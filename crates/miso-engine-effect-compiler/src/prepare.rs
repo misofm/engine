@@ -1,10 +1,12 @@
+use core::num::NonZeroUsize;
+use miso_engine_core::realtime::{Producer, QueueGeneration, bounded_spsc};
 use miso_engine_effect_contract::{
-    BankWidth, EffectDescriptorV1, EffectProgramKeyV1, EffectQuality, InitialParameterValue,
-    LinkMode, NativeEffectFactory, NativeEffectRegistry, ParameterChannel, ParameterChannelPolicy,
-    ParameterUnit, PrepareEffectBankRequest, PrepareEffectLimits, PrepareEffectRequest,
-    PreparedBankMetadata, PreparedEffectMetadata, PreparedNativeEffect, PreparedNativeEffectBank,
-    PreparedPortsV1, PreparedSidechainPort, RegistryError, StatePayloadInput, StatePayloadOutput,
-    expected_prepared_metadata,
+    BankWidth, EffectControlLane, EffectControlRecordV1, EffectDescriptorV1, EffectProgramKeyV1,
+    EffectQuality, InitialParameterValue, LinkMode, NativeEffectFactory, NativeEffectRegistry,
+    ParameterChannel, ParameterChannelPolicy, ParameterUnit, PrepareEffectBankRequest,
+    PrepareEffectLimits, PrepareEffectRequest, PreparedBankMetadata, PreparedEffectMetadata,
+    PreparedNativeEffect, PreparedNativeEffectBank, PreparedPortsV1, PreparedSidechainPort,
+    RegistryError, StatePayloadInput, StatePayloadOutput, expected_prepared_metadata,
 };
 use miso_engine_effect_package::{
     BoundEffectDescriptorWireV1, EFFECT_STATE_V1_BUFFER_ENVELOPE_OUTPUT,
@@ -21,6 +23,7 @@ use miso_engine_session::{
     CompiledSession, EffectIdentity, LinkMode as SessionLinkMode,
     ParameterChannel as SessionChannel, ParameterUnit as SessionUnit, SidechainDeclaration,
 };
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::{EffectDiagnostic, EffectDiagnosticSet};
@@ -42,6 +45,13 @@ pub struct EffectPreparedEntry {
     pub factory: Arc<dyn miso_engine_effect_contract::NativeEffectFactory>,
     /// Exact owned request inputs used to prepare the scalar processor.
     pub bank_preparation: EffectBankPreparationV1,
+    /// The consumer half of this instance's live-console control channel (issue #140 A).
+    ///
+    /// `None` unless [`attach_effect_console_v1`] was called, which is the only way one is ever
+    /// created. It travels with the entry into `GraphPreparedEffect`, so the plan that renders the
+    /// effect is the one that drains its queue, and a session with no console carries a `None`
+    /// that the runtime turns back into the byte-identical console-free path.
+    pub control: Option<Box<EffectControlLane>>,
 }
 
 /// Owned replayable portion of an accepted prepare request. It never crosses into render.
@@ -1102,6 +1112,7 @@ pub fn prepare_native_session_effects(
                     metadata,
                     factory,
                     bank_preparation,
+                    control: None,
                 });
             }
         }
@@ -1114,6 +1125,120 @@ pub fn prepare_native_session_effects(
             session: session.clone(),
             entries,
         })
+    } else {
+        Err(EffectDiagnosticSet::sorted(diagnostics))
+    }
+}
+
+/// One prepared live-console control channel for one effect instance (issue #140 A).
+///
+/// The producer half stays on the control plane; the consumer half rode into the plan inside the
+/// entry. A producer must be dropped before the plan that owns its consumer, which is why
+/// `PreparedHost`'s field order puts the plan first.
+pub struct EffectControlProducerV1 {
+    /// Session-stable track identity this channel addresses.
+    pub track_id: Box<str>,
+    /// Which rack the effect sits in.
+    pub rack: EffectRack,
+    /// Zero-based position of the effect **within its rack, in session declaration order**.
+    ///
+    /// This is the `effect_index` the `miso.command.v1` wire addresses, and it is derived from the
+    /// normalized session model here rather than from `EffectPreparedSession::entries`, which is
+    /// sorted by effect id.
+    pub effect_index: u32,
+    /// Session-stable effect instance identity.
+    pub effect_id: Box<str>,
+    /// The effect's declared parameter table, so an admitting host can map a wire `parameter_id`
+    /// to the `parameter_index` the render side stages, and check the value's domain, without a
+    /// second copy of the registry.
+    pub descriptor: &'static EffectDescriptorV1,
+    /// Bounded producer endpoint; `try_push` returns the record on a full queue.
+    pub producer: Producer<EffectControlRecordV1>,
+}
+
+/// Attach one bounded live-console control channel to every prepared effect of the session.
+///
+/// # The capacity rule that makes the render-side drain exact
+///
+/// A channel is prepared at `min(depth, automation_capacity)` records. Each drained
+/// [`EffectControlRecordV1::Parameter`] produces at most one span and duplicates collapse, so a
+/// full drain can never stage more spans than the effect's own
+/// [`PreparedEffectMetadata::automation_capacity`](miso_engine_effect_contract::PreparedEffectMetadata).
+/// "The staging window cannot overflow" is therefore an invariant of preparation, not a runtime
+/// check on the render thread.
+///
+/// # Errors
+///
+/// `effect.control.prepare` if a bounded queue cannot be built, and
+/// `effect.control.capacity` if an effect declares a zero automation capacity, which no launch
+/// effect does and which would leave the channel unable to deliver anything.
+pub fn attach_effect_console_v1(
+    prepared: &mut EffectPreparedSession,
+    depth: NonZeroUsize,
+) -> Result<Vec<EffectControlProducerV1>, EffectDiagnosticSet> {
+    // Declared position within each (track, rack), from the normalized model -- the same order the
+    // `miso.command.v1` `effect_index` names and the same order the browser host counts.
+    let mut declared: BTreeMap<(&str, EffectRack, &str), u32> = BTreeMap::new();
+    for track in &prepared.session.normalized_model().tracks {
+        for (rack, effects) in [
+            (EffectRack::Simd1, &track.simd1.effects),
+            (EffectRack::Dynamic, &track.dynamic.effects),
+            (EffectRack::Simd2, &track.simd2.effects),
+        ] {
+            for (index, effect) in effects.iter().enumerate() {
+                declared.insert((track.id.as_str(), rack, effect.id.as_str()), index as u32);
+            }
+        }
+    }
+    let mut producers = Vec::with_capacity(prepared.entries.len());
+    let mut diagnostics = Vec::new();
+    for entry in &mut prepared.entries {
+        let path = format!(
+            "$.tracks[id={}].effects[id={}]",
+            entry.track_id, entry.effect_id
+        );
+        let Some(capacity) = NonZeroUsize::new(entry.metadata.automation_capacity as usize) else {
+            diagnostics.push(EffectDiagnostic {
+                code: "effect.control.capacity",
+                path,
+            });
+            continue;
+        };
+        let Some(&effect_index) = declared.get(&(
+            entry.track_id.as_str(),
+            entry.rack,
+            entry.effect_id.as_str(),
+        )) else {
+            diagnostics.push(EffectDiagnostic {
+                code: "effect.control.prepare",
+                path,
+            });
+            continue;
+        };
+        let Ok((producer, consumer)) =
+            bounded_spsc::<EffectControlRecordV1>(depth.min(capacity), QueueGeneration(0))
+        else {
+            diagnostics.push(EffectDiagnostic {
+                code: "effect.control.prepare",
+                path,
+            });
+            continue;
+        };
+        producers.push(EffectControlProducerV1 {
+            track_id: entry.track_id.as_str().into(),
+            rack: entry.rack,
+            effect_index,
+            effect_id: entry.effect_id.as_str().into(),
+            descriptor: entry.factory.descriptor(),
+            producer,
+        });
+        entry.control = Some(Box::new(EffectControlLane::new(
+            consumer,
+            entry.bank_preparation.bypass,
+        )));
+    }
+    if diagnostics.is_empty() {
+        Ok(producers)
     } else {
         Err(EffectDiagnosticSet::sorted(diagnostics))
     }

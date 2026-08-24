@@ -16,10 +16,11 @@ use std::sync::Mutex;
 use sha2::{Digest, Sha256};
 
 use miso_engine_builtins::{
-    BuiltinChain, BuiltinInputBankV1, BuiltinParameterError, BuiltinParameters, BuiltinTail,
-    ChannelParameters, DualMonoBlock, FaderMuteBuiltins, InputBuiltins, Matrix2x2, MatrixBuiltins,
-    MeterAccumulator, MeterConfig, MeterConfigError, MeterHandle, MeterSnapshot, MeterTap,
-    PreparedMeter, pan_matrix, validate_builtin_filter_cutoff_v1,
+    BuiltinChain, BuiltinInputBankV1, BuiltinLaneSelector, BuiltinParameterError,
+    BuiltinParameters, BuiltinTail, ChannelParameters, DualMonoBlock, FaderMuteBuiltins,
+    FaderMuteRampBuiltinsV1, InputBuiltins, Matrix2x2, MatrixBuiltins, MeterAccumulator,
+    MeterConfig, MeterConfigError, MeterHandle, MeterSnapshot, MeterTap, PreparedMeter, pan_matrix,
+    validate_builtin_filter_cutoff_v1,
 };
 use miso_engine_core::realtime::{
     Consumer, PreparedRenderPlan, Producer, QueueGeneration, RenderEnvelope, RenderError,
@@ -80,6 +81,43 @@ pub struct TrackControlRecordV1 {
     pub smoothing_samples: u32,
 }
 
+/// One live-console fader or mute record for a track's fader/mute stage (issue #140 B).
+///
+/// # Why this is a second record type and a second queue
+///
+/// The matrix stage and the fader stage are two different graph nodes, so one SPSC queue cannot
+/// serve both -- a queue has exactly one consumer, and that consumer is the processor bound to the
+/// node. `TrackControlRecordV1` therefore stays exactly the 20-byte matrix record #137 froze, and
+/// this rides its own bounded queue to `TrackStage::PostFader`.
+///
+/// `fader_db` and `mute` still declare `BuiltinParameterUpdateRate::PreparedOnly` in
+/// `BUILTIN_PARAMETER_DESCRIPTORS_V1`, because that row describes the *prepared* fader section --
+/// `FaderMuteBuiltins`, which genuinely has no post-preparation write path and is unchanged. What
+/// #140 adds is a distinct live section, `FaderMuteRampBuiltinsV1`, bound only where a console
+/// asked for one; the parameter-metadata `liveUpdatable` flag is what tells a caller which of the
+/// two a session is running.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum TrackFaderRecordV1 {
+    /// Retarget the addressed lanes' fader gain, in decibels, over an explicit ramp window.
+    FaderDb {
+        /// Which lane(s) this record addresses.
+        lanes: BuiltinLaneSelector,
+        /// New fader value in decibels, already domain-checked by the producer.
+        db: f32,
+        /// Ramp length in sample updates for this retarget.
+        smoothing_samples: u32,
+    },
+    /// Set or clear the addressed lanes' mute, as a retarget of the same gain to `0`.
+    Mute {
+        /// Which lane(s) this record addresses.
+        lanes: BuiltinLaneSelector,
+        /// The new mute state.
+        muted: bool,
+        /// Ramp length in sample updates for the fade.
+        smoothing_samples: u32,
+    },
+}
+
 /// One requested live-console control channel, addressed by session track ID (issue #137 D1).
 #[derive(Clone, Debug, PartialEq)]
 pub struct TrackControlRequest {
@@ -97,8 +135,15 @@ pub struct TrackControlRequest {
 pub struct TrackControlProducer {
     /// Session-stable track identity this channel addresses.
     pub track_id: Box<str>,
-    /// Bounded producer endpoint; `try_push` returns the record on a full queue.
+    /// Bounded producer endpoint for the matrix/pan stage; `try_push` returns the record on a
+    /// full queue.
     pub producer: Producer<TrackControlRecordV1>,
+    /// Bounded producer endpoint for the fader/mute stage (issue #140 B), at the same depth.
+    ///
+    /// It is a field of the same struct rather than a second vector so that "one track, one
+    /// console channel" stays one object with one lifetime: both halves are created together,
+    /// handed to the caller together, and dropped before the plan that owns their consumers.
+    pub fader: Producer<TrackFaderRecordV1>,
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -1762,30 +1807,56 @@ pub fn prepare_session_builtins_with_console(
             stage_node(graph_id.clone(), TrackStage::PostInputBuiltins),
             Box::new(InputProcessor(input)),
         ));
+        let control_failure = || {
+            BuiltinDiagnosticSet::sorted(vec![diag(
+                "builtin.control.prepare",
+                &format!("$.controls[track_id={}]", track.id.as_str()),
+            )])
+        };
+        let (fader_processor, matrix_processor): (
+            Box<dyn GraphRuntimeProcessor>,
+            Box<dyn GraphRuntimeProcessor>,
+        ) = match control_capacity.get(track.id.as_str()) {
+            None => (
+                Box::new(FaderProcessor(fader)),
+                Box::new(MatrixProcessor(matrix)),
+            ),
+            Some(capacity) => {
+                let (producer, control) =
+                    bounded_spsc::<TrackControlRecordV1>(*capacity, QueueGeneration(0))
+                        .map_err(|_| control_failure())?;
+                let (fader_producer, fader_control) =
+                    bounded_spsc::<TrackFaderRecordV1>(*capacity, QueueGeneration(0))
+                        .map_err(|_| control_failure())?;
+                // Issue #140 B: the live fader is a *separate* section, built from the same
+                // prepared parameters. `FaderMuteBuiltins` above is untouched and simply not
+                // bound for this track, which is why no builtins layout or fixture digest moves.
+                let ramped = FaderMuteRampBuiltinsV1::new(parameters).map_err(|_| {
+                    BuiltinDiagnosticSet::sorted(vec![parameter_diagnostic(
+                        track,
+                        BuiltinParameterError::GainDomain,
+                        session.sample_rate().0,
+                    )])
+                })?;
+                track_controls.push(TrackControlProducer {
+                    track_id: Box::<str>::from(track.id.as_str()),
+                    producer,
+                    fader: fader_producer,
+                });
+                control_seal.push((Box::<str>::from(track.id.as_str()), capacity.get()));
+                (
+                    Box::new(ConsoleFaderProcessor {
+                        fader: ramped,
+                        control: fader_control,
+                    }),
+                    Box::new(ConsoleMatrixProcessor { matrix, control }),
+                )
+            }
+        };
         processors.push(miso_engine_graph::GraphNodeBinding::new(
             stage_node(graph_id.clone(), TrackStage::PostFader),
-            Box::new(FaderProcessor(fader)),
+            fader_processor,
         ));
-        let matrix_processor: Box<dyn GraphRuntimeProcessor> =
-            match control_capacity.get(track.id.as_str()) {
-                None => Box::new(MatrixProcessor(matrix)),
-                Some(capacity) => {
-                    let (producer, control) =
-                        bounded_spsc::<TrackControlRecordV1>(*capacity, QueueGeneration(0))
-                            .map_err(|_| {
-                                BuiltinDiagnosticSet::sorted(vec![diag(
-                                    "builtin.control.prepare",
-                                    &format!("$.controls[track_id={}]", track.id.as_str()),
-                                )])
-                            })?;
-                    track_controls.push(TrackControlProducer {
-                        track_id: Box::<str>::from(track.id.as_str()),
-                        producer,
-                    });
-                    control_seal.push((Box::<str>::from(track.id.as_str()), capacity.get()));
-                    Box::new(ConsoleMatrixProcessor { matrix, control })
-                }
-            };
         processors.push(miso_engine_graph::GraphNodeBinding::new(
             stage_node(graph_id, TrackStage::PostMatrix),
             matrix_processor,
@@ -1897,14 +1968,24 @@ fn resource_plan(
                 .add_bytes(bytes)
                 .ok_or_else(|| diag("builtin.resource.arithmetic_overflow", "$.tracks"))?;
         }
-        let matrix_layout = if controlled.contains(track.id.as_str()) {
-            core::alloc::Layout::new::<ConsoleMatrixProcessor>()
+        // Issue #140 B adds the second half of the same rule: a controlled track binds
+        // `ConsoleFaderProcessor` (the ramped section) instead of `FaderProcessor`, so its
+        // processor payload row is charged for exactly what it holds. An uncontrolled track
+        // charges the same two layouts it always did.
+        let (fader_layout, matrix_layout) = if controlled.contains(track.id.as_str()) {
+            (
+                core::alloc::Layout::new::<ConsoleFaderProcessor>(),
+                core::alloc::Layout::new::<ConsoleMatrixProcessor>(),
+            )
         } else {
-            core::alloc::Layout::new::<MatrixProcessor>()
+            (
+                core::alloc::Layout::new::<FaderProcessor>(),
+                core::alloc::Layout::new::<MatrixProcessor>(),
+            )
         };
         processor
             .add_layout(core::alloc::Layout::new::<InputProcessor>())
-            .and_then(|_| processor.add_layout(core::alloc::Layout::new::<FaderProcessor>()))
+            .and_then(|_| processor.add_layout(fader_layout))
             .and_then(|_| processor.add_layout(matrix_layout))
             .ok_or_else(|| diag("builtin.resource.arithmetic_overflow", "$.tracks"))?;
     }
@@ -1920,40 +2001,56 @@ fn resource_plan(
     add_vector_layout::<TrackControlProducer>(&mut processor, controls.len())?;
     add_vector_layout::<(Box<str>, usize)>(&mut processor, controls.len())?;
     for control in controls {
-        let queue = bounded_spsc_retained_payload::<TrackControlRecordV1>(control.queue_capacity)
-            .map_err(|_| {
+        // Two bounded rings per controlled track at the same depth: #137 D1's matrix channel and
+        // #140 B's fader/mute channel. Both are charged here, in the same accumulator, for the
+        // same reason -- they are per-track processor storage, not meter storage.
+        let matrix_queue = bounded_spsc_retained_payload::<TrackControlRecordV1>(
+            control.queue_capacity,
+        )
+        .map_err(|_| {
             diag(
                 "builtin.resource.arithmetic_overflow",
                 &control_path(control),
             )
         })?;
-        processor
-            .add_layout(
-                core::alloc::Layout::from_size_align(
-                    queue.ring_header_bytes,
-                    queue.ring_header_align,
+        let fader_queue = bounded_spsc_retained_payload::<TrackFaderRecordV1>(
+            control.queue_capacity,
+        )
+        .map_err(|_| {
+            diag(
+                "builtin.resource.arithmetic_overflow",
+                &control_path(control),
+            )
+        })?;
+        for queue in [matrix_queue, fader_queue] {
+            processor
+                .add_layout(
+                    core::alloc::Layout::from_size_align(
+                        queue.ring_header_bytes,
+                        queue.ring_header_align,
+                    )
+                    .map_err(|_| {
+                        diag(
+                            "builtin.resource.arithmetic_overflow",
+                            &control_path(control),
+                        )
+                    })?,
                 )
-                .map_err(|_| {
+                .and_then(|_| {
+                    core::alloc::Layout::from_size_align(
+                        queue.slot_payload_bytes,
+                        queue.slot_payload_align,
+                    )
+                    .ok()
+                    .and_then(|layout| processor.add_layout(layout))
+                })
+                .ok_or_else(|| {
                     diag(
                         "builtin.resource.arithmetic_overflow",
                         &control_path(control),
                     )
-                })?,
-            )
-            .and_then(|_| {
-                core::alloc::Layout::from_size_align(
-                    queue.slot_payload_bytes,
-                    queue.slot_payload_align,
-                )
-                .ok()
-                .and_then(|layout| processor.add_layout(layout))
-            })
-            .ok_or_else(|| {
-                diag(
-                    "builtin.resource.arithmetic_overflow",
-                    &control_path(control),
-                )
-            })?;
+                })?;
+        }
         // The public producer identity and the sealed control identity are retained separately.
         for _ in 0..2 {
             processor.add_bytes(control.track_id.len()).ok_or_else(|| {
@@ -2114,6 +2211,42 @@ impl GraphRuntimeProcessor for ConsoleMatrixProcessor {
         let block = DualMonoBlock::new(block.left, block.right, block.first_sample)
             .map_err(render_error)?;
         self.matrix.process(block);
+        Ok(())
+    }
+}
+/// The fader/mute stage of one track that a live console drives (issue #140 B).
+///
+/// The same shape as [`ConsoleMatrixProcessor`], for the same reason: a session prepared without
+/// a console keeps `FaderProcessor` and therefore keeps its exact processor storage and its exact
+/// rendered bits. The drain runs at the top of the block, before any audio is touched, so an
+/// admitted fader move or mute takes effect at exactly the block boundary the control side was
+/// acknowledged with.
+struct ConsoleFaderProcessor {
+    fader: FaderMuteRampBuiltinsV1,
+    control: Consumer<TrackFaderRecordV1>,
+}
+impl GraphRuntimeProcessor for ConsoleFaderProcessor {
+    fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
+        while let Ok(record) = self.control.try_pop() {
+            match record {
+                TrackFaderRecordV1::FaderDb {
+                    lanes,
+                    db,
+                    smoothing_samples,
+                } => self
+                    .fader
+                    .set_fader_db(lanes, db, smoothing_samples)
+                    .map_err(render_error)?,
+                TrackFaderRecordV1::Mute {
+                    lanes,
+                    muted,
+                    smoothing_samples,
+                } => self.fader.set_mute(lanes, muted, smoothing_samples),
+            }
+        }
+        let block = DualMonoBlock::new(block.left, block.right, block.first_sample)
+            .map_err(render_error)?;
+        self.fader.process(block);
         Ok(())
     }
 }
@@ -2559,6 +2692,7 @@ mod tests {
             required_bindings: vec![input.clone(), builtin.clone(), output.clone()],
             routes: Vec::new(),
             effects: Vec::new(),
+            effect_controls: Vec::new(),
             banks: Vec::new(),
             builtin_banks: Vec::new(),
             observers: Vec::new(),
@@ -3187,6 +3321,7 @@ mod tests {
             required_bindings: nodes,
             routes: Vec::new(),
             effects: Vec::new(),
+            effect_controls: Vec::new(),
             banks: Vec::new(),
             builtin_banks: Vec::new(),
             observers: Vec::new(),

@@ -89,5 +89,11 @@ pub use source::{
     source_id_arena_bytes,
 };
 
+/// The control-side half of one prepared effect's live-console channel (issue #140 A).
+///
+/// Re-exported here so a host does not have to depend on `miso-engine-effect-compiler` -- the
+/// compile pipeline stays in this crate (#106 F1) and a host names only what its own ABI names.
+pub use miso_engine_effect_compiler::{EffectControlProducerV1, EffectRack};
+
 #[doc(hidden)]
 pub use miso_engine_session::CompiledSession;

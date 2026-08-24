@@ -16,14 +16,20 @@
 
 use core::mem::{MaybeUninit, size_of};
 use core::num::{NonZeroU32, NonZeroUsize};
+use std::collections::BTreeMap;
 
-use miso_engine_builtins::{Matrix2x2, MeterSnapshot, MeterTap, pan_matrix};
-use miso_engine_builtins_compiler::{MeterConsumer, TrackControlProducer, TrackControlRecordV1};
+use miso_engine_builtins::{BuiltinLaneSelector, Matrix2x2, MeterSnapshot, MeterTap, pan_matrix};
+use miso_engine_builtins_compiler::{
+    MeterConsumer, TrackControlProducer, TrackControlRecordV1, TrackFaderRecordV1,
+};
 use miso_engine_core::realtime::{PlanarBufferMut, RenderIo, RenderTime};
+use miso_engine_effect_contract::{
+    EffectControlRecordV1, ParameterChannel, ParameterChannelPolicy, parameter_value_valid,
+};
 use miso_engine_host_core::{
-    CompiledSession, HostConsoleRequestV1, HostPrepareCaps, HostShapePolicy, PreparedHost,
-    SourceControlError, SourceSubmission, control_table_bytes, prepare_host_session_with_console,
-    source_id_arena_bytes,
+    CompiledSession, EffectControlProducerV1, EffectRack, HostConsoleRequestV1, HostPrepareCaps,
+    HostShapePolicy, PreparedHost, SourceControlError, SourceSubmission, control_table_bytes,
+    prepare_host_session_with_console, source_id_arena_bytes,
 };
 
 /// Frozen browser host ABI version 1.0.
@@ -101,13 +107,13 @@ pub const DEFAULT_COMMAND_QUEUE_RECORDS: u32 = 64;
 pub const COMMAND_PAN: u32 = 1;
 /// Retarget the track's full 2x2 matrix over an explicit ramp window.
 pub const COMMAND_MATRIX: u32 = 2;
-/// Set a lane fader in decibels. Declared, validated, and refused; see [`COMMAND_REASON_UNSUPPORTED_KIND`].
+/// Retarget a lane fader in decibels over an explicit ramp window (live since issue #140 B).
 pub const COMMAND_FADER_DB: u32 = 3;
-/// Set a lane mute. Declared, validated, and refused; see [`COMMAND_REASON_UNSUPPORTED_KIND`].
+/// Set a lane mute, as a fader endpoint over the same ramp window (live since issue #140 B).
 pub const COMMAND_MUTE: u32 = 4;
-/// Set an effect parameter. Declared, validated, and refused; see [`COMMAND_REASON_UNSUPPORTED_KIND`].
+/// Set an effect parameter (live since issue #140 A).
 pub const COMMAND_EFFECT_PARAM: u32 = 5;
-/// Set an effect bypass. Declared, validated, and refused; see [`COMMAND_REASON_UNSUPPORTED_KIND`].
+/// Set an effect bypass (live since issue #140 A).
 pub const COMMAND_EFFECT_BYPASS: u32 = 6;
 
 /// The submission was admitted whole.
@@ -124,11 +130,17 @@ pub const COMMAND_REASON_UNKNOWN_EFFECT: u32 = 4;
 pub const COMMAND_REASON_UNKNOWN_PARAMETER: u32 = 5;
 /// A value is outside the addressed parameter's declared domain.
 pub const COMMAND_REASON_DOMAIN: u32 = 6;
-/// The record is well formed and correctly addressed, but this ABI version cannot apply its kind.
+/// The record is well formed and correctly addressed, but this session cannot apply its kind.
 ///
 /// This is not "malformed" and it is not "unknown target": the parameter exists and the value is
-/// legal, and the engine has no post-preparation write path for it. The parameter-metadata JSON
+/// legal, and this session has no post-preparation write path for it. The parameter-metadata JSON
 /// (deliverable 4) marks every such parameter, so a caller never has to discover this at runtime.
+///
+/// Issue #140 emptied this of everything the ABI *declares*: pan, matrix, fader, mute, effect
+/// parameter and effect bypass are all live, and `liveUpdatable` is `true` for each. It remains
+/// reachable for the states that are genuinely not addressable -- a host with no console attached
+/// at all, and an effect whose parameter declares `AutomationRate::None`, which no launch effect
+/// does but which a future one may.
 pub const COMMAND_REASON_UNSUPPORTED_KIND: u32 = 7;
 /// A bounded control queue had no room for the submission; nothing was admitted.
 pub const COMMAND_REASON_BACKPRESSURE: u32 = 8;
@@ -436,16 +448,24 @@ type FfiSourceStaging<'a> = (
 /// the source consumers) before its control-side producers, and the compiled session model outlives
 /// both. Nothing here is ever dropped from `render_next`; see [`AudioWorkletEngineHost::fail`].
 struct ReadyOwnership {
-    /// Issue #137 D1: control-side producers, declared first so they are released before the plan
-    /// that owns their consumer endpoints.
+    /// Issue #137 D1 / #140 B: per-track control-side producers -- matrix/pan and fader/mute --
+    /// declared first so they are released before the plan that owns their consumer endpoints.
     controls: Vec<TrackControlProducer>,
-    /// Per-track room needed by the submission being validated. Allocated at compilation.
+    /// Issue #140 A: one control-side producer per prepared effect instance, in the dense
+    /// `queue_slot` order [`ReadyOwnership::effect_slot`] computes, so an addressed command
+    /// reaches its queue with one index and no search.
+    effect_controls: Box<[Option<EffectControlProducerV1>]>,
+    /// Per-track prefix sum of effect instances, so `effect_slot` is arithmetic, not a lookup.
+    effect_base: Box<[u32]>,
+    /// Room needed per destination queue by the submission being validated. Allocated at
+    /// compilation, one entry per queue (see [`ReadyOwnership::effect_slot`]).
     command_wanted: Box<[u32]>,
-    /// Decoded submission staging, `MAXIMUM_COMMAND_RECORDS` long. Allocated at compilation.
-    command_decoded: Box<[(u32, TrackControlRecordV1)]>,
-    /// Per-track records admitted since the last successful render.
+    /// Decoded submission staging. Two entries per staged record, because one wire record
+    /// addressed to `channel = both` on a per-lane effect parameter lowers to one span per lane.
+    command_decoded: Box<[(u32, AdmittedCommand)]>,
+    /// Records admitted per destination queue since the last successful render.
     ///
-    /// The browser's control plane and render plane are the same thread and the matrix stage
+    /// The browser's control plane and render plane are the same thread and every console stage
     /// drains its whole queue at the top of every block, so a successful render empties every
     /// control queue. That is what makes this an exact free-slot count rather than an estimate,
     /// and it is what lets a submission be refused *before* anything is pushed.
@@ -468,6 +488,87 @@ struct ReadyOwnership {
     /// Retained so the browser bridge keeps charging itself for the compiled model it holds; the
     /// V1 browser ABI has no session query, so nothing reads it.
     _session: CompiledSession,
+}
+
+impl ReadyOwnership {
+    /// The dense destination-queue index of one addressed console channel.
+    ///
+    /// The layout is frozen here and nowhere else:
+    ///
+    /// | range | queue |
+    /// |---|---|
+    /// | `0 .. tracks` | track `t`'s matrix/pan queue |
+    /// | `tracks .. 2 * tracks` | track `t`'s fader/mute queue |
+    /// | `2 * tracks ..` | effect instances, in `(track, simd1, dynamic, simd2, position)` order |
+    ///
+    /// One index therefore serves both the free-room pre-check and the push, and neither pass has
+    /// to search. `None` means the address names no channel this session prepared.
+    fn effect_slot(&self, track: usize, rack: u8, effect_index: u32) -> Option<usize> {
+        let base = *self.effect_base.get(track)? as usize;
+        let counts = self.rack_effects.get(track)?;
+        let mut offset = 0_usize;
+        for earlier in 0..rack as usize {
+            offset = offset.checked_add(*counts.get(earlier)? as usize)?;
+        }
+        if effect_index >= *counts.get(rack as usize)? {
+            return None;
+        }
+        let slot = base
+            .checked_add(offset)?
+            .checked_add(effect_index as usize)?;
+        (slot < self.effect_controls.len()).then_some(slot)
+    }
+
+    /// Free room in one destination queue, or `None` when the queue does not exist.
+    fn queue_capacity(&self, slot: usize) -> Option<u32> {
+        let tracks = self.tracks.len();
+        if slot < tracks {
+            let producer = self.controls.get(slot)?;
+            return u32::try_from(producer.producer.capacity()).ok();
+        }
+        if slot < tracks * 2 {
+            let producer = self.controls.get(slot - tracks)?;
+            return u32::try_from(producer.fader.capacity()).ok();
+        }
+        let producer = self.effect_controls.get(slot - tracks * 2)?.as_ref()?;
+        u32::try_from(producer.producer.capacity()).ok()
+    }
+
+    /// Push one admitted record into its destination queue. `Err` only on a full queue, which the
+    /// free-room pass has already ruled out.
+    fn push(&mut self, slot: usize, record: AdmittedCommand) -> Result<(), ()> {
+        let tracks = self.tracks.len();
+        match record {
+            AdmittedCommand::Matrix(record) => {
+                let producer = self.controls.get_mut(slot).ok_or(())?;
+                producer.producer.try_push(record).map_err(|_| ())
+            }
+            AdmittedCommand::Fader(record) => {
+                let producer = self.controls.get_mut(slot - tracks).ok_or(())?;
+                producer.fader.try_push(record).map_err(|_| ())
+            }
+            AdmittedCommand::Effect(record) => {
+                let producer = self
+                    .effect_controls
+                    .get_mut(slot - tracks * 2)
+                    .ok_or(())?
+                    .as_mut()
+                    .ok_or(())?;
+                producer.producer.try_push(record).map_err(|_| ())
+            }
+        }
+    }
+}
+
+/// One decoded record and the payload its destination queue takes (issue #140 C).
+#[derive(Clone, Copy)]
+enum AdmittedCommand {
+    /// The matrix/pan channel #137 D1 shipped.
+    Matrix(TrackControlRecordV1),
+    /// The fader/mute channel (#140 B).
+    Fader(TrackFaderRecordV1),
+    /// One effect instance's channel (#140 A).
+    Effect(EffectControlRecordV1),
 }
 
 /// Safe ownership object backing one future AudioWorklet Wasm handle.
@@ -1122,16 +1223,14 @@ impl CommandRecord {
         })
     }
 
-    /// Lower one addressed record onto the single live builtin surface, or say why it cannot be.
+    /// Lower one addressed track-builtin record, or say why it cannot be.
     ///
-    /// `matrix_ll/lr/rl/rr` are the only builtin parameters whose declared update rate is
-    /// `BuiltinParameterUpdateRate::BlockTarget`; `fader_db`, `mute` and every effect parameter
-    /// declare `PreparedOnly` or have no post-preparation write path at all, so they are refused
-    /// with [`COMMAND_REASON_UNSUPPORTED_KIND`] *after* their addressing and domain have been
-    /// checked. A caller can therefore tell "you addressed nothing" from "you addressed something
-    /// this engine cannot move yet", and deliverable 4's metadata tells it which is which before
-    /// it ever sends one.
-    fn into_matrix(self, rack_effects: [u32; 3]) -> Result<TrackControlRecordV1, u32> {
+    /// Issue #140 C: `fader_db` and `mute` are no longer refused here. They lower onto the live
+    /// ramped fader section (`FaderMuteRampBuiltinsV1`), which a console-attached track binds in
+    /// place of the prepared `FaderMuteBuiltins`. A track with no console still refuses them --
+    /// with [`COMMAND_REASON_UNSUPPORTED_KIND`], because the target exists and the value is legal
+    /// and this *session* has no write path -- which is exactly what the reason means.
+    fn into_track_record(self) -> Result<AdmittedCommand, u32> {
         match self.kind {
             COMMAND_PAN => {
                 if self.rack != 255
@@ -1143,10 +1242,10 @@ impl CommandRecord {
                 }
                 let matrix = pan_matrix(self.values[0], self.values[1])
                     .map_err(|_| COMMAND_REASON_DOMAIN)?;
-                Ok(TrackControlRecordV1 {
+                Ok(AdmittedCommand::Matrix(TrackControlRecordV1 {
                     matrix,
                     smoothing_samples: self.smoothing_samples,
-                })
+                }))
             }
             COMMAND_MATRIX => {
                 if self.rack != 255 || self.channel != 255 {
@@ -1160,54 +1259,150 @@ impl CommandRecord {
                 }
                 .checked()
                 .map_err(|_| COMMAND_REASON_DOMAIN)?;
-                Ok(TrackControlRecordV1 {
+                Ok(AdmittedCommand::Matrix(TrackControlRecordV1 {
                     matrix,
                     smoothing_samples: self.smoothing_samples,
-                })
+                }))
             }
             COMMAND_FADER_DB => {
-                if self.rack != 255 || self.channel > 2 {
+                if self.rack != 255 || self.values[1..].iter().any(|value| *value != 0.0) {
                     return Err(COMMAND_REASON_MALFORMED);
                 }
+                let lanes = lane_selector(self.channel).ok_or(COMMAND_REASON_MALFORMED)?;
+                // The declared domain of `fader_db` in `BUILTIN_PARAMETER_DESCRIPTORS_V1`.
                 if !(-144.0..=24.0).contains(&self.values[0]) {
                     return Err(COMMAND_REASON_DOMAIN);
                 }
-                Err(COMMAND_REASON_UNSUPPORTED_KIND)
+                Ok(AdmittedCommand::Fader(TrackFaderRecordV1::FaderDb {
+                    lanes,
+                    db: self.values[0],
+                    smoothing_samples: self.smoothing_samples,
+                }))
             }
             COMMAND_MUTE => {
-                if self.rack != 255 || self.channel > 2 {
+                if self.rack != 255 || self.values[1..].iter().any(|value| *value != 0.0) {
                     return Err(COMMAND_REASON_MALFORMED);
                 }
+                let lanes = lane_selector(self.channel).ok_or(COMMAND_REASON_MALFORMED)?;
                 if self.values[0] != 0.0 && self.values[0] != 1.0 {
                     return Err(COMMAND_REASON_DOMAIN);
                 }
-                Err(COMMAND_REASON_UNSUPPORTED_KIND)
-            }
-            COMMAND_EFFECT_PARAM | COMMAND_EFFECT_BYPASS => {
-                if self.rack > 2 {
-                    return Err(COMMAND_REASON_UNKNOWN_RACK);
-                }
-                if self.effect_index >= rack_effects[self.rack as usize] {
-                    return Err(COMMAND_REASON_UNKNOWN_EFFECT);
-                }
-                if self.kind == COMMAND_EFFECT_PARAM {
-                    if self.channel > 2 {
-                        return Err(COMMAND_REASON_MALFORMED);
-                    }
-                    if self.parameter_id == 0 {
-                        return Err(COMMAND_REASON_UNKNOWN_PARAMETER);
-                    }
-                } else if self.channel != 255 || (self.values[0] != 0.0 && self.values[0] != 1.0) {
-                    return Err(COMMAND_REASON_MALFORMED);
-                }
-                Err(COMMAND_REASON_UNSUPPORTED_KIND)
+                Ok(AdmittedCommand::Fader(TrackFaderRecordV1::Mute {
+                    lanes,
+                    muted: self.values[0] == 1.0,
+                    smoothing_samples: self.smoothing_samples,
+                }))
             }
             _ => Err(COMMAND_REASON_MALFORMED),
         }
     }
+
+    /// Lower one effect-addressed record against the addressed effect's own descriptor.
+    ///
+    /// Writes one or two records into `out` and returns how many: a `channel = both` command on a
+    /// parameter whose policy is `PerLane` lowers to **one record per lane**, because every launch
+    /// effect counts a policy-violating span as `invalid_spans` rather than applying it. Doing the
+    /// expansion here -- on the control plane, once per submission -- is what keeps the render
+    /// side's drain a pure one-record-one-span map.
+    fn into_effect_records(
+        self,
+        descriptor: &'static miso_engine_effect_contract::EffectDescriptorV1,
+        out: &mut [AdmittedCommand; 2],
+    ) -> Result<usize, u32> {
+        if self.kind == COMMAND_EFFECT_BYPASS {
+            if self.channel != 255
+                || self.parameter_id != 0
+                || self.smoothing_samples != 0
+                || self.values[1..].iter().any(|value| *value != 0.0)
+            {
+                return Err(COMMAND_REASON_MALFORMED);
+            }
+            if self.values[0] != 0.0 && self.values[0] != 1.0 {
+                return Err(COMMAND_REASON_DOMAIN);
+            }
+            out[0] = AdmittedCommand::Effect(EffectControlRecordV1::Bypass(self.values[0] == 1.0));
+            return Ok(1);
+        }
+        if self.channel > 2 || self.values[1..].iter().any(|value| *value != 0.0) {
+            return Err(COMMAND_REASON_MALFORMED);
+        }
+        if self.parameter_id == 0 {
+            return Err(COMMAND_REASON_UNKNOWN_PARAMETER);
+        }
+        let Some((parameter_index, parameter)) = descriptor
+            .parameters
+            .iter()
+            .enumerate()
+            .find(|(_, parameter)| parameter.id.0 == self.parameter_id)
+        else {
+            return Err(COMMAND_REASON_UNKNOWN_PARAMETER);
+        };
+        // A parameter the descriptor says cannot be automated has no write path at all. No launch
+        // effect declares one, which is why this is `UNSUPPORTED_KIND` and not `DOMAIN`.
+        if !parameter.automatable
+            || parameter.automation_rate == miso_engine_effect_contract::AutomationRate::None
+        {
+            return Err(COMMAND_REASON_UNSUPPORTED_KIND);
+        }
+        if !parameter_value_valid(parameter, self.values[0]) {
+            return Err(COMMAND_REASON_DOMAIN);
+        }
+        let parameter_index =
+            u32::try_from(parameter_index).map_err(|_| COMMAND_REASON_MALFORMED)?;
+        let record = |channel: ParameterChannel| {
+            AdmittedCommand::Effect(EffectControlRecordV1::Parameter {
+                parameter_index,
+                channel,
+                value: self.values[0],
+            })
+        };
+        match (parameter.channel_policy, self.channel) {
+            // A shared parameter is addressed as "both" and by nothing else.
+            (ParameterChannelPolicy::Shared, 2) => {
+                out[0] = record(ParameterChannel::Both);
+                Ok(1)
+            }
+            (ParameterChannelPolicy::Shared, _) => Err(COMMAND_REASON_MALFORMED),
+            (ParameterChannelPolicy::PerLane, 0) => {
+                out[0] = record(ParameterChannel::Left);
+                Ok(1)
+            }
+            (ParameterChannelPolicy::PerLane, 1) => {
+                out[0] = record(ParameterChannel::Right);
+                Ok(1)
+            }
+            (ParameterChannelPolicy::PerLane, _) => {
+                out[0] = record(ParameterChannel::Left);
+                out[1] = record(ParameterChannel::Right);
+                Ok(2)
+            }
+        }
+    }
+}
+
+/// The wire `channel` byte as a builtin lane selector; `None` for a byte the ABI does not define.
+const fn lane_selector(channel: u8) -> Option<BuiltinLaneSelector> {
+    match channel {
+        0 => Some(BuiltinLaneSelector::Left),
+        1 => Some(BuiltinLaneSelector::Right),
+        2 => Some(BuiltinLaneSelector::Both),
+        _ => None,
+    }
 }
 
 /// Validate a whole staged submission, then admit it. Nothing is pushed unless everything passes.
+///
+/// # The three passes are the contract, not an optimisation (#137 D1, extended by #140 C)
+///
+/// Pass one decodes and lowers every record and counts the room each *destination queue* needs.
+/// Pass two checks that room against every one of those queues. Pass three pushes. A submission is
+/// therefore all-or-nothing across every kind in it: a batch that moves a matrix, a fader and two
+/// effect parameters is admitted whole or refused whole, and the refusal names the first record
+/// that broke a rule.
+///
+/// One wire record can lower to two admitted records (`channel = both` on a per-lane effect
+/// parameter), which is why `command_decoded` is twice `MAXIMUM_COMMAND_RECORDS` long and why the
+/// room counted is per lowered record rather than per wire record.
 fn admit_commands(
     ready: &mut ReadyOwnership,
     bytes: &[u8],
@@ -1216,72 +1411,96 @@ fn admit_commands(
     let record_bytes = COMMAND_RECORD_BYTES as usize;
     let track_count = ready.tracks.len();
     ready.command_wanted.fill(0);
+    let refuse = |reason: u32, index: usize| CommandRejection {
+        result: match reason {
+            COMMAND_REASON_UNSUPPORTED_KIND => RESULT_UNSUPPORTED,
+            COMMAND_REASON_BACKPRESSURE => RESULT_BACKPRESSURE,
+            _ => RESULT_INVALID_ARGUMENT,
+        },
+        reason,
+        index: index as u32,
+    };
+    let mut lowered = 0_usize;
     for index in 0..count {
         let record = &bytes[index * record_bytes..(index + 1) * record_bytes];
-        let command = CommandRecord::decode(record).map_err(|reason| CommandRejection {
-            result: RESULT_INVALID_ARGUMENT,
-            reason,
-            index: index as u32,
-        })?;
+        let command = CommandRecord::decode(record).map_err(|reason| refuse(reason, index))?;
         let track = command.track_index as usize;
         if track >= track_count {
-            return Err(CommandRejection {
-                result: RESULT_INVALID_ARGUMENT,
-                reason: COMMAND_REASON_UNKNOWN_TRACK,
-                index: index as u32,
-            });
+            return Err(refuse(COMMAND_REASON_UNKNOWN_TRACK, index));
         }
-        let applied = command
-            .into_matrix(ready.rack_effects[track])
-            .map_err(|reason| CommandRejection {
-                result: if reason == COMMAND_REASON_UNSUPPORTED_KIND {
-                    RESULT_UNSUPPORTED
-                } else {
-                    RESULT_INVALID_ARGUMENT
-                },
-                reason,
-                index: index as u32,
-            })?;
-        ready.command_wanted[track] += 1;
-        ready.command_decoded[index] = (command.track_index, applied);
-    }
-    for index in 0..count {
-        let track = ready.command_decoded[index].0 as usize;
-        let needed = ready.command_wanted[track];
-        let Some(producer) = ready.controls.get(track) else {
-            return Err(CommandRejection {
-                result: RESULT_UNSUPPORTED,
-                reason: COMMAND_REASON_UNSUPPORTED_KIND,
-                index: index as u32,
-            });
+        let mut staged = [AdmittedCommand::Effect(EffectControlRecordV1::Bypass(false)); 2];
+        let (slot, produced) = match command.kind {
+            COMMAND_PAN | COMMAND_MATRIX | COMMAND_FADER_DB | COMMAND_MUTE => {
+                staged[0] = command
+                    .into_track_record()
+                    .map_err(|reason| refuse(reason, index))?;
+                let slot = match staged[0] {
+                    AdmittedCommand::Fader(_) => track_count + track,
+                    _ => track,
+                };
+                if ready.controls.get(track).is_none() {
+                    return Err(refuse(COMMAND_REASON_UNSUPPORTED_KIND, index));
+                }
+                (slot, 1)
+            }
+            COMMAND_EFFECT_PARAM | COMMAND_EFFECT_BYPASS => {
+                if command.rack > 2 {
+                    return Err(refuse(COMMAND_REASON_UNKNOWN_RACK, index));
+                }
+                let Some(counts) = ready.rack_effects.get(track) else {
+                    return Err(refuse(COMMAND_REASON_UNKNOWN_TRACK, index));
+                };
+                if command.effect_index >= counts[command.rack as usize] {
+                    return Err(refuse(COMMAND_REASON_UNKNOWN_EFFECT, index));
+                }
+                let Some(effect) = ready.effect_slot(track, command.rack, command.effect_index)
+                else {
+                    return Err(refuse(COMMAND_REASON_UNKNOWN_EFFECT, index));
+                };
+                let Some(producer) = ready.effect_controls.get(effect).and_then(Option::as_ref)
+                else {
+                    return Err(refuse(COMMAND_REASON_UNSUPPORTED_KIND, index));
+                };
+                let produced = command
+                    .into_effect_records(producer.descriptor, &mut staged)
+                    .map_err(|reason| refuse(reason, index))?;
+                (track_count * 2 + effect, produced)
+            }
+            _ => return Err(refuse(COMMAND_REASON_MALFORMED, index)),
         };
-        let capacity = u32::try_from(producer.producer.capacity()).unwrap_or(0);
-        if ready.in_flight[track].saturating_add(needed) > capacity {
-            return Err(CommandRejection {
-                result: RESULT_BACKPRESSURE,
-                reason: COMMAND_REASON_BACKPRESSURE,
-                index: index as u32,
-            });
+        let Some(wanted) = ready.command_wanted.get_mut(slot) else {
+            return Err(refuse(COMMAND_REASON_UNSUPPORTED_KIND, index));
+        };
+        *wanted = wanted.saturating_add(produced as u32);
+        for record in staged.into_iter().take(produced) {
+            let Some(entry) = ready.command_decoded.get_mut(lowered) else {
+                return Err(refuse(COMMAND_REASON_MALFORMED, index));
+            };
+            *entry = (slot as u32, record);
+            lowered += 1;
         }
     }
-    for index in 0..count {
-        let (track, record) = ready.command_decoded[index];
-        let track = track as usize;
-        let Some(producer) = ready.controls.get_mut(track) else {
+    for entry in 0..lowered {
+        let slot = ready.command_decoded[entry].0 as usize;
+        let Some(capacity) = ready.queue_capacity(slot) else {
+            return Err(refuse(COMMAND_REASON_UNSUPPORTED_KIND, entry));
+        };
+        let needed = ready.command_wanted[slot];
+        if ready.in_flight[slot].saturating_add(needed) > capacity {
+            return Err(refuse(COMMAND_REASON_BACKPRESSURE, entry));
+        }
+    }
+    for entry in 0..lowered {
+        let (slot, record) = ready.command_decoded[entry];
+        let slot = slot as usize;
+        if ready.push(slot, record).is_err() {
             return Err(CommandRejection {
                 result: RESULT_INTERNAL,
-                reason: COMMAND_REASON_UNSUPPORTED_KIND,
-                index: index as u32,
-            });
-        };
-        if producer.producer.try_push(record).is_err() {
-            return Err(CommandRejection {
-                result: RESULT_INTERNAL,
                 reason: COMMAND_REASON_BACKPRESSURE,
-                index: index as u32,
+                index: entry as u32,
             });
         }
-        ready.in_flight[track] += 1;
+        ready.in_flight[slot] += 1;
     }
     Ok(())
 }
@@ -1602,11 +1821,64 @@ fn compile_ready(
             count(track.simd2.effects.len())?,
         ]);
     }
+    // Issue #140 A: the dense effect-queue index. `effect_base[t]` is the number of effect
+    // instances declared by every earlier track, so `effect_slot` is arithmetic rather than a
+    // search, and the producers are permuted into exactly that order once, here.
+    let mut effect_base = Vec::new();
+    effect_base
+        .try_reserve_exact(track_count)
+        .map_err(|_| fixed_diagnostic("web.resource.allocation"))?;
+    let mut total_effects = 0_u32;
+    for counts in &rack_effects {
+        effect_base.push(total_effects);
+        for count in counts {
+            total_effects = total_effects
+                .checked_add(*count)
+                .ok_or_else(|| fixed_diagnostic("web.console.effects"))?;
+        }
+    }
+    let track_index: BTreeMap<&str, usize> = handles
+        .tracks
+        .iter()
+        .enumerate()
+        .map(|(index, id)| (id.as_ref(), index))
+        .collect();
+    let mut effect_controls: Vec<Option<EffectControlProducerV1>> = Vec::new();
+    effect_controls
+        .try_reserve_exact(total_effects as usize)
+        .map_err(|_| fixed_diagnostic("web.resource.allocation"))?;
+    effect_controls.resize_with(total_effects as usize, || None);
+    for producer in handles.effect_controls {
+        let Some(track) = track_index.get(producer.track_id.as_ref()).copied() else {
+            return Err(fixed_diagnostic("web.console.effects"));
+        };
+        let rack = match producer.rack {
+            EffectRack::Simd1 => 0_usize,
+            EffectRack::Dynamic => 1,
+            EffectRack::Simd2 => 2,
+        };
+        let counts = &rack_effects[track];
+        let offset: u32 = counts[..rack].iter().sum();
+        let slot = (effect_base[track] + offset + producer.effect_index) as usize;
+        let Some(entry) = effect_controls.get_mut(slot) else {
+            return Err(fixed_diagnostic("web.console.effects"));
+        };
+        if entry.is_some() {
+            return Err(fixed_diagnostic("web.console.effects"));
+        }
+        *entry = Some(producer);
+    }
+    let queue_count = track_count
+        .checked_mul(2)
+        .and_then(|value| value.checked_add(total_effects as usize))
+        .ok_or_else(|| fixed_diagnostic("web.console.effects"))?;
     let ready = ReadyOwnership {
         controls: handles.track_controls,
-        command_wanted: boxed_zero_u32(track_count)?,
+        effect_controls: effect_controls.into_boxed_slice(),
+        effect_base: effect_base.into_boxed_slice(),
+        command_wanted: boxed_zero_u32(queue_count)?,
         command_decoded: boxed_command_staging()?,
-        in_flight: boxed_zero_u32(track_count)?,
+        in_flight: boxed_zero_u32(queue_count)?,
         tracks: handles.tracks,
         rack_effects: rack_effects.into_boxed_slice(),
         host,
@@ -1665,14 +1937,13 @@ fn boxed_zero_meter_frame(track_count: usize) -> Result<Box<[f32]>, Vec<u8>> {
     Ok(value.into_boxed_slice())
 }
 
-fn boxed_command_staging() -> Result<Box<[(u32, TrackControlRecordV1)]>, Vec<u8>> {
-    let count = MAXIMUM_COMMAND_RECORDS as usize;
+fn boxed_command_staging() -> Result<Box<[(u32, AdmittedCommand)]>, Vec<u8>> {
+    // Two entries per staged wire record: one `channel = both` command on a per-lane effect
+    // parameter lowers to one record per lane (#140 C).
+    let count = MAXIMUM_COMMAND_RECORDS as usize * 2;
     let empty = (
         0_u32,
-        TrackControlRecordV1 {
-            matrix: Matrix2x2::IDENTITY,
-            smoothing_samples: 0,
-        },
+        AdmittedCommand::Effect(EffectControlRecordV1::Bypass(false)),
     );
     let mut value = Vec::new();
     value

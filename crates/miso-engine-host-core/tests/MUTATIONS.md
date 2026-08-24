@@ -212,3 +212,14 @@ Ten mutations, each proven to fail `scripts/check-host-core-policy.sh`: capi cal
 `no_mangle` C symbol; the facade becoming a `cdylib`. The suite also asserts the positive case,
 including that the one pending-conversion host (`hosts/miso-engine-host-web`, issue #106) is
 exempt.
+
+## Issue #140 A — the banked-effect console seam
+
+Applied to the working tree, the named test run, the failure observed, the mutation reverted, in
+the same session. Host: `x86_64` (Simd8 bank width), debug profile.
+
+| # | mutation | file | test | result |
+|---|---|---|---|---|
+| 140-14 | `ConsoleEffectBankStage::process` packs every lane at `packed[..staged]` instead of at that lane's own running offset | `rack/src/lib.rs` | `effect_console::*` | RED (`two_lanes_of_one_bank_take_two_different_commands`: each lane carries exactly the command addressed to it) |
+| 140-15 | the bank builder never takes a member's control channel (`.filter(\|_\| false)` after `effect_controls.remove`), so a banked lane silently keeps the console-free stage | `graph/src/runtime.rs` | `effect_console::a_banked_effect_applies_each_lanes_own_command_and_no_others` | RED (`the commanded lane moved`) |
+

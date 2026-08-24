@@ -886,18 +886,35 @@ fn native_identity_session_digest_pins_the_wasm_parity() {
     );
 }
 
-/// #137 E2, native leg: the same session, source feed and command timeline the shipped artifact
-/// runs in `tests/browser-v1/direct-oracle.mjs`, rendered natively here.
+/// #137 E2, extended by #140 C: the command-timeline determinism digest, native leg.
 ///
-/// The fixture is identity end to end, so a constant input renders to that same constant and the
-/// only thing that can move a sample is a command. Six blocks, one matrix retarget, one refused
-/// unknown-track record, one refused flood, one refused unsupported kind, and one smoothed pan
-/// retarget: the digest is a statement about *when* each of those took effect, not merely that
-/// they did. The digest is over little-endian `f32` words, so it is a bit comparison.
+/// The same session, source feed and command timeline the raw-Wasm oracle drives in
+/// `tests/browser-v1/direct-oracle.mjs`, rendered natively here. Both digests are asserted equal
+/// to the same pin, so a change to the audio makes them move together -- which is the point.
+///
+/// # Every newly live kind is in the timeline
+///
+/// #137 pinned a timeline of pan and matrix, with `fader_db` present only as a *refusal*. #140
+/// makes fader, mute, effect parameter and effect bypass live, so the timeline exercises each of
+/// them, in a fixed order, at fixed blocks:
+///
+/// | block | command admitted before it |
+/// |---|---|
+/// | 1 | `matrix`, `ll = 0.5` |
+/// | 2 | three refusals: unknown track, a queue flood, an unknown effect parameter |
+/// | 3 | `pan`, one-quantum window |
+/// | 4 | `faderDb` to `-6 dB`, one-quantum window |
+/// | 5 | `mute` on, one-quantum window |
+/// | 6 | `effectParam`: band 1 gain to `-12 dB`, `channel = both` |
+/// | 7 | `effectBypass` on |
+/// | 8 | `mute` off and `effectBypass` off, as one batch across two queues |
+///
+/// The digest is therefore a statement about *when* each of those took effect, not merely that
+/// they did. It is over little-endian `f32` words, so it is a bit comparison.
 ///
 /// Red mutation: change the matrix retarget's `applied_at_sample` expectation to `2 * QUANTUM`
-/// -> the assertion fails here, and moving the drain in `ConsoleMatrixProcessor::process` to after
-/// the audio makes both this digest and the wasm oracle's move together, which is the point.
+/// -> the assertion fails here, and moving any console stage's drain to after the audio makes
+/// both this digest and the wasm oracle's move together.
 #[test]
 fn native_command_timeline_digest_pins_the_wasm_parity() {
     use sha2::{Digest, Sha256};
@@ -905,9 +922,12 @@ fn native_command_timeline_digest_pins_the_wasm_parity() {
     const QUANTUM: u32 = 128;
     const RATE: u32 = 48_000;
     const DEPTH: u32 = 4;
+    const BLOCKS: u64 = 10;
 
     // The fixture file is read verbatim, exactly as `direct-oracle.mjs` reads it, so both legs
-    // compile byte-identical input. It is the browser identity session with a six-block region.
+    // compile byte-identical input. It is the browser identity session plus one dynamic-rack
+    // parametric EQ whose band 1 is a low shelf -- a shelf, not a bell, so a DC fixture can
+    // actually witness the parameter move.
     let toml = include_str!("../tests/browser-v1/command-session.toml");
     let mut config = WebPrepareConfigV1::launch_defaults(RATE, QUANTUM);
     config.source_ring_frames = QUANTUM;
@@ -964,6 +984,7 @@ fn native_command_timeline_digest_pins_the_wasm_parity() {
     assert_eq!(host.command_report().applied_at_sample, u64::from(QUANTUM));
     step(&mut host, 1);
 
+    // Three refusals between blocks 1 and 2. None of them may move a rendered sample.
     matrix(&mut host, 0, 5);
     assert_eq!(host.submit_commands(1), RESULT_INVALID_ARGUMENT);
     assert_eq!(host.command_report().reason, COMMAND_REASON_UNKNOWN_TRACK);
@@ -972,22 +993,24 @@ fn native_command_timeline_digest_pins_the_wasm_parity() {
     }
     assert_eq!(host.submit_commands(DEPTH + 1), RESULT_BACKPRESSURE);
     assert_eq!(host.command_report().admitted, 0);
+    // #140: `fader_db` is live, so the refusal that used to stand here is a real one now -- a
+    // parameter id the addressed effect does not declare.
     stage_command(
         &mut host,
         0,
-        COMMAND_FADER_DB,
-        255,
+        COMMAND_EFFECT_PARAM,
+        1,
+        2,
         0,
         0,
+        4_242,
         0,
-        0,
-        0,
-        [-6.0, 0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, 0.0],
     );
-    assert_eq!(host.submit_commands(1), RESULT_UNSUPPORTED);
+    assert_eq!(host.submit_commands(1), RESULT_INVALID_ARGUMENT);
     assert_eq!(
         host.command_report().reason,
-        COMMAND_REASON_UNSUPPORTED_KIND
+        COMMAND_REASON_UNKNOWN_PARAMETER
     );
     step(&mut host, 2);
 
@@ -1009,9 +1032,109 @@ fn native_command_timeline_digest_pins_the_wasm_parity() {
         3 * u64::from(QUANTUM)
     );
     step(&mut host, 3);
+
+    // #140 B: a windowed fader move.
+    stage_command(
+        &mut host,
+        0,
+        COMMAND_FADER_DB,
+        255,
+        2,
+        0,
+        0,
+        0,
+        QUANTUM,
+        [-6.0, 0.0, 0.0, 0.0],
+    );
+    assert_eq!(host.submit_commands(1), RESULT_OK);
+    assert_eq!(
+        host.command_report().applied_at_sample,
+        4 * u64::from(QUANTUM)
+    );
     step(&mut host, 4);
+
+    // #140 B: mute as a fader endpoint, over the same window.
+    stage_command(
+        &mut host,
+        0,
+        COMMAND_MUTE,
+        255,
+        2,
+        0,
+        0,
+        0,
+        QUANTUM,
+        [1.0, 0.0, 0.0, 0.0],
+    );
+    assert_eq!(host.submit_commands(1), RESULT_OK);
     step(&mut host, 5);
-    assert_eq!(host.status().rendered_quanta, 6);
+
+    // #140 A: an effect parameter, `channel = both`, lowering to one span per lane.
+    stage_command(
+        &mut host,
+        0,
+        COMMAND_EFFECT_PARAM,
+        1,
+        2,
+        0,
+        0,
+        4,
+        0,
+        [-12.0, 0.0, 0.0, 0.0],
+    );
+    assert_eq!(host.submit_commands(1), RESULT_OK);
+    assert_eq!(
+        host.command_report().applied_at_sample,
+        6 * u64::from(QUANTUM)
+    );
+    step(&mut host, 6);
+
+    // #140 A: live bypass, through the latency-preserving shunt.
+    stage_command(
+        &mut host,
+        0,
+        COMMAND_EFFECT_BYPASS,
+        1,
+        255,
+        0,
+        0,
+        0,
+        0,
+        [1.0, 0.0, 0.0, 0.0],
+    );
+    assert_eq!(host.submit_commands(1), RESULT_OK);
+    step(&mut host, 7);
+
+    // #140 C: one batch across two different destination queues.
+    stage_command(
+        &mut host,
+        0,
+        COMMAND_MUTE,
+        255,
+        2,
+        0,
+        0,
+        0,
+        0,
+        [0.0, 0.0, 0.0, 0.0],
+    );
+    stage_command(
+        &mut host,
+        1,
+        COMMAND_EFFECT_BYPASS,
+        1,
+        255,
+        0,
+        0,
+        0,
+        0,
+        [0.0, 0.0, 0.0, 0.0],
+    );
+    assert_eq!(host.submit_commands(2), RESULT_OK);
+    assert_eq!(host.command_report().admitted, 2);
+    step(&mut host, 8);
+    step(&mut host, 9);
+    assert_eq!(host.status().rendered_quanta, BLOCKS);
 
     let mut digest = Sha256::new();
     for channel in 0..2_usize {
@@ -1248,6 +1371,443 @@ fn command_ack_names_the_exact_application_sample() {
     );
 }
 
+/// A console host over the *command* fixture: the identity session plus one dynamic-rack
+/// parametric EQ, so an effect-addressed command has something real to address (issue #140 A).
+fn effect_console_host(quantum: u32, depth: u64) -> AudioWorkletEngineHost {
+    let toml = include_str!("../tests/browser-v1/command-session.toml");
+    let mut config = WebPrepareConfigV1::launch_defaults(48_000, quantum);
+    config.source_ring_frames = quantum;
+    config.console_command_queue_records = depth;
+    let mut host = AudioWorkletEngineHost::new(config);
+    assert_eq!(host.prepare(), RESULT_OK);
+    host.session_toml_mut().expect("TOML")[..toml.len()].copy_from_slice(toml.as_bytes());
+    assert_eq!(
+        host.compile(toml.len()),
+        RESULT_OK,
+        "{:?}",
+        core::str::from_utf8(host.diagnostic())
+    );
+    host
+}
+
+/// #140 B / E1: a fader command's acknowledgement names the exact sample it takes effect at.
+///
+/// The fixture is identity end to end, so a constant input renders to that same constant and a
+/// fader move has exactly one observable consequence: the whole plane scales. With a zero window
+/// the transition is a block boundary and is exact, not approximate.
+///
+/// Red mutation: move the `while let Ok(record) = self.control.try_pop()` drain in
+/// `ConsoleFaderProcessor::process` to *after* `self.fader.process(block)` -> the reported sample
+/// is one block early and `at_applied` still renders the pre-command value.
+#[test]
+fn a_fader_command_names_the_exact_application_sample() {
+    const QUANTUM: u32 = 128;
+    let mut host = console_host(QUANTUM, 0);
+    let quantum = QUANTUM as usize;
+
+    feed_and_render(&mut host, 1, 0, 0.5);
+    let before = host.output_pcm().expect("output").to_vec();
+    assert!(before.iter().all(|value| *value == 0.5), "unity fader");
+
+    // -6.0206 dB is a hair under exactly half; the assertion below is about *when*, so it
+    // compares the whole block against its own first sample and against the untouched input.
+    stage_command(
+        &mut host,
+        0,
+        COMMAND_FADER_DB,
+        255,
+        2,
+        0,
+        0,
+        0,
+        0,
+        [-6.0, 0.0, 0.0, 0.0],
+    );
+    assert_eq!(host.submit_commands(1), RESULT_OK);
+    let report = *host.command_report();
+    assert_eq!(report.reason, COMMAND_REASON_NONE);
+    assert_eq!(report.admitted, 1);
+    assert_eq!(report.applied_at_sample, u64::from(QUANTUM));
+
+    feed_and_render(&mut host, 1, 1, 0.5);
+    let at_applied = host.output_pcm().expect("output").to_vec();
+    let first = at_applied[0];
+    assert!(first < 0.5 && first > 0.2, "the block scaled: {first}");
+    assert!(
+        at_applied
+            .iter()
+            .all(|value| value.to_bits() == first.to_bits()),
+        "a zero-window move is settled for every sample of the block, both lanes",
+    );
+
+    // A windowed move ramps inside the block it reported, and settles by its end.
+    stage_command(
+        &mut host,
+        0,
+        COMMAND_FADER_DB,
+        255,
+        2,
+        0,
+        0,
+        0,
+        QUANTUM,
+        [0.0, 0.0, 0.0, 0.0],
+    );
+    assert_eq!(host.submit_commands(1), RESULT_OK);
+    assert_eq!(
+        host.command_report().applied_at_sample,
+        2 * u64::from(QUANTUM)
+    );
+    feed_and_render(&mut host, 1, 2, 0.5);
+    let ramping = host.output_pcm().expect("output").to_vec();
+    assert!(
+        ramping[0] > first && ramping[0] < 0.5,
+        "the ramp starts inside the block that reported the sample: {}",
+        ramping[0]
+    );
+    assert_eq!(
+        ramping[quantum - 1].to_bits(),
+        0.5_f32.to_bits(),
+        "a one-quantum window lands exactly on unity by the end of that block"
+    );
+}
+
+/// #140 B: mute is a fader endpoint. A zero-window mute is the exact `+0.0` the prepared path
+/// gives; a windowed mute fades over the window and only then reaches that exact zero.
+///
+/// Red mutation: make `FaderMuteRampBuiltinsV1::set_mute` snap instead of retargeting -> the
+/// windowed mute is already silent on its first sample and the "still audible" assertion fails.
+#[test]
+fn a_mute_command_is_a_fader_endpoint_not_a_discontinuity() {
+    const QUANTUM: u32 = 128;
+    let mut host = console_host(QUANTUM, 0);
+    let quantum = QUANTUM as usize;
+
+    feed_and_render(&mut host, 1, 0, -0.5);
+    stage_command(
+        &mut host,
+        0,
+        COMMAND_MUTE,
+        255,
+        2,
+        0,
+        0,
+        0,
+        QUANTUM,
+        [1.0, 0.0, 0.0, 0.0],
+    );
+    assert_eq!(host.submit_commands(1), RESULT_OK);
+    assert_eq!(host.command_report().applied_at_sample, u64::from(QUANTUM));
+    feed_and_render(&mut host, 1, 1, -0.5);
+    let fading = host.output_pcm().expect("output").to_vec();
+    assert!(
+        fading[0] < 0.0 && fading[0] > -0.5,
+        "the first sample of a mute fade is still audible: {}",
+        fading[0]
+    );
+    assert!(
+        fading[1] > fading[0],
+        "the fade moves monotonically toward zero"
+    );
+    assert_eq!(
+        fading[quantum - 1].to_bits(),
+        0.0_f32.to_bits(),
+        "the completed mute is exactly +0.0, not -0.0, for a negative input"
+    );
+
+    // Unmuting is the same event in reverse.
+    stage_command(
+        &mut host,
+        0,
+        COMMAND_MUTE,
+        255,
+        2,
+        0,
+        0,
+        0,
+        0,
+        [0.0, 0.0, 0.0, 0.0],
+    );
+    assert_eq!(host.submit_commands(1), RESULT_OK);
+    feed_and_render(&mut host, 1, 2, -0.5);
+    let restored = host.output_pcm().expect("output").to_vec();
+    assert!(
+        restored
+            .iter()
+            .all(|value| value.to_bits() == (-0.5_f32).to_bits()),
+        "a zero-window unmute restores the prepared fader exactly"
+    );
+}
+
+/// #140 A / E1: an effect-parameter command takes effect on the first sample of the block its
+/// acknowledgement named, and on no earlier sample.
+///
+/// The proof is a two-host comparison rather than a closed-form value: the EQ's own 64-sample
+/// coefficient ramp is its DSP, not this issue's, so what is gated here is the *boundary*. The
+/// control host receives nothing; every block before `applied_at_sample` must be bit-identical
+/// between the two, and the block at `applied_at_sample` must differ on its very first sample.
+///
+/// Red mutation: move the `console.control.stage(..)` drain in `execute_op`'s `ConsoleEffect` arm
+/// below `effect.processor.process(block)` -> the first differing block is one later and the
+/// `differs at its first sample` assertion fails.
+#[test]
+fn an_effect_parameter_command_names_the_exact_application_sample() {
+    const QUANTUM: u32 = 128;
+    let mut control = effect_console_host(QUANTUM, 8);
+    let mut commanded = effect_console_host(QUANTUM, 8);
+
+    for block in 0..2_u64 {
+        feed_and_render(&mut control, 1, block, 0.25);
+        feed_and_render(&mut commanded, 1, block, 0.25);
+        assert_eq!(
+            control.output_pcm().expect("control"),
+            commanded.output_pcm().expect("commanded"),
+            "block {block}: no command has been admitted yet",
+        );
+    }
+    // Band 1's gain: parameter id 4 of `miso.parametric-eq`, dynamic rack, effect 0, both lanes.
+    stage_command(
+        &mut commanded,
+        0,
+        COMMAND_EFFECT_PARAM,
+        1,
+        2,
+        0,
+        0,
+        4,
+        0,
+        [-12.0, 0.0, 0.0, 0.0],
+    );
+    assert_eq!(commanded.submit_commands(1), RESULT_OK);
+    let report = *commanded.command_report();
+    assert_eq!(report.reason, COMMAND_REASON_NONE);
+    assert_eq!(
+        report.admitted, 1,
+        "the report counts wire records, not the per-lane spans they lower to"
+    );
+    assert_eq!(report.applied_at_sample, 2 * u64::from(QUANTUM));
+
+    feed_and_render(&mut control, 1, 2, 0.25);
+    feed_and_render(&mut commanded, 1, 2, 0.25);
+    let clean = control.output_pcm().expect("control").to_vec();
+    let moved = commanded.output_pcm().expect("commanded").to_vec();
+    assert_ne!(
+        clean[0].to_bits(),
+        moved[0].to_bits(),
+        "the block at applied_at_sample differs at its first sample",
+    );
+    assert_ne!(
+        clean[QUANTUM as usize].to_bits(),
+        moved[QUANTUM as usize].to_bits(),
+        "a `channel = both` command lowers to one span per lane, so the right lane moved too",
+    );
+}
+
+/// #140 A: live effect bypass returns the dry signal at the effect's declared latency, and
+/// releasing it returns the wet signal the effect has been computing all along.
+///
+/// Red mutation: delete the `console.shunt.capture(..)` call in `execute_op` -> a bypassed block
+/// renders the shunt's initial zeros instead of the input, and the equality below fails.
+#[test]
+fn an_effect_bypass_command_returns_the_dry_signal() {
+    const QUANTUM: u32 = 128;
+    let mut host = effect_console_host(QUANTUM, 8);
+    // Move the band well off flat first, so "bypassed" and "enabled" are distinguishable.
+    stage_command(
+        &mut host,
+        0,
+        COMMAND_EFFECT_PARAM,
+        1,
+        2,
+        0,
+        0,
+        4,
+        0,
+        [18.0, 0.0, 0.0, 0.0],
+    );
+    assert_eq!(host.submit_commands(1), RESULT_OK);
+    for block in 0..3_u64 {
+        feed_and_render(&mut host, 1, block, 0.25);
+    }
+    let wet = host.output_pcm().expect("output").to_vec();
+
+    stage_command(
+        &mut host,
+        0,
+        COMMAND_EFFECT_BYPASS,
+        1,
+        255,
+        0,
+        0,
+        0,
+        0,
+        [1.0, 0.0, 0.0, 0.0],
+    );
+    assert_eq!(host.submit_commands(1), RESULT_OK);
+    assert_eq!(
+        host.command_report().applied_at_sample,
+        3 * u64::from(QUANTUM)
+    );
+    feed_and_render(&mut host, 1, 3, 0.25);
+    let dry = host.output_pcm().expect("output").to_vec();
+    assert!(
+        dry.iter()
+            .all(|value| value.to_bits() == 0.25_f32.to_bits()),
+        "the parametric EQ declares zero latency, so a bypassed block is the input itself",
+    );
+    assert_ne!(
+        wet[0].to_bits(),
+        dry[0].to_bits(),
+        "the enabled band was audibly off flat, so bypass is observable",
+    );
+
+    stage_command(
+        &mut host,
+        0,
+        COMMAND_EFFECT_BYPASS,
+        1,
+        255,
+        0,
+        0,
+        0,
+        0,
+        [0.0, 0.0, 0.0, 0.0],
+    );
+    assert_eq!(host.submit_commands(1), RESULT_OK);
+    feed_and_render(&mut host, 1, 4, 0.25);
+    let restored = host.output_pcm().expect("output").to_vec();
+    assert_ne!(
+        restored[0].to_bits(),
+        0.25_f32.to_bits(),
+        "releasing bypass returns the wet path, whose state stayed continuous throughout",
+    );
+}
+
+/// #140 C: a submission that mixes kinds is still one transaction, and the free-room pre-check is
+/// per *destination queue* -- one full queue refuses the whole batch, including the records bound
+/// for queues that had room.
+///
+/// Red mutation: make the free-room pass read `ready.command_wanted[0]` instead of
+/// `ready.command_wanted[slot]` -> the fader flood is checked against the matrix queue's count,
+/// the batch is admitted, and the "nothing was admitted" comparison against the clean host fails.
+#[test]
+fn a_mixed_batch_is_one_transaction_across_every_queue() {
+    const QUANTUM: u32 = 128;
+    const DEPTH: u32 = 2;
+    let mut clean = effect_console_host(QUANTUM, u64::from(DEPTH));
+    let mut flooded = effect_console_host(QUANTUM, u64::from(DEPTH));
+    feed_and_render(&mut clean, 1, 0, 0.25);
+    feed_and_render(&mut flooded, 1, 0, 0.25);
+
+    // One matrix record (room), then one more fader record than the fader queue can hold.
+    stage_command(
+        &mut flooded,
+        0,
+        COMMAND_MATRIX,
+        255,
+        255,
+        0,
+        0,
+        0,
+        0,
+        [0.5, 0.0, 0.0, 1.0],
+    );
+    for index in 0..DEPTH as usize + 1 {
+        stage_command(
+            &mut flooded,
+            index + 1,
+            COMMAND_FADER_DB,
+            255,
+            2,
+            0,
+            0,
+            0,
+            0,
+            [-6.0, 0.0, 0.0, 0.0],
+        );
+    }
+    assert_eq!(flooded.submit_commands(DEPTH + 2), RESULT_BACKPRESSURE);
+    let report = *flooded.command_report();
+    assert_eq!(report.reason, COMMAND_REASON_BACKPRESSURE);
+    assert_eq!(report.admitted, 0, "a refused submission admits nothing");
+
+    feed_and_render(&mut clean, 1, 1, 0.25);
+    feed_and_render(&mut flooded, 1, 1, 0.25);
+    assert_eq!(
+        clean.output_pcm().expect("clean"),
+        flooded.output_pcm().expect("flooded"),
+        "not even the matrix record in the refused batch reached the engine",
+    );
+
+    // The same batch, one record shorter, is admitted whole and moves both surfaces.
+    stage_command(
+        &mut flooded,
+        0,
+        COMMAND_MATRIX,
+        255,
+        255,
+        0,
+        0,
+        0,
+        0,
+        [0.5, 0.0, 0.0, 1.0],
+    );
+    for index in 0..DEPTH as usize {
+        stage_command(
+            &mut flooded,
+            index + 1,
+            COMMAND_FADER_DB,
+            255,
+            2,
+            0,
+            0,
+            0,
+            0,
+            [-6.0, 0.0, 0.0, 0.0],
+        );
+    }
+    assert_eq!(flooded.submit_commands(DEPTH + 1), RESULT_OK);
+    assert_eq!(flooded.command_report().admitted, DEPTH + 1);
+    feed_and_render(&mut clean, 1, 2, 0.25);
+    feed_and_render(&mut flooded, 1, 2, 0.25);
+    assert_ne!(
+        clean.output_pcm().expect("clean"),
+        flooded.output_pcm().expect("flooded"),
+        "the admitted batch moved the render",
+    );
+}
+
+/// #140 C: `UNSUPPORTED_KIND` still means exactly what it says -- the target is real and the value
+/// is legal, and *this session* has no write path. A host compiled with no console is that
+/// session, and every live kind is refused with it.
+#[test]
+fn a_console_free_host_refuses_every_live_kind_as_unsupported() {
+    const QUANTUM: u32 = 128;
+    let mut host = effect_console_host(QUANTUM, 0);
+    feed_and_render(&mut host, 1, 0, 0.25);
+    let baseline = host.output_pcm().expect("output").to_vec();
+    // A console-free host has no staging buffer at all: the refusal is decided before a record
+    // could even be written, which is the strongest form of "this session cannot apply it".
+    assert!(
+        host.command_staging_mut().is_none(),
+        "no console means no staging buffer",
+    );
+    for records in [1_u32, 8, MAXIMUM_COMMAND_RECORDS] {
+        assert_eq!(host.submit_commands(records), RESULT_UNSUPPORTED);
+        assert_eq!(
+            host.command_report().reason,
+            COMMAND_REASON_UNSUPPORTED_KIND
+        );
+        assert_eq!(host.command_report().admitted, 0);
+    }
+    feed_and_render(&mut host, 1, 1, 0.25);
+    assert_eq!(
+        baseline,
+        host.output_pcm().expect("output"),
+        "a console-free host renders the same block it would have without any traffic",
+    );
+}
+
 /// #137 E3: flooding past the bounded queue is a typed local rejection that admits nothing and
 /// disturbs no rendered sample.
 ///
@@ -1310,7 +1870,7 @@ fn unknown_targets_are_typed_and_leave_the_engine_untouched() {
 
     /// `(kind, rack, channel, track, effect, parameter, values, result, reason)`.
     type UnknownTargetCase = (u32, u8, u8, u32, u32, u32, [f32; 4], u32, u32);
-    let cases: [UnknownTargetCase; 7] = [
+    let cases: [UnknownTargetCase; 9] = [
         // kind, rack, channel, track, effect, parameter, values, result, reason
         (
             COMMAND_MATRIX,
@@ -1367,16 +1927,41 @@ fn unknown_targets_are_typed_and_leave_the_engine_untouched() {
             RESULT_INVALID_ARGUMENT,
             COMMAND_REASON_DOMAIN,
         ),
+        // Issue #140 B: the fader is live, so a *refusal* here has to be a real rule violation.
+        // An undefined lane byte is malformed and an out-of-domain decibel value is a domain
+        // failure -- and neither is "this engine cannot move it", which is what #137 answered.
         (
             COMMAND_FADER_DB,
             255,
-            0,
+            9,
             0,
             0,
             0,
             [-6.0, 0.0, 0.0, 0.0],
-            RESULT_UNSUPPORTED,
-            COMMAND_REASON_UNSUPPORTED_KIND,
+            RESULT_INVALID_ARGUMENT,
+            COMMAND_REASON_MALFORMED,
+        ),
+        (
+            COMMAND_FADER_DB,
+            255,
+            2,
+            0,
+            0,
+            0,
+            [24.001, 0.0, 0.0, 0.0],
+            RESULT_INVALID_ARGUMENT,
+            COMMAND_REASON_DOMAIN,
+        ),
+        (
+            COMMAND_MUTE,
+            255,
+            2,
+            0,
+            0,
+            0,
+            [0.5, 0.0, 0.0, 0.0],
+            RESULT_INVALID_ARGUMENT,
+            COMMAND_REASON_DOMAIN,
         ),
         (
             COMMAND_MATRIX,

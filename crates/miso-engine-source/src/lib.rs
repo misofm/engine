@@ -2473,6 +2473,7 @@ mod tests {
                 .to_vec(),
                 routes: Vec::new(),
                 effects: Vec::new(),
+                effect_controls: Vec::new(),
                 banks: Vec::new(),
                 builtin_banks: Vec::new(),
                 observers: Vec::new(),

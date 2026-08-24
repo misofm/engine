@@ -11,8 +11,8 @@
 
 use miso_engine_core::realtime::RenderError;
 use miso_engine_effect_contract::{
-    BankWidth, EffectBankProcessBlock, EffectProgramKeyV1, PreparedNativeEffectBank,
-    PreparedSidechainPort,
+    BankWidth, BypassShunt, EffectBankProcessBlock, EffectControlLane, EffectProgramKeyV1,
+    PreparedAutomationSpan, PreparedNativeEffectBank, PreparedSidechainPort,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -251,6 +251,185 @@ impl BankStage for EffectBankStage {
         // D7's once-per-block boundary check and its counters belong to effect-runtime (#95); the
         // descriptive bank report is deliberately dropped here, exactly as it was before #96.
         let _ = self.processor.process_bank(block);
+        Ok(())
+    }
+}
+
+/// The live-console twin of [`EffectBankStage`] (issue #140 A).
+///
+/// It is a **separate stage type** on purpose, exactly as `ConsoleMatrixProcessor` is a separate
+/// processor from `MatrixProcessor` (#137 D1): a bank prepared without a console keeps
+/// [`EffectBankStage`]'s storage and its `&[]`/zero-offset call, byte for byte, so "control off
+/// costs nothing" stays an identity rather than a claim. Nothing in this type is reachable from a
+/// session that asked for no control channel.
+///
+/// # What one block does, in order
+///
+/// 1. Drain every lane's bounded queue into that lane's window of the packed span array, in
+///    canonical order (`EffectControlLane::stage`). This happens **before** any audio is touched,
+///    so an admitted record takes effect on the first sample of this block -- the same
+///    block-boundary rule the matrix stage proved for #137's E1.
+/// 2. Capture the dry AoSoA block into the latency shunt, if any lane can be bypassed.
+/// 3. Run the bank once with the packed spans and the per-lane offsets the effect contract
+///    already defines (`EffectBankProcessBlock::automation_offsets`).
+/// 4. Restore the latency-matched dry signal into exactly the bypassed lanes.
+///
+/// # Partition invariance and `to_bits` identity extend to command timelines
+///
+/// The spans a lane receives are a pure function of that lane's own queue and the block's
+/// `first_sample`, and every lane is staged independently into a disjoint window. A bank therefore
+/// applies a command timeline to lane `l` exactly as the per-node scalar path applies it to the
+/// same effect: same spans, same block, same order.
+pub struct ConsoleEffectBankStage {
+    processor: Box<dyn PreparedNativeEffectBank>,
+    width: BankWidth,
+    quantum: u32,
+    /// `lanes + 1` packed offsets into [`Self::spans`], rewritten every block.
+    offsets: Box<[u32]>,
+    /// One control channel per lane; `None` for a lane no console addresses.
+    lanes: Box<[Option<EffectControlLane>]>,
+    /// One lane's staging window: the bank's own `automation_capacity` spans.
+    ///
+    /// One window serves every lane because a lane's staged prefix is copied into [`Self::packed`]
+    /// the moment it is drained, before the next lane touches the window. The bank never sees this
+    /// array; it sees `packed[..offsets[lanes]]`.
+    staging: Box<[PreparedAutomationSpan]>,
+    /// The packed, per-lane-partitioned span array the bank is handed. Lane `l` owns
+    /// `[offsets[l], offsets[l + 1])`, which is the partition the effect contract already defines.
+    packed: Box<[PreparedAutomationSpan]>,
+    /// Latency-preserving dry shunt over the resident AoSoA block, or `None` when no lane of this
+    /// slot can be bypassed live.
+    shunt: Option<BypassShunt>,
+    /// Records dropped because a lane's window was full of distinct targets. Zero by construction.
+    dropped: u64,
+}
+
+impl ConsoleEffectBankStage {
+    /// Builds the console stage for one bound bank slot.
+    ///
+    /// `latency` is the slot's declared [`PreparedEffectMetadata::latency`]. Every lane of a bank
+    /// shares one [`EffectProgramKeyV1`], so they share one latency and one AoSoA delay line:
+    /// delaying the interleaved plane by `latency * lanes` words delays every lane by exactly
+    /// `latency` frames.
+    ///
+    /// # Errors
+    ///
+    /// [`RackError::WidthMismatch`] if the processor is not this width or the lane count disagrees,
+    /// and [`RackError::ZeroQuantum`] for a zero quantum.
+    pub fn new(
+        processor: Box<dyn PreparedNativeEffectBank>,
+        width: BankWidth,
+        quantum: u32,
+        lanes: Vec<Option<EffectControlLane>>,
+        latency: usize,
+    ) -> Result<Self, RackError> {
+        if processor.metadata().width != width || lanes.len() != width.lanes() as usize {
+            return Err(RackError::WidthMismatch);
+        }
+        if quantum == 0 {
+            return Err(RackError::ZeroQuantum);
+        }
+        let lane_count = width.lanes() as usize;
+        let capacity = processor.metadata().program_key.automation_capacity as usize;
+        let total = capacity
+            .checked_mul(lane_count)
+            .ok_or(RackError::Overflow)?;
+
+        let words = (quantum as usize)
+            .checked_mul(lane_count)
+            .ok_or(RackError::Overflow)?;
+        let line = latency.checked_mul(lane_count).ok_or(RackError::Overflow)?;
+        let shunt = lanes
+            .iter()
+            .any(Option::is_some)
+            .then(|| BypassShunt::new(words, line));
+        Ok(Self {
+            processor,
+            width,
+            quantum,
+            offsets: vec![0_u32; lane_count + 1].into_boxed_slice(),
+            lanes: lanes.into_boxed_slice(),
+            staging: vec![IDLE_SPAN; capacity].into_boxed_slice(),
+            packed: vec![IDLE_SPAN; total].into_boxed_slice(),
+            shunt,
+            dropped: 0,
+        })
+    }
+
+    /// Records refused because a lane's staging window was full. Read only off the render thread.
+    #[must_use]
+    pub const fn dropped_records(&self) -> u64 {
+        self.dropped
+    }
+}
+
+/// The value an unused staging slot holds. It is never handed to a bank: only `[..offsets[lanes]]`
+/// is, and every span inside that range was written by this block's drain.
+const IDLE_SPAN: PreparedAutomationSpan = PreparedAutomationSpan {
+    kind: miso_engine_effect_contract::AutomationSpanKind::Point,
+    channel: miso_engine_effect_contract::ParameterChannel::Both,
+    parameter_index: 0,
+    start_sample: 0,
+    end_sample: 0,
+    start_value: 0.0,
+    end_value: 0.0,
+};
+
+impl BankStage for ConsoleEffectBankStage {
+    fn process(&mut self, block: BankBlock<'_>) -> Result<(), RenderError> {
+        let lane_count = self.width.lanes() as usize;
+        // 1. Drain, in lane order, into each lane's own window, then pack down.
+        let mut packed = 0_usize;
+        self.offsets[0] = 0;
+        for lane in 0..lane_count {
+            if let Some(channel) = self.lanes[lane].as_mut() {
+                let staged = channel.stage(&mut self.staging, block.first_sample);
+                self.dropped = self.dropped.saturating_add(u64::from(staged.dropped));
+                // Packed at this lane's own offset, immediately: that offset is what makes the
+                // window reusable and what gives the lane its private partition of `packed`.
+                self.packed[packed..packed + staged.staged]
+                    .copy_from_slice(&self.staging[..staged.staged]);
+                packed += staged.staged;
+            }
+            self.offsets[lane + 1] = packed as u32;
+        }
+        // 2. Capture the dry block before the bank touches it.
+        if let Some(shunt) = self.shunt.as_mut() {
+            shunt.capture(block.left, block.right);
+        }
+        let frames = block.frames;
+        let bank = EffectBankProcessBlock::new(
+            block.left,
+            block.right,
+            None,
+            frames,
+            self.width,
+            block.first_sample,
+            &self.packed[..packed],
+            &self.offsets,
+            self.quantum,
+        )
+        .map_err(|_| RenderError::InvalidEnvelope)?;
+        let _ = self.processor.process_bank(bank);
+        // 3. Latency-matched dry restore for exactly the bypassed lanes.
+        if let Some(shunt) = self.shunt.as_ref() {
+            let (dry_left, dry_right) = shunt.dry();
+            for lane in 0..lane_count {
+                if !self.lanes[lane]
+                    .as_ref()
+                    .is_some_and(EffectControlLane::bypassed)
+                {
+                    continue;
+                }
+                let mut index = lane;
+                let words = frames as usize * lane_count;
+                while index < words {
+                    block.left[index] = dry_left[index];
+                    block.right[index] = dry_right[index];
+                    index += lane_count;
+                }
+            }
+        }
         Ok(())
     }
 }

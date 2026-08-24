@@ -81,3 +81,15 @@ stress on a loaded host, so it is a race and not a reproducible-on-demand mutati
 N4 is the one row whose mutation is not the check it guards: I1 makes a foreign write unexpressible
 through the builder, so the stress is mutated at the address arithmetic instead, which is the
 failure I1 exists to make impossible.
+
+## Issue #140 — the automation-span feed, the live fader, and GR observation
+
+Every row below was applied to the working tree, the named test was run, the failure was observed,
+and the mutation was reverted in the same session. Host: `x86_64`, workspace `.cargo/config.toml`
+pin `-C target-feature=+avx2,+fma`, debug profile. Sweep driver: one mutation at a time,
+`cargo test -p <pkg> <test>`, tree restored before the next row.
+
+| # | mutation | file | test | result |
+|---|---|---|---|---|
+| 140-5 | the `console.control.stage(..)` drain in `execute_op`'s `ConsoleEffect` arm never runs, so an admitted parameter reaches the effect a block late | `graph/src/runtime.rs` | `tests::a_console_parameter_command_applies_at_the_next_block_boundary` | RED (`every sample of the block that drains the command carries it`) |
+| 140-6 | the `console.shunt.capture(..)` call is deleted, so a bypassed block renders the shunt's initial zeros instead of the latency-matched input | `graph/src/runtime.rs` | `tests::live_bypass_is_latency_preserving_and_reversible` | RED (`a bypassed block is the input delayed by exactly the declared latency`) |

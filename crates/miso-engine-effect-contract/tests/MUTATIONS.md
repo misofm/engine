@@ -40,3 +40,15 @@ Rows 4-13 are mutation *tests*: `scripts/test-math-policy.sh` and
 `scripts/test-effect-runtime-policy.sh` apply each mutation to a scratch copy of the workspace,
 assert the policy script rejects it, and restore. They run in CI, so these rows are re-proven on
 every commit rather than only on the day they were written.
+
+## Issue #140 — the automation-span feed, the live fader, and GR observation
+
+Every row below was applied to the working tree, the named test was run, the failure was observed,
+and the mutation was reverted in the same session. Host: `x86_64`, workspace `.cargo/config.toml`
+pin `-C target-feature=+avx2,+fma`, debug profile. Sweep driver: one mutation at a time,
+`cargo test -p <pkg> <test>`, tree restored before the next row.
+
+| # | mutation | file | test | result |
+|---|---|---|---|---|
+| 140-1 | `EffectControlLane::stage` loses its sorted-insertion leg (`if existing > key`), so records land in arrival order | `effect-contract/src/live.rs` | `live_control::a_drain_emits_the_contract_canonical_span_order` | RED (`spans must leave the drain in (parameter_index, channel) order`) |
+| 140-2 | `BypassShunt::capture` returns before the `pdc_delay_block` exchange, so the dry block is the *current* input rather than the input `latency` samples ago | `effect-contract/src/live.rs` | `live_control::the_shunt_reproduces_the_dry_signal_at_the_declared_latency` | RED (`sample 2 must be the input delayed by exactly 1`) |

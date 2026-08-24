@@ -45,3 +45,14 @@ tail counts:
 | Issue-037 audit PCM hash | `graph-compiler` | **did not move** — re-pinned from `origin/main` @ `b60f9b8` measured before any edit; it was already stale there because that audit is release-and-env-gated |
 | q128 preparation transcript + exact-100 aggregate | `scheduler-fixture` | fold the same counts; the crate's byte-identity PCM gates are untouched and green |
 | primitive-owner mirror `447_864` | `capi` | re-derived row by row (2 banks, 9 member ids, no mask row, two-plane scratch) and independently equal to `2 x (207_310 - 205_915) + 445_074` from the production estimate |
+
+## Issue #140 — the automation-span feed, the live fader, and GR observation
+
+Every row below was applied to the working tree, the named test was run, the failure was observed,
+and the mutation was reverted in the same session. Host: `x86_64`, workspace `.cargo/config.toml`
+pin `-C target-feature=+avx2,+fma`, debug profile. Sweep driver: one mutation at a time,
+`cargo test -p <pkg> <test>`, tree restored before the next row.
+
+| # | mutation | file | test | result |
+|---|---|---|---|---|
+| 140-10 | `ConsoleFaderProcessor::process` drains its queue *after* `self.fader.process(block)`, so an admitted fader move lands one block late | `builtins-compiler/src/lib.rs` | `miso-engine-host-web` `tests::a_fader_command_names_the_exact_application_sample` | RED (`a zero-window move is settled for every sample of the block, both lanes`) |

@@ -223,25 +223,41 @@ pub(crate) fn route_transform(gain_db: f32, matrix: &ChannelMatrix) -> Option<Ro
         rr: matrix.rr,
     })
 }
+/// Lower the prepared entries into the plan's effects, and -- separately -- the live-console
+/// control channels of whichever of them a console drives (issue #140 A).
+///
+/// The two vectors are returned side by side rather than as one because
+/// `core::mem::size_of::<RuntimeOp>()` is a reported byte: see
+/// [`miso_engine_graph::GraphEffectControlBindingV1`].
 pub(crate) fn into_effects(
     entries: Vec<EffectPreparedEntry>,
     ids: &BTreeMap<(String, RackId, String), EffectNodeId>,
-) -> Vec<GraphPreparedEffect> {
-    entries
-        .into_iter()
-        .map(|entry| {
-            let key = (
-                entry.track_id.clone(),
-                rack_id(entry.rack),
-                entry.effect_id.clone(),
-            );
-            GraphPreparedEffect {
-                id: ids[&key].clone(),
-                metadata: entry.metadata,
-                processor: entry.processor,
-            }
-        })
-        .collect()
+) -> (
+    Vec<GraphPreparedEffect>,
+    Vec<miso_engine_graph::GraphEffectControlBindingV1>,
+) {
+    let mut effects = Vec::with_capacity(entries.len());
+    let mut controls = Vec::new();
+    for entry in entries {
+        let key = (
+            entry.track_id.clone(),
+            rack_id(entry.rack),
+            entry.effect_id.clone(),
+        );
+        let node = ids[&key].clone();
+        if let Some(control) = entry.control {
+            controls.push(miso_engine_graph::GraphEffectControlBindingV1 {
+                node: node.clone(),
+                control,
+            });
+        }
+        effects.push(GraphPreparedEffect {
+            id: node,
+            metadata: entry.metadata,
+            processor: entry.processor,
+        });
+    }
+    (effects, controls)
 }
 pub(crate) fn diag(code: &'static str, path: &str) -> GraphDiagnostic {
     GraphDiagnostic {

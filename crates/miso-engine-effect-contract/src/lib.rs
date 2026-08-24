@@ -4,6 +4,9 @@
 //! persistence envelope. Those are interchange concerns owned by issue 029.
 #![allow(missing_docs)]
 
+mod live;
+pub use live::{BypassShunt, EffectControlLane, EffectControlRecordV1, Staged};
+
 use core::{fmt, hash::Hash};
 use miso_engine_core::{
     LAUNCH_SAMPLE_RATES, SampleRateHz, is_extended_compatibility_sample_rate, is_launch_sample_rate,
@@ -1270,10 +1273,47 @@ pub trait NativeEffectFactory: Send + Sync {
         request: PrepareEffectBankRequest<'_>,
     ) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError>;
 }
+/// What one dynamics effect reduced the signal by over the block it last processed (issue #140 D).
+///
+/// Decibels, and **negative for reduction**: `-6.0` means the effect took six decibels off. That is
+/// the sign convention every dynamics kernel in this workspace already smooths internally, so the
+/// observation is a read of state that exists rather than a second computation of it.
+///
+/// The reading is the value at the *end* of the block, not an average or a peak over it. A meter
+/// window is many blocks long, so the consumer decides how to fold; the effect states one number
+/// per block per channel and nothing else.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GainReductionV1 {
+    /// Left lane, in decibels; `<= 0`.
+    pub left_db: f32,
+    /// Right lane, in decibels; `<= 0`.
+    pub right_db: f32,
+}
+
 pub trait PreparedNativeEffect: Send {
     fn metadata(&self) -> PreparedEffectMetadata;
     fn reset(&mut self, kind: ResetKind);
     fn process(&mut self, block: EffectProcessBlock<'_>) -> ProcessReport;
+
+    /// Gain reduction after the last [`process`](Self::process) call, or `None` (issue #140 D).
+    ///
+    /// # Additive, and default-`None` on purpose
+    ///
+    /// Most effects have no gain reduction to report -- an EQ, a delay, a saturator reduce nothing
+    /// -- and the ones that do keep it as private smoother state in their kernels. This is the
+    /// observation point that state needs in order to reach a console's meter frame, and it is a
+    /// defaulted method so that adding it breaks no implementation and changes no prepared byte:
+    /// an effect that does not override it costs one vtable slot and returns `None`.
+    ///
+    /// # Not on the render path's critical section
+    ///
+    /// This is a read of already-computed state, so it is allocation-free and branch-free, but it
+    /// is not called by the graph: nothing in the runtime observes an effect instance yet. The
+    /// transport from here to `MisoMeterFrameV1.trackGrDb` -- an observer bound to an effect node
+    /// rather than a track stage -- is the remaining half of #140 D.
+    fn gain_reduction(&self) -> Option<GainReductionV1> {
+        None
+    }
     fn snapshot_state_payload(
         &self,
         output: StatePayloadOutput<'_>,

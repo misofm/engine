@@ -13,7 +13,8 @@ use miso_engine_builtins_compiler::{
 };
 use miso_engine_core::{SampleRateHz, realtime::PreparedRenderPlan};
 use miso_engine_effect_compiler::{
-    EffectCompileCaps, launch_native_effect_registry_v1, prepare_native_session_effects,
+    EffectCompileCaps, EffectControlProducerV1, attach_effect_console_v1,
+    launch_native_effect_registry_v1, prepare_native_session_effects,
 };
 use miso_engine_effect_contract::TailSamples;
 use miso_engine_graph::{
@@ -225,10 +226,12 @@ pub struct HostPrepareReport {
 /// and a host that wants no console allocates nothing extra.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HostConsoleRequestV1 {
-    /// Bounded per-track control-queue depth, or `None` for no live control channel.
+    /// Bounded per-channel control-queue depth, or `None` for no live control channel.
     ///
-    /// The channel carries the one live-updatable builtin surface the builtin parameter ABI
-    /// declares (`matrix_ll/lr/rl/rr`, `BuiltinParameterUpdateRate::BlockTarget`).
+    /// Issue #140 turns this into the depth of *every* live channel a track owns: the matrix/pan
+    /// queue #137 shipped, the fader/mute queue, and one queue per prepared effect instance. Each
+    /// effect's queue is capped at that effect's own `automation_capacity`, which is what makes
+    /// the render-side staging window unable to overflow.
     pub control_queue_depth: Option<NonZeroUsize>,
     /// Per-track meter window in frames, or `None` for no meters.
     pub meter_period_frames: Option<NonZeroU32>,
@@ -258,7 +261,14 @@ pub struct HostConsoleHandlesV1 {
     /// Canonical normalized track identities.
     pub tracks: Vec<Box<str>>,
     /// One control producer per track, in `tracks` order; empty when no channel was requested.
+    ///
+    /// Each carries both of a track's builtin channels: the matrix/pan queue (#137 D1) and the
+    /// fader/mute queue (#140 B).
     pub track_controls: Vec<TrackControlProducer>,
+    /// One control producer per prepared effect instance (#140 A); empty when no channel was
+    /// requested. Addressed by `(track_id, rack, effect_index)`, where `effect_index` is the
+    /// effect's position within its rack in session declaration order.
+    pub effect_controls: Vec<EffectControlProducerV1>,
     /// One meter consumer per track, in `tracks` order; empty when no meters were requested.
     pub meters: Vec<MeterConsumer>,
 }
@@ -481,7 +491,7 @@ pub fn prepare_host_runtime_with_console(
 
     let registry =
         launch_native_effect_registry_v1().map_err(|_| effect_failure("host.effect.registry"))?;
-    let effects = prepare_native_session_effects(
+    let mut effects = prepare_native_session_effects(
         compiled,
         &registry,
         EffectCompileCaps {
@@ -528,6 +538,25 @@ pub fn prepare_host_runtime_with_console(
     {
         return Err(resource("host.effect.resource.limit"));
     }
+
+    // Issue #140 A: one bounded live-control channel per prepared effect instance, at the same
+    // depth the builtin channels use and capped at each effect's own automation capacity. This is
+    // the only thing that creates one; a host that asks for no console attaches nothing and the
+    // plan renders the byte-identical console-free path.
+    let effect_controls: Vec<EffectControlProducerV1> = match console.control_queue_depth {
+        None => Vec::new(),
+        Some(depth) => attach_effect_console_v1(&mut effects, depth).map_err(|diagnostics| {
+            PrepareDiagnostics::new(
+                PrepareRejection::Effect,
+                diagnostic_lines(
+                    diagnostics
+                        .0
+                        .iter()
+                        .map(|diagnostic| (diagnostic.code, &diagnostic.path)),
+                ),
+            )
+        })?,
+    };
 
     // Issue #137 D1/D2: the console requests are derived here, once, from the canonical track
     // order, so `HostConsoleHandlesV1::tracks` and the requested channels cannot disagree.
@@ -765,6 +794,7 @@ pub fn prepare_host_runtime_with_console(
         HostConsoleHandlesV1 {
             tracks: console_tracks,
             track_controls,
+            effect_controls,
             meters,
         },
     ))

@@ -400,6 +400,13 @@ pub const BUILTIN_PARAMETER_DESCRIPTORS_V1: [BuiltinParameterDescriptorV1; 10] =
         reset: BuiltinParameterReset::RestorePreparedValue,
         disabled_value: Some(0.0),
     },
+    // Issue #140 B: `fader_db` and `mute` become block targets with linear-N smoothing, because
+    // the engine now has a post-preparation write path for them -- `FaderMuteRampBuiltinsV1`,
+    // bound by `ConsoleFaderProcessor` for a track a live console drives. This row states the
+    // parameter's *capability*, exactly as `matrix_ll..rr` do: a session with no console has
+    // nothing that writes either surface, and the prepared `FaderMuteBuiltins` it binds instead
+    // is unchanged. `mute` is smoothed for the same reason it is a block target: a mute is a
+    // retarget of the same gain to zero, over the same ramp window, not a discontinuity.
     BuiltinParameterDescriptorV1 {
         id: 5,
         name: "fader_db",
@@ -410,8 +417,8 @@ pub const BUILTIN_PARAMETER_DESCRIPTORS_V1: [BuiltinParameterDescriptorV1; 10] =
             maximum: 24.0,
         },
         default: 0.0,
-        update_rate: BuiltinParameterUpdateRate::PreparedOnly,
-        smoothing: BuiltinSmoothingPolicy::None,
+        update_rate: BuiltinParameterUpdateRate::BlockTarget,
+        smoothing: BuiltinSmoothingPolicy::LinearNUpdates,
         reset: BuiltinParameterReset::RestorePreparedValue,
         disabled_value: None,
     },
@@ -422,8 +429,8 @@ pub const BUILTIN_PARAMETER_DESCRIPTORS_V1: [BuiltinParameterDescriptorV1; 10] =
         mapping: BuiltinParameterMapping::Boolean,
         domain: BuiltinParameterDomain::BooleanExact,
         default: 0.0,
-        update_rate: BuiltinParameterUpdateRate::PreparedOnly,
-        smoothing: BuiltinSmoothingPolicy::None,
+        update_rate: BuiltinParameterUpdateRate::BlockTarget,
+        smoothing: BuiltinSmoothingPolicy::LinearNUpdates,
         reset: BuiltinParameterReset::RestorePreparedValue,
         disabled_value: None,
     },
@@ -1394,6 +1401,224 @@ impl FaderMuteBuiltins {
         BuiltinProcessReport::default()
     }
     fn reset(&mut self) {}
+}
+
+/// Which lane of a dual-mono track a live fader or mute command addresses (issue #140 B).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BuiltinLaneSelector {
+    /// The left lane only.
+    Left,
+    /// The right lane only.
+    Right,
+    /// Both lanes, with one shared ramp window.
+    Both,
+}
+
+impl BuiltinLaneSelector {
+    const fn covers(self, lane: usize) -> bool {
+        matches!(
+            (self, lane),
+            (Self::Left, 0) | (Self::Right, 1) | (Self::Both, _)
+        )
+    }
+}
+
+/// The live-console fader and mute section of one track (issue #140 B).
+///
+/// # The ramped-fader decision, and why it is a separate type
+///
+/// `fader_db` and `mute` declare `BuiltinParameterUpdateRate::PreparedOnly` with
+/// `BuiltinSmoothingPolicy::None`, and [`FaderMuteBuiltins`] is exactly that: one multiply and one
+/// `andnot` per frame, with no ramp state at all. Making *that* type ramp would change the fixed
+/// input/fader/matrix section layout, the builtin resource report, and the frozen
+/// builtins-compiler transcript for **every** session, console or not.
+///
+/// This type is the ramped fader instead. It exists only for a track a live console drives, it is
+/// bound only by `ConsoleFaderProcessor`, and [`FaderMuteBuiltins`] is byte-for-byte the type it
+/// always was. No builtins fixture digest, no frozen transcript and no corpus digest moves,
+/// because for a command-free session none of this code is reachable.
+///
+/// # Mute is a fader endpoint, not a discontinuity
+///
+/// A mute is a retarget of the same gain to `0`, over the same window a fader move uses, so
+/// muting a live signal fades it rather than clipping it off. Unmuting retargets back to the
+/// lane's current `fader_db`. A **settled** mute is still the exact `+0.0` the prepared path
+/// produces -- `andnot`, not a multiply -- so a muted lane's output bits are identical to a
+/// session that declared the mute in its TOML. During the ramp itself the lane is a plain
+/// multiply, which is what makes the fade a fade; the final ramp sample multiplies by exactly
+/// `+0.0` and can therefore carry the input's sign, and every sample after it is exactly `+0.0`.
+///
+/// # D11, once per retarget
+///
+/// `step = (target - current) / N` at the moment the target changes, then `current += step` per
+/// sample and an exact assignment of `target` on update `N` (master plan D11). There is no
+/// division per sample and no allocation anywhere on this path.
+pub struct FaderMuteRampBuiltinsV1 {
+    /// Current gain per lane, `[left, right]`.
+    current: [f32; 2],
+    /// Target gain per lane: the lane's `fader_db` gain, or `0.0` while muted.
+    target: [f32; 2],
+    /// Per-update increment, computed once per retarget.
+    step: [f32; 2],
+    /// Updates left in the current ramp.
+    remaining: [u32; 2],
+    /// The lane's fader gain, independent of mute.
+    fader_gain: [f32; 2],
+    /// The lane's mute flag.
+    muted: [bool; 2],
+}
+
+impl FaderMuteRampBuiltinsV1 {
+    /// Builds the ramped fader from the same prepared parameters [`FaderMuteBuiltins`] uses.
+    ///
+    /// # Errors
+    ///
+    /// [`BuiltinParameterError::GainDomain`] when a declared `fader_db` is outside `[-144, 24]`
+    /// or maps to a coefficient that is not representable.
+    pub fn new(parameters: BuiltinParameters) -> Result<Self, BuiltinParameterError> {
+        let mut ramp = Self {
+            current: [0.0; 2],
+            target: [0.0; 2],
+            step: [0.0; 2],
+            remaining: [0; 2],
+            fader_gain: [0.0; 2],
+            muted: [false; 2],
+        };
+        for (lane, params) in [parameters.left, parameters.right].into_iter().enumerate() {
+            if !params.fader_db.is_finite() || !(-144.0..=24.0).contains(&params.fader_db) {
+                return Err(BuiltinParameterError::GainDomain);
+            }
+            ramp.fader_gain[lane] = db_gain(params.fader_db)?;
+            ramp.muted[lane] = params.muted;
+            let settled = if params.muted {
+                0.0
+            } else {
+                ramp.fader_gain[lane]
+            };
+            ramp.current[lane] = settled;
+            ramp.target[lane] = settled;
+        }
+        Ok(ramp)
+    }
+
+    /// Retarget one or both lanes' fader gain in decibels over an explicit ramp window.
+    ///
+    /// A muted lane keeps its `0.0` target: the new gain is remembered and takes effect when the
+    /// lane is unmuted, exactly as a physical console's fader does.
+    ///
+    /// # Errors
+    ///
+    /// [`BuiltinParameterError::GainDomain`] when `db` is outside the declared `[-144, 24]`
+    /// domain of `fader_db`.
+    pub fn set_fader_db(
+        &mut self,
+        lanes: BuiltinLaneSelector,
+        db: f32,
+        smoothing_samples: u32,
+    ) -> Result<(), BuiltinParameterError> {
+        if !db.is_finite() || !(-144.0..=24.0).contains(&db) {
+            return Err(BuiltinParameterError::GainDomain);
+        }
+        let gain = db_gain(db)?;
+        for lane in 0..2 {
+            if !lanes.covers(lane) {
+                continue;
+            }
+            self.fader_gain[lane] = gain;
+            let target = if self.muted[lane] { 0.0 } else { gain };
+            self.retarget(lane, target, smoothing_samples);
+        }
+        Ok(())
+    }
+
+    /// Set or clear one or both lanes' mute, as a retarget of the same gain.
+    pub fn set_mute(&mut self, lanes: BuiltinLaneSelector, muted: bool, smoothing_samples: u32) {
+        for lane in 0..2 {
+            if !lanes.covers(lane) {
+                continue;
+            }
+            self.muted[lane] = muted;
+            let target = if muted { 0.0 } else { self.fader_gain[lane] };
+            self.retarget(lane, target, smoothing_samples);
+        }
+    }
+
+    /// The settled gain of one lane, for tests and control-plane readback.
+    #[must_use]
+    pub const fn target_gain(&self, lane: usize) -> f32 {
+        self.target[lane % 2]
+    }
+
+    /// Whether one lane is muted.
+    #[must_use]
+    pub const fn is_muted(&self, lane: usize) -> bool {
+        self.muted[lane % 2]
+    }
+
+    fn retarget(&mut self, lane: usize, target: f32, smoothing_samples: u32) {
+        self.target[lane] = target;
+        self.remaining[lane] = smoothing_samples;
+        if smoothing_samples == 0 {
+            self.current[lane] = target;
+            self.step[lane] = 0.0;
+            return;
+        }
+        // D11: one division, at the moment the target changes.
+        self.step[lane] = (target - self.current[lane]) / smoothing_samples as f32;
+    }
+
+    /// Renders one already-validated block.
+    pub fn process(&mut self, block: DualMonoBlock<'_>) -> BuiltinProcessReport {
+        let frames = block.left.len();
+        for (lane, plane) in [block.left, block.right].into_iter().enumerate() {
+            self.process_lane(lane, plane, frames);
+        }
+        BuiltinProcessReport::default()
+    }
+
+    fn process_lane(&mut self, lane: usize, plane: &mut [f32], frames: usize) {
+        let ramp_frames = (self.remaining[lane] as usize).min(frames);
+        for (index, sample) in plane[..ramp_frames].iter_mut().enumerate() {
+            self.current[lane] = if index + 1 == self.remaining[lane] as usize {
+                // The exact assignment of the target on update N (D11).
+                self.target[lane]
+            } else {
+                self.current[lane] + self.step[lane]
+            };
+            *sample *= self.current[lane];
+        }
+        self.remaining[lane] = self.remaining[lane].saturating_sub(ramp_frames as u32);
+        if self.remaining[lane] == 0 {
+            self.current[lane] = self.target[lane];
+            self.step[lane] = 0.0;
+            // A settled muted lane is *cleared*, never multiplied, so its bits are exactly the
+            // `+0.0` the prepared `gain_mute_block` produces for a mute declared in the session --
+            // for a negative input too, where a multiply by `+0.0` would keep the sign.
+            //
+            // The clear starts one sample early on purpose. The final ramp update assigns the
+            // target exactly (D11), so that sample was multiplied by exactly `+0.0` and already
+            // has magnitude zero; including it is what makes "a completed mute is exactly `+0.0`"
+            // true of every sample rather than all but one.
+            if self.muted[lane] {
+                plane[ramp_frames.saturating_sub(1)..frames].fill(0.0);
+                return;
+            }
+        }
+        if ramp_frames == frames {
+            return;
+        }
+        let gain = self.current[lane];
+        for sample in plane[ramp_frames..frames].iter_mut() {
+            *sample *= gain;
+        }
+    }
+
+    /// Snaps both lanes to their targets and cancels any ramp in flight.
+    pub fn reset(&mut self) {
+        self.current = self.target;
+        self.step = [0.0; 2];
+        self.remaining = [0; 2];
+    }
 }
 
 impl MatrixBuiltins {

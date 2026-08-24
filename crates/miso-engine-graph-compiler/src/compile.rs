@@ -552,7 +552,7 @@ impl GraphCompiler {
         // No canonical text, no SHA-256 and no Graphviz here: they are evidence, not plan, and
         // `GraphCompiler::evidence` produces them from the finished plan when something asks
         // (#99 F5). Nothing on the structural-mutation path pays for them any more.
-        let effect_nodes = into_effects(effects.entries, &effect_ids);
+        let (effect_nodes, effect_controls) = into_effects(effects.entries, &effect_ids);
         let spec = GraphSpec {
             ports,
             nodes,
@@ -593,6 +593,7 @@ impl GraphCompiler {
             routes: route_transforms,
             effects: effect_nodes,
             banks,
+            effect_controls,
             builtin_banks: Vec::new(),
             observers: Vec::new(),
         });

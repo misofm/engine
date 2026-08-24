@@ -15,21 +15,29 @@
 //
 // ## What the control path can and cannot move, and why
 //
-// **This is the most important thing to know before writing an app against it.** The engine has no
-// general post-preparation parameter write path. `BUILTIN_PARAMETER_DESCRIPTORS_V1` -- the builtin
-// parameter ABI -- says which builtin parameters may move after preparation, and the answer is
-// four of them: `matrix_ll`, `matrix_lr`, `matrix_rl` and `matrix_rr`, which declare
-// `BuiltinParameterUpdateRate::BlockTarget` with a linear smoothing policy. `polarity_invert`,
-// `trim_db`, `hpf_hz`, `lpf_hz`, `fader_db` and `mute` all declare `PreparedOnly`. Effect
-// parameters have no write path at all: the graph passes an empty automation slice to every
-// prepared effect and its runtime module is private and positionally addressed.
+// **This is the most important thing to know before writing an app against it.** Issue #140 made
+// every declared kind live, so the honest summary is now short: `MisoCommandKindV1.Pan`,
+// `.Matrix`, `.FaderDb`, `.Mute`, `.EffectParam` and `.EffectBypass` are all **applied**.
 //
-// So `MisoCommandKindV1.Pan` and `.Matrix` are applied, and `.FaderDb`, `.Mute`, `.EffectParam`
-// and `.EffectBypass` are **declared, addressed, domain-checked and then refused** with
-// `result: 7` and `reason: MisoCommandReasonV1.UnsupportedKind`. That refusal is deliberately
-// distinguishable from `Malformed` and from the `Unknown*` reasons: the parameter exists and the
-// value is legal, and the engine cannot move it yet. The build-time parameter-metadata JSON marks
-// every such parameter, so an app never has to discover this at runtime.
+// * `matrix_ll/lr/rl/rr`, `fader_db` and `mute` declare `BuiltinParameterUpdateRate::BlockTarget`
+//   with a linear smoothing policy. `polarity_invert`, `trim_db`, `hpf_hz` and `lpf_hz` still
+//   declare `PreparedOnly` and have no command kind at all.
+// * An effect parameter is delivered to the running plan as a `PreparedAutomationSpan` -- the
+//   route the effect contract always had and that #137 found nothing was feeding. A parameter is
+//   movable exactly when its own descriptor declares it automatable; the build-time
+//   parameter-metadata JSON carries that as `liveUpdatable`, so an app never has to discover it
+//   at runtime.
+// * `.EffectBypass` is applied *outside* the effect, by a latency-preserving shunt: the wet path
+//   keeps running, so state stays continuous and un-bypassing does not click, and the dry signal
+//   is delayed by exactly the effect's declared latency, so every compiled PDC route timing stays
+//   correct.
+//
+// `MisoCommandReasonV1.UnsupportedKind` (`result: 7`) has **not** gone away, and it still means
+// exactly what it said: the target is real and the value is legal, and *this session* has no write
+// path for it. A host compiled with `consoleCommandQueueRecords === 0n` is that session -- there
+// is no control channel and no staging buffer -- and so is a future effect parameter that declares
+// `AutomationRate::None`. It stays distinguishable from `Malformed` and from the `Unknown*`
+// reasons for that reason.
 //
 // ## Addressing is session-stable and string-free
 //
@@ -48,10 +56,14 @@
 //
 // ## Application timing is exact
 //
-// A track's matrix stage drains its control queue at the top of the block, before it touches a
-// sample. `appliedAtSample` on the acknowledgement is therefore the first sample of the next
-// rendered block, and every sample of that block carries the change. It is an exact statement, not
-// an estimate.
+// Every console stage -- matrix/pan, fader/mute, and each driven effect -- drains its control
+// queue at the top of the block, before it touches a sample. `appliedAtSample` on the
+// acknowledgement is therefore the first sample of the next rendered block, and every sample of
+// that block carries the change. It is an exact statement, not an estimate.
+//
+// A batch may address several kinds at once. It is still one transaction: the free-room check is
+// per destination queue, and one full queue refuses the whole batch, including the records bound
+// for queues that had room.
 //
 // ## What metering costs
 //
@@ -63,10 +75,11 @@
 // lease costs one branch per block plus the per-track observation fold, which runs whenever the
 // observers exist.
 //
-// Gain reduction is **not** in the meter frame. No effect in the engine exposes a per-block gain
-// reduction observation point -- `PreparedNativeEffect` has no observation method, GR lives as
-// private smoother state in each dynamics kernel, and the graph binds observers only to track
-// stages. `MisoMeterFrameV1` will gain `trackGrDb` additively once that observation point exists.
+// Gain reduction is **not** in the meter frame yet. Issue #140 D added the observation point --
+// `PreparedNativeEffect::gain_reduction`, additive and `None` by default, implemented by the
+// compressor -- but the transport is still missing: the graph binds observers to track stages, not
+// to effect instances, so nothing carries a per-effect reading out to the console.
+// `MisoMeterFrameV1` will gain `trackGrDb` additively once that transport exists.
 //
 // ## What a frame costs the render callback
 //
@@ -154,13 +167,13 @@ export const enum MisoCommandKindV1 {
   Pan = 1,
   /// Retarget the track's full 2x2 matrix over an explicit ramp window. Applied.
   Matrix = 2,
-  /// Set a lane fader in decibels. Refused: `fader_db` declares `PreparedOnly`.
+  /// Retarget a lane fader in decibels over an explicit ramp window. Applied (issue #140 B).
   FaderDb = 3,
-  /// Set a lane mute. Refused: `mute` declares `PreparedOnly`.
+  /// Set a lane mute, as a fader endpoint over the same window. Applied (issue #140 B).
   Mute = 4,
-  /// Set an effect parameter. Refused: no post-preparation effect write path exists.
+  /// Set an effect parameter, delivered as a prepared automation span. Applied (issue #140 A).
   EffectParam = 5,
-  /// Set an effect bypass. Refused: no post-preparation effect write path exists.
+  /// Set an effect bypass, through the latency-preserving shunt. Applied (issue #140 A).
   EffectBypass = 6,
 }
 

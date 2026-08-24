@@ -69,3 +69,14 @@ to `origin/main` on this branch.
 | `payload` | E7: idle restore bit-exact against an uninterrupted render, transactional rejection across both channels, the class-B mid-ramp restore, subnormal round trip, both resets |
 | `nonfinite` | E9, D7: the boundary check trips once per block at the latency and not per sample, the left channel is untouched, the limit row, a NaN detector is clamped, and `flush` brings `G` to exactly `+0.0` |
 | `stall` | E14, descriptive: the `f32` release stall floor, printed and handed to issue 046 |
+
+## Issue #140 — the automation-span feed, the live fader, and GR observation
+
+Every row below was applied to the working tree, the named test was run, the failure was observed,
+and the mutation was reverted in the same session. Host: `x86_64`, workspace `.cargo/config.toml`
+pin `-C target-feature=+avx2,+fma`, debug profile. Sweep driver: one mutation at a time,
+`cargo test -p <pkg> <test>`, tree restored before the next row.
+
+| # | mutation | file | test | result |
+|---|---|---|---|---|
+| 140-13 | `PreparedCompressor::gain_reduction` returns a hardcoded zero pair instead of reading `Channel::gain_reduction_db` | `compressor/src/lib.rs` | `gain_reduction::the_compressor_reports_the_reduction_its_kernel_smoothed` | RED (`a signal well over the threshold is audibly reduced: 0`) |

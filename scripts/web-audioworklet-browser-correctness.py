@@ -146,18 +146,41 @@ def load_inputs() -> tuple[dict, dict]:
     if timeline.get("pcmF32leSha256") != direct.get("nativeCommandTimelinePcmF32leSha256"):
         raise ValueError("command timeline native parity")
     reports = timeline.get("reports", {})
-    if set(reports) != {"matrix", "unknownTrack", "flood", "unsupported", "pan"}:
+    # Issue #140 C: every declared kind is live, so every declared kind is in the timeline.
+    if set(reports) != {
+        "matrix",
+        "unknownTrack",
+        "flood",
+        "unknownParameter",
+        "pan",
+        "fader",
+        "mute",
+        "effectParam",
+        "effectBypass",
+        "mixedBatch",
+    }:
         raise ValueError("command timeline report keys")
-    # The typed refusals are part of the pin: an ABI that silently starts accepting an unknown
-    # track, a flood or an unsupported kind is a changed ABI, not a passing test.
-    if reports["matrix"]["appliedAtSample"] != "128" or reports["matrix"]["admitted"] != 1:
-        raise ValueError("matrix command application sample")
-    if reports["pan"]["appliedAtSample"] != "384" or reports["pan"]["admitted"] != 1:
-        raise ValueError("pan command application sample")
+    # The application sample of each admitted kind is part of the pin: an ABI that starts applying
+    # a command one block early or late is a changed ABI, not a passing test.
+    for name, sample, admitted in (
+        ("matrix", "128", 1),
+        ("pan", "384", 1),
+        ("fader", "512", 1),
+        ("mute", "640", 1),
+        ("effectParam", "768", 1),
+        ("effectBypass", "896", 1),
+        ("mixedBatch", "1024", 2),
+    ):
+        if reports[name]["appliedAtSample"] != sample:
+            raise ValueError(f"{name} command application sample")
+        if reports[name]["admitted"] != admitted or reports[name]["result"] != 0:
+            raise ValueError(f"{name} admitted records")
+    # The typed refusals are part of the pin too: an ABI that silently starts accepting an unknown
+    # track, a flood or an undeclared parameter is a changed ABI.
     for name, result, reason in (
         ("unknownTrack", 1, 2),
         ("flood", 6, 8),
-        ("unsupported", 7, 7),
+        ("unknownParameter", 1, 5),
     ):
         if reports[name]["result"] != result or reports[name]["reason"] != reason:
             raise ValueError(f"{name} typed refusal")
@@ -169,10 +192,17 @@ def load_inputs() -> tuple[dict, dict]:
     for frozen in ("sample_rate_hz = 48000", "quantum_frames = 128", "length_samples = 256"):
         if frozen not in session:
             raise ValueError(f"session lacks {frozen}")
-    # Issue #137 E2: the command timeline runs the same identity session over a longer region, and
-    # both legs read this exact file.
+    # Issue #137 E2, extended by #140 C: the command timeline runs the identity session plus one
+    # dynamic-rack parametric EQ over a longer region, and both legs read this exact file. The EQ
+    # is what makes an effect-addressed command have something real to address, and its band 1 is
+    # a low shelf so a DC fixture can witness the parameter move at all.
     command_session = (FIXTURE / "command-session.toml").read_text()
-    for frozen in ("sample_rate_hz = 48000", "quantum_frames = 128", "length_samples = 1024"):
+    for frozen in (
+        "sample_rate_hz = 48000",
+        "quantum_frames = 128",
+        "length_samples = 2048",
+        'effect_id = "miso.parametric-eq"',
+    ):
         if frozen not in command_session:
             raise ValueError(f"command session lacks {frozen}")
     return source, expected

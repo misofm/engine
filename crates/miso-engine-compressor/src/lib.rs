@@ -40,7 +40,7 @@ pub mod corpus;
 
 use miso_engine_effect_contract::{
     AutomationRate, AutomationSpanKind, BankProcessReport, EffectBankProcessBlock,
-    EffectDescriptorV1, EffectPrepareError, EffectProcessBlock, EffectQuality,
+    EffectDescriptorV1, EffectPrepareError, EffectProcessBlock, EffectQuality, GainReductionV1,
     InitialParameterValue, LatencySamples, LinkModeSet, NativeEffectFactory, ParameterChannel,
     ParameterChannelPolicy, ParameterDescriptorV1, ParameterDomain, ParameterId, ParameterMapping,
     ParameterUnit, PortDescriptorV1, PortId, PortLayout, PortRole, PrepareEffectBankRequest,
@@ -689,6 +689,20 @@ impl PreparedNativeEffect for PreparedCompressor {
             },
         );
         report
+    }
+
+    /// Issue #140 D: the smoothed reduction the kernel already tracks, read for lane 0.
+    ///
+    /// `Channel::gain_reduction_db` is the compressor's own smoother state -- the value
+    /// `process_block` writes every sample and reads back on the next one -- so this is a read,
+    /// never a second opinion about what the kernel did. It is `<= 0` by the kernel's own clamp
+    /// (`gain_delta_db` is clamped into `[-100, 0]` before it is smoothed), and it is the value at
+    /// the end of the last processed block.
+    fn gain_reduction(&self) -> Option<GainReductionV1> {
+        Some(GainReductionV1 {
+            left_db: self.instance.left.gain_reduction_db,
+            right_db: self.instance.right.gain_reduction_db,
+        })
     }
 
     fn snapshot_state_payload(
