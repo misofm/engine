@@ -56,7 +56,11 @@ pub const RESULT_UNSUPPORTED: u32 = 7;
 pub const RESULT_RENDER_REJECTED: u32 = 8;
 /// The browser configuration changed and requires a fresh host.
 pub const RESULT_REPREPARE_REQUIRED: u32 = 9;
-/// An internal invariant failed.
+/// An internal invariant failed *and was detected by a checked path*.
+///
+/// A panic does not produce this code on `wasm32`: the target is `panic = abort`, so a panic traps
+/// the instance and kills the processor. The worklet converts that trap into this code from
+/// JavaScript (see the `.d.ts` header); nothing inside Rust catches it.
 pub const RESULT_INTERNAL: u32 = 255;
 
 /// Newly allocated configuration state.

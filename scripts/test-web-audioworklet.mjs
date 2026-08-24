@@ -603,6 +603,27 @@ async function testProcessor() {
     }
 
     {
+      // #106 F5: `panic = abort` means a Rust panic reaches JavaScript as a throw from the render
+      // export. `process()` is the only place that can contain it. Red mutation: remove the `try`
+      // around `miso_engine_web_v1_render` in `process()` -> this `process()` call throws.
+      const { processor } = makeProcessor();
+      processor.exports.miso_engine_web_v1_render = () => {
+        throw new Error("synthetic wasm trap from the render export");
+      };
+      const left = new Float32Array(64).fill(-0);
+      const right = new Float32Array(64).fill(1);
+      assert.equal(processor.process([], [[left, right]]), true, "a trap keeps the node alive");
+      assert(left.every((sample) => Object.is(sample, 0)), "trapped left is positive zero");
+      assert(right.every((sample) => Object.is(sample, 0)), "trapped right is positive zero");
+      assert.equal(processor.stickyResult, 255);
+      assert.equal(processor.ready, false);
+      processor.receive({ tag: "miso.status.v1", requestId: 1 });
+      const settled = processor.port.posts.at(-1).message;
+      assert.equal(settled.tag, "miso.error.v1");
+      assert.equal(settled.result, 255, "the trap is sticky for every later request");
+    }
+
+    {
       const { processor } = makeProcessor();
       const storage = new ArrayBuffer(16);
       const incoming = structuredClone({
