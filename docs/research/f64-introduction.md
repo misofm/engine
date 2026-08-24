@@ -243,6 +243,16 @@ Against an 80-digit decimal evaluation at the same endpoints, the binary64 relat
 `1e-7` row is `5.83e-15` (and no more than `4.75e-12` in the nonzero rows shown). Binary64 is
 therefore ample for these binary32 inputs, but it does not replace the exact-equality limit.
 
+The earlier v1 implementation supplies a separate measured guard result that fixes the practical
+scale of that limit branch. Its ADAA chain placed `EPS = 1e-6` where binary64 cancellation reached
+the binary32 noise floor; the same computation in binary32 would have needed the guard at roughly
+`|delta| = 0.05`, effectively selecting the guard on every sample. A perturbation of at most three
+ulps measured **-41.9 dBFS peak and -90.8 dBFS steady-state** through that chain. This is historical
+evidence for the need to retain the binary64 divided difference and an explicit near-equality
+guard, not a threshold pin for a future V2 ADAA topology. Source: `misofm/engine`,
+`docs/01-V2-LEARNINGS.md` lines 88-92 in the pre-deprecation snapshot read 2026-08-24
+([source lines](https://github.com/misofm/engine/blob/main/docs/01-V2-LEARNINGS.md#L88-L92)).
+
 The implementation rule for a future ADAA effect is therefore:
 
 - promote the `f32` inputs exactly and evaluate antiderivatives and divided differences in `f64`;

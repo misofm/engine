@@ -168,3 +168,6 @@ closed GitHub issues and deployable capabilities, not local file counts or unpus
 ## Scope boundaries for this sprint
 
 Deliver a mixing/mastering engine, session compiler, effect foundation, PCM runner, host adapters, streaming, and control foundation.  Do not deliver a timeline editor, human-oriented DAW UI, delivery codecs, unlimited in-memory stem cache, implicit feedback graph, third-party Wasm execution before its post-launch issue, or a general remote audio-streaming protocol.
+
+- **The acked-batch question**: v1's worst correctness bug was a fully validated, *acked* event batch silently dropped at queue overflow while the ledger advanced. Our #139/#140 admission already encodes the lesson (validate-everything-then-admit-atomically; ack carries application sample); keep it as the review question for every future queue: *can an ack ever precede a drop?*
+- **The ceremony boundary**: v1 drowned in evidence (924 record files, a comment-digest ledger, `Cargo.lock` SHA pinned inside a test) while its headline number stayed fiction — every byte-gate green. v2-old spent ~50 PRs on certification cadence and never shipped an effect. Gates must discriminate *claims*; byte-pinning prose is cost without evidence. Adopt the artifacts of both engines, never their pace.
