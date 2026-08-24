@@ -1,6 +1,10 @@
 //! Pure-Rust mobile host shell.
 //!
-//! Platform linking and audio callbacks are intentionally deferred to issue 023.
+//! Platform linking and audio callbacks are intentionally deferred to issue 023. The rules such a
+//! callback must honour -- which call runs on which thread, that a `RenderError` is sticky and
+//! frees nothing, and who owns the worker pool and thread priority -- are the
+//! `# Host callback contract (V1)` section of `miso-engine-host-core`, normative for every
+//! embedding and deliberately not restated here.
 
 use miso_engine_lane::{HostAttestation, attest_host};
 use miso_engine_target_smoke::TargetSmoke;

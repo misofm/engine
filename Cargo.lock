@@ -971,6 +971,7 @@ dependencies = [
  "miso-engine-core",
  "miso-engine-host-core",
  "miso-engine-session",
+ "sha2 0.11.0",
 ]
 
 [[package]]

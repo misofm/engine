@@ -82,6 +82,7 @@
         "final": 0
       },
       "pcmF32leSha256": "d8506bebd2f049265ef105a8346a85c919a0596b892a1afefd382173a360f58e"
-    }
+    },
+    "nativePcmF32leSha256": "d8506bebd2f049265ef105a8346a85c919a0596b892a1afefd382173a360f58e"
   }
 }
