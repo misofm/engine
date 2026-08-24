@@ -11,6 +11,8 @@ const VERSION: u16 = 1;
 const HEADER_BYTES: u64 = 96;
 const RECORD_BYTES: u64 = 72;
 const HARD_DESCRIPTOR_CAP: u64 = 4_194_304;
+const HARD_ARTIFACT_CAP: usize = 4_096;
+type ArtifactOrder = [u16; HARD_ARTIFACT_CAP];
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 #[repr(u32)]
@@ -241,6 +243,31 @@ fn descriptor_identity(bytes: &[u8], maximum: u64) -> Result<[u8; 32], Diagnosti
         })
 }
 
+fn artifact_cap(limits: EffectPackageLimitsV1) -> u32 {
+    limits.maximum_artifacts.min(HARD_ARTIFACT_CAP as u32)
+}
+
+/// Fills `order[..artifacts.len()]` with caller indices in canonical record order and returns the
+/// caller index of the first record, in caller order, whose key repeats an earlier record's key.
+///
+/// Callers guarantee `artifacts.len() <= HARD_ARTIFACT_CAP`.
+fn canonical_order(
+    artifacts: &[EffectArtifactAuthoringV1<'_>],
+    order: &mut ArtifactOrder,
+) -> Option<u32> {
+    let order = &mut order[..artifacts.len()];
+    for (slot, index) in order.iter_mut().zip(0u16..) {
+        *slot = index;
+    }
+    let at = |slot: u16| &artifacts[usize::from(slot)];
+    order.sort_unstable_by(|a, b| key_cmp(at(*a), at(*b)).then(a.cmp(b)));
+    order
+        .windows(2)
+        .filter(|pair| key_cmp(at(pair[0]), at(pair[1])) == Ordering::Equal)
+        .map(|pair| u32::from(pair[1]))
+        .min()
+}
+
 fn key_cmp(a: &EffectArtifactAuthoringV1<'_>, b: &EffectArtifactAuthoringV1<'_>) -> Ordering {
     (
         a.kind,
@@ -349,23 +376,22 @@ fn validate_artifact(
 fn preflight(
     package: &EffectPackageAuthoringV1<'_>,
     limits: EffectPackageLimitsV1,
+    order: &mut ArtifactOrder,
 ) -> Result<Layout, Diagnostic> {
     let identity = descriptor_identity(package.descriptor, limits.maximum_descriptor_bytes)?;
     let count =
         u32::try_from(package.artifacts.len()).map_err(|_| package_diag(Code::Limit, 48))?;
-    if count > limits.maximum_artifacts {
+    if count > artifact_cap(limits) {
         return Err(package_diag(Code::Limit, 48));
     }
+    let duplicate = canonical_order(package.artifacts, order);
     let mut table = 0u64;
     let mut content = 0u64;
     let mut source = false;
     for (i, artifact) in package.artifacts.iter().enumerate() {
         validate_artifact(artifact, i as u32, limits)?;
         source |= artifact.kind == EffectArtifactKindV1::Source;
-        if package.artifacts[..i]
-            .iter()
-            .any(|p| key_cmp(p, artifact) == Ordering::Equal)
-        {
+        if duplicate == Some(i as u32) {
             return Err(author_diag(Code::Order, i as u32));
         }
         let strings = add(
@@ -423,24 +449,16 @@ pub fn effect_package_v1_required_size(
     package: &EffectPackageAuthoringV1<'_>,
     limits: EffectPackageLimitsV1,
 ) -> Result<u64, Diagnostic> {
-    preflight(package, limits).map(|v| v.total)
-}
-fn next_artifact<'a>(
-    artifacts: &'a [EffectArtifactAuthoringV1<'a>],
-    prior: Option<&EffectArtifactAuthoringV1<'a>>,
-) -> &'a EffectArtifactAuthoringV1<'a> {
-    artifacts
-        .iter()
-        .filter(|a| prior.is_none_or(|p| key_cmp(a, p) == Ordering::Greater))
-        .min_by(|a, b| key_cmp(a, b))
-        .expect("validated unique order")
+    let mut order = [0; HARD_ARTIFACT_CAP];
+    preflight(package, limits, &mut order).map(|v| v.total)
 }
 pub fn encode_effect_package_v1(
     package: &EffectPackageAuthoringV1<'_>,
     limits: EffectPackageLimitsV1,
     output: &mut [u8],
 ) -> Result<usize, Diagnostic> {
-    let layout = preflight(package, limits)?;
+    let mut order = [0; HARD_ARTIFACT_CAP];
+    let layout = preflight(package, limits, &mut order)?;
     let required = host(layout.total, 16)?;
     if output.len() < required {
         return Err(Diagnostic::buffer_too_small(layout.total));
@@ -460,9 +478,8 @@ pub fn encode_effect_package_v1(
     let mut tc = 96 + descriptor_len;
     let mut cc = host(layout.manifest, 32)?;
     let content_start = cc;
-    let mut prior = None;
-    for _ in 0..package.artifacts.len() {
-        let a = next_artifact(package.artifacts, prior);
+    for &slot in &order[..package.artifacts.len()] {
+        let a = &package.artifacts[usize::from(slot)];
         let p = a.path.as_bytes();
         let t = a.target.as_bytes();
         let f = a.features.as_bytes();
@@ -480,7 +497,6 @@ pub fn encode_effect_package_v1(
         tc += (72 + p.len() + t.len() + f.len() + 7) & !7;
         output[cc..cc + a.content.len()].copy_from_slice(a.content);
         cc += a.content.len();
-        prior = Some(a);
     }
     debug_assert_eq!(tc, content_start);
     debug_assert_eq!(cc, required);
@@ -579,7 +595,7 @@ pub fn verify_effect_package_v1(
     if manifest > limits.maximum_manifest_bytes {
         return Err(package_diag(Code::Limit, 32));
     }
-    if count > limits.maximum_artifacts {
+    if count > artifact_cap(limits) {
         return Err(package_diag(Code::Limit, 48));
     }
     let de = host(add(HEADER_BYTES, dl, 24)?, 24)?;
