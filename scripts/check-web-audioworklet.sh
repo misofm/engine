@@ -128,10 +128,11 @@ expected=$(printf '%s\n' \
   miso-engine-v2-audio-worklet-host.d.ts \
   miso-engine-v2-audio-worklet-host.js \
   miso-engine-v2-audio-worklet.js \
-  miso-engine-v2-audio-worklet.simd128.wasm)
+  miso-engine-v2-audio-worklet.simd128.wasm \
+  miso-engine-v2-parameter-metadata.json)
 actual=$(find "$artifact_dir" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort)
 [[ "$actual" == "$expected" ]] || {
-  echo "artifact directory does not contain the exact four frozen outputs" >&2
+  echo "artifact directory does not contain the exact five frozen outputs" >&2
   diff -u <(printf '%s\n' "$expected") <(printf '%s\n' "$actual") >&2 || true
   exit 1
 }
@@ -275,5 +276,18 @@ process_body=$(sed -n '/PROCESS_POLICY_BEGIN/,/PROCESS_POLICY_END/p' "$worklet_j
 grep -q 'miso_engine_web_v1_render(this.handle, actualFrames)' <<<"$process_body"
 grep -q 'output\[0\]\.set(this.outputLeft)' <<<"$process_body"
 grep -q 'output\[1\]\.set(this.outputRight)' <<<"$process_body"
+
+# Issue #137 D4/E7: the shipped metadata is exactly what the registry produces right now, and it
+# satisfies its own schema. `--check` regenerates and compares byte for byte, so a stale file, a
+# hand edit, or an effect added to the registry without rebuilding all fail here.
+(
+  cd "$(dirname "${BASH_SOURCE[0]}")/.."
+  cargo run --locked --release -q -p miso-engine-parameter-metadata -- --check "$artifact_dir"
+) >/dev/null || {
+  echo "shipped parameter metadata is stale" >&2
+  exit 1
+}
+python3 -B "$(dirname "${BASH_SOURCE[0]}")/check-parameter-metadata-v1.py" \
+  "$artifact_dir/miso-engine-v2-parameter-metadata.json" || exit 1
 
 echo "web AudioWorklet static/object checks passed"

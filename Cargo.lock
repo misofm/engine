@@ -1052,6 +1052,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "miso-engine-parameter-metadata"
+version = "0.1.0"
+dependencies = [
+ "miso-engine-bench-support",
+ "miso-engine-builtins",
+ "miso-engine-effect-compiler",
+ "miso-engine-effect-contract",
+ "miso-engine-host-web",
+]
+
+[[package]]
 name = "miso-engine-parametric-eq"
 version = "0.1.0"
 dependencies = [

@@ -52,3 +52,11 @@ cp --update=none "$simd_target/wasm32-unknown-unknown/release/miso_engine_host_w
 cp --update=none "$repo_root/hosts/miso-engine-host-web/web/miso-engine-v2-audio-worklet.js" "$output_dir/"
 cp --update=none "$repo_root/hosts/miso-engine-host-web/web/miso-engine-v2-audio-worklet-host.js" "$output_dir/"
 cp --update=none "$repo_root/hosts/miso-engine-host-web/web/miso-engine-v2-audio-worklet-host.d.ts" "$output_dir/"
+
+# Issue #137 D4: the parameter metadata ships beside the module, so the app never introspects the
+# Wasm for names, units, ranges, defaults or enumerations. The effect list is read from
+# `launch_native_effect_registry_v1()`, so an effect cannot be in the engine and missing here.
+(
+  cd "$repo_root"
+  cargo run --locked --release -q -p miso-engine-parameter-metadata -- --write "$output_dir"
+) >/dev/null

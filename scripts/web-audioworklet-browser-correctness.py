@@ -27,6 +27,8 @@ EXPECTED_ARTIFACTS = (
     "miso-engine-v2-audio-worklet.js",
     "miso-engine-v2-audio-worklet-host.js",
     "miso-engine-v2-audio-worklet-host.d.ts",
+    # Issue #137 D4: the parameter metadata ships with the module and is sealed with it.
+    "miso-engine-v2-parameter-metadata.json",
 )
 SOURCE_SEAL_PATHS = (
     "Cargo.toml",

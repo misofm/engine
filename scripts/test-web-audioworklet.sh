@@ -88,6 +88,29 @@ if "$repo_root/scripts/check-web-audioworklet.sh" "--source-policy=$mutated" >/d
   exit 1
 fi
 echo "web AudioWorklet console policy mutations passed"
+
+# Issue #137 D4/E7: the metadata schema validator is proved to discriminate before it is trusted,
+# and the emitted document is validated against it.
+python3 -B "$repo_root/scripts/check-parameter-metadata-v1.py" --self-test
+metadata="$mutation_dir/parameter-metadata.json"
+(cd "$repo_root" && cargo run --locked -q -p miso-engine-parameter-metadata -- --print) >"$metadata"
+python3 -B "$repo_root/scripts/check-parameter-metadata-v1.py" "$metadata" >/dev/null
+# `--check` is byte equality against a freshly generated document, so a hand edit is a failure.
+mkdir -p "$mutation_dir/metadata"
+(cd "$repo_root" && cargo run --locked -q -p miso-engine-parameter-metadata -- --write "$mutation_dir/metadata") >/dev/null
+(cd "$repo_root" && cargo run --locked -q -p miso-engine-parameter-metadata -- --check "$mutation_dir/metadata") >/dev/null
+sed -i 's/"liveUpdatable": true/"liveUpdatable": false/' \
+  "$mutation_dir/metadata/miso-engine-v2-parameter-metadata.json"
+if (cd "$repo_root" && cargo run --locked -q -p miso-engine-parameter-metadata -- --check "$mutation_dir/metadata") >/dev/null 2>&1; then
+  echo "a hand-edited metadata document escaped --check" >&2
+  exit 1
+fi
+if python3 -B "$repo_root/scripts/check-parameter-metadata-v1.py" \
+  "$mutation_dir/metadata/miso-engine-v2-parameter-metadata.json" >/dev/null 2>&1; then
+  echo "a builtin that denies its own blockTarget update rate escaped the schema gate" >&2
+  exit 1
+fi
+echo "web AudioWorklet parameter-metadata gates passed"
 mutated_utf8="$mutation_dir/worklet-utf8.js"
 sed 's/(codePoint >>> 18) | 0xf0/(codePoint >>> 18) | 0xe0/' "$worklet" >"$mutated_utf8"
 if MISO_ENGINE_WEB_WORKLET_TEST_MODULE="$mutated_utf8" \

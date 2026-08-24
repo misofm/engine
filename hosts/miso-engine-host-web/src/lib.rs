@@ -634,7 +634,13 @@ impl AudioWorkletEngineHost {
         self.buffers.as_ref().map(|value| &*value.output_pcm)
     }
 
-    pub(crate) fn command_staging_mut(&mut self) -> Option<&mut [u8]> {
+    /// Mutable live-console command staging, or `None` when no console was attached.
+    ///
+    /// This is the buffer the JavaScript side writes records into through
+    /// `miso_engine_web_v1_buffer_ptr(handle, BUFFER_COMMAND)`; it is public so an embedding that
+    /// drives the safe host directly -- the native parity twin, the metadata round-trip gate --
+    /// stages exactly the bytes the browser stages.
+    pub fn command_staging_mut(&mut self) -> Option<&mut [u8]> {
         self.buffers
             .as_mut()
             .map(|value| &mut *value.command)
