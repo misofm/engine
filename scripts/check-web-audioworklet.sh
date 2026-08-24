@@ -10,11 +10,12 @@ check_process_policy() {
   ! grep -Eq "$process_policy_re" <<<"$body"
 }
 
+# Owner decision W4-D1 (#83): exactly one artifact ships and it is built with `+simd128`. The
+# scalar artifact and the dual-artifact selection are gone, so this file no longer has a
+# "scalar must contain no vector opcode" leg; the wasm-scalar *cargo check* stays in CI because
+# `miso-engine-lane`'s scalar wasm path is still gated, it is just not shipped.
 check_opcode_policy() {
-  local scalar_text=$1
-  local simd_text=$2
-  ! grep -Eq '(^|[[:space:]])(v128|i8x16|i16x8|i32x4|i64x2|f32x4|f64x2)\.' \
-    <<<"$scalar_text" || return 1
+  local simd_text=$1
   grep -q 'f32x4.mul' <<<"$simd_text" || return 1
   grep -q 'f32x4.add' <<<"$simd_text" || return 1
   grep -q 'f32x4.sub' <<<"$simd_text" || return 1
@@ -23,7 +24,7 @@ check_opcode_policy() {
 
 if (($# == 1)) && [[ $1 == --self-test-opcodes ]]; then
   valid_simd=$'f32x4.mul\nf32x4.add\nf32x4.sub'
-  check_opcode_policy 'f32.mul' "$valid_simd"
+  check_opcode_policy "$valid_simd"
   for mutation in \
     $'f32x4.add\nf32x4.sub' \
     $'f32x4.mul\nf32x4.sub' \
@@ -31,15 +32,11 @@ if (($# == 1)) && [[ $1 == --self-test-opcodes ]]; then
     $'f32x4.mul\nf32x4.add\nf32x4.sub\ni8x16.relaxed_swizzle' \
     $'f32x4.mul\nf32x4.add\nf32x4.sub\ni32.atomic.load'
   do
-    if check_opcode_policy 'f32.mul' "$mutation"; then
+    if check_opcode_policy "$mutation"; then
       echo "missing/forbidden SIMD opcode mutation escaped policy" >&2
       exit 1
     fi
   done
-  if check_opcode_policy 'f32x4.add' "$valid_simd"; then
-    echo "scalar SIMD mutation escaped policy" >&2
-    exit 1
-  fi
   echo "web AudioWorklet opcode-policy mutations passed"
   exit 0
 fi
@@ -71,16 +68,14 @@ expected=$(printf '%s\n' \
   miso-engine-v2-audio-worklet-host.d.ts \
   miso-engine-v2-audio-worklet-host.js \
   miso-engine-v2-audio-worklet.js \
-  miso-engine-v2-audio-worklet.scalar.wasm \
   miso-engine-v2-audio-worklet.simd128.wasm)
 actual=$(find "$artifact_dir" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort)
 [[ "$actual" == "$expected" ]] || {
-  echo "artifact directory does not contain the exact five frozen outputs" >&2
+  echo "artifact directory does not contain the exact four frozen outputs" >&2
   diff -u <(printf '%s\n' "$expected") <(printf '%s\n' "$actual") >&2 || true
   exit 1
 }
 
-scalar="$artifact_dir/miso-engine-v2-audio-worklet.scalar.wasm"
 simd="$artifact_dir/miso-engine-v2-audio-worklet.simd128.wasm"
 main_js="$artifact_dir/miso-engine-v2-audio-worklet-host.js"
 worklet_js="$artifact_dir/miso-engine-v2-audio-worklet.js"
@@ -102,7 +97,7 @@ expected_exports=$(printf '%s\n' \
   miso_engine_web_v1_source_submit \
   miso_engine_web_v1_status_ptr | sort)
 
-for module in "$scalar" "$simd"; do
+for module in "$simd"; do
   metadata=$(wasm-objdump -x "$module")
   exports=$(awk '
     /^Export\[/ { in_exports = 1; next }
@@ -136,10 +131,9 @@ for module in "$scalar" "$simd"; do
   fi
 done
 
-scalar_disassembly=$(wasm-objdump -d "$scalar")
 simd_disassembly=$(wasm-objdump -d "$simd")
-if ! check_opcode_policy "$scalar_disassembly" "$simd_disassembly"; then
-  echo "scalar/simd opcode contract failed" >&2
+if ! check_opcode_policy "$simd_disassembly"; then
+  echo "simd128 opcode contract failed" >&2
   exit 1
 fi
 

@@ -108,7 +108,7 @@ async function testMainRealm() {
         } else if (received.tag === "miso.status.v1") {
           response = {
             tag: "miso.status.v1", requestId: received.requestId, result: 0, state: 2,
-            lastResult: 0, backend: 0, sampleRateHz: 48000, quantumFrames: 64,
+            lastResult: 0, backend: 1, sampleRateHz: 48000, quantumFrames: 64,
             nextAbsoluteSample: 64n, renderedQuanta: 1n, memoryBytes: 65536,
           };
           if (statusMutation !== null) response = statusMutation(response);
@@ -162,7 +162,6 @@ async function testMainRealm() {
   WebAssembly.compile = async (bytes) => {
     const url = new TextDecoder().decode(bytes);
     events.push(["compile", url]);
-    if (url.includes("simd")) throw new Error("synthetic unsupported SIMD artifact");
     return Object.freeze({ url });
   };
   const context = {
@@ -178,15 +177,14 @@ async function testMainRealm() {
       quantumFrames: 64,
       sessionToml: new TextEncoder().encode("format_version = 2"),
       limits,
-      scalarModuleUrl: "scalar.wasm",
       simd128ModuleUrl: "simd.wasm",
       workletModuleUrl: "processor.js",
     });
-    assert.equal(host.backend, "scalar");
+    assert.equal(host.backend, "simd128", "W4-D1 ships exactly one artifact");
     assert.equal(host.memoryBytes, 65536);
     assert.equal(Object.getOwnPropertyDescriptor(host, "memoryBytes").writable, false);
-    assert.deepEqual(events.slice(0, 3), [
-      ["compile", "simd.wasm"], ["compile", "scalar.wasm"], ["addModule", "processor.js"],
+    assert.deepEqual(events.slice(0, 2), [
+      ["compile", "simd.wasm"], ["addModule", "processor.js"],
     ]);
 
     const storage = new ArrayBuffer(32);
@@ -243,14 +241,13 @@ async function testMainRealm() {
 
     readyMutation = (ready) => ({
       ...ready,
-      resources: { ...ready.resources, backend: 1 },
+      resources: { ...ready.resources, backend: 0 },
     });
     await errorResult(createMisoAudioWorkletHost({
       context,
       quantumFrames: 64,
       sessionToml: new Uint8Array(),
       limits,
-      scalarModuleUrl: "scalar.wasm",
       simd128ModuleUrl: "simd.wasm",
       workletModuleUrl: "processor.js",
     }), 255);
@@ -263,7 +260,6 @@ async function testMainRealm() {
       quantumFrames: 64,
       sessionToml: new Uint8Array(),
       limits,
-      scalarModuleUrl: "scalar.wasm",
       simd128ModuleUrl: "simd.wasm",
       workletModuleUrl: "processor.js",
     });
@@ -277,7 +273,6 @@ async function testMainRealm() {
       quantumFrames: 64,
       sessionToml: new Uint8Array(),
       limits,
-      scalarModuleUrl: "scalar.wasm",
       simd128ModuleUrl: "simd.wasm",
       workletModuleUrl: "processor.js",
     });
@@ -294,6 +289,35 @@ async function testMainRealm() {
     }), 255);
     planeMutation = null;
     await planeHost.dispose();
+
+    // W4-D1: a browser that cannot validate simd128 is refused with the typed record, before any
+    // network request. Red mutation: delete the `WebAssembly.validate(SIMD128_PROBE)` guard in
+    // `createMisoAudioWorkletHost` -> the rejection becomes a generic 255 and `compileCount` grows.
+    const compileCount = events.filter((event) => event[0] === "compile").length;
+    WebAssembly.validate = () => false;
+    const refusal = await createMisoAudioWorkletHost({
+      context,
+      quantumFrames: 64,
+      sessionToml: new Uint8Array(),
+      limits,
+      simd128ModuleUrl: "simd.wasm",
+      workletModuleUrl: "processor.js",
+    }).then(() => assert.fail("expected unsupported-browser refusal"), (error) => error);
+    WebAssembly.validate = () => true;
+    assert.deepEqual(
+      Object.keys(refusal).sort(),
+      ["capability", "requestId", "result", "tag"],
+    );
+    assert.equal(refusal.tag, "miso.unsupported.v1");
+    assert.equal(refusal.capability, "simd128");
+    assert.equal(refusal.result, 7);
+    assert.equal(refusal.requestId, 0);
+    assert.equal(Object.isFrozen(refusal), true);
+    assert.equal(
+      events.filter((event) => event[0] === "compile").length,
+      compileCount,
+      "the probe refuses before any artifact is fetched",
+    );
   } finally {
     globalThis.fetch = original.fetch;
     globalThis.AudioWorkletNode = original.AudioWorkletNode;

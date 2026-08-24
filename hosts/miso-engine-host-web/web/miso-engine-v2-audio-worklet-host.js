@@ -5,6 +5,12 @@ const PROCESSOR_NAME = "miso-engine-v2-audio-worklet";
 const VALID_RESULTS = new Set([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 255]);
 
 // Canonical minimal module: `() -> v128` implemented by `i32.const 0; i8x16.splat`.
+//
+// Owner decision W4-D1 (#83): exactly one artifact ships and it is built with `+simd128`, so this
+// probe is the browser twin of D4's native `attest_host` boot attestation -- a browser that cannot
+// validate a `simd128` module is refused up front with a typed error, never silently degraded to a
+// scalar build. `WebAssembly.validate` is synchronous, allocation-free and runs before any network
+// request, so an unsupported browser pays nothing.
 const SIMD128_PROBE = new Uint8Array([
   0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
   0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7b,
@@ -12,12 +18,16 @@ const SIMD128_PROBE = new Uint8Array([
   0x0a, 0x08, 0x01, 0x06, 0x00, 0x41, 0x00, 0xfd, 0x0f, 0x0b,
 ]);
 
+// The one frozen shipping backend (issue 024 `BACKEND_SIMD128`). It is still sent explicitly so
+// the processor can cross-check it against the backend row the Rust artifact reports: a module
+// built without `+simd128` reports `0` and is rejected transactionally rather than rendered with.
+const SHIPPING_BACKEND = "simd128";
+
 const OPTION_FIELDS = [
   "context",
   "quantumFrames",
   "sessionToml",
   "limits",
-  "scalarModuleUrl",
   "simd128ModuleUrl",
   "workletModuleUrl",
 ];
@@ -149,21 +159,24 @@ async function fetchModule(url) {
   return WebAssembly.compile(await response.arrayBuffer());
 }
 
-async function selectModule(options) {
-  if (WebAssembly.validate(SIMD128_PROBE)) {
-    try {
-      return {
-        backend: "simd128",
-        module: await fetchModule(options.simd128ModuleUrl),
-      };
-    } catch (_) {
-      // The frozen fallback is scalar and occurs only before processor construction.
-    }
-  }
-  return {
-    backend: "scalar",
-    module: await fetchModule(options.scalarModuleUrl),
-  };
+/// The typed refusal for a browser that cannot run the shipped artifact.
+///
+/// Deliberately not a `miso.error.v1`: a caller must be able to tell "this browser is out of
+/// scope" apart from "something went wrong", and the generic record carries no room to say which
+/// capability is missing. It never crosses the `MessagePort`, so it is not part of the frozen
+/// worklet message schema; it is thrown by `createMisoAudioWorkletHost` before any node exists.
+function unsupportedBrowser(capability) {
+  return Object.freeze({
+    tag: "miso.unsupported.v1",
+    requestId: 0,
+    result: RESULT_UNSUPPORTED,
+    capability,
+  });
+}
+
+function isUnsupportedBrowser(value) {
+  return value?.tag === "miso.unsupported.v1"
+    && hasExactFields(value, ["tag", "requestId", "result", "capability"]);
 }
 
 class MisoAudioWorkletHostV1 {
@@ -349,7 +362,6 @@ export async function createMisoAudioWorkletHost(options) {
       || !(options.sessionToml instanceof Uint8Array)
       || !validLimits(options.limits)
       || options.sessionToml.byteLength > options.limits.sessionTomlBytes
-      || typeof options.scalarModuleUrl !== "string"
       || typeof options.simd128ModuleUrl !== "string"
       || typeof options.workletModuleUrl !== "string") {
     throw webError(1);
@@ -359,9 +371,15 @@ export async function createMisoAudioWorkletHost(options) {
       && exposedQuantum !== options.quantumFrames) {
     throw webError(9);
   }
+  // W4-D1: attest before allocating anything. Thrown outside the `try` below so it reaches the
+  // caller as itself rather than being folded into the generic 255 rejection.
+  if (!WebAssembly.validate(SIMD128_PROBE)) throw unsupportedBrowser("simd128");
   let node;
   try {
-    const selected = await selectModule(options);
+    const selected = {
+      backend: SHIPPING_BACKEND,
+      module: await fetchModule(options.simd128ModuleUrl),
+    };
     await options.context.audioWorklet.addModule(options.workletModuleUrl);
     node = new AudioWorkletNode(options.context, PROCESSOR_NAME, {
       numberOfInputs: 0,
@@ -427,6 +445,7 @@ export async function createMisoAudioWorkletHost(options) {
     );
   } catch (error) {
     cleanupNode(node);
+    if (isUnsupportedBrowser(error)) throw error;
     if (error?.tag === "miso.error.v1" && hasExactFields(error, ["tag", "requestId", "result"])
         && error.requestId === 0 && validResult(error.result)) throw error;
     throw webError(255);

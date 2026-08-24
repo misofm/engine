@@ -77,26 +77,27 @@ function plainResources(resources) {
   ]));
 }
 
-async function runContext(createHost, backend, source, sessionToml) {
+// W4-D1: exactly one artifact ships, so every context loads the same simd128 module. The
+// backend row is still reported per run and cross-checked against the raw-Wasm oracle, which is
+// what proves the worklet path and the direct path drive the same binary the same way.
+const ARTIFACT_URL = "/artifacts/miso-engine-v2-audio-worklet.simd128.wasm";
+const BACKEND = "simd128";
+
+async function runContext(createHost, source, sessionToml) {
   const context = new OfflineAudioContext(2, TOTAL_FRAMES, SAMPLE_RATE);
   const exposedMainQuantum = Number(context.renderQuantumSize || 0);
   if (exposedMainQuantum !== 0 && exposedMainQuantum !== QUANTUM) {
     throw new Error("main quantum mismatch");
   }
-  const scalarUrl = "/artifacts/miso-engine-v2-audio-worklet.scalar.wasm";
-  const simdUrl = backend === "scalar"
-    ? "/artifacts/forced-scalar-missing.wasm"
-    : "/artifacts/miso-engine-v2-audio-worklet.simd128.wasm";
   const host = await createHost({
     context,
     quantumFrames: QUANTUM,
     sessionToml,
     limits: limits(),
-    scalarModuleUrl: scalarUrl,
-    simd128ModuleUrl: simdUrl,
+    simd128ModuleUrl: ARTIFACT_URL,
     workletModuleUrl: "/artifacts/miso-engine-v2-audio-worklet.js",
   });
-  if (host.backend !== backend) throw new Error("selected backend mismatch");
+  if (host.backend !== BACKEND) throw new Error("selected backend mismatch");
   host.node.connect(context.destination);
   const memoryBytes = host.memoryBytes;
   const resources = plainResources(host.resources);
@@ -132,7 +133,7 @@ async function runContext(createHost, backend, source, sessionToml) {
     (sample) => Object.is(sample, 0),
   ) && Array.from(renderedRight).every((sample) => Object.is(sample, 0));
   return {
-    backend,
+    backend: BACKEND,
     exposedMainQuantum,
     memoryBytes,
     memoryStable: stable,
@@ -166,8 +167,8 @@ async function runFailureContext(sessionToml) {
     throw new Error("failure-context main quantum mismatch");
   }
   await context.audioWorklet.addModule("/artifacts/miso-engine-v2-audio-worklet.js");
-  const response = await fetch("/artifacts/miso-engine-v2-audio-worklet.scalar.wasm");
-  if (!response.ok) throw new Error("failure-context scalar fetch failed");
+  const response = await fetch(ARTIFACT_URL);
+  if (!response.ok) throw new Error("failure-context artifact fetch failed");
   const module = await WebAssembly.compile(await response.arrayBuffer());
   const node = new AudioWorkletNode(context, PROCESSOR_NAME, {
     numberOfInputs: 0,
@@ -176,7 +177,7 @@ async function runFailureContext(sessionToml) {
     processorOptions: {
       requestId: 0,
       module,
-      backend: "scalar",
+      backend: BACKEND,
       sampleRateHz: 44100,
       quantumFrames: QUANTUM,
       sessionToml: new Uint8Array(sessionToml),
@@ -219,11 +220,12 @@ export async function runMisoBrowserCorrectness() {
   if (!sessionResponse.ok || !sourceResponse.ok) throw new Error("fixture fetch failed");
   const sessionToml = new TextEncoder().encode(await sessionResponse.text());
   const source = await sourceResponse.json();
-  const runs = [];
-  for (const backend of ["scalar", "simd128"]) {
-    runs.push(await runContext(createMisoAudioWorkletHost, backend, source, sessionToml));
-    runs.push(await runContext(createMisoAudioWorkletHost, backend, source, sessionToml));
-  }
+  // Two fresh contexts over the one shipped artifact: the pair proves fresh-context determinism,
+  // and each run is compared bit-for-bit against the raw-Wasm oracle's hash.
+  const runs = [
+    await runContext(createMisoAudioWorkletHost, source, sessionToml),
+    await runContext(createMisoAudioWorkletHost, source, sessionToml),
+  ];
   const failure = await runFailureContext(sessionToml);
-  return { schema: "miso.web.browser.result.v1", runs, failure };
+  return { schema: "miso.web.browser.result.v2", runs, failure };
 }
