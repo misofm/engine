@@ -10,6 +10,7 @@ and `scripts/test-native-vectorization-report.sh` repeats them against the real 
 | inject `vaddss` into the real gain-probe disassembly through an objdump test wrapper | forbidden scalar fallback |
 | remove the x86 sum probe row | active registry and allowlist differ |
 
-The mutations alter a temporary allowlist only. They never recompile or edit production code, so a
-red result proves the disassembly checker read and enforced the claim rather than merely observing
-that a build completed.
+The missing-family and incomplete-registry mutations alter temporary allowlists. The scalar-
+fallback mutation wraps the disassembler and injects one scalar instruction into the captured gain
+body. None recompiles or edits production code, so a red result proves the disassembly checker read
+and enforced the claim rather than merely observing that a build completed.

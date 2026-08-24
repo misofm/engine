@@ -10,4 +10,3 @@ This directory is an archive of research inputs, not a current architecture or p
 Current Engine V2 documentation, issue decisions, and docs/rulings/ records are authoritative.
 The legacy INDEX.md was not requested by issue #144's exact “11 files + sources.json” inventory
 and is intentionally not copied.
-
