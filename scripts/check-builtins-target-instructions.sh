@@ -186,14 +186,19 @@ printf 'issue068 object leg=native-avx2-fma object_sha256=%s symbol_sha256=%s re
 # every lane gate. The four cross-target legs below are unchanged and still cover the whole closure,
 # `graph-compiler` and builtins included. Retiring this leg outright belongs to the #104 evidence
 # triage, together with the rest of the issue-068 seal.
+#
+# Issue #98 narrows it once more, by the same rule. `miso-engine-graph` now depends on
+# `miso-engine-lane` for the block kernels its two executors share (`sum2_block`, `sum_into_block`,
+# `mix2x2_block`, `pdc_delay_block`), so it leaves this leg too. `miso-engine-core` is what is
+# left: it is the crate issue 068 actually asked about, it holds the portable scalar TPT paths the
+# three object legs above disassemble, and it reaches neither lane nor math.
 native_scalar_closure=(
     -p miso-engine-core
-    -p miso-engine-graph
 )
 RUSTFLAGS='-C target-feature=-avx2,-fma' CARGO_TARGET_DIR="$scratch/native-scalar" \
     cargo check --locked --release "${native_scalar_closure[@]}"
 printf 'issue068 build leg=%s target=%s features=%s result=PASS compile-or-object-only\n' \
-    native-scalar native '-avx2,-fma (core and graph only: D4 and W2-D1, see comment)'
+    native-scalar native '-avx2,-fma (core only: D4 and W2-D1, see comment)'
 build_closure aarch64-android aarch64-linux-android '+neon'
 build_closure aarch64-ios aarch64-apple-ios '+neon'
 build_closure wasm-scalar wasm32-unknown-unknown '-simd128'
