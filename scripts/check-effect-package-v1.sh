@@ -54,8 +54,17 @@ export_count="$(rg -c -- '-> "miso_engine_effect_descriptor_v1_inspect"' "$metad
         "$export_count" >&2
     exit 1
 }
+# Issue #143 added exactly one additive export: the observation projection.
+observation_export_count="$(rg -c -- \
+    '-> "miso_engine_effect_descriptor_v1_inspect_observations"' "$metadata" || true)"
+[[ "$observation_export_count" == 1 ]] || {
+    printf 'effect package V1 check failure: observation inspect export count %s\n' \
+        "$observation_export_count" >&2
+    exit 1
+}
 if rg -- '-> "miso_engine_' "$metadata" | \
-    rg -v -- '-> "miso_engine_effect_descriptor_v1_inspect"'; then
+    rg -v -- '-> "miso_engine_effect_descriptor_v1_inspect"' | \
+    rg -v -- '-> "miso_engine_effect_descriptor_v1_inspect_observations"'; then
     printf 'effect package V1 check failure: unexpected miso_engine Wasm export\n' >&2
     exit 1
 fi
