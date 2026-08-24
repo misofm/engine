@@ -331,6 +331,26 @@ const fn parameter(band: usize, field: usize) -> ParameterDescriptorV1 {
         smoothing_samples: if automatable { RAMP_SAMPLES } else { 0 },
         readable: true,
         automatable,
+        nudge_ladder: Some(if field == 0 {
+            miso_engine_effect_contract::NudgeLadderV1::human_v1(1.0)
+        } else if field == 1 {
+            miso_engine_effect_contract::NudgeLadderV1::human_v1(
+                1.0 / (KIND_CHOICES.len() - 1) as f32,
+            )
+        } else {
+            miso_engine_effect_contract::recommended_nudge_ladder_v1(
+                UNITS[field],
+                MAPPINGS[field],
+                match MINIMA[field] {
+                    Some(value) => value,
+                    None => panic!("continuous parameter minimum"),
+                },
+                match MAXIMA[field] {
+                    Some(value) => value,
+                    None => panic!("continuous parameter maximum"),
+                },
+            )
+        }),
         enum_choices: if field == 1 { &KIND_CHOICES } else { &[] },
     }
 }

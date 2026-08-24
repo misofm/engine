@@ -1543,6 +1543,7 @@ mod tests {
             smoothing_samples: 64,
             readable: false,
             automatable: true,
+            nudge_ladder: None,
             enum_choices: &[],
         },
         ParameterDescriptorV1 {
@@ -1561,6 +1562,7 @@ mod tests {
             smoothing_samples: 0,
             readable: true,
             automatable: true,
+            nudge_ladder: None,
             enum_choices: &[],
         },
         ParameterDescriptorV1 {
@@ -1579,6 +1581,7 @@ mod tests {
             smoothing_samples: 0,
             readable: true,
             automatable: false,
+            nudge_ladder: None,
             enum_choices: &CHOICES,
         },
     ];

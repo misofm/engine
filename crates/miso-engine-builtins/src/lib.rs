@@ -27,7 +27,7 @@ use miso_engine_core::{
 };
 pub mod corpus;
 
-use miso_engine_effect_contract::BankWidth;
+use miso_engine_effect_contract::{BankWidth, NudgeLadderV1, ParameterUnit};
 use miso_engine_lane::{
     Backend, Lane, Simd4, Simd8,
     kernels::{
@@ -217,9 +217,13 @@ pub struct BuiltinParameterDescriptorV1 {
     pub scope: BuiltinParameterScope,
     /// The semantic mapping used to interpret the stored `f32` value.
     pub mapping: BuiltinParameterMapping,
+    /// Shared effect/builtin unit vocabulary used by control-plane nudge derivation.
+    pub unit: ParameterUnit,
     /// The finite, rate-aware domain accepted during preparation.
     pub domain: BuiltinParameterDomain,
     pub default: f32,
+    /// Per-parameter normalized-x ladder declaration.
+    pub nudge_ladder: Option<NudgeLadderV1>,
     pub update_rate: BuiltinParameterUpdateRate,
     pub smoothing: BuiltinSmoothingPolicy,
     pub reset: BuiltinParameterReset,
@@ -348,8 +352,10 @@ pub const BUILTIN_PARAMETER_DESCRIPTORS_V1: [BuiltinParameterDescriptorV1; 10] =
         name: "polarity_invert",
         scope: BuiltinParameterScope::PerLane,
         mapping: BuiltinParameterMapping::Boolean,
+        unit: ParameterUnit::Linear,
         domain: BuiltinParameterDomain::BooleanExact,
         default: 0.0,
+        nudge_ladder: Some(NudgeLadderV1::human_v1(1.0)),
         update_rate: BuiltinParameterUpdateRate::PreparedOnly,
         smoothing: BuiltinSmoothingPolicy::None,
         reset: BuiltinParameterReset::RestorePreparedValue,
@@ -360,11 +366,13 @@ pub const BUILTIN_PARAMETER_DESCRIPTORS_V1: [BuiltinParameterDescriptorV1; 10] =
         name: "trim_db",
         scope: BuiltinParameterScope::PerLane,
         mapping: BuiltinParameterMapping::DecibelAmplitude,
+        unit: ParameterUnit::Db,
         domain: BuiltinParameterDomain::FiniteInclusive {
             minimum: -144.0,
             maximum: 24.0,
         },
         default: 0.0,
+        nudge_ladder: Some(NudgeLadderV1::human_v1(0.5 / 168.0)),
         update_rate: BuiltinParameterUpdateRate::PreparedOnly,
         smoothing: BuiltinSmoothingPolicy::None,
         reset: BuiltinParameterReset::RestorePreparedValue,
@@ -375,11 +383,13 @@ pub const BUILTIN_PARAMETER_DESCRIPTORS_V1: [BuiltinParameterDescriptorV1; 10] =
         name: "hpf_hz",
         scope: BuiltinParameterScope::PerLane,
         mapping: BuiltinParameterMapping::Hertz,
+        unit: ParameterUnit::Hz,
         domain: BuiltinParameterDomain::DisabledOrRateKeyedHertzV1 {
             disabled: 0.0,
             minimum_hz: 10.0,
         },
         default: 0.0,
+        nudge_ladder: Some(NudgeLadderV1::human_v1(0.002)),
         update_rate: BuiltinParameterUpdateRate::PreparedOnly,
         smoothing: BuiltinSmoothingPolicy::None,
         reset: BuiltinParameterReset::RestorePreparedValue,
@@ -390,11 +400,13 @@ pub const BUILTIN_PARAMETER_DESCRIPTORS_V1: [BuiltinParameterDescriptorV1; 10] =
         name: "lpf_hz",
         scope: BuiltinParameterScope::PerLane,
         mapping: BuiltinParameterMapping::Hertz,
+        unit: ParameterUnit::Hz,
         domain: BuiltinParameterDomain::DisabledOrRateKeyedHertzV1 {
             disabled: 0.0,
             minimum_hz: 10.0,
         },
         default: 0.0,
+        nudge_ladder: Some(NudgeLadderV1::human_v1(0.002)),
         update_rate: BuiltinParameterUpdateRate::PreparedOnly,
         smoothing: BuiltinSmoothingPolicy::None,
         reset: BuiltinParameterReset::RestorePreparedValue,
@@ -405,11 +417,13 @@ pub const BUILTIN_PARAMETER_DESCRIPTORS_V1: [BuiltinParameterDescriptorV1; 10] =
         name: "fader_db",
         scope: BuiltinParameterScope::PerLane,
         mapping: BuiltinParameterMapping::DecibelAmplitude,
+        unit: ParameterUnit::Db,
         domain: BuiltinParameterDomain::FiniteInclusive {
             minimum: -144.0,
             maximum: 24.0,
         },
         default: 0.0,
+        nudge_ladder: Some(NudgeLadderV1::human_v1(0.5 / 168.0)),
         update_rate: BuiltinParameterUpdateRate::PreparedOnly,
         smoothing: BuiltinSmoothingPolicy::None,
         reset: BuiltinParameterReset::RestorePreparedValue,
@@ -420,8 +434,10 @@ pub const BUILTIN_PARAMETER_DESCRIPTORS_V1: [BuiltinParameterDescriptorV1; 10] =
         name: "mute",
         scope: BuiltinParameterScope::PerLane,
         mapping: BuiltinParameterMapping::Boolean,
+        unit: ParameterUnit::Linear,
         domain: BuiltinParameterDomain::BooleanExact,
         default: 0.0,
+        nudge_ladder: Some(NudgeLadderV1::human_v1(1.0)),
         update_rate: BuiltinParameterUpdateRate::PreparedOnly,
         smoothing: BuiltinSmoothingPolicy::None,
         reset: BuiltinParameterReset::RestorePreparedValue,
@@ -432,11 +448,13 @@ pub const BUILTIN_PARAMETER_DESCRIPTORS_V1: [BuiltinParameterDescriptorV1; 10] =
         name: "matrix_ll",
         scope: BuiltinParameterScope::MatrixShared,
         mapping: BuiltinParameterMapping::Linear,
+        unit: ParameterUnit::Linear,
         domain: BuiltinParameterDomain::FiniteInclusive {
             minimum: -1.0,
             maximum: 1.0,
         },
         default: 1.0,
+        nudge_ladder: Some(NudgeLadderV1::human_v1(0.01)),
         update_rate: BuiltinParameterUpdateRate::BlockTarget,
         smoothing: BuiltinSmoothingPolicy::LinearNUpdates,
         reset: BuiltinParameterReset::KeepTargetResetCurrent,
@@ -447,11 +465,13 @@ pub const BUILTIN_PARAMETER_DESCRIPTORS_V1: [BuiltinParameterDescriptorV1; 10] =
         name: "matrix_lr",
         scope: BuiltinParameterScope::MatrixShared,
         mapping: BuiltinParameterMapping::Linear,
+        unit: ParameterUnit::Linear,
         domain: BuiltinParameterDomain::FiniteInclusive {
             minimum: -1.0,
             maximum: 1.0,
         },
         default: 0.0,
+        nudge_ladder: Some(NudgeLadderV1::human_v1(0.01)),
         update_rate: BuiltinParameterUpdateRate::BlockTarget,
         smoothing: BuiltinSmoothingPolicy::LinearNUpdates,
         reset: BuiltinParameterReset::KeepTargetResetCurrent,
@@ -462,11 +482,13 @@ pub const BUILTIN_PARAMETER_DESCRIPTORS_V1: [BuiltinParameterDescriptorV1; 10] =
         name: "matrix_rl",
         scope: BuiltinParameterScope::MatrixShared,
         mapping: BuiltinParameterMapping::Linear,
+        unit: ParameterUnit::Linear,
         domain: BuiltinParameterDomain::FiniteInclusive {
             minimum: -1.0,
             maximum: 1.0,
         },
         default: 0.0,
+        nudge_ladder: Some(NudgeLadderV1::human_v1(0.01)),
         update_rate: BuiltinParameterUpdateRate::BlockTarget,
         smoothing: BuiltinSmoothingPolicy::LinearNUpdates,
         reset: BuiltinParameterReset::KeepTargetResetCurrent,
@@ -477,11 +499,13 @@ pub const BUILTIN_PARAMETER_DESCRIPTORS_V1: [BuiltinParameterDescriptorV1; 10] =
         name: "matrix_rr",
         scope: BuiltinParameterScope::MatrixShared,
         mapping: BuiltinParameterMapping::Linear,
+        unit: ParameterUnit::Linear,
         domain: BuiltinParameterDomain::FiniteInclusive {
             minimum: -1.0,
             maximum: 1.0,
         },
         default: 1.0,
+        nudge_ladder: Some(NudgeLadderV1::human_v1(0.01)),
         update_rate: BuiltinParameterUpdateRate::BlockTarget,
         smoothing: BuiltinSmoothingPolicy::LinearNUpdates,
         reset: BuiltinParameterReset::KeepTargetResetCurrent,

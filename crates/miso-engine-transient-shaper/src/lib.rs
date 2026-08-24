@@ -107,6 +107,12 @@ const fn parameter(
         smoothing_samples: RAMP_SAMPLES,
         readable: true,
         automatable: true,
+        nudge_ladder: Some(miso_engine_effect_contract::recommended_nudge_ladder_v1(
+            ParameterUnit::Linear,
+            ParameterMapping::Linear,
+            minimum,
+            maximum,
+        )),
         enum_choices: &[],
     }
 }

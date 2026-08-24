@@ -128,6 +128,8 @@ scalar_enum!(AutomationSpanKind {Point=1,Step=2,Linear=3,Exponential=4});
 pub type AutomationKind = AutomationSpanKind;
 scalar_enum!(ParameterChannelPolicy {Shared=1,PerLane=2});
 scalar_enum!(SmoothingRule {None=1,Linear=2,OnePole99=3});
+scalar_enum!(NudgeRatioClass {HumanV1=1});
+scalar_enum!(NudgeSize {Xs=1,Sm=2,Md=3,Lg=4,Xl=5});
 scalar_enum!(PortRole {MainInput=1,MainOutput=2,SidechainInput=3});
 pub type PortKind = PortRole;
 scalar_enum!(PortLayout {DualMonoPlanar=1});
@@ -229,6 +231,71 @@ pub struct EnumChoiceV1 {
     pub value: f32,
     pub label: &'static str,
 }
+/// A compact declared nudge ladder. All steps are in the parameter mapping's normalized x-space.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NudgeLadderV1 {
+    /// Smallest normalized-x step. The remaining named sizes derive from `ratio_class`.
+    pub xs: f32,
+    /// Frozen multiplier vocabulary used to derive `sm` through `xl`.
+    pub ratio_class: NudgeRatioClass,
+}
+
+impl NudgeLadderV1 {
+    /// Declare the shared V1 human/agent ladder `{1, 3, 5, 10, 30}`.
+    #[must_use]
+    pub const fn human_v1(xs: f32) -> Self {
+        Self {
+            xs,
+            ratio_class: NudgeRatioClass::HumanV1,
+        }
+    }
+}
+
+/// The five registry-resolved normalized-x steps for one parameter.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ResolvedNudgeLadderV1 {
+    steps: [f32; 5],
+}
+
+impl ResolvedNudgeLadderV1 {
+    /// Return the exact normalized-x step for one named size.
+    #[must_use]
+    pub const fn step(self, size: NudgeSize) -> f32 {
+        self.steps[size as usize - 1]
+    }
+
+    /// Return all five steps in `xs`, `sm`, `md`, `lg`, `xl` order.
+    #[must_use]
+    pub const fn steps(self) -> [f32; 5] {
+        self.steps
+    }
+}
+
+/// Frozen named-size multipliers. The explicit table is mutation-gated by the resolver tests.
+pub const NUDGE_MULTIPLIERS_V1: [u8; 5] = [1, 3, 5, 10, 30];
+
+/// Authoring default for a continuous parameter override.
+///
+/// Effect tables call this once in their `const` descriptor constructors, so the resulting ABI
+/// declaration is per-parameter even when it adopts the shared unit/mapping class recommendation.
+#[must_use]
+pub const fn recommended_nudge_ladder_v1(
+    unit: ParameterUnit,
+    mapping: ParameterMapping,
+    minimum: f32,
+    maximum: f32,
+) -> NudgeLadderV1 {
+    let xs = match (mapping, unit) {
+        (ParameterMapping::Linear, ParameterUnit::Db) => 0.5 / (maximum - minimum),
+        (ParameterMapping::Linear, ParameterUnit::Samples) => 1.0 / (maximum - minimum),
+        (ParameterMapping::Logarithmic, ParameterUnit::Hz) => 0.002,
+        (ParameterMapping::Logarithmic, _) => 0.01,
+        (ParameterMapping::Linear | ParameterMapping::Exponential, _) => 0.01,
+        (ParameterMapping::Stepped, _) => 1.0,
+    };
+    NudgeLadderV1::human_v1(xs)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ParameterDescriptorV1 {
     pub id: ParameterId,
@@ -246,6 +313,8 @@ pub struct ParameterDescriptorV1 {
     pub smoothing_samples: u32,
     pub readable: bool,
     pub automatable: bool,
+    /// Per-parameter override. `None` selects the `(mapping, unit)` default during registry build.
+    pub nudge_ladder: Option<NudgeLadderV1>,
     pub enum_choices: &'static [EnumChoiceV1],
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -375,6 +444,7 @@ fn parameter_valid(p: &ParameterDescriptorV1) -> bool {
         || !valid_text(p.display_unit)
         || !p.default_value.is_finite()
         || is_negative_zero(p.default_value)
+        || resolve_parameter_nudge_ladder_v1(p).is_none()
     {
         return false;
     }
@@ -643,6 +713,124 @@ pub fn inverse_map_stepped_normalized(choices: &[f32], value: f32) -> Option<f32
         .iter()
         .position(|choice| canonical_bits(*choice) == canonical_bits(value))
         .map(|index| index as f32 / (choices.len() - 1) as f32)
+}
+
+fn continuous_default_nudge_xs(parameter: &ParameterDescriptorV1) -> Option<f32> {
+    let (minimum, maximum) = parameter.minimum.zip(parameter.maximum)?;
+    let midpoint_x = 0.5_f32;
+    let midpoint = map_normalized(parameter.mapping, minimum, maximum, midpoint_x)?;
+    let target = match parameter.unit {
+        // Half a decibel is the frozen level JND anchor.
+        ParameterUnit::Db => midpoint + 0.5,
+        // Twenty cents is an equal-ratio frequency step.
+        ParameterUnit::Hz if midpoint > 0.0 => {
+            midpoint * miso_engine_math::powf(2.0, 20.0 / 1_200.0)
+        }
+        // One sample is the smallest meaningful integer-domain movement.
+        ParameterUnit::Samples => midpoint + 1.0,
+        // Time, Q-like linear controls and generic ratios use a five-percent anchor.
+        ParameterUnit::Milliseconds | ParameterUnit::Ratio if midpoint != 0.0 => {
+            midpoint + midpoint.abs() * 0.05
+        }
+        ParameterUnit::Linear if midpoint != 0.0 => midpoint + midpoint.abs() * 0.05,
+        // A zero-centred generic control still needs a nonzero stable default.
+        ParameterUnit::Linear | ParameterUnit::Milliseconds | ParameterUnit::Ratio => {
+            midpoint + (maximum - minimum) * 0.01
+        }
+        ParameterUnit::Hz => return None,
+    }
+    .clamp(minimum, maximum);
+    let target_x = inverse_map_normalized(parameter.mapping, minimum, maximum, target)?;
+    let xs = (target_x - midpoint_x).abs();
+    (xs.is_finite() && xs > 0.0 && xs <= 1.0).then_some(xs)
+}
+
+/// Resolve one declaration exactly once while constructing a descriptor registry.
+///
+/// Explicit per-parameter overrides win. A missing declaration derives from the single
+/// `(mapping, unit)` default table above; stepped domains always mean one legal choice at `xs`.
+#[must_use]
+pub fn resolve_parameter_nudge_ladder_v1(
+    parameter: &ParameterDescriptorV1,
+) -> Option<ResolvedNudgeLadderV1> {
+    let xs = match parameter.nudge_ladder {
+        Some(declared)
+            if declared.ratio_class == NudgeRatioClass::HumanV1
+                && declared.xs.is_finite()
+                && declared.xs > 0.0
+                && declared.xs <= 1.0 =>
+        {
+            declared.xs
+        }
+        Some(_) => return None,
+        None => match parameter.domain {
+            ParameterDomain::Continuous => continuous_default_nudge_xs(parameter)?,
+            ParameterDomain::Boolean => 1.0,
+            ParameterDomain::Enumeration if parameter.enum_choices.len() >= 2 => {
+                1.0 / (parameter.enum_choices.len() - 1) as f32
+            }
+            ParameterDomain::Enumeration => return None,
+        },
+    };
+    let mut steps = [0.0; 5];
+    let mut index = 0;
+    while index < steps.len() {
+        steps[index] = xs * f32::from(NUDGE_MULTIPLIERS_V1[index]);
+        if !steps[index].is_finite() || steps[index] <= 0.0 {
+            return None;
+        }
+        index += 1;
+    }
+    Some(ResolvedNudgeLadderV1 { steps })
+}
+
+/// Resolve a named nudge to one absolute legal value without allocation or retained mutable state.
+#[must_use]
+pub fn resolve_parameter_nudge_value_v1(
+    parameter: &ParameterDescriptorV1,
+    current: f32,
+    size: NudgeSize,
+    count: i16,
+) -> Option<f32> {
+    if count == 0 || !parameter_value_valid(parameter, current) {
+        return None;
+    }
+    let multiplier = i32::from(NUDGE_MULTIPLIERS_V1[size as usize - 1]);
+    match parameter.domain {
+        ParameterDomain::Continuous => {
+            let (minimum, maximum) = parameter.minimum.zip(parameter.maximum)?;
+            let current_x = inverse_map_normalized(parameter.mapping, minimum, maximum, current)?;
+            let step = resolve_parameter_nudge_ladder_v1(parameter)?.step(size);
+            let target_x = (current_x + f32::from(count) * step).clamp(0.0, 1.0);
+            map_normalized(parameter.mapping, minimum, maximum, target_x).map(normalize_zero)
+        }
+        ParameterDomain::Boolean => {
+            let index = if canonical_bits(current) == canonical_bits(0.0) {
+                0_i32
+            } else {
+                1_i32
+            };
+            let target = index
+                .saturating_add(i32::from(count).saturating_mul(multiplier))
+                .clamp(0, 1);
+            Some(target as f32)
+        }
+        ParameterDomain::Enumeration => {
+            let index = parameter
+                .enum_choices
+                .iter()
+                .position(|choice| canonical_bits(choice.value) == canonical_bits(current))?;
+            let maximum = i32::try_from(parameter.enum_choices.len().checked_sub(1)?).ok()?;
+            let target = i32::try_from(index)
+                .ok()?
+                .saturating_add(i32::from(count).saturating_mul(multiplier))
+                .clamp(0, maximum);
+            parameter
+                .enum_choices
+                .get(target as usize)
+                .map(|choice| choice.value)
+        }
+    }
 }
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct PreparedPortsV1 {
@@ -1341,6 +1529,7 @@ pub trait PreparedNativeEffectBank: Send {
 #[derive(Default)]
 pub struct NativeEffectRegistry {
     factories: BTreeMap<EffectId, Arc<dyn NativeEffectFactory>>,
+    nudge_ladders: BTreeMap<(EffectId, ParameterId), ResolvedNudgeLadderV1>,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RegistryError {
@@ -1352,6 +1541,7 @@ impl NativeEffectRegistry {
         f: impl IntoIterator<Item = Box<dyn NativeEffectFactory>>,
     ) -> Result<Self, RegistryError> {
         let mut m = BTreeMap::new();
+        let mut nudge_ladders = BTreeMap::new();
         for x in f {
             let d = x.descriptor();
             if validate_descriptor_v1(d).is_err() {
@@ -1360,6 +1550,15 @@ impl NativeEffectRegistry {
                     id: Some(d.id),
                 });
             }
+            for parameter in d.parameters {
+                let Some(ladder) = resolve_parameter_nudge_ladder_v1(parameter) else {
+                    return Err(RegistryError {
+                        code: "effect.descriptor.nudge",
+                        id: Some(d.id),
+                    });
+                };
+                nudge_ladders.insert((d.id, parameter.id), ladder);
+            }
             if m.insert(d.id, Arc::from(x)).is_some() {
                 return Err(RegistryError {
                     code: "effect.registry.duplicate",
@@ -1367,7 +1566,10 @@ impl NativeEffectRegistry {
                 });
             }
         }
-        Ok(Self { factories: m })
+        Ok(Self {
+            factories: m,
+            nudge_ladders,
+        })
     }
     pub fn get(&self, id: EffectId) -> Option<&dyn NativeEffectFactory> {
         self.factories.get(&id).map(Arc::as_ref)
@@ -1382,6 +1584,15 @@ impl NativeEffectRegistry {
         self.factories
             .iter()
             .find_map(|(key, value)| (key.as_str() == id).then_some(Arc::clone(value)))
+    }
+    /// Borrow the five memoized steps derived during registry construction.
+    #[must_use]
+    pub fn nudge_ladder(
+        &self,
+        effect_id: EffectId,
+        parameter_id: ParameterId,
+    ) -> Option<ResolvedNudgeLadderV1> {
+        self.nudge_ladders.get(&(effect_id, parameter_id)).copied()
     }
     pub fn len(&self) -> usize {
         self.factories.len()
@@ -1661,6 +1872,162 @@ mod bank_width_tests {
                     );
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod nudge_tests {
+    use super::*;
+
+    const CHOICES: [EnumChoiceV1; 4] = [
+        EnumChoiceV1 {
+            value: 0.0,
+            label: "a",
+        },
+        EnumChoiceV1 {
+            value: 1.0,
+            label: "b",
+        },
+        EnumChoiceV1 {
+            value: 2.0,
+            label: "c",
+        },
+        EnumChoiceV1 {
+            value: 3.0,
+            label: "d",
+        },
+    ];
+
+    fn parameter(
+        unit: ParameterUnit,
+        mapping: ParameterMapping,
+        minimum: f32,
+        maximum: f32,
+    ) -> ParameterDescriptorV1 {
+        ParameterDescriptorV1 {
+            id: ParameterId(1),
+            display_name: "test",
+            display_unit: "test",
+            unit,
+            domain: ParameterDomain::Continuous,
+            minimum: Some(minimum),
+            maximum: Some(maximum),
+            default_value: map_normalized(mapping, minimum, maximum, 0.5).unwrap(),
+            mapping,
+            automation_rate: AutomationRate::Block,
+            channel_policy: ParameterChannelPolicy::PerLane,
+            smoothing: SmoothingRule::Linear,
+            smoothing_samples: 1,
+            readable: true,
+            automatable: true,
+            nudge_ladder: None,
+            enum_choices: &[],
+        }
+    }
+
+    #[test]
+    fn multiplier_table_and_mapping_closed_forms_are_exactly_named() {
+        assert_eq!(NUDGE_MULTIPLIERS_V1, [1, 3, 5, 10, 30]);
+
+        let linear_db = parameter(ParameterUnit::Db, ParameterMapping::Linear, -20.0, 20.0);
+        let ladder = resolve_parameter_nudge_ladder_v1(&linear_db).unwrap();
+        for (actual, expected) in ladder
+            .steps()
+            .into_iter()
+            .zip([0.0125, 0.0375, 0.0625, 0.125, 0.375])
+        {
+            assert!((actual - expected).abs() <= 4.0 * f32::EPSILON);
+        }
+        assert_eq!(
+            resolve_parameter_nudge_value_v1(&linear_db, 0.0, NudgeSize::Xs, 1),
+            Some(0.5)
+        );
+
+        let logarithmic = parameter(
+            ParameterUnit::Hz,
+            ParameterMapping::Logarithmic,
+            20.0,
+            20_000.0,
+        );
+        let middle = logarithmic.default_value;
+        let next = resolve_parameter_nudge_value_v1(&logarithmic, middle, NudgeSize::Xs, 1)
+            .expect("log nudge");
+        let ratio = next / middle;
+        let expected = miso_engine_math::powf(2.0, 20.0 / 1_200.0);
+        assert!((ratio - expected).abs() <= 4.0 * f32::EPSILON);
+
+        let exponential = parameter(
+            ParameterUnit::Linear,
+            ParameterMapping::Exponential,
+            0.0,
+            1.0,
+        );
+        let next = resolve_parameter_nudge_value_v1(
+            &exponential,
+            exponential.default_value,
+            NudgeSize::Xs,
+            1,
+        )
+        .expect("exponential nudge");
+        assert!(next > exponential.default_value);
+    }
+
+    #[test]
+    fn stepped_domains_move_whole_choices_and_all_domains_clamp() {
+        let stepped = ParameterDescriptorV1 {
+            id: ParameterId(1),
+            display_name: "choice",
+            display_unit: "choice",
+            unit: ParameterUnit::Linear,
+            domain: ParameterDomain::Enumeration,
+            minimum: None,
+            maximum: None,
+            default_value: 1.0,
+            mapping: ParameterMapping::Stepped,
+            automation_rate: AutomationRate::None,
+            channel_policy: ParameterChannelPolicy::PerLane,
+            smoothing: SmoothingRule::None,
+            smoothing_samples: 0,
+            readable: true,
+            automatable: false,
+            nudge_ladder: None,
+            enum_choices: &CHOICES,
+        };
+        assert_eq!(
+            resolve_parameter_nudge_value_v1(&stepped, 1.0, NudgeSize::Xs, 1),
+            Some(2.0)
+        );
+        assert_eq!(
+            resolve_parameter_nudge_value_v1(&stepped, 1.0, NudgeSize::Sm, 1),
+            Some(3.0)
+        );
+        assert_eq!(
+            resolve_parameter_nudge_value_v1(&stepped, 1.0, NudgeSize::Xl, -1),
+            Some(0.0)
+        );
+
+        let continuous = parameter(ParameterUnit::Db, ParameterMapping::Linear, -10.0, 10.0);
+        assert_eq!(
+            resolve_parameter_nudge_value_v1(&continuous, 10.0, NudgeSize::Xl, 1),
+            Some(10.0)
+        );
+        assert_eq!(
+            resolve_parameter_nudge_value_v1(&continuous, -10.0, NudgeSize::Xl, -1),
+            Some(-10.0)
+        );
+    }
+
+    #[test]
+    fn plus_then_minus_returns_the_starting_bits_away_from_clamp() {
+        for mapping in [ParameterMapping::Linear, ParameterMapping::Exponential] {
+            let parameter = parameter(ParameterUnit::Linear, mapping, 0.0, 1.0);
+            let start = map_normalized(mapping, 0.0, 1.0, 0.5).unwrap();
+            let up =
+                resolve_parameter_nudge_value_v1(&parameter, start, NudgeSize::Xs, 1).expect("up");
+            let back =
+                resolve_parameter_nudge_value_v1(&parameter, up, NudgeSize::Xs, -1).expect("back");
+            assert_eq!(back.to_bits(), start.to_bits(), "{mapping:?}");
         }
     }
 }

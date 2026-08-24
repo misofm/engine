@@ -150,6 +150,9 @@ const fn parameter(
         smoothing_samples,
         readable: true,
         automatable: !matches!(automation_rate, AutomationRate::None),
+        nudge_ladder: Some(miso_engine_effect_contract::recommended_nudge_ladder_v1(
+            unit, mapping, minimum, maximum,
+        )),
         enum_choices: &[],
     }
 }

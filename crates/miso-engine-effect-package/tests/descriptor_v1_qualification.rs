@@ -61,6 +61,7 @@ static PARAMETERS: [ParameterDescriptorV1; 6] = [
         smoothing_samples: 64,
         readable: false,
         automatable: true,
+        nudge_ladder: None,
         enum_choices: &[],
     },
     ParameterDescriptorV1 {
@@ -79,6 +80,7 @@ static PARAMETERS: [ParameterDescriptorV1; 6] = [
         smoothing_samples: 32,
         readable: true,
         automatable: true,
+        nudge_ladder: None,
         enum_choices: &[],
     },
     ParameterDescriptorV1 {
@@ -97,6 +99,7 @@ static PARAMETERS: [ParameterDescriptorV1; 6] = [
         smoothing_samples: 0,
         readable: true,
         automatable: true,
+        nudge_ladder: None,
         enum_choices: &[],
     },
     ParameterDescriptorV1 {
@@ -115,6 +118,7 @@ static PARAMETERS: [ParameterDescriptorV1; 6] = [
         smoothing_samples: 0,
         readable: true,
         automatable: true,
+        nudge_ladder: None,
         enum_choices: &[],
     },
     ParameterDescriptorV1 {
@@ -133,6 +137,7 @@ static PARAMETERS: [ParameterDescriptorV1; 6] = [
         smoothing_samples: 0,
         readable: true,
         automatable: false,
+        nudge_ladder: None,
         enum_choices: &CHOICES,
     },
     ParameterDescriptorV1 {
@@ -151,6 +156,7 @@ static PARAMETERS: [ParameterDescriptorV1; 6] = [
         smoothing_samples: 16,
         readable: true,
         automatable: true,
+        nudge_ladder: None,
         enum_choices: &[],
     },
 ];
