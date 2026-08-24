@@ -8,15 +8,14 @@ use toml::{
 };
 
 use crate::{
-    Automation, AutomationSegment, AutomationShape, AutomationTarget, ChannelBuiltins,
-    ChannelMatrix, Diagnostic, DiagnosticCode, DiagnosticPath as OwnedDiagnosticPath,
-    DiagnosticSet, DualMonoBuiltins, DualMonoFader, Effect, EffectIdentity, EffectParam,
-    EffectQuality, LinkMode, MatrixOrPan, Output, OutputProfile, ParameterChannel, ParameterUnit,
-    Rack, RackName, RenderMode, RenderProfile, Route, RouteDestination, RouteSource,
-    SESSION_SCHEMA_VERSION_V1, SampleFormat, SendTap, SessionLimits, SessionTomlV1, Sidechain,
-    SidechainDeclaration, Source, SourceContent, SourceMapping, SourceRegion, SourceSpan, StableId,
-    Submix, Track,
+    Automation, AutomationSegment, AutomationTarget, ChannelBuiltins, ChannelMatrix, Diagnostic,
+    DiagnosticCode, DiagnosticPath as OwnedDiagnosticPath, DiagnosticSet, DualMonoBuiltins,
+    DualMonoFader, Effect, EffectIdentity, EffectParam, MatrixOrPan, Output, OutputProfile, Rack,
+    RenderProfile, Route, RouteDestination, RouteSource, SESSION_SCHEMA_VERSION_V1, SessionLimits,
+    SessionTomlV1, Sidechain, SidechainDeclaration, Source, SourceContent, SourceMapping,
+    SourceRegion, SourceSpan, StableId, Submix, Track,
     diagnostic::{PathRef as DiagnosticPath, PathSegment},
+    model::ClosedToken,
     validate::validate_session,
     value::{F32Token, parse_f32_token, parse_i64_token},
 };
@@ -419,6 +418,34 @@ impl<'i> Parser<'i> {
         }
     }
 
+    fn closed_token<T: ClosedToken>(
+        &mut self,
+        table: TableRef<'_, '_>,
+        key: &'static str,
+        path: &DiagnosticPath<'_>,
+        code: DiagnosticCode,
+    ) -> Option<T> {
+        let token = self.token(table, key, path)?;
+        if let Some((value, _)) = T::ALL.iter().find(|(_, candidate)| *candidate == token) {
+            return Some(*value);
+        }
+        let mut allowed = String::new();
+        for (_, token) in T::ALL {
+            if !allowed.is_empty() {
+                allowed.push_str(", ");
+            }
+            allowed.push_str(token);
+        }
+        self.error_field(
+            table,
+            key,
+            path,
+            code,
+            &format!("expected one of: {allowed}"),
+        );
+        None
+    }
+
     fn bounded(
         &mut self,
         table: TableRef<'_, '_>,
@@ -652,20 +679,7 @@ fn parse_render_profile(
 ) -> Option<RenderProfile> {
     parser.keys(table, &["id", "mode"], &path);
     let id = parser.id(table, "id", &path);
-    let mode = match parser.token(table, "mode", &path)? {
-        "single_thread" => Some(RenderMode::SingleThread),
-        "dependency_waves" => Some(RenderMode::DependencyWaves),
-        _ => {
-            parser.error_field(
-                table,
-                "mode",
-                &path,
-                DiagnosticCode::InvalidEnum,
-                "expected single_thread or dependency_waves",
-            );
-            None
-        }
-    };
+    let mode = parser.closed_token(table, "mode", &path, DiagnosticCode::InvalidEnum);
     Some(RenderProfile {
         id: id?,
         mode: mode?,
@@ -680,19 +694,8 @@ fn parse_output_profile(
     parser.keys(table, &["id", "channels", "sample_format"], &path);
     let id = parser.id(table, "id", &path);
     let channels = parser.u8(table, "channels", &path);
-    let sample_format = match parser.token(table, "sample_format", &path)? {
-        "f32_planar" => Some(SampleFormat::F32Planar),
-        _ => {
-            parser.error_field(
-                table,
-                "sample_format",
-                &path,
-                DiagnosticCode::InvalidEnum,
-                "expected f32_planar",
-            );
-            None
-        }
-    };
+    let sample_format =
+        parser.closed_token(table, "sample_format", &path, DiagnosticCode::InvalidEnum);
     Some(OutputProfile {
         id: id?,
         channels: channels?,
@@ -926,9 +929,9 @@ fn parse_effect(
     );
     let id = parser.id(table, "id", &path);
     let identity = parse_record(parser, table, "identity", &path, parse_effect_identity);
-    let quality = parse_quality(parser, table, "quality", &path);
+    let quality = parser.closed_token(table, "quality", &path, DiagnosticCode::InvalidEnum);
     let bypass = parser.bool(table, "bypass", &path);
-    let link_mode = parse_link_mode(parser, table, "link_mode", &path);
+    let link_mode = parser.closed_token(table, "link_mode", &path, DiagnosticCode::InvalidEnum);
     let params = parse_list(parser, table, "params", &path, parse_param);
     let sidechain = parse_record(parser, table, "sidechain", &path, parse_sidechain);
     Some(Effect {
@@ -984,52 +987,6 @@ fn parse_effect_identity(
     }
 }
 
-fn parse_quality(
-    parser: &mut Parser,
-    table: TableRef<'_, '_>,
-    key: &'static str,
-    path: &DiagnosticPath,
-) -> Option<EffectQuality> {
-    match parser.token(table, key, path)? {
-        "draft" => Some(EffectQuality::Draft),
-        "normal" => Some(EffectQuality::Normal),
-        "high" => Some(EffectQuality::High),
-        _ => {
-            parser.error_field(
-                table,
-                key,
-                path,
-                DiagnosticCode::InvalidEnum,
-                "expected draft, normal, or high",
-            );
-            None
-        }
-    }
-}
-
-fn parse_link_mode(
-    parser: &mut Parser,
-    table: TableRef<'_, '_>,
-    key: &'static str,
-    path: &DiagnosticPath,
-) -> Option<LinkMode> {
-    match parser.token(table, key, path)? {
-        "dual_mono" => Some(LinkMode::DualMono),
-        "maximum" => Some(LinkMode::Maximum),
-        "average" => Some(LinkMode::Average),
-        _ => {
-            parser.error_field(
-                table,
-                key,
-                path,
-                DiagnosticCode::InvalidEnum,
-                "expected dual_mono, maximum, or average",
-            );
-            None
-        }
-    }
-}
-
 fn parse_param(
     parser: &mut Parser,
     table: TableRef<'_, '_>,
@@ -1037,8 +994,8 @@ fn parse_param(
 ) -> Option<EffectParam> {
     parser.keys(table, &["parameter_id", "channel", "unit", "value"], &path);
     let parameter_id = parser.u32(table, "parameter_id", &path);
-    let channel = parse_parameter_channel(parser, table, "channel", &path);
-    let unit = parse_unit(parser, table, "unit", &path);
+    let channel = parser.closed_token(table, "channel", &path, DiagnosticCode::InvalidEnum);
+    let unit = parser.closed_token(table, "unit", &path, DiagnosticCode::UnitInvalid);
     let value = parser.f32(table, "value", &path);
     Some(EffectParam {
         parameter_id: parameter_id?,
@@ -1046,55 +1003,6 @@ fn parse_param(
         unit: unit?,
         value: value?,
     })
-}
-
-fn parse_parameter_channel(
-    parser: &mut Parser,
-    table: TableRef<'_, '_>,
-    key: &'static str,
-    path: &DiagnosticPath,
-) -> Option<ParameterChannel> {
-    match parser.token(table, key, path)? {
-        "left" => Some(ParameterChannel::Left),
-        "right" => Some(ParameterChannel::Right),
-        "both" => Some(ParameterChannel::Both),
-        _ => {
-            parser.error_field(
-                table,
-                key,
-                path,
-                DiagnosticCode::InvalidEnum,
-                "expected left, right, or both",
-            );
-            None
-        }
-    }
-}
-
-fn parse_unit(
-    parser: &mut Parser,
-    table: TableRef<'_, '_>,
-    key: &'static str,
-    path: &DiagnosticPath,
-) -> Option<ParameterUnit> {
-    match parser.token(table, key, path)? {
-        "db" => Some(ParameterUnit::Db),
-        "hz" => Some(ParameterUnit::Hz),
-        "milliseconds" => Some(ParameterUnit::Milliseconds),
-        "samples" => Some(ParameterUnit::Samples),
-        "linear" => Some(ParameterUnit::Linear),
-        "ratio" => Some(ParameterUnit::Ratio),
-        _ => {
-            parser.error_field(
-                table,
-                key,
-                path,
-                DiagnosticCode::UnitInvalid,
-                "expected db, hz, milliseconds, samples, linear, or ratio",
-            );
-            None
-        }
-    }
 }
 
 fn parse_sidechain(
@@ -1277,7 +1185,7 @@ fn parse_route_source(
             );
             Some(RouteSource::Track {
                 track_id: parser.id(table, "track_id", &path)?,
-                tap: parse_tap(parser, table, "tap", &path)?,
+                tap: parser.closed_token(table, "tap", &path, DiagnosticCode::InvalidEnum)?,
             })
         }
         "submix_output" => {
@@ -1366,33 +1274,6 @@ fn parse_channel_matrix(
     })
 }
 
-fn parse_tap(
-    parser: &mut Parser,
-    table: TableRef<'_, '_>,
-    key: &'static str,
-    path: &DiagnosticPath,
-) -> Option<SendTap> {
-    match parser.token(table, key, path)? {
-        "input" => Some(SendTap::Input),
-        "post_input_builtins" => Some(SendTap::PostInputBuiltins),
-        "post_simd1" => Some(SendTap::PostSimd1),
-        "post_dynamic" => Some(SendTap::PostDynamic),
-        "post_simd2_pre_fader" => Some(SendTap::PostSimd2PreFader),
-        "post_fader" => Some(SendTap::PostFader),
-        "post_matrix" => Some(SendTap::PostMatrix),
-        _ => {
-            parser.error_field(
-                table,
-                key,
-                path,
-                DiagnosticCode::InvalidEnum,
-                "invalid send tap",
-            );
-            None
-        }
-    }
-}
-
 fn parse_automation(
     parser: &mut Parser,
     table: TableRef<'_, '_>,
@@ -1420,10 +1301,10 @@ fn parse_target(
         &path,
     );
     let entity_id = parser.id(table, "entity_id", &path);
-    let rack = parse_rack_name(parser, table, "rack", &path);
+    let rack = parser.closed_token(table, "rack", &path, DiagnosticCode::InvalidEnum);
     let effect_id = parser.id(table, "effect_id", &path);
     let parameter_id = parser.u32(table, "parameter_id", &path);
-    let channel = parse_parameter_channel(parser, table, "channel", &path);
+    let channel = parser.closed_token(table, "channel", &path, DiagnosticCode::InvalidEnum);
     Some(AutomationTarget {
         entity_id: entity_id?,
         rack: rack?,
@@ -1431,29 +1312,6 @@ fn parse_target(
         parameter_id: parameter_id?,
         channel: channel?,
     })
-}
-
-fn parse_rack_name(
-    parser: &mut Parser,
-    table: TableRef<'_, '_>,
-    key: &'static str,
-    path: &DiagnosticPath,
-) -> Option<RackName> {
-    match parser.token(table, key, path)? {
-        "simd1" => Some(RackName::Simd1),
-        "dynamic" => Some(RackName::Dynamic),
-        "simd2" => Some(RackName::Simd2),
-        _ => {
-            parser.error_field(
-                table,
-                key,
-                path,
-                DiagnosticCode::InvalidEnum,
-                "expected simd1, dynamic, or simd2",
-            );
-            None
-        }
-    }
 }
 
 fn parse_segment(
@@ -1473,12 +1331,12 @@ fn parse_segment(
         ],
         &path,
     );
-    let shape = parse_shape(parser, table, "shape", &path);
+    let shape = parser.closed_token(table, "shape", &path, DiagnosticCode::InvalidEnum);
     let start_sample = parser.u64(table, "start_sample", &path);
     let end_sample = parser.u64(table, "end_sample", &path);
     let start_value = parser.f32(table, "start_value", &path);
     let end_value = parser.f32(table, "end_value", &path);
-    let unit = parse_unit(parser, table, "unit", &path);
+    let unit = parser.closed_token(table, "unit", &path, DiagnosticCode::UnitInvalid);
     Some(AutomationSegment {
         shape: shape?,
         start_sample: start_sample?,
@@ -1487,27 +1345,4 @@ fn parse_segment(
         end_value: end_value?,
         unit: unit?,
     })
-}
-
-fn parse_shape(
-    parser: &mut Parser,
-    table: TableRef<'_, '_>,
-    key: &'static str,
-    path: &DiagnosticPath,
-) -> Option<AutomationShape> {
-    match parser.token(table, key, path)? {
-        "step" => Some(AutomationShape::Step),
-        "linear" => Some(AutomationShape::Linear),
-        "exponential" => Some(AutomationShape::Exponential),
-        _ => {
-            parser.error_field(
-                table,
-                key,
-                path,
-                DiagnosticCode::InvalidEnum,
-                "expected step, linear, or exponential",
-            );
-            None
-        }
-    }
 }

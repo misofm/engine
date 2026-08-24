@@ -3,9 +3,8 @@
 use core::fmt::Write;
 
 use crate::{
-    Automation, AutomationSegment, AutomationShape, Effect, EffectQuality, LinkMode, MatrixOrPan,
-    ParameterChannel, ParameterUnit, Rack, RackName, RenderMode, SampleFormat, SendTap,
-    SessionTomlV1, validate::validate_session, value::write_f32,
+    Automation, AutomationSegment, Effect, MatrixOrPan, Rack, SessionTomlV1,
+    validate::validate_session, value::write_f32,
 };
 
 /// Produce canonical V1 TOML bytes as UTF-8 text with LF line endings and one final newline.
@@ -27,7 +26,7 @@ pub(crate) fn write_canonical(session: &SessionTomlV1) -> String {
     output.push_str("render_profile = { id = ");
     output.push_str(&quoted(session.render_profile.id.as_str()));
     output.push_str(", mode = ");
-    output.push_str(&quoted(render_mode(session.render_profile.mode)));
+    output.push_str(&quoted(session.render_profile.mode.token()));
     output.push_str(" }\n");
     output.push_str("output_profile = { id = ");
     output.push_str(&quoted(session.output_profile.id.as_str()));
@@ -36,7 +35,7 @@ pub(crate) fn write_canonical(session: &SessionTomlV1) -> String {
         ", channels = {}, sample_format = ",
         session.output_profile.channels
     );
-    output.push_str(&quoted(sample_format(session.output_profile.sample_format)));
+    output.push_str(&quoted(session.output_profile.sample_format.token()));
     output.push_str(" }\n");
     let _ = writeln!(
         output,
@@ -302,11 +301,11 @@ fn write_effect(output: &mut String, effect: &Effect) {
         }
     }
     output.push_str(", quality = ");
-    output.push_str(&quoted(quality(effect.quality)));
+    output.push_str(&quoted(effect.quality.token()));
     output.push_str(", bypass = ");
     output.push_str(if effect.bypass { "true" } else { "false" });
     output.push_str(", link_mode = ");
-    output.push_str(&quoted(link_mode(effect.link_mode)));
+    output.push_str(&quoted(effect.link_mode.token()));
     output.push_str(", params = [");
     let mut params: Vec<_> = effect.params.iter().collect();
     params.sort_by(|left, right| {
@@ -320,9 +319,9 @@ fn write_effect(output: &mut String, effect: &Effect) {
         }
         let _ = write!(output, "{{ parameter_id = {}", param.parameter_id);
         output.push_str(", channel = ");
-        output.push_str(&quoted(channel(param.channel)));
+        output.push_str(&quoted(param.channel.token()));
         output.push_str(", unit = ");
-        output.push_str(&quoted(unit(param.unit)));
+        output.push_str(&quoted(param.unit.token()));
         output.push_str(", value = ");
         let _ = write_f32(output, param.value);
         output.push_str(" }");
@@ -347,7 +346,7 @@ fn write_automation(output: &mut String, automation: &Automation) {
     output.push_str(", target = { entity_id = ");
     output.push_str(&quoted(automation.target.entity_id.as_str()));
     output.push_str(", rack = ");
-    output.push_str(&quoted(rack(automation.target.rack)));
+    output.push_str(&quoted(automation.target.rack.token()));
     output.push_str(", effect_id = ");
     output.push_str(&quoted(automation.target.effect_id.as_str()));
     let _ = write!(
@@ -356,7 +355,7 @@ fn write_automation(output: &mut String, automation: &Automation) {
         automation.target.parameter_id
     );
     output.push_str(", channel = ");
-    output.push_str(&quoted(channel(automation.target.channel)));
+    output.push_str(&quoted(automation.target.channel.token()));
     output.push_str(" }, segments = [");
     for (index, segment) in automation.segments.iter().enumerate() {
         if index != 0 {
@@ -369,7 +368,7 @@ fn write_automation(output: &mut String, automation: &Automation) {
 
 fn write_segment(output: &mut String, segment: &AutomationSegment) {
     output.push_str("{ shape = ");
-    output.push_str(&quoted(shape(segment.shape)));
+    output.push_str(&quoted(segment.shape.token()));
     let _ = write!(
         output,
         ", start_sample = {}, end_sample = {}",
@@ -380,7 +379,7 @@ fn write_segment(output: &mut String, segment: &AutomationSegment) {
     output.push_str(", end_value = ");
     let _ = write_f32(output, segment.end_value);
     output.push_str(", unit = ");
-    output.push_str(&quoted(unit(segment.unit)));
+    output.push_str(&quoted(segment.unit.token()));
     output.push_str(" }");
 }
 
@@ -393,7 +392,7 @@ fn write_route_source(output: &mut String, source: &crate::RouteSource) {
             output.push_str("{ kind = \"track\", track_id = ");
             output.push_str(&quoted(track_id.as_str()));
             output.push_str(", tap = ");
-            output.push_str(&quoted(tap(*source_tap)));
+            output.push_str(&quoted(source_tap.token()));
             output.push_str(" }");
         }
         crate::RouteSource::SubmixOutput { submix_id } => {
@@ -443,72 +442,4 @@ fn quoted(value: &str) -> String {
     }
     output.push('"');
     output
-}
-
-fn render_mode(value: RenderMode) -> &'static str {
-    match value {
-        RenderMode::SingleThread => "single_thread",
-        RenderMode::DependencyWaves => "dependency_waves",
-    }
-}
-fn sample_format(value: SampleFormat) -> &'static str {
-    match value {
-        SampleFormat::F32Planar => "f32_planar",
-    }
-}
-fn quality(value: EffectQuality) -> &'static str {
-    match value {
-        EffectQuality::Draft => "draft",
-        EffectQuality::Normal => "normal",
-        EffectQuality::High => "high",
-    }
-}
-fn link_mode(value: LinkMode) -> &'static str {
-    match value {
-        LinkMode::DualMono => "dual_mono",
-        LinkMode::Maximum => "maximum",
-        LinkMode::Average => "average",
-    }
-}
-fn channel(value: ParameterChannel) -> &'static str {
-    match value {
-        ParameterChannel::Left => "left",
-        ParameterChannel::Right => "right",
-        ParameterChannel::Both => "both",
-    }
-}
-fn unit(value: ParameterUnit) -> &'static str {
-    match value {
-        ParameterUnit::Db => "db",
-        ParameterUnit::Hz => "hz",
-        ParameterUnit::Milliseconds => "milliseconds",
-        ParameterUnit::Samples => "samples",
-        ParameterUnit::Linear => "linear",
-        ParameterUnit::Ratio => "ratio",
-    }
-}
-fn tap(value: SendTap) -> &'static str {
-    match value {
-        SendTap::Input => "input",
-        SendTap::PostInputBuiltins => "post_input_builtins",
-        SendTap::PostSimd1 => "post_simd1",
-        SendTap::PostDynamic => "post_dynamic",
-        SendTap::PostSimd2PreFader => "post_simd2_pre_fader",
-        SendTap::PostFader => "post_fader",
-        SendTap::PostMatrix => "post_matrix",
-    }
-}
-fn rack(value: RackName) -> &'static str {
-    match value {
-        RackName::Simd1 => "simd1",
-        RackName::Dynamic => "dynamic",
-        RackName::Simd2 => "simd2",
-    }
-}
-fn shape(value: AutomationShape) -> &'static str {
-    match value {
-        AutomationShape::Step => "step",
-        AutomationShape::Linear => "linear",
-        AutomationShape::Exponential => "exponential",
-    }
 }
