@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
+import { pathToFileURL } from "node:url";
 const root = new URL("../", import.meta.url);
 const hostUrl = new URL("hosts/miso-engine-host-web/web/miso-engine-v2-audio-worklet-host.js", root);
-const workletUrl = new URL("hosts/miso-engine-host-web/web/miso-engine-v2-audio-worklet.js", root);
+const workletUrl = process.env.MISO_WEB_WORKLET_TEST_MODULE === undefined
+  ? new URL("hosts/miso-engine-host-web/web/miso-engine-v2-audio-worklet.js", root)
+  : pathToFileURL(process.env.MISO_WEB_WORKLET_TEST_MODULE);
 
 const limits = Object.freeze({
   sessionTomlBytes: 4096,
@@ -421,7 +424,10 @@ function createFakeExports(quantum, backend = 0) {
   resources.setUint32(12, quantum, true);
   resources.setUint32(16, backend, true);
   for (let index = 0; index < 20; index += 1) resources.setBigUint64(32 + index * 8, 1n, true);
-  const calls = { render: [], source: [], seek: [], dispose: 0, sourceResult: 0 };
+  const calls = {
+    render: [], source: [], sourceIdBytes: [], seek: [], seekIdBytes: [], dispose: 0,
+    sourceResult: 0,
+  };
   const pointers = { 1: 2048, 2: 4096, 3: 5000, 5: 8192 };
   const capacities = { 1: 4096, 2: 64, 3: 2 * quantum * 4, 5: 2 * quantum * 4 };
   const exports = {
@@ -448,10 +454,12 @@ function createFakeExports(quantum, backend = 0) {
     },
     miso_engine_web_v1_source_submit: (...args) => {
       calls.source.push(args);
+      calls.sourceIdBytes.push(new Uint8Array(memory.buffer, pointers[2], args[1]).slice());
       return calls.sourceResult;
     },
     miso_engine_web_v1_source_seek: (...args) => {
       calls.seek.push(args);
+      calls.seekIdBytes.push(new Uint8Array(memory.buffer, pointers[2], args[1]).slice());
       return 0;
     },
     miso_engine_web_v1_dispose: () => {
@@ -467,6 +475,10 @@ async function testProcessor() {
   const originalRegister = globalThis.registerProcessor;
   const originalInstance = WebAssembly.Instance;
   const originalSampleRate = globalThis.sampleRate;
+  const originalTextEncoder = globalThis.TextEncoder;
+  const processorSessionToml = new originalTextEncoder().encode("format_version = 2");
+  const nonAsciiSourceId = "caf\u00e9-\u96ea-\ud83d\ude00";
+  const nonAsciiSourceIdUtf8 = new originalTextEncoder().encode(nonAsciiSourceId);
   let registered;
   let nextFake;
   let instanceCount = 0;
@@ -491,6 +503,7 @@ async function testProcessor() {
   globalThis.AudioWorkletProcessor = FakeProcessor;
   globalThis.registerProcessor = (_name, implementation) => { registered = implementation; };
   globalThis.sampleRate = 48000;
+  globalThis.TextEncoder = undefined;
   WebAssembly.Instance = class {
     constructor() {
       instanceCount += 1;
@@ -510,7 +523,7 @@ async function testProcessor() {
           backend,
           sampleRateHz: 48000,
           quantumFrames: 64,
-          sessionToml: new TextEncoder().encode("format_version = 2"),
+          sessionToml: processorSessionToml,
           limits,
         },
       });
@@ -655,7 +668,7 @@ async function testProcessor() {
       fake.calls.sourceResult = 6;
       const storage = new ArrayBuffer(32);
       const incoming = structuredClone({
-        tag: "miso.source.v1", requestId: 1, sourceId: "source", generation: 1n,
+        tag: "miso.source.v1", requestId: 1, sourceId: nonAsciiSourceId, generation: 1n,
         startFrame: 0n, sampleRateHz: 48000,
         planes: [new Float32Array(storage, 0, 2), new Float32Array(storage, 16, 2)],
         frames: 2, endOfRegion: false,
@@ -668,12 +681,23 @@ async function testProcessor() {
       assert.equal(response.message.planes[0].byteOffset, 0);
       assert.equal(response.message.planes[1].byteOffset, 16);
       assert.equal(response.message.planes[0].buffer, response.message.planes[1].buffer);
+      assert.deepEqual(
+        fake.calls.sourceIdBytes[0],
+        nonAsciiSourceIdUtf8,
+        "non-ASCII submit IDs are byte-identical to UTF-8 without TextEncoder in the worklet",
+      );
       processor.receive({
-        tag: "miso.seek.v1", requestId: 2, sourceId: "source", generation: 2n, sourceFrame: 12n,
+        tag: "miso.seek.v1", requestId: 2, sourceId: nonAsciiSourceId,
+        generation: 2n, sourceFrame: 12n,
       });
       assert.deepEqual(processor.port.posts.at(-1).message, {
         tag: "miso.ack.v1", requestId: 2, result: 0,
       });
+      assert.deepEqual(
+        fake.calls.seekIdBytes[0],
+        nonAsciiSourceIdUtf8,
+        "non-ASCII seek IDs are byte-identical to UTF-8 without TextEncoder in the worklet",
+      );
       processor.receive({ tag: "miso.dispose.v1", requestId: 3 });
       assert.equal(fake.calls.dispose, 1);
       assert.equal(processor.process([], [[new Float32Array(64), new Float32Array(64)]]), false);
@@ -719,6 +743,7 @@ async function testProcessor() {
     globalThis.AudioWorkletProcessor = originalProcessor;
     globalThis.registerProcessor = originalRegister;
     globalThis.sampleRate = originalSampleRate;
+    globalThis.TextEncoder = originalTextEncoder;
     WebAssembly.Instance = originalInstance;
   }
 }

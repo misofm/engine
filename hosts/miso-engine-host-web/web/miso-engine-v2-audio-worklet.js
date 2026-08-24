@@ -43,6 +43,64 @@ function positiveU64(value) {
   return typeof value === "bigint" && value > 0n && value <= 0xffffffffn;
 }
 
+function writeBoundedUtf8(value, memoryBuffer, pointer, capacity) {
+  let byteLength = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    let codePoint = value.charCodeAt(index);
+    if (codePoint >= 0xd800 && codePoint <= 0xdbff) {
+      const low = value.charCodeAt(index + 1);
+      if (low >= 0xdc00 && low <= 0xdfff) {
+        codePoint = 0x10000 + ((codePoint - 0xd800) << 10) + low - 0xdc00;
+        index += 1;
+      } else {
+        codePoint = 0xfffd;
+      }
+    } else if (codePoint >= 0xdc00 && codePoint <= 0xdfff) {
+      codePoint = 0xfffd;
+    }
+    byteLength += codePoint <= 0x7f ? 1 : codePoint <= 0x7ff ? 2 : codePoint <= 0xffff ? 3 : 4;
+    if (byteLength > capacity) return -1;
+  }
+
+  const destination = new Uint8Array(memoryBuffer, pointer, byteLength);
+  let offset = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    let codePoint = value.charCodeAt(index);
+    if (codePoint >= 0xd800 && codePoint <= 0xdbff) {
+      const low = value.charCodeAt(index + 1);
+      if (low >= 0xdc00 && low <= 0xdfff) {
+        codePoint = 0x10000 + ((codePoint - 0xd800) << 10) + low - 0xdc00;
+        index += 1;
+      } else {
+        codePoint = 0xfffd;
+      }
+    } else if (codePoint >= 0xdc00 && codePoint <= 0xdfff) {
+      codePoint = 0xfffd;
+    }
+
+    if (codePoint <= 0x7f) {
+      destination[offset] = codePoint;
+      offset += 1;
+    } else if (codePoint <= 0x7ff) {
+      destination[offset] = (codePoint >>> 6) | 0xc0;
+      destination[offset + 1] = (codePoint & 0x3f) | 0x80;
+      offset += 2;
+    } else if (codePoint <= 0xffff) {
+      destination[offset] = (codePoint >>> 12) | 0xe0;
+      destination[offset + 1] = ((codePoint >>> 6) & 0x3f) | 0x80;
+      destination[offset + 2] = (codePoint & 0x3f) | 0x80;
+      offset += 3;
+    } else {
+      destination[offset] = (codePoint >>> 18) | 0xf0;
+      destination[offset + 1] = ((codePoint >>> 12) & 0x3f) | 0x80;
+      destination[offset + 2] = ((codePoint >>> 6) & 0x3f) | 0x80;
+      destination[offset + 3] = (codePoint & 0x3f) | 0x80;
+      offset += 4;
+    }
+  }
+  return byteLength;
+}
+
 class MisoEngineV2AudioWorkletProcessor extends AudioWorkletProcessor {
   constructor(options) {
     super();
@@ -154,7 +212,6 @@ class MisoEngineV2AudioWorkletProcessor extends AudioWorkletProcessor {
       resourcePointer,
       224,
     );
-    this.encoder = new TextEncoder();
     this.resources = this.readResources();
     const status = this.readStatus();
     const expectedBackend = init.backend === "scalar" ? 0 : 1;
@@ -354,17 +411,21 @@ class MisoEngineV2AudioWorkletProcessor extends AudioWorkletProcessor {
       this.sticky(RESULT_INVALID_ARGUMENT, message.requestId ?? 0, message.planes);
       return;
     }
-    const id = this.encoder.encode(message.sourceId);
-    if (id.byteLength > this.sourceIdCapacity) {
+    const idLength = writeBoundedUtf8(
+      message.sourceId,
+      this.memoryBuffer,
+      this.sourceIdPointer,
+      this.sourceIdCapacity,
+    );
+    if (idLength < 0) {
       this.sticky(4, message.requestId, message.planes);
       return;
     }
-    new Uint8Array(this.memoryBuffer, this.sourceIdPointer, id.byteLength).set(id);
     message.planes.forEach((plane, channel) => {
       this.sourcePcm.set(plane, channel * this.quantumFrames);
     });
     const result = this.exports.miso_engine_web_v1_source_submit(
-      this.handle, id.byteLength, message.generation, message.startFrame, message.planes.length,
+      this.handle, idLength, message.generation, message.startFrame, message.planes.length,
       message.frames, message.endOfRegion ? 1 : 0,
     );
     this.acknowledge(message.requestId, result, message.planes);
@@ -378,16 +439,20 @@ class MisoEngineV2AudioWorkletProcessor extends AudioWorkletProcessor {
       this.sticky(RESULT_INVALID_ARGUMENT, message.requestId ?? 0);
       return;
     }
-    const id = this.encoder.encode(message.sourceId);
-    if (id.byteLength > this.sourceIdCapacity) {
+    const idLength = writeBoundedUtf8(
+      message.sourceId,
+      this.memoryBuffer,
+      this.sourceIdPointer,
+      this.sourceIdCapacity,
+    );
+    if (idLength < 0) {
       this.sticky(4, message.requestId);
       return;
     }
-    new Uint8Array(this.memoryBuffer, this.sourceIdPointer, id.byteLength).set(id);
     this.acknowledge(
       message.requestId,
       this.exports.miso_engine_web_v1_source_seek(
-        this.handle, id.byteLength, message.generation, message.sourceFrame,
+        this.handle, idLength, message.generation, message.sourceFrame,
       ),
     );
   }
