@@ -1,8 +1,9 @@
 const SAMPLE_RATE = 48000;
 const QUANTUM_FRAMES = 128;
+const CORPUS_FRAMES = QUANTUM_FRAMES * 3;
 const DEFAULT_RING_FRAMES = 5120;
 const STALL_FRAMES = DEFAULT_RING_FRAMES;
-const STALL_RENDER_FRAMES = STALL_FRAMES + QUANTUM_FRAMES;
+const STALL_RENDER_FRAMES = STALL_FRAMES;
 const REQUESTED_STALL_MS = 120;
 const MINIMUM_STALL_MS = 100;
 const PROCESSOR_NAME = "miso-engine-v2-audio-worklet";
@@ -75,6 +76,85 @@ function sourcePlanes(blockIndex) {
     right[frame] = -(start + frame + 1) / 16384;
   }
   return [left, right];
+}
+
+function corpusPlanes(description) {
+  const storage = new ArrayBuffer(QUANTUM_FRAMES * 2 * Float32Array.BYTES_PER_ELEMENT);
+  const left = new Float32Array(storage, 0, QUANTUM_FRAMES);
+  const right = new Float32Array(
+    storage,
+    QUANTUM_FRAMES * Float32Array.BYTES_PER_ELEMENT,
+    QUANTUM_FRAMES,
+  );
+  for (let frame = 0; frame < QUANTUM_FRAMES; frame += 1) {
+    left[frame] = description.leftBase + description.leftStep * frame;
+    right[frame] = 0;
+  }
+  return [left, right];
+}
+
+function corpusRequest(requestId, description) {
+  return {
+    requestId,
+    sourceId: "fixture-source",
+    generation: 1n,
+    startFrame: BigInt(description.startFrame),
+    sampleRateHz: SAMPLE_RATE,
+    planes: corpusPlanes(description),
+    frames: description.frames,
+    endOfRegion: description.final,
+  };
+}
+
+async function renderCorpusSegment(createHost, sessionToml, descriptions) {
+  const frames = descriptions.length * QUANTUM_FRAMES;
+  const context = new OfflineAudioContext(2, frames, SAMPLE_RATE);
+  const host = await createHost({
+    context,
+    quantumFrames: QUANTUM_FRAMES,
+    sessionToml,
+    limits: limits(frames),
+    simd128ModuleUrl: ARTIFACT_URL,
+    workletModuleUrl: WORKLET_URL,
+  });
+  if (host.backend !== "simd128") throw new Error("corpus worklet backend mismatch");
+  host.node.connect(context.destination);
+  for (const [index, description] of descriptions.entries()) {
+    const acknowledgement = await host.submitSource(corpusRequest(index + 1, description));
+    if (acknowledgement.result !== 0) throw new Error("corpus prefill rejected");
+  }
+  const rendered = await context.startRendering();
+  await host.dispose();
+  return [
+    new Float32Array(rendered.getChannelData(0)),
+    new Float32Array(rendered.getChannelData(1)),
+  ];
+}
+
+async function runCorpusQualification(createHost, sessionToml, source) {
+  if (source?.sourceId !== "fixture-source" || source?.sampleRateHz !== SAMPLE_RATE
+      || source?.quantumFrames !== QUANTUM_FRAMES || source?.blocks?.length !== 2) {
+    throw new Error("corpus fixture shape mismatch");
+  }
+  // Firefox does not expose OfflineAudioContext.suspend. Prefill two bounded fresh contexts and
+  // concatenate the oracle's exact [block 0, block 0, block 1] timeline instead of coordinating
+  // submissions with a main-realm-only API. The resulting 384 frames must still match the one
+  // frozen native digest bit for bit.
+  const first = await renderCorpusSegment(createHost, sessionToml, [source.blocks[0]]);
+  const rest = await renderCorpusSegment(createHost, sessionToml, source.blocks);
+  const pcm = [new Float32Array(CORPUS_FRAMES), new Float32Array(CORPUS_FRAMES)];
+  for (let channel = 0; channel < 2; channel += 1) {
+    pcm[channel].set(first[channel], 0);
+    pcm[channel].set(rest[channel], QUANTUM_FRAMES);
+  }
+  return { backend: "simd128", pcm };
+}
+
+function diagnosticJson(value) {
+  return JSON.stringify(
+    value,
+    (_key, item) => typeof item === "bigint" ? item.toString() : item,
+  );
 }
 
 async function typedUnsupportedAttestation(createHost, sessionToml) {
@@ -183,14 +263,13 @@ async function runStallQualification(createHost, sessionToml) {
     if (acknowledgement.result !== 0) throw new Error("stall prefill rejected");
   }
 
-  const suspended = context.suspend(STALL_FRAMES / SAMPLE_RATE);
+  // An exact-length offline context needs no non-portable suspend point: rendering begins before
+  // the main-realm fault and consumes all 40 prefilled quanta while that realm is unavailable.
   const rendering = context.startRendering();
   const measuredStallMs = busyWait(REQUESTED_STALL_MS);
-  await suspended;
+  const rendered = await rendering;
   const status = await host.status();
   await host.dispose();
-  await context.resume();
-  const rendered = await rendering;
   const actual = [rendered.getChannelData(0), rendered.getChannelData(1)];
 
   let noDropout = true;
@@ -221,15 +300,22 @@ async function runStallQualification(createHost, sessionToml) {
 }
 
 export async function runQualification() {
-  const [{ createMisoAudioWorkletHost }, correctnessModule, expectedResponse, stallResponse] =
+  const [
+    { createMisoAudioWorkletHost }, expectedResponse, sessionResponse, sourceResponse, stallResponse,
+  ] =
     await Promise.all([
       import("/artifacts/miso-engine-v2-audio-worklet-host.js"),
-      import("/fixture/browser-correctness.js"),
       fetch("/fixture/expected.json"),
+      fetch("/fixture/session.toml"),
+      fetch("/fixture/source.json"),
       fetch("/qualification/stall-session.toml"),
     ]);
-  if (!expectedResponse.ok || !stallResponse.ok) throw new Error("qualification fixture fetch failed");
+  if (!expectedResponse.ok || !sessionResponse.ok || !sourceResponse.ok || !stallResponse.ok) {
+    throw new Error("qualification fixture fetch failed");
+  }
   const expected = await expectedResponse.json();
+  const sessionToml = new TextEncoder().encode(await sessionResponse.text());
+  const source = await sourceResponse.json();
   const stallSessionToml = new TextEncoder().encode(await stallResponse.text());
   const simd128 = WebAssembly.validate(SIMD128_PROBE);
 
@@ -258,17 +344,24 @@ export async function runQualification() {
   }
   let correctness;
   try {
-    correctness = await correctnessModule.runMisoBrowserCorrectness();
+    correctness = {
+      runs: [
+        await runCorpusQualification(createMisoAudioWorkletHost, sessionToml, source),
+        await runCorpusQualification(createMisoAudioWorkletHost, sessionToml, source),
+      ],
+    };
   } catch (error) {
-    const response = await fetch("/fixture/session.toml");
-    const sessionToml = new TextEncoder().encode(await response.text());
     const [diagnostic, globals] = await Promise.all([
       diagnoseReady(sessionToml),
       diagnoseGlobals(),
     ]);
-    throw new Error(`corpus qualification failed: ${JSON.stringify({ error: { ...error }, diagnostic, globals })}`);
+    throw new Error(`corpus qualification failed: ${diagnosticJson({
+      error: { name: error?.name, message: error?.message, ...error }, diagnostic, globals,
+    })}`);
   }
-  const digests = await Promise.all(correctness.runs.map((run) => pcmDigest(run.pcm, 384)));
+  const digests = await Promise.all(
+    correctness.runs.map((run) => pcmDigest(run.pcm, CORPUS_FRAMES)),
+  );
   let stall;
   try {
     stall = await runStallQualification(createMisoAudioWorkletHost, stallSessionToml);
