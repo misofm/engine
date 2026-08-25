@@ -64,3 +64,21 @@ pin `-C target-feature=+avx2,+fma`, debug profile. Sweep driver: one mutation at
 | 143-P2-c | `PeakMagnitude` folds the raw signed value instead of `max(\|x\|)` | `effect-contract/src/live.rs` | `observation_lane` | RED — 3 of 9 fail; `max(\|x\|) over the window, non-negative` reports `0.0` where `9.5` was required. This is the precursor of E4's dead-meter bug |
 | 143-P2-d | `accumulate` drops the `armed` guard, so an unarmed tap still folds and publishes | `effect-contract/src/live.rs` | `observation_lane::disarming_all_stops_every_tap_without_disturbing_published_windows` | RED — a disarmed tap published sequence 2 at `50.0` |
 | 143-P2-e | a re-subscribe keeps the older `window_blocks` | `effect-contract/src/live.rs` | `observation_lane` | RED — 3 of 9 fail; the window closes a block early |
+
+## Issue #143 — summary of where each eval's red mutation is recorded
+
+| eval | recorded in |
+|---|---|
+| E1 digest identity per tap | `graph-compiler/tests/MUTATIONS.md` (143-E1) |
+| E2 bank-lane correctness | `compressor/tests/MUTATIONS.md` (143-E2-a), `graph-compiler/tests/MUTATIONS.md` (143-E2) |
+| E3 window exactness vs `applied_at_sample` | `graph-compiler/tests/MUTATIONS.md` (143-E3-bank, 143-E3-scalar), plus 143-P2-b/e here |
+| E4 app-shape frame | `host-web/MUTATIONS.md` |
+| E5 zero binding, zero cost | `graph-compiler/tests/MUTATIONS.md` (143-E5) |
+| E6 resident means resident | `compressor/tests/MUTATIONS.md` (143-E6-a/b), `true-peak-limiter/tests/MUTATIONS.md` (143-E6-c) |
+| E7 cost classes bench-backed | `graph-compiler/tests/MUTATIONS.md` (143-E7) |
+| E8 flood and misuse | `host-web/MUTATIONS.md` |
+| E9 metadata round-trip | `effect-package/tests/MUTATIONS.md` (143-E9-a), `host-web/MUTATIONS.md` |
+| E10 wire and identity accounting | `effect-package/tests/MUTATIONS.md` (143-E10-a/b) |
+| E11 transport never tears | `core/tests/MUTATIONS.md` (143-E11-a..d) |
+| E12 three-browser qualification | `host-web/MUTATIONS.md` |
+| E13 plan replacement | `graph-compiler/tests/MUTATIONS.md` (143-E13) |

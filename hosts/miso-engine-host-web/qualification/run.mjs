@@ -19,6 +19,10 @@ const MUTATIONS = [
   "attestation", "boot", "native-corpus-digest", "main-thread-stall",
   // Issue #137 E8/E6: the live-console row and the console load carried across the stall.
   "control-path-applied", "control-path-meter", "control-path-command", "stall-console-load",
+  // Issue #143 E12: the observation row. `observation-armed` is the eval's named red mutation --
+  // a run whose armed tap published nothing, which is exactly what a browser that lost the
+  // transport would produce.
+  "observation-armed", "observation-unsubscribe", "observation-identity", "observation-window",
 ];
 
 function option(name) {
@@ -71,6 +75,35 @@ function validate(browserName, result) {
   gate(browserName, "control-path", live?.telemetryFrames >= 1,
     "no render-telemetry frame arrived over a full window");
 
+  // Issue #143 E12: subscribe -> nonzero `trackGrDb` -> unsubscribe -> zero, with `firstSample`
+  // monotonic and the windows tiling. The two runs render the *same* sixteen blocks, so their
+  // audio must be identical: arming a declared tap may not move a sample.
+  const observation = result.observation;
+  gate(browserName, "observation", observation?.armed?.meterLeaseResult === 0
+    && observation?.armed?.subscribeResult === 0 && observation?.armed?.subscribeReason === 0
+    && observation?.armed?.bindings === 1 && observation?.armed?.frameSlot === 0
+    && observation?.armed?.windowBlocks === 2,
+  "the subscription was not acknowledged with a usable map");
+  gate(browserName, "observation", observation?.armed?.frames >= 1
+    && observation?.armed?.trackGrDbWidth === 1
+    && observation?.armed?.peakWidth === 4
+    && observation?.armed?.everyValueFinite === true,
+  "no usable observation frame arrived while the tap was armed");
+  gate(browserName, "observation-armed", observation?.armed?.maximumTrackGrDb > 0,
+    "an armed tap published no reduction at all");
+  gate(browserName, "observation", observation?.armed?.masterPresent === true
+    && observation?.armed?.masterMatchesTrack === true,
+  "the designated master did not report the track's own reading");
+  gate(browserName, "observation-window", observation?.armed?.firstSampleMonotonic === true
+    && observation?.armed?.windowsTile === true,
+  "observation windows did not advance monotonically and tile");
+  gate(browserName, "observation-unsubscribe", observation?.disarmed?.unsubscribeResult === 0
+    && observation?.disarmed?.unsubscribeBindings === 0
+    && observation?.disarmed?.maximumTrackGrDb === 0,
+  "an unsubscribed tap kept publishing");
+  gate(browserName, "observation-identity", observation?.identicalAudio === true,
+    "arming a declared tap moved a rendered sample");
+
   const stall = result.stall;
   // #137 E6: the frozen stall requirements are unchanged, and they are now met with the control
   // path and the meter fold both live across the fault.
@@ -101,6 +134,11 @@ function mutate(result, mutation) {
   if (mutation === "control-path-meter") copy.console.masterPeak = 0;
   if (mutation === "control-path-command") copy.console.commandAdmitted = 0;
   if (mutation === "stall-console-load") copy.stall.consoleMeterFrames = 0;
+  // Issue #143 E12's named red mutation: `observationArmed = 0`.
+  if (mutation === "observation-armed") copy.observation.armed.maximumTrackGrDb = 0;
+  if (mutation === "observation-unsubscribe") copy.observation.disarmed.maximumTrackGrDb = 1;
+  if (mutation === "observation-identity") copy.observation.identicalAudio = false;
+  if (mutation === "observation-window") copy.observation.armed.firstSampleMonotonic = false;
   return copy;
 }
 
@@ -125,6 +163,7 @@ function normalizedRow(browserName, browserVersion, outcome) {
       audioWorkletBoot: passed ? "pass" : "not-applicable",
       nativeCorpusDigest: passed ? "pass" : "not-applicable",
       controlPath: passed ? "pass" : "not-applicable",
+      observation: passed ? "pass" : "not-applicable",
       mainThreadStall: passed ? "pass" : "not-applicable",
     },
   };

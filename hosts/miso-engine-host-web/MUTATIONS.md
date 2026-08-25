@@ -73,3 +73,39 @@ The callgraph gate over the **shipped artifact** is green with the observation c
 `miso_engine_web_v1_meter_poll`'s closure: `closure=5 traps=2`, trap owner
 `AudioWorkletEngineHost::poll_meters` and nothing else, and no allocator, deallocator or drop glue
 anywhere in it.
+
+## Issue #143 E12 — the three-browser observation row
+
+`qualification/run.mjs --browser all --self-test-mutations --record-matrix`, Playwright 1.62.1
+headless Linux, over the shipped `simd128` artifact.
+
+```
+chromium: all qualification gates passed (151.0.7922.34)
+firefox:  all qualification gates passed (153.0)
+webkit:   all qualification gates passed (26.5)
+```
+
+The row subscribes to the compressor's declared tap, renders sixteen blocks, and requires:
+`trackGrDb` positive and finite, `masterGrDb` equal to the designated track's own reading,
+`firstSample` strictly monotonic with the windows tiling, an unsubscribe that actually stops the
+traffic, and the armed and unarmed renders of the same sixteen blocks producing **bit-identical
+audio**. Four self-test mutations run against every browser's real result:
+
+| mutation | gate |
+|---|---|
+| `observation-armed` (the eval's named case, `observationArmed = 0`) | `an armed tap published no reduction at all` |
+| `observation-unsubscribe` | `an unsubscribed tap kept publishing` |
+| `observation-identity` | `arming a declared tap moved a rendered sample` |
+| `observation-window` | `observation windows did not advance monotonically and tile` |
+
+### And the same mutation against a real engine, in a real browser
+
+The self-test mutates a *result*. To prove the gate catches a mutated *engine*, the
+`ObservationLaneV1::accumulate` armed guard was changed to `return;` — so no armed tap ever
+accumulates — the browser artifact was rebuilt from that tree, and chromium was re-qualified:
+
+```
+Error: chromium: observation-armed: an armed tap published no reduction at all
+```
+
+Reverted in the same session; the recorded `results.json` and matrix are from the unmutated tree.

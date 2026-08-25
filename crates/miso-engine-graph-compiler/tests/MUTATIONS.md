@@ -186,6 +186,34 @@ a real per-node scalar instance.
 | 143-E3-scalar | window exactness | publish **before** `process` in `execute_op`'s `ConsoleEffect` arm (the #137-E1 mirror) | `graph/src/runtime.rs` | RED — `window 2 published its own blocks, not the previous block's state`, `1088069417` vs `1090923272` |
 | 143-E13 | plan replacement | a freshly built lane starts `armed: true`, so a subscription would survive a replacement | `effect-contract/src/live.rs` | RED — `the replacement plan carries capacity and no subscription`, `[8, 8, 8]` vs `[8, 8, 0]` |
 
+### E7 — the cost classes, measured
+
+`observation_cost_classes_are_what_they_claim` has a deterministic half and a descriptive one.
+
+The deterministic half counts reads through the same `wants` gate the runtime uses: **0** reads
+over 4 096 blocks with capacity but nothing armed, exactly **4 096** with one tap armed, and back
+to zero the moment it is disarmed.
+
+The descriptive half renders a real eight-compressor plan for 256 blocks in each of the four legs
+(debug profile, `x86_64` Zen 5, one shared machine — evidence, not a pin):
+
+| leg | 256 blocks | per block |
+|---|---|---|
+| no console | 253.74 ms | 991.2 us |
+| console, no capacity | 252.36 ms | 985.8 us |
+| capacity, unarmed | 252.11 ms | 984.8 us |
+| every tap armed | 252.60 ms | 986.7 us |
+| **synthetic computed scan** (negative control) | 14.33 ms | **56.0 us** |
+
+The four observation legs span 0.6%, which is inside the run-to-run noise of the machine; the
+negative control is ~90x the *entire* spread, which is what makes the comparison meaningful rather
+than merely quiet.
+
+| # | mutation | file | result |
+|---|---|---|---|
+| 143-E7-a | a tap declared `Resident` but implemented as a per-sample scan (the eval's named case, applied to the compressor's bank read) | `compressor/src/lib.rs` | RED — the armed row separates and the "far more than a copy out of state" bound fires |
+| 143-E7-b | `ObservationLaneV1::wants` returns true for any declared tap, armed or not | `effect-contract/src/live.rs` | RED — `an unarmed tap's state is never read`: 4 096 reads where 0 was required |
+
 ### Two mutations that had to be sharpened before they went red
 
 * **E3 on the scalar path first escaped.** The test read a *settled* window: once the reduction

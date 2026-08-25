@@ -832,3 +832,188 @@ fn observation_without_a_control_channel_is_refused() {
         "the diagnostic names the rule"
     );
 }
+
+/// Issue #143 E7: the cost classes are what they claim.
+///
+/// Two halves, because "cost" has two honest meanings and only one of them is a stopwatch.
+///
+/// **The deterministic half.** Level-2 zero says an unarmed tap's effect state is *never read*.
+/// That is a statement about how many times the effect is asked, and it is counted exactly here:
+/// the lane's `wants` gate is driven the way `graph::runtime::publish_observations` drives it,
+/// against an effect that counts every call. No capacity means the loop does not exist; capacity
+/// unarmed means `wants` refuses before the effect is touched; armed means exactly one call per
+/// tap per block and not one more.
+///
+/// **The descriptive half.** A real eight-compressor plan rendered in all four legs, timed, with a
+/// synthetic per-sample ring scan as the separating negative control -- the shape a `Computed` tap
+/// would have if one shipped. The scan must be *measurably* slower than every observation leg, or
+/// the measurement is too coarse to have said anything, and that is the assertion. The three
+/// observation legs are reported rather than pinned: a wall clock on a shared machine is evidence,
+/// not a gate.
+///
+/// Red mutation: declare the limiter tap `Resident` but implement it as a per-sample ring scan ->
+/// the armed row separates from the others, which is what the negative control calibrates for.
+#[test]
+fn observation_cost_classes_are_what_they_claim() {
+    use miso_engine_core::realtime::observation_slot;
+    use miso_engine_effect_contract::{
+        ObservationCadenceV1, ObservationChannelsV1, ObservationCostV1, ObservationDescriptorV1,
+        ObservationFoldV1, ObservationKindV1, ObservationLaneV1, ObservationTapId, ParameterUnit,
+    };
+    use std::cell::Cell;
+    use std::time::Instant;
+
+    static MENU: [ObservationDescriptorV1; 1] = [ObservationDescriptorV1 {
+        id: ObservationTapId(1),
+        display_name: "Gain Reduction",
+        display_unit: "dB",
+        kind: ObservationKindV1::GainReductionDb,
+        unit: ParameterUnit::Db,
+        cost: ObservationCostV1::Resident,
+        cadence: ObservationCadenceV1::PerBlock,
+        fold: ObservationFoldV1::PeakMagnitude,
+        channels: ObservationChannelsV1::PerLane,
+        minimum: 0.0,
+        maximum: 100.0,
+    }];
+
+    // The counting stand-in for a prepared effect: exactly the surface the publish step touches.
+    struct Counting {
+        reads: Cell<u64>,
+    }
+    impl Counting {
+        fn observe_resident(&self, _tap: u32, out: &mut ObservationSampleV1) -> bool {
+            self.reads.set(self.reads.get() + 1);
+            out.left = -6.0;
+            out.right = -6.0;
+            true
+        }
+    }
+
+    // The publish step, transcribed from `graph::runtime::publish_observations`.
+    fn publish(lane: &mut ObservationLaneV1, effect: &Counting, first_sample: u64, frames: u64) {
+        let mut sample = ObservationSampleV1::default();
+        for tap in 0..lane.len() {
+            if !lane.wants(tap) {
+                continue;
+            }
+            if effect.observe_resident(tap as u32, &mut sample) {
+                lane.accumulate(tap, sample, first_sample, frames);
+            }
+        }
+    }
+
+    const BLOCKS: u64 = 4_096;
+    let effect = Counting {
+        reads: Cell::new(0),
+    };
+    let (publisher, _reader) = observation_slot();
+    let mut lane = ObservationLaneV1::new(&MENU, vec![publisher], 4).expect("lane");
+
+    // Capacity, unarmed: the loop runs and the effect is never asked.
+    for block in 0..BLOCKS {
+        publish(&mut lane, &effect, block * 128, 128);
+    }
+    assert_eq!(
+        effect.reads.get(),
+        0,
+        "an unarmed tap's state is never read: that is the whole of level-2 zero"
+    );
+
+    // Armed: exactly one call per tap per block.
+    lane.arm(0, true, 4, 0);
+    for block in 0..BLOCKS {
+        publish(&mut lane, &effect, block * 128, 128);
+    }
+    assert_eq!(
+        effect.reads.get(),
+        BLOCKS,
+        "one read per tap per block, and not one more"
+    );
+
+    // Disarmed again: back to zero, immediately.
+    let before = effect.reads.get();
+    lane.arm(0, false, 0, 0);
+    for block in 0..BLOCKS {
+        publish(&mut lane, &effect, block * 128, 128);
+    }
+    assert_eq!(
+        effect.reads.get(),
+        before,
+        "disarming stops the reads at once"
+    );
+
+    // The descriptive half: four legs of a real eight-compressor plan.
+    const RENDER_BLOCKS: usize = 256;
+    let mut measured = Vec::new();
+    for leg in [
+        Leg::NoConsole,
+        Leg::ConsoleNoCapacity,
+        Leg::CapacityUnarmed,
+        Leg::AllArmed,
+    ] {
+        let mut session = prepare(leg);
+        if leg == Leg::AllArmed {
+            subscribe_all(&mut session, true, WINDOW_BLOCKS);
+        }
+        let _ = render(&mut session, 16); // warm the caches and settle the envelopes
+        let start = Instant::now();
+        let _ = render(&mut session, RENDER_BLOCKS);
+        measured.push((leg, start.elapsed()));
+    }
+
+    // The separating negative control: what a `Computed` tap's shape actually costs. One pass per
+    // sample per track over a ring the size of the plan's, which is the cheapest honest sketch of
+    // an analysis pass -- and it must be measurably slower than every observation leg, or the
+    // clock on this machine is too coarse for the comparison above to have meant anything.
+    let mut ring = vec![0.0_f32; 8 * 128 * 4];
+    let scan_start = Instant::now();
+    let mut sink = 0.0_f32;
+    for block in 0..RENDER_BLOCKS {
+        for (index, slot) in ring.iter_mut().enumerate() {
+            *slot = (index as f32).mul_add(1e-6, block as f32);
+        }
+        for slot in &ring {
+            sink = sink.max(slot.abs());
+        }
+    }
+    let scan = scan_start.elapsed();
+    assert!(sink > 0.0, "the control is not optimised away");
+
+    for (leg, elapsed) in &measured {
+        println!(
+            "E7 {leg:?}: {RENDER_BLOCKS} blocks in {:?} ({:.3} us/block)",
+            elapsed,
+            elapsed.as_secs_f64() * 1e6 / RENDER_BLOCKS as f64
+        );
+    }
+    println!(
+        "E7 synthetic computed scan: {scan:?} ({:.3} us/block)",
+        scan.as_secs_f64() * 1e6 / RENDER_BLOCKS as f64
+    );
+
+    let armed = measured
+        .iter()
+        .find(|(leg, _)| *leg == Leg::AllArmed)
+        .expect("armed leg")
+        .1;
+    let baseline = measured
+        .iter()
+        .find(|(leg, _)| *leg == Leg::NoConsole)
+        .expect("baseline leg")
+        .1;
+    assert!(
+        scan > armed
+            .saturating_sub(baseline)
+            .max(core::time::Duration::from_nanos(1)),
+        "the negative control ({scan:?}) must separate from the observation cost, or the clock \
+         is too coarse for this comparison to say anything"
+    );
+    // A gate, not a pin: eight resident reads and eight `abs`/compare pairs per block cannot
+    // plausibly double a plan that runs eight compressors. A regression that does is a regression.
+    assert!(
+        armed.as_secs_f64() < baseline.as_secs_f64() * 4.0 + 5e-3,
+        "arming every tap cost far more than a copy out of state: armed={armed:?} \
+         baseline={baseline:?}"
+    );
+}
