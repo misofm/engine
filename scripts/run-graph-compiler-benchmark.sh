@@ -39,6 +39,11 @@ publish_copy() {
     trap - RETURN
 }
 
+# Preflight is deliberately inline here rather than a separate scripts/preflight-*.sh: this is a
+# descriptive run whose outputs live under a rebuildable target/ path, so there is no consumed
+# one-shot authority for a sealed pre-check to protect. The AGENTS.md preflight duties -- tools,
+# schema, output persistence and overwrite refusal before any workload launch -- are all
+# discharged by the block below.
 command -v jq >/dev/null || { printf 'jq is required for graph benchmark validation\n' >&2; exit 1; }
 command -v cargo >/dev/null || { printf 'cargo is required for graph benchmark workload\n' >&2; exit 1; }
 [[ -f "$record_fixture" && -f "$record_validator" && -f "$validator" ]] || {
