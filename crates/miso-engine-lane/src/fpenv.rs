@@ -204,21 +204,28 @@ pub fn write_fp_control_word(value: FpControlWord) {
 /// Two words with the same control bits round and flush identically; they may still differ in the
 /// sticky exception flags a previous operation left behind. Attestation compares these; restoration
 /// never does.
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #[inline]
 #[must_use]
 pub fn fp_control_bits(word: FpControlWord) -> FpControlWord {
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-    {
-        word & MXCSR_CONTROL_MASK
-    }
-    #[cfg(target_arch = "aarch64")]
-    {
-        word & FPCR_CONTROL_MASK
-    }
-    #[cfg(not(any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")))]
-    {
-        word
-    }
+    word & MXCSR_CONTROL_MASK
+}
+
+/// The control-state half of a floating-point control word.
+#[cfg(target_arch = "aarch64")]
+#[inline]
+#[must_use]
+pub fn fp_control_bits(word: FpControlWord) -> FpControlWord {
+    word & FPCR_CONTROL_MASK
+}
+
+/// The control-state half of a floating-point control word; this target has none, so the unit
+/// value passes through.
+#[cfg(not(any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")))]
+#[inline]
+#[must_use]
+pub fn fp_control_bits(word: FpControlWord) -> FpControlWord {
+    word
 }
 
 /// Whether this thread is currently in the canonical floating-point control state.
@@ -226,10 +233,23 @@ pub fn fp_control_bits(word: FpControlWord) -> FpControlWord {
 /// This is what a render entry's session-start attestation asks after installing the guard, and
 /// what a host asks if it wants to check the state it is about to render in. Sticky exception flags
 /// are ignored; see [`fp_control_bits`].
+#[cfg(any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64"))]
 #[inline]
 #[must_use]
 pub fn in_canonical_fp_environment() -> bool {
     fp_control_bits(read_fp_control_word()) == fp_control_bits(canonical_fp_control_word())
+}
+
+/// Whether this thread is currently in the canonical floating-point control state.
+///
+/// Always `true` on a target with no floating-point control word: the WebAssembly core
+/// specification fixes round-to-nearest-even and full subnormal arithmetic, and offers no mode
+/// that could select anything else.
+#[cfg(not(any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")))]
+#[inline]
+#[must_use]
+pub fn in_canonical_fp_environment() -> bool {
+    true
 }
 
 /// The canonical control word for this target.
@@ -452,10 +472,6 @@ pub fn attest_fp_environment() -> Result<(), FpEnvironmentRejection> {
 ///
 /// Never on this target.
 #[cfg(not(any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")))]
-#[expect(
-    clippy::unnecessary_wraps,
-    reason = "one signature on every target; the x86 and AArch64 forms can fail"
-)]
 pub fn attest_fp_environment() -> Result<(), FpEnvironmentRejection> {
     let _pinned = CanonicalFpEnv::enter();
     Ok(())
