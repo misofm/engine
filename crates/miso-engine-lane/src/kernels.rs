@@ -142,6 +142,87 @@ pub fn svf_block<L: Lane>(io: &mut [f32], frames: usize, c: &SvfCoef<L>, s: &mut
     *s = state;
 }
 
+/// `S` independent cascades of `D` [`svf_block`] sections each, run in one shared frame loop
+/// (issue #163 phase 3).
+///
+/// # Why this exists
+///
+/// The TPT recurrence is first-order: frame `n`'s `ic1`/`ic2` are frame `n + 1`'s inputs. Within
+/// one filter the block loop is therefore a serial dependency chain whose period is the *latency*
+/// of `sub -> fma -> add -> add -> flush`, while the frame body issues about a dozen vector
+/// operations that the FMA ports could retire in a third of that. A lone chain leaves the vector
+/// units idle most of the window -- which is why [`svf_block`] at `Simd4` and at `Simd8` take the
+/// same wall time per chain-frame on the bench host. The kernel is latency-bound, not width-bound,
+/// and the only cure is to have more independent recurrences in flight.
+///
+/// This kernel supplies them from the two places a bank has them: `S` **independent streams**
+/// (a bank's left and right channels, which carry independent state by definition of dual-mono)
+/// and `D` **cascade sections**, whose integrators are independent of each other even though their
+/// audio is not -- section `k`'s state at frame `n + 1` depends on section `k`'s state at frame
+/// `n`, never on section `k - 1`'s. Section `k - 1`'s *output* at frame `n` feeds section `k` at
+/// the same frame, so the cascade is a forward chain inside the frame body and not a second
+/// loop-carried dependency. `S * D` recurrences are therefore live at once.
+///
+/// `D` is [`Lane::SVF_CASCADE_DEPTH`], a per-backend constant fixed by measurement, not a runtime
+/// knob: past the register file the compiler spills and the win reverses (measured; the table is
+/// on that constant).
+///
+/// # What it does not change
+///
+/// Each `(stream, section)` chain runs [`svf_block`]'s frozen operation order, in that order, on
+/// its own values. This function *is* `S * D` copies of that loop body with the loops merged and
+/// the intermediate section outputs kept in registers instead of round-tripping through `io` --
+/// and an `f32` store followed by an `f32` load of the same slot is the identity, so even that is
+/// bit-preserving rather than merely close. Nothing is reassociated and no value crosses between
+/// streams. Gate G2 pins it as an identity against a chain of [`svf_block`] calls
+/// (`tests/g2_kernel_identity.rs`).
+///
+/// # Contract
+///
+/// The `S` blocks are distinct buffers of `frames * L::WIDTH` samples. `c[t][k]` and `s[t][k]` are
+/// the coefficients and integrators of section `k` of stream `t`, in cascade order. Aliasing is
+/// unrepresentable: the blocks arrive as `&mut`, and the coefficient and state sets are owned
+/// arrays.
+#[inline(always)]
+pub fn svf_cascade_interleaved<L: Lane, const S: usize, const D: usize>(
+    io: [&mut [f32]; S],
+    frames: usize,
+    c: &[[SvfCoef<L>; D]; S],
+    s: &mut [[SvfState<L>; D]; S],
+) {
+    let width = L::WIDTH;
+    let span = frames * width;
+    debug_assert!(io.iter().all(|block| block.len() == span));
+    // Truncating once, outside the loop, is what lets the frame indexing below carry no per-frame
+    // bounds branch: every stream then has exactly `span` samples.
+    let io = io.map(|block| &mut block[..span]);
+    let mut state = *s;
+    let nc1: [[L; D]; S] =
+        core::array::from_fn(|stream| core::array::from_fn(|section| c[stream][section].c1.neg()));
+    for frame in 0..frames {
+        let base = frame * width;
+        for stream in 0..S {
+            let slot = &mut io[stream][base..base + width];
+            let mut x = L::load(slot);
+            for section in 0..D {
+                let coefficients = &c[stream][section];
+                let (v1, v2) = svf_step(
+                    x,
+                    nc1[stream][section],
+                    coefficients.a2,
+                    coefficients.a3,
+                    &mut state[stream][section],
+                );
+                x = coefficients
+                    .m2
+                    .fma(v2, coefficients.m1.fma(v1, coefficients.m0.mul(x)));
+            }
+            x.store(slot);
+        }
+    }
+    *s = state;
+}
+
 /// One frame of [`svf_block`]'s recurrence, returning the band-pass and low-pass taps.
 ///
 /// **It is a per-frame step helper for a caller that owns its own frame loop, and it duplicates

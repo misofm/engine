@@ -235,3 +235,20 @@ operations even unaided). Conclusion: no deterministic red exists for the barrie
 it is defense-in-depth against future codegen, its necessity evidenced by the recorded pre-barrier
 release failure of the un-anchored lane case, not by a standing gate. Do not delete it on the
 strength of a green sweep; this record is the reason the sweep is green without it.
+
+## G2 `g2_interleaved_cascade_equals_a_chain_of_blocks` (issue #163 phase 3)
+
+The gate asserts that `svf_cascade_interleaved` is bit-for-bit a chain of `svf_block` calls -- the
+shape the parametric EQ ran before phase 3 -- in both the audio it writes and the integrator words
+it leaves behind, at every width and at every depth that divides a four-section cascade.
+
+Red mutations run against it, each reverted after it was seen to fail:
+
+| mutation in `kernels.rs::svf_cascade_interleaved`            | result |
+|--------------------------------------------------------------|--------|
+| `&mut state[stream][section]` -> `&mut state[stream][section % 1]` (collapse every section's integrators onto slot 0) | FAILED |
+| `&c[stream][section]` -> `&c[stream][(section + 1) % D]` (rotate the coefficient sets within a pass) | FAILED |
+| output mix `m2.fma(v2, ..)` -> `m2.mul(v2).add(..)` (reassociate one fused multiply-add) | FAILED |
+
+The third is the phase-3 twin of the `svf_block` reassociation mutation above: it is the one that
+proves the gate is an identity and not a tolerance.

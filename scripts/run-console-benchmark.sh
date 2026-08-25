@@ -15,7 +15,11 @@
 # rows, a meters arm and an observation arm join the stream, and the run is admissible under
 # preconditions the earlier records were never held to -- so its numbers are a new authority
 # beside the issue-149 ones and not a continuation of them. Every directory keeps the same
-# refusal-to-overwrite discipline, so none of them can be quietly re-run. `--issue163-phase4`
+# refusal-to-overwrite discipline, so none of them can be quietly re-run. `--issue163-phase3`
+# writes to `artifacts/issue163-phase3` on the same terms as `--issue163-phase4` below: phase 3
+# (bank interleave) is class A throughout, so every workload's output digest is the phase-1 digest
+# to the bit, and the arm exists so that the interleaved tree's numbers describe the interleaved
+# tree. `--issue163-phase4`
 # writes to `artifacts/issue163-phase4` and is a *re-measurement* of the phase-1 subject: phase 4
 # is class A throughout, so every workload's output digest is the phase-1 digest to the bit and
 # the two records are directly comparable row by row. It gets its own directory anyway, for the
@@ -38,11 +42,12 @@ if [[ "$#" == 1 ]]; then
         --phase3) phase_directory=issue149-phase3 ;;
         --issue163-phase0) phase_directory=issue163-phase0 ;;
         --issue163-phase1) phase_directory=issue163-phase1 ;;
+        --issue163-phase3) phase_directory=issue163-phase3 ;;
         --issue163-phase4) phase_directory=issue163-phase4 ;;
-        *) printf 'usage: %s [--phase2|--phase3|--issue163-phase0|--issue163-phase1|--issue163-phase4]\n' "$0" >&2; exit 2 ;;
+        *) printf 'usage: %s [--phase2|--phase3|--issue163-phase0|--issue163-phase1|--issue163-phase3|--issue163-phase4]\n' "$0" >&2; exit 2 ;;
     esac
 elif [[ "$#" != 0 ]]; then
-    printf 'usage: %s [--phase2|--phase3|--issue163-phase0|--issue163-phase1|--issue163-phase4]\n' "$0" >&2
+    printf 'usage: %s [--phase2|--phase3|--issue163-phase0|--issue163-phase1|--issue163-phase3|--issue163-phase4]\n' "$0" >&2
     exit 2
 fi
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
