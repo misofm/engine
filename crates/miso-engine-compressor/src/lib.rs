@@ -787,8 +787,24 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedCompressorBank<L> {
         let lanes = L::WIDTH;
         let frames = block.frames as usize;
         // The pre-audit guard was four inline conditions that indexed the automation offsets
-        // before checking them and accepted `frames == 0`. 83c deferred the shared validator to
-        // #95; until it lands this is the strengthened form, and it rejects rather than indexes.
+        // before checking them and accepted `frames == 0`. This is the strengthened form: it
+        // rejects rather than indexes.
+        //
+        // #95 landed and `miso_engine_effect_contract::validate_automation_block` now exists,
+        // but it is deliberately NOT adopted here, for two independent reasons.
+        //
+        // 1. Different subject. This guard checks the *bank block shape* -- width, lane count,
+        //    buffer lengths and the per-lane `automation_offsets` array -- none of which the
+        //    shared validator knows about. Only `frames == 0` and `frames > quantum` overlap.
+        //    Span *content* is validated per lane by `apply_automation`, below.
+        // 2. Opposite failure semantics. `apply_automation` drops an invalid span, counts it in
+        //    `ProcessReport::invalid_spans`, and still applies the valid spans of the same block;
+        //    `validate_automation_block` rejects the whole block on the first invalid span. The
+        //    two also disagree on what "valid" is -- this effect accepts only a `Point` at
+        //    exactly `first_sample` and rejects `ParameterChannel::Both` outright, while the
+        //    shared validator admits Step/Linear/Exponential and *requires* `Both` for
+        //    `ParameterChannelPolicy::Shared`. Adopting it would change both rendered PCM and
+        //    the reported `invalid_spans` for any block mixing valid and invalid spans.
         if block.width != self.metadata.width
             || lanes != self.metadata.width.lanes() as usize
             || frames == 0
