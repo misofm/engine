@@ -57,6 +57,17 @@ most 1.02% on any row.
   claim is still per bank, still observed on a block that was actually run, and still compared over
   the same integrator words.
 
+## One row that moved and should not be read as a regression
+
+`console_observation.paired_arm_delta_median_ns` — phase 4's "arming an unarmed observation costs
++20/+160 ns" figure — reads +773/+1283 ns here. Phase 3 changes nothing about arming, and the run's
+own noise control says so: `paired_capacity_delta_median_ns`, which pairs the same way against a
+change that should cost nothing, moved −461/−1071 ns in the same two rounds. Both quantities are
+paired medians of order 1 µs on a 95 µs block, with opposite signs, which is the signature of the
+paired-median noise envelope rather than of a cost. Phase 4's own rounds already disagreed with each
+other by 8x on this row (20 vs 160 ns). `bit_identity` (`absent == unarmed == armed`, asserted
+in-run) and all three observation digests are unchanged.
+
 ## Class A
 
 Every one of the nine workloads above reports the **same `output_sha256` as phase 4**, which is the
