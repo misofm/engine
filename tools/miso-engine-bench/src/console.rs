@@ -817,17 +817,57 @@ fn backend_name(backend: Backend) -> &'static str {
     }
 }
 
+/// The nine runner-supplied metadata names, in the order they appear in a record.
+const METADATA_NAMES: [&str; 9] = [
+    "MISO_ENGINE_BENCH_CPU_MODEL",
+    "MISO_ENGINE_BENCH_GOVERNOR_OR_POWER_MODE",
+    "MISO_ENGINE_BENCH_RUST_VERSION",
+    "MISO_ENGINE_BENCH_LLVM_VERSION",
+    "MISO_ENGINE_BENCH_TARGET_TRIPLE",
+    "MISO_ENGINE_BENCH_TARGET_FEATURES",
+    "MISO_ENGINE_BENCH_PROFILE",
+    "MISO_ENGINE_BENCH_BACKGROUND_LOAD_NOTE",
+    "MISO_ENGINE_BENCH_CANDIDATE_COMMIT",
+];
+
+/// The record-side name of a metadata variable.
+fn metadata_key(name: &str) -> &str {
+    name.strip_prefix("MISO_ENGINE_BENCH_")
+        .expect("every metadata name carries the shared prefix")
+}
+
+/// The sorted list of metadata names this run could not resolve.
+///
+/// #104 F2: a runner that forgets to export a name produced records whose every metadata field was
+/// null and which still passed validation. Naming the gaps in the record is what makes a silent
+/// export failure visible instead of invisible.
+fn missing_metadata(metadata: &Metadata) -> Vec<String> {
+    let mut missing: Vec<String> = METADATA_NAMES
+        .iter()
+        .filter(|name| metadata.var(name).is_err())
+        .map(|name| metadata_key(name).to_ascii_lowercase())
+        .collect();
+    missing.sort();
+    missing
+}
+
 fn metadata_fields(metadata: &Metadata) -> String {
     let field = |name: &str| match metadata.var(name) {
         Ok(value) => format!("\"{}\"", json_escape(&value)),
         Err(_) => "null".to_string(),
     };
+    let missing = missing_metadata(metadata)
+        .into_iter()
+        .map(|name| format!("\"{name}\""))
+        .collect::<Vec<_>>()
+        .join(",");
     format!(
         concat!(
             "\"cpu_model\":{cpu},\"os\":\"{os}\",\"governor_or_power_mode\":{governor},",
             "\"rust_version\":{rust},\"llvm_version\":{llvm},\"target_triple\":{triple},",
             "\"target_features\":{features},\"profile\":{profile},",
             "\"background_load_note\":{load},\"candidate_commit\":{commit},",
+            "\"missing_metadata\":[{missing}],",
         ),
         cpu = field("MISO_ENGINE_BENCH_CPU_MODEL"),
         os = std::env::consts::OS,
@@ -839,6 +879,7 @@ fn metadata_fields(metadata: &Metadata) -> String {
         profile = field("MISO_ENGINE_BENCH_PROFILE"),
         load = field("MISO_ENGINE_BENCH_BACKGROUND_LOAD_NOTE"),
         commit = field("MISO_ENGINE_BENCH_CANDIDATE_COMMIT"),
+        missing = missing,
     )
 }
 
