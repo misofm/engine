@@ -2,12 +2,24 @@
 # Sole exactly-once Issue-149 console qualification timing entrypoint. Do not invoke its binary
 # directly: the runner is what supplies the round marker and the host metadata, and a direct
 # invocation produces a record whose provenance is a guess.
+#
+# One optional argument, `--phase2`, moves the artifact directory to `artifacts/issue149-phase2`
+# and changes nothing else. Phase 1's record is a consumed one-shot authority: it describes the
+# tree that produced it, and the sealed fast dB tier (#144 item 5) deliberately moves the rendered
+# bits it measured, so a phase-2 number belongs beside it rather than on top of it. Both
+# directories keep the same refusal-to-overwrite discipline, so neither can be quietly re-run.
 set -euo pipefail
-[[ "$#" == 0 ]] || { printf 'usage: %s\n' "$0" >&2; exit 2; }
+phase_directory=issue149
+if [[ "$#" == 1 && "$1" == "--phase2" ]]; then
+    phase_directory=issue149-phase2
+elif [[ "$#" != 0 ]]; then
+    printf 'usage: %s [--phase2]\n' "$0" >&2
+    exit 2
+fi
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$root"
 
-artifact_dir="$root/artifacts/issue149"
+artifact_dir="$root/artifacts/$phase_directory"
 raw="$artifact_dir/console-benchmark.raw.jsonl"
 accepted="$artifact_dir/console-benchmark.accepted.jsonl"
 stderr_log="$artifact_dir/console-benchmark.stderr.log"

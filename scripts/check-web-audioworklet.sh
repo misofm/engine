@@ -213,13 +213,40 @@ fi
 # #106 E5: the shipped artifact must still contain the vector kernels. The floor and the kernel
 # count are ratchets, measured on this artifact. Raise them when a wave adds kernels; a count that
 # drops below them is a regression to report, never a floor to lower.
+#
+# The floor was re-derived once, from 4500 to 3450, by issue #149's fast dB tier (#144 item 5).
+# That is the one move this comment says not to make, so here is the evidence that the ratchet's
+# *intent* -- "the shipped artifact must still contain the vector kernels" -- is untouched, and
+# only its proxy moved. Six named crossings replaced the exact-tier Cephes `log2`/`exp2` (degree 9
+# and 6, each with a range-reduction fold) with refitted minimax polynomials (degree 5 and 4, no
+# fold). Fewer polynomial terms is fewer `f32x4.{mul,add,sub}`, by construction and on purpose.
+#
+# Measured per kernel on the shipped artifact, before -> after (vector / scalar):
+#
+#   multiband f32x8        1576/20 -> 1192/20      crossed (X5, X6)
+#   multiband f32x4         788/20 ->  596/20      crossed (X5, X6)
+#   gate-expander f32x4     260/8  ->  172/8       crossed (X3, X4)
+#   compressor f32x4        250/0  ->  162/0       crossed (X1, X2)
+#   transient-shaper f32x4  762/72 ->  762/72      not crossed -- unchanged
+#   true-peak-limiter f32x4 124/0  ->  124/0       not crossed -- unchanged
+#   parametric-eq f32x4      32/0  ->   32/0       not crossed -- unchanged
+#   soft-clip f32x4          25/0  ->   25/0       not crossed -- unchanged
+#
+# Two things make this a re-derivation rather than a relaxation. Every *scalar* count is
+# byte-for-byte unchanged, so no kernel devectorised -- which is the failure this floor exists to
+# catch. And exactly the four crossed kernels moved while the four uncrossed ones did not, which
+# is the same claim `scripts/check-fast-db-seal.sh` makes structurally, confirmed here in the
+# shipped wasm. The `--kernel-min 8` half of the ratchet, which is the part that actually counts
+# kernels, is unchanged and still exact.
+#
+# 3450 keeps the same ~2% margin under the measured 3530 that 4500 kept under 4585.
 callgraph="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/check-web-audioworklet-callgraph.py"
 printf '%s
 ' "$simd_disassembly" |
   python3 -B "$callgraph" --callgraph miso_engine_web_v1_render || exit 1
 printf '%s
 ' "$simd_disassembly" |
-  python3 -B "$callgraph" --simd-floor 4500 --kernel-pattern '4wide6f32x[48]' --kernel-min 8 ||
+  python3 -B "$callgraph" --simd-floor 3450 --kernel-pattern '4wide6f32x[48]' --kernel-min 8 ||
   exit 1
 
 # #137 D1/D2: the two exports `process()` calls beside the render export get the same allocation
