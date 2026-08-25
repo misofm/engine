@@ -186,13 +186,23 @@ pub(crate) fn bind_rack_banks(
             };
             if slot_level != level + offset as u64 {
                 // A connected sidechain is the one edge that feeds a chain slot from outside the
-                // path, and it can lift a *later* slot past `level + k` when its source is
-                // scheduled late. Such a slot already blocks banking (#96 F9), so the chain is
-                // simply not a candidate: it renders per node and `scalar_in` still reports it,
-                // because `chains` keeps it. Opening the dynamic rack makes this reachable in
-                // practice -- sidechained compressors live there -- where before it was a
-                // compile-failing `graph.internal.invariant`. A *bankable* chain that breaks the
-                // path arithmetic is still a real invariant violation and still fails.
+                // path, and it lifts a *later* slot past `level + k` when its source is scheduled
+                // late. `level` is read from the chain's first slot, so a sidechain on slot 0
+                // lifts the chain uniformly and this arithmetic still holds; it takes a sidechain
+                // on slot 1 or beyond to break it. Such a slot already blocks banking (#96 F9),
+                // so the chain is simply not a candidate: it renders per node and `scalar_in`
+                // still reports it, because `chains` keeps it.
+                //
+                // This is reachable, not defensive. Opening the dynamic rack is what makes it
+                // matter -- sidechained compressors live there -- and before this branch existed
+                // such a session was rejected outright with `graph.internal.invariant`.
+                // `a_sidechain_lifted_chain_slot_falls_back_instead_of_failing_the_compile`
+                // constructs one (a two-slot dynamic chain whose second slot sidechains from
+                // another track's post-matrix tap, lifting it 4 levels past the path arithmetic)
+                // and asserts the lift explicitly, so this branch cannot go quietly unreachable.
+                //
+                // A *bankable* chain that breaks the path arithmetic is still a real invariant
+                // violation and still fails the compile.
                 if !programs[chain].is_bankable() {
                     continue 'chain;
                 }

@@ -4173,6 +4173,110 @@ mod tests {
         }
     }
 
+    /// The level of one node in the compiled graph.
+    fn level_of(artifact: &PreparedGraphArtifact, track: &str, effect: &str) -> u64 {
+        let wanted = GraphNodeId::Effect(EffectNodeId {
+            track_id: StableGraphId::parse(track).expect("track id"),
+            rack: RackId::Dynamic,
+            effect_id: StableGraphId::parse(effect).expect("effect id"),
+        });
+        artifact
+            .graph
+            .dependency_levels
+            .iter()
+            .find(|level| level.nodes.contains(&wanted))
+            .unwrap_or_else(|| panic!("{track}/{effect} must be scheduled"))
+            .level
+    }
+
+    /// A connected sidechain on a **non-first** chain slot lifts that slot past `level + k`, and
+    /// the chain must fall back per node instead of failing the compile.
+    ///
+    /// This is the one edge that feeds a rack chain from outside its own path. A chain is a path,
+    /// so slot `k` normally sits at `level + k`; `bind_rack_banks` asserts that arithmetic rather
+    /// than assuming it. But `level` is read from the chain's *first* slot, so a sidechain on slot
+    /// 0 lifts the whole chain uniformly and the arithmetic still holds -- which is why every
+    /// pre-existing sidechain fixture (all single-slot, and one that forges
+    /// `metadata.ports.sidechain` without an edge at all) leaves the fallback branch unreachable.
+    ///
+    /// Here `eq5` runs **two** dynamic compressors and the *second* takes its sidechain from
+    /// `eq0`'s post-matrix tap -- the deepest tap there is, scheduled long after `eq5`'s first
+    /// slot. That genuinely lifts slot 1, and the test asserts the lift explicitly so it can never
+    /// go quietly vacuous: if a future scheduling change stops producing it, assertion (a) fails
+    /// loudly rather than the test passing for the wrong reason.
+    ///
+    /// Opening the dynamic rack is what makes this matter. Sidechained compressors live in the
+    /// dynamic rack, so before the fallback existed this session compiled to
+    /// `graph.internal.invariant` -- a valid session rejected outright. Deleting the guard in
+    /// `bind_rack_banks` turns this test red with exactly that diagnostic.
+    #[test]
+    fn a_sidechain_lifted_chain_slot_falls_back_instead_of_failing_the_compile() {
+        let mut model = accepted_dynamic_rack_compressor_fixture();
+        // `eq5` gets a second dynamic slot whose sidechain source is the deepest tap in the graph.
+        let base = model.tracks[5].dynamic.effects[0].clone();
+        let mut lifted = base.clone();
+        lifted.id = StableId::parse("compressor-sc").expect("stable effect id");
+        lifted.sidechain = SidechainDeclaration::Routed(Sidechain {
+            source: RouteSource::Track {
+                track_id: StableId::parse("eq0").expect("stable source id"),
+                tap: SendTap::PostMatrix,
+            },
+            port_id: StableId::parse("sidechain-in").expect("stable sidechain port"),
+        });
+        model.tracks[5].dynamic.effects = vec![base, lifted];
+
+        // (a) The compile succeeds -- this is the assertion the guard exists for.
+        let artifact = compile_bank_only(&model, 1_660);
+
+        // (b) And the lift is real: slot 1 sits strictly past `level(slot 0) + 1`, which is the
+        // precondition the guard's branch tests. Without this the test could pass vacuously.
+        let first = level_of(&artifact, "eq5", "compressor");
+        let second = level_of(&artifact, "eq5", "compressor-sc");
+        assert!(
+            second > first + 1,
+            "the sidechain must lift slot 1 past level + 1 (slot 0 at {first}, slot 1 at {second})"
+        );
+        // Descriptive, printed under `--nocapture`: the size of the lift the guard absorbs.
+        println!(
+            "eq5 dynamic chain: slot 0 at level {first}, slot 1 at level {second} \
+             (lifted {} past the path arithmetic)",
+            second - (first + 1)
+        );
+
+        // (c) The lifted chain renders per node, and the report says so for both its slots.
+        let scalar = artifact
+            .report
+            .rack_cohorts
+            .scalar_in(RackLocationV1::Dynamic);
+        for effect in ["compressor", "compressor-sc"] {
+            assert!(
+                scalar
+                    .iter()
+                    .any(|id| id.track_id.as_str() == "eq5" && id.effect_id.as_str() == effect),
+                "eq5/{effect} must fall back per node"
+            );
+        }
+
+        // (d) The lifted chain is isolated: every other track still banks, and no bound bank ever
+        // contains one of its slots.
+        if BankWidth::for_backend(artifact.report.rack_cohorts.dispatch).is_some() {
+            assert!(
+                artifact.graph.prepared_bank_count() > 0,
+                "one awkward chain must not disband the rest of the rack"
+            );
+            for bound in artifact
+                .report
+                .rack_cohorts
+                .bound_slots_in(RackLocationV1::Dynamic)
+            {
+                assert!(
+                    bound.members.iter().all(|id| id.track_id.as_str() != "eq5"),
+                    "a lifted chain is never a bank member"
+                );
+            }
+        }
+    }
+
     /// AGENTS.md's opacity boundary, gated structurally rather than incidentally.
     ///
     /// "Third-party core Wasm ... is permitted only in the dynamic rack: opaque per-instance Wasm
