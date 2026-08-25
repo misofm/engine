@@ -42,3 +42,34 @@ pin `-C target-feature=+avx2,+fma`, debug profile. Sweep driver: one mutation at
 |---|---|---|---|---|
 | 140-11 | the free-room pass reads `ready.command_wanted[0]` instead of `ready.command_wanted[slot]`, so a fader flood is checked against the matrix queue's count | `host-web/src/lib.rs` | `tests::a_mixed_batch_is_one_transaction_across_every_queue` | RED (`not even the matrix record in the refused batch reached the engine`) |
 | 140-12 | the metadata emitter hardcodes `liveUpdatable: false` for every effect parameter again | `tools/miso-engine-parameter-metadata/src/lib.rs` | `scripts/check-parameter-metadata-v1.py` on the emitted document | RED (`FAIL parameter metadata: effect liveUpdatable follows automatable`) |
+
+## Issue #143 — the effect observation surface
+
+Every row applied to the working tree, the named binary run, the result recorded, the tree
+restored. Host: `x86_64` (AMD Ryzen 7 9700X, Zen 5), `-C target-feature=+avx2,+fma`.
+
+| gate | mutation | observed red |
+|---|---|---|
+| `tests::the_meter_frame_carries_the_app_shaped_gain_reduction` (E4) | publish the negative decibels raw instead of the declared `PeakMagnitude` fold | the app's `Math.max(0, -6)` is `0` and the frame reads dead; the "positive magnitude, not a negative decibel" assertion fires |
+| `tests::observation_misuse_is_typed_and_all_or_nothing` (E8) | drop the all-or-nothing free-room pre-check for the observe kinds | the oversized batch reaches a queue and returns `255` where `6` (backpressure) was required |
+| `tests::native_observation_timeline_digest_pins_the_wasm_parity` (E8) | an unknown tap answers `UnknownParameter` (5) instead of `UnknownTap` (10) | three tests fail; a caller could no longer tell which namespace it got wrong |
+| `tests::a_computed_tap_is_refused_with_unsupported_kind` (E9) | bind the computed tap instead of refusing it | `None` where `Some(7)` was required — a bound computed tap is a lane that never publishes |
+| `round_trip::every_metadata_observation_tap_resolves_through_a_command_acknowledgement` (E9) | offset the tap id by one in the lowering (equivalent to a hand-edited id in the document) | `miso.compressor tap 1 did not resolve`, reason `10` |
+| `tests::the_meter_frame_carries_the_app_shaped_gain_reduction` (E4/D6) | `master_gr_present = 1` unconditionally | `no designation means absent, never zero`: `Some(0.0)` where `None` was required |
+| `tests::the_meter_frame_carries_the_app_shaped_gain_reduction` (E4/D5) | keep the pre-#143 `2T + 2` frame shape | the frame is 8 words where `3T + 3 = 12` was required |
+| `tests::native_observation_timeline_digest_pins_the_wasm_parity` (E8) | never clear an armed bit, so an unsubscribed tap keeps publishing its last window | `an unsubscribed tap publishes nothing`: `8.437999` where `0.0` was required |
+| `tests::observation_unit_conversion_is_declared_and_clamped` (R4) | publish the linear reduction word unconverted | `0.5` reports `0.5 dB` instead of `6.02 dB` — a meter reading a tenth of the reduction actually happening |
+| `test-web-audioworklet.mjs` main-realm frame validation (E4) | drop the "`trackGrDb` is finite and non-negative" rule | a `-6.5` frame is accepted; the rejection the test requires never arrives |
+| `test-web-audioworklet.mjs` main-realm frame validation (E4) | drop the "`masterGrDb` is a number or `null`" rule | a `"6.5"` string frame is accepted |
+| `test-web-audioworklet.mjs` processor frame test (E4) | the worklet posts the peak view where `trackGrDb` belongs | `frame.trackGrDb.every((value) => value === 6.5)` is false. The two fake sections carry different values precisely so this is visible |
+
+### The two the browser gate catches instead
+
+`subarray` inside the frozen `process()` policy body is banned — a per-block view is a per-block
+allocation — so the first attempt at the frame post failed `check-web-audioworklet.sh` with
+`render callback violates the frozen static policy`. The two views are built once, at construction.
+
+The callgraph gate over the **shipped artifact** is green with the observation code in
+`miso_engine_web_v1_meter_poll`'s closure: `closure=5 traps=2`, trap owner
+`AudioWorkletEngineHost::poll_meters` and nothing else, and no allocator, deallocator or drop glue
+anywhere in it.

@@ -199,3 +199,108 @@ fn every_metadata_id_resolves_through_a_command_acknowledgement() {
     assert_eq!(host.command_report().reason, COMMAND_REASON_NONE);
     assert_eq!(host.command_report().admitted, 1);
 }
+
+/// Issue #143 E9: every declared observation tap in the document resolves on a live session.
+///
+/// The metadata's per-effect `observations` array is a *promise*: it says an app may address that
+/// tap by that number. This walks every one of them through the real command path and requires
+/// each to resolve -- `RESULT_OK` for a `subscribable` (resident) tap and `UNSUPPORTED_KIND` for a
+/// computed one -- and **never** an `Unknown*` reason, which would mean the document described
+/// something that does not exist.
+///
+/// The completeness half is structural: the taps come from
+/// `NativeEffectRegistry::descriptors`, which is the same list the generator walks, so an effect
+/// whose menu is missing from the document cannot exist.
+///
+/// Red mutation: hand-edit a tap id in the document (or, equivalently, offset the id in the
+/// lowering) -> the tap stops resolving and the `UNKNOWN_TAP` assertion fires.
+#[test]
+fn every_metadata_observation_tap_resolves_through_a_command_acknowledgement() {
+    use miso_engine_host_web::{
+        COMMAND_OBSERVE_SUBSCRIBE, COMMAND_OBSERVE_UNSUBSCRIBE, COMMAND_REASON_UNKNOWN_TAP,
+    };
+
+    let document = miso_engine_parameter_metadata::render();
+    let registry = launch_native_effect_registry_v1().expect("launch registry");
+    let ids: Vec<&'static str> = registry
+        .descriptors()
+        .map(|descriptor| descriptor.id.as_str())
+        .collect();
+
+    // Every declared tap is in the document, and every effect has the key even when empty.
+    let mut declared = 0_usize;
+    for descriptor in registry.descriptors() {
+        assert!(
+            document.contains("\"observations\": ["),
+            "the observations key is never absent"
+        );
+        for tap in descriptor.observations {
+            assert!(
+                document.contains(&format!(
+                    "\"id\": {}, \"name\": \"{}\"",
+                    tap.id.0, tap.display_name
+                )),
+                "{} tap {} is in the metadata",
+                descriptor.id.as_str(),
+                tap.id.0
+            );
+            declared += 1;
+        }
+    }
+    assert_eq!(
+        declared, 4,
+        "the four dynamics effects declare one tap each"
+    );
+
+    let toml = session_with_every_effect(&ids);
+    let mut config = WebPrepareConfigV1::console_defaults(48_000, 128);
+    config.source_ring_frames = 128;
+    config.console_meter_blocks = 4;
+    config.console_observation_taps = 4;
+    let mut host = AudioWorkletEngineHost::new(config);
+    assert_eq!(host.prepare(), RESULT_OK);
+    host.session_toml_mut().expect("TOML")[..toml.len()].copy_from_slice(toml.as_bytes());
+    assert_eq!(
+        host.compile(toml.len()),
+        RESULT_OK,
+        "{:?}",
+        core::str::from_utf8(host.diagnostic())
+    );
+
+    for (effect_index, descriptor) in registry.descriptors().enumerate() {
+        let index = u32::try_from(effect_index).expect("effect index");
+        for tap in descriptor.observations {
+            for kind in [COMMAND_OBSERVE_SUBSCRIBE, COMMAND_OBSERVE_UNSUBSCRIBE] {
+                stage(&mut host, kind, 1, 255, index, tap.id.0, 0.0);
+                let result = host.submit_commands(1);
+                let reason = host.command_report().reason;
+                // Every launch tap is resident, so every one of them binds. The rule the test
+                // states is the general one: resolved, never `Unknown*`.
+                assert_ne!(
+                    reason,
+                    COMMAND_REASON_UNKNOWN_TAP,
+                    "{} tap {} did not resolve",
+                    descriptor.id.as_str(),
+                    tap.id.0
+                );
+                assert_eq!(
+                    reason,
+                    COMMAND_REASON_NONE,
+                    "{} tap {} is subscribable and must bind",
+                    descriptor.id.as_str(),
+                    tap.id.0
+                );
+                assert_eq!(result, RESULT_OK);
+            }
+        }
+        assert_eq!(host.render_next(), RESULT_OK);
+    }
+
+    // The negative case: a tap id no effect declares does not resolve, and says so as a *tap*.
+    stage(&mut host, COMMAND_OBSERVE_SUBSCRIBE, 1, 255, 0, 4_242, 0.0);
+    assert_eq!(
+        host.submit_commands(1),
+        miso_engine_host_web::RESULT_INVALID_ARGUMENT
+    );
+    assert_eq!(host.command_report().reason, COMMAND_REASON_UNKNOWN_TAP);
+}

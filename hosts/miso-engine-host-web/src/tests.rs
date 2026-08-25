@@ -2670,3 +2670,172 @@ fn the_observation_fields_account_for_the_moved_bridge_rows() {
     assert_eq!(3_753_u64 - 3_641, 112);
     assert_eq!(1_075_129_u64 - 1_075_017, 112);
 }
+
+/// Issue #143 E9: a `Computed` tap is declared, validated and **refused**.
+///
+/// No launch effect declares one, so the rule is unreachable from a live session and would
+/// otherwise be a branch nothing ever takes. The lowering is exercised directly against a
+/// synthetic descriptor that declares both cost classes, which is the only honest way to gate a
+/// rule whose production reachability is zero by design.
+///
+/// Red mutation: bind the computed tap instead of refusing it -> the second case returns `Ok` and
+/// the assertion fails. A bound computed tap would be a lane that never publishes: a meter frozen
+/// at zero with no way for the caller to learn why.
+#[test]
+fn a_computed_tap_is_refused_with_unsupported_kind() {
+    use miso_engine_effect_contract::{
+        EffectDescriptorV1, EffectId, LinkModeSet, ObservationCadenceV1, ObservationChannelsV1,
+        ObservationCostV1, ObservationDescriptorV1, ObservationFoldV1, ObservationKindV1,
+        ObservationTapId, ParameterUnit,
+    };
+
+    const fn tap(
+        id: u32,
+        cost: ObservationCostV1,
+        cadence: ObservationCadenceV1,
+    ) -> ObservationDescriptorV1 {
+        ObservationDescriptorV1 {
+            id: ObservationTapId(id),
+            display_name: "Gain Reduction",
+            display_unit: "dB",
+            kind: ObservationKindV1::GainReductionDb,
+            unit: ParameterUnit::Db,
+            cost,
+            cadence,
+            fold: ObservationFoldV1::PeakMagnitude,
+            channels: ObservationChannelsV1::Shared,
+            minimum: 0.0,
+            maximum: 100.0,
+        }
+    }
+    static MENU: [ObservationDescriptorV1; 2] = [
+        tap(
+            1,
+            ObservationCostV1::Resident,
+            ObservationCadenceV1::PerBlock,
+        ),
+        tap(
+            2,
+            ObservationCostV1::Computed,
+            ObservationCadenceV1::PerWindow,
+        ),
+    ];
+    static DESCRIPTOR: EffectDescriptorV1 = EffectDescriptorV1 {
+        id: match EffectId::new("test.observation") {
+            Ok(value) => value,
+            Err(_) => panic!("fixture id"),
+        },
+        display_name: "Observation fixture",
+        contract_major: 1,
+        contract_minor: 1,
+        state_layout_version: 1,
+        supported_link_modes: LinkModeSet::ALL,
+        parameters: &[],
+        ports: &[],
+        qualities: &[],
+        observations: &MENU,
+    };
+
+    let record = |tap_id: u32| CommandRecord {
+        kind: COMMAND_OBSERVE_SUBSCRIBE,
+        rack: 1,
+        channel: 255,
+        track_index: 0,
+        effect_index: 0,
+        parameter_id: tap_id,
+        smoothing_samples: 2,
+        values: [0.0; 4],
+    };
+
+    // The resident tap resolves and binds.
+    assert!(record(1).into_observe_record(&DESCRIPTOR, true).is_ok());
+    // The computed tap resolves and is refused for what it is -- never `UnknownTap`, which would
+    // say the address was wrong, and never silently bound.
+    assert_eq!(
+        record(2).into_observe_record(&DESCRIPTOR, true).err(),
+        Some(COMMAND_REASON_UNSUPPORTED_KIND)
+    );
+    // A tap id the menu does not declare stays `UnknownTap` on the same descriptor.
+    assert_eq!(
+        record(3).into_observe_record(&DESCRIPTOR, true).err(),
+        Some(COMMAND_REASON_UNKNOWN_TAP)
+    );
+    // And with no bound lane, the resident tap is `ObservationUnbound` while the computed one is
+    // still `UnsupportedKind`: the cost class is a property of the *effect*, checked first.
+    assert_eq!(
+        record(1).into_observe_record(&DESCRIPTOR, false).err(),
+        Some(COMMAND_REASON_OBSERVATION_UNBOUND)
+    );
+    assert_eq!(
+        record(2).into_observe_record(&DESCRIPTOR, false).err(),
+        Some(COMMAND_REASON_UNSUPPORTED_KIND)
+    );
+}
+
+/// Issue #143 R4: the one unit conversion the design permits, and where it happens.
+///
+/// A `Db` tap crosses the transport already in the unit a meter draws, so the conversion is the
+/// identity. A `Linear` tap -- the true-peak limiter's recursive reduction word `d`, where
+/// `gain = 1 - d` -- needs a logarithm, which a render thread may not take: it crosses as `d` and
+/// becomes decibels here, once per closed window, on the control plane. The result is clamped into
+/// the tap's own declared range, so a consumer never has to guess what a number outside it meant.
+///
+/// Red mutation: publish the linear word unconverted -> `0.5` reports `0.5 dB` instead of
+/// `6.02 dB`, and the app's meter reads a tenth of the reduction that is actually happening.
+#[test]
+fn observation_unit_conversion_is_declared_and_clamped() {
+    use miso_engine_effect_contract::{
+        ObservationCadenceV1, ObservationChannelsV1, ObservationCostV1, ObservationDescriptorV1,
+        ObservationFoldV1, ObservationKindV1, ObservationTapId, ParameterUnit,
+    };
+    const fn tap(unit: ParameterUnit) -> ObservationDescriptorV1 {
+        ObservationDescriptorV1 {
+            id: ObservationTapId(1),
+            display_name: "Gain Reduction",
+            display_unit: "dB",
+            kind: ObservationKindV1::GainReductionDb,
+            unit,
+            cost: ObservationCostV1::Resident,
+            cadence: ObservationCadenceV1::PerBlock,
+            fold: ObservationFoldV1::PeakMagnitude,
+            channels: ObservationChannelsV1::PerLane,
+            minimum: 0.0,
+            maximum: 100.0,
+        }
+    }
+    let decibels = tap(ParameterUnit::Db);
+    let linear = tap(ParameterUnit::Linear);
+
+    // A decibel tap crosses in the consumer's own unit: the conversion is the identity.
+    assert_eq!(observed_decibels(decibels, 0.0), 0.0);
+    assert_eq!(observed_decibels(decibels, 6.5), 6.5);
+    assert_eq!(observed_decibels(decibels, 1_000.0), 100.0, "clamped high");
+
+    // A linear tap is `-20 log10(1 - d)`. Half the amplitude removed is 6.02 dB of reduction, and
+    // publishing `0.5` unconverted would report a *tenth* of that.
+    assert_eq!(
+        observed_decibels(linear, 0.0),
+        0.0,
+        "no reduction is zero dB"
+    );
+    let half = observed_decibels(linear, 0.5);
+    assert!(
+        (half - 6.020_6).abs() < 1e-3,
+        "half the amplitude removed is 6.02 dB, not {half}"
+    );
+    assert!(half > 6.0, "and it is decidedly not the raw 0.5");
+    let quarter = observed_decibels(linear, 0.25);
+    assert!((quarter - 2.498).abs() < 1e-3, "{quarter}");
+    // Total reduction has no finite decibel value; the declared maximum is what a meter draws.
+    assert_eq!(observed_decibels(linear, 1.0), 100.0);
+    assert_eq!(observed_decibels(linear, 2.0), 100.0);
+    assert_eq!(observed_decibels(linear, -1.0), 0.0, "clamped low");
+    // Monotonic across the range, which is the property a meter's needle depends on.
+    let mut previous = 0.0_f32;
+    for step in 0..64 {
+        let value = observed_decibels(linear, step as f32 / 64.0);
+        assert!(value >= previous, "step {step}: {value} < {previous}");
+        assert!(value.is_finite());
+        previous = value;
+    }
+}

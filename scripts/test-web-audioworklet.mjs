@@ -764,7 +764,12 @@ function createFakeExports(quantum, backend = 0) {
     miso_engine_web_v1_meter_poll: () => {
       if (calls.meterWindows === 0) return 0;
       calls.meterWindows -= 1;
-      new Float32Array(memory.buffer, meterFramePointer, meterFrameFloats).fill(0.5);
+      // Issue #143: the two sections carry **different** values, so a worklet that read the peak
+      // view where the gain-reduction view belongs (or the reverse) is visible here rather than
+      // hidden by a uniform fill.
+      const frame = new Float32Array(memory.buffer, meterFramePointer, meterFrameFloats);
+      frame.fill(0.5, 0, trackIds.length * 2 + 2);
+      frame.fill(6.5, trackIds.length * 2 + 2);
       return 1;
     },
     miso_engine_web_v1_console_track_count: () => trackIds.length,
@@ -1117,6 +1122,12 @@ async function testProcessor() {
       assert.equal(frame.trackCount, 2);
       assert.equal(frame.peaks.length, 6);
       assert(frame.peaks.every((value) => value === 0.5));
+      // Issue #143: the gain-reduction section is its own view, its own length, and its own value.
+      assert.equal(frame.trackGrDb.length, 2);
+      assert(frame.trackGrDb.every((value) => value === 6.5));
+      assert.equal(frame.masterGrDb, 6.5, "the header says the master reading is present");
+      assert.equal(frame.firstSample, 512n);
+      assert.equal(frame.endSample, 768n);
 
       // Releasing the lease stops the frames immediately.
       processor.receive({ tag: "miso.meters.v1", requestId: 2, enabled: false });
