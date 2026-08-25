@@ -171,6 +171,7 @@ fn console_chain(latency: usize, controlled: [bool; LANES]) -> (BankChain, Produ
         BankWidth::Four,
         8,
         lanes,
+        vec![None, None, None, None],
         latency,
     )
     .expect("stage");
@@ -409,6 +410,7 @@ fn a_stage_with_no_controlled_lane_allocates_no_shunt() {
         BankWidth::Four,
         8,
         vec![None, None, None, None],
+        vec![None, None, None, None],
         3,
     )
     .expect("stage");
@@ -424,6 +426,7 @@ fn stage_construction_rejects_a_lane_count_or_quantum_mismatch() {
             BankWidth::Four,
             8,
             vec![None, None],
+            vec![None, None],
             0,
         )
         .is_err(),
@@ -434,6 +437,7 @@ fn stage_construction_rejects_a_lane_count_or_quantum_mismatch() {
             Box::new(MockGainBank::new(0)),
             BankWidth::Four,
             0,
+            vec![None, None, None, None],
             vec![None, None, None, None],
             0,
         )

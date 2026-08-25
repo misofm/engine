@@ -167,3 +167,32 @@ it lands here. `direct-route` cannot see this bug: it is a chain with one node p
   (`colored_outputs + logical_edges`). The program legitimately keeps a dedicated buffer where the
   colouring shared one and the executor un-shared it again at bind time. The assertion now compares
   against the executor's real model, and the reason is written at the assertion.
+
+## Issue #143 P3 — the binding
+
+Every row applied to the working tree, the named binary run, the result recorded, the tree
+restored. Host: `x86_64` (AMD Ryzen 7 9700X, Zen 5), `-C target-feature=+avx2,+fma`, debug.
+
+The tests live in `miso-engine-host-core/tests/effect_observation.rs`, which is the only place the
+whole seam exists: a real session, compiled by the graph compiler, with a real homogeneous bank and
+a real per-node scalar instance.
+
+| # | eval | mutation | file | result |
+|---|---|---|---|---|
+| 143-E1 | digest identity per tap | make the peak fold perturb the value by `1e-30` on the first block of a window — i.e. let the observation touch anything the block computes | `effect-contract/src/live.rs` | RED — `lane 0 (threshold 0) published its own reduction`, `228737632` vs `0`; 2 of 5 fail |
+| 143-E5 | zero binding, zero cost | attach lanes whenever the descriptor declares a tap regardless of the request | `host-core/src/prepare.rs` | RED — `a_session_that_asked_for_no_observation_holds_none`. **The output stayed identical**, which is the point: only the structural walk catches it |
+| 143-E2 | bank-lane correctness | the bank publishes `samples[0]` into every lane | `rack/src/lib.rs` | RED — 3 of 5 fail, including the bit-exact comparison against an independently prepared scalar compressor at each lane's own threshold |
+| 143-E3-bank | window exactness | publish **before** `process_bank` | `rack/src/lib.rs` | RED |
+| 143-E3-scalar | window exactness | publish **before** `process` in `execute_op`'s `ConsoleEffect` arm (the #137-E1 mirror) | `graph/src/runtime.rs` | RED — `window 2 published its own blocks, not the previous block's state`, `1088069417` vs `1090923272` |
+| 143-E13 | plan replacement | a freshly built lane starts `armed: true`, so a subscription would survive a replacement | `effect-contract/src/live.rs` | RED — `the replacement plan carries capacity and no subscription`, `[8, 8, 8]` vs `[8, 8, 0]` |
+
+### Two mutations that had to be sharpened before they went red
+
+* **E3 on the scalar path first escaped.** The test read a *settled* window: once the reduction
+  stops moving, folding blocks `n-1..n+2` and `n..n+3` give the same peak, so publishing one block
+  early was invisible. The test now reads four consecutive windows with a threshold retarget in the
+  middle, so two of them sit on a moving envelope. Recorded because a gate that only discriminates
+  on a moving signal is a fact about the gate, not a detail.
+* **The scalar publish site was not wired at all** until this test existed: `stage` was still being
+  handed `None` in `graph::runtime`, so a subscription on a per-node effect armed nothing. The
+  banked fixture could not have found it, which is why the single-track dynamic-rack fixture exists.

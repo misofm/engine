@@ -54,6 +54,8 @@ fn console() -> HostConsoleRequestV1 {
         meter_period_frames: Some(NonZeroU32::new(QUANTUM as u32).expect("period")),
         meter_queue_depth: NonZeroUsize::new(16).expect("meter depth"),
         meter_tap: MeterTap::PostMatrix,
+        observation_taps: 0,
+        master_track: None,
     }
 }
 

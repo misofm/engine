@@ -2696,6 +2696,7 @@ mod tests {
             banks: Vec::new(),
             builtin_banks: Vec::new(),
             observers: Vec::new(),
+            effect_observations: Vec::new(),
         });
         let builtin_drops = Arc::new(AtomicUsize::new(0));
         let external_drops = Arc::new(AtomicUsize::new(0));
@@ -3325,6 +3326,7 @@ mod tests {
             banks: Vec::new(),
             builtin_banks: Vec::new(),
             observers: Vec::new(),
+            effect_observations: Vec::new(),
         });
         (graph, levels)
     }

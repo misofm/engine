@@ -1912,6 +1912,8 @@ fn console_request(config: WebPrepareConfigV1) -> Option<HostConsoleRequestV1> {
         // One window per track per post, plus headroom for a control-side stall of a few windows.
         meter_queue_depth: NonZeroUsize::new(8)?,
         meter_tap: MeterTap::PostMatrix,
+        observation_taps: 0,
+        master_track: None,
     })
 }
 

@@ -452,6 +452,7 @@ fn prepared_graph_plan(
         banks: Vec::new(),
         builtin_banks: Vec::new(),
         observers: Vec::new(),
+        effect_observations: Vec::new(),
     })
 }
 

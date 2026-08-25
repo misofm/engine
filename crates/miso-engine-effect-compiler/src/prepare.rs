@@ -1,12 +1,15 @@
 use core::num::NonZeroUsize;
-use miso_engine_core::realtime::{Producer, QueueGeneration, bounded_spsc};
+use miso_engine_core::realtime::{
+    ObservationReaderV1, Producer, QueueGeneration, bounded_spsc, observation_slot,
+};
 use miso_engine_effect_contract::{
     BankWidth, EffectControlLane, EffectControlRecordV1, EffectDescriptorV1, EffectProgramKeyV1,
     EffectQuality, InitialParameterValue, LinkMode, NativeEffectFactory, NativeEffectRegistry,
-    ParameterChannel, ParameterChannelPolicy, ParameterUnit, PrepareEffectBankRequest,
-    PrepareEffectLimits, PrepareEffectRequest, PreparedBankMetadata, PreparedEffectMetadata,
-    PreparedNativeEffect, PreparedNativeEffectBank, PreparedPortsV1, PreparedSidechainPort,
-    RegistryError, StatePayloadInput, StatePayloadOutput, expected_prepared_metadata,
+    ObservationLaneV1, ParameterChannel, ParameterChannelPolicy, ParameterUnit,
+    PrepareEffectBankRequest, PrepareEffectLimits, PrepareEffectRequest, PreparedBankMetadata,
+    PreparedEffectMetadata, PreparedNativeEffect, PreparedNativeEffectBank, PreparedPortsV1,
+    PreparedSidechainPort, RegistryError, StatePayloadInput, StatePayloadOutput,
+    expected_prepared_metadata,
 };
 use miso_engine_effect_package::{
     BoundEffectDescriptorWireV1, EFFECT_STATE_V1_BUFFER_ENVELOPE_OUTPUT,
@@ -52,6 +55,13 @@ pub struct EffectPreparedEntry {
     /// effect is the one that drains its queue, and a session with no console carries a `None`
     /// that the runtime turns back into the byte-identical console-free path.
     pub control: Option<Box<EffectControlLane>>,
+    /// This instance's observation taps (issue #143 D3, level 1).
+    ///
+    /// `None` unless [`attach_effect_observation_v1`] was called, which is the only way one is
+    /// ever created. A session whose console request named no observation capacity carries `None`
+    /// here, and the runtime turns that back into the byte-identical unobserved path: there is no
+    /// lane, no slot and no vector anywhere in the compiled plan.
+    pub observation: Option<Box<ObservationLaneV1>>,
 }
 
 /// Owned replayable portion of an accepted prepare request. It never crosses into render.
@@ -1113,6 +1123,7 @@ pub fn prepare_native_session_effects(
                     factory,
                     bank_preparation,
                     control: None,
+                    observation: None,
                 });
             }
         }
@@ -1176,20 +1187,7 @@ pub fn attach_effect_console_v1(
     prepared: &mut EffectPreparedSession,
     depth: NonZeroUsize,
 ) -> Result<Vec<EffectControlProducerV1>, EffectDiagnosticSet> {
-    // Declared position within each (track, rack), from the normalized model -- the same order the
-    // `miso.command.v1` `effect_index` names and the same order the browser host counts.
-    let mut declared: BTreeMap<(&str, EffectRack, &str), u32> = BTreeMap::new();
-    for track in &prepared.session.normalized_model().tracks {
-        for (rack, effects) in [
-            (EffectRack::Simd1, &track.simd1.effects),
-            (EffectRack::Dynamic, &track.dynamic.effects),
-            (EffectRack::Simd2, &track.simd2.effects),
-        ] {
-            for (index, effect) in effects.iter().enumerate() {
-                declared.insert((track.id.as_str(), rack, effect.id.as_str()), index as u32);
-            }
-        }
-    }
+    let declared = declared_effect_indices(&prepared.session);
     let mut producers = Vec::with_capacity(prepared.entries.len());
     let mut diagnostics = Vec::new();
     for entry in &mut prepared.entries {
@@ -1204,11 +1202,9 @@ pub fn attach_effect_console_v1(
             });
             continue;
         };
-        let Some(&effect_index) = declared.get(&(
-            entry.track_id.as_str(),
-            entry.rack,
-            entry.effect_id.as_str(),
-        )) else {
+        let Some(&effect_index) =
+            declared.get(&(entry.track_id.clone(), entry.rack, entry.effect_id.clone()))
+        else {
             diagnostics.push(EffectDiagnostic {
                 code: "effect.control.prepare",
                 path,
@@ -1242,6 +1238,139 @@ pub fn attach_effect_console_v1(
     } else {
         Err(EffectDiagnosticSet::sorted(diagnostics))
     }
+}
+
+/// The control-side reader half of one prepared effect instance's observation taps (issue #143).
+///
+/// Addressed exactly as an [`EffectControlProducerV1`] is -- by `(track_id, rack, effect_index)` --
+/// because a subscription and the parameter commands it correlates with address the same instance
+/// through the same numbers. `readers[i]` belongs to `descriptor.observations[i]`.
+pub struct EffectObservationHandleV1 {
+    /// Normalized track identity this instance belongs to.
+    pub track_id: Box<str>,
+    /// Which rack of that track.
+    pub rack: EffectRack,
+    /// Declared position within the rack, in session declaration order.
+    pub effect_index: u32,
+    /// The instance's session-declared identifier.
+    pub effect_id: Box<str>,
+    /// The effect's declared menu, so an admitting host maps a wire `tap_id` to a `tap_index` and
+    /// checks the cost class without a second copy of the registry.
+    pub descriptor: &'static EffectDescriptorV1,
+    /// One reader per declared tap, in declaration order.
+    pub readers: Box<[ObservationReaderV1]>,
+}
+
+/// Attach observation capacity to every prepared effect that declares at least one tap.
+///
+/// # Level 1 of the two-level zero (issue #143 D3)
+///
+/// This function is the **only** thing that creates an [`ObservationLaneV1`]. A session whose
+/// console request named no observation capacity never calls it, so its compiled plan contains no
+/// lane, no accumulator and no conflating cell -- not a disabled one, none. That is what makes
+/// "observation off costs nothing" an identity rather than a claim, and it is what
+/// `observation_retained_bytes == 0` reports.
+///
+/// An effect that declares no tap gets no lane either, for the same reason: `miso.delay` has
+/// nothing to observe, so it carries nothing.
+///
+/// `window_blocks` is the plan's default window length in render blocks. It is the *meter* window,
+/// derived by the host from the same `console_meter_blocks` the peak meters use, so a gain-reduction
+/// value and the peak beside it in one `miso.meter.v1` frame describe the same span of samples.
+///
+/// # Errors
+///
+/// `effect.observation.prepare` if an instance cannot be located in the declared order, and
+/// `effect.observation.taps` if an effect declares more taps than the request's cap allows.
+pub fn attach_effect_observation_v1(
+    prepared: &mut EffectPreparedSession,
+    maximum_taps: u32,
+    window_blocks: u32,
+) -> Result<Vec<EffectObservationHandleV1>, EffectDiagnosticSet> {
+    let declared = declared_effect_indices(&prepared.session);
+    let mut handles = Vec::new();
+    let mut diagnostics = Vec::new();
+    for entry in &mut prepared.entries {
+        let descriptor = entry.factory.descriptor();
+        if descriptor.observations.is_empty() {
+            continue;
+        }
+        let path = format!(
+            "$.tracks[id={}].effects[id={}]",
+            entry.track_id, entry.effect_id
+        );
+        if descriptor.observations.len() > maximum_taps as usize {
+            diagnostics.push(EffectDiagnostic {
+                code: "effect.observation.taps",
+                path,
+            });
+            continue;
+        }
+        let Some(&effect_index) =
+            declared.get(&(entry.track_id.clone(), entry.rack, entry.effect_id.clone()))
+        else {
+            diagnostics.push(EffectDiagnostic {
+                code: "effect.observation.prepare",
+                path,
+            });
+            continue;
+        };
+        let mut publishers = Vec::with_capacity(descriptor.observations.len());
+        let mut readers = Vec::with_capacity(descriptor.observations.len());
+        for _ in descriptor.observations {
+            let (publisher, reader) = observation_slot();
+            publishers.push(publisher);
+            readers.push(reader);
+        }
+        let Some(lane) = ObservationLaneV1::new(descriptor.observations, publishers, window_blocks)
+        else {
+            diagnostics.push(EffectDiagnostic {
+                code: "effect.observation.prepare",
+                path,
+            });
+            continue;
+        };
+        handles.push(EffectObservationHandleV1 {
+            track_id: entry.track_id.as_str().into(),
+            rack: entry.rack,
+            effect_index,
+            effect_id: entry.effect_id.as_str().into(),
+            descriptor,
+            readers: readers.into_boxed_slice(),
+        });
+        entry.observation = Some(Box::new(lane));
+    }
+    if diagnostics.is_empty() {
+        Ok(handles)
+    } else {
+        Err(EffectDiagnosticSet::sorted(diagnostics))
+    }
+}
+
+/// Declared position within each `(track, rack)`, from the normalized model.
+///
+/// The same order the `miso.command.v1` `effect_index` names and the same order the browser host
+/// counts, extracted once so the console attach and the observation attach cannot disagree about
+/// what "effect 2 of the dynamic rack" means.
+fn declared_effect_indices(
+    session: &CompiledSession,
+) -> BTreeMap<(String, EffectRack, String), u32> {
+    let mut declared: BTreeMap<(String, EffectRack, String), u32> = BTreeMap::new();
+    for track in &session.normalized_model().tracks {
+        for (rack, effects) in [
+            (EffectRack::Simd1, &track.simd1.effects),
+            (EffectRack::Dynamic, &track.dynamic.effects),
+            (EffectRack::Simd2, &track.simd2.effects),
+        ] {
+            for (index, effect) in effects.iter().enumerate() {
+                declared.insert(
+                    (track.id.to_string(), rack, effect.id.to_string()),
+                    index as u32,
+                );
+            }
+        }
+    }
+    declared
 }
 
 fn same_unit(session: SessionUnit, contract: ParameterUnit) -> bool {
