@@ -445,3 +445,97 @@ fn stage_construction_rejects_a_lane_count_or_quantum_mismatch() {
         "a zero quantum is refused"
     );
 }
+
+/// Issue #143 E5, at the bank slot: the observation surface a stage exposes off the render thread.
+///
+/// `ConsoleEffectBankStage` is where the structural walk bottoms out — `BankChain` sums it and the
+/// runtime sums that — so the counts and the retained bytes it reports are what
+/// `observation_retained_bytes == 0` ultimately rests on. A slot no observation request touched
+/// reports zero for all of them and allocates neither the lane vector nor the per-lane sample
+/// scratch.
+///
+/// Red mutation: build the sample scratch unconditionally in `ConsoleEffectBankStage::new` -> an
+/// unobserved slot stops being structurally distinguishable from an observed one, and `is_observed`
+/// stops meaning anything.
+#[test]
+fn an_unobserved_bank_slot_reports_no_observation_state_at_all() {
+    use miso_engine_core::realtime::observation_slot;
+    use miso_engine_effect_contract::{
+        ObservationCadenceV1, ObservationChannelsV1, ObservationCostV1, ObservationDescriptorV1,
+        ObservationFoldV1, ObservationKindV1, ObservationLaneV1, ObservationTapId, ParameterUnit,
+    };
+
+    static MENU: [ObservationDescriptorV1; 1] = [ObservationDescriptorV1 {
+        id: ObservationTapId(1),
+        display_name: "Gain Reduction",
+        display_unit: "dB",
+        kind: ObservationKindV1::GainReductionDb,
+        unit: ParameterUnit::Db,
+        cost: ObservationCostV1::Resident,
+        cadence: ObservationCadenceV1::PerBlock,
+        fold: ObservationFoldV1::PeakMagnitude,
+        channels: ObservationChannelsV1::PerLane,
+        minimum: 0.0,
+        maximum: 100.0,
+    }];
+
+    let unobserved = ConsoleEffectBankStage::new(
+        Box::new(MockGainBank::new(0)),
+        BankWidth::Four,
+        8,
+        vec![None, None, None, None],
+        vec![None, None, None, None],
+        0,
+    )
+    .expect("stage");
+    assert!(!unobserved.is_observed(), "no lane, no vector, no scratch");
+    assert_eq!(unobserved.observation_binding_counts(), [0, 0, 0]);
+    assert_eq!(unobserved.observation_retained_bytes(), 0);
+    assert_eq!(unobserved.observation_tap_counts(), (0, 0));
+    assert_eq!(unobserved.unbound_observations(), 0);
+
+    // Two of four lanes observed, one of them armed.
+    let mut lanes = Vec::new();
+    for lane in 0..4 {
+        if lane % 2 == 1 {
+            lanes.push(None);
+            continue;
+        }
+        let (publisher, _reader) = observation_slot();
+        let mut observation =
+            ObservationLaneV1::new(&MENU, vec![publisher], 4).expect("one per tap");
+        if lane == 0 {
+            observation.arm(0, true, 4, 0);
+        }
+        lanes.push(Some(observation));
+    }
+    let mut observed = ConsoleEffectBankStage::new(
+        Box::new(MockGainBank::new(0)),
+        BankWidth::Four,
+        8,
+        vec![None, None, None, None],
+        lanes,
+        0,
+    )
+    .expect("stage");
+    assert!(observed.is_observed());
+    assert_eq!(
+        observed.observation_binding_counts(),
+        [2, 2, 1],
+        "two observed lanes, two declared taps, one armed"
+    );
+    assert_eq!(observed.observation_tap_counts(), (2, 1));
+    let retained = observed.observation_retained_bytes();
+    assert!(retained > 0);
+
+    // Issue #143 D7's explicit form: dropping every subscription is one operation, and it changes
+    // the armed count and nothing else -- least of all what the slot retains.
+    observed.disarm_observations();
+    assert_eq!(observed.observation_binding_counts(), [2, 2, 0]);
+    assert_eq!(
+        observed.observation_retained_bytes(),
+        retained,
+        "disarming frees nothing, exactly as arming allocates nothing"
+    );
+    assert!(observed.is_observed(), "capacity survives an unsubscribe");
+}
