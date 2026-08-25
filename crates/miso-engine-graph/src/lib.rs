@@ -346,11 +346,16 @@ pub fn reduce_left_to_right(values: &[f32]) -> f32 {
 pub struct PreparedGraphPlan {
     /// The executable form of this plan, derived at construction (#99 F2).
     ///
-    /// Not yet consumed by either executor -- that is the step this seam exists for, and #98
-    /// owns the executor kernels it feeds. It is validated on every compile (see
-    /// `graph_plans_always_lower_to_an_executable_program`), so the shape both executors will be
-    /// rebuilt against is proven on every session the test corpus compiles, before anything
-    /// depends on it.
+    /// Both executors are built on this lowering: everything in `crate::runtime` -- the ops, their
+    /// input order, the identity aliases and the buffer colouring -- is derived from an
+    /// `ExecutionProgram` rather than from a second reading of the semantic graph.
+    ///
+    /// They do not read *this* copy. Binding calls `lowered`, which re-derives from the plan's
+    /// *current* fields, because the schedule, levels and inserted delays are public and the
+    /// transactional bind contract hands a rejected plan back to be repaired and re-bound. This
+    /// construction-time copy is the compile-time gate instead: it is validated on every compile
+    /// (see `graph_plans_always_lower_to_an_executable_program`), so a plan that cannot lower is
+    /// caught where it is built rather than at bind.
     program: Option<program::ExecutionProgram>,
     plan_id: u64,
     pub spec: GraphSpec,
