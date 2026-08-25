@@ -11,6 +11,11 @@ script_directory="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repository_root="$(cd "$script_directory/.." && pwd)"
 record_fixture="$script_directory/fixtures/protocol-benchmark-validator-record.json"
 validator="$script_directory/protocol-benchmark-validator.jq"
+# Preflight is deliberately inline here rather than a separate scripts/preflight-*.sh: this is a
+# descriptive comparison whose outputs live under a rebuildable target/ path, so there is no
+# consumed one-shot authority for a sealed pre-check to protect. The AGENTS.md preflight duties
+# -- tools, schema, output persistence and overwrite refusal before any workload launch -- are
+# all discharged by the block below and the artifact guard further down.
 command -v jq >/dev/null || { printf 'jq is required for JSONL verification\n' >&2; exit 1; }
 jq -e -L "$script_directory" \
     'include "protocol-benchmark-record-validator"; protocol_benchmark_record_valid' \
