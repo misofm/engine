@@ -441,6 +441,11 @@ pub struct TimingArm {
 /// The outcome of one leg at one width.
 #[derive(Clone, Debug)]
 pub struct TimingReport {
+    /// The runner-supplied round marker: `0` for the discarded warmup, then `1` and `2`.
+    ///
+    /// Supplied by `scripts/run-wasm-kernel-timing.sh` and recorded here, so a record taken by a
+    /// direct invocation cannot pass as one of the two frozen measured rounds.
+    pub round: u32,
     /// `"native"` or `"wasm"`.
     pub leg: &'static str,
     /// The record-family label. Never comparable with a native console record.
@@ -475,7 +480,7 @@ impl TimingReport {
         let arms: Vec<String> = self.arms.iter().map(arm).collect();
         format!(
             "{{\"schema_version\":1,\"issue\":163,\"phase\":\"0b\",\"record\":\"wasm_kernel_timing\",\
-             \"leg\":\"{}\",\"backend\":\"{}\",\"width\":\"{}\",\"runtime\":\"wasmtime {}\",\
+             \"round\":{},\"leg\":\"{}\",\"backend\":\"{}\",\"width\":\"{}\",\"runtime\":\"wasmtime {}\",\
              \"comparable_with_console_records\":false,\
              \"observations\":{},\"pairing\":\"alternating_per_observation\",\
              \"percentile_method\":\"nearest_rank\",\"units\":\"ns_per_case\",\
@@ -484,6 +489,7 @@ impl TimingReport {
              \"statistical_method\":\"arms alternated per observation; nearest-rank percentiles \
 over per-call nanoseconds; paired delta is the arm minus the baseline arm per observation; \
 descriptive only; no threshold\"}}",
+            self.round,
             self.leg,
             self.backend,
             corpus::width_name(self.width),
@@ -518,6 +524,7 @@ fn paired_median(arm: &[u64], baseline: &[u64]) -> i64 {
 
 /// Alternates the baseline and every named case, timing each call on the host clock.
 fn timing_run(
+    round: u32,
     leg: &'static str,
     backend: String,
     width: usize,
@@ -561,6 +568,7 @@ fn timing_run(
         }
     };
     TimingReport {
+        round,
         leg,
         backend,
         width,
@@ -576,10 +584,10 @@ fn timing_run(
 ///
 /// Panics if `width >= corpus::WIDTHS`, or if a named case has left the frozen corpus.
 #[must_use]
-pub fn native_timing_report(width: usize) -> TimingReport {
+pub fn native_timing_report(round: u32, width: usize) -> TimingReport {
     assert!(width < corpus::WIDTHS, "width index out of range");
     let backend = format!("native-{}", corpus::width_name(width));
-    timing_run("native", backend, width, |case| {
+    timing_run(round, "native", backend, width, |case| {
         corpus::digest_case(case, width)
     })
 }
@@ -595,6 +603,7 @@ pub fn native_timing_report(width: usize) -> TimingReport {
 ///
 /// Panics if `width >= corpus::WIDTHS`, or if a named case has left the frozen corpus.
 pub fn wasm_timing_report(
+    round: u32,
     path: &Path,
     expected: ExpectedBackend,
     width: usize,
@@ -615,7 +624,7 @@ pub fn wasm_timing_report(
         ExpectedBackend::Simd4 => "wasm-simd128".to_owned(),
         other => format!("wasm-{}", other.name()),
     };
-    Ok(timing_run("wasm", backend, width, |case| {
+    Ok(timing_run(round, "wasm", backend, width, |case| {
         guest
             .digest(case, width)
             .expect("the guest must not trap inside the timing arm")

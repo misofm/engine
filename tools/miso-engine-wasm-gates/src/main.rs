@@ -21,10 +21,24 @@ use miso_engine_wasm_gates::{
 const USAGE: &str = "usage:\n  \
      miso_engine_wasm_gates --native\n  \
      miso_engine_wasm_gates <guest.wasm> --expect-backend scalar|simd4|simd8\n  \
-     miso_engine_wasm_gates --native-timing scalar|simd4|simd8\n  \
+     miso_engine_wasm_gates --native-timing scalar|simd4|simd8 --round warmup|1|2\n  \
      miso_engine_wasm_gates <guest.wasm> --wasm-timing scalar|simd4|simd8 \
---expect-backend scalar|simd4|simd8\n  \
+--expect-backend scalar|simd4|simd8 --round warmup|1|2\n  \
      miso_engine_wasm_gates --print-pins";
+
+/// Parses the runner-supplied round marker.
+///
+/// There is no default. The timing arm is a one-shot measurement whose provenance is its runner,
+/// exactly as the console benchmark's is, so a direct invocation cannot produce a record that
+/// claims to be one of the two frozen measured rounds.
+fn round_marker(name: &str) -> Option<u32> {
+    match name {
+        "warmup" => Some(0),
+        "1" => Some(1),
+        "2" => Some(2),
+        _ => None,
+    }
+}
 
 /// Parses a width name into the corpus width index the timing arm drives.
 fn width_index(name: &str) -> Option<usize> {
@@ -42,16 +56,18 @@ fn main() -> ExitCode {
         Some("--native") if arguments.len() == 1 => run_native(),
         // Issue #163 phase 0b. Descriptive only, and a separate record family: a `wasm-simd128`
         // line is never comparable with a native console record.
-        Some("--native-timing") if arguments.len() == 2 => match width_index(&arguments[1]) {
-            Some(width) => {
-                println!("{}", native_timing_report(width).json());
-                ExitCode::SUCCESS
+        Some("--native-timing") if arguments.len() == 4 && arguments[2] == "--round" => {
+            match (width_index(&arguments[1]), round_marker(&arguments[3])) {
+                (Some(width), Some(round)) => {
+                    println!("{}", native_timing_report(round, width).json());
+                    ExitCode::SUCCESS
+                }
+                _ => {
+                    eprintln!("{USAGE}");
+                    ExitCode::from(2)
+                }
             }
-            None => {
-                eprintln!("unknown width '{}'\n{USAGE}", arguments[1]);
-                ExitCode::from(2)
-            }
-        },
+        }
         Some("--print-pins") if arguments.len() == 1 => {
             print!("{}", print_lane_pins());
             ExitCode::SUCCESS
@@ -61,16 +77,18 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Some(path)
-            if arguments.len() == 5
+            if arguments.len() == 7
                 && arguments[1] == "--wasm-timing"
-                && arguments[3] == "--expect-backend" =>
+                && arguments[3] == "--expect-backend"
+                && arguments[5] == "--round" =>
         {
             match (
                 width_index(&arguments[2]),
                 ExpectedBackend::parse(&arguments[4]),
+                round_marker(&arguments[6]),
             ) {
-                (Some(width), Ok(expected)) => {
-                    match wasm_timing_report(&PathBuf::from(path), expected, width) {
+                (Some(width), Ok(expected), Some(round)) => {
+                    match wasm_timing_report(round, &PathBuf::from(path), expected, width) {
                         Ok(report) => {
                             println!("{}", report.json());
                             ExitCode::SUCCESS

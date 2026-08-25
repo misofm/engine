@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# scripts/sweep.sh -- the hermetic check/test sweep. 87 explicit rows.
+# scripts/sweep.sh -- the hermetic check/test sweep. 88 explicit rows.
 #
 # Why this exists: the repo has 89 check-*/test-* scripts and ci.yml names 36 of them, so 50 gates
 # had no committed runner at all -- they were reachable only by knowing they existed. Every row
@@ -151,6 +151,7 @@ row scripts/check-capi-abi.sh
 row scripts/check-builtins-listening.sh
 row scripts/test-realtime-audit-leak.sh
 row scripts/test-web-audioworklet.sh
+row scripts/test-wasm-kernel-timing.sh
 row scripts/test-effect-interchange-benchmark.sh
 
 # ---- tier 3: build-bound, ten seconds and up -----------------------------------------------
@@ -170,6 +171,11 @@ row scripts/check-effect-contract.sh
 row scripts/check-web-audioworklet.sh
 
 # ---- deliberately not swept ----------------------------------------------------------------
+# run-wasm-kernel-timing.sh, run-console-benchmark.sh and the other run-*.sh entry points -- one-shot
+#   measurement runners. Each consumes a single authorised measurement and refuses to overwrite the
+#   artifacts it writes, so a sweep row would either burn the measurement or fail on the second
+#   sweep. Their hermetic halves are swept: check-bench-preconditions.sh, test-console-benchmark.sh
+#   and test-wasm-kernel-timing.sh are all rows above.
 # check-capi-object-symbols-v1.py -- pure helper, no self-test: exits 2 unless handed three argv
 #   paths. Exercised for real by check-capi-qualification-v1.sh, which is a row above.
 # check-capi-qualification-evidence-v1.py -- pure helper, no self-test: exits 2 unless handed a
