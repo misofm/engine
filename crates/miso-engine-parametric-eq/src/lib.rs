@@ -37,12 +37,13 @@ use miso_engine_effect_contract::{
     AutomationRate, AutomationSpanKind, BankProcessReport, BankWidth, EffectBankProcessBlock,
     EffectDescriptorV1, EffectPrepareError, EffectProcessBlock, EffectQuality as Quality,
     EnumChoiceV1, InitialParameterValue, LatencySamples, LinkModeSet, NativeEffectFactory,
-    ParameterChannel, ParameterChannelPolicy, ParameterDescriptorV1, ParameterDomain, ParameterId,
-    ParameterMapping, ParameterUnit, PortDescriptorV1, PortId, PortLayout, PortRole,
-    PrepareEffectBankRequest, PrepareEffectRequest, PreparedAutomationSpan, PreparedBankMetadata,
-    PreparedEffectMetadata, PreparedNativeEffect, PreparedNativeEffectBank, ProcessReport,
-    QualityDescriptorV1, ResetKind, SmoothingRule, StatePayloadError, StatePayloadInput,
-    StatePayloadOutput, StatePayloadSizes, TailSamples, expected_prepared_metadata,
+    NudgeLadderV1, ParameterChannel, ParameterChannelPolicy, ParameterDescriptorV1,
+    ParameterDomain, ParameterId, ParameterMapping, ParameterUnit, PortDescriptorV1, PortId,
+    PortLayout, PortRole, PrepareEffectBankRequest, PrepareEffectRequest, PreparedAutomationSpan,
+    PreparedBankMetadata, PreparedEffectMetadata, PreparedNativeEffect, PreparedNativeEffectBank,
+    ProcessReport, QualityDescriptorV1, ResetKind, SmoothingRule, StatePayloadError,
+    StatePayloadInput, StatePayloadOutput, StatePayloadSizes, TailSamples, default_nudge_ladder_v1,
+    expected_prepared_metadata,
 };
 use miso_engine_effect_runtime::bank::{check_block, nonfinite_lane_mask};
 use miso_engine_effect_runtime::params::{
@@ -300,6 +301,24 @@ const MAPPINGS: [ParameterMapping; 6] = [
     ParameterMapping::Linear,
 ];
 
+/// Per-field nudge ladders (issue #127), `None` where the `(unit, mapping)` class default is
+/// already right.
+///
+/// Only `shelf-slope` overrides. It is a `Ratio` on a `Linear` mapping, so its class default is
+/// 0.1 per `xs` rung -- which is right for a quantity read in tenths over a wide domain, and three
+/// times the whole 0.1..1.0 slope domain at the `xl` rung. This is the collision the previous
+/// engine hit between a compression ratio and a downsampling factor sharing one unit class, and
+/// the answer is the same one: the per-parameter override wins over the class. `0.02` puts `xl` at
+/// 0.6 of the domain and `xs` just below the point where a shelf's slope audibly changes.
+const NUDGE_OVERRIDES: [Option<NudgeLadderV1>; 6] = [
+    None,
+    None,
+    None,
+    None,
+    None,
+    Some(NudgeLadderV1::absolute(0.02)),
+];
+
 /// One descriptor of one field of one band.
 const fn parameter(band: usize, field: usize) -> ParameterDescriptorV1 {
     let automatable = field >= 2;
@@ -332,6 +351,10 @@ const fn parameter(band: usize, field: usize) -> ParameterDescriptorV1 {
         readable: true,
         automatable,
         enum_choices: if field == 1 { &KIND_CHOICES } else { &[] },
+        nudge: match NUDGE_OVERRIDES[field] {
+            Some(ladder) => Some(ladder),
+            None => default_nudge_ladder_v1(UNITS[field], DOMAINS[field], MAPPINGS[field]),
+        },
     }
 }
 

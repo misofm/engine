@@ -35,6 +35,7 @@ const PARAMETERS: [ParameterDescriptorV1; 1] = [ParameterDescriptorV1 {
     readable: true,
     automatable: true,
     enum_choices: &[],
+    nudge: None,
 }];
 const PORTS: [PortDescriptorV1; 2] = [
     PortDescriptorV1 {

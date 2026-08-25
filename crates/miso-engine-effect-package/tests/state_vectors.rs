@@ -36,6 +36,7 @@ static PARAMETERS: [ParameterDescriptorV1; 2] = [
         readable: true,
         automatable: true,
         enum_choices: &[],
+        nudge: None,
     },
     ParameterDescriptorV1 {
         id: ParameterId(2),
@@ -54,6 +55,7 @@ static PARAMETERS: [ParameterDescriptorV1; 2] = [
         readable: true,
         automatable: true,
         enum_choices: &[],
+        nudge: None,
     },
 ];
 
@@ -979,6 +981,7 @@ fn migration_edges_are_adjacent_compatible_and_preserve_exact_provenance() {
         default_value: 0.0,
         mapping: ParameterMapping::Stepped,
         enum_choices: &ENUM_CHOICES,
+        nudge: None,
         ..PARAMETERS[1]
     };
     let enum_source = descriptor_with_parameters(
@@ -1002,6 +1005,7 @@ fn migration_edges_are_adjacent_compatible_and_preserve_exact_provenance() {
                 PARAMETERS[0],
                 ParameterDescriptorV1 {
                     enum_choices: &CHANGED_ENUM_CHOICES,
+                    nudge: None,
                     ..enum_parameter
                 },
             ],

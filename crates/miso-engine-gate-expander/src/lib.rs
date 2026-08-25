@@ -29,14 +29,15 @@ use miso_engine_effect_contract::{
     AutomationRate, AutomationSpanKind, BankProcessReport, BankWidth, EffectBankProcessBlock,
     EffectDescriptorV1, EffectPrepareError, EffectProcessBlock, EffectQuality,
     InitialParameterValue, LatencySamples, LinkMode, LinkModeSet, NativeEffectFactory,
-    ObservationCadenceV1, ObservationChannelsV1, ObservationCostV1, ObservationDescriptorV1,
-    ObservationFoldV1, ObservationKindV1, ObservationSampleV1, ObservationTapId, ParameterChannel,
-    ParameterChannelPolicy, ParameterDescriptorV1, ParameterDomain, ParameterId, ParameterMapping,
-    ParameterUnit, PortDescriptorV1, PortId, PortLayout, PortRole, PrepareEffectBankRequest,
-    PrepareEffectRequest, PreparedAutomationSpan, PreparedBankMetadata, PreparedEffectMetadata,
-    PreparedNativeEffect, PreparedNativeEffectBank, PreparedSidechainPort, ProcessReport,
-    ResetKind, SmoothingRule, StatePayloadError, StatePayloadInput, StatePayloadOutput,
-    StatePayloadSizes, TailSamples, expected_prepared_metadata,
+    NudgeLadderV1, ObservationCadenceV1, ObservationChannelsV1, ObservationCostV1,
+    ObservationDescriptorV1, ObservationFoldV1, ObservationKindV1, ObservationSampleV1,
+    ObservationTapId, ParameterChannel, ParameterChannelPolicy, ParameterDescriptorV1,
+    ParameterDomain, ParameterId, ParameterMapping, ParameterUnit, PortDescriptorV1, PortId,
+    PortLayout, PortRole, PrepareEffectBankRequest, PrepareEffectRequest, PreparedAutomationSpan,
+    PreparedBankMetadata, PreparedEffectMetadata, PreparedNativeEffect, PreparedNativeEffectBank,
+    PreparedSidechainPort, ProcessReport, ResetKind, SmoothingRule, StatePayloadError,
+    StatePayloadInput, StatePayloadOutput, StatePayloadSizes, TailSamples, default_nudge_ladder_v1,
+    expected_prepared_metadata,
 };
 use miso_engine_effect_runtime::bank::{check_block, nonfinite_lane_mask};
 use miso_engine_effect_runtime::envelope::attack_release_coefficient;
@@ -112,7 +113,16 @@ const fn parameter(
         readable: true,
         automatable: !matches!(automation_rate, AutomationRate::None),
         enum_choices: &[],
+        nudge: default_nudge_ladder_v1(unit, ParameterDomain::Continuous, mapping),
     }
+}
+
+/// One parameter with a per-parameter nudge ladder in place of its `(unit, mapping)` class
+/// default (issue #127). The reason for every override is written at its call site: a class is a
+/// starting point, and two parameters that share a unit can still want different steps.
+const fn with_nudge(mut p: ParameterDescriptorV1, ladder: NudgeLadderV1) -> ParameterDescriptorV1 {
+    p.nudge = Some(ladder);
+    p
 }
 
 /// Frozen V1 gate/expander parameters. Descriptor position and stable numeric ID agree.
@@ -182,18 +192,25 @@ pub const GATE_EXPANDER_PARAMETERS_V1: [ParameterDescriptorV1; PARAMETER_COUNT] 
         SmoothingRule::None,
         0,
     ),
-    parameter(
-        6,
-        "hold",
-        "ms",
-        ParameterUnit::Milliseconds,
-        0.0,
-        1000.0,
-        100.0,
-        ParameterMapping::Linear,
-        AutomationRate::None,
-        SmoothingRule::None,
-        0,
+    // #127 override: `hold` shares the millisecond-on-a-linear-mapping class with `lookahead`,
+    // and the class default of 0.1 ms is chosen for lookahead. A hold time runs to a full second;
+    // a tenth of a millisecond is below anything audible on it, so the whole ladder would sit
+    // under the resolution a listener has. One millisecond is the smallest rung that moves it.
+    with_nudge(
+        parameter(
+            6,
+            "hold",
+            "ms",
+            ParameterUnit::Milliseconds,
+            0.0,
+            1000.0,
+            100.0,
+            ParameterMapping::Linear,
+            AutomationRate::None,
+            SmoothingRule::None,
+            0,
+        ),
+        NudgeLadderV1::absolute(1.0),
     ),
     parameter(
         7,

@@ -99,6 +99,7 @@ static STATE_PARAMETERS: [ParameterDescriptorV1; 2] = [
         readable: true,
         automatable: true,
         enum_choices: &[],
+        nudge: None,
     },
     ParameterDescriptorV1 {
         id: ParameterId(2),
@@ -117,6 +118,7 @@ static STATE_PARAMETERS: [ParameterDescriptorV1; 2] = [
         readable: true,
         automatable: true,
         enum_choices: &[],
+        nudge: None,
     },
 ];
 static STATE_PORTS: [PortDescriptorV1; 3] = [
@@ -232,6 +234,7 @@ static MIGRATION_PARAMETERS: [ParameterDescriptorV1; 1] = [ParameterDescriptorV1
     readable: true,
     automatable: true,
     enum_choices: &[],
+    nudge: None,
 }];
 static MIGRATION_PORTS: [PortDescriptorV1; 2] = [
     PortDescriptorV1 {

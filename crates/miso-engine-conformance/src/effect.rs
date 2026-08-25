@@ -58,6 +58,13 @@ const PARAMETERS: [ParameterDescriptorV1; 1] = [ParameterDescriptorV1 {
     readable: true,
     automatable: true,
     enum_choices: &[],
+    // Issue #127: the reference mock declares the `(Linear, Linear)` class ladder, so the shared
+    // harness exercises a nudgeable parameter rather than proving only the ladder-free path.
+    nudge: miso_engine_effect_contract::default_nudge_ladder_v1(
+        ParameterUnit::Linear,
+        ParameterDomain::Continuous,
+        ParameterMapping::Linear,
+    ),
 }];
 const PORTS: [PortDescriptorV1; 3] = [
     PortDescriptorV1 {

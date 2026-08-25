@@ -40,6 +40,7 @@ static PARAMETERS: [ParameterDescriptorV1; 1] = [ParameterDescriptorV1 {
     readable: true,
     automatable: true,
     enum_choices: &[],
+    nudge: None,
 }];
 static PORTS: [PortDescriptorV1; 2] = [
     PortDescriptorV1 {

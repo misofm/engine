@@ -64,6 +64,79 @@ def float_value(bits: int) -> float:
     return struct.unpack("<f", struct.pack("<I", bits))[0]
 
 
+# Issue #127: the nudge ladder that rides the parameter record's eight reserved bytes. The five
+# rungs are `xs` times the ratio class's multipliers; `xs` itself is declared in the parameter's
+# own unit and resolved into the mapping's normalized [0, 1] domain, which is where the nudge
+# arithmetic is exact at both endpoints.
+NUDGE_MULTIPLIERS = {1: (1, 3, 5, 10, 30), 2: (1, 4, 16, 64, 256)}
+
+
+def f32(value: float) -> float:
+    """Round a Python float to the nearest `f32`, as the Rust resolver's final cast does."""
+    return struct.unpack("<f", struct.pack("<f", value))[0]
+
+
+def resolve_nudge(ladder, domain: int, mapping: int, minimum, maximum, choice_count: int):
+    """The normalized `xs` step, or `None` when the ladder does not fit the parameter."""
+    xs = float_value(int(ladder["xs_bits"], 16))
+    if not math.isfinite(xs) or xs <= 0.0:
+        return None
+    low = float_value(minimum) if minimum is not None else None
+    high = float_value(maximum) if maximum is not None else None
+    bounded = (
+        low is not None
+        and high is not None
+        and math.isfinite(low)
+        and math.isfinite(high)
+        and low < high
+    )
+    unit = ladder["step_unit"]
+    if unit == 1 and domain == 1 and mapping == 1:
+        if not bounded:
+            return None
+        normalized = xs / (high - low)
+    elif unit in (2, 3) and domain == 1 and mapping == 2:
+        if not bounded or low <= 0.0:
+            return None
+        normalized = (
+            (xs / 1200.0) * math.log(2.0) / math.log(high / low)
+            if unit == 2
+            else math.log(1.0 + xs / 100.0) / math.log(high / low)
+        )
+    elif unit == 4 and domain == 3 and mapping == 4:
+        if choice_count < 2 or xs != int(xs):
+            return None
+        normalized = xs / (choice_count - 1)
+    else:
+        return None
+    normalized = f32(normalized)
+    if not math.isfinite(normalized) or normalized <= 0.0 or normalized > 1.0:
+        return None
+    return normalized
+
+
+def nudge_rules_broken(ladder, domain: int, mapping: int, minimum, maximum, choice_count: int) -> bool:
+    """True when the declared ladder breaks the step, domain or order rule."""
+    xs = float_value(int(ladder["xs_bits"], 16))
+    if (
+        not math.isfinite(xs)
+        or xs <= 0.0
+        or int(ladder["xs_bits"], 16) == 0x80000000
+        or (ladder["step_unit"] == 4 and xs != int(xs))
+    ):
+        return True
+    if domain == 2:
+        return True
+    resolved = resolve_nudge(ladder, domain, mapping, minimum, maximum, choice_count)
+    if resolved is None:
+        return True
+    multipliers = NUDGE_MULTIPLIERS[ladder["ratio_class"]]
+    steps = [f32(resolved * multiplier) for multiplier in multipliers]
+    if domain == 1 and steps[-1] > 1.0:
+        return True
+    return any(not (a < b) for a, b in zip(steps, steps[1:]))
+
+
 def canonical_float(bits: int) -> bool:
     return bits != 0x80000000 and math.isfinite(float_value(bits))
 
@@ -146,6 +219,17 @@ def validate_source(source: dict) -> None:
             fail(any(float_value(a) >= float_value(b) for a, b in zip(values, values[1:])), 13, record + 4, index)
             fail(any(not valid_text(label) for label in labels) or len(set(labels)) != len(labels), 13, record + 4, index)
             fail(default not in values, 13, record + 4, index)
+        ladder = parameter.get("nudge")
+        if ladder is not None:
+            fail(ladder["step_unit"] not in range(1, 5), 7, record + 76, index)
+            fail(ladder["ratio_class"] not in range(1, 3), 7, record + 77, index)
+            fail(not canonical_float(int(ladder["xs_bits"], 16)), 12, record + 72, index)
+            fail(
+                nudge_rules_broken(ladder, domain, mapping, minimum, maximum, len(choices)),
+                13,
+                record + 72,
+                index,
+            )
 
     port_offset = HEADER + len(source["parameters"]) * PARAMETER
     canonical_ports = sorted(source["ports"], key=lambda port: (port["role"], port["id"].encode()))
@@ -286,6 +370,11 @@ def encode(source: dict) -> bytes:
             offset, length = text(value)
             put32(output, record + field, offset)
             put32(output, record + field + 4, length)
+        ladder = parameter.get("nudge")
+        if ladder is not None:
+            put32(output, record + 72, int(ladder["xs_bits"], 16))
+            output[record + 76] = ladder["step_unit"]
+            output[record + 77] = ladder["ratio_class"]
         for choice in parameter["enum_choices"]:
             choice_record = choice_offset + choice_index * CHOICE
             put32(output, choice_record, int(choice["value_bits"], 16))
@@ -365,8 +454,15 @@ def verify(data: bytes, maximum: int = LIMIT) -> tuple[int, ...]:
         fail(flags & ~15 != 0, 8, record + 32, index)
         fail(flags & 4 == 0 and u32(data, record + 36) != 0, 8, record + 36, index)
         fail(flags & 8 == 0 and u32(data, record + 40) != 0, 8, record + 40, index)
-        for field in (72, 76):
-            fail(u32(data, record + field) != 0, 6, record + field, index)
+        # Issue #127: byte 76 is the presence bit. With no ladder all eight bytes stay zero,
+        # which is byte for byte the window the pre-#127 verifier reserved.
+        if data[record + 76] == 0:
+            for offset in range(72, 80):
+                fail(data[record + offset] != 0, 6, record + offset, index)
+        else:
+            fail(u16(data, record + 78) != 0, 6, record + 78, index)
+            fail(data[record + 76] not in range(1, 5), 7, record + 76, index)
+            fail(data[record + 77] not in range(1, 3), 7, record + 77, index)
     for index in range(counts[1]):
         fail(u32(data, port_offset + index * PORT + 20) != 0, 6, port_offset + index * PORT + 20, index)
     for index in range(counts[2]):
@@ -505,7 +601,8 @@ def verify(data: bytes, maximum: int = LIMIT) -> tuple[int, ...]:
     for index in range(counts[0]):
         record = parameter_offset + index * PARAMETER
         flags = u32(data, record + 32)
-        for field, present in ((36, flags & 4), (40, flags & 8), (44, True)):
+        for field, present in ((36, flags & 4), (40, flags & 8), (44, True),
+                               (72, data[record + 76] != 0)):
             fail(bool(present) and not canonical_float(u32(data, record + field)), 12, record + field, index)
     for index in range(counts[3]):
         record = choice_offset + index * CHOICE
@@ -547,6 +644,11 @@ def verify(data: bytes, maximum: int = LIMIT) -> tuple[int, ...]:
             "maximum_bits": f"{u32(data, record + 40):08x}" if flags & 8 else None,
             "default_bits": f"{u32(data, record + 44):08x}",
             "enum_choices": choices,
+            "nudge": {
+                "xs_bits": f"{u32(data, record + 72):08x}",
+                "step_unit": data[record + 76],
+                "ratio_class": data[record + 77],
+            } if data[record + 76] else None,
         })
     ports = []
     for index in range(counts[1]):
@@ -813,9 +915,60 @@ def read_hex(path: pathlib.Path) -> bytes:
     return bytes.fromhex("".join(path.read_text(encoding="ascii").split()))
 
 
+def nudge_mutation_matrix(data: bytes) -> None:
+    """Issue #127: every nudge rule, proven red on a ladder-bearing descriptor.
+
+    `comprehensive-d` declares a ladder on parameters 0, 1 and 4, so each mutation below lands on a
+    record that actually carries one; mutating a ladder-free record would only re-prove the
+    reserved rule the pre-#127 matrix already covers.
+    """
+    parameter_offset = u32(data, 52)
+    first = parameter_offset
+    frequency = parameter_offset + PARAMETER
+    mode = parameter_offset + 4 * PARAMETER
+    absent = parameter_offset + 2 * PARAMETER
+    cases = [
+        # The presence bit is off but the window is not clear: the reserved rule still holds.
+        ("nudge-reserved-xs", absent + 72, struct.pack("<I", 1), (6, absent + 72, 2, 0)),
+        ("nudge-reserved-class", absent + 77, b"\x01", (6, absent + 77, 2, 0)),
+        # The tail of the window is reserved whether or not a ladder is declared.
+        ("nudge-reserved-tail", first + 78, b"\x01", (6, first + 78, 0, 0)),
+        # Unknown vocabulary values are refused, never reinterpreted.
+        ("nudge-step-unit", first + 76, b"\x05", (7, first + 76, 0, 0)),
+        ("nudge-ratio-class", first + 77, b"\x03", (7, first + 77, 0, 0)),
+        # `xs` obeys the canonical-float rule every descriptor float obeys.
+        ("nudge-xs-negative-zero", first + 72, struct.pack("<I", 0x80000000),
+         (12, first + 72, 0, 0)),
+        ("nudge-xs-nan", first + 72, struct.pack("<I", 0x7fc00000), (12, first + 72, 0, 0)),
+        # Step rule: a zero or negative `xs` is not a step.
+        ("nudge-xs-zero", first + 72, struct.pack("<I", 0), (13, first + 72, 0, 0)),
+        ("nudge-xs-negative", first + 72, struct.pack("<f", -0.5), (13, first + 72, 0, 0)),
+        # Step rule: a `Steps` ladder counts whole choices.
+        ("nudge-fractional-steps", mode + 72, struct.pack("<f", 1.5), (13, mode + 72, 4, 0)),
+        # Domain rule: the step unit must fit the mapping. `Absolute` on a logarithmic frequency
+        # has no constant-unit meaning, and `Cents` on a linear gain has no ratio meaning.
+        ("nudge-absolute-on-logarithmic", frequency + 76, b"\x01",
+         (13, frequency + 72, 1, 0)),
+        ("nudge-cents-on-linear", first + 76, b"\x02", (13, first + 72, 0, 0)),
+        # Domain rule: `xl` may not cross the whole continuous domain. The gain spans 72 dB, so an
+        # `xs` of 3 dB puts `xl` at 90 dB -- more than the parameter has.
+        ("nudge-xl-crosses-domain", first + 72, struct.pack("<f", 3.0), (13, first + 72, 0, 0)),
+    ]
+    for name, offset, replacement, expected in cases:
+        mutated = bytearray(data)
+        mutated[offset:offset + len(replacement)] = replacement
+        try:
+            verify(bytes(mutated))
+        except WireError as error:
+            if error.diagnostic != expected:
+                raise AssertionError(f"{name}: {error.diagnostic} != {expected}") from error
+        else:
+            raise AssertionError(f"{name}: mutation accepted")
+
+
 def check(root: pathlib.Path) -> None:
     fixture = root / "fixtures/effect-descriptor/v1"
-    names = ("comprehensive-a", "comprehensive-b", "comprehensive-c")
+    names = ("comprehensive-a", "comprehensive-b", "comprehensive-c", "comprehensive-d")
     manifest_rows = []
     for name in names:
         source_path = fixture / f"{name}.json"
@@ -846,8 +999,37 @@ def check(root: pathlib.Path) -> None:
     assert len(tap_bearing) - len(zero_tap) == expected_delta, "observation section formula"
     assert u32(zero_tap, 88) == 0 and u32(zero_tap, 92) == 0, "zero-tap header stays reserved-zero"
     assert any(byte != 0 for byte in tap_bearing[88:96]), "tap-bearing header is nonzero"
+    # Issue #127 byte accounting: the ladder rides the eight bytes the parameter record already
+    # reserved, so a ladder costs *zero* bytes. `comprehensive-d` is `comprehensive-a` with three
+    # ladders declared and nothing else changed -- the id and display name are the same byte
+    # lengths -- so the totals must be equal, the identity must not be, and the only bytes that
+    # moved must be inside those windows.
+    ladder_bearing = read_hex(fixture / "comprehensive-d.wire.hex")
+    assert len(ladder_bearing) == len(zero_tap), "a nudge ladder adds no bytes"
+    assert identity(ladder_bearing) != identity(zero_tap), "a declared ladder moves the identity"
+    parameter_count = u32(zero_tap, 48)
+    windows = {
+        offset
+        for index in range(parameter_count)
+        for offset in range(HEADER + index * PARAMETER + 72, HEADER + index * PARAMETER + 80)
+    }
+    moved = {
+        offset
+        for offset in range(len(zero_tap))
+        if zero_tap[offset] != ladder_bearing[offset]
+    }
+    # The effect id and display name differ by one letter each, by construction.
+    text_moved = {offset for offset in moved if offset >= u32(zero_tap, 84)}
+    assert len(text_moved) == 2, "only the two renamed letters move in the string pool"
+    assert moved - text_moved <= windows, "a ladder writes only inside the reserved windows"
+    assert moved - text_moved, "the ladder-bearing wire actually writes a ladder"
+    for index in range(parameter_count):
+        record = HEADER + index * PARAMETER
+        declared = zero_tap[record + 72:record + 80]
+        assert declared == bytes(8), "the ladder-free wire keeps the window reserved-zero"
     mutation_matrix(read_hex(fixture / "comprehensive-a.wire.hex"))
     observation_mutation_matrix(tap_bearing)
+    nudge_mutation_matrix(ladder_bearing)
     expected_manifest = "\n".join(row for _, row in sorted(manifest_rows)) + "\n"
     actual_manifest = (fixture / "MANIFEST.sha256").read_text(encoding="ascii")
     assert actual_manifest == expected_manifest, "manifest mismatch"
@@ -856,7 +1038,7 @@ def check(root: pathlib.Path) -> None:
 
 def emit(root: pathlib.Path) -> None:
     fixture = root / "fixtures/effect-descriptor/v1"
-    for name in ("comprehensive-a", "comprehensive-b", "comprehensive-c"):
+    for name in ("comprehensive-a", "comprehensive-b", "comprehensive-c", "comprehensive-d"):
         source = json.loads((fixture / f"{name}.json").read_text(encoding="utf-8"))
         wire = encode(source)
         verify(wire)

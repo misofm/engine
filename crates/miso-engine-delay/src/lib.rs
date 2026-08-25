@@ -36,12 +36,12 @@
 use miso_engine_effect_contract::{
     AutomationRate, AutomationSpanKind, EffectDescriptorV1, EffectPrepareError, EffectProcessBlock,
     EffectQuality, InitialParameterValue, LatencySamples, LinkModeSet, NativeEffectFactory,
-    ParameterChannel, ParameterChannelPolicy, ParameterDescriptorV1, ParameterDomain, ParameterId,
-    ParameterMapping, ParameterUnit, PortDescriptorV1, PortId, PortLayout, PortRole,
-    PrepareEffectBankRequest, PrepareEffectRequest, PreparedAutomationSpan, PreparedEffectMetadata,
-    PreparedNativeEffect, ProcessReport, ResetKind, SmoothingRule, StatePayloadError,
-    StatePayloadInput, StatePayloadOutput, StatePayloadSizes, TailSamples,
-    expected_prepared_metadata,
+    NudgeLadderV1, ParameterChannel, ParameterChannelPolicy, ParameterDescriptorV1,
+    ParameterDomain, ParameterId, ParameterMapping, ParameterUnit, PortDescriptorV1, PortId,
+    PortLayout, PortRole, PrepareEffectBankRequest, PrepareEffectRequest, PreparedAutomationSpan,
+    PreparedEffectMetadata, PreparedNativeEffect, ProcessReport, ResetKind, SmoothingRule,
+    StatePayloadError, StatePayloadInput, StatePayloadOutput, StatePayloadSizes, TailSamples,
+    default_nudge_ladder_v1, expected_prepared_metadata,
 };
 use miso_engine_effect_runtime::bank::check_block;
 use miso_engine_effect_runtime::params::{
@@ -146,21 +146,36 @@ const fn parameter(
         readable: true,
         automatable: true,
         enum_choices: &[],
+        nudge: default_nudge_ladder_v1(unit, ParameterDomain::Continuous, ParameterMapping::Linear),
     }
+}
+
+/// One parameter with a per-parameter nudge ladder in place of its `(unit, mapping)` class
+/// default (issue #127). The reason for every override is written at its call site: a class is a
+/// starting point, and two parameters that share a unit can still want different steps.
+const fn with_nudge(mut p: ParameterDescriptorV1, ladder: NudgeLadderV1) -> ParameterDescriptorV1 {
+    p.nudge = Some(ladder);
+    p
 }
 
 /// Frozen V1 delay parameters in descriptor and stable-ID order.
 pub const DELAY_PARAMETERS_V1: [ParameterDescriptorV1; PARAMETER_COUNT] = [
-    parameter(
-        1,
-        "delay time",
-        "ms",
-        ParameterUnit::Milliseconds,
-        ParameterChannelPolicy::PerLane,
-        1.0,
-        2000.0,
-        250.0,
-        TRANSITION_SAMPLES,
+    // #127 override: the millisecond class default is a tenth of a millisecond, which is the
+    // right `xs` for a lookahead window and two orders of magnitude below anything a listener can
+    // hear in an echo. A delay time's smallest useful move is a whole millisecond.
+    with_nudge(
+        parameter(
+            1,
+            "delay time",
+            "ms",
+            ParameterUnit::Milliseconds,
+            ParameterChannelPolicy::PerLane,
+            1.0,
+            2000.0,
+            250.0,
+            TRANSITION_SAMPLES,
+        ),
+        NudgeLadderV1::absolute(1.0),
     ),
     parameter(
         2,

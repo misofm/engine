@@ -7,9 +7,11 @@ use miso_engine_core::{
 };
 use miso_engine_effect_contract::{
     AutomationRate, DescriptorDiagnosticCode, EffectDescriptorV1, EffectQuality, LinkMode,
-    LinkModeSet, ObservationCadenceV1, ObservationChannelsV1, ObservationCostV1, ObservationFoldV1,
-    ObservationKindV1, ParameterChannelPolicy, ParameterDomain, ParameterMapping, ParameterUnit,
-    PortDescriptorV1, PortLayout, PortRole, SmoothingRule, TailSamples, validate_descriptor_v1,
+    LinkModeSet, NudgeLadderV1, NudgeRatioClassV1, NudgeStepUnitV1, ObservationCadenceV1,
+    ObservationChannelsV1, ObservationCostV1, ObservationFoldV1, ObservationKindV1,
+    ParameterChannelPolicy, ParameterDomain, ParameterMapping, ParameterUnit, PortDescriptorV1,
+    PortLayout, PortRole, SmoothingRule, TailSamples, check_nudge_ladder_parts_v1,
+    validate_descriptor_v1,
 };
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -17,6 +19,24 @@ use std::collections::{BTreeMap, BTreeSet};
 const MAGIC: &[u8; 8] = b"MISOEFD1";
 const VERSION: u16 = 1;
 const HEADER_BYTES: usize = 96;
+/// One parameter record, 80 bytes, frozen by issue #082.
+///
+/// Issue #127 fills the eight bytes at offsets 72..80 that the frozen record reserved and the
+/// verifier required to be zero:
+///
+/// | offset | width | field |
+/// |---|---|---|
+/// | 72 | u32 | declared `xs` bits, `0` with no ladder |
+/// | 76 | u8 | nudge step unit, `0` with no ladder |
+/// | 77 | u8 | nudge ratio class, `0` with no ladder |
+/// | 78 | u16 | required zero |
+///
+/// The record does not grow -- a nudge ladder costs zero bytes -- and a parameter that declares no
+/// ladder leaves all eight bytes zero, so a ladder-free descriptor is byte for byte the pre-#127
+/// wire and its identity does not move. A descriptor that declares one changes bytes and therefore
+/// changes identity, which is correct and intended: it describes something different. A reader
+/// that predates #127 refuses a ladder-bearing record on the reserved rule rather than silently
+/// ignoring the ladder -- the same fail-closed choice #143 made with header bytes 88..96.
 const PARAMETER_BYTES: usize = 80;
 const PORT_BYTES: usize = 24;
 const QUALITY_BYTES: usize = 64;
@@ -430,6 +450,11 @@ pub fn encode_effect_descriptor_wire_v1(
         let (offset, length) = write_text(output, &mut string_cursor, parameter.display_unit);
         write_u32(output, record + 64, offset);
         write_u32(output, record + 68, length);
+        if let Some(ladder) = parameter.nudge {
+            write_u32(output, record + 72, ladder.xs.to_bits());
+            output[record + 76] = ladder.step_unit as u8;
+            output[record + 77] = ladder.ratio_class as u8;
+        }
         for choice in parameter.enum_choices {
             let choice_record =
                 layout.choice_offset as usize + choice_index as usize * ENUM_CHOICE_BYTES;
@@ -530,6 +555,7 @@ struct BorrowedParameterV1<'a> {
     choice_count: u32,
     display_name: &'a str,
     display_unit: &'a str,
+    nudge: Option<NudgeLadderV1>,
 }
 
 #[derive(Clone, Copy)]
@@ -587,6 +613,14 @@ impl<'a> BorrowedEffectDescriptorViewV1<'a> {
             choice_count: read_u32(self.bytes, record + 52),
             display_name: self.text(name_offset, name_length),
             display_unit: self.text(unit_offset, unit_length),
+            nudge: NudgeStepUnitV1::from_raw(u32::from(self.bytes[record + 76])).map(|step_unit| {
+                NudgeLadderV1 {
+                    xs: f32::from_bits(read_u32(self.bytes, record + 72)),
+                    step_unit,
+                    ratio_class: NudgeRatioClassV1::from_raw(u32::from(self.bytes[record + 77]))
+                        .unwrap(),
+                }
+            }),
         }
     }
 
@@ -794,10 +828,24 @@ fn parse_borrowed_wire(
         if flags & 8 == 0 && read_u32(bytes, record + 40) != 0 {
             return Err(diagnostic(Code::Flags, record + 40, Some(index)));
         }
-        for field in [72, 76] {
-            if read_u32(bytes, record + field) != 0 {
-                return Err(diagnostic(Code::Reserved, record + field, Some(index)));
+        // Issue #127: bytes 72..80 are the nudge ladder. Byte 76 -- the step unit -- is the
+        // presence bit; with no ladder all eight bytes stay zero, which is byte for byte the
+        // reserved-zero window the pre-#127 verifier enforced. That is what keeps every
+        // ladder-free identity unmoved and what makes a stale reader refuse a ladder-bearing
+        // record rather than ignore its ladder.
+        if bytes[record + 76] == 0 {
+            if let Some(offset) = bytes[record + 72..record + 80]
+                .iter()
+                .position(|byte| *byte != 0)
+            {
+                return Err(diagnostic(
+                    Code::Reserved,
+                    record + 72 + offset,
+                    Some(index),
+                ));
             }
+        } else if read_u16(bytes, record + 78) != 0 {
+            return Err(diagnostic(Code::Reserved, record + 78, Some(index)));
         }
     }
     for index in 0..ports as usize {
@@ -1001,6 +1049,21 @@ fn parse_borrowed_wire(
                 24,
                 SmoothingRule::from_raw(read_u32(bytes, record + 24)).is_some(),
             ),
+            // Issue #127: a zero step unit is "no ladder", and then the ratio class must be zero
+            // too; any other pair must name two known vocabulary values.
+            (
+                76,
+                bytes[record + 76] == 0
+                    || NudgeStepUnitV1::from_raw(u32::from(bytes[record + 76])).is_some(),
+            ),
+            (
+                77,
+                if bytes[record + 76] == 0 {
+                    bytes[record + 77] == 0
+                } else {
+                    NudgeRatioClassV1::from_raw(u32::from(bytes[record + 77])).is_some()
+                },
+            ),
         ];
         if let Some((field, _)) = fields.into_iter().find(|(_, valid)| !valid) {
             return Err(diagnostic(Code::Enum, record + field, Some(index)));
@@ -1134,7 +1197,12 @@ fn parse_borrowed_wire(
     for index in 0..parameters as usize {
         let record = parameter_offset as usize + index * PARAMETER_BYTES;
         let flags = read_u32(bytes, record + 32);
-        for (field, present) in [(36, flags & 4 != 0), (40, flags & 8 != 0), (44, true)] {
+        for (field, present) in [
+            (36, flags & 4 != 0),
+            (40, flags & 8 != 0),
+            (44, true),
+            (72, bytes[record + 76] != 0),
+        ] {
             if present && !canonical_float(f32::from_bits(read_u32(bytes, record + field))) {
                 return Err(diagnostic(Code::Float, record + field, Some(index)));
             }
@@ -1332,6 +1400,37 @@ fn borrowed_semantic_errors(
                 "parameters",
                 DescriptorDiagnosticCode::Parameter,
                 record + 4,
+                Some(index),
+            );
+        }
+        // Issue #127: the ladder obeys the same three rules here as it does in the contract's
+        // validator, because it is literally the contract's check -- see
+        // `check_nudge_ladder_parts_v1`. A second implementation of the ladder rules is the drift
+        // this crate exists to make impossible.
+        if let Some(ladder) = parameter.nudge
+            && let Err(rule) = check_nudge_ladder_parts_v1(
+                ladder,
+                parameter.domain,
+                parameter.mapping,
+                parameter.minimum,
+                parameter.maximum,
+                parameter.choice_count as usize,
+            )
+        {
+            push(
+                "parameters",
+                match rule {
+                    miso_engine_effect_contract::NudgeRuleV1::Step => {
+                        DescriptorDiagnosticCode::NudgeStep
+                    }
+                    miso_engine_effect_contract::NudgeRuleV1::Domain => {
+                        DescriptorDiagnosticCode::NudgeDomain
+                    }
+                    miso_engine_effect_contract::NudgeRuleV1::Order => {
+                        DescriptorDiagnosticCode::NudgeOrder
+                    }
+                },
+                record + 72,
                 Some(index),
             );
         }
@@ -1566,6 +1665,15 @@ fn compare_static_descriptor(
             (44, parameter.default_value.to_bits()),
             (48, choice_index as u32),
             (52, parameter.enum_choices.len() as u32),
+            // Issue #127: the ladder is part of what the wire promises about a parameter, so a
+            // wire that declares a different one is not this descriptor.
+            (72, parameter.nudge.map_or(0, |ladder| ladder.xs.to_bits())),
+            (
+                76,
+                parameter.nudge.map_or(0, |ladder| {
+                    ladder.step_unit as u32 | ((ladder.ratio_class as u32) << 8)
+                }),
+            ),
         ];
         if let Some((field, _)) = scalar_fields
             .into_iter()
@@ -1843,6 +1951,7 @@ mod tests {
             readable: false,
             automatable: true,
             enum_choices: &[],
+            nudge: None,
         },
         ParameterDescriptorV1 {
             id: ParameterId(2),
@@ -1861,6 +1970,7 @@ mod tests {
             readable: true,
             automatable: true,
             enum_choices: &[],
+            nudge: None,
         },
         ParameterDescriptorV1 {
             id: ParameterId(3),
@@ -1879,6 +1989,7 @@ mod tests {
             readable: true,
             automatable: false,
             enum_choices: &CHOICES,
+            nudge: None,
         },
     ];
     static ZERO_ID_PARAMETERS: [ParameterDescriptorV1; 3] = [
@@ -1918,6 +2029,7 @@ mod tests {
         PARAMETERS[1],
         ParameterDescriptorV1 {
             enum_choices: &DUPLICATE_LABEL_CHOICES,
+            nudge: None,
             ..PARAMETERS[2]
         },
     ];
@@ -1960,6 +2072,7 @@ mod tests {
         PARAMETERS[1],
         ParameterDescriptorV1 {
             enum_choices: &[CHOICES[0]],
+            nudge: None,
             ..PARAMETERS[2]
         },
     ];
@@ -2010,6 +2123,7 @@ mod tests {
     static CONTINUOUS_CHOICES_PARAMETERS: [ParameterDescriptorV1; 3] = [
         ParameterDescriptorV1 {
             enum_choices: &CHOICES,
+            nudge: None,
             ..PARAMETERS[0]
         },
         PARAMETERS[1],
@@ -2028,6 +2142,7 @@ mod tests {
         PARAMETERS[1],
         ParameterDescriptorV1 {
             enum_choices: &OUT_OF_ORDER_CHOICES,
+            nudge: None,
             ..PARAMETERS[2]
         },
     ];
@@ -2036,6 +2151,7 @@ mod tests {
         PARAMETERS[1],
         ParameterDescriptorV1 {
             enum_choices: &NONFINITE_CHOICES,
+            nudge: None,
             ..PARAMETERS[2]
         },
     ];
@@ -2044,6 +2160,7 @@ mod tests {
         PARAMETERS[1],
         ParameterDescriptorV1 {
             enum_choices: &CONTROL_LABEL_CHOICES,
+            nudge: None,
             ..PARAMETERS[2]
         },
     ];
@@ -2246,6 +2363,7 @@ mod tests {
             domain: ParameterDomain::Boolean,
             default_value: 1.0,
             enum_choices: &[],
+            nudge: None,
             ..PARAMETERS[2]
         },
     ];

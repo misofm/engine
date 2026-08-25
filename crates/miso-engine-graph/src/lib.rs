@@ -5181,6 +5181,7 @@ mod tests {
             readable: true,
             automatable: true,
             enum_choices: &[],
+            nudge: None,
         }];
     static GAIN_DESCRIPTOR: EffectDescriptorV1 = EffectDescriptorV1 {
         id: GAIN_ID,

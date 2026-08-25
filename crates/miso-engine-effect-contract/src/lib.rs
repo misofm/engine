@@ -165,7 +165,28 @@ impl ObservationTapId {
         if v == 0 { None } else { Some(Self(v)) }
     }
 }
+// Issue #127 D1/D2: the named nudge vocabulary. Three `scalar_enum!`s for the same reason every
+// other descriptor vocabulary is one -- the descriptor wire, the browser metadata and the live
+// command record all carry the raw value, and `from_raw` is the single place a foreign one is
+// refused rather than silently reinterpreted.
+// The five rungs of the ladder, smallest first. One vocabulary for humans and agents alike.
+scalar_enum!(NudgeSizeV1 {Xs=1,Sm=2,Md=3,Lg=4,Xl=5});
+// What a declared `xs` rung is measured in, and therefore which mapping it is legal on.
+//
+// `Absolute` is the parameter's own unit on a `Linear` mapping. `Cents` and `Percent` are
+// multiplicative steps on a `Logarithmic` mapping -- equal-ratio stepping falls out of the mapping
+// itself, so no per-decade banding table is needed. `Steps` is whole enumeration choices.
+scalar_enum!(NudgeStepUnitV1 {Absolute=1,Cents=2,Percent=3,Steps=4});
+// How the four larger rungs are derived from `xs`.
+scalar_enum!(NudgeRatioClassV1 {Human=1,Wide=2});
 scalar_enum!(SmoothingRule {None=1,Linear=2,OnePole99=3});
+mod nudge;
+pub use nudge::{
+    NudgeErrorV1, NudgeLadderV1, NudgeRuleV1, ResolvedNudgeLadderV1, check_nudge_ladder_parts_v1,
+    check_nudge_ladder_v1, class_nudge_ladder_v1, default_nudge_ladder_v1, nudge_neighbours_v1,
+    nudge_parameter_value_v1, resolve_nudge_ladder_parts_v1, resolve_nudge_ladder_v1,
+};
+
 scalar_enum!(PortRole {MainInput=1,MainOutput=2,SidechainInput=3});
 pub type PortKind = PortRole;
 scalar_enum!(PortLayout {DualMonoPlanar=1});
@@ -285,6 +306,12 @@ pub struct ParameterDescriptorV1 {
     pub readable: bool,
     pub automatable: bool,
     pub enum_choices: &'static [EnumChoiceV1],
+    /// The declared nudge ladder (issue #127), or `None` for a parameter with no named steps.
+    ///
+    /// Last, and `None` for every parameter that declares no ladder, so a ladder-free descriptor
+    /// encodes byte-identically to the pre-#127 wire -- the same additivity rule issue #143's
+    /// observation menu follows.
+    pub nudge: Option<NudgeLadderV1>,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PortDescriptorV1 {
@@ -371,6 +398,9 @@ pub enum DescriptorDiagnosticCode {
     ObservationId,
     ObservationOrder,
     Observation,
+    NudgeStep,
+    NudgeDomain,
+    NudgeOrder,
 }
 impl DescriptorDiagnosticCode {
     pub const fn as_str(self) -> &'static str {
@@ -389,6 +419,9 @@ impl DescriptorDiagnosticCode {
             Self::ObservationId => "effect.descriptor.observation_id",
             Self::ObservationOrder => "effect.descriptor.observation_order",
             Self::Observation => "effect.descriptor.observation",
+            Self::NudgeStep => "effect.descriptor.nudge_step",
+            Self::NudgeDomain => "effect.descriptor.nudge_domain",
+            Self::NudgeOrder => "effect.descriptor.nudge_order",
         }
     }
 }
@@ -598,6 +631,18 @@ pub fn validate_descriptor_v1(d: &'static EffectDescriptorV1) -> Result<(), Desc
             e.push(DescriptorError {
                 path: "parameters",
                 code: DescriptorDiagnosticCode::Parameter,
+            })
+        }
+        // Issue #127: the ladder is checked separately from the rest of the parameter so that a
+        // broken ladder names the rule it broke. A parameter that declares none is silently fine.
+        if let Err(rule) = check_nudge_ladder_v1(p) {
+            e.push(DescriptorError {
+                path: "parameters",
+                code: match rule {
+                    NudgeRuleV1::Step => DescriptorDiagnosticCode::NudgeStep,
+                    NudgeRuleV1::Domain => DescriptorDiagnosticCode::NudgeDomain,
+                    NudgeRuleV1::Order => DescriptorDiagnosticCode::NudgeOrder,
+                },
             })
         }
     }
@@ -1533,6 +1578,13 @@ pub trait PreparedNativeEffectBank: Send {
 #[derive(Default)]
 pub struct NativeEffectRegistry {
     factories: BTreeMap<EffectId, Arc<dyn NativeEffectFactory>>,
+    /// Issue #127: every registered parameter's ladder, resolved once here.
+    ///
+    /// Resolving a ladder is a handful of multiplies and at most one logarithm, but it is on the
+    /// describe and nudge paths, and a derivation that runs per call is how the same feature grew
+    /// a per-call `Box::leak` in the engine this one replaces. Doing it at construction makes
+    /// "never derived twice" a property of the type rather than a rule to remember.
+    ladders: BTreeMap<EffectId, Box<[Option<ResolvedNudgeLadderV1>]>>,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RegistryError {
@@ -1544,6 +1596,7 @@ impl NativeEffectRegistry {
         f: impl IntoIterator<Item = Box<dyn NativeEffectFactory>>,
     ) -> Result<Self, RegistryError> {
         let mut m = BTreeMap::new();
+        let mut ladders = BTreeMap::new();
         for x in f {
             let d = x.descriptor();
             if validate_descriptor_v1(d).is_err() {
@@ -1552,6 +1605,14 @@ impl NativeEffectRegistry {
                     id: Some(d.id),
                 });
             }
+            ladders.insert(
+                d.id,
+                d.parameters
+                    .iter()
+                    .map(resolve_nudge_ladder_v1)
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+            );
             if m.insert(d.id, Arc::from(x)).is_some() {
                 return Err(RegistryError {
                     code: "effect.registry.duplicate",
@@ -1559,7 +1620,19 @@ impl NativeEffectRegistry {
                 });
             }
         }
-        Ok(Self { factories: m })
+        Ok(Self {
+            factories: m,
+            ladders,
+        })
+    }
+
+    /// The memoized nudge ladders of one registered effect, in declaration order.
+    ///
+    /// One entry per parameter; `None` where the parameter declares no ladder. `None` for the
+    /// whole effect when it is not registered.
+    #[must_use]
+    pub fn nudge_ladders(&self, id: EffectId) -> Option<&[Option<ResolvedNudgeLadderV1>]> {
+        self.ladders.get(&id).map(AsRef::as_ref)
     }
     pub fn get(&self, id: EffectId) -> Option<&dyn NativeEffectFactory> {
         self.factories.get(&id).map(Arc::as_ref)

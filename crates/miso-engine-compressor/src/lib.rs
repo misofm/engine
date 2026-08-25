@@ -49,7 +49,7 @@ use miso_engine_effect_contract::{
     PrepareEffectRequest, PreparedAutomationSpan, PreparedBankMetadata, PreparedEffectMetadata,
     PreparedNativeEffect, PreparedNativeEffectBank, ProcessReport, ResetKind, SmoothingRule,
     StatePayloadError, StatePayloadInput, StatePayloadOutput, StatePayloadSizes, TailSamples,
-    expected_prepared_metadata,
+    default_nudge_ladder_v1, expected_prepared_metadata,
 };
 use miso_engine_effect_runtime::params::{is_negative_zero, normalize_zero, parameter_value_valid};
 use miso_engine_lane::{Backend, Lane, Simd4, Simd8};
@@ -115,6 +115,7 @@ const fn parameter(
         readable: true,
         automatable: !matches!(automation_rate, AutomationRate::None),
         enum_choices: &[],
+        nudge: default_nudge_ladder_v1(unit, ParameterDomain::Continuous, mapping),
     }
 }
 

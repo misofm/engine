@@ -2,7 +2,7 @@
 
 use miso_engine_effect_contract::{
     AutomationRate, EffectDescriptorV1, EffectId, EffectQuality, EnumChoiceV1, LatencySamples,
-    LinkModeSet, ObservationCadenceV1, ObservationChannelsV1, ObservationCostV1,
+    LinkModeSet, NudgeLadderV1, ObservationCadenceV1, ObservationChannelsV1, ObservationCostV1,
     ObservationDescriptorV1, ObservationFoldV1, ObservationKindV1, ObservationTapId,
     ParameterChannelPolicy, ParameterDescriptorV1, ParameterDomain, ParameterId, ParameterMapping,
     ParameterUnit, PortDescriptorV1, PortId, PortLayout, PortRole, QualityDescriptorV1,
@@ -10,7 +10,8 @@ use miso_engine_effect_contract::{
 };
 use miso_engine_effect_package::{
     EFFECT_DESCRIPTOR_WIRE_V1_UNAVAILABLE, EffectArtifactAuthoringV1, EffectArtifactKindV1,
-    EffectDescriptorWireDiagnosticCodeV1 as Code, EffectPackageAuthoringV1, EffectPackageLimitsV1,
+    EffectDescriptorBindingErrorKindV1, EffectDescriptorWireDiagnosticCodeV1 as Code,
+    EffectPackageAuthoringV1, EffectPackageLimitsV1, bind_effect_descriptor_wire_v1,
     effect_descriptor_identity_v1, effect_descriptor_wire_v1_required_size, effect_package_cid_v1,
     effect_package_v1_required_size, encode_effect_descriptor_wire_v1, encode_effect_package_v1,
     verify_effect_descriptor_wire_v1, verify_effect_package_v1,
@@ -64,6 +65,7 @@ static PARAMETERS: [ParameterDescriptorV1; 6] = [
         readable: false,
         automatable: true,
         enum_choices: &[],
+        nudge: None,
     },
     ParameterDescriptorV1 {
         id: ParameterId(2),
@@ -82,6 +84,7 @@ static PARAMETERS: [ParameterDescriptorV1; 6] = [
         readable: true,
         automatable: true,
         enum_choices: &[],
+        nudge: None,
     },
     ParameterDescriptorV1 {
         id: ParameterId(3),
@@ -100,6 +103,7 @@ static PARAMETERS: [ParameterDescriptorV1; 6] = [
         readable: true,
         automatable: true,
         enum_choices: &[],
+        nudge: None,
     },
     ParameterDescriptorV1 {
         id: ParameterId(4),
@@ -118,6 +122,7 @@ static PARAMETERS: [ParameterDescriptorV1; 6] = [
         readable: true,
         automatable: true,
         enum_choices: &[],
+        nudge: None,
     },
     ParameterDescriptorV1 {
         id: ParameterId(5),
@@ -136,6 +141,7 @@ static PARAMETERS: [ParameterDescriptorV1; 6] = [
         readable: true,
         automatable: false,
         enum_choices: &CHOICES,
+        nudge: None,
     },
     ParameterDescriptorV1 {
         id: ParameterId(6),
@@ -154,6 +160,7 @@ static PARAMETERS: [ParameterDescriptorV1; 6] = [
         readable: true,
         automatable: true,
         enum_choices: &[],
+        nudge: None,
     },
 ];
 
@@ -462,6 +469,26 @@ static DESCRIPTOR_C: EffectDescriptorV1 = EffectDescriptorV1 {
     observations: &OBSERVATIONS_C,
     ..DESCRIPTOR_A
 };
+/// Issue #127: `comprehensive-a` plus three declared nudge ladders and nothing else.
+///
+/// The id and the display name are the same byte lengths as A's, so `total(D)` must equal
+/// `total(A)` exactly -- a ladder rides the eight bytes the parameter record already reserved and
+/// costs none of its own. The three ladders cover the three step units a continuous or enumerated
+/// parameter can declare, and the three parameters left ladder-free cover the three reasons a
+/// parameter has none: an exponential mapping (`Time`, `Ratio`) and a boolean domain (`Bypass`).
+static PARAMETERS_D: [ParameterDescriptorV1; 6] = {
+    let mut parameters = PARAMETERS;
+    parameters[0].nudge = Some(NudgeLadderV1::absolute(0.5));
+    parameters[1].nudge = Some(NudgeLadderV1::cents(20.0));
+    parameters[4].nudge = Some(NudgeLadderV1::steps(1));
+    parameters
+};
+static DESCRIPTOR_D: EffectDescriptorV1 = EffectDescriptorV1 {
+    id: effect_id("fixture.comprehensive-d"),
+    display_name: "Comprehensive D",
+    parameters: &PARAMETERS_D,
+    ..DESCRIPTOR_A
+};
 static DESCRIPTOR_A_PERMUTED: EffectDescriptorV1 = EffectDescriptorV1 {
     ports: &PORTS_PERMUTED,
     ..DESCRIPTOR_A
@@ -535,6 +562,11 @@ fn checked_vectors_match_independent_wire_identity_and_port_permutation() {
             &DESCRIPTOR_C,
             "comprehensive-c.wire.hex",
             "comprehensive-c.identity.hex",
+        ),
+        (
+            &DESCRIPTOR_D,
+            "comprehensive-d.wire.hex",
+            "comprehensive-d.identity.hex",
         ),
     ] {
         let wire = encoded(descriptor);
@@ -829,4 +861,80 @@ fn observation_section_is_additive_and_stale_readers_refuse_it() {
     let error = verify_effect_descriptor_wire_v1(&mutated, 1 << 20).unwrap_err();
     assert_eq!(error.code, Code::Reserved);
     assert_eq!(error.byte_offset, 92);
+}
+
+/// Issue #127 wire accounting: a declared ladder costs zero bytes and moves the identity.
+///
+/// `DESCRIPTOR_D` is `DESCRIPTOR_A` with three ladders and two renamed letters, so the two wires
+/// must be the same length, must differ only inside the eight reserved bytes of the parameter
+/// records that declare a ladder (plus those two letters), and must not share an identity. That is
+/// the whole additivity claim, stated as bytes rather than as prose.
+#[test]
+fn a_declared_nudge_ladder_costs_no_bytes_and_moves_the_identity() {
+    let ladder_free = encoded(&DESCRIPTOR_A);
+    let ladder_bearing = encoded(&DESCRIPTOR_D);
+    assert_eq!(
+        ladder_free.len(),
+        ladder_bearing.len(),
+        "a nudge ladder rides reserved bytes and adds none"
+    );
+    let identity = |wire: &[u8]| {
+        *effect_descriptor_identity_v1(wire, 1 << 20)
+            .unwrap()
+            .as_bytes()
+    };
+    assert_ne!(
+        identity(&ladder_free),
+        identity(&ladder_bearing),
+        "a descriptor that declares a ladder describes something different"
+    );
+
+    let parameter_offset = 96usize;
+    let string_offset = u32::from_le_bytes(ladder_free[84..88].try_into().unwrap()) as usize;
+    let mut windows = std::collections::BTreeSet::new();
+    for index in 0..DESCRIPTOR_A.parameters.len() {
+        let record = parameter_offset + index * 80;
+        windows.extend(record + 72..record + 80);
+        assert_eq!(
+            &ladder_free[record + 72..record + 80],
+            &[0u8; 8],
+            "a ladder-free parameter keeps the window reserved-zero"
+        );
+    }
+    let moved: Vec<usize> = (0..ladder_free.len())
+        .filter(|offset| ladder_free[*offset] != ladder_bearing[*offset])
+        .collect();
+    let renamed: Vec<usize> = moved
+        .iter()
+        .copied()
+        .filter(|offset| *offset >= string_offset)
+        .collect();
+    assert_eq!(
+        renamed.len(),
+        2,
+        "only the two renamed letters move the pool"
+    );
+    let ladder_bytes: Vec<usize> = moved
+        .iter()
+        .copied()
+        .filter(|offset| *offset < string_offset)
+        .collect();
+    assert!(
+        !ladder_bytes.is_empty(),
+        "the ladders were actually written"
+    );
+    assert!(
+        ladder_bytes.iter().all(|offset| windows.contains(offset)),
+        "a ladder writes only inside the reserved windows"
+    );
+
+    // And the wire round-trips back to exactly this descriptor, ladders included: a wire that
+    // declared a different ladder would not bind.
+    assert!(bind_effect_descriptor_wire_v1(&DESCRIPTOR_D, &ladder_bearing, 1 << 20).is_ok());
+    assert_eq!(
+        bind_effect_descriptor_wire_v1(&DESCRIPTOR_A, &ladder_bearing, 1 << 20)
+            .unwrap_err()
+            .kind(),
+        EffectDescriptorBindingErrorKindV1::StaticDescriptorMismatch
+    );
 }

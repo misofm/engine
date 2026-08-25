@@ -42,7 +42,7 @@ use miso_engine_effect_contract::{
     PrepareEffectBankRequest, PrepareEffectRequest, PreparedAutomationSpan, PreparedBankMetadata,
     PreparedEffectMetadata, PreparedNativeEffect, PreparedNativeEffectBank, ProcessReport,
     ResetKind, SmoothingRule, StatePayloadError, StatePayloadInput, StatePayloadOutput,
-    StatePayloadSizes, TailSamples, expected_prepared_metadata,
+    StatePayloadSizes, TailSamples, default_nudge_ladder_v1, expected_prepared_metadata,
 };
 use miso_engine_effect_runtime::bank::{NonFiniteReport, finish_block};
 use miso_engine_effect_runtime::envelope::{ArCoef, ar_one_pole_step};
@@ -108,6 +108,11 @@ const fn parameter(
         readable: true,
         automatable: true,
         enum_choices: &[],
+        nudge: default_nudge_ladder_v1(
+            ParameterUnit::Linear,
+            ParameterDomain::Continuous,
+            ParameterMapping::Linear,
+        ),
     }
 }
 
