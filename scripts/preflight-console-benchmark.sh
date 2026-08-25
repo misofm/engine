@@ -26,8 +26,11 @@ bash scripts/check-console-benchmark-fixture.sh >/dev/null || fail 'fixture chec
 bash scripts/test-console-benchmark.sh >/dev/null || fail 'validator mutation suite failed'
 
 cargo test --locked -p miso-engine-bench >/dev/null || fail 'bench crate tests failed'
-cargo clippy --locked -p miso-engine-bench --all-targets --all-features -- -D warnings >/dev/null 2>&1 ||
-    fail 'bench crate clippy failed'
+# The workspace/all-features form is what CI runs, and it is the form that matters: Cargo unifies
+# features across the packages one invocation selects, so a single-package clippy resolves a
+# different feature set and reports lints that the shipped resolution does not have.
+cargo clippy --locked --workspace --all-targets --all-features -- -D warnings >/dev/null 2>&1 ||
+    fail 'workspace clippy failed'
 cargo build --locked --release --quiet -p miso-engine-bench || fail 'release build failed'
 
 binary="$root/target/release/miso_engine_bench"
