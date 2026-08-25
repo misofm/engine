@@ -210,43 +210,63 @@ fi
 # the wasm render path: there is no native audited-allocator tool for the browser host, and the
 # shipped binary is the only thing that can witness the property.
 #
-# #106 E5: the shipped artifact must still contain the vector kernels. The floor and the kernel
-# count are ratchets, measured on this artifact. Raise them when a wave adds kernels; a count that
-# drops below them is a regression to report, never a floor to lower.
+# #106 E5: the shipped artifact must still compute in the vector family. The kernel count is a
+# ratchet, measured on this artifact. Raise it when a wave adds kernels; a count that drops below
+# it is a regression to report, never a floor to lower.
 #
-# The floor was re-derived once, from 4500 to 3450, by issue #149's fast dB tier (#144 item 5).
-# That is the one move this comment says not to make, so here is the evidence that the ratchet's
-# *intent* -- "the shipped artifact must still contain the vector kernels" -- is untouched, and
-# only its proxy moved. Six named crossings replaced the exact-tier Cephes `log2`/`exp2` (degree 9
-# and 6, each with a range-reduction fold) with refitted minimax polynomials (degree 5 and 4, no
-# fold). Fewer polynomial terms is fewer `f32x4.{mul,add,sub}`, by construction and on purpose.
+# ## Issue #163 phase 0e: the raw f32x4 total became a per-kernel shape gate
 #
-# Measured per kernel on the shipped artifact, before -> after (vector / scalar):
+# What this line used to say was `--simd-floor 3450`: at least 3450 `f32x4.{mul,add,sub}`
+# instructions in the whole module. That number had already been re-derived once -- 4500 -> 3450,
+# by issue #149's fast dB tier (#144 item 5), which replaced the exact-tier Cephes `log2`/`exp2`
+# (degree 9 and 6, each with a range-reduction fold) with refitted minimax polynomials (degree 5
+# and 4, no fold). Fewer polynomial terms is fewer vector instructions, by construction and on
+# purpose, and the floor's own comment says a count below it is "a regression to report, never a
+# floor to lower". A gate whose documented response to correct work is the one move it forbids is
+# measuring the wrong thing.
 #
-#   multiband f32x8        1576/20 -> 1192/20      crossed (X5, X6)
-#   multiband f32x4         788/20 ->  596/20      crossed (X5, X6)
-#   gate-expander f32x4     260/8  ->  172/8       crossed (X3, X4)
-#   compressor f32x4        250/0  ->  162/0       crossed (X1, X2)
-#   transient-shaper f32x4  762/72 ->  762/72      not crossed -- unchanged
-#   true-peak-limiter f32x4 124/0  ->  124/0       not crossed -- unchanged
-#   parametric-eq f32x4      32/0  ->   32/0       not crossed -- unchanged
-#   soft-clip f32x4          25/0  ->   25/0       not crossed -- unchanged
+# It is measuring the wrong thing in a specific way. A raw total conflates two events that a floor
+# pass has to be able to tell apart:
 #
-# Two things make this a re-derivation rather than a relaxation. Every *scalar* count is
-# byte-for-byte unchanged, so no kernel devectorised -- which is the failure this floor exists to
-# catch. And exactly the four crossed kernels moved while the four uncrossed ones did not, which
-# is the same claim `scripts/check-fast-db-seal.sh` makes structurally, confirmed here in the
-# shipped wasm. The `--kernel-min 8` half of the ratchet, which is the part that actually counts
-# kernels, is unchanged and still exact.
+#   * a kernel de-vectorises -- the failure #106 E5 exists to catch -- and the total falls;
+#   * a kernel does the same work with fewer operations, and the total falls.
 #
-# 3450 keeps the same ~2% margin under the measured 3530 that 4500 kept under 4585.
+# The property actually wanted is per kernel and scale free: *this kernel still does its arithmetic
+# in the vector family*. The analyser now asserts exactly that, over a roster of the eight named
+# `process_bank`/`process_section`/`process_block` bodies the old comment enumerated. Each roster
+# kernel must match exactly one arithmetic-carrying function, and its scalar `f32.{mul,add,sub,div}`
+# count must stay inside `max(ceiling * vector, 8)`. The ceilings, their derivation from the counts
+# measured on this artifact, and why four times the measured ratio is the right multiple are
+# documented in `KERNEL_ROSTER` in `check-web-audioworklet-callgraph.py`.
+#
+# Why the reshape is strictly stronger where it matters, and weaker only where it should be:
+#
+#   * **Stronger.** The old total was one number for the whole module, so one kernel could
+#     scalarise completely while another grew and the gate stayed green. The roster is per kernel
+#     and requires presence, so scalarising any single one of the eight is red on its own. The
+#     roster budget also catches *partial* scalarisation that the pre-existing "vector strictly
+#     dominates scalar" rule waves through -- a kernel at 100 vector / 40 scalar dominates and is
+#     still a third scalarised; self-test case (c1) is exactly that shape.
+#   * **Weaker.** It no longer asserts any absolute instruction count. That is the point: phases 1
+#     to 4 of #163 exist to lower those counts.
+#
+# Re-measured on the shipped artifact at f08d28f, for the record (vector / scalar). These are the
+# derivation's *input* and are deliberately not asserted:
+#
+#   multiband f32x8        2224/20     multiband f32x4         1112/20
+#   transient-shaper f32x4  762/72     gate-expander f32x4      172/8
+#   compressor f32x4        162/0      true-peak-limiter f32x4  124/0
+#   parametric-eq f32x4      32/0      soft-clip f32x4           25/0
+#
+# The `--kernel-min 8` half of the ratchet, which is the part that actually counts kernels, is
+# unchanged and still exact.
 callgraph="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/check-web-audioworklet-callgraph.py"
 printf '%s
 ' "$simd_disassembly" |
   python3 -B "$callgraph" --callgraph miso_engine_web_v1_render || exit 1
 printf '%s
 ' "$simd_disassembly" |
-  python3 -B "$callgraph" --simd-floor 3450 --kernel-pattern '4wide6f32x[48]' --kernel-min 8 ||
+  python3 -B "$callgraph" --kernel-shape --kernel-pattern '4wide6f32x[48]' --kernel-min 8 ||
   exit 1
 
 # #137 D1/D2: the two exports `process()` calls beside the render export get the same allocation

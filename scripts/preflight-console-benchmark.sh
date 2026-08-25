@@ -15,10 +15,11 @@ if [[ "$#" == 1 ]]; then
     case "$1" in
         --phase2) phase_directory=issue149-phase2 ;;
         --phase3) phase_directory=issue149-phase3 ;;
-        *) printf 'usage: %s [--phase2|--phase3]\n' "$0" >&2; exit 2 ;;
+        --issue163-phase0) phase_directory=issue163-phase0 ;;
+        *) printf 'usage: %s [--phase2|--phase3|--issue163-phase0]\n' "$0" >&2; exit 2 ;;
     esac
 elif [[ "$#" != 0 ]]; then
-    printf 'usage: %s [--phase2|--phase3]\n' "$0" >&2
+    printf 'usage: %s [--phase2|--phase3|--issue163-phase0]\n' "$0" >&2
     exit 2
 fi
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -39,6 +40,9 @@ done
 
 bash scripts/check-console-benchmark-fixture.sh >/dev/null || fail 'fixture check failed'
 bash scripts/test-console-benchmark.sh >/dev/null || fail 'validator mutation suite failed'
+# The admissibility predicates the run is about to be refused by. A precondition whose own
+# self-test is red would refuse or admit for the wrong reason, and the run is one-shot.
+bash scripts/check-bench-preconditions.sh >/dev/null || fail 'bench precondition self-test failed'
 
 cargo test --locked -p miso-engine-bench >/dev/null || fail 'bench crate tests failed'
 # The workspace/all-features form is what CI runs, and it is the form that matters: Cargo unifies
@@ -70,13 +74,15 @@ jq -n -S \
     --arg record_validator_sha256 "$(sha256sum scripts/console-benchmark-record-validator.jq | awk '{print $1}')" \
     --arg aggregate_validator_sha256 "$(sha256sum scripts/console-benchmark-validator.jq | awk '{print $1}')" \
     --arg library_sha256 "$(sha256sum scripts/console-benchmark-record-lib.jq | awk '{print $1}')" \
+    --arg preconditions_sha256 "$(sha256sum scripts/check-bench-preconditions.sh | awk '{print $1}')" \
     '{schema_version: 1, issue: 149, kind: "console_benchmark_preflight",
-      workload_launches: 0, warmup_rounds: 1, measured_rounds: 2, records_required: 12,
+      workload_launches: 0, warmup_rounds: 1, measured_rounds: 2, records_required: 26,
       candidate_commit: $commit, candidate_commit_sha256: $commit_sha256,
       binary_sha256: $binary_sha256, benchmark_source_sha256: $subject_sha256,
       fixture_sha256: $fixture_sha256, runner_sha256: $runner_sha256,
       record_validator_sha256: $record_validator_sha256,
       aggregate_validator_sha256: $aggregate_validator_sha256,
-      validator_library_sha256: $library_sha256}'
+      validator_library_sha256: $library_sha256,
+      preconditions_sha256: $preconditions_sha256}'
 
 printf 'console benchmark preflight: PASS (workload launches 0)\n' >&2
