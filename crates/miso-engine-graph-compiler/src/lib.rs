@@ -318,6 +318,8 @@ mod tests {
     };
 
     const SESSION_FIXTURE: &str = include_str!("../../../fixtures/session/v1/canonical.toml");
+    const CONSOLE_SIXTY_FOUR_TRACK_FIXTURE: &str =
+        include_str!("../../../fixtures/session/v1/console-sixty-four-track.toml");
     const PARAMETRIC_EQ_NINE_TRACK_FIXTURE: &str =
         include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.toml");
 
@@ -4212,6 +4214,204 @@ mod tests {
             "an opaque dynamic-rack effect never reaches bank candidacy: {:?}",
             failure.0
         );
+    }
+
+    fn console_track_input_binding(node: &GraphNodeId) -> Box<dyn GraphRuntimeProcessor> {
+        let GraphNodeId::TrackStage {
+            track_id,
+            stage: TrackStage::Input,
+        } = node
+        else {
+            return Box::new(IdentityBinding);
+        };
+        let index = track_id
+            .as_str()
+            .strip_prefix("ch")
+            .and_then(|value| value.parse::<u32>().ok())
+            .expect("console fixture track id");
+        Box::new(AsymmetricTrackImpulseBinding {
+            left: 0.03125 * (index % 7 + 1) as f32,
+            right: -0.015625 * (index % 5 + 1) as f32,
+        })
+    }
+
+    /// The measured session: the 64-track console fixture the benchmark renders.
+    ///
+    /// Every track places `miso.parametric-eq` in SIMD-1 and `miso.compressor` in the **dynamic**
+    /// rack, sidechain-free. Before phase 1b this compiled to 64/lanes EQ banks and *64 scalar
+    /// compressors* -- the compressor ran a lane at a time purely because of its placement, which
+    /// the profile measured as the majority of the block. It now compiles to the same number of
+    /// compressor banks as EQ banks, with nothing left on the per-node path.
+    ///
+    /// The three things this pins, in the order they matter:
+    ///
+    /// 1. **Bits.** Rendered PCM is byte-identical to the same session compiled against a registry
+    ///    that refuses every bank. Class A: banking regrouped the lanes, it did not change the
+    ///    arithmetic.
+    /// 2. **Structure.** Both racks bank fully; `scalar_in` is empty in both.
+    /// 3. **G5** (master plan §4.5). One planar/AoSoA round-trip per bank per block, still exact
+    ///    with the extra banks present. The pin is derived from the realised bank count, not a
+    ///    literal, so the extra dynamic banks scale both sides of it -- there is no re-pin here.
+    #[test]
+    fn console_sixty_four_track_fixture_banks_its_dynamic_compressor_bit_identically() {
+        // Past the compressor's 960-sample lookahead (8 blocks of 128), so the comparison is over
+        // live compressed audio rather than over a latency pad of zeros.
+        const BLOCKS: u64 = 12;
+        let model = parse_session_toml(CONSOLE_SIXTY_FOUR_TRACK_FIXTURE).expect("console fixture");
+        assert_eq!(model.tracks.len(), 64);
+        assert!(model.tracks.iter().all(|track| {
+            track.simd1.effects.len() == 1
+                && track.dynamic.effects.len() == 1
+                && track.simd2.effects.is_empty()
+                && matches!(track.dynamic.effects[0].sidechain, SidechainDeclaration::None)
+        }));
+        let session = compile_session(
+            &model,
+            CompileCaps {
+                max_compiled_model_bytes: u64::MAX,
+                max_requested_runtime_bytes: u64::MAX,
+                max_single_allocation_bytes: u64::MAX,
+                max_queue_items: u64::MAX,
+                max_source_ring_frames: u64::MAX,
+                max_source_ring_bytes: u64::MAX,
+            },
+        )
+        .expect("compiled console fixture");
+        let registry = launch_native_effect_registry_v1().expect("launch registry");
+        let per_node_registry = NativeEffectRegistry::new(
+            ["miso.parametric-eq", "miso.compressor"].map(|id| {
+                Box::new(ScalarOnlyDelegateFactory {
+                    delegate: registry.get_shared_ascii(id).expect("registered launch effect"),
+                }) as Box<dyn NativeEffectFactory>
+            }),
+        )
+        .expect("per-node registry");
+        let effect_caps = EffectCompileCaps {
+            maximum_total_state_bytes: 1 << 20,
+            maximum_scratch_bytes: 1 << 20,
+            maximum_automation_spans_per_block: 32,
+        };
+        let bank = GraphCompiler::compile(GraphCompileRequest {
+            dispatch: host_dispatch(),
+            plan_id: 1_650,
+            effects: prepare_native_session_effects(&session, &registry, effect_caps)
+                .expect("prepared console effects"),
+            caps: integration_caps(),
+        })
+        .unwrap_or_else(|failure| panic!("console graph: {:?}", failure.diagnostics));
+        let per_node = GraphCompiler::compile(GraphCompileRequest {
+            dispatch: host_dispatch(),
+            plan_id: 1_651,
+            effects: prepare_native_session_effects(&session, &per_node_registry, effect_caps)
+                .expect("prepared per-node console effects"),
+            caps: integration_caps(),
+        })
+        .unwrap_or_else(|failure| panic!("per-node console graph: {:?}", failure.diagnostics));
+
+        let width = BankWidth::for_backend(bank.report.rack_cohorts.dispatch);
+        let Some(width) = width else {
+            assert_eq!(bank.graph.prepared_bank_count(), 0);
+            return;
+        };
+        let lanes = width.lanes() as usize;
+        assert_eq!(64 % lanes, 0, "the fixture is a whole number of cohorts");
+        let cohorts = &bank.report.rack_cohorts;
+        assert_eq!(
+            cohorts.bound_slots_in(RackLocationV1::Simd1).count(),
+            64 / lanes,
+            "the EQ banked before phase 1b and still does"
+        );
+        assert_eq!(
+            cohorts.bound_slots_in(RackLocationV1::Dynamic).count(),
+            64 / lanes,
+            "and the dynamic-rack compressor now banks at the same width"
+        );
+        assert!(cohorts.scalar_in(RackLocationV1::Simd1).is_empty());
+        assert!(
+            cohorts.scalar_in(RackLocationV1::Dynamic).is_empty(),
+            "no compressor is left on the per-node path"
+        );
+        assert_eq!(bank.graph.prepared_bank_count(), 2 * (64 / lanes));
+        assert_eq!(per_node.graph.prepared_bank_count(), 0);
+        assert_eq!(
+            bank.graph.sequential_schedule,
+            per_node.graph.sequential_schedule,
+            "banking is an execution decision and must not move the graph"
+        );
+        assert_eq!(bank.report.output_latency, per_node.report.output_latency);
+
+        let bank_count = bank.graph.prepared_bank_count();
+        let builtin_bank_count = bank.graph.prepared_builtin_bank_count();
+        let expected_transposes = BLOCKS * (bank_count + builtin_bank_count) as u64;
+        let banked = render_console_blocks(bank, BLOCKS);
+        let scalar = render_console_blocks(per_node, BLOCKS);
+        assert_pcm_bits_equal(
+            &banked.0,
+            &scalar.0,
+            "64-track console: banked vs per node",
+        );
+        assert!(
+            banked.0.iter().flatten().any(|sample| *sample != 0.0),
+            "the console fixture rendered audio"
+        );
+        // G5: one planar/AoSoA round-trip per bank per block, with the dynamic banks included.
+        assert_eq!(
+            banked.1, expected_transposes,
+            "one planar/AoSoA round-trip per bank per block"
+        );
+        assert_eq!(scalar.1, 0, "the per-node arm transposes nothing");
+        // Descriptive, printed under `--nocapture`: what phase 1b actually buys on the measured
+        // session, and what the composed benchmark should expect to see.
+        println!(
+            "console 64-track @ {lanes} lanes: {} effect banks ({} EQ + {} compressor) \
+             + {} builtin banks; {} scalar effect nodes; {} transposes over {BLOCKS} blocks",
+            bank_count,
+            64 / lanes,
+            64 / lanes,
+            builtin_bank_count,
+            0,
+            banked.1,
+        );
+    }
+
+    /// Render the console fixture, returning each block's PCM and the plan's transpose counter.
+    fn render_console_blocks(artifact: PreparedGraphArtifact, blocks: u64) -> (Vec<Vec<f32>>, u64) {
+        let graph = artifact.graph;
+        let envelope = graph.envelope;
+        let frames = envelope.quantum.0 as usize;
+        let nodes = graph
+            .required_bindings
+            .iter()
+            .map(|node| GraphNodeBinding::new(node.clone(), console_track_input_binding(node)))
+            .collect();
+        let mut plan = graph
+            .bind(GraphRuntimeBindings {
+                #[cfg(not(target_arch = "wasm32"))]
+                worker_lease: None,
+                envelope,
+                nodes,
+                observers: Vec::new(),
+            })
+            .unwrap_or_else(|failure| panic!("console bind: {}", failure.code));
+        let pcm = (0..blocks)
+            .map(|block| {
+                let mut pcm = vec![0.0_f32; frames * 2];
+                plan.render(
+                    RenderIo {
+                        input: None,
+                        output: PlanarBufferMut::try_new(&mut pcm, 2, frames, frames)
+                            .expect("output"),
+                    },
+                    RenderTime {
+                        absolute_sample: block * frames as u64,
+                    },
+                )
+                .expect("console render");
+                pcm
+            })
+            .collect();
+        let transposes = plan.bank_transposes();
+        (pcm, transposes)
     }
 
     #[test]
