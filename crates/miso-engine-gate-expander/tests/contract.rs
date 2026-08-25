@@ -494,18 +494,24 @@ fn bank_validation_precedes_fallback_and_unavailable_w4_is_legal() {
 // ---------------------------------------------------------------------------------------------
 
 /// The detector level in dB that a constant input of `amplitude` produces, in the kernel's exact
-/// operation order: `clamp(log2_lane(max(u, 1e-8)) * 20log10(2), -160, 24)` with the D8 select
-/// forms of `max`/`min`.
+/// operation order: `clamp(fast_level_db(max(u, 1e-8)), -160, 24)` with the D8 select forms of
+/// `max`/`min`.
+///
+/// FAST-DB-RESTATEMENT: this restates the kernel's law in order to *construct a witness on the
+/// boundary*, not to pin a
+/// value, so it has to track the law: crossing X3 moved the level conversion to the sealed fast
+/// tier, and a witness built from the exact tier would no longer land exactly on the threshold.
+/// The test's non-vacuity check is what keeps that honest -- each witness is rendered with its two
+/// neighbouring `f32` values as well, and the three must behave as (open, closed, open), which a
+/// witness sitting one ulp off the boundary cannot do.
 fn detector_level_db(amplitude: f32) -> f32 {
-    use miso_engine_gate_expander::kernel::{
-        DB_PER_OCTAVE, LEVEL_FLOOR, LEVEL_MAX_DB, LEVEL_MIN_DB,
-    };
+    use miso_engine_gate_expander::kernel::{LEVEL_FLOOR, LEVEL_MAX_DB, LEVEL_MIN_DB};
     let floored = if amplitude > LEVEL_FLOOR {
         amplitude
     } else {
         LEVEL_FLOOR
     };
-    let raw = miso_engine_math::log2_lane::<f32>(floored) * DB_PER_OCTAVE;
+    let raw = miso_engine_math::fast_db::fast_level_db::<f32>(floored);
     let capped = if raw < LEVEL_MAX_DB {
         raw
     } else {

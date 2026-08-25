@@ -40,6 +40,9 @@ pub mod corpus;
 mod lane_math;
 
 #[cfg(feature = "lane")]
+pub mod fast_db;
+
+#[cfg(feature = "lane")]
 pub use lane_math::{exp2_lane, log2_lane};
 
 /// `e^x` (f64).

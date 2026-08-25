@@ -87,6 +87,12 @@ jobs:
         run: RUSTFLAGS='-C target-feature=+fma' cargo test --locked --release -p miso-engine-math --test m3_determinism
       - name: Math M1 exhaustive sweep
         run: cargo test --locked --release -p miso-engine-math --features lane --test m1_exhaustive -- --ignored
+      - name: Fast dB tier seal and mutation tests
+        run: |
+          bash scripts/check-fast-db-seal.sh
+          bash scripts/test-fast-db-seal.sh
+      - name: Fast dB tier gate F1, exhaustive over both operating domains
+        run: cargo test --locked --release -p miso-engine-math --features lane --test f1_fast_db_bounds -- --ignored
       - name: Effect runtime gates (lane identity, partition invariance, D1 digests) in release
         run: cargo test --locked --release -p miso-engine-effect-runtime
       - name: Delay gates (partition invariance, oracle bound, G5 digests) in release
