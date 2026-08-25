@@ -511,7 +511,7 @@ impl HoistMeasurement {
         let quiet = Percentiles::from_samples(&self.ns_per_block[0]);
         let restated = Percentiles::from_samples(&self.ns_per_block[1]);
         let moving = Percentiles::from_samples(&self.ns_per_block[2]);
-        // The paired delta: nudged minus restated, per observation, then summarised. This is the
+        // The paired delta: moving minus restated, per observation, then summarised. This is the
         // ramp arithmetic the hoist elides, measured on pairs taken microseconds apart.
         let mut paired: Vec<i64> = self.ns_per_block[2]
             .iter()
@@ -539,7 +539,7 @@ impl HoistMeasurement {
                 "{metadata}",
                 "\"descriptive_only\":true,",
                 "\"statistical_method\":\"three arms alternated per observation; nearest-rank ",
-                "percentiles over per-block nanoseconds; paired delta is nudged minus restated ",
+                "percentiles over per-block nanoseconds; paired delta is moving minus restated ",
                 "per observation; descriptive only; no threshold\"}}"
             ),
             issue = ISSUE,

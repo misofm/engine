@@ -619,6 +619,23 @@ impl BandTarget {
         )
     }
 
+    /// `true` when `other` is this band bit for bit.
+    ///
+    /// Issue #144 item 6. Derived `PartialEq` would compare the four `f32` fields with `==`, which
+    /// makes `-0.0` equal `0.0` and makes a `NaN` band unequal to itself. Neither can reach a
+    /// stored `BandTarget` today -- values are normalised and domain-checked on the way in -- but
+    /// the hoist this feeds decides whether an `f64` coefficient design is skipped, and a decision
+    /// of that weight is made on bits rather than on a coincidence of the current admission rules.
+    fn same_bits(&self, other: &Self) -> bool {
+        self.enabled == other.enabled
+            && self.kind == other.kind
+            && self
+                .numeric()
+                .iter()
+                .zip(other.numeric().iter())
+                .all(|(left, right)| left.to_bits() == right.to_bits())
+    }
+
     /// The four automatable fields, in payload order.
     const fn numeric(&self) -> [f32; 4] {
         [self.frequency, self.gain, self.q, self.slope]
@@ -649,6 +666,10 @@ struct Section<L: Lane> {
 }
 
 /// Reads word `index` of a coefficient set in the pinned order.
+/// The words lane `track` of `section` is currently heading for.
+///
+/// These are exactly the words `BandTarget::words` last returned for this lane's stored band, so
+/// reading them back is the same value the design would recompute -- see `Channel::target_words`.
 fn coef_word<L: Lane>(coefficients: &SvfCoef<L>, index: usize) -> L {
     match index {
         0 => coefficients.c1,
@@ -792,6 +813,25 @@ impl<L: Lane, const W: usize> Channel<L, W> {
             );
         }
         self.remaining[section][track] = RAMP_SAMPLES;
+    }
+
+    /// The words lane `track` of `section` is heading for, read back out of the lane words.
+    ///
+    /// Issue #144 item 6, the re-preparation half. `BandTarget::words` is a pure function of the
+    /// band and the sample rate, and `Section::target` holds exactly what it returned the last
+    /// time this lane's band changed. So when an automation point restates a band it has already
+    /// been given, the design does not have to be recomputed -- it can be read. That matters far
+    /// more than the ramp arithmetic: the design is an `f64` `design_svf_v1` per lane per event,
+    /// and a console that refreshes its automation is paying it on every refresh for every band it
+    /// did not move.
+    ///
+    /// This is bit-identical rather than approximately equal, by determinism: same band, same
+    /// rate, same function, same words.
+    fn target_words(&self, section: usize, track: usize) -> EqSvfWordsV1 {
+        let slot = &self.sections[section];
+        EqSvfWordsV1::from_array(core::array::from_fn(|index| {
+            lane_get(coef_word(&slot.target, index), track)
+        }))
     }
 
     /// `true` when lane `track` of `section` already holds exactly `words`.
@@ -1110,23 +1150,39 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
                 if updates.iter().all(Option::is_none) {
                     continue;
                 }
-                let target = if channel == 0 {
-                    &mut self.left.targets[track][section]
+                // The stored band is read by value, so the borrow of the channel ends here and
+                // the cached-design read below can borrow it again.
+                let stored = if channel == 0 {
+                    self.left.targets[track][section]
                 } else {
-                    &mut self.right.targets[track][section]
+                    self.right.targets[track][section]
                 };
-                let mut candidate = *target;
+                let mut candidate = stored;
                 for (field, value) in updates.into_iter().enumerate() {
                     if let Some(value) = value {
                         candidate.set_numeric(field, value);
                     }
                 }
-                match candidate.words(sample_rate) {
+                // Issue #144 item 6: a band restated at the values it already holds designs to
+                // the words it is already heading for, so the `f64` design is read from the lane
+                // rather than recomputed. `words` is deterministic in (band, rate) and
+                // `Section::target` is what it last returned, so the two are the same bits.
+                let designed = if candidate.same_bits(&stored) {
+                    Ok(if channel == 0 {
+                        self.left.target_words(section, track)
+                    } else {
+                        self.right.target_words(section, track)
+                    })
+                } else {
+                    candidate.words(sample_rate)
+                };
+                match designed {
                     Ok(words) => {
-                        *target = candidate;
                         if channel == 0 {
+                            self.left.targets[track][section] = candidate;
                             self.left.start_ramp(section, track, words);
                         } else {
+                            self.right.targets[track][section] = candidate;
                             self.right.start_ramp(section, track, words);
                         }
                     }

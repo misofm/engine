@@ -172,3 +172,31 @@ fn a_real_automation_point_still_ramps() {
         "a one-ULP automation point must still be a real retarget"
     );
 }
+
+/// The re-preparation half: a restated band must not be redesigned, and must still render exactly.
+///
+/// The cached read is only sound because `BandTarget::words` is a pure function of the band and
+/// the sample rate, so the words held in `Section::target` are the words the design would return.
+/// This test states the consequence a caller can observe: restating a band is indistinguishable
+/// from not automating it at all, block after block, for a long enough run that a drifting cache
+/// would show up.
+#[test]
+fn a_restated_band_is_indistinguishable_from_no_automation_over_many_blocks() {
+    let Some((width, _)) = native_bank() else {
+        return;
+    };
+    let lanes = width.lanes() as usize;
+    let empty_offsets = vec![0_u32; lanes + 1];
+    let redundant: Vec<PreparedAutomationSpan> = (0..lanes)
+        .map(|track| point(3, ParameterChannel::Left, 0, band0_left_gain(track)))
+        .collect();
+    let offsets: Vec<u32> = (0..=lanes).map(|track| track as u32).collect();
+
+    // Delivered on the first block only (the render helper's contract), but the comparison runs
+    // for BLOCKS blocks so a cached word that had drifted would have time to show.
+    assert_eq!(
+        render(&[], &empty_offsets, lanes),
+        render(&redundant, &offsets, lanes),
+        "a restated band diverged from an unautomated one"
+    );
+}
