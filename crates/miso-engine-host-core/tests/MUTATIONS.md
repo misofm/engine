@@ -295,3 +295,25 @@ that the digest comparison discriminates.
 
   This is the E2 mutation: it is red on the error path (`a refused descriptor leaked MXCSR`) as
   well as the success path, which is the half a success-only gate would miss.
+
+### M-146-4 — the started session becomes movable between threads
+
+* Mutation: in `src/render_session.rs`, replace the `PhantomData<*const ()>` field of
+  `StartedRenderSessionV1` with `PhantomData<()>`. The same edit applied to `CanonicalFpEnv` in
+  `crates/miso-engine-lane/src/fpenv.rs`.
+* Commands: `cargo test -p miso-engine-host-core --doc`, `cargo test -p miso-engine-lane --doc`
+* Result: **RED**, and the two halves are red for different reasons, which is the fact worth
+  recording:
+
+  ```
+  crates/miso-engine-host-core/src/render_session.rs - StartedRenderSessionV1 (line 47) - compile fail ... FAILED
+  crates/miso-engine-lane/src/fpenv.rs - CanonicalFpEnv (line 250) - compile fail ... FAILED
+  crates/miso-engine-lane/src/fpenv.rs - CanonicalFpEnv (line 255) - compile fail ... FAILED
+  ```
+
+  `CanonicalFpEnv` loses **both** claims: the marker is the only thing making it `!Send` and
+  `!Sync`. `StartedRenderSessionV1` loses only the `Send` claim -- its `!Sync` survives, because
+  `PreparedRenderPlan` is already `!Sync` and the session owns one. The marker is therefore
+  load-bearing for exactly one of the session's two claims, and the doctest that proves the other
+  is proving the plan's property rather than the session's. Both are asserted, and neither is
+  assumed.
