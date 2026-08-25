@@ -528,9 +528,6 @@ pub fn check_nudge_ladder_parts_v1(
     {
         return Err(NudgeRuleV1::Step);
     }
-    if matches!(domain, ParameterDomain::Boolean) {
-        return Err(NudgeRuleV1::Domain);
-    }
     let resolved =
         resolve_nudge_ladder_parts_v1(ladder, domain, mapping, minimum, maximum, choice_count)
             .ok_or(NudgeRuleV1::Domain)?;

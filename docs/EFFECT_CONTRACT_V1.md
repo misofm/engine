@@ -76,6 +76,69 @@ control plane and for the conformance reference mock — whose sample-accurate r
 is a later protocol capability. Malformed render spans are ignored, counted once, and do not
 change the last valid target.
 
+### Named nudge sizes (issue #127)
+
+Every parameter that can express one declares a `NudgeLadderV1`: an `xs` rung in the parameter's
+own unit, plus a ratio class that derives `sm`, `md`, `lg` and `xl` from it. `Human` -- the class
+every launch parameter declares -- multiplies `xs` by `{1, 3, 5, 10, 30}`; `Wide` multiplies by
+`{1, 4, 16, 64, 256}` and exists so that adopting a coarse-to-fine search ladder later is a
+per-parameter edit rather than a vocabulary change. There are no per-frontend step preferences:
+one vocabulary everywhere.
+
+The declared `xs` is measured in a `NudgeStepUnitV1`, and each unit is legal on exactly one
+mapping, because that is the mapping whose arithmetic gives the unit its meaning:
+
+| step unit | mapping | meaning |
+|---|---|---|
+| `Absolute` | `Linear` | `xs` units of the parameter's own unit |
+| `Cents` | `Logarithmic` | multiply by `2^(xs/1200)` |
+| `Percent` | `Logarithmic` | multiply by `1 + xs/100` |
+| `Steps` | `Stepped` (enumeration) | advance `xs` whole choices |
+
+A ladder is *resolved* into the mapping's normalized `[0,1]` domain, where the arithmetic is exact
+at both endpoints and a logarithmic parameter gets equal-ratio stepping out of the mapping itself
+rather than out of a per-decade banding table. A nudge rounds the current position to the nearest
+multiple of the resolved `xs` and then moves a whole number of rungs from there:
+
+```text
+k  = round(x / xs)
+x' = clamp((k + count * multiplier) * xs, 0, 1)
+```
+
+Two consequences, both intended. Nudged values land on a fixed declared grid, so a frequency nudge
+produces the same handful of values every session instead of an endless supply of `1005.79 Hz`.
+And from any grid point the operation is exactly reversible: `+1 * size` then `-1 * size` restores
+the starting bits. The *first* nudge from an arbitrary value snaps by at most half an `xs` rung,
+and at a domain edge the clamp is one-way; both are documented asymmetries, not rounding drift.
+
+`validate_descriptor_v1` enforces three rules, each with its own diagnostic code:
+
+| code | rule |
+|---|---|
+| `effect.descriptor.nudge_step` | `xs` is finite, strictly positive, not `-0.0`, and a whole number for a `Steps` ladder |
+| `effect.descriptor.nudge_domain` | the step unit fits the mapping, the resolved `xs` is inside `(0,1]`, a continuous parameter's `xl` rung does not cross its whole domain, and a `Boolean` parameter declares no ladder at all |
+| `effect.descriptor.nudge_order` | the five resolved rungs strictly ascend |
+
+A stepped parameter is exempt from the `xl` half of the domain rule on purpose: `lg` and `xl` are
+ten and thirty choices, they are meant to run off the end of a six-choice enumeration, and the
+clamp is exact when they do.
+
+Class defaults are keyed by `(unit, mapping)` and anchored at the just-noticeable difference for
+that kind of quantity -- 0.5 dB for a level, 20 cents for a frequency, 5 % for a time constant,
+2.5 % for a ratio, 0.01 for a normalized control. A class is a starting point, never a ruling:
+`default_nudge_ladder_v1` is the table and every effect may override per parameter. The launch set
+overrides in three places (`miso.delay`'s `delay time`, `miso.gate-expander`'s `hold` and the EQ's
+four `shelf-slope` parameters), each with its reason written at the override and listed in
+`effect-compiler/tests/nudge_launch_set.rs`.
+
+Resolution is memoized at registry construction (`NativeEffectRegistry::nudge_ladders`) and
+allocates nothing anywhere.
+
+Two kinds of parameter declare no ladder, and nothing else may: a `Boolean` domain has nothing
+between its two values, and an `Exponential` mapping has no constant-unit step. No launch parameter
+uses an exponential mapping. Builtin parameters (trim, cutoffs, fader, pan/matrix) are a separate
+descriptor path and do not carry ladders yet; the metadata JSON marks every one of them `null`.
+
 ## State and lane isolation
 
 State is three exact caller buffers: common, left, and right. Snapshot is deterministic and
@@ -113,6 +176,9 @@ Descriptor errors use deterministic dotted codes documented by
 ```text
 effect.native.unavailable
 effect.descriptor.invalid
+effect.descriptor.nudge_step
+effect.descriptor.nudge_domain
+effect.descriptor.nudge_order
 effect.quality.unsupported
 effect.link_mode.unsupported
 effect.parameter.unknown

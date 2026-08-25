@@ -109,3 +109,20 @@ Error: chromium: observation-armed: an armed tap published no reduction at all
 ```
 
 Reverted in the same session; the recorded `results.json` and matrix are from the unmutated tree.
+
+## Issue #127 — the server-resolved nudge command
+
+| # | mutation | file | test | result |
+|---|---|---|---|---|
+| 127-16 | `ReadyOwnership::resolve_nudge` reads `parameter.default_value` instead of the live-value mirror | `host-web/src/lib.rs` | `cargo test -p miso-engine-host-web` | RED — 3 of 38, including `a_nudge_command_resolves_against_the_live_value_and_reports_it` (`a nudge resolves against the live value`) and the pinned nudge timeline digest |
+| 127-17 | `into_nudge_records` drops the ladder check | `host-web/src/lib.rs` | same | RED — `nudge_misuse_is_typed`: a boolean parameter answers `UNSUPPORTED_KIND` where `UNNUDGEABLE` is required |
+| 127-18 | `push` stops updating the mirror when it admits a `Parameter` record | `host-web/src/lib.rs` | same | RED — 3 of 38; two nudges in one batch stop chaining and an absolute set stops being visible to the next nudge |
+| 127-19 | `NudgeRatioClassV1::Human`'s `xl` multiplier becomes 20 | `effect-contract/src/nudge.rs` | `cargo test -p miso-engine-host-web --lib tests::native_nudge_timeline_digest_is_pinned` | RED — the pinned nudge-timeline digest moves, which is the point of pinning it |
+
+The metadata schema gate's fourteen nudge mutations run in CI on every commit through
+`scripts/check-parameter-metadata-v1.py --self-test`, which applies each to a valid document and
+fails if the validator accepts it: a removed `nudge` key, a nudgeable parameter declaring none, a
+name disagreeing with its value, a cents ladder on a linear mapping, a zero `xs`, a normalized `xs`
+outside the domain, a drifted multiplier table, reversed rungs, an `xs` rung that disagrees with
+the `xs` step, an `xl` rung that crosses the domain, a four-rung ladder, a removed builtin slot,
+and a renamed, truncated or removed nudge vocabulary.

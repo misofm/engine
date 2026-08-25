@@ -82,3 +82,29 @@ pin `-C target-feature=+avx2,+fma`, debug profile. Sweep driver: one mutation at
 | E11 transport never tears | `core/tests/MUTATIONS.md` (143-E11-a..d) |
 | E12 three-browser qualification | `host-web/MUTATIONS.md` |
 | E13 plan replacement | `graph-compiler/tests/MUTATIONS.md` (143-E13) |
+
+## Issue #127 — the named nudge ladder
+
+`tests/nudge.rs` and `effect-compiler/tests/nudge_launch_set.rs`. Each row was applied to the
+working tree by `scripts`-free driver, the named command was run, the failure was observed, and the
+mutation was reverted before the next row. Host: `x86_64` (Zen 5 class), workspace
+`.cargo/config.toml` pin `-C target-feature=+avx2,+fma`, debug profile.
+
+| # | mutation | file | test | result |
+|---|---|---|---|---|
+| 127-1 | `NudgeRatioClassV1::Human`'s multipliers become `[1, 3, 3, 10, 30]` | `effect-contract/src/nudge.rs` | `cargo test -p miso-engine-effect-contract --test nudge` | RED — 5 of 11 fail, including `the_multiplier_table_is_a_strict_ladder` (`Human multipliers must strictly ascend`) and `a_linear_decibel_ladder_steps_by_equal_decibels` |
+| 127-2 | the `Absolute` arm resolves `xs / b` instead of `xs / (b - a)` | `effect-contract/src/nudge.rs` | same | RED — 4 of 11, `an xs rung is 0.5 dB` |
+| 127-3 | the `Cents` arm divides by 1200 twice | `effect-contract/src/nudge.rs` | same | RED — `one xs rung is 20 cents at 40 Hz` |
+| 127-4 | the `Steps` arm divides by `choice_count` instead of `choice_count - 1` | `effect-contract/src/nudge.rs` | same | RED — `a_stepped_ladder_advances_whole_choices_and_clamps`, and the round trip stops being exact |
+| 127-5 | the grid disappears: `nudge_parameter_value_v1` adds `count * step` to `x` directly instead of rounding to the nearest `xs` multiple first | `effect-contract/src/nudge.rs` | same | RED — `a_grid_nudge_is_exactly_reversible`: `+1 then -1 must restore the exact bits` |
+| 127-6 | the `clamp(0.0, 1.0)` on the resolved position is dropped | `effect-contract/src/nudge.rs` | same | RED — 3 of 11, including `a_nudge_past_an_endpoint_lands_on_the_declared_endpoint_bits` |
+| 127-8 | a zero `count` returns `Ok(current)` instead of `Err(NudgeErrorV1::Count)` | `effect-contract/src/nudge.rs` | same | RED — `every_refusal_is_typed` |
+| 127-9 | `validate_descriptor_v1` stops calling `check_nudge_ladder_v1` | `effect-contract/src/lib.rs` | same | RED — `a_broken_ladder_stops_the_descriptor`: `the ladder is refused` |
+| 127-10 | `miso-engine-compressor`'s parameter helper stops setting `nudge` | `compressor/src/lib.rs` | `cargo test -p miso-engine-effect-compiler --test nudge_launch_set` | RED — 4 of 5, `miso.compressor/threshold could declare a ladder and does not` |
+| 127-11 | the dB class default moves from 0.5 to 5.0 dB | `effect-contract/src/nudge.rs` | same | RED — 4 of 5; `the_class_defaults_are_jnd_anchored` reports an xs rung of 5 where 0.5 is anchored, and the registry refuses two descriptors outright because `xl` now crosses their domains |
+| 127-12 | `miso.delay`'s `delay time` override becomes 2.0 ms without a matching row in `OVERRIDES` | `delay/src/lib.rs` | same | RED — `every_declared_ladder_is_its_class_default_or_a_listed_override` |
+
+Row 127-7 was attempted and is **not** recorded as a gate: removing the explicit
+`ParameterDomain::Boolean` guard from `check_nudge_ladder_parts_v1` left every test green, because
+no `(step unit, domain, mapping)` triple resolves against a boolean and the resolve already refuses
+one. The redundant guard was deleted rather than kept with a mutation nothing could prove.

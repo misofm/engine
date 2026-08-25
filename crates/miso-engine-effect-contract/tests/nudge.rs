@@ -498,3 +498,118 @@ fn resolving_and_applying_a_ladder_allocates_nothing() {
         "resolving and applying a ladder must not allocate"
     );
 }
+
+/// A broken ladder stops the whole descriptor, with the code that names the rule.
+///
+/// The rules are only worth having if `validate_descriptor_v1` runs them: a factory whose
+/// descriptor does not validate cannot enter the registry, which is what makes "every registered
+/// parameter's ladder resolves" true by construction everywhere downstream.
+///
+/// Red mutation: delete the `check_nudge_ladder_v1` arm from `validate_descriptor_v1`.
+#[test]
+fn a_broken_ladder_stops_the_descriptor() {
+    use miso_engine_effect_contract::{
+        DescriptorDiagnosticCode, EffectDescriptorV1, EffectId, EffectQuality, LatencySamples,
+        LinkModeSet, PortDescriptorV1, PortId, PortLayout, PortRole, QualityDescriptorV1,
+        StatePayloadSizes, TailSamples, validate_descriptor_v1,
+    };
+
+    const fn effect_id(value: &'static str) -> EffectId {
+        match EffectId::new(value) {
+            Ok(value) => value,
+            Err(_) => panic!("valid static effect id"),
+        }
+    }
+    const fn port_id(value: &'static str) -> PortId {
+        match PortId::new(value) {
+            Ok(value) => value,
+            Err(_) => panic!("valid static port id"),
+        }
+    }
+    const fn quality(sample_rate: u32) -> QualityDescriptorV1 {
+        QualityDescriptorV1 {
+            quality: EffectQuality::Normal,
+            sample_rate,
+            latency: LatencySamples(0),
+            tail: TailSamples::Finite(0),
+            maximum_state: StatePayloadSizes {
+                common_bytes: 0,
+                left_bytes: 4,
+                right_bytes: 4,
+            },
+            scratch_fixed_bytes: 0,
+            scratch_bytes_per_frame: 0,
+        }
+    }
+    static PORTS: [PortDescriptorV1; 2] = [
+        PortDescriptorV1 {
+            id: port_id("main-in"),
+            role: PortRole::MainInput,
+            required: true,
+            layout: PortLayout::DualMonoPlanar,
+        },
+        PortDescriptorV1 {
+            id: port_id("main-out"),
+            role: PortRole::MainOutput,
+            required: true,
+            layout: PortLayout::DualMonoPlanar,
+        },
+    ];
+    static QUALITIES: [QualityDescriptorV1; 4] = [
+        quality(44_100),
+        quality(48_000),
+        quality(88_200),
+        quality(96_000),
+    ];
+    // Three decibels times thirty is ninety, and the parameter spans seventy-two.
+    static BROKEN: [ParameterDescriptorV1; 1] = [ParameterDescriptorV1 {
+        unit: ParameterUnit::Db,
+        minimum: Some(-60.0),
+        maximum: Some(12.0),
+        default_value: 0.0,
+        nudge: Some(NudgeLadderV1::absolute(3.0)),
+        ..base()
+    }];
+    static GOOD: [ParameterDescriptorV1; 1] = [ParameterDescriptorV1 {
+        nudge: Some(NudgeLadderV1::absolute(0.5)),
+        ..BROKEN[0]
+    }];
+    static BROKEN_DESCRIPTOR: EffectDescriptorV1 = EffectDescriptorV1 {
+        id: effect_id("fixture.nudge"),
+        display_name: "Nudge fixture",
+        contract_major: 1,
+        contract_minor: 0,
+        state_layout_version: 1,
+        supported_link_modes: LinkModeSet::DUAL_MONO,
+        parameters: &BROKEN,
+        ports: &PORTS,
+        qualities: &QUALITIES,
+        observations: &[],
+    };
+    static GOOD_DESCRIPTOR: EffectDescriptorV1 = EffectDescriptorV1 {
+        parameters: &GOOD,
+        ..BROKEN_DESCRIPTOR
+    };
+
+    validate_descriptor_v1(&GOOD_DESCRIPTOR).expect("a sound ladder validates");
+    let errors = validate_descriptor_v1(&BROKEN_DESCRIPTOR).expect_err("the ladder is refused");
+    assert!(
+        errors
+            .errors()
+            .iter()
+            .any(|error| error.code == DescriptorDiagnosticCode::NudgeDomain),
+        "the refusal names the rule: {errors:?}"
+    );
+    assert_eq!(
+        DescriptorDiagnosticCode::NudgeStep.as_str(),
+        "effect.descriptor.nudge_step"
+    );
+    assert_eq!(
+        DescriptorDiagnosticCode::NudgeDomain.as_str(),
+        "effect.descriptor.nudge_domain"
+    );
+    assert_eq!(
+        DescriptorDiagnosticCode::NudgeOrder.as_str(),
+        "effect.descriptor.nudge_order"
+    );
+}

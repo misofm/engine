@@ -10,9 +10,10 @@ use miso_engine_effect_contract::{
 };
 use miso_engine_effect_package::{
     EFFECT_DESCRIPTOR_WIRE_V1_UNAVAILABLE, EffectArtifactAuthoringV1, EffectArtifactKindV1,
-    EffectDescriptorBindingErrorKindV1, EffectDescriptorWireDiagnosticCodeV1 as Code,
-    EffectPackageAuthoringV1, EffectPackageLimitsV1, bind_effect_descriptor_wire_v1,
-    effect_descriptor_identity_v1, effect_descriptor_wire_v1_required_size, effect_package_cid_v1,
+    EffectDescriptorBindingErrorKindV1, EffectDescriptorWireDiagnosticCodeV1,
+    EffectDescriptorWireDiagnosticCodeV1 as Code, EffectPackageAuthoringV1, EffectPackageLimitsV1,
+    bind_effect_descriptor_wire_v1, effect_descriptor_identity_v1,
+    effect_descriptor_wire_v1_required_size, effect_package_cid_v1,
     effect_package_v1_required_size, encode_effect_descriptor_wire_v1, encode_effect_package_v1,
     verify_effect_descriptor_wire_v1, verify_effect_package_v1,
 };
@@ -489,6 +490,20 @@ static DESCRIPTOR_D: EffectDescriptorV1 = EffectDescriptorV1 {
     parameters: &PARAMETERS_D,
     ..DESCRIPTOR_A
 };
+/// `comprehensive-d` with one ladder's magnitude changed and nothing else.
+///
+/// It exists so that "the wire declares a different ladder" is testable at the *magnitude*, not
+/// only at the step unit: a comparison that checked the unit and the class but read the magnitude
+/// back out of the wire would still bind this, and it must not.
+static PARAMETERS_D_ALTERNATE: [ParameterDescriptorV1; 6] = {
+    let mut parameters = PARAMETERS_D;
+    parameters[0].nudge = Some(NudgeLadderV1::absolute(0.25));
+    parameters
+};
+static DESCRIPTOR_D_ALTERNATE: EffectDescriptorV1 = EffectDescriptorV1 {
+    parameters: &PARAMETERS_D_ALTERNATE,
+    ..DESCRIPTOR_D
+};
 static DESCRIPTOR_A_PERMUTED: EffectDescriptorV1 = EffectDescriptorV1 {
     ports: &PORTS_PERMUTED,
     ..DESCRIPTOR_A
@@ -929,7 +944,8 @@ fn a_declared_nudge_ladder_costs_no_bytes_and_moves_the_identity() {
     );
 
     // And the wire round-trips back to exactly this descriptor, ladders included: a wire that
-    // declared a different ladder would not bind.
+    // declared a different ladder would not bind -- neither one that declares none, nor one whose
+    // rung is a different size.
     assert!(bind_effect_descriptor_wire_v1(&DESCRIPTOR_D, &ladder_bearing, 1 << 20).is_ok());
     assert_eq!(
         bind_effect_descriptor_wire_v1(&DESCRIPTOR_A, &ladder_bearing, 1 << 20)
@@ -937,4 +953,117 @@ fn a_declared_nudge_ladder_costs_no_bytes_and_moves_the_identity() {
             .kind(),
         EffectDescriptorBindingErrorKindV1::StaticDescriptorMismatch
     );
+    let alternate = encoded(&DESCRIPTOR_D_ALTERNATE);
+    assert_eq!(
+        alternate.len(),
+        ladder_bearing.len(),
+        "the two differ only in one rung's magnitude"
+    );
+    assert_ne!(alternate, ladder_bearing);
+    assert_eq!(
+        bind_effect_descriptor_wire_v1(&DESCRIPTOR_D, &alternate, 1 << 20)
+            .unwrap_err()
+            .kind(),
+        EffectDescriptorBindingErrorKindV1::StaticDescriptorMismatch,
+        "a wire whose xs rung is a different size is not this descriptor"
+    );
+}
+
+/// Issue #127: a wire whose declared ladder breaks a rule is refused as semantically invalid.
+///
+/// The wire verifier runs the contract's own three rules through `check_nudge_ladder_parts_v1`, so
+/// a hand-crafted wire that a legitimate encoder would never produce is still refused. Nothing
+/// this crate encodes can reach this path, which is exactly why it needs a test that builds the
+/// bytes by hand.
+///
+/// Red mutation: delete the ladder arm from `borrowed_semantic_errors`.
+#[test]
+fn a_wire_whose_ladder_breaks_a_rule_is_semantically_invalid() {
+    let wire = encoded(&DESCRIPTOR_D);
+    let record = 96_usize;
+    // Parameter 0 is a dB level spanning 72 dB with a 0.5 dB xs rung. Three decibels times thirty
+    // is ninety, which is more domain than the parameter has.
+    let mut too_coarse = wire.clone();
+    too_coarse[record + 72..record + 76].copy_from_slice(&3.0_f32.to_bits().to_le_bytes());
+    let diagnostic = verify_effect_descriptor_wire_v1(&too_coarse, 1 << 20)
+        .expect_err("an xl rung that crosses the domain is refused");
+    assert_eq!(
+        diagnostic.code,
+        EffectDescriptorWireDiagnosticCodeV1::Semantic
+    );
+    assert_eq!(diagnostic.byte_offset as usize, record + 72);
+    // A cents ladder on a linear mapping has no ratio to step by.
+    let mut wrong_unit = wire.clone();
+    wrong_unit[record + 76] = 2;
+    assert_eq!(
+        verify_effect_descriptor_wire_v1(&wrong_unit, 1 << 20)
+            .expect_err("a cents rung on a linear mapping is refused")
+            .code,
+        EffectDescriptorWireDiagnosticCodeV1::Semantic
+    );
+    // And a whole-choice rung must be a whole number.
+    let mode = record + 4 * 80;
+    let mut fractional = wire.clone();
+    fractional[mode + 72..mode + 76].copy_from_slice(&1.5_f32.to_bits().to_le_bytes());
+    assert_eq!(
+        verify_effect_descriptor_wire_v1(&fractional, 1 << 20)
+            .expect_err("a fractional choice count is refused")
+            .code,
+        EffectDescriptorWireDiagnosticCodeV1::Semantic
+    );
+}
+
+/// Issue #127: the eight bytes a ladder rides stay reserved, whether or not one is declared.
+///
+/// Red mutation: drop either leg of the reserved check in `parse_borrowed_wire`'s phase 5.
+#[test]
+fn the_nudge_window_is_reserved_whether_or_not_a_ladder_is_declared() {
+    let wire = encoded(&DESCRIPTOR_D);
+    let record = |index: usize| 96 + index * 80;
+    // Parameter 2 (`Time`) declares no ladder. Every byte of its window except the presence bit
+    // must stay zero, and the diagnostic names the exact byte that moved.
+    for offset in (72..76).chain(77..80) {
+        let mut mutated = wire.clone();
+        mutated[record(2) + offset] = 1;
+        let diagnostic = verify_effect_descriptor_wire_v1(&mutated, 1 << 20)
+            .expect_err("a nonzero byte in a ladder-free window is refused");
+        assert_eq!(
+            diagnostic.code,
+            EffectDescriptorWireDiagnosticCodeV1::Reserved,
+            "byte {offset} of a ladder-free window"
+        );
+        assert_eq!(diagnostic.byte_offset as usize, record(2) + offset);
+    }
+    // Setting the presence bit alone claims a ladder with no ratio class, which is a closed
+    // vocabulary refusing an unknown value rather than a reserved byte moving.
+    let mut presence = wire.clone();
+    presence[record(2) + 76] = 1;
+    assert_eq!(
+        verify_effect_descriptor_wire_v1(&presence, 1 << 20)
+            .expect_err("a declared ladder needs a ratio class")
+            .code,
+        EffectDescriptorWireDiagnosticCodeV1::Enum
+    );
+    // Parameter 0 declares one: the two bytes past the class are still reserved.
+    for offset in 78..80 {
+        let mut mutated = wire.clone();
+        mutated[record(0) + offset] = 1;
+        assert_eq!(
+            verify_effect_descriptor_wire_v1(&mutated, 1 << 20)
+                .expect_err("the window's tail is reserved")
+                .code,
+            EffectDescriptorWireDiagnosticCodeV1::Reserved
+        );
+    }
+    // And the two vocabularies are closed.
+    for (offset, value) in [(76_usize, 5_u8), (77, 3)] {
+        let mut mutated = wire.clone();
+        mutated[record(0) + offset] = value;
+        assert_eq!(
+            verify_effect_descriptor_wire_v1(&mutated, 1 << 20)
+                .expect_err("an unknown nudge vocabulary value is refused")
+                .code,
+            EffectDescriptorWireDiagnosticCodeV1::Enum
+        );
+    }
 }

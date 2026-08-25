@@ -134,3 +134,24 @@ the tap-bearing `comprehensive-c` vector — the record's reserved word, tap ord
 vocabularies, both float slots, inverted bounds, a `Computed` tap claiming `PerBlock` cadence, the
 section offset, the section count, and the two string-pool ownership rules. Each asserts the exact
 `(code, byte_offset, record_index, detail)` diagnostic and fails if the mutation is accepted.
+
+## Issue #127 — the nudge ladder in the parameter record's reserved window
+
+| # | mutation | file | test | result |
+|---|---|---|---|---|
+| 127-13 | the encoder stops writing byte 77, the ratio class | `effect-package/src/wire.rs` | `cargo test -p miso-engine-effect-package --test descriptor_v1_qualification` | RED — 3 of 8, including the frozen `comprehensive-d` wire and identity fixtures and the round trip against the static descriptor |
+| 127-14 | the reserved rule for a ladder-free window is dropped (`if bytes[record + 76] == 0` leg) | `effect-package/src/wire.rs` | same | RED — `the_nudge_window_is_reserved_whether_or_not_a_ladder_is_declared` |
+| 127-14c | the reserved rule for a *declared* window's two-byte tail is dropped | `effect-package/src/wire.rs` | same | RED — same test |
+| 127-15 | `compare_static_descriptor` reads the declared `xs` back out of the wire instead of out of the descriptor | `effect-package/src/wire.rs` | same | RED — `a_declared_nudge_ladder_costs_no_bytes_and_moves_the_identity`: a wire whose xs rung is a different size binds |
+| 127-20 | the ratio-class enum check becomes unconditional `true` | `effect-package/src/wire.rs` | same | RED — the closed vocabulary accepts `3`, and the presence-bit case panics on the `unwrap` the check exists to protect |
+| 127-21 | `borrowed_semantic_errors` stops running the ladder rules | `effect-package/src/wire.rs` | same | RED — `a_wire_whose_ladder_breaks_a_rule_is_semantically_invalid` |
+
+The Python reference carries its own nudge mutation matrix (`nudge_mutation_matrix` in
+`scripts/effect-descriptor-v1-reference.py`): thirteen cases over the ladder-bearing
+`comprehensive-d` vector — both reserved legs, the two vocabularies, both canonical-float rules,
+and every one of the three ladder rules (zero and negative `xs`, a fractional choice count, an
+absolute rung on a logarithmic mapping, a cents rung on a linear one, and an `xl` rung that crosses
+the whole domain). Each asserts the exact `(code, byte_offset, record_index, detail)` diagnostic
+and fails if the mutation is accepted. It also asserts the byte accounting directly:
+`len(comprehensive-d) == len(comprehensive-a)`, the identities differ, and the only bytes that move
+outside the string pool are inside the eight-byte windows.
