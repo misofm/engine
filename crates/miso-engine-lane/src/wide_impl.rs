@@ -22,12 +22,14 @@
 
 /// Implements [`crate::Lane`] for one `wide` vector type.
 ///
-/// Arguments: the vector type, its unsigned companion, the lane count, and the software FMA to use
-/// on targets without a hardware fused multiply-add.
+/// Arguments: the vector type, its unsigned companion, the lane count, the software FMA to use on
+/// targets without a hardware fused multiply-add, and the tuned SVF cascade depth
+/// ([`crate::Lane::SVF_CASCADE_DEPTH`], issue #163 phase 3).
 macro_rules! impl_lane_for_wide {
-    ($simd:ty, $uint:ty, $width:literal, $soft_fma:path) => {
+    ($simd:ty, $uint:ty, $width:literal, $soft_fma:path, $cascade_depth:literal) => {
         impl $crate::Lane for $simd {
             const WIDTH: usize = $width;
+            const SVF_CASCADE_DEPTH: usize = $cascade_depth;
             type Mask = $simd;
 
             #[inline(always)]

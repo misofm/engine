@@ -30,6 +30,10 @@ fn mask(condition: bool) -> ScalarMask {
 
 impl Lane for f32 {
     const WIDTH: usize = 1;
+    // #163 phase 3: the whole four-section cascade. The scalar oracle keeps one `f32` per
+    // integrator, so eight live recurrences do not exhaust the register file the way two `Simd8`
+    // streams times four sections do. Measured 2.088x against 1.773x at depth 2.
+    const SVF_CASCADE_DEPTH: usize = 4;
     type Mask = ScalarMask;
 
     #[inline(always)]

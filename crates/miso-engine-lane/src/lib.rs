@@ -128,6 +128,39 @@ pub trait Lane: Copy + Send + Sync + 'static {
     /// Number of `f32` lanes in one value.
     const WIDTH: usize;
 
+    /// How many cascade sections [`kernels::svf_cascade_interleaved`] fuses into one frame loop on
+    /// this backend (issue #163 phase 3).
+    ///
+    /// This is the **only** tuned constant in the crate, and it is a *schedule* choice, not a
+    /// numeric one: every value produces the same bits, because every value runs the same frozen
+    /// operation order on the same values (gate G2,
+    /// `tests/g2_kernel_identity.rs::interleaved_cascade_equals_a_chain_of_blocks`). It exists
+    /// because a TPT recurrence is latency-bound, not width-bound -- `Simd4` and `Simd8` take the
+    /// same wall time per chain-frame when one chain runs alone -- so the only way to fill the
+    /// vector units is to keep several independent recurrences in flight, and the useful number is
+    /// bounded above by the architectural register file.
+    ///
+    /// Chosen by the measured sweep in `tests/b2_interleave.rs`, over two interleaved streams (a
+    /// bank's two channels) at every depth that divides a four-section cascade, on the #163 bench
+    /// host (Zen 5, `x86-64-v3`), against the four-serial-blocks-per-channel shape the EQ ran
+    /// before:
+    ///
+    /// | backend  | depth 1 | depth 2    | depth 4    | chosen |
+    /// |----------|---------|------------|------------|--------|
+    /// | `Scalar` | 1.622x  | 1.774x     | **2.092x** | 4      |
+    /// | `Simd4`  | 1.800x  | **2.653x** | 2.085x     | 2      |
+    /// | `Simd8`  | 1.721x  | **2.453x** | 1.889x     | 2      |
+    ///
+    /// The vector backends turn over at depth 4 because two streams times four sections is eight
+    /// live integrator pairs -- sixteen vector registers -- plus the coefficient words, which
+    /// spills a sixteen-register file. `Scalar` keeps its state in single `f32` slots and does not.
+    ///
+    /// The same sweep measured what *fusing independent banks* would add on top, by running four
+    /// and eight streams instead of two: at `Simd8` the best cross-bank cell is 2.694x against
+    /// 2.453x here, a 1.10x margin for a fusion that would have to break the effect contract's
+    /// `dyn` boundary. `artifacts/issue163-phase3/` records that as a bounded, measured null.
+    const SVF_CASCADE_DEPTH: usize;
+
     /// Result of a comparison: per lane either all zero bits or all one bits.
     type Mask: Copy;
 

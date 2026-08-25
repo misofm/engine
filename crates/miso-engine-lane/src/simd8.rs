@@ -9,4 +9,4 @@ use wide::{f32x8, u32x8};
 
 use crate::wide_impl::impl_lane_for_wide;
 
-impl_lane_for_wide!(f32x8, u32x8, 8, crate::softfma::fma_f32x8_soft);
+impl_lane_for_wide!(f32x8, u32x8, 8, crate::softfma::fma_f32x8_soft, 2);
