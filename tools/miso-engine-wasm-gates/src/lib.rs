@@ -20,6 +20,8 @@
 use std::fmt;
 use std::path::Path;
 
+use miso_engine_bench_support::stats;
+use miso_engine_bench_support::timing;
 use miso_engine_wasm_gate_corpus as corpus;
 use wasmtime::{Config, Engine, Instance, Module, Store, TypedFunc};
 
@@ -355,4 +357,267 @@ pub fn print_lane_pins() -> String {
     }
     text.push_str("]\n");
     text
+}
+
+// =============================================================================================
+// Issue #163 phase 0b: the wasm kernel timing arm.
+// =============================================================================================
+//
+// # What this is, and what it deliberately is not
+//
+// Full 0b is the *console* benchmark running under a wasm runtime, so that the 222 µs block the
+// native records report has a browser-shaped twin. That is not what this is. `console.rs` is
+// `#[cfg(not(target_arch = "wasm32"))]` and every compiler it drives -- session, builtins, effect
+// and graph -- is a `cfg(not(wasm32))` dependency of the bench crate; `wasm32-unknown-unknown` has
+// no clock, so `Instant` cannot even be constructed inside the guest; and the guest takes no
+// arguments and reads no environment, so the runner's round marker and host metadata have nowhere
+// to go. Reaching the console workload under wasm is a port of the bench tool, not a flag.
+//
+// This is the smallest honest measurement that can be taken *today*, through the harness gate G5
+// already owns: the same frozen lane kernels, built for `wasm32-unknown-unknown` with `+simd128`,
+// executed under the same pinned wasmtime, timed on the host clock.
+//
+// # How the SHA-256 is cancelled rather than ignored
+//
+// The only thing the guest exports is a digest, and a digest is a kernel followed by a SHA-256 of
+// its output. Timing one call therefore measures the kernel *plus* a hash that is far larger than
+// it. The way out is a difference rather than a ratio of totals.
+//
+// `corpus::digest_case` routes every lane case and every element-wise case down one identical
+// path: `digest_lanes(&lane_values(index, width, true))`. `lane_values` always produces `LANES`
+// signals of `FRAMES` frames, so **every case in this arm hashes exactly the same 32,768 bytes**.
+// The SHA-256 term, the eight host-to-guest crossings that read the digest words, and the guest's
+// memoisation bookkeeping are all constant across the arms, so they cancel in
+//
+//     T(heavy case) - T(baseline case) = kernel(heavy) - kernel(baseline)
+//
+// taken per observation. That difference is what this arm publishes. `gain_block/noise` is the
+// baseline because a per-sample multiply is the cheapest lane kernel the corpus has.
+//
+// # Why the arms are alternated
+//
+// The #104 protocol, for the usual reason -- and here it is also load bearing for a second one.
+// The guest memoises the last `(case, width)` it digested, so a loop that ran one case a thousand
+// times would compute it once and then time a cache hit nine hundred and ninety-nine times.
+// Alternating the arms busts that cache on every call by construction.
+
+/// Observations per arm in the timing run.
+pub const TIMING_OBSERVATIONS: usize = 500;
+/// Untimed calls per arm before the clock starts.
+const TIMING_WARMUP: usize = 16;
+/// The cheapest lane kernel in the corpus: one multiply per sample. Every reported delta is a
+/// difference from this arm, which is what cancels the common SHA-256 term.
+pub const TIMING_BASELINE_CASE: &str = "gain_block/noise";
+/// The kernels this arm reports, by their frozen corpus names.
+pub const TIMING_CASES: [&str; 3] = [
+    // The state-variable filter the parametric EQ and every builtin filter section ride.
+    "svf_block_ramped/noise",
+    // The one-pole follower a compressor's detector rides.
+    "one_pole_block/noise",
+    // Master plan §3.5's software FMA: the `v128` body no native gate can execute, and the reason
+    // #163 says every recorded number is native while the product ships wasm.
+    "lane_fma",
+];
+
+/// One timed arm of the wasm kernel timing run.
+#[derive(Clone, Debug)]
+pub struct TimingArm {
+    /// The frozen corpus case name.
+    pub name: String,
+    /// Its case index in this build of the corpus.
+    pub case: usize,
+    /// Nearest-rank percentiles of the per-call wall time.
+    pub p50_ns: u64,
+    /// 95th percentile.
+    pub p95_ns: u64,
+    /// 99th percentile.
+    pub p99_ns: u64,
+    /// Median of the per-observation difference from the baseline arm. The kernel cost.
+    pub paired_delta_median_ns: i64,
+    /// The digest this arm produced, so a timing run also proves it ran the pinned computation.
+    pub digest: [u8; 32],
+}
+
+/// The outcome of one leg at one width.
+#[derive(Clone, Debug)]
+pub struct TimingReport {
+    /// `"native"` or `"wasm"`.
+    pub leg: &'static str,
+    /// The record-family label. Never comparable with a native console record.
+    pub backend: String,
+    /// Which lane width the corpus was driven at.
+    pub width: usize,
+    /// Observations per arm.
+    pub observations: usize,
+    /// The baseline arm every delta is measured from.
+    pub baseline: TimingArm,
+    /// The measured kernels.
+    pub arms: Vec<TimingArm>,
+}
+
+impl TimingReport {
+    /// One machine-readable evidence line.
+    #[must_use]
+    pub fn json(&self) -> String {
+        let arm = |arm: &TimingArm| {
+            format!(
+                "{{\"case\":\"{}\",\"case_index\":{},\"p50_ns\":{},\"p95_ns\":{},\"p99_ns\":{},\
+                 \"paired_delta_median_ns\":{},\"digest\":\"{}\"}}",
+                arm.name,
+                arm.case,
+                arm.p50_ns,
+                arm.p95_ns,
+                arm.p99_ns,
+                arm.paired_delta_median_ns,
+                hex(&arm.digest)
+            )
+        };
+        let arms: Vec<String> = self.arms.iter().map(arm).collect();
+        format!(
+            "{{\"schema_version\":1,\"issue\":163,\"phase\":\"0b\",\"record\":\"wasm_kernel_timing\",\
+             \"leg\":\"{}\",\"backend\":\"{}\",\"width\":\"{}\",\"runtime\":\"wasmtime {}\",\
+             \"comparable_with_console_records\":false,\
+             \"observations\":{},\"pairing\":\"alternating_per_observation\",\
+             \"percentile_method\":\"nearest_rank\",\"units\":\"ns_per_case\",\
+             \"common_term\":\"every arm hashes the same {} bytes, so the SHA-256 cancels in the paired delta\",\
+             \"baseline\":{},\"arms\":[{}],\"descriptive_only\":true,\
+             \"statistical_method\":\"arms alternated per observation; nearest-rank percentiles \
+over per-call nanoseconds; paired delta is the arm minus the baseline arm per observation; \
+descriptive only; no threshold\"}}",
+            self.leg,
+            self.backend,
+            corpus::width_name(self.width),
+            WASMTIME_VERSION,
+            self.observations,
+            corpus::LANES * corpus::FRAMES * 4,
+            arm(&self.baseline),
+            arms.join(",")
+        )
+    }
+}
+
+/// The index of a frozen corpus case, by name.
+fn case_by_name(name: &str) -> usize {
+    (0..corpus::LANE_CASE_COUNT)
+        .find(|index| corpus::case_name(*index) == name)
+        .unwrap_or_else(|| {
+            panic!("the frozen corpus no longer carries the case {name}: the timing arm names it")
+        })
+}
+
+/// Median of the per-observation differences `arm[i] - baseline[i]`.
+fn paired_median(arm: &[u64], baseline: &[u64]) -> i64 {
+    let mut paired: Vec<i64> = arm
+        .iter()
+        .zip(baseline)
+        .map(|(arm, baseline)| *arm as i64 - *baseline as i64)
+        .collect();
+    paired.sort_unstable();
+    paired[paired.len() / 2]
+}
+
+/// Alternates the baseline and every named case, timing each call on the host clock.
+fn timing_run(
+    leg: &'static str,
+    backend: String,
+    width: usize,
+    mut run: impl FnMut(usize) -> [u8; 32],
+) -> TimingReport {
+    let names: Vec<String> = std::iter::once(TIMING_BASELINE_CASE.to_owned())
+        .chain(TIMING_CASES.iter().map(|name| (*name).to_owned()))
+        .collect();
+    let cases: Vec<usize> = names.iter().map(|name| case_by_name(name)).collect();
+
+    for &case in &cases {
+        for _ in 0..TIMING_WARMUP {
+            let _ = run(case);
+        }
+    }
+
+    let mut samples: Vec<Vec<u64>> = cases
+        .iter()
+        .map(|_| Vec::with_capacity(TIMING_OBSERVATIONS))
+        .collect();
+    let mut digests = vec![[0_u8; 32]; cases.len()];
+    for _ in 0..TIMING_OBSERVATIONS {
+        for (index, &case) in cases.iter().enumerate() {
+            let (elapsed_ns, digest) = timing::timed(|| run(case));
+            samples[index].push(elapsed_ns);
+            digests[index] = digest;
+        }
+    }
+
+    let arm = |index: usize| {
+        let mut sorted = samples[index].clone();
+        sorted.sort_unstable();
+        TimingArm {
+            name: names[index].clone(),
+            case: cases[index],
+            p50_ns: stats::nearest_rank(&sorted, 50, 100),
+            p95_ns: stats::nearest_rank(&sorted, 95, 100),
+            p99_ns: stats::nearest_rank(&sorted, 99, 100),
+            paired_delta_median_ns: paired_median(&samples[index], &samples[0]),
+            digest: digests[index],
+        }
+    };
+    TimingReport {
+        leg,
+        backend,
+        width,
+        observations: TIMING_OBSERVATIONS,
+        baseline: arm(0),
+        arms: (1..cases.len()).map(arm).collect(),
+    }
+}
+
+/// The native leg of the timing arm: the corpus run in this process at `width`.
+///
+/// # Panics
+///
+/// Panics if `width >= corpus::WIDTHS`, or if a named case has left the frozen corpus.
+#[must_use]
+pub fn native_timing_report(width: usize) -> TimingReport {
+    assert!(width < corpus::WIDTHS, "width index out of range");
+    let backend = format!("native-{}", corpus::width_name(width));
+    timing_run("native", backend, width, |case| {
+        corpus::digest_case(case, width)
+    })
+}
+
+/// The wasm leg of the timing arm: the same corpus inside `path`, under the pinned wasmtime.
+///
+/// # Errors
+///
+/// Returns an error if the module fails to compile, validate or instantiate, if an export is
+/// missing, if the guest traps, or if the backend it reports is not `expected`.
+///
+/// # Panics
+///
+/// Panics if `width >= corpus::WIDTHS`, or if a named case has left the frozen corpus.
+pub fn wasm_timing_report(
+    path: &Path,
+    expected: ExpectedBackend,
+    width: usize,
+) -> wasmtime::Result<TimingReport> {
+    assert!(width < corpus::WIDTHS, "width index out of range");
+    let mut guest = Guest::load(path)?;
+    if guest.backend != expected.code() {
+        wasmtime::bail!(
+            "guest reports backend {} but {} was expected",
+            guest.backend,
+            expected.name()
+        );
+    }
+    // The label the record family carries. Named for the artifact the browser ships, and it is
+    // never comparable with a native console record: different target, different width, and a
+    // software FMA where the native build has a hardware one.
+    let backend = match expected {
+        ExpectedBackend::Simd4 => "wasm-simd128".to_owned(),
+        other => format!("wasm-{}", other.name()),
+    };
+    Ok(timing_run("wasm", backend, width, |case| {
+        guest
+            .digest(case, width)
+            .expect("the guest must not trap inside the timing arm")
+    }))
 }
