@@ -31,13 +31,12 @@
 
 use miso_engine_effect_contract::LinkMode;
 use miso_engine_effect_runtime::bank;
-use miso_engine_effect_runtime::dynamics::{
-    GainComputerCoef, gain_delta_db, gain_from_db, level_db,
-};
+use miso_engine_effect_runtime::dynamics::{GainComputerCoef, gain_delta_db};
 use miso_engine_effect_runtime::envelope::rms_follow;
 use miso_engine_effect_runtime::ramp::LinearRamp;
 use miso_engine_lane::kernels::gain_mix_step;
 use miso_engine_lane::{Lane, flush};
+use miso_engine_math::fast_db::{fast_gain_from_db, fast_level_db};
 
 use crate::design::{
     ALL_PARAMETERS, COEF_ATTACK, COEF_HALF_KNEE, COEF_INV_RATIO_MINUS_ONE, COEF_INV_TWO_KNEE,
@@ -469,8 +468,13 @@ fn one_frame<L: Lane>(
     let (zero, one, level_floor, level_min, level_max, reduction_min) = constants;
 
     // 4. amplitude to level, floored and clamped into the curve's domain.
+    //
+    // FAST-DB-CROSSING X1: the compressor's detector level. This is a dynamics gain path -- the
+    // result is a detector reading that feeds the static curve and is never pinned as a
+    // coefficient word -- so it takes the sealed fast tier. Bounded at 2.810e-5 dB, 1.83x the
+    // exact tier, by gate F1 in `miso-engine-math`.
     let floored = detected.max(level_floor);
-    let level = level_db(floored).max(level_min).min(level_max);
+    let level = fast_level_db(floored).max(level_min).min(level_max);
 
     // 5. the static curve, as the reduction it applies.
     let target = gain_delta_db(level, &coef.curve)
@@ -494,7 +498,11 @@ fn one_frame<L: Lane>(
     *gain_reduction_db = smoothed;
 
     // 7. level to amplitude.
-    let gain = gain_from_db(smoothed.add(coef.makeup));
+    //
+    // FAST-DB-CROSSING X2: the compressor's applied gain. Bounded at 7.431e-6 dB, 1.06x the
+    // exact tier, by gate F1. `fast_gain_from_db(+-0.0)` is exactly `1.0`, so the identity
+    // selects below remain true identities.
+    let gain = fast_gain_from_db(smoothed.add(coef.makeup));
 
     // 8. gain and mix, then the identities.
     //

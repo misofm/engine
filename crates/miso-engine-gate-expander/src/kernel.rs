@@ -30,7 +30,7 @@
 
 use miso_engine_effect_runtime::envelope::HysteresisState;
 use miso_engine_lane::{Lane, flush};
-use miso_engine_math::{exp2_lane, log2_lane};
+use miso_engine_math::fast_db::{fast_gain_from_db, fast_level_db};
 
 /// Smoothed parameters: threshold, ratio, range, hysteresis, in descriptor ID order.
 pub const RAMP_COUNT: usize = 4;
@@ -342,8 +342,11 @@ fn channel_step<L: Lane, const RAMPING: bool>(
             .add(L::splat(0.5).mul(partner_abs)),
         level,
     );
-    let level_db = log2_lane(level.max(L::splat(LEVEL_FLOOR)))
-        .mul(L::splat(DB_PER_OCTAVE))
+    // FAST-DB-CROSSING X3: the gate's detector level. A dynamics gain path; the reading feeds
+    // the hysteresis comparison and the expansion curve and is never pinned as a coefficient.
+    // The `DB_PER_OCTAVE` multiply moves inside the sealed tier, which spells the same constant
+    // (`0x40c0_a8c1`); the clamp order stays here, and stays `min` then `max`.
+    let level_db = fast_level_db(level.max(L::splat(LEVEL_FLOOR)))
         .min(L::splat(LEVEL_MAX_DB))
         .max(L::splat(LEVEL_MIN_DB));
 
@@ -383,7 +386,9 @@ fn channel_step<L: Lane, const RAMPING: bool>(
     let rate = L::select(target.gt(state.gain_db), coef.attack, coef.release);
     let gain_db = flush(rate.fma(target.sub(state.gain_db), state.gain_db));
     state.gain_db = gain_db;
-    let gain = exp2_lane(gain_db.mul(L::splat(OCTAVES_PER_DB)));
+    // FAST-DB-CROSSING X4: the gate's applied gain. The `OCTAVES_PER_DB` multiply moves inside
+    // the sealed tier, which spells the same constant (`0x3e2a_152d`).
+    let gain = fast_gain_from_db(gain_db);
     let identity = L::mask_or(gain_db.eq(zero), coef.bypass.gt(zero));
     L::select(identity, dry, dry.mul(gain))
 }

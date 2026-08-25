@@ -52,9 +52,7 @@ use miso_engine_effect_contract::{
     expected_prepared_metadata,
 };
 use miso_engine_effect_runtime::bank::{self, NonFiniteReport};
-use miso_engine_effect_runtime::dynamics::{
-    GainComputerCoef, gain_delta_db, gain_from_db, level_db,
-};
+use miso_engine_effect_runtime::dynamics::{GainComputerCoef, gain_delta_db};
 use miso_engine_effect_runtime::envelope::retention_coefficient;
 use miso_engine_effect_runtime::params::{ParameterSpec, normalize_zero, parameter_value_valid};
 use miso_engine_effect_runtime::ramp::LinearRamp;
@@ -63,6 +61,7 @@ use miso_engine_effect_runtime::state_payload::{
 };
 use miso_engine_lane::kernels::{SvfState, svf_step};
 use miso_engine_lane::{Lane, Simd4, Simd8, flush};
+use miso_engine_math::fast_db::{fast_gain_from_db, fast_level_db};
 
 pub mod corpus;
 mod shim;
@@ -879,7 +878,9 @@ fn band_amplitude<L: Lane>(
     coefficients: &BandCoef<L>,
     state: &mut L,
 ) -> L {
-    let level = level_db(detector.max(L::splat(DETECTOR_FLOOR)))
+    // FAST-DB-CROSSING X5: one band's detector level. Same law as the wideband compressor's X1,
+    // run twice per frame per channel because there are two bands.
+    let level = fast_level_db(detector.max(L::splat(DETECTOR_FLOOR)))
         .max(L::splat(-160.0))
         .min(L::splat(24.0));
     let curve = GainComputerCoef {
@@ -898,7 +899,8 @@ fn band_amplitude<L: Lane>(
         coefficients.release,
     ));
     *state = smoothed;
-    gain_from_db(smoothed.add(makeup))
+    // FAST-DB-CROSSING X6: one band's applied gain. Same law as the wideband compressor's X2.
+    fast_gain_from_db(smoothed.add(makeup))
 }
 
 /// One segment: `frames` frames over which no ramp arrives at its target.

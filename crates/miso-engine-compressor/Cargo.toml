@@ -12,7 +12,7 @@ name = "miso_engine_compressor"
 miso-engine-effect-contract.workspace = true
 miso-engine-effect-runtime.workspace = true
 miso-engine-lane.workspace = true
-miso-engine-math.workspace = true
+miso-engine-math = { workspace = true, features = ["lane"] }
 
 [dev-dependencies]
 # Issue #105 phase 2: the workspace's one audited global allocator (#104 phase B). It is what
