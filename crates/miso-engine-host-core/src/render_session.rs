@@ -74,7 +74,7 @@ impl StartedRenderSessionV1 {
     /// host can move it to a control thread and drop it there: the render thread frees nothing.
     #[expect(
         clippy::result_large_err,
-        reason = "the plan is the Err payload on purpose: an attestation failure hands it back so                   the host can drop it on a control thread, because the render thread frees nothing"
+        reason = "the plan is the Err payload on purpose: a refused attestation hands it back, so the host drops it on a control thread and the render thread frees nothing"
     )]
     pub fn start(
         plan: PreparedRenderPlan,
@@ -186,7 +186,7 @@ impl PreparedHost {
     /// thread's floating-point environment cannot be pinned.
     #[expect(
         clippy::result_large_err,
-        reason = "the plan is the Err payload on purpose: an attestation failure hands it back so                   the host can drop it on a control thread, because the render thread frees nothing"
+        reason = "the plan is the Err payload on purpose: a refused attestation hands it back, so the host drops it on a control thread and the render thread frees nothing"
     )]
     pub fn start_render_session(
         self,
