@@ -696,7 +696,11 @@ fn traffic<L: Lane, const W: usize>(instance: &mut Instance<L, W>, arm: Arm, blo
                     // Only the two thresholds move, which is what a console fader-style refresh
                     // looks like: most of the table is restated and a little of it is moving.
                     Arm::Moving if ramp == LOW_THRESHOLD || ramp == HIGH_THRESHOLD => {
-                        if block % 2 == 0 { held + 0.25 } else { held - 0.25 }
+                        if block.is_multiple_of(2) {
+                            held + 0.25
+                        } else {
+                            held - 0.25
+                        }
                     }
                     _ => held,
                 };
