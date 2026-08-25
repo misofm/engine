@@ -2,10 +2,16 @@ name: browser qualification
 
 on:
   push:
+    branches:
+      - main
   pull_request:
     branches:
       - main
   workflow_dispatch:
+
+concurrency:
+  group: browser-qualification-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   RUSTUP_TOOLCHAIN: 1.97.1
