@@ -26,6 +26,10 @@ lane_tests='^crates/miso-engine-lane/tests/'
 # render path cannot reach it, because nothing in `crates/` or `hosts/` depends on it.
 oracle_crate='^crates/miso-engine-dsp-reference/'
 lane_softfma='^crates/miso-engine-lane/src/softfma\.rs:'
+# Issue #146: the canonical floating-point environment. `core::arch::asm!` is the only way to reach
+# AArch64's FPCR -- there is no stable intrinsic for it -- so this second lane file is named here
+# for the same reason `softfma.rs` is, and for nothing else.
+lane_fpenv='^crates/miso-engine-lane/src/fpenv\.rs:'
 # #84 phase A deleted `crates/miso-engine-core/src/arch/` and its runtime detection, so the two
 # temporary exemptions that stood here are gone: there is no legacy kernel file and no second
 # backend enum left to exempt.
@@ -54,10 +58,10 @@ relaxed_matches="$({
 
 architecture_matches="$({
     rg -n '(core|std)::arch::' crates hosts tools --glob '*.rs' || true
-} | rg -v "$lane_softfma" || true)"
+} | rg -v "$lane_softfma|$lane_fpenv" || true)"
 [[ -z "$architecture_matches" ]] || {
     printf '%s\n' "$architecture_matches" >&2
-    fail "raw architecture intrinsics belong to crates/miso-engine-lane/src/softfma.rs"
+    fail "raw architecture intrinsics belong to crates/miso-engine-lane/src/{softfma,fpenv}.rs"
 }
 
 # Runtime SIMD dispatch is gone (D4, revision 4): the ISA is pinned at compile time and attested
