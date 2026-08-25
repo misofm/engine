@@ -223,3 +223,75 @@ the same session. Host: `x86_64` (Simd8 bank width), debug profile.
 | 140-14 | `ConsoleEffectBankStage::process` packs every lane at `packed[..staged]` instead of at that lane's own running offset | `rack/src/lib.rs` | `effect_console::*` | RED (`two_lanes_of_one_bank_take_two_different_commands`: each lane carries exactly the command addressed to it) |
 | 140-15 | the bank builder never takes a member's control channel (`.filter(\|_\| false)` after `effect_controls.remove`), so a banked lane silently keeps the console-free stage | `graph/src/runtime.rs` | `effect_console::a_banked_effect_applies_each_lanes_own_command_and_no_others` | RED (`the commanded lane moved`) |
 
+
+---
+
+## Issue #146 — the canonical floating-point environment at the render entries
+
+The gates are `crates/miso-engine-host-core/tests/fp_environment.rs` (the started-session entry) and
+`crates/miso-engine-capi/src/runtime/tests.rs::fp_environment` (the C ABI entry). Both render the
+same subnormal fade tail three ways -- caller clear through the entry, caller FTZ+DAZ through the
+entry, caller FTZ+DAZ *behind* the entry -- so the claim "the guard normalises" is asserted next to
+the control arm that proves the caller's FTZ moves this fixture at all.
+
+Every mutation below was applied, run, recorded and reverted on the delivery host
+(x86-64-v3, AMD Ryzen 7 9700X, rustc 1.97.1).
+
+### M-146-1 — the guard is removed from the host facade's render entry
+
+* Mutation: delete `let _fp_env = CanonicalFpEnv::enter();` from
+  `StartedRenderSessionV1::render_planar` in `src/render_session.rs`.
+* Command: `cargo test -p miso-engine-host-core --test fp_environment`
+* Result: **RED**
+
+  ```
+  assertion `left == right` failed: a caller's FTZ+DAZ must not reach a guarded render:
+    2048 of 4096 words moved
+  test result: FAILED. 2 passed; 1 failed
+  ```
+
+  Half of the rendered words move, because with DAZ set the whole subnormal input block reads as
+  zero.
+
+### M-146-2 — the guard is removed from the C ABI render entry
+
+* Mutation: delete `let _fp_env = CanonicalFpEnv::enter();` from
+  `miso_engine_v2_render_f32_planar` in `crates/miso-engine-capi/src/ffi.rs`.
+* Command: `cargo test -p miso-engine-capi --lib fp_environment`
+* Result: **RED**, and red at the *earliest* possible point: the plan's first block fails the
+  session-start re-attestation and the entry returns `RESULT_RENDER_REJECTED` (8) with
+  `render.fp_environment.invalid`, before any audio is produced.
+
+  ```
+  assertion `left == right` failed
+    left: 8
+    right: 0
+  test result: FAILED. 1 passed; 1 failed
+  ```
+
+### M-146-2b — the guard *and* the re-attestation are removed together
+
+Recorded because M-146-2 short-circuits on the attestation and therefore does not, by itself, show
+that the digest comparison discriminates.
+
+* Mutation: M-146-2, plus replace the first-block attestation condition with `if false`.
+* Command: `cargo test -p miso-engine-capi --lib fp_environment`
+* Result: **RED** on the bytes:
+
+  ```
+  assertion `left == right` failed: a caller's FTZ+DAZ reached a render through the C ABI entry
+  test result: FAILED. 1 passed; 1 failed
+  ```
+
+### M-146-3 — the restore is removed from `Drop for CanonicalFpEnv`
+
+* Mutation: empty the body of `impl Drop for CanonicalFpEnv` in
+  `crates/miso-engine-lane/src/fpenv.rs`.
+* Commands and results: **RED** in all three crates --
+  `-p miso-engine-lane --test fp_env` 4 of 8 failed,
+  `-p miso-engine-capi --lib fp_environment` 2 of 2 failed
+  (`a refused descriptor leaked MXCSR`),
+  `-p miso-engine-host-core --test fp_environment` 3 of 3 failed.
+
+  This is the E2 mutation: it is red on the error path (`a refused descriptor leaked MXCSR`) as
+  well as the success path, which is the half a success-only gate would miss.

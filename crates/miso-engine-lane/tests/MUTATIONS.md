@@ -33,6 +33,8 @@ cargo test --locked -p miso-engine-lane --test <test binary>
 | 13 | `history_push` writes only the low copy, dropping the mirror at `row + 32` | `src/kernels/halfband.rs` | `halfband` | RED |
 | 14 | two even taps are swapped (`h[14]` and `h[16]`), breaking the half-band symmetry | `src/kernels/halfband.rs` | `halfband` | RED |
 | 15 | `HALFBAND63_CENTER_SPLIT` moves from 15 to 16, putting the centre tap one position late | `src/kernels/halfband.rs` | `halfband` | RED |
+| 16 | `Drop for CanonicalFpEnv` stops writing `self.saved` back | `src/fpenv.rs` | `fp_env` | RED (4 of 8) |
+| 17 | `CanonicalFpEnv::enter` installs the caller's word instead of the canonical one | `src/fpenv.rs` | `fp_env` | RED (3 of 8) |
 
 ## Recorded failures
 
@@ -189,3 +191,38 @@ silently reassociate the decimator sum.
 The bit-identity of these kernels against the 63-tap graph they replace is *not* proved here: that
 graph lives in `miso-engine-soft-clip`, and the proof is its `tests/polyphase_identity.rs`
 (recorded in that crate's `tests/MUTATIONS.md`).
+
+## Issue #146 — the canonical floating-point environment
+
+Rows 16 and 17 are the guard's own two failure modes, and they fail different halves of the test
+binary, which is why both are recorded rather than one standing for the other.
+
+* **Row 16 (no restore).** `a_hostile_caller_word_is_normalised_and_returned_bit_exactly`,
+  `the_caller_word_survives_an_unwind_through_the_guard`,
+  `attestation_passes_from_a_hostile_caller_word` and
+  `sticky_status_flags_do_not_fail_the_attestation_but_a_control_bit_does` all fail:
+
+  ```
+  assertion `left == right` failed: every bit of the caller's word must come back, status flags included
+  assertion `left == right` failed: the guard must restore the caller's word while unwinding
+  test result: FAILED. 4 passed; 4 failed
+  ```
+
+  The same mutation is red at both hosts as well:
+  `cargo test -p miso-engine-capi --lib fp_environment` fails 2 of 2 with
+  `a refused descriptor leaked MXCSR`, and
+  `cargo test -p miso-engine-host-core --test fp_environment` fails 3 of 3.
+
+* **Row 17 (canonical word not installed).** The guard becomes a no-op transition:
+
+  ```
+  assertion `left == right` failed: the guard must install 0x1F80: masked, round-to-nearest-even, no FTZ, no DAZ
+  assertion `left == right` failed: inside the guard the same product must be the exact IEEE subnormal `2^-130`
+  test result: FAILED. 5 passed; 3 failed
+  ```
+
+  and the full-corpus gate goes red with the #144 divergence, unchanged:
+
+  ```
+  issue #146: a render entry's canonical environment did not normalise 70 of 331 comparisons under a caller's FTZ+DAZ
+  ```
