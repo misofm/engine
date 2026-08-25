@@ -12,6 +12,8 @@ mod builtins;
 #[cfg(not(target_arch = "wasm32"))]
 mod conformance;
 #[cfg(not(target_arch = "wasm32"))]
+mod console;
+#[cfg(not(target_arch = "wasm32"))]
 mod effect_contract;
 #[cfg(not(target_arch = "wasm32"))]
 mod effect_interchange;
@@ -32,6 +34,7 @@ const SUBJECTS: &[&str] = &[
     "bootstrap",
     "builtins",
     "conformance",
+    "console",
     "effect-contract",
     "effect-interchange",
     "graph",
@@ -47,6 +50,7 @@ fn run_subject(subject: &str) {
         "bootstrap" => bootstrap::main(),
         "builtins" => builtins::main(),
         "conformance" => conformance::main(),
+        "console" => console::main(),
         "effect-contract" => effect_contract::main(),
         "effect-interchange" => effect_interchange::main(),
         "graph" => graph::main(),
