@@ -1,8 +1,8 @@
 //! Deterministic issue-003 realtime audit and bounded descriptive benchmark.
 
+use crate::record::{json_f64_array, json_integer_array, metadata};
 use core::num::NonZeroUsize;
 use miso_engine_bench_support::alloc as bench_alloc;
-use miso_engine_bench_support::json::escape as json_escape;
 use miso_engine_core::realtime::audit::{self, AuditSnapshot, ForbiddenOperation};
 use miso_engine_core::realtime::{
     PlanExchangeConfig, PlanarBufferMut, PrepareRenderPlan, PreparedRenderPlan, RenderEnvelope,
@@ -201,7 +201,7 @@ pub(crate) fn main() {
                 metadata("MISO_ENGINE_BENCH_RUNTIME_OR_BROWSER"),
                 blocks,
                 rounds,
-                json_u128_array(durations.iter().map(Duration::as_nanos)),
+                json_integer_array(durations.iter().map(Duration::as_nanos)),
                 json_f64_array(ns_per_block.iter().copied()),
             );
         }
@@ -258,33 +258,4 @@ fn parse_operation(value: &str) -> ForbiddenOperation {
         "syscall" => ForbiddenOperation::Syscall,
         _ => panic!("unknown probe operation: {value}"),
     }
-}
-
-fn metadata(name: &str) -> String {
-    miso_engine_bench_support::metadata::Metadata::gather()
-        .var(name)
-        .ok()
-        .filter(|value| !value.is_empty())
-        .map(|value| json_escape(&value))
-        .unwrap_or_else(|| "unknown".to_owned())
-}
-
-fn json_u128_array(values: impl Iterator<Item = u128>) -> String {
-    format!(
-        "[{}]",
-        values
-            .map(|value| value.to_string())
-            .collect::<Vec<_>>()
-            .join(",")
-    )
-}
-
-fn json_f64_array(values: impl Iterator<Item = f64>) -> String {
-    format!(
-        "[{}]",
-        values
-            .map(|value| format!("{value:.6}"))
-            .collect::<Vec<_>>()
-            .join(",")
-    )
 }

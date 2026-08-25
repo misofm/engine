@@ -61,6 +61,7 @@ compile_error!(
 
 mod backend;
 mod bits;
+pub mod fpenv;
 pub mod kernels;
 mod scalar;
 mod simd4;
@@ -69,6 +70,7 @@ pub mod softfma;
 mod wide_impl;
 
 pub use backend::{Backend, HostAttestation, attest_host};
+pub use fpenv::{CanonicalFpEnv, FpEnvironmentRejection, attest_fp_environment};
 
 /// The four-lane production width: NEON on AArch64, `v128` on wasm with `simd128`.
 ///
@@ -85,9 +87,17 @@ pub use wide::f32x8 as Simd8;
 /// Magnitude below which a recursive state word is flushed to `+0.0` by [`flush`].
 ///
 /// `1.0e-20` is about `2^-66`; `f32` subnormals start at `2^-126`, so the flush band strictly
-/// contains the band hardware FTZ/DAZ acts on. Flushing is therefore the only denormal mechanism
-/// that matters, and hardware FTZ is provably inert and never load-bearing — which is what makes
-/// the same bits come out of an AudioWorklet (Chrome forces FTZ) and a native render (D7).
+/// contains the band hardware FTZ/DAZ acts on. Every recursive state word this law is applied to is
+/// therefore FTZ-inert, which gate G6 (`tests/g6_ftz_inert.rs`) proves against a deliberately
+/// unflushed control arm.
+///
+/// It is the *state* law, and issue #144's full-corpus reproducer showed it is not the whole story:
+/// 69-70 of the 331 cross-target corpus rows still moved under hardware FTZ+DAZ, because a
+/// transient intra-block denormal in a feed-forward lane, a scalar math kernel or an effect chain
+/// is never a flushed state word. Denormal correctness for the whole render is owned by
+/// [`fpenv::CanonicalFpEnv`], which pins the floating-point environment at every native render
+/// entry (issue #146); the D7 flush remains the law that keeps recursive state from *reaching* the
+/// subnormal range in the first place.
 pub const FLUSH_EPS: f32 = 1.0e-20;
 
 /// Flushes lanes whose magnitude is below [`FLUSH_EPS`] to exactly `+0.0`.

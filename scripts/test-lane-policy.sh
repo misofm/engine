@@ -26,6 +26,14 @@ create_valid_fixture() {
         'use core::arch::x86_64::_mm_getcsr;' \
         'pub fn fma_f32_via_f64(a: f32, b: f32, c: f32) -> f32 { a * b + c }' \
         >"$root/crates/miso-engine-lane/src/softfma.rs"
+    # Issue #146: the second, and only other, lane file allowed to name a raw architecture
+    # intrinsic. AArch64's FPCR has no stable `core::arch` intrinsic, so the canonical render-entry
+    # environment reaches it through `core::arch::asm!`.
+    printf '%s\n' \
+        '#![allow(unsafe_code)]' \
+        'use core::arch::asm;' \
+        'pub fn canonical() {}' \
+        >"$root/crates/miso-engine-lane/src/fpenv.rs"
     printf '%s\n' \
         'impl Lane for f32 {' \
         '    fn fma(self, b: Self, c: Self) -> Self {' \
@@ -104,6 +112,9 @@ expect_failure arch-outside-softfma \
     'printf "%s\n" "use core::arch::x86_64::_mm256_add_ps;" >>"$root/tools/miso-engine-audit/src/realtime.rs"'
 expect_failure arch-in-second-lane-file \
     'printf "%s\n" "use core::arch::x86_64::_mm256_add_ps;" >>"$root/crates/miso-engine-lane/src/scalar.rs"'
+# The #146 exemption is the file `fpenv.rs`, not the lane crate: a third file does not inherit it.
+expect_failure arch-in-a-third-lane-file \
+    'printf "%s\n" "use core::arch::asm;" >"$root/crates/miso-engine-lane/src/fpenv_extra.rs"'
 # #84 phase A: the legacy `core/arch` exemption is gone entirely, so an intrinsic there -- the
 # very file the exemption used to name -- is now a failure like any other.
 expect_failure deleted-core-arch-has-no-exemption \

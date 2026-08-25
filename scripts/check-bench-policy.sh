@@ -48,7 +48,7 @@ sole_owner 'the counted SHA-256 sink has more than one implementation' \
 #
 # The list is the conversion ratchet. It grows as the remaining benchmark subjects move onto the
 # shared harness; it never shrinks.
-timed_subjects=(tools/miso-engine-bench/src/rack.rs)
+timed_subjects=(tools/miso-engine-bench/src/rack.rs tools/miso-engine-audit/src/fp_env.rs)
 for subject in "${timed_subjects[@]}"; do
     [[ -f "$subject" ]] || fail "converted subject is missing: $subject"
     grep -q 'timing::timed' "$subject" ||

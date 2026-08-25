@@ -1,7 +1,7 @@
 //! Native bootstrap host shell.
 //!
-//! Platform audio I/O is issue 023; this binary only attests the CPU and prints the target smoke
-//! values. The rules a real callback must honour are not restated here: they are the
+//! Platform audio I/O is issue 023; this binary only attests the CPU and the floating-point
+//! environment, then prints the target smoke values. The rules a real callback must honour are not restated here: they are the
 //! `# Host callback contract (V1)` section of `miso-engine-host-core`, which is normative for every
 //! embedding. A second transcription of them is exactly the defect #106 F1 removed from this tree.
 
@@ -14,6 +14,15 @@ fn main() -> ExitCode {
     // silent scalar fallback.
     if let Err(attestation) = miso_engine_lane::attest_host() {
         eprintln!("miso-engine-host-native refusing to start: {attestation}");
+        return ExitCode::FAILURE;
+    }
+    // Issue #146: this process can pin the canonical floating-point environment and hand the
+    // caller's word back bit-exactly. It is the process-wide smoke check, not the load-bearing one
+    // -- a control word belongs to a thread, so the render thread re-attests for itself when
+    // `miso_engine_host_core::StartedRenderSessionV1::start` runs there. Refusing here means the
+    // build cannot pin at all, which no real audio callback would survive either.
+    if let Err(rejection) = miso_engine_lane::attest_fp_environment() {
+        eprintln!("miso-engine-host-native refusing to start: {rejection}");
         return ExitCode::FAILURE;
     }
     println!("{:?}", miso_engine_target_smoke::target_smoke());

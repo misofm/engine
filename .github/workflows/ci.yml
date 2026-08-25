@@ -75,7 +75,7 @@ jobs:
         run: |
           bash scripts/check-lane-policy.sh
           bash scripts/test-lane-policy.sh
-      - name: Lane gates G1-G4, G6 and P1 on the AVX2+FMA runner
+      - name: Lane gates G1-G4, G6, P1 and the issue-146 FP-environment guard on the AVX2+FMA runner
         run: cargo test --locked --release -p miso-engine-lane
       - name: Deterministic math policy and mutation tests
         run: |
@@ -275,6 +275,13 @@ jobs:
       # A mismatch is never fixed by re-pinning: it means a target stopped agreeing with the oracle.
       - name: Native and WebAssembly cross-target digest gates
         run: bash scripts/run-wasm-gates.sh
+      # Issue #146 E1. G6 over the full corpus is a standing gate, not a reproducer: with the
+      # caller's MXCSR carrying FTZ+DAZ, a render that goes through an entry's canonical
+      # floating-point environment lands on the frozen pins, and the unguarded control arm still
+      # shows the 70 diverging rows #144 measured. Run in release, because that is the profile the
+      # divergence was measured in and the one a host ships.
+      - name: Gate G6 over the full corpus in release
+        run: cargo test --locked --release -p miso-engine-wasm-gates
       - name: Upload cross-target gate evidence
         uses: actions/upload-artifact@v4
         with:
@@ -383,6 +390,14 @@ jobs:
           test -f target/session-benchmark.jsonl && test -s target/session-benchmark.jsonl
       - name: Run native effect benchmark once with two internal rounds
         run: bash scripts/run-effect-contract-benchmark.sh
+      # Issue #146 E5: what pinning the floating-point environment costs a 128-frame block.
+      # Descriptive only -- the record carries no threshold and nothing gates on it.
+      - name: Run one descriptive two-round FP-environment guard benchmark
+        run: |
+          set -o pipefail
+          mkdir -p target
+          bash scripts/run-fp-environment-benchmark.sh 2 1000000 | tee target/fp-environment-benchmark.jsonl
+          test -s target/fp-environment-benchmark.jsonl
       - name: Upload benchmark evidence
         uses: actions/upload-artifact@v4
         with:
@@ -391,4 +406,5 @@ jobs:
             target/conformance-benchmark.jsonl
             target/realtime-benchmark.jsonl
             target/session-benchmark.jsonl
+            target/fp-environment-benchmark.jsonl
             target/issue11/effect-contract-benchmark.jsonl

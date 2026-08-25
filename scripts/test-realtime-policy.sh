@@ -50,6 +50,11 @@ create_fixture() {
         '#![allow(unsafe_code)]' \
         'unsafe fn read_mxcsr() {}' \
         >"$root/crates/miso-engine-lane/src/softfma.rs"
+    # Issue #146: the AArch64 FPCR pair of the canonical render-entry environment.
+    printf '%s\n' \
+        '#![allow(unsafe_code)]' \
+        'unsafe fn write_fpcr() {}' \
+        >"$root/crates/miso-engine-lane/src/fpenv.rs"
     printf '%s\n' \
         '#![allow(unsafe_code)]' \
         'unsafe fn capi_boundary() {}' \
@@ -175,5 +180,7 @@ expect_failure unsafe-outside-disjoint-arena \
     'printf "%s\n" "unsafe fn bad() {}" >"$root/crates/miso-engine-core/src/realtime/disjoint_extra.rs"'
 expect_failure unsafe-outside-lane-softfma \
     'printf "%s\n" "unsafe fn bad() {}" >"$root/crates/miso-engine-lane/src/kernels.rs"'
+expect_failure unsafe-outside-lane-fpenv \
+    'printf "%s\n" "unsafe fn bad() {}" >"$root/crates/miso-engine-lane/src/fpenv_extra.rs"'
 
 printf 'realtime policy mutation tests: ok\n'

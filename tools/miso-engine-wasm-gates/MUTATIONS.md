@@ -1,13 +1,42 @@
 # Red mutations for gate G5
 
-## Full-corpus FTZ/DAZ discrimination (issue #144 item 1)
+## Full-corpus FTZ/DAZ (issue #144 item 1, closed by issue #146)
 
-The intended red mutation is lowering `miso_engine_lane::FLUSH_EPS` from `1.0e-20` to `1.0e-40`,
-which should make subnormal recursive-state cases diverge between the clear and FTZ+DAZ runs.
-It cannot yet serve as a discriminating red mutation: the exact unmodified full corpus already has
-70 divergent rows, including raw math and feed-forward subnormal-input cases outside D7's
-recursive-state law. The test is retained ignored with that explicit issue-144 blocker rather than
-excluding those rows or claiming a mutation against an already-red baseline.
+`tests/g6_full_corpus_ftz.rs` landed with #144 as an ignored reproducer. It asserted that hardware
+FTZ+DAZ is inert over the whole corpus, and it was not: the unmodified corpus had **70 divergent
+rows of 331**, including raw math and feed-forward subnormal-input cases outside D7's
+recursive-state law. No mutation can discriminate against an already-red baseline, so the file was
+carried ignored with that blocker written down rather than by excluding rows or narrowing the claim.
+
+Issue #146 fixed the defect at the render boundary -- every native render entry pins the canonical
+floating-point environment and restores the caller's exact control word -- and the file is now a
+standing gate for the true claim, with the old reproducer kept as its control arm:
+
+| arm | caller word | entry guard | asserts |
+|---|---|---|---|
+| canonical | FTZ/DAZ clear | none | matches the pins |
+| guarded | FTZ+DAZ set | entered | matches the pins |
+| control | FTZ+DAZ set | none | **differs** from the pins, in at least `CONTROL_ARM_FLOOR` rows |
+
+**Red mutation, applied and reverted on the delivery host.** Delete the `CanonicalFpEnv::enter()`
+line from `guarded_report`, which is exactly "remove the guard at one render entry":
+
+```
+issue #146: a render entry's canonical environment did not normalise 70 of 331 comparisons under a
+caller's FTZ+DAZ:
+case 106 (effect/soft_clip/subnormal) at simd4: expected 275722f6… got 4fe7b59a…
+case 116 (effect/gate_expander/dual_mono/subnormal) at scalar: expected 521e86ea… got de2f2560…
+case 120 (builtins/input_stage/subnormal) at scalar: expected fedb98cc… got d6df8037…
+case 128 (effect/true_peak_limiter/dual_mono/subnormal_release_flush) at scalar: expected 546b4a87… got af2731df…
+test result: FAILED. 1 passed; 1 failed
+```
+
+The count is the #144 figure to the row: 70 of 331. The same 70 rows are what the control arm
+reports every run, so the gate cannot pass by failing to set FTZ.
+
+The `FLUSH_EPS` mutation #144 wanted is still not this file's discriminator, and now for a
+different reason: the D7 flush law is the *state* law and gate `g6_ftz_inert` in
+`crates/miso-engine-lane` owns its red mutation. This file's subject is the boundary.
 
 Every mutation below was applied, run, recorded and reverted on the delivery host
 (x86-64-v3, rustc 1.97.1, wasmtime 47.0.3). Master plan #83 principle 6: a gate lands together

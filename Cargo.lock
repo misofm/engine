@@ -892,6 +892,7 @@ dependencies = [
  "miso-engine-effect-contract",
  "miso-engine-graph",
  "miso-engine-graph-compiler",
+ "miso-engine-lane",
  "miso-engine-session",
  "miso-engine-source",
 ]

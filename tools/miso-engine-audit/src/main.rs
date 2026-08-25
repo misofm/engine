@@ -11,11 +11,13 @@ mod compressor;
 mod delay;
 mod fixture_builtins;
 mod fixture_builtins_listening;
+mod fp_env;
 mod gate_expander;
 mod graph;
 mod parametric_eq;
 mod protocol;
 mod realtime;
+mod record;
 mod scheduler;
 #[allow(dead_code, unreachable_pub)]
 mod scheduler_fixture;
@@ -35,6 +37,7 @@ const SUBJECTS: &[&str] = &[
     "fixture-builtins",
     "fixture-builtins-listening",
     "fixture-source",
+    "fp-env",
     "gate-expander",
     "graph",
     "parametric-eq",
@@ -57,6 +60,7 @@ fn run_subject(subject: &str) {
         "fixture-builtins" => fixture_builtins::main(),
         "fixture-builtins-listening" => fixture_builtins_listening::main(),
         "fixture-source" => source_fixture::main(),
+        "fp-env" => fp_env::main(),
         "gate-expander" => gate_expander::main(),
         "graph" => graph::main(),
         "parametric-eq" => parametric_eq::main(),

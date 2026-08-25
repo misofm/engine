@@ -47,6 +47,8 @@
 //! | call | thread | rule |
 //! |---|---|---|
 //! | [`prepare_host_session`] / [`prepare_host_runtime`] | control | allocates, parses and compiles; never inside an audio callback |
+//! | [`PreparedHost::start_render_session`] / [`StartedRenderSessionV1::start`] | render, once | attests this thread's floating-point environment before the first block and returns the plan on refusal |
+//! | [`StartedRenderSessionV1::render_contiguous`] | render, exclusively | the guarded render entry: pins the canonical floating-point environment for the block and restores the caller's exact control word |
 //! | [`SourceControlSet::submit`] / [`SourceControlSet::seek`] | control, one thread at a time | copies once into the ring, returns typed backpressure, never blocks and never allocates |
 //! | `PreparedRenderPlan::render(io, RenderTime { absolute_sample })` | render, exclusively | exactly once per quantum; `absolute_sample` must equal the previous report's `next_absolute_sample`, and `0` on the first call; no other call touches the plan from any other thread |
 //! | `drop(PreparedHost)` / `PlanRetirer::try_reclaim` | control | only after the render thread has quiesced; never from the callback |
@@ -70,9 +72,25 @@
 //! * `render` performs no allocation, no lock, no syscall, no logging and no structural mutation.
 //!   `scripts/check-realtime-policy.sh` enforces the source-level half of that;
 //!   `tools/miso-engine-audit` and the browser call-graph gate enforce the binary half.
+//! * **A native render entry borrows the caller's floating-point environment; it never adopts it**
+//!   (issue #146). Every DAW audio callback arrives with hardware FTZ and DAZ set, and issue #144
+//!   measured what that does: 69-70 of the 331 cross-target corpus comparisons render off-pin,
+//!   because a transient intra-block denormal is not a recursive state word the master-plan D7
+//!   flush law can reach. So the entry saves the caller's control word, installs the canonical one,
+//!   renders, and restores the caller's exact word -- on the success path, on every rejection path
+//!   and while unwinding. A host does not have to configure its thread, and gets its thread back
+//!   unchanged. [`StartedRenderSessionV1`] is that entry for an embedding host;
+//!   `miso_engine_v2_render_f32_planar` is it for the C ABI. Browser Wasm needs neither: the core
+//!   specification fixes round-to-nearest-even and full subnormal arithmetic, so the guard is a
+//!   zero-sized value there and the shipped artifact is unchanged.
+//! * **A started session is neither `Send` nor `Sync`.** The attestation is a statement about one
+//!   thread; a handle that could move would let a host launder it onto a thread that was never
+//!   attested. [`PreparedHost`] stays `Send`, because moving *preparation* to the render thread is
+//!   the supported hand-off.
 
 pub mod diagnostics;
 pub mod prepare;
+pub mod render_session;
 pub mod source;
 
 pub use diagnostics::{
@@ -84,6 +102,7 @@ pub use prepare::{
     parse_host_session, prepare_host_runtime, prepare_host_runtime_with_console,
     prepare_host_session, prepare_host_session_with_console,
 };
+pub use render_session::StartedRenderSessionV1;
 pub use source::{
     SourceControlError, SourceControlSet, SourceSubmission, control_table_bytes,
     source_id_arena_bytes,
