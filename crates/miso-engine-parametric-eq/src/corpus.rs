@@ -48,10 +48,10 @@ pub const CASE_NAMES: [&str; CASE_COUNT] = [
 ];
 
 /// The sample rate every case designs at.
-const CORPUS_RATE: SampleRateHz = SampleRateHz(48_000);
+pub(crate) const CORPUS_RATE: SampleRateHz = SampleRateHz(48_000);
 
 /// The four-band configuration of one track, spread across the frozen parameter domain.
-fn bands(track: usize) -> [BandTarget; EQ_SECTION_COUNT_V1] {
+pub(crate) fn bands(track: usize) -> [BandTarget; EQ_SECTION_COUNT_V1] {
     const KINDS: [EqBandKindV1; EQ_SECTION_COUNT_V1] = [
         EqBandKindV1::Bell,
         EqBandKindV1::LowShelf,
@@ -104,7 +104,7 @@ impl Rng {
 }
 
 /// Fills one track's input signal.
-fn fill(case: usize, track: usize, lane: &mut [f32; FRAMES]) {
+pub(crate) fn fill(case: usize, track: usize, lane: &mut [f32; FRAMES]) {
     let mut random = Rng::new(0xA5A5_5A5A_1234_0001 ^ (track as u64).wrapping_mul(0x9E37_79B9));
     for (frame, sample) in lane.iter_mut().enumerate() {
         *sample = if case == 2 {

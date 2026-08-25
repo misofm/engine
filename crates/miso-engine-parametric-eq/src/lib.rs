@@ -50,7 +50,9 @@ use miso_engine_effect_runtime::params::{
 };
 use miso_engine_effect_runtime::ramp::LinearRamp;
 use miso_engine_effect_runtime::state_payload as payload;
-use miso_engine_lane::kernels::{SvfCoef, SvfCoefStep, SvfState, svf_block, svf_block_ramped};
+use miso_engine_lane::kernels::{
+    SvfCoef, SvfCoefStep, SvfState, svf_block, svf_block_ramped, svf_cascade_interleaved,
+};
 use miso_engine_lane::{Backend, Lane, Simd4, Simd8};
 
 /// Fixed cascade length in V1.
@@ -797,6 +799,14 @@ impl<L: Lane, const W: usize> Channel<L, W> {
     /// is bit-identical because a zero increment is bit-preserving on every word -- exactly the
     /// property `design_svf_v1` normalises `-0.0` away to guarantee, and the same property that
     /// makes an idle lane of a ramping bank identical to the same lane of a settled one.
+    /// `#[inline(never)]`: this is coefficient *design*, not render arithmetic. It runs only when
+    /// an admitted automation span retargets a band, it is per lane and scalar by nature (six
+    /// words, one subtract and one multiply each), and the shipped wasm artifact is gated on the
+    /// EQ's render kernel carrying no scalar arithmetic budget it does not need
+    /// (`check-web-audioworklet.sh`, `KERNEL_ROSTER`). Before #163 phase 3 the inliner kept it out
+    /// of `process_bank` on its own; phase 3 made that function small enough that it stopped, so
+    /// the shape is pinned here rather than left to a heuristic.
+    #[inline(never)]
     fn start_ramp(&mut self, section: usize, track: usize, words: EqSvfWordsV1) {
         if self.stationary_at(section, track, words) {
             self.settle(section, track, words);
@@ -862,6 +872,14 @@ impl<L: Lane, const W: usize> Channel<L, W> {
     }
 
     /// Runs the four sections over one block in place.
+    ///
+    /// `#[inline(always)]`, and [`process_section`](Self::process_section) with it, so that the
+    /// whole render path of a bank stays inside one wasm function. `check-web-audioworklet.sh`
+    /// asserts that each shipped effect has **exactly one** arithmetic-carrying kernel in the
+    /// artifact -- that is how a de-vectorisation is caught. #163 phase 3 made `process_bank`
+    /// small enough that the inliner began outlining this body into a second one, and a second
+    /// kernel reads to that gate as a kernel that moved, not as the ramp fallback it is.
+    #[inline(always)]
     fn process_block(&mut self, io: &mut [f32], frames: usize) {
         for section in 0..EQ_SECTION_COUNT_V1 {
             self.process_section(section, io, frames);
@@ -873,6 +891,7 @@ impl<L: Lane, const W: usize> Channel<L, W> {
     /// The block is cut at every distinct ramp end, so within a segment every ramping lane steps on
     /// every frame and every settled lane has a zero increment. The cut is control-plane work done
     /// once per section per block; the frames themselves never branch.
+    #[inline(always)]
     fn process_section(&mut self, section: usize, io: &mut [f32], frames: usize) {
         let mut position = 0;
         while position < frames {
@@ -958,6 +977,82 @@ impl<L: Lane, const W: usize> Channel<L, W> {
             for track in 0..W {
                 self.snap(section, track);
             }
+        }
+    }
+}
+
+/// Runs both channels' four-section cascades over one block.
+///
+/// Issue #163 phase 3. `stationary` means no lane of either channel has a ramp in flight, so
+/// every section would run [`svf_block`] with fixed coefficients over the whole block --
+/// exactly `EQ_SECTION_COUNT_V1 * 2` serial passes, each one a recurrence whose next frame
+/// cannot start until this one's integrators are written. That shape is latency-bound: it
+/// leaves the vector units idle for most of every frame, and it is why the EQ took the same
+/// wall time at `Simd4` as at `Simd8`.
+///
+/// The interleaved form runs the two channels in one frame loop, [`Lane::SVF_CASCADE_DEPTH`]
+/// sections deep, so several independent recurrences are always in flight. It is the *same*
+/// operation order per chain -- see [`svf_cascade_interleaved`] -- so this is a schedule
+/// change, not a numeric one, and the fixture pins are untouched.
+///
+/// A ramping block falls back to the per-section path, which owns the block-splitting rule
+/// that a moving coefficient needs. Ramps run for at most a smoothing window after a
+/// parameter change; a console rendering audio is stationary on essentially every block.
+#[inline(always)]
+fn process_channels<L: Lane, const W: usize>(
+    channels: (&mut Channel<L, W>, &mut Channel<L, W>),
+    left: &mut [f32],
+    right: &mut [f32],
+    frames: usize,
+    stationary: bool,
+) {
+    if !stationary {
+        channels.0.process_block(left, frames);
+        channels.1.process_block(right, frames);
+        return;
+    }
+    // `SVF_CASCADE_DEPTH` is a constant, so exactly one arm survives monomorphisation and the
+    // match costs nothing. Every arm is bit-identical; a depth that did not divide the cascade
+    // would silently drop sections, so only the divisors of `EQ_SECTION_COUNT_V1` are reached
+    // and anything else falls back to the always-valid depth of one.
+    match L::SVF_CASCADE_DEPTH {
+        4 => interleave::<L, W, 4>(channels, left, right, frames),
+        2 => interleave::<L, W, 2>(channels, left, right, frames),
+        _ => interleave::<L, W, 1>(channels, left, right, frames),
+    }
+}
+
+/// One stationary block, both channels, `DEPTH` cascade sections fused per pass.
+#[inline(always)]
+fn interleave<L: Lane, const W: usize, const DEPTH: usize>(
+    channels: (&mut Channel<L, W>, &mut Channel<L, W>),
+    left: &mut [f32],
+    right: &mut [f32],
+    frames: usize,
+) {
+    debug_assert_eq!(EQ_SECTION_COUNT_V1 % DEPTH, 0);
+    for pass in 0..EQ_SECTION_COUNT_V1 / DEPTH {
+        let base = pass * DEPTH;
+        let coefficients: [[SvfCoef<L>; DEPTH]; 2] = [
+            core::array::from_fn(|k| channels.0.sections[base + k].coef),
+            core::array::from_fn(|k| channels.1.sections[base + k].coef),
+        ];
+        let mut state: [[SvfState<L>; DEPTH]; 2] = [
+            core::array::from_fn(|k| channels.0.sections[base + k].state),
+            core::array::from_fn(|k| channels.1.sections[base + k].state),
+        ];
+        svf_cascade_interleaved::<L, 2, DEPTH>(
+            [&mut *left, &mut *right],
+            frames,
+            &coefficients,
+            &mut state,
+        );
+        let [left_state, right_state] = state;
+        for (k, word) in left_state.into_iter().enumerate() {
+            channels.0.sections[base + k].state = word;
+        }
+        for (k, word) in right_state.into_iter().enumerate() {
+            channels.1.sections[base + k].state = word;
         }
     }
 }
@@ -1262,8 +1357,11 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
         // observed block used) and both input planes exactly `+0.0`. The block test short-circuits on
         // its first chunk, so a console rendering music pays 32 words per channel for this and
         // nothing else.
-        let quiet = self.left.no_ramp_in_flight()
-            && self.right.no_ramp_in_flight()
+        // #163 phase 3 reuses this leg. "Stationary" -- no lane of either channel has a ramp in
+        // flight -- is exactly the condition under which every section runs `svf_block` with fixed
+        // coefficients over the whole block, which is the shape the interleaved cascade replaces.
+        let stationary = self.left.no_ramp_in_flight() && self.right.no_ramp_in_flight();
+        let quiet = stationary
             && block_is_positive_zero(&left[..words])
             && block_is_positive_zero(&right[..words]);
         if quiet && self.silent_fixed_point {
@@ -1279,8 +1377,13 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
             self.left.state_bits(&mut before_left);
             self.right.state_bits(&mut before_right);
         }
-        self.left.process_block(left, frames);
-        self.right.process_block(right, frames);
+        process_channels(
+            (&mut self.left, &mut self.right),
+            left,
+            right,
+            frames,
+            stationary,
+        );
         for (index, (channel, block)) in
             [(&mut self.left, &mut *left), (&mut self.right, &mut *right)]
                 .into_iter()
@@ -1753,3 +1856,166 @@ fn bank_block_matches(block: &EffectBankProcessBlock<'_>, width: BankWidth, quan
 }
 
 pub mod corpus;
+
+/// Issue #163 phase 3: the interleaved cascade is the per-section path, bit for bit.
+///
+/// The frozen E9 corpus (`corpus.rs`, `tests/determinism.rs`) drives [`Channel::process_block`]
+/// directly, because its whole job is to describe *arithmetic* independently of layout -- so it
+/// runs one channel at a time and never reaches [`process_channels`]. That leaves the phase-3 fast
+/// path outside the pinned digests, which is exactly where a schedule change could hide. This
+/// module closes that: it drives both arms of [`process_channels`] over the same corpus signals and
+/// asserts equality of the rendered audio **and** of every integrator word left behind, at all
+/// three widths.
+///
+/// The two arms are the *same entry point* with its stationary flag flipped, so the sequential arm
+/// is literally the code the EQ ran before phase 3 rather than a re-transcription of it, and no
+/// runtime tuning knob is added to reach it.
+#[cfg(test)]
+mod interleave_identity {
+    use super::{BandTarget, Channel, EQ_SECTION_COUNT_V1, MAX_LANES, corpus, process_channels};
+    use miso_engine_lane::{Lane, Simd4, Simd8};
+
+    /// Frames per case: the corpus length, several blocks' worth of settling.
+    const FRAMES: usize = corpus::FRAMES;
+
+    /// One channel of `W` tracks from the corpus band table, offset so the two channels of a case
+    /// never carry the same configuration.
+    fn channel<L: Lane, const W: usize>(offset: usize) -> Channel<L, W> {
+        let targets: [[BandTarget; EQ_SECTION_COUNT_V1]; W] =
+            core::array::from_fn(|lane| corpus::bands((offset + lane) % corpus::LANES));
+        Channel::new(targets, corpus::CORPUS_RATE).expect("every corpus row is a legal design")
+    }
+
+    /// One AoSoA block of corpus audio for `W` tracks.
+    fn block<const W: usize>(case: usize, offset: usize) -> Vec<f32> {
+        let mut lanes = vec![[0.0_f32; FRAMES]; W];
+        for (index, lane) in lanes.iter_mut().enumerate() {
+            corpus::fill(case, (offset + index) % corpus::LANES, lane);
+        }
+        let mut out = vec![0.0_f32; FRAMES * W];
+        for frame in 0..FRAMES {
+            for (index, lane) in lanes.iter().enumerate() {
+                out[frame * W + index] = lane[frame];
+            }
+        }
+        out
+    }
+
+    /// Every integrator word of a channel pair, as raw bits.
+    fn integrators<L: Lane, const W: usize>(
+        left: &Channel<L, W>,
+        right: &Channel<L, W>,
+    ) -> Vec<u32> {
+        let mut words = [0_u32; EQ_SECTION_COUNT_V1 * 2 * MAX_LANES];
+        let mut out = Vec::new();
+        left.state_bits(&mut words);
+        out.extend_from_slice(&words);
+        right.state_bits(&mut words);
+        out.extend_from_slice(&words);
+        out
+    }
+
+    /// Raw bits of a block.
+    fn bits(samples: &[f32]) -> Vec<u32> {
+        samples.iter().map(|sample| sample.to_bits()).collect()
+    }
+
+    /// Runs one corpus case at one width down both arms and asserts they are the same bits.
+    ///
+    /// `seed_state` puts a non-zero, subnormal-adjacent state into every section first, so the
+    /// comparison covers the D7 flush inside the interleaved body and not only a cold start.
+    fn compare<L: Lane, const W: usize>(width: &str, case: usize, seed_state: bool) {
+        let mut arms = Vec::new();
+        for stationary in [true, false] {
+            let mut left_channel = channel::<L, W>(0);
+            let mut right_channel = channel::<L, W>(3);
+            if seed_state {
+                for section in 0..EQ_SECTION_COUNT_V1 {
+                    left_channel.sections[section].state.ic1 = L::splat(1.0e-40);
+                    left_channel.sections[section].state.ic2 = L::splat(-1.0e-41);
+                    right_channel.sections[section].state.ic1 = L::splat(-3.5e-7);
+                    right_channel.sections[section].state.ic2 = L::splat(9.0e-8);
+                }
+            }
+            let mut left = block::<W>(case, 0);
+            let mut right = block::<W>(case, 3);
+            process_channels(
+                (&mut left_channel, &mut right_channel),
+                &mut left,
+                &mut right,
+                FRAMES,
+                stationary,
+            );
+            arms.push((left, right, integrators(&left_channel, &right_channel)));
+        }
+        let (interleaved, sequential) = (&arms[0], &arms[1]);
+        assert_eq!(
+            bits(&interleaved.0),
+            bits(&sequential.0),
+            "#163 phase 3: interleaved left channel differs at {width}, case {case}, \
+             seeded={seed_state}"
+        );
+        assert_eq!(
+            bits(&interleaved.1),
+            bits(&sequential.1),
+            "#163 phase 3: interleaved right channel differs at {width}, case {case}, \
+             seeded={seed_state}"
+        );
+        assert_eq!(
+            interleaved.2, sequential.2,
+            "#163 phase 3: interleaved integrators differ at {width}, case {case}, \
+             seeded={seed_state}"
+        );
+        // Non-vacuity: the arms must have filtered something, the channels must differ from each
+        // other, and nothing may have left the finite range.
+        assert_ne!(
+            bits(&interleaved.0),
+            bits(&block::<W>(case, 0)),
+            "#163 phase 3: the case must actually filter at {width}"
+        );
+        assert_ne!(
+            bits(&interleaved.0),
+            bits(&interleaved.1),
+            "#163 phase 3: the two channels must carry different audio at {width}"
+        );
+        assert!(
+            interleaved.0.iter().all(|sample| sample.is_finite()),
+            "#163 phase 3: a corpus case must stay finite at {width}"
+        );
+    }
+
+    #[test]
+    fn the_interleaved_cascade_renders_the_per_section_path_bit_for_bit() {
+        // Case 1 of the corpus is the ramped one, and a ramp never reaches the interleaved arm --
+        // its caller passes `stationary = false` -- so the stationary cases are 0 and 2.
+        for case in [0_usize, 2] {
+            for seeded in [false, true] {
+                compare::<f32, 1>("Scalar", case, seeded);
+                compare::<Simd4, 4>("Simd4", case, seeded);
+                compare::<Simd8, 8>("Simd8", case, seeded);
+            }
+        }
+    }
+
+    /// The depth this gate exercises really is per backend, and really is a divisor of the cascade.
+    #[test]
+    fn the_tuned_depth_is_per_backend_and_divides_the_cascade() {
+        for depth in [
+            <f32 as Lane>::SVF_CASCADE_DEPTH,
+            <Simd4 as Lane>::SVF_CASCADE_DEPTH,
+            <Simd8 as Lane>::SVF_CASCADE_DEPTH,
+        ] {
+            assert_eq!(
+                EQ_SECTION_COUNT_V1 % depth,
+                0,
+                "#163 phase 3: a cascade depth that does not divide {EQ_SECTION_COUNT_V1} \
+                 sections would silently drop sections"
+            );
+        }
+        assert_ne!(
+            <f32 as Lane>::SVF_CASCADE_DEPTH,
+            <Simd8 as Lane>::SVF_CASCADE_DEPTH,
+            "#163 phase 3: the constant is tuned per backend, not shared"
+        );
+    }
+}
