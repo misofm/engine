@@ -79,13 +79,27 @@ Issue 146 adds the second and, on `x86`, cheapest of them: `crates/miso-engine-l
 the canonical floating-point environment that every native render entry pins. It is the one place
 in the workspace that **is** reachable from a render path, deliberately -- pinning the environment
 is the render entry's first act and unpinning it is its last -- and it is three register accesses
-with no memory operand, no call and no branch. On `x86` it carries no unsafe of its own: it calls
-`softfma.rs`'s already-approved MXCSR helpers. Its single unsafe site is AArch64's `mrs`/`msr FPCR`
-pair, issued through `core::arch::asm!` because the standard library exposes no stable FPCR
+with no memory operand, no call and no branch. It carries unsafe for two reasons, and both are
+inline assembly -- the workspace's only inline assembly, and the reason the softfma paragraph above
+says "rather than the inline assembly their deprecation note recommends" and this one does not.
+
+First, AArch64's `mrs`/`msr FPCR` pair, because the standard library exposes no stable FPCR
 intrinsic (Arm Architecture Reference Manual for A-profile, `FPCR`, Floating-point Control
-Register); both blocks are `options(nomem, nostack)`, write only a value previously read from the
-same thread or the architectural default, and affect no other thread. This is the workspace's only
-inline assembly, and the exemption is the file, not the crate:
+Register). On `x86` there is no counterpart: `fpenv.rs` calls `softfma.rs`'s already-approved MXCSR
+helpers. The blocks write only a value previously read from the same thread or the architectural
+default, and affect no other thread.
+
+Second, on both, an empty `asm!` block as the guard's scheduling barrier. Installing a control word
+is a side effect the optimizer does not model -- `_mm_setcsr` lowers to an intrinsic declared as
+touching only its own argument's memory -- so without a barrier nothing stops a computation being
+scheduled outside the region it was meant to run in. The empty block is deliberately **not**
+`nomem`: being a memory clobber is its entire purpose, and it emits no instructions. It anchors
+every memory-dependent computation, which is every render; it does not anchor a value held entirely
+in registers, and `crates/miso-engine-lane/tests/fp_env.rs` proves that limit rather than assuming
+it, with a register-only product that a release build really does schedule outside the guard until
+the test anchors it itself.
+
+The exemption is the file, not the crate:
 `scripts/check-realtime-policy.sh` and `scripts/check-lane-policy.sh` both name `fpenv.rs`
 explicitly and both have a mutation test proving a third lane file does not inherit it. The introducing issue must use a local,
 minimal lint allowance; state the invariant next to the operation; include a `SAFETY` explanation;

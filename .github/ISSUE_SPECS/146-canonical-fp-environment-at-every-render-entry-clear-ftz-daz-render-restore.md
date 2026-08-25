@@ -40,6 +40,24 @@ Pin the floating-point environment at the boundary, not in the kernels.
   MXCSR are sticky exception status flags that any arithmetic sets and that say nothing about how
   the next operation rounds; a caller's sticky flags are the caller's and come back untouched.
 
+## The scheduling barrier, and the limit it does not cross
+
+Installing a control word is a side effect LLVM does not model: `_mm_setcsr` lowers to an intrinsic
+declared as touching only its own argument's memory, so nothing in it tells the optimizer that the
+arithmetic around it now means something different. `CanonicalFpEnv` therefore ends `enter` and
+begins `drop` with an empty `asm!` block that is deliberately not `nomem` -- a memory clobber that
+emits no instructions.
+
+That anchors every memory-dependent computation, which is every render: a render's values are loaded
+from and stored to the output block, the plan state and the source rings, and a load that cannot
+move takes its dependent arithmetic with it. It does **not** anchor a value held entirely in
+registers. That limit is proved, not assumed: the register-only subnormal product in
+`crates/miso-engine-lane/tests/fp_env.rs` was scheduled outside the guarded region by a release
+build -- the test failed under `--release` and passed in debug -- until the test anchored it with a
+`black_box` of its own. The finding is recorded in the module documentation next to the barrier,
+because the next person to compute something under the guard needs to know which of the two shapes
+they have.
+
 ## AArch64: implemented, not runtime-proven
 
 `read_fp_control_word`/`write_fp_control_word` issue `mrs`/`msr FPCR` through `core::arch::asm!`,
@@ -64,7 +82,7 @@ Until then the AArch64 half is compile-proven only. A runner is out of this issu
 | E2 | `miso-engine-lane --test fp_env`, `miso-engine-capi --lib fp_environment`, `miso-engine-host-core --test fp_environment` | GREEN; bit-exact restore proven on the success path, two rejection paths and an unwind |
 | E3 | `g6_the_guard_is_an_identity_for_a_caller_who_never_set_ftz`; every frozen pin; the shipped browser artifact | GREEN; the stripped `simd128` module is byte-identical to `94e8702` (`sha256:579bb210…`) |
 | E4 | `scripts/check-web-audioworklet.sh` call-graph gate; `check-realtime-policy.sh`; `check-lane-policy.sh` and both mutation suites | GREEN |
-| E5 | `artifacts/issue146/fp-environment-benchmark.raw.jsonl` | 0.93-2.89 ns per 128-frame block |
+| E5 | `artifacts/issue146/fp-environment-benchmark.raw.jsonl` | 1.32-2.67 ns per 128-frame block |
 
 Red mutations are recorded in `crates/miso-engine-lane/tests/MUTATIONS.md` (rows 16-17),
 `crates/miso-engine-host-core/tests/MUTATIONS.md` (M-146-1, M-146-2, M-146-2b, M-146-3) and

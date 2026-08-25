@@ -36,14 +36,14 @@
 //!
 //! # The canonical word
 //!
-//! `x86`/`x86_64`: [`CANONICAL_MXCSR`] is `0x1F80`, the architectural default MXCSR value -- all
+//! `x86`/`x86_64`: `CANONICAL_MXCSR` is `0x1F80`, the architectural default MXCSR value -- all
 //! six SIMD floating-point exceptions masked, round-to-nearest-even, FTZ clear, DAZ clear, status
 //! flags clear (Intel 64 and IA-32 Architectures Software Developer's Manual, Volume 1, "MXCSR
 //! Control and Status Register"). Installing the whole word rather than clearing two bits also
 //! removes a caller's directed rounding mode and any unmasked exception that would trap inside a
 //! render, both of which break determinism exactly as FTZ does.
 //!
-//! `aarch64`: [`CANONICAL_FPCR`] is `0`, the FPCR value with `RMode` round-to-nearest, `FZ` and
+//! `aarch64`: `CANONICAL_FPCR` is `0`, the FPCR value with `RMode` round-to-nearest, `FZ` and
 //! `FZ16` clear, every floating-point trap enable clear and the FEAT_AFP `AH`/`NEP`/`FIZ`
 //! alternate-handling bits clear (Arm Architecture Reference Manual for A-profile, `FPCR`,
 //! Floating-point Control Register). AArch64 has no separate DAZ bit: `FZ` flushes both subnormal
@@ -58,17 +58,21 @@
 //!
 //! # Why this file carries `unsafe`
 //!
-//! On `x86` the control word is reached through the already-approved `_mm_getcsr`/`_mm_setcsr`
-//! helpers of [`crate::softfma`]; this module adds no `unsafe` there. On `aarch64` there is no
-//! stable `core::arch` intrinsic for FPCR, so `mrs`/`msr` are issued through `core::arch::asm!`.
-//! That is the one new unsafe site of issue #146, allowlisted by
+//! This file is the one new unsafe site of issue #146 -- one file, two reasons, allowlisted by
 //! `scripts/check-realtime-policy.sh` and `scripts/check-lane-policy.sh` and recorded in
-//! `docs/REALTIME_DEPENDENCY_POLICY.md`.
+//! `docs/REALTIME_DEPENDENCY_POLICY.md`:
+//!
+//! 1. On `aarch64` there is no stable `core::arch` intrinsic for FPCR, so `mrs`/`msr` are issued
+//!    through `core::arch::asm!`. On `x86` no such block is needed: the control word is reached
+//!    through the already-approved `_mm_getcsr`/`_mm_setcsr` helpers of [`crate::softfma`].
+//! 2. An empty `asm!` on both, as the guard's scheduling barrier. See `scheduling_barrier`.
 //!
 //! # Realtime properties
 //!
-//! Entering and leaving the guard is a register read and two register writes. No allocation, no
-//! lock, no syscall, no call at all: the bodies are `#[inline]` and the `Drop` is a single store.
+//! Entering and leaving the guard is a register read, two register writes and two empty assembly
+//! blocks that emit nothing. No allocation, no lock, no syscall, no call at all: the bodies are
+//! `#[inline]` and the `Drop` is a barrier and a single store. Measured cost over a real 128-frame
+//! render, both arms on one plan: `artifacts/issue146/fp-environment-benchmark.raw.jsonl`.
 
 #![allow(unsafe_code)]
 
@@ -269,6 +273,34 @@ pub struct CanonicalFpEnv {
     _not_send_not_sync: PhantomData<*const ()>,
 }
 
+/// An empty assembly block that no load or store may be moved across.
+///
+/// Installing a control word is a side effect the optimizer does not model. `_mm_setcsr` lowers to
+/// `llvm.x86.sse.ldmxcsr`, which is declared as touching only its own argument's memory, so nothing
+/// in the intrinsic itself tells LLVM that the arithmetic around it now means something different.
+/// This barrier says the only thing that can be said in one line: no memory operation crosses here.
+/// That is enough for a render, whose every value is loaded from and stored to the output block,
+/// the plan state and the source rings -- the arithmetic is anchored by the loads it depends on.
+///
+/// It is *not* enough for a computation held entirely in registers, and
+/// `crates/miso-engine-lane/tests/fp_env.rs` proves that rather than assuming it: its
+/// register-only subnormal product needs a `black_box` of its own, and without one the optimizer
+/// really does schedule the multiply outside the guarded region in a release build. A render never
+/// has that shape, and a caller who wants a register-only value computed under the canonical
+/// environment must anchor it the same way.
+///
+/// The barrier emits no instructions.
+#[cfg(any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64"))]
+#[inline(always)]
+fn scheduling_barrier() {
+    // SAFETY: an empty assembly template with no operands. It cannot fault, cannot write a
+    // register and cannot diverge. `nomem` is deliberately absent -- being a memory clobber is the
+    // entire purpose -- and `preserves_flags` is accurate because the block contains nothing.
+    unsafe {
+        core::arch::asm!("", options(nostack, preserves_flags));
+    }
+}
+
 #[cfg(any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64"))]
 impl CanonicalFpEnv {
     /// Save the caller's control word and install the canonical one.
@@ -277,6 +309,7 @@ impl CanonicalFpEnv {
     pub fn enter() -> Self {
         let saved = read_fp_control_word();
         write_fp_control_word(canonical_fp_control_word());
+        scheduling_barrier();
         Self {
             saved,
             _not_send_not_sync: PhantomData,
@@ -295,6 +328,7 @@ impl CanonicalFpEnv {
 impl Drop for CanonicalFpEnv {
     #[inline]
     fn drop(&mut self) {
+        scheduling_barrier();
         write_fp_control_word(self.saved);
     }
 }

@@ -128,10 +128,17 @@ mod x86 {
         let small = std::hint::black_box(f32::from_bits(0x0D80_0000));
         let scale = std::hint::black_box(f32::from_bits(0x3080_0000));
 
-        let flushed = std::hint::black_box(small) * std::hint::black_box(scale);
+        // Each product is black-boxed *inside* the region it belongs to. The guard's barrier stops
+        // memory operations crossing it, which is what anchors a render; a product held entirely in
+        // registers has no load to be anchored by, and in a release build the optimizer really will
+        // schedule this multiply outside the guarded region without the `black_box` on its result.
+        // That asymmetry is the point of this test, and it is why the assertion below is about two
+        // *bit patterns* produced under two environments rather than about the guard's own code.
+        let flushed =
+            std::hint::black_box(std::hint::black_box(small) * std::hint::black_box(scale));
         let canonical = {
             let _pinned = CanonicalFpEnv::enter();
-            std::hint::black_box(small) * std::hint::black_box(scale)
+            std::hint::black_box(std::hint::black_box(small) * std::hint::black_box(scale))
         };
 
         // Compared as bits, never as floats: outside the guard DAZ is still set, and a `== 0.0`
