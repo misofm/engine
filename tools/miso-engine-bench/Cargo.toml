@@ -19,6 +19,10 @@ miso-engine-session.workspace = true
 miso-engine-builtins.workspace = true
 miso-engine-builtins-compiler.workspace = true
 miso-engine-conformance.workspace = true
+# The console subject itself. It lives in its own crate so the wasm console arm's guest can link
+# the identical code (#163 phase 2 step 1); this crate holds the clock, the percentiles and the
+# records, which is everything the guest cannot have.
+miso-engine-console-workload.workspace = true
 miso-engine-core = { workspace = true, features = ["realtime-audit"] }
 miso-engine-effect-compiler.workspace = true
 miso-engine-effect-contract.workspace = true

@@ -1,0 +1,30 @@
+[package]
+name = "miso-engine-console-workload"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# An `rlib`, for the reason `miso-engine-wasm-gate-corpus` is one: the native bench links this
+# subject directly, and the `cdylib` wasm guest links the very same code. A subject that existed
+# twice would be two subjects, and their ratio would measure the transcription.
+[lib]
+name = "miso_engine_console_workload"
+path = "src/lib.rs"
+
+# Every dependency here builds for `wasm32-unknown-unknown` unchanged, which is the finding that
+# made this port a tooling change rather than a crate change. None of them is target-conditional.
+[dependencies]
+miso-engine-bench-support.workspace = true
+miso-engine-builtins.workspace = true
+miso-engine-builtins-compiler.workspace = true
+miso-engine-core = { workspace = true, features = ["realtime-audit"] }
+miso-engine-effect-compiler.workspace = true
+miso-engine-effect-contract.workspace = true
+miso-engine-graph.workspace = true
+miso-engine-graph-compiler.workspace = true
+miso-engine-lane.workspace = true
+miso-engine-session.workspace = true
+
+[lints]
+workspace = true
