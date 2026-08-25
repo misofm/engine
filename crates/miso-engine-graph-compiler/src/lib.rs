@@ -242,7 +242,7 @@ impl GraphRackBankReport {
         let mut ids: Vec<EffectNodeId> = self
             .chains
             .iter()
-            .filter(|(chain, _)| rack_location(chain.rack) == Some(rack))
+            .filter(|(chain, _)| rack_location(chain.rack) == rack)
             .flat_map(|(_, nodes)| nodes.iter())
             .filter(|node| !banked.contains(node))
             .cloned()
@@ -5647,7 +5647,40 @@ mod tests {
             assert_eq!(artifact.report.rack_cohorts.groups_in(rack).count(), 0);
             assert!(artifact.report.rack_cohorts.scalar_in(rack).is_empty());
         }
-        assert!(artifact.report.rack_cohorts.plan.groups.is_empty());
+        // The dynamic rack *is* a bank location now, so this fixture is the gate on the thing that
+        // actually disqualifies a bank: the kernel contract, not the rack. Ten identical
+        // sidechain-free `conformance.delay` chains are a perfectly homogeneous cohort -- the
+        // planner forms full groups for them -- and every one of them still renders per node,
+        // because `DualAccumulatorDelayFactory::bind_homogeneous_bank` returns `Ok(None)`. If
+        // candidacy ever bound a bank from mere homogeneity, `prepared_bank_count` above and
+        // `scalar_in(Dynamic)` below both move.
+        assert!(
+            artifact
+                .report
+                .rack_cohorts
+                .groups_in(RackLocationV1::Dynamic)
+                .count()
+                > 0,
+            "the dynamic rack must reach the planner, or this fixture gates nothing"
+        );
+        assert_eq!(
+            artifact
+                .report
+                .rack_cohorts
+                .bound_slots_in(RackLocationV1::Dynamic)
+                .count(),
+            0,
+            "an effect with no homogeneous bank kernel must bind no bank in any rack"
+        );
+        assert_eq!(
+            artifact
+                .report
+                .rack_cohorts
+                .scalar_in(RackLocationV1::Dynamic)
+                .len(),
+            10,
+            "every delay stays on the per-node path"
+        );
         assert_eq!(artifact.report.estimate.effect_bank_count, 0);
         assert_eq!(artifact.report.estimate.effect_bank_scratch_bytes, 0);
         assert_eq!(artifact.report.estimate.effect_bank_runtime_buffer_bytes, 0);

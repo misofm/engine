@@ -163,7 +163,7 @@ pub fn plan_bank_groups<Id: Ord + Clone, K: BankSlotKey>(
     let mut groups = Vec::new();
     let mut scalar = Vec::new();
     for (level, candidates) in by_level {
-        for rack in [RackLocationV1::Simd1, RackLocationV1::Simd2] {
+        for rack in RackLocationV1::ALL {
             // No canonicalising sort here: leader selection is a total `max_by` over unique ids,
             // `order_members` fixes every group's lane order, and `scalar` is sorted on the way
             // out, so the plan cannot depend on pool order. `output_is_input_order_invariant`

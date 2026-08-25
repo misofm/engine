@@ -5,12 +5,42 @@
 use super::*;
 use crate::ids::{diag, rack_id};
 
-/// The `RackLocationV1` a graph rack id addresses, or `None` for the dynamic rack.
-pub(crate) const fn rack_location(rack: RackId) -> Option<RackLocationV1> {
+/// The `RackLocationV1` a graph rack id addresses.
+///
+/// Total, and deliberately so. This used to return `Option`, with `RackId::Dynamic => None`, and
+/// that `None` was the only reason a dynamic-rack effect never banked: the candidate loop skipped
+/// the rack outright, so a native effect carrying the homogeneous-bank kernel contract ran scalar
+/// at width 1 purely because of where the session had placed it.
+///
+/// AGENTS.md does not say that. It says a native effect *may* run track-locally in the dynamic
+/// rack, and that opaque third-party Wasm is per-instance because it "breaks the known
+/// homogeneous/fused SIMD bank contract". The disqualifier is **opacity, not location**, so the
+/// gate now lives on identity (see [`banks_are_permitted`]) and every rack has a location.
+pub(crate) const fn rack_location(rack: RackId) -> RackLocationV1 {
     match rack {
-        RackId::Simd1 => Some(RackLocationV1::Simd1),
-        RackId::Simd2 => Some(RackLocationV1::Simd2),
-        RackId::Dynamic => None,
+        RackId::Simd1 => RackLocationV1::Simd1,
+        RackId::Simd2 => RackLocationV1::Simd2,
+        RackId::Dynamic => RackLocationV1::Dynamic,
+    }
+}
+
+/// Whether a session effect may ever be considered for a homogeneous bank.
+///
+/// The AGENTS.md boundary, made structural: "Third-party core Wasm ... is permitted only in the
+/// dynamic rack: opaque per-instance Wasm breaks the known homogeneous/fused SIMD bank contract."
+/// A bank binds one kernel over `width` lanes of *known* arithmetic; an opaque module supplies no
+/// such kernel, so it is per-instance wherever it sits. This is checked for **every** rack, not
+/// just the dynamic one, so the boundary cannot be re-opened by a future rack gaining a location.
+///
+/// Non-native identities cannot reach preparation at all today
+/// (`effect.third_party.unavailable_at_launch`), so this predicate is currently unreachable-false
+/// in a compiling session. That is exactly why it is written as a gate rather than left implicit:
+/// when third-party execution does land, candidacy must already refuse it, and
+/// `third_party_dynamic_effects_are_never_bank_candidates` pins that it does.
+pub(crate) fn banks_are_permitted(identity: &miso_engine_session::EffectIdentity) -> bool {
+    match identity {
+        miso_engine_session::EffectIdentity::Native { .. } => true,
+        miso_engine_session::EffectIdentity::ThirdPartyCid { .. } => false,
     }
 }
 
@@ -68,12 +98,18 @@ pub(crate) fn bind_rack_banks(
     for track in &model.tracks {
         for (rack, declared) in [
             (RackId::Simd1, &track.simd1.effects),
+            (RackId::Dynamic, &track.dynamic.effects),
             (RackId::Simd2, &track.simd2.effects),
         ] {
-            let Some(location) = rack_location(rack) else {
-                continue;
-            };
+            let location = rack_location(rack);
             if declared.is_empty() {
+                continue;
+            }
+            // AGENTS.md's opacity boundary, applied before a chain is even a candidate: one
+            // opaque slot makes the whole chain per-node, exactly as one sidechained slot does
+            // (`EffectProgramKeyV1::blocks_banking`). A bank is a single kernel over the chain
+            // program, so it cannot straddle a slot it has no kernel for.
+            if !declared.iter().all(|effect| banks_are_permitted(&effect.identity)) {
                 continue;
             }
             let chain = RackChainId {
@@ -127,7 +163,7 @@ pub(crate) fn bind_rack_banks(
         .collect();
 
     let mut candidates_by_level: BTreeMap<u64, Vec<CohortCandidate<RackChainId>>> = BTreeMap::new();
-    for (chain, nodes) in &chains {
+    'chain: for (chain, nodes) in &chains {
         let Some(first) = nodes.first() else {
             continue;
         };
@@ -146,6 +182,17 @@ pub(crate) fn bind_rack_banks(
                 return Err(diag("graph.internal.invariant", "$.effects"));
             };
             if slot_level != level + offset as u64 {
+                // A connected sidechain is the one edge that feeds a chain slot from outside the
+                // path, and it can lift a *later* slot past `level + k` when its source is
+                // scheduled late. Such a slot already blocks banking (#96 F9), so the chain is
+                // simply not a candidate: it renders per node and `scalar_in` still reports it,
+                // because `chains` keeps it. Opening the dynamic rack makes this reachable in
+                // practice -- sidechained compressors live there -- where before it was a
+                // compile-failing `graph.internal.invariant`. A *bankable* chain that breaks the
+                // path arithmetic is still a real invariant violation and still fails.
+                if !programs[chain].is_bankable() {
+                    continue 'chain;
+                }
                 return Err(diag("graph.internal.invariant", "$.effects"));
             }
         }

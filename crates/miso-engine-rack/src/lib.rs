@@ -24,11 +24,33 @@ pub enum RackError {
     WidthMismatch,
 }
 
+/// Where in a track's chain a bank cohort sits.
+///
+/// The two SIMD racks are the architecture's *declared* bank locations. [`Self::Dynamic`] is the
+/// dynamic rack, which AGENTS.md permits to run track-locally -- and, for a **native** effect that
+/// carries the homogeneous-bank kernel contract, to bank exactly like a SIMD rack. Session
+/// placement decides where an effect runs in the signal chain; it never decides how wide the
+/// arithmetic is. The boundary that does decide is opacity, not location: opaque third-party Wasm
+/// has no homogeneous bank kernel and is per-instance wherever it sits (AGENTS.md, "Effects and
+/// plugins").
+///
+/// The variant exists on the *cohort* type so that a dynamic chain can never share a cohort with a
+/// SIMD chain: [`RackProgramV1::subsequence_mask`] compares `rack` first, and
+/// `miso_engine_rack_compiler::plan_bank_groups` pools per location.
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum RackLocationV1 {
     Simd1 = 1,
     Simd2 = 2,
+    Dynamic = 3,
+}
+
+impl RackLocationV1 {
+    /// Every bank location, in cohort-planning order.
+    ///
+    /// `plan_bank_groups` iterates this, so a new location is planned by construction rather than
+    /// by remembering to extend a literal array.
+    pub const ALL: [Self; 3] = [Self::Simd1, Self::Simd2, Self::Dynamic];
 }
 
 /// What a cohort planner needs of one slot's key.
