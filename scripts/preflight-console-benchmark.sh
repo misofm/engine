@@ -4,14 +4,29 @@
 # AGENTS.md requires benchmark infrastructure to preflight arguments, schema, output persistence,
 # shell exit semantics and overwrite refusal *before* the timed workload runs, so that a runner
 # defect cannot consume the one authorised measurement. Nothing here is timed.
+#
+# It takes the same optional phase argument the runner does, and checks the overwrite refusal
+# against the directory that run would actually write. Hardcoding phase 1's directory made this
+# script unusable the moment phase 1's record was committed, which defeated the purpose: the
+# preflight has to be runnable immediately before the run it protects.
 set -euo pipefail
-[[ "$#" == 0 ]] || { printf 'usage: %s\n' "$0" >&2; exit 2; }
+phase_directory=issue149
+if [[ "$#" == 1 ]]; then
+    case "$1" in
+        --phase2) phase_directory=issue149-phase2 ;;
+        --phase3) phase_directory=issue149-phase3 ;;
+        *) printf 'usage: %s [--phase2|--phase3]\n' "$0" >&2; exit 2 ;;
+    esac
+elif [[ "$#" != 0 ]]; then
+    printf 'usage: %s [--phase2|--phase3]\n' "$0" >&2
+    exit 2
+fi
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$root"
 
 fail() { printf 'console preflight failure: %s\n' "$1" >&2; exit 1; }
 
-artifact_dir="$root/artifacts/issue149"
+artifact_dir="$root/artifacts/$phase_directory"
 for name in console-benchmark.raw.jsonl console-benchmark.accepted.jsonl \
     console-benchmark.stderr.log console-benchmark.disposition.json; do
     path="$artifact_dir/$name"

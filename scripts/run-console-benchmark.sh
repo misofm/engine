@@ -3,17 +3,25 @@
 # directly: the runner is what supplies the round marker and the host metadata, and a direct
 # invocation produces a record whose provenance is a guess.
 #
-# One optional argument, `--phase2`, moves the artifact directory to `artifacts/issue149-phase2`
-# and changes nothing else. Phase 1's record is a consumed one-shot authority: it describes the
-# tree that produced it, and the sealed fast dB tier (#144 item 5) deliberately moves the rendered
-# bits it measured, so a phase-2 number belongs beside it rather than on top of it. Both
-# directories keep the same refusal-to-overwrite discipline, so neither can be quietly re-run.
+# One optional argument, `--phase2` or `--phase3`, moves the artifact directory to
+# `artifacts/issue149-phase2` or `artifacts/issue149-phase3` and changes nothing else. Phase 1's
+# record is a consumed one-shot authority: it describes the tree that produced it, and the sealed
+# fast dB tier (#144 item 5) deliberately moves the rendered bits it measured, so a phase-2 number
+# belongs beside it rather than on top of it. Phase 3 gets its own directory for the opposite
+# reason -- the multiband ramping split is class A and moves no rendered bit at all, so its console
+# numbers are a *re-measurement* of the phase-2 tree and have to be readable as one rather than
+# blended into it. Every directory keeps the same refusal-to-overwrite discipline, so none of them
+# can be quietly re-run.
 set -euo pipefail
 phase_directory=issue149
-if [[ "$#" == 1 && "$1" == "--phase2" ]]; then
-    phase_directory=issue149-phase2
+if [[ "$#" == 1 ]]; then
+    case "$1" in
+        --phase2) phase_directory=issue149-phase2 ;;
+        --phase3) phase_directory=issue149-phase3 ;;
+        *) printf 'usage: %s [--phase2|--phase3]\n' "$0" >&2; exit 2 ;;
+    esac
 elif [[ "$#" != 0 ]]; then
-    printf 'usage: %s [--phase2]\n' "$0" >&2
+    printf 'usage: %s [--phase2|--phase3]\n' "$0" >&2
     exit 2
 fi
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)

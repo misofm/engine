@@ -616,3 +616,223 @@ fn a_window_lands_on_its_target_on_the_exact_sample() {
         "the window arrives exactly on its target, on its last sample"
     );
 }
+
+// -------------------------------------------------------------------------------------------
+// The descriptive cost of the split (issue #149 phase 3)
+// -------------------------------------------------------------------------------------------
+//
+// Run with:
+//
+// ```text
+// cargo test --release -p miso-engine-multiband-compressor --lib \
+//     -- --ignored --nocapture the_split_costs
+// ```
+//
+// **Where this measures, and why not the console fixture.** The standing issue-149 benchmark is a
+// sixty-four track console session, and that session contains no multiband compressor: every track
+// carries a parametric EQ in `simd1` and a compressor in `dynamic`, and `simd2` is empty on all
+// sixty-four. The nine-track ragged strip and the hundred-and-twenty-eight track stretch are the
+// same file cloned. So the console fixture cannot move for this change, and putting a multiband
+// into it would redefine all three workloads and end their comparability with the phase-1 and
+// phase-2 records. The measurement therefore happens where the effect is, at the bank boundary —
+// the same choice, for the same reason, that the stationary hoist's ruling records for the EQ.
+//
+// **Paired alternation** (#104). The six subjects are interleaved observation by observation, not
+// run one after another, so every drift a run suffers is shared by all of them and the split's
+// delta is a distribution rather than a difference of two summaries. One warmup pass and two
+// measured rounds; nothing is tuned or retried between them.
+//
+// The two arms of each pair differ only in `FORCE_RAMPING`, so the paired delta is the split and
+// nothing else: same instance construction, same stimulus, same automation, same plumbing. The
+// automation is applied outside the timed region, because admitting a span is not what changed.
+
+/// Observations per round, matching the console benchmark's.
+#[cfg(test)]
+const OBSERVATIONS: usize = 1_000;
+
+/// What automation traffic a subject carries.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Arm {
+    /// No traffic. Every block is one flat segment: the case the split exists for.
+    Quiet,
+    /// Every parameter re-sent at the value it already holds. The phase-1 hoist settles each one,
+    /// so the bank stays flat through a block that carried a full automation refresh.
+    Restated,
+    /// Two parameters alternating over a quarter of a dB, so a sixty-four sample window is open
+    /// over the first half of every hundred-and-twenty-eight frame block.
+    Moving,
+}
+
+impl Arm {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Quiet => "quiet   ",
+            Self::Restated => "restated",
+            Self::Moving => "moving  ",
+        }
+    }
+}
+
+/// Nearest-rank percentile, the same rule the console benchmark uses.
+fn percentile(sorted: &[f64], fraction: f64) -> f64 {
+    let rank = (fraction * sorted.len() as f64).ceil().max(1.0) as usize;
+    sorted[rank.min(sorted.len()) - 1]
+}
+
+/// Sends one arm's traffic for `block`, outside the timed region.
+fn traffic<L: Lane, const W: usize>(instance: &mut Instance<L, W>, arm: Arm, block: usize) {
+    if arm == Arm::Quiet {
+        return;
+    }
+    let first = (block * 128) as u64;
+    for track in 0..W {
+        let mut spans = Vec::new();
+        for ramp in 0..RAMP_COUNT {
+            for channel in [ParameterChannel::Left, ParameterChannel::Right] {
+                let side = usize::from(channel == ParameterChannel::Right);
+                let held = instance.sides[side].ramps[track][ramp].target;
+                let value = match arm {
+                    Arm::Restated => held,
+                    // Only the two thresholds move, which is what a console fader-style refresh
+                    // looks like: most of the table is restated and a little of it is moving.
+                    Arm::Moving if ramp == LOW_THRESHOLD || ramp == HIGH_THRESHOLD => {
+                        if block % 2 == 0 { held + 0.25 } else { held - 0.25 }
+                    }
+                    _ => held,
+                };
+                spans.push(PreparedAutomationSpan {
+                    kind: AutomationSpanKind::Point,
+                    channel,
+                    parameter_index: (ramp + 2) as u32,
+                    start_sample: first,
+                    end_sample: first,
+                    start_value: value,
+                    end_value: value,
+                });
+            }
+        }
+        let mut report = ProcessReport::default();
+        instance.apply_automation(track, &spans, 32, first, &mut report);
+    }
+}
+
+/// One timed subject: an instance, its buffers, and the arm it carries.
+struct Subject<L: Lane, const W: usize> {
+    arm: Arm,
+    split: bool,
+    instance: Instance<L, W>,
+    left: Vec<f32>,
+    right: Vec<f32>,
+    reports: Vec<ProcessReport>,
+    samples: Vec<f64>,
+}
+
+impl<L: Lane, const W: usize> Subject<L, W> {
+    fn new(arm: Arm, split: bool) -> Self {
+        Self {
+            arm,
+            split,
+            instance: instance::<L, W>(LinkMode::Maximum, false),
+            left: vec![0.0; 128 * W],
+            right: vec![0.0; 128 * W],
+            reports: vec![ProcessReport::default(); W],
+            samples: Vec::with_capacity(OBSERVATIONS),
+        }
+    }
+
+    /// Renders one block, timing only the render itself.
+    fn observe(&mut self, block: usize, record: bool) {
+        traffic(&mut self.instance, self.arm, block);
+        for frame in 0..128 {
+            for track in 0..W {
+                let sample = block * 128 + frame;
+                self.left[frame * W + track] = stimulus(sample, track, 0);
+                self.right[frame * W + track] = stimulus(sample, track, 1);
+            }
+        }
+        let start = std::time::Instant::now();
+        if self.split {
+            render::<L, W, false>(
+                &mut self.instance,
+                &mut self.left,
+                &mut self.right,
+                128,
+                &mut self.reports,
+            );
+        } else {
+            render::<L, W, true>(
+                &mut self.instance,
+                &mut self.left,
+                &mut self.right,
+                128,
+                &mut self.reports,
+            );
+        }
+        let elapsed = start.elapsed().as_secs_f64() * 1.0e9;
+        if record {
+            self.samples.push(elapsed);
+        }
+    }
+}
+
+/// Measures one width: three arms, split on and off, alternated per observation.
+fn measure<L: Lane, const W: usize>(width: &str) {
+    const WARMUP: usize = 64;
+    for round in 0..3 {
+        let mut subjects: Vec<Subject<L, W>> = Vec::new();
+        for arm in [Arm::Quiet, Arm::Restated, Arm::Moving] {
+            for split in [true, false] {
+                subjects.push(Subject::new(arm, split));
+            }
+        }
+        for block in 0..WARMUP {
+            for subject in subjects.iter_mut() {
+                subject.observe(block, false);
+            }
+        }
+        for observation in 0..OBSERVATIONS {
+            for subject in subjects.iter_mut() {
+                subject.observe(WARMUP + observation, true);
+            }
+        }
+        if round == 0 {
+            continue;
+        }
+        for pair in subjects.chunks(2) {
+            let (on, off) = (&pair[0], &pair[1]);
+            assert!(on.split && !off.split);
+            let mut paired: Vec<f64> = off
+                .samples
+                .iter()
+                .zip(on.samples.iter())
+                .map(|(without, with)| without - with)
+                .collect();
+            let mut with: Vec<f64> = on.samples.clone();
+            let mut without: Vec<f64> = off.samples.clone();
+            for series in [&mut paired, &mut with, &mut without] {
+                series.sort_by(|a, b| a.partial_cmp(b).expect("no NaN in a timing series"));
+            }
+            let frames = (128 * W) as f64;
+            println!(
+                "{width} round {round}  {}  split off {:8.0} ns  split on {:8.0} ns  \
+                 paired delta p50 {:+7.0} ns/block ({:+6.2}%, {:+5.2} ns/frame/track)",
+                on.arm.label(),
+                percentile(&without, 0.5),
+                percentile(&with, 0.5),
+                percentile(&paired, 0.5),
+                100.0 * percentile(&paired, 0.5) / percentile(&without, 0.5),
+                percentile(&paired, 0.5) / frames,
+            );
+        }
+    }
+}
+
+/// The descriptive cost of the ramping split. Not a gate (AGENTS.md); run with `--ignored`.
+#[test]
+#[ignore = "descriptive measurement, not a gate"]
+fn the_split_costs_what_it_costs() {
+    println!("multiband ramping split, paired alternation, {OBSERVATIONS} observations/round");
+    measure::<f32, 1>("scalar");
+    measure::<Simd4, 4>("simd4 ");
+    measure::<Simd8, 8>("simd8 ");
+}
