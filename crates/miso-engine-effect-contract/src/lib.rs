@@ -5,7 +5,7 @@
 #![allow(missing_docs)]
 
 mod live;
-pub use live::{BypassShunt, EffectControlLane, EffectControlRecordV1, Staged};
+pub use live::{BypassShunt, EffectControlLane, EffectControlRecordV1, ObservationLaneV1, Staged};
 
 use core::{fmt, hash::Hash};
 use miso_engine_core::{
@@ -130,6 +130,41 @@ scalar_enum!(ResetKind {FullToDefaults=1,DiscontinuityKeepParameters=2});
 scalar_enum!(AutomationSpanKind {Point=1,Step=2,Linear=3,Exponential=4});
 pub type AutomationKind = AutomationSpanKind;
 scalar_enum!(ParameterChannelPolicy {Shared=1,PerLane=2});
+// Issue #143 D1: the declared observation menu. Each vocabulary is a `scalar_enum!` for the same
+// reason the parameter vocabularies are -- the descriptor wire, the C inspect surface and the
+// browser metadata all carry the raw `u32`, and `from_raw` is the single place a foreign value is
+// refused rather than silently reinterpreted.
+// What an observation tap reports. One kind ships in V1.
+scalar_enum!(ObservationKindV1 {GainReductionDb=1});
+// What publishing an observation costs.
+//
+// `Resident` means the value already exists in kernel state when the block ends: publishing is a
+// copy out of state that `process` wrote anyway, and no lane kernel changes. `Computed` means an
+// analysis pass that would not otherwise run; V1 declares the class, validates it, and refuses to
+// bind one (`ObservationUnbound`/`UnsupportedKind` on the control plane).
+scalar_enum!(ObservationCostV1 {Resident=1,Computed=2});
+// How often a tap produces a value.
+scalar_enum!(ObservationCadenceV1 {PerBlock=1,PerWindow=2});
+// How a window of per-block values folds into the one number a consumer reads.
+//
+// `PeakMagnitude` is `max(|x|)` over the window, which is what makes a gain-reduction tap publish
+// a **non-negative magnitude** even though the contract's internal sign convention is
+// negative-for-reduction ([`GainReductionV1`]). The published value is non-negative *by the
+// declared fold*, not by a host convention nobody can check.
+scalar_enum!(ObservationFoldV1 {Latest=1,PeakMagnitude=2});
+// Whether a tap publishes one value per instance or one per dual-mono lane.
+scalar_enum!(ObservationChannelsV1 {Shared=1,PerLane=2});
+/// An effect-local observation tap identifier: nonzero, and ascending within a descriptor.
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct ObservationTapId(pub u32);
+impl ObservationTapId {
+    /// `None` for zero, which the addressing ABI reserves as "no tap".
+    #[must_use]
+    pub const fn new(v: u32) -> Option<Self> {
+        if v == 0 { None } else { Some(Self(v)) }
+    }
+}
 scalar_enum!(SmoothingRule {None=1,Linear=2,OnePole99=3});
 scalar_enum!(PortRole {MainInput=1,MainOutput=2,SidechainInput=3});
 pub type PortKind = PortRole;
@@ -258,6 +293,43 @@ pub struct PortDescriptorV1 {
     pub required: bool,
     pub layout: PortLayout,
 }
+/// One declared observation tap: what an effect will let a console watch, and what watching costs.
+///
+/// # Why a declared menu rather than a host-side table
+///
+/// The effect is the only thing that knows which of its internal values exist, what they mean and
+/// whether reading one is a copy or a second computation. A host that kept its own table would be
+/// a second source of truth that goes stale the moment a kernel changes. Every consumer -- the
+/// subscribe path, the descriptor wire, the browser metadata -- reads this and nothing else.
+///
+/// `minimum`/`maximum` are the declared bounds of the **published** value, after the declared
+/// [`fold`](Self::fold). A gain-reduction tap therefore declares `0 .. 100`, not `-100 .. 0`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ObservationDescriptorV1 {
+    /// Effect-local tap id: nonzero, unique, and strictly ascending in declaration order.
+    pub id: ObservationTapId,
+    /// Human-facing name, e.g. `"Gain Reduction"`.
+    pub display_name: &'static str,
+    /// Human-facing unit suffix, e.g. `"dB"`.
+    pub display_unit: &'static str,
+    /// What the tap reports.
+    pub kind: ObservationKindV1,
+    /// The unit the effect publishes in. A `Linear` tap is converted once per window on the
+    /// control plane, never on the render thread (issue #143 R4).
+    pub unit: ParameterUnit,
+    /// What publishing it costs.
+    pub cost: ObservationCostV1,
+    /// How often it produces a value.
+    pub cadence: ObservationCadenceV1,
+    /// How a window of values folds into the number a consumer reads.
+    pub fold: ObservationFoldV1,
+    /// One value per instance, or one per dual-mono lane.
+    pub channels: ObservationChannelsV1,
+    /// Declared inclusive lower bound of the published value.
+    pub minimum: f32,
+    /// Declared inclusive upper bound of the published value.
+    pub maximum: f32,
+}
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct QualityDescriptorV1 {
     pub quality: EffectQuality,
@@ -279,6 +351,9 @@ pub struct EffectDescriptorV1 {
     pub parameters: &'static [ParameterDescriptorV1],
     pub ports: &'static [PortDescriptorV1],
     pub qualities: &'static [QualityDescriptorV1],
+    /// The declared observation menu (issue #143 D1). Last, and empty for every effect that
+    /// declares no tap, so a zero-tap descriptor encodes byte-identically to the pre-#143 wire.
+    pub observations: &'static [ObservationDescriptorV1],
 }
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum DescriptorDiagnosticCode {
@@ -293,6 +368,9 @@ pub enum DescriptorDiagnosticCode {
     Quality,
     QualityOrder,
     StateSizes,
+    ObservationId,
+    ObservationOrder,
+    Observation,
 }
 impl DescriptorDiagnosticCode {
     pub const fn as_str(self) -> &'static str {
@@ -308,6 +386,9 @@ impl DescriptorDiagnosticCode {
             Self::Quality => "effect.descriptor.quality",
             Self::QualityOrder => "effect.descriptor.quality_order",
             Self::StateSizes => "effect.descriptor.state_sizes",
+            Self::ObservationId => "effect.descriptor.observation_id",
+            Self::ObservationOrder => "effect.descriptor.observation_order",
+            Self::Observation => "effect.descriptor.observation",
         }
     }
 }
@@ -443,6 +524,35 @@ fn parameter_valid(p: &ParameterDescriptorV1) -> bool {
         }
     }
 }
+/// The three rules an [`ObservationDescriptorV1`] must satisfy beyond text and bounds.
+///
+/// * **Text and bounds.** Both display strings are non-empty printable text, and the declared
+///   published range is finite, ordered, and free of `-0.0` -- the same canonicalisation rule
+///   every other descriptor float obeys, so an identity comparison never depends on a zero's sign.
+/// * **A `Computed` tap may not claim `PerBlock`.** `Computed` is the class whose value does not
+///   already exist when the block ends; claiming per-block cadence for it would put an analysis
+///   pass on the render thread, which is precisely what the cost split exists to prevent.
+/// * **A `PerLane` tap requires per-lane state to read.** The observation is a read of kernel
+///   state, so an effect whose qualities declare no per-lane state (`left_bytes == 0`) cannot
+///   produce two independent lanes and must declare `Shared`.
+///
+/// The third rule is the in-descriptor form of issue #143's "PerLane requires bank width": bank
+/// width is not a descriptor field (it is a *factory* capability, `bind_homogeneous_bank`), so the
+/// checkable statement is the one that actually catches the error -- a per-lane tap on an effect
+/// with no per-lane state.
+fn observation_valid(d: &EffectDescriptorV1, o: &ObservationDescriptorV1) -> bool {
+    valid_text(o.display_name)
+        && valid_text(o.display_unit)
+        && o.minimum.is_finite()
+        && o.maximum.is_finite()
+        && !is_negative_zero(o.minimum)
+        && !is_negative_zero(o.maximum)
+        && o.minimum < o.maximum
+        && !(matches!(o.cost, ObservationCostV1::Computed)
+            && matches!(o.cadence, ObservationCadenceV1::PerBlock))
+        && (!matches!(o.channels, ObservationChannelsV1::PerLane)
+            || d.qualities.iter().all(|q| q.maximum_state.left_bytes > 0))
+}
 pub fn validate_descriptor_v1(d: &'static EffectDescriptorV1) -> Result<(), DescriptorErrorSet> {
     let mut e = Vec::new();
     if d.contract_major != 1 {
@@ -569,6 +679,28 @@ pub fn validate_descriptor_v1(d: &'static EffectDescriptorV1) -> Result<(), Desc
             e.push(DescriptorError {
                 path: "qualities",
                 code: DescriptorDiagnosticCode::Quality,
+            })
+        }
+    }
+    let (mut oprior, mut oids) = (0, BTreeSet::new());
+    for o in d.observations {
+        if o.id.0 == 0 || !oids.insert(o.id.0) {
+            e.push(DescriptorError {
+                path: "observations",
+                code: DescriptorDiagnosticCode::ObservationId,
+            })
+        }
+        if o.id.0 <= oprior {
+            e.push(DescriptorError {
+                path: "observations",
+                code: DescriptorDiagnosticCode::ObservationOrder,
+            })
+        }
+        oprior = o.id.0;
+        if !observation_valid(d, o) {
+            e.push(DescriptorError {
+                path: "observations",
+                code: DescriptorDiagnosticCode::Observation,
             })
         }
     }
@@ -1273,21 +1405,23 @@ pub trait NativeEffectFactory: Send + Sync {
         request: PrepareEffectBankRequest<'_>,
     ) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError>;
 }
-/// What one dynamics effect reduced the signal by over the block it last processed (issue #140 D).
+/// One observation reading, in the tap's declared [`unit`](ObservationDescriptorV1::unit).
 ///
-/// Decibels, and **negative for reduction**: `-6.0` means the effect took six decibels off. That is
-/// the sign convention every dynamics kernel in this workspace already smooths internally, so the
-/// observation is a read of state that exists rather than a second computation of it.
+/// Two lanes always, because a dual-mono effect has two of everything. A tap that declares
+/// [`ObservationChannelsV1::Shared`] writes the same value into both, so a consumer never has to
+/// ask which field is meaningful.
 ///
-/// The reading is the value at the *end* of the block, not an average or a peak over it. A meter
-/// window is many blocks long, so the consumer decides how to fold; the effect states one number
-/// per block per channel and nothing else.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct GainReductionV1 {
-    /// Left lane, in decibels; `<= 0`.
-    pub left_db: f32,
-    /// Right lane, in decibels; `<= 0`.
-    pub right_db: f32,
+/// The **sign and unit are the effect's own**, not the consumer's: a compressor writes the
+/// negative decibels its smoother holds, a true-peak limiter writes the linear reduction word its
+/// kernel recurses on. Turning that into the non-negative magnitude a meter shows is the declared
+/// [`fold`](ObservationDescriptorV1::fold) plus one control-plane unit conversion -- neither of
+/// which happens inside an effect, and neither of which puts a `log` on a render thread.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ObservationSampleV1 {
+    /// Left lane.
+    pub left: f32,
+    /// Right lane.
+    pub right: f32,
 }
 
 pub trait PreparedNativeEffect: Send {
@@ -1295,24 +1429,28 @@ pub trait PreparedNativeEffect: Send {
     fn reset(&mut self, kind: ResetKind);
     fn process(&mut self, block: EffectProcessBlock<'_>) -> ProcessReport;
 
-    /// Gain reduction after the last [`process`](Self::process) call, or `None` (issue #140 D).
+    /// Read one declared [`ObservationCostV1::Resident`] tap into `out` (issue #143 D2).
     ///
-    /// # Additive, and default-`None` on purpose
+    /// `tap_index` is the index into
+    /// [`EffectDescriptorV1::observations`](EffectDescriptorV1::observations), never the wire
+    /// `tap_id`: the translation is an admission-time lookup, off the render thread, exactly as
+    /// `parameter_index` is for a live parameter.
     ///
-    /// Most effects have no gain reduction to report -- an EQ, a delay, a saturator reduce nothing
-    /// -- and the ones that do keep it as private smoother state in their kernels. This is the
-    /// observation point that state needs in order to reach a console's meter frame, and it is a
-    /// defaulted method so that adding it breaks no implementation and changes no prepared byte:
-    /// an effect that does not override it costs one vtable slot and returns `None`.
+    /// Returns `false` -- and leaves `out` untouched -- for a tap this effect does not implement.
+    /// The default implementation returns `false` for every index, so adding the method breaks no
+    /// implementation and changes no prepared byte: an effect that declares no tap costs one vtable
+    /// slot.
     ///
-    /// # Not on the render path's critical section
+    /// # `&self`, and why the type says so
     ///
-    /// This is a read of already-computed state, so it is allocation-free and branch-free, but it
-    /// is not called by the graph: nothing in the runtime observes an effect instance yet. The
-    /// transport from here to `MisoMeterFrameV1.trackGrDb` -- an observer bound to an effect node
-    /// rather than a track stage -- is the remaining half of #140 D.
-    fn gain_reduction(&self) -> Option<GainReductionV1> {
-        None
+    /// Resident means *the value already exists*. The method takes `&self` so an implementation
+    /// physically cannot advance a smoother, run a release step, or otherwise make the reading a
+    /// second opinion about what the block did; calling it twice returns identical bits because
+    /// there is nothing it could have changed. That is the whole content of "resident" and it is
+    /// enforced by the signature rather than asserted in prose (#143 E6).
+    fn observe_resident(&self, tap_index: u32, out: &mut ObservationSampleV1) -> bool {
+        let _ = (tap_index, out);
+        false
     }
     fn snapshot_state_payload(
         &self,
@@ -1366,6 +1504,20 @@ pub trait PreparedNativeEffectBank: Send {
     fn metadata(&self) -> PreparedBankMetadata;
     fn reset(&mut self, kind: ResetKind);
     fn process_bank(&mut self, block: EffectBankProcessBlock<'_>) -> BankProcessReport;
+
+    /// Read one declared [`ObservationCostV1::Resident`] tap for **every lane at once**.
+    ///
+    /// One call per tap per block, not one per lane: a bank's state is vector state, so extracting
+    /// it once and scattering into `out` is a single `store`, while a per-lane accessor would be
+    /// `width` of them. `out` is exactly `PreparedBankMetadata::width.lanes()` long; an
+    /// implementation writes every entry or returns `false` and writes none.
+    ///
+    /// Same `&self` rule, for the same reason, as
+    /// [`PreparedNativeEffect::observe_resident`](PreparedNativeEffect::observe_resident).
+    fn observe_resident_bank(&self, tap_index: u32, out: &mut [ObservationSampleV1]) -> bool {
+        let _ = (tap_index, out);
+        false
+    }
     fn snapshot_track_state_payload(
         &self,
         track_index: u32,

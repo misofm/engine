@@ -366,6 +366,18 @@ pub extern "C" fn miso_engine_web_v1_meter_poll(handle: u32) -> u32 {
     with_host_mut(handle, 0, AudioWorkletEngineHost::poll_meters)
 }
 
+/// Return the stable meter-header address, or zero for an invalid handle (issue #143 D5).
+///
+/// The `f32` meter frame carries numbers a meter draws; the window those numbers describe is a
+/// pair of absolute sample counts, which an `f32` cannot hold. They ride this fixed structure, read
+/// exactly as the status and the resource report are.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_meter_header_ptr(handle: u32) -> u32 {
+    with_host(handle, 0, |host| {
+        pointer_u32(ptr::from_ref(host.meter_header()))
+    })
+}
+
 /// Return the number of tracks the live console addresses, or zero before compilation.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_console_track_count(handle: u32) -> u32 {

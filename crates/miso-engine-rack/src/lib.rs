@@ -12,7 +12,8 @@
 use miso_engine_core::realtime::RenderError;
 use miso_engine_effect_contract::{
     BankWidth, BypassShunt, EffectBankProcessBlock, EffectControlLane, EffectProgramKeyV1,
-    PreparedAutomationSpan, PreparedNativeEffectBank, PreparedSidechainPort,
+    ObservationLaneV1, ObservationSampleV1, PreparedAutomationSpan, PreparedNativeEffectBank,
+    PreparedSidechainPort,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -199,6 +200,17 @@ pub trait BankStage: Send {
     fn qualification_counters(&self) -> [u64; 2] {
         [0, 0]
     }
+    /// `[observed lanes, declared taps, armed taps]` (issue #143 E5). Zero for every stage that
+    /// carries no observation state at all, which is every stage in an unobserved plan.
+    fn observation_binding_counts(&self) -> [u64; 3] {
+        [0, 0, 0]
+    }
+    /// Exact engine-owned observation bytes this stage retains. Zero when unobserved.
+    fn observation_retained_bytes(&self) -> usize {
+        0
+    }
+    /// Drop every subscription this stage carries (issue #143 D7).
+    fn disarm_observations(&mut self) {}
 }
 
 /// Adapter from the effect contract's prepared homogeneous bank to a chain stage.
@@ -300,8 +312,18 @@ pub struct ConsoleEffectBankStage {
     /// Latency-preserving dry shunt over the resident AoSoA block, or `None` when no lane of this
     /// slot can be bypassed live.
     shunt: Option<BypassShunt>,
+    /// Issue #143 D3: one observation lane per bank lane, or `None` for the whole slot when the
+    /// plan named no observation capacity. `None` is the byte-identical unobserved path.
+    observations: Option<Box<[Option<ObservationLaneV1>]>>,
+    /// One reading per lane, filled by a single `observe_resident_bank` call per armed tap.
+    ///
+    /// Allocated at bind and only when the slot is observed at all, so an unobserved slot holds
+    /// nothing and an observed one allocates nothing per block.
+    samples: Box<[ObservationSampleV1]>,
     /// Records dropped because a lane's window was full of distinct targets. Zero by construction.
     dropped: u64,
+    /// `Observe` records this slot had no capacity to apply. Zero by construction.
+    unbound: u64,
 }
 
 impl ConsoleEffectBankStage {
@@ -321,9 +343,13 @@ impl ConsoleEffectBankStage {
         width: BankWidth,
         quantum: u32,
         lanes: Vec<Option<EffectControlLane>>,
+        observations: Vec<Option<ObservationLaneV1>>,
         latency: usize,
     ) -> Result<Self, RackError> {
-        if processor.metadata().width != width || lanes.len() != width.lanes() as usize {
+        if processor.metadata().width != width
+            || lanes.len() != width.lanes() as usize
+            || observations.len() != width.lanes() as usize
+        {
             return Err(RackError::WidthMismatch);
         }
         if quantum == 0 {
@@ -343,6 +369,14 @@ impl ConsoleEffectBankStage {
             .iter()
             .any(Option::is_some)
             .then(|| BypassShunt::new(words, line));
+        // Issue #143 level-1 zero: a slot no observation request touched holds neither the lane
+        // vector nor the per-lane sample scratch.
+        let observed = observations.iter().any(Option::is_some);
+        let samples = if observed {
+            vec![ObservationSampleV1::default(); lane_count].into_boxed_slice()
+        } else {
+            Vec::new().into_boxed_slice()
+        };
         Ok(Self {
             processor,
             width,
@@ -352,8 +386,63 @@ impl ConsoleEffectBankStage {
             staging: vec![IDLE_SPAN; capacity].into_boxed_slice(),
             packed: vec![IDLE_SPAN; total].into_boxed_slice(),
             shunt,
+            observations: observed.then(|| observations.into_boxed_slice()),
+            samples,
             dropped: 0,
+            unbound: 0,
         })
+    }
+
+    /// `Observe` records refused because this slot has no observation capacity. Read off render.
+    #[must_use]
+    pub const fn unbound_observations(&self) -> u64 {
+        self.unbound
+    }
+
+    /// Whether any lane of this slot carries observation taps at all (issue #143 E5).
+    #[must_use]
+    pub fn is_observed(&self) -> bool {
+        self.observations.is_some()
+    }
+
+    /// Declared taps and armed taps across every lane of this slot, for the structural gates.
+    #[must_use]
+    pub fn observation_tap_counts(&self) -> (u64, u64) {
+        let mut declared = 0_u64;
+        let mut armed = 0_u64;
+        for lane in self.observations.iter().flat_map(|lanes| lanes.iter()) {
+            if let Some(observation) = lane.as_ref() {
+                declared += observation.len() as u64;
+                armed += (0..observation.len())
+                    .filter(|tap| observation.is_armed(*tap))
+                    .count() as u64;
+            }
+        }
+        (declared, armed)
+    }
+
+    /// Exact engine-owned bytes this slot's observation lanes retain. Zero when unobserved.
+    #[must_use]
+    pub fn observation_retained_bytes(&self) -> usize {
+        self.observations
+            .iter()
+            .flat_map(|lanes| lanes.iter())
+            .filter_map(Option::as_ref)
+            .map(ObservationLaneV1::retained_bytes)
+            .sum()
+    }
+
+    /// Drop every subscription this slot carries (issue #143 D7).
+    pub fn disarm_observations(&mut self) {
+        for lane in self
+            .observations
+            .iter_mut()
+            .flat_map(|lanes| lanes.iter_mut())
+        {
+            if let Some(observation) = lane.as_mut() {
+                observation.disarm_all();
+            }
+        }
     }
 
     /// Records refused because a lane's staging window was full. Read only off the render thread.
@@ -376,6 +465,23 @@ const IDLE_SPAN: PreparedAutomationSpan = PreparedAutomationSpan {
 };
 
 impl BankStage for ConsoleEffectBankStage {
+    fn observation_binding_counts(&self) -> [u64; 3] {
+        let Some(lanes) = self.observations.as_deref() else {
+            return [0, 0, 0];
+        };
+        let observed = lanes.iter().filter(|lane| lane.is_some()).count() as u64;
+        let (declared, armed) = self.observation_tap_counts();
+        [observed, declared, armed]
+    }
+
+    fn observation_retained_bytes(&self) -> usize {
+        ConsoleEffectBankStage::observation_retained_bytes(self)
+    }
+
+    fn disarm_observations(&mut self) {
+        ConsoleEffectBankStage::disarm_observations(self);
+    }
+
     fn process(&mut self, block: BankBlock<'_>) -> Result<(), RenderError> {
         let lane_count = self.width.lanes() as usize;
         // 1. Drain, in lane order, into each lane's own window, then pack down.
@@ -383,8 +489,14 @@ impl BankStage for ConsoleEffectBankStage {
         self.offsets[0] = 0;
         for lane in 0..lane_count {
             if let Some(channel) = self.lanes[lane].as_mut() {
-                let staged = channel.stage(&mut self.staging, block.first_sample);
+                let observation = self
+                    .observations
+                    .as_deref_mut()
+                    .and_then(|lanes| lanes.get_mut(lane))
+                    .and_then(Option::as_mut);
+                let staged = channel.stage(&mut self.staging, block.first_sample, observation);
                 self.dropped = self.dropped.saturating_add(u64::from(staged.dropped));
+                self.unbound = self.unbound.saturating_add(u64::from(staged.unbound));
                 // Packed at this lane's own offset, immediately: that offset is what makes the
                 // window reusable and what gives the lane its private partition of `packed`.
                 self.packed[packed..packed + staged.staged]
@@ -411,6 +523,41 @@ impl BankStage for ConsoleEffectBankStage {
         )
         .map_err(|_| RenderError::InvalidEnvelope)?;
         let _ = self.processor.process_bank(bank);
+        // 4. Publish every armed tap, after the bank ran. One `observe_resident_bank` call per
+        // armed tap fills every lane, so a cohort of eight costs one vector extraction rather than
+        // eight scalar reads -- and a tap no lane armed costs one pass over a `bool` array.
+        if let Some(lanes) = self.observations.as_deref_mut() {
+            let taps = lanes
+                .iter()
+                .filter_map(Option::as_ref)
+                .map(ObservationLaneV1::len)
+                .max()
+                .unwrap_or(0);
+            for tap in 0..taps {
+                let wanted = lanes
+                    .iter()
+                    .filter_map(Option::as_ref)
+                    .any(|observation| observation.wants(tap));
+                if !wanted {
+                    continue;
+                }
+                if !self
+                    .processor
+                    .observe_resident_bank(tap as u32, &mut self.samples)
+                {
+                    continue;
+                }
+                for (lane, observation) in lanes.iter_mut().enumerate() {
+                    let Some(observation) = observation.as_mut() else {
+                        continue;
+                    };
+                    let Some(sample) = self.samples.get(lane) else {
+                        continue;
+                    };
+                    observation.accumulate(tap, *sample, block.first_sample, u64::from(frames));
+                }
+            }
+        }
         // 3. Latency-matched dry restore for exactly the bypassed lanes.
         if let Some(shunt) = self.shunt.as_ref() {
             let (dry_left, dry_right) = shunt.dry();
@@ -555,6 +702,34 @@ impl BankChain {
             total[1] = total[1].saturating_add(counters[1]);
             total
         })
+    }
+
+    /// `[observed lanes, declared taps, armed taps]` across every slot (issue #143 E5).
+    #[must_use]
+    pub fn observation_binding_counts(&self) -> [u64; 3] {
+        self.slots.iter().fold([0, 0, 0], |mut total, slot| {
+            let counts = slot.stage.observation_binding_counts();
+            for (value, add) in total.iter_mut().zip(counts) {
+                *value = value.saturating_add(add);
+            }
+            total
+        })
+    }
+
+    /// Exact engine-owned observation bytes every slot of this chain retains.
+    #[must_use]
+    pub fn observation_retained_bytes(&self) -> usize {
+        self.slots
+            .iter()
+            .map(|slot| slot.stage.observation_retained_bytes())
+            .sum()
+    }
+
+    /// Drop every subscription every slot of this chain carries (issue #143 D7).
+    pub fn disarm_observations(&mut self) {
+        for slot in self.slots.iter_mut() {
+            slot.stage.disarm_observations();
+        }
     }
 }
 

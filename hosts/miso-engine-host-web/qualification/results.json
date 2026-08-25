@@ -15,6 +15,7 @@
         "audioWorkletBoot": "pass",
         "nativeCorpusDigest": "pass",
         "controlPath": "pass",
+        "observation": "pass",
         "mainThreadStall": "pass"
       }
     },
@@ -27,6 +28,7 @@
         "audioWorkletBoot": "pass",
         "nativeCorpusDigest": "pass",
         "controlPath": "pass",
+        "observation": "pass",
         "mainThreadStall": "pass"
       }
     },
@@ -39,6 +41,7 @@
         "audioWorkletBoot": "pass",
         "nativeCorpusDigest": "pass",
         "controlPath": "pass",
+        "observation": "pass",
         "mainThreadStall": "pass"
       }
     }

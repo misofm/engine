@@ -2,9 +2,11 @@
 
 use miso_engine_effect_contract::{
     AutomationRate, EffectDescriptorV1, EffectId, EffectQuality, EnumChoiceV1, LatencySamples,
-    LinkModeSet, ParameterChannelPolicy, ParameterDescriptorV1, ParameterDomain, ParameterId,
-    ParameterMapping, ParameterUnit, PortDescriptorV1, PortId, PortLayout, PortRole,
-    QualityDescriptorV1, SmoothingRule, StatePayloadSizes, TailSamples, validate_descriptor_v1,
+    LinkModeSet, ObservationCadenceV1, ObservationChannelsV1, ObservationCostV1,
+    ObservationDescriptorV1, ObservationFoldV1, ObservationKindV1, ObservationTapId,
+    ParameterChannelPolicy, ParameterDescriptorV1, ParameterDomain, ParameterId, ParameterMapping,
+    ParameterUnit, PortDescriptorV1, PortId, PortLayout, PortRole, QualityDescriptorV1,
+    SmoothingRule, StatePayloadSizes, TailSamples, validate_descriptor_v1,
 };
 use miso_engine_effect_package::{
     EFFECT_DESCRIPTOR_WIRE_V1_UNAVAILABLE, EffectArtifactAuthoringV1, EffectArtifactKindV1,
@@ -419,6 +421,46 @@ static DESCRIPTOR_A: EffectDescriptorV1 = EffectDescriptorV1 {
     parameters: &PARAMETERS,
     ports: &PORTS_UNSORTED,
     qualities: &QUALITIES_A,
+    observations: &[],
+};
+/// Issue #143: `comprehensive-a` plus a declared observation menu and nothing else.
+///
+/// The id and the display name are the same byte lengths as A's, so
+/// `total(C) - total(A)` is exactly the observation section plus its two strings per tap. That is
+/// the formula E10 asserts, in-tree, on both encoders.
+static OBSERVATIONS_C: [ObservationDescriptorV1; 2] = [
+    ObservationDescriptorV1 {
+        id: ObservationTapId(1),
+        display_name: "Gain Reduction",
+        display_unit: "dB",
+        kind: ObservationKindV1::GainReductionDb,
+        unit: ParameterUnit::Db,
+        cost: ObservationCostV1::Resident,
+        cadence: ObservationCadenceV1::PerBlock,
+        fold: ObservationFoldV1::PeakMagnitude,
+        channels: ObservationChannelsV1::PerLane,
+        minimum: 0.0,
+        maximum: 100.0,
+    },
+    ObservationDescriptorV1 {
+        id: ObservationTapId(7),
+        display_name: "Reduction Envelope",
+        display_unit: "dB",
+        kind: ObservationKindV1::GainReductionDb,
+        unit: ParameterUnit::Db,
+        cost: ObservationCostV1::Computed,
+        cadence: ObservationCadenceV1::PerWindow,
+        fold: ObservationFoldV1::Latest,
+        channels: ObservationChannelsV1::Shared,
+        minimum: 0.0,
+        maximum: 60.0,
+    },
+];
+static DESCRIPTOR_C: EffectDescriptorV1 = EffectDescriptorV1 {
+    id: effect_id("fixture.comprehensive-c"),
+    display_name: "Comprehensive C",
+    observations: &OBSERVATIONS_C,
+    ..DESCRIPTOR_A
 };
 static DESCRIPTOR_A_PERMUTED: EffectDescriptorV1 = EffectDescriptorV1 {
     ports: &PORTS_PERMUTED,
@@ -434,6 +476,7 @@ static DESCRIPTOR_B: EffectDescriptorV1 = EffectDescriptorV1 {
     parameters: &[],
     ports: &PORTS_MAIN,
     qualities: &QUALITIES_B,
+    observations: &[],
 };
 
 fn fixture(name: &str) -> PathBuf {
@@ -487,6 +530,11 @@ fn checked_vectors_match_independent_wire_identity_and_port_permutation() {
             &DESCRIPTOR_B,
             "comprehensive-b.wire.hex",
             "comprehensive-b.identity.hex",
+        ),
+        (
+            &DESCRIPTOR_C,
+            "comprehensive-c.wire.hex",
+            "comprehensive-c.identity.hex",
         ),
     ] {
         let wire = encoded(descriptor);
@@ -733,4 +781,52 @@ fn raw_closed_values_and_field_overflows_have_exact_public_diagnostics() {
             (Code::Overflow, field as u32)
         );
     }
+}
+
+/// Issue #143 E10: the observation section is exactly additive, and a stale reader refuses it.
+///
+/// Three statements, each about bytes rather than about intent:
+///
+/// 1. **Zero taps move nothing.** Every production descriptor and both pre-#143 fixtures encode to
+///    the identity they had before the section existed -- proven by the fixture comparison above,
+///    and here by the header window staying eight zeros.
+/// 2. **A tap-bearing total is the formula.** `total(C) - total(A)` is `32` per tap plus the two
+///    declared strings, and nothing else.
+/// 3. **A stale reader refuses rather than ignores.** The pre-#143 verifier's rule was "bytes
+///    88..96 are reserved zero". A tap-bearing descriptor breaks it at byte 88, which is a refusal
+///    with an exact offset, not a silently dropped menu.
+#[test]
+fn observation_section_is_additive_and_stale_readers_refuse_it() {
+    let zero_tap = encoded(&DESCRIPTOR_A);
+    let tap_bearing = encoded(&DESCRIPTOR_C);
+    let expected_delta: usize = OBSERVATIONS_C
+        .iter()
+        .map(|observation| 32 + observation.display_name.len() + observation.display_unit.len())
+        .sum();
+    assert_eq!(tap_bearing.len() - zero_tap.len(), expected_delta);
+    assert_eq!(expected_delta, 2 * 32 + 14 + 2 + 18 + 2);
+
+    // The pre-#143 header rule, spelled out so the refusal is checked rather than assumed.
+    let stale_reader_reserved_zero = |wire: &[u8]| wire[88..96].iter().position(|byte| *byte != 0);
+    assert_eq!(stale_reader_reserved_zero(&zero_tap), None);
+    assert_eq!(stale_reader_reserved_zero(&tap_bearing), Some(0));
+
+    let verified = verify_effect_descriptor_wire_v1(&tap_bearing, 1 << 20).unwrap();
+    assert_eq!(verified.observation_count(), 2);
+    assert_eq!(
+        verify_effect_descriptor_wire_v1(&zero_tap, 1 << 20)
+            .unwrap()
+            .observation_count(),
+        0
+    );
+
+    // The E10 red mutation, run as a positive assertion: writing `string_offset` into the header's
+    // observation-offset word for a zero-tap descriptor is refused, so it can never become the
+    // encoder's habit and silently move every non-dynamics identity.
+    let mut mutated = zero_tap.clone();
+    let string_offset = u32::from_le_bytes(mutated[84..88].try_into().unwrap());
+    mutated[92..96].copy_from_slice(&string_offset.to_le_bytes());
+    let error = verify_effect_descriptor_wire_v1(&mutated, 1 << 20).unwrap_err();
+    assert_eq!(error.code, Code::Reserved);
+    assert_eq!(error.byte_offset, 92);
 }

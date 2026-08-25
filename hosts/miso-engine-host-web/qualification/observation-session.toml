@@ -1,0 +1,35 @@
+# Issue #143 E12: the three-browser observation row's session.
+#
+# The console session plus one compressor in the dynamic rack, at a -30 dBFS threshold. One
+# track cannot fill a cohort, so this is the per-node scalar publish path -- the one a real
+# single-track console uses. Everything else is identity, so the only thing a browser can
+# disagree about is the observation itself.
+schema_version = 1
+session_id = "web-browser-observation"
+revision = 1
+sample_rate_hz = 48000
+quantum_frames = 128
+render_profile = { id = "native", mode = "single_thread" }
+output_profile = { id = "main", channels = 2, sample_format = "f32_planar" }
+limits = { pcm_ring_frames = 2048, control_queue_messages = 64, memory_bytes = 16777216 }
+sources = [
+  { id = "console-source", sample_rate_hz = 48000, content = { identity = "sha256:web-browser-observation", locator = "host:web-browser-observation" }, mapping = { channel_count = 2, region = { start_sample = 0, length_samples = 2048 } } },
+]
+submixes = []
+outputs = [{ id = "main-out" }]
+routes = [
+  { id = "track-main", source = { kind = "track", track_id = "track", tap = "post_matrix" }, destination = { kind = "output_input", output_id = "main-out" }, channel_matrix = { ll = 1.0, lr = 0.0, rl = 0.0, rr = 1.0 }, gain_db = 0.0 },
+]
+automation = []
+
+[[tracks]]
+id = "track"
+source_id = "console-source"
+left_source_channel = 0
+right_source_channel = 1
+builtins = { left = { polarity_invert = false, trim_db = 0.0, hpf_hz = 0.0, lpf_hz = 0.0 }, right = { polarity_invert = false, trim_db = 0.0, hpf_hz = 0.0, lpf_hz = 0.0 } }
+simd1 = { effects = [] }
+dynamic = { effects = [{ id = "comp", identity = { kind = "native", effect_id = "miso.compressor" }, quality = "normal", bypass = false, link_mode = "dual_mono", params = [{ parameter_id = 1, channel = "both", unit = "db", value = -30.0 }, { parameter_id = 2, channel = "both", unit = "ratio", value = 4.0 }, { parameter_id = 3, channel = "both", unit = "db", value = 6.0 }, { parameter_id = 4, channel = "both", unit = "milliseconds", value = 10.0 }, { parameter_id = 5, channel = "both", unit = "milliseconds", value = 100.0 }, { parameter_id = 6, channel = "both", unit = "db", value = 0.0 }, { parameter_id = 7, channel = "both", unit = "linear", value = 1.0 }, { parameter_id = 8, channel = "both", unit = "milliseconds", value = 5.0 }], sidechain = { kind = "none" } }] }
+simd2 = { effects = [] }
+fader = { left_db = 0.0, right_db = 0.0, left_mute = false, right_mute = false }
+pan = { left = -1.0, right = 1.0, smoothing_samples = 0 }

@@ -3267,6 +3267,7 @@ mod tests {
             banks: Vec::new(),
             builtin_banks: Vec::new(),
             observers: Vec::new(),
+            effect_observations: Vec::new(),
         });
         let mut plan = match graph.bind_with_source_set(
             GraphRuntimeBindings {
@@ -3692,6 +3693,7 @@ mod tests {
             banks: Vec::new(),
             builtin_banks: Vec::new(),
             observers: Vec::new(),
+            effect_observations: Vec::new(),
         });
         let old = match graph.bind_with_source_set(
             GraphRuntimeBindings {

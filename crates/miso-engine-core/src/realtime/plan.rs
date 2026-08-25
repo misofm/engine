@@ -92,6 +92,24 @@ pub trait PreparedPlanExecutor: Send {
     fn bank_transposes(&self) -> u64 {
         0
     }
+    /// `[observed stages, declared taps, armed taps]`, walked over the **built** runtime.
+    ///
+    /// Issue #143 E5's structural gate. "A session that asked for no observation carries none" is
+    /// a statement about the objects a plan actually holds, and the only honest way to check it is
+    /// to walk them; comparing render output would pass even for a plan that bound every tap and
+    /// happened to publish nothing. Read only after rendering is disarmed.
+    #[doc(hidden)]
+    fn observation_binding_counts(&self) -> [u64; 3] {
+        [0, 0, 0]
+    }
+    /// Exact engine-owned observation bytes the built runtime retains (issue #143 R7).
+    ///
+    /// Zero for every plan that bound no tap, which is what makes `observation_retained_bytes == 0`
+    /// a walked fact rather than a computed guess.
+    #[doc(hidden)]
+    fn observation_retained_bytes(&self) -> u64 {
+        0
+    }
     /// Copy cumulative auxiliary-worker audit snapshots after render is disarmed.
     #[doc(hidden)]
     fn copy_worker_audit_snapshots(&self, _output: &mut [super::audit::AuditSnapshot]) -> usize {
@@ -294,6 +312,30 @@ impl PreparedRenderPlan {
     /// The plan's internal executor, for the block-boundary hand-over in `plan_exchange`.
     pub(crate) fn executor_mut(&mut self) -> Option<&mut (dyn PreparedPlanExecutor + 'static)> {
         self.executor.as_deref_mut()
+    }
+    /// Walk the built runtime for observation bindings, outside the render scope (issue #143 E5).
+    #[doc(hidden)]
+    #[must_use]
+    pub fn observation_binding_counts(&self) -> [u64; 3] {
+        assert!(
+            !super::audit::is_render_scope_active(),
+            "observation binding counts are sealed until the render audit is disarmed"
+        );
+        self.executor
+            .as_deref()
+            .map_or([0; 3], PreparedPlanExecutor::observation_binding_counts)
+    }
+    /// Walk the built runtime for retained observation bytes, outside the render scope.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn observation_retained_bytes(&self) -> u64 {
+        assert!(
+            !super::audit::is_render_scope_active(),
+            "observation retained bytes are sealed until the render audit is disarmed"
+        );
+        self.executor
+            .as_deref()
+            .map_or(0, PreparedPlanExecutor::observation_retained_bytes)
     }
     /// Read the cumulative bank transpose count outside the render scope.
     #[doc(hidden)]

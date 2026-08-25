@@ -11,16 +11,20 @@ scratch="$(mktemp -d)"
 trap 'rm -rf -- "$scratch"' EXIT
 
 accepted="$scratch/accepted.txt"
+# Issue #143 added exactly one additive export, so the accepted synthetic module carries two and
+# the rejection cases below still reject a third.
 printf '%s\n' \
     'miso_engine_effect_package.wasm: file format wasm 0x1' \
     'Module name: <miso_engine_effect_package.wasm>' \
-    'Function[2]:' \
+    'Function[3]:' \
     ' - func[0] sig=0 <miso_engine_internal_call>' \
-    'Export[2]:' \
+    'Export[3]:' \
     ' - memory[0] -> "memory"' \
     ' - func[1] <miso_engine_effect_descriptor_v1_inspect> -> "miso_engine_effect_descriptor_v1_inspect"' \
-    'Code[2]:' \
+    ' - func[2] <miso_engine_effect_descriptor_v1_inspect_observations> -> "miso_engine_effect_descriptor_v1_inspect_observations"' \
+    'Code[3]:' \
     ' - func[1] size=4 <miso_engine_effect_descriptor_v1_inspect>' \
+    ' - func[2] size=4 <miso_engine_effect_descriptor_v1_inspect_observations>' \
     >"$accepted"
 validate_wasm_exports "$accepted" synthetic-accepted
 
@@ -54,12 +58,12 @@ expect_rejection "$wrong_kind" non-function-export
 
 extra="$scratch/extra.txt"
 cp "$accepted" "$extra"
-sed -i '/Code\[2\]:/i\ - func[2] <miso_engine_unexpected> -> "miso_engine_unexpected"' "$extra"
+sed -i '/Code\[3\]:/i\ - func[3] <miso_engine_unexpected> -> "miso_engine_unexpected"' "$extra"
 expect_rejection "$extra" extra-export
 
 duplicate="$scratch/duplicate.txt"
 cp "$accepted" "$duplicate"
-sed -i '/Code\[2\]:/i\ - func[1] <miso_engine_effect_descriptor_v1_inspect> -> "miso_engine_effect_descriptor_v1_inspect"' "$duplicate"
+sed -i '/Code\[3\]:/i\ - func[1] <miso_engine_effect_descriptor_v1_inspect> -> "miso_engine_effect_descriptor_v1_inspect"' "$duplicate"
 expect_rejection "$duplicate" duplicate-export
 
 printf 'effect interchange Wasm export parser regression: ok synthetic_only=1\n'

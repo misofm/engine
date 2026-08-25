@@ -14,7 +14,11 @@ validate_wasm_exports() {
             if (name ~ /^miso_engine_/) print name
         }
     ' "$metadata")"
-    [[ "$exports" == miso_engine_effect_descriptor_v1_inspect ]] || {
+    # Issue #143 added exactly one additive export, the observation projection; the frozen
+    # `..._inspect` signature and its record layouts are untouched.
+    local expected
+    expected=$'miso_engine_effect_descriptor_v1_inspect\nmiso_engine_effect_descriptor_v1_inspect_observations'
+    [[ "$(printf '%s\n' "$exports" | LC_ALL=C sort)" == "$expected" ]] || {
         printf 'effect interchange target matrix: unexpected Wasm export in %s\n%s\n' \
             "$context" "$exports" >&2
         return 1

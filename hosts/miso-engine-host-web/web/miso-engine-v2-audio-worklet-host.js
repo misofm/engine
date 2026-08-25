@@ -52,16 +52,41 @@ const LIMIT_FIELDS = [
   "maximumEffectScratchBytes", "maximumBuiltinRetainedBytes", "maximumHostRetainedBytes",
   "maximumNamedAllocationBytes", "maximumMeterStreams", "maximumMeterItems", "maximumMeterBytes",
   "consoleCommandQueueRecords", "consoleMeterBlocks",
+  // Issue #143 D3/D6: the frozen configuration's remaining two reserved words, carved exactly as
+  // #137 carved the first two. Zero in both is what every pre-#143 writer already sends and means
+  // "no observation capacity, no master designation".
+  "consoleObservationTaps", "consoleMasterTrackPlusOne",
 ];
 
 // Issue #137 D1: the frozen 48-byte little-endian command record.
 const COMMAND_RECORD_BYTES = 48;
 const MAXIMUM_COMMAND_RECORDS = 256;
+// Issue #143: the largest `consoleObservationTaps` the frozen configuration accepts.
+const MAXIMUM_OBSERVATION_TAPS = 16;
+// Issue #143: the two observation command kinds, named here so `observe()` never writes a literal.
+// Not `MISO_`-prefixed: `scripts/check-env-vocabulary.sh` reserves that prefix for the engine's
+// environment vocabulary, and a `MISO_`-prefixed identifier in any tracked file is a failure.
+const OBSERVE_SUBSCRIBE_KIND = 7;
+const OBSERVE_UNSUBSCRIBE_KIND = 8;
+const SUBSCRIPTION_FIELDS = [
+  "trackIndex", "rack", "effectIndex", "tapId", "windowBlocks", "armed",
+];
+
+function validSubscription(subscription) {
+  return hasExactFields(subscription, SUBSCRIPTION_FIELDS)
+    && validU32(subscription.trackIndex)
+    && Number.isSafeInteger(subscription.rack) && subscription.rack >= 0 && subscription.rack <= 2
+    && validU32(subscription.effectIndex)
+    && validU32(subscription.tapId) && subscription.tapId > 0
+    && validU32(subscription.windowBlocks)
+    && typeof subscription.armed === "boolean";
+}
 const COMMAND_FIELDS = [
   "kind", "rack", "channel", "trackIndex", "effectIndex", "parameterId", "smoothingSamples",
   "values",
 ];
-const COMMAND_KINDS = new Set([1, 2, 3, 4, 5, 6]);
+// Issue #143 added kinds 7 and 8, the two observation subscribe/unsubscribe records.
+const COMMAND_KINDS = new Set([1, 2, 3, 4, 5, 6, 7, 8]);
 const NOT_APPLICABLE = 255;
 
 /// Encode one live-console submission into a single transferable byte block.
@@ -105,6 +130,8 @@ const RESOURCE_FIELDS = [
   "sourceTotalBytes", "sourceOverheadBytes", "effectScalarStateBytes", "effectScalarScratchBytes",
   "builtinRetainedBytes", "graphSessionPlusPlanBytes", "graphIncrementalPlanBytes",
   "graphMetadataBytes", "graphDelayBytes", "largestNamedAllocationBytes",
+  // Issue #143: carved from the report's first reserved word.
+  "observationRetainedBytes",
 ];
 const RESOURCE_U64_FIELDS = RESOURCE_FIELDS.slice(3);
 
@@ -152,7 +179,14 @@ function validLimits(limits) {
     && LIMIT_FIELDS.slice(6, 21).every((field) => validU64(limits[field], true))
     && validU64(limits.consoleCommandQueueRecords)
     && limits.consoleCommandQueueRecords <= BigInt(MAXIMUM_COMMAND_RECORDS)
-    && validU64(limits.consoleMeterBlocks);
+    && validU64(limits.consoleMeterBlocks)
+    // Issue #143 D3/D6: capacity requires a queue to carry the subscription, and a designation
+    // requires capacity to produce a reading.
+    && validU64(limits.consoleObservationTaps)
+    && limits.consoleObservationTaps <= BigInt(MAXIMUM_OBSERVATION_TAPS)
+    && (limits.consoleObservationTaps === 0n || limits.consoleCommandQueueRecords !== 0n)
+    && validU64(limits.consoleMasterTrackPlusOne)
+    && (limits.consoleMasterTrackPlusOne === 0n || limits.consoleObservationTaps !== 0n);
 }
 
 function validResources(resources, backend, sampleRateHz, quantumFrames) {
@@ -254,6 +288,10 @@ class MisoAudioWorkletHostV1 {
   #inFlightCommands = 0;
   #inFlightLease = new Set();
   #commandQueueRecords;
+  #consoleMeterBlocks;
+  /// Issue #143: the host's own record of the taps it armed, keyed by the four addressing numbers.
+  /// It is what `trackGrDb`'s positional array structurally cannot express.
+  #observations = new Map();
   #ringBlocks;
   #onMeterFrame = null;
   #onTelemetryFrame = null;
@@ -273,6 +311,7 @@ class MisoAudioWorkletHostV1 {
     memoryBytes,
     ringBlocks,
     commandQueueRecords,
+    consoleMeterBlocks,
   ) {
     Object.defineProperties(this, {
       node: { value: node, enumerable: true },
@@ -285,6 +324,7 @@ class MisoAudioWorkletHostV1 {
     this.#quantumFrames = quantumFrames;
     this.#ringBlocks = ringBlocks;
     this.#commandQueueRecords = commandQueueRecords;
+    this.#consoleMeterBlocks = consoleMeterBlocks;
     this.#port = node.port;
     this.#port.onmessage = (event) => this.#receive(event.data);
     this.#port.onmessageerror = () => this.#fail(webError(255, this.#oldestRequestId()));
@@ -322,12 +362,28 @@ class MisoAudioWorkletHostV1 {
     // whose shape is wrong is a hard failure exactly like a malformed acknowledgement: a console
     // that silently ignores a broken frame is a console that lies to its user.
     if (message?.tag === "miso.meter.v1") {
-      if (!hasExactFields(message, ["tag", "sequence", "windows", "trackCount", "peaks"])
+      // Issue #143 D5: the gain-reduction section and the sample window ride the same frame.
+      // Every rule below is a shape rule the app is entitled to rely on without checking:
+      // `trackGrDb` is exactly `trackCount` long, every entry is a finite non-negative magnitude,
+      // `masterGrDb` is a finite number or `null` -- never `0` standing in for absence -- and the
+      // window is half-open and non-empty.
+      if (!hasExactFields(message, [
+        "tag", "sequence", "windows", "trackCount", "peaks",
+        "trackGrDb", "masterGrDb", "firstSample", "endSample",
+      ])
           || !Number.isSafeInteger(message.sequence) || message.sequence <= 0
           || !Number.isSafeInteger(message.windows) || message.windows <= 0
           || !Number.isSafeInteger(message.trackCount) || message.trackCount < 0
           || !(message.peaks instanceof Float32Array)
-          || message.peaks.length !== message.trackCount * 2 + 2) {
+          || message.peaks.length !== message.trackCount * 2 + 2
+          || !(message.trackGrDb instanceof Float32Array)
+          || message.trackGrDb.length !== message.trackCount
+          || !message.trackGrDb.every((value) => Number.isFinite(value) && value >= 0)
+          || !(message.masterGrDb === null
+            || (typeof message.masterGrDb === "number" && Number.isFinite(message.masterGrDb)
+              && message.masterGrDb >= 0))
+          || typeof message.firstSample !== "bigint" || typeof message.endSample !== "bigint"
+          || message.firstSample < 0n || message.endSample < message.firstSample) {
         this.#fail(webError(255, this.#oldestRequestId()));
         return;
       }
@@ -592,6 +648,76 @@ class MisoAudioWorkletHostV1 {
     );
   }
 
+  /// Subscribe to, or unsubscribe from, declared observation taps (issue #143).
+  ///
+  /// # Why this is not just `command()` with two more kinds
+  ///
+  /// It *is* those two kinds on the wire -- one batch, one transaction, the same
+  /// `appliedAtSample`. What it adds is the answer to the question `trackGrDb` structurally cannot
+  /// answer: **which** tracks have an observed effect at all. The frame's array is positional, so
+  /// a track with no tap and a track that is not reducing both read `0`; the map this returns is
+  /// where that distinction lives, and it is why the array can be read without null checks.
+  ///
+  /// The map is the host's own record of what it successfully armed. A batch is all-or-nothing, so
+  /// it is updated only on `result === 0`, and it is cleared whenever the plan is replaced --
+  /// subscriptions belong to the plan they were applied to (D7).
+  async observe(request) {
+    if (!hasExactFields(request, ["requestId", "subscriptions"])
+        || !Array.isArray(request.subscriptions)
+        || request.subscriptions.length === 0
+        || request.subscriptions.length > MAXIMUM_COMMAND_RECORDS
+        || !request.subscriptions.every(validSubscription)) {
+      return Promise.reject(webError(1, request?.requestId ?? 0));
+    }
+    const commands = request.subscriptions.map((subscription) => ({
+      kind: subscription.armed
+        ? OBSERVE_SUBSCRIBE_KIND
+        : OBSERVE_UNSUBSCRIBE_KIND,
+      rack: subscription.rack,
+      channel: 255,
+      trackIndex: subscription.trackIndex,
+      effectIndex: subscription.effectIndex,
+      parameterId: subscription.tapId,
+      smoothingSamples: subscription.windowBlocks,
+      values: [0, 0, 0, 0],
+    }));
+    const ack = await this.command({ requestId: request.requestId, commands });
+    if (ack.result === 0) {
+      for (const subscription of request.subscriptions) {
+        const key = [
+          subscription.trackIndex, subscription.rack, subscription.effectIndex, subscription.tapId,
+        ].join("/");
+        if (subscription.armed) {
+          this.#observations.set(key, {
+            trackIndex: subscription.trackIndex,
+            rack: subscription.rack,
+            effectIndex: subscription.effectIndex,
+            tapId: subscription.tapId,
+            // The frame carries one gain-reduction slot per track, so the slot is the track.
+            frameSlot: subscription.trackIndex,
+            windowBlocks: subscription.windowBlocks === 0
+              ? Number(this.#consoleMeterBlocks)
+              : subscription.windowBlocks,
+          });
+        } else {
+          this.#observations.delete(key);
+        }
+      }
+    }
+    return Object.freeze({
+      tag: "miso.observe.v1",
+      requestId: ack.requestId,
+      result: ack.result,
+      reason: ack.reason,
+      bindings: Object.freeze([...this.#observations.values()]
+        .sort((left, right) => left.trackIndex - right.trackIndex
+          || left.rack - right.rack
+          || left.effectIndex - right.effectIndex
+          || left.tapId - right.tapId)
+        .map(Object.freeze)),
+    });
+  }
+
   /// Read the compiled session's canonical track order (issue #137 D1).
   ///
   /// This is the addressing authority for `trackIndex`: the app never guesses an index, and never
@@ -651,6 +777,7 @@ class MisoAudioWorkletHostV1 {
     const requestId = this.#lastRequestId + 1;
     await this.#request({ tag: "miso.dispose.v1", requestId }, [], "dispose", true);
     this.#disposed = true;
+    this.#observations.clear();
     this.#onMeterFrame = null;
     this.#onTelemetryFrame = null;
     this.#port.onmessage = null;
@@ -755,6 +882,9 @@ export async function createMisoAudioWorkletHost(options) {
       Math.floor(options.limits.sourceRingFrames / options.quantumFrames) || 1,
       // Issue #137 D1: zero means the engine's own default command-queue depth.
       Number(options.limits.consoleCommandQueueRecords) || 64,
+      // Issue #143: the plan's default observation window is the meter window; a subscription that
+      // names `windowBlocks: 0` gets it, and the returned map says which one it got.
+      Number(options.limits.consoleMeterBlocks),
     );
   } catch (error) {
     cleanupNode(node);

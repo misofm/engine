@@ -32,10 +32,15 @@
 //! drop and no unbounded loop -- the drain is bounded by the queue capacity, which preparation
 //! refuses to make larger than the automation capacity.
 
-use miso_engine_core::realtime::Consumer;
+use miso_engine_core::realtime::{
+    Consumer, ObservationPublisherV1, ObservationWindowV1, observation_slot_retained_bytes,
+};
 use miso_engine_lane::kernels::pdc_delay_block;
 
-use crate::{AutomationSpanKind, ParameterChannel, PreparedAutomationSpan};
+use crate::{
+    AutomationSpanKind, ObservationDescriptorV1, ObservationFoldV1, ObservationSampleV1,
+    ParameterChannel, PreparedAutomationSpan,
+};
 
 /// One admitted, still-unapplied live control event for one prepared effect instance.
 ///
@@ -60,6 +65,22 @@ pub enum EffectControlRecordV1 {
         channel: ParameterChannel,
         /// The new value, already domain-checked by the admitting host.
         value: f32,
+    },
+    /// Arm or disarm one declared observation tap (issue #143 D3, level 2).
+    ///
+    /// It rides this queue rather than a queue of its own for one reason: a subscription and a
+    /// parameter command that arrive in the same submission are drained by the same call at the
+    /// top of the same block, so STATE and IMPACT land on one sample timeline **by construction**
+    /// rather than by two clocks agreeing. `tap_index` is the index into the descriptor's
+    /// observation table, never the wire `tap_id`; `window_blocks` of `0` means "the plan's
+    /// default".
+    Observe {
+        /// Index into the descriptor's observation table.
+        tap_index: u32,
+        /// Whether the tap is to be read at all after this block boundary.
+        armed: bool,
+        /// Render blocks per published window, or `0` for the plan's default.
+        window_blocks: u32,
     },
     /// Set this instance's live bypass.
     ///
@@ -112,6 +133,12 @@ impl EffectControlLane {
 
     /// Drain every queued record into `staging`, in canonical span order, and return the count.
     ///
+    /// `observation` is this instance's tap state when the plan is observation-capable and `None`
+    /// otherwise. An [`EffectControlRecordV1::Observe`] emits **no span**: it changes what is read
+    /// after the block, never what the block renders, so it does not touch the staging window and
+    /// cannot make it overflow. A plan with no observation capacity applies nothing and reports the
+    /// record as refused, which is what the control plane turns into `ObservationUnbound`.
+    ///
     /// `staging` is the caller's preallocated window for this lane. Records are collapsed
     /// last-wins per `(parameter_index, channel)` and inserted in canonical order, so the emitted
     /// slice is already the strictly increasing, non-overlapping block the effect contract
@@ -121,13 +148,33 @@ impl EffectControlLane {
     /// the returned overflow. Preparation makes that unreachable by refusing a queue deeper than
     /// the effect's automation capacity; the count exists so a violated invariant is observable
     /// rather than silent.
-    pub fn stage(&mut self, staging: &mut [PreparedAutomationSpan], first_sample: u64) -> Staged {
+    pub fn stage(
+        &mut self,
+        staging: &mut [PreparedAutomationSpan],
+        first_sample: u64,
+        observation: Option<&mut ObservationLaneV1>,
+    ) -> Staged {
         let mut staged = 0_usize;
         let mut dropped = 0_u32;
+        let mut unbound = 0_u32;
+        let mut observation = observation;
         while let Ok(record) = self.control.try_pop() {
             let (parameter_index, channel, value) = match record {
                 EffectControlRecordV1::Bypass(value) => {
                     self.bypass = value;
+                    continue;
+                }
+                EffectControlRecordV1::Observe {
+                    tap_index,
+                    armed,
+                    window_blocks,
+                } => {
+                    let applied = observation.as_deref_mut().is_some_and(|lane| {
+                        lane.arm(tap_index, armed, window_blocks, first_sample)
+                    });
+                    if !applied {
+                        unbound = unbound.saturating_add(1);
+                    }
                     continue;
                 }
                 EffectControlRecordV1::Parameter {
@@ -174,7 +221,11 @@ impl EffectControlLane {
             staging[position] = span;
             staged += 1;
         }
-        Staged { staged, dropped }
+        Staged {
+            staged,
+            dropped,
+            unbound,
+        }
     }
 }
 
@@ -185,7 +236,249 @@ pub struct Staged {
     pub staged: usize,
     /// Records refused because the window was full of distinct targets. Zero by construction.
     pub dropped: u32,
+    /// [`EffectControlRecordV1::Observe`] records this plan had no capacity to apply. Zero by
+    /// construction: the control plane refuses them before they reach a queue.
+    pub unbound: u32,
 }
+
+/// One declared tap's arm state and open window, for one prepared instance or one bank lane.
+///
+/// Sixteen bytes of accumulator (`peak_left`, `peak_right`, `blocks`, `window_blocks`) plus the
+/// window's own bookkeeping. All of it is allocated at preparation from the **declared menu**, so
+/// arming allocates nothing and disarming frees nothing: subscribe is a flag, not a resource.
+#[derive(Debug)]
+struct ObservationTapV1 {
+    publisher: ObservationPublisherV1,
+    /// The declared fold, copied once at bind so the render path never walks the descriptor.
+    fold: ObservationFoldV1,
+    armed: bool,
+    /// Blocks per published window; never zero once armed.
+    window_blocks: u32,
+    blocks: u32,
+    first_sample: u64,
+    end_sample: u64,
+    sequence: u64,
+    peak_left: f32,
+    peak_right: f32,
+}
+
+/// Every declared tap of one prepared effect instance, or of one lane of one bank slot.
+///
+/// # The two-level zero (issue #143 D3)
+///
+/// Level 1 is that this type does not exist in a plan whose console request named no observation
+/// capacity: there is no lane, no slot and no vector, and the render path is the byte-identical one
+/// it always was. Level 2 is [`ObservationTapV1::armed`]: inside a capable plan, an unarmed tap's
+/// effect state is never read, never folded and never stored, and the honest cost is one predicted
+/// branch per driven effect per block.
+#[derive(Debug)]
+pub struct ObservationLaneV1 {
+    taps: Box<[ObservationTapV1]>,
+    default_window_blocks: u32,
+}
+
+impl ObservationLaneV1 {
+    /// Bind one publisher per declared tap. Off the render thread, once, at preparation.
+    ///
+    /// `publishers` must be one per entry of `observations`, in declaration order.
+    #[must_use]
+    pub fn new(
+        observations: &'static [ObservationDescriptorV1],
+        publishers: Vec<ObservationPublisherV1>,
+        default_window_blocks: u32,
+    ) -> Option<Self> {
+        if publishers.len() != observations.len() {
+            return None;
+        }
+        let default_window_blocks = default_window_blocks.max(1);
+        let taps: Vec<ObservationTapV1> = observations
+            .iter()
+            .zip(publishers)
+            .map(|(descriptor, publisher)| ObservationTapV1 {
+                publisher,
+                fold: descriptor.fold,
+                armed: false,
+                window_blocks: default_window_blocks,
+                blocks: 0,
+                first_sample: 0,
+                end_sample: 0,
+                sequence: 0,
+                peak_left: 0.0,
+                peak_right: 0.0,
+            })
+            .collect();
+        Some(Self {
+            taps: taps.into_boxed_slice(),
+            default_window_blocks,
+        })
+    }
+
+    /// Declared taps this lane carries.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.taps.len()
+    }
+
+    /// Whether the lane carries no tap at all.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.taps.is_empty()
+    }
+
+    /// Exact engine-owned bytes this lane retains, including its slots.
+    ///
+    /// One tap is one accumulator row plus one shared conflating cell. Stated as a formula rather
+    /// than a measured number so a row that grows has to move this line too (#143 R7).
+    #[must_use]
+    pub fn retained_bytes(&self) -> usize {
+        self.taps.len()
+            * (core::mem::size_of::<ObservationTapV1>() + observation_slot_retained_bytes())
+    }
+
+    /// Whether `tap_index` is armed right now. Off-thread introspection for the structural gates.
+    #[must_use]
+    pub fn is_armed(&self, tap_index: usize) -> bool {
+        self.taps.get(tap_index).is_some_and(|tap| tap.armed)
+    }
+
+    /// Whether any tap is armed, which is the one branch the block-top publish step takes.
+    #[must_use]
+    pub fn any_armed(&self) -> bool {
+        self.taps.iter().any(|tap| tap.armed)
+    }
+
+    /// The window length this lane would use for a request that names none.
+    #[must_use]
+    pub const fn default_window_blocks(&self) -> u32 {
+        self.default_window_blocks
+    }
+
+    /// Apply one drained [`EffectControlRecordV1::Observe`]; `false` for an index this lane has
+    /// no tap for.
+    ///
+    /// Arming opens a fresh window at `first_sample`, which is the first sample of the block that
+    /// drained the record -- the exact `applied_at_sample` the subscription was acknowledged with.
+    /// A re-arm is idempotent except that the newer `window_blocks` wins and the window restarts,
+    /// so a consumer never folds two different window lengths into one reading.
+    pub fn arm(
+        &mut self,
+        tap_index: u32,
+        armed: bool,
+        window_blocks: u32,
+        first_sample: u64,
+    ) -> bool {
+        let default = self.default_window_blocks;
+        let Some(tap) = usize::try_from(tap_index)
+            .ok()
+            .and_then(|index| self.taps.get_mut(index))
+        else {
+            return false;
+        };
+        tap.armed = armed;
+        tap.window_blocks = if window_blocks == 0 {
+            default
+        } else {
+            window_blocks
+        };
+        tap.blocks = 0;
+        tap.first_sample = first_sample;
+        tap.end_sample = first_sample;
+        tap.peak_left = 0.0;
+        tap.peak_right = 0.0;
+        true
+    }
+
+    /// Release every subscription without touching the published windows (issue #143 D7).
+    ///
+    /// A plan replacement drops subscriptions because the plan they addressed is gone; the app
+    /// re-subscribes against the new plan. Disarming here is the same operation an explicit
+    /// unsubscribe performs, so there is one code path and one meaning.
+    pub fn disarm_all(&mut self) {
+        for tap in self.taps.iter_mut() {
+            tap.armed = false;
+            tap.blocks = 0;
+            tap.peak_left = 0.0;
+            tap.peak_right = 0.0;
+        }
+    }
+}
+
+// REALTIME_POLICY_BEGIN
+impl ObservationLaneV1 {
+    /// Whether tap `tap_index` should be read for this block at all.
+    ///
+    /// The whole of level-2 zero: one bounds check and one flag load. An unarmed tap's effect state
+    /// is never touched, because this returns `false` before anything asks the effect for it.
+    #[must_use]
+    pub fn wants(&self, tap_index: usize) -> bool {
+        match self.taps.get(tap_index) {
+            Some(tap) => tap.armed,
+            None => false,
+        }
+    }
+
+    /// Fold one block's reading into tap `tap_index`, publishing the window if it closes here.
+    ///
+    /// `frames` is the block length, so `end_sample` advances by exactly what was rendered and
+    /// consecutive windows tile with no gap. Called **after** `process` returns: the reading is the
+    /// state at the end of the block, which is the only moment at which "resident" is true.
+    pub fn accumulate(
+        &mut self,
+        tap_index: usize,
+        sample: ObservationSampleV1,
+        first_sample: u64,
+        frames: u64,
+    ) {
+        let Some(tap) = self.taps.get_mut(tap_index) else {
+            return;
+        };
+        if !tap.armed {
+            return;
+        }
+        // `first_sample` is **not** taken from the block. It was set when the tap was armed and it
+        // is set again to `end_sample` when a window closes, so consecutive windows tile with no
+        // gap as a property of this type rather than of whatever the caller happens to pass.
+        tap.end_sample = first_sample.saturating_add(frames);
+        match tap.fold {
+            // `max(|x|)` is what turns an effect's own negative-for-reduction convention into the
+            // non-negative magnitude a meter reads. It is one `abs` and one compare per lane per
+            // block, and it is the whole reason the app's `Math.max(0, x)` is a no-op rather than
+            // a silent zeroing.
+            ObservationFoldV1::PeakMagnitude => {
+                let left = sample.left.abs();
+                let right = sample.right.abs();
+                if left > tap.peak_left {
+                    tap.peak_left = left;
+                }
+                if right > tap.peak_right {
+                    tap.peak_right = right;
+                }
+            }
+            ObservationFoldV1::Latest => {
+                tap.peak_left = sample.left;
+                tap.peak_right = sample.right;
+            }
+        }
+        tap.blocks = tap.blocks.saturating_add(1);
+        if tap.blocks < tap.window_blocks {
+            return;
+        }
+        tap.sequence = tap.sequence.saturating_add(1);
+        tap.publisher.publish(ObservationWindowV1 {
+            first_sample: tap.first_sample,
+            end_sample: tap.end_sample,
+            sequence: tap.sequence,
+            blocks: tap.blocks,
+            left: tap.peak_left,
+            right: tap.peak_right,
+        });
+        tap.blocks = 0;
+        tap.first_sample = tap.end_sample;
+        tap.peak_left = 0.0;
+        tap.peak_right = 0.0;
+    }
+}
+// REALTIME_POLICY_END
 
 /// The latency-preserving bypass shunt, applied **outside** the effect.
 ///

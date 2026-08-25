@@ -42,12 +42,14 @@ use miso_engine_effect_contract::{
     AutomationRate, AutomationSpanKind, BankProcessReport, BankWidth, EffectBankProcessBlock,
     EffectDescriptorV1, EffectPrepareError, EffectProcessBlock, EffectQuality,
     InitialParameterValue, LatencySamples, LinkMode, LinkModeSet, NativeEffectFactory,
-    ParameterChannel, ParameterChannelPolicy, ParameterDescriptorV1, ParameterDomain, ParameterId,
-    ParameterMapping, ParameterUnit, PortDescriptorV1, PortId, PortLayout, PortRole,
-    PrepareEffectBankRequest, PrepareEffectRequest, PreparedAutomationSpan, PreparedBankMetadata,
-    PreparedEffectMetadata, PreparedNativeEffect, PreparedNativeEffectBank, ProcessReport,
-    ResetKind, SmoothingRule, StatePayloadError, StatePayloadInput, StatePayloadOutput,
-    StatePayloadSizes, TailSamples, expected_prepared_metadata,
+    ObservationCadenceV1, ObservationChannelsV1, ObservationCostV1, ObservationDescriptorV1,
+    ObservationFoldV1, ObservationKindV1, ObservationSampleV1, ObservationTapId, ParameterChannel,
+    ParameterChannelPolicy, ParameterDescriptorV1, ParameterDomain, ParameterId, ParameterMapping,
+    ParameterUnit, PortDescriptorV1, PortId, PortLayout, PortRole, PrepareEffectBankRequest,
+    PrepareEffectRequest, PreparedAutomationSpan, PreparedBankMetadata, PreparedEffectMetadata,
+    PreparedNativeEffect, PreparedNativeEffectBank, ProcessReport, ResetKind, SmoothingRule,
+    StatePayloadError, StatePayloadInput, StatePayloadOutput, StatePayloadSizes, TailSamples,
+    expected_prepared_metadata,
 };
 use miso_engine_effect_runtime::bank::{self, NonFiniteReport};
 use miso_engine_effect_runtime::dynamics::{
@@ -376,17 +378,42 @@ const QUALITIES: [miso_engine_effect_contract::QualityDescriptorV1; 4] = [
     quality(96_000),
 ];
 
+/// The one declared observation tap: the **most reduced** of the two bands (issue #143 R3).
+///
+/// `Side::gain_db` is one smoother word per band, in decibels and negative for reduction, so the
+/// minimum of the two is the largest reduction the channel is applying. One aggregate tap ships in
+/// V1 because the meter frame carries one slot per track; per-band taps are an additive follow-up
+/// once per-tap frame slots exist, and they need no wire, contract or transport change to arrive.
+pub const MULTIBAND_COMPRESSOR_OBSERVATIONS_V1: [ObservationDescriptorV1; 1] =
+    [ObservationDescriptorV1 {
+        id: ObservationTapId(1),
+        display_name: "Gain Reduction",
+        display_unit: "dB",
+        kind: ObservationKindV1::GainReductionDb,
+        unit: ParameterUnit::Db,
+        cost: ObservationCostV1::Resident,
+        cadence: ObservationCadenceV1::PerBlock,
+        fold: ObservationFoldV1::PeakMagnitude,
+        channels: ObservationChannelsV1::PerLane,
+        minimum: 0.0,
+        maximum: 100.0,
+    }];
+
 /// Immutable descriptor for the launch two-band multiband compressor.
 pub const MULTIBAND_COMPRESSOR_DESCRIPTOR_V1: EffectDescriptorV1 = EffectDescriptorV1 {
     id: effect_id("miso.multiband-compressor"),
     display_name: "Multiband Compressor",
     contract_major: 1,
-    contract_minor: 0,
+    // Issue #143 P1: declaring the first tap is a `contract_minor` bump and a derived identity
+    // re-pin of exactly `32 + len("Gain Reduction") + len("dB")` = 48 bytes.
+    // `state_layout_version` does not move: the tap reads state that was already there.
+    contract_minor: 1,
     state_layout_version: STATE_LAYOUT_VERSION,
     supported_link_modes: LinkModeSet::ALL,
     parameters: &MULTIBAND_COMPRESSOR_PARAMETERS_V1,
     ports: &PORTS,
     qualities: &QUALITIES,
+    observations: &MULTIBAND_COMPRESSOR_OBSERVATIONS_V1,
 };
 
 /// The domain of one parameter, in the shared runtime's vocabulary.
@@ -1633,9 +1660,30 @@ impl NativeEffectFactory for MultibandCompressorFactory {
     }
 }
 
+/// The aggregate band reading for one lane of one channel: the more negative of the two bands.
+///
+/// `min` rather than a sum or an average, because the two bands are applied to *disjoint* parts of
+/// the spectrum: the channel's worst-case reduction is the deeper of the two, and adding them
+/// would report a reduction the signal never received.
+fn band_aggregate_db<L: Lane, const W: usize>(side: &Side<L, W>, lane: usize) -> f32 {
+    let low = lane_value(side.gain_db[LOW_BAND], lane);
+    let high = lane_value(side.gain_db[HIGH_BAND], lane);
+    if low < high { low } else { high }
+}
+
 impl PreparedNativeEffect for PreparedMultibandCompressor {
     fn metadata(&self) -> PreparedEffectMetadata {
         self.metadata
+    }
+
+    /// Issue #143 D2 / R3: the deeper of the two bands' smoother words, read for lane 0.
+    fn observe_resident(&self, tap_index: u32, out: &mut ObservationSampleV1) -> bool {
+        if tap_index != 0 {
+            return false;
+        }
+        out.left = band_aggregate_db(&self.instance.sides[0], 0);
+        out.right = band_aggregate_db(&self.instance.sides[1], 0);
+        true
     }
 
     fn reset(&mut self, kind: ResetKind) {
@@ -1685,6 +1733,17 @@ impl PreparedNativeEffect for PreparedMultibandCompressor {
 impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedMultibandCompressorBank<L, W> {
     fn metadata(&self) -> PreparedBankMetadata {
         self.metadata.clone()
+    }
+
+    fn observe_resident_bank(&self, tap_index: u32, out: &mut [ObservationSampleV1]) -> bool {
+        if tap_index != 0 || out.len() != W || W != L::WIDTH {
+            return false;
+        }
+        for (lane, sample) in out.iter_mut().enumerate() {
+            sample.left = band_aggregate_db(&self.instance.sides[0], lane);
+            sample.right = band_aggregate_db(&self.instance.sides[1], lane);
+        }
+        true
     }
 
     fn reset(&mut self, kind: ResetKind) {

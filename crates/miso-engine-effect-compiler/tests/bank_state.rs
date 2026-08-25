@@ -86,6 +86,7 @@ static DESCRIPTOR: EffectDescriptorV1 = EffectDescriptorV1 {
     parameters: &PARAMETERS,
     ports: &PORTS,
     qualities: &QUALITIES,
+    observations: &[],
 };
 static ALTERNATE_DESCRIPTOR: EffectDescriptorV1 = EffectDescriptorV1 {
     display_name: "Alternate bank state",

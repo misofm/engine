@@ -29,12 +29,14 @@ use miso_engine_effect_contract::{
     AutomationRate, AutomationSpanKind, BankProcessReport, BankWidth, EffectBankProcessBlock,
     EffectDescriptorV1, EffectPrepareError, EffectProcessBlock, EffectQuality,
     InitialParameterValue, LatencySamples, LinkMode, LinkModeSet, NativeEffectFactory,
-    ParameterChannel, ParameterChannelPolicy, ParameterDescriptorV1, ParameterDomain, ParameterId,
-    ParameterMapping, ParameterUnit, PortDescriptorV1, PortId, PortLayout, PortRole,
-    PrepareEffectBankRequest, PrepareEffectRequest, PreparedAutomationSpan, PreparedBankMetadata,
-    PreparedEffectMetadata, PreparedNativeEffect, PreparedNativeEffectBank, PreparedSidechainPort,
-    ProcessReport, ResetKind, SmoothingRule, StatePayloadError, StatePayloadInput,
-    StatePayloadOutput, StatePayloadSizes, TailSamples, expected_prepared_metadata,
+    ObservationCadenceV1, ObservationChannelsV1, ObservationCostV1, ObservationDescriptorV1,
+    ObservationFoldV1, ObservationKindV1, ObservationSampleV1, ObservationTapId, ParameterChannel,
+    ParameterChannelPolicy, ParameterDescriptorV1, ParameterDomain, ParameterId, ParameterMapping,
+    ParameterUnit, PortDescriptorV1, PortId, PortLayout, PortRole, PrepareEffectBankRequest,
+    PrepareEffectRequest, PreparedAutomationSpan, PreparedBankMetadata, PreparedEffectMetadata,
+    PreparedNativeEffect, PreparedNativeEffectBank, PreparedSidechainPort, ProcessReport,
+    ResetKind, SmoothingRule, StatePayloadError, StatePayloadInput, StatePayloadOutput,
+    StatePayloadSizes, TailSamples, expected_prepared_metadata,
 };
 use miso_engine_effect_runtime::bank::{check_block, nonfinite_lane_mask};
 use miso_engine_effect_runtime::envelope::attack_release_coefficient;
@@ -286,17 +288,40 @@ const QUALITIES: [miso_engine_effect_contract::QualityDescriptorV1; 4] = [
 /// which is why the two are one bump and not two.
 pub const STATE_LAYOUT_VERSION: u32 = 2;
 
+/// The one declared observation tap: the branching smoother's own gain word.
+///
+/// `GateState::gain_db` is what `gate_block` writes every sample and reads back on the next one,
+/// in decibels and negative for reduction -- a closed gate holds a large negative number and an
+/// open one holds `+0.0`. Publishing it is a copy out of state the block wrote anyway.
+pub const GATE_EXPANDER_OBSERVATIONS_V1: [ObservationDescriptorV1; 1] = [ObservationDescriptorV1 {
+    id: ObservationTapId(1),
+    display_name: "Gain Reduction",
+    display_unit: "dB",
+    kind: ObservationKindV1::GainReductionDb,
+    unit: ParameterUnit::Db,
+    cost: ObservationCostV1::Resident,
+    cadence: ObservationCadenceV1::PerBlock,
+    fold: ObservationFoldV1::PeakMagnitude,
+    channels: ObservationChannelsV1::PerLane,
+    minimum: 0.0,
+    maximum: 100.0,
+}];
+
 /// Immutable descriptor for the launch gate/expander contract.
 pub const GATE_EXPANDER_DESCRIPTOR_V1: EffectDescriptorV1 = EffectDescriptorV1 {
     id: effect_id("miso.gate-expander"),
     display_name: "Gate / Expander",
     contract_major: 1,
-    contract_minor: 0,
+    // Issue #143 P1: declaring the first tap is a `contract_minor` bump and a derived identity
+    // re-pin of exactly `32 + len("Gain Reduction") + len("dB")` = 48 bytes.
+    // `state_layout_version` does not move: the tap reads state that was already there.
+    contract_minor: 1,
     state_layout_version: STATE_LAYOUT_VERSION,
     supported_link_modes: LinkModeSet::ALL,
     parameters: &GATE_EXPANDER_PARAMETERS_V1,
     ports: &PORTS,
     qualities: &QUALITIES,
+    observations: &GATE_EXPANDER_OBSERVATIONS_V1,
 };
 
 /// The parameter domains, in the runtime's vocabulary.
@@ -974,6 +999,16 @@ impl<const CONNECTED: bool> PreparedNativeEffect for PreparedGate<f32, CONNECTED
         reports[0]
     }
 
+    /// Issue #143 D2: the branching smoother's own gain word, read for lane 0.
+    fn observe_resident(&self, tap_index: u32, out: &mut ObservationSampleV1) -> bool {
+        if tap_index != 0 {
+            return false;
+        }
+        out.left = lane_get(self.state[0].gain_db, 0);
+        out.right = lane_get(self.state[1].gain_db, 0);
+        true
+    }
+
     fn snapshot_state_payload(
         &self,
         mut output: StatePayloadOutput<'_>,
@@ -1002,6 +1037,26 @@ fn checked_track(track_index: u32, width: usize) -> Result<usize, StatePayloadEr
 macro_rules! bank_impl {
     ($lane:ty) => {
         impl PreparedNativeEffectBank for PreparedGate<$lane, false> {
+            fn observe_resident_bank(
+                &self,
+                tap_index: u32,
+                out: &mut [ObservationSampleV1],
+            ) -> bool {
+                let lanes = <$lane as Lane>::WIDTH;
+                if tap_index != 0 || out.len() != lanes {
+                    return false;
+                }
+                let mut left = [0.0_f32; MAX_WIDTH];
+                let mut right = [0.0_f32; MAX_WIDTH];
+                self.state[0].gain_db.store(&mut left[..lanes]);
+                self.state[1].gain_db.store(&mut right[..lanes]);
+                for (lane, sample) in out.iter_mut().enumerate() {
+                    sample.left = left[lane];
+                    sample.right = right[lane];
+                }
+                true
+            }
+
             fn metadata(&self) -> PreparedBankMetadata {
                 PreparedBankMetadata {
                     width: self.bank_width.expect("a bank is prepared with a width"),

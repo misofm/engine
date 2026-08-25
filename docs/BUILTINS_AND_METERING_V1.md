@@ -65,6 +65,28 @@ Raw energy/RMS observations are only *loudness-ready*: they are not BS.1770 K-we
 LUFS/LKFS, true-peak, or certified loudness measurements. [ITU-BS1770-5] and [EBU-R128] delimit
 those explicitly out-of-scope claims.
 
+## Effect observation (issue #143)
+
+Meters observe *boundaries*; observation taps observe *effects*. A track's peak is a fold over
+samples the meter can see; a compressor's gain reduction is state only the compressor holds, and it
+reaches a console through a separate mechanism with its own declared menu, cost classes and
+conflating transport. `docs/EFFECT_OBSERVATION_V1.md` is that mechanism in full.
+
+What belongs here is where the two meet: **one frame, one timeline**. Gain reduction rides the
+existing `miso.meter.v1` post rather than a second message, so the pinned-occurrence rule for the
+render callback is unchanged, and the window a gain-reduction value describes is the *same* meter
+window the peak beside it describes — the observation window length is derived from
+`console_meter_blocks`, not configured separately.
+
+The frame is `3 * trackCount + 3` `f32` words: the frozen `2T + 2` peak section exactly where it
+was, then one **non-negative decibel magnitude** per track and the designated master's. The sample
+window rides a fixed `WebMeterHeaderV1` structure, because a `u64` does not survive an `f32` and
+splitting one across two lanes would put a decoding rule in the app that nothing could check.
+
+A session that asks for no observation capacity allocates none of it, renders byte-identical audio,
+and reports `observation_retained_bytes == 0` — walked over the built runtime, not derived from the
+request.
+
 ## Current evidence status
 
 The machine-qualified fixture corpus covers the declared filter, gain, matrix, graph-tap, meter,

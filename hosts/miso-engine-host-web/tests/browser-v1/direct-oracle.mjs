@@ -23,6 +23,12 @@ const COMMAND_FADER_DB = 3;
 const COMMAND_MUTE = 4;
 const COMMAND_EFFECT_PARAM = 5;
 const COMMAND_EFFECT_BYPASS = 6;
+// Issue #143: the observation subscribe/unsubscribe kinds and the meter frame's shape.
+const COMMAND_OBSERVE_SUBSCRIBE = 7;
+const COMMAND_OBSERVE_UNSUBSCRIBE = 8;
+const BUFFER_METER_FRAME = 7;
+const METER_HEADER_BYTES = 64;
+const OBSERVATION_WINDOW_BLOCKS = 2;
 const RESOURCE_NAMES = [
   "configBytes", "statusBytes", "sessionTomlBytes", "diagnosticBytes", "sourceIdBytes",
   "sourcePcmStagingBytes", "outputPcmBytes", "bridgeMetadataBytes", "bridgeRetainedBytes",
@@ -30,6 +36,9 @@ const RESOURCE_NAMES = [
   "effectScalarStateBytes", "effectScalarScratchBytes", "builtinRetainedBytes",
   "graphSessionPlusPlanBytes", "graphIncrementalPlanBytes", "graphMetadataBytes",
   "graphDelayBytes", "largestNamedAllocationBytes",
+  // Issue #143: carved from the report's first reserved word. Zero on this transcript, which
+  // asks for no observation capacity at all.
+  "observationRetainedBytes",
 ];
 const LIMITS32 = [
   CONFIG_BYTES, ABI_VERSION, SAMPLE_RATE, QUANTUM, 1 << 20, 1 << 14, 1 << 10, 8, QUANTUM, 256,
@@ -69,7 +78,9 @@ function resources(exports, handle) {
   assert.equal(view.getUint32(0, true), 224);
   assert.equal(view.getUint32(4, true), ABI_VERSION);
   for (const offset of [20, 24, 28]) assert.equal(view.getUint32(offset, true), 0);
-  for (const offset of [192, 200, 208, 216]) assert.equal(view.getBigUint64(offset, true), 0n);
+  // Issue #143 carved `observationRetainedBytes` from the first of the report's four reserved
+  // words; the other three are still required zero and the 224-byte layout is unchanged.
+  for (const offset of [200, 208, 216]) assert.equal(view.getBigUint64(offset, true), 0n);
   const report = {
     sampleRateHz: view.getUint32(8, true),
     quantumFrames: view.getUint32(12, true),
@@ -81,17 +92,16 @@ function resources(exports, handle) {
   return report;
 }
 
-function writeConfig(exports, handle, consoleWords = [0n, 0n]) {
+function writeConfig(exports, handle, consoleWords = [0n, 0n, 0n, 0n]) {
   const pointer = exports.miso_engine_web_v1_config_ptr(handle);
   assert.notEqual(pointer, 0);
   const view = new DataView(exports.memory.buffer, pointer, CONFIG_BYTES);
   LIMITS32.forEach((value, index) => view.setUint32(index * 4, value, true));
   LIMITS64.forEach((value, index) => view.setBigUint64(40 + index * 8, value, true));
-  // Issue #137: the two console words are the first two of the four reserved words. The frozen
-  // transcript above keeps writing zeros, which is exactly "no control channel, no meters", and
-  // its digest is unchanged by this ABI.
+  // Issue #137 and #143: the four console words *are* the four reserved words. The frozen
+  // transcript above keeps writing zeros, which is exactly "no control channel, no meters, no
+  // observation capacity, no master designation", and its digest is unchanged by either ABI.
   consoleWords.forEach((value, index) => view.setBigUint64(160 + index * 8, value, true));
-  for (let index = 0; index < 2; index += 1) view.setBigUint64(176 + index * 8, 0n, true);
 }
 
 /// Stage one 48-byte command record and submit the batch, returning the typed report.
@@ -262,7 +272,7 @@ async function runCommandTimeline(modulePath, sessionToml, sourceId) {
   const exports = instance.exports;
   const handle = exports.miso_engine_web_v1_config_new();
   assert.notEqual(handle, 0);
-  writeConfig(exports, handle, [BigInt(COMMAND_QUEUE_RECORDS), 0n]);
+  writeConfig(exports, handle, [BigInt(COMMAND_QUEUE_RECORDS), 0n, 0n, 0n]);
   assert.equal(exports.miso_engine_web_v1_prepare(handle), 0);
   const tomlPointer = exports.miso_engine_web_v1_buffer_ptr(handle, BUFFER_SESSION_TOML);
   new Uint8Array(exports.memory.buffer, tomlPointer, sessionToml.byteLength).set(sessionToml);
@@ -342,6 +352,99 @@ async function runCommandTimeline(modulePath, sessionToml, sourceId) {
   return { reports, beforeDisposeStatus, pcmF32leSha256: pcmSha256(pcm) };
 }
 
+/// Issue #143 E1/E4/E12: the observation timeline, through the shipped artifact.
+///
+/// One track, one compressor, everything else identity. The timeline is deliberately the same
+/// eleven blocks whether or not a tap is armed, so the two legs' PCM digests must be identical --
+/// that is E1 on the browser, and it is checked here rather than asserted about.
+///
+/// `taps` of `0n` is the level-1 zero leg: no lane, no accumulator, no conflating cell, and
+/// `observationRetainedBytes` is `0`. The subscription it still sends is refused with the typed
+/// `observationUnbound` reason rather than silently ignored.
+async function runObservationTimeline(modulePath, sessionToml, sourceId, taps) {
+  const { instance } = await WebAssembly.instantiate(await readFile(modulePath), {});
+  const exports = instance.exports;
+  const handle = exports.miso_engine_web_v1_config_new();
+  assert.notEqual(handle, 0);
+  writeConfig(exports, handle, [
+    BigInt(COMMAND_QUEUE_RECORDS), BigInt(OBSERVATION_WINDOW_BLOCKS), taps, taps === 0n ? 0n : 1n,
+  ]);
+  assert.equal(exports.miso_engine_web_v1_prepare(handle), 0);
+  const tomlPointer = exports.miso_engine_web_v1_buffer_ptr(handle, BUFFER_SESSION_TOML);
+  new Uint8Array(exports.memory.buffer, tomlPointer, sessionToml.byteLength).set(sessionToml);
+  assert.equal(exports.miso_engine_web_v1_compile(handle, sessionToml.byteLength), 0);
+  assert.equal(exports.miso_engine_web_v1_console_track_count(handle), 1);
+  const resourceReport = resources(exports, handle);
+  assert.equal(
+    resourceReport.observationRetainedBytes === "0",
+    taps === 0n,
+    "a session that asked for no observation retains none, and one that asked retains some",
+  );
+
+  const framePointer = exports.miso_engine_web_v1_buffer_ptr(handle, BUFFER_METER_FRAME);
+  // `3T + 3` for one track: two peaks, the master pair, one gain-reduction slot and the master's.
+  assert.equal(exports.miso_engine_web_v1_buffer_capacity(handle, BUFFER_METER_FRAME), 6 * 4);
+  const headerPointer = exports.miso_engine_web_v1_meter_header_ptr(handle);
+  assert.notEqual(headerPointer, 0);
+  const memoryBuffer = exports.memory.buffer;
+  const header = new DataView(memoryBuffer, headerPointer, METER_HEADER_BYTES);
+  assert.equal(header.getUint32(0, true), METER_HEADER_BYTES);
+  assert.equal(header.getUint32(4, true), ABI_VERSION);
+  assert.equal(header.getUint32(8, true), 1);
+  assert.equal(header.getUint32(40, true), taps === 0n ? 0 : 1);
+  const frame = new Float32Array(memoryBuffer, framePointer, 6);
+  assert.equal(exports.miso_engine_web_v1_meter_lease(handle, 1), 0);
+
+  const feed = (block) => {
+    const id = new TextEncoder().encode(sourceId);
+    const idPointer = exports.miso_engine_web_v1_buffer_ptr(handle, BUFFER_SOURCE_ID);
+    new Uint8Array(exports.memory.buffer, idPointer, id.byteLength).set(id);
+    const pcmPointer = exports.miso_engine_web_v1_buffer_ptr(handle, BUFFER_SOURCE_PCM);
+    new Float32Array(exports.memory.buffer, pcmPointer, QUANTUM * 2).fill(0.5);
+    return exports.miso_engine_web_v1_source_submit(
+      handle, id.byteLength, 1n, BigInt(block * QUANTUM), 2, QUANTUM, 0,
+    );
+  };
+  const subscribe = {
+    kind: COMMAND_OBSERVE_SUBSCRIBE, rack: 1, channel: 255, trackIndex: 0,
+    effectIndex: 0, parameterId: 1, smoothingSamples: OBSERVATION_WINDOW_BLOCKS,
+    values: [0, 0, 0, 0],
+  };
+  const unsubscribe = { ...subscribe, kind: COMMAND_OBSERVE_UNSUBSCRIBE, smoothingSamples: 0 };
+  const blocks = [];
+  const step = (block) => {
+    assert.equal(feed(block), 0);
+    blocks.push(render(exports, handle));
+    exports.miso_engine_web_v1_meter_poll(handle);
+  };
+
+  const reports = {};
+  reports.unknownTap = submitCommands(exports, handle, [{ ...subscribe, parameterId: 9 }]);
+  reports.subscribe = submitCommands(exports, handle, [subscribe]);
+  for (let block = 0; block < 8; block += 1) step(block);
+  const armed = {
+    trackGrDb: frame[4],
+    masterGrDb: header.getUint32(44, true) === 1 ? frame[5] : null,
+    windowSamples: (header.getBigUint64(24, true) - header.getBigUint64(16, true)).toString(),
+  };
+  reports.unsubscribe = submitCommands(exports, handle, [unsubscribe]);
+  for (let block = 8; block < 12; block += 1) step(block);
+  const disarmed = {
+    trackGrDb: frame[4],
+    masterGrDb: header.getUint32(44, true) === 1 ? frame[5] : null,
+  };
+  const pcm = [blocks.flatMap((block) => block[0]), blocks.flatMap((block) => block[1])];
+  assert.equal(exports.memory.buffer, memoryBuffer, "an observation timeline never grows memory");
+  assert.equal(exports.miso_engine_web_v1_dispose(handle), 0);
+  return {
+    observationRetainedBytesIsZero: resourceReport.observationRetainedBytes === "0",
+    reports,
+    armed,
+    disarmed,
+    pcmF32leSha256: pcmSha256(pcm),
+  };
+}
+
 async function main() {
   if (process.argv.length !== 4) {
     throw new Error("usage: direct-oracle.mjs ARTIFACT_DIRECTORY EXPECTED_JSON");
@@ -396,6 +499,59 @@ async function main() {
     actual.commandTimeline.pcmF32leSha256,
     nativeTimeline,
     "native and simd128 must render this command timeline to identical bits",
+  );
+  // Issue #143 E1/E4/E12: the observation timeline. Both legs render the *same* eleven blocks;
+  // only the observation capacity and the subscription differ. Their PCM digests are compared to
+  // each other and to the native pin before anything is printed, so the pin can only ever be the
+  // value three independent runs already agree on.
+  const observationSession = await readFile(
+    path.join(fixtureDirectory, "observation-session.toml"),
+  );
+  const artifact = path.join(artifactDirectory, "miso-engine-v2-audio-worklet.simd128.wasm");
+  const observed = await runObservationTimeline(artifact, observationSession, source.sourceId, 4n);
+  const unobserved = await runObservationTimeline(
+    artifact, observationSession, source.sourceId, 0n,
+  );
+  assert.equal(
+    observed.pcmF32leSha256,
+    unobserved.pcmF32leSha256,
+    "arming every declared tap renders the identical bits",
+  );
+  assert.equal(observed.observationRetainedBytesIsZero, false);
+  assert.equal(unobserved.observationRetainedBytesIsZero, true);
+  // A tap the effect does not declare is `unknownTap` (10), never `unknownParameter` (5); a
+  // subscription against a session with no capacity is `observationUnbound` (11), never silence.
+  assert.equal(observed.reports.unknownTap.reason, 10);
+  assert.equal(observed.reports.subscribe.result, 0);
+  assert.equal(unobserved.reports.subscribe.result, 7);
+  assert.equal(unobserved.reports.subscribe.reason, 11);
+  assert.ok(observed.armed.trackGrDb > 0, "an armed tap publishes a positive magnitude");
+  assert.equal(observed.armed.masterGrDb, observed.armed.trackGrDb);
+  assert.equal(observed.disarmed.trackGrDb, 0, "an unsubscribed tap publishes nothing");
+  assert.equal(unobserved.armed.trackGrDb, 0);
+  assert.equal(unobserved.armed.masterGrDb, null);
+  actual.observationTimeline = {
+    armedTrackGrDbPositive: observed.armed.trackGrDb > 0,
+    armedMasterEqualsTrack: observed.armed.masterGrDb === observed.armed.trackGrDb,
+    armedWindowSamples: observed.armed.windowSamples,
+    disarmedTrackGrDb: observed.disarmed.trackGrDb,
+    unobservedMasterGrDb: unobserved.armed.masterGrDb,
+    subscribeReason: observed.reports.subscribe.reason,
+    unknownTapReason: observed.reports.unknownTap.reason,
+    unboundReason: unobserved.reports.subscribe.reason,
+    pcmF32leSha256: observed.pcmF32leSha256,
+  };
+  const nativeObservation = expected.directOracle?.nativeObservationPcmF32leSha256;
+  assert.equal(
+    typeof nativeObservation,
+    "string",
+    "expected.json must carry the native observation-timeline digest pin",
+  );
+  actual.nativeObservationPcmF32leSha256 = nativeObservation;
+  assert.equal(
+    observed.pcmF32leSha256,
+    nativeObservation,
+    "native and simd128 must render this observation timeline to identical bits",
   );
   if (process.env.MISO_ENGINE_WEB_ORACLE_PRINT === "1") {
     process.stdout.write(`${JSON.stringify(actual, null, 2)}\n`);

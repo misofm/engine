@@ -43,8 +43,10 @@ use miso_engine_builtins::{
 };
 use miso_engine_effect_compiler::launch_native_effect_registry_v1;
 use miso_engine_effect_contract::{
-    AutomationRate, EffectDescriptorV1, ParameterChannelPolicy, ParameterDescriptorV1,
-    ParameterDomain, ParameterMapping, ParameterUnit, SmoothingRule,
+    AutomationRate, EffectDescriptorV1, ObservationCadenceV1, ObservationChannelsV1,
+    ObservationCostV1, ObservationDescriptorV1, ObservationFoldV1, ObservationKindV1,
+    ParameterChannelPolicy, ParameterDescriptorV1, ParameterDomain, ParameterMapping,
+    ParameterUnit, SmoothingRule,
 };
 use miso_engine_host_web::{
     ABI_VERSION, COMMAND_EFFECT_BYPASS, COMMAND_EFFECT_PARAM, COMMAND_FADER_DB, COMMAND_MATRIX,
@@ -127,6 +129,54 @@ pub fn render() -> String {
         ));
     }
     out.push_str("  ],\n");
+    // Issue #143 D1: the observation vocabularies, so a consumer resolves a tap's raw `u32`s the
+    // same way it resolves a parameter's -- from this document, never from a hand-written table.
+    out.push_str("  \"observationVocabularies\": {\n");
+    let vocabularies: [(&str, &[(u32, &str)]); 5] = [
+        (
+            "kinds",
+            &[(ObservationKindV1::GainReductionDb as u32, "gainReductionDb")],
+        ),
+        (
+            "costs",
+            &[
+                (ObservationCostV1::Resident as u32, "resident"),
+                (ObservationCostV1::Computed as u32, "computed"),
+            ],
+        ),
+        (
+            "cadences",
+            &[
+                (ObservationCadenceV1::PerBlock as u32, "perBlock"),
+                (ObservationCadenceV1::PerWindow as u32, "perWindow"),
+            ],
+        ),
+        (
+            "folds",
+            &[
+                (ObservationFoldV1::Latest as u32, "latest"),
+                (ObservationFoldV1::PeakMagnitude as u32, "peakMagnitude"),
+            ],
+        ),
+        (
+            "channels",
+            &[
+                (ObservationChannelsV1::Shared as u32, "shared"),
+                (ObservationChannelsV1::PerLane as u32, "perLane"),
+            ],
+        ),
+    ];
+    for (index, (name, rows)) in vocabularies.iter().enumerate() {
+        out.push_str(&format!("    \"{name}\": ["));
+        for (row, (value, label)) in rows.iter().enumerate() {
+            out.push_str(&format!(
+                "{{ \"value\": {value}, \"name\": \"{label}\" }}{}",
+                if row + 1 == rows.len() { "" } else { ", " }
+            ));
+        }
+        out.push_str(&format!("]{}\n", comma(index, vocabularies.len())));
+    }
+    out.push_str("  },\n");
     out.push_str("  \"builtins\": {\n    \"parameters\": [\n");
     let builtins = BUILTIN_PARAMETER_DESCRIPTORS_V1;
     for (index, parameter) in builtins.iter().enumerate() {
@@ -189,8 +239,91 @@ fn effect(descriptor: &EffectDescriptorV1) -> String {
         out.push_str(&effect_parameter(parameter));
         out.push_str(&format!("{}\n", comma(index, descriptor.parameters.len())));
     }
-    out.push_str("      ]\n    }");
+    out.push_str("      ],\n");
+    // Issue #143: never absent. An effect that declares no tap emits `[]`, so a consumer reads one
+    // shape for every effect and "this build has no menu for that effect" is impossible to
+    // confuse with "this document predates observation".
+    out.push_str("      \"observations\": [");
+    for (index, observation) in descriptor.observations.iter().enumerate() {
+        out.push('\n');
+        out.push_str(&effect_observation(observation));
+        out.push_str(comma(index, descriptor.observations.len()));
+    }
+    if descriptor.observations.is_empty() {
+        out.push_str("]\n    }");
+    } else {
+        out.push_str("\n      ]\n    }");
+    }
     out
+}
+
+fn effect_observation(observation: &ObservationDescriptorV1) -> String {
+    // `subscribable` is derived from the cost class exactly as `liveUpdatable` is derived from
+    // `automatable`: a `Resident` tap is a copy out of state the block already wrote and the
+    // subscribe path binds it; a `Computed` tap has no implementation in V1 and the subscribe path
+    // answers `unsupportedKind`. The two statements are the same statement, which is why this is
+    // derived rather than written down -- and why the schema gate refuses a computed tap that
+    // claims to be subscribable.
+    let subscribable = matches!(observation.cost, ObservationCostV1::Resident);
+    format!(
+        "        {{ \"id\": {}, \"name\": \"{}\", \"displayUnit\": \"{}\", \
+\"kind\": {}, \"kindName\": \"{}\", \"unit\": {}, \"unitName\": \"{}\", \
+\"cost\": {}, \"costName\": \"{}\", \"cadence\": {}, \"cadenceName\": \"{}\", \
+\"fold\": {}, \"foldName\": \"{}\", \"channels\": {}, \"channelsName\": \"{}\", \
+\"minimum\": {}, \"maximum\": {}, \"subscribable\": {} }}",
+        observation.id.0,
+        escape(observation.display_name),
+        escape(observation.display_unit),
+        observation.kind as u32,
+        observation_kind_name(observation.kind),
+        observation.unit as u32,
+        unit_name(observation.unit),
+        observation.cost as u32,
+        observation_cost_name(observation.cost),
+        observation.cadence as u32,
+        observation_cadence_name(observation.cadence),
+        observation.fold as u32,
+        observation_fold_name(observation.fold),
+        observation.channels as u32,
+        observation_channels_name(observation.channels),
+        number(observation.minimum),
+        number(observation.maximum),
+        subscribable,
+    )
+}
+
+const fn observation_kind_name(kind: ObservationKindV1) -> &'static str {
+    match kind {
+        ObservationKindV1::GainReductionDb => "gainReductionDb",
+    }
+}
+
+const fn observation_cost_name(cost: ObservationCostV1) -> &'static str {
+    match cost {
+        ObservationCostV1::Resident => "resident",
+        ObservationCostV1::Computed => "computed",
+    }
+}
+
+const fn observation_cadence_name(cadence: ObservationCadenceV1) -> &'static str {
+    match cadence {
+        ObservationCadenceV1::PerBlock => "perBlock",
+        ObservationCadenceV1::PerWindow => "perWindow",
+    }
+}
+
+const fn observation_fold_name(fold: ObservationFoldV1) -> &'static str {
+    match fold {
+        ObservationFoldV1::Latest => "latest",
+        ObservationFoldV1::PeakMagnitude => "peakMagnitude",
+    }
+}
+
+const fn observation_channels_name(channels: ObservationChannelsV1) -> &'static str {
+    match channels {
+        ObservationChannelsV1::Shared => "shared",
+        ObservationChannelsV1::PerLane => "perLane",
+    }
 }
 
 fn effect_parameter(parameter: &ParameterDescriptorV1) -> String {

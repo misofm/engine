@@ -1,0 +1,40 @@
+{
+  "name": "comprehensive-c",
+  "effect_id": "fixture.comprehensive-c",
+  "display_name": "Comprehensive C",
+  "contract_major": 1,
+  "contract_minor": 7,
+  "state_layout_version": 3,
+  "supported_link_mode_bits": 7,
+  "parameters": [
+    {"id": 1, "display_name": "Gain", "display_unit": "dB", "unit": 1, "domain": 1, "mapping": 1, "automation_rate": 1, "channel_policy": 2, "smoothing": 2, "smoothing_samples": 64, "readable": false, "automatable": true, "minimum_bits": "c2700000", "maximum_bits": "41400000", "default_bits": "00000000", "enum_choices": []},
+    {"id": 2, "display_name": "Frequency", "display_unit": "Hz", "unit": 2, "domain": 1, "mapping": 2, "automation_rate": 2, "channel_policy": 1, "smoothing": 3, "smoothing_samples": 32, "readable": true, "automatable": true, "minimum_bits": "41a00000", "maximum_bits": "469c4000", "default_bits": "447a0000", "enum_choices": []},
+    {"id": 3, "display_name": "Time", "display_unit": "ms", "unit": 3, "domain": 1, "mapping": 3, "automation_rate": 1, "channel_policy": 1, "smoothing": 1, "smoothing_samples": 0, "readable": true, "automatable": true, "minimum_bits": "00000000", "maximum_bits": "447a0000", "default_bits": "41200000", "enum_choices": []},
+    {"id": 4, "display_name": "Bypass", "display_unit": "state", "unit": 4, "domain": 2, "mapping": 4, "automation_rate": 2, "channel_policy": 1, "smoothing": 1, "smoothing_samples": 0, "readable": true, "automatable": true, "minimum_bits": null, "maximum_bits": null, "default_bits": "00000000", "enum_choices": []},
+    {"id": 5, "display_name": "Mode", "display_unit": "choice", "unit": 5, "domain": 3, "mapping": 4, "automation_rate": 3, "channel_policy": 1, "smoothing": 1, "smoothing_samples": 0, "readable": true, "automatable": false, "minimum_bits": null, "maximum_bits": null, "default_bits": "00000000", "enum_choices": [{"value_bits": "bf800000", "label": "Low"}, {"value_bits": "00000000", "label": "Mid"}, {"value_bits": "3f800000", "label": "High"}]},
+    {"id": 6, "display_name": "Ratio", "display_unit": ":1", "unit": 6, "domain": 1, "mapping": 3, "automation_rate": 1, "channel_policy": 2, "smoothing": 3, "smoothing_samples": 16, "readable": true, "automatable": true, "minimum_bits": "3f800000", "maximum_bits": "41a00000", "default_bits": "40800000", "enum_choices": []}
+  ],
+  "ports": [
+    {"id": "sidechain", "role": 3, "required": false, "layout": 1},
+    {"id": "main-out", "role": 2, "required": true, "layout": 1},
+    {"id": "main-in", "role": 1, "required": true, "layout": 1}
+  ],
+  "qualities": [
+    {"quality": 1, "sample_rate": 44100, "latency_samples": 0, "tail_kind": 1, "tail_samples": 0, "common_state_bytes": 8, "left_state_bytes": 16, "right_state_bytes": 16, "scratch_fixed_bytes": 32, "scratch_bytes_per_frame": 4},
+    {"quality": 1, "sample_rate": 48000, "latency_samples": 0, "tail_kind": 1, "tail_samples": 0, "common_state_bytes": 8, "left_state_bytes": 16, "right_state_bytes": 16, "scratch_fixed_bytes": 32, "scratch_bytes_per_frame": 4},
+    {"quality": 1, "sample_rate": 88200, "latency_samples": 0, "tail_kind": 1, "tail_samples": 0, "common_state_bytes": 8, "left_state_bytes": 16, "right_state_bytes": 16, "scratch_fixed_bytes": 32, "scratch_bytes_per_frame": 4},
+    {"quality": 1, "sample_rate": 96000, "latency_samples": 0, "tail_kind": 1, "tail_samples": 0, "common_state_bytes": 8, "left_state_bytes": 16, "right_state_bytes": 16, "scratch_fixed_bytes": 32, "scratch_bytes_per_frame": 4},
+    {"quality": 2, "sample_rate": 44100, "latency_samples": 4, "tail_kind": 1, "tail_samples": 256, "common_state_bytes": 24, "left_state_bytes": 32, "right_state_bytes": 32, "scratch_fixed_bytes": 64, "scratch_bytes_per_frame": 8},
+    {"quality": 2, "sample_rate": 48000, "latency_samples": 4, "tail_kind": 1, "tail_samples": 256, "common_state_bytes": 24, "left_state_bytes": 32, "right_state_bytes": 32, "scratch_fixed_bytes": 64, "scratch_bytes_per_frame": 8},
+    {"quality": 2, "sample_rate": 88200, "latency_samples": 4, "tail_kind": 1, "tail_samples": 256, "common_state_bytes": 24, "left_state_bytes": 32, "right_state_bytes": 32, "scratch_fixed_bytes": 64, "scratch_bytes_per_frame": 8},
+    {"quality": 2, "sample_rate": 96000, "latency_samples": 4, "tail_kind": 1, "tail_samples": 256, "common_state_bytes": 24, "left_state_bytes": 32, "right_state_bytes": 32, "scratch_fixed_bytes": 64, "scratch_bytes_per_frame": 8},
+    {"quality": 3, "sample_rate": 44100, "latency_samples": 8, "tail_kind": 2, "tail_samples": 0, "common_state_bytes": 40, "left_state_bytes": 64, "right_state_bytes": 64, "scratch_fixed_bytes": 128, "scratch_bytes_per_frame": 16},
+    {"quality": 3, "sample_rate": 48000, "latency_samples": 8, "tail_kind": 2, "tail_samples": 0, "common_state_bytes": 40, "left_state_bytes": 64, "right_state_bytes": 64, "scratch_fixed_bytes": 128, "scratch_bytes_per_frame": 16},
+    {"quality": 3, "sample_rate": 88200, "latency_samples": 8, "tail_kind": 2, "tail_samples": 0, "common_state_bytes": 40, "left_state_bytes": 64, "right_state_bytes": 64, "scratch_fixed_bytes": 128, "scratch_bytes_per_frame": 16},
+    {"quality": 3, "sample_rate": 96000, "latency_samples": 8, "tail_kind": 2, "tail_samples": 0, "common_state_bytes": 40, "left_state_bytes": 64, "right_state_bytes": 64, "scratch_fixed_bytes": 128, "scratch_bytes_per_frame": 16}
+  ],
+  "observations": [
+    {"id": 1, "display_name": "Gain Reduction", "display_unit": "dB", "kind": 1, "unit": 1, "cost": 1, "cadence": 1, "fold": 2, "channels": 2, "minimum_bits": "00000000", "maximum_bits": "42c80000"},
+    {"id": 7, "display_name": "Reduction Envelope", "display_unit": "dB", "kind": 1, "unit": 1, "cost": 2, "cadence": 2, "fold": 1, "channels": 1, "minimum_bits": "00000000", "maximum_bits": "42700000"}
+  ]
+}

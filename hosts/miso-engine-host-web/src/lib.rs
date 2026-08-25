@@ -27,9 +27,10 @@ use miso_engine_effect_contract::{
     EffectControlRecordV1, ParameterChannel, ParameterChannelPolicy, parameter_value_valid,
 };
 use miso_engine_host_core::{
-    CompiledSession, EffectControlProducerV1, EffectRack, HostConsoleRequestV1, HostPrepareCaps,
-    HostShapePolicy, PreparedHost, SourceControlError, SourceSubmission, control_table_bytes,
-    prepare_host_session_with_console, source_id_arena_bytes,
+    CompiledSession, EffectControlProducerV1, EffectObservationHandleV1, EffectRack,
+    HostConsoleRequestV1, HostPrepareCaps, HostShapePolicy, PreparedHost, SourceControlError,
+    SourceSubmission, control_table_bytes, prepare_host_session_with_console,
+    source_id_arena_bytes,
 };
 
 /// Frozen browser host ABI version 1.0.
@@ -102,6 +103,12 @@ pub const COMMAND_RECORD_BYTES: u32 = 48;
 pub const MAXIMUM_COMMAND_RECORDS: u32 = 256;
 /// Per-track control-queue depth used when the configuration asks for the default.
 pub const DEFAULT_COMMAND_QUEUE_RECORDS: u32 = 64;
+/// Largest `console_observation_taps` the browser configuration accepts.
+///
+/// The frame carries one gain-reduction slot per track, so a session cannot usefully bind more
+/// taps per effect than a consumer can read; the cap keeps a mistyped configuration from asking
+/// preparation for an unbounded menu. Every launch effect declares one tap.
+pub const MAXIMUM_OBSERVATION_TAPS: u32 = 16;
 
 /// Retarget the track's pan pair (`left`, `right`) over an explicit ramp window.
 pub const COMMAND_PAN: u32 = 1;
@@ -115,6 +122,15 @@ pub const COMMAND_MUTE: u32 = 4;
 pub const COMMAND_EFFECT_PARAM: u32 = 5;
 /// Set an effect bypass (live since issue #140 A).
 pub const COMMAND_EFFECT_BYPASS: u32 = 6;
+/// Arm one declared observation tap of one effect instance (issue #143 D3).
+///
+/// `parameter_id` carries the effect-local `tap_id`, `smoothing_samples` carries the window length
+/// in render blocks (`0` = the plan's default), and every value word must be `0.0`: a subscription
+/// changes what is read, never what is rendered, so a nonzero value would be a caller mistake
+/// rather than a meaningful field.
+pub const COMMAND_OBSERVE_SUBSCRIBE: u32 = 7;
+/// Disarm one declared observation tap of one effect instance (issue #143 D3).
+pub const COMMAND_OBSERVE_UNSUBSCRIBE: u32 = 8;
 
 /// The submission was admitted whole.
 pub const COMMAND_REASON_NONE: u32 = 0;
@@ -146,6 +162,17 @@ pub const COMMAND_REASON_UNSUPPORTED_KIND: u32 = 7;
 pub const COMMAND_REASON_BACKPRESSURE: u32 = 8;
 /// The host is not `STATE_READY`.
 pub const COMMAND_REASON_WRONG_STATE: u32 = 9;
+/// `parameter_id` is not a declared observation tap of the addressed effect (issue #143).
+///
+/// Deliberately **not** `UNKNOWN_PARAMETER`: a parameter and a tap are different namespaces on the
+/// same effect, and a caller that confuses them learns which one it got wrong.
+pub const COMMAND_REASON_UNKNOWN_TAP: u32 = 10;
+/// The tap exists and the address is right, but this session bound no observation capacity.
+///
+/// The honest form of "you asked for a subscription this preparation cannot deliver": the effect
+/// is there, the tap is declared, and the plan holds no lane to arm because the host asked for
+/// none. A caller fixes it by preparing with `console_observation_taps` set, not by retrying.
+pub const COMMAND_REASON_OBSERVATION_UNBOUND: u32 = 11;
 
 /// The longest main-thread stall the default source ring hides without an underrun.
 ///
@@ -208,6 +235,65 @@ pub struct WebCommandReportV1 {
 
 /// Byte size of [`WebCommandReportV1`].
 pub const COMMAND_REPORT_BYTES: u32 = size_of::<WebCommandReportV1>() as u32;
+
+/// The sample window and shape of the meter frame the `f32` buffer cannot carry (issue #143 D5).
+///
+/// # Why a second structure rather than more `f32`s
+///
+/// The meter frame is a `Float32Array` and the window it describes is a pair of absolute sample
+/// counts. A `u64` does not survive an `f32`, and splitting one across two lanes would put a
+/// decoding rule in the app that nothing could check. So the window rides a fixed structure the
+/// JavaScript side reads through `miso_engine_web_v1_meter_header_ptr`, exactly as the status and
+/// the resource report already do, and the `f32` buffer stays what it is: numbers a meter draws.
+///
+/// `first_sample`/`end_sample` are half-open and describe the window the frame's values were
+/// folded over, so a consumer correlates them against a command's `applied_at_sample` rather than
+/// against a wall clock.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WebMeterHeaderV1 {
+    /// Exact structure byte size.
+    pub struct_size: u32,
+    /// ABI version.
+    pub abi_version: u32,
+    /// Tracks the frame carries, so the `f32` view's `3T + 3` shape is checkable.
+    pub track_count: u32,
+    /// Complete windows folded by the most recent poll.
+    pub windows: u32,
+    /// Absolute sample the reported window opened at, inclusive.
+    pub first_sample: u64,
+    /// Absolute sample the reported window closed at, exclusive.
+    pub end_sample: u64,
+    /// Monotonic frame sequence, incremented once per posted frame.
+    pub sequence: u64,
+    /// Designated master track plus one, or `0` when none was designated (issue #143 D6).
+    pub master_track_plus_one: u32,
+    /// `1` when `master_gr_db` is meaningful, `0` when no master tap is bound.
+    pub master_gr_present: u32,
+    /// Required-zero expansion words.
+    pub reserved: [u64; 2],
+}
+
+/// Byte size of [`WebMeterHeaderV1`].
+pub const METER_HEADER_BYTES: u32 = size_of::<WebMeterHeaderV1>() as u32;
+
+/// The header a handle with no compiled session reports: the zeroed shape, never a stale one.
+static EMPTY_METER_HEADER: WebMeterHeaderV1 = empty_meter_header();
+
+const fn empty_meter_header() -> WebMeterHeaderV1 {
+    WebMeterHeaderV1 {
+        struct_size: METER_HEADER_BYTES,
+        abi_version: ABI_VERSION,
+        track_count: 0,
+        windows: 0,
+        first_sample: 0,
+        end_sample: 0,
+        sequence: 0,
+        master_track_plus_one: 0,
+        master_gr_present: 0,
+        reserved: [0; 2],
+    }
+}
 
 /// Byte size of [`WebPrepareConfigV1`].
 pub const PREPARE_CONFIG_BYTES: u32 = size_of::<WebPrepareConfigV1>() as u32;
@@ -286,8 +372,23 @@ pub struct WebPrepareConfigV1 {
     /// track with a `blocks * quantum_frames` window; the port lease then gates whether a finished
     /// window is posted. `12` is ~31 frames per second at 48 kHz with a 128-frame quantum.
     pub console_meter_blocks: u64,
-    /// Required-zero expansion words.
-    pub reserved: [u64; 2],
+    /// Maximum declared observation taps to bind per effect, or `0` for no observation capacity
+    /// at all (issue #143 D3, level 1).
+    ///
+    /// Carved out of the frozen configuration's second reserved word, which every V1 writer
+    /// already sets to zero — the same expansion `console_command_queue_records` took. Zero is the
+    /// honest form: no lane, no accumulator and no conflating cell is allocated anywhere in the
+    /// compiled plan, `observation_retained_bytes` is zero, and a subscription is refused with
+    /// [`COMMAND_REASON_OBSERVATION_UNBOUND`]. The 192-byte layout is unchanged either way.
+    ///
+    /// Requires `console_command_queue_records != 0`: a subscription rides the effect's own
+    /// command queue, so observation without a console has no delivery path.
+    pub console_observation_taps: u64,
+    /// The designated master track, **plus one**, or `0` for none (issue #143 D6).
+    ///
+    /// V1 has no structural master bus, so `masterGrDb` is a designation rather than a discovery.
+    /// Plus one because zero has to keep meaning "unset" in a word every V1 writer already zeroes.
+    pub console_master_track_plus_one: u64,
 }
 
 impl WebPrepareConfigV1 {
@@ -322,7 +423,8 @@ impl WebPrepareConfigV1 {
             maximum_meter_bytes: 16 << 20,
             console_command_queue_records: 0,
             console_meter_blocks: 0,
-            reserved: [0; 2],
+            console_observation_taps: 0,
+            console_master_track_plus_one: 0,
         }
     }
 
@@ -421,8 +523,14 @@ pub struct WebResourceReportV1 {
     pub graph_delay_bytes: u64,
     /// Largest named production or bridge allocation.
     pub largest_named_allocation_bytes: u64,
+    /// Engine-owned bytes the plan's observation lanes and conflating cells retain (issue #143).
+    ///
+    /// Carved out of the report's first reserved word. Exactly zero for a session prepared with
+    /// `console_observation_taps == 0`, and that zero is *walked* over the built runtime rather
+    /// than computed from the configuration. The 224-byte layout is unchanged.
+    pub observation_retained_bytes: u64,
     /// Required-zero expansion words.
-    pub reserved: [u64; 4],
+    pub reserved: [u64; 3],
 }
 
 struct PreparedBuffers {
@@ -479,8 +587,32 @@ struct ReadyOwnership {
     /// Issue #137 D2: meter consumers, declared after the plan that owns their producers. Empty
     /// when `console_meter_blocks` was zero, in which case no observer exists at all.
     meters: Vec<MeterConsumer>,
-    /// `[track0 L, track0 R, .., trackN L, trackN R, master L, master R]` peak magnitudes.
+    /// Issue #143: one reader set per observed effect instance, in the same dense `effect_slot`
+    /// order the command producers use, so an addressed subscription reaches its lane with one
+    /// index and no search. Empty when the configuration named no observation capacity.
+    effect_observations: Box<[Option<EffectObservationHandleV1>]>,
+    /// Track index of each observed effect slot, or `u32::MAX` for a slot with no taps. Built once
+    /// at compilation, so the poll's fold is arithmetic rather than a search.
+    observation_tracks: Box<[u32]>,
+    /// Whether each track contributed a gain-reduction reading to the most recent poll. Allocated
+    /// at compilation; it is what makes `masterGrDb` absent rather than zero.
+    observation_present: Box<[bool]>,
+    /// Armed-tap bitmask per effect slot, maintained at **admission**.
+    ///
+    /// A conflating cell holds its last window forever -- that is what makes it wait-free -- so
+    /// "has this tap been unsubscribed" is not a question the transport can answer, and it must
+    /// not be: a reader that treated an unconsumed window as absent would make an armed tap's
+    /// reading flicker to zero on every poll between windows, exactly as the peak section would if
+    /// it forgot its last value. The subscription state is control-plane state, so it lives on the
+    /// control plane, updated by the one function that admits the record.
+    observation_armed: Box<[u32]>,
+    /// The designated master track, or `None` (issue #143 D6).
+    master_track: Option<u32>,
+    /// `[track0 L, track0 R, .., trackN L, trackN R, master L, master R, track0 GR, .., trackN GR,
+    /// master GR]` -- `3T + 3` words. The peak section is byte-for-byte where it always was.
     meter_frame: Box<[f32]>,
+    /// The window and shape the `f32` frame cannot carry (issue #143 D5).
+    meter_header: WebMeterHeaderV1,
     /// Master peaks folded over the rendered block while the lease is on.
     master_peak: [f32; 2],
     /// Windows folded into `meter_frame` since the host was compiled.
@@ -548,9 +680,21 @@ impl ReadyOwnership {
                 producer.fader.try_push(record).map_err(|_| ())
             }
             AdmittedCommand::Effect(record) => {
+                let effect = slot - tracks * 2;
+                // Issue #143: the armed set is control-plane state and is updated here, where the
+                // record is admitted, so it can never disagree with what the render side was told.
+                if let EffectControlRecordV1::Observe {
+                    tap_index, armed, ..
+                } = record
+                    && let Some(mask) = self.observation_armed.get_mut(effect)
+                    && tap_index < u32::BITS
+                {
+                    let bit = 1_u32 << tap_index;
+                    *mask = if armed { *mask | bit } else { *mask & !bit };
+                }
                 let producer = self
                     .effect_controls
-                    .get_mut(slot - tracks * 2)
+                    .get_mut(effect)
                     .ok_or(())?
                     .as_mut()
                     .ok_or(())?;
@@ -648,10 +792,45 @@ impl AudioWorkletEngineHost {
         self.ready.as_ref().map_or(&[], |ready| &ready.tracks)
     }
 
-    /// The decimated meter frame: two peaks per track, then master left and right (issue #137 D2).
+    /// The decimated meter frame (issue #137 D2, extended by #143 D5).
+    ///
+    /// `3T + 3` words: two peaks per track, master left and right, then one **non-negative**
+    /// gain-reduction magnitude in decibels per track and the master's. The peak section is
+    /// byte-for-byte where it always was.
     #[must_use]
     pub fn meter_frame(&self) -> &[f32] {
         self.ready.as_ref().map_or(&[], |ready| &ready.meter_frame)
+    }
+
+    /// The sample window and shape the `f32` frame cannot carry (issue #143 D5).
+    #[must_use]
+    pub fn meter_header(&self) -> &WebMeterHeaderV1 {
+        self.ready
+            .as_ref()
+            .map_or(&EMPTY_METER_HEADER, |ready| &ready.meter_header)
+    }
+
+    /// Armed taps, in the dense effect-slot order. Off-ABI introspection for the tests.
+    #[must_use]
+    pub fn observation_armed_taps(&self) -> u32 {
+        self.ready.as_ref().map_or(0, |ready| {
+            ready
+                .observation_armed
+                .iter()
+                .map(|mask| mask.count_ones())
+                .sum()
+        })
+    }
+
+    /// Whether preparation bound any observation taps at all (issue #143 D3, level 1).
+    #[must_use]
+    pub fn observation_attached(&self) -> bool {
+        self.ready.as_ref().is_some_and(|ready| {
+            ready
+                .effect_observations
+                .iter()
+                .any(std::option::Option::is_some)
+        })
     }
 
     /// Number of complete meter windows folded since compilation.
@@ -684,6 +863,13 @@ impl AudioWorkletEngineHost {
         if let Some(ready) = self.ready.as_mut() {
             ready.master_peak = [0.0, 0.0];
             ready.meter_frame.fill(0.0);
+            // Issue #143 E8: a retaken lease restarts the frame sequence and the reported window,
+            // so a consumer never folds a window from before the release into one after it.
+            ready.meter_header.sequence = 0;
+            ready.meter_header.windows = 0;
+            ready.meter_header.first_sample = 0;
+            ready.meter_header.end_sample = 0;
+            ready.meter_header.master_gr_present = 0;
         }
         self.record(RESULT_OK)
     }
@@ -1047,13 +1233,109 @@ impl AudioWorkletEngineHost {
                 windows.min(popped)
             };
         }
-        let master = ready.meter_frame.len().saturating_sub(2);
+        let tracks = ready.tracks.len();
+        let master = tracks * 2;
         for (plane, peak) in ready.master_peak.iter().enumerate() {
             if let Some(slot) = ready.meter_frame.get_mut(master + plane) {
                 *slot = *peak;
             }
         }
         ready.master_peak = [0.0, 0.0];
+
+        // Issue #143 D5: the gain-reduction section. This is the control plane -- `poll_meters` is
+        // called from `process()` but after the render export, and it performs no allocation, no
+        // lock and no unbounded loop -- so the one unit conversion the whole design permits lives
+        // here: a tap that publishes a **linear** magnitude (the true-peak limiter's recursive
+        // reduction word) becomes decibels once per closed window, never per sample and never on a
+        // lane kernel.
+        let gain_base = tracks * 2 + 2;
+        for slot in ready.meter_frame.iter_mut().skip(gain_base) {
+            *slot = 0.0;
+        }
+        for slot in ready.observation_present.iter_mut() {
+            *slot = false;
+        }
+        let mut first_sample = u64::MAX;
+        let mut end_sample = 0_u64;
+        let mut observed_any = false;
+        for (effect, entry) in ready.effect_observations.iter().enumerate() {
+            let Some(handle) = entry.as_ref() else {
+                continue;
+            };
+            let Some(track) = ready.observation_tracks.get(effect).copied() else {
+                continue;
+            };
+            if track == u32::MAX {
+                continue;
+            }
+            let armed = ready.observation_armed.get(effect).copied().unwrap_or(0);
+            if armed == 0 {
+                continue;
+            }
+            for (tap_index, reader) in handle.readers.iter().enumerate() {
+                if u32::try_from(tap_index)
+                    .ok()
+                    .is_none_or(|index| index >= u32::BITS || armed & (1_u32 << index) == 0)
+                {
+                    continue;
+                }
+                let Some(window) = reader.read() else {
+                    continue;
+                };
+                reader.acknowledge(window.sequence);
+                let Some(tap) = handle.descriptor.observations.get(tap_index) else {
+                    continue;
+                };
+                let magnitude = if window.left > window.right {
+                    window.left
+                } else {
+                    window.right
+                };
+                let value = observed_decibels(*tap, magnitude);
+                // Several armed taps on one track fold max-magnitude into the one positional slot
+                // the frame carries for that track, on the control plane.
+                if let Some(slot) = ready.meter_frame.get_mut(gain_base + track as usize)
+                    && value > *slot
+                {
+                    *slot = value;
+                }
+                if let Some(present) = ready.observation_present.get_mut(track as usize) {
+                    *present = true;
+                }
+                observed_any = true;
+                if window.first_sample < first_sample {
+                    first_sample = window.first_sample;
+                }
+                if window.end_sample > end_sample {
+                    end_sample = window.end_sample;
+                }
+            }
+        }
+        // `masterGrDb` is a designation, not a discovery (D6). It is absent -- not zero -- when no
+        // track was designated or the designated track published nothing, because zero would be
+        // indistinguishable from "the master is not reducing".
+        let master_present = match ready.master_track {
+            Some(track) => ready
+                .observation_present
+                .get(track as usize)
+                .copied()
+                .unwrap_or(false),
+            None => false,
+        };
+        if master_present
+            && let Some(track) = ready.master_track
+            && let Some(value) = ready.meter_frame.get(gain_base + track as usize).copied()
+            && let Some(slot) = ready.meter_frame.get_mut(gain_base + tracks)
+        {
+            *slot = value;
+        }
+        ready.meter_header.windows = windows;
+        ready.meter_header.sequence = ready.meter_header.sequence.saturating_add(1);
+        ready.meter_header.master_gr_present = u32::from(master_present);
+        if observed_any {
+            ready.meter_header.first_sample = first_sample;
+            ready.meter_header.end_sample = end_sample;
+        }
         ready.meter_windows = ready.meter_windows.saturating_add(u64::from(windows));
         windows
     }
@@ -1196,6 +1478,8 @@ impl CommandRecord {
                 | COMMAND_MUTE
                 | COMMAND_EFFECT_PARAM
                 | COMMAND_EFFECT_BYPASS
+                | COMMAND_OBSERVE_SUBSCRIBE
+                | COMMAND_OBSERVE_UNSUBSCRIBE
         ) {
             return Err(COMMAND_REASON_MALFORMED);
         }
@@ -1304,6 +1588,52 @@ impl CommandRecord {
     /// effect counts a policy-violating span as `invalid_spans` rather than applying it. Doing the
     /// expansion here -- on the control plane, once per submission -- is what keeps the render
     /// side's drain a pure one-record-one-span map.
+    /// Lower one observation subscribe/unsubscribe against the addressed effect's declared menu.
+    ///
+    /// `parameter_id` carries the effect-local `tap_id` and is translated to the `tap_index` the
+    /// render side arms — an admission-time lookup, off the render thread, exactly as a parameter
+    /// id is. A tap the descriptor does not declare is [`COMMAND_REASON_UNKNOWN_TAP`] and never
+    /// [`COMMAND_REASON_UNKNOWN_PARAMETER`]: they are different namespaces on one effect, and a
+    /// caller that confuses them learns which one it got wrong.
+    fn into_observe_record(
+        self,
+        descriptor: &'static miso_engine_effect_contract::EffectDescriptorV1,
+        observed: bool,
+    ) -> Result<AdmittedCommand, u32> {
+        if self.channel != 255 || self.values.iter().any(|value| *value != 0.0) {
+            return Err(COMMAND_REASON_MALFORMED);
+        }
+        if self.parameter_id == 0 {
+            return Err(COMMAND_REASON_UNKNOWN_TAP);
+        }
+        let Some((tap_index, tap)) = descriptor
+            .observations
+            .iter()
+            .enumerate()
+            .find(|(_, tap)| tap.id.0 == self.parameter_id)
+        else {
+            return Err(COMMAND_REASON_UNKNOWN_TAP);
+        };
+        // A computed tap is declared, validated and refused: V1 ships no implementation for one,
+        // and saying so is better than binding a lane that would never publish.
+        if !matches!(
+            tap.cost,
+            miso_engine_effect_contract::ObservationCostV1::Resident
+        ) {
+            return Err(COMMAND_REASON_UNSUPPORTED_KIND);
+        }
+        // The tap exists and the address is right; this *session* bound no lane to arm.
+        if !observed {
+            return Err(COMMAND_REASON_OBSERVATION_UNBOUND);
+        }
+        let tap_index = u32::try_from(tap_index).map_err(|_| COMMAND_REASON_MALFORMED)?;
+        Ok(AdmittedCommand::Effect(EffectControlRecordV1::Observe {
+            tap_index,
+            armed: self.kind == COMMAND_OBSERVE_SUBSCRIBE,
+            window_blocks: self.smoothing_samples,
+        }))
+    }
+
     fn into_effect_records(
         self,
         descriptor: &'static miso_engine_effect_contract::EffectDescriptorV1,
@@ -1413,7 +1743,11 @@ fn admit_commands(
     ready.command_wanted.fill(0);
     let refuse = |reason: u32, index: usize| CommandRejection {
         result: match reason {
-            COMMAND_REASON_UNSUPPORTED_KIND => RESULT_UNSUPPORTED,
+            // `ObservationUnbound` is "this preparation cannot deliver it", which is exactly what
+            // `RESULT_UNSUPPORTED` means; `UnknownTap` is a bad address, like every other unknown.
+            COMMAND_REASON_UNSUPPORTED_KIND | COMMAND_REASON_OBSERVATION_UNBOUND => {
+                RESULT_UNSUPPORTED
+            }
             COMMAND_REASON_BACKPRESSURE => RESULT_BACKPRESSURE,
             _ => RESULT_INVALID_ARGUMENT,
         },
@@ -1443,7 +1777,10 @@ fn admit_commands(
                 }
                 (slot, 1)
             }
-            COMMAND_EFFECT_PARAM | COMMAND_EFFECT_BYPASS => {
+            COMMAND_EFFECT_PARAM
+            | COMMAND_EFFECT_BYPASS
+            | COMMAND_OBSERVE_SUBSCRIBE
+            | COMMAND_OBSERVE_UNSUBSCRIBE => {
                 if command.rack > 2 {
                     return Err(refuse(COMMAND_REASON_UNKNOWN_RACK, index));
                 }
@@ -1461,9 +1798,23 @@ fn admit_commands(
                 else {
                     return Err(refuse(COMMAND_REASON_UNSUPPORTED_KIND, index));
                 };
-                let produced = command
-                    .into_effect_records(producer.descriptor, &mut staged)
-                    .map_err(|reason| refuse(reason, index))?;
+                let produced = if matches!(
+                    command.kind,
+                    COMMAND_OBSERVE_SUBSCRIBE | COMMAND_OBSERVE_UNSUBSCRIBE
+                ) {
+                    let observed = ready
+                        .effect_observations
+                        .get(effect)
+                        .is_some_and(Option::is_some);
+                    staged[0] = command
+                        .into_observe_record(producer.descriptor, observed)
+                        .map_err(|reason| refuse(reason, index))?;
+                    1
+                } else {
+                    command
+                        .into_effect_records(producer.descriptor, &mut staged)
+                        .map_err(|reason| refuse(reason, index))?
+                };
                 (track_count * 2 + effect, produced)
             }
             _ => return Err(refuse(COMMAND_REASON_MALFORMED, index)),
@@ -1503,6 +1854,48 @@ fn admit_commands(
         ready.in_flight[slot] += 1;
     }
     Ok(())
+}
+
+/// One published observation magnitude, as the **decibels of reduction** the frame carries.
+///
+/// The tap declares what crosses the transport (`unit`) and what a consumer reads (`display_unit`,
+/// `minimum`, `maximum`); this is the one place the two are reconciled, and it runs once per closed
+/// window on the control plane. That placement is the whole of R4: the true-peak limiter's `d` is a
+/// linear reduction word and turning it into decibels needs a logarithm, which a render thread may
+/// not take.
+///
+/// The result is clamped into the tap's own declared range, so a consumer never has to guess what
+/// a number outside it would have meant.
+fn observed_decibels(
+    tap: miso_engine_effect_contract::ObservationDescriptorV1,
+    magnitude: f32,
+) -> f32 {
+    use miso_engine_effect_contract::ParameterUnit;
+    let decibels = match tap.unit {
+        // Already a decibel magnitude: the declared `PeakMagnitude` fold made it non-negative.
+        ParameterUnit::Db => magnitude,
+        // `gain = 1 - d`, so the reduction in decibels is `-20 log10(1 - d)`. `d == 1` is total
+        // reduction and has no finite decibel value; the declared maximum is what a meter draws.
+        ParameterUnit::Linear => {
+            if magnitude <= 0.0 {
+                0.0
+            } else if magnitude >= 1.0 {
+                tap.maximum
+            } else {
+                -20.0 * miso_engine_math::log10f(1.0 - magnitude)
+            }
+        }
+        // No launch tap declares another unit, and a menu that did would be describing something
+        // this frame slot has no meaning for.
+        _ => 0.0,
+    };
+    if !decibels.is_finite() || decibels < tap.minimum {
+        tap.minimum
+    } else if decibels > tap.maximum {
+        tap.maximum
+    } else {
+        decibels
+    }
 }
 
 const fn empty_command_report() -> WebCommandReportV1 {
@@ -1554,7 +1947,8 @@ const fn empty_resource_report(backend: u32) -> WebResourceReportV1 {
         graph_metadata_bytes: 0,
         graph_delay_bytes: 0,
         largest_named_allocation_bytes: 0,
-        reserved: [0; 4],
+        observation_retained_bytes: 0,
+        reserved: [0; 3],
     }
 }
 
@@ -1642,7 +2036,13 @@ fn validate_config(config: WebPrepareConfigV1) -> Result<(), u32> {
     if config.struct_size != PREPARE_CONFIG_BYTES || config.abi_version != ABI_VERSION {
         return Err(RESULT_ABI_MISMATCH);
     }
-    if config.reserved != [0; 2]
+    // Issue #143: observation capacity requires a command queue to carry the subscription, and a
+    // master designation must be a plausible track index. The session-level range check is the
+    // facade's; this one only refuses what cannot be a track index at all.
+    if config.console_observation_taps > u64::from(MAXIMUM_OBSERVATION_TAPS)
+        || (config.console_observation_taps != 0 && config.console_command_queue_records == 0)
+        || config.console_master_track_plus_one > u64::from(u32::MAX)
+        || (config.console_master_track_plus_one != 0 && config.console_observation_taps == 0)
         || config.console_command_queue_records > u64::from(MAXIMUM_COMMAND_RECORDS)
         || config.console_meter_blocks > u64::from(u32::MAX)
         || !matches!(config.sample_rate_hz, 44_100 | 48_000 | 88_200 | 96_000)
@@ -1806,6 +2206,9 @@ fn compile_ready(
     report.graph_metadata_bytes = engine.graph_metadata_bytes;
     report.graph_delay_bytes = engine.graph_delay_bytes;
     report.largest_named_allocation_bytes = largest_named;
+    // Issue #143 R7: the engine's walked row, carried through unchanged. Zero for a session
+    // prepared with `console_observation_taps == 0`.
+    report.observation_retained_bytes = engine.observation_retained_bytes;
     let track_count = handles.tracks.len();
     let mut rack_effects = Vec::new();
     rack_effects
@@ -1872,9 +2275,56 @@ fn compile_ready(
         .checked_mul(2)
         .and_then(|value| value.checked_add(total_effects as usize))
         .ok_or_else(|| fixed_diagnostic("web.console.effects"))?;
+    // Issue #143: the observation handles are permuted into the same dense `effect_slot` order
+    // the command producers use, so one index serves both the subscribe path and the poll.
+    let mut effect_observations: Vec<Option<EffectObservationHandleV1>> = Vec::new();
+    effect_observations
+        .try_reserve_exact(total_effects as usize)
+        .map_err(|_| fixed_diagnostic("web.resource.allocation"))?;
+    effect_observations.resize_with(total_effects as usize, || None);
+    // `observation_tracks[slot]` is the track index of that effect slot's observed instance, or
+    // `u32::MAX` for a slot with no taps. Built once, here, so the poll's fold is arithmetic.
+    let mut observation_tracks = vec![u32::MAX; total_effects as usize];
+    let observation_present = vec![false; track_count];
+    for handle in handles.effect_observations {
+        let Some(track) = track_index.get(handle.track_id.as_ref()).copied() else {
+            return Err(fixed_diagnostic("web.console.observation"));
+        };
+        let rack = match handle.rack {
+            EffectRack::Simd1 => 0_usize,
+            EffectRack::Dynamic => 1,
+            EffectRack::Simd2 => 2,
+        };
+        let counts = &rack_effects[track];
+        let offset: u32 = counts[..rack].iter().sum();
+        let slot = (effect_base[track] + offset + handle.effect_index) as usize;
+        let Some(entry) = effect_observations.get_mut(slot) else {
+            return Err(fixed_diagnostic("web.console.observation"));
+        };
+        if entry.is_some() {
+            return Err(fixed_diagnostic("web.console.observation"));
+        }
+        // The frame carries one gain-reduction slot per track, so every observed effect of a track
+        // points at that track and the poll folds them max-magnitude into the one slot.
+        observation_tracks[slot] =
+            u32::try_from(track).map_err(|_| fixed_diagnostic("web.console.observation"))?;
+        *entry = Some(handle);
+    }
+    let mut meter_header = empty_meter_header();
+    meter_header.track_count =
+        u32::try_from(track_count).map_err(|_| fixed_diagnostic("web.console.effects"))?;
+    meter_header.master_track_plus_one = handles
+        .master_track
+        .map_or(0, |track| track.saturating_add(1));
     let ready = ReadyOwnership {
         controls: handles.track_controls,
         effect_controls: effect_controls.into_boxed_slice(),
+        effect_observations: effect_observations.into_boxed_slice(),
+        observation_tracks: observation_tracks.into_boxed_slice(),
+        observation_present: observation_present.into_boxed_slice(),
+        observation_armed: boxed_zero_u32(total_effects as usize)?,
+        master_track: handles.master_track,
+        meter_header,
         effect_base: effect_base.into_boxed_slice(),
         command_wanted: boxed_zero_u32(queue_count)?,
         command_decoded: boxed_command_staging()?,
@@ -1912,6 +2362,12 @@ fn console_request(config: WebPrepareConfigV1) -> Option<HostConsoleRequestV1> {
         // One window per track per post, plus headroom for a control-side stall of a few windows.
         meter_queue_depth: NonZeroUsize::new(8)?,
         meter_tap: MeterTap::PostMatrix,
+        // Issue #143 D3/D6: both are carved browser configuration words, translated once, here.
+        observation_taps: u32::try_from(config.console_observation_taps).ok()?,
+        master_track: match config.console_master_track_plus_one {
+            0 => None,
+            value => Some(u32::try_from(value.checked_sub(1)?).ok()?),
+        },
     })
 }
 
@@ -1924,10 +2380,14 @@ fn boxed_zero_u32(count: usize) -> Result<Box<[u32]>, Vec<u8>> {
     Ok(value.into_boxed_slice())
 }
 
+/// `3T + 3` words: two peak lanes and one gain-reduction magnitude per track, then the master's.
+///
+/// The peak section keeps its exact `2T + 2` layout and its exact offsets, so every existing
+/// reader of this buffer is unmoved; the gain-reduction section is appended after it.
 fn boxed_zero_meter_frame(track_count: usize) -> Result<Box<[f32]>, Vec<u8>> {
     let count = track_count
-        .checked_mul(2)
-        .and_then(|value| value.checked_add(2))
+        .checked_mul(3)
+        .and_then(|value| value.checked_add(3))
         .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
     let mut value = Vec::new();
     value

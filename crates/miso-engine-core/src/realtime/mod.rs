@@ -7,6 +7,7 @@
 pub mod audit;
 mod buffer;
 mod disjoint;
+mod observe;
 mod plan;
 mod plan_exchange;
 mod spsc;
@@ -17,6 +18,10 @@ pub use buffer::{
 pub use disjoint::{
     ARENA_SILENCE_BUFFER, ArenaLeaseSetBuilder, ArenaLeaseV1, ArenaStereoPair, DisjointArena,
     DisjointArenaError,
+};
+pub use observe::{
+    ObservationPublisherV1, ObservationReaderV1, ObservationSlotV1, ObservationWindowV1,
+    observation_slot, observation_slot_retained_bytes,
 };
 pub use plan::{
     ExecutorHandover, PrepareRenderPlan, PreparedPlanExecutor, PreparedProgram, PreparedRenderPlan,

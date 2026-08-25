@@ -80,3 +80,15 @@ pin `-C target-feature=+avx2,+fma`, debug profile. Sweep driver: one mutation at
 | # | mutation | file | test | result |
 |---|---|---|---|---|
 | 140-13 | `PreparedCompressor::gain_reduction` returns a hardcoded zero pair instead of reading `Channel::gain_reduction_db` | `compressor/src/lib.rs` | `gain_reduction::the_compressor_reports_the_reduction_its_kernel_smoothed` | RED (`a signal well over the threshold is audibly reduced: 0`) |
+
+## Issue #143 — the effect observation surface
+
+R5 removed `PreparedNativeEffect::gain_reduction` and its test file is re-expressed on the declared
+tap (`tests/observation.rs`); row 140-13 above is superseded by 143-E6-b, which is the same
+mutation applied to the same kernel read through the new address. Same host and profile as above.
+
+| # | mutation | file | test | result |
+|---|---|---|---|---|
+| 143-E6-a | `PreparedCompressor::observe_resident` advances the smoother in the read (`self.instance.left.gain_reduction_db *= 0.9;`) | `compressor/src/lib.rs` | `cargo build -p miso-engine-compressor` | RED — **does not compile**: `observe_resident` takes `&self`, so "resident" is enforced by the signature rather than asserted. This is the `&self` half of E6 |
+| 143-E6-b | `observe_resident` writes `0.0` into both lanes instead of reading `Channel::gain_reduction_db` | `compressor/src/lib.rs` | `observation` (whole binary) | RED — 5 of 6 tests fail; `the_compressor_reports_the_reduction_its_kernel_smoothed` reports `0` where reduction was required |
+| 143-E2-a | `observe_resident_bank` broadcasts lane 0's reading to every lane | `compressor/src/lib.rs` | `observation::every_bank_lane_reads_its_own_reduction` | RED — `lane 1 left reading is its own, not a neighbour's`, left `0` vs right `3239051021` |

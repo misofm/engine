@@ -90,6 +90,7 @@ static DESCRIPTOR: EffectDescriptorV1 = EffectDescriptorV1 {
     parameters: &PARAMETERS,
     ports: &PORTS,
     qualities: &QUALITIES,
+    observations: &[],
 };
 static DESCRIPTOR_WIRE: LazyLock<Vec<u8>> = LazyLock::new(|| {
     let required = effect_descriptor_wire_v1_required_size(&DESCRIPTOR, 1 << 20).unwrap();

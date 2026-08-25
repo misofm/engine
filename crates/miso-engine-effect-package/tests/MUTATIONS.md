@@ -119,3 +119,18 @@ change was needed here; the gates below prove it and cover the one property 079 
   `3 << 16`, unavailable index and offset.
 * Round trip: `exact_wire_round_trip_preserves_independent_sections_and_suffixes` and
   `independent_reference_vector_binds_verifies_and_reencodes_byte_identically`.
+
+## Issue #143 — the additive observation wire section
+
+| # | mutation | file | test | result |
+|---|---|---|---|---|
+| 143-E10-a | the encoder writes the real section offset into header word 92 even for a zero-tap descriptor (drop the `observations == 0 => 0` rule in `Layout::header_observation_offset`) | `effect-package/src/wire.rs` | `cargo test -p miso-engine-effect-package` | RED — 23 of 34 tests fail, including the frozen `comprehensive-a`/`-b` wire and identity fixtures: **every** non-dynamics identity moves, which is exactly the failure the two-word header exists to prevent |
+| 143-E10-b | `OBSERVATION_BYTES = 40` instead of 32 | `effect-package/src/wire.rs` | `effect-compiler` `observation_identity::every_declared_tap_costs_exactly_its_record_and_its_two_strings` | RED — `miso.compressor: the section is exactly its records plus its strings`, 56 vs 48 |
+| 143-E9-a | the schema gate accepts any boolean `subscribable` instead of deriving it from the cost class | `scripts/check-parameter-metadata-v1.py` | `check-parameter-metadata-v1.py --self-test` | RED — two mutations escape: `a computed tap claims to be subscribable`, `a resident tap denies being subscribable` |
+
+The Python reference carries its own observation mutation matrix
+(`observation_mutation_matrix` in `scripts/effect-descriptor-v1-reference.py`): sixteen cases over
+the tap-bearing `comprehensive-c` vector — the record's reserved word, tap order, all six
+vocabularies, both float slots, inverted bounds, a `Computed` tap claiming `PerBlock` cadence, the
+section offset, the section count, and the two string-pool ownership rules. Each asserts the exact
+`(code, byte_offset, record_index, detail)` diagnostic and fails if the mutation is accepted.

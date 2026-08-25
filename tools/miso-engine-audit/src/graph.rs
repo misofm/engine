@@ -307,6 +307,7 @@ fn prepared_graph(
         banks: Vec::new(),
         builtin_banks: Vec::new(),
         observers: Vec::new(),
+        effect_observations: Vec::new(),
     });
     match graph.bind(GraphRuntimeBindings {
         #[cfg(not(target_arch = "wasm32"))]

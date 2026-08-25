@@ -23,6 +23,13 @@
     { "value": 8, "name": "backpressure" },
     { "value": 9, "name": "wrongState" }
   ],
+  "observationVocabularies": {
+    "kinds": [{ "value": 1, "name": "gainReductionDb" }],
+    "costs": [{ "value": 1, "name": "resident" }, { "value": 2, "name": "computed" }],
+    "cadences": [{ "value": 1, "name": "perBlock" }, { "value": 2, "name": "perWindow" }],
+    "folds": [{ "value": 1, "name": "latest" }, { "value": 2, "name": "peakMagnitude" }],
+    "channels": [{ "value": 1, "name": "shared" }, { "value": 2, "name": "perLane" }]
+  },
   "builtins": {
     "parameters": [
       { "id": 1, "name": "polarity_invert", "scope": "perLane", "mapping": "boolean", "domain": "booleanExact", "minimum": null, "maximum": null, "maximumByRate": null, "default": 0.0, "updateRate": "preparedOnly", "smoothing": "none", "reset": "restorePreparedValue", "disabledValue": null, "liveUpdatable": false, "nudge": null },
@@ -41,7 +48,7 @@
     {
       "id": "miso.compressor",
       "displayName": "Compressor",
-      "contractMajor": 1, "contractMinor": 0, "stateLayoutVersion": 1,
+      "contractMajor": 1, "contractMinor": 1, "stateLayoutVersion": 1,
       "parameters": [
         {
           "id": 1,
@@ -171,6 +178,9 @@
           "enumChoices": [],
           "nudge": null
         }
+      ],
+      "observations": [
+        { "id": 1, "name": "Gain Reduction", "displayUnit": "dB", "kind": 1, "kindName": "gainReductionDb", "unit": 1, "unitName": "db", "cost": 1, "costName": "resident", "cadence": 1, "cadenceName": "perBlock", "fold": 2, "foldName": "peakMagnitude", "channels": 2, "channelsName": "perLane", "minimum": 0.0, "maximum": 100.0, "subscribable": true }
       ]
     },
     {
@@ -258,12 +268,13 @@
           "enumChoices": [],
           "nudge": null
         }
-      ]
+      ],
+      "observations": []
     },
     {
       "id": "miso.gate-expander",
       "displayName": "Gate / Expander",
-      "contractMajor": 1, "contractMinor": 0, "stateLayoutVersion": 2,
+      "contractMajor": 1, "contractMinor": 1, "stateLayoutVersion": 2,
       "parameters": [
         {
           "id": 1,
@@ -393,12 +404,15 @@
           "enumChoices": [],
           "nudge": null
         }
+      ],
+      "observations": [
+        { "id": 1, "name": "Gain Reduction", "displayUnit": "dB", "kind": 1, "kindName": "gainReductionDb", "unit": 1, "unitName": "db", "cost": 1, "costName": "resident", "cadence": 1, "cadenceName": "perBlock", "fold": 2, "foldName": "peakMagnitude", "channels": 2, "channelsName": "perLane", "minimum": 0.0, "maximum": 100.0, "subscribable": true }
       ]
     },
     {
       "id": "miso.multiband-compressor",
       "displayName": "Multiband Compressor",
-      "contractMajor": 1, "contractMinor": 0, "stateLayoutVersion": 2,
+      "contractMajor": 1, "contractMinor": 1, "stateLayoutVersion": 2,
       "parameters": [
         {
           "id": 1,
@@ -592,6 +606,9 @@
           "enumChoices": [],
           "nudge": null
         }
+      ],
+      "observations": [
+        { "id": 1, "name": "Gain Reduction", "displayUnit": "dB", "kind": 1, "kindName": "gainReductionDb", "unit": 1, "unitName": "db", "cost": 1, "costName": "resident", "cadence": 1, "cadenceName": "perBlock", "fold": 2, "foldName": "peakMagnitude", "channels": 2, "channelsName": "perLane", "minimum": 0.0, "maximum": 100.0, "subscribable": true }
       ]
     },
     {
@@ -983,7 +1000,8 @@
           "enumChoices": [],
           "nudge": null
         }
-      ]
+      ],
+      "observations": []
     },
     {
       "id": "miso.soft-clip",
@@ -1038,7 +1056,8 @@
           "enumChoices": [],
           "nudge": null
         }
-      ]
+      ],
+      "observations": []
     },
     {
       "id": "miso.transient-shaper",
@@ -1093,12 +1112,13 @@
           "enumChoices": [],
           "nudge": null
         }
-      ]
+      ],
+      "observations": []
     },
     {
       "id": "miso.true-peak-limiter",
       "displayName": "True-Peak Limiter",
-      "contractMajor": 1, "contractMinor": 0, "stateLayoutVersion": 2,
+      "contractMajor": 1, "contractMinor": 1, "stateLayoutVersion": 2,
       "parameters": [
         {
           "id": 1,
@@ -1148,6 +1168,9 @@
           "enumChoices": [],
           "nudge": null
         }
+      ],
+      "observations": [
+        { "id": 1, "name": "Gain Reduction", "displayUnit": "dB", "kind": 1, "kindName": "gainReductionDb", "unit": 5, "unitName": "linear", "cost": 1, "costName": "resident", "cadence": 1, "cadenceName": "perBlock", "fold": 2, "foldName": "peakMagnitude", "channels": 2, "channelsName": "perLane", "minimum": 0.0, "maximum": 100.0, "subscribable": true }
       ]
     }
   ]

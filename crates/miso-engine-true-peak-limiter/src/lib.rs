@@ -46,12 +46,14 @@ use miso_engine_effect_contract::{
     AutomationRate, AutomationSpanKind, BankProcessReport, BankWidth, EffectBankProcessBlock,
     EffectDescriptorV1, EffectPrepareError, EffectProcessBlock, EffectQuality,
     InitialParameterValue, LatencySamples, LinkMode, LinkModeSet, NativeEffectFactory,
-    ParameterChannel, ParameterChannelPolicy, ParameterDescriptorV1, ParameterDomain, ParameterId,
-    ParameterMapping, ParameterUnit, PortDescriptorV1, PortId, PortLayout, PortRole,
-    PrepareEffectBankRequest, PrepareEffectRequest, PreparedAutomationSpan, PreparedBankMetadata,
-    PreparedEffectMetadata, PreparedNativeEffect, PreparedNativeEffectBank, ProcessReport,
-    ResetKind, SmoothingRule, StatePayloadError, StatePayloadInput, StatePayloadOutput,
-    StatePayloadSizes, TailSamples, expected_prepared_metadata,
+    ObservationCadenceV1, ObservationChannelsV1, ObservationCostV1, ObservationDescriptorV1,
+    ObservationFoldV1, ObservationKindV1, ObservationSampleV1, ObservationTapId, ParameterChannel,
+    ParameterChannelPolicy, ParameterDescriptorV1, ParameterDomain, ParameterId, ParameterMapping,
+    ParameterUnit, PortDescriptorV1, PortId, PortLayout, PortRole, PrepareEffectBankRequest,
+    PrepareEffectRequest, PreparedAutomationSpan, PreparedBankMetadata, PreparedEffectMetadata,
+    PreparedNativeEffect, PreparedNativeEffectBank, ProcessReport, ResetKind, SmoothingRule,
+    StatePayloadError, StatePayloadInput, StatePayloadOutput, StatePayloadSizes, TailSamples,
+    expected_prepared_metadata,
 };
 use miso_engine_effect_runtime::bank::{NonFiniteReport, finish_block};
 use miso_engine_effect_runtime::params::{
@@ -245,12 +247,41 @@ const QUALITIES: [miso_engine_effect_contract::QualityDescriptorV1; 4] = [
     quality(96_000),
 ];
 
+/// The one declared observation tap: the recursive reduction word, **linear** (issue #143 R4).
+///
+/// `ChannelState::reduction` is `d` in the kernel's `gain = 1 - d` recursion, a linear magnitude in
+/// `[0, 1]`. The tap declares `unit: Linear` and publishes exactly that word: converting it to
+/// decibels would put a `log` on the render thread, and "resident = copy out" would stop being
+/// literally true. The host converts once per closed window, on the control plane.
+///
+/// `display_unit`, `minimum` and `maximum` describe the value a **consumer** reads, after the
+/// declared fold and after that one unit conversion -- decibels of reduction, `0 .. 100`. `unit`
+/// describes what crosses the transport. They differ here and only here, and the difference is the
+/// whole point of declaring the transport unit separately.
+pub const TRUE_PEAK_LIMITER_OBSERVATIONS_V1: [ObservationDescriptorV1; 1] =
+    [ObservationDescriptorV1 {
+        id: ObservationTapId(1),
+        display_name: "Gain Reduction",
+        display_unit: "dB",
+        kind: ObservationKindV1::GainReductionDb,
+        unit: ParameterUnit::Linear,
+        cost: ObservationCostV1::Resident,
+        cadence: ObservationCadenceV1::PerBlock,
+        fold: ObservationFoldV1::PeakMagnitude,
+        channels: ObservationChannelsV1::PerLane,
+        minimum: 0.0,
+        maximum: 100.0,
+    }];
+
 /// Immutable launch true-peak limiter descriptor.
 pub const TRUE_PEAK_LIMITER_DESCRIPTOR_V1: EffectDescriptorV1 = EffectDescriptorV1 {
     id: effect_id("miso.true-peak-limiter"),
     display_name: "True-Peak Limiter",
     contract_major: 1,
-    contract_minor: 0,
+    // Issue #143 P1: declaring the first tap is a `contract_minor` bump and a derived identity
+    // re-pin of exactly `32 + len("Gain Reduction") + len("dB")` = 48 bytes.
+    // `state_layout_version` does not move: the tap reads state that was already there.
+    contract_minor: 1,
     state_layout_version: STATE_LAYOUT_VERSION,
     supported_link_modes: match LinkModeSet::new(3) {
         Some(value) => value,
@@ -259,6 +290,7 @@ pub const TRUE_PEAK_LIMITER_DESCRIPTOR_V1: EffectDescriptorV1 = EffectDescriptor
     parameters: &TRUE_PEAK_LIMITER_PARAMETERS_V1,
     ports: &PORTS,
     qualities: &QUALITIES,
+    observations: &TRUE_PEAK_LIMITER_OBSERVATIONS_V1,
 };
 
 /// The state layout this crate reads and writes.
@@ -1610,6 +1642,20 @@ impl PreparedNativeEffect for PreparedTruePeakLimiter {
         self.core.metadata
     }
 
+    /// Issue #143 D2 / R4: the recursive reduction word `d`, linear, read for lane 0.
+    ///
+    /// A plain indexed read of the planar word the block already wrote -- no release step, no
+    /// logarithm, no second recursion. Freshening the state here would make two routes to one
+    /// value diverge, which is exactly what E6's red mutation demonstrates.
+    fn observe_resident(&self, tap_index: u32, out: &mut ObservationSampleV1) -> bool {
+        if tap_index != 0 {
+            return false;
+        }
+        out.left = self.core.left.reduction[0];
+        out.right = self.core.right.reduction[0];
+        true
+    }
+
     fn reset(&mut self, kind: ResetKind) {
         self.core.reset(kind);
     }
@@ -1649,6 +1695,22 @@ impl PreparedNativeEffect for PreparedTruePeakLimiter {
 impl<L: Lane> PreparedNativeEffectBank for PreparedTruePeakLimiterBank<L> {
     fn metadata(&self) -> PreparedBankMetadata {
         self.metadata.clone()
+    }
+
+    fn observe_resident_bank(&self, tap_index: u32, out: &mut [ObservationSampleV1]) -> bool {
+        let lanes = L::WIDTH;
+        if tap_index != 0
+            || out.len() != lanes
+            || self.core.left.reduction.len() != lanes
+            || self.core.right.reduction.len() != lanes
+        {
+            return false;
+        }
+        for (lane, sample) in out.iter_mut().enumerate() {
+            sample.left = self.core.left.reduction[lane];
+            sample.right = self.core.right.reduction[lane];
+        }
+        true
     }
 
     fn reset(&mut self, kind: ResetKind) {

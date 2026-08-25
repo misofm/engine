@@ -3,12 +3,12 @@
 
 This matrix is generated from the pinned Playwright 1.62.1 headless Linux qualification run over the single shipped simd128 AudioWorklet artifact. The version shown is the lowest version qualified by this run; older versions are unqualified, not implicitly supported.
 
-| Browser engine | Qualified version floor | Attestation outcome | SIMD gate | AudioWorklet boot | Native corpus digest | Live console (#137) | 100 ms main-thread stall |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| chromium | 151.0.7922.34 | simd128 supported | pass | pass | pass | pass | pass |
-| firefox | 153.0 | simd128 supported | pass | pass | pass | pass | pass |
-| webkit | 26.5 | simd128 supported | pass | pass | pass | pass | pass |
+| Browser engine | Qualified version floor | Attestation outcome | SIMD gate | AudioWorklet boot | Native corpus digest | Live console (#137) | Observation (#143) | 100 ms main-thread stall |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| chromium | 151.0.7922.34 | simd128 supported | pass | pass | pass | pass | pass | pass |
+| firefox | 153.0 | simd128 supported | pass | pass | pass | pass | pass | pass |
+| webkit | 26.5 | simd128 supported | pass | pass | pass | pass | pass | pass |
 
-The live-console gate (issue #137) applies one `miso.command.v1` matrix retarget, requires the rendered output to equal the declared half-gain result bit for bit, and requires at least one decimated `miso.meter.v1` frame whose master peak is a real observation of that output plus at least one windowed `miso.telemetry.v1` frame. The stall gate injects at least 100 ms of main-realm blocking after prefilling the 5120-frame default source ring, now with the control path and the meter fold both live across the fault, and requires bit-exact, dropout-free, frame-aligned output. `miso.unsupported.v1` is the only qualified refusal for a browser without simd128.
+The observation gate (issue #143) subscribes to the compressor's declared gain-reduction tap, requires at least one `miso.meter.v1` frame whose `trackGrDb` carries a **positive** magnitude the app can read without clamping, requires `masterGrDb` to be the designated track's own reading, requires the reported windows to advance monotonically and tile with no gap, requires an unsubscribe to actually stop the traffic, and requires the armed and unarmed renders of the same sixteen blocks to produce **bit-identical audio** -- arming a declared tap may not move a sample. The live-console gate (issue #137) applies one `miso.command.v1` matrix retarget, requires the rendered output to equal the declared half-gain result bit for bit, and requires at least one decimated `miso.meter.v1` frame whose master peak is a real observation of that output plus at least one windowed `miso.telemetry.v1` frame. The stall gate injects at least 100 ms of main-realm blocking after prefilling the 5120-frame default source ring, now with the control path and the meter fold both live across the fault, and requires bit-exact, dropout-free, frame-aligned output. `miso.unsupported.v1` is the only qualified refusal for a browser without simd128.
 
 Playwright's browser builds are qualification targets, not claims about branded Chrome, Safari, or untested Firefox builds. Re-run the matrix before lowering a deployment floor or changing Playwright. This work does not qualify cross-origin isolation or shared-memory operation.

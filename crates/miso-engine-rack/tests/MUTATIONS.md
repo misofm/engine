@@ -129,3 +129,9 @@ pin `-C target-feature=+avx2,+fma`, debug profile. Sweep driver: one mutation at
 |---|---|---|---|---|
 | 140-3 | `ConsoleEffectBankStage::process` packs every lane at `packed[..staged]` instead of at that lane's own running offset, so a later lane's spans overwrite an earlier lane's while the offsets still partition the array | `rack/src/lib.rs` | `console_bank::each_lane_receives_only_its_own_commands` | RED (`lane 0 got its own command`) |
 | 140-4 | the per-lane bypass restore walks the AoSoA block with `index += 1` instead of `index += lane_count`, so a bypassed lane's dry samples land in every lane | `rack/src/lib.rs` | `console_bank::bypass_is_per_lane_and_preserves_the_declared_latency` | RED (`lane 1 keeps the wet, gained signal`) |
+
+## Issue #143 — the bank slot's observation surface
+
+| # | mutation | file | test | result |
+|---|---|---|---|---|
+| 143-E5-rack | build the per-lane sample scratch unconditionally in `ConsoleEffectBankStage::new` | `rack/src/lib.rs` | `console_bank::an_unobserved_bank_slot_reports_no_observation_state_at_all` | RED — an unobserved slot stops being structurally distinguishable from an observed one, and `is_observed` stops meaning anything |

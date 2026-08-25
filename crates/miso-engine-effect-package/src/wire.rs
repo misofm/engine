@@ -7,7 +7,8 @@ use miso_engine_core::{
 };
 use miso_engine_effect_contract::{
     AutomationRate, DescriptorDiagnosticCode, EffectDescriptorV1, EffectQuality, LinkMode,
-    LinkModeSet, ParameterChannelPolicy, ParameterDomain, ParameterMapping, ParameterUnit,
+    LinkModeSet, ObservationCadenceV1, ObservationChannelsV1, ObservationCostV1, ObservationFoldV1,
+    ObservationKindV1, ParameterChannelPolicy, ParameterDomain, ParameterMapping, ParameterUnit,
     PortDescriptorV1, PortLayout, PortRole, SmoothingRule, TailSamples, validate_descriptor_v1,
 };
 use sha2::{Digest, Sha256};
@@ -20,6 +21,29 @@ const PARAMETER_BYTES: usize = 80;
 const PORT_BYTES: usize = 24;
 const QUALITY_BYTES: usize = 64;
 const ENUM_CHOICE_BYTES: usize = 16;
+/// Issue #143: one observation record, in the frozen little-endian layout
+///
+/// | offset | width | field |
+/// |---|---|---|
+/// | 0 | u32 | `id`, the effect-local tap id |
+/// | 4 | u8 | `kind` |
+/// | 5 | u8 | `unit` |
+/// | 6 | u8 | `cost` |
+/// | 7 | u8 | `cadence` |
+/// | 8 | u8 | `fold` |
+/// | 9 | u8 | `channels` |
+/// | 10 | u8 | `display_name` byte length |
+/// | 11 | u8 | `display_unit` byte length |
+/// | 12 | u32 | `minimum` bits |
+/// | 16 | u32 | `maximum` bits |
+/// | 20 | u32 | `display_name` offset into the string pool |
+/// | 24 | u32 | `display_unit` offset into the string pool |
+/// | 28 | u32 | required zero |
+///
+/// The six vocabularies are single bytes rather than the `u32`s the parameter record uses because
+/// the record is 32 bytes and the fields do not fit otherwise; every string in this workspace is
+/// capped at 255 bytes by `valid_text`, so the two lengths fit a byte for the same reason.
+const OBSERVATION_BYTES: usize = 32;
 const IDENTITY_DOMAIN: &[u8] = b"miso.engine.effect-descriptor.identity.v1\0";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -89,6 +113,7 @@ pub struct VerifiedEffectDescriptorWireV1<'a> {
     port_count: u32,
     quality_count: u32,
     enum_choice_count: u32,
+    observation_count: u32,
     state_layout_version: u32,
     supported_link_mode_bits: u32,
 }
@@ -114,6 +139,11 @@ impl<'a> VerifiedEffectDescriptorWireV1<'a> {
         self.enum_choice_count
     }
 
+    /// Number of declared observation taps (issue #143). Zero for every pre-#143 descriptor.
+    pub const fn observation_count(self) -> u32 {
+        self.observation_count
+    }
+
     pub const fn state_layout_version(self) -> u32 {
         self.state_layout_version
     }
@@ -135,12 +165,30 @@ struct Layout {
     ports: u32,
     qualities: u32,
     choices: u32,
+    observations: u32,
     parameter_offset: u32,
     port_offset: u32,
     quality_offset: u32,
     choice_offset: u32,
+    observation_offset: u32,
     string_offset: u32,
     string_bytes: u32,
+}
+
+impl Layout {
+    /// The value header byte 92 carries.
+    ///
+    /// **Zero when the descriptor declares no tap**, which is what keeps every pre-#143
+    /// descriptor's bytes -- and therefore its identity -- exactly where they were: header bytes
+    /// 88..96 stay the eight zeros the pre-#143 verifier demanded. A tap-bearing descriptor writes
+    /// the real offset there, which is precisely the byte a stale reader refuses.
+    const fn header_observation_offset(self) -> u32 {
+        if self.observations == 0 {
+            0
+        } else {
+            self.observation_offset
+        }
+    }
 }
 
 fn diagnostic(code: Code, byte_offset: usize, record_index: Option<usize>) -> Diagnostic {
@@ -212,6 +260,7 @@ fn descriptor_layout(
     let parameters = u32_len(descriptor.parameters.len())?;
     let ports = u32_len(descriptor.ports.len())?;
     let qualities = u32_len(descriptor.qualities.len())?;
+    let observations = u32_len(descriptor.observations.len())?;
     let mut choices = 0u32;
     let mut string_bytes = 0u32;
     add_text_size(&mut string_bytes, descriptor.id.as_str())?;
@@ -230,6 +279,12 @@ fn descriptor_layout(
             canonical_port_at(descriptor.ports, index).id.as_str(),
         )?;
     }
+    // Issue #143: observation strings own the tail of the pool, after the ports, so a zero-tap
+    // descriptor's pool is the pre-#143 pool byte for byte.
+    for observation in descriptor.observations {
+        add_text_size(&mut string_bytes, observation.display_name)?;
+        add_text_size(&mut string_bytes, observation.display_unit)?;
+    }
     let parameter_offset = HEADER_BYTES as u32;
     let port_offset = checked_add(
         parameter_offset,
@@ -240,9 +295,13 @@ fn descriptor_layout(
         quality_offset,
         checked_mul(qualities, QUALITY_BYTES as u32)?,
     )?;
-    let string_offset = checked_add(
+    let observation_offset = checked_add(
         choice_offset,
         checked_mul(choices, ENUM_CHOICE_BYTES as u32)?,
+    )?;
+    let string_offset = checked_add(
+        observation_offset,
+        checked_mul(observations, OBSERVATION_BYTES as u32)?,
     )?;
     let total = checked_add(string_offset, string_bytes)?;
     if total > maximum_descriptor_bytes
@@ -257,10 +316,12 @@ fn descriptor_layout(
         ports,
         qualities,
         choices,
+        observations,
         parameter_offset,
         port_offset,
         quality_offset,
         choice_offset,
+        observation_offset,
         string_offset,
         string_bytes,
     })
@@ -323,6 +384,8 @@ pub fn encode_effect_descriptor_wire_v1(
     write_u32(output, 76, layout.choice_offset);
     write_u32(output, 80, layout.string_bytes);
     write_u32(output, 84, layout.string_offset);
+    write_u32(output, 88, layout.observations);
+    write_u32(output, 92, layout.header_observation_offset());
 
     let mut string_cursor = layout.string_offset;
     let (offset, length) = write_text(output, &mut string_cursor, descriptor.id.as_str());
@@ -386,6 +449,24 @@ pub fn encode_effect_descriptor_wire_v1(
         write_u32(output, record + 8, port.role as u32);
         write_u32(output, record + 12, u32::from(port.required));
         write_u32(output, record + 16, port.layout as u32);
+    }
+    for (index, observation) in descriptor.observations.iter().enumerate() {
+        let record = layout.observation_offset as usize + index * OBSERVATION_BYTES;
+        write_u32(output, record, observation.id.0);
+        output[record + 4] = observation.kind as u8;
+        output[record + 5] = observation.unit as u8;
+        output[record + 6] = observation.cost as u8;
+        output[record + 7] = observation.cadence as u8;
+        output[record + 8] = observation.fold as u8;
+        output[record + 9] = observation.channels as u8;
+        output[record + 10] = observation.display_name.len() as u8;
+        output[record + 11] = observation.display_unit.len() as u8;
+        write_u32(output, record + 12, observation.minimum.to_bits());
+        write_u32(output, record + 16, observation.maximum.to_bits());
+        let (offset, _) = write_text(output, &mut string_cursor, observation.display_name);
+        write_u32(output, record + 20, offset);
+        let (offset, _) = write_text(output, &mut string_cursor, observation.display_unit);
+        write_u32(output, record + 24, offset);
     }
     for (index, quality) in descriptor.qualities.iter().enumerate() {
         let record = layout.quality_offset as usize + index * QUALITY_BYTES;
@@ -460,6 +541,18 @@ struct BorrowedPortV1<'a> {
 }
 
 #[derive(Clone, Copy)]
+struct BorrowedObservationV1<'a> {
+    id: u32,
+    cost: ObservationCostV1,
+    cadence: ObservationCadenceV1,
+    channels: ObservationChannelsV1,
+    minimum: f32,
+    maximum: f32,
+    display_name: &'a str,
+    display_unit: &'a str,
+}
+
+#[derive(Clone, Copy)]
 struct BorrowedQualityV1 {
     quality: EffectQuality,
     sample_rate: u32,
@@ -516,6 +609,27 @@ impl<'a> BorrowedEffectDescriptorViewV1<'a> {
             role: PortRole::from_raw(read_u32(self.bytes, record + 8)).unwrap(),
             required: read_u32(self.bytes, record + 12) == 1,
             layout: PortLayout::from_raw(read_u32(self.bytes, record + 16)).unwrap(),
+        }
+    }
+
+    fn observation(self, index: usize) -> BorrowedObservationV1<'a> {
+        let record = self.layout.observation_offset as usize + index * OBSERVATION_BYTES;
+        let byte = |offset: usize| u32::from(self.bytes[record + offset]);
+        BorrowedObservationV1 {
+            id: read_u32(self.bytes, record),
+            cost: ObservationCostV1::from_raw(byte(6)).unwrap(),
+            cadence: ObservationCadenceV1::from_raw(byte(7)).unwrap(),
+            channels: ObservationChannelsV1::from_raw(byte(9)).unwrap(),
+            minimum: f32::from_bits(read_u32(self.bytes, record + 12)),
+            maximum: f32::from_bits(read_u32(self.bytes, record + 16)),
+            display_name: self.text(
+                read_u32(self.bytes, record + 20) as usize,
+                usize::from(self.bytes[record + 10]),
+            ),
+            display_unit: self.text(
+                read_u32(self.bytes, record + 24) as usize,
+                usize::from(self.bytes[record + 11]),
+            ),
         }
     }
 
@@ -609,6 +723,7 @@ fn parse_borrowed_wire(
     let qualities = read_u32(bytes, 64);
     let choices = read_u32(bytes, 72);
     let string_bytes = read_u32(bytes, 80);
+    let observations = read_u32(bytes, 88);
     let parameter_offset = HEADER_BYTES as u32;
     let port_offset = checked_add_at(
         parameter_offset,
@@ -625,10 +740,15 @@ fn parse_borrowed_wire(
         checked_mul_at(qualities, QUALITY_BYTES as u32, 64)?,
         64,
     )?;
-    let string_offset = checked_add_at(
+    let observation_offset = checked_add_at(
         choice_offset,
         checked_mul_at(choices, ENUM_CHOICE_BYTES as u32, 72)?,
         72,
+    )?;
+    let string_offset = checked_add_at(
+        observation_offset,
+        checked_mul_at(observations, OBSERVATION_BYTES as u32, 88)?,
+        88,
     )?;
     if checked_add_at(string_offset, string_bytes, 80)? != total {
         return Err(diagnostic(Code::Length, 80, None));
@@ -639,10 +759,12 @@ fn parse_borrowed_wire(
         ports,
         qualities,
         choices,
+        observations,
         parameter_offset,
         port_offset,
         quality_offset,
         choice_offset,
+        observation_offset,
         string_offset,
         string_bytes,
     };
@@ -651,7 +773,13 @@ fn parse_borrowed_wire(
     if read_u32(bytes, 12) != 0 {
         return Err(diagnostic(Code::Reserved, 12, None));
     }
-    if let Some(index) = bytes[88..96].iter().position(|byte| *byte != 0) {
+    // Issue #143: header bytes 88..96 are the observation section's count and offset. A
+    // descriptor that declares no tap keeps them all zero -- byte for byte the reserved-zero
+    // window the pre-#143 verifier enforced, which is what makes every zero-tap identity unmoved
+    // and what makes a stale reader refuse a tap-bearing descriptor rather than ignore its menu.
+    if observations == 0
+        && let Some(index) = bytes[88..96].iter().position(|byte| *byte != 0)
+    {
         return Err(diagnostic(Code::Reserved, 88 + index, None));
     }
     for index in 0..parameters as usize {
@@ -692,6 +820,12 @@ fn parse_borrowed_wire(
             return Err(diagnostic(Code::Reserved, record + 12, Some(index)));
         }
     }
+    for index in 0..observations as usize {
+        let record = observation_offset as usize + index * OBSERVATION_BYTES;
+        if read_u32(bytes, record + 28) != 0 {
+            return Err(diagnostic(Code::Reserved, record + 28, Some(index)));
+        }
+    }
 
     // Phase 6: exact offsets, table order, and first-use string ownership.
     let mut string_cursor = string_offset;
@@ -717,6 +851,7 @@ fn parse_borrowed_wire(
         (68, quality_offset),
         (76, choice_offset),
         (84, string_offset),
+        (92, layout.header_observation_offset()),
     ] {
         if read_u32(bytes, field) != expected {
             return Err(diagnostic(Code::Offset, field, None));
@@ -798,6 +933,31 @@ fn parse_borrowed_wire(
         }
         prior_port = Some(key);
     }
+    let mut prior_observation = None;
+    for index in 0..observations as usize {
+        let record = observation_offset as usize + index * OBSERVATION_BYTES;
+        let id = read_u32(bytes, record);
+        if prior_observation.is_some_and(|prior| id <= prior) {
+            return Err(diagnostic(Code::Order, record, Some(index)));
+        }
+        prior_observation = Some(id);
+        take_text(
+            bytes,
+            read_u32(bytes, record + 20),
+            u32::from(bytes[record + 10]),
+            &mut string_cursor,
+            record + 20,
+            Some(index),
+        )?;
+        take_text(
+            bytes,
+            read_u32(bytes, record + 24),
+            u32::from(bytes[record + 11]),
+            &mut string_cursor,
+            record + 24,
+            Some(index),
+        )?;
+    }
     let mut prior_quality = None;
     for index in 0..qualities as usize {
         let record = quality_offset as usize + index * QUALITY_BYTES;
@@ -871,6 +1031,39 @@ fn parse_borrowed_wire(
         }
     }
 
+    for index in 0..observations as usize {
+        let record = observation_offset as usize + index * OBSERVATION_BYTES;
+        let fields = [
+            (
+                4,
+                ObservationKindV1::from_raw(u32::from(bytes[record + 4])).is_some(),
+            ),
+            (
+                5,
+                ParameterUnit::from_raw(u32::from(bytes[record + 5])).is_some(),
+            ),
+            (
+                6,
+                ObservationCostV1::from_raw(u32::from(bytes[record + 6])).is_some(),
+            ),
+            (
+                7,
+                ObservationCadenceV1::from_raw(u32::from(bytes[record + 7])).is_some(),
+            ),
+            (
+                8,
+                ObservationFoldV1::from_raw(u32::from(bytes[record + 8])).is_some(),
+            ),
+            (
+                9,
+                ObservationChannelsV1::from_raw(u32::from(bytes[record + 9])).is_some(),
+            ),
+        ];
+        if let Some((field, _)) = fields.into_iter().find(|(_, valid)| !valid) {
+            return Err(diagnostic(Code::Enum, record + field, Some(index)));
+        }
+    }
+
     // Phase 8: UTF-8, control scalars, lengths, and constructor-equivalent ID grammar.
     let effect_id =
         core::str::from_utf8(effect_id_bytes).map_err(|_| diagnostic(Code::Text, 32, None))?;
@@ -924,6 +1117,19 @@ fn parse_borrowed_wire(
         }
     }
 
+    for index in 0..observations as usize {
+        let record = observation_offset as usize + index * OBSERVATION_BYTES;
+        for (field, length_field) in [(20, 10), (24, 11)] {
+            let offset = read_u32(bytes, record + field) as usize;
+            let length = usize::from(bytes[record + length_field]);
+            let value = core::str::from_utf8(&bytes[offset..offset + length])
+                .map_err(|_| diagnostic(Code::Text, record + field, Some(index)))?;
+            if !valid_text(value) {
+                return Err(diagnostic(Code::Text, record + field, Some(index)));
+            }
+        }
+    }
+
     // Phase 9: canonical finite f32 bit patterns.
     for index in 0..parameters as usize {
         let record = parameter_offset as usize + index * PARAMETER_BYTES;
@@ -938,6 +1144,15 @@ fn parse_borrowed_wire(
         let record = choice_offset as usize + index * ENUM_CHOICE_BYTES;
         if !canonical_float(f32::from_bits(read_u32(bytes, record))) {
             return Err(diagnostic(Code::Float, record, Some(index)));
+        }
+    }
+
+    for index in 0..observations as usize {
+        let record = observation_offset as usize + index * OBSERVATION_BYTES;
+        for field in [12, 16] {
+            if !canonical_float(f32::from_bits(read_u32(bytes, record + field))) {
+                return Err(diagnostic(Code::Float, record + field, Some(index)));
+            }
         }
     }
 
@@ -1231,6 +1446,50 @@ fn borrowed_semantic_errors(
             );
         }
     }
+    // Issue #143: the borrowed mirror of `validate_descriptor_v1`'s observation rules. The
+    // per-lane rule reads the *decoded* qualities rather than the static descriptor, so external
+    // wire is judged by its own bytes and never by a descriptor it claims to be.
+    let per_lane_state =
+        (0..view.layout.qualities as usize).all(|index| view.quality(index).left_bytes > 0);
+    let mut prior_observation = 0;
+    let mut observation_ids = BTreeSet::new();
+    for index in 0..view.layout.observations as usize {
+        let observation = view.observation(index);
+        let record = view.layout.observation_offset as usize + index * OBSERVATION_BYTES;
+        if observation.id == 0 || !observation_ids.insert(observation.id) {
+            push(
+                "observations",
+                DescriptorDiagnosticCode::ObservationId,
+                record,
+                Some(index),
+            );
+        }
+        if observation.id <= prior_observation {
+            push(
+                "observations",
+                DescriptorDiagnosticCode::ObservationOrder,
+                record,
+                Some(index),
+            );
+        }
+        prior_observation = observation.id;
+        let valid = valid_text(observation.display_name)
+            && valid_text(observation.display_unit)
+            && canonical_float(observation.minimum)
+            && canonical_float(observation.maximum)
+            && observation.minimum < observation.maximum
+            && !(matches!(observation.cost, ObservationCostV1::Computed)
+                && matches!(observation.cadence, ObservationCadenceV1::PerBlock))
+            && (!matches!(observation.channels, ObservationChannelsV1::PerLane) || per_lane_state);
+        if !valid {
+            push(
+                "observations",
+                DescriptorDiagnosticCode::Observation,
+                record + 4,
+                Some(index),
+            );
+        }
+    }
     errors.sort();
     errors.dedup_by(|left, right| left.path == right.path && left.code == right.code);
     errors
@@ -1280,6 +1539,9 @@ fn compare_static_descriptor(
         .ok_or_else(|| semantic_mismatch(72, None))?;
     if view.layout.choices as usize != descriptor_choices {
         return Err(semantic_mismatch(72, None));
+    }
+    if view.layout.observations as usize != descriptor.observations.len() {
+        return Err(semantic_mismatch(88, None));
     }
 
     let mut choice_index = 0usize;
@@ -1373,6 +1635,42 @@ fn compare_static_descriptor(
         }
     }
 
+    for (index, observation) in descriptor.observations.iter().enumerate() {
+        let record = view.layout.observation_offset as usize + index * OBSERVATION_BYTES;
+        if read_u32(view.bytes, record) != observation.id.0 {
+            return Err(semantic_mismatch(record, Some(index)));
+        }
+        let scalar_fields = [
+            (4, observation.kind as u8),
+            (5, observation.unit as u8),
+            (6, observation.cost as u8),
+            (7, observation.cadence as u8),
+            (8, observation.fold as u8),
+            (9, observation.channels as u8),
+            (10, observation.display_name.len() as u8),
+            (11, observation.display_unit.len() as u8),
+        ];
+        if let Some((field, _)) = scalar_fields
+            .into_iter()
+            .find(|(field, expected)| view.bytes[record + field] != *expected)
+        {
+            return Err(semantic_mismatch(record + field, Some(index)));
+        }
+        if read_u32(view.bytes, record + 12) != observation.minimum.to_bits() {
+            return Err(semantic_mismatch(record + 12, Some(index)));
+        }
+        if read_u32(view.bytes, record + 16) != observation.maximum.to_bits() {
+            return Err(semantic_mismatch(record + 16, Some(index)));
+        }
+        let borrowed = view.observation(index);
+        if borrowed.display_name != observation.display_name {
+            return Err(semantic_mismatch(record + 20, Some(index)));
+        }
+        if borrowed.display_unit != observation.display_unit {
+            return Err(semantic_mismatch(record + 24, Some(index)));
+        }
+    }
+
     let mut choice_index = 0usize;
     for parameter in descriptor.parameters {
         for choice in parameter.enum_choices {
@@ -1457,6 +1755,7 @@ pub fn verify_effect_descriptor_wire_v1(
         port_count: view.layout.ports,
         quality_count: view.layout.qualities,
         enum_choice_count: view.layout.choices,
+        observation_count: view.layout.observations,
         state_layout_version: view.state_layout_version,
         supported_link_mode_bits: view.link_modes.bits(),
     })
@@ -1919,6 +2218,7 @@ mod tests {
         parameters: &PARAMETERS,
         ports: &PORTS_UNSORTED,
         qualities: &QUALITIES,
+        observations: &[],
     };
     static SORTED_PORT_DESCRIPTOR: EffectDescriptorV1 = EffectDescriptorV1 {
         ports: &PORTS_SORTED,
@@ -2111,10 +2411,13 @@ mod tests {
             ports: read_u32(bytes, 56),
             qualities: read_u32(bytes, 64),
             choices: read_u32(bytes, 72),
+            observations: read_u32(bytes, 88),
             parameter_offset: read_u32(bytes, 52),
             port_offset: read_u32(bytes, 60),
             quality_offset: read_u32(bytes, 68),
             choice_offset: read_u32(bytes, 76),
+            observation_offset: read_u32(bytes, 76)
+                + read_u32(bytes, 72) * ENUM_CHOICE_BYTES as u32,
             string_bytes: read_u32(bytes, 80),
             string_offset: read_u32(bytes, 84),
         };
@@ -2238,14 +2541,26 @@ mod tests {
                 .code,
             Code::Header
         );
+        // Issue #143 moved byte 88 from "reserved zero" to `observation_count`, so the
+        // reserved-before-enum ordering is proven on byte 92, which a zero-tap descriptor still
+        // requires to be zero. Claiming a tap the wire does not carry is refused by length first,
+        // which is the earlier phase and the more specific answer.
         let mut bytes = original.clone();
-        bytes[88] = 1;
+        bytes[92] = 1;
         write_u32(&mut bytes, 28, 0);
         assert_eq!(
             verify_effect_descriptor_wire_v1(&bytes, 1 << 20)
                 .unwrap_err()
                 .code,
             Code::Reserved
+        );
+        let mut bytes = original.clone();
+        bytes[88] = 1;
+        assert_eq!(
+            verify_effect_descriptor_wire_v1(&bytes, 1 << 20)
+                .unwrap_err()
+                .code,
+            Code::Length
         );
         let mut bytes = original.clone();
         write_u32(&mut bytes, 52, 104);

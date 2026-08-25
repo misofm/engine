@@ -52,7 +52,7 @@ fn a_drain_emits_the_contract_canonical_span_order() {
         producer.try_push(record).expect("room");
     }
     let mut staging = [idle(); 8];
-    let staged = lane.stage(&mut staging, 4_096);
+    let staged = lane.stage(&mut staging, 4_096, None);
     assert_eq!(staged.staged, 3);
     assert_eq!(staged.dropped, 0);
     let keys: Vec<(u32, ParameterChannel)> = staging[..3]
@@ -95,7 +95,7 @@ fn a_repeated_target_collapses_last_wins() {
         producer.try_push(record).expect("room");
     }
     let mut staging = [idle(); 4];
-    let staged = lane.stage(&mut staging, 0);
+    let staged = lane.stage(&mut staging, 0, None);
     assert_eq!(staged.staged, 2);
     assert_eq!(staging[0].parameter_index, 0);
     assert_eq!(staging[1].parameter_index, 2);
@@ -113,8 +113,8 @@ fn a_drained_queue_stages_nothing_on_the_next_block() {
         .try_push(parameter(1, ParameterChannel::Left, 0.5))
         .expect("room");
     let mut staging = [idle(); 4];
-    assert_eq!(lane.stage(&mut staging, 0).staged, 1);
-    assert_eq!(lane.stage(&mut staging, 128).staged, 0);
+    assert_eq!(lane.stage(&mut staging, 0, None).staged, 1);
+    assert_eq!(lane.stage(&mut staging, 128, None).staged, 0);
 }
 
 /// Bypass is not a span: it is retained state that survives blocks with no traffic.
@@ -129,12 +129,12 @@ fn bypass_is_retained_state_and_produces_no_span() {
         .expect("room");
     let mut staging = [idle(); 4];
     assert_eq!(
-        lane.stage(&mut staging, 0).staged,
+        lane.stage(&mut staging, 0, None).staged,
         0,
         "bypass is not a span"
     );
     assert!(lane.bypassed());
-    assert_eq!(lane.stage(&mut staging, 128).staged, 0);
+    assert_eq!(lane.stage(&mut staging, 128, None).staged, 0);
     assert!(lane.bypassed(), "bypass survives a block with no traffic");
 }
 
@@ -210,7 +210,7 @@ fn a_full_window_counts_the_overflow_instead_of_overrunning() {
             .expect("room");
     }
     let mut staging = [idle(); 2];
-    let staged = lane.stage(&mut staging, 0);
+    let staged = lane.stage(&mut staging, 0, None);
     assert_eq!(staged.staged, 2);
     assert_eq!(staged.dropped, 3);
 }

@@ -170,6 +170,7 @@ static STATE_DESCRIPTOR: EffectDescriptorV1 = EffectDescriptorV1 {
     parameters: &STATE_PARAMETERS,
     ports: &STATE_PORTS,
     qualities: &STATE_QUALITIES,
+    observations: &[],
 };
 static STATE_INITIAL: [InitialParameterValue; 3] = [
     InitialParameterValue {
@@ -292,6 +293,7 @@ static MIGRATION_D1: EffectDescriptorV1 = EffectDescriptorV1 {
     parameters: &MIGRATION_PARAMETERS,
     ports: &MIGRATION_PORTS,
     qualities: &MIGRATION_Q1,
+    observations: &[],
 };
 static MIGRATION_D2: EffectDescriptorV1 = EffectDescriptorV1 {
     state_layout_version: 2,

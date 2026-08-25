@@ -13,8 +13,9 @@ use miso_engine_builtins_compiler::{
 };
 use miso_engine_core::{SampleRateHz, realtime::PreparedRenderPlan};
 use miso_engine_effect_compiler::{
-    EffectCompileCaps, EffectControlProducerV1, attach_effect_console_v1,
-    launch_native_effect_registry_v1, prepare_native_session_effects,
+    EffectCompileCaps, EffectControlProducerV1, EffectObservationHandleV1,
+    attach_effect_console_v1, attach_effect_observation_v1, launch_native_effect_registry_v1,
+    prepare_native_session_effects,
 };
 use miso_engine_effect_contract::TailSamples;
 use miso_engine_graph::{
@@ -211,6 +212,11 @@ pub struct HostPrepareReport {
     pub session_largest_allocation_bytes: u64,
     /// Bytes retained by the returned [`SourceControlSet`] (endpoint table plus ID arena).
     pub control_retained_bytes: u64,
+    /// Engine-owned bytes the compiled plan's observation lanes and slots retain (issue #143 R7).
+    ///
+    /// Exactly zero for a session that named no observation capacity, and that zero is *walked*
+    /// over the built runtime rather than computed from the request.
+    pub observation_retained_bytes: u64,
     /// Total source ID text bytes.
     pub source_id_bytes: u64,
     /// Largest single engine-owned allocation: the maximum over the graph, source and builtin
@@ -239,6 +245,24 @@ pub struct HostConsoleRequestV1 {
     pub meter_queue_depth: NonZeroUsize,
     /// Which chain boundary the per-track meters observe.
     pub meter_tap: MeterTap,
+    /// Maximum declared observation taps to bind per effect instance, or `0` for **no observation
+    /// capacity at all** (issue #143 D3, level 1).
+    ///
+    /// Zero is the honest form of "observation off": `attach_effect_observation_v1` is never
+    /// called, so the compiled plan holds no lane, no accumulator and no conflating cell — not a
+    /// disabled one, none — and `observation_retained_bytes` is zero. Nonzero requires a control
+    /// channel, because a subscription rides the effect's existing command queue.
+    ///
+    /// The published window is the *meter* window: it is derived from `meter_period_frames`, not
+    /// configured separately, so a gain-reduction value and the peak beside it in one
+    /// `miso.meter.v1` frame describe the same span of samples.
+    pub observation_taps: u32,
+    /// The track whose gain reduction is reported as the master's, or `None` (issue #143 D6).
+    ///
+    /// V1 has no structural master bus — submixes and outputs carry no effect racks — so the
+    /// master reading is a *designation* rather than a discovery. The successor is effect racks on
+    /// submixes; until then this is twenty lines and an honest name.
+    pub master_track: Option<u32>,
 }
 
 impl Default for HostConsoleRequestV1 {
@@ -248,6 +272,8 @@ impl Default for HostConsoleRequestV1 {
             meter_period_frames: None,
             meter_queue_depth: NonZeroUsize::MIN,
             meter_tap: MeterTap::PostMatrix,
+            observation_taps: 0,
+            master_track: None,
         }
     }
 }
@@ -271,6 +297,14 @@ pub struct HostConsoleHandlesV1 {
     pub effect_controls: Vec<EffectControlProducerV1>,
     /// One meter consumer per track, in `tracks` order; empty when no meters were requested.
     pub meters: Vec<MeterConsumer>,
+    /// One reader set per prepared effect instance that declares an observation tap (issue #143).
+    ///
+    /// Empty when the request named no observation capacity, and empty for every effect whose
+    /// descriptor declares no tap. Addressed by `(track_id, rack, effect_index)`, exactly as
+    /// [`Self::effect_controls`] is.
+    pub effect_observations: Vec<EffectObservationHandleV1>,
+    /// The designated master track index, echoed back after validation against `tracks`.
+    pub master_track: Option<u32>,
 }
 
 /// One prepared session: the render plan, the control-side source set, and the resource report.
@@ -558,6 +592,34 @@ pub fn prepare_host_runtime_with_console(
         })?,
     };
 
+    // Issue #143 D3, level 1. Observation capacity is attached only when it was asked for, and
+    // only alongside a control channel: a subscription rides the effect's own command queue, so
+    // "observe without a console" has no delivery path and is a rejection rather than a silent
+    // half-attach. The published window is the meter window, derived rather than configured.
+    let observation_window_blocks = match (console.meter_period_frames, compiled.quantum().0) {
+        (Some(period), quantum) if quantum > 0 => (period.get() / quantum).max(1),
+        _ => 1,
+    };
+    let effect_observations: Vec<EffectObservationHandleV1> = match console.observation_taps {
+        0 => Vec::new(),
+        taps if console.control_queue_depth.is_none() => {
+            let _ = taps;
+            return Err(shape("host.observation.console"));
+        }
+        taps => attach_effect_observation_v1(&mut effects, taps, observation_window_blocks)
+            .map_err(|diagnostics| {
+                PrepareDiagnostics::new(
+                    PrepareRejection::Effect,
+                    diagnostic_lines(
+                        diagnostics
+                            .0
+                            .iter()
+                            .map(|diagnostic| (diagnostic.code, &diagnostic.path)),
+                    ),
+                )
+            })?,
+    };
+
     // Issue #137 D1/D2: the console requests are derived here, once, from the canonical track
     // order, so `HostConsoleHandlesV1::tracks` and the requested channels cannot disagree.
     let console_tracks: Vec<Box<str>> = model
@@ -749,6 +811,16 @@ pub fn prepare_host_runtime_with_console(
     track_controls.sort_by_key(|value| canonical_index[&*value.track_id]);
     meters.sort_by_key(|value| canonical_index[&*value.track_id]);
 
+    // Issue #143 D6: a designated master must name a track this session actually has, or the
+    // frame would report a master reading nobody can address.
+    let master_track = match console.master_track {
+        Some(index) if (index as usize) < console_tracks.len() => Some(index),
+        Some(_) => return Err(shape("host.observation.master_track")),
+        None => None,
+    };
+    // Issue #143 R7: walked over the built runtime, not derived from the request. A plan that
+    // bound nothing reports zero because it *holds* nothing.
+    let observation_retained_bytes = bound.plan.observation_retained_bytes();
     let control_retained_bytes = sources
         .retained_bytes()
         .ok_or_else(|| resource("host.resource.arithmetic"))?;
@@ -781,6 +853,7 @@ pub fn prepare_host_runtime_with_console(
         session_model_bytes: session_resources.compiled_model_bytes,
         session_largest_allocation_bytes: session_resources.single_allocation_bytes,
         control_retained_bytes,
+        observation_retained_bytes,
         source_id_bytes: u64::try_from(source_id_bytes).map_err(|_| platform("host.count"))?,
         largest_engine_allocation_bytes,
     };
@@ -796,6 +869,8 @@ pub fn prepare_host_runtime_with_console(
             track_controls,
             effect_controls,
             meters,
+            effect_observations,
+            master_track,
         },
     ))
 }

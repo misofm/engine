@@ -2477,6 +2477,7 @@ mod tests {
                 banks: Vec::new(),
                 builtin_banks: Vec::new(),
                 observers: Vec::new(),
+                effect_observations: Vec::new(),
             })
         };
         let mapping = |node, left_channel, right_channel| SourceGraphTrackMapping {

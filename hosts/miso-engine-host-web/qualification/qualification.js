@@ -12,6 +12,15 @@ const CONSOLE_FRAMES = CONSOLE_BLOCKS * QUANTUM_FRAMES;
 const CONSOLE_COMMAND_QUEUE_RECORDS = 64n;
 const CONSOLE_METER_BLOCKS = 2n;
 const COMMAND_MATRIX = 2;
+// Issue #143 E12: the observation row. Sixteen blocks is eight two-block windows -- enough for the
+// compressor's 10 ms attack to settle and for `firstSample` monotonicity to be a real sequence
+// rather than a single point.
+const OBSERVATION_BLOCKS = 16;
+const OBSERVATION_FRAMES = OBSERVATION_BLOCKS * QUANTUM_FRAMES;
+const OBSERVATION_TAPS = 4n;
+const OBSERVATION_MASTER_TRACK_PLUS_ONE = 1n;
+const OBSERVATION_TAP_ID = 1;
+const OBSERVATION_LEVEL = 0.5;
 const MINIMUM_STALL_MS = 100;
 const PROCESSOR_NAME = "miso-engine-v2-audio-worklet";
 const ARTIFACT_URL = "/artifacts/miso-engine-v2-audio-worklet.simd128.wasm";
@@ -28,10 +37,20 @@ const SIMD128_PROBE = new Uint8Array([
 // Issue #137 D1/D2: the two console words. Zero in both is the frozen pre-#137 shape -- no control
 // channel, no meter observers -- which is what the corpus and attestation gates keep using so
 // their digests and resource rows are untouched by the console's existence.
-function limits(sourceRingFrames, consoleCommandQueueRecords = 0n, consoleMeterBlocks = 0n) {
+function limits(
+  sourceRingFrames,
+  consoleCommandQueueRecords = 0n,
+  consoleMeterBlocks = 0n,
+  consoleObservationTaps = 0n,
+  consoleMasterTrackPlusOne = 0n,
+) {
   return {
     consoleCommandQueueRecords,
     consoleMeterBlocks,
+    // Issue #143 D3/D6: the frozen configuration's remaining two reserved words. Zero in both is
+    // the pre-#143 shape, which is what every row but the observation one keeps using.
+    consoleObservationTaps,
+    consoleMasterTrackPlusOne,
     sessionTomlBytes: 1 << 20,
     diagnosticBytes: 1 << 14,
     sourceIdBytes: 1 << 10,
@@ -355,6 +374,136 @@ async function runConsoleQualification(createHost, sessionToml) {
   };
 }
 
+/// Issue #143 E12: subscribe -> nonzero `trackGrDb` -> unsubscribe -> zero, in a real browser.
+///
+/// Two offline renders of the same sixteen blocks over the same session, differing only in whether
+/// the tap is armed when rendering starts. That is the eval's shape and it is also E1's leg (c)
+/// against leg (d) in a browser: the two renders must produce **identical PCM**, because arming a
+/// declared tap may not move a sample.
+///
+/// `armed` is `true` for the first run and `false` for the second, which subscribes and then
+/// immediately unsubscribes -- so the second run proves that an unsubscribe actually stops the
+/// traffic rather than merely being accepted.
+async function runObservationRun(createHost, sessionToml, armed) {
+  const context = new OfflineAudioContext(2, OBSERVATION_FRAMES, SAMPLE_RATE);
+  const host = await createHost({
+    context,
+    quantumFrames: QUANTUM_FRAMES,
+    sessionToml,
+    limits: limits(
+      OBSERVATION_FRAMES,
+      CONSOLE_COMMAND_QUEUE_RECORDS,
+      CONSOLE_METER_BLOCKS,
+      OBSERVATION_TAPS,
+      OBSERVATION_MASTER_TRACK_PLUS_ONE,
+    ),
+    simd128ModuleUrl: ARTIFACT_URL,
+    workletModuleUrl: WORKLET_URL,
+  });
+  host.node.connect(context.destination);
+
+  const frames = [];
+  const planes = () => {
+    const storage = new ArrayBuffer(QUANTUM_FRAMES * 2 * Float32Array.BYTES_PER_ELEMENT);
+    const left = new Float32Array(storage, 0, QUANTUM_FRAMES);
+    const right = new Float32Array(
+      storage,
+      QUANTUM_FRAMES * Float32Array.BYTES_PER_ELEMENT,
+      QUANTUM_FRAMES,
+    );
+    left.fill(OBSERVATION_LEVEL);
+    right.fill(OBSERVATION_LEVEL);
+    return [left, right];
+  };
+  for (let block = 0; block < OBSERVATION_BLOCKS; block += 1) {
+    const acknowledgement = await host.submitSource({
+      requestId: block + 1,
+      sourceId: "console-source",
+      generation: 1n,
+      startFrame: BigInt(block * QUANTUM_FRAMES),
+      sampleRateHz: SAMPLE_RATE,
+      planes: planes(),
+      frames: QUANTUM_FRAMES,
+      endOfRegion: block === OBSERVATION_BLOCKS - 1,
+    });
+    if (acknowledgement.result !== 0) throw new Error("observation prefill rejected");
+  }
+
+  const meterLease = await host.meters({
+    requestId: 30001,
+    enabled: true,
+    onFrame: (frame) => frames.push({
+      trackGrDb: Array.from(frame.trackGrDb),
+      masterGrDb: frame.masterGrDb,
+      firstSample: frame.firstSample.toString(),
+      endSample: frame.endSample.toString(),
+      peaks: frame.peaks.length,
+    }),
+  });
+  const subscription = {
+    trackIndex: 0,
+    rack: 1,
+    effectIndex: 0,
+    tapId: OBSERVATION_TAP_ID,
+    windowBlocks: Number(CONSOLE_METER_BLOCKS),
+    armed: true,
+  };
+  const subscribed = await host.observe({ requestId: 30002, subscriptions: [subscription] });
+  let unsubscribed = null;
+  if (!armed) {
+    unsubscribed = await host.observe({
+      requestId: 30003,
+      subscriptions: [{ ...subscription, armed: false }],
+    });
+  }
+
+  const rendered = await context.startRendering();
+  for (let spin = 0; spin < 8 && frames.length === 0; spin += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 4));
+  }
+  await host.dispose();
+  const actual = [rendered.getChannelData(0), rendered.getChannelData(1)];
+  const values = frames.map((frame) => frame.trackGrDb[0]);
+  const samples = frames.map((frame) => BigInt(frame.firstSample));
+  let monotonic = true;
+  for (let index = 1; index < samples.length; index += 1) {
+    if (samples[index] <= samples[index - 1]) monotonic = false;
+  }
+  let tiles = true;
+  for (let index = 1; index < frames.length; index += 1) {
+    if (frames[index].firstSample !== frames[index - 1].endSample) tiles = false;
+  }
+  return {
+    meterLeaseResult: meterLease.result,
+    subscribeResult: subscribed.result,
+    subscribeReason: subscribed.reason,
+    bindings: subscribed.bindings.length,
+    frameSlot: subscribed.bindings[0]?.frameSlot ?? -1,
+    windowBlocks: subscribed.bindings[0]?.windowBlocks ?? -1,
+    unsubscribeResult: unsubscribed === null ? null : unsubscribed.result,
+    unsubscribeBindings: unsubscribed === null ? null : unsubscribed.bindings.length,
+    frames: frames.length,
+    trackGrDbWidth: frames.length === 0 ? -1 : frames[0].trackGrDb.length,
+    peakWidth: frames.length === 0 ? -1 : frames[0].peaks,
+    maximumTrackGrDb: values.reduce((highest, value) => Math.max(highest, value), 0),
+    everyValueFinite: values.every((value) => Number.isFinite(value) && value >= 0),
+    masterMatchesTrack: frames.every(
+      (frame) => frame.masterGrDb === null || frame.masterGrDb === frame.trackGrDb[0],
+    ),
+    masterPresent: frames.some((frame) => frame.masterGrDb !== null),
+    firstSampleMonotonic: monotonic,
+    windowsTile: tiles,
+    renderedDigest: await pcmDigest(actual, OBSERVATION_FRAMES),
+  };
+}
+
+/// Issue #143 E12: the observation row, both runs.
+async function runObservationQualification(createHost, sessionToml) {
+  const armed = await runObservationRun(createHost, sessionToml, true);
+  const disarmed = await runObservationRun(createHost, sessionToml, false);
+  return { armed, disarmed, identicalAudio: armed.renderedDigest === disarmed.renderedDigest };
+}
+
 async function runStallQualification(createHost, sessionToml) {
   const context = new OfflineAudioContext(2, STALL_RENDER_FRAMES, SAMPLE_RATE);
   const host = await createHost({
@@ -455,7 +604,7 @@ async function runStallQualification(createHost, sessionToml) {
 export async function runQualification() {
   const [
     { createMisoAudioWorkletHost }, expectedResponse, sessionResponse, sourceResponse, stallResponse,
-    consoleResponse,
+    consoleResponse, observationResponse,
   ] =
     await Promise.all([
       import("/artifacts/miso-engine-v2-audio-worklet-host.js"),
@@ -464,9 +613,10 @@ export async function runQualification() {
       fetch("/fixture/source.json"),
       fetch("/qualification/stall-session.toml"),
       fetch("/qualification/console-session.toml"),
+      fetch("/qualification/observation-session.toml"),
     ]);
   if (!expectedResponse.ok || !sessionResponse.ok || !sourceResponse.ok || !stallResponse.ok
-      || !consoleResponse.ok) {
+      || !consoleResponse.ok || !observationResponse.ok) {
     throw new Error("qualification fixture fetch failed");
   }
   const expected = await expectedResponse.json();
@@ -476,6 +626,8 @@ export async function runQualification() {
   // Issue #137 E8: the console row needs a region long enough for one full 128-block telemetry
   // window, which the 40-block stall region is not.
   const consoleSessionToml = new TextEncoder().encode(await consoleResponse.text());
+  // Issue #143 E12: the console session plus one compressor, so an armed tap has a real reduction.
+  const observationSessionToml = new TextEncoder().encode(await observationResponse.text());
   const simd128 = WebAssembly.validate(SIMD128_PROBE);
 
   if (!simd128) {
@@ -493,6 +645,7 @@ export async function runQualification() {
       boot: { ready: false, backend: null },
       corpus: null,
       console: null,
+      observation: null,
       stall: null,
     };
   }
@@ -531,6 +684,18 @@ export async function runQualification() {
       name: error?.name, message: error?.message, ...error, diagnostic,
     })}`);
   }
+  let observation;
+  try {
+    observation = await runObservationQualification(
+      createMisoAudioWorkletHost,
+      observationSessionToml,
+    );
+  } catch (error) {
+    const diagnostic = await diagnoseReady(observationSessionToml);
+    throw new Error(`observation qualification failed: ${diagnosticJson({
+      name: error?.name, message: error?.message, ...error, diagnostic,
+    })}`);
+  }
   let stall;
   try {
     stall = await runStallQualification(createMisoAudioWorkletHost, stallSessionToml);
@@ -553,6 +718,7 @@ export async function runQualification() {
       freshContextIdentity: digests[0] === digests[1],
     },
     console: live,
+    observation,
     stall,
   };
 }

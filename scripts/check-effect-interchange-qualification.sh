@@ -16,19 +16,49 @@
 # No corpus byte changed. The manifest is still self-pinned, so a silent refresh after a fixture
 # edit is still a failure (`scripts/test-effect-interchange-policy.sh`, mutation
 # `refreshed-baseline`).
+#
+# Issue #143 P0. The observation section is an additive change to the descriptor wire, so it moves
+# exactly two sealed rows and adds three:
+#
+#   * `scripts/effect-descriptor-v1-reference.py` -- the independent encoder/verifier now carries
+#     the observation section and its own mutation matrix. There is no way to add a wire section
+#     without moving this row.
+#   * `fixtures/effect-descriptor/v1/MANIFEST.sha256` -- three `comprehensive-c` rows added. That
+#     manifest is not asserted, it is *recomputed* from the fixture files by the reference's
+#     `check()`, so its new identity is derived rather than declared.
+#   * `fixtures/effect-descriptor/v1/comprehensive-c.{json,wire.hex,identity.hex}` -- the new
+#     tap-bearing vector. `comprehensive-c` is `comprehensive-a` plus a two-tap menu and nothing
+#     else (the effect id and display name are the same byte lengths), so `total(C) - total(A)` is
+#     exactly `32 + len(name) + len(unit)` per tap; that formula is asserted in both the Python
+#     reference and `descriptor_v1_qualification.rs`. The wire bytes are the Python encoder's, and
+#     the Rust encoder reproduces them byte for byte in
+#     `checked_vectors_match_independent_wire_identity_and_port_permutation`.
+#
+# Every pre-#143 row is byte-unchanged, which is the point: a zero-tap descriptor encodes to the
+# identity it always had, so `comprehensive-a`/`-b` and the whole package and state corpora do not
+# move. The re-seal was taken after re-running the 100-process independent-reference matrix
+# (`scripts/run-effect-interchange-reference-processes.sh`) on the changed tree.
+#
+#   accepted manifest identity, before #143: 1aaa96dc731c0da3dabb2f8ecd7c2bf803078b580a38cccfccf1ffe280c83588 (24 rows)
+#   accepted manifest identity, after  #143: e3896726979aa746cfda50fc10c1985c0ecef117f87b39e692f18226b7b4fa14 (27 rows)
+#
+# The identity is pinned in three places -- here, `preflight-effect-interchange-benchmark.sh` and
+# `run-effect-interchange-benchmark.sh` -- and all three moved together. A re-seal that moves only
+# one is caught by `scripts/test-effect-interchange-benchmark.sh`.
 set -euo pipefail
 root="$(cd "${1:-.}" && pwd)"
 cd "$root"
 fail() { printf 'effect interchange qualification policy failure: %s\n' "$1" >&2; exit 1; }
 
 manifest=fixtures/effect-interchange/v1/ACCEPTED.sha256
-accepted_manifest_sha256=1aaa96dc731c0da3dabb2f8ecd7c2bf803078b580a38cccfccf1ffe280c83588
+accepted_manifest_sha256=e3896726979aa746cfda50fc10c1985c0ecef117f87b39e692f18226b7b4fa14
 [[ -f "$manifest" && ! -L "$manifest" ]] || fail 'missing immutable baseline manifest'
 [[ "$(sha256sum "$manifest" | awk '{print $1}')" == "$accepted_manifest_sha256" ]] ||
     fail 'immutable baseline manifest changed or was refreshed'
 LC_ALL=C sort -c -k2,2 "$manifest" || fail 'baseline manifest is not path-sorted'
 sha256sum --check --strict "$manifest" >/dev/null || fail 'accepted baseline changed'
-[[ $(wc -l <"$manifest" | tr -d ' ') -eq 24 ]] || fail 'baseline membership changed'
+# 24 corpus/reference-script rows plus the three `comprehensive-c` rows issue #143 added.
+[[ $(wc -l <"$manifest" | tr -d ' ') -eq 27 ]] || fail 'baseline membership changed'
 
 for path in \
     scripts/effect-interchange-v1-reference.py \
@@ -140,9 +170,12 @@ if rg -n 'Serialize|Deserialize|serde|migration_wire|encode_migration' \
 fi
 # Anchored at the start of the attribute so the prose in `ffi.rs`'s doc comment, which names the
 # attribute, is not counted as a second export (#104 phase A).
+# Issue #143 added exactly one additive export, `..._inspect_observations`; the frozen
+# `..._inspect` signature, its summary struct and its record layouts are untouched. The count is
+# still exact, so a *third* export is still a failure.
 exports="$(rg -n '^[[:space:]]*#\[(unsafe\()?no_mangle' \
     crates/miso-engine-effect-package/src | wc -l | tr -d ' ')"
-[[ "$exports" -eq 1 ]] || fail 'descriptor package gained a C export'
+[[ "$exports" -eq 2 ]] || fail 'descriptor package gained a C export'
 rg -q 'fn miso_engine_effect_descriptor_v1_inspect' \
     crates/miso-engine-effect-package/src/ffi.rs || fail 'sole descriptor export missing'
 if find fixtures/effect-interchange/v1 -mindepth 1 -maxdepth 1 -type f \

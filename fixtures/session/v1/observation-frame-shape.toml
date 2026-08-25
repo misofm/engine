@@ -1,0 +1,66 @@
+# Issue #143 E4: the app-shaped frame. Three tracks in the order the frame reports them:
+#
+#   0  a compressor      -- an observed effect that reduces
+#   1  a parametric EQ   -- an effect with **no** declared observation tap, so the track's
+#                           gain-reduction slot is positionally present and exactly `+0.0`
+#   2  a gate/expander   -- a second, different observed effect
+#
+# Every track's builtins are the identity and the racks are dynamic, so no cohort forms and each
+# instance renders on the per-node scalar path. The point of the fixture is the *shape* of the
+# frame the app reads, not the DSP: `trackGrDb.length == trackCount`, every entry finite, and the
+# absent case indistinguishable from "no reduction" by design (D5).
+schema_version = 1
+session_id = "observation-frame-shape"
+revision = 1
+sample_rate_hz = 48000
+quantum_frames = 128
+render_profile = { id = "native", mode = "single_thread" }
+output_profile = { id = "main", channels = 2, sample_format = "f32_planar" }
+limits = { pcm_ring_frames = 512, control_queue_messages = 64, memory_bytes = 16777216 }
+sources = [
+  { id = "fixture-source", sample_rate_hz = 48000, content = { identity = "sha256:observation-frame-shape", locator = "host:observation-frame-shape" }, mapping = { channel_count = 2, region = { start_sample = 0, length_samples = 48000 } } },
+]
+submixes = []
+outputs = [{ id = "main-out" }]
+routes = [
+  { id = "t0-main", source = { kind = "track", track_id = "t0", tap = "post_matrix" }, destination = { kind = "output_input", output_id = "main-out" }, channel_matrix = { ll = 1.0, lr = 0.0, rl = 0.0, rr = 1.0 }, gain_db = 0.0 },
+  { id = "t1-main", source = { kind = "track", track_id = "t1", tap = "post_matrix" }, destination = { kind = "output_input", output_id = "main-out" }, channel_matrix = { ll = 1.0, lr = 0.0, rl = 0.0, rr = 1.0 }, gain_db = 0.0 },
+  { id = "t2-main", source = { kind = "track", track_id = "t2", tap = "post_matrix" }, destination = { kind = "output_input", output_id = "main-out" }, channel_matrix = { ll = 1.0, lr = 0.0, rl = 0.0, rr = 1.0 }, gain_db = 0.0 },
+]
+automation = []
+
+[[tracks]]
+id = "t0"
+source_id = "fixture-source"
+left_source_channel = 0
+right_source_channel = 1
+builtins = { left = { polarity_invert = false, trim_db = 0.0, hpf_hz = 0.0, lpf_hz = 0.0 }, right = { polarity_invert = false, trim_db = 0.0, hpf_hz = 0.0, lpf_hz = 0.0 } }
+simd1 = { effects = [] }
+dynamic = { effects = [{ id = "comp", identity = { kind = "native", effect_id = "miso.compressor" }, quality = "normal", bypass = false, link_mode = "dual_mono", params = [{ parameter_id = 1, channel = "both", unit = "db", value = -30.0 }, { parameter_id = 2, channel = "both", unit = "ratio", value = 4.0 }, { parameter_id = 3, channel = "both", unit = "db", value = 6.0 }, { parameter_id = 4, channel = "both", unit = "milliseconds", value = 10.0 }, { parameter_id = 5, channel = "both", unit = "milliseconds", value = 100.0 }, { parameter_id = 6, channel = "both", unit = "db", value = 0.0 }, { parameter_id = 7, channel = "both", unit = "linear", value = 1.0 }, { parameter_id = 8, channel = "both", unit = "milliseconds", value = 5.0 }], sidechain = { kind = "none" } }] }
+simd2 = { effects = [] }
+fader = { left_db = 0.0, right_db = 0.0, left_mute = false, right_mute = false }
+pan = { left = -1.0, right = 1.0, smoothing_samples = 0 }
+
+[[tracks]]
+id = "t1"
+source_id = "fixture-source"
+left_source_channel = 0
+right_source_channel = 1
+builtins = { left = { polarity_invert = false, trim_db = 0.0, hpf_hz = 0.0, lpf_hz = 0.0 }, right = { polarity_invert = false, trim_db = 0.0, hpf_hz = 0.0, lpf_hz = 0.0 } }
+simd1 = { effects = [] }
+dynamic = { effects = [{ id = "eq", identity = { kind = "native", effect_id = "miso.parametric-eq" }, quality = "normal", bypass = false, link_mode = "dual_mono", params = [{ parameter_id = 1, channel = "both", unit = "linear", value = 1.0 }, { parameter_id = 2, channel = "both", unit = "linear", value = 2.0 }, { parameter_id = 3, channel = "both", unit = "hz", value = 1000.0 }, { parameter_id = 4, channel = "both", unit = "db", value = 0.0 }], sidechain = { kind = "none" } }] }
+simd2 = { effects = [] }
+fader = { left_db = 0.0, right_db = 0.0, left_mute = false, right_mute = false }
+pan = { left = -1.0, right = 1.0, smoothing_samples = 0 }
+
+[[tracks]]
+id = "t2"
+source_id = "fixture-source"
+left_source_channel = 0
+right_source_channel = 1
+builtins = { left = { polarity_invert = false, trim_db = 0.0, hpf_hz = 0.0, lpf_hz = 0.0 }, right = { polarity_invert = false, trim_db = 0.0, hpf_hz = 0.0, lpf_hz = 0.0 } }
+simd1 = { effects = [] }
+dynamic = { effects = [{ id = "gate", identity = { kind = "native", effect_id = "miso.gate-expander" }, quality = "normal", bypass = false, link_mode = "dual_mono", params = [{ parameter_id = 1, channel = "both", unit = "db", value = -6.0 }, { parameter_id = 2, channel = "both", unit = "ratio", value = 4.0 }, { parameter_id = 3, channel = "both", unit = "db", value = 40.0 }, { parameter_id = 4, channel = "both", unit = "db", value = 6.0 }, { parameter_id = 5, channel = "both", unit = "milliseconds", value = 1.0 }, { parameter_id = 6, channel = "both", unit = "milliseconds", value = 100.0 }, { parameter_id = 7, channel = "both", unit = "milliseconds", value = 100.0 }, { parameter_id = 8, channel = "both", unit = "milliseconds", value = 2.0 }], sidechain = { kind = "none" } }] }
+simd2 = { effects = [] }
+fader = { left_db = 0.0, right_db = 0.0, left_mute = false, right_mute = false }
+pan = { left = -1.0, right = 1.0, smoothing_samples = 0 }

@@ -49,7 +49,8 @@ use miso_engine_core::realtime::{ArenaLeaseSetBuilder, ArenaLeaseV1, RenderError
 /// offset by one.
 pub(crate) const ARENA_BASE: u32 = 1;
 use miso_engine_effect_contract::{
-    BypassShunt, EffectControlLane, EffectProcessBlock, PreparedAutomationSpan,
+    BypassShunt, EffectControlLane, EffectProcessBlock, ObservationLaneV1, ObservationSampleV1,
+    PreparedAutomationSpan, PreparedNativeEffect,
 };
 use miso_engine_lane::kernels::{mix2x2_block, pdc_delay_block, sum_into_block, sum2_block};
 use miso_engine_rack::{BankChain, BankMembers};
@@ -214,13 +215,23 @@ pub(crate) struct ConsoleEffect {
     /// Latency-preserving dry path, so live bypass keeps the effect's declared latency exactly
     /// and therefore leaves every compiled PDC route timing correct.
     shunt: BypassShunt,
+    /// Issue #143 D3: this instance's observation taps, or `None` in a plan with no observation
+    /// capacity. `None` is one null pointer and one predicted branch per block -- and, crucially,
+    /// it is the *only* observation state such a plan holds.
+    observation: Option<Box<ObservationLaneV1>>,
 }
 
 impl ConsoleEffect {
-    fn new(effect: GraphPreparedEffect, control: Box<EffectControlLane>, frames: usize) -> Self {
+    fn new(
+        effect: GraphPreparedEffect,
+        control: Box<EffectControlLane>,
+        observation: Option<Box<ObservationLaneV1>>,
+        frames: usize,
+    ) -> Self {
         let capacity = effect.metadata.automation_capacity as usize;
         let latency = usize::try_from(effect.metadata.latency.0).unwrap_or(usize::MAX);
         Self {
+            observation,
             spans: vec![
                 PreparedAutomationSpan {
                     kind: miso_engine_effect_contract::AutomationSpanKind::Point,
@@ -240,6 +251,38 @@ impl ConsoleEffect {
         }
     }
 }
+
+// REALTIME_POLICY_BEGIN
+/// Publish every armed tap of one prepared instance, after `process` returned (issue #143 D2).
+///
+/// **After**, always. The reading is "the value at the end of the block", so taking it before
+/// `process` would report the previous block's state against this block's window -- the exact
+/// off-by-one #137's E1 caught on the command side, mirrored here (E3's red mutation).
+///
+/// The whole of level-2 zero is the `wants` call: an unarmed tap's effect state is never read,
+/// never folded and never stored, and a plan with no capacity at all never reaches this function
+/// because `observation` is `None`.
+fn publish_observations(
+    observation: &mut ObservationLaneV1,
+    processor: &dyn PreparedNativeEffect,
+    first_sample: u64,
+    frames: u64,
+) {
+    let mut sample = ObservationSampleV1 {
+        left: 0.0,
+        right: 0.0,
+    };
+    for tap in 0..observation.len() {
+        if !observation.wants(tap) {
+            continue;
+        }
+        let index = tap as u32;
+        if processor.observe_resident(index, &mut sample) {
+            observation.accumulate(tap, sample, first_sample, frames);
+        }
+    }
+}
+// REALTIME_POLICY_END
 
 /// One delayed input, staged into a scratch buffer on the way in.
 #[derive(Clone, Copy)]
@@ -289,6 +332,64 @@ impl RuntimeUnit {
         match self {
             Self::Op(_) => 0,
             Self::Bank { chain, .. } => chain.transposes(),
+        }
+    }
+
+    /// Exact engine-owned observation bytes this unit retains (issue #143 R7).
+    pub(crate) fn observation_retained_bytes(&self) -> usize {
+        match self {
+            Self::Op(op) => op.kind.observation_retained_bytes(),
+            Self::Bank { members, chain } => {
+                members
+                    .iter()
+                    .map(|member| member.kind.observation_retained_bytes())
+                    .sum::<usize>()
+                    + chain.observation_retained_bytes()
+            }
+        }
+    }
+
+    /// `[observed stages, declared taps, armed taps]` for this unit (issue #143 E5).
+    pub(crate) fn observation_binding_counts(&self) -> [u64; 3] {
+        match self {
+            Self::Op(op) => op.kind.observation_binding_counts(),
+            Self::Bank { members, chain } => {
+                let mut total = chain.observation_binding_counts();
+                for member in members.iter() {
+                    let counts = member.kind.observation_binding_counts();
+                    for (slot, value) in total.iter_mut().zip(counts) {
+                        *slot = slot.saturating_add(value);
+                    }
+                }
+                total
+            }
+        }
+    }
+}
+
+impl NodeKind {
+    /// `[observed stages, declared taps, armed taps]` for one op.
+    pub(crate) fn observation_binding_counts(&self) -> [u64; 3] {
+        let Self::ConsoleEffect(console) = self else {
+            return [0, 0, 0];
+        };
+        let Some(observation) = console.observation.as_deref() else {
+            return [0, 0, 0];
+        };
+        let armed = (0..observation.len())
+            .filter(|tap| observation.is_armed(*tap))
+            .count() as u64;
+        [1, observation.len() as u64, armed]
+    }
+
+    /// Exact engine-owned observation bytes this op retains. Zero for an unobserved op.
+    pub(crate) fn observation_retained_bytes(&self) -> usize {
+        match self {
+            Self::ConsoleEffect(console) => console
+                .observation
+                .as_deref()
+                .map_or(0, ObservationLaneV1::retained_bytes),
+            _ => 0,
         }
     }
 }
@@ -484,7 +585,14 @@ fn execute_op(
             // The drain runs before a single sample is touched, so an admitted record takes
             // effect on the first sample of this block -- the exact `applied_at_sample` the
             // control side was acknowledged with (#137 E1's rule, now for effects).
-            let staged = console.control.stage(&mut console.spans, first_sample);
+            // Issue #143 D3: the subscription and the parameter commands are drained by this one
+            // call, so a batch that changes a threshold and arms its tap lands on one sample
+            // timeline by construction rather than by two clocks agreeing.
+            let staged = console.control.stage(
+                &mut console.spans,
+                first_sample,
+                console.observation.as_deref_mut(),
+            );
             // Preparation refuses a queue deeper than the effect's automation capacity, so a full
             // drain can never produce more distinct spans than the window holds. This is the
             // invariant, not a runtime policy: in release it costs nothing.
@@ -527,6 +635,16 @@ fn execute_op(
             if bypassed {
                 let (out_left, out_right) = lease.write_stereo(output);
                 console.shunt.apply(out_left, out_right);
+            }
+            // Issue #143: after `process`, and after the bypass shunt, so an observed value always
+            // describes the block that was actually emitted.
+            if let Some(observation) = console.observation.as_deref_mut() {
+                publish_observations(
+                    observation,
+                    console.effect.processor.as_ref(),
+                    first_sample,
+                    lease.frames() as u64,
+                );
             }
         }
     }
@@ -662,6 +780,9 @@ pub(crate) struct RuntimeParts {
     /// Issue #140 A: live-console channels by effect node, taken by whichever owner renders that
     /// node -- the per-node `ConsoleEffect`, or the bank slot that holds the node's lane.
     effect_controls: BTreeMap<crate::EffectNodeId, Box<EffectControlLane>>,
+    /// Issue #143 D3: observation lanes by effect node, taken by whichever owner renders that
+    /// node. Empty for a plan with no observation capacity, so `node_kind` hands out `None`.
+    effect_observations: BTreeMap<crate::EffectNodeId, Box<ObservationLaneV1>>,
     pub(crate) bindings: BTreeMap<GraphNodeId, Option<Box<dyn GraphRuntimeProcessor>>>,
     pub(crate) observers: BTreeMap<GraphNodeId, Vec<GraphNodeObserverBinding>>,
     pub(crate) source_inputs: std::collections::BTreeSet<GraphNodeId>,
@@ -679,6 +800,7 @@ impl RuntimeParts {
         routes: Vec<PreparedRoute>,
         effects: Vec<GraphPreparedEffect>,
         effect_controls: Vec<crate::GraphEffectControlBindingV1>,
+        effect_observations: Vec<crate::GraphEffectObservationBindingV1>,
         banks: Vec<GraphPreparedEffectBank>,
         builtin_banks: Vec<GraphPreparedBuiltinBank>,
         observers: Vec<GraphNodeObserverBinding>,
@@ -707,6 +829,10 @@ impl RuntimeParts {
                 .into_iter()
                 .map(|binding| (binding.node, binding.control))
                 .collect(),
+            effect_observations: effect_observations
+                .into_iter()
+                .map(|binding| (binding.node, binding.observation))
+                .collect(),
             bindings: bindings
                 .into_iter()
                 .map(|binding| (binding.node, binding.processor))
@@ -733,11 +859,16 @@ impl RuntimeParts {
         } else if let Some(Some(processor)) = self.bindings.remove(node) {
             NodeKind::Bound(processor)
         } else if let Some(effect) = self.effects.remove(node) {
+            let observation = self.effect_observations.remove(&effect.id);
             match self.effect_controls.remove(&effect.id) {
+                // An observation lane is only ever created alongside a control channel -- a
+                // subscription rides that queue -- so this arm is the unobserved, console-free
+                // path it always was, byte for byte.
                 None => NodeKind::Effect(effect),
                 Some(control) => NodeKind::ConsoleEffect(Box::new(ConsoleEffect::new(
                     effect,
                     control,
+                    observation,
                     self.frames,
                 ))),
             }
@@ -770,6 +901,16 @@ impl RuntimeParts {
                             .map(|control| *control)
                     })
                     .collect();
+                // Issue #143: one observation lane per bank lane, moved out in the same lane order
+                // so a slot has exactly one owner per lane and a lane nobody observes stays `None`.
+                let observations: Vec<Option<ObservationLaneV1>> = (0..width.lanes() as usize)
+                    .map(|lane| {
+                        bank.members
+                            .get(lane)
+                            .and_then(|member| self.effect_observations.remove(member))
+                            .map(|observation| *observation)
+                    })
+                    .collect();
                 if controls.iter().any(Option::is_some) {
                     let latency = usize::try_from(bank.processor.metadata().program_key.latency.0)
                         .unwrap_or(usize::MAX);
@@ -778,6 +919,7 @@ impl RuntimeParts {
                         width,
                         quantum,
                         controls,
+                        observations,
                         latency,
                     )
                     .expect("validated width");

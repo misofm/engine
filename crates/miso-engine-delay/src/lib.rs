@@ -259,6 +259,7 @@ pub const DELAY_DESCRIPTOR_V1: EffectDescriptorV1 = EffectDescriptorV1 {
     parameters: &DELAY_PARAMETERS_V1,
     ports: &PORTS,
     qualities: &QUALITIES,
+    observations: &[],
 };
 
 /// Factory for the launch scalar delay. There is intentionally no homogeneous bank kernel.

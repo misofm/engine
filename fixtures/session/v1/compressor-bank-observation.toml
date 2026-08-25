@@ -1,0 +1,134 @@
+# Issue #143 E1/E2/E3/E5/E13: eight identical compressor chains in one SIMD rack, so the cohort
+# planner forms a full homogeneous bank at every launch bank width (two of four lanes, or one of
+# eight).
+#
+# Every track's builtins are the identity — no polarity, no trim, both filters disabled — so the
+# samples the compressor sees are the source's own, bit for bit. What differs per track is the
+# compressor's **threshold**, and nothing else: threshold is an initial parameter value and not
+# part of `EffectProgramKeyV1`, so the eight instances still share one program key and still bank.
+# That is what lets an independent scalar instance, prepared with one track's threshold and fed the
+# same constant, reproduce that lane's gain reduction to the bit.
+#
+# At the 0.25 constant the fixture feeds (-12.04 dBFS), threshold 0 dB does not bite at all and
+# -18/-24/-30 bite progressively harder, which is the eval's -40/-6/-12/-18 shape expressed through
+# the threshold instead of through the level.
+schema_version = 1
+session_id = "compressor-bank-observation"
+revision = 1
+sample_rate_hz = 48000
+quantum_frames = 128
+render_profile = { id = "native", mode = "single_thread" }
+output_profile = { id = "main", channels = 2, sample_format = "f32_planar" }
+limits = { pcm_ring_frames = 1024, control_queue_messages = 64, memory_bytes = 16777216 }
+sources = [
+  { id = "fixture-source", sample_rate_hz = 48000, content = { identity = "sha256:compressor-bank-observation", locator = "host:compressor-bank-observation" }, mapping = { channel_count = 2, region = { start_sample = 0, length_samples = 48000 } } },
+]
+submixes = []
+outputs = [{ id = "main-out" }]
+routes = [
+  { id = "comp0-main", source = { kind = "track", track_id = "comp0", tap = "post_matrix" }, destination = { kind = "output_input", output_id = "main-out" }, channel_matrix = { ll = 1.0, lr = 0.0, rl = 0.0, rr = 1.0 }, gain_db = 0.0 },
+  { id = "comp1-main", source = { kind = "track", track_id = "comp1", tap = "post_matrix" }, destination = { kind = "output_input", output_id = "main-out" }, channel_matrix = { ll = 1.0, lr = 0.0, rl = 0.0, rr = 1.0 }, gain_db = 0.0 },
+  { id = "comp2-main", source = { kind = "track", track_id = "comp2", tap = "post_matrix" }, destination = { kind = "output_input", output_id = "main-out" }, channel_matrix = { ll = 1.0, lr = 0.0, rl = 0.0, rr = 1.0 }, gain_db = 0.0 },
+  { id = "comp3-main", source = { kind = "track", track_id = "comp3", tap = "post_matrix" }, destination = { kind = "output_input", output_id = "main-out" }, channel_matrix = { ll = 1.0, lr = 0.0, rl = 0.0, rr = 1.0 }, gain_db = 0.0 },
+  { id = "comp4-main", source = { kind = "track", track_id = "comp4", tap = "post_matrix" }, destination = { kind = "output_input", output_id = "main-out" }, channel_matrix = { ll = 1.0, lr = 0.0, rl = 0.0, rr = 1.0 }, gain_db = 0.0 },
+  { id = "comp5-main", source = { kind = "track", track_id = "comp5", tap = "post_matrix" }, destination = { kind = "output_input", output_id = "main-out" }, channel_matrix = { ll = 1.0, lr = 0.0, rl = 0.0, rr = 1.0 }, gain_db = 0.0 },
+  { id = "comp6-main", source = { kind = "track", track_id = "comp6", tap = "post_matrix" }, destination = { kind = "output_input", output_id = "main-out" }, channel_matrix = { ll = 1.0, lr = 0.0, rl = 0.0, rr = 1.0 }, gain_db = 0.0 },
+  { id = "comp7-main", source = { kind = "track", track_id = "comp7", tap = "post_matrix" }, destination = { kind = "output_input", output_id = "main-out" }, channel_matrix = { ll = 1.0, lr = 0.0, rl = 0.0, rr = 1.0 }, gain_db = 0.0 },
+]
+automation = []
+
+[[tracks]]
+id = "comp0"
+source_id = "fixture-source"
+left_source_channel = 0
+right_source_channel = 1
+builtins = { left = { polarity_invert = false, trim_db = 0.0, hpf_hz = 0.0, lpf_hz = 0.0 }, right = { polarity_invert = false, trim_db = 0.0, hpf_hz = 0.0, lpf_hz = 0.0 } }
+simd1 = { effects = [{ id = "comp", identity = { kind = "native", effect_id = "miso.compressor" }, quality = "normal", bypass = false, link_mode = "dual_mono", params = [{ parameter_id = 1, channel = "both", unit = "db", value = 0.0 }, { parameter_id = 2, channel = "both", unit = "ratio", value = 4.0 }, { parameter_id = 3, channel = "both", unit = "db", value = 6.0 }, { parameter_id = 4, channel = "both", unit = "milliseconds", value = 10.0 }, { parameter_id = 5, channel = "both", unit = "milliseconds", value = 100.0 }, { parameter_id = 6, channel = "both", unit = "db", value = 0.0 }, { parameter_id = 7, channel = "both", unit = "linear", value = 1.0 }, { parameter_id = 8, channel = "both", unit = "milliseconds", value = 5.0 }], sidechain = { kind = "none" } }] }
+dynamic = { effects = [] }
+simd2 = { effects = [] }
+fader = { left_db = 0.0, right_db = 0.0, left_mute = false, right_mute = false }
+pan = { left = -1.0, right = 1.0, smoothing_samples = 0 }
+
+[[tracks]]
+id = "comp1"
+source_id = "fixture-source"
+left_source_channel = 0
+right_source_channel = 1
+builtins = { left = { polarity_invert = false, trim_db = 0.0, hpf_hz = 0.0, lpf_hz = 0.0 }, right = { polarity_invert = false, trim_db = 0.0, hpf_hz = 0.0, lpf_hz = 0.0 } }
+simd1 = { effects = [{ id = "comp", identity = { kind = "native", effect_id = "miso.compressor" }, quality = "normal", bypass = false, link_mode = "dual_mono", params = [{ parameter_id = 1, channel = "both", unit = "db", value = -18.0 }, { parameter_id = 2, channel = "both", unit = "ratio", value = 4.0 }, { parameter_id = 3, channel = "both", unit = "db", value = 6.0 }, { parameter_id = 4, channel = "both", unit = "milliseconds", value = 10.0 }, { parameter_id = 5, channel = "both", unit = "milliseconds", value = 100.0 }, { parameter_id = 6, channel = "both", unit = "db", value = 0.0 }, { parameter_id = 7, channel = "both", unit = "linear", value = 1.0 }, { parameter_id = 8, channel = "both", unit = "milliseconds", value = 5.0 }], sidechain = { kind = "none" } }] }
+dynamic = { effects = [] }
+simd2 = { effects = [] }
+fader = { left_db = 0.0, right_db = 0.0, left_mute = false, right_mute = false }
+pan = { left = -1.0, right = 1.0, smoothing_samples = 0 }
+
+[[tracks]]
+id = "comp2"
+source_id = "fixture-source"
+left_source_channel = 0
+right_source_channel = 1
+builtins = { left = { polarity_invert = false, trim_db = 0.0, hpf_hz = 0.0, lpf_hz = 0.0 }, right = { polarity_invert = false, trim_db = 0.0, hpf_hz = 0.0, lpf_hz = 0.0 } }
+simd1 = { effects = [{ id = "comp", identity = { kind = "native", effect_id = "miso.compressor" }, quality = "normal", bypass = false, link_mode = "dual_mono", params = [{ parameter_id = 1, channel = "both", unit = "db", value = -24.0 }, { parameter_id = 2, channel = "both", unit = "ratio", value = 4.0 }, { parameter_id = 3, channel = "both", unit = "db", value = 6.0 }, { parameter_id = 4, channel = "both", unit = "milliseconds", value = 10.0 }, { parameter_id = 5, channel = "both", unit = "milliseconds", value = 100.0 }, { parameter_id = 6, channel = "both", unit = "db", value = 0.0 }, { parameter_id = 7, channel = "both", unit = "linear", value = 1.0 }, { parameter_id = 8, channel = "both", unit = "milliseconds", value = 5.0 }], sidechain = { kind = "none" } }] }
+dynamic = { effects = [] }
+simd2 = { effects = [] }
+fader = { left_db = 0.0, right_db = 0.0, left_mute = false, right_mute = false }
+pan = { left = -1.0, right = 1.0, smoothing_samples = 0 }
+
+[[tracks]]
+id = "comp3"
+source_id = "fixture-source"
+left_source_channel = 0
+right_source_channel = 1
+builtins = { left = { polarity_invert = false, trim_db = 0.0, hpf_hz = 0.0, lpf_hz = 0.0 }, right = { polarity_invert = false, trim_db = 0.0, hpf_hz = 0.0, lpf_hz = 0.0 } }
+simd1 = { effects = [{ id = "comp", identity = { kind = "native", effect_id = "miso.compressor" }, quality = "normal", bypass = false, link_mode = "dual_mono", params = [{ parameter_id = 1, channel = "both", unit = "db", value = -30.0 }, { parameter_id = 2, channel = "both", unit = "ratio", value = 4.0 }, { parameter_id = 3, channel = "both", unit = "db", value = 6.0 }, { parameter_id = 4, channel = "both", unit = "milliseconds", value = 10.0 }, { parameter_id = 5, channel = "both", unit = "milliseconds", value = 100.0 }, { parameter_id = 6, channel = "both", unit = "db", value = 0.0 }, { parameter_id = 7, channel = "both", unit = "linear", value = 1.0 }, { parameter_id = 8, channel = "both", unit = "milliseconds", value = 5.0 }], sidechain = { kind = "none" } }] }
+dynamic = { effects = [] }
+simd2 = { effects = [] }
+fader = { left_db = 0.0, right_db = 0.0, left_mute = false, right_mute = false }
+pan = { left = -1.0, right = 1.0, smoothing_samples = 0 }
+
+[[tracks]]
+id = "comp4"
+source_id = "fixture-source"
+left_source_channel = 0
+right_source_channel = 1
+builtins = { left = { polarity_invert = false, trim_db = 0.0, hpf_hz = 0.0, lpf_hz = 0.0 }, right = { polarity_invert = false, trim_db = 0.0, hpf_hz = 0.0, lpf_hz = 0.0 } }
+simd1 = { effects = [{ id = "comp", identity = { kind = "native", effect_id = "miso.compressor" }, quality = "normal", bypass = false, link_mode = "dual_mono", params = [{ parameter_id = 1, channel = "both", unit = "db", value = 0.0 }, { parameter_id = 2, channel = "both", unit = "ratio", value = 4.0 }, { parameter_id = 3, channel = "both", unit = "db", value = 6.0 }, { parameter_id = 4, channel = "both", unit = "milliseconds", value = 10.0 }, { parameter_id = 5, channel = "both", unit = "milliseconds", value = 100.0 }, { parameter_id = 6, channel = "both", unit = "db", value = 0.0 }, { parameter_id = 7, channel = "both", unit = "linear", value = 1.0 }, { parameter_id = 8, channel = "both", unit = "milliseconds", value = 5.0 }], sidechain = { kind = "none" } }] }
+dynamic = { effects = [] }
+simd2 = { effects = [] }
+fader = { left_db = 0.0, right_db = 0.0, left_mute = false, right_mute = false }
+pan = { left = -1.0, right = 1.0, smoothing_samples = 0 }
+
+[[tracks]]
+id = "comp5"
+source_id = "fixture-source"
+left_source_channel = 0
+right_source_channel = 1
+builtins = { left = { polarity_invert = false, trim_db = 0.0, hpf_hz = 0.0, lpf_hz = 0.0 }, right = { polarity_invert = false, trim_db = 0.0, hpf_hz = 0.0, lpf_hz = 0.0 } }
+simd1 = { effects = [{ id = "comp", identity = { kind = "native", effect_id = "miso.compressor" }, quality = "normal", bypass = false, link_mode = "dual_mono", params = [{ parameter_id = 1, channel = "both", unit = "db", value = -18.0 }, { parameter_id = 2, channel = "both", unit = "ratio", value = 4.0 }, { parameter_id = 3, channel = "both", unit = "db", value = 6.0 }, { parameter_id = 4, channel = "both", unit = "milliseconds", value = 10.0 }, { parameter_id = 5, channel = "both", unit = "milliseconds", value = 100.0 }, { parameter_id = 6, channel = "both", unit = "db", value = 0.0 }, { parameter_id = 7, channel = "both", unit = "linear", value = 1.0 }, { parameter_id = 8, channel = "both", unit = "milliseconds", value = 5.0 }], sidechain = { kind = "none" } }] }
+dynamic = { effects = [] }
+simd2 = { effects = [] }
+fader = { left_db = 0.0, right_db = 0.0, left_mute = false, right_mute = false }
+pan = { left = -1.0, right = 1.0, smoothing_samples = 0 }
+
+[[tracks]]
+id = "comp6"
+source_id = "fixture-source"
+left_source_channel = 0
+right_source_channel = 1
+builtins = { left = { polarity_invert = false, trim_db = 0.0, hpf_hz = 0.0, lpf_hz = 0.0 }, right = { polarity_invert = false, trim_db = 0.0, hpf_hz = 0.0, lpf_hz = 0.0 } }
+simd1 = { effects = [{ id = "comp", identity = { kind = "native", effect_id = "miso.compressor" }, quality = "normal", bypass = false, link_mode = "dual_mono", params = [{ parameter_id = 1, channel = "both", unit = "db", value = -24.0 }, { parameter_id = 2, channel = "both", unit = "ratio", value = 4.0 }, { parameter_id = 3, channel = "both", unit = "db", value = 6.0 }, { parameter_id = 4, channel = "both", unit = "milliseconds", value = 10.0 }, { parameter_id = 5, channel = "both", unit = "milliseconds", value = 100.0 }, { parameter_id = 6, channel = "both", unit = "db", value = 0.0 }, { parameter_id = 7, channel = "both", unit = "linear", value = 1.0 }, { parameter_id = 8, channel = "both", unit = "milliseconds", value = 5.0 }], sidechain = { kind = "none" } }] }
+dynamic = { effects = [] }
+simd2 = { effects = [] }
+fader = { left_db = 0.0, right_db = 0.0, left_mute = false, right_mute = false }
+pan = { left = -1.0, right = 1.0, smoothing_samples = 0 }
+
+[[tracks]]
+id = "comp7"
+source_id = "fixture-source"
+left_source_channel = 0
+right_source_channel = 1
+builtins = { left = { polarity_invert = false, trim_db = 0.0, hpf_hz = 0.0, lpf_hz = 0.0 }, right = { polarity_invert = false, trim_db = 0.0, hpf_hz = 0.0, lpf_hz = 0.0 } }
+simd1 = { effects = [{ id = "comp", identity = { kind = "native", effect_id = "miso.compressor" }, quality = "normal", bypass = false, link_mode = "dual_mono", params = [{ parameter_id = 1, channel = "both", unit = "db", value = -30.0 }, { parameter_id = 2, channel = "both", unit = "ratio", value = 4.0 }, { parameter_id = 3, channel = "both", unit = "db", value = 6.0 }, { parameter_id = 4, channel = "both", unit = "milliseconds", value = 10.0 }, { parameter_id = 5, channel = "both", unit = "milliseconds", value = 100.0 }, { parameter_id = 6, channel = "both", unit = "db", value = 0.0 }, { parameter_id = 7, channel = "both", unit = "linear", value = 1.0 }, { parameter_id = 8, channel = "both", unit = "milliseconds", value = 5.0 }], sidechain = { kind = "none" } }] }
+dynamic = { effects = [] }
+simd2 = { effects = [] }
+fader = { left_db = 0.0, right_db = 0.0, left_mute = false, right_mute = false }
+pan = { left = -1.0, right = 1.0, smoothing_samples = 0 }

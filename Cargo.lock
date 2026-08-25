@@ -886,6 +886,7 @@ version = "0.1.0"
 dependencies = [
  "miso-engine-builtins",
  "miso-engine-builtins-compiler",
+ "miso-engine-compressor",
  "miso-engine-core",
  "miso-engine-effect-compiler",
  "miso-engine-effect-contract",
@@ -920,6 +921,7 @@ dependencies = [
  "miso-engine-core",
  "miso-engine-effect-contract",
  "miso-engine-host-core",
+ "miso-engine-math",
  "miso-engine-session",
  "sha2 0.11.0",
 ]

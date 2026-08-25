@@ -112,6 +112,7 @@ static DESCRIPTOR_V1: EffectDescriptorV1 = EffectDescriptorV1 {
     parameters: &PARAMETERS,
     ports: &PORTS,
     qualities: &QUALITIES_V1,
+    observations: &[],
 };
 static DESCRIPTOR_V2: EffectDescriptorV1 = EffectDescriptorV1 {
     state_layout_version: 2,

@@ -235,9 +235,11 @@ pub(crate) fn into_effects(
 ) -> (
     Vec<GraphPreparedEffect>,
     Vec<miso_engine_graph::GraphEffectControlBindingV1>,
+    Vec<miso_engine_graph::GraphEffectObservationBindingV1>,
 ) {
     let mut effects = Vec::with_capacity(entries.len());
     let mut controls = Vec::new();
+    let mut observations = Vec::new();
     for entry in entries {
         let key = (
             entry.track_id.clone(),
@@ -251,13 +253,19 @@ pub(crate) fn into_effects(
                 control,
             });
         }
+        if let Some(observation) = entry.observation {
+            observations.push(miso_engine_graph::GraphEffectObservationBindingV1 {
+                node: node.clone(),
+                observation,
+            });
+        }
         effects.push(GraphPreparedEffect {
             id: node,
             metadata: entry.metadata,
             processor: entry.processor,
         });
     }
-    (effects, controls)
+    (effects, controls, observations)
 }
 pub(crate) fn diag(code: &'static str, path: &str) -> GraphDiagnostic {
     GraphDiagnostic {

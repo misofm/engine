@@ -52,3 +52,33 @@ pin `-C target-feature=+avx2,+fma`, debug profile. Sweep driver: one mutation at
 |---|---|---|---|---|
 | 140-1 | `EffectControlLane::stage` loses its sorted-insertion leg (`if existing > key`), so records land in arrival order | `effect-contract/src/live.rs` | `live_control::a_drain_emits_the_contract_canonical_span_order` | RED (`spans must leave the drain in (parameter_index, channel) order`) |
 | 140-2 | `BypassShunt::capture` returns before the `pdc_delay_block` exchange, so the dry block is the *current* input rather than the input `latency` samples ago | `effect-contract/src/live.rs` | `live_control::the_shunt_reproduces_the_dry_signal_at_the_declared_latency` | RED (`sample 2 must be the input delayed by exactly 1`) |
+
+## Issue #143 P2 — the observation transport and the arm/disarm seam
+
+`tests/observation_lane.rs`; each row was applied, run, recorded and reverted in the same session.
+
+| # | mutation | file | test | result |
+|---|---|---|---|---|
+| 143-P2-a | the `Observe` arm of `EffectControlLane::stage` falls through to the span builder instead of `continue`ing | `effect-contract/src/live.rs` | `observation_lane` | RED — 2 of 9 fail: `the observations did not crowd it out` (a subscription displaced a parameter from a full staging window) and the unbound count moves |
+| 143-P2-b | a closed window restarts at `first_sample = 0` instead of at `end_sample` | `effect-contract/src/live.rs` | `observation_lane::windows_tile_exactly_and_fold_by_the_declared_rule` | RED — `windows tile`, `0` vs `1408` |
+| 143-P2-c | `PeakMagnitude` folds the raw signed value instead of `max(\|x\|)` | `effect-contract/src/live.rs` | `observation_lane` | RED — 3 of 9 fail; `max(\|x\|) over the window, non-negative` reports `0.0` where `9.5` was required. This is the precursor of E4's dead-meter bug |
+| 143-P2-d | `accumulate` drops the `armed` guard, so an unarmed tap still folds and publishes | `effect-contract/src/live.rs` | `observation_lane::disarming_all_stops_every_tap_without_disturbing_published_windows` | RED — a disarmed tap published sequence 2 at `50.0` |
+| 143-P2-e | a re-subscribe keeps the older `window_blocks` | `effect-contract/src/live.rs` | `observation_lane` | RED — 3 of 9 fail; the window closes a block early |
+
+## Issue #143 — summary of where each eval's red mutation is recorded
+
+| eval | recorded in |
+|---|---|
+| E1 digest identity per tap | `graph-compiler/tests/MUTATIONS.md` (143-E1) |
+| E2 bank-lane correctness | `compressor/tests/MUTATIONS.md` (143-E2-a), `graph-compiler/tests/MUTATIONS.md` (143-E2) |
+| E3 window exactness vs `applied_at_sample` | `graph-compiler/tests/MUTATIONS.md` (143-E3-bank, 143-E3-scalar), plus 143-P2-b/e here |
+| E4 app-shape frame | `host-web/MUTATIONS.md` |
+| E5 zero binding, zero cost | `graph-compiler/tests/MUTATIONS.md` (143-E5) |
+| E6 resident means resident | `compressor/tests/MUTATIONS.md` (143-E6-a/b), `true-peak-limiter/tests/MUTATIONS.md` (143-E6-c) |
+| E7 cost classes bench-backed | `graph-compiler/tests/MUTATIONS.md` (143-E7) |
+| E8 flood and misuse | `host-web/MUTATIONS.md` |
+| E9 metadata round-trip | `effect-package/tests/MUTATIONS.md` (143-E9-a), `host-web/MUTATIONS.md` |
+| E10 wire and identity accounting | `effect-package/tests/MUTATIONS.md` (143-E10-a/b) |
+| E11 transport never tears | `core/tests/MUTATIONS.md` (143-E11-a..d) |
+| E12 three-browser qualification | `host-web/MUTATIONS.md` |
+| E13 plan replacement | `graph-compiler/tests/MUTATIONS.md` (143-E13) |
