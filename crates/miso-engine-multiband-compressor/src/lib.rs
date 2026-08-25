@@ -65,6 +65,8 @@ use miso_engine_math::fast_db::{fast_gain_from_db, fast_level_db};
 
 pub mod corpus;
 mod shim;
+#[cfg(test)]
+mod split;
 
 use shim::{LINK_AVERAGE, LINK_DUAL_MONO, LINK_MAXIMUM, branching_smooth, link_levels};
 
@@ -662,6 +664,26 @@ struct Segment<L: Lane> {
     step: [L; RAMP_COUNT],
 }
 
+/// How far the next segment reaches, and whether anything is ramping over it.
+///
+/// The two answers are one decision because they come from the same scan of the same counters, so
+/// they are produced together rather than scanned for twice ([`Instance::plan_segment`]).
+///
+/// `ramping` is a **whole-bank** predicate: every track of both channels, all ten parameters. The
+/// segment kernel is lane-wide and a per-lane branch inside its frame loop is precisely what the
+/// bank contract forbids, so one moving track puts the whole bank on the ramped path for that
+/// segment. That is the granularity the rest of the library already settled on — the compressor's
+/// `max_remaining` is taken across both channels and every lane, the true-peak limiter's
+/// stationary predicate is an `all` over both channels' ramp arrays, and the 2x2 matrix's early
+/// return is on the maximum over the bank.
+#[derive(Clone, Copy)]
+struct SegmentPlan {
+    /// Frames the segment covers. Always at least one.
+    frames: usize,
+    /// `true` while any ramp in the bank still has samples to produce.
+    ramping: bool,
+}
+
 /// Everything one channel of one bank owns.
 struct Side<L: Lane, const W: usize> {
     coefficients: Lr4Coef<L>,
@@ -909,9 +931,26 @@ fn band_amplitude<L: Lane>(
 /// when the effect is prepared; a bypassed instance is a pure `Fs/50` delay through the low ring
 /// and runs neither the crossover nor the dynamics, and it still advances its ramps so that its
 /// parameter state does not depend on whether it was bypassed.
+///
+/// `RAMPING` is the third compile-time switch, and it is the one that varies *within* a block.
+/// It says whether any ramp of any track of either channel still has samples to produce over this
+/// segment; [`Instance::plan_segment`] decides it from the ramp counters at the same moment it
+/// decides the segment's length. At `RAMPING == false` the twenty per-frame lane additions below
+/// are not merely predicted away, they are not emitted: a settled bank pays no smoothing
+/// arithmetic at all.
+///
+/// **Why that is bit-identical, not merely close.** `LinearRamp` keeps `remaining == 0` implying
+/// `step == +0.0`, and this crate admits parameter words through exactly four doors — prepared
+/// defaults, `apply_automation`, `snap`, and a restored payload — every one of which runs
+/// `normalize_zero` over a `parameter_value_valid` word. So on the skipped path every lane of
+/// every `step` is `+0.0` and every lane of every `current` is finite and is not `-0.0`, which
+/// makes `current.add(step)` the identity on all of them. The two exclusions matter and are the
+/// same two `LinearRamp::stationary_at` names: `-0.0 + 0.0` is `+0.0`, and a NaN is quieted by an
+/// addition. `Instance::flat_path_is_identity` asserts the precondition in debug builds rather
+/// than leaving it as a comment.
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
-fn run_segment<L: Lane, const W: usize, const LINK: u8, const BYPASS: bool>(
+fn run_segment<L: Lane, const W: usize, const LINK: u8, const BYPASS: bool, const RAMPING: bool>(
     sides: &mut [Side<L, W>; 2],
     cursor: &mut usize,
     ring_len: usize,
@@ -930,9 +969,13 @@ fn run_segment<L: Lane, const W: usize, const LINK: u8, const BYPASS: bool>(
     let mut gain_far = far.gain_db;
     let mut position = *cursor;
     for frame in 0..frames {
-        for index in 0..RAMP_COUNT {
-            segments[0].current[index] = segments[0].current[index].add(segments[0].step[index]);
-            segments[1].current[index] = segments[1].current[index].add(segments[1].step[index]);
+        if RAMPING {
+            for index in 0..RAMP_COUNT {
+                segments[0].current[index] =
+                    segments[0].current[index].add(segments[0].step[index]);
+                segments[1].current[index] =
+                    segments[1].current[index].add(segments[1].step[index]);
+            }
         }
         let slot = position * W;
         let delayed = wrap(position + 1, ring_len) * W;
@@ -1012,9 +1055,20 @@ fn run_segment<L: Lane, const W: usize, const LINK: u8, const BYPASS: bool>(
     *cursor = position;
 }
 
-/// Splits the block at ramp arrivals and runs each segment.
+/// Splits the block at ramp arrivals and runs each segment, ramped or flat.
+///
+/// `FORCE_RAMPING` is the split's A/B switch. It is `false` on every production path; the crate's
+/// own bit-identity test sets it to reproduce exactly what this function did before the split
+/// existed, so "split on versus split off" is a real comparison of two rendered buffers and two
+/// state snapshots rather than an argument.
 #[inline(always)]
-fn process_block<L: Lane, const W: usize, const LINK: u8, const BYPASS: bool>(
+fn process_block<
+    L: Lane,
+    const W: usize,
+    const LINK: u8,
+    const BYPASS: bool,
+    const FORCE_RAMPING: bool,
+>(
     instance: &mut Instance<L, W>,
     left: &mut [f32],
     right: &mut [f32],
@@ -1024,32 +1078,55 @@ fn process_block<L: Lane, const W: usize, const LINK: u8, const BYPASS: bool>(
     let ring_len = instance.ring_len;
     let mut position = 0;
     while position < frames {
-        let length = instance.segment_length(frames - position);
+        let plan = instance.plan_segment(frames - position);
+        let length = plan.frames;
         let mut segments = [instance.sides[0].segment(), instance.sides[1].segment()];
         let coefficients = [
             instance.sides[0].band_coefficients(sample_rate),
             instance.sides[1].band_coefficients(sample_rate),
         ];
-        run_segment::<L, W, LINK, BYPASS>(
-            &mut instance.sides,
-            &mut instance.cursor,
-            ring_len,
-            &mut left[position * W..(position + length) * W],
-            &mut right[position * W..(position + length) * W],
-            length,
-            &mut segments,
-            &coefficients,
-        );
-        let advanced = length as u32;
-        instance.sides[0].store_segment(&segments[0], advanced);
-        instance.sides[1].store_segment(&segments[1], advanced);
+        if plan.ramping || FORCE_RAMPING {
+            run_segment::<L, W, LINK, BYPASS, true>(
+                &mut instance.sides,
+                &mut instance.cursor,
+                ring_len,
+                &mut left[position * W..(position + length) * W],
+                &mut right[position * W..(position + length) * W],
+                length,
+                &mut segments,
+                &coefficients,
+            );
+            let advanced = length as u32;
+            instance.sides[0].store_segment(&segments[0], advanced);
+            instance.sides[1].store_segment(&segments[1], advanced);
+        } else {
+            #[cfg(debug_assertions)]
+            assert!(instance.flat_path_is_identity());
+            run_segment::<L, W, LINK, BYPASS, false>(
+                &mut instance.sides,
+                &mut instance.cursor,
+                ring_len,
+                &mut left[position * W..(position + length) * W],
+                &mut right[position * W..(position + length) * W],
+                length,
+                &mut segments,
+                &coefficients,
+            );
+            // The write-back is skipped rather than performed and discarded, and that is sound
+            // for the same reason the additions are: `store_segment` would write `current` back
+            // unchanged, because no lane of it moved, and would apply `saturating_sub` to a
+            // `remaining` that is already zero.
+        }
         position += length;
     }
 }
 
 /// Dispatches on the two values that are fixed at preparation, once per block.
+///
+/// `FORCE_RAMPING` is threaded through from [`process_block`] and is `false` on every production
+/// call; only the crate's split-identity test instantiates the other arm.
 #[inline(always)]
-fn render<L: Lane, const W: usize>(
+fn render<L: Lane, const W: usize, const FORCE_RAMPING: bool>(
     instance: &mut Instance<L, W>,
     left: &mut [f32],
     right: &mut [f32],
@@ -1058,16 +1135,24 @@ fn render<L: Lane, const W: usize>(
 ) {
     match (instance.link, instance.bypass) {
         (LinkMode::DualMono, false) => {
-            process_block::<L, W, LINK_DUAL_MONO, false>(instance, left, right, frames);
+            process_block::<L, W, LINK_DUAL_MONO, false, FORCE_RAMPING>(
+                instance, left, right, frames,
+            );
         }
         (LinkMode::Maximum, false) => {
-            process_block::<L, W, LINK_MAXIMUM, false>(instance, left, right, frames);
+            process_block::<L, W, LINK_MAXIMUM, false, FORCE_RAMPING>(
+                instance, left, right, frames,
+            );
         }
         (LinkMode::Average, false) => {
-            process_block::<L, W, LINK_AVERAGE, false>(instance, left, right, frames);
+            process_block::<L, W, LINK_AVERAGE, false, FORCE_RAMPING>(
+                instance, left, right, frames,
+            );
         }
         (_, true) => {
-            process_block::<L, W, LINK_DUAL_MONO, true>(instance, left, right, frames);
+            process_block::<L, W, LINK_DUAL_MONO, true, FORCE_RAMPING>(
+                instance, left, right, frames,
+            );
         }
     }
     instance.finish(left, right, frames, reports);
@@ -1142,14 +1227,24 @@ impl<L: Lane, const W: usize> Side<L, W> {
 }
 
 impl<L: Lane, const W: usize> Instance<L, W> {
-    /// Frames until the next ramp arrival, at most `budget`.
+    /// Frames until the next ramp arrival, at most `budget`, and whether anything ramps over them.
     ///
     /// D11's snap is an assignment on the final sample, not an addition, so it cannot happen
     /// inside a vectorised run. Every ramp that is one sample from its target is therefore snapped
     /// here, at a zero-length segment boundary, and the segment that follows is bounded by the
     /// nearest remaining arrival. Boundaries depend only on absolute ramp positions, which is what
     /// makes the result independent of how the caller partitions the block.
-    fn segment_length(&mut self, budget: usize) -> usize {
+    ///
+    /// The snap pass runs **before** the ramping scan, and that ordering is what makes a settled
+    /// ramp stop costing anything. A ramp arriving on this segment's first sample is snapped here,
+    /// leaves `remaining == 0` behind it, and so does not report itself as in flight; the rest of
+    /// the block is then one flat segment. Without the split that segment still ran the twenty
+    /// additions per frame with every step at `+0.0`, which is the cost this change removes.
+    ///
+    /// The lengths this returns are exactly the lengths the pre-split form returned — the scan is
+    /// the same scan, `ramping` is a second answer read out of it — so segment boundaries, and
+    /// with them the sample at which each ramp arrives, do not move.
+    fn plan_segment(&mut self, budget: usize) -> SegmentPlan {
         for side in &mut self.sides {
             for track in 0..W {
                 for ramp in &mut side.ramps[track] {
@@ -1160,16 +1255,43 @@ impl<L: Lane, const W: usize> Instance<L, W> {
             }
         }
         let mut length = budget;
+        let mut ramping = false;
         for side in &self.sides {
             for track in 0..W {
                 for ramp in &side.ramps[track] {
                     if ramp.remaining > 0 {
+                        ramping = true;
                         length = length.min(ramp.remaining as usize - 1);
                     }
                 }
             }
         }
-        length.max(1)
+        SegmentPlan {
+            frames: length.max(1),
+            ramping,
+        }
+    }
+
+    /// The precondition that makes the flat path bit-identical to the ramped one.
+    ///
+    /// Debug-only, and asserted at the point of use rather than argued in a comment: on a segment
+    /// the split sends down the flat path, dropping `current.add(step)` must be the identity on
+    /// every lane of every parameter of both channels. It is, when each ramp is at rest with a
+    /// `+0.0` step and holds a value that `x + 0.0 == x` preserves bit for bit — which excludes
+    /// `-0.0` (it would become `+0.0`) and the non-finite values (a NaN is quieted by the
+    /// addition). Those are the same two exclusions `LinearRamp::stationary_at` carries, for the
+    /// same reason.
+    #[cfg(any(debug_assertions, test))]
+    fn flat_path_is_identity(&self) -> bool {
+        const NEGATIVE_ZERO: u32 = 0x8000_0000;
+        self.sides.iter().all(|side| {
+            side.ramps[..W].iter().flatten().all(|ramp| {
+                ramp.remaining == 0
+                    && ramp.step.to_bits() == 0
+                    && ramp.current.is_finite()
+                    && ramp.current.to_bits() != NEGATIVE_ZERO
+            })
+        })
     }
 
     /// The once-per-block output boundary check of master plan §4.4.
@@ -1706,7 +1828,7 @@ impl PreparedNativeEffect for PreparedMultibandCompressor {
             return report;
         }
         let mut reports = [report];
-        render(
+        render::<f32, 1, false>(
             &mut self.instance,
             block.left,
             block.right,
@@ -1771,7 +1893,7 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedMultibandComp
                 &mut report.reports[track],
             );
         }
-        render(
+        render::<L, W, false>(
             &mut self.instance,
             block.left,
             block.right,
