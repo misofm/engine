@@ -1513,7 +1513,7 @@ pub trait PreparedNativeEffectBank: Send {
     /// implementation writes every entry or returns `false` and writes none.
     ///
     /// Same `&self` rule, for the same reason, as
-    /// [`PreparedNativeEffect::observe_resident`](PreparedNativeEffect::observe_resident).
+    /// [`PreparedNativeEffect::observe_resident`].
     fn observe_resident_bank(&self, tap_index: u32, out: &mut [ObservationSampleV1]) -> bool {
         let _ = (tap_index, out);
         false
