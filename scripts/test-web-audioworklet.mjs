@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import { pathToFileURL } from "node:url";
 const root = new URL("../", import.meta.url);
-const hostUrl = new URL("hosts/miso-engine-host-web/web/miso-engine-v2-audio-worklet-host.js", root);
+// Issue #151: the host module is overridable for exactly the reason the worklet module already is
+// -- so a red mutation of the shipped host runs this same suite and is required to fail it.
+const hostUrl = process.env.MISO_ENGINE_WEB_HOST_TEST_MODULE === undefined
+  ? new URL("hosts/miso-engine-host-web/web/miso-engine-v2-audio-worklet-host.js", root)
+  : pathToFileURL(process.env.MISO_ENGINE_WEB_HOST_TEST_MODULE);
 const workletUrl = process.env.MISO_ENGINE_WEB_WORKLET_TEST_MODULE === undefined
   ? new URL("hosts/miso-engine-host-web/web/miso-engine-v2-audio-worklet.js", root)
   : pathToFileURL(process.env.MISO_ENGINE_WEB_WORKLET_TEST_MODULE);
@@ -627,8 +631,102 @@ async function testMainRealm() {
     }
     await errorResult(consoleHost.observe({ requestId: 216, subscriptions: [] }), 1);
 
+    // Issue #143's two reasons, and the #151 defect they exposed: a refused subscription is a
+    // typed *per-request* rejection and costs the host nothing.
+    //
+    // Reasons 10 (`unknownTap`) and 11 (`observationUnbound`) are the only two the observation
+    // path ever returns, and `#receive` used to bound `reason` at the literal `<= 9`. Either one
+    // therefore read as a malformed acknowledgement and tripped the sticky 255 that fails every
+    // unsettled request and every later one -- so one refused subscription cost the whole
+    // session. That is what kept the app's gain-reduction meters dead: the app arms its taps
+    // once at startup, and a single refusal took the console with it.
+    //
+    // Red mutation: restore `validU32(message.reason) && message.reason <= 9` in `#receive` ->
+    // every assertion below fails with the sticky signature, starting with `refused.tag` because
+    // the promise rejects with `{tag: "miso.error.v1", result: 255}` instead of settling.
+    // `scripts/test-web-audioworklet.sh` runs exactly that mutation and requires this file red.
+    let refusalRequestId = 240;
+    const nextRequestId = () => (refusalRequestId += 10);
+    const mapBeforeRefusal = unsubscribed.bindings;
+    for (const { reason, result, what } of [
+      // The address resolves and the tap id does not. A bad address, like every other unknown, so
+      // `RESULT_INVALID_ARGUMENT`.
+      { reason: 10, result: 1, what: "an undeclared tap" },
+      // The tap is declared and correctly addressed; this preparation bound no observation
+      // capacity, which is what `RESULT_UNSUPPORTED` means. Retrying will never help.
+      { reason: 11, result: 7, what: "a session that bound no observation capacity" },
+    ]) {
+      commandResult = result;
+      commandMutation = (response) => ({ ...response, reason, rejectedIndex: 0, admitted: 0 });
+      const refused = await consoleHost.observe({
+        requestId: nextRequestId(),
+        subscriptions: [
+          { trackIndex: 0, rack: 1, effectIndex: 0, tapId: 9, windowBlocks: 0, armed: true },
+        ],
+      });
+      commandMutation = null;
+      commandResult = 0;
+      assert.equal(refused.tag, "miso.observe.v1", `${what} settles as a typed observation ack`);
+      assert.equal(refused.result, result, `${what} carries its own result code`);
+      assert.equal(refused.reason, reason, "the ack names which namespace the caller got wrong");
+      assert.equal(Object.isFrozen(refused), true);
+      assert.deepEqual(
+        refused.bindings,
+        mapBeforeRefusal,
+        "a batch is all-or-nothing: a refused batch arms nothing and leaves the map untouched",
+      );
+
+      // The host is fully healthy afterwards. Each of these is a request the sticky error would
+      // have failed with `{tag: "miso.error.v1", result: 255}`.
+      assert.equal((await consoleHost.status()).result, 0, `${what}: status still answers`);
+      const laterCommand = await consoleHost.command({
+        requestId: nextRequestId(), commands: [pan],
+      });
+      assert.equal(laterCommand.result, 0, `${what}: the command path still admits a batch`);
+      assert.equal(laterCommand.admitted, 1);
+      assert.deepEqual(
+        (await consoleHost.sessionMap()).tracks,
+        ["kick", "snare"],
+        `${what}: the addressing authority still answers`,
+      );
+      const framesBefore = meterFrames.length;
+      node.port.onmessage({
+        data: {
+          tag: "miso.meter.v1", sequence: 10 + reason, windows: 1, trackCount: 2,
+          peaks: new Float32Array([0.5, 0.5, 0.5, 0.5, 0.5, 0.5]),
+          trackGrDb: new Float32Array([3.25, 0]), masterGrDb: 3.25,
+          firstSample: 1024n, endSample: 1280n,
+        },
+      });
+      assert.equal(
+        meterFrames.length,
+        framesBefore + 1,
+        `${what}: the meter lease still delivers -- this is the dead-GR-meter regression`,
+      );
+      assert.equal(meterFrames.at(-1).trackGrDb[0], 3.25);
+
+      // And a *correct* subscription still arms, so nothing about the map machinery was poisoned.
+      const recovered = await consoleHost.observe({
+        requestId: nextRequestId(),
+        subscriptions: [
+          { trackIndex: 1, rack: 1, effectIndex: 0, tapId: 1, windowBlocks: 4, armed: true },
+        ],
+      });
+      assert.equal(recovered.result, 0, `${what}: a correct subscription still arms after it`);
+      assert.equal(recovered.reason, 0);
+      assert.deepEqual(recovered.bindings.map((binding) => binding.trackIndex), [0, 1]);
+      const undo = await consoleHost.observe({
+        requestId: nextRequestId(),
+        subscriptions: [
+          { trackIndex: 1, rack: 1, effectIndex: 0, tapId: 1, windowBlocks: 4, armed: false },
+        ],
+      });
+      assert.deepEqual(undo.bindings, mapBeforeRefusal, "the map returns to where it started");
+    }
+
     // A released lease detaches the callback: a late frame is delivered nowhere.
-    await consoleHost.meters({ requestId: 230, enabled: false, onFrame: null });
+    const framesAtRelease = meterFrames.length;
+    await consoleHost.meters({ requestId: nextRequestId(), enabled: false, onFrame: null });
     node.port.onmessage({
       data: {
         tag: "miso.meter.v1", sequence: 2, windows: 1, trackCount: 2,
@@ -636,7 +734,7 @@ async function testMainRealm() {
         firstSample: 768n, endSample: 1024n,
       },
     });
-    assert.equal(meterFrames.length, 1, "a released lease receives nothing");
+    assert.equal(meterFrames.length, framesAtRelease, "a released lease receives nothing");
 
     // A malformed frame is a hard failure, not a silent skip: a console that ignores a broken
     // frame is a console that lies to its user. Red mutation: replace the `#fail` in the
@@ -651,6 +749,84 @@ async function testMainRealm() {
     });
     await errorResult(doomed, 255);
     await consoleHost.dispose();
+
+    // Issue #143 D7 / #151: recompile and re-subscribe, the way the app re-arms after the plan is
+    // replaced.
+    //
+    // A structural session edit produces a replacement plan, and in the browser that is a new host
+    // over the new session TOML. Subscriptions belong to the plan they were applied to: the
+    // replacement's lanes exist and are unarmed, nothing carries over, and the app re-arms from
+    // scratch against the new addressing. This is also the moment the #151 defect was most likely
+    // to fire in the field, because a replacement moves effect indices -- a stale tap address
+    // comes back as reason 10, and before the fix that killed the freshly prepared host on its
+    // first gesture.
+    const prepare = (sessionToml) => createMisoAudioWorkletHost({
+      context,
+      quantumFrames: 64,
+      sessionToml: new TextEncoder().encode(sessionToml),
+      limits,
+      simd128ModuleUrl: "simd.wasm",
+      workletModuleUrl: "processor.js",
+    });
+    const tap = (trackIndex, effectIndex, armed) => ({
+      trackIndex, rack: 1, effectIndex, tapId: 1, windowBlocks: 0, armed,
+    });
+
+    const beforeEdit = await prepare("format_version = 2");
+    const armedBefore = await beforeEdit.observe({
+      requestId: 1, subscriptions: [tap(0, 0, true), tap(1, 0, true)],
+    });
+    assert.equal(armedBefore.result, 0);
+    assert.deepEqual(armedBefore.bindings.map((binding) => binding.trackIndex), [0, 1]);
+    await beforeEdit.dispose();
+
+    const afterEdit = await prepare("format_version = 2 # one effect inserted");
+    // The replacement's map starts empty: request ids restart at 1 and nothing carried over.
+    // The app's first re-arm uses the *old* effect index, which the replacement no longer has.
+    commandResult = 1;
+    commandMutation = (response) => ({ ...response, reason: 10, rejectedIndex: 0, admitted: 0 });
+    const staleRearm = await afterEdit.observe({
+      requestId: 1, subscriptions: [tap(0, 0, true), tap(1, 0, true)],
+    });
+    commandMutation = null;
+    commandResult = 0;
+    assert.equal(staleRearm.tag, "miso.observe.v1");
+    assert.equal(staleRearm.reason, 10, "a stale tap address is refused, per request");
+    assert.deepEqual(staleRearm.bindings, [], "the replacement plan's map is still empty");
+
+    // The app reads the new addressing and re-arms. The host was never sticky, so this is a plain
+    // second call rather than a rebuild.
+    assert.deepEqual((await afterEdit.sessionMap()).tracks, ["kick", "snare"]);
+    const rearmed = await afterEdit.observe({
+      requestId: 3, subscriptions: [tap(0, 1, true), tap(1, 1, true)],
+    });
+    assert.equal(rearmed.result, 0, "the replacement plan re-arms after the refusal");
+    assert.deepEqual(rearmed.bindings.map((binding) => binding.effectIndex), [1, 1],
+      "the map holds the replacement's addressing, not the retired plan's");
+    assert.deepEqual(rearmed.bindings.map((binding) => binding.windowBlocks),
+      [Number(limits.consoleMeterBlocks), Number(limits.consoleMeterBlocks)],
+      "`windowBlocks: 0` resolves against the replacement's own default");
+
+    // The rest of the console is live on the replacement.
+    const rearmedFrames = [];
+    assert.equal(
+      (await afterEdit.meters({
+        requestId: 4, enabled: true, onFrame: (frame) => rearmedFrames.push(frame),
+      })).result,
+      0,
+    );
+    FakeNode.latest.port.onmessage({
+      data: {
+        tag: "miso.meter.v1", sequence: 1, windows: 1, trackCount: 2,
+        peaks: new Float32Array(6), trackGrDb: new Float32Array([1.5, 2.5]), masterGrDb: 2.5,
+        firstSample: 0n, endSample: 256n,
+      },
+    });
+    assert.equal(rearmedFrames.length, 1, "the replacement's meter sequence restarts at 1");
+    assert.deepEqual([...rearmedFrames[0].trackGrDb], [1.5, 2.5]);
+    assert.equal((await afterEdit.command({ requestId: 5, commands: [pan] })).result, 0);
+    assert.equal((await afterEdit.status()).result, 0);
+    await afterEdit.dispose();
   } finally {
     globalThis.fetch = original.fetch;
     globalThis.AudioWorkletNode = original.AudioWorkletNode;

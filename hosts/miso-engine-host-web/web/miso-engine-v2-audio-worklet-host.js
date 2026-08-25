@@ -81,6 +81,39 @@ function validSubscription(subscription) {
     && validU32(subscription.windowBlocks)
     && typeof subscription.armed === "boolean";
 }
+// Issue #143 froze reasons 10 and 11; issue #151 found that this file still wrote the bound as
+// the literal `<= 9`, so the only two reasons the observation path ever returns read as malformed
+// acknowledgements and killed the whole host with a sticky 255.
+//
+// The vocabulary is therefore a table, spelled once, in the frozen value order. The bound is
+// derived from it and never written as a literal again, and
+// `scripts/check-command-reason-vocabulary.py` holds this table equal to
+// `hosts/miso-engine-host-web/src/lib.rs`'s `COMMAND_REASON_*` constants, the `.d.ts`
+// `MisoCommandReasonV1` enum, the metadata generator's `commandReasons` rows and the schema
+// gate's own list. Bump a Rust reason without the rest and that gate is red.
+const COMMAND_REASONS = Object.freeze([
+  "none",
+  "malformed",
+  "unknownTrack",
+  "unknownRack",
+  "unknownEffect",
+  "unknownParameter",
+  "domain",
+  "unsupportedKind",
+  "backpressure",
+  "wrongState",
+  "unknownTap",
+  "observationUnbound",
+]);
+
+/// `true` for exactly the reasons this ABI version declares.
+///
+/// A reason outside the table is a genuinely malformed acknowledgement and still fails the host:
+/// the fix for #151 widened the vocabulary, it did not stop validating it.
+function validCommandReason(reason) {
+  return validU32(reason) && reason < COMMAND_REASONS.length;
+}
+
 const COMMAND_FIELDS = [
   "kind", "rack", "channel", "trackIndex", "effectIndex", "parameterId", "smoothingSamples",
   "values",
@@ -451,7 +484,7 @@ class MisoAudioWorkletHostV1 {
     const validSourcePlanes = pending.response !== "source"
       || validReturnedPlanes(message.planes, pending.planeShape);
     const validCommandAck = pending.response !== "command" || (
-      validU32(message.reason) && message.reason <= 9
+      validCommandReason(message.reason)
       && validU32(message.rejectedIndex) && message.rejectedIndex < MAXIMUM_COMMAND_RECORDS
       && validU32(message.admitted) && message.admitted <= pending.commandCount
       && (message.result === RESULT_OK) === (message.admitted === pending.commandCount)

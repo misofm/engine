@@ -310,6 +310,39 @@ export interface MisoMeterFrameV1 {
   readonly endSample: bigint;
 }
 
+/// One arm/disarm request for a single declared observation tap (issues 143, 151).
+///
+/// Exactly these six fields, and no others: `observe()` rejects a subscription object carrying an
+/// unknown field with `RESULT_INVALID_ARGUMENT` (1) before anything reaches the port, so an
+/// optional-looking extra property is a local refusal rather than a field the engine ignores.
+export interface MisoObservationSubscriptionV1 {
+  /// Index into the canonical track order `sessionMap()` returns.
+  trackIndex: number;
+  /// `0` simd1, `1` dynamic, `2` simd2. There is no `255` here: a tap always names a rack.
+  rack: number;
+  effectIndex: number;
+  /// The effect-local tap id from the metadata JSON's per-effect `observations[].id`. Never `0`.
+  ///
+  /// This is a *tap* id, not a parameter id: they are different namespaces on one effect, and a
+  /// parameter id sent here comes back as `MisoCommandReasonV1.UnknownTap`, never
+  /// `UnknownParameter`.
+  tapId: number;
+  /// Render blocks per published window, or `0` for the plan's default (`consoleMeterBlocks`).
+  ///
+  /// The returned binding reports the window that is actually in force, so a caller that sends `0`
+  /// reads the resolved number back rather than having to know the default.
+  windowBlocks: number;
+  /// `true` arms the tap (wire kind `ObserveSubscribe`), `false` disarms it (`ObserveUnsubscribe`).
+  armed: boolean;
+}
+
+/// One observation batch. Like a command batch, it is one transaction (issues 143, 151).
+export interface MisoObservationRequestV1 {
+  requestId: number;
+  /// At least one and at most `256` subscriptions, arming and disarming freely mixed.
+  subscriptions: MisoObservationSubscriptionV1[];
+}
+
 /// The subscription map one `miso.observe.v1` acknowledgement carries (issue 143).
 ///
 /// This is where "which tracks have an observed effect at all" lives. `trackGrDb` is positional
@@ -328,6 +361,18 @@ export interface MisoObservationBindingV1 {
 }
 
 /// One observation acknowledgement (issue 143).
+///
+/// # A refusal is a resolved acknowledgement, not a thrown error
+///
+/// `observe()` settles with this record whenever the engine answered at all, including when it
+/// refused: `result` is nonzero, `reason` names why, and `bindings` is the map **unchanged**,
+/// because a batch is all-or-nothing and a refused batch armed nothing. The two reasons the
+/// observation path returns are `MisoCommandReasonV1.UnknownTap` (10, `result: 1`) and
+/// `MisoCommandReasonV1.ObservationUnbound` (11, `result: 7`).
+///
+/// A refusal is per request and costs the host nothing: later commands, meter frames, renders and
+/// further `observe()` calls all keep working. Only a locally malformed request rejects, with
+/// `MisoErrorV1` and `result: 1`, before anything is sent.
 ///
 /// # Subscriptions are per plan
 ///
@@ -491,6 +536,13 @@ export interface MisoAudioWorkletHost {
   status(): Promise<MisoStatusV1>;
   /// Submit one live-console batch as a single transaction (issue 137 D1).
   command(request: MisoCommandRequestV1): Promise<MisoCommandAckV1>;
+  /// Arm or disarm declared observation taps and read back the subscription map (issues 143, 151).
+  ///
+  /// It is wire kinds `ObserveSubscribe`/`ObserveUnsubscribe` on one `miso.command.v1` batch --
+  /// one transaction, one `appliedAtSample` -- plus the map that answers what the positional
+  /// `MisoMeterFrameV1.trackGrDb` array structurally cannot: which tracks have an observed effect
+  /// at all. See `MisoObservationAckV1` for what a refusal settles as.
+  observe(request: MisoObservationRequestV1): Promise<MisoObservationAckV1>;
   /// Read the canonical track order that `trackIndex` addresses (issue 137 D1).
   sessionMap(): Promise<MisoSessionMapV1>;
   /// Take or release the decimated meter lease (issue 137 D2).

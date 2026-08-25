@@ -291,4 +291,12 @@ grep -q 'output\[1\]\.set(this.outputRight)' <<<"$process_body"
 python3 -B "$(dirname "${BASH_SOURCE[0]}")/check-parameter-metadata-v1.py" \
   "$artifact_dir/miso-engine-v2-parameter-metadata.json" || exit 1
 
+# Issues #143/#151: the command-reason vocabulary is written out five times -- Rust constants, the
+# host JS acknowledgement table, the `.d.ts` enum, the metadata generator's rows and the schema
+# gate's own list -- and the app's dead GR meters were what a two-reason drift between them cost.
+# The gate is run over the SHIPPED js/.d.ts/JSON, so a stale artifact fails here too, and it also
+# holds the `.d.ts`'s `observe()` declaration to the shipped implementation's actual field sets.
+python3 -B "$(dirname "${BASH_SOURCE[0]}")/check-command-reason-vocabulary.py" \
+  --artifacts "$artifact_dir" || exit 1
+
 echo "web AudioWorklet static/object checks passed"

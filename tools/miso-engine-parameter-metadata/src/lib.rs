@@ -51,10 +51,10 @@ use miso_engine_effect_contract::{
 use miso_engine_host_web::{
     ABI_VERSION, COMMAND_EFFECT_BYPASS, COMMAND_EFFECT_PARAM, COMMAND_FADER_DB, COMMAND_MATRIX,
     COMMAND_MUTE, COMMAND_PAN, COMMAND_REASON_BACKPRESSURE, COMMAND_REASON_DOMAIN,
-    COMMAND_REASON_MALFORMED, COMMAND_REASON_NONE, COMMAND_REASON_UNKNOWN_EFFECT,
-    COMMAND_REASON_UNKNOWN_PARAMETER, COMMAND_REASON_UNKNOWN_RACK, COMMAND_REASON_UNKNOWN_TRACK,
-    COMMAND_REASON_UNSUPPORTED_KIND, COMMAND_REASON_WRONG_STATE, COMMAND_RECORD_BYTES,
-    MAXIMUM_COMMAND_RECORDS,
+    COMMAND_REASON_MALFORMED, COMMAND_REASON_NONE, COMMAND_REASON_OBSERVATION_UNBOUND,
+    COMMAND_REASON_UNKNOWN_EFFECT, COMMAND_REASON_UNKNOWN_PARAMETER, COMMAND_REASON_UNKNOWN_RACK,
+    COMMAND_REASON_UNKNOWN_TAP, COMMAND_REASON_UNKNOWN_TRACK, COMMAND_REASON_UNSUPPORTED_KIND,
+    COMMAND_REASON_WRONG_STATE, COMMAND_RECORD_BYTES, MAXIMUM_COMMAND_RECORDS,
 };
 
 /// The emitted file name, shipped beside the Wasm artifact.
@@ -121,6 +121,13 @@ pub fn render() -> String {
         (COMMAND_REASON_UNSUPPORTED_KIND, "unsupportedKind"),
         (COMMAND_REASON_BACKPRESSURE, "backpressure"),
         (COMMAND_REASON_WRONG_STATE, "wrongState"),
+        // Issue #143 added these two and #151 found the drift they caused: a vocabulary that stops
+        // at `wrongState` tells every consumer that reasons 10 and 11 do not exist, and the only
+        // reasons the observation path ever returns are exactly those two.
+        // `scripts/check-command-reason-vocabulary.py` now holds this table, the Rust constants,
+        // the host JS bound, the `.d.ts` enum and the schema gate's list to one another.
+        (COMMAND_REASON_UNKNOWN_TAP, "unknownTap"),
+        (COMMAND_REASON_OBSERVATION_UNBOUND, "observationUnbound"),
     ];
     for (index, (value, name)) in reasons.iter().enumerate() {
         out.push_str(&format!(

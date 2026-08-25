@@ -109,3 +109,25 @@ Error: chromium: observation-armed: an armed tap published no reduction at all
 ```
 
 Reverted in the same session; the recorded `results.json` and matrix are from the unmutated tree.
+
+## Issue #151 — the command-reason cap and the `observe()` typing gap
+
+The field defect, found in `misofm/app` PR #32: `#receive` bounded a command acknowledgement's
+`reason` at the literal `<= 9`, but #143 froze `UNKNOWN_TAP = 10` and `OBSERVATION_UNBOUND = 11`
+and those are the **only** two reasons the observation path ever returns. Either one therefore read
+as a malformed acknowledgement and tripped the host-wide sticky 255, so a single refused
+subscription failed every unsettled request and every later one. That is what kept the app's
+gain-reduction meters dead. The shipped metadata JSON's `commandReasons` vocabulary stopped at `9`
+for the same reason, and the `.d.ts` declared neither `observe()` nor the request-side subscription
+type at all.
+
+Every row below was applied, the named gate run, the red observed, and the tree restored. Host:
+`x86_64`, `-C target-feature=+avx2,+fma`, toolchain 1.97.1.
+
+| gate | mutation | observed red |
+|---|---|---|
+| `test-web-audioworklet.mjs` observation-refusal tests (the shipped defect) | restore `validU32(message.reason) && message.reason <= 9` in `#receive` | `{ tag: 'miso.error.v1', requestId: 250, result: 255 }` — the sticky signature, thrown out of the *first* refused `observe()` instead of settling as a typed `miso.observe.v1` ack. `test-web-audioworklet.sh` runs this mutation on disk and requires the suite red |
+| `check-command-reason-vocabulary.py` (the drift class) | add `pub const COMMAND_REASON_FUTURE_TAP: u32 = 12;` to `host-web/src/lib.rs` and nothing else | `host JS table disagrees with the Rust host constants` — a Rust reason bumped without the other five spellings. `test-web-audioworklet.sh` performs this one on a copied file tree, not only in memory |
+| `check-command-reason-vocabulary.py --self-test` | eighteen in-memory mutations across all six spellings: a renumbered Rust constant; the JS table truncated at `wrongState`; the literal `<= 9` reinstated; the derived bound replaced by `reason <= 11`; the `.d.ts` enum missing or renaming a reason; a generator row dropped or emitting the wrong name for its own constant; the schema gate's list truncated; the render-thread worklet renumbering or renaming the one reason it produces itself | every one refused |
+| `check-command-reason-vocabulary.py --self-test` (#151's typing half) | drop `observe()` from `MisoAudioWorkletHost`; drop `windowBlocks` from the declared subscription; add a `channel?` the implementation refuses; drop `frameSlot` from the declared binding; drop `reason` from the declared ack; add a binding field to the implementation the `.d.ts` does not declare | every one refused — the declaration is held to the shipped implementation's actual field sets, not to the issue's sketch |
+| `check-parameter-metadata-v1.py --self-test` | truncate `commandReasons` at `wrongState`; rename reason 10; renumber reason 11 to `12` | `command reasons` / `command reason values` — the exact shape of the shipped vocabulary drift |
