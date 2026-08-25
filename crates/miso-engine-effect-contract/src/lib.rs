@@ -1226,7 +1226,20 @@ impl ParameterSmoother {
             return false;
         }
         self.target = normalize_zero(target);
-        if self.rule == SmoothingRule::None {
+        // Issue #144 item 6, the stationary hoist. A `Linear` retarget to the value already in
+        // force has `target - current == +0.0` exactly, so every update of the window adds `+0.0`
+        // to a value that is already the target: `total` updates that cannot change a bit. The
+        // detection is a bit compare, never a tolerance, and it is confined to `Linear` on
+        // purpose -- `OnePole99` computes `a * current + k * target`, two products and two
+        // roundings, which does *not* return `current` unchanged even when the two are equal, so
+        // hoisting it would be a numeric change rather than a skipped no-op.
+        //
+        // `normalize_zero` above means `-0.0` never reaches this state, so the sign-of-zero
+        // exclusion `LinearRamp::stationary_at` carries has nothing to exclude here; the
+        // finiteness half is already guaranteed by the early return above.
+        let stationary =
+            self.rule == SmoothingRule::Linear && self.target.to_bits() == self.current.to_bits();
+        if self.rule == SmoothingRule::None || stationary {
             self.current = self.target;
             self.step = 0.0;
             self.remaining = 0;

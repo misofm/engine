@@ -48,6 +48,7 @@ use miso_engine_effect_runtime::bank::{check_block, nonfinite_lane_mask};
 use miso_engine_effect_runtime::params::{
     ParameterSpec, normalize_zero, parameter_value_valid as domain_valid,
 };
+use miso_engine_effect_runtime::ramp::LinearRamp;
 use miso_engine_effect_runtime::state_payload as payload;
 use miso_engine_lane::kernels::{SvfCoef, SvfCoefStep, SvfState, svf_block, svf_block_ramped};
 use miso_engine_lane::{Backend, Lane, Simd4, Simd8};
@@ -618,6 +619,23 @@ impl BandTarget {
         )
     }
 
+    /// `true` when `other` is this band bit for bit.
+    ///
+    /// Issue #144 item 6. Derived `PartialEq` would compare the four `f32` fields with `==`, which
+    /// makes `-0.0` equal `0.0` and makes a `NaN` band unequal to itself. Neither can reach a
+    /// stored `BandTarget` today -- values are normalised and domain-checked on the way in -- but
+    /// the hoist this feeds decides whether an `f64` coefficient design is skipped, and a decision
+    /// of that weight is made on bits rather than on a coincidence of the current admission rules.
+    fn same_bits(&self, other: &Self) -> bool {
+        self.enabled == other.enabled
+            && self.kind == other.kind
+            && self
+                .numeric()
+                .iter()
+                .zip(other.numeric().iter())
+                .all(|(left, right)| left.to_bits() == right.to_bits())
+    }
+
     /// The four automatable fields, in payload order.
     const fn numeric(&self) -> [f32; 4] {
         [self.frequency, self.gain, self.q, self.slope]
@@ -648,6 +666,10 @@ struct Section<L: Lane> {
 }
 
 /// Reads word `index` of a coefficient set in the pinned order.
+/// The words lane `track` of `section` is currently heading for.
+///
+/// These are exactly the words `BandTarget::words` last returned for this lane's stored band, so
+/// reading them back is the same value the design would recompute -- see `Channel::target_words`.
 fn coef_word<L: Lane>(coefficients: &SvfCoef<L>, index: usize) -> L {
     match index {
         0 => coefficients.c1,
@@ -759,7 +781,27 @@ impl<L: Lane, const W: usize> Channel<L, W> {
     ///
     /// The increment is one multiply by an exact power of two, computed once here; a ramp that is
     /// re-targeted mid-flight starts from the words in force now, not from the old target.
+    ///
+    /// # The stationary hoist (issue #144 item 6)
+    ///
+    /// When all six words this lane is being sent to are already the six words it holds, every
+    /// increment is `(word - word) * RAMP_SCALE`, which is exactly `+0.0` for finite words. The
+    /// ramp would then spend [`RAMP_SAMPLES`] samples adding zero to a lane that is already where
+    /// it is being sent. That costs far more than the lane: `process_section` takes its ramping
+    /// decision across **all** `W` lanes of the section, so one lane's no-op window drags the
+    /// whole bank onto `svf_block_ramped` -- six vector additions and a negate per frame -- for
+    /// sixty-four samples. A console that re-sends a band it did not move (an automation refresh,
+    /// a touched-but-unmoved control) pays that on every refresh.
+    ///
+    /// [`LinearRamp::stationary_at`] decides it by bit compare. The lane is settled instead, which
+    /// is bit-identical because a zero increment is bit-preserving on every word -- exactly the
+    /// property `design_svf_v1` normalises `-0.0` away to guarantee, and the same property that
+    /// makes an idle lane of a ramping bank identical to the same lane of a settled one.
     fn start_ramp(&mut self, section: usize, track: usize, words: EqSvfWordsV1) {
+        if self.stationary_at(section, track, words) {
+            self.settle(section, track, words);
+            return;
+        }
         let slot = &mut self.sections[section];
         for (index, word) in words.to_array().into_iter().enumerate() {
             let current = lane_get(coef_word(&slot.coef, index), track);
@@ -771,6 +813,41 @@ impl<L: Lane, const W: usize> Channel<L, W> {
             );
         }
         self.remaining[section][track] = RAMP_SAMPLES;
+    }
+
+    /// The words lane `track` of `section` is heading for, read back out of the lane words.
+    ///
+    /// Issue #144 item 6, the re-preparation half. `BandTarget::words` is a pure function of the
+    /// band and the sample rate, and `Section::target` holds exactly what it returned the last
+    /// time this lane's band changed. So when an automation point restates a band it has already
+    /// been given, the design does not have to be recomputed -- it can be read. That matters far
+    /// more than the ramp arithmetic: the design is an `f64` `design_svf_v1` per lane per event,
+    /// and a console that refreshes its automation is paying it on every refresh for every band it
+    /// did not move.
+    ///
+    /// This is bit-identical rather than approximately equal, by determinism: same band, same
+    /// rate, same function, same words.
+    fn target_words(&self, section: usize, track: usize) -> EqSvfWordsV1 {
+        let slot = &self.sections[section];
+        EqSvfWordsV1::from_array(core::array::from_fn(|index| {
+            lane_get(coef_word(&slot.target, index), track)
+        }))
+    }
+
+    /// `true` when lane `track` of `section` already holds exactly `words`.
+    ///
+    /// All six words must agree bitwise, and each must pass [`LinearRamp::stationary_at`], which
+    /// is where the `-0.0` and non-finite exclusions live. A partial match is not a hoist: five
+    /// settled words and one moving word is a ramp.
+    fn stationary_at(&self, section: usize, track: usize, words: EqSvfWordsV1) -> bool {
+        let slot = &self.sections[section];
+        words
+            .to_array()
+            .into_iter()
+            .enumerate()
+            .all(|(index, word)| {
+                LinearRamp::stationary_at(lane_get(coef_word(&slot.coef, index), track), word)
+            })
     }
 
     /// Assigns the target exactly and stops lane `track`'s ramp — the D11 snap.
@@ -1073,23 +1150,39 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
                 if updates.iter().all(Option::is_none) {
                     continue;
                 }
-                let target = if channel == 0 {
-                    &mut self.left.targets[track][section]
+                // The stored band is read by value, so the borrow of the channel ends here and
+                // the cached-design read below can borrow it again.
+                let stored = if channel == 0 {
+                    self.left.targets[track][section]
                 } else {
-                    &mut self.right.targets[track][section]
+                    self.right.targets[track][section]
                 };
-                let mut candidate = *target;
+                let mut candidate = stored;
                 for (field, value) in updates.into_iter().enumerate() {
                     if let Some(value) = value {
                         candidate.set_numeric(field, value);
                     }
                 }
-                match candidate.words(sample_rate) {
+                // Issue #144 item 6: a band restated at the values it already holds designs to
+                // the words it is already heading for, so the `f64` design is read from the lane
+                // rather than recomputed. `words` is deterministic in (band, rate) and
+                // `Section::target` is what it last returned, so the two are the same bits.
+                let designed = if candidate.same_bits(&stored) {
+                    Ok(if channel == 0 {
+                        self.left.target_words(section, track)
+                    } else {
+                        self.right.target_words(section, track)
+                    })
+                } else {
+                    candidate.words(sample_rate)
+                };
+                match designed {
                     Ok(words) => {
-                        *target = candidate;
                         if channel == 0 {
+                            self.left.targets[track][section] = candidate;
                             self.left.start_ramp(section, track, words);
                         } else {
+                            self.right.targets[track][section] = candidate;
                             self.right.start_ramp(section, track, words);
                         }
                     }
