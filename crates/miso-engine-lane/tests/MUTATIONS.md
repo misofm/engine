@@ -226,3 +226,12 @@ binary, which is why both are recorded rather than one standing for the other.
   ```
   issue #146: a render entry's canonical environment did not normalise 70 of 331 comparisons under a caller's FTZ+DAZ
   ```
+
+## M-146-V1 (verifier-added, #146 review): the scheduling barrier is deliberately undiscriminated
+Mutation: empty `scheduling_barrier` entirely (no asm block). Observed: `fp_env` release suite
+green (its cases self-anchor by design — the recorded register-only limit), and release
+`g6_full_corpus_ftz` green (current codegen does not hoist the corpus render's memory-dependent
+operations even unaided). Conclusion: no deterministic red exists for the barrier by construction —
+it is defense-in-depth against future codegen, its necessity evidenced by the recorded pre-barrier
+release failure of the un-anchored lane case, not by a standing gate. Do not delete it on the
+strength of a green sweep; this record is the reason the sweep is green without it.
