@@ -17,35 +17,40 @@ mod native {
 
     use miso_engine_builtins_compiler::{BuiltinCompileCaps, prepare_session_builtins};
     use miso_engine_conformance::DualAccumulatorDelayFactory;
-    use miso_engine_core::realtime::{PlanarBufferMut, RenderError, RenderIo, RenderTime};
+    use miso_engine_core::realtime::RenderError;
+    #[cfg(test)]
+    use miso_engine_core::realtime::{PlanarBufferMut, RenderIo, RenderTime};
     use miso_engine_effect_compiler::{EffectCompileCaps, prepare_native_session_effects};
     use miso_engine_effect_contract::NativeEffectRegistry;
+    #[cfg(test)]
+    use miso_engine_graph::NativeWorkerPoolConfigV1;
     use miso_engine_graph::{
         GraphBindingBlock, GraphNodeBinding, GraphNodeId, GraphNodeObserverBinding,
         GraphObservationBlock, GraphRuntimeBindings, GraphRuntimeObserver, GraphRuntimeProcessor,
         NativeGraphBindConfigV1, NativeGraphPreparedMetadataV1, NativeGraphRenderModeV1,
         NativeGraphWorkerLeaseV1, NativeGraphWorkerPoolV1, NativeSchedulerConfigV1,
-        NativeWorkerPoolConfigV1, NativeWorkerPoolShapeV1, TrackStage,
+        NativeWorkerPoolShapeV1, TrackStage,
     };
-    use miso_engine_graph_compiler::{
-        GraphBuiltinsCompileRequest, GraphCompileReport, GraphCompiler,
-    };
+    use miso_engine_graph_compiler::{GraphBuiltinsCompileRequest, GraphCompiler};
     use miso_engine_session::{
         ChannelMatrix, CompileCaps, EffectIdentity, EffectParam, ParameterChannel, ParameterUnit,
         RouteDestination, RouteSource, SendTap, Sidechain, SidechainDeclaration, StableId, Submix,
         compile_session, parse_session_toml,
     };
 
-    pub const Q128_QUANTUM_FRAMES: usize = 128;
-    pub const Q128_TRACK_COUNT: usize = 12;
-    pub const Q128_FIXTURE_ID: &str = "issue039-q128-production-v1";
+    pub(crate) const Q128_QUANTUM_FRAMES: usize = 128;
+    pub(crate) const Q128_TRACK_COUNT: usize = 12;
+    pub(crate) const Q128_FIXTURE_ID: &str = "issue039-q128-production-v1";
 
     const SESSION_FIXTURE: &str = include_str!("../../../fixtures/session/v1/canonical.toml");
     const OBSERVER_POST_SIMD1: u64 = 0x0390_0001;
     const OBSERVER_POST_MATRIX: u64 = 0x0390_0002;
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-    pub enum Q128RenderMode {
+    pub(crate) enum Q128RenderMode {
+        /// The single-threaded reference leg. The audit binary always renders the parallel
+        /// mode; only the module's own byte-identity tests render the sequential reference.
+        #[cfg(test)]
         Sequential,
         DependencyWaves,
     }
@@ -53,6 +58,7 @@ mod native {
     impl Q128RenderMode {
         const fn native_mode(self) -> NativeGraphRenderModeV1 {
             match self {
+                #[cfg(test)]
                 Self::Sequential => NativeGraphRenderModeV1::SingleThread,
                 Self::DependencyWaves => NativeGraphRenderModeV1::DependencyWaves,
             }
@@ -60,7 +66,7 @@ mod native {
     }
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-    pub struct Q128ObserverRecord {
+    pub(crate) struct Q128ObserverRecord {
         pub sample_time: u64,
         pub node_token: u64,
         pub handle: u64,
@@ -70,7 +76,7 @@ mod native {
 
     /// Read-only handle for the fixture's preallocated observer transcript after render disarms.
     #[derive(Clone)]
-    pub struct Q128ObserverTranscript {
+    pub(crate) struct Q128ObserverTranscript {
         transcript: Arc<Transcript>,
     }
 
@@ -157,13 +163,13 @@ mod native {
     impl Q128ObserverTranscript {
         /// Number of records written into fixed transcript storage.
         #[must_use]
-        pub fn record_count(&self) -> usize {
+        pub(crate) fn record_count(&self) -> usize {
             self.transcript.count()
         }
 
         /// Address-free stable hash of the completed observer transcript.
         #[must_use]
-        pub fn stable_hash(&self) -> u64 {
+        pub(crate) fn stable_hash(&self) -> u64 {
             self.transcript.stable_hash()
         }
     }
@@ -214,14 +220,19 @@ mod native {
         }
     }
 
-    pub struct PreparedQ128Fixture {
+    pub(crate) struct PreparedQ128Fixture {
         pub plan: miso_engine_core::realtime::PreparedRenderPlan,
         /// The fixture's own worker pool. It outlives the plan, so it is dropped last.
+        ///
+        /// Never read: this field exists purely to own the pool for the fixture's lifetime.
+        /// Dropping it early would stop the workers while the plan still holds their lease, so
+        /// the allow is a drop-order guard, not dead weight.
+        #[allow(dead_code)]
         pub pool: Option<NativeGraphWorkerPoolV1>,
         pub metadata: NativeGraphPreparedMetadataV1,
-        pub report: GraphCompileReport,
-        /// The semantic graph hash, taken while the artifact still owned its plan (#99 F5): the
-        /// report no longer carries it, and the plan is consumed into `plan` on the way out.
+        /// The semantic graph hash, taken while the artifact still owned its plan (#99 F5):
+        /// `GraphCompileReport` no longer carries it, and the plan is consumed into `plan` on
+        /// the way out.
         pub graph_sha256: String,
         pub pdc_samples: u64,
         pub prepared_builtin_bank_count: usize,
@@ -233,7 +244,10 @@ mod native {
     }
 
     impl PreparedQ128Fixture {
-        pub fn render(
+        /// Render one quantum straight through the fixture's own plan. The audit binary drives
+        /// its renders through `plan_exchange` instead, so this direct path is test-only.
+        #[cfg(test)]
+        pub(crate) fn render(
             &mut self,
             output: &mut [f32],
             absolute_sample: u64,
@@ -253,26 +267,31 @@ mod native {
             Ok(())
         }
 
+        #[cfg(test)]
         #[must_use]
-        pub fn observer_records(&self) -> Vec<Q128ObserverRecord> {
+        pub(crate) fn observer_records(&self) -> Vec<Q128ObserverRecord> {
             self.transcript.records()
         }
 
+        #[cfg(test)]
         #[must_use]
-        pub fn observer_record_count(&self) -> usize {
+        pub(crate) fn observer_record_count(&self) -> usize {
             self.transcript.count()
         }
 
         /// Clone a read-only transcript handle before moving this fixture plan into an exchange.
         #[must_use]
-        pub fn observer_transcript(&self) -> Q128ObserverTranscript {
+        pub(crate) fn observer_transcript(&self) -> Q128ObserverTranscript {
             Q128ObserverTranscript {
                 transcript: Arc::clone(&self.transcript),
             }
         }
     }
 
-    pub fn prepare_q128_fixture(
+    /// Prepare the fixture with its own worker pool. The audit binary always supplies a
+    /// caller-owned pool via `prepare_q128_fixture_with_pool`, so this is test-only.
+    #[cfg(test)]
+    pub(crate) fn prepare_q128_fixture(
         sample_rate_hz: u32,
         render_lanes: usize,
         render_mode: Q128RenderMode,
@@ -293,8 +312,10 @@ mod native {
     }
 
     /// Where a prepared fixture's auxiliary workers come from.
-    pub enum PoolChoice {
-        /// The fixture starts and owns its own pool.
+    pub(crate) enum PoolChoice {
+        /// The fixture starts and owns its own pool. Only the module's own tests prepare a
+        /// self-owned pool; the audit binary always leases one caller-owned pool to both plans.
+        #[cfg(test)]
         Own,
         /// The caller owns the pool. A fixture prepared without a lease renders sequentially
         /// until the block-boundary hand-over gives it one.
@@ -306,7 +327,7 @@ mod native {
     /// The audit uses this to prove one persistent pool serves two successive plans: the initial
     /// plan holds the lease, the replacement is prepared without one, and the swap hands it over.
     #[doc(hidden)]
-    pub fn prepare_q128_fixture_with_pool(
+    pub(crate) fn prepare_q128_fixture_with_pool(
         sample_rate_hz: u32,
         render_lanes: usize,
         render_mode: Q128RenderMode,
@@ -329,8 +350,9 @@ mod native {
 
     /// Prepare the same production fixture topology at one generated track count for the
     /// scheduler preparation matrix. This is qualification-only support, not a product graph API.
+    #[cfg(test)]
     #[doc(hidden)]
-    pub fn prepare_q128_fixture_for_track_count(
+    pub(crate) fn prepare_q128_fixture_for_track_count(
         track_count: usize,
         render_lanes: usize,
         plan_id: u64,
@@ -497,7 +519,6 @@ mod native {
         if require_q128_bank_and_pdc && prepared_builtin_bank_count == 0 {
             return Err("q128.builtin_bank".to_owned());
         }
-        let report = artifact.report().clone();
         let graph_sha256 = GraphCompiler::sha256(artifact.graph(), artifact.report());
         // #99 F5: the plan owns the schedule vectors; the report no longer duplicates them.
         let pdc_samples = artifact
@@ -554,9 +575,11 @@ mod native {
         let lanes = NonZeroUsize::new(render_lanes).ok_or_else(|| "q128.lanes".to_owned())?;
         let (pool, lease, pool_shape) = match (pool_choice, render_mode) {
             (PoolChoice::External(shape, lease), _) => (None, lease, shape),
+            #[cfg(test)]
             (PoolChoice::Own, Q128RenderMode::Sequential) => {
                 (None, None, NativeWorkerPoolShapeV1::default())
             }
+            #[cfg(test)]
             (PoolChoice::Own, Q128RenderMode::DependencyWaves) => {
                 // The fixture owns its own pool, so two fixtures in one process share nothing.
                 // The fixture accepts absurd lane counts so binding can reject them; it must not
@@ -600,7 +623,6 @@ mod native {
             plan: bound.prepared.into_plan(),
             pool,
             metadata,
-            report,
             graph_sha256,
             pdc_samples,
             prepared_builtin_bank_count,
@@ -727,7 +749,7 @@ mod native {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub use native::*;
+pub(crate) use native::*;
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
