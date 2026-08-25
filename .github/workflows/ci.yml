@@ -27,8 +27,6 @@ jobs:
         run: rustup toolchain install 1.97.1 --profile minimal --component clippy --component rustfmt
       - name: Format
         run: cargo fmt --all -- --check
-      - name: Check
-        run: cargo check --locked --workspace --all-targets --all-features
       - name: Clippy
         run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
       - name: Test
@@ -160,6 +158,51 @@ jobs:
         run: cargo metadata --locked --format-version 1 --no-deps
       - name: Native host smoke
         run: cargo run --locked -p miso-engine-host-native
+
+  release-workspace:
+    name: workspace release build
+    runs-on: blacksmith-8vcpu-ubuntu-2404
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.97.1 --profile minimal
+      # D12 puts `panic = "abort"` on `[profile.release]`, so ONE workspace-wide release
+      # invocation builds both panic variants of every crate, and the three packages whose lib
+      # units carry a cdylib/staticlib crate-type emit un-hashed filenames the two variants
+      # clobber. A downstream unit then links whichever variant landed last and fails with a
+      # misleading `E0463: can't find crate for ...`. The runner pins a single panic variant for
+      # this run; it builds no shipped artifact, so no artifact digest depends on it. See the
+      # "Panic behaviour by profile" section of docs/REALTIME_DEPENDENCY_POLICY.md, and the
+      # header of the script itself.
+      #
+      # This is its own job rather than another step on `host` so the long fat-LTO link runs in
+      # parallel with the rest of CI instead of extending the critical path.
+      #
+      # `--no-run` is deliberate: it gates exactly the thing that rotted. The clobber is a BUILD
+      # failure, it happens while compiling every test target, and `--no-run` catches it
+      # deterministically -- verified both ways from clean target directories, twice green with
+      # the override and still red without it.
+      #
+      # Running the tests is the intended end state and is NOT done yet, because repairing the
+      # build made two release-only failures reachable for the first time and both predate this
+      # job. No CI leg has ever run these tests in release, and the workspace release build did
+      # not compile, so nothing could have run them. Both fail on `main`, with and without the
+      # panic override, and both pass in debug:
+      #
+      #   * `observation_cost_classes_are_what_they_claim (#159)` (#143,
+      #     crates/miso-engine-host-core/tests/effect_observation.rs) -- deterministic. Arming
+      #     costs nothing (AllArmed sits at or below ConsoleNoCapacity), but the assertion
+      #     subtracts the NoConsole baseline and so charges observation for a console existing.
+      #   * `a_million_windows_are_read_whole_and_in_order (#160)` (#143,
+      #     crates/miso-engine-core/tests/observation_transport.rs) -- intermittent: it failed
+      #     three of five full-workspace release runs while passing 20 of 20 standalone release
+      #     reruns, so it is timing-dependent rather than a plain red.
+      #
+      # Both are questions about what those gates assert, so they belong to their owner rather
+      # than to a --skip list here. Turn this step into the full `cargo test` run once they are
+      # resolved; the script already runs the tests by default.
+      - name: Workspace release build (single panic variant)
+        run: bash scripts/run-release-workspace-tests.sh --no-run
 
   x86-probes:
     name: x86 scalar and SIMD compile probes

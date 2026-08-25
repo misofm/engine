@@ -214,6 +214,76 @@ names a kernel, and costs build time and artifact size, never speed.
   unwinds and `#[should_panic]` still works. That was verified by inspecting the `rustc`
   command lines: a release binary is compiled with `-C panic=abort`, a release test harness is not.
 
+### What `panic = "abort"` costs a workspace-wide release build
+
+The previous bullet is the whole story for a *per-package* release invocation. It is not the whole
+story for `cargo test --release --workspace --all-targets`, and the difference is a build failure
+rather than a behaviour change.
+
+Because Cargo ignores `panic` for test harnesses but honours it for lib and bin units, one
+workspace-wide invocation builds **both** panic variants of every crate: the abort variant for the
+shipped units, the unwind variant for the harnesses and everything they depend on. Cargo normally
+keeps the two apart by hashing the variant into the output filename. It cannot do that for a lib
+unit that also carries a `cdylib` or `staticlib` crate-type, because those emit un-hashed filenames
+(`libfoo.so`, `libfoo.a`). Three packages are in that shape:
+
+| package | crate-types |
+|---|---|
+| `crates/miso-engine-capi` | `rlib`, `staticlib`, `cdylib` |
+| `crates/miso-engine-effect-package` | `rlib`, `cdylib` |
+| `hosts/miso-engine-host-web` | `rlib`, `cdylib` |
+
+The two variants write to the same paths, the second clobbers the first, and a downstream unit
+links whichever landed last and hits a metadata mismatch. Which unit reports it depends on build
+scheduling, so the *error face* is nondeterministic — it usually surfaces as a misleading
+`error[E0463]: can't find crate for ...` — while the *failure* is deterministic: a clean
+`cargo test --locked --release --workspace --all-targets` does not build.
+
+**The supported invocation is `scripts/run-release-workspace-tests.sh`**, which sets
+`CARGO_PROFILE_RELEASE_PANIC=unwind` for that one run. Forcing a single panic variant means nothing
+is built twice and nothing is clobbered.
+
+`.github/workflows/ci.yml` runs the script with `--no-run`, so the workspace-wide release build
+cannot silently rot again. That gates exactly what rotted: the clobber is a build failure that
+happens while compiling the test targets, so building them is enough to catch it, and doing so is
+deterministic.
+
+Running those tests in CI is the intended end state and is not done yet. Repairing the build made
+two release-only failures reachable for the first time, and both predate this work — no CI leg has
+ever run these tests in release, and the workspace release build did not compile, so nothing could
+have run them. Both fail on `main`, with and without the panic override, and both pass in debug:
+
+- `observation_cost_classes_are_what_they_claim (#159)` (#143, in
+  `crates/miso-engine-host-core/tests/effect_observation.rs`) fails deterministically. The
+  measurement says arming costs nothing — `AllArmed` sits at or below `ConsoleNoCapacity` — while
+  the assertion subtracts the `NoConsole` baseline and so charges observation for the cost of a
+  console *existing*.
+- `a_million_windows_are_read_whole_and_in_order (#160)` (#143, in
+  `crates/miso-engine-core/tests/observation_transport.rs`) fails intermittently: three of five
+  full-workspace release runs, against 20 of 20 passing standalone release reruns. It is
+  timing-dependent rather than a plain red, and the reader's spin loop is far faster in an
+  optimized build than in the debug build the assertion has only ever been exercised under.
+
+Both are questions about what those gates assert, so they are left to their owner rather than
+skipped here. Once they are resolved, the CI step becomes the full `cargo test` invocation — the
+script already runs the tests by default.
+
+What the override does **not** touch:
+
+- **Shipped artifacts.** The script builds none. `scripts/build-web-audioworklet.sh` and every
+  release build of a shipped artifact still get `panic = "abort"` exactly as before; the artifact
+  digests are unchanged by the script's existence.
+- **Per-package release invocations.** The many `cargo test --locked --release -p <pkg>` gate legs
+  select one package's targets, so they never put two panic variants of a clobbering lib unit in
+  the same run. They are unaffected and are deliberately left un-overridden — they keep measuring
+  and testing D12's shipped codegen.
+
+**Deferred, owner decision.** The structural fix is to move `panic = "abort"` off
+`[profile.release]` onto a separate `dist` profile, leaving `release` unwinding. That would remove
+the dual-variant build entirely, but `[profile.bench]` inherits `release`, so it would also change
+D12's "a benchmark measures the shipped code" intent — benchmarks would stop measuring the panic
+strategy the artifact ships. That trade is not made here.
+
 ## Issue 083 boot attestation and the cross-target gate runtime
 
 **Boot attestation.** Master plan D4 removes runtime SIMD dispatch: the instruction set is chosen

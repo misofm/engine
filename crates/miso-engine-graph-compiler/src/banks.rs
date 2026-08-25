@@ -15,12 +15,6 @@ pub(crate) const fn rack_location(rack: RackId) -> Option<RackLocationV1> {
     }
 }
 
-/// Plan the SIMD-rack cohorts and bind the ones that can be bound.
-///
-/// The planner is `miso_engine_rack_compiler::plan_bank_groups` - the single cohort planner in the
-/// workspace. #96 binds only full groups: every effect factory rejects `requests.len() != lanes`
-/// and the contract has no per-lane mask yet (#96 F7), so a padded group's members stay on the
-/// per-node scalar path, exactly as they did before. #99 flips that once #95 adds the lane mask.
 /// Plan the SIMD-rack cohorts over whole rack chains, and bind every slot that can be bound.
 ///
 /// The planner is `miso_engine_rack_compiler::plan_bank_groups` -- the single cohort planner in
@@ -33,8 +27,8 @@ pub(crate) const fn rack_location(rack: RackId) -> Option<RackLocationV1> {
 /// form single-slot banks.
 ///
 /// A slot is bound when the group is full and **every** lane runs that slot. A slot some lane
-/// skips would need a per-lane bypass mask in the effect contract, which does not exist yet
-/// (#96 F7, owned by #95); those members render on the per-node scalar path exactly as before.
+/// skips would need a per-lane bypass mask in the effect contract, which does not exist (#96 F7);
+/// those members render on the per-node scalar path exactly as before.
 /// Padded (non-full) groups are likewise unbound, unchanged from #96.
 ///
 /// Level bucketing: slot `k` of every chain in a bucket sits at `level + k`, because a rack chain
@@ -182,7 +176,7 @@ pub(crate) fn bind_rack_banks(
                 continue;
             }
             // Every lane must run this slot: the effect contract has no per-lane bypass mask
-            // (#96 F7 / #95), so a bank whose lanes disagree cannot be expressed.
+            // (#96 F7), so a bank whose lanes disagree cannot be expressed.
             if !group.active_slots.iter().all(|lane| lane[slot]) {
                 continue;
             }

@@ -6,8 +6,6 @@ use std::ffi::OsString;
 use std::process::Command;
 
 #[cfg(not(target_arch = "wasm32"))]
-mod bootstrap;
-#[cfg(not(target_arch = "wasm32"))]
 mod builtins;
 #[cfg(not(target_arch = "wasm32"))]
 mod conformance;
@@ -31,7 +29,6 @@ mod session;
 const INTERNAL_SUBJECT: &str = "ENGINE_V2_INTERNAL_BENCH_SUBJECT";
 #[cfg(not(target_arch = "wasm32"))]
 const SUBJECTS: &[&str] = &[
-    "bootstrap",
     "builtins",
     "conformance",
     "console",
@@ -47,7 +44,6 @@ const SUBJECTS: &[&str] = &[
 #[cfg(not(target_arch = "wasm32"))]
 fn run_subject(subject: &str) {
     match subject {
-        "bootstrap" => bootstrap::main(),
         "builtins" => builtins::main(),
         "conformance" => conformance::main(),
         "console" => console::main(),
