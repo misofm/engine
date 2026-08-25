@@ -13,6 +13,7 @@ use crate::{
 use core::ffi::c_void;
 use core::ptr;
 use core::sync::atomic::{AtomicU32, Ordering};
+use miso_engine_lane::fpenv::CanonicalFpEnv;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use crate::runtime::{
@@ -716,6 +717,12 @@ pub unsafe extern "C" fn miso_engine_v2_dequeue_event(
 
 /// Render one exact-time quantum directly into caller-owned contiguous planar storage.
 ///
+/// The caller's floating-point environment is borrowed, never adopted (issue #146): every path out
+/// of this function -- success, any rejection code, or an unwind -- restores the caller's exact
+/// control word, because [`CanonicalFpEnv`] is an ordinary stack value whose `Drop` is the restore.
+/// A DAW audio callback that arrives with FTZ and DAZ set therefore gets the same bits as one that
+/// does not, and gets its own environment back untouched.
+///
 /// # Safety
 ///
 /// `plan` must be live and exclusive; `output` must satisfy the caller-owned output contract.
@@ -728,6 +735,10 @@ pub unsafe extern "C" fn miso_engine_v2_render_f32_planar(
     output: *const PlanarOutput,
 ) -> u32 {
     catch_result(|| {
+        // Issue #146, first statement of the entry and last thing undone: the whole call runs in
+        // the canonical floating-point environment, validation included, so a rejected call also
+        // hands the caller's word back unchanged. Two register writes and a read per block.
+        let _fp_env = CanonicalFpEnv::enter();
         // SAFETY: Nonnull live handle pointers are caller-provided under the handle contract.
         let kind = unsafe { plan_kind(plan) };
         if kind != RESULT_OK {
@@ -754,6 +765,18 @@ pub unsafe extern "C" fn miso_engine_v2_render_f32_planar(
         let state = unsafe { &mut *plan_state(plan) };
         // SAFETY: See above; the diagnostic slot is disjoint from `state`.
         let error = unsafe { &*plan_error_slot(plan) };
+        // Issue #146 session-start re-attestation, on the thread that will render: the first block
+        // this plan renders proves the canonical word actually took here, and refuses the render
+        // rather than silently producing off-pin audio if it did not. Later blocks skip it.
+        if !state.fp_env_attested.get() {
+            if miso_engine_lane::fpenv::read_fp_control_word()
+                != miso_engine_lane::fpenv::canonical_fp_control_word()
+            {
+                error.store(plan_error::FP_ENVIRONMENT, Ordering::Relaxed);
+                return RESULT_RENDER_REJECTED;
+            }
+            state.fp_env_attested.set(true);
+        }
         if !output.samples.is_aligned() {
             error.store(plan_error::OUTPUT_UNALIGNED, Ordering::Relaxed);
             return RESULT_INVALID_ARGUMENT;

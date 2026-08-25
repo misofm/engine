@@ -76,7 +76,11 @@ mod x86 {
         let _restore = Restore(saved);
         let hostile = hostile_word(saved);
         write_mxcsr(hostile);
-        assert_eq!(read_mxcsr(), hostile, "the test must really install FTZ+DAZ");
+        assert_eq!(
+            read_mxcsr(),
+            hostile,
+            "the test must really install FTZ+DAZ"
+        );
 
         {
             let _pinned = CanonicalFpEnv::enter();

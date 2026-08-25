@@ -62,6 +62,8 @@ pub(crate) mod plan_error {
     pub(crate) const TIME_OVERFLOW: u32 = 6;
     /// The prepared plan itself rejected the render call.
     pub(crate) const PLAN_REJECTED: u32 = 7;
+    /// The canonical floating-point environment did not take on this render thread (issue #146).
+    pub(crate) const FP_ENVIRONMENT: u32 = 8;
 
     /// Returns the frozen diagnostic text for `code`.
     ///
@@ -77,6 +79,7 @@ pub(crate) mod plan_error {
             TIME_DISCONTINUITY => b"render.time.discontinuity",
             TIME_OVERFLOW => b"render.time.overflow",
             PLAN_REJECTED => b"render.plan.rejected",
+            FP_ENVIRONMENT => b"render.fp_environment.invalid",
             _ => b"render.internal",
         }
     }

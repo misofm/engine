@@ -17,6 +17,10 @@ miso-engine-effect-compiler.workspace = true
 miso-engine-effect-contract.workspace = true
 miso-engine-graph.workspace = true
 miso-engine-graph-compiler.workspace = true
+# Issue #146: the canonical floating-point environment guard and the render-thread attestation.
+# The lane crate is already in every host's link graph; naming it here is what lets the facade own
+# the one started-session handle instead of each host re-deriving the pin.
+miso-engine-lane.workspace = true
 miso-engine-session.workspace = true
 miso-engine-source.workspace = true
 

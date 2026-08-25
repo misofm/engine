@@ -73,6 +73,7 @@
 
 pub mod diagnostics;
 pub mod prepare;
+pub mod render_session;
 pub mod source;
 
 pub use diagnostics::{
@@ -84,6 +85,7 @@ pub use prepare::{
     parse_host_session, prepare_host_runtime, prepare_host_runtime_with_console,
     prepare_host_session, prepare_host_session_with_console,
 };
+pub use render_session::StartedRenderSessionV1;
 pub use source::{
     SourceControlError, SourceControlSet, SourceSubmission, control_table_bytes,
     source_id_arena_bytes,
