@@ -160,6 +160,13 @@ emitted `.ll`, each emitted object, each shipped artifact, and the exact disasse
 bytes the rules were evaluated against. The sorted `path  sha256` list is itself hashed into
 `receipt.chain_sha256`, so one value identifies the whole chain.
 
+The manifest holds only facts that do not move between two identical runs. Cargo's own output goes
+to `build.log` beside it and is deliberately *not* in the chain: it carries wall-clock build
+durations, and hashing it would make every run's chain digest unique for no evidence. With that
+split, two clean rebuilds of this tree produce a byte-identical report — same IR digests, same
+object digests, same shipped-artifact digests, same `chain_sha256` — which is what makes the digest
+usable as an identity rather than a timestamp.
+
 ## Status: report, not gate
 
 The CI job is non-blocking and uploads its receipt. The promotion criteria for making it a gate are

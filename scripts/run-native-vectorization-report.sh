@@ -21,7 +21,12 @@ cd "$repository_root"
 
 output_directory="${2:-$repository_root/target/ci/native-vectorization}"
 report="$output_directory/report.json"
+# The manifest holds only facts that do not move between two identical runs -- toolchain and tool
+# versions, the effective profile and ISA pin -- so that `receipt.chain_sha256` is a stable identity
+# for the whole chain. Cargo's own output goes to a separate log beside it: it carries wall-clock
+# build durations, and hashing it would make every run's chain digest unique for no evidence.
 manifest="$output_directory/build-manifest.txt"
+build_log="$output_directory/build.log"
 mkdir -p "$output_directory"
 
 resolve_tool() {
@@ -64,12 +69,12 @@ build_probes() {
     if [[ -z "$target" ]]; then
         CARGO_PROFILE_RELEASE_LTO=false CARGO_TARGET_DIR="$directory" \
             cargo rustc --locked --release -p "$probe_package" --lib -- --emit=llvm-ir,obj \
-            >>"$manifest" 2>&1
+            >>"$build_log" 2>&1
         printf '%s/release/deps\n' "$directory"
     else
         CARGO_PROFILE_RELEASE_LTO=false CARGO_TARGET_DIR="$directory" \
             cargo rustc --locked --release --target "$target" -p "$probe_package" --lib -- \
-            --emit=llvm-ir,obj >>"$manifest" 2>&1
+            --emit=llvm-ir,obj >>"$build_log" 2>&1
         printf '%s/%s/release/deps\n' "$directory" "$target"
     fi
 }
@@ -84,6 +89,7 @@ build_probes() {
     "$nm" --version | head -n 2
     printf 'cargo_config=%s\n' "$(sed -n '1,20p' .cargo/config.toml | tr '\n' ' ')"
 } >"$manifest"
+: >"$build_log"
 
 host_deps="$(build_probes host '')"
 host_ir="$(single "$host_deps/$probe_crate-*.ll" 'host probe LLVM IR')"
@@ -110,7 +116,7 @@ fi
 # The shipped products, built with the release profile exactly as it ships.
 products_directory="$repository_root/target/ci/native-vectorization/products"
 CARGO_TARGET_DIR="$products_directory" cargo build --locked --release \
-    -p miso-engine-capi -p miso-engine-host-web >>"$manifest" 2>&1
+    -p miso-engine-capi -p miso-engine-host-web >>"$build_log" 2>&1
 capi="$products_directory/release/libmiso_engine_capi.so"
 web="$products_directory/release/libmiso_engine_host_web.so"
 for artifact in "$capi" "$web"; do

@@ -215,6 +215,7 @@ jobs:
           path: |
             target/ci/native-vectorization/report.json
             target/ci/native-vectorization/build-manifest.txt
+            target/ci/native-vectorization/build.log
 
   wasm:
     name: browser Wasm artifact probes
