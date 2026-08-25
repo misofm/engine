@@ -2283,6 +2283,82 @@ mod tests {
         }
     }
 
+    /// Issue #144 item 6: the stationary hoist reads the value `advance` would have produced.
+    ///
+    /// This effect had no ramping split at all -- four `RampLanes::advance` per frame, every
+    /// frame. The hoist skips them when nothing is moving, so the gate is that `resting_value`
+    /// and `advance` agree bitwise at rest, *and* that `advance` leaves the state untouched
+    /// there. If either half stopped holding, the skip would be a re-tuning rather than a
+    /// no-op, which is exactly the failure the class-A bar exists to catch.
+    #[test]
+    fn the_stationary_hoist_reads_what_advancing_would_have_produced() {
+        fn check<L: Lane>() {
+            let values = [0.0_f32, -1.0, 0.25, 100.0, -0.5, 3.0, 1.0e-7, 7.0];
+            let mut scalar = [LinearRamp::fixed(0.0); MAXIMUM_WIDTH];
+            for (lane, ramp) in scalar.iter_mut().enumerate().take(L::WIDTH) {
+                *ramp = LinearRamp::fixed(values[lane]);
+            }
+            assert!(
+                ramps_are_stationary(&scalar[..L::WIDTH]),
+                "width {}: ramps built at rest must read as stationary",
+                L::WIDTH
+            );
+
+            let mut lanes = RampLanes::<L>::gather(&scalar[..L::WIDTH]);
+            let mut rested = [0.0_f32; MAXIMUM_WIDTH];
+            let mut advanced = [0.0_f32; MAXIMUM_WIDTH];
+            // Several frames, because the hoist skips the whole block, not one sample.
+            for frame in 0..8 {
+                lanes.resting_value().store(&mut rested);
+                let before = lanes;
+                lanes.advance().store(&mut advanced);
+                for lane in 0..L::WIDTH {
+                    assert_eq!(
+                        rested[lane].to_bits(),
+                        advanced[lane].to_bits(),
+                        "width {} lane {lane} frame {frame}: resting value diverged",
+                        L::WIDTH
+                    );
+                }
+                let mut before_state = [0.0_f32; MAXIMUM_WIDTH];
+                let mut after_state = [0.0_f32; MAXIMUM_WIDTH];
+                before.current.store(&mut before_state);
+                lanes.current.store(&mut after_state);
+                for lane in 0..L::WIDTH {
+                    assert_eq!(
+                        before_state[lane].to_bits(),
+                        after_state[lane].to_bits(),
+                        "width {} lane {lane} frame {frame}: advancing at rest moved the state",
+                        L::WIDTH
+                    );
+                }
+            }
+        }
+        check::<f32>();
+        check::<miso_engine_lane::Simd4>();
+        check::<miso_engine_lane::Simd8>();
+    }
+
+    /// A ramp with a window open is never stationary, however small the move.
+    #[test]
+    fn an_open_window_is_never_stationary() {
+        let mut ramps = [LinearRamp::fixed(0.5); 4];
+        assert!(ramps_are_stationary(&ramps));
+        // One ULP: the smallest real move the bit compare must still refuse to hoist.
+        ramps[2].set_target(f32::from_bits(0.5_f32.to_bits() + 1), RAMP_UPDATES);
+        assert!(
+            !ramps_are_stationary(&ramps),
+            "a one-ULP retarget must open a window"
+        );
+        // A redundant retarget is hoisted by `LinearRamp::set_target` itself, so it stays at rest.
+        let mut redundant = [LinearRamp::fixed(0.5); 4];
+        redundant[1].set_target(0.5, RAMP_UPDATES);
+        assert!(
+            ramps_are_stationary(&redundant),
+            "a redundant retarget must not open a window"
+        );
+    }
+
     /// E13: the lane-wide coefficient ramp is `LinearRamp::next_value`, snap included.
     ///
     /// `RampLanes::advance` is a second implementation of the runtime's D11 law, in the vector

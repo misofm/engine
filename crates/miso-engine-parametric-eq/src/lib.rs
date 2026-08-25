@@ -45,10 +45,10 @@ use miso_engine_effect_contract::{
     StatePayloadOutput, StatePayloadSizes, TailSamples, expected_prepared_metadata,
 };
 use miso_engine_effect_runtime::bank::{check_block, nonfinite_lane_mask};
-use miso_engine_effect_runtime::ramp::LinearRamp;
 use miso_engine_effect_runtime::params::{
     ParameterSpec, normalize_zero, parameter_value_valid as domain_valid,
 };
+use miso_engine_effect_runtime::ramp::LinearRamp;
 use miso_engine_effect_runtime::state_payload as payload;
 use miso_engine_lane::kernels::{SvfCoef, SvfCoefStep, SvfState, svf_block, svf_block_ramped};
 use miso_engine_lane::{Backend, Lane, Simd4, Simd8};

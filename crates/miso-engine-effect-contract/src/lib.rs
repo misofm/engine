@@ -1237,8 +1237,8 @@ impl ParameterSmoother {
         // `normalize_zero` above means `-0.0` never reaches this state, so the sign-of-zero
         // exclusion `LinearRamp::stationary_at` carries has nothing to exclude here; the
         // finiteness half is already guaranteed by the early return above.
-        let stationary = self.rule == SmoothingRule::Linear
-            && self.target.to_bits() == self.current.to_bits();
+        let stationary =
+            self.rule == SmoothingRule::Linear && self.target.to_bits() == self.current.to_bits();
         if self.rule == SmoothingRule::None || stationary {
             self.current = self.target;
             self.step = 0.0;
