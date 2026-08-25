@@ -127,8 +127,8 @@ pub type FpControlWord = u32;
 #[cfg(target_arch = "aarch64")]
 pub type FpControlWord = u64;
 
-/// The kind of the target's floating-point control word; uninhabited-by-value on targets without
-/// one.
+/// The kind of the target's floating-point control word: the unit type, because this target has no
+/// control word to name.
 #[cfg(not(any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")))]
 pub type FpControlWord = ();
 
@@ -154,10 +154,16 @@ pub fn write_fp_control_word(value: FpControlWord) {
 pub fn read_fp_control_word() -> FpControlWord {
     let value: u64;
     // SAFETY: `MRS Xt, FPCR` reads an unprivileged, always-accessible system register on every
-    // AArch64 profile the engine targets; it has no side effect, touches no memory and cannot
-    // trap at EL0. The output constraint gives the compiler an ordinary register result.
+    // AArch64 profile the engine targets, and cannot trap at EL0. The output constraint gives the
+    // compiler an ordinary register result.
+    //
+    // `nostack` is accurate -- no stack slot is touched. `nomem` is deliberately **not** given, to
+    // the read as well as the write: the pair is an optimization barrier, and a block of assembly
+    // that advertises itself as memory-free is one the optimizer may sink or hoist arithmetic
+    // across. What FPCR selects is a side effect the compiler does not model, so the assembly must
+    // not claim to have none.
     unsafe {
-        core::arch::asm!("mrs {value}, fpcr", value = out(reg) value, options(nomem, nostack));
+        core::arch::asm!("mrs {value}, fpcr", value = out(reg) value, options(nostack));
     }
     value
 }
@@ -167,11 +173,12 @@ pub fn read_fp_control_word() -> FpControlWord {
 #[inline]
 pub fn write_fp_control_word(value: FpControlWord) {
     // SAFETY: `MSR FPCR, Xt` writes an unprivileged, always-accessible system register on every
-    // AArch64 profile the engine targets. The value written is either [`CANONICAL_FPCR`] or a word
+    // AArch64 profile the engine targets. The value written is either `CANONICAL_FPCR` or a word
     // previously read from this same thread's FPCR, so no reserved encoding is introduced, and the
-    // write affects only the calling thread. It touches no memory and cannot trap at EL0.
+    // write affects only the calling thread. It cannot trap at EL0. `nomem` is omitted for the
+    // reason given on the read.
     unsafe {
-        core::arch::asm!("msr fpcr, {value}", value = in(reg) value, options(nomem, nostack));
+        core::arch::asm!("msr fpcr, {value}", value = in(reg) value, options(nostack));
     }
 }
 
