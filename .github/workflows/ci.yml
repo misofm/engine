@@ -53,6 +53,13 @@ jobs:
         run: |
           bash scripts/check-bench-policy.sh
           bash scripts/test-bench-policy.sh
+      # The fixture is the workload: a console record measured against a drifted fixture is
+      # measuring something other than what it claims. The check previously ran only inside the
+      # manual bench runner, so drift could not surface until the next authorised measurement --
+      # which is exactly the one run that must not discover a broken input. It is a pure grep
+      # gate over a committed fixture, so it belongs with the cheap policy gates.
+      - name: Console benchmark fixture integrity
+        run: bash scripts/check-console-benchmark-fixture.sh
       - name: Shared host facade policy and mutation tests
         run: |
           bash scripts/check-host-core-policy.sh
