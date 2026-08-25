@@ -22,6 +22,9 @@ use miso_engine_host_core::{
 };
 
 const SESSION: &str = include_str!("../../../fixtures/session/v1/compressor-bank-observation.toml");
+/// The same fixture with every compressor moved into the dynamic rack (issue #163 phase 1b).
+const DYNAMIC_BANK_SESSION: &str =
+    include_str!("../../../fixtures/session/v1/compressor-dynamic-bank-observation.toml");
 const QUANTUM: usize = 128;
 const TRACKS: usize = 8;
 /// Blocks per published observation window, and per meter window: they are the same window.
@@ -95,10 +98,14 @@ struct Session {
 }
 
 fn prepare(leg: Leg) -> Session {
+    prepare_from(SESSION, leg)
+}
+
+fn prepare_from(toml: &str, leg: Leg) -> Session {
     let (_session, prepared, handles) =
-        prepare_host_session_with_console(SESSION, &caps(), &console(leg)).unwrap_or_else(
-            |failure| panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes())),
-        );
+        prepare_host_session_with_console(toml, &caps(), &console(leg)).unwrap_or_else(|failure| {
+            panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes()))
+        });
     assert_eq!(handles.tracks.len(), TRACKS);
     assert!(
         prepared.report.effect_bank_scratch_bytes > 0,
@@ -1017,5 +1024,88 @@ fn observation_cost_classes_are_what_they_claim() {
         armed.as_secs_f64() < baseline.as_secs_f64() * 4.0 + 5e-3,
         "arming every tap cost far more than a copy out of state: armed={armed:?} \
          baseline={baseline:?}"
+    );
+}
+
+/// Issue #163 phase 1b: the same eight compressors observe identically wherever they are placed.
+///
+/// `DYNAMIC_BANK_SESSION` is `SESSION` with every compressor moved from SIMD-1 into the dynamic
+/// rack and nothing else changed. Before phase 1b that placement banked nothing, so this pair
+/// would have compared a banked publish site against a per-node one; now both bank, and the #143
+/// gain-reduction taps must resolve through `ConsoleEffectBankStage` on both sides and publish the
+/// same windows to the bit.
+///
+/// This is what would catch a bank that meters its lanes in the wrong order: the eight thresholds
+/// are all different, so a lane permutation inside the dynamic bank shows up as a permuted set of
+/// reductions here even while the summed PCM stays identical.
+#[test]
+fn observation_is_identical_across_rack_placement() {
+    let mut simd1 = prepare(Leg::AllArmed);
+    let mut dynamic = prepare_from(DYNAMIC_BANK_SESSION, Leg::AllArmed);
+
+    // Both placements bank: the fixture is eight identical program keys either way.
+    assert!(simd1.prepared.report.effect_bank_scratch_bytes > 0);
+    assert_eq!(
+        dynamic.prepared.report.effect_bank_scratch_bytes,
+        simd1.prepared.report.effect_bank_scratch_bytes,
+        "the dynamic placement retains the same bank scratch as the SIMD-1 placement"
+    );
+    assert!(
+        dynamic
+            .handles
+            .effect_observations
+            .iter()
+            .all(|handle| matches!(handle.rack, EffectRack::Dynamic)),
+        "the taps address the rack the fixture actually declares"
+    );
+
+    subscribe_all(&mut simd1, true, WINDOW_BLOCKS);
+    subscribe_all(&mut dynamic, true, WINDOW_BLOCKS);
+    // The same settle the banked-lane test uses, so the published peak is a settled value rather
+    // than a point on the attack ramp.
+    const SETTLE: usize = 64;
+    let simd1_pcm = render(&mut simd1, SETTLE);
+    let dynamic_pcm = render(&mut dynamic, SETTLE);
+    assert_eq!(
+        simd1_pcm, dynamic_pcm,
+        "rack placement must not change a rendered sample"
+    );
+
+    for (track, threshold) in THRESHOLDS.iter().enumerate() {
+        let expected = reader(&simd1.handles, track).read().expect("a window");
+        let observed = reader(&dynamic.handles, track).read().expect("a window");
+        assert_eq!(
+            observed, expected,
+            "track {track}: the gain-reduction window must not depend on the rack"
+        );
+        // And it is a real reduction for the tracks whose threshold bites, not a shared zero.
+        // Reduction is published as a positive magnitude in dB.
+        if *threshold < 0.0 {
+            assert!(
+                observed.left > 0.0 && observed.right > 0.0,
+                "track {track}: threshold {threshold} must reduce"
+            );
+        } else {
+            assert_eq!(observed.left, 0.0, "threshold 0 dB does not bite");
+        }
+    }
+    // Distinct thresholds must still produce distinct reductions through the dynamic bank, or a
+    // lane permutation would pass the comparison above vacuously.
+    let reductions: Vec<u32> = (0..TRACKS)
+        .map(|track| {
+            reader(&dynamic.handles, track)
+                .read()
+                .expect("a window")
+                .left
+                .to_bits()
+        })
+        .collect();
+    let mut distinct = reductions.clone();
+    distinct.sort_unstable();
+    distinct.dedup();
+    assert_eq!(
+        distinct.len(),
+        4,
+        "the four declared thresholds must give four distinct reductions: {reductions:?}"
     );
 }
