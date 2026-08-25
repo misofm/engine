@@ -527,8 +527,26 @@ impl BankStage for ConsoleEffectBankStage {
             }
             self.offsets[lane + 1] = packed as u32;
         }
-        // 2. Capture the dry block before the bank touches it.
-        if let Some(shunt) = self.shunt.as_mut() {
+        // Issue #163 phase 4 item 4: which lanes, if any, are bypassed this block. Decided here
+        // because it gates both the capture below and the restore in step 3, and because the
+        // control drain in step 1 has already run — so this is the same verdict step 3 reaches,
+        // read once instead of twice.
+        //
+        // `shunt.is_some()` means *some lane of this cohort has a control channel*, not that any
+        // lane is bypassed. An eight-lane cohort with one console-driven lane and nothing
+        // bypassed was paying a `quantum * lanes` two-plane copy every block for a dry block no
+        // reader could observe.
+        let any_bypassed = self.lanes[..lane_count]
+            .iter()
+            .any(|lane| lane.as_ref().is_some_and(EffectControlLane::bypassed));
+        // 2. Capture the dry block before the bank touches it. Skippable exactly when no lane
+        //    will read it back and there is no latency line to keep fed; `dry_*` never crosses a
+        //    block boundary, so the skip moves no rendered bit.
+        if let Some(shunt) = self
+            .shunt
+            .as_mut()
+            .filter(|shunt| any_bypassed || shunt.feeds_line())
+        {
             shunt.capture(block.left, block.right);
         }
         let frames = block.frames;
@@ -547,8 +565,25 @@ impl BankStage for ConsoleEffectBankStage {
         let _ = self.processor.process_bank(bank);
         // 4. Publish every armed tap, after the bank ran. One `observe_resident_bank` call per
         // armed tap fills every lane, so a cohort of eight costs one vector extraction rather than
-        // eight scalar reads -- and a tap no lane armed costs one pass over a `bool` array.
-        if let Some(lanes) = self.observations.as_deref_mut() {
+        // eight scalar reads.
+        //
+        // Issue #163 phase 4 item 3/6: the slot-level gate comes first. What the old comment here
+        // called "one pass over a `bool` array" for a tap no lane armed was, for the slot as a
+        // whole, an O(lanes) `max()` to find the tap count plus an O(taps x lanes) `.any()` walk
+        // -- 4 096 flag loads per block for the 64-lane, 64-tap console shape, every block,
+        // whether or not anything was subscribed. `ObservationLaneV1::any_armed` is now O(1) per
+        // lane, so this gate is O(lanes) and the whole publish section costs nothing at all until
+        // a subscription exists.
+        //
+        // Semantics are unchanged by construction: this is the disjunction over lanes of the
+        // per-tap `wants` disjunction below, so it can only skip work the inner loop would have
+        // skipped tap by tap. `wants` and `accumulate`'s own armed guard both stay.
+        if let Some(lanes) = self.observations.as_deref_mut().filter(|lanes| {
+            lanes
+                .iter()
+                .filter_map(Option::as_ref)
+                .any(ObservationLaneV1::any_armed)
+        }) {
             let taps = lanes
                 .iter()
                 .filter_map(Option::as_ref)
@@ -580,8 +615,11 @@ impl BankStage for ConsoleEffectBankStage {
                 }
             }
         }
-        // 3. Latency-matched dry restore for exactly the bypassed lanes.
-        if let Some(shunt) = self.shunt.as_ref() {
+        // 3. Latency-matched dry restore for exactly the bypassed lanes. `any_bypassed` is the
+        //    disjunction of the per-lane test below, decided before the capture; when it is false
+        //    this whole loop was already a no-op, and skipping it also proves the capture above
+        //    had no reader.
+        if let Some(shunt) = self.shunt.as_ref().filter(|_| any_bypassed) {
             let (dry_left, dry_right) = shunt.dry();
             for lane in 0..lane_count {
                 if !self.lanes[lane]

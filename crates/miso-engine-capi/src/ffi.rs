@@ -810,16 +810,31 @@ pub unsafe extern "C" fn miso_engine_v2_render_f32_planar(
         };
         match state.render(absolute_sample, render_output) {
             Ok(()) => {
-                let mut peak = 0.0_f32;
-                for channel in 0..2_usize {
-                    let plane = channel * stride;
-                    for frame in 0..frames {
-                        // SAFETY: The validated two-plane layout proves this exact sample index is
-                        // initialized and readable after the exclusive render borrow ended.
-                        let sample = unsafe { *samples_pointer.add(plane + frame) };
-                        peak = peak.max(sample.abs());
+                // Issue #163 phase 4 item 2: the scan runs only for an armed observer.
+                //
+                // This is `2 * frames` scalar loads plus an `abs` and a `max` on every successful
+                // render -- 256 of them at the launch quantum -- and its sole consumer is
+                // `collect_render_activity`, which discards it unless the endpoint has configured
+                // meter handles and a nonzero meter period. `render_peak_observed` is that
+                // condition, refreshed by the control thread. When it is false the block
+                // publishes `NaN`, which the consumer reads as "not measured" and drops, so an
+                // unarmed block never fabricates a peak of `0.0`.
+                let peak = if state.render_peak_observed() {
+                    let mut peak = 0.0_f32;
+                    for channel in 0..2_usize {
+                        let plane = channel * stride;
+                        for frame in 0..frames {
+                            // SAFETY: The validated two-plane layout proves this exact sample
+                            // index is initialized and readable after the exclusive render borrow
+                            // ended.
+                            let sample = unsafe { *samples_pointer.add(plane + frame) };
+                            peak = peak.max(sample.abs());
+                        }
                     }
-                }
+                    peak
+                } else {
+                    f32::NAN
+                };
                 state.publish_render_observation(peak);
                 error.store(plan_error::NONE, Ordering::Relaxed);
                 RESULT_OK

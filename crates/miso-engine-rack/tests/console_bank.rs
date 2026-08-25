@@ -539,3 +539,106 @@ fn an_unobserved_bank_slot_reports_no_observation_state_at_all() {
     );
     assert!(observed.is_observed(), "capacity survives an unsubscribe");
 }
+
+/// Issue #163 phase 4 item 4: the latency line stays fed while the lane is *not* bypassed, so the
+/// first bypassed block after a mid-session toggle emits the correctly delayed dry signal.
+///
+/// This is the tripwire for the capture gate. Phase 4 stopped staging the dry block on a block no
+/// reader can observe, which is sound only because `BypassShunt::feeds_line` keeps the capture
+/// unconditional whenever a latency line exists. Red mutation: gate the capture in
+/// `ConsoleEffectBankStage::process` on `any_bypassed` alone, dropping the `feeds_line()` term ->
+/// the line starves while the lane runs wet, and the first bypassed block below emits stale
+/// samples (zeros, or block-0 content) instead of the input from `LATENCY` frames earlier.
+///
+/// The distinction from `bypass_is_per_lane_and_preserves_the_declared_latency` is the toggle
+/// point: that test bypasses from block 0, so a starved line would still look correct for the
+/// only samples it checks. Here the lane renders wet for two whole blocks first, so the delayed
+/// dry signal the third block must produce can only come from a line that was fed while wet.
+#[test]
+fn a_mid_session_bypass_emits_the_delayed_dry_signal_captured_while_wet() {
+    const LATENCY: usize = 2;
+    const FRAMES: usize = 8;
+    let (mut chain, mut producers) = console_chain(LATENCY, [true, false, false, false]);
+    producers[0].try_push(gain(0.5)).expect("room");
+
+    let input = |block: usize, frame: usize| (block * FRAMES + frame + 1) as f32;
+    let mut seen: Vec<f32> = Vec::new();
+    for block in 0..4_usize {
+        // The toggle lands between blocks 1 and 2, so blocks 0 and 1 render wet and block 2 is the
+        // first bypassed one. Its dry signal is input the shunt could only hold if the capture ran
+        // during the wet blocks.
+        if block == 2 {
+            producers[0]
+                .try_push(EffectControlRecordV1::Bypass(true))
+                .expect("room");
+        }
+        let mut members = Planes {
+            left: (0..LANES)
+                .map(|_| (0..FRAMES).map(|frame| input(block, frame)).collect())
+                .collect(),
+            right: (0..LANES)
+                .map(|_| (0..FRAMES).map(|frame| -input(block, frame)).collect())
+                .collect(),
+        };
+        chain
+            .run(&mut members, FRAMES as u32, (block * FRAMES) as u64)
+            .expect("run");
+        seen.extend_from_slice(&members.left[0]);
+    }
+
+    // Blocks 0 and 1 are wet: the mock bank applies the 0.5 gain and its own `LATENCY`-frame FIFO.
+    for (index, value) in seen.iter().enumerate().take(2 * FRAMES) {
+        let delayed = if index < LATENCY {
+            0.0
+        } else {
+            index as f32 - LATENCY as f32 + 1.0
+        };
+        assert_eq!(
+            *value,
+            delayed * 0.5,
+            "sample {index}: wet before the toggle"
+        );
+    }
+    // Blocks 2 and 3 are bypassed: the dry signal at the declared latency, unity gain. The first
+    // two samples of block 2 are the last two samples of block 1, which is the whole point.
+    for (index, value) in seen.iter().enumerate().take(4 * FRAMES).skip(2 * FRAMES) {
+        assert_eq!(
+            *value,
+            index as f32 - LATENCY as f32 + 1.0,
+            "sample {index}: a mid-session bypass is the dry signal at the declared latency"
+        );
+    }
+}
+
+/// The zero-latency counterpart: with no line to feed, the capture is skipped while wet, and the
+/// first bypassed block still emits *its own* input because the control drain decides `bypassed`
+/// before the capture runs.
+///
+/// Red mutation: move the `any_bypassed` decision in `ConsoleEffectBankStage::process` below the
+/// capture, or compute it from a stale pre-drain snapshot -> the first bypassed block emits the
+/// previous block's dry samples.
+#[test]
+fn a_zero_latency_bypass_emits_the_current_block_dry() {
+    const FRAMES: usize = 8;
+    let (mut chain, mut producers) = console_chain(0, [true, false, false, false]);
+    producers[0].try_push(gain(0.25)).expect("room");
+
+    let mut members = planes(3.0);
+    chain.run(&mut members, FRAMES as u32, 0).expect("run");
+    assert!(
+        members.left[0].iter().all(|value| *value == 0.75),
+        "block 0 renders wet"
+    );
+
+    producers[0]
+        .try_push(EffectControlRecordV1::Bypass(true))
+        .expect("room");
+    let mut members = planes(5.0);
+    chain
+        .run(&mut members, FRAMES as u32, FRAMES as u64)
+        .expect("run");
+    assert!(
+        members.left[0].iter().all(|value| *value == 5.0),
+        "the first bypassed block is this block's own dry input, not the previous block's"
+    );
+}

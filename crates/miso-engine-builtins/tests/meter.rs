@@ -293,3 +293,147 @@ fn meter_peak_of_signed_zeros_is_positive_zero() {
     assert_eq!(snapshot.right.sample_peak.to_bits(), 0.0_f32.to_bits());
     assert_eq!(snapshot.left.held_peak.to_bits(), 0.0_f32.to_bits());
 }
+
+/// Issue #163 phase 4 item 3: the settled-silence early-out is bit-identical to the sample loop.
+///
+/// The skip is only sound while `held == 0.0` and `hold_remaining` is already at the configured
+/// hold length. This drives both sides of that boundary in one accumulator and pins every field a
+/// skipped segment must still produce: the window still tiles, the sequence still advances, the
+/// retained peak from an earlier window is not disturbed, and both signed zeros are admitted.
+///
+/// Red mutation this holds against: skip the whole `while` body rather than just
+/// `observe_segment` -> `self.frames` stops advancing, the period boundary is never reached and
+/// no window is ever emitted, so every `try_pop` below returns `None`.
+///
+/// It deliberately does **not** claim the `held == 0.0` precondition: with decay disabled, as it
+/// is here, a silent segment leaves a nonzero `held` alone anyway, so dropping that term changes
+/// no bit in this configuration. `silence_against_a_nonzero_held_peak_still_decays` is the test
+/// that makes that term load-bearing, and it is red without it.
+#[test]
+fn a_settled_silent_block_is_bit_identical_through_the_early_out() {
+    let handle = MeterHandle(NonZeroU64::new(1).expect("constant"));
+    let config = MeterConfig {
+        period_frames: NonZeroU32::new(4).expect("constant"),
+        peak_hold_frames: 0,
+        peak_decay_db_per_second: 0.0,
+        queue_capacity: NonZeroUsize::new(8).expect("constant"),
+        reset_generation: 0,
+    };
+    let PreparedMeter {
+        mut accumulator,
+        mut consumer,
+    } = MeterAccumulator::prepare(handle, config, 48_000).expect("meter");
+
+    // Window 0: exact positive zeros. The lane starts settled, so this is the skipped path.
+    accumulator
+        .observe(&[0.0; 4], &[0.0; 4], 0)
+        .expect("matched meter lanes");
+    let snap = consumer
+        .try_pop()
+        .expect("a skipped block still closes its window");
+    assert_eq!(
+        snap.start_sample, 0,
+        "the window still tiles from the start"
+    );
+    assert_eq!(
+        snap.end_sample, 4,
+        "a skipped block still advances `frames`"
+    );
+    assert_eq!(snap.left.sample_peak, 0.0);
+    assert_eq!(snap.left.energy, 0.0);
+    assert_eq!(snap.left.rms, 0.0);
+    assert_eq!(snap.left.held_peak, 0.0);
+    assert_eq!(snap.left.clipped_samples, 0);
+    assert_eq!(snap.left.sanitized_samples, 0);
+
+    // Window 1: negative zeros. `(-0.0).abs()` is `+0.0` and `(-0.0) * (-0.0)` is `+0.0`, so the
+    // `== 0.0` admission test covers exactly the values the proof covers.
+    accumulator
+        .observe(&[-0.0; 4], &[-0.0; 4], 4)
+        .expect("matched meter lanes");
+    let snap = consumer.try_pop().expect("snapshot");
+    assert_eq!(snap.start_sample, 4);
+    assert_eq!(snap.end_sample, 8);
+    assert_eq!(snap.left.sample_peak, 0.0, "a negative zero is not a peak");
+    assert_eq!(
+        snap.left.energy, 0.0,
+        "a negative zero contributes no energy"
+    );
+
+    // Window 2: real signal. The early-out must not fire, and `all` short-circuits on frame 0.
+    accumulator
+        .observe(&[0.5, 0.0, 0.0, 0.0], &[0.0, 0.0, 0.0, 0.25], 8)
+        .expect("matched meter lanes");
+    let snap = consumer.try_pop().expect("snapshot");
+    assert_eq!(snap.left.sample_peak, 0.5, "signal still meters");
+    assert_eq!(snap.left.energy, 0.25);
+    assert_eq!(snap.right.sample_peak, 0.25);
+
+    // Window 3: silence again, but `held` is now `0.5`, so the lane is *not* settled and the
+    // sample loop must run. With decay disabled the held peak is retained rather than decayed.
+    accumulator
+        .observe(&[0.0; 4], &[0.0; 4], 12)
+        .expect("matched meter lanes");
+    let snap = consumer.try_pop().expect("snapshot");
+    assert_eq!(snap.start_sample, 12);
+    assert_eq!(snap.end_sample, 16);
+    assert_eq!(
+        snap.left.held_peak, 0.5,
+        "the retained held peak survives a silent window unchanged"
+    );
+    assert_eq!(
+        snap.left.sample_peak, 0.0,
+        "`sample_peak` is per window and `emit` cleared it; `held_peak` is the retained one"
+    );
+    assert_eq!(snap.left.energy, 0.0, "the silent window adds no energy");
+}
+
+/// The decaying-hold half of the #163 phase 4 item 3 boundary: silence against a *nonzero* held
+/// peak is not a no-op, and the early-out must not claim it.
+///
+/// With decay enabled, every silent sample runs `held = flush_subnormal(held * decay)`. That is
+/// the one case where a lane is silent and settled-looking but its state still moves, so it is the
+/// case that decides whether `held == 0.0` belongs in the precondition.
+///
+/// Red mutation: drop `self.left.held == 0.0 && self.right.held == 0.0` from `settled_silence` ->
+/// the decay stops running the moment the signal does, and `held_peak` below stays at `1.0`
+/// forever instead of decaying toward zero.
+#[test]
+fn silence_against_a_nonzero_held_peak_still_decays() {
+    let handle = MeterHandle(NonZeroU64::new(1).expect("constant"));
+    let config = MeterConfig {
+        period_frames: NonZeroU32::new(4).expect("constant"),
+        peak_hold_frames: 0,
+        peak_decay_db_per_second: 120.0,
+        queue_capacity: NonZeroUsize::new(8).expect("constant"),
+        reset_generation: 0,
+    };
+    let PreparedMeter {
+        mut accumulator,
+        mut consumer,
+    } = MeterAccumulator::prepare(handle, config, 48_000).expect("meter");
+
+    accumulator
+        .observe(&[1.0, 0.0, 0.0, 0.0], &[1.0, 0.0, 0.0, 0.0], 0)
+        .expect("matched meter lanes");
+    let first = consumer.try_pop().expect("snapshot");
+    assert_eq!(first.left.sample_peak, 1.0);
+    let held_after_signal = first.left.held_peak;
+    assert!(
+        held_after_signal < 1.0 && held_after_signal > 0.0,
+        "the three silent samples of window 0 already decay the hold: {held_after_signal}"
+    );
+
+    // A fully silent window against a nonzero `held`. The sample loop must run.
+    accumulator
+        .observe(&[0.0; 4], &[0.0; 4], 4)
+        .expect("matched meter lanes");
+    let second = consumer.try_pop().expect("snapshot");
+    assert!(
+        second.left.held_peak < held_after_signal,
+        "a silent window against a nonzero held peak keeps decaying it: \
+         {} is not below {held_after_signal}",
+        second.left.held_peak
+    );
+    assert_eq!(second.left.energy, 0.0, "and still adds no energy");
+}

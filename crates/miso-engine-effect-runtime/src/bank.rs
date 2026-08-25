@@ -88,6 +88,53 @@ pub fn check_block<L: Lane>(io: &[f32]) -> bool {
     !L::mask_any(L::mask_not(ok))
 }
 
+/// `true` when every word of `io` is **exactly** `+0.0` (bit pattern zero).
+///
+/// # Why bits and not `== 0.0` (issue #163 phase 4 item 1)
+///
+/// This is the admission test for the silent fast path, and the fast path's whole claim is that
+/// leaving a buffer untouched is bit-identical to what the kernel would have written into it. A
+/// float compare cannot carry that claim: `-0.0 == 0.0` is `true`, so a block of negative zeros
+/// would pass while the bits differ from what an untouched `+0.0` buffer holds. Reducing the raw
+/// `u32` patterns instead makes the test exactly as strict as the claim -- `+0.0` is the only
+/// `f32` whose bits are zero, so `bits == 0` is "every word is `+0.0`" and nothing else.
+///
+/// Chunked so the **active** path stays cheap. A block carrying signal returns on its first
+/// chunk, so a rendering console pays 32 words rather than a whole extra pass over
+/// `frames * lanes`. The reduction is a plain `|` fold, which vectorises.
+#[inline]
+#[must_use]
+pub fn block_is_positive_zero(io: &[f32]) -> bool {
+    for chunk in io.chunks(32) {
+        let mut bits = 0_u32;
+        for value in chunk {
+            bits |= value.to_bits();
+        }
+        if bits != 0 {
+            return false;
+        }
+    }
+    true
+}
+
+/// `true` when every lane of `value` is **exactly** `+0.0`, by the same bit rule as
+/// [`block_is_positive_zero`].
+///
+/// Used on state words rather than audio: a recursive kernel's fixed point is only usable by the
+/// fast path if it is the *exact* word the slow path would have left behind.
+#[inline]
+#[must_use]
+pub fn lane_is_positive_zero<L: Lane>(value: L) -> bool {
+    debug_assert!(L::WIDTH <= 32);
+    let mut words = [0_u32; 32];
+    value.store_bits(&mut words[..L::WIDTH]);
+    let mut bits = 0_u32;
+    for word in words.iter().take(L::WIDTH) {
+        bits |= *word;
+    }
+    bits == 0
+}
+
 /// The lane bitmask of the values in `io` that are out of bounds.
 ///
 /// Only called on the failing path, once, to attribute a rejected block to a track. Bit `l` is set

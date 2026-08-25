@@ -541,6 +541,8 @@ pub(crate) fn compile_children(
         render_sequence: AtomicU64::new(0),
         render_sample: AtomicU64::new(0),
         render_peak_bits: AtomicU32::new(0),
+        // No endpoint has configured telemetry yet, so nothing can read a peak.
+        render_peak_observed: AtomicBool::new(false),
     });
     let mut pending_providers = Vec::new();
     pending_providers

@@ -275,6 +275,17 @@ struct ObservationTapV1 {
 pub struct ObservationLaneV1 {
     taps: Box<[ObservationTapV1]>,
     default_window_blocks: u32,
+    /// How many taps of this lane are armed, maintained by [`arm`](Self::arm) and
+    /// [`disarm_all`](Self::disarm_all) (issue #163 phase 4 item 6).
+    ///
+    /// This exists so [`any_armed`](Self::any_armed) — which the doc has always described as "the
+    /// one branch the block-top publish step takes" — is a single load rather than a walk over
+    /// every tap. The publish gate runs on the render thread once per driven effect (or once per
+    /// bank slot) per block, so a walk there would make the level-2 zero cost O(taps) exactly
+    /// where #143 promises one predicted branch. `armed` on the tap stays the authority for what
+    /// a tap *does*; this is only a redundant count of it, and `arm`/`disarm_all` are the only
+    /// two writers of either.
+    armed_count: u32,
 }
 
 impl ObservationLaneV1 {
@@ -310,6 +321,8 @@ impl ObservationLaneV1 {
         Some(Self {
             taps: taps.into_boxed_slice(),
             default_window_blocks,
+            // Every tap is built unarmed, so the count starts where they do.
+            armed_count: 0,
         })
     }
 
@@ -341,12 +354,6 @@ impl ObservationLaneV1 {
         self.taps.get(tap_index).is_some_and(|tap| tap.armed)
     }
 
-    /// Whether any tap is armed, which is the one branch the block-top publish step takes.
-    #[must_use]
-    pub fn any_armed(&self) -> bool {
-        self.taps.iter().any(|tap| tap.armed)
-    }
-
     /// The window length this lane would use for a request that names none.
     #[must_use]
     pub const fn default_window_blocks(&self) -> u32 {
@@ -374,6 +381,13 @@ impl ObservationLaneV1 {
         else {
             return false;
         };
+        // Maintained across the transition, not recomputed: a re-arm of an already-armed tap is
+        // idempotent here exactly as it is for `armed` itself.
+        match (tap.armed, armed) {
+            (false, true) => self.armed_count = self.armed_count.saturating_add(1),
+            (true, false) => self.armed_count = self.armed_count.saturating_sub(1),
+            _ => {}
+        }
         tap.armed = armed;
         tap.window_blocks = if window_blocks == 0 {
             default
@@ -394,6 +408,7 @@ impl ObservationLaneV1 {
     /// re-subscribes against the new plan. Disarming here is the same operation an explicit
     /// unsubscribe performs, so there is one code path and one meaning.
     pub fn disarm_all(&mut self) {
+        self.armed_count = 0;
         for tap in self.taps.iter_mut() {
             tap.armed = false;
             tap.blocks = 0;
@@ -405,6 +420,17 @@ impl ObservationLaneV1 {
 
 // REALTIME_POLICY_BEGIN
 impl ObservationLaneV1 {
+    /// Whether any tap is armed, which is the one branch the block-top publish step takes.
+    ///
+    /// One load and one compare, from the count [`arm`](Self::arm) and
+    /// [`disarm_all`](Self::disarm_all) maintain. Wired into both publish sites by #163 phase 4
+    /// item 6; before that it was `pub`, documented as the block-top gate, and called only from
+    /// this crate's own tests, while the render path walked every tap instead.
+    #[must_use]
+    pub const fn any_armed(&self) -> bool {
+        self.armed_count != 0
+    }
+
     /// Whether tap `tap_index` should be read for this block at all.
     ///
     /// The whole of level-2 zero: one bounds check and one flag load. An unarmed tap's effect state
@@ -538,11 +564,35 @@ impl BypassShunt {
             * core::mem::size_of::<f32>()
     }
 
+    /// Whether this shunt carries a latency line that has to be fed on every block.
+    ///
+    /// # Why a caller needs to ask (issue #163 phase 4 item 4)
+    ///
+    /// [`capture`](Self::capture) does two separable things: it stages the dry block into
+    /// `dry_*`, and — only when `latency > 0` — exchanges that staging through the delay line.
+    /// The second is stateful and must happen on every block, bypassed or not, for the reason
+    /// `capture` documents. The first is **not**: `dry_*` is read only by
+    /// [`apply`](Self::apply) and [`dry`](Self::dry), both of which run later in the *same* block
+    /// and only for a bypassed instance or lane. Nothing carries `dry_*` across a block boundary.
+    ///
+    /// So at zero latency a non-bypassed block's capture is provably dead work — two whole-block
+    /// `copy_from_slice`s whose result no reader can observe — and a caller that knows it is not
+    /// bypassed may skip it. At nonzero latency it may not: the staging buffer *is* the line's
+    /// input, so skipping the copy would starve the line and the first bypassed block would emit
+    /// stale samples. This predicate is the exact boundary between those two cases, and it is
+    /// fixed at preparation rather than per block.
+    #[must_use]
+    pub const fn feeds_line(&self) -> bool {
+        !self.line_left.is_empty()
+    }
+
     /// Capture this block's input and advance the latency line, returning nothing.
     ///
-    /// Always called, bypassed or not: the line has to stay fed so that enabling bypass mid-stream
-    /// produces the correctly delayed dry signal on its very first block rather than `latency`
-    /// samples of stale zeros.
+    /// Called on every block whenever [`feeds_line`](Self::feeds_line) is true, bypassed or not:
+    /// the line has to stay fed so that enabling bypass mid-stream produces the correctly delayed
+    /// dry signal on its very first block rather than `latency` samples of stale zeros. When
+    /// `feeds_line` is false there is no line, and a caller that is not bypassed this block may
+    /// skip the call entirely (#163 phase 4 item 4).
     pub fn capture(&mut self, left: &[f32], right: &[f32]) {
         let frames = left.len().min(self.dry_left.len()).min(right.len());
         self.dry_left[..frames].copy_from_slice(&left[..frames]);
