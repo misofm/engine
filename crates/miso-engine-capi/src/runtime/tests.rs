@@ -1601,3 +1601,229 @@ fn barrier_schedule_separates_one_source_producer_from_exclusive_render() {
     crate::ffi::test_session_destroy(session as *mut crate::Session);
     crate::ffi::test_plan_destroy(plan as *mut crate::Plan);
 }
+
+/// Issue #146 at the C ABI: the render entry pins the environment and hands the caller's back.
+///
+/// Every DAW audio callback arrives with FTZ and DAZ already set, so this is the shape of the real
+/// exposure. Three arms render the same subnormal fade tail through the same compiled session:
+///
+/// * the C entry with the caller's FTZ/DAZ clear -- the reference bytes;
+/// * the C entry with the caller's FTZ+DAZ set -- must be the same bytes;
+/// * the plan rendered *behind* the entry with FTZ+DAZ set -- must differ, or the second arm is
+///   vacuous.
+///
+/// Red mutation (recorded in `crates/miso-engine-capi/tests/MUTATIONS.md`): delete the
+/// `CanonicalFpEnv::enter()` line from `miso_engine_v2_render_f32_planar`; the second arm collapses
+/// onto the third.
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+mod fp_environment {
+    use super::*;
+    use miso_engine_lane::softfma::{MXCSR_DAZ, MXCSR_FTZ, read_mxcsr, write_mxcsr};
+
+    const QUANTUM: usize = 128;
+    const BLOCKS: u64 = 12;
+    /// DAZ, the six exception masks, the rounding-control field and FTZ. The low six bits are
+    /// sticky status flags that ordinary arithmetic sets and no restore is expected to hold back.
+    const MXCSR_CONTROL_BITS: u32 = 0xFFC0;
+
+    struct Restore(u32);
+
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            write_mxcsr(self.0);
+        }
+    }
+
+    /// One block of a fade tail: every sample is a distinct `f32` subnormal, which is exactly what
+    /// DAZ reads as zero and FTZ writes as zero.
+    fn tail_block(block: u64) -> (Vec<f32>, Vec<f32>) {
+        let mut left = vec![0.0_f32; QUANTUM];
+        let mut right = vec![0.0_f32; QUANTUM];
+        for (frame, (left, right)) in left.iter_mut().zip(right.iter_mut()).enumerate() {
+            let step = (block * QUANTUM as u64 + frame as u64) as u32;
+            *left = f32::from_bits(0x0004_0000_u32.wrapping_add(step.wrapping_mul(1_031)));
+            *right = -f32::from_bits(0x0002_0000_u32.wrapping_add(step.wrapping_mul(613)));
+        }
+        (left, right)
+    }
+
+    /// Renders `BLOCKS` quanta through the C ABI render entry.
+    fn render_through_the_c_entry(caller: u32) -> (Vec<u32>, u32) {
+        let saved = read_mxcsr();
+        let _restore = Restore(saved);
+        let children = compile_children(SESSION, limits()).expect("C children");
+        let c_session = Box::into_raw(Box::new(crate::Session::new(
+            children.session,
+            children.session_error,
+        )));
+        let c_plan = Box::into_raw(Box::new(crate::Plan::new(children.plan)));
+
+        write_mxcsr(caller);
+        let mut rendered = Vec::with_capacity(BLOCKS as usize * QUANTUM * 2);
+        let mut leaked = 0;
+        for block in 0..BLOCKS {
+            let (left, right) = tail_block(block);
+            submit_c(
+                c_session,
+                1,
+                block * QUANTUM as u64,
+                48_000,
+                &left,
+                &right,
+                false,
+            );
+            let mut pcm = vec![f32::NAN; QUANTUM * 2];
+            let output = crate::PlanarOutput {
+                struct_size: crate::PLANAR_OUTPUT_SIZE,
+                channels: 2,
+                samples: pcm.as_mut_ptr(),
+                sample_capacity: pcm.len() as u64,
+                frames: QUANTUM as u32,
+                plane_stride_samples: QUANTUM as u32,
+                reserved: [0; 2],
+            };
+            assert_eq!(
+                crate::ffi::test_render(c_plan, block * QUANTUM as u64, &output),
+                crate::RESULT_OK
+            );
+            // E2, read the instant the entry returns: every bit of the caller's word, status flags
+            // included, because the guard's restore is unconditional.
+            leaked |= read_mxcsr() ^ caller;
+            rendered.extend(pcm.iter().map(|sample| sample.to_bits()));
+        }
+        write_mxcsr(saved);
+        crate::ffi::test_plan_destroy(c_plan);
+        crate::ffi::test_session_destroy(c_session);
+        (rendered, leaked)
+    }
+
+    /// Renders `BLOCKS` quanta straight into the plan state, behind the C entry and its guard.
+    fn render_behind_the_c_entry(caller: u32) -> Vec<u32> {
+        let saved = read_mxcsr();
+        let _restore = Restore(saved);
+        let mut children = compile_children(SESSION, limits()).expect("direct children");
+
+        write_mxcsr(caller);
+        let mut rendered = Vec::with_capacity(BLOCKS as usize * QUANTUM * 2);
+        for block in 0..BLOCKS {
+            let (left, right) = tail_block(block);
+            children
+                .session
+                .submit(
+                    b"fixture-source",
+                    SourceSubmission {
+                        generation: 1,
+                        start_frame: block * QUANTUM as u64,
+                        sample_rate_hz: 48_000,
+                        planes: &[&left, &right],
+                        frames: QUANTUM as u32,
+                        end_of_region: false,
+                    },
+                )
+                .expect("direct submit");
+            let mut pcm = vec![f32::NAN; QUANTUM * 2];
+            children
+                .plan
+                .render(
+                    block * QUANTUM as u64,
+                    PlanarBufferMut::try_new(&mut pcm, 2, QUANTUM, QUANTUM).expect("direct output"),
+                )
+                .expect("direct render");
+            rendered.extend(pcm.iter().map(|sample| sample.to_bits()));
+        }
+        write_mxcsr(saved);
+        rendered
+    }
+
+    #[test]
+    fn the_c_render_entry_is_canonical_under_a_caller_that_set_ftz_and_daz() {
+        let saved = read_mxcsr();
+        let clear = saved & !(MXCSR_FTZ | MXCSR_DAZ);
+        let hostile = clear | MXCSR_FTZ | MXCSR_DAZ;
+
+        let (reference, reference_leak) = render_through_the_c_entry(clear);
+        let (guarded, guarded_leak) = render_through_the_c_entry(hostile);
+        let behind = render_behind_the_c_entry(hostile);
+
+        assert_eq!(
+            reference_leak & MXCSR_CONTROL_BITS,
+            0,
+            "the entry must restore every control bit"
+        );
+        assert_eq!(
+            guarded_leak, 0,
+            "the entry must restore the caller's exact word, status flags included"
+        );
+        assert_ne!(
+            behind, reference,
+            "issue #146 is vacuous here: FTZ+DAZ did not move this fixture behind the entry"
+        );
+        assert_eq!(
+            guarded, reference,
+            "a caller's FTZ+DAZ reached a render through the C ABI entry"
+        );
+        assert_eq!(read_mxcsr(), saved, "the test leaked MXCSR state");
+    }
+
+    #[test]
+    fn a_rejected_c_render_also_restores_the_callers_word() {
+        let saved = read_mxcsr();
+        let _restore = Restore(saved);
+        // Round-toward-zero and a sticky precision flag alongside FTZ+DAZ: nothing an entry may
+        // keep, and nothing it may drop.
+        let hostile = (saved & !0x6000) | MXCSR_FTZ | MXCSR_DAZ | 0x6000 | 0x0020;
+
+        let children = compile_children(SESSION, limits()).expect("C children");
+        let c_session = Box::into_raw(Box::new(crate::Session::new(
+            children.session,
+            children.session_error,
+        )));
+        let c_plan = Box::into_raw(Box::new(crate::Plan::new(children.plan)));
+
+        let mut pcm = vec![f32::NAN; QUANTUM * 2];
+        write_mxcsr(hostile);
+
+        // A malformed descriptor: refused before the plan is touched at all.
+        let malformed = crate::PlanarOutput {
+            struct_size: crate::PLANAR_OUTPUT_SIZE,
+            channels: 3,
+            samples: pcm.as_mut_ptr(),
+            sample_capacity: pcm.len() as u64,
+            frames: QUANTUM as u32,
+            plane_stride_samples: QUANTUM as u32,
+            reserved: [0; 2],
+        };
+        assert_eq!(
+            crate::ffi::test_render(c_plan, 0, &malformed),
+            crate::RESULT_INVALID_ARGUMENT
+        );
+        assert_eq!(read_mxcsr(), hostile, "a refused descriptor leaked MXCSR");
+
+        // A null plan handle: the earliest return the entry has.
+        let output = crate::PlanarOutput {
+            struct_size: crate::PLANAR_OUTPUT_SIZE,
+            channels: 2,
+            samples: pcm.as_mut_ptr(),
+            sample_capacity: pcm.len() as u64,
+            frames: QUANTUM as u32,
+            plane_stride_samples: QUANTUM as u32,
+            reserved: [0; 2],
+        };
+        assert_ne!(
+            crate::ffi::test_render(core::ptr::null_mut(), 0, &output),
+            crate::RESULT_OK
+        );
+        assert_eq!(read_mxcsr(), hostile, "a null handle leaked MXCSR");
+
+        // A discontinuous absolute sample: rejected by the plan, after the guard is installed.
+        assert_eq!(
+            crate::ffi::test_render(c_plan, 7, &output),
+            crate::RESULT_RENDER_REJECTED
+        );
+        assert_eq!(read_mxcsr(), hostile, "a rejected render leaked MXCSR");
+
+        write_mxcsr(saved);
+        crate::ffi::test_plan_destroy(c_plan);
+        crate::ffi::test_session_destroy(c_session);
+    }
+}
