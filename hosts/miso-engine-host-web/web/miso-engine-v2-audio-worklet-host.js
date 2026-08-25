@@ -86,7 +86,8 @@ const COMMAND_FIELDS = [
   "values",
 ];
 // Issue #143 added kinds 7 and 8, the two observation subscribe/unsubscribe records.
-const COMMAND_KINDS = new Set([1, 2, 3, 4, 5, 6, 7, 8]);
+// Issue #127 added kind 9, the server-resolved nudge.
+const COMMAND_KINDS = new Set([1, 2, 3, 4, 5, 6, 7, 8, 9]);
 const NOT_APPLICABLE = 255;
 
 /// Encode one live-console submission into a single transferable byte block.

@@ -28,9 +28,15 @@
 //!
 //! # Issue #127 (named nudge sizes)
 //!
-//! Each parameter carries `"nudge": null`. When #127 lands its ladder on
-//! `ParameterDescriptorV1`, that slot becomes an object and nothing else in this schema moves --
-//! which is the whole reason it is a declared null rather than an absent key.
+//! Each effect parameter carries `"nudge"`: the object issue #139 D4 reserved as a declared null,
+//! now filled. It is never absent -- a parameter with no ladder still emits `"nudge": null`, so a
+//! consumer reads one shape for every parameter and "this build has no ladder for that parameter"
+//! cannot be confused with "this document predates nudging". Builtin rows keep the null: the
+//! builtin parameter tables are a separate descriptor path and #127 does not reach them.
+//!
+//! The object carries the declared rung *and* the five resolved normalized steps, because the
+//! declared rung alone is not usable without re-implementing the mapping conversion in the
+//! consumer -- which is precisely the second source of truth this file exists to prevent.
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -43,18 +49,20 @@ use miso_engine_builtins::{
 };
 use miso_engine_effect_compiler::launch_native_effect_registry_v1;
 use miso_engine_effect_contract::{
-    AutomationRate, EffectDescriptorV1, ObservationCadenceV1, ObservationChannelsV1,
-    ObservationCostV1, ObservationDescriptorV1, ObservationFoldV1, ObservationKindV1,
-    ParameterChannelPolicy, ParameterDescriptorV1, ParameterDomain, ParameterMapping,
-    ParameterUnit, SmoothingRule,
+    AutomationRate, EffectDescriptorV1, NudgeRatioClassV1, NudgeSizeV1, NudgeStepUnitV1,
+    ObservationCadenceV1, ObservationChannelsV1, ObservationCostV1, ObservationDescriptorV1,
+    ObservationFoldV1, ObservationKindV1, ParameterChannelPolicy, ParameterDescriptorV1,
+    ParameterDomain, ParameterMapping, ParameterUnit, SmoothingRule, resolve_nudge_ladder_v1,
 };
 use miso_engine_host_web::{
-    ABI_VERSION, COMMAND_EFFECT_BYPASS, COMMAND_EFFECT_PARAM, COMMAND_FADER_DB, COMMAND_MATRIX,
-    COMMAND_MUTE, COMMAND_PAN, COMMAND_REASON_BACKPRESSURE, COMMAND_REASON_DOMAIN,
-    COMMAND_REASON_MALFORMED, COMMAND_REASON_NONE, COMMAND_REASON_UNKNOWN_EFFECT,
-    COMMAND_REASON_UNKNOWN_PARAMETER, COMMAND_REASON_UNKNOWN_RACK, COMMAND_REASON_UNKNOWN_TRACK,
-    COMMAND_REASON_UNSUPPORTED_KIND, COMMAND_REASON_WRONG_STATE, COMMAND_RECORD_BYTES,
-    MAXIMUM_COMMAND_RECORDS,
+    ABI_VERSION, COMMAND_EFFECT_BYPASS, COMMAND_EFFECT_PARAM, COMMAND_EFFECT_PARAM_NUDGE,
+    COMMAND_FADER_DB, COMMAND_MATRIX, COMMAND_MUTE, COMMAND_OBSERVE_SUBSCRIBE,
+    COMMAND_OBSERVE_UNSUBSCRIBE, COMMAND_PAN, COMMAND_REASON_BACKPRESSURE, COMMAND_REASON_DOMAIN,
+    COMMAND_REASON_MALFORMED, COMMAND_REASON_NONE, COMMAND_REASON_OBSERVATION_UNBOUND,
+    COMMAND_REASON_UNKNOWN_EFFECT, COMMAND_REASON_UNKNOWN_NUDGE_SIZE,
+    COMMAND_REASON_UNKNOWN_PARAMETER, COMMAND_REASON_UNKNOWN_RACK, COMMAND_REASON_UNKNOWN_TAP,
+    COMMAND_REASON_UNKNOWN_TRACK, COMMAND_REASON_UNNUDGEABLE, COMMAND_REASON_UNSUPPORTED_KIND,
+    COMMAND_REASON_WRONG_STATE, COMMAND_RECORD_BYTES, MAXIMUM_COMMAND_RECORDS, MAXIMUM_NUDGE_COUNT,
 };
 
 /// The emitted file name, shipped beside the Wasm artifact.
@@ -93,6 +101,9 @@ pub fn render() -> String {
     out.push_str(&format!(
         "  \"maximumCommandRecords\": {MAXIMUM_COMMAND_RECORDS},\n"
     ));
+    out.push_str(&format!(
+        "  \"maximumNudgeCount\": {MAXIMUM_NUDGE_COUNT},\n"
+    ));
     out.push_str("  \"commandKinds\": [\n");
     let kinds = [
         (COMMAND_PAN, "pan", true),
@@ -101,6 +112,13 @@ pub fn render() -> String {
         (COMMAND_MUTE, "mute", true),
         (COMMAND_EFFECT_PARAM, "effectParam", true),
         (COMMAND_EFFECT_BYPASS, "effectBypass", true),
+        // Issue #143's two subscription kinds and issue #127's nudge complete the list. Before
+        // #127 the document stopped at six, which meant an app could read a parameter's whole
+        // description here and still have to learn two of the kinds that address it from
+        // somewhere else. The list is the ABI's, so it is all of it.
+        (COMMAND_OBSERVE_SUBSCRIBE, "observeSubscribe", true),
+        (COMMAND_OBSERVE_UNSUBSCRIBE, "observeUnsubscribe", true),
+        (COMMAND_EFFECT_PARAM_NUDGE, "effectParamNudge", true),
     ];
     for (index, (value, name, applied)) in kinds.iter().enumerate() {
         out.push_str(&format!(
@@ -121,6 +139,10 @@ pub fn render() -> String {
         (COMMAND_REASON_UNSUPPORTED_KIND, "unsupportedKind"),
         (COMMAND_REASON_BACKPRESSURE, "backpressure"),
         (COMMAND_REASON_WRONG_STATE, "wrongState"),
+        (COMMAND_REASON_UNKNOWN_TAP, "unknownTap"),
+        (COMMAND_REASON_OBSERVATION_UNBOUND, "observationUnbound"),
+        (COMMAND_REASON_UNKNOWN_NUDGE_SIZE, "unknownNudgeSize"),
+        (COMMAND_REASON_UNNUDGEABLE, "unnudgeable"),
     ];
     for (index, (value, name)) in reasons.iter().enumerate() {
         out.push_str(&format!(
@@ -175,6 +197,48 @@ pub fn render() -> String {
             ));
         }
         out.push_str(&format!("]{}\n", comma(index, vocabularies.len())));
+    }
+    out.push_str("  },\n");
+    // Issue #127: the nudge vocabularies, for the same reason the observation ones are here -- a
+    // consumer resolves a ladder's raw `u32`s from this document and never from its own table.
+    out.push_str("  \"nudgeVocabularies\": {\n");
+    let nudge_vocabularies: [(&str, &[(u32, &str)]); 3] = [
+        (
+            "sizes",
+            &[
+                (NudgeSizeV1::Xs as u32, "xs"),
+                (NudgeSizeV1::Sm as u32, "sm"),
+                (NudgeSizeV1::Md as u32, "md"),
+                (NudgeSizeV1::Lg as u32, "lg"),
+                (NudgeSizeV1::Xl as u32, "xl"),
+            ],
+        ),
+        (
+            "stepUnits",
+            &[
+                (NudgeStepUnitV1::Absolute as u32, "absolute"),
+                (NudgeStepUnitV1::Cents as u32, "cents"),
+                (NudgeStepUnitV1::Percent as u32, "percent"),
+                (NudgeStepUnitV1::Steps as u32, "steps"),
+            ],
+        ),
+        (
+            "ratioClasses",
+            &[
+                (NudgeRatioClassV1::Human as u32, "human"),
+                (NudgeRatioClassV1::Wide as u32, "wide"),
+            ],
+        ),
+    ];
+    for (index, (name, rows)) in nudge_vocabularies.iter().enumerate() {
+        out.push_str(&format!("    \"{name}\": ["));
+        for (row, (value, label)) in rows.iter().enumerate() {
+            out.push_str(&format!(
+                "{{ \"value\": {value}, \"name\": \"{label}\" }}{}",
+                if row + 1 == rows.len() { "" } else { ", " }
+            ));
+        }
+        out.push_str(&format!("]{}\n", comma(index, nudge_vocabularies.len())));
     }
     out.push_str("  },\n");
     out.push_str("  \"builtins\": {\n    \"parameters\": [\n");
@@ -402,9 +466,63 @@ fn effect_parameter(parameter: &ParameterDescriptorV1) -> String {
         ));
     }
     out.push_str("],\n");
-    // Issue #127 slot. A declared null, not an absent key, so adding the ladder is additive.
-    out.push_str("          \"nudge\": null\n        }");
+    // Issue #127: the slot #139 D4 reserved, filled. `null` where the parameter declares no
+    // ladder; never absent.
+    out.push_str(&format!(
+        "          \"nudge\": {}\n        }}",
+        nudge(parameter)
+    ));
     out
+}
+
+fn nudge(parameter: &ParameterDescriptorV1) -> String {
+    // A declared ladder that does not resolve cannot reach the registry: `validate_descriptor_v1`
+    // refuses it. So "declared" and "resolved" are the same condition here, and the emitted object
+    // always carries both halves.
+    let Some((ladder, resolved)) = parameter.nudge.zip(resolve_nudge_ladder_v1(parameter)) else {
+        return "null".to_owned();
+    };
+    let steps = NudgeSizeV1::ALL
+        .into_iter()
+        .map(|size| {
+            format!(
+                "{{ \"size\": {}, \"sizeName\": \"{}\", \"multiplier\": {}, \
+\"stepNormalized\": {} }}",
+                size as u32,
+                size.as_str(),
+                ladder.ratio_class.multiplier(size),
+                number(resolved.step_normalized(size)),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "{{ \"xs\": {}, \"stepUnit\": {}, \"stepUnitName\": \"{}\", \
+\"ratioClass\": {}, \"ratioClassName\": \"{}\", \"xsNormalized\": {}, \
+\"steps\": [{steps}] }}",
+        number(ladder.xs),
+        ladder.step_unit as u32,
+        step_unit_name(ladder.step_unit),
+        ladder.ratio_class as u32,
+        ratio_class_name(ladder.ratio_class),
+        number(resolved.xs_normalized()),
+    )
+}
+
+const fn step_unit_name(unit: NudgeStepUnitV1) -> &'static str {
+    match unit {
+        NudgeStepUnitV1::Absolute => "absolute",
+        NudgeStepUnitV1::Cents => "cents",
+        NudgeStepUnitV1::Percent => "percent",
+        NudgeStepUnitV1::Steps => "steps",
+    }
+}
+
+const fn ratio_class_name(class: NudgeRatioClassV1) -> &'static str {
+    match class {
+        NudgeRatioClassV1::Human => "human",
+        NudgeRatioClassV1::Wide => "wide",
+    }
 }
 
 fn builtin_parameter(parameter: &BuiltinParameterDescriptorV1) -> String {

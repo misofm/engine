@@ -24,7 +24,8 @@ use miso_engine_builtins_compiler::{
 };
 use miso_engine_core::realtime::{PlanarBufferMut, RenderIo, RenderTime};
 use miso_engine_effect_contract::{
-    EffectControlRecordV1, ParameterChannel, ParameterChannelPolicy, parameter_value_valid,
+    EffectControlRecordV1, NudgeSizeV1, ParameterChannel, ParameterChannelPolicy,
+    nudge_parameter_value_v1, parameter_value_valid, resolve_nudge_ladder_v1,
 };
 use miso_engine_host_core::{
     CompiledSession, EffectControlProducerV1, EffectObservationHandleV1, EffectRack,
@@ -131,6 +132,37 @@ pub const COMMAND_EFFECT_BYPASS: u32 = 6;
 pub const COMMAND_OBSERVE_SUBSCRIBE: u32 = 7;
 /// Disarm one declared observation tap of one effect instance (issue #143 D3).
 pub const COMMAND_OBSERVE_UNSUBSCRIBE: u32 = 8;
+/// Move an effect parameter by a named number of nudge rungs (issue #127).
+///
+/// The only *relative* verb in the ABI. Everything else on this path carries an absolute value; a
+/// nudge carries a rung name and a direction, and the engine resolves it against the parameter's
+/// declared ladder and the value it currently holds. That resolution is deliberately here rather
+/// than in the caller: a client that read the value, computed a delta and wrote it back would pay
+/// two round trips and would race every other writer in between, and it would need a second copy
+/// of the ladder arithmetic to get the same answer this one does.
+///
+/// The record reuses the frozen 48-byte shape with a nudge reading of its value words:
+///
+/// | field | meaning |
+/// |---|---|
+/// | `parameter_id` | the parameter to move, exactly as [`COMMAND_EFFECT_PARAM`] |
+/// | `smoothing_samples` | required zero: the effect's declared smoothing governs the move |
+/// | `value0` | the rung, one of the `NudgeSizeV1` values `1..=5` (`xs`..`xl`) |
+/// | `value1` | the direction, exactly `1.0` or `-1.0` |
+/// | `value2` | the rung count, a whole number in `1..=1024` |
+/// | `value3` | required zero |
+///
+/// The ack reports the resolved absolute value in
+/// [`WebCommandReportV1::resolved_value_bits`], so the caller's model of the parameter stays in
+/// step without a read-back.
+pub const COMMAND_EFFECT_PARAM_NUDGE: u32 = 9;
+
+/// The largest rung count one nudge record may carry.
+///
+/// A nudge is a gesture, not a sweep: an agent that wants the endpoint asks for the endpoint. The
+/// cap keeps a mistyped count from being silently absorbed by the domain clamp, and it keeps the
+/// resolved arithmetic far from any range where a rung index could lose precision.
+pub const MAXIMUM_NUDGE_COUNT: u32 = 1_024;
 
 /// The submission was admitted whole.
 pub const COMMAND_REASON_NONE: u32 = 0;
@@ -173,6 +205,18 @@ pub const COMMAND_REASON_UNKNOWN_TAP: u32 = 10;
 /// is there, the tap is declared, and the plan holds no lane to arm because the host asked for
 /// none. A caller fixes it by preparing with `console_observation_taps` set, not by retrying.
 pub const COMMAND_REASON_OBSERVATION_UNBOUND: u32 = 11;
+/// `value0` does not name one of the five nudge rungs (issue #127).
+///
+/// Deliberately **not** `MALFORMED`: the record's shape is right and the address is right, and the
+/// caller used a rung name this ABI does not have. Refusing it by name is what stops an unknown
+/// size from being rounded to a neighbouring rung somewhere downstream.
+pub const COMMAND_REASON_UNKNOWN_NUDGE_SIZE: u32 = 12;
+/// The addressed parameter declares no nudge ladder, so it has no named rungs to move by.
+///
+/// A boolean parameter has nothing between its two values and an exponential mapping has no
+/// constant-unit step; both are permanently in this class, and the parameter-metadata JSON marks
+/// every one of them with a `null` `nudge` slot so a caller never has to discover it at runtime.
+pub const COMMAND_REASON_UNNUDGEABLE: u32 = 13;
 
 /// The longest main-thread stall the default source ring hides without an underrun.
 ///
@@ -229,8 +273,23 @@ pub struct WebCommandReportV1 {
     pub admitted: u32,
     /// Absolute sample at which the admitted records take effect.
     pub applied_at_sample: u64,
-    /// Required-zero expansion words.
-    pub reserved: [u64; 2],
+    /// Issue #127: the `f32` bits of the value a nudge resolved to, or `0` for a submission that
+    /// carried none.
+    ///
+    /// A nudge is the one command whose applied value the caller did not send, so it is the one
+    /// command whose ack has to report it. This is the first half of the word #137 reserved --
+    /// carved exactly as issue #143 carved the resource report's -- so every V1 writer that never
+    /// sends a nudge still reports two zeros here and the ack is byte-identical.
+    ///
+    /// A submission carrying several nudges reports the last one, and a `channel = both` nudge on
+    /// a per-lane parameter reports the left lane: the two lanes hold independent values and can
+    /// resolve differently. A batch of one -- the shape an agent actually sends -- always reports
+    /// its own.
+    pub resolved_value_bits: u32,
+    /// The `parameter_id` [`Self::resolved_value_bits`] belongs to, or `0` when there is none.
+    pub resolved_parameter_id: u32,
+    /// Required-zero expansion word.
+    pub reserved: u64,
 }
 
 /// Byte size of [`WebCommandReportV1`].
@@ -597,6 +656,22 @@ struct ReadyOwnership {
     /// Whether each track contributed a gain-reduction reading to the most recent poll. Allocated
     /// at compilation; it is what makes `masterGrDb` absent rather than zero.
     observation_present: Box<[bool]>,
+    /// Issue #127: the live value of every effect parameter of every prepared instance, per lane.
+    ///
+    /// A nudge is relative, so admitting one needs the value the parameter currently holds. The
+    /// render side cannot be asked -- it is the same thread, but reading back through a bounded
+    /// SPSC queue is not a read path and never was -- so the admitting host keeps the mirror
+    /// itself. It can, exactly: it is seeded from the session's own prepared initial values, and
+    /// every value that ever reaches the queue passes through `push`, which is where it is
+    /// updated. That is the same reasoning that puts `observation_armed` here.
+    ///
+    /// Flat, with `effect_parameter_base[slot]` the first entry of that slot and two entries per
+    /// declared parameter -- left then right -- because the two lanes of a per-lane parameter hold
+    /// independent values and a nudge on one must not read the other. A `Shared` parameter writes
+    /// both entries and reads the left one.
+    effect_parameter_values: Box<[f32]>,
+    /// First [`Self::effect_parameter_values`] entry of each effect slot.
+    effect_parameter_base: Box<[u32]>,
     /// Armed-tap bitmask per effect slot, maintained at **admission**.
     ///
     /// A conflating cell holds its last window forever -- that is what makes it wait-free -- so
@@ -666,18 +741,127 @@ impl ReadyOwnership {
         u32::try_from(producer.producer.capacity()).ok()
     }
 
+    /// The two [`Self::effect_parameter_values`] entries of one parameter of one effect slot.
+    ///
+    /// `None` when the slot or the parameter is not one this session prepared, which the admission
+    /// pass has already ruled out by the time anything calls it.
+    fn parameter_value_slots(&self, effect: usize, parameter_index: u32) -> Option<(usize, usize)> {
+        let base = *self.effect_parameter_base.get(effect)? as usize;
+        let left = base.checked_add((parameter_index as usize).checked_mul(2)?)?;
+        let right = left.checked_add(1)?;
+        let limit = self
+            .effect_parameter_base
+            .get(effect + 1)
+            .map_or(self.effect_parameter_values.len(), |next| *next as usize);
+        (right < limit).then_some((left, right))
+    }
+
+    /// The value one addressed lane of one parameter currently holds.
+    ///
+    /// A `Shared` or `Both` record reads the left entry: a shared parameter writes both entries to
+    /// the same value, so the two are the same number, and a per-lane parameter addressed as
+    /// "both" has already been split into one record per lane before it gets here.
+    fn current_parameter_value(
+        &self,
+        effect: usize,
+        parameter_index: u32,
+        channel: ParameterChannel,
+    ) -> Option<f32> {
+        let (left, right) = self.parameter_value_slots(effect, parameter_index)?;
+        let entry = if matches!(channel, ParameterChannel::Right) {
+            right
+        } else {
+            left
+        };
+        self.effect_parameter_values.get(entry).copied()
+    }
+
+    /// Record the value one admitted record set, so the next nudge resolves from it.
+    fn record_parameter_value(
+        &mut self,
+        effect: usize,
+        parameter_index: u32,
+        channel: ParameterChannel,
+        value: f32,
+    ) {
+        let Some((left, right)) = self.parameter_value_slots(effect, parameter_index) else {
+            return;
+        };
+        let entries: &[usize] = match channel {
+            ParameterChannel::Left => &[left],
+            ParameterChannel::Right => &[right],
+            ParameterChannel::Both => &[left, right],
+        };
+        for entry in entries {
+            if let Some(stored) = self.effect_parameter_values.get_mut(*entry) {
+                *stored = value;
+            }
+        }
+    }
+
+    /// Resolve one pending nudge into the absolute record the ordinary parameter path takes.
+    ///
+    /// `None` only for an address this session did not prepare; every other way a nudge can fail
+    /// was refused in the decode pass, against the same descriptor.
+    fn resolve_nudge(
+        &self,
+        effect: usize,
+        parameter_index: u32,
+        channel: ParameterChannel,
+        size: NudgeSizeV1,
+        count: i32,
+    ) -> Option<(u32, f32)> {
+        let descriptor = self.effect_controls.get(effect)?.as_ref()?.descriptor;
+        let parameter = descriptor.parameters.get(parameter_index as usize)?;
+        let current = self.current_parameter_value(effect, parameter_index, channel)?;
+        let resolved = nudge_parameter_value_v1(parameter, current, size, count).ok()?;
+        Some((parameter.id.0, resolved))
+    }
+
     /// Push one admitted record into its destination queue. `Err` only on a full queue, which the
     /// free-room pass has already ruled out.
-    fn push(&mut self, slot: usize, record: AdmittedCommand) -> Result<(), ()> {
+    ///
+    /// Returns the `(parameter_id, resolved value)` of a nudge, so the ack can report the value
+    /// the caller did not send.
+    fn push(&mut self, slot: usize, record: AdmittedCommand) -> Result<Option<(u32, f32)>, ()> {
         let tracks = self.tracks.len();
+        let record = match record {
+            // Issue #127: the one place a relative command becomes an absolute one. Everything
+            // downstream of here -- the queue, the staging lane, the render path -- never learns
+            // that "nudge" exists.
+            AdmittedCommand::Nudge {
+                parameter_index,
+                channel,
+                size,
+                count,
+            } => {
+                let effect = slot - tracks * 2;
+                let (parameter_id, value) = self
+                    .resolve_nudge(effect, parameter_index, channel, size, count)
+                    .ok_or(())?;
+                self.push(
+                    slot,
+                    AdmittedCommand::Effect(EffectControlRecordV1::Parameter {
+                        parameter_index,
+                        channel,
+                        value,
+                    }),
+                )?;
+                return Ok(Some((parameter_id, value)));
+            }
+            other => other,
+        };
         match record {
+            AdmittedCommand::Nudge { .. } => unreachable!("resolved above"),
             AdmittedCommand::Matrix(record) => {
                 let producer = self.controls.get_mut(slot).ok_or(())?;
-                producer.producer.try_push(record).map_err(|_| ())
+                producer.producer.try_push(record).map_err(|_| ())?;
+                Ok(None)
             }
             AdmittedCommand::Fader(record) => {
                 let producer = self.controls.get_mut(slot - tracks).ok_or(())?;
-                producer.fader.try_push(record).map_err(|_| ())
+                producer.fader.try_push(record).map_err(|_| ())?;
+                Ok(None)
             }
             AdmittedCommand::Effect(record) => {
                 let effect = slot - tracks * 2;
@@ -692,13 +876,25 @@ impl ReadyOwnership {
                     let bit = 1_u32 << tap_index;
                     *mask = if armed { *mask | bit } else { *mask & !bit };
                 }
+                // Issue #127: the live-value mirror is maintained here for the same reason the
+                // armed set is -- this is the one function that admits a value, so the mirror
+                // cannot disagree with what the render side was told.
+                if let EffectControlRecordV1::Parameter {
+                    parameter_index,
+                    channel,
+                    value,
+                } = record
+                {
+                    self.record_parameter_value(effect, parameter_index, channel, value);
+                }
                 let producer = self
                     .effect_controls
                     .get_mut(effect)
                     .ok_or(())?
                     .as_mut()
                     .ok_or(())?;
-                producer.producer.try_push(record).map_err(|_| ())
+                producer.producer.try_push(record).map_err(|_| ())?;
+                Ok(None)
             }
         }
     }
@@ -713,6 +909,19 @@ enum AdmittedCommand {
     Fader(TrackFaderRecordV1),
     /// One effect instance's channel (#140 A).
     Effect(EffectControlRecordV1),
+    /// Issue #127: a validated but still *unresolved* nudge.
+    ///
+    /// It stays relative until the push pass on purpose. Resolution reads the value the parameter
+    /// currently holds, and the admission transaction is all-or-nothing, so resolving in the
+    /// decode pass would either read a value a later refusal was going to undo, or make two
+    /// nudges in one batch both resolve from the same starting point. Pushing is the moment the
+    /// batch is known to be admitted, so it is the moment the value is real.
+    Nudge {
+        parameter_index: u32,
+        channel: ParameterChannel,
+        size: NudgeSizeV1,
+        count: i32,
+    },
 }
 
 /// Safe ownership object backing one future AudioWorklet Wasm handle.
@@ -1182,8 +1391,13 @@ impl AudioWorkletEngineHost {
             return self.finish_commands(RESULT_INVALID_ARGUMENT, COMMAND_REASON_MALFORMED, 0, 0);
         };
         match admit_commands(ready, bytes, count as usize) {
-            Ok(()) => {
+            Ok(resolved) => {
                 self.command_report.applied_at_sample = applied_at_sample;
+                // Issue #127: the resolved value is reported only when the submission carried a
+                // nudge, so an ack for any other kind is byte-identical to the pre-#127 ack.
+                let (parameter_id, value) = resolved.unwrap_or((0, 0.0));
+                self.command_report.resolved_parameter_id = parameter_id;
+                self.command_report.resolved_value_bits = value.to_bits();
                 self.finish_commands(RESULT_OK, COMMAND_REASON_NONE, 0, count)
             }
             Err(CommandRejection {
@@ -1347,6 +1561,10 @@ impl AudioWorkletEngineHost {
         self.command_report.admitted = admitted;
         if admitted == 0 {
             self.command_report.applied_at_sample = self.status.next_absolute_sample;
+            // A refused submission resolved nothing, and must not leave an earlier ack's answer
+            // standing where a caller would read it as this one's.
+            self.command_report.resolved_parameter_id = 0;
+            self.command_report.resolved_value_bits = 0;
         }
         self.record(result)
     }
@@ -1480,6 +1698,7 @@ impl CommandRecord {
                 | COMMAND_EFFECT_BYPASS
                 | COMMAND_OBSERVE_SUBSCRIBE
                 | COMMAND_OBSERVE_UNSUBSCRIBE
+                | COMMAND_EFFECT_PARAM_NUDGE
         ) {
             return Err(COMMAND_REASON_MALFORMED);
         }
@@ -1634,6 +1853,99 @@ impl CommandRecord {
         }))
     }
 
+    /// Validate one nudge record and lower it into one pending nudge per addressed lane.
+    ///
+    /// Everything checkable without the parameter's current value is checked here: the record's
+    /// shape, the address, whether the parameter can be written at all, whether it declares a
+    /// ladder, and whether the rung and the count are ones this ABI has. What is left for the push
+    /// pass is the arithmetic, which is total once those hold.
+    fn into_nudge_records(
+        self,
+        descriptor: &'static miso_engine_effect_contract::EffectDescriptorV1,
+        out: &mut [AdmittedCommand; 2],
+    ) -> Result<usize, u32> {
+        if self.channel > 2 || self.smoothing_samples != 0 || self.values[3] != 0.0 {
+            return Err(COMMAND_REASON_MALFORMED);
+        }
+        if self.parameter_id == 0 {
+            return Err(COMMAND_REASON_UNKNOWN_PARAMETER);
+        }
+        let Some((parameter_index, parameter)) = descriptor
+            .parameters
+            .iter()
+            .enumerate()
+            .find(|(_, parameter)| parameter.id.0 == self.parameter_id)
+        else {
+            return Err(COMMAND_REASON_UNKNOWN_PARAMETER);
+        };
+        // A parameter with no ladder has no named rungs at all, whatever else is true of it.
+        // Saying that first is what makes the answer specific: "this parameter cannot be nudged"
+        // is a permanent property of the descriptor, while "this session cannot write it" is a
+        // property of the write path, and a caller fixes the two differently.
+        if resolve_nudge_ladder_v1(parameter).is_none() {
+            return Err(COMMAND_REASON_UNNUDGEABLE);
+        }
+        if !parameter.automatable
+            || parameter.automation_rate == miso_engine_effect_contract::AutomationRate::None
+        {
+            return Err(COMMAND_REASON_UNSUPPORTED_KIND);
+        }
+        // The rung. An unknown one is refused by name rather than rounded to a neighbour.
+        let size = if self.values[0] > 0.0
+            && self.values[0].fract() == 0.0
+            && self.values[0] <= u32::MAX as f32
+        {
+            NudgeSizeV1::from_raw(self.values[0] as u32)
+        } else {
+            None
+        };
+        let Some(size) = size else {
+            return Err(COMMAND_REASON_UNKNOWN_NUDGE_SIZE);
+        };
+        // The direction is a separate word rather than the sign of the count, so a caller that
+        // means "down" says so and a zero count is a mistake instead of a silent no-op.
+        let direction = match self.values[1] {
+            value if value == 1.0 => 1_i32,
+            value if value == -1.0 => -1,
+            _ => return Err(COMMAND_REASON_MALFORMED),
+        };
+        let count = self.values[2];
+        if count.fract() != 0.0 || count < 1.0 || count > MAXIMUM_NUDGE_COUNT as f32 {
+            return Err(COMMAND_REASON_DOMAIN);
+        }
+        let parameter_index =
+            u32::try_from(parameter_index).map_err(|_| COMMAND_REASON_MALFORMED)?;
+        let count = direction * count as i32;
+        let record = |channel: ParameterChannel| AdmittedCommand::Nudge {
+            parameter_index,
+            channel,
+            size,
+            count,
+        };
+        match (parameter.channel_policy, self.channel) {
+            (ParameterChannelPolicy::Shared, 2) => {
+                out[0] = record(ParameterChannel::Both);
+                Ok(1)
+            }
+            (ParameterChannelPolicy::Shared, _) => Err(COMMAND_REASON_MALFORMED),
+            (ParameterChannelPolicy::PerLane, 0) => {
+                out[0] = record(ParameterChannel::Left);
+                Ok(1)
+            }
+            (ParameterChannelPolicy::PerLane, 1) => {
+                out[0] = record(ParameterChannel::Right);
+                Ok(1)
+            }
+            // The two lanes hold independent values, so a "both" nudge resolves twice and the two
+            // answers may differ. The ack reports the left one.
+            (ParameterChannelPolicy::PerLane, _) => {
+                out[0] = record(ParameterChannel::Left);
+                out[1] = record(ParameterChannel::Right);
+                Ok(2)
+            }
+        }
+    }
+
     fn into_effect_records(
         self,
         descriptor: &'static miso_engine_effect_contract::EffectDescriptorV1,
@@ -1737,7 +2049,7 @@ fn admit_commands(
     ready: &mut ReadyOwnership,
     bytes: &[u8],
     count: usize,
-) -> Result<(), CommandRejection> {
+) -> Result<Option<(u32, f32)>, CommandRejection> {
     let record_bytes = COMMAND_RECORD_BYTES as usize;
     let track_count = ready.tracks.len();
     ready.command_wanted.fill(0);
@@ -1745,9 +2057,11 @@ fn admit_commands(
         result: match reason {
             // `ObservationUnbound` is "this preparation cannot deliver it", which is exactly what
             // `RESULT_UNSUPPORTED` means; `UnknownTap` is a bad address, like every other unknown.
-            COMMAND_REASON_UNSUPPORTED_KIND | COMMAND_REASON_OBSERVATION_UNBOUND => {
-                RESULT_UNSUPPORTED
-            }
+            // `Unnudgeable` joins them: the address is right and the verb is right, and this
+            // parameter has no ladder for the verb to use -- which is what `UNSUPPORTED` means.
+            COMMAND_REASON_UNSUPPORTED_KIND
+            | COMMAND_REASON_OBSERVATION_UNBOUND
+            | COMMAND_REASON_UNNUDGEABLE => RESULT_UNSUPPORTED,
             COMMAND_REASON_BACKPRESSURE => RESULT_BACKPRESSURE,
             _ => RESULT_INVALID_ARGUMENT,
         },
@@ -1780,7 +2094,8 @@ fn admit_commands(
             COMMAND_EFFECT_PARAM
             | COMMAND_EFFECT_BYPASS
             | COMMAND_OBSERVE_SUBSCRIBE
-            | COMMAND_OBSERVE_UNSUBSCRIBE => {
+            | COMMAND_OBSERVE_UNSUBSCRIBE
+            | COMMAND_EFFECT_PARAM_NUDGE => {
                 if command.rack > 2 {
                     return Err(refuse(COMMAND_REASON_UNKNOWN_RACK, index));
                 }
@@ -1810,6 +2125,10 @@ fn admit_commands(
                         .into_observe_record(producer.descriptor, observed)
                         .map_err(|reason| refuse(reason, index))?;
                     1
+                } else if command.kind == COMMAND_EFFECT_PARAM_NUDGE {
+                    command
+                        .into_nudge_records(producer.descriptor, &mut staged)
+                        .map_err(|reason| refuse(reason, index))?
                 } else {
                     command
                         .into_effect_records(producer.descriptor, &mut staged)
@@ -1841,19 +2160,26 @@ fn admit_commands(
             return Err(refuse(COMMAND_REASON_BACKPRESSURE, entry));
         }
     }
+    let mut resolved = None;
     for entry in 0..lowered {
         let (slot, record) = ready.command_decoded[entry];
         let slot = slot as usize;
-        if ready.push(slot, record).is_err() {
-            return Err(CommandRejection {
-                result: RESULT_INTERNAL,
-                reason: COMMAND_REASON_BACKPRESSURE,
-                index: entry as u32,
-            });
+        match ready.push(slot, record) {
+            // The last nudge of the batch is the one the ack reports; a batch of one -- the shape
+            // an agent actually sends -- always reports its own.
+            Ok(Some(answer)) => resolved = Some(answer),
+            Ok(None) => {}
+            Err(()) => {
+                return Err(CommandRejection {
+                    result: RESULT_INTERNAL,
+                    reason: COMMAND_REASON_BACKPRESSURE,
+                    index: entry as u32,
+                });
+            }
         }
         ready.in_flight[slot] += 1;
     }
-    Ok(())
+    Ok(resolved)
 }
 
 /// One published observation magnitude, as the **decibels of reduction** the frame carries.
@@ -1907,7 +2233,9 @@ const fn empty_command_report() -> WebCommandReportV1 {
         rejected_index: 0,
         admitted: 0,
         applied_at_sample: 0,
-        reserved: [0; 2],
+        resolved_value_bits: 0,
+        resolved_parameter_id: 0,
+        reserved: 0,
     }
 }
 
@@ -2310,6 +2638,62 @@ fn compile_ready(
             u32::try_from(track).map_err(|_| fixed_diagnostic("web.console.observation"))?;
         *entry = Some(handle);
     }
+    // Issue #127: the live-value mirror, seeded from the session's own prepared initial values.
+    // Two entries per declared parameter of every prepared instance -- left then right -- laid out
+    // in the same dense `effect_slot` order everything else on this path uses.
+    let mut effect_parameter_base = Vec::new();
+    effect_parameter_base
+        .try_reserve_exact(total_effects as usize + 1)
+        .map_err(|_| fixed_diagnostic("web.resource.allocation"))?;
+    let mut mirror_entries = 0_usize;
+    for entry in &effect_controls {
+        effect_parameter_base.push(
+            u32::try_from(mirror_entries).map_err(|_| fixed_diagnostic("web.console.effects"))?,
+        );
+        if let Some(producer) = entry {
+            mirror_entries = producer
+                .descriptor
+                .parameters
+                .len()
+                .checked_mul(2)
+                .and_then(|count| mirror_entries.checked_add(count))
+                .ok_or_else(|| fixed_diagnostic("web.console.effects"))?;
+        }
+    }
+    effect_parameter_base
+        .push(u32::try_from(mirror_entries).map_err(|_| fixed_diagnostic("web.console.effects"))?);
+    let mut effect_parameter_values = Vec::new();
+    effect_parameter_values
+        .try_reserve_exact(mirror_entries)
+        .map_err(|_| fixed_diagnostic("web.resource.allocation"))?;
+    effect_parameter_values.resize(mirror_entries, 0.0_f32);
+    for (slot, entry) in effect_controls.iter().enumerate() {
+        let Some(producer) = entry else {
+            continue;
+        };
+        let base = effect_parameter_base[slot] as usize;
+        // Start from the descriptor defaults, then apply the session's prepared values over them,
+        // so a parameter the session did not name is still the value the effect actually holds.
+        for (index, parameter) in producer.descriptor.parameters.iter().enumerate() {
+            effect_parameter_values[base + index * 2] = parameter.default_value;
+            effect_parameter_values[base + index * 2 + 1] = parameter.default_value;
+        }
+        for initial in producer.initial_values.iter() {
+            let index = initial.parameter_index as usize;
+            if index >= producer.descriptor.parameters.len() {
+                return Err(fixed_diagnostic("web.console.effects"));
+            }
+            let (left, right) = (base + index * 2, base + index * 2 + 1);
+            match initial.channel {
+                ParameterChannel::Left => effect_parameter_values[left] = initial.value,
+                ParameterChannel::Right => effect_parameter_values[right] = initial.value,
+                ParameterChannel::Both => {
+                    effect_parameter_values[left] = initial.value;
+                    effect_parameter_values[right] = initial.value;
+                }
+            }
+        }
+    }
     let mut meter_header = empty_meter_header();
     meter_header.track_count =
         u32::try_from(track_count).map_err(|_| fixed_diagnostic("web.console.effects"))?;
@@ -2323,6 +2707,8 @@ fn compile_ready(
         observation_tracks: observation_tracks.into_boxed_slice(),
         observation_present: observation_present.into_boxed_slice(),
         observation_armed: boxed_zero_u32(total_effects as usize)?,
+        effect_parameter_values: effect_parameter_values.into_boxed_slice(),
+        effect_parameter_base: effect_parameter_base.into_boxed_slice(),
         master_track: handles.master_track,
         meter_header,
         effect_base: effect_base.into_boxed_slice(),

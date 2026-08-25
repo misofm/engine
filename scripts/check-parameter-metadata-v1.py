@@ -29,10 +29,14 @@ RATES = {1: "sample", 2: "block", 3: "none"}
 POLICIES = {1: "shared", 2: "perLane"}
 SMOOTHINGS = {1: "none", 2: "linear", 3: "onePole99"}
 
-COMMAND_KINDS = ["pan", "matrix", "faderDb", "mute", "effectParam", "effectBypass"]
+COMMAND_KINDS = [
+    "pan", "matrix", "faderDb", "mute", "effectParam", "effectBypass", "observeSubscribe",
+    "observeUnsubscribe", "effectParamNudge",
+]
 COMMAND_REASONS = [
     "none", "malformed", "unknownTrack", "unknownRack", "unknownEffect", "unknownParameter",
-    "domain", "unsupportedKind", "backpressure", "wrongState",
+    "domain", "unsupportedKind", "backpressure", "wrongState", "unknownTap", "observationUnbound",
+    "unknownNudgeSize", "unnudgeable",
 ]
 BUILTIN_UPDATE_RATES = {"preparedOnly", "blockTarget"}
 BUILTIN_SCOPES = {"perLane", "matrixShared"}
@@ -65,6 +69,31 @@ OBSERVATION_VOCABULARIES = {
     "channels": OBSERVATION_CHANNELS,
 }
 
+# Issue #127. The rung names are the vocabulary an agent types, so they are checked by name and in
+# order, not merely by count.
+NUDGE_SIZES = {1: "xs", 2: "sm", 3: "md", 4: "lg", 5: "xl"}
+NUDGE_STEP_UNITS = {1: "absolute", 2: "cents", 3: "percent", 4: "steps"}
+NUDGE_RATIO_CLASSES = {1: "human", 2: "wide"}
+NUDGE_VOCABULARIES = {
+    "sizes": NUDGE_SIZES,
+    "stepUnits": NUDGE_STEP_UNITS,
+    "ratioClasses": NUDGE_RATIO_CLASSES,
+}
+NUDGE_MULTIPLIERS = {"human": [1, 3, 5, 10, 30], "wide": [1, 4, 16, 64, 256]}
+NUDGE_KEYS = {
+    "xs", "stepUnit", "stepUnitName", "ratioClass", "ratioClassName", "xsNormalized", "steps",
+}
+NUDGE_STEP_KEYS = {"size", "sizeName", "multiplier", "stepNormalized"}
+# Which mapping each step unit is legal on: an absolute step has no constant-unit meaning on a
+# logarithmic mapping, a ratio step has none on a linear one, and whole choices exist only on a
+# stepped enumeration.
+NUDGE_STEP_UNIT_MAPPINGS = {
+    "absolute": "linear",
+    "cents": "logarithmic",
+    "percent": "logarithmic",
+    "steps": "stepped",
+}
+
 BUILTIN_PARAMETER_KEYS = {
     "id", "name", "scope", "mapping", "domain", "minimum", "maximum", "maximumByRate", "default",
     "updateRate", "smoothing", "reset", "disabledValue", "liveUpdatable", "nudge",
@@ -89,23 +118,25 @@ def finite(value: object, message: str) -> float:
 def validate(document: dict) -> None:
     require(set(document) == {
         "schema", "abiVersion", "commandRecordBytes", "maximumCommandRecords", "commandKinds",
-        "commandReasons", "observationVocabularies", "builtins", "effects",
+        "commandReasons", "observationVocabularies", "nudgeVocabularies", "builtins", "effects",
+        "maximumNudgeCount",
     }, "top-level keys")
     require(document["schema"] == SCHEMA, "schema tag")
     require(document["abiVersion"] == ABI_VERSION, "abi version")
     require(document["commandRecordBytes"] == 48, "command record bytes")
     require(document["maximumCommandRecords"] >= 1, "maximum command records")
+    require(document["maximumNudgeCount"] == 1024, "maximum nudge count")
 
     kinds = document["commandKinds"]
     require([kind["name"] for kind in kinds] == COMMAND_KINDS, "command kinds")
-    require([kind["value"] for kind in kinds] == list(range(1, 7)), "command kind values")
+    require([kind["value"] for kind in kinds] == list(range(1, 10)), "command kind values")
     applied = {kind["name"] for kind in kinds if kind["applied"]}
     # Issue #140: every declared kind is applied. Nothing in the ABI is declared-and-refused any
     # more, so a kind that reports `applied: false` is a regression, not a documented gap.
     require(applied == set(COMMAND_KINDS), "applied command kinds")
     reasons = document["commandReasons"]
     require([reason["name"] for reason in reasons] == COMMAND_REASONS, "command reasons")
-    require([reason["value"] for reason in reasons] == list(range(10)), "command reason values")
+    require([reason["value"] for reason in reasons] == list(range(14)), "command reason values")
 
     vocabularies = document["observationVocabularies"]
     require(set(vocabularies) == set(OBSERVATION_VOCABULARIES), "observation vocabulary keys")
@@ -116,6 +147,22 @@ def validate(document: dict) -> None:
             f"observation vocabulary {name}",
         )
         require(len(rows) == len(expected), f"observation vocabulary {name} membership")
+
+    nudge_vocabularies = document["nudgeVocabularies"]
+    require(set(nudge_vocabularies) == set(NUDGE_VOCABULARIES), "nudge vocabulary keys")
+    for name, expected in NUDGE_VOCABULARIES.items():
+        rows = nudge_vocabularies[name]
+        require(
+            {row["value"]: row["name"] for row in rows} == expected,
+            f"nudge vocabulary {name}",
+        )
+        require(len(rows) == len(expected), f"nudge vocabulary {name} membership")
+        # The rungs are ordered smallest to largest; a consumer that renders them in document
+        # order must get the ladder, not an arbitrary permutation of it.
+        require(
+            [row["value"] for row in rows] == sorted(expected),
+            f"nudge vocabulary {name} order",
+        )
 
     builtins = document["builtins"]
     require(set(builtins) == {"parameters"}, "builtin keys")
@@ -230,6 +277,58 @@ def validate_effect_observation(observation: dict) -> None:
     )
 
 
+def validate_effect_nudge(parameter: dict) -> None:
+    """Issue #127: the nudge slot is an object or an explicit null, and never absent."""
+    ladder = parameter["nudge"]
+    if ladder is None:
+        # The two reasons a parameter has no ladder, and nothing else may claim to be one of them.
+        require(
+            parameter["domainName"] == "boolean" or parameter["mappingName"] == "exponential",
+            "only a boolean domain or an exponential mapping declares no ladder",
+        )
+        return
+    require(isinstance(ladder, dict) and set(ladder) == NUDGE_KEYS, "nudge keys")
+    require(
+        NUDGE_STEP_UNITS.get(ladder["stepUnit"]) == ladder["stepUnitName"],
+        "nudge step unit name agrees with value",
+    )
+    require(
+        NUDGE_RATIO_CLASSES.get(ladder["ratioClass"]) == ladder["ratioClassName"],
+        "nudge ratio class name agrees with value",
+    )
+    # The one rule that ties the ladder to the parameter: a step unit is legal on exactly one
+    # mapping, because that is the mapping whose arithmetic gives the unit its meaning.
+    require(
+        NUDGE_STEP_UNIT_MAPPINGS[ladder["stepUnitName"]] == parameter["mappingName"],
+        "nudge step unit follows the mapping",
+    )
+    xs = finite(ladder["xs"], "nudge xs")
+    require(xs > 0.0, "nudge xs is positive")
+    if ladder["stepUnitName"] == "steps":
+        require(xs == int(xs), "a stepped nudge counts whole choices")
+    normalized = finite(ladder["xsNormalized"], "nudge xsNormalized")
+    require(0.0 < normalized <= 1.0, "nudge xsNormalized is inside the domain")
+    steps = ladder["steps"]
+    require(len(steps) == len(NUDGE_SIZES), "a ladder has five rungs")
+    multipliers = NUDGE_MULTIPLIERS[ladder["ratioClassName"]]
+    prior = None
+    for index, step in enumerate(steps, start=1):
+        require(set(step) == NUDGE_STEP_KEYS, "nudge step keys")
+        require(step["size"] == index, "nudge steps ascend by rung")
+        require(NUDGE_SIZES[step["size"]] == step["sizeName"], "nudge size name agrees")
+        require(step["multiplier"] == multipliers[index - 1], "nudge multiplier table")
+        value = finite(step["stepNormalized"], "nudge step")
+        require(value > 0.0, "a nudge step is positive")
+        require(prior is None or prior < value, "nudge steps strictly ascend")
+        prior = value
+    require(steps[0]["stepNormalized"] == normalized, "the xs rung is the xs step")
+    # A single largest rung may not cross a continuous parameter's whole domain. A stepped
+    # parameter is exempt: `lg` and `xl` are ten and thirty choices, they are meant to run off the
+    # end of a short enumeration, and the clamp is exact when they do.
+    if parameter["domainName"] == "continuous":
+        require(steps[-1]["stepNormalized"] <= 1.0, "the xl rung fits the domain")
+
+
 def validate_effect_parameter(parameter: dict) -> None:
     require(set(parameter) == EFFECT_PARAMETER_KEYS, "effect parameter keys")
     require(UNITS.get(parameter["unit"]) == parameter["unitName"], "unit name agrees with value")
@@ -271,7 +370,7 @@ def validate_effect_parameter(parameter: dict) -> None:
         parameter["liveUpdatable"] == parameter["automatable"],
         "effect liveUpdatable follows automatable",
     )
-    require(parameter["nudge"] is None, "effect nudge slot")
+    validate_effect_nudge(parameter)
     default = finite(parameter["default"], "parameter default")
     if parameter["domainName"] == "continuous":
         low = finite(parameter["minimum"], "parameter minimum")
@@ -408,6 +507,74 @@ def self_test() -> int:
         (
             "non-finite default",
             lambda d: d["effects"][0]["parameters"][0].update(default=float("inf")),
+        ),
+        # Issue #127. The nudge slot is the one #139 D4 reserved: it may be an object or an
+        # explicit null, and every rule that ties the ladder to its parameter is proved red here.
+        (
+            "nudge key removed",
+            lambda d: d["effects"][0]["parameters"][0].pop("nudge"),
+        ),
+        (
+            "a nudgeable parameter declares no ladder",
+            lambda d: d["effects"][0]["parameters"][0].update(nudge=None),
+        ),
+        (
+            "nudge step unit name disagrees with value",
+            lambda d: d["effects"][0]["parameters"][0]["nudge"].update(stepUnitName="cents"),
+        ),
+        (
+            "a cents ladder on a linear mapping",
+            lambda d: d["effects"][0]["parameters"][0]["nudge"].update(
+                stepUnit=2, stepUnitName="cents"
+            ),
+        ),
+        (
+            "a zero xs rung",
+            lambda d: d["effects"][0]["parameters"][0]["nudge"].update(xs=0.0),
+        ),
+        (
+            "a normalized xs outside the domain",
+            lambda d: d["effects"][0]["parameters"][0]["nudge"].update(xsNormalized=1.5),
+        ),
+        (
+            "the multiplier table drifts",
+            lambda d: d["effects"][0]["parameters"][0]["nudge"]["steps"][2].update(multiplier=4),
+        ),
+        (
+            "the rungs do not ascend",
+            lambda d: d["effects"][0]["parameters"][0]["nudge"]["steps"].reverse(),
+        ),
+        (
+            "the xs rung disagrees with the xs step",
+            lambda d: d["effects"][0]["parameters"][0]["nudge"]["steps"][0].update(
+                stepNormalized=0.5
+            ),
+        ),
+        (
+            "an xl rung crosses the whole domain",
+            lambda d: d["effects"][0]["parameters"][0]["nudge"]["steps"][4].update(
+                stepNormalized=1.5
+            ),
+        ),
+        (
+            "a ladder is dropped to four rungs",
+            lambda d: d["effects"][0]["parameters"][0]["nudge"]["steps"].pop(),
+        ),
+        (
+            "builtin nudge slot removed",
+            lambda d: d["builtins"]["parameters"][0].pop("nudge"),
+        ),
+        (
+            "nudge vocabulary renamed",
+            lambda d: d["nudgeVocabularies"]["sizes"][0].update(name="xxs"),
+        ),
+        (
+            "nudge vocabulary truncated",
+            lambda d: d["nudgeVocabularies"]["stepUnits"].pop(),
+        ),
+        (
+            "nudge vocabularies removed",
+            lambda d: d.pop("nudgeVocabularies"),
         ),
     ]
     failures = 0

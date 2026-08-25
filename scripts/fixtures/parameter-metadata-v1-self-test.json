@@ -3,13 +3,17 @@
   "abiVersion": 65536,
   "commandRecordBytes": 48,
   "maximumCommandRecords": 256,
+  "maximumNudgeCount": 1024,
   "commandKinds": [
     { "value": 1, "name": "pan", "applied": true },
     { "value": 2, "name": "matrix", "applied": true },
     { "value": 3, "name": "faderDb", "applied": true },
     { "value": 4, "name": "mute", "applied": true },
     { "value": 5, "name": "effectParam", "applied": true },
-    { "value": 6, "name": "effectBypass", "applied": true }
+    { "value": 6, "name": "effectBypass", "applied": true },
+    { "value": 7, "name": "observeSubscribe", "applied": true },
+    { "value": 8, "name": "observeUnsubscribe", "applied": true },
+    { "value": 9, "name": "effectParamNudge", "applied": true }
   ],
   "commandReasons": [
     { "value": 0, "name": "none" },
@@ -21,7 +25,11 @@
     { "value": 6, "name": "domain" },
     { "value": 7, "name": "unsupportedKind" },
     { "value": 8, "name": "backpressure" },
-    { "value": 9, "name": "wrongState" }
+    { "value": 9, "name": "wrongState" },
+    { "value": 10, "name": "unknownTap" },
+    { "value": 11, "name": "observationUnbound" },
+    { "value": 12, "name": "unknownNudgeSize" },
+    { "value": 13, "name": "unnudgeable" }
   ],
   "observationVocabularies": {
     "kinds": [{ "value": 1, "name": "gainReductionDb" }],
@@ -29,6 +37,11 @@
     "cadences": [{ "value": 1, "name": "perBlock" }, { "value": 2, "name": "perWindow" }],
     "folds": [{ "value": 1, "name": "latest" }, { "value": 2, "name": "peakMagnitude" }],
     "channels": [{ "value": 1, "name": "shared" }, { "value": 2, "name": "perLane" }]
+  },
+  "nudgeVocabularies": {
+    "sizes": [{ "value": 1, "name": "xs" }, { "value": 2, "name": "sm" }, { "value": 3, "name": "md" }, { "value": 4, "name": "lg" }, { "value": 5, "name": "xl" }],
+    "stepUnits": [{ "value": 1, "name": "absolute" }, { "value": 2, "name": "cents" }, { "value": 3, "name": "percent" }, { "value": 4, "name": "steps" }],
+    "ratioClasses": [{ "value": 1, "name": "human" }, { "value": 2, "name": "wide" }]
   },
   "builtins": {
     "parameters": [
@@ -64,7 +77,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "nudge": { "xs": 0.5, "stepUnit": 1, "stepUnitName": "absolute", "ratioClass": 1, "ratioClassName": "human", "xsNormalized": 0.00625, "steps": [{ "size": 1, "sizeName": "xs", "multiplier": 1, "stepNormalized": 0.00625 }, { "size": 2, "sizeName": "sm", "multiplier": 3, "stepNormalized": 0.01875 }, { "size": 3, "sizeName": "md", "multiplier": 5, "stepNormalized": 0.03125 }, { "size": 4, "sizeName": "lg", "multiplier": 10, "stepNormalized": 0.0625 }, { "size": 5, "sizeName": "xl", "multiplier": 30, "stepNormalized": 0.1875 }] }
         },
         {
           "id": 2,
@@ -80,7 +93,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "nudge": { "xs": 2.5, "stepUnit": 3, "stepUnitName": "percent", "ratioClass": 1, "ratioClassName": "human", "xsNormalized": 0.008242597, "steps": [{ "size": 1, "sizeName": "xs", "multiplier": 1, "stepNormalized": 0.008242597 }, { "size": 2, "sizeName": "sm", "multiplier": 3, "stepNormalized": 0.024727792 }, { "size": 3, "sizeName": "md", "multiplier": 5, "stepNormalized": 0.041212983 }, { "size": 4, "sizeName": "lg", "multiplier": 10, "stepNormalized": 0.08242597 }, { "size": 5, "sizeName": "xl", "multiplier": 30, "stepNormalized": 0.2472779 }] }
         },
         {
           "id": 3,
@@ -96,7 +109,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "nudge": { "xs": 0.5, "stepUnit": 1, "stepUnitName": "absolute", "ratioClass": 1, "ratioClassName": "human", "xsNormalized": 0.020833334, "steps": [{ "size": 1, "sizeName": "xs", "multiplier": 1, "stepNormalized": 0.020833334 }, { "size": 2, "sizeName": "sm", "multiplier": 3, "stepNormalized": 0.0625 }, { "size": 3, "sizeName": "md", "multiplier": 5, "stepNormalized": 0.10416667 }, { "size": 4, "sizeName": "lg", "multiplier": 10, "stepNormalized": 0.20833334 }, { "size": 5, "sizeName": "xl", "multiplier": 30, "stepNormalized": 0.625 }] }
         },
         {
           "id": 4,
@@ -112,7 +125,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "nudge": { "xs": 5.0, "stepUnit": 3, "stepUnitName": "percent", "ratioClass": 1, "ratioClassName": "human", "xsNormalized": 0.006418996, "steps": [{ "size": 1, "sizeName": "xs", "multiplier": 1, "stepNormalized": 0.006418996 }, { "size": 2, "sizeName": "sm", "multiplier": 3, "stepNormalized": 0.019256989 }, { "size": 3, "sizeName": "md", "multiplier": 5, "stepNormalized": 0.03209498 }, { "size": 4, "sizeName": "lg", "multiplier": 10, "stepNormalized": 0.06418996 }, { "size": 5, "sizeName": "xl", "multiplier": 30, "stepNormalized": 0.19256988 }] }
         },
         {
           "id": 5,
@@ -128,7 +141,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "nudge": { "xs": 5.0, "stepUnit": 3, "stepUnitName": "percent", "ratioClass": 1, "ratioClassName": "human", "xsNormalized": 0.0070630996, "steps": [{ "size": 1, "sizeName": "xs", "multiplier": 1, "stepNormalized": 0.0070630996 }, { "size": 2, "sizeName": "sm", "multiplier": 3, "stepNormalized": 0.021189298 }, { "size": 3, "sizeName": "md", "multiplier": 5, "stepNormalized": 0.0353155 }, { "size": 4, "sizeName": "lg", "multiplier": 10, "stepNormalized": 0.070631 }, { "size": 5, "sizeName": "xl", "multiplier": 30, "stepNormalized": 0.21189299 }] }
         },
         {
           "id": 6,
@@ -144,7 +157,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "nudge": { "xs": 0.5, "stepUnit": 1, "stepUnitName": "absolute", "ratioClass": 1, "ratioClassName": "human", "xsNormalized": 0.010416667, "steps": [{ "size": 1, "sizeName": "xs", "multiplier": 1, "stepNormalized": 0.010416667 }, { "size": 2, "sizeName": "sm", "multiplier": 3, "stepNormalized": 0.03125 }, { "size": 3, "sizeName": "md", "multiplier": 5, "stepNormalized": 0.052083336 }, { "size": 4, "sizeName": "lg", "multiplier": 10, "stepNormalized": 0.10416667 }, { "size": 5, "sizeName": "xl", "multiplier": 30, "stepNormalized": 0.3125 }] }
         },
         {
           "id": 7,
@@ -160,7 +173,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "nudge": { "xs": 0.01, "stepUnit": 1, "stepUnitName": "absolute", "ratioClass": 1, "ratioClassName": "human", "xsNormalized": 0.01, "steps": [{ "size": 1, "sizeName": "xs", "multiplier": 1, "stepNormalized": 0.01 }, { "size": 2, "sizeName": "sm", "multiplier": 3, "stepNormalized": 0.03 }, { "size": 3, "sizeName": "md", "multiplier": 5, "stepNormalized": 0.049999997 }, { "size": 4, "sizeName": "lg", "multiplier": 10, "stepNormalized": 0.099999994 }, { "size": 5, "sizeName": "xl", "multiplier": 30, "stepNormalized": 0.29999998 }] }
         },
         {
           "id": 8,
@@ -176,7 +189,7 @@
           "readable": true, "automatable": false,
           "liveUpdatable": false,
           "enumChoices": [],
-          "nudge": null
+          "nudge": { "xs": 0.1, "stepUnit": 1, "stepUnitName": "absolute", "ratioClass": 1, "ratioClassName": "human", "xsNormalized": 0.005, "steps": [{ "size": 1, "sizeName": "xs", "multiplier": 1, "stepNormalized": 0.005 }, { "size": 2, "sizeName": "sm", "multiplier": 3, "stepNormalized": 0.015 }, { "size": 3, "sizeName": "md", "multiplier": 5, "stepNormalized": 0.024999999 }, { "size": 4, "sizeName": "lg", "multiplier": 10, "stepNormalized": 0.049999997 }, { "size": 5, "sizeName": "xl", "multiplier": 30, "stepNormalized": 0.14999999 }] }
         }
       ],
       "observations": [
@@ -202,7 +215,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "nudge": { "xs": 1.0, "stepUnit": 1, "stepUnitName": "absolute", "ratioClass": 1, "ratioClassName": "human", "xsNormalized": 0.00050025014, "steps": [{ "size": 1, "sizeName": "xs", "multiplier": 1, "stepNormalized": 0.00050025014 }, { "size": 2, "sizeName": "sm", "multiplier": 3, "stepNormalized": 0.0015007504 }, { "size": 3, "sizeName": "md", "multiplier": 5, "stepNormalized": 0.0025012507 }, { "size": 4, "sizeName": "lg", "multiplier": 10, "stepNormalized": 0.0050025014 }, { "size": 5, "sizeName": "xl", "multiplier": 30, "stepNormalized": 0.015007504 }] }
         },
         {
           "id": 2,
@@ -218,7 +231,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "nudge": { "xs": 0.01, "stepUnit": 1, "stepUnitName": "absolute", "ratioClass": 1, "ratioClassName": "human", "xsNormalized": 0.0052631577, "steps": [{ "size": 1, "sizeName": "xs", "multiplier": 1, "stepNormalized": 0.0052631577 }, { "size": 2, "sizeName": "sm", "multiplier": 3, "stepNormalized": 0.015789473 }, { "size": 3, "sizeName": "md", "multiplier": 5, "stepNormalized": 0.026315788 }, { "size": 4, "sizeName": "lg", "multiplier": 10, "stepNormalized": 0.052631576 }, { "size": 5, "sizeName": "xl", "multiplier": 30, "stepNormalized": 0.15789473 }] }
         },
         {
           "id": 3,
@@ -234,7 +247,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "nudge": { "xs": 0.01, "stepUnit": 1, "stepUnitName": "absolute", "ratioClass": 1, "ratioClassName": "human", "xsNormalized": 0.010050251, "steps": [{ "size": 1, "sizeName": "xs", "multiplier": 1, "stepNormalized": 0.010050251 }, { "size": 2, "sizeName": "sm", "multiplier": 3, "stepNormalized": 0.030150753 }, { "size": 3, "sizeName": "md", "multiplier": 5, "stepNormalized": 0.050251257 }, { "size": 4, "sizeName": "lg", "multiplier": 10, "stepNormalized": 0.10050251 }, { "size": 5, "sizeName": "xl", "multiplier": 30, "stepNormalized": 0.30150753 }] }
         },
         {
           "id": 4,
@@ -250,7 +263,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "nudge": { "xs": 0.01, "stepUnit": 1, "stepUnitName": "absolute", "ratioClass": 1, "ratioClassName": "human", "xsNormalized": 0.01, "steps": [{ "size": 1, "sizeName": "xs", "multiplier": 1, "stepNormalized": 0.01 }, { "size": 2, "sizeName": "sm", "multiplier": 3, "stepNormalized": 0.03 }, { "size": 3, "sizeName": "md", "multiplier": 5, "stepNormalized": 0.049999997 }, { "size": 4, "sizeName": "lg", "multiplier": 10, "stepNormalized": 0.099999994 }, { "size": 5, "sizeName": "xl", "multiplier": 30, "stepNormalized": 0.29999998 }] }
         },
         {
           "id": 5,
@@ -266,7 +279,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "nudge": { "xs": 0.01, "stepUnit": 1, "stepUnitName": "absolute", "ratioClass": 1, "ratioClassName": "human", "xsNormalized": 0.01, "steps": [{ "size": 1, "sizeName": "xs", "multiplier": 1, "stepNormalized": 0.01 }, { "size": 2, "sizeName": "sm", "multiplier": 3, "stepNormalized": 0.03 }, { "size": 3, "sizeName": "md", "multiplier": 5, "stepNormalized": 0.049999997 }, { "size": 4, "sizeName": "lg", "multiplier": 10, "stepNormalized": 0.099999994 }, { "size": 5, "sizeName": "xl", "multiplier": 30, "stepNormalized": 0.29999998 }] }
         }
       ],
       "observations": []
@@ -290,7 +303,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "nudge": { "xs": 0.5, "stepUnit": 1, "stepUnitName": "absolute", "ratioClass": 1, "ratioClassName": "human", "xsNormalized": 0.00625, "steps": [{ "size": 1, "sizeName": "xs", "multiplier": 1, "stepNormalized": 0.00625 }, { "size": 2, "sizeName": "sm", "multiplier": 3, "stepNormalized": 0.01875 }, { "size": 3, "sizeName": "md", "multiplier": 5, "stepNormalized": 0.03125 }, { "size": 4, "sizeName": "lg", "multiplier": 10, "stepNormalized": 0.0625 }, { "size": 5, "sizeName": "xl", "multiplier": 30, "stepNormalized": 0.1875 }] }
         },
         {
           "id": 2,
@@ -306,7 +319,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "nudge": { "xs": 2.5, "stepUnit": 3, "stepUnitName": "percent", "ratioClass": 1, "ratioClassName": "human", "xsNormalized": 0.008242597, "steps": [{ "size": 1, "sizeName": "xs", "multiplier": 1, "stepNormalized": 0.008242597 }, { "size": 2, "sizeName": "sm", "multiplier": 3, "stepNormalized": 0.024727792 }, { "size": 3, "sizeName": "md", "multiplier": 5, "stepNormalized": 0.041212983 }, { "size": 4, "sizeName": "lg", "multiplier": 10, "stepNormalized": 0.08242597 }, { "size": 5, "sizeName": "xl", "multiplier": 30, "stepNormalized": 0.2472779 }] }
         },
         {
           "id": 3,
@@ -322,7 +335,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "nudge": { "xs": 0.5, "stepUnit": 1, "stepUnitName": "absolute", "ratioClass": 1, "ratioClassName": "human", "xsNormalized": 0.0052083335, "steps": [{ "size": 1, "sizeName": "xs", "multiplier": 1, "stepNormalized": 0.0052083335 }, { "size": 2, "sizeName": "sm", "multiplier": 3, "stepNormalized": 0.015625 }, { "size": 3, "sizeName": "md", "multiplier": 5, "stepNormalized": 0.026041668 }, { "size": 4, "sizeName": "lg", "multiplier": 10, "stepNormalized": 0.052083336 }, { "size": 5, "sizeName": "xl", "multiplier": 30, "stepNormalized": 0.15625 }] }
         },
         {
           "id": 4,
@@ -338,7 +351,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "nudge": { "xs": 0.5, "stepUnit": 1, "stepUnitName": "absolute", "ratioClass": 1, "ratioClassName": "human", "xsNormalized": 0.020833334, "steps": [{ "size": 1, "sizeName": "xs", "multiplier": 1, "stepNormalized": 0.020833334 }, { "size": 2, "sizeName": "sm", "multiplier": 3, "stepNormalized": 0.0625 }, { "size": 3, "sizeName": "md", "multiplier": 5, "stepNormalized": 0.10416667 }, { "size": 4, "sizeName": "lg", "multiplier": 10, "stepNormalized": 0.20833334 }, { "size": 5, "sizeName": "xl", "multiplier": 30, "stepNormalized": 0.625 }] }
         },
         {
           "id": 5,
@@ -354,7 +367,7 @@
           "readable": true, "automatable": false,
           "liveUpdatable": false,
           "enumChoices": [],
-          "nudge": null
+          "nudge": { "xs": 5.0, "stepUnit": 3, "stepUnitName": "percent", "ratioClass": 1, "ratioClassName": "human", "xsNormalized": 0.0078508835, "steps": [{ "size": 1, "sizeName": "xs", "multiplier": 1, "stepNormalized": 0.0078508835 }, { "size": 2, "sizeName": "sm", "multiplier": 3, "stepNormalized": 0.02355265 }, { "size": 3, "sizeName": "md", "multiplier": 5, "stepNormalized": 0.03925442 }, { "size": 4, "sizeName": "lg", "multiplier": 10, "stepNormalized": 0.07850884 }, { "size": 5, "sizeName": "xl", "multiplier": 30, "stepNormalized": 0.2355265 }] }
         },
         {
           "id": 6,
@@ -370,7 +383,7 @@
           "readable": true, "automatable": false,
           "liveUpdatable": false,
           "enumChoices": [],
-          "nudge": null
+          "nudge": { "xs": 1.0, "stepUnit": 1, "stepUnitName": "absolute", "ratioClass": 1, "ratioClassName": "human", "xsNormalized": 0.001, "steps": [{ "size": 1, "sizeName": "xs", "multiplier": 1, "stepNormalized": 0.001 }, { "size": 2, "sizeName": "sm", "multiplier": 3, "stepNormalized": 0.003 }, { "size": 3, "sizeName": "md", "multiplier": 5, "stepNormalized": 0.0050000004 }, { "size": 4, "sizeName": "lg", "multiplier": 10, "stepNormalized": 0.010000001 }, { "size": 5, "sizeName": "xl", "multiplier": 30, "stepNormalized": 0.030000001 }] }
         },
         {
           "id": 7,
@@ -386,7 +399,7 @@
           "readable": true, "automatable": false,
           "liveUpdatable": false,
           "enumChoices": [],
-          "nudge": null
+          "nudge": { "xs": 5.0, "stepUnit": 3, "stepUnitName": "percent", "ratioClass": 1, "ratioClassName": "human", "xsNormalized": 0.008143279, "steps": [{ "size": 1, "sizeName": "xs", "multiplier": 1, "stepNormalized": 0.008143279 }, { "size": 2, "sizeName": "sm", "multiplier": 3, "stepNormalized": 0.024429835 }, { "size": 3, "sizeName": "md", "multiplier": 5, "stepNormalized": 0.040716395 }, { "size": 4, "sizeName": "lg", "multiplier": 10, "stepNormalized": 0.08143279 }, { "size": 5, "sizeName": "xl", "multiplier": 30, "stepNormalized": 0.24429837 }] }
         },
         {
           "id": 8,
@@ -402,7 +415,7 @@
           "readable": true, "automatable": false,
           "liveUpdatable": false,
           "enumChoices": [],
-          "nudge": null
+          "nudge": { "xs": 0.1, "stepUnit": 1, "stepUnitName": "absolute", "ratioClass": 1, "ratioClassName": "human", "xsNormalized": 0.01, "steps": [{ "size": 1, "sizeName": "xs", "multiplier": 1, "stepNormalized": 0.01 }, { "size": 2, "sizeName": "sm", "multiplier": 3, "stepNormalized": 0.03 }, { "size": 3, "sizeName": "md", "multiplier": 5, "stepNormalized": 0.049999997 }, { "size": 4, "sizeName": "lg", "multiplier": 10, "stepNormalized": 0.099999994 }, { "size": 5, "sizeName": "xl", "multiplier": 30, "stepNormalized": 0.29999998 }] }
         }
       ],
       "observations": [
@@ -428,7 +441,7 @@
           "readable": true, "automatable": false,
           "liveUpdatable": false,
           "enumChoices": [],
-          "nudge": null
+          "nudge": { "xs": 20.0, "stepUnit": 2, "stepUnitName": "cents", "ratioClass": 1, "ratioClassName": "human", "xsNormalized": 0.0025085832, "steps": [{ "size": 1, "sizeName": "xs", "multiplier": 1, "stepNormalized": 0.0025085832 }, { "size": 2, "sizeName": "sm", "multiplier": 3, "stepNormalized": 0.0075257495 }, { "size": 3, "sizeName": "md", "multiplier": 5, "stepNormalized": 0.012542916 }, { "size": 4, "sizeName": "lg", "multiplier": 10, "stepNormalized": 0.025085833 }, { "size": 5, "sizeName": "xl", "multiplier": 30, "stepNormalized": 0.075257495 }] }
         },
         {
           "id": 2,
@@ -444,7 +457,7 @@
           "readable": true, "automatable": false,
           "liveUpdatable": false,
           "enumChoices": [],
-          "nudge": null
+          "nudge": { "xs": 0.1, "stepUnit": 1, "stepUnitName": "absolute", "ratioClass": 1, "ratioClassName": "human", "xsNormalized": 0.005, "steps": [{ "size": 1, "sizeName": "xs", "multiplier": 1, "stepNormalized": 0.005 }, { "size": 2, "sizeName": "sm", "multiplier": 3, "stepNormalized": 0.015 }, { "size": 3, "sizeName": "md", "multiplier": 5, "stepNormalized": 0.024999999 }, { "size": 4, "sizeName": "lg", "multiplier": 10, "stepNormalized": 0.049999997 }, { "size": 5, "sizeName": "xl", "multiplier": 30, "stepNormalized": 0.14999999 }] }
         },
         {
           "id": 3,
@@ -460,7 +473,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "nudge": { "xs": 0.5, "stepUnit": 1, "stepUnitName": "absolute", "ratioClass": 1, "ratioClassName": "human", "xsNormalized": 0.00625, "steps": [{ "size": 1, "sizeName": "xs", "multiplier": 1, "stepNormalized": 0.00625 }, { "size": 2, "sizeName": "sm", "multiplier": 3, "stepNormalized": 0.01875 }, { "size": 3, "sizeName": "md", "multiplier": 5, "stepNormalized": 0.03125 }, { "size": 4, "sizeName": "lg", "multiplier": 10, "stepNormalized": 0.0625 }, { "size": 5, "sizeName": "xl", "multiplier": 30, "stepNormalized": 0.1875 }] }
         },
         {
           "id": 4,
@@ -476,7 +489,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "nudge": { "xs": 2.5, "stepUnit": 3, "stepUnitName": "percent", "ratioClass": 1, "ratioClassName": "human", "xsNormalized": 0.008242597, "steps": [{ "size": 1, "sizeName": "xs", "multiplier": 1, "stepNormalized": 0.008242597 }, { "size": 2, "sizeName": "sm", "multiplier": 3, "stepNormalized": 0.024727792 }, { "size": 3, "sizeName": "md", "multiplier": 5, "stepNormalized": 0.041212983 }, { "size": 4, "sizeName": "lg", "multiplier": 10, "stepNormalized": 0.08242597 }, { "size": 5, "sizeName": "xl", "multiplier": 30, "stepNormalized": 0.2472779 }] }
         },
         {
           "id": 5,
@@ -492,7 +505,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "nudge": { "xs": 5.0, "stepUnit": 3, "stepUnitName": "percent", "ratioClass": 1, "ratioClassName": "human", "xsNormalized": 0.006418996, "steps": [{ "size": 1, "sizeName": "xs", "multiplier": 1, "stepNormalized": 0.006418996 }, { "size": 2, "sizeName": "sm", "multiplier": 3, "stepNormalized": 0.019256989 }, { "size": 3, "sizeName": "md", "multiplier": 5, "stepNormalized": 0.03209498 }, { "size": 4, "sizeName": "lg", "multiplier": 10, "stepNormalized": 0.06418996 }, { "size": 5, "sizeName": "xl", "multiplier": 30, "stepNormalized": 0.19256988 }] }
         },
         {
           "id": 6,
@@ -508,7 +521,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "nudge": { "xs": 5.0, "stepUnit": 3, "stepUnitName": "percent", "ratioClass": 1, "ratioClassName": "human", "xsNormalized": 0.0070630996, "steps": [{ "size": 1, "sizeName": "xs", "multiplier": 1, "stepNormalized": 0.0070630996 }, { "size": 2, "sizeName": "sm", "multiplier": 3, "stepNormalized": 0.021189298 }, { "size": 3, "sizeName": "md", "multiplier": 5, "stepNormalized": 0.0353155 }, { "size": 4, "sizeName": "lg", "multiplier": 10, "stepNormalized": 0.070631 }, { "size": 5, "sizeName": "xl", "multiplier": 30, "stepNormalized": 0.21189299 }] }
         },
         {
           "id": 7,
@@ -524,7 +537,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "nudge": { "xs": 0.5, "stepUnit": 1, "stepUnitName": "absolute", "ratioClass": 1, "ratioClassName": "human", "xsNormalized": 0.010416667, "steps": [{ "size": 1, "sizeName": "xs", "multiplier": 1, "stepNormalized": 0.010416667 }, { "size": 2, "sizeName": "sm", "multiplier": 3, "stepNormalized": 0.03125 }, { "size": 3, "sizeName": "md", "multiplier": 5, "stepNormalized": 0.052083336 }, { "size": 4, "sizeName": "lg", "multiplier": 10, "stepNormalized": 0.10416667 }, { "size": 5, "sizeName": "xl", "multiplier": 30, "stepNormalized": 0.3125 }] }
         },
         {
           "id": 8,
@@ -540,7 +553,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "nudge": { "xs": 0.5, "stepUnit": 1, "stepUnitName": "absolute", "ratioClass": 1, "ratioClassName": "human", "xsNormalized": 0.00625, "steps": [{ "size": 1, "sizeName": "xs", "multiplier": 1, "stepNormalized": 0.00625 }, { "size": 2, "sizeName": "sm", "multiplier": 3, "stepNormalized": 0.01875 }, { "size": 3, "sizeName": "md", "multiplier": 5, "stepNormalized": 0.03125 }, { "size": 4, "sizeName": "lg", "multiplier": 10, "stepNormalized": 0.0625 }, { "size": 5, "sizeName": "xl", "multiplier": 30, "stepNormalized": 0.1875 }] }
         },
         {
           "id": 9,
@@ -556,7 +569,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "nudge": { "xs": 2.5, "stepUnit": 3, "stepUnitName": "percent", "ratioClass": 1, "ratioClassName": "human", "xsNormalized": 0.008242597, "steps": [{ "size": 1, "sizeName": "xs", "multiplier": 1, "stepNormalized": 0.008242597 }, { "size": 2, "sizeName": "sm", "multiplier": 3, "stepNormalized": 0.024727792 }, { "size": 3, "sizeName": "md", "multiplier": 5, "stepNormalized": 0.041212983 }, { "size": 4, "sizeName": "lg", "multiplier": 10, "stepNormalized": 0.08242597 }, { "size": 5, "sizeName": "xl", "multiplier": 30, "stepNormalized": 0.2472779 }] }
         },
         {
           "id": 10,
@@ -572,7 +585,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "nudge": { "xs": 5.0, "stepUnit": 3, "stepUnitName": "percent", "ratioClass": 1, "ratioClassName": "human", "xsNormalized": 0.006418996, "steps": [{ "size": 1, "sizeName": "xs", "multiplier": 1, "stepNormalized": 0.006418996 }, { "size": 2, "sizeName": "sm", "multiplier": 3, "stepNormalized": 0.019256989 }, { "size": 3, "sizeName": "md", "multiplier": 5, "stepNormalized": 0.03209498 }, { "size": 4, "sizeName": "lg", "multiplier": 10, "stepNormalized": 0.06418996 }, { "size": 5, "sizeName": "xl", "multiplier": 30, "stepNormalized": 0.19256988 }] }
         },
         {
           "id": 11,
@@ -588,7 +601,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "nudge": { "xs": 5.0, "stepUnit": 3, "stepUnitName": "percent", "ratioClass": 1, "ratioClassName": "human", "xsNormalized": 0.0070630996, "steps": [{ "size": 1, "sizeName": "xs", "multiplier": 1, "stepNormalized": 0.0070630996 }, { "size": 2, "sizeName": "sm", "multiplier": 3, "stepNormalized": 0.021189298 }, { "size": 3, "sizeName": "md", "multiplier": 5, "stepNormalized": 0.0353155 }, { "size": 4, "sizeName": "lg", "multiplier": 10, "stepNormalized": 0.070631 }, { "size": 5, "sizeName": "xl", "multiplier": 30, "stepNormalized": 0.21189299 }] }
         },
         {
           "id": 12,
@@ -604,7 +617,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "nudge": { "xs": 0.5, "stepUnit": 1, "stepUnitName": "absolute", "ratioClass": 1, "ratioClassName": "human", "xsNormalized": 0.010416667, "steps": [{ "size": 1, "sizeName": "xs", "multiplier": 1, "stepNormalized": 0.010416667 }, { "size": 2, "sizeName": "sm", "multiplier": 3, "stepNormalized": 0.03125 }, { "size": 3, "sizeName": "md", "multiplier": 5, "stepNormalized": 0.052083336 }, { "size": 4, "sizeName": "lg", "multiplier": 10, "stepNormalized": 0.10416667 }, { "size": 5, "sizeName": "xl", "multiplier": 30, "stepNormalized": 0.3125 }] }
         }
       ],
       "observations": [
@@ -646,7 +659,7 @@
           "readable": true, "automatable": false,
           "liveUpdatable": false,
           "enumChoices": [{ "value": 1.0, "label": "bell" }, { "value": 2.0, "label": "low-shelf" }, { "value": 3.0, "label": "high-shelf" }, { "value": 4.0, "label": "low-pass" }, { "value": 5.0, "label": "high-pass" }, { "value": 6.0, "label": "notch" }],
-          "nudge": null
+          "nudge": { "xs": 1.0, "stepUnit": 4, "stepUnitName": "steps", "ratioClass": 1, "ratioClassName": "human", "xsNormalized": 0.2, "steps": [{ "size": 1, "sizeName": "xs", "multiplier": 1, "stepNormalized": 0.2 }, { "size": 2, "sizeName": "sm", "multiplier": 3, "stepNormalized": 0.6 }, { "size": 3, "sizeName": "md", "multiplier": 5, "stepNormalized": 1.0 }, { "size": 4, "sizeName": "lg", "multiplier": 10, "stepNormalized": 2.0 }, { "size": 5, "sizeName": "xl", "multiplier": 30, "stepNormalized": 6.0 }] }
         },
         {
           "id": 3,
@@ -662,7 +675,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "nudge": { "xs": 20.0, "stepUnit": 2, "stepUnitName": "cents", "ratioClass": 1, "ratioClassName": "human", "xsNormalized": 0.0015198791, "steps": [{ "size": 1, "sizeName": "xs", "multiplier": 1, "stepNormalized": 0.0015198791 }, { "size": 2, "sizeName": "sm", "multiplier": 3, "stepNormalized": 0.004559637 }, { "size": 3, "sizeName": "md", "multiplier": 5, "stepNormalized": 0.0075993957 }, { "size": 4, "sizeName": "lg", "multiplier": 10, "stepNormalized": 0.015198791 }, { "size": 5, "sizeName": "xl", "multiplier": 30, "stepNormalized": 0.045596372 }] }
         },
         {
           "id": 4,
@@ -678,7 +691,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "nudge": { "xs": 0.5, "stepUnit": 1, "stepUnitName": "absolute", "ratioClass": 1, "ratioClassName": "human", "xsNormalized": 0.010416667, "steps": [{ "size": 1, "sizeName": "xs", "multiplier": 1, "stepNormalized": 0.010416667 }, { "size": 2, "sizeName": "sm", "multiplier": 3, "stepNormalized": 0.03125 }, { "size": 3, "sizeName": "md", "multiplier": 5, "stepNormalized": 0.052083336 }, { "size": 4, "sizeName": "lg", "multiplier": 10, "stepNormalized": 0.10416667 }, { "size": 5, "sizeName": "xl", "multiplier": 30, "stepNormalized": 0.3125 }] }
         },
         {
           "id": 5,
@@ -694,7 +707,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "nudge": { "xs": 2.5, "stepUnit": 3, "stepUnitName": "percent", "ratioClass": 1, "ratioClassName": "human", "xsNormalized": 0.0047550197, "steps": [{ "size": 1, "sizeName": "xs", "multiplier": 1, "stepNormalized": 0.0047550197 }, { "size": 2, "sizeName": "sm", "multiplier": 3, "stepNormalized": 0.014265059 }, { "size": 3, "sizeName": "md", "multiplier": 5, "stepNormalized": 0.023775099 }, { "size": 4, "sizeName": "lg", "multiplier": 10, "stepNormalized": 0.047550198 }, { "size": 5, "sizeName": "xl", "multiplier": 30, "stepNormalized": 0.14265059 }] }
         },
         {
           "id": 6,
@@ -710,7 +723,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "nudge": { "xs": 0.02, "stepUnit": 1, "stepUnitName": "absolute", "ratioClass": 1, "ratioClassName": "human", "xsNormalized": 0.02222222, "steps": [{ "size": 1, "sizeName": "xs", "multiplier": 1, "stepNormalized": 0.02222222 }, { "size": 2, "sizeName": "sm", "multiplier": 3, "stepNormalized": 0.06666666 }, { "size": 3, "sizeName": "md", "multiplier": 5, "stepNormalized": 0.111111104 }, { "size": 4, "sizeName": "lg", "multiplier": 10, "stepNormalized": 0.22222221 }, { "size": 5, "sizeName": "xl", "multiplier": 30, "stepNormalized": 0.6666666 }] }
         },
         {
           "id": 17,
@@ -742,7 +755,7 @@
           "readable": true, "automatable": false,
           "liveUpdatable": false,
           "enumChoices": [{ "value": 1.0, "label": "bell" }, { "value": 2.0, "label": "low-shelf" }, { "value": 3.0, "label": "high-shelf" }, { "value": 4.0, "label": "low-pass" }, { "value": 5.0, "label": "high-pass" }, { "value": 6.0, "label": "notch" }],
-          "nudge": null
+          "nudge": { "xs": 1.0, "stepUnit": 4, "stepUnitName": "steps", "ratioClass": 1, "ratioClassName": "human", "xsNormalized": 0.2, "steps": [{ "size": 1, "sizeName": "xs", "multiplier": 1, "stepNormalized": 0.2 }, { "size": 2, "sizeName": "sm", "multiplier": 3, "stepNormalized": 0.6 }, { "size": 3, "sizeName": "md", "multiplier": 5, "stepNormalized": 1.0 }, { "size": 4, "sizeName": "lg", "multiplier": 10, "stepNormalized": 2.0 }, { "size": 5, "sizeName": "xl", "multiplier": 30, "stepNormalized": 6.0 }] }
         },
         {
           "id": 19,
@@ -758,7 +771,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "nudge": { "xs": 20.0, "stepUnit": 2, "stepUnitName": "cents", "ratioClass": 1, "ratioClassName": "human", "xsNormalized": 0.0015198791, "steps": [{ "size": 1, "sizeName": "xs", "multiplier": 1, "stepNormalized": 0.0015198791 }, { "size": 2, "sizeName": "sm", "multiplier": 3, "stepNormalized": 0.004559637 }, { "size": 3, "sizeName": "md", "multiplier": 5, "stepNormalized": 0.0075993957 }, { "size": 4, "sizeName": "lg", "multiplier": 10, "stepNormalized": 0.015198791 }, { "size": 5, "sizeName": "xl", "multiplier": 30, "stepNormalized": 0.045596372 }] }
         },
         {
           "id": 20,
@@ -774,7 +787,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "nudge": { "xs": 0.5, "stepUnit": 1, "stepUnitName": "absolute", "ratioClass": 1, "ratioClassName": "human", "xsNormalized": 0.010416667, "steps": [{ "size": 1, "sizeName": "xs", "multiplier": 1, "stepNormalized": 0.010416667 }, { "size": 2, "sizeName": "sm", "multiplier": 3, "stepNormalized": 0.03125 }, { "size": 3, "sizeName": "md", "multiplier": 5, "stepNormalized": 0.052083336 }, { "size": 4, "sizeName": "lg", "multiplier": 10, "stepNormalized": 0.10416667 }, { "size": 5, "sizeName": "xl", "multiplier": 30, "stepNormalized": 0.3125 }] }
         },
         {
           "id": 21,
@@ -790,7 +803,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "nudge": { "xs": 2.5, "stepUnit": 3, "stepUnitName": "percent", "ratioClass": 1, "ratioClassName": "human", "xsNormalized": 0.0047550197, "steps": [{ "size": 1, "sizeName": "xs", "multiplier": 1, "stepNormalized": 0.0047550197 }, { "size": 2, "sizeName": "sm", "multiplier": 3, "stepNormalized": 0.014265059 }, { "size": 3, "sizeName": "md", "multiplier": 5, "stepNormalized": 0.023775099 }, { "size": 4, "sizeName": "lg", "multiplier": 10, "stepNormalized": 0.047550198 }, { "size": 5, "sizeName": "xl", "multiplier": 30, "stepNormalized": 0.14265059 }] }
         },
         {
           "id": 22,
@@ -806,7 +819,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "nudge": { "xs": 0.02, "stepUnit": 1, "stepUnitName": "absolute", "ratioClass": 1, "ratioClassName": "human", "xsNormalized": 0.02222222, "steps": [{ "size": 1, "sizeName": "xs", "multiplier": 1, "stepNormalized": 0.02222222 }, { "size": 2, "sizeName": "sm", "multiplier": 3, "stepNormalized": 0.06666666 }, { "size": 3, "sizeName": "md", "multiplier": 5, "stepNormalized": 0.111111104 }, { "size": 4, "sizeName": "lg", "multiplier": 10, "stepNormalized": 0.22222221 }, { "size": 5, "sizeName": "xl", "multiplier": 30, "stepNormalized": 0.6666666 }] }
         },
         {
           "id": 33,
@@ -838,7 +851,7 @@
           "readable": true, "automatable": false,
           "liveUpdatable": false,
           "enumChoices": [{ "value": 1.0, "label": "bell" }, { "value": 2.0, "label": "low-shelf" }, { "value": 3.0, "label": "high-shelf" }, { "value": 4.0, "label": "low-pass" }, { "value": 5.0, "label": "high-pass" }, { "value": 6.0, "label": "notch" }],
-          "nudge": null
+          "nudge": { "xs": 1.0, "stepUnit": 4, "stepUnitName": "steps", "ratioClass": 1, "ratioClassName": "human", "xsNormalized": 0.2, "steps": [{ "size": 1, "sizeName": "xs", "multiplier": 1, "stepNormalized": 0.2 }, { "size": 2, "sizeName": "sm", "multiplier": 3, "stepNormalized": 0.6 }, { "size": 3, "sizeName": "md", "multiplier": 5, "stepNormalized": 1.0 }, { "size": 4, "sizeName": "lg", "multiplier": 10, "stepNormalized": 2.0 }, { "size": 5, "sizeName": "xl", "multiplier": 30, "stepNormalized": 6.0 }] }
         },
         {
           "id": 35,
@@ -854,7 +867,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "nudge": { "xs": 20.0, "stepUnit": 2, "stepUnitName": "cents", "ratioClass": 1, "ratioClassName": "human", "xsNormalized": 0.0015198791, "steps": [{ "size": 1, "sizeName": "xs", "multiplier": 1, "stepNormalized": 0.0015198791 }, { "size": 2, "sizeName": "sm", "multiplier": 3, "stepNormalized": 0.004559637 }, { "size": 3, "sizeName": "md", "multiplier": 5, "stepNormalized": 0.0075993957 }, { "size": 4, "sizeName": "lg", "multiplier": 10, "stepNormalized": 0.015198791 }, { "size": 5, "sizeName": "xl", "multiplier": 30, "stepNormalized": 0.045596372 }] }
         },
         {
           "id": 36,
@@ -870,7 +883,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "nudge": { "xs": 0.5, "stepUnit": 1, "stepUnitName": "absolute", "ratioClass": 1, "ratioClassName": "human", "xsNormalized": 0.010416667, "steps": [{ "size": 1, "sizeName": "xs", "multiplier": 1, "stepNormalized": 0.010416667 }, { "size": 2, "sizeName": "sm", "multiplier": 3, "stepNormalized": 0.03125 }, { "size": 3, "sizeName": "md", "multiplier": 5, "stepNormalized": 0.052083336 }, { "size": 4, "sizeName": "lg", "multiplier": 10, "stepNormalized": 0.10416667 }, { "size": 5, "sizeName": "xl", "multiplier": 30, "stepNormalized": 0.3125 }] }
         },
         {
           "id": 37,
@@ -886,7 +899,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "nudge": { "xs": 2.5, "stepUnit": 3, "stepUnitName": "percent", "ratioClass": 1, "ratioClassName": "human", "xsNormalized": 0.0047550197, "steps": [{ "size": 1, "sizeName": "xs", "multiplier": 1, "stepNormalized": 0.0047550197 }, { "size": 2, "sizeName": "sm", "multiplier": 3, "stepNormalized": 0.014265059 }, { "size": 3, "sizeName": "md", "multiplier": 5, "stepNormalized": 0.023775099 }, { "size": 4, "sizeName": "lg", "multiplier": 10, "stepNormalized": 0.047550198 }, { "size": 5, "sizeName": "xl", "multiplier": 30, "stepNormalized": 0.14265059 }] }
         },
         {
           "id": 38,
@@ -902,7 +915,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "nudge": { "xs": 0.02, "stepUnit": 1, "stepUnitName": "absolute", "ratioClass": 1, "ratioClassName": "human", "xsNormalized": 0.02222222, "steps": [{ "size": 1, "sizeName": "xs", "multiplier": 1, "stepNormalized": 0.02222222 }, { "size": 2, "sizeName": "sm", "multiplier": 3, "stepNormalized": 0.06666666 }, { "size": 3, "sizeName": "md", "multiplier": 5, "stepNormalized": 0.111111104 }, { "size": 4, "sizeName": "lg", "multiplier": 10, "stepNormalized": 0.22222221 }, { "size": 5, "sizeName": "xl", "multiplier": 30, "stepNormalized": 0.6666666 }] }
         },
         {
           "id": 49,
@@ -934,7 +947,7 @@
           "readable": true, "automatable": false,
           "liveUpdatable": false,
           "enumChoices": [{ "value": 1.0, "label": "bell" }, { "value": 2.0, "label": "low-shelf" }, { "value": 3.0, "label": "high-shelf" }, { "value": 4.0, "label": "low-pass" }, { "value": 5.0, "label": "high-pass" }, { "value": 6.0, "label": "notch" }],
-          "nudge": null
+          "nudge": { "xs": 1.0, "stepUnit": 4, "stepUnitName": "steps", "ratioClass": 1, "ratioClassName": "human", "xsNormalized": 0.2, "steps": [{ "size": 1, "sizeName": "xs", "multiplier": 1, "stepNormalized": 0.2 }, { "size": 2, "sizeName": "sm", "multiplier": 3, "stepNormalized": 0.6 }, { "size": 3, "sizeName": "md", "multiplier": 5, "stepNormalized": 1.0 }, { "size": 4, "sizeName": "lg", "multiplier": 10, "stepNormalized": 2.0 }, { "size": 5, "sizeName": "xl", "multiplier": 30, "stepNormalized": 6.0 }] }
         },
         {
           "id": 51,
@@ -950,7 +963,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "nudge": { "xs": 20.0, "stepUnit": 2, "stepUnitName": "cents", "ratioClass": 1, "ratioClassName": "human", "xsNormalized": 0.0015198791, "steps": [{ "size": 1, "sizeName": "xs", "multiplier": 1, "stepNormalized": 0.0015198791 }, { "size": 2, "sizeName": "sm", "multiplier": 3, "stepNormalized": 0.004559637 }, { "size": 3, "sizeName": "md", "multiplier": 5, "stepNormalized": 0.0075993957 }, { "size": 4, "sizeName": "lg", "multiplier": 10, "stepNormalized": 0.015198791 }, { "size": 5, "sizeName": "xl", "multiplier": 30, "stepNormalized": 0.045596372 }] }
         },
         {
           "id": 52,
@@ -966,7 +979,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "nudge": { "xs": 0.5, "stepUnit": 1, "stepUnitName": "absolute", "ratioClass": 1, "ratioClassName": "human", "xsNormalized": 0.010416667, "steps": [{ "size": 1, "sizeName": "xs", "multiplier": 1, "stepNormalized": 0.010416667 }, { "size": 2, "sizeName": "sm", "multiplier": 3, "stepNormalized": 0.03125 }, { "size": 3, "sizeName": "md", "multiplier": 5, "stepNormalized": 0.052083336 }, { "size": 4, "sizeName": "lg", "multiplier": 10, "stepNormalized": 0.10416667 }, { "size": 5, "sizeName": "xl", "multiplier": 30, "stepNormalized": 0.3125 }] }
         },
         {
           "id": 53,
@@ -982,7 +995,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "nudge": { "xs": 2.5, "stepUnit": 3, "stepUnitName": "percent", "ratioClass": 1, "ratioClassName": "human", "xsNormalized": 0.0047550197, "steps": [{ "size": 1, "sizeName": "xs", "multiplier": 1, "stepNormalized": 0.0047550197 }, { "size": 2, "sizeName": "sm", "multiplier": 3, "stepNormalized": 0.014265059 }, { "size": 3, "sizeName": "md", "multiplier": 5, "stepNormalized": 0.023775099 }, { "size": 4, "sizeName": "lg", "multiplier": 10, "stepNormalized": 0.047550198 }, { "size": 5, "sizeName": "xl", "multiplier": 30, "stepNormalized": 0.14265059 }] }
         },
         {
           "id": 54,
@@ -998,7 +1011,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "nudge": { "xs": 0.02, "stepUnit": 1, "stepUnitName": "absolute", "ratioClass": 1, "ratioClassName": "human", "xsNormalized": 0.02222222, "steps": [{ "size": 1, "sizeName": "xs", "multiplier": 1, "stepNormalized": 0.02222222 }, { "size": 2, "sizeName": "sm", "multiplier": 3, "stepNormalized": 0.06666666 }, { "size": 3, "sizeName": "md", "multiplier": 5, "stepNormalized": 0.111111104 }, { "size": 4, "sizeName": "lg", "multiplier": 10, "stepNormalized": 0.22222221 }, { "size": 5, "sizeName": "xl", "multiplier": 30, "stepNormalized": 0.6666666 }] }
         }
       ],
       "observations": []
@@ -1022,7 +1035,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "nudge": { "xs": 0.5, "stepUnit": 1, "stepUnitName": "absolute", "ratioClass": 1, "ratioClassName": "human", "xsNormalized": 0.008333334, "steps": [{ "size": 1, "sizeName": "xs", "multiplier": 1, "stepNormalized": 0.008333334 }, { "size": 2, "sizeName": "sm", "multiplier": 3, "stepNormalized": 0.025000002 }, { "size": 3, "sizeName": "md", "multiplier": 5, "stepNormalized": 0.041666668 }, { "size": 4, "sizeName": "lg", "multiplier": 10, "stepNormalized": 0.083333336 }, { "size": 5, "sizeName": "xl", "multiplier": 30, "stepNormalized": 0.25 }] }
         },
         {
           "id": 2,
@@ -1038,7 +1051,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "nudge": { "xs": 0.5, "stepUnit": 1, "stepUnitName": "absolute", "ratioClass": 1, "ratioClassName": "human", "xsNormalized": 0.010416667, "steps": [{ "size": 1, "sizeName": "xs", "multiplier": 1, "stepNormalized": 0.010416667 }, { "size": 2, "sizeName": "sm", "multiplier": 3, "stepNormalized": 0.03125 }, { "size": 3, "sizeName": "md", "multiplier": 5, "stepNormalized": 0.052083336 }, { "size": 4, "sizeName": "lg", "multiplier": 10, "stepNormalized": 0.10416667 }, { "size": 5, "sizeName": "xl", "multiplier": 30, "stepNormalized": 0.3125 }] }
         },
         {
           "id": 3,
@@ -1054,7 +1067,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "nudge": { "xs": 0.01, "stepUnit": 1, "stepUnitName": "absolute", "ratioClass": 1, "ratioClassName": "human", "xsNormalized": 0.01, "steps": [{ "size": 1, "sizeName": "xs", "multiplier": 1, "stepNormalized": 0.01 }, { "size": 2, "sizeName": "sm", "multiplier": 3, "stepNormalized": 0.03 }, { "size": 3, "sizeName": "md", "multiplier": 5, "stepNormalized": 0.049999997 }, { "size": 4, "sizeName": "lg", "multiplier": 10, "stepNormalized": 0.099999994 }, { "size": 5, "sizeName": "xl", "multiplier": 30, "stepNormalized": 0.29999998 }] }
         }
       ],
       "observations": []
@@ -1078,7 +1091,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "nudge": { "xs": 0.01, "stepUnit": 1, "stepUnitName": "absolute", "ratioClass": 1, "ratioClassName": "human", "xsNormalized": 0.005, "steps": [{ "size": 1, "sizeName": "xs", "multiplier": 1, "stepNormalized": 0.005 }, { "size": 2, "sizeName": "sm", "multiplier": 3, "stepNormalized": 0.015 }, { "size": 3, "sizeName": "md", "multiplier": 5, "stepNormalized": 0.024999999 }, { "size": 4, "sizeName": "lg", "multiplier": 10, "stepNormalized": 0.049999997 }, { "size": 5, "sizeName": "xl", "multiplier": 30, "stepNormalized": 0.14999999 }] }
         },
         {
           "id": 2,
@@ -1094,7 +1107,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "nudge": { "xs": 0.01, "stepUnit": 1, "stepUnitName": "absolute", "ratioClass": 1, "ratioClassName": "human", "xsNormalized": 0.005, "steps": [{ "size": 1, "sizeName": "xs", "multiplier": 1, "stepNormalized": 0.005 }, { "size": 2, "sizeName": "sm", "multiplier": 3, "stepNormalized": 0.015 }, { "size": 3, "sizeName": "md", "multiplier": 5, "stepNormalized": 0.024999999 }, { "size": 4, "sizeName": "lg", "multiplier": 10, "stepNormalized": 0.049999997 }, { "size": 5, "sizeName": "xl", "multiplier": 30, "stepNormalized": 0.14999999 }] }
         },
         {
           "id": 3,
@@ -1110,7 +1123,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "nudge": { "xs": 0.01, "stepUnit": 1, "stepUnitName": "absolute", "ratioClass": 1, "ratioClassName": "human", "xsNormalized": 0.01, "steps": [{ "size": 1, "sizeName": "xs", "multiplier": 1, "stepNormalized": 0.01 }, { "size": 2, "sizeName": "sm", "multiplier": 3, "stepNormalized": 0.03 }, { "size": 3, "sizeName": "md", "multiplier": 5, "stepNormalized": 0.049999997 }, { "size": 4, "sizeName": "lg", "multiplier": 10, "stepNormalized": 0.099999994 }, { "size": 5, "sizeName": "xl", "multiplier": 30, "stepNormalized": 0.29999998 }] }
         }
       ],
       "observations": []
@@ -1134,7 +1147,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "nudge": { "xs": 0.5, "stepUnit": 1, "stepUnitName": "absolute", "ratioClass": 1, "ratioClassName": "human", "xsNormalized": 0.020833334, "steps": [{ "size": 1, "sizeName": "xs", "multiplier": 1, "stepNormalized": 0.020833334 }, { "size": 2, "sizeName": "sm", "multiplier": 3, "stepNormalized": 0.0625 }, { "size": 3, "sizeName": "md", "multiplier": 5, "stepNormalized": 0.10416667 }, { "size": 4, "sizeName": "lg", "multiplier": 10, "stepNormalized": 0.20833334 }, { "size": 5, "sizeName": "xl", "multiplier": 30, "stepNormalized": 0.625 }] }
         },
         {
           "id": 2,
@@ -1150,7 +1163,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "nudge": { "xs": 5.0, "stepUnit": 3, "stepUnitName": "percent", "ratioClass": 1, "ratioClassName": "human", "xsNormalized": 0.009208615, "steps": [{ "size": 1, "sizeName": "xs", "multiplier": 1, "stepNormalized": 0.009208615 }, { "size": 2, "sizeName": "sm", "multiplier": 3, "stepNormalized": 0.027625844 }, { "size": 3, "sizeName": "md", "multiplier": 5, "stepNormalized": 0.046043076 }, { "size": 4, "sizeName": "lg", "multiplier": 10, "stepNormalized": 0.09208615 }, { "size": 5, "sizeName": "xl", "multiplier": 30, "stepNormalized": 0.27625844 }] }
         },
         {
           "id": 3,
@@ -1166,7 +1179,7 @@
           "readable": true, "automatable": false,
           "liveUpdatable": false,
           "enumChoices": [],
-          "nudge": null
+          "nudge": { "xs": 0.1, "stepUnit": 1, "stepUnitName": "absolute", "ratioClass": 1, "ratioClassName": "human", "xsNormalized": 0.01, "steps": [{ "size": 1, "sizeName": "xs", "multiplier": 1, "stepNormalized": 0.01 }, { "size": 2, "sizeName": "sm", "multiplier": 3, "stepNormalized": 0.03 }, { "size": 3, "sizeName": "md", "multiplier": 5, "stepNormalized": 0.049999997 }, { "size": 4, "sizeName": "lg", "multiplier": 10, "stepNormalized": 0.099999994 }, { "size": 5, "sizeName": "xl", "multiplier": 30, "stepNormalized": 0.29999998 }] }
         }
       ],
       "observations": [

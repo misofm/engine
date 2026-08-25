@@ -1165,6 +1165,14 @@ pub struct EffectControlProducerV1 {
     pub descriptor: &'static EffectDescriptorV1,
     /// Bounded producer endpoint; `try_push` returns the record on a full queue.
     pub producer: Producer<EffectControlRecordV1>,
+    /// The exact `(parameter_index, channel, value)` triples this instance was prepared with.
+    ///
+    /// Issue #127: a server-resolved nudge is a *relative* verb, so the admitting host has to know
+    /// what the parameter currently is. It maintains that itself -- every value it admits passes
+    /// through it -- but it has to start from the truth, and the truth at preparation is the
+    /// session's own initial values, not the descriptor's defaults. Handing them over here is what
+    /// makes a nudge on a session-configured parameter resolve from the configured value.
+    pub initial_values: Box<[InitialParameterValue]>,
 }
 
 /// Attach one bounded live-console control channel to every prepared effect of the session.
@@ -1227,6 +1235,7 @@ pub fn attach_effect_console_v1(
             effect_id: entry.effect_id.as_str().into(),
             descriptor: entry.factory.descriptor(),
             producer,
+            initial_values: entry.bank_preparation.initial_values.clone(),
         });
         entry.control = Some(Box::new(EffectControlLane::new(
             consumer,

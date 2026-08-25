@@ -114,9 +114,10 @@ fn frozen_layouts_and_values_are_exact() {
             COMMAND_EFFECT_PARAM,
             COMMAND_EFFECT_BYPASS,
             COMMAND_OBSERVE_SUBSCRIBE,
-            COMMAND_OBSERVE_UNSUBSCRIBE
+            COMMAND_OBSERVE_UNSUBSCRIBE,
+            COMMAND_EFFECT_PARAM_NUDGE
         ],
-        [1, 2, 3, 4, 5, 6, 7, 8]
+        [1, 2, 3, 4, 5, 6, 7, 8, 9]
     );
     assert_eq!(
         [
@@ -131,9 +132,11 @@ fn frozen_layouts_and_values_are_exact() {
             COMMAND_REASON_BACKPRESSURE,
             COMMAND_REASON_WRONG_STATE,
             COMMAND_REASON_UNKNOWN_TAP,
-            COMMAND_REASON_OBSERVATION_UNBOUND
+            COMMAND_REASON_OBSERVATION_UNBOUND,
+            COMMAND_REASON_UNKNOWN_NUDGE_SIZE,
+            COMMAND_REASON_UNNUDGEABLE
         ],
-        [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+        [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
     );
     assert_eq!(offset_of!(WebPrepareConfigV1, struct_size), 0);
     assert_eq!(offset_of!(WebPrepareConfigV1, quantum_frames), 12);
@@ -170,7 +173,13 @@ fn frozen_layouts_and_values_are_exact() {
     assert_eq!(offset_of!(WebCommandReportV1, result), 8);
     assert_eq!(offset_of!(WebCommandReportV1, rejected_index), 16);
     assert_eq!(offset_of!(WebCommandReportV1, applied_at_sample), 24);
-    assert_eq!(offset_of!(WebCommandReportV1, reserved), 32);
+    // Issue #127: the report's first reserved word becomes the resolved value and the parameter it
+    // belongs to; the second stays reserved. The structure is still 48 bytes and every offset that
+    // existed before #127 is where it was, which is what keeps a pre-#127 reader correct.
+    assert_eq!(offset_of!(WebCommandReportV1, resolved_value_bits), 32);
+    assert_eq!(offset_of!(WebCommandReportV1, resolved_parameter_id), 36);
+    assert_eq!(offset_of!(WebCommandReportV1, reserved), 40);
+    assert_eq!(MAXIMUM_NUDGE_COUNT, 1_024);
     assert_eq!(offset_of!(WebStatusV1, state), 8);
     assert_eq!(offset_of!(WebStatusV1, next_absolute_sample), 32);
     assert_eq!(offset_of!(WebStatusV1, reserved), 48);
@@ -2839,3 +2848,462 @@ fn observation_unit_conversion_is_declared_and_clamped() {
         previous = value;
     }
 }
+
+/// Issue #127 E1: a nudge is resolved by the engine, applied through the ordinary parameter path,
+/// and acknowledged with the value the caller did not send.
+///
+/// Band 1's gain is a dB parameter on a linear mapping over `-24 .. 24`, so its `xs` rung is
+/// 0.5 dB and `md` is five of them. The session prepares it at 0 dB, so one `md` up is exactly
+/// 2.5 dB -- a number the caller never wrote and the ack reports.
+///
+/// Red mutation: make `ReadyOwnership::push`'s `Nudge` arm ignore the mirror and resolve from
+/// `parameter.default_value` -> the resolved value is right here only by accident, and the
+/// chaining assertion below fails outright.
+#[test]
+fn a_nudge_command_resolves_against_the_live_value_and_reports_it() {
+    const QUANTUM: u32 = 128;
+    let mut control = effect_console_host(QUANTUM, 8);
+    let mut commanded = effect_console_host(QUANTUM, 8);
+    for block in 0..2_u64 {
+        feed_and_render(&mut control, 1, block, 0.25);
+        feed_and_render(&mut commanded, 1, block, 0.25);
+    }
+    // `md` (3), upward (+1.0), one rung, on band 1's gain (parameter id 4).
+    stage_command(
+        &mut commanded,
+        0,
+        COMMAND_EFFECT_PARAM_NUDGE,
+        1,
+        2,
+        0,
+        0,
+        4,
+        0,
+        [3.0, 1.0, 1.0, 0.0],
+    );
+    assert_eq!(commanded.submit_commands(1), RESULT_OK);
+    let report = *commanded.command_report();
+    assert_eq!(report.reason, COMMAND_REASON_NONE);
+    assert_eq!(report.admitted, 1);
+    assert_eq!(report.applied_at_sample, 2 * u64::from(QUANTUM));
+    assert_eq!(report.resolved_parameter_id, 4);
+    let resolved = f32::from_bits(report.resolved_value_bits);
+    assert!(
+        (resolved - 2.5).abs() < 1e-4,
+        "one md rung of a 0.5 dB ladder from 0 dB is 2.5 dB, got {resolved}"
+    );
+
+    // It reached the render path: the block at `applied_at_sample` differs, in both lanes.
+    feed_and_render(&mut control, 1, 2, 0.25);
+    feed_and_render(&mut commanded, 1, 2, 0.25);
+    let clean = control.output_pcm().expect("control").to_vec();
+    let moved = commanded.output_pcm().expect("commanded").to_vec();
+    assert_ne!(clean[0].to_bits(), moved[0].to_bits());
+    assert_ne!(
+        clean[QUANTUM as usize].to_bits(),
+        moved[QUANTUM as usize].to_bits()
+    );
+
+    // And the next nudge resolves from where the last one left the parameter, not from the
+    // session's initial value: two md rungs down from 2.5 dB is -2.5 dB.
+    stage_command(
+        &mut commanded,
+        0,
+        COMMAND_EFFECT_PARAM_NUDGE,
+        1,
+        2,
+        0,
+        0,
+        4,
+        0,
+        [3.0, -1.0, 2.0, 0.0],
+    );
+    assert_eq!(commanded.submit_commands(1), RESULT_OK);
+    let chained = f32::from_bits(commanded.command_report().resolved_value_bits);
+    assert!(
+        (chained + 2.5).abs() < 1e-4,
+        "a nudge resolves against the live value, got {chained}"
+    );
+
+    // An absolute set moves the same mirror, so a nudge after one resolves from it.
+    stage_command(
+        &mut commanded,
+        0,
+        COMMAND_EFFECT_PARAM,
+        1,
+        2,
+        0,
+        0,
+        4,
+        0,
+        [6.0, 0.0, 0.0, 0.0],
+    );
+    assert_eq!(commanded.submit_commands(1), RESULT_OK);
+    assert_eq!(
+        commanded.command_report().resolved_value_bits,
+        0,
+        "a submission that carried no nudge resolves nothing"
+    );
+    stage_command(
+        &mut commanded,
+        0,
+        COMMAND_EFFECT_PARAM_NUDGE,
+        1,
+        2,
+        0,
+        0,
+        4,
+        0,
+        [1.0, 1.0, 1.0, 0.0],
+    );
+    assert_eq!(commanded.submit_commands(1), RESULT_OK);
+    let after_set = f32::from_bits(commanded.command_report().resolved_value_bits);
+    assert!(
+        (after_set - 6.5).abs() < 1e-4,
+        "one xs rung above an absolute set of 6 dB is 6.5 dB, got {after_set}"
+    );
+}
+
+/// Issue #127 E2: two nudges in one batch chain, and a refused batch moves nothing.
+///
+/// Red mutation: resolve the nudge in the decode pass instead of the push pass -> the second
+/// record of the batch resolves from the same starting value as the first and the sum is 2.5 dB
+/// instead of 5.0.
+#[test]
+fn a_batch_of_nudges_chains_and_a_refused_batch_moves_nothing() {
+    const QUANTUM: u32 = 128;
+    let mut host = effect_console_host(QUANTUM, 8);
+    feed_and_render(&mut host, 1, 0, 0.25);
+    for index in 0..2 {
+        stage_command(
+            &mut host,
+            index,
+            COMMAND_EFFECT_PARAM_NUDGE,
+            1,
+            2,
+            0,
+            0,
+            4,
+            0,
+            [3.0, 1.0, 1.0, 0.0],
+        );
+    }
+    assert_eq!(host.submit_commands(2), RESULT_OK);
+    let chained = f32::from_bits(host.command_report().resolved_value_bits);
+    assert!(
+        (chained - 5.0).abs() < 1e-4,
+        "two md rungs in one batch chain to 5.0 dB, got {chained}"
+    );
+
+    // A batch whose second record is refused admits nothing, and leaves the mirror where it was.
+    stage_command(
+        &mut host,
+        0,
+        COMMAND_EFFECT_PARAM_NUDGE,
+        1,
+        2,
+        0,
+        0,
+        4,
+        0,
+        [3.0, 1.0, 1.0, 0.0],
+    );
+    stage_command(
+        &mut host,
+        1,
+        COMMAND_EFFECT_PARAM_NUDGE,
+        1,
+        2,
+        0,
+        0,
+        4,
+        0,
+        [9.0, 1.0, 1.0, 0.0],
+    );
+    assert_eq!(host.submit_commands(2), RESULT_INVALID_ARGUMENT);
+    let report = *host.command_report();
+    assert_eq!(report.reason, COMMAND_REASON_UNKNOWN_NUDGE_SIZE);
+    assert_eq!(report.rejected_index, 1);
+    assert_eq!(report.admitted, 0);
+    assert_eq!(
+        report.resolved_value_bits, 0,
+        "a refused submission leaves no resolved value standing"
+    );
+    // Prove the mirror did not move: one more md rung still lands on 7.5 dB, not 10.0.
+    feed_and_render(&mut host, 1, 1, 0.25);
+
+    stage_command(
+        &mut host,
+        0,
+        COMMAND_EFFECT_PARAM_NUDGE,
+        1,
+        2,
+        0,
+        0,
+        4,
+        0,
+        [3.0, 1.0, 1.0, 0.0],
+    );
+    assert_eq!(host.submit_commands(1), RESULT_OK);
+    let after = f32::from_bits(host.command_report().resolved_value_bits);
+    assert!(
+        (after - 7.5).abs() < 1e-4,
+        "the refused batch moved nothing, got {after}"
+    );
+}
+
+/// Issue #127 E3: every way a nudge can be wrong is a typed refusal, and none of them is a guess.
+///
+/// Red mutation: drop the ladder check from `into_nudge_records` -> a boolean parameter answers
+/// `UNSUPPORTED_KIND` instead of `UNNUDGEABLE` and the caller cannot tell a missing ladder from a
+/// missing write path.
+#[test]
+fn nudge_misuse_is_typed() {
+    const QUANTUM: u32 = 128;
+    let mut host = effect_console_host(QUANTUM, 8);
+    feed_and_render(&mut host, 1, 0, 0.25);
+    let mut refuse = |parameter_id: u32, values: [f32; 4], smoothing: u32, channel: u8| {
+        stage_command(
+            &mut host,
+            0,
+            COMMAND_EFFECT_PARAM_NUDGE,
+            1,
+            channel,
+            0,
+            0,
+            parameter_id,
+            smoothing,
+            values,
+        );
+        let result = host.submit_commands(1);
+        let report = *host.command_report();
+        assert_eq!(report.admitted, 0);
+        (result, report.reason)
+    };
+    // A rung name the ABI does not have. Refused by name; never rounded to a neighbour.
+    assert_eq!(
+        refuse(4, [0.0, 1.0, 1.0, 0.0], 0, 2),
+        (RESULT_INVALID_ARGUMENT, COMMAND_REASON_UNKNOWN_NUDGE_SIZE)
+    );
+    assert_eq!(
+        refuse(4, [6.0, 1.0, 1.0, 0.0], 0, 2),
+        (RESULT_INVALID_ARGUMENT, COMMAND_REASON_UNKNOWN_NUDGE_SIZE)
+    );
+    assert_eq!(
+        refuse(4, [1.5, 1.0, 1.0, 0.0], 0, 2),
+        (RESULT_INVALID_ARGUMENT, COMMAND_REASON_UNKNOWN_NUDGE_SIZE)
+    );
+    // A boolean parameter has nothing between its two values, so it has no rungs.
+    assert_eq!(
+        refuse(1, [3.0, 1.0, 1.0, 0.0], 0, 2),
+        (RESULT_UNSUPPORTED, COMMAND_REASON_UNNUDGEABLE)
+    );
+    // The band-kind enumeration *has* a ladder -- one choice per rung -- and this session has no
+    // write path for it, which is a different answer and a different fix.
+    assert_eq!(
+        refuse(2, [3.0, 1.0, 1.0, 0.0], 0, 2),
+        (RESULT_UNSUPPORTED, COMMAND_REASON_UNSUPPORTED_KIND)
+    );
+    // A parameter the effect does not declare.
+    assert_eq!(
+        refuse(9_999, [3.0, 1.0, 1.0, 0.0], 0, 2),
+        (RESULT_INVALID_ARGUMENT, COMMAND_REASON_UNKNOWN_PARAMETER)
+    );
+    // A direction that is neither up nor down, and a field set for the wrong kind.
+    assert_eq!(
+        refuse(4, [3.0, 0.0, 1.0, 0.0], 0, 2),
+        (RESULT_INVALID_ARGUMENT, COMMAND_REASON_MALFORMED)
+    );
+    assert_eq!(
+        refuse(4, [3.0, 1.0, 1.0, 1.0], 0, 2),
+        (RESULT_INVALID_ARGUMENT, COMMAND_REASON_MALFORMED)
+    );
+    assert_eq!(
+        refuse(4, [3.0, 1.0, 1.0, 0.0], 64, 2),
+        (RESULT_INVALID_ARGUMENT, COMMAND_REASON_MALFORMED)
+    );
+    // A count that is zero, fractional or past the cap is a domain error: the verb is right and
+    // the number is not one this ABI accepts.
+    assert_eq!(
+        refuse(4, [3.0, 1.0, 0.0, 0.0], 0, 2),
+        (RESULT_INVALID_ARGUMENT, COMMAND_REASON_DOMAIN)
+    );
+    assert_eq!(
+        refuse(4, [3.0, 1.0, 1.5, 0.0], 0, 2),
+        (RESULT_INVALID_ARGUMENT, COMMAND_REASON_DOMAIN)
+    );
+    assert_eq!(
+        refuse(4, [3.0, 1.0, 2_048.0, 0.0], 0, 2),
+        (RESULT_INVALID_ARGUMENT, COMMAND_REASON_DOMAIN)
+    );
+}
+
+/// Issue #127 E4: a nudge clamps at the declared endpoint and stays there.
+///
+/// Red mutation: drop the `clamp(0.0, 1.0)` in `nudge_parameter_value_v1` -> the resolve returns
+/// `None`, the push pass answers `Err(())`, and the submission fails as an internal error instead
+/// of landing on the endpoint.
+#[test]
+fn a_nudge_clamps_at_the_declared_endpoint() {
+    const QUANTUM: u32 = 128;
+    let mut host = effect_console_host(QUANTUM, 8);
+    feed_and_render(&mut host, 1, 0, 0.25);
+    for block in 1..5_u64 {
+        stage_command(
+            &mut host,
+            0,
+            COMMAND_EFFECT_PARAM_NUDGE,
+            1,
+            2,
+            0,
+            0,
+            4,
+            0,
+            [5.0, 1.0, 64.0, 0.0],
+        );
+        assert_eq!(host.submit_commands(1), RESULT_OK);
+        feed_and_render(&mut host, 1, block, 0.25);
+    }
+    let resolved = f32::from_bits(host.command_report().resolved_value_bits);
+    assert_eq!(
+        resolved.to_bits(),
+        24.0_f32.to_bits(),
+        "band gain's declared maximum is reached exactly, not nearly"
+    );
+}
+
+/// Issue #127 E5, class A: a session that never sends a nudge is bit-identical to one compiled
+/// before the kind existed -- same audio, same ack bytes.
+///
+/// The two hosts are the same fixture; one of them additionally has a nudge *refused* on every
+/// block. A refusal admits nothing, so the rendered audio must be identical sample for sample and
+/// the ack's two new words must stay zero throughout.
+///
+/// Red mutation: make `into_nudge_records` push its lowered records before validating the rung ->
+/// the refused submission moves the parameter and the digests diverge.
+#[test]
+fn a_session_that_never_nudges_renders_and_acks_identically() {
+    const QUANTUM: u32 = 128;
+    const BLOCKS: u64 = 6;
+    let mut plain = effect_console_host(QUANTUM, 8);
+    let mut refused = effect_console_host(QUANTUM, 8);
+    let mut plain_pcm = Vec::new();
+    let mut refused_pcm = Vec::new();
+    for block in 0..BLOCKS {
+        // A nudge with an unknown rung: admitted nothing, changed nothing.
+        stage_command(
+            &mut refused,
+            0,
+            COMMAND_EFFECT_PARAM_NUDGE,
+            1,
+            2,
+            0,
+            0,
+            4,
+            0,
+            [7.0, 1.0, 1.0, 0.0],
+        );
+        assert_eq!(refused.submit_commands(1), RESULT_INVALID_ARGUMENT);
+        let report = *refused.command_report();
+        assert_eq!(report.resolved_value_bits, 0);
+        assert_eq!(report.resolved_parameter_id, 0);
+        feed_and_render(&mut plain, 1, block, 0.25);
+        feed_and_render(&mut refused, 1, block, 0.25);
+        plain_pcm.extend_from_slice(plain.output_pcm().expect("plain"));
+        refused_pcm.extend_from_slice(refused.output_pcm().expect("refused"));
+    }
+    assert_eq!(
+        plain_pcm
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>(),
+        refused_pcm
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>(),
+        "a refused nudge is not an input to the render",
+    );
+}
+
+/// Issue #127 E6: the nudge command timeline is deterministic, and its digest is pinned.
+///
+/// A sibling of `native_command_timeline_digest_pins_the_wasm_parity`, kept separate on purpose:
+/// the pre-#127 timeline's digest must not move, because that is the class-A evidence that a
+/// session which never nudges is untouched. This one is the nudge timeline, and it pins the audio
+/// a fixed sequence of nudges produces plus the value each one resolved to.
+///
+/// Red mutation: any change to the multiplier table, to the grid rounding, or to the mirror -> a
+/// different resolved value and a different digest.
+#[test]
+fn native_nudge_timeline_digest_is_pinned() {
+    use sha2::{Digest, Sha256};
+    const QUANTUM: u32 = 128;
+    const BLOCKS: u64 = 8;
+    // (block, rung, direction, count) -- one rung of every size, up and down.
+    const TIMELINE: [(u64, f32, f32, f32); 6] = [
+        (1, 1.0, 1.0, 1.0),
+        (2, 2.0, 1.0, 1.0),
+        (3, 3.0, -1.0, 2.0),
+        (4, 4.0, 1.0, 1.0),
+        (5, 5.0, -1.0, 1.0),
+        (6, 1.0, 1.0, 3.0),
+    ];
+    let mut host = effect_console_host(QUANTUM, 8);
+    let mut digest = Sha256::new();
+    let mut resolved = Vec::new();
+    for block in 0..BLOCKS {
+        if let Some((_, size, direction, count)) =
+            TIMELINE.iter().copied().find(|(at, ..)| *at == block)
+        {
+            stage_command(
+                &mut host,
+                0,
+                COMMAND_EFFECT_PARAM_NUDGE,
+                1,
+                2,
+                0,
+                0,
+                4,
+                0,
+                [size, direction, count, 0.0],
+            );
+            assert_eq!(host.submit_commands(1), RESULT_OK);
+            let report = *host.command_report();
+            assert_eq!(report.applied_at_sample, block * u64::from(QUANTUM));
+            resolved.push(f32::from_bits(report.resolved_value_bits));
+        }
+        feed_and_render(&mut host, 1, block, 0.25);
+        let output = host.output_pcm().expect("output");
+        for channel in 0..2_usize {
+            let plane = &output[channel * QUANTUM as usize..(channel + 1) * QUANTUM as usize];
+            for sample in plane {
+                digest.update(sample.to_bits().to_le_bytes());
+            }
+        }
+    }
+    // The ladder in value space: 0 dB, then +xs, +sm, -2 md, +lg, -xl, +3 xs.
+    assert_eq!(
+        resolved
+            .iter()
+            .map(|value| format!("{value:.3}"))
+            .collect::<Vec<_>>(),
+        ["0.500", "2.000", "-3.000", "2.000", "-13.000", "-11.500"],
+        "the resolved ladder is the {{1, 3, 5, 10, 30}} multipliers over a 0.5 dB xs rung",
+    );
+    let hex = digest
+        .finalize()
+        .iter()
+        .fold(String::with_capacity(64), |mut text, byte| {
+            use core::fmt::Write as _;
+            let _ = write!(&mut text, "{byte:02x}");
+            text
+        });
+    assert_eq!(
+        hex, NUDGE_TIMELINE_PCM_SHA256,
+        "the nudge timeline is deterministic",
+    );
+}
+
+/// The frozen digest of the issue #127 nudge timeline. Regenerating it is a decision, not a fix.
+const NUDGE_TIMELINE_PCM_SHA256: &str =
+    "5993f48e0b099995a9d46ea7da75f16ee10d810500d2a579e008de048009b457";

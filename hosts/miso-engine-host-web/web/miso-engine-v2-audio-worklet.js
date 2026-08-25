@@ -661,6 +661,8 @@ class MisoEngineV2AudioWorkletProcessor extends AudioWorkletProcessor {
         rejectedIndex: 0,
         admitted: 0,
         appliedAtSample: 0n,
+        resolvedValue: 0,
+        resolvedParameterId: 0,
         records: message.records,
       }, [message.records.buffer]);
       return;
@@ -668,9 +670,11 @@ class MisoEngineV2AudioWorkletProcessor extends AudioWorkletProcessor {
     this.commandStaging.set(message.records, 0);
     const result = this.exports.miso_engine_web_v1_command_submit(this.handle, message.count);
     const report = this.commandReport;
+    // Issue #127 carved the report's first reserved word into the resolved value and the parameter
+    // it belongs to, so only the second word is still required-zero.
     if (report.getUint32(0, true) !== COMMAND_REPORT_BYTES
         || report.getUint32(4, true) !== ABI_VERSION
-        || report.getBigUint64(32, true) !== 0n || report.getBigUint64(40, true) !== 0n) {
+        || report.getBigUint64(40, true) !== 0n) {
       this.sticky(RESULT_INTERNAL, message.requestId);
       return;
     }
@@ -682,6 +686,10 @@ class MisoEngineV2AudioWorkletProcessor extends AudioWorkletProcessor {
       rejectedIndex: report.getUint32(16, true),
       admitted: report.getUint32(20, true),
       appliedAtSample: report.getBigUint64(24, true),
+      // Issue #127: the value a nudge resolved to, and the parameter it moved. Both zero for a
+      // submission that carried no nudge, which is every submission a pre-#127 caller sends.
+      resolvedValue: report.getFloat32(32, true),
+      resolvedParameterId: report.getUint32(36, true),
       records: message.records,
     }, [message.records.buffer]);
   }

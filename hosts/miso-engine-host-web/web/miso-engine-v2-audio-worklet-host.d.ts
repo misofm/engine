@@ -190,6 +190,18 @@ export const enum MisoCommandKindV1 {
   ObserveSubscribe = 7,
   /// Disarm one declared observation tap of one effect instance. Applied (issue #143).
   ObserveUnsubscribe = 8,
+  /// Move an effect parameter by a named number of nudge rungs. Applied (issue #127).
+  ///
+  /// The only relative verb in this ABI. `parameterId` addresses the parameter exactly as
+  /// `EffectParam` does; `smoothingSamples` must be `0`; and the value words are read as
+  /// `[size, direction, count, 0]` -- the rung `1..=5` (`xs`, `sm`, `md`, `lg`, `xl`), the
+  /// direction `1` or `-1`, and a whole rung count in `1..=1024`.
+  ///
+  /// The engine resolves the move against the parameter's declared ladder -- the metadata JSON's
+  /// per-parameter `nudge` object -- and the value the parameter currently holds, then applies the
+  /// resolved absolute value through the ordinary parameter path. The ack reports it in
+  /// `resolvedValueBits`, so a caller's model stays in step without a read-back.
+  EffectParamNudge = 9,
 }
 
 /// Frozen typed reasons a live-console submission was refused (issue 137 D1).
@@ -224,6 +236,16 @@ export const enum MisoCommandReasonV1 {
   /// Prepare with `consoleObservationTaps` set. Retrying will not help, which is why this is its
   /// own reason and not `Backpressure`.
   ObservationUnbound = 11,
+  /// The first value word does not name one of the five nudge rungs (issue 127).
+  ///
+  /// Deliberately not `Malformed`: the record's shape and address are right, and the rung name is
+  /// one this ABI does not have. It is refused rather than rounded to a neighbouring rung.
+  UnknownNudgeSize = 12,
+  /// The addressed parameter declares no nudge ladder, so it has no named rungs to move by.
+  ///
+  /// A permanent property of the parameter: the metadata JSON's `nudge` slot is `null` for every
+  /// one of them. Retrying will not help, and neither will a different rung.
+  Unnudgeable = 13,
 }
 
 /// One live-console command. `255` means "not applicable to this kind".
@@ -237,9 +259,11 @@ export interface MisoCommandV1 {
   trackIndex: number;
   effectIndex: number;
   parameterId: number;
-  /// Ramp window in sample updates for `Pan` and `Matrix`; ignored by every other kind.
+  /// Ramp window in sample updates for `Pan` and `Matrix`; ignored by every other kind, and
+  /// required `0` for `EffectParamNudge`.
   smoothingSamples: number;
-  /// `Pan`: `[left, right, 0, 0]`. `Matrix`: `[ll, lr, rl, rr]`. Everything else: `[value, 0, 0, 0]`.
+  /// `Pan`: `[left, right, 0, 0]`. `Matrix`: `[ll, lr, rl, rr]`.
+  /// `EffectParamNudge`: `[size, direction, count, 0]`. Everything else: `[value, 0, 0, 0]`.
   values: [number, number, number, number];
 }
 
@@ -260,6 +284,16 @@ export interface MisoCommandAckV1 {
   readonly admitted: number;
   /// The exact absolute sample the admitted records take effect at.
   readonly appliedAtSample: bigint;
+  /// The absolute value an `EffectParamNudge` resolved to, or `0` when the batch carried none
+  /// (issue 127).
+  ///
+  /// A nudge is the one kind whose applied value the caller did not send, so it is the one kind
+  /// whose ack reports it. A batch carrying several nudges reports the last; a `channel = 2` nudge
+  /// on a per-lane parameter reports the left lane, because the two lanes hold independent values
+  /// and can resolve differently.
+  readonly resolvedValue: number;
+  /// The `parameterId` `resolvedValue` belongs to, or `0` when there is none.
+  readonly resolvedParameterId: number;
   /// The caller's record block, handed straight back.
   readonly records: Uint8Array;
 }
