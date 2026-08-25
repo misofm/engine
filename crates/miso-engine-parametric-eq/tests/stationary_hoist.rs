@@ -14,11 +14,11 @@ mod support;
 
 use miso_engine_effect_contract::{
     BankWidth, EffectBankProcessBlock, NativeEffectFactory, ParameterChannel,
-    PrepareEffectBankRequest, PreparedAutomationSpan,
+    PrepareEffectBankRequest, PreparedAutomationSpan, StatePayloadOutput, StatePayloadSizes,
 };
 use miso_engine_lane::Backend;
 use miso_engine_parametric_eq::ParametricEqFactory;
-use support::{point, request, set_initial, values};
+use support::{COMMON_BYTES, LANE_BYTES, point, request, set_initial, values, word};
 
 const FRAMES: usize = 128;
 const BLOCKS: usize = 4;
@@ -199,4 +199,136 @@ fn a_restated_band_is_indistinguishable_from_no_automation_over_many_blocks() {
         render(&redundant, &offsets, lanes),
         "a restated band diverged from an unautomated one"
     );
+}
+
+/// The cached read must return the **designed** words, not the words currently in force.
+///
+/// Automation points land only at a block's first sample, but `frames` may be as short as one
+/// sample, so a sixty-four-sample word ramp legitimately spans block boundaries — and a
+/// restatement in the next block then takes the cached-design path while `Section::coef` and
+/// `Section::target` disagree. That is the one window where reading the wrong side of the lane
+/// is observable: a readback of the in-flight words would let `start_ramp` see a "stationary"
+/// lane and settle it at mid-ramp coefficients, and the bank would hold the wrong design
+/// forever. The restatement restarts the ramp, so the first blocks differ by design; where the
+/// lane **ends up** must not depend on whether the target was restated on the way there.
+#[test]
+fn a_band_restated_mid_flight_still_settles_at_the_designed_words() {
+    let Some((width, backend)) = native_bank() else {
+        return;
+    };
+    let lanes = width.lanes() as usize;
+    const SHORT_FRAMES: usize = 32;
+    const SHORT_BLOCKS: usize = 8;
+
+    // A real one-ULP retarget; its sixty-four-sample ramp is still in flight one short block in.
+    let retargeted = |track: usize| {
+        let held = band0_left_gain(track);
+        f32::from_bits(held.to_bits() + 1)
+    };
+
+    // Renders SHORT_BLOCKS thirty-two-frame blocks, delivering the retarget on block zero and,
+    // when asked, a restatement of the same value on block one, and returns output bits.
+    let render_short = |restate: bool| -> Vec<([u8; LANE_BYTES], [u8; LANE_BYTES])> {
+        let factory = ParametricEqFactory;
+        let prepared: Vec<_> = (0..lanes).map(configured).collect();
+        let requests: Vec<_> = prepared
+            .iter()
+            .map(|values| request(values, false))
+            .collect();
+        let mut bank = factory
+            .bind_homogeneous_bank(PrepareEffectBankRequest {
+                backend,
+                width,
+                requests: &requests,
+            })
+            .expect("valid bank request")
+            .expect("the native width must bind");
+
+        let source: Vec<f32> = (0..SHORT_FRAMES * lanes)
+            .map(|index| ((index as f32) * 0.017).sin() * 0.4)
+            .collect();
+        let mut left = source.clone();
+        let mut right: Vec<f32> = source.iter().map(|value| -value).collect();
+        let empty_offsets = vec![0_u32; lanes + 1];
+        let span_offsets: Vec<u32> = (0..=lanes).map(|track| track as u32).collect();
+
+        for block in 0..SHORT_BLOCKS {
+            let first_sample = (block * SHORT_FRAMES) as u64;
+            let spans: Vec<PreparedAutomationSpan> = if block == 0 || (block == 1 && restate) {
+                (0..lanes)
+                    .map(|track| point(3, ParameterChannel::Left, first_sample, retargeted(track)))
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let offsets = if spans.is_empty() {
+                &empty_offsets
+            } else {
+                &span_offsets
+            };
+            bank.process_bank(
+                EffectBankProcessBlock::new(
+                    &mut left,
+                    &mut right,
+                    None,
+                    SHORT_FRAMES as u32,
+                    width,
+                    first_sample,
+                    &spans,
+                    offsets,
+                    128,
+                )
+                .expect("bank block"),
+            );
+        }
+        (0..lanes)
+            .map(|track| {
+                let mut common = [0_u8; COMMON_BYTES];
+                let mut lane_left = [0_u8; LANE_BYTES];
+                let mut lane_right = [0_u8; LANE_BYTES];
+                bank.snapshot_track_state_payload(
+                    track as u32,
+                    StatePayloadOutput::new(
+                        &mut common,
+                        &mut lane_left,
+                        &mut lane_right,
+                        StatePayloadSizes {
+                            common_bytes: COMMON_BYTES as u32,
+                            left_bytes: LANE_BYTES as u32,
+                            right_bytes: LANE_BYTES as u32,
+                        },
+                    )
+                    .expect("state output"),
+                )
+                .expect("snapshot");
+                (lane_left, lane_right)
+            })
+            .collect()
+    };
+
+    // The integrators are legitimately path-dependent (the restatement restarts the ramp), so
+    // the comparison is the rest of the settled state: coefficients, steps, remaining, targets.
+    // A readback of in-flight words would settle the restated arm's coefficients at mid-ramp
+    // values, and they would stay there.
+    const WORDS_PER_BAND: usize = 19;
+    let once = render_short(false);
+    let restated = render_short(true);
+    for track in 0..lanes {
+        for (label, arm_once, arm_restated) in [
+            ("left", &once[track].0, &restated[track].0),
+            ("right", &once[track].1, &restated[track].1),
+        ] {
+            for band in 0..LANE_BYTES / 4 / WORDS_PER_BAND {
+                let base = band * WORDS_PER_BAND;
+                for index in 2..WORDS_PER_BAND {
+                    assert_eq!(
+                        word(arm_once, base + index),
+                        word(arm_restated, base + index),
+                        "track {track} {label} band {band} word {index}: \
+                         a mid-flight restatement changed where the lane settled"
+                    );
+                }
+            }
+        }
+    }
 }
