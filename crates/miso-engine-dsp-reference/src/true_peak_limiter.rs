@@ -168,18 +168,6 @@ impl ReferenceRamp {
         }
     }
 
-    fn set_target(&mut self, target: f64, samples: u32) {
-        self.target = target;
-        if samples == 0 {
-            self.current = target;
-            self.step = 0.0;
-            self.remaining = 0;
-            return;
-        }
-        self.step = (target - self.current) / f64::from(samples);
-        self.remaining = samples;
-    }
-
     fn advance(&mut self) -> f64 {
         match self.remaining {
             0 => {}
@@ -400,22 +388,6 @@ impl ReferenceTruePeakLimiter {
     #[must_use]
     pub fn gain(&self) -> f64 {
         1.0 - self.reduction
-    }
-
-    /// Schedules a 64-update linear ramp of the *linear* limit toward `ceiling_db`.
-    pub fn set_ceiling_db(&mut self, ceiling_db: f64) {
-        self.parameters.ceiling_db = ceiling_db;
-        self.limit
-            .set_target(reference_true_peak_limit(ceiling_db), 64);
-    }
-
-    /// Schedules a 64-update linear ramp of the release coefficient toward `release_ms`.
-    pub fn set_release_ms(&mut self, release_ms: f64) {
-        self.parameters.release_ms = release_ms;
-        self.release.set_target(
-            reference_release_coefficient(release_ms, self.sample_rate_hz),
-            64,
-        );
     }
 
     /// Clears every runtime word to the `FullToDefaults` state.

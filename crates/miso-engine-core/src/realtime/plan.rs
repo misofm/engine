@@ -39,7 +39,12 @@ pub struct PrepareRenderPlan<'a> {
     /// Internal planar scratch buffers allocated during preparation.
     pub scratch: &'a [super::PlanarBufferSpec],
 }
-/// Immutable topology/schema placeholder; future graph compilation owns its contents.
+/// The plan's frozen control-plane identity: its `plan_id` and validated [`RenderEnvelope`].
+///
+/// Both are fixed by [`PreparedRenderPlan::prepare`] and immutable for the plan's life. Graph
+/// topology is deliberately *not* here -- it is owned by the [`PreparedPlanExecutor`] the plan
+/// holds behind its dispatch seam -- so this stays a two-field identity record rather than
+/// growing a schema.
 #[derive(Debug)]
 pub struct PreparedProgram {
     plan_id: u64,
