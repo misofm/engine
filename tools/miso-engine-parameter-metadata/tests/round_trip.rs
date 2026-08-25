@@ -9,10 +9,12 @@
 //! `RESULT_OK`.
 
 use miso_engine_effect_compiler::launch_native_effect_registry_v1;
+use miso_engine_effect_contract::{NudgeSizeV1, resolve_nudge_ladder_v1};
 use miso_engine_host_web::{
-    AudioWorkletEngineHost, COMMAND_EFFECT_BYPASS, COMMAND_EFFECT_PARAM, COMMAND_MATRIX,
-    COMMAND_REASON_NONE, COMMAND_REASON_UNSUPPORTED_KIND, COMMAND_RECORD_BYTES, RESULT_OK,
-    RESULT_UNSUPPORTED, WebPrepareConfigV1,
+    AudioWorkletEngineHost, COMMAND_EFFECT_BYPASS, COMMAND_EFFECT_PARAM,
+    COMMAND_EFFECT_PARAM_NUDGE, COMMAND_MATRIX, COMMAND_REASON_NONE, COMMAND_REASON_UNNUDGEABLE,
+    COMMAND_REASON_UNSUPPORTED_KIND, COMMAND_RECORD_BYTES, RESULT_OK, RESULT_UNSUPPORTED,
+    WebPrepareConfigV1,
 };
 
 /// A one-track session whose dynamic rack holds every launch effect at its declared defaults.
@@ -84,6 +86,115 @@ fn stage(
     record[8..12].copy_from_slice(&effect_index.to_le_bytes());
     record[12..16].copy_from_slice(&parameter_id.to_le_bytes());
     record[24..28].copy_from_slice(&value.to_le_bytes());
+}
+
+/// Stage one nudge record: the rung, the direction and the count share the value words.
+fn stage_nudge(
+    host: &mut AudioWorkletEngineHost,
+    effect_index: u32,
+    parameter_id: u32,
+    size: NudgeSizeV1,
+    direction: f32,
+    count: f32,
+) {
+    stage(
+        host,
+        COMMAND_EFFECT_PARAM_NUDGE,
+        1,
+        2,
+        effect_index,
+        parameter_id,
+        size as u32 as f32,
+    );
+    let staging = host
+        .command_staging_mut()
+        .expect("prepared command staging");
+    staging[28..32].copy_from_slice(&direction.to_le_bytes());
+    staging[32..36].copy_from_slice(&count.to_le_bytes());
+}
+
+/// Issue #127 E7: every ladder the metadata declares is one the command path will actually move.
+///
+/// The two halves of the claim are checked against each other, so the document and the ABI cannot
+/// drift: a parameter the metadata gives a `nudge` object to must be nudgeable when it is also
+/// live, and a parameter the metadata gives `null` to must be refused as `UNNUDGEABLE` -- never as
+/// something vaguer.
+///
+/// Red mutation: make the metadata emit `null` for every ladder -> `a declared ladder must nudge`
+/// fires on the first automatable parameter of the first effect.
+#[test]
+fn every_declared_ladder_moves_through_a_command_acknowledgement() {
+    let document = miso_engine_parameter_metadata::render();
+    let registry = launch_native_effect_registry_v1().expect("launch registry");
+    let ids: Vec<&'static str> = registry
+        .descriptors()
+        .map(|descriptor| descriptor.id.as_str())
+        .collect();
+    let toml = session_with_every_effect(&ids);
+    let mut config = WebPrepareConfigV1::console_defaults(48_000, 128);
+    config.source_ring_frames = 128;
+    config.console_meter_blocks = 0;
+    let mut host = AudioWorkletEngineHost::new(config);
+    assert_eq!(host.prepare(), RESULT_OK);
+    host.session_toml_mut().expect("TOML")[..toml.len()].copy_from_slice(toml.as_bytes());
+    assert_eq!(host.compile(toml.len()), RESULT_OK);
+
+    let mut nudged = 0_u32;
+    let mut refused = 0_u32;
+    for (effect_index, descriptor) in registry.descriptors().enumerate() {
+        let index = u32::try_from(effect_index).expect("effect index");
+        for parameter in descriptor.parameters {
+            let declared = resolve_nudge_ladder_v1(parameter).is_some();
+            for size in NudgeSizeV1::ALL {
+                stage_nudge(&mut host, index, parameter.id.0, size, 1.0, 1.0);
+                let result = host.submit_commands(1);
+                let report = *host.command_report();
+                match (declared, parameter.automatable) {
+                    (true, true) => {
+                        assert_eq!(
+                            result,
+                            RESULT_OK,
+                            "{}#{} declares a ladder and must nudge (reason {})",
+                            descriptor.id.as_str(),
+                            parameter.id.0,
+                            report.reason
+                        );
+                        assert_eq!(report.resolved_parameter_id, parameter.id.0);
+                        assert!(f32::from_bits(report.resolved_value_bits).is_finite());
+                        nudged += 1;
+                    }
+                    (false, _) => {
+                        assert_eq!(
+                            (result, report.reason),
+                            (RESULT_UNSUPPORTED, COMMAND_REASON_UNNUDGEABLE),
+                            "{}#{} declares no ladder and must say exactly that",
+                            descriptor.id.as_str(),
+                            parameter.id.0
+                        );
+                        refused += 1;
+                    }
+                    (true, false) => {
+                        assert_eq!(
+                            (result, report.reason),
+                            (RESULT_UNSUPPORTED, COMMAND_REASON_UNSUPPORTED_KIND),
+                            "{}#{} has a ladder and no write path",
+                            descriptor.id.as_str(),
+                            parameter.id.0
+                        );
+                        refused += 1;
+                    }
+                }
+                assert_eq!(host.render_next(), RESULT_OK);
+            }
+            // And the document agrees about which of the two it is.
+            let slot = if declared { "\"nudge\": {" } else { "\"nudge\": null" };
+            assert!(
+                document.contains(slot),
+                "the metadata carries both nudge shapes"
+            );
+        }
+    }
+    assert_eq!((nudged, refused), (250, 80), "every launch parameter, every rung");
 }
 
 /// Red mutation: delete the `command.effect_index >= counts[rack]` leg in `admit_commands`
