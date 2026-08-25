@@ -532,6 +532,19 @@ impl ChannelState {
     }
 }
 
+/// `true` when no lane of `ramps` has a window open and every lane holds exactly its target.
+///
+/// Issue #144 item 6. Both halves are needed and both are exact: `remaining == 0` is the D11
+/// statement that no ramp is in flight, and the bit compare is the statement that the value in
+/// force *is* the target, so that reading `current` for the whole block reproduces what
+/// [`RampLanes::advance`] would have produced sample by sample. Tolerances are not used anywhere
+/// in this decision -- an epsilon here would make the optimisation a re-tuning.
+fn ramps_are_stationary(ramps: &[LinearRamp]) -> bool {
+    ramps
+        .iter()
+        .all(|ramp| ramp.remaining == 0 && ramp.current.to_bits() == ramp.target.to_bits())
+}
+
 /// A linear ramp of one coefficient, held as lanes for the block loop.
 #[derive(Clone, Copy)]
 struct RampLanes<L: Lane> {
@@ -592,6 +605,21 @@ impl<L: Lane> RampLanes<L> {
         let stepping = self.remaining.gt(zero);
         self.current = L::select(stepping, self.current.add(self.step), self.target);
         self.step = L::select(stepping, self.step, zero);
+        self.current
+    }
+
+    /// This sample's value when the ramp is known to be stationary, advancing nothing.
+    ///
+    /// Issue #144 item 6. Unlike the compressor and the gate, this effect had no ramping split at
+    /// all: [`RampLanes::advance`] ran four times per frame, every frame, whether or not anything
+    /// was moving -- and outside a sixty-four-sample window after a ceiling or release change,
+    /// nothing ever is. At rest `advance` computes `remaining = max(0 - 1, 0) = 0`, `stepping =
+    /// false`, `current = select(false, .., target) = target` and `step = select(false, step, 0)
+    /// = 0`; with the rest invariant `current == target` bitwise and `step == 0` already true,
+    /// every one of those is the identity. Returning `current` is therefore the same value and
+    /// the same state, which is what makes the skip class A rather than a re-tuning.
+    #[inline(always)]
+    const fn resting_value(&self) -> L {
         self.current
     }
 }
@@ -892,6 +920,21 @@ fn limiter_block<L: Lane>(
 
     let mut hot_left = HotChannel::<L>::load(left);
     let mut hot_right = HotChannel::<L>::load(right);
+    // Issue #144 item 6, the stationary hoist, taken once per block at whole-bank granularity.
+    //
+    // Per-lane branching is forbidden here: one track's arithmetic must not depend on which
+    // cohort it landed in. So the block takes the hoist only when *every* lane of *all four*
+    // ramps is stationary, exactly as the compressor's `max_remaining` split and the matrix
+    // stage's `if maximum == 0` already do.
+    //
+    // The test is a bit compare, never a tolerance: `remaining == 0` says no window is open, and
+    // `current.to_bits() == target.to_bits()` says the value in force is exactly the value being
+    // held. The scalar ramps are read rather than the gathered lanes because this is
+    // control-plane bookkeeping done once, and because lanes at or above `width` are inert.
+    let stationary = ramps_are_stationary(&left.limit)
+        && ramps_are_stationary(&left.release)
+        && ramps_are_stationary(&right.limit)
+        && ramps_are_stationary(&right.release);
     let all = L::zero().eq(L::zero());
     let none = L::mask_not(all);
     let link = if coef.link_max { all } else { none };
@@ -927,10 +970,21 @@ fn limiter_block<L: Lane>(
 
         for frame in 0..span {
             let base = (chunk + frame) * width;
-            let limit_left = hot_left.limit.advance();
-            let release_left = hot_left.release.advance();
-            let limit_right = hot_right.limit.advance();
-            let release_right = hot_right.release.advance();
+            let (limit_left, release_left, limit_right, release_right) = if stationary {
+                (
+                    hot_left.limit.resting_value(),
+                    hot_left.release.resting_value(),
+                    hot_right.limit.resting_value(),
+                    hot_right.release.resting_value(),
+                )
+            } else {
+                (
+                    hot_left.limit.advance(),
+                    hot_left.release.advance(),
+                    hot_right.limit.advance(),
+                    hot_right.release.advance(),
+                )
+            };
 
             let peak_left = L::load(&peaks[0][frame * width..]);
             let peak_right = L::load(&peaks[1][frame * width..]);

@@ -58,9 +58,27 @@ impl LinearRamp {
     /// discontinuity reset and a preparation-time initial value use.
     ///
     /// Operation order, frozen: `step = (target - current) / samples as f32`.
+    ///
+    /// # The stationary hoist (issue #144 item 6)
+    ///
+    /// A retarget to the value the ramp already holds arms a ramp whose every step is `+0.0`. It
+    /// produces `current` on every sample of the window and then assigns a target that is already
+    /// `current` — `samples` samples of arithmetic with no observable effect. It is not a rare
+    /// case: a console re-sends a parameter it did not move on every automation refresh, and
+    /// because the bank kernels take their ramping decision across *all* lanes, one lane's no-op
+    /// ramp drags a whole eight-track bank onto the ramping path for the length of the window.
+    ///
+    /// [`LinearRamp::stationary_at`] decides the case by **bit compare**, never by tolerance, and
+    /// the hoist settles the ramp instead of arming it. The three exclusions in `stationary_at`
+    /// are what make the skip bit-identical rather than merely close; see its documentation.
+    ///
+    /// The hoist deliberately does not require the ramp to be at rest. `set_target` re-derives
+    /// `step` from `current`, so a retarget *to the value in force right now* is a no-op window
+    /// whether or not an earlier ramp is still in flight, and cancelling that flight is exactly
+    /// what the non-hoisted arm arrives at when the window ends.
     pub fn set_target(&mut self, target: f32, samples: u32) {
         self.target = target;
-        if samples == 0 {
+        if samples == 0 || Self::stationary_at(self.current, target) {
             self.current = target;
             self.step = 0.0;
             self.remaining = 0;
@@ -68,6 +86,30 @@ impl LinearRamp {
         }
         self.step = (target - self.current) / samples as f32;
         self.remaining = samples;
+    }
+
+    /// `true` when ramping `current` to `target` cannot change a single rendered bit.
+    ///
+    /// Bit-identity, not nearness, is the whole bar, so the test is `to_bits` equality plus the
+    /// three exclusions where `x + 0.0 != x` bitwise or where the ramp's own snap would restore a
+    /// bit pattern the additions had destroyed:
+    ///
+    /// * **`-0.0`.** `-0.0 + 0.0` is `+0.0`, so a no-op ramp from `-0.0` renders `+0.0` for every
+    ///   sample but the last, which the D11 snap returns to `-0.0`. Skipping it would render
+    ///   `-0.0` throughout. The two arms genuinely differ, so `-0.0` is never hoisted. (`+0.0` is
+    ///   hoisted: `+0.0 + 0.0` is `+0.0`.)
+    /// * **Non-finite values.** `NaN - NaN` is `NaN`, so the step is `NaN` rather than zero, and a
+    ///   signalling payload is quieted by the addition. An infinite target ramps by `NaN` too.
+    /// * Subnormals are *not* excluded: `d + 0.0 == d` exactly, for every subnormal `d`, in the
+    ///   canonical floating-point environment issue #146 installs at every render entry. That
+    ///   environment is load-bearing here — under a host's FTZ/DAZ the addition would flush and
+    ///   the two arms would part company, which is precisely why the guard is not optional.
+    #[must_use]
+    #[inline]
+    pub fn stationary_at(current: f32, target: f32) -> bool {
+        const NEGATIVE_ZERO: u32 = 0x8000_0000;
+        let bits = current.to_bits();
+        bits == target.to_bits() && bits != NEGATIVE_ZERO && current.is_finite()
     }
 
     /// Assigns the target immediately and stops the ramp.

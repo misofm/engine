@@ -45,6 +45,7 @@ use miso_engine_effect_contract::{
     StatePayloadOutput, StatePayloadSizes, TailSamples, expected_prepared_metadata,
 };
 use miso_engine_effect_runtime::bank::{check_block, nonfinite_lane_mask};
+use miso_engine_effect_runtime::ramp::LinearRamp;
 use miso_engine_effect_runtime::params::{
     ParameterSpec, normalize_zero, parameter_value_valid as domain_valid,
 };
@@ -759,7 +760,27 @@ impl<L: Lane, const W: usize> Channel<L, W> {
     ///
     /// The increment is one multiply by an exact power of two, computed once here; a ramp that is
     /// re-targeted mid-flight starts from the words in force now, not from the old target.
+    ///
+    /// # The stationary hoist (issue #144 item 6)
+    ///
+    /// When all six words this lane is being sent to are already the six words it holds, every
+    /// increment is `(word - word) * RAMP_SCALE`, which is exactly `+0.0` for finite words. The
+    /// ramp would then spend [`RAMP_SAMPLES`] samples adding zero to a lane that is already where
+    /// it is being sent. That costs far more than the lane: `process_section` takes its ramping
+    /// decision across **all** `W` lanes of the section, so one lane's no-op window drags the
+    /// whole bank onto `svf_block_ramped` -- six vector additions and a negate per frame -- for
+    /// sixty-four samples. A console that re-sends a band it did not move (an automation refresh,
+    /// a touched-but-unmoved control) pays that on every refresh.
+    ///
+    /// [`LinearRamp::stationary_at`] decides it by bit compare. The lane is settled instead, which
+    /// is bit-identical because a zero increment is bit-preserving on every word -- exactly the
+    /// property `design_svf_v1` normalises `-0.0` away to guarantee, and the same property that
+    /// makes an idle lane of a ramping bank identical to the same lane of a settled one.
     fn start_ramp(&mut self, section: usize, track: usize, words: EqSvfWordsV1) {
+        if self.stationary_at(section, track, words) {
+            self.settle(section, track, words);
+            return;
+        }
         let slot = &mut self.sections[section];
         for (index, word) in words.to_array().into_iter().enumerate() {
             let current = lane_get(coef_word(&slot.coef, index), track);
@@ -771,6 +792,22 @@ impl<L: Lane, const W: usize> Channel<L, W> {
             );
         }
         self.remaining[section][track] = RAMP_SAMPLES;
+    }
+
+    /// `true` when lane `track` of `section` already holds exactly `words`.
+    ///
+    /// All six words must agree bitwise, and each must pass [`LinearRamp::stationary_at`], which
+    /// is where the `-0.0` and non-finite exclusions live. A partial match is not a hoist: five
+    /// settled words and one moving word is a ramp.
+    fn stationary_at(&self, section: usize, track: usize, words: EqSvfWordsV1) -> bool {
+        let slot = &self.sections[section];
+        words
+            .to_array()
+            .into_iter()
+            .enumerate()
+            .all(|(index, word)| {
+                LinearRamp::stationary_at(lane_get(coef_word(&slot.coef, index), track), word)
+            })
     }
 
     /// Assigns the target exactly and stops lane `track`'s ramp — the D11 snap.
