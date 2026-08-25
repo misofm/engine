@@ -155,6 +155,7 @@ expected_exports=$(printf '%s\n' \
   miso_engine_web_v1_console_track_count \
   miso_engine_web_v1_console_track_id \
   miso_engine_web_v1_dispose \
+  miso_engine_web_v1_meter_header_ptr \
   miso_engine_web_v1_meter_lease \
   miso_engine_web_v1_meter_poll \
   miso_engine_web_v1_prepare \

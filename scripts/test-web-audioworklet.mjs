@@ -28,10 +28,13 @@ const limits = Object.freeze({
   maximumMeterStreams: 8n,
   maximumMeterItems: 16n,
   maximumMeterBytes: 4096n,
-  // Issue #137 D1/D2: the two console words. Zero in both is "default command-queue depth, no
-  // meter observers"; the console tests below override them.
+  // Issue #137 D1/D2 and #143 D3/D6: the four console words. All zero is "default command-queue
+  // depth, no meter observers, no observation capacity, no master designation"; the console tests
+  // below override them.
   consoleCommandQueueRecords: 4n,
   consoleMeterBlocks: 2n,
+  consoleObservationTaps: 2n,
+  consoleMasterTrackPlusOne: 1n,
 });
 
 function resourceReport(backend, quantumFrames) {
@@ -59,6 +62,7 @@ function resourceReport(backend, quantumFrames) {
     graphMetadataBytes: 1n,
     graphDelayBytes: 1n,
     largestNamedAllocationBytes: 1n,
+    observationRetainedBytes: 1n,
   });
 }
 
@@ -511,6 +515,8 @@ async function testMainRealm() {
       data: {
         tag: "miso.meter.v1", sequence: 1, windows: 1, trackCount: 2,
         peaks: new Float32Array([0.125, 0.25, 0.375, 0.5, 0.625, 0.75]),
+        trackGrDb: new Float32Array([6.5, 0]), masterGrDb: 6.5,
+        firstSample: 512n, endSample: 768n,
       },
     });
     node.port.onmessage({
@@ -523,15 +529,111 @@ async function testMainRealm() {
     assert.equal(meterFrames.length, 1);
     assert.deepEqual([...meterFrames[0].peaks], [0.125, 0.25, 0.375, 0.5, 0.625, 0.75]);
     assert.equal(Object.isFrozen(meterFrames[0]), true);
+
+    // Issue #143 E4: the frame as an **app** reads it.
+    //
+    // `appGainReduction` is the app's own fold, copied verbatim from `meters.ts`'s
+    // `Math.max(0, x ?? 0)` lines. The whole point of the declared `peakMagnitude` fold is that
+    // this line is a *no-op*: the engine publishes a non-negative magnitude, so clamping at zero
+    // changes nothing. Publish the raw negative decibels instead and every one of these becomes
+    // `0` -- the exact dead-meter bug -- which is what the red mutation demonstrates.
+    const appGainReduction = (frame) => ({
+      tracks: Array.from({ length: frame.trackCount }, (_, index) =>
+        Math.max(0, frame.trackGrDb[index] ?? 0)),
+      master: Math.max(0, frame.masterGrDb ?? 0),
+    });
+    const ingested = appGainReduction(meterFrames[0]);
+    assert.equal(ingested.tracks.length, meterFrames[0].trackCount);
+    assert.equal(ingested.tracks[0], 6.5, "trackGrDb(0) > 0 survives the app's clamp unchanged");
+    assert(ingested.tracks[0] > 0);
+    assert.equal(ingested.tracks[1], 0, "a track with no observed effect reads exactly zero");
+    assert.equal(ingested.master, 6.5);
+    assert.equal(meterFrames[0].endSample - meterFrames[0].firstSample, 256n);
+
+    // Every shape rule is a hard failure, not a silent skip. Each entry is one red mutation of
+    // one rule in the `miso.meter.v1` branch of `#receive`.
+    for (const broken of [
+      { trackGrDb: new Float32Array(1) },
+      { trackGrDb: [0, 0] },
+      { trackGrDb: new Float32Array([-6.5, 0]) },
+      { trackGrDb: new Float32Array([Number.NaN, 0]) },
+      { masterGrDb: -1 },
+      { masterGrDb: "6.5" },
+      { firstSample: 512 },
+      { endSample: 256n },
+    ]) {
+      const rejecting = await createMisoAudioWorkletHost({
+        context,
+        quantumFrames: 64,
+        sessionToml: new TextEncoder().encode("format_version = 2"),
+        limits,
+        simd128ModuleUrl: "simd.wasm",
+        workletModuleUrl: "processor.js",
+      });
+      const rejected = rejecting.status();
+      FakeNode.latest.port.onmessage({
+        data: {
+          tag: "miso.meter.v1", sequence: 1, windows: 1, trackCount: 2,
+          peaks: new Float32Array(6), trackGrDb: new Float32Array(2), masterGrDb: null,
+          firstSample: 512n, endSample: 768n, ...broken,
+        },
+      });
+      await errorResult(rejected, 255);
+    }
     assert.equal(telemetryFrames.length, 1);
     assert.equal(telemetryFrames[0].cpuPercent, 4.5);
 
+    // Issue #143: the `miso.observe.v1` acknowledgement's subscription map.
+    //
+    // The map is the answer to what `trackGrDb` cannot say -- which tracks have an observed effect
+    // at all -- so it is checked as carefully as the frame: the exact wire kinds go out, the map
+    // is canonically ordered, `windowBlocks: 0` resolves to the plan default, and an unsubscribe
+    // removes exactly one entry.
+    const observeAck = await consoleHost.observe({
+      requestId: 213,
+      subscriptions: [
+        { trackIndex: 1, rack: 1, effectIndex: 0, tapId: 1, windowBlocks: 0, armed: true },
+        { trackIndex: 0, rack: 1, effectIndex: 0, tapId: 1, windowBlocks: 8, armed: true },
+      ],
+    });
+    assert.equal(observeAck.tag, "miso.observe.v1");
+    assert.equal(observeAck.result, 0);
+    assert.deepEqual(observeAck.bindings.map((binding) => binding.trackIndex), [0, 1],
+      "the map is canonically ordered by (track, rack, effectIndex, tapId)");
+    assert.deepEqual(observeAck.bindings[0], {
+      trackIndex: 0, rack: 1, effectIndex: 0, tapId: 1, frameSlot: 0, windowBlocks: 8,
+    });
+    assert.equal(observeAck.bindings[1].windowBlocks, Number(limits.consoleMeterBlocks),
+      "`windowBlocks: 0` resolves to the plan default, and the map says which one it got");
+    assert.equal(Object.isFrozen(observeAck.bindings), true);
+    const unsubscribed = await consoleHost.observe({
+      requestId: 214,
+      subscriptions: [
+        { trackIndex: 1, rack: 1, effectIndex: 0, tapId: 1, windowBlocks: 0, armed: false },
+      ],
+    });
+    assert.equal(unsubscribed.bindings.length, 1, "an unsubscribe removes exactly one entry");
+    assert.equal(unsubscribed.bindings[0].trackIndex, 0);
+    for (const broken of [
+      { trackIndex: -1 }, { rack: 3 }, { tapId: 0 }, { armed: "yes" }, { windowBlocks: -1 },
+    ]) {
+      await errorResult(consoleHost.observe({
+        requestId: 215,
+        subscriptions: [{
+          trackIndex: 0, rack: 1, effectIndex: 0, tapId: 1, windowBlocks: 0, armed: true,
+          ...broken,
+        }],
+      }), 1);
+    }
+    await errorResult(consoleHost.observe({ requestId: 216, subscriptions: [] }), 1);
+
     // A released lease detaches the callback: a late frame is delivered nowhere.
-    await consoleHost.meters({ requestId: 212, enabled: false, onFrame: null });
+    await consoleHost.meters({ requestId: 230, enabled: false, onFrame: null });
     node.port.onmessage({
       data: {
         tag: "miso.meter.v1", sequence: 2, windows: 1, trackCount: 2,
-        peaks: new Float32Array(6),
+        peaks: new Float32Array(6), trackGrDb: new Float32Array(2), masterGrDb: null,
+        firstSample: 768n, endSample: 1024n,
       },
     });
     assert.equal(meterFrames.length, 1, "a released lease receives nothing");
@@ -543,7 +645,8 @@ async function testMainRealm() {
     node.port.onmessage({
       data: {
         tag: "miso.meter.v1", sequence: 3, windows: 1, trackCount: 2,
-        peaks: new Float32Array(4),
+        peaks: new Float32Array(4), trackGrDb: new Float32Array(2), masterGrDb: null,
+        firstSample: 0n, endSample: 0n,
       },
     });
     await errorResult(doomed, 255);
@@ -573,7 +676,9 @@ function createFakeExports(quantum, backend = 0) {
   resources.setUint32(8, 48000, true);
   resources.setUint32(12, quantum, true);
   resources.setUint32(16, backend, true);
-  for (let index = 0; index < 20; index += 1) resources.setBigUint64(32 + index * 8, 1n, true);
+  // Twenty-one u64 rows now: issue #143 carved `observationRetainedBytes` from the first of the
+  // report's four reserved words, so offset 192 is a real row and 200..216 stay required zero.
+  for (let index = 0; index < 21; index += 1) resources.setBigUint64(32 + index * 8, 1n, true);
   const calls = {
     render: [], source: [], sourceIdBytes: [], seek: [], seekIdBytes: [], dispose: 0,
     sourceResult: 0,
@@ -582,8 +687,19 @@ function createFakeExports(quantum, backend = 0) {
   const commandPointer = 24000;
   const meterFramePointer = 40000;
   const reportPointer = 41000;
+  const meterHeaderPointer = 41100;
   const trackIds = ["kick", "snare"];
-  const meterFrameFloats = trackIds.length * 2 + 2;
+  // Issue #143 D5: `3T + 3` -- the frozen `2T + 2` peak section, then one gain-reduction magnitude
+  // per track and the master's.
+  const meterFrameFloats = trackIds.length * 3 + 3;
+  const meterHeader = new DataView(memory.buffer, meterHeaderPointer, 64);
+  meterHeader.setUint32(0, 64, true);
+  meterHeader.setUint32(4, 0x00010000, true);
+  meterHeader.setUint32(8, trackIds.length, true);
+  meterHeader.setUint32(40, 1, true);
+  meterHeader.setUint32(44, 1, true);
+  meterHeader.setBigUint64(16, 512n, true);
+  meterHeader.setBigUint64(24, 768n, true);
   const report = new DataView(memory.buffer, reportPointer, 48);
   report.setUint32(0, 48, true);
   report.setUint32(4, 0x00010000, true);
@@ -644,6 +760,7 @@ function createFakeExports(quantum, backend = 0) {
       calls.meterLease.push(enabled);
       return 0;
     },
+    miso_engine_web_v1_meter_header_ptr: () => meterHeaderPointer,
     miso_engine_web_v1_meter_poll: () => {
       if (calls.meterWindows === 0) return 0;
       calls.meterWindows -= 1;

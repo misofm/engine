@@ -112,9 +112,11 @@ fn frozen_layouts_and_values_are_exact() {
             COMMAND_FADER_DB,
             COMMAND_MUTE,
             COMMAND_EFFECT_PARAM,
-            COMMAND_EFFECT_BYPASS
+            COMMAND_EFFECT_BYPASS,
+            COMMAND_OBSERVE_SUBSCRIBE,
+            COMMAND_OBSERVE_UNSUBSCRIBE
         ],
-        [1, 2, 3, 4, 5, 6]
+        [1, 2, 3, 4, 5, 6, 7, 8]
     );
     assert_eq!(
         [
@@ -127,9 +129,11 @@ fn frozen_layouts_and_values_are_exact() {
             COMMAND_REASON_DOMAIN,
             COMMAND_REASON_UNSUPPORTED_KIND,
             COMMAND_REASON_BACKPRESSURE,
-            COMMAND_REASON_WRONG_STATE
+            COMMAND_REASON_WRONG_STATE,
+            COMMAND_REASON_UNKNOWN_TAP,
+            COMMAND_REASON_OBSERVATION_UNBOUND
         ],
-        [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+        [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
     );
     assert_eq!(offset_of!(WebPrepareConfigV1, struct_size), 0);
     assert_eq!(offset_of!(WebPrepareConfigV1, quantum_frames), 12);
@@ -140,7 +144,29 @@ fn frozen_layouts_and_values_are_exact() {
         160
     );
     assert_eq!(offset_of!(WebPrepareConfigV1, console_meter_blocks), 168);
-    assert_eq!(offset_of!(WebPrepareConfigV1, reserved), 176);
+    // Issue #143 D3/D6: the configuration's remaining two reserved words, carved exactly as #137
+    // carved the first two. The structure is still 192 bytes and every existing offset is where it
+    // was, so a V1 writer that zeroes them gets "no observation capacity, no master designation".
+    assert_eq!(
+        offset_of!(WebPrepareConfigV1, console_observation_taps),
+        176
+    );
+    assert_eq!(
+        offset_of!(WebPrepareConfigV1, console_master_track_plus_one),
+        184
+    );
+    assert_eq!(MAXIMUM_OBSERVATION_TAPS, 16);
+    // The meter header is a new fixed structure, not a change to an existing one.
+    assert_eq!(size_of::<WebMeterHeaderV1>(), 64);
+    assert_eq!(METER_HEADER_BYTES, 64);
+    assert_eq!(offset_of!(WebMeterHeaderV1, track_count), 8);
+    assert_eq!(offset_of!(WebMeterHeaderV1, windows), 12);
+    assert_eq!(offset_of!(WebMeterHeaderV1, first_sample), 16);
+    assert_eq!(offset_of!(WebMeterHeaderV1, end_sample), 24);
+    assert_eq!(offset_of!(WebMeterHeaderV1, sequence), 32);
+    assert_eq!(offset_of!(WebMeterHeaderV1, master_track_plus_one), 40);
+    assert_eq!(offset_of!(WebMeterHeaderV1, master_gr_present), 44);
+    assert_eq!(offset_of!(WebMeterHeaderV1, reserved), 48);
     assert_eq!(offset_of!(WebCommandReportV1, result), 8);
     assert_eq!(offset_of!(WebCommandReportV1, rejected_index), 16);
     assert_eq!(offset_of!(WebCommandReportV1, applied_at_sample), 24);
@@ -153,7 +179,13 @@ fn frozen_layouts_and_values_are_exact() {
         offset_of!(WebResourceReportV1, largest_named_allocation_bytes),
         184
     );
-    assert_eq!(offset_of!(WebResourceReportV1, reserved), 192);
+    // Issue #143: the report's first reserved word becomes `observation_retained_bytes`; the
+    // structure is still 224 bytes and every existing offset is unmoved.
+    assert_eq!(
+        offset_of!(WebResourceReportV1, observation_retained_bytes),
+        192
+    );
+    assert_eq!(offset_of!(WebResourceReportV1, reserved), 200);
 
     // Issue #137: `bridgeMetadataBytes` in `tests/browser-v1/expected.json` is not a magic number
     // and never was. It is exactly this formula over the host shell, so when the shell grows the
@@ -1176,6 +1208,8 @@ mod serde_pin {
         pub(super) simd128: String,
         pub(super) native_command_timeline: String,
         pub(super) simd128_command_timeline: String,
+        pub(super) native_observation: String,
+        pub(super) simd128_observation: String,
     }
 
     fn hex_after(text: &str, key: &str) -> String {
@@ -1200,6 +1234,13 @@ mod serde_pin {
             simd128: hex_after(text, "\"pcmF32leSha256\":"),
             native_command_timeline: hex_after(text, "\"nativeCommandTimelinePcmF32leSha256\":"),
             simd128_command_timeline: hex_after(&text[timeline..], "\"pcmF32leSha256\":"),
+            native_observation: hex_after(text, "\"nativeObservationPcmF32leSha256\":"),
+            simd128_observation: hex_after(
+                &text[text
+                    .find("\"observationTimeline\"")
+                    .expect("expected.json has no observationTimeline")..],
+                "\"pcmF32leSha256\":",
+            ),
         }
     }
 }
@@ -2069,4 +2110,563 @@ fn meter_frames_equal_an_offline_fold_and_cost_the_render_nothing() {
     assert!(!bare.meters_attached());
     assert_eq!(bare.set_meter_lease(true), RESULT_UNSUPPORTED);
     assert_eq!(bare.poll_meters(), 0);
+}
+
+/// A three-track observation host over the #143 E4 fixture: compressor, EQ (no tap), gate.
+fn observation_host(
+    quantum: u32,
+    meter_blocks: u64,
+    master: Option<u32>,
+) -> AudioWorkletEngineHost {
+    let toml = include_str!("../../../fixtures/session/v1/observation-frame-shape.toml");
+    let mut config = WebPrepareConfigV1::console_defaults(48_000, quantum);
+    config.source_ring_frames = quantum * 4;
+    config.console_meter_blocks = meter_blocks;
+    config.console_observation_taps = 4;
+    config.console_master_track_plus_one = master.map_or(0, |track| u64::from(track) + 1);
+    config.maximum_meter_streams = 16;
+    config.maximum_meter_items = 1 << 16;
+    config.maximum_meter_bytes = 1 << 24;
+    let mut host = AudioWorkletEngineHost::new(config);
+    assert_eq!(host.prepare(), RESULT_OK);
+    host.session_toml_mut().expect("TOML")[..toml.len()].copy_from_slice(toml.as_bytes());
+    assert_eq!(
+        host.compile(toml.len()),
+        RESULT_OK,
+        "{:?}",
+        core::str::from_utf8(host.diagnostic())
+    );
+    host
+}
+
+/// Feed one quantum of a constant to every track's shared source and render it.
+fn feed_and_render_tracks(host: &mut AudioWorkletEngineHost, block: u64, value: f32) {
+    feed_and_render(host, 1, block, value);
+}
+
+/// Stage and submit one observation subscribe/unsubscribe for one addressed effect.
+fn observe(
+    host: &mut AudioWorkletEngineHost,
+    track: u32,
+    rack: u8,
+    effect: u32,
+    tap_id: u32,
+    window_blocks: u32,
+    armed: bool,
+) -> u32 {
+    let kind = if armed {
+        COMMAND_OBSERVE_SUBSCRIBE
+    } else {
+        COMMAND_OBSERVE_UNSUBSCRIBE
+    };
+    stage_command(
+        host,
+        0,
+        kind,
+        rack,
+        255,
+        track,
+        effect,
+        tap_id,
+        window_blocks,
+        [0.0; 4],
+    );
+    host.submit_commands(1)
+}
+
+/// The frame's gain-reduction section: one non-negative magnitude per track, then the master's.
+fn gain_reduction(host: &AudioWorkletEngineHost) -> (Vec<f32>, Option<f32>) {
+    let tracks = host.console_tracks().len();
+    let frame = host.meter_frame();
+    assert_eq!(frame.len(), tracks * 3 + 3, "the frame is 3T + 3 words");
+    let base = tracks * 2 + 2;
+    let per_track = frame[base..base + tracks].to_vec();
+    let master = (host.meter_header().master_gr_present == 1).then(|| frame[base + tracks]);
+    (per_track, master)
+}
+
+/// Issue #143 E4: the frame the app reads.
+///
+/// Red mutation: publish the negative decibels raw instead of the declared `PeakMagnitude` fold ->
+/// the app's `Math.max(0, -6)` is `0` and every meter reads dead. The fold is what makes that line
+/// a no-op rather than a silent zeroing, and the assertion below is the difference.
+#[test]
+fn the_meter_frame_carries_the_app_shaped_gain_reduction() {
+    const QUANTUM: u32 = 128;
+    const BLOCKS: u64 = 2;
+    let mut host = observation_host(QUANTUM, BLOCKS, Some(0));
+    assert_eq!(host.console_tracks().len(), 3);
+    assert!(host.observation_attached());
+    assert_eq!(host.set_meter_lease(true), RESULT_OK);
+
+    // Track 1's parametric EQ declares no tap: subscribing to it is an addressing error, not a
+    // capacity error, and it is `UNKNOWN_TAP` rather than `UNKNOWN_PARAMETER`.
+    assert_eq!(
+        observe(&mut host, 1, 1, 0, 1, 2, true),
+        RESULT_INVALID_ARGUMENT
+    );
+    assert_eq!(host.command_report().reason, COMMAND_REASON_UNKNOWN_TAP);
+
+    for track in [0_u32, 2] {
+        assert_eq!(observe(&mut host, track, 1, 0, 1, 2, true), RESULT_OK);
+        assert_eq!(host.command_report().reason, COMMAND_REASON_NONE);
+    }
+
+    // Silence first: an armed tap over a signal that never crosses a threshold reads exactly zero.
+    for block in 0..8 {
+        feed_and_render_tracks(&mut host, block, 0.0);
+    }
+    assert!(host.poll_meters() > 0);
+    let (quiet, quiet_master) = gain_reduction(&host);
+    assert_eq!(quiet.len(), 3, "one slot per track");
+    assert!(quiet.iter().all(|value| value.is_finite()), "{quiet:?}");
+    assert_eq!(quiet[0], 0.0, "silence is not compressed");
+    assert_eq!(quiet[1], 0.0, "a track with no observed effect reads +0.0");
+    assert_eq!(quiet[1].to_bits(), 0.0_f32.to_bits(), "positive zero");
+    assert_eq!(
+        quiet_master,
+        Some(0.0),
+        "the designated master reads zero too"
+    );
+
+    // Then a signal well over the compressor's threshold and well over the gate's, so track 0
+    // reduces and track 2 opens.
+    for block in 8..40 {
+        feed_and_render_tracks(&mut host, block, 0.5);
+    }
+    assert!(host.poll_meters() > 0);
+    let (loud, master) = gain_reduction(&host);
+    assert!(loud.iter().all(|value| value.is_finite()), "{loud:?}");
+    assert!(
+        loud[0] > 0.0,
+        "the compressor's reduction is a positive magnitude, not a negative decibel: {}",
+        loud[0]
+    );
+    assert_eq!(loud[1], 0.0, "the untapped track is still exactly zero");
+    assert_eq!(
+        master,
+        Some(loud[0]),
+        "the designated master reports track 0's own reading"
+    );
+
+    // The window the frame describes is the meter window, and it tiles.
+    let header = *host.meter_header();
+    assert_eq!(header.track_count, 3);
+    assert_eq!(header.master_track_plus_one, 1);
+    assert_eq!(
+        header.end_sample - header.first_sample,
+        BLOCKS * u64::from(QUANTUM)
+    );
+    assert!(header.sequence > 0);
+
+    // With no designation at all the master reading is absent, not zero.
+    let mut undesignated = observation_host(QUANTUM, BLOCKS, None);
+    assert_eq!(undesignated.set_meter_lease(true), RESULT_OK);
+    assert_eq!(observe(&mut undesignated, 0, 1, 0, 1, 2, true), RESULT_OK);
+    for block in 0..16 {
+        feed_and_render_tracks(&mut undesignated, block, 0.5);
+    }
+    assert!(undesignated.poll_meters() > 0);
+    let (values, master) = gain_reduction(&undesignated);
+    assert!(values[0] > 0.0, "the track still reduces");
+    assert_eq!(master, None, "no designation means absent, never zero");
+    assert_eq!(undesignated.meter_header().master_track_plus_one, 0);
+}
+
+/// Issue #143 E8: flood and misuse.
+///
+/// Red mutation: drop the all-or-nothing free-room pre-check for the observe kinds -> an oversized
+/// batch arms some taps before it is refused, and the "nothing was armed" assertion fails.
+#[test]
+fn observation_misuse_is_typed_and_all_or_nothing() {
+    const QUANTUM: u32 = 128;
+    let mut host = observation_host(QUANTUM, 2, Some(0));
+    assert_eq!(host.set_meter_lease(true), RESULT_OK);
+
+    // A tap id the effect does not declare, distinguished from an unknown parameter.
+    assert_eq!(
+        observe(&mut host, 0, 1, 0, 9, 2, true),
+        RESULT_INVALID_ARGUMENT
+    );
+    assert_eq!(host.command_report().reason, COMMAND_REASON_UNKNOWN_TAP);
+    stage_command(
+        &mut host,
+        0,
+        COMMAND_EFFECT_PARAM,
+        1,
+        2,
+        0,
+        0,
+        99,
+        0,
+        [0.0; 4],
+    );
+    assert_eq!(host.submit_commands(1), RESULT_INVALID_ARGUMENT);
+    assert_eq!(
+        host.command_report().reason,
+        COMMAND_REASON_UNKNOWN_PARAMETER,
+        "a parameter and a tap are different namespaces on one effect"
+    );
+
+    // Tap zero is reserved for "no tap" and is an unknown tap, not a malformed record.
+    assert_eq!(
+        observe(&mut host, 0, 1, 0, 0, 2, true),
+        RESULT_INVALID_ARGUMENT
+    );
+    assert_eq!(host.command_report().reason, COMMAND_REASON_UNKNOWN_TAP);
+
+    // A nonzero value word on a subscription is a caller mistake, not a meaningful field.
+    stage_command(
+        &mut host,
+        0,
+        COMMAND_OBSERVE_SUBSCRIBE,
+        1,
+        255,
+        0,
+        0,
+        1,
+        2,
+        [1.0, 0.0, 0.0, 0.0],
+    );
+    assert_eq!(host.submit_commands(1), RESULT_INVALID_ARGUMENT);
+    assert_eq!(host.command_report().reason, COMMAND_REASON_MALFORMED);
+
+    // Unknown rack and unknown effect keep their own reasons on the observe kinds.
+    assert_eq!(
+        observe(&mut host, 0, 3, 0, 1, 2, true),
+        RESULT_INVALID_ARGUMENT
+    );
+    assert_eq!(host.command_report().reason, COMMAND_REASON_UNKNOWN_RACK);
+    assert_eq!(
+        observe(&mut host, 0, 1, 7, 1, 2, true),
+        RESULT_INVALID_ARGUMENT
+    );
+    assert_eq!(host.command_report().reason, COMMAND_REASON_UNKNOWN_EFFECT);
+    assert_eq!(
+        observe(&mut host, 9, 1, 0, 1, 2, true),
+        RESULT_INVALID_ARGUMENT
+    );
+    assert_eq!(host.command_report().reason, COMMAND_REASON_UNKNOWN_TRACK);
+
+    // Double subscribe is idempotent and the newer window length wins; double unsubscribe is fine.
+    assert_eq!(observe(&mut host, 0, 1, 0, 1, 8, true), RESULT_OK);
+    assert_eq!(observe(&mut host, 0, 1, 0, 1, 2, true), RESULT_OK);
+    for block in 0..8 {
+        feed_and_render_tracks(&mut host, block, 0.5);
+    }
+    assert!(host.poll_meters() > 0);
+    assert_eq!(
+        host.meter_header().end_sample - host.meter_header().first_sample,
+        2 * u64::from(QUANTUM),
+        "the second subscription's window length is the one in force"
+    );
+    assert_eq!(observe(&mut host, 0, 1, 0, 1, 0, false), RESULT_OK);
+    assert_eq!(observe(&mut host, 0, 1, 0, 1, 0, false), RESULT_OK);
+
+    // A lease release and retake restarts the frame sequence and the reported window.
+    assert_eq!(host.set_meter_lease(false), RESULT_OK);
+    assert_eq!(host.set_meter_lease(true), RESULT_OK);
+    assert_eq!(host.meter_header().sequence, 0);
+    assert_eq!(host.meter_header().first_sample, 0);
+    assert!(host.meter_frame().iter().all(|value| *value == 0.0));
+
+    // The flood: a batch larger than any queue can take is refused whole, nothing is armed, and
+    // the frame is untouched.
+    assert_eq!(observe(&mut host, 0, 1, 0, 1, 2, true), RESULT_OK);
+    let before = host.meter_frame().to_vec();
+    let depth = host.config().console_command_queue_records as usize;
+    let flood = (depth + 2).min(MAXIMUM_COMMAND_RECORDS as usize);
+    for index in 0..flood {
+        stage_command(
+            &mut host,
+            index,
+            COMMAND_OBSERVE_SUBSCRIBE,
+            1,
+            255,
+            0,
+            0,
+            1,
+            4,
+            [0.0; 4],
+        );
+    }
+    assert_eq!(
+        host.submit_commands(flood as u32),
+        RESULT_BACKPRESSURE,
+        "a batch deeper than the queue is refused whole"
+    );
+    assert_eq!(host.command_report().reason, COMMAND_REASON_BACKPRESSURE);
+    assert_eq!(host.command_report().admitted, 0);
+    assert_eq!(
+        host.meter_frame(),
+        &before[..],
+        "nothing was armed or moved"
+    );
+
+    // And a batch beyond the staging capacity is malformed before any queue is consulted.
+    assert_eq!(
+        host.submit_commands(MAXIMUM_COMMAND_RECORDS + 1),
+        RESULT_INVALID_ARGUMENT
+    );
+    assert_eq!(host.command_report().reason, COMMAND_REASON_MALFORMED);
+}
+
+/// A session with a console but no observation capacity refuses a subscription with its own
+/// reason: the effect exists, the tap is declared, and this preparation bound no lane.
+#[test]
+fn a_subscription_without_capacity_is_observation_unbound() {
+    const QUANTUM: u32 = 128;
+    let toml = include_str!("../../../fixtures/session/v1/observation-frame-shape.toml");
+    let mut config = WebPrepareConfigV1::console_defaults(48_000, QUANTUM);
+    config.source_ring_frames = QUANTUM * 4;
+    config.console_observation_taps = 0;
+    config.maximum_meter_streams = 16;
+    config.maximum_meter_items = 1 << 16;
+    config.maximum_meter_bytes = 1 << 24;
+    let mut host = AudioWorkletEngineHost::new(config);
+    assert_eq!(host.prepare(), RESULT_OK);
+    host.session_toml_mut().expect("TOML")[..toml.len()].copy_from_slice(toml.as_bytes());
+    assert_eq!(host.compile(toml.len()), RESULT_OK);
+    assert!(!host.observation_attached());
+    assert_eq!(host.resources().observation_retained_bytes, 0);
+    assert_eq!(
+        observe(&mut host, 0, 1, 0, 1, 2, true),
+        RESULT_UNSUPPORTED,
+        "the address is right and this preparation cannot deliver it"
+    );
+    assert_eq!(
+        host.command_report().reason,
+        COMMAND_REASON_OBSERVATION_UNBOUND
+    );
+    // And the frame is the pre-#143 shape plus the positional gain-reduction section, all zero.
+    let tracks = host.console_tracks().len();
+    assert_eq!(host.meter_frame().len(), tracks * 3 + 3);
+    assert!(host.meter_frame().iter().all(|value| *value == 0.0));
+}
+
+/// Observation capacity is refused at configuration time when nothing can carry the subscription.
+#[test]
+fn observation_configuration_words_are_validated() {
+    let mut config = WebPrepareConfigV1::launch_defaults(48_000, 128);
+    config.console_observation_taps = 4;
+    let mut host = AudioWorkletEngineHost::new(config);
+    assert_eq!(
+        host.prepare(),
+        RESULT_INVALID_ARGUMENT,
+        "a subscription rides the command queue, so capacity without one has no delivery path"
+    );
+
+    let mut config = WebPrepareConfigV1::console_defaults(48_000, 128);
+    config.console_observation_taps = u64::from(MAXIMUM_OBSERVATION_TAPS) + 1;
+    let mut host = AudioWorkletEngineHost::new(config);
+    assert_eq!(host.prepare(), RESULT_INVALID_ARGUMENT);
+
+    let mut config = WebPrepareConfigV1::console_defaults(48_000, 128);
+    config.console_master_track_plus_one = 1;
+    let mut host = AudioWorkletEngineHost::new(config);
+    assert_eq!(
+        host.prepare(),
+        RESULT_INVALID_ARGUMENT,
+        "a master designation with no observation capacity would report nothing"
+    );
+
+    // And a zeroed pair is exactly what every pre-#143 writer already sends.
+    let mut host = AudioWorkletEngineHost::new(WebPrepareConfigV1::console_defaults(48_000, 128));
+    assert_eq!(host.prepare(), RESULT_OK);
+}
+
+/// Issue #143 E1/E12, native leg: the observation timeline's determinism digest.
+///
+/// The native twin of `direct-oracle.mjs`'s `runObservationTimeline`. Both legs read this exact
+/// fixture file, run this exact twelve-block timeline, and their digests are asserted equal to one
+/// pin -- so a change to the audio makes them move together, which is the point.
+///
+/// Two runs, one timeline: with observation capacity and every declared tap armed, and with
+/// `console_observation_taps == 0`. They must render **identical bits**. That is E1's leg (b)
+/// against leg (d) on the browser ABI, and it is checked here rather than asserted about.
+///
+/// Red mutation: fold the observation read into the compressor's inner loop -> the two digests
+/// diverge and both stop matching the pin.
+#[test]
+fn native_observation_timeline_digest_pins_the_wasm_parity() {
+    use sha2::{Digest, Sha256};
+
+    const QUANTUM: u32 = 128;
+    const RATE: u32 = 48_000;
+    const DEPTH: u32 = 4;
+    const WINDOW_BLOCKS: u32 = 2;
+    const BLOCKS: u64 = 12;
+
+    let toml = include_str!("../tests/browser-v1/observation-session.toml");
+    let run = |taps: u64| -> (String, f32, Option<f32>, f32, u64, u32, u32) {
+        let mut config = WebPrepareConfigV1::launch_defaults(RATE, QUANTUM);
+        config.source_ring_frames = QUANTUM;
+        config.console_command_queue_records = u64::from(DEPTH);
+        config.console_meter_blocks = u64::from(WINDOW_BLOCKS);
+        config.console_observation_taps = taps;
+        config.console_master_track_plus_one = if taps == 0 { 0 } else { 1 };
+        let mut host = AudioWorkletEngineHost::new(config);
+        assert_eq!(host.prepare(), RESULT_OK);
+        host.session_toml_mut().expect("TOML")[..toml.len()].copy_from_slice(toml.as_bytes());
+        assert_eq!(
+            host.compile(toml.len()),
+            RESULT_OK,
+            "{:?}",
+            core::str::from_utf8(host.diagnostic())
+        );
+        assert_eq!(host.console_tracks().len(), 1);
+        assert_eq!(
+            host.resources().observation_retained_bytes == 0,
+            taps == 0,
+            "the retained row follows the request, and is walked over the built runtime"
+        );
+        assert_eq!(host.set_meter_lease(true), RESULT_OK);
+
+        let subscribe = |host: &mut AudioWorkletEngineHost, kind: u32, tap: u32, window: u32| {
+            stage_command(host, 0, kind, 1, 255, 0, 0, tap, window, [0.0; 4]);
+            host.submit_commands(1);
+            *host.command_report()
+        };
+        let unknown_tap = subscribe(&mut host, COMMAND_OBSERVE_SUBSCRIBE, 9, WINDOW_BLOCKS);
+        let subscribed = subscribe(&mut host, COMMAND_OBSERVE_SUBSCRIBE, 1, WINDOW_BLOCKS);
+
+        let plane = vec![0.5_f32; QUANTUM as usize];
+        let mut blocks: Vec<Vec<f32>> = Vec::new();
+        let mut step = |host: &mut AudioWorkletEngineHost, block: u64| {
+            let planes: [&[f32]; 2] = [&plane, &plane];
+            assert_eq!(
+                host.submit_source(
+                    b"fixture-source",
+                    1,
+                    block * u64::from(QUANTUM),
+                    RATE,
+                    &planes,
+                    QUANTUM,
+                    false,
+                ),
+                RESULT_OK,
+            );
+            assert_eq!(host.render_next(), RESULT_OK);
+            host.poll_meters();
+            blocks.push(host.output_pcm().expect("output").to_vec());
+        };
+        for block in 0..8 {
+            step(&mut host, block);
+        }
+        let tracks = host.console_tracks().len();
+        let base = tracks * 2 + 2;
+        let armed = host.meter_frame()[base];
+        let master =
+            (host.meter_header().master_gr_present == 1).then(|| host.meter_frame()[base + tracks]);
+        let window_samples = host.meter_header().end_sample - host.meter_header().first_sample;
+        let _ = subscribe(&mut host, COMMAND_OBSERVE_UNSUBSCRIBE, 1, 0);
+        for block in 8..BLOCKS {
+            step(&mut host, block);
+        }
+        let disarmed = host.meter_frame()[base];
+        assert_eq!(host.status().rendered_quanta, BLOCKS);
+
+        let mut digest = Sha256::new();
+        for channel in 0..2_usize {
+            for output in &blocks {
+                let plane = &output[channel * QUANTUM as usize..(channel + 1) * QUANTUM as usize];
+                for sample in plane {
+                    digest.update(sample.to_bits().to_le_bytes());
+                }
+            }
+        }
+        let hex = digest
+            .finalize()
+            .iter()
+            .fold(String::with_capacity(64), |mut text, byte| {
+                use core::fmt::Write as _;
+                let _ = write!(&mut text, "{byte:02x}");
+                text
+            });
+        (
+            hex,
+            armed,
+            master,
+            disarmed,
+            window_samples,
+            unknown_tap.reason,
+            subscribed.reason,
+        )
+    };
+
+    let (observed, armed, master, disarmed, window, unknown_tap, subscribed) = run(4);
+    let (unobserved, quiet, quiet_master, _, _, _, unbound) = run(0);
+
+    assert_eq!(
+        observed, unobserved,
+        "arming every declared tap renders the identical bits"
+    );
+    assert!(armed > 0.0, "an armed tap publishes a positive magnitude");
+    assert_eq!(
+        master,
+        Some(armed),
+        "the designated master is track 0's own"
+    );
+    assert_eq!(disarmed, 0.0, "an unsubscribed tap publishes nothing");
+    assert_eq!(window, u64::from(WINDOW_BLOCKS) * u64::from(QUANTUM));
+    assert_eq!(unknown_tap, COMMAND_REASON_UNKNOWN_TAP);
+    assert_eq!(subscribed, COMMAND_REASON_NONE);
+    assert_eq!(quiet, 0.0, "no capacity means no reading");
+    assert_eq!(quiet_master, None, "and no master reading either");
+    assert_eq!(unbound, COMMAND_REASON_OBSERVATION_UNBOUND);
+
+    let expected: serde_pin::Pin =
+        serde_pin::read(include_str!("../tests/browser-v1/expected.json"));
+    assert_eq!(
+        observed, expected.native_observation,
+        "native and the pinned wasm observation-timeline digest must agree bit for bit"
+    );
+    assert_eq!(
+        observed, expected.simd128_observation,
+        "the shipped simd128 artifact renders this observation timeline to the same bits"
+    );
+}
+
+/// Issue #143 R7: what the browser bridge's two moved report rows moved *by*.
+///
+/// `bridgeMetadataBytes` and `bridgeRetainedBytes` in `tests/browser-v1/expected.json` are not
+/// magic numbers and never were: the first is exactly the host shell minus the two structures
+/// charged separately plus the plane-reference table, and the second is that plus the staging
+/// buffers. `frozen_layouts_and_values_are_exact` asserts the first formula directly; what this
+/// adds is the *size of the change*, so the re-pin is derived rather than read off a run.
+///
+/// Six fields joined `ReadyOwnership`, which is stored inline in the host shell:
+///
+/// | field | wasm32 | x86-64 |
+/// |---|---|---|
+/// | `effect_observations: Box<[Option<EffectObservationHandleV1>]>` | 8 | 16 |
+/// | `observation_tracks: Box<[u32]>` | 8 | 16 |
+/// | `observation_present: Box<[bool]>` | 8 | 16 |
+/// | `observation_armed: Box<[u32]>` | 8 | 16 |
+/// | `master_track: Option<u32>` | 8 | 8 |
+/// | `meter_header: WebMeterHeaderV1` | 64 | 64 |
+/// | **sum** | **104** | **136** |
+///
+/// The shipped wasm32 rows moved by `112`, which is `104` rounded up to the structure's 8-byte
+/// alignment. Nothing else in the report moved, which the oracle's `deepStrictEqual` proves.
+#[test]
+fn the_observation_fields_account_for_the_moved_bridge_rows() {
+    let fields = size_of::<Box<[Option<miso_engine_host_core::EffectObservationHandleV1>]>>()
+        + size_of::<Box<[u32]>>()
+        + size_of::<Box<[bool]>>()
+        + size_of::<Box<[u32]>>()
+        + size_of::<Option<u32>>()
+        + size_of::<WebMeterHeaderV1>();
+    let pointer = size_of::<usize>();
+    assert_eq!(
+        fields,
+        4 * 2 * pointer + 8 + usize::try_from(METER_HEADER_BYTES).expect("frozen"),
+        "four boxed slices, one optional index, and the meter header"
+    );
+    // The wasm32 instantiation of that sum, which is what the browser rows moved by.
+    assert_eq!(4 * 2 * 4 + 8 + 64, 104);
+    assert_eq!(104_usize.next_multiple_of(8), 104);
+    // The shipped rows moved by 112: 104 of fields plus 8 of alignment padding inside the shell.
+    assert_eq!(3_753_u64 - 3_641, 112);
+    assert_eq!(1_075_129_u64 - 1_075_017, 112);
 }

@@ -59,8 +59,8 @@
         "sourceIdBytes": "1024",
         "sourcePcmStagingBytes": "4096",
         "outputPcmBytes": "1024",
-        "bridgeMetadataBytes": "3641",
-        "bridgeRetainedBytes": "1075017",
+        "bridgeMetadataBytes": "3753",
+        "bridgeRetainedBytes": "1075129",
         "largestBridgeAllocationBytes": "1048576",
         "sourceTotalBytes": "2206",
         "sourceOverheadBytes": "1182",
@@ -71,7 +71,8 @@
         "graphIncrementalPlanBytes": "18988",
         "graphMetadataBytes": "3367",
         "graphDelayBytes": "0",
-        "largestNamedAllocationBytes": "1048576"
+        "largestNamedAllocationBytes": "1048576",
+        "observationRetainedBytes": "0"
       },
       "results": {
         "first": 0,
@@ -169,6 +170,18 @@
       },
       "pcmF32leSha256": "fc760629464396730a4716027e59ba89a80fbe9c4f47aa103c68b0b6bde847b7"
     },
-    "nativeCommandTimelinePcmF32leSha256": "fc760629464396730a4716027e59ba89a80fbe9c4f47aa103c68b0b6bde847b7"
+    "nativeCommandTimelinePcmF32leSha256": "fc760629464396730a4716027e59ba89a80fbe9c4f47aa103c68b0b6bde847b7",
+    "observationTimeline": {
+      "armedTrackGrDbPositive": true,
+      "armedMasterEqualsTrack": true,
+      "armedWindowSamples": "256",
+      "disarmedTrackGrDb": 0,
+      "unobservedMasterGrDb": null,
+      "subscribeReason": 0,
+      "unknownTapReason": 10,
+      "unboundReason": 11,
+      "pcmF32leSha256": "9ae838f85b055c4a6a96fb25aa3c2d7c17c5000a39b71c099d649e35bd7525d7"
+    },
+    "nativeObservationPcmF32leSha256": "9ae838f85b055c4a6a96fb25aa3c2d7c17c5000a39b71c099d649e35bd7525d7"
   }
 }

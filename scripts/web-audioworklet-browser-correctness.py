@@ -138,8 +138,44 @@ def load_inputs() -> tuple[dict, dict]:
         # Issue #137 E2: the command-timeline leg and its native pin.
         "commandTimeline",
         "nativeCommandTimelinePcmF32leSha256",
+        # Issue #143 E1/E4/E12: the observation-timeline leg and its native pin.
+        "observationTimeline",
+        "nativeObservationPcmF32leSha256",
     }:
         raise ValueError("direct oracle keys")
+    # Issue #143. The observation leg's contract, stated here so a browser run that silently
+    # stopped observing anything cannot pass: an armed tap publishes a positive magnitude, the
+    # designated master is that track's own reading, the window is the declared two blocks, an
+    # unsubscribed tap publishes exactly zero, a session with no capacity reports no master
+    # reading at all, and the two typed refusals keep their frozen reasons.
+    observation = direct.get("observationTimeline", {})
+    if set(observation) != {
+        "armedTrackGrDbPositive",
+        "armedMasterEqualsTrack",
+        "armedWindowSamples",
+        "disarmedTrackGrDb",
+        "unobservedMasterGrDb",
+        "subscribeReason",
+        "unknownTapReason",
+        "unboundReason",
+        "pcmF32leSha256",
+    }:
+        raise ValueError("observation timeline keys")
+    if observation.get("pcmF32leSha256") != direct.get("nativeObservationPcmF32leSha256"):
+        raise ValueError("observation timeline native parity")
+    if observation.get("armedTrackGrDbPositive") is not True:
+        raise ValueError("observation timeline armed magnitude")
+    if observation.get("armedMasterEqualsTrack") is not True:
+        raise ValueError("observation timeline master designation")
+    if observation.get("armedWindowSamples") != "256":
+        raise ValueError("observation timeline window length")
+    if observation.get("disarmedTrackGrDb") != 0:
+        raise ValueError("observation timeline unsubscribe")
+    if observation.get("unobservedMasterGrDb") is not None:
+        raise ValueError("observation timeline absent master")
+    if (observation.get("subscribeReason"), observation.get("unknownTapReason"),
+            observation.get("unboundReason")) != (0, 10, 11):
+        raise ValueError("observation timeline typed reasons")
     timeline = direct.get("commandTimeline", {})
     if set(timeline) != {"reports", "beforeDisposeStatus", "pcmF32leSha256"}:
         raise ValueError("command timeline keys")
@@ -196,6 +232,17 @@ def load_inputs() -> tuple[dict, dict]:
     # dynamic-rack parametric EQ over a longer region, and both legs read this exact file. The EQ
     # is what makes an effect-addressed command have something real to address, and its band 1 is
     # a low shelf so a DC fixture can witness the parameter move at all.
+    # Issue #143: the observation timeline's own session -- one track, one compressor in the
+    # dynamic rack, so the per-node scalar publish path is what the browser exercises.
+    observation_session = (FIXTURE / "observation-session.toml").read_text()
+    for frozen in (
+        "sample_rate_hz = 48000",
+        "quantum_frames = 128",
+        "length_samples = 2048",
+        'effect_id = "miso.compressor"',
+    ):
+        if frozen not in observation_session:
+            raise ValueError(f"observation session lacks {frozen}")
     command_session = (FIXTURE / "command-session.toml").read_text()
     for frozen in (
         "sample_rate_hz = 48000",

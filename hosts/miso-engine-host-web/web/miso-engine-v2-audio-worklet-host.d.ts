@@ -75,20 +75,26 @@
 // lease costs one branch per block plus the per-track observation fold, which runs whenever the
 // observers exist.
 //
-// Gain reduction is **not** in the meter frame yet. Issue #140 D added the observation point --
-// `PreparedNativeEffect::gain_reduction`, additive and `None` by default, implemented by the
-// compressor -- but the transport is still missing: the graph binds observers to track stages, not
-// to effect instances, so nothing carries a per-effect reading out to the console.
-// `MisoMeterFrameV1` will gain `trackGrDb` additively once that transport exists.
+// Gain reduction **is** in the meter frame, since issue #143. The frame carries `trackGrDb` --
+// one non-negative decibel magnitude per track -- `masterGrDb`, and the `firstSample`/`endSample`
+// of the window they were folded over. It rides the existing `miso.meter.v1` post: there is no
+// second message and no second clock, so the pinned occurrence rule is unchanged.
+//
+// What a tap costs is declared, not guessed. Every effect publishes an `observations` menu in the
+// build-time metadata JSON; a `resident` tap is a copy out of state the block already wrote and is
+// `subscribable`, a `computed` tap is an analysis pass that does not ship in V1 and is refused with
+// `MisoCommandReasonV1.UnsupportedKind`. A session that never asks for observation
+// (`consoleObservationTaps === 0n`) allocates none of it and renders byte-identical audio; inside a
+// session that does, an unarmed tap costs one predicted branch per driven effect per block.
 //
 // ## What a frame costs the render callback
 //
 // One `postMessage` per window, not per block. The body is a frozen object allocated at
-// construction whose only array is a `Float32Array` of `2 * trackCount + 2` elements, also
-// allocated at construction and overwritten in place; nothing is transferred, so the caller keeps
-// no ownership obligation. The single allocation left is the structured clone `postMessage`
-// performs, which is `4 * (2 * trackCount + 2)` bytes plus four small numbers -- 264 bytes for a
-// 32-track console. That cost has not been separately benchmarked in a browser; the telemetry
+// construction whose two arrays are a `Float32Array` of `2 * trackCount + 2` peaks and one of
+// `trackCount` gain-reduction magnitudes, both allocated at construction and overwritten in place;
+// nothing is transferred, so the caller keeps no ownership obligation. The single allocation left
+// is the structured clone `postMessage` performs, which is `4 * (3 * trackCount + 2)` bytes plus a
+// handful of small numbers -- 392 bytes for a 32-track console. That cost has not been separately benchmarked in a browser; the telemetry
 // lease measures the render export, not the post around it.
 //
 // # Exactly one artifact
@@ -175,6 +181,15 @@ export const enum MisoCommandKindV1 {
   EffectParam = 5,
   /// Set an effect bypass, through the latency-preserving shunt. Applied (issue #140 A).
   EffectBypass = 6,
+  /// Arm one declared observation tap of one effect instance. Applied (issue #143).
+  ///
+  /// `parameterId` carries the effect-local **tap id** from the metadata JSON's per-effect
+  /// `observations` array, `smoothingSamples` carries the window length in render blocks (`0` for
+  /// the plan's default), and every `values` word must be `0`: a subscription changes what is read,
+  /// never what is rendered.
+  ObserveSubscribe = 7,
+  /// Disarm one declared observation tap of one effect instance. Applied (issue #143).
+  ObserveUnsubscribe = 8,
 }
 
 /// Frozen typed reasons a live-console submission was refused (issue 137 D1).
@@ -199,6 +214,16 @@ export const enum MisoCommandReasonV1 {
   Backpressure = 8,
   /// The engine is not `STATE_READY`.
   WrongState = 9,
+  /// `parameterId` is not a declared observation tap of the addressed effect (issue 143).
+  ///
+  /// Deliberately not `UnknownParameter`: a parameter and a tap are different namespaces on the
+  /// same effect, and a caller that confuses them learns which one it got wrong.
+  UnknownTap = 10,
+  /// The tap exists and the address is right; this session bound no observation capacity.
+  ///
+  /// Prepare with `consoleObservationTaps` set. Retrying will not help, which is why this is its
+  /// own reason and not `Backpressure`.
+  ObservationUnbound = 11,
 }
 
 /// One live-console command. `255` means "not applicable to this kind".
@@ -250,7 +275,7 @@ export interface MisoSessionMapV1 {
   readonly metersAttached: boolean;
 }
 
-/// One decimated meter window (issue 137 D2).
+/// One decimated meter window (issue 137 D2, extended by issue 143).
 export interface MisoMeterFrameV1 {
   readonly tag: "miso.meter.v1";
   readonly sequence: number;
@@ -259,6 +284,64 @@ export interface MisoMeterFrameV1 {
   readonly trackCount: number;
   /// `[track0 L, track0 R, .., trackN L, trackN R, master L, master R]` peak magnitudes.
   readonly peaks: Float32Array;
+  /// Gain reduction per track, in **non-negative decibels**, `trackCount` long (issue 143).
+  ///
+  /// Non-negative because the tap declares a `peakMagnitude` fold, not because the app clamps it:
+  /// an effect holds its reduction as negative decibels internally, and the fold is `max(|x|)` over
+  /// the window. An app's `Math.max(0, x ?? 0)` is therefore a no-op rather than a silent zeroing.
+  ///
+  /// Every entry is finite. `0` deliberately conflates "not reducing" with "no observed effect on
+  /// this track", because the array is positional and read without null checks; the distinction
+  /// lives in the `miso.observe.v1` acknowledgement's subscription map. Several armed taps on one
+  /// track fold max-magnitude into the one slot, on the control plane.
+  readonly trackGrDb: Float32Array;
+  /// The designated master track's own folded reading, or `null` (issue 143 D6).
+  ///
+  /// `null` -- never `0` -- when no track was designated or the designated track published no
+  /// window, because `0` would be indistinguishable from "the master is not reducing".
+  readonly masterGrDb: number | null;
+  /// Absolute sample the reported window opened at, inclusive.
+  ///
+  /// Correlate this against a `MisoCommandAckV1.appliedAtSample`: the first window whose
+  /// `firstSample >= appliedAtSample` is the first that reflects the command. Consecutive windows
+  /// tile with no gap, so `firstSample` of the next frame is this frame's `endSample`.
+  readonly firstSample: bigint;
+  /// Absolute sample the reported window closed at, exclusive.
+  readonly endSample: bigint;
+}
+
+/// The subscription map one `miso.observe.v1` acknowledgement carries (issue 143).
+///
+/// This is where "which tracks have an observed effect at all" lives. `trackGrDb` is positional
+/// and cannot express absence; this can.
+export interface MisoObservationBindingV1 {
+  readonly trackIndex: number;
+  /// `0` simd1, `1` dynamic, `2` simd2.
+  readonly rack: number;
+  readonly effectIndex: number;
+  /// The effect-local tap id, matching the metadata JSON's per-effect `observations[].id`.
+  readonly tapId: number;
+  /// Index into `MisoMeterFrameV1.trackGrDb` this tap folds into.
+  readonly frameSlot: number;
+  /// Render blocks per published window, as it is actually in force.
+  readonly windowBlocks: number;
+}
+
+/// One observation acknowledgement (issue 143).
+///
+/// # Subscriptions are per plan
+///
+/// A structural session edit replaces the plan, and subscriptions belong to the plan they were
+/// applied to: the replacement's lanes exist and are unarmed, and the readers the old plan handed
+/// out simply stop advancing. An app re-subscribes against the new plan and receives a fresh map
+/// whose sequences restart at `1`. Nothing carries over, and nothing has to be torn down.
+export interface MisoObservationAckV1 {
+  readonly tag: "miso.observe.v1";
+  readonly requestId: number;
+  readonly result: number;
+  readonly reason: MisoCommandReasonV1;
+  /// Every armed tap of the current plan, in canonical `(track, rack, effectIndex, tapId)` order.
+  readonly bindings: MisoObservationBindingV1[];
 }
 
 /// One windowed render-telemetry frame (issue 137 D3). JavaScript only; Wasm never sees the lease.
@@ -306,6 +389,19 @@ export interface MisoWebPrepareLimitsV1 {
   consoleCommandQueueRecords: bigint;
   /// Meter window in render blocks, or `0n` to bind no meter observer at all (issue 137).
   consoleMeterBlocks: bigint;
+  /// Maximum declared observation taps to bind per effect, or `0n` for none at all (issue 143).
+  ///
+  /// Zero is the honest form: no lane, no accumulator and no conflating cell is allocated anywhere
+  /// in the compiled plan, `observationRetainedBytes` is `0n`, and a subscription is refused with
+  /// `MisoCommandReasonV1.ObservationUnbound`. Requires `consoleCommandQueueRecords !== 0n`,
+  /// because a subscription rides the effect's own command queue.
+  consoleObservationTaps: bigint;
+  /// The designated master track **plus one**, or `0n` for none (issue 143).
+  ///
+  /// V1 has no structural master bus -- submixes and outputs carry no effect racks -- so
+  /// `masterGrDb` is a designation rather than a discovery. Plus one because zero has to keep
+  /// meaning "unset". Requires `consoleObservationTaps !== 0n`.
+  consoleMasterTrackPlusOne: bigint;
 }
 
 export interface MisoWebResourceReportV1 {
@@ -332,6 +428,11 @@ export interface MisoWebResourceReportV1 {
   readonly graphMetadataBytes: bigint;
   readonly graphDelayBytes: bigint;
   readonly largestNamedAllocationBytes: bigint;
+  /// Engine-owned bytes the plan's observation lanes and conflating cells retain (issue 143).
+  ///
+  /// Exactly `0n` for a session prepared with `consoleObservationTaps === 0n`, and that zero is
+  /// walked over the built runtime rather than computed from the configuration.
+  readonly observationRetainedBytes: bigint;
 }
 
 export interface MisoStatusV1 {

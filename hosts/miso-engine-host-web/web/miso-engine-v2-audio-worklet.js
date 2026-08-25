@@ -1,5 +1,7 @@
 const ABI_VERSION = 0x00010000;
 const CONFIG_BYTES = 192;
+// Issue #143 D5: the fixed structure carrying the sample window an `f32` frame cannot hold.
+const METER_HEADER_BYTES = 64;
 const RESULT_OK = 0;
 const RESULT_INVALID_ARGUMENT = 1;
 const RESULT_UNSUPPORTED = 7;
@@ -34,6 +36,10 @@ const LIMIT_FIELDS = [
   "maximumEffectScratchBytes", "maximumBuiltinRetainedBytes", "maximumHostRetainedBytes",
   "maximumNamedAllocationBytes", "maximumMeterStreams", "maximumMeterItems", "maximumMeterBytes",
   "consoleCommandQueueRecords", "consoleMeterBlocks",
+  // Issue #143 D3/D6: the frozen configuration's remaining two reserved words, carved exactly as
+  // #137 carved the first two. Zero in both is what every pre-#143 writer already sends and means
+  // "no observation capacity, no master designation".
+  "consoleObservationTaps", "consoleMasterTrackPlusOne",
 ];
 const SOURCE_FIELDS = [
   "tag", "requestId", "sourceId", "generation", "startFrame", "sampleRateHz", "planes", "frames",
@@ -337,16 +343,49 @@ class MisoEngineV2AudioWorkletProcessor extends AudioWorkletProcessor {
       BUFFER_METER_FRAME,
     );
     this.metersAttached = init.limits.consoleMeterBlocks !== 0n;
+    this.observationAttached = init.limits.consoleObservationTaps !== 0n;
     if (this.metersAttached) {
+      // Issue #143 D5: the frame is `3T + 3` words -- the peak section exactly where it was, then
+      // one non-negative gain-reduction magnitude per track and the master's.
       if (!u32(framePointer) || framePointer === 0
-          || frameCapacity !== (this.trackCount * 2 + 2) * 4) return false;
+          || frameCapacity !== (this.trackCount * 3 + 3) * 4) return false;
+      const headerPointer = this.exports.miso_engine_web_v1_meter_header_ptr(this.handle);
+      if (!u32(headerPointer) || headerPointer === 0) return false;
       this.meterView = new Float32Array(this.memoryBuffer, framePointer, frameCapacity / 4);
+      // Two fixed views over the one buffer, built here and never again: the frozen render-callback
+      // policy forbids `subarray` inside it, and rightly -- a per-block view is a per-block
+      // allocation. The peak view is byte-for-byte the `2T + 2` region it always was.
+      this.meterPeakView = new Float32Array(
+        this.memoryBuffer,
+        framePointer,
+        this.trackCount * 2 + 2,
+      );
+      this.meterGainView = new Float32Array(
+        this.memoryBuffer,
+        framePointer + (this.trackCount * 2 + 2) * 4,
+        this.trackCount,
+      );
+      this.meterMasterGainIndex = this.trackCount * 3 + 2;
+      this.meterHeaderView = new DataView(this.memoryBuffer, headerPointer, METER_HEADER_BYTES);
+      if (this.meterHeaderView.getUint32(0, true) !== METER_HEADER_BYTES
+          || this.meterHeaderView.getUint32(4, true) !== ABI_VERSION
+          || this.meterHeaderView.getUint32(8, true) !== this.trackCount) {
+        return false;
+      }
       this.meterMessage = {
         tag: "miso.meter.v1",
         sequence: 0,
         windows: 0,
         trackCount: this.trackCount,
-        peaks: new Float32Array(frameCapacity / 4),
+        // The frozen `2T + 2` peak view, unmoved: an existing reader indexes it exactly as before.
+        peaks: new Float32Array(this.trackCount * 2 + 2),
+        // Issue #143: one non-negative decibel magnitude per track. Positional and always finite;
+        // `0` deliberately conflates "not reducing" with "no observed effect", because the array
+        // is read without null checks and the distinction lives in the subscription map.
+        trackGrDb: new Float32Array(this.trackCount),
+        masterGrDb: null,
+        firstSample: 0n,
+        endSample: 0n,
       };
     }
     this.telemetryMessage = {
@@ -409,26 +448,36 @@ class MisoEngineV2AudioWorkletProcessor extends AudioWorkletProcessor {
     if (values64.some((value) => !positiveU64(value))) {
       throw new RangeError("Invalid u64 preparation limit");
     }
-    // Issue #137 D1/D2: the two console words are the first two of the frozen configuration's
-    // four reserved words. Zero in both is exactly what every pre-#137 writer wrote and means
-    // "default command-queue depth, no meter observers attached".
-    const consoleWords = [limits.consoleCommandQueueRecords, limits.consoleMeterBlocks];
+    // Issue #137 D1/D2 and #143 D3/D6: the four console words *are* the frozen configuration's
+    // four reserved words. All zero is exactly what every pre-#137 writer wrote and means "default
+    // command-queue depth, no meter observers, no observation capacity, no master designation".
+    const consoleWords = [
+      limits.consoleCommandQueueRecords, limits.consoleMeterBlocks,
+      limits.consoleObservationTaps, limits.consoleMasterTrackPlusOne,
+    ];
     if (consoleWords.some((value) => !validU64(value))) {
       throw new RangeError("Invalid u64 console configuration word");
+    }
+    // A subscription rides the effect's own command queue, so capacity without one has no delivery
+    // path; a master designation with no capacity would report a number nothing produces.
+    if ((limits.consoleObservationTaps !== 0n && limits.consoleCommandQueueRecords === 0n)
+        || (limits.consoleMasterTrackPlusOne !== 0n && limits.consoleObservationTaps === 0n)) {
+      throw new RangeError("Invalid observation configuration word");
     }
     const view = new DataView(this.exports.memory.buffer, pointer, CONFIG_BYTES);
     values32.forEach((value, index) => view.setUint32(index * 4, value, true));
     values64.forEach((value, index) => view.setBigUint64(40 + index * 8, value, true));
     consoleWords.forEach((value, index) => view.setBigUint64(160 + index * 8, value, true));
-    for (let index = 0; index < 2; index += 1) view.setBigUint64(176 + index * 8, 0n, true);
   }
 
   readResources() {
     const view = this.resourceView;
+    // Issue #143: the report's first reserved word became `observationRetainedBytes`; the other
+    // three are still required zero and the 224-byte layout is unchanged.
     if (view.getUint32(0, true) !== 224 || view.getUint32(4, true) !== ABI_VERSION
         || view.getUint32(20, true) !== 0 || view.getUint32(24, true) !== 0
         || view.getUint32(28, true) !== 0
-        || [192, 200, 208, 216].some((offset) => view.getBigUint64(offset, true) !== 0n)) {
+        || [200, 208, 216].some((offset) => view.getBigUint64(offset, true) !== 0n)) {
       throw new RangeError("Invalid resource report");
     }
     const names = [
@@ -438,6 +487,9 @@ class MisoEngineV2AudioWorkletProcessor extends AudioWorkletProcessor {
       "effectScalarStateBytes", "effectScalarScratchBytes", "builtinRetainedBytes",
       "graphSessionPlusPlanBytes", "graphIncrementalPlanBytes", "graphMetadataBytes",
       "graphDelayBytes", "largestNamedAllocationBytes",
+      // Issue #143: carved from the report's first reserved word; zero for a session prepared
+      // with `consoleObservationTaps === 0n`.
+      "observationRetainedBytes",
     ];
     const resources = {
       sampleRateHz: view.getUint32(8, true),
@@ -721,7 +773,15 @@ class MisoEngineV2AudioWorkletProcessor extends AudioWorkletProcessor {
     this.meterSequence += 1;
     this.meterMessage.sequence = this.meterSequence;
     this.meterMessage.windows = windows;
-    this.meterMessage.peaks.set(this.meterView);
+    this.meterMessage.peaks.set(this.meterPeakView);
+    // Issue #143 D5: the gain-reduction section rides the same post. There is no second message
+    // and no second clock -- the pinned-occurrence rule does not move.
+    this.meterMessage.trackGrDb.set(this.meterGainView);
+    this.meterMessage.masterGrDb = this.meterHeaderView.getUint32(44, true) === 1
+      ? this.meterView[this.meterMasterGainIndex]
+      : null;
+    this.meterMessage.firstSample = this.meterHeaderView.getBigUint64(16, true);
+    this.meterMessage.endSample = this.meterHeaderView.getBigUint64(24, true);
     this.port.postMessage(this.meterMessage);
   }
 

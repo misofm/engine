@@ -921,6 +921,7 @@ dependencies = [
  "miso-engine-core",
  "miso-engine-effect-contract",
  "miso-engine-host-core",
+ "miso-engine-math",
  "miso-engine-session",
  "sha2 0.11.0",
 ]
