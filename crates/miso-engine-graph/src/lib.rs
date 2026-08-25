@@ -428,17 +428,17 @@ pub struct GraphPreparedEffectBank {
     pub scratch: AoSoaScratch,
 }
 /// Every homogeneous bank a prepared plan will render, as one member list each, for the
-/// lowering's dedication rule and its bank windows (issue #169).
+/// lowering's bank windows (issue #169).
 ///
-/// Grouping matters: [`program::lower`] needs each bank's *window* -- first member op to last --
-/// and not merely the union of all members, because that window is the range over which
-/// `runtime::units_of` reorders the schedule.
+/// Grouping matters, and a flat union of members would not do: [`program::lower`] needs each
+/// bank's *window* -- first member op to last -- because that is the op range over which
+/// `runtime::units_of` reorders the schedule, hoisting members forward and deferring everything
+/// else past them.
 ///
-/// Effect banks are the load-bearing half: #166 made dynamic-rack effects bank-eligible, and
-/// `program::is_statically_dedicated` answers `false` for them. Builtin banks are listed too:
-/// their members are already statically dedicated (`attach_builtin_banks` rejects any member that
-/// is not a `PostInputBuiltins` stage), but their *window* is real and constrains colouring the
-/// same way an effect bank's does.
+/// Effect banks are the reason this exists: #166 made dynamic-rack effects bank-eligible, and a
+/// dynamic rack banks by cohort signature, so one bank's members need not be adjacent and another
+/// bank's members can sit between them. Builtin banks are listed on the same terms -- their
+/// window is just as real -- even though their members happen to be contiguous today.
 fn bank_member_nodes(
     banks: &[GraphPreparedEffectBank],
     builtin_banks: &[GraphPreparedBuiltinBank],

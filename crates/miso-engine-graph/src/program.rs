@@ -191,24 +191,18 @@ const fn is_alias_candidate(node: &GraphNodeId) -> bool {
     )
 }
 
-/// The *static* half of the dedication rule: nodes whose output buffer may never be shared,
-/// whether or not this particular plan banks them.
+/// A node whose output buffer is never returned to the free list.
 ///
-/// A homogeneous bank gathers *all* of its members' outputs, runs, and scatters them back, so
-/// every member's output is live from the first member's gather to the last member's scatter --
-/// across every op scheduled between them. Colouring must therefore never hand a bank member's
-/// storage to an op in that window, and no op may consume a member's buffer in place.
+/// The SIMD-rack effects and the post-input builtin stage, unchanged since #99: the same rule
+/// `GraphExecutor::new` once hard-coded by re-buffering members after colouring. It is a
+/// conservative classification by node *kind*, and it costs whatever it costs -- a dedicated
+/// buffer cannot be consumed in place, so its consumer pays a copy.
 ///
-/// This predicate is deliberately **not** the definition of "bank member". It is the conservative
-/// classification the lowering has always applied -- the SIMD-rack effects and the post-input
-/// builtin stage -- and it is kept exactly as it was so that a plan with no banks at all colours
-/// byte for byte the way it did before. The membership half lives in [`lower`], which is handed
-/// the plan's actual bank members; the two are OR-ed, so dedication is only ever *added*.
-///
-/// Issue #169: before that OR existed this predicate was the whole rule, and it answers `false`
-/// for `RackId::Dynamic`. #166 made dynamic-rack effects bank-eligible, so a dynamic bank member
-/// was mis-classified as shareable -- see [`lower`] for the divergence that made reachable.
-const fn is_statically_dedicated(node: &GraphNodeId) -> bool {
+/// It is **not** what makes a homogeneous bank safe, despite predating banks and looking like it
+/// should be. A bank's hazard is a *window*, not a node; the window is handled by
+/// [`bank_windows`], and [`lower`] records why extending this predicate to bank members was
+/// measured and rejected (issue #169).
+const fn is_dedicated(node: &GraphNodeId) -> bool {
     match node {
         GraphNodeId::Effect(id) => !matches!(id.rack, RackId::Dynamic),
         GraphNodeId::TrackStage { stage, .. } => matches!(stage, TrackStage::PostInputBuiltins),
@@ -291,8 +285,8 @@ struct Lifetime {
 ///
 /// `banks` is one entry per homogeneous bank this plan will render, each listing that bank's
 /// member nodes in any order and from any rack. It is the *plan's* answer, not a guess from the
-/// node id. Ids that are not nodes of this spec are ignored: membership can only ever make
-/// colouring more conservative, so an id the spec does not have costs nothing.
+/// node id, and it is used for one thing: the op ranges those banks reorder. Ids that are not
+/// nodes of this spec are ignored -- a stale id can only widen a window, never unsound one.
 ///
 /// ## Banks reorder the schedule, and colouring has to survive it (issue #169)
 ///
@@ -304,26 +298,43 @@ struct Lifetime {
 ///
 /// A bank may not cross a dependency level (#96 F12) and ops are level-major, so every op in a
 /// window sits at one level and no op in a window reads another's output. Each op in a window
-/// therefore reads only values produced before the window and is read only after it, which makes
-/// the whole soundness condition a single sentence:
+/// therefore reads only values produced before the window and is read only after it. Its inputs
+/// are live entering the window and its output is dead until the window ends, so the whole
+/// soundness condition collapses to one sentence:
 ///
 /// > **No physical slot may be recycled inside a bank window.**
 ///
-/// Colouring earns that two ways, and needs both:
+/// `bank_windows` computes those ranges and pass 2 *holds* every slot freed inside one until
+/// the window closes, instead of returning it to the free list where an op the bank hoists past
+/// its releaser could take it. `a_bank_window_never_recycles_a_physical_slot` constructs the
+/// smallest graph that reaches the defect and
+/// `bank_window_hoisting_preserves_dataflow_on_random_graphs` interprets seeded graphs in the
+/// order the executor actually runs them.
 ///
-/// * a member's output is `dedicated`, so it is never *returned* to the free list; and
-/// * a slot freed by an op inside a window is *held* until the window closes, so it is never
-///   *handed out* to an op the bank hoists past its releaser.
+/// ## The rejected alternative: dedication by bank membership
 ///
-/// `is_statically_dedicated` answered `false` for `RackId::Dynamic`, and #166 made dynamic-rack
-/// effects bank-eligible, so the first guarantee lapsed for exactly the nodes #166 added. The
-/// second was never there at all: `take` has always drawn from the free list without regard to
-/// windows, which is why marking members dedicated *alone* makes matters worse -- a dedicated
-/// member cannot fold into its producer in place, so it allocates, and the slot it allocates may
-/// be one a hoisted op still needs.
+/// The obvious-looking fix is to extend `is_dedicated` to bank members, so a member's output is
+/// never returned to the free list. **It was implemented, measured and deliberately not taken.**
+/// Do not re-propose it without new evidence, because:
 ///
-/// `a_bank_window_never_recycles_a_physical_slot` and
-/// `bank_window_hoisting_preserves_dataflow_on_random_graphs` construct both failures.
+/// * **It does not fix the defect.** Dedication governs what colouring *returns*; the hazard is
+///   what colouring *takes*. `take` draws from the free list with no notion of a window, so a
+///   slot released inside one still reaches a member hoisted past its releaser. Over the corpus
+///   `bank_window_hoisting_preserves_dataflow_on_random_graphs` draws from, 285 of 3617 graphs
+///   diverge today and the window hold takes that to zero.
+/// * **On its own it makes matters worse** -- 528 divergences, up from 285. A dedicated member
+///   cannot fold into its producer in place, so it allocates, and the slot it allocates may be
+///   one a hoisted op still needs.
+/// * **It is redundant once windows hold**, and it is not free: on
+///   `fixtures/session/v1/console-sixty-four-track.toml` it costs 64 arena buffers (193 -> 257)
+///   and 64 stereo block copies per render block, one per dynamic member whose consumer can no
+///   longer consume it in place. The window hold costs nothing there --
+///   `banking_a_dynamic_rack_costs_no_arena_buffers` pins the 193.
+///
+/// The invariant the doc on `is_dedicated` used to claim for bank members -- "no op may consume
+/// a member's buffer in place" -- is not needed and is not held. A member's consumer sits at a
+/// strictly later dependency level, so it runs after the whole bank unit, including the
+/// observers; overwriting a member's output there is safe.
 ///
 /// # Errors
 /// See [`ProgramError`]; every variant means the caller's own invariants were violated.
@@ -360,16 +371,6 @@ pub fn lower(
     }
     if cursor != node_count {
         return Err(ProgramError::ScheduleMismatch);
-    }
-
-    // Bank membership, interned. An id that is not a node of this spec is ignored rather than
-    // rejected: this only ever *adds* dedication, so a stale id costs nothing and cannot make a
-    // sound plan unlowerable.
-    let mut is_bank_member = vec![false; node_count];
-    for id in banks.iter().flatten() {
-        if let Some(index) = node_index(spec, id) {
-            is_bank_member[index as usize] = true;
-        }
     }
 
     // Schedule position per node, and the interned schedule.
@@ -511,12 +512,9 @@ pub fn lower(
                 })
             }
         };
-        // Dedication is the union of the static classification and this plan's actual bank
-        // membership (#169). Union, not replacement: a plan with no banks colours exactly as it
-        // did before, and a member can only ever gain dedication, never lose it.
-        let dedicated = is_statically_dedicated(id) || is_bank_member[index];
+        let dedicated = is_dedicated(id);
         // In place iff this op is the *only* reader of a single undelayed input, and neither end
-        // of the aliasing is a bank member.
+        // of the aliasing is dedicated storage.
         let single = (last_input - first_input == 1)
             && sidechain.is_none()
             && inputs[first_input as usize].delay.is_none();
@@ -593,10 +591,9 @@ pub fn lower(
             if closes_here[op_index - 1] {
                 free.extend(held.drain(..));
             }
-            // What op `op_index - 1` gave up. A dedicated buffer gives up nothing: a bank keeps
-            // every member's output live across the whole gather/process/scatter window. A
-            // staging scratch belongs to the op that filled it, so it retires with that op's
-            // outputs.
+            // What op `op_index - 1` gave up. A dedicated buffer gives up nothing -- that is what
+            // dedication is. A staging scratch belongs to the op that filled it, so it retires
+            // with that op's outputs.
             //
             // Inside a bank window those slots are *held* rather than freed (#169): the bank
             // hoists some of the window's ops past op `op_index - 1`, so a slot it no longer
@@ -1273,15 +1270,17 @@ mod tests {
                     .all(|pair| (pair[0].level, pair[0].node) < (pair[1].level, pair[1].node)),
                 "graph {graph}: ops are not level-major"
             );
-            // Once a bank-eligible node has written its buffer, nothing else may write it.
+            // Once a dedicated node has written its buffer, nothing else may write it.
             //
-            // A homogeneous bank gathers every member's output, runs, and scatters them back, so
-            // all member outputs are live from the first gather to the last scatter -- across
-            // every op scheduled between them. Colouring must therefore never hand that storage
-            // to a later op, and no later op may consume it in place. Inheriting storage a *dead*
-            // buffer used earlier is fine and is what keeps the arena small; the invariant is
-            // forward-only. The symbolic interpreter above cannot see this: it evaluates one op at
-            // a time, and a bank is not one op, so it is checked structurally here.
+            // Dedication is forward-only, and deliberately so: inheriting storage a *dead* buffer
+            // used earlier is fine and is what keeps the arena small. What it forbids is handing
+            // the slot on once the node owns it. The symbolic interpreter above cannot see this,
+            // because it compares values op by op and a recycled slot is only wrong once someone
+            // reads it, so it is checked structurally here.
+            //
+            // This is *not* the bank invariant, despite `is_dedicated` predating banks and
+            // covering most bank-eligible nodes. A bank's hazard is its reordering window; see
+            // `bank_window_hoisting_preserves_dataflow_on_random_graphs` and `lower` (#169).
             let mut open: std::collections::BTreeMap<BufferRef, usize> =
                 std::collections::BTreeMap::new();
             for (at, op) in program.ops.iter().enumerate() {
@@ -1300,7 +1299,7 @@ mod tests {
                         );
                     }
                 }
-                if is_statically_dedicated(&spec.nodes[op.node as usize].id) {
+                if is_dedicated(&spec.nodes[op.node as usize].id) {
                     open.insert(op.output, at);
                 }
             }
@@ -1657,25 +1656,28 @@ mod tests {
             divergence_in_runtime_order(&spec, &schedule, &delays, &program, &lanes),
             None
         );
-        // Holding the window's slots costs two buffers on this graph, and buys the collision
-        // away. The window is the only thing that grew: nothing else about the colouring moved.
-        assert_eq!((unaware.buffers, program.buffers), (7, 9));
+        // And it costs nothing here: holding a slot across the window changes *which* slot each
+        // op gets, not how many exist. The window hold buys the collision away out of the
+        // colouring's own slack -- which is why it, and not dedication, is the fix that shipped.
+        assert_eq!((unaware.buffers, program.buffers), (7, 7));
     }
 
-    /// Issue #169's structural half: a bank member's output is dedicated storage, whatever rack it
-    /// came from.
+    /// Issue #169's structural half: **no physical slot is recycled inside a merged bank
+    /// window**, which is the whole soundness condition (see [`lower`]).
     ///
-    /// `is_statically_dedicated` answers `false` for `RackId::Dynamic`, so before #166 that was
-    /// also the answer for "is this a bank member". It is not any more, and dedication now follows
-    /// the plan's own membership. Dedication is not observable directly, so this asserts its two
-    /// consequences: a member never folds into its producer in place, and nothing else in the
-    /// program ever writes a member's buffer.
+    /// Four tracks and two interleaved cohorts -- the shape a dynamic rack produces when
+    /// neighbouring tracks carry different chains, which is what #166 made reachable. Each bank's
+    /// window contains the other's members, so the two merge into one span: what makes them
+    /// unsafe is not either bank alone but that each reorders the other's ops.
+    ///
+    /// The overlap assertion is the non-vacuity guard. If the fixture ever stopped interleaving,
+    /// the windows would stop merging and this would pass on a graph that no longer poses the
+    /// question.
     #[test]
-    fn every_dynamic_bank_member_is_dedicated_storage() {
+    fn no_slot_is_recycled_inside_a_merged_bank_window() {
         let mut nodes = Vec::new();
         let mut edges = Vec::new();
-        let tracks = ["t00", "t01", "t02", "t03"];
-        for (index, track) in tracks.iter().enumerate() {
+        for (index, track) in ["t00", "t01", "t02", "t03"].iter().enumerate() {
             let (track_nodes, track_edges) = dynamic_track(track, &format!("r{index:02}"));
             nodes.extend(track_nodes.into_iter().filter(|candidate| {
                 !matches!(candidate.id, GraphNodeId::Output { .. }) || index == 0
@@ -1683,8 +1685,6 @@ mod tests {
             edges.extend(track_edges);
         }
         let (spec, schedule, levels) = build(nodes, edges);
-        // Two interleaved cohorts, the shape a dynamic rack produces when neighbouring tracks
-        // carry different chains.
         let banks = vec![
             vec![dynamic_effect("t00"), dynamic_effect("t02")],
             vec![dynamic_effect("t01"), dynamic_effect("t03")],
@@ -1692,27 +1692,34 @@ mod tests {
         let program = lower(&spec, &schedule, &levels, &[], &banks).expect("lowers");
         assert_program_matches_spec(&spec, &schedule, &[], &program);
 
-        for member in banks.iter().flatten() {
-            let index = node_index(&spec, member).expect("member is a node");
-            let op_index = program.node_op[index as usize].expect("a member is never elided");
-            let op = &program.ops[op_index as usize];
-            assert!(
-                !op.in_place,
-                "member {member:?} folded into its producer's buffer"
-            );
-            // Dedication is forward-only, and deliberately so: inheriting a slot some *dead*
-            // buffer used earlier is what keeps the arena small. What it forbids is handing the
-            // slot on once the member owns it.
-            let buffer = program.node_buffer[index as usize];
-            for (other, candidate) in program.ops.iter().enumerate().skip(op_index as usize + 1) {
-                let (writes, _) = touched(&program, candidate);
-                assert!(
-                    !writes.contains(&buffer.0),
-                    "op {other} writes buffer {buffer:?}, which member {member:?} owns"
-                );
-            }
-        }
-        assert_no_slot_is_recycled_inside_a_bank_window(&program, &spec, &banks, "structural");
+        // The two windows really do interleave, so `bank_windows` really does merge them.
+        let window = |members: &[GraphNodeId]| {
+            let ops: Vec<usize> = members
+                .iter()
+                .map(|id| {
+                    let index = node_index(&spec, id).expect("member is a node");
+                    program.node_op[index as usize].expect("a member is never elided") as usize
+                })
+                .collect();
+            (
+                *ops.iter().min().expect("first"),
+                *ops.iter().max().expect("last"),
+            )
+        };
+        let (first_start, first_end) = window(&banks[0]);
+        let (second_start, second_end) = window(&banks[1]);
+        assert!(
+            first_start < second_start && second_start < first_end && first_end < second_end,
+            "the cohorts must interleave: {first_start}..{first_end} and \
+             {second_start}..{second_end}"
+        );
+
+        assert_no_slot_is_recycled_inside_a_bank_window(&program, &spec, &banks, "merged window");
+        let lanes = member_lanes(&spec, &banks);
+        assert_eq!(
+            divergence_in_runtime_order(&spec, &schedule, &[], &program, &lanes),
+            None
+        );
     }
 
     /// Issue #169, the load-bearing eval: over seeded multi-track graphs with dynamic rack chains,
@@ -1728,7 +1735,7 @@ mod tests {
         let mut state = 0x1234_5678_9abc_def1_u64;
         let mut banked_graphs = 0usize;
         let mut unaware_divergences = 0usize;
-        for graph in 0..600_u32 {
+        for graph in 0..4000_u32 {
             let track_count = (xorshift(&mut state) % 5) as usize + 2;
             let mut nodes = Vec::new();
             let mut edges = Vec::new();
@@ -1835,11 +1842,15 @@ mod tests {
                 unaware_divergences += 1;
             }
         }
-        assert!(banked_graphs > 400, "only {banked_graphs} graphs banked");
-        // The corpus must keep constructing the hazard, or the arm above proves nothing.
-        assert!(
-            unaware_divergences > 20,
-            "only {unaware_divergences} of {banked_graphs} banked graphs reach the pre-#169 defect"
+        // Both numbers are pinned, not bounded, because `lower`'s documentation quotes them: the
+        // corpus is seeded and deterministic, so a change here means the corpus moved and the
+        // claims that rest on it need re-measuring rather than re-pinning. The second number is
+        // also the non-vacuity guard -- without it the arm above could pass on a corpus that no
+        // longer constructs the hazard at all.
+        assert_eq!(banked_graphs, 3617, "the banked corpus moved");
+        assert_eq!(
+            unaware_divergences, 285,
+            "the number of graphs reaching the pre-#169 defect moved"
         );
     }
 }

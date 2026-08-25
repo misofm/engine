@@ -4363,6 +4363,75 @@ mod tests {
         })
     }
 
+    /// Issue #169: the bank-window slot hold costs no arena.
+    ///
+    /// Colouring may not recycle a physical slot inside a bank's reordering window, so slots freed
+    /// there are held until it closes. That could have cost buffers; on the sixty-four-track
+    /// console fixture -- eight full eight-lane EQ banks and eight compressor banks, the floor
+    /// pass's own workload -- it costs none, because holding a slot changes *which* slot an op
+    /// gets rather than how many exist.
+    ///
+    /// Two assertions, and the first is the durable one: the banked plan's arena equals the arena
+    /// of the same session compiled against a registry that refuses every bank, so banking is
+    /// arena-neutral whatever lane width this host has. The literal pins the fixture's shape, so a
+    /// colouring regression surfaces as a number rather than as a benchmark drifting.
+    ///
+    /// The rejected alternative in `program::lower` (dedicating every bank member) scored 257
+    /// here: one extra buffer and one extra stereo block copy per block for each of the 64
+    /// dynamic members whose consumer could no longer consume it in place.
+    #[test]
+    fn banking_a_dynamic_rack_costs_no_arena_buffers() {
+        let model = parse_session_toml(CONSOLE_SIXTY_FOUR_TRACK_FIXTURE).expect("console fixture");
+        let session = compile_session(
+            &model,
+            CompileCaps {
+                max_compiled_model_bytes: u64::MAX,
+                max_requested_runtime_bytes: u64::MAX,
+                max_single_allocation_bytes: u64::MAX,
+                max_queue_items: u64::MAX,
+                max_source_ring_frames: u64::MAX,
+                max_source_ring_bytes: u64::MAX,
+            },
+        )
+        .expect("compiled console fixture");
+        let registry = launch_native_effect_registry_v1().expect("launch registry");
+        let per_node_registry =
+            NativeEffectRegistry::new(["miso.parametric-eq", "miso.compressor"].map(|id| {
+                Box::new(ScalarOnlyDelegateFactory {
+                    delegate: registry
+                        .get_shared_ascii(id)
+                        .expect("registered launch effect"),
+                }) as Box<dyn NativeEffectFactory>
+            }))
+            .expect("per-node registry");
+        let effect_caps = EffectCompileCaps {
+            maximum_total_state_bytes: 1 << 20,
+            maximum_scratch_bytes: 1 << 20,
+            maximum_automation_spans_per_block: 32,
+        };
+        let arena = |plan_id: u64, registry: &NativeEffectRegistry| {
+            GraphCompiler::compile(GraphCompileRequest {
+                dispatch: host_dispatch(),
+                plan_id,
+                effects: prepare_native_session_effects(&session, registry, effect_caps)
+                    .expect("prepared console effects"),
+                caps: integration_caps(),
+            })
+            .unwrap_or_else(|failure| panic!("console graph: {:?}", failure.diagnostics))
+            .graph
+            .program()
+            .expect("lowers")
+            .buffers
+        };
+        let banked = arena(1_690, &registry);
+        let per_node = arena(1_691, &per_node_registry);
+        assert_eq!(
+            banked, per_node,
+            "banking regrouped the lanes; it must not enlarge the arena"
+        );
+        assert_eq!(banked, 193);
+    }
+
     /// The measured session: the 64-track console fixture the benchmark renders.
     ///
     /// Every track places `miso.parametric-eq` in SIMD-1 and `miso.compressor` in the **dynamic**
