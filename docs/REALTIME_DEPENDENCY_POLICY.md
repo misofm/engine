@@ -253,12 +253,12 @@ two release-only failures reachable for the first time, and both predate this wo
 ever run these tests in release, and the workspace release build did not compile, so nothing could
 have run them. Both fail on `main`, with and without the panic override, and both pass in debug:
 
-- `observation_cost_classes_are_what_they_claim` (#143, in
+- `observation_cost_classes_are_what_they_claim (#159)` (#143, in
   `crates/miso-engine-host-core/tests/effect_observation.rs`) fails deterministically. The
   measurement says arming costs nothing — `AllArmed` sits at or below `ConsoleNoCapacity` — while
   the assertion subtracts the `NoConsole` baseline and so charges observation for the cost of a
   console *existing*.
-- `a_million_windows_are_read_whole_and_in_order` (#143, in
+- `a_million_windows_are_read_whole_and_in_order (#160)` (#143, in
   `crates/miso-engine-core/tests/observation_transport.rs`) fails intermittently: three of five
   full-workspace release runs, against 20 of 20 passing standalone release reruns. It is
   timing-dependent rather than a plain red, and the reader's spin loop is far faster in an
