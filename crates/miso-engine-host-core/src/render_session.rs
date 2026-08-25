@@ -42,7 +42,9 @@ use crate::source::SourceControlSet;
 
 /// A render plan that has been started on -- and pinned to -- the calling render thread.
 ///
-/// `Send` and `Sync` are both refused:
+/// `Send` and `Sync` are both refused. The `PhantomData<*const ()>` field is what refuses `Send`;
+/// `Sync` is refused twice over, because `PreparedRenderPlan` is already `!Sync` and this owns one
+/// (red mutation M-146-4 in `tests/MUTATIONS.md` shows exactly which claim the marker carries):
 ///
 /// ```compile_fail
 /// fn requires_send<T: Send>() {}
