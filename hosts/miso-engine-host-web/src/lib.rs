@@ -1904,10 +1904,12 @@ impl CommandRecord {
         };
         // The direction is a separate word rather than the sign of the count, so a caller that
         // means "down" says so and a zero count is a mistake instead of a silent no-op.
-        let direction = match self.values[1] {
-            value if value == 1.0 => 1_i32,
-            value if value == -1.0 => -1,
-            _ => return Err(COMMAND_REASON_MALFORMED),
+        let direction = if self.values[1] == 1.0 {
+            1_i32
+        } else if self.values[1] == -1.0 {
+            -1
+        } else {
+            return Err(COMMAND_REASON_MALFORMED);
         };
         let count = self.values[2];
         if count.fract() != 0.0 || count < 1.0 || count > MAXIMUM_NUDGE_COUNT as f32 {
