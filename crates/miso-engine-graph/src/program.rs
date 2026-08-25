@@ -191,20 +191,89 @@ const fn is_alias_candidate(node: &GraphNodeId) -> bool {
     )
 }
 
-/// A node whose output buffer may never be shared with anything else.
+/// The *static* half of the dedication rule: nodes whose output buffer may never be shared,
+/// whether or not this particular plan banks them.
 ///
 /// A homogeneous bank gathers *all* of its members' outputs, runs, and scatters them back, so
 /// every member's output is live from the first member's gather to the last member's scatter --
 /// across every op scheduled between them. Colouring must therefore never hand a bank member's
-/// storage to an op in that window, and no op may consume a member's buffer in place. The
-/// bank-eligible nodes are the SIMD-rack effects and the post-input builtin stage; this is the
-/// same rule `GraphExecutor::new` previously hard-coded by re-buffering members after colouring.
-const fn is_dedicated(node: &GraphNodeId) -> bool {
+/// storage to an op in that window, and no op may consume a member's buffer in place.
+///
+/// This predicate is deliberately **not** the definition of "bank member". It is the conservative
+/// classification the lowering has always applied -- the SIMD-rack effects and the post-input
+/// builtin stage -- and it is kept exactly as it was so that a plan with no banks at all colours
+/// byte for byte the way it did before. The membership half lives in [`lower`], which is handed
+/// the plan's actual bank members; the two are OR-ed, so dedication is only ever *added*.
+///
+/// Issue #169: before that OR existed this predicate was the whole rule, and it answers `false`
+/// for `RackId::Dynamic`. #166 made dynamic-rack effects bank-eligible, so a dynamic bank member
+/// was mis-classified as shareable -- see [`lower`] for the divergence that made reachable.
+const fn is_statically_dedicated(node: &GraphNodeId) -> bool {
     match node {
         GraphNodeId::Effect(id) => !matches!(id.rack, RackId::Dynamic),
         GraphNodeId::TrackStage { stage, .. } => matches!(stage, TrackStage::PostInputBuiltins),
         _ => false,
     }
+}
+
+/// The op ranges over which a bank reorders the schedule, merged into disjoint spans.
+///
+/// A bank's window runs from its first member's op to its last: `runtime::units_of` emits the
+/// whole bank at the first position, so every op in between executes in some other order than the
+/// one colouring saw. A bank with fewer than two ops reorders nothing and contributes no window.
+///
+/// Overlapping windows are merged, because two banks that interleave at one level reorder each
+/// other's ops as well as their own; the merged span is the range over which no slot may be
+/// recycled. Returns `(defer_release, closes_here)`, both indexed by op:
+///
+/// * `defer_release[o]` -- a slot whose last reader is op `o` must be *held*, not freed, because
+///   some op in the same span still executes after `o` does;
+/// * `closes_here[o]` -- op `o` is the last op of a span, so everything held may be released once
+///   `o` is behind us.
+fn bank_windows(
+    node_op: &[Option<OpIndex>],
+    banks: &[Vec<GraphNodeId>],
+    spec: &GraphSpec,
+    op_count: usize,
+) -> (Vec<bool>, Vec<bool>) {
+    let mut spans: Vec<(usize, usize)> = Vec::with_capacity(banks.len());
+    for bank in banks {
+        let (mut first, mut last) = (usize::MAX, 0usize);
+        let mut seen = 0usize;
+        for id in bank {
+            let Some(index) = node_index(spec, id) else {
+                continue;
+            };
+            let Some(op) = node_op[index as usize] else {
+                continue;
+            };
+            first = first.min(op as usize);
+            last = last.max(op as usize);
+            seen += 1;
+        }
+        if seen > 1 && first < last {
+            spans.push((first, last));
+        }
+    }
+    spans.sort_unstable();
+    let mut defer_release = vec![false; op_count];
+    let mut closes_here = vec![false; op_count];
+    let mut merged: Vec<(usize, usize)> = Vec::with_capacity(spans.len());
+    for (first, last) in spans {
+        match merged.last_mut() {
+            Some(open) if first <= open.1 => open.1 = open.1.max(last),
+            _ => merged.push((first, last)),
+        }
+    }
+    for (first, last) in merged {
+        // The releasing op is the span's *reader*: a slot whose last reader is `last` is safe to
+        // reuse afterwards, because the span is over by then. Hence the half-open range.
+        for slot in defer_release.iter_mut().take(last).skip(first) {
+            *slot = true;
+        }
+        closes_here[last] = true;
+    }
+    (defer_release, closes_here)
 }
 
 /// One logical buffer's lifetime, in op indices.
@@ -220,6 +289,42 @@ struct Lifetime {
 /// edge must run forwards in the schedule -- all three are properties the graph compiler
 /// establishes before it calls this.
 ///
+/// `banks` is one entry per homogeneous bank this plan will render, each listing that bank's
+/// member nodes in any order and from any rack. It is the *plan's* answer, not a guess from the
+/// node id. Ids that are not nodes of this spec are ignored: membership can only ever make
+/// colouring more conservative, so an id the spec does not have costs nothing.
+///
+/// ## Banks reorder the schedule, and colouring has to survive it (issue #169)
+///
+/// `runtime::units_of` emits a whole bank as **one unit at its first member's op position**, and
+/// that unit gathers every member before the kernel runs. Over the op range from a bank's first
+/// member to its last -- its *window* -- execution is therefore a permutation of the schedule
+/// this function coloured: a member scheduled after the first member runs *earlier*, and a
+/// non-member op scheduled between two members runs *later*.
+///
+/// A bank may not cross a dependency level (#96 F12) and ops are level-major, so every op in a
+/// window sits at one level and no op in a window reads another's output. Each op in a window
+/// therefore reads only values produced before the window and is read only after it, which makes
+/// the whole soundness condition a single sentence:
+///
+/// > **No physical slot may be recycled inside a bank window.**
+///
+/// Colouring earns that two ways, and needs both:
+///
+/// * a member's output is `dedicated`, so it is never *returned* to the free list; and
+/// * a slot freed by an op inside a window is *held* until the window closes, so it is never
+///   *handed out* to an op the bank hoists past its releaser.
+///
+/// `is_statically_dedicated` answered `false` for `RackId::Dynamic`, and #166 made dynamic-rack
+/// effects bank-eligible, so the first guarantee lapsed for exactly the nodes #166 added. The
+/// second was never there at all: `take` has always drawn from the free list without regard to
+/// windows, which is why marking members dedicated *alone* makes matters worse -- a dedicated
+/// member cannot fold into its producer in place, so it allocates, and the slot it allocates may
+/// be one a hoisted op still needs.
+///
+/// `a_bank_window_never_recycles_a_physical_slot` and
+/// `bank_window_hoisting_preserves_dataflow_on_random_graphs` construct both failures.
+///
 /// # Errors
 /// See [`ProgramError`]; every variant means the caller's own invariants were violated.
 #[allow(clippy::too_many_lines)]
@@ -228,6 +333,7 @@ pub fn lower(
     schedule: &[GraphNodeId],
     levels: &[DependencyLevel],
     delays: &[InsertedDelay],
+    banks: &[Vec<GraphNodeId>],
 ) -> Result<ExecutionProgram, ProgramError> {
     if spec.nodes.windows(2).any(|pair| pair[0].id >= pair[1].id) {
         return Err(ProgramError::SpecUnsorted);
@@ -254,6 +360,16 @@ pub fn lower(
     }
     if cursor != node_count {
         return Err(ProgramError::ScheduleMismatch);
+    }
+
+    // Bank membership, interned. An id that is not a node of this spec is ignored rather than
+    // rejected: this only ever *adds* dedication, so a stale id costs nothing and cannot make a
+    // sound plan unlowerable.
+    let mut is_bank_member = vec![false; node_count];
+    for id in banks.iter().flatten() {
+        if let Some(index) = node_index(spec, id) {
+            is_bank_member[index as usize] = true;
+        }
     }
 
     // Schedule position per node, and the interned schedule.
@@ -395,7 +511,10 @@ pub fn lower(
                 })
             }
         };
-        let dedicated = is_dedicated(id);
+        // Dedication is the union of the static classification and this plan's actual bank
+        // membership (#169). Union, not replacement: a plan with no banks colours exactly as it
+        // did before, and a member can only ever gain dedication, never lose it.
+        let dedicated = is_statically_dedicated(id) || is_bank_member[index];
         // In place iff this op is the *only* reader of a single undelayed input, and neither end
         // of the aliasing is a bank member.
         let single = (last_input - first_input == 1)
@@ -449,8 +568,11 @@ pub fn lower(
     for (buffer, life) in lifetimes.iter().enumerate() {
         expire[life.last_use].push(u32::try_from(buffer).map_err(|_| ProgramError::Overflow)?);
     }
+    let (defer_release, closes_here) = bank_windows(&node_op, banks, spec, ops.len());
     let mut physical = vec![u32::MAX; lifetimes.len()];
     let mut free: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
+    // Slots freed inside a bank window, released together once the window closes (#169).
+    let mut held: Vec<u32> = Vec::new();
     let mut next_physical = 0u32;
     let mut staging_release: Vec<u32> = Vec::new();
     let take = |free: &mut std::collections::BTreeSet<u32>, next: &mut u32| -> u32 {
@@ -463,17 +585,32 @@ pub fn lower(
         }
     };
     for op_index in 0..ops.len() {
+        // Slots retire one op late: a buffer whose last reader is `op_index - 1` is only free
+        // once that read has happened.
         if op_index > 0 {
-            for buffer in expire[op_index - 1].drain(..) {
-                // A dedicated buffer is never returned: a bank keeps every member's output live
-                // across the whole gather/process/scatter window.
-                if !lifetimes[buffer as usize].dedicated {
-                    free.insert(physical[buffer as usize]);
-                }
+            // The window that op `op_index - 1` sat in (if any) is behind us now, so the slots it
+            // held are safe to hand out again.
+            if closes_here[op_index - 1] {
+                free.extend(held.drain(..));
             }
-        }
-        for buffer in staging_release.drain(..) {
-            free.insert(buffer);
+            // What op `op_index - 1` gave up. A dedicated buffer gives up nothing: a bank keeps
+            // every member's output live across the whole gather/process/scatter window. A
+            // staging scratch belongs to the op that filled it, so it retires with that op's
+            // outputs.
+            //
+            // Inside a bank window those slots are *held* rather than freed (#169): the bank
+            // hoists some of the window's ops past op `op_index - 1`, so a slot it no longer
+            // needs may be one they still do.
+            let retired = expire[op_index - 1]
+                .drain(..)
+                .filter(|buffer| !lifetimes[*buffer as usize].dedicated)
+                .map(|buffer| physical[buffer as usize])
+                .chain(staging_release.drain(..));
+            if defer_release[op_index - 1] {
+                held.extend(retired);
+            } else {
+                free.extend(retired);
+            }
         }
         // A delayed input stages into a scratch buffer that lives only for this op.
         let (first, last) = ops[op_index].inputs;
@@ -681,7 +818,7 @@ mod tests {
         let (spec, schedule, levels) = build(nodes, edges);
         assert_eq!(spec.nodes.len(), 9);
         assert_eq!(spec.edges.len(), 8);
-        let program = lower(&spec, &schedule, &levels, &[]).expect("lowers");
+        let program = lower(&spec, &schedule, &levels, &[], &[]).expect("lowers");
 
         assert_eq!(program.ops.len(), 6);
         assert_eq!(program.taps.len(), 3);
@@ -731,7 +868,7 @@ mod tests {
     fn fan_out_blocks_in_place_and_fan_in_keeps_its_reduction() {
         let (nodes, edges) = plain_track("t", &["ra", "rb"]);
         let (spec, schedule, levels) = build(nodes, edges);
-        let program = lower(&spec, &schedule, &levels, &[]).expect("lowers");
+        let program = lower(&spec, &schedule, &levels, &[], &[]).expect("lowers");
 
         assert_eq!(program.taps.len(), 3);
         assert_eq!(program.reduction_count(), 1);
@@ -767,8 +904,14 @@ mod tests {
             edge_id: GraphEdgeId::RouteSource { route_id: gid("r") },
             samples: LatencySamples(64),
         };
-        let program =
-            lower(&spec, &schedule, &levels, std::slice::from_ref(&delayed)).expect("lowers");
+        let program = lower(
+            &spec,
+            &schedule,
+            &levels,
+            std::slice::from_ref(&delayed),
+            &[],
+        )
+        .expect("lowers");
 
         assert_eq!(program.delays.len(), 1);
         assert_eq!(program.delays[0].samples, 64);
@@ -802,8 +945,14 @@ mod tests {
             },
             samples: LatencySamples(8),
         };
-        let program =
-            lower(&spec, &schedule, &levels, std::slice::from_ref(&delayed)).expect("lowers");
+        let program = lower(
+            &spec,
+            &schedule,
+            &levels,
+            std::slice::from_ref(&delayed),
+            &[],
+        )
+        .expect("lowers");
         assert_eq!(program.taps.len(), 2);
         assert_eq!(program.ops.len(), 7);
         let index = node_index(&spec, &stage_node("t", TrackStage::PostSimd1)).expect("node");
@@ -850,7 +999,7 @@ mod tests {
             stage_node(track, TrackStage::PostDynamic),
         ));
         let (spec, schedule, levels) = build(nodes, edges);
-        let program = lower(&spec, &schedule, &levels, &[]).expect("lowers");
+        let program = lower(&spec, &schedule, &levels, &[], &[]).expect("lowers");
 
         let effect_index = node_index(&spec, &effect).expect("effect node");
         let effect_op = program.node_op[effect_index as usize].expect("effect keeps its op");
@@ -1101,7 +1250,7 @@ mod tests {
                     samples: LatencySamples(xorshift(&mut state) % 128 + 1),
                 });
             }
-            let program = lower(&spec, &schedule, &levels, &delays)
+            let program = lower(&spec, &schedule, &levels, &delays, &[])
                 .unwrap_or_else(|error| panic!("graph {graph}: {error:?}"));
 
             assert_program_matches_spec(&spec, &schedule, &delays, &program);
@@ -1151,7 +1300,7 @@ mod tests {
                         );
                     }
                 }
-                if is_dedicated(&spec.nodes[op.node as usize].id) {
+                if is_statically_dedicated(&spec.nodes[op.node as usize].id) {
                     open.insert(op.output, at);
                 }
             }
@@ -1175,20 +1324,522 @@ mod tests {
         let (nodes, edges) = plain_track("t", &["r"]);
         let (spec, schedule, levels) = build(nodes, edges);
         assert_eq!(
-            lower(&spec, &schedule[..schedule.len() - 1], &levels, &[]),
+            lower(&spec, &schedule[..schedule.len() - 1], &levels, &[], &[]),
             Err(ProgramError::ScheduleMismatch)
         );
         let mut swapped = schedule.clone();
         swapped.swap(0, 1);
         assert_eq!(
-            lower(&spec, &swapped, &levels, &[]),
+            lower(&spec, &swapped, &levels, &[], &[]),
             Err(ProgramError::ScheduleMismatch)
         );
         let mut unsorted = spec.clone();
         unsorted.nodes.swap(0, 1);
         assert_eq!(
-            lower(&unsorted, &schedule, &levels, &[]),
+            lower(&unsorted, &schedule, &levels, &[], &[]),
             Err(ProgramError::SpecUnsorted)
+        );
+    }
+
+    // ---- issue #169: colouring across a bank's reordering window ---------------------------
+
+    /// A track whose dynamic rack carries one effect, spliced between the two stage boundaries
+    /// that surround it, plus one route to the shared output.
+    fn dynamic_track(track: &str, route: &str) -> (Vec<GraphNode>, Vec<GraphEdge>) {
+        let (mut nodes, mut edges) = plain_track(track, &[route]);
+        let effect = GraphNodeId::Effect(crate::EffectNodeId {
+            track_id: gid(track),
+            rack: RackId::Dynamic,
+            effect_id: gid("fx"),
+        });
+        nodes.push(node(effect.clone()));
+        edges.retain(|edge| {
+            edge.id
+                != GraphEdgeId::TrackMain {
+                    target: stage_node(track, TrackStage::PostDynamic),
+                }
+        });
+        edges.push(main_edge(
+            GraphEdgeId::TrackMain {
+                target: effect.clone(),
+            },
+            stage_node(track, TrackStage::PostSimd1),
+            effect.clone(),
+        ));
+        edges.push(main_edge(
+            GraphEdgeId::TrackMain {
+                target: stage_node(track, TrackStage::PostDynamic),
+            },
+            effect,
+            stage_node(track, TrackStage::PostDynamic),
+        ));
+        (nodes, edges)
+    }
+
+    fn dynamic_effect(track: &str) -> GraphNodeId {
+        GraphNodeId::Effect(crate::EffectNodeId {
+            track_id: gid(track),
+            rack: RackId::Dynamic,
+            effect_id: gid("fx"),
+        })
+    }
+
+    /// `node index -> (bank, lane)`, the shape `runtime::BankMembership` has.
+    fn member_lanes(
+        spec: &GraphSpec,
+        banks: &[Vec<GraphNodeId>],
+    ) -> std::collections::BTreeMap<u32, (usize, usize)> {
+        let mut lanes = std::collections::BTreeMap::new();
+        for (bank, members) in banks.iter().enumerate() {
+            for (lane, id) in members.iter().enumerate() {
+                lanes.insert(
+                    node_index(spec, id).expect("member is a node"),
+                    (bank, lane),
+                );
+            }
+        }
+        lanes
+    }
+
+    /// The op groups the executor will run, in the order it will run them.
+    ///
+    /// This mirrors `runtime::units_of` exactly, and it is the whole reason #169 exists: a bank
+    /// becomes **one unit at its first member's position**, so a member scheduled later is hoisted
+    /// forward and every non-member op between the members is deferred past the bank.
+    fn units_in_runtime_order(
+        program: &ExecutionProgram,
+        lanes: &std::collections::BTreeMap<u32, (usize, usize)>,
+    ) -> Vec<Vec<usize>> {
+        let mut units: Vec<Vec<usize>> = Vec::with_capacity(program.ops.len());
+        let mut emitted: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
+        for (index, op) in program.ops.iter().enumerate() {
+            match lanes.get(&op.node) {
+                None => units.push(vec![index]),
+                Some((bank, _)) => {
+                    if !emitted.insert(*bank) {
+                        continue;
+                    }
+                    let mut members: Vec<(usize, usize)> = program
+                        .ops
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(other, candidate)| {
+                            lanes.get(&candidate.node).and_then(|(other_bank, lane)| {
+                                (*other_bank == *bank).then_some((*lane, other))
+                            })
+                        })
+                        .collect();
+                    members.sort_unstable();
+                    units.push(members.into_iter().map(|(_, op)| op).collect());
+                }
+            }
+        }
+        units
+    }
+
+    /// Interpret the program the way the executor runs it -- banks hoisted -- and compare against
+    /// the semantic graph, node by node.
+    ///
+    /// This is [`assert_program_matches_spec`]'s check moved from schedule order to *unit* order,
+    /// which is the order that actually renders. It models the two things schedule-order
+    /// interpretation cannot see: a bank gathers every member before its kernel runs, and a
+    /// delayed input is physically written into its staging slot.
+    fn divergence_in_runtime_order(
+        spec: &GraphSpec,
+        schedule: &[GraphNodeId],
+        delays: &[InsertedDelay],
+        program: &ExecutionProgram,
+        lanes: &std::collections::BTreeMap<u32, (usize, usize)>,
+    ) -> Option<String> {
+        let expected = evaluate_spec(spec, schedule, delays);
+        let mut arena = vec![Expr::Silence; program.buffers as usize];
+        // One op's reduction: stage every delayed input into its scratch, then combine.
+        let gather = |arena: &mut Vec<Expr>, op: &Op| {
+            let mut operands = Vec::new();
+            for input in program.inputs_of(op) {
+                let value = arena[input.buffer.0 as usize].clone();
+                match input.delay {
+                    Some(delay) => {
+                        let staged = Expr::Delayed(
+                            Box::new(value),
+                            program.delays[delay.line as usize].samples,
+                        );
+                        arena[delay.staging.0 as usize] = staged.clone();
+                        operands.push(staged);
+                    }
+                    None => operands.push(value),
+                }
+            }
+            match operands.len() {
+                0 => Expr::Silence,
+                1 => operands.remove(0),
+                _ => Expr::Sum(operands),
+            }
+        };
+        let transform = |op: &Op, gathered: Expr| {
+            if is_alias_candidate(&spec.nodes[op.node as usize].id) {
+                gathered
+            } else {
+                Expr::Node(op.node, Box::new(gathered))
+            }
+        };
+        for unit in units_in_runtime_order(program, lanes) {
+            // A bank gathers *every* member before the kernel touches any of them, so a member's
+            // storage must survive every other member's gather.
+            let banked = unit.len() > 1 || lanes.contains_key(&program.ops[unit[0]].node);
+            for index in &unit {
+                let op = &program.ops[*index];
+                let gathered = gather(&mut arena, op);
+                arena[op.output.0 as usize] = if banked {
+                    gathered
+                } else {
+                    transform(op, gathered)
+                };
+            }
+            if banked {
+                for index in &unit {
+                    let op = &program.ops[*index];
+                    let gathered = arena[op.output.0 as usize].clone();
+                    arena[op.output.0 as usize] = transform(op, gathered);
+                }
+            }
+            for index in &unit {
+                let op = &program.ops[*index];
+                if arena[op.output.0 as usize] != expected[op.node as usize] {
+                    return Some(format!(
+                        "op {index} (node {}) rendered a foreign value",
+                        op.node
+                    ));
+                }
+            }
+        }
+        let output_node = spec
+            .nodes
+            .iter()
+            .position(|node| matches!(node.id, GraphNodeId::Output { .. }))
+            .expect("output");
+        (arena[program.output.0 as usize] != expected[output_node])
+            .then(|| "the session output rendered a foreign value".to_owned())
+    }
+
+    /// Buffers one op writes (its output, plus every staging slot it fills) and reads.
+    fn touched(program: &ExecutionProgram, op: &Op) -> (Vec<u32>, Vec<u32>) {
+        let mut writes = vec![op.output.0];
+        let mut reads = Vec::new();
+        for input in program.inputs_of(op) {
+            reads.push(input.buffer.0);
+            if let Some(delay) = input.delay {
+                writes.push(delay.staging.0);
+            }
+        }
+        if let Some(side) = op.sidechain {
+            reads.push(side.buffer.0);
+            if let Some(delay) = side.delay {
+                writes.push(delay.staging.0);
+            }
+        }
+        (writes, reads)
+    }
+
+    /// The #169 invariant, checked structurally: **no physical slot is recycled inside a bank
+    /// window**.
+    ///
+    /// A window is the op range from a bank's first member to its last. Execution over that range
+    /// is a permutation of the schedule -- members hoisted forward, non-members deferred -- so
+    /// colouring is sound there only if no op in the window writes storage another op in the
+    /// window reads or writes. An op writing its own input in place is the one exception, because
+    /// that is one op, not two.
+    fn assert_no_slot_is_recycled_inside_a_bank_window(
+        program: &ExecutionProgram,
+        spec: &GraphSpec,
+        banks: &[Vec<GraphNodeId>],
+        label: &str,
+    ) {
+        for members in banks {
+            let positions: Vec<usize> = members
+                .iter()
+                .filter_map(|id| node_index(spec, id))
+                .filter_map(|index| program.node_op[index as usize])
+                .map(|op| op as usize)
+                .collect();
+            let (Some(first), Some(last)) = (positions.iter().min(), positions.iter().max()) else {
+                continue;
+            };
+            for here in *first..=*last {
+                let (writes, _) = touched(program, &program.ops[here]);
+                for there in *first..=*last {
+                    if there == here {
+                        continue;
+                    }
+                    let (other_writes, other_reads) = touched(program, &program.ops[there]);
+                    for slot in &writes {
+                        assert!(
+                            !other_writes.contains(slot),
+                            "{label}: ops {here} and {there} both write buffer {slot} inside a \
+                             bank window"
+                        );
+                        assert!(
+                            !other_reads.contains(slot),
+                            "{label}: op {here} writes buffer {slot}, which op {there} reads \
+                             inside the same bank window"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Issue #169, the minimal reproduction: a slot released inside a bank window was handed
+    /// straight back to a member of that same bank.
+    ///
+    /// Three tracks, one dynamic effect each, and a bank over the *outer* two -- the shape #166
+    /// made reachable, because a dynamic rack banks by cohort signature, so the tracks that share
+    /// a compressor bank need not be adjacent. Track `t01`'s effect is not in the bank and sits
+    /// between the two members in the schedule, so the executor defers it past the bank; its
+    /// delayed input needs a staging slot, and colouring released that slot one op before `t02`'s
+    /// member allocated its output.
+    ///
+    /// In schedule order that is correct: the staging slot is dead the moment `t01`'s op finishes.
+    /// In *execution* order the bank runs first, `t02`'s member writes the slot, and then the
+    /// deferred `t01` stages over the top of it -- so `t02` renders `t01`'s delayed input.
+    ///
+    /// The second half of the test is what keeps the first half honest: lowered with no bank
+    /// declared -- which is exactly what the pre-#169 signature could express -- the same graph
+    /// really does hand the slot over.
+    #[test]
+    fn a_bank_window_never_recycles_a_physical_slot() {
+        let mut nodes = Vec::new();
+        let mut edges = Vec::new();
+        for (index, track) in ["t00", "t01", "t02"].iter().enumerate() {
+            let (track_nodes, track_edges) = dynamic_track(track, &format!("r{index:02}"));
+            nodes.extend(track_nodes.into_iter().filter(|candidate| {
+                !matches!(candidate.id, GraphNodeId::Output { .. }) || index == 0
+            }));
+            edges.extend(track_edges);
+        }
+        let (spec, schedule, levels) = build(nodes, edges);
+        // The one PDC edge: into the effect of the track the bank does *not* contain.
+        let delays = vec![InsertedDelay {
+            node: dynamic_effect("t01"),
+            edge_id: GraphEdgeId::TrackMain {
+                target: dynamic_effect("t01"),
+            },
+            samples: LatencySamples(64),
+        }];
+        let banks = vec![vec![dynamic_effect("t00"), dynamic_effect("t02")]];
+        let lanes = member_lanes(&spec, &banks);
+
+        // Not vacuous: told nothing about the bank, colouring recycles the slot and the render
+        // diverges. This is the pre-#169 behaviour, and the fixture exists to reach it.
+        let unaware = lower(&spec, &schedule, &levels, &delays, &[]).expect("lowers");
+        assert_program_matches_spec(&spec, &schedule, &delays, &unaware);
+        let member = node_index(&spec, &dynamic_effect("t02")).expect("member");
+        let outsider = node_index(&spec, &dynamic_effect("t01")).expect("outsider");
+        let outsider_op = &unaware.ops[unaware.node_op[outsider as usize].expect("op") as usize];
+        let staging = unaware.inputs_of(outsider_op)[0]
+            .delay
+            .expect("the outsider's input is delayed")
+            .staging;
+        assert_eq!(
+            unaware.node_buffer[member as usize], staging,
+            "the fixture must reach the collision it is here to pin"
+        );
+        assert!(
+            divergence_in_runtime_order(&spec, &schedule, &delays, &unaware, &lanes).is_some(),
+            "and that collision must actually change what renders"
+        );
+
+        // Told about the bank, the slot is held until the window closes.
+        let program = lower(&spec, &schedule, &levels, &delays, &banks).expect("lowers");
+        assert_program_matches_spec(&spec, &schedule, &delays, &program);
+        assert_no_slot_is_recycled_inside_a_bank_window(&program, &spec, &banks, "minimal");
+        assert_eq!(
+            divergence_in_runtime_order(&spec, &schedule, &delays, &program, &lanes),
+            None
+        );
+        // Holding the window's slots costs two buffers on this graph, and buys the collision
+        // away. The window is the only thing that grew: nothing else about the colouring moved.
+        assert_eq!((unaware.buffers, program.buffers), (7, 9));
+    }
+
+    /// Issue #169's structural half: a bank member's output is dedicated storage, whatever rack it
+    /// came from.
+    ///
+    /// `is_statically_dedicated` answers `false` for `RackId::Dynamic`, so before #166 that was
+    /// also the answer for "is this a bank member". It is not any more, and dedication now follows
+    /// the plan's own membership. Dedication is not observable directly, so this asserts its two
+    /// consequences: a member never folds into its producer in place, and nothing else in the
+    /// program ever writes a member's buffer.
+    #[test]
+    fn every_dynamic_bank_member_is_dedicated_storage() {
+        let mut nodes = Vec::new();
+        let mut edges = Vec::new();
+        let tracks = ["t00", "t01", "t02", "t03"];
+        for (index, track) in tracks.iter().enumerate() {
+            let (track_nodes, track_edges) = dynamic_track(track, &format!("r{index:02}"));
+            nodes.extend(track_nodes.into_iter().filter(|candidate| {
+                !matches!(candidate.id, GraphNodeId::Output { .. }) || index == 0
+            }));
+            edges.extend(track_edges);
+        }
+        let (spec, schedule, levels) = build(nodes, edges);
+        // Two interleaved cohorts, the shape a dynamic rack produces when neighbouring tracks
+        // carry different chains.
+        let banks = vec![
+            vec![dynamic_effect("t00"), dynamic_effect("t02")],
+            vec![dynamic_effect("t01"), dynamic_effect("t03")],
+        ];
+        let program = lower(&spec, &schedule, &levels, &[], &banks).expect("lowers");
+        assert_program_matches_spec(&spec, &schedule, &[], &program);
+
+        for member in banks.iter().flatten() {
+            let index = node_index(&spec, member).expect("member is a node");
+            let op_index = program.node_op[index as usize].expect("a member is never elided");
+            let op = &program.ops[op_index as usize];
+            assert!(
+                !op.in_place,
+                "member {member:?} folded into its producer's buffer"
+            );
+            // Dedication is forward-only, and deliberately so: inheriting a slot some *dead*
+            // buffer used earlier is what keeps the arena small. What it forbids is handing the
+            // slot on once the member owns it.
+            let buffer = program.node_buffer[index as usize];
+            for (other, candidate) in program.ops.iter().enumerate().skip(op_index as usize + 1) {
+                let (writes, _) = touched(&program, candidate);
+                assert!(
+                    !writes.contains(&buffer.0),
+                    "op {other} writes buffer {buffer:?}, which member {member:?} owns"
+                );
+            }
+        }
+        assert_no_slot_is_recycled_inside_a_bank_window(&program, &spec, &banks, "structural");
+    }
+
+    /// Issue #169, the load-bearing eval: over seeded multi-track graphs with dynamic rack chains,
+    /// interleaved cohorts, fan-out and PDC, the program renders the value the semantic graph does
+    /// **in the order the executor actually runs it**, with banks hoisted to their first member.
+    ///
+    /// `lowering_preserves_dataflow_and_bounds_the_arena_on_random_graphs` checks the same thing
+    /// in schedule order, which is not the order that renders once a bank exists. The `unaware`
+    /// arm counts how many of these graphs the pre-#169 lowering got wrong, so the corpus cannot
+    /// quietly stop constructing the hazard.
+    #[test]
+    fn bank_window_hoisting_preserves_dataflow_on_random_graphs() {
+        let mut state = 0x1234_5678_9abc_def1_u64;
+        let mut banked_graphs = 0usize;
+        let mut unaware_divergences = 0usize;
+        for graph in 0..600_u32 {
+            let track_count = (xorshift(&mut state) % 5) as usize + 2;
+            let mut nodes = Vec::new();
+            let mut edges = Vec::new();
+            let mut cohort_of_track: Vec<usize> = Vec::new();
+            let mut route_index = 0usize;
+            for track in 0..track_count {
+                let name = format!("t{track:02}");
+                let routes: Vec<String> = (0..(xorshift(&mut state) % 2) + 1)
+                    .map(|_| {
+                        route_index += 1;
+                        format!("r{route_index:02}")
+                    })
+                    .collect();
+                let borrowed: Vec<&str> = routes.iter().map(String::as_str).collect();
+                let (mut track_nodes, mut track_edges) = plain_track(&name, &borrowed);
+                // A dynamic rack chain of one or two slots, and the cohort it belongs to.
+                let slots = (xorshift(&mut state) % 2) as usize + 1;
+                cohort_of_track.push((xorshift(&mut state) % 2) as usize);
+                track_edges.retain(|edge| {
+                    edge.id
+                        != GraphEdgeId::TrackMain {
+                            target: stage_node(&name, TrackStage::PostDynamic),
+                        }
+                });
+                let mut upstream = stage_node(&name, TrackStage::PostSimd1);
+                for slot in 0..slots {
+                    let effect = GraphNodeId::Effect(crate::EffectNodeId {
+                        track_id: gid(&name),
+                        rack: RackId::Dynamic,
+                        effect_id: gid(&format!("fx{slot}")),
+                    });
+                    track_nodes.push(node(effect.clone()));
+                    track_edges.push(main_edge(
+                        GraphEdgeId::TrackMain {
+                            target: effect.clone(),
+                        },
+                        upstream,
+                        effect.clone(),
+                    ));
+                    upstream = effect;
+                }
+                track_edges.push(main_edge(
+                    GraphEdgeId::TrackMain {
+                        target: stage_node(&name, TrackStage::PostDynamic),
+                    },
+                    upstream,
+                    stage_node(&name, TrackStage::PostDynamic),
+                ));
+                nodes.extend(track_nodes.into_iter().filter(|candidate| {
+                    !matches!(candidate.id, GraphNodeId::Output { .. }) || track == 0
+                }));
+                edges.extend(track_edges);
+            }
+            let (spec, schedule, levels) = build(nodes, edges);
+            let mut delays: Vec<InsertedDelay> = Vec::new();
+            for edge in &spec.edges {
+                if !xorshift(&mut state).is_multiple_of(6) {
+                    continue;
+                }
+                delays.push(InsertedDelay {
+                    node: edge.destination.node.clone(),
+                    edge_id: edge.id.clone(),
+                    samples: LatencySamples(xorshift(&mut state) % 128 + 1),
+                });
+            }
+            // Banks: dynamic effects, bucketed by (level, cohort), which is what the rack
+            // compiler's cohort planner produces. Cohorts interleave by track, so one bank's
+            // window contains the other's members.
+            let mut buckets: std::collections::BTreeMap<(u64, usize), Vec<GraphNodeId>> =
+                std::collections::BTreeMap::new();
+            for level in &levels {
+                for id in &level.nodes {
+                    let GraphNodeId::Effect(effect) = id else {
+                        continue;
+                    };
+                    let track: usize = effect.track_id.as_str()[1..].parse().expect("track");
+                    buckets
+                        .entry((level.level, cohort_of_track[track]))
+                        .or_default()
+                        .push(id.clone());
+                }
+            }
+            let banks: Vec<Vec<GraphNodeId>> = buckets
+                .into_values()
+                .filter(|members| members.len() > 1)
+                .collect();
+            if banks.is_empty() {
+                continue;
+            }
+            banked_graphs += 1;
+
+            let program = lower(&spec, &schedule, &levels, &delays, &banks).expect("lowers");
+            let lanes = member_lanes(&spec, &banks);
+            assert_program_matches_spec(&spec, &schedule, &delays, &program);
+            assert_no_slot_is_recycled_inside_a_bank_window(&program, &spec, &banks, "random");
+            assert_eq!(
+                divergence_in_runtime_order(&spec, &schedule, &delays, &program, &lanes),
+                None,
+                "graph {graph}"
+            );
+
+            let unaware = lower(&spec, &schedule, &levels, &delays, &[]).expect("lowers");
+            if divergence_in_runtime_order(&spec, &schedule, &delays, &unaware, &lanes).is_some() {
+                unaware_divergences += 1;
+            }
+        }
+        assert!(banked_graphs > 400, "only {banked_graphs} graphs banked");
+        // The corpus must keep constructing the hazard, or the arm above proves nothing.
+        assert!(
+            unaware_divergences > 20,
+            "only {unaware_divergences} of {banked_graphs} banked graphs reach the pre-#169 defect"
         );
     }
 }

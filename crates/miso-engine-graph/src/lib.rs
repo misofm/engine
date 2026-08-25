@@ -427,6 +427,35 @@ pub struct GraphPreparedEffectBank {
     pub processor: Box<dyn miso_engine_effect_contract::PreparedNativeEffectBank>,
     pub scratch: AoSoaScratch,
 }
+/// Every homogeneous bank a prepared plan will render, as one member list each, for the
+/// lowering's dedication rule and its bank windows (issue #169).
+///
+/// Grouping matters: [`program::lower`] needs each bank's *window* -- first member op to last --
+/// and not merely the union of all members, because that window is the range over which
+/// `runtime::units_of` reorders the schedule.
+///
+/// Effect banks are the load-bearing half: #166 made dynamic-rack effects bank-eligible, and
+/// `program::is_statically_dedicated` answers `false` for them. Builtin banks are listed too:
+/// their members are already statically dedicated (`attach_builtin_banks` rejects any member that
+/// is not a `PostInputBuiltins` stage), but their *window* is real and constrains colouring the
+/// same way an effect bank's does.
+fn bank_member_nodes(
+    banks: &[GraphPreparedEffectBank],
+    builtin_banks: &[GraphPreparedBuiltinBank],
+) -> Vec<Vec<GraphNodeId>> {
+    banks
+        .iter()
+        .map(|bank| {
+            bank.members
+                .iter()
+                .cloned()
+                .map(GraphNodeId::Effect)
+                .collect()
+        })
+        .chain(builtin_banks.iter().map(|bank| bank.members.to_vec()))
+        .collect()
+}
+
 /// A compiler-owned homogeneous post-input-builtin bank.  Unlike effect banks, this is a
 /// fixed graph stage and therefore has no automation or sidechain surface.
 ///
@@ -638,6 +667,11 @@ impl PreparedGraphPlan {
             .checked_add_builtin_banks(resource)
             .ok_or(GraphBuiltinBankAttachError::ResourceOverflow)?;
         self.builtin_banks = banks;
+        // `program` is *derived* from this plan's own fields (#99 F2), and since #169 the bank
+        // member lists are among them: attaching banks changes which buffers may be shared, so
+        // the derivation is redone here. Without this, `program()` would describe the plan as it
+        // was before the attach while bind-time `lowered()` described it as it is.
+        self.program = self.lower_from_current_fields();
         Ok(self)
     }
     /// The lowered executable program, or `None` when the plan's schedule, levels and spec
@@ -645,6 +679,23 @@ impl PreparedGraphPlan {
     #[must_use]
     pub fn program(&self) -> Option<&program::ExecutionProgram> {
         self.program.as_ref()
+    }
+    /// The one place a plan's executable program is derived from its fields.
+    ///
+    /// Three callers need it -- construction, `attach_builtin_banks`, and bind-time re-derivation
+    /// -- and they must not be able to disagree about which fields feed it. Since #169 the bank
+    /// member lists are among those fields, because a bank's window constrains what colouring may
+    /// share; before that they were not, which is why attaching banks used to be able to leave
+    /// `program` untouched.
+    fn lower_from_current_fields(&self) -> Option<program::ExecutionProgram> {
+        program::lower(
+            &self.spec,
+            &self.sequential_schedule,
+            &self.dependency_levels,
+            &self.inserted_delays,
+            &bank_member_nodes(&self.banks, &self.builtin_banks),
+        )
+        .ok()
     }
     /// Re-derives the executable program from this plan's *current* semantic fields.
     ///
@@ -654,13 +705,7 @@ impl PreparedGraphPlan {
     /// lower the plan it now holds rather than the one the constructor saw. Lowering is a pure
     /// function of those fields, so the two can never disagree about an unmodified plan.
     fn lowered(&self) -> Option<program::ExecutionProgram> {
-        let program = program::lower(
-            &self.spec,
-            &self.sequential_schedule,
-            &self.dependency_levels,
-            &self.inserted_delays,
-        )
-        .ok()?;
+        let program = self.lower_from_current_fields()?;
         // A node the lowering elided has no op, so a processor bound to it would never run. The
         // compiler never asks for one -- the three internal rack boundaries are not bindable
         // (`program::is_alias_candidate`) -- and a hand-built plan that does is rejected here
@@ -677,21 +722,17 @@ impl PreparedGraphPlan {
         &self.routes
     }
     pub fn new(parts: PreparedGraphPlanParts) -> Self {
-        // #99 F2: the executable program is *derived* here, from the plan's own spec, schedule,
-        // levels and PDC edges, so it cannot disagree with the semantic graph and no caller has
-        // to supply or maintain it. `None` means those four disagree -- a schedule that is not
-        // the concatenation of the levels, an edge running backwards, an unsorted spec -- which
-        // `has_valid_structural_layout` rejects at bind time anyway. Hand-built plans in tests
-        // are the only things that ever produce it, and they keep working exactly as before.
-        let program = program::lower(
-            &parts.spec,
-            &parts.sequential_schedule,
-            &parts.dependency_levels,
-            &parts.inserted_delays,
-        )
-        .ok();
-        Self {
-            program,
+        // #99 F2: the executable program is *derived* from the plan's own spec, schedule, levels,
+        // PDC edges and banks, so it cannot disagree with the semantic graph and no caller has to
+        // supply or maintain it. `None` means those disagree -- a schedule that is not the
+        // concatenation of the levels, an edge running backwards, an unsorted spec -- which
+        // `has_valid_structural_layout` rejects at bind time anyway. Hand-built plans in tests are
+        // the only things that ever produce it, and they keep working exactly as before.
+        //
+        // The plan is assembled first and the derivation runs against the assembled plan, so this
+        // and `attach_builtin_banks` cannot form different opinions about which fields feed it.
+        let mut plan = Self {
+            program: None,
             plan_id: parts.plan_id,
             spec: parts.spec,
             sequential_schedule: parts.sequential_schedule,
@@ -710,7 +751,9 @@ impl PreparedGraphPlan {
             builtin_banks: parts.builtin_banks,
             observers: parts.observers,
             _not_sync: Cell::new(()),
-        }
+        };
+        plan.program = plan.lower_from_current_fields();
+        plan
     }
     /// The failure carries every input back, which is the point; boxing it would only move the
     /// allocation onto the caller's error path.
@@ -2910,6 +2953,45 @@ mod tests {
         // Five distinct members over a four-lane scratch: rejected by the width clause, not by
         // the duplicate-member clause.
         assert_eq!(attach(5), Err(GraphBuiltinBankAttachError::InvalidMembers));
+    }
+
+    /// Issue #169: a bank's window constrains colouring, so a plan that gains a bank after
+    /// construction must re-derive its program -- otherwise `program()` describes the plan as it
+    /// was and bind-time `lowered()` describes it as it is.
+    ///
+    /// The `differs` assertion is what keeps this honest: if attaching a bank stopped changing the
+    /// colouring, the equality above would hold for the wrong reason.
+    #[test]
+    fn attaching_builtin_banks_re_derives_the_program_that_bind_will_use() {
+        let bank = || GraphPreparedBuiltinBank {
+            backend: Backend::Simd4,
+            members: (0..4)
+                .map(|lane| GraphNodeId::TrackStage {
+                    track_id: StableGraphId::parse(&format!("track{lane}")).expect("track id"),
+                    stage: TrackStage::PostInputBuiltins,
+                })
+                .collect(),
+            processor: Box::<CountingIdentityBuiltin>::default(),
+            scratch: miso_engine_rack::AoSoaScratch::new(BankWidth::Four, 1).expect("W4 scratch"),
+        };
+        let (constructed, _, _) = four_track_builtin_plan(1_690, true, false);
+        let (unbanked, _, _) = four_track_builtin_plan(1_691, false, false);
+        let before = unbanked.program().cloned().expect("lowers");
+        let attached = unbanked
+            .with_builtin_banks(
+                vec![bank()],
+                GraphBuiltinBankResourceEstimate {
+                    bank_count: 1,
+                    ..GraphBuiltinBankResourceEstimate::default()
+                },
+            )
+            .expect("attaches");
+        assert_ne!(
+            attached.program(),
+            Some(&before),
+            "the fixture must reach a colouring the bank window changes"
+        );
+        assert_eq!(attached.program(), constructed.program());
     }
 
     fn four_track_builtin_plan(
