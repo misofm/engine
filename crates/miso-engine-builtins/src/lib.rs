@@ -1634,7 +1634,7 @@ impl MatrixBuiltins {
     ///
     /// # Errors
     ///
-    /// [`BuiltinParameterError::MatrixDomain`] when a coefficient is outside `[-1, 1]` or is not
+    /// [`BuiltinParameterError::MatrixCoefficient`] when a coefficient is outside `[-1, 1]` or is not
     /// finite.
     pub fn set_target_smoothed(
         &mut self,

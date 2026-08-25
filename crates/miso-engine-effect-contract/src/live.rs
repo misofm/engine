@@ -268,7 +268,7 @@ struct ObservationTapV1 {
 ///
 /// Level 1 is that this type does not exist in a plan whose console request named no observation
 /// capacity: there is no lane, no slot and no vector, and the render path is the byte-identical one
-/// it always was. Level 2 is [`ObservationTapV1::armed`]: inside a capable plan, an unarmed tap's
+/// it always was. Level 2 is `ObservationTapV1::armed`: inside a capable plan, an unarmed tap's
 /// effect state is never read, never folded and never stored, and the honest cost is one predicted
 /// branch per driven effect per block.
 #[derive(Debug)]

@@ -329,7 +329,7 @@ pub struct ConsoleEffectBankStage {
 impl ConsoleEffectBankStage {
     /// Builds the console stage for one bound bank slot.
     ///
-    /// `latency` is the slot's declared [`PreparedEffectMetadata::latency`]. Every lane of a bank
+    /// `latency` is the slot's declared [`miso_engine_effect_contract::PreparedEffectMetadata::latency`]. Every lane of a bank
     /// shares one [`EffectProgramKeyV1`], so they share one latency and one AoSoA delay line:
     /// delaying the interleaved plane by `latency * lanes` words delays every lane by exactly
     /// `latency` frames.
