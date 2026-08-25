@@ -42,6 +42,29 @@
 #   accepted manifest identity, before #143: 1aaa96dc731c0da3dabb2f8ecd7c2bf803078b580a38cccfccf1ffe280c83588 (24 rows)
 #   accepted manifest identity, after  #143: e3896726979aa746cfda50fc10c1985c0ecef117f87b39e692f18226b7b4fa14 (27 rows)
 #
+# Issue #127 P0. The nudge ladder is an additive change to the descriptor wire that costs zero
+# bytes -- it rides the eight bytes the parameter record already reserved -- so it moves exactly
+# the same two sealed rows #143 moved and adds three:
+#
+#   * `scripts/effect-descriptor-v1-reference.py` -- the independent encoder/verifier now carries
+#     the ladder window and its own thirteen-case mutation matrix. There is no way to add a wire
+#     field without moving this row.
+#   * `fixtures/effect-descriptor/v1/MANIFEST.sha256` -- three `comprehensive-d` rows added. That
+#     manifest is not asserted, it is *recomputed* from the fixture files by the reference's
+#     `check()`, so its new identity is derived rather than declared.
+#   * `fixtures/effect-descriptor/v1/comprehensive-d.{json,wire.hex,identity.hex}` -- the new
+#     ladder-bearing vector. `comprehensive-d` is `comprehensive-a` plus three ladders and two
+#     renamed letters, so `total(D) == total(A)` exactly; that equality is asserted in both the
+#     Python reference and `descriptor_v1_qualification.rs`, alongside the identity change and a
+#     byte-by-byte check that nothing outside the reserved windows moved.
+#
+# Every pre-#127 row is byte-unchanged, for the same reason every pre-#143 row was: a ladder-free
+# descriptor encodes to the identity it always had, so `comprehensive-a`/`-b`/`-c` and the whole
+# package and state corpora do not move.
+#
+#   accepted manifest identity, before #127: e3896726979aa746cfda50fc10c1985c0ecef117f87b39e692f18226b7b4fa14 (27 rows)
+#   accepted manifest identity, after  #127: 3ba3d1472d2660003374a329ca31386e7c0ecf3133aa98378eacbba3a9502133 (30 rows)
+#
 # The identity is pinned in three places -- here, `preflight-effect-interchange-benchmark.sh` and
 # `run-effect-interchange-benchmark.sh` -- and all three moved together. A re-seal that moves only
 # one is caught by `scripts/test-effect-interchange-benchmark.sh`.
@@ -51,14 +74,15 @@ cd "$root"
 fail() { printf 'effect interchange qualification policy failure: %s\n' "$1" >&2; exit 1; }
 
 manifest=fixtures/effect-interchange/v1/ACCEPTED.sha256
-accepted_manifest_sha256=e3896726979aa746cfda50fc10c1985c0ecef117f87b39e692f18226b7b4fa14
+accepted_manifest_sha256=3ba3d1472d2660003374a329ca31386e7c0ecf3133aa98378eacbba3a9502133
 [[ -f "$manifest" && ! -L "$manifest" ]] || fail 'missing immutable baseline manifest'
 [[ "$(sha256sum "$manifest" | awk '{print $1}')" == "$accepted_manifest_sha256" ]] ||
     fail 'immutable baseline manifest changed or was refreshed'
 LC_ALL=C sort -c -k2,2 "$manifest" || fail 'baseline manifest is not path-sorted'
 sha256sum --check --strict "$manifest" >/dev/null || fail 'accepted baseline changed'
-# 24 corpus/reference-script rows plus the three `comprehensive-c` rows issue #143 added.
-[[ $(wc -l <"$manifest" | tr -d ' ') -eq 27 ]] || fail 'baseline membership changed'
+# 24 corpus/reference-script rows, the three `comprehensive-c` rows issue #143 added, and the
+# three `comprehensive-d` rows issue #127 added.
+[[ $(wc -l <"$manifest" | tr -d ' ') -eq 30 ]] || fail 'baseline membership changed'
 
 for path in \
     scripts/effect-interchange-v1-reference.py \

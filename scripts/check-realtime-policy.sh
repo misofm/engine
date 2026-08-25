@@ -19,10 +19,16 @@ realtime_root="crates/miso-engine-core/src/realtime"
 # AArch64 `mrs`/`msr FPCR` pair, for which the standard library exposes no `core::arch` intrinsic
 # (Arm Architecture Reference Manual for A-profile, `FPCR`, Floating-point Control Register).
 # `docs/REALTIME_DEPENDENCY_POLICY.md`, "Unsafe-code ownership", carries the full justification.
+#
+# Issue #127 adds `crates/miso-engine-effect-contract/tests/nudge.rs` to the *test* half of this
+# list, which is the counting-`GlobalAlloc` half: it is a test-only allocation counter of exactly
+# the shape `soft-clip/tests/allocation.rs` and `effect-package/tests/package_allocation.rs`
+# already carry, forwarding every request to `System` unchanged, and it exists to prove that
+# resolving and applying a nudge ladder allocates nothing. No render path reaches it.
 unsafe_matches="$({
     rg -n 'unsafe[[:space:]]+(impl|fn|extern)|unsafe[[:space:]]*\{' \
         crates hosts tools --glob '*.rs' || true
-} | rg -v '^crates/miso-engine-core/src/realtime/spsc.rs:|^crates/miso-engine-core/src/realtime/disjoint.rs:|^crates/miso-engine-lane/src/softfma.rs:|^crates/miso-engine-lane/src/fpenv.rs:|^crates/miso-engine-builtins-compiler/tests/allocation_tracker.rs:|^crates/miso-engine-session/tests/allocation_budget.rs:|^crates/miso-engine-soft-clip/tests/allocation.rs:|^crates/miso-engine-transient-shaper/tests/allocation.rs:|^crates/miso-engine-capi/src/ffi.rs:|^crates/miso-engine-capi/tests/resource_lifecycle.rs:|^crates/miso-engine-effect-package/src/ffi.rs:|^crates/miso-engine-effect-package/tests/package_allocation.rs:|^crates/miso-engine-true-peak-limiter/tests/allocation.rs:|^crates/miso-engine-multiband-compressor/tests/no_alloc_render.rs:|^crates/miso-engine-effect-compiler/tests/migration_terminal.rs:|^hosts/miso-engine-host-web/src/ffi.rs:|^tools/miso-engine-bench-support/src/alloc.rs:|^tools/miso-engine-audit/src/capi.rs:|^tools/miso-engine-native-pcm-runner/src/lib.rs:|^tools/miso-engine-bench/src/protocol.rs:|^tools/miso-engine-wasm-gate-guest/src/lib.rs:' || true)"
+} | rg -v '^crates/miso-engine-core/src/realtime/spsc.rs:|^crates/miso-engine-core/src/realtime/disjoint.rs:|^crates/miso-engine-lane/src/softfma.rs:|^crates/miso-engine-lane/src/fpenv.rs:|^crates/miso-engine-builtins-compiler/tests/allocation_tracker.rs:|^crates/miso-engine-session/tests/allocation_budget.rs:|^crates/miso-engine-soft-clip/tests/allocation.rs:|^crates/miso-engine-transient-shaper/tests/allocation.rs:|^crates/miso-engine-capi/src/ffi.rs:|^crates/miso-engine-capi/tests/resource_lifecycle.rs:|^crates/miso-engine-effect-package/src/ffi.rs:|^crates/miso-engine-effect-package/tests/package_allocation.rs:|^crates/miso-engine-true-peak-limiter/tests/allocation.rs:|^crates/miso-engine-multiband-compressor/tests/no_alloc_render.rs:|^crates/miso-engine-effect-compiler/tests/migration_terminal.rs:|^crates/miso-engine-effect-contract/tests/nudge.rs:|^hosts/miso-engine-host-web/src/ffi.rs:|^tools/miso-engine-bench-support/src/alloc.rs:|^tools/miso-engine-audit/src/capi.rs:|^tools/miso-engine-native-pcm-runner/src/lib.rs:|^tools/miso-engine-bench/src/protocol.rs:|^tools/miso-engine-wasm-gate-guest/src/lib.rs:' || true)"
 [[ -z "$unsafe_matches" ]] || {
     printf '%s\n' "$unsafe_matches" >&2
     fail "unsafe code exists outside the issue-approved ownership/audit files"
