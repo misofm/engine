@@ -4287,7 +4287,10 @@ mod tests {
             track.simd1.effects.len() == 1
                 && track.dynamic.effects.len() == 1
                 && track.simd2.effects.is_empty()
-                && matches!(track.dynamic.effects[0].sidechain, SidechainDeclaration::None)
+                && matches!(
+                    track.dynamic.effects[0].sidechain,
+                    SidechainDeclaration::None
+                )
         }));
         let session = compile_session(
             &model,
@@ -4302,14 +4305,15 @@ mod tests {
         )
         .expect("compiled console fixture");
         let registry = launch_native_effect_registry_v1().expect("launch registry");
-        let per_node_registry = NativeEffectRegistry::new(
-            ["miso.parametric-eq", "miso.compressor"].map(|id| {
+        let per_node_registry =
+            NativeEffectRegistry::new(["miso.parametric-eq", "miso.compressor"].map(|id| {
                 Box::new(ScalarOnlyDelegateFactory {
-                    delegate: registry.get_shared_ascii(id).expect("registered launch effect"),
+                    delegate: registry
+                        .get_shared_ascii(id)
+                        .expect("registered launch effect"),
                 }) as Box<dyn NativeEffectFactory>
-            }),
-        )
-        .expect("per-node registry");
+            }))
+            .expect("per-node registry");
         let effect_caps = EffectCompileCaps {
             maximum_total_state_bytes: 1 << 20,
             maximum_scratch_bytes: 1 << 20,
@@ -4358,8 +4362,7 @@ mod tests {
         assert_eq!(bank.graph.prepared_bank_count(), 2 * (64 / lanes));
         assert_eq!(per_node.graph.prepared_bank_count(), 0);
         assert_eq!(
-            bank.graph.sequential_schedule,
-            per_node.graph.sequential_schedule,
+            bank.graph.sequential_schedule, per_node.graph.sequential_schedule,
             "banking is an execution decision and must not move the graph"
         );
         assert_eq!(bank.report.output_latency, per_node.report.output_latency);
@@ -4369,11 +4372,7 @@ mod tests {
         let expected_transposes = BLOCKS * (bank_count + builtin_bank_count) as u64;
         let banked = render_console_blocks(bank, BLOCKS);
         let scalar = render_console_blocks(per_node, BLOCKS);
-        assert_pcm_bits_equal(
-            &banked.0,
-            &scalar.0,
-            "64-track console: banked vs per node",
-        );
+        assert_pcm_bits_equal(&banked.0, &scalar.0, "64-track console: banked vs per node");
         assert!(
             banked.0.iter().flatten().any(|sample| *sample != 0.0),
             "the console fixture rendered audio"

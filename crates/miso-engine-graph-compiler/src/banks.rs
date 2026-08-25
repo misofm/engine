@@ -109,7 +109,10 @@ pub(crate) fn bind_rack_banks(
             // opaque slot makes the whole chain per-node, exactly as one sidechained slot does
             // (`EffectProgramKeyV1::blocks_banking`). A bank is a single kernel over the chain
             // program, so it cannot straddle a slot it has no kernel for.
-            if !declared.iter().all(|effect| banks_are_permitted(&effect.identity)) {
+            if !declared
+                .iter()
+                .all(|effect| banks_are_permitted(&effect.identity))
+            {
                 continue;
             }
             let chain = RackChainId {

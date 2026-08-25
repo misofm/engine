@@ -103,9 +103,9 @@ fn prepare(leg: Leg) -> Session {
 
 fn prepare_from(toml: &str, leg: Leg) -> Session {
     let (_session, prepared, handles) =
-        prepare_host_session_with_console(toml, &caps(), &console(leg)).unwrap_or_else(
-            |failure| panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes())),
-        );
+        prepare_host_session_with_console(toml, &caps(), &console(leg)).unwrap_or_else(|failure| {
+            panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes()))
+        });
     assert_eq!(handles.tracks.len(), TRACKS);
     assert!(
         prepared.report.effect_bank_scratch_bytes > 0,
@@ -1071,7 +1071,7 @@ fn observation_is_identical_across_rack_placement() {
         "rack placement must not change a rendered sample"
     );
 
-    for track in 0..TRACKS {
+    for (track, threshold) in THRESHOLDS.iter().enumerate() {
         let expected = reader(&simd1.handles, track).read().expect("a window");
         let observed = reader(&dynamic.handles, track).read().expect("a window");
         assert_eq!(
@@ -1080,11 +1080,10 @@ fn observation_is_identical_across_rack_placement() {
         );
         // And it is a real reduction for the tracks whose threshold bites, not a shared zero.
         // Reduction is published as a positive magnitude in dB.
-        if THRESHOLDS[track] < 0.0 {
+        if *threshold < 0.0 {
             assert!(
                 observed.left > 0.0 && observed.right > 0.0,
-                "track {track}: threshold {} must reduce",
-                THRESHOLDS[track]
+                "track {track}: threshold {threshold} must reduce"
             );
         } else {
             assert_eq!(observed.left, 0.0, "threshold 0 dB does not bite");
