@@ -70,6 +70,10 @@ impl StartedRenderSessionV1 {
     /// stable `fp_environment_invalid` token, when the canonical control word cannot be installed
     /// on this thread or the caller's word is not restored bit-exactly. The plan comes back so the
     /// host can move it to a control thread and drop it there: the render thread frees nothing.
+    #[expect(
+        clippy::result_large_err,
+        reason = "the plan is the Err payload on purpose: an attestation failure hands it back so                   the host can drop it on a control thread, because the render thread frees nothing"
+    )]
     pub fn start(
         plan: PreparedRenderPlan,
     ) -> Result<Self, (PreparedRenderPlan, FpEnvironmentRejection)> {
@@ -178,6 +182,10 @@ impl PreparedHost {
     ///
     /// Returns the untouched [`PreparedHost`] alongside the [`FpEnvironmentRejection`] when this
     /// thread's floating-point environment cannot be pinned.
+    #[expect(
+        clippy::result_large_err,
+        reason = "the plan is the Err payload on purpose: an attestation failure hands it back so                   the host can drop it on a control thread, because the render thread frees nothing"
+    )]
     pub fn start_render_session(
         self,
     ) -> Result<

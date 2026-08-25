@@ -1053,7 +1053,13 @@ fn complete_capi_owners(
     // read-mostly header plus one per cursor) and each endpoint by 8 (cached peer cursor); phase C
     // deleted the plan's unused parameter/event store (-96 per live plan row). The rows above are
     // sized from the live layouts, and `resources_c` at the frozen-scratch comparison must agree.
-    assert_effective_owner_mutations(&active, 141_777, "active CAPI");
+    //
+    // #146 re-pin (+8): `PlanState` gained the render-thread floating-point attestation flag, a
+    // `Cell<bool>` that costs a machine word of padding inside the `Plan` handle. It is the whole
+    // of the change: the first block a plan renders proves the canonical environment took on that
+    // thread, and every block after it reads an already-set flag. Eight bytes per live plan handle,
+    // once, and no per-block or per-track cost anywhere.
+    assert_effective_owner_mutations(&active, 141_785, "active CAPI");
 
     let candidate_epoch_rows = [
         PrimitiveOwner {
@@ -1622,7 +1628,7 @@ fn primitive_replacement_oracle(current: &str, prospective: &str) -> PrimitiveRe
             bytes: prepared_protocol,
         },
     ];
-    assert_effective_owner_mutations(&capi_rows, 166_190, "double-live CAPI");
+    assert_effective_owner_mutations(&capi_rows, 166_198, "double-live CAPI");
 
     let graph_rows = graph_owners();
     let graph_largest = owner_total(&graph_rows[7..15]);
@@ -1707,7 +1713,7 @@ fn primitive_replacement_oracle(current: &str, prospective: &str) -> PrimitiveRe
     );
     assert_ne!(
         capi_rows.iter().map(|owner| owner.bytes).max(),
-        Some(166_190),
+        Some(166_198),
         "CAPI aggregate is not max-single"
     );
 
@@ -1921,7 +1927,7 @@ fn external_primitive_double_live_oracle_drives_exact_and_one_below_c_caps() {
     assert_eq!(oracle.effect_state, 15_120);
     assert_eq!(oracle.effect_scratch, 432);
     assert_eq!(oracle.builtin, 15_948);
-    assert_eq!(oracle.capi, 166_190);
+    assert_eq!(oracle.capi, 166_198);
     assert_eq!(oracle.largest, 58_694);
 
     let rows = [
@@ -1952,7 +1958,7 @@ fn external_primitive_double_live_oracle_drives_exact_and_one_below_c_caps() {
         // SAFETY: These handles are uniquely owned until their matching destroy calls.
         unsafe {
             let (session, plan) = compile_c(&session_toml, &exact_limits);
-            assert_eq!(resources_c(plan), frozen_scratch_report(141_777));
+            assert_eq!(resources_c(plan), frozen_scratch_report(141_785));
             let request = command(1, 42, "double-live-cap");
             let mut response = [0xa5_u8; 4_096];
             assert_eq!(submit(session, &request, &mut response), RESULT_OK, "{row}");
@@ -1970,7 +1976,7 @@ fn external_primitive_double_live_oracle_drives_exact_and_one_below_c_caps() {
                 miso_engine_v2_render_f32_planar(plan, 0, &output),
                 RESULT_OK
             );
-            assert_eq!(resources_c(plan), frozen_scratch_report(141_768));
+            assert_eq!(resources_c(plan), frozen_scratch_report(141_776));
             miso_engine_v2_session_destroy(session);
             miso_engine_v2_plan_destroy(plan);
         }
