@@ -262,12 +262,23 @@ impl ConsoleEffect {
 /// The whole of level-2 zero is the `wants` call: an unarmed tap's effect state is never read,
 /// never folded and never stored, and a plan with no capacity at all never reaches this function
 /// because `observation` is `None`.
+///
+/// Issue #163 phase 4 item 6 adds the lane-level gate in front of that per-tap one. `wants` made
+/// the *state read* free for an unarmed tap but still walked every declared tap of every driven
+/// effect on every block, so a capable-but-unsubscribed plan paid O(taps) where #143 promises
+/// "one predicted branch per driven effect per block". `any_armed` is that one branch, and it is
+/// the branch its own doc comment has always described itself as. The per-tap `wants` stays: it
+/// is what keeps an armed lane from reading an unarmed sibling tap, and the two gates are a
+/// conjunction, never a replacement.
 fn publish_observations(
     observation: &mut ObservationLaneV1,
     processor: &dyn PreparedNativeEffect,
     first_sample: u64,
     frames: u64,
 ) {
+    if !observation.any_armed() {
+        return;
+    }
     let mut sample = ObservationSampleV1 {
         left: 0.0,
         right: 0.0,
@@ -599,12 +610,21 @@ fn execute_op(
             debug_assert_eq!(staged.dropped, 0, "console staging window overflowed");
             let automation = &console.spans[..staged.staged];
             let bypassed = console.control.bypassed();
+            // Issue #163 phase 4 item 4: the dry staging is read only by the `apply` below, and
+            // only when this block is bypassed. `bypassed` is already decided here — the control
+            // drain that could change it ran above — so the capture is skippable for an
+            // un-bypassed block *unless* the shunt carries a latency line, which has to be fed on
+            // every block whatever the bypass state. Both readers of `dry_*` are later in this
+            // same block, so nothing crosses a block boundary and the skip moves no rendered bit.
+            let capture_dry = bypassed || console.shunt.feeds_line();
             let effect = &mut console.effect;
             let quantum = effect.metadata.quantum;
             match op.sidechain {
                 None => {
                     let (out_left, out_right) = lease.write_stereo(output);
-                    console.shunt.capture(out_left, out_right);
+                    if capture_dry {
+                        console.shunt.capture(out_left, out_right);
+                    }
                     let block = EffectProcessBlock::new(
                         out_left,
                         out_right,
@@ -619,7 +639,9 @@ fn execute_op(
                 Some(sidechain) => {
                     let ((out_left, out_right), (side_left, side_right)) =
                         lease.write_read_stereo(output, sidechain);
-                    console.shunt.capture(out_left, out_right);
+                    if capture_dry {
+                        console.shunt.capture(out_left, out_right);
+                    }
                     let block = EffectProcessBlock::new(
                         out_left,
                         out_right,

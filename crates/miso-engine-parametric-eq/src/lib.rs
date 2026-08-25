@@ -44,7 +44,7 @@ use miso_engine_effect_contract::{
     QualityDescriptorV1, ResetKind, SmoothingRule, StatePayloadError, StatePayloadInput,
     StatePayloadOutput, StatePayloadSizes, TailSamples, expected_prepared_metadata,
 };
-use miso_engine_effect_runtime::bank::{check_block, nonfinite_lane_mask};
+use miso_engine_effect_runtime::bank::{block_is_positive_zero, check_block, nonfinite_lane_mask};
 use miso_engine_effect_runtime::params::{
     ParameterSpec, normalize_zero, parameter_value_valid as domain_valid,
 };
@@ -914,6 +914,36 @@ impl<L: Lane, const W: usize> Channel<L, W> {
         }
     }
 
+    /// `true` when no lane of any section has a ramp in flight.
+    ///
+    /// A ramp means the coefficients move within the block, so the "same coefficients" leg of the
+    /// fixed-point induction does not hold and the fast path must not engage.
+    fn no_ramp_in_flight(&self) -> bool {
+        self.remaining
+            .iter()
+            .all(|section| section.iter().all(|remaining| *remaining == 0))
+    }
+
+    /// The raw bit patterns of every integrator word, for an exact before/after comparison.
+    ///
+    /// Bits rather than floats because the comparison has to distinguish `+0.0` from `-0.0`: an
+    /// integrator that settles at `-0.0` is still settled, but a float compare would also call a
+    /// pair that moved between the two zeros "unchanged", which is exactly the bit the fast path
+    /// promises not to move.
+    fn state_bits(&self, out: &mut [u32; EQ_SECTION_COUNT_V1 * 2 * MAX_LANES]) {
+        for (index, section) in self.sections.iter().enumerate() {
+            let base = index * 2 * L::WIDTH;
+            section
+                .state
+                .ic1
+                .store_bits(&mut out[base..base + L::WIDTH]);
+            section
+                .state
+                .ic2
+                .store_bits(&mut out[base + L::WIDTH..base + 2 * L::WIDTH]);
+        }
+    }
+
     /// Clears every integrator word, leaving coefficients and ramps alone.
     fn reset_states(&mut self) {
         for section in &mut self.sections {
@@ -1090,6 +1120,23 @@ struct PreparedParametricEq<L: Lane, const W: usize> {
     initial: [[[BandTarget; EQ_SECTION_COUNT_V1]; 2]; W],
     left: Channel<L, W>,
     right: Channel<L, W>,
+    /// Issue #163 phase 4 item 1: the previous block proved this bank is at a silent fixed point.
+    ///
+    /// Set only by [`render`](Self::render), and only after it has *observed* -- not assumed --
+    /// all three facts on a block it actually ran: the input was exactly `+0.0` everywhere, the
+    /// output it produced was exactly `+0.0` everywhere, and every integrator word came out of the
+    /// block bit-identical to the word it went in with. Cleared by anything that can move a
+    /// coefficient or a state word out from under that observation.
+    ///
+    /// The induction it licenses: a bank kernel is a pure function of (input, state,
+    /// coefficients). If those three are bit-identical to a block that provably produced all
+    /// `+0.0` output and left its state unmoved, the next block produces the same output and
+    /// leaves the state unmoved again -- so writing nothing is bit-identical to running it. This
+    /// is why the flag is *earned* by observation rather than derived from a theory about where an
+    /// SVF settles: the fixed point is not always `+0.0` (a negative coefficient drives an
+    /// integrator to `-0.0` and it stays there), and a theory that assumed it was would either
+    /// engage wrongly or never engage at all.
+    silent_fixed_point: bool,
 }
 
 impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
@@ -1209,6 +1256,29 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
         frames: usize,
     ) -> [[bool; MAX_LANES]; 2] {
         let mut failures = [[false; MAX_LANES]; 2];
+        let words = frames * W;
+        // Issue #163 phase 4 item 1. `quiet` is the whole precondition, evaluated whole-bank:
+        // no ramp in flight on either channel (so the coefficients are the same words the
+        // observed block used) and both input planes exactly `+0.0`. The block test short-circuits on
+        // its first chunk, so a console rendering music pays 32 words per channel for this and
+        // nothing else.
+        let quiet = self.left.no_ramp_in_flight()
+            && self.right.no_ramp_in_flight()
+            && block_is_positive_zero(&left[..words])
+            && block_is_positive_zero(&right[..words]);
+        if quiet && self.silent_fixed_point {
+            // The buffers already hold exactly `+0.0`, which is exactly what the four sections
+            // would have written; the integrators are at a fixed point the previous block
+            // measured. Writing nothing is bit-identical, and an all-`+0.0` block is trivially
+            // inside the §4.4 bound, so no lane failed.
+            return failures;
+        }
+        let mut before_left = [0_u32; EQ_SECTION_COUNT_V1 * 2 * MAX_LANES];
+        let mut before_right = [0_u32; EQ_SECTION_COUNT_V1 * 2 * MAX_LANES];
+        if quiet {
+            self.left.state_bits(&mut before_left);
+            self.right.state_bits(&mut before_right);
+        }
         self.left.process_block(left, frames);
         self.right.process_block(right, frames);
         for (index, (channel, block)) in
@@ -1226,6 +1296,20 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
                 *failed = mask & (1 << lane) != 0;
             }
         }
+        // Earn (or lose) the flag from what this block actually did. All three legs are required:
+        // the input was `+0.0` and the coefficients were still (`quiet`), the integrators came out
+        // exactly as they went in, and the output the sections wrote was `+0.0` to the bit. Only
+        // then is "write nothing" a faithful replay of "run the kernel".
+        self.silent_fixed_point = quiet && {
+            let mut after_left = [0_u32; EQ_SECTION_COUNT_V1 * 2 * MAX_LANES];
+            let mut after_right = [0_u32; EQ_SECTION_COUNT_V1 * 2 * MAX_LANES];
+            self.left.state_bits(&mut after_left);
+            self.right.state_bits(&mut after_right);
+            after_left == before_left
+                && after_right == before_right
+                && block_is_positive_zero(&left[..words])
+                && block_is_positive_zero(&right[..words])
+        };
         failures
     }
 
@@ -1328,6 +1412,8 @@ fn prepare_width<L: Lane, const W: usize>(
             .map_err(coefficients)?,
         right: Channel::new(core::array::from_fn(|track| initial[track][1]), sample_rate)
             .map_err(coefficients)?,
+        // Nothing has been observed yet, so nothing is claimed.
+        silent_fixed_point: false,
     })
 }
 
@@ -1498,6 +1584,9 @@ impl PreparedNativeEffect for PreparedParametricEq<f32, 1> {
     }
 
     fn reset(&mut self, kind: ResetKind) {
+        // #163 phase 4 item 1: a reset moves state, and `FullToDefaults` moves coefficients too.
+        // The flag is a claim about a block that has now been overwritten, so it is withdrawn.
+        self.silent_fixed_point = false;
         match kind {
             ResetKind::FullToDefaults => {
                 let _ = self.reset_to_defaults();
@@ -1511,6 +1600,11 @@ impl PreparedNativeEffect for PreparedParametricEq<f32, 1> {
 
     fn process(&mut self, block: EffectProcessBlock<'_>) -> ProcessReport {
         let mut report = ProcessReport::default();
+        // #163 phase 4 item 1, as in `process_bank`: automation can snap a coefficient without
+        // ever raising `remaining`, so the claim is withdrawn whenever a span arrives.
+        if !block.automation.is_empty() {
+            self.silent_fixed_point = false;
+        }
         self.automate(
             block.automation,
             block.first_sample,
@@ -1539,6 +1633,8 @@ impl PreparedNativeEffect for PreparedParametricEq<f32, 1> {
         version: u32,
         input: StatePayloadInput<'_>,
     ) -> Result<(), StatePayloadError> {
+        // #163 phase 4 item 1: see `restore_track_state_payload`.
+        self.silent_fixed_point = false;
         self.restore_track(0, version, input)
     }
 }
@@ -1549,6 +1645,9 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedParametricEq<
     }
 
     fn reset(&mut self, kind: ResetKind) {
+        // #163 phase 4 item 1: a reset moves state, and `FullToDefaults` moves coefficients too.
+        // The flag is a claim about a block that has now been overwritten, so it is withdrawn.
+        self.silent_fixed_point = false;
         match kind {
             ResetKind::FullToDefaults => {
                 let _ = self.reset_to_defaults();
@@ -1566,6 +1665,13 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedParametricEq<
             || self.bank.width.lanes() as usize != W
         {
             return report;
+        }
+        // #163 phase 4 item 1: an admitted span retargets a band, and a span with no smoothing
+        // snaps the coefficient words outright while leaving `remaining` at zero -- so
+        // `no_ramp_in_flight` alone would not notice it. Withdraw the claim whenever this block
+        // carries automation at all; the next silent block re-earns it.
+        if !block.automation.is_empty() {
+            self.silent_fixed_point = false;
         }
         for track in 0..W {
             let start = block.automation_offsets[track] as usize;
@@ -1603,6 +1709,9 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedParametricEq<
         version: u32,
         input: StatePayloadInput<'_>,
     ) -> Result<(), StatePayloadError> {
+        // #163 phase 4 item 1: a restore writes integrators and coefficients this bank never
+        // rendered, so any standing fixed-point claim is void.
+        self.silent_fixed_point = false;
         self.restore_track(bank_track_index(track_index, W)?, version, input)
     }
 }

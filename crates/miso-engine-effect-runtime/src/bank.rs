@@ -88,6 +88,76 @@ pub fn check_block<L: Lane>(io: &[f32]) -> bool {
     !L::mask_any(L::mask_not(ok))
 }
 
+/// `true` when every word of `io` is **exactly** `+0.0` (bit pattern zero).
+///
+/// # Why bits and not `== 0.0` (issue #163 phase 4 item 1)
+///
+/// This is the admission test for the silent fast path, and the fast path's whole claim is that
+/// leaving a buffer untouched is bit-identical to what the kernel would have written into it. A
+/// float compare cannot carry that claim: `-0.0 == 0.0` is `true`, so a block of negative zeros
+/// would pass while the bits differ from what an untouched `+0.0` buffer holds. Reducing the raw
+/// `u32` patterns instead makes the test exactly as strict as the claim -- `+0.0` is the only
+/// `f32` whose bits are zero, so `bits == 0` is "every word is `+0.0`" and nothing else.
+///
+/// # Why `-0.0` is excluded on the **input** side too (#163 phase 4, adversarial pass)
+///
+/// The paragraph above is about state. The input side needs its own argument, because "this block
+/// is all zeros, so skipping is free" is *false* for negative zero, and it is false in the
+/// direction that loses bits.
+///
+/// Measured, not assumed: a settled parametric-EQ bank handed one block of all `-0.0` writes back
+/// all `+0.0`. The SVF's `x - ic2` at `ic2 = +0.0` does give `-0.0`, but the output sum
+/// `m0*x + m1*v1 + m2*v2` mixes signed zeros and `(-0.0) + (+0.0)` is `+0.0` under
+/// round-to-nearest. The compressor reaches the same place by a different route: a `-0.0` block is
+/// written into its lookahead ring and emerges some seven blocks later, so skipping it changes a
+/// sample that is not even in this block.
+///
+/// So a sign-blind predicate would let a claim earned on `+0.0` engage on a `-0.0` block, and the
+/// skip would leave the buffer holding `-0.0` where the kernel writes `+0.0` — different bit
+/// patterns for the same block, which is precisely the class-A promise this fast path makes. The
+/// strict test declines such a block and renders it through the real kernel like any other input.
+///
+/// Both directions are pinned by `a_negative_zero_input_block_is_not_treated_as_silence`, in
+/// `miso-engine-parametric-eq` and `miso-engine-compressor`. Masking the sign bit here
+/// (`bits |= value.to_bits() & 0x7fff_ffff`) leaves every other test in the workspace green and
+/// reddens exactly those two.
+///
+/// Chunked so the **active** path stays cheap. A block carrying signal returns on its first
+/// chunk, so a rendering console pays 32 words rather than a whole extra pass over
+/// `frames * lanes`. The reduction is a plain `|` fold, which vectorises.
+#[inline]
+#[must_use]
+pub fn block_is_positive_zero(io: &[f32]) -> bool {
+    for chunk in io.chunks(32) {
+        let mut bits = 0_u32;
+        for value in chunk {
+            bits |= value.to_bits();
+        }
+        if bits != 0 {
+            return false;
+        }
+    }
+    true
+}
+
+/// `true` when every lane of `value` is **exactly** `+0.0`, by the same bit rule as
+/// [`block_is_positive_zero`].
+///
+/// Used on state words rather than audio: a recursive kernel's fixed point is only usable by the
+/// fast path if it is the *exact* word the slow path would have left behind.
+#[inline]
+#[must_use]
+pub fn lane_is_positive_zero<L: Lane>(value: L) -> bool {
+    debug_assert!(L::WIDTH <= 32);
+    let mut words = [0_u32; 32];
+    value.store_bits(&mut words[..L::WIDTH]);
+    let mut bits = 0_u32;
+    for word in words.iter().take(L::WIDTH) {
+        bits |= *word;
+    }
+    bits == 0
+}
+
 /// The lane bitmask of the values in `io` that are out of bounds.
 ///
 /// Only called on the failing path, once, to attribute a rejected block to a track. Bit `l` is set

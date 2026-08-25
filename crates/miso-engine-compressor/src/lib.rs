@@ -51,6 +51,7 @@ use miso_engine_effect_contract::{
     StatePayloadError, StatePayloadInput, StatePayloadOutput, StatePayloadSizes, TailSamples,
     expected_prepared_metadata,
 };
+use miso_engine_effect_runtime::bank::block_is_positive_zero;
 use miso_engine_effect_runtime::params::{is_negative_zero, normalize_zero, parameter_value_valid};
 use miso_engine_lane::{Backend, Lane, Simd4, Simd8};
 
@@ -472,6 +473,13 @@ struct Instance<L: Lane> {
     metadata: PreparedEffectMetadata,
     left: Channel<L>,
     right: Channel<L>,
+    /// Issue #163 phase 4 item 1: the previous block proved this instance is at a silent fixed
+    /// point. Earned only by observation in [`render`](Self::render), never assumed. See the
+    /// matching field on `miso-engine-parametric-eq` for the induction it licenses.
+    silent_fixed_point: bool,
+    /// The bypass flag in force when the claim above was earned. Bypass selects a different path
+    /// through the kernel, so a claim earned on one side of it says nothing about the other.
+    silent_bypass: bool,
 }
 
 impl<L: Lane> Instance<L> {
@@ -486,10 +494,14 @@ impl<L: Lane> Instance<L> {
             metadata,
             left: Channel::new(left_defaults, length, metadata.sample_rate),
             right: Channel::new(right_defaults, length, metadata.sample_rate),
+            silent_fixed_point: false,
+            silent_bypass: metadata.bypass,
         }
     }
 
     fn reset(&mut self, kind: ResetKind) {
+        // #163 phase 4 item 1: a reset moves the rings and the recursive word, so the claim goes.
+        self.silent_fixed_point = false;
         let rate = self.metadata.sample_rate;
         match kind {
             ResetKind::FullToDefaults => {
@@ -515,6 +527,35 @@ impl<L: Lane> Instance<L> {
         frames: usize,
         mut record: impl FnMut(usize, bool, bool),
     ) {
+        let words = frames * L::WIDTH;
+        // Issue #163 phase 4 item 1. Whole-bank, never per lane. Four legs, all cheap:
+        //
+        // * no ramp in flight on either channel, so the coefficient words are the ones the
+        //   observed block used;
+        // * the detector is the main input rather than a connected sidechain, so there is no
+        //   second buffer whose contents could differ from the block that was observed;
+        // * the bypass flag is the one that was in force when the claim was earned, since it
+        //   selects a different path through the kernel;
+        // * both input planes are exactly `+0.0`, which short-circuits on the first chunk for a
+        //   block carrying signal.
+        let quiet = self.left.max_remaining() == 0
+            && self.right.max_remaining() == 0
+            && matches!(detector, Detector::Main | Detector::Silent)
+            && self.silent_bypass == self.metadata.bypass
+            && block_is_positive_zero(&left[..words])
+            && block_is_positive_zero(&right[..words]);
+        if quiet && self.silent_fixed_point {
+            // Both rings are known all-`+0.0` (that is one of the legs the claim was earned on),
+            // the one recursive word is at its fixed point, and the buffers already hold the
+            // `+0.0` the kernel would have written. The cursor is the only state that must still
+            // move: advancing it by `frames` is exactly what `frames` per-sample increments do,
+            // and it keeps the state bit-identical to the slow path rather than merely
+            // equivalent.
+            self.left.advance_cursor(frames as u32);
+            self.right.advance_cursor(frames as u32);
+            return;
+        }
+        let before = quiet.then(|| (self.left.recursive_bits(), self.right.recursive_bits()));
         kernel::process_block::<L>(
             left,
             right,
@@ -525,6 +566,21 @@ impl<L: Lane> Instance<L> {
             self.metadata.sample_rate,
             (&mut self.left, &mut self.right),
         );
+        // Earn or lose the claim from what this block actually did: the recursive gain-reduction
+        // word came out as it went in, both delay rings are entirely `+0.0` (so a later cursor
+        // position reads the same silence a slow path would), and the output is `+0.0` to the bit.
+        self.silent_fixed_point = match before {
+            Some((left_before, right_before)) => {
+                left_before == self.left.recursive_bits()
+                    && right_before == self.right.recursive_bits()
+                    && self.left.rings_are_positive_zero()
+                    && self.right.rings_are_positive_zero()
+                    && block_is_positive_zero(&left[..words])
+                    && block_is_positive_zero(&right[..words])
+            }
+            None => false,
+        };
+        self.silent_bypass = self.metadata.bypass;
         let left_mask = kernel::finish_channel::<L>(left, &mut self.left);
         let right_mask = kernel::finish_channel::<L>(right, &mut self.right);
         if left_mask | right_mask == 0 {
@@ -559,6 +615,10 @@ impl<L: Lane> Instance<L> {
         input: StatePayloadInput<'_>,
         lane: usize,
     ) -> Result<(), StatePayloadError> {
+        // #163 phase 4 item 1: a restore writes rings, the recursive word and the coefficients
+        // from a payload this instance never rendered, so any standing claim is void. Withdrawn
+        // before the version check so a rejected restore cannot leave a half-trusted claim either.
+        self.silent_fixed_point = false;
         if state_layout_version != COMPRESSOR_DESCRIPTOR_V1.state_layout_version {
             return Err(StatePayloadError {
                 code: "effect.state.version",
@@ -689,6 +749,10 @@ impl PreparedNativeEffect for PreparedCompressor {
     }
 
     fn process(&mut self, block: EffectProcessBlock<'_>) -> ProcessReport {
+        // #163 phase 4 item 1, as in `process_bank`.
+        if !block.automation.is_empty() {
+            self.instance.silent_fixed_point = false;
+        }
         let mut report = ProcessReport::default();
         let metadata = self.instance.metadata;
         apply_automation(
@@ -816,6 +880,13 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedCompressorBank<L> {
             || !offsets_are_ordered(block.automation_offsets, block.automation.len())
         {
             return report;
+        }
+        // #163 phase 4 item 1: an admitted span can redesign coefficients, and a span whose
+        // smoothing resolves to zero samples snaps them outright while leaving `max_remaining` at
+        // zero -- so the ramp test alone would not notice it. Withdraw the claim whenever this
+        // block carries automation at all; the next settled silent block re-earns it.
+        if !block.automation.is_empty() {
+            self.instance.silent_fixed_point = false;
         }
         let metadata = self.instance.metadata;
         for track in 0..lanes {

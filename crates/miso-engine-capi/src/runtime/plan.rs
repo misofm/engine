@@ -9,6 +9,21 @@ pub(crate) struct SharedPlanState {
     pub(crate) render_sequence: AtomicU64,
     pub(crate) render_sample: AtomicU64,
     pub(crate) render_peak_bits: AtomicU32,
+    /// Whether anything can currently consume the per-block output peak (#163 phase 4 item 2).
+    ///
+    /// The render thread computed a 2 x `frames` scalar `abs`/`max` scan on every successful
+    /// render and published the result unconditionally. Its only consumer is
+    /// `SessionState::collect_render_activity`, which turns it into `MeterRecord`s and stages
+    /// them through `ProtocolController::stage_meter_batch_event` -- and that call refuses
+    /// outright unless the endpoint has configured meter handles and a nonzero meter period. With
+    /// no meters configured, which is every session that has not asked for them, the scan ran 256
+    /// times per block to produce a number nothing could read.
+    ///
+    /// This flag is that consumer condition, hoisted to where the render thread can see it. It is
+    /// deliberately a *superset* of the refusal condition in `stage_meter_batch_event`: it omits
+    /// the `provider_features.meters` term, so it can only ever cause the scan to run when it was
+    /// not strictly needed, never to be skipped when it was.
+    pub(crate) render_peak_observed: AtomicBool,
 }
 
 pub(crate) fn active_resources(shared: &SharedPlanState) -> PlanResourceReport {
@@ -196,6 +211,19 @@ impl PlanState {
         Ok(())
     }
 
+    /// Whether the peak scan has a consumer this block (#163 phase 4 item 2).
+    ///
+    /// `Relaxed` is the correct ordering and not a shortcut: the flag guards no other memory, the
+    /// value it gates is published through its own `Release` store below, and a render that
+    /// straddles the control thread's `refresh_render_peak_gate` is allowed either answer. Taking
+    /// the stale `false` for one block costs one dropped record on the lossy telemetry lane --
+    /// which that lane documents as permitted -- and `publish_render_observation` marks that block
+    /// so the consumer drops it rather than reading a `0.0` that was never measured.
+    pub(crate) fn render_peak_observed(&self) -> bool {
+        self.shared.render_peak_observed.load(Ordering::Relaxed)
+    }
+
+    /// Publish this block's observation. A `NaN` peak means "not measured this block".
     pub(crate) fn publish_render_observation(&self, peak: f32) {
         self.shared
             .render_sample

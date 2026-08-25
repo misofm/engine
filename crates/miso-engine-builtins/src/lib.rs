@@ -1865,10 +1865,51 @@ impl MeterAccumulator {
             decay: self.decay,
             decay_enabled: self.config.peak_decay_db_per_second != 0.0,
         };
+        // Issue #163 phase 4 item 3: a silent block against a settled lane is a provable no-op,
+        // and the loop below is otherwise a third full read of the same audio (after the kernel's
+        // own store and after D7's boundary scan), with a serial `f64` energy dependency and four
+        // branches per sample per channel.
+        //
+        // The proof, sample by sample, for a lane whose `held` is `+0.0` and whose
+        // `hold_remaining` already equals the configured hold length:
+        //
+        // * `normal_or_zero(±0.0)` is true, so `sanitized` does not move and the sample is not
+        //   replaced;
+        // * `absolute` is `+0.0`, so `absolute > peak` is false for every reachable `peak` (peak
+        //   is a magnitude and never negative) and `peak` does not move;
+        // * `energy += 0.0 * 0.0` adds exactly `+0.0`, which is the identity on every
+        //   non-negative `f64` -- and `energy` only ever grows from `+0.0`;
+        // * `absolute >= 1.0` is false, so `clipped` does not move;
+        // * `absolute >= held` is true exactly when `held == 0.0`, which re-arms `hold_remaining`
+        //   to `hold_frames` -- a no-op only once it is already there, which is why that is a
+        //   precondition rather than a consequence.
+        //
+        // Both signed zeros qualify: `(-0.0).abs()` is `+0.0` and `(-0.0) * (-0.0)` is `+0.0`, so
+        // the `== 0.0` test below (which matches both) admits exactly the values the proof covers.
+        // Neither `self.frames`, `self.start`, `self.sequence` nor the window split is touched
+        // here, so a skipped block still advances the window and still emits on the period
+        // boundary -- the early-out is inside the segment, not around it.
+        //
+        // Cost on the active path is one compare: `all` short-circuits on the first nonzero
+        // sample, so a block carrying signal pays for the first frame and nothing more.
+        let settled_silence = self.left.held == 0.0
+            && self.right.held == 0.0
+            && self.left.hold_remaining == window.hold_frames
+            && self.right.hold_remaining == window.hold_frames
+            && left[..len].iter().all(|sample| *sample == 0.0)
+            && right[..len].iter().all(|sample| *sample == 0.0);
         let mut offset = 0;
         while offset < len {
             let take = ((period - self.frames) as usize).min(len - offset);
             let end = offset + take;
+            if settled_silence {
+                self.frames = self.frames.saturating_add(take as u32);
+                offset = end;
+                if self.frames == period {
+                    self.emit();
+                }
+                continue;
+            }
             observe_segment(
                 &mut self.left,
                 &left[offset..end],

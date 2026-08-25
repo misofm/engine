@@ -401,7 +401,23 @@ impl SessionState {
         take_test_fault_state(phase)
     }
 
+    /// Republish the render thread's peak-scan gate from the accepted telemetry configuration.
+    ///
+    /// Issue #163 phase 4 item 2. Called wherever the endpoint's telemetry configuration can have
+    /// just changed, which is every path that reaches this control state: an accepted
+    /// `ConfigureTelemetry` arrives inside `command`, and a plan swap re-reads it here. The flag
+    /// only ever lags by the width of one concurrent render, and `publish_render_observation`
+    /// marks such a block unmeasured rather than letting it publish a fabricated `0.0`.
+    pub(crate) fn refresh_render_peak_gate(&self) {
+        let telemetry = self.controller.telemetry_configuration();
+        let observed = !telemetry.meter_handles.is_empty() && telemetry.meter_period_blocks != 0;
+        self.shared
+            .render_peak_observed
+            .store(observed, Ordering::Relaxed);
+    }
+
     pub(crate) fn collect_render_activity(&mut self) {
+        self.refresh_render_peak_gate();
         let sequence = self.shared.render_sequence.load(Ordering::Acquire);
         if sequence == self.observed_render_sequence {
             return;
@@ -411,11 +427,18 @@ impl SessionState {
         let peak = f32::from_bits(self.shared.render_peak_bits.load(Ordering::Acquire));
         let observed_sample = miso_engine_protocol::SampleTime(sample);
         let revision = self.controller.session().revision();
-        let meter_len = self
-            .controller
-            .telemetry_configuration()
-            .meter_handles
-            .len();
+        // A `NaN` peak is the render thread saying it did not measure this block, which happens
+        // for exactly one block when telemetry is configured concurrently with a render. Staging
+        // it would publish a peak of `0.0` that no sample ever produced; dropping it costs one
+        // record on the lane that is documented to coalesce and drop.
+        let meter_len = if peak.is_nan() {
+            0
+        } else {
+            self.controller
+                .telemetry_configuration()
+                .meter_handles
+                .len()
+        };
         for index in 0..meter_len {
             let handle = self.controller.telemetry_configuration().meter_handles[index];
             let _ = self.controller.stage_meter_batch_event(

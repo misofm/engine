@@ -183,8 +183,37 @@ impl<L: Lane> Channel<L> {
         design_lane(&values, sample_rate, ALL_PARAMETERS, &mut self.words, lane);
     }
 
+    /// The bit pattern of the one recursive word, for an exact before/after comparison.
+    ///
+    /// Bits, not floats, for the reason #163 phase 4 item 1 needs everywhere: the fast path
+    /// promises not to move a bit, and `-0.0 == 0.0` would let a word that crossed between the
+    /// two zeros be called unchanged.
+    pub(crate) fn recursive_bits(&self) -> [u32; MAX_WIDTH] {
+        let mut words = [0_u32; MAX_WIDTH];
+        self.gain_reduction_db.store_bits(&mut words[..L::WIDTH]);
+        words
+    }
+
+    /// `true` when both delay rings are entirely `+0.0`.
+    ///
+    /// This is what makes skipping the ring writes sound: a ring of exact `+0.0` reads back the
+    /// same silence from any cursor position, so a block that writes only zeros into it leaves it
+    /// bit-identical whatever the cursor did.
+    pub(crate) fn rings_are_positive_zero(&self) -> bool {
+        miso_engine_effect_runtime::bank::block_is_positive_zero(&self.main)
+            && miso_engine_effect_runtime::bank::block_is_positive_zero(&self.detector)
+    }
+
+    /// Advance the shared write cursor by a whole block, as `frames` per-sample steps would.
+    pub(crate) fn advance_cursor(&mut self, frames: u32) {
+        if self.ring_length == 0 {
+            return;
+        }
+        self.cursor = (self.cursor + frames % self.ring_length) % self.ring_length;
+    }
+
     /// Highest number of samples any ramp of this channel still has to produce.
-    fn max_remaining(&self) -> u32 {
+    pub(crate) fn max_remaining(&self) -> u32 {
         let mut most = 0;
         for parameter in &self.ramps {
             for lane in parameter.iter().take(L::WIDTH) {
