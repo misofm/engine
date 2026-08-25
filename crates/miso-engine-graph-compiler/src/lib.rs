@@ -4099,6 +4099,30 @@ mod tests {
             "PDC is a property of the chain, not of the rack the stage sits in"
         );
 
+        // #96 state payloads are placement-independent *by construction*: a bank is built from
+        // `PrepareEffectBankRequest`, which carries a backend, a width and one
+        // `PrepareEffectRequest` per member -- and neither type has a rack in it. These pin the
+        // observable consequence: the same session retains byte-for-byte the same bank state,
+        // scratch and metadata under either placement, so a snapshot taken under one restores
+        // under the other.
+        assert_eq!(
+            simd1.report.estimate.effect_bank_scratch_bytes,
+            dynamic.report.estimate.effect_bank_scratch_bytes,
+        );
+        assert_eq!(
+            simd1.report.estimate.effect_bank_runtime_buffer_bytes,
+            dynamic.report.estimate.effect_bank_runtime_buffer_bytes,
+        );
+        assert_eq!(
+            simd1.report.estimate.effect_bank_metadata_bytes,
+            dynamic.report.estimate.effect_bank_metadata_bytes,
+        );
+        assert_eq!(
+            simd1.report.estimate.declared_effect_bytes,
+            dynamic.report.estimate.declared_effect_bytes,
+            "identical declared state layout under either placement"
+        );
+
         assert_pcm_bits_equal(
             &render_blocks(simd1, 16),
             &render_blocks(dynamic, 16),
