@@ -74,6 +74,13 @@
 //! The tier is faster because it is a better-conditioned approximation problem, not because it
 //! is a worse approximation.
 //!
+//! # Boundaries
+//!
+//! `docs/rulings/fast-db-tier-boundaries.md` records what this tier does *not* do: the true-peak
+//! limiter, which had no decibel conversion left to replace; the shared
+//! `effect_runtime::dynamics` helpers, deliberately left exact; and the isolated throughput
+//! microbenchmark that under-predicted this tier's console win by a factor of seventeen.
+//!
 //! ## Exactness at the identity points, preserved
 //!
 //! The dynamics path relies on a unity stage being a *true* identity, so these hold exactly and
