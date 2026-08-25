@@ -1126,6 +1126,14 @@ pub fn valid_runtime_span(
 }
 
 /// Validate the compiler-owned canonical ordering and non-overlap rules for one delivered block.
+///
+/// This states the contract's whole-block law: the first invalid span rejects the entire block.
+/// It is exercised by `miso-engine-conformance`'s `effect_contract` suite rather than from a
+/// render path, and that is deliberate -- an effect whose own policy is to drop and count an
+/// invalid span while still applying its valid siblings (as `miso-engine-compressor` does, see
+/// `apply_automation` there) cannot call this without changing its rendered output. Such effects
+/// carry their own guard; this function remains the reference the conformance suite holds them
+/// against where the whole-block rule does apply.
 pub fn validate_automation_block(
     spans: &[PreparedAutomationSpan],
     metadata: PreparedEffectMetadata,

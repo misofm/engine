@@ -4,8 +4,7 @@
 //! concatenation -- the contract `NativeGraphBlueprint::prepare` enforces (#99 F1).
 
 use super::*;
-#[allow(unused_imports)]
-use crate::{banks::*, canonical::*, compile::*, estimate::*, ids::*, pdc::*};
+use crate::ids::port;
 
 pub(crate) fn topo(nodes: &[GraphNode], edges: &[GraphEdge]) -> Option<Vec<DependencyLevel>> {
     let mut degree: BTreeMap<_, u64> = nodes.iter().map(|node| (node.id.clone(), 0)).collect();

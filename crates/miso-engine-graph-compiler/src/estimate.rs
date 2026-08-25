@@ -4,8 +4,8 @@
 //! than formatting them (#99 F5).
 
 use super::*;
-#[allow(unused_imports)]
-use crate::{banks::*, canonical::*, compile::*, ids::*, pdc::*, schedule::*};
+use crate::canonical::node_text_len;
+use crate::pdc::TimingResult;
 
 /// Nine inputs because the estimate is a function of nine independent facts about the compile,
 /// and bundling them into a struct would only move the argument list. Was inside `lib.rs` before

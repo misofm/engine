@@ -9,8 +9,18 @@
 //! here (#99 F5); see [`GraphCompiler::evidence`].
 
 use super::*;
-#[allow(unused_imports)]
-use crate::{banks::*, canonical::*, estimate::*, ids::*, pdc::*, schedule::*};
+use crate::banks::{bind_rack_banks, checked_add_effect_banks, effect_bank_resource};
+use crate::canonical::{
+    Sha256Writer, canonical_parts, dot, hex_digest, hex_sha256, reductions_of, write_canonical,
+};
+use crate::estimate::{estimate_fits_platform, resource_estimate};
+use crate::ids::{
+    add_main_edge, add_node, add_route_destination_edge, add_route_source_edge, diag, effect_path,
+    failure, gid, into_effects, port, ports_for, rack_id, route_destination_node,
+    route_source_node, route_transform, sidechain_matches, stages, track_node,
+};
+use crate::pdc::timings;
+use crate::schedule::{buffer_assignments, cycle_witnesses, topo};
 
 impl GraphCompiler {
     /// The canonical text, its SHA-256 and the Graphviz rendering, produced on demand.
@@ -141,15 +151,16 @@ impl GraphCompiler {
         if !caps.all_nonzero() {
             diagnostics.push(diag("graph.resource.limit", "$.graph_compile_caps"));
         }
-        // NOT YET REMOVED (#99 F5, deliberately): this clones the whole `CompiledSession`,
-        // canonical TOML included, purely to satisfy the borrow checker -- `model` borrows the
-        // session, and the transactional failure path must hand `effects` back **by value** from
-        // inside the loops that read `model`. Removing it means restructuring a 500-line function
-        // so every early `failure(effects, ..)` happens after the borrow ends, and the failure
-        // path is a frozen API contract. Left as a bounded successor rather than rushed: the
-        // shape is a `build(&effects) -> Result<Built, Vec<GraphDiagnostic>>` that returns owned
-        // outputs, with `failure(effects, ..)` called only on its `Err`. The dominant F5 cost --
-        // the canonical dump, its SHA and the Graphviz string on every compile -- is gone.
+        // NOT YET REMOVED (#99 F5, deliberately; tracked by #162): this clones the whole
+        // `CompiledSession`, canonical TOML included, purely to satisfy the borrow checker --
+        // `model` borrows the session, and the transactional failure path must hand `effects`
+        // back **by value** from inside the loops that read `model`. Removing it means
+        // restructuring a 500-line function so every early `failure(effects, ..)` happens after
+        // the borrow ends, and the failure path is a frozen API contract. Left as a bounded
+        // successor rather than rushed: the shape is a
+        // `build(&effects) -> Result<Built, Vec<GraphDiagnostic>>` that returns owned outputs,
+        // with `failure(effects, ..)` called only on its `Err`. The dominant F5 cost -- the
+        // canonical dump, its SHA and the Graphviz string on every compile -- is gone.
         let session = effects.session.clone();
         let model = session.normalized_model();
         if model.outputs.len() != 1 {

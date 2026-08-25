@@ -1,6 +1,7 @@
 //! Deterministic control-plane lowering of an accepted session and prepared native effects.
 #![allow(missing_docs)]
 
+use crate::banks::rack_location;
 use std::collections::{BTreeMap, BTreeSet};
 
 use miso_engine_builtins::BuiltinTail;
@@ -259,11 +260,19 @@ mod ids;
 mod pdc;
 mod schedule;
 
-#[allow(unused_imports)]
-use crate::{banks::*, canonical::*, compile::*, estimate::*, ids::*, pdc::*, schedule::*};
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::banks::bind_rack_banks;
+    use crate::canonical::{
+        canonical_parts, edge_text, edge_text_len, hex_sha256, node_text, node_text_len,
+        write_canonical,
+    };
+    use crate::ids::{gid, port, rack_id, stages, track_node};
+    use crate::pdc::timings;
+    use crate::schedule::{
+        buffer_assignments, cycle_witness, cycle_witnesses, is_identity_boundary, topo,
+    };
 
     /// The dispatch every in-crate test compiles with.
     ///

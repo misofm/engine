@@ -4,8 +4,7 @@
 //! `GraphCompiler::evidence` and `GraphCompiler::sha256`.
 
 use super::*;
-#[allow(unused_imports)]
-use crate::{banks::*, compile::*, estimate::*, ids::*, pdc::*, schedule::*};
+use crate::ids::reduction_records;
 
 pub(crate) fn stage_token(stage: TrackStage) -> &'static str {
     match stage {

@@ -19,7 +19,6 @@ mod protocol;
 mod realtime;
 mod record;
 mod scheduler;
-#[allow(dead_code, unreachable_pub)]
 mod scheduler_fixture;
 mod source;
 mod source_duration;

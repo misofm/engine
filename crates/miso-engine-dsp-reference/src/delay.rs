@@ -182,14 +182,6 @@ impl ReferenceDelayPair {
             mix(right_input, right_tap, self.parameters.right_mix),
         )
     }
-
-    /// Returns the exact rounded integer tap for an accepted millisecond value.
-    pub fn rounded_delay_samples(
-        milliseconds: f64,
-        sample_rate_hz: f64,
-    ) -> Result<usize, ReferenceDelayError> {
-        delay_samples(milliseconds, sample_rate_hz)
-    }
 }
 
 fn validate_parameters(

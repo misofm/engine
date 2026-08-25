@@ -1,8 +1,6 @@
 //! Graph identity: node and edge construction, stable-ID helpers, and diagnostics.
 
 use super::*;
-#[allow(unused_imports)]
-use crate::{banks::*, canonical::*, compile::*, estimate::*, pdc::*, schedule::*};
 
 pub(crate) fn ports_for(nodes: &[GraphNode], edges: &[GraphEdge]) -> Vec<GraphPortId> {
     let mut ports = Vec::new();
