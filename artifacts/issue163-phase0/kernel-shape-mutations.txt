@@ -1,0 +1,55 @@
+# Issue #163 phase 0e: the kernel-shape gate, mutated.
+# Generated from the shipped miso-engine-v2-audio-worklet.simd128.wasm at f08d28f.
+
+## 1. baseline: the unmodified shipped artifact
+kernel shape: f32x4_arith=5086 kernels=8 pattern='4wide6f32x[48]'
+  roster ok   vector=2224 scalar=20 budget=222.4 ceiling=0.1 multiband-compressor f32x8
+  roster ok   vector=1112 scalar=20 budget=111.2 ceiling=0.1 multiband-compressor f32x4
+  roster ok   vector=762 scalar=72 budget=289.6 ceiling=0.38 transient-shaper f32x4
+  roster ok   vector=172 scalar=8 budget=32.7 ceiling=0.19 gate-expander f32x4
+  roster ok   vector=162 scalar=0 budget=16.2 ceiling=0.1 compressor f32x4
+  roster ok   vector=124 scalar=0 budget=12.4 ceiling=0.1 true-peak-limiter f32x4
+  roster ok   vector=32 scalar=0 budget=8.0 ceiling=0.1 parametric-eq f32x4
+  roster ok   vector=25 scalar=0 budget=8.0 ceiling=0.1 soft-clip f32x4
+exit=0
+
+## 2. mutation A -- the compressor f32x4 kernel fully de-vectorised (162 vector ops -> 4 scalar each)
+FAIL kernel count: 7 arithmetic-carrying functions match '4wide6f32x[48]' < 8. If a wave moved the kernels, update the pattern and RAISE the floor.
+FAIL roster compressor f32x4: 0 arithmetic-carrying kernels match 'miso_engine_compressor.*4wide6f32x4' (expected exactly one). A kernel that vanished, was renamed, or stopped carrying f32x4 arithmetic is a de-vectorisation, not a roster edit.
+kernel shape: f32x4_arith=4924 kernels=7 pattern='4wide6f32x[48]'
+  roster ok   vector=2224 scalar=20 budget=222.4 ceiling=0.1 multiband-compressor f32x8
+  roster ok   vector=1112 scalar=20 budget=111.2 ceiling=0.1 multiband-compressor f32x4
+  roster ok   vector=762 scalar=72 budget=289.6 ceiling=0.38 transient-shaper f32x4
+  roster ok   vector=172 scalar=8 budget=32.7 ceiling=0.19 gate-expander f32x4
+  roster ok   vector=124 scalar=0 budget=12.4 ceiling=0.1 true-peak-limiter f32x4
+  roster ok   vector=32 scalar=0 budget=8.0 ceiling=0.1 parametric-eq f32x4
+  roster ok   vector=25 scalar=0 budget=8.0 ceiling=0.1 soft-clip f32x4
+exit=1
+
+## 3. mutation B -- 32 of the compressor's 162 vector ops de-vectorised.
+##    vector still strictly dominates scalar (130 > 128), so the pre-existing per-kernel rule passes it.
+##    the module total is 5054 f32x4 mul/add/sub, so the retired --simd-floor 3450 would have PASSED it.
+FAIL roster compressor f32x4: vector=130 scalar=128 budget=13.0 (ceiling 0.1 x vector, slack 8). This kernel moved arithmetic out of the vector family. The budget is scale free in the vector count, so a genuine op-count reduction never trips it and lowering the ceiling is never the fix.
+kernel shape: f32x4_arith=5054 kernels=8 pattern='4wide6f32x[48]'
+  roster ok   vector=2224 scalar=20 budget=222.4 ceiling=0.1 multiband-compressor f32x8
+  roster ok   vector=1112 scalar=20 budget=111.2 ceiling=0.1 multiband-compressor f32x4
+  roster ok   vector=762 scalar=72 budget=289.6 ceiling=0.38 transient-shaper f32x4
+  roster ok   vector=172 scalar=8 budget=32.7 ceiling=0.19 gate-expander f32x4
+  roster FAIL vector=130 scalar=128 budget=13.0 ceiling=0.1 compressor f32x4
+  roster ok   vector=124 scalar=0 budget=12.4 ceiling=0.1 true-peak-limiter f32x4
+  roster ok   vector=32 scalar=0 budget=8.0 ceiling=0.1 parametric-eq f32x4
+  roster ok   vector=25 scalar=0 budget=8.0 ceiling=0.1 soft-clip f32x4
+exit=1
+
+## 4. mutation C -- every kernel's vector op count halved (a uniform polynomial-degree reduction).
+##    the module total is 2788 f32x4 mul/add/sub, so the retired --simd-floor 3450 would have FAILED it.
+kernel shape: f32x4_arith=2788 kernels=8 pattern='4wide6f32x[48]'
+  roster ok   vector=1112 scalar=20 budget=111.2 ceiling=0.1 multiband-compressor f32x8
+  roster ok   vector=556 scalar=20 budget=55.6 ceiling=0.1 multiband-compressor f32x4
+  roster ok   vector=381 scalar=72 budget=144.8 ceiling=0.38 transient-shaper f32x4
+  roster ok   vector=86 scalar=8 budget=16.3 ceiling=0.19 gate-expander f32x4
+  roster ok   vector=81 scalar=0 budget=8.1 ceiling=0.1 compressor f32x4
+  roster ok   vector=62 scalar=0 budget=8.0 ceiling=0.1 true-peak-limiter f32x4
+  roster ok   vector=16 scalar=0 budget=8.0 ceiling=0.1 parametric-eq f32x4
+  roster ok   vector=12 scalar=0 budget=8.0 ceiling=0.1 soft-clip f32x4
+exit=0

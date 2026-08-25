@@ -25,20 +25,40 @@ Modes
     own checked slot indexing. Naming the export's own symbol keeps the strong statement "nothing
     this export *calls* may trap" while admitting the one checked index the queue primitive emits.
 
-`--simd-floor N --kernel-pattern REGEX --kernel-min K`
-    Assert the artifact still contains the vector kernels: at least `N` `f32x4.{mul,add,sub}`
-    instructions in total, and at least `K` functions matching `REGEX` that carry
-    `f32x4.{mul,add,sub,div}` arithmetic, each of which must use strictly more vector than scalar
-    `f32` arithmetic. `N` and `K` are **ratchets**: when a wave moves kernels and the counts rise,
-    raise them. A count below the floor is a regression to report, never a floor to lower.
+`--kernel-shape --kernel-pattern REGEX --kernel-min K`
+    Assert the artifact still computes in the vector family. Three rules, none of which is a raw
+    op-count minimum:
 
-    The per-kernel rule is "vector dominates", not "no scalar at all". At `ae02d2a` the kernels were
-    hand-written `core::arch::wasm32` bodies with literally zero scalar `f32` arithmetic; after
-    wave 2 they are `Lane`-over-`wide` generic bodies instantiated at `wide::f32x4`/`f32x8`, and a
-    real instantiation legitimately keeps a handful of scalar coefficient and tail operations.
-    Asserting the old absolute rule would assert something that is no longer true; strict
-    domination is the strongest statement the current code actually supports, and it still fails
-    loudly if a kernel silently de-vectorises.
+    1. **Roster presence.** Each of the eight named kernels in `KERNEL_ROSTER` -- the
+       `process_bank`/`process_section`/`process_block` bodies of the shipped effect library --
+       must match exactly one arithmetic-carrying function. A kernel that vanished, that was
+       renamed, or that de-vectorised so completely it stopped carrying `f32x4` arithmetic at all
+       fails here.
+    2. **Per-kernel scalar budget (the shape gate).** Each roster kernel's scalar
+       `f32.{mul,add,sub,div}` count must satisfy `scalar <= max(ceiling * vector, SCALAR_SLACK)`,
+       where `ceiling` is that kernel's roster entry. The rule is a *shape*: it is scale free in
+       the vector count, so halving a kernel's op count leaves it exactly as compliant as it was,
+       while moving arithmetic out of the vector family and into the scalar family fails it.
+    3. **Kernel count.** At least `K` functions matching `REGEX` carry `f32x4.{mul,add,sub,div}`
+       arithmetic, each using strictly more vector than scalar `f32` arithmetic. `K` is a
+       **ratchet**: when a wave adds kernels, raise it. It never drops.
+
+    ### Why this replaced the raw `--simd-floor N` total (issue #163 phase 0e)
+
+    The old gate asserted "at least N `f32x4.{mul,add,sub}` instructions in the whole module", most
+    recently `N = 3450`. That proxy conflates two different events. Scalarising a kernel -- the
+    failure the gate exists to catch -- lowers the count. Reducing a polynomial's degree, refitting
+    a minimax approximation, or hoisting an invariant out of an inner loop *also* lowers the count,
+    and those are the exact optimisations the floor pass exists to perform. Under a raw total the
+    second is indistinguishable from the first, so the gate red-lights work it should wave through
+    and the only available response is to lower the floor -- which the floor's own comment forbids.
+
+    The property actually wanted is not "many vector instructions" but "each kernel still does its
+    arithmetic in the vector family". Rules 1 and 2 state exactly that and nothing else. Rule 2 is
+    the discriminating one: de-vectorising a `Lane`-over-`wide` body at `f32x4` turns one vector
+    operation into four scalar ones, so a scalarised kernel's scalar-to-vector ratio does not drift
+    -- it inverts. A degree reduction moves `vector` down with `scalar` fixed, which the ceiling
+    absorbs by construction because it is expressed as a multiple of `vector`.
 
 `--self-test`
     Synthetic disassembly cases (a)-(f) below, each the red mutation of one rule.
@@ -81,6 +101,57 @@ VECTOR = re.compile(r"^(v128|i8x16|i16x8|i32x4|i64x2|f32x4|f64x2)\.")
 SIMD_ARITH = re.compile(r"^f32x4\.(mul|add|sub)$")
 KERNEL_VECTOR = re.compile(r"^f32x4\.(mul|add|sub|div)$")
 KERNEL_SCALAR = re.compile(r"^f32\.(mul|add|sub|div)$")
+
+# The smallest scalar budget any kernel gets, in instructions.
+#
+# Four of the eight roster kernels currently emit *zero* scalar `f32` arithmetic, so a ceiling
+# expressed purely as a multiple of `vector` would be exactly zero for them: a single scalar
+# coefficient load introduced by an ordinary refactor would fail the gate. Eight instructions is
+# well under the ~4x explosion de-vectorisation produces even in the smallest roster kernel
+# (soft-clip, 25 vector operations -> ~100 scalar), so the slack cannot hide a scalarisation.
+SCALAR_SLACK = 8
+
+# The named kernel bodies of the shipped effect library, with each one's scalar budget.
+#
+# Each row is `(label, name pattern, scalar-to-vector ceiling)`. The pattern must match exactly one
+# arithmetic-carrying kernel in the artifact; two matches or none is a failure, because a roster
+# that silently stopped naming a kernel is a gate that silently stopped checking one.
+#
+# ## Derivation of the ceilings (issue #163 phase 0e, re-measured on the shipped artifact)
+#
+# Measured with this analyser on `miso-engine-v2-audio-worklet.simd128.wasm` built at `f08d28f`
+# (vector = `f32x4.{mul,add,sub,div}`, scalar = `f32.{mul,add,sub,div}`):
+#
+#   multiband-compressor f32x8   2224 / 20   ratio 0.0090
+#   multiband-compressor f32x4   1112 / 20   ratio 0.0180
+#   transient-shaper     f32x4    762 / 72   ratio 0.0945
+#   gate-expander        f32x4    172 /  8   ratio 0.0465
+#   compressor           f32x4    162 /  0   ratio 0
+#   true-peak-limiter    f32x4    124 /  0   ratio 0
+#   parametric-eq        f32x4     32 /  0   ratio 0
+#   soft-clip            f32x4     25 /  0   ratio 0
+#
+# Each ceiling is **four times the measured ratio, floored at 0.10**. Four times, because that is
+# the factor by which a *partial* de-vectorisation would have to stay below to escape: converting
+# one `f32x4` operation to scalar at width four costs one vector operation and buys four scalar
+# ones, so even a single scalarised inner statement moves the ratio by far more than 4x its
+# starting value in every kernel here. Floored at 0.10, because a ratio of zero admits no budget
+# at all and the four zero-scalar kernels would then fail on a stray coefficient move.
+#
+# The counts above are deliberately **not** asserted. They are the derivation's input, not the
+# gate: a kernel is free to halve them, and the previous `--simd-floor 3450` total is exactly the
+# assertion this note replaces. What is asserted is that no kernel's arithmetic migrates out of
+# the vector family.
+KERNEL_ROSTER: tuple[tuple[str, str, float], ...] = (
+    ("multiband-compressor f32x8", r"miso_engine_multiband_compressor.*4wide6f32x8", 0.10),
+    ("multiband-compressor f32x4", r"miso_engine_multiband_compressor.*4wide6f32x4", 0.10),
+    ("transient-shaper f32x4", r"miso_engine_transient_shaper.*4wide6f32x4", 0.38),
+    ("gate-expander f32x4", r"miso_engine_gate_expander.*4wide6f32x4", 0.19),
+    ("compressor f32x4", r"miso_engine_compressor.*4wide6f32x4", 0.10),
+    ("true-peak-limiter f32x4", r"miso_engine_true_peak_limiter.*4wide6f32x4", 0.10),
+    ("parametric-eq f32x4", r"miso_engine_parametric_eq.*4wide6f32x4", 0.10),
+    ("soft-clip f32x4", r"miso_engine_soft_clip.*4wide6f32x4", 0.10),
+)
 
 
 class Function:
@@ -185,23 +256,10 @@ def check_callgraph(
     return failures
 
 
-def check_simd(
-    functions: dict[int, Function], floor: int, pattern: str, minimum: int
-) -> int:
-    failures = 0
-    total = sum(
-        1
-        for function in functions.values()
-        for opcode in function.opcodes
-        if SIMD_ARITH.match(opcode)
-    )
-    if total < floor:
-        failures += 1
-        print(
-            f"FAIL simd floor: {total} f32x4.{{mul,add,sub}} < {floor}. This floor is a ratchet: "
-            "a lower count is a regression to report, never a floor to lower.",
-            file=sys.stderr,
-        )
+def kernel_arithmetic(
+    functions: dict[int, Function], pattern: str
+) -> list[tuple[Function, int, int]]:
+    """Every function matching `pattern` that carries vector arithmetic, with its op counts."""
     kernel_re = re.compile(pattern)
     kernels = []
     for function in functions.values():
@@ -212,6 +270,19 @@ def check_simd(
             continue  # a vector-typed helper that does no arithmetic (drop glue, reset, stores)
         scalar = sum(1 for opcode in function.opcodes if KERNEL_SCALAR.match(opcode))
         kernels.append((function, vector, scalar))
+    return kernels
+
+
+def check_kernel_shape(
+    functions: dict[int, Function],
+    pattern: str,
+    minimum: int,
+    roster: tuple[tuple[str, str, float], ...] = KERNEL_ROSTER,
+) -> int:
+    """The per-kernel shape gate that replaced the raw `--simd-floor` total (#163 phase 0e)."""
+    failures = 0
+    kernels = kernel_arithmetic(functions, pattern)
+    for function, vector, scalar in kernels:
         if vector <= scalar:
             failures += 1
             print(
@@ -226,9 +297,45 @@ def check_simd(
             f"< {minimum}. If a wave moved the kernels, update the pattern and RAISE the floor.",
             file=sys.stderr,
         )
-    print(f"simd: f32x4_arith={total} kernels={len(kernels)} pattern={pattern!r}")
-    for function, vector, scalar in sorted(kernels, key=lambda row: -row[1]):
-        print(f"  kernel vector={vector} scalar={scalar} {function.name}")
+
+    total = sum(
+        1
+        for function in functions.values()
+        for opcode in function.opcodes
+        if SIMD_ARITH.match(opcode)
+    )
+    print(f"kernel shape: f32x4_arith={total} kernels={len(kernels)} pattern={pattern!r}")
+
+    for label, kernel_pattern, ceiling in roster:
+        entry_re = re.compile(kernel_pattern)
+        matched = [row for row in kernels if entry_re.search(row[0].name)]
+        if len(matched) != 1:
+            failures += 1
+            print(
+                f"FAIL roster {label}: {len(matched)} arithmetic-carrying kernels match "
+                f"{kernel_pattern!r} (expected exactly one). A kernel that vanished, was renamed, "
+                "or stopped carrying f32x4 arithmetic is a de-vectorisation, not a roster edit.",
+                file=sys.stderr,
+            )
+            continue
+        function, vector, scalar = matched[0]
+        budget = max(ceiling * vector, float(SCALAR_SLACK))
+        verdict = "ok"
+        if scalar > budget:
+            failures += 1
+            verdict = "FAIL"
+            print(
+                f"FAIL roster {label}: vector={vector} scalar={scalar} "
+                f"budget={budget:.1f} (ceiling {ceiling:g} x vector, slack {SCALAR_SLACK}). "
+                "This kernel moved arithmetic out of the vector family. The budget is scale free "
+                "in the vector count, so a genuine op-count reduction never trips it and lowering "
+                "the ceiling is never the fix.",
+                file=sys.stderr,
+            )
+        print(
+            f"  roster {verdict:4s} vector={vector} scalar={scalar} budget={budget:.1f} "
+            f"ceiling={ceiling:g} {label}"
+        )
     return failures
 
 
@@ -242,6 +349,20 @@ VALID_SHAPE = """\
  000023: fd e5 01                   | f32x4.sub
  000024: 0b                         | end
 """
+
+# The synthetic roster the self-test drives, matching `VALID_SHAPE`'s one kernel.
+SELF_TEST_ROSTER: tuple[tuple[str, str, float], ...] = (("render-next", "render_next", 0.10),)
+
+
+def synthetic_kernel(name: str, vector: int, scalar: int, index: int = 0) -> str:
+    """One disassembled function body with exactly `vector` and `scalar` arithmetic operations."""
+    lines = [f"{index:06x} func[{index}] <{name}>:"]
+    for _ in range(vector):
+        lines.append(" 000001: fd e6 01                   | f32x4.mul")
+    for _ in range(scalar):
+        lines.append(" 000002: 94                         | f32.mul")
+    lines.append(" 000003: 0b                         | end")
+    return "\n".join(lines) + "\n"
 
 
 def self_test() -> int:
@@ -257,8 +378,8 @@ def self_test() -> int:
     functions = parse(VALID_SHAPE)
     expect("(f) valid shape callgraph", check_callgraph(functions, "miso_engine_web_v1_render") == 0)
     expect(
-        "(f) valid shape simd",
-        check_simd(functions, 3, "render_next", 1) == 0,
+        "(f) valid shape kernel shape",
+        check_kernel_shape(functions, "render_next", 1, SELF_TEST_ROSTER) == 0,
     )
 
     # (a) a free reachable from the render export fails.
@@ -327,8 +448,82 @@ def self_test() -> int:
     )
     expect("(b3) panic entry is a leaf", check_callgraph(parse(entry), "miso_engine_web_v1_render") == 0)
 
-    # (c) one op below the simd floor fails.
-    expect("(c) simd floor", check_simd(parse(VALID_SHAPE), 4, "render_next", 1) == 1)
+    # (c) the #163 phase 0e shape gate. Its whole reason for existing is that (c1) and (c2) below
+    # have to land on opposite verdicts, which the raw `--simd-floor` total it replaced could not
+    # do: both of them lower the module's vector instruction count.
+    #
+    # (c1) a roster kernel that de-vectorised -- vector operations traded for scalar ones -- fails
+    # its scalar budget. The shape here still satisfies the old "vector strictly dominates scalar"
+    # rule (100 > 40), so this case is precisely what the roster budget adds: a kernel can lose a
+    # third of its arithmetic to the scalar family while still "dominating", and that is a
+    # scalarisation.
+    partly_scalarised = parse(synthetic_kernel("render_next", vector=100, scalar=40))
+    expect(
+        "(c1) partly de-vectorised roster kernel",
+        check_kernel_shape(
+            partly_scalarised, "render_next", 1, (("partly", "render_next", 0.10),)
+        )
+        == 1,
+    )
+    expect(
+        "(c1) and the roster is what caught it",
+        check_kernel_shape(partly_scalarised, "render_next", 1, ()) == 0,
+    )
+    # (c2) the same kernel with its vector op count *halved* and its scalar count untouched -- a
+    # polynomial-degree reduction, a minimax refit, a hoisted loop invariant -- passes. The budget
+    # is a multiple of `vector`, so it scales down with the kernel instead of red-lighting it.
+    expect(
+        "(c2) halved vector count still passes",
+        check_kernel_shape(
+            parse(synthetic_kernel("render_next", vector=381, scalar=72)),
+            "render_next",
+            1,
+            (("transient-shaper", "render_next", 0.38),),
+        )
+        == 0,
+    )
+    # (c3) a roster entry that names no kernel in the artifact fails: a kernel that vanished or was
+    # renamed must be a red gate, never a silently skipped row.
+    expect(
+        "(c3) roster entry matching nothing",
+        check_kernel_shape(parse(VALID_SHAPE), "render_next", 1, (("absent", "no_such", 0.10),))
+        == 1,
+    )
+    # (c4) an ambiguous roster entry fails too, because the gate would otherwise check whichever
+    # of the two matches it happened to pick.
+    expect(
+        "(c4) ambiguous roster entry",
+        check_kernel_shape(
+            parse(synthetic_kernel("render_next_a", vector=40, scalar=0, index=0)
+                  + synthetic_kernel("render_next_b", vector=40, scalar=0, index=1)),
+            "render_next",
+            1,
+            (("ambiguous", "render_next", 0.10),),
+        )
+        == 1,
+    )
+    # (c5) the SCALAR_SLACK floor is a floor, not a hole: a zero-scalar kernel may acquire a
+    # handful of scalar coefficient moves, and may not acquire a scalarised inner loop.
+    expect(
+        "(c5) slack admits a handful of scalar ops",
+        check_kernel_shape(
+            parse(synthetic_kernel("render_next", vector=25, scalar=SCALAR_SLACK)),
+            "render_next",
+            1,
+            (("soft-clip", "render_next", 0.10),),
+        )
+        == 0,
+    )
+    expect(
+        "(c5) slack does not admit one more",
+        check_kernel_shape(
+            parse(synthetic_kernel("render_next", vector=25, scalar=SCALAR_SLACK + 1)),
+            "render_next",
+            1,
+            (("soft-clip", "render_next", 0.10),),
+        )
+        == 1,
+    )
 
     # (d) a kernel whose scalar arithmetic reaches its vector arithmetic fails (de-vectorisation).
     scalarized = VALID_SHAPE.replace(
@@ -338,7 +533,10 @@ def self_test() -> int:
         " 000026: 94                         | f32.mul\n"
         " 000027: 0b                         | end",
     )
-    expect("(d) scalar dominates kernel", check_simd(parse(scalarized), 3, "render_next", 1) == 1)
+    expect(
+        "(d) scalar dominates kernel",
+        check_kernel_shape(parse(scalarized), "render_next", 1, SELF_TEST_ROSTER) == 1,
+    )
 
     # (d3) a vector-typed helper with no arithmetic is not counted as a kernel.
     helper = VALID_SHAPE + (
@@ -347,11 +545,17 @@ def self_test() -> int:
     )
     expect(
         "(d3) arithmetic-free helper is not a kernel",
-        check_simd(parse(helper), 3, "render_next|write_lane_words", 2) == 1,
+        check_kernel_shape(
+            parse(helper), "render_next|write_lane_words", 2, SELF_TEST_ROSTER
+        )
+        == 1,
     )
 
     # (d2) too few kernel functions fails.
-    expect("(d2) kernel count", check_simd(parse(VALID_SHAPE), 3, "render_next", 2) == 1)
+    expect(
+        "(d2) kernel count",
+        check_kernel_shape(parse(VALID_SHAPE), "render_next", 2, SELF_TEST_ROSTER) == 1,
+    )
 
     # (e) a missing name section is refused rather than silently passing.
     try:
@@ -373,7 +577,7 @@ def main() -> int:
     parser.add_argument("--callgraph", metavar="EXPORT")
     parser.add_argument("--trap-owner", action="append", default=[], metavar="SUBSTRING")
     parser.add_argument("--allocation-only", action="store_true")
-    parser.add_argument("--simd-floor", type=int)
+    parser.add_argument("--kernel-shape", action="store_true")
     parser.add_argument("--kernel-pattern")
     parser.add_argument("--kernel-min", type=int)
     parser.add_argument("--self-test", action="store_true")
@@ -381,8 +585,8 @@ def main() -> int:
 
     if args.self_test:
         return self_test()
-    if args.callgraph is None and args.simd_floor is None:
-        parser.error("one of --callgraph, --simd-floor or --self-test is required")
+    if args.callgraph is None and not args.kernel_shape:
+        parser.error("one of --callgraph, --kernel-shape or --self-test is required")
 
     functions = parse(sys.stdin.read())
     failures = 0
@@ -392,12 +596,10 @@ def main() -> int:
         failures += check_callgraph(
             functions, args.callgraph, tuple(args.trap_owner), args.allocation_only
         )
-    if args.simd_floor is not None:
+    if args.kernel_shape:
         if args.kernel_pattern is None or args.kernel_min is None:
-            parser.error("--simd-floor requires --kernel-pattern and --kernel-min")
-        failures += check_simd(
-            functions, args.simd_floor, args.kernel_pattern, args.kernel_min
-        )
+            parser.error("--kernel-shape requires --kernel-pattern and --kernel-min")
+        failures += check_kernel_shape(functions, args.kernel_pattern, args.kernel_min)
     return 1 if failures else 0
 
 

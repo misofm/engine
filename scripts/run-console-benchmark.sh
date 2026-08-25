@@ -3,29 +3,45 @@
 # directly: the runner is what supplies the round marker and the host metadata, and a direct
 # invocation produces a record whose provenance is a guess.
 #
-# One optional argument, `--phase2` or `--phase3`, moves the artifact directory to
-# `artifacts/issue149-phase2` or `artifacts/issue149-phase3` and changes nothing else. Phase 1's
+# One optional argument, `--phase2`, `--phase3` or `--issue163-phase0`, moves the artifact
+# directory and changes nothing else. Phase 1's
 # record is a consumed one-shot authority: it describes the tree that produced it, and the sealed
 # fast dB tier (#144 item 5) deliberately moves the rendered bits it measured, so a phase-2 number
 # belongs beside it rather than on top of it. Phase 3 gets its own directory for the opposite
 # reason -- the multiband ramping split is class A and moves no rendered bit at all, so its console
 # numbers are a *re-measurement* of the phase-2 tree and have to be readable as one rather than
-# blended into it. Every directory keeps the same refusal-to-overwrite discipline, so none of them
-# can be quietly re-run.
+# blended into it. `--issue163-phase0` writes to `artifacts/issue163-phase0` for the same reason
+# again, and one further one: phase 0 changes what the subject *measures* -- five decomposition
+# rows, a meters arm and an observation arm join the stream, and the run is admissible under
+# preconditions the earlier records were never held to -- so its numbers are a new authority
+# beside the issue-149 ones and not a continuation of them. Every directory keeps the same
+# refusal-to-overwrite discipline, so none of them can be quietly re-run.
+#
+# # Admissibility (#144 item 13, #163 phase 0a)
+#
+# Everything from `check-bench-preconditions.sh` down to the warmup is a *precondition*, not a
+# note. The runner refuses a measurement it cannot control and names which control it lacked. The
+# escape hatch `MISO_ENGINE_BENCH_ALLOW_UNCONTROLLED=1` exists for machines where control is
+# genuinely impossible, and it does not make the run look controlled: every record it writes
+# carries `measurement_control: "uncontrolled"` and the validator refuses to let that record claim
+# otherwise.
 set -euo pipefail
 phase_directory=issue149
 if [[ "$#" == 1 ]]; then
     case "$1" in
         --phase2) phase_directory=issue149-phase2 ;;
         --phase3) phase_directory=issue149-phase3 ;;
-        *) printf 'usage: %s [--phase2|--phase3]\n' "$0" >&2; exit 2 ;;
+        --issue163-phase0) phase_directory=issue163-phase0 ;;
+        *) printf 'usage: %s [--phase2|--phase3|--issue163-phase0]\n' "$0" >&2; exit 2 ;;
     esac
 elif [[ "$#" != 0 ]]; then
-    printf 'usage: %s [--phase2|--phase3]\n' "$0" >&2
+    printf 'usage: %s [--phase2|--phase3|--issue163-phase0]\n' "$0" >&2
     exit 2
 fi
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$root"
+# shellcheck source=scripts/check-bench-preconditions.sh
+source "$root/scripts/check-bench-preconditions.sh"
 
 artifact_dir="$root/artifacts/$phase_directory"
 raw="$artifact_dir/console-benchmark.raw.jsonl"
@@ -33,7 +49,7 @@ accepted="$artifact_dir/console-benchmark.accepted.jsonl"
 stderr_log="$artifact_dir/console-benchmark.stderr.log"
 disposition="$artifact_dir/console-benchmark.disposition.json"
 for path in "$raw" "$accepted" "$stderr_log" "$disposition"; do
-    [[ ! -e "$path" ]] || { printf 'refusing to overwrite issue-149 artifact: %s\n' "$path" >&2; exit 1; }
+    [[ ! -e "$path" ]] || { printf 'refusing to overwrite console artifact: %s\n' "$path" >&2; exit 1; }
 done
 [[ "$(uname -m)" == "x86_64" ]] || { printf 'Issue-149 qualification requires x86_64\n' >&2; exit 1; }
 grep -qm1 -w avx2 /proc/cpuinfo || { printf 'Issue-149 qualification requires AVX2\n' >&2; exit 1; }
@@ -55,6 +71,10 @@ measured_rounds_completed=0
 candidate_commit=
 candidate_commit_sha256=
 binary_sha256=
+# Declared before the exit trap can fire so a failure *inside* the precondition block still writes
+# a disposition that says what the run knew about its own admissibility at the point it failed.
+measurement_control=unevaluated
+cpu_affinity=unevaluated
 
 artifact_identity() {
     local path=$1
@@ -77,9 +97,10 @@ write_disposition() {
     [[ -n "$candidate_commit" ]] && candidate_json="\"$candidate_commit\""
     [[ -n "$candidate_commit_sha256" ]] && candidate_sha_json="\"$candidate_commit_sha256\""
     [[ -n "$binary_sha256" ]] && binary_sha_json="\"$binary_sha256\""
-    printf '{"schema_version":1,"issue":149,"status":"%s","reason":"%s","runner_invocations":1,"workload_process_launches":%s,"warmup_launches":%s,"measured_rounds_completed":%s,"candidate_commit":%s,"candidate_commit_sha256":%s,"binary_sha256":%s,"raw_sha256":%s,"raw_bytes":%s,"accepted_sha256":%s,"accepted_bytes":%s,"stderr_sha256":%s,"stderr_bytes":%s}\n' \
+    printf '{"schema_version":1,"issue":149,"status":"%s","reason":"%s","runner_invocations":1,"workload_process_launches":%s,"warmup_launches":%s,"measured_rounds_completed":%s,"measurement_control":"%s","cpu_affinity":"%s","candidate_commit":%s,"candidate_commit_sha256":%s,"binary_sha256":%s,"raw_sha256":%s,"raw_bytes":%s,"accepted_sha256":%s,"accepted_bytes":%s,"stderr_sha256":%s,"stderr_bytes":%s}\n' \
         "$status" "$reason" "$workload_process_launches" "$warmup_launches" \
-        "$measured_rounds_completed" "$candidate_json" "$candidate_sha_json" \
+        "$measured_rounds_completed" "$measurement_control" "$cpu_affinity" \
+        "$candidate_json" "$candidate_sha_json" \
         "$binary_sha_json" "$raw_sha" "$raw_bytes" "$accepted_sha" "$accepted_bytes" \
         "$stderr_sha" "$stderr_bytes" >"$disposition"
 }
@@ -123,10 +144,114 @@ rust_version=$(rustc -V)
 llvm_version=$(rustc -vV | awk -F: '/LLVM version/ {gsub(/^ +/, "", $2); print $2}')
 target_triple=$(rustc -vV | awk -F: '/host/ {gsub(/^ +/, "", $2); print $2}')
 target_features="runtime-avx2$(grep -qm1 ' fma ' /proc/cpuinfo && printf '%s' ',fma' || true);baseline"
-background_load_note="not-controlled; pre-run loadavg $(awk '{print $1","$2","$3}' /proc/loadavg)"
 governor_or_power_mode=unknown
 if [[ -r /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor ]]; then
     governor_or_power_mode=$(< /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor)
+fi
+
+# ---------------------------------------------------------------------------------------------
+# Preconditions. Each one refuses with a named reason, or is recorded as waived.
+# ---------------------------------------------------------------------------------------------
+failure_reason=precondition_failed
+allow_uncontrolled=0
+[[ "${MISO_ENGINE_BENCH_ALLOW_UNCONTROLLED:-}" == 1 ]] && allow_uncontrolled=1
+declare -a refusals=()
+declare -a affinity=()
+cpu_affinity=uncontrolled
+note_affinity='affinity none'
+note_sibling='smt not-checked'
+
+# 1. Single-core affinity. Two tenants alternating on one core is the single largest source of
+#    per-block variance on a loaded host, and it is the one the process itself can eliminate.
+if command -v taskset >/dev/null 2>&1 && [[ -r /sys/devices/system/cpu/online ]] &&
+    bench_cpu=$(bench_highest_cpu "$(< /sys/devices/system/cpu/online)") &&
+    taskset -c "$bench_cpu" true >/dev/null 2>&1; then
+    affinity=(taskset -c "$bench_cpu")
+    cpu_affinity="$bench_cpu"
+    note_affinity="affinity cpu $bench_cpu"
+else
+    refusals+=(affinity_unavailable)
+    bench_cpu=
+fi
+
+# 2. Binary-mtime cooldown. A release build saturates every core; the package is hot and the
+#    governor is ramped for tens of seconds afterwards. Wait out the remainder of the cooldown
+#    before anything is timed, then refuse if the binary moved underneath us while we waited --
+#    a second build racing this one would make the recorded sha256 describe a different program
+#    than the one measured.
+binary_mtime_before=$(stat -c %Y "$binary" 2>/dev/null) || {
+    failure_reason=binary_mtime_unreadable
+    exit 1
+}
+binary_age=$(( $(date +%s) - binary_mtime_before ))
+cooldown_waited=0
+if (( binary_age < MISO_ENGINE_BENCH_COOLDOWN_SECONDS )); then
+    cooldown_waited=$(( MISO_ENGINE_BENCH_COOLDOWN_SECONDS - binary_age ))
+    sleep "$cooldown_waited"
+fi
+binary_mtime_after=$(stat -c %Y "$binary" 2>/dev/null) || {
+    failure_reason=binary_mtime_unreadable
+    exit 1
+}
+[[ "$binary_mtime_before" == "$binary_mtime_after" ]] || {
+    failure_reason=binary_rebuilt_during_cooldown
+    exit 1
+}
+
+# 3. Load-average ceiling, read *after* the cooldown so it describes the machine that is about to
+#    be measured rather than the machine that just finished compiling.
+loadavg_text=$(< /proc/loadavg)
+loadavg_one=$(bench_loadavg_one_minute "$loadavg_text") || loadavg_one=
+if [[ -n "$loadavg_one" ]] &&
+    bench_within_ceiling "$loadavg_one" "$MISO_ENGINE_BENCH_LOADAVG_CEILING"; then
+    :
+else
+    refusals+=(loadavg_above_ceiling)
+fi
+
+# 4. SMT sibling quiet. Cheap where the topology is exported and skipped, not refused, where it is
+#    not: a container that hides `/sys/devices/system/cpu/*/topology` is not evidence of a busy
+#    sibling, and inventing a refusal from missing information is its own dishonesty. What the
+#    check cannot establish it says it could not establish.
+if [[ -n "$bench_cpu" ]]; then
+    sibling_path="/sys/devices/system/cpu/cpu$bench_cpu/topology/thread_siblings_list"
+    if [[ -r "$sibling_path" ]]; then
+        siblings=$(bench_other_siblings "$bench_cpu" "$(< "$sibling_path")") || siblings=
+        if [[ -z "$siblings" ]]; then
+            note_sibling='smt none'
+        else
+            stat_before=$(< /proc/stat)
+            sleep "$MISO_ENGINE_BENCH_SIBLING_SAMPLE_SECONDS"
+            stat_after=$(< /proc/stat)
+            note_sibling="smt siblings $siblings"
+            for sibling in $siblings; do
+                busy=$(bench_cpu_busy_percent "$stat_before" "$stat_after" "$sibling") || busy=
+                if [[ -z "$busy" ]]; then
+                    note_sibling="$note_sibling cpu$sibling=unreadable"
+                    continue
+                fi
+                note_sibling="$note_sibling cpu$sibling=$busy%"
+                bench_within_ceiling "$busy" "$MISO_ENGINE_BENCH_SIBLING_BUSY_CEILING" ||
+                    refusals+=(smt_sibling_busy)
+            done
+        fi
+    else
+        note_sibling='smt topology-unavailable'
+    fi
+fi
+
+if [[ "${#refusals[@]}" == 0 ]]; then
+    measurement_control=controlled
+    background_load_note="controlled; loadavg $loadavg_text; ceiling $MISO_ENGINE_BENCH_LOADAVG_CEILING; $note_affinity; $note_sibling; cooldown ${MISO_ENGINE_BENCH_COOLDOWN_SECONDS}s waited ${cooldown_waited}s"
+elif [[ "$allow_uncontrolled" == 1 ]]; then
+    measurement_control=uncontrolled
+    background_load_note="uncontrolled; MISO_ENGINE_BENCH_ALLOW_UNCONTROLLED=1; waived ${refusals[*]}; loadavg $loadavg_text; $note_affinity; $note_sibling; cooldown ${MISO_ENGINE_BENCH_COOLDOWN_SECONDS}s waited ${cooldown_waited}s"
+else
+    failure_reason="precondition_${refusals[0]}"
+    printf 'refusing an uncontrolled measurement: %s\n' "${refusals[*]}" >&2
+    printf 'loadavg %s; %s; %s\n' "$loadavg_text" "$note_affinity" "$note_sibling" >&2
+    printf 'set MISO_ENGINE_BENCH_ALLOW_UNCONTROLLED=1 to record an uncontrolled run instead.\n' >&2
+    exit 1
 fi
 
 run_round() {
@@ -141,8 +266,10 @@ run_round() {
     MISO_ENGINE_BENCH_TARGET_FEATURES="$target_features" \
     MISO_ENGINE_BENCH_PROFILE=release \
     MISO_ENGINE_BENCH_BACKGROUND_LOAD_NOTE="$background_load_note" \
+    MISO_ENGINE_BENCH_MEASUREMENT_CONTROL="$measurement_control" \
+    MISO_ENGINE_BENCH_CPU_AFFINITY="$cpu_affinity" \
     MISO_ENGINE_BENCH_GOVERNOR_OR_POWER_MODE="$governor_or_power_mode" \
-    "$binary" console
+    "${affinity[@]}" "$binary" console
 }
 
 # One untimed warmup, then exactly the two frozen measured rounds. Raw stdout is append-only after
@@ -157,7 +284,7 @@ failure_reason=round_2_failed
 run_round 2 >>"$raw" 2>>"$stderr_log" || exit 1
 measured_rounds_completed=2
 failure_reason=record_count
-[[ "$(wc -l <"$raw")" == 12 ]] || exit 1
+[[ "$(wc -l <"$raw")" == 26 ]] || exit 1
 failure_reason=validation_failed
 jq -s -e -L scripts -f scripts/console-benchmark-validator.jq "$raw" >/dev/null || exit 1
 failure_reason=accepted_promotion_failed

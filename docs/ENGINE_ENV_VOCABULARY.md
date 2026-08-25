@@ -66,7 +66,9 @@ One name per fact. Set by the runner, read by the bench binary; a name the runne
 | `MISO_ENGINE_BENCH_OPT_LEVEL` | opt-level. |
 | `MISO_ENGINE_BENCH_LTO` | lto setting. |
 | `MISO_ENGINE_BENCH_CODEGEN_UNITS` | codegen-units. |
-| `MISO_ENGINE_BENCH_BACKGROUND_LOAD_NOTE` | operator's declared background load. |
+| `MISO_ENGINE_BENCH_BACKGROUND_LOAD_NOTE` | the run's own statement of the machine it measured: the load average it read, the core it pinned to, the SMT sibling busyness it sampled and the cooldown it waited. Begins `controlled;` or `uncontrolled;`, and the record validator refuses a note that disagrees with `MISO_ENGINE_BENCH_MEASUREMENT_CONTROL`. |
+| `MISO_ENGINE_BENCH_MEASUREMENT_CONTROL` | `controlled` or `uncontrolled`, and nothing else (#144 item 13). A controlled run passed every precondition; an uncontrolled one waived at least one under `MISO_ENGINE_BENCH_ALLOW_UNCONTROLLED`. Every record carries it so the two can never be silently compared. |
+| `MISO_ENGINE_BENCH_CPU_AFFINITY` | the CPU number the workload was pinned to, or `uncontrolled` when affinity could not be obtained. |
 | `MISO_ENGINE_BENCH_RUNTIME_OR_BROWSER` | Wasm runtime or browser identity. |
 | `MISO_ENGINE_BENCH_WASM_HOST` | Wasm host name. |
 | `MISO_ENGINE_BENCH_WASM_HOST_VERSION` | Wasm host version. |
@@ -81,6 +83,18 @@ Written to stderr by every bench binary, counted by the runner. Not an environme
 | name | meaning |
 |---|---|
 | `MISO_ENGINE_BENCH_PHASE` | the one bench phase marker. |
+
+
+## Benchmark admissibility ceilings
+
+Frozen shell constants in `scripts/check-bench-preconditions.sh`, read by the one-shot runners that source it. Not environment variables, and deliberately not overridable: a ceiling an operator can raise is a ceiling that gets raised on the day the measurement matters. `MISO_ENGINE_BENCH_ALLOW_UNCONTROLLED` is the one honest way past them, and it changes what the record says.
+
+| name | meaning |
+|---|---|
+| `MISO_ENGINE_BENCH_LOADAVG_CEILING` | one-minute load average the host must be under, read after the cooldown. |
+| `MISO_ENGINE_BENCH_COOLDOWN_SECONDS` | seconds a freshly linked binary must age before it is timed. |
+| `MISO_ENGINE_BENCH_SIBLING_BUSY_CEILING` | percentage of the sample interval an SMT sibling of the pinned core may be busy. |
+| `MISO_ENGINE_BENCH_SIBLING_SAMPLE_SECONDS` | length of that sample interval. |
 
 
 ## Realtime trace markers
@@ -121,6 +135,7 @@ Read by one subject each.
 
 | name | meaning |
 |---|---|
+| `MISO_ENGINE_BENCH_ALLOW_UNCONTROLLED` | set to `1` to record a run whose admissibility preconditions failed instead of refusing it. For machines where control is genuinely impossible; the resulting records say `uncontrolled` and name every waived precondition. |
 | `MISO_ENGINE_BUILTINS_SKIP_METADATA` | `check-builtins-policy.sh`: skip the `cargo metadata` smoke. |
 | `MISO_ENGINE_SCHEDULER_AUDIT_PACED` | scheduler audit: run the paced arrival pattern. |
 | `MISO_ENGINE_SCHEDULER_TRACE_ROOT` | scheduler trace gate: where the strace files go. |

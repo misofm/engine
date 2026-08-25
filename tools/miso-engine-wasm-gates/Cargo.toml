@@ -13,6 +13,10 @@ name = "miso_engine_wasm_gates"
 path = "src/main.rs"
 
 [dependencies]
+# The one shared bench harness (#104 F4): the nearest-rank percentile and the timed region the
+# #163 phase 0b timing arm reports through. `scripts/check-bench-policy.sh` fails if a second copy
+# of either reappears under `tools/`, so this edge is what keeps this crate from growing one.
+miso-engine-bench-support.workspace = true
 miso-engine-builtins.workspace = true
 miso-engine-compressor.workspace = true
 miso-engine-effect-runtime.workspace = true
