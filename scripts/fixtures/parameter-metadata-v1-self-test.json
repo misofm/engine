@@ -21,7 +21,9 @@
     { "value": 6, "name": "domain" },
     { "value": 7, "name": "unsupportedKind" },
     { "value": 8, "name": "backpressure" },
-    { "value": 9, "name": "wrongState" }
+    { "value": 9, "name": "wrongState" },
+    { "value": 10, "name": "unknownTap" },
+    { "value": 11, "name": "observationUnbound" }
   ],
   "observationVocabularies": {
     "kinds": [{ "value": 1, "name": "gainReductionDb" }],

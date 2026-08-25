@@ -30,9 +30,14 @@ POLICIES = {1: "shared", 2: "perLane"}
 SMOOTHINGS = {1: "none", 2: "linear", 3: "onePole99"}
 
 COMMAND_KINDS = ["pan", "matrix", "faderDb", "mute", "effectParam", "effectBypass"]
+# Issue #143 added `unknownTap` (10) and `observationUnbound` (11); issue #151 found that this
+# list, the host JS acknowledgement bound and the generator all still stopped at `wrongState`.
+# The list is spelled here rather than imported on purpose -- this validator is deliberately a
+# second implementation -- and `scripts/check-command-reason-vocabulary.py` is what proves the two
+# spellings, the Rust constants, the host JS table and the `.d.ts` enum are one vocabulary.
 COMMAND_REASONS = [
     "none", "malformed", "unknownTrack", "unknownRack", "unknownEffect", "unknownParameter",
-    "domain", "unsupportedKind", "backpressure", "wrongState",
+    "domain", "unsupportedKind", "backpressure", "wrongState", "unknownTap", "observationUnbound",
 ]
 BUILTIN_UPDATE_RATES = {"preparedOnly", "blockTarget"}
 BUILTIN_SCOPES = {"perLane", "matrixShared"}
@@ -105,7 +110,10 @@ def validate(document: dict) -> None:
     require(applied == set(COMMAND_KINDS), "applied command kinds")
     reasons = document["commandReasons"]
     require([reason["name"] for reason in reasons] == COMMAND_REASONS, "command reasons")
-    require([reason["value"] for reason in reasons] == list(range(10)), "command reason values")
+    require(
+        [reason["value"] for reason in reasons] == list(range(len(COMMAND_REASONS))),
+        "command reason values",
+    )
 
     vocabularies = document["observationVocabularies"]
     require(set(vocabularies) == set(OBSERVATION_VOCABULARIES), "observation vocabulary keys")
@@ -369,6 +377,13 @@ def self_test() -> int:
         ("record bytes", lambda d: d.update(commandRecordBytes=32)),
         ("kind not applied", lambda d: d["commandKinds"][2].update(applied=False)),
         ("reason order", lambda d: d["commandReasons"].reverse()),
+        # Issue #151's exact defect shape: a vocabulary that stops one short of the reasons the
+        # observation path returns, and one whose value column no longer matches its name column.
+        ("reason vocabulary truncated at wrongState", lambda d: d["commandReasons"].__delitem__(
+            slice(10, None)
+        )),
+        ("reason renamed", lambda d: d["commandReasons"][10].update(name="unknownObservation")),
+        ("reason value renumbered", lambda d: d["commandReasons"][11].update(value=12)),
         (
             "builtin live disagrees with update rate",
             lambda d: d["builtins"]["parameters"][6].update(liveUpdatable=False),
