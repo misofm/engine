@@ -135,6 +135,7 @@ Read by one subject each.
 | `MISO_ENGINE_WEB_WORKLET_TEST_MODULE` | Hermetic worklet test: override module path for the bootstrap-under-test (#132). |
 | `MISO_ENGINE_PRINT_HELPER_MANIFEST` | native PCM runner portability gate: helper manifest path. |
 | `MISO_ENGINE_EFFECT_CONTRACT_V1_H` | the C include guard `check-effect-contract.sh` asserts. Not an environment variable. |
+| `MISO_ENGINE_VECTORIZATION_AARCH64_TARGET` | native vectorization report: which AArch64 target to build the probe object for. |
 
 
 ## Test harness hooks

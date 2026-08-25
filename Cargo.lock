@@ -1095,6 +1095,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "miso-engine-vectorization-probes"
+version = "0.1.0"
+dependencies = [
+ "miso-engine-lane",
+]
+
+[[package]]
 name = "miso-engine-wasm-gate-corpus"
 version = "0.1.0"
 dependencies = [

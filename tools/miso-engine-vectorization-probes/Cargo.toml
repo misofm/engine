@@ -1,0 +1,16 @@
+[package]
+name = "miso-engine-vectorization-probes"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+name = "miso_engine_vectorization_probes"
+crate-type = ["rlib"]
+
+[dependencies]
+miso-engine-lane.workspace = true
+
+[lints]
+workspace = true

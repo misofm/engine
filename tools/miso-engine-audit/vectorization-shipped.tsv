@@ -1,0 +1,27 @@
+# Issue #144 item 3, shipped-artifact binding. Rules about the release products themselves, not
+# about a probe build. `render-entry` requires an exported entry that is defined exactly once and
+# whose direct and GOT-indirect call closure reaches at least `floor` functions. `kernel-host`
+# names a production function that instantiates lane kernels, and requires it to be defined exactly
+# once, to perform at least `floor` vector arithmetic instructions at the backend width, to be
+# vector dominated (strictly more vector than scalar arithmetic), and to call no math library.
+#
+# The floors are deliberately well below the observed counts: this report discriminates "the shipped
+# bank is a scalar loop in bank clothing", not a compiler's instruction-selection drift. Observed
+# counts are in the report so drift stays visible without gating on it.
+# product	backend	rule	subject	floor
+capi-cdylib	x86_64-avx2	render-entry	miso_engine_v2_render_f32_planar	2
+capi-cdylib	x86_64-avx2	kernel-host	<miso_engine_parametric_eq::Channel<wide::f32x8_::f32x8, 8>>::process_section	16
+capi-cdylib	x86_64-avx2	kernel-host	<miso_engine_builtins::BuiltinInputBankV1>::process	16
+capi-cdylib	x86_64-avx2	kernel-host	<miso_engine_compressor::Instance<wide::f32x8_::f32x8>>::render::<<miso_engine_compressor::PreparedCompressorBank<wide::f32x8_::f32x8> as miso_engine_effect_contract::PreparedNativeEffectBank>::process_bank::{closure#0}>	64
+capi-cdylib	x86_64-avx2	kernel-host	<miso_engine_gate_expander::PreparedGate<wide::f32x8_::f32x8, false> as miso_engine_effect_contract::PreparedNativeEffectBank>::process_bank	64
+capi-cdylib	x86_64-avx2	kernel-host	<miso_engine_multiband_compressor::PreparedMultibandCompressorBank<wide::f32x8_::f32x8, 8> as miso_engine_effect_contract::PreparedNativeEffectBank>::process_bank	64
+capi-cdylib	x86_64-avx2	kernel-host	<miso_engine_true_peak_limiter::PreparedTruePeakLimiterBank<wide::f32x8_::f32x8> as miso_engine_effect_contract::PreparedNativeEffectBank>::process_bank	32
+capi-cdylib	x86_64-avx2	kernel-host	<miso_engine_transient_shaper::Shaper<wide::f32x8_::f32x8, 8>>::process_block	64
+web-native-twin	x86_64-avx2	render-entry	miso_engine_web_v1_render	2
+web-native-twin	x86_64-avx2	kernel-host	<miso_engine_parametric_eq::Channel<wide::f32x8_::f32x8, 8>>::process_section	16
+web-native-twin	x86_64-avx2	kernel-host	<miso_engine_builtins::BuiltinInputBankV1>::process	16
+web-native-twin	x86_64-avx2	kernel-host	<miso_engine_compressor::Instance<wide::f32x8_::f32x8>>::render::<<miso_engine_compressor::PreparedCompressorBank<wide::f32x8_::f32x8> as miso_engine_effect_contract::PreparedNativeEffectBank>::process_bank::{closure#0}>	64
+web-native-twin	x86_64-avx2	kernel-host	<miso_engine_gate_expander::PreparedGate<wide::f32x8_::f32x8, false> as miso_engine_effect_contract::PreparedNativeEffectBank>::process_bank	64
+web-native-twin	x86_64-avx2	kernel-host	<miso_engine_multiband_compressor::PreparedMultibandCompressorBank<wide::f32x8_::f32x8, 8> as miso_engine_effect_contract::PreparedNativeEffectBank>::process_bank	64
+web-native-twin	x86_64-avx2	kernel-host	<miso_engine_true_peak_limiter::PreparedTruePeakLimiterBank<wide::f32x8_::f32x8> as miso_engine_effect_contract::PreparedNativeEffectBank>::process_bank	32
+web-native-twin	x86_64-avx2	kernel-host	<miso_engine_transient_shaper::Shaper<wide::f32x8_::f32x8, 8>>::process_block	64

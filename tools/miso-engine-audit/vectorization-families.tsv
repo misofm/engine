@@ -1,0 +1,32 @@
+# Issue #144 item 3: the closed roster of public lane kernels and how each is disposed of.
+# `miso_engine_audit vectorization` parses crates/miso-engine-lane/src/kernels{,/*}.rs and fails if
+# this file and that roster differ in either direction, so a new kernel family is uncertified until
+# it is registered here and given a rule per backend in vectorization-allowlist.tsv.
+# module	kernel	family	disposition	note
+kernels	gain_block	feedforward-gain	certified	-
+kernels	gain_mix_block	feedforward-gain-mix	certified	-
+kernels	gain_mix_step	feedforward-gain-mix-step	certified	-
+kernels	mix2x2_block	route-matrix-2x2	certified	-
+kernels	one_pole_block	recursive-one-pole	certified	-
+kernels	pdc_delay_block	pdc-delay-ring	certified	-
+kernels	ramp_block	feedforward-gain-ramp	certified	-
+kernels	sum2_block	feedforward-sum2	certified	-
+kernels	sum_into_block	feedforward-sum-into	certified	-
+kernels	svf_block	recursive-svf	certified	-
+kernels	svf_block_ramped	recursive-svf-ramped	certified	-
+kernels	svf_step	recursive-svf-step	certified	-
+kernels/builtins	all_lanes	mask-all-lanes	exempt	mask constructor with no input and no floating-point operation; the lane shape it produces is certified where it is consumed (builtins-gain-mute, builtins-zero-lanes)
+kernels/builtins	gain_mute_block	builtins-gain-mute	certified	-
+kernels/builtins	input_chain_block	builtins-input-chain	certified	-
+kernels/builtins	lanes_below	mask-lanes-below	exempt	mask constructor from a frame count; integer compare only, no floating-point operation
+kernels/builtins	mask_from_flags	mask-from-flags	exempt	mask constructor from a control-plane flag slice; read once per block off the sample loop
+kernels/builtins	matrix2x2_block	builtins-matrix-2x2	certified	-
+kernels/builtins	matrix2x2_ramp_block	builtins-matrix-2x2-ramp	certified	-
+kernels/builtins	no_lanes	mask-no-lanes	exempt	mask constructor with no input and no floating-point operation; see mask-all-lanes
+kernels/builtins	nonfinite_lanes_block	builtins-nonfinite-lanes	certified	-
+kernels/builtins	sanitize_gain_block	builtins-sanitize-gain	certified	-
+kernels/builtins	zero_lanes_block	builtins-zero-lanes	certified	-
+kernels/halfband	halfband2x_decim_even	halfband-decimate-even	certified	-
+kernels/halfband	halfband2x_interp_even	halfband-interpolate-even	certified	-
+kernels/halfband	history_push	halfband-history-push	certified	the whole-lane store of one history row; LLVM expresses it as a 32-byte memcpy rather than a typed vector store, so its IR class is no-float and the width is certified in the object
+kernels/halfband	history_row	halfband-history-row	exempt	slice-index helper returning a borrowed row; performs no arithmetic and emits no floating-point instruction

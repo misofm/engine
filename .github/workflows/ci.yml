@@ -185,29 +185,36 @@ jobs:
           rustc --print cfg -C target-cpu=x86-64 -C target-feature=+avx2,+fma | grep -qx 'target_feature="fma"'
 
   native-vectorization-report:
-    name: native production-kernel release-probe report (non-blocking)
+    name: native lane-kernel vectorization certification (non-blocking)
     runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v4
-      - name: Install pinned Rust toolchain and disassembler
+      # The AArch64 leg needs only the cross target's standard library: the probe crate is built as
+      # an rlib with `--emit=llvm-ir,obj`, so nothing is linked and no cross linker is required.
+      # Without the target installed the report records an explicit skip with its reason.
+      - name: Install pinned Rust toolchain, AArch64 standard library and LLVM tools
         run: |
           rustup toolchain install 1.97.1 --profile minimal
+          rustup target add --toolchain 1.97.1 aarch64-linux-android
           sudo apt-get update
           sudo apt-get install -y llvm
-      # Issue #144 item 3 starts as evidence, not a merge gate. Both the live report and its red
-      # mutations are allowed to fail this step while the uploaded receipt remains inspectable.
-      - name: Generate report and run red mutations
+      # Issue #144 item 3 stays evidence, not a merge gate. `docs/NATIVE_VECTORIZATION_V1.md` states
+      # the linkage argument and its limits, and `tools/miso-engine-audit/VECTORIZATION.md` records
+      # what would have to be true to promote it. Both the live report and its red mutations may
+      # fail this step while the uploaded receipt stays inspectable.
+      - name: Certify the lane kernels and run the red mutations
         continue-on-error: true
         run: |
           bash scripts/run-native-vectorization-report.sh
-          bash scripts/test-native-vectorization-report.sh \
-            target/release/miso_engine_audit
+          bash scripts/test-native-vectorization-report.sh
       - name: Upload native vectorization evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: native-vectorization-report
-          path: target/ci/native-vectorization/report.json
+          path: |
+            target/ci/native-vectorization/report.json
+            target/ci/native-vectorization/build-manifest.txt
 
   wasm:
     name: browser Wasm artifact probes

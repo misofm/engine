@@ -41,6 +41,7 @@ members = [
     "tools/miso-engine-wasm-gate-guest",
     "tools/miso-engine-parameter-metadata",
     "tools/miso-engine-wasm-gates",
+    "tools/miso-engine-vectorization-probes",
 ]
 resolver = "3"
 
@@ -85,6 +86,7 @@ miso-engine-host-web = { path = "hosts/miso-engine-host-web", version = "0.1.0" 
 miso-engine-bench-support = { path = "tools/miso-engine-bench-support", version = "0.1.0" }
 miso-engine-wasm-gate-corpus = { path = "tools/miso-engine-wasm-gate-corpus", version = "0.1.0" }
 miso-engine-wasm-gate-guest = { path = "tools/miso-engine-wasm-gate-guest", version = "0.1.0" }
+miso-engine-vectorization-probes = { path = "tools/miso-engine-vectorization-probes", version = "0.1.0" }
 sha2 = { version = "=0.11.0", default-features = false }
 wide = { version = "=1.6.1", default-features = false }
 

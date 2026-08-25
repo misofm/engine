@@ -1,7 +1,54 @@
-# backend	kernel_family	probe_symbol	required_groups	forbidden_scalar_families
-x86_64-avx2	feedforward-gain	probe_gain_simd8	vmulps,%ymm	mulss,addss,subss,divss
-x86_64-avx2	feedforward-sum	probe_sum2_simd8	vaddps,%ymm	mulss,addss,subss,divss
-x86_64-avx2	recursive-svf	probe_svf_simd8	vfmadd|vfnmadd,%ymm	mulss,addss,subss,divss
-aarch64-neon	feedforward-gain	probe_gain_simd4	fmul,.4s	fmul s,fadd s,fsub s,fdiv s,fmla s
-aarch64-neon	feedforward-sum	probe_sum2_simd4	fadd,.4s	fmul s,fadd s,fsub s,fdiv s,fmla s
-aarch64-neon	recursive-svf	probe_svf_simd4	fmla|fmls,.4s	fmul s,fadd s,fsub s,fdiv s,fmla s
+# Issue #144 item 3: one rule per certified kernel family per production backend.
+# Every certified family in vectorization-families.tsv must appear once for every backend, and no
+# other family may appear; the audit fails in both directions. `probe_path` is the demangled Rust
+# path of the wrapper in tools/miso-engine-vectorization-probes; `generic_argument` is the lane type
+# the backend instantiates it at, `-` for a family that is not generic over the lane.
+# Classes: vector-arith (floating-point arithmetic at the backend vector width), vector-compare
+# (a floating-point comparison at that width), vector-any (any operation on the backend vector
+# type), no-float (no floating-point operation at all). Every class additionally forbids scalar and
+# narrow floating-point arithmetic, fast-math flags, and math-library calls.
+# backend	family	probe_path	generic_argument	ir_class	asm_class
+x86_64-avx2	feedforward-gain	miso_engine_vectorization_probes::probe_gain_block	wide::f32x8_::f32x8	vector-arith	vector-arith
+x86_64-avx2	feedforward-gain-mix	miso_engine_vectorization_probes::probe_gain_mix_block	wide::f32x8_::f32x8	vector-arith	vector-arith
+x86_64-avx2	feedforward-gain-mix-step	miso_engine_vectorization_probes::probe_gain_mix_step	wide::f32x8_::f32x8	vector-arith	vector-arith
+x86_64-avx2	route-matrix-2x2	miso_engine_vectorization_probes::probe_mix2x2_block	wide::f32x8_::f32x8	vector-arith	vector-arith
+x86_64-avx2	recursive-one-pole	miso_engine_vectorization_probes::probe_one_pole_block	wide::f32x8_::f32x8	vector-arith	vector-arith
+x86_64-avx2	pdc-delay-ring	miso_engine_vectorization_probes::probe_pdc_delay_block	-	no-float	no-float
+x86_64-avx2	feedforward-gain-ramp	miso_engine_vectorization_probes::probe_ramp_block	wide::f32x8_::f32x8	vector-arith	vector-arith
+x86_64-avx2	feedforward-sum2	miso_engine_vectorization_probes::probe_sum2_block	wide::f32x8_::f32x8	vector-arith	vector-arith
+x86_64-avx2	feedforward-sum-into	miso_engine_vectorization_probes::probe_sum_into_block	wide::f32x8_::f32x8	vector-arith	vector-arith
+x86_64-avx2	recursive-svf	miso_engine_vectorization_probes::probe_svf_block	wide::f32x8_::f32x8	vector-arith	vector-arith
+x86_64-avx2	recursive-svf-ramped	miso_engine_vectorization_probes::probe_svf_block_ramped	wide::f32x8_::f32x8	vector-arith	vector-arith
+x86_64-avx2	recursive-svf-step	miso_engine_vectorization_probes::probe_svf_step	wide::f32x8_::f32x8	vector-arith	vector-arith
+x86_64-avx2	builtins-gain-mute	miso_engine_vectorization_probes::probe_gain_mute_block	wide::f32x8_::f32x8	vector-arith	vector-arith
+x86_64-avx2	builtins-input-chain	miso_engine_vectorization_probes::probe_input_chain_block	wide::f32x8_::f32x8	vector-arith	vector-arith
+x86_64-avx2	builtins-matrix-2x2	miso_engine_vectorization_probes::probe_matrix2x2_block	wide::f32x8_::f32x8	vector-arith	vector-arith
+x86_64-avx2	builtins-matrix-2x2-ramp	miso_engine_vectorization_probes::probe_matrix2x2_ramp_block	wide::f32x8_::f32x8	vector-arith	vector-arith
+x86_64-avx2	builtins-nonfinite-lanes	miso_engine_vectorization_probes::probe_nonfinite_lanes_block	wide::f32x8_::f32x8	vector-compare	vector-any
+x86_64-avx2	builtins-sanitize-gain	miso_engine_vectorization_probes::probe_sanitize_gain_block	wide::f32x8_::f32x8	vector-arith	vector-arith
+x86_64-avx2	builtins-zero-lanes	miso_engine_vectorization_probes::probe_zero_lanes_block	wide::f32x8_::f32x8	vector-any	vector-any
+x86_64-avx2	halfband-decimate-even	miso_engine_vectorization_probes::probe_halfband2x_decim_even	wide::f32x8_::f32x8	vector-arith	vector-arith
+x86_64-avx2	halfband-interpolate-even	miso_engine_vectorization_probes::probe_halfband2x_interp_even	wide::f32x8_::f32x8	vector-arith	vector-arith
+x86_64-avx2	halfband-history-push	miso_engine_vectorization_probes::probe_history_push	wide::f32x8_::f32x8	no-float	vector-any
+aarch64-neon	feedforward-gain	miso_engine_vectorization_probes::probe_gain_block	wide::f32x4_::f32x4	vector-arith	vector-arith
+aarch64-neon	feedforward-gain-mix	miso_engine_vectorization_probes::probe_gain_mix_block	wide::f32x4_::f32x4	vector-arith	vector-arith
+aarch64-neon	feedforward-gain-mix-step	miso_engine_vectorization_probes::probe_gain_mix_step	wide::f32x4_::f32x4	vector-arith	vector-arith
+aarch64-neon	route-matrix-2x2	miso_engine_vectorization_probes::probe_mix2x2_block	wide::f32x4_::f32x4	vector-arith	vector-arith
+aarch64-neon	recursive-one-pole	miso_engine_vectorization_probes::probe_one_pole_block	wide::f32x4_::f32x4	vector-arith	vector-arith
+aarch64-neon	pdc-delay-ring	miso_engine_vectorization_probes::probe_pdc_delay_block	-	no-float	no-float
+aarch64-neon	feedforward-gain-ramp	miso_engine_vectorization_probes::probe_ramp_block	wide::f32x4_::f32x4	vector-arith	vector-arith
+aarch64-neon	feedforward-sum2	miso_engine_vectorization_probes::probe_sum2_block	wide::f32x4_::f32x4	vector-arith	vector-arith
+aarch64-neon	feedforward-sum-into	miso_engine_vectorization_probes::probe_sum_into_block	wide::f32x4_::f32x4	vector-arith	vector-arith
+aarch64-neon	recursive-svf	miso_engine_vectorization_probes::probe_svf_block	wide::f32x4_::f32x4	vector-arith	vector-arith
+aarch64-neon	recursive-svf-ramped	miso_engine_vectorization_probes::probe_svf_block_ramped	wide::f32x4_::f32x4	vector-arith	vector-arith
+aarch64-neon	recursive-svf-step	miso_engine_vectorization_probes::probe_svf_step	wide::f32x4_::f32x4	vector-arith	vector-arith
+aarch64-neon	builtins-gain-mute	miso_engine_vectorization_probes::probe_gain_mute_block	wide::f32x4_::f32x4	vector-arith	vector-arith
+aarch64-neon	builtins-input-chain	miso_engine_vectorization_probes::probe_input_chain_block	wide::f32x4_::f32x4	vector-arith	vector-arith
+aarch64-neon	builtins-matrix-2x2	miso_engine_vectorization_probes::probe_matrix2x2_block	wide::f32x4_::f32x4	vector-arith	vector-arith
+aarch64-neon	builtins-matrix-2x2-ramp	miso_engine_vectorization_probes::probe_matrix2x2_ramp_block	wide::f32x4_::f32x4	vector-arith	vector-arith
+aarch64-neon	builtins-nonfinite-lanes	miso_engine_vectorization_probes::probe_nonfinite_lanes_block	wide::f32x4_::f32x4	vector-compare	vector-any
+aarch64-neon	builtins-sanitize-gain	miso_engine_vectorization_probes::probe_sanitize_gain_block	wide::f32x4_::f32x4	vector-arith	vector-arith
+aarch64-neon	builtins-zero-lanes	miso_engine_vectorization_probes::probe_zero_lanes_block	wide::f32x4_::f32x4	vector-any	vector-any
+aarch64-neon	halfband-decimate-even	miso_engine_vectorization_probes::probe_halfband2x_decim_even	wide::f32x4_::f32x4	vector-arith	vector-arith
+aarch64-neon	halfband-interpolate-even	miso_engine_vectorization_probes::probe_halfband2x_interp_even	wide::f32x4_::f32x4	vector-arith	vector-arith
+aarch64-neon	halfband-history-push	miso_engine_vectorization_probes::probe_history_push	wide::f32x4_::f32x4	no-float	vector-any
