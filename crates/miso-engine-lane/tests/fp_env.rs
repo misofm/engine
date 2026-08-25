@@ -148,6 +148,39 @@ mod x86 {
         );
     }
 
+    /// Attestation is about control state, not about what a previous operation left sticky.
+    #[test]
+    fn sticky_status_flags_do_not_fail_the_attestation_but_a_control_bit_does() {
+        let saved = read_mxcsr();
+        let _restore = Restore(saved);
+
+        // Every sticky exception flag set, control state exactly canonical.
+        let flagged = fpenv::CANONICAL_MXCSR | 0x003F;
+        write_mxcsr(flagged);
+        assert!(
+            fpenv::in_canonical_fp_environment(),
+            "sticky status flags must not be read as a non-canonical environment"
+        );
+        attest_fp_environment().expect("sticky flags must not fail the attestation");
+        assert_eq!(
+            read_mxcsr(),
+            flagged,
+            "attestation must leave even the sticky flags alone"
+        );
+
+        // One control bit, and the answer changes.
+        write_mxcsr(fpenv::CANONICAL_MXCSR | MXCSR_FTZ);
+        assert!(
+            !fpenv::in_canonical_fp_environment(),
+            "a set FTZ bit must be read as a non-canonical environment"
+        );
+        write_mxcsr(fpenv::CANONICAL_MXCSR | MXCSR_DAZ);
+        assert!(
+            !fpenv::in_canonical_fp_environment(),
+            "a set DAZ bit must be read as a non-canonical environment"
+        );
+    }
+
     #[test]
     fn attestation_passes_from_a_hostile_caller_word() {
         let saved = read_mxcsr();

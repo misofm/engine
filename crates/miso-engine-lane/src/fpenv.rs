@@ -84,6 +84,23 @@ pub const CANONICAL_MXCSR: u32 = 0x1F80;
 #[cfg(target_arch = "aarch64")]
 pub const CANONICAL_FPCR: u64 = 0;
 
+/// The MXCSR bits that are *control* state: DAZ, the six exception masks, the rounding-control
+/// field and FTZ.
+///
+/// Bits 0-5 are sticky exception *status* flags, which ordinary arithmetic sets and which say
+/// nothing about how the next operation will round or flush. An attestation asks whether the
+/// canonical control state is in effect, so it compares under this mask; a *restore* is still
+/// bit-exact over the whole word, because a caller's sticky flags are the caller's.
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+pub const MXCSR_CONTROL_MASK: u32 = 0xFFC0;
+
+/// The FPCR bits that are control state: all of them.
+///
+/// AArch64 keeps its sticky exception flags in FPSR, a different register, so FPCR carries no
+/// status bits to mask off.
+#[cfg(target_arch = "aarch64")]
+pub const FPCR_CONTROL_MASK: u64 = u64::MAX;
+
 /// AArch64 `FPCR.FZ`: subnormal inputs and results are flushed to zero.
 #[cfg(target_arch = "aarch64")]
 pub const FPCR_FZ: u64 = 1 << 24;
@@ -169,6 +186,39 @@ pub fn read_fp_control_word() -> FpControlWord {}
 #[inline]
 pub fn write_fp_control_word(value: FpControlWord) {
     let () = value;
+}
+
+/// The control-state half of a floating-point control word.
+///
+/// Two words with the same control bits round and flush identically; they may still differ in the
+/// sticky exception flags a previous operation left behind. Attestation compares these; restoration
+/// never does.
+#[inline]
+#[must_use]
+pub fn fp_control_bits(word: FpControlWord) -> FpControlWord {
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    {
+        word & MXCSR_CONTROL_MASK
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        word & FPCR_CONTROL_MASK
+    }
+    #[cfg(not(any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        word
+    }
+}
+
+/// Whether this thread is currently in the canonical floating-point control state.
+///
+/// This is what a render entry's session-start attestation asks after installing the guard, and
+/// what a host asks if it wants to check the state it is about to render in. Sticky exception flags
+/// are ignored; see [`fp_control_bits`].
+#[inline]
+#[must_use]
+pub fn in_canonical_fp_environment() -> bool {
+    fp_control_bits(read_fp_control_word()) == fp_control_bits(canonical_fp_control_word())
 }
 
 /// The canonical control word for this target.
@@ -334,7 +384,7 @@ pub fn attest_fp_environment() -> Result<(), FpEnvironmentRejection> {
         let _pinned = CanonicalFpEnv::enter();
         read_fp_control_word()
     };
-    if readback != canonical_fp_control_word() {
+    if fp_control_bits(readback) != fp_control_bits(canonical_fp_control_word()) {
         return Err(FpEnvironmentRejection {
             observed,
             readback,

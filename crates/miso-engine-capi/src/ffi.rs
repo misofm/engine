@@ -769,9 +769,7 @@ pub unsafe extern "C" fn miso_engine_v2_render_f32_planar(
         // this plan renders proves the canonical word actually took here, and refuses the render
         // rather than silently producing off-pin audio if it did not. Later blocks skip it.
         if !state.fp_env_attested.get() {
-            if miso_engine_lane::fpenv::read_fp_control_word()
-                != miso_engine_lane::fpenv::canonical_fp_control_word()
-            {
+            if !miso_engine_lane::fpenv::in_canonical_fp_environment() {
                 error.store(plan_error::FP_ENVIRONMENT, Ordering::Relaxed);
                 return RESULT_RENDER_REJECTED;
             }
