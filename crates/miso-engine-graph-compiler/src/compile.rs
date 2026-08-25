@@ -151,15 +151,16 @@ impl GraphCompiler {
         if !caps.all_nonzero() {
             diagnostics.push(diag("graph.resource.limit", "$.graph_compile_caps"));
         }
-        // NOT YET REMOVED (#99 F5, deliberately): this clones the whole `CompiledSession`,
-        // canonical TOML included, purely to satisfy the borrow checker -- `model` borrows the
-        // session, and the transactional failure path must hand `effects` back **by value** from
-        // inside the loops that read `model`. Removing it means restructuring a 500-line function
-        // so every early `failure(effects, ..)` happens after the borrow ends, and the failure
-        // path is a frozen API contract. Left as a bounded successor rather than rushed: the
-        // shape is a `build(&effects) -> Result<Built, Vec<GraphDiagnostic>>` that returns owned
-        // outputs, with `failure(effects, ..)` called only on its `Err`. The dominant F5 cost --
-        // the canonical dump, its SHA and the Graphviz string on every compile -- is gone.
+        // NOT YET REMOVED (#99 F5, deliberately; tracked by #162): this clones the whole
+        // `CompiledSession`, canonical TOML included, purely to satisfy the borrow checker --
+        // `model` borrows the session, and the transactional failure path must hand `effects`
+        // back **by value** from inside the loops that read `model`. Removing it means
+        // restructuring a 500-line function so every early `failure(effects, ..)` happens after
+        // the borrow ends, and the failure path is a frozen API contract. Left as a bounded
+        // successor rather than rushed: the shape is a
+        // `build(&effects) -> Result<Built, Vec<GraphDiagnostic>>` that returns owned outputs,
+        // with `failure(effects, ..)` called only on its `Err`. The dominant F5 cost -- the
+        // canonical dump, its SHA and the Graphviz string on every compile -- is gone.
         let session = effects.session.clone();
         let model = session.normalized_model();
         if model.outputs.len() != 1 {
