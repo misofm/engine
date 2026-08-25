@@ -29,5 +29,9 @@ required-features = ["lane"]
 name = "m2_lane_identity"
 required-features = ["lane"]
 
+[[test]]
+name = "f1_fast_db_bounds"
+required-features = ["lane"]
+
 [lints]
 workspace = true
