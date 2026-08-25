@@ -3,8 +3,7 @@
 //! Single-pass longest-path over the level-major schedule, with every add checked.
 
 use super::*;
-#[allow(unused_imports)]
-use crate::{banks::*, canonical::*, compile::*, estimate::*, ids::*, schedule::*};
+use crate::ids::diag;
 
 pub(crate) struct TimingResult {
     pub(crate) routes: Vec<RouteTiming>,

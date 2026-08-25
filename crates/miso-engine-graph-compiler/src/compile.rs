@@ -9,8 +9,18 @@
 //! here (#99 F5); see [`GraphCompiler::evidence`].
 
 use super::*;
-#[allow(unused_imports)]
-use crate::{banks::*, canonical::*, estimate::*, ids::*, pdc::*, schedule::*};
+use crate::banks::{bind_rack_banks, checked_add_effect_banks, effect_bank_resource};
+use crate::canonical::{
+    Sha256Writer, canonical_parts, dot, hex_digest, hex_sha256, reductions_of, write_canonical,
+};
+use crate::estimate::{estimate_fits_platform, resource_estimate};
+use crate::ids::{
+    add_main_edge, add_node, add_route_destination_edge, add_route_source_edge, diag, effect_path,
+    failure, gid, into_effects, port, ports_for, rack_id, route_destination_node,
+    route_source_node, route_transform, sidechain_matches, stages, track_node,
+};
+use crate::pdc::timings;
+use crate::schedule::{buffer_assignments, cycle_witnesses, topo};
 
 impl GraphCompiler {
     /// The canonical text, its SHA-256 and the Graphviz rendering, produced on demand.

@@ -3,8 +3,7 @@
 //! One cohort former, over whole rack chains: see [`bind_rack_banks`] (#96 F1, #99 F3).
 
 use super::*;
-#[allow(unused_imports)]
-use crate::{canonical::*, compile::*, estimate::*, ids::*, pdc::*, schedule::*};
+use crate::ids::{diag, rack_id};
 
 /// The `RackLocationV1` a graph rack id addresses, or `None` for the dynamic rack.
 pub(crate) const fn rack_location(rack: RackId) -> Option<RackLocationV1> {
