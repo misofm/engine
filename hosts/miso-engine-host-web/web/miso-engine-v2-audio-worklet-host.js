@@ -64,8 +64,10 @@ const MAXIMUM_COMMAND_RECORDS = 256;
 // Issue #143: the largest `consoleObservationTaps` the frozen configuration accepts.
 const MAXIMUM_OBSERVATION_TAPS = 16;
 // Issue #143: the two observation command kinds, named here so `observe()` never writes a literal.
-const MISO_COMMAND_OBSERVE_SUBSCRIBE = 7;
-const MISO_COMMAND_OBSERVE_UNSUBSCRIBE = 8;
+// Not `MISO_`-prefixed: `scripts/check-env-vocabulary.sh` reserves that prefix for the engine's
+// environment vocabulary, and a `MISO_`-prefixed identifier in any tracked file is a failure.
+const OBSERVE_SUBSCRIBE_KIND = 7;
+const OBSERVE_UNSUBSCRIBE_KIND = 8;
 const SUBSCRIPTION_FIELDS = [
   "trackIndex", "rack", "effectIndex", "tapId", "windowBlocks", "armed",
 ];
@@ -669,8 +671,8 @@ class MisoAudioWorkletHostV1 {
     }
     const commands = request.subscriptions.map((subscription) => ({
       kind: subscription.armed
-        ? MISO_COMMAND_OBSERVE_SUBSCRIBE
-        : MISO_COMMAND_OBSERVE_UNSUBSCRIBE,
+        ? OBSERVE_SUBSCRIBE_KIND
+        : OBSERVE_UNSUBSCRIBE_KIND,
       rack: subscription.rack,
       channel: 255,
       trackIndex: subscription.trackIndex,

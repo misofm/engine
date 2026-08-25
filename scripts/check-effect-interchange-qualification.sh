@@ -41,6 +41,10 @@
 #
 #   accepted manifest identity, before #143: 1aaa96dc731c0da3dabb2f8ecd7c2bf803078b580a38cccfccf1ffe280c83588 (24 rows)
 #   accepted manifest identity, after  #143: e3896726979aa746cfda50fc10c1985c0ecef117f87b39e692f18226b7b4fa14 (27 rows)
+#
+# The identity is pinned in three places -- here, `preflight-effect-interchange-benchmark.sh` and
+# `run-effect-interchange-benchmark.sh` -- and all three moved together. A re-seal that moves only
+# one is caught by `scripts/test-effect-interchange-benchmark.sh`.
 set -euo pipefail
 root="$(cd "${1:-.}" && pwd)"
 cd "$root"

@@ -971,7 +971,9 @@ fn observation_cost_classes_are_what_they_claim() {
     let mut sink = 0.0_f32;
     for block in 0..RENDER_BLOCKS {
         for (index, slot) in ring.iter_mut().enumerate() {
-            *slot = (index as f32).mul_add(1e-6, block as f32);
+            // Deliberately not a fused multiply-add: fusion belongs to
+            // `miso-engine-lane` alone (D3), and this is a stopwatch control, not a kernel.
+            *slot = index as f32 * 1e-6 + block as f32;
         }
         for slot in &ring {
             sink = sink.max(slot.abs());
