@@ -638,6 +638,170 @@ mod tests {
         model
     }
 
+    /// The compressor fixture with every compressor moved from SIMD-1 to the **dynamic** rack.
+    ///
+    /// Nothing else moves: same effect ids, same parameters, same routes, same routed sidechain on
+    /// `eq8`. The two racks a compressor is *not* in are empty on every track, so both placements
+    /// describe the same signal chain -- `input -> builtins -> simd1 -> dynamic -> simd2 -> fader`
+    /// with exactly one non-identity stage in it. That is what lets
+    /// `rack_placement_changes_the_bank_but_never_the_samples` be a bit test instead of a
+    /// tolerance.
+    fn accepted_dynamic_rack_compressor_fixture() -> miso_engine_session::SessionTomlV1 {
+        let mut model = accepted_compressor_graph_fixture();
+        for track in &mut model.tracks {
+            assert!(
+                track.dynamic.effects.is_empty() && track.simd2.effects.is_empty(),
+                "the compressor must be the only stage, or the placements are not comparable"
+            );
+            track.dynamic.effects = core::mem::take(&mut track.simd1.effects);
+        }
+        model
+    }
+
+    /// Compile one accepted model twice: once against the real registry (banks where it can) and
+    /// once against a registry whose only difference is that `bind_homogeneous_bank` returns
+    /// `Ok(None)` (`ScalarOnlyDelegateFactory`), which forces every instance onto the per-node
+    /// path. Same session, same dispatch, same parameters -- the *only* variable is whether the
+    /// arithmetic is done a lane at a time or `width` lanes at a time.
+    fn compile_bank_and_per_node(
+        model: &miso_engine_session::SessionTomlV1,
+        effect_id: &str,
+        plan_id: u64,
+    ) -> (PreparedGraphArtifact, PreparedGraphArtifact) {
+        let session = compile_session(
+            model,
+            CompileCaps {
+                max_compiled_model_bytes: u64::MAX,
+                max_requested_runtime_bytes: u64::MAX,
+                max_single_allocation_bytes: u64::MAX,
+                max_queue_items: u64::MAX,
+                max_source_ring_frames: u64::MAX,
+                max_source_ring_bytes: u64::MAX,
+            },
+        )
+        .expect("accepted fixture");
+        let registry = launch_native_effect_registry_v1().expect("launch registry");
+        let scalar_registry = NativeEffectRegistry::new([Box::new(ScalarOnlyDelegateFactory {
+            delegate: registry
+                .get_shared_ascii(effect_id)
+                .expect("registered launch effect"),
+        })
+            as Box<dyn NativeEffectFactory>])
+        .expect("per-node registry");
+        let effect_caps = EffectCompileCaps {
+            maximum_total_state_bytes: 1 << 20,
+            maximum_scratch_bytes: 1 << 20,
+            maximum_automation_spans_per_block: 32,
+        };
+        let bank_effects = prepare_native_session_effects(&session, &registry, effect_caps)
+            .expect("prepared bank-capable effects");
+        let per_node_effects =
+            prepare_native_session_effects(&session, &scalar_registry, effect_caps)
+                .expect("prepared per-node effects");
+        let bank = GraphCompiler::compile(GraphCompileRequest {
+            dispatch: host_dispatch(),
+            plan_id,
+            effects: bank_effects,
+            caps: integration_caps(),
+        })
+        .unwrap_or_else(|failure| panic!("bank graph: {:?}", failure.diagnostics));
+        let per_node = GraphCompiler::compile(GraphCompileRequest {
+            dispatch: host_dispatch(),
+            plan_id: plan_id + 1,
+            effects: per_node_effects,
+            caps: integration_caps(),
+        })
+        .unwrap_or_else(|failure| panic!("per-node graph: {:?}", failure.diagnostics));
+        (bank, per_node)
+    }
+
+    /// Compile one accepted model against the real launch registry.
+    fn compile_bank_only(
+        model: &miso_engine_session::SessionTomlV1,
+        plan_id: u64,
+    ) -> PreparedGraphArtifact {
+        let session = compile_session(
+            model,
+            CompileCaps {
+                max_compiled_model_bytes: u64::MAX,
+                max_requested_runtime_bytes: u64::MAX,
+                max_single_allocation_bytes: u64::MAX,
+                max_queue_items: u64::MAX,
+                max_source_ring_frames: u64::MAX,
+                max_source_ring_bytes: u64::MAX,
+            },
+        )
+        .expect("accepted fixture");
+        let registry = launch_native_effect_registry_v1().expect("launch registry");
+        let effects = prepare_native_session_effects(
+            &session,
+            &registry,
+            EffectCompileCaps {
+                maximum_total_state_bytes: 1 << 20,
+                maximum_scratch_bytes: 1 << 20,
+                maximum_automation_spans_per_block: 32,
+            },
+        )
+        .expect("prepared effects");
+        GraphCompiler::compile(GraphCompileRequest {
+            dispatch: host_dispatch(),
+            plan_id,
+            effects,
+            caps: integration_caps(),
+        })
+        .unwrap_or_else(|failure| panic!("graph: {:?}", failure.diagnostics))
+    }
+
+    /// Bind a compiled artifact over the shared impulse input bindings and render `blocks` blocks,
+    /// returning the PCM of each block.
+    fn render_blocks(artifact: PreparedGraphArtifact, blocks: u64) -> Vec<Vec<f32>> {
+        let graph = artifact.graph;
+        let envelope = graph.envelope;
+        let frames = envelope.quantum.0 as usize;
+        let nodes = graph
+            .required_bindings
+            .iter()
+            .map(|node| GraphNodeBinding::new(node.clone(), parametric_eq_input_binding(node)))
+            .collect();
+        let mut plan = graph
+            .bind(GraphRuntimeBindings {
+                #[cfg(not(target_arch = "wasm32"))]
+                worker_lease: None,
+                envelope,
+                nodes,
+                observers: Vec::new(),
+            })
+            .unwrap_or_else(|failure| panic!("bind: {}", failure.code));
+        (0..blocks)
+            .map(|block| {
+                let mut pcm = vec![0.0_f32; frames * 2];
+                plan.render(
+                    RenderIo {
+                        input: None,
+                        output: PlanarBufferMut::try_new(&mut pcm, 2, frames, frames)
+                            .expect("output"),
+                    },
+                    RenderTime {
+                        absolute_sample: block * frames as u64,
+                    },
+                )
+                .expect("render");
+                pcm
+            })
+            .collect()
+    }
+
+    fn assert_pcm_bits_equal(left: &[Vec<f32>], right: &[Vec<f32>], what: &str) {
+        assert_eq!(left.len(), right.len(), "{what}: block count");
+        for (block, (left, right)) in left.iter().zip(right).enumerate() {
+            assert_eq!(
+                left.iter().map(|s| s.to_bits()).collect::<Vec<_>>(),
+                right.iter().map(|s| s.to_bits()).collect::<Vec<_>>(),
+                "{what}: block {block} differs"
+            );
+        }
+    }
+
     fn accepted_gate_expander_graph_fixture() -> miso_engine_session::SessionTomlV1 {
         let mut model = accepted_compressor_graph_fixture();
         for track in &mut model.tracks {
@@ -3799,6 +3963,255 @@ mod tests {
         .unwrap_or_else(|failure| panic!("bypass compressor graph: {:?}", failure.diagnostics));
         assert_eq!(bypass_artifact.graph.sequential_schedule, expected_schedule);
         assert_eq!(bypass_artifact.graph.route_timings, expected_route_timings);
+    }
+
+    /// Phase 1b: a native effect carrying the homogeneous-bank kernel contract banks in the
+    /// **dynamic** rack, and every rendered sample is bit-identical to the per-node path.
+    ///
+    /// Before this, `rack_location` mapped `RackId::Dynamic` to `None`, so this exact session --
+    /// ten identical sidechain-free compressors -- produced zero banks and ran scalar at width 1.
+    /// Nothing about the compressor changed to make it bankable; only the candidacy gate did.
+    ///
+    /// The bar is class A. Banking changes lane *grouping*, not per-lane arithmetic:
+    /// `PreparedCompressorBank<L>` runs the same coefficient and detector update per lane that the
+    /// scalar instance runs, so a single differing bit would be a defect in the bank kernel or in
+    /// the gather/scatter, never something to re-pin around. This renders sixteen blocks -- well
+    /// past the compressor's 960-sample lookahead latency, so the comparison is over live
+    /// compressed audio with retained detector state, not over a latency pad of zeros.
+    #[test]
+    fn dynamic_rack_compressors_bank_and_render_bit_identically_to_the_per_node_path() {
+        let model = accepted_dynamic_rack_compressor_fixture();
+        assert_eq!(model.tracks.len(), 10);
+        assert!(model.tracks.iter().all(|track| {
+            track.simd1.effects.is_empty()
+                && track.simd2.effects.is_empty()
+                && track.dynamic.effects.len() == 1
+        }));
+        let (bank, per_node) = compile_bank_and_per_node(&model, "miso.compressor", 1_610);
+
+        // Structure: the dynamic rack is now a bank location, and it fills exactly as SIMD-1 does.
+        // Nine tracks are bankable (`eq8` carries a routed sidechain); the tenth is the tail.
+        let width = BankWidth::for_backend(bank.report.rack_cohorts.dispatch);
+        if let Some(width) = width {
+            let lanes = width.lanes() as usize;
+            let cohorts = &bank.report.rack_cohorts;
+            assert_eq!(bank.graph.prepared_bank_count(), 9 / lanes);
+            assert_eq!(
+                cohorts.bound_groups_in(RackLocationV1::Dynamic).count(),
+                9 / lanes,
+                "the dynamic rack binds full cohorts"
+            );
+            assert_eq!(
+                cohorts.groups_in(RackLocationV1::Simd1).count(),
+                0,
+                "no compressor is left in SIMD-1"
+            );
+            let scalar = cohorts.scalar_in(RackLocationV1::Dynamic);
+            assert_eq!(scalar.len(), 1 + 9 % lanes);
+            assert!(
+                scalar.iter().any(|id| id.track_id.as_str() == "eq8"),
+                "a routed sidechain still blocks banking in the dynamic rack (#96 F9)"
+            );
+            assert!(scalar.iter().all(|id| id.rack == RackId::Dynamic));
+        } else {
+            assert_eq!(bank.graph.prepared_bank_count(), 0);
+        }
+        assert_eq!(per_node.graph.prepared_bank_count(), 0);
+        assert!(per_node.report.rack_cohorts.bound_slots.is_empty());
+        assert_eq!(
+            per_node.report.rack_cohorts.plan.groups, bank.report.rack_cohorts.plan.groups,
+            "cohort planning is independent of the factory's legal scalar fallback"
+        );
+
+        // Banking is an execution-layer decision: it must not move the graph.
+        assert_eq!(
+            bank.graph.sequential_schedule,
+            per_node.graph.sequential_schedule
+        );
+        assert_eq!(bank.graph.route_timings, per_node.graph.route_timings);
+        assert_eq!(bank.graph.inserted_delays, per_node.graph.inserted_delays);
+
+        let banked = render_blocks(bank, 16);
+        let scalar = render_blocks(per_node, 16);
+        assert_pcm_bits_equal(&banked, &scalar, "dynamic-rack compressor bank vs per node");
+        assert!(
+            banked.iter().flatten().any(|sample| *sample != 0.0),
+            "sixteen blocks must clear the compressor's lookahead latency"
+        );
+        assert!(
+            banked[15]
+                .iter()
+                .zip(&banked[14])
+                .any(|(a, b)| a.to_bits() != b.to_bits()),
+            "the bank must carry detector state across blocks, not restart each one"
+        );
+    }
+
+    /// Rack placement decides where an effect sits in the signal chain. It must never decide what
+    /// the arithmetic produces -- and, after phase 1b, it no longer decides how wide that
+    /// arithmetic is either.
+    ///
+    /// The same ten compressors are compiled twice, once placed in SIMD-1 and once in the dynamic
+    /// rack. Both racks a compressor is not in are empty identity boundaries, so the two sessions
+    /// are the same chain; both now bank the same number of lanes, and every rendered bit agrees.
+    /// This is the gate that would catch a bank kernel that silently depended on rack identity.
+    #[test]
+    fn rack_placement_changes_the_bank_but_never_the_samples() {
+        let simd1_model = accepted_compressor_graph_fixture();
+        let dynamic_model = accepted_dynamic_rack_compressor_fixture();
+        let (simd1, _) = compile_bank_and_per_node(&simd1_model, "miso.compressor", 1_620);
+        let (dynamic, _) = compile_bank_and_per_node(&dynamic_model, "miso.compressor", 1_630);
+
+        assert_eq!(
+            simd1.graph.prepared_bank_count(),
+            dynamic.graph.prepared_bank_count(),
+            "the same session banks the same width wherever it is placed"
+        );
+        assert_eq!(
+            simd1
+                .report
+                .rack_cohorts
+                .bound_slots_in(RackLocationV1::Simd1)
+                .count(),
+            dynamic
+                .report
+                .rack_cohorts
+                .bound_slots_in(RackLocationV1::Dynamic)
+                .count(),
+        );
+        assert_eq!(
+            simd1
+                .report
+                .rack_cohorts
+                .scalar_in(RackLocationV1::Simd1)
+                .len(),
+            dynamic
+                .report
+                .rack_cohorts
+                .scalar_in(RackLocationV1::Dynamic)
+                .len(),
+            "the same tracks fall back, for the same reasons"
+        );
+        assert_eq!(
+            simd1.report.output_latency, dynamic.report.output_latency,
+            "PDC is a property of the chain, not of the rack the stage sits in"
+        );
+
+        assert_pcm_bits_equal(
+            &render_blocks(simd1, 16),
+            &render_blocks(dynamic, 16),
+            "SIMD-1 placement vs dynamic placement",
+        );
+    }
+
+    /// A dynamic slot that differs from its bank-mates' falls back exactly as a SIMD slot does.
+    ///
+    /// One track's compressor becomes a gate/expander: a different `EffectProgramKeyV1`, so a
+    /// different cohort, so a pool of one that can never fill a group. It renders per node while
+    /// its eight bank-mates bank -- the same subsequence/leader mechanism that already governs
+    /// SIMD-rack heterogeneity, reached through the same code path. Nothing rack-specific decides
+    /// this, which is the point.
+    #[test]
+    fn a_dynamic_slot_that_differs_from_its_bank_mates_falls_back_per_node() {
+        let mut model = accepted_dynamic_rack_compressor_fixture();
+        // `eq8` already falls back on its routed sidechain; make `eq7` fall back on its *program*.
+        let odd = &mut model.tracks[7].dynamic.effects[0];
+        odd.id = StableId::parse("gate-expander").expect("stable effect id");
+        odd.identity = EffectIdentity::Native {
+            effect_id: StableId::parse("miso.gate-expander").expect("gate/expander id"),
+        };
+        let bank = compile_bank_only(&model, 1_640);
+        let cohorts = &bank.report.rack_cohorts;
+
+        let Some(width) = BankWidth::for_backend(cohorts.dispatch) else {
+            assert_eq!(bank.graph.prepared_bank_count(), 0);
+            return;
+        };
+        let lanes = width.lanes() as usize;
+        // Eight homogeneous compressors remain; the gate/expander and the sidechained compressor
+        // are each alone in their cohort and bind nothing.
+        assert_eq!(bank.graph.prepared_bank_count(), 8 / lanes);
+        let scalar = cohorts.scalar_in(RackLocationV1::Dynamic);
+        assert_eq!(scalar.len(), 2, "exactly the two odd tracks fall back");
+        assert!(scalar.iter().any(|id| id.track_id.as_str() == "eq7"));
+        assert!(scalar.iter().any(|id| id.track_id.as_str() == "eq8"));
+        // A heterogeneous member is never quietly folded into a bank of the wrong program.
+        for bound in cohorts.bound_slots_in(RackLocationV1::Dynamic) {
+            assert!(
+                bound
+                    .members
+                    .iter()
+                    .all(|member| member.effect_id.as_str() == "compressor"),
+                "a bound dynamic bank contains only its own program"
+            );
+        }
+    }
+
+    /// AGENTS.md's opacity boundary, gated structurally rather than incidentally.
+    ///
+    /// "Third-party core Wasm ... is permitted only in the dynamic rack: opaque per-instance Wasm
+    /// breaks the known homogeneous/fused SIMD bank contract." Opening the dynamic rack to banking
+    /// must not open it to *opaque* effects, and the reason must not be an accident of which rack
+    /// the candidate loop happens to walk.
+    ///
+    /// Two independent gates, because either one alone would rot:
+    ///
+    /// 1. Identity: `banks_are_permitted` refuses every non-native identity, and it is consulted
+    ///    for every rack, so a future rack gaining a location cannot re-open the boundary.
+    /// 2. Reachability: a third-party effect in the dynamic rack does not survive preparation at
+    ///    all (`effect.third_party.unavailable_at_launch`), so no `EffectPreparedEntry` -- and
+    ///    therefore no bank member -- can exist for one today.
+    ///
+    /// The third gate is `launch_delay_fixture_closes_scalar_state_tail_pdc_and_transactional_caps`:
+    /// a *native* dynamic-rack effect with no bank kernel forms full cohorts and still binds
+    /// nothing. Together they pin that banking follows the kernel contract, not the rack.
+    #[test]
+    fn third_party_dynamic_effects_are_never_bank_candidates() {
+        assert!(!crate::banks::banks_are_permitted(
+            &EffectIdentity::ThirdPartyCid {
+                cid: "bafy2bzaceexampleexampleexampleexampleexampleexampleexample".to_owned(),
+            }
+        ));
+        assert!(crate::banks::banks_are_permitted(&EffectIdentity::Native {
+            effect_id: StableId::parse("miso.compressor").expect("compressor id"),
+        }));
+
+        let mut model = accepted_dynamic_rack_compressor_fixture();
+        model.tracks[0].dynamic.effects[0].identity = EffectIdentity::ThirdPartyCid {
+            cid: "bafy2bzaceexampleexampleexampleexampleexampleexampleexample".to_owned(),
+        };
+        let session = compile_session(
+            &model,
+            CompileCaps {
+                max_compiled_model_bytes: u64::MAX,
+                max_requested_runtime_bytes: u64::MAX,
+                max_single_allocation_bytes: u64::MAX,
+                max_queue_items: u64::MAX,
+                max_source_ring_frames: u64::MAX,
+                max_source_ring_bytes: u64::MAX,
+            },
+        )
+        .expect("a third-party CID is an accepted session, not a malformed one");
+        let registry = launch_native_effect_registry_v1().expect("launch registry");
+        let Err(failure) = prepare_native_session_effects(
+            &session,
+            &registry,
+            EffectCompileCaps {
+                maximum_total_state_bytes: 1 << 20,
+                maximum_scratch_bytes: 1 << 20,
+                maximum_automation_spans_per_block: 32,
+            },
+        ) else {
+            panic!("an opaque effect must not prepare at launch");
+        };
+        assert!(
+            failure
+                .0
+                .iter()
+                .any(|diagnostic| diagnostic.code == "effect.third_party.unavailable_at_launch"),
+            "an opaque dynamic-rack effect never reaches bank candidacy: {:?}",
+            failure.0
+        );
     }
 
     #[test]
