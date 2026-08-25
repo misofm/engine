@@ -737,7 +737,8 @@ pub unsafe extern "C" fn miso_engine_v2_render_f32_planar(
     catch_result(|| {
         // Issue #146, first statement of the entry and last thing undone: the whole call runs in
         // the canonical floating-point environment, validation included, so a rejected call also
-        // hands the caller's word back unchanged. Two register writes and a read per block.
+        // hands the caller's word back unchanged. One control-word read, two writes and two empty
+        // assembly barriers per block; measured in `artifacts/issue146/`.
         let _fp_env = CanonicalFpEnv::enter();
         // SAFETY: Nonnull live handle pointers are caller-provided under the handle contract.
         let kind = unsafe { plan_kind(plan) };

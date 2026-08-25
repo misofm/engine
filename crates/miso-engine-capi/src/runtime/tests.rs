@@ -1735,6 +1735,21 @@ mod fp_environment {
         rendered
     }
 
+    /// The refusal has its own frozen diagnostic, so a host that hits it is told which rule it
+    /// broke rather than reading the catch-all.
+    #[test]
+    fn the_fp_environment_refusal_names_its_own_check() {
+        assert_eq!(
+            plan_error::text(plan_error::FP_ENVIRONMENT),
+            b"render.fp_environment.invalid"
+        );
+        assert_ne!(
+            plan_error::text(plan_error::FP_ENVIRONMENT),
+            plan_error::text(u32::MAX),
+            "the refusal must not fall through to render.internal"
+        );
+    }
+
     #[test]
     fn the_c_render_entry_is_canonical_under_a_caller_that_set_ftz_and_daz() {
         let saved = read_mxcsr();
