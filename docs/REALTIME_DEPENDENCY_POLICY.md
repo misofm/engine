@@ -75,10 +75,10 @@ gate G6 uses to prove hardware flush-to-zero is inert under the D7 flush law (`_
 `_mm_setcsr` are used rather than the inline assembly their deprecation note recommends). No `Lane`
 value or vector type escapes the crate as unsafe.
 
-Issue 146 adds the second and, on `x86`, cheapest of them: `crates/miso-engine-lane/src/fpenv.rs`,
-the canonical floating-point environment that every native render entry pins. It is the one place
-in the workspace that **is** reachable from a render path, deliberately -- pinning the environment
-is the render entry's first act and unpinning it is its last -- and it is three register accesses
+Issue 146 adds the second: `crates/miso-engine-lane/src/fpenv.rs`, the canonical floating-point
+environment that every native render entry pins. It is the one place in the workspace that **is**
+reachable from a render path, deliberately -- pinning the environment is the render entry's first
+act and unpinning it is its last -- and it is three register accesses and two empty assembly blocks,
 with no memory operand, no call and no branch. It carries unsafe for two reasons, and both are
 inline assembly -- the workspace's only inline assembly, and the reason the softfma paragraph above
 says "rather than the inline assembly their deprecation note recommends" and this one does not.
