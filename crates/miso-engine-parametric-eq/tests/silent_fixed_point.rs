@@ -25,11 +25,11 @@ mod support;
 
 use miso_engine_effect_contract::{
     BankWidth, EffectBankProcessBlock, NativeEffectFactory, ParameterChannel,
-    PrepareEffectBankRequest, PreparedAutomationSpan,
+    PrepareEffectBankRequest, PreparedAutomationSpan, StatePayloadOutput, StatePayloadSizes,
 };
 use miso_engine_lane::Backend;
 use miso_engine_parametric_eq::ParametricEqFactory;
-use support::{point, request, set_initial, values};
+use support::{COMMON_BYTES, LANE_BYTES, point, request, set_initial, values};
 
 const FRAMES: usize = 128;
 /// Long enough that every integrator reaches its silent fixed point with room to spare, so the
@@ -204,4 +204,147 @@ fn the_settled_stretch_is_exactly_positive_zero() {
             "word {index} of the settled stretch is not exactly +0.0"
         );
     }
+}
+
+/// The **input** side of the signed-zero rule (#163 phase 4, adversarial pass).
+///
+/// `block_is_positive_zero` reduces raw bit patterns, so a block of `-0.0` is *not* silence by its
+/// test and the fast path declines it. That strictness had no pin: every release test stayed green
+/// under a mutation that masked the sign bit (`bits |= value.to_bits() & 0x7fff_ffff`), which makes
+/// a `-0.0` block count as silence and lets a claim earned on `+0.0` engage on it.
+///
+/// It is not merely conservative — it is load-bearing, and this is the measurement that settles it.
+/// A settled bank fed one block of all `-0.0` **writes all `+0.0`**: the SVF's `x - ic2` at
+/// `ic2 = +0.0` gives `-0.0`, but the output sum `m0*x + m1*v1 + m2*v2` mixes signed zeros and
+/// `(-0.0) + (+0.0)` is `+0.0` under round-to-nearest. So the kernel changes the bits, while a
+/// sign-blind fast path would skip and leave the buffer holding the `-0.0`s it was handed. Those
+/// are different bit patterns for the same block, which is exactly the class-A promise being
+/// broken.
+///
+/// Red under the sign-masked mutation; green on the strict predicate, which declines to engage and
+/// therefore renders the `-0.0` block through the real kernel like any other non-silent input.
+///
+/// Both the rendered output and the per-track state payload are compared, so a divergence that
+/// happened to leave the audio alone but moved an integrator would still be caught.
+#[test]
+fn a_negative_zero_input_block_is_not_treated_as_silence() {
+    let Some((width, backend)) = native_bank() else {
+        return;
+    };
+    let lanes = width.lanes() as usize;
+
+    fn run(
+        lanes: usize,
+        width: BankWidth,
+        backend: miso_engine_lane::Backend,
+        restate: bool,
+    ) -> (Vec<u32>, Vec<[u8; LANE_BYTES]>) {
+        let factory = ParametricEqFactory;
+        let prepared: Vec<_> = (0..lanes).map(configured).collect();
+        let requests: Vec<_> = prepared.iter().map(|v| request(v, false)).collect();
+        let mut bank = factory
+            .bind_homogeneous_bank(PrepareEffectBankRequest {
+                backend,
+                width,
+                requests: &requests,
+            })
+            .expect("valid bank request")
+            .expect("the native width must bind");
+        let redundant: Vec<PreparedAutomationSpan> = (0..lanes)
+            .map(|track| point(3, ParameterChannel::Left, 0, band0_left_gain(track)))
+            .collect();
+        let full_offsets: Vec<u32> = (0..=lanes).map(|t| t as u32).collect();
+        let empty_offsets = vec![0_u32; lanes + 1];
+
+        // 40 blocks of exact `+0.0` earn the claim, then exactly one block of all `-0.0`, then
+        // four more `+0.0` blocks so a state divergence has somewhere to show up.
+        const SETTLE: usize = 40;
+        const TOTAL: usize = SETTLE + 5;
+        let mut bits = Vec::new();
+        for block in 0..TOTAL {
+            let fill = if block == SETTLE { -0.0_f32 } else { 0.0_f32 };
+            let mut left = vec![fill; FRAMES * lanes];
+            let mut right = vec![fill; FRAMES * lanes];
+            let first_sample = (block * FRAMES) as u64;
+            let restated: Vec<PreparedAutomationSpan> = if restate {
+                redundant
+                    .iter()
+                    .map(|span| PreparedAutomationSpan {
+                        start_sample: first_sample,
+                        end_sample: first_sample,
+                        ..*span
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let offsets: &[u32] = if restate {
+                &full_offsets
+            } else {
+                &empty_offsets
+            };
+            bank.process_bank(
+                EffectBankProcessBlock::new(
+                    &mut left,
+                    &mut right,
+                    None,
+                    FRAMES as u32,
+                    width,
+                    first_sample,
+                    &restated,
+                    offsets,
+                    128,
+                )
+                .expect("bank block"),
+            );
+            bits.extend(left.iter().map(|v| v.to_bits()));
+            bits.extend(right.iter().map(|v| v.to_bits()));
+        }
+        let state: Vec<[u8; LANE_BYTES]> = (0..lanes)
+            .map(|track| {
+                let mut common = [0_u8; COMMON_BYTES];
+                let mut lane_left = [0_u8; LANE_BYTES];
+                let mut lane_right = [0_u8; LANE_BYTES];
+                bank.snapshot_track_state_payload(
+                    track as u32,
+                    StatePayloadOutput::new(
+                        &mut common,
+                        &mut lane_left,
+                        &mut lane_right,
+                        StatePayloadSizes {
+                            common_bytes: COMMON_BYTES as u32,
+                            left_bytes: LANE_BYTES as u32,
+                            right_bytes: LANE_BYTES as u32,
+                        },
+                    )
+                    .expect("state output"),
+                )
+                .expect("snapshot");
+                lane_left
+            })
+            .collect();
+        (bits, state)
+    }
+
+    let (fast_bits, fast_state) = run(lanes, width, backend, false);
+    let (slow_bits, slow_state) = run(lanes, width, backend, true);
+
+    // The measurement this pin rests on: the real kernel turns a `-0.0` block into `+0.0`.
+    let per_block = FRAMES * lanes * 2;
+    let negative_zero_block = &slow_bits[40 * per_block..41 * per_block];
+    assert!(
+        negative_zero_block.iter().all(|word| *word == 0),
+        "the kernel is expected to write +0.0 for a -0.0 input block; if this ever stops being \
+         true the reasoning in `block_is_positive_zero` needs re-deriving, not this assertion \
+         relaxing"
+    );
+    assert_eq!(
+        fast_bits, slow_bits,
+        "a -0.0 input block was treated as silence and skipped, leaving -0.0 where the kernel \
+         writes +0.0"
+    );
+    assert_eq!(
+        fast_state, slow_state,
+        "a -0.0 input block was skipped and the integrators diverged from the rendered arm"
+    );
 }

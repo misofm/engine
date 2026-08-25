@@ -243,3 +243,89 @@ fn silence_shorter_than_the_lookahead_line_still_drains_it() {
         "the fast path skipped tone that was still inside the lookahead line"
     );
 }
+
+/// The **input** side of the signed-zero rule, at the compressor (#163 phase 4, adversarial pass).
+///
+/// Same gap as `miso-engine-parametric-eq`'s pin of the same name, guarding a different kernel:
+/// masking the sign bit in `block_is_positive_zero` makes a `-0.0` block count as silence, and a
+/// claim earned on `+0.0` then engages on it. Every release test stayed green under that mutation
+/// before this test existed.
+///
+/// The compressor's exposure is its delay line rather than its arithmetic. A `-0.0` block that the
+/// kernel actually renders is *written into the lookahead ring*, and it emerges at the output
+/// about seven blocks later; a fast path that skipped the block never writes it, so the sample
+/// that should have emerged is a different bit pattern. The trailing run is therefore long enough
+/// for the line to drain, which is what gives the divergence somewhere to appear.
+///
+/// Red under the sign-masked mutation; green on the strict predicate.
+#[test]
+fn a_negative_zero_input_block_is_not_treated_as_silence() {
+    let Some((_, width)) = native_bank_width() else {
+        return;
+    };
+    let lanes = width.lanes() as usize;
+
+    fn run(lanes: usize, width: miso_engine_effect_contract::BankWidth, restate: bool) -> Vec<u32> {
+        let values = values_with(&[(0, THRESHOLD_DB), (1, RATIO), (4, RELEASE_MS)]);
+        let requests: Vec<_> = (0..lanes).map(|_| request(&values)).collect();
+        let mut bank = bind_bank(&requests).expect("a native bank width");
+        let full_offsets: Vec<u32> = (0..=lanes).map(|t| t as u32).collect();
+        let empty_offsets = vec![0_u32; lanes + 1];
+
+        // Settle past the lookahead line, one `-0.0` block, then long enough for it to emerge.
+        const SETTLE: usize = 40;
+        const TOTAL: usize = SETTLE + 16;
+        let mut bits = Vec::new();
+        for block in 0..TOTAL {
+            let fill = if block == SETTLE { -0.0_f32 } else { 0.0_f32 };
+            let mut left = vec![fill; FRAMES * lanes];
+            let mut right = vec![fill; FRAMES * lanes];
+            let first_sample = (block * FRAMES) as u64;
+            let restated: Vec<PreparedAutomationSpan> = if restate {
+                (0..lanes)
+                    .map(|_| PreparedAutomationSpan {
+                        kind: AutomationSpanKind::Point,
+                        channel: ParameterChannel::Left,
+                        parameter_index: 0,
+                        start_sample: first_sample,
+                        end_sample: first_sample,
+                        start_value: THRESHOLD_DB,
+                        end_value: THRESHOLD_DB,
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let offsets: &[u32] = if restate {
+                &full_offsets
+            } else {
+                &empty_offsets
+            };
+            bank.process_bank(
+                EffectBankProcessBlock::new(
+                    &mut left,
+                    &mut right,
+                    None,
+                    FRAMES as u32,
+                    width,
+                    first_sample,
+                    &restated,
+                    offsets,
+                    128,
+                )
+                .expect("bank block"),
+            );
+            bits.extend(left.iter().map(|v| v.to_bits()));
+            bits.extend(right.iter().map(|v| v.to_bits()));
+        }
+        bits
+    }
+
+    let fast = run(lanes, width, false);
+    let slow = run(lanes, width, true);
+    assert_eq!(
+        fast, slow,
+        "a -0.0 input block was treated as silence and skipped, so it never entered the lookahead \
+         line and the sample that should have emerged from it differs"
+    );
+}
