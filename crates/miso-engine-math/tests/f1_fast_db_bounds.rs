@@ -452,3 +452,185 @@ fn f1_fast_tier_stays_within_twice_the_exact_tier() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// The six named crossings, each pinned by an independent restatement.
+//
+// The sweeps above bound the tier over the union of the domains. These bound it over *each
+// crossing's own* domain, named, so that the container's claim -- "exactly six crossings, and this
+// is what each one costs" -- is checked one site at a time rather than in aggregate.
+//
+// The restatement is deliberately not the `exp2`/`log2` oracle used above. It is
+// `20 * log10(x)` and `pow(10, db/20)` in `f64`, through the vendored `log10` and `pow`, which are
+// different algorithms from the vendored `exp2`/`log2` -- `log10` is vendored separately precisely
+// because `log2(x) * LOG10_2` is not bit-equal to it. So the expected value is computed from the
+// decibel definition by an independent route, not by running the fast path and recording what it
+// said, and not by re-spelling the same reduction.
+// ---------------------------------------------------------------------------------------------
+
+/// `20 * log10(x)` in `f64`, through the vendored `log10`. Independent of `log2`.
+fn restate_level_db(x: f64) -> f64 {
+    20.0 * miso_engine_math::log10(x)
+}
+
+/// `10^(db / 20)` in `f64`, through the vendored `pow`. Independent of `exp2`.
+fn restate_gain(db: f64) -> f64 {
+    miso_engine_math::pow(10.0, db / 20.0)
+}
+
+/// Worst error over one same-sign run of `f32` bit patterns, `first` to `last` inclusive.
+///
+/// Same-sign is the precondition, not a detail: `f32` bit patterns are monotone in *magnitude*,
+/// so a range whose endpoints straddle zero is not a contiguous run of values at all -- walking it
+/// passes through the infinities and the NaNs. Crossing domains that span zero are therefore
+/// swept as two runs and combined by the caller.
+fn worst_over_run(first: u32, last: u32, level: bool) -> f64 {
+    let (first, last) = if first <= last {
+        (first, last)
+    } else {
+        (last, first)
+    };
+    let mut worst = 0.0_f64;
+    let mut bits = first;
+    // Stride chosen so every crossing checks a few hundred thousand points in the default run.
+    let stride = 1 + (u64::from(last - first) / 400_000) as u32;
+    while bits <= last {
+        let x = f32::from_bits(bits);
+        let error = if level {
+            let got = f64::from(fast_level_db::<f32>(x));
+            (got - restate_level_db(f64::from(x))).abs()
+        } else {
+            let got = f64::from(fast_gain_from_db::<f32>(x));
+            let want = restate_gain(f64::from(x));
+            ((got - want) / want).abs() * DB_PER_RELATIVE
+        };
+        if error.is_finite() && error > worst {
+            worst = error;
+        }
+        bits = match bits.checked_add(stride) {
+            Some(next) => next,
+            None => break,
+        };
+    }
+    worst
+}
+
+/// Sweeps a crossing's own domain `[lo, hi]` and returns its worst error in decibels.
+///
+/// Split at zero into at most two same-sign runs, because that is the only shape
+/// [`worst_over_run`] can walk. A domain that merely *ends* at zero (crossing X4's `[-96, 0]`) is
+/// still a negative run: its far end is `-0.0`, not `+0.0`, and taking the `+0.0` bit pattern as
+/// the endpoint sends the walk through every positive float instead.
+fn crossing_worst_db(lo: f32, hi: f32, level: bool) -> f64 {
+    assert!(lo <= hi, "a crossing domain is given low to high");
+    let mut worst = 0.0_f64;
+    if lo < 0.0 {
+        let negative_end = if hi < 0.0 { hi } else { -0.0 };
+        worst = worst.max(worst_over_run(lo.to_bits(), negative_end.to_bits(), level));
+    }
+    if hi >= 0.0 {
+        let positive_start = if lo > 0.0 { lo } else { 0.0 };
+        worst = worst.max(worst_over_run(
+            positive_start.to_bits(),
+            hi.to_bits(),
+            level,
+        ));
+    }
+    worst
+}
+
+/// Crossing X1 — the compressor's detector level (`kernel.rs`, step 4).
+///
+/// Domain: the detector is rectified and floored to `LEVEL_FLOOR = 1e-8`; the result is clamped
+/// into `[-160, 24]` dB, so amplitudes above about `15.85` cannot affect the output.
+#[test]
+fn f1_crossing_x1_compressor_detector_level() {
+    let worst = crossing_worst_db(1.0e-8, 16.0, true);
+    assert!(
+        worst <= LEVEL_MAX_DB,
+        "crossing X1: {worst:.6e} dB exceeds the {LEVEL_MAX_DB:.1e} dB gate"
+    );
+    println!("crossing X1 (compressor detector level): {worst:.6e} dB");
+}
+
+/// Crossing X2 — the compressor's applied gain (`kernel.rs`, step 7).
+///
+/// Domain: `smoothed + makeup`, where the reduction is clamped to `[-100, 0]` and the makeup
+/// parameter's domain is `[-24, 24]`, so the argument lies in `[-124, 24]` dB.
+#[test]
+fn f1_crossing_x2_compressor_applied_gain() {
+    let worst = crossing_worst_db(-124.0, 24.0, false);
+    assert!(
+        worst <= GAIN_MAX_DB,
+        "crossing X2: {worst:.6e} dB exceeds the {GAIN_MAX_DB:.1e} dB gate"
+    );
+    println!("crossing X2 (compressor applied gain): {worst:.6e} dB");
+}
+
+/// Crossing X3 — the gate/expander's detector level (`kernel.rs`).
+///
+/// Same floor and clamps as X1; the clamp *order* differs (`min` then `max`) but the conversion's
+/// domain does not.
+#[test]
+fn f1_crossing_x3_gate_detector_level() {
+    let worst = crossing_worst_db(1.0e-8, 16.0, true);
+    assert!(
+        worst <= LEVEL_MAX_DB,
+        "crossing X3: {worst:.6e} dB exceeds the {LEVEL_MAX_DB:.1e} dB gate"
+    );
+    println!("crossing X3 (gate detector level): {worst:.6e} dB");
+}
+
+/// Crossing X4 — the gate/expander's applied gain (`kernel.rs`).
+///
+/// Domain: the smoothed `gain_db` tracks a target clamped to `[-range, 0]`, and the range
+/// parameter's maximum is 96 dB, so the argument lies in `[-96, 0]`.
+#[test]
+fn f1_crossing_x4_gate_applied_gain() {
+    let worst = crossing_worst_db(-96.0, 0.0, false);
+    assert!(
+        worst <= GAIN_MAX_DB,
+        "crossing X4: {worst:.6e} dB exceeds the {GAIN_MAX_DB:.1e} dB gate"
+    );
+    println!("crossing X4 (gate applied gain): {worst:.6e} dB");
+}
+
+/// Crossing X5 — one multiband band's detector level (`lib.rs`, `band_amplitude`).
+///
+/// Domain: `DETECTOR_FLOOR = 1e-8`, clamped into `[-160, 24]` dB. Same as X1, reached four times
+/// per frame rather than twice because there are two bands.
+#[test]
+fn f1_crossing_x5_multiband_detector_level() {
+    let worst = crossing_worst_db(1.0e-8, 16.0, true);
+    assert!(
+        worst <= LEVEL_MAX_DB,
+        "crossing X5: {worst:.6e} dB exceeds the {LEVEL_MAX_DB:.1e} dB gate"
+    );
+    println!("crossing X5 (multiband detector level): {worst:.6e} dB");
+}
+
+/// Crossing X6 — one multiband band's applied gain (`lib.rs`, `band_amplitude`).
+///
+/// Domain: `smoothed + makeup`, reduction clamped to `[-100, 0]`, makeup domain `[-24, 24]`.
+#[test]
+fn f1_crossing_x6_multiband_applied_gain() {
+    let worst = crossing_worst_db(-124.0, 24.0, false);
+    assert!(
+        worst <= GAIN_MAX_DB,
+        "crossing X6: {worst:.6e} dB exceeds the {GAIN_MAX_DB:.1e} dB gate"
+    );
+    println!("crossing X6 (multiband applied gain): {worst:.6e} dB");
+}
+
+/// The container's arithmetic: six crossings, and no seventh hiding in this file.
+#[test]
+fn f1_the_container_pins_exactly_six_crossings() {
+    let source = include_str!("f1_fast_db_bounds.rs");
+    // Built in two pieces so this test does not match its own needle.
+    let needle = concat!("fn ", "f1_crossing_x");
+    let pinned = source.matches(needle).count();
+    assert_eq!(
+        pinned, 6,
+        "the seal admits exactly six named crossings; this file pins {pinned}"
+    );
+}
