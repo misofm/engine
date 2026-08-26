@@ -41,7 +41,7 @@ Set by `scripts/run-*-benchmark.sh` before the single launch; read by the bench 
 |---|---|
 | `MISO_ENGINE_BENCH_CANDIDATE_COMMIT` | 40-hex commit the candidate binary was built from. |
 | `MISO_ENGINE_BENCH_CANDIDATE_TREE` | 40-hex tree of that commit. |
-| `MISO_ENGINE_BENCH_CANDIDATE_SHA256` | sha256 of the candidate commit string (rack, scheduler). |
+| `MISO_ENGINE_BENCH_CANDIDATE_SHA256` | sha256 of the candidate commit string (rack). |
 | `MISO_ENGINE_BENCH_BINARY_SHA256` | sha256 of the launched binary. |
 | `MISO_ENGINE_BENCH_ROUND` | `warmup`, `1` or `2` for the runners that launch per round. |
 | `MISO_ENGINE_BENCH_TOOL_SOURCE_SHA256` | sha256 of the bench tool source (interchange). |
@@ -130,10 +130,6 @@ Written to stdout by an audit binary immediately outside its armed render scope,
 | `MISO_ENGINE_DELAY_RT_END` | delay audit: disarmed. |
 | `MISO_ENGINE_GATE_EXPANDER_RT_BEGIN` | gate/expander audit: armed. |
 | `MISO_ENGINE_GATE_EXPANDER_RT_END` | gate/expander audit: disarmed. |
-| `MISO_ENGINE_SCHEDULER_PHASE_PREPARED` | scheduler audit: plan prepared. |
-| `MISO_ENGINE_SCHEDULER_PHASE_ARMED` | scheduler audit: armed. |
-| `MISO_ENGINE_SCHEDULER_PHASE_DISARMED` | scheduler audit: disarmed. |
-| `MISO_ENGINE_SCHEDULER_PHASE_RETIRED` | scheduler audit: plan retired off-render. |
 
 
 ## Subject switches
@@ -144,8 +140,6 @@ Read by one subject each.
 |---|---|
 | `MISO_ENGINE_BENCH_ALLOW_UNCONTROLLED` | set to `1` to record a run whose admissibility preconditions failed instead of refusing it. For machines where control is genuinely impossible; the resulting records say `uncontrolled` and name every waived precondition. |
 | `MISO_ENGINE_BUILTINS_SKIP_METADATA` | `check-builtins-policy.sh`: skip the `cargo metadata` smoke. |
-| `MISO_ENGINE_SCHEDULER_AUDIT_PACED` | scheduler audit: run the paced arrival pattern. |
-| `MISO_ENGINE_SCHEDULER_TRACE_ROOT` | scheduler trace gate: where the strace files go. |
 | `MISO_ENGINE_CAPI_HEADER` | C-ABI tests: path of `miso_engine_v2.h`. |
 | `MISO_ENGINE_CAPI_LIBRARY` | C-ABI tests: path of the built library. |
 | `MISO_ENGINE_CAPI_C_FIXTURE` | C-ABI tests: path of the C consumer. |

@@ -302,10 +302,8 @@ mod tests {
         PreparedNativeEffectBank, ProcessReport, StatePayloadOutput,
     };
     use miso_engine_graph::{
-        FallbackReasonV1, GraphBindingBlock, GraphNodeBinding, GraphNodeObserverBinding,
-        GraphObservationBlock, GraphRuntimeBindings, GraphRuntimeObserver, GraphRuntimeProcessor,
-        NativeGraphBindConfigV1, NativeGraphRenderModeV1, NativeSchedulerConfigV1,
-        SchedulerSelectionV1,
+        GraphBindingBlock, GraphNodeBinding, GraphNodeObserverBinding, GraphObservationBlock,
+        GraphRuntimeBindings, GraphRuntimeObserver, GraphRuntimeProcessor,
     };
     use miso_engine_session::{
         CompileCaps, EffectIdentity, EffectParam, ParameterChannel, ParameterUnit,
@@ -769,8 +767,6 @@ mod tests {
             .collect();
         let mut plan = graph
             .bind(GraphRuntimeBindings {
-                #[cfg(not(target_arch = "wasm32"))]
-                worker_lease: None,
                 envelope,
                 nodes,
                 observers: Vec::new(),
@@ -1237,7 +1233,7 @@ mod tests {
 
     /// #99 F1 (the property behind the wave-0 fix, gated here rather than assumed).
     ///
-    /// `NativeGraphBlueprint::prepare` rejects any dependency level whose nodes are not strictly
+    /// Binding rejects any dependency level whose nodes are not strictly
     /// ascending, and it runs for *both* native render modes -- so an unsorted level makes a valid
     /// multi-submix session unbindable on the native launch path. The `direct-route` fixture
     /// cannot see this: it is a chain with exactly one node per level. This test builds graphs
@@ -1564,10 +1560,7 @@ mod tests {
         Ok(())
     }
 
-    fn render_reverse_route_submix(
-        artifact: PreparedGraphArtifact,
-        render_mode: NativeGraphRenderModeV1,
-    ) -> (Vec<u32>, SchedulerSelectionV1, u64, bool) {
+    fn render_reverse_route_submix(artifact: PreparedGraphArtifact) -> (Vec<u32>, u64, bool) {
         let envelope = artifact.graph.envelope;
         let nodes = artifact
             .graph
@@ -1592,27 +1585,7 @@ mod tests {
         let observer_order = Arc::new(AtomicU64::new(0));
         let observed_audio = Arc::new(AtomicBool::new(false));
         let observed_node = track_node("vocal", TrackStage::PostMatrix);
-        // The dependency-wave mode needs a real pool; the pool outlives the plan it leases to.
-        let (pool, lease) = match render_mode {
-            NativeGraphRenderModeV1::DependencyWaves => {
-                let (pool, lease) = miso_engine_graph::NativeGraphWorkerPoolV1::start(
-                    miso_engine_graph::NativeWorkerPoolConfigV1 {
-                        requested_workers: NonZeroUsize::new(3),
-                        ..miso_engine_graph::NativeWorkerPoolConfigV1::default()
-                    },
-                )
-                .unwrap_or_else(|_| panic!("reverse-route worker pool"));
-                (Some(pool), Some(lease))
-            }
-            _ => (None, None),
-        };
-        let pool_shape = pool
-            .as_ref()
-            .map(miso_engine_graph::NativeGraphWorkerPoolV1::shape)
-            .unwrap_or_default();
         let bindings = GraphRuntimeBindings {
-            #[cfg(not(target_arch = "wasm32"))]
-            worker_lease: lease,
             envelope,
             nodes,
             observers: vec![
@@ -1636,24 +1609,10 @@ mod tests {
                 ),
             ],
         };
-        let prepared = artifact
+        let mut plan = artifact
             .graph
-            .bind_native(
-                bindings,
-                NativeGraphBindConfigV1 {
-                    render_mode,
-                    scheduler: NativeSchedulerConfigV1::new(
-                        NonZeroUsize::new(4).expect("four lanes"),
-                        true,
-                        pool_shape,
-                    )
-                    .with_recovery_deadline_ns(5_000_000_000),
-                    maximum_retained_bytes: 1 << 20,
-                },
-            )
-            .unwrap_or_else(|failure| panic!("native bind: {}", failure.code));
-        let selection = prepared.metadata.selection;
-        let mut plan = prepared.into_plan();
+            .bind(bindings)
+            .unwrap_or_else(|failure| panic!("reverse-route bind: {}", failure.code));
         let frames = envelope.quantum.0 as usize;
         let mut pcm = vec![0.0_f32; frames * 2];
         plan.render(
@@ -1665,19 +1624,15 @@ mod tests {
         )
         .expect("reverse-route submix render");
         drop(plan);
-        if let Some(pool) = pool {
-            pool.stop_and_join();
-        }
         (
             pcm.into_iter().map(f32::to_bits).collect(),
-            selection,
             observer_order.load(Ordering::SeqCst),
             observed_audio.load(Ordering::SeqCst),
         )
     }
 
     #[test]
-    fn issue122_reverse_route_ids_emit_sorted_levels_and_bind_both_native_modes() {
+    fn issue122_reverse_route_ids_emit_sorted_levels_and_bind() {
         let baseline = compile_reverse_route_submix_fixture(122_000);
         let existing_fixture = compile_fixture(122_001);
         dependency_level_contract(
@@ -1898,19 +1853,15 @@ mod tests {
                 GraphCompiler::sha256(&baseline.graph, &baseline.report)
             );
         }
-        let single =
-            render_reverse_route_submix(single_artifact, NativeGraphRenderModeV1::SingleThread);
-        let wave =
-            render_reverse_route_submix(wave_artifact, NativeGraphRenderModeV1::DependencyWaves);
-        assert!(matches!(single.1, SchedulerSelectionV1::Sequential(_)));
-        assert_eq!(wave.1, SchedulerSelectionV1::Parallel);
-        assert_eq!(single.0, wave.0);
+        let single = render_reverse_route_submix(single_artifact);
+        let repeat = render_reverse_route_submix(wave_artifact);
+        assert_eq!(single.0, repeat.0);
         assert_eq!(single.0[0], 2.0_f32.to_bits());
         assert_eq!(single.0[128], (-2.0_f32).to_bits());
         assert!(single.0[1..128].iter().all(|sample| *sample == 0));
         assert!(single.0[129..].iter().all(|sample| *sample == 0));
-        assert_eq!((single.2, single.3), (2, true));
-        assert_eq!((wave.2, wave.3), (2, true));
+        assert_eq!((single.1, single.2), (2, true));
+        assert_eq!((repeat.1, repeat.2), (2, true));
     }
 
     #[test]
@@ -2491,8 +2442,6 @@ mod tests {
         let mut plan = artifact
             .graph
             .bind(GraphRuntimeBindings {
-                #[cfg(not(target_arch = "wasm32"))]
-                worker_lease: None,
                 envelope,
                 nodes,
                 // Reverse input order proves executor sorting by stable handle. The stage is only
@@ -2587,8 +2536,6 @@ mod tests {
         let mut scalar_plan = scalar_artifact
             .graph
             .bind(GraphRuntimeBindings {
-                #[cfg(not(target_arch = "wasm32"))]
-                worker_lease: None,
                 envelope: scalar_envelope,
                 nodes: scalar_nodes,
                 observers: Vec::new(),
@@ -3024,8 +2971,6 @@ mod tests {
                     .collect();
                 let mut oracle_plan = oracle_artifact
                     .into_bound(GraphRuntimeBindings {
-                        #[cfg(not(target_arch = "wasm32"))]
-                        worker_lease: None,
                         envelope: oracle_envelope,
                         nodes: oracle_nodes,
                         observers: oracle_observers,
@@ -3109,8 +3054,6 @@ mod tests {
                 .collect();
             let bound = audit_artifact
                 .into_bound(GraphRuntimeBindings {
-                    #[cfg(not(target_arch = "wasm32"))]
-                    worker_lease: None,
                     envelope: audit_envelope,
                     nodes: audit_nodes,
                     observers: Vec::new(),
@@ -3171,102 +3114,6 @@ mod tests {
             assert_eq!(
                 output_hash, 0x5b3e_672a_ae5d_97aa,
                 "deterministic mixed output hash"
-            );
-
-            // The same session through the native dependency-wave executor: bit-identical PCM
-            // over the same 100,000 blocks, and the same zero-allocation render (#98 F2/F7).
-            let native_effects = prepare_native_session_effects(
-                &session,
-                &registry,
-                EffectCompileCaps {
-                    maximum_total_state_bytes: 1 << 20,
-                    maximum_scratch_bytes: 1 << 20,
-                    maximum_automation_spans_per_block: 32,
-                },
-            )
-            .expect("native audit effects");
-            let native_builtins = prepare_session_builtins(
-                &session,
-                &[],
-                BuiltinCompileCaps {
-                    maximum_total_state_bytes: u64::MAX,
-                    maximum_total_retained_payload_bytes: u64::MAX,
-                    maximum_total_meter_items: u64::MAX,
-                    maximum_total_meter_bytes: u64::MAX,
-                    maximum_single_allocation_bytes: u64::MAX,
-                    maximum_meter_streams: u64::MAX,
-                    maximum_period_frames: u32::MAX,
-                    maximum_peak_hold_frames: u32::MAX,
-                    maximum_smoothing_samples: u32::MAX,
-                },
-            )
-            .expect("native audit builtins");
-            let native_artifact =
-                GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
-                    dispatch: host_dispatch(),
-                    plan_id: 1_002,
-                    effects: native_effects,
-                    builtins: native_builtins,
-                    caps: integration_caps(),
-                })
-                .unwrap_or_else(|_| panic!("native audit graph"));
-            let native_envelope = native_artifact.envelope();
-            let native_nodes = native_artifact
-                .external_binding_nodes()
-                .map(|node| GraphNodeBinding::new(node.clone(), asymmetric_input_binding(node)))
-                .collect();
-            let mut native_plan = native_artifact
-                .into_bound_native(
-                    GraphRuntimeBindings {
-                        #[cfg(not(target_arch = "wasm32"))]
-                        worker_lease: None,
-                        envelope: native_envelope,
-                        nodes: native_nodes,
-                        observers: Vec::new(),
-                    },
-                    NativeGraphBindConfigV1 {
-                        render_mode: NativeGraphRenderModeV1::SingleThread,
-                        scheduler: NativeSchedulerConfigV1::new(
-                            NonZeroUsize::new(4).expect("four lanes"),
-                            true,
-                            miso_engine_graph::NativeWorkerPoolShapeV1::default(),
-                        ),
-                        maximum_retained_bytes: 1 << 28,
-                    },
-                )
-                .unwrap_or_else(|failure| panic!("native audit bind: {}", failure.code))
-                .prepared
-                .into_plan();
-            let mut native_pcm = vec![0.0_f32; frames * 2];
-            audit::warm_up();
-            audit::reset();
-            let mut native_hash = 0xcbf2_9ce4_8422_2325_u64;
-            for block in 0..100_000_u64 {
-                native_plan
-                    .render(
-                        RenderIo {
-                            input: None,
-                            output: PlanarBufferMut::try_new(&mut native_pcm, 2, frames, frames)
-                                .expect("native audit output"),
-                        },
-                        RenderTime {
-                            absolute_sample: block * frames as u64,
-                        },
-                    )
-                    .expect("native audit render");
-                for sample in &native_pcm {
-                    native_hash ^= u64::from(sample.to_bits());
-                    native_hash = native_hash.wrapping_mul(0x0000_0100_0000_01b3);
-                }
-            }
-            assert_eq!(
-                audit::snapshot().total(),
-                0,
-                "native render allocates nothing"
-            );
-            assert_eq!(
-                native_hash, output_hash,
-                "sequential and native disagree on the production twelve-track session"
             );
         }
     }
@@ -3368,8 +3215,6 @@ mod tests {
                 .collect();
             let mut plan = graph
                 .bind(GraphRuntimeBindings {
-                    #[cfg(not(target_arch = "wasm32"))]
-                    worker_lease: None,
                     envelope,
                     nodes,
                     observers,
@@ -3557,8 +3402,6 @@ mod tests {
         let observed_post_bank_audio = Arc::new(AtomicBool::new(false));
         let mut bank_plan = bank_graph
             .bind(GraphRuntimeBindings {
-                #[cfg(not(target_arch = "wasm32"))]
-                worker_lease: None,
                 envelope,
                 nodes: bank_nodes,
                 // Deliberately reverse insertion order: binding handles, not insertion order,
@@ -3600,8 +3443,6 @@ mod tests {
             .collect();
         let mut scalar_plan = scalar_graph
             .bind(GraphRuntimeBindings {
-                #[cfg(not(target_arch = "wasm32"))]
-                worker_lease: None,
                 envelope,
                 nodes: scalar_nodes,
                 observers: Vec::new(),
@@ -3700,8 +3541,6 @@ mod tests {
             .collect();
         let mut bypass_plan = bypass_graph
             .bind(GraphRuntimeBindings {
-                #[cfg(not(target_arch = "wasm32"))]
-                worker_lease: None,
                 envelope,
                 nodes: bypass_nodes,
                 observers: Vec::new(),
@@ -3870,8 +3709,6 @@ mod tests {
             .collect();
         let mut bank_plan = bank_graph
             .bind(GraphRuntimeBindings {
-                #[cfg(not(target_arch = "wasm32"))]
-                worker_lease: None,
                 envelope,
                 nodes: bank_nodes,
                 observers: Vec::new(),
@@ -3879,8 +3716,6 @@ mod tests {
             .unwrap_or_else(|failure| panic!("compressor bank bind: {}", failure.code));
         let mut scalar_plan = scalar_graph
             .bind(GraphRuntimeBindings {
-                #[cfg(not(target_arch = "wasm32"))]
-                worker_lease: None,
                 envelope,
                 nodes: scalar_nodes,
                 observers: Vec::new(),
@@ -4774,8 +4609,6 @@ mod tests {
             .collect();
         let mut plan = graph
             .bind(GraphRuntimeBindings {
-                #[cfg(not(target_arch = "wasm32"))]
-                worker_lease: None,
                 envelope,
                 nodes,
                 observers: Vec::new(),
@@ -4947,8 +4780,6 @@ mod tests {
             .collect();
         let mut bank_plan = bank_graph
             .bind(GraphRuntimeBindings {
-                #[cfg(not(target_arch = "wasm32"))]
-                worker_lease: None,
                 envelope,
                 nodes: bank_nodes,
                 observers: Vec::new(),
@@ -4956,8 +4787,6 @@ mod tests {
             .unwrap_or_else(|failure| panic!("gate/expander bank bind: {}", failure.code));
         let mut scalar_plan = scalar_graph
             .bind(GraphRuntimeBindings {
-                #[cfg(not(target_arch = "wasm32"))]
-                worker_lease: None,
                 envelope,
                 nodes: scalar_nodes,
                 observers: Vec::new(),
@@ -5301,8 +5130,6 @@ mod tests {
             .collect();
         let mut bank_plan = bank_graph
             .bind(GraphRuntimeBindings {
-                #[cfg(not(target_arch = "wasm32"))]
-                worker_lease: None,
                 envelope,
                 nodes: bank_nodes,
                 observers: Vec::new(),
@@ -5310,8 +5137,6 @@ mod tests {
             .unwrap_or_else(|failure| panic!("limiter bank bind: {}", failure.code));
         let mut scalar_plan = scalar_graph
             .bind(GraphRuntimeBindings {
-                #[cfg(not(target_arch = "wasm32"))]
-                worker_lease: None,
                 envelope,
                 nodes: scalar_nodes,
                 observers: Vec::new(),
@@ -5694,8 +5519,6 @@ mod tests {
             .collect();
         let mut bank_plan = bank_graph
             .bind(GraphRuntimeBindings {
-                #[cfg(not(target_arch = "wasm32"))]
-                worker_lease: None,
                 envelope,
                 nodes: bank_nodes,
                 observers: Vec::new(),
@@ -5703,8 +5526,6 @@ mod tests {
             .unwrap_or_else(|failure| panic!("multiband bank bind: {}", failure.code));
         let mut scalar_plan = scalar_graph
             .bind(GraphRuntimeBindings {
-                #[cfg(not(target_arch = "wasm32"))]
-                worker_lease: None,
                 envelope,
                 nodes: scalar_nodes,
                 observers: Vec::new(),
@@ -6072,8 +5893,6 @@ mod tests {
             .collect();
         let mut bank_plan = bank_graph
             .bind(GraphRuntimeBindings {
-                #[cfg(not(target_arch = "wasm32"))]
-                worker_lease: None,
                 envelope,
                 nodes: bank_nodes,
                 observers: Vec::new(),
@@ -6081,8 +5900,6 @@ mod tests {
             .unwrap_or_else(|failure| panic!("soft-clip bank bind: {}", failure.code));
         let mut scalar_plan = scalar_graph
             .bind(GraphRuntimeBindings {
-                #[cfg(not(target_arch = "wasm32"))]
-                worker_lease: None,
                 envelope,
                 nodes: scalar_nodes,
                 observers: Vec::new(),
@@ -6455,8 +6272,6 @@ mod tests {
             .collect();
         let mut bank_plan = bank_graph
             .bind(GraphRuntimeBindings {
-                #[cfg(not(target_arch = "wasm32"))]
-                worker_lease: None,
                 envelope,
                 nodes: bank_nodes,
                 observers: Vec::new(),
@@ -6464,8 +6279,6 @@ mod tests {
             .unwrap_or_else(|failure| panic!("transient bank bind: {}", failure.code));
         let mut scalar_plan = scalar_graph
             .bind(GraphRuntimeBindings {
-                #[cfg(not(target_arch = "wasm32"))]
-                worker_lease: None,
                 envelope,
                 nodes: scalar_nodes,
                 observers: Vec::new(),
@@ -6744,8 +6557,6 @@ mod tests {
             .collect();
         let mut plan = graph
             .bind(GraphRuntimeBindings {
-                #[cfg(not(target_arch = "wasm32"))]
-                worker_lease: None,
                 envelope,
                 nodes,
                 observers: Vec::new(),
@@ -7051,7 +6862,7 @@ mod tests {
             .unwrap_or_else(|_| panic!("graph"))
         };
         let artifact = prepare_artifact(78, compiled.clone());
-        let native_artifact = prepare_artifact(79, compiled);
+        let repeat_artifact = prepare_artifact(79, compiled);
         let dispatch = Backend::current();
         // #86 F3: `T.div_ceil(W)` banks, the last one padded with identity lanes, and no
         // scalar post-input tail on a vector host.
@@ -7060,7 +6871,7 @@ mod tests {
         let expected_tail = BankWidth::for_backend(dispatch).map_or(12, |_| 0);
         assert_eq!(artifact.prepared_builtin_bank_count(), expected_banks);
         assert_eq!(
-            native_artifact.prepared_builtin_bank_count(),
+            repeat_artifact.prepared_builtin_bank_count(),
             expected_banks
         );
         assert_eq!(
@@ -7074,7 +6885,7 @@ mod tests {
         );
         assert_eq!(
             artifact.graph().sequential_schedule,
-            native_artifact.graph().sequential_schedule
+            repeat_artifact.graph().sequential_schedule
         );
         let assigned: BTreeMap<_, _> = artifact
             .graph()
@@ -7144,8 +6955,6 @@ mod tests {
             })
             .collect();
         let bound = match artifact.into_bound(GraphRuntimeBindings {
-            #[cfg(not(target_arch = "wasm32"))]
-            worker_lease: None,
             envelope,
             nodes,
             observers: Vec::new(),
@@ -7153,57 +6962,15 @@ mod tests {
             Ok(bound) => bound,
             Err(_) => panic!("sealed builtin bank bind"),
         };
-        let native_envelope = native_artifact.envelope();
-        let native_nodes = native_artifact
-            .external_binding_nodes()
-            .cloned()
-            .map(|node| {
-                let processor = match node {
-                    GraphNodeId::TrackStage {
-                        stage: TrackStage::Input,
-                        ..
-                    } => asymmetric_input_binding(&node),
-                    _ => Box::new(IdentityBinding) as Box<dyn GraphRuntimeProcessor>,
-                };
-                GraphNodeBinding::new(node, processor)
-            })
-            .collect();
-        let native_bound = match native_artifact.into_bound_native(
-            GraphRuntimeBindings {
-                #[cfg(not(target_arch = "wasm32"))]
-                worker_lease: None,
-                envelope: native_envelope,
-                nodes: native_nodes,
-                observers: Vec::new(),
-            },
-            NativeGraphBindConfigV1 {
-                render_mode: NativeGraphRenderModeV1::SingleThread,
-                scheduler: NativeSchedulerConfigV1::new(
-                    NonZeroUsize::new(4).expect("four lanes"),
-                    true,
-                    miso_engine_graph::NativeWorkerPoolShapeV1::default(),
-                ),
-                maximum_retained_bytes: 1 << 28,
-            },
-        ) {
-            Ok(bound) => bound,
-            Err(_) => panic!("sealed native builtin bank bind"),
-        };
-        assert_eq!(
-            native_bound.prepared.metadata.selection,
-            SchedulerSelectionV1::Sequential(FallbackReasonV1::SingleThread)
-        );
         let mut plan = bound.plan;
-        let mut native_plan = native_bound.prepared.into_plan();
         let frames = envelope.quantum.0 as usize;
         let mut pcm = vec![0.0; frames * 2 * 3];
-        let mut native_pcm = vec![0.0; frames * 2 * 3];
         for block in 0..3 {
             let range = block * frames * 2..(block + 1) * frames * 2;
             plan.render(
                 RenderIo {
                     input: None,
-                    output: PlanarBufferMut::try_new(&mut pcm[range.clone()], 2, frames, frames)
+                    output: PlanarBufferMut::try_new(&mut pcm[range], 2, frames, frames)
                         .expect("output"),
                 },
                 RenderTime {
@@ -7211,33 +6978,8 @@ mod tests {
                 },
             )
             .expect("production builtin-bank render");
-            native_plan
-                .render(
-                    RenderIo {
-                        input: None,
-                        output: PlanarBufferMut::try_new(&mut native_pcm[range], 2, frames, frames)
-                            .expect("native output"),
-                    },
-                    RenderTime {
-                        absolute_sample: (block * frames) as u64,
-                    },
-                )
-                .expect("native production builtin-bank render");
         }
         assert!(pcm[..frames * 2].iter().any(|sample| *sample != 0.0));
-        assert_eq!(
-            pcm.iter()
-                .map(|sample| sample.to_bits())
-                .collect::<Vec<_>>(),
-            native_pcm
-                .iter()
-                .map(|sample| sample.to_bits())
-                .collect::<Vec<_>>()
-        );
-        assert_eq!(
-            plan.qualification_counters(),
-            native_plan.qualification_counters()
-        );
     }
 
     #[test]
@@ -7484,7 +7226,7 @@ mod tests {
                 },
             )
             .expect("independently prepared native seeded builtins");
-            let native_artifact =
+            let repeat_artifact =
                 GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
                     dispatch: host_dispatch(),
                     plan_id: u64::from(layout) + 60_000,
@@ -7502,7 +7244,7 @@ mod tests {
             let expected_tail = width.map_or(count, |_| 0);
             assert_eq!(artifact.prepared_builtin_bank_count(), expected_banks);
             assert_eq!(
-                native_artifact.prepared_builtin_bank_count(),
+                repeat_artifact.prepared_builtin_bank_count(),
                 expected_banks
             );
             assert_eq!(
@@ -7516,7 +7258,7 @@ mod tests {
             );
             assert_eq!(
                 artifact.graph().sequential_schedule,
-                native_artifact.graph().sequential_schedule
+                repeat_artifact.graph().sequential_schedule
             );
             let envelope = artifact.envelope();
             let nodes = artifact
@@ -7596,8 +7338,6 @@ mod tests {
                 })
                 .collect();
             let mut plan = match artifact.into_bound(GraphRuntimeBindings {
-                #[cfg(not(target_arch = "wasm32"))]
-                worker_lease: None,
                 envelope,
                 nodes,
                 observers: tap_observers,
@@ -7605,49 +7345,8 @@ mod tests {
                 Ok(bound) => bound.plan,
                 Err(_) => panic!("seeded bind"),
             };
-            let native_envelope = native_artifact.envelope();
-            let native_nodes = native_artifact
-                .external_binding_nodes()
-                .cloned()
-                .map(|node| {
-                    let processor = match node {
-                        GraphNodeId::TrackStage {
-                            stage: TrackStage::Input,
-                            ..
-                        } => asymmetric_input_binding(&node),
-                        _ => Box::new(IdentityBinding) as Box<dyn GraphRuntimeProcessor>,
-                    };
-                    GraphNodeBinding::new(node, processor)
-                })
-                .collect();
-            let native_bound = native_artifact
-                .into_bound_native(
-                    GraphRuntimeBindings {
-                        #[cfg(not(target_arch = "wasm32"))]
-                        worker_lease: None,
-                        envelope: native_envelope,
-                        nodes: native_nodes,
-                        observers: Vec::new(),
-                    },
-                    NativeGraphBindConfigV1 {
-                        render_mode: NativeGraphRenderModeV1::SingleThread,
-                        scheduler: NativeSchedulerConfigV1::new(
-                            NonZeroUsize::new(4).expect("four lanes"),
-                            true,
-                            miso_engine_graph::NativeWorkerPoolShapeV1::default(),
-                        ),
-                        maximum_retained_bytes: 1 << 28,
-                    },
-                )
-                .unwrap_or_else(|failure| panic!("native seeded bind: {}", failure.code));
-            assert!(matches!(
-                native_bound.prepared.metadata.selection,
-                SchedulerSelectionV1::Sequential(_)
-            ));
-            let mut native_plan = native_bound.prepared.into_plan();
             let frames = envelope.quantum.0 as usize;
             let mut pcm = vec![0.0; frames * 2];
-            let mut native_pcm = vec![0.0; frames * 2];
             plan.render(
                 RenderIo {
                     input: None,
@@ -7657,16 +7356,6 @@ mod tests {
                 RenderTime { absolute_sample: 0 },
             )
             .expect("seeded render");
-            native_plan
-                .render(
-                    RenderIo {
-                        input: None,
-                        output: PlanarBufferMut::try_new(&mut native_pcm, 2, frames, frames)
-                            .expect("native seeded output"),
-                    },
-                    RenderTime { absolute_sample: 0 },
-                )
-                .expect("native seeded render");
             let contributions: Vec<Vec<(u32, u32)>> = taps
                 .iter()
                 .map(|(_, sink)| sink.lock().expect("tap sink").clone())
@@ -7692,27 +7381,14 @@ mod tests {
                 );
             }
             let counters = plan.qualification_counters();
-            let native_counters = native_plan.qualification_counters();
             assert_eq!(counters[0], expected_banks as u64);
             assert_eq!(counters[1], counters[0] * u64::from(envelope.quantum.0));
-            assert_eq!(counters, native_counters);
-            assert_eq!(
-                pcm.iter()
-                    .map(|sample| sample.to_bits())
-                    .collect::<Vec<_>>(),
-                native_pcm
-                    .iter()
-                    .map(|sample| sample.to_bits())
-                    .collect::<Vec<_>>()
-            );
-            let pcm_hash = native_pcm
-                .iter()
-                .fold(0xcbf2_9ce4_8422_2325_u64, |hash, sample| {
-                    (hash ^ u64::from(sample.to_bits())).wrapping_mul(0x0000_0100_0000_01b3)
-                });
+            let pcm_hash = pcm.iter().fold(0xcbf2_9ce4_8422_2325_u64, |hash, sample| {
+                (hash ^ u64::from(sample.to_bits())).wrapping_mul(0x0000_0100_0000_01b3)
+            });
             for byte in format!(
                 "{layout}:{value:016x}:{count}:{expected_banks}:{expected_tail}:{pcm_hash:016x}:{:?}",
-                native_counters
+                counters
             )
             .bytes()
             {
@@ -8281,8 +7957,6 @@ mod tests {
             })
             .collect();
         let mut plan = match artifact.graph.bind(GraphRuntimeBindings {
-            #[cfg(not(target_arch = "wasm32"))]
-            worker_lease: None,
             envelope,
             nodes,
             observers: Vec::new(),

@@ -874,7 +874,6 @@ dependencies = [
  "miso-engine-core",
  "miso-engine-effect-contract",
  "miso-engine-lane",
- "miso-engine-native-scheduler",
  "miso-engine-rack",
 ]
 
@@ -981,13 +980,6 @@ dependencies = [
  "miso-engine-session",
  "miso-engine-source",
  "sha2 0.11.0",
-]
-
-[[package]]
-name = "miso-engine-native-scheduler"
-version = "0.1.0"
-dependencies = [
- "miso-engine-core",
 ]
 
 [[package]]

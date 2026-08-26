@@ -75,3 +75,15 @@ commit message.
 * **Not in this job**: `spsc.rs` cache-line padding (#84 F6), thread priority/affinity and platform
   workgroups (#106), the dependency-counter DAG scheduler (successor issue opened with the measured
   serial fraction).
+
+
+---
+
+**Superseded (wave-scheduler removal).** The `miso-engine-native-scheduler` crate, the graph
+crate's `bind_native` family and native dependency-wave executor, and this issue's gate scripts and
+benchmark runner were removed from the tree as production-unreachable: nothing outside the graph
+crate's own tests and the audit/bench scheduler subjects ever engaged them, every graph-side use
+was `cfg(not(target_arch = "wasm32"))`, and host-core bound sequentially with no worker lease. This
+document is retained unchanged as consumed history -- its findings, verdicts and measurements
+describe the tree as it stood, and none of them are re-litigated by the removal. The sealed
+measurements under `artifacts/issue009/` are retained for the same reason.

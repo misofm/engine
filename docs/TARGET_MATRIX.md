@@ -57,19 +57,18 @@ CARGO_TARGET_DIR=target/ci/wasm-simd RUSTFLAGS="-C target-feature=+simd128" \
 SDK; Android linking/device execution needs a suitable NDK; browser execution needs a browser
 test harness. Those are explicitly deferred to the platform adapter issues.
 
-## Native dependency-wave scheduler (issue 100)
+## Render threading (issue 100, removed)
 
-The parallel render path has no target gate: it compiles and is unit-tested on **every** native
-target, and `SchedulerSelectionV1::Sequential(FallbackReasonV1::UnsupportedTarget)` is now reached
-only on `wasm32`, which deliberately has no worker, no shared memory claim and no atomics in its
-artifact. `x86_64-unknown-linux-gnu` carries the evidence that needs Linux facilities:
+There is no parallel render path and therefore no target gate for one. The native dependency-wave
+scheduler was built and qualified under issue 100, then removed as production-unreachable: every
+graph-side use was `cfg(not(target_arch = "wasm32"))`, host-core always bound sequentially, and no
+wasm artifact ever contained a scheduler node. Render is single-threaded on every target, native
+and browser alike.
 
-| evidence | how it is produced | targets |
-|---|---|---|
-| coordinator/worker syscall counts (steady and paced) | `scripts/trace-scheduler-audit.sh` (strace, `/proc`) | `x86_64-unknown-linux-gnu` only |
-| worker idle CPU between blocks | `/proc/<tid>/stat` in `miso_engine_audit` | `x86_64-unknown-linux-gnu` only |
-| determinism, pool lifetime, wake protocol, bounded recovery, weighted split | `cargo test -p miso-engine-native-scheduler -p miso-engine-graph` | every native target |
-| compilation of the parallel path | `cargo check --target x86_64-apple-darwin -p miso-engine-graph`, and `aarch64-unknown-linux-gnu` where its std is installed | macOS/aarch64 |
+The evidence rows this section used to carry -- coordinator/worker syscall counts under strace,
+worker idle CPU from `/proc/<tid>/stat`, and the determinism/pool-lifetime/wake-protocol suites --
+went with the machinery they measured. `x86_64-unknown-linux-gnu` no longer carries any
+render-threading evidence that other targets lack.
 
-macOS and aarch64 hosts therefore carry the unit-test evidence, not the strace/`/proc` evidence.
-Platform thread priority and workgroup adoption stay with the host issues.
+Platform thread priority, affinity and workgroup adoption remain with the host issues, unchanged:
+they were never part of the scheduler and are not affected by its removal.

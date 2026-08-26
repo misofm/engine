@@ -755,8 +755,6 @@ pub fn prepare_host_runtime_with_console(
     }
 
     let bindings = GraphRuntimeBindings {
-        #[cfg(not(target_arch = "wasm32"))]
-        worker_lease: None,
         envelope: artifact.envelope(),
         nodes: artifact
             .external_binding_nodes()

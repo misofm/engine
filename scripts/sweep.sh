@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# scripts/sweep.sh -- the hermetic check/test sweep. 91 explicit rows.
+# scripts/sweep.sh -- the hermetic check/test sweep. 89 explicit rows.
 #
 # Why this exists: the repo has 91 check-*/test-* scripts and ci.yml names 36 of them, so 52 gates
 # had no committed runner at all -- they were reachable only by knowing they existed. Every row
@@ -98,7 +98,6 @@ row scripts/check-protocol-control-policy.sh
 row scripts/check-rack-benchmark-fixture.sh
 row scripts/check-rack-policy.sh
 row scripts/check-realtime-policy.sh
-row scripts/check-scheduler-policy.sh
 row scripts/check-session-policy.sh
 row scripts/check-workspace-policy.sh
 row scripts/check-capi-qualification-v1.sh
@@ -133,14 +132,12 @@ row scripts/test-rack-policy.sh
 row scripts/test-realtime-audit-hooks.sh
 row scripts/test-realtime-policy.sh
 row scripts/test-realtime-trace-validator.sh
-row scripts/test-scheduler-policy.sh
 row scripts/test-workspace-policy.sh
 
 # ---- tier 2: seconds; mutation suites and audit probes -------------------------------------
 row scripts/test-builtins-graph-audit-probes.sh
 row scripts/test-fast-db-seal.sh
 row scripts/test-unfused-seal.sh
-row scripts/test-scheduler-benchmark.sh
 row scripts/test-console-benchmark.sh
 row scripts/test-capi-abi.sh
 row scripts/test-effect-runtime-policy.sh

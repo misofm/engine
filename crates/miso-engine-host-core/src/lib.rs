@@ -52,7 +52,6 @@
 //! | [`SourceControlSet::submit`] / [`SourceControlSet::seek`] | control, one thread at a time | copies once into the ring, returns typed backpressure, never blocks and never allocates |
 //! | `PreparedRenderPlan::render(io, RenderTime { absolute_sample })` | render, exclusively | exactly once per quantum; `absolute_sample` must equal the previous report's `next_absolute_sample`, and `0` on the first call; no other call touches the plan from any other thread |
 //! | `drop(PreparedHost)` / `PlanRetirer::try_reclaim` | control | only after the render thread has quiesced; never from the callback |
-//! | `NativeGraphWorkerPoolV1` creation (issue #100) | control, before the first render | the pool is control-owned and plan-independent; its lease travels with the plan; `wasm32` has no pool |
 //! | render-thread and worker priority, affinity, platform workgroups | host platform code | outside the engine crates entirely; the issue-023 successor owns it (hand-off recorded from #100 §5) |
 //!
 //! Further rules that are not per-call:

@@ -654,8 +654,6 @@ impl SessionRuntime {
         // hand-built observer. Driving the real path is the whole point of the arm.
         let bound = artifact
             .into_bound(GraphRuntimeBindings {
-                #[cfg(not(target_arch = "wasm32"))]
-                worker_lease: None,
                 envelope,
                 nodes,
                 observers: Vec::new(),

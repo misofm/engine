@@ -202,7 +202,10 @@ all-thread syscall trace, macOS/rustdoc/clean-candidate proof and sole one-warmu
 benchmark. Issue 039 permits one Terra attempt plus one bounded Sol correction; its timed invocation
 count starts at zero. It gates only consumers that claim qualified native parallel graph execution
 and release issue 026. Sequential streaming, effects, control work and browser/mobile adapters
-remain nonblocked.
+remain nonblocked. Issues 009, 039 and 100 are now closed history: the native scheduler crate and
+the graph crate's native dependency-wave executor were removed from the tree as
+production-unreachable, so nothing downstream can claim qualified native parallel graph execution
+and 026 no longer waits on one.
 
 Issue 010 stopped after strict Sol review without overall PASS. Checkpoint `5dbe1cb` preserves its
 native parser/decoder, move-owned planar ring, host chunk boundary, coordinator source fan-out and

@@ -1,8 +1,8 @@
 //! Semantic validation owned by issue 004, deliberately before graph/DSP/effect resolution.
 use crate::{
     AutomationShape, Diagnostic, DiagnosticCode, DiagnosticSet, Effect, MatrixOrPan, ParameterUnit,
-    Rack, RackName, RouteDestination, RouteSource, SESSION_SCHEMA_VERSION_V1, SessionTomlV1,
-    Source, Track, diagnostic::PathRef,
+    Rack, RackName, RenderMode, RouteDestination, RouteSource, SESSION_SCHEMA_VERSION_V1,
+    SessionTomlV1, Source, Track, diagnostic::PathRef,
 };
 use miso_engine_core::{SampleRateHz, is_launch_sample_rate};
 use std::collections::{HashMap, HashSet};
@@ -38,6 +38,14 @@ pub(crate) fn validate_session(session: &SessionTomlV1) -> Result<(), Diagnostic
             DiagnosticCode::SampleRateUnsupportedAtLaunch,
             &root.key("sample_rate_hz"),
             "launch sample_rate_hz must be one of 44100, 48000, 88200, or 96000 Hz",
+        );
+    }
+    if session.render_profile.mode != RenderMode::SingleThread {
+        error(
+            &mut diagnostics,
+            DiagnosticCode::RenderModeUnsupportedAtLaunch,
+            &root.key("render_profile").key("mode"),
+            "launch render_profile.mode must be single_thread",
         );
     }
     if session.quantum_frames == 0 {
