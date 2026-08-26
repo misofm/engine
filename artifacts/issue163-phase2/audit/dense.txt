@@ -1,0 +1,141 @@
+# Unfused multiply-add audit (issue #163 phase 2 step 2)
+
+f32 unit roundoff u = 2^-24 = 5.960464e-8
+mode = dense, sweep frames = 20000, sustained frames = 1000000
+
+## Model conformance: which arm do the production kernels implement?
+
+  F1/F2 svf_block          vs fused:   6469   vs unfused:      0	=> unfused
+  F3 one_pole_block        vs fused:  18510   vs unfused:      0	=> unfused
+  F4 gain_mix_block        vs fused:   1306   vs unfused:      0	=> unfused
+  F5 mix2x2_block          vs fused:   8844   vs unfused:      0	=> unfused
+
+  every production kernel implements the same arm: unfused
+
+## F1/F2 -- the SVF state update and output mix
+
+Dense stratified sweep: 7 kinds x 4 launch rates x 23 cutoffs (20 Hz .. 0.45*fs, logarithmic) x 7 Q (0.1 .. 32) x 5 gains (-24 .. +24 dB) = up to 22540 designs, each rendered for 20000 frames of SplitMix64 bipolar noise at full scale (seed 0x163_2).
+
+  low-pass    designs=644   max propagation gain G=     48892.9
+    output vs f64 oracle : fused    -91.76 dBFS   unfused    -90.37 dBFS   growth   1.39 dB
+    state  vs f64 oracle : fused    -75.70 dBFS   unfused    -74.21 dBFS   growth   1.49 dB
+    fused vs unfused     :   -103.51 dBFS
+  high-pass   designs=644   max propagation gain G=     48892.9
+    output vs f64 oracle : fused    -91.73 dBFS   unfused    -90.37 dBFS   growth   1.36 dB
+    state  vs f64 oracle : fused    -75.70 dBFS   unfused    -74.21 dBFS   growth   1.49 dB
+    fused vs unfused     :   -103.51 dBFS
+  band-pass   designs=644   max propagation gain G=     48892.9
+    output vs f64 oracle : fused    -91.81 dBFS   unfused    -90.32 dBFS   growth   1.50 dB
+    state  vs f64 oracle : fused    -75.70 dBFS   unfused    -74.21 dBFS   growth   1.49 dB
+    fused vs unfused     :   -102.35 dBFS
+  notch       designs=644   max propagation gain G=     48892.9
+    output vs f64 oracle : fused   -121.75 dBFS   unfused   -117.93 dBFS   growth   3.82 dB
+    state  vs f64 oracle : fused    -75.70 dBFS   unfused    -74.21 dBFS   growth   1.49 dB
+    fused vs unfused     :   -118.47 dBFS
+  bell        designs=3220  max propagation gain G=    194644.7
+    output vs f64 oracle : fused    -96.68 dBFS   unfused    -97.66 dBFS   growth  -0.98 dB
+    state  vs f64 oracle : fused    -70.49 dBFS   unfused    -71.37 dBFS   growth  -0.88 dB
+    fused vs unfused     :   -100.41 dBFS
+  low-shelf   designs=3220  max propagation gain G=     97553.7
+    output vs f64 oracle : fused    -69.41 dBFS   unfused    -68.31 dBFS   growth   1.10 dB
+    state  vs f64 oracle : fused    -67.67 dBFS   unfused    -67.37 dBFS   growth   0.30 dB
+    fused vs unfused     :    -80.07 dBFS
+  high-shelf  designs=3220  max propagation gain G=     97553.7
+    output vs f64 oracle : fused    -66.24 dBFS   unfused    -65.76 dBFS   growth   0.48 dB
+    state  vs f64 oracle : fused    -67.67 dBFS   unfused    -67.37 dBFS   growth   0.30 dB
+    fused vs unfused     :    -79.43 dBFS
+
+  F1/F2 WORST OVER ALL KINDS
+    propagation gain G          194644.7
+    fused   vs oracle              -66.24 dBFS
+    unfused vs oracle              -65.76 dBFS
+    oracle-distance growth      0.478 dB (1.057x)
+    fused vs unfused               -79.43 dBFS
+
+  Sustained rendering: the worst corner of each kind, 1000000 frames (20.8 s at 48 kHz)
+    kind           rho(A)   fused dBFS unfused dBFS state f/u dB   growth
+    low-pass     0.999959      -115.67      -112.61        +3.08    3.06 dB
+    high-pass    0.999959      -115.52      -112.62        +3.08    2.89 dB
+    band-pass    0.999959      -115.99      -113.09        +3.08    2.90 dB
+    notch        0.999959      -140.81      -138.46        +3.08    2.35 dB
+    bell         0.999979      -134.51      -133.83        -0.48    0.68 dB
+    low-shelf    0.999971      -103.71      -104.19        -0.49   -0.48 dB
+    high-shelf   0.999942      -104.98      -104.98        +0.21    0.00 dB
+
+    worst sustained output growth vs the f64 oracle: 3.06 dB (1.42x)
+    worst sustained state  growth vs the f64 oracle: 3.08 dB (1.43x)
+
+## F3 -- the one-pole recurrence `y' = fma(c, x - y, y)`
+
+Dense sweep: 8 time constants spanning the render path's domain x 4 launch rates, each rendered for 20000 frames of full-scale bipolar noise, compared against the same recurrence in f64. Propagation gain is 1/c exactly (a first-order pole at 1-c).
+
+  20 us  (limiter attack floor) c=6.4713e-1 G=        1.5  fused   -142.68 unfused   -139.51 growth  3.169 dB cancel 14536.045
+  100 us (gate fast attack)    c=1.8806e-1 G=        5.3  fused   -145.41 unfused   -145.27 growth  0.144 dB cancel 52951.664
+  1 ms   (peak detector)       c=2.0618e-2 G=       48.5  fused   -148.33 unfused   -146.58 growth  1.751 dB cancel 2306.892
+  10 ms  (typical attack)      c=2.0812e-3 G=      480.5  fused   -150.58 unfused   -151.04 growth -0.453 dB cancel 2772.326
+  100 ms (typical release)     c=2.0831e-4 G=     4800.5  fused   -157.89 unfused   -159.50 growth -1.600 dB cancel  222.028
+  400 ms (mean-square window)  c=5.2082e-5 G=    19200.5  fused   -165.41 unfused   -164.69 growth  0.723 dB cancel  204.537
+  2 s    (slow release)        c=1.0417e-5 G=    96000.5  fused   -174.10 unfused   -174.70 growth -0.604 dB cancel  386.675
+  10 s   (domain ceiling)      c=2.0833e-6 G=   480000.5  fused   -186.03 unfused   -186.28 growth -0.257 dB cancel  942.035
+
+  F3 WORST GROWTH OVER THE SWEEP
+    20 us  (limiter attack floor) @ 44100 Hz: c=6.782e-1 G=1/c=1.5 fused   -142.51 dBFS unfused   -138.61 dBFS growth 3.894 dB, max |ab/(ab+c)| = 4399.584
+
+## F4 -- the dry/wet mix `y = fma(mix, x*g - x, x)`
+
+Operating domain: 264-point stratified x-grid (linear over +/-4.0 = full scale + 12 dB headroom, plus a logarithmic companion down to 4e-6, with 0, -0, +/-1, +/-4, +/-MIN_POSITIVE forced) x the same grid for g x 130 mix values covering [0, 1] with the exact endpoints. The out-of-domain row sweeps 1e-30 .. 1e30 and is reported separately because a render path does not present those magnitudes.
+  F4 operating domain    cases     20129984  max |f-u|   -114.39 dBFS (8064 ulp)  max |ab/(ab+c)| 1.678e7  finiteness disagreements 0
+  F4 out of domain       cases      5135724  max |f-u|    626.14 dBFS (3968 ulp)  max |ab/(ab+c)| 1.678e7  finiteness disagreements 0
+
+## F5 -- one row of the 2x2 matrix, `l' = fma(lr, r, ll * l)`
+
+Operating domain: the same 264-point stratified grid for each of the two signal operands x a 68-point grid for each of the two smoothed matrix coefficients over [-1.5, 1.5] (the domain a smoothed pan/width matrix reaches, with the exact 0 and +/-1 corners forced).
+  F5 operating domain    cases    710542336  max |f-u|   -120.41 dBFS (880803841 ulp)  max |ab/(ab+c)| 1.975e8  finiteness disagreements 0
+  F5 out of domain       cases    181279296  max |f-u|    626.14 dBFS (1928855553 ulp)  max |ab/(ab+c)| 9.854e2  finiteness disagreements 1496
+
+## Signed-zero corners (phase-4 silence fast path)
+
+  site                       operands                       fused     unfused  same
+  gain_mix_step              mix=+0.0 x=+0.0 g=+0.0            +0.0      +0.0  yes
+  gain_mix_step              mix=+0.0 x=+0.0 g=-0.0            +0.0      +0.0  yes
+  gain_mix_step              mix=+0.0 x=+0.0 g=+1.0            +0.0      +0.0  yes
+  gain_mix_step              mix=+0.0 x=+0.0 g=-1.0            +0.0      +0.0  yes
+  gain_mix_step              mix=+0.0 x=-0.0 g=+0.0            +0.0      +0.0  yes
+  gain_mix_step              mix=+0.0 x=-0.0 g=-0.0            +0.0      +0.0  yes
+  gain_mix_step              mix=+0.0 x=-0.0 g=+1.0            +0.0      +0.0  yes
+  gain_mix_step              mix=+0.0 x=-0.0 g=-1.0            +0.0      +0.0  yes
+  gain_mix_step              mix=+0.0 x=+1.0 g=+0.0          +1.000    +1.000  yes
+  gain_mix_step              mix=+0.0 x=+1.0 g=-0.0          +1.000    +1.000  yes
+  gain_mix_step              mix=+0.0 x=-1.0 g=+0.0          -1.000    -1.000  yes
+  gain_mix_step              mix=+0.0 x=-1.0 g=-0.0          -1.000    -1.000  yes
+  gain_mix_step              mix=-0.0 x=+0.0 g=+0.0            +0.0      +0.0  yes
+  gain_mix_step              mix=-0.0 x=+0.0 g=-0.0            +0.0      +0.0  yes
+  gain_mix_step              mix=-0.0 x=+0.0 g=+1.0            +0.0      +0.0  yes
+  gain_mix_step              mix=-0.0 x=+0.0 g=-1.0            +0.0      +0.0  yes
+  gain_mix_step              mix=-0.0 x=-0.0 g=+0.0            -0.0      -0.0  yes
+  gain_mix_step              mix=-0.0 x=-0.0 g=-0.0            -0.0      -0.0  yes
+  gain_mix_step              mix=-0.0 x=-0.0 g=+1.0            -0.0      -0.0  yes
+  gain_mix_step              mix=-0.0 x=-0.0 g=-1.0            -0.0      -0.0  yes
+  gain_mix_step              mix=-0.0 x=+1.0 g=+0.0          +1.000    +1.000  yes
+  gain_mix_step              mix=-0.0 x=+1.0 g=-0.0          +1.000    +1.000  yes
+  gain_mix_step              mix=-0.0 x=-1.0 g=+0.0          -1.000    -1.000  yes
+  gain_mix_step              mix=-0.0 x=-1.0 g=-0.0          -1.000    -1.000  yes
+  one_pole                   c=+0.0 x=+0.0 y=+0.0            +0.0      +0.0  yes
+  one_pole                   c=+0.0 x=+0.0 y=-0.0            +0.0      +0.0  yes
+  one_pole                   c=+0.0 x=-0.0 y=+0.0            +0.0      +0.0  yes
+  one_pole                   c=+0.0 x=-0.0 y=-0.0            +0.0      +0.0  yes
+  one_pole                   c=+0.0 x=+1.0 y=+0.0            +0.0      +0.0  yes
+  one_pole                   c=+0.0 x=+1.0 y=-0.0            +0.0      +0.0  yes
+  one_pole                   c=+0.0 x=-1.0 y=+0.0            +0.0      +0.0  yes
+  one_pole                   c=+0.0 x=-1.0 y=-0.0            +0.0      +0.0  yes
+  one_pole                   c=-0.0 x=+0.0 y=+0.0            +0.0      +0.0  yes
+  one_pole                   c=-0.0 x=+0.0 y=-0.0            +0.0      +0.0  yes
+  one_pole                   c=-0.0 x=-0.0 y=+0.0            +0.0      +0.0  yes
+  one_pole                   c=-0.0 x=-0.0 y=-0.0            +0.0      +0.0  yes
+  one_pole                   c=-0.0 x=+1.0 y=+0.0            +0.0      +0.0  yes
+  one_pole                   c=-0.0 x=+1.0 y=-0.0            +0.0      +0.0  yes
+  one_pole                   c=-0.0 x=-1.0 y=+0.0            +0.0      +0.0  yes
+  one_pole                   c=-0.0 x=-1.0 y=-0.0            +0.0      +0.0  yes
+
+  every signed-zero corner agrees: yes
+
