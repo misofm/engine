@@ -201,7 +201,7 @@ fn the_link_laws_bypass_and_a_sidechain_all_agree() {
     for link in [LinkMode::DualMono, LinkMode::Maximum, LinkMode::Average] {
         for bypass in [false, true] {
             for sidechain in [false, true] {
-                let mut reference: Option<(Vec<u32>, Vec<u32>, Vec<u8>, Vec<u8>)> = None;
+                let mut reference: Option<Rendered> = None;
                 for partition in [512, 1, 7, 64, 128] {
                     let rendered = render_case(link, bypass, sidechain, partition);
                     match &reference {
@@ -220,12 +220,7 @@ fn the_link_laws_bypass_and_a_sidechain_all_agree() {
 /// One configuration of [`the_link_laws_bypass_and_a_sidechain_all_agree`], rendered at one
 /// partition. The sidechain is a second noise plane, so the detector and the delayed output are
 /// different signals and a body that confused them would not survive.
-fn render_case(
-    link: LinkMode,
-    bypass: bool,
-    sidechain: bool,
-    partition: usize,
-) -> (Vec<u32>, Vec<u32>, Vec<u8>, Vec<u8>) {
+fn render_case(link: LinkMode, bypass: bool, sidechain: bool, partition: usize) -> Rendered {
     let values = values_with(&[(0, -22.0), (1, 4.0), (2, 6.0), (5, 2.0), (7, 4.0)]);
     let mut preparation = request_with_quantum(&values, QUANTUM);
     preparation.link_mode = link;
