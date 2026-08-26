@@ -18,8 +18,8 @@ cargo test --locked -p miso-engine-lane --test <test binary>
 
 | # | mutation | file | test binary | result |
 |---|---|---|---|---|
-| 1 | `Lane::select` swaps its operands: `m.bitselect(a, b)` becomes `m.bitselect(b, a)` | `src/wide_impl.rs` | `g1_op_identity` | RED |
-| 2 | `Lane::max`/`min` forward to `wide`'s `max`/`min` instead of the D8 default | `src/wide_impl.rs` | `g1_op_identity` | RED |
+| 1 | `Lane::select` swaps its value operands: `m.select(a, b)` becomes `m.select(b, a)` | `src/wide_impl.rs` | `g1_op_identity` | RED |
+| 2 | `Lane::max`/`min` forward to `wide`'s `max`/`min` instead of the D8 rule | `src/wide_impl.rs` | `g1_op_identity` | RED |
 | 3 | `Lane::neg` becomes `zero - self` instead of a sign-bit flip | `src/wide_impl.rs` | `g1_op_identity` | RED |
 | 4 | `Lane::fma` at the vector widths becomes the unfused `(self * b) + c` | `src/wide_impl.rs` | `g2_kernel_identity` | RED |
 | 5 | round-to-odd becomes unconditional (`s_bits \| 1`), losing the direction | `src/softfma.rs` | `g3_softfma` | RED |
@@ -35,34 +35,48 @@ cargo test --locked -p miso-engine-lane --test <test binary>
 | 15 | `HALFBAND63_CENTER_SPLIT` moves from 15 to 16, putting the centre tap one position late | `src/kernels/halfband.rs` | `halfband` | RED |
 | 16 | `Drop for CanonicalFpEnv` stops writing `self.saved` back | `src/fpenv.rs` | `fp_env` | RED (4 of 8) |
 | 17 | `CanonicalFpEnv::enter` installs the caller's word instead of the canonical one | `src/fpenv.rs` | `fp_env` | RED (3 of 8) |
+| 18 | `Lane::max`/`min` take wasm's `pmax`/`pmin` operand order on x86: `self.fast_max(b)` becomes `b.fast_max(self)` | `src/wide_impl.rs` | `g1_op_identity` | RED |
 
 ## Recorded failures
 
 ### 1 — `select` operand swap (G1)
 
+Re-run after round 2 moved `Lane::select` from `bitselect` to `wide`'s `select` (one `blendv` on
+x86, the identical `v128.bitselect`/`vbsl` call on wasm and NEON). Every comparison in the pool is
+read back through a `select`, so the swap fails on `lt` before it reaches an arithmetic case.
+
 ```
 test g1_directed_edge_pool_is_lane_identical ... FAILED
-test g1_signed_zero_max_and_min_follow_d8 ... FAILED
-test g1_nan_max_and_min_follow_d8 ... FAILED
-test g1_exp2_int_is_exact_on_the_integer_range ... FAILED
-test g1_frexp_reconstructs_positive_normals ... FAILED
 test g1_random_vectors_are_lane_identical ... FAILED
-assertion `left == right` failed: Simd4: exp2_int(-126)
-  left: 2130706432
- right: 8388608
+G1 lt at Simd4: lane 0: a=0x00000000 b=0x00000000 c=0x00000000 oracle=0x00000000 actual=0x3f800000
+assertion `left == right` failed: G1: lt differs from the scalar oracle at Simd4 in 1232 of 1232 lanes
+  left: 1232
+ right: 0
 ```
 
-### 2 — `wide`'s `max`/`min` instead of the D8 default (G1)
+### 2 — `wide`'s `max`/`min` instead of the D8 rule (G1)
 
 Only the NaN clause moves on x86 (`maxps` happens to agree with D8 on signed zeros); on NEON
-`vmaxnmq` would move the signed-zero clause too, which is why both are in the pool.
+`vmaxnmq` would move the signed-zero clause too, which is why both are in the pool. Applied to the
+round-2 lowering, this is `self.fast_max(b)` becoming `self.max(b)` — the fix-up `wide` wraps
+`maxps` in is exactly what D8 does not want.
 
 ```
 test g1_nan_max_and_min_follow_d8 ... FAILED
+test g1_max_and_min_lowerings_match_the_oracle ... FAILED
 test g1_directed_edge_pool_is_lane_identical ... FAILED
 test g1_random_vectors_are_lane_identical ... FAILED
-G1 max at Simd4: lane 8: a=0x00000000 b=0x7fc00000 c=0x7fc00000 oracle=0x7fc00000 actual=0x00000000
-G1 max at Simd4: lane 43: a=0x80000000 b=0x7fc00000 c=0xffc00000 oracle=0x7fc00000 actual=0x80000000
+G1 max at Simd4: lane 4: a=0x00000000 b=0x7fc00000 c=0x00000000 oracle=0x7fc00000 actual=0x00000000
+assertion `left == right` failed: G1: max differs from the scalar oracle at Simd4 in 18 of 104 lanes
+```
+
+The `min` half of the same row (`self.fast_min(b)` becoming `self.min(b)`) fails the mirror cases:
+
+```
+test g1_nan_max_and_min_follow_d8 ... FAILED
+test g1_max_and_min_lowerings_match_the_oracle ... FAILED
+G1 min at Simd4: lane 4: a=0x00000000 b=0x7fc00000 c=0x00000000 oracle=0x7fc00000 actual=0x00000000
+assertion `left == right` failed: G1: min differs from the scalar oracle at Simd4 in 18 of 104 lanes
 ```
 
 ### 3 — `neg` as `zero - self` (G1)
@@ -226,6 +240,38 @@ binary, which is why both are recorded rather than one standing for the other.
   ```
   issue #146: a render entry's canonical environment did not normalise 70 of 331 comparisons under a caller's FTZ+DAZ
   ```
+
+### 18 — wasm's `pmax`/`pmin` operand order used on x86 (G1)
+
+Round 2 lowers `Lane::max`/`Lane::min` to one instruction per backend, and the two backends want
+opposite operand orders: x86's `maxps(a, b)` is `a > b ? a : b`, while wasm's `f32x4.pmax(z1, z2)`
+is `z1 < z2 ? z2 : z1` and therefore has to be called as `pmax(b, a)`. Writing the wasm order on
+x86 is the one mistake this shape can make, and it is silent on ordinary values: it moves only the
+tie and the unordered cases. Both halves were applied and reverted; `max` first:
+
+```
+test g1_exp2_int_is_exact_on_the_integer_range ... FAILED
+test g1_nan_max_and_min_follow_d8 ... FAILED
+test g1_max_and_min_lowerings_match_the_oracle ... FAILED
+test g1_signed_zero_max_and_min_follow_d8 ... FAILED
+test g1_directed_edge_pool_is_lane_identical ... FAILED
+test g1_random_vectors_are_lane_identical ... FAILED
+G1 max at Simd4: lane 1: a=0x00000000 b=0x80000000 c=0x00000000 oracle=0x80000000 actual=0x00000000
+assertion `left == right` failed: G1: max differs from the scalar oracle at Simd4 in 36 of 104 lanes
+```
+
+then `min`, whose signed-zero clause is the clearest statement of what a swapped order costs:
+
+```
+test g1_signed_zero_max_and_min_follow_d8 ... FAILED
+assertion `left == right` failed: Simd4: min(-0.0, +0.0)
+  left: 2147483648
+ right: 0
+```
+
+The wasm half of the same claim cannot be run here. It is executed instead by gate G5's two wasm
+legs, which call `miso_gate_minmax_lowering_mismatches` inside the guest over the same ordered pool
+and require zero (`tools/miso-engine-wasm-gate-corpus`, `scripts/run-wasm-gates.sh`).
 
 ## M-146-V1 (verifier-added, #146 review): the scheduling barrier is deliberately undiscriminated
 Mutation: empty `scheduling_barrier` entirely (no asm block). Observed: `fp_env` release suite

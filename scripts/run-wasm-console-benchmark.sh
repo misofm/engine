@@ -56,6 +56,12 @@
 # specific to phase 2: the contract change moves every `output_sha256`, so the two records cannot
 # be reconciled row by row on digests, only on timings. The digest columns are expected to differ
 # and `docs/rulings/unfused-multiply-add-audit.md` is the evidence that the new ones are intended.
+#
+# `--round2-lane` and `--round2-lane-baseline` are the wasm half of round 2's lane lowerings. On
+# this target `Lane::select` is unchanged -- `wide` emits the identical `v128.bitselect` for both
+# the old call and the new one -- so the wasm interest is entirely `Lane::max`/`Lane::min`, which
+# become `f32x4.pmax`/`f32x4.pmin` with their operands swapped. Class A on both counts: every
+# `output_sha256` of the two arms must match, row for row and leg for leg.
 set -euo pipefail
 arm=baseline
 if [[ "$#" == 1 ]]; then
@@ -67,12 +73,13 @@ if [[ "$#" == 1 ]]; then
         --compressor-round1) arm=compressor-round1 ;;
         --compressor-round1-baseline) arm=compressor-round1-baseline ;;
         --round1-composed) arm=round1-composed ;;
-        --issue183) arm=issue183 ;;
-        *) printf 'usage: %s [--after|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue183]
+        --round2-lane) arm=round2-lane ;;
+        --round2-lane-baseline) arm=round2-lane-baseline ;;
+        *) printf 'usage: %s [--after|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue183|--round2-lane|--round2-lane-baseline]
 ' "$0" >&2; exit 2 ;;
     esac
 elif [[ "$#" != 0 ]]; then
-    printf 'usage: %s [--after|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue183]
+    printf 'usage: %s [--after|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue183|--round2-lane|--round2-lane-baseline]
 ' "$0" >&2
     exit 2
 fi
@@ -97,6 +104,10 @@ elif [[ "$arm" == round1-composed ]]; then
     artifact_dir="$root/artifacts/round1-composed"
 elif [[ "$arm" == issue183 ]]; then
     artifact_dir="$root/artifacts/issue183"
+elif [[ "$arm" == round2-lane ]]; then
+    artifact_dir="$root/artifacts/round2-lane"
+elif [[ "$arm" == round2-lane-baseline ]]; then
+    artifact_dir="$root/artifacts/round2-lane-baseline"
 else
     artifact_dir="$root/artifacts/issue163-phase2-wasm-baseline"
 fi

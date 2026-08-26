@@ -85,6 +85,19 @@ pub extern "C" fn miso_gate_backend() -> u32 {
     }
 }
 
+/// Lanes on which this module's `Lane::max`/`Lane::min` disagree with the scalar oracle at
+/// `width`, over the pool that separates their per-backend lowerings. Zero is the only admissible
+/// answer, and the host fails the leg on anything else.
+///
+/// This is the only wasm execution of that truth table anywhere in the workspace: the lane crate's
+/// gate G1 runs it natively, and wasm's `f32x4.pmax`/`f32x4.pmin` lowering has no native leg.
+///
+/// Traps on an out-of-range argument, which the host reports as a failure rather than a mismatch.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_gate_minmax_lowering_mismatches(width: u32) -> u32 {
+    corpus::minmax_lowering_mismatches(width as usize)
+}
+
 /// Word `word` (0..8) of the little-endian SHA-256 digest of `case` at `width`.
 ///
 /// Traps on an out-of-range argument, which the host reports as a failure rather than a mismatch.

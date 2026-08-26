@@ -516,6 +516,89 @@ pub fn case_name(index: usize) -> String {
     }
 }
 
+/// The pool that separates `Lane::max`/`Lane::min`'s per-backend lowerings from the D8 rule.
+///
+/// Bit patterns rather than literals, because the payload of each NaN is the point: a lowering
+/// that answered "some NaN" instead of "this operand's NaN" would pass a `is_nan()` check and
+/// fail here. Both signed zeros carry the tie, both infinities the saturating ends, and both
+/// signed minimum subnormals the magnitudes an x86 DAZ would flush.
+const MINMAX_LOWERING_POOL: [u32; 10] = [
+    0x0000_0000,
+    0x8000_0000,
+    0x3F80_0000,
+    0xBF80_0000,
+    0x7FC0_0000,
+    0xFFC0_0001,
+    0x7F80_0000,
+    0xFF80_0000,
+    0x0000_0001,
+    0x8000_0001,
+];
+
+/// Lanes on which this target's `Lane::max`/`Lane::min` disagree with the scalar oracle, over
+/// every ordered pair of [`MINMAX_LOWERING_POOL`]. Zero is the only admissible answer.
+///
+/// This is not a digest and has no pin. It exists because `crates/miso-engine-lane` lowers
+/// `Lane::max`/`Lane::min` to one instruction where the target has one with the D8 rule --
+/// `maxps`/`minps` on x86, operand-swapped `f32x4.pmax`/`f32x4.pmin` on wasm `simd128` -- and the
+/// wasm half of that claim cannot be executed by any native gate. Gate G5 already runs this crate
+/// under wasmtime with and without `simd128`, so the cheapest honest proof is to run the truth
+/// table there and return a count. A count, not bits: rule 2 of this corpus is that no NaN
+/// reaches a digest, and the pool is full of them.
+///
+/// # Panics
+///
+/// Panics if `width >= WIDTHS`.
+#[must_use]
+pub fn minmax_lowering_mismatches(width: usize) -> u32 {
+    assert!(width < WIDTHS, "width index out of range");
+    match width {
+        0 => minmax_lowering_mismatches_at::<f32>(),
+        1 => minmax_lowering_mismatches_at::<miso_engine_lane::Simd4>(),
+        _ => minmax_lowering_mismatches_at::<miso_engine_lane::Simd8>(),
+    }
+}
+
+/// [`minmax_lowering_mismatches`] at one width.
+fn minmax_lowering_mismatches_at<L: Lane>() -> u32 {
+    let mut left = Vec::new();
+    let mut right = Vec::new();
+    for a in MINMAX_LOWERING_POOL {
+        for b in MINMAX_LOWERING_POOL {
+            left.push(f32::from_bits(a));
+            right.push(f32::from_bits(b));
+        }
+    }
+    while left.len() % LANES != 0 {
+        left.push(0.0);
+        right.push(0.0);
+    }
+
+    let mut mismatches = 0;
+    let mut actual = [0_u32; LANES];
+    let mut index = 0;
+    while index < left.len() {
+        let a = L::load(&left[index..]);
+        let b = L::load(&right[index..]);
+        for (is_max, value) in [(true, L::max(a, b)), (false, L::min(a, b))] {
+            value.store_bits(&mut actual);
+            for lane in 0..L::WIDTH {
+                let (x, y) = (left[index + lane], right[index + lane]);
+                let oracle = if is_max {
+                    <f32 as Lane>::max(x, y)
+                } else {
+                    <f32 as Lane>::min(x, y)
+                };
+                if actual[lane] != oracle.to_bits() {
+                    mismatches += 1;
+                }
+            }
+        }
+        index += L::WIDTH;
+    }
+    mismatches
+}
+
 /// Name of a width index, as the widths appear in [`digest_case`].
 ///
 /// # Panics

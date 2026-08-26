@@ -9,6 +9,9 @@
 # against the directory that run would actually write. Hardcoding phase 1's directory made this
 # script unusable the moment phase 1's record was committed, which defeated the purpose: the
 # preflight has to be runnable immediately before the run it protects.
+#
+# `--round2-lane` and `--round2-lane-baseline` are the paired class-A arms of round 2's lane
+# lowerings; see the runner's header for what they measure and why their digests must match.
 set -euo pipefail
 phase_directory=issue149
 if [[ "$#" == 1 ]]; then
@@ -27,10 +30,12 @@ if [[ "$#" == 1 ]]; then
         --compressor-round1-baseline) phase_directory=compressor-round1-baseline ;;
         --round1-composed) phase_directory=round1-composed ;;
         --issue184) phase_directory=issue184 ;;
-        *) printf 'usage: %s [--phase2|--phase3|--issue163-phase0|--issue163-phase1|--issue163-phase2|--issue163-phase3|--issue163-phase4|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue184]\n' "$0" >&2; exit 2 ;;
+        --round2-lane) phase_directory=round2-lane ;;
+        --round2-lane-baseline) phase_directory=round2-lane-baseline ;;
+        *) printf 'usage: %s [--phase2|--phase3|--issue163-phase0|--issue163-phase1|--issue163-phase2|--issue163-phase3|--issue163-phase4|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue184|--round2-lane|--round2-lane-baseline]\n' "$0" >&2; exit 2 ;;
     esac
 elif [[ "$#" != 0 ]]; then
-    printf 'usage: %s [--phase2|--phase3|--issue163-phase0|--issue163-phase1|--issue163-phase2|--issue163-phase3|--issue163-phase4|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue184]\n' "$0" >&2
+    printf 'usage: %s [--phase2|--phase3|--issue163-phase0|--issue163-phase1|--issue163-phase2|--issue163-phase3|--issue163-phase4|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue184|--round2-lane|--round2-lane-baseline]\n' "$0" >&2
     exit 2
 fi
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)

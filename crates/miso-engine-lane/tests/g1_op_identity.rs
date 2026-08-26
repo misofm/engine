@@ -7,8 +7,10 @@
 //! pseudo-random vectors.
 //!
 //! Red-mutations proven for this gate (see `tests/MUTATIONS.md`):
-//! * `Lane::select` forwarded to `wide`'s sign-bit `select` instead of `bitselect`.
-//! * `Lane::max`/`min` forwarded to `wide`'s `max`/`min` instead of the D8 default.
+//! * `Lane::select` with its two value operands swapped.
+//! * `Lane::max`/`min` forwarded to `wide`'s `max`/`min` instead of the D8 rule.
+//! * `Lane::max`/`min` lowered with wasm's operand order on x86, which is the one mistake the
+//!   per-backend single-instruction lowerings can make.
 //! * `Lane::neg` written as `zero - x`.
 
 mod support;
@@ -206,6 +208,53 @@ fn g1_nan_max_and_min_follow_d8() {
     check::<f32>("f32");
     check::<Simd4>("Simd4");
     check::<Simd8>("Simd8");
+}
+
+/// The pool that separates `max`/`min`'s per-backend lowerings from the D8 rule.
+///
+/// Every value whose treatment differs between `select(a > b, a, b)`, x86's `maxps`/`minps`,
+/// wasm's `pmax`/`pmin` and NEON's `vmaxnmq`/`vmaxq`: both signed zeros (the tie), both NaN
+/// payloads with distinct bit patterns (so a swapped operand order shows up as a payload, not
+/// just as "some NaN"), both infinities, both signed minimum subnormals (the DAZ-sensitive
+/// magnitudes) and a finite pair either side of zero.
+const MINMAX_LOWERING_POOL: &[f32] = &[
+    0.0,
+    -0.0,
+    1.0,
+    -1.0,
+    f32::from_bits(0x7FC0_0000),
+    f32::from_bits(0xFFC0_0001),
+    f32::INFINITY,
+    f32::NEG_INFINITY,
+    f32::from_bits(0x0000_0001),
+    f32::from_bits(0x8000_0001),
+];
+
+#[test]
+fn g1_max_and_min_lowerings_match_the_oracle() {
+    // `crates/miso-engine-lane/src/wide_impl.rs` lowers `Lane::max`/`Lane::min` to one
+    // instruction where the target has one with the D8 rule: `maxps`/`minps` on x86 and
+    // operand-swapped `f32x4.pmax`/`f32x4.pmin` on wasm `simd128`. The claim is that the
+    // instruction *is* `select(a > b, a, b)`, so the gate is every ordered pair of the pool
+    // against the scalar oracle, read as bits. `g1_directed_edge_pool_is_lane_identical` covers
+    // this pool as a subset of its own; this test exists so the truth table has a name, and so a
+    // failure reports which lowering moved rather than which edge value did.
+    let (mut a, mut b) = (Vec::new(), Vec::new());
+    for left in MINMAX_LOWERING_POOL {
+        for right in MINMAX_LOWERING_POOL {
+            a.push(*left);
+            b.push(*right);
+        }
+    }
+    while a.len() % MAX_WIDTH != 0 {
+        a.push(0.0);
+        b.push(0.0);
+    }
+    let c = vec![0.0f32; a.len()];
+    for op in [Op::Max, Op::Min] {
+        compare::<Simd4>(op, "Simd4", &a, &b, &c);
+        compare::<Simd8>(op, "Simd8", &a, &b, &c);
+    }
 }
 
 #[test]

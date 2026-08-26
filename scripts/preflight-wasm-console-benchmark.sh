@@ -7,7 +7,7 @@
 # defect cannot consume the one authorised measurement. Nothing here is timed, and nothing here
 # instantiates the guest for anything but a shape check.
 set -euo pipefail
-[[ "$#" -le 1 ]] || { printf 'usage: %s [--after|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue183]
+[[ "$#" -le 1 ]] || { printf 'usage: %s [--after|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue183|--round2-lane|--round2-lane-baseline]
 ' "$0" >&2; exit 2; }
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$root"
@@ -28,6 +28,9 @@ fail() { printf 'wasm console preflight failure: %s\n' "$1" >&2; exit 1; }
 # `miso_wasm_simd8` build-time cfg, timed inside one observation so the width ratio is a paired
 # statistic. Its extra preflight checks are the ones that keep a mislabelled module out of the
 # record -- the host must refuse the four-lane module in the eight-lane slot and the reverse.
+#
+# `--round2-lane` and `--round2-lane-baseline` are the same paired shape for round 2's lane
+# lowerings, whose wasm half is `f32x4.pmax`/`f32x4.pmin` for `Lane::max`/`Lane::min`.
 arm=baseline
 case "${1:-}" in
     --after) arm=after; shift ;;
@@ -37,9 +40,10 @@ case "${1:-}" in
     --compressor-round1) arm=compressor-round1; shift ;;
     --compressor-round1-baseline) arm=compressor-round1-baseline; shift ;;
     --round1-composed) arm=round1-composed; shift ;;
-    --issue183) arm=issue183; shift ;;
+    --round2-lane) arm=round2-lane; shift ;;
+    --round2-lane-baseline) arm=round2-lane-baseline; shift ;;
 esac
-[[ "$#" == 0 ]] || fail "usage: $0 [--after|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue183]"
+[[ "$#" == 0 ]] || fail "usage: $0 [--after|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue183|--round2-lane|--round2-lane-baseline]"
 
 if [[ "$arm" == after ]]; then
     artifact_dir="$root/artifacts/issue163-phase2"
@@ -57,6 +61,10 @@ elif [[ "$arm" == round1-composed ]]; then
     artifact_dir="$root/artifacts/round1-composed"
 elif [[ "$arm" == issue183 ]]; then
     artifact_dir="$root/artifacts/issue183"
+elif [[ "$arm" == round2-lane ]]; then
+    artifact_dir="$root/artifacts/round2-lane"
+elif [[ "$arm" == round2-lane-baseline ]]; then
+    artifact_dir="$root/artifacts/round2-lane-baseline"
 else
     artifact_dir="$root/artifacts/issue163-phase2-wasm-baseline"
 fi
