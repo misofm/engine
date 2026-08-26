@@ -51,6 +51,7 @@ cargo test --locked -p miso-engine-parametric-eq --test <test binary>
 | 20 | the bypass path renders instead of copying the dry block | `src/lib.rs` | `contract` | RED |
 | 21 | the corpus stops staggering its per-lane ramp ends | `src/corpus.rs` | `determinism` | RED |
 | 22 | a `-0.0` automation value is not normalised to `+0.0` on the way in | `src/lib.rs` | `contract` | RED |
+| 24 | `discontinuity_reset` snaps the section but does not refresh `identity` | `src/lib.rs` | `lib` | RED |
 
 ## Recorded failures
 
@@ -160,3 +161,33 @@ bypass must preserve the dry bits *and* the latency, not approximate them.
 carries `-0.0` and a later restore has to decide what to do with a value five of the eight effect
 crates used to reject outright. 83c decision 3 settled it — accepted as a way of writing zero,
 normalised on the way in — so nothing downstream of the validator ever sees a negative zero.
+
+### 24 — the reset site is the one ramp end outside the render path
+
+Row 24 is the mutation the round-2 verifier found surviving: deleting `self.refresh_identity(section)`
+from `discontinuity_reset` passed the entire suite. The committed code was already correct; what was
+missing was a gate over it, because no test drove the shape that makes the site load-bearing.
+
+`identity[section]` is allowed to be stale exactly while a ramp is in flight. `start_ramp` refreshes
+the flag while `coef` still holds the words it is leaving, so a section ramping *away from* identity
+keeps a `true` flag; `advance_words` then walks `coef` off identity and refreshes nothing. That is
+safe only because a ramp in flight makes the bank non-stationary, and `identity` is read on the
+stationary path alone. Every ramp that ends inside `process_section` refreshes on the way out.
+
+A discontinuity reset is the one ramp end that happens *outside* the render path. It snaps `coef` to
+a live target and clears `remaining` in one step, so the next block is stationary and reads the flag
+immediately. Without the refresh the flag still claims identity for a section that is now a real
+filter, and `cascade_sections` elides it.
+
+`a_discontinuity_reset_mid_ramp_refreshes_the_identity_flag` drives that shape: four identity
+sections, a ramp started on section 0 toward a live corpus design, sixteen frames of it walked off
+(the ramp is 64 samples, so it is still in flight), then the `DiscontinuityKeepParameters` reset and
+a stationary block. It carries three independent oracles, and the mutation trips all three — the
+explicit `identity_flags_agree` assertion, the production `debug_assert` in `process_channels`
+(`src/lib.rs:1193`), and the render itself, which elides **0 of 4** cascade positions against the
+settled reference's 4 and hands back the block unfiltered. The first and third are ordinary
+assertions, so this row is RED in release as well as debug.
+
+The pre-existing reset gate (`resets_restore_defaults_or_only_clear_history`, and the conformance
+reset scenario) does not reach it: those reset a section that is live *before* the ramp, where the
+flag was already `false` and the snap cannot make it wrong.
