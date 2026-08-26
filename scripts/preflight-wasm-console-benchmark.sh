@@ -7,7 +7,7 @@
 # defect cannot consume the one authorised measurement. Nothing here is timed, and nothing here
 # instantiates the guest for anything but a shape check.
 set -euo pipefail
-[[ "$#" == 0 ]] || { printf 'usage: %s\n' "$0" >&2; exit 2; }
+[[ "$#" -le 1 ]] || { printf 'usage: %s [--after]\n' "$0" >&2; exit 2; }
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$root"
 
