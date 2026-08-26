@@ -37,6 +37,13 @@
 # are unchanged -- but the digest columns must not be compared, and a reader who diffs them will
 # find every row different.
 #
+# `--round2-lim` and `--round2-lim-baseline` are the paired arms of the limiter's round-2
+# effect-optimisation pass: the same rows with and without two class-A kernel changes (the uniform
+# gain frame loop de-bookkeeped, and the detector history moved out of linear memory on the wasm
+# target). Both are class A, so the two records must reproduce each other's `output_sha256`
+# exactly on every row and every leg and differ only in time. The baseline arm is the base commit
+# with this arm registration and nothing else.
+#
 # `--issue-loop-eq-r1` writes to `artifacts/issue-loop-eq-r1` and is the effect-optimization loop's
 # EQ round 1: parametric-EQ identity-section elision and the two-slot cohort chain (#181). Both are
 # **class A** -- every workload's output digest is the #175 digest to the bit, on every row and every
@@ -101,10 +108,12 @@ if [[ "$#" == 1 ]]; then
         --round2-eqrack-baseline) phase_directory=round2-eqrack-baseline ;;
         --round2-comp) phase_directory=round2-comp ;;
         --round2-comp-baseline) phase_directory=round2-comp-baseline ;;
-        *) printf 'usage: %s [--phase2|--phase3|--issue163-phase0|--issue163-phase1|--issue163-phase2|--issue163-phase3|--issue163-phase4|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue184|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline]\n' "$0" >&2; exit 2 ;;
+        --round2-lim) phase_directory=round2-lim ;;
+        --round2-lim-baseline) phase_directory=round2-lim-baseline ;;
+        *) printf 'usage: %s [--phase2|--phase3|--issue163-phase0|--issue163-phase1|--issue163-phase2|--issue163-phase3|--issue163-phase4|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue184|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline|--round2-lim|--round2-lim-baseline]\n' "$0" >&2; exit 2 ;;
     esac
 elif [[ "$#" != 0 ]]; then
-    printf 'usage: %s [--phase2|--phase3|--issue163-phase0|--issue163-phase1|--issue163-phase2|--issue163-phase3|--issue163-phase4|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue184|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline]\n' "$0" >&2
+    printf 'usage: %s [--phase2|--phase3|--issue163-phase0|--issue163-phase1|--issue163-phase2|--issue163-phase3|--issue163-phase4|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue184|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline|--round2-lim|--round2-lim-baseline]\n' "$0" >&2
     exit 2
 fi
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)

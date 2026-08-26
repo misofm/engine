@@ -80,7 +80,7 @@ are mixed and take the fallback. `D90_DIGESTS` did not move.
 | 182-1 | shape leg dropped: `lanes_uniform` returns only the phase test | `src/lib.rs` `lanes_uniform` | `a_mixed_lookahead_cohort_falls_back_bit_identically` (and `lane_identity_holds_across_widths`) |
 | 182-2 | phase leg dropped: `lanes_uniform` returns only the shape test | `src/lib.rs` `lanes_uniform` | `a_restore_that_desyncs_the_phase_falls_back` — **and nothing else**, which is what makes the leg's own justification testable rather than asserted |
 | 182-3 | `suffix.min(L::load(..))` → `suffix.max(..)` in the vector suffix pass | `src/lib.rs` `sliding_minimum_uniform` | `a_mixed_lookahead_cohort_falls_back_bit_identically`, `a_restore_that_desyncs_the_phase_falls_back`, `lane_identity_holds_across_widths` |
-| 182-4 | uniform box gather reads `state.lane[0].end_offset` instead of `box_offset` | `src/lib.rs` `channel_frame` | as 182-3 |
+| 182-4 | uniform box gather reads the cohort's `end_offset` instead of `box_offset` | `src/lib.rs` `channel_frame_uniform` | as 182-3 |
 | 182-5 | the vector suffix pass guarded by `complete && width < 2`, so it never runs at W4/W8 (row 7's analogue in the new path) | `src/lib.rs` `sliding_minimum_uniform` | `a_uniform_cohort_renders_exactly_the_per_lane_path` — **and nothing else**: every cohort the other cross-width tests build falls back |
 
 ### Why the cross-path comparison is where it is
@@ -95,7 +95,7 @@ than against the one whose name sounds like it should own them.
 ### A mutation that does not turn anything red, and why it is not a gap
 
 **Swapping the argument order of all three `L::min` sites** in `sliding_minimum_uniform`
-(`L::load(&state.prefix).min(newest)` → `newest.min(L::load(&state.prefix))`, and so on) leaves
+(`prefix.min(newest)` → `newest.min(prefix)`, and so on) leaves
 every test in the crate green, including the E12 pins. This is recorded rather than papered over,
 because the reason is a statement about the kernel's value domain and not about the gates.
 
@@ -114,6 +114,107 @@ in the frozen order anyway, and the order is the reason the D8 citation in
 `sliding_minimum_uniform`'s prose is a citation and not a hand-wave: the equality it claims is an
 equality of definitions, which holds on the whole `f32` domain rather than only on the reachable
 part of it.
+
+## Round 2 — the de-bookkeeped uniform frame loop and the resident detector history
+
+Two class-A kernel changes, neither of which moves a rendered bit.
+
+**R1** takes the bookkeeping out of the uniform-cohort frame. `prefix` and the van Herk `phase`
+become block-resident locals, joining the recursive word, the box sum, the detector taps and all
+four ramp words that `HotChannel` already held that way; the window minimum is returned as an `L`
+instead of round-tripping through a `[f32; 8]` scratch; the three rings become `&mut [f32]` views
+cut once per block and addressed with the constant `L::WIDTH` rather than the runtime
+`ChannelState::width`; and the frame loop is walked in **wrap-free segments**, so the seven ring
+indices are `base + step` inside one instead of a compare and a conditional subtract each. The
+per-lane fallback body keeps its arithmetic and its loop structure.
+
+**R2** replaces the detector's `[L; 12]` history with `History<L>`, twelve named fields, because
+LLVM idiom-recognises a twelve-word array shift as a block move and the wasm guest was paying a
+192-byte `memory.copy` and twelve reloads per frame for it. The tap-major order, the four `+0.0`
+accumulators and their twelve separately rounded `add(mul(..))` steps are unchanged.
+
+Every row below is a **bit** test. The claims here are about *when* a state word is written and
+*where* it lives, so a gate that compared values with a tolerance would pass every one of them.
+
+| # | mutation | file | test that turned red |
+|---|---|---|---|
+| round2-1 | the block-end write-back of `prefix` dropped | `src/lib.rs` `limiter_block_uniform` | `a_mixed_lookahead_cohort_falls_back_bit_identically`, `a_restore_that_desyncs_the_phase_falls_back`, `fixed_latency_guarded_ceiling_and_bypass_bits_hold`, `lane_identity_holds_across_widths`, `partition_invariance_holds_over_block_sizes` |
+| round2-2 | the block-end write-back of `phase` dropped, so the cohort restarts each block at the phase it entered the previous one with | `src/lib.rs` `limiter_block_uniform` | `a_de_zipper_window_open_across_a_block_boundary_refuses_the_claim`, `a_mixed_lookahead_cohort_falls_back_bit_identically`, `a_negative_zero_input_block_is_not_treated_as_silence`, `a_restore_that_desyncs_the_phase_falls_back`, `a_restore_withdraws_the_silence_claim`, `a_settled_silent_limiter_renders_exactly_the_never_fast_path` |
+| round2-3 | `.min(ring - left_end)` dropped from the segment run | `src/lib.rs` `segment` | `the_segment_walk_visits_the_slots_a_frame_at_a_time_walk_visits` — **and nothing else** |
+| round2-4 | `.min(ring - left_expiring)` dropped from the segment run | `src/lib.rs` `segment` | `the_segment_walk_visits_the_slots_a_frame_at_a_time_walk_visits` — **and nothing else** |
+| round2-5 | `.min(ring - start)` dropped from the segment run | `src/lib.rs` `segment` | six render tests, including `a_settled_silent_limiter_renders_exactly_the_never_fast_path` and `a_restore_that_desyncs_the_phase_falls_back` |
+| round2-6 | the main cursor advanced by the run without the segment-end wrap | `src/lib.rs` `limiter_block_uniform` | RED **by hang**: `main - main_cursor` reaches zero, the run reaches zero and the frame loop stops advancing. This is the row `debug_assert!(run >= 1)` exists for |
+| round2-7 | the ring cursor advanced by the run without the segment-end wrap | `src/lib.rs` `limiter_block_uniform` | RED by hang, as round2-6 |
+| round2-8 | `FrameSlots::advanced` leaves `main_cursor` at the segment's entry value | `src/lib.rs` `FrameSlots::advanced` | `a_de_zipper_window_open_across_a_block_boundary_refuses_the_claim`, `a_mixed_lookahead_cohort_falls_back_bit_identically`, `a_restore_that_desyncs_the_phase_falls_back`, `a_restore_withdraws_the_silence_claim`, `a_settled_silent_limiter_renders_exactly_the_never_fast_path`, `automation_withdraws_the_claim_and_the_resident_tap_keeps_up` |
+| round2-9 | `History::shift` written newest-first, so every tap reads a word the shift has already overwritten | `src/lib.rs` `History::shift` | `phase_outputs_match_the_frozen_scalar_order` (E1), `bs1770_annex2_conformance_is_unchanged` (E2) |
+| round2-10 | taps 3 and 4 accumulated in the other order | `src/lib.rs` `annex2_phases` | `phase_outputs_match_the_frozen_scalar_order` — the frozen summation order is a bit statement, and swapping two of its twelve steps is visible in the low bit |
+| round2-11 | the alignment sample read from tap 0 instead of tap 6 | `src/lib.rs` `detector_peak` | `every_case_has_one_digest_at_every_width` (the E12 `D90_DIGESTS`) |
+| round2-12 | the left channel takes the **right** channel's block-end phase: `left.phase.fill(left_phase)` → `fill(right_phase)` | `src/lib.rs` `limiter_block_uniform` | `the_two_channels_of_a_uniform_cohort_keep_their_own_phases` — **and nothing else** |
+| round2-13 | the mirror of round2-12: `right.phase.fill(right_phase)` → `fill(left_phase)` | `src/lib.rs` `limiter_block_uniform` | `the_two_channels_of_a_uniform_cohort_keep_their_own_phases` — **and nothing else** |
+| round2-14 | the two channels' block-end `prefix` write-backs are swapped | `src/lib.rs` `limiter_block_uniform` | seven tests, including `lane_identity_holds_across_widths`, `partition_invariance_holds_over_block_sizes`, `output_true_peak_never_exceeds_the_ceiling` and `passes_effect_contract_conformance` |
+
+### Why a crossed phase needed its own test and a crossed prefix did not
+
+Rows 1 and 2 gate a **dropped** write-back. Rows 12 and 13 are the **crossed** one, and they were an
+open gap until the adversarial verifier's M-A found it: writing the right channel's phase into the
+left one survived every other test in this crate while moving rendered bits.
+
+The asymmetry with row 14 is the whole explanation. `prefix` is a running minimum of the signal, so
+the two channels hold different values in it on any block carrying material — crossing them is
+visible immediately, at any configuration, and seven existing tests see it. `phase` is a *counter*:
+it advances one step per frame and wraps at `Wb`, so two channels prepared with the same lookahead
+hold the same phase in every block, always, and crossing them is the identity. Every test in the
+crate before this one prepares both channels alike. Lookahead is the one parameter that is per
+channel *and* sets `Wb` rather than a coefficient, so a left/right lookahead split is the only way
+to reach the state where the crossing is observable at all — and it is reachable from the public
+parameter surface, which is what makes the gap a defect rather than a curiosity.
+
+Once the split exists, neither of the crate's two standing comparison shapes reaches it either, and
+this is why the new test compares two *banks* rather than a bank against scalar twins:
+
+* **cross-width** compares a bank against scalar instances, and a scalar instance is `W = 1` and
+  therefore uniform by construction — it runs the same crossed write-back. Both widths corrupt
+  identically and agree.
+* **partition invariance** compares one long block against several short ones. The uncorrupted
+  right phase is `frames mod Wb_right` at any shared block boundary whatever the partition was, and
+  the corrupted left phase inherits it and re-syncs there. Both partitions corrupt identically and
+  agree.
+
+The oracle therefore has to be a rendering of the same asymmetric configuration that does not run
+the uniform write-back at all. The per-lane fallback body is exactly that: it writes each lane's
+phase from that lane's own `sliding_minimum`, per channel, and shares no code with the crossed
+line. The test's oracle arm is a W8 bank whose lane 7 carries a third, different *left* lookahead,
+which makes `lanes_uniform(left)` false and sends the whole bank down the fallback; lanes 0 through
+6 are prepared identically in the two arms and must agree to the bit.
+
+### Why rows 3 and 4 have exactly one gate, and why that is the point
+
+Dropping either clamp lets a segment run past the frame at which that channel's window end or box
+slot wraps, so the walk addresses `end + step` with `end + step >= R` — a slot of the *next* lap
+of the ring, or past the view entirely. Nothing in the render suites catches it, and the reason is
+arithmetic rather than luck: at the shapes those suites build, the write cursor's own wrap (or the
+end of the block) always arrives first, so the dropped term is never the minimum. The window end
+is `Wb` slots ahead of the write cursor and the box slot `R - Wb` behind it, so which of the seven
+wraps first is a function of the cohort's lookahead and of where in the ring the block starts —
+and a fixed corpus visits a fixed handful of those.
+
+`the_segment_walk_visits_the_slots_a_frame_at_a_time_walk_visits` sweeps them instead: every
+launch rate, the boundary lookaheads (zero, the `MINIMUM_RAMP_WINDOW` clamp, `N - 1` and `N`,
+where `Wb == R` collapses the window end onto the write cursor and the box offset to zero), and
+cursor positions at both ends of both rings. It compares the segment walk's slot sequence against
+a frame-at-a-time oracle written with `%` rather than with `wrapped`, so it is an independent
+formulation and not the same conditional subtraction compared with itself, and it walks both
+channels together because their window shapes differ and their wrap points interleave. That a
+render test cannot reach these two rows is the argument for the test existing, not against it.
+
+### A note on the two hangs
+
+Rows 6 and 7 are recorded as RED by hang rather than by assertion because that is what they do: an
+unwrapped cursor drives `ring - ring_cursor` or `main - main_cursor` to zero, the run to zero, and
+the `while frame < span` loop never advances. In a debug build `debug_assert!(run >= 1)` fires
+first and says so, which is why that assertion is in the source; in a release build the mutation
+would spin. Recorded as-is rather than softened, because "the gate is a hang" is a weaker gate
+than "the gate is an assertion" and the reader should know which one this is.
 
 ## Issue #182 S2 — the earned silence fixed point
 

@@ -7,7 +7,7 @@
 # defect cannot consume the one authorised measurement. Nothing here is timed, and nothing here
 # instantiates the guest for anything but a shape check.
 set -euo pipefail
-[[ "$#" -le 1 ]] || { printf 'usage: %s [--after|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue183|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline]
+[[ "$#" -le 1 ]] || { printf 'usage: %s [--after|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue183|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline|--round2-lim|--round2-lim-baseline]
 ' "$0" >&2; exit 2; }
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$root"
@@ -21,6 +21,9 @@ fail() { printf 'wasm console preflight failure: %s\n' "$1" >&2; exit 1; }
 # section elision plus the two-slot cohort chain), which is class A against #175 on every leg.
 # `--issue182` is the same strip re-measured after the limiter's effect-optimisation round, which
 # is class A and must therefore reproduce every `output_sha256` of the #175 arm exactly.
+# `--round2-lim` and `--round2-lim-baseline` are the paired arms of the limiter's round-2
+# effect-optimisation pass, on the same terms: two class-A kernel changes, so the two records must
+# reproduce each other's `output_sha256` exactly on every row and every leg.
 # `--compressor-round1` and `--compressor-round1-baseline` are the paired arms of the compressor's
 # effect-optimisation round: the same rows with and without two class-A kernel changes, so they
 # must reproduce each other's digests exactly and differ only in time.
@@ -52,8 +55,10 @@ case "${1:-}" in
     --round2-eqrack-baseline) arm=round2-eqrack-baseline; shift ;;
     --round2-comp) arm=round2-comp; shift ;;
     --round2-comp-baseline) arm=round2-comp-baseline; shift ;;
+    --round2-lim) arm=round2-lim; shift ;;
+    --round2-lim-baseline) arm=round2-lim-baseline; shift ;;
 esac
-[[ "$#" == 0 ]] || fail "usage: $0 [--after|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue183|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline]"
+[[ "$#" == 0 ]] || fail "usage: $0 [--after|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue183|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline|--round2-lim|--round2-lim-baseline]"
 
 if [[ "$arm" == after ]]; then
     artifact_dir="$root/artifacts/issue163-phase2"
@@ -83,6 +88,10 @@ elif [[ "$arm" == round2-comp ]]; then
     artifact_dir="$root/artifacts/round2-comp"
 elif [[ "$arm" == round2-comp-baseline ]]; then
     artifact_dir="$root/artifacts/round2-comp-baseline"
+elif [[ "$arm" == round2-lim ]]; then
+    artifact_dir="$root/artifacts/round2-lim"
+elif [[ "$arm" == round2-lim-baseline ]]; then
+    artifact_dir="$root/artifacts/round2-lim-baseline"
 else
     artifact_dir="$root/artifacts/issue163-phase2-wasm-baseline"
 fi
