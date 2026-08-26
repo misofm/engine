@@ -7,7 +7,7 @@
 # defect cannot consume the one authorised measurement. Nothing here is timed, and nothing here
 # instantiates the guest for anything but a shape check.
 set -euo pipefail
-[[ "$#" -le 1 ]] || { printf 'usage: %s [--after|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed]
+[[ "$#" -le 1 ]] || { printf 'usage: %s [--after|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue183]
 ' "$0" >&2; exit 2; }
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$root"
@@ -24,6 +24,10 @@ fail() { printf 'wasm console preflight failure: %s\n' "$1" >&2; exit 1; }
 # `--compressor-round1` and `--compressor-round1-baseline` are the paired arms of the compressor's
 # effect-optimisation round: the same rows with and without two class-A kernel changes, so they
 # must reproduce each other's digests exactly and differ only in time.
+# `--issue183` is the paired W4/W8 arm: two guest modules, the same source at two values of the
+# `miso_wasm_simd8` build-time cfg, timed inside one observation so the width ratio is a paired
+# statistic. Its extra preflight checks are the ones that keep a mislabelled module out of the
+# record -- the host must refuse the four-lane module in the eight-lane slot and the reverse.
 arm=baseline
 case "${1:-}" in
     --after) arm=after; shift ;;
@@ -33,8 +37,9 @@ case "${1:-}" in
     --compressor-round1) arm=compressor-round1; shift ;;
     --compressor-round1-baseline) arm=compressor-round1-baseline; shift ;;
     --round1-composed) arm=round1-composed; shift ;;
+    --issue183) arm=issue183; shift ;;
 esac
-[[ "$#" == 0 ]] || fail "usage: $0 [--after|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed]"
+[[ "$#" == 0 ]] || fail "usage: $0 [--after|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue183]"
 
 if [[ "$arm" == after ]]; then
     artifact_dir="$root/artifacts/issue163-phase2"
@@ -50,6 +55,8 @@ elif [[ "$arm" == compressor-round1-baseline ]]; then
     artifact_dir="$root/artifacts/compressor-round1-baseline"
 elif [[ "$arm" == round1-composed ]]; then
     artifact_dir="$root/artifacts/round1-composed"
+elif [[ "$arm" == issue183 ]]; then
+    artifact_dir="$root/artifacts/issue183"
 else
     artifact_dir="$root/artifacts/issue163-phase2-wasm-baseline"
 fi
@@ -113,12 +120,40 @@ if MISO_ENGINE_BENCH_ROUND=1 "$binary" "$scalar_guest" >/dev/null 2>&1; then
     fail 'the wasm console host accepted a guest built without simd128'
 fi
 
+# The paired arm's second guest, and the two refusals that keep the record honest about which
+# module produced which leg. Both modules export the same names, so a swap would otherwise be
+# invisible: what separates them is the backend constant each one reports.
+guest_simd8_sha256=null
+if [[ "$arm" == issue183 ]]; then
+    simd8_target=target/ci/issue183-guest-simd8
+    CARGO_TARGET_DIR="$simd8_target" \
+        RUSTFLAGS="-C target-feature=+simd128 --cfg miso_wasm_simd8" \
+        cargo build --locked --release --quiet --target wasm32-unknown-unknown \
+        -p miso-engine-wasm-console-guest || fail 'eight-lane guest build failed'
+    guest_simd8="$simd8_target/wasm32-unknown-unknown/release/miso_engine_wasm_console_guest.wasm"
+    [[ -f "$guest_simd8" ]] || fail 'eight-lane guest module is missing'
+    [[ "$(sha256sum "$guest_simd8" | awk '{print $1}')" != \
+       "$(sha256sum "$guest" | awk '{print $1}')" ]] ||
+        fail 'the eight-lane guest hashed the same as the four-lane one'
+    if MISO_ENGINE_BENCH_ROUND=1 "$binary" "$guest" "$guest" >/dev/null 2>&1; then
+        fail 'the wasm console host accepted the four-lane guest in the eight-lane slot'
+    fi
+    if MISO_ENGINE_BENCH_ROUND=1 "$binary" "$guest_simd8" >/dev/null 2>&1; then
+        fail 'the wasm console host accepted the eight-lane guest in the four-lane slot'
+    fi
+    if MISO_ENGINE_BENCH_ROUND=1 "$binary" "$guest" /nonexistent.wasm >/dev/null 2>&1; then
+        fail 'the wasm console host accepted an eight-lane guest module that does not exist'
+    fi
+    guest_simd8_sha256="\"$(sha256sum "$guest_simd8" | awk '{print $1}')\""
+fi
+
 candidate_commit=$(git rev-parse --verify HEAD)
 jq -n -S \
     --arg commit "$candidate_commit" \
     --arg commit_sha256 "$(printf '%s' "$candidate_commit" | sha256sum | awk '{print $1}')" \
     --arg binary_sha256 "$(sha256sum "$binary" | awk '{print $1}')" \
     --arg guest_sha256 "$(sha256sum "$guest" | awk '{print $1}')" \
+    --argjson guest_simd8_sha256 "$guest_simd8_sha256" \
     --arg host_sha256 "$(sha256sum tools/miso-engine-wasm-console/src/main.rs | awk '{print $1}')" \
     --arg guest_source_sha256 "$(sha256sum tools/miso-engine-wasm-console-guest/src/lib.rs | awk '{print $1}')" \
     --arg subject_sha256 "$(sha256sum tools/miso-engine-console-workload/src/lib.rs | awk '{print $1}')" \
@@ -133,6 +168,7 @@ jq -n -S \
       workload_launches: 0, warmup_rounds: 1, measured_rounds: 2, records_required: 22,
       candidate_commit: $commit, candidate_commit_sha256: $commit_sha256,
       binary_sha256: $binary_sha256, guest_module_sha256: $guest_sha256,
+      guest_simd8_module_sha256: $guest_simd8_sha256,
       host_source_sha256: $host_sha256, guest_source_sha256: $guest_source_sha256,
       subject_source_sha256: $subject_sha256, fixture_sha256: $fixture_sha256,
       standing_fixture_sha256: $standing_fixture_sha256,

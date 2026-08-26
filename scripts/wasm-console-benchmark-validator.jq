@@ -66,13 +66,24 @@ def workload_pins:
       [64, true, "eq+compressor", "simd1:eq+compressor", "tone", "fixtures/session/v1/console-sixty-four-track-intended.toml"]
   };
 
-# The three legs, in the fixed order they are rendered and emitted.
+# The legs, in the fixed order they are rendered and emitted.
+#
+# Issue #183 step 2 added a fourth: the *same* wasm artifact built at eight lanes, where `wide`
+# lowers `f32x8` to two `v128` values. It is appended rather than substituted, so a record from
+# any earlier arm has exactly the three legs it always had and validates unchanged here. A paired
+# record carries all four and is recognised by `guest_simd8_module_sha256`, the digest of the
+# second guest module -- which is what makes "this record was taken from two guests" a checkable
+# claim rather than an inference from a leg name.
 def leg_pins:
   [
     ["native_simd8", "native", "Simd8", "host_process_heap"],
     ["native_simd4", "native", "Simd4", "host_process_heap"],
     ["wasm_simd128", "wasm32-unknown-unknown", "Simd4", "not_observable_guest_linear_memory"]
   ];
+def paired_leg_pins:
+  leg_pins +
+  [["wasm_simd128_w8", "wasm32-unknown-unknown", "Simd8", "not_observable_guest_linear_memory"]];
+def paired: has("guest_simd8_module_sha256");
 
 def leg_valid($pin):
   (keys | sort) == ["audit_scope","backend","leg","max_ns_per_block","min_ns_per_block",
@@ -94,8 +105,14 @@ def leg_valid($pin):
 
 def ratio_valid($legs):
   (keys | sort) == ["denominator","numerator","paired_ratio_median","ratio_of_p50"] and
-  .numerator == "wasm_simd128" and
-  (.denominator == "native_simd8" or .denominator == "native_simd4") and
+  (.numerator == "wasm_simd128" or .numerator == "wasm_simd128_w8") and
+  (.denominator == "native_simd8" or .denominator == "native_simd4" or
+   .denominator == "wasm_simd128") and
+  # The width ratio is the one the #183 decision is read off, so it may only compare the eight-lane
+  # wasm leg against the four-lane one -- never a leg against itself, and never against a native
+  # denominator, which would make a width comparison a target comparison.
+  (.numerator == "wasm_simd128_w8" or .denominator != "wasm_simd128") and
+  (.denominator == "wasm_simd128" or .numerator == "wasm_simd128") and
   (.ratio_of_p50 | type == "number" and . > 0) and
   (.paired_ratio_median | type == "number" and . > 0) and
   # Recomputed from the legs this ratio names.
@@ -104,8 +121,8 @@ def ratio_valid($legs):
     ([$legs[] | select(.leg == $ratio.denominator) | .p50_ns_per_block] | first) as $bottom |
     close($ratio.ratio_of_p50; $top / $bottom));
 
-def record_valid:
-  (keys | sort) == ["background_load_note","browser_field_measurement","candidate_commit",
+def record_keys:
+  ["background_load_note","browser_field_measurement","candidate_commit",
                     "comparable_with_console_records","cpu_affinity","cpu_model",
                     "descriptive_only","digest_identity","fixture_id","governor_or_power_mode",
                     "guest_call_overhead_p50_ns","guest_module_sha256","guest_target",
@@ -115,7 +132,11 @@ def record_valid:
                     "render_total_forbidden_operations","round","runtime","rust_version",
                     "sample_rate_hz","schema_version","statistical_method","strip_content",
                     "strip_layout","synthetic_fixture","target_features","target_triple","tracks","units",
-                    "warmup_blocks","workload_kind"] and
+                    "warmup_blocks","workload_kind"];
+
+def record_valid:
+  ((keys | sort) ==
+     (if paired then (record_keys + ["guest_simd8_module_sha256"] | sort) else record_keys end)) and
   .schema_version == 1 and .issue == 163 and .phase == "2-step1" and
   .record == "wasm_console_session" and
   (.round == 1 or .round == 2) and
@@ -128,6 +149,10 @@ def record_valid:
   .guest_target == "wasm32-unknown-unknown" and
   .guest_target_features == "+simd128" and
   (.guest_module_sha256 | sha256) and
+  ((paired | not) or (.guest_simd8_module_sha256 | sha256)) and
+  # Two guests that hashed alike are one guest named twice, and the width ratio between a module
+  # and itself is 1.0 by construction rather than by measurement.
+  ((paired | not) or (.guest_simd8_module_sha256 != .guest_module_sha256)) and
   (.guest_call_overhead_p50_ns | nonnegative_integer) and
   (.render_total_forbidden_operations | nonnegative_integer) and
   (.measurement_control == "controlled" or .measurement_control == "uncontrolled") and
@@ -144,9 +169,10 @@ def record_valid:
     $record.strip_layout == $pin[3] and
     $record.input_signal == $pin[4] and
     $record.fixture_id == $pin[5]) and
-  # The three legs, in their fixed order, each internally consistent.
-  (.legs | type == "array" and length == 3) and
-  ([.legs, leg_pins] | transpose | all(. as $pair | $pair[0] | leg_valid($pair[1]))) and
+  # The legs, in their fixed order, each internally consistent.
+  (. as $record | ($record | if paired then paired_leg_pins else leg_pins end) as $pins |
+    ($record.legs | type == "array" and length == ($pins | length)) and
+    ([$record.legs, $pins] | transpose | all(. as $pair | $pair[0] | leg_valid($pair[1])))) and
   # Claim 2: one subject, three targets -- and a summary that cannot lie about it.
   (. as $record |
     ([$record.legs[] | .output_sha256] | unique | length) as $distinct |
@@ -155,9 +181,12 @@ def record_valid:
     else false end) and
   # Claim 3: the published ratios are the legs' own.
   (. as $record |
-    ($record.ratios | type == "array" and length == 2) and
+    ($record.ratios | type == "array" and
+       length == (if ($record | paired) then 3 else 2 end)) and
     ($record.ratios | all(ratio_valid($record.legs))) and
-    ([$record.ratios[] | .denominator] | unique | sort) == ["native_simd4","native_simd8"]);
+    ([$record.ratios[] | .denominator] | unique | sort) ==
+      (if ($record | paired) then ["native_simd4","native_simd8","wasm_simd128"]
+       else ["native_simd4","native_simd8"] end));
 
 . as $records |
 (type == "array") and length == 22 and
@@ -170,6 +199,10 @@ all(.[]; record_valid) and
 # One guest module produced every row. Two modules in one record set would mean two different
 # machine codes were timed and reported as one measurement.
 ([.[] | .guest_module_sha256] | unique | length) == 1 and
+([.[] | .guest_simd8_module_sha256] | unique | length) == 1 and
+# A paired arm is paired in every row or in none: half a record set carrying the eight-lane leg
+# would publish a width ratio for some workloads and silently omit it for the rest.
+([.[] | paired] | unique | length) == 1 and
 ([.[] | .runtime] | unique | length) == 1 and
 # The whole arm's central result, asserted over the set rather than per record: every workload,
 # in every round, on every target, computed the same bits.

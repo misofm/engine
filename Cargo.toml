@@ -97,7 +97,10 @@ unsafe_op_in_unsafe_fn = "deny"
 missing_docs = "deny"
 unreachable_pub = "deny"
 unused_must_use = "deny"
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
+# `miso_wasm_simd8` is issue #183's eight-lane wasm measurement build (see
+# `crates/miso-engine-lane/src/backend.rs`). Declaring it here is what keeps a typo in the flag a
+# warning rather than a silent W4 run reported as a W8 number.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)', 'cfg(miso_wasm_simd8)'] }
 
 [workspace.lints.clippy]
 all = "deny"

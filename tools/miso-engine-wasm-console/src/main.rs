@@ -11,6 +11,12 @@
 //! * `wasm_simd128`, the same source compiled to `wasm32-unknown-unknown` with `+simd128` and
 //!   executed under the pinned wasmtime.
 //!
+//! A fourth leg, `wasm_simd128_w8`, appears when the runner hands this host a second guest module
+//! (issue #183 step 2): the same wasm artifact built at eight lanes, where `wide` lowers `f32x8`
+//! to two `v128` values. It is appended, never substituted, so every earlier arm's record has the
+//! legs it always had, and the W8-over-W4 ratio the switch decision turns on is taken from two
+//! modules rendered inside one observation rather than from two runs minutes apart.
+//!
 //! All three drive [`miso_engine_console_workload`]. Not a port of it, not a stand-in for it: the
 //! same crate, linked natively here and compiled to wasm in the guest. That is the only condition
 //! under which a ratio between two of these legs is a statement about a target rather than about a
@@ -105,13 +111,21 @@ fn main() -> ExitCode {
     }
 }
 
-/// Parsed command line: the guest module to drive.
+/// Parsed command line: the guest module (or modules) to drive.
 struct Invocation {
+    /// The `Simd4` guest: the width `simd128` offers and the one the product ships.
     guest: PathBuf,
+    /// The optional `Simd8` guest of the issue #183 paired arm.
+    ///
+    /// When present the run grows a fourth leg rather than replacing the third, so a paired record
+    /// carries the W4 number this arm has always reported *and* the W8 number beside it. The two
+    /// modules are the same source at two values of one compile-time constant; nothing else about
+    /// the run differs, which is the whole point of pairing them inside one observation.
+    guest_simd8: Option<PathBuf>,
 }
 
 fn usage() -> String {
-    "usage: miso_engine_wasm_console <guest.wasm>\n\
+    "usage: miso_engine_wasm_console <guest.wasm> [guest-simd8.wasm]\n\
      the round marker and host metadata arrive in the environment, from the fixed runner"
         .to_string()
 }
@@ -119,11 +133,13 @@ fn usage() -> String {
 fn parse_arguments() -> Result<Invocation, String> {
     let mut arguments = std::env::args_os().skip(1);
     let guest = arguments.next().ok_or_else(usage)?;
+    let guest_simd8 = arguments.next();
     if arguments.next().is_some() {
         return Err(usage());
     }
     Ok(Invocation {
         guest: PathBuf::from(guest),
+        guest_simd8: guest_simd8.map(PathBuf::from),
     })
 }
 
@@ -143,19 +159,30 @@ fn run() -> Result<(), String> {
         ));
     }
 
-    let module_bytes = std::fs::read(&invocation.guest)
-        .map_err(|error| format!("reading {}: {error}", invocation.guest.display()))?;
-    let module_sha256 = sha256_hex(&module_bytes);
-    let (engine, module) = Guest::compile(&invocation.guest)?;
+    let module_sha256 = module_digest(&invocation.guest)?;
+    let compiled = Guest::compile(&invocation.guest)?;
+    let simd8 = match invocation.guest_simd8.as_deref() {
+        Some(path) => Some((module_digest(path)?, Guest::compile(path)?)),
+        None => None,
+    };
+    let simd8_digest = simd8.as_ref().map(|(digest, _)| digest.as_str());
+    let simd8_compiled = simd8.as_ref().map(|(_, compiled)| compiled);
 
     for workload in WORKLOADS {
-        let measurement = WorkloadMeasurement::run(workload, &engine, &module)?;
+        let measurement = WorkloadMeasurement::run(workload, &compiled, simd8_compiled)?;
         println!(
             "{}",
-            measurement.record(workload, round, &module_sha256, metadata)
+            measurement.record(workload, round, &module_sha256, simd8_digest, metadata)
         );
     }
     Ok(())
+}
+
+/// The SHA-256 of a guest module's bytes, as the record reports it.
+fn module_digest(path: &Path) -> Result<String, String> {
+    let bytes =
+        std::fs::read(path).map_err(|error| format!("reading {}: {error}", path.display()))?;
+    Ok(sha256_hex(&bytes))
 }
 
 /// The round marker, supplied by the fixed runner and never defaulted.
@@ -176,7 +203,7 @@ fn backend_name(backend: Backend) -> &'static str {
     }
 }
 
-/// The three legs of the comparison, in the order they are rendered within one observation.
+/// The legs of the comparison, in the order they are rendered within one observation.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Leg {
     /// The production native backend: the same source, dispatched at `Simd8`.
@@ -185,10 +212,30 @@ enum Leg {
     NativeSimd4,
     /// The same source compiled for `wasm32-unknown-unknown` with `+simd128`.
     WasmSimd128,
+    /// The same wasm artifact built at eight lanes, where `wide` lowers `f32x8` to two `v128`.
+    ///
+    /// Issue #183 step 2. Present only when the runner supplied a second guest module, so a record
+    /// from any earlier arm has exactly the legs it always had.
+    WasmSimd128W8,
 }
 
-/// The legs in emission order. Fixed, and fixed deliberately -- see [`WorkloadMeasurement::run`].
+/// The legs in emission order, without and with the issue #183 eight-lane wasm arm.
+///
+/// Fixed, and fixed deliberately -- see [`WorkloadMeasurement::run`]. The W8 leg is appended
+/// rather than substituted: the paired record has to carry both wasm numbers, taken inside one
+/// observation, or the ratio between them is partly a measurement of the minutes between two runs.
 const LEGS: [Leg; 3] = [Leg::NativeSimd8, Leg::NativeSimd4, Leg::WasmSimd128];
+const PAIRED_LEGS: [Leg; 4] = [
+    Leg::NativeSimd8,
+    Leg::NativeSimd4,
+    Leg::WasmSimd128,
+    Leg::WasmSimd128W8,
+];
+
+/// The legs this run emits.
+fn legs_of(paired: bool) -> &'static [Leg] {
+    if paired { &PAIRED_LEGS } else { &LEGS }
+}
 
 impl Leg {
     const fn name(self) -> &'static str {
@@ -196,18 +243,19 @@ impl Leg {
             Self::NativeSimd8 => "native_simd8",
             Self::NativeSimd4 => "native_simd4",
             Self::WasmSimd128 => "wasm_simd128",
+            Self::WasmSimd128W8 => "wasm_simd128_w8",
         }
     }
     const fn backend(self) -> &'static str {
         match self {
-            Self::NativeSimd8 => "Simd8",
+            Self::NativeSimd8 | Self::WasmSimd128W8 => "Simd8",
             Self::NativeSimd4 | Self::WasmSimd128 => "Simd4",
         }
     }
     const fn target(self) -> &'static str {
         match self {
             Self::NativeSimd8 | Self::NativeSimd4 => "native",
-            Self::WasmSimd128 => "wasm32-unknown-unknown",
+            Self::WasmSimd128 | Self::WasmSimd128W8 => "wasm32-unknown-unknown",
         }
     }
     /// Whether this process's allocation audit can see what the leg did.
@@ -217,10 +265,13 @@ impl Leg {
     const fn audit_scope(self) -> &'static str {
         match self {
             Self::NativeSimd8 | Self::NativeSimd4 => "host_process_heap",
-            Self::WasmSimd128 => "not_observable_guest_linear_memory",
+            Self::WasmSimd128 | Self::WasmSimd128W8 => "not_observable_guest_linear_memory",
         }
     }
 }
+
+/// A guest module compiled once, with the engine that owns it.
+type Compiled = (Engine, Module);
 
 /// The guest module, instantiated, with its exports resolved once.
 struct Guest {
@@ -244,7 +295,7 @@ impl Guest {
     /// also not part of anything measured: doing it once and instantiating per workload keeps the
     /// nine rows from each paying for it, and -- more importantly -- guarantees every row was
     /// timed against *the same machine code*.
-    fn compile(path: &Path) -> Result<(Engine, Module), String> {
+    fn compile(path: &Path) -> Result<Compiled, String> {
         let mut config = Config::new();
         // `simd128` is the artifact the browser ships. Relaxed SIMD is out of scope for this
         // engine (spec 024/074) and is switched off so a guest that emitted one would fail to
@@ -266,7 +317,8 @@ impl Guest {
     /// One instance per workload, never reused: a workload's prepared plan, its staged input table
     /// and its running digest all live in the guest's linear memory, and the cleanest way to be
     /// sure one row cannot inherit another's state is to give each row a new one.
-    fn instantiate(engine: &Engine, module: &Module) -> Result<Self, String> {
+    fn instantiate(compiled: &Compiled, expected_backend: Leg) -> Result<Self, String> {
+        let (engine, module) = compiled;
         let mut store = Store::new(engine, ());
         // No imports: the guest cannot reach the host, the clock, or anything outside itself.
         let instance = Instance::new(&mut store, module, &[])
@@ -319,10 +371,16 @@ impl Guest {
         let guest_backend = backend
             .call(&mut store, ())
             .map_err(|error| format!("miso_console_backend: {error}"))?;
-        if guest_backend != 1 {
+        let wanted = match expected_backend.backend() {
+            "Simd8" => 2,
+            _ => 1,
+        };
+        if guest_backend != wanted {
             return Err(format!(
-                "the guest reports backend {guest_backend}, not Simd4: it was built without \
-                 `+simd128` and must not be reported as a simd128 measurement"
+                "the guest reports backend {guest_backend} and this leg is {}: a module built \
+                 without `+simd128`, or at a lane width other than the one the leg is labelled \
+                 with, must not be timed and reported as that leg's number",
+                expected_backend.name()
             ));
         }
         let guest_workloads = workload_count
@@ -458,7 +516,7 @@ struct LegSamples {
     render_errors: u64,
 }
 
-/// One workload measured on all three legs, paired observation by observation.
+/// One workload measured on every leg, paired observation by observation.
 struct WorkloadMeasurement {
     legs: Vec<LegSamples>,
     crossing_ns: Vec<u64>,
@@ -466,19 +524,30 @@ struct WorkloadMeasurement {
 }
 
 impl WorkloadMeasurement {
-    fn run(workload: Workload, engine: &Engine, module: &Module) -> Result<Self, String> {
+    fn run(
+        workload: Workload,
+        compiled: &Compiled,
+        compiled_simd8: Option<&Compiled>,
+    ) -> Result<Self, String> {
+        let legs = legs_of(compiled_simd8.is_some());
         let mut native8 = SessionRuntime::new(workload);
         let mut native4 = SessionRuntime::build_with_dispatch(
             workload,
             miso_engine_console_workload::PlanConfig::BASELINE,
             Backend::Simd4,
         );
-        let mut guest = Guest::instantiate(engine, module)?;
+        let mut guest = Guest::instantiate(compiled, Leg::WasmSimd128)?;
+        let mut guest8 = compiled_simd8
+            .map(|compiled| Guest::instantiate(compiled, Leg::WasmSimd128W8))
+            .transpose()?;
         let index = WORKLOADS
             .iter()
             .position(|candidate| *candidate == workload)
             .ok_or_else(|| "workload is not in the shared emission order".to_string())?;
         guest.prepare(workload, index)?;
+        if let Some(guest8) = guest8.as_mut() {
+            guest8.prepare(workload, index)?;
+        }
 
         // Untimed settling, every leg equally. The idle row asks for a lot; see
         // `Workload::warmup_blocks`.
@@ -487,14 +556,17 @@ impl WorkloadMeasurement {
             let _ = native8.render(observation as u64);
             let _ = native4.render(observation as u64);
             guest.render(observation as u32)?;
+            if let Some(guest8) = guest8.as_mut() {
+                guest8.render(observation as u32)?;
+            }
         }
 
-        let mut samples: Vec<Vec<u64>> = LEGS
+        let mut samples: Vec<Vec<u64>> = legs
             .iter()
             .map(|_| Vec::with_capacity(OBSERVATIONS))
             .collect();
-        let mut hashes: Vec<Sha256Sink> = LEGS.iter().map(|_| Sha256Sink::new()).collect();
-        let mut errors = [0_u64; 3];
+        let mut hashes: Vec<Sha256Sink> = legs.iter().map(|_| Sha256Sink::new()).collect();
+        let mut errors = vec![0_u64; legs.len()];
 
         audit::warm_up();
         audit::reset();
@@ -510,6 +582,13 @@ impl WorkloadMeasurement {
             let (native4_ns, native4_result) = timing::timed(|| native4.render(observation as u64));
             let (wasm_ns, wasm_result) = timing::timed(|| guest.render(observation as u32));
             let wasm_ok = wasm_result?;
+            let wasm8 = match guest8.as_mut() {
+                Some(guest8) => {
+                    let (ns, result) = timing::timed(|| guest8.render(observation as u32));
+                    Some((ns, result?))
+                }
+                None => None,
+            };
 
             if native8_result.is_err() {
                 errors[0] += 1;
@@ -523,12 +602,21 @@ impl WorkloadMeasurement {
             samples[0].push(native8_ns);
             samples[1].push(native4_ns);
             samples[2].push(wasm_ns);
+            if let Some((ns, ok)) = wasm8 {
+                if !ok {
+                    errors[3] += 1;
+                }
+                samples[3].push(ns);
+            }
 
             // Every evidence step is outside the clock and after the whole round-robin, so one
             // leg's bookkeeping never lands between another leg's two timed blocks.
             native8.hash_output(&mut hashes[0]);
             native4.hash_output(&mut hashes[1]);
             guest.hash_output()?;
+            if let Some(guest8) = guest8.as_mut() {
+                guest8.hash_output()?;
+            }
         }
         let snapshot = audit::snapshot();
 
@@ -545,8 +633,12 @@ impl WorkloadMeasurement {
         let mut digests: Vec<String> = hashes.into_iter().map(Sha256Sink::finish_hex).collect();
         digests[2] = guest_digest;
         errors[2] = errors[2].max(guest_errors);
+        if let Some(guest8) = guest8.as_mut() {
+            digests[3] = guest8.digest_hex()?;
+            errors[3] = errors[3].max(guest8.errors()?);
+        }
 
-        let legs = LEGS
+        let legs = legs
             .iter()
             .enumerate()
             .map(|(index, _)| LegSamples {
@@ -575,10 +667,12 @@ impl WorkloadMeasurement {
         workload: Workload,
         round: u32,
         module_sha256: &str,
+        module_simd8_sha256: Option<&str>,
         metadata: &Metadata,
     ) -> String {
         let tracks = f64::from(workload.tracks());
-        let legs = LEGS
+        let leg_order = legs_of(module_simd8_sha256.is_some());
+        let legs = leg_order
             .iter()
             .zip(&self.legs)
             .map(|(leg, samples)| {
@@ -611,7 +705,14 @@ impl WorkloadMeasurement {
             .collect::<Vec<_>>()
             .join(",");
 
-        let ratios = [(2_usize, 0_usize), (2, 1)]
+        // The two standing target ratios, and -- in the paired arm -- the one the decision is
+        // read off: W8 over W4 on the *same* target, from two guests interleaved inside one
+        // observation.
+        let mut pairs = vec![(2_usize, 0_usize), (2, 1)];
+        if module_simd8_sha256.is_some() {
+            pairs.push((3, 2));
+        }
+        let ratios = pairs
             .iter()
             .map(|(numerator, denominator)| {
                 let top = &self.legs[*numerator];
@@ -623,8 +724,8 @@ impl WorkloadMeasurement {
                         "{{\"numerator\":\"{top}\",\"denominator\":\"{bottom}\",",
                         "\"ratio_of_p50\":{ratio},\"paired_ratio_median\":{paired}}}"
                     ),
-                    top = LEGS[*numerator].name(),
-                    bottom = LEGS[*denominator].name(),
+                    top = leg_order[*numerator].name(),
+                    bottom = leg_order[*denominator].name(),
                     ratio = format_f64(top_p50 as f64 / bottom_p50 as f64),
                     paired =
                         format_f64(paired_ratio_median(&top.ns_per_block, &bottom.ns_per_block)),
@@ -647,7 +748,7 @@ impl WorkloadMeasurement {
                 "\"units\":\"us_per_block\",\"percentile_method\":\"nearest_rank\",",
                 "\"runtime\":\"wasmtime {runtime}\",\"guest_target\":\"wasm32-unknown-unknown\",",
                 "\"guest_target_features\":\"+simd128\",",
-                "\"guest_module_sha256\":\"{module}\",",
+                "\"guest_module_sha256\":\"{module}\",{module8}",
                 "\"guest_call_overhead_p50_ns\":{crossing},",
                 "\"legs\":[{legs}],\"ratios\":[{ratios}],",
                 "\"digest_identity\":\"{identity}\",",
@@ -657,7 +758,7 @@ impl WorkloadMeasurement {
                 "{metadata}",
                 "\"descriptive_only\":true,",
                 "\"statistical_method\":\"nearest-rank percentiles over per-block nanoseconds; ",
-                "three legs interleaved observation by observation (#104); ratios reported both ",
+                "every leg interleaved observation by observation (#104); ratios reported both ",
                 "as a quotient of per-leg p50 and as the median of the per-observation quotient; ",
                 "one warmup pass and two measured rounds; descriptive only; no threshold\"}}"
             ),
@@ -676,6 +777,9 @@ impl WorkloadMeasurement {
             warmup = workload.warmup_blocks().max(WARMUP_BLOCKS),
             runtime = wasmtime_version(),
             module = module_sha256,
+            module8 = module_simd8_sha256.map_or_else(String::new, |digest| {
+                format!("\"guest_simd8_module_sha256\":\"{digest}\",")
+            }),
             crossing = crossing.p50,
             legs = legs,
             ratios = ratios,
