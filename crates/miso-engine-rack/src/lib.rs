@@ -13,7 +13,7 @@ use miso_engine_core::realtime::RenderError;
 use miso_engine_effect_contract::{
     BankWidth, BypassShunt, EffectBankProcessBlock, EffectControlLane, EffectProgramKeyV1,
     ObservationLaneV1, ObservationSampleV1, PreparedAutomationSpan, PreparedNativeEffectBank,
-    PreparedSidechainPort,
+    PreparedSidechainPort, transpose_tile_4, transpose_tile_8,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -170,34 +170,113 @@ impl AoSoaScratch {
         self.quantum
     }
 
-    /// Copy one planar track into its stable AoSoA lane. Shape is a `debug_assert`: the compiler
-    /// fixed it once (master plan §4.3).
-    fn gather_lane(&mut self, lane: usize, left: &[f32], right: &[f32], frames: u32) {
+    /// Copy frames `[from, frames)` of one planar track into its stable AoSoA lane. Shape is a
+    /// `debug_assert`: the compiler fixed it once (master plan §4.3).
+    ///
+    /// This is the **per-lane scalar** move: one `f32` store per lane-sample, at the lane's stride
+    /// through the block. It stays the whole path for a partial bank and the ragged tail of a full
+    /// one; [`BankChain::gather`] explains why.
+    fn gather_lane(&mut self, lane: usize, left: &[f32], right: &[f32], from: usize, frames: u32) {
         let lanes = self.width.lanes() as usize;
         let len = frames as usize * lanes;
         debug_assert!(lane < lanes);
         debug_assert!(left.len() == frames as usize && right.len() == frames as usize);
         debug_assert!(len <= self.left.len());
-        for (chunk, &sample) in self.left[..len].chunks_exact_mut(lanes).zip(left) {
+        debug_assert!(from <= frames as usize);
+        for (chunk, &sample) in self.left[from * lanes..len]
+            .chunks_exact_mut(lanes)
+            .zip(&left[from..])
+        {
             chunk[lane] = sample;
         }
-        for (chunk, &sample) in self.right[..len].chunks_exact_mut(lanes).zip(right) {
+        for (chunk, &sample) in self.right[from * lanes..len]
+            .chunks_exact_mut(lanes)
+            .zip(&right[from..])
+        {
             chunk[lane] = sample;
         }
     }
 
-    /// Copy one stable AoSoA lane back into its planar graph buffer.
-    fn scatter_lane(&self, lane: usize, left: &mut [f32], right: &mut [f32], frames: u32) {
+    /// Copy frames `[from, frames)` of one stable AoSoA lane back into its planar graph buffer.
+    fn scatter_lane(
+        &self,
+        lane: usize,
+        left: &mut [f32],
+        right: &mut [f32],
+        from: usize,
+        frames: u32,
+    ) {
         let lanes = self.width.lanes() as usize;
         let len = frames as usize * lanes;
         debug_assert!(lane < lanes);
         debug_assert!(left.len() == frames as usize && right.len() == frames as usize);
         debug_assert!(len <= self.left.len());
-        for (chunk, sample) in self.left[..len].chunks_exact(lanes).zip(left.iter_mut()) {
+        debug_assert!(from <= frames as usize);
+        for (chunk, sample) in self.left[from * lanes..len]
+            .chunks_exact(lanes)
+            .zip(left[from..].iter_mut())
+        {
             *sample = chunk[lane];
         }
-        for (chunk, sample) in self.right[..len].chunks_exact(lanes).zip(right.iter_mut()) {
+        for (chunk, sample) in self.right[from * lanes..len]
+            .chunks_exact(lanes)
+            .zip(right[from..].iter_mut())
+        {
             *sample = chunk[lane];
+        }
+    }
+}
+
+/// One plane's tiled planar -> AoSoA gather.
+///
+/// Per `W`-frame tile: `W` contiguous vector loads (one per planar lane), one whole-tile shuffle
+/// transpose, `W` contiguous vector stores into sample-major scratch. The scalar path this
+/// replaces moved every lane-sample one 32-bit word at a time, twice per chain block.
+///
+/// `W` is the bank width, never a literal: a four-lane bank tiles four frames at a time and an
+/// eight-lane bank eight, so the wasm `simd128` build (four lanes) and the `x86-64-v3` build (eight)
+/// each transpose at their own width (#183).
+#[inline(always)]
+fn tile_gather<const W: usize>(
+    destination: &mut [f32],
+    planes: &[&[f32]; W],
+    transpose: impl Fn([[f32; W]; W]) -> [[f32; W]; W],
+) {
+    for (tile, block) in destination.chunks_exact_mut(W * W).enumerate() {
+        let base = tile * W;
+        let mut rows = [[0.0_f32; W]; W];
+        for (row, plane) in rows.iter_mut().zip(planes.iter()) {
+            row.copy_from_slice(&plane[base..base + W]);
+        }
+        for (chunk, row) in block.chunks_exact_mut(W).zip(transpose(rows)) {
+            chunk.copy_from_slice(&row);
+        }
+    }
+}
+
+/// One plane's tiled AoSoA -> lane-major scatter, into an owned staging block of `W` lanes at
+/// `stride` words each.
+///
+/// The inverse of [`tile_gather`], with one difference forced by [`BankMembers`]: a gather may hold
+/// every lane's planar view at once (`plane` takes `&self`), but `plane_mut` hands out one lane at
+/// a time, so the transpose lands in engine-owned staging and each lane is then handed its result
+/// as **one contiguous copy** instead of one strided store per sample.
+#[inline(always)]
+fn tile_scatter<const W: usize>(
+    source: &[f32],
+    staging: &mut [f32],
+    stride: usize,
+    transpose: impl Fn([[f32; W]; W]) -> [[f32; W]; W],
+) {
+    for (tile, block) in source.chunks_exact(W * W).enumerate() {
+        let base = tile * W;
+        let mut rows = [[0.0_f32; W]; W];
+        for (row, chunk) in rows.iter_mut().zip(block.chunks_exact(W)) {
+            row.copy_from_slice(chunk);
+        }
+        for (lane, row) in transpose(rows).into_iter().enumerate() {
+            let offset = lane * stride + base;
+            staging[offset..offset + W].copy_from_slice(&row);
         }
     }
 }
@@ -663,6 +742,14 @@ pub struct BankChain {
     active: Box<[bool]>,
     slots: Box<[BankSlot]>,
     transposes: u64,
+    /// Every lane of this chain is active, so the whole bank may transpose in `W`-frame tiles.
+    /// Decided once in [`BankChain::new`]; a partial bank never takes the tiled path.
+    full_bank: bool,
+    /// Lane-major landing block for the tiled scatter, `lanes * stride` words per plane. Empty --
+    /// and never allocated -- for a partial bank, which scatters per lane as it always did.
+    staging_left: Box<[f32]>,
+    /// See [`Self::staging_left`].
+    staging_right: Box<[f32]>,
 }
 
 impl BankChain {
@@ -691,12 +778,23 @@ impl BankChain {
         }
         scratch.left.fill(0.0);
         scratch.right.fill(0.0);
+        // The tiled round trip needs every lane's planar view, and its scatter fully overwrites
+        // every lane's planar buffer. Both are only true of a full bank, so a partial one keeps
+        // the per-lane scalar path: that is what preserves the invariant above, that an inactive
+        // lane is neither read from nor written to and can never hand stale garbage across the
+        // block boundary. The standing 64-track fixture is all-full banks; the nine-track ragged
+        // fixture is what exercises the fallback.
+        let full_bank = active.iter().all(|lane| *lane);
+        let staging = if full_bank { scratch.left.len() } else { 0 };
         Ok(Self {
             scratch,
             lanes,
             active,
             slots: slots.into_boxed_slice(),
             transposes: 0,
+            full_bank,
+            staging_left: vec![0.0; staging].into_boxed_slice(),
+            staging_right: vec![0.0; staging].into_boxed_slice(),
         })
     }
 
@@ -710,12 +808,7 @@ impl BankChain {
     ) -> Result<(), RenderError> {
         debug_assert!(frames >= 1 && frames <= self.scratch.quantum);
         let len = frames as usize * self.lanes;
-        for lane in 0..self.lanes {
-            if self.active[lane] {
-                let (left, right) = members.plane(lane);
-                self.scratch.gather_lane(lane, left, right, frames);
-            }
-        }
+        self.gather(members, frames);
         self.transposes = self.transposes.saturating_add(1);
         for slot in &mut self.slots {
             if slot.active_lanes.iter().any(|lane| *lane) {
@@ -728,13 +821,135 @@ impl BankChain {
                 })?;
             }
         }
+        self.scatter(members, frames);
+        Ok(())
+    }
+
+    /// Planar -> AoSoA for the whole bank: one tiled transpose per plane when every lane is
+    /// active, the per-lane scalar move otherwise.
+    ///
+    /// A tile is `W` frames wide, `W` being the bank width, so this is the same code at four lanes
+    /// and at eight. Frames past the last whole tile are the ragged tail and take the scalar path
+    /// too -- there is no partial-tile transpose and no read past `frames`.
+    fn gather<M: BankMembers + ?Sized>(&mut self, members: &M, frames: u32) {
+        if self.full_bank {
+            match self.scratch.width {
+                BankWidth::Four => self.gather_tiled::<M, 4>(members, frames, transpose_tile_4),
+                BankWidth::Eight => self.gather_tiled::<M, 8>(members, frames, transpose_tile_8),
+            }
+            return;
+        }
+        for lane in 0..self.lanes {
+            if self.active[lane] {
+                let (left, right) = members.plane(lane);
+                self.scratch.gather_lane(lane, left, right, 0, frames);
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn gather_tiled<M: BankMembers + ?Sized, const W: usize>(
+        &mut self,
+        members: &M,
+        frames: u32,
+        transpose: impl Fn([[f32; W]; W]) -> [[f32; W]; W] + Copy,
+    ) {
+        debug_assert_eq!(self.lanes, W);
+        let frames_used = frames as usize;
+        let tiled = (frames_used / W) * W;
+        // `plane` takes `&self`, so every lane's planar view can be held at once: the gather needs
+        // no staging block, only `W` live shared borrows.
+        let mut left_planes: [&[f32]; W] = [&[]; W];
+        let mut right_planes: [&[f32]; W] = [&[]; W];
+        for lane in 0..W {
+            let (left, right) = members.plane(lane);
+            debug_assert!(left.len() == frames_used && right.len() == frames_used);
+            left_planes[lane] = left;
+            right_planes[lane] = right;
+        }
+        tile_gather(&mut self.scratch.left[..tiled * W], &left_planes, transpose);
+        tile_gather(
+            &mut self.scratch.right[..tiled * W],
+            &right_planes,
+            transpose,
+        );
+        if tiled < frames_used {
+            for lane in 0..W {
+                self.scratch.gather_lane(
+                    lane,
+                    left_planes[lane],
+                    right_planes[lane],
+                    tiled,
+                    frames,
+                );
+            }
+        }
+    }
+
+    /// AoSoA -> planar for the whole bank, the inverse of [`Self::gather`] under the same rule.
+    fn scatter<M: BankMembers + ?Sized>(&mut self, members: &mut M, frames: u32) {
+        if self.full_bank {
+            match self.scratch.width {
+                BankWidth::Four => self.scatter_tiled::<M, 4>(members, frames, transpose_tile_4),
+                BankWidth::Eight => self.scatter_tiled::<M, 8>(members, frames, transpose_tile_8),
+            }
+            return;
+        }
         for lane in 0..self.lanes {
             if self.active[lane] {
                 let (left, right) = members.plane_mut(lane);
-                self.scratch.scatter_lane(lane, left, right, frames);
+                self.scratch.scatter_lane(lane, left, right, 0, frames);
             }
         }
-        Ok(())
+    }
+
+    #[inline(always)]
+    fn scatter_tiled<M: BankMembers + ?Sized, const W: usize>(
+        &mut self,
+        members: &mut M,
+        frames: u32,
+        transpose: impl Fn([[f32; W]; W]) -> [[f32; W]; W] + Copy,
+    ) {
+        debug_assert_eq!(self.lanes, W);
+        let frames_used = frames as usize;
+        let stride = self.scratch.quantum as usize;
+        let tiled = (frames_used / W) * W;
+        tile_scatter(
+            &self.scratch.left[..tiled * W],
+            &mut self.staging_left,
+            stride,
+            transpose,
+        );
+        tile_scatter(
+            &self.scratch.right[..tiled * W],
+            &mut self.staging_right,
+            stride,
+            transpose,
+        );
+        // The ragged tail, word by word, straight into the same staging block: one contiguous copy
+        // per lane below then still covers the whole block.
+        for frame in tiled..frames_used {
+            for lane in 0..W {
+                self.staging_left[lane * stride + frame] = self.scratch.left[frame * W + lane];
+                self.staging_right[lane * stride + frame] = self.scratch.right[frame * W + lane];
+            }
+        }
+        for lane in 0..W {
+            let (left, right) = members.plane_mut(lane);
+            debug_assert!(left.len() == frames_used && right.len() == frames_used);
+            left.copy_from_slice(&self.staging_left[lane * stride..lane * stride + frames_used]);
+            right.copy_from_slice(&self.staging_right[lane * stride..lane * stride + frames_used]);
+        }
+    }
+
+    /// Take the per-lane scalar path even on a full bank.
+    ///
+    /// Test-only, and the only way to reach the scalar transpose with an all-active mask: it is
+    /// what lets `tiled_transpose_matches_the_scalar_path_bit_for_bit` run identical input through
+    /// both implementations and compare words, instead of comparing the tiled path to itself.
+    #[cfg(test)]
+    fn force_scalar_transpose(&mut self) {
+        self.full_bank = false;
     }
 
     #[must_use]
@@ -832,8 +1047,162 @@ mod tests {
         }
     }
 
+    /// Every bit pattern a 32-bit word can carry that a permutation must not touch: quiet and
+    /// signalling NaN payloads, both signed zeroes, both signed subnormals and both infinities.
+    const HOSTILE: [f32; 10] = [
+        f32::NAN,
+        f32::from_bits(0x7fc0_dead),
+        f32::from_bits(0xffc0_beef),
+        f32::from_bits(0x7f80_0001),
+        -0.0,
+        0.0,
+        f32::from_bits(1),
+        f32::from_bits(0x8000_0001),
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+    ];
+
+    /// Planar planes of arbitrary bit patterns, with [`HOSTILE`] salted across every lane so that
+    /// no frame shape can miss them.
+    fn hostile_planes(lanes: usize, frames: u32, state: &mut u64) -> Planes {
+        let mut planes = Planes {
+            left: (0..lanes)
+                .map(|_| (0..frames).map(|_| seeded(state)).collect())
+                .collect(),
+            right: (0..lanes)
+                .map(|_| (0..frames).map(|_| seeded(state)).collect())
+                .collect(),
+        };
+        for lane in 0..lanes {
+            for (index, value) in HOSTILE.into_iter().enumerate() {
+                let frame = (lane + index) % frames as usize;
+                planes.left[lane][frame] = value;
+                planes.right[lane][frames as usize - 1 - frame] = value;
+            }
+        }
+        planes
+    }
+
+    /// Frame counts that reach every shape of the tiled round trip at this width: no whole tile at
+    /// all, exactly one, one plus a ragged tail, several plus a tail, and the standing quantum.
+    fn frame_shapes(lanes: usize) -> [u32; 6] {
+        let width = lanes as u32;
+        [1, width - 1, width, width + 1, 3 * width + 2, 128]
+    }
+
+    fn assert_planes_bit_equal(actual: &Planes, expected: &Planes, what: &str) {
+        for lane in 0..actual.left.len() {
+            for frame in 0..actual.left[lane].len() {
+                assert_eq!(
+                    actual.left[lane][frame].to_bits(),
+                    expected.left[lane][frame].to_bits(),
+                    "{what}: left lane={lane} frame={frame}"
+                );
+                assert_eq!(
+                    actual.right[lane][frame].to_bits(),
+                    expected.right[lane][frame].to_bits(),
+                    "{what}: right lane={lane} frame={frame}"
+                );
+            }
+        }
+    }
+
+    /// T1b: on a **full** bank -- the tiled whole-bank transpose -- the round trip is bit-exact at
+    /// both widths and at every frame shape, ragged tails included.
+    ///
+    /// T1 below is the partial bank, which is a different code path: a chain with any inactive
+    /// lane keeps the per-lane scalar move.
+    #[test]
+    fn full_bank_gather_scatter_round_trip_is_bit_exact() {
+        let mut state = 0x5eed_1234_abcd_0001_u64;
+        for width in [BankWidth::Four, BankWidth::Eight] {
+            let lanes = width.lanes() as usize;
+            for frames in frame_shapes(lanes) {
+                let mut planes = hostile_planes(lanes, frames, &mut state);
+                let expected = Planes {
+                    left: planes.left.clone(),
+                    right: planes.right.clone(),
+                };
+                let active = vec![true; lanes];
+                let mut chain = BankChain::new(
+                    AoSoaScratch::new(width, 128).expect("scratch"),
+                    active.clone().into_boxed_slice(),
+                    vec![slot(active, Box::new(PassThrough))],
+                )
+                .expect("chain");
+                chain.run(&mut planes, frames, 0).expect("run");
+                assert_planes_bit_equal(
+                    &planes,
+                    &expected,
+                    &format!("{lanes} lanes, {frames} frames"),
+                );
+                assert_eq!(chain.transposes(), 1);
+            }
+        }
+    }
+
+    /// T1c: the tiled transpose and the per-lane scalar move it replaces are the **same
+    /// permutation**, at both widths and every frame shape.
+    ///
+    /// The stage in the middle rewrites every resident word as a function of its **index in the
+    /// block**, so a gather that laid the block out differently would scatter differently: the
+    /// planar comparison at the end therefore pins the gather layout as well as the scatter, and
+    /// does it without reaching inside the boxed stage. "Agree" is `to_bits` equality, never a
+    /// float comparison -- `NaN == NaN` is false and would pass vacuously.
+    #[test]
+    fn tiled_transpose_matches_the_scalar_path_bit_for_bit() {
+        struct IndexXor;
+        impl BankStage for IndexXor {
+            fn process(&mut self, block: BankBlock<'_>) -> Result<(), RenderError> {
+                for (index, sample) in block.left.iter_mut().enumerate() {
+                    *sample = f32::from_bits(sample.to_bits() ^ (index as u32 | 1));
+                }
+                for (index, sample) in block.right.iter_mut().enumerate() {
+                    *sample = f32::from_bits(sample.to_bits() ^ (index as u32 | 2));
+                }
+                Ok(())
+            }
+        }
+
+        let mut state = 0x5eed_1234_abcd_0002_u64;
+        for width in [BankWidth::Four, BankWidth::Eight] {
+            let lanes = width.lanes() as usize;
+            for frames in frame_shapes(lanes) {
+                let source = hostile_planes(lanes, frames, &mut state);
+                let mut outcomes = Vec::new();
+                for scalar in [false, true] {
+                    let mut planes = Planes {
+                        left: source.left.clone(),
+                        right: source.right.clone(),
+                    };
+                    let active = vec![true; lanes];
+                    let mut chain = BankChain::new(
+                        AoSoaScratch::new(width, 128).expect("scratch"),
+                        active.clone().into_boxed_slice(),
+                        vec![slot(active, Box::new(IndexXor))],
+                    )
+                    .expect("chain");
+                    if scalar {
+                        chain.force_scalar_transpose();
+                    }
+                    chain.run(&mut planes, frames, 0).expect("run");
+                    outcomes.push(planes);
+                }
+                assert_planes_bit_equal(
+                    &outcomes[0],
+                    &outcomes[1],
+                    &format!("tiled vs scalar, {lanes} lanes, {frames} frames"),
+                );
+            }
+        }
+    }
+
     /// T1: the gather/scatter round-trip is bit-exact for every active lane, including NaN
     /// payloads, `-0.0` and subnormals, and never writes an inactive lane's planar buffer.
+    ///
+    /// The mask below has inactive lanes, so this is the **partial-bank scalar path** -- the one a
+    /// ragged-tail bank takes, and the one that carries the "an inactive lane is never read and
+    /// never written" invariant.
     #[test]
     fn gather_scatter_round_trip_is_bit_exact() {
         let frames = 128_u32;

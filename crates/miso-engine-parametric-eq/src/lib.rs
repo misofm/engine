@@ -998,6 +998,14 @@ impl<L: Lane, const W: usize> Channel<L, W> {
     }
 
     /// Assigns the target exactly and stops lane `track`'s ramp — the D11 snap.
+    ///
+    /// **The caller refreshes** `identity[section]`. Every call site is a loop over the lanes of
+    /// one section, and [`refresh_identity`](Self::refresh_identity) re-derives the whole section
+    /// from its coefficient words, so running it inside this function re-derived the same six lane
+    /// compares `W` times for one bank-wide ramp end. Hoisting it is exact rather than merely
+    /// cheaper: the flag is read only on a *stationary* block ([`cascade_sections`]), no lane's
+    /// ramp can start mid-block, and a section's last snap is the one whose value survives either
+    /// way. `identity_flags_agree` is the standing oracle that no refresh site was lost.
     fn snap(&mut self, section: usize, track: usize) {
         let slot = &mut self.sections[section];
         for index in 0..6 {
@@ -1006,7 +1014,22 @@ impl<L: Lane, const W: usize> Channel<L, W> {
             lane_set(step_word_mut(&mut slot.step, index), track, 0.0);
         }
         self.remaining[section][track] = 0;
-        self.refresh_identity(section);
+    }
+
+    /// Snaps **every** lane of `section` at once: six vector copies and one zeroed step set.
+    ///
+    /// Bit-identical to `for track in 0..W { self.snap(section, track) }`, and it is the shape a
+    /// bank-wide ramp end actually has -- the console moves a band on all `W` lanes of a bank
+    /// together. The per-lane form pays a `lane_get`/`lane_set` pair per word per lane, and each of
+    /// those is a full `store`/`load` round trip out of and back into the vector domain: `12 * W`
+    /// of them per section, to write words the target already holds in exactly the right lanes.
+    ///
+    /// The caller refreshes `identity[section]`, as with [`snap`](Self::snap).
+    fn snap_section(&mut self, section: usize) {
+        let slot = &mut self.sections[section];
+        slot.coef = slot.target;
+        slot.step = SvfCoefStep::default();
+        self.remaining[section] = [0; W];
     }
 
     /// Runs the four sections over one block in place.
@@ -1032,10 +1055,22 @@ impl<L: Lane, const W: usize> Channel<L, W> {
     #[inline(always)]
     fn process_section(&mut self, section: usize, io: &mut [f32], frames: usize) {
         let mut position = 0;
+        let mut snapped = false;
         while position < frames {
-            for track in 0..W {
-                if self.remaining[section][track] == 1 {
-                    self.snap(section, track);
+            // A ramp that ends on every lane at once is the common case -- a console automates a
+            // band across a whole bank -- and it is the one that can skip the lane loop entirely.
+            if self.remaining[section]
+                .iter()
+                .all(|remaining| *remaining == 1)
+            {
+                self.snap_section(section);
+                snapped = true;
+            } else {
+                for track in 0..W {
+                    if self.remaining[section][track] == 1 {
+                        self.snap(section, track);
+                        snapped = true;
+                    }
                 }
             }
             let mut length = frames - position;
@@ -1068,6 +1103,12 @@ impl<L: Lane, const W: usize> Channel<L, W> {
                 *remaining = remaining.saturating_sub(length as u32);
             }
             position += length;
+        }
+        // Once for the section, not once per snapped lane per segment. Nothing between the snaps
+        // above and here reads `identity`, and the value this leaves is the value the last snap
+        // would have left: see the note on `snap`.
+        if snapped {
+            self.refresh_identity(section);
         }
     }
 
@@ -1112,9 +1153,10 @@ impl<L: Lane, const W: usize> Channel<L, W> {
     fn discontinuity_reset(&mut self) {
         self.reset_states();
         for section in 0..EQ_SECTION_COUNT_V1 {
-            for track in 0..W {
-                self.snap(section, track);
-            }
+            // Every lane, so this is the whole-section snap by construction; one refresh per
+            // section rather than one per lane.
+            self.snap_section(section);
+            self.refresh_identity(section);
         }
     }
 }
@@ -2338,8 +2380,8 @@ mod interleave_identity {
 #[cfg(test)]
 mod elision {
     use super::{
-        BandTarget, Channel, EQ_SECTION_COUNT_V1, EqSvfWordsV1, MAX_LANES, cascade_sections,
-        corpus, process_channels,
+        BandTarget, Channel, EQ_SECTION_COUNT_V1, EqSvfWordsV1, MAX_LANES, RAMP_SAMPLES,
+        cascade_sections, corpus, process_channels,
     };
     use miso_engine_lane::{Lane, Simd4, Simd8};
 
@@ -2819,5 +2861,132 @@ mod elision {
             "the transition sequence must actually engage the elision on its stationary blocks, \
              engaged on {engaged} of {BLOCKS}"
         );
+    }
+
+    /// A `DiscontinuityKeepParameters` reset taken mid-ramp must refresh `identity`.
+    ///
+    /// This is the one coefficient-change site the rest of the suite never reaches.
+    /// [`start_ramp`](Channel::start_ramp) refreshes the flag while `coef` is still the identity it
+    /// is leaving, so the flag reads `true`; the ramp then walks `coef` away through
+    /// `advance_words`, which refreshes nothing. That staleness is licensed only because a ramp in
+    /// flight makes the bank non-stationary, and every ramp that ends *inside*
+    /// [`process_section`](Channel::process_section) refreshes on the way out.
+    ///
+    /// A discontinuity reset ends the ramp from outside the render path: it snaps `coef` to a live
+    /// target and clears `remaining`, so the very next block is stationary and reads the flag.
+    /// Without the refresh at that site the flag still says "identity" for a section that is now a
+    /// real filter, and `cascade_sections` elides it -- the whole cascade here, so the block comes
+    /// back unfiltered.
+    ///
+    /// The conformance reset scenario does not reach this: it resets with no ramp in flight, where
+    /// the snap is a no-op and the flag was already right.
+    fn reset_mid_ramp_case<L: Lane, const W: usize>(width: &str) {
+        // Every section identity, so the ramped section is the only live one after the reset and a
+        // stale flag elides the entire cascade rather than one position of it.
+        let mut left_channel = channel::<L, W>(0, 0b0000);
+        let mut right_channel = channel::<L, W>(3, 0b0000);
+        assert!(
+            left_channel.identity[0] && right_channel.identity[0],
+            "{width}: section 0 must start at the identity the ramp leaves"
+        );
+
+        // Ramp section 0 of every lane from that identity to a live corpus design.
+        for (offset, target_channel) in [(0_usize, &mut left_channel), (3, &mut right_channel)] {
+            for track in 0..W {
+                let words = corpus::bands((offset + track) % corpus::LANES)[0]
+                    .words(corpus::CORPUS_RATE)
+                    .expect("every corpus row is a legal design");
+                target_channel.start_ramp(0, track, words);
+            }
+        }
+
+        // Walk part of the way, which moves `coef` off identity without ending the ramp.
+        const MID_RAMP: usize = 16;
+        assert!(MID_RAMP < RAMP_SAMPLES as usize, "the walk must not settle");
+        let mut left = block::<W>(0, 0);
+        let mut right = block::<W>(0, 3);
+        process_channels(
+            (&mut left_channel, &mut right_channel),
+            &mut left,
+            &mut right,
+            MID_RAMP,
+            false,
+        );
+        assert!(
+            (0..W).all(|track| left_channel.remaining[0][track] > 1),
+            "{width}: the ramp must still be in flight when the reset lands"
+        );
+        assert!(
+            !left_channel.identity_flags_agree(),
+            "{width}: non-vacuity -- the reset must land inside the licensed stale window, where \
+             the words have left identity and the flag has not been refreshed"
+        );
+
+        // The `ResetKind::DiscontinuityKeepParameters` route.
+        left_channel.discontinuity_reset();
+        right_channel.discontinuity_reset();
+        assert!(
+            left_channel.identity_flags_agree() && right_channel.identity_flags_agree(),
+            "{width}: a discontinuity reset must leave `identity` agreeing with the words it \
+             snapped to"
+        );
+
+        // And the next stationary block must render the live section rather than elide it. The
+        // reference reached the same coefficients and the same cleared integrators without ever
+        // ramping, so the two renders are bit-identical when the flag is right and diverge by a
+        // whole cascade when it is not.
+        let mut reference_left = channel::<L, W>(0, 0b0001);
+        let mut reference_right = channel::<L, W>(3, 0b0001);
+        let mut left = block::<W>(0, 0);
+        let mut right = block::<W>(0, 3);
+        let mut reference_left_block = block::<W>(0, 0);
+        let mut reference_right_block = block::<W>(0, 3);
+        assert_eq!(
+            kept(&left_channel, &right_channel, &left, &right),
+            kept(
+                &reference_left,
+                &reference_right,
+                &reference_left_block,
+                &reference_right_block,
+            ),
+            "{width}: the reset channel must run the same cascade positions as the settled one"
+        );
+        process_channels(
+            (&mut left_channel, &mut right_channel),
+            &mut left,
+            &mut right,
+            FRAMES,
+            true,
+        );
+        process_channels(
+            (&mut reference_left, &mut reference_right),
+            &mut reference_left_block,
+            &mut reference_right_block,
+            FRAMES,
+            true,
+        );
+        assert_eq!(
+            bits(&left),
+            bits(&reference_left_block),
+            "{width}: the block after a mid-ramp reset must render the live section"
+        );
+        assert_eq!(
+            bits(&right),
+            bits(&reference_right_block),
+            "{width}: the block after a mid-ramp reset must render the live section"
+        );
+        assert_eq!(
+            integrators(&left_channel, &right_channel),
+            integrators(&reference_left, &reference_right),
+            "{width}: and must leave the same integrators"
+        );
+    }
+
+    /// The mid-ramp discontinuity reset, at all three widths.
+    #[test]
+    fn a_discontinuity_reset_mid_ramp_refreshes_the_identity_flag() {
+        reset_mid_ramp_case::<f32, 1>("Scalar");
+        reset_mid_ramp_case::<Simd4, 4>("Simd4");
+        reset_mid_ramp_case::<Simd8, 8>("Simd8");
     }
 }

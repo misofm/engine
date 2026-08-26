@@ -7,7 +7,7 @@
 # defect cannot consume the one authorised measurement. Nothing here is timed, and nothing here
 # instantiates the guest for anything but a shape check.
 set -euo pipefail
-[[ "$#" -le 1 ]] || { printf 'usage: %s [--after|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue183|--round2-lane|--round2-lane-baseline]
+[[ "$#" -le 1 ]] || { printf 'usage: %s [--after|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue183|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline]
 ' "$0" >&2; exit 2; }
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$root"
@@ -31,6 +31,10 @@ fail() { printf 'wasm console preflight failure: %s\n' "$1" >&2; exit 1; }
 #
 # `--round2-lane` and `--round2-lane-baseline` are the same paired shape for round 2's lane
 # lowerings, whose wasm half is `f32x4.pmax`/`f32x4.pmin` for `Lane::max`/`Lane::min`.
+# `--round2-eqrack` and `--round2-eqrack-baseline` are the paired arms of the rack/EQ round 2: the
+# vectorised planar/AoSoA transpose, the skipped bank-member dedication copy and the batched EQ
+# identity refresh. All three are class A, so the two arms must reproduce each other's digests on
+# every row and every leg and differ only in time.
 arm=baseline
 case "${1:-}" in
     --after) arm=after; shift ;;
@@ -42,8 +46,10 @@ case "${1:-}" in
     --round1-composed) arm=round1-composed; shift ;;
     --round2-lane) arm=round2-lane; shift ;;
     --round2-lane-baseline) arm=round2-lane-baseline; shift ;;
+    --round2-eqrack) arm=round2-eqrack; shift ;;
+    --round2-eqrack-baseline) arm=round2-eqrack-baseline; shift ;;
 esac
-[[ "$#" == 0 ]] || fail "usage: $0 [--after|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue183|--round2-lane|--round2-lane-baseline]"
+[[ "$#" == 0 ]] || fail "usage: $0 [--after|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue183|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline]"
 
 if [[ "$arm" == after ]]; then
     artifact_dir="$root/artifacts/issue163-phase2"
@@ -65,6 +71,10 @@ elif [[ "$arm" == round2-lane ]]; then
     artifact_dir="$root/artifacts/round2-lane"
 elif [[ "$arm" == round2-lane-baseline ]]; then
     artifact_dir="$root/artifacts/round2-lane-baseline"
+elif [[ "$arm" == round2-eqrack ]]; then
+    artifact_dir="$root/artifacts/round2-eqrack"
+elif [[ "$arm" == round2-eqrack-baseline ]]; then
+    artifact_dir="$root/artifacts/round2-eqrack-baseline"
 else
     artifact_dir="$root/artifacts/issue163-phase2-wasm-baseline"
 fi
