@@ -510,13 +510,19 @@ impl Runtime {
                 chain,
             } => {
                 let lanes = *lanes;
-                // Only the first slot reduces graph inputs; the chain computes the rest.
-                for member in members[..lanes].iter_mut() {
-                    execute_op(member, lease, delays, first_sample)?;
+                // Only the first slot reduces graph inputs; the chain computes the rest -- and a
+                // member whose whole reduction *is* the dedication copy does not even do that:
+                // the gather reads its producer's buffer directly. See `bank_gather_source`.
+                for (lane, member) in members[..lanes].iter_mut().enumerate() {
+                    if let Some(source) = bank_gather_source(member) {
+                        bank_inputs[lane] = source;
+                    } else {
+                        execute_op(member, lease, delays, first_sample)?;
+                        bank_inputs[lane] = member.output;
+                    }
                 }
                 let last = members.len() - lanes;
                 for lane in 0..lanes {
-                    bank_inputs[lane] = members[lane].output;
                     bank_outputs[lane] = members[last + lane].output;
                 }
                 let frames = lease.frames();
@@ -554,6 +560,45 @@ impl Runtime {
 }
 
 // REALTIME_POLICY_BEGIN
+/// The buffer a first-slot bank member's gather may read **instead of** the member's own output,
+/// or `None` when the member has to run.
+///
+/// The SIMD-rack effects sit in dedicated racks (`program::is_dedicated`), so their ops are never
+/// `in_place` and `reduce_plane` memcpys the upstream output into a buffer whose only reader is
+/// this bank's gather -- after which the chain's scatter fully overwrites that same buffer. The
+/// copy is therefore pure cost, and pointing the gather at the producer removes it. `None` on any
+/// doubt; every clause below is one way the copy could be load-bearing:
+///
+/// * **Nothing but the reduction.** [`NodeKind::BankMember`] is the kind whose `execute_op` body is
+///   empty apart from `reduce_plane`, so skipping the op skips exactly the copy and nothing else.
+/// * **One undelayed, unmixed input.** Two inputs is a sum and zero inputs is a `fill(0.0)`; either
+///   way the gather source is a value no single buffer holds. A sidechain already blocks banking
+///   (#96 F9) and a `staged` input owns a compensation delay line that must still be pumped.
+/// * **Not already in place.** `inputs[0] == output` is the lowering having elided the copy
+///   already, and redirecting the gather would change nothing.
+///
+/// What stays true of the member's own output buffer: for a single-slot chain it *is* the scatter
+/// target, so every later reader -- an observer, a `program::Tap`'s observer, the session output --
+/// sees exactly the bits it saw before. For a multi-slot cohort chain the scatter lands in the last
+/// slot's buffer instead and this one is left holding the previous block's words, which is sound
+/// for the reason `chains_into` already requires and checks: the first slot has exactly one reader
+/// (the next slot's op, which never reduces), no tap, no observer, and is not the session output.
+///
+/// This does not touch `is_dedicated`, which stays a classification by node kind: dedication *by
+/// bank membership* was measured and rejected, and `program::lower` records why (#169).
+fn bank_gather_source(member: &RuntimeOp) -> Option<u32> {
+    if !matches!(member.kind, NodeKind::BankMember)
+        || !member.staged.is_empty()
+        || member.sidechain.is_some()
+    {
+        return None;
+    }
+    match &*member.inputs {
+        [single] if *single != member.output => Some(*single),
+        _ => None,
+    }
+}
+
 /// The one implementation of node semantics, shared by both executors.
 fn execute_op(
     op: &mut RuntimeOp,
@@ -1424,6 +1469,93 @@ mod tests {
         builder.lease(0, owned.clone(), owned);
         let (_arena, mut leases) = builder.finish().expect("one disjoint lease");
         leases.pop().expect("the lease")
+    }
+
+    /// The dedication copy is skipped for exactly the shape that is only a copy, and for nothing
+    /// else.
+    ///
+    /// Red mutations (`tests/MUTATIONS.md`): drop the `staged` clause -- the delayed case admits
+    /// and the delay line stops being pumped; drop the `sidechain` clause -- the sidechained case
+    /// admits; accept two inputs -- the summed case admits and a summand is lost; accept
+    /// `inputs[0] == output` -- the already-in-place case admits, which is a no-op redirect that
+    /// hides the clause; widen past `BankMember` -- the `Effect` case admits and the effect's own
+    /// processing is skipped along with the copy.
+    #[test]
+    fn bank_gather_source_admits_only_the_dedication_copy() {
+        fn member(
+            inputs: Vec<u32>,
+            staged: Vec<StagedInput>,
+            sidechain: Option<u32>,
+            output: u32,
+            kind: NodeKind,
+        ) -> RuntimeOp {
+            RuntimeOp {
+                inputs: inputs.into_boxed_slice(),
+                staged: staged.into_boxed_slice(),
+                sidechain,
+                output,
+                kind,
+                observers: Box::new([]),
+            }
+        }
+
+        // The shape the SIMD racks actually produce: a dedicated member whose whole body is one
+        // copy from its producer.
+        assert_eq!(
+            bank_gather_source(&member(vec![7], Vec::new(), None, 9, NodeKind::BankMember)),
+            Some(7),
+            "a single undelayed input into a distinct dedicated buffer is the copy"
+        );
+
+        // Every refusal, one clause each.
+        for (case, op) in [
+            (
+                "no input at all is a fill(0.0), not a copy",
+                member(Vec::new(), Vec::new(), None, 9, NodeKind::BankMember),
+            ),
+            (
+                "two inputs are a sum; skipping it would drop a summand",
+                member(vec![7, 8], Vec::new(), None, 9, NodeKind::BankMember),
+            ),
+            (
+                "a staged input owns a delay line that must still be pumped",
+                member(
+                    vec![7],
+                    vec![StagedInput {
+                        source: 6,
+                        staging: 7,
+                        line: 0,
+                    }],
+                    None,
+                    9,
+                    NodeKind::BankMember,
+                ),
+            ),
+            (
+                "a sidechain is a second read the gather has no port for",
+                member(vec![7], Vec::new(), Some(8), 9, NodeKind::BankMember),
+            ),
+            (
+                "already in place: there is no copy left to skip",
+                member(vec![9], Vec::new(), None, 9, NodeKind::BankMember),
+            ),
+            (
+                "a kind that does work of its own must run",
+                member(vec![7], Vec::new(), None, 9, NodeKind::Identity),
+            ),
+            (
+                "a route does work of its own too",
+                member(
+                    vec![7],
+                    Vec::new(),
+                    None,
+                    9,
+                    NodeKind::Route([1.0, 0.0, 0.0, 1.0]),
+                ),
+            ),
+        ] {
+            assert_eq!(bank_gather_source(&op), None, "{case}");
+        }
     }
 
     /// E5. Master plan #83 D9: the block reduction is bit-for-bit the scalar left-to-right
