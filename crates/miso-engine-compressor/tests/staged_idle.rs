@@ -17,7 +17,14 @@
 
 mod support;
 
-use support::{noise, prepare, render_scalar, request_with_quantum, snapshot, values_with};
+use miso_engine_effect_contract::{
+    EffectProcessBlock, LinkMode, PreparedSidechainPort, ProcessReport,
+};
+
+use support::{
+    accumulate, noise, prepare, render_scalar, request_with_quantum, sidechain_port, snapshot,
+    values_with,
+};
 
 /// Frames rendered per case.
 const FRAMES: usize = 4_096;
@@ -180,4 +187,86 @@ fn a_ragged_bank_agrees_with_the_per_frame_body() {
             }
         }
     }
+}
+
+/// The same property across the three link laws, the bypass flag and a connected sidechain.
+///
+/// `link_frame` is shared source between the two bodies, so this is a regression guard rather than
+/// a second derivation — but the pre-gather and the staging sit either side of it, and a body that
+/// linked the wrong pair of magnitudes into the ring would be invisible to a `DualMono` corpus.
+/// The frozen cross-target corpus renders in 100-frame blocks against detector distances as short
+/// as 16, so it takes the per-frame body on every case and covers none of this.
+#[test]
+fn the_link_laws_bypass_and_a_sidechain_all_agree() {
+    for link in [LinkMode::DualMono, LinkMode::Maximum, LinkMode::Average] {
+        for bypass in [false, true] {
+            for sidechain in [false, true] {
+                let mut reference: Option<(Vec<u32>, Vec<u32>, Vec<u8>, Vec<u8>)> = None;
+                for partition in [512, 1, 7, 64, 128] {
+                    let rendered = render_case(link, bypass, sidechain, partition);
+                    match &reference {
+                        None => reference = Some(rendered),
+                        Some(expected) => assert_eq!(
+                            &rendered, expected,
+                            "{link:?}, bypass {bypass}, sidechain {sidechain}, partition {partition}"
+                        ),
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// One configuration of [`the_link_laws_bypass_and_a_sidechain_all_agree`], rendered at one
+/// partition. The sidechain is a second noise plane, so the detector and the delayed output are
+/// different signals and a body that confused them would not survive.
+fn render_case(
+    link: LinkMode,
+    bypass: bool,
+    sidechain: bool,
+    partition: usize,
+) -> (Vec<u32>, Vec<u32>, Vec<u8>, Vec<u8>) {
+    let values = values_with(&[(0, -22.0), (1, 4.0), (2, 6.0), (5, 2.0), (7, 4.0)]);
+    let mut preparation = request_with_quantum(&values, QUANTUM);
+    preparation.link_mode = link;
+    preparation.bypass = bypass;
+    if sidechain {
+        preparation.ports.sidechain = PreparedSidechainPort::Connected {
+            id: sidechain_port(),
+            required: false,
+        };
+    }
+    let mut effect = prepare(preparation);
+    let mut left = noise(FRAMES, 0x5A_6E_D0_04, 0.8);
+    let mut right = noise(FRAMES, 0x5A_6E_D0_05, 0.6);
+    let detector_left = noise(FRAMES, 0x5A_6E_D0_06, 0.9);
+    let detector_right = noise(FRAMES, 0x5A_6E_D0_07, 0.4);
+
+    let mut total = ProcessReport::default();
+    let mut offset = 0;
+    while offset < FRAMES {
+        let end = (offset + partition).min(FRAMES);
+        let ports = sidechain.then(|| (&detector_left[offset..end], &detector_right[offset..end]));
+        let report = effect.process(
+            EffectProcessBlock::new(
+                &mut left[offset..end],
+                &mut right[offset..end],
+                ports,
+                offset as u64,
+                &[],
+                QUANTUM,
+            )
+            .expect("bounded block"),
+        );
+        accumulate(&mut total, report);
+        offset = end;
+    }
+    assert_eq!(total.invalid_spans, 0);
+    let (state_left, state_right) = snapshot(effect.as_ref());
+    (
+        left.iter().map(|sample| sample.to_bits()).collect(),
+        right.iter().map(|sample| sample.to_bits()).collect(),
+        state_left,
+        state_right,
+    )
 }
