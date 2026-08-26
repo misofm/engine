@@ -737,8 +737,8 @@ impl SessionRuntime {
     /// contract's own construction rather than by a hand-built span a benchmark asserts is
     /// equivalent.
     ///
-    /// Off the clock, like [`SessionRuntime::arm_observation`] and every other control-side
-    /// method on this type. Returns `false` when the bounded queue was full, which a driver counts
+    /// Off the clock, like the observation arming and every other control-side method on this
+    /// type. Returns `false` when the bounded queue was full, which a driver counts
     /// rather than ignores -- a silently refused push would report the cost of automation that
     /// never happened.
     pub fn push_parameter(
