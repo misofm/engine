@@ -229,19 +229,37 @@ impl<L: Lane> Channel<L> {
     ///
     /// Only the coefficients whose parameter actually moved are recomputed, so a threshold ramp
     /// never re-enters the exponential. A lane with no ramp in flight is skipped entirely.
+    ///
+    /// # The idle-lane guard
+    ///
+    /// A ramping *block* is not a ramping *lane*: `process_block` cuts the prefix from the longest
+    /// ramp anywhere in either channel, so one automated track drags every lane of its bank and
+    /// every unmoved parameter of that track through the prefix. The guard is sound because
+    /// [`LinearRamp::next_value`] on a finished ramp (`remaining == 0`) returns `current` and
+    /// mutates nothing at all — calling it is the identity, so not calling it is too. The lane
+    /// scan reads `remaining` seven times and, when nothing is in flight, does no more; a lane
+    /// that is ramping still takes `current` for its resting parameters, which is the same `f32`
+    /// bit pattern `next_value` would have handed back.
     fn advance_ramps(&mut self, sample_rate: u32) {
         for lane in 0..L::WIDTH {
             let mut changed = 0_u8;
-            let mut values = [0.0_f32; RAMP_COUNT];
-            for (parameter, ramp) in self.ramps.iter_mut().enumerate() {
+            for (parameter, ramp) in self.ramps.iter().enumerate() {
                 if ramp[lane].is_ramping() {
                     changed |= 1 << parameter;
                 }
-                values[parameter] = ramp[lane].next_value();
             }
-            if changed != 0 {
-                design_lane(&values, sample_rate, changed, &mut self.words, lane);
+            if changed == 0 {
+                continue;
             }
+            let mut values = [0.0_f32; RAMP_COUNT];
+            for (parameter, ramp) in self.ramps.iter_mut().enumerate() {
+                values[parameter] = if changed & (1 << parameter) != 0 {
+                    ramp[lane].next_value()
+                } else {
+                    ramp[lane].current
+                };
+            }
+            design_lane(&values, sample_rate, changed, &mut self.words, lane);
         }
     }
 }
@@ -258,11 +276,27 @@ struct Coef<L: Lane> {
     makeup: L,
     /// Dry/wet mix.
     mix: L,
+    /// `mix == 1`: step 8's wet-identity select mask.
+    wet_identity: L::Mask,
+    /// `mix == 0`: the half of step 8's dry identity that the smoother cannot influence.
+    dry_mix_zero: L::Mask,
+    /// `makeup == 0`: the other half of the unity-gain dry identity.
+    makeup_zero: L::Mask,
 }
 
 impl<L: Lane> Coef<L> {
+    /// Loads the lane vectors *and* the three step-8 identity masks that are functions of them.
+    ///
+    /// The masks belong here rather than in [`one_frame`] because they are functions of
+    /// coefficient words alone, and a coefficient word cannot change inside the idle body — that
+    /// body loads `Coef` once and never redesigns (see the module documentation). The ramping body
+    /// reloads `Coef` every frame, after `advance_ramps`, so a mask is always as fresh there as the
+    /// words it came from and the two bodies still agree bit for bit. Only `smoothed == 0`, which
+    /// is a function of the recursive word, stays per frame.
     #[inline(always)]
     fn load(words: &CoefWords) -> Self {
+        let makeup = L::load(&words[COEF_MAKEUP]);
+        let mix = L::load(&words[COEF_MIX]);
         Self {
             curve: GainComputerCoef {
                 threshold_db: L::load(&words[COEF_THRESHOLD]),
@@ -272,8 +306,11 @@ impl<L: Lane> Coef<L> {
             },
             attack: L::load(&words[COEF_ATTACK]),
             release: L::load(&words[COEF_RELEASE]),
-            makeup: L::load(&words[COEF_MAKEUP]),
-            mix: L::load(&words[COEF_MIX]),
+            makeup,
+            mix,
+            wet_identity: mix.eq(L::splat(1.0)),
+            dry_mix_zero: mix.eq(L::zero()),
+            makeup_zero: makeup.eq(L::zero()),
         }
     }
 }
@@ -366,7 +403,6 @@ fn frames_loop<L: Lane, const RAMPING: bool>(
     let width = L::WIDTH;
     let ring_length = channel_left.ring_length as usize;
     let zero = L::zero();
-    let one = L::splat(1.0);
     let half = L::splat(0.5);
     let level_floor = L::splat(LEVEL_FLOOR);
     let level_min = L::splat(LEVEL_MIN_DB);
@@ -440,7 +476,7 @@ fn frames_loop<L: Lane, const RAMPING: bool>(
             &coef_left,
             &mut channel_left.gain_reduction_db,
             bypassed,
-            (zero, one, level_floor, level_min, level_max, reduction_min),
+            (zero, level_floor, level_min, level_max, reduction_min),
         );
         let output_right = one_frame(
             delayed_right,
@@ -448,7 +484,7 @@ fn frames_loop<L: Lane, const RAMPING: bool>(
             &coef_right,
             &mut channel_right.gain_reduction_db,
             bypassed,
-            (zero, one, level_floor, level_min, level_max, reduction_min),
+            (zero, level_floor, level_min, level_max, reduction_min),
         );
         output_left.store(&mut left[slot..]);
         output_right.store(&mut right[slot..]);
@@ -492,9 +528,9 @@ fn one_frame<L: Lane>(
     coef: &Coef<L>,
     gain_reduction_db: &mut L,
     bypassed: L::Mask,
-    constants: (L, L, L, L, L, L),
+    constants: (L, L, L, L, L),
 ) -> L {
-    let (zero, one, level_floor, level_min, level_max, reduction_min) = constants;
+    let (zero, level_floor, level_min, level_max, reduction_min) = constants;
 
     // 4. amplitude to level, floored and clamped into the curve's domain.
     //
@@ -539,17 +575,20 @@ fn one_frame<L: Lane>(
     // body of `gain_mix_block`, factored out for exactly this case, where `g` comes out of a
     // detector rather than out of a prepared coefficient. Using it rather than writing the three
     // lines again is what makes a compressor slot and a static gain/mix slot the same law.
+    //
+    // Six of the nine mask words step 8 used to build per frame were functions of `mix` and
+    // `makeup` only. They are now built once, in `Coef::load` — the same masks, from the same
+    // words, in the same order, so this is a hoist and not a rewrite of the identity law.
     let wet = delayed.mul(gain);
     let mixed = gain_mix_step(delayed, gain, coef.mix);
-    let wet_identity = coef.mix.eq(one);
     let dry_identity = L::mask_or(
         bypassed,
         L::mask_or(
-            coef.mix.eq(zero),
-            L::mask_and(smoothed.eq(zero), coef.makeup.eq(zero)),
+            coef.dry_mix_zero,
+            L::mask_and(smoothed.eq(zero), coef.makeup_zero),
         ),
     );
-    let output = L::select(wet_identity, wet, mixed);
+    let output = L::select(coef.wet_identity, wet, mixed);
     L::select(dry_identity, delayed, output)
 }
 
