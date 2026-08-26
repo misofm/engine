@@ -5,8 +5,8 @@ description: Author, extend, or repair a miso engine-v2 session TOML file and pr
 
 # Authoring an engine-v2 session
 
-Run every command from the repository root. Everything here is read-only: the validator writes no
-file, produces no artifact, and renders no audio.
+Run every command from the repository root. The validator writes no file of its own, produces no
+artifact, and renders no audio — canonical output goes to stdout and you redirect it yourself.
 
 ## What you are producing
 
@@ -58,11 +58,16 @@ The registry ids are `miso.parametric-eq`, `miso.compressor`, `miso.gate-expande
 `miso.true-peak-limiter`, `miso.multiband-compressor`, `miso.soft-clip`, `miso.transient-shaper`,
 `miso.delay`. Confirm against the metadata.
 
-Two traps. `fixtures/session/v1/canonical.toml` carries `effect_id = "parametric-eq"` without
-the `miso.` prefix — it
-predates the registry, and V1 does not check effect availability (issue 011), so the validator
-accepts it and later preparation would not. Take `effect_id` strings from the metadata. And
-parameter ids are not contiguous: `miso.parametric-eq` band 1 is 1–6, band 2 starts at 17.
+`fixtures/session/v1/canonical.toml` carries two traps of its own. It declares
+`effect_id = "parametric-eq"` without the `miso.` prefix — that predates the registry, and V1 does
+not check effect availability (issue 011), so the validator accepts it and later preparation would
+not; take `effect_id` strings from the metadata. And it puts its EQ in the **`dynamic` rack with
+`simd1` empty**, contradicting the #175 layout below. Four fixtures do populate `simd1`, but **none
+populates `simd2`**, so the full intended layout has no worked example yet (#175 will add
+intended-layout fixtures). Follow the layout rule, not the fixture.
+
+Parameter ids are not contiguous. `miso.parametric-eq` bands are **16 apart**: band 1 is 1–6,
+band 2 starts at 17, band 3 at 33, band 4 at 49.
 
 ## Rack semantics
 
@@ -126,6 +131,20 @@ lane detectors (the usual "stereo-linked" behaviour); `average` links by their m
   to 256 MiB for sixty-four.
 - `fader = { left_db, right_db, left_mute, right_mute }` — decibels and mutes, per lane.
 
+### Automation reaches rack effect parameters only
+
+An `automation` target is `{ entity_id, rack, effect_id, parameter_id, channel }`, all five
+required, `rack` being `simd1`/`dynamic`/`simd2`. **The only thing a session file can automate is a
+parameter of an effect in a rack**, on a track (submixes and outputs carry no racks). The builtin
+strip — `trim_db`, `hpf_hz`, `lpf_hz`, `fader_db`, `mute`, the matrix/pan coefficients — has **no
+session automation path at all**.
+
+The metadata marks `fader_db`, `mute` and `matrix_*` `"liveUpdatable": true` with smoothing. That
+is the *command plane*, a host driving them over the control protocol, not this surface — do not
+read it as permission to automate them here. Issue **#178** owns whether the schema should grow one.
+To ride level meanwhile, automate a dB parameter on a rack effect (a compressor's `makeup`) and
+declare it in `params` even at its default so the target resolves.
+
 ## Values a PASS does not vouch for
 
 The validator checks representable and preparable, not *musically intended*. These four are the
@@ -146,8 +165,10 @@ ones that pass while meaning something other than what you assumed.
 - **`boolean` and `enumeration` parameters are not free scalars.** Check the metadata's
   `domainName`: `boolean` takes exactly `0.0` or `1.0`, and `enumeration` takes a value listed in
   that parameter's `enumChoices`. Both carry `unitName: "linear"`, which is a carrier, not a licence.
-- **An automation `target.entity_id` must name a track.** Racks live only on tracks, even though
-  tracks, submixes and outputs share one ID namespace.
+- **An automation `target.entity_id` must name a track**, and the target must be a rack effect
+  parameter. There is no session path to the builtin strip — a fader or trim ride you "wrote" as
+  automation is silently not expressible, not merely unvalidated. See "Automation reaches rack
+  effect parameters only" above, and issue #178.
 
 ## The validation loop
 
