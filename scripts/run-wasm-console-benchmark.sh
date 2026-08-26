@@ -58,11 +58,12 @@ if [[ "$#" == 1 ]]; then
         --issue-loop-eq-r1) arm=issue-loop-eq-r1 ;;
         --compressor-round1) arm=compressor-round1 ;;
         --compressor-round1-baseline) arm=compressor-round1-baseline ;;
-        *) printf 'usage: %s [--after|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline]
+        --round1-composed) arm=round1-composed ;;
+        *) printf 'usage: %s [--after|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed]
 ' "$0" >&2; exit 2 ;;
     esac
 elif [[ "$#" != 0 ]]; then
-    printf 'usage: %s [--after|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline]
+    printf 'usage: %s [--after|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed]
 ' "$0" >&2
     exit 2
 fi
@@ -83,6 +84,8 @@ elif [[ "$arm" == compressor-round1 ]]; then
     artifact_dir="$root/artifacts/compressor-round1"
 elif [[ "$arm" == compressor-round1-baseline ]]; then
     artifact_dir="$root/artifacts/compressor-round1-baseline"
+elif [[ "$arm" == round1-composed ]]; then
+    artifact_dir="$root/artifacts/round1-composed"
 else
     artifact_dir="$root/artifacts/issue163-phase2-wasm-baseline"
 fi

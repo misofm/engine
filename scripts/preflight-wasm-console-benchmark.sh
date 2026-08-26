@@ -7,7 +7,7 @@
 # defect cannot consume the one authorised measurement. Nothing here is timed, and nothing here
 # instantiates the guest for anything but a shape check.
 set -euo pipefail
-[[ "$#" -le 1 ]] || { printf 'usage: %s [--after|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline]
+[[ "$#" -le 1 ]] || { printf 'usage: %s [--after|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed]
 ' "$0" >&2; exit 2; }
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$root"
@@ -32,8 +32,9 @@ case "${1:-}" in
     --issue-loop-eq-r1) arm=issue-loop-eq-r1; shift ;;
     --compressor-round1) arm=compressor-round1; shift ;;
     --compressor-round1-baseline) arm=compressor-round1-baseline; shift ;;
+    --round1-composed) arm=round1-composed; shift ;;
 esac
-[[ "$#" == 0 ]] || fail "usage: $0 [--after|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline]"
+[[ "$#" == 0 ]] || fail "usage: $0 [--after|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed]"
 
 if [[ "$arm" == after ]]; then
     artifact_dir="$root/artifacts/issue163-phase2"
@@ -47,6 +48,8 @@ elif [[ "$arm" == compressor-round1 ]]; then
     artifact_dir="$root/artifacts/compressor-round1"
 elif [[ "$arm" == compressor-round1-baseline ]]; then
     artifact_dir="$root/artifacts/compressor-round1-baseline"
+elif [[ "$arm" == round1-composed ]]; then
+    artifact_dir="$root/artifacts/round1-composed"
 else
     artifact_dir="$root/artifacts/issue163-phase2-wasm-baseline"
 fi
