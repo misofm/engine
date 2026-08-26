@@ -1,0 +1,22 @@
+[package]
+name = "miso-engine-wasm-console-guest"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# `cdylib` only, exactly as `miso-engine-wasm-gate-guest` is: this is the artifact
+# `wasm32-unknown-unknown` links into the module wasmtime instantiates. The subject it drives lives
+# in `miso-engine-console-workload`, an `rlib`, so the native leg of the comparison links the
+# identical code rather than a transcription of it.
+[lib]
+name = "miso_engine_wasm_console_guest"
+crate-type = ["cdylib"]
+
+[dependencies]
+miso-engine-bench-support.workspace = true
+miso-engine-console-workload.workspace = true
+miso-engine-lane.workspace = true
+
+[lints]
+workspace = true

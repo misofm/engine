@@ -35,10 +35,13 @@ members = [
     "hosts/miso-engine-host-web",
     "tools/miso-engine-bench-support",
     "tools/miso-engine-bench",
+    "tools/miso-engine-console-workload",
     "tools/miso-engine-audit",
     "tools/miso-engine-native-pcm-runner",
     "tools/miso-engine-wasm-gate-corpus",
     "tools/miso-engine-wasm-gate-guest",
+    "tools/miso-engine-wasm-console-guest",
+    "tools/miso-engine-wasm-console",
     "tools/miso-engine-parameter-metadata",
     "tools/miso-engine-wasm-gates",
 ]
@@ -83,6 +86,7 @@ miso-engine-host-core = { path = "crates/miso-engine-host-core", version = "0.1.
 miso-engine-native-scheduler = { path = "crates/miso-engine-native-scheduler", version = "0.1.0" }
 miso-engine-host-web = { path = "hosts/miso-engine-host-web", version = "0.1.0" }
 miso-engine-bench-support = { path = "tools/miso-engine-bench-support", version = "0.1.0" }
+miso-engine-console-workload = { path = "tools/miso-engine-console-workload", version = "0.1.0" }
 miso-engine-wasm-gate-corpus = { path = "tools/miso-engine-wasm-gate-corpus", version = "0.1.0" }
 miso-engine-wasm-gate-guest = { path = "tools/miso-engine-wasm-gate-guest", version = "0.1.0" }
 sha2 = { version = "=0.11.0", default-features = false }

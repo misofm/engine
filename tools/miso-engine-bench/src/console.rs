@@ -7,7 +7,8 @@
 //! can be asked to render, and not the shape of a mixing session. This subject measures the shape
 //! a session actually has: sixty-four tracks, each carrying the full channel strip (input
 //! trim/HPF/LPF, a parametric EQ in SIMD rack 1, a compressor in the dynamic rack, a fader and a
-//! pan matrix), rendered through a real [`PreparedRenderPlan`] at 48 kHz and a 128-frame quantum.
+//! pan matrix), rendered through a real [`miso_engine_core::realtime::PreparedRenderPlan`] at
+//! 48 kHz and a 128-frame quantum.
 //!
 //! Sixty-four tracks is eight full banks and no tail, so the per-track cost reported here is the
 //! cost of a full bank rather than the cost of a remainder. The nine-track fixture is kept as a
@@ -64,7 +65,8 @@
 //! `sixty_four_track_dispatch_only` and `sixty_four_track_idle`. Same tracks, same parameters, same
 //! sources, same binary, same run.
 //!
-//! They are derived from the checked-in model by [`apply_strip`] rather than being five more
+//! They are derived from the checked-in model by [`miso_engine_console_workload`]'s strip
+//! edits rather than being five more
 //! 900-line TOMLs, for the reason the 128-track stretch fixture already gives: nothing about an
 //! emptied rack is a new *shape* to review, and five near-duplicate fixtures would be five files
 //! that can drift apart from the one they were copied from. Every derived row says
@@ -89,282 +91,28 @@
 //! Both records carry a class-A statement asserted in-run: observing a console must not change
 //! what the console renders, so every arm of both measurements must produce byte-identical output.
 
-use core::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
-
 use miso_engine_bench_support::alloc as bench_alloc;
 use miso_engine_bench_support::digest::Sha256Sink;
 use miso_engine_bench_support::json::escape as json_escape;
 use miso_engine_bench_support::metadata::Metadata;
 use miso_engine_bench_support::stats;
 use miso_engine_bench_support::timing;
-use miso_engine_builtins::{MeterConfig, MeterHandle, MeterTap};
-use miso_engine_builtins_compiler::{MeterConsumer, MeterRequest};
-use miso_engine_core::realtime::{
-    PlanarBufferMut, PreparedRenderPlan, RenderIo, RenderTime, audit,
+use miso_engine_console_workload::{
+    ObservationArm, PlanConfig, QUANTUM, SAMPLE_RATE_HZ, SessionRuntime, WINDOW_BLOCKS, WORKLOADS,
+    Workload,
 };
-use miso_engine_effect_compiler::{
-    EffectCompileCaps, EffectControlProducerV1, EffectObservationHandleV1,
-    attach_effect_console_v1, attach_effect_observation_v1, launch_native_effect_registry_v1,
-    prepare_native_session_effects,
-};
+use miso_engine_core::realtime::audit;
+use miso_engine_effect_compiler::launch_native_effect_registry_v1;
 use miso_engine_effect_contract::{
-    AutomationSpanKind, BankWidth, EffectBankProcessBlock, EffectControlRecordV1, EffectQuality,
-    InitialParameterValue, LinkMode, NativeEffectFactory, ParameterChannel,
-    PrepareEffectBankRequest, PrepareEffectLimits, PrepareEffectRequest, PreparedAutomationSpan,
-    PreparedNativeEffectBank, PreparedPortsV1, PreparedSidechainPort,
+    AutomationSpanKind, BankWidth, EffectBankProcessBlock, EffectQuality, InitialParameterValue,
+    LinkMode, NativeEffectFactory, ParameterChannel, PrepareEffectBankRequest, PrepareEffectLimits,
+    PrepareEffectRequest, PreparedAutomationSpan, PreparedNativeEffectBank, PreparedPortsV1,
+    PreparedSidechainPort,
 };
-use miso_engine_graph::{
-    GraphBindingBlock, GraphNodeBinding, GraphNodeId, GraphRuntimeBindings, GraphRuntimeProcessor,
-    TrackStage,
-};
-use miso_engine_graph_compiler::{GraphBuiltinsCompileRequest, GraphCompiler};
 use miso_engine_lane::Backend;
-use miso_engine_session::{
-    CompileCaps, DualMonoFader, MatrixOrPan, SessionTomlV1, StableId, compile_session,
-    parse_session_toml,
-};
 
-const SAMPLE_RATE_HZ: u32 = 48_000;
-const QUANTUM: usize = 128;
 const OBSERVATIONS: usize = 1_000;
 const ISSUE: u32 = 149;
-
-/// Blocks per published meter window and per published observation window.
-///
-/// Deliberately one number for both: a gain-reduction value and the peak beside it in one console
-/// frame have to describe the same span of samples, which is the rule
-/// `attach_effect_observation_v1` states and the rule a host follows.
-const WINDOW_BLOCKS: u32 = 4;
-/// Bounded depth of each effect's live-console control channel in the observation arms.
-const CONTROL_QUEUE_DEPTH: usize = 8;
-/// Cap on declared observation taps per effect, passed to the observation attach.
-const MAXIMUM_OBSERVATION_TAPS: u32 = 8;
-/// Bounded depth of each meter stream. Drained outside the clock after every observation.
-const METER_QUEUE_DEPTH: usize = 8;
-
-const NINE_TRACK: &str = include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.toml");
-const SIXTY_FOUR_TRACK: &str =
-    include_str!("../../../fixtures/session/v1/console-sixty-four-track.toml");
-
-/// The standing session workloads, in emission order.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Workload {
-    /// The inherited ragged baseline: nine tracks, EQ only, one full bank plus a scalar tail.
-    ///
-    /// Kept because it is the fixture the sprint's prior numbers were taken on. It carries no
-    /// compressor, so its per-track cost is **not** comparable with the console workloads; that is
-    /// what `NineTrackRaggedStrip` is for.
-    NineTrackBaseline,
-    /// The same channel strip as the console fixture, truncated to nine tracks.
-    ///
-    /// This is the honest ragged-versus-full comparison: identical strip, identical parameters,
-    /// nine tracks (one full eight-lane bank plus a one-track tail) against sixty-four (eight full
-    /// banks, no tail). Any per-track difference between this row and the console row is the cost
-    /// of the ragged shape and nothing else.
-    NineTrackRaggedStrip,
-    /// The qualification session: sixty-four full channel strips, eight full banks, no tail.
-    SixtyFourTrackConsole,
-    /// The stretch fixture: the same strip at 128 tracks, synthesised from the 64-track model.
-    OneTwentyEightTrackStretch,
-    /// Decomposition (#163 item 0c): the console strip with the dynamic rack emptied.
-    ///
-    /// Sixty-four tracks of EQ and nothing else. `NineTrackBaseline` is also EQ-only, but at nine
-    /// ragged tracks on a different fixture, so it cannot be subtracted from the console row. This
-    /// row can: it is the *same* fixture, the same parameters and the same track count, with one
-    /// rack emptied, so `sixty_four_track_console - sixty_four_track_eq_only` is the compressor's
-    /// share of the block and nothing else.
-    SixtyFourTrackEqOnly,
-    /// Decomposition: the console strip with SIMD rack 1 emptied. Compressor and builtins only.
-    SixtyFourTrackCompressorOnly,
-    /// Decomposition: every rack emptied. Input trim/HPF/LPF, fader and pan matrix only.
-    SixtyFourTrackBuiltinsOnly,
-    /// Decomposition: every rack emptied **and** every builtin asked for its identity.
-    ///
-    /// Polarity off, trim 0 dB, HPF and LPF at 0 Hz, fader 0 dB unmuted, pan hard identity with no
-    /// smoothing.
-    ///
-    /// What this row is **not**: it is not the cost of dispatch alone, and the record says
-    /// `identity` rather than `dispatch` for that reason. A builtin filter at 0 Hz is *disabled*,
-    /// and `SvfSection::design` implements disabled by designing an identity section -- `m0 = 1`,
-    /// `m1 = m2 = 0`, `k = 0` (`miso-engine-builtins`, the version-1 cutoff contract). The
-    /// `enabled` flag it sets is consulted only when the plan computes its tail. The arithmetic
-    /// still runs, over the same lanes, every block. The same is true of a 0 dB fader and an
-    /// identity pan matrix.
-    ///
-    /// So this row measures: source fill, per-node graph dispatch, buffer plumbing, route
-    /// summation, **and** the whole builtins/fader/matrix chain executing identity kernels. Its
-    /// near-equality with `sixty_four_track_builtins_only` is the evidence for exactly that
-    /// reading -- the two rows differ only in the *coefficients* the same kernels run, so a large
-    /// gap between them would mean this description is wrong.
-    SixtyFourTrackDispatchOnly,
-    /// The idle row: the full console strip rendering silence.
-    ///
-    /// Honest statement of what this measures, because the name invites a stronger reading than
-    /// the number supports. The plan is the unmodified sixty-four-track console. Every effect,
-    /// builtin, fader and matrix is prepared and armed exactly as in `sixty_four_track_console`.
-    /// The only difference is the input: every track's source binding writes zeros instead of a
-    /// tone, and the arm is warmed for long enough that every recursive filter and every detector
-    /// has settled to its silent steady state before the clock starts.
-    ///
-    /// It is therefore **not** "the cost of a stopped engine". No transport gate, silence gate or
-    /// early-out exists on any render path in this tree (#163 phase 4 is the issue that would add
-    /// one), so a prepared console renders silence through the entire chain at very nearly the
-    /// cost of rendering music. That equality is the finding; this row is the number that states
-    /// it. Nothing here is scheduled, decoded or transported: the row measures render only.
-    SixtyFourTrackIdle,
-}
-
-const WORKLOADS: [Workload; 9] = [
-    Workload::NineTrackBaseline,
-    Workload::NineTrackRaggedStrip,
-    Workload::SixtyFourTrackConsole,
-    Workload::OneTwentyEightTrackStretch,
-    Workload::SixtyFourTrackEqOnly,
-    Workload::SixtyFourTrackCompressorOnly,
-    Workload::SixtyFourTrackBuiltinsOnly,
-    Workload::SixtyFourTrackDispatchOnly,
-    Workload::SixtyFourTrackIdle,
-];
-
-/// What a decomposition row does to the fixture's channel strip before it is compiled.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Strip {
-    /// The fixture is compiled exactly as written (after any track-count synthesis).
-    AsWritten,
-    /// The dynamic rack is emptied; SIMD rack 1 keeps its EQ.
-    EqOnly,
-    /// SIMD rack 1 is emptied; the dynamic rack keeps its compressor.
-    CompressorOnly,
-    /// Every rack is emptied; the builtins, fader and matrix are left as written.
-    BuiltinsOnly,
-    /// Every rack is emptied and every builtin, fader and matrix is set to its identity.
-    Identity,
-}
-
-impl Workload {
-    const fn kind(self) -> &'static str {
-        match self {
-            Self::NineTrackBaseline => "nine_track_baseline",
-            Self::NineTrackRaggedStrip => "nine_track_ragged_strip",
-            Self::SixtyFourTrackConsole => "sixty_four_track_console",
-            Self::OneTwentyEightTrackStretch => "one_twenty_eight_track_stretch",
-            Self::SixtyFourTrackEqOnly => "sixty_four_track_eq_only",
-            Self::SixtyFourTrackCompressorOnly => "sixty_four_track_compressor_only",
-            Self::SixtyFourTrackBuiltinsOnly => "sixty_four_track_builtins_only",
-            Self::SixtyFourTrackDispatchOnly => "sixty_four_track_dispatch_only",
-            Self::SixtyFourTrackIdle => "sixty_four_track_idle",
-        }
-    }
-    const fn tracks(self) -> u32 {
-        match self {
-            Self::NineTrackBaseline | Self::NineTrackRaggedStrip => 9,
-            Self::OneTwentyEightTrackStretch => 128,
-            _ => 64,
-        }
-    }
-    const fn fixture_id(self) -> &'static str {
-        match self {
-            Self::NineTrackBaseline => "fixtures/session/v1/parametric-eq-nine-track.toml",
-            _ => "fixtures/session/v1/console-sixty-four-track.toml",
-        }
-    }
-    /// `true` when the rendered model was derived in code from the named fixture.
-    ///
-    /// Two derivations qualify and both must say so: cloning the strips to a different track
-    /// count, and emptying or neutralising part of the strip for a decomposition row. A derived
-    /// model reported as a checked-in fixture would be exactly the "measuring a fiction" failure
-    /// the bench discipline exists to catch, so the flag is pinned per kind in the validator.
-    const fn synthetic(self) -> bool {
-        !matches!(self, Self::NineTrackBaseline | Self::SixtyFourTrackConsole)
-    }
-    /// The edit this row makes to the fixture's channel strip.
-    const fn strip(self) -> Strip {
-        match self {
-            Self::SixtyFourTrackEqOnly => Strip::EqOnly,
-            Self::SixtyFourTrackCompressorOnly => Strip::CompressorOnly,
-            Self::SixtyFourTrackBuiltinsOnly => Strip::BuiltinsOnly,
-            Self::SixtyFourTrackDispatchOnly => Strip::Identity,
-            _ => Strip::AsWritten,
-        }
-    }
-    /// What every track of this row actually carries, named in the record.
-    ///
-    /// Derived from the fixture for the `AsWritten` rows -- the nine-track fixture's dynamic rack
-    /// is empty as written, which is why it reads `eq` rather than `eq+compressor`.
-    const fn strip_content(self) -> &'static str {
-        match self {
-            Self::NineTrackBaseline | Self::SixtyFourTrackEqOnly => "eq",
-            Self::SixtyFourTrackCompressorOnly => "compressor",
-            Self::SixtyFourTrackBuiltinsOnly => "builtins",
-            Self::SixtyFourTrackDispatchOnly => "identity",
-            _ => "eq+compressor",
-        }
-    }
-    /// What every track's source binding writes into the graph.
-    const fn input_signal(self) -> &'static str {
-        match self {
-            Self::SixtyFourTrackIdle => "silence",
-            _ => "tone",
-        }
-    }
-    /// Untimed blocks rendered before the clock starts.
-    ///
-    /// The idle row needs a real settling period rather than a token one: every SVF, every
-    /// smoother and every compressor detector has to reach its silent steady state, or the row
-    /// would report the decay rather than the floor.
-    const fn warmup_blocks(self) -> usize {
-        match self {
-            Self::SixtyFourTrackIdle => 512,
-            _ => 0,
-        }
-    }
-}
-
-/// Applies a decomposition row's edit to a parsed session model.
-///
-/// Every edit is a *removal or a neutralisation*, never an addition: a row can only ever measure a
-/// subset of what `sixty_four_track_console` measures, which is what makes the differences between
-/// the rows subtractions rather than comparisons of two different sessions.
-fn apply_strip(model: &mut SessionTomlV1, strip: Strip) {
-    if strip == Strip::AsWritten {
-        return;
-    }
-    for track in &mut model.tracks {
-        match strip {
-            Strip::AsWritten => unreachable!("returned above"),
-            Strip::EqOnly => track.dynamic.effects.clear(),
-            Strip::CompressorOnly => track.simd1.effects.clear(),
-            Strip::BuiltinsOnly => {
-                track.simd1.effects.clear();
-                track.dynamic.effects.clear();
-            }
-            Strip::Identity => {
-                track.simd1.effects.clear();
-                track.dynamic.effects.clear();
-                for channel in [&mut track.builtins.left, &mut track.builtins.right] {
-                    channel.polarity_invert = false;
-                    channel.trim_db = 0.0;
-                    // Zero is how a builtin filter is disabled: `InputBuiltins::prepare` designs
-                    // the section from the declared frequency and treats zero as "not enabled".
-                    channel.hpf_hz = 0.0;
-                    channel.lpf_hz = 0.0;
-                }
-                track.fader = DualMonoFader {
-                    left_db: 0.0,
-                    right_db: 0.0,
-                    left_mute: false,
-                    right_mute: false,
-                };
-                track.matrix_or_pan = MatrixOrPan::Pan {
-                    left: 1.0,
-                    right: 1.0,
-                    smoothing_samples: 0,
-                };
-            }
-        }
-        track.simd2.effects.clear();
-    }
-}
 
 pub(crate) fn main() {
     // #104 F4: prove the shared audited allocator is the one serving this process. A global
@@ -507,300 +255,8 @@ impl SessionMeasurement {
             digest = self.output_sha256,
             errors = self.render_errors,
             forbidden = self.audit.total(),
-            metadata = metadata_fields(metadata),
+            metadata = metadata.record_fields(),
         )
-    }
-}
-
-/// Which console-side facilities a prepared arm carries.
-///
-/// The session rows all use [`PlanConfig::BASELINE`], which is what the console benchmark has
-/// always measured: no meter streams, no live-console control channel, no observation capacity.
-/// The #163 item 0d arms differ from it in exactly one field each, so the paired delta between two
-/// arms is the cost of that one facility.
-#[derive(Clone, Copy, PartialEq, Eq)]
-struct PlanConfig {
-    /// One meter stream per track at the post-matrix tap, as a production console prepares.
-    meters: bool,
-    /// One bounded live-console control channel per prepared effect.
-    control: bool,
-    /// Effect observation capacity, and whether its taps are armed.
-    observation: ObservationArm,
-}
-
-/// The three points of the issue #143 two-level zero, as benchmark arms.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ObservationArm {
-    /// Level 1: no lane exists. `attach_effect_observation_v1` is never called.
-    Absent,
-    /// Level 2: the lane exists and no tap is armed. One predicted branch per effect per block.
-    Unarmed,
-    /// Every declared tap of every observed effect is armed.
-    Armed,
-}
-
-impl ObservationArm {
-    const fn name(self) -> &'static str {
-        match self {
-            Self::Absent => "absent",
-            Self::Unarmed => "unarmed",
-            Self::Armed => "armed",
-        }
-    }
-}
-
-impl PlanConfig {
-    /// What every `console_session` row measures, and what the console bench has always measured.
-    const BASELINE: Self = Self {
-        meters: false,
-        control: false,
-        observation: ObservationArm::Absent,
-    };
-}
-
-/// The parsed, edited session model a workload renders.
-///
-/// Split out of `SessionRuntime` so the meter and observation arms build the *same* model the
-/// `sixty_four_track_console` row builds, through the same code, rather than a second transcription
-/// of it.
-fn console_model(workload: Workload) -> SessionTomlV1 {
-    let text = match workload {
-        Workload::NineTrackBaseline => NINE_TRACK,
-        _ => SIXTY_FOUR_TRACK,
-    };
-    let mut model = parse_session_toml(text).expect("frozen console session fixture");
-    model.automation.clear();
-    if model.tracks.len() != workload.tracks() as usize {
-        synthesise_tracks(&mut model, workload.tracks() as usize);
-    }
-    apply_strip(&mut model, workload.strip());
-    assert_eq!(
-        model.tracks.len(),
-        workload.tracks() as usize,
-        "{}: the fixture must carry exactly the declared track count",
-        workload.kind()
-    );
-    model
-}
-
-/// One meter stream per track at the post-matrix tap, in canonical track order.
-///
-/// This is the shape `miso-engine-host-core` prepares for a real console session: handles are
-/// `index + 1` so they are nonzero and stable, the tap is the one a console meters by default, and
-/// the window is [`WINDOW_BLOCKS`] blocks. Nothing here is a benchmark convenience -- an arm that
-/// metered a shape no host prepares would report a cost nobody pays.
-fn meter_requests(model: &SessionTomlV1) -> Vec<MeterRequest> {
-    let config = MeterConfig {
-        period_frames: NonZeroU32::new(WINDOW_BLOCKS * QUANTUM as u32).expect("nonzero period"),
-        peak_hold_frames: 0,
-        peak_decay_db_per_second: 0.0,
-        queue_capacity: NonZeroUsize::new(METER_QUEUE_DEPTH).expect("nonzero depth"),
-        reset_generation: 0,
-    };
-    model
-        .tracks
-        .iter()
-        .enumerate()
-        .map(|(index, track)| MeterRequest {
-            handle: MeterHandle(NonZeroU64::new(index as u64 + 1).expect("nonzero handle")),
-            track_id: track.id.as_str().to_owned(),
-            tap: MeterTap::PostMatrix,
-            config,
-        })
-        .collect()
-}
-
-struct SessionRuntime {
-    plan: PreparedRenderPlan,
-    output: Vec<f32>,
-    /// Control-side halves, held for the arms that attached them. Never touched inside the clock.
-    meter_consumers: Vec<MeterConsumer>,
-    controls: Vec<EffectControlProducerV1>,
-    observations: Vec<EffectObservationHandleV1>,
-}
-
-impl SessionRuntime {
-    fn new(workload: Workload) -> Self {
-        Self::build(workload, PlanConfig::BASELINE)
-    }
-
-    fn build(workload: Workload, config: PlanConfig) -> Self {
-        let model = console_model(workload);
-        let session = compile_session(&model, compile_caps()).expect("compiled console session");
-        let meters = if config.meters {
-            meter_requests(&model)
-        } else {
-            Vec::new()
-        };
-        let builtins = miso_engine_builtins_compiler::prepare_session_builtins(
-            &session,
-            &meters,
-            builtin_caps(),
-        )
-        .expect("prepared console builtins");
-        let registry = launch_native_effect_registry_v1().expect("launch effect registry");
-        let mut effects = prepare_native_session_effects(&session, &registry, effect_caps())
-            .expect("prepared console effects");
-        // Both attaches are the production entry points, called in the order a host calls them.
-        // The control channel is attached for every observation arm including `Absent`, so the
-        // paired delta between the arms is the observation lane and not the control queue drain.
-        let controls = if config.control {
-            attach_effect_console_v1(
-                &mut effects,
-                NonZeroUsize::new(CONTROL_QUEUE_DEPTH).expect("nonzero depth"),
-            )
-            .expect("live-console control channels")
-        } else {
-            Vec::new()
-        };
-        let observations = if config.observation == ObservationArm::Absent {
-            Vec::new()
-        } else {
-            attach_effect_observation_v1(&mut effects, MAXIMUM_OBSERVATION_TAPS, WINDOW_BLOCKS)
-                .expect("effect observation capacity")
-        };
-        let artifact = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
-            dispatch: Backend::current(),
-            plan_id: u64::from(ISSUE),
-            effects,
-            builtins,
-            caps: graph_caps(),
-        })
-        .unwrap_or_else(|_| panic!("{}: production console graph", workload.kind()));
-
-        let envelope = artifact.envelope();
-        let silent = workload.input_signal() == "silence";
-        let nodes = artifact
-            .external_binding_nodes()
-            .map(|node| GraphNodeBinding::new(node.clone(), source_binding(node, silent)))
-            .collect();
-        // `observers` stays empty on purpose: it is the *external* observer slot. A meter observer
-        // is compiler-owned and is appended to this vector by the sealed builtins artifact inside
-        // `into_bound`, which is why `meters: true` is expressed as a meter *request* and not as a
-        // hand-built observer. Driving the real path is the whole point of the arm.
-        let bound = artifact
-            .into_bound(GraphRuntimeBindings {
-                #[cfg(not(target_arch = "wasm32"))]
-                worker_lease: None,
-                envelope,
-                nodes,
-                observers: Vec::new(),
-            })
-            .unwrap_or_else(|_| panic!("{}: console graph bindings", workload.kind()));
-        assert_eq!(
-            bound.meter_consumers.len(),
-            meters.len(),
-            "{}: every requested meter stream must reach the plan",
-            workload.kind()
-        );
-
-        let mut runtime = Self {
-            plan: bound.plan,
-            output: vec![0.0; QUANTUM * 2],
-            meter_consumers: bound.meter_consumers,
-            controls,
-            observations,
-        };
-        if config.observation == ObservationArm::Armed {
-            runtime.arm_observation();
-        }
-        runtime
-    }
-
-    /// Arms every declared tap of every prepared effect, the way a subscribing console does.
-    ///
-    /// Off the clock, and through the same bounded control queue a host pushes: the records are
-    /// drained by the render thread at the top of the next block, so the arm must render at least
-    /// one untimed block after this before it is actually armed. Its warmup does.
-    fn arm_observation(&mut self) {
-        for producer in &mut self.controls {
-            for tap_index in 0..producer.descriptor.observations.len() as u32 {
-                producer
-                    .producer
-                    .try_push(EffectControlRecordV1::Observe {
-                        tap_index,
-                        armed: true,
-                        window_blocks: WINDOW_BLOCKS,
-                    })
-                    .expect("room in the bounded control queue");
-            }
-        }
-    }
-
-    /// Declared observation taps across every prepared lane. Zero for an `Absent` arm.
-    fn observation_taps(&self) -> usize {
-        self.observations
-            .iter()
-            .map(|handle| handle.readers.len())
-            .sum()
-    }
-
-    /// Observation windows this arm has published and not yet acknowledged. Outside the clock.
-    fn published_windows(&self) -> u64 {
-        self.observations
-            .iter()
-            .flat_map(|handle| handle.readers.iter())
-            .filter_map(|reader| reader.read())
-            .map(|window| window.sequence)
-            .sum()
-    }
-
-    /// Meter frames drained from every stream. Outside the clock, like every evidence step.
-    fn drain_meters(&mut self) -> u64 {
-        let mut frames = 0;
-        for stream in &mut self.meter_consumers {
-            while stream.consumer.try_pop().is_ok() {
-                frames += 1;
-            }
-        }
-        frames
-    }
-
-    fn render(&mut self, observation: u64) -> Result<(), ()> {
-        self.plan
-            .render(
-                RenderIo {
-                    input: None,
-                    output: PlanarBufferMut::try_new(&mut self.output, 2, QUANTUM, QUANTUM)
-                        .map_err(|_| ())?,
-                },
-                RenderTime {
-                    absolute_sample: observation * QUANTUM as u64,
-                },
-            )
-            .map(|_| ())
-            .map_err(|_| ())
-    }
-
-    fn hash_output(&self, hash: &mut Sha256Sink) {
-        for value in &self.output {
-            hash.update(value.to_bits().to_le_bytes());
-        }
-    }
-}
-
-/// Clones the fixture's strips up to `tracks`, keeping every track's parameters distinct.
-///
-/// The stretch fixture is synthetic and says so in its record. It is a clone of the 64-track
-/// model rather than a second checked-in session because nothing about 128 tracks is a new
-/// *shape* -- it is sixteen full banks instead of eight -- and a second 288 KiB fixture would be
-/// 128 tracks of duplicated text to review for no additional coverage.
-fn synthesise_tracks(model: &mut miso_engine_session::SessionTomlV1, tracks: usize) {
-    let template: Vec<_> = model.tracks.clone();
-    let route = model.routes[0].clone();
-    model.tracks.clear();
-    model.routes.clear();
-    for index in 0..tracks {
-        let mut track = template[index % template.len()].clone();
-        track.id = StableId::parse(&format!("ch{index:03}")).expect("synthetic track id");
-        let mut next = route.clone();
-        next.id = StableId::parse(&format!("ch{index:03}-main")).expect("synthetic route id");
-        next.source = miso_engine_session::RouteSource::Track {
-            track_id: track.id.clone(),
-            tap: miso_engine_session::SendTap::PostMatrix,
-        };
-        model.tracks.push(track);
-        model.routes.push(next);
     }
 }
 
@@ -966,7 +422,7 @@ impl HoistMeasurement {
             qd = self.digests[0],
             rd = self.digests[1],
             nd = self.digests[2],
-            metadata = metadata_fields(metadata),
+            metadata = metadata.record_fields(),
         )
     }
 }
@@ -1272,7 +728,7 @@ impl FacilityMeasurement {
 
         let observation_lanes = arms
             .iter()
-            .map(|arm| arm.observations.len())
+            .map(SessionRuntime::observation_lanes)
             .max()
             .unwrap_or(0);
         let observation_taps = arms
@@ -1356,7 +812,7 @@ impl FacilityMeasurement {
             nd = self.digests[1],
             errors = self.render_errors,
             forbidden = self.audit.total(),
-            metadata = metadata_fields(metadata),
+            metadata = metadata.record_fields(),
         )
     }
 
@@ -1436,7 +892,7 @@ impl FacilityMeasurement {
             rd = self.digests[2],
             errors = self.render_errors,
             forbidden = self.audit.total(),
-            metadata = metadata_fields(metadata),
+            metadata = metadata.record_fields(),
         )
     }
 }
@@ -1498,191 +954,5 @@ fn backend_name(backend: Backend) -> &'static str {
         Backend::Scalar => "Scalar",
         Backend::Simd4 => "Simd4",
         Backend::Simd8 => "Simd8",
-    }
-}
-
-/// The eleven runner-supplied metadata names, in the order they appear in a record.
-const METADATA_NAMES: [&str; 11] = [
-    "MISO_ENGINE_BENCH_CPU_MODEL",
-    "MISO_ENGINE_BENCH_GOVERNOR_OR_POWER_MODE",
-    "MISO_ENGINE_BENCH_RUST_VERSION",
-    "MISO_ENGINE_BENCH_LLVM_VERSION",
-    "MISO_ENGINE_BENCH_TARGET_TRIPLE",
-    "MISO_ENGINE_BENCH_TARGET_FEATURES",
-    "MISO_ENGINE_BENCH_PROFILE",
-    "MISO_ENGINE_BENCH_BACKGROUND_LOAD_NOTE",
-    "MISO_ENGINE_BENCH_MEASUREMENT_CONTROL",
-    "MISO_ENGINE_BENCH_CPU_AFFINITY",
-    "MISO_ENGINE_BENCH_CANDIDATE_COMMIT",
-];
-
-/// The record-side name of a metadata variable.
-fn metadata_key(name: &str) -> &str {
-    name.strip_prefix("MISO_ENGINE_BENCH_")
-        .expect("every metadata name carries the shared prefix")
-}
-
-/// The sorted list of metadata names this run could not resolve.
-///
-/// #104 F2: a runner that forgets to export a name produced records whose every metadata field was
-/// null and which still passed validation. Naming the gaps in the record is what makes a silent
-/// export failure visible instead of invisible.
-fn missing_metadata(metadata: &Metadata) -> Vec<String> {
-    let mut missing: Vec<String> = METADATA_NAMES
-        .iter()
-        .filter(|name| metadata.var(name).is_err())
-        .map(|name| metadata_key(name).to_ascii_lowercase())
-        .collect();
-    missing.sort();
-    missing
-}
-
-fn metadata_fields(metadata: &Metadata) -> String {
-    let field = |name: &str| match metadata.var(name) {
-        Ok(value) => format!("\"{}\"", json_escape(&value)),
-        Err(_) => "null".to_string(),
-    };
-    let missing = missing_metadata(metadata)
-        .into_iter()
-        .map(|name| format!("\"{name}\""))
-        .collect::<Vec<_>>()
-        .join(",");
-    format!(
-        concat!(
-            "\"cpu_model\":{cpu},\"os\":\"{os}\",\"governor_or_power_mode\":{governor},",
-            "\"rust_version\":{rust},\"llvm_version\":{llvm},\"target_triple\":{triple},",
-            "\"target_features\":{features},\"profile\":{profile},",
-            "\"background_load_note\":{load},\"measurement_control\":{control},",
-            "\"cpu_affinity\":{affinity},\"candidate_commit\":{commit},",
-            "\"missing_metadata\":[{missing}],",
-        ),
-        cpu = field("MISO_ENGINE_BENCH_CPU_MODEL"),
-        os = std::env::consts::OS,
-        governor = field("MISO_ENGINE_BENCH_GOVERNOR_OR_POWER_MODE"),
-        rust = field("MISO_ENGINE_BENCH_RUST_VERSION"),
-        llvm = field("MISO_ENGINE_BENCH_LLVM_VERSION"),
-        triple = field("MISO_ENGINE_BENCH_TARGET_TRIPLE"),
-        features = field("MISO_ENGINE_BENCH_TARGET_FEATURES"),
-        profile = field("MISO_ENGINE_BENCH_PROFILE"),
-        load = field("MISO_ENGINE_BENCH_BACKGROUND_LOAD_NOTE"),
-        control = field("MISO_ENGINE_BENCH_MEASUREMENT_CONTROL"),
-        affinity = field("MISO_ENGINE_BENCH_CPU_AFFINITY"),
-        commit = field("MISO_ENGINE_BENCH_CANDIDATE_COMMIT"),
-        missing = missing,
-    )
-}
-
-fn compile_caps() -> CompileCaps {
-    CompileCaps {
-        max_compiled_model_bytes: u64::MAX,
-        max_requested_runtime_bytes: u64::MAX,
-        max_single_allocation_bytes: u64::MAX,
-        max_queue_items: u64::MAX,
-        max_source_ring_frames: u64::MAX,
-        max_source_ring_bytes: u64::MAX,
-    }
-}
-
-fn builtin_caps() -> miso_engine_builtins_compiler::BuiltinCompileCaps {
-    miso_engine_builtins_compiler::BuiltinCompileCaps {
-        maximum_total_state_bytes: u64::MAX,
-        maximum_total_retained_payload_bytes: u64::MAX,
-        maximum_total_meter_items: u64::MAX,
-        maximum_total_meter_bytes: u64::MAX,
-        maximum_single_allocation_bytes: u64::MAX,
-        maximum_meter_streams: u64::MAX,
-        maximum_period_frames: u32::MAX,
-        maximum_peak_hold_frames: u32::MAX,
-        maximum_smoothing_samples: u32::MAX,
-    }
-}
-
-fn effect_caps() -> EffectCompileCaps {
-    EffectCompileCaps {
-        maximum_total_state_bytes: 1 << 28,
-        maximum_scratch_bytes: 1 << 28,
-        maximum_automation_spans_per_block: 32,
-    }
-}
-
-fn graph_caps() -> miso_engine_graph::GraphCompileCaps {
-    miso_engine_graph::GraphCompileCaps {
-        maximum_nodes: 100_000,
-        maximum_edges: 100_000,
-        maximum_schedule_items: 100_000,
-        maximum_dependency_levels: 100_000,
-        maximum_audio_buffer_samples: 100_000_000,
-        maximum_delay_samples_per_edge: 1_000_000,
-        maximum_total_delay_samples: 100_000_000,
-        maximum_graph_bytes: 100_000_000,
-        maximum_plan_bytes: 1_000_000_000,
-        maximum_single_allocation_bytes: 100_000_000,
-        maximum_finite_tail_samples: 10_000_000,
-    }
-}
-
-/// Every track input is a frozen block per observation; nothing is decoded on the render path.
-struct FrozenGraphSource {
-    left: [f32; QUANTUM],
-    right: [f32; QUANTUM],
-}
-
-impl FrozenGraphSource {
-    /// `silent` writes exact zeros rather than a scaled-down tone.
-    ///
-    /// Exact zeros because "quiet" and "silent" are different measurements: a very small nonzero
-    /// signal keeps every filter and every detector working, and on some hosts pushes them into
-    /// denormal arithmetic, which would make the idle row report a cost *higher* than the console
-    /// row for reasons that have nothing to do with idling.
-    fn new(track: usize, silent: bool) -> Self {
-        let mut left = [0.0; QUANTUM];
-        let mut right = [0.0; QUANTUM];
-        if !silent {
-            for frame in 0..QUANTUM {
-                let value = ((frame as f32) * 0.017 + track as f32 * 0.31).sin() * 0.6;
-                left[frame] = value;
-                right[frame] = -value * 0.75;
-            }
-        }
-        Self { left, right }
-    }
-}
-
-impl GraphRuntimeProcessor for FrozenGraphSource {
-    fn process(
-        &mut self,
-        block: GraphBindingBlock<'_>,
-    ) -> Result<(), miso_engine_core::realtime::RenderError> {
-        block.left.copy_from_slice(&self.left);
-        block.right.copy_from_slice(&self.right);
-        Ok(())
-    }
-}
-
-struct GraphIdentity;
-
-impl GraphRuntimeProcessor for GraphIdentity {
-    fn process(
-        &mut self,
-        _block: GraphBindingBlock<'_>,
-    ) -> Result<(), miso_engine_core::realtime::RenderError> {
-        Ok(())
-    }
-}
-
-fn source_binding(node: &GraphNodeId, silent: bool) -> Box<dyn GraphRuntimeProcessor> {
-    if let GraphNodeId::TrackStage {
-        track_id,
-        stage: TrackStage::Input,
-    } = node
-    {
-        let id = track_id.as_str();
-        let track = id
-            .trim_start_matches(|c: char| !c.is_ascii_digit())
-            .parse()
-            .unwrap_or(0);
-        Box::new(FrozenGraphSource::new(track, silent))
-    } else {
-        Box::new(GraphIdentity)
     }
 }

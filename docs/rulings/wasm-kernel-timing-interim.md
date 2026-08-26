@@ -95,7 +95,49 @@ This is recorded and not diagnosed. Diagnosing it means reading `miso-engine-lan
 [#163](https://github.com/misofm/engine-v2/issues/163) phase 2, whose whole subject is the numeric
 contract around fused multiply-add, and phase 2 should re-derive it rather than inherit this row.
 
+## Superseded by full 0b (2026-08-26)
+
+The full console arm this note said was "not a flag, and none of it is in scope for phase 0" now
+exists. Its record is `artifacts/issue163-phase2-wasm-baseline/`, taken on the phase-3 tree before
+any phase-2 contract change, and its README carries the ratio table and the bounded projection.
+
+**The requirement list was right about what was needed and wrong about why.** Requirement 1 -- "a
+`wasm32` build of the bench crate's console subject with the four compilers available on that
+target" -- reads above as structural. It was not. All four compilers build for
+`wasm32-unknown-unknown` today, unchanged; the `cfg(not(target_arch = "wasm32"))` gates were
+entries in the *bench manifest*, expressing that the bench binary is a native tool, and not a
+statement that the subject could not target wasm. No crate needed a change. The subject moved to
+`tools/miso-engine-console-workload`, which the native bench and the wasm guest both link, and the
+nine native console digests are byte-identical across the move.
+
+Requirements 2 and 3 held exactly as written and were met as written: the host owns the clock and
+times around one exported render call, and the round marker and the eleven metadata names are the
+host's and cross the ABI as records the guest never sees.
+
+**What the console arm may be quoted for.** At 64 tracks the shipped `simd128` artifact renders the
+console block in **969.58 us against 91.03 us natively -- 10.65x**, which is **36.4% of one core**
+at a 2 666.67 us block. At equal lane width the ratio is **3.10x**. Idle costs **328.59 us, 12.3%
+of a core**. Every one of the nine rows renders **byte-identical output on native Simd8, native
+Simd4 and wasm-simd128**, so cross-backend `to_bits` identity holds at console level and not only
+on the frozen lane corpus.
+
+**What it may still not be quoted for.** The same boundary this note drew. wasmtime with Cranelift
+compiles ahead of time and does not tier; a browser JIT does, on a phone that is not this desktop
+core. Every record in the new family carries `browser_field_measurement: false` alongside
+`comparable_with_console_records: false`. Real device measurement remains owner hardware and out of
+scope.
+
+**The anomaly recorded below is still undiagnosed, and the console arm reproduces its shape.**
+Native `lane_fma` being slower at Simd8 than at Simd4 is recorded here as a reason phase 2 should
+re-derive rather than inherit that row. The console arm inherits nothing, but it does show a
+related shape: halving the native lane width should cost about 2x and costs **3.39x** on the console
+row. That inflates the `native_simd4` denominators, which makes the wasm/native ratios at equal
+width an *under*statement rather than an overstatement. Phase 2's fma audit should still re-derive
+it.
+
 ## Reopening
 
-Supersede this note when full 0b lands, or when a native `lane_fma` width anomaly is explained.
-Do not supersede it with a re-run on different hardware: add a row.
+The requirement list and the phase-0b kernel measurement below stand as taken; full 0b supersedes
+only the claim that a console arm was out of reach. Supersede the remainder when a native
+`lane_fma` width anomaly is explained. Do not supersede it with a re-run on different hardware:
+add a row.

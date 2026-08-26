@@ -48,7 +48,8 @@ sole_owner 'the counted SHA-256 sink has more than one implementation' \
 #
 # The list is the conversion ratchet. It grows as the remaining benchmark subjects move onto the
 # shared harness; it never shrinks.
-timed_subjects=(tools/miso-engine-bench/src/rack.rs tools/miso-engine-audit/src/fp_env.rs)
+timed_subjects=(tools/miso-engine-bench/src/rack.rs tools/miso-engine-audit/src/fp_env.rs
+    tools/miso-engine-wasm-console/src/main.rs)
 for subject in "${timed_subjects[@]}"; do
     [[ -f "$subject" ]] || fail "converted subject is missing: $subject"
     grep -q 'timing::timed' "$subject" ||
@@ -58,15 +59,25 @@ for subject in "${timed_subjects[@]}"; do
     fi
 done
 
-# `allow(unsafe_code)` is denied workspace-wide; these five files are the approved exceptions under
+# `allow(unsafe_code)` is denied workspace-wide; these six files are the approved exceptions under
 # `tools/`, and `scripts/check-realtime-policy.sh` holds the matching list for `crates/` and
-# `hosts/`. A sixth file is a new unsafe ownership boundary and needs a decision, not a grep.
+# `hosts/`. A seventh file is a new unsafe ownership boundary and needs a decision, not a grep.
+#
+# The decision for the sixth, `miso-engine-wasm-console-guest` (#163 phase 2 step 1): it is the
+# *same* boundary this list already grants `miso-engine-wasm-gate-guest`, for the same reason and
+# with the same shape. Exporting a function from a `cdylib` requires `#[unsafe(no_mangle)]` under
+# edition 2024 and there is no safe spelling of it. Both guests are `u32`-in/`u32`-out, neither
+# dereferences a pointer, neither declares a memory contract with its host, and no engine crate
+# links either. This is not a new *kind* of exception; it is a second instance of the one already
+# approved, and it is named here rather than absorbed by a pattern so that a genuinely new
+# boundary still has to come back for a decision.
 expected_unsafe="$(printf '%s\n' \
     tools/miso-engine-bench-support/src/alloc.rs \
     tools/miso-engine-audit/src/capi.rs \
     tools/miso-engine-native-pcm-runner/src/lib.rs \
     tools/miso-engine-bench/src/protocol.rs \
-    tools/miso-engine-wasm-gate-guest/src/lib.rs | LC_ALL=C sort)"
+    tools/miso-engine-wasm-gate-guest/src/lib.rs \
+    tools/miso-engine-wasm-console-guest/src/lib.rs | LC_ALL=C sort)"
 actual_unsafe="$(grep -rlE '^#!\[allow\(unsafe_code\)\]' tools --include='*.rs' 2>/dev/null | LC_ALL=C sort || true)"
 [[ "$actual_unsafe" == "$expected_unsafe" ]] || {
     diff -u <(printf '%s\n' "$expected_unsafe") <(printf '%s\n' "$actual_unsafe") >&2 || true
