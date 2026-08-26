@@ -1,11 +1,13 @@
 # Shared definitions for the console qualification benchmark records.
 #
-# Four record shapes share one stream. `console_session` is a workload rendered through a real
+# Six record shapes share one stream. `console_session` is a workload rendered through a real
 # prepared plan; `console_hoist` is the paired-alternation comparison of the stationary-smoother
 # arms; `console_meters` and `console_observation` are the #163 item 0d paired arms of the console
-# observation facilities. `console_benchmark_record_valid_lib` dispatches on `.record`, so a record
-# that claims one shape and carries another's keys fails rather than being validated against the
-# wrong table.
+# observation facilities; `console_placement` is the #175 chain-shape row-pair; and
+# `console_automation` is the automation-active row -- one Point span per block on one track,
+# which is the only place in this stream a compressor's ramping body is executed at all.
+# `console_benchmark_record_valid_lib` dispatches on `.record`, so a record that claims one shape
+# and carries another's keys fails rather than being validated against the wrong table.
 def sha256: type == "string" and test("^[0-9a-f]{64}$");
 def nonnegative_integer: type == "number" and floor == . and . >= 0;
 def positive_integer: type == "number" and floor == . and . > 0;
@@ -22,6 +24,8 @@ def meters_keys: ["arms","backend","background_load_note","bit_identity","candid
 def placement_keys: ["arms","backend","background_load_note","bit_identity","candidate_commit","cpu_affinity","cpu_model","descriptive_only","governor_or_power_mode","issue","llvm_version","measurement_control","merged_chain_layout","merged_chain_output_sha256","merged_chain_p50_ns","merged_chain_p95_ns","merged_chain_p99_ns","merged_chain_transposes_per_block","missing_metadata","observations","os","paired_delta_median_ns","paired_delta_median_ns_per_track","pairing","percentile_method","profile","record","render_errors","render_total_forbidden_operations","round","rust_version","schema_version","split_chains_layout","split_chains_output_sha256","split_chains_p50_ns","split_chains_p95_ns","split_chains_p99_ns","split_chains_transposes_per_block","statistical_method","target_features","target_triple","tracks","units","workload_kind"];
 
 def observation_keys: ["absent_output_sha256","absent_p50_ns","absent_p95_ns","absent_p99_ns","armed_output_sha256","armed_p50_ns","armed_p95_ns","armed_p99_ns","armed_windows_published","arms","backend","background_load_note","bit_identity","candidate_commit","cpu_affinity","cpu_model","descriptive_only","governor_or_power_mode","issue","llvm_version","measurement_control","missing_metadata","observation_lanes","observation_taps","observation_window_blocks","observations","os","paired_arm_delta_median_ns","paired_capacity_delta_median_ns","pairing","percentile_method","profile","record","render_errors","render_total_forbidden_operations","round","rust_version","schema_version","statistical_method","target_features","target_triple","tracks","unarmed_output_sha256","unarmed_p50_ns","unarmed_p95_ns","unarmed_p99_ns","unarmed_windows_published","units","workload_kind"];
+
+def automation_keys: ["arms","automated_channel","automated_effect","automated_effect_id","automated_output_sha256","automated_p50_ns","automated_p95_ns","automated_p99_ns","automated_parameter","automated_parameter_index","automated_pushes_accepted","automated_track_id","automation_spans_per_block","backend","background_load_note","bit_identity","candidate_commit","cpu_affinity","cpu_model","descriptive_only","fixture_id","governor_or_power_mode","input_signal","issue","llvm_version","measurement_control","missing_metadata","observations","os","paired_control_delta_median_ns","paired_ramp_delta_median_ns","paired_ramp_delta_median_ns_per_track","pairing","percentile_method","profile","quantum_frames","quiet_output_sha256","quiet_p50_ns","quiet_p95_ns","quiet_p99_ns","record","render_errors","render_total_forbidden_operations","restated_output_sha256","restated_p50_ns","restated_p95_ns","restated_p99_ns","restated_pushes_accepted","round","rust_version","sample_rate_hz","schema_version","smoothing_samples","statistical_method","strip_content","strip_layout","synthetic_fixture","target_features","target_triple","tracks","units","workload_kind"];
 
 # The nine session workloads, in the emission order of `WORKLOADS`.
 def session_kinds: ["nine_track_baseline","nine_track_ragged_strip","one_twenty_eight_track_stretch","sixty_four_track_builtins_only","sixty_four_track_compressor_only","sixty_four_track_console","sixty_four_track_console_legacy","sixty_four_track_dispatch_only","sixty_four_track_eq_comp_simd1","sixty_four_track_eq_only","sixty_four_track_idle"];
@@ -159,6 +163,8 @@ def meters_statistical_method:
   "two arms alternated per observation; nearest-rank percentiles over per-block nanoseconds; paired delta is meters_on minus meters_off per observation; descriptive only; no threshold";
 def placement_statistical_method:
   "two arms alternated per observation; nearest-rank percentiles over per-block nanoseconds; paired delta is merged_chain minus split_chains per observation; descriptive only; no threshold";
+def automation_statistical_method:
+  "three arms alternated per observation; nearest-rank percentiles over per-block nanoseconds; ramp delta is automated minus restated and control delta is restated minus quiet, per observation; descriptive only; no threshold";
 def observation_statistical_method:
   "three arms alternated per observation; nearest-rank percentiles over per-block nanoseconds; capacity delta is unarmed minus absent and arm delta is armed minus unarmed, per observation; descriptive only; no threshold";
 
@@ -311,6 +317,58 @@ def placement_record_valid:
   .bit_identity == "split_chains == merged_chain, asserted in-run" and
   .render_errors == 0 and .render_total_forbidden_operations == 0;
 
+# The automation-active row (one Point span per block, on one track).
+#
+# Its subject is the `sixty_four_track_compressor_only` decomposition row, so it is pinned against
+# exactly the six facts that row is pinned against -- an arm repointed at another workload, or at
+# the same workload with a different strip edit, fails here rather than reporting a ramping
+# surcharge for a session nobody named. What the row adds on top of those facts is *what rides the
+# control channel*, and every part of that is pinned too: which track, which slot, which effect,
+# which parameter, which channel, how many spans per block, and how long the window the surcharge
+# is the cost of.
+#
+# The two digest rules are the row's whole claim. `quiet == restated` is the class-A statement --
+# restating a parameter at the value it already holds must move no rendered bit, which is what
+# makes the ramp delta the cost of the *window* rather than of the queue drain. `restated !=
+# automated` is the honesty half: an arm that renders the restated arm's bits opened no window and
+# measured the cost of nothing, which is precisely the failure the EQ hoist arm recorded when it
+# tried a one-ULP step.
+def automation_record_valid:
+  (keys | sort) == automation_keys and
+  .record == "console_automation" and common_shape and
+  .statistical_method == automation_statistical_method and
+  .workload_kind == "sixty_four_track_compressor_automation" and
+  # The subject row's six pinned facts, verbatim from `session_kind_shape`.
+  .tracks == 64 and .synthetic_fixture == true and
+  .strip_content == "compressor" and .strip_layout == "simd1:compressor" and
+  .input_signal == "tone" and .fixture_id == console_fixture and
+  .sample_rate_hz == 48000 and .quantum_frames == 128 and
+  .pairing == "alternating_per_observation" and
+  .arms == ["quiet","restated","automated"] and
+  # What rides the control channel.
+  .automated_track_id == "ch00" and .automated_effect_id == "comp" and
+  .automated_effect == "miso.compressor" and
+  .automated_parameter == "threshold" and .automated_parameter_index == 0 and
+  .automated_channel == "left" and
+  .automation_spans_per_block == 1 and .smoothing_samples == 64 and
+  # Every block of both pushing arms was accepted by the bounded queue. A refused push would be
+  # the cost of automation that never arrived, reported as though it had.
+  .restated_pushes_accepted == .observations and
+  .automated_pushes_accepted == .observations and
+  .units == "ns_per_block" and
+  ([.quiet_p50_ns,.quiet_p95_ns,.quiet_p99_ns,.restated_p50_ns,.restated_p95_ns,.restated_p99_ns,.automated_p50_ns,.automated_p95_ns,.automated_p99_ns] | all(positive_integer)) and
+  ordered_percentiles([.quiet_p50_ns,.quiet_p95_ns,.quiet_p99_ns]) and
+  ordered_percentiles([.restated_p50_ns,.restated_p95_ns,.restated_p99_ns]) and
+  ordered_percentiles([.automated_p50_ns,.automated_p95_ns,.automated_p99_ns]) and
+  (.paired_ramp_delta_median_ns | type == "number" and floor == .) and
+  (.paired_control_delta_median_ns | type == "number" and floor == .) and
+  (.paired_ramp_delta_median_ns_per_track | type == "number") and
+  ([.quiet_output_sha256,.restated_output_sha256,.automated_output_sha256] | all(sha256)) and
+  .quiet_output_sha256 == .restated_output_sha256 and
+  .restated_output_sha256 != .automated_output_sha256 and
+  .bit_identity == "quiet == restated, asserted in-run" and
+  .render_errors == 0 and .render_total_forbidden_operations == 0;
+
 def console_benchmark_record_valid_lib:
   type == "object" and (.record | type == "string") and
   (if .record == "console_session" then session_record_valid
@@ -318,4 +376,5 @@ def console_benchmark_record_valid_lib:
    elif .record == "console_meters" then meters_record_valid
    elif .record == "console_observation" then observation_record_valid
    elif .record == "console_placement" then placement_record_valid
+   elif .record == "console_automation" then automation_record_valid
    else false end);
