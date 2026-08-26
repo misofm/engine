@@ -48,7 +48,7 @@ use miso_engine_effect_compiler::{
     attach_effect_console_v1, attach_effect_observation_v1, launch_native_effect_registry_v1,
     prepare_native_session_effects,
 };
-use miso_engine_effect_contract::EffectControlRecordV1;
+use miso_engine_effect_contract::{EffectControlRecordV1, ParameterChannel};
 use miso_engine_graph::{
     GraphBindingBlock, GraphNodeBinding, GraphNodeId, GraphRuntimeBindings, GraphRuntimeProcessor,
     TrackStage,
@@ -697,6 +697,65 @@ impl SessionRuntime {
                     .expect("room in the bounded control queue");
             }
         }
+    }
+
+    /// The live-console control channel of the alphabetically first track carrying `effect_id`.
+    ///
+    /// "One track" has to be chosen by a stable key rather than by taking the first matching
+    /// channel: [`attach_effect_console_v1`] returns channels in prepared-entry order, which is
+    /// sorted by effect id and not by track, so a positional choice would silently address a
+    /// different track when the entry set changes. The track id is the session-stable identity, so
+    /// picking its minimum is deterministic across every build of every fixture.
+    ///
+    /// Returns `None` when the arm attached no control channels (a `control: false` plan) or when
+    /// no prepared effect carries that id.
+    #[must_use]
+    pub fn first_track_control_channel(&self, effect_id: &str) -> Option<usize> {
+        self.controls
+            .iter()
+            .enumerate()
+            .filter(|(_, producer)| producer.descriptor.id.as_str() == effect_id)
+            .min_by(|(_, left), (_, right)| left.track_id.cmp(&right.track_id))
+            .map(|(index, _)| index)
+    }
+
+    /// Session-stable `(track_id, effect_id)` identity of one prepared control channel.
+    ///
+    /// So a record can *name* the track and slot it automated instead of asserting one in prose.
+    #[must_use]
+    pub fn control_identity(&self, channel: usize) -> (&str, &str) {
+        let producer = &self.controls[channel];
+        (&producer.track_id, &producer.effect_id)
+    }
+
+    /// Pushes one live-console parameter retarget into one prepared effect's bounded queue.
+    ///
+    /// This is the production control path and nothing else: the record is drained by the render
+    /// thread at the top of the next block and staged as a single
+    /// [`AutomationSpanKind::Point`](miso_engine_effect_contract::AutomationSpanKind) span at that
+    /// block's first sample. One call per block therefore *is* "one Point span per block", by the
+    /// contract's own construction rather than by a hand-built span a benchmark asserts is
+    /// equivalent.
+    ///
+    /// Off the clock, like [`SessionRuntime::arm_observation`] and every other control-side
+    /// method on this type. Returns `false` when the bounded queue was full, which a driver counts
+    /// rather than ignores -- a silently refused push would report the cost of automation that
+    /// never happened.
+    pub fn push_parameter(
+        &mut self,
+        channel: usize,
+        parameter_index: u32,
+        parameter_channel: ParameterChannel,
+        value: f32,
+    ) -> bool {
+        self.controls[channel]
+            .producer
+            .try_push(EffectControlRecordV1::Parameter {
+                parameter_index,
+                channel: parameter_channel,
+                value,
+            })
+            .is_ok()
     }
 
     /// Prepared observation lanes. Zero for an `Absent` arm.
