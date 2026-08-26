@@ -2,10 +2,11 @@
 # Console validator mutation suite. Hermetic: no workload, no timing, no binary.
 #
 # A validator that has never been shown to reject anything is decoration. Every rule below is
-# mutated in turn and asserted red, so the aggregate's guarantees -- twenty-six records, both
+# mutated in turn and asserted red, so the aggregate's guarantees -- thirty-four records, both
 # rounds, one host, one admissibility state, the decomposition rows' pinned strip contents, and
 # the class-A statements that neither the stationary smoother nor a meter nor an armed observation
-# tap changes a rendered bit -- are properties the suite can actually lose.
+# tap nor a restated parameter changes a rendered bit -- are properties the suite can actually
+# lose.
 set -euo pipefail
 [[ "$#" -le 1 ]] || { printf 'usage: %s\n' "$0" >&2; exit 2; }
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -144,16 +145,45 @@ placement=$(jq -cn --arg a "$digest_a" --argjson m "$metadata" '$m + {
   statistical_method: "two arms alternated per observation; nearest-rank percentiles over per-block nanoseconds; paired delta is merged_chain minus split_chains per observation; descriptive only; no threshold"
 }')
 
+# The automation-active row. Three arms on one control channel; only one of them opens a window.
+automation=$(jq -cn --arg a "$digest_a" --arg b "$digest_b" --argjson m "$metadata" '$m + {
+  schema_version: 1, issue: 149, record: "console_automation",
+  workload_kind: "sixty_four_track_compressor_automation", tracks: 64,
+  synthetic_fixture: true, strip_content: "compressor", strip_layout: "simd1:compressor",
+  input_signal: "tone", fixture_id: "fixtures/session/v1/console-sixty-four-track-intended.toml",
+  round: 1, backend: "Simd8", sample_rate_hz: 48000, quantum_frames: 128,
+  observations: 1000, pairing: "alternating_per_observation",
+  arms: ["quiet","restated","automated"],
+  automated_track_id: "ch00", automated_effect_id: "comp",
+  automated_effect: "miso.compressor", automated_parameter: "threshold",
+  automated_parameter_index: 0, automated_channel: "left",
+  automation_spans_per_block: 1, smoothing_samples: 64,
+  restated_pushes_accepted: 1000, automated_pushes_accepted: 1000,
+  units: "ns_per_block", percentile_method: "nearest_rank",
+  quiet_p50_ns: 73329, quiet_p95_ns: 75000, quiet_p99_ns: 76000,
+  restated_p50_ns: 74101, restated_p95_ns: 76000, restated_p99_ns: 77000,
+  automated_p50_ns: 76685, automated_p95_ns: 78000, automated_p99_ns: 79000,
+  paired_ramp_delta_median_ns: 2585,
+  paired_ramp_delta_median_ns_per_track: 40.390625,
+  paired_control_delta_median_ns: 811,
+  quiet_output_sha256: $a, restated_output_sha256: $a, automated_output_sha256: $b,
+  bit_identity: "quiet == restated, asserted in-run",
+  render_errors: 0, render_total_forbidden_operations: 0,
+  descriptive_only: true,
+  statistical_method: "three arms alternated per observation; nearest-rank percentiles over per-block nanoseconds; ramp delta is automated minus restated and control delta is restated minus quiet, per observation; descriptive only; no threshold"
+}')
+
 expect_accept "$session" 'the base session record'
 expect_accept "$hoist" 'the base hoist record'
 expect_accept "$meters" 'the base meters record'
 expect_accept "$observation" 'the base observation record'
 expect_accept "$placement" 'the base placement record'
+expect_accept "$automation" 'the base automation record'
 
 # ---------------------------------------------------------------------------------------------
 # Per-key structural mutations: every key is load-bearing in both directions.
 # ---------------------------------------------------------------------------------------------
-for base in "$session" "$hoist" "$meters" "$observation" "$placement"; do
+for base in "$session" "$hoist" "$meters" "$observation" "$placement" "$automation"; do
     kind=$(printf '%s' "$base" | jq -r '.record')
     while read -r field; do
         expect_reject "$(printf '%s' "$base" | jq -c "del(.\"$field\")")" "$kind without $field"
@@ -371,6 +401,54 @@ placement_mutation '.split_chains_p50_ns = 999999' 'placement percentiles out of
 placement_mutation '.merged_chain_p99_ns = 1' 'merged placement percentiles out of order'
 placement_mutation '.render_errors = 1' 'a placement pair that produced render errors'
 placement_mutation '.render_total_forbidden_operations = 1' 'a placement pair that allocated on the render path'
+
+# The automation-active row. Its two digest rules are the whole claim, so both are mutated in both
+# directions: a row whose restated arm moved a bit is not measuring a window, and a row whose
+# automated arm moved none is measuring nothing.
+automation_mutation() { expect_reject "$(printf '%s' "$automation" | jq -c "$1")" "$2"; }
+
+automation_mutation '.arms = ["quiet","automated","restated"]' 'automation arms in the wrong order'
+automation_mutation '.arms = ["quiet","restated"]' 'an automation row missing its restated control'
+automation_mutation '.pairing = "sequential"' 'an automation row that was not alternated'
+automation_mutation '.record = "console_session"' 'an automation record claiming the session shape'
+automation_mutation '.workload_kind = "sixty_four_track_compressor_only"' \
+    'an automation row claiming the quiet decomposition kind'
+automation_mutation '.units = "us_per_block"' 'the wrong automation unit'
+automation_mutation '.statistical_method = "three arms alternated per observation"' \
+    'an automation method sentence that drifted'
+# The subject row's six pinned facts. A row repointed at another workload reports a ramping
+# surcharge for a session nobody named.
+automation_mutation '.strip_content = "eq+compressor+limiter"' 'an automation row claiming the full strip'
+automation_mutation '.strip_layout = "simd1:eq+compressor,simd2:limiter"' 'an automation row claiming the intended layout'
+automation_mutation '.synthetic_fixture = false' 'a derived automation row claiming a checked-in fixture'
+automation_mutation '.input_signal = "silence"' 'an automation row claiming silence while rendering a tone'
+automation_mutation '.tracks = 9' 'an automation row that is not eight full banks'
+automation_mutation '.fixture_id = "fixtures/session/v1/console-sixty-four-track.toml"' \
+    'an automation row claiming the retired fixture'
+# What rides the control channel.
+automation_mutation '.automation_spans_per_block = 64' 'a row claiming one span per block while sending sixty-four'
+automation_mutation '.automated_parameter = "makeup"' 'a row that named the wrong automated parameter'
+automation_mutation '.automated_parameter_index = 5' 'a parameter index that does not match its name'
+automation_mutation '.automated_channel = "both"' 'a channel the compressor does not accept'
+automation_mutation '.automated_effect = "miso.parametric-eq"' 'a row that automated the wrong effect'
+automation_mutation '.smoothing_samples = 32' 'a window length that is not the descriptor'"'"'s'
+automation_mutation '.restated_pushes_accepted = 999' 'a restated arm whose queue refused a push'
+automation_mutation '.automated_pushes_accepted = 0' 'an automated arm that pushed nothing'
+# The class-A statement and its honesty half.
+automation_mutation '.restated_output_sha256 = "'"$digest_c"'"' \
+    'a restated arm that moved a rendered bit'
+automation_mutation '.automated_output_sha256 = "'"$digest_a"'"' \
+    'an automated arm that rendered the restated arm'"'"'s bits'
+automation_mutation '.bit_identity = "quiet != restated, asserted in-run"' \
+    'an automation row that inverted its own class-A sentence'
+automation_mutation '.bit_identity = "asserted"' 'an automation bit-identity sentence that drifted'
+automation_mutation '.quiet_p99_ns = 1' 'automation percentiles out of order'
+automation_mutation '.automated_p50_ns = 999999' 'automated percentiles out of order'
+automation_mutation '.render_errors = 1' 'an automation row that produced render errors'
+automation_mutation '.render_total_forbidden_operations = 1' 'an automation row that allocated on the render path'
+# And the honest form is accepted, so every pin above is shown to be a pin rather than a blanket
+# refusal of the shape.
+expect_accept "$automation" 'the honest automation row'
 # A record that claims one shape and carries another's keys.
 expect_reject "$(printf '%s' "$placement" | jq -c '.record = "console_meters"')" \
     'a placement record claiming to be a meters record'
@@ -383,7 +461,7 @@ expect_accept "$(printf '%s' "$placement" | jq -c '.split_chains_transposes_per_
 
 records=$(jq -cn --argjson session "$session" --argjson hoist "$hoist" \
     --argjson meters "$meters" --argjson observation "$observation" \
-    --argjson placement "$placement" \
+    --argjson placement "$placement" --argjson automation "$automation" \
     --arg a "$digest_a" --arg b "$digest_b" '
   def console_fixture: "fixtures/session/v1/console-sixty-four-track-intended.toml";
   def legacy_fixture: "fixtures/session/v1/console-sixty-four-track.toml";
@@ -431,30 +509,33 @@ records=$(jq -cn --argjson session "$session" --argjson hoist "$hoist" \
         | .moving_output_sha256 = $b),
       ($meters | .round = $round),
       ($observation | .round = $round),
-      ($placement | .round = $round)
+      ($placement | .round = $round),
+      ($automation | .round = $round)
   ) ]')
 
-expect_aggregate_accept "$(printf '%s' "$records" | jq -c '.[]')" 'the thirty-two-record set'
+expect_aggregate_accept "$(printf '%s' "$records" | jq -c '.[]')" 'the thirty-four-record set'
 
 # Index map of the frozen emission order: 0-10 are round one's eleven session rows, 11-12 its two
-# hoist rows, 13 its meters row, 14 its observation row and 15 its placement row-pair; 16-31
-# repeat for round two.
-expect_aggregate_reject "$(printf '%s' "$records" | jq -c 'del(.[0]) | .[]')" 'thirty-one records'
-expect_aggregate_reject "$(printf '%s' "$records" | jq -c '. as $r | ($r + [$r[15]]) | .[]')" 'thirty-three records'
+# hoist rows, 13 its meters row, 14 its observation row, 15 its placement row-pair and 16 its
+# automation-active row; 17-33 repeat for round two.
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c 'del(.[0]) | .[]')" 'thirty-three records'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c '. as $r | ($r + [$r[16]]) | .[]')" 'thirty-five records'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '. as $r | ($r + [$r[0]]) | .[]')" 'a duplicated record'
-expect_aggregate_reject "$(printf '%s' "$records" | jq -c '.[16].round = 1 | .[]')" 'a workload measured twice in one round'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c '.[17].round = 1 | .[]')" 'a workload measured twice in one round'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '.[0].cpu_model = "Another CPU" | .[]')" 'records from two hosts'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '.[0].candidate_commit = "ffffffffffffffffffffffffffffffffffffffff" | .[]')" 'records from two commits'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '.[0].backend = "Scalar" | .[]')" 'records from two backends'
 # Round one and round two must render the same bytes: they are two measurements of one workload.
-expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '.[16].output_sha256 = $c | .[]')" 'a workload whose rounds rendered different output'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '.[17].output_sha256 = $c | .[]')" 'a workload whose rounds rendered different output'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.record == "console_session")] | .[]')" 'a set with no hoist rows'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.record != "console_meters")] | .[]')" 'a set with no meters arm'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.record != "console_observation")] | .[]')" 'a set with no observation arm'
-expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '.[29].meters_off_output_sha256 = $c | .[29].meters_on_output_sha256 = $c | .[]')" 'a meters arm whose rounds rendered different output'
-expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '.[30].absent_output_sha256 = $c | .[30].unarmed_output_sha256 = $c | .[30].armed_output_sha256 = $c | .[]')" 'an observation arm whose rounds rendered different output'
-expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '.[31].split_chains_output_sha256 = $c | .[31].merged_chain_output_sha256 = $c | .[]')" 'a placement pair whose rounds rendered different output'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '.[30].meters_off_output_sha256 = $c | .[30].meters_on_output_sha256 = $c | .[]')" 'a meters arm whose rounds rendered different output'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '.[31].absent_output_sha256 = $c | .[31].unarmed_output_sha256 = $c | .[31].armed_output_sha256 = $c | .[]')" 'an observation arm whose rounds rendered different output'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '.[32].split_chains_output_sha256 = $c | .[32].merged_chain_output_sha256 = $c | .[]')" 'a placement pair whose rounds rendered different output'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.record != "console_placement")] | .[]')" 'a set with no placement row-pair'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.record != "console_automation")] | .[]')" 'a set with no automation-active row'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '.[33].quiet_output_sha256 = $c | .[33].restated_output_sha256 = $c | .[]')" 'an automation row whose rounds rendered different output'
 # #144 item 13: two admissibility states in one accepted run is the comparison the control field
 # exists to prevent, and a run that never stated one at all is not an accepted run.
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '.[0].measurement_control = "uncontrolled" | .[0].cpu_affinity = "uncontrolled" | .[0].background_load_note = "uncontrolled; MISO_ENGINE_BENCH_ALLOW_UNCONTROLLED=1; waived affinity_unavailable" | .[]')" 'a run mixing controlled and uncontrolled records'
@@ -464,6 +545,7 @@ expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.worklo
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.workload_kind != "sixty_four_track_idle")] | .[]')" 'a set missing the idle row'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.workload_kind != "sixty_four_track_console_legacy")] | .[]')" 'a set missing the transition row'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.workload_kind != "sixty_four_track_eq_comp_simd1")] | .[]')" 'a set missing the chain-shape row'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.workload_kind != "sixty_four_track_compressor_automation")] | .[]')" 'a set missing the automation-active row'
 
 if [[ "$failures" != 0 ]]; then
     printf 'console benchmark validator suite: %s FAILED case(s)\n' "$failures" >&2

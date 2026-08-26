@@ -90,6 +90,24 @@
 //!
 //! Both records carry a class-A statement asserted in-run: observing a console must not change
 //! what the console renders, so every arm of both measurements must produce byte-identical output.
+//!
+//! # The automation-active row (`console_automation`)
+//!
+//! Every session row above renders with automation **cleared**: `console_model` empties the
+//! fixture's table unconditionally, and both fixture gates assert the standing sessions declare
+//! none. The compressor's ramping body is therefore dead code in the whole standing table, and the
+//! one arm that does deliver spans -- `console_hoist` -- drives banks of parametric EQs. No
+//! compressor in this benchmark had ever seen an automation span, so no change to a compressor's
+//! ramping path could move a number in it.
+//!
+//! `console_automation` closes that gap with the console's real traffic shape: **one Point span
+//! per block, on one track**, pushed through the same bounded live-console queue a host pushes
+//! through, into a real prepared plan. Its three arms carry the identical control channel and
+//! differ only in what rides it -- `quiet` pushes nothing, `restated` restates the value in force
+//! (the #144 hoist settles it, so no window opens), `automated` moves it every block. The paired
+//! ramp delta is `automated - restated`: the same queue drain, the same span count, and a
+//! smoothing window open in one arm and not the other. `quiet == restated` is the class-A
+//! statement, asserted in-run.
 
 use miso_engine_bench_support::alloc as bench_alloc;
 use miso_engine_bench_support::digest::Sha256Sink;
@@ -149,6 +167,8 @@ pub(crate) fn main() {
     );
     let placement = PlacementMeasurement::run();
     println!("{}", placement.record(round, backend, metadata));
+    let automation = AutomationMeasurement::run();
+    println!("{}", automation.record(round, backend, metadata));
 }
 
 fn round_from_runner() -> u32 {
@@ -1065,6 +1085,332 @@ impl PlacementMeasurement {
 const PLACEMENT_STATISTICAL_METHOD: &str = "two arms alternated per observation; nearest-rank \
 percentiles over per-block nanoseconds; paired delta is merged_chain minus split_chains per \
 observation; descriptive only; no threshold";
+
+// ---------------------------------------------------------------------------------------------
+// The compressor-automation measurement: the ramping body no standing row can see.
+// ---------------------------------------------------------------------------------------------
+
+/// The workload every automation arm renders: the compressor decomposition row.
+///
+/// Deliberately the decomposition row and not the whole strip. The subject here is the
+/// compressor's *ramping body*, and a row that also carries an EQ and a limiter buries a
+/// microsecond of it under two other effects' steady-state cost.
+const AUTOMATION_WORKLOAD: Workload = Workload::SixtyFourTrackCompressorOnly;
+
+/// The plan every automation arm is prepared with: the live-console control channel and nothing
+/// else.
+///
+/// All three arms carry the channel, so the deltas between them are the *traffic* and never the
+/// queue's presence -- the same discipline `console_observation` uses for its three arms.
+const AUTOMATION_CONFIG: PlanConfig = PlanConfig {
+    meters: false,
+    control: true,
+    observation: ObservationArm::Absent,
+};
+
+/// The effect the arms address, by contract id rather than by session slot name.
+const AUTOMATION_EFFECT_ID: &str = "miso.compressor";
+
+/// Descriptor index of the compressor's `threshold`. An index into the parameter table, never the
+/// wire `parameter_id`.
+const AUTOMATION_PARAMETER_INDEX: u32 = 0;
+
+/// The parameter's descriptor name, recorded so a reader does not have to resolve the index.
+const AUTOMATION_PARAMETER_NAME: &str = "threshold";
+
+/// The threshold, in dB, every arm is settled at before the clock starts.
+///
+/// Inside the descriptor's `[-80, 0]` domain and far enough below the source tone (0.6 peak, less
+/// a -6 dB input trim) that the static curve is genuinely engaged. A threshold the signal never
+/// reaches would make the arms differ in a coefficient nothing reads, and the in-run inequality
+/// gate below would catch it -- but as a failure, after a run.
+const AUTOMATION_BASE_DB: f32 = -24.0;
+
+/// The dB step the automated arm alternates over, either side of the base.
+///
+/// It alternates `base + step`, `base - step`, `base + step`, ... rather than restating the base
+/// on every other block, so that **every** timed block opens a real smoothing window. Alternating
+/// against the base itself would let the #144 stationary hoist settle half the blocks and the row
+/// would report half the ramping cost it claims to.
+const AUTOMATION_STEP_DB: f32 = 0.5;
+
+/// Which traffic pattern an automation arm delivers.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AutomationArm {
+    /// The channel is attached and nothing is ever pushed. The standing baseline.
+    Quiet,
+    /// The threshold restated at the value it already holds, every block. The #144 hoist settles
+    /// it, so no window ever opens and this arm must render `quiet`'s bits exactly.
+    Restated,
+    /// The threshold moved every block, so a `Linear 64` window is open on every block of the run.
+    Automated,
+}
+
+const AUTOMATION_ARMS: [AutomationArm; 3] = [
+    AutomationArm::Quiet,
+    AutomationArm::Restated,
+    AutomationArm::Automated,
+];
+
+impl AutomationArm {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Quiet => "quiet",
+            Self::Restated => "restated",
+            Self::Automated => "automated",
+        }
+    }
+
+    /// The value this arm pushes before block `observation`, or `None` if it pushes nothing.
+    fn value(self, observation: u64) -> Option<f32> {
+        match self {
+            Self::Quiet => None,
+            Self::Restated => Some(AUTOMATION_BASE_DB),
+            Self::Automated => Some(if observation.is_multiple_of(2) {
+                AUTOMATION_BASE_DB + AUTOMATION_STEP_DB
+            } else {
+                AUTOMATION_BASE_DB - AUTOMATION_STEP_DB
+            }),
+        }
+    }
+}
+
+/// The automation-active row: one Point span per block, on one track, through a real plan.
+///
+/// # Why this measurement had to be added
+///
+/// Every existing row of this stream renders with automation cleared -- `console_model` clears the
+/// fixture's table unconditionally and both fixture gates assert the standing sessions declare
+/// none -- so the compressor's ramping body is dead code in all of them. The one arm that does
+/// deliver automation, `console_hoist`, drives banks of *parametric EQs*; no compressor in this
+/// benchmark has ever seen a span. A change to the compressor's ramping path is therefore
+/// invisible to the whole standing table, which is exactly the gap this row closes.
+///
+/// # What one Point span per block on one track actually exercises
+///
+/// Sixty-four tracks is eight eight-lane banks. Automating one track's left channel puts a
+/// `Linear 64` window in flight on one lane of one bank, and the compressor cuts its block into a
+/// ramping prefix and an idle remainder from the longest ramp anywhere in *either* channel of that
+/// bank. So one automated lane drags fifteen unautomated channel-lanes of that bank through the
+/// ramping body for sixty-four of the block's hundred and twenty-eight frames, while the other
+/// seven banks stay entirely on the idle body. That asymmetry is the realistic console case -- a
+/// console rides one parameter on one track, not sixty-four at once -- and it is the case whose
+/// cost no other row in this file reports.
+struct AutomationMeasurement {
+    ns_per_block: [Vec<u64>; 3],
+    digests: [String; 3],
+    /// Pushes the bounded control queue accepted, per arm. A refused push is a measured lie.
+    accepted: [u64; 3],
+    track_id: String,
+    effect_id: String,
+    audit: audit::AuditSnapshot,
+    render_errors: u64,
+}
+
+impl AutomationMeasurement {
+    fn run() -> Self {
+        let mut arms: Vec<SessionRuntime> = AUTOMATION_ARMS
+            .iter()
+            .map(|_| SessionRuntime::build(AUTOMATION_WORKLOAD, AUTOMATION_CONFIG))
+            .collect();
+        let channel = arms[0]
+            .first_track_control_channel(AUTOMATION_EFFECT_ID)
+            .expect("the compressor decomposition row prepares a compressor control channel");
+        let (track_id, effect_id) = {
+            let (track, effect) = arms[0].control_identity(channel);
+            (track.to_owned(), effect.to_owned())
+        };
+
+        // Untimed pre-roll. Every arm -- `quiet` included -- is settled at the same base threshold
+        // before the clock starts, which is what makes `quiet` and `restated` comparable at all:
+        // `restated` can only be bit-identical to a baseline that holds the value it restates.
+        // Sixty-four blocks is far more than the sixty-four *samples* the window takes.
+        for arm in &mut arms {
+            assert!(
+                arm.push_parameter(
+                    channel,
+                    AUTOMATION_PARAMETER_INDEX,
+                    ParameterChannel::Left,
+                    AUTOMATION_BASE_DB,
+                ),
+                "the bounded control queue refused the pre-roll push"
+            );
+            for observation in 0..64 {
+                let _ = arm.render(observation);
+            }
+        }
+
+        let mut hashes: Vec<Sha256Sink> =
+            AUTOMATION_ARMS.iter().map(|_| Sha256Sink::new()).collect();
+        let mut samples: Vec<Vec<u64>> = AUTOMATION_ARMS
+            .iter()
+            .map(|_| Vec::with_capacity(OBSERVATIONS))
+            .collect();
+        let mut accepted = [0_u64; 3];
+        let mut render_errors = 0_u64;
+        audit::warm_up();
+        audit::reset();
+        for observation in 0..OBSERVATIONS as u64 {
+            for (index, arm) in arms.iter_mut().enumerate() {
+                // The push is control-plane work and stays outside the clock, exactly where a host
+                // does it. What the timed region pays for is the render-side drain, the span it
+                // stages and the ramping body that span opens -- which is the cost under test.
+                if let Some(value) = AUTOMATION_ARMS[index].value(observation)
+                    && arm.push_parameter(
+                        channel,
+                        AUTOMATION_PARAMETER_INDEX,
+                        ParameterChannel::Left,
+                        value,
+                    )
+                {
+                    accepted[index] += 1;
+                }
+                let (elapsed_ns, result) = timing::timed(|| arm.render(observation));
+                if result.is_err() {
+                    render_errors += 1;
+                }
+                samples[index].push(elapsed_ns);
+            }
+            for (index, arm) in arms.iter_mut().enumerate() {
+                arm.hash_output(&mut hashes[index]);
+            }
+        }
+        let snapshot = audit::snapshot();
+        let digests: Vec<String> = hashes.into_iter().map(Sha256Sink::finish_hex).collect();
+
+        // The class-A statement, asserted in-run. Restating a parameter at the value it already
+        // holds is by construction a no-op, and the #144 hoist is what makes it free; if it ever
+        // moved a rendered bit, this run says so before it reports a number. This is the first
+        // time that statement is made about the *compressor*, through a real prepared plan.
+        assert_eq!(
+            digests[0], digests[1],
+            "restating the compressor's threshold changed rendered output: the hoist is not \
+             bit-identical"
+        );
+        // And the honesty half: an arm that renders the restated arm's bits is not automating.
+        assert_ne!(
+            digests[1], digests[2],
+            "the automated arm rendered the restated arm's output: no window ever opened"
+        );
+        // A silently refused push would report the cost of automation that never arrived.
+        assert_eq!(accepted[0], 0, "the quiet arm pushed a record");
+        for index in [1, 2] {
+            assert_eq!(
+                accepted[index],
+                OBSERVATIONS as u64,
+                "the {} arm's bounded control queue refused a push",
+                AUTOMATION_ARMS[index].name()
+            );
+        }
+
+        Self {
+            ns_per_block: [samples[0].clone(), samples[1].clone(), samples[2].clone()],
+            digests: [digests[0].clone(), digests[1].clone(), digests[2].clone()],
+            accepted,
+            track_id,
+            effect_id,
+            audit: snapshot,
+            render_errors,
+        }
+    }
+
+    fn record(&self, round: u32, backend: Backend, metadata: &Metadata) -> String {
+        let quiet = Percentiles::from_samples(&self.ns_per_block[0]);
+        let restated = Percentiles::from_samples(&self.ns_per_block[1]);
+        let automated = Percentiles::from_samples(&self.ns_per_block[2]);
+        // The row's headline: the ramping surcharge, taken against an arm that delivers the *same*
+        // control traffic and differs only in whether that traffic opens a window.
+        let ramp = paired_median(&self.ns_per_block[2], &self.ns_per_block[1]);
+        let control = paired_median(&self.ns_per_block[1], &self.ns_per_block[0]);
+        let tracks = f64::from(AUTOMATION_WORKLOAD.tracks());
+        format!(
+            concat!(
+                "{{\"schema_version\":1,\"issue\":{issue},\"record\":\"console_automation\",",
+                "\"workload_kind\":\"sixty_four_track_compressor_automation\",\"tracks\":{tracks},",
+                "\"synthetic_fixture\":{synthetic},\"strip_content\":\"{strip}\",",
+                "\"strip_layout\":\"{layout}\",\"input_signal\":\"{signal}\",",
+                "\"fixture_id\":\"{fixture}\",\"round\":{round},\"backend\":\"{backend}\",",
+                "\"sample_rate_hz\":{rate},\"quantum_frames\":{quantum},",
+                "\"observations\":{obs},\"pairing\":\"alternating_per_observation\",",
+                "\"arms\":[\"{arm0}\",\"{arm1}\",\"{arm2}\"],",
+                "\"automated_track_id\":\"{track}\",\"automated_effect_id\":\"{effect}\",",
+                "\"automated_effect\":\"{contract}\",\"automated_parameter\":\"{parameter}\",",
+                "\"automated_parameter_index\":{parameter_index},",
+                "\"automated_channel\":\"left\",\"automation_spans_per_block\":1,",
+                "\"smoothing_samples\":{smoothing},",
+                "\"restated_pushes_accepted\":{restated_pushes},",
+                "\"automated_pushes_accepted\":{automated_pushes},",
+                "\"units\":\"ns_per_block\",\"percentile_method\":\"nearest_rank\",",
+                "\"quiet_p50_ns\":{q50},\"quiet_p95_ns\":{q95},\"quiet_p99_ns\":{q99},",
+                "\"restated_p50_ns\":{r50},\"restated_p95_ns\":{r95},\"restated_p99_ns\":{r99},",
+                "\"automated_p50_ns\":{a50},\"automated_p95_ns\":{a95},\"automated_p99_ns\":{a99},",
+                "\"paired_ramp_delta_median_ns\":{ramp},",
+                "\"paired_ramp_delta_median_ns_per_track\":{ramp_per_track},",
+                "\"paired_control_delta_median_ns\":{control},",
+                "\"quiet_output_sha256\":\"{qd}\",\"restated_output_sha256\":\"{rd}\",",
+                "\"automated_output_sha256\":\"{ad}\",",
+                "\"bit_identity\":\"quiet == restated, asserted in-run\",",
+                "\"render_errors\":{errors},\"render_total_forbidden_operations\":{forbidden},",
+                "{metadata}",
+                "\"descriptive_only\":true,",
+                "\"statistical_method\":\"{method}\"}}"
+            ),
+            issue = ISSUE,
+            tracks = AUTOMATION_WORKLOAD.tracks(),
+            synthetic = AUTOMATION_WORKLOAD.synthetic(),
+            strip = AUTOMATION_WORKLOAD.strip_content(),
+            layout = AUTOMATION_WORKLOAD.strip_layout(),
+            signal = AUTOMATION_WORKLOAD.input_signal(),
+            fixture = json_escape(AUTOMATION_WORKLOAD.fixture_id()),
+            round = round,
+            backend = backend_name(backend),
+            rate = SAMPLE_RATE_HZ,
+            quantum = QUANTUM,
+            obs = OBSERVATIONS,
+            arm0 = AUTOMATION_ARMS[0].name(),
+            arm1 = AUTOMATION_ARMS[1].name(),
+            arm2 = AUTOMATION_ARMS[2].name(),
+            track = json_escape(&self.track_id),
+            effect = json_escape(&self.effect_id),
+            contract = AUTOMATION_EFFECT_ID,
+            parameter = AUTOMATION_PARAMETER_NAME,
+            parameter_index = AUTOMATION_PARAMETER_INDEX,
+            smoothing = AUTOMATION_SMOOTHING_SAMPLES,
+            restated_pushes = self.accepted[1],
+            automated_pushes = self.accepted[2],
+            q50 = quiet.p50,
+            q95 = quiet.p95,
+            q99 = quiet.p99,
+            r50 = restated.p50,
+            r95 = restated.p95,
+            r99 = restated.p99,
+            a50 = automated.p50,
+            a95 = automated.p95,
+            a99 = automated.p99,
+            ramp = ramp,
+            ramp_per_track = format_f64(ramp as f64 / tracks),
+            control = control,
+            qd = self.digests[0],
+            rd = self.digests[1],
+            ad = self.digests[2],
+            errors = self.render_errors,
+            forbidden = self.audit.total(),
+            metadata = metadata.record_fields(),
+            method = AUTOMATION_STATISTICAL_METHOD,
+        )
+    }
+}
+
+/// The compressor descriptor's `smoothing_samples` for every automatable parameter.
+///
+/// Recorded so the row states the window length its surcharge is the cost of, rather than leaving
+/// a reader to look it up in the effect crate.
+const AUTOMATION_SMOOTHING_SAMPLES: u32 = 64;
+
+/// Pinned verbatim in the validator, for the reason every method sentence in this stream is.
+const AUTOMATION_STATISTICAL_METHOD: &str = "three arms alternated per observation; nearest-rank \
+percentiles over per-block nanoseconds; ramp delta is automated minus restated and control delta \
+is restated minus quiet, per observation; descriptive only; no threshold";
 
 /// The median of the per-observation differences `left[i] - right[i]`.
 ///

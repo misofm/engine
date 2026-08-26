@@ -1,8 +1,9 @@
 # Aggregate validator: eleven session workloads, two hoist workloads, one meters arm, one
-# observation arm and one placement row-pair, each in rounds one and two -- thirty-two records.
+# observation arm, one placement row-pair and one automation-active row, each in rounds one and
+# two -- thirty-four records.
 include "console-benchmark-record-lib";
 . as $records |
-(type == "array") and length == 32 and
+(type == "array") and length == 34 and
 all(.[]; console_benchmark_record_valid_lib) and
 ([.[] | select(.record == "console_session") | .workload_kind] | unique | sort) == session_kinds and
 ([.[] | select(.record == "console_hoist") | .workload_kind] | unique | sort)
@@ -12,8 +13,11 @@ all(.[]; console_benchmark_record_valid_lib) and
 ([.[] | select(.record == "console_meters")] | length) == 2 and
 ([.[] | select(.record == "console_observation")] | length) == 2 and
 ([.[] | select(.record == "console_placement")] | length) == 2 and
+([.[] | select(.record == "console_automation")] | length) == 2 and
+([.[] | select(.record == "console_automation") | .workload_kind] | unique)
+  == ["sixty_four_track_compressor_automation"] and
 ([.[] | .round] | unique | sort) == [1,2] and
-([.[] | [.record,.workload_kind,.round] | join(":")] | unique | length) == 32 and
+([.[] | [.record,.workload_kind,.round] | join(":")] | unique | length) == 34 and
 (group_by([.record,.workload_kind]) | all(map(.round) | sort == [1,2])) and
 # Round one and round two are two measurements of one frozen workload, so the rendered output must
 # be identical across them. A drifting digest means the rounds are not measuring the same thing.
