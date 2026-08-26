@@ -13,7 +13,20 @@ cd "$root"
 
 fail() { printf 'wasm console preflight failure: %s\n' "$1" >&2; exit 1; }
 
-artifact_dir="$root/artifacts/issue163-phase2-wasm-baseline"
+# Mirrors `run-wasm-console-benchmark.sh`'s two arms: default is the pre-change browser baseline,
+# `--after` is the same nine rows on the unfused tree (issue #163 phase 2).
+arm=baseline
+if [[ "${1:-}" == "--after" ]]; then
+    arm=after
+    shift
+fi
+[[ "$#" == 0 ]] || fail "usage: $0 [--after]"
+
+if [[ "$arm" == after ]]; then
+    artifact_dir="$root/artifacts/issue163-phase2"
+else
+    artifact_dir="$root/artifacts/issue163-phase2-wasm-baseline"
+fi
 for name in wasm-console-benchmark.raw.jsonl wasm-console-benchmark.accepted.jsonl \
     wasm-console-benchmark.stderr.log wasm-console-benchmark.disposition.json; do
     path="$artifact_dir/$name"

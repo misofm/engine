@@ -35,14 +35,40 @@
 # The console runner's preconditions, sourced from the same file, so a wasm console number and a
 # native console number were taken under the same rules. A run that cannot be controlled refuses
 # and names the control it lacked.
+#
+# # The two arms
+#
+# The default arm writes `artifacts/issue163-phase2-wasm-baseline`: the browser baseline taken
+# *before* the phase-2 contract change, which is what the owner's ruling asked for first so that
+# the change had a premise to be judged against.
+#
+# `--after` writes `artifacts/issue163-phase2`: the same nine rows on the unfused tree. The two are
+# separate sealed directories rather than one re-run for the reason every one-shot in this repo is
+# -- a consumed measurement describes the tree that produced it -- and for one more that is
+# specific to phase 2: the contract change moves every `output_sha256`, so the two records cannot
+# be reconciled row by row on digests, only on timings. The digest columns are expected to differ
+# and `docs/rulings/unfused-multiply-add-audit.md` is the evidence that the new ones are intended.
 set -euo pipefail
-[[ "$#" == 0 ]] || { printf 'usage: %s\n' "$0" >&2; exit 2; }
+arm=baseline
+if [[ "$#" == 1 ]]; then
+    case "$1" in
+        --after) arm=after ;;
+        *) printf 'usage: %s [--after]\n' "$0" >&2; exit 2 ;;
+    esac
+elif [[ "$#" != 0 ]]; then
+    printf 'usage: %s [--after]\n' "$0" >&2
+    exit 2
+fi
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$root"
 # shellcheck source=scripts/check-bench-preconditions.sh
 source "$root/scripts/check-bench-preconditions.sh"
 
-artifact_dir="$root/artifacts/issue163-phase2-wasm-baseline"
+if [[ "$arm" == after ]]; then
+    artifact_dir="$root/artifacts/issue163-phase2"
+else
+    artifact_dir="$root/artifacts/issue163-phase2-wasm-baseline"
+fi
 raw="$artifact_dir/wasm-console-benchmark.raw.jsonl"
 accepted="$artifact_dir/wasm-console-benchmark.accepted.jsonl"
 stderr_log="$artifact_dir/wasm-console-benchmark.stderr.log"
