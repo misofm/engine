@@ -160,6 +160,25 @@ This record is the **last sealed authority of the current 64-track fixture famil
 introduces the intended-placement strip (EQ+comp on simd1, limiter on simd2), and that strip
 becomes the standing qualification fixture; these records retire to history at that boundary.
 
+**Authority transferred 2026-08-26 (#175).** The standing fixture is now
+`fixtures/session/v1/console-sixty-four-track-intended.toml` and the standing record family is
+`artifacts/issue175/`. This directory is history: its numbers describe a fixture the console
+bench no longer measures as its primary row.
+
+What may still be quoted from here, and what may not:
+
+* **Quotable.** Every timing in this record, against the `sixty_four_track_console_legacy` row of
+  `artifacts/issue175/`, which is this exact fixture re-measured on the standing tree. That row
+  exists for this one comparison and goes away after it.
+* **Quotable.** The decomposition digests. `sixty_four_track_eq_only`,
+  `sixty_four_track_compressor_only`, `sixty_four_track_builtins_only`,
+  `sixty_four_track_dispatch_only` and `sixty_four_track_idle` render byte-identically in
+  `artifacts/issue175/` -- the handover did not perturb them, and the `compressor_only` row is
+  byte-identical *across a rack move*, which is #166 restated as evidence.
+* **Not quotable.** The `sixty_four_track_console` row's 95.10 us as "the 64-track console
+  number". That name now denotes the intended strip, which carries a true-peak limiter this
+  fixture has on no track. Compare against `sixty_four_track_console_legacy` instead.
+
 ## Links
 
 * Ruling: `docs/rulings/unfused-multiply-add-audit.md`; issue #163 phase 2, owner GO 2026-08-26.

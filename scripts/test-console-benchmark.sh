@@ -55,7 +55,7 @@ metadata=$(jq -cn '{
 session=$(jq -cn --arg a "$digest_a" --argjson m "$metadata" '$m + {
   schema_version: 1, issue: 149, record: "console_session",
   workload_kind: "sixty_four_track_console", tracks: 64, synthetic_fixture: false,
-  fixture_id: "fixtures/session/v1/console-sixty-four-track.toml",
+  fixture_id: "fixtures/session/v1/console-sixty-four-track-intended.toml",
   round: 1, backend: "Simd8", sample_rate_hz: 48000, quantum_frames: 128, observations: 1000,
   units: "us_per_block", percentile_method: "nearest_rank",
   min_us_per_block: 281.9, p50_us_per_block: 283.4, p95_us_per_block: 285.4,
@@ -63,7 +63,8 @@ session=$(jq -cn --arg a "$digest_a" --argjson m "$metadata" '$m + {
   min_ns_per_block: 281915, p50_ns_per_block: 283459, p95_ns_per_block: 285482,
   p99_ns_per_block: 295702, max_ns_per_block: 297245,
   output_sha256: $a, render_errors: 0, render_total_forbidden_operations: 0,
-  descriptive_only: true, strip_content: "eq+compressor", input_signal: "tone",
+  descriptive_only: true, strip_content: "eq+compressor+limiter",
+  strip_layout: "simd1:eq+compressor,simd2:limiter", input_signal: "tone",
   statistical_method: "nearest-rank percentiles over per-block nanoseconds; one warmup pass and two measured rounds; descriptive only; no threshold"
 }')
 
@@ -123,15 +124,36 @@ observation=$(jq -cn --arg a "$digest_a" --argjson m "$metadata" '$m + {
   statistical_method: "three arms alternated per observation; nearest-rank percentiles over per-block nanoseconds; capacity delta is unarmed minus absent and arm delta is armed minus unarmed, per observation; descriptive only; no threshold"
 }')
 
+# The #175 chain-shape row-pair. Two arms carrying identical arithmetic in two rack layouts.
+placement=$(jq -cn --arg a "$digest_a" --argjson m "$metadata" '$m + {
+  schema_version: 1, issue: 149, record: "console_placement",
+  workload_kind: "sixty_four_track_placement", tracks: 64, round: 1, backend: "Simd8",
+  observations: 1000, pairing: "alternating_per_observation",
+  arms: ["split_chains","merged_chain"],
+  split_chains_layout: "simd1:eq,dynamic:compressor",
+  merged_chain_layout: "simd1:eq+compressor",
+  units: "ns_per_block", percentile_method: "nearest_rank",
+  split_chains_p50_ns: 94510, split_chains_p95_ns: 96000, split_chains_p99_ns: 97000,
+  merged_chain_p50_ns: 95522, merged_chain_p95_ns: 97000, merged_chain_p99_ns: 98000,
+  paired_delta_median_ns: 1032, paired_delta_median_ns_per_track: 16.125,
+  split_chains_transposes_per_block: 24, merged_chain_transposes_per_block: 24,
+  split_chains_output_sha256: $a, merged_chain_output_sha256: $a,
+  bit_identity: "split_chains == merged_chain, asserted in-run",
+  render_errors: 0, render_total_forbidden_operations: 0,
+  descriptive_only: true,
+  statistical_method: "two arms alternated per observation; nearest-rank percentiles over per-block nanoseconds; paired delta is merged_chain minus split_chains per observation; descriptive only; no threshold"
+}')
+
 expect_accept "$session" 'the base session record'
 expect_accept "$hoist" 'the base hoist record'
 expect_accept "$meters" 'the base meters record'
 expect_accept "$observation" 'the base observation record'
+expect_accept "$placement" 'the base placement record'
 
 # ---------------------------------------------------------------------------------------------
 # Per-key structural mutations: every key is load-bearing in both directions.
 # ---------------------------------------------------------------------------------------------
-for base in "$session" "$hoist" "$meters" "$observation"; do
+for base in "$session" "$hoist" "$meters" "$observation" "$placement"; do
     kind=$(printf '%s' "$base" | jq -r '.record')
     while read -r field; do
         expect_reject "$(printf '%s' "$base" | jq -c "del(.\"$field\")")" "$kind without $field"
@@ -198,9 +220,36 @@ session_mutation '.workload_kind = "sixty_four_track_idle" | .synthetic_fixture 
 session_mutation '.workload_kind = "sixty_four_track_idle" | .synthetic_fixture = true | .input_signal = "silence" | .strip_content = "identity"' \
     'an idle row that emptied the strip it claims to idle'
 session_mutation '.strip_content = "eq+compressor+saturator"' 'a strip content no workload declares'
+
+# #175: `strip_layout` is pinned per kind for the same reason every other row fact is. Two rows in
+# this stream now carry the same `strip_content` and differ only in where those effects sit, so a
+# layout that drifted from what the subject built would silently turn the chain-shape row-pair
+# into a comparison of one layout with itself.
+session_mutation '.strip_layout = "simd1:eq+compressor"' \
+    'a standing console row claiming the limiter-free layout'
+session_mutation '.strip_layout = "simd1:eq,dynamic:compressor"' \
+    'a standing console row claiming the retired layout'
+session_mutation '.strip_layout = "simd2:eq+compressor,simd1:limiter"' \
+    'a layout naming racks in an order the strip does not run'
+session_mutation '.strip_layout = "dynamic:eq+compressor+limiter"' \
+    'a layout no workload declares'
+# The transition row and the chain-shape row: identical `strip_content`, different everything else
+# that matters. Each must reject the other's identity.
+session_mutation '.workload_kind = "sixty_four_track_console_legacy" | .strip_content = "eq+compressor" | .strip_layout = "simd1:eq+compressor"' \
+    'a legacy row claiming the merged chain shape'
+session_mutation '.workload_kind = "sixty_four_track_console_legacy" | .strip_content = "eq+compressor" | .strip_layout = "simd1:eq,dynamic:compressor"' \
+    'a legacy row rendered from the standing fixture'
+session_mutation '.workload_kind = "sixty_four_track_eq_comp_simd1" | .strip_content = "eq+compressor" | .strip_layout = "simd1:eq,dynamic:compressor" | .synthetic_fixture = true' \
+    'a chain-shape row claiming the retired layout'
+session_mutation '.workload_kind = "sixty_four_track_eq_comp_simd1" | .strip_content = "eq+compressor" | .strip_layout = "simd1:eq+compressor" | .synthetic_fixture = false' \
+    'a derived chain-shape row reported as a checked-in fixture'
+expect_accept "$(printf '%s' "$session" | jq -c --arg f "fixtures/session/v1/console-sixty-four-track.toml" '.workload_kind = "sixty_four_track_console_legacy" | .strip_content = "eq+compressor" | .strip_layout = "simd1:eq,dynamic:compressor" | .fixture_id = $f')" \
+    'an honest transition row'
+expect_accept "$(printf '%s' "$session" | jq -c '.workload_kind = "sixty_four_track_eq_comp_simd1" | .strip_content = "eq+compressor" | .strip_layout = "simd1:eq+compressor" | .synthetic_fixture = true')" \
+    'an honest chain-shape row'
 session_mutation '.input_signal = "noise"' 'an input signal no workload declares'
 # Accept the honest forms, so the pins above are shown to be pins and not a blanket refusal.
-expect_accept "$(printf '%s' "$session" | jq -c '.workload_kind = "sixty_four_track_eq_only" | .strip_content = "eq" | .synthetic_fixture = true')" \
+expect_accept "$(printf '%s' "$session" | jq -c '.workload_kind = "sixty_four_track_eq_only" | .strip_content = "eq" | .strip_layout = "simd1:eq" | .synthetic_fixture = true')" \
     'an honest eq-only row'
 expect_accept "$(printf '%s' "$session" | jq -c '.workload_kind = "sixty_four_track_idle" | .synthetic_fixture = true | .input_signal = "silence"')" \
     'an honest idle row'
@@ -293,29 +342,76 @@ expect_reject "$(printf '%s' "$session" | jq -c '.record = "console_meters"')" \
 # ---------------------------------------------------------------------------------------------
 # Aggregate mutations.
 # ---------------------------------------------------------------------------------------------
+placement_mutation() { expect_reject "$(printf '%s' "$placement" | jq -c "$1")" "$2"; }
+
+# The #175 row-pair's own claims. Two of them exist nowhere else in this stream.
+placement_mutation '.arms = ["merged_chain","split_chains"]' 'placement arms in the wrong order'
+placement_mutation '.arms = ["split_chains","merged_chain","limiter"]' 'a third placement arm'
+placement_mutation '.pairing = "sequential"' 'a placement pair that was not alternated'
+placement_mutation '.workload_kind = "sixty_four_track_console"' 'a placement record claiming a session kind'
+placement_mutation '.tracks = 9' 'a placement pair that is not eight full banks'
+placement_mutation '.units = "us_per_block"' 'the wrong placement unit'
+placement_mutation '.statistical_method = "two arms alternated per observation"' \
+    'a placement record whose method sentence drifted'
+# The layouts *are* the comparison. A pair that names one layout twice is comparing nothing.
+placement_mutation '.split_chains_layout = "simd1:eq+compressor"' 'a pair whose two arms name one layout'
+placement_mutation '.merged_chain_layout = "simd1:eq,dynamic:compressor"' 'a merged arm claiming the split layout'
+placement_mutation '.split_chains_layout = "simd1:eq+compressor,simd2:limiter"' 'a split arm carrying the limiter'
+# The class-A claim. A placement change that moved a rendered bit is not a chain-shape measurement,
+# and this is the one record in the stream that would notice.
+placement_mutation '.merged_chain_output_sha256 = "'"$digest_b"'"' \
+    'a placement pair whose two layouts rendered different output'
+placement_mutation '.bit_identity = "asserted"' 'a placement record whose bit-identity sentence drifted'
+placement_mutation '.bit_identity = "split_chains != merged_chain, asserted in-run"' \
+    'a placement record claiming its layouts differ'
+# The transpose counts are what make the delta explicable rather than merely reported.
+placement_mutation '.split_chains_transposes_per_block = 0' 'an arm that transposed nothing'
+placement_mutation '.merged_chain_transposes_per_block = 0' 'a merged arm that transposed nothing'
+placement_mutation '.split_chains_p50_ns = 999999' 'placement percentiles out of order'
+placement_mutation '.merged_chain_p99_ns = 1' 'merged placement percentiles out of order'
+placement_mutation '.render_errors = 1' 'a placement pair that produced render errors'
+placement_mutation '.render_total_forbidden_operations = 1' 'a placement pair that allocated on the render path'
+# A record that claims one shape and carries another's keys.
+expect_reject "$(printf '%s' "$placement" | jq -c '.record = "console_meters"')" \
+    'a placement record claiming to be a meters record'
+expect_reject "$(printf '%s' "$meters" | jq -c '.record = "console_placement"')" \
+    'a meters record claiming to be a placement record'
+# The saving the hypothesis predicted would show up here first: an arm pair whose transpose counts
+# differ is a real finding, not a malformed record, so it must still validate.
+expect_accept "$(printf '%s' "$placement" | jq -c '.split_chains_transposes_per_block = 32 | .paired_delta_median_ns = -4000 | .paired_delta_median_ns_per_track = -62.5')" \
+    'a placement pair that did save a round-trip'
+
 records=$(jq -cn --argjson session "$session" --argjson hoist "$hoist" \
     --argjson meters "$meters" --argjson observation "$observation" \
+    --argjson placement "$placement" \
     --arg a "$digest_a" --arg b "$digest_b" '
-  def console_fixture: "fixtures/session/v1/console-sixty-four-track.toml";
+  def console_fixture: "fixtures/session/v1/console-sixty-four-track-intended.toml";
+  def legacy_fixture: "fixtures/session/v1/console-sixty-four-track.toml";
+  def intended_layout: "simd1:eq+compressor,simd2:limiter";
   def sessions: [
-    {kind: "nine_track_baseline", tracks: 9, synthetic: false, strip: "eq", signal: "tone",
-     fixture: "fixtures/session/v1/parametric-eq-nine-track.toml", digest: "1"},
-    {kind: "nine_track_ragged_strip", tracks: 9, synthetic: true, strip: "eq+compressor",
-     signal: "tone", fixture: console_fixture, digest: "2"},
-    {kind: "sixty_four_track_console", tracks: 64, synthetic: false, strip: "eq+compressor",
-     signal: "tone", fixture: console_fixture, digest: "3"},
-    {kind: "one_twenty_eight_track_stretch", tracks: 128, synthetic: true, strip: "eq+compressor",
-     signal: "tone", fixture: console_fixture, digest: "4"},
+    {kind: "nine_track_baseline", tracks: 9, synthetic: false, strip: "eq", layout: "simd1:eq",
+     signal: "tone", fixture: "fixtures/session/v1/parametric-eq-nine-track.toml", digest: "1"},
+    {kind: "nine_track_ragged_strip", tracks: 9, synthetic: true, strip: "eq+compressor+limiter",
+     layout: intended_layout, signal: "tone", fixture: console_fixture, digest: "2"},
+    {kind: "sixty_four_track_console", tracks: 64, synthetic: false, strip: "eq+compressor+limiter",
+     layout: intended_layout, signal: "tone", fixture: console_fixture, digest: "3"},
+    {kind: "one_twenty_eight_track_stretch", tracks: 128, synthetic: true,
+     strip: "eq+compressor+limiter", layout: intended_layout, signal: "tone",
+     fixture: console_fixture, digest: "4"},
     {kind: "sixty_four_track_eq_only", tracks: 64, synthetic: true, strip: "eq",
-     signal: "tone", fixture: console_fixture, digest: "5"},
+     layout: "simd1:eq", signal: "tone", fixture: console_fixture, digest: "5"},
     {kind: "sixty_four_track_compressor_only", tracks: 64, synthetic: true, strip: "compressor",
-     signal: "tone", fixture: console_fixture, digest: "6"},
+     layout: "simd1:compressor", signal: "tone", fixture: console_fixture, digest: "6"},
     {kind: "sixty_four_track_builtins_only", tracks: 64, synthetic: true, strip: "builtins",
-     signal: "tone", fixture: console_fixture, digest: "7"},
+     layout: "builtins", signal: "tone", fixture: console_fixture, digest: "7"},
     {kind: "sixty_four_track_dispatch_only", tracks: 64, synthetic: true, strip: "identity",
-     signal: "tone", fixture: console_fixture, digest: "8"},
-    {kind: "sixty_four_track_idle", tracks: 64, synthetic: true, strip: "eq+compressor",
-     signal: "silence", fixture: console_fixture, digest: "9"}
+     layout: "builtins", signal: "tone", fixture: console_fixture, digest: "8"},
+    {kind: "sixty_four_track_idle", tracks: 64, synthetic: true, strip: "eq+compressor+limiter",
+     layout: intended_layout, signal: "silence", fixture: console_fixture, digest: "9"},
+    {kind: "sixty_four_track_console_legacy", tracks: 64, synthetic: false, strip: "eq+compressor",
+     layout: "simd1:eq,dynamic:compressor", signal: "tone", fixture: legacy_fixture, digest: "e"},
+    {kind: "sixty_four_track_eq_comp_simd1", tracks: 64, synthetic: true, strip: "eq+compressor",
+     layout: "simd1:eq+compressor", signal: "tone", fixture: console_fixture, digest: "f"}
   ];
   def hoists: [
     {kind: "nine_track_ragged_strip", tracks: 9, digest: "a"},
@@ -325,7 +421,7 @@ records=$(jq -cn --argjson session "$session" --argjson hoist "$hoist" \
       (sessions[] | . as $s | $session
         | .workload_kind = $s.kind | .tracks = $s.tracks
         | .synthetic_fixture = $s.synthetic
-        | .strip_content = $s.strip | .input_signal = $s.signal
+        | .strip_content = $s.strip | .strip_layout = $s.layout | .input_signal = $s.signal
         | .fixture_id = $s.fixture | .round = $round
         | .output_sha256 = ($a[0:63] + $s.digest)),
       (hoists[] | . as $h | $hoist
@@ -334,34 +430,40 @@ records=$(jq -cn --argjson session "$session" --argjson hoist "$hoist" \
         | .restated_output_sha256 = ($a[0:63] + $h.digest)
         | .moving_output_sha256 = $b),
       ($meters | .round = $round),
-      ($observation | .round = $round)
+      ($observation | .round = $round),
+      ($placement | .round = $round)
   ) ]')
 
-expect_aggregate_accept "$(printf '%s' "$records" | jq -c '.[]')" 'the twenty-six-record set'
+expect_aggregate_accept "$(printf '%s' "$records" | jq -c '.[]')" 'the thirty-two-record set'
 
-# Index map of the frozen emission order: 0-8 are round one's nine session rows, 9-10 its two
-# hoist rows, 11 its meters row and 12 its observation row; 13-25 repeat for round two.
-expect_aggregate_reject "$(printf '%s' "$records" | jq -c 'del(.[0]) | .[]')" 'twenty-five records'
-expect_aggregate_reject "$(printf '%s' "$records" | jq -c '. as $r | ($r + [$r[12]]) | .[]')" 'twenty-seven records'
+# Index map of the frozen emission order: 0-10 are round one's eleven session rows, 11-12 its two
+# hoist rows, 13 its meters row, 14 its observation row and 15 its placement row-pair; 16-31
+# repeat for round two.
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c 'del(.[0]) | .[]')" 'thirty-one records'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c '. as $r | ($r + [$r[15]]) | .[]')" 'thirty-three records'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '. as $r | ($r + [$r[0]]) | .[]')" 'a duplicated record'
-expect_aggregate_reject "$(printf '%s' "$records" | jq -c '.[13].round = 1 | .[]')" 'a workload measured twice in one round'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c '.[16].round = 1 | .[]')" 'a workload measured twice in one round'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '.[0].cpu_model = "Another CPU" | .[]')" 'records from two hosts'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '.[0].candidate_commit = "ffffffffffffffffffffffffffffffffffffffff" | .[]')" 'records from two commits'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '.[0].backend = "Scalar" | .[]')" 'records from two backends'
 # Round one and round two must render the same bytes: they are two measurements of one workload.
-expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '.[13].output_sha256 = $c | .[]')" 'a workload whose rounds rendered different output'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '.[16].output_sha256 = $c | .[]')" 'a workload whose rounds rendered different output'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.record == "console_session")] | .[]')" 'a set with no hoist rows'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.record != "console_meters")] | .[]')" 'a set with no meters arm'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.record != "console_observation")] | .[]')" 'a set with no observation arm'
-expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '.[24].meters_off_output_sha256 = $c | .[24].meters_on_output_sha256 = $c | .[]')" 'a meters arm whose rounds rendered different output'
-expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '.[25].absent_output_sha256 = $c | .[25].unarmed_output_sha256 = $c | .[25].armed_output_sha256 = $c | .[]')" 'an observation arm whose rounds rendered different output'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '.[29].meters_off_output_sha256 = $c | .[29].meters_on_output_sha256 = $c | .[]')" 'a meters arm whose rounds rendered different output'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '.[30].absent_output_sha256 = $c | .[30].unarmed_output_sha256 = $c | .[30].armed_output_sha256 = $c | .[]')" 'an observation arm whose rounds rendered different output'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '.[31].split_chains_output_sha256 = $c | .[31].merged_chain_output_sha256 = $c | .[]')" 'a placement pair whose rounds rendered different output'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.record != "console_placement")] | .[]')" 'a set with no placement row-pair'
 # #144 item 13: two admissibility states in one accepted run is the comparison the control field
 # exists to prevent, and a run that never stated one at all is not an accepted run.
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '.[0].measurement_control = "uncontrolled" | .[0].cpu_affinity = "uncontrolled" | .[0].background_load_note = "uncontrolled; MISO_ENGINE_BENCH_ALLOW_UNCONTROLLED=1; waived affinity_unavailable" | .[]')" 'a run mixing controlled and uncontrolled records'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | .measurement_control = null | .cpu_affinity = null | .missing_metadata = ["cpu_affinity","measurement_control"]] | .[]')" 'a run that never stated its admissibility'
-expect_aggregate_reject "$(printf '%s' "$records" | jq -c '.[0].workload_kind = "sixty_four_track_console" | .[0].tracks = 64 | .[0].synthetic_fixture = false | .[0].fixture_id = "fixtures/session/v1/console-sixty-four-track.toml" | .[0].strip_content = "eq+compressor" | .[]')" 'a set missing a declared workload'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c '.[0].workload_kind = "sixty_four_track_console" | .[0].tracks = 64 | .[0].synthetic_fixture = false | .[0].fixture_id = "fixtures/session/v1/console-sixty-four-track-intended.toml" | .[0].strip_content = "eq+compressor+limiter" | .[0].strip_layout = "simd1:eq+compressor,simd2:limiter" | .[]')" 'a set missing a declared workload'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.workload_kind != "sixty_four_track_eq_only")] | .[]')" 'a set missing the eq-only decomposition row'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.workload_kind != "sixty_four_track_idle")] | .[]')" 'a set missing the idle row'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.workload_kind != "sixty_four_track_console_legacy")] | .[]')" 'a set missing the transition row'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.workload_kind != "sixty_four_track_eq_comp_simd1")] | .[]')" 'a set missing the chain-shape row'
 
 if [[ "$failures" != 0 ]]; then
     printf 'console benchmark validator suite: %s FAILED case(s)\n' "$failures" >&2

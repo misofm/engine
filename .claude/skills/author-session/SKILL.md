@@ -62,9 +62,19 @@ The registry ids are `miso.parametric-eq`, `miso.compressor`, `miso.gate-expande
 `effect_id = "parametric-eq"` without the `miso.` prefix — that predates the registry, and V1 does
 not check effect availability (issue 011), so the validator accepts it and later preparation would
 not; take `effect_id` strings from the metadata. And it puts its EQ in the **`dynamic` rack with
-`simd1` empty**, contradicting the #175 layout below. Four fixtures do populate `simd1`, but **none
-populates `simd2`**, so the full intended layout has no worked example yet (#175 will add
-intended-layout fixtures). Follow the layout rule, not the fixture.
+`simd1` empty**, contradicting the #175 layout below. Follow the layout rule, not that fixture.
+
+**The worked example of the intended layout is
+`fixtures/session/v1/console-sixty-four-track-intended.toml`** (#175, 2026-08-26): the standing
+64-track qualification session, and the only checked-in fixture that populates `simd2`. Copy its
+rack structure — a two-slot `simd1` chain, `dynamic = { effects = [] }`, and a one-slot `simd2`
+chain — when you need the production layout. It is *generated*, not authored:
+`scripts/derive-intended-console-fixture.py` derives it from the retired
+`console-sixty-four-track.toml` and takes its canonical spelling from this validator, so edit the
+generator and regenerate rather than editing the file (`scripts/check-intended-console-fixture.sh`
+compares the two byte for byte). Its header documents the limiter's parameter choices and their
+provenance in the metadata, including why `lookahead` is uniform across all sixty-four tracks
+while `ceiling` and `release` vary.
 
 Parameter ids are not contiguous. `miso.parametric-eq` bands are **16 apart**: band 1 is 1–6,
 band 2 starts at 17, band 3 at 33, band 4 at 49.

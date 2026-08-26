@@ -35,27 +35,35 @@ def positive_integer: type == "number" and floor == . and . > 0;
 def nonnegative_integer: type == "number" and floor == . and . >= 0;
 def close($a; $b): (($a - $b) | if . < 0 then -. else . end) < 0.002;
 
-# workload kind -> [tracks, synthetic, strip_content, input_signal, fixture_id]
+# workload kind -> [tracks, synthetic, strip_content, strip_layout, input_signal, fixture_id]
+#
+# `strip_layout` joined the pin in #175. Two rows in this table now carry the same
+# `strip_content` (`eq+compressor`) and differ only in where those two effects sit, so without it
+# the chain-shape row-pair would be two indistinguishable rows.
 def workload_pins:
   {
     "nine_track_baseline":
-      [9, false, "eq", "tone", "fixtures/session/v1/parametric-eq-nine-track.toml"],
+      [9, false, "eq", "simd1:eq", "tone", "fixtures/session/v1/parametric-eq-nine-track.toml"],
     "nine_track_ragged_strip":
-      [9, true, "eq+compressor", "tone", "fixtures/session/v1/console-sixty-four-track.toml"],
+      [9, true, "eq+compressor+limiter", "simd1:eq+compressor,simd2:limiter", "tone", "fixtures/session/v1/console-sixty-four-track-intended.toml"],
     "sixty_four_track_console":
-      [64, false, "eq+compressor", "tone", "fixtures/session/v1/console-sixty-four-track.toml"],
+      [64, false, "eq+compressor+limiter", "simd1:eq+compressor,simd2:limiter", "tone", "fixtures/session/v1/console-sixty-four-track-intended.toml"],
     "one_twenty_eight_track_stretch":
-      [128, true, "eq+compressor", "tone", "fixtures/session/v1/console-sixty-four-track.toml"],
+      [128, true, "eq+compressor+limiter", "simd1:eq+compressor,simd2:limiter", "tone", "fixtures/session/v1/console-sixty-four-track-intended.toml"],
     "sixty_four_track_eq_only":
-      [64, true, "eq", "tone", "fixtures/session/v1/console-sixty-four-track.toml"],
+      [64, true, "eq", "simd1:eq", "tone", "fixtures/session/v1/console-sixty-four-track-intended.toml"],
     "sixty_four_track_compressor_only":
-      [64, true, "compressor", "tone", "fixtures/session/v1/console-sixty-four-track.toml"],
+      [64, true, "compressor", "simd1:compressor", "tone", "fixtures/session/v1/console-sixty-four-track-intended.toml"],
     "sixty_four_track_builtins_only":
-      [64, true, "builtins", "tone", "fixtures/session/v1/console-sixty-four-track.toml"],
+      [64, true, "builtins", "builtins", "tone", "fixtures/session/v1/console-sixty-four-track-intended.toml"],
     "sixty_four_track_dispatch_only":
-      [64, true, "identity", "tone", "fixtures/session/v1/console-sixty-four-track.toml"],
+      [64, true, "identity", "builtins", "tone", "fixtures/session/v1/console-sixty-four-track-intended.toml"],
     "sixty_four_track_idle":
-      [64, true, "eq+compressor", "silence", "fixtures/session/v1/console-sixty-four-track.toml"]
+      [64, true, "eq+compressor+limiter", "simd1:eq+compressor,simd2:limiter", "silence", "fixtures/session/v1/console-sixty-four-track-intended.toml"],
+    "sixty_four_track_console_legacy":
+      [64, false, "eq+compressor", "simd1:eq,dynamic:compressor", "tone", "fixtures/session/v1/console-sixty-four-track.toml"],
+    "sixty_four_track_eq_comp_simd1":
+      [64, true, "eq+compressor", "simd1:eq+compressor", "tone", "fixtures/session/v1/console-sixty-four-track-intended.toml"]
   };
 
 # The three legs, in the fixed order they are rendered and emitted.
@@ -106,7 +114,7 @@ def record_valid:
                     "phase","profile","quantum_frames","ratios","record",
                     "render_total_forbidden_operations","round","runtime","rust_version",
                     "sample_rate_hz","schema_version","statistical_method","strip_content",
-                    "synthetic_fixture","target_features","target_triple","tracks","units",
+                    "strip_layout","synthetic_fixture","target_features","target_triple","tracks","units",
                     "warmup_blocks","workload_kind"] and
   .schema_version == 1 and .issue == 163 and .phase == "2-step1" and
   .record == "wasm_console_session" and
@@ -133,8 +141,9 @@ def record_valid:
     $record.tracks == $pin[0] and
     $record.synthetic_fixture == $pin[1] and
     $record.strip_content == $pin[2] and
-    $record.input_signal == $pin[3] and
-    $record.fixture_id == $pin[4]) and
+    $record.strip_layout == $pin[3] and
+    $record.input_signal == $pin[4] and
+    $record.fixture_id == $pin[5]) and
   # The three legs, in their fixed order, each internally consistent.
   (.legs | type == "array" and length == 3) and
   ([.legs, leg_pins] | transpose | all(. as $pair | $pair[0] | leg_valid($pair[1]))) and
@@ -151,12 +160,12 @@ def record_valid:
     ([$record.ratios[] | .denominator] | unique | sort) == ["native_simd4","native_simd8"]);
 
 . as $records |
-(type == "array") and length == 18 and
+(type == "array") and length == 22 and
 all(.[]; record_valid) and
 ([.[] | .round] | unique | sort) == [1,2] and
-# Nine workloads, each measured exactly once per round, and no workload measured twice.
-([.[] | [.workload_kind,(.round|tostring)] | join(":")] | unique | length) == 18 and
-([.[] | .workload_kind] | unique | length) == 9 and
+# Eleven workloads, each measured exactly once per round, and no workload measured twice.
+([.[] | [.workload_kind,(.round|tostring)] | join(":")] | unique | length) == 22 and
+([.[] | .workload_kind] | unique | length) == 11 and
 ([.[] | .workload_kind] | unique | sort) == (workload_pins | keys | sort) and
 # One guest module produced every row. Two modules in one record set would mean two different
 # machine codes were timed and reported as one measurement.
@@ -167,4 +176,4 @@ all(.[]; record_valid) and
 all(.[]; .digest_identity == "all_legs_identical") and
 # The same workload in the two rounds must render the same output on every leg. A round that
 # rendered something else did not re-measure the row it claims to have re-measured.
-([.[] | [.workload_kind, (.legs[0].output_sha256)] | join(":")] | unique | length) == 9
+([.[] | [.workload_kind, (.legs[0].output_sha256)] | join(":")] | unique | length) == 11

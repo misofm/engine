@@ -80,8 +80,19 @@ pub const MAXIMUM_OBSERVATION_TAPS: u32 = 8;
 pub const METER_QUEUE_DEPTH: usize = 8;
 
 const NINE_TRACK: &str = include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.toml");
-const SIXTY_FOUR_TRACK: &str =
+/// The retired 64-track fixture: EQ on `simd1`, compressor in the `dynamic` rack, no limiter.
+///
+/// Kept, and still rendered, by exactly one row. See [`Workload::SixtyFourTrackConsoleLegacy`].
+const SIXTY_FOUR_TRACK_LEGACY: &str =
     include_str!("../../../fixtures/session/v1/console-sixty-four-track.toml");
+/// The standing 64-track qualification fixture (#175): the intended production rack layout.
+///
+/// EQ and compressor share one two-slot chain on `simd1`; a true-peak limiter sits alone on
+/// `simd2`. Generated from the retired fixture by `scripts/derive-intended-console-fixture.py`,
+/// which moves the compressor's declaration verbatim, so every EQ and compressor coefficient is
+/// byte-identical between the two files and the only arithmetic that is new is the limiter's.
+const SIXTY_FOUR_TRACK: &str =
+    include_str!("../../../fixtures/session/v1/console-sixty-four-track-intended.toml");
 
 /// The standing session workloads, in emission order.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -149,10 +160,40 @@ pub enum Workload {
     /// cost of rendering music. That equality is the finding; this row is the number that states
     /// it. Nothing here is scheduled, decoded or transported: the row measures render only.
     SixtyFourTrackIdle,
+    /// The retired layout, kept for one transition record (#175): EQ on `simd1` and the
+    /// compressor in the `dynamic` rack -- **two one-slot chains** -- and no limiter.
+    ///
+    /// This is the shape every console record up to and including
+    /// `artifacts/issue163-phase2/` measured, rendered here from the unmodified retired fixture.
+    /// It exists so the handover to the intended-placement fixture is a *measured* step rather
+    /// than an announced one: this row and `sixty_four_track_console` are taken on one host in
+    /// one run, so the number the retired authority reported and the number the standing
+    /// authority reports can be read against each other exactly once, and afterwards the retired
+    /// row can go.
+    ///
+    /// It is also one half of the chain-shape row-pair. Against
+    /// `sixty_four_track_eq_comp_simd1` -- the same two effects, the same coefficients, the same
+    /// order, differing only in whether they are one two-slot chain or two one-slot chains -- the
+    /// difference is the per-chain AoSoA round-trip and nothing else, and the two rows must
+    /// render byte-identically (#166).
+    SixtyFourTrackConsoleLegacy,
+    /// The other half of the chain-shape row-pair: EQ and compressor as **one two-slot chain**
+    /// on `simd1`, with `simd2` emptied.
+    ///
+    /// The standing fixture with its limiter removed, which makes it the intended layout's
+    /// chain shape carrying the retired layout's arithmetic. Two subtractions meet here:
+    /// `sixty_four_track_console - sixty_four_track_eq_comp_simd1` is the limiter's cost, and
+    /// `sixty_four_track_console_legacy - sixty_four_track_eq_comp_simd1` is the chain-shape
+    /// delta -- one AoSoA round-trip per bank per block, and no arithmetic at all.
+    SixtyFourTrackEqCompSimd1,
 }
 
 /// The standing session workloads, in the order their records are emitted.
-pub const WORKLOADS: [Workload; 9] = [
+///
+/// **Append-only.** The wasm console guest is addressed by *index* into this array
+/// (`miso_console_prepare(index)`), so reordering it silently re-labels every wasm record. New
+/// rows go on the end.
+pub const WORKLOADS: [Workload; 11] = [
     Workload::NineTrackBaseline,
     Workload::NineTrackRaggedStrip,
     Workload::SixtyFourTrackConsole,
@@ -162,6 +203,8 @@ pub const WORKLOADS: [Workload; 9] = [
     Workload::SixtyFourTrackBuiltinsOnly,
     Workload::SixtyFourTrackDispatchOnly,
     Workload::SixtyFourTrackIdle,
+    Workload::SixtyFourTrackConsoleLegacy,
+    Workload::SixtyFourTrackEqCompSimd1,
 ];
 
 /// What a decomposition row does to the fixture's channel strip before it is compiled.
@@ -169,14 +212,42 @@ pub const WORKLOADS: [Workload; 9] = [
 enum Strip {
     /// The fixture is compiled exactly as written (after any track-count synthesis).
     AsWritten,
-    /// The dynamic rack is emptied; SIMD rack 1 keeps its EQ.
+    /// The `simd1` chain keeps only its EQ slot. One one-slot chain.
+    ///
+    /// On the standing fixture this drops the compressor from the two-slot chain; on the retired
+    /// fixture it dropped the compressor's separate `dynamic` chain. Either way the surviving
+    /// arithmetic is one EQ per track on `simd1`, which is why the `sixty_four_track_eq_only`
+    /// digest is expected to be unchanged across the fixture handover.
     EqOnly,
-    /// SIMD rack 1 is emptied; the dynamic rack keeps its compressor.
+    /// The `simd1` chain keeps only its compressor slot. One one-slot chain.
     CompressorOnly,
+    /// The limiter is removed from `simd2`; the `simd1` chain is left as written.
+    ///
+    /// The chain-shape row. Everything that computes anything is unchanged from the standing
+    /// fixture except that the limiter is gone, so this row against
+    /// `SixtyFourTrackConsoleLegacy` is a comparison of chain *shape* over identical arithmetic.
+    LimiterRemoved,
     /// Every rack is emptied; the builtins, fader and matrix are left as written.
     BuiltinsOnly,
     /// Every rack is emptied and every builtin, fader and matrix is set to its identity.
     Identity,
+}
+
+/// Retains only the slots of `rack` whose native effect id is `effect_id`.
+///
+/// Used instead of clearing a whole rack because the standing fixture's `simd1` is a *two-slot*
+/// chain: a decomposition row that wants the EQ alone has to drop one slot out of a chain rather
+/// than empty a rack. Matching on the contract's effect id rather than the session's local slot
+/// id means a fixture that renamed a slot cannot silently turn a decomposition row into a row
+/// that measures nothing.
+fn retain_effect(rack: &mut miso_engine_session::Rack, effect_id: &str) {
+    rack.effects.retain(|effect| {
+        matches!(
+            &effect.identity,
+            miso_engine_session::EffectIdentity::Native { effect_id: id }
+                if id.as_str() == effect_id
+        )
+    });
 }
 
 impl Workload {
@@ -192,6 +263,8 @@ impl Workload {
             Self::SixtyFourTrackBuiltinsOnly => "sixty_four_track_builtins_only",
             Self::SixtyFourTrackDispatchOnly => "sixty_four_track_dispatch_only",
             Self::SixtyFourTrackIdle => "sixty_four_track_idle",
+            Self::SixtyFourTrackConsoleLegacy => "sixty_four_track_console_legacy",
+            Self::SixtyFourTrackEqCompSimd1 => "sixty_four_track_eq_comp_simd1",
         }
     }
     /// How many console tracks this workload renders.
@@ -206,7 +279,10 @@ impl Workload {
     pub const fn fixture_id(self) -> &'static str {
         match self {
             Self::NineTrackBaseline => "fixtures/session/v1/parametric-eq-nine-track.toml",
-            _ => "fixtures/session/v1/console-sixty-four-track.toml",
+            Self::SixtyFourTrackConsoleLegacy => {
+                "fixtures/session/v1/console-sixty-four-track.toml"
+            }
+            _ => "fixtures/session/v1/console-sixty-four-track-intended.toml",
         }
     }
     /// `true` when the rendered model was derived in code from the named fixture.
@@ -216,7 +292,12 @@ impl Workload {
     /// model reported as a checked-in fixture would be exactly the "measuring a fiction" failure
     /// the bench discipline exists to catch, so the flag is pinned per kind in the validator.
     pub const fn synthetic(self) -> bool {
-        !matches!(self, Self::NineTrackBaseline | Self::SixtyFourTrackConsole)
+        !matches!(
+            self,
+            Self::NineTrackBaseline
+                | Self::SixtyFourTrackConsole
+                | Self::SixtyFourTrackConsoleLegacy
+        )
     }
     /// The edit this row makes to the fixture's channel strip.
     const fn strip(self) -> Strip {
@@ -225,6 +306,7 @@ impl Workload {
             Self::SixtyFourTrackCompressorOnly => Strip::CompressorOnly,
             Self::SixtyFourTrackBuiltinsOnly => Strip::BuiltinsOnly,
             Self::SixtyFourTrackDispatchOnly => Strip::Identity,
+            Self::SixtyFourTrackEqCompSimd1 => Strip::LimiterRemoved,
             _ => Strip::AsWritten,
         }
     }
@@ -238,7 +320,34 @@ impl Workload {
             Self::SixtyFourTrackCompressorOnly => "compressor",
             Self::SixtyFourTrackBuiltinsOnly => "builtins",
             Self::SixtyFourTrackDispatchOnly => "identity",
-            _ => "eq+compressor",
+            Self::SixtyFourTrackConsoleLegacy | Self::SixtyFourTrackEqCompSimd1 => "eq+compressor",
+            _ => "eq+compressor+limiter",
+        }
+    }
+
+    /// Where this row's effects sit in the track strip, named in the record.
+    ///
+    /// `strip_content` says *what* every track carries; this says *where*. The two were one field
+    /// until #175, which is the issue that made the distinction load-bearing: the chain-shape
+    /// row-pair is two rows with identical `strip_content` (`eq+compressor`), identical
+    /// coefficients and identical order whose whole difference is that one is a two-slot chain on
+    /// `simd1` and the other is a `simd1` chain plus a `dynamic` chain. Without this field those
+    /// two rows are indistinguishable in a record, and the number that separates them -- one
+    /// AoSoA round-trip per bank per block -- would be attributed to nothing.
+    ///
+    /// The vocabulary is `rack:slot[+slot]`, racks in strip order, joined by `,`. `builtins` is
+    /// the row that carries no rack effect at all.
+    pub const fn strip_layout(self) -> &'static str {
+        match self {
+            Self::NineTrackBaseline | Self::SixtyFourTrackEqOnly => "simd1:eq",
+            Self::SixtyFourTrackCompressorOnly => "simd1:compressor",
+            Self::SixtyFourTrackBuiltinsOnly | Self::SixtyFourTrackDispatchOnly => "builtins",
+            // The retired layout: two one-slot chains, one per rack.
+            Self::SixtyFourTrackConsoleLegacy => "simd1:eq,dynamic:compressor",
+            // The chain-shape row: one two-slot chain, no limiter.
+            Self::SixtyFourTrackEqCompSimd1 => "simd1:eq+compressor",
+            // The intended production layout.
+            _ => "simd1:eq+compressor,simd2:limiter",
         }
     }
     /// What every track's source binding writes into the graph.
@@ -273,8 +382,11 @@ fn apply_strip(model: &mut SessionTomlV1, strip: Strip) {
     for track in &mut model.tracks {
         match strip {
             Strip::AsWritten => unreachable!("returned above"),
-            Strip::EqOnly => track.dynamic.effects.clear(),
-            Strip::CompressorOnly => track.simd1.effects.clear(),
+            Strip::EqOnly => retain_effect(&mut track.simd1, "miso.parametric-eq"),
+            Strip::CompressorOnly => retain_effect(&mut track.simd1, "miso.compressor"),
+            // `simd2` is cleared for every derived row below, so this arm's whole edit is that
+            // clearing: the `simd1` chain is deliberately left exactly as the fixture wrote it.
+            Strip::LimiterRemoved => {}
             Strip::BuiltinsOnly => {
                 track.simd1.effects.clear();
                 track.dynamic.effects.clear();
@@ -361,6 +473,7 @@ impl PlanConfig {
 fn console_model(workload: Workload) -> SessionTomlV1 {
     let text = match workload {
         Workload::NineTrackBaseline => NINE_TRACK,
+        Workload::SixtyFourTrackConsoleLegacy => SIXTY_FOUR_TRACK_LEGACY,
         _ => SIXTY_FOUR_TRACK,
     };
     let mut model = parse_session_toml(text).expect("frozen console session fixture");
@@ -612,6 +725,20 @@ impl SessionRuntime {
             .filter_map(|reader| reader.read())
             .map(|window| window.sequence)
             .sum()
+    }
+
+    /// Completed planar/AoSoA transpose round-trips since this plan was bound.
+    ///
+    /// The G5 shape gate's counter (master plan §4.5), surfaced so a benchmark can *record* the
+    /// chain shape it measured instead of asserting one in prose. Issue #175 is the reason it is
+    /// here: the intended production layout was expected to pay fewer round-trips than the retired
+    /// one, and a claim like that belongs in the record next to the timing it is supposed to
+    /// explain.
+    ///
+    /// Read outside the clock, like every other evidence accessor on this type.
+    #[must_use]
+    pub fn bank_transposes(&self) -> u64 {
+        self.plan.bank_transposes()
     }
 
     /// Meter frames drained from every stream. Outside the clock, like every evidence step.
