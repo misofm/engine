@@ -265,3 +265,118 @@ fn render_case(link: LinkMode, bypass: bool, sidechain: bool, partition: usize) 
         state_right,
     )
 }
+
+/// Frames rendered before the partition is varied.
+///
+/// Eight 128-frame blocks. The latency is 960 samples, so a rejection triggered at sample 0 lands
+/// in block 7 and the prefix ends one block boundary past it — with the rejection, and the reset it
+/// causes, already behind us.
+const REJECTION_PREFIX_FRAMES: usize = 1_024;
+
+/// Block size the prefix is always cut at, so every run reaches the *same* diverged state.
+///
+/// The prefix cannot be re-partitioned along with the rest: `bank::finish_channel` zeroes the whole
+/// block it rejects, so moving the block boundaries would move which samples are zeroed and
+/// partition invariance would fail for a reason that has nothing to do with the staged body.
+const REJECTION_PREFIX_PARTITION: usize = 128;
+
+/// A rejection on one channel diverges the two cursors, and the staged body still agrees.
+///
+/// `Channel::clear_state` zeroes a channel's rings **and** its cursor, and
+/// `kernel::finish_channel` runs it per channel, so a block that is out of bounds on the left alone
+/// leaves `left.cursor == 0` next to a right cursor that has kept counting. The frozen behaviour is
+/// that the left cursor is the shared write index for both channels — `frames_loop` reads
+/// `channel_left.cursor` and hands it to `gather_detector` for the right channel too — and
+/// `idle_frames_staged` pre-gathers both channels' taps from that same index.
+///
+/// Which channel is rejected is the whole point. Reject the **right** one and the divergence is
+/// unobservable: the reset zeroed right's rings, so every candidate tap row reads `+0.0` and any
+/// cursor gives the same answer. Reject the **left** one and right keeps both its diverged cursor
+/// and a ring full of real signal, so the two candidate rows hold different samples. The cursors
+/// re-converge at the end of the very next block — every body writes both channels at the shared
+/// index and leaves both at `next` — so that one block is the entire window in which this is
+/// observable, and the prefix is cut to land exactly on its boundary.
+///
+/// Both channels' rings are `D = 960` deep here and the quantum is 512, so the 512- and 256-frame
+/// partitions exceed the staged body's 128-frame bound and take `frames_loop`, while the 128- and
+/// 64-frame partitions stage. The first block after the prefix is therefore rendered by the
+/// per-frame body in the reference run and by the staged body in the others, from byte-identical
+/// diverged state.
+///
+/// Red mutation (MUTATIONS.md row 31, the adversarial verifier's V3): pre-gather the right
+/// channel's taps from `channel_right.cursor` instead of the shared index.
+#[test]
+fn a_left_only_rejection_diverges_the_cursors_and_the_staged_body_still_agrees() {
+    let mut reference: Option<Rendered> = None;
+    for partition in [512, 256, 128, 64] {
+        let rendered = render_across_a_left_only_rejection(partition);
+        match &reference {
+            None => {
+                assert!(
+                    rendered.1[REJECTION_PREFIX_FRAMES..]
+                        .iter()
+                        .any(|sample| *sample != 0_f32.to_bits()),
+                    "the right channel must carry content across the diverged block"
+                );
+                reference = Some(rendered);
+            }
+            Some(expected) => assert_eq!(&rendered, expected, "partition {partition}"),
+        }
+    }
+}
+
+/// Renders [`FRAMES`] frames whose left channel is rejected once, cutting the prefix identically
+/// and only the remainder at `partition`.
+///
+/// The `NaN` is the same injection `tests/nonfinite.rs` uses, moved to the left plane. `DualMono`
+/// keeps it there: the right channel's detector is its own magnitude, so the right block stays in
+/// bounds and is never reset. The two rejection counters are asserted rather than assumed, because
+/// a run in which *both* channels were rejected, or neither, would leave the cursors equal and this
+/// test would be measuring nothing.
+fn render_across_a_left_only_rejection(partition: usize) -> Rendered {
+    let values = values_with(&[(0, -30.0), (1, 4.0), (2, 6.0), (5, 2.0), (7, 0.0)]);
+    let mut effect = prepare(request_with_quantum(&values, QUANTUM));
+    let mut left = noise(FRAMES, 0x5A_6E_D0_08, 0.7);
+    let mut right = noise(FRAMES, 0x5A_6E_D0_09, 0.7);
+    left[0] = f32::NAN;
+
+    let mut total = ProcessReport::default();
+    let mut offset = 0;
+    while offset < FRAMES {
+        let block = if offset < REJECTION_PREFIX_FRAMES {
+            REJECTION_PREFIX_PARTITION
+        } else {
+            partition
+        };
+        let end = (offset + block).min(FRAMES);
+        let report = effect.process(
+            EffectProcessBlock::new(
+                &mut left[offset..end],
+                &mut right[offset..end],
+                None,
+                offset as u64,
+                &[],
+                QUANTUM,
+            )
+            .expect("bounded block"),
+        );
+        accumulate(&mut total, report);
+        offset = end;
+    }
+    assert_eq!(
+        total.nonfinite_left_blocks, 1,
+        "exactly one left rejection, partition {partition}"
+    );
+    assert_eq!(
+        total.nonfinite_right_blocks, 0,
+        "the right channel is never reset, partition {partition}"
+    );
+
+    let (state_left, state_right) = snapshot(effect.as_ref());
+    (
+        left.iter().map(|sample| sample.to_bits()).collect(),
+        right.iter().map(|sample| sample.to_bits()).collect(),
+        state_left,
+        state_right,
+    )
+}
