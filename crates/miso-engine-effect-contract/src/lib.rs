@@ -11,7 +11,7 @@ use core::{fmt, hash::Hash};
 use miso_engine_core::{
     LAUNCH_SAMPLE_RATES, SampleRateHz, is_extended_compatibility_sample_rate, is_launch_sample_rate,
 };
-use miso_engine_lane::Backend;
+use miso_engine_lane::{Backend, Simd4, Simd8};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -202,6 +202,37 @@ impl BankWidth {
             (Self::Four, Some(Self::Four)) | (Self::Eight, Some(Self::Eight))
         )
     }
+}
+
+/// Transpose one four-by-four tile of 32-bit words: `out[k][lane] == rows[lane][k]`.
+///
+/// A transpose is a **pure permutation of 32-bit words** -- no arithmetic, no rounding, no
+/// canonicalisation -- so every NaN payload, every `-0.0` and every subnormal survives it bit for
+/// bit. That is what lets the planar/AoSoA round trip of a full bank be one whole-tile vector
+/// shuffle instead of a scalar move per lane-sample, with no effect on a rendered bit.
+///
+/// The vocabulary is the lane crate's neutral re-export ([`Simd4`]), whose `transpose` is `wide`'s
+/// **safe** shuffle network: `_MM_TRANSPOSE4_PS` on SSE, a dedicated `simd128`/NEON unpack arm, and
+/// a scalar element permutation everywhere else. The workspace denies `unsafe_code`; none is
+/// needed here. This lives beside [`BankWidth`] because the tile is a fact about the AoSoA layout
+/// the contract defines, and because the SIMD vocabulary is the contract's dependency, not the
+/// rack's (`scripts/check-lane-policy.sh` D4, `scripts/check-rack-policy.sh`).
+#[inline(always)]
+#[must_use]
+pub fn transpose_tile_4(rows: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
+    Simd4::transpose(rows.map(Simd4::new)).map(Simd4::to_array)
+}
+
+/// Transpose one eight-by-eight tile of 32-bit words: `out[k][lane] == rows[lane][k]`.
+///
+/// The eight-lane twin of [`transpose_tile_4`]; see it for why this is bit-exact. On `x86-64-v3`
+/// [`Simd8`]'s `transpose` is the 24-shuffle AVX pattern (eight `unpack`, eight `shuffle`, eight
+/// `permute2f128`); on a target where `wide` lowers `f32x8` to two 128-bit halves it is the scalar
+/// element permutation, which is equally bit-exact and equally correct.
+#[inline(always)]
+#[must_use]
+pub fn transpose_tile_8(rows: [[f32; 8]; 8]) -> [[f32; 8]; 8] {
+    Simd8::transpose(rows.map(Simd8::new)).map(Simd8::to_array)
 }
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct LinkModeSet(u32);
