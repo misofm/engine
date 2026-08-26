@@ -415,6 +415,28 @@ pub struct GraphPreparedEffectBank {
     pub active_mask: Box<[bool]>,
     pub processor: Box<dyn miso_engine_effect_contract::PreparedNativeEffectBank>,
     pub scratch: AoSoaScratch,
+    /// The cohort chain this bank is one slot of (issue #181).
+    ///
+    /// The cohort planner has formed multi-slot groups since #99 F3 -- a candidate is a whole
+    /// rack chain, and `plan_bank_groups` matches a *signature over slot types and order*. What
+    /// the planner never told anyone downstream is which bound banks came out of the same group,
+    /// so `runtime::chain_for` materialised each one as its own single-slot `BankChain` and the
+    /// grouping never reached the transpose counter. This is that missing edge.
+    pub cohort: GraphBankCohortV1,
+}
+
+/// Where one bound bank sits in its cohort chain.
+///
+/// `group` is an index into the plan's groups and is meaningful only within one prepared plan;
+/// two banks are slots of the same chain exactly when their `group` agree. `slot` is the position
+/// in the chain's program, and it is strictly increasing along the chain but need not be
+/// contiguous: a slot every lane leaves at identity, or one no lane can bind, is skipped.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub struct GraphBankCohortV1 {
+    /// The plan group this bank was bound from.
+    pub group: u32,
+    /// This bank's slot index in that group's program.
+    pub slot: u32,
 }
 /// Every homogeneous bank a prepared plan will render, as one member list each, for the
 /// lowering's bank windows (issue #169).
@@ -432,18 +454,31 @@ fn bank_member_nodes(
     banks: &[GraphPreparedEffectBank],
     builtin_banks: &[GraphPreparedBuiltinBank],
 ) -> Vec<Vec<GraphNodeId>> {
-    banks
-        .iter()
-        .map(|bank| {
-            bank.members
-                .iter()
-                .cloned()
-                .map(GraphNodeId::Effect)
-                .collect()
-        })
+    // Issue #181: one entry per *cohort chain*, not per bound slot. `runtime::build_sequential`
+    // emits a whole chain as one unit at its first member's op position, so the range the
+    // schedule is permuted over is the union of every slot's ops -- which spans two dependency
+    // levels where a single-slot bank spanned one. The window is what makes that permutation
+    // sound (see `program::lower`), so it has to be the merged one.
+    //
+    // Widening a window is always safe: it only defers more physical-slot releases, and the
+    // runtime is free to decline the merge -- which it does whenever the lowered program does not
+    // let it prove the merge preserves dataflow. A window that is wider than the reordering that
+    // actually happened costs nothing but the deferral.
+    let mut chains: BTreeMap<GraphBankCohortGroup, Vec<GraphNodeId>> = BTreeMap::new();
+    for bank in banks {
+        chains
+            .entry(bank.cohort.group)
+            .or_default()
+            .extend(bank.members.iter().cloned().map(GraphNodeId::Effect));
+    }
+    chains
+        .into_values()
         .chain(builtin_banks.iter().map(|bank| bank.members.to_vec()))
         .collect()
 }
+
+/// The plan-group index two banks share exactly when they are slots of one cohort chain.
+type GraphBankCohortGroup = u32;
 
 /// A compiler-owned homogeneous post-input-builtin bank.  Unlike effect banks, this is a
 /// fixed graph stage and therefore has no automation or sidechain surface.
@@ -1231,6 +1266,15 @@ impl PreparedPlanExecutor for GraphExecutor {
             .units
             .iter()
             .fold(0_u64, |total, unit| total.saturating_add(unit.transposes()))
+    }
+
+    fn bank_shape(&self) -> [u64; 2] {
+        self.runtime.units.iter().fold([0, 0], |mut total, unit| {
+            let shape = unit.bank_shape();
+            total[0] = total[0].saturating_add(shape[0]);
+            total[1] = total[1].saturating_add(shape[1]);
+            total
+        })
     }
 
     fn observation_binding_counts(&self) -> [u64; 3] {
