@@ -502,7 +502,8 @@ impl<L: Lane> Default for Lr4State<L> {
 ///
 /// Frozen operation order:
 /// 1. `(v1, lp1) = svf_step(x)` — the first stage, both taps of one state
-/// 2. `ap = fma(-2k, v1, x)` — one rounding; this is `svf_block`'s all-pass mix `(1, -2k, 0)`
+/// 2. `ap = fma(-2k, v1, x)` — unfused (#163 phase 2); this is `svf_block`'s all-pass mix
+///    `(1, -2k, 0)`
 /// 3. `(_, low) = svf_step(lp1)` — the second stage
 /// 4. `high = ap - low`
 ///

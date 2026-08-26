@@ -12,7 +12,8 @@
 //!   value, so the attack coefficient belongs to `target < y`. The 83c survey found the gate crate
 //!   using the opposite compare under the opposite sign convention — correct in both, and exactly
 //!   the thing a shared helper must not paper over. It is gated in `tests/dynamics_shims.rs`.
-//! * The **single rounding**. `fma(c, y - target, target)` returns `target` exactly at `c = 0`;
+//! * The **exact identity at `c = 0`**. `fma(c, y - target, target)` returns `target` exactly
+//!   there, unfused as much as fused (`0 * d + target == target` for finite `d`);
 //!   the `c * y + (1 - c) * target` form the audit found copied into two crates rounds three
 //!   times and does not.
 //! * The link's `max` is the **D8 select form**, never `f32::max`. The copies relied on their
@@ -90,7 +91,7 @@ mod tests {
     /// The smoother is the single-rounding `target + c * (y - target)`, and the attack coefficient
     /// is the one selected when the target asks for more reduction.
     ///
-    /// The oracle is an `f64` evaluation of the same operation order with one rounding at the end;
+    /// The oracle is an `f64` evaluation of the same operation order;
     /// `d` is an `f32` subtraction inside the function, so the oracle takes the same rounded
     /// difference. The two-rounding form the audit found copied into the compressor and multiband
     /// crates is checked to be *different* on more than a thousand steps, so this is not vacuous.

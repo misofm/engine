@@ -49,7 +49,7 @@ pub struct ReferenceTptRetainedStep {
 /// operation order are the production ones, transcribed from the equations rather than from the
 /// production source, and it never calls `miso-engine-lane`. What it proves is that the shared
 /// block kernel, at any width, computes the recurrence the master plan writes down -- including
-/// its three single roundings and its D7 flush. The independent oracle for the response is
+/// its frozen unfused operation order and its D7 flush. The independent oracle for the response is
 /// [`ReferenceSvfStateSpace`](crate::ReferenceSvfStateSpace), and for the time domain it is
 /// [`ReferenceBiquad`](crate::ReferenceBiquad).
 ///
@@ -167,33 +167,39 @@ impl ReferenceRetainedTptF32 {
     ///
     /// ```text
     /// v3 = v0 - ic2
-    /// d1 = fma(-c1, ic1, a2 * v3)
+    /// d1 = (-c1 * ic1) + (a2 * v3)
     /// v1 = ic1 + d1
-    /// d2 = fma(a3, v3, a2 * ic1)
+    /// d2 = (a3 * v3) + (a2 * ic1)
     /// v2 = ic2 + d2
     /// ic1 = flush(ic1 + (d1 + d1))
     /// ic2 = flush(ic2 + (d2 + d2))
-    /// y  = fma(m2, v2, fma(m1, v1, m0 * v0))
+    /// y  = (m2 * v2) + ((m1 * v1) + (m0 * v0))
     /// ```
     ///
-    /// `-c1` is a sign-bit flip, `d + d` is exact, and each `fma` rounds once -- `f32::mul_add` is
-    /// the hardware instruction where one exists and the correctly rounded `fmaf` where it does
-    /// not, which is the same single rounding either way.
+    /// `-c1` is a sign-bit flip and `d + d` is exact. Every multiply-add is **unfused**: the
+    /// multiply rounds, then the add rounds (issue #163 phase 2). This twin is written in the same
+    /// two IEEE basic operations the production kernel uses, so it stays a bit-exact restatement
+    /// of the frozen order rather than a more accurate one -- which is the whole of its job.
+    ///
+    /// Being a bit-identity twin is also its limit: a pin regenerated from this function proves
+    /// the order is reproducible, not that it is correct. Correctness comes from the `f64` oracles
+    /// ([`crate::ReferenceSvf`] and friends), which use no multiply-add primitive at all and are
+    /// therefore unaffected by the contract.
     pub fn process(&mut self, input: f32) -> ReferenceTptRetainedStep {
         let pre_state_bits = self.state_bits();
 
         let v0 = input;
         let v3 = v0 - self.s2;
-        let d1 = (-self.c1).mul_add(self.s1, self.a2 * v3);
+        let d1 = ((-self.c1) * self.s1) + (self.a2 * v3);
         let v1 = self.s1 + d1;
-        let d2 = self.a3.mul_add(v3, self.a2 * self.s1);
+        let d2 = (self.a3 * v3) + (self.a2 * self.s1);
         let v2 = self.s2 + d2;
         let n1 = self.s1 + (d1 + d1);
         let n2 = self.s2 + (d2 + d2);
         let flushed = below_flush_epsilon(n1) | below_flush_epsilon(n2);
         self.s1 = flush(n1);
         self.s2 = flush(n2);
-        let y = self.m2.mul_add(v2, self.m1.mul_add(v1, self.m0 * v0));
+        let y = (self.m2 * v2) + ((self.m1 * v1) + (self.m0 * v0));
 
         ReferenceTptRetainedStep {
             pre_state_bits,

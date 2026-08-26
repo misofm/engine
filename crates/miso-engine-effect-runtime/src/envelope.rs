@@ -132,12 +132,12 @@ impl<L: Lane> ArCoef<L> {
 /// two different coefficients, which is what a dual-envelope transient detector needs.
 ///
 /// The two-product form is also the numerically correct one *here*. Writing the release as
-/// `e + k * (u - e)` (one rounding) stalls in `f32` when `|u - e| < ulp(e) / (2k)`: at the 100 ms
+/// `e + k * (u - e)` stalls in `f32` when `|u - e| < ulp(e) / (2k)`: at the 100 ms
 /// coefficient of a 96 kHz slow follower that is about `2.7e-4` relative, roughly 0.002 dB, and a
 /// stalled slow envelope is a permanent contrast offset. With `1 - c` exact (see [`ArCoef`]) the
 /// only error left is the rounding of `c` itself.
 ///
-/// Frozen operation order, one rounding per line:
+/// Frozen operation order:
 /// 1. `rising = u > e` — **strict**: a detector exactly at the envelope releases, which is the
 ///    convention of Giannoulis, Massberg and Reiss (JAES 2012) and of every follower in the
 ///    workspace
@@ -160,7 +160,8 @@ pub fn ar_one_pole_step<L: Lane>(e: L, u: L, coefficients: &ArCoef<L>) -> L {
 
 /// One sample of a mean-square follower: `y' = fma(c, x2 - y, y)`.
 ///
-/// Frozen operation order: `d = x2 - y`, then `y' = fma(c, d, y)` — one rounding. `x2` is the
+/// Frozen operation order: `d = x2 - y`, then `y' = fma(c, d, y)`, which is a multiply and an
+/// add (#163 phase 2). `x2` is the
 /// squared input; the square root that turns the result into an RMS level belongs to the caller
 /// and is IEEE-exact, so it is not part of the recurrence.
 ///

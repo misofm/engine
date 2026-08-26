@@ -12,8 +12,9 @@
 //!   `vmaxnmq` (IEEE `maxNum`) on NEON — `max(+0.0, -0.0)` is `-0.0` on x86 and `+0.0` on NEON.
 //!   The trait's D8 default (`select(a > b, a, b)`) is used on every backend instead.
 //! * `mul_add` is fused only when the build enables `+fma` on x86 or targets NEON, and is silently
-//!   `(a * b) + c` otherwise. It is forwarded only on those two targets — guarded by the crate's
-//!   `compile_error!` on x86 — and every other target uses the exact software FMA.
+//!   `(a * b) + c` otherwise — a per-target semantics split, which is exactly what the numeric
+//!   contract forbids. It is not forwarded at all: [`crate::Lane::fma`] is `(a * b) + c` written
+//!   out, on every backend (issue #163 phase 2).
 //! * `select` uses `blendv`, which inspects only the sign bit. `bitselect` is the bitwise form the
 //!   scalar oracle defines, so `Lane::select` forwards to `bitselect`.
 //!
@@ -22,11 +23,10 @@
 
 /// Implements [`crate::Lane`] for one `wide` vector type.
 ///
-/// Arguments: the vector type, its unsigned companion, the lane count, the software FMA to use on
-/// targets without a hardware fused multiply-add, and the tuned SVF cascade depth
-/// ([`crate::Lane::SVF_CASCADE_DEPTH`], issue #163 phase 3).
+/// Arguments: the vector type, its unsigned companion, the lane count, and the tuned SVF cascade
+/// depth ([`crate::Lane::SVF_CASCADE_DEPTH`], issue #163 phase 3).
 macro_rules! impl_lane_for_wide {
-    ($simd:ty, $uint:ty, $width:literal, $soft_fma:path, $cascade_depth:literal) => {
+    ($simd:ty, $uint:ty, $width:literal, $cascade_depth:literal) => {
         impl $crate::Lane for $simd {
             const WIDTH: usize = $width;
             const SVF_CASCADE_DEPTH: usize = $cascade_depth;
@@ -82,25 +82,12 @@ macro_rules! impl_lane_for_wide {
 
             #[inline(always)]
             fn fma(self, b: Self, c: Self) -> Self {
-                #[cfg(any(
-                    target_arch = "x86",
-                    target_arch = "x86_64",
-                    all(target_arch = "aarch64", target_feature = "neon")
-                ))]
-                {
-                    // LANE-OP-OK(mul_add): hardware FMA only. On x86 the crate's `compile_error!`
-                    // guarantees `+fma`, so this is `vfmadd`; on aarch64 `wide` lowers it to
-                    // `vfmaq_f32`. Both are the single-rounding IEEE operation D3 pins.
-                    self.mul_add(b, c)
-                }
-                #[cfg(not(any(
-                    target_arch = "x86",
-                    target_arch = "x86_64",
-                    all(target_arch = "aarch64", target_feature = "neon")
-                )))]
-                {
-                    <$simd>::new($soft_fma(self.to_array(), b.to_array(), c.to_array()))
-                }
+                // Two roundings, natively, on every backend (issue #163 phase 2). There is no
+                // `cfg` here and that is the point: the multiply rounds, then the add rounds, and
+                // both are IEEE basic operations every target implements identically. The
+                // hardware fused instruction is deliberately *not* used on the targets that have
+                // one, because using it there would make the contract per-backend.
+                (self * b) + c
             }
 
             #[inline(always)]

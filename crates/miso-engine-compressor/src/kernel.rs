@@ -336,7 +336,7 @@ pub(crate) fn process_block<L: Lane>(
 
 /// The frame body. `RAMPING` is a compile-time switch, not a branch.
 ///
-/// Frozen operation order, per frame — every line is one rounding site and moving one moves bits:
+/// Frozen operation order, per frame — moving any line moves bits:
 ///
 /// 1. load main, choose the detector source, take magnitudes;
 /// 2. link: `mx = max(|l|, |r|)`, `avg = 0.5*|l| + 0.5*|r|` (two products and an add, **not** an

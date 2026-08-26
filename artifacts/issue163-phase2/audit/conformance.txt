@@ -1,0 +1,14 @@
+# Unfused multiply-add audit (issue #163 phase 2 step 2)
+
+f32 unit roundoff u = 2^-24 = 5.960464e-8
+mode = conformance, sweep frames = 20000, sustained frames = 1000000
+
+## Model conformance: which arm do the production kernels implement?
+
+  F1/F2 svf_block          vs fused:   6469   vs unfused:      0	=> unfused
+  F3 one_pole_block        vs fused:  18510   vs unfused:      0	=> unfused
+  F4 gain_mix_block        vs fused:   1306   vs unfused:      0	=> unfused
+  F5 mix2x2_block          vs fused:   8844   vs unfused:      0	=> unfused
+
+  every production kernel implements the same arm: unfused
+

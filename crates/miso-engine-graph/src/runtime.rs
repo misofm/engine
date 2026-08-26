@@ -871,7 +871,7 @@ impl RuntimeParts {
     /// The one node-kind decision, shared by both executors.
     ///
     /// A route's linear gain is folded into its 2x2 coefficients here, once, at bind: render then
-    /// spends one multiply and one fused multiply-add per output word instead of re-applying the
+    /// spends two multiplies and one add per output word instead of re-applying the
     /// gain every frame (D3, #98 F4).
     fn node_kind(&mut self, node: &GraphNodeId, index: u32) -> NodeKind {
         if self.source_inputs.contains(node) {
@@ -1616,11 +1616,11 @@ mod tests {
         }
     }
 
-    /// E10. The route is one multiply plus one fused multiply-add per output word, with the gain
-    /// folded into the coefficients at bind (D3). The oracle is `softfma::fma_f32_via_f64`, the
-    /// lane crate's exact software FMA -- one `f64` product and one correctly rounded narrowing,
-    /// with no dependence on `mix2x2_block`'s vector body, and proven bit-identical to hardware
-    /// FMA on every backend by master plan gate G3.
+    /// E10. The route is two multiplies plus one add per output word, with the gain
+    /// folded into the coefficients at bind (D3). The oracle is
+    /// `softfma::unfused_mul_add_via_f64`, which computes the same multiply-add through `f64` with
+    /// no dependence on `mix2x2_block`'s vector body; the exact product and the innocuous double
+    /// rounding of the sum make it bit-identical to the `f32` expression (issue #163 phase 2).
     ///
     /// Red mutation (`tests/MUTATIONS.md`): compute `gain * (ll * l + lr * r)` instead.
     #[test]
@@ -1642,9 +1642,9 @@ mod tests {
         for frame in 0..FRAMES {
             let (l, r) = (left_in[frame], right_in[frame]);
             let expected_left =
-                miso_engine_lane::softfma::fma_f32_via_f64(folded[1], r, folded[0] * l);
+                miso_engine_lane::softfma::unfused_mul_add_via_f64(folded[1], r, folded[0] * l);
             let expected_right =
-                miso_engine_lane::softfma::fma_f32_via_f64(folded[3], r, folded[2] * l);
+                miso_engine_lane::softfma::unfused_mul_add_via_f64(folded[3], r, folded[2] * l);
             assert_eq!(
                 left[frame].to_bits(),
                 expected_left.to_bits(),

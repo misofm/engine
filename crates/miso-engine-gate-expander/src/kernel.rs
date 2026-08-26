@@ -175,7 +175,7 @@ pub struct GateArgs<'a, L: Lane> {
 /// `remaining` is zero, which the caller guarantees by splitting a block at the point the last
 /// ramp ends.
 ///
-/// Frozen operation order, per frame — every line is one rounding site unless noted:
+/// Frozen operation order, per frame — moving any line moves bits:
 ///
 /// ```text
 /// write   x_l, x_r into ring slot (cursor & mask); the sidechain too when CONNECTED
@@ -186,7 +186,7 @@ pub struct GateArgs<'a, L: Lane> {
 /// level   X = clamp(log2(max(u, 1e-8)) * 20log10(2), -160, 24)
 /// gate    open' / hold' from the brief 014 transition
 /// curve   C = select(open', 0, clamp((rho - 1) * (X - T), -R, 0))
-/// pole    b = select(C > G, attack, release);  G' = flush(fma(b, C - G, G))     one rounding
+/// pole    b = select(C > G, attack, release);  G' = flush(fma(b, C - G, G))     unfused (#163)
 /// gain    A = exp2(G' * log2(10)/20)
 /// out     y = select(G' == 0 or bypass, z, z * A)
 /// ```

@@ -336,7 +336,9 @@ impl Signal {
 /// An element-wise `Lane` or lane-`math` operation applied to a corpus of values.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Elementwise {
-    /// `Lane::fma`: hardware `vfmadd`/`fmla` natively, the exact software FMA on wasm.
+    /// `Lane::fma`: `(a * b) + c` with two roundings, identically on every backend (#163
+    /// phase 2). This case is the corpus's separator between a fused and an unfused evaluation,
+    /// so its digests are the ones that moved most visibly when the contract changed.
     Fma,
     /// `miso_engine_math::exp2_lane`.
     Exp2,
