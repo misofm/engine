@@ -125,13 +125,25 @@ fn main() -> ExitCode {
 fn run_native() -> ExitCode {
     let report = native_report();
     println!("{}", report.json());
-    if report.mismatches.is_empty() {
+    if report.mismatches.is_empty() && report.minmax_lowering_mismatches == 0 {
         ExitCode::SUCCESS
     } else {
         for mismatch in &report.mismatches {
             eprintln!("native mismatch: {mismatch}");
         }
+        report_minmax_lowering("native", report.minmax_lowering_mismatches);
         ExitCode::FAILURE
+    }
+}
+
+/// Names a `max`/`min` lowering divergence, which is a lane-crate defect rather than a pin drift.
+fn report_minmax_lowering(leg: &str, mismatches: u32) {
+    if mismatches != 0 {
+        eprintln!(
+            "{leg} max/min lowering: {mismatches} lanes disagree with the scalar oracle; the \
+             single-instruction lowering in crates/miso-engine-lane/src/wide_impl.rs is not D8 on \
+             this target"
+        );
     }
 }
 
@@ -140,12 +152,13 @@ fn run_wasm(path: PathBuf, expected: ExpectedBackend) -> ExitCode {
     match wasm_report(&path, expected) {
         Ok(report) => {
             println!("{}", report.json());
-            if report.mismatches.is_empty() {
+            if report.mismatches.is_empty() && report.minmax_lowering_mismatches == 0 {
                 ExitCode::SUCCESS
             } else {
                 for mismatch in &report.mismatches {
                     eprintln!("wasm mismatch: {mismatch}");
                 }
+                report_minmax_lowering("wasm", report.minmax_lowering_mismatches);
                 ExitCode::FAILURE
             }
         }

@@ -126,6 +126,13 @@ pub struct Report {
     pub comparisons: usize,
     /// Every case whose digest did not equal its pin.
     pub mismatches: Vec<Mismatch>,
+    /// Lanes on which this leg's `Lane::max`/`Lane::min` disagreed with the scalar oracle over the
+    /// per-backend lowering pool, summed over every width. Anything but zero fails the leg.
+    ///
+    /// Not a digest and not pinned: it is the wasm execution of the truth table behind the
+    /// single-instruction `max`/`min` lowerings, which no native gate can reach (see
+    /// `miso_engine_wasm_gate_corpus::minmax_lowering_mismatches`).
+    pub minmax_lowering_mismatches: u32,
 }
 
 impl Report {
@@ -147,12 +154,13 @@ impl Report {
             })
             .collect();
         format!(
-            "{{\"schema_version\":1,\"kind\":\"wasm_gates\",\"leg\":\"{}\",\"runtime\":\"wasmtime {}\",\"backend\":{},\"cases\":{},\"comparisons\":{},\"mismatches\":[{}]}}",
+            "{{\"schema_version\":1,\"kind\":\"wasm_gates\",\"leg\":\"{}\",\"runtime\":\"wasmtime {}\",\"backend\":{},\"cases\":{},\"comparisons\":{},\"minmax_lowering_mismatches\":{},\"mismatches\":[{}]}}",
             self.leg,
             WASMTIME_VERSION,
             self.backend,
             self.cases,
             self.comparisons,
+            self.minmax_lowering_mismatches,
             mismatches.join(",")
         )
     }
@@ -218,6 +226,9 @@ pub fn native_report() -> Report {
         cases: corpus::CASE_COUNT,
         comparisons,
         mismatches,
+        minmax_lowering_mismatches: (0..corpus::WIDTHS)
+            .map(corpus::minmax_lowering_mismatches)
+            .sum(),
     }
 }
 
@@ -227,6 +238,8 @@ struct Guest {
     store: Store<()>,
     /// `miso_gate_digest_word(case, width, word) -> u32`.
     digest_word: TypedFunc<(u32, u32, u32), u32>,
+    /// `miso_gate_minmax_lowering_mismatches(width) -> u32`.
+    minmax_lowering_mismatches: TypedFunc<u32, u32>,
     /// What `miso_gate_backend()` reported.
     backend: u32,
     /// What `miso_gate_case_count()` reported.
@@ -254,6 +267,8 @@ impl Guest {
         let widths: TypedFunc<(), u32> = instance.get_typed_func(&mut store, "miso_gate_widths")?;
         let digest_word: TypedFunc<(u32, u32, u32), u32> =
             instance.get_typed_func(&mut store, "miso_gate_digest_word")?;
+        let minmax_lowering_mismatches: TypedFunc<u32, u32> =
+            instance.get_typed_func(&mut store, "miso_gate_minmax_lowering_mismatches")?;
 
         let backend = backend.call(&mut store, ())?;
         let cases = case_count.call(&mut store, ())? as usize;
@@ -270,9 +285,21 @@ impl Guest {
         Ok(Self {
             store,
             digest_word,
+            minmax_lowering_mismatches,
             backend,
             cases,
         })
+    }
+
+    /// Runs the `max`/`min` lowering truth table inside the guest, at every width.
+    fn minmax_lowering_mismatches(&mut self) -> wasmtime::Result<u32> {
+        let mut total = 0;
+        for width in 0..corpus::WIDTHS {
+            total += self
+                .minmax_lowering_mismatches
+                .call(&mut self.store, width as u32)?;
+        }
+        Ok(total)
     }
 
     /// Reads one digest out of the guest, eight little-endian words at a time.
@@ -325,12 +352,15 @@ pub fn wasm_report(path: &Path, expected: ExpectedBackend) -> wasmtime::Result<R
         }
     }
 
+    let minmax_lowering_mismatches = guest.minmax_lowering_mismatches()?;
+
     Ok(Report {
         leg: "wasm",
         backend: guest.backend,
         cases: guest.cases,
         comparisons,
         mismatches,
+        minmax_lowering_mismatches,
     })
 }
 

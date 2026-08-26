@@ -116,3 +116,33 @@ changing the corpus, not the assertion.
 * `g5_fma_case_separates_fused_from_unfused` compares the pinned `lane_fma` digest against the same
   case evaluated with a multiply and an add. If the operands ever stop separating the two forms,
   the wasm leg would go on being green while proving nothing, and this fails instead.
+
+## `max`/`min` single-instruction lowerings (round 2)
+
+`crates/miso-engine-lane/src/wide_impl.rs` lowers `Lane::max`/`Lane::min` to one instruction on the
+two targets that have one with the D8 rule: `maxps`/`minps` on x86, and `f32x4.pmax`/`f32x4.pmin`
+on wasm `simd128` **with the operands swapped**, because `pmax(z1, z2)` is `z1 < z2 ? z2 : z1`
+while `maxps(a, b)` is `a > b ? a : b`. The x86 half is gated natively by
+`crates/miso-engine-lane/tests/g1_op_identity.rs`; the wasm half has no native leg at all, so the
+guest gained `miso_gate_minmax_lowering_mismatches(width)`, which runs the truth table over every
+ordered pair of ten edge values (both signed zeros, two distinct NaN payloads, both infinities,
+both signed minimum subnormals) against the scalar oracle inside the module and returns a count.
+Both wasm legs and the native leg require zero, and the count is carried in the evidence line.
+
+**Red mutation, applied and reverted on the delivery host.** Drop the operand swap in the wasm arm
+-- `b.fast_max(self)` becomes `self.fast_max(b)`, and the same for `min` -- which is the one
+mistake this shape can make:
+
+```
+{"schema_version":1,"kind":"wasm_gates","leg":"native","...":"","minmax_lowering_mismatches":0,"mismatches":[]}
+{"schema_version":1,"kind":"wasm_gates","leg":"wasm","backend":0,"minmax_lowering_mismatches":0,"mismatches":[]}
+wasm max/min lowering: 144 lanes disagree with the scalar oracle; the single-instruction lowering
+in crates/miso-engine-lane/src/wide_impl.rs is not D8 on this target
+{"schema_version":1,"kind":"wasm_gates","leg":"wasm","backend":1,"minmax_lowering_mismatches":144,"mismatches":[]}
+```
+
+The line that matters is the one that stayed green: **all 331 corpus digest comparisons still
+matched their pins under the mutation, on every leg.** The swapped lowering differs from D8 only on
+ties and unordered pairs, and rule 2 of the corpus is that no NaN reaches a digest, so the frozen
+corpus cannot see this defect. That is the whole reason the count exists beside the digests rather
+than as another case in them.

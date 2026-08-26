@@ -11,8 +11,11 @@
 //!   [`prim@f32`] is the oracle and is written operation by operation to that table, never to a
 //!   `std` convenience: `f32::max`, for example, has a different NaN rule than decision D8 and is
 //!   forbidden on any render path.
-//! * `max`/`min` are `select(a > b, a, b)` / `select(a < b, a, b)` (D8), provided as trait defaults
-//!   so that no backend can substitute an IEEE `maximum`.
+//! * `max`/`min` are `select(a > b, a, b)` / `select(a < b, a, b)` (D8). The trait default is that
+//!   expression, so a backend that overrides it must reproduce it bit for bit and never substitute
+//!   an IEEE `maximum`: `x86` and wasm `simd128` each have one instruction with exactly the D8
+//!   rule and use it, AArch64 has none and keeps the default
+//!   (`wide_impl.rs`, "Lowerings chosen per backend").
 //! * Fusion exists **nowhere** (issue #163 phase 2, amending D3). [`Lane::fma`] keeps its name but
 //!   is `(a * b) + c` with two roundings on every backend. Rust never contracts `a * b + c`, so
 //!   the absence of fusion is mechanically checkable and is sealed:
@@ -30,7 +33,9 @@
 //! [`attest_host`]. `wide` is a vocabulary, not a semantics authority: its `max`, `min` and
 //! `mul_add` differ per target and are never forwarded — `mul_add` least of all, since a fused
 //! lowering on one target and an unfused one on another is precisely the split issue #163 phase 2
-//! removed.
+//! removed. Its `fast_max`/`fast_min`, which are the bare instruction with no fix-up, *are* used
+//! on the two targets where that instruction is D8 exactly; the difference between borrowing a
+//! semantics and borrowing an instruction is argued case by case in `wide_impl.rs`.
 //!
 //! # Realtime rules
 //!
@@ -279,12 +284,18 @@ pub trait Lane: Copy + Send + Sync + 'static {
     ///
     /// Consequences that are deliberate and gated: `max(-0.0, +0.0)` is `+0.0`,
     /// `max(+0.0, -0.0)` is `-0.0`, `max(NaN, x)` is `x` and `max(x, NaN)` is `NaN`.
+    ///
+    /// This body is the specification. An implementation may override it only with a lowering
+    /// that reproduces it bit for bit on every input, which `x86`'s `maxps` and wasm's
+    /// operand-swapped `f32x4.pmax` do and NEON's `vmaxq`/`vmaxnmq` do not; gate G1 is what makes
+    /// that a checked claim rather than a comment.
     #[inline(always)]
     fn max(self, b: Self) -> Self {
         Self::select(self.gt(b), self, b)
     }
 
-    /// `select(self < b, self, b)`: the mirror of [`Lane::max`] (D8).
+    /// `select(self < b, self, b)`: the mirror of [`Lane::max`] (D8), overridable on the same
+    /// terms.
     #[inline(always)]
     fn min(self, b: Self) -> Self {
         Self::select(self.lt(b), self, b)
