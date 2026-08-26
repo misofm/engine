@@ -58,6 +58,16 @@
 # is captured with `wide_impl.rs` reverted to the base commit and nothing else changed -- so the
 # rows are read against each other directly, and against `artifacts/issue175`, which remains the
 # standing authority for the intended strip.
+# `--round2-eqrack` and `--round2-eqrack-baseline` are the paired arms of rack/EQ round 2, and they
+# are read against each other rather than against a standing directory: the baseline is captured at
+# the merge base and the candidate on the same tree plus three changes -- the vectorised
+# planar/AoSoA whole-bank transpose, the skipped bank-member dedication copy, and the EQ identity
+# refresh batched out of the per-lane snap loop. All three are **class A**, so every `output_sha256`
+# must be byte-identical between the two arms on every row, `console_automation` and the nine-track
+# ragged row included; the ragged row matters twice over, because it is the fixture that exercises
+# the partial-bank scalar transpose the tiled path deliberately does not replace. Unlike the EQ
+# round-1 arm, `console_placement`'s `merged_chain_transposes_per_block` must *not* move: this round
+# makes each transpose cheaper and does not remove one.
 #
 # # Admissibility (#144 item 13, #163 phase 0a)
 #
@@ -87,10 +97,12 @@ if [[ "$#" == 1 ]]; then
         --issue184) phase_directory=issue184 ;;
         --round2-lane) phase_directory=round2-lane ;;
         --round2-lane-baseline) phase_directory=round2-lane-baseline ;;
-        *) printf 'usage: %s [--phase2|--phase3|--issue163-phase0|--issue163-phase1|--issue163-phase2|--issue163-phase3|--issue163-phase4|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue184|--round2-lane|--round2-lane-baseline]\n' "$0" >&2; exit 2 ;;
+        --round2-eqrack) phase_directory=round2-eqrack ;;
+        --round2-eqrack-baseline) phase_directory=round2-eqrack-baseline ;;
+        *) printf 'usage: %s [--phase2|--phase3|--issue163-phase0|--issue163-phase1|--issue163-phase2|--issue163-phase3|--issue163-phase4|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue184|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline]\n' "$0" >&2; exit 2 ;;
     esac
 elif [[ "$#" != 0 ]]; then
-    printf 'usage: %s [--phase2|--phase3|--issue163-phase0|--issue163-phase1|--issue163-phase2|--issue163-phase3|--issue163-phase4|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue184|--round2-lane|--round2-lane-baseline]\n' "$0" >&2
+    printf 'usage: %s [--phase2|--phase3|--issue163-phase0|--issue163-phase1|--issue163-phase2|--issue163-phase3|--issue163-phase4|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue184|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline]\n' "$0" >&2
     exit 2
 fi
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)

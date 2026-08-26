@@ -75,11 +75,13 @@ if [[ "$#" == 1 ]]; then
         --round1-composed) arm=round1-composed ;;
         --round2-lane) arm=round2-lane ;;
         --round2-lane-baseline) arm=round2-lane-baseline ;;
-        *) printf 'usage: %s [--after|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue183|--round2-lane|--round2-lane-baseline]
+        --round2-eqrack) arm=round2-eqrack ;;
+        --round2-eqrack-baseline) arm=round2-eqrack-baseline ;;
+        *) printf 'usage: %s [--after|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue183|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline]
 ' "$0" >&2; exit 2 ;;
     esac
 elif [[ "$#" != 0 ]]; then
-    printf 'usage: %s [--after|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue183|--round2-lane|--round2-lane-baseline]
+    printf 'usage: %s [--after|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue183|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline]
 ' "$0" >&2
     exit 2
 fi
@@ -108,6 +110,10 @@ elif [[ "$arm" == round2-lane ]]; then
     artifact_dir="$root/artifacts/round2-lane"
 elif [[ "$arm" == round2-lane-baseline ]]; then
     artifact_dir="$root/artifacts/round2-lane-baseline"
+elif [[ "$arm" == round2-eqrack ]]; then
+    artifact_dir="$root/artifacts/round2-eqrack"
+elif [[ "$arm" == round2-eqrack-baseline ]]; then
+    artifact_dir="$root/artifacts/round2-eqrack-baseline"
 else
     artifact_dir="$root/artifacts/issue163-phase2-wasm-baseline"
 fi
