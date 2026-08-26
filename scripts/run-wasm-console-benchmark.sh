@@ -42,6 +42,14 @@
 # *before* the phase-2 contract change, which is what the owner's ruling asked for first so that
 # the change had a premise to be judged against.
 #
+# `--issue183` writes `artifacts/issue183`: the paired W4/W8 arm of issue #183 step 2. It builds
+# the guest twice -- once as every other arm does, once with `--cfg miso_wasm_simd8`, which is the
+# single build-time switch that moves `Backend::current()` on wasm32 from `Simd4` to `Simd8` -- and
+# hands both modules to one host process, which renders them inside the same observation. The
+# record grows a `wasm_simd128_w8` leg and a third ratio, `wasm_simd128_w8 / wasm_simd128`; that
+# ratio against the 1.8x null threshold is the whole decision. The four-lane module is byte-
+# identical to the one every other arm builds: no default build reads the cfg.
+#
 # `--after` writes `artifacts/issue163-phase2`: the same nine rows on the unfused tree. The two are
 # separate sealed directories rather than one re-run for the reason every one-shot in this repo is
 # -- a consumed measurement describes the tree that produced it -- and for one more that is
@@ -59,11 +67,12 @@ if [[ "$#" == 1 ]]; then
         --compressor-round1) arm=compressor-round1 ;;
         --compressor-round1-baseline) arm=compressor-round1-baseline ;;
         --round1-composed) arm=round1-composed ;;
-        *) printf 'usage: %s [--after|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed]
+        --issue183) arm=issue183 ;;
+        *) printf 'usage: %s [--after|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue183]
 ' "$0" >&2; exit 2 ;;
     esac
 elif [[ "$#" != 0 ]]; then
-    printf 'usage: %s [--after|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed]
+    printf 'usage: %s [--after|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue183]
 ' "$0" >&2
     exit 2
 fi
@@ -86,6 +95,8 @@ elif [[ "$arm" == compressor-round1-baseline ]]; then
     artifact_dir="$root/artifacts/compressor-round1-baseline"
 elif [[ "$arm" == round1-composed ]]; then
     artifact_dir="$root/artifacts/round1-composed"
+elif [[ "$arm" == issue183 ]]; then
+    artifact_dir="$root/artifacts/issue183"
 else
     artifact_dir="$root/artifacts/issue163-phase2-wasm-baseline"
 fi
@@ -119,6 +130,7 @@ candidate_commit=
 candidate_commit_sha256=
 binary_sha256=
 guest_sha256=
+guest_simd8_sha256=
 measurement_control=unevaluated
 cpu_affinity=unevaluated
 
@@ -140,14 +152,16 @@ write_disposition() {
     read -r accepted_sha accepted_bytes <<<"$accepted_identity"
     read -r stderr_sha stderr_bytes <<<"$stderr_identity"
     local commit_json=null commit_sha_json=null binary_json=null guest_json=null
+    local guest_simd8_json=null
     [[ -n "$candidate_commit" ]] && commit_json="\"$candidate_commit\""
     [[ -n "$candidate_commit_sha256" ]] && commit_sha_json="\"$candidate_commit_sha256\""
     [[ -n "$binary_sha256" ]] && binary_json="\"$binary_sha256\""
     [[ -n "$guest_sha256" ]] && guest_json="\"$guest_sha256\""
-    printf '{"schema_version":1,"issue":163,"phase":"2-step1","status":"%s","reason":"%s","runner_invocations":1,"workload_process_launches":%s,"warmup_launches":%s,"measured_rounds_completed":%s,"measurement_control":"%s","cpu_affinity":"%s","candidate_commit":%s,"candidate_commit_sha256":%s,"binary_sha256":%s,"guest_module_sha256":%s,"raw_sha256":%s,"raw_bytes":%s,"accepted_sha256":%s,"accepted_bytes":%s,"stderr_sha256":%s,"stderr_bytes":%s}\n' \
+    [[ -n "$guest_simd8_sha256" ]] && guest_simd8_json="\"$guest_simd8_sha256\""
+    printf '{"schema_version":1,"issue":163,"phase":"2-step1","status":"%s","reason":"%s","runner_invocations":1,"workload_process_launches":%s,"warmup_launches":%s,"measured_rounds_completed":%s,"measurement_control":"%s","cpu_affinity":"%s","candidate_commit":%s,"candidate_commit_sha256":%s,"binary_sha256":%s,"guest_module_sha256":%s,"guest_simd8_module_sha256":%s,"raw_sha256":%s,"raw_bytes":%s,"accepted_sha256":%s,"accepted_bytes":%s,"stderr_sha256":%s,"stderr_bytes":%s}\n' \
         "$status" "$reason" "$workload_process_launches" "$warmup_launches" \
         "$measured_rounds_completed" "$measurement_control" "$cpu_affinity" \
-        "$commit_json" "$commit_sha_json" "$binary_json" "$guest_json" \
+        "$commit_json" "$commit_sha_json" "$binary_json" "$guest_json" "$guest_simd8_json" \
         "$raw_sha" "$raw_bytes" "$accepted_sha" "$accepted_bytes" \
         "$stderr_sha" "$stderr_bytes" >"$disposition"
 }
@@ -187,6 +201,32 @@ CARGO_TARGET_DIR="$guest_target" RUSTFLAGS="-C target-feature=+simd128" \
 guest="$guest_target/wasm32-unknown-unknown/release/miso_engine_wasm_console_guest.wasm"
 [[ -f "$guest" ]] || { failure_reason=missing_guest_module; exit 1; }
 guest_sha256=$(sha256sum "$guest" | awk '{print $1}')
+
+# The issue #183 paired arm needs a second guest: the same source, the same flags, plus the one
+# build-time cfg that moves `Backend::current()` on wasm32 from `Simd4` to `Simd8`. It is built
+# into its own target directory so the W4 module measured above is not disturbed, and the two are
+# handed to the host together so both are timed inside one observation.
+#
+# The default W4 module is byte-identical whether or not this arm exists: nothing above reads the
+# cfg, and `guest_sha256` is recorded before this block runs.
+guests=("$guest")
+if [[ "$arm" == issue183 ]]; then
+    failure_reason=guest_simd8_build_failed
+    guest_simd8_target=target/ci/issue183-guest-simd8
+    CARGO_TARGET_DIR="$guest_simd8_target" \
+        RUSTFLAGS="-C target-feature=+simd128 --cfg miso_wasm_simd8" \
+        cargo build --locked --release --quiet --target wasm32-unknown-unknown \
+        -p miso-engine-wasm-console-guest 2>>"$stderr_log"
+    guest_simd8="$guest_simd8_target/wasm32-unknown-unknown/release/miso_engine_wasm_console_guest.wasm"
+    [[ -f "$guest_simd8" ]] || { failure_reason=missing_guest_simd8_module; exit 1; }
+    guest_simd8_sha256=$(sha256sum "$guest_simd8" | awk '{print $1}')
+    [[ "$guest_simd8_sha256" != "$guest_sha256" ]] || {
+        failure_reason=guest_simd8_module_identical
+        printf 'the eight-lane guest hashed the same as the four-lane one: the width override did not take\n' >&2
+        exit 1
+    }
+    guests+=("$guest_simd8")
+fi
 
 failure_reason=build_failed
 cargo build --locked --release --quiet -p miso-engine-wasm-console 2>>"$stderr_log"
@@ -313,7 +353,7 @@ run_round() {
     MISO_ENGINE_BENCH_MEASUREMENT_CONTROL="$measurement_control" \
     MISO_ENGINE_BENCH_CPU_AFFINITY="$cpu_affinity" \
     MISO_ENGINE_BENCH_GOVERNOR_OR_POWER_MODE="$governor_or_power_mode" \
-    "${affinity[@]}" "$binary" "$guest"
+    "${affinity[@]}" "$binary" "${guests[@]}"
 }
 
 # One untimed warmup, then exactly the two frozen measured rounds.

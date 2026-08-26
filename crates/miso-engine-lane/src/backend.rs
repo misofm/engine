@@ -4,6 +4,13 @@
 //! `cfg(target_feature)` at compile time, the workspace pins `x86_64` to `x86-64-v3`, and NEON is
 //! baseline on AArch64, so the backend is a compile-time constant. What remains is to refuse to
 //! start on a CPU that cannot execute the pinned instructions — never to fall back silently.
+//!
+//! One build-time cfg, `miso_wasm_simd8`, moves the wasm arm from [`Backend::Simd4`] to
+//! [`Backend::Simd8`]. It is measurement infrastructure for issue #183 step 2 and nothing else:
+//! no default build, gate or shipped artifact sets it, so with it absent this file compiles to the
+//! same constant it did before it existed. It is deliberately a cfg rather than a Cargo feature,
+//! because a feature is unified across a whole invocation's dependency graph and would let one
+//! crate's opt-in silently rewidth another's.
 
 use core::fmt;
 
@@ -30,9 +37,25 @@ impl Backend {
         {
             Self::Simd4
         }
-        #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+        // The production wasm width. `wide` lowers `f32x8` to two `v128` values there, so eight
+        // lanes are two instructions per operation rather than one; whether that is a win is a
+        // measurement, and until it is made the shipped artifact is four lanes.
+        #[cfg(all(
+            target_arch = "wasm32",
+            target_feature = "simd128",
+            not(miso_wasm_simd8)
+        ))]
         {
             Self::Simd4
+        }
+        // Issue #183 step 2: the eight-lane wasm *measurement* build, opt in at build time with
+        // `RUSTFLAGS="--cfg miso_wasm_simd8"`. It exists so the paired W4/W8 wasmtime console
+        // record can be taken from two guests that differ in nothing but this constant; it is not
+        // a shipping configuration and no default build sets it, so the W4 artifact every gate and
+        // digest check covers is byte-identical with or without this arm present.
+        #[cfg(all(target_arch = "wasm32", target_feature = "simd128", miso_wasm_simd8))]
+        {
+            Self::Simd8
         }
         #[cfg(not(any(
             target_arch = "x86",

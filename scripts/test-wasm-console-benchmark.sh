@@ -2,10 +2,14 @@
 # Mutation coverage for the issue #163 phase 2 step 1 wasm console arm's validator.
 #
 # Hermetic: no wasmtime, no guest module, no timing, no measurement. It builds one frozen
-# eighteen-record set with `jq -cn`, asserts the validator accepts it, then destroys one claim at a
-# time and asserts the validator rejects each. Every case carries a prose label naming the claim it
-# breaks, because a mutation suite whose cases are unlabelled is a list of jq expressions rather
+# twenty-two-record set with `jq -cn`, asserts the validator accepts it, then destroys one claim at
+# a time and asserts the validator rejects each. Every case carries a prose label naming the claim
+# it breaks, because a mutation suite whose cases are unlabelled is a list of jq expressions rather
 # than a statement of what the validator is for.
+#
+# There are two frozen shapes, because there are two record shapes. The three-leg set is every arm
+# up to and including #184; the paired four-leg set is issue #183's W4/W8 arm, derived from the
+# first so the two cannot drift apart here, and it carries its own block of cases at the bottom.
 #
 # The no-pipe shape is deliberate and is the same one `test-wasm-kernel-timing.sh` uses: the
 # helpers take JSON as an *argument*, never on stdin, because a helper on the right of a pipe runs
@@ -181,6 +185,72 @@ mutate '.[0].guest_module_sha256 = ("a" * 64)' \
 expect_reject "$(set_all '.unexpected_key = 1')" 'an extra key'
 expect_reject "$(set_all 'del(.guest_call_overhead_p50_ns)')" \
     'a record that dropped the host-to-guest crossing cost it does not subtract'
+
+# ------------------------------------------------------------------------------------------
+# The issue #183 paired arm: the same twenty-two rows with a fourth leg, the eight-lane wasm
+# guest, and the width ratio the switch decision is read off. The set is derived from the frozen
+# one above rather than written out again, so the two shapes cannot drift apart in this file.
+# ------------------------------------------------------------------------------------------
+paired=$(printf '%s' "$records" | jq -c '
+  def w8_p50: 1120000;
+  [ .[] | . as $record |
+    ($record.legs[2]) as $w4 |
+    $record
+    + { guest_simd8_module_sha256: ("2" * 64) }
+    | .legs += [ $w4 + {
+          leg: "wasm_simd128_w8", backend: "Simd8",
+          min_ns_per_block: (w8_p50 - 100),
+          p50_ns_per_block: w8_p50,
+          p95_ns_per_block: (w8_p50 + 100),
+          p99_ns_per_block: (w8_p50 + 200),
+          max_ns_per_block: (w8_p50 + 900),
+          p50_us_per_block: ((w8_p50 / 1000 * 1000 | round) / 1000)
+        } ]
+    | .ratios += [ { numerator: "wasm_simd128_w8", denominator: "wasm_simd128",
+                     ratio_of_p50: ((w8_p50 / $w4.p50_ns_per_block * 1000 | round) / 1000),
+                     paired_ratio_median: 1.18 } ] ]')
+
+paired_set_all() { printf '%s' "$paired" | jq -c "[.[] | $1] | .[]"; }
+paired_mutate() { expect_reject "$(printf '%s' "$paired" | jq -c "$1 | .[]")" "$2"; }
+
+expect_accept "$(printf '%s' "$paired" | jq -c '.[]')" \
+    'the frozen twenty-two-record paired W4/W8 set'
+
+# The pairing itself: a record set is paired in every row or in none.
+paired_mutate '.[0:11] = ([.[0:11][] | del(.guest_simd8_module_sha256)
+                          | .legs = .legs[0:3] | .ratios = .ratios[0:2]])' \
+    'half a set carrying the eight-lane leg and half not'
+paired_mutate '[.[] | del(.guest_simd8_module_sha256)]' \
+    'a fourth leg timed and reported with no second guest module behind it'
+paired_mutate '[.[] | .guest_simd8_module_sha256 = .guest_module_sha256]' \
+    'one guest module named twice and reported as a paired width measurement'
+paired_mutate '.[0].guest_simd8_module_sha256 = ("3" * 64)' \
+    'two different eight-lane guests timed and reported as one measurement'
+paired_mutate '[.[] | .legs = .legs[0:3]]' \
+    'a paired record that dropped the eight-lane leg it says it carries'
+
+# The eight-lane leg is the eight-lane leg.
+paired_mutate '.[0].legs[3].backend = "Simd4"' \
+    'the eight-lane wasm leg labelled at the width it is being compared against'
+paired_mutate '.[0].legs[3].target = "native"' 'the eight-lane wasm leg labelled as a native one'
+paired_mutate '.[0].legs[3].leg = "wasm_simd128"' \
+    'a record whose two wasm legs carry the same name'
+paired_mutate '.[0].legs[3].output_sha256 = ("f" * 64)' \
+    'an eight-lane guest that rendered different bits than the four-lane guest beside it'
+
+# The width ratio: the number the switch decision is read off.
+paired_mutate '.[0].ratios[2].ratio_of_p50 = 1.0' \
+    'a width ratio that does not follow from the two wasm legs it names'
+paired_mutate '.[0].legs[3].p50_ns_per_block = 2000000' \
+    'an eight-lane p50 moved out from under the width ratio computed from it'
+paired_mutate '.[0].ratios[2].denominator = "native_simd8"' \
+    'a width ratio taken against a native leg, which is a target comparison and not a width one'
+paired_mutate '.[0].ratios[2].numerator = "wasm_simd128"' \
+    'a width ratio of the four-lane leg against itself'
+paired_mutate '[.[] | .ratios = .ratios[0:2]]' \
+    'a paired record that publishes both wasm legs and no ratio between them'
+
+expect_reject "$(paired_set_all '.unexpected_key = 1')" 'an extra key on a paired record'
 
 if [[ "$failures" != 0 ]]; then
     printf 'wasm console benchmark validator suite: %s FAILED case(s)\n' "$failures" >&2
