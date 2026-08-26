@@ -7,7 +7,8 @@
 # defect cannot consume the one authorised measurement. Nothing here is timed, and nothing here
 # instantiates the guest for anything but a shape check.
 set -euo pipefail
-[[ "$#" -le 1 ]] || { printf 'usage: %s [--after|--issue175|--issue182|--issue-loop-eq-r1]\n' "$0" >&2; exit 2; }
+[[ "$#" -le 1 ]] || { printf 'usage: %s [--after|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline]
+' "$0" >&2; exit 2; }
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$root"
 
@@ -18,14 +19,21 @@ fail() { printf 'wasm console preflight failure: %s\n' "$1" >&2; exit 1; }
 # wasm half of the intended-placement family, whose row set the standing fixture changed, and
 # `--issue-loop-eq-r1` is the wasm half of the effect-optimization loop's EQ round 1 (identity-
 # section elision plus the two-slot cohort chain), which is class A against #175 on every leg.
+# `--issue182` is the same strip re-measured after the limiter's effect-optimisation round, which
+# is class A and must therefore reproduce every `output_sha256` of the #175 arm exactly.
+# `--compressor-round1` and `--compressor-round1-baseline` are the paired arms of the compressor's
+# effect-optimisation round: the same rows with and without two class-A kernel changes, so they
+# must reproduce each other's digests exactly and differ only in time.
 arm=baseline
 case "${1:-}" in
     --after) arm=after; shift ;;
     --issue175) arm=issue175; shift ;;
     --issue182) arm=issue182; shift ;;
     --issue-loop-eq-r1) arm=issue-loop-eq-r1; shift ;;
+    --compressor-round1) arm=compressor-round1; shift ;;
+    --compressor-round1-baseline) arm=compressor-round1-baseline; shift ;;
 esac
-[[ "$#" == 0 ]] || fail "usage: $0 [--after|--issue175|--issue182|--issue-loop-eq-r1]"
+[[ "$#" == 0 ]] || fail "usage: $0 [--after|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline]"
 
 if [[ "$arm" == after ]]; then
     artifact_dir="$root/artifacts/issue163-phase2"
@@ -35,6 +43,10 @@ elif [[ "$arm" == issue182 ]]; then
     artifact_dir="$root/artifacts/issue182"
 elif [[ "$arm" == issue-loop-eq-r1 ]]; then
     artifact_dir="$root/artifacts/issue-loop-eq-r1"
+elif [[ "$arm" == compressor-round1 ]]; then
+    artifact_dir="$root/artifacts/compressor-round1"
+elif [[ "$arm" == compressor-round1-baseline ]]; then
+    artifact_dir="$root/artifacts/compressor-round1-baseline"
 else
     artifact_dir="$root/artifacts/issue163-phase2-wasm-baseline"
 fi

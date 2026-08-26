@@ -56,10 +56,14 @@ if [[ "$#" == 1 ]]; then
         --issue175) arm=issue175 ;;
         --issue182) arm=issue182 ;;
         --issue-loop-eq-r1) arm=issue-loop-eq-r1 ;;
-        *) printf 'usage: %s [--after|--issue175|--issue182|--issue-loop-eq-r1]\n' "$0" >&2; exit 2 ;;
+        --compressor-round1) arm=compressor-round1 ;;
+        --compressor-round1-baseline) arm=compressor-round1-baseline ;;
+        *) printf 'usage: %s [--after|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline]
+' "$0" >&2; exit 2 ;;
     esac
 elif [[ "$#" != 0 ]]; then
-    printf 'usage: %s [--after|--issue175|--issue182|--issue-loop-eq-r1]\n' "$0" >&2
+    printf 'usage: %s [--after|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline]
+' "$0" >&2
     exit 2
 fi
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -75,6 +79,10 @@ elif [[ "$arm" == issue182 ]]; then
     artifact_dir="$root/artifacts/issue182"
 elif [[ "$arm" == issue-loop-eq-r1 ]]; then
     artifact_dir="$root/artifacts/issue-loop-eq-r1"
+elif [[ "$arm" == compressor-round1 ]]; then
+    artifact_dir="$root/artifacts/compressor-round1"
+elif [[ "$arm" == compressor-round1-baseline ]]; then
+    artifact_dir="$root/artifacts/compressor-round1-baseline"
 else
     artifact_dir="$root/artifacts/issue163-phase2-wasm-baseline"
 fi
