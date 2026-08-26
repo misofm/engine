@@ -185,6 +185,13 @@ const MUTATIONS: &[(&str, &str, &str, usize, &str)] = &[
         1,
         "schema.invalid_enum",
     ),
+    (
+        "canonical.toml",
+        "shape = \"linear\"",
+        "shape = \"exponential\"",
+        1,
+        "automation.invalid_range",
+    ),
     // Stage 3: the checked resource preflight against the session's own declared limits.
     (
         "canonical.toml",
