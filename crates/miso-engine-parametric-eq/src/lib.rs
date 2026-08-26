@@ -998,6 +998,14 @@ impl<L: Lane, const W: usize> Channel<L, W> {
     }
 
     /// Assigns the target exactly and stops lane `track`'s ramp — the D11 snap.
+    ///
+    /// **The caller refreshes** `identity[section]`. Every call site is a loop over the lanes of
+    /// one section, and [`refresh_identity`](Self::refresh_identity) re-derives the whole section
+    /// from its coefficient words, so running it inside this function re-derived the same six lane
+    /// compares `W` times for one bank-wide ramp end. Hoisting it is exact rather than merely
+    /// cheaper: the flag is read only on a *stationary* block ([`cascade_sections`]), no lane's
+    /// ramp can start mid-block, and a section's last snap is the one whose value survives either
+    /// way. `identity_flags_agree` is the standing oracle that no refresh site was lost.
     fn snap(&mut self, section: usize, track: usize) {
         let slot = &mut self.sections[section];
         for index in 0..6 {
@@ -1006,7 +1014,22 @@ impl<L: Lane, const W: usize> Channel<L, W> {
             lane_set(step_word_mut(&mut slot.step, index), track, 0.0);
         }
         self.remaining[section][track] = 0;
-        self.refresh_identity(section);
+    }
+
+    /// Snaps **every** lane of `section` at once: six vector copies and one zeroed step set.
+    ///
+    /// Bit-identical to `for track in 0..W { self.snap(section, track) }`, and it is the shape a
+    /// bank-wide ramp end actually has -- the console moves a band on all `W` lanes of a bank
+    /// together. The per-lane form pays a `lane_get`/`lane_set` pair per word per lane, and each of
+    /// those is a full `store`/`load` round trip out of and back into the vector domain: `12 * W`
+    /// of them per section, to write words the target already holds in exactly the right lanes.
+    ///
+    /// The caller refreshes `identity[section]`, as with [`snap`](Self::snap).
+    fn snap_section(&mut self, section: usize) {
+        let slot = &mut self.sections[section];
+        slot.coef = slot.target;
+        slot.step = SvfCoefStep::default();
+        self.remaining[section] = [0; W];
     }
 
     /// Runs the four sections over one block in place.
@@ -1032,10 +1055,22 @@ impl<L: Lane, const W: usize> Channel<L, W> {
     #[inline(always)]
     fn process_section(&mut self, section: usize, io: &mut [f32], frames: usize) {
         let mut position = 0;
+        let mut snapped = false;
         while position < frames {
-            for track in 0..W {
-                if self.remaining[section][track] == 1 {
-                    self.snap(section, track);
+            // A ramp that ends on every lane at once is the common case -- a console automates a
+            // band across a whole bank -- and it is the one that can skip the lane loop entirely.
+            if self.remaining[section]
+                .iter()
+                .all(|remaining| *remaining == 1)
+            {
+                self.snap_section(section);
+                snapped = true;
+            } else {
+                for track in 0..W {
+                    if self.remaining[section][track] == 1 {
+                        self.snap(section, track);
+                        snapped = true;
+                    }
                 }
             }
             let mut length = frames - position;
@@ -1068,6 +1103,12 @@ impl<L: Lane, const W: usize> Channel<L, W> {
                 *remaining = remaining.saturating_sub(length as u32);
             }
             position += length;
+        }
+        // Once for the section, not once per snapped lane per segment. Nothing between the snaps
+        // above and here reads `identity`, and the value this leaves is the value the last snap
+        // would have left: see the note on `snap`.
+        if snapped {
+            self.refresh_identity(section);
         }
     }
 
@@ -1112,9 +1153,10 @@ impl<L: Lane, const W: usize> Channel<L, W> {
     fn discontinuity_reset(&mut self) {
         self.reset_states();
         for section in 0..EQ_SECTION_COUNT_V1 {
-            for track in 0..W {
-                self.snap(section, track);
-            }
+            // Every lane, so this is the whole-section snap by construction; one refresh per
+            // section rather than one per lane.
+            self.snap_section(section);
+            self.refresh_identity(section);
         }
     }
 }
