@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# scripts/sweep.sh -- the hermetic check/test sweep. 89 explicit rows.
+# scripts/sweep.sh -- the hermetic check/test sweep. 91 explicit rows.
 #
-# Why this exists: the repo has 89 check-*/test-* scripts and ci.yml names 36 of them, so 50 gates
+# Why this exists: the repo has 91 check-*/test-* scripts and ci.yml names 36 of them, so 52 gates
 # had no committed runner at all -- they were reachable only by knowing they existed. Every row
 # below is written out by name. There are deliberately no globs: a glob silently absorbs a new
 # script (and silently drops a renamed one), which is how the coverage gap got here in the first
@@ -87,6 +87,7 @@ row scripts/check-effect-runtime-policy.sh
 row scripts/check-effect-state-migration-v1.sh
 row scripts/check-env-vocabulary.sh
 row scripts/check-fast-db-seal.sh
+row scripts/check-unfused-seal.sh
 row scripts/check-host-core-policy.sh
 row scripts/check-lane-policy.sh
 row scripts/check-math-policy.sh
@@ -137,6 +138,7 @@ row scripts/test-workspace-policy.sh
 # ---- tier 2: seconds; mutation suites and audit probes -------------------------------------
 row scripts/test-builtins-graph-audit-probes.sh
 row scripts/test-fast-db-seal.sh
+row scripts/test-unfused-seal.sh
 row scripts/test-scheduler-benchmark.sh
 row scripts/test-console-benchmark.sh
 row scripts/test-capi-abi.sh

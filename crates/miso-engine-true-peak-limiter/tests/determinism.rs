@@ -19,8 +19,20 @@ fn digest<L: Lane>(case: usize) -> ([u8; 32], Vec<u32>) {
     (hasher.finalize().into(), out)
 }
 
+/// Set `MISO_ENGINE_REPIN_TRUE_PEAK_LIMITER_CORPUS=1` to print the scalar pins in `D90_DIGESTS`
+/// form.
+///
+/// Per master plan §8.3 the pins come from the `f32` instantiation and from nowhere else; the
+/// vector widths and the wasm legs *confirm* them. Re-pin mode suppresses only the comparison
+/// against the pin: `Simd4` and `Simd8` are still required to agree with the scalar oracle, so a
+/// width disagreement cannot be laundered into a fresh pin.
+///
+/// This family has no independent `f64` oracle behind it — see the note above `D90_DIGESTS` and
+/// issue #90.
 #[test]
 fn every_case_has_one_digest_at_every_width() {
+    let repinning = std::env::var_os("MISO_ENGINE_REPIN_TRUE_PEAK_LIMITER_CORPUS").is_some();
+    let mut repin = String::new();
     for case in 0..corpus::CASE_COUNT {
         let (scalar, words) = digest::<f32>(case);
         let name = corpus::CASE_NAMES[case];
@@ -39,15 +51,25 @@ fn every_case_has_one_digest_at_every_width() {
             "{name} produced only {distinct} distinct words"
         );
 
-        assert_eq!(
-            scalar,
-            corpus::D90_DIGESTS[case],
-            "{name}: scalar digest moved; re-pin only from this oracle (master plan §8). \
-             Measured {}",
-            hex(&scalar)
-        );
+        if !repinning {
+            assert_eq!(
+                scalar,
+                corpus::D90_DIGESTS[case],
+                "{name}: scalar digest moved; re-pin only from this oracle (master plan §8). \
+                 Measured {}",
+                hex(&scalar)
+            );
+        }
         assert_eq!(digest::<Simd4>(case).0, scalar, "{name} at Simd4");
         assert_eq!(digest::<Simd8>(case).0, scalar, "{name} at Simd8");
+
+        let bytes: Vec<String> = scalar.iter().map(|byte| format!("0x{byte:02x}")).collect();
+        repin.push_str(&format!("    // {name}\n"));
+        repin.push_str(&format!("    [{}],\n", bytes.join(", ")));
+    }
+    if repinning {
+        println!("{repin}");
+        panic!("re-pin mode: copy the block above into D90_DIGESTS in src/corpus.rs");
     }
 }
 

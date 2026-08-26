@@ -3895,12 +3895,12 @@ mod tests {
     impl GraphRuntimeProcessor for Recursive {
         fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
             for frame in 0..block.left.len() {
-                self.left = miso_engine_lane::softfma::fma_f32_via_f64(
+                self.left = miso_engine_lane::softfma::unfused_multiply_add_via_f64(
                     self.coefficient,
                     self.left,
                     block.left[frame] * 0.5,
                 );
-                self.right = miso_engine_lane::softfma::fma_f32_via_f64(
+                self.right = miso_engine_lane::softfma::unfused_multiply_add_via_f64(
                     self.coefficient,
                     self.right,
                     block.right[frame] * 0.5,

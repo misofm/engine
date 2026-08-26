@@ -26,6 +26,17 @@
 # reason every phase does -- a consumed one-shot describes the tree that produced it, and phase 4
 # changes what the idle row costs without changing what any row computes.
 #
+# `--issue163-phase2` writes to `artifacts/issue163-phase2` and is the one arm in this list whose
+# subject is **class B**. Phases 1, 3 and 4 are class A: every workload's output digest is the
+# phase-1 digest to the bit, which is what lets their records be read row against row. Phase 2
+# changes the numeric contract itself (fused multiply-add to unfused, owner ruling 2026-08-26), so
+# every `output_sha256` in its record differs from every earlier record's by construction. That is
+# not drift and it is not a defect: it is the change being measured, and
+# `docs/rulings/unfused-multiply-add-audit.md` is the evidence that the new bits are the intended
+# ones. The timing rows remain comparable -- the workloads, fixture, quantum and observation count
+# are unchanged -- but the digest columns must not be compared, and a reader who diffs them will
+# find every row different.
+#
 # # Admissibility (#144 item 13, #163 phase 0a)
 #
 # Everything from `check-bench-preconditions.sh` down to the warmup is a *precondition*, not a
@@ -42,12 +53,13 @@ if [[ "$#" == 1 ]]; then
         --phase3) phase_directory=issue149-phase3 ;;
         --issue163-phase0) phase_directory=issue163-phase0 ;;
         --issue163-phase1) phase_directory=issue163-phase1 ;;
+        --issue163-phase2) phase_directory=issue163-phase2 ;;
         --issue163-phase3) phase_directory=issue163-phase3 ;;
         --issue163-phase4) phase_directory=issue163-phase4 ;;
-        *) printf 'usage: %s [--phase2|--phase3|--issue163-phase0|--issue163-phase1|--issue163-phase3|--issue163-phase4]\n' "$0" >&2; exit 2 ;;
+        *) printf 'usage: %s [--phase2|--phase3|--issue163-phase0|--issue163-phase1|--issue163-phase2|--issue163-phase3|--issue163-phase4]\n' "$0" >&2; exit 2 ;;
     esac
 elif [[ "$#" != 0 ]]; then
-    printf 'usage: %s [--phase2|--phase3|--issue163-phase0|--issue163-phase1|--issue163-phase3|--issue163-phase4]\n' "$0" >&2
+    printf 'usage: %s [--phase2|--phase3|--issue163-phase0|--issue163-phase1|--issue163-phase2|--issue163-phase3|--issue163-phase4]\n' "$0" >&2
     exit 2
 fi
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)

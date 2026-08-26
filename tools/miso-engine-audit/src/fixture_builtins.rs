@@ -34,7 +34,7 @@ use sha2::{Digest, Sha256};
 const MANIFEST_HEADER: &str = "path\tlength\tsha256\n";
 /// The checked graph fixture identity pinned by the two meter benchmark inputs.
 const GRAPH_TAP_PCM_SHA256_V1: &str =
-    "e6294eba78adcb3b09ae20dbf7ca7b322f81c8d39455b45ab5034e25e8493049";
+    "508c8e94244b99ae1ee59e4863088ba69c6462127eb0256f85ec72e775a17a19";
 const RATES: [u32; 4] = [44_100, 48_000, 88_200, 96_000];
 const QUANTA: [u32; 5] = [1, 127, 128, 255, 1_024];
 const CASE_COUNT_V1: usize = 1_652;
@@ -4988,7 +4988,7 @@ fn expected_benchmark_fields_v1(kind: BenchmarkKindV1, rate_hz: u32) -> Vec<(Str
             benchmark_field_pair_v1("meter_queue_capacity", "0"),
             benchmark_field_pair_v1("state_mode", "\"continuous\""),
             benchmark_field_pair_v1("input_pcm_path", "\"pcm/filters-asymmetric.f32le\""),
-            benchmark_field_pair_v1("input_pcm_sha256", "\"a1f1d4830b83413e7012d70a67f1b19624a3a78a92666bfc034e4bb5d2396cb4\""),
+            benchmark_field_pair_v1("input_pcm_sha256", "\"e53eead1da91f80b8c93a730bd1a45629f4efdddf90c3642d38498d29952d1ff\""),
             benchmark_field_pair_v1("left_hpf_hz", "100.0"),
             benchmark_field_pair_v1("right_hpf_hz", "200.0"),
             benchmark_field_pair_v1("left_lpf_hz", "1000.0"),
@@ -5219,7 +5219,7 @@ mod tests {
         assert_eq!(manifest.entries.len(), 50, "frozen checked payload count");
         assert_eq!(
             sha256(&fs::read(root.join("MANIFEST.tsv")).expect("checked manifest bytes")),
-            "c33781cfb1335de913b549456399016c28635dc5b0c9aacd169c4c6495e1956d",
+            "ddb4b201dcd4cc00ad445013c9a1b29d9d5f6071f018e649748963c74af4c55b",
             "accepted joined-corpus manifest identity"
         );
 
@@ -5628,7 +5628,7 @@ mod tests {
             (
                 "declared_pcm_hash",
                 benchmark_text_mutation_v1(
-                    "input_pcm_sha256 = \"a1f1d4830b83413e7012d70a67f1b19624a3a78a92666bfc034e4bb5d2396cb4\"",
+                    "input_pcm_sha256 = \"e53eead1da91f80b8c93a730bd1a45629f4efdddf90c3642d38498d29952d1ff\"",
                     "input_pcm_sha256 = \"0000000000000000000000000000000000000000000000000000000000000000\"",
                 ),
             ),

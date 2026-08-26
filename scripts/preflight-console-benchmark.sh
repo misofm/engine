@@ -17,12 +17,13 @@ if [[ "$#" == 1 ]]; then
         --phase3) phase_directory=issue149-phase3 ;;
         --issue163-phase0) phase_directory=issue163-phase0 ;;
         --issue163-phase1) phase_directory=issue163-phase1 ;;
+        --issue163-phase2) phase_directory=issue163-phase2 ;;
         --issue163-phase3) phase_directory=issue163-phase3 ;;
         --issue163-phase4) phase_directory=issue163-phase4 ;;
-        *) printf 'usage: %s [--phase2|--phase3|--issue163-phase0|--issue163-phase1|--issue163-phase3|--issue163-phase4]\n' "$0" >&2; exit 2 ;;
+        *) printf 'usage: %s [--phase2|--phase3|--issue163-phase0|--issue163-phase1|--issue163-phase2|--issue163-phase3|--issue163-phase4]\n' "$0" >&2; exit 2 ;;
     esac
 elif [[ "$#" != 0 ]]; then
-    printf 'usage: %s [--phase2|--phase3|--issue163-phase0|--issue163-phase1|--issue163-phase3|--issue163-phase4]\n' "$0" >&2
+    printf 'usage: %s [--phase2|--phase3|--issue163-phase0|--issue163-phase1|--issue163-phase2|--issue163-phase3|--issue163-phase4]\n' "$0" >&2
     exit 2
 fi
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)

@@ -84,10 +84,12 @@ impl Lane for f32 {
 
     #[inline(always)]
     fn fma(self, b: Self, c: Self) -> Self {
-        // LANE-OP-OK(mul_add): the oracle's single rounding. Under the x86-64-v3 pin this is
-        // `vfmadd`; on any target without hardware FMA it is the correctly rounded libm `fmaf`.
-        // Both are the IEEE fused operation, which is what D3 pins.
-        f32::mul_add(self, b, c)
+        // Two roundings: the multiply, then the add (issue #163 phase 2). `f32::mul_add` is
+        // deliberately not called -- it would be a single rounding here and on the vector
+        // backends only where the hardware has one, which is the per-backend split the contract
+        // forbids. The scalar Lane is the oracle every other backend is compared against, so it
+        // is written in the same two IEEE basic operations they are.
+        (self * b) + c
     }
 
     #[inline(always)]

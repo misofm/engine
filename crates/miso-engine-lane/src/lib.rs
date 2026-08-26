@@ -1,7 +1,7 @@
 //! `Lane`: the workspace SIMD foundation and its pinned per-operation numeric contract.
 //!
-//! This crate is the single home of every SIMD vocabulary type, of `mul_add`, and of the software
-//! FMA used where hardware FMA does not exist. Everything else in the workspace is written once,
+//! This crate is the single home of every SIMD vocabulary type and of the per-operation numeric
+//! contract they all obey. Everything else in the workspace is written once,
 //! generic over [`Lane`], and instantiated per width; lane identity is therefore a property of the
 //! code rather than of a fixture corpus (master plan for issue #83, §1 and §3).
 //!
@@ -13,9 +13,11 @@
 //!   forbidden on any render path.
 //! * `max`/`min` are `select(a > b, a, b)` / `select(a < b, a, b)` (D8), provided as trait defaults
 //!   so that no backend can substitute an IEEE `maximum`.
-//! * Fusion exists only where [`Lane::fma`] is written (D3). Rust never contracts `a * b + c`, so
-//!   this is mechanically checkable: `scripts/check-lane-policy.sh` fails if `mul_add` appears
-//!   outside this crate.
+//! * Fusion exists **nowhere** (issue #163 phase 2, amending D3). [`Lane::fma`] keeps its name but
+//!   is `(a * b) + c` with two roundings on every backend. Rust never contracts `a * b + c`, so
+//!   the absence of fusion is mechanically checkable and is sealed:
+//!   `scripts/check-unfused-seal.sh` fails if `mul_add` or a fused intrinsic appears anywhere in
+//!   workspace source, and `scripts/check-lane-policy.sh` keeps raw intrinsics inside this crate.
 //! * Denormal handling is one mechanism on every target: [`flush`] with [`FLUSH_EPS`] (D7).
 //!
 //! # Backends
@@ -26,7 +28,9 @@
 //! native `x86_64` builds are pinned to `x86-64-v3` by `.cargo/config.toml`, this crate refuses to
 //! compile on `x86` without `avx2` and `fma`, and a host attests the CPU once at boot with
 //! [`attest_host`]. `wide` is a vocabulary, not a semantics authority: its `max`, `min` and
-//! `mul_add` differ per target and are never forwarded.
+//! `mul_add` differ per target and are never forwarded — `mul_add` least of all, since a fused
+//! lowering on one target and an unfused one on another is precisely the split issue #163 phase 2
+//! removed.
 //!
 //! # Realtime rules
 //!
@@ -35,16 +39,18 @@
 //! preparation, never per block on the render thread.
 
 #![no_std]
-// `std` is used for exactly three things, none of them on a render path: the `f32::floor`,
-// `f32::sqrt` and `f32::mul_add` inherent methods (not available in `core` on the pinned
-// toolchain), and `is_x86_feature_detected!` inside `attest_host`. The crate stays `#![no_std]` so
+// `std` is used for exactly two things, neither of them on a render path: the `f32::floor` and
+// `f32::sqrt` inherent methods (not available in `core` on the pinned toolchain), and
+// `is_x86_feature_detected!` inside `attest_host`. The crate stays `#![no_std]` so
 // that `Vec`, `String` and the rest of the allocating prelude are not reachable by accident.
 extern crate std;
 
 // Master plan #83 D4: native x86 is x86-64-v3, pinned at compile time by `.cargo/config.toml` and
 // attested at boot by `attest_host`. Without the pin, `wide` silently lowers `f32x8` to two SSE2
-// `m128` values and its `mul_add` to an unfused `(a * b) + c`, which would break D3 and D5 without
-// any test noticing. Refusing to compile is the guard (master plan §11).
+// `m128` values, which halves the production width and would break D5 without any test noticing.
+// (The `mul_add` half of this hazard is gone since issue #163 phase 2: the contract is unfused
+// everywhere, so no lowering choice can change a rendered bit.) Refusing to compile is the guard
+// (master plan §11).
 // `cfg(doc)` is excluded because `rustdoc` does not receive `[target.*] rustflags` from
 // `.cargo/config.toml`, and `RUSTDOCFLAGS` on the command line replaces any `rustdocflags` set
 // there. Documentation is not a build artefact, so the guard has nothing to protect in that pass.
@@ -120,7 +126,8 @@ pub fn flush<L: Lane>(x: L) -> L {
 ///
 /// # Numeric contract
 ///
-/// `add`, `sub`, `mul`, `div` and `sqrt` are IEEE-754 round-to-nearest-even; `fma` rounds once;
+/// `add`, `sub`, `mul`, `div` and `sqrt` are IEEE-754 round-to-nearest-even; `fma` is
+/// `(a * b) + c` and rounds twice (issue #163 phase 2);
 /// `neg` and `abs` are sign-bit operations, never `0.0 - x`; comparisons are ordered (NaN compares
 /// false); `select` is bitwise per lane. A [`Lane::Mask`] lane is either all zero bits or all one
 /// bits — masks are produced only by the comparison and mask operations of this trait.
@@ -200,11 +207,27 @@ pub trait Lane: Copy + Send + Sync + 'static {
     /// `sqrt(self)`, IEEE-exact on every target.
     fn sqrt(self) -> Self;
 
-    /// `self * b + c` with a single rounding (D3).
+    /// `(self * b) + c` with **two** roundings, on every backend (issue #163 phase 2).
     ///
-    /// This is the only place fusion is allowed to exist. Hardware FMA is used on `x86` (pinned to
-    /// `+fma`) and on AArch64 NEON; every other target uses the exact software FMA of
-    /// [`softfma`], which is bit-identical to the hardware instruction (gate G3).
+    /// The name is historical: this operation is not fused and no longer may be. It is retained as
+    /// a named operation because the kernels' frozen operation orders are written in terms of it,
+    /// and because naming it keeps the multiply and the add adjacent so no backend can reassociate
+    /// them.
+    ///
+    /// # Why the contract is unfused
+    ///
+    /// A hardware fused multiply-add exists on `x86` (pinned `+fma`) and on AArch64 NEON, and does
+    /// not exist in base wasm `simd128`. Emulating it exactly on wasm cost about 54 instructions
+    /// per operation -- measured 5.5x on the SVF kernel -- which the product pays on the platform
+    /// it is leaning hardest into. The alternative of using hardware fusion where it exists and
+    /// emulation where it does not is what the engine did until phase 2; the alternative of using
+    /// hardware fusion where it exists and `(a * b) + c` where it does not is a per-backend
+    /// numeric split, which this crate exists to prevent.
+    ///
+    /// Unfusing is a numeric-contract change and was made under an owner ruling (issue #163,
+    /// 2026-08-26). It is not a free one: it moves every pinned bit in the workspace. The audit
+    /// behind it -- per-site verdicts, domain error bounds, and the proof that the change cannot
+    /// move a filter pole -- is `docs/rulings/unfused-multiply-add-audit.md`.
     fn fma(self, b: Self, c: Self) -> Self;
 
     /// `-self` as a sign-bit flip. Never `0.0 - self`, which is wrong for `+0.0`.

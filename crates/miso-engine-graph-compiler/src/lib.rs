@@ -2907,7 +2907,7 @@ mod tests {
             assert_eq!(12 - actual_members.len(), expected_builtin_tails);
             // Independent oracle for the two frozen op orders this branch re-pins for (#98 F2/F4),
             // on the production 12-track shape: every track's post-matrix output is recorded, the
-            // route's folded 2x2 is re-applied here with the exact software FMA, and the output
+            // route's folded 2x2 is re-applied here through the f64 unfused oracle, and the output
             // must be exactly those contributions folded left to right in the plan's own stable
             // edge order. It runs on its own short bind, outside the allocation-audited loop.
             {
@@ -3065,12 +3065,12 @@ mod tests {
                                 let left = f32::from_bits(tap[frame].0);
                                 let right = f32::from_bits(tap[frame].1);
                                 (
-                                    miso_engine_lane::softfma::fma_f32_via_f64(
+                                    miso_engine_lane::softfma::unfused_multiply_add_via_f64(
                                         coefficients[1],
                                         right,
                                         coefficients[0] * left,
                                     ),
-                                    miso_engine_lane::softfma::fma_f32_via_f64(
+                                    miso_engine_lane::softfma::unfused_multiply_add_via_f64(
                                         coefficients[3],
                                         right,
                                         coefficients[2] * left,
@@ -3159,11 +3159,11 @@ mod tests {
             // Re-pinned by #98 F2/F4 (master plan #83 D9/D3, section-8 policy):
             // 0x2fd8_5286_518f_d13b -> 0x5b3e_672a_ae5d_97aa. The output's twelve route inputs
             // are now folded left to right instead of as a balanced pairwise tree, and each
-            // route spends one multiply and one fused multiply-add with the gain folded in at
+            // route spends two multiplies and one add with the gain folded in at
             // bind. Neither value is pinned from production output: the oracle block above
             // re-derives the expected PCM for this exact session from the recorded per-track
             // post-matrix contributions, re-applying both frozen op orders with scalar
-            // `softfma::fma_f32_via_f64` and `reduce`, and asserts it bit for bit before this
+            // `softfma::unfused_multiply_add_via_f64` and `reduce`, and asserts it bit for bit before this
             // literal is compared. (The previous re-pin note stands: 0x9f30_db02_2065_6d79 was already
             // stale on `origin/main` before either branch existed.)
             assert_eq!(
@@ -7530,16 +7530,29 @@ mod tests {
             completed += 1;
         }
         assert_eq!(completed, 100);
-        // Re-pinned once by #98 F2 (master plan #83 D9 and the section-8 policy). The membership
-        // and counter halves of the transcript string are unchanged; the `pcm_hash` half moved for
-        // every layout whose output fan-in is four or more, because the session output's reduction
-        // became a left-to-right recursive sum instead of a balanced pairwise tree. It is *not*
-        // pinned from production output: the per-layout `assert_eq!` above derives the expected
-        // output from the recorded per-track post-matrix contributions folded left to right in the
-        // plan's own stable edge order, for all 100 layouts, before this literal is compared.
-        // Old value `0x0fc9_bdc8_ff12_0f6e`; layouts with `count <= 3` are bit-identical to it.
+        // Re-pin chain (master plan #83 D9 and the section-8 policy):
+        //
+        //   0x0fc9_bdc8_ff12_0f6e  original
+        //   0x9dfc_dcf2_0e37_0ef5  #98 F2 -- the session output's reduction became a
+        //                          left-to-right recursive sum instead of a balanced pairwise
+        //                          tree, moving `pcm_hash` for every layout with output fan-in
+        //                          four or more; layouts with `count <= 3` were unmoved.
+        //   0x0b9d_839a_7df9_3ac8  #163 phase 2 -- the numeric contract became unfused, so every
+        //                          rendered sample moved and with it every layout's `pcm_hash`,
+        //                          for all 100 layouts and every fan-in.
+        //
+        // The membership and counter halves of the transcript string are unchanged at every link
+        // in that chain, which is what makes it a chain rather than three unrelated numbers: the
+        // per-layout membership, bank-count, tail and counter assertions above all still hold
+        // against their own expectations, and only the `pcm_hash` field of the string moved.
+        //
+        // It is *not* pinned from production output: the per-layout `assert_eq!` above derives the
+        // expected output from the recorded per-track post-matrix contributions folded left to
+        // right in the plan's own stable edge order -- through `softfma::unfused_multiply_add_via_f64`,
+        // an `f64` restatement independent of the `f32` vector body -- for all 100 layouts, before
+        // this literal is compared.
         assert_eq!(
-            transcript, 0x9dfc_dcf2_0e37_0ef5,
+            transcript, 0x0b9d_839a_7df9_3ac8,
             "frozen Issue-037 seeded layout transcript"
         );
     }

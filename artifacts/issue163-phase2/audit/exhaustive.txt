@@ -1,0 +1,28 @@
+# Unfused multiply-add audit (issue #163 phase 2 step 2)
+
+f32 unit roundoff u = 2^-24 = 5.960464e-8
+mode = exhaustive, sweep frames = 20000, sustained frames = 1000000
+
+## Exhaustive identity sweeps (all 2^32 f32 bit patterns of the free operand)
+
+  mismatches = fused and unfused disagree (must be 0). carve-out = neither returns x, by cause; these are the frozen contract's documented exceptions, reproduced exactly.
+
+  sweep                      mismatches        -0.0  nonfin in nonfin mid   other
+  F4 mix=0 g=0                        0           1          2          0       0
+  F4 mix=0 g=0.5                      0           1          2          0       0
+  F4 mix=0 g=1                        0           1          2          0       0
+  F4 mix=0 g=2                        0           1          2   16777216       0
+  F4 mix=0 g=-1                       0           1          2   16777216       0
+  F4 mix=0 g=1000000000000000000000000000000          0           1          2 1673231168       0
+  F4 mix=0 g=inf                      0           0          2 4278190080       0
+  F3 c=0 x=0                          0           0          2          0       0
+  F3 c=0 x=1                          0           0          2          0       0
+  F3 c=0 x=-1                         0           0          2          0       0
+  F3 c=0 x=1000000000000000000000000000000          0           0          2          0       0
+  F5 lr=0 ll=1 r=0                    0           1          0          0       0
+  F5 lr=0 ll=1 r=1                    0           1          0          0       0
+  F5 lr=0 ll=1 r=-1                   0           0          0          0       0
+  F5 lr=0 ll=1 r=1000000000000000000000000000000          0           1          0          0       0
+
+  15 sweeps x 2^32 = 64 424 509 440 cases. Total fused-vs-unfused mismatches: 0. Unexplained carve-out cases: 0.
+

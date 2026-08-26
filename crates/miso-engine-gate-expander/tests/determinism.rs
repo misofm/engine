@@ -18,15 +18,26 @@ fn digest<L: Lane>(case: usize) -> [u8; 32] {
     hasher.finalize().into()
 }
 
+/// Set `MISO_ENGINE_REPIN_GATE_EXPANDER_CORPUS=1` to print the scalar pins in `gate_digests.in`
+/// form.
+///
+/// Per master plan §8.3 the pins come from the `f32` instantiation and from nowhere else; the
+/// vector widths and the wasm legs *confirm* them. Re-pin mode suppresses only the comparison
+/// against the pin: `Simd4` and `Simd8` are still required to agree with the scalar oracle, so a
+/// width disagreement cannot be laundered into a fresh pin.
 #[test]
 fn every_case_agrees_at_every_width_and_matches_its_pin() {
+    let repinning = std::env::var_os("MISO_ENGINE_REPIN_GATE_EXPANDER_CORPUS").is_some();
+    let mut repin = String::from("[\n");
     for case in 0..CASE_COUNT {
         let scalar = digest::<f32>(case);
-        assert_eq!(
-            scalar, GATE_DIGESTS[case],
-            "{}: the scalar oracle moved away from its pin",
-            CASE_NAMES[case]
-        );
+        if !repinning {
+            assert_eq!(
+                scalar, GATE_DIGESTS[case],
+                "{}: the scalar oracle moved away from its pin",
+                CASE_NAMES[case]
+            );
+        }
         assert_eq!(
             digest::<Simd4>(case),
             scalar,
@@ -39,6 +50,17 @@ fn every_case_agrees_at_every_width_and_matches_its_pin() {
             "{}: Simd8 disagrees with the scalar oracle",
             CASE_NAMES[case]
         );
+        repin.push_str("    [\n");
+        for row in scalar.chunks(8) {
+            let bytes: Vec<String> = row.iter().map(|byte| format!("0x{byte:02x},")).collect();
+            repin.push_str(&format!("        {} \n", bytes.join(" ")));
+        }
+        repin.push_str("    ],\n");
+    }
+    repin.push_str("]\n");
+    if repinning {
+        println!("{repin}");
+        panic!("re-pin mode: copy the block above into src/gate_digests.in");
     }
 }
 

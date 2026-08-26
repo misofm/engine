@@ -8,10 +8,17 @@
 //! targets (D5).
 //!
 //! **No fused multiply-add.** The Horner chains are written `p.mul(f).add(c)`, not `p.fma(f, c)`.
-//! Fusion is permitted only where `Lane::fma` is written (D3), and on wasm `fma` is an exact
-//! software emulation costing far more than the accuracy it buys here: measured, an `fma` Horner
-//! improves `exp2_lane` from 1.462 to 1.191 ulp and leaves `log2_lane` unchanged, against a gate
-//! of 2 ulp. Mul/add is the cheaper way to stay inside the gate.
+//! This crate reached that conclusion before the workspace did, and for the same reason: when
+//! `Lane::fma` was still fused, it was an exact software emulation on wasm costing far more than
+//! the accuracy it bought here — measured, an `fma` Horner improved `exp2_lane` from 1.462 to
+//! 1.191 ulp, left `log2_lane` unchanged, and was weighed against a gate of 2 ulp. Mul/add was the
+//! cheaper way to stay inside the gate.
+//!
+//! Since issue #163 phase 2 the two spellings compute the same thing — `Lane::fma` is `(a * b) + c`
+//! on every backend — so this note is now a record of precedent rather than a live distinction.
+//! The Horner chains keep their explicit `mul`/`add` spelling because it says what happens, and
+//! because these bits are pinned by gate M2 and by the M3 corpus digests: they did **not** move
+//! when the contract changed, which is one of the phase's control groups.
 //!
 //! **Coefficients.** Both sets are Moshier's published Cephes single-precision sets
 //! (`cephes/single/exp2f.c` and `cephes/single/logf.c`), used rather than newly fitted ones so the

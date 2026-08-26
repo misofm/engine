@@ -116,7 +116,7 @@ impl<L: Lane> Default for SvfCoefStep<L> {
 /// Frozen operation order, per frame:
 /// 1. `v0 = load(frame)`
 /// 2. `v3 = v0 - ic2`
-/// 3. `d1 = fma(-c1, ic1, a2 * v3)` — one multiply, then one fused multiply-add
+/// 3. `d1 = fma(-c1, ic1, a2 * v3)` — two multiplies, then an add; `fma` is unfused (#163)
 /// 4. `v1 = ic1 + d1`
 /// 5. `d2 = fma(a3, v3, a2 * ic1)` — `ic1` is still the old value here
 /// 6. `v2 = ic2 + d2`
@@ -342,7 +342,7 @@ impl<L: Lane> Default for OnePoleState<L> {
     }
 }
 
-/// One-pole smoother over one block: `y += c * (x - y)`, one rounding.
+/// One-pole smoother over one block: `y += c * (x - y)`.
 ///
 /// Frozen operation order, per frame:
 /// 1. `x = load(frame)`
@@ -410,7 +410,7 @@ pub fn gain_mix_block<L: Lane>(io: &mut [f32], frames: usize, g: L, mix: L) {
 /// Frozen operation order:
 /// 1. `w = x * g`
 /// 2. `d = w - x`
-/// 3. `y = fma(mix, d, x)` — one rounding
+/// 3. `y = fma(mix, d, x)` — a multiply then an add, two roundings (#163 phase 2)
 ///
 /// `mix = 0` returns `x` bit-for-bit for a finite `d` (`fma(0, d, x) = x`). It does **not**
 /// preserve the sign of a zero `x` when `d` is non-zero, which is why an effect with a signed-zero
@@ -554,7 +554,7 @@ pub fn pdc_delay_block(ring: &mut [f32], cursor: &mut usize, io: &mut [f32]) {
 /// r' = fma(rr', r, rl' * l)
 /// ```
 ///
-/// one multiply and one fused multiply-add per output word, three roundings per frame instead of
+/// two multiplies and one add per output word, four roundings per frame instead of
 /// the five the unfolded `gain * (ll * l + lr * r)` form spends. Both outputs are computed from
 /// the frame's *original* `l` and `r`, so the in-place write is safe.
 ///

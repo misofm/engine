@@ -33,23 +33,41 @@ fn hex(bytes: &[u8; 32]) -> String {
 /// written back to the channel; the ballistic coefficient designed through an `f32`
 /// `0.001 * ms * fs` product instead of the `f64` one; the corpus rendered in one block instead of
 /// the frozen partition. Each moves the digest at every width.
+/// Set `MISO_ENGINE_REPIN_COMPRESSOR_CORPUS=1` to print the scalar pins in `C1_DIGESTS` form.
+///
+/// Per master plan §8.3 the pins come from the `f32` instantiation and from nowhere else; the
+/// vector widths and the wasm legs *confirm* them. Re-pin mode suppresses only the comparison
+/// against the pin: `Simd4` and `Simd8` are still required to agree with the scalar oracle, so a
+/// width disagreement cannot be laundered into a fresh pin.
 #[test]
 fn the_corpus_matches_its_pins_at_every_width() {
+    let repinning = std::env::var_os("MISO_ENGINE_REPIN_COMPRESSOR_CORPUS").is_some();
     let mut mismatches = Vec::new();
+    let mut repin = String::new();
     for (case, name) in CASE_NAMES.iter().enumerate() {
+        let scalar = case_digest::<f32>(case);
         for (width, digest) in [
-            ("W=1", case_digest::<f32>(case)),
             ("W=4", case_digest::<Simd4>(case)),
             ("W=8", case_digest::<Simd8>(case)),
         ] {
-            if digest != C1_DIGESTS[case] {
+            if digest != scalar {
                 mismatches.push(format!(
-                    "{name} at {width}: {} (pinned {})",
+                    "{name} at {width}: {} (scalar oracle {})",
                     hex(&digest),
-                    hex(&C1_DIGESTS[case])
+                    hex(&scalar)
                 ));
             }
         }
+        if !repinning && scalar != C1_DIGESTS[case] {
+            mismatches.push(format!(
+                "{name} at W=1: {} (pinned {})",
+                hex(&scalar),
+                hex(&C1_DIGESTS[case])
+            ));
+        }
+        let bytes: Vec<String> = scalar.iter().map(|byte| format!("0x{byte:02x}")).collect();
+        repin.push_str(&format!("    // {name}\n"));
+        repin.push_str(&format!("    [{}],\n", bytes.join(", ")));
     }
     assert!(
         mismatches.is_empty(),
@@ -58,6 +76,10 @@ fn the_corpus_matches_its_pins_at_every_width() {
          same commit and state the deviation (master plan section 8).",
         mismatches.join("\n")
     );
+    if repinning {
+        println!("{repin}");
+        panic!("re-pin mode: copy the block above into C1_DIGESTS in src/corpus.rs");
+    }
 }
 
 /// The corpus is NaN-free and Inf-free, so the pins survive wasm's NaN canonicalisation (D5).

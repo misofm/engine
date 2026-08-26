@@ -209,23 +209,35 @@ fn g1_nan_max_and_min_follow_d8() {
 }
 
 #[test]
-fn g1_fma_is_fused_on_every_backend() {
-    /// `(1 + 2^-12)^2 - (1 + 2^-11)` is `2^-24` with one rounding and exactly `0` with two, so
-    /// this triple is a witness that `Lane::fma` really is fused. If a build loses the `+fma`
-    /// target feature, `wide::mul_add` silently becomes `(a * b) + c` and this fails.
+fn g1_fma_is_unfused_on_every_backend() {
+    /// `(1 + 2^-12)^2 - (1 + 2^-11)` is `2^-24` with one rounding and exactly `0` with two.
+    ///
+    /// That makes this triple a *witness*: it separates the two contracts by a value, not by a
+    /// digest, so it says which arithmetic ran without depending on any pinned corpus. Before
+    /// issue #163 phase 2 the assertion ran the other way and proved `Lane::fma` was fused. It now
+    /// proves the opposite, and it is the sharpest gate the phase installs -- a backend that
+    /// quietly regained a hardware fused multiply-add fails here immediately, at every width,
+    /// with no re-pin able to hide it.
+    ///
+    /// The unfused answer is `+0.0` exactly, so the check is on bits: a `-0.0` would compare equal
+    /// under `==` and would mean the addition had taken a different path.
     fn check<L: Lane>(width_name: &str) {
         let a = L::splat(FUSED_WITNESS_A);
         let c = L::splat(FUSED_WITNESS_C);
-        let mut fused = [0u32; 8];
-        let mut unfused = [0u32; 8];
-        a.fma(a, c).store_bits(&mut fused);
-        a.mul(a).add(c).store_bits(&mut unfused);
+        let mut through_fma = [0u32; 8];
+        let mut written_out = [0u32; 8];
+        a.fma(a, c).store_bits(&mut through_fma);
+        a.mul(a).add(c).store_bits(&mut written_out);
         assert_eq!(
-            f32::from_bits(fused[0]),
-            f32::from_bits(0x3380_0000),
-            "{width_name}: fused fma must be 2^-24"
+            through_fma[0], 0x0000_0000,
+            "{width_name}: Lane::fma must be unfused, so this witness is exactly +0.0 \
+             (got {:#010x}; {:#010x} would mean a fused multiply-add came back)",
+            through_fma[0], 0x3380_0000_u32
         );
-        assert_eq!(unfused[0], 0, "{width_name}: unfused mul+add must be 0");
+        assert_eq!(
+            written_out[0], through_fma[0],
+            "{width_name}: Lane::fma must equal the written-out multiply and add"
+        );
     }
     check::<f32>("f32");
     check::<Simd4>("Simd4");

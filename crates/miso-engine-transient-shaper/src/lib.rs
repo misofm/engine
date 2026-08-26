@@ -292,7 +292,7 @@ fn link<L: Lane, const LINK: u8>(left: L, right: L) -> (L, L) {
     }
 }
 
-/// One frame of one channel. Frozen operation order, one rounding per line unless noted.
+/// One frame of one channel. Frozen operation order.
 ///
 /// 1. both followers advance (`ar_one_pole_step`: two products, one sum, one D7 flush each)
 /// 2. `ratio = max(fast, FLOOR) / max(slow, FLOOR)` — one IEEE division

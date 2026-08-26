@@ -1134,7 +1134,7 @@ fn tap_sample(lane: &LaneChunk<'_>, frame: usize, last: usize, alpha: &mut f32, 
 
 /// One damping sample: a topology-preserving one-pole low pass, `g` already designed.
 ///
-/// `v = g * (x - s)`, `y = s + v` with one rounding, `s' = y + v`. `g == 0` is the exact tap
+/// `v = g * (x - s)`, `y = s + v`, `s' = y + v`. `g == 0` is the exact tap
 /// identity the frozen contract promises, selected per sample. `s` is a recursive word, so it is
 /// the D7 flush site.
 #[inline(always)]
@@ -1148,7 +1148,7 @@ fn damp_sample(tap: f32, gain: f32, state: &mut f32) -> f32 {
     lane_select(identity, tap, output)
 }
 
-/// One output sample: `dry + mix * (wet - dry)` with one rounding, with the frozen dry and wet
+/// One output sample: `dry + mix * (wet - dry)`, with the frozen dry and wet
 /// identities and prepared bypass as bitwise selects.
 #[inline(always)]
 fn mix_sample(dry: f32, wet: f32, mix: f32, bypass: Mask) -> f32 {

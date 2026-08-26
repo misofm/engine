@@ -17,15 +17,33 @@ fn digest(case: usize) -> [u8; 32] {
     hasher.finalize().into()
 }
 
+/// Set `MISO_ENGINE_REPIN_DELAY_CORPUS=1` to print the scalar pins in `G5_DIGESTS` form.
+///
+/// Per master plan §8.3 the pins come from the `f32` instantiation and from nowhere else. The
+/// delay is a `W = 1` effect (§4.1), so there is no vector width to confirm against here; the wasm
+/// leg in `tools/miso-engine-wasm-gate-corpus` is what confirms these pins on another target, and
+/// it never sources them.
 #[test]
 fn corpus_digests_match_their_pins() {
+    let repinning = std::env::var_os("MISO_ENGINE_REPIN_DELAY_CORPUS").is_some();
+    let mut repin = String::new();
     for case in 0..corpus::CASE_COUNT {
-        assert_eq!(
-            digest(case),
-            corpus::G5_DIGESTS[case],
-            "case {}",
-            corpus::CASE_NAMES[case]
-        );
+        let scalar = digest(case);
+        if !repinning {
+            assert_eq!(
+                scalar,
+                corpus::G5_DIGESTS[case],
+                "case {}",
+                corpus::CASE_NAMES[case]
+            );
+        }
+        let bytes: Vec<String> = scalar.iter().map(|byte| format!("0x{byte:02X}")).collect();
+        repin.push_str(&format!("    // {}\n", corpus::CASE_NAMES[case]));
+        repin.push_str(&format!("    [{}],\n", bytes.join(", ")));
+    }
+    if repinning {
+        println!("{repin}");
+        panic!("re-pin mode: copy the block above into G5_DIGESTS in src/corpus.rs");
     }
 }
 

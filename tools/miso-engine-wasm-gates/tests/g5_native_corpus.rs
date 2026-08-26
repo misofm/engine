@@ -121,25 +121,52 @@ fn g5_idle_ramped_svf_equals_the_plain_svf() {
     }
 }
 
-/// The `lane_fma` case separates `Lane::fma` from a multiply followed by an add.
+/// The `lane_fma` case proves `Lane::fma` is unfused, and proves the case is not vacuous.
+///
+/// Two assertions, and both are needed:
+///
+/// 1. `Lane::fma` agrees with an explicit multiply followed by an add, at every width. That is the
+///    contract issue #163 phase 2 installed, checked on the corpus the wasm legs replay.
+/// 2. A *genuinely fused* evaluation of the same operands disagrees. Without this the first
+///    assertion would pass vacuously the moment the operands stopped separating the two forms,
+///    and the wasm leg would go on being green while proving nothing.
 ///
 /// This is the standing form of the G5 red mutation "build the guest with `+relaxed-simd` and use
-/// a relaxed multiply-add": whatever makes the wasm build stop rounding once shows up here as a
-/// different digest. If this ever passes vacuously — because the operands stopped separating the
-/// two forms — the wasm leg would go on being green while proving nothing.
+/// a relaxed multiply-add": a wasm build that started fusing would break assertion 1 here and in
+/// the guest, and the digest it produced would be the one assertion 2 computes.
+///
+/// The fused reference is built here rather than in the corpus crate because that crate is
+/// compiled into the wasm guest, where no fused instruction exists. Native `x86-64-v3` pins
+/// `+fma`, so `f32::mul_add` below is `vfmadd` -- the single-rounding IEEE operation, which is
+/// exactly what this assertion needs to contrast against.
 #[test]
-fn g5_fma_case_separates_fused_from_unfused() {
-    let fused = corpus::expected_digest(corpus::fma_case());
+fn g5_fma_case_is_unfused_and_the_case_is_not_vacuous() {
+    let pinned = corpus::expected_digest(corpus::fma_case());
     for width in 0..corpus::WIDTHS {
         let unfused = corpus::unfused_fma_digest(width);
-        assert_ne!(
-            hex(&fused),
+        assert_eq!(
+            hex(&pinned),
             hex(&unfused),
-            "the lane_fma corpus does not distinguish a fused from an unfused evaluation at {}: \
-             the case proves nothing",
+            "Lane::fma must equal an explicit multiply and add at {} (#163 phase 2)",
             corpus::width_name(width)
         );
     }
+
+    let mut fused_lanes = [[0.0_f32; corpus::FRAMES]; corpus::LANES];
+    for (lane, out) in fused_lanes.iter_mut().enumerate() {
+        let operands = corpus::fma_operands(lane);
+        for frame in 0..corpus::FRAMES {
+            // UNFUSED-SEAL-EXEMPT: the fused reference gate G5 contrasts the contract against.
+            out[frame] = operands[0][frame].mul_add(operands[1][frame], operands[2][frame]);
+        }
+    }
+    let fused = corpus::digest_of_lanes(&fused_lanes);
+    assert_ne!(
+        hex(&fused),
+        hex(&pinned),
+        "the lane_fma corpus no longer separates a fused evaluation from an unfused one: \
+         the case proves nothing"
+    );
 }
 
 /// The delegated parts of the corpus are not second pins: they are compared against the digests
