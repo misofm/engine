@@ -41,7 +41,7 @@
 //! **What it does not attribute.** The wasm leg's interval also contains one host-to-guest
 //! crossing that the native legs do not have: wasmtime's trampoline, the stack switch and the
 //! return. That cost is *inside* every reported `wasm_simd128` number and is not subtracted from
-//! it. It is measured instead: [`Legs::crossing_ns`] times the same crossing into an export that
+//! it. It is measured instead: [`Guest::crossing`] times the same crossing into an export that
 //! renders nothing, and every record carries the result as `guest_call_overhead_p50_ns`. A reader
 //! who wants the crossing removed can remove it; this arm does not remove it silently, and does
 //! not pretend it is zero.

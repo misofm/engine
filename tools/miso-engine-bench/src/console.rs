@@ -7,7 +7,8 @@
 //! can be asked to render, and not the shape of a mixing session. This subject measures the shape
 //! a session actually has: sixty-four tracks, each carrying the full channel strip (input
 //! trim/HPF/LPF, a parametric EQ in SIMD rack 1, a compressor in the dynamic rack, a fader and a
-//! pan matrix), rendered through a real [`PreparedRenderPlan`] at 48 kHz and a 128-frame quantum.
+//! pan matrix), rendered through a real [`miso_engine_core::realtime::PreparedRenderPlan`] at
+//! 48 kHz and a 128-frame quantum.
 //!
 //! Sixty-four tracks is eight full banks and no tail, so the per-track cost reported here is the
 //! cost of a full bank rather than the cost of a remainder. The nine-track fixture is kept as a
@@ -64,7 +65,8 @@
 //! `sixty_four_track_dispatch_only` and `sixty_four_track_idle`. Same tracks, same parameters, same
 //! sources, same binary, same run.
 //!
-//! They are derived from the checked-in model by [`apply_strip`] rather than being five more
+//! They are derived from the checked-in model by [`miso_engine_console_workload`]'s strip
+//! edits rather than being five more
 //! 900-line TOMLs, for the reason the 128-track stretch fixture already gives: nothing about an
 //! emptied rack is a new *shape* to review, and five near-duplicate fixtures would be five files
 //! that can drift apart from the one they were copied from. Every derived row says
