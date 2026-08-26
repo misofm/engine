@@ -703,8 +703,9 @@ fn a_ramp_inside_the_silent_fixed_point_withdraws_it_and_moves_no_bit() {
 ///
 /// The assertion is the one-design-function property at the boundary: once the window has closed,
 /// the ramped lane must render exactly what a lane prepared at the target renders, on every
-/// subsequent block. `fast_gain_from_db(+-0.0)` is exactly `1.0`, so a makeup that has ramped to
-/// `+0.0` really is an identity and not merely a very small gain.
+/// subsequent block. A gain of exactly zero dB converts to exactly unity on the tier this kernel
+/// uses -- the property `one_frame` documents where it applies the makeup -- so a makeup that has
+/// ramped to `+0.0` really is an identity and not merely a very small gain.
 #[test]
 fn a_ramp_onto_an_identity_boundary_lands_on_the_identity() {
     let Some((_, width)) = support::native_bank_width() else {
