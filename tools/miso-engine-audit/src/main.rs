@@ -18,8 +18,6 @@ mod parametric_eq;
 mod protocol;
 mod realtime;
 mod record;
-mod scheduler;
-mod scheduler_fixture;
 mod source;
 mod source_duration;
 mod source_fixture;
@@ -43,7 +41,6 @@ const SUBJECTS: &[&str] = &[
     "parametric-eq",
     "protocol",
     "realtime",
-    "scheduler",
     "source",
     "source-duration",
     "unfused-fma",
@@ -67,7 +64,6 @@ fn run_subject(subject: &str) {
         "parametric-eq" => parametric_eq::main(),
         "protocol" => protocol::main(),
         "realtime" => realtime::main(),
-        "scheduler" => scheduler::main(),
         "source" => source::main(),
         "source-duration" => source_duration::main(),
         "unfused-fma" => unfused_fma::main(),

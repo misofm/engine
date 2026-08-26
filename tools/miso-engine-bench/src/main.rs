@@ -21,8 +21,6 @@ mod protocol;
 #[cfg(not(target_arch = "wasm32"))]
 mod rack;
 #[cfg(not(target_arch = "wasm32"))]
-mod scheduler;
-#[cfg(not(target_arch = "wasm32"))]
 mod session;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -37,7 +35,6 @@ const SUBJECTS: &[&str] = &[
     "graph",
     "protocol",
     "rack",
-    "scheduler",
     "session",
 ];
 
@@ -52,7 +49,6 @@ fn run_subject(subject: &str) {
         "graph" => graph::main(),
         "protocol" => protocol::main(),
         "rack" => rack::main(),
-        "scheduler" => scheduler::main(),
         "session" => session::main(),
         _ => unreachable!("dispatcher validates internal subjects"),
     }

@@ -138,8 +138,6 @@ jobs:
         run: |
           bash scripts/trace-builtins-audit.sh
           bash scripts/trace-builtins-graph-audit.sh
-      - name: Scheduler fault-injection suite (dead workers, lost wakes, stale generations)
-        run: cargo test --locked -p miso-engine-native-scheduler --features fault-injection
       - name: Native effect runtime policy, fixtures, conformance, and mutations
         run: bash scripts/check-effect-contract.sh
       - name: Protocol caller-buffer allocation audit
