@@ -93,18 +93,28 @@ would be run. The correction is one expression — the table has to become the b
 other eight factories already ask — and it belongs in step 3, with a bank-membership assertion on
 `wasm32` behind it so the table cannot drift out of the backend law a second time.
 
-### Blocker 2 — the wasm gate hosts pin `Simd4` by number, not by build
+### Blocker 2 — the harnesses assert the wasm backend by name, and would refuse the switch
 
 `tools/miso-engine-wasm-gate-guest/src/lib.rs:81` exports the guest's backend as `0`/`1`/`2`, and
-`tools/miso-engine-wasm-gates/src/lib.rs:184` computes the same code for the native process. The
-G5 gate compares the two. Both sides derive the code from `Backend::current()`, so both move
-together and G5 itself is safe. What does **not** move is every place that has written the
-expectation down as a number: `tools/miso-engine-wasm-console/src/main.rs` refused any guest whose
-backend was not `1` until this branch made the expectation a parameter of the leg being timed. Any
-remaining site that spells the wasm backend as a literal has to be found and converted before the
-switch, or a `Simd8` artifact will be refused by its own harness. This is mechanical, not deep, and
-it is listed as a blocker only because it is the class of thing that turns a one-line revert into a
-half-day.
+`tools/miso-engine-wasm-gates/src/lib.rs:183` computes the same code for the native process. Both
+sides derive it from `Backend::current()`, so G5's own comparison moves with the switch and is
+safe. What does **not** move is every place that has written the expectation down:
+
+* `scripts/run-wasm-gates.sh:46` — `run_guest simd128 +simd128 simd4`. The third argument is
+  `--expect-backend`, and `miso-engine-wasm-gates` exits with "the artifact was built with the
+  wrong feature set" (`src/lib.rs:300`) when the guest disagrees. **The G5 wasm gate fails on the
+  first build after the switch**, and the fix is `simd4 -> simd8` on that line;
+* `scripts/run-wasm-kernel-timing.sh:183-184` — both wasm legs pass `--expect-backend simd4`;
+* `tools/miso-engine-wasm-console/src/main.rs` refused any guest whose backend code was not `1`
+  until this branch made the expectation a parameter of the leg being timed;
+* `scripts/wasm-console-benchmark-validator.jq:81` pins the `wasm_simd128` leg's `backend` field to
+  the string `"Simd4"`, and every sealed record in `artifacts/` carries that string. A switch turns
+  that pin into a claim about the *history* of the arm rather than about the current build, so the
+  leg naming needs a deliberate decision rather than an edit in passing.
+
+None of this is deep. It is listed as a blocker because it is the class of thing that turns a
+one-line revert into a half-day of red gates, and because the first item is a hard failure of a
+named gate rather than a warning.
 
 ---
 
