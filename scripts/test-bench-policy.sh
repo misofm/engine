@@ -34,7 +34,7 @@ expect_failure second-allocator
 
 new_case second-global-allocator-attribute
 printf '\n#[global_allocator]\nstatic A: X = X;\n' \
-    >>"$case_root/tools/miso-engine-bench/src/scheduler.rs"
+    >>"$case_root/tools/miso-engine-bench/src/session.rs"
 expect_failure second-global-allocator-attribute
 
 new_case second-escaper
