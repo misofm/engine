@@ -516,8 +516,6 @@ impl RealMeterTapPlan {
             .collect();
         let bound = artifact
             .into_bound(GraphRuntimeBindings {
-                #[cfg(not(target_arch = "wasm32"))]
-                worker_lease: None,
                 envelope,
                 nodes,
                 observers: Vec::new(),

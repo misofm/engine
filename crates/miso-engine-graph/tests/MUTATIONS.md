@@ -60,23 +60,12 @@ except where the "result" column says otherwise.
 | N4 | off-by-one in the arena's write address, so a lease writes its neighbour | `miso-engine-core` `ArenaLeaseV1::write` | `disjoint::tests::concurrent_leases_never_write_a_foreign_word` (`--release`) | RED |
 | N5 | never take the executor hand-over at the block-boundary swap | `miso-engine-core` `RealtimePlanOwner::enter_block` | `realtime::tests::enter_block_moves_the_executor_handover_and_returns_a_refused_one` | RED |
 | N6 | add `unsafe` to a second `realtime/` file | `scripts/check-realtime-policy.sh` fixture | `scripts/test-realtime-policy.sh` (`unsafe-outside-disjoint-arena`) | RED |
-| N7 | balance unit count instead of prepared cost (the pre-#100 split) | `miso-engine-native-scheduler` `partition_weighted_units_v1` | `lpt_balances_a_heavy_bank_against_scalar_tails` | RED |
-| N8 | do not restart the idle-spin count when a block opens or closes | `miso-engine-native-scheduler` `worker_loop` | `back_to_back_blocks_never_park_a_worker` | RED |
-| N9 | make the recovery budget unbounded (`u64::MAX`) | `miso-engine-graph` bind budget | `a_late_worker_degrades_one_block_and_never_wedges_the_callback` | RED |
-| N10 | never send the endpoints back when a lease is released | `miso-engine-native-scheduler` `WorkerLeaseV1::drop` | `a_released_lease_returns_to_its_pool` | RED |
-| N11 | issue commands in ascending worker order, so a worker can wake a child before that child's command exists | `miso-engine-native-scheduler` `render_wave` | `command_queue_full_preserves_unmoved_parcels` | RED |
-| N12 | a second `unpark` inside a marked region | `scripts/check-scheduler-policy.sh` fixture | `scripts/test-scheduler-policy.sh` (`second-coordinator-unpark`) | RED |
-| N13 | `thread::park` outside `worker_loop` | `scripts/check-scheduler-policy.sh` fixture | `scripts/test-scheduler-policy.sh` (`park-outside-worker-loop`) | RED |
-| N14 | request `fault-injection` from `[dependencies]`, and from a host | `scripts/check-scheduler-policy.sh` fixture | `scripts/test-scheduler-policy.sh` (`fault-injection-in-dependencies`, `fault-injection-in-a-host`) | RED |
-| N15 | drop the `graph.scheduler.lease` worker-count check at bind | `miso-engine-graph` `bind_native_optional_source_set` | `a_mismatched_worker_lease_is_refused_and_every_bind_input_returns` | RED |
-| N16 | resolve a native op's inputs from the coloured buffer instead of its producing op (claim an in-place op's output before reading its inputs) | `miso-engine-graph` `runtime::op_producers` | `fifty_random_dag_sessions_render_bit_identically_in_both_executors` | RED |
 | N17 | forget the silence-slot offset in the sequential executor's output buffer | `miso-engine-graph` `GraphExecutor::new` | builtins-fixture `issue067_graph_pdc_and_dependent_identity_mutations_are_rejected` | RED (observed as a real defect during this work, then fixed) |
 
-Two notes on N11. The ordering rule is *why* the wake tree is safe, and the deterministic gate for
-it is the command-publication order that `command_queue_full_preserves_unmoved_parcels` pins. The
-lost wake it prevents was first observed as a real defect on this branch: with ascending order, the
-50-DAG gate failed at 7 lanes as a five-second deadline miss, but only under six-way parallel
-stress on a loaded host, so it is a race and not a reproducible-on-demand mutation.
+N7-N16 covered the native dependency-wave scheduler and were retired with it: the scheduler crate,
+the `bind_native` family and the cross-executor 50-DAG oracle no longer exist, so none of those
+mutations can be expressed. N1-N5 are unaffected -- the disjoint arena and its lease API are what
+the *sequential* executor renders through, so they remain live production code with live gates.
 
 N4 is the one row whose mutation is not the check it guards: I1 makes a foreign write unexpressible
 through the builder, so the stress is mutated at the address arithmetic instead, which is the

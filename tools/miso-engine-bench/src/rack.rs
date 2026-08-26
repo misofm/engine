@@ -534,8 +534,6 @@ impl MixedRuntime {
             .map(|node| GraphNodeBinding::new(node.clone(), source_binding(node)))
             .collect();
         let bound = match artifact.into_bound(GraphRuntimeBindings {
-            #[cfg(not(target_arch = "wasm32"))]
-            worker_lease: None,
             envelope,
             nodes,
             observers: Vec::new(),

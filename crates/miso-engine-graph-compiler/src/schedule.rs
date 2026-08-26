@@ -1,7 +1,7 @@
 //! Topological order, dependency levels, cycle witnesses and output-buffer colouring.
 //!
 //! Levels are emitted in ascending node-ID order and the sequential schedule is their
-//! concatenation -- the contract `NativeGraphBlueprint::prepare` enforces (#99 F1).
+//! concatenation -- the contract graph binding enforces (#99 F1).
 
 use super::*;
 use crate::ids::port;

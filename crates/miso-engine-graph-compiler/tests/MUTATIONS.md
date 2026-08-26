@@ -108,7 +108,7 @@ it lands here. `direct-route` cannot see this bug: it is a chain with one node p
 * Command: `cargo test -p miso-engine-graph-compiler --lib random_dags`
 * Red: `random_dags_have_strictly_ascending_levels_and_level_major_schedule` —
   `graph 0: level 1 is not strictly ascending` (which is exactly what
-  `NativeGraphBlueprint::prepare` rejects with `graph.scheduler.layout`).
+  graph binding rejects with `graph.scheduler.layout`).
 
 ### M-12 — level = max(predecessor) instead of max(predecessor) + 1
 * Mutation: `.map_or(0, |value| value)` in `topo`'s level computation.

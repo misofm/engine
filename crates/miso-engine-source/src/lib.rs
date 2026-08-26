@@ -2344,7 +2344,7 @@ mod tests {
 
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    fn one_four_channel_source_fans_out_to_three_inputs_in_sequential_and_native_fallback() {
+    fn one_four_channel_source_fans_out_to_three_inputs_in_the_sequential_executor() {
         use core::num::NonZeroUsize;
         use miso_engine_core::{
             QuantumFrames,
@@ -2354,7 +2354,6 @@ mod tests {
         use miso_engine_graph::{
             DependencyLevel, GraphEdge, GraphEdgeId, GraphNode, GraphPortId, GraphPortKind,
             GraphResourceEstimate, GraphRuntimeBindings, GraphRuntimeProcessor, GraphSpec,
-            NativeGraphBindConfigV1, NativeGraphRenderModeV1, NativeSchedulerConfigV1,
             PreparedGraphPlan, PreparedGraphPlanParts, StableGraphId, TrackStage,
         };
 
@@ -2523,8 +2522,6 @@ mod tests {
             .expect("source set")
         };
         let bindings = || GraphRuntimeBindings {
-            #[cfg(not(target_arch = "wasm32"))]
-            worker_lease: None,
             envelope,
             nodes: vec![miso_engine_graph::GraphNodeBinding::new(
                 output.clone(),
@@ -2569,8 +2566,6 @@ mod tests {
         assert_transactional_rejection(
             make_source_set(normal_mappings()),
             GraphRuntimeBindings {
-                #[cfg(not(target_arch = "wasm32"))]
-                worker_lease: None,
                 envelope,
                 nodes: vec![
                     miso_engine_graph::GraphNodeBinding::new(output.clone(), Box::new(Noop)),
@@ -2585,43 +2580,16 @@ mod tests {
             Ok(plan) => plan,
             Err(failure) => panic!("sequential bind failed: {}", failure.code),
         };
-        let mut native = match make_plan().bind_native_with_source_set(
-            bindings(),
-            NativeGraphBindConfigV1 {
-                render_mode: NativeGraphRenderModeV1::SingleThread,
-                scheduler: NativeSchedulerConfigV1::new(
-                    NonZeroUsize::new(1).expect("lane"),
-                    false,
-                    miso_engine_graph::NativeWorkerPoolShapeV1::default(),
-                ),
-                maximum_retained_bytes: 1 << 20,
-            },
-            make_source_set(normal_mappings()),
-        ) {
-            Ok(plan) => plan.into_plan(),
-            Err(failure) => panic!("native bind failed: {}", failure.code),
-        };
         let mut sequential_pcm = [0.0_f32; 4];
-        let mut native_pcm = [0.0_f32; 4];
-        for plan_and_pcm in [
-            (&mut sequential, &mut sequential_pcm),
-            (&mut native, &mut native_pcm),
-        ] {
-            plan_and_pcm
-                .0
-                .render(
-                    RenderIo {
-                        input: None,
-                        output: PlanarBufferMut::try_new(plan_and_pcm.1, 2, 2, 2).expect("output"),
-                    },
-                    RenderTime { absolute_sample: 0 },
-                )
-                .expect("render");
-        }
+        sequential
+            .render(
+                RenderIo {
+                    input: None,
+                    output: PlanarBufferMut::try_new(&mut sequential_pcm, 2, 2, 2).expect("output"),
+                },
+                RenderTime { absolute_sample: 0 },
+            )
+            .expect("render");
         assert_eq!(sequential_pcm, [10.0, 10.0, 10.0, 10.0]);
-        assert_eq!(
-            native_pcm.map(f32::to_bits),
-            sequential_pcm.map(f32::to_bits)
-        );
     }
 }
