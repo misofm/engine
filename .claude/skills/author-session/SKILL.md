@@ -107,7 +107,7 @@ appear in the parameter metadata — this list is the authority.
 
 | Key | Accepted tokens |
 | --- | --- |
-| `render_profile.mode` | `single_thread`, `dependency_waves` |
+| `render_profile.mode` | `single_thread`, `dependency_waves` (parses, but only `single_thread` launches -- see below) |
 | `output_profile.sample_format` | `f32_planar` |
 | effect `quality` | `draft`, `normal`, `high` |
 | effect `link_mode` | `dual_mono`, `maximum`, `average` |
@@ -204,7 +204,7 @@ The failing stage names the kind of repair:
 | Stage | Rejects | Typical fix |
 | --- | --- | --- |
 | 1 `toml-grammar` | `toml.syntax` | a TOML typo: unbalanced brace, duplicate key |
-| 2 `typed-model` | `schema.*`, `id.*`, `reference.*`, `numeric.*`, `unit.*`, `source.*`, `automation.*`, `capacity.zero`, `sample_rate.*` | the document contradicts the schema |
+| 2 `typed-model` | `schema.*`, `id.*`, `reference.*`, `numeric.*`, `unit.*`, `source.*`, `automation.*`, `capacity.zero`, `sample_rate.*`, `render_mode.*` | the document contradicts the schema |
 | 3 `compile-session` (resource preflight, caps, canonical normalization) | `resource.limit_exceeded`, `capacity.*` | your `limits` are too small for what you declared |
 | 4 `prepare-builtins` (off-render builtins preparation) | `builtin.*` | a builtin value outside its DSP domain (e.g. a cutoff above the rate-keyed maximum) |
 
@@ -224,6 +224,10 @@ key order, or float spellings — regenerate instead.
 
 ## Constraints and pitfalls
 
+- `render_profile.mode` must be `single_thread`. `dependency_waves` is a valid token that the
+  parser knows, so it fails at stage 2 with `render_mode.unsupported_at_launch` rather than
+  `schema.invalid_enum` -- the repair is to write `single_thread`, not to invent a new token. The
+  parallel executor it named no longer exists.
 - `sample_rate_hz` is exactly one of `44100`, `48000`, `88200`, `96000`; IDs match
   `[a-z][a-z0-9._-]{0,126}` (lowercase, leading letter); `output_profile` is exactly
   `{ id, channels = 2, sample_format = "f32_planar" }`.

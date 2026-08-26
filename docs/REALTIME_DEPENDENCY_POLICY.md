@@ -17,49 +17,28 @@ control or worker threads.
 The policy applies transitively. A dependency that hides one of these operations behind a benign
 API is still forbidden in the render-reachable graph.
 
-## Issue 100 worker idle policy and the single wake
+## Render is syscall-free (the single wake is gone)
 
-Issue 100 makes the native dependency-wave workers park between blocks instead of burning a core
-each, and creates exactly one documented exception to the "no syscalls" rule above.
+Issue 100 created exactly one documented exception to the "no syscalls" rule above: the audio
+callback could issue at most one `std::thread::unpark` per rendered block to wake a parked native
+dependency-wave worker. **That exception no longer exists.** The native scheduler, its worker pool
+and the graph crate's dependency-wave executor were removed as production-unreachable -- nothing
+outside the graph crate's own tests ever engaged them -- so render-reachable code now makes no
+syscall at all, unconditionally. `AGENTS.md` records the same, without an exception clause.
 
-* The coordinator (the audio callback thread) may issue **at most one** `std::thread::unpark` per
-  rendered block, from `NativeSchedulerV1::wake_root`, and only when worker 0 is observed parked.
-  On Linux/glibc that is one `futex(FUTEX_WAKE)`. It is the only syscall any render-reachable
-  coordinator code is permitted to make; everything else in the prohibitions above still holds.
-* Auxiliary workers wake their own binary-tree children (`2i+1`, `2i+2`), so one coordinator wake
-  reaches every issued worker. A worker may `park` and `unpark` (futex wait/wake) and nothing
-  else: it allocates nothing, takes no lock, and performs no I/O or logging.
-* A worker never parks while its block is open -- that is what makes "at most one coordinator wake
-  per rendered block" structural rather than statistical: `wake_root` can only ever find a parked
-  worker on a block's first wave. (A runaway guard of many quanta still bounds the spin if a
-  coordinator never closes its block.) After the block closes the worker spins a short linger
-  budget and then parks; the count restarts at each transition. A host
-  rendering at the real block cadence leaves nearly a whole quantum between blocks, so the worker
-  parks and the next block costs exactly one coordinator wake; an offline or saturated render
-  re-opens the next block within microseconds, so the worker never parks and the render thread
-  makes no syscall at all. `scripts/trace-scheduler-audit.sh` gates both: in steady (unpaced) mode
-  the coordinator's armed interval contains **at most one** `futex` (the pool has been parked since
-  preparation, so the first block wakes it and nothing after that does), and in paced mode at most
-  one `futex` per block, never more than the executor's own `coordinator_wakes` counter. Worker
-  idle CPU is measured from `/proc/<tid>/stat` and gated at 5 % between blocks.
-* The wake protocol is a Dekker pair: the worker stores `parked = true`, fences `SeqCst`, then
-  re-checks its command queue; the coordinator publishes the command, fences `SeqCst`, then reads
-  `parked`. Removing or weakening either fence is a lost-wake bug.
-* `AGENTS.md` records the same exception in one sentence next to the render prohibitions.
+What the removal retires with it: the Dekker wake protocol and its `SeqCst` fence pair, the
+binary-tree child wake, the linger-and-park budget, the bounded `recover_issued` deadline with its
+trapped parcels and muted edges, and the strace/`/proc` gate that measured all of it. None of these
+can be reintroduced by accident; a future multicore render must re-argue this exception from
+scratch, and the burden is the same one #100 carried.
 
-Bounded recovery replaces the old unbounded completion spin: `recover_issued` spins for a
-calibrated budget -- one render quantum, never less than `MINIMUM_RECOVERY_NS` -- and then declares
-the worker dead *for that block*. The dead worker's parcel stays *trapped* (it is never touched
-again until the worker returns it at a later block boundary), every edge sourced from it is muted
-to the arena's always-zero silence buffer, and the remaining units of the block render on the
-coordinator. The audio callback therefore has a bounded worst case and never wedges.
-
-The #100 plan proposed half a quantum and a permanent death. Both were widened, in the safe
-direction, by what parking makes true: the first wave of a block also pays the operating system's
-wake latency, which the quantum does not bound, and a worker that answers late is demonstrably
-alive, so a false deadline miss must cost one degraded block rather than the life of the lease.
-`NativeSchedulerConfigV1::with_recovery_deadline_ns` lets a qualification harness that measures
-determinism rather than deadlines opt out of the derived budget entirely.
+What survives, because the *sequential* executor depends on it: the plan-owned disjoint audio
+arena in `crates/miso-engine-core/src/realtime/disjoint.rs` and its lease API. Invariants I1 and
+I2 are still proved at bind by `ArenaLeaseSetBuilder::finish`, and they are still what makes node
+semantics have exactly one implementation of *where the audio is*. I3 and I4 described a
+multi-wave issue discipline and a coordinator that could decline to own a parcel; with one
+executor and one lease over the whole coloured arena, both are trivially satisfied rather than
+enforced.
 
 ## Unsafe-code ownership
 
@@ -107,19 +86,14 @@ add tests; and obtain explicit review. Unsafe code must not leak through a publi
 exception owns fixed `UnsafeCell<MaybeUninit<T>>` storage and its local `SAFETY` assertions
 require one producer, one consumer, release publication after writes, acquire before reads, and
 shared `Arc` storage outliving both non-cloneable endpoints. `Arc` creation/destruction stays
-outside push, pop, and render. Issue 100 adds `crates/miso-engine-core/src/realtime/disjoint.rs`, the plan-owned disjoint audio
-arena that lets each consuming parcel read its producers' buffers in place on the worker that
-needs them instead of having the coordinator copy every inter-parcel edge. Its `unsafe impl Sync`
-and its raw slice construction are justified by four invariants stated in the module
-documentation and proved once at bind by `ArenaLeaseSetBuilder::finish`: **I1** every buffer is
-writable by at most one lease for the life of the plan (buffers are never recycled), **I2** a
-lease reads only buffers produced by a strictly earlier wave or by itself, **I3** the scheduler
-runs one wave at a time with an SPSC release/acquire edge between waves, and **I4** a parcel the
-coordinator does not own is never read (its buffers are muted to the always-zero silence buffer).
-Soundness therefore does not depend on any worker being on time: a late worker can only write its
-own unique slots, which nobody reads. `crates/miso-engine-native-scheduler` and
-`crates/miso-engine-graph` remain entirely free of unsafe code, which
-`scripts/check-scheduler-policy.sh` enforces. A second test-only exception is
+outside push, pop, and render. Issue 100 added `crates/miso-engine-core/src/realtime/disjoint.rs`, the plan-owned disjoint audio
+arena, which the sequential executor still renders through. Its `unsafe impl Sync` and its raw
+slice construction are justified by invariants stated in the module documentation and proved once
+at bind by `ArenaLeaseSetBuilder::finish`: **I1** every buffer is writable by at most one lease for
+the life of the plan (buffers are never recycled) and **I2** a lease reads only buffers produced
+strictly earlier or by itself. I3 and I4 constrained the removed multi-wave scheduler and are now
+trivially satisfied: there is one executor holding one lease. `crates/miso-engine-graph` remains
+entirely free of unsafe code. A second test-only exception is
 `tools/miso-engine-audit/src/realtime.rs`, whose audited global allocator forwards unchanged
 layouts to `System` and terminates without unwinding if allocation/free is attempted in render.
 Loom `=0.7.2` is MIT licensed and test/model-only; it is not a production, Wasm, or

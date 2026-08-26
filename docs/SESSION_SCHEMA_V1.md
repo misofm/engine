@@ -22,6 +22,16 @@ canonical string escapes, and finite `f32` spellings that preserve exact bits th
 `Display`; the two double-rounding values use exact `f64` `Display`; integral spellings gain `.0`
 to remain TOML floats; and negative zero is preserved exactly as `-0.0`.
 
+`render_profile.mode` is a launch engine setting. Both V1 tokens still parse -- `single_thread`
+and `dependency_waves` -- because the closed token set, the protocol wire encoding and the
+canonical writer are all lossless by doctrine, and canonical round-trip forbids normalizing one
+token into another. Only `single_thread` launches. `dependency_waves` rejects with
+`render_mode.unsupported_at_launch` at `$.render_profile.mode` from parsing, typed compilation and
+canonical serialization alike, so no caller reaches a prepared plan through an entry point that
+skipped the check. The token named a native dependency-wave executor that was removed as
+production-unreachable; a rejection is the honest answer, where silently rendering single-threaded
+would let a session claim parallelism it never had.
+
 `sample_rate_hz` is a launch engine setting and is exactly one of 44100, 48000, 88200, or
 96000 Hz. Other values, including extended compatibility corpus rates, reject with
 `sample_rate.unsupported_at_launch` at `$.sample_rate_hz`; parsing, typed compilation, and
