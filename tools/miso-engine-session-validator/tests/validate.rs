@@ -44,6 +44,11 @@ fn every_valid_session_fixture_passes_every_stage() {
         "canonical.toml",
         "canonical-minimal.toml",
         "console-sixty-four-track.toml",
+        // The standing 64-track qualification fixture (#175). It is generated rather than
+        // authored, and the generator takes its canonical spelling from this very validator, so
+        // requiring it here closes the loop: the tool that produced the fixture is the tool that
+        // has to keep accepting it.
+        "console-sixty-four-track-intended.toml",
     ] {
         assert!(
             names.iter().any(|name| name == required),

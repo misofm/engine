@@ -279,7 +279,9 @@ impl Workload {
     pub const fn fixture_id(self) -> &'static str {
         match self {
             Self::NineTrackBaseline => "fixtures/session/v1/parametric-eq-nine-track.toml",
-            Self::SixtyFourTrackConsoleLegacy => "fixtures/session/v1/console-sixty-four-track.toml",
+            Self::SixtyFourTrackConsoleLegacy => {
+                "fixtures/session/v1/console-sixty-four-track.toml"
+            }
             _ => "fixtures/session/v1/console-sixty-four-track-intended.toml",
         }
     }
@@ -292,7 +294,9 @@ impl Workload {
     pub const fn synthetic(self) -> bool {
         !matches!(
             self,
-            Self::NineTrackBaseline | Self::SixtyFourTrackConsole | Self::SixtyFourTrackConsoleLegacy
+            Self::NineTrackBaseline
+                | Self::SixtyFourTrackConsole
+                | Self::SixtyFourTrackConsoleLegacy
         )
     }
     /// The edit this row makes to the fixture's channel strip.

@@ -4598,8 +4598,8 @@ mod tests {
     #[test]
     fn intended_placement_merges_two_chains_into_one_bit_identically() {
         const BLOCKS: u64 = 12;
-        let intended =
-            parse_session_toml(CONSOLE_SIXTY_FOUR_TRACK_INTENDED_FIXTURE).expect("intended fixture");
+        let intended = parse_session_toml(CONSOLE_SIXTY_FOUR_TRACK_INTENDED_FIXTURE)
+            .expect("intended fixture");
         assert_eq!(intended.tracks.len(), 64);
         assert!(
             intended.tracks.iter().all(|track| {
@@ -4655,7 +4655,8 @@ mod tests {
         let merged_artifact = compile(&merged, 1_751);
         let intended_artifact = compile(&intended, 1_752);
 
-        let Some(width) = BankWidth::for_backend(split_artifact.report.rack_cohorts.dispatch) else {
+        let Some(width) = BankWidth::for_backend(split_artifact.report.rack_cohorts.dispatch)
+        else {
             assert_eq!(split_artifact.graph.prepared_bank_count(), 0);
             return;
         };
@@ -4669,10 +4670,15 @@ mod tests {
             cohorts_per_rack
         );
         assert_eq!(
-            split_cohorts.bound_slots_in(RackLocationV1::Dynamic).count(),
+            split_cohorts
+                .bound_slots_in(RackLocationV1::Dynamic)
+                .count(),
             cohorts_per_rack
         );
-        assert_eq!(split_artifact.graph.prepared_bank_count(), 2 * cohorts_per_rack);
+        assert_eq!(
+            split_artifact.graph.prepared_bank_count(),
+            2 * cohorts_per_rack
+        );
 
         // The merged layout: both slots bound inside one `simd1` cohort, nothing in `dynamic`.
         let merged_cohorts = &merged_artifact.report.rack_cohorts;

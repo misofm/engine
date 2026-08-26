@@ -901,10 +901,6 @@ impl FacilityMeasurement {
     }
 }
 
-/// The median of the per-observation differences `left[i] - right[i]`.
-///
-/// Pairs taken microseconds apart, then summarised -- never a difference of two summaries taken
-/// minutes apart, which is the whole point of alternating the arms.
 // ---------------------------------------------------------------------------------------------
 // The placement measurement: the #175 chain-shape row-pair, alternated observation by observation.
 // ---------------------------------------------------------------------------------------------
@@ -948,7 +944,8 @@ impl PlacementMeasurement {
             .iter()
             .map(|workload| SessionRuntime::new(*workload))
             .collect();
-        let mut hashes: Vec<Sha256Sink> = PLACEMENT_ARMS.iter().map(|_| Sha256Sink::new()).collect();
+        let mut hashes: Vec<Sha256Sink> =
+            PLACEMENT_ARMS.iter().map(|_| Sha256Sink::new()).collect();
         for arm in &mut arms {
             for observation in 0..64 {
                 let _ = arm.render(observation);
@@ -1069,6 +1066,10 @@ const PLACEMENT_STATISTICAL_METHOD: &str = "two arms alternated per observation;
 percentiles over per-block nanoseconds; paired delta is merged_chain minus split_chains per \
 observation; descriptive only; no threshold";
 
+/// The median of the per-observation differences `left[i] - right[i]`.
+///
+/// Pairs taken microseconds apart, then summarised -- never a difference of two summaries taken
+/// minutes apart, which is the whole point of alternating the arms.
 fn paired_median(left: &[u64], right: &[u64]) -> i64 {
     let mut paired: Vec<i64> = left
         .iter()

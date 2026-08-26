@@ -53,10 +53,11 @@ arm=baseline
 if [[ "$#" == 1 ]]; then
     case "$1" in
         --after) arm=after ;;
-        *) printf 'usage: %s [--after]\n' "$0" >&2; exit 2 ;;
+        --issue175) arm=issue175 ;;
+        *) printf 'usage: %s [--after|--issue175]\n' "$0" >&2; exit 2 ;;
     esac
 elif [[ "$#" != 0 ]]; then
-    printf 'usage: %s [--after]\n' "$0" >&2
+    printf 'usage: %s [--after|--issue175]\n' "$0" >&2
     exit 2
 fi
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -66,6 +67,8 @@ source "$root/scripts/check-bench-preconditions.sh"
 
 if [[ "$arm" == after ]]; then
     artifact_dir="$root/artifacts/issue163-phase2"
+elif [[ "$arm" == issue175 ]]; then
+    artifact_dir="$root/artifacts/issue175"
 else
     artifact_dir="$root/artifacts/issue163-phase2-wasm-baseline"
 fi

@@ -20,10 +20,11 @@ if [[ "$#" == 1 ]]; then
         --issue163-phase2) phase_directory=issue163-phase2 ;;
         --issue163-phase3) phase_directory=issue163-phase3 ;;
         --issue163-phase4) phase_directory=issue163-phase4 ;;
-        *) printf 'usage: %s [--phase2|--phase3|--issue163-phase0|--issue163-phase1|--issue163-phase2|--issue163-phase3|--issue163-phase4]\n' "$0" >&2; exit 2 ;;
+        --issue175) phase_directory=issue175 ;;
+        *) printf 'usage: %s [--phase2|--phase3|--issue163-phase0|--issue163-phase1|--issue163-phase2|--issue163-phase3|--issue163-phase4|--issue175]\n' "$0" >&2; exit 2 ;;
     esac
 elif [[ "$#" != 0 ]]; then
-    printf 'usage: %s [--phase2|--phase3|--issue163-phase0|--issue163-phase1|--issue163-phase2|--issue163-phase3|--issue163-phase4]\n' "$0" >&2
+    printf 'usage: %s [--phase2|--phase3|--issue163-phase0|--issue163-phase1|--issue163-phase2|--issue163-phase3|--issue163-phase4|--issue175]\n' "$0" >&2
     exit 2
 fi
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -43,6 +44,7 @@ for tool in awk cmp cp git jq sha256sum wc; do
 done
 
 bash scripts/check-console-benchmark-fixture.sh >/dev/null || fail 'fixture check failed'
+bash scripts/check-intended-console-fixture.sh >/dev/null || fail 'intended fixture check failed'
 bash scripts/test-console-benchmark.sh >/dev/null || fail 'validator mutation suite failed'
 # The admissibility predicates the run is about to be refused by. A precondition whose own
 # self-test is red would refuse or admit for the wrong reason, and the run is one-shot.

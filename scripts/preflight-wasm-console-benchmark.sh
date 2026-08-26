@@ -7,23 +7,26 @@
 # defect cannot consume the one authorised measurement. Nothing here is timed, and nothing here
 # instantiates the guest for anything but a shape check.
 set -euo pipefail
-[[ "$#" -le 1 ]] || { printf 'usage: %s [--after]\n' "$0" >&2; exit 2; }
+[[ "$#" -le 1 ]] || { printf 'usage: %s [--after|--issue175]\n' "$0" >&2; exit 2; }
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$root"
 
 fail() { printf 'wasm console preflight failure: %s\n' "$1" >&2; exit 1; }
 
-# Mirrors `run-wasm-console-benchmark.sh`'s two arms: default is the pre-change browser baseline,
-# `--after` is the same nine rows on the unfused tree (issue #163 phase 2).
+# Mirrors `run-wasm-console-benchmark.sh`'s arms: default is the pre-change browser baseline,
+# `--after` is the same rows on the unfused tree (issue #163 phase 2), and `--issue175` is the
+# wasm half of the intended-placement family, whose row set the standing fixture changed.
 arm=baseline
-if [[ "${1:-}" == "--after" ]]; then
-    arm=after
-    shift
-fi
-[[ "$#" == 0 ]] || fail "usage: $0 [--after]"
+case "${1:-}" in
+    --after) arm=after; shift ;;
+    --issue175) arm=issue175; shift ;;
+esac
+[[ "$#" == 0 ]] || fail "usage: $0 [--after|--issue175]"
 
 if [[ "$arm" == after ]]; then
     artifact_dir="$root/artifacts/issue163-phase2"
+elif [[ "$arm" == issue175 ]]; then
+    artifact_dir="$root/artifacts/issue175"
 else
     artifact_dir="$root/artifacts/issue163-phase2-wasm-baseline"
 fi
@@ -38,6 +41,7 @@ for tool in awk cmp cp git jq sha256sum wc; do
 done
 
 bash scripts/check-console-benchmark-fixture.sh >/dev/null || fail 'fixture check failed'
+bash scripts/check-intended-console-fixture.sh >/dev/null || fail 'intended fixture check failed'
 bash scripts/test-wasm-console-benchmark.sh >/dev/null || fail 'validator mutation suite failed'
 # The admissibility predicates the run is about to be refused by. A precondition whose own
 # self-test is red would refuse or admit for the wrong reason, and the run is one-shot.

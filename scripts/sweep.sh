@@ -80,6 +80,7 @@ row scripts/check-builtins-policy.sh
 row scripts/check-command-reason-vocabulary.py
 row scripts/check-conformance-boundaries.sh
 row scripts/check-console-benchmark-fixture.sh
+row scripts/check-intended-console-fixture.sh
 row scripts/check-effect-interchange-benchmark-108.sh
 row scripts/check-effect-interchange-qualification.sh
 row scripts/check-effect-runtime-fixtures.sh
