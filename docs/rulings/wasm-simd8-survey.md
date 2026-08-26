@@ -208,7 +208,12 @@ with the override present : c5f4e95f4df4ae10295354cfd91531a2ff58e0e4bd68e4612ff9
 with the change stashed   : c5f4e95f4df4ae10295354cfd91531a2ff58e0e4bd68e4612ff958ff5dfce0a6
 ```
 
-Byte-identical. The eight-lane guest hashes differently
+Byte-identical. These are default-profile builds; the sealed record's `guest_module_sha256`
+values differ from them because the runner builds under its frozen profile env (opt-level, lto,
+codegen-units overrides) — an auditor reproducing the record's digests must use the runner's
+env, and one reproducing the Class-A pair above must use a plain `cargo build`. Under the frozen
+profile the default guest differs from `origin/main`'s by exactly two DWARF line-number bytes
+(debug metadata only; all executable sections byte-identical). The eight-lane guest hashes differently
 (`80978c7ad6e0c84ce740d341d566692dd7665c1688e8a0a103718ab277c9b70a`), and both the runner and the
 preflight refuse the run if the two modules hash alike — a paired width measurement taken from one
 module twice would report a ratio of 1.0 by construction.
@@ -318,17 +323,24 @@ core's measured 5.45 GHz, the native `Simd8` arithmetic floor for the composed s
 **35.75 us/block**. The wasm floor is that figure times the width factor: **x2 at W4** (four lanes
 against the floor's eight) and **x1 at W8**.
 
-| build | measured | its own width floor | multiple of floor |
+Two floor constructions are defensible and they disagree, so both are stated. By *bank width*
+(a W8 bank carries the full eight lanes per lane-op, so its floor is the native figure), the W8
+build stands 6.87x from its floor where W4 stands 3.85x. But `effect-floor-accounting.md`'s own
+width term is per *instruction* — and on wasm an instruction is a four-lane `v128` at either bank
+width (`f32x8` lowers to two `v128`s), so under the doc's machine reading the x2 width factor
+applies to both builds and the doc's mandatory per-row residual must be quoted with it:
+
+| build | measured | machine floor (x2, residual 1) | multiple |
 |---|---:|---:|---:|
 | wasm W4 | 275.31 | 71.50 | 3.85x |
-| wasm W8 | 245.74 | 35.75 | **6.87x** |
+| wasm W8 | 245.74 | 71.50 | 3.44x |
 | native `Simd8` | 124.73 | 35.75 | 3.49x |
 
-**The switch halves the floor and moves the measurement by a ninth, so the W8 build stands twice as
-far from its own bottom as the W4 build does.** That is the honest floor statement, and it is the
-argument against reading -10.8 % as convergence: the arithmetic the strip requires did not get
-cheaper, the machine simply retired a little more of it per instruction pair before the spill
-traffic ate the rest.
+Under the doc's reading the W8 build is modestly *closer* to the machine floor, not twice as far
+from a halved one. What is true under both constructions, and is the substantive caution: the
+arithmetic the strip requires did not get cheaper — the machine retired a little more of it per
+instruction pair before spill traffic ate the rest, and the -10.8 % should not be read as
+convergence toward a new, lower bottom.
 
 ## Recommendation
 
