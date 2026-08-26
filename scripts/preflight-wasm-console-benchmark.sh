@@ -100,6 +100,8 @@ jq -n -S \
     --arg guest_source_sha256 "$(sha256sum tools/miso-engine-wasm-console-guest/src/lib.rs | awk '{print $1}')" \
     --arg subject_sha256 "$(sha256sum tools/miso-engine-console-workload/src/lib.rs | awk '{print $1}')" \
     --arg fixture_sha256 "$(sha256sum fixtures/session/v1/console-sixty-four-track.toml | awk '{print $1}')" \
+    --arg standing_fixture_sha256 "$(sha256sum fixtures/session/v1/console-sixty-four-track-intended.toml | awk '{print $1}')" \
+    --arg fixture_generator_sha256 "$(sha256sum scripts/derive-intended-console-fixture.py | awk '{print $1}')" \
     --arg runner_sha256 "$(sha256sum scripts/run-wasm-console-benchmark.sh | awk '{print $1}')" \
     --arg validator_sha256 "$(sha256sum scripts/wasm-console-benchmark-validator.jq | awk '{print $1}')" \
     --arg preconditions_sha256 "$(sha256sum scripts/check-bench-preconditions.sh | awk '{print $1}')" \
@@ -110,6 +112,8 @@ jq -n -S \
       binary_sha256: $binary_sha256, guest_module_sha256: $guest_sha256,
       host_source_sha256: $host_sha256, guest_source_sha256: $guest_source_sha256,
       subject_source_sha256: $subject_sha256, fixture_sha256: $fixture_sha256,
+      standing_fixture_sha256: $standing_fixture_sha256,
+      fixture_generator_sha256: $fixture_generator_sha256,
       runner_sha256: $runner_sha256, validator_sha256: $validator_sha256,
       preconditions_sha256: $preconditions_sha256}'
 
