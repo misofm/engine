@@ -225,7 +225,7 @@ pub struct Rack {
     pub effects: Vec<Effect>,
 }
 
-/// Typed effect declaration; availability and CID validity are deferred to issue 011.
+/// Typed effect declaration; availability is issue-011 work and CID validity issue-029 work.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Effect {
     /// Stable local slot identity.
@@ -252,7 +252,7 @@ pub enum EffectIdentity {
         /// Stable native effect contract identifier.
         effect_id: StableId,
     },
-    /// Third-party package CIDv1 text. CID validation is deferred to issue 011.
+    /// Third-party package CIDv1 text. CID validation is deferred to issue 029.
     ThirdPartyCid {
         /// Opaque nonempty CIDv1 text.
         cid: String,

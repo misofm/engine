@@ -43,6 +43,7 @@ members = [
     "tools/miso-engine-wasm-console-guest",
     "tools/miso-engine-wasm-console",
     "tools/miso-engine-parameter-metadata",
+    "tools/miso-engine-session-validator",
     "tools/miso-engine-wasm-gates",
 ]
 resolver = "3"

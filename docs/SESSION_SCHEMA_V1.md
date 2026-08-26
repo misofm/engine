@@ -8,7 +8,9 @@ requires the root keys, in canonical order,
 `schema_version`, `session_id`, `revision`, `sample_rate_hz`, `quantum_frames`, `render_profile`,
 `output_profile`, `limits`, `sources`, `tracks`, `submixes`, `outputs`, `routes`, and `automation`.
 Every table rejects unknown keys and every field is explicit, including empty arrays and
-`sidechain = { kind = "none" }`.
+`sidechain = { kind = "none" }`. `limits` carries exactly `pcm_ring_frames`,
+`control_queue_messages`, and `memory_bytes`; each of those three and `quantum_frames` must be
+nonzero, and a zero rejects with `capacity.zero` at its own leaf.
 
 Stable IDs use `[a-z][a-z0-9._-]{0,126}`. Sources have their own unique ID namespace. Tracks,
 submixes, and outputs share the graph-entity namespace; routes, automations, rack-local effects,
