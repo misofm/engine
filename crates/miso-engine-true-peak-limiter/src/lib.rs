@@ -2843,6 +2843,24 @@ mod tests {
         values
     }
 
+    /// [`values_with`] with a different lookahead on each channel.
+    ///
+    /// Lookahead is the one parameter of this effect that is per channel *and* changes the shape
+    /// of the window rather than a coefficient, so a left/right split is the only way to reach a
+    /// cohort whose two channels sit at different van Herk positions while both are internally
+    /// uniform. `values[4]` and `values[5]` are parameter 2's Left and Right entries, which is the
+    /// order [`initial_defaults`] reads them in.
+    fn values_split(
+        ceiling: f32,
+        release: f32,
+        left_lookahead: f32,
+        right_lookahead: f32,
+    ) -> [InitialParameterValue; PARAMETER_COUNT * 2] {
+        let mut values = values_with(ceiling, release, left_lookahead);
+        values[5].value = right_lookahead;
+        values
+    }
+
     fn request_at_rate<'a>(
         values: &'a [InitialParameterValue],
         sample_rate: u32,
@@ -3500,6 +3518,46 @@ mod tests {
     /// One track's state payload: the common, left and right sections a snapshot produces.
     type LanePayload = (Vec<u8>, Vec<u8>, Vec<u8>);
 
+    /// Renders `tracks` through one W8 bank over `blocks` blocks of 128 frames.
+    ///
+    /// The bank arm of [`cohort_run`] on its own, over the same per-lane signal, for the
+    /// comparisons whose oracle is another *bank* rather than a scalar twin. A scalar instance is
+    /// `W = 1` and therefore uniform by construction, so it is not a usable oracle for anything
+    /// the uniform body does to a whole channel.
+    fn bank_planes(
+        tracks: &[[InitialParameterValue; PARAMETER_COUNT * 2]],
+        blocks: usize,
+    ) -> (Vec<f32>, Vec<f32>) {
+        const LANES: usize = 8;
+        assert_eq!(tracks.len(), LANES);
+        let frames = blocks * 128;
+        let mut left = vec![0.0_f32; frames * LANES];
+        let mut right = vec![0.0_f32; frames * LANES];
+        for lane in 0..LANES {
+            let mut noise = Noise(0x5182_0000 + lane as u64);
+            let lane_left: Vec<f32> = (0..frames).map(|_| noise.next() * 3.0).collect();
+            let lane_right: Vec<f32> = (0..frames).map(|_| noise.next() * 3.0).collect();
+            for frame in 0..frames {
+                left[frame * LANES + lane] = lane_left[frame];
+                right[frame * LANES + lane] = lane_right[frame];
+            }
+        }
+        let mut bank = bank_for(tracks, LinkMode::DualMono, BankWidth::Eight, Backend::Simd8);
+        for block in 0..blocks {
+            let start = block * 128 * LANES;
+            let end = start + 128 * LANES;
+            process_bank(
+                bank.as_mut(),
+                &mut left[start..end],
+                &mut right[start..end],
+                BankWidth::Eight,
+                128,
+                (block * 128) as u64,
+            );
+        }
+        (left, right)
+    }
+
     /// Renders `tracks` through eight scalar instances and one W8 bank over `blocks` blocks of 128.
     ///
     /// `swap_after` optionally restores `donor` into track 0 of both arms after that many blocks,
@@ -3772,6 +3830,93 @@ mod tests {
             (0..8).map(|_| values_with(-6.0, 100.0, 5.0)).collect();
         tracks[3] = values_with(-6.0, 100.0, 1.0);
         cohort_run(&tracks, 6, None).assert_lane_identity("mixed lookahead cohort");
+    }
+
+    /// **The two channels of a uniform cohort keep their own van Herk phases.**
+    ///
+    /// Closes the adversarial verifier's M-A finding. Round 2 R1(a) moved `prefix` and `phase` out
+    /// of the arena and into block locals, written back once at the end of
+    /// [`limiter_block_uniform`]. The `round2-1` and `round2-2` mutation rows gate a **dropped**
+    /// write-back; nothing gated a **crossed** one. Writing `right`'s phase into `left` at the
+    /// block end survives every other test in this crate while moving rendered bits, and this is
+    /// the test that does not.
+    ///
+    /// Red mutation (M-A): `left.phase.fill(left_phase)` → `left.phase.fill(right_phase)` at the
+    /// block-end write-back of `limiter_block_uniform`.
+    ///
+    /// # Why the obvious gates cannot reach it
+    ///
+    /// The crossing is only observable when the two channels are at *different* window positions,
+    /// which needs a per-channel lookahead split — every other test in the crate prepares both
+    /// channels alike, and there the crossed value is the value being overwritten. And once the
+    /// split exists, neither of the crate's two standing comparison shapes helps:
+    ///
+    /// * **Cross-width** (`lane_identity_holds_across_widths`, `assert_lane_identity`) compares a
+    ///   bank against scalar twins, and a scalar instance is `W = 1` and therefore uniform by
+    ///   construction — it runs the same crossed write-back. Both widths corrupt identically and
+    ///   agree.
+    /// * **Partition invariance** compares one long block against several short ones. `right`'s
+    ///   phase is uncorrupted and advances one step per frame, so at any shared block boundary it
+    ///   is `frames mod Wb_right` whatever the partition was; the corrupted `left` inherits it and
+    ///   re-syncs. Both partitions corrupt identically and agree.
+    ///
+    /// So the oracle has to be a rendering of the same asymmetric configuration that does **not**
+    /// run the uniform write-back. The per-lane fallback body is exactly that: it writes each
+    /// lane's phase from that lane's own `sliding_minimum`, per channel, and shares no code with
+    /// the crossed line. Both arms below are W8 banks over the same signal; lane 7 of the oracle
+    /// arm carries a third, different *left* lookahead, which makes `lanes_uniform(left)` false
+    /// and sends the whole bank down the fallback. Lanes 0 through 6 are prepared identically in
+    /// the two arms, so their rendered samples must agree to the bit.
+    #[test]
+    fn the_two_channels_of_a_uniform_cohort_keep_their_own_phases() {
+        const BLOCKS: usize = 16;
+        const LANES: usize = 8;
+        // The three windows this test needs to be distinct. Asserted rather than assumed: if the
+        // clamp in `LaneShape::new` ever swallowed one of them, the comparison below would still
+        // pass and would be gating nothing.
+        let shape = Shape::new(48_000).expect("shape");
+        let window = |milliseconds: f32| {
+            LaneShape::new(lookahead_samples(milliseconds, 48_000, shape.n), &shape).window
+        };
+        assert_ne!(
+            window(5.0),
+            window(1.0),
+            "the two channels must sit at different window lengths for a crossed phase to show"
+        );
+        assert_ne!(
+            window(3.0),
+            window(5.0),
+            "the odd lane must differ from the cohort or the oracle arm stays uniform"
+        );
+
+        // Subject: every lane the same asymmetric program, so both channels are internally uniform
+        // and the bank takes `limiter_block_uniform`.
+        let subject: Vec<[InitialParameterValue; PARAMETER_COUNT * 2]> = (0..LANES)
+            .map(|_| values_split(-6.0, 100.0, 5.0, 1.0))
+            .collect();
+        // Oracle: lane 7's *left* lookahead differs, so `lanes_uniform(left)` is false and both
+        // channels take the per-lane body. Lanes 0..7 are byte-identical to the subject's.
+        let mut oracle = subject.clone();
+        oracle[7] = values_split(-6.0, 100.0, 3.0, 1.0);
+
+        let (subject_left, subject_right) = bank_planes(&subject, BLOCKS);
+        let (oracle_left, oracle_right) = bank_planes(&oracle, BLOCKS);
+
+        for lane in 0..LANES - 1 {
+            for frame in 0..BLOCKS * 128 {
+                let index = frame * LANES + lane;
+                assert_eq!(
+                    subject_left[index].to_bits(),
+                    oracle_left[index].to_bits(),
+                    "left lane {lane} frame {frame}"
+                );
+                assert_eq!(
+                    subject_right[index].to_bits(),
+                    oracle_right[index].to_bits(),
+                    "right lane {lane} frame {frame}"
+                );
+            }
+        }
     }
 
     /// **Restoring one track of a uniform cohort desynchronises the phase, and that falls back.**

@@ -149,6 +149,43 @@ Every row below is a **bit** test. The claims here are about *when* a state word
 | round2-9 | `History::shift` written newest-first, so every tap reads a word the shift has already overwritten | `src/lib.rs` `History::shift` | `phase_outputs_match_the_frozen_scalar_order` (E1), `bs1770_annex2_conformance_is_unchanged` (E2) |
 | round2-10 | taps 3 and 4 accumulated in the other order | `src/lib.rs` `annex2_phases` | `phase_outputs_match_the_frozen_scalar_order` — the frozen summation order is a bit statement, and swapping two of its twelve steps is visible in the low bit |
 | round2-11 | the alignment sample read from tap 0 instead of tap 6 | `src/lib.rs` `detector_peak` | `every_case_has_one_digest_at_every_width` (the E12 `D90_DIGESTS`) |
+| round2-12 | the left channel takes the **right** channel's block-end phase: `left.phase.fill(left_phase)` → `fill(right_phase)` | `src/lib.rs` `limiter_block_uniform` | `the_two_channels_of_a_uniform_cohort_keep_their_own_phases` — **and nothing else** |
+| round2-13 | the mirror of round2-12: `right.phase.fill(right_phase)` → `fill(left_phase)` | `src/lib.rs` `limiter_block_uniform` | `the_two_channels_of_a_uniform_cohort_keep_their_own_phases` — **and nothing else** |
+| round2-14 | the two channels' block-end `prefix` write-backs are swapped | `src/lib.rs` `limiter_block_uniform` | seven tests, including `lane_identity_holds_across_widths`, `partition_invariance_holds_over_block_sizes`, `output_true_peak_never_exceeds_the_ceiling` and `passes_effect_contract_conformance` |
+
+### Why a crossed phase needed its own test and a crossed prefix did not
+
+Rows 1 and 2 gate a **dropped** write-back. Rows 12 and 13 are the **crossed** one, and they were an
+open gap until the adversarial verifier's M-A found it: writing the right channel's phase into the
+left one survived every other test in this crate while moving rendered bits.
+
+The asymmetry with row 14 is the whole explanation. `prefix` is a running minimum of the signal, so
+the two channels hold different values in it on any block carrying material — crossing them is
+visible immediately, at any configuration, and seven existing tests see it. `phase` is a *counter*:
+it advances one step per frame and wraps at `Wb`, so two channels prepared with the same lookahead
+hold the same phase in every block, always, and crossing them is the identity. Every test in the
+crate before this one prepares both channels alike. Lookahead is the one parameter that is per
+channel *and* sets `Wb` rather than a coefficient, so a left/right lookahead split is the only way
+to reach the state where the crossing is observable at all — and it is reachable from the public
+parameter surface, which is what makes the gap a defect rather than a curiosity.
+
+Once the split exists, neither of the crate's two standing comparison shapes reaches it either, and
+this is why the new test compares two *banks* rather than a bank against scalar twins:
+
+* **cross-width** compares a bank against scalar instances, and a scalar instance is `W = 1` and
+  therefore uniform by construction — it runs the same crossed write-back. Both widths corrupt
+  identically and agree.
+* **partition invariance** compares one long block against several short ones. The uncorrupted
+  right phase is `frames mod Wb_right` at any shared block boundary whatever the partition was, and
+  the corrupted left phase inherits it and re-syncs there. Both partitions corrupt identically and
+  agree.
+
+The oracle therefore has to be a rendering of the same asymmetric configuration that does not run
+the uniform write-back at all. The per-lane fallback body is exactly that: it writes each lane's
+phase from that lane's own `sliding_minimum`, per channel, and shares no code with the crossed
+line. The test's oracle arm is a W8 bank whose lane 7 carries a third, different *left* lookahead,
+which makes `lanes_uniform(left)` false and sends the whole bank down the fallback; lanes 0 through
+6 are prepared identically in the two arms and must agree to the bit.
 
 ### Why rows 3 and 4 have exactly one gate, and why that is the point
 
