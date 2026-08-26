@@ -1051,6 +1051,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "miso-engine-session-validator"
+version = "0.1.0"
+dependencies = [
+ "miso-engine-builtins-compiler",
+ "miso-engine-session",
+]
+
+[[package]]
 name = "miso-engine-soft-clip"
 version = "0.1.0"
 dependencies = [
