@@ -37,6 +37,17 @@
 # are unchanged -- but the digest columns must not be compared, and a reader who diffs them will
 # find every row different.
 #
+# `--issue-loop-eq-r1` writes to `artifacts/issue-loop-eq-r1` and is the effect-optimization loop's
+# EQ round 1: parametric-EQ identity-section elision and the two-slot cohort chain (#181). Both are
+# **class A** -- every workload's output digest is the #175 digest to the bit, on every row and every
+# leg -- so its rows are read directly against `artifacts/issue175`, which is the standing authority
+# for the intended strip. It gets its own directory for the reason every arm does: a consumed
+# one-shot describes the tree that produced it, and this tree renders the same bits for less time.
+# The one record that is *expected* to move a non-timing field is `console_placement`, whose
+# `merged_chain_transposes_per_block` falls from 24 to 16; that count is derived from the realised
+# bank count, and #175 wrote its equality specifically so that the day the graph layer took the
+# saving, the equality would go red and say so.
+#
 # # Admissibility (#144 item 13, #163 phase 0a)
 #
 # Everything from `check-bench-preconditions.sh` down to the warmup is a *precondition*, not a
@@ -58,10 +69,11 @@ if [[ "$#" == 1 ]]; then
         --issue163-phase4) phase_directory=issue163-phase4 ;;
         --issue175) phase_directory=issue175 ;;
         --issue182) phase_directory=issue182 ;;
-        *) printf 'usage: %s [--phase2|--phase3|--issue163-phase0|--issue163-phase1|--issue163-phase2|--issue163-phase3|--issue163-phase4|--issue175|--issue182]\n' "$0" >&2; exit 2 ;;
+        --issue-loop-eq-r1) phase_directory=issue-loop-eq-r1 ;;
+        *) printf 'usage: %s [--phase2|--phase3|--issue163-phase0|--issue163-phase1|--issue163-phase2|--issue163-phase3|--issue163-phase4|--issue175|--issue182|--issue-loop-eq-r1]\n' "$0" >&2; exit 2 ;;
     esac
 elif [[ "$#" != 0 ]]; then
-    printf 'usage: %s [--phase2|--phase3|--issue163-phase0|--issue163-phase1|--issue163-phase2|--issue163-phase3|--issue163-phase4|--issue175|--issue182]\n' "$0" >&2
+    printf 'usage: %s [--phase2|--phase3|--issue163-phase0|--issue163-phase1|--issue163-phase2|--issue163-phase3|--issue163-phase4|--issue175|--issue182|--issue-loop-eq-r1]\n' "$0" >&2
     exit 2
 fi
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
