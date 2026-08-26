@@ -88,17 +88,21 @@ mod tests {
     use super::*;
     use miso_engine_lane::{Simd4, Simd8};
 
-    /// The smoother is the single-rounding `target + c * (y - target)`, and the attack coefficient
-    /// is the one selected when the target asks for more reduction.
+    /// The smoother is `target + c * (y - target)`, and the attack coefficient is the one selected
+    /// when the target asks for more reduction.
     ///
-    /// The oracle is an `f64` evaluation of the same operation order;
-    /// `d` is an `f32` subtraction inside the function, so the oracle takes the same rounded
-    /// difference. The two-rounding form the audit found copied into the compressor and multiband
-    /// crates is checked to be *different* on more than a thousand steps, so this is not vacuous.
+    /// The oracle restates that operation order through `f64`, taking each `f32` rounding
+    /// separately (issue #163 phase 2 made `Lane::fma` unfused). `d` is an `f32` subtraction
+    /// inside the function, so the oracle takes the same rounded difference.
     ///
-    /// Red mutations: `select(target.gt(y), ..)`; `c * y + (1 - c) * target`.
+    /// The `c * y + (1 - c) * target` rearrangement is checked to be *different* on more than a
+    /// thousand steps, so this is not vacuous. That form is a different algebra, not a different
+    /// rounding contract: it stays wrong for the same reason it was wrong before the phase.
+    ///
+    /// Red mutations: `select(target.gt(y), ..)`; `c * y + (1 - c) * target`; restoring the fused
+    /// oracle (one `f64` expression narrowed once).
     #[test]
-    fn the_smoother_rounds_once_and_picks_the_attack_direction() {
+    fn the_smoother_picks_the_attack_direction_and_matches_the_unfused_restatement() {
         let mut differing = 0usize;
         let mut state = 0.0f32;
         for step in 0..20_000i32 {
@@ -112,10 +116,9 @@ mod tests {
             let expected_coefficient = if target < state { attack } else { release };
             let d = state - target;
             let oracle =
-                (f64::from(expected_coefficient) * f64::from(d) + f64::from(target)) as f32;
-            let two_roundings =
-                expected_coefficient * state + (1.0 - expected_coefficient) * target;
-            if two_roundings.to_bits() != oracle.to_bits() {
+                miso_engine_lane::softfma::unfused_mul_add_via_f64(expected_coefficient, d, target);
+            let rearranged = expected_coefficient * state + (1.0 - expected_coefficient) * target;
+            if rearranged.to_bits() != oracle.to_bits() {
                 differing += 1;
             }
             let actual = branching_smooth::<f32>(state, target, attack, release);
@@ -128,7 +131,7 @@ mod tests {
         }
         assert!(
             differing > 1_000,
-            "the two-rounding form must differ often enough for this to be a gate: {differing}"
+            "the rearranged form must differ often enough for this to be a gate: {differing}"
         );
     }
 

@@ -652,6 +652,31 @@ pub fn unfused_fma_digest(width: usize) -> [u8; 32] {
     digest_lanes(&lanes)
 }
 
+/// The three operand streams of one lane of the `lane_fma` case.
+///
+/// Exposed so the native half of gate G5 can evaluate the same operands with a *genuinely fused*
+/// multiply-add and prove the case still separates the two contracts. That reference cannot live
+/// in this crate: this crate is compiled into the wasm guest, where no fused instruction exists,
+/// so a "fused" reference computed here would silently become a second copy of the unfused one.
+///
+/// # Panics
+///
+/// Panics if `lane >= LANES`.
+#[must_use]
+pub fn fma_operands(lane: usize) -> [[f32; FRAMES]; 3] {
+    assert!(lane < LANES, "lane index out of range");
+    elementwise_operands(Elementwise::Fma, lane)
+}
+
+/// SHA-256 over a per-lane result block, in the corpus's own digest order.
+///
+/// Exposed for the same reason as [`fma_operands`]: a reference computed outside this crate has to
+/// be digested the same way as one computed inside it, or the comparison is meaningless.
+#[must_use]
+pub fn digest_of_lanes(lanes: &[[f32; FRAMES]; LANES]) -> [u8; 32] {
+    digest_lanes(lanes)
+}
+
 /// Index of the `lane_fma` case, which [`unfused_fma_digest`] is the counterpart of.
 #[must_use]
 pub const fn fma_case() -> usize {
@@ -873,7 +898,10 @@ fn elementwise_operands(operation: Elementwise, lane: usize) -> [[f32; FRAMES]; 
                 0 => {
                     // The witness triple of master plan §3.6, scaled by exact powers of two:
                     // `a = b = 1 + 2^-12`, `c = -(1 + 2^-11)`. Fused this is `2^-24`; unfused it
-                    // is exactly zero, so an unfused build cannot pass.
+                    // is exactly zero. Since issue #163 phase 2 the contract is unfused, so the
+                    // zero is the required answer and the `2^-24` is what a regression would look
+                    // like -- the triple separates the two contracts either way, which is the
+                    // whole reason it is here.
                     let exponent = (frame % 41) as i32 - 20;
                     let scale = exact_pow2(exponent);
                     let a = f32::from_bits(0x3F80_0800) * scale;
@@ -970,8 +998,11 @@ fn moderate(bits: u32) -> f32 {
 /// Runs one element-wise case at width `L::WIDTH` and returns the per-lane results.
 ///
 /// `fused` selects `Lane::fma` (the production path) or an explicit multiply followed by an add.
-/// The unfused form exists for one assertion -- that the two disagree -- which is what makes the
-/// `lane_fma` case a real check of `Lane::fma` and not a test that happens to pass.
+/// Since issue #163 phase 2 those are the same operation, and the assertion that pairs them
+/// changed direction with the contract: it now requires them to *agree*, which is what says
+/// `Lane::fma` is unfused. The parameter keeps its name and its two arms because the separation
+/// still has to be demonstrated -- against a genuinely fused reference, which the native gate
+/// builds from `fma_operands`.
 fn elementwise_values<L: Lane>(operation: Elementwise, fused: bool) -> [[f32; FRAMES]; LANES] {
     let mut operands = [[[0.0_f32; FRAMES]; 3]; LANES];
     for (lane, slot) in operands.iter_mut().enumerate() {

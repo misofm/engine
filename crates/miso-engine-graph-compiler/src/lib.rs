@@ -7530,16 +7530,29 @@ mod tests {
             completed += 1;
         }
         assert_eq!(completed, 100);
-        // Re-pinned once by #98 F2 (master plan #83 D9 and the section-8 policy). The membership
-        // and counter halves of the transcript string are unchanged; the `pcm_hash` half moved for
-        // every layout whose output fan-in is four or more, because the session output's reduction
-        // became a left-to-right recursive sum instead of a balanced pairwise tree. It is *not*
-        // pinned from production output: the per-layout `assert_eq!` above derives the expected
-        // output from the recorded per-track post-matrix contributions folded left to right in the
-        // plan's own stable edge order, for all 100 layouts, before this literal is compared.
-        // Old value `0x0fc9_bdc8_ff12_0f6e`; layouts with `count <= 3` are bit-identical to it.
+        // Re-pin chain (master plan #83 D9 and the section-8 policy):
+        //
+        //   0x0fc9_bdc8_ff12_0f6e  original
+        //   0x9dfc_dcf2_0e37_0ef5  #98 F2 -- the session output's reduction became a
+        //                          left-to-right recursive sum instead of a balanced pairwise
+        //                          tree, moving `pcm_hash` for every layout with output fan-in
+        //                          four or more; layouts with `count <= 3` were unmoved.
+        //   0x0b9d_839a_7df9_3ac8  #163 phase 2 -- the numeric contract became unfused, so every
+        //                          rendered sample moved and with it every layout's `pcm_hash`,
+        //                          for all 100 layouts and every fan-in.
+        //
+        // The membership and counter halves of the transcript string are unchanged at every link
+        // in that chain, which is what makes it a chain rather than three unrelated numbers: the
+        // per-layout membership, bank-count, tail and counter assertions above all still hold
+        // against their own expectations, and only the `pcm_hash` field of the string moved.
+        //
+        // It is *not* pinned from production output: the per-layout `assert_eq!` above derives the
+        // expected output from the recorded per-track post-matrix contributions folded left to
+        // right in the plan's own stable edge order -- through `softfma::unfused_mul_add_via_f64`,
+        // an `f64` restatement independent of the `f32` vector body -- for all 100 layouts, before
+        // this literal is compared.
         assert_eq!(
-            transcript, 0x9dfc_dcf2_0e37_0ef5,
+            transcript, 0x0b9d_839a_7df9_3ac8,
             "frozen Issue-037 seeded layout transcript"
         );
     }

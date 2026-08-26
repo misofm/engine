@@ -1477,6 +1477,7 @@ mod tests {
 
     #[test]
     fn real_c_abi_riff_and_rf64_render_exact_block_planar_outputs() {
+        let mut repinned = 0usize;
         for name in [
             "riff-44100",
             "riff-48000",
@@ -1500,19 +1501,46 @@ mod tests {
                 assert!(bits.iter().any(|bits| *bits != 0));
             }
             let digest: [u8; 32] = Sha256::digest(&bytes).into();
-            assert_eq!(hex_digest(digest), expected_output_digest(name));
+            if std::env::var_os("MISO_ENGINE_REPIN_NATIVE_PCM_RUNNER").is_some() {
+                println!("    \"{name}\" => \"{}\",", hex_digest(digest));
+                repinned += 1;
+            } else {
+                assert_eq!(hex_digest(digest), expected_output_digest(name));
+            }
             assert!(!partial_path(&output).expect("partial").exists());
             fs::remove_dir_all(temp).expect("remove temp");
         }
+        assert_eq!(
+            repinned, 0,
+            "re-pin mode: copy the five lines above into `expected_output_digest` and into \
+             fixtures/native-pcm-runner/v1/generate.py's OUTPUTS, then regenerate the manifest"
+        );
     }
 
+    /// The five whole-file output digests.
+    ///
+    /// **No independent oracle stands behind these.** Master plan §8.3 names an f64 reference for
+    /// every effect family, and names none for this runner: the digests are the SHA-256 of what
+    /// the production C ABI emitted, re-derived with `MISO_ENGINE_REPIN_NATIVE_PCM_RUNNER=1`. They
+    /// say the answer does not move; they do not say it is right. That gap is owned by issue #90
+    /// and is recorded rather than papered over.
+    ///
+    /// What *is* oracle-gated is the DSP upstream of them: the parametric EQ's coefficients and
+    /// response are checked against `miso-engine-dsp-reference`'s RBJ model by that crate's own
+    /// analytic tests, which did not move under issue #163 phase 2.
+    ///
+    /// Re-pin chain: the original values; then #89's rebase (`0897976`, "re-measured"); then #163
+    /// phase 2, which moved all five because the numeric contract became unfused. The #89 re-pin
+    /// updated this function but *not* `fixtures/native-pcm-runner/v1/generate.py`, so the two pin
+    /// sets described different renders from `0897976` until this commit brought them back
+    /// together. Nothing read the manifest's `output:*` rows, which is why nothing caught it.
     fn expected_output_digest(name: &str) -> &'static str {
         match name {
-            "riff-44100" => "949f9e794f1cf909a0b901390bd5f69bcc6e86d7cb0290ce67200040f4817118",
-            "riff-48000" => "07004381a567d5ac94ada4402fcc056e7ee455d167c1695af86187efad3e1c14",
-            "riff-88200" => "8dee1d66fc13f7a9dc00a193f1d0f7079fe7846521b542705beb7b7f651411fb",
-            "riff-96000" => "a1b47e58d7977d53254318036364e7c8fedefb4d932f447abfe2ff8db8242867",
-            "rf64-48000" => "1c60f3355302807da7a409b896596fbcb97bcffa99afc0953d1b0d9fae458cf2",
+            "riff-44100" => "fbf9a1482fb224415f7fb96b4f1c2026b3302f7c474eb5b2639d3d63e0a3ce92",
+            "riff-48000" => "cef2b4282bb8478687b4dec5f764a9f04bc64fc7a35d3a8edd5b398a80494771",
+            "riff-88200" => "0a2ae7050b4a443e0888281e3953963706f249ffd28a3d9a61cdbbc675d7a0b7",
+            "riff-96000" => "dcb0de625cb09c064ea424dff6b1eca01896ba1e7ee602c72dc7454ad9b74f16",
+            "rf64-48000" => "9c3011f06e52c7f1006c2d7710b4d71ac2d928d76ba5f94f24ef55525cce9100",
             _ => panic!("unknown fixture"),
         }
     }

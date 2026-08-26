@@ -24,8 +24,16 @@ fn hex(digest: [u8; 32]) -> String {
 }
 
 /// Every case is identical at `WIDTH` 1, 4 and 8 and equal to its pin.
+///
+/// Set `MISO_ENGINE_REPIN_PARAMETRIC_EQ_CORPUS=1` to print the scalar pins in `E9_DIGESTS` form.
+///
+/// Per master plan §8.3 the pins come from the `f32` instantiation and from nowhere else; the
+/// vector widths and the wasm legs *confirm* them. The width assertions below still run in re-pin
+/// mode, so a corpus that stopped being width independent cannot be laundered into a fresh pin.
 #[test]
 fn the_corpus_digests_match_the_pins_at_every_width() {
+    let repinning = std::env::var_os("MISO_ENGINE_REPIN_PARAMETRIC_EQ_CORPUS").is_some();
+    let mut repin = String::new();
     for case in 0..corpus::CASE_COUNT {
         let scalar = digest::<f32>(case);
         let simd4 = digest::<Simd4>(case);
@@ -42,12 +50,21 @@ fn the_corpus_digests_match_the_pins_at_every_width() {
             "{} simd8 vs scalar",
             corpus::CASE_NAMES[case]
         );
-        assert_eq!(
-            hex(scalar),
-            hex(corpus::E9_DIGESTS[case]),
-            "{} pin",
-            corpus::CASE_NAMES[case]
-        );
+        let bytes: Vec<String> = scalar.iter().map(|byte| format!("0x{byte:02x}")).collect();
+        repin.push_str(&format!("    // {}\n", corpus::CASE_NAMES[case]));
+        repin.push_str(&format!("    [{}],\n", bytes.join(", ")));
+        if !repinning {
+            assert_eq!(
+                hex(scalar),
+                hex(corpus::E9_DIGESTS[case]),
+                "{} pin",
+                corpus::CASE_NAMES[case]
+            );
+        }
+    }
+    if repinning {
+        println!("{repin}");
+        panic!("re-pin mode: copy the block above into E9_DIGESTS in src/corpus.rs");
     }
 }
 

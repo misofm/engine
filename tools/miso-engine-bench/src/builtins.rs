@@ -47,7 +47,7 @@ const OBSERVERS: usize = 7;
 const ISSUE: u32 = 35;
 const INPUT_MANIFEST: &[u8] = include_bytes!("../../../fixtures/builtins/v1/MANIFEST.tsv");
 const INPUT_MANIFEST_SHA256: &str =
-    "bfcc7bbe66ab4a643a3969048d9ad4660111874fcd4316c23645db1e7c1eafff";
+    "ddb4b201dcd4cc00ad445013c9a1b29d9d5f6071f018e649748963c74af4c55b";
 const SESSION: &str = include_str!("../../../fixtures/session/v1/canonical.toml");
 
 const WORKLOADS: [Workload; 5] = [
@@ -1821,7 +1821,7 @@ mod tests {
         assert!(record.contains(
             "\"input_fixture_id\":\"fixtures/builtins/v1/benchmark/full_chain_filters-48000.toml\""
         ));
-        assert!(record.contains("\"input_fixture_sha256\":\"178b35953960ded3166157b3d781d2aeac0d033789925d77aec6f57bab084d7d\""));
+        assert!(record.contains("\"input_fixture_sha256\":\"6a1633442678cfdecb2872deacd053e727c47f0bc94039a84b4e950949e195d0\""));
         assert!(record.contains("\"render_errors\":0"));
         assert!(record.contains("\"render_feature_detection\":0"));
         assert!(record.contains("\"render_panic_unwind\":0"));
@@ -1995,7 +1995,7 @@ mod tests {
         }
         assert_eq!(
             manifest_input_sha256("fixtures/builtins/v1/benchmark/meter_success_full-48000.toml"),
-            "95904e939716b6dd8de19c5cc92050ba13ef7e4b9d41a212b135c559d0b032a0"
+            "ded3579ee8ffbf79d920648a33a7e2f35fa9c9b386e98ef469d583830ef992de"
         );
     }
 

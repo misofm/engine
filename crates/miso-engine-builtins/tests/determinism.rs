@@ -23,17 +23,35 @@ fn digest_at<L: Lane>(case: usize) -> [u8; 32] {
 }
 
 /// Every case agrees with its pin at `f32`, `Simd4` and `Simd8`.
+///
+/// Set `MISO_ENGINE_REPIN_BUILTINS_CORPUS=1` to print the scalar pins in `BUILTINS_DIGESTS` form.
+///
+/// Per master plan §8.3 the pins come from the `f32` instantiation and from nowhere else; the
+/// vector widths and the wasm legs *confirm* them. Re-pin mode suppresses only the comparison
+/// against the pin: `Simd4` and `Simd8` are still required to agree with the scalar oracle, so a
+/// width disagreement cannot be laundered into a fresh pin.
 #[test]
 fn every_corpus_case_matches_its_pin_at_every_width() {
+    let repinning = std::env::var_os("MISO_ENGINE_REPIN_BUILTINS_CORPUS").is_some();
+    let mut repin = String::new();
     for case in 0..CASE_COUNT {
         let name = CASE_NAMES[case];
         let scalar = digest_at::<f32>(case);
-        assert_eq!(
-            scalar, BUILTINS_DIGESTS[case],
-            "case {name}: scalar digest moved -- regenerate only from the scalar oracle"
-        );
+        if !repinning {
+            assert_eq!(
+                scalar, BUILTINS_DIGESTS[case],
+                "case {name}: scalar digest moved -- regenerate only from the scalar oracle"
+            );
+        }
         assert_eq!(digest_at::<Simd4>(case), scalar, "case {name}: Simd4");
         assert_eq!(digest_at::<Simd8>(case), scalar, "case {name}: Simd8");
+        let bytes: Vec<String> = scalar.iter().map(|byte| format!("0x{byte:02x}")).collect();
+        repin.push_str(&format!("    // {name}\n"));
+        repin.push_str(&format!("    [{}],\n", bytes.join(", ")));
+    }
+    if repinning {
+        println!("{repin}");
+        panic!("re-pin mode: copy the block above into BUILTINS_DIGESTS in src/corpus.rs");
     }
 }
 

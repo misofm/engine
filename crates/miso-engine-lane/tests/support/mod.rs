@@ -123,11 +123,12 @@ pub const EDGES: &[f32] = &[
     -1.0e30,
 ];
 
-/// `1 + 2^-12`, the first half of the triple where a fused multiply-add differs from a multiply
-/// followed by an add.
+/// `1 + 2^-12`, the first half of the triple that separates a fused multiply-add from a multiply
+/// followed by an add. Since issue #163 phase 2 the engine must produce the *unfused* answer.
 pub const FUSED_WITNESS_A: f32 = f32::from_bits(0x3F80_0800);
 
-/// `-(1 + 2^-11)`, the addend of that triple: `a * a + c` is `2^-24` fused and `0` unfused.
+/// `-(1 + 2^-11)`, the addend of that triple: `a * a + c` is `2^-24` fused and exactly `0`
+/// unfused, which is the value gate G1 now requires.
 pub const FUSED_WITNESS_C: f32 = f32::from_bits(0xBF80_1000);
 
 /// One operation of the [`Lane`] surface, applied uniformly at every width.

@@ -5,6 +5,7 @@ use miso_engine_effect_runtime::envelope::{
     hysteresis_step, peak_follow, retention_coefficient, rms_follow,
 };
 use miso_engine_lane::Lane;
+use miso_engine_lane::softfma::unfused_mul_add_via_f64;
 
 /// `exp(-1 / (tau * fs))` in `f64`, the independent oracle for the coefficient design.
 fn oracle_retention(time_ms: f64, sample_rate: f64) -> f64 {
@@ -72,16 +73,20 @@ fn degenerate_coefficient_arguments_are_instantaneous() {
     }
 }
 
-/// `peak_follow` is the exact single-rounding form: identical to an `f64` evaluation of the same
-/// operation order, rounded once.
+/// `peak_follow` is exactly the unfused form: identical to an `f64` restatement of the same
+/// operation order, with each `f32` rounding taken separately.
 ///
-/// `f32` fma is exactly representable in `f64` (24 + 24 bits of product against a 53-bit
-/// significand), so this is a bit-for-bit assertion, not a tolerance.
+/// Before issue #163 phase 2 this test asserted the *fused* form, computing the expectation as one
+/// `f64` expression narrowed once. The contract is now two roundings, so the expectation is built
+/// the same way the kernel builds it: round the product to `f32`, then round the sum. Both steps
+/// go through `f64` so the expectation does not simply re-execute the `f32` expression under test
+/// -- the product is exact in `f64` (24 + 24 <= 53) and the sum double-rounds innocuously
+/// (53 >= 2p + 2), which is what makes this a bit-for-bit assertion rather than a tolerance.
 ///
-/// Red mutation: write the release as `c * y + (1 - c) * x` — two roundings — and the equality
-/// fails on the first input where the two disagree.
+/// Red mutation: restore the fused expectation (one `f64` expression, one narrowing) and the
+/// equality fails on the first input where the two contracts disagree.
 #[test]
-fn peak_follow_rounds_once() {
+fn peak_follow_matches_the_unfused_f64_restatement() {
     let mut state = 0.0f64;
     let mut y = 0.0f32;
     for step in 0..20_000u32 {
@@ -89,7 +94,7 @@ fn peak_follow_rounds_once() {
         let c = 0.9995f32;
         let x_abs = x.abs();
         let d = y - x_abs;
-        let exact = (f64::from(c) * f64::from(d) + f64::from(x_abs)) as f32;
+        let exact = unfused_mul_add_via_f64(c, d, x_abs);
         let expected = if x_abs > exact { x_abs } else { exact };
         y = peak_follow::<f32>(x_abs, y, c);
         assert_eq!(
@@ -102,16 +107,16 @@ fn peak_follow_rounds_once() {
     assert!(state.is_finite());
 }
 
-/// `rms_follow` is likewise exact against a single-rounding `f64` evaluation.
+/// `rms_follow` is likewise exact against the unfused `f64` restatement.
 #[test]
-fn rms_follow_rounds_once() {
+fn rms_follow_matches_the_unfused_f64_restatement() {
     let c = attack_release_coefficient(10.0, 48_000);
     let mut y = 0.0f32;
     for step in 0..20_000u32 {
         let x = ((step as f32) * 0.001_9).cos();
         let x2 = x * x;
         let d = x2 - y;
-        let expected = (f64::from(c) * f64::from(d) + f64::from(y)) as f32;
+        let expected = unfused_mul_add_via_f64(c, d, y);
         y = rms_follow::<f32>(x2, y, c);
         assert_eq!(y.to_bits(), expected.to_bits(), "step {step}");
     }
@@ -339,7 +344,7 @@ fn ar_one_pole_step_switches_strictly_on_rising() {
 /// separately, and their sum leaves `e`. A stalled slow envelope is a permanent contrast offset,
 /// which is why the transient shaper's follower is this form and not `peak_follow`'s.
 ///
-/// Red mutation: `ar_one_pole_step` rewritten as the one-rounding `c.fma(e.sub(u), u)` — the
+/// Red mutation: `ar_one_pole_step` rewritten as the single-rounding fused form — the
 /// witness pair below then returns `e` unchanged and this test goes red.
 #[test]
 fn ar_one_pole_step_is_the_two_product_form() {
@@ -348,8 +353,11 @@ fn ar_one_pole_step_is_the_two_product_form() {
     let e = 0.7f32;
     let u = e - f32::from_bits(0x3870_0000);
     let k = 1.0f32 - c;
-    // The one-rounding release, written with the trait `fma` (D3: fusion is the lane crate's).
-    let stalled = k.fma(u - e, e);
+    // The one-rounding release. `Lane::fma` is unfused since #163 phase 2, so the fused form has
+    // to be written out in `f64` -- one exact product, one sum, one narrowing -- to keep the
+    // contrast this witness is about. (The stall is a property of the single rounding, not of the
+    // spelling: it is why the transient shaper's follower is the two-product form.)
+    let stalled = (f64::from(k) * f64::from(u - e) + f64::from(e)) as f32;
     assert_eq!(
         stalled.to_bits(),
         e.to_bits(),

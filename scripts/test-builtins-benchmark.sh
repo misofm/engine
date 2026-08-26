@@ -9,7 +9,7 @@ command -v jq >/dev/null || { printf 'jq is required for benchmark validator tes
 hash64="4e5e2c9fc8e2c2400b816715273879f3635f2374133e5775ade18dabee1f6ad9"
 binary64="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 output64="cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
-manifest64="bfcc7bbe66ab4a643a3969048d9ad4660111874fcd4316c23645db1e7c1eafff"
+manifest64="ddb4b201dcd4cc00ad445013c9a1b29d9d5f6071f018e649748963c74af4c55b"
 commit40="0123456789abcdef0123456789abcdef01234567"
 
 record="$(jq -cn --arg hash "$hash64" --arg binary "$binary64" --arg output "$output64" --arg manifest "$manifest64" --arg commit "$commit40" '
@@ -600,13 +600,13 @@ case "$1" in
   *Cargo.lock)
     hash=4213efd775d1d1207fea805ccdc01392acb015ae36d1bf2eba783f938f19916a ;;
   *fixtures/builtins/v1/MANIFEST.tsv)
-    hash=bfcc7bbe66ab4a643a3969048d9ad4660111874fcd4316c23645db1e7c1eafff ;;
+    hash=ddb4b201dcd4cc00ad445013c9a1b29d9d5f6071f018e649748963c74af4c55b ;;
   *fixtures/builtins/v1/pcm/graph-taps.f32le)
     hash=508c8e94244b99ae1ee59e4863088ba69c6462127eb0256f85ec72e775a17a19 ;;
   *fixtures/builtins/v1/meters/graph-taps.jsonl)
     hash=958a702612b76353ae2dbb0f8a03a2e41aafbd90ed72857bc0c39a10b5d1935f ;;
   *builtins-benchmark-record-validator.jq)
-    hash=c3db1d9574360bdab0d9ac335615787446e5537439d6accdded4fdd0a4479467 ;;
+    hash=45f2e0196b4e457a633980653536bb397af7f8ebc82ea69f49c8812dfa7dd9a6 ;;
   *builtins-benchmark-validator.jq)
     hash=6085e740f15d7902fca4443d761cfb8e29df7168ba12f632c7946db56a3e1b63 ;;
   *target/issue35/miso_engine_bench)
@@ -658,9 +658,9 @@ write_fake_nonbenchmark() {
       cargo_lock_sha256:"4213efd775d1d1207fea805ccdc01392acb015ae36d1bf2eba783f938f19916a",
       tool_source_sha256:$source,runner_sha256:$runner,preflight_script_sha256:$preflight,
       lifecycle_sha256:$lifecycle,
-      record_validator_sha256:"c3db1d9574360bdab0d9ac335615787446e5537439d6accdded4fdd0a4479467",
+      record_validator_sha256:"45f2e0196b4e457a633980653536bb397af7f8ebc82ea69f49c8812dfa7dd9a6",
       aggregate_validator_sha256:"6085e740f15d7902fca4443d761cfb8e29df7168ba12f632c7946db56a3e1b63",
-      fixture_manifest_sha256:"bfcc7bbe66ab4a643a3969048d9ad4660111874fcd4316c23645db1e7c1eafff",
+      fixture_manifest_sha256:"ddb4b201dcd4cc00ad445013c9a1b29d9d5f6071f018e649748963c74af4c55b",
       graph_pcm_sha256:"508c8e94244b99ae1ee59e4863088ba69c6462127eb0256f85ec72e775a17a19",
       graph_meter_sha256:"958a702612b76353ae2dbb0f8a03a2e41aafbd90ed72857bc0c39a10b5d1935f",
       accepted_issue068_source_sha256:"0c71b71d864fbdd01aa918c6825abea78c38f0486535bc914af92142a5080d19",

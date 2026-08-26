@@ -56,15 +56,29 @@ fn every_width_produces_the_same_words() {
 
 /// The pinned digests. Regenerate only from the scalar `Lane` instantiation (master plan §8).
 ///
+/// Set `MISO_ENGINE_REPIN_TRANSIENT_SHAPER_CORPUS=1` to print the scalar pins in
+/// `CROSS_TARGET_DIGESTS` form.
+///
+/// Per master plan §8.3 the pins come from the width-1 instantiation and from nowhere else; the
+/// vector widths and the wasm legs *confirm* them. `every_width_produces_the_same_words` above
+/// still runs in re-pin mode, so a corpus that stopped being width independent cannot be laundered
+/// into a fresh pin.
+///
 /// Red mutation: perturb `DB_PER_OCTAVE` by one ulp.
 #[test]
 fn the_pinned_digests_hold() {
-    let mut actual = Vec::new();
+    let repinning = std::env::var_os("MISO_ENGINE_REPIN_TRANSIENT_SHAPER_CORPUS").is_some();
+    let mut repin = String::new();
     let mut failures = Vec::new();
     for case in 0..CASE_COUNT {
         let (candidate, _) = digest(case, 1);
-        actual.push(hex(&candidate));
-        if candidate != CROSS_TARGET_DIGESTS[case] {
+        let bytes: Vec<String> = candidate
+            .iter()
+            .map(|byte| format!("0x{byte:02x}"))
+            .collect();
+        repin.push_str(&format!("    // {}\n", CASE_NAMES[case]));
+        repin.push_str(&format!("    [{}],\n", bytes.join(", ")));
+        if !repinning && candidate != CROSS_TARGET_DIGESTS[case] {
             failures.push(format!(
                 "{}: expected {}, got {}",
                 CASE_NAMES[case],
@@ -74,10 +88,12 @@ fn the_pinned_digests_hold() {
         }
     }
     if !failures.is_empty() {
-        for line in &actual {
-            println!("PIN {line}");
-        }
+        println!("{repin}");
         panic!("{}", failures.join("\n"));
+    }
+    if repinning {
+        println!("{repin}");
+        panic!("re-pin mode: copy the block above into CROSS_TARGET_DIGESTS in src/corpus.rs");
     }
 }
 
