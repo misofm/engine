@@ -490,11 +490,17 @@ fn frames_loop<L: Lane, const RAMPING: bool>(
 
 /// Longest idle segment [`idle_frames_staged`] will take in one visit.
 ///
-/// The prepared render quantum the effect and bank contracts carry is at most 128 frames, so this
-/// is the whole idle remainder of a normal block rather than a strip of one. It is also the bound
-/// on the staged body's scratch, which is stack: `2 * 128 * MAX_WIDTH` floats of taps plus
-/// `2 * 128` lane vectors of curve targets, 16 KiB at `W = 8` and 8.5 KiB at `W = 1`. Nothing is
-/// allocated on the render path (AGENTS.md, allocation-free render).
+/// This is the bound on the staged body's scratch, which is stack: `2 * 128 * MAX_WIDTH` floats of
+/// taps plus `2 * 128` lane vectors of curve targets, 16 KiB at `W = 8` and 8.5 KiB at `W = 1`.
+/// Nothing is allocated on the render path (AGENTS.md, allocation-free render).
+///
+/// The contract sets no ceiling on the prepared quantum, but 128 frames is the render quantum
+/// every launch host actually carries — the Web Audio render quantum, the console fixtures and the
+/// benchmark subjects — so at launch this is the whole idle remainder of a block and not a strip
+/// of one. A longer segment is not wrong, it simply takes [`frames_loop`]. Cutting a long segment
+/// into strips to keep it staged is a real option and deliberately not taken: at 128 frames the
+/// scratch already sits in L1, and strip-mining this body to 16, 32 or 64 frames measured slower
+/// on the kernel example at every one of the three sizes.
 const MAX_STAGED_FRAMES: usize = 128;
 
 /// Whether the staged idle body may take a segment of `len` frames.
