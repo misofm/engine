@@ -1,0 +1,183 @@
+//! The staged idle body and the per-frame body are the same renderer.
+//!
+//! `kernel::process_block` sends an idle segment to `idle_frames_staged` when every live lane's
+//! detector distance `D` is at least the segment length, and to `frames_loop` when it is not. The
+//! first pre-gathers the whole segment's detector taps and visits the segment three times; the
+//! second reads one tap per frame and visits it once. They are claimed bit-identical, and which
+//! one runs is a function of the lanes' lookahead and the caller's block size alone.
+//!
+//! This file is that claim as a gate. `D = N - L` with `N = 960` at 48 kHz, so a lookahead chosen
+//! in milliseconds picks `D` directly, and rendering the same input at partitions that straddle
+//! `D` puts the same frames through both bodies. The 512-frame partition is always the per-frame
+//! body — it is longer than the staged body's 128-frame bound — so it is the reference every other
+//! partition is compared against.
+//!
+//! Red mutations (MUTATIONS.md rows 25 to 27): loosen the guard by one frame, drop the `D == 0`
+//! case, or gather the taps after the segment's first ring write instead of before it.
+
+mod support;
+
+use support::{noise, prepare, render_scalar, request_with_quantum, snapshot, values_with};
+
+/// Frames rendered per case.
+const FRAMES: usize = 4_096;
+
+/// Prepared quantum. Every partition below is at most this.
+const QUANTUM: u32 = 512;
+
+/// Block partitions, straddling the detector distances of [`LOOKAHEAD_MS`].
+///
+/// 512 is longer than the staged body's bound, so it is always the per-frame body and is used as
+/// the reference. 63/64/65 and 127/128/129 bracket the two guard boundaries exactly.
+const PARTITIONS: [usize; 9] = [1, 7, 63, 64, 65, 127, 128, 129, 512];
+
+/// Lookaheads in ms and the detector distance each one produces at 48 kHz with `N = 960`.
+///
+/// `D = 960 - round(ms * 48)`: 960, 720, 120, 64, 24, 0. The last is the maximum lookahead, whose
+/// tap is the row the frame itself has just written — the case that can never be pre-gathered.
+const LOOKAHEAD_MS: [(f32, usize); 6] = [
+    (0.0, 960),
+    (5.0, 720),
+    (17.5, 120),
+    (18.666_667, 64),
+    (19.5, 24),
+    (20.0, 0),
+];
+
+/// Rendered bits and payload bytes of one run: left samples, right samples, left state, right
+/// state.
+type Rendered = (Vec<u32>, Vec<u32>, Vec<u8>, Vec<u8>);
+
+/// Renders `FRAMES` frames of one configuration at one partition and returns its bits and state.
+fn render(lookahead_ms: f32, partition: usize) -> Rendered {
+    let values = values_with(&[(0, -20.0), (1, 5.0), (2, 6.0), (5, 3.0), (7, lookahead_ms)]);
+    let mut effect = prepare(request_with_quantum(&values, QUANTUM));
+    let mut left = noise(FRAMES, 0x5A_6E_D0_01, 0.8);
+    let mut right = noise(FRAMES, 0x5A_6E_D0_02, 0.8);
+    let report = render_scalar(
+        effect.as_mut(),
+        &mut left,
+        &mut right,
+        partition,
+        QUANTUM,
+        &[],
+    );
+    assert_eq!(report.invalid_spans, 0);
+    let (state_left, state_right) = snapshot(effect.as_ref());
+    (
+        left.iter().map(|sample| sample.to_bits()).collect(),
+        right.iter().map(|sample| sample.to_bits()).collect(),
+        state_left,
+        state_right,
+    )
+}
+
+/// Every partition of every lookahead renders the bits and the state the per-frame body renders.
+///
+/// At `D = 64` the partitions 63 and 64 are staged and 65 is not, which is the guard's `D >= len`
+/// boundary on the nose; at `D = 120` the boundary falls between 127 and 128; at `D = 0` nothing
+/// is ever staged, so that row asserts the fallback is still reachable and still right.
+#[test]
+fn every_partition_agrees_with_the_per_frame_body() {
+    for (lookahead_ms, delay) in LOOKAHEAD_MS {
+        let (expected_left, expected_right, expected_state_left, expected_state_right) =
+            render(lookahead_ms, 512);
+        assert!(
+            expected_left[2_000..]
+                .iter()
+                .any(|sample| *sample != 0_f32.to_bits()),
+            "D = {delay} must render content"
+        );
+        for partition in PARTITIONS {
+            let (bits_left, bits_right, state_left, state_right) = render(lookahead_ms, partition);
+            assert_eq!(
+                bits_left, expected_left,
+                "left, D = {delay}, partition {partition}"
+            );
+            assert_eq!(
+                bits_right, expected_right,
+                "right, D = {delay}, partition {partition}"
+            );
+            assert_eq!(
+                state_left, expected_state_left,
+                "left state, D = {delay}, partition {partition}"
+            );
+            assert_eq!(
+                state_right, expected_state_right,
+                "right state, D = {delay}, partition {partition}"
+            );
+        }
+    }
+}
+
+/// The same property for a bank whose lanes disagree about their lookahead.
+///
+/// The guard is whole-bank: one lane with a short `D` keeps the whole bank on the per-frame body,
+/// because the pre-gather is one buffer per channel and not one per lane. Lane 0 is given the
+/// maximum lookahead in the second configuration, so the bank is forced onto the fallback while
+/// every other lane would have qualified.
+#[test]
+fn a_ragged_bank_agrees_with_the_per_frame_body() {
+    let Some((_, width)) = support::native_bank_width() else {
+        println!("no bank width on this backend; the scalar case carries this gate");
+        return;
+    };
+    let lanes = width.lanes() as usize;
+    for forced in [false, true] {
+        let values: Vec<_> = (0..lanes)
+            .map(|track| {
+                let lookahead = if forced && track == 0 {
+                    20.0
+                } else {
+                    // 0, 2.5, 5, 7.5, ... ms: D of 960, 840, 720, 600, ...
+                    2.5 * (track % 8) as f32
+                };
+                values_with(&[
+                    (0, -18.0 - track as f32),
+                    (1, 3.0 + track as f32),
+                    (5, 2.0),
+                    (7, lookahead),
+                ])
+            })
+            .collect();
+        let requests: Vec<_> = values
+            .iter()
+            .map(|v| request_with_quantum(v, QUANTUM))
+            .collect();
+        let signal = noise(FRAMES * lanes, 0x5A_6E_D0_03, 0.8);
+
+        let mut reference: Option<Vec<u32>> = None;
+        for partition in [512, 1, 7, 64, 65, 128, 129] {
+            let mut bank = support::bind_bank(&requests).expect("bank");
+            let mut left = signal.clone();
+            let mut right = signal.clone();
+            support::render_bank(
+                bank.as_mut(),
+                &mut left,
+                &mut right,
+                lanes,
+                width,
+                partition,
+                QUANTUM,
+                &[],
+            );
+            let bits: Vec<u32> = left
+                .iter()
+                .chain(right.iter())
+                .map(|sample| sample.to_bits())
+                .collect();
+            match &reference {
+                None => {
+                    assert!(left[2_000 * lanes..].iter().any(|sample| *sample != 0.0));
+                    reference = Some(bits);
+                }
+                Some(expected) => {
+                    assert_eq!(
+                        &bits, expected,
+                        "forced {forced}, bank partition {partition}"
+                    )
+                }
+            }
+        }
+    }
+}
