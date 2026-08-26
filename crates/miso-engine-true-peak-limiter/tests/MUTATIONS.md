@@ -61,3 +61,56 @@ does not prove.
 | # | mutation | file | test | result |
 |---|---|---|---|---|
 | 143-E6-c | `observe_resident` "freshens" the recursive reduction word by one release step (`* 0.9`) in the read | `true-peak-limiter/src/lib.rs` | `observation::the_limiter_reads_the_reduction_word_the_envelope_persists` | RED — the tap and the state envelope disagree: `1044868013` vs `1046320150`. The envelope is a second, already-gated route to the same kernel word, so agreeing with it is agreeing with the kernel |
+
+## Issue #182 S1 — the uniform-cohort vectorisation
+
+`sliding_minimum` and the box-expiry gather of `channel_frame` were the kernel's only scalar
+sections, because `LaneShape` is a per-lane preparation parameter. `lanes_uniform` is a whole-bank
+gate — one branch per block, per the single-branch discipline — under which both collapse to
+lane-wide row operations (`sliding_minimum_uniform`, and one `L::load` of the expiring box term).
+Bit identity is structural: `Lane::min` is defined as `select(self < b, self, b)` (decision D8) and
+`scalar_min` is `if a < b { a } else { b }`, so one lane of `a.min(b)` *is* `scalar_min(a, b)`.
+
+The E12 corpus exercises both paths at every width without any change: cases 2 and 3 give every
+lane the same lookahead and therefore take the vector path at W4 and W8, while cases 0, 1 and 4
+are mixed and take the fallback. `D90_DIGESTS` did not move.
+
+| # | mutation | file | test that turned red |
+|---|---|---|---|
+| 182-1 | shape leg dropped: `lanes_uniform` returns only the phase test | `src/lib.rs` `lanes_uniform` | `a_mixed_lookahead_cohort_falls_back_bit_identically` (and `lane_identity_holds_across_widths`) |
+| 182-2 | phase leg dropped: `lanes_uniform` returns only the shape test | `src/lib.rs` `lanes_uniform` | `a_restore_that_desyncs_the_phase_falls_back` — **and nothing else**, which is what makes the leg's own justification testable rather than asserted |
+| 182-3 | `suffix.min(L::load(..))` → `suffix.max(..)` in the vector suffix pass | `src/lib.rs` `sliding_minimum_uniform` | `a_mixed_lookahead_cohort_falls_back_bit_identically`, `a_restore_that_desyncs_the_phase_falls_back`, `lane_identity_holds_across_widths` |
+| 182-4 | uniform box gather reads `state.lane[0].end_offset` instead of `box_offset` | `src/lib.rs` `channel_frame` | as 182-3 |
+| 182-5 | the vector suffix pass guarded by `complete && width < 2`, so it never runs at W4/W8 (row 7's analogue in the new path) | `src/lib.rs` `sliding_minimum_uniform` | `a_uniform_cohort_renders_exactly_the_per_lane_path` — **and nothing else**: every cohort the other cross-width tests build falls back |
+
+### Why the cross-path comparison is where it is
+
+A scalar instance is `L = f32`, `W = 1`, so it is uniform by construction and takes the *new* path.
+That is why `a_uniform_cohort_renders_exactly_the_per_lane_path` cannot be red for a mutation that
+applies at every width — both of its arms move together — and why the honest cross-path gate is
+`a_mixed_lookahead_cohort_falls_back_bit_identically`, whose bank lanes run the per-lane body while
+their scalar twins run the uniform one. Rows 182-3 and 182-4 are recorded against that test rather
+than against the one whose name sounds like it should own them.
+
+### A mutation that does not turn anything red, and why it is not a gap
+
+**Swapping the argument order of all three `L::min` sites** in `sliding_minimum_uniform`
+(`L::load(&state.prefix).min(newest)` → `newest.min(L::load(&state.prefix))`, and so on) leaves
+every test in the crate green, including the E12 pins. This is recorded rather than papered over,
+because the reason is a statement about the kernel's value domain and not about the gates.
+
+D8 makes `min` asymmetric only where the two operands are *indistinguishable as numbers but
+distinguishable as bits*, or unordered: `min(+0.0, -0.0)`, `min(-0.0, +0.0)`, and either order with
+a NaN. Neither is reachable in the required-gain ring. `r = select(P > limit, limit / P, 1)` with
+`limit >= 10^(-25/20) > 0` yields a strictly positive quotient or exactly `1.0`; `P` is a maximum of
+absolute values, so `P > limit` implies `P > 0` and the quotient is never a zero of either sign and
+never a NaN. `prefix` rests at `1.0` and only ever takes minima of ring values, so it inherits the
+same domain. `P = +inf` — the one way to reach `r = +0.0` — is a §4.4 boundary failure, which zeroes
+the block and resets the instance before the ring can be read again.
+
+So the argument order is unobservable here *for the data this kernel can hold*, and a test that
+made it observable would have to reach past the public API to plant a `-0.0` in the ring. It is kept
+in the frozen order anyway, and the order is the reason the D8 citation in
+`sliding_minimum_uniform`'s prose is a citation and not a hand-wave: the equality it claims is an
+equality of definitions, which holds on the whole `f32` domain rather than only on the reachable
+part of it.

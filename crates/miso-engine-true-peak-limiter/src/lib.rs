@@ -704,6 +704,99 @@ fn annex2_phases<L: Lane>(history: &[L; HISTORY_WORDS], fir: &[[L; 4]; HISTORY_W
     phases
 }
 
+/// `true` when every lane of `state` shares one window shape **and** one van Herk phase.
+///
+/// Issue #182 S1, the uniform-cohort gate. Lookahead is a per-lane preparation parameter, so
+/// [`sliding_minimum`] and the box-expiry gather of [`channel_frame`] address the arena lane by
+/// lane: two lanes of one bank can hold different `window`, `end_offset` and `box_offset`, and can
+/// therefore be at different points of their van Herk blocks. Those two steps are the only scalar
+/// work left in the kernel, and they are the majority of it.
+///
+/// In practice a cohort is uniform: `bind_homogeneous_bank` only admits members that share a
+/// program key, and a lookahead difference is the ordinary reason two tracks are in the same
+/// cohort with different windows. So the kernel takes **one** whole-bank branch, exactly as the
+/// `stationary` hoist of #144 item 6 does, and runs the lane-wide form under it; anything else
+/// falls back to the per-lane body, which is unchanged. Per-lane branching stays forbidden: one
+/// track's arithmetic must never depend on which lane of which cohort it landed in.
+///
+/// Both legs are bit compares of integers, never tolerances. The shape leg is a derived-value
+/// compare on [`LaneShape`], which is `Eq`. The **phase** leg is not redundant with it: lanes that
+/// share a window advance their phase in lockstep for as long as they only render, but
+/// [`commit_lane`] writes one lane's `phase` from a payload, so restoring a single track of a bank
+/// can leave a cohort with one shape and several phases. Reading `state.phase[0]` for the whole
+/// bank there would render the other lanes at the wrong window position, which is why the phase is
+/// in the gate and why `a_restore_that_desyncs_the_phase_falls_back` exists.
+fn lanes_uniform(state: &ChannelState) -> bool {
+    state.lane.iter().all(|shape| *shape == state.lane[0])
+        && state.phase.iter().all(|phase| *phase == state.phase[0])
+}
+
+/// [`sliding_minimum`] for a bank whose lanes are known uniform by [`lanes_uniform`].
+///
+/// Same algorithm, same operation order, one lane-wide instance of it instead of `W` scalar ones.
+/// The window offsets and the phase are read once from lane 0 — which the gate has established is
+/// every lane's — so every index this computes is the index the scalar body computes for *each*
+/// lane, and the AoSoA layout makes the `W` words at that index one contiguous vector.
+///
+/// Bit identity is structural rather than empirical. [`Lane::min`] is defined as
+/// `select(self < b, self, b)` (decision D8) and [`scalar_min`] is `if a < b { a } else { b }`, so
+/// a lane of `a.min(b)` *is* `scalar_min(a, b)` — including on the two zeros and on NaN, where the
+/// definition is deliberately asymmetric. Argument order therefore has to be preserved exactly,
+/// and each of the three `min` sites below keeps the operand order its scalar original has.
+/// `L::load`/`L::store` move the same words the indexed reads and writes move.
+///
+/// The amortised backward suffix pass is included: it is `Wb` loads, mins and stores once per
+/// completed block, and it is the single largest scalar cost in the kernel.
+#[inline(always)]
+fn sliding_minimum_uniform<L: Lane>(
+    state: &mut ChannelState,
+    ring: usize,
+    cursor: usize,
+    out: &mut [f32; MAXIMUM_WIDTH],
+) {
+    let width = state.width;
+    let shape = state.lane[0];
+    let window = shape.window as usize;
+    let mut end = cursor + shape.end_offset as usize;
+    if end >= ring {
+        end -= ring;
+    }
+    let mut start = cursor + 1;
+    if start >= ring {
+        start -= ring;
+    }
+    let newest = L::load(&state.required_ring[end * width..]);
+    let position = state.phase[0] as usize;
+    let running = if position == 0 {
+        newest
+    } else {
+        L::load(&state.prefix).min(newest)
+    };
+    running.store(&mut state.prefix);
+    let complete = position + 1 == window;
+    let minimum = if complete {
+        running
+    } else {
+        L::load(&state.required_ring[start * width..]).min(running)
+    };
+    minimum.store(out);
+    if complete {
+        let mut suffix = L::load(&state.required_ring[end * width..]);
+        let mut slot = end;
+        for _ in 0..window {
+            suffix = suffix.min(L::load(&state.required_ring[slot * width..]));
+            suffix.store(&mut state.required_ring[slot * width..]);
+            if slot == 0 {
+                slot = ring;
+            }
+            slot -= 1;
+        }
+        state.phase.fill(0);
+    } else {
+        state.phase.fill((position + 1) as u32);
+    }
+}
+
 /// The streaming van Herk / Gil-Werman sliding minimum over each lane's window.
 ///
 /// M. van Herk, *A fast algorithm for local minimum and maximum filters on rectangular and
@@ -837,9 +930,15 @@ impl<L: Lane> HotChannel<L> {
 ///    the decay terminate at exactly `+0.0`, and therefore `g` at exactly `1.0`.
 /// 7. **output (A)** read-before-write on the main ring gives a delay of exactly `B = N + 6`;
 ///    `y = select(bypass, z, z * g)` keeps the bypass path bit-exact including signed zero.
+/// # The uniform-cohort parameter
+///
+/// `UNIFORM` selects the lane-wide form of steps 3 and 5 for a cohort [`lanes_uniform`] has
+/// accepted (#182 S1). It is a const parameter rather than a runtime flag so that neither
+/// instantiation carries the other's branch into the frame loop; the whole-bank decision is taken
+/// once, in [`limiter_block`].
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
-fn channel_frame<L: Lane>(
+fn channel_frame<L: Lane, const UNIFORM: bool>(
     io: &mut [f32],
     base: usize,
     x: L,
@@ -860,21 +959,34 @@ fn channel_frame<L: Lane>(
     let required = L::select(peak.gt(limit), limit.div(peak), one);
     required.store(&mut state.required_ring[ring_cursor * width..]);
 
-    sliding_minimum(state, ring, ring_cursor, scratch);
+    if UNIFORM {
+        sliding_minimum_uniform::<L>(state, ring, ring_cursor, scratch);
+    } else {
+        sliding_minimum(state, ring, ring_cursor, scratch);
+    }
     let minimum = L::load(scratch);
     let quantised = minimum
         .mul(L::splat(BOX_GRID))
         .floor()
         .mul(L::splat(1.0 / BOX_GRID));
 
-    for (lane, expiring) in scratch.iter_mut().enumerate().take(width) {
-        let mut slot = ring_cursor + state.lane[lane].box_offset as usize;
+    let expired = if UNIFORM {
+        // One slot for the whole bank, so the `W` expiring terms are one contiguous vector load.
+        let mut slot = ring_cursor + state.lane[0].box_offset as usize;
         if slot >= ring {
             slot -= ring;
         }
-        *expiring = state.box_ring[slot * width + lane];
-    }
-    let expired = L::load(scratch);
+        L::load(&state.box_ring[slot * width..])
+    } else {
+        for (lane, expiring) in scratch.iter_mut().enumerate().take(width) {
+            let mut slot = ring_cursor + state.lane[lane].box_offset as usize;
+            if slot >= ring {
+                slot -= ring;
+            }
+            *expiring = state.box_ring[slot * width + lane];
+        }
+        L::load(scratch)
+    };
     hot.box_sum = hot.box_sum.add(quantised).sub(expired);
     quantised.store(&mut state.box_ring[ring_cursor * width..]);
     let smoothed = hot.box_sum.div(hot.window);
@@ -902,6 +1014,32 @@ fn channel_frame<L: Lane>(
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
 fn limiter_block<L: Lane>(
+    left_io: &mut [f32],
+    right_io: &mut [f32],
+    frames: usize,
+    coef: &LimiterCoef<L>,
+    shape: &Shape,
+    left: &mut ChannelState,
+    right: &mut ChannelState,
+    cursors: &mut Cursors,
+) {
+    // Issue #182 S1: one whole-bank branch, taken here and nowhere else. Both channels must be
+    // uniform, because both run the same body with the same const parameter; a bank with a mixed
+    // left channel and a uniform right one takes the per-lane path on both, which is the
+    // conservative direction and keeps the decision one branch rather than two.
+    if lanes_uniform(left) && lanes_uniform(right) {
+        limiter_block_body::<L, true>(left_io, right_io, frames, coef, shape, left, right, cursors);
+    } else {
+        limiter_block_body::<L, false>(
+            left_io, right_io, frames, coef, shape, left, right, cursors,
+        );
+    }
+}
+
+/// The body of [`limiter_block`] at one setting of the uniform-cohort gate.
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn limiter_block_body<L: Lane, const UNIFORM: bool>(
     left_io: &mut [f32],
     right_io: &mut [f32],
     frames: usize,
@@ -992,7 +1130,7 @@ fn limiter_block<L: Lane>(
             let peak_left = L::select(link, linked, peak_left);
             let peak_right = L::select(link, linked, peak_right);
 
-            channel_frame(
+            channel_frame::<L, UNIFORM>(
                 left_io,
                 base,
                 L::load(&left_io[base..]),
@@ -1007,7 +1145,7 @@ fn limiter_block<L: Lane>(
                 bypass,
                 &mut scratch,
             );
-            channel_frame(
+            channel_frame::<L, UNIFORM>(
                 right_io,
                 base,
                 L::load(&right_io[base..]),
@@ -2490,6 +2628,248 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The #182 S1 cohort helper: renders `lanes` tracks both as scalar instances and as one bank,
+    /// with an optional payload swap partway through, and returns both output plans lane major.
+    ///
+    /// The two arms are the same tracks, the same samples and the same block boundaries, so any
+    /// difference between them is the uniform-cohort gate deciding something the per-lane body
+    /// would not have decided.
+    struct CohortRun {
+        scalar: Vec<(Vec<f32>, Vec<f32>)>,
+        bank_left: Vec<f32>,
+        bank_right: Vec<f32>,
+        frames: usize,
+        lanes: usize,
+    }
+
+    impl CohortRun {
+        fn assert_lane_identity(&self, label: &str) {
+            for lane in 0..self.lanes {
+                for frame in 0..self.frames {
+                    assert_eq!(
+                        self.bank_left[frame * self.lanes + lane].to_bits(),
+                        self.scalar[lane].0[frame].to_bits(),
+                        "{label}: left lane {lane} frame {frame}"
+                    );
+                    assert_eq!(
+                        self.bank_right[frame * self.lanes + lane].to_bits(),
+                        self.scalar[lane].1[frame].to_bits(),
+                        "{label}: right lane {lane} frame {frame}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// One track's state payload: the common, left and right sections a snapshot produces.
+    type LanePayload = (Vec<u8>, Vec<u8>, Vec<u8>);
+
+    /// Renders `tracks` through eight scalar instances and one W8 bank over `blocks` blocks of 128.
+    ///
+    /// `swap_after` optionally restores `donor` into track 0 of both arms after that many blocks,
+    /// which is how the phase leg of [`lanes_uniform`] is reached: a payload carries its own van
+    /// Herk phase, and committing one lane of a bank is the only way a cohort that shares a window
+    /// can end a block with lanes at different window positions.
+    fn cohort_run(
+        tracks: &[[InitialParameterValue; PARAMETER_COUNT * 2]],
+        blocks: usize,
+        swap_after: Option<(usize, LanePayload)>,
+    ) -> CohortRun {
+        const LANES: usize = 8;
+        assert_eq!(tracks.len(), LANES);
+        let frames = blocks * 128;
+        let inputs: Vec<(Vec<f32>, Vec<f32>)> = (0..LANES)
+            .map(|lane| {
+                let mut noise = Noise(0x5182_0000 + lane as u64);
+                (
+                    (0..frames).map(|_| noise.next() * 3.0).collect(),
+                    (0..frames).map(|_| noise.next() * 3.0).collect(),
+                )
+            })
+            .collect();
+
+        let mut instances: Vec<Box<dyn PreparedNativeEffect>> = tracks
+            .iter()
+            .map(|values| {
+                TruePeakLimiterFactory
+                    .prepare(request(values))
+                    .expect("prepare")
+            })
+            .collect();
+        let mut scalar: Vec<(Vec<f32>, Vec<f32>)> = inputs
+            .iter()
+            .map(|(left, right)| (left.clone(), right.clone()))
+            .collect();
+
+        let mut bank = bank_for(tracks, LinkMode::DualMono, BankWidth::Eight, Backend::Simd8);
+        let mut bank_left = vec![0.0_f32; frames * LANES];
+        let mut bank_right = vec![0.0_f32; frames * LANES];
+        for frame in 0..frames {
+            for lane in 0..LANES {
+                bank_left[frame * LANES + lane] = inputs[lane].0[frame];
+                bank_right[frame * LANES + lane] = inputs[lane].1[frame];
+            }
+        }
+
+        for block in 0..blocks {
+            if let Some((after, payload)) = swap_after.as_ref()
+                && block == *after
+            {
+                let sizes = instances[0].metadata().state_sizes;
+                instances[0]
+                    .restore_state_payload(
+                        STATE_LAYOUT_VERSION,
+                        StatePayloadInput::new(&payload.0, &payload.1, &payload.2, sizes)
+                            .expect("sizes"),
+                    )
+                    .expect("scalar restore");
+                bank.restore_track_state_payload(
+                    0,
+                    STATE_LAYOUT_VERSION,
+                    StatePayloadInput::new(&payload.0, &payload.1, &payload.2, sizes)
+                        .expect("sizes"),
+                )
+                .expect("bank restore");
+            }
+            let start = block * 128;
+            for (lane, effect) in instances.iter_mut().enumerate() {
+                let (left, right) = &mut scalar[lane];
+                effect.process(
+                    EffectProcessBlock::new(
+                        &mut left[start..start + 128],
+                        &mut right[start..start + 128],
+                        None,
+                        start as u64,
+                        &[],
+                        128,
+                    )
+                    .expect("block"),
+                );
+            }
+            process_bank(
+                bank.as_mut(),
+                &mut bank_left[start * LANES..(start + 128) * LANES],
+                &mut bank_right[start * LANES..(start + 128) * LANES],
+                BankWidth::Eight,
+                128,
+                start as u64,
+            );
+        }
+
+        CohortRun {
+            scalar,
+            bank_left,
+            bank_right,
+            frames,
+            lanes: LANES,
+        }
+    }
+
+    /// **A cohort every lane of which shares one window renders exactly the per-lane body.**
+    ///
+    /// Issue #182 S1. This is the arm the vectorised van Herk and the vectorised box-expiry gather
+    /// actually run on: [`lanes_uniform`] accepts it, so `sliding_minimum_uniform` and the
+    /// lane-wide `expired` load replace `W` scalar passes over the arena. A scalar instance is
+    /// `L = f32`, `W = 1`, which is uniform by construction, so the comparison is the vectorised
+    /// path against the same law one lane at a time.
+    ///
+    /// What this test is, precisely, is the **lane-identity** property *of the uniform path*: the
+    /// scalar arm runs `sliding_minimum_uniform` at `W = 1` and the bank arm runs it at `W = 8`, so
+    /// a mutation that treats the wide instantiation differently from the narrow one is red here
+    /// and nowhere else. Its red mutation is the #182 analogue of row 7: guard the uniform suffix
+    /// pass with `complete && width < 2` so it never runs at W4/W8. `lane_identity_holds_across_
+    /// widths` and `a_mixed_lookahead_cohort_falls_back_bit_identically` both stay green under it,
+    /// because every cohort they build falls back.
+    ///
+    /// It is deliberately *not* claimed to gate a mutation that applies at every width — the two
+    /// arms would move together, since a scalar instance is `W = 1` and therefore uniform too.
+    /// Those are gated by the frozen E12 pins (which a moved scalar digest breaks immediately) and
+    /// by `a_mixed_lookahead_cohort_falls_back_bit_identically`, whose bank lanes run the per-lane
+    /// body against scalar twins running this one.
+    ///
+    /// The E12 corpus already carries this path at the digest level — cases 2 and 3 give every lane
+    /// the same lookahead, so they take it at W4 and W8 while cases 0, 1 and 4 take the fallback —
+    /// but a pinned digest says *which* bits, not *why*, and this test names the why.
+    #[test]
+    fn a_uniform_cohort_renders_exactly_the_per_lane_path() {
+        let tracks: Vec<[InitialParameterValue; PARAMETER_COUNT * 2]> = (0..8)
+            .map(|lane| values_with(-6.0 - lane as f32, 100.0, 5.0))
+            .collect();
+        cohort_run(&tracks, 6, None).assert_lane_identity("uniform cohort");
+    }
+
+    /// **A cohort with one differently prepared lookahead falls back, bit for bit.**
+    ///
+    /// Issue #182 S1, the shape leg of [`lanes_uniform`]. Seven lanes at 5 ms and one at 1 ms is
+    /// the adversarial shape rather than eight distinct ones: a gate that compared only the first
+    /// two lanes, or only `window` and not `box_offset`, would still reject eight distinct
+    /// lookaheads and would wrongly accept this.
+    ///
+    /// Red mutation: drop the shape leg, `state.lane.iter().all(..)`, from `lanes_uniform`. The
+    /// odd lane is then rendered with lane 0's 241-sample window instead of its own 49-sample one,
+    /// and diverges from its scalar twin inside the first block. (The phase leg does not cover
+    /// this: every lane starts a fresh cohort at phase 0, so the first block is admitted before
+    /// the differing windows have had a chance to desync the phases.)
+    ///
+    /// It is also the crate's **cross-path** gate, which is worth stating because it is not
+    /// obvious from the name. The bank arm falls back to the per-lane body for all eight lanes,
+    /// while every scalar twin is `W = 1` and therefore runs `sliding_minimum_uniform`. So the
+    /// seven lanes that are not the odd one out compare the uniform body against the per-lane body
+    /// on the same samples, and mutations *inside* the uniform body are red here: `suffix.min(..)`
+    /// → `suffix.max(..)`, `for _ in 0..window` → `0..window - 1`, `state.phase.fill(position + 1)`
+    /// → `fill(position)`, and `state.lane[0].box_offset` → `end_offset` in the uniform gather.
+    #[test]
+    fn a_mixed_lookahead_cohort_falls_back_bit_identically() {
+        let mut tracks: Vec<[InitialParameterValue; PARAMETER_COUNT * 2]> =
+            (0..8).map(|_| values_with(-6.0, 100.0, 5.0)).collect();
+        tracks[3] = values_with(-6.0, 100.0, 1.0);
+        cohort_run(&tracks, 6, None).assert_lane_identity("mixed lookahead cohort");
+    }
+
+    /// **Restoring one track of a uniform cohort desynchronises the phase, and that falls back.**
+    ///
+    /// Issue #182 S1, the phase leg of [`lanes_uniform`], and the reason the gate is two bit
+    /// compares rather than one. Every lane here is prepared with the same 5 ms lookahead, so the
+    /// shape leg holds for the whole run and never fires. What moves is the *position inside the
+    /// van Herk block*: `commit_lane` writes one lane's `phase` straight out of a payload, and the
+    /// donor below was snapshotted two blocks into its own timeline while the cohort is three
+    /// blocks into its. 256 mod 241 is 15 and 384 mod 241 is 143, so track 0 lands at phase 15
+    /// inside a cohort resting at 143.
+    ///
+    /// Red mutation: drop the phase leg, `state.phase.iter().all(..)`, from `lanes_uniform`. The
+    /// bank then reads `state.phase[0]` — the restored 15 — for all eight lanes, so the seven
+    /// lanes that were *not* restored take their window minimum at the wrong window position and
+    /// run their suffix pass on the wrong block boundary. They diverge from their scalar twins,
+    /// which is the whole-bank failure a per-lane parameter causes when it is assumed uniform.
+    ///
+    /// The scalar arm restores the same payload into track 0 at the same block, so the comparison
+    /// is not "did the restore change anything" — it is "did the restore change anything *for the
+    /// other seven lanes*", which is the only thing the gate is responsible for.
+    #[test]
+    fn a_restore_that_desyncs_the_phase_falls_back() {
+        let values = values_with(-6.0, 100.0, 5.0);
+        let tracks: Vec<[InitialParameterValue; PARAMETER_COUNT * 2]> =
+            (0..8).map(|_| values).collect();
+
+        // The donor: the same program, two blocks into a different signal, so its phase is 15.
+        let mut donor = TruePeakLimiterFactory
+            .prepare(request(&values))
+            .expect("prepare");
+        let mut noise = Noise(0x0D0D_0182);
+        let mut left: Vec<f32> = (0..256).map(|_| noise.next() * 3.0).collect();
+        let mut right: Vec<f32> = (0..256).map(|_| noise.next() * 3.0).collect();
+        render(donor.as_mut(), &mut left, &mut right, 128);
+        let payload = snapshot(donor.as_ref());
+        assert_eq!(
+            read_u32(&payload.1, words::PHASE),
+            256 % 241,
+            "the donor is not at the phase this test is about"
+        );
+
+        let run = cohort_run(&tracks, 8, Some((3, payload)));
+        run.assert_lane_identity("phase-desynchronised cohort");
     }
 
     /// E9: partition invariance over the gate's block sizes (master plan P1).
