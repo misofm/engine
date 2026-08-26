@@ -731,6 +731,129 @@ fn scalar_min(a: f32, b: f32) -> f32 {
     if a < b { a } else { b }
 }
 
+/// The twelve detector taps of one channel, one named field per tap.
+///
+/// Round 2 R2, a **data-residence** change and nothing else. The taps were a `[L; 12]`, and on the
+/// wasm target that array is where the frame loop went wrong: LLVM idiom-recognises the twelve-word
+/// shift of an array as a block move, so each frame emitted a 192-byte `memory.copy` and then
+/// twelve `v128.load`s to read the taps it had just copied. Linear memory is not a register file,
+/// and the detector is latency-bound, so a store-to-load round trip per tap per frame lands
+/// directly on the critical path.
+///
+/// Twelve named fields cannot be memmoved. The shift becomes twelve local-to-local moves that
+/// register allocation coalesces away, and every tap read is a live value rather than a load.
+///
+/// Nothing about the arithmetic moves: [`History::shift`] writes exactly the assignments the
+/// `while tap > 0` loop wrote, in the same order, and [`annex2_phases`] walks the same taps against
+/// the same table rows in the same tap-major order with the same twelve separately rounded
+/// `add(mul(..))` steps per accumulator. The native target reaches the same code either way once
+/// SROA has promoted the array, which is why this is a wasm change with a native no-op attached.
+#[derive(Clone, Copy)]
+struct History<L: Lane> {
+    t0: L,
+    t1: L,
+    t2: L,
+    t3: L,
+    t4: L,
+    t5: L,
+    t6: L,
+    t7: L,
+    t8: L,
+    t9: L,
+    t10: L,
+    t11: L,
+}
+
+/// The struct has one field per `HISTORY_WORDS` tap, and `t6` is the alignment sample.
+const _: () = assert!(HISTORY_WORDS == 12 && FIR_ALIGNMENT_SAMPLES == 6);
+
+impl<L: Lane> History<L> {
+    /// Reads the twelve tap-major words of `state` into locals, once per block.
+    #[inline]
+    fn load(state: &ChannelState) -> Self {
+        let width = state.width;
+        let tap = |index: usize| L::load(&state.history[index * width..]);
+        Self {
+            t0: tap(0),
+            t1: tap(1),
+            t2: tap(2),
+            t3: tap(3),
+            t4: tap(4),
+            t5: tap(5),
+            t6: tap(6),
+            t7: tap(7),
+            t8: tap(8),
+            t9: tap(9),
+            t10: tap(10),
+            t11: tap(11),
+        }
+    }
+
+    /// Writes the twelve locals back into `state`, once per block.
+    #[inline]
+    fn store(self, state: &mut ChannelState) {
+        let width = state.width;
+        let mut tap = |index: usize, word: L| word.store(&mut state.history[index * width..]);
+        tap(0, self.t0);
+        tap(1, self.t1);
+        tap(2, self.t2);
+        tap(3, self.t3);
+        tap(4, self.t4);
+        tap(5, self.t5);
+        tap(6, self.t6);
+        tap(7, self.t7);
+        tap(8, self.t8);
+        tap(9, self.t9);
+        tap(10, self.t10);
+        tap(11, self.t11);
+    }
+
+    /// All twelve taps `+0.0`, the rest state of a silent lane.
+    ///
+    /// Test-only: the render path reaches the rest state through [`History::load`] of an arena
+    /// `clear_runtime` has already zeroed, so a second constructor on it would be dead code.
+    #[cfg(test)]
+    #[inline(always)]
+    fn zero() -> Self {
+        let zero = L::zero();
+        Self {
+            t0: zero,
+            t1: zero,
+            t2: zero,
+            t3: zero,
+            t4: zero,
+            t5: zero,
+            t6: zero,
+            t7: zero,
+            t8: zero,
+            t9: zero,
+            t10: zero,
+            t11: zero,
+        }
+    }
+
+    /// Every tap moves up one and `x` becomes tap 0.
+    ///
+    /// Written out because the point is that it is *not* a block move: these are the same twelve
+    /// assignments the array form made, oldest first, so no tap can read a value the shift has
+    /// already overwritten.
+    #[inline(always)]
+    fn shift(&mut self, x: L) {
+        self.t11 = self.t10;
+        self.t10 = self.t9;
+        self.t9 = self.t8;
+        self.t8 = self.t7;
+        self.t7 = self.t6;
+        self.t6 = self.t5;
+        self.t5 = self.t4;
+        self.t4 = self.t3;
+        self.t3 = self.t2;
+        self.t2 = self.t1;
+        self.t1 = self.t0;
+        self.t0 = x;
+    }
+}
+
 /// Shifts the history and returns `P[n] = max(|h[6]|, |v0|, |v1|, |v2|, |v3|)`.
 ///
 /// The FIR is tap-major and lockstep across lanes: for each phase the accumulator starts at exactly
@@ -743,18 +866,9 @@ fn scalar_min(a: f32, b: f32) -> f32 {
 /// phases against a sample six frames in the future, which is the sole reason its gain law needed a
 /// six-sample hold.
 #[inline(always)]
-fn detector_peak<L: Lane>(
-    history: &mut [L; HISTORY_WORDS],
-    x: L,
-    fir: &[[L; 4]; HISTORY_WORDS],
-) -> L {
-    let mut tap = HISTORY_WORDS - 1;
-    while tap > 0 {
-        history[tap] = history[tap - 1];
-        tap -= 1;
-    }
-    history[0] = x;
-    let mut peak = history[FIR_ALIGNMENT_SAMPLES].abs();
+fn detector_peak<L: Lane>(history: &mut History<L>, x: L, fir: &[[L; 4]; HISTORY_WORDS]) -> L {
+    history.shift(x);
+    let mut peak = history.t6.abs();
     for phase in annex2_phases(history, fir) {
         peak = peak.max(phase.abs());
     }
@@ -767,15 +881,41 @@ fn detector_peak<L: Lane>(
 /// steps in increasing tap order. Walking taps on the outside and phases on the inside reads the
 /// table in its stored order and keeps each lane's summation order exactly the one the 016 brief
 /// froze, which is why the reorder is bit-preserving (#90 F4).
+///
+/// The twelve steps are written out rather than iterated (round 2 R2). The order is the loop's,
+/// tap for tap and phase for phase; what the unrolling buys is that each table row is read as a
+/// single-use load feeding its multiply — the wasm backend sinks such a load into its consumer,
+/// where a hoisted row would have had to be kept live — and that the four accumulators are four
+/// values rather than an array a backend might decide to spill.
 #[inline(always)]
-fn annex2_phases<L: Lane>(history: &[L; HISTORY_WORDS], fir: &[[L; 4]; HISTORY_WORDS]) -> [L; 4] {
-    let mut phases = [L::zero(); 4];
-    for (row, sample) in fir.iter().zip(history.iter()) {
-        for (accumulator, coefficient) in phases.iter_mut().zip(row.iter()) {
-            *accumulator = accumulator.add(coefficient.mul(*sample));
-        }
+fn annex2_phases<L: Lane>(history: &History<L>, fir: &[[L; 4]; HISTORY_WORDS]) -> [L; 4] {
+    let mut phase0 = L::zero();
+    let mut phase1 = L::zero();
+    let mut phase2 = L::zero();
+    let mut phase3 = L::zero();
+    macro_rules! tap {
+        ($index:literal, $sample:expr) => {{
+            let row = &fir[$index];
+            let sample = $sample;
+            phase0 = phase0.add(row[0].mul(sample));
+            phase1 = phase1.add(row[1].mul(sample));
+            phase2 = phase2.add(row[2].mul(sample));
+            phase3 = phase3.add(row[3].mul(sample));
+        }};
     }
-    phases
+    tap!(0, history.t0);
+    tap!(1, history.t1);
+    tap!(2, history.t2);
+    tap!(3, history.t3);
+    tap!(4, history.t4);
+    tap!(5, history.t5);
+    tap!(6, history.t6);
+    tap!(7, history.t7);
+    tap!(8, history.t8);
+    tap!(9, history.t9);
+    tap!(10, history.t10);
+    tap!(11, history.t11);
+    [phase0, phase1, phase2, phase3]
 }
 
 /// `true` when every lane of `state` shares one window shape **and** one van Herk phase.
@@ -865,9 +1005,13 @@ const fn wrapped(value: usize, ring: usize) -> usize {
 ///   segments and therefore knows both indices are linear inside one (R1 d). They are the same two
 ///   indices the `+ offset` / `- ring` pair computed here before.
 ///
-/// None of the three moves a *value*. The word this frame would have left in `state.prefix` is the
-/// word the local now holds, and the block-end write-back leaves exactly what the last frame's
-/// store would have left; `state.phase` is filled from the local for the same reason, every lane
+/// None of the three moves a *value*, and the first is not even a new idea: [`HotChannel`] already
+/// holds the recursive reduction word, the box sum, the twelve detector taps and all four ramp
+/// words in registers for a whole block and writes them back once at the end. `prefix` and `phase`
+/// join that set; they were only ever left in the arena because the scalar body had to address
+/// them lane by lane. The word this frame would have left in `state.prefix` is the word the local
+/// now holds, and the block-end write-back leaves exactly what the last frame's store would have
+/// left; `state.phase` is filled from the local for the same reason, every lane
 /// of a uniform cohort holding one phase being precisely what [`lanes_uniform`] established. The
 /// state words move in *when* they are written, never in what is written, and nothing observes
 /// them between two frames of one block — `snapshot_track` and `is_at_silent_rest` read the arena
@@ -988,7 +1132,7 @@ fn sliding_minimum(
 
 /// The lane-wide state one channel carries across a block.
 struct HotChannel<L: Lane> {
-    history: [L; HISTORY_WORDS],
+    history: History<L>,
     reduction: L,
     box_sum: L,
     window: L,
@@ -1000,10 +1144,7 @@ impl<L: Lane> HotChannel<L> {
     /// Loads every lane-wide word of `state` into registers for the block loop.
     #[inline]
     fn load(state: &ChannelState) -> Self {
-        let mut history = [L::zero(); HISTORY_WORDS];
-        for (tap, word) in history.iter_mut().enumerate() {
-            *word = L::load(&state.history[tap * state.width..]);
-        }
+        let history = History::<L>::load(state);
         let mut window = [0.0_f32; MAXIMUM_WIDTH];
         for (lane, shape) in state.lane.iter().enumerate() {
             window[lane] = shape.window as f32;
@@ -1021,10 +1162,7 @@ impl<L: Lane> HotChannel<L> {
     /// Writes every lane-wide word back into `state` at the end of the block.
     #[inline]
     fn store(self, state: &mut ChannelState) {
-        let width = state.width;
-        for (tap, word) in self.history.iter().enumerate() {
-            word.store(&mut state.history[tap * width..]);
-        }
+        self.history.store(state);
         self.reduction.store(&mut state.reduction);
         self.box_sum.store(&mut state.box_sum);
         self.limit.scatter(&mut state.limit);
@@ -1276,13 +1414,13 @@ fn limiter_block<L: Lane>(
 
 /// One channel's detector pass over one chunk: `span` peaks from `span` input frames.
 ///
-/// The twelve history words live in locals for the whole chunk and are written back to `hot` once,
+/// The twelve history words live in locals for the whole chunk and are written back to `taps` once,
 /// which is the reason the block is walked in chunks at all (see [`limiter_block_per_lane`]).
 /// Shared by both block bodies verbatim: the detector is the same computation whether or not the
 /// cohort is uniform, and its operation order is frozen.
 #[inline(always)]
 fn detector_chunk<L: Lane>(
-    hot: &mut HotChannel<L>,
+    taps: &mut History<L>,
     io: &[f32],
     chunk: usize,
     span: usize,
@@ -1290,13 +1428,13 @@ fn detector_chunk<L: Lane>(
     peaks: &mut [f32; DETECTOR_CHUNK * MAXIMUM_WIDTH],
 ) {
     let width = L::WIDTH;
-    let mut history = hot.history;
+    let mut history = *taps;
     for frame in 0..span {
         let base = (chunk + frame) * width;
         let x = L::load(&io[base..]);
         detector_peak(&mut history, x, fir).store(&mut peaks[frame * width..]);
     }
-    hot.history = history;
+    *taps = history;
 }
 
 /// The body of [`limiter_block`] for a cohort whose lanes are **not** uniform.
@@ -1361,7 +1499,7 @@ fn limiter_block_per_lane<L: Lane>(
     for chunk in (0..frames).step_by(DETECTOR_CHUNK) {
         let span = core::cmp::min(DETECTOR_CHUNK, frames - chunk);
         detector_chunk::<L>(
-            &mut hot_left,
+            &mut hot_left.history,
             left_io,
             chunk,
             span,
@@ -1369,7 +1507,7 @@ fn limiter_block_per_lane<L: Lane>(
             &mut peaks_left,
         );
         detector_chunk::<L>(
-            &mut hot_right,
+            &mut hot_right.history,
             right_io,
             chunk,
             span,
@@ -1526,7 +1664,7 @@ fn limiter_block_uniform<L: Lane>(
         for chunk in (0..frames).step_by(DETECTOR_CHUNK) {
             let span = core::cmp::min(DETECTOR_CHUNK, frames - chunk);
             detector_chunk::<L>(
-                &mut hot_left,
+                &mut hot_left.history,
                 left_io,
                 chunk,
                 span,
@@ -1534,7 +1672,7 @@ fn limiter_block_uniform<L: Lane>(
                 &mut peaks_left,
             );
             detector_chunk::<L>(
-                &mut hot_right,
+                &mut hot_right.history,
                 right_io,
                 chunk,
                 span,
@@ -1559,6 +1697,11 @@ fn limiter_block_uniform<L: Lane>(
                     .min(ring - right_end)
                     .min(ring - left_expiring)
                     .min(ring - right_expiring);
+                // Every term is at least one -- `span - frame` because the `while` guard says so,
+                // and each `ring - index` / `main - main_cursor` because the index it subtracts is
+                // a slot of that ring. A zero would not be a slow segment walk, it would be a
+                // frame loop that never advances, so it is asserted rather than assumed.
+                debug_assert!(run >= 1);
 
                 let base = (chunk + frame) * width;
                 let words = run * width;
@@ -2787,7 +2930,7 @@ mod tests {
     fn phase_outputs_match_the_frozen_scalar_order() {
         let coefficients = LimiterCoef::<f32>::new(false, false);
         let mut history = [0.0_f32; HISTORY_WORDS];
-        let mut kernel_history = [0.0_f32; HISTORY_WORDS];
+        let mut kernel_history = History::<f32>::zero();
         let mut noise = Noise(0x5150_0090_0001);
         for _ in 0..4096 {
             let sample = noise.next() * 3.0;
@@ -2838,7 +2981,7 @@ mod tests {
             }
         }
         for rate in [44_100_u32, 48_000, 88_200, 96_000] {
-            let mut history = [0.0_f32; HISTORY_WORDS];
+            let mut history = History::<f32>::zero();
             let mut oracle_history = [0.0_f64; HISTORY_WORDS];
             let mut noise = Noise(0x1770_0000 ^ u64::from(rate));
             for _ in 0..4096 {

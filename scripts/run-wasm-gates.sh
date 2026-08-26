@@ -42,7 +42,57 @@ run_guest() {
         "$target_directory/$TARGET/release/$GUEST" --expect-backend "$expected" | tee -a "$evidence"
 }
 
+# Round 2 R2: the limiter's twelve-word detector history must live in wasm *locals*.
+#
+# LLVM idiom-recognises the shift of a twelve-word array as a block move, and the guest then
+# re-reads through linear memory every tap it has just copied -- a store-to-load round trip per
+# tap per frame, on a kernel that is latency-bound. `History<L>` is twelve named fields precisely
+# so that there is no such idiom left to recognise, and this pin is what keeps it that way.
+#
+# What it refuses is a `memory.copy` whose size is a whole history (`HISTORY_WORDS * sizeof(L)`)
+# or the eleven words a shift actually moves, inside a function the limiter owns. Those two sizes
+# are the signature of the regression and of nothing else: the other copies a limiter block makes
+# -- the `BankProcessReport` at `process_bank`'s exit, a state payload buffer -- are other sizes.
+# The sizes are derived, not guessed: one lane is 4 bytes at `Lane = f32`, 16 at `Simd4` and 32 at
+# the wasm `Simd8` (two v128 halves), and `HISTORY_WORDS` is 12.
+#
+# `HotChannel::load` and `History::load`/`store` are excluded by name, and only they. Those are
+# the once-per-block gather and scatter of the whole hot state; moving twelve words as a unit
+# there is the intended shape, and whether the backend emits it as a block move is a decision
+# about one copy per block rather than one per frame. Deleting the exclusion is how you check the
+# pin is still wired to something: with it gone, the scalar and Simd8 legs go red on those.
+readonly HISTORY_SHIFT_SIZES="44 48 176 192 352 384"
+
+check_detector_residency() {
+    local module="$1" name="$2" found
+    found="$(wasm-objdump -d "$module" | awk -v sizes="$HISTORY_SHIFT_SIZES" '
+        BEGIN { split(sizes, list, " "); for (i in list) forbidden[list[i]] = 1 }
+        /^[0-9a-f]+ func\[[0-9]+\] </ {
+            subject = /miso_engine_true_peak_limiter/ && !/10HotChannel/ && !/7History/
+            fn = $0
+            size = ""
+        }
+        subject && /i32\.const/ { size = $NF }
+        subject && /memory\.copy/ && (size in forbidden) { print size, fn }
+    ')"
+    [[ -z "$found" ]] || {
+        printf 'wasm gates: the detector history is shifted through linear memory (%s leg)\n%s\n' \
+            "$name" "$found" >&2
+        return 1
+    }
+}
+
+command -v wasm-objdump >/dev/null 2>&1 || {
+    printf 'wasm gates: wasm-objdump is required for the detector-residency pin\n' >&2
+    exit 1
+}
+
 run_guest scalar -simd128 scalar
 run_guest simd128 +simd128 simd4
+
+for leg in scalar simd128; do
+    check_detector_residency "target/ci/wasm-gates-$leg/$TARGET/release/$GUEST" "$leg"
+done
+printf 'wasm gates: detector history resident in locals on both guest legs\n'
 
 printf 'wasm gates: ok (native + wasm scalar + wasm simd128), evidence in %s\n' "$evidence"
