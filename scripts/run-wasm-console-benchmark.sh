@@ -55,10 +55,11 @@ if [[ "$#" == 1 ]]; then
         --after) arm=after ;;
         --issue175) arm=issue175 ;;
         --issue182) arm=issue182 ;;
-        *) printf 'usage: %s [--after|--issue175|--issue182]\n' "$0" >&2; exit 2 ;;
+        --issue-loop-eq-r1) arm=issue-loop-eq-r1 ;;
+        *) printf 'usage: %s [--after|--issue175|--issue182|--issue-loop-eq-r1]\n' "$0" >&2; exit 2 ;;
     esac
 elif [[ "$#" != 0 ]]; then
-    printf 'usage: %s [--after|--issue175|--issue182]\n' "$0" >&2
+    printf 'usage: %s [--after|--issue175|--issue182|--issue-loop-eq-r1]\n' "$0" >&2
     exit 2
 fi
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -72,6 +73,8 @@ elif [[ "$arm" == issue175 ]]; then
     artifact_dir="$root/artifacts/issue175"
 elif [[ "$arm" == issue182 ]]; then
     artifact_dir="$root/artifacts/issue182"
+elif [[ "$arm" == issue-loop-eq-r1 ]]; then
+    artifact_dir="$root/artifacts/issue-loop-eq-r1"
 else
     artifact_dir="$root/artifacts/issue163-phase2-wasm-baseline"
 fi

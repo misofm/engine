@@ -296,13 +296,37 @@ struct Lifetime {
 /// this function coloured: a member scheduled after the first member runs *earlier*, and a
 /// non-member op scheduled between two members runs *later*.
 ///
-/// A bank may not cross a dependency level (#96 F12) and ops are level-major, so every op in a
-/// window sits at one level and no op in a window reads another's output. Each op in a window
-/// therefore reads only values produced before the window and is read only after it. Its inputs
-/// are live entering the window and its output is dead until the window ends, so the whole
-/// soundness condition collapses to one sentence:
+/// A *single-slot* bank may not cross a dependency level (#96 F12) and ops are level-major, so
+/// every op in such a window sits at one level and no op in it reads another's output. Each op in
+/// the window therefore reads only values produced before the window and is read only after it.
+/// Its inputs are live entering the window and its output is dead until the window ends, so the
+/// whole soundness condition collapses to one sentence:
 ///
 /// > **No physical slot may be recycled inside a bank window.**
+///
+/// ## A cohort chain's window spans levels, and the sentence still holds (issue #181)
+///
+/// `runtime::cohort_runs` now renders consecutive slots of one cohort chain as **one** unit, so a
+/// window can cover slot `k` at level `L` and slot `k + 1` at level `L + 1`, and the clause "no op
+/// in a window reads another's output" is false there: slot `k + 1`'s op names slot `k`'s buffer.
+/// The argument has to be re-made rather than reused, and it comes out the same way:
+///
+/// * A later slot's op is **not executed**. The chain computes it over the resident AoSoA block,
+///   so the read that would have gone through the arena never happens. What was an inter-op edge
+///   inside the window becomes a value passed between two slots in registers and scratch.
+/// * `runtime::chains_into` merges only when the later slot's op has exactly one main input, no
+///   sidechain, and no compensation-delay staging, and when the earlier slot's output is read by
+///   **nothing else** -- no second consumer, no `Tap`, no observer, and not the session output.
+///   So the earlier slot's buffer, which now holds the chain's *input* rather than that slot's
+///   output, has no reader inside or outside the window that could tell.
+/// * Every other op in the window is still read only after the window and written only before it,
+///   exactly as above.
+///
+/// So the window's obligation is unchanged -- no physical slot may be recycled inside it -- and
+/// `bank_member_nodes` is what makes the window the merged one: it lists a cohort chain as a
+/// single entry covering every slot's members, so the span this function holds is the span the
+/// runtime actually permutes. A window wider than the permutation is always safe; one narrower is
+/// the defect this machinery exists to prevent.
 ///
 /// `bank_windows` computes those ranges and pass 2 *holds* every slot freed inside one until
 /// the window closes, instead of returning it to the free list where an op the bank hoists past

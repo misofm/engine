@@ -321,7 +321,16 @@ pub(crate) struct RuntimeOp {
 pub(crate) enum RuntimeUnit {
     Op(RuntimeOp),
     Bank {
+        /// Slot major, `lanes` ops per slot. A single-slot chain has exactly `lanes` of them.
+        ///
+        /// Only the first slot's ops are *executed*: they reduce their graph inputs into their
+        /// output buffers, which is what the chain then gathers. Every later slot's audio is
+        /// computed by the chain itself, so running its op would overwrite the scatter with a
+        /// copy of the chain's input. Later slots are still carried here because they still own
+        /// their observers and their output buffers.
         members: Box<[RuntimeOp]>,
+        /// Lanes per slot; `members.len()` is a whole multiple of it.
+        lanes: usize,
         chain: BankChain,
     },
 }
@@ -341,11 +350,23 @@ impl RuntimeUnit {
         }
     }
 
+    /// `[bank chains, bound bank slots]` this unit realises (issue #181).
+    ///
+    /// The two were the same number for every plan before a cohort chain could carry more than
+    /// one slot, which is precisely why G5 could not tell "one round-trip per chain" from "one
+    /// per slot". Reporting both is what lets the gate state the law it means.
+    pub(crate) fn bank_shape(&self) -> [u64; 2] {
+        match self {
+            Self::Op(_) => [0, 0],
+            Self::Bank { members, lanes, .. } => [1, (members.len() / lanes) as u64],
+        }
+    }
+
     /// Exact engine-owned observation bytes this unit retains (issue #143 R7).
     pub(crate) fn observation_retained_bytes(&self) -> usize {
         match self {
             Self::Op(op) => op.kind.observation_retained_bytes(),
-            Self::Bank { members, chain } => {
+            Self::Bank { members, chain, .. } => {
                 members
                     .iter()
                     .map(|member| member.kind.observation_retained_bytes())
@@ -359,7 +380,7 @@ impl RuntimeUnit {
     pub(crate) fn observation_binding_counts(&self) -> [u64; 3] {
         match self {
             Self::Op(op) => op.kind.observation_binding_counts(),
-            Self::Bank { members, chain } => {
+            Self::Bank { members, chain, .. } => {
                 let mut total = chain.observation_binding_counts();
                 for member in members.iter() {
                     let counts = member.kind.observation_binding_counts();
@@ -401,15 +422,21 @@ impl NodeKind {
 }
 
 // REALTIME_POLICY_BEGIN
-/// Planar per-lane view over the arena slots a bank's members own.
+/// Planar per-lane view over the arena slots a bank chain gathers from and scatters to.
+///
+/// The two lists differ only for a multi-slot cohort chain (issue #181): the chain gathers the
+/// first slot's member outputs and scatters the *last* slot's, because the last slot's buffer is
+/// what the rest of the graph reads. A single-slot chain passes the same list twice, which is the
+/// in-place round-trip it has always done.
 struct ArenaMembers<'a> {
     lease: &'a mut ArenaLeaseV1,
+    inputs: &'a [u32],
     outputs: &'a [u32],
 }
 
 impl BankMembers for ArenaMembers<'_> {
     fn plane(&self, lane: usize) -> (&[f32], &[f32]) {
-        self.lease.read_stereo(self.outputs[lane])
+        self.lease.read_stereo(self.inputs[lane])
     }
     fn plane_mut(&mut self, lane: usize) -> (&mut [f32], &mut [f32]) {
         self.lease.write_stereo(self.outputs[lane])
@@ -424,7 +451,9 @@ pub(crate) struct Runtime {
     pub(crate) lease: ArenaLeaseV1,
     pub(crate) delays: Box<[CompensationDelay]>,
     pub(crate) units: Box<[RuntimeUnit]>,
-    /// Scratch for a bank's member output buffers, sized to the widest bank at bind.
+    /// Scratch for a bank chain's gather-source buffers, sized to the widest bank at bind.
+    bank_inputs: Box<[u32]>,
+    /// Scratch for a bank chain's scatter-target buffers, sized to the widest bank at bind.
     bank_outputs: Box<[u32]>,
 }
 
@@ -438,7 +467,7 @@ impl Runtime {
             .iter()
             .map(|unit| match unit {
                 RuntimeUnit::Op(_) => 0,
-                RuntimeUnit::Bank { members, .. } => members.len(),
+                RuntimeUnit::Bank { lanes, .. } => *lanes,
             })
             .max()
             .unwrap_or(0);
@@ -446,6 +475,7 @@ impl Runtime {
             lease,
             delays: delays.into_boxed_slice(),
             units: units.into_boxed_slice(),
+            bank_inputs: vec![0; widest].into_boxed_slice(),
             bank_outputs: vec![0; widest].into_boxed_slice(),
         }
     }
@@ -468,23 +498,33 @@ impl Runtime {
             lease,
             delays,
             units,
+            bank_inputs,
             bank_outputs,
         } = self;
         let delays: &mut [CompensationDelay] = delays;
         match &mut units[index] {
             RuntimeUnit::Op(op) => execute_op(op, lease, delays, first_sample),
-            RuntimeUnit::Bank { members, chain } => {
-                for member in members.iter_mut() {
+            RuntimeUnit::Bank {
+                members,
+                lanes,
+                chain,
+            } => {
+                let lanes = *lanes;
+                // Only the first slot reduces graph inputs; the chain computes the rest.
+                for member in members[..lanes].iter_mut() {
                     execute_op(member, lease, delays, first_sample)?;
                 }
-                for (lane, member) in members.iter().enumerate() {
-                    bank_outputs[lane] = member.output;
+                let last = members.len() - lanes;
+                for lane in 0..lanes {
+                    bank_inputs[lane] = members[lane].output;
+                    bank_outputs[lane] = members[last + lane].output;
                 }
                 let frames = lease.frames();
                 chain.run(
                     &mut ArenaMembers {
                         lease,
-                        outputs: &bank_outputs[..members.len()],
+                        inputs: &bank_inputs[..lanes],
+                        outputs: &bank_outputs[..lanes],
                     },
                     u32::try_from(frames).unwrap_or(u32::MAX),
                     first_sample,
@@ -736,16 +776,25 @@ pub(crate) fn trailing_active_mask(members: usize, width: BankWidth) -> Box<[boo
         .collect()
 }
 
-fn bank_chain(scratch: AoSoaScratch, active: Box<[bool]>, stage: Box<dyn BankStage>) -> BankChain {
-    BankChain::new(
-        scratch,
-        active.clone(),
-        vec![BankSlot {
+/// One chain over `slots`, in cascade order, sharing one resident block.
+///
+/// `active` is the chain's lane mask; every slot carries it too, because a cohort chain binds a
+/// slot only when *every* lane of the group runs it (`banks::bind_rack_banks`, #96 F7). The rack
+/// crate has supported multi-slot chains since it was written and unit-tests three of them; until
+/// issue #181 nothing in the graph layer ever handed it more than one.
+fn bank_chain(
+    scratch: AoSoaScratch,
+    active: Box<[bool]>,
+    slots: Vec<Box<dyn BankStage>>,
+) -> BankChain {
+    let slots = slots
+        .into_iter()
+        .map(|stage| BankSlot {
             stage,
-            active_lanes: active,
-        }],
-    )
-    .expect("validated bank shape")
+            active_lanes: active.clone(),
+        })
+        .collect();
+    BankChain::new(scratch, active, slots).expect("validated bank shape")
 }
 
 /// Which unit a node belongs to, when it is a bank member.
@@ -897,7 +946,44 @@ impl RuntimeParts {
         }
     }
 
-    fn chain_for(&mut self, membership: Membership, members: usize) -> BankChain {
+    /// One chain for a whole cohort run, in slot order (issue #181).
+    ///
+    /// The scratch and the lane mask come from the run's first slot; every slot of a cohort
+    /// covers the same lanes by construction, and `BankChain::new` re-checks it rather than
+    /// trusting it.
+    fn chain_for(&mut self, run: &[Membership], members: usize) -> BankChain {
+        // Every slot arrives with its own `AoSoaScratch`, because a bound bank is prepared
+        // without knowing whether it will end up sharing a chain. One chain has one resident
+        // block, so the run keeps the first slot's scratch and drops the rest here, on the
+        // control plane at bind. The compile-time estimate (`banks::effect_bank_resource`) still
+        // charges one scratch per bound *slot*, so it now over-states what the plan retains by
+        // one scratch per merged slot. Over-stating is the safe direction for a memory ceiling --
+        // a plan admitted under the estimate always fits -- and it is left that way deliberately:
+        // the estimate is computed before the lowered program exists, and whether a merge is
+        // admissible is not knowable until it does.
+        let mut scratch = None;
+        let mut active: Option<Box<[bool]>> = None;
+        let mut stages = Vec::with_capacity(run.len());
+        for membership in run {
+            let (slot_scratch, slot_active, stage) = self.stage_for(*membership, members);
+            if scratch.is_none() {
+                scratch = Some(slot_scratch);
+                active = Some(slot_active);
+            }
+            stages.push(stage);
+        }
+        bank_chain(
+            scratch.expect("a unit has at least one slot"),
+            active.expect("a unit has at least one slot"),
+            stages,
+        )
+    }
+
+    fn stage_for(
+        &mut self,
+        membership: Membership,
+        members: usize,
+    ) -> (AoSoaScratch, Box<[bool]>, Box<dyn BankStage>) {
         match membership {
             Membership::Effect(index) => {
                 let bank = self.banks[index].take().expect("one effect bank owner");
@@ -936,19 +1022,27 @@ impl RuntimeParts {
                         latency,
                     )
                     .expect("validated width");
-                    return bank_chain(bank.scratch, bank.active_mask, Box::new(stage));
+                    return (bank.scratch, bank.active_mask, Box::new(stage));
                 }
                 let stage =
                     EffectBankStage::new(bank.processor, width, quantum).expect("validated width");
-                bank_chain(bank.scratch, bank.active_mask, Box::new(stage))
+                (bank.scratch, bank.active_mask, Box::new(stage))
             }
             Membership::Builtin(index) => {
                 let bank = self.builtin_banks[index]
                     .take()
                     .expect("one builtin bank owner");
                 let active = trailing_active_mask(members, bank.scratch.width());
-                bank_chain(bank.scratch, active, Box::new(BuiltinStage(bank.processor)))
+                (bank.scratch, active, Box::new(BuiltinStage(bank.processor)))
             }
+        }
+    }
+
+    /// The cohort chain a bound effect bank belongs to, or `None` for a builtin bank.
+    fn cohort_of(&self, membership: Membership) -> Option<crate::GraphBankCohortV1> {
+        match membership {
+            Membership::Effect(index) => self.banks[index].as_ref().map(|bank| bank.cohort),
+            Membership::Builtin(_) => None,
         }
     }
 }
@@ -1032,8 +1126,17 @@ pub(crate) fn build_sequential(
         .iter()
         .map(|line| CompensationDelay::new(line.samples as usize))
         .collect();
-    let mut units = Vec::with_capacity(grouped.len());
-    for (membership, ops) in grouped {
+    // Issue #181: consecutive slots of one cohort chain become one unit with one chain, so the
+    // pair pays one planar/AoSoA round-trip per block where it used to pay two.
+    let runs = cohort_runs(program, spec, &parts, &grouped);
+    let mut units = Vec::with_capacity(runs.len());
+    for run in runs {
+        let membership: Vec<Membership> =
+            run.iter().filter_map(|index| grouped[*index].0).collect();
+        let ops: Vec<usize> = run
+            .iter()
+            .flat_map(|index| grouped[*index].1.iter().copied())
+            .collect();
         let members: Vec<RuntimeOp> = ops
             .iter()
             .map(|index| {
@@ -1077,7 +1180,7 @@ pub(crate) fn build_sequential(
                 )
             })
             .collect();
-        units.push(finish_unit(&mut parts, membership, members));
+        units.push(finish_unit(&mut parts, &membership, members));
     }
     let mut builder = ArenaLeaseSetBuilder::new(
         NonZeroUsize::new(2).expect("stereo planes"),
@@ -1120,19 +1223,171 @@ fn build_op(
 
 fn finish_unit(
     parts: &mut RuntimeParts,
-    membership: Option<Membership>,
+    run: &[Membership],
     mut members: Vec<RuntimeOp>,
 ) -> RuntimeUnit {
-    match membership {
-        None => RuntimeUnit::Op(members.pop().expect("one op per plain unit")),
-        Some(membership) => {
-            let chain = parts.chain_for(membership, members.len());
-            RuntimeUnit::Bank {
-                members: members.into_boxed_slice(),
-                chain,
+    if run.is_empty() {
+        return RuntimeUnit::Op(members.pop().expect("one op per plain unit"));
+    }
+    let lanes = members.len() / run.len();
+    let chain = parts.chain_for(run, lanes);
+    RuntimeUnit::Bank {
+        members: members.into_boxed_slice(),
+        lanes,
+        chain,
+    }
+}
+
+/// For each op, the ops that read its output, and the op that produced its first main input.
+///
+/// The lowering gives an op output a *coloured* buffer and colours are reused, so "which ops name
+/// this buffer" is not the question -- "which ops name it while this op is still its last writer"
+/// is. Walking `program.ops` in schedule order and remembering the last writer of each colour
+/// answers exactly that: liveness colouring never reassigns a colour while a consumer still needs
+/// it, so the last writer at the moment a consumer is reached is that consumer's producer. This
+/// reuses #98/#99's colouring rather than forming a second opinion from the semantic graph.
+fn op_dataflow(program: &ExecutionProgram) -> (Vec<Vec<usize>>, Vec<Option<usize>>) {
+    let mut owner: Vec<Option<usize>> = vec![None; program.buffers as usize];
+    let mut readers: Vec<Vec<usize>> = vec![Vec::new(); program.ops.len()];
+    let mut first_producer: Vec<Option<usize>> = vec![None; program.ops.len()];
+    for (index, op) in program.ops.iter().enumerate() {
+        for (position, input) in program.inputs_of(op).iter().enumerate() {
+            if let Some(producer) = owner[input.buffer.0 as usize] {
+                readers[producer].push(index);
+                if position == 0 {
+                    first_producer[index] = Some(producer);
+                }
+            }
+        }
+        if let Some(Some(producer)) = op.sidechain.map(|side| owner[side.buffer.0 as usize]) {
+            readers[producer].push(index);
+        }
+        owner[op.output.0 as usize] = Some(index);
+    }
+    (readers, first_producer)
+}
+
+/// `true` when unit `later`'s ops are exactly the lane-wise consumers of unit `earlier`'s, so the
+/// two may be rendered as consecutive slots of one chain (issue #181).
+///
+/// The merge replaces two planar/AoSoA round-trips with one: the chain gathers `earlier`'s member
+/// outputs, runs both stages over the resident block, and scatters into `later`'s. The price is
+/// that `earlier`'s output buffers are left holding the *chain's input* rather than the first
+/// stage's output, and `later`'s ops never reduce. Every clause below is one way that could be
+/// observed, and any one of them declines the merge:
+///
+/// * **Lane count.** The two slots must cover the same lanes, one op each.
+/// * **`later` reads only `earlier`, undelayed and unmixed.** One main input, no sidechain, no
+///   compensation-delay staging -- otherwise skipping `later`'s reduction would drop a summand or
+///   a delay line. A sidechained slot already blocks banking (#96 F9); this re-checks it on the
+///   lowered program rather than trusting the planner.
+/// * **Nothing else reads `earlier`.** Exactly one reader, and it is `later`'s op. A send tap, a
+///   meter or a second consumer would read the pre-stage signal.
+/// * **No alias, no observer, and not the session output.** A `program::Tap` aliases an elided
+///   node onto `earlier`'s buffer; an observer bound to `earlier` fires after the unit and would
+///   see the chain's input; and the session output is read by the host.
+fn chains_into(
+    program: &ExecutionProgram,
+    spec: &GraphSpec,
+    parts: &RuntimeParts,
+    readers: &[Vec<usize>],
+    first_producer: &[Option<usize>],
+    earlier: &[usize],
+    later: &[usize],
+) -> bool {
+    if earlier.len() != later.len() || earlier.is_empty() {
+        return false;
+    }
+    for (before, after) in earlier.iter().zip(later.iter()) {
+        let producer = &program.ops[*before];
+        let consumer = &program.ops[*after];
+        if consumer.input_count() != 1
+            || consumer.sidechain.is_some()
+            || program.inputs_of(consumer)[0].delay.is_some()
+            || first_producer[*after] != Some(*before)
+        {
+            return false;
+        }
+        if readers[*before].len() != 1 || readers[*before][0] != *after {
+            return false;
+        }
+        if producer.output == program.output
+            || program
+                .taps
+                .iter()
+                .any(|tap| tap.after_op as usize == *before)
+        {
+            return false;
+        }
+        let node = &spec.nodes[producer.node as usize].id;
+        if parts.observers.contains_key(node) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Groups the planned units into cohort runs: consecutive slots of one chain become one unit.
+///
+/// Returns one entry per rendered unit, in render order, each listing the planned-unit indices it
+/// covers. A unit that merges with nothing is a run of one, which is what every unit was before
+/// issue #181.
+///
+/// Two bank units are candidates when the cohort planner put them in the same group -- that is
+/// the only place the "same lanes, consecutive slots of one rack chain" fact exists -- and the
+/// merge happens only when [`chains_into`] can also prove it on the lowered program. The planner
+/// knows the session's shape; the program knows what the colouring and the taps did with it, and
+/// both have to agree.
+fn cohort_runs(
+    program: &ExecutionProgram,
+    spec: &GraphSpec,
+    parts: &RuntimeParts,
+    units: &[PlannedUnit],
+) -> Vec<Vec<usize>> {
+    let (readers, first_producer) = op_dataflow(program);
+    // Candidate successors: within one cohort group, the next bound slot.
+    let mut by_group: BTreeMap<u32, Vec<(u32, usize)>> = BTreeMap::new();
+    for (index, (membership, _)) in units.iter().enumerate() {
+        if let Some(cohort) = membership.and_then(|value| parts.cohort_of(value)) {
+            by_group
+                .entry(cohort.group)
+                .or_default()
+                .push((cohort.slot, index));
+        }
+    }
+    let mut successor: BTreeMap<usize, usize> = BTreeMap::new();
+    for slots in by_group.values_mut() {
+        slots.sort_unstable();
+        for pair in slots.windows(2) {
+            let (earlier, later) = (pair[0].1, pair[1].1);
+            if chains_into(
+                program,
+                spec,
+                parts,
+                &readers,
+                &first_producer,
+                &units[earlier].1,
+                &units[later].1,
+            ) {
+                successor.insert(earlier, later);
             }
         }
     }
+    let merged: std::collections::BTreeSet<usize> = successor.values().copied().collect();
+    let mut runs = Vec::with_capacity(units.len());
+    for index in 0..units.len() {
+        if merged.contains(&index) {
+            continue;
+        }
+        let mut run = vec![index];
+        let mut cursor = index;
+        while let Some(next) = successor.get(&cursor) {
+            run.push(*next);
+            cursor = *next;
+        }
+        runs.push(run);
+    }
+    runs
 }
 
 #[cfg(test)]

@@ -97,6 +97,16 @@ pub trait PreparedPlanExecutor: Send {
     fn bank_transposes(&self) -> u64 {
         0
     }
+    /// `[bank chains, bound bank slots]` the built runtime realises (issue #181).
+    ///
+    /// G5 fixes one round-trip per bank **chain** per block. While every chain carried one slot
+    /// the two readings were numerically identical and the gate could not discriminate between
+    /// them -- a runtime that had silently regressed to one chain per slot would still have
+    /// passed. Reporting both makes the law checkable.
+    #[doc(hidden)]
+    fn bank_shape(&self) -> [u64; 2] {
+        [0, 0]
+    }
     /// `[observed stages, declared taps, armed taps]`, walked over the **built** runtime.
     ///
     /// Issue #143 E5's structural gate. "A session that asked for no observation carries none" is
@@ -353,6 +363,18 @@ impl PreparedRenderPlan {
         self.executor
             .as_deref()
             .map_or(0, PreparedPlanExecutor::bank_transposes)
+    }
+    /// Read `[bank chains, bound bank slots]` outside the render scope (issue #181).
+    #[doc(hidden)]
+    #[must_use]
+    pub fn bank_shape(&self) -> [u64; 2] {
+        assert!(
+            !super::audit::is_render_scope_active(),
+            "bank shape counters are sealed until the render audit is disarmed"
+        );
+        self.executor
+            .as_deref()
+            .map_or([0, 0], PreparedPlanExecutor::bank_shape)
     }
     /// Copy cumulative auxiliary-worker audit snapshots in stable worker order.
     #[doc(hidden)]
