@@ -114,3 +114,79 @@ in the frozen order anyway, and the order is the reason the D8 citation in
 `sliding_minimum_uniform`'s prose is a citation and not a hand-wave: the equality it claims is an
 equality of definitions, which holds on the whole `f32` domain rather than only on the reachable
 part of it.
+
+## Issue #182 S2 — the earned silence fixed point
+
+The compressor's `silent_fixed_point` design (#163 phase 4 item 1) at a kernel whose rest state is
+not all zeros. `LimiterCore::process_block` admits a block when the claim stands, no ramp window is
+open, the bypass flag has not moved and both input planes are exactly `+0.0`; it earns the claim
+back from a block that *ran* and left both channels at `clear_runtime`'s documented rest state with
+an all-`+0.0` output. A skipped block advances the two cursors and each lane's van Herk phase and
+touches nothing else, which makes it bit-identical to the block that ran rather than merely
+equivalent to it.
+
+Every gate here has two arms over the same signal, the same parameters and the same block
+boundaries; the control arm withdraws the claim before every block, so the only difference between
+the arms is the fast path. Both the rendered samples **and** the whole instance state — every ring,
+the recursive word, the cursors, the phases and all four ramps — are compared, block by block.
+
+| # | mutation | file | test that turned red |
+|---|---|---|---|
+| 182-6 | input `block_is_positive_zero` legs dropped from the admission test | `src/lib.rs` `LimiterCore::process_block` | `a_settled_silent_limiter_renders_exactly_the_never_fast_path`, `a_negative_zero_input_block_is_not_treated_as_silence`, `a_stale_detector_history_refuses_the_claim` |
+| 182-7 | `block_is_positive_zero(&self.reduction)` dropped from `is_at_silent_rest` | `src/lib.rs` `ChannelState::is_at_silent_rest` | `a_limiter_still_releasing_through_the_silence_is_never_frozen` |
+| 182-8 | `block_is_positive_zero(&self.main_ring)` dropped | `src/lib.rs` `ChannelState::is_at_silent_rest` | `a_settled_silent_limiter_renders_exactly_the_never_fast_path`, `a_negative_zero_input_block_is_not_treated_as_silence` |
+| 182-9 | `block_is_positive_zero(&self.history)` dropped | `src/lib.rs` `ChannelState::is_at_silent_rest` | `a_stale_detector_history_refuses_the_claim` — **and nothing else** |
+| 182-10 | output `block_is_positive_zero` legs dropped from the claim | `src/lib.rs` `LimiterCore::process_block` | `a_settled_silent_limiter_renders_exactly_the_never_fast_path` |
+| 182-11 | `self.cursors.advance(frames, &self.shape)` deleted from the fast path | `src/lib.rs` `LimiterCore::process_block` | `a_settled_silent_limiter_...`, `a_negative_zero_input_...`, `a_stale_detector_history_...` (via the state comparison, not the sample comparison) |
+| 182-12 | both `advance_rest_phase(frames)` calls deleted from the fast path | `src/lib.rs` `LimiterCore::process_block` | as 182-11 |
+| 182-13 | the four `ramps_are_stationary` legs dropped from the admission test | `src/lib.rs` `LimiterCore::process_block` | `a_de_zipper_window_open_across_a_block_boundary_refuses_the_claim` — **and nothing else** |
+| 182-14 | `self.silent_fixed_point = false` deleted from `restore_track` | `src/lib.rs` `LimiterCore::restore_track` | `a_restore_withdraws_the_silence_claim` — **and nothing else** |
+| 182-15 | `if !block.automation.is_empty()` withdrawal deleted from `process` | `src/lib.rs` `PreparedTruePeakLimiter::process` | `automation_withdraws_the_claim_and_the_resident_tap_keeps_up` |
+| 182-16 | the same withdrawal deleted from `process_bank` | `src/lib.rs` `PreparedTruePeakLimiterBank::process_bank` | `automation_withdraws_the_claim_on_the_bank_path_too` |
+
+### Two legs that a 128-frame quantum cannot reach
+
+`RAMP_UPDATES` is 64 and `HISTORY_WORDS` is 12, so at the quantum every other test in this crate
+uses, a de-zipper window is fully consumed inside the block that opened it and twelve stale detector
+taps are flushed by the first block that renders after them. Rows 182-9 and 182-13 are therefore red
+only at a **short** quantum, and their tests run eight-frame blocks to reach them. The render quantum
+is caller-supplied, so neither implication is a property of the effect; both are properties of one
+configuration, and a gate that only held at that configuration would be a gate that held by luck.
+
+### Four legs that turn nothing red, and the argument that they are still right
+
+`all_exactly_one` on `required_ring`, on `box_ring` and on `prefix`, and the `box_sum == Wb` test,
+can all be deleted with every test in this crate still green. Recorded rather than deleted, because
+the reason is a dynamics argument and dynamics arguments are exactly what a bit-identity claim
+should not rest on.
+
+The reduction word is always the last thing to settle, by three orders of magnitude. `d = +0.0`
+already implies `1 - S/Wb <= 0`, hence `S >= Wb`; every box term is at most `1`, so `S <= Wb`; so
+`S == Wb` exactly and every one of the `Wb` terms in the sum is exactly `1.0` — which is every term
+the ring will be read for while the claim holds. The ring legs are therefore *implied* for the
+purpose of rendering the right samples. Separately, reaching `d = +0.0` at all needs the release to
+decay to `FLUSH_EPS = 1e-20`, which is around 218 000 samples at a 100 ms release and four million
+at 2 000 ms, against a ring of `R = 481` slots: by the time the recursive word snaps, every slot has
+been overwritten with `1.0` hundreds of times.
+
+So the four legs are kept for what the *dynamics* cannot promise: that the skipped block leaves the
+arena bit-identical, including the slots outside the current window that a rendered block would have
+rewritten and a skipped one does not touch. They cost one linear scan of a settling block, on a path
+that is about to replace a whole block of rendering, and they make `is_at_silent_rest` a literal
+transcription of `clear_runtime` rather than a subset of it that has to be re-derived every time the
+release law changes.
+
+### One leg that is inert today
+
+`self.silent_bypass == self.metadata.bypass` turns nothing red, and cannot: `bypass` is fixed at
+preparation and there is no path that changes it, so `silent_bypass` is always equal to it. It is
+kept for parity with `miso-engine-compressor` and `miso-engine-parametric-eq`, which carry the same
+leg for the same reason, and because it is the leg that becomes load-bearing the day bypass becomes
+a per-block flag — at which point every standing claim would otherwise silently survive a change of
+kernel arm. One bool compare per block is not where this crate's ceremony budget goes.
+
+`LimiterCore::reset` withdraws the claim and that turns nothing red either, for a different and
+weaker reason: both resets land on `clear_runtime`, which *is* the rest state the claim describes,
+so a claim that survived a reset would happen to be true. It is withdrawn because the claim is a
+statement about a block that was rendered and observed, and it must not come to depend on
+`clear_runtime` and `is_at_silent_rest` continuing to coincide.

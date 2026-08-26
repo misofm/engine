@@ -55,7 +55,7 @@ use miso_engine_effect_contract::{
     StatePayloadError, StatePayloadInput, StatePayloadOutput, StatePayloadSizes, TailSamples,
     expected_prepared_metadata,
 };
-use miso_engine_effect_runtime::bank::{NonFiniteReport, finish_block};
+use miso_engine_effect_runtime::bank::{NonFiniteReport, block_is_positive_zero, finish_block};
 use miso_engine_effect_runtime::params::{
     ParameterSpec, is_negative_zero, normalize_zero, parameter_value_valid,
 };
@@ -435,6 +435,19 @@ struct Cursors {
     ring: u32,
 }
 
+impl Cursors {
+    /// Advances both cursors by a whole block, as `frames` per-sample steps would (#182 S2).
+    ///
+    /// The `%` here is not the one #90 F6 removed. F6 is about the *render path*: a cursor must not
+    /// cost a division per sample, which is why [`limiter_block_body`] advances with a compare and
+    /// a wrap. This runs once per block on a path that renders nothing at all, in the same position
+    /// and for the same reason as the rotation arithmetic in [`commit_lane`].
+    fn advance(&mut self, frames: usize, shape: &Shape) {
+        self.main = ((self.main as usize + frames % shape.main) % shape.main) as u32;
+        self.ring = ((self.ring as usize + frames % shape.ring) % shape.ring) as u32;
+    }
+}
+
 /// One channel of one instance or bank: the AoSoA arena plus the planar small state.
 ///
 /// Every ring is `slots * width` with lane `l` of slot `s` at `s * width + l`, so a frame of `W`
@@ -530,6 +543,67 @@ impl ChannelState {
             *sum = shape.window as f32;
         }
     }
+
+    /// `true` when every runtime word of this channel is exactly what [`clear_runtime`] writes.
+    ///
+    /// Issue #182 S2, the observation half of the silent fixed point. The list is
+    /// [`clear_runtime`]'s own, word for word, and that is the point: the rest state is not a
+    /// property this function invents, it is the state the crate already documents a silent lane
+    /// rests in, read back rather than assumed.
+    ///
+    /// The one member of [`clear_runtime`]'s list that is deliberately **absent** is `phase`. A
+    /// resting channel is at whatever van Herk position its history left it at, and the position is
+    /// unobservable while the rest of the state holds: with `required_ring` and `prefix` entirely
+    /// `1.0`, [`sliding_minimum`] returns `1.0` from every position and its backward pass writes
+    /// `1.0` over `1.0`. Requiring `phase == 0` would refuse the claim for all but one frame in
+    /// `Wb`, which is a correctness-free way to never engage.
+    ///
+    /// `history` is *not* absent, and it is the one entry that is not obvious. A channel can reach
+    /// `required_ring == 1.0` everywhere with a non-zero detector history — that only needs the
+    /// twelve stale taps to estimate a peak at or under the ceiling, which quiet material does all
+    /// the time. Freezing the history there would mean the first eleven frames of the tone that
+    /// ends the silence are estimated against samples from before it, so the fast path has to wait
+    /// for the history to drain like everything else.
+    ///
+    /// Bits, not values, at every word. `-0.0 == 0.0` and `1.0 - 2^-24 != 1.0`, but the fast path
+    /// promises not to move a bit, so the test that licenses it has to be a bit test.
+    ///
+    /// [`clear_runtime`]: ChannelState::clear_runtime
+    fn is_at_silent_rest(&self) -> bool {
+        block_is_positive_zero(&self.history)
+            && block_is_positive_zero(&self.main_ring)
+            && block_is_positive_zero(&self.reduction)
+            && all_exactly_one(&self.required_ring)
+            && all_exactly_one(&self.box_ring)
+            && all_exactly_one(&self.prefix)
+            && self
+                .box_sum
+                .iter()
+                .zip(self.lane.iter())
+                .all(|(sum, shape)| sum.to_bits() == (shape.window as f32).to_bits())
+    }
+
+    /// Advances each lane's van Herk phase by a whole block, as the frame loop would (#182 S2).
+    ///
+    /// Per lane, because `window` is a per-lane preparation parameter — this is the control-plane
+    /// mirror of the same fact [`lanes_uniform`] gates on. The phase cycles `0 .. Wb - 1` one step
+    /// per frame, so `frames` steps land on `(phase + frames) mod Wb`.
+    fn advance_rest_phase(&mut self, frames: usize) {
+        for (phase, shape) in self.phase.iter_mut().zip(self.lane.iter()) {
+            let window = shape.window as usize;
+            *phase = ((*phase as usize + frames % window) % window) as u32;
+        }
+    }
+}
+
+/// `true` when every word of `values` is **exactly** the `f32` `1.0`, by bit pattern.
+///
+/// The identity element of this kernel's three multiplicative rings, and the counterpart of
+/// [`block_is_positive_zero`] for them: a ring of exact `1.0` returns `1.0` from any cursor
+/// position, which is what lets a skipped block leave it untouched and still be bit-identical.
+fn all_exactly_one(values: &[f32]) -> bool {
+    const ONE: u32 = 1.0_f32.to_bits();
+    values.iter().all(|value| value.to_bits() == ONE)
 }
 
 /// `true` when no lane of `ramps` has a window open and every lane holds exactly its target.
@@ -1200,6 +1274,21 @@ struct LimiterCore<L: Lane> {
     right: ChannelState,
     cursors: Cursors,
     report: NonFiniteReport,
+    /// Issue #182 S2: the previous block proved this instance is at a silent fixed point.
+    ///
+    /// Earned only by observation in [`process_block`](Self::process_block), never assumed. The
+    /// design is the compressor's `silent_fixed_point` (#163 phase 4 item 1) at a kernel whose rest
+    /// state is not all zeros: two of this crate's three rings rest at exactly `1.0`, not `+0.0`,
+    /// and the argument transfers because what it needs is that the rings rest **uniform**, so that
+    /// a read from any cursor position returns the value a slow path would have read.
+    silent_fixed_point: bool,
+    /// The bypass flag in force when the claim above was earned. Bypass selects a different arm of
+    /// the output `select`, so a claim earned on one side of it says nothing about the other.
+    silent_bypass: bool,
+    /// Blocks the fast path actually took, for the engagement-rate gate. Test-only, like
+    /// [`nonfinite_report`](Self::nonfinite_report): instrumentation is not render state.
+    #[cfg(test)]
+    silent_engagements: u32,
 }
 
 impl<L: Lane> LimiterCore<L> {
@@ -1224,6 +1313,10 @@ impl<L: Lane> LimiterCore<L> {
             right: ChannelState::new(width, &shape, &right_defaults, rate),
             cursors: Cursors::default(),
             report: NonFiniteReport::new(),
+            silent_fixed_point: false,
+            silent_bypass: metadata.bypass,
+            #[cfg(test)]
+            silent_engagements: 0,
             metadata,
             shape,
             left_defaults,
@@ -1233,6 +1326,11 @@ impl<L: Lane> LimiterCore<L> {
 
     /// The two resets, one implementation (#90 F9).
     fn reset(&mut self, kind: ResetKind) {
+        // #182 S2: a reset rewrites every ring, the recursive word and the cursors, so the claim
+        // goes. It is withdrawn rather than re-earned here even though `clear_runtime` leaves
+        // precisely the rest state the claim describes, because the claim is a statement about a
+        // block that was *rendered and observed*, and a reset renders nothing.
+        self.silent_fixed_point = false;
         let rate = self.metadata.sample_rate;
         match kind {
             ResetKind::FullToDefaults => {
@@ -1256,6 +1354,55 @@ impl<L: Lane> LimiterCore<L> {
     /// per-lane recovery and no per-value check anywhere on this path: a signal that leaves the
     /// representable range is a bug report, not a signal-processing feature.
     fn process_block(&mut self, left_io: &mut [f32], right_io: &mut [f32], frames: usize) {
+        let words = frames * L::WIDTH;
+        // Issue #182 S2, the phase-4 admission test. Whole-bank, never per lane, and every leg is
+        // cheap next to the block it can replace:
+        //
+        // * no ramp of either channel has a window open and each holds exactly its target, so the
+        //   coefficient words in force are the ones the observed block used;
+        // * the bypass flag is the one that was in force when the claim was earned, since bypass
+        //   selects the other arm of this kernel's output `select`;
+        // * both input planes are exactly `+0.0`, which short-circuits on the first thirty-two
+        //   words for a block carrying signal.
+        //
+        // Strict `+0.0`, never `== 0.0`. This crate is the one where the distinction is audible
+        // rather than academic: a `-0.0` input sample is written into `main_ring` and emerges `B =
+        // N + 6` samples later, and `select(bypass, delayed, delayed * gain)` preserves its sign on
+        // both arms (`-0.0 * 1.0` is `-0.0`). A fast path that counted `-0.0` as silence would
+        // never write it into the line, and the sample that should have come out of the line four
+        // blocks later would be `+0.0` instead. That is the compressor's input-side argument
+        // (#163 phase 4, adversarial pass) at a kernel that also has a delay line to carry it.
+        let quiet = self.silent_bypass == self.metadata.bypass
+            && ramps_are_stationary(&self.left.limit)
+            && ramps_are_stationary(&self.left.release)
+            && ramps_are_stationary(&self.right.limit)
+            && ramps_are_stationary(&self.right.release)
+            && block_is_positive_zero(&left_io[..words])
+            && block_is_positive_zero(&right_io[..words]);
+        if quiet && self.silent_fixed_point {
+            // Every ring is known uniform — `main_ring` all `+0.0`, `required_ring` and `box_ring`
+            // all exactly `1.0` — the recursive word is at its fixed point, and the buffers already
+            // hold the `+0.0` the kernel would have written over them. What the frame loop would
+            // have done to the arena is the identity at every step: it writes `r = 1.0` over a
+            // `1.0`, takes a window minimum of `1.0`s, quantises `1.0` to `1.0`, adds and subtracts
+            // the same `1.0` from a box sum that is exactly `Wb` (and is therefore exact, being a
+            // multiple of `2^-14` below `2^24`), lands on `d = flush(max(0, fma(c, 0, 0))) = +0.0`,
+            // and stores the `+0.0` it just read out of the main ring.
+            //
+            // Only the cursors and the van Herk phase actually move, so only they are advanced.
+            // As in the compressor's cursor note, this makes the skipped block leave the instance
+            // **bit-identical** to the block that ran, rather than merely observationally
+            // equivalent to it: the weaker invariant would have to be re-proved every time the ring
+            // handling changed, and `snapshot_track` would expose the difference immediately.
+            self.left.advance_rest_phase(frames);
+            self.right.advance_rest_phase(frames);
+            self.cursors.advance(frames, &self.shape);
+            #[cfg(test)]
+            {
+                self.silent_engagements = self.silent_engagements.saturating_add(1);
+            }
+            return;
+        }
         limiter_block::<L>(
             left_io,
             right_io,
@@ -1266,6 +1413,23 @@ impl<L: Lane> LimiterCore<L> {
             &mut self.right,
             &mut self.cursors,
         );
+        // Earn or lose the claim from what this block actually did. `is_at_silent_rest` is
+        // `clear_runtime`'s own word list read back, which is the state the crate documents a
+        // silent lane rests in; the output test is what says the *caller* saw silence too.
+        //
+        // The rest state is exactly reachable here, which is the precondition #163 phase 4 states
+        // for engaging at all. Every box term is an integer multiple of `2^-14` and `BOX_GRID * R`
+        // is below `2^24` at every launch rate, so the running sum arrives at exactly `Wb` rather
+        // than near it; and the D7 flush terminates the release at exactly `+0.0` rather than
+        // asymptotically, which is the difference between this kernel and the compressor's
+        // `gain_reduction_db`. Without both, the claim would be refused forever and the fast path
+        // would be dead code.
+        self.silent_fixed_point = quiet
+            && self.left.is_at_silent_rest()
+            && self.right.is_at_silent_rest()
+            && block_is_positive_zero(&left_io[..words])
+            && block_is_positive_zero(&right_io[..words]);
+        self.silent_bypass = self.metadata.bypass;
         let shape = self.shape;
         let rate = self.metadata.sample_rate;
         let left = &mut self.left;
@@ -1284,6 +1448,12 @@ impl<L: Lane> LimiterCore<L> {
     #[cfg(test)]
     const fn nonfinite_report(&self) -> NonFiniteReport {
         self.report
+    }
+
+    /// Blocks the #182 S2 fast path took since preparation, for the engagement-rate gate.
+    #[cfg(test)]
+    const fn silent_engagements(&self) -> u32 {
+        self.silent_engagements
     }
 }
 
@@ -1700,6 +1870,11 @@ impl<L: Lane> LimiterCore<L> {
         state_layout_version: u32,
         input: &StatePayloadInput<'_>,
     ) -> Result<(), StatePayloadError> {
+        // #182 S2: a restore writes rings, the recursive word, the phase and the coefficients of
+        // one lane from a payload this instance never rendered, so any standing claim is void.
+        // Withdrawn before the version check, so a rejected restore cannot leave a half-trusted
+        // claim behind either.
+        self.silent_fixed_point = false;
         if state_layout_version != STATE_LAYOUT_VERSION {
             return Err(state_error("effect.state.version"));
         }
@@ -1853,6 +2028,10 @@ impl PreparedNativeEffect for PreparedTruePeakLimiter {
     }
 
     fn process(&mut self, block: EffectProcessBlock<'_>) -> ProcessReport {
+        // #182 S2, as in `process_bank`.
+        if !block.automation.is_empty() {
+            self.core.silent_fixed_point = false;
+        }
         let mut report = ProcessReport::default();
         let frames = block.frames();
         apply_automation(
@@ -1921,6 +2100,14 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedTruePeakLimiterBank<L> {
         debug_assert_eq!(block.width.lanes() as usize, L::WIDTH);
         debug_assert!(block.frames <= self.core.metadata.quantum);
         debug_assert!(block.sidechain.is_none());
+        // #182 S2: an admitted span retargets a linear coefficient, and one whose smoothing
+        // window resolves to zero updates snaps it outright while leaving `remaining` at zero — so
+        // the `ramps_are_stationary` leg alone would not notice it. Withdraw the claim whenever
+        // this block carries automation at all, valid or not; the next settled silent block earns
+        // it back. This is the compressor's rule and it is the same hole at both effects.
+        if !block.automation.is_empty() {
+            self.core.silent_fixed_point = false;
+        }
         let mut report = BankProcessReport::empty(self.metadata.width);
         for track in 0..L::WIDTH {
             let start = block.automation_offsets[track] as usize;
@@ -2870,6 +3057,779 @@ mod tests {
 
         let run = cohort_run(&tracks, 8, Some((3, payload)));
         run.assert_lane_identity("phase-desynchronised cohort");
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Issue #182 S2: the earned silence fixed point.
+    //
+    // The family is the compressor's (`miso-engine-compressor/tests/silent_fixed_point.rs`) at a
+    // kernel whose rest state is not all zeros. Two of the three rings rest at exactly `1.0` rather
+    // than `+0.0`, and the argument transfers unchanged because what it needs is that a resting
+    // ring is **uniform**: a read from any cursor position then returns the value a slow path would
+    // have read, so a block that writes only the resting value back leaves it bit-identical
+    // whatever the cursor did.
+    //
+    // This crate is also the one where the fixed point is *exactly* reachable, which the compressor
+    // records as the precondition for engaging at all and does not have: `gain_reduction_db`
+    // approaches `0` dB geometrically, whereas the box terms here live on the `2^-14` grid with
+    // `BOX_GRID * R` below `2^24` at every launch rate, so the running sum arrives at exactly `Wb`,
+    // and the D7 flush terminates the release at exactly `+0.0` rather than near it.
+    // ---------------------------------------------------------------------------------------
+
+    /// One block of signal, or a block filled with `quiet` — an exact `+0.0` or an exact `-0.0`.
+    ///
+    /// The signal is [`Noise`], the crate's SplitMix64, seeded from the block index so that two
+    /// arms of the same comparison see the same samples and a corpus stays a seed rather than a
+    /// file. It is deliberately *not* a sine: `f32::sin` is a platform transcendental, which
+    /// decision D6 and `scripts/check-math-policy.sh` forbid anywhere in `src/` — including in a
+    /// test module, since the policy scans the file and not the `cfg`.
+    fn silence_plane(
+        block: usize,
+        frames: usize,
+        width: usize,
+        quiet: Option<f32>,
+        amplitude: f32,
+        negate: bool,
+    ) -> Vec<f32> {
+        if let Some(fill) = quiet {
+            return vec![fill; frames * width];
+        }
+        let mut noise = Noise(0x5182_0000 ^ (block as u64).wrapping_mul(0x9E37_79B9));
+        (0..frames * width)
+            .map(|_| {
+                let value = noise.next() * amplitude;
+                if negate { -value } else { value }
+            })
+            .collect()
+    }
+
+    /// A core of `L::WIDTH` identically prepared lanes, driven directly through `process_block`.
+    ///
+    /// The same construction `a_nonfinite_block_is_zeroed_reset_and_counted` uses, and for the same
+    /// reason: `process_block` *is* the shipped path — `process` and `process_bank` both end in it
+    /// — and reaching it directly is what lets the control arm suppress the fast path without
+    /// having to change the signal or the parameters to do it.
+    fn silent_core<L: Lane>(ceiling: f32, release: f32, lookahead: f32) -> LimiterCore<L> {
+        let values = values_with(ceiling, release, lookahead);
+        let mut preparation = request(&values);
+        preparation.link_mode = LinkMode::DualMono;
+        let metadata = expected_prepared_metadata(&TRUE_PEAK_LIMITER_DESCRIPTOR_V1, preparation)
+            .expect("metadata");
+        let (left, right) = initial_defaults(&values).expect("defaults");
+        LimiterCore::<L>::new(
+            metadata,
+            vec![left; L::WIDTH].into_boxed_slice(),
+            vec![right; L::WIDTH].into_boxed_slice(),
+        )
+        .expect("core")
+    }
+
+    /// Every word of one core's state, as bits: both cursors, then both channels' whole arenas.
+    ///
+    /// Comparing *this* between the two arms, and not only the rendered samples, is what makes the
+    /// fast path's cursor and phase advances load-bearing. The compressor's version of this test
+    /// records honestly that deleting its cursor advance passes every test in its file, because a
+    /// ring of exact `+0.0` reads the same from every position; reading the state back directly
+    /// closes that gap rather than restating it. `phase` is in the list for the same reason.
+    fn state_bits<L: Lane>(core: &LimiterCore<L>) -> Vec<u32> {
+        let mut words = vec![core.cursors.main, core.cursors.ring];
+        for channel in [&core.left, &core.right] {
+            for plane in [
+                &channel.history,
+                &channel.main_ring,
+                &channel.required_ring,
+                &channel.box_ring,
+                &channel.reduction,
+                &channel.prefix,
+                &channel.box_sum,
+            ] {
+                words.extend(plane.iter().map(|value| value.to_bits()));
+            }
+            words.extend(channel.phase.iter().copied());
+            // The two coefficient ramps, which the fast path must not freeze. A skipped block
+            // advances no ramp, so a claim admitted while a de-zipper window was still open would
+            // strand `current` short of its target for as long as the silence lasted.
+            for ramps in [&channel.limit, &channel.release] {
+                for ramp in ramps.iter() {
+                    words.push(ramp.current.to_bits());
+                    words.push(ramp.target.to_bits());
+                    words.push(ramp.step.to_bits());
+                    words.push(ramp.remaining);
+                }
+            }
+        }
+        words
+    }
+
+    /// What one arm of a silence comparison produced.
+    struct SilenceArm {
+        /// Every rendered sample of every block, both planes.
+        rendered: Vec<u32>,
+        /// The whole instance's state, sampled at the end of every block.
+        states: Vec<u32>,
+        /// Left lane 0's recursive reduction word, at the end of every block.
+        reduction: Vec<u32>,
+        /// Blocks the fast path actually took.
+        engagements: u32,
+    }
+
+    /// Renders `plan` through `core`: `None` is a tone block, `Some(fill)` a constant plane.
+    ///
+    /// `force_slow` withdraws the claim before every block, which is the control arm: it changes
+    /// nothing about the signal, the parameters or the block boundaries, so any difference between
+    /// the arms is the fast path and only the fast path.
+    fn run_silence_arm<L: Lane>(
+        core: &mut LimiterCore<L>,
+        plan: &[Option<f32>],
+        frames: usize,
+        amplitude: f32,
+        force_slow: bool,
+    ) -> SilenceArm {
+        let width = L::WIDTH;
+        let mut arm = SilenceArm {
+            rendered: Vec::new(),
+            states: Vec::new(),
+            reduction: Vec::new(),
+            engagements: 0,
+        };
+        for (block, quiet) in plan.iter().enumerate() {
+            let mut left = silence_plane(block, frames, width, *quiet, amplitude, false);
+            let mut right = silence_plane(block, frames, width, *quiet, amplitude, true);
+            if force_slow {
+                core.silent_fixed_point = false;
+            }
+            core.process_block(&mut left, &mut right, frames);
+            arm.rendered
+                .extend(left.iter().map(|value| value.to_bits()));
+            arm.rendered
+                .extend(right.iter().map(|value| value.to_bits()));
+            arm.states.extend(state_bits(core));
+            arm.reduction.push(core.left.reduction[0].to_bits());
+        }
+        arm.engagements = core.silent_engagements();
+        arm
+    }
+
+    /// Renders `plan` twice at one width, once free and once forced slow, and asserts they agree.
+    fn compare_silence_arms<L: Lane>(
+        label: &str,
+        plan: &[Option<f32>],
+        ceiling: f32,
+        release: f32,
+        amplitude: f32,
+    ) -> SilenceArm {
+        let mut fast = silent_core::<L>(ceiling, release, 5.0);
+        let mut slow = silent_core::<L>(ceiling, release, 5.0);
+        let free = run_silence_arm(&mut fast, plan, 128, amplitude, false);
+        let forced = run_silence_arm(&mut slow, plan, 128, amplitude, true);
+        assert_eq!(
+            forced.engagements, 0,
+            "{label}: the control arm took the fast path, so it is not a control"
+        );
+        assert_eq!(
+            free.rendered, forced.rendered,
+            "{label}: the silent fast path moved a rendered bit"
+        );
+        assert_eq!(
+            free.states, forced.states,
+            "{label}: the silent fast path moved a state word"
+        );
+        free
+    }
+
+    /// A plan of `before` tone blocks, `quiet` silent blocks and `after` tone blocks.
+    fn silence_plan(before: usize, quiet: usize, after: usize) -> Vec<Option<f32>> {
+        let mut plan = vec![None; before];
+        plan.extend(vec![Some(0.0_f32); quiet]);
+        plan.extend(vec![None; after]);
+        plan
+    }
+
+    /// **A settled silent limiter renders exactly the limiter that is never allowed to skip.**
+    ///
+    /// Issue #182 S2, the headline gate, at all three widths. The tone is well under the guarded
+    /// ceiling (`limit = 10^(-7/20) = 0.447` against an amplitude of `0.05`), so `r = 1` at every
+    /// frame and the recursive word never leaves `+0.0`. That is deliberate, and it is the same
+    /// choice the compressor's file explains at length: it isolates the *rings* as the thing that
+    /// has to drain, and it makes the fixed point reachable inside a test-sized run.
+    /// `a_limiter_still_releasing_through_the_silence_is_never_frozen` is the arm that makes the
+    /// recursive word's own leg load-bearing.
+    ///
+    /// What has to drain here is the main delay line, `B = N + 6 = 486` samples at 48 kHz, which is
+    /// 3.8 blocks of 128. The claim is therefore earned at the end of the block in which both the
+    /// line has gone entirely `+0.0` *and* the output has, and the engagement count below is that
+    /// arithmetic read back rather than asserted loosely.
+    ///
+    /// Red mutations: drop `block_is_positive_zero` on either input plane from the admission test;
+    /// drop `is_at_silent_rest` on either channel from the claim; drop `all_exactly_one(&self
+    /// .main_ring)`'s counterpart `block_is_positive_zero(&self.main_ring)`; drop the output test
+    /// from the claim; and — caught by the state comparison rather than the sample comparison —
+    /// delete `self.cursors.advance(..)` or either `advance_rest_phase(..)` from the fast path.
+    #[test]
+    fn a_settled_silent_limiter_renders_exactly_the_never_fast_path() {
+        const SILENT_BLOCKS: usize = 40;
+        let plan = silence_plan(1, SILENT_BLOCKS, 8);
+        let scalar = compare_silence_arms::<f32>("scalar", &plan, -6.0, 100.0, 0.05);
+        let four = compare_silence_arms::<Simd4>("W4", &plan, -6.0, 100.0, 0.05);
+        let eight = compare_silence_arms::<Simd8>("W8", &plan, -6.0, 100.0, 0.05);
+
+        // Engagement is a property of the signal and the shape, not of the width.
+        assert_eq!(
+            (scalar.engagements, four.engagements),
+            (eight.engagements, eight.engagements),
+            "engagement rate depends on the lane width"
+        );
+        assert_eq!(
+            eight.engagements, 35,
+            "the fast path engaged on {} of {SILENT_BLOCKS} silent blocks, not the 35 the 486-sample \
+             delay line allows",
+            eight.engagements
+        );
+
+        // Anti-vacuity: the trailing tone is really rendered, so the comparison above had
+        // something other than silence to compare. Without it the test would pass on a fast path
+        // that simply stopped rendering.
+        let per_block = 128 * 8 * 2;
+        assert!(
+            eight.rendered[eight.rendered.len() - per_block..]
+                .iter()
+                .any(|word| *word != 0),
+            "the block after the silence rendered nothing at all"
+        );
+    }
+
+    /// **A limiter still releasing when the tone returns is never frozen by the fast path.**
+    ///
+    /// Issue #182 S2, the recursive-word and delay-line legs, and the refusal the brief for this
+    /// work asks to be *proved* rather than assumed. The tone is far over the ceiling and the
+    /// release is 2 000 ms, so `d` decays by a factor of `1 - 1.04e-5` per sample and needs some
+    /// four million samples — about 34 000 blocks — to fall from its working value to `FLUSH_EPS`
+    /// and snap to exactly `+0.0`. Twenty-four blocks of silence is nowhere near it.
+    ///
+    /// So the correct code refuses for the whole silence, and the assertion is that it refuses:
+    /// `engagements == 0`. The `assert_ne!` on the recursive word is what keeps that from being
+    /// vacuous — a run in which the release had already finished would refuse for the wrong
+    /// reason and prove nothing.
+    ///
+    /// Red mutation: drop `block_is_positive_zero(&self.reduction)` from `is_at_silent_rest`. The
+    /// claim is then earned on the first block whose output has drained to `+0.0`, `d` is frozen
+    /// part-way through its release, and the returning tone is limited by a reduction that was
+    /// never allowed to finish — the exact failure the compressor's file describes, at a kernel
+    /// that reaches it through a delay line as well as through the gain.
+    #[test]
+    fn a_limiter_still_releasing_through_the_silence_is_never_frozen() {
+        const SILENT_BLOCKS: usize = 24;
+        let plan = silence_plan(1, SILENT_BLOCKS, 8);
+        for (label, arm) in [
+            (
+                "scalar",
+                compare_silence_arms::<f32>("scalar", &plan, -6.0, 2_000.0, 3.0),
+            ),
+            (
+                "W4",
+                compare_silence_arms::<Simd4>("W4", &plan, -6.0, 2_000.0, 3.0),
+            ),
+            (
+                "W8",
+                compare_silence_arms::<Simd8>("W8", &plan, -6.0, 2_000.0, 3.0),
+            ),
+        ] {
+            assert_eq!(
+                arm.engagements, 0,
+                "{label}: the fast path engaged during a release that had not finished"
+            );
+            assert_ne!(
+                arm.reduction[SILENT_BLOCKS], 0,
+                "{label}: the release had already terminated, so the refusal proves nothing"
+            );
+        }
+    }
+
+    /// **A `-0.0` input block is not silence, and is not skipped.**
+    ///
+    /// Issue #182 S2, the input side of the signed-zero rule. Masking the sign bit in
+    /// `block_is_positive_zero` makes a `-0.0` block count as silence, and a standing claim then
+    /// engages on it. Every other test in this family stays green under that mutation.
+    ///
+    /// This crate's exposure is its delay line, as the compressor's is. A `-0.0` block the kernel
+    /// actually renders is written into `main_ring` and emerges `B = 486` samples — a little under
+    /// four blocks — later, with its sign intact: `select(bypass, delayed, delayed * gain)` gives
+    /// `-0.0 * 1.0 = -0.0` on the limiting arm and `-0.0` on the bypass arm. A fast path that
+    /// skipped the block never writes it, so the sample that should have emerged is `+0.0`.
+    ///
+    /// The `any(.. == 0x8000_0000)` is the anti-vacuity: it asserts a `-0.0` really did come out
+    /// the far end, so the comparison had the divergence available to it.
+    #[test]
+    fn a_negative_zero_input_block_is_not_treated_as_silence() {
+        let mut plan = vec![None];
+        plan.extend(vec![Some(0.0_f32); 40]);
+        plan.push(Some(-0.0_f32));
+        plan.extend(vec![Some(0.0_f32); 16]);
+
+        let arm = compare_silence_arms::<Simd8>("W8", &plan, -6.0, 100.0, 0.05);
+        assert!(
+            arm.rendered.contains(&0x8000_0000),
+            "no -0.0 ever reached the output, so the comparison had nothing to catch"
+        );
+        compare_silence_arms::<f32>("scalar", &plan, -6.0, 100.0, 0.05);
+        compare_silence_arms::<Simd4>("W4", &plan, -6.0, 100.0, 0.05);
+    }
+
+    /// **A block carrying automation is rendered, not skipped, and the resident tap keeps up.**
+    ///
+    /// Issue #182 S2 at the contract boundary rather than the kernel one: `process` and
+    /// `process_bank` withdraw the claim whenever the block carries any automation at all, and the
+    /// #143 D2/R4 gain-reduction tap reads the same word during a skipped block that it reads
+    /// during a rendered one.
+    ///
+    /// The withdrawal is **not** load-bearing for correctness at this crate, and saying so is more
+    /// useful than implying otherwise. `SmoothingRule::Linear` here resolves to a constant
+    /// `RAMP_UPDATES = 64`, so an accepted span that actually moves a coefficient leaves
+    /// `remaining == 64` and the `ramps_are_stationary` leg refuses the next block anyway; a span
+    /// that restates the value it already holds snaps through `LinearRamp::stationary_at` and
+    /// changes no state at all, so skipping would have been correct. It is kept for two reasons
+    /// that are: the claim must not silently depend on `RAMP_UPDATES` being non-zero, which is a
+    /// tuning constant and not a contract; and it is what makes a restated point a usable
+    /// forced-slow control arm, which is how the compressor's family is built.
+    ///
+    /// Red mutations: delete either `if !block.automation.is_empty()` withdrawal (the engagement
+    /// assertion goes red); make `observe_resident` freshen the word it reads, as #143's E6-c does
+    /// (the tap comparison goes red).
+    #[test]
+    fn automation_withdraws_the_claim_and_the_resident_tap_keeps_up() {
+        let values = values_with(-6.0, 100.0, 5.0);
+        let mut preparation = request(&values);
+        preparation.link_mode = LinkMode::DualMono;
+        let metadata = expected_prepared_metadata(&TRUE_PEAK_LIMITER_DESCRIPTOR_V1, preparation)
+            .expect("metadata");
+        let (left_defaults, right_defaults) = initial_defaults(&values).expect("defaults");
+        let mut effect = PreparedTruePeakLimiter {
+            core: LimiterCore::<f32>::new(
+                metadata,
+                vec![left_defaults].into_boxed_slice(),
+                vec![right_defaults].into_boxed_slice(),
+            )
+            .expect("core"),
+        };
+
+        let mut taps = Vec::new();
+        let mut tap = ObservationSampleV1::default();
+        // One tone block, then long enough for the 486-sample line to drain and the claim to be
+        // earned and used.
+        for block in 0..16_usize {
+            let quiet = (block > 0).then_some(0.0_f32);
+            let mut left = silence_plane(block, 128, 1, quiet, 0.05, false);
+            let mut right = silence_plane(block, 128, 1, quiet, 0.05, true);
+            effect.process(
+                EffectProcessBlock::new(
+                    &mut left,
+                    &mut right,
+                    None,
+                    (block * 128) as u64,
+                    &[],
+                    128,
+                )
+                .expect("block"),
+            );
+            assert!(effect.observe_resident(0, &mut tap), "the tap must answer");
+            taps.push((tap.left.to_bits(), tap.right.to_bits()));
+        }
+        let engaged = effect.core.silent_engagements();
+        assert!(
+            engaged > 0,
+            "the claim was never used, so the rest of this test proves nothing"
+        );
+        assert!(
+            taps[15..]
+                .iter()
+                .all(|(left, right)| *left == 0 && *right == 0),
+            "the resident tap did not read the resting +0.0 reduction through the skipped blocks"
+        );
+
+        // One more silent block, this time carrying a point that restates the ceiling it already
+        // holds. It must be rendered rather than skipped.
+        let restated = [PreparedAutomationSpan {
+            kind: AutomationSpanKind::Point,
+            channel: ParameterChannel::Left,
+            parameter_index: 0,
+            start_sample: 16 * 128,
+            end_sample: 16 * 128,
+            start_value: -6.0,
+            end_value: -6.0,
+        }];
+        let mut left = vec![0.0_f32; 128];
+        let mut right = vec![0.0_f32; 128];
+        let report = effect.process(
+            EffectProcessBlock::new(&mut left, &mut right, None, 16 * 128, &restated, 128)
+                .expect("block"),
+        );
+        assert_eq!(
+            report.invalid_spans, 0,
+            "the restated point must be accepted"
+        );
+        assert_eq!(
+            effect.core.silent_engagements(),
+            engaged,
+            "a block carrying automation took the silent fast path"
+        );
+    }
+
+    /// **A stale detector history refuses the claim, even when every ring is already at rest.**
+    ///
+    /// Issue #182 S2, the `history` leg of `is_at_silent_rest` — the one entry on that list that is
+    /// not obviously needed, and the one that is not reachable at a 128-frame quantum.
+    ///
+    /// At an ordinary quantum the leg is *implied*: `main_ring` holds the last `B = 486` input
+    /// samples, so `block_is_positive_zero(&main_ring)` already says the last 486 inputs were
+    /// `+0.0`, and the twelve detector taps are a suffix of those. Deleting the history test
+    /// therefore turns nothing red at 128 frames, and recording that would be the end of it if the
+    /// implication held generally. It does not: the render quantum is caller-supplied, and a block
+    /// of fewer than `HISTORY_WORDS = 12` frames cannot flush the taps that a longer block would.
+    ///
+    /// So this test runs eight-frame blocks. The instance starts at the rest state with one word
+    /// changed — a small stale value in every detector tap, small enough (`0.01` against a guarded
+    /// limit of `0.447`) that the estimate it produces never crosses the ceiling and every ring
+    /// therefore stays at exactly `1.0`. Every leg of the claim but `history` holds after the first
+    /// eight-frame block. Correct code refuses until the taps have drained; code without the leg
+    /// earns the claim there and freezes four stale taps for the rest of the silence, which the
+    /// loud tone at the end reads as part of its own Annex-2 estimate.
+    ///
+    /// The same shape is what a crafted payload reaches at any quantum: `commit_lane` writes
+    /// `history` and `main_ring` from independent regions of a section, so a restore can install a
+    /// zeroed delay line behind a non-zero history. That path is closed by the restore withdrawal;
+    /// this one is closed by the leg.
+    ///
+    /// Red mutation: drop `block_is_positive_zero(&self.history)` from `is_at_silent_rest`.
+    #[test]
+    fn a_stale_detector_history_refuses_the_claim() {
+        fn arm<L: Lane>(force_slow: bool) -> SilenceArm {
+            let mut core = silent_core::<L>(-6.0, 100.0, 5.0);
+            core.left.history.fill(0.01);
+            core.right.history.fill(-0.01);
+            let mut plan = vec![Some(0.0_f32); 6];
+            plan.extend(vec![None; 400]);
+            run_silence_arm(&mut core, &plan, 8, 3.0, force_slow)
+        }
+
+        let free = arm::<Simd8>(false);
+        let forced = arm::<Simd8>(true);
+        assert_eq!(
+            forced.engagements, 0,
+            "the control arm took the fast path, so it is not a control"
+        );
+        assert!(
+            free.engagements > 0,
+            "the fast path never engaged at all, so the test would pass on any refusal"
+        );
+        assert_eq!(
+            free.rendered, forced.rendered,
+            "a stale detector tap survived into the returning tone"
+        );
+        assert_eq!(
+            free.states, forced.states,
+            "a stale detector tap survived into the instance state"
+        );
+    }
+
+    /// **A de-zipper window still open across a block boundary refuses the claim.**
+    ///
+    /// Issue #182 S2, the `ramps_are_stationary` leg of the admission test — the leg that is not
+    /// reachable at a 128-frame quantum, for the mirror of the reason the `history` leg is not.
+    /// `SmoothingRule::Linear` here resolves to `RAMP_UPDATES = 64` updates, so at any quantum of
+    /// 64 frames or more a retarget is fully consumed inside the very block that carried it and no
+    /// later block ever *begins* with a window open. The render quantum is caller-supplied, so
+    /// that is a coincidence of one configuration and not a property of the effect.
+    ///
+    /// At eight frames a retarget takes eight blocks to consume, seven of which carry no automation
+    /// at all — so the automation withdrawal cannot cover them and only this leg can. The failure
+    /// it prevents is not a wrong sample during the silence (`peak > limit` is false for a `+0.0`
+    /// input whatever `limit` holds, so the rendered block really is `+0.0` either way); it is that
+    /// a skipped block advances no ramp, and the ceiling would be stranded part-way to the value
+    /// the automation asked for, for as long as the silence lasted. The tone that ends the silence
+    /// is then limited to the wrong ceiling.
+    ///
+    /// That is why `state_bits` carries the ramp words. The rendered samples of the two arms agree
+    /// under the mutation; the state does not.
+    ///
+    /// Red mutation: drop the four `ramps_are_stationary` legs from the admission test in
+    /// `process_block`.
+    #[test]
+    fn a_de_zipper_window_open_across_a_block_boundary_refuses_the_claim() {
+        const FRAMES: usize = 8;
+        const BLOCKS: usize = 240;
+        /// Well after the 486-sample line has drained and the claim is in use.
+        const RETARGET_BLOCK: usize = 120;
+
+        fn arm(force_slow: bool) -> (Vec<u32>, Vec<u32>, u32) {
+            let values = values_with(-6.0, 100.0, 5.0);
+            let mut preparation = request(&values);
+            preparation.link_mode = LinkMode::DualMono;
+            let metadata =
+                expected_prepared_metadata(&TRUE_PEAK_LIMITER_DESCRIPTOR_V1, preparation)
+                    .expect("metadata");
+            let (left_defaults, right_defaults) = initial_defaults(&values).expect("defaults");
+            let mut effect = PreparedTruePeakLimiter {
+                core: LimiterCore::<f32>::new(
+                    metadata,
+                    vec![left_defaults].into_boxed_slice(),
+                    vec![right_defaults].into_boxed_slice(),
+                )
+                .expect("core"),
+            };
+            let mut rendered = Vec::new();
+            let mut states = Vec::new();
+            for block in 0..BLOCKS {
+                // Eight tone blocks, a long silence, then tone again. The tone is under the
+                // guarded ceiling on *both* sides of the retarget, so the recursive word never
+                // leaves `+0.0` and the fixed point is reachable inside a test-sized run — the
+                // same choice, for the same reason, as the settled-silence gate above.
+                let quiet = (8..BLOCKS - 40).contains(&block).then_some(0.0_f32);
+                let mut left = silence_plane(block, FRAMES, 1, quiet, 0.05, false);
+                let mut right = silence_plane(block, FRAMES, 1, quiet, 0.05, true);
+                let first_sample = (block * FRAMES) as u64;
+                let retarget = [PreparedAutomationSpan {
+                    kind: AutomationSpanKind::Point,
+                    channel: ParameterChannel::Left,
+                    parameter_index: 0,
+                    start_sample: first_sample,
+                    end_sample: first_sample,
+                    start_value: -3.0,
+                    end_value: -3.0,
+                }];
+                let spans: &[PreparedAutomationSpan] = if block == RETARGET_BLOCK {
+                    &retarget
+                } else {
+                    &[]
+                };
+                if force_slow {
+                    effect.core.silent_fixed_point = false;
+                }
+                let report = effect.process(
+                    EffectProcessBlock::new(&mut left, &mut right, None, first_sample, spans, 128)
+                        .expect("block"),
+                );
+                assert_eq!(report.invalid_spans, 0, "the retarget must be accepted");
+                rendered.extend(left.iter().map(|value| value.to_bits()));
+                rendered.extend(right.iter().map(|value| value.to_bits()));
+                states.extend(state_bits(&effect.core));
+            }
+            (rendered, states, effect.core.silent_engagements())
+        }
+
+        let (free_rendered, free_states, engagements) = arm(false);
+        let (slow_rendered, slow_states, never) = arm(true);
+        assert_eq!(never, 0, "the control arm took the fast path");
+        assert!(
+            engagements > 0,
+            "the fast path never engaged, so the test would pass on any refusal"
+        );
+        assert_eq!(
+            free_rendered, slow_rendered,
+            "the silent fast path moved a rendered bit across an open de-zipper window"
+        );
+        assert_eq!(
+            free_states, slow_states,
+            "the silent fast path stranded a coefficient ramp part-way to its target"
+        );
+    }
+
+    /// A scalar instance of `LimiterCore<f32>` behind the contract type, for the tests that need
+    /// both the public entry points and the private engagement counter.
+    fn silent_instance(ceiling: f32, release: f32, lookahead: f32) -> PreparedTruePeakLimiter {
+        PreparedTruePeakLimiter {
+            core: silent_core::<f32>(ceiling, release, lookahead),
+        }
+    }
+
+    /// **A restore withdraws the claim, so the payload's delay line is drained and not skipped.**
+    ///
+    /// Issue #182 S2. This is the leg that makes the withdrawal in `restore_track` load-bearing
+    /// rather than merely tidy. An instance that has earned the claim is, by construction, holding
+    /// an all-`+0.0` delay line; `commit_lane` then fills that line with a payload's contents,
+    /// which this instance never rendered and whose samples have not reached its output yet. Every
+    /// other leg of the admission test still passes — the ramps are stationary, the bypass flag has
+    /// not moved, and the caller's block is still exactly `+0.0` — so nothing but the withdrawal
+    /// stands between the claim and a skipped block that drops the restored signal on the floor.
+    ///
+    /// It is the same window `silence_shorter_than_the_lookahead_line_still_drains_it` opens at the
+    /// compressor, reached from the other side: there the rings fill because the *signal* has not
+    /// drained, here because a *restore* refilled them.
+    ///
+    /// Red mutation: delete `self.silent_fixed_point = false;` from `LimiterCore::restore_track`.
+    #[test]
+    fn a_restore_withdraws_the_silence_claim() {
+        // The donor's delay line is full of signal when it is snapshotted, but its signal is under
+        // the guarded ceiling, so its recursive word is at `+0.0` and the *only* thing the
+        // receiver has to drain is the line itself. A donor that had been limiting would refuse
+        // the claim afterwards on the recursive word instead, which is a different leg's job.
+        let values = values_with(-6.0, 100.0, 5.0);
+        let mut donor = TruePeakLimiterFactory
+            .prepare(request(&values))
+            .expect("prepare");
+        let mut noise = Noise(0x0118_2000);
+        let mut left: Vec<f32> = (0..1024).map(|_| noise.next() * 0.2).collect();
+        let mut right: Vec<f32> = (0..1024).map(|_| noise.next() * 0.2).collect();
+        render(donor.as_mut(), &mut left, &mut right, 128);
+        let payload = snapshot(donor.as_ref());
+
+        fn arm(payload: &LanePayload, force_slow: bool) -> (Vec<u32>, Vec<u32>, u32, u32) {
+            let mut effect = silent_instance(-6.0, 100.0, 5.0);
+            let mut rendered = Vec::new();
+            let mut states = Vec::new();
+            let mut engaged_before_restore = 0;
+            // One quiet tone block, then enough silence for the claim to be earned and used.
+            for block in 0..32_usize {
+                if block == 16 {
+                    engaged_before_restore = effect.core.silent_engagements();
+                    let sizes = effect.metadata().state_sizes;
+                    effect
+                        .restore_state_payload(
+                            STATE_LAYOUT_VERSION,
+                            StatePayloadInput::new(&payload.0, &payload.1, &payload.2, sizes)
+                                .expect("sizes"),
+                        )
+                        .expect("restore");
+                }
+                let quiet = (block > 0).then_some(0.0_f32);
+                let mut left = silence_plane(block, 128, 1, quiet, 0.05, false);
+                let mut right = silence_plane(block, 128, 1, quiet, 0.05, true);
+                if force_slow {
+                    effect.core.silent_fixed_point = false;
+                }
+                effect.process(
+                    EffectProcessBlock::new(
+                        &mut left,
+                        &mut right,
+                        None,
+                        (block * 128) as u64,
+                        &[],
+                        128,
+                    )
+                    .expect("block"),
+                );
+                rendered.extend(left.iter().map(|value| value.to_bits()));
+                rendered.extend(right.iter().map(|value| value.to_bits()));
+                states.extend(state_bits(&effect.core));
+            }
+            (
+                rendered,
+                states,
+                engaged_before_restore,
+                effect.core.silent_engagements(),
+            )
+        }
+
+        let (free_rendered, free_states, engaged_before, engaged_after) = arm(&payload, false);
+        let (slow_rendered, slow_states, _, never) = arm(&payload, true);
+        assert_eq!(never, 0, "the control arm took the fast path");
+        assert!(
+            engaged_before > 0,
+            "the claim was never earned before the restore, so the test proves nothing"
+        );
+        assert!(
+            engaged_after > engaged_before,
+            "the claim was never re-earned after the restore drained, so the arms could agree by \
+             refusing everything"
+        );
+        assert_eq!(
+            free_rendered, slow_rendered,
+            "the restored payload's delay line was skipped instead of drained"
+        );
+        assert_eq!(
+            free_states, slow_states,
+            "the restored payload left the two arms in different states"
+        );
+    }
+
+    /// **The bank entry point withdraws the claim on an automated block, exactly as `process` does.**
+    ///
+    /// Issue #182 S2. `process` and `process_bank` are separate functions carrying the same rule,
+    /// which is precisely the shape the #90 audit found six crates diverging in, so the rule is
+    /// gated at both. See `automation_withdraws_the_claim_and_the_resident_tap_keeps_up` for why
+    /// the withdrawal is defence rather than a hole-plug at this crate.
+    ///
+    /// Red mutation: delete `if !block.automation.is_empty()` from `process_bank`.
+    #[test]
+    fn automation_withdraws_the_claim_on_the_bank_path_too() {
+        let values = values_with(-6.0, 100.0, 5.0);
+        let mut preparation = request(&values);
+        preparation.link_mode = LinkMode::DualMono;
+        let metadata = expected_prepared_metadata(&TRUE_PEAK_LIMITER_DESCRIPTOR_V1, preparation)
+            .expect("metadata");
+        let mut bank = PreparedTruePeakLimiterBank::<Simd8> {
+            metadata: PreparedBankMetadata {
+                width: BankWidth::Eight,
+                program_key: metadata.program_key(),
+            },
+            core: silent_core::<Simd8>(-6.0, 100.0, 5.0),
+        };
+
+        let lanes = 8_usize;
+        let empty = vec![0_u32; lanes + 1];
+        for block in 0..16_usize {
+            let quiet = (block > 0).then_some(0.0_f32);
+            let mut left = silence_plane(block, 128, lanes, quiet, 0.05, false);
+            let mut right = silence_plane(block, 128, lanes, quiet, 0.05, true);
+            bank.process_bank(
+                EffectBankProcessBlock::new(
+                    &mut left,
+                    &mut right,
+                    None,
+                    128,
+                    BankWidth::Eight,
+                    (block * 128) as u64,
+                    &[],
+                    &empty,
+                    128,
+                )
+                .expect("bank block"),
+            );
+        }
+        let engaged = bank.core.silent_engagements();
+        assert!(
+            engaged > 0,
+            "the bank never used the claim, so the rest of this test proves nothing"
+        );
+
+        // One more silent block, carrying a point per track that restates the ceiling in force.
+        let first_sample = 16 * 128_u64;
+        let restated: Vec<PreparedAutomationSpan> = (0..lanes)
+            .map(|_| PreparedAutomationSpan {
+                kind: AutomationSpanKind::Point,
+                channel: ParameterChannel::Left,
+                parameter_index: 0,
+                start_sample: first_sample,
+                end_sample: first_sample,
+                start_value: -6.0,
+                end_value: -6.0,
+            })
+            .collect();
+        let offsets: Vec<u32> = (0..=lanes).map(|track| track as u32).collect();
+        let mut left = vec![0.0_f32; 128 * lanes];
+        let mut right = vec![0.0_f32; 128 * lanes];
+        let report = bank.process_bank(
+            EffectBankProcessBlock::new(
+                &mut left,
+                &mut right,
+                None,
+                128,
+                BankWidth::Eight,
+                first_sample,
+                &restated,
+                &offsets,
+                128,
+            )
+            .expect("bank block"),
+        );
+        assert!(
+            report.reports.iter().all(|track| track.invalid_spans == 0),
+            "the restated points must be accepted"
+        );
+        assert_eq!(
+            bank.core.silent_engagements(),
+            engaged,
+            "a bank block carrying automation took the silent fast path"
+        );
     }
 
     /// E9: partition invariance over the gate's block sizes (master plan P1).
