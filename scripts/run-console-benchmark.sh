@@ -381,7 +381,9 @@ run_round() {
 # its exclusive creation; failures preserve every byte emitted by the failed process.
 failure_reason=warmup_failed
 counted=
-(( core_clock_available == 1 )) && counted=counted
+if (( core_clock_available == 1 )); then
+    counted=counted
+fi
 run_round warmup "$counted" >/dev/null 2>>"$stderr_log" || exit 1
 warmup_launches=1
 if [[ -n "$counted" ]]; then
