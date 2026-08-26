@@ -109,6 +109,7 @@
 //! smoothing window open in one arm and not the other. `quiet == restated` is the class-A
 //! statement, asserted in-run.
 
+use crate::floor::{self, CoreClock};
 use miso_engine_bench_support::alloc as bench_alloc;
 use miso_engine_bench_support::digest::Sha256Sink;
 use miso_engine_bench_support::json::escape as json_escape;
@@ -147,9 +148,22 @@ pub(crate) fn main() {
     let backend = Backend::current();
     let metadata = &Metadata::gather();
 
-    for workload in WORKLOADS {
-        let session = SessionMeasurement::run(workload);
-        println!("{}", session.record(workload, round, backend, metadata));
+    // Every workload is measured before any record is emitted. A decomposition row's floor
+    // columns subtract the control row the floor table names, and a subtraction between two rows
+    // means something only when both were measured in one process, on one host, in one round --
+    // the rule #163 item 0c already states for the decomposition itself. Emission is untimed, and
+    // its order is unchanged.
+    let clock = CoreClock::from_runner(metadata);
+    let sessions: Vec<SessionMeasurement> = WORKLOADS.map(SessionMeasurement::run).into();
+    for (workload, session) in WORKLOADS.iter().zip(&sessions) {
+        let control = floor::floor_row(*workload)
+            .and_then(|row| row.control)
+            .and_then(|control| WORKLOADS.iter().position(|row| *row == control))
+            .map(|index| sessions[index].p50_ns());
+        println!(
+            "{}",
+            session.record(*workload, round, backend, metadata, clock.as_ref(), control)
+        );
     }
     for workload in [
         Workload::NineTrackRaggedStrip,
@@ -222,12 +236,19 @@ impl SessionMeasurement {
         }
     }
 
+    /// The p50 nanoseconds per block: what a control row contributes to a floor subtraction.
+    fn p50_ns(&self) -> u64 {
+        Percentiles::from_samples(&self.ns_per_block).p50
+    }
+
     fn record(
         &self,
         workload: Workload,
         round: u32,
         backend: Backend,
         metadata: &Metadata,
+        clock: Option<&CoreClock>,
+        control_p50_ns: Option<u64>,
     ) -> String {
         let percentiles = Percentiles::from_samples(&self.ns_per_block);
         let tracks = f64::from(workload.tracks());
@@ -247,7 +268,7 @@ impl SessionMeasurement {
                 "\"p95_ns_per_block\":{p95_ns},\"p99_ns_per_block\":{p99_ns},",
                 "\"max_ns_per_block\":{max_ns},\"output_sha256\":\"{digest}\",",
                 "\"render_errors\":{errors},\"render_total_forbidden_operations\":{forbidden},",
-                "{metadata}",
+                "{floor}{metadata}",
                 "\"descriptive_only\":true,",
                 "\"statistical_method\":\"nearest-rank percentiles over per-block nanoseconds; ",
                 "one warmup pass and two measured rounds; descriptive only; no threshold\"}}"
@@ -279,6 +300,12 @@ impl SessionMeasurement {
             digest = self.output_sha256,
             errors = self.render_errors,
             forbidden = self.audit.total(),
+            // Issue #184's floor accounting. The whole group is absent when the runner had no
+            // performance counter to measure the pinned core's clock with, which is the shape
+            // every sealed record already has and is what makes the columns additive.
+            floor = clock.map_or_else(String::new, |clock| {
+                floor::record_fields(workload, percentiles.p50, clock, control_p50_ns)
+            }),
             metadata = metadata.record_fields(),
         )
     }

@@ -16,6 +16,8 @@ mod effect_contract;
 #[cfg(not(target_arch = "wasm32"))]
 mod effect_interchange;
 #[cfg(not(target_arch = "wasm32"))]
+mod floor;
+#[cfg(not(target_arch = "wasm32"))]
 mod graph;
 mod protocol;
 #[cfg(not(target_arch = "wasm32"))]
