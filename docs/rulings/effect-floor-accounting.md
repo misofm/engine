@@ -14,7 +14,7 @@ did not survive the derivation and are ruled against below, with the evidence:
   width. The compressor's inventory is 94 operations per lane-sample and 94 ÷ 13.2 is 7.1, which is
   a **core dispatch rate**, not the rate a 256-bit machine retires lane-work at. Divided by the
   eight lanes a `Simd8` bank renders per instruction, the floor is **3.18** cycles/lane-sample and
-  the compressor stands at **19.2 %** of it, not 88 % (boundary 1);
+  the compressor stands at **19.0 %** of it, not 88 % (boundary 1);
 * *"the identity-section content is workload-dependent — floors are stated per enabled-section
   count"* is not true of this tree. A disabled builtins filter is designed as the arithmetic
   identity rather than branched around, the section count is fixed at two per channel by the
@@ -96,8 +96,9 @@ recording as unmeasurable.
 Wall time is not cycles. The runner measures the pinned core's clock the same way this table does —
 `perf stat -e cycles,task-clock` over the untimed warmup launch, `cycles / task-clock` — exports it
 to the measured rounds, and counts those rounds too, refusing the run if either round's own ratio
-differs from the exported figure by more than 3 %. On the run this document quotes, the three
-launches measured 5 422 689 287, 5 428 034 794 and 5 427 243 146 Hz: a spread of 0.10 %.
+differs from the exported figure by more than 3 %. On the run this document quotes
+(`artifacts/issue184/console-benchmark.core-clock.csv`), the three launches measured
+5 455 548 845, 5 446 054 703 and 5 443 122 651 Hz: a spread of 0.23 %.
 
 The clock is therefore a hardware counter reading taken under exactly the preconditions the
 records already claim (single-core affinity, load-average ceiling, SMT sibling quiet, binary-mtime
@@ -282,8 +283,9 @@ rack-free benchmark rows share one floor for that reason. In the standing fixtur
 executed happen to coincide; the point is that they would coincide anyway.
 
 This is also the evidence for the near-equality the decomposition rows already rely on:
-`sixty_four_track_builtins_only` and `sixty_four_track_dispatch_only` measure 22.854 and 22.593 µs,
-0.26 µs apart, because the same instructions run over the same lanes with different constants.
+`sixty_four_track_builtins_only` and `sixty_four_track_dispatch_only` measure 22.833 and 21.962 µs,
+0.87 µs (3.8 %) apart, because the same instructions run over the same lanes with different
+constants.
 
 ---
 
@@ -301,7 +303,39 @@ independently by `scripts/console-benchmark-record-lib.jq`, and carried in every
 | true-peak limiter, uniform cohort | 138 | 4.662 |
 | the whole intended strip | 352 | 11.892 |
 
-<!-- STANDINGS -->
+### The standing table
+
+`artifacts/issue184/`, commit `a1ef5f1`, controlled, AMD Ryzen 7 9700X pinned to cpu 15, exported
+core clock **5 455 548 845 Hz**. p50, minimum of the two measured rounds, as the round READMEs
+report it.
+
+| row | p50 µs/block | measured cycles/lane-sample | floor | % of floor | isolate | isolated % of floor |
+|---|---:|---:|---:|---:|---:|---:|
+| console — the intended strip | 123.685 | 41.185 | 11.892 | 28.9 % | **13.918** *(limiter)* | **33.5 %** |
+| console, synthetic, 128 tracks | 246.258 | 41.000 | 11.892 | 29.0 % | — | — |
+| eq+compressor on simd1 | 81.816 | 27.243 | 7.230 | 26.5 % | 19.593 *(eq+comp)* | 25.0 % |
+| console legacy | 86.054 | 28.654 | 7.230 | 25.2 % | 21.051 *(eq+comp, split chains)* | 23.3 % |
+| compressor only | 72.959 | 24.294 | 5.507 | 22.7 % | **16.691** *(compressor)* | **19.0 %** |
+| eq only | 37.942 | 12.634 | 4.054 | 32.1 % | **4.984** *(eq)* | **34.6 %** |
+| idle (silence) | 38.974 | 12.978 | 2.331 | **18.0 %** | — | — |
+| builtins only | 22.833 | 7.603 | 2.331 | 30.7 % | — | — |
+| dispatch only (identity) | 21.962 | 7.313 | 2.331 | 31.9 % | — | — |
+| nine-track ragged strip | 24.978 | 59.144 | 21.141 | 35.7 % | — | — |
+| nine-track eq fixture | 6.092 | 14.425 | *not derived* | — | — | — |
+
+**The four per-effect standings, which is what the directive asked for:**
+
+| effect | measured | derived floor | % of floor | isolated against |
+|---|---:|---:|---:|---|
+| parametric EQ | 4.984 | 1.723 | **34.6 %** | `sixty_four_track_builtins_only` |
+| true-peak limiter | 13.918 | 4.662 | **33.5 %** | `sixty_four_track_eq_comp_simd1` |
+| compressor | 16.691 | 3.176 | **19.0 %** | `sixty_four_track_builtins_only` |
+| builtins and routing (row, not isolated) | 7.603 | 2.331 | **30.7 %** | — |
+
+The compressor's 16.691 is 3.059 nanoseconds per lane-sample, which is 15.0 cycles at 4.92 GHz —
+the directive's measured figure, reproduced — and agrees to three digits with the 3.043
+ns/lane-sample recorded for the W8 bank in `.github/ISSUE_SPECS/013-compressor.md` on this same
+machine.
 
 **How to read the two percentages.** A row's `percent_of_floor` compares the row's *whole* cost —
 graph dispatch, transposes and all — against the arithmetic its strip requires, so it is a lower
@@ -315,8 +349,8 @@ because the two rows are the same fixture with one rack emptied.
 ## Boundary 1 — the floor divides by lane width, and the standing 13.2 did not
 
 The directive's figure is *"compressor ~15.0 measured vs ~13.2 derived cycles/lane-sample (≈88 % of
-floor)"*. The measured half reproduces: this document measures the compressor isolate at 3.05
-nanoseconds per lane-sample, which is 15.0 cycles at 4.92 GHz and 16.5 at the 5.42 GHz this host
+floor)"*. The measured half reproduces: this document measures the compressor isolate at 3.059
+nanoseconds per lane-sample, which is 15.0 cycles at 4.92 GHz and 16.691 at the 5.456 GHz this host
 actually clocked at, and which agrees to three digits with the 3.043 ns/lane-sample recorded for
 the W8 bank in `.github/ISSUE_SPECS/013-compressor.md` on this same machine.
 
@@ -337,20 +371,20 @@ exit; at 19 % there is a factor of five on the table, and the next section says 
 
 ## Boundary 2 — the compressor's gap factors exactly, and it is not arithmetic
 
-At the measured isolate of 16.540 cycles/lane-sample against a 3.176 floor, the gap is 5.21x. It
+At the measured isolate of 16.691 cycles/lane-sample against a 3.176 floor, the gap is 5.255x. It
 decomposes without a residual:
 
 ```text
 instructions per frame iteration (idle body, objdump)     630
 the floor's instruction count (94 lane-ops x 2 channels)  188
-                                             ratio       3.35x
+                                             ratio       3.351x
 
-measured cycles per frame iteration (16.540 x 16)         264.6
-                        implied IPC (630 / 264.6)          2.38
+measured cycles per frame iteration (16.691 x 16)         267.1
+                        implied IPC (630 / 267.1)         2.359
                   the probe's mixed-stream rate             3.7
-                                             ratio        1.55x
+                                             ratio        1.568x
 
-                                     3.35 x 1.55  =       5.19x     (observed 5.21x)
+                            3.351 x 1.568  =             5.255x     (observed 5.255x)
 ```
 
 Both halves are named:
@@ -363,7 +397,7 @@ scalar half is the per-lane detector gather — `D` is a per-lane parameter deli
 the program key, so eight scalar loads, eight scalar stores and their bounds checks build a vector
 that is then loaded back, twice per frame.
 
-**The issue rate.** 2.38 against 3.7. The gather's scalar stores followed immediately by a vector
+**The issue rate.** 2.359 against 3.7. The gather's scalar stores followed immediately by a vector
 load of the same buffer is a store-to-load forwarding stall by construction; and the lookahead
 rings are 481 and 486 slots deep, so a bank's ring working set is far larger than L1 and every ring
 access is an L2 hit.
@@ -377,12 +411,12 @@ finding "the compressor is at 88 % of floor and there is nothing left".
 
 ## Boundary 3 — the EQ's gap is the same shape, and its kernel is not the subject
 
-The EQ isolate measures 4.904 cycles/lane-sample against a 1.723 floor: 35.1 %, the best of the
+The EQ isolate measures 4.984 cycles/lane-sample against a 1.723 floor: 34.6 %, the best of the
 three rack effects. The kernel itself is at its register-file ceiling — `SVF_CASCADE_DEPTH = 2` is
 the tuned constant `docs/rulings/cross-bank-interleave.md` ruled on, and that ruling's reopening
 condition is a machine with more than sixteen vector registers, which this is not.
 
-What the EQ's 2.8x gap contains is therefore not the section body. It is the same list as the
+What the EQ's 2.89x gap contains is therefore not the section body. It is the same list as the
 compressor's minus the gather: the interleave pass's load and store per two sections, the block
 elision gate's five integer comparisons per lane-sample, the AoSoA round trip the fused
 `simd1:eq+compressor` chain shares, and the graph dispatch the row cannot subtract. **Naming that
@@ -394,7 +428,7 @@ arithmetic.
 
 ## Boundary 4 — the limiter's floor moved because round 1 changed its shape, not its arithmetic
 
-The limiter isolate measures 13.865 cycles/lane-sample against a 4.662 floor: 33.6 %.
+The limiter isolate measures 13.918 cycles/lane-sample against a 4.662 floor: 33.5 %.
 
 The pre-round-1 inventory cannot be quoted against it and is not. In the ragged path the same
 computation costs 180 lane-ops, 46 loads and 37 stores per lane-sample, against 138, 10 and 8 in
@@ -425,7 +459,7 @@ the limiter alike — and on this row all three are earned, so all three kernels
 timed block. Its class-A arithmetic floor is therefore the builtins chain, 2.331, and not the
 strip's 11.892.
 
-The row measures 13.115 cycles/lane-sample, 17.8 % of that floor and the worst standing in the
+The row measures 12.978 cycles/lane-sample, 18.0 % of that floor and the worst standing in the
 table. That is not a defect in the fixed points: it is the statement that **what the idle row costs
 is almost entirely the AoSoA transposes and the graph dispatch that the fixed points cannot skip.**
 The rack performs one planar/AoSoA round trip per realised chain per block whether the chain
@@ -499,6 +533,12 @@ was derived from, and the two isolate columns — which are subtractions between
 `scripts/console-benchmark-validator.jq` across the whole run. `scripts/test-console-benchmark.sh`
 mutates each of them and asserts the rejection. A column that is merely present proves nothing;
 these are the ones that are checked against their own inputs.
+
+**The additivity was checked, not asserted.** Every `console-benchmark.accepted.jsonl` under
+`artifacts/` was validated against the validator as it stood at `98b5706` and against this one:
+`compressor-round1` and `compressor-round1-baseline` pass both, and the ten older directories fail
+both — for reasons that predate this change and belong to the record shapes the validator has moved
+past since, not to these columns. No sealed record's verdict moved.
 
 `nine_track_baseline` is the one session row with null floors. It is rendered from
 `fixtures/session/v1/parametric-eq-nine-track.toml`, which was never inventoried, and its
@@ -635,7 +675,7 @@ what it is claimed to be.
   `crates/miso-engine-true-peak-limiter/src/lib.rs`, `crates/miso-engine-builtins/src/`,
   `crates/miso-engine-lane/src/kernels.rs`, `crates/miso-engine-math/src/fast_db.rs`.
 * **Standing qualification authority:** `artifacts/issue175/` for what the strip renders;
-  this document accounts for what it costs.
+  this document accounts for what it costs. The measurement it quotes is `artifacts/issue184/`.
 * **Precedent for the unit:** `docs/rulings/fast-db-tier-boundaries.md`, and its rule that a
   per-sample kernel component may not be sized by an isolated throughput loop — which is why the
   standings here are taken from the console rows and not from a microbenchmark.
