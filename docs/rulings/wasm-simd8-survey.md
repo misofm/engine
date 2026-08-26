@@ -230,3 +230,157 @@ names and only the backend constant they report tells them apart.
   desktop. `docs/rulings/wasm-kernel-timing-interim.md` owns that boundary and it is unchanged: a
   browser JIT tiers and deoptimises, and the shipped artifact's width decision is a field question
   the owner's browser pass answers, not this one.
+
+---
+
+# Step 2: the paired W4/W8 measurement
+
+**Record.** `artifacts/issue183/wasm-console-benchmark.accepted.jsonl`, 22 rows (the eleven #175
+strip workloads x two measured rounds), `status: PASS`, `measurement_control: controlled`,
+candidate `b628524`, CPU 15, one untimed warmup launch and exactly two measured rounds. Two guest
+modules, `f3128a27...` (W4) and `f19c35b7...` (W8), rendered inside the same observation on every
+one of the 1,000 observations per row, alongside the two native legs.
+
+**Digest identity.** `all_legs_identical` on all 22 rows: `native_simd8`, `native_simd4`,
+`wasm_simd128` and `wasm_simd128_w8` produced one output digest per row, and **all 44 wasm digests
+reproduce `artifacts/round1-composed/` exactly** — both the W4 leg (which must, class A) and the
+W8 leg (which need not have, and does). Eight-lane wasm banks are bit-identical to four-lane ones
+on every row of the standing strip. That is the lane-identity claim of master plan §1 holding
+across a width change on the target, not merely on the host.
+
+**The W4 leg reproduces the standing baseline.** 275.3 us/block against the sealed 274.9
+(+0.15 %), `eq_only` 79.1 against 78.7, `compressor_only` 128.7 against 128.9,
+`builtins_only` 47.4 against 47.1. The denominator of every ratio below is the number the
+scoreboard already carries.
+
+## The rows
+
+`p50 us/block`, both rounds. `W8/W4` is the record's own `wasm_simd128_w8 / wasm_simd128` ratio,
+recomputed by the validator from the two legs under it; the paired median of the per-observation
+quotient agrees with it to within 0.004 on every row.
+
+| workload | W4 r1 | W4 r2 | W8 r1 | W8 r2 | W8/W4 r1 | W8/W4 r2 |
+|---|---:|---:|---:|---:|---:|---:|
+| `sixty_four_track_console` | 275.032 | 275.594 | 245.958 | 245.517 | **0.894** | **0.891** |
+| `one_twenty_eight_track_stretch` | 554.684 | 556.367 | 494.009 | 495.241 | 0.891 | 0.890 |
+| `nine_track_ragged_strip` | 48.031 | 47.731 | 45.677 | 45.376 | 0.951 | 0.951 |
+| `sixty_four_track_compressor_only` | 128.264 | 129.135 | 124.717 | 124.626 | 0.972 | 0.965 |
+| `sixty_four_track_console_legacy` | 159.122 | 159.433 | 155.175 | 155.034 | 0.975 | 0.972 |
+| `sixty_four_track_idle` | 78.049 | 77.647 | 76.054 | 75.984 | 0.974 | 0.979 |
+| `sixty_four_track_eq_comp_simd1` | 150.366 | 150.907 | 147.841 | 147.279 | 0.983 | 0.976 |
+| `sixty_four_track_dispatch_only` | 47.290 | 47.299 | 47.330 | 47.400 | 1.001 | 1.002 |
+| `sixty_four_track_builtins_only` | 47.150 | 47.540 | 47.320 | 47.831 | 1.004 | 1.006 |
+| `sixty_four_track_eq_only` | 79.090 | 79.181 | 79.551 | 79.290 | 1.006 | 1.001 |
+| `nine_track_baseline` | 11.071 | 11.111 | 13.446 | 13.465 | **1.215** | **1.212** |
+
+**The null exit does not fire.** The ruling condition was `W8 >= 1.8x W4`; the worst row is 1.215
+and the strip rows are all below 1.01. Round-to-round agreement is within 0.008 on every row, so
+none of this is noise.
+
+## What the win is made of, and what it is not
+
+Reading the decomposition rows as increments (round means):
+
+| increment | W4 | W8 | change | share of the available 2x converted |
+|---|---:|---:|---:|---:|
+| composed console (`sixty_four_track_console`) | 275.31 | 245.74 | **-29.6 us** | 22 % |
+| limiter + its rack (console minus `eq_comp_simd1`) | 124.67 | 98.18 | **-26.5 us** | **43 %** |
+| compressor (`compressor_only` minus `builtins_only`) | 81.35 | 77.09 | -4.3 us | 10 % |
+| EQ (`eq_only` minus `builtins_only`) | 31.79 | 31.84 | +0.05 us | **0 %** |
+| builtins + graph dispatch (`builtins_only`) | 47.35 | 47.58 | +0.2 us | -1 % |
+
+("Share converted" is `2 * (1 - ratio)`: a kernel that turned the doubled width into half the time
+scores 100 %, one that gained nothing scores 0 %.)
+
+**The issue's mechanism is refuted and the win is real anyway.** #183 projected the wasm compressor
+increment 81 -> ~50-60 us from lane width. Measured, it goes **81.35 -> 77.09**: the compressor
+converts a tenth of the doubled width, not the four-fifths the native W4->W8 probe suggested. The
+EQ converts **nothing at all** — 31.79 to 31.84, inside round-to-round noise. Almost the entire
+-29.6 us on the console row is the **limiter**, which #183 did not name, and which converts 43 %.
+
+That ordering is the one the survey's register-pressure section predicted and it is worth stating
+as a confirmed prediction rather than a coincidence: the compressor's hot loop wants 37 vectors
+live and the EQ's wants 37 including its re-read coefficients, both far past sixteen at W4 already,
+so doubling the vector size doubles spill traffic against the doubled lane-work and nets out near
+zero. The limiter is the one kernel that hoists its live set out of the inner loop by construction
+(`DETECTOR_CHUNK`), and it is the one kernel that keeps a real fraction of the width.
+
+**The nine-track row regresses 21 %.** `nine_track_baseline` is EQ-only at nine tracks: at W4 it is
+two full banks plus a one-track scalar tail, at W8 one full bank plus a one-track tail. It pays the
+wider vector on the effect that converts none of the width, and it is the one row where the switch
+is a clear loss. Small sessions are a real product shape, and this is a 21 % regression on one.
+
+## Against the floor
+
+Using `docs/rulings/effect-floor-accounting.md` (native cycles/lane-sample: compressor 3.176, EQ
+1.723, limiter 4.662, builtins 2.331) at 16,384 lane-samples per 64-track block and the pinned
+core's measured 5.45 GHz, the native `Simd8` arithmetic floor for the composed strip is
+**35.75 us/block**. The wasm floor is that figure times the width factor: **x2 at W4** (four lanes
+against the floor's eight) and **x1 at W8**.
+
+| build | measured | its own width floor | multiple of floor |
+|---|---:|---:|---:|
+| wasm W4 | 275.31 | 71.50 | 3.85x |
+| wasm W8 | 245.74 | 35.75 | **6.87x** |
+| native `Simd8` | 124.73 | 35.75 | 3.49x |
+
+**The switch halves the floor and moves the measurement by a ninth, so the W8 build stands twice as
+far from its own bottom as the W4 build does.** That is the honest floor statement, and it is the
+argument against reading -10.8 % as convergence: the arithmetic the strip requires did not get
+cheaper, the machine simply retired a little more of it per instruction pair before the spill
+traffic ate the rest.
+
+## Recommendation
+
+**Not a null exit** (the 1.8x condition is nowhere near met) and **not an unconditional switch**.
+The recommendation to the coordinator is a **conditional switch, with the issue's mechanism claim
+corrected**, in this order:
+
+1. **Correct the record on #183.** The projection "compressor 81 -> ~50-60 us, and it generalises
+   to every banked effect" is measured false in both halves. It does not generalise: the EQ gains
+   nothing and the builtins gain nothing. The compressor itself gains 5 %. Whatever is decided
+   next should be decided about the limiter, which is where the 29.6 us lives.
+2. **Clear the two blockers before the one-line change**, or the switch lands red: soft clip's
+   `width_is_native` table (`crates/miso-engine-soft-clip/src/lib.rs:900`) would silently drop
+   every soft-clip cohort to scalar, and `scripts/run-wasm-gates.sh:46` fails G5 on the first
+   build. Neither is deep; both are invisible to the arm that was just run.
+3. **Then the switch is defensible on the standing strip**: the composed wasm console becomes
+   **245.7 us/block** from 275.3, measured rather than projected, with every rendered bit
+   unchanged. Its cost is a **21 % regression on the nine-track EQ-only row**, and that trade has
+   to be accepted explicitly rather than discovered later.
+4. **The design's real answer is per-effect width, and this tree cannot express it.**
+   `Backend::current()` is one constant and `BankWidth::for_backend` is one law (#84 phase A), so
+   "limiter at eight, EQ at four" is not a `cfg` — it is a contract change to make bank width a
+   per-factory capability. The measurement says that is where the remaining value is (43 % against
+   0 %), and it is issue-sized work, not a step-3 edit.
+5. **Before the switch ships, re-tune `SVF_CASCADE_DEPTH` for wasm at eight lanes.** The `eq_only`
+   row at 1.006/1.001 is the depth asking to be looked at, and the constant cannot express a
+   per-target value today (see the depth section above). A W8 wasm EQ at depth 1 is untested and
+   is the cheapest remaining hypothesis in this phase.
+
+**Revert remains one line** (`crates/miso-engine-lane/src/backend.rs`), and nothing in this branch
+has switched anything: the default `wasm32` guest module is byte-identical to `origin/main`'s.
+
+## What an adversarial verifier should probe
+
+* **That the W4 leg is genuinely the shipped build.** Compare `guest_module_sha256`
+  (`f3128a27...`) against a fresh default `wasm32` guest build; it must match, and the W8 digest
+  (`f19c35b7...`) must not.
+* **That the two legs were not the same module.** The runner and the preflight both refuse equal
+  digests, and the validator refuses a paired record whose two guest digests agree — but the
+  cheapest independent check is that the 44 W8 digests equal the 44 W4 digests *while the timings
+  differ by 21 % on one row and 0.1 % on another*. A single module timed twice cannot do that.
+* **The nine-track regression.** It is the row that most resists the thesis; re-run it alone, and
+  check whether the loss is the EQ's width or the bank/tail split at nine tracks by measuring a
+  sixteen-track EQ-only row, which is two full banks at both widths.
+* **The limiter attribution.** It is a subtraction of two rows (`console` minus `eq_comp_simd1`),
+  not a direct measurement, and it carries the second rack's dispatch with it. A `limiter_only`
+  decomposition row would settle it and does not exist.
+* **The floor multiple.** Every figure in that table is inversely proportional to the 3.7 ops/cycle
+  of `docs/rulings/effect-floor-accounting.md`, which is a measurement of one host. The *ratio*
+  between the W4 and W8 multiples is not: it is exactly the width factor, and it is 2x by
+  construction.
+* **`descriptive_only` and the family flags.** Every row carries
+  `comparable_with_console_records: false` and `browser_field_measurement: false`. None of these
+  numbers is a browser number, and none of them may be quoted beside the 124.0 us native console
+  figure as if it were the same measurement.
