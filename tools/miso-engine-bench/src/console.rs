@@ -147,6 +147,8 @@ pub(crate) fn main() {
         "{}",
         observation.observation_record(round, backend, metadata)
     );
+    let placement = PlacementMeasurement::run();
+    println!("{}", placement.record(round, backend, metadata));
 }
 
 fn round_from_runner() -> u32 {
@@ -213,7 +215,8 @@ impl SessionMeasurement {
             concat!(
                 "{{\"schema_version\":1,\"issue\":{issue},\"record\":\"console_session\",",
                 "\"workload_kind\":\"{kind}\",\"tracks\":{tracks},\"synthetic_fixture\":{synthetic},",
-                "\"strip_content\":\"{strip}\",\"input_signal\":\"{signal}\",",
+                "\"strip_content\":\"{strip}\",\"strip_layout\":\"{layout}\",",
+                "\"input_signal\":\"{signal}\",",
                 "\"fixture_id\":\"{fixture}\",\"round\":{round},\"backend\":\"{backend}\",",
                 "\"sample_rate_hz\":{rate},\"quantum_frames\":{quantum},\"observations\":{obs},",
                 "\"units\":\"us_per_block\",\"percentile_method\":\"nearest_rank\",",
@@ -234,6 +237,7 @@ impl SessionMeasurement {
             tracks = workload.tracks(),
             synthetic = workload.synthetic(),
             strip = workload.strip_content(),
+            layout = workload.strip_layout(),
             signal = workload.input_signal(),
             fixture = json_escape(workload.fixture_id()),
             round = round,
@@ -901,6 +905,170 @@ impl FacilityMeasurement {
 ///
 /// Pairs taken microseconds apart, then summarised -- never a difference of two summaries taken
 /// minutes apart, which is the whole point of alternating the arms.
+// ---------------------------------------------------------------------------------------------
+// The placement measurement: the #175 chain-shape row-pair, alternated observation by observation.
+// ---------------------------------------------------------------------------------------------
+
+/// The two arms of the chain-shape comparison, in record order.
+///
+/// `split_chains` is the retired layout: EQ on `simd1` and the compressor in the `dynamic` rack,
+/// two one-slot bank chains per cohort. `merged_chain` is the standing fixture with its limiter
+/// removed: the same two effects, the same coefficients, the same order, as one two-slot chain on
+/// `simd1`.
+///
+/// They carry *identical arithmetic*. Every difference between their timings is chain shape --
+/// how many planar/AoSoA round-trips the plan pays and how the slots are grouped -- and nothing
+/// else. That is what makes this a paired measurement rather than two rows a reader subtracts.
+const PLACEMENT_ARMS: [Workload; 2] = [
+    Workload::SixtyFourTrackConsoleLegacy,
+    Workload::SixtyFourTrackEqCompSimd1,
+];
+
+/// The #175 chain-shape row-pair.
+///
+/// Structurally a sibling of [`FacilityMeasurement`], and deliberately so: the two arms are
+/// alternated observation by observation, for the reason the module header gives. This pair
+/// especially needs it. The hypothesis under test predicted a *saving*, and the measured answer is
+/// that there is none -- and "no difference" is precisely the claim a run-A-then-run-B benchmark
+/// cannot make honestly, because the drift between two points in time is indistinguishable from
+/// the effect at that scale. Alternating makes the delta a paired statistic over simultaneous
+/// conditions, so a reported zero is a measured zero.
+struct PlacementMeasurement {
+    ns_per_block: [Vec<u64>; 2],
+    digests: [String; 2],
+    /// Transposes attributable to the timed region, per arm, per block.
+    transposes_per_block: [u64; 2],
+    audit: audit::AuditSnapshot,
+    render_errors: u64,
+}
+
+impl PlacementMeasurement {
+    fn run() -> Self {
+        let mut arms: Vec<SessionRuntime> = PLACEMENT_ARMS
+            .iter()
+            .map(|workload| SessionRuntime::new(*workload))
+            .collect();
+        let mut hashes: Vec<Sha256Sink> = PLACEMENT_ARMS.iter().map(|_| Sha256Sink::new()).collect();
+        for arm in &mut arms {
+            for observation in 0..64 {
+                let _ = arm.render(observation);
+            }
+        }
+        // Counted across the timed region only, so the warmup's round-trips are not attributed to
+        // it. Read before and after, outside the clock.
+        let before: Vec<u64> = arms.iter().map(SessionRuntime::bank_transposes).collect();
+
+        let mut samples: Vec<Vec<u64>> = PLACEMENT_ARMS
+            .iter()
+            .map(|_| Vec::with_capacity(OBSERVATIONS))
+            .collect();
+        let mut render_errors = 0_u64;
+        audit::warm_up();
+        audit::reset();
+        for observation in 0..OBSERVATIONS as u64 {
+            for (index, arm) in arms.iter_mut().enumerate() {
+                let (elapsed_ns, result) = timing::timed(|| arm.render(observation));
+                if result.is_err() {
+                    render_errors += 1;
+                }
+                samples[index].push(elapsed_ns);
+            }
+            for (index, arm) in arms.iter_mut().enumerate() {
+                arm.hash_output(&mut hashes[index]);
+            }
+        }
+        let snapshot = audit::snapshot();
+        let digests: Vec<String> = hashes.into_iter().map(Sha256Sink::finish_hex).collect();
+
+        // The class-A statement, asserted in-run. Rack placement regroups lanes; it never changes
+        // per-lane arithmetic (AGENTS.md, #166). If the two arms ever disagree, this run says so
+        // before it reports a delta -- because a timing difference between two arms that compute
+        // different things is not a chain-shape measurement at all.
+        assert_eq!(
+            digests[0], digests[1],
+            "the two placements rendered different output: a placement change moved a rendered bit"
+        );
+
+        let transposes: Vec<u64> = arms
+            .iter()
+            .zip(before.iter())
+            .map(|(arm, start)| (arm.bank_transposes() - start) / OBSERVATIONS as u64)
+            .collect();
+
+        Self {
+            ns_per_block: [samples[0].clone(), samples[1].clone()],
+            digests: [digests[0].clone(), digests[1].clone()],
+            transposes_per_block: [transposes[0], transposes[1]],
+            audit: snapshot,
+            render_errors,
+        }
+    }
+
+    fn record(&self, round: u32, backend: Backend, metadata: &Metadata) -> String {
+        let split = Percentiles::from_samples(&self.ns_per_block[0]);
+        let merged = Percentiles::from_samples(&self.ns_per_block[1]);
+        let delta = paired_median(&self.ns_per_block[1], &self.ns_per_block[0]);
+        let tracks = f64::from(PLACEMENT_ARMS[0].tracks());
+        format!(
+            concat!(
+                "{{\"schema_version\":1,\"issue\":{issue},\"record\":\"console_placement\",",
+                "\"workload_kind\":\"sixty_four_track_placement\",\"tracks\":{tracks},",
+                "\"round\":{round},\"backend\":\"{backend}\",",
+                "\"observations\":{obs},\"units\":\"ns_per_block\",",
+                "\"percentile_method\":\"nearest_rank\",",
+                "\"pairing\":\"alternating_per_observation\",",
+                "\"arms\":[\"split_chains\",\"merged_chain\"],",
+                "\"split_chains_layout\":\"{split_layout}\",",
+                "\"merged_chain_layout\":\"{merged_layout}\",",
+                "\"split_chains_p50_ns\":{split_p50},\"split_chains_p95_ns\":{split_p95},",
+                "\"split_chains_p99_ns\":{split_p99},",
+                "\"merged_chain_p50_ns\":{merged_p50},\"merged_chain_p95_ns\":{merged_p95},",
+                "\"merged_chain_p99_ns\":{merged_p99},",
+                "\"paired_delta_median_ns\":{delta},",
+                "\"paired_delta_median_ns_per_track\":{delta_per_track},",
+                "\"split_chains_transposes_per_block\":{split_transposes},",
+                "\"merged_chain_transposes_per_block\":{merged_transposes},",
+                "\"split_chains_output_sha256\":\"{split_digest}\",",
+                "\"merged_chain_output_sha256\":\"{merged_digest}\",",
+                "\"bit_identity\":\"split_chains == merged_chain, asserted in-run\",",
+                "\"render_errors\":{errors},",
+                "\"render_total_forbidden_operations\":{forbidden},",
+                "{metadata}",
+                "\"descriptive_only\":true,",
+                "\"statistical_method\":\"{method}\"}}"
+            ),
+            issue = ISSUE,
+            tracks = PLACEMENT_ARMS[0].tracks(),
+            round = round,
+            backend = backend_name(backend),
+            obs = OBSERVATIONS,
+            split_layout = PLACEMENT_ARMS[0].strip_layout(),
+            merged_layout = PLACEMENT_ARMS[1].strip_layout(),
+            split_p50 = split.p50,
+            split_p95 = split.p95,
+            split_p99 = split.p99,
+            merged_p50 = merged.p50,
+            merged_p95 = merged.p95,
+            merged_p99 = merged.p99,
+            delta = delta,
+            delta_per_track = format_f64(delta as f64 / tracks),
+            split_transposes = self.transposes_per_block[0],
+            merged_transposes = self.transposes_per_block[1],
+            split_digest = self.digests[0],
+            merged_digest = self.digests[1],
+            errors = self.render_errors,
+            forbidden = self.audit.total(),
+            metadata = metadata.record_fields(),
+            method = PLACEMENT_STATISTICAL_METHOD,
+        )
+    }
+}
+
+/// Pinned verbatim in the validator, for the reason every method sentence in this stream is.
+const PLACEMENT_STATISTICAL_METHOD: &str = "two arms alternated per observation; nearest-rank \
+percentiles over per-block nanoseconds; paired delta is merged_chain minus split_chains per \
+observation; descriptive only; no threshold";
+
 fn paired_median(left: &[u64], right: &[u64]) -> i64 {
     let mut paired: Vec<i64> = left
         .iter()

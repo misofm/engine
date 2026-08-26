@@ -13,18 +13,24 @@ def positive_integer: type == "number" and floor == . and . > 0;
 # The eleven runner-supplied metadata names, as they appear in a record.
 def metadata_names: ["background_load_note","candidate_commit","cpu_affinity","cpu_model","governor_or_power_mode","llvm_version","measurement_control","profile","rust_version","target_features","target_triple"];
 
-def session_keys: ["backend","background_load_note","candidate_commit","cpu_affinity","cpu_model","descriptive_only","fixture_id","governor_or_power_mode","input_signal","issue","llvm_version","max_ns_per_block","max_us_per_block","measurement_control","min_ns_per_block","min_us_per_block","missing_metadata","observations","os","output_sha256","p50_ns_per_block","p50_us_per_block","p50_us_per_block_per_track","p95_ns_per_block","p95_us_per_block","p99_ns_per_block","p99_us_per_block","percentile_method","profile","quantum_frames","record","render_errors","render_total_forbidden_operations","round","rust_version","sample_rate_hz","schema_version","statistical_method","strip_content","synthetic_fixture","target_features","target_triple","tracks","units","workload_kind"];
+def session_keys: ["backend","background_load_note","candidate_commit","cpu_affinity","cpu_model","descriptive_only","fixture_id","governor_or_power_mode","input_signal","issue","llvm_version","max_ns_per_block","max_us_per_block","measurement_control","min_ns_per_block","min_us_per_block","missing_metadata","observations","os","output_sha256","p50_ns_per_block","p50_us_per_block","p50_us_per_block_per_track","p95_ns_per_block","p95_us_per_block","p99_ns_per_block","p99_us_per_block","percentile_method","profile","quantum_frames","record","render_errors","render_total_forbidden_operations","round","rust_version","sample_rate_hz","schema_version","statistical_method","strip_content","strip_layout","synthetic_fixture","target_features","target_triple","tracks","units","workload_kind"];
 
 def hoist_keys: ["arms","backend","background_load_note","bank_boundary","bit_identity","candidate_commit","cpu_affinity","cpu_model","descriptive_only","governor_or_power_mode","issue","llvm_version","measurement_control","missing_metadata","moving_output_sha256","moving_p50_ns","moving_p95_ns","moving_p99_ns","observations","os","paired_delta_median_ns","pairing","percentile_method","profile","quiet_output_sha256","quiet_p50_ns","quiet_p99_ns","record","restated_output_sha256","restated_p50_ns","restated_p95_ns","restated_p99_ns","round","rust_version","schema_version","statistical_method","target_features","target_triple","tracks","units","workload_kind"];
 
 def meters_keys: ["arms","backend","background_load_note","bit_identity","candidate_commit","cpu_affinity","cpu_model","descriptive_only","governor_or_power_mode","issue","llvm_version","measurement_control","meter_frames_drained","meter_streams","meter_tap","meter_window_blocks","meters_off_output_sha256","meters_off_p50_ns","meters_off_p95_ns","meters_off_p99_ns","meters_on_output_sha256","meters_on_p50_ns","meters_on_p95_ns","meters_on_p99_ns","missing_metadata","observations","os","paired_delta_median_ns","pairing","percentile_method","profile","record","render_errors","render_total_forbidden_operations","round","rust_version","schema_version","statistical_method","target_features","target_triple","tracks","units","workload_kind"];
 
+def placement_keys: ["arms","backend","background_load_note","bit_identity","candidate_commit","cpu_affinity","cpu_model","descriptive_only","governor_or_power_mode","issue","llvm_version","measurement_control","merged_chain_layout","merged_chain_output_sha256","merged_chain_p50_ns","merged_chain_p95_ns","merged_chain_p99_ns","merged_chain_transposes_per_block","missing_metadata","observations","os","paired_delta_median_ns","paired_delta_median_ns_per_track","pairing","percentile_method","profile","record","render_errors","render_total_forbidden_operations","round","rust_version","schema_version","split_chains_layout","split_chains_output_sha256","split_chains_p50_ns","split_chains_p95_ns","split_chains_p99_ns","split_chains_transposes_per_block","statistical_method","target_features","target_triple","tracks","units","workload_kind"];
+
 def observation_keys: ["absent_output_sha256","absent_p50_ns","absent_p95_ns","absent_p99_ns","armed_output_sha256","armed_p50_ns","armed_p95_ns","armed_p99_ns","armed_windows_published","arms","backend","background_load_note","bit_identity","candidate_commit","cpu_affinity","cpu_model","descriptive_only","governor_or_power_mode","issue","llvm_version","measurement_control","missing_metadata","observation_lanes","observation_taps","observation_window_blocks","observations","os","paired_arm_delta_median_ns","paired_capacity_delta_median_ns","pairing","percentile_method","profile","record","render_errors","render_total_forbidden_operations","round","rust_version","schema_version","statistical_method","target_features","target_triple","tracks","unarmed_output_sha256","unarmed_p50_ns","unarmed_p95_ns","unarmed_p99_ns","unarmed_windows_published","units","workload_kind"];
 
 # The nine session workloads, in the emission order of `WORKLOADS`.
-def session_kinds: ["nine_track_baseline","nine_track_ragged_strip","one_twenty_eight_track_stretch","sixty_four_track_builtins_only","sixty_four_track_compressor_only","sixty_four_track_console","sixty_four_track_dispatch_only","sixty_four_track_eq_only","sixty_four_track_idle"];
+def session_kinds: ["nine_track_baseline","nine_track_ragged_strip","one_twenty_eight_track_stretch","sixty_four_track_builtins_only","sixty_four_track_compressor_only","sixty_four_track_console","sixty_four_track_console_legacy","sixty_four_track_dispatch_only","sixty_four_track_eq_comp_simd1","sixty_four_track_eq_only","sixty_four_track_idle"];
 
-def console_fixture: "fixtures/session/v1/console-sixty-four-track.toml";
+# The standing qualification fixture (#175): the intended production layout, EQ and compressor as
+# one two-slot chain on `simd1` and a true-peak limiter on `simd2`.
+def console_fixture: "fixtures/session/v1/console-sixty-four-track-intended.toml";
+# The retired fixture, rendered by exactly one row for exactly one transition record.
+def legacy_console_fixture: "fixtures/session/v1/console-sixty-four-track.toml";
 
 # Every workload names its track count, whether its model was derived in code, what its strip
 # carries and what its sources feed it. A synthetic row that claimed to be a checked-in fixture,
@@ -40,42 +46,64 @@ def console_fixture: "fixtures/session/v1/console-sixty-four-track.toml";
 def session_kind_shape:
   if .workload_kind == "nine_track_baseline" then
     .tracks == 9 and .synthetic_fixture == false and
-    .strip_content == "eq" and .input_signal == "tone" and
+    .strip_content == "eq" and .strip_layout == "simd1:eq" and .input_signal == "tone" and
     .fixture_id == "fixtures/session/v1/parametric-eq-nine-track.toml"
   elif .workload_kind == "nine_track_ragged_strip" then
     .tracks == 9 and .synthetic_fixture == true and
-    .strip_content == "eq+compressor" and .input_signal == "tone" and
+    .strip_content == "eq+compressor+limiter" and
+    .strip_layout == "simd1:eq+compressor,simd2:limiter" and .input_signal == "tone" and
     .fixture_id == console_fixture
   elif .workload_kind == "sixty_four_track_console" then
     .tracks == 64 and .synthetic_fixture == false and
-    .strip_content == "eq+compressor" and .input_signal == "tone" and
+    .strip_content == "eq+compressor+limiter" and
+    .strip_layout == "simd1:eq+compressor,simd2:limiter" and .input_signal == "tone" and
     .fixture_id == console_fixture
   elif .workload_kind == "one_twenty_eight_track_stretch" then
     .tracks == 128 and .synthetic_fixture == true and
-    .strip_content == "eq+compressor" and .input_signal == "tone" and
+    .strip_content == "eq+compressor+limiter" and
+    .strip_layout == "simd1:eq+compressor,simd2:limiter" and .input_signal == "tone" and
+    .fixture_id == console_fixture
+  # The transition row (#175). The one row still rendered from the retired fixture, and the only
+  # row in the stream whose `dynamic` rack carries anything. It exists so the standing authority's
+  # first record and the retired authority's last one are taken on one host in one run; pinning
+  # its fixture separately is what stops it quietly becoming a second copy of the standing row.
+  elif .workload_kind == "sixty_four_track_console_legacy" then
+    .tracks == 64 and .synthetic_fixture == false and
+    .strip_content == "eq+compressor" and
+    .strip_layout == "simd1:eq,dynamic:compressor" and .input_signal == "tone" and
+    .fixture_id == legacy_console_fixture
+  # The chain-shape row: the standing fixture's two-slot chain carrying the retired fixture's
+  # arithmetic. Identical `strip_content` to the row above and a different `strip_layout`, which is
+  # the entire reason `strip_layout` is a field: these two rows are otherwise indistinguishable in
+  # a record, and the number that separates them is attributed to chain shape alone.
+  elif .workload_kind == "sixty_four_track_eq_comp_simd1" then
+    .tracks == 64 and .synthetic_fixture == true and
+    .strip_content == "eq+compressor" and
+    .strip_layout == "simd1:eq+compressor" and .input_signal == "tone" and
     .fixture_id == console_fixture
   elif .workload_kind == "sixty_four_track_eq_only" then
     .tracks == 64 and .synthetic_fixture == true and
-    .strip_content == "eq" and .input_signal == "tone" and
+    .strip_content == "eq" and .strip_layout == "simd1:eq" and .input_signal == "tone" and
     .fixture_id == console_fixture
   elif .workload_kind == "sixty_four_track_compressor_only" then
     .tracks == 64 and .synthetic_fixture == true and
-    .strip_content == "compressor" and .input_signal == "tone" and
-    .fixture_id == console_fixture
+    .strip_content == "compressor" and .strip_layout == "simd1:compressor" and
+    .input_signal == "tone" and .fixture_id == console_fixture
   elif .workload_kind == "sixty_four_track_builtins_only" then
     .tracks == 64 and .synthetic_fixture == true and
-    .strip_content == "builtins" and .input_signal == "tone" and
+    .strip_content == "builtins" and .strip_layout == "builtins" and .input_signal == "tone" and
     .fixture_id == console_fixture
   elif .workload_kind == "sixty_four_track_dispatch_only" then
     .tracks == 64 and .synthetic_fixture == true and
-    .strip_content == "identity" and .input_signal == "tone" and
+    .strip_content == "identity" and .strip_layout == "builtins" and .input_signal == "tone" and
     .fixture_id == console_fixture
   elif .workload_kind == "sixty_four_track_idle" then
-    # The one row whose whole meaning is its input. `eq+compressor` because the strip is the
-    # unmodified console strip: the idle row measures a fully armed console rendering silence, not
-    # a stripped console rendering anything.
+    # The one row whose whole meaning is its input. The strip is the unmodified standing console
+    # strip: the idle row measures a fully armed console rendering silence, not a stripped console
+    # rendering anything.
     .tracks == 64 and .synthetic_fixture == true and
-    .strip_content == "eq+compressor" and .input_signal == "silence" and
+    .strip_content == "eq+compressor+limiter" and
+    .strip_layout == "simd1:eq+compressor,simd2:limiter" and .input_signal == "silence" and
     .fixture_id == console_fixture
   else false end;
 
@@ -129,6 +157,8 @@ def hoist_statistical_method:
   "three arms alternated per observation; nearest-rank percentiles over per-block nanoseconds; paired delta is moving minus restated per observation; descriptive only; no threshold";
 def meters_statistical_method:
   "two arms alternated per observation; nearest-rank percentiles over per-block nanoseconds; paired delta is meters_on minus meters_off per observation; descriptive only; no threshold";
+def placement_statistical_method:
+  "two arms alternated per observation; nearest-rank percentiles over per-block nanoseconds; paired delta is merged_chain minus split_chains per observation; descriptive only; no threshold";
 def observation_statistical_method:
   "three arms alternated per observation; nearest-rank percentiles over per-block nanoseconds; capacity delta is unarmed minus absent and arm delta is armed minus unarmed, per observation; descriptive only; no threshold";
 
@@ -239,10 +269,53 @@ def observation_record_valid:
   .bit_identity == "absent == unarmed == armed, asserted in-run" and
   .render_errors == 0 and .render_total_forbidden_operations == 0;
 
+# The #175 chain-shape row-pair. Two arms that carry *identical arithmetic* and differ only in
+# whether the EQ and the compressor are one two-slot chain on `simd1` or two one-slot chains
+# across `simd1` and `dynamic`.
+#
+# Two claims are pinned here that no other record in this stream makes.
+#
+# The first is bit identity across a *placement* change, which is AGENTS.md's rule and #166's
+# result: "Banking regroups lanes; it never changes per-lane arithmetic, so a placement change must
+# not move a rendered bit." If these two digests ever differ the delta is not a chain-shape
+# measurement at all, so the record is refused rather than published with a caveat.
+#
+# The second is the transpose count of each arm, which is what makes the measured delta
+# *explicable* rather than merely reported. The G5 shape gate says one planar/AoSoA round-trip per
+# bank chain per block, and #175 opened on the hypothesis that the merged layout would therefore
+# pay one round-trip per cohort where the split layout paid two. It does not: `miso-engine-graph`'s
+# `runtime::bank_chain` materialises every prepared bank as a *single-slot* chain, so the cohort
+# planner's grouping never reaches the counter and both arms transpose the same number of times.
+# The record carries both counts so that finding is a datum in the stream and not a claim in a
+# README -- and so that the day the graph layer takes the saving, this validator's equality goes
+# red and says so.
+def placement_record_valid:
+  (keys | sort) == placement_keys and
+  .record == "console_placement" and common_shape and
+  .statistical_method == placement_statistical_method and
+  .units == "ns_per_block" and
+  .pairing == "alternating_per_observation" and
+  .arms == ["split_chains","merged_chain"] and
+  .workload_kind == "sixty_four_track_placement" and .tracks == 64 and
+  # The two arms are named by their layouts, and the layouts are the point of the comparison.
+  .split_chains_layout == "simd1:eq,dynamic:compressor" and
+  .merged_chain_layout == "simd1:eq+compressor" and
+  ([.split_chains_p50_ns,.split_chains_p95_ns,.split_chains_p99_ns,.merged_chain_p50_ns,.merged_chain_p95_ns,.merged_chain_p99_ns] | all(positive_integer)) and
+  (.split_chains_p50_ns <= .split_chains_p95_ns and .split_chains_p95_ns <= .split_chains_p99_ns) and
+  (.merged_chain_p50_ns <= .merged_chain_p95_ns and .merged_chain_p95_ns <= .merged_chain_p99_ns) and
+  (.paired_delta_median_ns | type == "number" and floor == .) and
+  (.paired_delta_median_ns_per_track | type == "number") and
+  ([.split_chains_transposes_per_block,.merged_chain_transposes_per_block] | all(positive_integer)) and
+  ([.split_chains_output_sha256,.merged_chain_output_sha256] | all(sha256)) and
+  .split_chains_output_sha256 == .merged_chain_output_sha256 and
+  .bit_identity == "split_chains == merged_chain, asserted in-run" and
+  .render_errors == 0 and .render_total_forbidden_operations == 0;
+
 def console_benchmark_record_valid_lib:
   type == "object" and (.record | type == "string") and
   (if .record == "console_session" then session_record_valid
    elif .record == "console_hoist" then hoist_record_valid
    elif .record == "console_meters" then meters_record_valid
    elif .record == "console_observation" then observation_record_valid
+   elif .record == "console_placement" then placement_record_valid
    else false end);

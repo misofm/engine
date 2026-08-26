@@ -101,7 +101,7 @@ jq -n -S \
     --arg preconditions_sha256 "$(sha256sum scripts/check-bench-preconditions.sh | awk '{print $1}')" \
     '{schema_version: 1, issue: 163, phase: "2-step1",
       kind: "wasm_console_benchmark_preflight",
-      workload_launches: 0, warmup_rounds: 1, measured_rounds: 2, records_required: 18,
+      workload_launches: 0, warmup_rounds: 1, measured_rounds: 2, records_required: 22,
       candidate_commit: $commit, candidate_commit_sha256: $commit_sha256,
       binary_sha256: $binary_sha256, guest_module_sha256: $guest_sha256,
       host_source_sha256: $host_sha256, guest_source_sha256: $guest_source_sha256,

@@ -307,7 +307,7 @@ failure_reason=round_2_failed
 run_round 2 >>"$raw" 2>>"$stderr_log" || exit 1
 measured_rounds_completed=2
 failure_reason=record_count
-[[ "$(wc -l <"$raw")" == 18 ]] || exit 1
+[[ "$(wc -l <"$raw")" == 22 ]] || exit 1
 failure_reason=validation_failed
 jq -s -e -f scripts/wasm-console-benchmark-validator.jq "$raw" >/dev/null || exit 1
 failure_reason=accepted_promotion_failed

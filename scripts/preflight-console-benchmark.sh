@@ -80,7 +80,7 @@ jq -n -S \
     --arg library_sha256 "$(sha256sum scripts/console-benchmark-record-lib.jq | awk '{print $1}')" \
     --arg preconditions_sha256 "$(sha256sum scripts/check-bench-preconditions.sh | awk '{print $1}')" \
     '{schema_version: 1, issue: 149, kind: "console_benchmark_preflight",
-      workload_launches: 0, warmup_rounds: 1, measured_rounds: 2, records_required: 26,
+      workload_launches: 0, warmup_rounds: 1, measured_rounds: 2, records_required: 32,
       candidate_commit: $commit, candidate_commit_sha256: $commit_sha256,
       binary_sha256: $binary_sha256, benchmark_source_sha256: $subject_sha256,
       fixture_sha256: $fixture_sha256, runner_sha256: $runner_sha256,

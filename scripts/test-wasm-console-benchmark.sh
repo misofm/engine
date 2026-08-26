@@ -40,17 +40,20 @@ records=$(jq -cn '
       output_sha256: out_digest($kind),
       render_errors: 0
     };
+  # [kind, tracks, synthetic, strip_content, strip_layout, input_signal, fixture_id]
   def pins:
     [
-      ["nine_track_baseline", 9, false, "eq", "tone", "fixtures/session/v1/parametric-eq-nine-track.toml"],
-      ["nine_track_ragged_strip", 9, true, "eq+compressor", "tone", "fixtures/session/v1/console-sixty-four-track.toml"],
-      ["sixty_four_track_console", 64, false, "eq+compressor", "tone", "fixtures/session/v1/console-sixty-four-track.toml"],
-      ["one_twenty_eight_track_stretch", 128, true, "eq+compressor", "tone", "fixtures/session/v1/console-sixty-four-track.toml"],
-      ["sixty_four_track_eq_only", 64, true, "eq", "tone", "fixtures/session/v1/console-sixty-four-track.toml"],
-      ["sixty_four_track_compressor_only", 64, true, "compressor", "tone", "fixtures/session/v1/console-sixty-four-track.toml"],
-      ["sixty_four_track_builtins_only", 64, true, "builtins", "tone", "fixtures/session/v1/console-sixty-four-track.toml"],
-      ["sixty_four_track_dispatch_only", 64, true, "identity", "tone", "fixtures/session/v1/console-sixty-four-track.toml"],
-      ["sixty_four_track_idle", 64, true, "eq+compressor", "silence", "fixtures/session/v1/console-sixty-four-track.toml"]
+      ["nine_track_baseline", 9, false, "eq", "simd1:eq", "tone", "fixtures/session/v1/parametric-eq-nine-track.toml"],
+      ["nine_track_ragged_strip", 9, true, "eq+compressor+limiter", "simd1:eq+compressor,simd2:limiter", "tone", "fixtures/session/v1/console-sixty-four-track-intended.toml"],
+      ["sixty_four_track_console", 64, false, "eq+compressor+limiter", "simd1:eq+compressor,simd2:limiter", "tone", "fixtures/session/v1/console-sixty-four-track-intended.toml"],
+      ["one_twenty_eight_track_stretch", 128, true, "eq+compressor+limiter", "simd1:eq+compressor,simd2:limiter", "tone", "fixtures/session/v1/console-sixty-four-track-intended.toml"],
+      ["sixty_four_track_eq_only", 64, true, "eq", "simd1:eq", "tone", "fixtures/session/v1/console-sixty-four-track-intended.toml"],
+      ["sixty_four_track_compressor_only", 64, true, "compressor", "simd1:compressor", "tone", "fixtures/session/v1/console-sixty-four-track-intended.toml"],
+      ["sixty_four_track_builtins_only", 64, true, "builtins", "builtins", "tone", "fixtures/session/v1/console-sixty-four-track-intended.toml"],
+      ["sixty_four_track_dispatch_only", 64, true, "identity", "builtins", "tone", "fixtures/session/v1/console-sixty-four-track-intended.toml"],
+      ["sixty_four_track_idle", 64, true, "eq+compressor+limiter", "simd1:eq+compressor,simd2:limiter", "silence", "fixtures/session/v1/console-sixty-four-track-intended.toml"],
+      ["sixty_four_track_console_legacy", 64, false, "eq+compressor", "simd1:eq,dynamic:compressor", "tone", "fixtures/session/v1/console-sixty-four-track.toml"],
+      ["sixty_four_track_eq_comp_simd1", 64, true, "eq+compressor", "simd1:eq+compressor", "tone", "fixtures/session/v1/console-sixty-four-track-intended.toml"]
     ];
   [ (1, 2) as $round | pins[] | . as $pin |
     ([ leg("native_simd8"; "native"; "Simd8"; "host_process_heap"; 89000; $pin[0]),
@@ -60,7 +63,8 @@ records=$(jq -cn '
     {
       schema_version: 1, issue: 163, phase: "2-step1", record: "wasm_console_session",
       workload_kind: $pin[0], tracks: $pin[1], synthetic_fixture: $pin[2],
-      strip_content: $pin[3], input_signal: $pin[4], fixture_id: $pin[5],
+      strip_content: $pin[3], strip_layout: $pin[4],
+      input_signal: $pin[5], fixture_id: $pin[6],
       round: $round, sample_rate_hz: 48000, quantum_frames: 128,
       observations: 1000, warmup_blocks: 64,
       units: "us_per_block", percentile_method: "nearest_rank",
@@ -89,10 +93,10 @@ records=$(jq -cn '
 set_all() { printf '%s' "$records" | jq -c "[.[] | $1] | .[]"; }
 mutate() { expect_reject "$(printf '%s' "$records" | jq -c "$1 | .[]")" "$2"; }
 
-expect_accept "$(printf '%s' "$records" | jq -c '.[]')" 'the frozen eighteen-record set'
+expect_accept "$(printf '%s' "$records" | jq -c '.[]')" 'the frozen twenty-two-record set'
 
 # Shape of the set.
-mutate 'del(.[0])' 'seventeen records'
+mutate 'del(.[0])' 'twenty-one records'
 mutate '. as $r | ($r + [$r[0]])' 'a duplicated workload row'
 mutate '.[0].round = 2' 'a workload measured twice in one round and never in the other'
 mutate '[.[] | .round = 1]' 'a set with only one measured round'
@@ -114,7 +118,7 @@ mutate '.[0].digest_identity = "divergent"' \
     'a summary claiming divergence over legs whose digests agree'
 mutate '.[0].digest_identity = "probably_fine"' \
     'a digest identity outside the two words the field may carry'
-mutate '.[9].legs[0].output_sha256 = ("e" * 64)' \
+mutate '.[11].legs[0].output_sha256 = ("e" * 64)' \
     'a second round that rendered something other than what the first round rendered'
 
 # Claim 3: the published ratios are the legs own.
@@ -136,6 +140,19 @@ mutate '.[8].input_signal = "tone"' 'the idle row claiming it renders a tone'
 mutate '.[2].synthetic_fixture = true' \
     'the checked-in console fixture reported as derived in code'
 mutate '.[5].workload_kind = "sixty_four_track_mystery"' 'a workload kind with no pinned shape'
+# #175: the two rows that carry the same `strip_content` and differ only in rack layout. Without
+# `strip_layout` in the pin these two are the same row, and the chain-shape comparison the wasm
+# arm reports would be a comparison of one layout with itself.
+mutate '.[9].strip_layout = "simd1:eq+compressor"' \
+    'the transition row claiming the merged chain shape'
+mutate '.[10].strip_layout = "simd1:eq,dynamic:compressor"' \
+    'the chain-shape row claiming the retired layout'
+mutate '.[9].fixture_id = "fixtures/session/v1/console-sixty-four-track-intended.toml"' \
+    'the transition row rendered from the standing fixture'
+mutate '.[2].strip_layout = "simd1:eq,dynamic:compressor"' \
+    'the standing console row claiming the retired layout'
+mutate '.[2].strip_content = "eq+compressor"' \
+    'the standing console row claiming it carries no limiter'
 
 # Leg labelling and leg internals.
 mutate '.[0].legs[2].target = "native"' 'a wasm leg labelled as a native one'

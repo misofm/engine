@@ -320,6 +320,8 @@ mod tests {
     const SESSION_FIXTURE: &str = include_str!("../../../fixtures/session/v1/canonical.toml");
     const CONSOLE_SIXTY_FOUR_TRACK_FIXTURE: &str =
         include_str!("../../../fixtures/session/v1/console-sixty-four-track.toml");
+    const CONSOLE_SIXTY_FOUR_TRACK_INTENDED_FIXTURE: &str =
+        include_str!("../../../fixtures/session/v1/console-sixty-four-track-intended.toml");
     const PARAMETRIC_EQ_NINE_TRACK_FIXTURE: &str =
         include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.toml");
 
@@ -4567,6 +4569,190 @@ mod tests {
             builtin_bank_count,
             0,
             banked.1,
+        );
+    }
+
+    /// Issue #175: the intended production layout's chain structure and its G5 transpose count.
+    ///
+    /// The owner set the layout the product will ship: EQ and compressor as **one two-slot chain**
+    /// on `simd1`, and a true-peak limiter alone on `simd2`. The retired fixture ran the same EQ
+    /// and compressor as **two one-slot chains** (`simd1` + `dynamic`). This pins what that
+    /// difference is, and -- just as importantly -- what it is not.
+    ///
+    /// 1. **Bits.** The two placements render byte-identically. Post-#166 bank eligibility follows
+    ///    the effect's kernel contract and not the rack, and the strip order
+    ///    `simd1 -> dynamic -> simd2` means appending the compressor to `simd1` and emptying
+    ///    `dynamic` leaves the traversal order alone, so the merge regroups lanes without touching
+    ///    any lane's arithmetic. The comparison is made against the *limiter-free* intended model,
+    ///    because the limiter is genuinely new arithmetic and would mask the property under test.
+    /// 2. **Structure.** The retired layout realises two bank cohorts per eight tracks (one per
+    ///    rack); the merged layout realises one cohort of two slots. The slot *executions* are
+    ///    unchanged -- the same two effects still run over the same lanes -- so what falls is the
+    ///    chain count, not the work.
+    /// 3. **G5** (master plan §4.5). One planar/AoSoA round-trip per bank chain per block. The
+    ///    merged layout therefore pays one round-trip per eight tracks per block where the retired
+    ///    layout paid two, and the full intended strip pays two again because the limiter adds a
+    ///    second chain on `simd2`. Every count below is derived from the realised bank count
+    ///    rather than written as a literal, so the assertion states the *law* and the structural
+    ///    literals beside it state the shape.
+    #[test]
+    fn intended_placement_merges_two_chains_into_one_bit_identically() {
+        const BLOCKS: u64 = 12;
+        let intended =
+            parse_session_toml(CONSOLE_SIXTY_FOUR_TRACK_INTENDED_FIXTURE).expect("intended fixture");
+        assert_eq!(intended.tracks.len(), 64);
+        assert!(
+            intended.tracks.iter().all(|track| {
+                track.simd1.effects.len() == 2
+                    && track.dynamic.effects.is_empty()
+                    && track.simd2.effects.len() == 1
+            }),
+            "the intended fixture is a two-slot simd1 chain, an empty dynamic rack and a \
+             one-slot simd2 chain"
+        );
+
+        // The limiter-free intended model: the merged chain shape carrying exactly the retired
+        // layout's arithmetic. This is the honest counterpart to the retired fixture.
+        let mut merged = intended.clone();
+        for track in &mut merged.tracks {
+            track.simd2.effects.clear();
+        }
+        let split = parse_session_toml(CONSOLE_SIXTY_FOUR_TRACK_FIXTURE).expect("retired fixture");
+
+        let compile = |model: &miso_engine_session::SessionTomlV1, plan_id: u64| {
+            let session = compile_session(
+                model,
+                CompileCaps {
+                    max_compiled_model_bytes: u64::MAX,
+                    max_requested_runtime_bytes: u64::MAX,
+                    max_single_allocation_bytes: u64::MAX,
+                    max_queue_items: u64::MAX,
+                    max_source_ring_frames: u64::MAX,
+                    max_source_ring_bytes: u64::MAX,
+                },
+            )
+            .expect("compiled console model");
+            let registry = launch_native_effect_registry_v1().expect("launch registry");
+            GraphCompiler::compile(GraphCompileRequest {
+                dispatch: host_dispatch(),
+                plan_id,
+                effects: prepare_native_session_effects(
+                    &session,
+                    &registry,
+                    EffectCompileCaps {
+                        maximum_total_state_bytes: 1 << 22,
+                        maximum_scratch_bytes: 1 << 20,
+                        maximum_automation_spans_per_block: 32,
+                    },
+                )
+                .expect("prepared console effects"),
+                caps: integration_caps(),
+            })
+            .unwrap_or_else(|failure| panic!("console graph: {:?}", failure.diagnostics))
+        };
+
+        let split_artifact = compile(&split, 1_750);
+        let merged_artifact = compile(&merged, 1_751);
+        let intended_artifact = compile(&intended, 1_752);
+
+        let Some(width) = BankWidth::for_backend(split_artifact.report.rack_cohorts.dispatch) else {
+            assert_eq!(split_artifact.graph.prepared_bank_count(), 0);
+            return;
+        };
+        let lanes = width.lanes() as usize;
+        let cohorts_per_rack = 64 / lanes;
+
+        // (2) Structure. The retired layout: one cohort in `simd1`, one in `dynamic`.
+        let split_cohorts = &split_artifact.report.rack_cohorts;
+        assert_eq!(
+            split_cohorts.bound_slots_in(RackLocationV1::Simd1).count(),
+            cohorts_per_rack
+        );
+        assert_eq!(
+            split_cohorts.bound_slots_in(RackLocationV1::Dynamic).count(),
+            cohorts_per_rack
+        );
+        assert_eq!(split_artifact.graph.prepared_bank_count(), 2 * cohorts_per_rack);
+
+        // The merged layout: both slots bound inside one `simd1` cohort, nothing in `dynamic`.
+        let merged_cohorts = &merged_artifact.report.rack_cohorts;
+        assert_eq!(
+            merged_cohorts.bound_slots_in(RackLocationV1::Simd1).count(),
+            2 * cohorts_per_rack,
+            "both slots of the two-slot chain must bind"
+        );
+        assert_eq!(
+            merged_cohorts
+                .bound_slots_in(RackLocationV1::Dynamic)
+                .count(),
+            0
+        );
+        assert!(merged_cohorts.scalar_in(RackLocationV1::Simd1).is_empty());
+        // **The finding.** Both layouts realise the *same number of prepared banks*, because a
+        // prepared bank is a bound **slot**, not a chain: the retired layout's sixteen are one
+        // EQ slot and one compressor slot per cohort in two racks, and the merged layout's
+        // sixteen are two slots per cohort in one rack. The cohort planner did group them --
+        // `bound_slots_in(Simd1)` doubled and `Dynamic` emptied -- but that grouping does not
+        // reach the runtime as one chain.
+        assert_eq!(
+            merged_artifact.graph.prepared_bank_count(),
+            split_artifact.graph.prepared_bank_count(),
+            "merging the racks regroups which cohort the slots belong to, not how many slots bind"
+        );
+        assert_eq!(
+            intended_artifact.graph.prepared_bank_count(),
+            3 * cohorts_per_rack,
+            "the intended strip binds three slots per cohort: EQ, compressor and limiter"
+        );
+
+        // (1) Bits, and (3) G5.
+        let split_render = render_console_blocks(split_artifact, BLOCKS);
+        let merged_render = render_console_blocks(merged_artifact, BLOCKS);
+        assert_pcm_bits_equal(
+            &split_render.0,
+            &merged_render.0,
+            "64-track console: two one-slot chains vs one two-slot chain",
+        );
+        assert!(
+            split_render.0.iter().flatten().any(|sample| *sample != 0.0),
+            "the console fixture rendered audio"
+        );
+
+        // G5 holds on both sides, derived rather than pinned. `miso-engine-graph`'s
+        // `runtime::bank_chain` builds every `BankChain` with a single-element slot vector, so
+        // today "one round-trip per chain" and "one round-trip per bound slot" are the same
+        // number, and the law cannot distinguish them.
+        let banks = |render: &(Vec<Vec<f32>>, u64)| render.1 / BLOCKS;
+        assert_eq!(split_render.1, BLOCKS * banks(&split_render));
+        assert_eq!(merged_render.1, BLOCKS * banks(&merged_render));
+
+        // **The measured answer to #175's hypothesis.** The intended layout was expected to save
+        // one AoSoA round-trip per cohort per block by paying one gather/scatter for a two-slot
+        // chain where the retired layout paid two for two one-slot chains. It does not, and this
+        // is where that is recorded rather than left to the benchmark to imply.
+        //
+        // `miso_engine_rack::BankChain` is built for exactly this: it takes an ordered `slots`
+        // vector, transposes once in `run`, and its own unit tests drive three slots through one
+        // round-trip. The unrealised half is in `miso-engine-graph`: `runtime::chain_for` returns
+        // one `BankChain` per prepared effect bank and `runtime::bank_chain` gives each of them
+        // `vec![BankSlot { .. }]`, so a two-slot cohort becomes two independent one-slot chains
+        // with two gathers and two scatters. The saving is therefore available in the rack layer
+        // and not taken by the graph layer; until it is, rack placement is a pure layout choice
+        // with no round-trip consequence, which is a stronger form of the #166 result than #166
+        // claimed.
+        assert_eq!(
+            split_render.1, merged_render.1,
+            "merging two one-slot chains into one two-slot chain currently saves no AoSoA \
+             round-trip: the graph runtime materialises one single-slot BankChain per bound slot, \
+             so the cohort planner's grouping does not reach the transpose counter"
+        );
+        println!(
+            "#175 chain shape @ {lanes} lanes over {BLOCKS} blocks: \
+             retired {} transposes, merged {} -- saving {} per block (hypothesis predicted {})",
+            split_render.1,
+            merged_render.1,
+            (split_render.1 - merged_render.1) / BLOCKS,
+            cohorts_per_rack,
         );
     }
 
