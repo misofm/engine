@@ -7,26 +7,31 @@
 # defect cannot consume the one authorised measurement. Nothing here is timed, and nothing here
 # instantiates the guest for anything but a shape check.
 set -euo pipefail
-[[ "$#" -le 1 ]] || { printf 'usage: %s [--after|--issue175]\n' "$0" >&2; exit 2; }
+[[ "$#" -le 1 ]] || { printf 'usage: %s [--after|--issue175|--issue182]\n' "$0" >&2; exit 2; }
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$root"
 
 fail() { printf 'wasm console preflight failure: %s\n' "$1" >&2; exit 1; }
 
 # Mirrors `run-wasm-console-benchmark.sh`'s arms: default is the pre-change browser baseline,
-# `--after` is the same rows on the unfused tree (issue #163 phase 2), and `--issue175` is the
-# wasm half of the intended-placement family, whose row set the standing fixture changed.
+# `--after` is the same rows on the unfused tree (issue #163 phase 2), `--issue175` is the
+# wasm half of the intended-placement family, whose row set the standing fixture changed, and
+# `--issue182` is the same strip re-measured after the limiter's effect-optimisation round, which
+# is class A and must therefore reproduce every `output_sha256` of the #175 arm exactly.
 arm=baseline
 case "${1:-}" in
     --after) arm=after; shift ;;
     --issue175) arm=issue175; shift ;;
+    --issue182) arm=issue182; shift ;;
 esac
-[[ "$#" == 0 ]] || fail "usage: $0 [--after|--issue175]"
+[[ "$#" == 0 ]] || fail "usage: $0 [--after|--issue175|--issue182]"
 
 if [[ "$arm" == after ]]; then
     artifact_dir="$root/artifacts/issue163-phase2"
 elif [[ "$arm" == issue175 ]]; then
     artifact_dir="$root/artifacts/issue175"
+elif [[ "$arm" == issue182 ]]; then
+    artifact_dir="$root/artifacts/issue182"
 else
     artifact_dir="$root/artifacts/issue163-phase2-wasm-baseline"
 fi
