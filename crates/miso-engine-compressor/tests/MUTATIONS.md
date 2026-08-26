@@ -92,3 +92,32 @@ mutation applied to the same kernel read through the new address. Same host and 
 | 143-E6-a | `PreparedCompressor::observe_resident` advances the smoother in the read (`self.instance.left.gain_reduction_db *= 0.9;`) | `compressor/src/lib.rs` | `cargo build -p miso-engine-compressor` | RED — **does not compile**: `observe_resident` takes `&self`, so "resident" is enforced by the signature rather than asserted. This is the `&self` half of E6 |
 | 143-E6-b | `observe_resident` writes `0.0` into both lanes instead of reading `Channel::gain_reduction_db` | `compressor/src/lib.rs` | `observation` (whole binary) | RED — 5 of 6 tests fail; `the_compressor_reports_the_reduction_its_kernel_smoothed` reports `0` where reduction was required |
 | 143-E2-a | `observe_resident_bank` broadcasts lane 0's reading to every lane | `compressor/src/lib.rs` | `observation::every_bank_lane_reads_its_own_reduction` | RED — `lane 1 left reading is its own, not a neighbour's`, left `0` vs right `3239051021` |
+
+## Round 2 — the staged idle body and the pre-gathered detector taps
+
+`kernel::process_block` sends an idle segment to `idle_frames_staged` when every live lane's
+detector distance `D` is at least the segment length, and to `frames_loop` otherwise. The claim is
+bit identity, and `tests/staged_idle.rs` is its gate: the same input at partitions that straddle
+`D` puts the same frames through both bodies, with the 512-frame partition — always the per-frame
+body, being longer than the staged bound — as the reference.
+
+Every row below was applied to the working tree, `cargo test -p miso-engine-compressor --test
+staged_idle` was run, the result was recorded, and the mutation was reverted in the same session.
+Host: `x86_64` (AMD Ryzen 7 9700X, Zen 5), workspace `.cargo/config.toml` pin
+`-C target-feature=+avx2,+fma`, debug profile.
+
+| # | mutation | file | test binary | result |
+|---|---|---|---|---|
+| 25 | the legality guard loosened by one frame: `min_delay(..) + 1 >= len` | `src/kernel.rs` | `staged_idle` | RED — `left, D = 64, partition 65`, and `forced true, bank partition 1`. The first is the guard's boundary on the nose: at `D = 64` a 64-frame segment is legal and a 65-frame one is not. The second is the `D == 0` lane, whose tap is the row the frame itself writes |
+| 26 | `fill_taps` uses `delay[0]` for every lane | `src/kernel.rs` | `staged_idle` | RED — `forced false, bank partition 1`. The per-lane stride of the pre-gather, which is row 1's mutation applied to the block-level gather |
+| 27 | the delay test dropped from the guard, leaving only `len <= MAX_STAGED_FRAMES` | `src/kernel.rs` | `staged_idle` | RED — `left, D = 120, partition 127` and `forced false, bank partition 128` |
+| 28 | the ring wrap dropped from `fill_taps`: `first = len` | `src/kernel.rs` | `staged_idle` | RED — `range end index 967 out of range for slice of length 961`, the out-of-bounds read the two-run split prevents. Row 4's mutation applied to the block-level gather |
+| 29 | pass A of the staged body binds the linked levels the wrong way round: `let (level_right, level_left) = link_frame(..)` | `src/kernel.rs` | `staged_idle` | RED — `left, D = 960, partition 1` and `DualMono, bypass false, sidechain false, partition 1`. The three link laws, the bypass flag and a connected sidechain are all outside the frozen corpus's reach on the staged path, so they are covered here |
+| 31 | the staged body pre-gathers the **right** channel's taps from `channel_right.cursor` instead of the shared left-cursor index (the adversarial verifier's V3) | `src/kernel.rs` | `staged_idle` | RED — `partition 128`, the first staged partition of `a_left_only_rejection_diverges_the_cursors_and_the_staged_body_still_agrees`. Applied to the whole crate, **every other test binary still passes**: this row is the only thing that gates it. The two cursors diverge only after `kernel::finish_channel` resets one channel, and re-converge at the end of the next block, so the window is one block wide |
+
+### Equivalent mutations (applied, GREEN, and recorded rather than gated)
+
+| # | mutation | why it survives |
+|---|---|---|
+| 30 | `segment_is_stageable` returns `false` unconditionally, so every idle segment takes the per-frame body | Applied and run: **GREEN** in `staged_idle`, and necessarily so — that is the whole point of the guard. The staged body is a cost optimisation with no semantics of its own, exactly as the ramping/idle split of row 24 is, and no bit-identity test can distinguish a renderer from itself. What distinguishes the two is the benchmark: `examples/lane_sample_timing` reports 2.61 → 1.93 ns/lane-sample at `W = 8` with the staged body in and out. The mutation that *is* gated is the one that takes the staged body where it is illegal, which is rows 25 and 27 |
+| 32 | row 31's mutation, gated by a test that rejects the **right** channel rather than the left | Applied and run: **GREEN**, and necessarily so. `Channel::clear_state` zeroes the rejected channel's rings as well as its cursor, so when the *right* channel is the one reset every candidate tap row of its detector ring reads `+0.0` and the two cursors cannot be told apart. Only a **left**-only rejection leaves the diverged channel holding real signal, which is why row 31's test injects there. Recorded because the obvious way to write that test is vacuous |

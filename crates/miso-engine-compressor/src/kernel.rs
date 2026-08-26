@@ -28,6 +28,12 @@
 //! redesigns a coefficient and loads its lane vectors once. `frames_loop` is generic over a `const
 //! RAMPING: bool` so the two bodies are the same source and the idle one is free of the ramp work
 //! at compile time.
+//!
+//! The idle remainder is then staged: `idle_frames_staged` visits it three times, once for the
+//! frame-independent work before the ballistic recurrence, once for the recurrence, once for the
+//! frame-independent work after it, with the detector taps of the whole segment pre-gathered.
+//! That is legal only when no lane taps a row the segment writes first, so `frames_loop` remains
+//! the fallback and the general body; both are exercised.
 
 use miso_engine_effect_contract::LinkMode;
 use miso_engine_effect_runtime::bank;
@@ -356,18 +362,35 @@ pub(crate) fn process_block<L: Lane>(
         );
     }
     if ramping < frames {
-        frames_loop::<L, false>(
-            left,
-            right,
-            detector,
-            ramping,
-            frames,
-            link,
-            bypass,
-            sample_rate,
-            channel_left,
-            channel_right,
-        );
+        // The idle remainder takes the staged body when its detector taps can be pre-gathered,
+        // and the general per-frame body when they cannot. The two are bit-identical; which one
+        // runs is a property of the lanes' lookahead alone (see `idle_frames_staged`).
+        if segment_is_stageable(channel_left, channel_right, frames - ramping) {
+            idle_frames_staged::<L>(
+                left,
+                right,
+                detector,
+                ramping,
+                frames,
+                link,
+                bypass,
+                channel_left,
+                channel_right,
+            );
+        } else {
+            frames_loop::<L, false>(
+                left,
+                right,
+                detector,
+                ramping,
+                frames,
+                link,
+                bypass,
+                sample_rate,
+                channel_left,
+                channel_right,
+            );
+        }
     }
 }
 
@@ -386,6 +409,11 @@ pub(crate) fn process_block<L: Lane>(
 /// 7. gain: `a = gain_from_db(g + makeup)`;
 /// 8. mix: `wet = z * a`, `y = fma(mix, wet - z, z)`, then the two identity selects;
 /// 9. advance the cursor.
+///
+/// This is the general body: it is the only one that may ramp, and it is the fallback whenever
+/// [`segment_is_stageable`] says an idle segment cannot be pre-gathered. Steps 4 to 8 are the
+/// shared [`curve_target`], [`ballistic`] and [`gain_mix`], so the staged body below is the same
+/// arithmetic in a different order of visits, not a second transcription of it.
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
 fn frames_loop<L: Lane, const RAMPING: bool>(
@@ -402,25 +430,7 @@ fn frames_loop<L: Lane, const RAMPING: bool>(
 ) {
     let width = L::WIDTH;
     let ring_length = channel_left.ring_length as usize;
-    let zero = L::zero();
-    let half = L::splat(0.5);
-    let level_floor = L::splat(LEVEL_FLOOR);
-    let level_min = L::splat(LEVEL_MIN_DB);
-    let level_max = L::splat(LEVEL_MAX_DB);
-    let reduction_min = L::splat(GAIN_REDUCTION_MIN_DB);
-    let all = zero.eq(zero);
-    let none = L::mask_not(all);
-    let linked = if matches!(link, LinkMode::DualMono) {
-        none
-    } else {
-        all
-    };
-    let averaged = if matches!(link, LinkMode::Average) {
-        all
-    } else {
-        none
-    };
-    let bypassed = if bypass { all } else { none };
+    let invariants = Invariants::<L>::new(link, bypass);
 
     let mut coef_left = Coef::load(&channel_left.words);
     let mut coef_right = Coef::load(&channel_right.words);
@@ -435,26 +445,11 @@ fn frames_loop<L: Lane, const RAMPING: bool>(
         }
         let slot = frame * width;
 
-        // 1. main input and detector source.
+        // 1 and 2. main input, detector source, magnitudes and link.
         let main_left = L::load(&left[slot..]);
         let main_right = L::load(&right[slot..]);
-        let (source_left, source_right) = match detector {
-            Detector::Main => (main_left, main_right),
-            Detector::Silent => (zero, zero),
-            Detector::Sidechain(sidechain_left, sidechain_right) => (
-                L::load(&sidechain_left[slot..]),
-                L::load(&sidechain_right[slot..]),
-            ),
-        };
-
-        // 2. link.
-        let magnitude_left = source_left.abs();
-        let magnitude_right = source_right.abs();
-        let maximum = magnitude_left.max(magnitude_right);
-        let average = magnitude_left.mul(half).add(magnitude_right.mul(half));
-        let combined = L::select(averaged, average, maximum);
-        let level_left = L::select(linked, combined, magnitude_left);
-        let level_right = L::select(linked, combined, magnitude_right);
+        let (level_left, level_right) =
+            link_frame(detector, slot, main_left, main_right, &invariants);
 
         // 3. rings.
         let write = channel_left.cursor as usize;
@@ -475,16 +470,14 @@ fn frames_loop<L: Lane, const RAMPING: bool>(
             detected_left,
             &coef_left,
             &mut channel_left.gain_reduction_db,
-            bypassed,
-            (zero, level_floor, level_min, level_max, reduction_min),
+            &invariants,
         );
         let output_right = one_frame(
             delayed_right,
             detected_right,
             &coef_right,
             &mut channel_right.gain_reduction_db,
-            bypassed,
-            (zero, level_floor, level_min, level_max, reduction_min),
+            &invariants,
         );
         output_left.store(&mut left[slot..]);
         output_right.store(&mut right[slot..]);
@@ -492,6 +485,233 @@ fn frames_loop<L: Lane, const RAMPING: bool>(
         // 9.
         channel_left.cursor = next as u32;
         channel_right.cursor = next as u32;
+    }
+}
+
+/// Longest idle segment [`idle_frames_staged`] will take in one visit.
+///
+/// This is the bound on the staged body's scratch, which is stack: `2 * 128 * MAX_WIDTH` floats of
+/// taps plus `2 * 128` lane vectors of curve targets, 16 KiB at `W = 8` and 8.5 KiB at `W = 1`.
+/// Nothing is allocated on the render path (AGENTS.md, allocation-free render).
+///
+/// The contract sets no ceiling on the prepared quantum, but 128 frames is the render quantum
+/// every launch host actually carries — the Web Audio render quantum, the console fixtures and the
+/// benchmark subjects — so at launch this is the whole idle remainder of a block and not a strip
+/// of one. A longer segment is not wrong, it simply takes [`frames_loop`]. Cutting a long segment
+/// into strips to keep it staged is a real option and deliberately not taken: at 128 frames the
+/// scratch already sits in L1, and strip-mining this body to 16, 32 or 64 frames measured slower
+/// on the kernel example at every one of the three sizes.
+const MAX_STAGED_FRAMES: usize = 128;
+
+/// Whether the staged idle body may take a segment of `len` frames.
+///
+/// The one legality condition, derived in [`idle_frames_staged`]: every live lane of both channels
+/// must tap a detector row that this segment does not write first, which is `D >= len`.
+fn segment_is_stageable<L: Lane>(
+    channel_left: &Channel<L>,
+    channel_right: &Channel<L>,
+    len: usize,
+) -> bool {
+    len <= MAX_STAGED_FRAMES && min_delay(channel_left) >= len && min_delay(channel_right) >= len
+}
+
+/// The idle body as three passes over the segment, with the detector taps pre-gathered.
+///
+/// # Why the passes
+///
+/// Step 6 is the compressor's only cross-frame dependency: one lane vector, `g`, carried from
+/// frame to frame through a select, an `fma` and a `flush`. Everything before it (steps 1 to 5,
+/// which is where the work is — `fast_level_db` and `gain_delta_db` are both several-term
+/// polynomial evaluations) and everything after it (steps 7 and 8) depend only on the frame they
+/// are in. Visiting the segment once per stage lets consecutive frames' polynomial chains overlap
+/// instead of each one waiting behind the previous frame's recurrence, and leaves a pass B whose
+/// serial chain is the ~7 operations it actually is.
+///
+/// Per lane and per sample the operation order is untouched: pass A does steps 1 to 5 of frame `i`
+/// in the same order the per-frame body does, pass B does step 6 of frame `i` after step 6 of
+/// frame `i - 1`, and pass C does steps 7 and 8. Only the *interleaving across frames* moves, and
+/// no lane's arithmetic sees another frame's. That is the same argument class as #163 phase 3's
+/// SVF interleave: a reordering of independent frames is bit-exact, a reordering of a dependent
+/// chain is not, and the recurrence is kept in its own strictly sequential pass precisely so that
+/// it is never the thing being reordered.
+///
+/// # Why pre-gathering the taps is legal
+///
+/// Write `B` for the ring length, `w0` for the cursor at the head of the segment and `D_k` for
+/// lane `k`'s read-back distance. Frame `i` of the segment writes detector row
+/// `w_i = (w0 + i) mod B` and reads row `t_i(k) = (w0 + i - D_k) mod B`.
+///
+/// Gathering every `t_i(k)` before the segment's first write returns a different value from the
+/// per-frame body exactly when some earlier frame `j < i` of this same segment overwrote that row,
+/// i.e. when `t_i(k) == w_j`, i.e. when `D_k ≡ i - j (mod B)` for some `1 <= i - j <= len - 1`.
+/// Because `0 <= D_k <= N = B - 1`, that congruence is plain equality, so the gather is
+/// bit-identical iff no lane has `D_k` in `[1, len - 1]`. `D_k == 0` is not safe either — the tap
+/// would then be the row the frame itself has just written — so the condition is `D_k >= len` for
+/// every live lane of both channels, which is what [`segment_is_stageable`] tests.
+///
+/// `D = N - L` with `N = Fs/50` (the 20 ms fixed latency) and `L` the lookahead in samples, so the
+/// guard fails only for a lane whose lookahead is within `len` samples of the 20 ms maximum — over
+/// 17.3 ms at 48 kHz for a full 128-frame segment. Those blocks take [`frames_loop`], which is why
+/// the per-frame body stays a live, exercised path and not dead code.
+///
+/// The delayed main output needs no such guard. Frame `i` reads main row `(w0 + i + 1) mod B`
+/// after writing row `w_i`; that row is written by frame `i + 1`, never by an earlier one, so it
+/// is staged forward during pass A rather than gathered up front. It is staged into `left`/`right`
+/// themselves: pass A has already consumed `left[slot]` (it is the frame's main input) and pass C
+/// is going to overwrite it, so the block buffer is exactly the right-sized scratch for it and
+/// carries no stack.
+///
+/// Not `#[inline(always)]`: the segment is visited once per block, and keeping the scratch in this
+/// frame keeps it off the stack of blocks that take the per-frame body.
+#[allow(clippy::too_many_arguments)]
+fn idle_frames_staged<L: Lane>(
+    left: &mut [f32],
+    right: &mut [f32],
+    detector: Detector<'_>,
+    start: usize,
+    end: usize,
+    link: LinkMode,
+    bypass: bool,
+    channel_left: &mut Channel<L>,
+    channel_right: &mut Channel<L>,
+) {
+    let width = L::WIDTH;
+    let ring_length = channel_left.ring_length as usize;
+    let len = end - start;
+    debug_assert!(segment_is_stageable(channel_left, channel_right, len));
+    let invariants = Invariants::<L>::new(link, bypass);
+    let coef_left = Coef::load(&channel_left.words);
+    let coef_right = Coef::load(&channel_right.words);
+
+    // The taps of the whole segment, frame major, read before the segment's first ring write.
+    //
+    // The left channel's cursor is the shared write index for both channels, exactly as it is in
+    // the per-frame body: a rejected block clears one channel's state and not necessarily the
+    // other's, so the two cursors can legitimately disagree on entry, and the frozen behaviour is
+    // that the left one wins and both are left equal on exit.
+    let head = channel_left.cursor as usize;
+    let mut taps_left = [0.0_f32; MAX_STAGED_FRAMES * MAX_WIDTH];
+    let mut taps_right = [0.0_f32; MAX_STAGED_FRAMES * MAX_WIDTH];
+    fill_taps(channel_left, head, len, &mut taps_left);
+    fill_taps(channel_right, head, len, &mut taps_right);
+
+    // Pass A: steps 1 to 5, plus the cursor. Holds the static-curve target of every frame, which
+    // pass B then overwrites in place with the smoothed reduction it produces.
+    let mut target_left = [L::zero(); MAX_STAGED_FRAMES];
+    let mut target_right = [L::zero(); MAX_STAGED_FRAMES];
+    let mut write = head;
+    for index in 0..len {
+        let slot = (start + index) * width;
+        let main_left = L::load(&left[slot..]);
+        let main_right = L::load(&right[slot..]);
+        let (level_left, level_right) =
+            link_frame(detector, slot, main_left, main_right, &invariants);
+        let next = write + 1;
+        let next = if next == ring_length { 0 } else { next };
+        main_left.store(&mut channel_left.main[write * width..]);
+        level_left.store(&mut channel_left.detector[write * width..]);
+        main_right.store(&mut channel_right.main[write * width..]);
+        level_right.store(&mut channel_right.detector[write * width..]);
+        L::load(&channel_left.main[next * width..]).store(&mut left[slot..]);
+        L::load(&channel_right.main[next * width..]).store(&mut right[slot..]);
+        target_left[index] = curve_target(
+            L::load(&taps_left[index * width..]),
+            &coef_left,
+            &invariants,
+        );
+        target_right[index] = curve_target(
+            L::load(&taps_right[index * width..]),
+            &coef_right,
+            &invariants,
+        );
+        write = next;
+    }
+    channel_left.cursor = write as u32;
+    channel_right.cursor = write as u32;
+
+    // Pass B: step 6, the one serial recurrence, one per channel.
+    let mut gain_left = channel_left.gain_reduction_db;
+    let mut gain_right = channel_right.gain_reduction_db;
+    for (frame_left, frame_right) in target_left[..len]
+        .iter_mut()
+        .zip(target_right[..len].iter_mut())
+    {
+        *frame_left = ballistic(*frame_left, &mut gain_left, &coef_left);
+        *frame_right = ballistic(*frame_right, &mut gain_right, &coef_right);
+    }
+    channel_left.gain_reduction_db = gain_left;
+    channel_right.gain_reduction_db = gain_right;
+
+    // Pass C: steps 7 and 8, over the delayed output pass A left in the block buffers.
+    for (index, (smoothed_left, smoothed_right)) in target_left[..len]
+        .iter()
+        .zip(&target_right[..len])
+        .enumerate()
+    {
+        let slot = (start + index) * width;
+        let delayed_left = L::load(&left[slot..]);
+        gain_mix(delayed_left, *smoothed_left, &coef_left, &invariants).store(&mut left[slot..]);
+        let delayed_right = L::load(&right[slot..]);
+        gain_mix(delayed_right, *smoothed_right, &coef_right, &invariants)
+            .store(&mut right[slot..]);
+    }
+}
+
+/// The smallest detector read-back distance over a channel's live lanes.
+#[inline(always)]
+fn min_delay<L: Lane>(channel: &Channel<L>) -> usize {
+    let mut least = u32::MAX;
+    for lane in 0..L::WIDTH {
+        if channel.delay[lane] < least {
+            least = channel.delay[lane];
+        }
+    }
+    least as usize
+}
+
+/// Copies `len` frames of every live lane's detector tap into `scratch`, frame major.
+///
+/// The tap row of lane `k` advances one row per frame from `(write - D_k) mod B`, so the whole
+/// segment is two contiguous runs of the ring per lane — the part before the wrap and the part
+/// after it. Written that way the bounds checks leave the inner loop, `delay[k]` is read once
+/// instead of once per frame, and the ring is walked forwards, which is what the per-access
+/// compare-select in [`gather_detector`] cannot offer.
+#[inline]
+fn fill_taps<L: Lane>(channel: &Channel<L>, write: usize, len: usize, scratch: &mut [f32]) {
+    let width = L::WIDTH;
+    let ring_length = channel.ring_length as usize;
+    let scratch = &mut scratch[..len * width];
+    for lane in 0..width {
+        let delay = channel.delay[lane] as usize;
+        let row = if write >= delay {
+            write - delay
+        } else {
+            write + ring_length - delay
+        };
+        let first = (ring_length - row).min(len);
+        copy_lane(
+            &channel.detector[row * width..(row + first) * width],
+            &mut scratch[..first * width],
+            lane,
+            width,
+        );
+        copy_lane(
+            &channel.detector[..(len - first) * width],
+            &mut scratch[first * width..],
+            lane,
+            width,
+        );
+    }
+}
+
+/// Copies lane `lane` of every frame of `source` into lane `lane` of every frame of `destination`.
+#[inline(always)]
+fn copy_lane(source: &[f32], destination: &mut [f32], lane: usize, width: usize) {
+    for (to, from) in destination
+        .chunks_exact_mut(width)
+        .zip(source.chunks_exact(width))
+    {
+        to[lane] = from[lane];
     }
 }
 
@@ -520,6 +740,95 @@ fn gather_detector<L: Lane>(
     L::load(gather)
 }
 
+/// The lane vectors and masks that are constant for a whole block body.
+///
+/// Both bodies need exactly these, and building them in one place is what keeps the staged body
+/// and the per-frame body the same law rather than two transcriptions of it. Nothing here is a
+/// function of a coefficient word, so unlike [`Coef`] this survives a ramp untouched.
+struct Invariants<L: Lane> {
+    /// `+0.0`, the step 5 ceiling and the step 8 identity comparand.
+    zero: L,
+    /// The `0.5` of the average link.
+    half: L,
+    /// Step 4's `1e-8` detector floor.
+    level_floor: L,
+    /// Lowest level in dB the static curve sees.
+    level_min: L,
+    /// Highest level in dB the static curve sees.
+    level_max: L,
+    /// Most gain reduction the smoother may be asked to track, in dB.
+    reduction_min: L,
+    /// The link mode is not `DualMono`: both channels see the combined detector.
+    linked: L::Mask,
+    /// The link mode is `Average`: the combined detector is the mean rather than the maximum.
+    averaged: L::Mask,
+    /// The block's bypass flag, as a mask.
+    bypassed: L::Mask,
+}
+
+impl<L: Lane> Invariants<L> {
+    /// Splats the constants and turns the block's two loop-invariant choices into masks.
+    #[inline(always)]
+    fn new(link: LinkMode, bypass: bool) -> Self {
+        let zero = L::zero();
+        let all = zero.eq(zero);
+        let none = L::mask_not(all);
+        Self {
+            zero,
+            half: L::splat(0.5),
+            level_floor: L::splat(LEVEL_FLOOR),
+            level_min: L::splat(LEVEL_MIN_DB),
+            level_max: L::splat(LEVEL_MAX_DB),
+            reduction_min: L::splat(GAIN_REDUCTION_MIN_DB),
+            linked: if matches!(link, LinkMode::DualMono) {
+                none
+            } else {
+                all
+            },
+            averaged: if matches!(link, LinkMode::Average) {
+                all
+            } else {
+                none
+            },
+            bypassed: if bypass { all } else { none },
+        }
+    }
+}
+
+/// Steps 1 and 2 for one frame: the detector source, its magnitudes, and the link.
+///
+/// Returns the two detector levels that go into the rings. `main_left` and `main_right` are passed
+/// in rather than loaded here because the caller needs them for the ring write anyway, and
+/// `Detector::Main` must see the very same vectors.
+#[inline(always)]
+fn link_frame<L: Lane>(
+    detector: Detector<'_>,
+    slot: usize,
+    main_left: L,
+    main_right: L,
+    invariants: &Invariants<L>,
+) -> (L, L) {
+    let (source_left, source_right) = match detector {
+        Detector::Main => (main_left, main_right),
+        Detector::Silent => (invariants.zero, invariants.zero),
+        Detector::Sidechain(sidechain_left, sidechain_right) => (
+            L::load(&sidechain_left[slot..]),
+            L::load(&sidechain_right[slot..]),
+        ),
+    };
+    let magnitude_left = source_left.abs();
+    let magnitude_right = source_right.abs();
+    let maximum = magnitude_left.max(magnitude_right);
+    let average = magnitude_left
+        .mul(invariants.half)
+        .add(magnitude_right.mul(invariants.half));
+    let combined = L::select(invariants.averaged, average, maximum);
+    (
+        L::select(invariants.linked, combined, magnitude_left),
+        L::select(invariants.linked, combined, magnitude_right),
+    )
+}
+
 /// Steps 4 to 8 for one channel of one frame.
 #[inline(always)]
 fn one_frame<L: Lane>(
@@ -527,41 +836,65 @@ fn one_frame<L: Lane>(
     detected: L,
     coef: &Coef<L>,
     gain_reduction_db: &mut L,
-    bypassed: L::Mask,
-    constants: (L, L, L, L, L),
+    invariants: &Invariants<L>,
 ) -> L {
-    let (zero, level_floor, level_min, level_max, reduction_min) = constants;
+    let target = curve_target(detected, coef, invariants);
+    let smoothed = ballistic(target, gain_reduction_db, coef);
+    gain_mix(delayed, smoothed, coef, invariants)
+}
 
+/// Steps 4 and 5: the detector amplitude through the level and the static curve.
+///
+/// Frame independent — this is the pass A half of the staged body, and the expensive half: two
+/// polynomial evaluations whose chains are what stall behind step 6 when the body is per frame.
+#[inline(always)]
+fn curve_target<L: Lane>(detected: L, coef: &Coef<L>, invariants: &Invariants<L>) -> L {
     // 4. amplitude to level, floored and clamped into the curve's domain.
     //
     // FAST-DB-CROSSING X1: the compressor's detector level. This is a dynamics gain path -- the
     // result is a detector reading that feeds the static curve and is never pinned as a
     // coefficient word -- so it takes the sealed fast tier. Bounded at 2.810e-5 dB, 1.83x the
     // exact tier, by gate F1 in `miso-engine-math`.
-    let floored = detected.max(level_floor);
-    let level = fast_level_db(floored).max(level_min).min(level_max);
+    let floored = detected.max(invariants.level_floor);
+    let level = fast_level_db(floored)
+        .max(invariants.level_min)
+        .min(invariants.level_max);
 
     // 5. the static curve, as the reduction it applies.
-    let target = gain_delta_db(level, &coef.curve)
-        .max(reduction_min)
-        .min(zero);
+    gain_delta_db(level, &coef.curve)
+        .max(invariants.reduction_min)
+        .min(invariants.zero)
+}
 
-    // 6. the branching one-pole, and the only `flush` in the crate.
-    //
-    // The recurrence itself is `envelope::rms_follow` — the runtime's frozen one-rounding form
-    // `fma(c, target - y, y)` on a *rate* coefficient, which is the general one-pole and not
-    // specific to a mean square (its own documentation says the squaring and the square root
-    // belong to the caller). Nothing is added to the runtime for this: what the compressor
-    // contributes is the **branch**, and a branch is a `Lane::select`, not a new primitive.
-    //
-    // Frozen: the select is strict (`target < y`), so equality takes the release coefficient —
-    // BRIEFS/013's rule, and the sign convention that makes falling gain reduction the attack.
-    // `peak_follow` is the wrong sibling here: its attack is an unconditional `max`, which is a
-    // limiter's ballistic, not a compressor's (GMR 2012 section 4.2, "smooth branching").
+/// Step 6: the branching one-pole, and the only `flush` in the crate.
+///
+/// The recurrence itself is `envelope::rms_follow` — the runtime's frozen one-rounding form
+/// `fma(c, target - y, y)` on a *rate* coefficient, which is the general one-pole and not
+/// specific to a mean square (its own documentation says the squaring and the square root
+/// belong to the caller). Nothing is added to the runtime for this: what the compressor
+/// contributes is the **branch**, and a branch is a `Lane::select`, not a new primitive.
+///
+/// Frozen: the select is strict (`target < y`), so equality takes the release coefficient —
+/// BRIEFS/013's rule, and the sign convention that makes falling gain reduction the attack.
+/// `peak_follow` is the wrong sibling here: its attack is an unconditional `max`, which is a
+/// limiter's ballistic, not a compressor's (GMR 2012 section 4.2, "smooth branching").
+///
+/// This is the compressor's whole cross-frame dependency, which is why the staged body gives it a
+/// pass of its own instead of letting it sit in the middle of the frame's other twenty-odd
+/// operations.
+#[inline(always)]
+fn ballistic<L: Lane>(target: L, gain_reduction_db: &mut L, coef: &Coef<L>) -> L {
     let coefficient = L::select(target.lt(*gain_reduction_db), coef.attack, coef.release);
     let smoothed = flush(rms_follow(target, *gain_reduction_db, coefficient));
     *gain_reduction_db = smoothed;
+    smoothed
+}
 
+/// Steps 7 and 8: the smoothed reduction as an amplitude, applied and mixed.
+///
+/// Frame independent again — the pass C half of the staged body.
+#[inline(always)]
+fn gain_mix<L: Lane>(delayed: L, smoothed: L, coef: &Coef<L>, invariants: &Invariants<L>) -> L {
     // 7. level to amplitude.
     //
     // FAST-DB-CROSSING X2: the compressor's applied gain. Bounded at 7.431e-6 dB, 1.06x the
@@ -582,10 +915,10 @@ fn one_frame<L: Lane>(
     let wet = delayed.mul(gain);
     let mixed = gain_mix_step(delayed, gain, coef.mix);
     let dry_identity = L::mask_or(
-        bypassed,
+        invariants.bypassed,
         L::mask_or(
             coef.dry_mix_zero,
-            L::mask_and(smoothed.eq(zero), coef.makeup_zero),
+            L::mask_and(smoothed.eq(invariants.zero), coef.makeup_zero),
         ),
     );
     let output = L::select(coef.wet_identity, wet, mixed);

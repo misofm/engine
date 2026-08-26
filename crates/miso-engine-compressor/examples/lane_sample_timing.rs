@@ -99,7 +99,20 @@ fn bank_nanoseconds_per_lane_sample() -> Option<(usize, f64)> {
     let backend = Backend::current();
     let width = BankWidth::for_backend(backend)?;
     let lanes = width.lanes() as usize;
-    let values = vec![initial_values(); lanes];
+    // Ragged lookahead, 1 ms per lane, matching the standing console fixture's per-track spread.
+    // A bank whose lanes agree about their detector tap is not the bank the fixture renders, and
+    // the per-lane tap is the part of the ring walk that costs.
+    let values: Vec<_> = (0..lanes)
+        .map(|lane| {
+            let mut values = initial_values();
+            for value in values.iter_mut() {
+                if value.parameter_index == 7 {
+                    value.value = (lane + 1) as f32;
+                }
+            }
+            values
+        })
+        .collect();
     let requests = values.iter().map(|v| request(v)).collect::<Vec<_>>();
     let mut bank = CompressorFactory
         .bind_homogeneous_bank(PrepareEffectBankRequest {
