@@ -60,6 +60,11 @@ jobs:
       # gate over a committed fixture, so it belongs with the cheap policy gates.
       - name: Console benchmark fixture integrity
         run: bash scripts/check-console-benchmark-fixture.sh
+      # The #163 phase 2 wasm console arm's validator, exercised by mutation. Hermetic: it never
+      # instantiates a guest, never holds a clock and never touches the one-shot artifacts, so it
+      # belongs with the cheap gates rather than behind the runner that consumes the measurement.
+      - name: Wasm console benchmark validator mutation tests
+        run: bash scripts/test-wasm-console-benchmark.sh
       - name: Shared host facade policy and mutation tests
         run: |
           bash scripts/check-host-core-policy.sh
@@ -291,6 +296,13 @@ jobs:
         run: |
           CARGO_TARGET_DIR=target/ci/wasm-simd RUSTFLAGS='-C target-feature=+simd128' cargo build --locked --release --target wasm32-unknown-unknown -p miso-engine-core -p miso-engine-session -p miso-engine-effect-contract -p miso-engine-effect-compiler -p miso-engine-protocol -p miso-engine-target-smoke -p miso-engine-host-core -p miso-engine-host-web -p miso-engine-lane -p miso-engine-math -p miso-engine-builtins -p miso-engine-builtins-compiler -p miso-engine-effect-runtime -p miso-engine-gate-expander -p miso-engine-delay -p miso-engine-multiband-compressor -p miso-engine-parametric-eq -p miso-engine-soft-clip
           rustc --print cfg --target wasm32-unknown-unknown -C target-feature=+simd128 | grep -qx 'target_feature="simd128"'
+      # The #163 phase 2 console guest. It is dev/tooling and never ships, but it is the subject of
+      # a recorded measurement family, and a guest that stopped building for wasm32 would not
+      # surface until the next authorised run -- which is exactly the run that must not discover a
+      # broken input.
+      - name: Wasm console benchmark guest compiles for Wasm (not an artifact)
+        run: |
+          CARGO_TARGET_DIR=target/ci/wasm-console RUSTFLAGS='-C target-feature=+simd128' cargo build --locked --release --target wasm32-unknown-unknown -p miso-engine-wasm-console-guest -p miso-engine-console-workload
       - name: Evidence crates compile for Wasm (not an artifact)
         run: |
           CARGO_TARGET_DIR=target/ci/wasm-scalar RUSTFLAGS='-C target-feature=-simd128' cargo build --locked --release --target wasm32-unknown-unknown -p miso-engine-dsp-reference -p miso-engine-conformance

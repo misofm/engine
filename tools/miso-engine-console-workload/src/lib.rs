@@ -464,6 +464,28 @@ impl SessionRuntime {
     ///
     /// As [`SessionRuntime::build`].
     pub fn build_with_dispatch(workload: Workload, config: PlanConfig, dispatch: Backend) -> Self {
+        Self::build_full(workload, config, dispatch, SourceSignal::Local)
+    }
+
+    /// Compiles, prepares and binds one console arm, choosing both the lane width and where its
+    /// input samples come from.
+    ///
+    /// The source choice exists for exactly one reason, recorded on [`source_block`]: the tone is
+    /// a libm sine, and libm differs between the native and wasm targets. A driver comparing two
+    /// targets injects one target's samples into both, so a digest difference between the legs is
+    /// a difference in how the *engine* computed and never a difference in what it was asked to
+    /// compute.
+    ///
+    /// # Panics
+    ///
+    /// As [`SessionRuntime::build`], and additionally if an injected table does not cover every
+    /// track the workload binds.
+    pub fn build_full(
+        workload: Workload,
+        config: PlanConfig,
+        dispatch: Backend,
+        source: SourceSignal,
+    ) -> Self {
         let model = console_model(workload);
         let session = compile_session(&model, compile_caps()).expect("compiled console session");
         let meters = if config.meters {
@@ -511,7 +533,7 @@ impl SessionRuntime {
         let silent = workload.input_signal() == "silence";
         let nodes = artifact
             .external_binding_nodes()
-            .map(|node| GraphNodeBinding::new(node.clone(), source_binding(node, silent)))
+            .map(|node| GraphNodeBinding::new(node.clone(), source_binding(node, silent, &source)))
             .collect();
         // `observers` stays empty on purpose: it is the *external* observer slot. A meter observer
         // is compiler-owned and is appended to this vector by the sealed builtins artifact inside
@@ -708,6 +730,61 @@ fn graph_caps() -> miso_engine_graph::GraphCompileCaps {
     }
 }
 
+/// Values in one track's frozen input block: `QUANTUM` left samples then `QUANTUM` right.
+pub const SOURCE_BLOCK_VALUES: usize = QUANTUM * 2;
+
+/// One track's frozen input block, left channel followed by right.
+///
+/// # Why this is public
+///
+/// Because a cross-target driver has to be able to compute it on **one** target and hand the
+/// result to the other. The tone is a sine, `f32::sin` is a libm call, and libm is not the same
+/// implementation on `x86_64-unknown-linux-gnu` as it is on `wasm32-unknown-unknown`. Measured on
+/// the #163 phase 2 arm: with this tone computed locally on each target, four of the nine console
+/// rows rendered different bits on wasm than on native; with the identical tone injected into
+/// both, all nine rows agree to the byte, at both lane widths.
+///
+/// So that difference was never the engine's. It was the benchmark's *input*, and it would have
+/// been reported as a cross-target numeric divergence by anyone who did not look. Nothing
+/// downstream of this function calls libm.
+#[must_use]
+pub fn source_block(track: usize, silent: bool) -> Vec<f32> {
+    let mut values = vec![0.0; SOURCE_BLOCK_VALUES];
+    if !silent {
+        for frame in 0..QUANTUM {
+            let value = ((frame as f32) * 0.017 + track as f32 * 0.31).sin() * 0.6;
+            values[frame] = value;
+            values[QUANTUM + frame] = -value * 0.75;
+        }
+    }
+    values
+}
+
+/// Where a prepared arm's input samples come from.
+///
+/// Both variants produce the *same numbers* when the driver supplies what [`source_block`] would
+/// have produced. The distinction exists so that a cross-target comparison can guarantee that
+/// rather than assume it.
+pub enum SourceSignal {
+    /// Computed by [`source_block`] on whichever target renders. What the native bench uses, and
+    /// what every recorded native console number was taken with.
+    Local,
+    /// Supplied by the driver: `tracks * SOURCE_BLOCK_VALUES` values in track-major order.
+    Injected(Vec<f32>),
+}
+
+impl SourceSignal {
+    /// This signal's block for one track, or `None` if an injected table does not cover it.
+    fn block(&self, track: usize, silent: bool) -> Option<Vec<f32>> {
+        match self {
+            Self::Local => Some(source_block(track, silent)),
+            Self::Injected(table) => table
+                .get(track * SOURCE_BLOCK_VALUES..(track + 1) * SOURCE_BLOCK_VALUES)
+                .map(<[f32]>::to_vec),
+        }
+    }
+}
+
 /// Every track input is a frozen block per observation; nothing is decoded on the render path.
 struct FrozenGraphSource {
     left: [f32; QUANTUM],
@@ -721,16 +798,11 @@ impl FrozenGraphSource {
     /// signal keeps every filter and every detector working, and on some hosts pushes them into
     /// denormal arithmetic, which would make the idle row report a cost *higher* than the console
     /// row for reasons that have nothing to do with idling.
-    fn new(track: usize, silent: bool) -> Self {
+    fn from_block(block: &[f32]) -> Self {
         let mut left = [0.0; QUANTUM];
         let mut right = [0.0; QUANTUM];
-        if !silent {
-            for frame in 0..QUANTUM {
-                let value = ((frame as f32) * 0.017 + track as f32 * 0.31).sin() * 0.6;
-                left[frame] = value;
-                right[frame] = -value * 0.75;
-            }
-        }
+        left.copy_from_slice(&block[..QUANTUM]);
+        right.copy_from_slice(&block[QUANTUM..SOURCE_BLOCK_VALUES]);
         Self { left, right }
     }
 }
@@ -757,7 +829,11 @@ impl GraphRuntimeProcessor for GraphIdentity {
     }
 }
 
-fn source_binding(node: &GraphNodeId, silent: bool) -> Box<dyn GraphRuntimeProcessor> {
+fn source_binding(
+    node: &GraphNodeId,
+    silent: bool,
+    source: &SourceSignal,
+) -> Box<dyn GraphRuntimeProcessor> {
     if let GraphNodeId::TrackStage {
         track_id,
         stage: TrackStage::Input,
@@ -768,7 +844,10 @@ fn source_binding(node: &GraphNodeId, silent: bool) -> Box<dyn GraphRuntimeProce
             .trim_start_matches(|c: char| !c.is_ascii_digit())
             .parse()
             .unwrap_or(0);
-        Box::new(FrozenGraphSource::new(track, silent))
+        let block = source
+            .block(track, silent)
+            .unwrap_or_else(|| panic!("the injected source table must cover track {track}"));
+        Box::new(FrozenGraphSource::from_block(&block))
     } else {
         Box::new(GraphIdentity)
     }

@@ -1112,6 +1112,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "miso-engine-wasm-console"
+version = "0.1.0"
+dependencies = [
+ "miso-engine-bench-support",
+ "miso-engine-console-workload",
+ "miso-engine-core",
+ "miso-engine-lane",
+ "wasmtime",
+]
+
+[[package]]
+name = "miso-engine-wasm-console-guest"
+version = "0.1.0"
+dependencies = [
+ "miso-engine-bench-support",
+ "miso-engine-console-workload",
+ "miso-engine-lane",
+]
+
+[[package]]
 name = "miso-engine-wasm-gate-corpus"
 version = "0.1.0"
 dependencies = [

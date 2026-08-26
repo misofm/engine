@@ -1,0 +1,36 @@
+[package]
+name = "miso-engine-wasm-console"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "miso_engine_wasm_console"
+path = "src/main.rs"
+
+[dependencies]
+# The one shared bench harness (#104 F4): the audited allocator, the nearest-rank percentile, the
+# JSON escaper, the counted digest sink and the timed region. `scripts/check-bench-policy.sh` fails
+# if a second copy of any of them appears under `tools/`, so this edge is what keeps this crate
+# from growing one -- and it is what puts the host's clock under the F1 evidence-collection guard.
+miso-engine-bench-support.workspace = true
+# The subject itself, linked natively here and compiled to wasm in the guest. One subject, two
+# targets: that is the whole basis on which the two legs' ratio means anything.
+miso-engine-console-workload.workspace = true
+# The realtime allocation audit, so the native legs' timed regions are held to the same
+# forbidden-operation counter the console benchmark holds its own to.
+miso-engine-core = { workspace = true, features = ["realtime-audit"] }
+miso-engine-lane.workspace = true
+# The pinned WebAssembly runtime, exactly as gate G5 pins it. Apache-2.0 WITH LLVM-exception
+# (wasmtime and the Cranelift backend it embeds). Pinned exactly for the same reason G5 pins it and
+# one more: a runtime upgrade changes the compiler that generated the machine code being timed, so
+# an unpinned runtime would make two records incomparable without saying so.
+#
+# This dependency belongs to dev/tooling crates alone. No engine crate, host or fixture may reach a
+# WebAssembly runtime (master plan §3.6, and AGENTS.md: the render callback never invokes a
+# general-purpose Wasm runtime).
+wasmtime = { version = "=47.0.3", default-features = false, features = ["runtime", "cranelift", "std"] }
+
+[lints]
+workspace = true

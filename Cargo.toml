@@ -40,6 +40,8 @@ members = [
     "tools/miso-engine-native-pcm-runner",
     "tools/miso-engine-wasm-gate-corpus",
     "tools/miso-engine-wasm-gate-guest",
+    "tools/miso-engine-wasm-console-guest",
+    "tools/miso-engine-wasm-console",
     "tools/miso-engine-parameter-metadata",
     "tools/miso-engine-wasm-gates",
 ]
