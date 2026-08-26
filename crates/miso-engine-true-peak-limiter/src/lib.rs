@@ -1267,12 +1267,8 @@ struct UniformHot<'a, L: Lane> {
     prefix: L,
     /// Position inside the current van Herk block, in a register for the whole block.
     phase: u32,
-    /// `Wb`, the cohort's one window length.
-    window: usize,
-    /// `Wb`, the ring distance from the write cursor to the window's newest sample.
-    end_offset: usize,
-    /// `R - Wb`, the ring distance to the box term leaving the running sum.
-    box_offset: usize,
+    /// The cohort's one window shape, read once from lane 0.
+    offsets: WindowOffsets,
     /// `R * W` words of required gain; the van Herk suffix minima overwrite expired raw values.
     required_ring: &'a mut [f32],
     /// `R * W` words of quantised minima.
@@ -1296,9 +1292,7 @@ impl<'a, L: Lane> UniformHot<'a, L> {
         Self {
             prefix: L::load(&state.prefix),
             phase: state.phase[0],
-            window: lane.window as usize,
-            end_offset: lane.end_offset as usize,
-            box_offset: lane.box_offset as usize,
+            offsets: WindowOffsets::new(lane),
             required_ring: &mut state.required_ring[..ring_words],
             box_ring: &mut state.box_ring[..ring_words],
             main_ring: &mut state.main_ring[..main_words],
@@ -1311,7 +1305,7 @@ impl<'a, L: Lane> UniformHot<'a, L> {
 /// Round 2 R1(d). Inside a wrap-free segment every one of the five advances by exactly one per
 /// frame, so the segment resolves them once and the frame loop adds its step index. The values are
 /// the same indices the per-frame `+ offset` / `- ring` pairs produced.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct FrameSlots {
     /// The write cursor of the required-gain and box rings.
     ring_cursor: usize,
@@ -1323,6 +1317,126 @@ struct FrameSlots {
     start: usize,
     /// The box term leaving the running sum, `ring_cursor + (R - Wb)` around the ring.
     expiring: usize,
+}
+
+impl FrameSlots {
+    /// These slots `step` frames into the segment they begin.
+    ///
+    /// One addition each, and no compare: that every one of the five stays below its ring's slot
+    /// count for the whole run is what [`segment`] computes the run *from*.
+    #[inline(always)]
+    const fn advanced(self, step: usize) -> Self {
+        Self {
+            ring_cursor: self.ring_cursor + step,
+            main_cursor: self.main_cursor + step,
+            end: self.end + step,
+            start: self.start + step,
+            expiring: self.expiring + step,
+        }
+    }
+}
+
+/// The window shape of a uniform cohort, as ring distances from the write cursor.
+///
+/// [`LaneShape`]'s three fields as `usize`, read once per block from lane 0 — which
+/// [`lanes_uniform`] has established is every lane's.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct WindowOffsets {
+    /// `Wb`, the window length.
+    window: usize,
+    /// `Wb`, the ring distance to the window's newest sample.
+    end_offset: usize,
+    /// `R - Wb`, the ring distance to the box term leaving the running sum.
+    box_offset: usize,
+}
+
+impl WindowOffsets {
+    #[inline]
+    const fn new(shape: LaneShape) -> Self {
+        Self {
+            window: shape.window as usize,
+            end_offset: shape.end_offset as usize,
+            box_offset: shape.box_offset as usize,
+        }
+    }
+}
+
+/// One wrap-free segment of the frame loop: where each channel's five slots start, and for how
+/// many frames all of them advance by one without wrapping.
+///
+/// Round 2 R1(d).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct Segment {
+    left: FrameSlots,
+    right: FrameSlots,
+    run: usize,
+}
+
+/// Resolves the segment that begins at `ring_cursor` / `main_cursor`.
+///
+/// Seven indices advance by one per frame — the two cursors, each channel's window end and box
+/// slot, and the window start both channels share — and each wraps at its own point of its ring.
+/// The run is the distance to the first of those wraps, capped by `remaining`, so inside a segment
+/// the frame loop adds its step index to five integers and does nothing else.
+///
+/// # Identity
+///
+/// For an offset `o` and a segment whose entry cursor is `c`, the frame-at-a-time body computes
+/// `(c + step + o) mod R` and this form computes `((c + o) mod R) + step`. The two agree exactly
+/// while `((c + o) mod R) + step < R`, which is precisely what `run <= R - ((c + o) mod R)` says;
+/// the same argument with `B` covers the main cursor.
+/// `the_segment_walk_visits_the_slots_a_frame_at_a_time_walk_visits` is that statement as a test,
+/// against a `%` oracle rather than against this function's own conditional subtraction.
+///
+/// This is **per-block** control flow, not per-sample: a segment's length is a function of the
+/// cursors and of the prepared window shape and of nothing the signal does, so the Lane doc's ban
+/// on data-dependent branching inside a per-sample loop is untouched.
+#[inline(always)]
+fn segment(
+    shape: &Shape,
+    ring_cursor: usize,
+    main_cursor: usize,
+    remaining: usize,
+    left: WindowOffsets,
+    right: WindowOffsets,
+) -> Segment {
+    let ring = shape.ring;
+    let main = shape.main;
+    let start = wrapped(ring_cursor + 1, ring);
+    let left_end = wrapped(ring_cursor + left.end_offset, ring);
+    let right_end = wrapped(ring_cursor + right.end_offset, ring);
+    let left_expiring = wrapped(ring_cursor + left.box_offset, ring);
+    let right_expiring = wrapped(ring_cursor + right.box_offset, ring);
+    let run = remaining
+        .min(ring - ring_cursor)
+        .min(main - main_cursor)
+        .min(ring - start)
+        .min(ring - left_end)
+        .min(ring - right_end)
+        .min(ring - left_expiring)
+        .min(ring - right_expiring);
+    // Every term is at least one -- `remaining` because the caller's loop guard says so, and each
+    // `ring - index` / `main - main_cursor` because the index it subtracts is a slot of that ring.
+    // A zero would not be a slow segment walk, it would be a frame loop that never advances, so it
+    // is asserted rather than assumed.
+    debug_assert!(run >= 1);
+    Segment {
+        left: FrameSlots {
+            ring_cursor,
+            main_cursor,
+            end: left_end,
+            start,
+            expiring: left_expiring,
+        },
+        right: FrameSlots {
+            ring_cursor,
+            main_cursor,
+            end: right_end,
+            start,
+            expiring: right_expiring,
+        },
+        run,
+    }
 }
 
 /// [`channel_frame`] for a uniform cohort: the same seven steps, no per-lane scalar work.
@@ -1351,7 +1465,7 @@ fn channel_frame_uniform<L: Lane>(
 
     let minimum = sliding_minimum_uniform::<L>(
         uniform.required_ring,
-        uniform.window,
+        uniform.offsets.window,
         ring,
         slots.end,
         slots.start,
@@ -1682,26 +1796,15 @@ fn limiter_block_uniform<L: Lane>(
 
             let mut frame = 0;
             while frame < span {
-                // Segment entry: resolve the five slots of each channel once, then take the run of
-                // frames over which all of them stay linear.
-                let start = wrapped(ring_cursor + 1, ring);
-                let left_end = wrapped(ring_cursor + uniform_left.end_offset, ring);
-                let right_end = wrapped(ring_cursor + uniform_right.end_offset, ring);
-                let left_expiring = wrapped(ring_cursor + uniform_left.box_offset, ring);
-                let right_expiring = wrapped(ring_cursor + uniform_right.box_offset, ring);
-                let run = (span - frame)
-                    .min(ring - ring_cursor)
-                    .min(main - main_cursor)
-                    .min(ring - start)
-                    .min(ring - left_end)
-                    .min(ring - right_end)
-                    .min(ring - left_expiring)
-                    .min(ring - right_expiring);
-                // Every term is at least one -- `span - frame` because the `while` guard says so,
-                // and each `ring - index` / `main - main_cursor` because the index it subtracts is
-                // a slot of that ring. A zero would not be a slow segment walk, it would be a
-                // frame loop that never advances, so it is asserted rather than assumed.
-                debug_assert!(run >= 1);
+                let walk = segment(
+                    shape,
+                    ring_cursor,
+                    main_cursor,
+                    span - frame,
+                    uniform_left.offsets,
+                    uniform_right.offsets,
+                );
+                let run = walk.run;
 
                 let base = (chunk + frame) * width;
                 let words = run * width;
@@ -1751,13 +1854,7 @@ fn limiter_block_uniform<L: Lane>(
                         &mut hot_left,
                         &mut uniform_left,
                         ring,
-                        FrameSlots {
-                            ring_cursor: ring_cursor + step,
-                            main_cursor: main_cursor + step,
-                            end: left_end + step,
-                            start: start + step,
-                            expiring: left_expiring + step,
-                        },
+                        walk.left.advanced(step),
                         bypass,
                     );
                     channel_frame_uniform::<L>(
@@ -1769,13 +1866,7 @@ fn limiter_block_uniform<L: Lane>(
                         &mut hot_right,
                         &mut uniform_right,
                         ring,
-                        FrameSlots {
-                            ring_cursor: ring_cursor + step,
-                            main_cursor: main_cursor + step,
-                            end: right_end + step,
-                            start: start + step,
-                            expiring: right_expiring + step,
-                        },
+                        walk.right.advanced(step),
                         bypass,
                     );
                 }
@@ -3526,6 +3617,118 @@ mod tests {
     /// widths` and `a_mixed_lookahead_cohort_falls_back_bit_identically` both stay green under it,
     /// because every cohort they build falls back.
     ///
+    /// Round 2 R1(d): the segment walk visits exactly the slots a frame-at-a-time walk visits.
+    ///
+    /// The whole of [`segment`]'s claim is an arithmetic one — that
+    /// `((c + o) mod R) + step` is `(c + step + o) mod R` for every step of a run it sized — and
+    /// this is that claim as a test rather than as prose. The oracle is written with `%`, not with
+    /// [`wrapped`], so it is an independent formulation and not the same conditional subtraction
+    /// compared with itself; and it walks *both* channels, because the two carry different window
+    /// shapes and their wrap points interleave, which is the case a single-channel argument would
+    /// miss.
+    ///
+    /// The sweep covers every launch rate the crate supports, the boundary lookaheads (zero, the
+    /// clamp at `MINIMUM_RAMP_WINDOW`, and the maximum `N`, where `Wb == R` collapses the window
+    /// end onto the write cursor and the box offset to zero), and cursor positions at both ends of
+    /// both rings. It also asserts what the release build depends on and the `debug_assert`s
+    /// state: every slot the walk produces is in range, and no run is empty.
+    #[test]
+    fn the_segment_walk_visits_the_slots_a_frame_at_a_time_walk_visits() {
+        fn oracle(
+            shape: &Shape,
+            ring_cursor: usize,
+            main_cursor: usize,
+            o: WindowOffsets,
+        ) -> FrameSlots {
+            FrameSlots {
+                ring_cursor,
+                main_cursor,
+                end: (ring_cursor + o.end_offset) % shape.ring,
+                start: (ring_cursor + 1) % shape.ring,
+                expiring: (ring_cursor + o.box_offset) % shape.ring,
+            }
+        }
+        for rate in [44_100_u32, 48_000, 88_200, 96_000] {
+            let shape = Shape::new(rate).expect("shape");
+            let lookaheads = [
+                0,
+                1,
+                MINIMUM_RAMP_WINDOW as usize,
+                240,
+                shape.n - 1,
+                shape.n,
+            ];
+            for left_lookahead in lookaheads {
+                for right_lookahead in [0, 7, 240, shape.n] {
+                    let left = WindowOffsets::new(LaneShape::new(left_lookahead, &shape));
+                    let right = WindowOffsets::new(LaneShape::new(right_lookahead, &shape));
+                    for ring_start in [0, 1, shape.ring / 2, shape.ring - 2, shape.ring - 1] {
+                        for main_start in [0, 5, shape.main - 1] {
+                            let frames = 3 * DETECTOR_CHUNK + 7;
+                            let mut expected = Vec::with_capacity(frames);
+                            let (mut ring_cursor, mut main_cursor) = (ring_start, main_start);
+                            for _ in 0..frames {
+                                expected.push((
+                                    oracle(&shape, ring_cursor, main_cursor, left),
+                                    oracle(&shape, ring_cursor, main_cursor, right),
+                                ));
+                                ring_cursor = (ring_cursor + 1) % shape.ring;
+                                main_cursor = (main_cursor + 1) % shape.main;
+                            }
+
+                            let mut produced = Vec::with_capacity(frames);
+                            let (mut ring_cursor, mut main_cursor) = (ring_start, main_start);
+                            let mut done = 0;
+                            let mut segments = 0;
+                            while done < frames {
+                                // The real loop never asks for more than one detector chunk at a
+                                // time, because the frame loop lives inside the chunk loop.
+                                let remaining = (frames - done).min(DETECTOR_CHUNK);
+                                let walk = segment(
+                                    &shape,
+                                    ring_cursor,
+                                    main_cursor,
+                                    remaining,
+                                    left,
+                                    right,
+                                );
+                                assert!(walk.run >= 1, "empty segment at {ring_cursor}");
+                                assert!(walk.run <= remaining);
+                                for step in 0..walk.run {
+                                    let slots =
+                                        (walk.left.advanced(step), walk.right.advanced(step));
+                                    for side in [slots.0, slots.1] {
+                                        assert!(side.ring_cursor < shape.ring);
+                                        assert!(side.end < shape.ring);
+                                        assert!(side.start < shape.ring);
+                                        assert!(side.expiring < shape.ring);
+                                        assert!(side.main_cursor < shape.main);
+                                    }
+                                    produced.push(slots);
+                                }
+                                done += walk.run;
+                                ring_cursor = wrapped(ring_cursor + walk.run, shape.ring);
+                                main_cursor = wrapped(main_cursor + walk.run, shape.main);
+                                segments += 1;
+                            }
+                            assert_eq!(
+                                produced, expected,
+                                "rate {rate} lookaheads {left_lookahead}/{right_lookahead} \
+                                 cursors {ring_start}/{main_start}"
+                            );
+                            // The point of the split is that it is rare: a block of this length
+                            // takes a handful of segments, not one per frame.
+                            assert!(
+                                segments <= frames / 8,
+                                "{segments} segments for {frames} frames"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// It is deliberately *not* claimed to gate a mutation that applies at every width — the two
     /// arms would move together, since a scalar instance is `W = 1` and therefore uniform too.
     /// Those are gated by the frozen E12 pins (which a moved scalar digest breaks immediately) and
