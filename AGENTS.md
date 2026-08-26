@@ -159,6 +159,15 @@ issue rather than blocking unrelated engine implementation.  Do not optimize mer
 descriptive number; open a weekly optimization issue unless a named release budget is actually
 missed.
 
+An effect-optimization loop exits on its own terms and reports on the floor's.  The two-stalled-
+rounds circuit breaker stands, and the exit report must state, per effect, the measured
+`isolated_cycles_per_lane_sample` from a console record, the derived class-A floor, the residual
+gap between them, and a named reason for that gap; "not investigated" is a reason and "diminishing
+returns" is not.  A gap attributable to the algorithm rather than the implementation is class B: it
+is flagged for owner ruling and never chased unilaterally, and no projected win may be quoted for a
+change nobody has ruled on.  The floors, their derivation and the clause in full are
+`docs/rulings/effect-floor-accounting.md`.
+
 Prefer a working vertical slice over exhaustive evidence scaffolding that delays downstream
 features.  Launch-critical correctness, realtime safety, deterministic behavior, target builds,
 and academically grounded DSP remain mandatory; additional matrix expansion should be recorded as
