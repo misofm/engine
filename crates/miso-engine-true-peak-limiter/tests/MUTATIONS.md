@@ -115,6 +115,70 @@ in the frozen order anyway, and the order is the reason the D8 citation in
 equality of definitions, which holds on the whole `f32` domain rather than only on the reachable
 part of it.
 
+## Round 2 — the de-bookkeeped uniform frame loop and the resident detector history
+
+Two class-A kernel changes, neither of which moves a rendered bit.
+
+**R1** takes the bookkeeping out of the uniform-cohort frame. `prefix` and the van Herk `phase`
+become block-resident locals, joining the recursive word, the box sum, the detector taps and all
+four ramp words that `HotChannel` already held that way; the window minimum is returned as an `L`
+instead of round-tripping through a `[f32; 8]` scratch; the three rings become `&mut [f32]` views
+cut once per block and addressed with the constant `L::WIDTH` rather than the runtime
+`ChannelState::width`; and the frame loop is walked in **wrap-free segments**, so the seven ring
+indices are `base + step` inside one instead of a compare and a conditional subtract each. The
+per-lane fallback body keeps its arithmetic and its loop structure.
+
+**R2** replaces the detector's `[L; 12]` history with `History<L>`, twelve named fields, because
+LLVM idiom-recognises a twelve-word array shift as a block move and the wasm guest was paying a
+192-byte `memory.copy` and twelve reloads per frame for it. The tap-major order, the four `+0.0`
+accumulators and their twelve separately rounded `add(mul(..))` steps are unchanged.
+
+Every row below is a **bit** test. The claims here are about *when* a state word is written and
+*where* it lives, so a gate that compared values with a tolerance would pass every one of them.
+
+| # | mutation | file | test that turned red |
+|---|---|---|---|
+| round2-1 | the block-end write-back of `prefix` dropped | `src/lib.rs` `limiter_block_uniform` | `a_mixed_lookahead_cohort_falls_back_bit_identically`, `a_restore_that_desyncs_the_phase_falls_back`, `fixed_latency_guarded_ceiling_and_bypass_bits_hold`, `lane_identity_holds_across_widths`, `partition_invariance_holds_over_block_sizes` |
+| round2-2 | the block-end write-back of `phase` dropped, so the cohort restarts each block at the phase it entered the previous one with | `src/lib.rs` `limiter_block_uniform` | `a_de_zipper_window_open_across_a_block_boundary_refuses_the_claim`, `a_mixed_lookahead_cohort_falls_back_bit_identically`, `a_negative_zero_input_block_is_not_treated_as_silence`, `a_restore_that_desyncs_the_phase_falls_back`, `a_restore_withdraws_the_silence_claim`, `a_settled_silent_limiter_renders_exactly_the_never_fast_path` |
+| round2-3 | `.min(ring - left_end)` dropped from the segment run | `src/lib.rs` `segment` | `the_segment_walk_visits_the_slots_a_frame_at_a_time_walk_visits` — **and nothing else** |
+| round2-4 | `.min(ring - left_expiring)` dropped from the segment run | `src/lib.rs` `segment` | `the_segment_walk_visits_the_slots_a_frame_at_a_time_walk_visits` — **and nothing else** |
+| round2-5 | `.min(ring - start)` dropped from the segment run | `src/lib.rs` `segment` | six render tests, including `a_settled_silent_limiter_renders_exactly_the_never_fast_path` and `a_restore_that_desyncs_the_phase_falls_back` |
+| round2-6 | the main cursor advanced by the run without the segment-end wrap | `src/lib.rs` `limiter_block_uniform` | RED **by hang**: `main - main_cursor` reaches zero, the run reaches zero and the frame loop stops advancing. This is the row `debug_assert!(run >= 1)` exists for |
+| round2-7 | the ring cursor advanced by the run without the segment-end wrap | `src/lib.rs` `limiter_block_uniform` | RED by hang, as round2-6 |
+| round2-8 | `FrameSlots::advanced` leaves `main_cursor` at the segment's entry value | `src/lib.rs` `FrameSlots::advanced` | `a_de_zipper_window_open_across_a_block_boundary_refuses_the_claim`, `a_mixed_lookahead_cohort_falls_back_bit_identically`, `a_restore_that_desyncs_the_phase_falls_back`, `a_restore_withdraws_the_silence_claim`, `a_settled_silent_limiter_renders_exactly_the_never_fast_path`, `automation_withdraws_the_claim_and_the_resident_tap_keeps_up` |
+| round2-9 | `History::shift` written newest-first, so every tap reads a word the shift has already overwritten | `src/lib.rs` `History::shift` | `phase_outputs_match_the_frozen_scalar_order` (E1), `bs1770_annex2_conformance_is_unchanged` (E2) |
+| round2-10 | taps 3 and 4 accumulated in the other order | `src/lib.rs` `annex2_phases` | `phase_outputs_match_the_frozen_scalar_order` — the frozen summation order is a bit statement, and swapping two of its twelve steps is visible in the low bit |
+| round2-11 | the alignment sample read from tap 0 instead of tap 6 | `src/lib.rs` `detector_peak` | `every_case_has_one_digest_at_every_width` (the E12 `D90_DIGESTS`) |
+
+### Why rows 3 and 4 have exactly one gate, and why that is the point
+
+Dropping either clamp lets a segment run past the frame at which that channel's window end or box
+slot wraps, so the walk addresses `end + step` with `end + step >= R` — a slot of the *next* lap
+of the ring, or past the view entirely. Nothing in the render suites catches it, and the reason is
+arithmetic rather than luck: at the shapes those suites build, the write cursor's own wrap (or the
+end of the block) always arrives first, so the dropped term is never the minimum. The window end
+is `Wb` slots ahead of the write cursor and the box slot `R - Wb` behind it, so which of the seven
+wraps first is a function of the cohort's lookahead and of where in the ring the block starts —
+and a fixed corpus visits a fixed handful of those.
+
+`the_segment_walk_visits_the_slots_a_frame_at_a_time_walk_visits` sweeps them instead: every
+launch rate, the boundary lookaheads (zero, the `MINIMUM_RAMP_WINDOW` clamp, `N - 1` and `N`,
+where `Wb == R` collapses the window end onto the write cursor and the box offset to zero), and
+cursor positions at both ends of both rings. It compares the segment walk's slot sequence against
+a frame-at-a-time oracle written with `%` rather than with `wrapped`, so it is an independent
+formulation and not the same conditional subtraction compared with itself, and it walks both
+channels together because their window shapes differ and their wrap points interleave. That a
+render test cannot reach these two rows is the argument for the test existing, not against it.
+
+### A note on the two hangs
+
+Rows 6 and 7 are recorded as RED by hang rather than by assertion because that is what they do: an
+unwrapped cursor drives `ring - ring_cursor` or `main - main_cursor` to zero, the run to zero, and
+the `while frame < span` loop never advances. In a debug build `debug_assert!(run >= 1)` fires
+first and says so, which is why that assertion is in the source; in a release build the mutation
+would spin. Recorded as-is rather than softened, because "the gate is a hang" is a weaker gate
+than "the gate is an assertion" and the reader should know which one this is.
+
 ## Issue #182 S2 — the earned silence fixed point
 
 The compressor's `silent_fixed_point` design (#163 phase 4 item 1) at a kernel whose rest state is
