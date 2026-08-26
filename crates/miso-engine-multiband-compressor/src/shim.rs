@@ -115,8 +115,11 @@ mod tests {
             let release = 0.999_012_3f32;
             let expected_coefficient = if target < state { attack } else { release };
             let d = state - target;
-            let oracle =
-                miso_engine_lane::softfma::unfused_mul_add_via_f64(expected_coefficient, d, target);
+            let oracle = miso_engine_lane::softfma::unfused_multiply_add_via_f64(
+                expected_coefficient,
+                d,
+                target,
+            );
             let rearranged = expected_coefficient * state + (1.0 - expected_coefficient) * target;
             if rearranged.to_bits() != oracle.to_bits() {
                 differing += 1;

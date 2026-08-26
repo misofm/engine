@@ -3065,12 +3065,12 @@ mod tests {
                                 let left = f32::from_bits(tap[frame].0);
                                 let right = f32::from_bits(tap[frame].1);
                                 (
-                                    miso_engine_lane::softfma::unfused_mul_add_via_f64(
+                                    miso_engine_lane::softfma::unfused_multiply_add_via_f64(
                                         coefficients[1],
                                         right,
                                         coefficients[0] * left,
                                     ),
-                                    miso_engine_lane::softfma::unfused_mul_add_via_f64(
+                                    miso_engine_lane::softfma::unfused_multiply_add_via_f64(
                                         coefficients[3],
                                         right,
                                         coefficients[2] * left,
@@ -3163,7 +3163,7 @@ mod tests {
             // bind. Neither value is pinned from production output: the oracle block above
             // re-derives the expected PCM for this exact session from the recorded per-track
             // post-matrix contributions, re-applying both frozen op orders with scalar
-            // `softfma::unfused_mul_add_via_f64` and `reduce`, and asserts it bit for bit before this
+            // `softfma::unfused_multiply_add_via_f64` and `reduce`, and asserts it bit for bit before this
             // literal is compared. (The previous re-pin note stands: 0x9f30_db02_2065_6d79 was already
             // stale on `origin/main` before either branch existed.)
             assert_eq!(
@@ -7548,7 +7548,7 @@ mod tests {
         //
         // It is *not* pinned from production output: the per-layout `assert_eq!` above derives the
         // expected output from the recorded per-track post-matrix contributions folded left to
-        // right in the plan's own stable edge order -- through `softfma::unfused_mul_add_via_f64`,
+        // right in the plan's own stable edge order -- through `softfma::unfused_multiply_add_via_f64`,
         // an `f64` restatement independent of the `f32` vector body -- for all 100 layouts, before
         // this literal is compared.
         assert_eq!(

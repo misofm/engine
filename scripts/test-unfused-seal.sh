@@ -22,8 +22,8 @@ passed=0
 failed=0
 
 # Builds a minimal synthetic workspace that the real checker passes: the two dispatch points
-# stating the unfused contract, a retired `softfma.rs`, and the one registered exemption with
-# exactly seven marked fused calls.
+# stating the unfused contract, a retired `softfma.rs`, and both registered exemptions -- the
+# audit's seven marked fused calls and gate G5's one.
 create_fixture() {
     local tree
     tree="$(mktemp -d "$scratch_root/fixture-XXXXXX")"
@@ -81,6 +81,14 @@ fn mix_fused(x: f32, g: f32, m: f32) -> f32 {
     m.mul_add(g, x)
 }
 fn matrix_fused(a: f32, b: f32, c: f32) -> f32 {
+    // UNFUSED-SEAL-EXEMPT
+    a.mul_add(b, c)
+}
+EOF
+    mkdir -p "$tree/tools/miso-engine-wasm-gates/tests"
+    cat >"$tree/tools/miso-engine-wasm-gates/tests/g5_native_corpus.rs" <<'EOF'
+//! Gate G5's native leg. Keeps a fused reference so the `lane_fma` case cannot pass vacuously.
+fn fused_reference(a: f32, b: f32, c: f32) -> f32 {
     // UNFUSED-SEAL-EXEMPT
     a.mul_add(b, c)
 }

@@ -20,10 +20,17 @@ Two rules, both mechanical:
 
 Names that appear only under `crates/` or `hosts/` -- the C ABI macro families
 `MISO_ENGINE_V2_*` and `MISO_ENGINE_EFFECT_*_V1`, and the crate-local test hooks
-`MISO_ENGINE_MATH_PIN`, `MISO_ENGINE_REPIN_MULTIBAND_CORPUS`, `MISO_ENGINE_TRANSCRIPT_031`,
+`MISO_ENGINE_MATH_PIN`, the `MISO_ENGINE_REPIN_*_CORPUS` family, `MISO_ENGINE_TRANSCRIPT_031`,
 `MISO_ENGINE_TRANSCRIPT_045`, `MISO_ENGINE_AUDIT_008`, `MISO_ENGINE_AUDIT_037`,
 `MISO_ENGINE_WEB_ORACLE_PRINT` -- are bound by rule 1 but are not part of the tool/script
 vocabulary and are not listed here.
+
+The `MISO_ENGINE_REPIN_*_CORPUS` family is one name per pinned corpus
+(`BUILTINS`, `COMPRESSOR`, `DELAY`, `EFFECT_RUNTIME`, `GATE_EXPANDER`, `MULTIBAND`,
+`PARAMETRIC_EQ`, `TRANSIENT_SHAPER`, `TRUE_PEAK_LIMITER`). Each suppresses only the comparison
+against the pin and prints the scalar oracle's digests in include-file form; the cross-width
+assertions stay live, so a width disagreement can never be laundered into a fresh pin
+(master plan §8.3, issue #163 phase 2).
 
 
 ## Benchmark identities
@@ -175,4 +182,14 @@ Read only by a `scripts/test-*.sh` fake, never by a real run. A runner that read
 | `MISO_ENGINE_TEST_REAL_RUSTC` | real rustc behind the stub. |
 | `MISO_ENGINE_TEST_REAL_SHA256SUM` | real sha256sum behind the stub. |
 | `MISO_ENGINE_TEST_RUSTC_PIPE_FAIL` | make the rustc stub break the pipe. |
+
+## Re-pin hooks
+
+Read by a test in order to print an oracle-derived pin instead of asserting it. The comparison
+against the pin is the only thing suppressed: every cross-width and cross-target assertion still
+runs, so re-pin mode cannot turn a backend disagreement into a new pin (master plan §8.3).
+
+| name | meaning |
+|---|---|
+| `MISO_ENGINE_REPIN_NATIVE_PCM_RUNNER` | print the five native PCM runner output digests instead of asserting them. |
 

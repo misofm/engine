@@ -33,11 +33,24 @@ lane_fpenv='^crates/miso-engine-lane/src/fpenv\.rs:'
 # #84 phase A deleted `crates/miso-engine-core/src/arch/` and its runtime detection, so the two
 # temporary exemptions that stood here are gone: there is no legacy kernel file and no second
 # backend enum left to exempt.
+#
+# Issue #163 phase 2 made the numeric contract unfused everywhere, which leaves exactly two places
+# that must still be able to *compute* a fused multiply-add in order to prove the contract is not
+# one: the audit that justified the change (its bounds are measured against the arm it replaced)
+# and gate G5's native leg (its `lane_fma` case would pass vacuously without a fused reference to
+# contrast against). Both are evidence code on no render path.
+#
+# This is not a second, looser roster: `scripts/check-unfused-seal.sh` registers the same two files
+# with an exact per-file call count, checks the registry in both directions, and requires an
+# `UNFUSED-SEAL-EXEMPT` marker within six lines of every call. Naming them here keeps this policy's
+# question ("does fused arithmetic live outside the lane crate?") answerable while that seal owns
+# the harder question ("how many fused calls exist at all, and are they the ones we admitted?").
+fused_evidence='^tools/miso-engine-audit/src/unfused_fma\.rs:|^tools/miso-engine-wasm-gates/tests/g5_native_corpus\.rs:'
 
 fusion_matches="$({
     rg -n 'mul_add|_mm256_fmadd|_mm256_fmsub|_mm256_fnmadd|_mm_fmadd|vfmaq|vfmsq|wide::' \
         crates hosts tools --glob '*.rs' || true
-} | rg -v "$lane_source|$lane_tests|$oracle_crate" || true)"
+} | rg -v "$lane_source|$lane_tests|$oracle_crate|$fused_evidence" || true)"
 [[ -z "$fusion_matches" ]] || {
     printf '%s\n' "$fusion_matches" >&2
     fail "fused multiply-add and the SIMD vocabulary belong to crates/miso-engine-lane (D3, D4)"

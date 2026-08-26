@@ -1618,7 +1618,7 @@ mod tests {
 
     /// E10. The route is two multiplies plus one add per output word, with the gain
     /// folded into the coefficients at bind (D3). The oracle is
-    /// `softfma::unfused_mul_add_via_f64`, which computes the same multiply-add through `f64` with
+    /// `softfma::unfused_multiply_add_via_f64`, which computes the same multiply-add through `f64` with
     /// no dependence on `mix2x2_block`'s vector body; the exact product and the innocuous double
     /// rounding of the sum make it bit-identical to the `f32` expression (issue #163 phase 2).
     ///
@@ -1641,10 +1641,16 @@ mod tests {
         mix2x2_block::<FrameLane>(&mut left, &mut right, folded);
         for frame in 0..FRAMES {
             let (l, r) = (left_in[frame], right_in[frame]);
-            let expected_left =
-                miso_engine_lane::softfma::unfused_mul_add_via_f64(folded[1], r, folded[0] * l);
-            let expected_right =
-                miso_engine_lane::softfma::unfused_mul_add_via_f64(folded[3], r, folded[2] * l);
+            let expected_left = miso_engine_lane::softfma::unfused_multiply_add_via_f64(
+                folded[1],
+                r,
+                folded[0] * l,
+            );
+            let expected_right = miso_engine_lane::softfma::unfused_multiply_add_via_f64(
+                folded[3],
+                r,
+                folded[2] * l,
+            );
             assert_eq!(
                 left[frame].to_bits(),
                 expected_left.to_bits(),

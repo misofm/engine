@@ -5,7 +5,7 @@ use miso_engine_effect_runtime::envelope::{
     hysteresis_step, peak_follow, retention_coefficient, rms_follow,
 };
 use miso_engine_lane::Lane;
-use miso_engine_lane::softfma::unfused_mul_add_via_f64;
+use miso_engine_lane::softfma::unfused_multiply_add_via_f64;
 
 /// `exp(-1 / (tau * fs))` in `f64`, the independent oracle for the coefficient design.
 fn oracle_retention(time_ms: f64, sample_rate: f64) -> f64 {
@@ -94,7 +94,7 @@ fn peak_follow_matches_the_unfused_f64_restatement() {
         let c = 0.9995f32;
         let x_abs = x.abs();
         let d = y - x_abs;
-        let exact = unfused_mul_add_via_f64(c, d, x_abs);
+        let exact = unfused_multiply_add_via_f64(c, d, x_abs);
         let expected = if x_abs > exact { x_abs } else { exact };
         y = peak_follow::<f32>(x_abs, y, c);
         assert_eq!(
@@ -116,7 +116,7 @@ fn rms_follow_matches_the_unfused_f64_restatement() {
         let x = ((step as f32) * 0.001_9).cos();
         let x2 = x * x;
         let d = x2 - y;
-        let expected = unfused_mul_add_via_f64(c, d, y);
+        let expected = unfused_multiply_add_via_f64(c, d, y);
         y = rms_follow::<f32>(x2, y, c);
         assert_eq!(y.to_bits(), expected.to_bits(), "step {step}");
     }

@@ -37,11 +37,20 @@ dispatch_scalar=crates/miso-engine-lane/src/scalar.rs
 
 # The exemption registry: source file, and the exact number of fused calls it may make.
 #
-# There is exactly one, and it is the audit that justified the contract change. It has to keep a
-# copy of the retired operation in order to measure the unfused form *against* it -- the fused arm
-# no longer exists anywhere else in the tree, so without this the audit's bounds could never be
-# reproduced. It is evidence code: it is not reachable from any render path, and it is not
-# `Lane::fma`.
+# There are exactly two, and both exist for the same reason: to compute the contract that was
+# retired, so that the contract that replaced it can be measured *against* something.
+#
+#   * the audit that justified the change -- without its fused arm the bounds in
+#     `docs/rulings/unfused-multiply-add-audit.md` could never be reproduced, because the fused arm
+#     no longer exists anywhere else in the tree;
+#   * gate G5's native leg -- its `lane_fma` case asserts that `Lane::fma` equals a written-out
+#     multiply and add, and that assertion would pass vacuously the moment the corpus operands
+#     stopped separating the two forms. The fused reference is what keeps it honest. It lives in
+#     the native gate rather than the corpus crate because the corpus is compiled into the wasm
+#     guest, where `mul_add` is unfused and a "fused" reference would silently become a second copy
+#     of the unfused one.
+#
+# Both are evidence code: neither is reachable from a render path, and neither is `Lane::fma`.
 #
 # Adding a row here is the deliberate act the seal exists to require. A new row means someone has
 # decided a fused multiply-add belongs in the workspace again, which is an owner-ruling-sized
@@ -49,12 +58,13 @@ dispatch_scalar=crates/miso-engine-lane/src/scalar.rs
 exemption_registry() {
     cat <<'EOF'
 tools/miso-engine-audit/src/unfused_fma.rs 7
+tools/miso-engine-wasm-gates/tests/g5_native_corpus.rs 1
 EOF
 }
 
 # The number of fused calls the container claims exist in the whole workspace. "No fused
 # multiply-add anywhere" is only a meaningful statement if the residue is written down and checked.
-expected_fused_call_count=7
+expected_fused_call_count=8
 
 # A call of a fused multiply-add, in any of its spellings. The `(` is what separates a call from a
 # `use` line or a doc mention.
