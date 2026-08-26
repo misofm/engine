@@ -80,7 +80,7 @@ are mixed and take the fallback. `D90_DIGESTS` did not move.
 | 182-1 | shape leg dropped: `lanes_uniform` returns only the phase test | `src/lib.rs` `lanes_uniform` | `a_mixed_lookahead_cohort_falls_back_bit_identically` (and `lane_identity_holds_across_widths`) |
 | 182-2 | phase leg dropped: `lanes_uniform` returns only the shape test | `src/lib.rs` `lanes_uniform` | `a_restore_that_desyncs_the_phase_falls_back` — **and nothing else**, which is what makes the leg's own justification testable rather than asserted |
 | 182-3 | `suffix.min(L::load(..))` → `suffix.max(..)` in the vector suffix pass | `src/lib.rs` `sliding_minimum_uniform` | `a_mixed_lookahead_cohort_falls_back_bit_identically`, `a_restore_that_desyncs_the_phase_falls_back`, `lane_identity_holds_across_widths` |
-| 182-4 | uniform box gather reads `state.lane[0].end_offset` instead of `box_offset` | `src/lib.rs` `channel_frame` | as 182-3 |
+| 182-4 | uniform box gather reads the cohort's `end_offset` instead of `box_offset` | `src/lib.rs` `channel_frame_uniform` | as 182-3 |
 | 182-5 | the vector suffix pass guarded by `complete && width < 2`, so it never runs at W4/W8 (row 7's analogue in the new path) | `src/lib.rs` `sliding_minimum_uniform` | `a_uniform_cohort_renders_exactly_the_per_lane_path` — **and nothing else**: every cohort the other cross-width tests build falls back |
 
 ### Why the cross-path comparison is where it is
@@ -95,7 +95,7 @@ than against the one whose name sounds like it should own them.
 ### A mutation that does not turn anything red, and why it is not a gap
 
 **Swapping the argument order of all three `L::min` sites** in `sliding_minimum_uniform`
-(`L::load(&state.prefix).min(newest)` → `newest.min(L::load(&state.prefix))`, and so on) leaves
+(`prefix.min(newest)` → `newest.min(prefix)`, and so on) leaves
 every test in the crate green, including the E12 pins. This is recorded rather than papered over,
 because the reason is a statement about the kernel's value domain and not about the gates.
 

@@ -805,6 +805,37 @@ fn lanes_uniform(state: &ChannelState) -> bool {
         && state.phase.iter().all(|phase| *phase == state.phase[0])
 }
 
+/// The `W` contiguous words of ring slot `slot`, as one lane.
+///
+/// Round 2 R1(c). The uniform path addresses every ring with the **constant** `L::WIDTH` rather
+/// than the runtime `ChannelState::width` the per-lane body must use. The two are equal — the
+/// arena is allocated at `L::WIDTH` and [`limiter_block_uniform`] debug-asserts it — but only the
+/// constant is a constant: with it a slot stride is a shift instead of an `imul`, and the
+/// sub-slice handed to [`Lane::load`] has a statically known length, so the width check inside
+/// `load` folds away and one of the two bounds checks per access disappears.
+#[inline(always)]
+fn ring_lane<L: Lane>(ring: &[f32], slot: usize) -> L {
+    let base = slot * L::WIDTH;
+    L::load(&ring[base..base + L::WIDTH])
+}
+
+/// [`ring_lane`]'s counterpart: writes one lane over the `W` contiguous words of ring slot `slot`.
+#[inline(always)]
+fn store_ring_lane<L: Lane>(ring: &mut [f32], slot: usize, value: L) {
+    let base = slot * L::WIDTH;
+    value.store(&mut ring[base..base + L::WIDTH]);
+}
+
+/// `value - ring` once `value` has passed the ring's end.
+///
+/// The render path's only form of the modulo (#90 F6). Every call site holds `value < 2 * ring`,
+/// which is what makes one conditional subtraction exact; the uniform block loop calls it once per
+/// *segment* rather than once per frame (R1 d).
+#[inline(always)]
+const fn wrapped(value: usize, ring: usize) -> usize {
+    if value >= ring { value - ring } else { value }
+}
+
 /// [`sliding_minimum`] for a bank whose lanes are known uniform by [`lanes_uniform`].
 ///
 /// Same algorithm, same operation order, one lane-wide instance of it instead of `W` scalar ones.
@@ -821,54 +852,69 @@ fn lanes_uniform(state: &ChannelState) -> bool {
 ///
 /// The amortised backward suffix pass is included: it is `Wb` loads, mins and stores once per
 /// completed block, and it is the single largest scalar cost in the kernel.
+///
+/// # Residency (round 2, R1 a and b)
+///
+/// Three round trips through memory are gone from the frame and nothing else is.
+///
+/// * `prefix` and the van Herk `phase` are `&mut` locals of [`limiter_block_uniform`] instead of
+///   arena words, written back once when the block ends.
+/// * The window minimum is **returned** as an `L` instead of being stored into a `[f32; 8]`
+///   scratch for the caller to load straight back out of.
+/// * `end` and `start` arrive already resolved, because the caller walks the block in wrap-free
+///   segments and therefore knows both indices are linear inside one (R1 d). They are the same two
+///   indices the `+ offset` / `- ring` pair computed here before.
+///
+/// None of the three moves a *value*. The word this frame would have left in `state.prefix` is the
+/// word the local now holds, and the block-end write-back leaves exactly what the last frame's
+/// store would have left; `state.phase` is filled from the local for the same reason, every lane
+/// of a uniform cohort holding one phase being precisely what [`lanes_uniform`] established. The
+/// state words move in *when* they are written, never in what is written, and nothing observes
+/// them between two frames of one block — `snapshot_track` and `is_at_silent_rest` read the arena
+/// between blocks. That is the same licence the #182 S2 cursor note relies on when it advances the
+/// cursors and the rest phase of a block it skipped instead of running it: mid-block state is not
+/// observable, so only the state a block *ends* on has to match.
 #[inline(always)]
+#[allow(clippy::too_many_arguments)]
 fn sliding_minimum_uniform<L: Lane>(
-    state: &mut ChannelState,
+    required_ring: &mut [f32],
+    window: usize,
     ring: usize,
-    cursor: usize,
-    out: &mut [f32; MAXIMUM_WIDTH],
-) {
-    let width = state.width;
-    let shape = state.lane[0];
-    let window = shape.window as usize;
-    let mut end = cursor + shape.end_offset as usize;
-    if end >= ring {
-        end -= ring;
-    }
-    let mut start = cursor + 1;
-    if start >= ring {
-        start -= ring;
-    }
-    let newest = L::load(&state.required_ring[end * width..]);
-    let position = state.phase[0] as usize;
+    end: usize,
+    start: usize,
+    prefix: &mut L,
+    phase: &mut u32,
+) -> L {
+    let newest = ring_lane::<L>(required_ring, end);
+    let position = *phase as usize;
     let running = if position == 0 {
         newest
     } else {
-        L::load(&state.prefix).min(newest)
+        (*prefix).min(newest)
     };
-    running.store(&mut state.prefix);
+    *prefix = running;
     let complete = position + 1 == window;
     let minimum = if complete {
         running
     } else {
-        L::load(&state.required_ring[start * width..]).min(running)
+        ring_lane::<L>(required_ring, start).min(running)
     };
-    minimum.store(out);
     if complete {
-        let mut suffix = L::load(&state.required_ring[end * width..]);
+        let mut suffix = ring_lane::<L>(required_ring, end);
         let mut slot = end;
         for _ in 0..window {
-            suffix = suffix.min(L::load(&state.required_ring[slot * width..]));
-            suffix.store(&mut state.required_ring[slot * width..]);
+            suffix = suffix.min(ring_lane::<L>(required_ring, slot));
+            store_ring_lane::<L>(required_ring, slot, suffix);
             if slot == 0 {
                 slot = ring;
             }
             slot -= 1;
         }
-        state.phase.fill(0);
+        *phase = 0;
     } else {
-        state.phase.fill((position + 1) as u32);
+        *phase = (position + 1) as u32;
     }
+    minimum
 }
 
 /// The streaming van Herk / Gil-Werman sliding minimum over each lane's window.
@@ -1004,15 +1050,17 @@ impl<L: Lane> HotChannel<L> {
 ///    the decay terminate at exactly `+0.0`, and therefore `g` at exactly `1.0`.
 /// 7. **output (A)** read-before-write on the main ring gives a delay of exactly `B = N + 6`;
 ///    `y = select(bypass, z, z * g)` keeps the bypass path bit-exact including signed zero.
-/// # The uniform-cohort parameter
+/// # The uniform-cohort form
 ///
-/// `UNIFORM` selects the lane-wide form of steps 3 and 5 for a cohort [`lanes_uniform`] has
-/// accepted (#182 S1). It is a const parameter rather than a runtime flag so that neither
-/// instantiation carries the other's branch into the frame loop; the whole-bank decision is taken
-/// once, in [`limiter_block`].
+/// [`channel_frame_uniform`] is the same seven steps for a cohort [`lanes_uniform`] has accepted
+/// (#182 S1): steps 3 and 5 run lane-wide there instead of lane by lane. It is a separate function
+/// rather than a const parameter on this one so that neither form carries the other's branch —
+/// and, since round 2, so that the uniform form can be handed pre-split ring views and pre-resolved
+/// slot indices that this one, addressing the arena lane by lane, cannot use. The whole-bank
+/// decision is taken once, in [`limiter_block`].
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
-fn channel_frame<L: Lane, const UNIFORM: bool>(
+fn channel_frame<L: Lane>(
     io: &mut [f32],
     base: usize,
     x: L,
@@ -1033,25 +1081,14 @@ fn channel_frame<L: Lane, const UNIFORM: bool>(
     let required = L::select(peak.gt(limit), limit.div(peak), one);
     required.store(&mut state.required_ring[ring_cursor * width..]);
 
-    if UNIFORM {
-        sliding_minimum_uniform::<L>(state, ring, ring_cursor, scratch);
-    } else {
-        sliding_minimum(state, ring, ring_cursor, scratch);
-    }
+    sliding_minimum(state, ring, ring_cursor, scratch);
     let minimum = L::load(scratch);
     let quantised = minimum
         .mul(L::splat(BOX_GRID))
         .floor()
         .mul(L::splat(1.0 / BOX_GRID));
 
-    let expired = if UNIFORM {
-        // One slot for the whole bank, so the `W` expiring terms are one contiguous vector load.
-        let mut slot = ring_cursor + state.lane[0].box_offset as usize;
-        if slot >= ring {
-            slot -= ring;
-        }
-        L::load(&state.box_ring[slot * width..])
-    } else {
+    let expired = {
         for (lane, expiring) in scratch.iter_mut().enumerate().take(width) {
             let mut slot = ring_cursor + state.lane[lane].box_offset as usize;
             if slot >= ring {
@@ -1073,6 +1110,135 @@ fn channel_frame<L: Lane, const UNIFORM: bool>(
     let delayed = L::load(&state.main_ring[main_cursor * width..]);
     x.store(&mut state.main_ring[main_cursor * width..]);
     L::select(bypass, delayed, delayed.mul(gain)).store(&mut io[base..]);
+}
+
+/// The three ring views and the two van Herk words one uniform channel carries across a block.
+///
+/// Round 2 R1 (a) and (c). `ChannelState` is behind a `&mut` that the frame body used to hold for
+/// the whole frame, so every read of a ring base pointer, of `width`, or of `lane[0]` had to be
+/// re-loaded after each store the compiler could not prove disjoint from it — about two hundred
+/// scalar instructions per frame of pure bookkeeping. Taking the three views and the three window
+/// offsets **once per block** removes the aliasing question entirely: the views are `&mut [f32]`
+/// locals of known length, and the offsets are integers in registers.
+///
+/// The views are cut to exactly `slots * L::WIDTH` words, which is their whole length. The slice
+/// is not a narrowing, it is a *statement*: it gives the block loop's bounds checks a length the
+/// compiler can relate to the slot indices, which is what lets them be hoisted to segment entry.
+struct UniformHot<'a, L: Lane> {
+    /// Running minimum of the current van Herk block, in a register for the whole block.
+    prefix: L,
+    /// Position inside the current van Herk block, in a register for the whole block.
+    phase: u32,
+    /// `Wb`, the cohort's one window length.
+    window: usize,
+    /// `Wb`, the ring distance from the write cursor to the window's newest sample.
+    end_offset: usize,
+    /// `R - Wb`, the ring distance to the box term leaving the running sum.
+    box_offset: usize,
+    /// `R * W` words of required gain; the van Herk suffix minima overwrite expired raw values.
+    required_ring: &'a mut [f32],
+    /// `R * W` words of quantised minima.
+    box_ring: &'a mut [f32],
+    /// `B * W` words of main delay.
+    main_ring: &'a mut [f32],
+}
+
+impl<'a, L: Lane> UniformHot<'a, L> {
+    /// Splits one channel's arena into the views the block loop holds, and reads the two van Herk
+    /// words out of it.
+    ///
+    /// Lane 0 speaks for the cohort at every one of the three offsets, which is exactly what
+    /// [`lanes_uniform`] has just established — the same read `sliding_minimum_uniform` and the
+    /// box gather each made for themselves, once per frame, before.
+    #[inline]
+    fn new(state: &'a mut ChannelState, shape: &Shape) -> Self {
+        let ring_words = shape.ring * L::WIDTH;
+        let main_words = shape.main * L::WIDTH;
+        let lane = state.lane[0];
+        Self {
+            prefix: L::load(&state.prefix),
+            phase: state.phase[0],
+            window: lane.window as usize,
+            end_offset: lane.end_offset as usize,
+            box_offset: lane.box_offset as usize,
+            required_ring: &mut state.required_ring[..ring_words],
+            box_ring: &mut state.box_ring[..ring_words],
+            main_ring: &mut state.main_ring[..main_words],
+        }
+    }
+}
+
+/// The five ring slots one frame of one uniform channel touches, resolved at segment entry.
+///
+/// Round 2 R1(d). Inside a wrap-free segment every one of the five advances by exactly one per
+/// frame, so the segment resolves them once and the frame loop adds its step index. The values are
+/// the same indices the per-frame `+ offset` / `- ring` pairs produced.
+#[derive(Clone, Copy)]
+struct FrameSlots {
+    /// The write cursor of the required-gain and box rings.
+    ring_cursor: usize,
+    /// The read-before-write cursor of the main delay ring.
+    main_cursor: usize,
+    /// The window's newest sample, `ring_cursor + Wb` around the ring.
+    end: usize,
+    /// The window's oldest sample, `ring_cursor + 1` around the ring.
+    start: usize,
+    /// The box term leaving the running sum, `ring_cursor + (R - Wb)` around the ring.
+    expiring: usize,
+}
+
+/// [`channel_frame`] for a uniform cohort: the same seven steps, no per-lane scalar work.
+///
+/// The operation order is [`channel_frame`]'s, step for step and operand for operand. What differs
+/// is where the operands live: the rings arrive as views and the slots as integers, so the body is
+/// seven lane-wide operations and no bookkeeping.
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn channel_frame_uniform<L: Lane>(
+    io_frame: &mut [f32],
+    x: L,
+    peak: L,
+    limit: L,
+    release: L,
+    hot: &mut HotChannel<L>,
+    uniform: &mut UniformHot<'_, L>,
+    ring: usize,
+    slots: FrameSlots,
+    bypass: <L as Lane>::Mask,
+) {
+    let one = L::splat(1.0);
+
+    let required = L::select(peak.gt(limit), limit.div(peak), one);
+    store_ring_lane::<L>(uniform.required_ring, slots.ring_cursor, required);
+
+    let minimum = sliding_minimum_uniform::<L>(
+        uniform.required_ring,
+        uniform.window,
+        ring,
+        slots.end,
+        slots.start,
+        &mut uniform.prefix,
+        &mut uniform.phase,
+    );
+    let quantised = minimum
+        .mul(L::splat(BOX_GRID))
+        .floor()
+        .mul(L::splat(1.0 / BOX_GRID));
+
+    // One slot for the whole bank, so the `W` expiring terms are one contiguous vector load.
+    let expired = ring_lane::<L>(uniform.box_ring, slots.expiring);
+    hot.box_sum = hot.box_sum.add(quantised).sub(expired);
+    store_ring_lane::<L>(uniform.box_ring, slots.ring_cursor, quantised);
+    let smoothed = hot.box_sum.div(hot.window);
+
+    let target = one.sub(smoothed);
+    let released = release.fma(target.sub(hot.reduction), hot.reduction);
+    hot.reduction = flush(target.max(released));
+
+    let gain = one.sub(hot.reduction);
+    let delayed = ring_lane::<L>(uniform.main_ring, slots.main_cursor);
+    store_ring_lane::<L>(uniform.main_ring, slots.main_cursor, x);
+    L::select(bypass, delayed, delayed.mul(gain)).store(io_frame);
 }
 
 /// The one block kernel: `frames` frames of `L::WIDTH` tracks, both channels, one pass.
@@ -1098,22 +1264,51 @@ fn limiter_block<L: Lane>(
     cursors: &mut Cursors,
 ) {
     // Issue #182 S1: one whole-bank branch, taken here and nowhere else. Both channels must be
-    // uniform, because both run the same body with the same const parameter; a bank with a mixed
-    // left channel and a uniform right one takes the per-lane path on both, which is the
-    // conservative direction and keeps the decision one branch rather than two.
+    // uniform, because both run the same body; a bank with a mixed left channel and a uniform
+    // right one takes the per-lane path on both, which is the conservative direction and keeps the
+    // decision one branch rather than two.
     if lanes_uniform(left) && lanes_uniform(right) {
-        limiter_block_body::<L, true>(left_io, right_io, frames, coef, shape, left, right, cursors);
+        limiter_block_uniform::<L>(left_io, right_io, frames, coef, shape, left, right, cursors);
     } else {
-        limiter_block_body::<L, false>(
-            left_io, right_io, frames, coef, shape, left, right, cursors,
-        );
+        limiter_block_per_lane::<L>(left_io, right_io, frames, coef, shape, left, right, cursors);
     }
 }
 
-/// The body of [`limiter_block`] at one setting of the uniform-cohort gate.
+/// One channel's detector pass over one chunk: `span` peaks from `span` input frames.
+///
+/// The twelve history words live in locals for the whole chunk and are written back to `hot` once,
+/// which is the reason the block is walked in chunks at all (see [`limiter_block_per_lane`]).
+/// Shared by both block bodies verbatim: the detector is the same computation whether or not the
+/// cohort is uniform, and its operation order is frozen.
+#[inline(always)]
+fn detector_chunk<L: Lane>(
+    hot: &mut HotChannel<L>,
+    io: &[f32],
+    chunk: usize,
+    span: usize,
+    fir: &[[L; 4]; HISTORY_WORDS],
+    peaks: &mut [f32; DETECTOR_CHUNK * MAXIMUM_WIDTH],
+) {
+    let width = L::WIDTH;
+    let mut history = hot.history;
+    for frame in 0..span {
+        let base = (chunk + frame) * width;
+        let x = L::load(&io[base..]);
+        detector_peak(&mut history, x, fir).store(&mut peaks[frame * width..]);
+    }
+    hot.history = history;
+}
+
+/// The body of [`limiter_block`] for a cohort whose lanes are **not** uniform.
+///
+/// The fallback of #182 S1, unchanged: every ring is addressed lane by lane because `LaneShape` is
+/// a per-lane preparation parameter, and one track's arithmetic must not depend on which lane of
+/// which cohort it landed in. Round 2 left this body's arithmetic and loop structure exactly as
+/// they were; the only edit is that the detector pass it shares with the uniform body now lives in
+/// [`detector_chunk`] and the peak scratch is two named arrays instead of one indexed pair.
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
-fn limiter_block_body<L: Lane, const UNIFORM: bool>(
+fn limiter_block_per_lane<L: Lane>(
     left_io: &mut [f32],
     right_io: &mut [f32],
     frames: usize,
@@ -1154,7 +1349,8 @@ fn limiter_block_body<L: Lane, const UNIFORM: bool>(
     let mut main_cursor = cursors.main as usize;
     let mut ring_cursor = cursors.ring as usize;
     let mut scratch = [0.0_f32; MAXIMUM_WIDTH];
-    let mut peaks = [[0.0_f32; DETECTOR_CHUNK * MAXIMUM_WIDTH]; 2];
+    let mut peaks_left = [0.0_f32; DETECTOR_CHUNK * MAXIMUM_WIDTH];
+    let mut peaks_right = [0.0_f32; DETECTOR_CHUNK * MAXIMUM_WIDTH];
 
     // The block is walked in chunks so that only one channel's twelve history words are live at a
     // time. Both channels' histories together are twenty-four vector registers, which is more than
@@ -1164,21 +1360,22 @@ fn limiter_block_body<L: Lane, const UNIFORM: bool>(
     // single-pass form (the E12 digests are the proof).
     for chunk in (0..frames).step_by(DETECTOR_CHUNK) {
         let span = core::cmp::min(DETECTOR_CHUNK, frames - chunk);
-        for (channel, io) in [&*left_io, &*right_io].into_iter().enumerate() {
-            let hot = if channel == 0 {
-                &mut hot_left
-            } else {
-                &mut hot_right
-            };
-            let mut history = hot.history;
-            for frame in 0..span {
-                let base = (chunk + frame) * width;
-                let x = L::load(&io[base..]);
-                detector_peak(&mut history, x, &coef.fir)
-                    .store(&mut peaks[channel][frame * width..]);
-            }
-            hot.history = history;
-        }
+        detector_chunk::<L>(
+            &mut hot_left,
+            left_io,
+            chunk,
+            span,
+            &coef.fir,
+            &mut peaks_left,
+        );
+        detector_chunk::<L>(
+            &mut hot_right,
+            right_io,
+            chunk,
+            span,
+            &coef.fir,
+            &mut peaks_right,
+        );
 
         for frame in 0..span {
             let base = (chunk + frame) * width;
@@ -1198,13 +1395,13 @@ fn limiter_block_body<L: Lane, const UNIFORM: bool>(
                 )
             };
 
-            let peak_left = L::load(&peaks[0][frame * width..]);
-            let peak_right = L::load(&peaks[1][frame * width..]);
+            let peak_left = L::load(&peaks_left[frame * width..]);
+            let peak_right = L::load(&peaks_right[frame * width..]);
             let linked = peak_right.max(peak_left);
             let peak_left = L::select(link, linked, peak_left);
             let peak_right = L::select(link, linked, peak_right);
 
-            channel_frame::<L, UNIFORM>(
+            channel_frame::<L>(
                 left_io,
                 base,
                 L::load(&left_io[base..]),
@@ -1219,7 +1416,7 @@ fn limiter_block_body<L: Lane, const UNIFORM: bool>(
                 bypass,
                 &mut scratch,
             );
-            channel_frame::<L, UNIFORM>(
+            channel_frame::<L>(
                 right_io,
                 base,
                 L::load(&right_io[base..]),
@@ -1245,6 +1442,222 @@ fn limiter_block_body<L: Lane, const UNIFORM: bool>(
             }
         }
     }
+
+    hot_left.store(left);
+    hot_right.store(right);
+    cursors.main = main_cursor as u32;
+    cursors.ring = ring_cursor as u32;
+}
+
+/// The body of [`limiter_block`] for a cohort [`lanes_uniform`] has accepted.
+///
+/// Every frame is the same seven lane-wide steps [`channel_frame_uniform`] lists, in the same
+/// order, on the same words. What round 2 changed is the bookkeeping around them.
+///
+/// # The segment walk (R1 d)
+///
+/// The frame loop is split into **wrap-free segments**. Seven indices advance by one per frame —
+/// the two cursors, and each channel's window end, box slot and the shared window start — and each
+/// wraps at its own point of the ring. A segment runs until the first of them would wrap, so
+/// inside a segment every one of the seven is `base + step` with no compare, no conditional
+/// subtract, and a slot index the compiler can relate to the ring view's length. At the launch
+/// rates this crate supports the rings are hundreds of slots and a block is at most a few hundred
+/// frames, so each index wraps at most once in a block and the walk costs a handful of segment
+/// entries — the console's 128-frame quantum against `R = 481` and `B = 486` takes at most six.
+///
+/// This is **per-block** control flow, not per-sample: the segment lengths are functions of the
+/// cursors and the prepared window shape and of nothing the signal does, so the Lane doc's ban on
+/// data-dependent branching inside a per-sample loop is untouched. Two cohorts with the same
+/// cursors and the same shape take the same segments whatever they are rendering.
+///
+/// # Identity
+///
+/// Every index this produces is the index the frame-by-frame form produced. For an offset `o` and
+/// a segment whose entry cursor is `c`, the frame-by-frame form computes `(c + step + o) mod R`
+/// and this form computes `((c + o) mod R) + step`; the two agree exactly while
+/// `((c + o) mod R) + step < R`, which is the condition the segment length is the minimum of. The
+/// state words the frame loop keeps in registers are argued in [`sliding_minimum_uniform`].
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn limiter_block_uniform<L: Lane>(
+    left_io: &mut [f32],
+    right_io: &mut [f32],
+    frames: usize,
+    coef: &LimiterCoef<L>,
+    shape: &Shape,
+    left: &mut ChannelState,
+    right: &mut ChannelState,
+    cursors: &mut Cursors,
+) {
+    let width = L::WIDTH;
+    debug_assert!(width <= MAXIMUM_WIDTH);
+    debug_assert_eq!(left.width, width);
+    debug_assert_eq!(right.width, width);
+    debug_assert_eq!(left_io.len(), frames * width);
+    debug_assert_eq!(right_io.len(), frames * width);
+
+    let mut hot_left = HotChannel::<L>::load(left);
+    let mut hot_right = HotChannel::<L>::load(right);
+    // Issue #144 item 6, the stationary hoist, taken once per block at whole-bank granularity, on
+    // the terms `limiter_block_per_lane` states.
+    let stationary = ramps_are_stationary(&left.limit)
+        && ramps_are_stationary(&left.release)
+        && ramps_are_stationary(&right.limit)
+        && ramps_are_stationary(&right.release);
+    let all = L::zero().eq(L::zero());
+    let none = L::mask_not(all);
+    let link = if coef.link_max { all } else { none };
+    let bypass = if coef.bypass { all } else { none };
+    let ring = shape.ring;
+    let main = shape.main;
+    let mut main_cursor = cursors.main as usize;
+    let mut ring_cursor = cursors.ring as usize;
+    let mut peaks_left = [0.0_f32; DETECTOR_CHUNK * MAXIMUM_WIDTH];
+    let mut peaks_right = [0.0_f32; DETECTOR_CHUNK * MAXIMUM_WIDTH];
+
+    // The ring views borrow the two channels for the whole walk, so the two van Herk words come
+    // back out of the scope and are written to the arena below, once.
+    let (left_prefix, left_phase, right_prefix, right_phase) = {
+        let mut uniform_left = UniformHot::<L>::new(left, shape);
+        let mut uniform_right = UniformHot::<L>::new(right, shape);
+
+        // The chunking of the detector is `limiter_block_per_lane`'s, for its reason: only one
+        // channel's twelve history words are live at a time.
+        for chunk in (0..frames).step_by(DETECTOR_CHUNK) {
+            let span = core::cmp::min(DETECTOR_CHUNK, frames - chunk);
+            detector_chunk::<L>(
+                &mut hot_left,
+                left_io,
+                chunk,
+                span,
+                &coef.fir,
+                &mut peaks_left,
+            );
+            detector_chunk::<L>(
+                &mut hot_right,
+                right_io,
+                chunk,
+                span,
+                &coef.fir,
+                &mut peaks_right,
+            );
+
+            let mut frame = 0;
+            while frame < span {
+                // Segment entry: resolve the five slots of each channel once, then take the run of
+                // frames over which all of them stay linear.
+                let start = wrapped(ring_cursor + 1, ring);
+                let left_end = wrapped(ring_cursor + uniform_left.end_offset, ring);
+                let right_end = wrapped(ring_cursor + uniform_right.end_offset, ring);
+                let left_expiring = wrapped(ring_cursor + uniform_left.box_offset, ring);
+                let right_expiring = wrapped(ring_cursor + uniform_right.box_offset, ring);
+                let run = (span - frame)
+                    .min(ring - ring_cursor)
+                    .min(main - main_cursor)
+                    .min(ring - start)
+                    .min(ring - left_end)
+                    .min(ring - right_end)
+                    .min(ring - left_expiring)
+                    .min(ring - right_expiring);
+
+                let base = (chunk + frame) * width;
+                let words = run * width;
+                let left_segment = &mut left_io[base..base + words];
+                let right_segment = &mut right_io[base..base + words];
+                let left_peaks = &peaks_left[frame * width..(frame + run) * width];
+                let right_peaks = &peaks_right[frame * width..(frame + run) * width];
+
+                for (step, (((left_frame, right_frame), left_peak), right_peak)) in left_segment
+                    .chunks_exact_mut(width)
+                    .zip(right_segment.chunks_exact_mut(width))
+                    .zip(left_peaks.chunks_exact(width))
+                    .zip(right_peaks.chunks_exact(width))
+                    .enumerate()
+                {
+                    let (limit_left, release_left, limit_right, release_right) = if stationary {
+                        (
+                            hot_left.limit.resting_value(),
+                            hot_left.release.resting_value(),
+                            hot_right.limit.resting_value(),
+                            hot_right.release.resting_value(),
+                        )
+                    } else {
+                        (
+                            hot_left.limit.advance(),
+                            hot_left.release.advance(),
+                            hot_right.limit.advance(),
+                            hot_right.release.advance(),
+                        )
+                    };
+
+                    let peak_left = L::load(left_peak);
+                    let peak_right = L::load(right_peak);
+                    let linked = peak_right.max(peak_left);
+                    let peak_left = L::select(link, linked, peak_left);
+                    let peak_right = L::select(link, linked, peak_right);
+
+                    let x_left = L::load(left_frame);
+                    let x_right = L::load(right_frame);
+
+                    channel_frame_uniform::<L>(
+                        left_frame,
+                        x_left,
+                        peak_left,
+                        limit_left,
+                        release_left,
+                        &mut hot_left,
+                        &mut uniform_left,
+                        ring,
+                        FrameSlots {
+                            ring_cursor: ring_cursor + step,
+                            main_cursor: main_cursor + step,
+                            end: left_end + step,
+                            start: start + step,
+                            expiring: left_expiring + step,
+                        },
+                        bypass,
+                    );
+                    channel_frame_uniform::<L>(
+                        right_frame,
+                        x_right,
+                        peak_right,
+                        limit_right,
+                        release_right,
+                        &mut hot_right,
+                        &mut uniform_right,
+                        ring,
+                        FrameSlots {
+                            ring_cursor: ring_cursor + step,
+                            main_cursor: main_cursor + step,
+                            end: right_end + step,
+                            start: start + step,
+                            expiring: right_expiring + step,
+                        },
+                        bypass,
+                    );
+                }
+
+                frame += run;
+                ring_cursor = wrapped(ring_cursor + run, ring);
+                main_cursor = wrapped(main_cursor + run, main);
+            }
+        }
+
+        (
+            uniform_left.prefix,
+            uniform_left.phase,
+            uniform_right.prefix,
+            uniform_right.phase,
+        )
+    };
+
+    // R1(a)'s write-back. One store of each van Herk word per block, holding what the last frame
+    // of the block computed; `phase` is filled across the cohort because every lane of it shares
+    // the one position `lanes_uniform` established.
+    left_prefix.store(&mut left.prefix);
+    left.phase.fill(left_phase);
+    right_prefix.store(&mut right.prefix);
+    right.phase.fill(right_phase);
 
     hot_left.store(left);
     hot_right.store(right);
