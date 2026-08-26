@@ -395,6 +395,14 @@ fi
 failure_reason=round_1_failed
 run_round 1 "$counted" >"$raw" 2>>"$stderr_log" || exit 1
 measured_rounds_completed=1
+if [[ -n "$counted" ]]; then
+    failure_reason=precondition_core_clock_drift
+    core_clock_agrees "$(core_clock_from_csv "$core_clock_log")" || {
+        printf 'refusing cycle columns taken under a clock that moved: exported %s Hz\n' \
+            "$core_clock_hz" >&2
+        exit 1
+    }
+fi
 failure_reason=round_2_failed
 run_round 2 "$counted" >>"$raw" 2>>"$stderr_log" || exit 1
 measured_rounds_completed=2
