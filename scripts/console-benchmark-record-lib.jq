@@ -27,6 +27,106 @@ def observation_keys: ["absent_output_sha256","absent_p50_ns","absent_p95_ns","a
 
 def automation_keys: ["arms","automated_channel","automated_effect","automated_effect_id","automated_output_sha256","automated_p50_ns","automated_p95_ns","automated_p99_ns","automated_parameter","automated_parameter_index","automated_pushes_accepted","automated_track_id","automation_spans_per_block","backend","background_load_note","bit_identity","candidate_commit","cpu_affinity","cpu_model","descriptive_only","fixture_id","governor_or_power_mode","input_signal","issue","llvm_version","measurement_control","missing_metadata","observations","os","paired_control_delta_median_ns","paired_ramp_delta_median_ns","paired_ramp_delta_median_ns_per_track","pairing","percentile_method","profile","quantum_frames","quiet_output_sha256","quiet_p50_ns","quiet_p95_ns","quiet_p99_ns","record","render_errors","render_total_forbidden_operations","restated_output_sha256","restated_p50_ns","restated_p95_ns","restated_p99_ns","restated_pushes_accepted","round","rust_version","sample_rate_hz","schema_version","smoothing_samples","statistical_method","strip_content","strip_layout","synthetic_fixture","target_features","target_triple","tracks","units","workload_kind"];
 
+# ---------------------------------------------------------------------------------------------
+# Issue #184: floor accounting. Additive, and additive means additive.
+# ---------------------------------------------------------------------------------------------
+#
+# A session record either carries the whole floor group or none of it. Every record sealed under
+# `artifacts/` predates the group and validates on `session_keys` exactly as before; a record from
+# a runner that measured the pinned core's clock validates on `session_floor_keys`, which is the
+# same set plus these eleven. There is no third shape: dropping one column out of the group leaves
+# a record that matches neither list, which is what makes the structural mutation sweep bite on
+# every one of them individually.
+def floor_keys: ["core_clock_hz","core_clock_source","cycles_per_block_p50","cycles_per_lane_sample","floor_basis","floor_control_row","floor_cycles_per_lane_sample","isolated_cycles_per_lane_sample","isolated_percent_of_floor","lane_samples_per_block","percent_of_floor"];
+def session_floor_keys: (session_keys + floor_keys) | sort;
+
+# The op inventories, restated. `tools/miso-engine-bench/src/floor.rs` is the authority and
+# `docs/rulings/effect-floor-accounting.md` is the derivation; this is the independent copy that
+# makes a subject which quietly re-tuned a floor fail here rather than publish. The same discipline
+# `session_kind_shape` applies to a workload's track count is applied to its floor.
+def lane_ops_per_cycle: 8 * 3.7;
+def builtins_lane_ops: 69;
+def eq_lane_ops: 51;
+def compressor_lane_ops: 94;
+def limiter_lane_ops: 138;
+# Nine tracks is one full eight-lane bank plus a one-track tail, and the tail costs a whole vector
+# operation per lane-sample: `(8 + 8) / 9` of the full-bank floor.
+def ragged_nine_track_width_factor: 16 / 9;
+def floor_document: "docs/rulings/effect-floor-accounting.md: ";
+
+# Per workload kind: required arithmetic per lane-sample, width factor, the row subtracted to
+# isolate this row's subject, and the basis string. A null inventory is a row whose fixture was
+# never inventoried, and it must say `not_derived` rather than guess.
+def floor_pins:
+  (builtins_lane_ops) as $b |
+  (builtins_lane_ops + eq_lane_ops) as $be |
+  (builtins_lane_ops + compressor_lane_ops) as $bc |
+  (builtins_lane_ops + eq_lane_ops + compressor_lane_ops) as $bec |
+  (builtins_lane_ops + eq_lane_ops + compressor_lane_ops + limiter_lane_ops) as $becl |
+  {
+    "nine_track_baseline":
+      [null, 1, "none", "not_derived"],
+    "nine_track_ragged_strip":
+      [$becl, ragged_nine_track_width_factor, "none",
+       floor_document + "builtins+eq+compressor+limiter, ragged"],
+    "sixty_four_track_console":
+      [$becl, 1, "sixty_four_track_eq_comp_simd1",
+       floor_document + "builtins+eq+compressor+limiter"],
+    "one_twenty_eight_track_stretch":
+      [$becl, 1, "none", floor_document + "builtins+eq+compressor+limiter"],
+    "sixty_four_track_eq_only":
+      [$be, 1, "sixty_four_track_builtins_only", floor_document + "builtins+eq"],
+    "sixty_four_track_compressor_only":
+      [$bc, 1, "sixty_four_track_builtins_only", floor_document + "builtins+compressor"],
+    "sixty_four_track_console_legacy":
+      [$bec, 1, "sixty_four_track_builtins_only", floor_document + "builtins+eq+compressor"],
+    "sixty_four_track_eq_comp_simd1":
+      [$bec, 1, "sixty_four_track_builtins_only", floor_document + "builtins+eq+compressor"],
+    "sixty_four_track_idle":
+      [$b, 1, "none", floor_document + "builtins, silent"],
+    "sixty_four_track_builtins_only":
+      [$b, 1, "none", floor_document + "builtins"],
+    "sixty_four_track_dispatch_only":
+      [$b, 1, "none", floor_document + "builtins"]
+  };
+
+# Absolute agreement to the precision the subject prints (three decimals), with a little slack for
+# the order the two sides multiply in.
+def near($a; $b; $tolerance):
+  ($a | type == "number") and ($b | type == "number") and
+  ((($a - $b) | if . < 0 then - . else . end) <= $tolerance);
+
+# Every derived column recomputed from the columns it was derived from. A miscomputed cycle count,
+# a floor that does not match its inventory, or a percentage that does not match its own floor and
+# its own measurement all fail here; a column that is merely *present* proves nothing.
+def floor_shape:
+  (floor_pins[.workload_kind]) as $pin |
+  ($pin != null) and
+  (.lane_samples_per_block == (.tracks * .quantum_frames * 2)) and
+  (.core_clock_hz | type == "number" and . > 100000000 and . < 100000000000) and
+  (.core_clock_source | type == "string" and length > 0) and
+  near(.cycles_per_block_p50; .p50_ns_per_block * .core_clock_hz / 1000000000; 0.002) and
+  near(.cycles_per_lane_sample; .cycles_per_block_p50 / .lane_samples_per_block; 0.002) and
+  (.floor_basis == $pin[3]) and
+  (.floor_control_row == $pin[2]) and
+  (if $pin[0] == null then
+     .floor_cycles_per_lane_sample == null and .percent_of_floor == null
+   else
+     near(.floor_cycles_per_lane_sample; $pin[0] * $pin[1] / lane_ops_per_cycle; 0.002) and
+     near(.percent_of_floor;
+          100 * .floor_cycles_per_lane_sample / .cycles_per_lane_sample; 0.02)
+   end) and
+  # The isolate is a subtraction between two rows, so only the aggregate can recompute it. What a
+  # single record can say is whether it claims one at all, and that has to agree with the control
+  # row it names.
+  (if .floor_control_row == "none" then
+     .isolated_cycles_per_lane_sample == null and .isolated_percent_of_floor == null
+   else
+     (.isolated_cycles_per_lane_sample | type == "number" and . > 0) and
+     (.isolated_percent_of_floor | type == "number" and . > 0)
+   end);
+
+
 # The nine session workloads, in the emission order of `WORKLOADS`.
 def session_kinds: ["nine_track_baseline","nine_track_ragged_strip","one_twenty_eight_track_stretch","sixty_four_track_builtins_only","sixty_four_track_compressor_only","sixty_four_track_console","sixty_four_track_console_legacy","sixty_four_track_dispatch_only","sixty_four_track_eq_comp_simd1","sixty_four_track_eq_only","sixty_four_track_idle"];
 
@@ -180,7 +280,7 @@ def common_shape:
   honest_metadata and admissibility;
 
 def session_record_valid:
-  (keys | sort) == session_keys and
+  ((keys | sort) == session_keys or (keys | sort) == session_floor_keys) and
   .record == "console_session" and common_shape and
   # The method is pinned verbatim. A record that changed how it was measured but kept the old
   # sentence would be the most expensive kind of quiet drift, so the sentence is part of the shape.
@@ -191,7 +291,8 @@ def session_record_valid:
   ordered_percentiles([.min_ns_per_block,.p50_ns_per_block,.p95_ns_per_block,.p99_ns_per_block,.max_ns_per_block]) and
   ([.min_us_per_block,.p50_us_per_block,.p95_us_per_block,.p99_us_per_block,.max_us_per_block,.p50_us_per_block_per_track] | all(type == "number" and . > 0)) and
   (.output_sha256 | sha256) and
-  .render_errors == 0 and .render_total_forbidden_operations == 0;
+  .render_errors == 0 and .render_total_forbidden_operations == 0 and
+  (if (keys | sort) == session_floor_keys then floor_shape else true end);
 
 def hoist_record_valid:
   (keys | sort) == hoist_keys and

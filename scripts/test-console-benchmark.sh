@@ -173,17 +173,65 @@ automation=$(jq -cn --arg a "$digest_a" --arg b "$digest_b" --argjson m "$metada
   statistical_method: "three arms alternated per observation; nearest-rank percentiles over per-block nanoseconds; ramp delta is automated minus restated and control delta is restated minus quiet, per observation; descriptive only; no threshold"
 }')
 
+# ---------------------------------------------------------------------------------------------
+# The #184 floor group. A session record either carries all eleven columns or none of them.
+# ---------------------------------------------------------------------------------------------
+#
+# The derived columns are computed here the way the subject computes them, through the validator
+# library's own inventories rather than a third copy of the numbers -- the suite's job is to mutate
+# a correct record, not to restate the derivation. `tools/miso-engine-bench/src/floor.rs` is the
+# authority; the end-to-end agreement between it and the library is what a real run proves.
+core_clock_source='perf stat cycles/task-clock over the warmup launch, cpu 15'
+add_floor='
+  include "console-benchmark-record-lib";
+  def with_floor($clock; $source):
+    (floor_pins[.workload_kind]) as $pin |
+    (.tracks * .quantum_frames * 2) as $lane_samples |
+    (.p50_ns_per_block * $clock / 1000000000) as $cycles |
+    ($cycles / $lane_samples) as $per_lane |
+    (if $pin[0] == null then null else $pin[0] * $pin[1] / lane_ops_per_cycle end) as $floor |
+    . + {
+      lane_samples_per_block: $lane_samples,
+      core_clock_hz: $clock,
+      core_clock_source: $source,
+      cycles_per_block_p50: $cycles,
+      cycles_per_lane_sample: $per_lane,
+      floor_cycles_per_lane_sample: $floor,
+      percent_of_floor: (if $floor == null then null else 100 * $floor / $per_lane end),
+      floor_basis: $pin[3],
+      floor_control_row: $pin[2],
+      isolated_cycles_per_lane_sample: null,
+      isolated_percent_of_floor: null
+    };
+'
+# The console row isolates the limiter against the chain-shape row, so it must claim an isolate.
+# Its value is a subtraction between two records and only the aggregate can recompute it; what a
+# single record can be held to is that it claims one at all.
+session_floor=$(printf '%s' "$session" | jq -c -L "$scripts_dir" --arg s "$core_clock_source" \
+    "$add_floor"' with_floor(5480000000; $s)
+      | .isolated_cycles_per_lane_sample = 20.5
+      | .isolated_percent_of_floor = 22.75')
+# The one row whose fixture was never inventoried. Null floors, and a basis that says so.
+session_floor_not_derived=$(printf '%s' "$session" | jq -c -L "$scripts_dir" --arg s "$core_clock_source" \
+    "$add_floor"' .workload_kind = "nine_track_baseline" | .tracks = 9
+      | .synthetic_fixture = false | .strip_content = "eq" | .strip_layout = "simd1:eq"
+      | .fixture_id = "fixtures/session/v1/parametric-eq-nine-track.toml"
+      | with_floor(5480000000; $s)')
+
 expect_accept "$session" 'the base session record'
 expect_accept "$hoist" 'the base hoist record'
 expect_accept "$meters" 'the base meters record'
 expect_accept "$observation" 'the base observation record'
 expect_accept "$placement" 'the base placement record'
 expect_accept "$automation" 'the base automation record'
+expect_accept "$session_floor" 'the base session record carrying the floor columns'
+expect_accept "$session_floor_not_derived" 'a row whose fixture was never inventoried'
 
 # ---------------------------------------------------------------------------------------------
 # Per-key structural mutations: every key is load-bearing in both directions.
 # ---------------------------------------------------------------------------------------------
-for base in "$session" "$hoist" "$meters" "$observation" "$placement" "$automation"; do
+for base in "$session" "$session_floor" "$hoist" "$meters" \
+    "$observation" "$placement" "$automation"; do
     kind=$(printf '%s' "$base" | jq -r '.record')
     while read -r field; do
         expect_reject "$(printf '%s' "$base" | jq -c "del(.\"$field\")")" "$kind without $field"
@@ -194,6 +242,21 @@ for base in "$session" "$hoist" "$meters" "$observation" "$placement" "$automati
     done < <(printf '%s' "$base" | jq -r 'keys[]')
     expect_reject "$(printf '%s' "$base" | jq -c '.unexpected_key = 1')" "$kind with an extra key"
 done
+
+# The uninventoried row takes the deletion half of the sweep only. Four of its floor columns are
+# legitimately `null` -- that is what "no floor was derived for this fixture" looks like in a
+# record -- so nulling them is the identity rather than a mutation, and asserting it red would be
+# asserting that an honest record is dishonest.
+while read -r field; do
+    expect_reject "$(printf '%s' "$session_floor_not_derived" | jq -c "del(.\"$field\")")" \
+        "the uninventoried row without $field"
+    if [[ "$(printf '%s' "$session_floor_not_derived" | jq -c ".\"$field\"")" != null ]]; then
+        expect_reject "$(printf '%s' "$session_floor_not_derived" | jq -c ".\"$field\" = null")" \
+            "the uninventoried row with $field nulled"
+    fi
+done < <(printf '%s' "$session_floor_not_derived" | jq -r 'keys[]')
+expect_reject "$(printf '%s' "$session_floor_not_derived" | jq -c '.unexpected_key = 1')" \
+    'the uninventoried row with an extra key'
 
 # ---------------------------------------------------------------------------------------------
 # Semantic mutations: each names the property it destroys.
@@ -229,6 +292,36 @@ session_mutation '.cpu_model = null' 'a null metadata field not named in missing
 session_mutation '.cpu_model = "unknown"' 'a placeholder metadata value'
 session_mutation '.cpu_model = ""' 'an empty metadata value'
 session_mutation '.missing_metadata = ["cpu_model"]' 'a gap claimed for a field that resolved'
+
+# #184: the floor group. Every derived column is recomputed by the validator from the columns it
+# was derived from, so a wrong number is caught rather than merely a missing one. A column that is
+# present but arbitrary is the failure mode this block exists to make red.
+session_floor_mutation() { expect_reject "$(printf '%s' "$session_floor" | jq -c "$1")" "$2"; }
+
+session_floor_mutation '.cycles_per_lane_sample = 1.0' 'a cycle count that does not follow from the clock'
+session_floor_mutation '.cycles_per_block_p50 = 1.0' 'a block cycle count that does not follow from the wall time'
+session_floor_mutation '.core_clock_hz = 3000000000' 'a clock the cycle columns were not derived under'
+session_floor_mutation '.core_clock_hz = 1000' 'a clock outside any plausible core frequency'
+session_floor_mutation '.core_clock_source = ""' 'a measured clock with no provenance'
+session_floor_mutation '.lane_samples_per_block = 8192' 'a lane-sample count that is not tracks x frames x channels'
+session_floor_mutation '.tracks = 9 | .workload_kind = "nine_track_ragged_strip"' 'a lane-sample count left behind by a changed track count'
+session_floor_mutation '.floor_cycles_per_lane_sample = 1.0' 'a floor that does not follow from the published inventory'
+session_floor_mutation '.floor_cycles_per_lane_sample = null' 'a derived row that dropped its floor'
+session_floor_mutation '.percent_of_floor = 99.0' 'a percentage that flatters its own measurement'
+session_floor_mutation '.percent_of_floor = null' 'a floor stated without the percentage it implies'
+session_floor_mutation '.floor_basis = "docs/rulings/effect-floor-accounting.md: builtins"' 'a row citing another row inventory'
+session_floor_mutation '.floor_basis = "not_derived"' 'a derived row claiming it was never inventoried'
+session_floor_mutation '.floor_control_row = "sixty_four_track_builtins_only"' 'a row subtracting a control it does not isolate against'
+session_floor_mutation '.floor_control_row = "none"' 'a row that claims an isolate and names no control'
+session_floor_mutation '.isolated_cycles_per_lane_sample = -1' 'an isolate that costs less than nothing'
+session_floor_mutation '.isolated_percent_of_floor = -1' 'an isolate percentage below zero'
+# The not-derived row is the other half of the same rule: it must not invent a floor either.
+expect_reject "$(printf '%s' "$session_floor_not_derived" | jq -c '.floor_cycles_per_lane_sample = 11.892 | .percent_of_floor = 12.5')" 'an uninventoried fixture given a floor anyway'
+expect_reject "$(printf '%s' "$session_floor_not_derived" | jq -c '.floor_basis = "docs/rulings/effect-floor-accounting.md: builtins+eq"')" 'an uninventoried fixture citing an inventory'
+# Additive means additive: the sealed shape stays legal, and half the group is not a shape at all.
+expect_accept "$session" 'a record from before the floor columns existed'
+expect_reject "$(printf '%s' "$session_floor" | jq -c 'del(.percent_of_floor, .isolated_percent_of_floor)')" 'a record carrying half the floor group'
+
 
 # #163 item 0c: the decomposition rows. Every one of them is the console fixture with part of the
 # strip removed, and the subtraction between two rows only means something if each row's declared
@@ -546,6 +639,55 @@ expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.worklo
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.workload_kind != "sixty_four_track_console_legacy")] | .[]')" 'a set missing the transition row'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.workload_kind != "sixty_four_track_eq_comp_simd1")] | .[]')" 'a set missing the chain-shape row'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.workload_kind != "sixty_four_track_compressor_automation")] | .[]')" 'a set missing the automation-active row'
+
+# ---------------------------------------------------------------------------------------------
+# #184 at the aggregate: the isolate is a subtraction between two rows, so only a whole run has
+# the two rows. The set below carries the floor columns on every session row, with a distinct cost
+# per workload so that every named subtraction is a positive number the aggregate can recompute.
+# ---------------------------------------------------------------------------------------------
+floor_records=$(printf '%s' "$records" | jq -c -L "$scripts_dir" --arg s "$core_clock_source" \
+    "$add_floor"'
+  def scale: {
+    "nine_track_baseline": 0.30, "nine_track_ragged_strip": 0.70,
+    "sixty_four_track_builtins_only": 1.00, "sixty_four_track_dispatch_only": 1.02,
+    "sixty_four_track_idle": 1.05, "sixty_four_track_eq_only": 1.60,
+    "sixty_four_track_compressor_only": 2.60, "sixty_four_track_eq_comp_simd1": 3.20,
+    "sixty_four_track_console_legacy": 3.30, "sixty_four_track_console": 4.40,
+    "one_twenty_eight_track_stretch": 8.60
+  }[.workload_kind];
+  def rescale:
+    scale as $k |
+    reduce ("min", "p50", "p95", "p99", "max") as $p (.;
+      .[$p + "_ns_per_block"] = ((.[$p + "_ns_per_block"] * $k) | floor)
+      | .[$p + "_us_per_block"] = (.[$p + "_ns_per_block"] / 1000))
+    | .p50_us_per_block_per_track = (.p50_us_per_block / .tracks);
+  [ .[] | if .record == "console_session" then rescale | with_floor(5480000000; $s) else . end ]
+  | . as $all
+  | ([ $all[] | select(.record == "console_session")
+       | {key: (.workload_kind + ":" + (.round | tostring)), value: .} ] | from_entries) as $by
+  | [ $all[]
+      | if .record == "console_session" and .floor_control_row != "none" then
+          ($by[.floor_control_row + ":" + (.round | tostring)]) as $control
+          | .isolated_cycles_per_lane_sample =
+              (.cycles_per_lane_sample - $control.cycles_per_lane_sample)
+          | .isolated_percent_of_floor =
+              (100 * (.floor_cycles_per_lane_sample - $control.floor_cycles_per_lane_sample)
+                 / .isolated_cycles_per_lane_sample)
+        else . end ]')
+
+expect_aggregate_accept "$(printf '%s' "$floor_records" | jq -c '.[]')" 'the thirty-four-record set with floor accounting'
+expect_aggregate_reject "$(printf '%s' "$floor_records" | jq -c '(.[] | select(.workload_kind == "sixty_four_track_compressor_only")).isolated_cycles_per_lane_sample = 3.0 | .[]')" 'an isolate that is not the subtraction it names'
+expect_aggregate_reject "$(printf '%s' "$floor_records" | jq -c '(.[] | select(.workload_kind == "sixty_four_track_compressor_only")).isolated_percent_of_floor = 88.0 | .[]')" 'an isolate percentage that does not follow from the two rows floors'
+# The control row moving is the same defect seen from the other side: the subtraction stops being
+# the subtraction the subtracted row published.
+expect_aggregate_reject "$(printf '%s' "$floor_records" | jq -c '(.[] | select(.workload_kind == "sixty_four_track_builtins_only" and .round == 1)).cycles_per_lane_sample = 1.0 | .[]')" 'a control row whose cost moved under the rows that subtract it'
+# A run cannot lose its counter half way through: with the columns on some rows and not others the
+# two halves are not comparable and the aggregate refuses the run rather than the record.
+expect_aggregate_reject "$(printf '%s' "$floor_records" | jq -c -L "$scripts_dir" 'include "console-benchmark-record-lib"; [.[] | if .workload_kind == "sixty_four_track_idle" then delpaths([floor_keys[] | [.]]) else . end] | .[]')" 'a run carrying cycle columns on some session rows only'
+# Two clocks in one run is two hosts in one run, restated in hertz. The row is recomputed under the
+# second clock so that every per-record rule still passes and only the aggregate rule bites.
+expect_aggregate_reject "$(printf '%s' "$floor_records" | jq -c -L "$scripts_dir" --arg s "$core_clock_source" "$add_floor"'[.[] | if .workload_kind == "sixty_four_track_idle" then with_floor(4100000000; $s) else . end] | .[]')" 'a run measured under two core clocks'
+expect_aggregate_reject "$(printf '%s' "$floor_records" | jq -c '[.[] | if .record == "console_session" then .core_clock_source = (.core_clock_source + .workload_kind) else . end] | .[]')" 'a run whose rows disagree about where their clock came from'
 
 if [[ "$failures" != 0 ]]; then
     printf 'console benchmark validator suite: %s FAILED case(s)\n' "$failures" >&2

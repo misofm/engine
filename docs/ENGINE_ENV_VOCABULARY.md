@@ -76,6 +76,8 @@ One name per fact. Set by the runner, read by the bench binary; a name the runne
 | `MISO_ENGINE_BENCH_BACKGROUND_LOAD_NOTE` | the run's own statement of the machine it measured: the load average it read, the core it pinned to, the SMT sibling busyness it sampled and the cooldown it waited. Begins `controlled;` or `uncontrolled;`, and the record validator refuses a note that disagrees with `MISO_ENGINE_BENCH_MEASUREMENT_CONTROL`. |
 | `MISO_ENGINE_BENCH_MEASUREMENT_CONTROL` | `controlled` or `uncontrolled`, and nothing else (#144 item 13). A controlled run passed every precondition; an uncontrolled one waived at least one under `MISO_ENGINE_BENCH_ALLOW_UNCONTROLLED`. Every record carries it so the two can never be silently compared. |
 | `MISO_ENGINE_BENCH_CPU_AFFINITY` | the CPU number the workload was pinned to, or `uncontrolled` when affinity could not be obtained. |
+| `MISO_ENGINE_BENCH_CORE_CLOCK_HZ` | cycles per second the pinned core actually ran at, measured by `perf stat` over the warmup launch as `cycles / task-clock` and re-checked against each measured round. Empty on a host with no usable performance counter, which is what makes the #184 cycle columns absent rather than wrong. |
+| `MISO_ENGINE_BENCH_CORE_CLOCK_SOURCE` | how `MISO_ENGINE_BENCH_CORE_CLOCK_HZ` was obtained, carried into the record verbatim so a derived cycle count names its instrument. |
 | `MISO_ENGINE_BENCH_RUNTIME_OR_BROWSER` | Wasm runtime or browser identity. |
 | `MISO_ENGINE_BENCH_WASM_HOST` | Wasm host name. |
 | `MISO_ENGINE_BENCH_WASM_HOST_VERSION` | Wasm host version. |
@@ -102,6 +104,7 @@ Frozen shell constants in `scripts/check-bench-preconditions.sh`, read by the on
 | `MISO_ENGINE_BENCH_COOLDOWN_SECONDS` | seconds a freshly linked binary must age before it is timed. |
 | `MISO_ENGINE_BENCH_SIBLING_BUSY_CEILING` | percentage of the sample interval an SMT sibling of the pinned core may be busy. |
 | `MISO_ENGINE_BENCH_SIBLING_SAMPLE_SECONDS` | length of that sample interval. |
+| `MISO_ENGINE_BENCH_CORE_CLOCK_DRIFT_CEILING` | fraction by which a measured round's own `cycles / task-clock` may differ from the clock the records were told about before the run is refused (#184). |
 
 
 ## Realtime trace markers

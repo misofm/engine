@@ -73,10 +73,11 @@ if [[ "$#" == 1 ]]; then
         --compressor-round1) phase_directory=compressor-round1 ;;
         --compressor-round1-baseline) phase_directory=compressor-round1-baseline ;;
         --round1-composed) phase_directory=round1-composed ;;
-        *) printf 'usage: %s [--phase2|--phase3|--issue163-phase0|--issue163-phase1|--issue163-phase2|--issue163-phase3|--issue163-phase4|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed]\n' "$0" >&2; exit 2 ;;
+        --issue184) phase_directory=issue184 ;;
+        *) printf 'usage: %s [--phase2|--phase3|--issue163-phase0|--issue163-phase1|--issue163-phase2|--issue163-phase3|--issue163-phase4|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue184]\n' "$0" >&2; exit 2 ;;
     esac
 elif [[ "$#" != 0 ]]; then
-    printf 'usage: %s [--phase2|--phase3|--issue163-phase0|--issue163-phase1|--issue163-phase2|--issue163-phase3|--issue163-phase4|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed]\n' "$0" >&2
+    printf 'usage: %s [--phase2|--phase3|--issue163-phase0|--issue163-phase1|--issue163-phase2|--issue163-phase3|--issue163-phase4|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue184]\n' "$0" >&2
     exit 2
 fi
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -89,7 +90,11 @@ raw="$artifact_dir/console-benchmark.raw.jsonl"
 accepted="$artifact_dir/console-benchmark.accepted.jsonl"
 stderr_log="$artifact_dir/console-benchmark.stderr.log"
 disposition="$artifact_dir/console-benchmark.disposition.json"
-for path in "$raw" "$accepted" "$stderr_log" "$disposition"; do
+# #184: the perf-counter evidence behind the records' cycle columns. One file per launch that was
+# counted, kept beside the records for the same reason the stderr log is kept -- a derived column
+# whose instrument left no trace is a claim, not a measurement.
+core_clock_log="$artifact_dir/console-benchmark.core-clock.csv"
+for path in "$raw" "$accepted" "$stderr_log" "$disposition" "$core_clock_log"; do
     [[ ! -e "$path" ]] || { printf 'refusing to overwrite console artifact: %s\n' "$path" >&2; exit 1; }
 done
 [[ "$(uname -m)" == "x86_64" ]] || { printf 'Issue-149 qualification requires x86_64\n' >&2; exit 1; }
@@ -295,10 +300,69 @@ else
     exit 1
 fi
 
+# ---------------------------------------------------------------------------------------------
+# The pinned core's clock (#184). A cycle column needs cycles, and wall time is not cycles.
+# ---------------------------------------------------------------------------------------------
+#
+# `perf stat` counts `cycles` and `task-clock` over a launch, and their ratio is the clock the
+# pinned core actually ran at while it was running this subject -- a hardware counter reading,
+# taken under exactly the preconditions above, not a nameplate frequency and not `/proc/cpuinfo`.
+# The warmup launch supplies it, because the subject has to have it in its environment *before* it
+# builds a record and a `perf stat` result only exists after its workload has exited.
+#
+# The measured rounds are counted too, and their own ratio is checked against the exported figure.
+# That is what makes using the warmup's number honest rather than convenient: if the core clocked
+# differently while the numbers that are kept were being taken, the run refuses instead of
+# publishing cycle columns derived from a clock that was not in force.
+#
+# A host with no usable counter is not a failure. It exports nothing, every record omits the whole
+# column group, and the records validate exactly as the sealed ones under `artifacts/` do.
+readonly MISO_ENGINE_BENCH_CORE_CLOCK_DRIFT_CEILING=0.03
+core_clock_hz=
+core_clock_source=
+core_clock_available=0
+
+# Cycles per second from one `perf stat -x,` CSV. The last complete pair in the file wins, so a
+# file appended to by several launches reports the launch that wrote last. Empty when neither a
+# `cycles` nor a `task-clock` row counted.
+core_clock_from_csv() {
+    awk -F, '
+        $1 ~ /^[0-9]+([.][0-9]+)?$/ && $3 == "cycles" { cycles = $1 }
+        $1 ~ /^[0-9]+([.][0-9]+)?$/ && $3 == "task-clock" { milliseconds = $1 }
+        END { if (cycles > 0 && milliseconds > 0) printf "%.0f", cycles * 1000.0 / milliseconds }
+    ' "$1"
+}
+
+# Refuse a run whose measured round did not clock like the warmup the records were told about.
+core_clock_agrees() {
+    local measured=$1
+    awk -v exported="$core_clock_hz" -v measured="$measured" \
+        -v ceiling="$MISO_ENGINE_BENCH_CORE_CLOCK_DRIFT_CEILING" \
+        'BEGIN {
+            drift = (measured - exported) / exported
+            if (drift < 0) { drift = -drift }
+            exit (drift <= ceiling) ? 0 : 1
+        }'
+}
+
+core_clock_probe=$(mktemp)
+if command -v perf >/dev/null 2>&1 &&
+    perf stat -x, -e cycles,task-clock -o "$core_clock_probe" -- true >/dev/null 2>&1 &&
+    [[ -n "$(core_clock_from_csv "$core_clock_probe")" ]]; then
+    core_clock_available=1
+fi
+rm -f "$core_clock_probe"
+
 run_round() {
-    local round=$1
+    local round=$1 counted=${2:-}
+    local -a counter=()
+    if [[ -n "$counted" ]]; then
+        counter=(perf stat -x, -e cycles,task-clock --append -o "$core_clock_log" --)
+    fi
     workload_process_launches=$((workload_process_launches + 1))
     MISO_ENGINE_BENCH_ROUND="$round" \
+    MISO_ENGINE_BENCH_CORE_CLOCK_HZ="$core_clock_hz" \
+    MISO_ENGINE_BENCH_CORE_CLOCK_SOURCE="$core_clock_source" \
     MISO_ENGINE_BENCH_CANDIDATE_COMMIT="$candidate_commit" \
     MISO_ENGINE_BENCH_CPU_MODEL="$cpu_model" \
     MISO_ENGINE_BENCH_RUST_VERSION="$rust_version" \
@@ -310,20 +374,36 @@ run_round() {
     MISO_ENGINE_BENCH_MEASUREMENT_CONTROL="$measurement_control" \
     MISO_ENGINE_BENCH_CPU_AFFINITY="$cpu_affinity" \
     MISO_ENGINE_BENCH_GOVERNOR_OR_POWER_MODE="$governor_or_power_mode" \
-    "${affinity[@]}" "$binary" console
+    "${counter[@]}" "${affinity[@]}" "$binary" console
 }
 
 # One untimed warmup, then exactly the two frozen measured rounds. Raw stdout is append-only after
 # its exclusive creation; failures preserve every byte emitted by the failed process.
 failure_reason=warmup_failed
-run_round warmup >/dev/null 2>>"$stderr_log" || exit 1
+counted=
+(( core_clock_available == 1 )) && counted=counted
+run_round warmup "$counted" >/dev/null 2>>"$stderr_log" || exit 1
 warmup_launches=1
+if [[ -n "$counted" ]]; then
+    failure_reason=core_clock_unreadable
+    core_clock_hz=$(core_clock_from_csv "$core_clock_log")
+    [[ -n "$core_clock_hz" ]] || exit 1
+    core_clock_source="perf stat cycles/task-clock over the warmup launch, cpu $cpu_affinity"
+fi
 failure_reason=round_1_failed
-run_round 1 >"$raw" 2>>"$stderr_log" || exit 1
+run_round 1 "$counted" >"$raw" 2>>"$stderr_log" || exit 1
 measured_rounds_completed=1
 failure_reason=round_2_failed
-run_round 2 >>"$raw" 2>>"$stderr_log" || exit 1
+run_round 2 "$counted" >>"$raw" 2>>"$stderr_log" || exit 1
 measured_rounds_completed=2
+if [[ -n "$counted" ]]; then
+    failure_reason=precondition_core_clock_drift
+    core_clock_agrees "$(core_clock_from_csv "$core_clock_log")" || {
+        printf 'refusing cycle columns taken under a clock that moved: exported %s Hz\n' \
+            "$core_clock_hz" >&2
+        exit 1
+    }
+fi
 failure_reason=record_count
 [[ "$(wc -l <"$raw")" == 34 ]] || exit 1
 failure_reason=validation_failed
