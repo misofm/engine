@@ -440,3 +440,34 @@ final handoff names exact commits, gate counts/digests, unresolved findings, and
   and Bun 1.4.0 with unchanged E6/E7 digests, E8 sample 256, all E9 reasons, E10a pre-instantiation
   rejection, and five of five deliberate red mutations. The E7 typed nine-track reconstruction is
   byte-identical to the native raw-TOML fixture at 48 and 96 kHz.
+
+### Phase 2 post-#219 source-introspection integration (engine follow-up required)
+
+- Fable's PR #219 landed on `main` at `62bcb8c`; its exact change was integrated locally as
+  `c6a9e1c`. The conflict resolution retained this branch's Phase 0/SDK rows, added the new
+  session-map self-test, and recounted the actual sweep union as 96 rows. All three conflicted
+  shell scripts passed `bash -n`; the new cross-artifact shape gate caught all 10 red mutations.
+- A clean-tree serialized `scripts/build-sdk.sh` run rebuilt the packaged Wasm and siblings from
+  `c6a9e1c`. Provenance validates the 2,496,015-byte Wasm at SHA-256
+  `06b7846aa4e74248f25da7014fd00ffe99e0726c05a4590dd7dcbfbf00d8d66a`; the module has the exact
+  28-export set and all six source queries. The landed implementation deliberately did not bump
+  `abiVersion` or change the ABI-layout JSON, superseding the earlier coordinator forecast with
+  the additive-export precedent recorded in PR #219.
+- Checkpoint `b57a2ae` removes the temporary `introspectionUnavailable` error and reads canonical
+  tracks plus `{id, channels, sampleRateHz, startFrame, frames}` from the compiled engine. Region
+  values remain BigInts at the public `sessionMap()` boundary; actual Node file/array feeding
+  refuses declarations above safe addressing rather than narrowing silently. Typed plans are
+  cross-checked against the engine map, while raw TOML uses the engine map as its sole source-shape
+  authority.
+- E7 now renders raw 48/96 kHz native-runner TOML byte-identically as well as the typed plans, and
+  separately drives `rf64-48000.toml` from the introspected nonzero `startFrame = 1`,
+  `frames = 514`; its first 512 output frames are byte-identical to the native runner. Node 22.23.2
+  and Bun 1.4.0 retain the pinned E6/E7 digests, E8 sample 256, all six E9 outcomes, E10a
+  pre-instantiation ordering, and 5/5 deliberate red mutations. The broader generated self-test
+  caught and then passed after repinning its independent Wasm byte/hash oracle (`ac9d1e4`).
+- One raw-TOML blocker remains and was posted to #207 as comment `5439512242`: the six queries are
+  state-gated until compile succeeds, but the 192-byte prepare config requires the session rate and
+  arbitrary quantum before compile. A real 96 kHz document with quoted root keys reproduces red as
+  `miso.offline.v1/prepare`; recovering those values in TypeScript would violate ruling
+  `5438024085`. Phase 2 cannot honestly receive its terminal verdict until Fable supplies or rules
+  on an engine-owned pre-prepare shape mechanism.
