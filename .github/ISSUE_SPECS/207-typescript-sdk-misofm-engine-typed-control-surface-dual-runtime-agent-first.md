@@ -476,3 +476,18 @@ final handoff names exact commits, gate counts/digests, unresolved findings, and
   `miso.offline.v1/prepare`; recovering those values in TypeScript would violate ruling
   `5438024085`. Phase 2 cannot honestly receive its terminal verdict until Fable supplies or rules
   on an engine-owned pre-prepare shape mechanism.
+
+### Phase 2 attempt-2 independent verdict: HOLD (`d1ec846`)
+
+- Independent Sol reproduced the remaining blocker with valid quoted-key documents. At 48 kHz / 128,
+  engine validation succeeds but offline creation refuses before compile; at 96 kHz / 127,
+  validation itself falsely reports `host.session.shape` because its fallback prepare shape cannot
+  match the document. Raw source-rate mismatch also cannot meet the early-ordering ruling: it is
+  typed correctly only after one `WebAssembly.compile` call, while typed `SessionPlan` inputs remain
+  correctly pre-compilation.
+- The reviewer found no second blocker. It independently confirmed canonical raw 48/96 maps and
+  native-pinned digests, the RF64 nonzero region/native comparison, RF64 parser parity, Node-only
+  sweep integration, effect-specific tap typing, generated prepare writes, 10/10 session-map red
+  mutations, 5/5 E6-E10a red predicates, rebuilt artifact/provenance coupling, authorized frozen
+  host changes only, and the recorded 96/96/fmt/clippy owner bar. Attempt 2 therefore remains HOLD
+  solely on the engine-owned pre-prepare shape dependency.
