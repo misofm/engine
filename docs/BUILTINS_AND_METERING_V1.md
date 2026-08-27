@@ -87,6 +87,73 @@ A session that asks for no observation capacity allocates none of it, renders by
 and reports `observation_retained_bytes == 0` — walked over the built runtime, not derived from the
 request.
 
+## Solo in place (issue #210 phase 1)
+
+Solo is **console state, composed at command admission, with no render-plane code at all**. The
+strip already carries a per-lane declicked gate whose target is `0.0` or the lane's fader gain, fed
+by a bounded per-track queue of mute records. Solo-in-place adds a state machine above that queue —
+`ConsoleSoloState` in `miso-engine-host-core` — which composes
+
+```
+effective_mute(track, lane) = user_mute(track, lane) || (any_solo_engaged && !this_track_soloed)
+```
+
+and emits the *existing* mute records into the *existing* queues. The render thread cannot tell a
+solo-derived mute from a user mute, so every property the mute path already has is inherited
+whole: allocation-free admission, no cross-lane audio coupling (the `||` is computed over booleans
+on the control plane and never from audio), the per-sample D11 linear declick with the caller's own
+`smoothing_samples`, and the all-or-nothing admission transaction.
+
+**User mute and solo are separate states and neither overwrites the other.** That is the hardware
+semantics, and it is what makes snapshot and restore correct by construction: muting a soloed strip
+silences it, and clearing solo restores exactly the mutes the user had — *per lane*, because a
+lane's mute is a lane's mute and one record carries one bool. The host keeps a mirror of user-mute
+intent, initialized at preparation from the session's baked `fader.left_mute` / `fader.right_mute`,
+because once solo exists the render side's flag holds the *effective* mute and there is no readback
+of it.
+
+Two rules of the admission path are load-bearing rather than incidental:
+
+- **One coalesced net emission per submission.** Solo records stage nothing as they are read. The
+  whole batch's state changes are applied first, and the difference between the composed effective
+  mute and what the render plane was last told is staged once, at the end. Fanning out per command
+  would put a gate record per track on the wire *per transition*, which a batch of alternating
+  toggles turns into an overflow rather than a gesture.
+- **Never a redundant record.** A lane whose effective mute did not change is not re-muted. The
+  fader stage retargets unconditionally, so re-muting an already-*settled* muted lane with a
+  nonzero window re-enters the ramp kernel — which multiplies by the current gain — instead of the
+  settled kernel, which fills the plane. For a negative input that is the difference between an
+  exact `+0.0` and a `-0.0`, and it is digest visible.
+
+### Ruling D1 — solo is not persisted in Session V1
+
+**Solo is monitoring state, not mix state, and no session key carries it.** A session reloads with
+every solo bit clear, and an offline or stem render of a session can never come out soloed — the
+reference PCM runner renders a session with no command stream at all, so a persisted solo bit would
+silence stems that the session, read as a document, says are audible.
+
+This does not violate the standing "protocol mutations update the typed session model and must be
+snapshot-able" law, because solo deliberately does not mutate the session model — exactly as live
+fader, pan, mute and effect-parameter moves already do not. Live console state is rebuilt from the
+session on reload and is never written back.
+
+Persisted solo-safe or monitor-scene semantics, if the product ever wants them, are a session-V2
+monitor-scene concept and not a V1 key. Nothing here forecloses that.
+
+### Metering and observation while soloed
+
+The code is unchanged; the semantics are worth stating because a console user will ask.
+
+The gate applies at the fader, so taps at `input`, `post_input_builtins`, `post_simd1`,
+`post_dynamic` and `post_simd2_pre_fader` keep reading the **un-gated** signal — input and
+pre-fader metering survives a solo, which is console-correct and is what makes gain-riding a
+silenced strip possible. Taps at `post_fader` and `post_matrix`, and everything downstream of them
+(submixes, outputs, the designated master's peak and gain-reduction rows), read the **gated** mix.
+
+A gain-reduction tap on a strip that solo has silenced falls toward zero reduction, because its
+effects are seeing silence. That is the true state of that signal path, not an artifact of the
+observation surface.
+
 ## Current evidence status
 
 The machine-qualified fixture corpus covers the declared filter, gain, matrix, graph-tap, meter,

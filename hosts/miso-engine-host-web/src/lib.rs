@@ -146,6 +146,19 @@ pub const COMMAND_OBSERVE_UNSUBSCRIBE: u32 = 8;
 /// record, `domain` for a `values[0]` outside `{0.0, 1.0}` (exactly as `mute` does),
 /// `unknownTrack`, `backpressure` and `wrongState`.
 pub const COMMAND_SOLO: u32 = 9;
+// Issue #210's design proposed *reserving* kind 12 for `soloMode` (0 = SIP, 1 = PFL) here, so
+// phase 5 would not have to renumber. It cannot be done, and the reason is a gate rather than a
+// preference: `scripts/check-command-kind-vocabulary.py` requires the Rust constants to be
+// contiguous from 1 and requires every other spelling -- the decode whitelist, the host JS set,
+// the `.d.ts` enum, the metadata generator's rows and the shipped JSON, whose row *position*
+// stands for its value -- to be that same list. A declared 12 with 10 and 11 absent is a gap in
+// the authority; a declared 12 with nothing decoding it is a kind no caller can send. Either is
+// red, and correctly so.
+//
+// So kinds are allocated when they ship, in the order they ship, and nothing is renumbered by a
+// later phase: 9 is spent here, and `soloMode` takes whatever the next unclaimed value is when
+// phase 5 threads it through all seven spellings. Recorded so the design's reservation is not
+// read as a missing deliverable.
 
 /// The submission was admitted whole.
 pub const COMMAND_REASON_NONE: u32 = 0;
