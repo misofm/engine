@@ -180,7 +180,7 @@ final handoff names exact commits, gate counts/digests, unresolved findings, and
   A separate 127-frame-quantum mutation also passed all four stages, causing removal of an invented
   power-of-two SDK restriction. The >=40-document E3/E4 corpus remains the next tranche.
 
-### Phase 1 E5 specification blocker (owner decision required)
+### Phase 1 E5 oracle amendment (coordinator-approved)
 
 - The verified E5 text requires each forced outside-effect-domain TOML value to fail the real
   session validator at stage 2 or 3 with the corresponding effect leaf. The current validator does
@@ -191,7 +191,10 @@ final handoff names exact commits, gate counts/digests, unresolved findings, and
   metadata maximum (`20.000002`, maximum `20.0`) was accepted with PASS at all four validator
   stages. This agrees with `docs/SESSION_SCHEMA_V1.md`, which assigns native descriptor/effect
   validity to issue 011 rather than the base session compiler.
-- No E5 gate or Phase 1 PASS is claimed. The smallest implementation-only alternative is to use the
-  full engine/WebAssembly compile pipeline as E5's engine-truth oracle; the literal issue contract
-  instead requires an engine-side validator-stage expansion. Either changes a verified claim or
-  expands engine scope, so work stopped for owner direction before any corpus code was written.
+- Coordinator comment `5435519665` approves a domain-owner split. E5a keeps the four-stage CLI as
+  oracle for schema/model/builtins domains. E5b uses a fresh zero-import Wasm instance through the
+  full prepare/compile/diagnostic-buffer path for effect-parameter domains. The primary local gate
+  still covers every catalog domain in both groups.
+- The ratio probe is now a required asymmetric red witness: `20.000002` must PASS the four-stage CLI
+  and fail the Wasm compile oracle with `effect.parameter.domain` at the effect leaf. The SDK does
+  not extend the CLI; remote successor #211 owns its future fifth effect-preparation stage.
