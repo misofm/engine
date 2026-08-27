@@ -179,3 +179,19 @@ final handoff names exact commits, gate counts/digests, unresolved findings, and
   1,993-byte builder document at all four stages and its `--canonical` stdout was byte-identical.
   A separate 127-frame-quantum mutation also passed all four stages, causing removal of an invented
   power-of-two SDK restriction. The >=40-document E3/E4 corpus remains the next tranche.
+
+### Phase 1 E5 specification blocker (owner decision required)
+
+- The verified E5 text requires each forced outside-effect-domain TOML value to fail the real
+  session validator at stage 2 or 3 with the corresponding effect leaf. The current validator does
+  not perform that operation: stages 2/3 own schema/unit-local validation and resource/canonical
+  compilation, while stage 4 prepares builtins only. Native descriptor validation lives separately
+  in `prepare_native_session_effects` and is not called by the validator.
+- Concrete serialized probe: changing compressor `ratio` from `2.0` to the next `f32` above its
+  metadata maximum (`20.000002`, maximum `20.0`) was accepted with PASS at all four validator
+  stages. This agrees with `docs/SESSION_SCHEMA_V1.md`, which assigns native descriptor/effect
+  validity to issue 011 rather than the base session compiler.
+- No E5 gate or Phase 1 PASS is claimed. The smallest implementation-only alternative is to use the
+  full engine/WebAssembly compile pipeline as E5's engine-truth oracle; the literal issue contract
+  instead requires an engine-side validator-stage expansion. Either changes a verified claim or
+  expands engine scope, so work stopped for owner direction before any corpus code was written.
