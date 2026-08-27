@@ -2810,6 +2810,74 @@ fn cohort_runs(
 mod tests {
     use super::*;
 
+    /// The node's cached witness and the line's own answer are the same fact (#210 phase 2).
+    ///
+    /// `NodeKind::channel_symmetry` is asked without the delay lines in hand, so the lowering
+    /// caches the verdict on the variant. This is what keeps the cache and the rings from drifting.
+    #[test]
+    fn the_node_witness_agrees_with_its_line() {
+        for (left, right) in [(0_usize, 0_usize), (1, 1), (480, 480), (0, 1), (480, 481)] {
+            let line = TrackDelayLine::new(left, right);
+            assert_eq!(line.lane_samples(), [left, right]);
+            assert_eq!(line.channels_agree(), left == right);
+            let kind = NodeKind::TrackDelay {
+                line: 0,
+                channels_agree: line.channels_agree(),
+            };
+            assert_eq!(
+                kind.channel_symmetry().eligible(),
+                left == right,
+                "the op witness for {left}/{right}"
+            );
+        }
+    }
+
+    /// A lane's ring is exactly a pure `N`-sample shift, whatever the block partitioning.
+    ///
+    /// Blocks shorter than, equal to and longer than the ring, and a ring of one -- the three cases
+    /// `delay_lane`'s take loop exists for. FP-free by construction: the kernel swaps words, so
+    /// this is an exact equality over a sequence that includes signed zeros and a NaN, none of
+    /// which a ring is allowed to alter.
+    #[test]
+    fn a_delay_line_is_a_pure_shift_at_every_partitioning() {
+        for delay in [1_usize, 3, 8, 32] {
+            for block in [1_usize, 4, 8, 31, 64] {
+                let source: Vec<f32> = (0..128)
+                    .map(|index| match index {
+                        5 => -0.0,
+                        9 => f32::NAN,
+                        other => other as f32 + 0.5,
+                    })
+                    .collect();
+                let mut line = TrackDelayLine::new(delay, delay);
+                let mut got = Vec::new();
+                for chunk in source.chunks(block) {
+                    let mut left = chunk.to_vec();
+                    let mut right = chunk.to_vec();
+                    line.process(&mut left, &mut right);
+                    assert_eq!(
+                        left.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                        right.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                        "equal-length lanes must stay in step"
+                    );
+                    got.extend(left);
+                }
+                for (index, value) in got.iter().enumerate() {
+                    let want = if index < delay {
+                        0.0_f32
+                    } else {
+                        source[index - delay]
+                    };
+                    assert_eq!(
+                        value.to_bits(),
+                        want.to_bits(),
+                        "delay {delay}, block {block}, sample {index}"
+                    );
+                }
+            }
+        }
+    }
+
     /// Deterministic 32-bit LCG, frozen here so the corpora do not depend on host RNG state.
     fn lcg(state: &mut u32) -> f32 {
         *state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
