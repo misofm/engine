@@ -6,20 +6,20 @@
       "sha256": "357876a26e833f0bb91e9aeb568ebb7734dfdbd6ce6d0d47c17b5e8f4210c58e"
     },
     "miso-engine-v2-audio-worklet-host.d.ts": {
-      "bytes": 28035,
-      "sha256": "e7ed673603f15be4c455bffc5710c4a48e9f6590c514360c8bda09c7415eca48"
+      "bytes": 30177,
+      "sha256": "357696a3bfc93b223cbdc74673fe0d523b3f4da0ffe4f6b834077a38066145d6"
     },
     "miso-engine-v2-audio-worklet-host.js": {
-      "bytes": 39725,
-      "sha256": "64b49c055d7f32f3b4922ca62f96c9d0101d61e4c515aa244bdc6a34c856e9db"
+      "bytes": 40754,
+      "sha256": "5123ce471362002937ea7f46a4ca8a9b4540e22f4e66081b858b93ce413d1b3f"
     },
     "miso-engine-v2-audio-worklet.js": {
-      "bytes": 37822,
-      "sha256": "19160eb8b07a418d2714cdc0c3098fc283bd8407811333c8a6d1f312517545f2"
+      "bytes": 41142,
+      "sha256": "0994920bc69587f90423b062feabfb744636682d5d3c57dae499869469217c8f"
     },
     "miso-engine-v2-audio-worklet.simd128.wasm": {
-      "bytes": 2494615,
-      "sha256": "99c08301577dc27799bee3c13fe74dfee87db36b0b54864d97c92935666368d6"
+      "bytes": 2496015,
+      "sha256": "06b7846aa4e74248f25da7014fd00ffe99e0726c05a4590dd7dcbfbf00d8d66a"
     },
     "miso-engine-v2-parameter-metadata.json": {
       "bytes": 51952,
@@ -30,6 +30,6 @@
   "builtWith": "scripts/build-sdk.sh",
   "schema": "miso.web.provenance.v1",
   "sourceRepository": "misofm/engine-v2",
-  "sourceRevision": "c77a0d0ef8f978988b7fe988cff5a9c264c3542d",
-  "sourceSubject": "Independently sort SDK artifact gate oracle"
+  "sourceRevision": "c6a9e1c5dbb856ffc34fa3b5cd585a05fd4c30f8",
+  "sourceSubject": "feat(host-web): source introspection on the browser ABI (#207) (#219)"
 }

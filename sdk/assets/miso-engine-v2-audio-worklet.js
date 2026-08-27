@@ -83,6 +83,20 @@ function validU64(value) {
   return typeof value === "bigint" && value >= 0n && value <= 0xffffffffn;
 }
 
+// Issue #207: the whole `u64` range, not the configuration words' 32-bit window above. A source
+// region is declared in sample frames and the introspection queries return it as a `u64`, so the
+// check that reads one back has to admit the range the ABI actually carries.
+//
+// The lower bound is not decoration. These are the first exports whose *result* is a Wasm `i64`,
+// and the JS API converts an `i64` result to a BigInt by its **signed** interpretation: a returned
+// value at or above `2 ** 63` arrives negative. At 48 kHz that is six million years of frames, so
+// it cannot arise from a real session -- but it is exactly what a mis-wired export would produce,
+// and the `>= 0n` leg is what turns that into a refused initialization instead of a negative
+// region a consumer would carry.
+function u64(value) {
+  return typeof value === "bigint" && value >= 0n && value <= 0xffffffffffffffffn;
+}
+
 function writeBoundedUtf8(value, memoryBuffer, pointer, capacity) {
   let byteLength = 0;
   for (let index = 0; index < value.length; index += 1) {
@@ -334,6 +348,38 @@ class MisoEngineV2AudioWorkletProcessor extends AudioWorkletProcessor {
       this.trackIds.push(id);
     }
 
+    // Issue #207: source introspection, read once here for the same reason the track identities
+    // are -- the construction path is the one that may allocate, and `process()` never touches
+    // this. A headless consumer of the session map cannot otherwise learn which sources a compiled
+    // session declares, how many channels each carries, or which frames it is waiting for; the
+    // ABI exposed track discovery and nothing at all about sources.
+    //
+    // Every read is checked against something the engine already guarantees, so a mis-wired export
+    // fails initialization here rather than surfacing as a plausible-looking wrong number:
+    // compilation refuses a zero channel count, a zero region length and a source rate that is not
+    // the session rate, and preparation refuses a channel count above `maximumSourceChannels`.
+    this.sourceCount = this.exports.miso_engine_web_v1_source_count(this.handle);
+    if (!u32(this.sourceCount)) return false;
+    this.sources = [];
+    for (let index = 0; index < this.sourceCount; index += 1) {
+      const length = this.exports.miso_engine_web_v1_source_id(this.handle, index);
+      if (!u32(length) || length === 0 || length > this.sourceIdCapacity) return false;
+      const bytes = new Uint8Array(this.memoryBuffer, this.sourceIdPointer, length);
+      let id = "";
+      for (let byte = 0; byte < length; byte += 1) {
+        if (bytes[byte] > 0x7f) return false;
+        id += String.fromCharCode(bytes[byte]);
+      }
+      const channels = this.exports.miso_engine_web_v1_source_channels(this.handle, index);
+      const sampleRateHz = this.exports.miso_engine_web_v1_source_sample_rate(this.handle, index);
+      const frames = this.exports.miso_engine_web_v1_source_frames(this.handle, index);
+      const startFrame = this.exports.miso_engine_web_v1_source_start_frame(this.handle, index);
+      if (!u32(channels) || channels === 0 || channels > this.maximumSourceChannels
+          || sampleRateHz !== this.sampleRateHz
+          || !u64(frames) || frames === 0n || !u64(startFrame)) return false;
+      this.sources.push({ id, channels, sampleRateHz, startFrame, frames });
+    }
+
     const framePointer = this.exports.miso_engine_web_v1_buffer_ptr(
       this.handle,
       BUFFER_METER_FRAME,
@@ -582,6 +628,13 @@ class MisoEngineV2AudioWorkletProcessor extends AudioWorkletProcessor {
         requestId: message.requestId,
         result: RESULT_OK,
         tracks: [...this.trackIds],
+        sources: this.sources.map((source) => ({
+          id: source.id,
+          channels: source.channels,
+          sampleRateHz: source.sampleRateHz,
+          startFrame: source.startFrame,
+          frames: source.frames,
+        })),
         metersAttached: this.metersAttached === true,
       });
     } else if (message?.tag === "miso.status.v1"

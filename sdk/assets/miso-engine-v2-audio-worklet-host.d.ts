@@ -264,13 +264,46 @@ export interface MisoCommandAckV1 {
   readonly records: Uint8Array;
 }
 
-/// The compiled session's addressing authority (issue 137 D1).
+/// One compiled source, as the engine declares it (issue 207).
+///
+/// Named without a version suffix on purpose: issue 215 removes all version scoping at this
+/// sprint's close, and a type minted now has nothing pinned against it to break.
+///
+/// This is what the *compiled* session knows about a source -- not what a decoder will eventually
+/// find in a file. `frames` and `startFrame` are the declared region, and preparation positioned
+/// the source's ring at `startFrame`: a driver that submitted from `0` into a session whose region
+/// starts later would be feeding frames the ring is not waiting for.
+export interface MisoSessionSource {
+  /// Stable source ID -- the string `submitSource`/`seekSource` address the source by.
+  readonly id: string;
+  /// Declared source channels. Always at least one, and never above `maximumSourceChannels`.
+  readonly channels: number;
+  /// Declared native source rate in hertz.
+  ///
+  /// Always the session rate for a compiled session: V1 has no sample-rate conversion, so
+  /// preparation refuses a source that declares anything else. It is reported because the session
+  /// declares it per source, so a consumer reads the declaration rather than assuming the rule.
+  readonly sampleRateHz: number;
+  /// First source sample frame of the declared region. Zero is an ordinary value.
+  readonly startFrame: bigint;
+  /// Length of the declared region in source sample frames. Always at least one.
+  readonly frames: bigint;
+}
+
+/// The compiled session's addressing authority (issue 137 D1, extended by issue 207).
 export interface MisoSessionMapV1 {
   readonly tag: "miso.sessionmap.v1";
   readonly requestId: number;
   readonly result: number;
   /// Canonical normalized track order. `trackIndex` indexes this.
   readonly tracks: string[];
+  /// Canonical normalized source order (issue 207).
+  ///
+  /// The engine's own order: session compilation sorts `sources` by stable ID, and the queries
+  /// behind this list read that sorted model rather than a copy of it. This is what makes a
+  /// session compiled from raw TOML drivable -- the shapes a render loop must feed are here, and
+  /// there is nowhere else in the browser ABI to learn them.
+  readonly sources: MisoSessionSource[];
   /// Whether preparation bound meter observers at all.
   readonly metersAttached: boolean;
 }
@@ -543,7 +576,10 @@ export interface MisoAudioWorkletHost {
   /// `MisoMeterFrameV1.trackGrDb` array structurally cannot: which tracks have an observed effect
   /// at all. See `MisoObservationAckV1` for what a refusal settles as.
   observe(request: MisoObservationRequestV1): Promise<MisoObservationAckV1>;
-  /// Read the canonical track order that `trackIndex` addresses (issue 137 D1).
+  /// Read the compiled session's canonical track and source order (issues 137 D1, 207).
+  ///
+  /// `tracks` is what `trackIndex` addresses; `sources` is what `submitSource`/`seekSource` feed,
+  /// with the channel count and region every submission has to agree with.
   sessionMap(): Promise<MisoSessionMapV1>;
   /// Take or release the decimated meter lease (issue 137 D2).
   meters(
