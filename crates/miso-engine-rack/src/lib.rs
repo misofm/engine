@@ -1010,6 +1010,7 @@ impl BankChain {
             }
         }
         counters
+    }
 
     /// Hand `lanes`' scatter to [`BankMembers::fold_plane`] instead of writing their planes.
     ///
