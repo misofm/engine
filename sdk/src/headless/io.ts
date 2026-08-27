@@ -8,7 +8,7 @@ function copyBytes(bytes: Uint8Array): Uint8Array<ArrayBuffer> {
 
 /** Read a package/file/HTTP asset without adding a runtime dependency. */
 export async function readBytes(input: string | URL): Promise<Uint8Array> {
-  const url = input instanceof URL ? input : undefined;
+  const url = input instanceof URL ? input : (typeof input === "string" && /^[a-z][a-z0-9+.-]*:/i.test(input) ? new URL(input) : undefined);
   if (url && url.protocol !== "file:") {
     const response = await fetch(url);
     if (!response.ok) throw new MisoOfflineError(`Asset fetch failed with HTTP ${response.status}: ${url.href}`, "asset");

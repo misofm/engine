@@ -330,3 +330,34 @@ final handoff names exact commits, gate counts/digests, unresolved findings, and
   `cef2b4282bb8478687b4dec5f764a9f04bc64fc7a35d3a8edd5b398a80494771`, exactly matching the
   independently pinned native manifest. Real `tsc --noEmit` and diff hygiene pass. Phase 2 eval
   gates, deliberate red mutations, Bun coverage, 96 kHz cross-oracle, and full gates remain pending.
+
+### Phase 2 tranche B: E6-E10a Node/Bun gate (pending checkpoint)
+
+- `check-sdk-headless.sh` builds the real native C-ABI/WAV runner once, emits the TypeScript SDK,
+  and runs the same eval file under Node 22.23.2 and Bun 1.4.0. The new sweep row invokes its
+  `--self-test`; shell syntax was checked immediately after each edit.
+- Red-before-green harness evidence was preserved: the first run looked for an underscored instead
+  of Cargo's documented hyphenated runner binary; the next used an empty graph as a Wasm-valid
+  validation fixture; E8 initially measured a deliberately cancelling pan fixture; and E6's first
+  1,024-frame fixture ended before the compressor/EQ/limiter chain's fixed latency. Each failure was
+  corrected at the fixture or harness boundary without weakening the runtime contract.
+- E6 renders a non-silent 4,096-frame session containing compressor, parametric EQ, true-peak
+  limiter, two generated stereo WAV sources, and Session V1 automation twice in-process and once in
+  a fresh process. Node and Bun agree on SHA-256
+  `67490eb8c623c7e6797ee88f46b777d4fe6c7da2b2873ab553871fd5019d0f43`.
+- E7 compares complete bytes from SDK `renderToFile(..., {format:"f32le-planar"})` with the real
+  native runner: 48 kHz is
+  `cef2b4282bb8478687b4dec5f764a9f04bc64fc7a35d3a8edd5b398a80494771`; 96 kHz is
+  `dcb0de625cb09c064ea424dff6b1eca01896ba1e7ee602c72dc7454ad9b74f16`. Both also equal the
+  independent repository manifest pins under both JavaScript runtimes.
+- E8 proves first changed sample = `ack.appliedAtSample` = `2 * 128 = 256`. E9 returns, in order,
+  `backpressure`, `unknownTrack`, `unknownParameter`, `unknownTap`, `observationUnbound`, and a final
+  successful `none`, with the overfilled transaction admitting zero records. E10a flips one Wasm
+  byte and proves the typed error names asset/expected/actual while an instrumented Wasm compile
+  counter remains zero.
+- Self-test mutates one E6 digest, one E7 output byte, the E8 acknowledgement, one E9 reason, and the
+  E10a ordering count; all five mutations turn their eval predicate red under both runtimes. Extra
+  focused probes cover fresh-instance diagnostics, PCM16/24 plus 32f/RF64 WAV decode, exact
+  partial-quantum retention, early rate mismatch, and compile-time exact headless track/effect/
+  parameter access. Generated/core/builder self-tests remain green. Full sweep/fmt/clippy and
+  independent Phase 2 review remain pending.

@@ -124,6 +124,13 @@ export interface CommandAck {
   readonly admitted: number;
   readonly appliedAtSample: bigint;
   readonly explain: string;
+  readonly raw: Readonly<{
+    result: number;
+    reason: number;
+    rejectedIndex: number;
+    admitted: number;
+    appliedAtSample: bigint;
+  }>;
 }
 
 export type CatalogEffect = EffectDescriptor;

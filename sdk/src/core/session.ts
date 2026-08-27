@@ -71,6 +71,7 @@ export interface PlacedEffect<D extends EffectDecl = EffectDecl> {
   readonly effectId: D["effectId"];
   readonly rack: Rack;
   readonly rackIndex: number;
+  readonly declaration: D;
 }
 
 type PlacedEffectTuple<Effects extends readonly EffectDecl[]> = Readonly<{
@@ -391,6 +392,7 @@ function summarizeBuilderTracks<Tracks extends SessionShape>(state: BuilderState
       effectId: declaration.effectId,
       rack,
       rackIndex,
+      declaration,
     })));
     return freeze({ id, effects: freeze(effects) });
   });
@@ -406,6 +408,16 @@ function summarizeJsonTracks(json: SessionJson): readonly SessionPlanTrack<Sessi
         effectId: String((effect.identity as JsonRecord).effect_id) as EffectId,
         rack,
         rackIndex,
+        declaration: freeze({
+          effectId: String((effect.identity as JsonRecord).effect_id) as EffectId,
+          parameters: freeze({}),
+          options: freeze({
+            bypass: Boolean(effect.bypass),
+            quality: "normal" as const,
+            linkMode: String(effect.link_mode) as EffectDecl["options"]["linkMode"],
+            channel: "both" as const,
+          }),
+        }),
       }));
     });
     return freeze({ id: String(track.id), effects: freeze(effects) });

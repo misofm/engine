@@ -28,9 +28,13 @@ async function checkProject() {
   await requireCompiler();
   const result = compile(["--project", "tsconfig.json", "--noEmit"]);
   assert.equal(result.status, 0, `tsc --noEmit failed:\n${result.stdout}${result.stderr}`);
-  const fixture = resolve(sdkRoot, "test", "builder-types.ts");
+  const fixtures = [
+    resolve(sdkRoot, "src", "headless", "node-shims.d.ts"),
+    resolve(sdkRoot, "test", "builder-types.ts"),
+    resolve(sdkRoot, "test", "headless-types.ts"),
+  ];
   const tupleResult = compile([
-    "--ignoreConfig", "--noEmit", "--strict", "--target", "ES2022", "--module", "NodeNext", "--moduleResolution", "NodeNext", fixture,
+    "--ignoreConfig", "--noEmit", "--strict", "--target", "ES2022", "--module", "NodeNext", "--moduleResolution", "NodeNext", ...fixtures,
   ]);
   assert.equal(tupleResult.status, 0, `tuple index fixture failed:\n${tupleResult.stdout}${tupleResult.stderr}`);
 }

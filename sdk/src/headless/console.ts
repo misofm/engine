@@ -170,10 +170,8 @@ export class OfflineConsole<S extends SessionShape> implements EngineConsole<S> 
     const trackIndex = this.trackIndexes.get(id);
     if (trackIndex === undefined) throw new MisoCommandError("Unknown track", `tracks.${id}`);
     const summary = this.plan?.tracks.find((track) => track.id === id);
-    const declarations = (summary ? (this.plan as SessionPlan<S>) : undefined);
     const effects = summary?.effects ?? [];
-    const declared = effects.map((placed) => Object.freeze({ effectId: placed.effectId, parameters: Object.freeze({}), options: Object.freeze({ bypass: false, quality: "normal", linkMode: "dual_mono", channel: "both" }) })) as unknown as S[Id];
-    void declarations;
+    const declared = effects.map((placed) => placed.declaration) as unknown as S[Id];
     return new TrackControl(this as unknown as OfflineConsole<SessionShape>, trackIndex, effects, declared);
   }
 
@@ -192,13 +190,21 @@ export class OfflineConsole<S extends SessionShape> implements EngineConsole<S> 
     if (view.getUint32(reportOffsets.structSize, true) !== ABI_LAYOUT.structures.commandReport.bytes
         || view.getUint32(reportOffsets.abiVersion, true) !== ABI_LAYOUT.abiVersion) throw new MisoOfflineError("Invalid command report", "lifecycle", 255);
     const reason = reasonByValue.get(view.getUint32(reportOffsets.reason, true)) ?? "malformed";
-    const ack: CommandAck = Object.freeze({
-      ok: result === 0 && reason === "none",
-      reason,
+    const raw = Object.freeze({
+      result,
+      reason: view.getUint32(reportOffsets.reason, true),
       rejectedIndex: view.getUint32(reportOffsets.rejectedIndex, true),
       admitted: view.getUint32(reportOffsets.admitted, true),
       appliedAtSample: view.getBigUint64(reportOffsets.appliedAtSample, true),
+    });
+    const ack: CommandAck = Object.freeze({
+      ok: result === 0 && reason === "none",
+      reason,
+      rejectedIndex: raw.rejectedIndex,
+      admitted: raw.admitted,
+      appliedAtSample: raw.appliedAtSample,
       explain: reason === "none" ? "The complete command transaction was admitted for the next render block." : `The engine refused the command transaction: ${reason}.`,
+      raw,
     });
     return ack;
   }

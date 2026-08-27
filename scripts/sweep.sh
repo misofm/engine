@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# scripts/sweep.sh -- the hermetic check/test sweep. 94 explicit rows.
+# scripts/sweep.sh -- the hermetic check/test sweep. 95 explicit rows.
 #
 # Why this exists: the repo has 91 check-*/test-* scripts and ci.yml names 36 of them, so 52 gates
 # had no committed runner at all -- they were reachable only by knowing they existed. Every row
@@ -163,6 +163,7 @@ row scripts/test-effect-interchange-benchmark.sh
 # ---- tier 3: build-bound, ten seconds and up -----------------------------------------------
 row scripts/check-wasm-realtime-atomics.sh
 row scripts/check-effect-descriptor-v1.sh
+row scripts/check-sdk-headless.sh --self-test
 row scripts/check-parametric-eq-targets.sh
 row scripts/check-builtins-fixtures.sh
 row scripts/check-protocol-benchmark-wasm-parity.sh

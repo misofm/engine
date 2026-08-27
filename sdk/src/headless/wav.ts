@@ -1,6 +1,6 @@
 import { MisoSourceError } from "./errors.js";
 
-type WaveEncoding = "pcm8" | "pcm16" | "pcm24" | "pcm32" | "float32" | "float64";
+type WaveEncoding = "pcm16" | "pcm24" | "float32";
 
 export interface WaveData {
   readonly bytes: Uint8Array;
@@ -36,13 +36,10 @@ function safeNumber(value: bigint, sourceId: string, path: string): number {
 function encoding(tagValue: number, bits: number, guid: string | undefined, sourceId: string): WaveEncoding {
   const format = tagValue === 0xfffe ? (guid === PCM_GUID ? 1 : guid === FLOAT_GUID ? 3 : 0) : tagValue;
   if (format === 1) {
-    if (bits === 8) return "pcm8";
     if (bits === 16) return "pcm16";
     if (bits === 24) return "pcm24";
-    if (bits === 32) return "pcm32";
   }
   if (format === 3 && bits === 32) return "float32";
-  if (format === 3 && bits === 64) return "float64";
   return sourceError(sourceId, "Unsupported WAV scalar format", "wav.fmt");
 }
 
@@ -83,7 +80,7 @@ export function parseWave(bytes: Uint8Array, sourceId = "wav"): WaveData {
       const bits = view.getUint16(payload + 14, true);
       const guid = size === 40 ? hex(bytes.subarray(payload + 24, payload + 40)) : undefined;
       const scalar = encoding(tagValue, bits, guid, sourceId);
-      const bytesPerSample = scalar === "pcm8" ? 1 : scalar === "pcm16" ? 2 : scalar === "pcm24" ? 3 : scalar === "float64" ? 8 : 4;
+      const bytesPerSample = scalar === "pcm16" ? 2 : scalar === "pcm24" ? 3 : 4;
       if (channels === 0 || sampleRateHz === 0 || blockAlign !== channels * bytesPerSample || byteRate !== sampleRateHz * blockAlign) {
         sourceError(sourceId, "Inconsistent WAV fmt fields", "wav.fmt");
       }
@@ -122,17 +119,9 @@ export function decodeWave(wave: WaveData, startFrame: number, frames: number, s
     for (let channel = 0; channel < wave.channels; channel += 1) {
       let value: number;
       switch (wave.encoding) {
-        case "pcm8": value = (view.getUint8(base + channel) - 128) * 0.0078125; break;
         case "pcm16": value = view.getInt16(base + channel * 2, true) * (1 / 32_768); break;
         case "pcm24": value = Math.fround(Math.fround(signed24(view, base + channel * 3)) * Math.fround(1 / 8_388_608)); break;
-        case "pcm32": value = Math.fround(Math.fround(view.getInt32(base + channel * 4, true)) * Math.fround(1 / 2_147_483_648)); break;
         case "float32": value = finiteNormalF32(view, base + channel * 4); break;
-        case "float64": {
-          const input = view.getFloat64(base + channel * 8, true);
-          const rounded = Math.fround(input);
-          value = Number.isFinite(input) && (input === 0 || Math.abs(input) >= Number.MIN_VALUE) && Number.isFinite(rounded) && (rounded === 0 ? input === 0 : Math.abs(rounded) >= 1.1754943508222875e-38) ? rounded : 0;
-          break;
-        }
       }
       output[channel][frame] = value;
     }
