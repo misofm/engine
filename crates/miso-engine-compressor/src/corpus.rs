@@ -34,7 +34,7 @@ use miso_engine_effect_contract::LinkMode;
 use miso_engine_lane::Lane;
 
 use crate::design::{MAX_WIDTH, PARAMETER_COUNT, SMOOTHING_SAMPLES};
-use crate::kernel::{Channel, Detector, process_block};
+use crate::kernel::{Channel, Detector, Staged, process_block};
 
 /// Independent single-track signals in a case. A multiple of the widest backend.
 pub const LANES: usize = 8;
@@ -179,6 +179,7 @@ pub fn run_case<L: Lane>(case: usize, out: &mut [u32]) {
         }
         let mut left_channel = Channel::<L>::new(&defaults, RING_LENGTH, SAMPLE_RATE);
         let mut right_channel = Channel::<L>::new(&defaults, RING_LENGTH, SAMPLE_RATE);
+        let mut staged = Staged::<L>::new();
 
         let inputs: Vec<([f32; FRAMES], [f32; FRAMES])> = (0..width)
             .map(|lane| lane_input(base + lane, case))
@@ -216,6 +217,7 @@ pub fn run_case<L: Lane>(case: usize, out: &mut [u32]) {
                 false,
                 SAMPLE_RATE,
                 (&mut left_channel, &mut right_channel),
+                &mut staged,
             );
             for step in 0..frames {
                 for lane in 0..width {

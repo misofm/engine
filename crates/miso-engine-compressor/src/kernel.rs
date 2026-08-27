@@ -335,6 +335,7 @@ pub(crate) fn process_block<L: Lane>(
     bypass: bool,
     sample_rate: u32,
     channels: (&mut Channel<L>, &mut Channel<L>),
+    staged: &mut Staged<L>,
 ) {
     debug_assert_eq!(left.len(), frames * L::WIDTH);
     debug_assert_eq!(right.len(), frames * L::WIDTH);
@@ -366,6 +367,12 @@ pub(crate) fn process_block<L: Lane>(
         // and the general per-frame body when they cannot. The two are bit-identical; which one
         // runs is a property of the lanes' lookahead alone (see `idle_frames_staged`).
         if segment_is_stageable(channel_left, channel_right, frames - ramping) {
+            let Staged {
+                taps_left,
+                taps_right,
+                target_left,
+                target_right,
+            } = staged;
             idle_frames_staged::<L>(
                 left,
                 right,
@@ -376,6 +383,10 @@ pub(crate) fn process_block<L: Lane>(
                 bypass,
                 channel_left,
                 channel_right,
+                taps_left,
+                taps_right,
+                target_left,
+                target_right,
             );
         } else {
             frames_loop::<L, false>(
@@ -490,9 +501,10 @@ fn frames_loop<L: Lane, const RAMPING: bool>(
 
 /// Longest idle segment [`idle_frames_staged`] will take in one visit.
 ///
-/// This is the bound on the staged body's scratch, which is stack: `2 * 128 * MAX_WIDTH` floats of
-/// taps plus `2 * 128` lane vectors of curve targets, 16 KiB at `W = 8` and 8.5 KiB at `W = 1`.
-/// Nothing is allocated on the render path (AGENTS.md, allocation-free render).
+/// This is the bound on the staged body's scratch, which lives in [`Staged`] and is allocated once
+/// at preparation: `2 * 128 * W` floats of taps plus `2 * 128` lane vectors of curve targets,
+/// 16 KiB at `W = 8` and 2.5 KiB at `W = 1`. Nothing is allocated on the render path (AGENTS.md,
+/// allocation-free render).
 ///
 /// The contract sets no ceiling on the prepared quantum, but 128 frames is the render quantum
 /// every launch host actually carries — the Web Audio render quantum, the console fixtures and the
@@ -502,6 +514,65 @@ fn frames_loop<L: Lane, const RAMPING: bool>(
 /// scratch already sits in L1, and strip-mining this body to 16, 32 or 64 frames measured slower
 /// on the kernel example at every one of the three sizes.
 const MAX_STAGED_FRAMES: usize = 128;
+
+/// The staged idle body's scratch, allocated once at preparation and reused by every block.
+///
+/// # Why this is not on the stack
+///
+/// It was, as four `[_; MAX_STAGED_FRAMES * MAX_WIDTH]` locals of [`idle_frames_staged`]. Rust has
+/// no safe way to name an uninitialised local, so those four arrays were zeroed on entry — four
+/// `memset` calls of 4 KiB each, once per bank per block, and every byte of them dead: `fill_taps`
+/// writes every slot of `taps[..len * W]` before the first read, and pass A writes `target[..len]`
+/// before passes B and C read it. The workspace denies `unsafe_code`, so `MaybeUninit` is not on
+/// the table; a buffer that is zeroed once at preparation and then only ever overwritten is the
+/// safe way to spend the zeroing once instead of once per block.
+///
+/// # Why this is not state
+///
+/// Nothing here survives a call. Every read of `taps` and `target` in [`idle_frames_staged`] is
+/// preceded, within the same call, by a write of the same slot; the buffers carry nothing from one
+/// block to the next, and reading them at any other moment observes only whatever the last staged
+/// segment happened to leave behind. So they are deliberately **not** part of [`Channel`]: the
+/// V1 payload layout in `state.rs` is a contract fixture of `24 + 2B` words per lane, and
+/// `snapshot_lane` and `commit_channel` name every one of `Channel`'s fields explicitly, so a
+/// fifth buffer on `Channel` would be a field the payload silently does not carry. They hang off
+/// `Instance` beside the two channels instead, where no snapshot, restore, `maximum_state` or
+/// reset path can reach them — `clear_state` has nothing to clear here, because there is nothing
+/// here a later block can observe.
+///
+/// # Size
+///
+/// `MAX_STAGED_FRAMES` is the kernel's own segment bound (see above), not a track count, and the
+/// width comes from `L::WIDTH` at preparation — there is no compiled maximum track count here.
+pub(crate) struct Staged<L: Lane> {
+    /// Left detector taps of one segment, frame major, `MAX_STAGED_FRAMES * L::WIDTH` samples.
+    taps_left: Box<[f32]>,
+    /// Right detector taps, same shape.
+    taps_right: Box<[f32]>,
+    /// Left curve target per frame, then the smoothed reduction pass B overwrites it with.
+    target_left: Box<[L]>,
+    /// Right curve target, same shape.
+    target_right: Box<[L]>,
+}
+
+impl<L: Lane> Staged<L> {
+    /// Allocates and zeroes the four buffers. Preparation only; never called on the render path.
+    pub(crate) fn new() -> Self {
+        let samples = MAX_STAGED_FRAMES * L::WIDTH;
+        Self {
+            taps_left: vec![0.0; samples].into_boxed_slice(),
+            taps_right: vec![0.0; samples].into_boxed_slice(),
+            target_left: vec![L::zero(); MAX_STAGED_FRAMES].into_boxed_slice(),
+            target_right: vec![L::zero(); MAX_STAGED_FRAMES].into_boxed_slice(),
+        }
+    }
+}
+
+impl<L: Lane> Default for Staged<L> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// Whether the staged idle body may take a segment of `len` frames.
 ///
@@ -561,8 +632,20 @@ fn segment_is_stageable<L: Lane>(
 /// is going to overwrite it, so the block buffer is exactly the right-sized scratch for it and
 /// carries no stack.
 ///
-/// Not `#[inline(always)]`: the segment is visited once per block, and keeping the scratch in this
-/// frame keeps it off the stack of blocks that take the per-frame body.
+/// Not `#[inline(always)]`: the segment is visited once per block, and a separate frame keeps the
+/// body's bookkeeping off the stack of blocks that take the per-frame body.
+///
+/// # Why the scratch arrives as four parameters and not as one `&mut Staged`
+///
+/// The four buffers used to be four locals of this function, so the optimiser knew they were four
+/// distinct allocas and could not alias. They now live in [`Staged`], where they are four `Box`
+/// pointers *inside* one struct: `&mut Staged` is `noalias`, but that covers the struct, not the
+/// four heap blocks it points at, so a single-parameter form leaves the three passes below
+/// reloading `taps` after every `target` store. Passed one by one they are four `noalias`
+/// reference parameters again. Measured on `examples/lane_sample_timing`, both forms otherwise
+/// identical: 7.03 ns/lane-sample here against 8.01 for the single-parameter form on the scalar
+/// instantiation, and no separation at all at `W = 8` (1.293 against 1.298), which is what a
+/// per-frame dependency stall looks like when it is amortised over eight lanes.
 #[allow(clippy::too_many_arguments)]
 fn idle_frames_staged<L: Lane>(
     left: &mut [f32],
@@ -574,6 +657,10 @@ fn idle_frames_staged<L: Lane>(
     bypass: bool,
     channel_left: &mut Channel<L>,
     channel_right: &mut Channel<L>,
+    taps_left: &mut [f32],
+    taps_right: &mut [f32],
+    target_left: &mut [L],
+    target_right: &mut [L],
 ) {
     let width = L::WIDTH;
     let ring_length = channel_left.ring_length as usize;
@@ -589,18 +676,31 @@ fn idle_frames_staged<L: Lane>(
     // the per-frame body: a rejected block clears one channel's state and not necessarily the
     // other's, so the two cursors can legitimately disagree on entry, and the frozen behaviour is
     // that the left one wins and both are left equal on exit.
+    //
+    // The scratch is `staged`, allocated at preparation: `fill_taps` writes every slot of
+    // `taps[..len * width]` it is about to be read at, so what the buffer held on entry — the
+    // previous block's segment — is never observed.
     let head = channel_left.cursor as usize;
-    let mut taps_left = [0.0_f32; MAX_STAGED_FRAMES * MAX_WIDTH];
-    let mut taps_right = [0.0_f32; MAX_STAGED_FRAMES * MAX_WIDTH];
-    fill_taps(channel_left, head, len, &mut taps_left);
-    fill_taps(channel_right, head, len, &mut taps_right);
+    fill_taps(channel_left, head, len, taps_left);
+    fill_taps(channel_right, head, len, taps_right);
 
-    // Pass A: steps 1 to 5, plus the cursor. Holds the static-curve target of every frame, which
-    // pass B then overwrites in place with the smoothed reduction it produces.
-    let mut target_left = [L::zero(); MAX_STAGED_FRAMES];
-    let mut target_right = [L::zero(); MAX_STAGED_FRAMES];
+    // Pass A: steps 1 to 5, plus the cursor. `target` holds the static-curve target of every
+    // frame, which pass B then overwrites in place with the smoothed reduction it produces.
+    //
+    // Walked as an iterator rather than indexed by `index`, for the reason the stack arrays did
+    // not need: their length was a compile-time constant, so `taps[index * width..]` and
+    // `target[index]` carried no bounds check. A prepared buffer's length is not, and four checks
+    // per frame cost 12% of the scalar instantiation and 2% at `W = 8` on the kernel example.
+    // `chunks_exact(width)` also hands `L::load` a slice whose length the optimiser knows is
+    // exactly `L::WIDTH`, which is the one thing that check was ever for.
     let mut write = head;
-    for index in 0..len {
+    for (index, (((tap_left, tap_right), frame_left), frame_right)) in taps_left[..len * width]
+        .chunks_exact(width)
+        .zip(taps_right[..len * width].chunks_exact(width))
+        .zip(target_left[..len].iter_mut())
+        .zip(target_right[..len].iter_mut())
+        .enumerate()
+    {
         let slot = (start + index) * width;
         let main_left = L::load(&left[slot..]);
         let main_right = L::load(&right[slot..]);
@@ -614,16 +714,8 @@ fn idle_frames_staged<L: Lane>(
         level_right.store(&mut channel_right.detector[write * width..]);
         L::load(&channel_left.main[next * width..]).store(&mut left[slot..]);
         L::load(&channel_right.main[next * width..]).store(&mut right[slot..]);
-        target_left[index] = curve_target(
-            L::load(&taps_left[index * width..]),
-            &coef_left,
-            &invariants,
-        );
-        target_right[index] = curve_target(
-            L::load(&taps_right[index * width..]),
-            &coef_right,
-            &invariants,
-        );
+        *frame_left = curve_target(L::load(tap_left), &coef_left, &invariants);
+        *frame_right = curve_target(L::load(tap_right), &coef_right, &invariants);
         write = next;
     }
     channel_left.cursor = write as u32;

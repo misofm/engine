@@ -473,6 +473,11 @@ struct Instance<L: Lane> {
     metadata: PreparedEffectMetadata,
     left: Channel<L>,
     right: Channel<L>,
+    /// The staged idle body's scratch, allocated once here rather than zeroed on the stack once
+    /// per block. Scratch, not state: it is written before it is read within every call that
+    /// touches it, so no snapshot, restore or reset has anything to say about it. See
+    /// [`kernel::Staged`].
+    staged: kernel::Staged<L>,
     /// Issue #163 phase 4 item 1: the previous block proved this instance is at a silent fixed
     /// point. Earned only by observation in [`render`](Self::render), never assumed. See the
     /// matching field on `miso-engine-parametric-eq` for the induction it licenses.
@@ -494,6 +499,7 @@ impl<L: Lane> Instance<L> {
             metadata,
             left: Channel::new(left_defaults, length, metadata.sample_rate),
             right: Channel::new(right_defaults, length, metadata.sample_rate),
+            staged: kernel::Staged::new(),
             silent_fixed_point: false,
             silent_bypass: metadata.bypass,
         }
@@ -565,6 +571,7 @@ impl<L: Lane> Instance<L> {
             self.metadata.bypass,
             self.metadata.sample_rate,
             (&mut self.left, &mut self.right),
+            &mut self.staged,
         );
         // Earn or lose the claim from what this block actually did: the recursive gain-reduction
         // word came out as it went in, both delay rings are entirely `+0.0` (so a later cursor
