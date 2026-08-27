@@ -21,9 +21,11 @@ Two rules, both mechanical:
 Names that appear only under `crates/` or `hosts/` -- the C ABI macro families
 `MISO_ENGINE_V2_*` and `MISO_ENGINE_EFFECT_*_V1`, and the crate-local test hooks
 `MISO_ENGINE_MATH_PIN`, the `MISO_ENGINE_REPIN_*_CORPUS` family, `MISO_ENGINE_TRANSCRIPT_031`,
-`MISO_ENGINE_TRANSCRIPT_045`, `MISO_ENGINE_AUDIT_008`, `MISO_ENGINE_AUDIT_037`,
-`MISO_ENGINE_WEB_ORACLE_PRINT` -- are bound by rule 1 but are not part of the tool/script
-vocabulary and are not listed here.
+`MISO_ENGINE_TRANSCRIPT_045`, `MISO_ENGINE_AUDIT_008`, `MISO_ENGINE_AUDIT_037` -- are bound by
+rule 1 but are not part of the tool/script vocabulary and are not listed here.
+`MISO_ENGINE_WEB_ORACLE_PRINT` was one of them until issue #217:
+`scripts/check-browser-expected-resources.py` reads the browser fixture's resource rows through
+it, so it now appears under `scripts/` and is a row below.
 
 The `MISO_ENGINE_REPIN_*_CORPUS` family is one name per pinned corpus
 (`BUILTINS`, `COMPRESSOR`, `DELAY`, `EFFECT_RUNTIME`, `GATE_EXPANDER`, `MULTIBAND`,
@@ -150,6 +152,7 @@ Read by one subject each.
 | `MISO_ENGINE_CAPI_SKIP_BUILD` | C-ABI tests: use a prebuilt library. |
 | `MISO_ENGINE_CHROMIUM_BINARY` | browser gate: Chromium path. |
 | `MISO_ENGINE_CHROMEDRIVER_BINARY` | browser gate: chromedriver path. |
+| `MISO_ENGINE_WEB_ORACLE_PRINT` | `tests/browser-v1/direct-oracle.mjs`: set to `1` to print the derived oracle document instead of asserting it against the pin. The house instrument a browser re-pin is read off, and how `check-browser-expected-resources.py` reads the module's resource rows (#217). |
 | `MISO_ENGINE_WEB_STRIP` | AudioWorklet build: the `wasm-strip` binary. |
 | `MISO_ENGINE_WEB_WORKLET_TEST_MODULE` | Hermetic worklet test: override module path for the bootstrap-under-test (#132). |
 | `MISO_ENGINE_WEB_HOST_TEST_MODULE` | Hermetic worklet test: override module path for the main-realm host under test, so a red mutation of the host runs the same suite (#151). |
