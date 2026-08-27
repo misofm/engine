@@ -131,7 +131,19 @@ tree restored between rows.
 |---|---|---|---|---|
 | M2-C1 | the collapsed per-frame body computes the level as `main_left.abs()` instead of `link_frame(detector, slot, main_left, main_left, ..)` — the "the link is a no-op on a mono bank" simplification | `compressor/src/kernel.rs` `frames_loop_mono` | `the_collapsed_body_renders_the_dual_bodys_left_plane` | RED — `LinkMode::Average` is `0.5*|p| + 0.5*|p|`, which is not `|p|` for a subnormal `p`. Every *sample* assertion stays green (the detector floor clamps it); the serialised detector ring is where it shows, which is why this test compares state |
 | M2-C2 | the same, in the staged idle body | `compressor/src/kernel.rs` `idle_frames_staged_mono` | the same test | RED |
-| M2-C3..C8 | `Channel::copy_state_from` drops one of `words`, `ramps`, `gain_reduction_db`, `cursor`, `main`, `detector` | `compressor/src/kernel.rs` | `a_desymmetrized_bank_is_a_never_collapsed_bank` | RED, one row each. `words` is the interesting one: it is redundant *given* `ramps` on a continuously automated session and load-bearing on one whose ramp settled while collapsed, which is why that test retargets once and then stops |
+| M2-C3 | `Channel::copy_state_from` drops `words` | `compressor/src/kernel.rs` | `a_desymmetrized_bank_is_a_never_collapsed_bank` | RED — redundant *given* `ramps` on a continuously automated session and load-bearing on one whose ramp settled while collapsed, which is why the test retargets once and then stops |
+| M2-C4 | `Channel::copy_state_from` drops `ramps` | `compressor/src/kernel.rs` | `a_desymmetrized_bank_is_a_never_collapsed_bank` | RED — all four fields of every smoothed parameter; only the collapsed channel's were advanced |
+| M2-C5 | `Channel::copy_state_from` drops `gain_reduction_db` | `compressor/src/kernel.rs` | `a_desymmetrized_bank_is_a_never_collapsed_bank` | RED — the one recursive word, and the whole cross-frame dependency |
+| M2-C6 | `Channel::copy_state_from` drops `cursor` | `compressor/src/kernel.rs` | `a_desymmetrized_bank_is_a_never_collapsed_bank` | RED — the shared ring write index, advanced once per frame on the collapsed channel only |
+| M2-C7 | `Channel::copy_state_from` drops `main` | `compressor/src/kernel.rs` | `a_desymmetrized_bank_is_a_never_collapsed_bank` | RED — the delay ring the output is read out of |
+| M2-C8 | `Channel::copy_state_from` drops `detector` | `compressor/src/kernel.rs` | `a_desymmetrized_bank_is_a_never_collapsed_bank` | RED — the detector ring the lookahead tap gathers from |
+
+`a_statically_bypassed_bank_collapses_to_the_dual_bits` carries no mutation of its own: it is
+coverage for the one place a **prepared** bypass and a **live** one differ. A live bypass clears the
+witness' `UNBYPASSED` term and declines the collapse; a prepared bypass on a console-free bank does
+not, because `EffectBankStage::lane_symmetry` is the designed-word comparison alone. The effect
+contract calls that "a seam the collapse must close", and the test closes it by rendering a bypassed
+bank both ways rather than by arguing that the bypass is per plane inside the kernel.
 
 `lookahead_ms` and `delay` are on the copy list and are **not** individually red: no rendered block
 writes them. See `copy_state_from`'s doc for why they are copied anyway.

@@ -1025,6 +1025,27 @@ impl SessionRuntime {
         (&producer.track_id, &producer.effect_id)
     }
 
+    /// Pushes one live-console bypass record into one prepared effect's bounded queue.
+    ///
+    /// The production control path, like [`SessionRuntime::push_parameter`]: the record is drained
+    /// by the render thread at the top of the next block, and it moves the channel-symmetry
+    /// witness' `UNBYPASSED` term at the same boundary it takes effect on.
+    ///
+    /// It is here because bypass is the transition the mono collapse is hardest on and the one no
+    /// other control record reaches. A bypassed lane's dry signal is delayed through the slot's own
+    /// latency **line**, which persists across blocks, so engaging a bypass after a collapsed run
+    /// reads samples the collapsed blocks put into that line. Nothing else in this harness can set
+    /// that sequence up.
+    ///
+    /// Returns `false` when the bounded queue was full, which a caller counts rather than ignores.
+    /// Off the clock.
+    pub fn push_bypass(&mut self, channel: usize, bypassed: bool) -> bool {
+        self.controls[channel]
+            .producer
+            .try_push(EffectControlRecordV1::Bypass(bypassed))
+            .is_ok()
+    }
+
     /// Pushes one live-console parameter retarget into one prepared effect's bounded queue.
     ///
     /// This is the production control path and nothing else: the record is drained by the render

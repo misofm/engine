@@ -299,7 +299,14 @@ tree restored between rows.
 
 | # | mutation | file | test | result |
 |---|---|---|---|---|
-| M2-L1..L8 | `ChannelState::copy_state_from` drops one of `history`, `main_ring`, `required_ring`, `box_ring`, `reduction`, `box_sum`, `limit`, `release` | `true-peak-limiter/src/lib.rs` | `a_desymmetrized_bank_is_a_never_collapsed_bank` | RED, one row each |
+| M2-L1 | `ChannelState::copy_state_from` drops `history` | `true-peak-limiter/src/lib.rs` | `a_desymmetrized_bank_is_a_never_collapsed_bank` | RED |
+| M2-L2 | `ChannelState::copy_state_from` drops `main_ring` | `true-peak-limiter/src/lib.rs` | `a_desymmetrized_bank_is_a_never_collapsed_bank` | RED |
+| M2-L3 | `ChannelState::copy_state_from` drops `required_ring` | `true-peak-limiter/src/lib.rs` | `a_desymmetrized_bank_is_a_never_collapsed_bank` | RED |
+| M2-L4 | `ChannelState::copy_state_from` drops `box_ring` | `true-peak-limiter/src/lib.rs` | `a_desymmetrized_bank_is_a_never_collapsed_bank` | RED |
+| M2-L5 | `ChannelState::copy_state_from` drops `reduction` | `true-peak-limiter/src/lib.rs` | `a_desymmetrized_bank_is_a_never_collapsed_bank` | RED |
+| M2-L6 | `ChannelState::copy_state_from` drops `box_sum` | `true-peak-limiter/src/lib.rs` | `a_desymmetrized_bank_is_a_never_collapsed_bank` | RED |
+| M2-L7 | `ChannelState::copy_state_from` drops `limit` | `true-peak-limiter/src/lib.rs` | `a_desymmetrized_bank_is_a_never_collapsed_bank` | RED |
+| M2-L8 | `ChannelState::copy_state_from` drops `release` | `true-peak-limiter/src/lib.rs` | `a_desymmetrized_bank_is_a_never_collapsed_bank` | RED |
 
 Three properties of the test corpus are what make those eight rows red, and each was arrived at by
 watching a row stay green first:
@@ -314,6 +321,11 @@ watching a row stay green first:
 * the release retarget is **away from the descriptor default**. Against the default value the span
   is a no-op and `release` is green.
 
-`prefix`, `phase`, `lookahead_ms` and `lane` are on the copy list and are not individually red:
-the first two are re-derived at the next van Herk block boundary, and the last two move only at
-prepare, restore and a full reset, none of which is reachable on a bound bank.
+`prefix`, `phase`, `lookahead_ms` and `lane` are on the copy list and are not individually red, and
+the two pairs are not the same kind of gap. `lookahead_ms` and `lane` are the prepared window shape
+and no rendered block writes them, so nothing *can* make them diverge on a bound bank. `prefix` and
+`phase` are genuine running state -- `UniformHot::new` loads them and the block write-back stores
+them -- and a collapsed block advances only the left channel's, so a divergence ought to be
+constructible and this corpus does not construct one. An earlier draft of this row claimed they were
+re-derived at the next van Herk block boundary; that is not true of either word and the claim is
+withdrawn rather than repaired. The gap is recorded, not explained.

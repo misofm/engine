@@ -38,11 +38,20 @@ fn request_linked<'a>(
     values: &'a [InitialParameterValue],
     link_mode: LinkMode,
 ) -> PrepareEffectRequest<'a> {
+    request_configured(values, link_mode, false)
+}
+
+/// A preparation request carrying one link mode and one **prepared** bypass flag.
+fn request_configured<'a>(
+    values: &'a [InitialParameterValue],
+    link_mode: LinkMode,
+    bypass: bool,
+) -> PrepareEffectRequest<'a> {
     PrepareEffectRequest {
         sample_rate: 48_000,
         quantum: FRAMES as u32,
         quality: EffectQuality::Normal,
-        bypass: false,
+        bypass,
         link_mode,
         ports: PreparedPortsV1 {
             sidechain: PreparedSidechainPort::Unconnected {
@@ -355,5 +364,94 @@ fn a_desymmetrized_bank_is_a_never_collapsed_bank() {
                 );
             }
         }
+    }
+}
+
+/// A **statically bypassed** bank collapses to the dual bypassed bits, plane and state.
+///
+/// # The seam this closes
+///
+/// A *live* bypass clears the channel-symmetry witness' `UNBYPASSED` term, so a console-driven
+/// bypassed lane declines the collapse and never reaches a one-plane body. A **prepared** bypass on
+/// a console-free bank does not: `EffectBankStage::lane_symmetry` is the effect's designed-word
+/// comparison alone, and it leaves `UNBYPASSED` unconditionally true. That asymmetry is written
+/// down in `miso_engine_effect_contract::symmetry` as "a seam the collapse must close", and this
+/// closes it by measurement rather than by the argument that the bypass is per plane inside the
+/// kernel.
+///
+/// The second assertion is the one that makes it a *chain*-level statement: on symmetric input a
+/// dual bypassed block must publish the same words on both planes, because the collapse's seam
+/// publishes the left plane on both. If a bypassed kernel could make its two channels differ on
+/// identical input, collapsing a bypassed cohort would be unsound however faithful the one-plane
+/// body was.
+#[test]
+fn a_statically_bypassed_bank_collapses_to_the_dual_bits() {
+    let Some((_, width)) = support::native_bank_width() else {
+        return;
+    };
+    let lanes = width.lanes() as usize;
+    let values = support::values_with(&[(0, -30.0), (1, 4.0), (7, 1.0)]);
+    let requests: Vec<_> = (0..lanes)
+        .map(|_| request_configured(&values, LinkMode::Average, true))
+        .collect();
+    let mut dual = support::bind_bank(&requests).expect("dual bank");
+    let mut collapsed = support::bind_bank(&requests).expect("collapsed bank");
+    let idle = offsets(lanes);
+
+    for step in 0..BLOCKS {
+        let mut dual_left = block(step * FRAMES, lanes);
+        let mut dual_right = dual_left.clone();
+        let mut mono_left = dual_left.clone();
+        let mut stale = vec![f32::from_bits(0x7F7F_FFFF); FRAMES * lanes];
+        let first = (step * FRAMES) as u64;
+        run_block(
+            dual.as_mut(),
+            &mut dual_left,
+            &mut dual_right,
+            width,
+            first,
+            &[],
+            &idle,
+            false,
+        );
+        run_block(
+            collapsed.as_mut(),
+            &mut mono_left,
+            &mut stale,
+            width,
+            first,
+            &[],
+            &idle,
+            true,
+        );
+        for (word, (collapsed_word, dual_word)) in
+            mono_left.iter().zip(dual_left.iter()).enumerate()
+        {
+            assert_eq!(
+                collapsed_word.to_bits(),
+                dual_word.to_bits(),
+                "block {step} word {word}: bypassed collapsed left plane"
+            );
+        }
+        for (word, (dual_right_word, dual_left_word)) in
+            dual_right.iter().zip(dual_left.iter()).enumerate()
+        {
+            assert_eq!(
+                dual_right_word.to_bits(),
+                dual_left_word.to_bits(),
+                "block {step} word {word}: a dual bypassed block on symmetric input must publish \
+                 the same words on both planes, or a collapsed bypassed cohort is unsound"
+            );
+        }
+    }
+
+    let scalar = support::prepare(request_configured(&values, LinkMode::Average, true));
+    collapsed.desymmetrize_channels();
+    for track in 0..lanes as u32 {
+        assert_eq!(
+            support::snapshot_track(collapsed.as_ref(), track, scalar.as_ref()),
+            support::snapshot_track(dual.as_ref(), track, scalar.as_ref()),
+            "track {track}: bypassed state after the disengage copy"
+        );
     }
 }

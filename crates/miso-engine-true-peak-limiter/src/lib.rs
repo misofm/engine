@@ -533,11 +533,23 @@ impl ChannelState {
     ///
     /// `crates/miso-engine-true-peak-limiter/tests/mono_collapse.rs` fails if any of `history`,
     /// `main_ring`, `required_ring`, `box_ring`, `reduction`, `box_sum`, `limit` or `release` is
-    /// dropped. `prefix` and `phase` are the van Herk block's two running registers and are
-    /// re-derived at the next block boundary from `box_ring` and `box_sum`, so a stale pair is
-    /// bounded rather than permanent and no test in the tree makes it show; `lookahead_ms` and
-    /// `lane` move only at prepare, restore and a full reset, none of which is reachable on a
-    /// bound bank. All four are copied because the rule is *whole per-channel state*.
+    /// dropped.
+    ///
+    /// Four entries are **not** individually red, and the two groups are not the same kind of
+    /// thing:
+    ///
+    /// * `lookahead_ms` and `lane` are the prepared window shape. No rendered block writes them --
+    ///   they move only at prepare, restore and a full reset, none of which is reachable on a bound
+    ///   bank -- so nothing can make them diverge today.
+    /// * `prefix` and `phase` are the uniform body's two van Herk registers, and they *are* running
+    ///   state: `UniformHot::new` loads them out of this arena and the block write-back stores them
+    ///   into it. A collapsed block advances only the left channel's. **No test in the tree makes
+    ///   dropping them show, and this comment does not claim to know why** -- an earlier draft
+    ///   asserted they were re-derived at the next block boundary, which is not true of either
+    ///   word, and asserting a mechanism nobody measured is worse than recording the gap.
+    ///
+    /// All four are copied because the rule is *whole per-channel state*, which is the rule
+    /// precisely so that a word nobody has a divergence for is still carried.
     fn copy_state_from(&mut self, source: &Self) {
         debug_assert_eq!(self.width, source.width);
         debug_assert_eq!(self.main_ring.len(), source.main_ring.len());

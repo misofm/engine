@@ -1235,3 +1235,112 @@ fn a_run_that_starts_collapsing_renders_what_an_always_collapsed_run_renders() {
         "a session that started collapsing mid-render must be bit-identical to one that always did"
     );
 }
+
+/// Engaging a live bypass after a collapsed run renders what a never-collapsed run renders.
+///
+/// # The seam this is the gate on, and why the other transition oracles miss it
+///
+/// A bypassed lane does not emit silence: it emits its own **dry** input, delayed by the slot's
+/// declared latency so that switching bypass on and off does not move the signal in time. That
+/// delay is a `BypassShunt` line that persists across blocks, and it is fed on *every* block --
+/// bypassed or not -- precisely so that the first bypassed block emits correctly delayed audio
+/// instead of `latency` samples of stale zeros.
+///
+/// So the shunt's line carries state out of the collapsed window, and it is the one piece of
+/// per-block state the seam cannot repair: the seam duplicates the resident *plane* after the slot
+/// has run, while the line was written before it. A collapsed block that handed the line its
+/// ungathered right plane would poison it for `latency` samples, and the poison would surface only
+/// on a block that is both bypassed and dual -- which is exactly the block a live `Bypass(true)`
+/// produces, because that record clears the witness' `UNBYPASSED` term on the same boundary it
+/// takes effect on. `a_run_that_stops_collapsing_...` cannot see it (it never bypasses) and
+/// `a_live_one_channel_retarget_...` cannot see it (a parameter write reads no dry line).
+///
+/// # Why all three effects, and why the EQ is in the list
+///
+/// The failure is proportional to declared latency, so the three slots of the strip fail for
+/// different lengths and the EQ, at zero latency, does not fail at all. Running all three is what
+/// distinguishes "the collapse is wrong about dry signal" from "one effect is wrong": with the
+/// defect present the limiter diverges for its lookahead and the compressor for its own, while the
+/// EQ stays green. A single-effect test would have read as an effect bug.
+///
+/// Red mutation: `ConsoleEffectBankStage::process_inner::<true>` captures `block.right` -- the
+/// ungathered resident scratch -- instead of `block.left`. The limiter and compressor arms fail on
+/// the blocks following the bypass; the EQ arm stays green, which is the shape that names the
+/// cause.
+#[test]
+fn a_bypass_engaged_after_a_collapsed_run_renders_the_dual_bits() {
+    const CONTROL: PlanConfig = PlanConfig {
+        meters: false,
+        control: true,
+        observation: ObservationArm::Absent,
+    };
+    const SWITCH: u64 = BLOCKS / 2;
+
+    for effect in [
+        "miso.true-peak-limiter",
+        "miso.compressor",
+        "miso.parametric-eq",
+    ] {
+        let mut collapsing = SessionRuntime::build(Workload::SixtyFourTrackConsoleMono, CONTROL);
+        let mut never = SessionRuntime::build(Workload::SixtyFourTrackConsoleMono, CONTROL);
+        never.force_mono_collapse_off(true);
+
+        let channel = collapsing
+            .first_track_control_channel(effect)
+            .unwrap_or_else(|| panic!("the mono fixture carries a {effect} on every track"));
+        assert_eq!(
+            never.first_track_control_channel(effect),
+            Some(channel),
+            "both arms must address the same track, or they are two sessions"
+        );
+
+        // Block by block rather than one digest over the run: the divergence is a burst the length
+        // of the slot's latency, and which blocks it lands on is what names the cause.
+        let mut diverged: Vec<u64> = Vec::new();
+        for block in 0..BLOCKS {
+            if block == SWITCH {
+                for runtime in [&mut collapsing, &mut never] {
+                    assert!(
+                        runtime.push_bypass(channel, true),
+                        "the bounded control queue must have room"
+                    );
+                }
+            }
+            collapsing.render(block).expect("console render");
+            never.render(block).expect("console render");
+            let mut collapsing_digest = Sha256Sink::new();
+            let mut never_digest = Sha256Sink::new();
+            collapsing.hash_output(&mut collapsing_digest);
+            never.hash_output(&mut never_digest);
+            if collapsing_digest.finish_hex() != never_digest.finish_hex() {
+                diverged.push(block);
+            }
+        }
+
+        let collapsed = collapsing.bank_collapse_counters();
+        let cohorts_in_plan = cohorts(collapsing.bank_shape()[1]);
+        // One cohort holds the bypassed track and stops on the block the record lands; the other
+        // seven never see a record and collapse throughout. A bypass that had stopped *every*
+        // cohort, or one that had stopped none, would both read as this test passing its digest
+        // check for the wrong reason.
+        assert_eq!(
+            collapsed,
+            [
+                BLOCKS * cohorts_in_plan - (BLOCKS - SWITCH),
+                cohorts_in_plan
+            ],
+            "{effect}: the bypassed cohort must stop collapsing on the block its record lands, and \
+             every other cohort must keep collapsing"
+        );
+        assert_eq!(
+            never.bank_collapse_counters(),
+            [0, cohorts_in_plan],
+            "{effect}: the reference arm must never have collapsed"
+        );
+        assert!(
+            diverged.is_empty(),
+            "{effect}: a bypass engaged after a collapsed run diverged from the never-collapsed \
+             run on blocks {diverged:?}"
+        );
+    }
+}

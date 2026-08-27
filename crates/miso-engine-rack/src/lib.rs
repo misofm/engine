@@ -876,12 +876,37 @@ impl ConsoleEffectBankStage {
         // 2. Capture the dry block before the bank touches it. Skippable exactly when no lane
         //    will read it back and there is no latency line to keep fed; `dry_*` never crosses a
         //    block boundary, so the skip moves no rendered bit.
+        //
+        // A collapsed block captures the **left plane twice**, and this is the one place in the
+        // collapse where "the seam overwrites the right plane after this slot" is not the whole
+        // argument. `capture` does two things: it stages `dry_*`, which is read later in this same
+        // block and never crosses a boundary, and -- when the slot declares latency -- it exchanges
+        // that staging through a delay **line** that persists for `latency` samples. Handing the
+        // line the ungathered resident scratch poisons it for as long as it holds those samples,
+        // and a bypass engaged after the collapse disengages then restores that scratch into the
+        // bypassed lane's right channel. The seam is downstream of the line, so it cannot repair it.
+        //
+        // The left plane is the right answer, not a stand-in for one: under the collapse the
+        // counterfactual dual run's right plane **is** its left plane everywhere upstream of the
+        // seam, so `capture(left, left)` writes into `dry_right` and `line_right` exactly the words
+        // a never-collapsed run writes there, on every block. That is the same standard
+        // `desymmetrize_channels` meets, met continuously instead of at a boundary.
+        //
+        // Covering the shunt in the disengage copy instead would be weaker twice over: the line
+        // would hold ungathered scratch for the whole collapsed window, so any reader that is not
+        // the disengage boundary would still be wrong; and it would leave a read of `block.right`
+        // alive on the collapsed path, which is the exact class of defect this design excludes by
+        // construction rather than by argument. **A collapsed block reads no right plane at all.**
         if let Some(shunt) = self
             .shunt
             .as_mut()
             .filter(|shunt| any_bypassed || shunt.feeds_line())
         {
-            shunt.capture(block.left, block.right);
+            if MONO {
+                shunt.capture(block.left, block.left);
+            } else {
+                shunt.capture(block.left, block.right);
+            }
         }
         let frames = block.frames;
         let bank = EffectBankProcessBlock::new(
@@ -3085,6 +3110,123 @@ mod tests {
             mono_chain(4, 8, vec![upstream(), upstream(), seam(), seam()]).collapse_prefix(),
             2
         );
+    }
+
+    /// Planar planes whose two channels **differ**, for the cases where `L == R` would hide the bug.
+    ///
+    /// Every other collapse test in this module feeds identical planes, because that is what a
+    /// collapse-eligible track looks like. The two clauses of `collapse_prefix_of` that gate a
+    /// chain the collapse must *refuse* need the opposite: if the refusal failed and the seam ran,
+    /// the right plane would come back as the duplicated left one, and identical inputs would make
+    /// that invisible.
+    fn distinct_planes(lanes: usize, frames: u32) -> Planes {
+        let frames = frames as usize;
+        Planes {
+            left: (0..lanes)
+                .map(|lane| (0..frames).map(|f| (lane * 100 + f) as f32 + 1.0).collect())
+                .collect(),
+            right: (0..lanes)
+                .map(|lane| {
+                    (0..frames)
+                        .map(|f| -((lane * 100 + f) as f32) - 1.0)
+                        .collect()
+                })
+                .collect(),
+        }
+    }
+
+    /// An **armed** chain of nothing but seam-side slots must not collapse.
+    ///
+    /// Clause 2 of [`BankChain::collapse_prefix_of`], and the one whose failure is silent. A
+    /// fader-or-matrix-only chain reports every lane symmetric on every session, mono or not,
+    /// because `SEAM_SIDE_WITNESS` is an unconditional `SYMMETRIC` -- so `all_lanes_symmetric` and
+    /// the structural join both say yes and only the empty prefix says no. If the dispatch dropped
+    /// `collapse_prefix > 0`, the seam would publish the duplicated left plane as this chain's
+    /// right output on a session whose two channels legitimately differ.
+    ///
+    /// Red mutation: `collapse_prefix > 0` becomes `collapse_prefix >= 0` in `BankChain::run`.
+    #[test]
+    fn an_armed_seam_side_only_chain_renders_the_dual_bits() {
+        let coefficients = [1.0_f32, 0.5, 0.25, 2.0];
+        let mut chain = mono_chain(4, 8, vec![Box::new(Matrix { coefficients })]);
+        assert_eq!(
+            chain.collapse_prefix(),
+            0,
+            "a seam-side-only chain has no prefix"
+        );
+        chain.arm_mono_collapse(true);
+        let mut planes = distinct_planes(4, 8);
+        let source = distinct_planes(4, 8);
+        chain.run(&mut planes, 8, 0).expect("render");
+        assert_eq!(
+            chain.collapses(),
+            0,
+            "a vacuous witness must never read as collapse evidence"
+        );
+        let [ll, lr, rl, rr] = coefficients;
+        for lane in 0..4 {
+            for frame in 0..8 {
+                let (l, r) = (source.left[lane][frame], source.right[lane][frame]);
+                assert_eq!(
+                    planes.left[lane][frame].to_bits(),
+                    (ll * l + lr * r).to_bits(),
+                    "lane {lane} frame {frame}: left"
+                );
+                assert_eq!(
+                    planes.right[lane][frame].to_bits(),
+                    (rl * l + rr * r).to_bits(),
+                    "lane {lane} frame {frame}: the right plane must be the dual matrix output, \
+                     not the duplicated left one"
+                );
+            }
+        }
+    }
+
+    /// A chain holding a slot that runs on only some of its lanes must not collapse.
+    ///
+    /// Clause 4 of [`BankChain::collapse_prefix_of`]. The collapse is all-lanes-or-nothing and the
+    /// witness is conjoined over the slots a lane actually runs, so a slot that is an identity on
+    /// some lanes makes "every active lane is eligible" and "every slot agreed for every active
+    /// lane" two different statements -- and the dispatch reads the first. Declining the whole
+    /// chain is what keeps them one statement.
+    ///
+    /// Red mutation: drop the `lanes_agree` clause from `collapse_prefix_of`.
+    #[test]
+    fn a_partial_agreement_slot_declines_the_collapse() {
+        let active: Box<[bool]> = vec![true; 4].into_boxed_slice();
+        let slots = vec![
+            slot(active.to_vec(), Box::new(Scale::new([2.0, 3.0], true))),
+            slot(
+                vec![true, false, true, false],
+                Box::new(Scale::new([5.0, 7.0], true)),
+            ),
+        ];
+        let mut chain = BankChain::new(
+            AoSoaScratch::new(BankWidth::Four, 8).expect("scratch"),
+            active,
+            slots,
+        )
+        .expect("chain");
+        assert_eq!(
+            chain.collapse_prefix(),
+            0,
+            "a slot that does not run every lane of the chain zeroes the prefix"
+        );
+        chain.arm_mono_collapse(true);
+        let mut planes = distinct_planes(4, 8);
+        let source = distinct_planes(4, 8);
+        chain.run(&mut planes, 8, 0).expect("render");
+        assert_eq!(chain.collapses(), 0);
+        // Both stages run the whole resident block whenever any lane of theirs is live -- the mask
+        // gates the *slot*, not the words -- so the dual bits are both gains on every lane. What is
+        // load-bearing here is only that the right plane is the right channel's own arithmetic.
+        for lane in 0..4 {
+            assert_eq!(
+                planes.right[lane][0].to_bits(),
+                (source.right[lane][0] * 3.0 * 7.0).to_bits(),
+                "lane {lane}: the right plane must be its own, not the duplicated left"
+            );
+        }
     }
 
     /// The disengage copy runs once, on the block that stops collapsing, and only for the prefix.
