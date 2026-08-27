@@ -1312,6 +1312,12 @@ impl AudioWorkletEngineHost {
         }
     }
 
+    /// Entries in the decode staging array, for the issue #210 phase 1 sizing pin.
+    #[cfg(test)]
+    pub(crate) fn command_staging_entries(&self) -> Option<usize> {
+        self.ready.as_ref().map(|ready| ready.command_decoded.len())
+    }
+
     /// The console's solo state, for the issue #210 phase 1 evals.
     ///
     /// The ABI has no readback of it on purpose -- solo is control-plane state and the app is the
