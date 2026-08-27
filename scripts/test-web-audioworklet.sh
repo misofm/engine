@@ -14,6 +14,7 @@ fi
 worklet="$repo_root/hosts/miso-engine-host-web/web/miso-engine-v2-audio-worklet.js"
 "$repo_root/scripts/check-web-audioworklet.sh" "--source-policy=$worklet"
 "$repo_root/scripts/check-web-audioworklet.sh" --self-test-opcodes
+"$repo_root/scripts/check-web-audioworklet.sh" --self-test-artifact-order
 python3 -B "$repo_root/scripts/check-web-audioworklet-callgraph.py" --self-test
 mutation_dir=$(mktemp -d)
 cleanup() {

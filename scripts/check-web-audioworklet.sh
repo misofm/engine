@@ -68,6 +68,42 @@ check_opcode_policy() {
   ! grep -Eqi 'relaxed|atomic' <<<"$simd_text"
 }
 
+canonical_artifact_names() {
+  printf '%s\n' \
+    miso-engine-v2-abi-layout.json \
+    miso-engine-v2-audio-worklet-host.d.ts \
+    miso-engine-v2-audio-worklet-host.js \
+    miso-engine-v2-audio-worklet.js \
+    miso-engine-v2-audio-worklet.simd128.wasm \
+    miso-engine-v2-parameter-metadata.json
+}
+
+check_artifact_order() {
+  local expected=$1 actual=$2
+  [[ "$actual" == "$expected" ]]
+}
+
+if (($# == 1)) && [[ $1 == --self-test-artifact-order ]]; then
+  canonical=$(canonical_artifact_names)
+  check_artifact_order "$canonical" "$canonical" || {
+    echo "canonical artifact order was rejected" >&2
+    exit 1
+  }
+  out_of_order=$(printf '%s\n' \
+    miso-engine-v2-audio-worklet-host.d.ts \
+    miso-engine-v2-abi-layout.json \
+    miso-engine-v2-audio-worklet-host.js \
+    miso-engine-v2-audio-worklet.js \
+    miso-engine-v2-audio-worklet.simd128.wasm \
+    miso-engine-v2-parameter-metadata.json)
+  if check_artifact_order "$out_of_order" "$canonical"; then
+    echo "out-of-order expected artifact list escaped the ordering gate" >&2
+    exit 1
+  fi
+  echo "web AudioWorklet artifact-order mutations passed"
+  exit 0
+fi
+
 if (($# == 1)) && [[ $1 == --self-test-opcodes ]]; then
   valid_simd=$'f32x4.mul\nf32x4.add\nf32x4.sub'
   check_opcode_policy "$valid_simd"
@@ -124,15 +160,9 @@ command -v wasm-objdump >/dev/null || {
   exit 2
 }
 
-expected=$(printf '%s\n' \
-  miso-engine-v2-audio-worklet-host.d.ts \
-  miso-engine-v2-audio-worklet-host.js \
-  miso-engine-v2-audio-worklet.js \
-  miso-engine-v2-audio-worklet.simd128.wasm \
-  miso-engine-v2-abi-layout.json \
-  miso-engine-v2-parameter-metadata.json)
+expected=$(canonical_artifact_names)
 actual=$(find "$artifact_dir" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort)
-[[ "$actual" == "$expected" ]] || {
+check_artifact_order "$expected" "$actual" || {
   echo "artifact directory does not contain the exact six frozen outputs" >&2
   diff -u <(printf '%s\n' "$expected") <(printf '%s\n' "$actual") >&2 || true
   exit 1
