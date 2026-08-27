@@ -11,9 +11,9 @@
 
 use miso_engine_core::realtime::RenderError;
 use miso_engine_effect_contract::{
-    BankWidth, BypassShunt, EffectBankProcessBlock, EffectControlLane, EffectProgramKeyV1,
-    ObservationLaneV1, ObservationSampleV1, PreparedAutomationSpan, PreparedNativeEffectBank,
-    PreparedSidechainPort, transpose_tile_4, transpose_tile_8,
+    BankWidth, BypassShunt, ChannelSymmetryWitnessV1, EffectBankProcessBlock, EffectControlLane,
+    EffectProgramKeyV1, ObservationLaneV1, ObservationSampleV1, PreparedAutomationSpan,
+    PreparedNativeEffectBank, PreparedSidechainPort, transpose_tile_4, transpose_tile_8,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -312,6 +312,17 @@ pub trait BankStage: Send {
     }
     /// Drop every subscription this stage carries (issue #143 D7).
     fn disarm_observations(&mut self) {}
+
+    /// This stage's channel-symmetry witness for one lane of the cohort.
+    ///
+    /// The default is [`ChannelSymmetryWitnessV1::DECLINED`], not `SYMMETRIC`: a stage that has
+    /// not derived a witness from its kernel's read surface declines, so an unclassified stage in
+    /// a chain makes the whole cohort decline rather than silently claiming eligibility for work
+    /// nobody checked. Nothing rendered reads this.
+    fn lane_symmetry(&self, lane: usize) -> ChannelSymmetryWitnessV1 {
+        let _ = lane;
+        ChannelSymmetryWitnessV1::DECLINED
+    }
 }
 
 /// Adapter from the effect contract's prepared homogeneous bank to a chain stage.
@@ -348,6 +359,12 @@ impl EffectBankStage {
 }
 
 impl BankStage for EffectBankStage {
+    /// A console-free bank has no live channel at all, so the two live terms cannot be false and
+    /// the whole witness is the effect's own designed-word comparison.
+    fn lane_symmetry(&self, lane: usize) -> ChannelSymmetryWitnessV1 {
+        designed_lane_witness(self.processor.as_ref(), lane)
+    }
+
     fn process(&mut self, block: BankBlock<'_>) -> Result<(), RenderError> {
         let block = EffectBankProcessBlock::new(
             block.left,
@@ -393,6 +410,23 @@ impl BankStage for EffectBankStage {
 /// `first_sample`, and every lane is staged independently into a disjoint window. A bank therefore
 /// applies a command timeline to lane `l` exactly as the per-node scalar path applies it to the
 /// same effect: same spans, same block, same order.
+/// One bank lane's witness from the effect's own designed-word comparison alone.
+///
+/// The other four terms are left set: a bank slot speaks only to `DESIGNED`, and `SOURCE`,
+/// `RESTORED` and the two live terms are conjoined by whoever owns them. Leaving them set is what
+/// makes the conjunction in [`BankChain::lane_symmetry`] mean "every stage agreed" rather than
+/// "every stage claimed everything".
+fn designed_lane_witness(
+    processor: &dyn PreparedNativeEffectBank,
+    lane: usize,
+) -> ChannelSymmetryWitnessV1 {
+    if processor.lane_channel_symmetry(lane) {
+        ChannelSymmetryWitnessV1::SYMMETRIC
+    } else {
+        ChannelSymmetryWitnessV1::symmetric_except(ChannelSymmetryWitnessV1::DESIGNED)
+    }
+}
+
 pub struct ConsoleEffectBankStage {
     processor: Box<dyn PreparedNativeEffectBank>,
     width: BankWidth,
@@ -566,6 +600,19 @@ const IDLE_SPAN: PreparedAutomationSpan = PreparedAutomationSpan {
 };
 
 impl BankStage for ConsoleEffectBankStage {
+    /// The designed-word comparison, conjoined with the lane's own live terms.
+    ///
+    /// The live half comes from [`EffectControlLane::symmetry`], which the drain in
+    /// [`Self::process`] maintains: a lane with no console channel has no live writes at all and
+    /// contributes only the designed term.
+    fn lane_symmetry(&self, lane: usize) -> ChannelSymmetryWitnessV1 {
+        let designed = designed_lane_witness(self.processor.as_ref(), lane);
+        match self.lanes.get(lane).and_then(Option::as_ref) {
+            Some(channel) => designed.and(channel.symmetry()),
+            None => designed,
+        }
+    }
+
     fn observation_binding_counts(&self) -> [u64; 3] {
         let Some(lanes) = self.observations.as_deref() else {
             return [0, 0, 0];
@@ -872,6 +919,64 @@ impl BankChain {
     #[must_use]
     pub fn aux_lanes(&self) -> &[bool] {
         &self.aux
+    }
+
+    /// This cohort lane's channel-symmetry witness: the conjunction over every slot of the chain.
+    ///
+    /// # Why this is a pull and not a stored aggregate
+    ///
+    /// The terms themselves are event-maintained -- a slot's live terms move only when a record is
+    /// drained, and its designed term only when the plan is rebuilt -- so the aggregate is a
+    /// conjunction of at most `slots` already-computed values. That is the cost the collapse
+    /// design priced as "an AND over eight lane witnesses, nanoseconds", and it is why nothing
+    /// here is cached: a cache would add a per-block invalidation check to buy back an `and` over
+    /// four bools. In this phase nothing on the render path calls it at all, so the per-block cost
+    /// of the whole witness is exactly zero.
+    ///
+    /// An inactive lane declines: it renders no track, so there is nothing to collapse.
+    #[must_use]
+    pub fn lane_symmetry(&self, lane: usize) -> ChannelSymmetryWitnessV1 {
+        if !self.active.get(lane).copied().unwrap_or(false) {
+            return ChannelSymmetryWitnessV1::DECLINED;
+        }
+        let mut witness = ChannelSymmetryWitnessV1::SYMMETRIC;
+        for slot in &self.slots {
+            // A slot that is an identity on this lane renders nothing for it, so it has nothing
+            // to say about whether the lane's two channels agree.
+            if slot.active_lanes.get(lane).copied().unwrap_or(false) {
+                witness = witness.and(slot.stage.lane_symmetry(lane));
+            }
+        }
+        witness
+    }
+
+    /// Whether **every** active lane of this cohort is collapse-eligible.
+    ///
+    /// All-lanes-or-nothing is not a simplification: the unit of savable work is a whole plane
+    /// pass over the lane vector, and a SIMD op executes every lane whether or not that lane needs
+    /// it, so masking the mono lanes inside a mixed cohort would save nothing. Mixing is the
+    /// planner's problem, not the chain's.
+    #[must_use]
+    pub fn all_lanes_symmetric(&self) -> bool {
+        (0..self.lanes)
+            .filter(|lane| self.active[*lane])
+            .all(|lane| self.lane_symmetry(lane).eligible())
+    }
+
+    /// `[eligible active lanes, active lanes]` for this chain. Evidence and gates only.
+    #[must_use]
+    pub fn symmetry_counters(&self) -> [u64; 2] {
+        let mut counters = [0_u64; 2];
+        for lane in 0..self.lanes {
+            if !self.active[lane] {
+                continue;
+            }
+            counters[1] += 1;
+            if self.lane_symmetry(lane).eligible() {
+                counters[0] += 1;
+            }
+        }
+        counters
     }
 
     /// Gather every active lane, run every non-identity slot over the resident block, scatter every

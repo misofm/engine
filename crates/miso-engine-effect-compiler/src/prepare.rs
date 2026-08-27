@@ -3,13 +3,13 @@ use miso_engine_core::realtime::{
     ObservationReaderV1, Producer, QueueGeneration, bounded_spsc, observation_slot,
 };
 use miso_engine_effect_contract::{
-    BankWidth, EffectControlLane, EffectControlRecordV1, EffectDescriptorV1, EffectProgramKeyV1,
-    EffectQuality, InitialParameterValue, LinkMode, NativeEffectFactory, NativeEffectRegistry,
-    ObservationLaneV1, ParameterChannel, ParameterChannelPolicy, ParameterUnit,
-    PrepareEffectBankRequest, PrepareEffectLimits, PrepareEffectRequest, PreparedBankMetadata,
-    PreparedEffectMetadata, PreparedNativeEffect, PreparedNativeEffectBank, PreparedPortsV1,
-    PreparedSidechainPort, RegistryError, StatePayloadInput, StatePayloadOutput,
-    expected_prepared_metadata,
+    BankWidth, ChannelSymmetryWitnessV1, EffectControlLane, EffectControlRecordV1,
+    EffectDescriptorV1, EffectProgramKeyV1, EffectQuality, InitialParameterValue, LinkMode,
+    NativeEffectFactory, NativeEffectRegistry, ObservationLaneV1, ParameterChannel,
+    ParameterChannelPolicy, ParameterUnit, PrepareEffectBankRequest, PrepareEffectLimits,
+    PrepareEffectRequest, PreparedBankMetadata, PreparedEffectMetadata, PreparedNativeEffect,
+    PreparedNativeEffectBank, PreparedPortsV1, PreparedSidechainPort, RegistryError,
+    StatePayloadInput, StatePayloadOutput, expected_prepared_metadata, payload_sections_agree,
 };
 use miso_engine_effect_package::{
     BoundEffectDescriptorWireV1, EFFECT_STATE_V1_BUFFER_ENVELOPE_OUTPUT,
@@ -192,6 +192,8 @@ pub struct RestoredScalarEffectStateV1<'wire> {
     metadata: PreparedEffectMetadata,
     bound_factory: WireBoundNativeEffectFactoryV1<'wire>,
     replay: EffectBankPreparationV1,
+    /// This restore's channel-symmetry witness, decided from the envelope's own bytes.
+    symmetry: ChannelSymmetryWitnessV1,
 }
 
 impl core::fmt::Debug for RestoredScalarEffectStateV1<'_> {
@@ -205,6 +207,25 @@ impl core::fmt::Debug for RestoredScalarEffectStateV1<'_> {
 }
 
 impl RestoredScalarEffectStateV1<'_> {
+    /// This restored instance's channel-symmetry witness.
+    ///
+    /// `RESTORED` holds exactly when the envelope's left and right payload sections compared
+    /// **byte-equal**, and `DESIGNED` is the restored processor's own comparison of the words its
+    /// kernel reads. The other three terms are set: a restore says nothing about the track's
+    /// source mapping and nothing about live console traffic.
+    ///
+    /// # Why the check is on the wire bytes and not on the restored object
+    ///
+    /// The payload is the whole of what a restore carries, and it carries *state* as well as
+    /// designed words -- rings, cursors, integrators. Two channels whose designed words agree but
+    /// whose restored rings differ are not doing identical work and must not be collapsed, and
+    /// only the byte comparison sees that. It is also the cheapest possible form: one `memcmp` of
+    /// two equal-length slices, off the render thread, once.
+    #[must_use]
+    pub const fn channel_symmetry(&self) -> ChannelSymmetryWitnessV1 {
+        self.symmetry
+    }
+
     #[must_use]
     pub fn processor(&self) -> &dyn PreparedNativeEffect {
         self.processor.as_ref()
@@ -238,6 +259,13 @@ pub struct UnpublishedEffectBankStateV1<'wire> {
     width: BankWidth,
     bound_factory: WireBoundNativeEffectFactoryV1<'wire>,
     replays: Box<[EffectBankPreparationV1]>,
+    /// Per-lane `RESTORED` term, one entry per lane of the bound width.
+    ///
+    /// A freshly bound bank has restored nothing, so every lane starts `true`: the term says "no
+    /// restore has contradicted this lane", and a lane that was never restored has not been
+    /// contradicted. Each `restore_unpublished_effect_bank_track_state_v1` writes exactly its own
+    /// lane's entry, which is what keeps the per-lane witnesses free of cross-lane coupling.
+    restored: Box<[bool]>,
 }
 
 impl core::fmt::Debug for UnpublishedEffectBankStateV1<'_> {
@@ -253,6 +281,26 @@ impl core::fmt::Debug for UnpublishedEffectBankStateV1<'_> {
 }
 
 impl UnpublishedEffectBankStateV1<'_> {
+    /// One lane's channel-symmetry witness for this bound bank.
+    ///
+    /// `RESTORED` is what that lane's restore decided (see
+    /// [`RestoredScalarEffectStateV1::channel_symmetry`] for the argument); `DESIGNED` is the
+    /// bank's own comparison of the words its kernel reads for that lane. A lane index the bound
+    /// width does not have declines outright.
+    #[must_use]
+    pub fn lane_channel_symmetry(&self, lane: usize) -> ChannelSymmetryWitnessV1 {
+        let Some(restored) = self.restored.get(lane).copied() else {
+            return ChannelSymmetryWitnessV1::DECLINED;
+        };
+        let mut witness = ChannelSymmetryWitnessV1::SYMMETRIC;
+        witness.set(ChannelSymmetryWitnessV1::RESTORED, restored);
+        witness.set(
+            ChannelSymmetryWitnessV1::DESIGNED,
+            self.bank.lane_channel_symmetry(lane),
+        );
+        witness
+    }
+
     #[must_use]
     pub fn bank(&self) -> &dyn PreparedNativeEffectBank {
         self.bank.as_ref()
@@ -428,6 +476,7 @@ pub fn prepare_unpublished_effect_bank_state_v1<'wire>(
     if !core::ptr::eq(bound_factory.factory.descriptor(), bound_factory.descriptor) {
         return Err(state_unavailable(EffectStateDiagnosticCodeV1::Factory, 4));
     }
+    let restored = vec![true; width.lanes() as usize].into_boxed_slice();
     Ok(UnpublishedEffectBankStateV1 {
         bank,
         metadata,
@@ -435,6 +484,7 @@ pub fn prepare_unpublished_effect_bank_state_v1<'wire>(
         width,
         bound_factory,
         replays,
+        restored,
     })
 }
 
@@ -559,6 +609,12 @@ pub fn restore_unpublished_effect_bank_track_state_v1<'wire>(
     .map_err(|_| bank_restore_error(2))?;
     validate_unpublished_bank_program_and_provenance(&capability, replay)?;
     let (common, left, right) = state.payloads();
+    // The restore hook. Taken here, before a byte enters the bank, on the two equal-length
+    // sections of the verified envelope: byte equality of the sections is bitwise equality of the
+    // two channels' words, `-0.0` included, because every payload word is little-endian raw bits.
+    // An unequal restore declines this lane until a reset, and cannot be re-earned by the
+    // parameter words agreeing afterwards -- equal words do not imply equal state.
+    let sections_agree = payload_sections_agree(left, right);
     let payload_input = StatePayloadInput::new(
         common,
         left,
@@ -570,6 +626,9 @@ pub fn restore_unpublished_effect_bank_track_state_v1<'wire>(
         .bank
         .restore_track_state_payload(track_index, state.state_layout_version(), payload_input)
         .map_err(|_| state_unavailable(EffectStateDiagnosticCodeV1::Payload, 4))?;
+    if let Some(lane) = capability.restored.get_mut(track_index as usize) {
+        *lane = *lane && sections_agree;
+    }
     Ok(capability)
 }
 
@@ -773,16 +832,25 @@ pub fn restore_scalar_effect_state_v1<'wire>(
     validate_effect_state_metadata_v1(bound_factory.bound_descriptor, replay_view, metadata)
         .map_err(|_| state_unavailable(EffectStateDiagnosticCodeV1::Factory, 4))?;
     let (common, left, right) = state.payloads();
+    // The restore hook; see `restore_unpublished_effect_bank_track_state_v1` for the argument.
+    let sections_agree = payload_sections_agree(left, right);
     let payload_input = StatePayloadInput::new(common, left, right, metadata.state_sizes)
         .map_err(|_| state_unavailable(EffectStateDiagnosticCodeV1::Payload, 3))?;
     processor
         .restore_state_payload(state.state_layout_version(), payload_input)
         .map_err(|_| state_unavailable(EffectStateDiagnosticCodeV1::Payload, 3))?;
+    let mut symmetry = ChannelSymmetryWitnessV1::SYMMETRIC;
+    symmetry.set(ChannelSymmetryWitnessV1::RESTORED, sections_agree);
+    symmetry.set(
+        ChannelSymmetryWitnessV1::DESIGNED,
+        processor.channel_symmetry(),
+    );
     Ok(RestoredScalarEffectStateV1 {
         processor,
         metadata,
         bound_factory,
         replay,
+        symmetry,
     })
 }
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]

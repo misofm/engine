@@ -26,7 +26,7 @@ use miso_engine_core::realtime::{
     Consumer, PreparedRenderPlan, Producer, QueueGeneration, RenderEnvelope, RenderError,
     bounded_spsc, bounded_spsc_retained_payload,
 };
-use miso_engine_effect_contract::BankWidth;
+use miso_engine_effect_contract::{BankWidth, ChannelSymmetryWitnessV1};
 use miso_engine_graph::{
     DependencyLevel, GraphBindingBlock, GraphBuiltinBankResourceEstimate, GraphNodeId,
     GraphNodeObserverBinding, GraphObservationBlock, GraphPreparedBuiltinBank,
@@ -231,6 +231,15 @@ pub struct PreparedBuiltinsSession {
     resources: BuiltinResourceEstimate,
 }
 
+/// The witness of a stage that is **seam-side by design**: fader, mute, pan and matrix.
+///
+/// Every term holds, unconditionally and without looking at a single word. That is not an
+/// optimism: a collapsed track duplicates its one plane *into* these stages, so their per-channel
+/// words are free to differ and must never gate the collapse. The measured evidence for the seam
+/// sitting exactly here is a session with per-track asymmetric faders and non-identity pans whose
+/// collapsed and dual renders are byte-identical.
+const SEAM_SIDE_WITNESS: ChannelSymmetryWitnessV1 = ChannelSymmetryWitnessV1::SYMMETRIC;
+
 struct BuiltinBankProcessor {
     bank: BuiltinInputBankV1,
     process_calls: u64,
@@ -254,6 +263,10 @@ impl GraphPreparedBuiltinBankProcessor for BuiltinBankProcessor {
 
     fn qualification_counters(&self) -> [u64; 2] {
         [self.process_calls, self.frames_processed]
+    }
+
+    fn lane_symmetry(&self, lane: usize) -> ChannelSymmetryWitnessV1 {
+        self.bank.lane_symmetry(lane)
     }
 }
 
@@ -328,6 +341,14 @@ impl GraphPreparedBuiltinBankProcessor for FaderBankProcessor {
     fn qualification_counters(&self) -> [u64; 2] {
         [self.process_calls, self.frames_processed]
     }
+
+    /// Seam-side: see [`SEAM_SIDE_WITNESS`]. `TrackFaderRecordV1` is a seam-side record type, so
+    /// its drain above deliberately folds nothing into a witness -- and could not, because
+    /// `LiveConsoleRecordV1::SEAM` compiles the seam-side arm away.
+    fn lane_symmetry(&self, lane: usize) -> ChannelSymmetryWitnessV1 {
+        let _ = lane;
+        SEAM_SIDE_WITNESS
+    }
 }
 
 /// One strip matrix/pan bank and the console channels of its member lanes (issue #212).
@@ -369,6 +390,14 @@ impl GraphPreparedBuiltinBankProcessor for MatrixBankProcessor {
 
     fn qualification_counters(&self) -> [u64; 2] {
         [self.process_calls, self.frames_processed]
+    }
+
+    /// Seam-side: see [`SEAM_SIDE_WITNESS`]. The 2x2 matrix **is** the seam -- it is the earliest
+    /// genuinely cross-channel operation in the strip -- so it is the one stage that is
+    /// structurally guaranteed to sit on the free side of it.
+    fn lane_symmetry(&self, lane: usize) -> ChannelSymmetryWitnessV1 {
+        let _ = lane;
+        SEAM_SIDE_WITNESS
     }
 }
 
@@ -2405,6 +2434,64 @@ fn add_vector_layout<T>(
     })
 }
 
+/// The `SOURCE` term of one track's channel-symmetry witness.
+///
+/// True exactly when the track's two dual-mono lanes read the **same** source channel, so the two
+/// planes are filled with identical samples. That is the structural precondition of a mono
+/// collapse: a collapsed track computes one plane, so the two planes have to have been fed
+/// identically in the first place.
+///
+/// # Why one condition and not two
+///
+/// The mono-collapse design states the predicate as "`left_source_channel ==
+/// right_source_channel`, **or** a one-channel source". The second is not a second case: session
+/// validation refuses any channel index that is not below the source's `channel_count`
+/// (`SourceChannelIndexOutOfRange`, `$.tracks[i].left_source_channel`), so a one-channel source can
+/// only ever be mapped as `0, 0` -- which the first condition already admits. A separate branch
+/// for it would be code no validated session can reach, and the honest form of an unreachable
+/// branch is not writing it.
+///
+/// `session` is taken so this stays the one predicate both bank planners call even after the rule
+/// grows a term the track alone cannot answer.
+#[must_use]
+pub fn track_mono_source_v1(session: &CompiledSession, track: &Track) -> bool {
+    let _ = session;
+    track.left_source_channel == track.right_source_channel
+}
+
+/// Every track's structural channel-symmetry witness, in normalized track order.
+///
+/// # Why this is a function over the compiled session and not a field of the prepared plan
+///
+/// The structural term is what the **planner** needs: the mono-collapse design pools cohorts by
+/// class -- "mono-symmetric at prepare" against "stereo" -- and that decision is taken while the
+/// plan is being built, from the compiled session, before any prepared object exists. Both bank
+/// planners must derive the class from the same predicate or the lane-alignment check declines
+/// the chain merges silently, so the predicate is written once, here, and called rather than
+/// copied.
+///
+/// The prepared side is deliberately source-agnostic: the SOURCE term lives only in this
+/// bit into each track's input stage, so the runtime witness carries it too. This function is what
+/// a caller with a `CompiledSession` and no plan asks.
+#[must_use]
+pub fn session_structural_symmetry_v1(
+    session: &CompiledSession,
+) -> Vec<(Box<str>, ChannelSymmetryWitnessV1)> {
+    session
+        .normalized_model()
+        .tracks
+        .iter()
+        .map(|track| {
+            let mut witness = ChannelSymmetryWitnessV1::SYMMETRIC;
+            witness.set(
+                ChannelSymmetryWitnessV1::SOURCE,
+                track_mono_source_v1(session, track),
+            );
+            (Box::<str>::from(track.id.as_str()), witness)
+        })
+        .collect()
+}
+
 struct InputProcessor(InputBuiltins);
 impl GraphRuntimeProcessor for InputProcessor {
     fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
@@ -2412,6 +2499,9 @@ impl GraphRuntimeProcessor for InputProcessor {
             .map_err(render_error)?;
         self.0.process(block);
         Ok(())
+    }
+    fn channel_symmetry(&self) -> ChannelSymmetryWitnessV1 {
+        self.0.channel_symmetry()
     }
 }
 struct FaderProcessor(FaderMuteBuiltins);
@@ -2422,6 +2512,9 @@ impl GraphRuntimeProcessor for FaderProcessor {
         self.0.process(block);
         Ok(())
     }
+    fn channel_symmetry(&self) -> ChannelSymmetryWitnessV1 {
+        SEAM_SIDE_WITNESS
+    }
 }
 struct MatrixProcessor(MatrixBuiltins);
 impl GraphRuntimeProcessor for MatrixProcessor {
@@ -2430,6 +2523,9 @@ impl GraphRuntimeProcessor for MatrixProcessor {
             .map_err(render_error)?;
         self.0.process(block);
         Ok(())
+    }
+    fn channel_symmetry(&self) -> ChannelSymmetryWitnessV1 {
+        SEAM_SIDE_WITNESS
     }
 }
 

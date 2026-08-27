@@ -38,8 +38,8 @@ use miso_engine_core::realtime::{
 use miso_engine_lane::kernels::pdc_delay_block;
 
 use crate::{
-    AutomationSpanKind, ObservationDescriptorV1, ObservationFoldV1, ObservationSampleV1,
-    ParameterChannel, PreparedAutomationSpan,
+    AutomationSpanKind, ChannelSymmetryWitnessV1, ObservationDescriptorV1, ObservationFoldV1,
+    ObservationSampleV1, ParameterChannel, PreparedAutomationSpan,
 };
 
 /// One admitted, still-unapplied live control event for one prepared effect instance.
@@ -110,13 +110,46 @@ pub struct EffectControlLane {
     control: Consumer<EffectControlRecordV1>,
     /// Live bypass state, retained across blocks so a rendered block always knows it.
     bypass: bool,
+    /// This instance's live channel-symmetry terms, retained across blocks exactly as `bypass`
+    /// is, and for the same reason: the terms describe what the *drained* records did, so they
+    /// have to survive the block that drained them.
+    ///
+    /// # Why the witness is maintained here and not at the host's admission call
+    ///
+    /// The queue **is** the admission boundary. A record is admitted into the rendered state at
+    /// the drain, on the render thread, at the top of the block that first applies it -- so a
+    /// witness folded in here cannot disagree with the state it describes, and it needs no
+    /// atomic and no second channel to reach the collapse dispatch. A host-side bit could not:
+    /// `PreparedRenderPlan` is `Send` and **not** `Sync`, so a value the control thread owns is
+    /// unreadable from the render thread by construction, and the record it would have been
+    /// derived from is already crossing this queue.
+    ///
+    /// Only the two live terms move here. `SOURCE`, `DESIGNED` and `RESTORED` are decided off
+    /// render, at preparation and at restore, and are conjoined by the stage that owns this lane.
+    symmetry: ChannelSymmetryWitnessV1,
 }
 
 impl EffectControlLane {
     /// Binds the consumer half of one prepared channel.
     #[must_use]
     pub fn new(control: Consumer<EffectControlRecordV1>, bypass: bool) -> Self {
-        Self { control, bypass }
+        let mut symmetry = ChannelSymmetryWitnessV1::SYMMETRIC;
+        symmetry.set(ChannelSymmetryWitnessV1::UNBYPASSED, !bypass);
+        Self {
+            control,
+            bypass,
+            symmetry,
+        }
+    }
+
+    /// This lane's live channel-symmetry terms as of the last [`stage`](Self::stage).
+    ///
+    /// `LIVE` and `UNBYPASSED` are the only terms this value speaks to; the other three are set,
+    /// so conjoining it with the stage's prepared witness gives the whole answer and never
+    /// over-claims.
+    #[must_use]
+    pub const fn symmetry(&self) -> ChannelSymmetryWitnessV1 {
+        self.symmetry
     }
 
     /// Whether this instance is bypassed as of the last [`stage`](Self::stage).
@@ -159,6 +192,10 @@ impl EffectControlLane {
         let mut unbound = 0_u32;
         let mut observation = observation;
         while let Ok(record) = self.control.try_pop() {
+            // The one hook. `admit` takes the record by trait, not by kind, so a record type
+            // added to this queue later cannot reach the render state without declaring what it
+            // does to the witness (`symmetry::LiveConsoleRecordV1`).
+            self.symmetry.admit(&record);
             let (parameter_index, channel, value) = match record {
                 EffectControlRecordV1::Bypass(value) => {
                     self.bypass = value;

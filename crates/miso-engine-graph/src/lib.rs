@@ -18,8 +18,8 @@ use miso_engine_core::{
     },
 };
 use miso_engine_effect_contract::{
-    EffectControlLane, LatencySamples, ObservationLaneV1, PreparedEffectMetadata,
-    PreparedNativeEffect, TailSamples,
+    ChannelSymmetryWitnessV1, EffectControlLane, LatencySamples, ObservationLaneV1,
+    PreparedEffectMetadata, PreparedNativeEffect, TailSamples,
 };
 use miso_engine_lane::Backend;
 use miso_engine_rack::AoSoaScratch;
@@ -541,6 +541,15 @@ pub trait GraphPreparedBuiltinBankProcessor: Send {
     /// Cumulative `[process_calls, frames_processed]` after render is disarmed.
     fn qualification_counters(&self) -> [u64; 2] {
         [0, 0]
+    }
+
+    /// This builtin bank's channel-symmetry witness for one lane of the cohort.
+    ///
+    /// The default declines, for the reason `miso_engine_rack::BankStage::lane_symmetry` gives:
+    /// an unclassified stage must not claim eligibility for work nobody checked.
+    fn lane_symmetry(&self, lane: usize) -> ChannelSymmetryWitnessV1 {
+        let _ = lane;
+        ChannelSymmetryWitnessV1::DECLINED
     }
 }
 impl PreparedGraphPlan {
@@ -1153,6 +1162,15 @@ pub struct GraphBindingBlock<'a> {
 }
 pub trait GraphRuntimeProcessor: Send {
     fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError>;
+
+    /// This bound processor's channel-symmetry witness for the track it renders.
+    ///
+    /// The scalar-tail sibling of `GraphPreparedBuiltinBankProcessor::lane_symmetry`, defaulted to
+    /// declining for the same reason. A host-supplied processor is opaque to the engine and
+    /// therefore declines: nothing has compared its two channels' words.
+    fn channel_symmetry(&self) -> ChannelSymmetryWitnessV1 {
+        ChannelSymmetryWitnessV1::DECLINED
+    }
 }
 /// Immutable post-node observation input. Observers cannot alter graph audio.
 pub struct GraphObservationBlock<'a> {
@@ -1311,6 +1329,15 @@ impl PreparedPlanExecutor for GraphExecutor {
             let shape = unit.bank_shape();
             total[0] = total[0].saturating_add(shape[0]);
             total[1] = total[1].saturating_add(shape[1]);
+            total
+        })
+    }
+
+    fn symmetry_counters(&self) -> [u64; 2] {
+        self.runtime.units.iter().fold([0, 0], |mut total, unit| {
+            let counters = unit.symmetry_counters();
+            total[0] = total[0].saturating_add(counters[0]);
+            total[1] = total[1].saturating_add(counters[1]);
             total
         })
     }

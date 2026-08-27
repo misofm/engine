@@ -5,7 +5,12 @@
 #![allow(missing_docs)]
 
 mod live;
+mod symmetry;
 pub use live::{BypassShunt, EffectControlLane, EffectControlRecordV1, ObservationLaneV1, Staged};
+pub use symmetry::{
+    ChannelSymmetryWitnessV1, LiveConsoleRecordV1, SeamSideV1, SymmetryEventV1,
+    payload_sections_agree,
+};
 
 use core::{fmt, hash::Hash};
 use miso_engine_core::{
@@ -1551,6 +1556,16 @@ pub trait PreparedNativeEffect: Send {
         state_layout_version: u32,
         input: StatePayloadInput<'_>,
     ) -> Result<(), StatePayloadError>;
+
+    /// Whether every designed per-channel word this instance's kernel reads compares
+    /// **bit-equal** between the left and the right channel.
+    ///
+    /// The scalar sibling of
+    /// [`PreparedNativeEffectBank::lane_channel_symmetry`]; the same rule, the same default, the
+    /// same reason.
+    fn channel_symmetry(&self) -> bool {
+        false
+    }
 }
 pub trait PreparedNativeEffectBank: Send {
     fn metadata(&self) -> PreparedBankMetadata;
@@ -1581,6 +1596,25 @@ pub trait PreparedNativeEffectBank: Send {
         state_layout_version: u32,
         input: StatePayloadInput<'_>,
     ) -> Result<(), StatePayloadError>;
+
+    /// Whether every designed per-lane word this bank's kernel reads for `lane` compares
+    /// **bit-equal** between the left and the right channel.
+    ///
+    /// This is the `DESIGNED` term of
+    /// [`ChannelSymmetryWitnessV1`](crate::ChannelSymmetryWitnessV1), and the only thing an
+    /// implementation may look at is the words its own kernel loads: not the control-plane
+    /// parameter table it designed them from, not running filter state, not anything shared
+    /// between the channels (which cannot be asymmetric and would only dilute the answer). The
+    /// comparison is on raw bits, so `+0.0` and `-0.0` decline.
+    ///
+    /// The default is `false`: an effect that has not derived a witness from its kernel's read
+    /// surface declines, and a wrong `true` is the only answer that could ever be unsound.
+    ///
+    /// Off the render thread, or at a block boundary. `&self`, so it cannot advance a smoother.
+    fn lane_channel_symmetry(&self, lane: usize) -> bool {
+        let _ = lane;
+        false
+    }
 }
 #[derive(Default)]
 pub struct NativeEffectRegistry {

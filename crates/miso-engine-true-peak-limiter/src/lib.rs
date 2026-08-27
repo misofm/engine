@@ -2651,9 +2651,62 @@ impl NativeEffectFactory for TruePeakLimiterFactory {
     }
 }
 
+/// The `DESIGNED` term of the channel-symmetry witness, over the limiter's own kernel read
+/// surface.
+///
+/// # The word list, and why it is exactly this
+///
+/// The limiter's per-lane designed words are four `ChannelState` fields, and every one of them is
+/// read by a body that runs every block:
+///
+/// * `lane[l]` (`LaneShape { window, end_offset, box_offset }`) -- the van Herk window geometry.
+///   It is leg one of `lanes_uniform`, the gate that chooses the uniform body over the general
+///   one, and `UniformHot::new` hoists lane 0 of it. Three integers; `LaneShape` is `Eq`.
+/// * `limit[l]` and `release[l]` (`LinearRamp`) -- the two automatable coefficients, all four
+///   fields each. `RampLanes::gather` reads `current`, `target`, `step` and `remaining` into
+///   registers at the top of every block and `scatter` writes them back.
+/// * `lookahead_ms[l]` -- what `lane[l]` was derived from, serialised and never ramped. The frame
+///   loop does not read it, but `commit_lane` and `reset_to_defaults` do, so two channels that
+///   agreed on the shape and disagreed here would diverge at the next restore or reset.
+///
+/// Deliberately excluded, each for its own reason:
+///
+/// * `history`, `main_ring`, `required_ring`, `box_ring`, `reduction`, `prefix`, `box_sum`,
+///   `phase` -- running state (the crate's own `clear_runtime` is the authoritative list). `phase`
+///   is leg two of `lanes_uniform`, which makes it a *gate* input; it is still running state and
+///   still converges by induction rather than by comparison, and a restore that desynchronised it
+///   is caught by the `RESTORED` term, not this one.
+/// * `left_defaults` / `right_defaults` -- control-plane reset values the kernel never reads; a
+///   `FullToDefaults` that made the channels disagree lands in the four words above.
+/// * `Cursors` and `LimiterCoef` (the FIR table, `link_max`, `bypass`) -- one per **bank**, shared
+///   by both channels, so they cannot be asymmetric. `link_max` in particular is the reason the
+///   seam sits where it does: `linked = peak_right.max(peak_left)` on two identical words is
+///   `max(p, p) = p` bit-exactly.
+impl<L: Lane> LimiterCore<L> {
+    fn designed_channel_symmetry(&self, lane: usize) -> bool {
+        if lane >= self.left.width || lane >= self.right.width {
+            return false;
+        }
+        let ramps_agree = |left: &LinearRamp, right: &LinearRamp| {
+            left.current.to_bits() == right.current.to_bits()
+                && left.target.to_bits() == right.target.to_bits()
+                && left.step.to_bits() == right.step.to_bits()
+                && left.remaining == right.remaining
+        };
+        self.left.lane[lane] == self.right.lane[lane]
+            && self.left.lookahead_ms[lane].to_bits() == self.right.lookahead_ms[lane].to_bits()
+            && ramps_agree(&self.left.limit[lane], &self.right.limit[lane])
+            && ramps_agree(&self.left.release[lane], &self.right.release[lane])
+    }
+}
+
 impl PreparedNativeEffect for PreparedTruePeakLimiter {
     fn metadata(&self) -> PreparedEffectMetadata {
         self.core.metadata
+    }
+
+    fn channel_symmetry(&self) -> bool {
+        self.core.designed_channel_symmetry(0)
     }
 
     /// Issue #143 D2 / R4: the recursive reduction word `d`, linear, read for lane 0.
@@ -2713,6 +2766,10 @@ impl PreparedNativeEffect for PreparedTruePeakLimiter {
 impl<L: Lane> PreparedNativeEffectBank for PreparedTruePeakLimiterBank<L> {
     fn metadata(&self) -> PreparedBankMetadata {
         self.metadata.clone()
+    }
+
+    fn lane_channel_symmetry(&self, lane: usize) -> bool {
+        self.core.designed_channel_symmetry(lane)
     }
 
     fn observe_resident_bank(&self, tap_index: u32, out: &mut [ObservationSampleV1]) -> bool {
