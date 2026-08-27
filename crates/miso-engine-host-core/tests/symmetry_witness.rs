@@ -26,7 +26,7 @@
 //!   before any plan exists. That is the planner's pooling class -- the later phase partitions
 //!   cohorts by it -- and it is a control-plane function rather than a field of a prepared object
 //!   for a concrete reason: the prepared input section's byte size is a sealed fixture-ABI number
-//!   (`INPUT_PROCESSOR_BYTES_V1`), and a phase that changes no behaviour must not move a sealed
+//!   (the sealed builtin-compiler mutation-matrix transcript), and a phase that changes no behaviour must not move a sealed
 //!   byte count to carry a bit nothing rendered reads.
 //! * `PreparedRenderPlan::symmetry_counters` answers the other four terms from the **built
 //!   runtime**: what preparation designed, what a restore contradicted, and what the live drains

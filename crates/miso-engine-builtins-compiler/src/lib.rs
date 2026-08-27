@@ -2470,7 +2470,7 @@ pub fn track_mono_source_v1(session: &CompiledSession, track: &Track) -> bool {
 /// the chain merges silently, so the predicate is written once, here, and called rather than
 /// copied.
 ///
-/// The prepared side is not left guessing either: `InputBuiltins::set_mono_source` stamps the same
+/// The prepared side is deliberately source-agnostic: the SOURCE term lives only in this
 /// bit into each track's input stage, so the runtime witness carries it too. This function is what
 /// a caller with a `CompiledSession` and no plan asks.
 #[must_use]

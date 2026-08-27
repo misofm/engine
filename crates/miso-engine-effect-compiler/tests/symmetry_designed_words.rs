@@ -122,7 +122,7 @@ struct Case {
 }
 
 /// Red mutation: in any one implementation, drop a word from the comparison (for example, stop
-/// comparing the compressor's `words[COEF_THRESHOLD]`) -> that effect's asymmetric row fails while
+/// comparing a whole term such as the compressor's ramps or `delay`) -> that effect's asymmetric row fails while
 /// every other row stays green, so the failure names the effect and the word.
 #[test]
 fn each_launch_effect_sees_its_own_designed_words_disagree() {

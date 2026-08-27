@@ -1616,7 +1616,7 @@ impl InputBuiltins {
     /// * `SOURCE` is the track's **source mapping**, which this crate never sees; it is decided on
     ///   the control plane by `miso_engine_builtins_compiler::track_mono_source_v1` and conjoined
     ///   there. It is not stamped into this object because the prepared size of this type is a
-    ///   sealed fixture-ABI number (`INPUT_PROCESSOR_BYTES_V1`), and a phase that changes no
+    ///   sealed fixture-ABI accounting (the builtin-compiler mutation-matrix transcript), and a phase that changes no
     ///   behaviour must not move a sealed byte count to carry a bit nothing rendered reads.
     /// * The two live terms stay set because `polarity_invert`, `trim_db`, `hpf_hz` and `lpf_hz`
     ///   are all `PreparedOnly` in `BUILTIN_PARAMETER_DESCRIPTORS_V1`: there is no
