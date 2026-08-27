@@ -7,7 +7,7 @@
 # defect cannot consume the one authorised measurement. Nothing here is timed, and nothing here
 # instantiates the guest for anything but a shape check.
 set -euo pipefail
-[[ "$#" -le 1 ]] || { printf 'usage: %s [--after|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue183|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline|--round2-lim|--round2-lim-baseline|--round2-composed]
+[[ "$#" -le 1 ]] || { printf 'usage: %s [--after|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue183|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline|--round2-lim|--round2-lim-baseline|--round2-composed|--audit-chain-merge|--audit-chain-merge-baseline]
 ' "$0" >&2; exit 2; }
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$root"
@@ -59,8 +59,10 @@ case "${1:-}" in
     --round2-lim) arm=round2-lim; shift ;;
     --round2-lim-baseline) arm=round2-lim-baseline; shift ;;
     --round2-composed) arm=round2-composed; shift ;;
+    --audit-chain-merge) arm=audit-chain-merge; shift ;;
+    --audit-chain-merge-baseline) arm=audit-chain-merge-baseline; shift ;;
 esac
-[[ "$#" == 0 ]] || fail "usage: $0 [--after|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue183|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline|--round2-lim|--round2-lim-baseline|--round2-composed]"
+[[ "$#" == 0 ]] || fail "usage: $0 [--after|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue183|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline|--round2-lim|--round2-lim-baseline|--round2-composed|--audit-chain-merge|--audit-chain-merge-baseline]"
 
 if [[ "$arm" == after ]]; then
     artifact_dir="$root/artifacts/issue163-phase2"
@@ -96,6 +98,10 @@ elif [[ "$arm" == round2-lim-baseline ]]; then
     artifact_dir="$root/artifacts/round2-lim-baseline"
 elif [[ "$arm" == round2-composed ]]; then
     artifact_dir="$root/artifacts/round2-composed"
+elif [[ "$arm" == audit-chain-merge ]]; then
+    artifact_dir="$root/artifacts/audit-chain-merge"
+elif [[ "$arm" == audit-chain-merge-baseline ]]; then
+    artifact_dir="$root/artifacts/audit-chain-merge-baseline"
 else
     artifact_dir="$root/artifacts/issue163-phase2-wasm-baseline"
 fi

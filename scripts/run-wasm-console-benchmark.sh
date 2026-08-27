@@ -62,6 +62,13 @@
 # the old call and the new one -- so the wasm interest is entirely `Lane::max`/`Lane::min`, which
 # become `f32x4.pmax`/`f32x4.pmin` with their operands swapped. Class A on both counts: every
 # `output_sha256` of the two arms must match, row for row and leg for leg.
+#
+# `--audit-chain-merge` and `--audit-chain-merge-baseline` are the wasm half of issue #202
+# recommendation 2's paired measurement. The merge is a graph-layer decision and is therefore
+# identical on both targets -- the strip fuses into one bank chain per cohort -- but the round-trip
+# it removes is a planar/AoSoA transpose, which is exactly the shape of work the wasm leg pays most
+# for, so the saving is expected to be the larger one here. Class **A**: every `output_sha256` of
+# the two arms must match, row for row and leg for leg.
 set -euo pipefail
 arm=baseline
 if [[ "$#" == 1 ]]; then
@@ -83,11 +90,13 @@ if [[ "$#" == 1 ]]; then
         --round2-lim) arm=round2-lim ;;
         --round2-lim-baseline) arm=round2-lim-baseline ;;
         --round2-composed) arm=round2-composed ;;
-        *) printf 'usage: %s [--after|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue183|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline|--round2-lim|--round2-lim-baseline|--round2-composed]
+        --audit-chain-merge) arm=audit-chain-merge ;;
+        --audit-chain-merge-baseline) arm=audit-chain-merge-baseline ;;
+        *) printf 'usage: %s [--after|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue183|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline|--round2-lim|--round2-lim-baseline|--round2-composed|--audit-chain-merge|--audit-chain-merge-baseline]
 ' "$0" >&2; exit 2 ;;
     esac
 elif [[ "$#" != 0 ]]; then
-    printf 'usage: %s [--after|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue183|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline|--round2-lim|--round2-lim-baseline|--round2-composed]
+    printf 'usage: %s [--after|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue183|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline|--round2-lim|--round2-lim-baseline|--round2-composed|--audit-chain-merge|--audit-chain-merge-baseline]
 ' "$0" >&2
     exit 2
 fi
@@ -130,6 +139,10 @@ elif [[ "$arm" == round2-lim-baseline ]]; then
     artifact_dir="$root/artifacts/round2-lim-baseline"
 elif [[ "$arm" == round2-composed ]]; then
     artifact_dir="$root/artifacts/round2-composed"
+elif [[ "$arm" == audit-chain-merge ]]; then
+    artifact_dir="$root/artifacts/audit-chain-merge"
+elif [[ "$arm" == audit-chain-merge-baseline ]]; then
+    artifact_dir="$root/artifacts/audit-chain-merge-baseline"
 else
     artifact_dir="$root/artifacts/issue163-phase2-wasm-baseline"
 fi

@@ -455,13 +455,21 @@ pub(crate) struct Runtime {
     bank_inputs: Box<[u32]>,
     /// Scratch for a bank chain's scatter-target buffers, sized to the widest bank at bind.
     bank_outputs: Box<[u32]>,
+    /// Lanes whose scatter this bind pointed at their consumer's buffer (issue #202 rec 3).
+    redirects: u64,
 }
 
 impl Runtime {
+    /// Lanes whose scatter this bind pointed at their consumer's buffer (issue #202 rec 3).
+    pub(crate) const fn scatter_redirects(&self) -> u64 {
+        self.redirects
+    }
+
     pub(crate) fn new(
         lease: ArenaLeaseV1,
         delays: Vec<CompensationDelay>,
         units: Vec<RuntimeUnit>,
+        redirects: u64,
     ) -> Self {
         let widest = units
             .iter()
@@ -477,6 +485,7 @@ impl Runtime {
             units: units.into_boxed_slice(),
             bank_inputs: vec![0; widest].into_boxed_slice(),
             bank_outputs: vec![0; widest].into_boxed_slice(),
+            redirects,
         }
     }
 
@@ -500,6 +509,7 @@ impl Runtime {
             units,
             bank_inputs,
             bank_outputs,
+            ..
         } = self;
         let delays: &mut [CompensationDelay] = delays;
         match &mut units[index] {
@@ -1082,14 +1092,6 @@ impl RuntimeParts {
             }
         }
     }
-
-    /// The cohort chain a bound effect bank belongs to, or `None` for a builtin bank.
-    fn cohort_of(&self, membership: Membership) -> Option<crate::GraphBankCohortV1> {
-        match membership {
-            Membership::Effect(index) => self.banks[index].as_ref().map(|bank| bank.cohort),
-            Membership::Builtin(_) => None,
-        }
-    }
 }
 
 /// Which nodes alias each op's output buffer, in schedule order (`program::Tap`).
@@ -1174,14 +1176,34 @@ pub(crate) fn build_sequential(
     // Issue #181: consecutive slots of one cohort chain become one unit with one chain, so the
     // pair pays one planar/AoSoA round-trip per block where it used to pay two.
     let runs = cohort_runs(program, spec, &parts, &grouped);
-    let mut units = Vec::with_capacity(runs.len());
-    for run in runs {
-        let membership: Vec<Membership> =
-            run.iter().filter_map(|index| grouped[*index].0).collect();
-        let ops: Vec<usize> = run
-            .iter()
-            .flat_map(|index| grouped[*index].1.iter().copied())
-            .collect();
+    let run_units: Vec<(Vec<Membership>, Vec<usize>)> = runs
+        .iter()
+        .map(|run| {
+            (
+                run.iter().filter_map(|index| grouped[*index].0).collect(),
+                run.iter()
+                    .flat_map(|index| grouped[*index].1.iter().copied())
+                    .collect(),
+            )
+        })
+        .collect();
+    // Issue #202 rec 3: decided here, before `build_op` consumes `parts.observers`, because two of
+    // the clauses are about what is bound to a node rather than about the program.
+    let redirects = scatter_redirects(
+        program,
+        spec,
+        &parts.membership,
+        &parts.observers,
+        &run_units,
+    );
+    // Where each op's `RuntimeOp` ended up, so a redirect can neutralise the consumer's reduction.
+    let mut op_slot: Vec<Option<(usize, usize)>> = vec![None; program.ops.len()];
+    let mut units = Vec::with_capacity(run_units.len());
+    for (membership, ops) in &run_units {
+        let membership = membership.clone();
+        for (member, index) in ops.iter().enumerate() {
+            op_slot[*index] = Some((units.len(), member));
+        }
         let members: Vec<RuntimeOp> = ops
             .iter()
             .map(|index| {
@@ -1227,6 +1249,7 @@ pub(crate) fn build_sequential(
             .collect();
         units.push(finish_unit(&mut parts, &membership, members));
     }
+    apply_scatter_redirects(program, &redirects, &op_slot, &mut units);
     let mut builder = ArenaLeaseSetBuilder::new(
         NonZeroUsize::new(2).expect("stereo planes"),
         NonZeroUsize::new(frames.max(1)).expect("nonzero frames"),
@@ -1236,7 +1259,343 @@ pub(crate) fn build_sequential(
     let (_arena, mut leases) = builder
         .finish()
         .expect("one lease over one coloured arena is disjoint by construction");
-    Runtime::new(leases.pop().expect("the sequential lease"), delays, units)
+    Runtime::new(
+        leases.pop().expect("the sequential lease"),
+        delays,
+        units,
+        redirects.len() as u64,
+    )
+}
+
+/// One chain's scatter redirect: `(run, lane, consumer op)` for every lane whose scatter may land
+/// in its consumer's buffer instead of the last slot's own (issue #202 rec 3).
+type ScatterRedirect = (usize, usize, usize);
+
+/// The buffers a chain's scatter may land in **instead of** the last slot's own outputs.
+///
+/// The mirror image of [`bank_gather_source`], on the other side of the round trip. The gather
+/// side removed the copy a *member's* reduction made into a dedicated bank buffer; this removes
+/// the copy the *consumer's* reduction makes out of one. On the 64-track intended strip that copy
+/// is `reduce_plane` memcpying a whole stereo block from the limiter's dedicated buffer into the
+/// fader op, once per track per block -- 64 stereo block copies that exist only because
+/// `program::is_dedicated` refuses the in-place fold (`program::lower`, the `in_place` clause).
+///
+/// The redirect makes the consumer behave exactly as an `in_place` op would: the chain scatters
+/// straight into the consumer's buffer, and the consumer's reduction becomes the no-op
+/// `reduce_plane` already performs for a single input that is its own output. Nothing else about
+/// the consumer changes -- it still runs, in its own unit, at its own position.
+///
+/// This does **not** touch `program::is_dedicated`. Dedication *by bank membership* was measured
+/// and rejected (`program::lower` records why, #169), and this is not that: `is_dedicated` stays
+/// exactly the classification by node kind it has always been, and what moves is where one chain
+/// scatters. It is likewise not the #194 "scatter straight into the planes" null, which was about
+/// staging the transpose itself and not about which buffer the scatter targets.
+///
+/// `None` on any doubt. Every clause is one way the redirect could be observed:
+///
+/// * **Sole readership.** The last slot's output must have exactly one reader, and that reader is
+///   the consumer. A second reader -- a send, a meter, a sidechain source, all of which
+///   `op_dataflow` counts -- would read a buffer the scatter no longer fills.
+/// * **The consumer's reduction is a pure copy.** One main input, no sidechain, no
+///   compensation-delay staging, and that input is the last slot's output. Two inputs is a sum and
+///   zero is a `fill(0.0)`; either way the consumer's buffer is not simply the chain's output, and
+///   neutralising its reduction would drop a summand. A delayed input owns a line that must still
+///   be pumped.
+/// * **Not already in place.** `consumer.output == producer.output` is the lowering having elided
+///   the copy already, and redirecting the scatter would change nothing.
+/// * **The consumer is not a bank member.** A banked consumer's own gather may already read the
+///   producer's buffer directly ([`bank_gather_source`]), and redirecting the scatter away from it
+///   would hand that gather the previous block's words. The two redirects are each other's only
+///   incompatibility, so this is where they are kept apart.
+/// * **Not the session output.** The host copies the session output out of its buffer after the
+///   last unit; leaving it stale would silence the render.
+/// * **No observer, and no observed alias, on the producer.** After the redirect the last slot's
+///   own buffer is never written, so anything that reads it reads the previous block. That is the
+///   same pair of clauses `chains_into` carries, keyed the same way -- `parts.observers` is keyed
+///   by node, so the alias check names the elided stage node and not the producing one.
+/// * **Nothing between the scatter and the consumer names the consumer's buffer.** This is the one
+///   clause with no counterpart on the gather side, and it is the load-bearing one. The scatter now
+///   writes the consumer's buffer at the *chain's* position, which is earlier -- often much
+///   earlier -- than the consumer's own op, and the colouring only owns that physical slot from the
+///   consumer's op onwards. Whatever held the slot before then is still live for the ops in
+///   between. So every op in `[chain's first op, consumer's op)` that is not part of the chain is
+///   checked, and any mention of the buffer -- as an output, an input, a sidechain or a staging
+///   slot -- declines. The chain's own ops are excluded because they all run *before* the scatter:
+///   the first slot's reductions are the gather, and no later slot's op is executed at all.
+///
+///   Ops outside that range cannot be a hazard. One before the chain's first op belongs to a unit
+///   emitted at or before that op, so it has already run. One at or after the consumer's op that
+///   names the buffer is a legitimate reader of the value the consumer produces, and a bank that
+///   hoisted it past the consumer would be the #169 defect the bank window already forbids.
+fn scatter_redirects(
+    program: &ExecutionProgram,
+    spec: &GraphSpec,
+    bank_membership: &BankMembership,
+    observers: &BTreeMap<GraphNodeId, Vec<GraphNodeObserverBinding>>,
+    run_units: &[(Vec<Membership>, Vec<usize>)],
+) -> Vec<ScatterRedirect> {
+    let (readers, first_producer) = op_dataflow(program);
+    let mut redirects = Vec::new();
+    for (run, (membership, ops)) in run_units.iter().enumerate() {
+        if membership.is_empty() || ops.is_empty() {
+            continue;
+        }
+        let lanes = ops.len() / membership.len();
+        let last = ops.len() - lanes;
+        let Some(first_op) = ops.iter().min().copied() else {
+            continue;
+        };
+        let mut chain: Vec<(usize, Option<usize>)> = Vec::with_capacity(lanes);
+        for lane in 0..lanes {
+            let producer = ops[last + lane];
+            chain.push((
+                producer,
+                scatter_target(
+                    program,
+                    spec,
+                    bank_membership,
+                    observers,
+                    &readers,
+                    &first_producer,
+                    ops,
+                    first_op,
+                    producer,
+                ),
+            ));
+        }
+        // A chain scatters every lane in one pass, so its targets have to stay pairwise distinct.
+        // They can stop being so: a consumer's buffer is coloured after its own producer's is
+        // released, so one lane's consumer may have been handed the *physical slot* another lane's
+        // last slot still scatters into. Two lanes would then write one buffer in the same pass.
+        // The colouring is what decides this and it is not knowable lane by lane, so it is checked
+        // over the whole chain, and a collision declines every redirect in it rather than picking a
+        // winner.
+        let scattered: Vec<crate::program::BufferRef> = chain
+            .iter()
+            .map(|(producer, target)| program.ops[target.unwrap_or(*producer)].output)
+            .collect();
+        let distinct: std::collections::BTreeSet<_> = scattered.iter().collect();
+        if distinct.len() != scattered.len() {
+            continue;
+        }
+        for (lane, (_, target)) in chain.into_iter().enumerate() {
+            if let Some(consumer) = target {
+                redirects.push((run, last + lane, consumer));
+            }
+        }
+    }
+    redirects
+}
+
+/// # Which clauses a mutation makes red (the house ledger, measured)
+///
+/// Dropping a clause and running the graph and graph-compiler suites gives:
+///
+/// * **sole readership** -> `a_send_from_the_last_slots_alias_declines_that_lanes_scatter_redirect`
+/// * **one main input** -> `id_ordered_bank_plan_rejects_transactionally_and_returned_ownership_\
+///   is_reusable`
+/// * **the consumer is not a bank member** -> `misaligned_lane_sets_decline_the_merge` and two
+///   others
+/// * **no observed alias** ->
+///   `an_observed_alias_on_the_last_slot_declines_that_lanes_scatter_redirect`
+/// * **no observer on the producer** ->
+///   `a_meter_on_a_bank_member_declines_that_lanes_scatter_redirect`
+/// * **nothing in between names the buffer** -> seven session-level tests, including the fixture's
+///   own `the_intended_strip_fuses_the_whole_signal_path_into_one_chain_per_cohort`, *and* --
+///   for the scan's **end boundary**, which none of those seven pin --
+///   `cohort_chain_merging_preserves_dataflow_on_random_graphs` through
+///   [`scatter_redirects_over_program`]. Shortening the scan by a single op reddens it at graph 24.
+/// * **no compensation delay on the consumer's input** -> the same differential eval, at graph 0.
+///   No *compiled session* reaches a delayed consumer of a chain's last slot -- PDC is inserted on
+///   route edges between tracks, never between a rack slot and the fader it feeds -- so this clause
+///   has no session-level red test and never will. The corpus builds the case 38,725 times, so the
+///   eval is where it is defended.
+///
+/// Four clauses have **no** red test, and each is kept for a stated reason rather than a measured
+/// one. Saying so is the point of writing the ledger down:
+///
+/// * **no sidechain on the consumer** is conservative and nothing more. A sidechained consumer's
+///   *reduction* is still a pure copy and the redirect does not touch which buffer its
+///   `write_read_stereo` names, so no hazard is known here. It is kept because
+///   [`bank_gather_source`] carries the same clause and a reader comparing the two should not have
+///   to work out why one side omits it.
+/// * **`first_producer` agrees** is redundant given the two above it: if the producer's sole reader
+///   is this consumer and the consumer has exactly one main input, that input is the producer's
+///   buffer. It re-derives the fact from the colouring rather than inferring it.
+/// * **not already in place** is an early-out: if the consumer already writes the producer's
+///   buffer, the redirect's target *is* that buffer and nothing changes.
+/// * **not the session output** is subsumed by the clause above wherever it can fire -- an output
+///   node folded onto its producer in place satisfies both -- and is kept because "the host reads
+///   this buffer after the last unit" is the thing being defended, not "the output op is in place".
+///
+/// **Pairwise-distinct scatter targets is defensive by construction, not merely unreached.** The
+/// adversarial verification of issue #202 closed this one: for a bank that satisfies the contract
+/// the collision cannot arise at all. A chain's last slot is `program::is_dedicated` storage, and a
+/// dedicated buffer is never returned to the free list, so no consumer can ever be coloured onto a
+/// slot another lane is still scattering into; and where two lanes' consumers *are* ordered such
+/// that one could be, the earlier lane has already declined on another clause. The guard is
+/// therefore a construction check rather than a hazard defence -- it costs one `BTreeSet` per chain
+/// at bind and it is what makes "a chain scatters every lane in one pass" a checked fact rather
+/// than an inherited assumption. It is deliberately **not** presented as a measured clause.
+///
+/// The consumer's *own* observers are deliberately **not** a clause. The redirect changes nothing
+/// about what the consumer's buffer holds by the time its observers run, so there is nothing there
+/// for one to see.
+///
+/// The consumer whose buffer one lane's scatter may land in, or `None`. See [`scatter_redirects`]
+/// for what each clause is defending.
+#[allow(clippy::too_many_arguments)]
+fn scatter_target(
+    program: &ExecutionProgram,
+    spec: &GraphSpec,
+    membership: &BankMembership,
+    observers: &BTreeMap<GraphNodeId, Vec<GraphNodeObserverBinding>>,
+    readers: &[Vec<usize>],
+    first_producer: &[Option<usize>],
+    run: &[usize],
+    first_op: usize,
+    producer: usize,
+) -> Option<usize> {
+    if readers[producer].len() != 1 {
+        return None;
+    }
+    let consumer = readers[producer][0];
+    let producer_op = &program.ops[producer];
+    let consumer_op = &program.ops[consumer];
+    if consumer_op.input_count() != 1
+        || consumer_op.sidechain.is_some()
+        || program.inputs_of(consumer_op)[0].delay.is_some()
+        || first_producer[consumer] != Some(producer)
+    {
+        return None;
+    }
+    if consumer_op.output == producer_op.output || producer_op.output == program.output {
+        return None;
+    }
+    if membership.contains_key(&consumer_op.node) {
+        return None;
+    }
+    let node = &spec.nodes[producer_op.node as usize].id;
+    if observers.contains_key(node) {
+        return None;
+    }
+    if program
+        .taps
+        .iter()
+        .filter(|tap| tap.after_op as usize == producer)
+        .any(|tap| observers.contains_key(&spec.nodes[tap.node as usize].id))
+    {
+        return None;
+    }
+    let target = consumer_op.output;
+    for (index, op) in program.ops.iter().enumerate().take(consumer).skip(first_op) {
+        if run.contains(&index) {
+            continue;
+        }
+        if op_names_buffer(program, op, target) {
+            return None;
+        }
+    }
+    Some(consumer)
+}
+
+/// Whether `op` mentions `buffer` at all: as its output, a main input, a sidechain, or the staging
+/// slot of either.
+fn op_names_buffer(program: &ExecutionProgram, op: &Op, buffer: crate::program::BufferRef) -> bool {
+    let staging_or_buffer = |input: &crate::program::InputRef| {
+        input.buffer == buffer || input.delay.is_some_and(|delay| delay.staging == buffer)
+    };
+    op.output == buffer
+        || program.inputs_of(op).iter().any(staging_or_buffer)
+        || op.sidechain.as_ref().is_some_and(staging_or_buffer)
+}
+
+/// The **runtime's own** scatter-redirect decision, driven over a program that has no bindings.
+///
+/// `program::tests::cohort_chain_merging_preserves_dataflow_on_random_graphs` interprets the
+/// executor through a *model* of [`scatter_target`]'s clauses. A model is an oracle only while it
+/// and the thing it models agree, and the model cannot check that by itself: the adversarial
+/// verification of issue #202 found that shortening [`scatter_target`]'s in-between scan by a
+/// single op -- `take(consumer)` to `take(consumer - 1)`, which is the unsound direction -- reddens
+/// nothing anywhere, while the same one-token change to the model reddens the corpus at once. The
+/// corpus was building the hazard at exactly that boundary and then only ever asking the model
+/// about it.
+///
+/// This is the missing half. The corpus now drives *this* function, and the two answers must be
+/// equal graph for graph, so every clause the corpus exercises has the corpus as its red test on
+/// both sides of the model/runtime pair -- the same correspondence #194 established on the gather
+/// side.
+///
+/// Returns `producer op -> consumer op` for every admitted lane. A program-level fixture binds no
+/// observers, which is why the two observer clauses take an empty map here: they are covered by
+/// the session-level tests in the graph compiler, and this eval covers the rest.
+#[cfg(test)]
+pub(crate) fn scatter_redirects_over_program(
+    program: &ExecutionProgram,
+    spec: &GraphSpec,
+    lanes: &BTreeMap<u32, (usize, usize)>,
+    runs: &[Vec<Vec<usize>>],
+) -> BTreeMap<usize, usize> {
+    let bank_membership: BankMembership = lanes
+        .iter()
+        .map(|(node, (bank, lane))| (*node, (Membership::Effect(*bank), *lane)))
+        .collect();
+    let observers = BTreeMap::new();
+    // `build_sequential` builds this shape from `units_of`; here it is built from the model's runs,
+    // so the only thing that differs between the two sides is which copy of the clauses answers.
+    // A plain unit carries an empty membership list, which is what marks it as not a bank.
+    let run_units: Vec<(Vec<Membership>, Vec<usize>)> = runs
+        .iter()
+        .map(|run| {
+            let last = run.last().expect("a run has at least one slot");
+            let banked = last.len() > 1 || lanes.contains_key(&program.ops[last[0]].node);
+            let membership = if banked {
+                vec![Membership::Effect(0); run.len()]
+            } else {
+                Vec::new()
+            };
+            (membership, run.iter().flatten().copied().collect())
+        })
+        .collect();
+    scatter_redirects(program, spec, &bank_membership, &observers, &run_units)
+        .into_iter()
+        .map(|(run, member, consumer)| (run_units[run].1[member], consumer))
+        .collect()
+}
+
+/// Point each admitted lane's scatter at its consumer's buffer and neutralise the consumer's
+/// reduction.
+///
+/// Two edits, and they are each other's counterpart: the member's `output` is what
+/// `Runtime::execute` reads to build the chain's scatter list, and the consumer's single input
+/// becomes its own output, which is the shape `reduce_plane` already treats as "nothing to copy".
+/// The consumer therefore runs exactly as an `in_place` op does, which is what it would have been
+/// had its producer not been dedicated storage.
+fn apply_scatter_redirects(
+    program: &ExecutionProgram,
+    redirects: &[ScatterRedirect],
+    op_slot: &[Option<(usize, usize)>],
+    units: &mut [RuntimeUnit],
+) {
+    for (run, member, consumer) in redirects.iter().copied() {
+        let target = ARENA_BASE + program.ops[consumer].output.0;
+        let RuntimeUnit::Bank { members, .. } = &mut units[run] else {
+            continue;
+        };
+        members[member].output = target;
+        let Some((unit, _)) = op_slot[consumer] else {
+            continue;
+        };
+        match &mut units[unit] {
+            RuntimeUnit::Op(op) => op.inputs = vec![target].into_boxed_slice(),
+            // Unreachable by construction: `scatter_target` declines a banked consumer outright,
+            // because such a consumer's own gather may already read the producer's buffer
+            // (`bank_gather_source`) and the two redirects would then disagree about which buffer
+            // holds this block's audio. Left inert rather than applying, so that if that clause is
+            // ever loosened this arm does nothing instead of doing the wrong thing.
+            RuntimeUnit::Bank { .. } => debug_assert!(false, "a banked consumer never redirects"),
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1313,7 +1672,7 @@ fn op_dataflow(program: &ExecutionProgram) -> (Vec<Vec<usize>>, Vec<Option<usize
 }
 
 /// `true` when unit `later`'s ops are exactly the lane-wise consumers of unit `earlier`'s, so the
-/// two may be rendered as consecutive slots of one chain (issue #181).
+/// two may be rendered as consecutive slots of one chain (issue #181, widened by #202 rec 2).
 ///
 /// The merge replaces two planar/AoSoA round-trips with one: the chain gathers `earlier`'s member
 /// outputs, runs both stages over the resident block, and scatters into `later`'s. The price is
@@ -1321,16 +1680,44 @@ fn op_dataflow(program: &ExecutionProgram) -> (Vec<Vec<usize>>, Vec<Option<usize
 /// stage's output, and `later`'s ops never reduce. Every clause below is one way that could be
 /// observed, and any one of them declines the merge:
 ///
-/// * **Lane count.** The two slots must cover the same lanes, one op each.
+/// * **Lane count and lane order.** The two slots must cover the same lanes, one op each, *in the
+///   same order*: the `first_producer` clause below is checked lane by lane, so two banks whose
+///   planners disagreed about which track sits in which lane can never fuse. This is the whole of
+///   the lane-alignment obligation and it is proved on the lowered program rather than assumed of
+///   the planners.
 /// * **`later` reads only `earlier`, undelayed and unmixed.** One main input, no sidechain, no
 ///   compensation-delay staging -- otherwise skipping `later`'s reduction would drop a summand or
 ///   a delay line. A sidechained slot already blocks banking (#96 F9); this re-checks it on the
 ///   lowered program rather than trusting the planner.
-/// * **Nothing else reads `earlier`.** Exactly one reader, and it is `later`'s op. A send tap, a
-///   meter or a second consumer would read the pre-stage signal.
-/// * **No alias, no observer, and not the session output.** A `program::Tap` aliases an elided
-///   node onto `earlier`'s buffer; an observer bound to `earlier` fires after the unit and would
-///   see the chain's input; and the session output is read by the host.
+/// * **Nothing else reads `earlier`.** Exactly one reader, and it is `later`'s op. A send, a
+///   second consumer or a sidechain source would read the pre-stage signal; `op_dataflow` counts
+///   sidechain reads, so a sidechained consumer of `earlier` is one of these and not an omission.
+/// * **No observer, and not the session output.** An observer bound to `earlier` fires after the
+///   unit and would see the chain's input; the session output is read by the host.
+/// * **No *observed* alias.** A `program::Tap` aliases an elided stage boundary onto `earlier`'s
+///   buffer. The alias is a name, not a read -- an edge out of it resolves to `earlier` and is
+///   already counted as a second reader above -- so a tap on its own is not a reason to decline.
+///   What can read one is an **observer bound to the alias node**, which is how a leased stage
+///   meter reaches `PostSimd1`, `PostDynamic` or `PostSimd2PreFader`
+///   (`miso_engine_builtins::MeterTap`). `parts.observers` is keyed by *node*, so the check has to
+///   name the alias node and not the producing one; keying it on the producer would miss exactly
+///   the meter it exists to protect.
+///
+/// # The perf cliff this last clause buys, stated out loud
+///
+/// Issue #181 declined on the presence of a tap alone, which is why the intended 64-track strip
+/// stopped at the `simd1`/`simd2` boundary: the three elided rack-boundary stages put a tap on the
+/// compressor and the limiter never fused. Nothing planar reads those aliases in a session that
+/// leases no stage meter, so the refusal was paying for an observer that was not there. It is now
+/// paid only when the observer is: **leasing a meter at `PostSimd1`, `PostDynamic` or
+/// `PostSimd2PreFader` costs that track's cohort one extra planar/AoSoA round-trip per block**,
+/// because its chain can no longer span the stage the meter reads. That is the intended trade --
+/// the meter must see post-compressor audio, and a merged chain would hand it the chain's input --
+/// and `a_leased_stage_meter_declines_the_merge_and_still_meters` pins both halves of it.
+///
+/// Effect observation (`ObservationLaneV1`) is *not* such an observer and must not be confused
+/// with one: it reads the effect's own resident state through `observe_resident`, never a planar
+/// stage buffer, so an armed console lane neither declines the merge nor is disturbed by one.
 fn chains_into(
     program: &ExecutionProgram,
     spec: &GraphSpec,
@@ -1356,16 +1743,23 @@ fn chains_into(
         if readers[*before].len() != 1 || readers[*before][0] != *after {
             return false;
         }
-        if producer.output == program.output
-            || program
-                .taps
-                .iter()
-                .any(|tap| tap.after_op as usize == *before)
-        {
+        if producer.output == program.output {
             return false;
         }
         let node = &spec.nodes[producer.node as usize].id;
         if parts.observers.contains_key(node) {
+            return false;
+        }
+        if program
+            .taps
+            .iter()
+            .filter(|tap| tap.after_op as usize == *before)
+            .any(|tap| {
+                parts
+                    .observers
+                    .contains_key(&spec.nodes[tap.node as usize].id)
+            })
+        {
             return false;
         }
     }
@@ -1378,11 +1772,36 @@ fn chains_into(
 /// covers. A unit that merges with nothing is a run of one, which is what every unit was before
 /// issue #181.
 ///
-/// Two bank units are candidates when the cohort planner put them in the same group -- that is
-/// the only place the "same lanes, consecutive slots of one rack chain" fact exists -- and the
-/// merge happens only when [`chains_into`] can also prove it on the lowered program. The planner
-/// knows the session's shape; the program knows what the colouring and the taps did with it, and
-/// both have to agree.
+/// # Candidacy is the program's dataflow, not the planner's grouping (issue #202 rec 2)
+///
+/// Issue #181 asked the cohort planner which bound slots came out of one group and offered only
+/// those pairs to [`chains_into`]. That is a strictly narrower question than the one the merge
+/// actually needs answered, and it left three quarters of the intended strip's round-trips on the
+/// table: `plan_bank_groups` pools per `RackLocationV1`, so no candidate ever crossed a rack
+/// boundary, and a builtin bank has no cohort group at all, so the `builtins -> simd1` boundary
+/// was not even expressible. On the 64-track intended fixture that is 8 groups x {builtins, simd1,
+/// simd2} = 24 chains where 8 will do.
+///
+/// The candidate successor of a bank unit is therefore taken from the lowered program itself: the
+/// unit that owns the op reading lane 0's output. `chains_into` then has to prove the whole
+/// lane-wise relation anyway, so nothing is trusted to the planners -- least of all that two banks
+/// planned by two different planners agree about which track sits in which lane. Where the merge
+/// is admissible the planners' lane orders coincide *because the proof says so*, and where they do
+/// not the merge is simply declined.
+///
+/// Two structural facts make the run construction below well formed:
+///
+/// * **The successor relation is injective.** `chains_into` requires
+///   `first_producer[later[i]] == Some(earlier[i])` for every lane, so two different predecessors
+///   would have to share lane 0's op -- that is, be the same unit. No unit is ever appended to two
+///   runs.
+/// * **A successor is always later in unit order.** Every lane of `later` is scheduled after the
+///   matching lane of `earlier`, and a unit is emitted at its members' minimum op index, so the
+///   minimum over `later` strictly exceeds the minimum over `earlier`. The runs therefore have no
+///   cycles and stay in render order.
+///
+/// The op range a merged run permutes is held by `program::lower`'s bank window, which forms the
+/// same union from the same lane-wise relation (`program::chainable_bank_groups`).
 fn cohort_runs(
     program: &ExecutionProgram,
     spec: &GraphSpec,
@@ -1390,35 +1809,51 @@ fn cohort_runs(
     units: &[PlannedUnit],
 ) -> Vec<Vec<usize>> {
     let (readers, first_producer) = op_dataflow(program);
-    // Candidate successors: within one cohort group, the next bound slot.
-    let mut by_group: BTreeMap<u32, Vec<(u32, usize)>> = BTreeMap::new();
-    for (index, (membership, _)) in units.iter().enumerate() {
-        if let Some(cohort) = membership.and_then(|value| parts.cohort_of(value)) {
-            by_group
-                .entry(cohort.group)
-                .or_default()
-                .push((cohort.slot, index));
+    let mut unit_of_op: Vec<Option<usize>> = vec![None; program.ops.len()];
+    for (index, (membership, ops)) in units.iter().enumerate() {
+        if membership.is_none() {
+            continue;
+        }
+        for op in ops {
+            unit_of_op[*op] = Some(index);
         }
     }
     let mut successor: BTreeMap<usize, usize> = BTreeMap::new();
-    for slots in by_group.values_mut() {
-        slots.sort_unstable();
-        for pair in slots.windows(2) {
-            let (earlier, later) = (pair[0].1, pair[1].1);
-            if chains_into(
-                program,
-                spec,
-                parts,
-                &readers,
-                &first_producer,
-                &units[earlier].1,
-                &units[later].1,
-            ) {
-                successor.insert(earlier, later);
-            }
+    for (earlier, (membership, ops)) in units.iter().enumerate() {
+        if membership.is_none() {
+            continue;
+        }
+        // The sole reader of lane 0 names the only unit this one can possibly chain into.
+        // `chains_into` re-checks sole readership for every lane, so a `first()` here is a lookup
+        // and not a decision.
+        let Some(later) = ops
+            .first()
+            .and_then(|lane| readers[*lane].first())
+            .and_then(|reader| unit_of_op[*reader])
+        else {
+            continue;
+        };
+        if later == earlier {
+            continue;
+        }
+        if chains_into(
+            program,
+            spec,
+            parts,
+            &readers,
+            &first_producer,
+            ops,
+            &units[later].1,
+        ) {
+            successor.insert(earlier, later);
         }
     }
     let merged: std::collections::BTreeSet<usize> = successor.values().copied().collect();
+    debug_assert_eq!(
+        merged.len(),
+        successor.len(),
+        "the successor relation is injective, so no unit joins two runs"
+    );
     let mut runs = Vec::with_capacity(units.len());
     for index in 0..units.len() {
         if merged.contains(&index) {

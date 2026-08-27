@@ -31,6 +31,8 @@
 //! by `GraphEdgeId`. A single-input "reduction" was already the identity (`values[0]`), so folding
 //! it into an in-place read is bit-preserving by construction, not by tolerance.
 
+use std::collections::BTreeMap;
+
 use crate::{
     DependencyLevel, GraphEdgeId, GraphNodeId, GraphPortKind, GraphSpec, InsertedDelay, RackId,
     TrackStage,
@@ -210,6 +212,118 @@ const fn is_dedicated(node: &GraphNodeId) -> bool {
     }
 }
 
+/// The node whose storage a node's first main input reads, resolved through elided aliases.
+///
+/// This is the lowered program's `first_producer` stated on the semantic graph: the buffer an op's
+/// first main input names is written by the op of the node this returns, because an elided stage
+/// boundary owns no storage of its own and an in-place op keeps its producer's colour under its
+/// own ownership. `runtime::op_dataflow` derives the same edge from the colouring; the two have to
+/// agree, and `chainable_bank_groups` is the only place the lowering needs the answer before the
+/// colouring exists.
+fn first_main_producer(
+    spec: &GraphSpec,
+    elided: &[bool],
+    main_in: &[Vec<usize>],
+    node: usize,
+) -> Option<usize> {
+    let edge = *main_in.get(node)?.first()?;
+    let mut source = node_index(spec, &spec.edges[edge].source.node)? as usize;
+    while elided[source] {
+        source = node_index(spec, &spec.edges[*main_in[source].first()?].source.node)? as usize;
+    }
+    Some(source)
+}
+
+/// Bank member lists with every pair of banks a cohort chain may fuse unioned into one entry.
+///
+/// A merged run renders as **one unit at its first slot's op position** (`runtime::cohort_runs`),
+/// so the op range the schedule is permuted over is the union of every slot's ops -- not each
+/// slot's own range. `bank_windows` needs that union, and this is where it is formed.
+///
+/// The pairing condition is exactly `runtime::chains_into`'s first clause, restated on the
+/// semantic graph: two banks may fuse only when they cover the same number of lanes and, for
+/// **every** lane `i`, the later bank's lane `i` reads the earlier bank's lane `i`. Everything
+/// else `chains_into` demands -- sole readership, no observed alias, no sidechain, no delay, not
+/// the session output -- can only *decline* a merge, and a window wider than the permutation that
+/// actually happens is always safe. So this is a superset of what the runtime will do, computed
+/// without the runtime's bindings, which the lowering does not have.
+///
+/// It is deliberately not "every bank connected to another bank by any edge". That coarser union
+/// would fold whole racks of unrelated cohorts into one span on sessions where nothing can fuse,
+/// and every op inside a span is an op whose physical slot may not be recycled: an over-wide
+/// window is sound but it costs arena buffers, and this keeps the cost proportional to the merges
+/// the runtime can actually take.
+fn chainable_bank_groups(
+    banks: &[Vec<GraphNodeId>],
+    spec: &GraphSpec,
+    elided: &[bool],
+    main_in: &[Vec<usize>],
+) -> Vec<Vec<GraphNodeId>> {
+    // A bank with an id that is not a node of this spec pairs with nothing: the lane alignment
+    // below is positional, so a silently dropped member would compare the wrong lanes. Such an
+    // id is already documented as ignorable ("a stale id can only widen a window"), and leaving
+    // its bank unpaired keeps that true.
+    let interned: Vec<Option<Vec<usize>>> = banks
+        .iter()
+        .map(|members| {
+            members
+                .iter()
+                .map(|id| node_index(spec, id).map(|index| index as usize))
+                .collect::<Option<Vec<usize>>>()
+        })
+        .collect();
+    let mut bank_lane: BTreeMap<usize, (usize, usize)> = BTreeMap::new();
+    for (bank, members) in interned.iter().enumerate() {
+        for (lane, node) in members.iter().flatten().enumerate() {
+            bank_lane.insert(*node, (bank, lane));
+        }
+    }
+    let producer = |node: usize| first_main_producer(spec, elided, main_in, node);
+    let mut parent: Vec<usize> = (0..banks.len()).collect();
+    fn root(parent: &mut [usize], mut bank: usize) -> usize {
+        while parent[bank] != bank {
+            parent[bank] = parent[parent[bank]];
+            bank = parent[bank];
+        }
+        bank
+    }
+    for (later, members) in interned.iter().enumerate() {
+        let Some(members) = members else { continue };
+        // The candidate predecessor is whichever bank owns lane 0's producer; a bank owns each of
+        // its members exactly once, so there is at most one candidate and no search.
+        let Some(first) = members.first().copied().and_then(producer) else {
+            continue;
+        };
+        let Some((earlier, lane)) = bank_lane.get(&first).copied() else {
+            continue;
+        };
+        let Some(Some(before)) = interned.get(earlier) else {
+            continue;
+        };
+        if lane != 0 || earlier == later || before.len() != members.len() {
+            continue;
+        }
+        if !members
+            .iter()
+            .zip(before.iter())
+            .all(|(after, before)| producer(*after) == Some(*before))
+        {
+            continue;
+        }
+        let (a, b) = (root(&mut parent, earlier), root(&mut parent, later));
+        parent[a] = b;
+    }
+    let mut grouped: BTreeMap<usize, Vec<GraphNodeId>> = BTreeMap::new();
+    for (bank, members) in banks.iter().enumerate() {
+        let group = root(&mut parent, bank);
+        grouped
+            .entry(group)
+            .or_default()
+            .extend(members.iter().cloned());
+    }
+    grouped.into_values().collect()
+}
+
 /// The op ranges over which a bank reorders the schedule, merged into disjoint spans.
 ///
 /// A bank's window runs from its first member's op to its last: `runtime::units_of` emits the
@@ -304,9 +418,9 @@ struct Lifetime {
 ///
 /// > **No physical slot may be recycled inside a bank window.**
 ///
-/// ## A cohort chain's window spans levels, and the sentence still holds (issue #181)
+/// ## A cohort chain's window spans levels, and the sentence still holds (issues #181, #202)
 ///
-/// `runtime::cohort_runs` now renders consecutive slots of one cohort chain as **one** unit, so a
+/// `runtime::cohort_runs` renders consecutive slots of one cohort chain as **one** unit, so a
 /// window can cover slot `k` at level `L` and slot `k + 1` at level `L + 1`, and the clause "no op
 /// in a window reads another's output" is false there: slot `k + 1`'s op names slot `k`'s buffer.
 /// The argument has to be re-made rather than reused, and it comes out the same way:
@@ -316,15 +430,23 @@ struct Lifetime {
 ///   inside the window becomes a value passed between two slots in registers and scratch.
 /// * `runtime::chains_into` merges only when the later slot's op has exactly one main input, no
 ///   sidechain, and no compensation-delay staging, and when the earlier slot's output is read by
-///   **nothing else** -- no second consumer, no `Tap`, no observer, and not the session output.
-///   So the earlier slot's buffer, which now holds the chain's *input* rather than that slot's
-///   output, has no reader inside or outside the window that could tell.
+///   **nothing else** -- no second consumer, no observer, no *observed* alias, and not the session
+///   output. So the earlier slot's buffer, which now holds the chain's *input* rather than that
+///   slot's output, has no reader inside or outside the window that could tell.
 /// * Every other op in the window is still read only after the window and written only before it,
 ///   exactly as above.
 ///
-/// So the window's obligation is unchanged -- no physical slot may be recycled inside it -- and
-/// `bank_member_nodes` is what makes the window the merged one: it lists a cohort chain as a
-/// single entry covering every slot's members, so the span this function holds is the span the
+/// Issue #202 rec 2 widens which pairs may fuse -- across rack locations, and into the post-input
+/// builtin bank -- and none of the argument above depends on where a slot sat. What it does change
+/// is how far a window reaches: a chain that runs `builtins -> EQ -> compressor -> limiter` for one
+/// cohort executes that whole strip at the cohort's *first* op position, so its window spans every
+/// dependency level the strip crosses. The obligation is unchanged -- no physical slot may be
+/// recycled inside it -- and it is simply held over a longer range, which costs arena buffers and
+/// buys the round-trips.
+///
+/// [`chainable_bank_groups`] is what makes the window the merged one. It is handed one entry per
+/// bound bank and unions the pairs that could fuse, using the same lane-wise producer/consumer
+/// relation `chains_into` proves, so the span this function holds is a superset of the span the
 /// runtime actually permutes. A window wider than the permutation is always safe; one narrower is
 /// the defect this machinery exists to prevent.
 ///
@@ -362,13 +484,42 @@ struct Lifetime {
 ///
 /// # Errors
 /// See [`ProgramError`]; every variant means the caller's own invariants were violated.
-#[allow(clippy::too_many_lines)]
 pub fn lower(
     spec: &GraphSpec,
     schedule: &[GraphNodeId],
     levels: &[DependencyLevel],
     delays: &[InsertedDelay],
     banks: &[Vec<GraphNodeId>],
+) -> Result<ExecutionProgram, ProgramError> {
+    lower_with(spec, schedule, levels, delays, banks, true)
+}
+
+/// [`lower`], with the cohort-chain window union switched off.
+///
+/// The only caller is the counterfactual arm of
+/// `cohort_chain_merging_preserves_dataflow_on_random_graphs`: it measures how many seeded graphs a
+/// per-bank window gets wrong, which is the measurement of what [`chainable_bank_groups`] buys.
+/// There is no production path to it, and there must not be -- a per-bank window is unsound for a
+/// merged chain.
+#[cfg(test)]
+fn lower_with_per_bank_windows(
+    spec: &GraphSpec,
+    schedule: &[GraphNodeId],
+    levels: &[DependencyLevel],
+    delays: &[InsertedDelay],
+    banks: &[Vec<GraphNodeId>],
+) -> Result<ExecutionProgram, ProgramError> {
+    lower_with(spec, schedule, levels, delays, banks, false)
+}
+
+#[allow(clippy::too_many_lines)]
+fn lower_with(
+    spec: &GraphSpec,
+    schedule: &[GraphNodeId],
+    levels: &[DependencyLevel],
+    delays: &[InsertedDelay],
+    banks: &[Vec<GraphNodeId>],
+    chain_windows: bool,
 ) -> Result<ExecutionProgram, ProgramError> {
     if spec.nodes.windows(2).any(|pair| pair[0].id >= pair[1].id) {
         return Err(ProgramError::SpecUnsorted);
@@ -590,7 +741,15 @@ pub fn lower(
     for (buffer, life) in lifetimes.iter().enumerate() {
         expire[life.last_use].push(u32::try_from(buffer).map_err(|_| ProgramError::Overflow)?);
     }
-    let (defer_release, closes_here) = bank_windows(&node_op, banks, spec, ops.len());
+    // Issue #202 rec 2: the window a merged cohort chain permutes is the union of every slot's
+    // ops, and a chain may now fuse across rack locations and into a builtin bank, so the union is
+    // derived from the graph's own dataflow rather than from the cohort planner's grouping.
+    let chained = if chain_windows {
+        chainable_bank_groups(banks, spec, &elided, &main_in)
+    } else {
+        banks.to_vec()
+    };
+    let (defer_release, closes_here) = bank_windows(&node_op, &chained, spec, ops.len());
     let mut physical = vec![u32::MAX; lifetimes.len()];
     let mut free: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
     // Slots freed inside a bank window, released together once the window closes (#169).
@@ -1460,6 +1619,229 @@ mod tests {
         units
     }
 
+    /// `runtime::op_dataflow`, restated for the interpreter: readers of each op, and the op that
+    /// produced each op's first main input.
+    fn op_dataflow_model(program: &ExecutionProgram) -> (Vec<Vec<usize>>, Vec<Option<usize>>) {
+        let mut owner: Vec<Option<usize>> = vec![None; program.buffers as usize];
+        let mut readers: Vec<Vec<usize>> = vec![Vec::new(); program.ops.len()];
+        let mut first: Vec<Option<usize>> = vec![None; program.ops.len()];
+        for (index, op) in program.ops.iter().enumerate() {
+            for (position, input) in program.inputs_of(op).iter().enumerate() {
+                if let Some(producer) = owner[input.buffer.0 as usize] {
+                    readers[producer].push(index);
+                    if position == 0 {
+                        first[index] = Some(producer);
+                    }
+                }
+            }
+            if let Some(Some(producer)) = op.sidechain.map(|side| owner[side.buffer.0 as usize]) {
+                readers[producer].push(index);
+            }
+            owner[op.output.0 as usize] = Some(index);
+        }
+        (readers, first)
+    }
+
+    /// `runtime::chains_into`, restated for the interpreter.
+    ///
+    /// The observer clauses are the two this model omits, and it omits them on purpose: a program
+    /// -level fixture binds no observers at all, so both are vacuously satisfied. Omitting them
+    /// makes the model *more* permissive than the runtime, which is the safe direction for an
+    /// oracle -- it interprets at least every merge the runtime can take.
+    fn chains_into_model(
+        program: &ExecutionProgram,
+        readers: &[Vec<usize>],
+        first_producer: &[Option<usize>],
+        earlier: &[usize],
+        later: &[usize],
+    ) -> bool {
+        if earlier.len() != later.len() || earlier.is_empty() {
+            return false;
+        }
+        earlier.iter().zip(later.iter()).all(|(before, after)| {
+            let producer = &program.ops[*before];
+            let consumer = &program.ops[*after];
+            consumer.input_count() == 1
+                && consumer.sidechain.is_none()
+                && program.inputs_of(consumer)[0].delay.is_none()
+                && first_producer[*after] == Some(*before)
+                && readers[*before].len() == 1
+                && readers[*before][0] == *after
+                && producer.output != program.output
+        })
+    }
+
+    /// `runtime::cohort_runs`, restated for the interpreter: the units of
+    /// [`units_in_runtime_order`], grouped into the multi-slot chains the executor will build.
+    ///
+    /// Each entry is one rendered unit as a slot-major list: `run[slot][lane]` is an op index.
+    fn runs_in_runtime_order(
+        program: &ExecutionProgram,
+        lanes: &std::collections::BTreeMap<u32, (usize, usize)>,
+    ) -> Vec<Vec<Vec<usize>>> {
+        let units = units_in_runtime_order(program, lanes);
+        let (readers, first_producer) = op_dataflow_model(program);
+        let mut unit_of_op: Vec<Option<usize>> = vec![None; program.ops.len()];
+        for (index, ops) in units.iter().enumerate() {
+            if !lanes.contains_key(&program.ops[ops[0]].node) {
+                continue;
+            }
+            for op in ops {
+                unit_of_op[*op] = Some(index);
+            }
+        }
+        let mut successor: std::collections::BTreeMap<usize, usize> =
+            std::collections::BTreeMap::new();
+        for (earlier, ops) in units.iter().enumerate() {
+            if !lanes.contains_key(&program.ops[ops[0]].node) {
+                continue;
+            }
+            let Some(later) = ops
+                .first()
+                .and_then(|lane| readers[*lane].first())
+                .and_then(|reader| unit_of_op[*reader])
+            else {
+                continue;
+            };
+            if later != earlier
+                && chains_into_model(program, &readers, &first_producer, ops, &units[later])
+            {
+                successor.insert(earlier, later);
+            }
+        }
+        let merged: std::collections::BTreeSet<usize> = successor.values().copied().collect();
+        let mut runs = Vec::with_capacity(units.len());
+        for index in 0..units.len() {
+            if merged.contains(&index) {
+                continue;
+            }
+            let mut run = vec![units[index].clone()];
+            let mut cursor = index;
+            while let Some(next) = successor.get(&cursor) {
+                run.push(units[*next].clone());
+                cursor = *next;
+            }
+            runs.push(run);
+        }
+        runs
+    }
+
+    /// `runtime::bank_gather_source`, restated for the interpreter: the buffer a first-slot
+    /// member's gather reads **instead of** the member's own output, or `None` when it must run.
+    ///
+    /// Modelling this is what closes the gap #194's verification flagged. A redirected member
+    /// never writes its own output buffer during the gather, so an interpreter that always wrote
+    /// it was describing a store the executor does not make -- and could therefore not tell that
+    /// buffer apart from one another member's gather still needs.
+    fn gather_source_model(program: &ExecutionProgram, op: &Op) -> Option<u32> {
+        if op.sidechain.is_some() {
+            return None;
+        }
+        match program.inputs_of(op) {
+            [single] if single.delay.is_none() && single.buffer != op.output => {
+                Some(single.buffer.0)
+            }
+            _ => None,
+        }
+    }
+
+    /// `runtime::scatter_target`, restated for the interpreter.
+    ///
+    /// The observer clauses are omitted for the reason [`chains_into_model`] omits them: a
+    /// program-level fixture binds none, so both are vacuously satisfied and omitting them makes
+    /// the model at least as permissive as the runtime.
+    fn scatter_target_model(
+        program: &ExecutionProgram,
+        lanes: &std::collections::BTreeMap<u32, (usize, usize)>,
+        readers: &[Vec<usize>],
+        first_producer: &[Option<usize>],
+        run: &[usize],
+        first_op: usize,
+        producer: usize,
+    ) -> Option<usize> {
+        if readers[producer].len() != 1 {
+            return None;
+        }
+        let consumer = readers[producer][0];
+        let producer_op = &program.ops[producer];
+        let consumer_op = &program.ops[consumer];
+        if consumer_op.input_count() != 1
+            || consumer_op.sidechain.is_some()
+            || program.inputs_of(consumer_op)[0].delay.is_some()
+            || first_producer[consumer] != Some(producer)
+            || consumer_op.output == producer_op.output
+            || producer_op.output == program.output
+            || lanes.contains_key(&consumer_op.node)
+        {
+            return None;
+        }
+        let target = consumer_op.output;
+        let names = |op: &Op| {
+            let hit = |input: &InputRef| {
+                input.buffer == target || input.delay.is_some_and(|delay| delay.staging == target)
+            };
+            op.output == target
+                || program.inputs_of(op).iter().any(hit)
+                || op.sidechain.as_ref().is_some_and(hit)
+        };
+        for (index, op) in program.ops.iter().enumerate().take(consumer).skip(first_op) {
+            if !run.contains(&index) && names(op) {
+                return None;
+            }
+        }
+        Some(consumer)
+    }
+
+    /// `runtime::scatter_redirects`, restated for the interpreter: last-slot op -> the consumer op
+    /// whose buffer the chain scatters into instead of its own.
+    fn redirects_in_runtime_order(
+        program: &ExecutionProgram,
+        lanes: &std::collections::BTreeMap<u32, (usize, usize)>,
+        runs: &[Vec<Vec<usize>>],
+    ) -> std::collections::BTreeMap<usize, usize> {
+        let (readers, first_producer) = op_dataflow_model(program);
+        let mut redirects = std::collections::BTreeMap::new();
+        for run in runs {
+            let Some(first_op) = run.iter().flatten().min().copied() else {
+                continue;
+            };
+            let flat: Vec<usize> = run.iter().flatten().copied().collect();
+            let last = run.last().expect("a run has at least one slot");
+            if last.len() < 2 && !lanes.contains_key(&program.ops[last[0]].node) {
+                continue;
+            }
+            let lane_targets: Vec<Option<usize>> = last
+                .iter()
+                .map(|producer| {
+                    scatter_target_model(
+                        program,
+                        lanes,
+                        &readers,
+                        &first_producer,
+                        &flat,
+                        first_op,
+                        *producer,
+                    )
+                })
+                .collect();
+            let scattered: Vec<BufferRef> = last
+                .iter()
+                .zip(lane_targets.iter())
+                .map(|(producer, target)| program.ops[target.unwrap_or(*producer)].output)
+                .collect();
+            let distinct: std::collections::BTreeSet<_> = scattered.iter().collect();
+            if distinct.len() != scattered.len() {
+                continue;
+            }
+            for (producer, target) in last.iter().zip(lane_targets) {
+                if let Some(consumer) = target {
+                    redirects.insert(*producer, consumer);
+                }
+            }
+        }
+        redirects
+    }
+
     /// Interpret the program the way the executor runs it -- banks hoisted -- and compare against
     /// the semantic graph, node by node.
     ///
@@ -1506,34 +1888,72 @@ mod tests {
                 Expr::Node(op.node, Box::new(gathered))
             }
         };
-        for unit in units_in_runtime_order(program, lanes) {
+        let runs = runs_in_runtime_order(program, lanes);
+        let redirect_of_lane = redirects_in_runtime_order(program, lanes, &runs);
+        for run in runs {
+            let first = &run[0];
             // A bank gathers *every* member before the kernel touches any of them, so a member's
             // storage must survive every other member's gather.
-            let banked = unit.len() > 1 || lanes.contains_key(&program.ops[unit[0]].node);
-            for index in &unit {
-                let op = &program.ops[*index];
-                let gathered = gather(&mut arena, op);
-                arena[op.output.0 as usize] = if banked {
-                    gathered
+            let banked = first.len() > 1 || lanes.contains_key(&program.ops[first[0]].node);
+            if !banked {
+                let op = &program.ops[first[0]];
+                // A redirected consumer does not reduce: the chain already scattered its input
+                // into this very buffer, which is what `reduce_plane` does for a lone input that
+                // is its own output.
+                let gathered = if redirect_of_lane.values().any(|op| *op == first[0]) {
+                    arena[op.output.0 as usize].clone()
                 } else {
-                    transform(op, gathered)
+                    gather(&mut arena, op)
                 };
+                arena[op.output.0 as usize] = transform(op, gathered);
+                if arena[op.output.0 as usize] != expected[op.node as usize] {
+                    return Some(format!(
+                        "op {} (node {}) rendered a foreign value",
+                        first[0], op.node
+                    ));
+                }
+                continue;
             }
-            if banked {
-                for index in &unit {
-                    let op = &program.ops[*index];
-                    let gathered = arena[op.output.0 as usize].clone();
-                    arena[op.output.0 as usize] = transform(op, gathered);
+            // Gather: the first slot's lanes, in lane order. A lane whose whole reduction is the
+            // dedication copy is not executed at all -- the gather reads its producer's buffer and
+            // its own output buffer is left alone (`runtime::bank_gather_source`).
+            let mut resident: Vec<Expr> = Vec::with_capacity(first.len());
+            for index in first {
+                let op = &program.ops[*index];
+                match gather_source_model(program, op) {
+                    Some(source) => resident.push(arena[source as usize].clone()),
+                    None => {
+                        let gathered = gather(&mut arena, op);
+                        arena[op.output.0 as usize] = gathered.clone();
+                        resident.push(gathered);
+                    }
                 }
             }
-            for index in &unit {
+            // Every slot of the chain runs over the resident block, in cascade order. A later
+            // slot's op is never executed: its value is passed between slots, not through the
+            // arena, so its input buffer is never read and only the *last* slot's output buffer is
+            // written by the scatter.
+            for slot in &run {
+                for (lane, index) in slot.iter().enumerate() {
+                    let op = &program.ops[*index];
+                    resident[lane] = transform(op, resident[lane].clone());
+                }
+            }
+            let last = run.last().expect("a run has at least one slot");
+            for (lane, index) in last.iter().enumerate() {
                 let op = &program.ops[*index];
-                if arena[op.output.0 as usize] != expected[op.node as usize] {
+                if resident[lane] != expected[op.node as usize] {
                     return Some(format!(
                         "op {index} (node {}) rendered a foreign value",
                         op.node
                     ));
                 }
+                // The scatter lands in the consumer's buffer when this lane was redirected, and
+                // the last slot's own buffer is then never written at all.
+                let target = redirect_of_lane
+                    .get(index)
+                    .map_or(op.output, |consumer| program.ops[*consumer].output);
+                arena[target.0 as usize] = resident[lane].clone();
             }
         }
         let output_node = spec
@@ -1874,6 +2294,209 @@ mod tests {
         assert_eq!(banked_graphs, 3617, "the banked corpus moved");
         assert_eq!(
             unaware_divergences, 285,
+            "the number of graphs reaching the pre-#169 defect moved"
+        );
+    }
+
+    /// Issue #202 rec 2, the load-bearing eval: over seeded multi-track graphs whose cohorts form
+    /// **multi-slot chains**, the program renders the value the semantic graph does in the order
+    /// the executor actually runs it -- chains merged, later slots never executed, and first-slot
+    /// gathers redirected past their dedication copy.
+    ///
+    /// [`bank_window_hoisting_preserves_dataflow_on_random_graphs`] is the same eval for #169's
+    /// per-bank hoisting, and its corpus gives each *track* an independent slot count, so a
+    /// cohort's two levels rarely hold the same lane set and almost nothing merges. This corpus
+    /// fixes the slot count per **cohort**, which is what a rack chain actually looks like: every
+    /// lane of a cohort runs the same program, so slot `k` and slot `k + 1` cover the same lanes in
+    /// the same order and `runtime::chains_into` can prove the fusion.
+    ///
+    /// Three arms, and the second and third are what make the first mean something:
+    ///
+    /// * **Merged.** Lowered with the bank member lists production passes, so
+    ///   [`chainable_bank_groups`] unions the fusible pairs and the window spans the whole chain.
+    ///   No graph may diverge.
+    /// * **Narrow window.** The same lowering with [`chainable_bank_groups`] switched off
+    ///   ([`lower_with_per_bank_windows`]), so every bank holds only its own span. That is
+    ///   precisely the window set a merge-unaware lowering would hold, and the count of graphs it
+    ///   gets wrong is the measurement of what the union buys.
+    /// * **No window at all.** The pre-#169 arm, kept so the corpus cannot quietly stop
+    ///   constructing a hazard at all.
+    ///
+    /// Every count is pinned rather than bounded, for the reason the #169 eval gives: the corpus is
+    /// seeded and deterministic, so a change means the corpus moved and the claims resting on it
+    /// need re-measuring rather than re-pinning.
+    #[test]
+    fn cohort_chain_merging_preserves_dataflow_on_random_graphs() {
+        let mut state = 0x0fed_cba9_8765_4321_u64;
+        let mut chained_graphs = 0usize;
+        let mut merged_runs = 0usize;
+        let mut redirected_lanes = 0usize;
+        let mut narrow_divergences = 0usize;
+        let mut unaware_divergences = 0usize;
+        for graph in 0..4000_u32 {
+            let track_count = (xorshift(&mut state) % 11) as usize + 2;
+            // Four cohorts, each with its own chain length: every lane of a cohort runs the same
+            // program, which is what makes slot `k` and slot `k + 1` the same lane set. Four
+            // rather than two because a merged run hoists its whole chain past *every* other
+            // cohort's ops at the same level, so the pressure on the colouring grows with the
+            // cohort count -- the standing console fixture runs eight.
+            let cohort_slots = [
+                (xorshift(&mut state) % 3) as usize + 1,
+                (xorshift(&mut state) % 3) as usize + 1,
+                (xorshift(&mut state) % 3) as usize + 1,
+                (xorshift(&mut state) % 3) as usize + 1,
+            ];
+            let mut nodes = Vec::new();
+            let mut edges = Vec::new();
+            let mut cohort_of_track: Vec<usize> = Vec::new();
+            let mut route_index = 0usize;
+            for track in 0..track_count {
+                let name = format!("t{track:02}");
+                let routes: Vec<String> = (0..(xorshift(&mut state) % 2) + 1)
+                    .map(|_| {
+                        route_index += 1;
+                        format!("r{route_index:02}")
+                    })
+                    .collect();
+                let borrowed: Vec<&str> = routes.iter().map(String::as_str).collect();
+                let (mut track_nodes, mut track_edges) = plain_track(&name, &borrowed);
+                let cohort = (xorshift(&mut state) % 4) as usize;
+                cohort_of_track.push(cohort);
+                track_edges.retain(|edge| {
+                    edge.id
+                        != GraphEdgeId::TrackMain {
+                            target: stage_node(&name, TrackStage::PostDynamic),
+                        }
+                });
+                let mut upstream = stage_node(&name, TrackStage::PostSimd1);
+                // One cohort's members are dedicated storage and one's are not, which is the
+                // difference that decides whether a member folds into its producer in place.
+                // A member that folds allocates nothing, so a corpus of only those never reaches
+                // the recycling hazard a merged window exists to hold off.
+                let rack = if cohort.is_multiple_of(2) {
+                    RackId::Simd1
+                } else {
+                    RackId::Dynamic
+                };
+                for slot in 0..cohort_slots[cohort] {
+                    let effect = GraphNodeId::Effect(crate::EffectNodeId {
+                        track_id: gid(&name),
+                        rack,
+                        effect_id: gid(&format!("fx{slot}")),
+                    });
+                    track_nodes.push(node(effect.clone()));
+                    track_edges.push(main_edge(
+                        GraphEdgeId::TrackMain {
+                            target: effect.clone(),
+                        },
+                        upstream,
+                        effect.clone(),
+                    ));
+                    upstream = effect;
+                }
+                track_edges.push(main_edge(
+                    GraphEdgeId::TrackMain {
+                        target: stage_node(&name, TrackStage::PostDynamic),
+                    },
+                    upstream,
+                    stage_node(&name, TrackStage::PostDynamic),
+                ));
+                nodes.extend(track_nodes.into_iter().filter(|candidate| {
+                    !matches!(candidate.id, GraphNodeId::Output { .. }) || track == 0
+                }));
+                edges.extend(track_edges);
+            }
+            let (spec, schedule, levels) = build(nodes, edges);
+            let mut delays: Vec<InsertedDelay> = Vec::new();
+            for edge in &spec.edges {
+                if !xorshift(&mut state).is_multiple_of(6) {
+                    continue;
+                }
+                delays.push(InsertedDelay {
+                    node: edge.destination.node.clone(),
+                    edge_id: edge.id.clone(),
+                    samples: LatencySamples(xorshift(&mut state) % 128 + 1),
+                });
+            }
+            let mut buckets: std::collections::BTreeMap<(u64, usize), Vec<GraphNodeId>> =
+                std::collections::BTreeMap::new();
+            for level in &levels {
+                for id in &level.nodes {
+                    let GraphNodeId::Effect(effect) = id else {
+                        continue;
+                    };
+                    let track: usize = effect.track_id.as_str()[1..].parse().expect("track");
+                    buckets
+                        .entry((level.level, cohort_of_track[track]))
+                        .or_default()
+                        .push(id.clone());
+                }
+            }
+            let banks: Vec<Vec<GraphNodeId>> = buckets
+                .into_values()
+                .filter(|members| members.len() > 1)
+                .collect();
+            if banks.is_empty() {
+                continue;
+            }
+            chained_graphs += 1;
+
+            let program = lower(&spec, &schedule, &levels, &delays, &banks).expect("lowers");
+            let lanes = member_lanes(&spec, &banks);
+            assert_program_matches_spec(&spec, &schedule, &delays, &program);
+            assert_eq!(
+                divergence_in_runtime_order(&spec, &schedule, &delays, &program, &lanes),
+                None,
+                "graph {graph}"
+            );
+            let realised = runs_in_runtime_order(&program, &lanes);
+            merged_runs += realised.iter().filter(|run| run.len() > 1).count();
+            let modelled = redirects_in_runtime_order(&program, &lanes, &realised);
+            redirected_lanes += modelled.len();
+            // The model is an oracle only while it and the runtime agree, and the model cannot
+            // check that by itself. Issue #202's adversarial verification found the gap: shortening
+            // `runtime::scatter_target`'s in-between scan by one op -- the unsound direction --
+            // reddened nothing, while the same one-token change to `scatter_target_model` reddened
+            // this corpus at graph 0. The corpus was building the hazard and then only ever asking
+            // the model about it. So the corpus now drives the runtime's own clauses too, and every
+            // clause it exercises has this eval as its red test on both sides of the pair.
+            assert_eq!(
+                crate::runtime::scatter_redirects_over_program(&program, &spec, &lanes, &realised),
+                modelled,
+                "graph {graph}: the runtime and the model disagree about which lanes redirect"
+            );
+
+            // The narrow-window arm: every bank's own span, and no union across banks.
+            let narrow = lower_with_per_bank_windows(&spec, &schedule, &levels, &delays, &banks)
+                .expect("lowers");
+            if divergence_in_runtime_order(&spec, &schedule, &delays, &narrow, &lanes).is_some() {
+                narrow_divergences += 1;
+            }
+
+            let unaware = lower(&spec, &schedule, &levels, &delays, &[]).expect("lowers");
+            if divergence_in_runtime_order(&spec, &schedule, &delays, &unaware, &lanes).is_some() {
+                unaware_divergences += 1;
+            }
+        }
+        assert_eq!(chained_graphs, 3563, "the chained corpus moved");
+        assert_eq!(
+            merged_runs, 3752,
+            "the number of realised multi-slot chains moved: if this ever falls to zero the arm \
+             above is passing on a corpus where nothing merges"
+        );
+        assert_eq!(
+            redirected_lanes, 1669,
+            "the number of lanes whose scatter is redirected into their consumer moved (#202 \
+             rec 3): a zero here would mean this eval never interprets one"
+        );
+        assert_eq!(
+            narrow_divergences, 885,
+            "the number of graphs a per-bank window gets wrong moved -- this is the measurement \
+             of what the cohort-chain window union buys, and a zero here would mean the union is \
+             held for nothing"
+        );
+        assert_eq!(
+            unaware_divergences, 1665,
             "the number of graphs reaching the pre-#169 defect moved"
         );
     }

@@ -107,6 +107,18 @@ pub trait PreparedPlanExecutor: Send {
     fn bank_shape(&self) -> [u64; 2] {
         [0, 0]
     }
+    /// Bank-chain lanes whose scatter was pointed at their consumer's buffer (issue #202 rec 3).
+    ///
+    /// The optimisation removes a whole stereo block copy per admitted lane per block, and removes
+    /// it by *not doing* something -- there is no output difference to observe and no timing
+    /// difference a gate may rest on. A count of the lanes the bind admitted is the only honest way
+    /// to state that it fired, which is the same reason `bank_shape` exists beside
+    /// `bank_transposes`. Fixed at bind, so it does not move across blocks. Read only after
+    /// rendering is disarmed.
+    #[doc(hidden)]
+    fn bank_scatter_redirects(&self) -> u64 {
+        0
+    }
     /// `[observed stages, declared taps, armed taps]`, walked over the **built** runtime.
     ///
     /// Issue #143 E5's structural gate. "A session that asked for no observation carries none" is
@@ -375,6 +387,18 @@ impl PreparedRenderPlan {
         self.executor
             .as_deref()
             .map_or([0, 0], PreparedPlanExecutor::bank_shape)
+    }
+    /// Read the admitted scatter-redirect count outside the render scope (issue #202 rec 3).
+    #[doc(hidden)]
+    #[must_use]
+    pub fn bank_scatter_redirects(&self) -> u64 {
+        assert!(
+            !super::audit::is_render_scope_active(),
+            "bank scatter redirects are sealed until the render audit is disarmed"
+        );
+        self.executor
+            .as_deref()
+            .map_or(0, PreparedPlanExecutor::bank_scatter_redirects)
     }
     /// Copy cumulative auxiliary-worker audit snapshots in stable worker order.
     #[doc(hidden)]
