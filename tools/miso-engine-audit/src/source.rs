@@ -445,6 +445,7 @@ fn prepared_graph_plan(
         envelope,
         required_bindings: vec![input, output],
         routes: Vec::new(),
+        track_delays: Vec::new(),
         effects: Vec::new(),
         effect_controls: Vec::new(),
         banks: Vec::new(),

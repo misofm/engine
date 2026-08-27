@@ -2524,6 +2524,29 @@ pub fn track_mono_source_v1(session: &CompiledSession, track: &Track) -> bool {
     track.left_source_channel == track.right_source_channel
 }
 
+/// The `DESIGNED` term a track's **input-side delay** contributes (#210 phase 2).
+///
+/// True exactly when the two lanes declare the same `delay_samples`. A collapsed track computes one
+/// plane and duplicates it at the seam; two lanes with different delays turn one source channel
+/// into two genuinely different signals upstream of that seam, so duplicating either one is wrong
+/// audio, not a saved multiply.
+///
+/// # Why this term is decided here and not by the input stage's word list
+///
+/// `InputStage::lane_channel_symmetry` compares the words its **kernel** reads -- `trim_signed` and
+/// the two SVF sections' six coefficients each. `delay_samples` is not one of them: the delay is
+/// applied by a graph node at `TrackStage::Input`, upstream of the bank, and the bank never sees
+/// it. Adding it to that list would be claiming the kernel reads a word it does not read. It is a
+/// prepared-only session word, so the honest owner of the verdict is the prepare-time structural
+/// witness -- here -- which is also the only one that runs before the chain is armed at all.
+/// Named without a `_v1` suffix on purpose, unlike its two neighbours: issue #215's owner ruling
+/// is that pre-launch internal implementation names are born unversioned, and the neighbours are
+/// on that issue's own rename list.
+#[must_use]
+pub fn track_input_delay_symmetric(track: &Track) -> bool {
+    track.builtins.left.delay_samples == track.builtins.right.delay_samples
+}
+
 /// Every track's structural channel-symmetry witness, in normalized track order.
 ///
 /// # Why this is a function over the compiled session and not a field of the prepared plan
@@ -2551,6 +2574,14 @@ pub fn session_structural_symmetry_v1(
             witness.set(
                 ChannelSymmetryWitnessV1::SOURCE,
                 track_mono_source_v1(session, track),
+            );
+            // Issue #210 phase 2. Prepared-only state, so the whole verdict is available here and
+            // needs no per-block maintenance: an asymmetric delay declines this track's collapse
+            // for the life of the plan, and a symmetric one -- including the overwhelmingly common
+            // zero -- leaves the witness exactly as it was before the feature existed.
+            witness.set(
+                ChannelSymmetryWitnessV1::DESIGNED,
+                track_input_delay_symmetric(track),
             );
             (Box::<str>::from(track.id.as_str()), witness)
         })
@@ -3191,6 +3222,7 @@ mod tests {
             envelope,
             required_bindings: vec![input.clone(), builtin.clone(), output.clone()],
             routes: Vec::new(),
+            track_delays: Vec::new(),
             effects: Vec::new(),
             effect_controls: Vec::new(),
             banks: Vec::new(),
@@ -3831,6 +3863,7 @@ mod tests {
             envelope,
             required_bindings: nodes,
             routes: Vec::new(),
+            track_delays: Vec::new(),
             effects: Vec::new(),
             effect_controls: Vec::new(),
             banks: Vec::new(),

@@ -32,7 +32,7 @@ id = "eq0"
 source_id = "fixture-source"
 left_source_channel = 0
 right_source_channel = 1
-builtins = { left = { polarity_invert = false, trim_db = 0.0, hpf_hz = 0.0, lpf_hz = 0.0 }, right = { polarity_invert = false, trim_db = 0.0, hpf_hz = 0.0, lpf_hz = 0.0 } }
+builtins = { left = { polarity_invert = false, trim_db = 0.0, hpf_hz = 0.0, lpf_hz = 0.0, delay_samples = 0 }, right = { polarity_invert = false, trim_db = 0.0, hpf_hz = 0.0, lpf_hz = 0.0, delay_samples = 0 } }
 simd1 = { effects = [{ id = "eq", identity = { kind = "native", effect_id = "miso.parametric-eq" }, quality = "normal", bypass = false, link_mode = "dual_mono", params = [{ parameter_id = 1, channel = "both", unit = "linear", value = 1.0 }, { parameter_id = 2, channel = "both", unit = "linear", value = 2.0 }, { parameter_id = 3, channel = "both", unit = "hz", value = 1000.0 }, { parameter_id = 4, channel = "both", unit = "db", value = 0.0 }], sidechain = { kind = "none" } }] }
 dynamic = { effects = [] }
 simd2 = { effects = [] }
@@ -44,7 +44,7 @@ id = "eq1"
 source_id = "fixture-source"
 left_source_channel = 0
 right_source_channel = 1
-builtins = { left = { polarity_invert = false, trim_db = 0.0, hpf_hz = 0.0, lpf_hz = 0.0 }, right = { polarity_invert = false, trim_db = 0.0, hpf_hz = 0.0, lpf_hz = 0.0 } }
+builtins = { left = { polarity_invert = false, trim_db = 0.0, hpf_hz = 0.0, lpf_hz = 0.0, delay_samples = 0 }, right = { polarity_invert = false, trim_db = 0.0, hpf_hz = 0.0, lpf_hz = 0.0, delay_samples = 0 } }
 simd1 = { effects = [{ id = "eq", identity = { kind = "native", effect_id = "miso.parametric-eq" }, quality = "normal", bypass = false, link_mode = "dual_mono", params = [{ parameter_id = 1, channel = "both", unit = "linear", value = 1.0 }, { parameter_id = 2, channel = "both", unit = "linear", value = 2.0 }, { parameter_id = 3, channel = "both", unit = "hz", value = 1000.0 }, { parameter_id = 4, channel = "both", unit = "db", value = 0.0 }], sidechain = { kind = "none" } }] }
 dynamic = { effects = [] }
 simd2 = { effects = [] }
@@ -56,7 +56,7 @@ id = "eq2"
 source_id = "fixture-source"
 left_source_channel = 0
 right_source_channel = 1
-builtins = { left = { polarity_invert = false, trim_db = 0.0, hpf_hz = 0.0, lpf_hz = 0.0 }, right = { polarity_invert = false, trim_db = 0.0, hpf_hz = 0.0, lpf_hz = 0.0 } }
+builtins = { left = { polarity_invert = false, trim_db = 0.0, hpf_hz = 0.0, lpf_hz = 0.0, delay_samples = 0 }, right = { polarity_invert = false, trim_db = 0.0, hpf_hz = 0.0, lpf_hz = 0.0, delay_samples = 0 } }
 simd1 = { effects = [{ id = "eq", identity = { kind = "native", effect_id = "miso.parametric-eq" }, quality = "normal", bypass = false, link_mode = "dual_mono", params = [{ parameter_id = 1, channel = "both", unit = "linear", value = 1.0 }, { parameter_id = 2, channel = "both", unit = "linear", value = 2.0 }, { parameter_id = 3, channel = "both", unit = "hz", value = 1000.0 }, { parameter_id = 4, channel = "both", unit = "db", value = 0.0 }], sidechain = { kind = "none" } }] }
 dynamic = { effects = [] }
 simd2 = { effects = [] }
@@ -68,7 +68,7 @@ id = "eq3"
 source_id = "fixture-source"
 left_source_channel = 0
 right_source_channel = 1
-builtins = { left = { polarity_invert = false, trim_db = 0.0, hpf_hz = 0.0, lpf_hz = 0.0 }, right = { polarity_invert = false, trim_db = 0.0, hpf_hz = 0.0, lpf_hz = 0.0 } }
+builtins = { left = { polarity_invert = false, trim_db = 0.0, hpf_hz = 0.0, lpf_hz = 0.0, delay_samples = 0 }, right = { polarity_invert = false, trim_db = 0.0, hpf_hz = 0.0, lpf_hz = 0.0, delay_samples = 0 } }
 simd1 = { effects = [{ id = "eq", identity = { kind = "native", effect_id = "miso.parametric-eq" }, quality = "normal", bypass = false, link_mode = "dual_mono", params = [{ parameter_id = 1, channel = "both", unit = "linear", value = 1.0 }, { parameter_id = 2, channel = "both", unit = "linear", value = 2.0 }, { parameter_id = 3, channel = "both", unit = "hz", value = 1000.0 }, { parameter_id = 4, channel = "both", unit = "db", value = 0.0 }], sidechain = { kind = "none" } }] }
 dynamic = { effects = [] }
 simd2 = { effects = [] }
@@ -80,7 +80,7 @@ id = "eq4"
 source_id = "fixture-source"
 left_source_channel = 0
 right_source_channel = 1
-builtins = { left = { polarity_invert = false, trim_db = 0.0, hpf_hz = 0.0, lpf_hz = 0.0 }, right = { polarity_invert = false, trim_db = 0.0, hpf_hz = 0.0, lpf_hz = 0.0 } }
+builtins = { left = { polarity_invert = false, trim_db = 0.0, hpf_hz = 0.0, lpf_hz = 0.0, delay_samples = 0 }, right = { polarity_invert = false, trim_db = 0.0, hpf_hz = 0.0, lpf_hz = 0.0, delay_samples = 0 } }
 simd1 = { effects = [{ id = "eq", identity = { kind = "native", effect_id = "miso.parametric-eq" }, quality = "normal", bypass = false, link_mode = "dual_mono", params = [{ parameter_id = 1, channel = "both", unit = "linear", value = 1.0 }, { parameter_id = 2, channel = "both", unit = "linear", value = 2.0 }, { parameter_id = 3, channel = "both", unit = "hz", value = 1000.0 }, { parameter_id = 4, channel = "both", unit = "db", value = 0.0 }], sidechain = { kind = "none" } }] }
 dynamic = { effects = [] }
 simd2 = { effects = [] }
@@ -92,7 +92,7 @@ id = "eq5"
 source_id = "fixture-source"
 left_source_channel = 0
 right_source_channel = 1
-builtins = { left = { polarity_invert = false, trim_db = 0.0, hpf_hz = 0.0, lpf_hz = 0.0 }, right = { polarity_invert = false, trim_db = 0.0, hpf_hz = 0.0, lpf_hz = 0.0 } }
+builtins = { left = { polarity_invert = false, trim_db = 0.0, hpf_hz = 0.0, lpf_hz = 0.0, delay_samples = 0 }, right = { polarity_invert = false, trim_db = 0.0, hpf_hz = 0.0, lpf_hz = 0.0, delay_samples = 0 } }
 simd1 = { effects = [{ id = "eq", identity = { kind = "native", effect_id = "miso.parametric-eq" }, quality = "normal", bypass = false, link_mode = "dual_mono", params = [{ parameter_id = 1, channel = "both", unit = "linear", value = 1.0 }, { parameter_id = 2, channel = "both", unit = "linear", value = 2.0 }, { parameter_id = 3, channel = "both", unit = "hz", value = 1000.0 }, { parameter_id = 4, channel = "both", unit = "db", value = 0.0 }], sidechain = { kind = "none" } }] }
 dynamic = { effects = [] }
 simd2 = { effects = [] }
@@ -104,7 +104,7 @@ id = "eq6"
 source_id = "fixture-source"
 left_source_channel = 0
 right_source_channel = 1
-builtins = { left = { polarity_invert = false, trim_db = 0.0, hpf_hz = 0.0, lpf_hz = 0.0 }, right = { polarity_invert = false, trim_db = 0.0, hpf_hz = 0.0, lpf_hz = 0.0 } }
+builtins = { left = { polarity_invert = false, trim_db = 0.0, hpf_hz = 0.0, lpf_hz = 0.0, delay_samples = 0 }, right = { polarity_invert = false, trim_db = 0.0, hpf_hz = 0.0, lpf_hz = 0.0, delay_samples = 0 } }
 simd1 = { effects = [{ id = "eq", identity = { kind = "native", effect_id = "miso.parametric-eq" }, quality = "normal", bypass = false, link_mode = "dual_mono", params = [{ parameter_id = 1, channel = "both", unit = "linear", value = 1.0 }, { parameter_id = 2, channel = "both", unit = "linear", value = 2.0 }, { parameter_id = 3, channel = "both", unit = "hz", value = 1000.0 }, { parameter_id = 4, channel = "both", unit = "db", value = 0.0 }], sidechain = { kind = "none" } }] }
 dynamic = { effects = [] }
 simd2 = { effects = [] }
@@ -116,7 +116,7 @@ id = "eq7"
 source_id = "fixture-source"
 left_source_channel = 0
 right_source_channel = 1
-builtins = { left = { polarity_invert = false, trim_db = 0.0, hpf_hz = 0.0, lpf_hz = 0.0 }, right = { polarity_invert = false, trim_db = 0.0, hpf_hz = 0.0, lpf_hz = 0.0 } }
+builtins = { left = { polarity_invert = false, trim_db = 0.0, hpf_hz = 0.0, lpf_hz = 0.0, delay_samples = 0 }, right = { polarity_invert = false, trim_db = 0.0, hpf_hz = 0.0, lpf_hz = 0.0, delay_samples = 0 } }
 simd1 = { effects = [{ id = "eq", identity = { kind = "native", effect_id = "miso.parametric-eq" }, quality = "normal", bypass = false, link_mode = "dual_mono", params = [{ parameter_id = 1, channel = "both", unit = "linear", value = 1.0 }, { parameter_id = 2, channel = "both", unit = "linear", value = 2.0 }, { parameter_id = 3, channel = "both", unit = "hz", value = 1000.0 }, { parameter_id = 4, channel = "both", unit = "db", value = 0.0 }], sidechain = { kind = "none" } }] }
 dynamic = { effects = [] }
 simd2 = { effects = [] }

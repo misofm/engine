@@ -10,7 +10,7 @@ sources = [
   { id = "voice", sample_rate_hz = 48000, content = { identity = "sha256:demo", locator = "host:voice" }, mapping = { channel_count = 2, region = { start_sample = 0, length_samples = 48000 } } },
 ]
 tracks = [
-  { id = "vocal", source_id = "voice", left_source_channel = 0, right_source_channel = 1, builtins = { left = { polarity_invert = false, trim_db = 0.0, hpf_hz = 20.0, lpf_hz = 20000.0 }, right = { polarity_invert = false, trim_db = 0.0, hpf_hz = 20.0, lpf_hz = 20000.0 } }, simd1 = { effects = [] }, dynamic = { effects = [{ id = "eq", identity = { kind = "native", effect_id = "parametric-eq" }, quality = "normal", bypass = false, link_mode = "dual_mono", params = [{ parameter_id = 1, channel = "both", unit = "db", value = 0.0 }], sidechain = { kind = "none" } }] }, simd2 = { effects = [] }, fader = { left_db = 0.0, right_db = 0.0, left_mute = false, right_mute = false }, pan = { left = 1.0, right = 1.0, smoothing_samples = 16 } },
+  { id = "vocal", source_id = "voice", left_source_channel = 0, right_source_channel = 1, builtins = { left = { polarity_invert = false, trim_db = 0.0, hpf_hz = 20.0, lpf_hz = 20000.0, delay_samples = 0 }, right = { polarity_invert = false, trim_db = 0.0, hpf_hz = 20.0, lpf_hz = 20000.0, delay_samples = 0 } }, simd1 = { effects = [] }, dynamic = { effects = [{ id = "eq", identity = { kind = "native", effect_id = "parametric-eq" }, quality = "normal", bypass = false, link_mode = "dual_mono", params = [{ parameter_id = 1, channel = "both", unit = "db", value = 0.0 }], sidechain = { kind = "none" } }] }, simd2 = { effects = [] }, fader = { left_db = 0.0, right_db = 0.0, left_mute = false, right_mute = false }, pan = { left = 1.0, right = 1.0, smoothing_samples = 16 } },
 ]
 submixes = [
 ]

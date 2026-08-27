@@ -357,6 +357,9 @@ pub struct PreparedGraphPlan {
     pub envelope: RenderEnvelope,
     pub required_bindings: Vec<GraphNodeId>,
     routes: Vec<PreparedRoute>,
+    /// Issue #210 phase 2: input-side track alignment, one entry per delayed track. Empty on every
+    /// session that declared no delay.
+    track_delays: Vec<PreparedTrackDelay>,
     effects: Vec<GraphPreparedEffect>,
     /// Issue #140 A: one entry per effect a live console drives. Empty for every session that
     /// asked for no console, which is what keeps the runtime on its byte-identical path.
@@ -585,6 +588,16 @@ pub trait GraphPreparedBuiltinBankProcessor: Send {
     fn desymmetrize(&mut self) {}
 }
 impl PreparedGraphPlan {
+    /// The input-side track delays this plan lowers, in normalized track order (#210 phase 2).
+    ///
+    /// Empty is the answer for every session that declared no delay, and that emptiness is the
+    /// feature's off gate: an empty list means `node_kind` never leaves its `SourceInput` arm, so
+    /// the lowered program is the one this plan would have had before the feature existed.
+    #[must_use]
+    pub fn track_delays(&self) -> &[PreparedTrackDelay] {
+        &self.track_delays
+    }
+
     fn has_valid_structural_layout(&self) -> bool {
         let graph_nodes: BTreeSet<_> = self.spec.nodes.iter().map(|node| node.id.clone()).collect();
         if graph_nodes.len() != self.spec.nodes.len() {
@@ -852,6 +865,7 @@ impl PreparedGraphPlan {
             envelope: parts.envelope,
             required_bindings: parts.required_bindings,
             routes: parts.routes,
+            track_delays: parts.track_delays,
             effects: parts.effects,
             effect_controls: parts.effect_controls,
             effect_observations: parts.effect_observations,
@@ -1011,6 +1025,8 @@ pub struct PreparedGraphPlanParts {
     pub envelope: RenderEnvelope,
     pub required_bindings: Vec<GraphNodeId>,
     pub routes: Vec<PreparedRoute>,
+    /// Issue #210 phase 2: input-side track alignment, one entry per delayed track.
+    pub track_delays: Vec<PreparedTrackDelay>,
     pub effects: Vec<GraphPreparedEffect>,
     /// Issue #140 A: live-console control channels, one per driven effect node.
     pub effect_controls: Vec<GraphEffectControlBindingV1>,
@@ -1257,6 +1273,27 @@ pub struct PreparedRoute {
     pub transform: RouteTransform,
 }
 
+/// One track's declared input-side time alignment (#210 phase 2).
+///
+/// Emitted by the compiler **only** for a track that declared a nonzero delay on at least one lane,
+/// so an undelayed session carries an empty vector and lowers to exactly the program it lowered to
+/// before this feature existed.
+///
+/// This is not latency and never becomes latency: it contributes nothing to `GraphNode.latency`,
+/// nothing to `RouteTiming`, and nothing to `inserted_delays`. See `runtime::TrackDelayLine`.
+///
+/// Unversioned by #215's ruling: pre-launch internal implementation types carry no `V1` suffix.
+/// It sits beside `PreparedRoute`, which is already spelled that way.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PreparedTrackDelay {
+    /// The `TrackStage::Input` node this delay is applied at.
+    pub node: GraphNodeId,
+    /// `builtins.left.delay_samples`.
+    pub left_samples: u32,
+    /// `builtins.right.delay_samples`.
+    pub right_samples: u32,
+}
+
 /// The sequential executor: one coloured arena, one pass over the lowered ops.
 ///
 /// It is a *driver* over [`runtime`], not a second implementation of anything: node semantics,
@@ -1313,6 +1350,7 @@ impl GraphExecutor {
             observers,
             bindings,
             source_inputs,
+            plan.track_delays,
             frames,
         );
         let runtime = runtime::build_sequential(program, &plan.spec, parts, frames);
@@ -1852,6 +1890,7 @@ mod tests {
                 envelope,
                 required_bindings: required.clone(),
                 routes: Vec::new(),
+                track_delays: Vec::new(),
                 effects: Vec::new(),
                 effect_controls: Vec::new(),
                 effect_observations: Vec::new(),
@@ -2100,6 +2139,7 @@ mod tests {
             envelope,
             required_bindings: required_bindings.clone(),
             routes: Vec::new(),
+            track_delays: Vec::new(),
             effects: Vec::new(),
             effect_controls: Vec::new(),
             effect_observations: Vec::new(),
@@ -3055,6 +3095,7 @@ mod tests {
             envelope,
             required_bindings: required,
             routes,
+            track_delays: Vec::new(),
             effects,
             effect_controls: Vec::new(),
             effect_observations: Vec::new(),
@@ -3240,6 +3281,7 @@ mod tests {
                 envelope,
                 required_bindings: required,
                 routes: Vec::new(),
+                track_delays: Vec::new(),
                 effects: Vec::new(),
                 effect_controls: Vec::new(),
                 effect_observations: Vec::new(),
@@ -3524,6 +3566,7 @@ mod tests {
                     transform: identity,
                 },
             ],
+            track_delays: Vec::new(),
             effects: Vec::new(),
             effect_controls: Vec::new(),
             effect_observations: Vec::new(),
@@ -3816,6 +3859,7 @@ mod tests {
             envelope,
             required_bindings: vec![input.clone(), output_node.clone()],
             routes: Vec::new(),
+            track_delays: Vec::new(),
             effects: vec![GraphPreparedEffect {
                 id: effect_id.clone(),
                 metadata,
@@ -4236,6 +4280,7 @@ mod tests {
                     rr: 1.0,
                 },
             }],
+            track_delays: Vec::new(),
             effects: vec![GraphPreparedEffect {
                 id: effect_id,
                 metadata,
@@ -4509,6 +4554,7 @@ mod tests {
                     transform: identity,
                 },
             ],
+            track_delays: Vec::new(),
             effects: vec![GraphPreparedEffect {
                 id: effect_id,
                 metadata,

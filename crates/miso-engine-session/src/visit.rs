@@ -86,7 +86,7 @@ pub mod keys {
  key_module!(region,"Source-region fields.";START_SAMPLE="start_sample":1,LENGTH_SAMPLES="length_samples":2);
  key_module!(track,"Track fields.";ID="id":1,SOURCE_ID="source_id":2,LEFT_SOURCE_CHANNEL="left_source_channel":3,RIGHT_SOURCE_CHANNEL="right_source_channel":4,BUILTINS="builtins":5,SIMD1="simd1":6,DYNAMIC="dynamic":7,SIMD2="simd2":8,FADER="fader":9,PAN="pan":10,MATRIX="matrix":10);
  key_module!(builtins,"Dual-mono builtins fields.";LEFT="left":1,RIGHT="right":2);
- key_module!(channel_builtins,"Channel-builtin fields.";POLARITY_INVERT="polarity_invert":1,TRIM_DB="trim_db":2,HPF_HZ="hpf_hz":3,LPF_HZ="lpf_hz":4);
+ key_module!(channel_builtins,"Channel-builtin fields.";POLARITY_INVERT="polarity_invert":1,TRIM_DB="trim_db":2,HPF_HZ="hpf_hz":3,LPF_HZ="lpf_hz":4,DELAY_SAMPLES="delay_samples":5);
  key_module!(rack,"Rack fields.";EFFECTS="effects":1);
  key_module!(effect,"Effect fields.";ID="id":1,IDENTITY="identity":2,QUALITY="quality":3,BYPASS="bypass":4,LINK_MODE="link_mode":5,PARAMS="params":6,SIDECHAIN="sidechain":7);
  key_module!(identity,"Effect-identity fields.";KIND="kind":1,EFFECT_ID="effect_id":2,CID="cid":2);
@@ -202,7 +202,7 @@ mod walk {
           {let k=match s.matrix_or_pan {MatrixOrPan::Pan{..}=>f::PAN,MatrixOrPan::Matrix{..}=>f::MATRIX};s.matrix_or_pan.record(Some(k),o,v)}
         }
         DualMonoBuiltins=>builtins |s,v,o,f| [2] {s.left.record(Some(f::LEFT),o,v),s.right.record(Some(f::RIGHT),o,v)}
-        ChannelBuiltins=>channel_builtins |s,v,_o,f| [4] {v.bool(f::POLARITY_INVERT,s.polarity_invert),v.f32(f::TRIM_DB,s.trim_db),v.f32(f::HPF_HZ,s.hpf_hz),v.f32(f::LPF_HZ,s.lpf_hz)}
+        ChannelBuiltins=>channel_builtins |s,v,_o,f| [5] {v.bool(f::POLARITY_INVERT,s.polarity_invert),v.f32(f::TRIM_DB,s.trim_db),v.f32(f::HPF_HZ,s.hpf_hz),v.f32(f::LPF_HZ,s.lpf_hz),v.u32(f::DELAY_SAMPLES,s.delay_samples)}
         Rack=>rack |s,v,o,f| [s.effects.len() as u32] {array(f::EFFECTS,&s.effects,o,v)}
         Effect=>effect |s,v,o,f| [6+s.params.len() as u32] {
           v.id(f::ID,&s.id),s.identity.record(Some(f::IDENTITY),o,v),v.token(f::QUALITY,token(s.quality.token(),s.quality.wire())),v.bool(f::BYPASS,s.bypass),

@@ -893,18 +893,28 @@ fn parse_channel_builtins(
 ) -> Option<ChannelBuiltins> {
     parser.keys(
         table,
-        &["polarity_invert", "trim_db", "hpf_hz", "lpf_hz"],
+        &[
+            "polarity_invert",
+            "trim_db",
+            "hpf_hz",
+            "lpf_hz",
+            "delay_samples",
+        ],
         &path,
     );
     let polarity_invert = parser.bool(table, "polarity_invert", &path);
     let trim_db = parser.f32(table, "trim_db", &path);
     let hpf_hz = parser.f32(table, "hpf_hz", &path);
     let lpf_hz = parser.f32(table, "lpf_hz", &path);
+    // Required, like every other V1 key: the schema has no optional fields and no unknown-key
+    // tolerance, so an existing document without it is a `schema.missing_field`, not a default.
+    let delay_samples = parser.u32(table, "delay_samples", &path);
     Some(ChannelBuiltins {
         polarity_invert: polarity_invert?,
         trim_db: trim_db?,
         hpf_hz: hpf_hz?,
         lpf_hz: lpf_hz?,
+        delay_samples: delay_samples?,
     })
 }
 

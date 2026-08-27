@@ -13,7 +13,9 @@ that at preparation, and this script is what makes them true of every track:
     between the channels". The standing fixture is deliberately asymmetric everywhere: all 64
     tracks carry a different ``trim_db``/``hpf_hz``/``lpf_hz`` per channel, and 124 of its 128
     left/right EQ parameter pairs carry different values. Here the **left** value wins in both
-    places.
+    places. Since issue #210 phase 2 the builtins table also carries ``delay_samples``; copying the
+    whole ``builtins.left`` table carries it across with everything else, which is what keeps an
+    asymmetric input delay -- a term this witness genuinely declines -- out of the mono fixture.
 
 So the transformation is exactly three edits, and every one of them is upstream of the seam:
 

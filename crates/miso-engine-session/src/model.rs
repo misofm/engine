@@ -205,6 +205,12 @@ pub struct DualMonoBuiltins {
     pub right: ChannelBuiltins,
 }
 
+/// Inclusive maximum for `ChannelBuiltins::delay_samples`.
+///
+/// About 1.09 s at 44.1 kHz and 0.5 s at 96 kHz -- an order of magnitude beyond any mic-alignment
+/// need -- which bounds the worst-case ring at 192,000 bytes per lane.
+pub const CHANNEL_BUILTIN_DELAY_SAMPLES_MAXIMUM: u32 = 48_000;
+
 /// Builtin parameters with explicit `_db`/`_hz` units.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ChannelBuiltins {
@@ -216,6 +222,20 @@ pub struct ChannelBuiltins {
     pub hpf_hz: f32,
     /// Low-pass cutoff in hertz. Nyquist validation is issue 007.
     pub lpf_hz: f32,
+    /// Input-side time alignment, in samples, applied at the track's `Input` stage.
+    ///
+    /// Samples rather than milliseconds: alignment is a sample-exact operation, the engine is
+    /// sample-domain everywhere, and #147's unit-in-name rule makes the unit explicit. A UI
+    /// converts from milliseconds; the session never does.
+    ///
+    /// Per-lane, following the dual-mono law. A track whose two lanes declare **different**
+    /// delays is genuinely asymmetric upstream of the mono-collapse seam and declines that
+    /// track's collapse; see `session_structural_symmetry_v1`.
+    ///
+    /// This is deliberately **not** plugin latency. PDC equalizes unrequested arrival-time skew;
+    /// this is a musical time shift the session asked for, so it contributes zero to
+    /// `GraphNode.latency` and PDC must never compensate it away.
+    pub delay_samples: u32,
 }
 
 /// An ordered effect rack.

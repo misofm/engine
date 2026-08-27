@@ -32,7 +32,10 @@ fn frozen_corpus_bytes_and_typed_decoders_are_unchanged() {
         };
         assert!(decoded.is_ok(), "{} must decode", frame.name);
     }
-    assert_eq!(hash, 0x88a8_ee6a_6d9e_4acc);
+    // Re-pinned by issue #210 phase 2: the frozen session frames carry `ChannelBuiltins`, which
+    // gained a required `delay_samples` field, so their encoded bytes moved. The frame *count* did
+    // not: no message was added, one existing message grew a field.
+    assert_eq!(hash, 0xeb7a_a549_b666_77a8);
 }
 
 #[test]

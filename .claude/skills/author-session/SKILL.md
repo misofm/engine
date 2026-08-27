@@ -152,8 +152,8 @@ lane detectors (the usual "stereo-linked" behaviour); `average` links by their m
 An `automation` target is `{ entity_id, rack, effect_id, parameter_id, channel }`, all five
 required, `rack` being `simd1`/`dynamic`/`simd2`. **The only thing a session file can automate is a
 parameter of an effect in a rack**, on a track (submixes and outputs carry no racks). The builtin
-strip — `trim_db`, `hpf_hz`, `lpf_hz`, `fader_db`, `mute`, the matrix/pan coefficients — has **no
-session automation path at all**.
+strip — `trim_db`, `hpf_hz`, `lpf_hz`, `delay_samples`, `fader_db`, `mute`, the matrix/pan
+coefficients — has **no session automation path at all**.
 
 The metadata marks `fader_db`, `mute` and `matrix_*` `"liveUpdatable": true` with smoothing, and
 the metadata's `commandKinds` additionally carries `solo` (9), which has no builtin row at all
@@ -176,6 +176,17 @@ ones that pass while meaning something other than what you assumed.
 - **Builtin `hpf_hz` / `lpf_hz` of `0.0` means the filter is disabled**, not 0 Hz — that is the
   metadata's `disabledValue`. An enabled cutoff is at least `10.0` and below the rate-keyed maximum
   for your `sample_rate_hz`.
+- **`delay_samples` is required on both lanes and is written in samples, never milliseconds.**
+  Every lane's builtins table is exactly `polarity_invert`, `trim_db`, `hpf_hz`, `lpf_hz`,
+  `delay_samples`; omit it and you get `schema.missing_field`. Write `delay_samples = 0` unless the
+  session is doing multi-mic time alignment. The domain is `0..=48000` and out of range is
+  `numeric.out_of_schema_range` at `$.tracks[N].builtins.left.delay_samples`. Convert from
+  milliseconds yourself: `round(ms * sample_rate_hz / 1000)`. For the ordinary alignment workflow
+  set **both lanes to the same value** — unequal lanes are a legitimate but unusual declaration
+  that makes the track's two channels genuinely different and costs it the mono-collapse
+  optimization. The delay is applied at the track input, ahead of trim/HPF/LPF, so every `input`
+  send tap, sidechain and input meter sees aligned audio; it is not latency and PDC does not
+  compensate it away.
 - **`link_mode` is mandatory on every effect but inert without a detector.** EQ, soft clip,
   transient shaper and delay have nothing to link: write `dual_mono`. For compressors, limiters and
   gates pick deliberately — a true-peak limiter normally wants `maximum`, because independent

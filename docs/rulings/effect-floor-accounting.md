@@ -274,6 +274,18 @@ the graph's routing in `crates/miso-engine-graph/src/runtime.rs`. Per lane-sampl
 Polarity inversion is **0**: it is folded into the trim coefficient at prepare time
 (`trim_signed: if params.polarity_invert { -trim } else { trim }`).
 
+Input time alignment (`builtins.*.delay_samples`, issue #210 phase 2) is **0** as well, and it is a
+named gap term rather than a floor row: *input delay — 1 load + 1 store per lane-sample when
+engaged, floor 0*. It falls under the standing rule that loads and stores are outside the floor
+(see "Counting rules" and the gap-term list above). The kernel is `pdc_delay_block`, the same
+two-segment ring swap PDC uses: it performs no arithmetic at all — it exchanges block words with
+ring words — so there is no lane-op to count, and the residual it contributes is a memory-traffic
+term of exactly the shape the transpose and dispatch terms already are. The overwhelming majority
+of tracks declare `delay_samples = 0` and are not lowered to a delay node at all, so the term is
+zero for them by construction rather than by rounding. `BUILTINS_LANE_OPS = 69.0`
+(`tools/miso-engine-bench/src/floor.rs`) is therefore unchanged and this feature is **not** a
+recount trigger.
+
 **The ruling.** The directive asks for a floor "per enabled-section count" because the identity
 section's content was believed to be workload-dependent. It is not:
 

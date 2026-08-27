@@ -169,6 +169,31 @@ const MUTATIONS: &[(&str, &str, &str, usize, &str)] = &[
         1,
         "schema.unknown_field",
     ),
+    // Issue #210 phase 2. `delay_samples` is a **required** key like every other V1 key -- the
+    // schema has no optional fields -- so deleting it is a missing field, not a default, and
+    // exceeding its flat 0..=48000 domain is stage-2 schema work rather than stage-4 DSP work.
+    // Both are on the *left* lane so the row is unambiguous about which one it removed.
+    (
+        "canonical.toml",
+        "lpf_hz = 20000.0, delay_samples = 0 }, right",
+        "lpf_hz = 20000.0 }, right",
+        1,
+        "schema.missing_field",
+    ),
+    (
+        "canonical.toml",
+        "lpf_hz = 20000.0, delay_samples = 0 }, right",
+        "lpf_hz = 20000.0, delay_samples = 48001 }, right",
+        1,
+        "numeric.out_of_schema_range",
+    ),
+    (
+        "canonical.toml",
+        "lpf_hz = 20000.0, delay_samples = 0 }, right",
+        "lpf_hz = 20000.0, delay_samples = -1 }, right",
+        1,
+        "numeric.out_of_schema_range",
+    ),
     (
         "canonical.toml",
         "output_id = \"main-out\"",

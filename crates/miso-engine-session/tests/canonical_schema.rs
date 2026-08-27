@@ -41,8 +41,11 @@ fn parametric_eq_session_fixture_bytes_are_immutable() {
         .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
             (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
         });
-    assert_eq!(PARAMETRIC_EQ.len(), 9_475);
-    assert_eq!(hash, 0x96a3_be36_fc01_31fa);
+    // Re-pinned by issue #210 phase 2: `builtins.{left,right}.delay_samples` is a new required
+    // key, so every session document in the tree grew, this one by 342 bytes (9 tracks x 2 lanes
+    // x 19 bytes of ", delay_samples = 0").
+    assert_eq!(PARAMETRIC_EQ.len(), 9_817);
+    assert_eq!(hash, 0xa7e3_594d_10fa_c382);
 }
 
 #[test]
@@ -93,6 +96,9 @@ fn maximal_float_spellings_fit_the_canonical_size_estimate() {
         channel.trim_db = tiny;
         channel.hpf_hz = tiny;
         channel.lpf_hz = tiny;
+        // Not a float, but it is the widest spelling this key has: the canonical estimate must
+        // cover a five-digit integer on every lane too (#210 phase 2).
+        channel.delay_samples = miso_engine_session::CHANNEL_BUILTIN_DELAY_SAMPLES_MAXIMUM;
     }
     track.fader.left_db = tiny;
     track.fader.right_db = tiny;

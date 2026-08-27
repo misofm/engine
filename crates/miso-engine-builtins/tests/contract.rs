@@ -22,7 +22,7 @@ fn parameter_descriptors_have_complete_stable_contracts() {
     let descriptors = BUILTIN_PARAMETER_DESCRIPTORS_V1;
     assert_eq!(
         descriptors.map(|descriptor| descriptor.id),
-        [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+        [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
     );
     assert_eq!(
         descriptors.map(|descriptor| descriptor.name),
@@ -37,6 +37,7 @@ fn parameter_descriptors_have_complete_stable_contracts() {
             "matrix_lr",
             "matrix_rl",
             "matrix_rr",
+            "delay_samples",
         ]
     );
     assert_eq!(
@@ -52,6 +53,7 @@ fn parameter_descriptors_have_complete_stable_contracts() {
             BuiltinParameterScope::MatrixShared,
             BuiltinParameterScope::MatrixShared,
             BuiltinParameterScope::MatrixShared,
+            BuiltinParameterScope::PerLane,
         ]
     );
     assert_eq!(
@@ -67,11 +69,24 @@ fn parameter_descriptors_have_complete_stable_contracts() {
             BuiltinParameterMapping::Linear,
             BuiltinParameterMapping::Linear,
             BuiltinParameterMapping::Linear,
+            BuiltinParameterMapping::Linear,
         ]
     );
     assert_eq!(
         descriptors.map(|descriptor| descriptor.default.to_bits()),
-        [0, 0, 0, 0, 0, 0, 1.0_f32.to_bits(), 0, 0, 1.0_f32.to_bits()]
+        [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            1.0_f32.to_bits(),
+            0,
+            0,
+            1.0_f32.to_bits(),
+            0
+        ]
     );
     assert_eq!(
         descriptors.map(|descriptor| descriptor.update_rate),
@@ -87,6 +102,8 @@ fn parameter_descriptors_have_complete_stable_contracts() {
             BuiltinParameterUpdateRate::BlockTarget,
             BuiltinParameterUpdateRate::BlockTarget,
             BuiltinParameterUpdateRate::BlockTarget,
+            // Issue #210 phase 2: a delay length change re-times the ring, so it is a session edit.
+            BuiltinParameterUpdateRate::PreparedOnly,
         ]
     );
     assert_eq!(
@@ -102,6 +119,7 @@ fn parameter_descriptors_have_complete_stable_contracts() {
             BuiltinSmoothingPolicy::LinearNUpdates,
             BuiltinSmoothingPolicy::LinearNUpdates,
             BuiltinSmoothingPolicy::LinearNUpdates,
+            BuiltinSmoothingPolicy::None,
         ]
     );
     assert_eq!(
@@ -117,6 +135,7 @@ fn parameter_descriptors_have_complete_stable_contracts() {
             BuiltinParameterReset::KeepTargetResetCurrent,
             BuiltinParameterReset::KeepTargetResetCurrent,
             BuiltinParameterReset::KeepTargetResetCurrent,
+            BuiltinParameterReset::RestorePreparedValue,
         ]
     );
     assert_eq!(
@@ -126,6 +145,7 @@ fn parameter_descriptors_have_complete_stable_contracts() {
             None,
             Some(0.0),
             Some(0.0),
+            None,
             None,
             None,
             None,
@@ -170,6 +190,10 @@ fn parameter_descriptors_have_complete_stable_contracts() {
             BuiltinParameterDomain::FiniteInclusive {
                 minimum: -1.0,
                 maximum: 1.0,
+            },
+            BuiltinParameterDomain::FiniteInclusive {
+                minimum: 0.0,
+                maximum: 48_000.0,
             },
         ]
     );
@@ -221,12 +245,29 @@ fn descriptor_domains_are_exhaustive_at_launch_rates() {
         assert!(!decibels.domain.contains(-144.001, 48_000));
         assert!(!decibels.domain.contains(24.001, 48_000));
     }
-    for matrix in &BUILTIN_PARAMETER_DESCRIPTORS_V1[6..] {
+    // Bounded, not open-ended: issue #210 phase 2 appended `delay_samples` after the matrix rows,
+    // and an open `[6..]` would have quietly swept it into the matrix contract.
+    for matrix in &BUILTIN_PARAMETER_DESCRIPTORS_V1[6..10] {
         assert!(matrix.domain.contains(-1.0, 48_000));
         assert!(matrix.domain.contains(1.0, 48_000));
         assert!(!matrix.domain.contains(-1.001, 48_000));
         assert!(!matrix.domain.contains(1.001, 48_000));
     }
+    let delay = BUILTIN_PARAMETER_DESCRIPTORS_V1[10];
+    assert_eq!(delay.name, "delay_samples");
+    for rate in [44_100, 48_000, 88_200, 96_000] {
+        // A flat integer range: rate-independent, unlike the two cutoff rows above.
+        assert!(delay.domain.contains(0.0, rate));
+        assert!(delay.domain.contains(1.0, rate));
+        assert!(delay.domain.contains(48_000.0, rate));
+        assert!(!delay.domain.contains(48_001.0, rate));
+        assert!(!delay.domain.contains(-1.0, rate));
+        assert!(!delay.domain.contains(f32::NAN, rate));
+        assert!(!delay.domain.contains(f32::INFINITY, rate));
+    }
+    // The descriptor maximum and the session schema maximum being *one* number rather than two
+    // that agree today is gated in `miso-engine-builtins-compiler`, which is the crate that can see
+    // both without this one taking a session dependency it has no other reason to have.
 }
 
 #[test]
