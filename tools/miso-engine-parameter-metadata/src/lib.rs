@@ -32,6 +32,7 @@
 //! `ParameterDescriptorV1`, that slot becomes an object and nothing else in this schema moves --
 //! which is the whole reason it is a declared null rather than an absent key.
 
+use core::mem::offset_of;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
@@ -49,34 +50,48 @@ use miso_engine_effect_contract::{
     ParameterUnit, SmoothingRule,
 };
 use miso_engine_host_web::{
-    ABI_VERSION, COMMAND_EFFECT_BYPASS, COMMAND_EFFECT_PARAM, COMMAND_FADER_DB, COMMAND_MATRIX,
-    COMMAND_MUTE, COMMAND_PAN, COMMAND_REASON_BACKPRESSURE, COMMAND_REASON_DOMAIN,
-    COMMAND_REASON_MALFORMED, COMMAND_REASON_NONE, COMMAND_REASON_OBSERVATION_UNBOUND,
-    COMMAND_REASON_UNKNOWN_EFFECT, COMMAND_REASON_UNKNOWN_PARAMETER, COMMAND_REASON_UNKNOWN_RACK,
-    COMMAND_REASON_UNKNOWN_TAP, COMMAND_REASON_UNKNOWN_TRACK, COMMAND_REASON_UNSUPPORTED_KIND,
-    COMMAND_REASON_WRONG_STATE, COMMAND_RECORD_BYTES, MAXIMUM_COMMAND_RECORDS,
+    ABI_VERSION, BACKEND_SCALAR, BACKEND_SIMD128, BUFFER_COMMAND, BUFFER_DIAGNOSTIC,
+    BUFFER_METER_FRAME, BUFFER_OUTPUT_PCM, BUFFER_SESSION_TOML, BUFFER_SOURCE_ID,
+    BUFFER_SOURCE_PCM, COMMAND_EFFECT_BYPASS, COMMAND_EFFECT_PARAM, COMMAND_FADER_DB,
+    COMMAND_MATRIX, COMMAND_MUTE, COMMAND_OBSERVE_SUBSCRIBE, COMMAND_OBSERVE_UNSUBSCRIBE,
+    COMMAND_PAN, COMMAND_REASON_BACKPRESSURE, COMMAND_REASON_DOMAIN, COMMAND_REASON_MALFORMED,
+    COMMAND_REASON_NONE, COMMAND_REASON_OBSERVATION_UNBOUND, COMMAND_REASON_UNKNOWN_EFFECT,
+    COMMAND_REASON_UNKNOWN_PARAMETER, COMMAND_REASON_UNKNOWN_RACK, COMMAND_REASON_UNKNOWN_TAP,
+    COMMAND_REASON_UNKNOWN_TRACK, COMMAND_REASON_UNSUPPORTED_KIND, COMMAND_REASON_WRONG_STATE,
+    COMMAND_RECORD_BYTES, COMMAND_REPORT_BYTES, MAXIMUM_COMMAND_RECORDS, METER_HEADER_BYTES,
+    PREPARE_CONFIG_BYTES, RESOURCE_REPORT_BYTES, RESULT_ABI_MISMATCH, RESULT_BACKPRESSURE,
+    RESULT_BUFFER_TOO_SMALL, RESULT_INTERNAL, RESULT_INVALID_ARGUMENT, RESULT_OK,
+    RESULT_PREPARE_REJECTED, RESULT_RENDER_REJECTED, RESULT_REPREPARE_REQUIRED, RESULT_UNSUPPORTED,
+    RESULT_WRONG_STATE, STATE_CONFIG, STATE_DISPOSED, STATE_FAILED, STATE_PREPARED, STATE_READY,
+    STATUS_BYTES, WebCommandReportV1, WebMeterHeaderV1, WebPrepareConfigV1, WebResourceReportV1,
+    WebStatusV1,
 };
 
 /// The emitted file name, shipped beside the Wasm artifact.
 pub const OUTPUT_NAME: &str = "miso-engine-v2-parameter-metadata.json";
 /// The schema tag every consumer must check before reading a field.
 pub const SCHEMA: &str = "miso.web.parameter-metadata.v1";
+/// The emitted ABI-layout file name, shipped beside the Wasm artifact.
+pub const ABI_LAYOUT_OUTPUT_NAME: &str = "miso-engine-v2-abi-layout.json";
+/// The schema tag for the browser ABI layout consumed by SDK code generation.
+pub const ABI_LAYOUT_SCHEMA: &str = "miso.web.abi-layout.v1";
 /// The launch sample rates a rate-keyed builtin domain is reported for.
 pub const LAUNCH_RATES_HZ: [u32; 4] = [44_100, 48_000, 88_200, 96_000];
 
 fn usage() -> ! {
     eprintln!(
-        "usage: miso_engine_parameter_metadata --write DIRECTORY | --check DIRECTORY | --print"
+        "usage: miso_engine_parameter_metadata --write DIRECTORY | --check DIRECTORY | \\
+         --print | --print-abi-layout"
     );
     std::process::exit(2)
 }
 
-fn output_path(directory: &Path) -> PathBuf {
+fn output_path(directory: &Path, name: &str) -> PathBuf {
     if !directory.is_dir() {
         eprintln!("{} is not a directory", directory.display());
         std::process::exit(2);
     }
-    directory.join(OUTPUT_NAME)
+    directory.join(name)
 }
 
 /// Render the whole document. Deterministic: registry order is `EffectId` order.
@@ -204,6 +219,554 @@ pub fn render() -> String {
     }
     out.push_str("  ]\n}\n");
     out
+}
+
+/// Render the complete fixed browser ABI layout consumed by SDK code generation.
+///
+/// The values are derived directly from the public C-facing structures and frozen constants rather
+/// than copied from JavaScript. This is deliberately separate from parameter metadata: its
+/// vocabulary describes bytes and state-machine values, not effect descriptors.
+#[must_use]
+pub fn render_abi_layout() -> String {
+    let prepare = [
+        (
+            "structSize",
+            offset_of!(WebPrepareConfigV1, struct_size),
+            "u32",
+        ),
+        (
+            "abiVersion",
+            offset_of!(WebPrepareConfigV1, abi_version),
+            "u32",
+        ),
+        (
+            "sampleRateHz",
+            offset_of!(WebPrepareConfigV1, sample_rate_hz),
+            "u32",
+        ),
+        (
+            "quantumFrames",
+            offset_of!(WebPrepareConfigV1, quantum_frames),
+            "u32",
+        ),
+        (
+            "sessionTomlBytes",
+            offset_of!(WebPrepareConfigV1, session_toml_bytes),
+            "u32",
+        ),
+        (
+            "diagnosticBytes",
+            offset_of!(WebPrepareConfigV1, diagnostic_bytes),
+            "u32",
+        ),
+        (
+            "sourceIdBytes",
+            offset_of!(WebPrepareConfigV1, source_id_bytes),
+            "u32",
+        ),
+        (
+            "maximumSourceChannels",
+            offset_of!(WebPrepareConfigV1, maximum_source_channels),
+            "u32",
+        ),
+        (
+            "sourceRingFrames",
+            offset_of!(WebPrepareConfigV1, source_ring_frames),
+            "u32",
+        ),
+        (
+            "maximumAutomationSpansPerBlock",
+            offset_of!(WebPrepareConfigV1, maximum_automation_spans_per_block),
+            "u32",
+        ),
+        (
+            "maximumTracks",
+            offset_of!(WebPrepareConfigV1, maximum_tracks),
+            "u64",
+        ),
+        (
+            "maximumSources",
+            offset_of!(WebPrepareConfigV1, maximum_sources),
+            "u64",
+        ),
+        (
+            "maximumRoutes",
+            offset_of!(WebPrepareConfigV1, maximum_routes),
+            "u64",
+        ),
+        (
+            "maximumEffects",
+            offset_of!(WebPrepareConfigV1, maximum_effects),
+            "u64",
+        ),
+        (
+            "maximumGraphSessionPlusPlanBytes",
+            offset_of!(WebPrepareConfigV1, maximum_graph_session_plus_plan_bytes),
+            "u64",
+        ),
+        (
+            "maximumSourceTotalBytes",
+            offset_of!(WebPrepareConfigV1, maximum_source_total_bytes),
+            "u64",
+        ),
+        (
+            "maximumSourceOverheadBytes",
+            offset_of!(WebPrepareConfigV1, maximum_source_overhead_bytes),
+            "u64",
+        ),
+        (
+            "maximumEffectStateBytes",
+            offset_of!(WebPrepareConfigV1, maximum_effect_state_bytes),
+            "u64",
+        ),
+        (
+            "maximumEffectScratchBytes",
+            offset_of!(WebPrepareConfigV1, maximum_effect_scratch_bytes),
+            "u64",
+        ),
+        (
+            "maximumBuiltinRetainedBytes",
+            offset_of!(WebPrepareConfigV1, maximum_builtin_retained_bytes),
+            "u64",
+        ),
+        (
+            "maximumHostRetainedBytes",
+            offset_of!(WebPrepareConfigV1, maximum_host_retained_bytes),
+            "u64",
+        ),
+        (
+            "maximumNamedAllocationBytes",
+            offset_of!(WebPrepareConfigV1, maximum_named_allocation_bytes),
+            "u64",
+        ),
+        (
+            "maximumMeterStreams",
+            offset_of!(WebPrepareConfigV1, maximum_meter_streams),
+            "u64",
+        ),
+        (
+            "maximumMeterItems",
+            offset_of!(WebPrepareConfigV1, maximum_meter_items),
+            "u64",
+        ),
+        (
+            "maximumMeterBytes",
+            offset_of!(WebPrepareConfigV1, maximum_meter_bytes),
+            "u64",
+        ),
+        (
+            "consoleCommandQueueRecords",
+            offset_of!(WebPrepareConfigV1, console_command_queue_records),
+            "u64",
+        ),
+        (
+            "consoleMeterBlocks",
+            offset_of!(WebPrepareConfigV1, console_meter_blocks),
+            "u64",
+        ),
+        (
+            "consoleObservationTaps",
+            offset_of!(WebPrepareConfigV1, console_observation_taps),
+            "u64",
+        ),
+        (
+            "consoleMasterTrackPlusOne",
+            offset_of!(WebPrepareConfigV1, console_master_track_plus_one),
+            "u64",
+        ),
+    ];
+    let status = [
+        ("structSize", offset_of!(WebStatusV1, struct_size), "u32"),
+        ("abiVersion", offset_of!(WebStatusV1, abi_version), "u32"),
+        ("state", offset_of!(WebStatusV1, state), "u32"),
+        ("lastResult", offset_of!(WebStatusV1, last_result), "u32"),
+        ("backend", offset_of!(WebStatusV1, backend), "u32"),
+        (
+            "sampleRateHz",
+            offset_of!(WebStatusV1, sample_rate_hz),
+            "u32",
+        ),
+        (
+            "quantumFrames",
+            offset_of!(WebStatusV1, quantum_frames),
+            "u32",
+        ),
+        ("reserved0", offset_of!(WebStatusV1, reserved0), "u32"),
+        (
+            "nextAbsoluteSample",
+            offset_of!(WebStatusV1, next_absolute_sample),
+            "u64",
+        ),
+        (
+            "renderedQuanta",
+            offset_of!(WebStatusV1, rendered_quanta),
+            "u64",
+        ),
+        ("reserved", offset_of!(WebStatusV1, reserved), "u64[4]"),
+    ];
+    let resource = [
+        (
+            "structSize",
+            offset_of!(WebResourceReportV1, struct_size),
+            "u32",
+        ),
+        (
+            "abiVersion",
+            offset_of!(WebResourceReportV1, abi_version),
+            "u32",
+        ),
+        (
+            "sampleRateHz",
+            offset_of!(WebResourceReportV1, sample_rate_hz),
+            "u32",
+        ),
+        (
+            "quantumFrames",
+            offset_of!(WebResourceReportV1, quantum_frames),
+            "u32",
+        ),
+        ("backend", offset_of!(WebResourceReportV1, backend), "u32"),
+        (
+            "reserved0",
+            offset_of!(WebResourceReportV1, reserved0),
+            "u32[3]",
+        ),
+        (
+            "configBytes",
+            offset_of!(WebResourceReportV1, config_bytes),
+            "u64",
+        ),
+        (
+            "statusBytes",
+            offset_of!(WebResourceReportV1, status_bytes),
+            "u64",
+        ),
+        (
+            "sessionTomlBytes",
+            offset_of!(WebResourceReportV1, session_toml_bytes),
+            "u64",
+        ),
+        (
+            "diagnosticBytes",
+            offset_of!(WebResourceReportV1, diagnostic_bytes),
+            "u64",
+        ),
+        (
+            "sourceIdBytes",
+            offset_of!(WebResourceReportV1, source_id_bytes),
+            "u64",
+        ),
+        (
+            "sourcePcmStagingBytes",
+            offset_of!(WebResourceReportV1, source_pcm_staging_bytes),
+            "u64",
+        ),
+        (
+            "outputPcmBytes",
+            offset_of!(WebResourceReportV1, output_pcm_bytes),
+            "u64",
+        ),
+        (
+            "bridgeMetadataBytes",
+            offset_of!(WebResourceReportV1, bridge_metadata_bytes),
+            "u64",
+        ),
+        (
+            "bridgeRetainedBytes",
+            offset_of!(WebResourceReportV1, bridge_retained_bytes),
+            "u64",
+        ),
+        (
+            "largestBridgeAllocationBytes",
+            offset_of!(WebResourceReportV1, largest_bridge_allocation_bytes),
+            "u64",
+        ),
+        (
+            "sourceTotalBytes",
+            offset_of!(WebResourceReportV1, source_total_bytes),
+            "u64",
+        ),
+        (
+            "sourceOverheadBytes",
+            offset_of!(WebResourceReportV1, source_overhead_bytes),
+            "u64",
+        ),
+        (
+            "effectScalarStateBytes",
+            offset_of!(WebResourceReportV1, effect_scalar_state_bytes),
+            "u64",
+        ),
+        (
+            "effectScalarScratchBytes",
+            offset_of!(WebResourceReportV1, effect_scalar_scratch_bytes),
+            "u64",
+        ),
+        (
+            "builtinRetainedBytes",
+            offset_of!(WebResourceReportV1, builtin_retained_bytes),
+            "u64",
+        ),
+        (
+            "graphSessionPlusPlanBytes",
+            offset_of!(WebResourceReportV1, graph_session_plus_plan_bytes),
+            "u64",
+        ),
+        (
+            "graphIncrementalPlanBytes",
+            offset_of!(WebResourceReportV1, graph_incremental_plan_bytes),
+            "u64",
+        ),
+        (
+            "graphMetadataBytes",
+            offset_of!(WebResourceReportV1, graph_metadata_bytes),
+            "u64",
+        ),
+        (
+            "graphDelayBytes",
+            offset_of!(WebResourceReportV1, graph_delay_bytes),
+            "u64",
+        ),
+        (
+            "largestNamedAllocationBytes",
+            offset_of!(WebResourceReportV1, largest_named_allocation_bytes),
+            "u64",
+        ),
+        (
+            "observationRetainedBytes",
+            offset_of!(WebResourceReportV1, observation_retained_bytes),
+            "u64",
+        ),
+        (
+            "reserved",
+            offset_of!(WebResourceReportV1, reserved),
+            "u64[3]",
+        ),
+    ];
+    let meter = [
+        (
+            "structSize",
+            offset_of!(WebMeterHeaderV1, struct_size),
+            "u32",
+        ),
+        (
+            "abiVersion",
+            offset_of!(WebMeterHeaderV1, abi_version),
+            "u32",
+        ),
+        (
+            "trackCount",
+            offset_of!(WebMeterHeaderV1, track_count),
+            "u32",
+        ),
+        ("windows", offset_of!(WebMeterHeaderV1, windows), "u32"),
+        (
+            "firstSample",
+            offset_of!(WebMeterHeaderV1, first_sample),
+            "u64",
+        ),
+        ("endSample", offset_of!(WebMeterHeaderV1, end_sample), "u64"),
+        ("sequence", offset_of!(WebMeterHeaderV1, sequence), "u64"),
+        (
+            "masterTrackPlusOne",
+            offset_of!(WebMeterHeaderV1, master_track_plus_one),
+            "u32",
+        ),
+        (
+            "masterGrPresent",
+            offset_of!(WebMeterHeaderV1, master_gr_present),
+            "u32",
+        ),
+        ("reserved", offset_of!(WebMeterHeaderV1, reserved), "u64[2]"),
+    ];
+    let command_report = [
+        (
+            "structSize",
+            offset_of!(WebCommandReportV1, struct_size),
+            "u32",
+        ),
+        (
+            "abiVersion",
+            offset_of!(WebCommandReportV1, abi_version),
+            "u32",
+        ),
+        ("result", offset_of!(WebCommandReportV1, result), "u32"),
+        ("reason", offset_of!(WebCommandReportV1, reason), "u32"),
+        (
+            "rejectedIndex",
+            offset_of!(WebCommandReportV1, rejected_index),
+            "u32",
+        ),
+        ("admitted", offset_of!(WebCommandReportV1, admitted), "u32"),
+        (
+            "appliedAtSample",
+            offset_of!(WebCommandReportV1, applied_at_sample),
+            "u64",
+        ),
+        (
+            "reserved",
+            offset_of!(WebCommandReportV1, reserved),
+            "u64[2]",
+        ),
+    ];
+    let command_record = [
+        ("kind", 0, "u8"),
+        ("rack", 1, "u8"),
+        ("channel", 2, "u8"),
+        ("reserved0", 3, "u8"),
+        ("trackIndex", 4, "u32"),
+        ("effectIndex", 8, "u32"),
+        ("parameterId", 12, "u32"),
+        ("smoothingSamples", 16, "u32"),
+        ("reserved1", 20, "u32"),
+        ("values", 24, "f32[4]"),
+        ("reserved2", 40, "u8[8]"),
+    ];
+    let results = [
+        (RESULT_OK, "ok"),
+        (RESULT_INVALID_ARGUMENT, "invalidArgument"),
+        (RESULT_ABI_MISMATCH, "abiMismatch"),
+        (RESULT_WRONG_STATE, "wrongState"),
+        (RESULT_BUFFER_TOO_SMALL, "bufferTooSmall"),
+        (RESULT_PREPARE_REJECTED, "prepareRejected"),
+        (RESULT_BACKPRESSURE, "backpressure"),
+        (RESULT_UNSUPPORTED, "unsupported"),
+        (RESULT_RENDER_REJECTED, "renderRejected"),
+        (RESULT_REPREPARE_REQUIRED, "reprepareRequired"),
+        (RESULT_INTERNAL, "internal"),
+    ];
+    let states = [
+        (STATE_CONFIG, "config"),
+        (STATE_PREPARED, "prepared"),
+        (STATE_READY, "ready"),
+        (STATE_FAILED, "failed"),
+        (STATE_DISPOSED, "disposed"),
+    ];
+    let backends = [(BACKEND_SCALAR, "scalar"), (BACKEND_SIMD128, "simd128")];
+    let buffers = [
+        (BUFFER_SESSION_TOML, "sessionToml"),
+        (BUFFER_SOURCE_ID, "sourceId"),
+        (BUFFER_SOURCE_PCM, "sourcePcm"),
+        (BUFFER_DIAGNOSTIC, "diagnostic"),
+        (BUFFER_OUTPUT_PCM, "outputPcm"),
+        (BUFFER_COMMAND, "command"),
+        (BUFFER_METER_FRAME, "meterFrame"),
+    ];
+    // These are the complete wire values. They deliberately do not carry P2's metadata
+    // `applied` claim: observation subscribe/unsubscribe are host transactions, not DSP writes.
+    let wire_command_kinds = [
+        (COMMAND_PAN, "pan"),
+        (COMMAND_MATRIX, "matrix"),
+        (COMMAND_FADER_DB, "faderDb"),
+        (COMMAND_MUTE, "mute"),
+        (COMMAND_EFFECT_PARAM, "effectParam"),
+        (COMMAND_EFFECT_BYPASS, "effectBypass"),
+        (COMMAND_OBSERVE_SUBSCRIBE, "observeSubscribe"),
+        (COMMAND_OBSERVE_UNSUBSCRIBE, "observeUnsubscribe"),
+    ];
+    let command_reasons = [
+        (COMMAND_REASON_NONE, "none"),
+        (COMMAND_REASON_MALFORMED, "malformed"),
+        (COMMAND_REASON_UNKNOWN_TRACK, "unknownTrack"),
+        (COMMAND_REASON_UNKNOWN_RACK, "unknownRack"),
+        (COMMAND_REASON_UNKNOWN_EFFECT, "unknownEffect"),
+        (COMMAND_REASON_UNKNOWN_PARAMETER, "unknownParameter"),
+        (COMMAND_REASON_DOMAIN, "domain"),
+        (COMMAND_REASON_UNSUPPORTED_KIND, "unsupportedKind"),
+        (COMMAND_REASON_BACKPRESSURE, "backpressure"),
+        (COMMAND_REASON_WRONG_STATE, "wrongState"),
+        (COMMAND_REASON_UNKNOWN_TAP, "unknownTap"),
+        (COMMAND_REASON_OBSERVATION_UNBOUND, "observationUnbound"),
+    ];
+
+    let mut out = String::with_capacity(1 << 14);
+    out.push_str("{\n");
+    out.push_str(&format!("  \"schema\": \"{ABI_LAYOUT_SCHEMA}\",\n"));
+    out.push_str(&format!("  \"abiVersion\": {ABI_VERSION},\n"));
+    out.push_str("  \"structures\": {\n");
+    render_structure(
+        &mut out,
+        "prepareConfig",
+        PREPARE_CONFIG_BYTES,
+        &prepare,
+        true,
+    );
+    render_structure(&mut out, "status", STATUS_BYTES, &status, true);
+    render_structure(
+        &mut out,
+        "resourceReport",
+        RESOURCE_REPORT_BYTES,
+        &resource,
+        true,
+    );
+    render_structure(&mut out, "meterHeader", METER_HEADER_BYTES, &meter, true);
+    render_structure(
+        &mut out,
+        "commandReport",
+        COMMAND_REPORT_BYTES,
+        &command_report,
+        false,
+    );
+    out.push_str("  },\n");
+    out.push_str("  \"commandRecord\": {\n");
+    out.push_str(&format!("    \"bytes\": {COMMAND_RECORD_BYTES},\n"));
+    out.push_str("    \"endianness\": \"little\",\n");
+    render_fields(&mut out, &command_record, "    ");
+    out.push_str("  },\n");
+    out.push_str("  \"constants\": {\n");
+    render_named_constants(&mut out, "resultCodes", &results, true);
+    render_named_constants(&mut out, "states", &states, true);
+    render_named_constants(&mut out, "backends", &backends, true);
+    render_named_constants(&mut out, "bufferKinds", &buffers, true);
+    render_named_constants(&mut out, "wireCommandKinds", &wire_command_kinds, true);
+    render_named_constants(&mut out, "commandReasons", &command_reasons, true);
+    out.push_str(&format!(
+        "    \"maximumCommandRecords\": {MAXIMUM_COMMAND_RECORDS}\n"
+    ));
+    out.push_str("  }\n}\n");
+    out
+}
+
+fn render_structure(
+    out: &mut String,
+    name: &str,
+    bytes: u32,
+    fields: &[(&str, usize, &str)],
+    trailing_comma: bool,
+) {
+    out.push_str(&format!("    \"{name}\": {{\n      \"bytes\": {bytes},\n"));
+    render_fields(out, fields, "      ");
+    out.push_str(if trailing_comma {
+        "    },\n"
+    } else {
+        "    }\n"
+    });
+}
+
+fn render_fields(out: &mut String, fields: &[(&str, usize, &str)], indent: &str) {
+    out.push_str(&format!("{indent}\"fields\": [\n"));
+    for (index, (name, offset, ty)) in fields.iter().enumerate() {
+        out.push_str(&format!(
+            "{indent}  {{ \"name\": \"{name}\", \"offset\": {offset}, \"type\": \"{ty}\" }}{}\n",
+            comma(index, fields.len())
+        ));
+    }
+    out.push_str(&format!("{indent}]\n"));
+}
+
+fn render_named_constants(
+    out: &mut String,
+    name: &str,
+    values: &[(u32, &str)],
+    trailing_comma: bool,
+) {
+    out.push_str(&format!("    \"{name}\": ["));
+    for (index, (value, label)) in values.iter().enumerate() {
+        out.push_str(&format!(
+            "{{ \"value\": {value}, \"name\": \"{label}\" }}{}",
+            if index + 1 == values.len() { "" } else { ", " }
+        ));
+    }
+    out.push_str(if trailing_comma { "],\n" } else { "]\n" });
 }
 
 fn comma(index: usize, total: usize) -> &'static str {
@@ -536,41 +1099,56 @@ const fn smoothing_name(rule: SmoothingRule) -> &'static str {
     }
 }
 
-/// Command-line entry point: `--write DIR`, `--check DIR` or `--print`.
+/// Command-line entry point: `--write DIR`, `--check DIR`, `--print` or `--print-abi-layout`.
 pub fn run() {
     let mut arguments = std::env::args().skip(1);
     let mode = arguments.next().unwrap_or_else(|| usage());
-    let document = render();
     match mode.as_str() {
         "--print" => {
             if arguments.next().is_some() {
                 usage();
             }
-            print!("{document}");
+            print!("{}", render());
+        }
+        "--print-abi-layout" => {
+            if arguments.next().is_some() {
+                usage();
+            }
+            print!("{}", render_abi_layout());
         }
         "--write" | "--check" => {
             let directory = PathBuf::from(arguments.next().unwrap_or_else(|| usage()));
             if arguments.next().is_some() {
                 usage();
             }
-            let path = output_path(&directory);
+            let documents = [
+                (OUTPUT_NAME, render()),
+                (ABI_LAYOUT_OUTPUT_NAME, render_abi_layout()),
+            ];
             if mode == "--write" {
-                let mut file = std::fs::File::create(&path).unwrap_or_else(|error| {
-                    eprintln!("cannot create {}: {error}", path.display());
-                    std::process::exit(2)
-                });
-                file.write_all(document.as_bytes()).expect("write metadata");
-                println!("wrote {}", path.display());
-            } else {
-                let existing = std::fs::read_to_string(&path).unwrap_or_else(|error| {
-                    eprintln!("cannot read {}: {error}", path.display());
-                    std::process::exit(1)
-                });
-                if existing != document {
-                    eprintln!("{} is stale; regenerate with --write", path.display());
-                    std::process::exit(1);
+                for (name, document) in &documents {
+                    let path = output_path(&directory, name);
+                    let mut file = std::fs::File::create(&path).unwrap_or_else(|error| {
+                        eprintln!("cannot create {}: {error}", path.display());
+                        std::process::exit(2)
+                    });
+                    file.write_all(document.as_bytes())
+                        .expect("write artifact metadata");
+                    println!("wrote {}", path.display());
                 }
-                println!("{} is current", path.display());
+            } else {
+                for (name, document) in &documents {
+                    let path = output_path(&directory, name);
+                    let existing = std::fs::read_to_string(&path).unwrap_or_else(|error| {
+                        eprintln!("cannot read {}: {error}", path.display());
+                        std::process::exit(1)
+                    });
+                    if existing != document.as_str() {
+                        eprintln!("{} is stale; regenerate with --write", path.display());
+                        std::process::exit(1);
+                    }
+                    println!("{} is current", path.display());
+                }
             }
         }
         _ => usage(),

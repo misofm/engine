@@ -129,10 +129,11 @@ expected=$(printf '%s\n' \
   miso-engine-v2-audio-worklet-host.js \
   miso-engine-v2-audio-worklet.js \
   miso-engine-v2-audio-worklet.simd128.wasm \
+  miso-engine-v2-abi-layout.json \
   miso-engine-v2-parameter-metadata.json)
 actual=$(find "$artifact_dir" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort)
 [[ "$actual" == "$expected" ]] || {
-  echo "artifact directory does not contain the exact five frozen outputs" >&2
+  echo "artifact directory does not contain the exact six frozen outputs" >&2
   diff -u <(printf '%s\n' "$expected") <(printf '%s\n' "$actual") >&2 || true
   exit 1
 }
@@ -337,6 +338,8 @@ grep -q 'output\[1\]\.set(this.outputRight)' <<<"$process_body"
 }
 python3 -B "$(dirname "${BASH_SOURCE[0]}")/check-parameter-metadata-v1.py" \
   "$artifact_dir/miso-engine-v2-parameter-metadata.json" || exit 1
+python3 -B "$(dirname "${BASH_SOURCE[0]}")/check-abi-layout-v1.py" \
+  "$artifact_dir/miso-engine-v2-abi-layout.json" || exit 1
 
 # Issues #143/#151: the command-reason vocabulary is written out five times -- Rust constants, the
 # host JS acknowledgement table, the `.d.ts` enum, the metadata generator's rows and the schema

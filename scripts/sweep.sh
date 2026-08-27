@@ -108,6 +108,7 @@ row scripts/check-graph-policy.sh
 # driven by the parent gates below; the self-test row keeps each one individually accounted for.
 row scripts/check-builtins-listening-033.py --self-test
 row scripts/check-builtins-listening-111.py --self-test
+row scripts/check-abi-layout-v1.py --self-test
 row scripts/check-parameter-metadata-v1.py --self-test
 row scripts/check-web-audioworklet-callgraph.py --self-test
 row scripts/test-artifact-evidence-leak.sh

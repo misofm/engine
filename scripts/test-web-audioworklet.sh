@@ -112,6 +112,28 @@ if python3 -B "$repo_root/scripts/check-parameter-metadata-v1.py" \
 fi
 echo "web AudioWorklet parameter-metadata gates passed"
 
+# Issue #207 E0a: the SDK-facing ABI layout has its own independent schema gate. `--check`
+# compares both generated JSON artifacts, so a layout field reordered in Rust cannot leave a stale
+# browser artifact behind unnoticed.
+python3 -B "$repo_root/scripts/check-abi-layout-v1.py" --self-test
+abi_layout="$mutation_dir/abi-layout.json"
+(cd "$repo_root" && cargo run --locked -q -p miso-engine-parameter-metadata -- --print-abi-layout) >"$abi_layout"
+python3 -B "$repo_root/scripts/check-abi-layout-v1.py" "$abi_layout" >/dev/null
+sed -i 's/"offset": 40, "type": "u64"/"offset": 41, "type": "u64"/' "$abi_layout"
+if python3 -B "$repo_root/scripts/check-abi-layout-v1.py" "$abi_layout" >/dev/null 2>&1; then
+  echo "a hand-flipped ABI layout offset escaped the schema gate" >&2
+  exit 1
+fi
+mkdir -p "$mutation_dir/abi-layout-artifacts"
+(cd "$repo_root" && cargo run --locked -q -p miso-engine-parameter-metadata -- --write "$mutation_dir/abi-layout-artifacts") >/dev/null
+sed -i 's/"offset": 40, "type": "u64"/"offset": 41, "type": "u64"/' \
+  "$mutation_dir/abi-layout-artifacts/miso-engine-v2-abi-layout.json"
+if (cd "$repo_root" && cargo run --locked -q -p miso-engine-parameter-metadata -- --check "$mutation_dir/abi-layout-artifacts") >/dev/null 2>&1; then
+  echo "a stale ABI layout artifact escaped --check" >&2
+  exit 1
+fi
+echo "web AudioWorklet ABI-layout gates passed"
+
 # Issues #143/#151: one command-reason vocabulary across six spellings, and the `.d.ts`'s
 # `observe()` declaration held to the shipped implementation. The gate's own red mutations run
 # first -- including a Rust reason bumped without the other five.
