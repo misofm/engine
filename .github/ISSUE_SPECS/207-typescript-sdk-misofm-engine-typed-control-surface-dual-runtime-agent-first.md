@@ -465,6 +465,11 @@ final handoff names exact commits, gate counts/digests, unresolved findings, and
   and Bun 1.4.0 retain the pinned E6/E7 digests, E8 sample 256, all six E9 outcomes, E10a
   pre-instantiation ordering, and 5/5 deliberate red mutations. The broader generated self-test
   caught and then passed after repinning its independent Wasm byte/hash oracle (`ac9d1e4`).
+- Fresh post-integration owner gates are green: `scripts/sweep.sh` passed 96/96 rows with zero
+  failures in 140 seconds; `cargo fmt --all -- --check` passed; and
+  `cargo clippy --locked --workspace --all-targets -- -D warnings` passed. Every one ran through
+  the required shared CPU serializer. These results qualify the implemented source-map tranche;
+  they do not convert the preserved pre-prepare red below into a Phase 2 PASS.
 - One raw-TOML blocker remains and was posted to #207 as comment `5439512242`: the six queries are
   state-gated until compile succeeds, but the 192-byte prepare config requires the session rate and
   arbitrary quantum before compile. A real 96 kHz document with quoted root keys reproduces red as
