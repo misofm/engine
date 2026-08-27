@@ -151,6 +151,24 @@ function blockPlanes(description) {
   return [left, right];
 }
 
+/// Issue #207: read one canonical source ID back out of the staging buffer the ABI copies it into.
+///
+/// The ID is `[a-z][a-z0-9._-]{0,126}` by the session schema, so every byte is ASCII and the
+/// decode is a loop rather than a `TextDecoder` -- the same reasoning the worklet's own reader
+/// carries, held here so both sides decode identically.
+function readSourceId(exports, handle, index) {
+  const length = exports.miso_engine_web_v1_source_id(handle, index);
+  assert.ok(length > 0, "a declared source has a nonempty ID");
+  const pointer = exports.miso_engine_web_v1_buffer_ptr(handle, BUFFER_SOURCE_ID);
+  const bytes = new Uint8Array(exports.memory.buffer, pointer, length);
+  let id = "";
+  for (let byte = 0; byte < length; byte += 1) {
+    assert.ok(bytes[byte] <= 0x7f, "source IDs are ASCII by the session schema");
+    id += String.fromCharCode(bytes[byte]);
+  }
+  return id;
+}
+
 function writeSource(exports, handle, sourceId, description) {
   const encoder = new TextEncoder();
   const id = encoder.encode(sourceId);
@@ -224,6 +242,23 @@ async function runBackend(modulePath, expectedBackend, sessionToml, source) {
   const resourceReport = resources(exports, handle);
   assert.equal(initialStatus.backend, expectedBackend);
   assert.equal(resourceReport.backend, expectedBackend);
+
+  // Issue #207: source introspection, against the real module and the real compiled session -- the
+  // leg the JS suite's fake exports cannot supply. `session.toml` declares one source, and the
+  // transcript this oracle replays addresses it by the *same* ID the engine reports here: the
+  // assertion is that a driver holding only the compiled session can find the source it must feed.
+  assert.equal(exports.miso_engine_web_v1_source_count(handle), 1);
+  assert.equal(readSourceId(exports, handle, 0), source.sourceId);
+  assert.equal(exports.miso_engine_web_v1_source_channels(handle, 0), 2);
+  assert.equal(exports.miso_engine_web_v1_source_sample_rate(handle, 0), source.sampleRateHz);
+  assert.equal(exports.miso_engine_web_v1_source_frames(handle, 0), 256n);
+  assert.equal(exports.miso_engine_web_v1_source_start_frame(handle, 0), 0n);
+  // Out of range answers the sentinel everywhere it has one; `source_count` is the bounds
+  // authority for `source_start_frame`, whose zero is source 0's real answer.
+  assert.equal(exports.miso_engine_web_v1_source_id(handle, 1), 0);
+  assert.equal(exports.miso_engine_web_v1_source_channels(handle, 1), 0);
+  assert.equal(exports.miso_engine_web_v1_source_frames(handle, 1), 0n);
+  assert.equal(exports.miso_engine_web_v1_source_sample_rate(handle, 1), 0);
 
   const first = { ...source.blocks[0], generation: 1 };
   const second = { ...source.blocks[1], generation: 1 };

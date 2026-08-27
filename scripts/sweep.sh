@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# scripts/sweep.sh -- the hermetic check/test sweep. 90 explicit rows.
+# scripts/sweep.sh -- the hermetic check/test sweep. 91 explicit rows.
 #
 # Why this exists: the repo has 91 check-*/test-* scripts and ci.yml names 36 of them, so 52 gates
 # had no committed runner at all -- they were reachable only by knowing they existed. Every row
@@ -110,6 +110,7 @@ row scripts/check-graph-policy.sh
 row scripts/check-builtins-listening-033.py --self-test
 row scripts/check-builtins-listening-111.py --self-test
 row scripts/check-parameter-metadata-v1.py --self-test
+row scripts/check-session-map-shape.py --self-test
 row scripts/check-web-audioworklet-callgraph.py --self-test
 row scripts/test-artifact-evidence-leak.sh
 row scripts/test-bench-policy.sh

@@ -2839,3 +2839,222 @@ fn observation_unit_conversion_is_declared_and_clamped() {
         previous = value;
     }
 }
+
+/// The identity fixture with three sources declared out of canonical order (issue #207).
+///
+/// `zeta` is declared first and `alpha` last, so a query that reported *declaration* order rather
+/// than the normalized order would be visible here rather than hidden by an already-sorted
+/// fixture. The shapes are all distinct -- different channel counts, different region starts,
+/// different lengths -- so a query that read the wrong row is visible too. The one track points at
+/// `mid`, which is neither the first nor the last of the three by either ordering.
+fn three_source_session(quantum: u32) -> String {
+    let mut model = parse_session_toml(include_str!("../tests/browser-v1/session.toml"))
+        .expect("accepted identity fixture");
+    model.quantum_frames = quantum;
+    model.limits.pcm_ring_frames = u64::from(quantum);
+    let template = model.sources[0].clone();
+    let source = |id: &str, channels: u8, start: u64, length: u64| {
+        let mut value = template.clone();
+        value.id = miso_engine_session::StableId::parse(id).expect("stable id");
+        value.mapping.channel_count = channels;
+        value.mapping.region.start_sample = start;
+        value.mapping.region.length_samples = length;
+        value
+    };
+    model.sources = vec![
+        source("zeta", 1, 0, u64::from(quantum) * 3),
+        source("mid", 2, u64::from(quantum) * 7, u64::from(quantum) * 5),
+        source("alpha", 4, 9, u64::from(quantum) * 2),
+    ];
+    model.tracks[0].source_id = miso_engine_session::StableId::parse("mid").expect("stable id");
+    canonical_session_toml(&model).expect("canonical three-source session")
+}
+
+/// Issue #207 D1: the compiled session answers what sources exist, in canonical order, with the
+/// shape a headless driver needs to feed them.
+///
+/// Red mutation: report declaration order instead of the normalized order -> the assertion below
+/// reads `["zeta", "mid", "alpha"]`. Red mutation: report `region.length_samples` as the region
+/// *end* -> `mid` reads 1536 frames instead of 640. Neither survives a fixture whose sources are
+/// deliberately unsorted and whose regions deliberately do not start at zero.
+#[test]
+fn session_source_introspection_is_canonical_ordered_shaped_and_bounded() {
+    const QUANTUM: u32 = 128;
+    let toml = three_source_session(QUANTUM);
+    let mut host = prepared_host(QUANTUM);
+
+    // Before compilation there is no session, so there are no sources -- the same state gating the
+    // track queries carry, for the same reason: the answer lives in the compiled session.
+    assert_eq!(host.session_source_count(), 0);
+    assert_eq!(host.session_source_id(0), None);
+    assert_eq!(host.session_source_shape(0), None);
+
+    host.session_toml_mut().expect("prepared TOML buffer")[..toml.len()]
+        .copy_from_slice(toml.as_bytes());
+    assert_eq!(
+        host.compile(toml.len()),
+        RESULT_OK,
+        "{:?}",
+        core::str::from_utf8(host.diagnostic())
+    );
+
+    assert_eq!(host.session_source_count(), 3);
+    let ids: Vec<&str> = (0..3)
+        .map(|index| host.session_source_id(index).expect("declared source"))
+        .collect();
+    assert_eq!(
+        ids,
+        ["alpha", "mid", "zeta"],
+        "canonical source order is the normalized model's, which is sorted by stable ID"
+    );
+    assert_eq!(
+        host.session_source_shape(0).expect("alpha"),
+        SessionSourceShape {
+            channel_count: 4,
+            sample_rate_hz: 48_000,
+            region_start_frame: 9,
+            region_frames: u64::from(QUANTUM) * 2,
+        }
+    );
+    assert_eq!(
+        host.session_source_shape(1).expect("mid"),
+        SessionSourceShape {
+            channel_count: 2,
+            sample_rate_hz: 48_000,
+            region_start_frame: u64::from(QUANTUM) * 7,
+            region_frames: u64::from(QUANTUM) * 5,
+        }
+    );
+    assert_eq!(
+        host.session_source_shape(2).expect("zeta"),
+        SessionSourceShape {
+            channel_count: 1,
+            sample_rate_hz: 48_000,
+            region_start_frame: 0,
+            region_frames: u64::from(QUANTUM) * 3,
+        }
+    );
+
+    // The track order is unchanged by any of this: the two lists are independent, and the source
+    // list is not a filter of the referenced sources either -- `alpha` and `zeta` are declared and
+    // therefore reported, though no track reads them.
+    assert_eq!(host.console_tracks().len(), 1);
+    assert_eq!(&*host.console_tracks()[0], "track");
+
+    // One past the end, and the u32 ceiling.
+    assert_eq!(host.session_source_id(3), None);
+    assert_eq!(host.session_source_shape(3), None);
+    assert_eq!(host.session_source_id(u32::MAX), None);
+    assert_eq!(host.session_source_shape(u32::MAX), None);
+}
+
+/// Issue #207 D1: the raw exports, held to the track queries' conventions exactly.
+///
+/// The shape queries answer zero out of range because zero is impossible for a compiled source --
+/// the session validator refuses `channel_count == 0`, `length_samples == 0` and
+/// `sample_rate_hz == 0` -- while `source_start_frame` has no spare value and leans on
+/// `source_count` as the bounds authority. That asymmetry is asserted here so it cannot be
+/// "tidied" into a sentinel that collides with a real region start.
+#[test]
+fn raw_ffi_source_introspection_mirrors_the_track_queries() {
+    const QUANTUM: u32 = 128;
+    let toml = three_source_session(QUANTUM);
+    let handle = miso_engine_web_v1_config_new();
+    assert_ne!(handle, 0);
+
+    // An invalid handle answers the invalid value on every query, as every other export does.
+    for probe in [0, handle.wrapping_add(1)] {
+        assert_eq!(miso_engine_web_v1_source_count(probe), 0);
+        assert_eq!(miso_engine_web_v1_source_id(probe, 0), 0);
+        assert_eq!(miso_engine_web_v1_source_channels(probe, 0), 0);
+        assert_eq!(miso_engine_web_v1_source_frames(probe, 0), 0);
+        assert_eq!(miso_engine_web_v1_source_start_frame(probe, 0), 0);
+        assert_eq!(miso_engine_web_v1_source_sample_rate(probe, 0), 0);
+    }
+
+    let mut config = WebPrepareConfigV1::launch_defaults(48_000, QUANTUM);
+    config.source_ring_frames = QUANTUM;
+    config.maximum_source_channels = 4;
+    assert_eq!(crate::ffi::test_configure(handle, config), RESULT_OK);
+    assert_eq!(miso_engine_web_v1_prepare(handle), RESULT_OK);
+
+    // Prepared but not compiled: staging exists, a session does not.
+    assert_eq!(miso_engine_web_v1_source_count(handle), 0);
+    assert_eq!(miso_engine_web_v1_source_id(handle, 0), 0);
+    assert_eq!(miso_engine_web_v1_console_track_count(handle), 0);
+
+    assert_eq!(
+        crate::ffi::test_copy_staging(handle, BUFFER_SESSION_TOML, toml.as_bytes()),
+        RESULT_OK
+    );
+    assert_eq!(
+        miso_engine_web_v1_compile(handle, toml.len() as u32),
+        RESULT_OK
+    );
+
+    assert_eq!(miso_engine_web_v1_source_count(handle), 3);
+    let read = |index: u32| {
+        let length = miso_engine_web_v1_source_id(handle, index);
+        let bytes = crate::ffi::test_read_source_id(handle, length).expect("staging");
+        String::from_utf8(bytes).expect("ASCII source ID")
+    };
+    assert_eq!([read(0), read(1), read(2)], ["alpha", "mid", "zeta"]);
+    assert_eq!(
+        [
+            miso_engine_web_v1_source_channels(handle, 0),
+            miso_engine_web_v1_source_channels(handle, 1),
+            miso_engine_web_v1_source_channels(handle, 2),
+        ],
+        [4, 2, 1]
+    );
+    assert_eq!(
+        [
+            miso_engine_web_v1_source_frames(handle, 0),
+            miso_engine_web_v1_source_frames(handle, 1),
+            miso_engine_web_v1_source_frames(handle, 2),
+        ],
+        [
+            u64::from(QUANTUM) * 2,
+            u64::from(QUANTUM) * 5,
+            u64::from(QUANTUM) * 3
+        ]
+    );
+    assert_eq!(
+        [
+            miso_engine_web_v1_source_start_frame(handle, 0),
+            miso_engine_web_v1_source_start_frame(handle, 1),
+            miso_engine_web_v1_source_start_frame(handle, 2),
+        ],
+        [9, u64::from(QUANTUM) * 7, 0]
+    );
+    for index in 0..3 {
+        assert_eq!(miso_engine_web_v1_source_sample_rate(handle, index), 48_000);
+    }
+
+    // Out of range: zero everywhere it can be said, and `source_count` is what a caller checked
+    // before asking, because `source_start_frame`'s zero is `zeta`'s real answer.
+    assert_eq!(miso_engine_web_v1_source_id(handle, 3), 0);
+    assert_eq!(miso_engine_web_v1_source_channels(handle, 3), 0);
+    assert_eq!(miso_engine_web_v1_source_frames(handle, 3), 0);
+    assert_eq!(miso_engine_web_v1_source_sample_rate(handle, 3), 0);
+    assert_eq!(miso_engine_web_v1_source_start_frame(handle, 3), 0);
+    assert_eq!(miso_engine_web_v1_source_start_frame(handle, 2), 0);
+    assert_eq!(miso_engine_web_v1_source_id(handle, u32::MAX), 0);
+
+    // The queries survive a sticky failure, exactly as the track queries do: nothing here is
+    // dropped on the failure path, so a diagnosing consumer can still read the session map.
+    assert_eq!(
+        miso_engine_web_v1_render(handle, QUANTUM.wrapping_add(1)),
+        RESULT_REPREPARE_REQUIRED
+    );
+    assert_eq!(
+        crate::ffi::test_status(handle).expect("status").state,
+        STATE_FAILED
+    );
+    assert_eq!(miso_engine_web_v1_source_count(handle), 3);
+    assert_eq!(miso_engine_web_v1_source_channels(handle, 1), 2);
+    assert_eq!(miso_engine_web_v1_console_track_count(handle), 1);
+
+    assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
+    assert_eq!(miso_engine_web_v1_source_count(handle), 0);
+}

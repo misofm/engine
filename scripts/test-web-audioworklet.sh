@@ -194,6 +194,44 @@ if python3 -B "$kind_dir/scripts/check-command-kind-vocabulary.py" >/dev/null 2>
 fi
 echo "web AudioWorklet command-kind vocabulary gates passed"
 
+# Issue #207: one session-map shape across the Rust FFI, the frozen export list, the worklet, the
+# host's acknowledgement validator and the `.d.ts`. Its own red mutations run first, then the two
+# drift classes that matter are performed on disk: the host validator losing the source list (the
+# #151 shape -- a map the validator does not expect fails the WHOLE host with a sticky 255) and the
+# `.d.ts` narrowing a `u64` region to a JavaScript `number` (the shape an SDK generates against).
+python3 -B "$repo_root/scripts/check-session-map-shape.py" --self-test
+python3 -B "$repo_root/scripts/check-session-map-shape.py"
+map_dir="$mutation_dir/session-map"
+mkdir -p "$map_dir/scripts" "$map_dir/hosts/miso-engine-host-web/src" \
+  "$map_dir/hosts/miso-engine-host-web/web"
+cp "$repo_root/scripts/check-session-map-shape.py" "$repo_root/scripts/check-web-audioworklet.sh" \
+  "$map_dir/scripts/"
+cp "$repo_root/hosts/miso-engine-host-web/src/ffi.rs" "$map_dir/hosts/miso-engine-host-web/src/"
+cp "$repo_root/hosts/miso-engine-host-web/web/miso-engine-v2-audio-worklet.js" \
+  "$repo_root/hosts/miso-engine-host-web/web/miso-engine-v2-audio-worklet-host.d.ts" \
+  "$map_dir/hosts/miso-engine-host-web/web/"
+session_map_mutations=(
+  'miso-engine-v2-audio-worklet-host.js|s/"result", "tracks", "sources", "metersAttached"/"result", "tracks", "metersAttached"/'
+  'miso-engine-v2-audio-worklet-host.d.ts|s/  readonly frames: bigint;/  readonly frames: number;/'
+)
+for entry in "${session_map_mutations[@]}"; do
+  target=${entry%%|*}
+  expression=${entry#*|}
+  original="$repo_root/hosts/miso-engine-host-web/web/$target"
+  mutated="$map_dir/hosts/miso-engine-host-web/web/$target"
+  sed "$expression" "$original" >"$mutated"
+  if diff -q "$original" "$mutated" >/dev/null; then
+    echo "the session-map mutation matched nothing: $entry" >&2
+    exit 1
+  fi
+  if python3 -B "$map_dir/scripts/check-session-map-shape.py" >/dev/null 2>&1; then
+    echo "a session-map drift escaped the shape gate: $entry" >&2
+    exit 1
+  fi
+  cp "$original" "$mutated"
+done
+echo "web AudioWorklet session-map shape gates passed"
+
 # Issue #151: the shipped defect itself. Restoring the literal `<= 9` bound on the acknowledgement
 # must take the whole hermetic suite red -- the refused subscription stops being a typed
 # per-request rejection and becomes the host-wide sticky 255 that kept the app's GR meters dead.

@@ -307,7 +307,7 @@ jobs:
           CARGO_TARGET_DIR=target/ci/wasm-simd RUSTFLAGS='-C target-feature=+simd128' cargo build --locked --release --target wasm32-unknown-unknown -p miso-engine-dsp-reference -p miso-engine-conformance
       # #106 E1/E2/E5/E7 and the F4 native<->simd128 session parity, over the artifact that ships.
       # `build-web-audioworklet.sh` produces the one stripped simd128 module (#083 W4-D1);
-      # `check-web-audioworklet.sh` asserts the frozen 15-export set, no imports, no shared memory,
+      # `check-web-audioworklet.sh` asserts the frozen 28-export set, no imports, no shared memory,
       # no atomics or relaxed SIMD, the render export's allocation-free and trap-free call closure,
       # and the vector-kernel ratchet. The Python `--check` runs the raw-Wasm oracle, whose parity
       # assertion compares the artifact's rendered PCM against the digest the native test pins.
