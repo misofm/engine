@@ -346,4 +346,11 @@ python3 -B "$(dirname "${BASH_SOURCE[0]}")/check-parameter-metadata-v1.py" \
 python3 -B "$(dirname "${BASH_SOURCE[0]}")/check-command-reason-vocabulary.py" \
   --artifacts "$artifact_dir" || exit 1
 
+# Issue #210 phase 0: the command-KIND vocabulary, across the Rust constants, the wire's decode
+# whitelist, the host JS `COMMAND_KINDS` set, the `.d.ts` enum, the generator's rows, the schema
+# gate's list and the SHIPPED `commandKinds`. Before this gate the shipped document stopped at six
+# kinds while the wire decoded eight, and nothing in the tree could see it.
+python3 -B "$(dirname "${BASH_SOURCE[0]}")/check-command-kind-vocabulary.py" \
+  --artifacts "$artifact_dir" || exit 1
+
 echo "web AudioWorklet static/object checks passed"

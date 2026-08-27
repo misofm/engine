@@ -26,6 +26,19 @@
 //! exactly when its descriptor declares it automatable. A caller that reads this file never has to
 //! discover either at runtime. See the browser ABI's `.d.ts` header for the full statement.
 //!
+//! # `commandKinds` is the whole vocabulary, and `plane` says what each kind moves
+//!
+//! Every kind the wire decodes is a row here -- all eight of them. Before the kind-vocabulary
+//! gate this table stopped at `effectBypass` while the Rust constants, the host JS `COMMAND_KINDS`
+//! set and the `.d.ts` enum all carried eight, and nothing noticed: an app reading its vocabulary
+//! from this file could not learn that `observeSubscribe`/`observeUnsubscribe` exist.
+//!
+//! The two observation kinds are not DSP kinds, so each row carries `plane`. `applied` keeps its
+//! issue #140 meaning -- the ABI applies this kind rather than declaring and refusing it, which is
+//! true of all eight -- and `plane` distinguishes the six that move state the render thread reads
+//! (`"render"`) from the two that bind or unbind an entry in the `miso.observe.v1` subscription
+//! map and change nothing rendered (`"observation"`).
+//!
 //! # Issue #127 (named nudge sizes)
 //!
 //! Each parameter carries `"nudge": null`. When #127 lands its ladder on
@@ -50,11 +63,12 @@ use miso_engine_effect_contract::{
 };
 use miso_engine_host_web::{
     ABI_VERSION, COMMAND_EFFECT_BYPASS, COMMAND_EFFECT_PARAM, COMMAND_FADER_DB, COMMAND_MATRIX,
-    COMMAND_MUTE, COMMAND_PAN, COMMAND_REASON_BACKPRESSURE, COMMAND_REASON_DOMAIN,
-    COMMAND_REASON_MALFORMED, COMMAND_REASON_NONE, COMMAND_REASON_OBSERVATION_UNBOUND,
-    COMMAND_REASON_UNKNOWN_EFFECT, COMMAND_REASON_UNKNOWN_PARAMETER, COMMAND_REASON_UNKNOWN_RACK,
-    COMMAND_REASON_UNKNOWN_TAP, COMMAND_REASON_UNKNOWN_TRACK, COMMAND_REASON_UNSUPPORTED_KIND,
-    COMMAND_REASON_WRONG_STATE, COMMAND_RECORD_BYTES, MAXIMUM_COMMAND_RECORDS,
+    COMMAND_MUTE, COMMAND_OBSERVE_SUBSCRIBE, COMMAND_OBSERVE_UNSUBSCRIBE, COMMAND_PAN,
+    COMMAND_REASON_BACKPRESSURE, COMMAND_REASON_DOMAIN, COMMAND_REASON_MALFORMED,
+    COMMAND_REASON_NONE, COMMAND_REASON_OBSERVATION_UNBOUND, COMMAND_REASON_UNKNOWN_EFFECT,
+    COMMAND_REASON_UNKNOWN_PARAMETER, COMMAND_REASON_UNKNOWN_RACK, COMMAND_REASON_UNKNOWN_TAP,
+    COMMAND_REASON_UNKNOWN_TRACK, COMMAND_REASON_UNSUPPORTED_KIND, COMMAND_REASON_WRONG_STATE,
+    COMMAND_RECORD_BYTES, MAXIMUM_COMMAND_RECORDS,
 };
 
 /// The emitted file name, shipped beside the Wasm artifact.
@@ -63,6 +77,15 @@ pub const OUTPUT_NAME: &str = "miso-engine-v2-parameter-metadata.json";
 pub const SCHEMA: &str = "miso.web.parameter-metadata.v1";
 /// The launch sample rates a rate-keyed builtin domain is reported for.
 pub const LAUNCH_RATES_HZ: [u32; 4] = [44_100, 48_000, 88_200, 96_000];
+/// The plane a `commandKinds` row applies on: DSP state the render thread reads.
+pub const PLANE_RENDER: &str = "render";
+/// The plane a `commandKinds` row applies on: the `miso.observe.v1` subscription map.
+///
+/// Kinds 7 and 8 are applied -- `admit_commands` binds or unbinds the tap and acknowledges
+/// `COMMAND_REASON_NONE` -- but they move nothing the render thread reads. `applied` therefore
+/// stays `true` for every kind (issue #140: nothing in this ABI is declared-and-refused), and
+/// `plane` is what tells a consumer which of the two things "applied" means for that kind.
+pub const PLANE_OBSERVATION: &str = "observation";
 
 fn usage() -> ! {
     eprintln!(
@@ -95,16 +118,29 @@ pub fn render() -> String {
     ));
     out.push_str("  \"commandKinds\": [\n");
     let kinds = [
-        (COMMAND_PAN, "pan", true),
-        (COMMAND_MATRIX, "matrix", true),
-        (COMMAND_FADER_DB, "faderDb", true),
-        (COMMAND_MUTE, "mute", true),
-        (COMMAND_EFFECT_PARAM, "effectParam", true),
-        (COMMAND_EFFECT_BYPASS, "effectBypass", true),
+        (COMMAND_PAN, "pan", true, PLANE_RENDER),
+        (COMMAND_MATRIX, "matrix", true, PLANE_RENDER),
+        (COMMAND_FADER_DB, "faderDb", true, PLANE_RENDER),
+        (COMMAND_MUTE, "mute", true, PLANE_RENDER),
+        (COMMAND_EFFECT_PARAM, "effectParam", true, PLANE_RENDER),
+        (COMMAND_EFFECT_BYPASS, "effectBypass", true, PLANE_RENDER),
+        (
+            COMMAND_OBSERVE_SUBSCRIBE,
+            "observeSubscribe",
+            true,
+            PLANE_OBSERVATION,
+        ),
+        (
+            COMMAND_OBSERVE_UNSUBSCRIBE,
+            "observeUnsubscribe",
+            true,
+            PLANE_OBSERVATION,
+        ),
     ];
-    for (index, (value, name, applied)) in kinds.iter().enumerate() {
+    for (index, (value, name, applied, plane)) in kinds.iter().enumerate() {
         out.push_str(&format!(
-            "    {{ \"value\": {value}, \"name\": \"{name}\", \"applied\": {applied} }}{}\n",
+            "    {{ \"value\": {value}, \"name\": \"{name}\", \"applied\": {applied}, \
+             \"plane\": \"{plane}\" }}{}\n",
             comma(index, kinds.len())
         ));
     }

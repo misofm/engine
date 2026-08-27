@@ -145,6 +145,55 @@ if python3 -B "$vocabulary_dir/scripts/check-command-reason-vocabulary.py" >/dev
 fi
 echo "web AudioWorklet command-reason vocabulary gates passed"
 
+# Issue #210 phase 0: the same discipline for the command-KIND vocabulary. Its own red mutations
+# run first -- 21 of them, one per rule -- then the shipped drift class is performed on disk: a
+# kind the 48-byte wire decodes that the host JS `COMMAND_KINDS` set does not admit. That is the
+# defect shape the metadata JSON shipped for two releases (six kinds declared, eight decoded).
+python3 -B "$repo_root/scripts/check-command-kind-vocabulary.py" --self-test
+python3 -B "$repo_root/scripts/check-command-kind-vocabulary.py"
+kind_dir="$mutation_dir/kinds"
+mkdir -p "$kind_dir/scripts" "$kind_dir/hosts/miso-engine-host-web/src" \
+  "$kind_dir/hosts/miso-engine-host-web/web" \
+  "$kind_dir/tools/miso-engine-parameter-metadata/src"
+cp "$repo_root/scripts/check-command-kind-vocabulary.py" \
+  "$repo_root/scripts/check-parameter-metadata-v1.py" "$kind_dir/scripts/"
+cp "$repo_root/hosts/miso-engine-host-web/src/lib.rs" \
+  "$kind_dir/hosts/miso-engine-host-web/src/"
+cp "$repo_root/hosts/miso-engine-host-web/web/miso-engine-v2-audio-worklet-host.d.ts" \
+  "$kind_dir/hosts/miso-engine-host-web/web/"
+cp "$repo_root/tools/miso-engine-parameter-metadata/src/lib.rs" \
+  "$kind_dir/tools/miso-engine-parameter-metadata/src/"
+sed 's/^const COMMAND_KINDS = new Set(\[1, 2, 3, 4, 5, 6, 7, 8\]);$/const COMMAND_KINDS = new Set([1, 2, 3, 4, 5, 6]);/' \
+  "$repo_root/hosts/miso-engine-host-web/web/miso-engine-v2-audio-worklet-host.js" \
+  >"$kind_dir/hosts/miso-engine-host-web/web/miso-engine-v2-audio-worklet-host.js"
+if diff -q "$repo_root/hosts/miso-engine-host-web/web/miso-engine-v2-audio-worklet-host.js" \
+  "$kind_dir/hosts/miso-engine-host-web/web/miso-engine-v2-audio-worklet-host.js" >/dev/null; then
+  echo "the host JS kind-set mutation matched nothing" >&2
+  exit 1
+fi
+if python3 -B "$kind_dir/scripts/check-command-kind-vocabulary.py" >/dev/null 2>&1; then
+  echo "a wire kind missing from the host JS COMMAND_KINDS set escaped the kind gate" >&2
+  exit 1
+fi
+# The class every later #210 phase risks, on disk: a kind added to the Rust authority alone. Kinds
+# 9-13 arrive with the solo/trim/polarity/soloMode/routeGainDb phases; each one has to land in all
+# seven spellings or fail here.
+cp "$repo_root/hosts/miso-engine-host-web/web/miso-engine-v2-audio-worklet-host.js" \
+  "$kind_dir/hosts/miso-engine-host-web/web/"
+sed 's/^pub const COMMAND_OBSERVE_UNSUBSCRIBE: u32 = 8;/&\npub const COMMAND_SOLO: u32 = 9;/' \
+  "$repo_root/hosts/miso-engine-host-web/src/lib.rs" \
+  >"$kind_dir/hosts/miso-engine-host-web/src/lib.rs"
+if diff -q "$repo_root/hosts/miso-engine-host-web/src/lib.rs" \
+  "$kind_dir/hosts/miso-engine-host-web/src/lib.rs" >/dev/null; then
+  echo "the Rust kind-bump mutation matched nothing" >&2
+  exit 1
+fi
+if python3 -B "$kind_dir/scripts/check-command-kind-vocabulary.py" >/dev/null 2>&1; then
+  echo "a Rust kind bumped without the other six spellings escaped the kind gate" >&2
+  exit 1
+fi
+echo "web AudioWorklet command-kind vocabulary gates passed"
+
 # Issue #151: the shipped defect itself. Restoring the literal `<= 9` bound on the acknowledgement
 # must take the whole hermetic suite red -- the refused subscription stops being a typed
 # per-request rejection and becomes the host-wide sticky 255 that kept the app's GR meters dead.

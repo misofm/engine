@@ -168,6 +168,14 @@ export interface MisoUnsupportedBrowserV1 {
 }
 
 /// Frozen live-console command kinds (issue 137 D1).
+///
+/// All eight are one vocabulary, proved across every file that spells it -- this enum, the Rust
+/// `COMMAND_*` constants, the wire's decode whitelist, the host JS `COMMAND_KINDS` set, the
+/// metadata generator and the shipped `commandKinds` rows -- by
+/// `scripts/check-command-kind-vocabulary.py`. Every one of them is *applied*: nothing here is
+/// declared and refused (issue 140). Six of them move state the render thread reads; the two
+/// observation kinds move the `miso.observe.v1` subscription map and nothing rendered, which is
+/// what the metadata JSON's per-kind `plane` field reports.
 export const enum MisoCommandKindV1 {
   /// Retarget the track's pan pair over an explicit ramp window. Applied.
   Pan = 1,
@@ -187,8 +195,14 @@ export const enum MisoCommandKindV1 {
   /// `observations` array, `smoothingSamples` carries the window length in render blocks (`0` for
   /// the plan's default), and every `values` word must be `0`: a subscription changes what is read,
   /// never what is rendered.
+  ///
+  /// Applied on the `miso.observe.v1` plane: it binds an entry in the subscription map. The
+  /// metadata JSON reports it as `"plane": "observation"`.
   ObserveSubscribe = 7,
   /// Disarm one declared observation tap of one effect instance. Applied (issue #143).
+  ///
+  /// Applied on the `miso.observe.v1` plane: it clears an entry from the subscription map. The
+  /// metadata JSON reports it as `"plane": "observation"`.
   ObserveUnsubscribe = 8,
 }
 

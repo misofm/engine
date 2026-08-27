@@ -119,6 +119,10 @@ const COMMAND_FIELDS = [
   "values",
 ];
 // Issue #143 added kinds 7 and 8, the two observation subscribe/unsubscribe records.
+//
+// This set is the bound: `validCommand` asks it, never a hand-written `kind <= 8`. It is one of
+// the spellings `scripts/check-command-kind-vocabulary.py` holds to the Rust `COMMAND_*`
+// constants, so a kind that exists on the wire and not here is red before it ships.
 const COMMAND_KINDS = new Set([1, 2, 3, 4, 5, 6, 7, 8]);
 const NOT_APPLICABLE = 255;
 
