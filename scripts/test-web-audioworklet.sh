@@ -110,6 +110,31 @@ if python3 -B "$repo_root/scripts/check-parameter-metadata-v1.py" \
   echo "a builtin that denies its own blockTarget update rate escaped the schema gate" >&2
   exit 1
 fi
+# Issue #207 P2: kinds 7/8 are `miso.observe.v1` transactions, not #140 commandKinds. These
+# valid-JSON mutations prove the shipped metadata gate rejects a wrong value, a truncated table,
+# and a relabelled transaction without adding an `applied` escape hatch.
+for mutation in wrong truncated relabelled; do
+  mutated_metadata="$mutation_dir/observation-transaction-$mutation.json"
+  cp "$metadata" "$mutated_metadata"
+  case "$mutation" in
+    wrong)
+      sed -i 's/"value": 7, "name": "observeSubscribe"/"value": 6, "name": "observeSubscribe"/' "$mutated_metadata"
+      ;;
+    truncated)
+      sed -i \
+        -e '/    { "value": 8, "name": "observeUnsubscribe", "protocol": "miso.observe.v1" }/d' \
+        -e 's/{ "value": 7, "name": "observeSubscribe", "protocol": "miso.observe.v1" },/{ "value": 7, "name": "observeSubscribe", "protocol": "miso.observe.v1" }/' \
+        "$mutated_metadata"
+      ;;
+    relabelled)
+      sed -i 's/"name": "observeUnsubscribe"/"name": "observeRemove"/' "$mutated_metadata"
+      ;;
+  esac
+  if python3 -B "$repo_root/scripts/check-parameter-metadata-v1.py" "$mutated_metadata" >/dev/null 2>&1; then
+    echo "observation transaction $mutation mutation escaped the schema gate" >&2
+    exit 1
+  fi
+done
 echo "web AudioWorklet parameter-metadata gates passed"
 
 # Issue #207 E0a: the SDK-facing ABI layout has its own independent schema gate. `--check`

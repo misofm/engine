@@ -124,6 +124,21 @@ pub fn render() -> String {
         ));
     }
     out.push_str("  ],\n");
+    // Issue #207 P2: observation subscription changes a host-side `miso.observe.v1` binding; it
+    // is not a DSP `miso.command.v1` write. Keeping this separate preserves #140's invariant that
+    // every declared `commandKinds` row is applied, without hiding wire kinds 7 and 8 from SDKs.
+    out.push_str("  \"observationTransactionKinds\": [\n");
+    let observation_transactions = [
+        (COMMAND_OBSERVE_SUBSCRIBE, "observeSubscribe"),
+        (COMMAND_OBSERVE_UNSUBSCRIBE, "observeUnsubscribe"),
+    ];
+    for (index, (value, name)) in observation_transactions.iter().enumerate() {
+        out.push_str(&format!(
+            "    {{ \"value\": {value}, \"name\": \"{name}\", \"protocol\": \"miso.observe.v1\" }}{}\n",
+            comma(index, observation_transactions.len())
+        ));
+    }
+    out.push_str("  ],\n");
     out.push_str("  \"commandReasons\": [\n");
     let reasons = [
         (COMMAND_REASON_NONE, "none"),

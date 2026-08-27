@@ -30,6 +30,8 @@ POLICIES = {1: "shared", 2: "perLane"}
 SMOOTHINGS = {1: "none", 2: "linear", 3: "onePole99"}
 
 COMMAND_KINDS = ["pan", "matrix", "faderDb", "mute", "effectParam", "effectBypass"]
+OBSERVATION_TRANSACTION_KINDS = ["observeSubscribe", "observeUnsubscribe"]
+OBSERVATION_TRANSACTION_PROTOCOL = "miso.observe.v1"
 # Issue #143 added `unknownTap` (10) and `observationUnbound` (11); issue #151 found that this
 # list, the host JS acknowledgement bound and the generator all still stopped at `wrongState`.
 # The list is spelled here rather than imported on purpose -- this validator is deliberately a
@@ -94,7 +96,7 @@ def finite(value: object, message: str) -> float:
 def validate(document: dict) -> None:
     require(set(document) == {
         "schema", "abiVersion", "commandRecordBytes", "maximumCommandRecords", "commandKinds",
-        "commandReasons", "observationVocabularies", "builtins", "effects",
+        "observationTransactionKinds", "commandReasons", "observationVocabularies", "builtins", "effects",
     }, "top-level keys")
     require(document["schema"] == SCHEMA, "schema tag")
     require(document["abiVersion"] == ABI_VERSION, "abi version")
@@ -108,6 +110,29 @@ def validate(document: dict) -> None:
     # Issue #140: every declared kind is applied. Nothing in the ABI is declared-and-refused any
     # more, so a kind that reports `applied: false` is a regression, not a documented gap.
     require(applied == set(COMMAND_KINDS), "applied command kinds")
+    transactions = document["observationTransactionKinds"]
+    require(isinstance(transactions, list), "observation transaction kinds list")
+    require(
+        all(isinstance(transaction, dict) for transaction in transactions),
+        "observation transaction kind objects",
+    )
+    require(
+        [transaction["name"] for transaction in transactions] == OBSERVATION_TRANSACTION_KINDS,
+        "observation transaction kinds",
+    )
+    require(
+        [transaction["value"] for transaction in transactions] == [7, 8],
+        "observation transaction kind values",
+    )
+    for transaction in transactions:
+        require(
+            set(transaction) == {"value", "name", "protocol"},
+            "observation transaction kind keys",
+        )
+        require(
+            transaction["protocol"] == OBSERVATION_TRANSACTION_PROTOCOL,
+            "observation transaction protocol",
+        )
     reasons = document["commandReasons"]
     require([reason["name"] for reason in reasons] == COMMAND_REASONS, "command reasons")
     require(
@@ -376,6 +401,26 @@ def self_test() -> int:
         ("abi", lambda d: d.update(abiVersion=1)),
         ("record bytes", lambda d: d.update(commandRecordBytes=32)),
         ("kind not applied", lambda d: d["commandKinds"][2].update(applied=False)),
+        (
+            "observation transaction kinds truncated",
+            lambda d: d["observationTransactionKinds"].pop(),
+        ),
+        (
+            "observation transaction kind relabelled",
+            lambda d: d["observationTransactionKinds"][1].update(name="observeRemove"),
+        ),
+        (
+            "observation transaction kind value wrong",
+            lambda d: d["observationTransactionKinds"][0].update(value=6),
+        ),
+        (
+            "observation transaction protocol wrong",
+            lambda d: d["observationTransactionKinds"][0].update(protocol="miso.command.v1"),
+        ),
+        (
+            "observation transaction kind claims applied",
+            lambda d: d["observationTransactionKinds"][0].update(applied=False),
+        ),
         ("reason order", lambda d: d["commandReasons"].reverse()),
         # Issue #151's exact defect shape: a vocabulary that stops one short of the reasons the
         # observation path returns, and one whose value column no longer matches its name column.

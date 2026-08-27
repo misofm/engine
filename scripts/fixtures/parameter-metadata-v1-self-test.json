@@ -11,6 +11,10 @@
     { "value": 5, "name": "effectParam", "applied": true },
     { "value": 6, "name": "effectBypass", "applied": true }
   ],
+  "observationTransactionKinds": [
+    { "value": 7, "name": "observeSubscribe", "protocol": "miso.observe.v1" },
+    { "value": 8, "name": "observeUnsubscribe", "protocol": "miso.observe.v1" }
+  ],
   "commandReasons": [
     { "value": 0, "name": "none" },
     { "value": 1, "name": "malformed" },
