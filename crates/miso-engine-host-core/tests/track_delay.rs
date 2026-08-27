@@ -209,6 +209,15 @@ fn source_id(toml: &str) -> &'static [u8] {
     }
 }
 
+/// Whether two renders disagree anywhere, on bits.
+fn differs(a: &[Vec<f32>; 2], b: &[Vec<f32>; 2]) -> bool {
+    a.iter().zip(b.iter()).any(|(x, y)| {
+        x.iter()
+            .zip(y.iter())
+            .any(|(p, q)| p.to_bits() != q.to_bits())
+    })
+}
+
 fn assert_bit_identical(actual: &[Vec<f32>; 2], oracle: &[Vec<f32>; 2], what: &str) {
     for (plane, (got, want)) in actual.iter().zip(oracle.iter()).enumerate() {
         assert_eq!(got.len(), want.len(), "{what}: plane {plane} length");
@@ -298,13 +307,6 @@ fn the_two_lanes_carry_independent_delays() {
     let right_late = render(&session(0, delay, false), 0, 6, None);
     let neither = render(&session(0, 0, false), 0, 6, None);
     let both = render(&session(delay, delay, false), 0, 6, None);
-    let differs = |a: &[Vec<f32>; 2], b: &[Vec<f32>; 2]| {
-        a.iter().zip(b.iter()).any(|(x, y)| {
-            x.iter()
-                .zip(y.iter())
-                .any(|(p, q)| p.to_bits() != q.to_bits())
-        })
-    };
     assert!(
         differs(&left_late, &right_late),
         "delaying the left lane must not render what delaying the right lane renders"
@@ -409,6 +411,29 @@ fn an_asymmetric_delay_declines_exactly_its_own_track() {
 /// an omission, but the consequence of the placement -- and this is the test that would go red if
 /// the delay were ever moved inside the collapsed prefix without also joining that copy.
 ///
+/// The delay survives the banked path, and is not elided away.
+///
+/// Every shift-exactness row above runs on the one-track fixture, which forms no bank at all. This
+/// one runs on eight collapse-eligible tracks with identical EQ chains: the planner pools them into
+/// a homogeneous bank and #208 may merge its slots into one chain. The delay must still be there.
+///
+/// The specific hazard is elision. A `TrackStage` boundary that is a pure pass-through becomes a
+/// buffer alias with no op at all, and an aliased input node would never reach `node_kind` -- the
+/// delay would vanish silently, with every digest gate still green, because the plan would be
+/// *smaller* rather than wrong. It cannot happen today: `program::is_alias_candidate` admits only
+/// the three internal rack boundaries (`PostSimd1`, `PostDynamic`, `PostSimd2PreFader`), and
+/// `Input` is bindable and keeps its op. This is the render that would notice if that ever moved.
+#[test]
+fn the_delay_survives_the_banked_path() {
+    assert!(
+        differs(
+            &render(&mono_bank(3, 480, 480), 0, 8, None),
+            &render(&mono_bank(3, 0, 0), 0, 8, None),
+        ),
+        "a delay declared on a banked track must reach the rendered audio"
+    );
+}
+
 /// Red mutation: process only the left lane in `TrackDelayLine::process` -> the forced-off arm
 /// keeps its right plane and the armed arm loses it, and this fails on the first delayed sample.
 #[test]
