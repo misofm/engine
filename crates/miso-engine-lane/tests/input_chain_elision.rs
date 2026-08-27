@@ -398,8 +398,11 @@ fn negative_zero_mix_words_are_not_the_identity() {
 /// So for every one of the 256 sign assignments to the eight integrator words of an
 /// identity-coefficient chain: the plan refuses to elide exactly the sections that carry a `-0.0`
 /// -- the gate is on bit patterns, and `-0.0` is not the identity pattern -- and forcing the
-/// elision on all four anyway moves **no** bit. The second half is what the appendix asserts, and
-/// it is the half a reader is entitled to see run.
+/// elision on all four anyway moves **no output sample bit**. (The retained state words DO differ
+/// under forced elision -- the unelided kernel washes a seeded `-0.0` integrator to `+0.0` on the
+/// first frame while the elided kernel never writes it -- but forced elision is unreachable
+/// through the gate, so output inertness is the whole reachable claim.) The second half is what
+/// the appendix asserts, and it is the half a reader is entitled to see run.
 #[test]
 fn negative_zero_state_words_are_inert_but_still_fail_the_bitwise_gate() {
     fn check<L: Lane>(width: &str) {
