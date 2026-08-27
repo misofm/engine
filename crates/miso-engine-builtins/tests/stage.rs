@@ -791,3 +791,373 @@ fn identity_sections_are_elided_only_when_every_lane_and_word_says_so() {
         );
     }
 }
+
+/// One live command in the automation script the banked-identity gates replay.
+///
+/// A script entry names the lane it addresses, so the same script drives the bank (by lane) and
+/// the per-track sections (one section per lane) without either side reordering it.
+#[derive(Clone, Copy, Debug)]
+enum Command {
+    FaderDb {
+        lane: usize,
+        channels: BuiltinLaneSelector,
+        db: f32,
+        smoothing_samples: u32,
+    },
+    Mute {
+        lane: usize,
+        channels: BuiltinLaneSelector,
+        muted: bool,
+        smoothing_samples: u32,
+    },
+    Pan {
+        lane: usize,
+        matrix: Matrix2x2,
+        smoothing_samples: u32,
+    },
+}
+
+/// A deterministic automation script: `(block index, command)`, ramps deliberately overlapping.
+///
+/// The windows are chosen against the partitions below so that ramps are **in flight across block
+/// boundaries** at every partition, and so that lanes settle at different frames inside one block:
+/// that is the case a banked ramp could get wrong and a per-track one cannot, because it is the
+/// only case where one lane's countdown reaching zero must not disturb its neighbours'.
+fn automation_script(members: usize) -> Vec<(usize, Command)> {
+    let mut script = Vec::new();
+    let channels = [
+        BuiltinLaneSelector::Both,
+        BuiltinLaneSelector::Left,
+        BuiltinLaneSelector::Right,
+    ];
+    for lane in 0..members {
+        // Windows that are not multiples of any partition, so a ramp never settles on a boundary
+        // for every partition at once.
+        script.push((
+            0,
+            Command::FaderDb {
+                lane,
+                channels: channels[lane % 3],
+                db: -6.0 - lane as f32,
+                smoothing_samples: 37 + lane as u32 * 53,
+            },
+        ));
+        script.push((
+            1,
+            Command::Pan {
+                lane,
+                matrix: pan_matrix(-0.5 + lane as f32 * 0.1, 0.5 - lane as f32 * 0.1)
+                    .expect("in-domain pan"),
+                smoothing_samples: 91 + lane as u32 * 29,
+            },
+        ));
+        // A retarget *while the first ramp is still running*: the step is recomputed from the
+        // gain in flight, so a bank that shared one countdown across lanes would diverge here.
+        script.push((
+            2,
+            Command::FaderDb {
+                lane,
+                channels: channels[(lane + 1) % 3],
+                db: 3.0 - lane as f32 * 0.5,
+                smoothing_samples: 71 + lane as u32 * 17,
+            },
+        ));
+        script.push((
+            3,
+            Command::Mute {
+                lane,
+                channels: channels[(lane + 2) % 3],
+                muted: lane % 2 == 0,
+                smoothing_samples: 23 + lane as u32 * 41,
+            },
+        ));
+        // Unmute back to the remembered fader gain, overlapping the mute ramp on odd lanes.
+        script.push((
+            5,
+            Command::Mute {
+                lane,
+                channels: channels[(lane + 2) % 3],
+                muted: false,
+                smoothing_samples: 13 + lane as u32 * 7,
+            },
+        ));
+        // A zero-window snap: the D11 branch that assigns instead of ramping.
+        script.push((
+            7,
+            Command::Pan {
+                lane,
+                matrix: pan_matrix(0.25, -0.25).expect("in-domain pan"),
+                smoothing_samples: 0,
+            },
+        ));
+    }
+    script
+}
+
+/// Renders one automation script through the banked fader and matrix, in AoSoA order.
+///
+/// Returns the planar per-lane output, so it can be compared word for word against the per-track
+/// sections that the graph binds today.
+fn render_banked(
+    backend: Backend,
+    width: BankWidth,
+    members: usize,
+    blocks: usize,
+    frames: usize,
+    planar: &[Vec<f32>],
+) -> Vec<Vec<f32>> {
+    let lanes = width.lanes() as usize;
+    let mut fader = BuiltinFaderBankV1::new(
+        backend,
+        width,
+        (0..members).map(parameters_for).collect(),
+    )
+    .expect("fader bank");
+    let mut matrix = BuiltinMatrixBankV1::new(
+        backend,
+        width,
+        (0..members)
+            .map(|index| {
+                let parameters = parameters_for(index);
+                (parameters.matrix, parameters.smoothing_samples)
+            })
+            .collect(),
+    )
+    .expect("matrix bank");
+    assert_eq!(fader.active_lanes(), members);
+    assert_eq!(matrix.active_lanes(), members);
+
+    let script = automation_script(members);
+    let mut output: Vec<Vec<f32>> = vec![Vec::with_capacity(blocks * frames * 2); members];
+    let mut left = vec![0.0_f32; frames * lanes];
+    let mut right = vec![0.0_f32; frames * lanes];
+    // The bit patterns a padding lane must not be able to leak out of, refreshed every block.
+    const POISON: [u32; 4] = [0x7FC0_0000, 0x7F80_0000, 0x8000_0000, 0x0000_0001];
+    for block in 0..blocks {
+        for (at, command) in &script {
+            if *at != block {
+                continue;
+            }
+            match *command {
+                Command::FaderDb {
+                    lane,
+                    channels,
+                    db,
+                    smoothing_samples,
+                } => fader
+                    .set_fader_db(lane, channels, db, smoothing_samples)
+                    .expect("in-domain fader move"),
+                Command::Mute {
+                    lane,
+                    channels,
+                    muted,
+                    smoothing_samples,
+                } => fader
+                    .set_mute(lane, channels, muted, smoothing_samples)
+                    .expect("member lane"),
+                Command::Pan {
+                    lane,
+                    matrix: target,
+                    smoothing_samples,
+                } => matrix
+                    .set_target_smoothed(lane, target, smoothing_samples)
+                    .expect("in-domain pan"),
+            }
+        }
+        for frame in 0..frames {
+            let sample = block * frames + frame;
+            for lane in 0..lanes {
+                let (l, r) = if lane < members {
+                    (
+                        planar[lane][sample],
+                        planar[lane][blocks * frames + sample],
+                    )
+                } else {
+                    let poison = f32::from_bits(POISON[(sample + lane) % POISON.len()]);
+                    (poison, poison)
+                };
+                left[frame * lanes + lane] = l;
+                right[frame * lanes + lane] = r;
+            }
+        }
+        fader.process(&mut left, &mut right, frames as u32);
+        matrix.process(&mut left, &mut right, frames as u32);
+        for (lane, out) in output.iter_mut().enumerate() {
+            for frame in 0..frames {
+                out.push(left[frame * lanes + lane]);
+            }
+            for frame in 0..frames {
+                out.push(right[frame * lanes + lane]);
+            }
+        }
+    }
+    output
+}
+
+/// Renders the same script through the per-track sections the graph binds today, one per lane.
+fn render_per_track(
+    members: usize,
+    blocks: usize,
+    frames: usize,
+    planar: &[Vec<f32>],
+) -> Vec<Vec<f32>> {
+    let script = automation_script(members);
+    let mut faders: Vec<FaderMuteRampBuiltinsV1> = (0..members)
+        .map(|index| FaderMuteRampBuiltinsV1::new(parameters_for(index)).expect("fader"))
+        .collect();
+    let mut matrices: Vec<MatrixBuiltins> = (0..members)
+        .map(|index| {
+            let (_, _, matrix) = BuiltinChain::new(48_000, parameters_for(index))
+                .expect("chain")
+                .into_sections();
+            matrix
+        })
+        .collect();
+    let mut output: Vec<Vec<f32>> = vec![Vec::with_capacity(blocks * frames * 2); members];
+    for block in 0..blocks {
+        for (at, command) in &script {
+            if *at != block {
+                continue;
+            }
+            match *command {
+                Command::FaderDb {
+                    lane,
+                    channels,
+                    db,
+                    smoothing_samples,
+                } => faders[lane]
+                    .set_fader_db(channels, db, smoothing_samples)
+                    .expect("in-domain fader move"),
+                Command::Mute {
+                    lane,
+                    channels,
+                    muted,
+                    smoothing_samples,
+                } => faders[lane].set_mute(channels, muted, smoothing_samples),
+                Command::Pan {
+                    lane,
+                    matrix: target,
+                    smoothing_samples,
+                } => matrices[lane]
+                    .set_target_smoothed(target, smoothing_samples)
+                    .expect("in-domain pan"),
+            }
+        }
+        for lane in 0..members {
+            let start = block * frames;
+            let mut left = planar[lane][start..start + frames].to_vec();
+            let mut right =
+                planar[lane][blocks * frames + start..blocks * frames + start + frames].to_vec();
+            faders[lane]
+                .process(DualMonoBlock::new(&mut left, &mut right, 0).expect("block"));
+            matrices[lane]
+                .process(DualMonoBlock::new(&mut left, &mut right, 0).expect("block"));
+            output[lane].extend_from_slice(&left);
+            output[lane].extend_from_slice(&right);
+        }
+    }
+    output
+}
+
+/// The Class-A claim of the banked strip: a banked fader and matrix render the exact bits the
+/// per-track sections render, under live automation, at every width and every member count.
+///
+/// This is the identity the whole job rests on, and it is stated over the case that can break it
+/// and nothing else: ramps in flight across block boundaries, retargets landing mid-ramp, mutes
+/// and unmutes overlapping, per-lane windows that settle at different frames inside one block,
+/// and padding lanes pre-filled with NaN, infinity, `-0.0` and a subnormal.
+///
+/// Red-mutation proven: sharing one countdown across the bank -- replacing the per-lane
+/// `remaining` maximum in `FaderRampStage::process_plane` with lane 0's count -- fails on lane 1
+/// of the first ragged case.
+#[test]
+fn banked_fader_and_matrix_are_bit_identical_to_the_per_track_sections() {
+    const BLOCKS: usize = 9;
+    for (backend, width) in BANKS {
+        let lanes = width.lanes() as usize;
+        for members in [1, lanes - 1, lanes] {
+            // Partitions chosen against the script's windows so a ramp is always mid-flight at a
+            // boundary: 1 is the pathological case, 128 is the master-plan quantum.
+            for frames in [1, 7, 64, 128] {
+                let mut rng = Rng(0x5A17_0BED ^ members as u64 ^ (frames as u64) << 8);
+                let planar: Vec<Vec<f32>> = (0..members)
+                    .map(|_| (0..BLOCKS * frames * 2).map(|_| rng.next_sample()).collect())
+                    .collect();
+                let banked =
+                    render_banked(backend, width, members, BLOCKS, frames, &planar);
+                let per_track = render_per_track(members, BLOCKS, frames, &planar);
+                for lane in 0..members {
+                    for (index, (bank, track)) in
+                        banked[lane].iter().zip(per_track[lane].iter()).enumerate()
+                    {
+                        assert_eq!(
+                            bank.to_bits(),
+                            track.to_bits(),
+                            "width={lanes}, members={members}, frames={frames}, lane={lane}, \
+                             sample={index}: banked {bank:?} vs per-track {track:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A settled mute is exactly `+0.0` in the bank, for a negative input too, and a settled lane's
+/// gain is one multiply -- the two properties banking must not quietly trade away.
+///
+/// Red-mutation proven: gating the kernel's clear on the frame *after* the ramp settles -- an
+/// `andnot` of `done` shifted by one -- leaves the settling sample carrying the input's sign bit
+/// and fails the `-0.0` assertion below.
+#[test]
+fn a_settled_banked_mute_is_exactly_positive_zero() {
+    for (backend, width) in BANKS {
+        let lanes = width.lanes() as usize;
+        let mut bank = BuiltinFaderBankV1::new(
+            backend,
+            width,
+            (0..lanes)
+                .map(|_| BuiltinParameters::default())
+                .collect(),
+        )
+        .expect("fader bank");
+        // Lane 0 mutes over a window that settles inside block 1; lane 1 is muted instantly.
+        bank.set_mute(0, BuiltinLaneSelector::Both, true, 5)
+            .expect("member lane");
+        bank.set_mute(1, BuiltinLaneSelector::Both, true, 0)
+            .expect("member lane");
+        const FRAMES: usize = 16;
+        for block in 0..2 {
+            let mut left = vec![-1.0_f32; FRAMES * lanes];
+            let mut right = vec![-1.0_f32; FRAMES * lanes];
+            bank.process(&mut left, &mut right, FRAMES as u32);
+            for frame in 0..FRAMES {
+                // Lane 1 settled before a single sample was rendered, so every sample of both
+                // blocks is `+0.0`; lane 0 is `+0.0` from the frame its ramp assigned the target.
+                if block == 1 || frame >= 4 {
+                    for (plane, name) in [(&left, "left"), (&right, "right")] {
+                        assert_eq!(
+                            plane[frame * lanes].to_bits(),
+                            0,
+                            "width={lanes}, block={block}, frame={frame}, {name}: a settled mute \
+                             kept the input's sign"
+                        );
+                    }
+                }
+                assert_eq!(
+                    left[frame * lanes + 1].to_bits(),
+                    0,
+                    "width={lanes}, block={block}, frame={frame}: an instant mute is not +0.0"
+                );
+            }
+            // An unmuted, unmoved lane is one multiply by unit gain, so it is untouched.
+            for frame in 0..FRAMES {
+                assert_eq!(
+                    left[frame * lanes + 2].to_bits(),
+                    (-1.0_f32).to_bits(),
+                    "width={lanes}, block={block}, frame={frame}: a settled unmuted lane moved"
+                );
+            }
+        }
+    }
+}

@@ -33,9 +33,10 @@ use miso_engine_lane::{
     kernels::{
         SvfCoef,
         builtins::{
-            InputChainCoef, InputChainPlan, InputChainState, Matrix2x2Coef, Matrix2x2Ramp,
-            gain_mute_block, input_chain_block_elided, input_chain_plan, lanes_below,
-            mask_from_flags, matrix2x2_block, matrix2x2_ramp_block, no_lanes, zero_lanes_block,
+            GainMuteRamp, InputChainCoef, InputChainPlan, InputChainState, Matrix2x2Coef,
+            Matrix2x2Ramp, gain_mute_block, gain_mute_ramp_block, input_chain_block_elided,
+            input_chain_plan, lanes_below, mask_from_flags, matrix2x2_block, matrix2x2_ramp_block,
+            no_lanes, zero_lanes_block,
         },
     },
 };
@@ -929,6 +930,256 @@ impl<L: Lane> FaderStage<L> {
     }
 }
 
+/// The ramped fader and mute stage at one width (D11 ramps, issue #212's banked strip).
+///
+/// # One body, so lane identity is a property of the code
+///
+/// This is the *only* ramped-fader implementation in the workspace. A live-console track is this
+/// type at `L = f32` over planar slices ([`FaderMuteRampBuiltinsV1`]); a banked strip slot is the
+/// same type at `Simd4` or `Simd8` over an AoSoA block ([`BuiltinFaderBankV1`]). The banked form is
+/// therefore op-order-identical to the per-track form by construction rather than by two
+/// implementations being compared -- the same rule [`InputStage`] follows, and the reason the
+/// per-track scalar path was rewritten onto this type instead of being left beside it.
+///
+/// The lane arrays are `[channel][lane]`: `channel` is the dual-mono side (`0` left, `1` right)
+/// and `lane` is the bank member. A scalar track has `L::WIDTH == 1`, so `lane` is always `0` and
+/// the two channels are the two `[GainMuteRamp; 2]` entries -- exactly the `[f32; 2]` pairs the
+/// per-track type carried before.
+///
+/// # Ramp independence, and why partition invariance follows
+///
+/// Every lane owns its countdown, its step and its current gain, and
+/// [`gain_mute_ramp_block`] advances all three in place per frame. A lane's ramp therefore evolves
+/// by its own additions, in its own order, regardless of the block size, of where the block
+/// boundaries fall, or of which other tracks share its bank. That is what makes a banked lane's
+/// bits equal the same track's bits rendered alone, and it is the same argument
+/// [`matrix2x2_ramp_block`] carries.
+///
+/// # Which kernel a block runs
+///
+/// A channel with **no** lane ramping dispatches [`gain_mute_block`] over the whole block: one
+/// multiply and one mask clear per frame, the identical operation the prepared-only [`FaderStage`]
+/// has always run. A settled lane's arithmetic is therefore unchanged by banking, muted or not --
+/// a settled mute is the exact `+0.0` the `andnot` produces, never a multiply's signed zero.
+///
+/// A channel with any lane ramping runs the ramp kernel over `max(remaining)` frames -- capped at
+/// the block -- and then, if the block outlives every ramp, [`gain_mute_block`] over the tail. A
+/// lane whose own ramp ended earlier inside that window keeps multiplying by its exactly-assigned
+/// target, which is what the scalar tail multiply did for it before.
+pub(crate) struct FaderRampStage<L: Lane> {
+    /// Ramp words per channel. `ramp[c].current` is the settled gain between events, and
+    /// `ramp[c].mute` is the per-lane mute mask, so there is no second copy of either.
+    ramp: [GainMuteRamp<L>; 2],
+    /// Each lane's fader gain, independent of mute, `[channel][lane]`.
+    fader_gain: [[f32; MAX_BANK_LANES]; 2],
+    /// Each lane's mute flag, `[channel][lane]`.
+    muted: [[bool; MAX_BANK_LANES]; 2],
+    /// Frames left in each lane's ramp, `[channel][lane]`.
+    remaining: [[u32; MAX_BANK_LANES]; 2],
+}
+
+/// Largest ramp countdown that is exact in `f32`.
+///
+/// The same clamp, for the same reason, as [`MATRIX_RAMP_COUNTDOWN_MAXIMUM`]: a window may be up to
+/// `u32::MAX` updates but the in-kernel countdown is an `f32` integer. It is invisible because a
+/// lane can only reach zero inside a block when its remaining count is at most the block length,
+/// and because the authoritative countdown is the `u32` in [`FaderRampStage::remaining`] -- the
+/// kernel's leftover word is recomputed from it at the top of every ramping block, never carried.
+const FADER_RAMP_COUNTDOWN_MAXIMUM: u32 = 1 << 24;
+
+impl<L: Lane> FaderRampStage<L> {
+    /// Builds a settled stage from one prepared fader per populated lane and channel.
+    ///
+    /// Lanes at or above `lanes.len()` are padding: unit gain, unmuted, never ramping. A muted
+    /// lane starts at gain `0.0` -- its mute is a fader endpoint, not a separate state -- which is
+    /// what lets [`Self::set_mute`] unmute by retargeting back to `fader_gain`.
+    fn new(lanes: &[(FaderLane, FaderLane)]) -> Self {
+        let mut settled = [[1.0_f32; MAX_BANK_LANES]; 2];
+        let mut fader_gain = [[1.0_f32; MAX_BANK_LANES]; 2];
+        let mut muted = [[false; MAX_BANK_LANES]; 2];
+        let mut flags = [[0.0_f32; MAX_BANK_LANES]; 2];
+        for (lane, pair) in lanes.iter().enumerate().take(L::WIDTH) {
+            for (channel, fader) in [pair.0, pair.1].into_iter().enumerate() {
+                fader_gain[channel][lane] = fader.gain;
+                muted[channel][lane] = fader.muted;
+                settled[channel][lane] = if fader.muted { 0.0 } else { fader.gain };
+                flags[channel][lane] = f32::from(u8::from(fader.muted));
+            }
+        }
+        let ramp = core::array::from_fn(|channel| {
+            let current = lane_words::<L>(&settled[channel]);
+            GainMuteRamp {
+                current,
+                target: current,
+                step: L::zero(),
+                remaining: L::zero(),
+                mute: mask_from_flags::<L>(&flags[channel][..L::WIDTH]),
+            }
+        });
+        Self {
+            ramp,
+            fader_gain,
+            muted,
+            remaining: [[0; MAX_BANK_LANES]; 2],
+        }
+    }
+
+    /// Recomputes one channel's mute mask from the per-lane flags.
+    fn sync_mute(&mut self, channel: usize) {
+        let mut flags = [0.0_f32; MAX_BANK_LANES];
+        for (lane, flag) in flags.iter_mut().enumerate() {
+            *flag = f32::from(u8::from(self.muted[channel][lane]));
+        }
+        self.ramp[channel].mute = mask_from_flags::<L>(&flags[..L::WIDTH]);
+    }
+
+    /// Retargets one lane of one channel. D11: one division per event, never per sample.
+    fn retarget(&mut self, lane: usize, channel: usize, target: f32, smoothing_samples: u32) {
+        let current = lane_read::<L>(self.ramp[channel].current);
+        let mut targets = lane_read::<L>(self.ramp[channel].target);
+        let mut steps = lane_read::<L>(self.ramp[channel].step);
+        targets[lane] = target;
+        steps[lane] = if smoothing_samples == 0 {
+            0.0
+        } else {
+            // D11: one division, at the moment the target changes.
+            (target - current[lane]) / smoothing_samples as f32
+        };
+        self.ramp[channel].target = lane_words::<L>(&targets);
+        self.ramp[channel].step = lane_words::<L>(&steps);
+        self.remaining[channel][lane] = smoothing_samples;
+        if smoothing_samples == 0 {
+            let mut current = current;
+            current[lane] = target;
+            self.ramp[channel].current = lane_words::<L>(&current);
+        }
+    }
+
+    /// Retargets one lane's fader gain on the channels `channels` covers.
+    ///
+    /// A muted lane keeps its `0.0` target: the new gain is remembered and takes effect when the
+    /// lane is unmuted, exactly as a physical console's fader does.
+    fn set_fader_gain(
+        &mut self,
+        lane: usize,
+        channels: BuiltinLaneSelector,
+        gain: f32,
+        smoothing_samples: u32,
+    ) {
+        for channel in 0..2 {
+            if !channels.covers(channel) {
+                continue;
+            }
+            self.fader_gain[channel][lane] = gain;
+            let target = if self.muted[channel][lane] { 0.0 } else { gain };
+            self.retarget(lane, channel, target, smoothing_samples);
+        }
+    }
+
+    /// Sets or clears one lane's mute on the channels `channels` covers, as a retarget.
+    fn set_mute(
+        &mut self,
+        lane: usize,
+        channels: BuiltinLaneSelector,
+        muted: bool,
+        smoothing_samples: u32,
+    ) {
+        for channel in 0..2 {
+            if !channels.covers(channel) {
+                continue;
+            }
+            self.muted[channel][lane] = muted;
+            let target = if muted {
+                0.0
+            } else {
+                self.fader_gain[channel][lane]
+            };
+            self.retarget(lane, channel, target, smoothing_samples);
+            self.sync_mute(channel);
+        }
+    }
+
+    /// The settled gain of one lane and channel, for tests and control-plane readback.
+    fn target_gain(&self, lane: usize, channel: usize) -> f32 {
+        lane_read::<L>(self.ramp[channel].target)[lane]
+    }
+
+    /// Whether one lane and channel is muted.
+    const fn is_muted(&self, lane: usize, channel: usize) -> bool {
+        self.muted[channel][lane]
+    }
+
+    /// Renders one block of both channels.
+    fn process(&mut self, left: &mut [f32], right: &mut [f32], frames: usize) {
+        self.process_plane(0, left, frames);
+        self.process_plane(1, right, frames);
+    }
+
+    fn process_plane(&mut self, channel: usize, plane: &mut [f32], frames: usize) {
+        let maximum = self.remaining[channel]
+            .iter()
+            .take(L::WIDTH)
+            .copied()
+            .max()
+            .unwrap_or(0);
+        if maximum == 0 {
+            gain_mute_block::<L>(
+                plane,
+                frames,
+                self.ramp[channel].current,
+                self.ramp[channel].mute,
+            );
+            return;
+        }
+        let ramp_frames = (maximum as usize).min(frames);
+        let mut countdown = [0.0_f32; MAX_BANK_LANES];
+        for (lane, word) in countdown.iter_mut().enumerate() {
+            *word = self.remaining[channel][lane].min(FADER_RAMP_COUNTDOWN_MAXIMUM) as f32;
+        }
+        self.ramp[channel].remaining = lane_words::<L>(&countdown);
+        let split = ramp_frames * L::WIDTH;
+        gain_mute_ramp_block::<L>(&mut plane[..split], ramp_frames, &mut self.ramp[channel]);
+        for remaining in self.remaining[channel].iter_mut().take(L::WIDTH) {
+            *remaining = remaining.saturating_sub(ramp_frames as u32);
+        }
+        // The kernel already assigned the target exactly on the frame a lane settled on, so these
+        // two writes are the bookkeeping the scalar path did after its loop and not a second
+        // numeric event: `current` is re-assigned to the value it already holds, and the step is
+        // dropped so a later block cannot walk past a finished ramp.
+        let mut current = lane_read::<L>(self.ramp[channel].current);
+        let target = lane_read::<L>(self.ramp[channel].target);
+        let mut steps = lane_read::<L>(self.ramp[channel].step);
+        for lane in 0..L::WIDTH {
+            if self.remaining[channel][lane] == 0 {
+                current[lane] = target[lane];
+                steps[lane] = 0.0;
+            }
+        }
+        self.ramp[channel].current = lane_words::<L>(&current);
+        self.ramp[channel].step = lane_words::<L>(&steps);
+        if ramp_frames < frames {
+            // Reached only when every lane settled inside this block, because `ramp_frames` is the
+            // largest remaining count: the settled kernel is therefore correct for all of them.
+            gain_mute_block::<L>(
+                &mut plane[split..],
+                frames - ramp_frames,
+                self.ramp[channel].current,
+                self.ramp[channel].mute,
+            );
+        }
+    }
+
+    /// Snaps every lane to its target and cancels any ramp in flight.
+    fn reset(&mut self) {
+        for channel in 0..2 {
+            self.ramp[channel].current = self.ramp[channel].target;
+            self.ramp[channel].step = L::zero();
+            self.ramp[channel].remaining = L::zero();
+        }
+        self.remaining = [[0; MAX_BANK_LANES]; 2];
+    }
+}
+
 /// The smoothed 2x2 channel matrix at one width (D11 ramps, master plan §4.2).
 ///
 /// The lane words are authoritative for the coefficient values; the scalar arrays carry the
@@ -1438,6 +1689,319 @@ impl BuiltinInputBankV1 {
     }
 }
 
+/// The dispatched fader-ramp stage of a bank, at the width the selected backend chose.
+enum FaderStageKernel {
+    /// Four lanes: AArch64 NEON and wasm `simd128`.
+    Simd4(FaderRampStage<Simd4>),
+    /// Eight lanes: `x86-64-v3`.
+    Simd8(FaderRampStage<Simd8>),
+}
+
+/// A homogeneous fader/mute bank over one AoSoA cohort (issue #212, the banked strip).
+///
+/// # What banking does and does not change
+///
+/// Nothing numeric. The bank is [`FaderRampStage`] at `Simd4` or `Simd8`, and a per-track fader is
+/// the same type at `f32`, so a member lane's output bits are the bits that track produced as its
+/// own dispatched op -- settled or mid-ramp, muted or not. What banking removes is one graph op,
+/// one arena buffer and one `dyn` dispatch per track per block, and -- because the fader now sits
+/// in the cohort's chain rather than between two of them -- one planar/AoSoA round-trip.
+///
+/// # Lane semantics (owned by this crate)
+///
+/// `faders.len()` is in `1..=width.lanes()`. Lanes at or above that count are **padding lanes**:
+/// unit gain, unmuted, never ramping, so they are arithmetically inert. They run through the
+/// kernel like any other lane and their samples are never observed. The caller assigns lanes in
+/// sorted member order; there is no stored mask and no `&[bool]` argument.
+///
+/// # The drain contract lives one level up
+///
+/// This type exposes the retargets ([`Self::set_fader_db`], [`Self::set_mute`]) and knows nothing
+/// about queues. The bank's owner drains its members' per-track command queues at the top of the
+/// block and calls these, which is what keeps `TrackFaderRecordV1`'s single-consumer SPSC
+/// contract intact while the consumer moves from the per-track node to the bank.
+pub struct BuiltinFaderBankV1 {
+    backend: Backend,
+    width: BankWidth,
+    members: usize,
+    stage: FaderStageKernel,
+}
+
+impl BuiltinFaderBankV1 {
+    /// Builds a bank from one to `width.lanes()` independently prepared tracks.
+    ///
+    /// # Errors
+    ///
+    /// [`BuiltinParameterError::LaneLength`] if `backend` has no bank width, if `width` is not the
+    /// width that backend selects, or if `faders.len()` is outside `1..=width.lanes()`.
+    /// [`BuiltinParameterError::GainDomain`] if a declared `fader_db` is outside `[-144, 24]`.
+    pub fn new(
+        backend: Backend,
+        width: BankWidth,
+        faders: Vec<BuiltinParameters>,
+    ) -> Result<Self, BuiltinParameterError> {
+        if BankWidth::for_backend(backend) != Some(width)
+            || faders.is_empty()
+            || faders.len() > width.lanes() as usize
+        {
+            return Err(BuiltinParameterError::LaneLength);
+        }
+        let members = faders.len();
+        let lanes = faders
+            .into_iter()
+            .map(fader_lanes)
+            .collect::<Result<Vec<_>, _>>()?;
+        let stage = match width {
+            BankWidth::Four => FaderStageKernel::Simd4(FaderRampStage::<Simd4>::new(&lanes)),
+            BankWidth::Eight => FaderStageKernel::Simd8(FaderRampStage::<Simd8>::new(&lanes)),
+        };
+        Ok(Self {
+            backend,
+            width,
+            members,
+            stage,
+        })
+    }
+
+    #[must_use]
+    pub const fn backend(&self) -> Backend {
+        self.backend
+    }
+    #[must_use]
+    pub const fn width(&self) -> BankWidth {
+        self.width
+    }
+    /// Populated lanes; lanes at or above this index are padding lanes.
+    #[must_use]
+    pub const fn active_lanes(&self) -> usize {
+        self.members
+    }
+
+    /// Retargets one member lane's fader gain in decibels over an explicit ramp window.
+    ///
+    /// # Errors
+    ///
+    /// [`BuiltinParameterError::LaneLength`] when `lane` is not a populated member, and
+    /// [`BuiltinParameterError::GainDomain`] when `db` is outside the declared `[-144, 24]`
+    /// domain of `fader_db`.
+    pub fn set_fader_db(
+        &mut self,
+        lane: usize,
+        channels: BuiltinLaneSelector,
+        db: f32,
+        smoothing_samples: u32,
+    ) -> Result<(), BuiltinParameterError> {
+        if lane >= self.members {
+            return Err(BuiltinParameterError::LaneLength);
+        }
+        let gain = checked_fader_gain(db)?;
+        match &mut self.stage {
+            FaderStageKernel::Simd4(stage) => {
+                stage.set_fader_gain(lane, channels, gain, smoothing_samples);
+            }
+            FaderStageKernel::Simd8(stage) => {
+                stage.set_fader_gain(lane, channels, gain, smoothing_samples);
+            }
+        }
+        Ok(())
+    }
+
+    /// Sets or clears one member lane's mute, as a retarget of the same gain.
+    ///
+    /// # Errors
+    ///
+    /// [`BuiltinParameterError::LaneLength`] when `lane` is not a populated member.
+    pub fn set_mute(
+        &mut self,
+        lane: usize,
+        channels: BuiltinLaneSelector,
+        muted: bool,
+        smoothing_samples: u32,
+    ) -> Result<(), BuiltinParameterError> {
+        if lane >= self.members {
+            return Err(BuiltinParameterError::LaneLength);
+        }
+        match &mut self.stage {
+            FaderStageKernel::Simd4(stage) => stage.set_mute(lane, channels, muted, smoothing_samples),
+            FaderStageKernel::Simd8(stage) => stage.set_mute(lane, channels, muted, smoothing_samples),
+        }
+        Ok(())
+    }
+
+    /// The settled gain of one lane and channel, for tests and control-plane readback.
+    #[must_use]
+    pub fn target_gain(&self, lane: usize, channel: usize) -> f32 {
+        match &self.stage {
+            FaderStageKernel::Simd4(stage) => stage.target_gain(lane, channel % 2),
+            FaderStageKernel::Simd8(stage) => stage.target_gain(lane, channel % 2),
+        }
+    }
+
+    /// Whether one lane and channel is muted.
+    #[must_use]
+    pub const fn is_muted(&self, lane: usize, channel: usize) -> bool {
+        match &self.stage {
+            FaderStageKernel::Simd4(stage) => stage.is_muted(lane, channel % 2),
+            FaderStageKernel::Simd8(stage) => stage.is_muted(lane, channel % 2),
+        }
+    }
+
+    /// Renders one AoSoA block of `frames * width.lanes()` samples per channel.
+    ///
+    /// The shape is fixed by the prepared plan and validated there, so it is a `debug_assert`
+    /// here and never a render-path branch (master plan §4.3).
+    pub fn process(
+        &mut self,
+        left: &mut [f32],
+        right: &mut [f32],
+        frames: u32,
+    ) -> BuiltinProcessReport {
+        let frames = frames as usize;
+        debug_assert_eq!(left.len(), frames * self.width.lanes() as usize);
+        debug_assert_eq!(right.len(), frames * self.width.lanes() as usize);
+        match &mut self.stage {
+            FaderStageKernel::Simd4(stage) => stage.process(left, right, frames),
+            FaderStageKernel::Simd8(stage) => stage.process(left, right, frames),
+        }
+        BuiltinProcessReport::default()
+    }
+
+    /// Snaps every lane to its target and cancels any ramp in flight.
+    pub fn reset(&mut self) {
+        match &mut self.stage {
+            FaderStageKernel::Simd4(stage) => stage.reset(),
+            FaderStageKernel::Simd8(stage) => stage.reset(),
+        }
+    }
+}
+
+/// The dispatched matrix stage of a bank, at the width the selected backend chose.
+enum MatrixStageKernel {
+    /// Four lanes: AArch64 NEON and wasm `simd128`.
+    Simd4(MatrixStage<Simd4>),
+    /// Eight lanes: `x86-64-v3`.
+    Simd8(MatrixStage<Simd8>),
+}
+
+/// A homogeneous 2x2 pan/matrix bank over one AoSoA cohort (issue #212, the banked strip).
+///
+/// [`MatrixStage`] has been per-lane and width-generic since it was written -- a per-track matrix
+/// is that type at `f32` -- so this bank introduces no arithmetic at all. It is the same
+/// settled/ramping kernel choice, made per bank instead of per track, over the same per-lane ramp
+/// state. Padding lanes carry [`Matrix2x2::IDENTITY`] with a zero window, so they settle
+/// immediately into the stage's identity mask and pass their samples through untouched.
+///
+/// As with [`BuiltinFaderBankV1`], the queue lives one level up: this type exposes the retarget
+/// and the owner drains `TrackControlRecordV1` for each member at the top of the block.
+pub struct BuiltinMatrixBankV1 {
+    backend: Backend,
+    width: BankWidth,
+    members: usize,
+    stage: MatrixStageKernel,
+}
+
+impl BuiltinMatrixBankV1 {
+    /// Builds a bank from one to `width.lanes()` prepared `(matrix, window)` pairs.
+    ///
+    /// # Errors
+    ///
+    /// [`BuiltinParameterError::LaneLength`] if `backend` has no bank width, if `width` is not the
+    /// width that backend selects, or if `lanes.len()` is outside `1..=width.lanes()`.
+    /// [`BuiltinParameterError::MatrixCoefficient`] if a coefficient is outside `[-1, 1]`.
+    pub fn new(
+        backend: Backend,
+        width: BankWidth,
+        lanes: Vec<(Matrix2x2, u32)>,
+    ) -> Result<Self, BuiltinParameterError> {
+        if BankWidth::for_backend(backend) != Some(width)
+            || lanes.is_empty()
+            || lanes.len() > width.lanes() as usize
+        {
+            return Err(BuiltinParameterError::LaneLength);
+        }
+        let members = lanes.len();
+        let lanes = lanes
+            .into_iter()
+            .map(|(matrix, samples)| Ok((matrix.checked()?, samples)))
+            .collect::<Result<Vec<_>, BuiltinParameterError>>()?;
+        let stage = match width {
+            BankWidth::Four => MatrixStageKernel::Simd4(MatrixStage::<Simd4>::new(&lanes)),
+            BankWidth::Eight => MatrixStageKernel::Simd8(MatrixStage::<Simd8>::new(&lanes)),
+        };
+        Ok(Self {
+            backend,
+            width,
+            members,
+            stage,
+        })
+    }
+
+    #[must_use]
+    pub const fn backend(&self) -> Backend {
+        self.backend
+    }
+    #[must_use]
+    pub const fn width(&self) -> BankWidth {
+        self.width
+    }
+    /// Populated lanes; lanes at or above this index are padding lanes.
+    #[must_use]
+    pub const fn active_lanes(&self) -> usize {
+        self.members
+    }
+
+    /// Retargets one member lane's 2x2 matrix over an explicit ramp window.
+    ///
+    /// # Errors
+    ///
+    /// [`BuiltinParameterError::LaneLength`] when `lane` is not a populated member, and
+    /// [`BuiltinParameterError::MatrixCoefficient`] when a coefficient is outside `[-1, 1]` or is
+    /// not finite.
+    pub fn set_target_smoothed(
+        &mut self,
+        lane: usize,
+        target: Matrix2x2,
+        smoothing_samples: u32,
+    ) -> Result<(), BuiltinParameterError> {
+        if lane >= self.members {
+            return Err(BuiltinParameterError::LaneLength);
+        }
+        match &mut self.stage {
+            MatrixStageKernel::Simd4(stage) => {
+                stage.set_target_over(lane, target, smoothing_samples)
+            }
+            MatrixStageKernel::Simd8(stage) => {
+                stage.set_target_over(lane, target, smoothing_samples)
+            }
+        }
+    }
+
+    /// Renders one AoSoA block of `frames * width.lanes()` samples per channel.
+    pub fn process(
+        &mut self,
+        left: &mut [f32],
+        right: &mut [f32],
+        frames: u32,
+    ) -> BuiltinProcessReport {
+        let frames = frames as usize;
+        debug_assert_eq!(left.len(), frames * self.width.lanes() as usize);
+        debug_assert_eq!(right.len(), frames * self.width.lanes() as usize);
+        match &mut self.stage {
+            MatrixStageKernel::Simd4(stage) => stage.process(left, right, frames),
+            MatrixStageKernel::Simd8(stage) => stage.process(left, right, frames),
+        }
+        BuiltinProcessReport::default()
+    }
+
+    /// Snaps every lane to its target and cancels any ramp in flight.
+    pub fn reset(&mut self) {
+        match &mut self.stage {
+            MatrixStageKernel::Simd4(stage) => stage.reset(),
+            MatrixStageKernel::Simd8(stage) => stage.reset(),
+        }
+    }
+}
+
 impl FaderMuteBuiltins {
     /// Renders one already-validated block.
     ///
@@ -1502,18 +2066,9 @@ impl BuiltinLaneSelector {
 /// sample and an exact assignment of `target` on update `N` (master plan D11). There is no
 /// division per sample and no allocation anywhere on this path.
 pub struct FaderMuteRampBuiltinsV1 {
-    /// Current gain per lane, `[left, right]`.
-    current: [f32; 2],
-    /// Target gain per lane: the lane's `fader_db` gain, or `0.0` while muted.
-    target: [f32; 2],
-    /// Per-update increment, computed once per retarget.
-    step: [f32; 2],
-    /// Updates left in the current ramp.
-    remaining: [u32; 2],
-    /// The lane's fader gain, independent of mute.
-    fader_gain: [f32; 2],
-    /// The lane's mute flag.
-    muted: [bool; 2],
+    /// The one ramped-fader body, at width one. `lane` is always `0`; the two dual-mono sides are
+    /// the stage's two channels.
+    stage: FaderRampStage<f32>,
 }
 
 impl FaderMuteRampBuiltinsV1 {
@@ -1524,29 +2079,9 @@ impl FaderMuteRampBuiltinsV1 {
     /// [`BuiltinParameterError::GainDomain`] when a declared `fader_db` is outside `[-144, 24]`
     /// or maps to a coefficient that is not representable.
     pub fn new(parameters: BuiltinParameters) -> Result<Self, BuiltinParameterError> {
-        let mut ramp = Self {
-            current: [0.0; 2],
-            target: [0.0; 2],
-            step: [0.0; 2],
-            remaining: [0; 2],
-            fader_gain: [0.0; 2],
-            muted: [false; 2],
-        };
-        for (lane, params) in [parameters.left, parameters.right].into_iter().enumerate() {
-            if !params.fader_db.is_finite() || !(-144.0..=24.0).contains(&params.fader_db) {
-                return Err(BuiltinParameterError::GainDomain);
-            }
-            ramp.fader_gain[lane] = db_gain(params.fader_db)?;
-            ramp.muted[lane] = params.muted;
-            let settled = if params.muted {
-                0.0
-            } else {
-                ramp.fader_gain[lane]
-            };
-            ramp.current[lane] = settled;
-            ramp.target[lane] = settled;
-        }
-        Ok(ramp)
+        Ok(Self {
+            stage: FaderRampStage::<f32>::new(&[fader_lanes(parameters)?]),
+        })
     }
 
     /// Retarget one or both lanes' fader gain in decibels over an explicit ramp window.
@@ -1564,109 +2099,63 @@ impl FaderMuteRampBuiltinsV1 {
         db: f32,
         smoothing_samples: u32,
     ) -> Result<(), BuiltinParameterError> {
-        if !db.is_finite() || !(-144.0..=24.0).contains(&db) {
-            return Err(BuiltinParameterError::GainDomain);
-        }
-        let gain = db_gain(db)?;
-        for lane in 0..2 {
-            if !lanes.covers(lane) {
-                continue;
-            }
-            self.fader_gain[lane] = gain;
-            let target = if self.muted[lane] { 0.0 } else { gain };
-            self.retarget(lane, target, smoothing_samples);
-        }
+        let gain = checked_fader_gain(db)?;
+        self.stage.set_fader_gain(0, lanes, gain, smoothing_samples);
         Ok(())
     }
 
     /// Set or clear one or both lanes' mute, as a retarget of the same gain.
     pub fn set_mute(&mut self, lanes: BuiltinLaneSelector, muted: bool, smoothing_samples: u32) {
-        for lane in 0..2 {
-            if !lanes.covers(lane) {
-                continue;
-            }
-            self.muted[lane] = muted;
-            let target = if muted { 0.0 } else { self.fader_gain[lane] };
-            self.retarget(lane, target, smoothing_samples);
-        }
+        self.stage.set_mute(0, lanes, muted, smoothing_samples);
     }
 
     /// The settled gain of one lane, for tests and control-plane readback.
     #[must_use]
-    pub const fn target_gain(&self, lane: usize) -> f32 {
-        self.target[lane % 2]
+    pub fn target_gain(&self, lane: usize) -> f32 {
+        self.stage.target_gain(0, lane % 2)
     }
 
     /// Whether one lane is muted.
     #[must_use]
     pub const fn is_muted(&self, lane: usize) -> bool {
-        self.muted[lane % 2]
-    }
-
-    fn retarget(&mut self, lane: usize, target: f32, smoothing_samples: u32) {
-        self.target[lane] = target;
-        self.remaining[lane] = smoothing_samples;
-        if smoothing_samples == 0 {
-            self.current[lane] = target;
-            self.step[lane] = 0.0;
-            return;
-        }
-        // D11: one division, at the moment the target changes.
-        self.step[lane] = (target - self.current[lane]) / smoothing_samples as f32;
+        self.stage.is_muted(0, lane % 2)
     }
 
     /// Renders one already-validated block.
     pub fn process(&mut self, block: DualMonoBlock<'_>) -> BuiltinProcessReport {
         let frames = block.left.len();
-        for (lane, plane) in [block.left, block.right].into_iter().enumerate() {
-            self.process_lane(lane, plane, frames);
-        }
+        self.stage.process(block.left, block.right, frames);
         BuiltinProcessReport::default()
-    }
-
-    fn process_lane(&mut self, lane: usize, plane: &mut [f32], frames: usize) {
-        let ramp_frames = (self.remaining[lane] as usize).min(frames);
-        for (index, sample) in plane[..ramp_frames].iter_mut().enumerate() {
-            self.current[lane] = if index + 1 == self.remaining[lane] as usize {
-                // The exact assignment of the target on update N (D11).
-                self.target[lane]
-            } else {
-                self.current[lane] + self.step[lane]
-            };
-            *sample *= self.current[lane];
-        }
-        self.remaining[lane] = self.remaining[lane].saturating_sub(ramp_frames as u32);
-        if self.remaining[lane] == 0 {
-            self.current[lane] = self.target[lane];
-            self.step[lane] = 0.0;
-            // A settled muted lane is *cleared*, never multiplied, so its bits are exactly the
-            // `+0.0` the prepared `gain_mute_block` produces for a mute declared in the session --
-            // for a negative input too, where a multiply by `+0.0` would keep the sign.
-            //
-            // The clear starts one sample early on purpose. The final ramp update assigns the
-            // target exactly (D11), so that sample was multiplied by exactly `+0.0` and already
-            // has magnitude zero; including it is what makes "a completed mute is exactly `+0.0`"
-            // true of every sample rather than all but one.
-            if self.muted[lane] {
-                plane[ramp_frames.saturating_sub(1)..frames].fill(0.0);
-                return;
-            }
-        }
-        if ramp_frames == frames {
-            return;
-        }
-        let gain = self.current[lane];
-        for sample in plane[ramp_frames..frames].iter_mut() {
-            *sample *= gain;
-        }
     }
 
     /// Snaps both lanes to their targets and cancels any ramp in flight.
     pub fn reset(&mut self) {
-        self.current = self.target;
-        self.step = [0.0; 2];
-        self.remaining = [0; 2];
+        self.stage.reset();
     }
+}
+
+/// Validates one live `fader_db` against the declared domain and converts it to a coefficient.
+///
+/// The domain is `fader_db`'s own, so a live move is admitted on exactly the terms a declared one
+/// is; sharing this with preparation is what keeps the two from drifting.
+fn checked_fader_gain(db: f32) -> Result<f32, BuiltinParameterError> {
+    if !db.is_finite() || !(-144.0..=24.0).contains(&db) {
+        return Err(BuiltinParameterError::GainDomain);
+    }
+    db_gain(db)
+}
+
+/// The prepared fader pair of one track, validated on the same terms as a live move.
+fn fader_lanes(
+    parameters: BuiltinParameters,
+) -> Result<(FaderLane, FaderLane), BuiltinParameterError> {
+    let lane = |params: ChannelParameters| -> Result<FaderLane, BuiltinParameterError> {
+        Ok(FaderLane {
+            gain: checked_fader_gain(params.fader_db)?,
+            muted: params.muted,
+        })
+    };
+    Ok((lane(parameters.left)?, lane(parameters.right)?))
 }
 
 impl MatrixBuiltins {
