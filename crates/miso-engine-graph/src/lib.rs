@@ -574,6 +574,12 @@ pub trait GraphPreparedBuiltinBankProcessor: Send {
     ///
     /// There is no right plane here on purpose: a collapsed chain gathers one, and the seam writes
     /// the other after this stage has run.
+    ///
+    /// Whatever this call publishes besides the plane -- per-channel recovery counts, sanitised
+    /// totals, lifetime counters -- must be what a dual block would have published, not the half
+    /// this call computed: the right plane the seam is about to write carries exactly the left
+    /// plane's samples. `miso_engine_rack::BankStage::process_mono` states the rule and
+    /// `miso-engine-builtins/tests/mono_collapse.rs` is the gate on the one bank that has any.
     fn process_mono(
         &mut self,
         left: &mut [f32],
@@ -586,6 +592,14 @@ pub trait GraphPreparedBuiltinBankProcessor: Send {
 
     /// Copy every lane's left-channel state onto the right channel (the disengage boundary).
     fn desymmetrize(&mut self) {}
+
+    /// Whether this bank can prove, right now, that its two channels' state is bit-equal.
+    ///
+    /// The mono collapse's way back (M3). Same contract, same declining default and same cost rule
+    /// as `miso_engine_effect_contract::PreparedNativeEffectBank::channels_agree`.
+    fn channels_agree(&self) -> bool {
+        false
+    }
 }
 impl PreparedGraphPlan {
     /// The input-side track delays this plan lowers, in normalized track order (#210 phase 2).
@@ -1422,6 +1436,10 @@ impl PreparedPlanExecutor for GraphExecutor {
 
     fn bank_collapse_counters(&self) -> [u64; 2] {
         self.runtime.collapse_counters()
+    }
+
+    fn bank_collapse_transitions(&self) -> [u64; 3] {
+        self.runtime.collapse_transitions()
     }
 
     fn force_mono_collapse_off(&mut self, forced: bool) {

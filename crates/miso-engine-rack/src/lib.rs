@@ -392,6 +392,29 @@ pub trait BankStage: Send {
     /// seam, before the first seam-side slot and before the scatter.
     ///
     /// Never called unless [`supports_mono_collapse`](Self::supports_mono_collapse) is `true`.
+    ///
+    /// # What a collapsed block owes besides the plane
+    ///
+    /// The plane is the visible half and the gates that cover it are digests. Everything a block
+    /// publishes *other* than samples is the half no digest can see, and a collapsed body owes the
+    /// dual body's answer there too:
+    ///
+    /// * **Observations.** A resident tap reads bank state, and a collapsed bank's right-channel
+    ///   state is frozen at the moment the collapse engaged. The stage substitutes the left
+    ///   channel's reading for the right channel's after the bank runs -- see
+    ///   [`ConsoleEffectBankStage::process_mono`] -- because the right channel of a collapsed track
+    ///   *is* its left channel at the tap exactly as at the fader.
+    /// * **Reports and counters.** Per-channel accounting is duplicated from the left, and a total
+    ///   that sums both channels is twice the left count. See
+    ///   [`PreparedNativeEffectBank::process_bank_mono`], which states the rule for the effects,
+    ///   and `miso-engine-builtins/tests/mono_collapse.rs`, which is the worked gate on it.
+    /// * **Latency lines.** Anything a stage stages for a *later* block -- a dry shunt's delay line
+    ///   is the one in this tree -- must be fed the left plane rather than the ungathered right
+    ///   scratch, because the seam is downstream of the line and cannot repair it.
+    ///   `ConsoleEffectBankStage::process_inner` carries that argument in full.
+    ///
+    /// The common shape of all three is that the collapse is invisible to samples and visible to
+    /// state, so a stage whose only mono gate is a digest has not been gated.
     fn process_mono(&mut self, block: BankBlock<'_>) -> Result<(), RenderError> {
         self.process(block)
     }
@@ -401,6 +424,19 @@ pub trait BankStage: Send {
     /// The collapse's disengage boundary. See
     /// [`PreparedNativeEffectBank::desymmetrize_channels`] for what the copy has to cover and why.
     fn desymmetrize(&mut self) {}
+
+    /// Whether this stage can **prove**, right now, that its two channels' state is bit-equal.
+    ///
+    /// The re-engage rule's way back for a chain whose channels have already been driven apart.
+    /// See [`PreparedNativeEffectBank::channels_agree`] for the contract, the cost rule and what
+    /// each shipped effect proves it with; and [`BankChain::run`] for the one place it is asked.
+    ///
+    /// The default is `false`, for the same reason every default on this surface is the declining
+    /// one: a stage that cannot prove equality must not be believed to have it, and a wrong `true`
+    /// here re-engages a collapse onto a right channel that is not the left one.
+    fn channels_agree(&self) -> bool {
+        false
+    }
 }
 
 /// Adapter from the effect contract's prepared homogeneous bank to a chain stage.
@@ -476,6 +512,10 @@ impl BankStage for EffectBankStage {
 
     fn desymmetrize(&mut self) {
         self.processor.desymmetrize_channels();
+    }
+
+    fn channels_agree(&self) -> bool {
+        self.processor.channels_agree()
     }
 
     fn process_mono(&mut self, block: BankBlock<'_>) -> Result<(), RenderError> {
@@ -776,6 +816,10 @@ impl BankStage for ConsoleEffectBankStage {
 
     fn desymmetrize(&mut self) {
         self.processor.desymmetrize_channels();
+    }
+
+    fn channels_agree(&self) -> bool {
+        self.processor.channels_agree()
     }
 
     fn begin_block(&mut self, first_sample: u64) -> Result<(), RenderError> {
@@ -1111,6 +1155,35 @@ pub trait BankMembers {
 /// Leaving the collapsed mode costs one whole-state copy per prefix slot
 /// ([`BankStage::desymmetrize`]) on the block that stops, which is what makes the first dual block
 /// after it bit-identical to a run that never collapsed.
+///
+/// # Coming back (mono-collapse M3)
+///
+/// Engaging is sound only when the two channels' state already agrees, and the witness does not
+/// say that. The witness is a statement about a *block's* inputs -- one source channel, bit-equal
+/// designed words, no one-channel write, no divergent restore -- and a run whose witness has been
+/// false for a while is a run whose two channels have been evolving apart under different words.
+/// Re-equal words do not put the state back. Engaging on the witness alone would therefore be
+/// engaging on the wrong premise, and it is the reason M2 shipped the disengage as a one-way
+/// latch: a chain that stopped stayed stopped, because declining is always safe.
+///
+/// What the chain carries instead is [`collapse_channels_agree`](Self::collapse_channels_agree),
+/// an invariant maintained at every block boundary and read by the dispatch alongside the witness:
+///
+/// * it is **true at bind**, where every prefix stage's two channels hold the state preparation
+///   built them with, and every difference between them is a designed word the witness sees;
+/// * it is **re-established by the disengage copy**, which is not an approximation of the
+///   counterfactual dual run's right state but literally that state
+///   ([`disengage_collapse`](Self::disengage_collapse));
+/// * it is **preserved by any dual block whose witness preserves agreement**
+///   ([`ChannelSymmetryWitnessV1::AGREEING`]) -- equal inputs over equal state with equal words
+///   leave equal state, which is the same induction the engage direction has always rested on;
+/// * it is **cleared by any dual block that does not**, and after that only a proof brings it
+///   back ([`BankStage::channels_agree`]).
+///
+/// So the reachable cycle -- collapse, disengage on a forced-off arm or a lifted-then-restored
+/// bypass, re-engage when the switch or the term comes back -- is a cycle the chain takes, and the
+/// one transition M2 could not justify is now justified by an invariant rather than by an argument
+/// about why the witness went false. Counted in [`collapse_transitions`](Self::collapse_transitions).
 pub struct BankChain {
     scratch: AoSoaScratch,
     lanes: usize,
@@ -1154,16 +1227,17 @@ pub struct BankChain {
     collapse_forced_off: bool,
     /// The chain rendered its previous block collapsed.
     collapsed: bool,
-    /// A disengage has happened, and this chain does not collapse again.
+    /// The two channels' state agrees at the boundary of the next **dual** block.
     ///
-    /// The engage direction is sound at any block whose witness holds -- the two channels' states
-    /// agree by the induction the witness maintains -- and the disengage direction is made sound by
-    /// the state copy. Re-engaging after a disengage is the one transition whose premise this
-    /// milestone does not own: it would have to argue that the *dual* blocks in between left the
-    /// two channels agreeing again, which is a statement about the reason the witness went false
-    /// and not about the witness itself. It is M3's, and until then a chain that has disengaged
-    /// once stays dual: declining is always safe.
-    collapse_retired: bool,
+    /// The premise the engage direction needs and the witness does not supply. See the type's
+    /// `Coming back` section for the four clauses that maintain it; the awkward "next *dual*
+    /// block" in the sentence above is the one wrinkle and it is deliberate. A collapsed block
+    /// freezes the right channel, so between the block that engages and the block that stops the
+    /// two channels genuinely disagree -- but nothing dual reads them in that window, and
+    /// [`disengage_collapse`](Self::disengage_collapse) puts them back before anything does. The
+    /// flag therefore stays `true` across a collapsed run, which is what lets block `N + 1` collapse
+    /// after block `N` did.
+    collapse_channels_agree: bool,
     /// The **structural** half of every active lane's witness, joined at bind.
     ///
     /// `false` until [`BankChain::arm_mono_collapse`] says otherwise, and that default is the
@@ -1180,6 +1254,10 @@ pub struct BankChain {
     collapse_source: bool,
     /// Blocks this chain rendered collapsed. Evidence only, read after render is disarmed.
     collapses: u64,
+    /// `[disengages, re-engages, agreement proofs]`. Evidence only; see
+    /// [`collapse_transitions`](Self::collapse_transitions) for what each one counts and why a
+    /// block count alone cannot say it.
+    transitions: [u64; 3],
 }
 
 impl BankChain {
@@ -1231,9 +1309,13 @@ impl BankChain {
             collapse_prefix,
             collapse_forced_off: false,
             collapsed: false,
-            collapse_retired: false,
+            // True at bind: nothing has rendered, so every prefix stage's two channels hold the
+            // state preparation gave them, and any way in which they differ is a designed word the
+            // witness compares and declines on.
+            collapse_channels_agree: true,
             collapse_source: false,
             collapses: 0,
+            transitions: [0; 3],
         })
     }
 
@@ -1380,6 +1462,22 @@ impl BankChain {
             .all(|lane| self.lane_symmetry(lane).eligible())
     }
 
+    /// Whether a **dual** block rendered under this cohort's witness leaves every active lane's two
+    /// channels agreeing (mono-collapse M3).
+    ///
+    /// Strictly weaker than [`all_lanes_symmetric`](Self::all_lanes_symmetric), by exactly the
+    /// `UNBYPASSED` term: see [`ChannelSymmetryWitnessV1::AGREEING`] for why a bypass window is the
+    /// one way to lose the witness without moving the two channels apart.
+    ///
+    /// Short-circuits, like its sibling, and [`run`](Self::run) reaches it only when the answer can
+    /// change something -- see the guard chain there, which is what keeps this off the steady-state
+    /// path of every session that is not in the middle of a bypass.
+    fn all_lanes_preserve_agreement(&self) -> bool {
+        (0..self.lanes)
+            .filter(|lane| self.active[*lane])
+            .all(|lane| self.lane_symmetry(lane).preserves_channel_agreement())
+    }
+
     /// `[eligible active lanes, active lanes]` for this chain. Evidence and gates only.
     #[must_use]
     pub fn symmetry_counters(&self) -> [u64; 2] {
@@ -1469,15 +1567,71 @@ impl BankChain {
         // A command lands at a block boundary, so the eligibility this reads is the eligibility
         // that holds for every sample of this block -- which is what makes a per-block mode legal
         // at all.
-        let collapse = self.collapse_prefix > 0
-            && self.collapse_source
-            && !self.collapse_forced_off
-            && !self.collapse_retired
-            && self.all_lanes_symmetric();
+        //
+        // M3 adds one term to the M2 dispatch and no work to it: `collapse_channels_agree` is the
+        // premise the witness does not supply, maintained at the bottom of this section.
+        let witness = self.all_lanes_symmetric();
+        let armed = self.collapse_prefix > 0 && self.collapse_source && !self.collapse_forced_off;
+        // The way back for a chain the invariant has declined. Asked at most once per block per
+        // prefix slot, and only inside a *recovery window* -- the chain is otherwise ready to
+        // collapse and this is the only thing refusing it -- so a session that never disagrees
+        // never calls it at all. See `BankStage::channels_agree`.
+        if armed && witness && !self.collapse_channels_agree {
+            let proven = self.slots[..self.collapse_prefix]
+                .iter()
+                .all(|slot| slot.stage.channels_agree());
+            if proven {
+                self.collapse_channels_agree = true;
+                self.transitions[2] = self.transitions[2].saturating_add(1);
+            }
+        }
+        let collapse = armed && witness && self.collapse_channels_agree;
         if self.collapsed && !collapse {
             self.disengage_collapse();
+        } else if collapse && !self.collapsed && self.transitions[0] > 0 {
+            // A re-engage, and only that: the first engage of a chain that has never disengaged is
+            // not one, and neither is a second collapsed block in a row.
+            self.transitions[1] = self.transitions[1].saturating_add(1);
         }
         self.collapsed = collapse;
+        // The invariant, maintained for the block this dispatch just decided, and guarded so that
+        // it costs nothing in the steady state of any session -- which is what lets it be an
+        // unconditional rule rather than a mode.
+        //
+        // The four guards, in the order they are cheapest to refuse:
+        //
+        // * a **collapsed** block is skipped. It does freeze the right channel, but the disengage
+        //   copy repairs that before any dual block reads it, which is exactly what the flag's
+        //   "at the next dual block's boundary" wording says;
+        // * a chain that **can never collapse** is skipped: nothing reads the flag, so nothing is
+        //   owed. This is every stereo-source row and every chain with no collapsible prefix, and
+        //   it is why the M3 dispatch adds no work at all to the sessions M2 left alone;
+        // * a chain that has **already lost** agreement is skipped: only a proof brings it back,
+        //   and the proof is above;
+        // * a block whose witness was **eligible** is skipped, because eligible implies preserving
+        //   -- `AGREEING` is a subset of `ALL` -- so the second walk would be asking a question the
+        //   first already answered. That is what leaves the forced-off arm, which is eligible on
+        //   every block of its window, paying one already-computed `bool`.
+        //
+        // What is left is the case the walk is for: a collapsible chain rendering dual under a
+        // witness that is not eligible, with agreement still to lose. That is a bypass window, or
+        // it is the episode after which the chain must not come back.
+        //
+        // `SOURCE` is deliberately not a clause here, and it is the one term that would have to be
+        // argued about. It is decided at bind from the compiled session and never moves within a
+        // plan, so it cannot be an *episode*: either it holds for every block, and the two planes
+        // carry the same samples on all of them, or it does not, and `can_collapse` is false and
+        // this chain never collapses at all. A term that cannot change cannot break an invariant
+        // whose whole job is to survive change. `arm_mono_collapse` carries the obligation that
+        // makes that reading true.
+        if !collapse
+            && self.can_collapse()
+            && self.collapse_channels_agree
+            && !witness
+            && !self.all_lanes_preserve_agreement()
+        {
+            self.collapse_channels_agree = false;
+        }
         if collapse {
             self.collapses = self.collapses.saturating_add(1);
             self.gather_mono(members, frames);
@@ -1554,7 +1708,26 @@ impl BankChain {
         for slot in &mut self.slots[..self.collapse_prefix] {
             slot.stage.desymmetrize();
         }
-        self.collapse_retired = true;
+        self.transitions[0] = self.transitions[0].saturating_add(1);
+        // The copy **is** the proof, not evidence for one: every prefix stage's right channel now
+        // holds its left channel's whole state, so the two agree by construction at this boundary.
+        // M2 set a one-way latch here instead, because it had no invariant to hand this fact to.
+        // The block that takes this branch still renders *dual*, and the maintenance step in `run`
+        // will clear the flag again if that block's witness does not preserve agreement -- which is
+        // precisely the disengage-for-cause case, and precisely the case that must not re-engage.
+        //
+        // The assignment is redundant today and is kept anyway, which is worth being explicit
+        // about rather than quietly relying on: reaching here requires `self.collapsed`, and a
+        // chain only collapses while the flag holds, so the flag is already `true`. What the line
+        // states is the *reason* it stays true across a boundary where the right channel was
+        // frozen, and it is the line a future disengage path -- one reached from somewhere other
+        // than a collapsed block -- would otherwise have to remember to add. The debug assertion
+        // is what keeps the redundancy honest: if it ever stops holding, this becomes mechanism.
+        debug_assert!(
+            self.collapse_channels_agree,
+            "a chain only collapses while its channels agree, so a disengage cannot find them apart"
+        );
+        self.collapse_channels_agree = true;
     }
 
     /// Planar -> AoSoA for the **left plane only**: the collapsed cohort's gather.
@@ -1610,6 +1783,17 @@ impl BankChain {
     /// `structural` is "every active lane of this chain renders a track whose two channels read
     /// one source channel". Passing `false`, or never calling this at all, makes the chain decline
     /// forever. See [`BankChain::collapse_source`] for why the chain cannot derive this itself.
+    ///
+    /// # The obligation, which M3's invariant rests on
+    ///
+    /// Bind-time: off the render thread, once, before this chain renders its first block.
+    /// `PreparedRenderPlan::arm_mono_collapse` enforces the render-scope half with an assertion.
+    /// The block-order half is a caller obligation because the chain cannot check it, and it is
+    /// what lets [`run`](Self::run) leave `SOURCE` out of the agreement invariant: a chain armed
+    /// before it renders has one answer to "do the two planes carry the same samples" for its whole
+    /// life, so that term cannot be the cause of a *transient* divergence. Arming a chain that has
+    /// already rendered blocks fed by two different source channels would break that reading, and
+    /// nothing in the engine does it -- the join runs once, from the compiled session, at bind.
     pub const fn arm_mono_collapse(&mut self, structural: bool) {
         self.collapse_source = structural;
     }
@@ -1647,10 +1831,27 @@ impl BankChain {
         self.collapsed
     }
 
-    /// Whether this chain has disengaged and will not collapse again in this plan.
+    /// Whether the two channels' state agrees at the next dual block's boundary.
+    ///
+    /// The re-engage rule's premise, and `false` is the retirement M2 latched: a chain whose
+    /// channels have been driven apart does not collapse again until something proves they agree.
+    /// Evidence only.
     #[must_use]
-    pub const fn collapse_is_retired(&self) -> bool {
-        self.collapse_retired
+    pub const fn collapse_channels_agree(&self) -> bool {
+        self.collapse_channels_agree
+    }
+
+    /// `[disengages, re-engages, agreement proofs]` for this chain. Evidence only.
+    ///
+    /// Three numbers because the cycle has three edges and a block count sees none of them: a
+    /// chain that collapsed for every block and one that collapsed, stopped and started again can
+    /// report the same [`collapses`](Self::collapses), and the second is the transition the
+    /// milestone is about. A **re-engage** is an engage by a chain that has disengaged at least
+    /// once; an **agreement proof** is a recovery through [`BankStage::channels_agree`], which is
+    /// the only way the invariant comes back other than the disengage copy that sets it.
+    #[must_use]
+    pub const fn collapse_transitions(&self) -> [u64; 3] {
+        self.transitions
     }
 
     /// Adds every armed lane's resident result into its auxiliary destination.
@@ -3231,7 +3432,7 @@ mod tests {
 
     /// The disengage copy runs once, on the block that stops collapsing, and only for the prefix.
     #[test]
-    fn disengaging_copies_the_prefixs_state_once_and_retires_the_chain() {
+    fn disengaging_copies_the_prefixs_state_once() {
         let mut chain = mono_chain(
             4,
             8,
@@ -3248,14 +3449,15 @@ mod tests {
         assert!(chain.is_collapsed());
         chain.force_mono_collapse_off(true);
         chain.run(&mut planes, 8, 0).expect("render");
-        assert!(!chain.is_collapsed() && chain.collapse_is_retired());
-        // Re-arming does not re-engage: that transition is M3's.
-        chain.force_mono_collapse_off(false);
-        chain.run(&mut planes, 8, 0).expect("render");
+        assert!(!chain.is_collapsed());
         assert_eq!(
-            chain.collapses(),
-            1,
-            "one collapsed block, and no re-engage"
+            chain.collapse_transitions(),
+            [1, 0, 0],
+            "one disengage, no re-engage yet and no proof: the copy is the premise, not a proof"
+        );
+        assert!(
+            chain.collapse_channels_agree(),
+            "the disengage copy re-establishes agreement; a witness that still holds keeps it"
         );
     }
 }

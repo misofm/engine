@@ -130,3 +130,18 @@ a gate on the *default*, not on the join, and the two are separate claims. Both 
 crate whose test carries each.
 | M2-G2 | the disengage copy is skipped (`slot.stage.desymmetrize()` becomes a no-op) | `rack/src/lib.rs` `disengage_collapse` | `a_run_that_stops_collapsing_renders_what_a_never_collapsed_run_renders` | RED |
 | M2-G3 | the drain is moved back after the dispatch | `rack/src/lib.rs` `run` | `a_live_one_channel_retarget_disengages_on_the_block_it_lands` | RED — see the rack's M2-5 row for what the ordering protects |
+
+## Mono-collapse M3 — the transition evidence
+
+Same driver: `cargo test -p miso-engine-console-workload --test chain_shape`, one mutation at a
+time, tree restored between rows.
+
+M3's graph-layer contribution is one accessor, and the reason it needs a row is the reason the M2
+block counters needed theirs. The collapse renders the bits a dual run renders, so nothing a digest
+can see distinguishes a chain that collapsed for the whole session from one that collapsed, retired
+and came back. `collapse_transitions` is the only statement of the difference, and an accessor that
+reported zeros would leave every re-engage assertion in the tree passing vacuously.
+
+| # | mutation | file | test | result |
+|---|---|---|---|---|
+| M3-G1 | `RuntimeUnit::collapse_transitions` returns `[0; 3]` for a banked unit, so the cycle is invisible above the chain | `graph/src/runtime.rs` | `chain_shape::the_switch_coming_back_re_engages_and_renders_the_never_collapsed_bits` | RED — `every cohort disengaged once and re-engaged once`. `no_workload_transitions_unless_something_moves_the_switch` stays green under it, which is the shape that names the cause: an all-zero accessor is indistinguishable from an undisturbed session and only a session that *did* transition can tell them apart |

@@ -952,34 +952,105 @@ fn a_run_that_stops_collapsing_renders_what_a_never_collapsed_run_renders() {
     );
 }
 
-/// A chain that has disengaged does not collapse again in this plan.
+/// The switch coming back **re-engages**, and the whole cycle renders the never-collapsed bits.
 ///
-/// M2 owns the engage direction and the disengage direction; **re-engage** is M3's, and this states
-/// that as a checkable property rather than as a note. Re-engaging would have to argue that the
-/// dual blocks in between left the two channels agreeing again, which is a statement about *why*
-/// the witness went false and not about the witness itself -- so until that argument exists, a
-/// chain that has stopped stays stopped. Declining is always safe.
+/// # What this replaced
+///
+/// M2 shipped the disengage as a one-way latch and this test asserted it: four collapsed blocks,
+/// the switch off, the switch on again, and still four. The latch was not timidity -- re-engaging
+/// on a re-equal witness is genuinely unsound, and
+/// `re_equal_designed_words_after_a_one_channel_retarget_never_re_engage` is the session that
+/// proves it -- it was that M2 had no way to tell that case from this one.
+///
+/// This is the case the latch was wrong about. The force-off switch never touches a designed word,
+/// so the witness holds on every block of the forced-off window, and the disengage copy that opened
+/// the window left every prefix stage's two channels holding one state. Equal inputs over equal
+/// state with equal words leave equal state, block after block, so when the switch comes back the
+/// premise the engage direction needs is exactly as true as it was the first time.
+/// `BankChain::collapse_channels_agree` is that premise carried explicitly, and this is the cycle
+/// it licenses.
+///
+/// # Why the digest is here and not only the counters
+///
+/// A counter says the chain re-engaged. It cannot say the re-engaged blocks were right, and "the
+/// collapse moves no bit" is the only claim that matters -- so the arm that stops and starts is
+/// compared against one that never collapsed at all, exactly as the disengage oracle above is. The
+/// re-engaged window is the half of the cycle no M2 test rendered.
+///
+/// # Red mutation
+///
+/// Delete `self.collapse_channels_agree = true;` from `BankChain::disengage_collapse` and the
+/// chain never comes back: the block count falls to `4 * cohorts` and the transition triple loses
+/// its re-engage. Delete the `!collapse` guard around the invariant's clear and every collapsed
+/// block retires the chain after it.
 #[test]
-fn a_disengaged_chain_stays_dual_even_when_the_switch_comes_back() {
+fn the_switch_coming_back_re_engages_and_renders_the_never_collapsed_bits() {
     let mut runtime =
         SessionRuntime::build(Workload::SixtyFourTrackConsoleMono, PlanConfig::BASELINE);
+    let mut never =
+        SessionRuntime::build(Workload::SixtyFourTrackConsoleMono, PlanConfig::BASELINE);
+    never.force_mono_collapse_off(true);
     let cohorts_in_plan = cohorts(runtime.bank_shape()[1]);
-    for block in 0..4 {
+
+    let mut cycled = Sha256Sink::new();
+    let mut dual = Sha256Sink::new();
+    for block in 0..12 {
+        if block == 4 {
+            runtime.force_mono_collapse_off(true);
+        }
+        if block == 8 {
+            runtime.force_mono_collapse_off(false);
+        }
         runtime.render(block).expect("console render");
+        never.render(block).expect("console render");
+        runtime.hash_output(&mut cycled);
+        never.hash_output(&mut dual);
     }
-    runtime.force_mono_collapse_off(true);
-    for block in 4..8 {
-        runtime.render(block).expect("console render");
-    }
-    runtime.force_mono_collapse_off(false);
-    for block in 8..12 {
-        runtime.render(block).expect("console render");
-    }
+
     assert_eq!(
         runtime.bank_collapse_counters(),
-        [4 * cohorts_in_plan, cohorts_in_plan],
-        "only the four blocks before the disengage collapsed"
+        [8 * cohorts_in_plan, cohorts_in_plan],
+        "four collapsed blocks either side of the forced-off window"
     );
+    assert_eq!(
+        runtime.bank_collapse_transitions(),
+        [cohorts_in_plan, cohorts_in_plan, 0],
+        "every cohort disengaged once and re-engaged once, and none of them needed a proof: the \
+         disengage copy is what re-established the premise"
+    );
+    assert_eq!(
+        never.bank_collapse_transitions(),
+        [0, 0, 0],
+        "a chain that never collapsed has no transitions to report"
+    );
+    assert_eq!(
+        cycled.finish_hex(),
+        dual.finish_hex(),
+        "a session that collapsed, stopped and started again must be bit-identical to one that \
+         never collapsed"
+    );
+}
+
+/// The mono row never disengages, so it never re-engages: the cycle is evidence, not noise.
+///
+/// The counter companion to `the_collapse_fires_on_every_mono_cohort_and_no_other`. A transition
+/// triple that drifted off zero on a row whose witness holds for every block of every cohort would
+/// mean the dispatch was oscillating -- collapsing, retiring and recovering -- while rendering the
+/// same bits and reporting the same block count. Nothing else in the tree would see it.
+#[test]
+fn no_workload_transitions_unless_something_moves_the_switch() {
+    for workload in WORKLOADS {
+        let mut runtime = SessionRuntime::build(workload, PlanConfig::BASELINE);
+        for block in 0..BLOCKS {
+            runtime.render(block).expect("console render");
+        }
+        assert_eq!(
+            runtime.bank_collapse_transitions(),
+            [0, 0, 0],
+            "{}: no chain may disengage, re-engage or need a proof on an undisturbed session",
+            workload.kind()
+        );
+    }
 }
 
 /// A live one-channel retarget disengages the collapse on the block it lands, not the block after.
@@ -1099,6 +1170,199 @@ fn a_live_one_channel_retarget_disengages_on_the_block_it_lands() {
         collapsing_digest.finish_hex(),
         never_digest.finish_hex(),
         "a session that disengaged on a live retarget must render what a never-collapsed one does"
+    );
+}
+
+/// Lifting a bypass **re-engages** the collapse, on the real strip, and renders the dual bits.
+///
+/// # The one witness term that comes back, and why it may
+///
+/// `UNBYPASSED` is the only term of the five that a plan can lose and get back: `admit` restores it
+/// on `Bypass(false)` and has no restoring arm for any other. It is also the only one whose absence
+/// does not separate the two channels. A bypassed lane still runs the bank -- the shunt captures
+/// the dry block before the bank touches it and restores it into the bypassed lanes afterwards --
+/// so both channels advance through the same kernel on the same samples and come out holding the
+/// same state, which is exactly why `ChannelSymmetryWitnessV1::AGREEING` leaves the term out of the
+/// agreement invariant.
+///
+/// So this is the cycle M2 could not take and M3 must: a bypass window on a real strip, and a
+/// re-engage on the block the lift drains. It is the console-level counterpart of
+/// `the_switch_coming_back_re_engages_...` and it is the stronger of the two, because the forced-off
+/// switch is a measurement device and this is a record a session actually sends.
+///
+/// # Red mutation
+///
+/// Fold `UNBYPASSED` back into `ChannelSymmetryWitnessV1::AGREEING` -- make it `ALL` -- and the
+/// bypassed cohort is retired for the rest of the plan: the block count falls by the whole tail
+/// rather than by the four bypassed blocks, and the transition triple loses its re-engage. The
+/// digest stays green, which is the point of asserting the count as well.
+#[test]
+fn a_lifted_bypass_re_engages_the_collapse_and_renders_the_dual_bits() {
+    const CONTROL: PlanConfig = PlanConfig {
+        meters: false,
+        control: true,
+        observation: ObservationArm::Absent,
+    };
+    const SWITCH: u64 = BLOCKS / 2;
+    const BYPASSED: u64 = 4;
+
+    for effect in [
+        "miso.true-peak-limiter",
+        "miso.compressor",
+        "miso.parametric-eq",
+    ] {
+        let mut collapsing = SessionRuntime::build(Workload::SixtyFourTrackConsoleMono, CONTROL);
+        let mut never = SessionRuntime::build(Workload::SixtyFourTrackConsoleMono, CONTROL);
+        never.force_mono_collapse_off(true);
+
+        let channel = collapsing
+            .first_track_control_channel(effect)
+            .unwrap_or_else(|| panic!("the mono fixture carries a {effect} on every track"));
+
+        let mut diverged: Vec<u64> = Vec::new();
+        for block in 0..BLOCKS {
+            for runtime in [&mut collapsing, &mut never] {
+                if block == SWITCH {
+                    assert!(runtime.push_bypass(channel, true));
+                }
+                if block == SWITCH + BYPASSED {
+                    assert!(runtime.push_bypass(channel, false));
+                }
+            }
+            collapsing.render(block).expect("console render");
+            never.render(block).expect("console render");
+            let mut collapsing_digest = Sha256Sink::new();
+            let mut never_digest = Sha256Sink::new();
+            collapsing.hash_output(&mut collapsing_digest);
+            never.hash_output(&mut never_digest);
+            if collapsing_digest.finish_hex() != never_digest.finish_hex() {
+                diverged.push(block);
+            }
+        }
+
+        let cohorts_in_plan = cohorts(collapsing.bank_shape()[1]);
+        assert_eq!(
+            collapsing.bank_collapse_counters(),
+            [BLOCKS * cohorts_in_plan - BYPASSED, cohorts_in_plan],
+            "{effect}: exactly the bypassed cohort's bypassed blocks may render dual"
+        );
+        assert_eq!(
+            collapsing.bank_collapse_transitions(),
+            [1, 1, 0],
+            "{effect}: the bypassed cohort disengaged once and re-engaged once, and needed no \
+             agreement proof -- a bypass window never moved its channels apart"
+        );
+        assert!(
+            diverged.is_empty(),
+            "{effect}: a lifted bypass diverged from the never-collapsed run on blocks {diverged:?}"
+        );
+    }
+}
+
+/// Re-equal designed words after a one-channel retarget do **not** bring the collapse back.
+///
+/// # The design flaw this is the reachable shape of
+///
+/// "The witness came back, so collapse again" is unsound, and this is the session that says why in
+/// the vocabulary the engine actually has. A `ParameterChannel::Left` retarget lands at `SWITCH`:
+/// the cohort disengages, and from that block on its two channels render under different
+/// coefficients and their compressor rings, EQ integrators and limiter lookahead lines separate.
+/// A `ParameterChannel::Both` retarget then lands at `SWITCH + 2` carrying the *same* value the
+/// left channel was given, so once its ramp closes every designed word the three kernels read
+/// compares bit-equal between the channels again. The words agree. The state does not, and it
+/// never will: the two channels have been integrating different signals for two blocks and no
+/// later block undoes that.
+///
+/// A dispatch that re-engaged here would publish the left channel's state as the right channel's
+/// on a session whose parameters look perfectly symmetric -- the exact failure the M3 rule exists
+/// to make impossible.
+///
+/// # Two mechanisms decline, and only one of them is the rule
+///
+/// The `LIVE` term is cleared by the one-channel write and is never re-set within a plan
+/// (`ChannelSymmetryWitnessV1::admit` has no restoring arm for it, unlike `UNBYPASSED`), so the
+/// witness alone already declines this session forever. That is worth having and it is *not* the
+/// rule: it is a property of today's live-record vocabulary, and
+/// `miso_engine_effect_contract::symmetry`'s module header names two seams -- builtins liveness and
+/// session automation spans -- whose arrival could make a term restorable. The rule is
+/// `BankChain::collapse_channels_agree`, which declines on what the blocks *did* rather than on
+/// what the vocabulary happens not to express. This test pins both, so a future issue that makes
+/// `LIVE` restorable finds the second one already standing.
+///
+/// # Red mutation
+///
+/// Drop `&& self.collapse_channels_agree` from `BankChain::run`'s dispatch and this stays green --
+/// which is the point: the witness is still declining. Restore `LIVE` in
+/// `ChannelSymmetryWitnessV1::admit` *as well* and the digest comparison fails, because the cohort
+/// re-engages onto a right channel that is two blocks behind its left.
+/// `miso-engine-rack`'s `mono_reengage::re_equal_words_after_a_desymmetrised_episode_do_not_re_engage`
+/// is the same session with the second mechanism isolated.
+#[test]
+fn re_equal_designed_words_after_a_one_channel_retarget_never_re_engage() {
+    const CONTROL: PlanConfig = PlanConfig {
+        meters: false,
+        control: true,
+        observation: ObservationArm::Absent,
+    };
+    const SWITCH: u64 = BLOCKS / 2;
+
+    let mut collapsing = SessionRuntime::build(Workload::SixtyFourTrackConsoleMono, CONTROL);
+    let mut never = SessionRuntime::build(Workload::SixtyFourTrackConsoleMono, CONTROL);
+    never.force_mono_collapse_off(true);
+
+    let channel = collapsing
+        .first_track_control_channel("miso.compressor")
+        .expect("the mono fixture carries a compressor on every track");
+    assert_eq!(
+        never.first_track_control_channel("miso.compressor"),
+        Some(channel),
+        "both arms must address the same track, or they are two sessions"
+    );
+
+    let mut collapsing_digest = Sha256Sink::new();
+    let mut never_digest = Sha256Sink::new();
+    for block in 0..BLOCKS {
+        for runtime in [&mut collapsing, &mut never] {
+            if block == SWITCH {
+                // The episode: one channel's threshold moves and the other's does not.
+                assert!(runtime.push_parameter(
+                    channel,
+                    0,
+                    miso_engine_effect_contract::ParameterChannel::Left,
+                    -24.0,
+                ));
+            }
+            if block == SWITCH + 2 {
+                // The words agree again: both channels are given the value the left one has.
+                assert!(runtime.push_parameter(
+                    channel,
+                    0,
+                    miso_engine_effect_contract::ParameterChannel::Both,
+                    -24.0,
+                ));
+            }
+        }
+        collapsing.render(block).expect("console render");
+        never.render(block).expect("console render");
+        collapsing.hash_output(&mut collapsing_digest);
+        never.hash_output(&mut never_digest);
+    }
+
+    let cohorts_in_plan = cohorts(collapsing.bank_shape()[1]);
+    assert_eq!(
+        collapsing.bank_collapse_counters()[0],
+        BLOCKS * cohorts_in_plan - (BLOCKS - SWITCH),
+        "the retargeted cohort stops at SWITCH and never starts again, however the words move"
+    );
+    assert_eq!(
+        collapsing.bank_collapse_transitions(),
+        [1, 0, 0],
+        "one cohort disengaged, none re-engaged, and no chain claimed an agreement proof"
+    );
+    assert_eq!(
+        collapsing_digest.finish_hex(),
+        never_digest.finish_hex(),
+        "a session that declined to re-engage must render what a never-collapsed one does"
     );
 }
 

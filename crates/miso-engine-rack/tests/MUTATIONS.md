@@ -204,3 +204,63 @@ graph 3. Rows outnumber mutations by exactly one: the drain/dispatch ordering ed
 once from each side of the seam it crosses (M2-5 here, M2-G3 in `miso-engine-graph`). Every row was
 applied, run, observed red and reverted; the counts are stated so a reader who tallies them and gets
 a different number knows which of the two they have counted.
+
+## Mono-collapse M3 — the re-engage rule
+
+Same driver and same host as M2: one mutation at a time, applied to the working tree, the named
+test run, the failure observed, the tree restored (and `touch`ed) before the next row.
+
+M2 shipped the disengage as a one-way latch, so **no M2 test rendered a re-engaged block**. The
+rows below are the gates on the transition that latch was standing in for, and they split into two
+groups that have to fail differently: a rule that is too strict costs the collapse (a counter falls)
+and a rule that is too loose is wrong audio (a digest moves). A ledger with only one kind of row
+would not be checking a rule at all.
+
+| # | mutation | file | test | result |
+|---|---|---|---|---|
+| M3-1 | the dispatch drops `&& self.collapse_channels_agree`, which is M2's latch simply deleted | `rack/src/lib.rs` `run` | `mono_reengage::re_equal_words_after_a_desymmetrised_episode_do_not_re_engage`, `mono_reengage::an_earned_agreement_proof_re_engages_a_chain_the_witness_could_not` | RED — 2 failed, both on the **output** comparison against a never-collapsed oracle and neither on a counter: the chain re-engages onto a right channel four blocks behind its left |
+| M3-2 | `disengage_collapse` no longer sets `collapse_channels_agree = true` | `rack/src/lib.rs` | (whole `mono_reengage` suite, whole `chain_shape` suite) | **GREEN, deliberately.** Reaching that line requires `self.collapsed`, and a chain only collapses while the flag holds, so the assignment is redundant today. It is kept as the statement of *why* agreement survives a window in which the right channel was frozen, and a `debug_assert!` next to it fails the moment the redundancy stops holding. Recorded rather than dropped because a reader who cuts the line and sees green deserves to find the reason written down |
+| M3-3 | `ChannelSymmetryWitnessV1::AGREEING` becomes `ALL`, folding `UNBYPASSED` back into the invariant | `effect-contract/src/symmetry.rs` | `mono_reengage::a_bypass_episode_re_engages_because_it_never_moved_the_channels_apart`; `miso-engine-console-workload` `chain_shape::a_lifted_bypass_re_engages_the_collapse_and_renders_the_dual_bits` | RED — 2 failed, both on the **counter**: the bypassed cohort is retired for the rest of the plan instead of for the four bypassed blocks. Both digests stay green, which is the point of asserting the count as well — a too-strict rule is invisible to every digest in the tree |
+| M3-4 | the agreement proof is never asked (`BankStage::channels_agree` is short-circuited to `false` in the dispatch) | `rack/src/lib.rs` `run` | `mono_reengage::an_earned_agreement_proof_re_engages_a_chain_the_witness_could_not` (and `mono_reengage::re_equal_words_after_a_desymmetrised_episode_do_not_re_engage` on its query count) | RED — 2 failed. The second row is what proves the recovery window is entered at all on the session that must *not* recover, so the first is not passing because the query was skipped |
+| M3-5 | the invariant's guard chain is deleted: `collapse_channels_agree` is cleared by any block whose witness is not eligible | `rack/src/lib.rs` `run` | `mono_reengage::a_bypass_episode_re_engages_because_it_never_moved_the_channels_apart` | RED — the bypass window retires the chain, the same failure as M3-3 reached from the other side. The guards are not only an optimisation: the `!collapse` clause and the `all_lanes_preserve_agreement` fallback are both load-bearing, and this row cuts them together because either alone produces the same verdict on this session |
+| M3-B1 | `InputStage::process_mono` drops `.saturating_add(self.members_sum(report.sanitized[1]))` from `sanitized_input` | `builtins/src/lib.rs` | `miso-engine-builtins` `mono_collapse::the_collapsed_body_publishes_the_dual_bodys_report` | RED — the collapsed body reports half the sanitised samples a dual body reports, and the audio is untouched. Ledgered in `miso-engine-builtins/tests/MUTATIONS.md` as well; it is repeated here because it is the accounting half of `BankStage::process_mono`'s contract |
+
+### What the two red tests are, and why one of them is a session and not a stage
+
+`mono_reengage::re_equal_words_after_a_desymmetrised_episode_do_not_re_engage` is the flaw this
+milestone exists to exclude, stated at the chain: a window rendered dual with the `DESIGNED` term down separates the two
+channels' recursive state, the words then agree again, every term of the witness holds, and
+collapsing would publish the left channel's state as the right channel's. The test asserts the
+decline **and** asserts that the states really do disagree at that boundary, so it cannot pass
+because the episode stopped separating anything.
+
+`re_equal_designed_words_after_a_one_channel_retarget_never_re_engage` in
+`miso-engine-console-workload` is the same session in the vocabulary the engine actually has — a
+`ParameterChannel::Left` retarget followed by a `ParameterChannel::Both` one carrying the same
+value — and it is **green under M3-1**, which is stated in its own doc comment rather than hidden.
+The `LIVE` term has no restoring arm, so today's live-record vocabulary already declines that
+session forever, and the invariant is the second of two mechanisms. That is worth having and it is
+not the rule: `miso_engine_effect_contract::symmetry`'s module header names two seams (builtins
+liveness, session automation spans) whose arrival could make a term restorable, and the invariant is
+what will still be standing when one of them lands.
+
+### Counting
+
+Six rows in this section for six distinct mutations, five of them red and one deliberately green.
+Rows M3-1, M3-2, M3-4 and M3-5 are `rack`'s, M3-3 is `effect-contract`'s, and M3-B1 is `builtins`'
+and is double-listed there for the same reason M2-5 is double-listed in `miso-engine-graph`. The
+graph layer's own row is M3-G1, in `miso-engine-graph/tests/MUTATIONS.md`. Counting the whole
+milestone: **eight rows across four crates for eight distinct mutations** -- rack 4, effect-contract
+1, builtins 3 (one of them double-listed here), graph 1 -- of which seven are red.
+
+### What the guard chain costs, and why that is a correctness statement too
+
+The invariant is maintained behind four guards, and M3-5 cuts them to show they are not decoration.
+Their effect on the render path is worth stating because it is what lets the rule be unconditional
+rather than a mode: a **collapsed** block skips the maintenance, a chain that **can never collapse**
+skips it, a chain that has **already lost** agreement skips it, and a block whose witness was
+**eligible** skips the second walk because eligible implies preserving. What is left is a
+collapsible chain rendering dual under a witness that is not eligible with agreement still to lose
+-- a bypass window, or the episode after which the chain must not come back. So M3 adds one already
+computed `bool` to the M2 dispatch on every session M2 measured, and a short-circuiting walk over
+cached lane flags on the two transitions this milestone is about.
