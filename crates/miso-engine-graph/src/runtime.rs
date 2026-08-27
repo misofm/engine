@@ -1974,23 +1974,46 @@ fn foldable_lane(
 ///
 /// # Which clauses a mutation makes red (the house ledger, measured)
 ///
-/// * **sole readership of a route** -> `a_send_from_a_routes_buffer_declines_the_route_fold`
-/// * **no observer on the route/output path** -> `a_meter_on_the_matrix_declines_the_route_fold`
-///   and `console_facilities_do_not_change_the_chain_shape_or_the_bits`
-/// * **nothing in between names the master** -> `a_mid_schedule_master_reader_declines_the_route_\
-///   fold`
-/// * **the association order** -> `folding_in_reversed_chain_order_diverges_from_the_reduction`
-/// * **the first contributor stores** -> `a_negative_zero_first_contributor_survives_the_fold`
-/// * **one main input, no sidechain, no delay on a route** and **the master's own shape** ->
-///   `the_intended_strip_folds_every_route_into_its_cohorts_epilogue` stops folding, which the
-///   fold counter sees.
+/// Dropping a clause and running the graph, graph-compiler and console-workload suites gives:
 ///
-/// Two clauses are conservative rather than measured, and saying so is the point of the ledger:
+/// * **the association order** -> `route_ids_ordered_against_the_cohorts_decline_the_route_fold`,
+///   plus `a_leased_stage_meter_declines_the_merge_and_still_meters` and
+///   `an_observed_alias_on_the_last_slot_declines_that_lanes_scatter_redirect`. Keeping the length
+///   check and dropping the element-wise comparison is the unsound direction, and it is the one
+///   measured.
+/// * **no observer on the route/output path** -> `the_folded_master_is_the_reductions_own_bits`.
+///   That test's oracle is a post-matrix meter, so dropping this clause destroys the oracle *and*
+///   the plan it was oracle for; it goes red either way, which is what the ledger records.
+/// * **the opening chain's ops are excluded from the in-between scan** -> every fold in the tree
+///   stops firing and `every_standing_workload_folds_one_route_per_track` goes red. That is the
+///   conservative direction, and it is worth pinning: the colouring gives the session output the
+///   physical slot of track zero's *input* buffer on every console fixture, so without the
+///   exclusion the standing fixture never folds at all.
+/// * **the first contributor stores** ->
+///   `the_first_contributor_stores_so_a_negative_zero_master_keeps_its_sign`.
+/// * **the whole fold** -> `every_standing_workload_folds_one_route_per_track`, on a count. There
+///   is no output difference to see: that is the point of the counter.
 ///
+/// Four clauses have **no** red test, and each is kept for a stated reason rather than a measured
+/// one. Saying so is the point of writing the ledger down:
+///
+/// * **sole readership of a chain's last slot.** Genuinely load-bearing -- a folded lane stops
+///   writing that buffer, so a second reader would carry the previous block -- but *shadowed* in
+///   every session a compiler can build. A second route from the same tap adds a summand the
+///   master's input list has, so the association proof declines on length first; a sidechain from
+///   that tap is read by an op scheduled *before* the route, so `readers[producer][0]` is not a
+///   route and the plain-route clause declines instead. Dropping the clause reddens nothing, and
+///   that is reported rather than dressed up.
+/// * **nothing in between names the master.** No compiled session reaches the hazard, and the
+///   reason is structural: the master's colour is the first colour the lowering frees, which is
+///   track zero's input buffer, and track zero is always in the *opening* cohort -- whose ops the
+///   scan excludes because they all precede the first master write. A later cohort naming the
+///   master's slot is expressible in a lowered program and not in a session, exactly as
+///   `scatter_target`'s compensation-delay clause is.
 /// * **one master op for the whole plan.** A session whose tracks reduce into several submixes
 ///   could fold each submix separately; this folds one reduction or none. The proof would have to
 ///   be run per master and the chains partitioned between them, and no fixture in the tree needs
-///   it. A second master simply declines.
+///   it. Dropping it is shadowed by the association proof's length check.
 /// * **the master buffer is distinct from every folded buffer.** The colouring cannot hand the
 ///   master a slot a folded lane still writes -- a chain's last slot is `program::is_dedicated`
 ///   storage and is never returned to the free list -- so this is a construction check, in the

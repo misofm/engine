@@ -82,3 +82,27 @@ pin `-C target-feature=+avx2,+fma`, debug profile. Sweep driver: one mutation at
 |---|---|---|---|---|
 | 140-5 | the `console.control.stage(..)` drain in `execute_op`'s `ConsoleEffect` arm never runs, so an admitted parameter reaches the effect a block late | `graph/src/runtime.rs` | `tests::a_console_parameter_command_applies_at_the_next_block_boundary` | RED (`every sample of the block that drains the command carries it`) |
 | 140-6 | the `console.shunt.capture(..)` call is deleted, so a bypassed block renders the shunt's initial zeros instead of the latency-matched input | `graph/src/runtime.rs` | `tests::live_bypass_is_latency_preserving_and_reversible` | RED (`a bypassed block is the input delayed by exactly the declared latency`) |
+
+## Issue #218 — the route fold and the in-order scatter-accumulate mixdown
+
+Every row below was applied to the working tree, the named suites were run, the failure (or the
+absence of one) was recorded, and the mutation was reverted in the same session. Host: `x86_64`,
+workspace `.cargo/config.toml` pin `-C target-feature=+avx2,+fma`, debug profile. Sweep driver: one
+mutation at a time over `cargo test -p miso-engine-graph -p miso-engine-graph-compiler
+-p miso-engine-console-workload`, tree restored before the next row.
+
+| # | mutation | file | test | result |
+|---|---|---|---|---|
+| 218-1 | the first contributor accumulates instead of storing (`copy_from_slice` becomes `sum_into_block`) | `graph/src/runtime.rs` `ArenaMembers::fold_plane` | `runtime::tests::the_first_contributor_stores_so_a_negative_zero_master_keeps_its_sign` | RED (`+0.0` where `-0.0` is required; bits 0 against 0x8000_0000) |
+| 218-2 | the fan-in-zero fill is skipped for *every* kind, not only a bound source | `graph/src/runtime.rs` `execute_op` | `runtime::tests::the_fan_in_zero_fill_is_dead_only_under_a_bound_source` | RED (an identity node with no contributors renders the previous block instead of silence) |
+| 218-3 | the association proof keeps its length check and drops the element-wise comparison | `graph/src/runtime.rs` `route_fold` | `route_ids_ordered_against_the_cohorts_decline_the_route_fold` | RED, plus `a_leased_stage_meter_declines_the_merge_and_still_meters` and `an_observed_alias_on_the_last_slot_declines_that_lanes_scatter_redirect` |
+| 218-4 | the observer clause is dropped from `foldable_lane` | `graph/src/runtime.rs` | `the_folded_master_is_the_reductions_own_bits` | RED |
+| 218-5 | the opening chain's own ops are no longer excluded from the in-between master scan | `graph/src/runtime.rs` `route_fold` | `every_standing_workload_folds_one_route_per_track` | RED (nothing folds at all: the session output's colour is track zero's input slot) |
+| 218-6 | sole readership of a chain's last slot is dropped (`len() != 1` becomes `is_empty()`) | `graph/src/runtime.rs` `foldable_lane` | — | **GREEN.** Reported rather than dressed up: the clause is real but shadowed. A second route from the same tap adds a summand the master's input list carries, so the association proof declines on length first; a sidechain from that tap is read by an op scheduled before the route, so `readers[producer][0]` is not a route and the plain-route clause declines instead. |
+| 218-7 | the in-between master scan is dropped entirely | `graph/src/runtime.rs` `route_fold` | — | **GREEN.** No compiled session reaches the hazard: the master's colour is the first colour the lowering frees, which is track zero's input buffer, and track zero is always in the opening cohort — whose ops the scan excludes anyway. Expressible in a lowered program, not in a session, exactly as `scatter_target`'s compensation-delay clause is. |
+| 218-8 | the "one master op" retain admits candidates reducing into different masters | `graph/src/runtime.rs` `route_fold` | — | **GREEN.** Shadowed by the association proof's length check. |
+
+Rows 218-6 to 218-8 are the honest half of this ledger. Each clause is kept because it defends a
+hazard that is real in the lowered program and unreachable from a session the compiler can build,
+and the reason is written down beside the clause in `route_fold`'s doc comment rather than left to
+be rediscovered.
