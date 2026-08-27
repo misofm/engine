@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """One command-reason vocabulary, proved across every file that spells it (issues #143, #151).
 
-`COMMAND_REASON_*` is written out six times in this repository, in five languages' worth of
+`COMMAND_REASON_*` is written out seven times in this repository, in six languages' worth of
 syntax, and issue #151's field defect is exactly what that costs when they drift:
 
 * `hosts/miso-engine-host-web/src/lib.rs` -- the constants. This is the authority.
@@ -16,8 +16,11 @@ syntax, and issue #151's field defect is exactly what that costs when they drift
 * `tools/miso-engine-parameter-metadata/src/lib.rs` -- the `commandReasons` rows of the shipped
   JSON, which is where an app reads the vocabulary from.
 * `scripts/check-parameter-metadata-v1.py` -- the schema gate's deliberately independent list.
+* `sdk/src/generated/catalog.ts` -- the SDK's generated TypeScript transcription of the shipped
+  metadata. This is the seventh spelling: it is checked against the Rust authority rather than
+  trusted merely because its generator also reads the metadata artifact.
 
-Adding a reason to the Rust constants without the other five is the drift class. This gate makes
+Adding a reason to the Rust constants without the other six is the drift class. This gate makes
 that red: every source must yield the same ordered `value -> camelCase name` mapping, contiguous
 from `0`.
 
@@ -45,8 +48,17 @@ WORKLET_JS = pathlib.Path("hosts/miso-engine-host-web/web/miso-engine-v2-audio-w
 HOST_DTS = pathlib.Path("hosts/miso-engine-host-web/web/miso-engine-v2-audio-worklet-host.d.ts")
 METADATA_GENERATOR = pathlib.Path("tools/miso-engine-parameter-metadata/src/lib.rs")
 SCHEMA_GATE = pathlib.Path("scripts/check-parameter-metadata-v1.py")
+SDK_CATALOG = pathlib.Path("sdk/src/generated/catalog.ts")
 
-SOURCES = (RUST_CONSTANTS, HOST_JS, WORKLET_JS, HOST_DTS, METADATA_GENERATOR, SCHEMA_GATE)
+SOURCES = (
+    RUST_CONSTANTS,
+    HOST_JS,
+    WORKLET_JS,
+    HOST_DTS,
+    METADATA_GENERATOR,
+    SCHEMA_GATE,
+    SDK_CATALOG,
+)
 
 METADATA_DOCUMENT = "miso-engine-v2-parameter-metadata.json"
 
@@ -93,7 +105,7 @@ def block_after(text: str, anchor: str, opening: str, closing: str) -> str:
     return balanced(text, start, opening, closing)
 
 
-# --- the six spellings -------------------------------------------------------------------------
+# --- the seven spellings -----------------------------------------------------------------------
 
 
 def rust_constants(text: str) -> list[tuple[int, str]]:
@@ -162,6 +174,22 @@ def worklet_js_constants(text: str) -> list[tuple[int, str]]:
 def metadata_document_rows(document: dict) -> list[tuple[int, str]]:
     rows = document["commandReasons"]
     return sorted((int(row["value"]), row["name"]) for row in rows)
+
+
+def sdk_catalog_table(text: str) -> list[tuple[int, str]]:
+    """Read the generated catalog's JSON literal without executing TypeScript."""
+    start = "export const CATALOG = deepFreeze(\n"
+    end = " as const,\n);"
+    first = text.find(start)
+    require(first >= 0, "the generated SDK CATALOG declaration is absent")
+    first += len(start)
+    last = text.find(end, first)
+    require(last >= 0, "the generated SDK CATALOG declaration has no closing marker")
+    try:
+        document = json.loads(text[first:last])
+    except json.JSONDecodeError as error:
+        raise Invalid(f"the generated SDK CATALOG JSON literal is invalid: {error}") from error
+    return metadata_document_rows(document)
 
 
 # --- the #151 structural half -------------------------------------------------------------------
@@ -274,6 +302,7 @@ def validate(texts: dict[pathlib.Path, str], document: dict | None = None) -> No
         ".d.ts MisoCommandReasonV1": host_dts_enum(texts[HOST_DTS]),
         "metadata generator rows": metadata_generator_table(texts[METADATA_GENERATOR]),
         "schema gate list": schema_gate_list(texts[SCHEMA_GATE]),
+        "generated SDK catalog": sdk_catalog_table(texts[SDK_CATALOG]),
     }
     if document is not None:
         spellings["shipped metadata JSON"] = metadata_document_rows(document)
@@ -324,7 +353,7 @@ def self_test() -> int:
     mutations: list[tuple[str, object]] = [
         # The brief's named red mutation: a reason is added to the Rust authority alone.
         (
-            "a Rust reason is bumped without the other five spellings",
+            "a Rust reason is bumped without the other six spellings",
             mutate(
                 RUST_CONSTANTS,
                 "pub const COMMAND_REASON_OBSERVATION_UNBOUND: u32 = 11;",
@@ -411,6 +440,14 @@ def self_test() -> int:
                 SCHEMA_GATE,
                 '"wrongState", "unknownTap", "observationUnbound",',
                 '"wrongState",',
+            ),
+        ),
+        (
+            "the generated SDK catalog renames a reason",
+            mutate(
+                SDK_CATALOG,
+                '"observationUnbound"',
+                '"observationDetached"',
             ),
         ),
         # Issue #151's structural half.

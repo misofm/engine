@@ -121,3 +121,23 @@ final handoff names exact commits, gate counts/digests, unresolved findings, and
   ran through the engagement CPU serializer.
 - Delivery state: local Phase 0 is separately mergeable and green. No commit was pushed by owner
   instruction, so GitHub #209 remains open and is not claimed remotely synchronized or complete.
+
+### Phase 1 tranche A: generated data scaffold (pending checkpoint)
+
+- `sdk/` now has the zero-runtime-dependency `@misofm/engine` package scaffold, strict NodeNext
+  TypeScript configuration, and the seven exact Phase 0 artifacts copied from the accepted sealed
+  build. No session builder, command encoder, or runtime host is included in this tranche.
+- `sdk/codegen/generate.mjs` deterministically transcribes parameter metadata, ABI layout, and
+  provenance into immutable `as const` generated modules. `--check` refuses any manual drift.
+- E1 compares the generated catalog literal with the shipped metadata using deep equality; its
+  self-test changes one generated reason value and proves both parity and codegen checks refuse it.
+- TypeScript `6.0.3` is a pinned development-only dependency. The gate runs the real compiler with
+  `--noEmit`; its self-test proves a wrong-type assignment red. The compiler caught and drove a
+  generator correction that keeps `as const` on the JSON literal's closing line.
+- `check-command-reason-vocabulary.py` now reads the generated catalog as the seventh spelling and
+  its self-test rejects a catalog-only reason rename. Phase 0's separate observation-transaction
+  kinds remain separate from applied `miso.command.v1` kinds.
+- Focused green evidence: `bash -n scripts/check-sdk-generated.sh`; real `tsc --noEmit` and its red
+  self-test; generated codegen check; E1 self-test; metadata schema check against the SDK asset;
+  and command-reason vocabulary self-test (19 red mutations). Full sweep, Cargo, and Wasm gates
+  were intentionally not run in this tranche.

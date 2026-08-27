@@ -1,0 +1,35 @@
+{
+  "abiVersion": 65536,
+  "assets": {
+    "miso-engine-v2-abi-layout.json": {
+      "bytes": 9003,
+      "sha256": "357876a26e833f0bb91e9aeb568ebb7734dfdbd6ce6d0d47c17b5e8f4210c58e"
+    },
+    "miso-engine-v2-audio-worklet-host.d.ts": {
+      "bytes": 28035,
+      "sha256": "e7ed673603f15be4c455bffc5710c4a48e9f6590c514360c8bda09c7415eca48"
+    },
+    "miso-engine-v2-audio-worklet-host.js": {
+      "bytes": 39725,
+      "sha256": "64b49c055d7f32f3b4922ca62f96c9d0101d61e4c515aa244bdc6a34c856e9db"
+    },
+    "miso-engine-v2-audio-worklet.js": {
+      "bytes": 37822,
+      "sha256": "19160eb8b07a418d2714cdc0c3098fc283bd8407811333c8a6d1f312517545f2"
+    },
+    "miso-engine-v2-audio-worklet.simd128.wasm": {
+      "bytes": 2494615,
+      "sha256": "99c08301577dc27799bee3c13fe74dfee87db36b0b54864d97c92935666368d6"
+    },
+    "miso-engine-v2-parameter-metadata.json": {
+      "bytes": 51952,
+      "sha256": "8cb52132e3f70168c0756841e0529f3eb36dbbafe3011124936507038fcf1f7e"
+    }
+  },
+  "backend": "simd128",
+  "builtWith": "scripts/build-sdk.sh",
+  "schema": "miso.web.provenance.v1",
+  "sourceRepository": "misofm/engine-v2",
+  "sourceRevision": "c77a0d0ef8f978988b7fe988cff5a9c264c3542d",
+  "sourceSubject": "Independently sort SDK artifact gate oracle"
+}
