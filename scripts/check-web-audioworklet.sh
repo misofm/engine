@@ -85,18 +85,19 @@ check_artifact_order() {
 
 if (($# == 1)) && [[ $1 == --self-test-artifact-order ]]; then
   canonical=$(canonical_artifact_names)
-  check_artifact_order "$canonical" "$canonical" || {
-    echo "canonical artifact order was rejected" >&2
+  sorted_oracle=$(canonical_artifact_names | LC_ALL=C sort)
+  check_artifact_order "$canonical" "$sorted_oracle" || {
+    echo "canonical artifact order differs from the independently sorted oracle" >&2
     exit 1
   }
   out_of_order=$(printf '%s\n' \
     miso-engine-v2-audio-worklet-host.d.ts \
-    miso-engine-v2-abi-layout.json \
     miso-engine-v2-audio-worklet-host.js \
     miso-engine-v2-audio-worklet.js \
     miso-engine-v2-audio-worklet.simd128.wasm \
+    miso-engine-v2-abi-layout.json \
     miso-engine-v2-parameter-metadata.json)
-  if check_artifact_order "$out_of_order" "$canonical"; then
+  if check_artifact_order "$out_of_order" "$sorted_oracle"; then
     echo "out-of-order expected artifact list escaped the ordering gate" >&2
     exit 1
   fi
