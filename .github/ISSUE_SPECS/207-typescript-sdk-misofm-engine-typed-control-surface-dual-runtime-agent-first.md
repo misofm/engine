@@ -96,4 +96,28 @@ final handoff names exact commits, gate counts/digests, unresolved findings, and
 
 ## Evidence log
 
-Pending implementation.
+### Phase 0: local PASS via bounded successor #209
+
+- `6c8a967` emits and independently validates `miso.web.abi-layout.v1`; the metadata tool has two
+  real-structure layout tests, including a scoped duplicate-field red mutation.
+- `9888bfe` preserves applied `miso.command.v1` kinds 1–6 and separately emits
+  `miso.observe.v1` transaction kinds 7/8 with wrong/truncated/relabelled/protocol/applied red
+  mutations.
+- `7bd2930`, `56ea90f`, and `387b789` add clean-tree provenance generation, independent sibling
+  byte/hash verification, a real wrapper smoke, and complete scoped E0b coverage.
+- The third #207 Phase 0 attempt stopped candidly at `91/92` sweep rows: the correct ABI-layout
+  artifact was placed out of lexical order in the checker's expected list. No other row failed.
+  Stateless successor #209 owns that sole gate repair under commits `0fedc9e` and `c77a0d0`.
+- Independent Sol review: initial HOLDs were resolved; #209 terminal verdict PASS. The regression
+  probe compares the canonical list with an independent `LC_ALL=C sort` oracle and rejects the
+  exact former ordering.
+- Fresh serialized SDK build: seven exact files; Wasm `2,494,615` bytes,
+  SHA-256 `99c08301577dc27799bee3c13fe74dfee87db36b0b54864d97c92935666368d6`;
+  provenance `1,264` bytes,
+  SHA-256 `37a01e6a54e9d0bd806682e80bc9c4fccacd1b99c717a4ce2a99e5d9009d63ef`;
+  independent provenance recomputation PASS.
+- Fresh full gates: `scripts/sweep.sh` `92/92` PASS in `121s`; `cargo fmt --all -- --check`
+  PASS; `cargo clippy --locked --workspace --all-targets -- -D warnings` PASS. Every heavy command
+  ran through the engagement CPU serializer.
+- Delivery state: local Phase 0 is separately mergeable and green. No commit was pushed by owner
+  instruction, so GitHub #209 remains open and is not claimed remotely synchronized or complete.

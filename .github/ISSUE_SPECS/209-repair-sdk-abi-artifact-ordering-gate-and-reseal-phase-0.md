@@ -55,4 +55,20 @@ gate, stop without weakening the acceptance bar.
 
 ## Evidence
 
-Pending implementation.
+- Attempt 1 `0fedc9e`: put the six-file production list into lexical order and added the first
+  ordering self-test. Sol HOLD: the positive arm compared the canonical list with itself, so the
+  exact former ordering could return without failing the probe.
+- Allowed bounded Sol correction `c77a0d0`: compare against an independently generated
+  `LC_ALL=C sort` oracle and use the exact pre-fix ordering as the red input. Terminal independent
+  Sol verdict: PASS.
+- Focused `scripts/test-web-audioworklet.sh`: PASS, including artifact-order, opcode, call-graph,
+  metadata, ABI-layout, reason-vocabulary, and UTF-8 mutations.
+- Fresh real `scripts/build-sdk.sh`: PASS with exactly seven outputs. Wasm is `2,494,615` bytes at
+  SHA-256 `99c08301577dc27799bee3c13fe74dfee87db36b0b54864d97c92935666368d6`;
+  provenance is `1,264` bytes at
+  SHA-256 `37a01e6a54e9d0bd806682e80bc9c4fccacd1b99c717a4ce2a99e5d9009d63ef`;
+  sibling byte/hash recomputation PASS.
+- Full serialized bar: `scripts/sweep.sh` `92/92` PASS in `121s`; workspace fmt PASS; workspace
+  clippy with `-D warnings` PASS.
+- No push was made by owner instruction. This local evidence is not yet upstream, so GitHub #209
+  intentionally remains open and no remote completion claim is made.
