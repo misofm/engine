@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# scripts/sweep.sh -- the hermetic check/test sweep. 92 explicit rows.
+# scripts/sweep.sh -- the hermetic check/test sweep. 93 explicit rows.
 #
-# Why this exists: the repo has 95 check-*/test-* scripts and ci.yml names 37 of them, so most
+# Why this exists: the repo has 96 check-*/test-* scripts and ci.yml names 37 of them, so most
 # gates had no committed runner at all -- they were reachable only by knowing they existed. Every
 # row below is written out by name. There are deliberately no globs: a glob silently absorbs a new
 # script (and silently drops a renamed one), which is how the coverage gap got here in the first
