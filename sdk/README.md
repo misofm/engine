@@ -49,8 +49,11 @@ Path-backed WAV inputs are opened once and decoded with quantum-bounded reads; t
 stereo `wav32f` blocks without retaining duration-scaled output, returns the incremental SHA-256,
 and refuses to overwrite an existing path. `renderAll()` and caller-supplied WAV bytes remain the
 explicit in-memory forms. `wav16` remains deferred because v1 has no quantization/dither policy.
-Raw `{ toml }` validation is fully engine-authoritative. For rendering, the frozen ABI cannot query
-a compiled session's source map. Until the additive engine introspection ABI lands, raw-TOML
-rendering returns `MisoIntrospectionUnavailableError` with reason `introspectionUnavailable` rather
-than parsing TOML or guessing source regions in the SDK. This is a temporary integration state;
-external TOML remains a first-class rendering input in the completed API.
+Raw `{ toml }` validation is fully engine-authoritative. Rendering reads the compiled engine's
+canonical source map through the additive source-introspection ABI, including exact `bigint`
+region starts and lengths; it never guesses a zero-origin region. The current ABI still requires
+the session rate and quantum in the prepare structure before TOML can be compiled, however. Until
+the engine exposes those two root values before preparation, raw rendering can only bootstrap
+documents whose root integer headers use the canonical bare-key spelling. This remaining ABI-order
+gap is recorded on issue #207 rather than hidden behind fallback defaults or a TypeScript TOML
+parser.

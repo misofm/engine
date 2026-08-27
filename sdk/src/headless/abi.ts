@@ -29,6 +29,21 @@ export interface EngineStatus {
 
 export type EngineResources = Readonly<Record<string, number | bigint>>;
 
+/** One source declaration read from the engine-owned compiled session map. */
+export interface SessionSource {
+  readonly id: string;
+  readonly channels: number;
+  readonly sampleRateHz: number;
+  readonly startFrame: bigint;
+  readonly frames: bigint;
+}
+
+/** Canonical addressing order owned by the compiled engine session. */
+export interface SessionMap {
+  readonly tracks: readonly string[];
+  readonly sources: readonly SessionSource[];
+}
+
 export interface WebExports {
   readonly memory: WebAssembly.Memory;
   miso_engine_web_v1_abi_version(): number;
@@ -50,6 +65,12 @@ export interface WebExports {
   miso_engine_web_v1_meter_header_ptr(handle: number): number;
   miso_engine_web_v1_console_track_count(handle: number): number;
   miso_engine_web_v1_console_track_id(handle: number, index: number): number;
+  miso_engine_web_v1_source_count(handle: number): number;
+  miso_engine_web_v1_source_id(handle: number, index: number): number;
+  miso_engine_web_v1_source_channels(handle: number, index: number): number;
+  miso_engine_web_v1_source_frames(handle: number, index: number): bigint;
+  miso_engine_web_v1_source_start_frame(handle: number, index: number): bigint;
+  miso_engine_web_v1_source_sample_rate(handle: number, index: number): number;
   miso_engine_web_v1_status_ptr(handle: number): number;
   miso_engine_web_v1_dispose(handle: number): number;
 }
@@ -242,6 +263,44 @@ export class WasmBoundary {
   }
 
   readDiagnostics(): readonly SessionDiagnostic[] { return diagnostics(this.exports, this.handle); }
+
+  sessionMap(): SessionMap {
+    this.assertLive("lifecycle");
+    const staging = this.buffer("sourceId");
+    const readId = (length: number, kind: "track" | "source"): string => {
+      if (!Number.isSafeInteger(length) || length <= 0 || length > staging.capacity) {
+        throw new MisoOfflineError(`Invalid compiled ${kind} ID length`, "prepare", 255);
+      }
+      const bytes = new Uint8Array(this.exports.memory.buffer, staging.pointer, length);
+      if (bytes.some((byte) => byte > 0x7f)) throw new MisoOfflineError(`Invalid compiled ${kind} ID bytes`, "prepare", 255);
+      try { return decoder.decode(bytes); }
+      catch (_error) { throw new MisoOfflineError(`Invalid compiled ${kind} ID bytes`, "prepare", 255); }
+    };
+    const tracks: string[] = [];
+    const trackCount = this.exports.miso_engine_web_v1_console_track_count(this.handle);
+    if (!Number.isSafeInteger(trackCount) || trackCount < 0) throw new MisoOfflineError("Invalid compiled track count", "prepare", 255);
+    for (let index = 0; index < trackCount; index += 1) {
+      tracks.push(readId(this.exports.miso_engine_web_v1_console_track_id(this.handle, index), "track"));
+    }
+    const sources: SessionSource[] = [];
+    const sourceCount = this.exports.miso_engine_web_v1_source_count(this.handle);
+    if (!Number.isSafeInteger(sourceCount) || sourceCount < 0) throw new MisoOfflineError("Invalid compiled source count", "prepare", 255);
+    for (let index = 0; index < sourceCount; index += 1) {
+      const id = readId(this.exports.miso_engine_web_v1_source_id(this.handle, index), "source");
+      const channels = this.exports.miso_engine_web_v1_source_channels(this.handle, index);
+      const sampleRateHz = this.exports.miso_engine_web_v1_source_sample_rate(this.handle, index);
+      const frames = this.exports.miso_engine_web_v1_source_frames(this.handle, index);
+      const startFrame = this.exports.miso_engine_web_v1_source_start_frame(this.handle, index);
+      if (!Number.isSafeInteger(channels) || channels <= 0
+          || !Number.isSafeInteger(sampleRateHz) || sampleRateHz !== this.sampleRateHz
+          || typeof frames !== "bigint" || frames <= 0n
+          || typeof startFrame !== "bigint" || startFrame < 0n) {
+        throw new MisoOfflineError(`Invalid compiled source declaration: ${id}`, "prepare", 255);
+      }
+      sources.push(Object.freeze({ id, channels, sampleRateHz, startFrame, frames }));
+    }
+    return Object.freeze({ tracks: Object.freeze(tracks), sources: Object.freeze(sources) });
+  }
 
   status(): EngineStatus {
     this.assertLive("lifecycle");

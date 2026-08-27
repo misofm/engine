@@ -1,7 +1,7 @@
 import type { CommandRecord } from "../core/command.js";
 import type { CommandAck, EffectDecl, EffectParamValues, Indices, Rack, TapName } from "../core/types.js";
 import type { SessionShape } from "../core/session.js";
-import type { EngineResources, EngineStatus, SessionDiagnostics, WasmAssetOptions } from "./abi.js";
+import type { EngineResources, EngineStatus, SessionDiagnostics, SessionMap, WasmAssetOptions } from "./abi.js";
 
 export type OfflineSource = readonly Float32Array[] | Readonly<{ wav: Uint8Array | string }>;
 
@@ -79,7 +79,7 @@ export interface OfflineTrackConsole<E extends readonly EffectDecl[] = readonly 
 }
 
 export interface EngineConsole<S extends SessionShape> {
-  sessionMap(): Promise<Readonly<{ tracks: readonly string[] }>>;
+  sessionMap(): Promise<SessionMap>;
   track<Id extends keyof S & string>(id: Id): OfflineTrackConsole<S[Id]>;
   batch(): CommandBatch;
   submit(records: readonly CommandRecord[]): Promise<CommandAck>;

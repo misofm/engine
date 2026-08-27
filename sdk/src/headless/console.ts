@@ -5,7 +5,7 @@ import { ABI_LAYOUT } from "../generated/abi.js";
 import { CATALOG, type CommandReasonName, type EffectDescriptor, type EffectId } from "../generated/catalog.js";
 import { MisoCommandError } from "../core/errors.js";
 import { MisoOfflineError } from "./errors.js";
-import type { WasmBoundary } from "./abi.js";
+import type { SessionMap, WasmBoundary } from "./abi.js";
 import type {
   CommandBatch,
   EngineConsole,
@@ -159,22 +159,16 @@ export class OfflineConsole<S extends SessionShape> implements EngineConsole<S> 
   readonly trackIds: readonly string[];
   private readonly trackIndexes: ReadonlyMap<string, number>;
   private readonly plan?: SessionPlan<S>;
+  private readonly map: SessionMap;
 
   constructor(private readonly boundary: WasmBoundary, plan?: SessionPlan<S>) {
     this.plan = plan;
-    const ids: string[] = [];
-    const idBuffer = boundary.buffer("sourceId");
-    const count = boundary.exports.miso_engine_web_v1_console_track_count(boundary.handle);
-    for (let index = 0; index < count; index += 1) {
-      const length = boundary.exports.miso_engine_web_v1_console_track_id(boundary.handle, index);
-      if (length === 0 || length > idBuffer.capacity) throw new MisoOfflineError("Invalid console track map", "prepare", 255);
-      ids.push(new TextDecoder("ascii", { fatal: true }).decode(new Uint8Array(boundary.exports.memory.buffer, idBuffer.pointer, length)));
-    }
-    this.trackIds = Object.freeze(ids);
-    this.trackIndexes = new Map(ids.map((id, index) => [id, index]));
+    this.map = boundary.sessionMap();
+    this.trackIds = this.map.tracks;
+    this.trackIndexes = new Map(this.trackIds.map((id, index) => [id, index]));
   }
 
-  async sessionMap(): Promise<Readonly<{ tracks: readonly string[] }>> { return Object.freeze({ tracks: this.trackIds }); }
+  async sessionMap(): Promise<SessionMap> { return this.map; }
 
   track<Id extends keyof S & string>(id: Id): OfflineTrackConsole<S[Id]> {
     const trackIndex = this.trackIndexes.get(id);

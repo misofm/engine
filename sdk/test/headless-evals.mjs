@@ -153,17 +153,20 @@ async function runE7(sdk, wasm, nativeRunner) {
       } finally { pathWave.close(); }
       assert.throws(() => pathWave.decode(0, 1), (error) => error?.code === "miso.source.v1" && error.path === "wav.lifecycle");
       const toml = await readFile(resolve(fixtures, `${stem}.toml`), "utf8");
-      const compile = WebAssembly.compile;
-      let rawCompileCalls = 0;
-      WebAssembly.compile = async (...args) => { rawCompileCalls += 1; return compile(...args); };
+      const rawOutput = resolve(directory, `${stem}.raw-sdk.f32le`);
+      const raw = await sdk.createOfflineEngine({
+        session: { toml },
+        sources: { "fixture-source": { wav: sourcePath } },
+        wasm: { bytes: wasm },
+      });
       try {
-        await assert.rejects(
-          sdk.createOfflineEngine({ session: { toml }, sources: { "fixture-source": { wav: sourcePath } }, wasm: { bytes: wasm } }),
-          (error) => error?.code === "miso.introspection.unavailable.v1" && error.reason === "introspectionUnavailable",
-          "raw TOML must use the typed interim introspection refusal until the additive ABI lands",
-        );
-      } finally { WebAssembly.compile = compile; }
-      assert.equal(rawCompileCalls, 0, "the interim introspection refusal must not create a partial engine");
+        const map = await raw.console.sessionMap();
+        assert.equal(map.sources.length, 1, "raw TOML must discover the compiled source map");
+        assert.deepEqual(map.sources[0], {
+          id: "fixture-source", channels: 2, sampleRateHz: rate, startFrame: 0n, frames: 1_024n,
+        });
+        await raw.renderToFile(rawOutput, { format: "f32le-planar" });
+      } finally { raw.dispose(); }
       const engine = await sdk.createOfflineEngine({ session: e7Plan(sdk, rate), sources: { "fixture-source": { wav: sourcePath } }, wasm: { bytes: wasm } });
       let maximumRenderRequest = 0;
       const render = engine.render.bind(engine);
@@ -179,6 +182,7 @@ async function runE7(sdk, wasm, nativeRunner) {
       } finally { engine.dispose(); }
       const nativeBytes = await readFile(nativeOutput), sdkBytes = await readFile(sdkOutput);
       assertE7(nativeBytes, sdkBytes, expectedNative[rate], rate);
+      assert.deepEqual(await readFile(rawOutput), nativeBytes, `E7 ${rate} Hz raw-TOML bytes differ from native`);
       assert.equal(report.frames, 1_024);
       assert.equal(report.bytes, sdkBytes.byteLength);
       assert.equal(report.sha256, digest(sdkBytes));
@@ -189,6 +193,29 @@ async function runE7(sdk, wasm, nativeRunner) {
     const rf64File = sdk.openWaveFile(rf64Path, "rf64-path");
     try { assert.deepEqual(rf64File.decode(1, 17), sdk.decodeWave(rf64Memory, 1, 17), "RF64 path and memory decoding must agree"); }
     finally { rf64File.close(); }
+    const rf64NativeOutput = resolve(directory, "rf64.native.f32le");
+    const rf64Native = spawnSync(nativeRunner, [
+      "--session", resolve(fixtures, "rf64-48000.toml"), "--source-root", fixtures,
+      "--frames", "512", "--output", rf64NativeOutput,
+    ], { cwd: repoRoot, encoding: "utf8" });
+    assert.equal(rf64Native.status, 0, `RF64 native runner failed:\n${rf64Native.stdout}${rf64Native.stderr}`);
+    const rf64Raw = await sdk.createOfflineEngine({
+      session: { toml: await readFile(resolve(fixtures, "rf64-48000.toml"), "utf8") },
+      sources: { "fixture-source": { wav: rf64Path } },
+      wasm: { bytes: wasm },
+    });
+    try {
+      const map = await rf64Raw.console.sessionMap();
+      assert.deepEqual(map.sources[0], {
+        id: "fixture-source", channels: 2, sampleRateHz: 48_000, startFrame: 1n, frames: 514n,
+      }, "raw RF64 source shape must come from the compiled engine session");
+      const audio = rf64Raw.render(512);
+      assert.deepEqual(
+        sdk.f32lePlanarBytes(audio.left, audio.right, 128),
+        new Uint8Array(await readFile(rf64NativeOutput)),
+        "raw RF64 nonzero-region output must be byte-identical to native",
+      );
+    } finally { rf64Raw.dispose(); }
   } finally { await rm(directory, { recursive: true, force: true }); }
   return Object.freeze(evidence);
 }

@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { closeSync, openSync, unlinkSync, writeSync } from "node:fs";
 import { isSessionPlan, WasmBoundary, type EngineStatus } from "./abi.js";
 import { OfflineConsole } from "./console.js";
-import { MisoIntrospectionUnavailableError, MisoOfflineError, MisoSourceError } from "./errors.js";
+import { MisoOfflineError, MisoSourceError } from "./errors.js";
 import type {
   MeterFrame,
   OfflineEngine,
@@ -55,31 +55,66 @@ function numeric(value: unknown, sourceId: string, path: string): number {
   return number;
 }
 
-function sessionIntrospection<S extends SessionShape>(plan: SessionPlan<S> | { readonly toml: string }): SessionIntrospection {
-  const candidate = plan as SessionPlan<SessionShape> | { readonly toml: string };
-  if (isSessionPlan(candidate)) {
-    const sources = Object.freeze(candidate.json.sources.map((row) => {
-      const id = String(row.id);
-      const mapping = row.mapping as Readonly<Record<string, unknown>>;
-      const region = mapping.region as Readonly<Record<string, unknown>>;
-      return Object.freeze({
-        id,
-        sampleRateHz: numeric(row.sample_rate_hz, id, "sample_rate_hz"),
-        channels: numeric(mapping.channel_count, id, "mapping.channel_count"),
-        startFrame: numeric(region.start_sample, id, "mapping.region.start_sample"),
-        frames: numeric(region.length_samples, id, "mapping.region.length_samples"),
-      });
-    }));
+function planIntrospection<S extends SessionShape>(candidate: SessionPlan<S>): SessionIntrospection {
+  const sources = Object.freeze(candidate.json.sources.map((row) => {
+    const id = String(row.id);
+    const mapping = row.mapping as Readonly<Record<string, unknown>>;
+    const region = mapping.region as Readonly<Record<string, unknown>>;
     return Object.freeze({
-      sampleRateHz: numeric(candidate.json.sample_rate_hz, "$", "sample_rate_hz"),
-      quantumFrames: numeric(candidate.json.quantum_frames, "$", "quantum_frames"),
-      tracks: Object.freeze(candidate.tracks.map((track) => track.id)),
-      sources,
+      id,
+      sampleRateHz: numeric(row.sample_rate_hz, id, "sample_rate_hz"),
+      channels: numeric(mapping.channel_count, id, "mapping.channel_count"),
+      startFrame: numeric(region.start_sample, id, "mapping.region.start_sample"),
+      frames: numeric(region.length_samples, id, "mapping.region.length_samples"),
     });
+  }));
+  return Object.freeze({
+    sampleRateHz: numeric(candidate.json.sample_rate_hz, "$", "sample_rate_hz"),
+    quantumFrames: numeric(candidate.json.quantum_frames, "$", "quantum_frames"),
+    tracks: Object.freeze(candidate.tracks.map((track) => track.id)),
+    sources,
+  });
+}
+
+function compiledIntrospection(boundary: WasmBoundary): SessionIntrospection {
+  const map = boundary.sessionMap();
+  const safeFrame = (value: bigint, sourceId: string, path: string): number => {
+    if (value > BigInt(Number.MAX_SAFE_INTEGER)) {
+      throw new MisoSourceError("Headless source region exceeds JavaScript file/array addressing", sourceId, path);
+    }
+    return Number(value);
+  };
+  return Object.freeze({
+    sampleRateHz: boundary.sampleRateHz,
+    quantumFrames: boundary.quantumFrames,
+    tracks: map.tracks,
+    sources: Object.freeze(map.sources.map((row) => Object.freeze({
+      id: row.id,
+      sampleRateHz: row.sampleRateHz,
+      channels: row.channels,
+      startFrame: safeFrame(row.startFrame, row.id, "mapping.region.start_sample"),
+      frames: safeFrame(row.frames, row.id, "mapping.region.length_samples"),
+    }))),
+  });
+}
+
+function assertSameSession(plan: SessionIntrospection, compiled: SessionIntrospection): void {
+  if (plan.sampleRateHz !== compiled.sampleRateHz || plan.quantumFrames !== compiled.quantumFrames) {
+    throw new MisoOfflineError("Engine preparation shape differs from SessionPlan", "prepare", 255);
   }
-  // Coordinator ruling 5438024085: do not grow a second TOML parser or guess zero-origin regions.
-  // The additive engine-owned query will replace this typed temporary refusal when its ABI lands.
-  throw new MisoIntrospectionUnavailableError("sources");
+  if (plan.tracks.length !== compiled.tracks.length
+      || plan.tracks.some((id) => !compiled.tracks.includes(id))) {
+    throw new MisoOfflineError("Compiled track map differs from SessionPlan", "prepare", 255);
+  }
+  const compiledSources = new Map(compiled.sources.map((row) => [row.id, row]));
+  if (plan.sources.length !== compiled.sources.length || plan.sources.some((row) => {
+    const actual = compiledSources.get(row.id);
+    return actual === undefined || actual.sampleRateHz !== row.sampleRateHz
+      || actual.channels !== row.channels || actual.startFrame !== row.startFrame
+      || actual.frames !== row.frames;
+  })) {
+    throw new MisoOfflineError("Compiled source map differs from SessionPlan", "prepare", 255);
+  }
 }
 
 function byteOrder(left: string, right: string): number {
@@ -314,15 +349,18 @@ class Engine<S extends SessionShape> implements OfflineEngine<S> {
 }
 
 export async function createOfflineEngine<S extends SessionShape>(options: OfflineEngineOptions<S>): Promise<OfflineEngine<S>> {
-  const introspection = sessionIntrospection(options.session);
-  const sources = await prepareSources(introspection, options.sources);
+  const candidate = options.session as SessionPlan<SessionShape> | { readonly toml: string };
+  const plan = isSessionPlan(candidate) ? options.session as SessionPlan<S> : undefined;
+  const declared = plan === undefined ? undefined : planIntrospection(plan);
+  let sources: readonly PreparedSource[] = declared === undefined
+    ? Object.freeze([])
+    : await prepareSources(declared, options.sources);
   let boundary: WasmBoundary | undefined;
   try {
     boundary = await WasmBoundary.create(options.session, options.limits, options.wasm);
-    if (boundary.sampleRateHz !== introspection.sampleRateHz || boundary.quantumFrames !== introspection.quantumFrames) {
-      throw new MisoOfflineError("Engine preparation shape differs from SessionPlan introspection", "prepare");
-    }
-    const plan = isSessionPlan(options.session as SessionPlan<SessionShape> | { readonly toml: string }) ? options.session as SessionPlan<S> : undefined;
+    const compiled = compiledIntrospection(boundary);
+    if (declared === undefined) sources = await prepareSources(compiled, options.sources);
+    else assertSameSession(declared, compiled);
     return new Engine(boundary, sources, plan, (options.limits?.consoleMeterBlocks ?? 0n) !== 0n);
   } catch (error) {
     closeSources(sources);
