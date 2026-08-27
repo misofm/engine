@@ -236,3 +236,27 @@ final handoff names exact commits, gate counts/digests, unresolved findings, and
   mutation suite; environment vocabulary plus its mutation suite; generated SDK self-test; and a
   fresh serialized E3-E5 corpus with the same `247/20/132/127/5` counts. A fresh full sweep remains
   required after this checkpoint.
+
+### Phase 1 adversarial attempt 1: HOLD and bounded revision (pending checkpoint)
+
+- Independent Sol review of `98e3c8e` returned HOLD. It reproduced six gaps: signed negative
+  exponent expansion moved the decimal point; synthesized output `main` could collide with a track;
+  source length/content, pan, and sidechain references could escape local validation; command
+  value arrays could be short or overwrite reserved bytes when long; `fromJson` lost negative zero;
+  and sweep did not invoke focused core/builder tests or verify the real packaged sibling bytes.
+  The later `589fc44` integration repair was correctly excluded from that verdict.
+- Red-before-fix probes reproduced the command defect (one value was accepted) and canonical-float
+  defect (`-1e-7` emitted as `-0.000001`). The committed eval expansion also covers five-value
+  reserved-byte overwrite, signed-zero rebuild, default-ID collision, zero-length and empty-content
+  sources, pan outside `[-1,1]`, and a sidechain referencing a missing graph entity.
+- The bounded correction counts exponent positions on the unsigned coefficient, clones normalized
+  JSON structurally without decimal text conversion, requires exactly four command values, applies
+  the relevant Session V1 source/pan/u32 constraints, checks the synthesized ID, and validates
+  routed sidechain graph references. The corpus's independent float-token helper now asserts every
+  forced neighbor decimal reconstructs the intended exact `f32` bits.
+- `check-sdk-generated.sh --self-test` now runs core and builder runtime/self-test gates plus the
+  actual `sdk/assets` provenance sibling-byte check and its changed-artifact mutation. Focused gate
+  PASS; serialized E3-E5 PASS with `documents=248`, `effect-parameters=66`,
+  `builtin-negative-cases=20`, `effect-negative-cases=132`, `effect-prepare-cases=127`,
+  `schema-envelope-cases=5`, and `ratio-asymmetry=PASS`. Full gates and independent re-review remain
+  pending; Phase 2 has not started.

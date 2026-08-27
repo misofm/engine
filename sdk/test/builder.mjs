@@ -75,6 +75,16 @@ async function check() {
       .track("mono", { source: "voice", pan: { matrix: { ll: 0.1, lr: fromBits(0x15ae43fd), rl: fromBits(0x95ae43fd), rr: 1 } } }).build();
     assert.match(floatPlan.toml, /ll = 0.1, lr = 0.00000000000000000000000007038530691851209, rl = -0.00000000000000000000000007038530691851209, rr = 1.0/);
 
+    const exponentPlan = sdk.session({ id: "negative-exponent", sampleRateHz: 48_000 }).source("voice", { channels: 1, frames: 1 })
+      .track("mono", { source: "voice" }).output("print")
+      .route({ id: "mono-print", source: { kind: "track", trackId: "mono", tap: "post_matrix" }, destination: { kind: "output_input", outputId: "print" }, gainDb: -1e-7 })
+      .build();
+    assert.match(exponentPlan.toml, /gain_db = -0\.0000001/, "negative exponent expansion must preserve the exact f32 value");
+
+    const negativeZeroPlan = sdk.session({ id: "negative-zero", sampleRateHz: 48_000 }).source("voice", { channels: 1, frames: 1 })
+      .track("mono", { source: "voice", pan: { matrix: { ll: -0, lr: 0, rl: 0, rr: 1 } } }).build();
+    assert.equal(sdk.SessionPlan.fromJson(negativeZeroPlan.json).toml, negativeZeroPlan.toml, "fromJson must preserve signed zero and canonical bytes");
+
     const longestTrack = `t${"a".repeat(126)}`;
     const maximumIdPlan = sdk.session({ id: "max-id", sampleRateHz: 48_000 }).source("voice", { channels: 1, frames: 1 }).track(longestTrack, { source: "voice" }).build();
     assert.equal(maximumIdPlan.json.routes[0].id, "auto-route-1", "convenience route IDs must not derive from maximum-length track IDs");
@@ -121,6 +131,35 @@ async function selfTest() {
       () => sdk.session({ id: "u64-red", sampleRateHz: 48_000 }).source("voice", { channels: 1, frames: 1 }).track("track", { source: "voice", dynamic: [sdk.effect("miso.compressor", { threshold: -18 }, { slotId: "vca" })] }).automate({ id: "too-large", target: { trackId: "track", rack: "dynamic", slotId: "vca", parameter: "threshold", channel: "both" }, segments: [{ shape: "linear", startSample: 0n, endSample: 9_223_372_036_854_775_808n, startValue: -18, endValue: -12 }] }),
       (error) => error instanceof sdk.MisoSessionError && error.path === "automation.segments[0].endSample",
       "automation times above TOML i64 must be rejected",
+    );
+    assert.throws(
+      () => sdk.session({ id: "main-collision", sampleRateHz: 48_000 }).source("voice", { channels: 1, frames: 1 }).track("main", { source: "voice" }).build(),
+      (error) => error instanceof sdk.MisoSessionError,
+      "the synthesized main output must not collide with a track ID",
+    );
+    for (const [label, spec] of [
+      ["zero source frames", { channels: 1, frames: 0 }],
+      ["empty source identity", { channels: 1, frames: 1, identity: "" }],
+      ["empty source locator", { channels: 1, frames: 1, locator: "" }],
+    ]) {
+      assert.throws(
+        () => sdk.session({ id: `source-${label.replaceAll(" ", "-")}`, sampleRateHz: 48_000 }).source("voice", spec).build(),
+        (error) => error instanceof sdk.MisoSessionError,
+        `the deliberate ${label} mutation must fail locally`,
+      );
+    }
+    assert.throws(
+      () => sdk.session({ id: "pan-red", sampleRateHz: 48_000 }).source("voice", { channels: 1, frames: 1 }).track("track", { source: "voice", pan: { left: 2, right: 0 } }).build(),
+      (error) => error instanceof sdk.MisoSessionError,
+      "pan values outside the Session V1 [-1,1] domain must fail locally",
+    );
+    const missingSidechain = sdk.effect("miso.compressor", { threshold: -18 }, {
+      slotId: "vca", sidechain: { source: { kind: "track", trackId: "missing", tap: "post_fader" }, portId: "detector" },
+    });
+    assert.throws(
+      () => sdk.session({ id: "sidechain-red", sampleRateHz: 48_000 }).source("voice", { channels: 1, frames: 1 }).track("track", { source: "voice", dynamic: [missingSidechain] }).build(),
+      (error) => error instanceof sdk.MisoSessionError,
+      "a routed sidechain must reference a declared graph entity",
     );
   });
 }

@@ -56,6 +56,9 @@ export function encodeCommandBatch(commands: readonly CommandRecord[]): EncodedC
   const view = new DataView(records.buffer);
   for (const [index, command] of commands.entries()) {
     const path = `$.commands[${index}]`;
+    if (!Array.isArray(command.values) || command.values.length !== 4) {
+      throw new MisoCommandError("command values must contain exactly four f32 slots", `${path}.values`);
+    }
     if (!wireKinds.has(command.kind)) throw new MisoCommandError("unknown wire command kind", `${path}.kind`);
     view.setUint8(index * recordBytes + offsets.kind, byte(command.kind, `${path}.kind`));
     view.setUint8(index * recordBytes + offsets.rack, byte(command.rack, `${path}.rack`));

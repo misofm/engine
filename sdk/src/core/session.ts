@@ -112,8 +112,19 @@ function stableId(value: string, path: string): string {
   return value;
 }
 
+function nonemptyString(value: unknown, path: string): string {
+  if (typeof value !== "string" || value.length === 0) fail("Expected a nonempty string", path);
+  return value;
+}
+
 function integer(value: number, path: string, minimum = 0): number {
   if (!Number.isSafeInteger(value) || value < minimum) fail("Expected a non-negative safe integer", path);
+  return value;
+}
+
+function u32(value: number, path: string, minimum = 0): number {
+  integer(value, path, minimum);
+  if (value > 0xffff_ffff) fail("Expected a u32", path);
   return value;
 }
 
@@ -225,8 +236,10 @@ export class SessionBuilder<Tracks extends BuilderTracks = {}> {
     stableId(id, "source.id");
     if (this.state.sources.some((source) => source.id === id)) fail("Duplicate source ID", "source.id");
     if (spec.channels !== 1 && spec.channels !== 2) fail("Source must be mono or dual-mono", "source.channels");
-    integer(spec.frames, "source.frames");
+    integer(spec.frames, "source.frames", 1);
     if (spec.sampleRateHz !== undefined) rate(spec.sampleRateHz, "source.sampleRateHz");
+    if (spec.identity !== undefined) nonemptyString(spec.identity, "source.identity");
+    if (spec.locator !== undefined) nonemptyString(spec.locator, "source.locator");
     return this.next({ sources: [...this.state.sources, freeze({ id, spec: freeze({ ...spec }) })] });
   }
 
@@ -311,12 +324,19 @@ export function session(options: SessionOptions): SessionBuilder<{}> {
 /** Rebuilds an immutable plan from its JSON-safe normalized form. */
 export const SessionPlan = Object.freeze({
   fromJson(json: SessionJson): SessionPlan {
-    validateJson(json);
-    const copy = freeze(JSON.parse(JSON.stringify(json)) as SessionJson);
+    const copy = freeze(cloneJson(json) as SessionJson);
+    validateJson(copy);
     validateGraph(copy);
     return freeze({ json: copy, toml: writeToml(copy), toJson: () => copy });
   },
 });
+
+function cloneJson(value: unknown): unknown {
+  if (value === null || typeof value === "string" || typeof value === "boolean" || typeof value === "number") return value;
+  if (Array.isArray(value)) return value.map(cloneJson);
+  if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, child]) => [key, cloneJson(child)]));
+  fail("Session JSON contains a non-JSON value", "json");
+}
 
 function rate(value: number, path: string): SessionSampleRateHz {
   if (value !== 44_100 && value !== 48_000 && value !== 88_200 && value !== 96_000) fail("Unsupported launch sample rate", path);
@@ -328,6 +348,11 @@ function trackBuiltinMatrix(value: Matrix2x2, path: string): Matrix2x2 {
 }
 function routeMatrix(value: Matrix2x2, path: string): Matrix2x2 {
   return freeze({ ll: f32(value.ll, `${path}.ll`), lr: f32(value.lr, `${path}.lr`), rl: f32(value.rl, `${path}.rl`), rr: f32(value.rr, `${path}.rr`) });
+}
+function panValue(value: number, path: string): number {
+  const normalized = f32(value, path);
+  if (normalized < -1 || normalized > 1) fail("Pan value is outside the Session V1 [-1,1] domain", path);
+  return normalized;
 }
 
 function builtinDescriptor(name: string): (typeof CATALOG.builtins.parameters)[number] {
@@ -384,8 +409,8 @@ function validateTrackSpec(spec: TrackSpec, path: string): void {
   }
   if (spec.pan) {
     if ("matrix" in spec.pan) trackBuiltinMatrix(spec.pan.matrix, `${path}.pan.matrix`);
-    else { f32(spec.pan.left, `${path}.pan.left`); f32(spec.pan.right, `${path}.pan.right`); }
-    if (spec.pan.smoothingSamples !== undefined) integer(spec.pan.smoothingSamples, `${path}.pan.smoothingSamples`);
+    else { panValue(spec.pan.left, `${path}.pan.left`); panValue(spec.pan.right, `${path}.pan.right`); }
+    if (spec.pan.smoothingSamples !== undefined) u32(spec.pan.smoothingSamples, `${path}.pan.smoothingSamples`);
   }
   for (const rack of ["simd1", "dynamic", "simd2"] as const) validateRack(spec[rack] ?? [], rack, path);
 }
@@ -463,11 +488,12 @@ function validateAutomationParameterValue(parameter: EffectDescriptor["parameter
 
 function normalize(state: BuilderState): SessionJson {
   const o = state.options;
+  const explicitRoutes = state.routes.length > 0 || state.outputs.length > 0;
+  if (!explicitRoutes && state.tracks.some((track) => track.id === "main")) fail("Synthesized output ID 'main' collides with a track ID", "outputs[0].id");
   const sources = state.sources.map(({ id, spec }) => freeze({ id, sample_rate_hz: spec.sampleRateHz ?? o.sampleRateHz, content: freeze({ identity: spec.identity ?? `source:${id}`, locator: spec.locator ?? `host:${id}` }), mapping: freeze({ channel_count: spec.channels, region: freeze({ start_sample: 0, length_samples: spec.frames }) }) })).sort(byId);
   const trackIds = new Set(state.tracks.map((track) => track.id));
   const tracks = state.tracks.map(({ id, spec }) => normalizeTrack(id, spec, state.sources, o.sampleRateHz)).sort(byId);
   const submixes = state.submixes.map((id) => freeze({ id })).sort(byId);
-  const explicitRoutes = state.routes.length > 0 || state.outputs.length > 0;
   const outputs = (explicitRoutes ? state.outputs.map((output) => freeze({ id: output.id })) : [freeze({ id: "main" })]).sort(byId);
   const routes = (explicitRoutes ? state.routes.map(normalizeRoute) : [...state.tracks].sort((a, b) => asciiCompare(a.id, b.id)).map(({ id }, index) => freeze({ id: `auto-route-${index + 1}`, source: freeze({ kind: "track", track_id: id, tap: "post_matrix" }), destination: freeze({ kind: "output_input", output_id: "main" }), channel_matrix: UNITY, gain_db: 0 }))).sort(byId);
   const automation = state.automation.map((item) => normalizeAutomation(item, tracks)).sort(byId);
@@ -481,7 +507,7 @@ function normalizeTrack(id: string, spec: TrackSpec, sources: BuilderState["sour
   const sourceRef = typeof spec.source === "string" ? { left: [spec.source, 0], right: [spec.source, source!.spec.channels === 1 ? 0 : 1] } : { left: spec.source.left, right: spec.source.right };
   const builtins = normalizeBuiltins(spec.builtins, sampleRateHz);
   const fader = freeze({ left_db: builtinNumber("fader_db", spec.fader?.leftDb ?? 0, `track.${id}.fader.leftDb`), right_db: builtinNumber("fader_db", spec.fader?.rightDb ?? 0, `track.${id}.fader.rightDb`), left_mute: builtinBoolean("mute", spec.fader?.leftMute ?? false, `track.${id}.fader.leftMute`), right_mute: builtinBoolean("mute", spec.fader?.rightMute ?? false, `track.${id}.fader.rightMute`) });
-  const matrixOrPan = spec.pan && "matrix" in spec.pan ? { matrix: freeze({ ...trackBuiltinMatrix(spec.pan.matrix, `track.${id}.matrix`), smoothing_samples: spec.pan.smoothingSamples ?? 0 }) } : { pan: freeze({ left: f32(spec.pan && "left" in spec.pan ? spec.pan.left : 1, `track.${id}.pan.left`), right: f32(spec.pan && "left" in spec.pan ? spec.pan.right : 1, `track.${id}.pan.right`), smoothing_samples: spec.pan?.smoothingSamples ?? 0 }) };
+  const matrixOrPan = spec.pan && "matrix" in spec.pan ? { matrix: freeze({ ...trackBuiltinMatrix(spec.pan.matrix, `track.${id}.matrix`), smoothing_samples: u32(spec.pan.smoothingSamples ?? 0, `track.${id}.matrix.smoothingSamples`) }) } : { pan: freeze({ left: panValue(spec.pan && "left" in spec.pan ? spec.pan.left : 1, `track.${id}.pan.left`), right: panValue(spec.pan && "left" in spec.pan ? spec.pan.right : 1, `track.${id}.pan.right`), smoothing_samples: u32(spec.pan?.smoothingSamples ?? 0, `track.${id}.pan.smoothingSamples`) }) };
   return freeze({ id, source_id: sourceRef.left[0], left_source_channel: sourceRef.left[1], right_source_channel: sourceRef.right[1], builtins, simd1: freeze({ effects: normalizeRack(spec.simd1 ?? [], "simd1") }), dynamic: freeze({ effects: normalizeRack(spec.dynamic ?? [], "dynamic") }), simd2: freeze({ effects: normalizeRack(spec.simd2 ?? [], "simd2") }), fader, ...matrixOrPan });
 }
 
@@ -527,12 +553,32 @@ function validateGraph(json: SessionJson): void {
   const tracks = new Set(json.tracks.map((track) => String(track.id)));
   const submixes = new Set(json.submixes.map((submix) => String(submix.id)));
   const outputs = new Set(json.outputs.map((output) => String(output.id)));
+  const graphIds = new Set<string>();
+  for (const [kind, entities] of [["tracks", json.tracks], ["submixes", json.submixes], ["outputs", json.outputs]] as const) {
+    for (const [index, entity] of entities.entries()) {
+      const id = String(entity.id);
+      if (graphIds.has(id)) fail("Track, submix, and output IDs share one namespace", `${kind}[${index}].id`);
+      graphIds.add(id);
+    }
+  }
+  const validateSource = (source: JsonRecord, path: string): void => {
+    if (source.kind === "track" && !tracks.has(String(source.track_id))) fail("Source references an unknown track", `${path}.track_id`);
+    if (source.kind === "submix_output" && !submixes.has(String(source.submix_id))) fail("Source references an unknown submix", `${path}.submix_id`);
+  };
   for (const route of json.routes) {
     const source = route.source as JsonRecord; const destination = route.destination as JsonRecord;
-    if (source.kind === "track" && !tracks.has(String(source.track_id))) fail("Route references an unknown track", "routes.source.track_id");
-    if (source.kind === "submix_output" && !submixes.has(String(source.submix_id))) fail("Route references an unknown submix", "routes.source.submix_id");
+    validateSource(source, "routes.source");
     if (destination.kind === "submix_input" && !submixes.has(String(destination.submix_id))) fail("Route references an unknown submix", "routes.destination.submix_id");
     if (destination.kind === "output_input" && !outputs.has(String(destination.output_id))) fail("Route references an unknown output", "routes.destination.output_id");
+  }
+  for (const [trackIndex, track] of json.tracks.entries()) {
+    for (const rackName of ["simd1", "dynamic", "simd2"] as const) {
+      const rack = track[rackName] as JsonRecord;
+      for (const [effectIndex, effect] of (rack.effects as readonly JsonRecord[]).entries()) {
+        const sidechain = effect.sidechain as JsonRecord;
+        if (sidechain.kind === "routed") validateSource(sidechain.source as JsonRecord, `tracks[${trackIndex}].${rackName}.effects[${effectIndex}].sidechain.source`);
+      }
+    }
   }
 }
 
@@ -617,7 +663,7 @@ function shortestF32(value: number, bits: number): string {
   fail("Unable to canonicalize finite f32", "toml.f32");
 }
 function expandExponent(value: string): string {
-  const [coefficient, exponentText] = value.toLowerCase().split("e"); const exponent = Number(exponentText); const negative = coefficient.startsWith("-"); const digits = coefficient.replace("-", "").replace(".", ""); const point = (coefficient.indexOf(".") < 0 ? coefficient.length : coefficient.indexOf(".")) + exponent;
+  const [coefficient, exponentText] = value.toLowerCase().split("e"); const exponent = Number(exponentText); const negative = coefficient.startsWith("-"); const unsignedCoefficient = negative ? coefficient.slice(1) : coefficient; const digits = unsignedCoefficient.replace(".", ""); const point = (unsignedCoefficient.indexOf(".") < 0 ? unsignedCoefficient.length : unsignedCoefficient.indexOf(".")) + exponent;
   const unsigned = point <= 0 ? `0.${"0".repeat(-point)}${digits}` : point >= digits.length ? `${digits}${"0".repeat(point - digits.length)}` : `${digits.slice(0, point)}.${digits.slice(point)}`;
   return negative ? `-${unsigned}` : unsigned;
 }

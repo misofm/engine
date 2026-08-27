@@ -83,8 +83,9 @@ function floatToken(value) {
     const [coefficient, exponentText] = text.toLowerCase().split("e");
     const exponent = Number(exponentText);
     const negative = coefficient.startsWith("-");
-    const digits = coefficient.replace("-", "").replace(".", "");
-    const point = (coefficient.includes(".") ? coefficient.indexOf(".") : coefficient.length) + exponent;
+    const unsignedCoefficient = negative ? coefficient.slice(1) : coefficient;
+    const digits = unsignedCoefficient.replace(".", "");
+    const point = (unsignedCoefficient.includes(".") ? unsignedCoefficient.indexOf(".") : unsignedCoefficient.length) + exponent;
     const unsigned = point <= 0
       ? `0.${"0".repeat(-point)}${digits}`
       : point >= digits.length
@@ -233,6 +234,7 @@ function builtinInvalidCases(descriptor) {
 }
 
 function mutateEffectValue(toml, parameter, invalid, label) {
+  assert.equal(f32Bits(Number(floatToken(invalid))), f32Bits(invalid), `${label}: mutation token must preserve the immediate-neighbor f32`);
   const pattern = new RegExp(`(parameter_id = ${parameter.id}, channel = "both", unit = "${parameter.unitName}", value = )[^ },]+`);
   return replaceExactlyOnce(toml, pattern, `$1${floatToken(invalid)}`, label);
 }
@@ -319,6 +321,12 @@ async function buildGreenCorpus(engine) {
     for (let index = 0; index < count; index += 1) builder = builder.track(`t${index}`, { source: "source" });
     documents.push({ name: `tracks-${count}`, plan: builder.build() });
   }
+  const exponentPlan = baseSession(engine, "negative-exponent")
+    .track("track", { source: "source" }).output("out")
+    .route({ id: "track-out", source: { kind: "track", trackId: "track", tap: "post_matrix" }, destination: { kind: "output_input", outputId: "out" }, gainDb: -1e-7 })
+    .build();
+  assert.match(exponentPlan.toml, /gain_db = -0\.0000001/, "E4 negative exponent token must preserve the intended f32");
+  documents.push({ name: "negative-exponent", plan: exponentPlan });
   assert.ok(documents.length >= 40, `E3 requires >=40 documents, got ${documents.length}`);
   return documents;
 }

@@ -82,6 +82,16 @@ async function selfTest() {
       (error) => error instanceof sdk.MisoCommandError && error.path === "$.commands[0].values[0]",
       "the deliberate finite-f64/out-of-f32-range mutation must be rejected before encoding",
     );
+    for (const values of [[0], [0, 0, 0, 0, 1]]) {
+      assert.throws(
+        () => sdk.encodeCommandBatch([{
+          kind: 5, rack: 1, channel: 2, trackIndex: 0, effectIndex: 0, parameterId: 1,
+          smoothingSamples: 0, values,
+        }]),
+        (error) => error instanceof sdk.MisoCommandError && error.path === "$.commands[0].values",
+        `the deliberate ${values.length}-value command mutation must be rejected before encoding`,
+      );
+    }
   });
 }
 

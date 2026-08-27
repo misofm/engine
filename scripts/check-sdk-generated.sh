@@ -14,8 +14,11 @@ run() {
   node sdk/codegen/generate.mjs --check
   node sdk/test/typecheck.mjs
   node sdk/test/generated-parity.mjs
+  node sdk/test/core.mjs
+  node sdk/test/builder.mjs
   python3 -I -B scripts/check-parameter-metadata-v1.py \
     sdk/assets/miso-engine-v2-parameter-metadata.json
+  python3 -I -B scripts/check-web-provenance-v1.py sdk/assets
   python3 -I -B scripts/check-command-reason-vocabulary.py
 }
 
@@ -24,6 +27,9 @@ if (($# == 1)); then
   run
   node sdk/test/typecheck.mjs --self-test
   node sdk/test/generated-parity.mjs --self-test
+  node sdk/test/core.mjs --self-test
+  node sdk/test/builder.mjs --self-test
+  python3 -I -B scripts/check-web-provenance-v1.py --self-test
   python3 -I -B scripts/check-command-reason-vocabulary.py --self-test
   echo "SDK generated-data self-test passed"
 else
