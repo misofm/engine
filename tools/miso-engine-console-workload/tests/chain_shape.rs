@@ -1295,8 +1295,8 @@ fn a_lifted_bypass_re_engages_the_collapse_and_renders_the_dual_bits() {
 /// which is the point: the witness is still declining. Restore `LIVE` in
 /// `ChannelSymmetryWitnessV1::admit` *as well* and the digest comparison fails, because the cohort
 /// re-engages onto a right channel that is two blocks behind its left.
-/// `re_equal_words_after_a_desymmetrised_episode_do_not_re_engage` in `miso-engine-rack` is the
-/// same session with the second mechanism isolated.
+/// `miso-engine-rack`'s `mono_reengage::re_equal_words_after_a_desymmetrised_episode_do_not_re_engage`
+/// is the same session with the second mechanism isolated.
 #[test]
 fn re_equal_designed_words_after_a_one_channel_retarget_never_re_engage() {
     const CONTROL: PlanConfig = PlanConfig {
