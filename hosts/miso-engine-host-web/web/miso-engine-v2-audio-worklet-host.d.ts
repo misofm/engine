@@ -225,11 +225,13 @@ export const enum MisoCommandKindV1 {
   /// offline or stem render of a session can never come out soloed, and reloading a session
   /// starts with every solo bit clear.
   ///
-  /// Metering is console-correct across a solo: the gate sits at the fader, so `input`,
-  /// `postInputBuiltins`, `postSimd1`, `postDynamic` and `postSimd2PreFader` taps keep reading the
-  /// un-gated signal while `postFader`, `postMatrix`, the submixes, the output and `masterGrDb`
-  /// read the gated mix. A gain-reduction tap on a silenced track falls toward zero reduction,
-  /// because that is the true state of its signal path.
+  /// Metering is console-correct across a solo, and the code for it is unchanged: the gate sits at
+  /// the fader, so a session's pre-fader send taps (`input`, `post_input_builtins`, `post_simd1`,
+  /// `post_dynamic`, `post_simd2_pre_fader`) keep reading the un-gated signal, while
+  /// `post_fader`, `post_matrix`, the submixes, the output and this host's own meter frame --
+  /// including `masterGrDb` -- read the gated mix. A gain-reduction reading on a strip that solo
+  /// has silenced falls toward zero reduction, because that is the true state of its signal path
+  /// and not an artifact.
   Solo = 9,
 }
 
