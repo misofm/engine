@@ -146,7 +146,7 @@ fi
 echo "web AudioWorklet command-reason vocabulary gates passed"
 
 # Issue #210 phase 0: the same discipline for the command-KIND vocabulary. Its own red mutations
-# run first -- 21 of them, one per rule -- then the shipped drift class is performed on disk: a
+# run first -- 26 of them, one per rule -- then the shipped drift class is performed on disk: a
 # kind the 48-byte wire decodes that the host JS `COMMAND_KINDS` set does not admit. That is the
 # defect shape the metadata JSON shipped for two releases (six kinds declared, eight decoded).
 python3 -B "$repo_root/scripts/check-command-kind-vocabulary.py" --self-test
@@ -163,7 +163,7 @@ cp "$repo_root/hosts/miso-engine-host-web/web/miso-engine-v2-audio-worklet-host.
   "$kind_dir/hosts/miso-engine-host-web/web/"
 cp "$repo_root/tools/miso-engine-parameter-metadata/src/lib.rs" \
   "$kind_dir/tools/miso-engine-parameter-metadata/src/"
-sed 's/^const COMMAND_KINDS = new Set(\[1, 2, 3, 4, 5, 6, 7, 8\]);$/const COMMAND_KINDS = new Set([1, 2, 3, 4, 5, 6]);/' \
+sed 's/^const COMMAND_KINDS = new Set(\[1, 2, 3, 4, 5, 6, 7, 8, 9\]);$/const COMMAND_KINDS = new Set([1, 2, 3, 4, 5, 6]);/' \
   "$repo_root/hosts/miso-engine-host-web/web/miso-engine-v2-audio-worklet-host.js" \
   >"$kind_dir/hosts/miso-engine-host-web/web/miso-engine-v2-audio-worklet-host.js"
 if diff -q "$repo_root/hosts/miso-engine-host-web/web/miso-engine-v2-audio-worklet-host.js" \
@@ -175,12 +175,12 @@ if python3 -B "$kind_dir/scripts/check-command-kind-vocabulary.py" >/dev/null 2>
   echo "a wire kind missing from the host JS COMMAND_KINDS set escaped the kind gate" >&2
   exit 1
 fi
-# The class every later #210 phase risks, on disk: a kind added to the Rust authority alone. Kinds
-# 9-13 arrive with the solo/trim/polarity/soloMode/routeGainDb phases; each one has to land in all
-# seven spellings or fail here.
+# The class every later #210 phase risks, on disk: a kind added to the Rust authority alone. Kind
+# 9 (`solo`) landed with phase 1; 10 onward arrive with the trim/polarity/soloMode/routeGainDb
+# phases, and each one has to land in all seven spellings or fail here.
 cp "$repo_root/hosts/miso-engine-host-web/web/miso-engine-v2-audio-worklet-host.js" \
   "$kind_dir/hosts/miso-engine-host-web/web/"
-sed 's/^pub const COMMAND_OBSERVE_UNSUBSCRIBE: u32 = 8;/&\npub const COMMAND_SOLO: u32 = 9;/' \
+sed 's/^pub const COMMAND_SOLO: u32 = 9;/&\npub const COMMAND_SOLO_MODE: u32 = 10;/' \
   "$repo_root/hosts/miso-engine-host-web/src/lib.rs" \
   >"$kind_dir/hosts/miso-engine-host-web/src/lib.rs"
 if diff -q "$repo_root/hosts/miso-engine-host-web/src/lib.rs" \

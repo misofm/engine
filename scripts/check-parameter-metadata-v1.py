@@ -31,7 +31,7 @@ SMOOTHINGS = {1: "none", 2: "linear", 3: "onePole99"}
 
 COMMAND_KINDS = [
     "pan", "matrix", "faderDb", "mute", "effectParam", "effectBypass",
-    "observeSubscribe", "observeUnsubscribe",
+    "observeSubscribe", "observeUnsubscribe", "solo",
 ]
 # The two host-level transaction kinds. They are applied -- `admit_commands` binds or unbinds the
 # tap and acknowledges `none` -- but what they apply to is the `miso.observe.v1` subscription map,

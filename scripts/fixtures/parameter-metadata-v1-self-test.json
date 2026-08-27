@@ -11,7 +11,8 @@
     { "value": 5, "name": "effectParam", "applied": true, "plane": "render" },
     { "value": 6, "name": "effectBypass", "applied": true, "plane": "render" },
     { "value": 7, "name": "observeSubscribe", "applied": true, "plane": "observation" },
-    { "value": 8, "name": "observeUnsubscribe", "applied": true, "plane": "observation" }
+    { "value": 8, "name": "observeUnsubscribe", "applied": true, "plane": "observation" },
+    { "value": 9, "name": "solo", "applied": true, "plane": "render" }
   ],
   "commandReasons": [
     { "value": 0, "name": "none" },

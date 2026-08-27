@@ -26,15 +26,19 @@ to the literal `range(1, 7)`, so the missing two could not be noticed there eith
 for two releases, with no gate on it.
 
 **The observation-kinds ruling this gate enforces.** Kinds 7 and 8 join `commandKinds`: the
-vocabulary is complete at eight. They are not, however, DSP kinds, so every row carries `plane`:
+vocabulary is complete at whatever the Rust constants say it is -- eight when this gate was
+written, nine since issue #210 phase 1 added `solo` (9). They are not, however, DSP kinds, so every
+row carries `plane`:
 
 * `applied` keeps its issue #140 meaning -- the ABI applies this kind rather than declaring and
   refusing it. That is true of all eight (`admit_commands` binds or unbinds the tap and
   acknowledges `none`), so `applied: false` would have been a *false* marker: it would say the ABI
   refuses a kind it does not refuse.
-* `plane` is the marker that distinguishes them: `"render"` for the six kinds that move state the
+* `plane` is the marker that distinguishes them: `"render"` for the kinds that move state the
   render thread reads, `"observation"` for the two that move an entry in the `miso.observe.v1`
-  subscription map and change nothing rendered.
+  subscription map and change nothing rendered. `solo` is a render kind: it carries no strip
+  parameter of its own, but what it composes to -- the fader section's mute -- is state the render
+  thread reads.
 
 So the #140 invariant survives verbatim -- every declared kind is applied -- and the schema gate
 additionally pins *which* plane each kind is applied on, in both directions.
@@ -378,14 +382,16 @@ def self_test() -> int:
         return apply
 
     mutations: list[tuple[str, object]] = [
-        # The brief's named red mutation: a kind added to the Rust authority alone.
+        # The brief's named red mutation: a kind added to the Rust authority alone. It names the
+        # next unclaimed value, so this stays the "added and not threaded" shape rather than a
+        # duplicate of a kind that already ships -- issue #210 phase 1 spent kind 9 on `solo`.
         (
             "a Rust kind is added without the other spellings",
             mutate(
                 RUST_CONSTANTS,
-                "pub const COMMAND_OBSERVE_UNSUBSCRIBE: u32 = 8;",
-                "pub const COMMAND_OBSERVE_UNSUBSCRIBE: u32 = 8;\n"
                 "pub const COMMAND_SOLO: u32 = 9;",
+                "pub const COMMAND_SOLO: u32 = 9;\n"
+                "pub const COMMAND_SOLO_MODE: u32 = 10;",
             ),
         ),
         (
@@ -422,16 +428,24 @@ def self_test() -> int:
             "the host JS set stops at effectBypass",
             mutate(
                 HOST_JS,
-                "const COMMAND_KINDS = new Set([1, 2, 3, 4, 5, 6, 7, 8]);",
+                "const COMMAND_KINDS = new Set([1, 2, 3, 4, 5, 6, 7, 8, 9]);",
                 "const COMMAND_KINDS = new Set([1, 2, 3, 4, 5, 6]);",
+            ),
+        ),
+        (
+            "the host JS set stops one kind short of the wire",
+            mutate(
+                HOST_JS,
+                "const COMMAND_KINDS = new Set([1, 2, 3, 4, 5, 6, 7, 8, 9]);",
+                "const COMMAND_KINDS = new Set([1, 2, 3, 4, 5, 6, 7, 8]);",
             ),
         ),
         (
             "the host JS set gains a kind the wire does not decode",
             mutate(
                 HOST_JS,
-                "const COMMAND_KINDS = new Set([1, 2, 3, 4, 5, 6, 7, 8]);",
                 "const COMMAND_KINDS = new Set([1, 2, 3, 4, 5, 6, 7, 8, 9]);",
+                "const COMMAND_KINDS = new Set([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);",
             ),
         ),
         (
@@ -439,7 +453,7 @@ def self_test() -> int:
             mutate(
                 HOST_JS,
                 "COMMAND_KINDS.has(command.kind)",
-                "command.kind >= 1 && command.kind <= 8",
+                "command.kind >= 1 && command.kind <= 9",
             ),
         ),
         (
@@ -524,9 +538,33 @@ def self_test() -> int:
             "the schema gate's list stops at effectBypass",
             mutate(
                 SCHEMA_GATE,
-                '    "observeSubscribe", "observeUnsubscribe",\n',
+                '    "observeSubscribe", "observeUnsubscribe", "solo",\n',
                 "",
             ),
+        ),
+        (
+            "the schema gate's list drops the render kind added last",
+            mutate(
+                SCHEMA_GATE,
+                '"observeSubscribe", "observeUnsubscribe", "solo",',
+                '"observeSubscribe", "observeUnsubscribe",',
+            ),
+        ),
+        (
+            "the .d.ts enum drops the render kind added last",
+            mutate(HOST_DTS, "  Solo = 9,\n", ""),
+        ),
+        (
+            "the metadata generator puts solo on the observation plane",
+            mutate(
+                METADATA_GENERATOR,
+                '(COMMAND_SOLO, "solo", true, PLANE_RENDER)',
+                '(COMMAND_SOLO, "solo", true, PLANE_OBSERVATION)',
+            ),
+        ),
+        (
+            "the decode whitelist drops solo",
+            mutate(RUST_CONSTANTS, "                | COMMAND_SOLO\n", ""),
         ),
         (
             "the schema gate reinstates the literal range(1, 7)",

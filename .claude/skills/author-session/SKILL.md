@@ -140,6 +140,12 @@ lane detectors (the usual "stereo-linked" behaviour); `average` links by their m
   raise it if stage 3 returns `resource.limit_exceeded`; the fixtures run 16 MiB for three tracks
   to 256 MiB for sixty-four.
 - `fader = { left_db, right_db, left_mute, right_mute }` — decibels and mutes, per lane.
+- **There is no `solo` key, and asking for one is the wrong question.** Solo is monitoring
+  state, not mix state (issue #210 ruling D1): the engine composes it live from the command
+  plane as `left_mute/right_mute || (any solo engaged && this track not soloed)`, and no
+  session document carries a solo bit. A session reloads with every solo clear, and an
+  offline or stem render — which runs with no command stream at all — can never come out
+  soloed. If you want a strip silent *in the document*, set its `left_mute`/`right_mute`.
 
 ### Automation reaches rack effect parameters only
 
@@ -149,9 +155,11 @@ parameter of an effect in a rack**, on a track (submixes and outputs carry no ra
 strip — `trim_db`, `hpf_hz`, `lpf_hz`, `fader_db`, `mute`, the matrix/pan coefficients — has **no
 session automation path at all**.
 
-The metadata marks `fader_db`, `mute` and `matrix_*` `"liveUpdatable": true` with smoothing. That
-is the *command plane*, a host driving them over the control protocol, not this surface — do not
-read it as permission to automate them here. Issue **#178** owns whether the schema should grow one.
+The metadata marks `fader_db`, `mute` and `matrix_*` `"liveUpdatable": true` with smoothing, and
+the metadata's `commandKinds` additionally carries `solo` (9), which has no builtin row at all
+because it is console state rather than a strip parameter. That is all the *command plane*, a host
+driving the engine over the control protocol, not this surface — do not read it as permission to
+automate any of it here. Issue **#178** owns whether the schema should grow one.
 To ride level meanwhile, automate a dB parameter on a rack effect (a compressor's `makeup`) and
 declare it in `params` even at its default so the target resolves.
 

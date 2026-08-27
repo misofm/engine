@@ -28,16 +28,21 @@
 //!
 //! # `commandKinds` is the whole vocabulary, and `plane` says what each kind moves
 //!
-//! Every kind the wire decodes is a row here -- all eight of them. Before the kind-vocabulary
+//! Every kind the wire decodes is a row here -- all nine of them. Before the kind-vocabulary
 //! gate this table stopped at `effectBypass` while the Rust constants, the host JS `COMMAND_KINDS`
 //! set and the `.d.ts` enum all carried eight, and nothing noticed: an app reading its vocabulary
 //! from this file could not learn that `observeSubscribe`/`observeUnsubscribe` exist.
 //!
 //! The two observation kinds are not DSP kinds, so each row carries `plane`. `applied` keeps its
 //! issue #140 meaning -- the ABI applies this kind rather than declaring and refusing it, which is
-//! true of all eight -- and `plane` distinguishes the six that move state the render thread reads
+//! true of all nine -- and `plane` distinguishes the seven that move state the render thread reads
 //! (`"render"`) from the two that bind or unbind an entry in the `miso.observe.v1` subscription
 //! map and change nothing rendered (`"observation"`).
+//!
+//! `solo` (issue #210 phase 1) is a `"render"` kind with no row in `builtins`, and deliberately:
+//! it moves what the render thread reads -- it composes into the fader section's mute -- but it is
+//! console/monitor state rather than a strip DSP parameter, so it has no parameter descriptor, no
+//! domain table and no session key to be automated from.
 //!
 //! # Issue #127 (named nudge sizes)
 //!
@@ -68,7 +73,7 @@ use miso_engine_host_web::{
     COMMAND_REASON_NONE, COMMAND_REASON_OBSERVATION_UNBOUND, COMMAND_REASON_UNKNOWN_EFFECT,
     COMMAND_REASON_UNKNOWN_PARAMETER, COMMAND_REASON_UNKNOWN_RACK, COMMAND_REASON_UNKNOWN_TAP,
     COMMAND_REASON_UNKNOWN_TRACK, COMMAND_REASON_UNSUPPORTED_KIND, COMMAND_REASON_WRONG_STATE,
-    COMMAND_RECORD_BYTES, MAXIMUM_COMMAND_RECORDS,
+    COMMAND_RECORD_BYTES, COMMAND_SOLO, MAXIMUM_COMMAND_RECORDS,
 };
 
 /// The emitted file name, shipped beside the Wasm artifact.
@@ -136,6 +141,7 @@ pub fn render() -> String {
             true,
             PLANE_OBSERVATION,
         ),
+        (COMMAND_SOLO, "solo", true, PLANE_RENDER),
     ];
     for (index, (value, name, applied, plane)) in kinds.iter().enumerate() {
         out.push_str(&format!(

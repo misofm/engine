@@ -156,3 +156,24 @@ Every row below was applied, the named gate run, the red observed, and the tree 
 | `tests::session_source_introspection_is_canonical_ordered_shaped_and_bounded` | index the normalized source list in reverse — `sources.get(index)` → `sources.iter().rev().nth(index)` in both `session_source_id` and `session_source_shape` | `["zeta", "mid", "alpha"]` where `["alpha", "mid", "zeta"]` is required. The fixture declares its three sources deliberately unsorted, and for it the reversed order *is* the declaration order, so this is the "reports the order the file happened to use" defect exactly |
 | `tests::raw_ffi_source_introspection_mirrors_the_track_queries` | give `source_start_frame` an out-of-range sentinel of its own: `map_or(0, …)` → `map_or(u64::MAX, …)` | `assertion left == right failed: left: 18446744073709551615, right: 0`. Source `zeta` declares `start_sample = 0`, so any sentinel this export invents collides with a real answer; the test asserts the zero at index 2 *and* at index 3, which is what makes `source_count` the bounds authority rather than a convenience |
 | `direct-oracle.mjs` (real module, real compiled session) | copy the canonical *track* ID out of `copy_session_source_id` instead of the source ID | `Expected values to be strictly equal: 'track' !== 'fixture-source'` — the oracle addresses the source by the ID the engine reports, so a query that reports the wrong list is caught against the real module. This is the leg the JavaScript suite's fake exports structurally cannot prove |
+
+## Issue #210 phase 1 — solo in place
+
+Solo is 100% control plane, so every pin below is either a rendered-sample assertion or an
+assertion on the one piece of host state the ABI deliberately has no readback for. Each mutation
+was performed on the working tree, run, and reverted; every one was observed red.
+
+| gate | mutation | observed red |
+|---|---|---|
+| `tests::solo_is_bit_identically_mute_on_the_complement` (P1-1) | drop `&& !self.solo(track)` from `ConsoleSoloState::effective_mute`, so the gate silences everything | the soloed tracks silence with the rest and the first commanded block differs from the explicit-mute arm |
+| `tests::un_solo_restores_the_exact_per_lane_user_mute_set` (P1-2) | restore from the gate alone — `track_delta` composes `any_solo && !solo(track)` instead of `effective_mute` | the session's baked `left_mute` comes back unmuted and every block after the settle differs from the never-soloed arm |
+| `tests::mute_and_solo_are_separate_states` (P1-4) | make `set_solo` clear that track's `user_mute` | a repeated solo engage un-mutes the track it re-engages, and the host mirror reads `[false, false]` where the user set `[true, true]` |
+| `tests::a_refused_solo_submission_leaves_the_console_untouched` (P1-5) | delete the `ready.solo.rollback()` on `admit_commands`'s refusal path | the refused engage sticks in host state; the refused console and the untouched console diverge on the retry |
+| `tests::a_solo_that_changes_nothing_emits_nothing` (the −0.0 pin) | drop the changed-lanes test in `ConsoleSoloState::track_delta` — `match (true, true)` | soloing the only track of a one-track console re-mutes its already-settled-muted lanes, the ramp kernel runs instead of the fill, and a negative input renders `-0.0` where the settled path renders exact `+0.0` |
+| `tests::a_batch_of_alternating_solo_toggles_coalesces_to_its_net_effect` (the coalescing pin) | run the net-emission pass once per solo record rather than once per submission, and drop its `record_emitted` sync — per-command fan-out | a 256-record batch of alternating toggles fans out a gate record per track per transition and is refused instead of admitted |
+| `tests::a_console_that_never_solos_renders_what_it_always_did` (the class-A OFF gate) | route `mute` through the coalesced net emission instead of staging its own record | the redundant re-mute of a settled-muted lane stages nothing, the plane stays `+0.0`, and the pinned `-0.0` ramp block is gone — a digest change on a path no solo command touched |
+| `tests::the_decode_staging_holds_a_full_batch_plus_a_solo_transition` (the sizing correction) | size `command_decoded` `2 * MAXIMUM_COMMAND_RECORDS` again, without the `2 * track_count` term | 255 `channel = both` effect-parameter records (510 spans) plus one solo record on a four-track console need 513 entries; the batch is refused `malformed` by the staging bound |
+
+`miso_engine_host_core::solo`'s own unit tests carry the state machine's algebra — the complement
+composition, the per-lane restore, the two-record delta shape, `solo_count`'s incremental
+maintenance, and the shadow/rollback — independently of any host.

@@ -27,9 +27,9 @@ use miso_engine_effect_contract::{
     EffectControlRecordV1, ParameterChannel, ParameterChannelPolicy, parameter_value_valid,
 };
 use miso_engine_host_core::{
-    CompiledSession, EffectControlProducerV1, EffectObservationHandleV1, EffectRack,
-    HostConsoleRequestV1, HostPrepareCaps, HostShapePolicy, PreparedHost, SourceControlError,
-    SourceSubmission, control_table_bytes, prepare_host_session_with_console,
+    CompiledSession, ConsoleSoloState, EffectControlProducerV1, EffectObservationHandleV1,
+    EffectRack, HostConsoleRequestV1, HostPrepareCaps, HostShapePolicy, PreparedHost,
+    SourceControlError, SourceSubmission, control_table_bytes, prepare_host_session_with_console,
     source_id_arena_bytes,
 };
 
@@ -131,6 +131,34 @@ pub const COMMAND_EFFECT_BYPASS: u32 = 6;
 pub const COMMAND_OBSERVE_SUBSCRIBE: u32 = 7;
 /// Disarm one declared observation tap of one effect instance (issue #143 D3).
 pub const COMMAND_OBSERVE_UNSUBSCRIBE: u32 = 8;
+/// Engage or clear one track's solo-in-place bit (issue #210 phase 1).
+///
+/// The shape mirrors [`COMMAND_MUTE`] because solo *is* a mute composition: `rack = 255`,
+/// `channel = 255` (solo is a strip gesture, not a lane one), `values[0]` exactly `0.0` or `1.0`,
+/// and `smoothing_samples` the engage/disengage fade -- the same declick window a mute takes.
+///
+/// It moves no state of its own on the render thread. Admission composes
+/// `effective_mute = user_mute || (any_solo && !my_solo)` over the console's
+/// [`miso_engine_host_core::ConsoleSoloState`] and emits the *existing*
+/// `TrackFaderRecordV1::Mute` records into the *existing* per-track fader queues, so this kind is
+/// on the `render` plane (it moves what the render thread reads) while adding nothing below
+/// `admit_commands`. Refusals reuse the existing vocabulary: `malformed` for a wrong-shaped
+/// record, `domain` for a `values[0]` outside `{0.0, 1.0}` (exactly as `mute` does),
+/// `unknownTrack`, `backpressure` and `wrongState`.
+pub const COMMAND_SOLO: u32 = 9;
+// Issue #210's design proposed *reserving* kind 12 for `soloMode` (0 = SIP, 1 = PFL) here, so
+// phase 5 would not have to renumber. It cannot be done, and the reason is a gate rather than a
+// preference: `scripts/check-command-kind-vocabulary.py` requires the Rust constants to be
+// contiguous from 1 and requires every other spelling -- the decode whitelist, the host JS set,
+// the `.d.ts` enum, the metadata generator's rows and the shipped JSON, whose row *position*
+// stands for its value -- to be that same list. A declared 12 with 10 and 11 absent is a gap in
+// the authority; a declared 12 with nothing decoding it is a kind no caller can send. Either is
+// red, and correctly so.
+//
+// So kinds are allocated when they ship, in the order they ship, and nothing is renumbered by a
+// later phase: 9 is spent here, and `soloMode` takes whatever the next unclaimed value is when
+// phase 5 threads it through all seven spellings. Recorded so the design's reservation is not
+// read as a missing deliverable.
 
 /// The submission was admitted whole.
 pub const COMMAND_REASON_NONE: u32 = 0;
@@ -569,8 +597,13 @@ struct ReadyOwnership {
     /// compilation, one entry per queue (see [`ReadyOwnership::effect_slot`]).
     command_wanted: Box<[u32]>,
     /// Decoded submission staging. Two entries per staged record, because one wire record
-    /// addressed to `channel = both` on a per-lane effect parameter lowers to one span per lane.
+    /// addressed to `channel = both` on a per-lane effect parameter lowers to one span per lane,
+    /// plus `2 * track_count` for the coalesced solo emission (issue #210 phase 1).
     command_decoded: Box<[(u32, AdmittedCommand)]>,
+    /// Issue #210 phase 1: the console's solo bits and its mirrors of user mute and of what the
+    /// render plane was last told. Solo composes into the *existing* mute records at admission and
+    /// adds nothing below it, so this is the whole of solo-in-place on the host side.
+    solo: ConsoleSoloState,
     /// Records admitted per destination queue since the last successful render.
     ///
     /// The browser's control plane and render plane are the same thread and every console stage
@@ -1292,6 +1325,22 @@ impl AudioWorkletEngineHost {
         }
     }
 
+    /// Entries in the decode staging array, for the issue #210 phase 1 sizing pin.
+    #[cfg(test)]
+    pub(crate) fn command_staging_entries(&self) -> Option<usize> {
+        self.ready.as_ref().map(|ready| ready.command_decoded.len())
+    }
+
+    /// The console's solo state, for the issue #210 phase 1 evals.
+    ///
+    /// The ABI has no readback of it on purpose -- solo is control-plane state and the app is the
+    /// one that issued every gesture that moved it -- so this exists only for the tests that have
+    /// to prove the mirror agrees with the session it was prepared from.
+    #[cfg(test)]
+    pub(crate) fn console_solo(&self) -> Option<&ConsoleSoloState> {
+        self.ready.as_ref().map(|ready| &ready.solo)
+    }
+
     /// Drain every finished meter window into the frame buffer (issue #137 D2).
     ///
     /// Returns the number of complete windows folded by this call. Zero work happens without the
@@ -1578,6 +1627,7 @@ impl CommandRecord {
                 | COMMAND_EFFECT_BYPASS
                 | COMMAND_OBSERVE_SUBSCRIBE
                 | COMMAND_OBSERVE_UNSUBSCRIBE
+                | COMMAND_SOLO
         ) {
             return Err(COMMAND_REASON_MALFORMED);
         }
@@ -1677,6 +1727,26 @@ impl CommandRecord {
             }
             _ => Err(COMMAND_REASON_MALFORMED),
         }
+    }
+
+    /// Read one `solo` record's requested bit, or say why it cannot be read (issue #210 phase 1).
+    ///
+    /// Deliberately *not* an arm of [`Self::into_track_record`]: a solo record lowers to no record
+    /// of its own. It moves console state, and the mute records that state composes to are staged
+    /// once, coalesced, at the end of the submission's first pass. The shape rules are `mute`'s,
+    /// with `channel = 255` because solo addresses a strip and not a lane, and the same
+    /// `DOMAIN`-for-a-non-boolean rule `mute` uses for `values[0]`.
+    const fn into_solo_request(self) -> Result<bool, u32> {
+        if self.rack != 255 || self.channel != 255 {
+            return Err(COMMAND_REASON_MALFORMED);
+        }
+        if self.values[1] != 0.0 || self.values[2] != 0.0 || self.values[3] != 0.0 {
+            return Err(COMMAND_REASON_MALFORMED);
+        }
+        if self.values[0] != 0.0 && self.values[0] != 1.0 {
+            return Err(COMMAND_REASON_DOMAIN);
+        }
+        Ok(self.values[0] == 1.0)
     }
 
     /// Lower one effect-addressed record against the addressed effect's own descriptor.
@@ -1829,9 +1899,36 @@ const fn lane_selector(channel: u8) -> Option<BuiltinLaneSelector> {
 /// that broke a rule.
 ///
 /// One wire record can lower to two admitted records (`channel = both` on a per-lane effect
-/// parameter), which is why `command_decoded` is twice `MAXIMUM_COMMAND_RECORDS` long and why the
-/// room counted is per lowered record rather than per wire record.
+/// parameter), and one submission that touches solo owes up to two *more* per track (issue #210
+/// phase 1), which is why `command_decoded` is `2 * MAXIMUM_COMMAND_RECORDS + 2 * track_count`
+/// long and why the room counted is per lowered record rather than per wire record.
+///
+/// # The solo transaction (issue #210 phase 1)
+///
+/// Pass one now also mutates console solo state -- the solo bits, the user-mute mirror, the
+/// emitted-mute mirror -- while it is still deciding whether the submission is admissible at all.
+/// So the state carries its own shadow and this wrapper is where it is closed: `commit` once pass
+/// three has actually pushed, `rollback` on every refusal. A refused submission leaves host state
+/// exactly as it was, which is the same all-or-nothing contract the queues keep.
 fn admit_commands(
+    ready: &mut ReadyOwnership,
+    bytes: &[u8],
+    count: usize,
+) -> Result<(), CommandRejection> {
+    match admit_commands_staged(ready, bytes, count) {
+        Ok(()) => {
+            ready.solo.commit();
+            Ok(())
+        }
+        Err(rejection) => {
+            ready.solo.rollback();
+            Err(rejection)
+        }
+    }
+}
+
+/// The three passes themselves. Every exit from here is a transaction boundary for its caller.
+fn admit_commands_staged(
     ready: &mut ReadyOwnership,
     bytes: &[u8],
     count: usize,
@@ -1853,6 +1950,10 @@ fn admit_commands(
         index: index as u32,
     };
     let mut lowered = 0_usize;
+    // Issue #210 phase 1: solo state changes are applied as they are read, but the mute records
+    // they compose to are staged once, after the whole batch, by the coalescing pass below.
+    let mut solo_seen = false;
+    let mut solo_smoothing = 0_u32;
     for index in 0..count {
         let record = &bytes[index * record_bytes..(index + 1) * record_bytes];
         let command = CommandRecord::decode(record).map_err(|reason| refuse(reason, index))?;
@@ -1862,7 +1963,7 @@ fn admit_commands(
         }
         let mut staged = [AdmittedCommand::Effect(EffectControlRecordV1::Bypass(false)); 2];
         let (slot, produced) = match command.kind {
-            COMMAND_PAN | COMMAND_MATRIX | COMMAND_FADER_DB | COMMAND_MUTE => {
+            COMMAND_PAN | COMMAND_MATRIX | COMMAND_FADER_DB => {
                 staged[0] = command
                     .into_track_record()
                     .map_err(|reason| refuse(reason, index))?;
@@ -1874,6 +1975,54 @@ fn admit_commands(
                     return Err(refuse(COMMAND_REASON_UNSUPPORTED_KIND, index));
                 }
                 (slot, 1)
+            }
+            // A mute command carries the user's *intent*; what reaches the queue is the composed
+            // effective mute. With no solo engaged the two are the same value and this stages
+            // byte-for-byte what it staged before solo existed. Every lane a selector covers
+            // shares one track-scoped solo term, so one record still carries the whole command.
+            COMMAND_MUTE => {
+                let lowered_record = command
+                    .into_track_record()
+                    .map_err(|reason| refuse(reason, index))?;
+                if ready.controls.get(track).is_none() {
+                    return Err(refuse(COMMAND_REASON_UNSUPPORTED_KIND, index));
+                }
+                let AdmittedCommand::Fader(TrackFaderRecordV1::Mute {
+                    lanes,
+                    muted,
+                    smoothing_samples,
+                }) = lowered_record
+                else {
+                    return Err(refuse(COMMAND_REASON_MALFORMED, index));
+                };
+                if !ready.solo.set_user_mute(track, lanes, muted) {
+                    return Err(refuse(COMMAND_REASON_UNKNOWN_TRACK, index));
+                }
+                let effective = muted || (ready.solo.any_solo() && !ready.solo.solo(track));
+                ready.solo.record_emitted(track, lanes, effective);
+                staged[0] = AdmittedCommand::Fader(TrackFaderRecordV1::Mute {
+                    lanes,
+                    muted: effective,
+                    smoothing_samples,
+                });
+                (track_count + track, 1)
+            }
+            // Solo lowers to nothing here. It moves one console bit; the records that bit composes
+            // to are the coalescing pass's business, because a batch of alternating toggles would
+            // otherwise fan out up to `2 * track_count` records *per transition*.
+            COMMAND_SOLO => {
+                let engaged = command
+                    .into_solo_request()
+                    .map_err(|reason| refuse(reason, index))?;
+                if ready.controls.get(track).is_none() {
+                    return Err(refuse(COMMAND_REASON_UNSUPPORTED_KIND, index));
+                }
+                if !ready.solo.set_solo(track, engaged) {
+                    return Err(refuse(COMMAND_REASON_UNKNOWN_TRACK, index));
+                }
+                solo_seen = true;
+                solo_smoothing = command.smoothing_samples;
+                (track_count + track, 0)
             }
             COMMAND_EFFECT_PARAM
             | COMMAND_EFFECT_BYPASS
@@ -1927,6 +2076,44 @@ fn admit_commands(
             };
             *entry = (slot as u32, record);
             lowered += 1;
+        }
+    }
+    // The coalesced net emission (issue #210 phase 1, correction 1). Every solo and mute change in
+    // the batch has been applied; what the console owes the render plane is now the difference
+    // between the composed effective mute and what the render plane was last told -- at most two
+    // records per track, and **never** a redundant one. That last clause is load-bearing for bit
+    // identity, not an optimisation: re-muting an already-settled-muted lane with a nonzero
+    // smoothing window re-enters the ramp kernel and turns an exact `+0.0` into `-0.0` for a
+    // negative input. It runs only for a batch that actually moved a solo bit; without one, every
+    // mute command already staged its own record and the difference is empty by construction.
+    //
+    // The fade is the last solo record's `smoothing_samples`: a batch is one gesture, and the
+    // gesture that moved the solo state is the one whose declick window the console asked for.
+    if solo_seen {
+        for track in 0..track_count {
+            let slot = track_count + track;
+            for (lanes, muted) in ready.solo.track_delta(track).into_iter().flatten() {
+                let Some(wanted) = ready.command_wanted.get_mut(slot) else {
+                    return Err(refuse(
+                        COMMAND_REASON_UNSUPPORTED_KIND,
+                        count.saturating_sub(1),
+                    ));
+                };
+                *wanted = wanted.saturating_add(1);
+                let Some(entry) = ready.command_decoded.get_mut(lowered) else {
+                    return Err(refuse(COMMAND_REASON_MALFORMED, count.saturating_sub(1)));
+                };
+                *entry = (
+                    slot as u32,
+                    AdmittedCommand::Fader(TrackFaderRecordV1::Mute {
+                        lanes,
+                        muted,
+                        smoothing_samples: solo_smoothing,
+                    }),
+                );
+                lowered += 1;
+                ready.solo.record_emitted(track, lanes, muted);
+            }
         }
     }
     for entry in 0..lowered {
@@ -2312,6 +2499,14 @@ fn compile_ready(
     rack_effects
         .try_reserve_exact(track_count)
         .map_err(|_| fixed_diagnostic("web.resource.allocation"))?;
+    // Issue #210 phase 1: the solo state's user-mute mirror starts from the *session's* baked
+    // fader mutes -- the same `left_mute`/`right_mute` words `track_parameters` compiles into the
+    // prepared fader section -- read in the same normalized track order `handles.tracks` carries,
+    // because that order is the addressing authority for every queue, meter and command index.
+    let mut prepared_mutes: Vec<[bool; 2]> = Vec::new();
+    prepared_mutes
+        .try_reserve_exact(track_count)
+        .map_err(|_| fixed_diagnostic("web.resource.allocation"))?;
     for track in &session.normalized_model().tracks {
         let count = |effects: usize| -> Result<u32, Vec<u8>> {
             u32::try_from(effects).map_err(|_| fixed_diagnostic("web.console.effects"))
@@ -2321,6 +2516,7 @@ fn compile_ready(
             count(track.dynamic.effects.len())?,
             count(track.simd2.effects.len())?,
         ]);
+        prepared_mutes.push([track.fader.left_mute, track.fader.right_mute]);
     }
     // Issue #140 A: the dense effect-queue index. `effect_base[t]` is the number of effect
     // instances declared by every earlier track, so `effect_slot` is arithmetic rather than a
@@ -2425,7 +2621,9 @@ fn compile_ready(
         meter_header,
         effect_base: effect_base.into_boxed_slice(),
         command_wanted: boxed_zero_u32(queue_count)?,
-        command_decoded: boxed_command_staging()?,
+        command_decoded: boxed_command_staging(track_count)?,
+        solo: ConsoleSoloState::try_new(&prepared_mutes)
+            .map_err(|_| fixed_diagnostic("web.resource.allocation"))?,
         in_flight: boxed_zero_u32(queue_count)?,
         tracks: handles.tracks,
         rack_effects: rack_effects.into_boxed_slice(),
@@ -2495,10 +2693,19 @@ fn boxed_zero_meter_frame(track_count: usize) -> Result<Box<[f32]>, Vec<u8>> {
     Ok(value.into_boxed_slice())
 }
 
-fn boxed_command_staging() -> Result<Box<[(u32, AdmittedCommand)]>, Vec<u8>> {
+fn boxed_command_staging(track_count: usize) -> Result<Box<[(u32, AdmittedCommand)]>, Vec<u8>> {
     // Two entries per staged wire record: one `channel = both` command on a per-lane effect
     // parameter lowers to one record per lane (#140 C).
-    let count = MAXIMUM_COMMAND_RECORDS as usize * 2;
+    //
+    // Plus `2 * track_count` for issue #210 phase 1's coalesced solo emission. A submission that
+    // moves a solo bit owes the console the difference between the composed effective mute and
+    // what the render plane was last told; that is at most two records per track, because
+    // `TrackFaderRecordV1::Mute` carries one `muted` bool and a track whose user mute is
+    // asymmetric needs one record per lane to restore. The two terms add rather than max: a batch
+    // may carry 256 effect-parameter records *and* a solo toggle.
+    let count = (MAXIMUM_COMMAND_RECORDS as usize * 2)
+        .checked_add(track_count.checked_mul(2).ok_or_else(arithmetic)?)
+        .ok_or_else(arithmetic)?;
     let empty = (
         0_u32,
         AdmittedCommand::Effect(EffectControlRecordV1::Bypass(false)),
@@ -2509,6 +2716,10 @@ fn boxed_command_staging() -> Result<Box<[(u32, AdmittedCommand)]>, Vec<u8>> {
         .map_err(|_| fixed_diagnostic("web.resource.allocation"))?;
     value.resize(count, empty);
     Ok(value.into_boxed_slice())
+}
+
+fn arithmetic() -> Vec<u8> {
+    fixed_diagnostic("web.resource.arithmetic")
 }
 
 /// One `code\t$\n` diagnostic line for a rule that names no session path.

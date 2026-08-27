@@ -172,11 +172,11 @@ export interface MisoUnsupportedBrowserV1 {
 
 /// Frozen live-console command kinds (issue 137 D1).
 ///
-/// All eight are one vocabulary, proved across every file that spells it -- this enum, the Rust
+/// All nine are one vocabulary, proved across every file that spells it -- this enum, the Rust
 /// `COMMAND_*` constants, the wire's decode whitelist, the host JS `COMMAND_KINDS` set, the
 /// metadata generator and the shipped `commandKinds` rows -- by
 /// `scripts/check-command-kind-vocabulary.py`. Every one of them is *applied*: nothing here is
-/// declared and refused (issue 140). Six of them move state the render thread reads; the two
+/// declared and refused (issue 140). Seven of them move state the render thread reads; the two
 /// observation kinds move the `miso.observe.v1` subscription map and nothing rendered, which is
 /// what the metadata JSON's per-kind `plane` field reports.
 export const enum MisoCommandKindV1 {
@@ -207,6 +207,32 @@ export const enum MisoCommandKindV1 {
   /// Applied on the `miso.observe.v1` plane: it clears an entry from the subscription map. The
   /// metadata JSON reports it as `"plane": "observation"`.
   ObserveUnsubscribe = 8,
+  /// Engage or clear one track's solo-in-place bit. Applied (issue 210 phase 1).
+  ///
+  /// Console state, not a strip DSP parameter -- which is why solo has no row in the metadata
+  /// JSON's `builtins` table while it does have a `commandKinds` row. `rack` and `channel` are
+  /// both `255`: solo addresses a strip, not a lane. `values[0]` is exactly `0` or `1`, and
+  /// `smoothingSamples` is the engage/disengage fade -- the same declick window `Mute` takes, and
+  /// worth giving the same value the app uses for a mute.
+  ///
+  /// Solo is composed, not stored twice: the engine keeps your per-lane mute intent and your solo
+  /// bits as separate states and gates each strip on
+  /// `userMute || (anySoloEngaged && !thisTrackSoloed)`. So muting a soloed track silences it,
+  /// clearing solo restores exactly the mutes you had -- per lane -- and the whole gesture rides
+  /// the same declicked fader endpoint a `Mute` rides.
+  ///
+  /// Solo is **monitoring state and is never persisted in a session** (issue 210 decision D1): an
+  /// offline or stem render of a session can never come out soloed, and reloading a session
+  /// starts with every solo bit clear.
+  ///
+  /// Metering is console-correct across a solo, and the code for it is unchanged: the gate sits at
+  /// the fader, so a session's pre-fader send taps (`input`, `post_input_builtins`, `post_simd1`,
+  /// `post_dynamic`, `post_simd2_pre_fader`) keep reading the un-gated signal, while
+  /// `post_fader`, `post_matrix`, the submixes, the output and this host's own meter frame --
+  /// including `masterGrDb` -- read the gated mix. A gain-reduction reading on a strip that solo
+  /// has silenced falls toward zero reduction, because that is the true state of its signal path
+  /// and not an artifact.
+  Solo = 9,
 }
 
 /// Frozen typed reasons a live-console submission was refused (issue 137 D1).
@@ -254,9 +280,11 @@ export interface MisoCommandV1 {
   trackIndex: number;
   effectIndex: number;
   parameterId: number;
-  /// Ramp window in sample updates for `Pan` and `Matrix`; ignored by every other kind.
+  /// Ramp window in sample updates for `Pan`, `Matrix`, `FaderDb`, `Mute` and `Solo`; the
+  /// observation kinds read it as a window length in render blocks, and it is ignored by the rest.
   smoothingSamples: number;
-  /// `Pan`: `[left, right, 0, 0]`. `Matrix`: `[ll, lr, rl, rr]`. Everything else: `[value, 0, 0, 0]`.
+  /// `Pan`: `[left, right, 0, 0]`. `Matrix`: `[ll, lr, rl, rr]`. `Mute` and `Solo`: `[0|1, 0, 0, 0]`
+  /// exactly. Everything else: `[value, 0, 0, 0]`.
   values: [number, number, number, number];
 }
 
