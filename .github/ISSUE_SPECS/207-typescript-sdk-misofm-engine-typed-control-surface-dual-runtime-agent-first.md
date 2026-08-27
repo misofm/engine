@@ -220,3 +220,19 @@ final handoff names exact commits, gate counts/digests, unresolved findings, and
 - Focused serialized gate result: `documents=247`, `effect-parameters=66`,
   `builtin-negative-cases=20`, `effect-negative-cases=132`, `effect-prepare-cases=127`,
   `schema-envelope-cases=5`, `ratio-asymmetry=PASS`. Phase-wide sweep/fmt/clippy remain pending.
+
+### Phase 1 integration sweep repair (pending checkpoint)
+
+- The first serialized 94-row phase sweep reported `90/94` in `114s`. All four failures had two
+  integration causes: the corpus gate's private validator-path environment variable violated the
+  repository-wide `MISO_ENGINE_` vocabulary, and the Issue-081 source-artifact policy treated the
+  deliberately packaged SDK Wasm as an accidental build output. The failures are recorded as red;
+  none was suppressed.
+- The validator binary is now passed as an ordinary positional argument, avoiding a new process
+  environment contract. The artifact policy exempts only
+  `sdk/assets/miso-engine-v2-audio-worklet.simd128.wasm`; a deliberate sibling Wasm mutation proves
+  the policy remains red for generated artifacts elsewhere under `sdk/`.
+- Focused green evidence: shell syntax for every edited script; qualification policy plus its red
+  mutation suite; environment vocabulary plus its mutation suite; generated SDK self-test; and a
+  fresh serialized E3-E5 corpus with the same `247/20/132/127/5` counts. A fresh full sweep remains
+  required after this checkpoint.

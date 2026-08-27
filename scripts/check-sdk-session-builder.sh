@@ -19,4 +19,4 @@ bash -n "$0"
 env CARGO_TARGET_DIR="$target_dir" cargo build --locked -p miso-engine-session-validator
 validator="$target_dir/debug/miso_engine_session_validator"
 [[ -x $validator ]] || { echo "validator build produced no binary" >&2; exit 1; }
-MISO_SESSION_VALIDATOR="$validator" node sdk/test/session-corpus.mjs "$@"
+node sdk/test/session-corpus.mjs "$validator" "$@"

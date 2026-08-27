@@ -183,6 +183,7 @@ if find fixtures/effect-interchange/v1 -mindepth 1 -maxdepth 1 -type f \
     fail 'untracked/generated corpus appeared in interchange fixture directory'
 fi
 if find . -path './target' -prune -o -type f \
+    ! -path './sdk/assets/miso-engine-v2-audio-worklet.simd128.wasm' \
     \( -name '*.o' -o -name '*.a' -o -name '*.so' -o -name '*.dylib' -o -name '*.wasm' \
        -o -name '*.profraw' -o -name '*.jsonl.raw' \) -print | grep -q .; then
     fail 'generated artifact exists under a source path'

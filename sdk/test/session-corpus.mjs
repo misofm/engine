@@ -10,12 +10,11 @@ import { pathToFileURL } from "node:url";
 
 const root = resolve(import.meta.dirname, "..", "..");
 const sdkRoot = resolve(root, "sdk");
-const validator = process.env.MISO_SESSION_VALIDATOR;
-const selfTest = process.argv[2] === "--self-test";
+const validator = process.argv[2];
+const selfTest = process.argv[3] === "--self-test";
 
-if (!validator) throw new Error("MISO_SESSION_VALIDATOR must name the already-built validator binary");
-if (process.argv.length > 3 || (process.argv[2] && !selfTest)) {
-  throw new Error("usage: node sdk/test/session-corpus.mjs [--self-test]");
+if (!validator || process.argv.length > 4 || (process.argv[3] && !selfTest)) {
+  throw new Error("usage: node sdk/test/session-corpus.mjs VALIDATOR [--self-test]");
 }
 
 const SAMPLE_RATE = 48_000;

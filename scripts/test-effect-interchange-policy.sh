@@ -15,6 +15,11 @@ expect_failure() {
 }
 
 check
+mkdir -p "$temp/sdk/assets"
+printf 'deliberate stray wasm\n' >"$temp/sdk/assets/not-the-packaged-engine.wasm"
+expect_failure generated-artifact
+rm "$temp/sdk/assets/not-the-packaged-engine.wasm"
+
 printf 'changed\n' >>"$temp/fixtures/effect-state/v1/canonical.state.hex"
 expect_failure baseline
 cp "$root/fixtures/effect-state/v1/canonical.state.hex" \
