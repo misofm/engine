@@ -60,6 +60,12 @@ use miso_engine_lane::{Backend, Lane, Simd4, Simd8};
 /// Fixed cascade length in V1.
 pub const EQ_SECTION_COUNT_V1: usize = 4;
 
+/// Coefficient words one SVF section carries, in the pinned `c1, a2, a3, m0, m1, m2` order.
+///
+/// This is the width of `EqSvfWordsV1::to_array`, of `SvfCoef`, and of `SvfCoefStep`: exactly the
+/// per-section surface the cascade kernel loads.
+const EQ_COEFFICIENT_WORDS: usize = 6;
+
 /// State payload layout version. Version 1 was the delta-word layout of issue #42.
 const STATE_LAYOUT_VERSION: u32 = 2;
 /// Words one band occupies in a lane section of the payload.
@@ -758,6 +764,14 @@ const IDENTITY_WORD_BITS: [u32; 6] = {
         words[5].to_bits(),
     ]
 };
+
+/// Reads the raw bits of one lane of a vector. Control plane only: it leaves the vector domain.
+fn lane_bits<L: Lane>(value: L, lane: usize) -> u32 {
+    debug_assert!(L::WIDTH <= MAX_LANES);
+    let mut words = [0_u32; MAX_LANES];
+    value.store_bits(&mut words[..L::WIDTH]);
+    words[lane]
+}
 
 /// `true` when every lane of `value` holds exactly the bit pattern `bits`.
 fn lane_bits_all<L: Lane>(value: L, bits: u32) -> bool {
@@ -2025,9 +2039,73 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
     }
 }
 
+/// The `DESIGNED` term of the channel-symmetry witness, over the EQ's own kernel read surface.
+///
+/// # The word list, and why it is exactly this
+///
+/// `svf_cascade_interleaved` (`miso_engine_lane::kernels`) loads one thing per section per
+/// channel: `SvfCoef` -- the six words `c1, a2, a3, m0, m1, m2`. The ramped body
+/// (`svf_block_ramped`) additionally advances those words by `SvfCoefStep` and, at the sample the
+/// ramp lands on, assigns `target` over `coef`; how many samples remain is `Channel::remaining`.
+/// So the designed surface for lane `l` of one channel is
+///
+/// * `sections[s].coef`   -- 4 x 6 words, what this frame uses;
+/// * `sections[s].step`   -- 4 x 6 words, the increment, exactly `+0.0` on a settled lane;
+/// * `sections[s].target` -- 4 x 6 words, where the ramp lands;
+/// * `remaining[s][l]`    -- 4 counters, when it lands.
+///
+/// Two channels that agree on all seventy-six of those words produce bit-identical output from
+/// bit-identical input, and stay in agreement for as long as no per-channel write arrives:
+/// `advance_words` is the same increment applied to the same word, and `snap` assigns the same
+/// target on the same sample.
+///
+/// Deliberately excluded, each for its own reason:
+///
+/// * `sections[s].state` (`ic1`, `ic2`) -- running filter state, not a designed word. It is what
+///   the *state* half of the collapse argument is about, and it converges by induction rather
+///   than by comparison.
+/// * `identity[s]` -- a per-**channel** flag over *every* lane of the bank, refreshed from the
+///   same `coef` words this already compares. Reading it would make one lane's witness depend on
+///   its neighbours' parameters, which is precisely the cross-lane coupling the witness must not
+///   have; and it carries no information the coefficient comparison does not.
+/// * `targets[l][s]` (`BandTarget`) -- the control-plane band description. The kernel never reads
+///   it, and it is the design *input*, not the designed word: two different band descriptions
+///   that design to the same six words are symmetric, and the words are what decides that.
+/// * `silent_fixed_point`, `metadata.bypass` -- whole-instance, so they cannot be asymmetric.
+impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
+    fn designed_channel_symmetry(&self, lane: usize) -> bool {
+        if lane >= W || lane >= L::WIDTH {
+            return false;
+        }
+        for section in 0..EQ_SECTION_COUNT_V1 {
+            let left = &self.left.sections[section];
+            let right = &self.right.sections[section];
+            for word in 0..EQ_COEFFICIENT_WORDS {
+                if lane_bits(coef_word(&left.coef, word), lane)
+                    != lane_bits(coef_word(&right.coef, word), lane)
+                    || lane_bits(step_word(&left.step, word), lane)
+                        != lane_bits(step_word(&right.step, word), lane)
+                    || lane_bits(coef_word(&left.target, word), lane)
+                        != lane_bits(coef_word(&right.target, word), lane)
+                {
+                    return false;
+                }
+            }
+            if self.left.remaining[section][lane] != self.right.remaining[section][lane] {
+                return false;
+            }
+        }
+        true
+    }
+}
+
 impl PreparedNativeEffect for PreparedParametricEq<f32, 1> {
     fn metadata(&self) -> PreparedEffectMetadata {
         self.metadata
+    }
+
+    fn channel_symmetry(&self) -> bool {
+        self.designed_channel_symmetry(0)
     }
 
     fn reset(&mut self, kind: ResetKind) {
@@ -2089,6 +2167,10 @@ impl PreparedNativeEffect for PreparedParametricEq<f32, 1> {
 impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedParametricEq<L, W> {
     fn metadata(&self) -> PreparedBankMetadata {
         self.bank.clone()
+    }
+
+    fn lane_channel_symmetry(&self, lane: usize) -> bool {
+        self.designed_channel_symmetry(lane)
     }
 
     fn reset(&mut self, kind: ResetKind) {

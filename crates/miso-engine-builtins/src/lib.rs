@@ -27,7 +27,7 @@ use miso_engine_core::{
 };
 pub mod corpus;
 
-use miso_engine_effect_contract::BankWidth;
+use miso_engine_effect_contract::{BankWidth, ChannelSymmetryWitnessV1};
 use miso_engine_lane::{
     Backend, Lane, Simd4, Simd8,
     kernels::{
@@ -854,6 +854,64 @@ impl<L: Lane> InputStage<L> {
         }
     }
 
+    /// Whether every designed word the input chain's kernel reads for `lane` compares
+    /// **bit-equal** between the two channels.
+    ///
+    /// # The word list, and why it is exactly this
+    ///
+    /// `input_chain_block` (and both of its elided variants) reads one thing per channel:
+    /// `InputChainCoef`. That is
+    ///
+    /// * `trim[channel]` -- one word, with the polarity inversion already folded in
+    ///   (`InputLane::trim_signed`), so its sign bit *is* the polarity flag and comparing the word
+    ///   compares `trim_db` and `polarity_invert` together;
+    /// * `section[channel][s].{c1, a2, a3, m0, m1, m2}` -- six words per section, two sections
+    ///   (`0` high-pass, `1` low-pass).
+    ///
+    /// Twenty-six words per lane. `k` (`1/Q`) is not among them: it lives only in the
+    /// control-plane `SvfSection` and is folded into `m1` by `svf_coef`, so the kernel never sees
+    /// it and neither does this.
+    ///
+    /// Deliberately excluded, each for its own reason:
+    ///
+    /// * `InputChainState` (`ic1`, `ic2`) -- running integrator state, not a designed word.
+    /// * `InputChainPlan` -- the Job-1 elision decision. It is a pure boolean function of the very
+    ///   words above and of the state, so it carries no information this comparison does not; and
+    ///   it is decided over **every** lane of the bank (`every_lane_is`), so reading it would make
+    ///   one lane's witness depend on its neighbours' parameters, which is exactly the cross-lane
+    ///   coupling the witness must not have.
+    /// * `members`, `active`, `lifetime_recovered` -- cohort shape and counters, not track
+    ///   parameters. A lane's witness must not change because the cohort grew.
+    fn lane_channel_symmetry(&self, lane: usize) -> bool {
+        if lane >= self.members || lane >= L::WIDTH {
+            return false;
+        }
+        if lane_read::<L>(self.coef.trim[0])[lane].to_bits()
+            != lane_read::<L>(self.coef.trim[1])[lane].to_bits()
+        {
+            return false;
+        }
+        for section in 0..2 {
+            let left = &self.coef.section[0][section];
+            let right = &self.coef.section[1][section];
+            for (left_word, right_word) in [
+                (left.c1, right.c1),
+                (left.a2, right.a2),
+                (left.a3, right.a3),
+                (left.m0, right.m0),
+                (left.m1, right.m1),
+                (left.m2, right.m2),
+            ] {
+                if lane_read::<L>(left_word)[lane].to_bits()
+                    != lane_read::<L>(right_word)[lane].to_bits()
+                {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
     /// Which sections this stage elides, `[channel][section]`. Evidence only.
     fn elision_plan(&self) -> [[bool; 2]; 2] {
         self.plan.elided
@@ -1549,6 +1607,33 @@ fn prepare_sections(
 }
 
 impl InputBuiltins {
+    /// This track's channel-symmetry witness, as far as the input builtins can speak to it.
+    ///
+    /// `DESIGNED` is the bitwise comparison of the twenty-six words
+    /// `InputStage::lane_channel_symmetry` documents. Every other term stays set, and two of them
+    /// deliberately so:
+    ///
+    /// * `SOURCE` is the track's **source mapping**, which this crate never sees; it is decided on
+    ///   the control plane by `miso_engine_builtins_compiler::track_mono_source_v1` and conjoined
+    ///   there. It is not stamped into this object because the prepared size of this type is a
+    ///   sealed fixture-ABI number (`INPUT_PROCESSOR_BYTES_V1`), and a phase that changes no
+    ///   behaviour must not move a sealed byte count to carry a bit nothing rendered reads.
+    /// * The two live terms stay set because `polarity_invert`, `trim_db`, `hpf_hz` and `lpf_hz`
+    ///   are all `PreparedOnly` in `BUILTIN_PARAMETER_DESCRIPTORS_V1`: there is no
+    ///   post-preparation write path to this stage and so no drain to hook. **That is the seam the
+    ///   builtins liveness work will land on** -- when a trim/polarity record queue arrives here,
+    ///   its drain folds `ChannelSymmetryWitnessV1::admit` in exactly as the effect drain does,
+    ///   and the record type must implement `LiveConsoleRecordV1` to get there at all.
+    #[must_use]
+    pub fn channel_symmetry(&self) -> ChannelSymmetryWitnessV1 {
+        let mut witness = ChannelSymmetryWitnessV1::SYMMETRIC;
+        witness.set(
+            ChannelSymmetryWitnessV1::DESIGNED,
+            self.stage.lane_channel_symmetry(0),
+        );
+        witness
+    }
+
     /// Renders one already-validated block. Infallible: the block shape was checked once (F9).
     pub fn process(&mut self, block: DualMonoBlock<'_>) -> BuiltinProcessReport {
         let frames = block.left.len();
@@ -1613,6 +1698,21 @@ pub struct BuiltinInputBankV1 {
 }
 
 impl BuiltinInputBankV1 {
+    /// Lane `lane`'s track's channel-symmetry witness, as far as the input builtins speak to it.
+    ///
+    /// The banked form of [`InputBuiltins::channel_symmetry`]; a padding lane, which no track
+    /// owns, declines.
+    #[must_use]
+    pub fn lane_symmetry(&self, lane: usize) -> ChannelSymmetryWitnessV1 {
+        let designed = match &self.stage {
+            InputStageKernel::Simd4(stage) => stage.lane_channel_symmetry(lane),
+            InputStageKernel::Simd8(stage) => stage.lane_channel_symmetry(lane),
+        };
+        let mut witness = ChannelSymmetryWitnessV1::SYMMETRIC;
+        witness.set(ChannelSymmetryWitnessV1::DESIGNED, designed);
+        witness
+    }
+
     /// Builds a bank from one to `width.lanes()` independently prepared tracks.
     ///
     /// # Errors

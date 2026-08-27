@@ -44,8 +44,8 @@ use miso_engine_core::realtime::{ArenaLeaseSetBuilder, ArenaLeaseV1, RenderError
 /// offset by one.
 pub(crate) const ARENA_BASE: u32 = 1;
 use miso_engine_effect_contract::{
-    BypassShunt, EffectControlLane, EffectProcessBlock, ObservationLaneV1, ObservationSampleV1,
-    PreparedAutomationSpan, PreparedNativeEffect,
+    BypassShunt, ChannelSymmetryWitnessV1, EffectControlLane, EffectProcessBlock,
+    ObservationLaneV1, ObservationSampleV1, PreparedAutomationSpan, PreparedNativeEffect,
 };
 use miso_engine_lane::kernels::{mix2x2_block, pdc_delay_block, sum_into_block, sum2_block};
 use miso_engine_rack::{BankChain, BankMembers};
@@ -376,6 +376,17 @@ impl RuntimeUnit {
         }
     }
 
+    /// `[collapse-eligible lanes, lanes] ` this unit realises. Evidence and gates only.
+    ///
+    /// A bank counts its active lanes; a single op counts one "lane", its own node. Nothing on
+    /// the render path calls this.
+    pub(crate) fn symmetry_counters(&self) -> [u64; 2] {
+        match self {
+            Self::Op(op) => [u64::from(op.kind.channel_symmetry().eligible()), 1],
+            Self::Bank { chain, .. } => chain.symmetry_counters(),
+        }
+    }
+
     /// `[observed stages, declared taps, armed taps]` for this unit (issue #143 E5).
     pub(crate) fn observation_binding_counts(&self) -> [u64; 3] {
         match self {
@@ -395,6 +406,34 @@ impl RuntimeUnit {
 }
 
 impl NodeKind {
+    /// This op's channel-symmetry witness.
+    ///
+    /// A bank member says nothing: its work is the chain's, and the chain's slots carry the
+    /// witness for it. An identity, a source input and a route are not upstream-of-seam track
+    /// work at all. Everything else answers for itself, and the two effect variants answer with
+    /// the effect's own designed-word comparison -- plus, for a console-driven one, the live terms
+    /// its drain maintains.
+    pub(crate) fn channel_symmetry(&self) -> ChannelSymmetryWitnessV1 {
+        let designed = |symmetric: bool| {
+            if symmetric {
+                ChannelSymmetryWitnessV1::SYMMETRIC
+            } else {
+                ChannelSymmetryWitnessV1::symmetric_except(ChannelSymmetryWitnessV1::DESIGNED)
+            }
+        };
+        match self {
+            Self::Effect(effect) => designed(effect.processor.channel_symmetry()),
+            Self::ConsoleEffect(console) => designed(console.effect.processor.channel_symmetry())
+                .and(console.control.symmetry()),
+            Self::Bound(processor) => processor.channel_symmetry(),
+            // Not a per-track upstream stage: nothing here can make the two channels disagree,
+            // and nothing here is collapsed.
+            Self::Identity | Self::SourceInput | Self::Route(_) | Self::BankMember => {
+                ChannelSymmetryWitnessV1::SYMMETRIC
+            }
+        }
+    }
+
     /// `[observed stages, declared taps, armed taps]` for one op.
     pub(crate) fn observation_binding_counts(&self) -> [u64; 3] {
         let Self::ConsoleEffect(console) = self else {
@@ -819,6 +858,9 @@ impl BankStage for BuiltinStage {
     }
     fn qualification_counters(&self) -> [u64; 2] {
         self.0.qualification_counters()
+    }
+    fn lane_symmetry(&self, lane: usize) -> ChannelSymmetryWitnessV1 {
+        self.0.lane_symmetry(lane)
     }
 }
 

@@ -107,6 +107,21 @@ pub trait PreparedPlanExecutor: Send {
     fn bank_shape(&self) -> [u64; 2] {
         [0, 0]
     }
+    /// `[collapse-eligible lanes, lanes]` the built runtime realises: the channel-symmetry census.
+    ///
+    /// A lane is eligible when every term of its channel-symmetry witness holds -- the two
+    /// channels are fed by one source channel, every designed per-lane word every upstream stage's
+    /// kernel reads compares bit-equal between them, no admitted record has written one channel's
+    /// upstream word, no upstream stage is live-bypassed, and every restored payload's two
+    /// sections compared byte-equal.
+    ///
+    /// **Nothing rendered reads this.** It is the census of a control-plane bit, walked over the
+    /// built runtime for the same reason `observation_binding_counts` is: the honest way to check
+    /// what a plan holds is to walk it. Read only after rendering is disarmed.
+    #[doc(hidden)]
+    fn symmetry_counters(&self) -> [u64; 2] {
+        [0, 0]
+    }
     /// Bank-chain lanes whose scatter was pointed at their consumer's buffer (issue #202 rec 3).
     ///
     /// The optimisation removes a whole stereo block copy per admitted lane per block, and removes
@@ -387,6 +402,18 @@ impl PreparedRenderPlan {
         self.executor
             .as_deref()
             .map_or([0, 0], PreparedPlanExecutor::bank_shape)
+    }
+    /// Read `[collapse-eligible lanes, lanes]` outside the render scope: the symmetry census.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn symmetry_counters(&self) -> [u64; 2] {
+        assert!(
+            !super::audit::is_render_scope_active(),
+            "symmetry counters are sealed until the render audit is disarmed"
+        );
+        self.executor
+            .as_deref()
+            .map_or([0, 0], PreparedPlanExecutor::symmetry_counters)
     }
     /// Read the admitted scatter-redirect count outside the render scope (issue #202 rec 3).
     #[doc(hidden)]

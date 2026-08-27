@@ -55,7 +55,9 @@ use miso_engine_effect_runtime::bank::block_is_positive_zero;
 use miso_engine_effect_runtime::params::{is_negative_zero, normalize_zero, parameter_value_valid};
 use miso_engine_lane::{Backend, Lane, Simd4, Simd8};
 
-use crate::design::{MAX_WIDTH, PARAMETER_COUNT, PARAMETER_SPECS, RAMP_COUNT, SMOOTHING_SAMPLES};
+use crate::design::{
+    COEF_COUNT, MAX_WIDTH, PARAMETER_COUNT, PARAMETER_SPECS, RAMP_COUNT, SMOOTHING_SAMPLES,
+};
 use crate::kernel::{Channel, Detector};
 
 /// Fixed scalar words each channel section carries before its two ring arrays.
@@ -647,6 +649,67 @@ impl<L: Lane> Instance<L> {
     }
 }
 
+/// The `DESIGNED` term of the channel-symmetry witness, over the compressor's own kernel read
+/// surface.
+///
+/// # The word list, and why it is exactly this
+///
+/// Every per-lane word the compressor's kernel loads is a `Channel` field
+/// (`miso_engine_compressor::kernel::Channel`), and the render path reads exactly four of them
+/// per lane:
+///
+/// * `words[c][l]` -- the eight designed coefficients (`COEF_COUNT`), the documented "source of
+///   truth; `Coef` is a load of these". `Coef::load` reads them and derives `wet_identity`,
+///   `dry_mix_zero` and `makeup_zero` as pure functions of them, so those three masks carry no
+///   information this comparison does not already have.
+/// * `ramps[p][l]` -- one `LinearRamp` per smoothed parameter (`RAMP_COUNT`), all four fields:
+///   `max_remaining` reads `remaining` to size the ramping prefix, and `advance_ramps` reads
+///   `current`, `target` and `step` to move it. A ramp mid-flight is symmetric exactly when both
+///   channels are the same distance from the same target by the same step.
+/// * `delay[l]` -- the detector read-back distance, read every frame by `gather_detector` and
+///   `fill_taps`, and by `min_delay`, which gates the staged idle body.
+/// * `lookahead_ms[l]` -- what `delay` was derived from. The kernel never reads it, but `redesign`
+///   does, so two channels that agree on `delay` and disagree here would diverge at the next
+///   restore or reset. Cheap, and it closes that hole.
+///
+/// Deliberately excluded, each for its own reason:
+///
+/// * `gain_reduction_db`, `main`, `detector`, `cursor` -- running state, not designed words.
+/// * `defaults[l][p]` -- the control-plane reset values. They are not read by the kernel; a
+///   `FullToDefaults` reset that made the channels disagree would show up in `words` and `ramps`
+///   immediately, which is where the witness sees it.
+/// * `metadata.link_mode`, `metadata.bypass`, `metadata.sample_rate`, `silent_fixed_point`,
+///   `silent_bypass`, `ring_length` -- whole-instance or per-channel-shared, so they cannot be
+///   asymmetric. The link is the reason the seam sits where it does, not a thing that breaks it:
+///   on identical planes the collapsed kernel computes the link on the one plane read twice, in
+///   the original operation order.
+/// * `staged` -- scratch, written before it is read on every call that touches it.
+impl<L: Lane> Instance<L> {
+    fn designed_channel_symmetry(&self, lane: usize) -> bool {
+        if lane >= L::WIDTH {
+            return false;
+        }
+        let (left, right) = (&self.left, &self.right);
+        for coefficient in 0..COEF_COUNT {
+            if left.words[coefficient][lane].to_bits() != right.words[coefficient][lane].to_bits() {
+                return false;
+            }
+        }
+        for parameter in 0..RAMP_COUNT {
+            let (l, r) = (&left.ramps[parameter][lane], &right.ramps[parameter][lane]);
+            if l.current.to_bits() != r.current.to_bits()
+                || l.target.to_bits() != r.target.to_bits()
+                || l.step.to_bits() != r.step.to_bits()
+                || l.remaining != r.remaining
+            {
+                return false;
+            }
+        }
+        left.delay[lane] == right.delay[lane]
+            && left.lookahead_ms[lane].to_bits() == right.lookahead_ms[lane].to_bits()
+    }
+}
+
 /// A prepared, allocation-free scalar compressor instance: the `L = f32` instantiation.
 pub struct PreparedCompressor {
     instance: Instance<f32>,
@@ -751,6 +814,10 @@ impl PreparedNativeEffect for PreparedCompressor {
         self.instance.metadata
     }
 
+    fn channel_symmetry(&self) -> bool {
+        self.instance.designed_channel_symmetry(0)
+    }
+
     fn reset(&mut self, kind: ResetKind) {
         self.instance.reset(kind);
     }
@@ -824,6 +891,10 @@ impl PreparedNativeEffect for PreparedCompressor {
 impl<L: Lane> PreparedNativeEffectBank for PreparedCompressorBank<L> {
     fn metadata(&self) -> PreparedBankMetadata {
         self.metadata.clone()
+    }
+
+    fn lane_channel_symmetry(&self, lane: usize) -> bool {
+        self.instance.designed_channel_symmetry(lane)
     }
 
     /// One `store` per channel fills every lane: the bank's reduction is one vector.

@@ -1157,9 +1157,58 @@ fn mix_sample(dry: f32, wet: f32, mix: f32, bypass: Mask) -> f32 {
     lane_select(lane_mask_or(lane_eq(mix, 0.0), bypass), dry, wet_or_blend)
 }
 
+/// The `DESIGNED` term of the channel-symmetry witness, over the delay's own kernel read surface.
+///
+/// # The word list, and why it is exactly this
+///
+/// The delay carries no bank kernel, so "per lane" here is "per channel": `left` and `right` are
+/// two `DelayLane`s. Everything `delay_chunk` reads is flattened into `LaneChunk` by `chunk_of`
+/// and into the tap windows by `fill_windows`, and those two draw from exactly:
+///
+/// * `ramps[0..3]` -- feedback, damping `g` and wet mix, all four `LinearRamp` fields each;
+///   `chunk_of` advances them per chunk and `chunk_frames` reads `remaining` to size the chunk.
+/// * `active_delay`, `transition_delay`, `pending_delay`, `transition_remaining` -- the tap
+///   geometry `fill_windows` and `fill_tap` materialise, and the crossfade alpha `chunk_of`
+///   derives from `transition_remaining`.
+/// * `valid_history` -- read by `tap_is_valid`, which decides whether a tap reads audio or the
+///   zero fill.
+/// * `delay_target_ms` -- the last accepted delay time. The frame loop does not read it, but it is
+///   the value the next retarget is compared against, so two channels that agreed on the taps and
+///   disagreed here would diverge at the next automation event.
+///
+/// Deliberately excluded: `ring` and `damping_state` are running state; `left_defaults` /
+/// `right_defaults` are control-plane reset values; and `cursor`, `cross` and `cross_default` are
+/// whole-instance (one shared ring cursor and the ping-pong position), so they cannot be
+/// asymmetric.
+impl PreparedDelay {
+    fn designed_channel_symmetry(&self) -> bool {
+        let (left, right) = (&self.left, &self.right);
+        for parameter in 0..ORDINARY_RAMP_COUNT {
+            let (l, r) = (&left.ramps[parameter], &right.ramps[parameter]);
+            if l.current.to_bits() != r.current.to_bits()
+                || l.target.to_bits() != r.target.to_bits()
+                || l.step.to_bits() != r.step.to_bits()
+                || l.remaining != r.remaining
+            {
+                return false;
+            }
+        }
+        left.delay_target_ms.to_bits() == right.delay_target_ms.to_bits()
+            && left.active_delay == right.active_delay
+            && left.transition_delay == right.transition_delay
+            && left.pending_delay == right.pending_delay
+            && left.transition_remaining == right.transition_remaining
+            && left.valid_history == right.valid_history
+    }
+}
+
 impl PreparedNativeEffect for PreparedDelay {
     fn metadata(&self) -> PreparedEffectMetadata {
         self.metadata
+    }
+
+    fn channel_symmetry(&self) -> bool {
+        self.designed_channel_symmetry()
     }
 
     fn reset(&mut self, kind: ResetKind) {

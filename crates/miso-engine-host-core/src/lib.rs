@@ -115,5 +115,25 @@ pub use miso_engine_effect_compiler::{
     EffectControlProducerV1, EffectObservationHandleV1, EffectRack,
 };
 
+/// The channel-symmetry witness vocabulary, re-exported for hosts and planners.
+///
+/// # What a caller does with it
+///
+/// Two halves answer the question "may this track's two channels be collapsed into one plane?",
+/// and they are deliberately separate because they are decided at different times by different
+/// owners:
+///
+/// * [`session_structural_symmetry_v1`] answers from the **compiled session**, before any plan
+///   exists: the `SOURCE` term, which is the planner's pooling class.
+/// * `PreparedRenderPlan::symmetry_counters` answers from the **built runtime**: the census of the
+///   four terms preparation, restore and the live drains maintain.
+///
+/// The conjunction is [`ChannelSymmetryWitnessV1::and`]. Nothing in this engine reads either half
+/// to decide anything rendered; they are control-plane state and a query surface.
+pub use miso_engine_builtins_compiler::{session_structural_symmetry_v1, track_mono_source_v1};
+pub use miso_engine_effect_contract::{
+    ChannelSymmetryWitnessV1, LiveConsoleRecordV1, SeamSideV1, SymmetryEventV1,
+};
+
 #[doc(hidden)]
 pub use miso_engine_session::CompiledSession;
