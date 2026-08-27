@@ -798,6 +798,22 @@ impl SessionRuntime {
         self.plan.bank_transposes()
     }
 
+    /// `[bank chains, bound bank slots]` this arm's plan realises (issue #181's G5 shape, widened
+    /// by #202 rec 2).
+    ///
+    /// Beside [`SessionRuntime::bank_transposes`] because the two answer different questions and
+    /// were indistinguishable while every chain carried one slot: the counter says how many
+    /// planar/AoSoA round-trips were paid, this says how many chains and how many slots the plan
+    /// built. A merge that silently stopped firing would leave every digest and every timing
+    /// plausible and only move this pair, so a test that wants to assert a merge *fired* has to
+    /// read it.
+    ///
+    /// Read outside the clock, like every other evidence accessor on this type.
+    #[must_use]
+    pub fn bank_shape(&self) -> [u64; 2] {
+        self.plan.bank_shape()
+    }
+
     /// Meter frames drained from every stream. Outside the clock, like every evidence step.
     pub fn drain_meters(&mut self) -> u64 {
         let mut frames = 0;

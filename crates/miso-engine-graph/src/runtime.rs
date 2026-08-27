@@ -1082,14 +1082,6 @@ impl RuntimeParts {
             }
         }
     }
-
-    /// The cohort chain a bound effect bank belongs to, or `None` for a builtin bank.
-    fn cohort_of(&self, membership: Membership) -> Option<crate::GraphBankCohortV1> {
-        match membership {
-            Membership::Effect(index) => self.banks[index].as_ref().map(|bank| bank.cohort),
-            Membership::Builtin(_) => None,
-        }
-    }
 }
 
 /// Which nodes alias each op's output buffer, in schedule order (`program::Tap`).
@@ -1313,7 +1305,7 @@ fn op_dataflow(program: &ExecutionProgram) -> (Vec<Vec<usize>>, Vec<Option<usize
 }
 
 /// `true` when unit `later`'s ops are exactly the lane-wise consumers of unit `earlier`'s, so the
-/// two may be rendered as consecutive slots of one chain (issue #181).
+/// two may be rendered as consecutive slots of one chain (issue #181, widened by #202 rec 2).
 ///
 /// The merge replaces two planar/AoSoA round-trips with one: the chain gathers `earlier`'s member
 /// outputs, runs both stages over the resident block, and scatters into `later`'s. The price is
@@ -1321,16 +1313,44 @@ fn op_dataflow(program: &ExecutionProgram) -> (Vec<Vec<usize>>, Vec<Option<usize
 /// stage's output, and `later`'s ops never reduce. Every clause below is one way that could be
 /// observed, and any one of them declines the merge:
 ///
-/// * **Lane count.** The two slots must cover the same lanes, one op each.
+/// * **Lane count and lane order.** The two slots must cover the same lanes, one op each, *in the
+///   same order*: the `first_producer` clause below is checked lane by lane, so two banks whose
+///   planners disagreed about which track sits in which lane can never fuse. This is the whole of
+///   the lane-alignment obligation and it is proved on the lowered program rather than assumed of
+///   the planners.
 /// * **`later` reads only `earlier`, undelayed and unmixed.** One main input, no sidechain, no
 ///   compensation-delay staging -- otherwise skipping `later`'s reduction would drop a summand or
 ///   a delay line. A sidechained slot already blocks banking (#96 F9); this re-checks it on the
 ///   lowered program rather than trusting the planner.
-/// * **Nothing else reads `earlier`.** Exactly one reader, and it is `later`'s op. A send tap, a
-///   meter or a second consumer would read the pre-stage signal.
-/// * **No alias, no observer, and not the session output.** A `program::Tap` aliases an elided
-///   node onto `earlier`'s buffer; an observer bound to `earlier` fires after the unit and would
-///   see the chain's input; and the session output is read by the host.
+/// * **Nothing else reads `earlier`.** Exactly one reader, and it is `later`'s op. A send, a
+///   second consumer or a sidechain source would read the pre-stage signal; `op_dataflow` counts
+///   sidechain reads, so a sidechained consumer of `earlier` is one of these and not an omission.
+/// * **No observer, and not the session output.** An observer bound to `earlier` fires after the
+///   unit and would see the chain's input; the session output is read by the host.
+/// * **No *observed* alias.** A `program::Tap` aliases an elided stage boundary onto `earlier`'s
+///   buffer. The alias is a name, not a read -- an edge out of it resolves to `earlier` and is
+///   already counted as a second reader above -- so a tap on its own is not a reason to decline.
+///   What can read one is an **observer bound to the alias node**, which is how a leased stage
+///   meter reaches `PostSimd1`, `PostDynamic` or `PostSimd2PreFader`
+///   (`miso_engine_builtins::MeterTap`). `parts.observers` is keyed by *node*, so the check has to
+///   name the alias node and not the producing one; keying it on the producer would miss exactly
+///   the meter it exists to protect.
+///
+/// # The perf cliff this last clause buys, stated out loud
+///
+/// Issue #181 declined on the presence of a tap alone, which is why the intended 64-track strip
+/// stopped at the `simd1`/`simd2` boundary: the three elided rack-boundary stages put a tap on the
+/// compressor and the limiter never fused. Nothing planar reads those aliases in a session that
+/// leases no stage meter, so the refusal was paying for an observer that was not there. It is now
+/// paid only when the observer is: **leasing a meter at `PostSimd1`, `PostDynamic` or
+/// `PostSimd2PreFader` costs that track's cohort one extra planar/AoSoA round-trip per block**,
+/// because its chain can no longer span the stage the meter reads. That is the intended trade --
+/// the meter must see post-compressor audio, and a merged chain would hand it the chain's input --
+/// and `a_leased_stage_meter_declines_the_merge_and_still_meters` pins both halves of it.
+///
+/// Effect observation (`ObservationLaneV1`) is *not* such an observer and must not be confused
+/// with one: it reads the effect's own resident state through `observe_resident`, never a planar
+/// stage buffer, so an armed console lane neither declines the merge nor is disturbed by one.
 fn chains_into(
     program: &ExecutionProgram,
     spec: &GraphSpec,
@@ -1356,16 +1376,23 @@ fn chains_into(
         if readers[*before].len() != 1 || readers[*before][0] != *after {
             return false;
         }
-        if producer.output == program.output
-            || program
-                .taps
-                .iter()
-                .any(|tap| tap.after_op as usize == *before)
-        {
+        if producer.output == program.output {
             return false;
         }
         let node = &spec.nodes[producer.node as usize].id;
         if parts.observers.contains_key(node) {
+            return false;
+        }
+        if program
+            .taps
+            .iter()
+            .filter(|tap| tap.after_op as usize == *before)
+            .any(|tap| {
+                parts
+                    .observers
+                    .contains_key(&spec.nodes[tap.node as usize].id)
+            })
+        {
             return false;
         }
     }
@@ -1378,11 +1405,36 @@ fn chains_into(
 /// covers. A unit that merges with nothing is a run of one, which is what every unit was before
 /// issue #181.
 ///
-/// Two bank units are candidates when the cohort planner put them in the same group -- that is
-/// the only place the "same lanes, consecutive slots of one rack chain" fact exists -- and the
-/// merge happens only when [`chains_into`] can also prove it on the lowered program. The planner
-/// knows the session's shape; the program knows what the colouring and the taps did with it, and
-/// both have to agree.
+/// # Candidacy is the program's dataflow, not the planner's grouping (issue #202 rec 2)
+///
+/// Issue #181 asked the cohort planner which bound slots came out of one group and offered only
+/// those pairs to [`chains_into`]. That is a strictly narrower question than the one the merge
+/// actually needs answered, and it left three quarters of the intended strip's round-trips on the
+/// table: `plan_bank_groups` pools per `RackLocationV1`, so no candidate ever crossed a rack
+/// boundary, and a builtin bank has no cohort group at all, so the `builtins -> simd1` boundary
+/// was not even expressible. On the 64-track intended fixture that is 8 groups x {builtins, simd1,
+/// simd2} = 24 chains where 8 will do.
+///
+/// The candidate successor of a bank unit is therefore taken from the lowered program itself: the
+/// unit that owns the op reading lane 0's output. `chains_into` then has to prove the whole
+/// lane-wise relation anyway, so nothing is trusted to the planners -- least of all that two banks
+/// planned by two different planners agree about which track sits in which lane. Where the merge
+/// is admissible the planners' lane orders coincide *because the proof says so*, and where they do
+/// not the merge is simply declined.
+///
+/// Two structural facts make the run construction below well formed:
+///
+/// * **The successor relation is injective.** `chains_into` requires
+///   `first_producer[later[i]] == Some(earlier[i])` for every lane, so two different predecessors
+///   would have to share lane 0's op -- that is, be the same unit. No unit is ever appended to two
+///   runs.
+/// * **A successor is always later in unit order.** Every lane of `later` is scheduled after the
+///   matching lane of `earlier`, and a unit is emitted at its members' minimum op index, so the
+///   minimum over `later` strictly exceeds the minimum over `earlier`. The runs therefore have no
+///   cycles and stay in render order.
+///
+/// The op range a merged run permutes is held by `program::lower`'s bank window, which forms the
+/// same union from the same lane-wise relation (`program::chainable_bank_groups`).
 fn cohort_runs(
     program: &ExecutionProgram,
     spec: &GraphSpec,
@@ -1390,35 +1442,51 @@ fn cohort_runs(
     units: &[PlannedUnit],
 ) -> Vec<Vec<usize>> {
     let (readers, first_producer) = op_dataflow(program);
-    // Candidate successors: within one cohort group, the next bound slot.
-    let mut by_group: BTreeMap<u32, Vec<(u32, usize)>> = BTreeMap::new();
-    for (index, (membership, _)) in units.iter().enumerate() {
-        if let Some(cohort) = membership.and_then(|value| parts.cohort_of(value)) {
-            by_group
-                .entry(cohort.group)
-                .or_default()
-                .push((cohort.slot, index));
+    let mut unit_of_op: Vec<Option<usize>> = vec![None; program.ops.len()];
+    for (index, (membership, ops)) in units.iter().enumerate() {
+        if membership.is_none() {
+            continue;
+        }
+        for op in ops {
+            unit_of_op[*op] = Some(index);
         }
     }
     let mut successor: BTreeMap<usize, usize> = BTreeMap::new();
-    for slots in by_group.values_mut() {
-        slots.sort_unstable();
-        for pair in slots.windows(2) {
-            let (earlier, later) = (pair[0].1, pair[1].1);
-            if chains_into(
-                program,
-                spec,
-                parts,
-                &readers,
-                &first_producer,
-                &units[earlier].1,
-                &units[later].1,
-            ) {
-                successor.insert(earlier, later);
-            }
+    for (earlier, (membership, ops)) in units.iter().enumerate() {
+        if membership.is_none() {
+            continue;
+        }
+        // The sole reader of lane 0 names the only unit this one can possibly chain into.
+        // `chains_into` re-checks sole readership for every lane, so a `first()` here is a lookup
+        // and not a decision.
+        let Some(later) = ops
+            .first()
+            .and_then(|lane| readers[*lane].first())
+            .and_then(|reader| unit_of_op[*reader])
+        else {
+            continue;
+        };
+        if later == earlier {
+            continue;
+        }
+        if chains_into(
+            program,
+            spec,
+            parts,
+            &readers,
+            &first_producer,
+            ops,
+            &units[later].1,
+        ) {
+            successor.insert(earlier, later);
         }
     }
     let merged: std::collections::BTreeSet<usize> = successor.values().copied().collect();
+    debug_assert_eq!(
+        merged.len(),
+        successor.len(),
+        "the successor relation is injective, so no unit joins two runs"
+    );
     let mut runs = Vec::with_capacity(units.len());
     for index in 0..units.len() {
         if merged.contains(&index) {

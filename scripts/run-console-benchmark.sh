@@ -44,6 +44,19 @@
 # exactly on every row and every leg and differ only in time. The baseline arm is the base commit
 # with this arm registration and nothing else.
 #
+# `--audit-chain-merge` and `--audit-chain-merge-baseline` are the paired arms of issue #202
+# recommendation 2: the cross-rack cohort chain merge. `runtime::cohort_runs` took its merge
+# candidates from the cohort planner's groups, which are pooled per `RackLocationV1` and do not
+# exist at all for a builtin bank, so the 64-track intended strip ran three bank chains per cohort
+# -- `{builtins, simd1, simd2}` -- and paid one planar/AoSoA round-trip for each. Candidacy is now
+# taken from the lowered program's dataflow and proved lane by lane on it, so the whole strip fuses
+# into one chain per cohort: 24 round-trips a block become 8. Class **A** -- every `output_sha256`
+# must reproduce the baseline arm's exactly, on every row and every leg, and the two records differ
+# only in time. The baseline arm is the base commit with this arm registration and nothing else.
+# The one record expected to move a non-timing field is `console_placement`, whose two arms now
+# report the *same* transposes per block: the retired layout's cross-rack pair fuses too, so which
+# rack a slot was placed in no longer changes how many round-trips its cohort pays.
+#
 # `--issue-loop-eq-r1` writes to `artifacts/issue-loop-eq-r1` and is the effect-optimization loop's
 # EQ round 1: parametric-EQ identity-section elision and the two-slot cohort chain (#181). Both are
 # **class A** -- every workload's output digest is the #175 digest to the bit, on every row and every
@@ -111,10 +124,12 @@ if [[ "$#" == 1 ]]; then
         --round2-lim) phase_directory=round2-lim ;;
         --round2-lim-baseline) phase_directory=round2-lim-baseline ;;
         --round2-composed) phase_directory=round2-composed ;;
-        *) printf 'usage: %s [--phase2|--phase3|--issue163-phase0|--issue163-phase1|--issue163-phase2|--issue163-phase3|--issue163-phase4|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue184|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline|--round2-lim|--round2-lim-baseline|--round2-composed]\n' "$0" >&2; exit 2 ;;
+        --audit-chain-merge) phase_directory=audit-chain-merge ;;
+        --audit-chain-merge-baseline) phase_directory=audit-chain-merge-baseline ;;
+        *) printf 'usage: %s [--phase2|--phase3|--issue163-phase0|--issue163-phase1|--issue163-phase2|--issue163-phase3|--issue163-phase4|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue184|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline|--round2-lim|--round2-lim-baseline|--round2-composed|--audit-chain-merge|--audit-chain-merge-baseline]\n' "$0" >&2; exit 2 ;;
     esac
 elif [[ "$#" != 0 ]]; then
-    printf 'usage: %s [--phase2|--phase3|--issue163-phase0|--issue163-phase1|--issue163-phase2|--issue163-phase3|--issue163-phase4|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue184|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline|--round2-lim|--round2-lim-baseline|--round2-composed]\n' "$0" >&2
+    printf 'usage: %s [--phase2|--phase3|--issue163-phase0|--issue163-phase1|--issue163-phase2|--issue163-phase3|--issue163-phase4|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue184|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline|--round2-lim|--round2-lim-baseline|--round2-composed|--audit-chain-merge|--audit-chain-merge-baseline]\n' "$0" >&2
     exit 2
 fi
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)

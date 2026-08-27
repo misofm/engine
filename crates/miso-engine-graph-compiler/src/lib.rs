@@ -285,7 +285,7 @@ mod tests {
         Backend::current()
     }
     use core::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
-    use miso_engine_builtins::{MeterConfig, MeterHandle, MeterTap};
+    use miso_engine_builtins::{MeterConfig, MeterHandle, MeterSnapshot, MeterTap};
     use miso_engine_builtins_compiler::{
         BuiltinCompileCaps, MeterRequest, PreparedBuiltinsCorruption,
         PreparedBuiltinsCorruptionCase, prepare_session_builtins,
@@ -4403,7 +4403,19 @@ mod tests {
 
         let bank_count = bank.graph.prepared_bank_count();
         let builtin_bank_count = bank.graph.prepared_builtin_bank_count();
-        let expected_transposes = BLOCKS * (bank_count + builtin_bank_count) as u64;
+        let bound_slots = (bank_count + builtin_bank_count) as u64;
+        // G5 derivation, issue #202 rec 2. This fixture binds `64 / lanes` EQ slots on `simd1` and
+        // `64 / lanes` compressor slots in `dynamic`, and nothing else -- no builtin banks are
+        // attached on this path. Lane `i` of the compressor bank reads lane `i` of the EQ bank
+        // through the elided `PostSimd1` boundary, undelayed, unmixed, with no second reader and
+        // no observer, so every cohort fuses into one chain:
+        //
+        //     chains = bound slots - one merge per cohort = 2 * (64 / lanes) - 64 / lanes
+        //
+        // Before rec 2 the merge was never proposed, because the cohort planner pools per
+        // `RackLocationV1` and these two slots sit in different racks.
+        let cohorts = 64 / lanes;
+        let expected_chains = bound_slots - cohorts as u64;
         let banked = render_console_blocks(bank, BLOCKS);
         let scalar = render_console_blocks(per_node, BLOCKS);
         assert_pcm_bits_equal(&banked.0, &scalar.0, "64-track console: banked vs per node");
@@ -4411,23 +4423,32 @@ mod tests {
             banked.0.iter().flatten().any(|sample| *sample != 0.0),
             "the console fixture rendered audio"
         );
-        // G5: one planar/AoSoA round-trip per bank per block, with the dynamic banks included.
         assert_eq!(
-            banked.1, expected_transposes,
-            "one planar/AoSoA round-trip per bank per block"
+            banked.3, bound_slots,
+            "every bound bank is a slot of exactly one realised chain"
+        );
+        assert_eq!(
+            banked.2, expected_chains,
+            "the EQ and the dynamic compressor fuse into one chain per cohort"
+        );
+        // G5: one planar/AoSoA round-trip per bank *chain* per block.
+        assert_eq!(
+            banked.1,
+            BLOCKS * expected_chains,
+            "one planar/AoSoA round-trip per chain per block"
+        );
+        assert!(
+            banked.2 < banked.3,
+            "a cross-rack cohort must realise fewer chains than slots"
         );
         assert_eq!(scalar.1, 0, "the per-node arm transposes nothing");
         // Descriptive, printed under `--nocapture`: what phase 1b actually buys on the measured
         // session, and what the composed benchmark should expect to see.
         println!(
             "console 64-track @ {lanes} lanes: {} effect banks ({} EQ + {} compressor) \
-             + {} builtin banks; {} scalar effect nodes; {} transposes over {BLOCKS} blocks",
-            bank_count,
-            64 / lanes,
-            64 / lanes,
-            builtin_bank_count,
-            0,
-            banked.1,
+             + {} builtin banks; {} scalar effect nodes; {} slots -> {} chains; {} transposes \
+             over {BLOCKS} blocks",
+            bank_count, cohorts, cohorts, builtin_bank_count, 0, banked.3, banked.2, banked.1,
         );
     }
 
@@ -4444,16 +4465,18 @@ mod tests {
     ///    `dynamic` leaves the traversal order alone, so the merge regroups lanes without touching
     ///    any lane's arithmetic. The comparison is made against the *limiter-free* intended model,
     ///    because the limiter is genuinely new arithmetic and would mask the property under test.
-    /// 2. **Structure.** The retired layout realises two bank cohorts per eight tracks (one per
-    ///    rack); the merged layout realises one cohort of two slots. The slot *executions* are
-    ///    unchanged -- the same two effects still run over the same lanes -- so what falls is the
-    ///    chain count, not the work.
-    /// 3. **G5** (master plan §4.5). One planar/AoSoA round-trip per bank chain per block. The
-    ///    merged layout therefore pays one round-trip per eight tracks per block where the retired
-    ///    layout paid two, and the full intended strip pays two again because the limiter adds a
-    ///    second chain on `simd2`. Every count below is derived from the realised bank count
-    ///    rather than written as a literal, so the assertion states the *law* and the structural
-    ///    literals beside it state the shape.
+    /// 2. **Structure.** The retired layout binds two bank *cohorts* per eight tracks (one per
+    ///    rack); the merged layout binds one cohort of two slots. The slot *executions* are
+    ///    unchanged -- the same two effects still run over the same lanes.
+    /// 3. **G5** (master plan §4.5). One planar/AoSoA round-trip per bank chain per block. Since
+    ///    issue #202 rec 2 both layouts realise **one chain per cohort**: the merge is proved on
+    ///    the lowered program's dataflow rather than proposed from the cohort planner's per-rack
+    ///    groups, and the EQ feeds the compressor across the elided `PostSimd1` boundary as
+    ///    directly as it does inside one rack. So the round-trip counts are now equal, and the
+    ///    equality is asserted for the same reason #181 asserted the inequality: if a rack-boundary
+    ///    refusal ever comes back, this says so. Every count below is derived from the realised
+    ///    bank count rather than written as a literal, so the assertion states the *law* and the
+    ///    structural literals beside it state the shape.
     #[test]
     fn intended_placement_merges_two_chains_into_one_bit_identically() {
         const BLOCKS: u64 = 12;
@@ -4528,9 +4551,9 @@ mod tests {
         // layout's sixteen are one EQ slot and one compressor slot per cohort in two racks, and
         // the merged layout's sixteen are two slots per cohort in one rack. The cohort planner
         // always did group them -- `bound_slots_in(Simd1)` doubles and `Dynamic` empties -- and
-        // #175 measured that the grouping did not reach the runtime as one chain. It does now, so
-        // the slot counts below are still equal while the *chain* counts asserted further down
-        // are not. That is the whole shape of the change: same slots, fewer chains.
+        // #175 measured that the grouping did not reach the runtime as one chain. It does now --
+        // and since #202 rec 2 so does the retired layout's cross-rack pair, so the chain counts
+        // asserted further down are equal as well. Same slots, same chains, different racks.
         assert_eq!(
             merged_artifact.graph.prepared_bank_count(),
             split_artifact.graph.prepared_bank_count(),
@@ -4567,10 +4590,22 @@ mod tests {
 
         // G5 holds on both sides, derived rather than pinned -- and since issue #181 the law can
         // finally tell its two readings apart. "One round-trip per bank *chain* per block" and
-        // "one per bound *slot* per block" were the same number while every chain had one slot;
-        // the merged side now has a two-slot chain, so the two readings differ there and agree on
-        // the retired side. Asserting both is what makes this a test of the law rather than of a
-        // coincidence (the gate gap #175's report named).
+        // "one per bound *slot* per block" were the same number while every chain had one slot.
+        //
+        // **What issue #202 rec 2 moved here, and why it is not a weakening of #181.** #181
+        // measured the retired layout at two chains per cohort and the merged one at one, and read
+        // that gap as the value of moving the compressor into `simd1`. The gap was never the
+        // compressor's placement. It was that `runtime::cohort_runs` offered only the cohort
+        // planner's own groups as merge candidates, and `plan_bank_groups` pools per
+        // `RackLocationV1` -- so `simd1 -> dynamic` could not even be proposed, however plainly
+        // the EQ fed the compressor. Candidacy is now taken from the lowered program's dataflow,
+        // and the EQ feeds the compressor across the elided `PostSimd1` boundary exactly as
+        // directly as it does inside one rack. **Both layouts now realise one chain per cohort**,
+        // so the saving #181 attributed to the rack move is taken wherever the compressor sits.
+        //
+        // What #181 established is untouched and still asserted below: a cohort chain carries more
+        // slots than there are chains, and G5's per-chain reading is the one this gate checks.
+        // What is deliberately no longer true is that the retired placement pays more for it.
         let chains = |render: &(Vec<Vec<f32>>, u64, u64, u64)| render.1 / BLOCKS;
         // The measured round-trip count and the realised structure must agree: `bank_shape`
         // counts the chains the runtime built, `bank_transposes` counts what they did.
@@ -4592,66 +4627,282 @@ mod tests {
             merged_render.3, merged_slots as u64,
             "merged: realised slots == bound slots"
         );
-        assert_eq!(
-            merged_render.2 + cohorts_per_rack as u64,
-            merged_render.3,
-            "the merged layout realises one chain per cohort carrying two slots"
-        );
         assert_eq!(split_render.1, BLOCKS * chains(&split_render));
         assert_eq!(merged_render.1, BLOCKS * chains(&merged_render));
-        // Per *slot*: both sides bind the same number of slots, and on the merged side that is
-        // strictly more than the number of chains. A regression that silently went back to one
-        // chain per slot would make these two equal again and this assertion would go red.
+        // Two bound slots per cohort on both sides, fused into one chain on both sides.
+        // Derivation: 64 tracks / `lanes` = `cohorts_per_rack` cohorts; each binds an EQ slot and
+        // a compressor slot (2 * cohorts_per_rack slots); the compressor's op is the sole reader
+        // of the EQ's output, undelayed, unmixed and unobserved, so each cohort fuses to one
+        // chain.
+        assert_eq!(
+            split_render.3,
+            2 * cohorts_per_rack as u64,
+            "the retired layout binds one EQ slot and one compressor slot per cohort"
+        );
+        assert_eq!(
+            merged_render.3,
+            2 * cohorts_per_rack as u64,
+            "so does the merged layout; the racks differ, the slot count does not"
+        );
         assert_eq!(
             chains(&split_render),
-            split_slots as u64,
-            "the retired layout's chains and slots are the same count: every chain has one slot"
+            cohorts_per_rack as u64,
+            "the retired layout now fuses its two racks into one chain per cohort"
         );
         assert_eq!(
             chains(&merged_render),
-            merged_slots as u64 - cohorts_per_rack as u64,
-            "the merged layout runs one chain per cohort where it binds two slots, so its \
-             round-trip count is its slot count less one per cohort"
+            cohorts_per_rack as u64,
+            "and the merged layout fuses its two slots into one chain per cohort"
         );
         assert!(
             chains(&merged_render) < merged_slots as u64,
             "G5 must distinguish a per-chain round-trip from a per-slot one; if these are equal \
              the merged side is still materialising one chain per bound slot"
         );
-
-        // **The measured answer to #175's hypothesis, taken in issue #181.** The intended layout
-        // saves one AoSoA round-trip per cohort per block by paying one gather/scatter for a
-        // two-slot chain where the retired layout paid two for two one-slot chains.
-        //
-        // #175 measured this as *zero* and said why: `miso_engine_rack::BankChain` was built for
-        // exactly this -- an ordered `slots` vector, one transpose in `run`, three slots driven
-        // through one round-trip in its own unit tests -- but `runtime::chain_for` returned one
-        // `BankChain` per prepared effect bank and `runtime::bank_chain` gave each of them
-        // `vec![BankSlot { .. }]`, so a two-slot cohort became two independent one-slot chains.
-        // The cohort planner has formed multi-slot groups since #99 F3; what was missing was the
-        // edge telling the runtime which bound banks came out of the same group, which
-        // `GraphPreparedEffectBank::cohort` now carries.
-        //
-        // #175 wrote the equality below as `==` specifically so that the day the graph layer took
-        // the saving, it would go red and say so. It did. The count is still derived from the
-        // realised chain count rather than written as a literal, so what is asserted is the law.
-        assert_eq!(
-            split_render.1 - merged_render.1,
-            BLOCKS * cohorts_per_rack as u64,
-            "merging two one-slot chains into one two-slot chain saves exactly one AoSoA \
-             round-trip per cohort per block"
-        );
         assert!(
-            merged_render.1 < split_render.1,
-            "the merged layout must transpose strictly less often than the retired one"
+            chains(&split_render) < split_slots as u64,
+            "and the retired side must no longer be materialising one chain per bound slot"
+        );
+
+        // **The measured answer to #175's hypothesis, taken in #181 and generalised in #202.**
+        // #181 wrote this as a strict inequality so the day the graph layer took the saving it
+        // would say so. #202 rec 2 takes the *same* saving on the retired layout, so the
+        // difference is now exactly zero -- and that equality is the finding, written as an
+        // assertion for the same reason: if a future change re-introduces a rack-boundary refusal
+        // this goes red and names it.
+        assert_eq!(
+            split_render.1, merged_render.1,
+            "which rack a slot was placed in no longer changes how many planar/AoSoA round-trips \
+             the cohort pays"
         );
         println!(
-            "#181 chain shape @ {lanes} lanes over {BLOCKS} blocks: \
-             retired {} transposes, merged {} -- saving {} per block (hypothesis predicted {})",
-            split_render.1,
-            merged_render.1,
-            (split_render.1 - merged_render.1) / BLOCKS,
-            cohorts_per_rack,
+            "#202 chain shape @ {lanes} lanes over {BLOCKS} blocks: \
+             retired {} transposes, merged {} -- {} slots each, {} chains each",
+            split_render.1, merged_render.1, merged_render.3, merged_render.2,
+        );
+    }
+
+    /// A stage meter leased at an elided rack boundary declines the merge -- and still meters.
+    ///
+    /// This is the perf cliff `runtime::chains_into` buys, pinned from both sides. The three
+    /// internal rack boundaries (`PostSimd1`, `PostDynamic`, `PostSimd2PreFader`) are elided into
+    /// buffer aliases, and `miso_engine_builtins::MeterTap` admits all three, so a host may lease a
+    /// meter that reads one. A merged chain leaves the aliased buffer holding the *chain's input*
+    /// rather than the compressor's output, so such a meter must stop the merge.
+    ///
+    /// It is `parts.observers` keyed on the **alias node** that stops it. Keying the check on the
+    /// producing node instead -- the compressor -- would miss this entirely: nobody observes the
+    /// compressor, the observer is bound to `ch00/PostSimd1`. That mutation is the one this test
+    /// exists to make red, and no digest comparison would catch it, because the merged plan would
+    /// still render the correct session output and only the meter would read pre-compressor audio.
+    ///
+    /// The cost is stated rather than hidden: one leased stage meter costs *that track's cohort*
+    /// one extra planar/AoSoA round-trip per block, and no other cohort anything.
+    #[test]
+    fn a_leased_stage_meter_declines_the_merge_and_still_meters() {
+        const BLOCKS: u64 = 12;
+        let Some(width) = BankWidth::for_backend(host_dispatch()) else {
+            return;
+        };
+        let cohorts = 64 / width.lanes() as u64;
+        let intended = parse_session_toml(CONSOLE_SIXTY_FOUR_TRACK_INTENDED_FIXTURE)
+            .expect("intended fixture");
+        let meters = vec![MeterRequest {
+            handle: MeterHandle(NonZeroU64::new(1).expect("constant")),
+            track_id: "ch00".to_owned(),
+            tap: MeterTap::PostSimd1,
+            config: MeterConfig {
+                period_frames: NonZeroU32::new(128).expect("constant"),
+                peak_hold_frames: 0,
+                peak_decay_db_per_second: 0.0,
+                queue_capacity: NonZeroUsize::new(64).expect("constant"),
+                reset_generation: 0,
+            },
+        }];
+        let registry = launch_native_effect_registry_v1().expect("launch registry");
+        let artifact = compile_console_model_with_builtins(&intended, 2_030, &meters, &registry);
+        let (pcm, transposes, chains, slots, frames) =
+            render_console_builtins_blocks(artifact, BLOCKS, Vec::new());
+        assert_eq!(slots, 4 * cohorts, "the meter changes no bank's membership");
+        assert_eq!(
+            chains,
+            cohorts + 1,
+            "ch00's cohort splits at the metered boundary; every other cohort stays one chain"
+        );
+        assert_eq!(transposes, BLOCKS * chains, "G5 on the declining plan");
+
+        // And the meter reads what it is supposed to read. The oracle is the same session with
+        // every effect on the per-node scalar path: no bank binds there, so no merge is even
+        // expressible, and the meter can only be reading the compressor's output.
+        let scalar_artifact = compile_console_model_with_builtins(
+            &intended,
+            2_031,
+            &meters,
+            &scalar_console_registry(),
+        );
+        assert_eq!(
+            scalar_artifact.graph().prepared_bank_count(),
+            0,
+            "the oracle arm must bind no effect bank at all"
+        );
+        let (scalar_pcm, _, scalar_chains, _, scalar_frames) =
+            render_console_builtins_blocks(scalar_artifact, BLOCKS, Vec::new());
+        assert_eq!(
+            scalar_chains, cohorts,
+            "the oracle arm realises only its builtin banks"
+        );
+        assert_pcm_bits_equal(
+            &pcm,
+            &scalar_pcm,
+            "64-track intended strip with a stage meter",
+        );
+        assert!(
+            !frames.is_empty(),
+            "the leased meter must publish windows, or this test proves nothing about it"
+        );
+        assert_eq!(
+            frames, scalar_frames,
+            "the metered boundary must read the compressor's output, not the chain's input"
+        );
+        assert!(
+            frames
+                .iter()
+                .any(|frame| frame.left.sample_peak != 0.0 || frame.right.sample_peak != 0.0),
+            "the metered windows must carry signal"
+        );
+        println!(
+            "#202 leased stage meter: {slots} slots -> {chains} chains \
+             ({} published windows over {BLOCKS} blocks)",
+            frames.len()
+        );
+    }
+
+    /// A send taken from an elided rack boundary declines the merge, through the second-reader
+    /// clause rather than the observer one.
+    ///
+    /// Issue #181 declined on the *presence* of a `program::Tap`, which made this case and the
+    /// metered one indistinguishable. They are not the same: a tap is a name, and an edge out of
+    /// the aliased stage resolves through it to the compressor, so it is counted by
+    /// `runtime::op_dataflow` as an ordinary second reader of the compressor's output. That clause
+    /// is what refuses here, and it has to, because a merged chain would send pre-compressor audio.
+    #[test]
+    fn a_send_from_a_rack_boundary_declines_the_merge() {
+        const BLOCKS: u64 = 12;
+        let Some(width) = BankWidth::for_backend(host_dispatch()) else {
+            return;
+        };
+        let cohorts = 64 / width.lanes() as u64;
+        let mut sent = parse_session_toml(CONSOLE_SIXTY_FOUR_TRACK_INTENDED_FIXTURE)
+            .expect("intended fixture");
+        let template = sent.routes[0].clone();
+        let mut route = template.clone();
+        route.id = StableId::parse("ch00-simd1-send").expect("route id");
+        route.source = RouteSource::Track {
+            track_id: StableId::parse("ch00").expect("track id"),
+            tap: miso_engine_session::SendTap::PostSimd1,
+        };
+        sent.routes.push(route);
+        sent.routes.sort_by(|left, right| left.id.cmp(&right.id));
+
+        let registry = launch_native_effect_registry_v1().expect("launch registry");
+        let artifact = compile_console_model_with_builtins(&sent, 2_040, &[], &registry);
+        let (pcm, transposes, chains, slots, _) =
+            render_console_builtins_blocks(artifact, BLOCKS, Vec::new());
+        assert_eq!(slots, 4 * cohorts, "the send changes no bank's membership");
+        assert_eq!(
+            chains,
+            cohorts + 1,
+            "ch00's cohort splits at the sent boundary; every other cohort stays one chain"
+        );
+        assert_eq!(transposes, BLOCKS * chains, "G5 on the declining plan");
+        let scalar_artifact =
+            compile_console_model_with_builtins(&sent, 2_041, &[], &scalar_console_registry());
+        let (scalar_pcm, ..) = render_console_builtins_blocks(scalar_artifact, BLOCKS, Vec::new());
+        assert_pcm_bits_equal(&pcm, &scalar_pcm, "64-track strip with a post-simd1 send");
+        assert!(
+            pcm.iter().flatten().any(|sample| *sample != 0.0),
+            "the sent strip rendered audio"
+        );
+    }
+
+    /// Misaligned lane sets decline the merge: the lane-alignment hole, made visible.
+    ///
+    /// A merge is only ever admissible when two banks cover the same lanes **in the same order**,
+    /// and nothing makes two planners agree about that. The post-input builtin candidates all run
+    /// the same one-slot program, so their banks are always plain id-ordered chunks of every track
+    /// in the session. The effect cohorts are chunks of only the tracks that *carry* that chain,
+    /// ordered by `order_members`. The two coincide on the intended fixture only because every
+    /// track there carries every rack.
+    ///
+    /// Empty four tracks' `simd1` and `simd2` racks and they stop coinciding: the effect cohorts
+    /// slide by four tracks, so builtin bank `{ch00..ch07}` no longer feeds effect bank
+    /// `{ch00..ch07}` -- it feeds four lanes of one effect bank and four of another.
+    /// `runtime::chains_into` proves the pairing lane by lane on the lowered program, so every
+    /// `builtins -> EQ` merge is declined, while the effect banks, which do still align with each
+    /// other, keep fusing. The plan is correct either way; it is only slower.
+    ///
+    /// This is the test that would catch a "merge" that silently never fires, because it asserts
+    /// counts on both sides of the alignment. A digest comparison cannot: the session renders the
+    /// same bits whether or not any merge is taken.
+    #[test]
+    fn misaligned_lane_sets_decline_the_merge() {
+        const BLOCKS: u64 = 12;
+        let Some(width) = BankWidth::for_backend(host_dispatch()) else {
+            return;
+        };
+        let lanes = width.lanes() as u64;
+        let cohorts = 64 / lanes;
+        let mut ragged = parse_session_toml(CONSOLE_SIXTY_FOUR_TRACK_INTENDED_FIXTURE)
+            .expect("intended fixture");
+        // Half a bank's worth of tracks lose their whole effect strip, which is what slides every
+        // effect cohort out of step with the builtin banks.
+        for track in ragged.tracks.iter_mut().take((lanes / 2) as usize) {
+            track.simd1.effects.clear();
+            track.simd2.effects.clear();
+        }
+        let registry = launch_native_effect_registry_v1().expect("launch registry");
+        let artifact = compile_console_model_with_builtins(&ragged, 2_050, &[], &registry);
+        let effect_slots = artifact.graph().prepared_bank_count() as u64;
+        let builtin_slots = artifact.graph().prepared_builtin_bank_count() as u64;
+        let (pcm, transposes, chains, slots, _) =
+            render_console_builtins_blocks(artifact, BLOCKS, Vec::new());
+        assert_eq!(slots, effect_slots + builtin_slots);
+        assert_eq!(
+            builtin_slots, cohorts,
+            "every track still has a builtin bank"
+        );
+        assert_eq!(transposes, BLOCKS * chains, "G5 holds however little fuses");
+        // The derivation. 60 tracks carry the strip, so each effect rack binds
+        // `60 / lanes` full cohorts and strands the remainder in a padded group that never binds:
+        // 7 EQ + 7 compressor + 7 limiter slots at eight lanes. Those three still align with each
+        // other, so each cohort fuses into one chain. None of them aligns with a builtin bank, so
+        // all `cohorts` builtin banks stay chains of their own.
+        let strip_cohorts = (64 - lanes / 2) / lanes;
+        assert_eq!(
+            effect_slots,
+            3 * strip_cohorts,
+            "the tracks that keep their strip still bind three slots per full cohort"
+        );
+        assert_eq!(
+            chains,
+            cohorts + strip_cohorts,
+            "the effect racks fuse with each other and none of them fuses with a builtin bank"
+        );
+        assert!(
+            chains > cohorts,
+            "a misaligned session must realise more than the aligned one chain per cohort"
+        );
+        let scalar_artifact =
+            compile_console_model_with_builtins(&ragged, 2_051, &[], &scalar_console_registry());
+        let (scalar_pcm, ..) = render_console_builtins_blocks(scalar_artifact, BLOCKS, Vec::new());
+        assert_pcm_bits_equal(&pcm, &scalar_pcm, "64-track strip with four bare tracks");
+        assert!(
+            pcm.iter().flatten().any(|sample| *sample != 0.0),
+            "the misaligned strip rendered audio"
+        );
+        println!(
+            "#202 misaligned lane sets: {effect_slots} effect slots + {builtin_slots} builtin \
+             slots = {slots} slots -> {chains} chains (aligned would be {cohorts})"
         );
     }
 
@@ -4691,46 +4942,193 @@ mod tests {
         .unwrap_or_else(|failure| panic!("console graph: {:?}", failure.diagnostics))
     }
 
-    /// Issue #181: the merge stops at a rack boundary, and that is what makes 24 chains 16.
+    /// Compile one console session model into a prepared graph artifact **with** its builtin
+    /// banks, the way the production pipeline assembles a plan.
     ///
-    /// This is the adversarial half. `runtime::chains_into` fuses two slots only when *nothing
-    /// else* can see the first slot's output -- a merged chain leaves that buffer holding the
-    /// chain's input rather than the slot's output, so a second consumer, a `program::Tap` or an
-    /// observer would read pre-stage audio.
+    /// [`compile_console_model`] attaches none, so the plans it builds carry effect banks only and
+    /// the `builtins -> simd1` boundary does not exist in them at all. Issue #202 rec 2 fuses
+    /// across exactly that boundary, so every test that measures it has to compile the production
+    /// pair rather than the effect-only one.
+    fn compile_console_model_with_builtins(
+        model: &miso_engine_session::SessionTomlV1,
+        plan_id: u64,
+        meters: &[MeterRequest],
+        registry: &NativeEffectRegistry,
+    ) -> PreparedGraphBuiltinsArtifact {
+        let session = compile_session(
+            model,
+            CompileCaps {
+                max_compiled_model_bytes: u64::MAX,
+                max_requested_runtime_bytes: u64::MAX,
+                max_single_allocation_bytes: u64::MAX,
+                max_queue_items: u64::MAX,
+                max_source_ring_frames: u64::MAX,
+                max_source_ring_bytes: u64::MAX,
+            },
+        )
+        .expect("compiled console model");
+        let builtins = prepare_session_builtins(
+            &session,
+            meters,
+            BuiltinCompileCaps {
+                maximum_total_state_bytes: u64::MAX,
+                maximum_total_retained_payload_bytes: u64::MAX,
+                maximum_total_meter_items: u64::MAX,
+                maximum_total_meter_bytes: u64::MAX,
+                maximum_single_allocation_bytes: u64::MAX,
+                maximum_meter_streams: u64::MAX,
+                maximum_period_frames: u32::MAX,
+                maximum_peak_hold_frames: u32::MAX,
+                maximum_smoothing_samples: u32::MAX,
+            },
+        )
+        .expect("prepared console builtins");
+        GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+            dispatch: host_dispatch(),
+            plan_id,
+            effects: prepare_native_session_effects(
+                &session,
+                registry,
+                EffectCompileCaps {
+                    maximum_total_state_bytes: 1 << 22,
+                    maximum_scratch_bytes: 1 << 20,
+                    maximum_automation_spans_per_block: 32,
+                },
+            )
+            .expect("prepared console effects"),
+            builtins,
+            caps: integration_caps(),
+        })
+        .unwrap_or_else(|_| panic!("production console graph"))
+    }
+
+    /// The registry that forces every console effect onto the per-node scalar path.
     ///
-    /// The full intended strip is the case where both answers occur in one plan. Inside `simd1`,
-    /// EQ feeds the compressor and nothing else: nothing sits between two slots of one rack, so
-    /// they fuse. Between `simd1` and `simd2` sit the `PostSimd1`, `PostDynamic` and
-    /// `PostSimd2PreFader` track stages, which the lowering elides into buffer *aliases* -- one
-    /// `program::Tap` each, pointing at the compressor's op. That tap is a refusal, so the
-    /// limiter stays its own chain.
+    /// The bank-free arm is the oracle a merged chain is compared against: it binds no bank at
+    /// all, so no merge is expressible in it and the audio it renders is the strip's arithmetic
+    /// with none of this machinery in the way.
+    fn scalar_console_registry() -> NativeEffectRegistry {
+        let registry = launch_native_effect_registry_v1().expect("launch registry");
+        NativeEffectRegistry::new(
+            [
+                "miso.parametric-eq",
+                "miso.compressor",
+                "miso.true-peak-limiter",
+            ]
+            .map(|id| {
+                Box::new(ScalarOnlyDelegateFactory {
+                    delegate: registry
+                        .get_shared_ascii(id)
+                        .expect("registered launch effect"),
+                }) as Box<dyn NativeEffectFactory>
+            }),
+        )
+        .expect("scalar console registry")
+    }
+
+    /// Bind and render a production console artifact, returning what it rendered, what its chains
+    /// did, and every meter frame its streams published.
+    fn render_console_builtins_blocks(
+        artifact: PreparedGraphBuiltinsArtifact,
+        blocks: u64,
+        observers: Vec<GraphNodeObserverBinding>,
+    ) -> (Vec<Vec<f32>>, u64, u64, u64, Vec<MeterSnapshot>) {
+        let envelope = artifact.envelope();
+        let frames = envelope.quantum.0 as usize;
+        let nodes = artifact
+            .external_binding_nodes()
+            .map(|node| GraphNodeBinding::new(node.clone(), console_track_input_binding(node)))
+            .collect();
+        let bound = artifact
+            .into_bound(GraphRuntimeBindings {
+                envelope,
+                nodes,
+                observers,
+            })
+            .unwrap_or_else(|failure| panic!("production console bind: {}", failure.code));
+        let mut plan = bound.plan;
+        let mut meter_consumers = bound.meter_consumers;
+        let mut meter_frames: Vec<MeterSnapshot> = Vec::new();
+        let pcm = (0..blocks)
+            .map(|block| {
+                let mut pcm = vec![0.0_f32; frames * 2];
+                plan.render(
+                    RenderIo {
+                        input: None,
+                        output: PlanarBufferMut::try_new(&mut pcm, 2, frames, frames)
+                            .expect("output"),
+                    },
+                    RenderTime {
+                        absolute_sample: block * frames as u64,
+                    },
+                )
+                .expect("console render");
+                for stream in &mut meter_consumers {
+                    while let Ok(snapshot) = stream.consumer.try_pop() {
+                        meter_frames.push(snapshot);
+                    }
+                }
+                pcm
+            })
+            .collect();
+        let transposes = plan.bank_transposes();
+        let [chains, slots] = plan.bank_shape();
+        (pcm, transposes, chains, slots, meter_frames)
+    }
+
+    /// Issue #202 rec 2: the intended strip is **one chain per cohort**, end to end.
     ///
-    /// The result is #181's headline: 24 bound slots become 16 chains, not 8. If the refusal
-    /// stopped working this test would read 8 and the send/meter taps at those stages would be
-    /// reading the wrong audio -- which is the defect the clause exists to prevent, and which no
-    /// bit comparison of the session output alone would catch, because the output is downstream
-    /// of the whole strip either way.
+    /// This is the finding the recommendation was written to take. The production 64-track plan
+    /// binds four bank slots per cohort -- the post-input builtin stage, the EQ, the compressor and
+    /// the limiter -- and issue #181 rendered them as three chains: the builtin bank had no cohort
+    /// group at all, so `builtins -> simd1` was not an expressible candidate, and the cohort
+    /// planner pools per `RackLocationV1`, so `simd1 -> simd2` was not either. Eight cohorts times
+    /// three chains is the 24 planar/AoSoA round-trips a block that the audit measured, of which
+    /// 16 separated stages with nothing planar reading between them.
+    ///
+    /// Sixteen of the 24 now go away, because candidacy comes from the lowered program's dataflow:
+    ///
+    /// * `builtins -> EQ`. The EQ's op is the sole reader of the builtin bank's output, undelayed
+    ///   and unmixed. Nothing elides between them -- `PostInputBuiltins` is a bindable stage that
+    ///   keeps its op, and that op *is* the bank member.
+    /// * `EQ -> compressor`. The pair #181 already fused, inside `simd1`.
+    /// * `compressor -> limiter`. Three elided stage boundaries sit between them (`PostSimd1`,
+    ///   `PostDynamic`, `PostSimd2PreFader`), each contributing a `program::Tap` on the
+    ///   compressor's op. A tap is a *name*, not a read: an edge out of one resolves back to the
+    ///   compressor and is counted as a second reader, and the only other thing that can read one
+    ///   is an observer bound to the alias node. This session leases no stage meter, so nothing
+    ///   does, and the merge is admitted. `a_leased_stage_meter_declines_the_merge_and_still_meters`
+    ///   is the other side of that clause.
+    ///
+    /// The count is asserted, not just the digest: a silent non-merge renders exactly the same
+    /// bits, so a bit comparison alone cannot tell a working merge from a merge that never fires.
     #[test]
-    fn the_cohort_merge_stops_at_a_rack_boundary() {
+    fn the_intended_strip_fuses_the_whole_signal_path_into_one_chain_per_cohort() {
         // Enough blocks for the limiter's lookahead latency to clear, so the non-silence check
         // below is a real statement about the strip rather than about its priming window.
         const BLOCKS: u64 = 12;
         let Some(width) = BankWidth::for_backend(host_dispatch()) else {
             return;
         };
-        let cohorts_per_rack = 64 / width.lanes() as u64;
+        let cohorts = 64 / width.lanes() as u64;
         let intended = parse_session_toml(CONSOLE_SIXTY_FOUR_TRACK_INTENDED_FIXTURE)
             .expect("intended fixture");
-        let artifact = compile_console_model(&intended, 1_810);
-        let effect_slots = artifact.graph.prepared_bank_count() as u64;
-        let builtin_slots = artifact.graph.prepared_builtin_bank_count() as u64;
+        let registry = launch_native_effect_registry_v1().expect("launch registry");
+        let artifact = compile_console_model_with_builtins(&intended, 2_020, &[], &registry);
+        let effect_slots = artifact.graph().prepared_bank_count() as u64;
+        let builtin_slots = artifact.graph().prepared_builtin_bank_count() as u64;
         assert_eq!(
             effect_slots,
-            3 * cohorts_per_rack,
-            "the intended strip binds three slots per cohort: EQ, compressor and limiter"
+            3 * cohorts,
+            "the intended strip binds three effect slots per cohort: EQ, compressor and limiter"
+        );
+        assert_eq!(
+            builtin_slots, cohorts,
+            "and one post-input builtin bank per cohort"
         );
 
-        let (pcm, transposes, chains, slots) = render_console_blocks(artifact, BLOCKS);
+        let (pcm, transposes, chains, slots, _) =
+            render_console_builtins_blocks(artifact, BLOCKS, Vec::new());
         assert!(
             pcm.iter().flatten().any(|sample| *sample != 0.0),
             "the intended strip rendered audio"
@@ -4740,30 +5138,41 @@ mod tests {
             effect_slots + builtin_slots,
             "every bound bank is a slot of exactly one realised chain"
         );
-        // Two of the three effect slots per cohort fuse; the limiter does not.
+        // The derivation, stated: 4 slots per cohort, 3 merges per cohort, 1 chain per cohort.
+        assert_eq!(slots, 4 * cohorts, "four bank slots per cohort");
         assert_eq!(
-            chains,
-            effect_slots + builtin_slots - cohorts_per_rack,
-            "exactly one merge per cohort: EQ into the compressor, and the limiter left alone \
-             because the rack-boundary stage taps read the compressor's output"
-        );
-        assert!(
-            chains < slots,
-            "the intended strip must realise fewer chains than slots"
-        );
-        assert!(
-            chains > builtin_slots + cohorts_per_rack,
-            "the limiter must not be fused into the simd1 chain: a stage tap reads the \
-             compressor's output and a merged chain would leave that buffer holding pre-\
-             compressor audio"
+            chains, cohorts,
+            "the whole strip is one chain per cohort: builtins -> EQ -> compressor -> limiter"
         );
         assert_eq!(
             transposes,
             BLOCKS * chains,
             "G5: one planar/AoSoA round-trip per realised chain per block"
         );
+        assert_eq!(
+            slots - chains,
+            3 * cohorts,
+            "three of the four slots per cohort are fused into their predecessor"
+        );
+
+        // Bits: the merged strip renders exactly what the bank-free strip renders. Necessary, and
+        // on its own not sufficient -- which is why the chain count above is asserted too.
+        let scalar_registry = scalar_console_registry();
+        let scalar_artifact =
+            compile_console_model_with_builtins(&intended, 2_021, &[], &scalar_registry);
+        assert_eq!(
+            scalar_artifact.graph().prepared_bank_count(),
+            0,
+            "the oracle arm must bind no effect bank at all"
+        );
+        let (scalar_pcm, ..) = render_console_builtins_blocks(scalar_artifact, BLOCKS, Vec::new());
+        assert_pcm_bits_equal(
+            &pcm,
+            &scalar_pcm,
+            "64-track intended strip: one fused chain per cohort vs the per-node path",
+        );
         println!(
-            "#181 intended strip: {effect_slots} effect slots + {builtin_slots} builtin slots \
+            "#202 intended strip: {effect_slots} effect slots + {builtin_slots} builtin slots \
              = {slots} slots -> {chains} chains ({transposes} transposes over {BLOCKS} blocks)"
         );
     }
