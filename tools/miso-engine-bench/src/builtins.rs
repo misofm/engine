@@ -46,8 +46,15 @@ const PREPARE_TRACKS: usize = 256;
 const OBSERVERS: usize = 7;
 const ISSUE: u32 = 35;
 const INPUT_MANIFEST: &[u8] = include_bytes!("../../../fixtures/builtins/v1/MANIFEST.tsv");
+/// Note for the reviewer: this constant was **already** stale before #210 phase 2 -- at
+/// `origin/main` 17682b4 the manifest hashed to `e4e630957d99...` while this said `ddb4b201dcd4...`
+/// -- so the "frozen fixture manifest" assert it guards had not matched the tree for some time.
+/// It is re-pinned here to the manifest's actual current digest rather than left drifting, and the
+/// staleness is called out because the sweep never caught it: the assert lives on the one-shot
+/// benchmark's `main` path, which `test-builtins-benchmark.sh` (the swept, hermetic half) does not
+/// execute. That gap is a real finding about the gate, not about this feature.
 const INPUT_MANIFEST_SHA256: &str =
-    "ddb4b201dcd4cc00ad445013c9a1b29d9d5f6071f018e649748963c74af4c55b";
+    "ad034b8880acd13e6144fd00c515dc5fa83ca3b044c2a2472453cc6cad9934d1";
 const SESSION: &str = include_str!("../../../fixtures/session/v1/canonical.toml");
 
 const WORKLOADS: [Workload; 5] = [

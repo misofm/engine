@@ -371,7 +371,7 @@ fn an_oversized_delay_is_rejected_by_the_caps() {
     // Room for the plan's audio and metadata, but not for two 48,000-sample rings on top.
     caps.maximum_plan_bytes = compiled(0, 0).plan.estimate.incremental_plan_bytes + 1_024;
     assert!(
-        compile(session_with_delay(0, 0), caps.clone()).is_ok(),
+        compile(session_with_delay(0, 0), caps).is_ok(),
         "the cap must admit the undelayed session, or the rejection below proves nothing"
     );
     let Err(rejection) = compile(session_with_delay(48_000, 48_000), caps) else {
