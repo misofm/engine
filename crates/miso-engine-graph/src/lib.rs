@@ -588,6 +588,16 @@ pub trait GraphPreparedBuiltinBankProcessor: Send {
     fn desymmetrize(&mut self) {}
 }
 impl PreparedGraphPlan {
+    /// The input-side track delays this plan lowers, in normalized track order (#210 phase 2).
+    ///
+    /// Empty is the answer for every session that declared no delay, and that emptiness is the
+    /// feature's off gate: an empty list means `node_kind` never leaves its `SourceInput` arm, so
+    /// the lowered program is the one this plan would have had before the feature existed.
+    #[must_use]
+    pub fn track_delays(&self) -> &[PreparedTrackDelayV1] {
+        &self.track_delays
+    }
+
     fn has_valid_structural_layout(&self) -> bool {
         let graph_nodes: BTreeSet<_> = self.spec.nodes.iter().map(|node| node.id.clone()).collect();
         if graph_nodes.len() != self.spec.nodes.len() {
