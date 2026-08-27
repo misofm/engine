@@ -17,7 +17,10 @@
 //
 // **This is the most important thing to know before writing an app against it.** Issue #140 made
 // every declared kind live, so the honest summary is now short: `MisoCommandKindV1.Pan`,
-// `.Matrix`, `.FaderDb`, `.Mute`, `.EffectParam` and `.EffectBypass` are all **applied**.
+// `.Matrix`, `.FaderDb`, `.Mute`, `.EffectParam` and `.EffectBypass` are all **applied**. So are
+// `.ObserveSubscribe` and `.ObserveUnsubscribe` (issue 143), on the observation plane rather than
+// the render one -- they move the `miso.observe.v1` subscription map, not anything rendered. All
+// eight are in the metadata JSON's `commandKinds`, each with the `plane` it applies on.
 //
 // * `matrix_ll/lr/rl/rr`, `fader_db` and `mute` declare `BuiltinParameterUpdateRate::BlockTarget`
 //   with a linear smoothing policy. `polarity_invert`, `trim_db`, `hpf_hz` and `lpf_hz` still
