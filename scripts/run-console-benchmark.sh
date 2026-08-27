@@ -65,9 +65,17 @@
 # decided elidable at bank construction, and a run of them is emitted as the single `add(+0.0)` the
 # run composes to, at the run's position in the chain. Class **A** -- every `output_sha256` must
 # reproduce the baseline arm's exactly, on every row and every leg, and the two records differ only
-# in time. `sixty_four_track_dispatch_only` is the row that moves; every other row's builtins carry
-# a real design and elide nothing. The baseline arm is the base commit with this arm registration
-# and nothing else.
+# in time. `sixty_four_track_dispatch_only` is the row that moves most; every other row's builtins
+# carry a real design and elide nothing.
+#
+# The arm carries a second, smaller class-A change (candidate A1): the D7 sanitisation counter
+# accumulates `1.0 & bad` rather than `select(bad, 1.0, 0.0)` at all four copies of the sanitise
+# prologue. On a canonical mask those are the same bits, so this moves no digest either; it is
+# worth about -0.10 to -0.14 us/block and it applies to *every* row, because every block is
+# sanitised. So the expected motion of this pair is: `dispatch_only` to roughly 10.6 us, and
+# `builtins_only`, `console` and `idle` each down by about 0.12 us -- a real, expected motion
+# rather than noise. A row that does not move at all is as much a finding as one that moves too
+# far. The baseline arm is the base commit with this arm registration and nothing else.
 #
 # `--issue-loop-eq-r1` writes to `artifacts/issue-loop-eq-r1` and is the effect-optimization loop's
 # EQ round 1: parametric-EQ identity-section elision and the two-slot cohort chain (#181). Both are

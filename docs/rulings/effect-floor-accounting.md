@@ -257,7 +257,7 @@ the graph's routing in `crates/miso-engine-graph/src/runtime.rs`. Per lane-sampl
 
 | stage | lane-ops |
 |---|---:|
-| input sanitise and trim: `abs`, `lt`, `mask_not`, `select`, `add` (the counter), `andnot`, `mul` | 7 |
+| input sanitise and trim: `abs`, `lt`, `mask_not`, `1.0 & bad`, `add` (the counter), `andnot`, `mul` | 7 |
 | HPF section (one 2nd-order TPT SVF, Butterworth `k = sqrt(2)`) | 24 |
 | LPF section | 24 |
 | output boundary scan: `abs`, `lt`, `mask_not`, `mask_or` | 4 |
@@ -307,7 +307,7 @@ The `dispatch_only` row, per lane-sample, once both sections are elided:
 
 | stage | lane-ops |
 |---|---:|
-| input sanitise and trim: `abs`, `lt`, `mask_not`, `select`, `add` (the counter), `andnot`, `mul` | 7 |
+| input sanitise and trim: `abs`, `lt`, `mask_not`, `1.0 & bad`, `add` (the counter), `andnot`, `mul` | 7 |
 | the run of two identity sections, collapsed: one `add` | 1 |
 | output boundary scan: `abs`, `lt`, `mask_not`, `mask_or` | 4 |
 | fader: `mul`, `andnot` (mute) | 2 |
@@ -315,6 +315,15 @@ The `dispatch_only` row, per lane-sample, once both sections are elided:
 | route `mix2x2`: `mul` + unfused `fma` per channel | 3 |
 | output node's 64-input reduction, amortised per track | 1 |
 | **total** | **22** |
+
+> **The counter's spelling, not its cost.** The sanitise row used to read `select` where it now
+> reads `1.0 & bad`. `sanitize_gain_block` and the three copies of its prologue accumulate the
+> counter as `count + (1.0 & bad)` rather than `count + select(bad, 1.0, 0.0)`, which is the same
+> bits on a canonical mask — `select(m, a, +0.0)` *is* `m & a` when `m` is all-ones or all-zeros —
+> and the same **one** mask-and-value operation. The inventory is unchanged at 7 and no floor row
+> moves; only the instruction the row names does. `crates/miso-engine-lane/tests/sanitise_counter.rs`
+> holds both halves: the equivalence, and an independent scalar recount of what the D7 boundary
+> should have counted.
 
 Sanitisation, the boundary scan, the fader and the pan matrix keep their full cost, and that is the
 whole reason this is 22 and not something smaller. The D7 policy requires the input clear and the

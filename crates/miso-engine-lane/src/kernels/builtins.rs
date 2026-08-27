@@ -74,23 +74,42 @@ pub fn mask_from_flags<L: Lane>(flags: &[f32]) -> L::Mask {
 /// 1. `x = load(frame)`
 /// 2. `bad = !(|x| < NONFINITE_LIMIT)` — one ordered compare; NaN is included because the compare
 ///    is false for it
-/// 3. `count = count + select(bad, 1.0, 0.0)`
+/// 3. `count = count + (1.0 & bad)` — the and-form; see below
 /// 4. `y = andnot(x, bad) * gain` — one multiply, no fusion
 /// 5. `store(frame, y)`
 ///
 /// The count is an exact `f32` integer: a block never has more frames than `2^24`, so the
 /// accumulation is exact and the caller reads it back with `store`.
+///
+/// # The and-form, and why it is not a numeric change
+///
+/// Step 3 was `count + select(bad, 1.0, 0.0)` and is now `count + one.andnot(mask_not(bad))`,
+/// which is `1.0 & bad`. The two are the *same bits*, not merely the same value, and the reason is
+/// the canonical-mask contract on [`Lane::Mask`]: a comparison result is per lane either all zero
+/// bits or all one bits, and nothing else. `bad` is `mask_not` of a single ordered compare at every
+/// site, so it is canonical; `mask_not` of a canonical mask is canonical; and on a canonical mask
+/// `select(m, a, b)` is by definition `(m & a) | (!m & b)`, which with `b = +0.0` — all zero bits —
+/// is exactly `m & a`. So the and-form is a spelling of step 3, not a rounding of it.
+///
+/// It is used at **every** copy of this frame body: here, in [`input_chain_block`], and in the two
+/// elision variants [`identity_chain_block`] and [`mixed_chain_block`], which duplicate the
+/// sanitise prologue. A copy left on the select-form would still be correct — that is the point of
+/// the equivalence — but the four are kept identical so the frozen order above has one reading.
+///
+/// The **floor accounting does not move**: this was one mask-and-value operation before and is one
+/// now, so the sanitise inventory in `docs/rulings/effect-floor-accounting.md` stays at 7
+/// lane-ops. The change is an instruction-selection one, gated by
+/// `crates/miso-engine-lane/tests/sanitise_counter.rs`.
 #[inline(always)]
 pub fn sanitize_gain_block<L: Lane>(io: &mut [f32], frames: usize, gain: L) -> L {
     debug_assert_eq!(io.len(), frames * L::WIDTH);
     let limit = L::splat(NONFINITE_LIMIT);
     let one = L::splat(1.0);
-    let zero = L::zero();
     let mut count = L::zero();
     for frame in io.chunks_exact_mut(L::WIDTH) {
         let x = L::load(frame);
         let bad = L::mask_not(x.abs().lt(limit));
-        count = count.add(L::select(bad, one, zero));
+        count = count.add(one.andnot(L::mask_not(bad)));
         x.andnot(bad).mul(gain).store(frame);
     }
     count
@@ -357,7 +376,7 @@ pub fn input_chain_block<L: Lane>(
         for (channel, frame) in [left_frame, right_frame].into_iter().enumerate() {
             let x = L::load(frame);
             let bad = L::mask_not(x.abs().lt(limit));
-            count[channel] = count[channel].add(L::select(bad, one, zero));
+            count[channel] = count[channel].add(one.andnot(L::mask_not(bad)));
             let mut v = x.andnot(bad).mul(c.trim[channel]);
             for section in 0..2 {
                 let coefficient = &c.section[channel][section];
@@ -537,7 +556,7 @@ fn identity_chain_block<L: Lane>(
         for (channel, frame) in [left_frame, right_frame].into_iter().enumerate() {
             let x = L::load(frame);
             let bad = L::mask_not(x.abs().lt(limit));
-            count[channel] = count[channel].add(L::select(bad, one, zero));
+            count[channel] = count[channel].add(one.andnot(L::mask_not(bad)));
             let v = x.andnot(bad).mul(c.trim[channel]).add(zero);
             nonfinite[channel] = L::mask_or(nonfinite[channel], L::mask_not(v.abs().lt(limit)));
             v.store(frame);
@@ -587,7 +606,7 @@ fn mixed_chain_block<L: Lane>(
         for (channel, frame) in [left_frame, right_frame].into_iter().enumerate() {
             let x = L::load(frame);
             let bad = L::mask_not(x.abs().lt(limit));
-            count[channel] = count[channel].add(L::select(bad, one, zero));
+            count[channel] = count[channel].add(one.andnot(L::mask_not(bad)));
             let mut v = x.andnot(bad).mul(c.trim[channel]);
             let mut run = false;
             for section in 0..2 {
