@@ -131,6 +131,15 @@
 # row's `output_sha256` is unchanged from `strip3`, which is the arm this one is read against; the
 # five new rows have no earlier number to be read against, and that is the point of capturing them.
 # This capture is the post-strip-round baseline the sprint scoreboard quotes.
+#
+# `--mono2` is mono-collapse M2: the collapsed execution. Like `--strip4` it has **no baseline
+# partner**, and for a stronger reason than "nothing changed" -- the baseline is *inside the run*.
+# The `console_mono` record is a paired measurement whose two arms are the same fixture with the
+# collapse taken and forced off, alternated observation by observation, so its delta is the
+# mechanism's cost measured against itself on one machine at one moment. What the arm is read
+# against externally is `strip4`: every non-mono row's `output_sha256` must be unchanged from it,
+# because a session with no mono-source track never collapses and a change to its bits would mean
+# the dispatch fired where it must not.
 # `--issue-loop-eq-r1` writes to `artifacts/issue-loop-eq-r1` and is the effect-optimization loop's
 # EQ round 1: parametric-EQ identity-section elision and the two-slot cohort chain (#181). Both are
 # **class A** -- every workload's output digest is the #175 digest to the bit, on every row and every
@@ -207,10 +216,11 @@ if [[ "$#" == 1 ]]; then
         --strip3) phase_directory=strip3 ;;
         --strip3-baseline) phase_directory=strip3-baseline ;;
         --strip4) phase_directory=strip4 ;;
-        *) printf 'usage: %s [--phase2|--phase3|--issue163-phase0|--issue163-phase1|--issue163-phase2|--issue163-phase3|--issue163-phase4|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue184|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline|--round2-lim|--round2-lim-baseline|--round2-composed|--audit-chain-merge|--audit-chain-merge-baseline|--strip1|--strip1-baseline|--strip2|--strip2-baseline|--strip3|--strip3-baseline|--strip4]\n' "$0" >&2; exit 2 ;;
+        --mono2) phase_directory=mono2 ;;
+        *) printf 'usage: %s [--phase2|--phase3|--issue163-phase0|--issue163-phase1|--issue163-phase2|--issue163-phase3|--issue163-phase4|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue184|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline|--round2-lim|--round2-lim-baseline|--round2-composed|--audit-chain-merge|--audit-chain-merge-baseline|--strip1|--strip1-baseline|--strip2|--strip2-baseline|--strip3|--strip3-baseline|--strip4|--mono2]\n' "$0" >&2; exit 2 ;;
     esac
 elif [[ "$#" != 0 ]]; then
-    printf 'usage: %s [--phase2|--phase3|--issue163-phase0|--issue163-phase1|--issue163-phase2|--issue163-phase3|--issue163-phase4|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue184|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline|--round2-lim|--round2-lim-baseline|--round2-composed|--audit-chain-merge|--audit-chain-merge-baseline|--strip1|--strip1-baseline|--strip2|--strip2-baseline|--strip3|--strip3-baseline|--strip4]\n' "$0" >&2
+    printf 'usage: %s [--phase2|--phase3|--issue163-phase0|--issue163-phase1|--issue163-phase2|--issue163-phase3|--issue163-phase4|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue184|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline|--round2-lim|--round2-lim-baseline|--round2-composed|--audit-chain-merge|--audit-chain-merge-baseline|--strip1|--strip1-baseline|--strip2|--strip2-baseline|--strip3|--strip3-baseline|--strip4|--mono2]\n' "$0" >&2
     exit 2
 fi
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)

@@ -26,7 +26,7 @@ use miso_engine_core::realtime::{
     Consumer, PreparedRenderPlan, Producer, QueueGeneration, RenderEnvelope, RenderError,
     bounded_spsc, bounded_spsc_retained_payload,
 };
-use miso_engine_effect_contract::{BankWidth, ChannelSymmetryWitnessV1};
+use miso_engine_effect_contract::{BankWidth, ChannelSymmetryWitnessV1, SeamSideV1};
 use miso_engine_graph::{
     DependencyLevel, GraphBindingBlock, GraphBuiltinBankResourceEstimate, GraphNodeId,
     GraphNodeObserverBinding, GraphObservationBlock, GraphPreparedBuiltinBank,
@@ -270,6 +270,27 @@ impl GraphPreparedBuiltinBankProcessor for BuiltinBankProcessor {
     fn lane_symmetry(&self, lane: usize) -> ChannelSymmetryWitnessV1 {
         self.bank.lane_symmetry(lane)
     }
+
+    fn supports_mono_collapse(&self) -> bool {
+        self.bank.supports_mono_collapse()
+    }
+
+    fn process_mono(
+        &mut self,
+        left: &mut [f32],
+        frames: u32,
+        first_sample: u64,
+    ) -> Result<(), RenderError> {
+        let _ = first_sample;
+        self.bank.process_mono(left, frames);
+        self.process_calls = self.process_calls.saturating_add(1);
+        self.frames_processed = self.frames_processed.saturating_add(u64::from(frames));
+        Ok(())
+    }
+
+    fn desymmetrize(&mut self) {
+        self.bank.desymmetrize();
+    }
 }
 
 /// One strip fader bank and the console channels of its member lanes (issue #212).
@@ -351,6 +372,13 @@ impl GraphPreparedBuiltinBankProcessor for FaderBankProcessor {
         let _ = lane;
         SEAM_SIDE_WITNESS
     }
+
+    /// The fader is the first stage that reads the duplicated plane, so the seam is immediately
+    /// before it. It never runs one-plane: its two channels' gains and mutes are free to differ,
+    /// and on the standing mono fixture 49 of 64 tracks' faders do.
+    fn seam_side(&self) -> SeamSideV1 {
+        SeamSideV1::SeamSide
+    }
 }
 
 /// One strip matrix/pan bank and the console channels of its member lanes (issue #212).
@@ -400,6 +428,11 @@ impl GraphPreparedBuiltinBankProcessor for MatrixBankProcessor {
     fn lane_symmetry(&self, lane: usize) -> ChannelSymmetryWitnessV1 {
         let _ = lane;
         SEAM_SIDE_WITNESS
+    }
+
+    /// Irreducibly cross-plane: `yl = ll*l + lr*r` reads both. See [`Self::lane_symmetry`].
+    fn seam_side(&self) -> SeamSideV1 {
+        SeamSideV1::SeamSide
     }
 }
 

@@ -7,9 +7,20 @@
 //! doing identical work, and duplicates the result at the fader/matrix seam. That is only sound
 //! when every stage *upstream of the seam* would have computed the same bits on both channels.
 //! This module is the decision infrastructure for that: an authoritative, event-maintained bit
-//! per track saying "the two channels are still doing identical work". **Nothing reads it to
-//! decide anything rendered.** It is control-plane state and a query surface, and it is
-//! deliberately inert.
+//! per track saying "the two channels are still doing identical work".
+//!
+//! **It is live.** Since mono-collapse M2, `miso_engine_rack::BankChain::run` reads the
+//! conjunction of these terms once per bank chain per block and renders one plane instead of two
+//! when every active lane holds. Two things follow, and both are load-bearing:
+//!
+//! * a wrong `true` here is **wrong audio**, not a missed optimisation. Every default in this
+//!   module is therefore the declining one, and every term's owner clears it eagerly;
+//! * the four terms a *runtime* object can see are not the whole answer. [`SOURCE`] is decided
+//!   from the compiled session, keyed by track id, and a chain sees only anonymous lanes -- so a
+//!   chain must be handed that half explicitly (`BankChain::arm_mono_collapse`) and declines until
+//!   it is. The join is `PreparedRenderPlan::arm_mono_collapse`.
+//!
+//! [`SOURCE`]: ChannelSymmetryWitnessV1::SOURCE
 //!
 //! # The five terms, and why the witness is a set rather than a `bool`
 //!

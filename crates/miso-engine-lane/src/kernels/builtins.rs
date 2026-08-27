@@ -707,3 +707,200 @@ fn mixed_chain_block<L: Lane>(
         nonfinite,
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// The mono-collapse one-plane variants.
+//
+// A collapsed track computes one channel and the strip duplicates it at the fader/matrix seam, so
+// these are the same three shapes as above with the channel loop peeled to the one live channel.
+// The rule that makes them class A is stated once here and holds for every one of them: **each is
+// the dual body's channel-`0` arm, character for character, with the channel index frozen at `0`
+// and the `1` arm deleted.** No operation is reassociated, no compare is hoisted, no accumulation
+// changes order -- the two channels were already independent per-frame arithmetic in one loop, so
+// deleting one of them cannot move the other's bits.
+//
+// The report is filled for **both** channels, because the collapsed track's right plane is the
+// duplicated left one and its accounting is therefore the left one's: a caller that read
+// `sanitized[1]` off a collapsed block would otherwise see a zero where the dual run counted.
+// ---------------------------------------------------------------------------------------------
+
+/// [`input_chain_block`] over one plane: the collapsed track's live channel.
+///
+/// Frozen operation order: [`input_chain_block`]'s, with `ch = 0` and no second channel.
+#[inline(always)]
+pub fn input_chain_block_mono<L: Lane>(
+    io: &mut [f32],
+    frames: usize,
+    c: &InputChainCoef<L>,
+    s: &mut InputChainState<L>,
+) -> InputChainReport<L> {
+    debug_assert_eq!(io.len(), frames * L::WIDTH);
+    let limit = L::splat(NONFINITE_LIMIT);
+    let one = L::splat(1.0);
+    let zero = L::zero();
+
+    let mut count = zero;
+    let mut nonfinite = no_lanes::<L>();
+    let mut state = s.section[0];
+    let mut nc1 = [zero; 2];
+    for (section, coefficient) in c.section[0].iter().enumerate() {
+        nc1[section] = coefficient.c1.neg();
+    }
+
+    for frame in io.chunks_exact_mut(L::WIDTH) {
+        let x = L::load(frame);
+        let bad = L::mask_not(x.abs().lt(limit));
+        count = count.add(one.andnot(L::mask_not(bad)));
+        let mut v = x.andnot(bad).mul(c.trim[0]);
+        for section in 0..2 {
+            let coefficient = &c.section[0][section];
+            let v0 = v;
+            let (v1, v2) = svf_step(
+                v0,
+                nc1[section],
+                coefficient.a2,
+                coefficient.a3,
+                &mut state[section],
+            );
+            v = coefficient
+                .m2
+                .fma(v2, coefficient.m1.fma(v1, coefficient.m0.mul(v0)));
+        }
+        nonfinite = L::mask_or(nonfinite, L::mask_not(v.abs().lt(limit)));
+        v.store(frame);
+    }
+
+    s.section[0] = state;
+    InputChainReport {
+        sanitized: [count; 2],
+        nonfinite: [nonfinite; 2],
+    }
+}
+
+/// [`identity_chain_block`] over one plane.
+#[inline(always)]
+fn identity_chain_block_mono<L: Lane>(
+    io: &mut [f32],
+    frames: usize,
+    c: &InputChainCoef<L>,
+) -> InputChainReport<L> {
+    debug_assert_eq!(io.len(), frames * L::WIDTH);
+    let limit = L::splat(NONFINITE_LIMIT);
+    let one = L::splat(1.0);
+    let zero = L::zero();
+
+    let mut count = zero;
+    let mut nonfinite = no_lanes::<L>();
+    for frame in io.chunks_exact_mut(L::WIDTH) {
+        let x = L::load(frame);
+        let bad = L::mask_not(x.abs().lt(limit));
+        count = count.add(one.andnot(L::mask_not(bad)));
+        let v = x.andnot(bad).mul(c.trim[0]).add(zero);
+        nonfinite = L::mask_or(nonfinite, L::mask_not(v.abs().lt(limit)));
+        v.store(frame);
+    }
+
+    InputChainReport {
+        sanitized: [count; 2],
+        nonfinite: [nonfinite; 2],
+    }
+}
+
+/// [`mixed_chain_block`] over one plane.
+#[inline(always)]
+fn mixed_chain_block_mono<L: Lane>(
+    io: &mut [f32],
+    frames: usize,
+    c: &InputChainCoef<L>,
+    s: &mut InputChainState<L>,
+    plan: &InputChainPlan,
+) -> InputChainReport<L> {
+    debug_assert_eq!(io.len(), frames * L::WIDTH);
+    let limit = L::splat(NONFINITE_LIMIT);
+    let one = L::splat(1.0);
+    let zero = L::zero();
+
+    let mut count = zero;
+    let mut nonfinite = no_lanes::<L>();
+    let mut state = s.section[0];
+    let mut nc1 = [zero; 2];
+    for (section, coefficient) in c.section[0].iter().enumerate() {
+        nc1[section] = coefficient.c1.neg();
+    }
+
+    for frame in io.chunks_exact_mut(L::WIDTH) {
+        let x = L::load(frame);
+        let bad = L::mask_not(x.abs().lt(limit));
+        count = count.add(one.andnot(L::mask_not(bad)));
+        let mut v = x.andnot(bad).mul(c.trim[0]);
+        let mut run = false;
+        for section in 0..2 {
+            if plan.elided[0][section] {
+                run = true;
+                continue;
+            }
+            if run {
+                v = v.add(zero);
+                run = false;
+            }
+            let coefficient = &c.section[0][section];
+            let v0 = v;
+            let (v1, v2) = svf_step(
+                v0,
+                nc1[section],
+                coefficient.a2,
+                coefficient.a3,
+                &mut state[section],
+            );
+            v = coefficient
+                .m2
+                .fma(v2, coefficient.m1.fma(v1, coefficient.m0.mul(v0)));
+        }
+        if run {
+            v = v.add(zero);
+        }
+        nonfinite = L::mask_or(nonfinite, L::mask_not(v.abs().lt(limit)));
+        v.store(frame);
+    }
+
+    s.section[0] = state;
+    InputChainReport {
+        sanitized: [count; 2],
+        nonfinite: [nonfinite; 2],
+    }
+}
+
+/// [`input_chain_block_elided`] over one plane: the collapsed track's whole input chain.
+///
+/// The plan is read at **channel `0` only**, which is the collapsed channel's own plan and
+/// therefore exactly the plan the dual body would have taken for it. The two channels' plans agree
+/// whenever the chain is collapse-eligible at all -- the elision test is a function of the
+/// coefficient words the `DESIGNED` term compares plus a state that starts `+0.0` in both -- and
+/// [`plan_is_channel_symmetric`] is the bit a caller gates the collapse on so that the one case
+/// where they could disagree declines instead of guessing.
+#[inline(always)]
+pub fn input_chain_block_mono_elided<L: Lane>(
+    io: &mut [f32],
+    frames: usize,
+    c: &InputChainCoef<L>,
+    s: &mut InputChainState<L>,
+    plan: &InputChainPlan,
+) -> InputChainReport<L> {
+    match plan.elided[0] {
+        [false, false] => input_chain_block_mono(io, frames, c, s),
+        [true, true] => identity_chain_block_mono(io, frames, c),
+        _ => mixed_chain_block_mono(io, frames, c, s, plan),
+    }
+}
+
+/// Whether the two channels of a chain elide the same sections.
+///
+/// The collapse's Job-1 interaction, and the reason it is a query rather than an assertion: an
+/// elided identity section is `v |-> v + 0.0` and an *unelided* one with identity coefficients is
+/// `v |-> fma(0, 0, fma(0, 0, 1.0 * v))`, which is `v`. The two agree everywhere except at `-0.0`.
+/// So a chain whose channels disagree about elision is one whose dual run can produce `-0.0` on
+/// one plane and `+0.0` on the other, and a collapse would claim they agree. It declines instead.
+#[must_use]
+pub const fn plan_is_channel_symmetric(plan: &InputChainPlan) -> bool {
+    plan.elided[0][0] == plan.elided[1][0] && plan.elided[0][1] == plan.elided[1][1]
+}

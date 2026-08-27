@@ -448,9 +448,11 @@ inventory — 352 lane-ops — because their fixture differs from the standing o
 *values* only, and a floor is an inventory of operations, not of operands.
 
 **One question is deliberately left open**, and it is left open here rather than answered quietly in
-the table. The mono collapse does not exist in this tree. When it lands, a collapsed track will
-compute one plane where the spec describes two, and whether a collapsed row's floor halves is a
-ruling this document does not yet make: the honest candidates are "the spec requires the arithmetic
+the table. The mono collapse landed with mono-collapse M2, and `sixty_four_track_console_mono` now
+takes it on every cohort of every block: a collapsed track computes one plane where the spec
+describes two. So the row's measured cost has fallen against an inventory that has not, and its
+%-of-floor now reads above what any stereo row can reach. Whether a collapsed row's floor *should*
+halve is a ruling this document still does not make: the honest candidates are "the spec requires the arithmetic
 of both channels and the collapse is an implementation that exploits their equality, so the floor
 stands at 352 and the row's %-of-floor rises above what a stereo row can reach", and "a lane-sample
 whose value is determined by another lane-sample is not independent arithmetic, so the upstream half

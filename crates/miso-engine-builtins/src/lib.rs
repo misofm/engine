@@ -35,8 +35,9 @@ use miso_engine_lane::{
         builtins::{
             GainMuteRamp, InputChainCoef, InputChainPlan, InputChainState, Matrix2x2Coef,
             Matrix2x2Ramp, gain_mute_block, gain_mute_ramp_block, input_chain_block_elided,
-            input_chain_plan, lanes_below, mask_from_flags, matrix2x2_block, matrix2x2_ramp_block,
-            no_lanes, zero_lanes_block,
+            input_chain_block_mono_elided, input_chain_plan, lanes_below, mask_from_flags,
+            matrix2x2_block, matrix2x2_ramp_block, no_lanes, plan_is_channel_symmetric,
+            zero_lanes_block,
         },
     },
 };
@@ -798,6 +799,71 @@ impl<L: Lane> InputStage<L> {
             recovered_left_state: recovered[0],
             recovered_right_state: recovered[1],
         }
+    }
+
+    /// Renders one block of the **collapsed** track: one plane, one channel's coefficients and
+    /// state, and the right channel's accounting duplicated from the left.
+    ///
+    /// The seam duplicates this plane into the right one before the fader reads it, so the right
+    /// plane this call does not touch is not the block's right output -- it is scratch. The right
+    /// channel's *state* is not touched either, and is restored by [`InputStage::desymmetrize`]
+    /// before the first dual block after a disengage.
+    ///
+    /// The recovery arm is the dual body's channel-`0` arm with the channel index frozen: the same
+    /// mask, the same `zero_lanes_block`, the same `andnot` over the same two sections. Its
+    /// per-channel counters are duplicated rather than left at zero, because the right plane the
+    /// seam is about to write carries exactly the left plane's recovered samples.
+    fn process_mono(&mut self, left: &mut [f32], frames: usize) -> BuiltinProcessReport {
+        debug_assert!(plan_is_channel_symmetric(&self.plan));
+        let report = input_chain_block_mono_elided::<L>(
+            left,
+            frames,
+            &self.coef,
+            &mut self.state,
+            &self.plan,
+        );
+        let mut recovered = 0_u64;
+        let bad = L::mask_and(report.nonfinite[0], self.active);
+        if L::mask_any(bad) {
+            zero_lanes_block::<L>(left, frames, bad);
+            for section in &mut self.state.section[0] {
+                section.ic1 = section.ic1.andnot(bad);
+                section.ic2 = section.ic2.andnot(bad);
+            }
+            recovered = self.members_sum(L::select(bad, L::splat(1.0), L::zero()));
+            for channel in 0..2 {
+                self.lifetime_recovered[channel] =
+                    self.lifetime_recovered[channel].saturating_add(recovered);
+            }
+        }
+        BuiltinProcessReport {
+            sanitized_input: self
+                .members_sum(report.sanitized[0])
+                .saturating_add(self.members_sum(report.sanitized[1])),
+            sanitized_output: 0,
+            recovered_left_state: recovered,
+            recovered_right_state: recovered,
+        }
+    }
+
+    /// Copies the left channel's retained integrators onto the right channel.
+    ///
+    /// The collapse's disengage boundary for this stage. The **whole** per-channel state of this
+    /// kernel is `InputChainState::section[channel]` -- two `SvfState` words per section, two
+    /// sections -- and nothing else: `coef` is designed and compares bit-equal between the
+    /// channels for every lane of a collapse-eligible bank (which is what `DESIGNED` *is*), and
+    /// `plan`, `members`, `active` and the counters are cohort-wide. Copying the integrators is
+    /// therefore the whole of it.
+    fn desymmetrize(&mut self) {
+        self.state.section[1] = self.state.section[0];
+    }
+
+    /// Whether this chain may be collapsed at all: the two channels must elide the same sections.
+    ///
+    /// See `miso_engine_lane::kernels::builtins::plan_is_channel_symmetric` for why an elision
+    /// disagreement is a `-0.0` divergence rather than a scheduling difference.
+    const fn mono_collapse_gate(&self) -> bool {
+        plan_is_channel_symmetric(&self.plan)
     }
 
     /// Clears every retained integrator word; prepared coefficients are untouched.
@@ -1777,6 +1843,39 @@ impl BuiltinInputBankV1 {
         match &mut self.stage {
             InputStageKernel::Simd4(stage) => stage.process(left, right, frames),
             InputStageKernel::Simd8(stage) => stage.process(left, right, frames),
+        }
+    }
+
+    /// Renders one AoSoA block of the **collapsed** cohort: the left plane only.
+    ///
+    /// `right` is deliberately not a parameter. A collapsed chain gathers one plane and duplicates
+    /// it at the seam, so there is no right block here to be wrong about.
+    pub fn process_mono(&mut self, left: &mut [f32], frames: u32) -> BuiltinProcessReport {
+        let frames = frames as usize;
+        debug_assert_eq!(left.len(), frames * self.width.lanes() as usize);
+        match &mut self.stage {
+            InputStageKernel::Simd4(stage) => stage.process_mono(left, frames),
+            InputStageKernel::Simd8(stage) => stage.process_mono(left, frames),
+        }
+    }
+
+    /// Whether this bank may run [`BuiltinInputBankV1::process_mono`] at all.
+    ///
+    /// Fixed by preparation: the elision plan is decided once, from the coefficient words and a
+    /// `+0.0` state, and nothing on the render path re-decides it.
+    #[must_use]
+    pub const fn supports_mono_collapse(&self) -> bool {
+        match &self.stage {
+            InputStageKernel::Simd4(stage) => stage.mono_collapse_gate(),
+            InputStageKernel::Simd8(stage) => stage.mono_collapse_gate(),
+        }
+    }
+
+    /// Copies every lane's left-channel integrators onto the right channel (the disengage copy).
+    pub fn desymmetrize(&mut self) {
+        match &mut self.stage {
+            InputStageKernel::Simd4(stage) => stage.desymmetrize(),
+            InputStageKernel::Simd8(stage) => stage.desymmetrize(),
         }
     }
 

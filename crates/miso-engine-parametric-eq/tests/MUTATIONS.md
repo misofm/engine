@@ -191,3 +191,19 @@ assertions, so this row is RED in release as well as debug.
 The pre-existing reset gate (`resets_restore_defaults_or_only_clear_history`, and the conformance
 reset scenario) does not reach it: those reset a section that is live *before* the ramp, where the
 flag was already `false` and the snap cannot make it wrong.
+
+## Mono-collapse M2 — the collapsed cascade and the disengage copy
+
+Driver: one mutation at a time, `cargo test -p miso-engine-parametric-eq --test mono_collapse`,
+tree restored between rows.
+
+| # | mutation | file | test | result |
+|---|---|---|---|---|
+| M2-E1 | `PreparedParametricEq::desymmetrize` drops `sections` | `parametric-eq/src/lib.rs` | `a_desymmetrized_bank_is_a_never_collapsed_bank` | RED |
+| M2-E2 | the collapsed body hard-codes `stationary = true` instead of reading the one live channel's `no_ramp_in_flight` | `parametric-eq/src/lib.rs` `render_mono` | `the_collapsed_body_renders_the_dual_bodys_left_plane` | RED — 2 failed; a ramping block taking the interleaved cascade renders a coefficient that is not the one in force |
+
+`remaining` and `identity` are on the copy list and are not individually red, and the reason is
+worth stating: both are read only to choose a *schedule* — the interleaved cascade over the
+per-section one, and the elided cascade over the full one — and this crate's own gates prove all
+three schedules render the same bits. A stale copy of either leaves the two channels taking
+different schedules to the same words, which is the invariant the whole-state rule protects.

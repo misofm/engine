@@ -291,3 +291,41 @@ weaker reason: both resets land on `clear_runtime`, which *is* the rest state th
 so a claim that survived a reset would happen to be true. It is withdrawn because the claim is a
 statement about a block that was rendered and observed, and it must not come to depend on
 `clear_runtime` and `is_at_silent_rest` continuing to coincide.
+
+## Mono-collapse M2 — the collapsed kernel and the disengage copy
+
+Driver: one mutation at a time, `cargo test -p miso-engine-true-peak-limiter --test mono_collapse`,
+tree restored between rows.
+
+| # | mutation | file | test | result |
+|---|---|---|---|---|
+| M2-L1 | `ChannelState::copy_state_from` drops `history` | `true-peak-limiter/src/lib.rs` | `a_desymmetrized_bank_is_a_never_collapsed_bank` | RED |
+| M2-L2 | `ChannelState::copy_state_from` drops `main_ring` | `true-peak-limiter/src/lib.rs` | `a_desymmetrized_bank_is_a_never_collapsed_bank` | RED |
+| M2-L3 | `ChannelState::copy_state_from` drops `required_ring` | `true-peak-limiter/src/lib.rs` | `a_desymmetrized_bank_is_a_never_collapsed_bank` | RED |
+| M2-L4 | `ChannelState::copy_state_from` drops `box_ring` | `true-peak-limiter/src/lib.rs` | `a_desymmetrized_bank_is_a_never_collapsed_bank` | RED |
+| M2-L5 | `ChannelState::copy_state_from` drops `reduction` | `true-peak-limiter/src/lib.rs` | `a_desymmetrized_bank_is_a_never_collapsed_bank` | RED |
+| M2-L6 | `ChannelState::copy_state_from` drops `box_sum` | `true-peak-limiter/src/lib.rs` | `a_desymmetrized_bank_is_a_never_collapsed_bank` | RED |
+| M2-L7 | `ChannelState::copy_state_from` drops `limit` | `true-peak-limiter/src/lib.rs` | `a_desymmetrized_bank_is_a_never_collapsed_bank` | RED |
+| M2-L8 | `ChannelState::copy_state_from` drops `release` | `true-peak-limiter/src/lib.rs` | `a_desymmetrized_bank_is_a_never_collapsed_bank` | RED |
+
+Three properties of the test corpus are what make those eight rows red, and each was arrived at by
+watching a row stay green first:
+
+* the ceiling is retargeted **below the signal**, so `required_ring` is not uniformly `1.0` and the
+  twelve oversampling history taps actually decide an output sample. Against a corpus under the
+  ceiling, `history` is green;
+* the content carries a per-block **envelope**. A steady loud signal drives the release recursion to
+  a fixed point within a few blocks, and a frozen recursive word that has converged to the same
+  value as a live one is a state difference no output can show. Against steady content, `reduction`
+  is green;
+* the release retarget is **away from the descriptor default**. Against the default value the span
+  is a no-op and `release` is green.
+
+`prefix`, `phase`, `lookahead_ms` and `lane` are on the copy list and are not individually red, and
+the two pairs are not the same kind of gap. `lookahead_ms` and `lane` are the prepared window shape
+and no rendered block writes them, so nothing *can* make them diverge on a bound bank. `prefix` and
+`phase` are genuine running state -- `UniformHot::new` loads them and the block write-back stores
+them -- and a collapsed block advances only the left channel's, so a divergence ought to be
+constructible and this corpus does not construct one. An earlier draft of this row claimed they were
+re-derived at the next van Herk block boundary; that is not true of either word and the claim is
+withdrawn rather than repaired. The gap is recorded, not explained.

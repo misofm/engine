@@ -172,9 +172,11 @@ pub(crate) fn floor_row(workload: Workload) -> Option<FloorRow> {
         // inventory, exactly as the standing console row is. Their fixture differs from it only in
         // per-channel *values* -- one source channel instead of two, and the left channel's
         // designed words on both sides -- and a floor is an inventory of operations, not of
-        // operands. The mono collapse does not exist in this tree, so nothing here is yet a
-        // statement about it; when it lands, whether a collapsed row's floor halves is a ruling
-        // this table will need and does not have (see the ruling doc's "mono rows" note).
+        // operands. The mono collapse now exists and `sixty_four_track_console_mono` takes it, so
+        // that row's measured cost falls while this inventory stands and its %-of-floor rises
+        // above what a stereo row can reach. Whether a collapsed row's floor *should* halve is a
+        // ruling this table still does not make; the open question is stated in the ruling doc's
+        // "mono rows" note and this pin is what keeps answering it a deliberate edit.
         Workload::SixtyFourTrackConsole
         | Workload::OneTwentyEightTrackStretch
         | Workload::SixtyFourTrackConsoleMono

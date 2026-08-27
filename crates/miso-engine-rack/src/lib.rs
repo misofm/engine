@@ -13,7 +13,8 @@ use miso_engine_core::realtime::RenderError;
 use miso_engine_effect_contract::{
     BankWidth, BypassShunt, ChannelSymmetryWitnessV1, EffectBankProcessBlock, EffectControlLane,
     EffectProgramKeyV1, ObservationLaneV1, ObservationSampleV1, PreparedAutomationSpan,
-    PreparedNativeEffectBank, PreparedSidechainPort, transpose_tile_4, transpose_tile_8,
+    PreparedNativeEffectBank, PreparedSidechainPort, SeamSideV1, transpose_tile_4,
+    transpose_tile_8,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -197,6 +198,22 @@ impl AoSoaScratch {
         }
     }
 
+    /// [`AoSoaScratch::gather_lane`] for the left plane alone: the collapsed cohort's move.
+    fn gather_lane_left(&mut self, lane: usize, left: &[f32], from: usize, frames: u32) {
+        let lanes = self.width.lanes() as usize;
+        let len = frames as usize * lanes;
+        debug_assert!(lane < lanes);
+        debug_assert!(left.len() == frames as usize);
+        debug_assert!(len <= self.left.len());
+        debug_assert!(from <= frames as usize);
+        for (chunk, &sample) in self.left[from * lanes..len]
+            .chunks_exact_mut(lanes)
+            .zip(&left[from..])
+        {
+            chunk[lane] = sample;
+        }
+    }
+
     /// Copy frames `[from, frames)` of one stable AoSoA lane back into its planar graph buffer.
     fn scatter_lane(
         &self,
@@ -318,11 +335,72 @@ pub trait BankStage: Send {
     /// The default is [`ChannelSymmetryWitnessV1::DECLINED`], not `SYMMETRIC`: a stage that has
     /// not derived a witness from its kernel's read surface declines, so an unclassified stage in
     /// a chain makes the whole cohort decline rather than silently claiming eligibility for work
-    /// nobody checked. Nothing rendered reads this.
+    /// nobody checked -- and since mono-collapse M2 the chain **does** read this to decide whether
+    /// to render one plane or two, so the declining default is the difference between a missed
+    /// optimisation and wrong audio.
     fn lane_symmetry(&self, lane: usize) -> ChannelSymmetryWitnessV1 {
         let _ = lane;
         ChannelSymmetryWitnessV1::DECLINED
     }
+
+    /// Drain this stage's live-console queues, before any lane of the block is dispatched.
+    ///
+    /// # Why the drain is a separate call and not the first paragraph of [`process`](Self::process)
+    ///
+    /// An admitted record takes effect on the **first sample of the block that drains it** -- that
+    /// is #137 E1's rule and every console gate in the tree rests on it. A record that writes one
+    /// channel's upstream word also clears the channel-symmetry witness' `LIVE` term. Those two
+    /// facts have to be observed in that order: if the collapse dispatch read the witness *before*
+    /// the drain, a `ParameterChannel::Left` retarget admitted at block `N` would take effect on
+    /// block `N`'s first sample while block `N` still ran collapsed -- and a collapsed block
+    /// publishes the left plane on both channels, so the right channel would receive a retarget
+    /// addressed to the left one. The bits would be wrong, in the audible direction, on the one
+    /// block nobody would think to look at.
+    ///
+    /// So [`BankChain::run`] drains **every** slot first, then reads the witness, then gathers. The
+    /// default is a no-op, which is what a console-free plan pays.
+    fn begin_block(&mut self, first_sample: u64) -> Result<(), RenderError> {
+        let _ = first_sample;
+        Ok(())
+    }
+
+    /// Which side of the fader/matrix seam this stage sits on.
+    ///
+    /// The default is [`SeamSideV1::UpstreamOfSeam`], which is the **conservative** answer here and
+    /// not the permissive one: an upstream stage is one a collapsed chain would have to run
+    /// one-plane, so a stage that has not spoken is one the collapse must be able to run through --
+    /// and it cannot, because [`supports_mono_collapse`](Self::supports_mono_collapse) defaults to
+    /// `false`. An unclassified stage therefore declines the whole chain rather than being silently
+    /// treated as seam-side and left to read a plane nobody gathered.
+    fn seam_side(&self) -> SeamSideV1 {
+        SeamSideV1::UpstreamOfSeam
+    }
+
+    /// Whether this stage implements [`process_mono`](Self::process_mono) and
+    /// [`desymmetrize`](Self::desymmetrize).
+    ///
+    /// Decided off the render thread, at bind, and cached by [`BankChain::new`]: a chain whose
+    /// upstream prefix contains one stage that answers `false` can never collapse.
+    fn supports_mono_collapse(&self) -> bool {
+        false
+    }
+
+    /// Render one block with the cohort's two channels collapsed onto `block.left`.
+    ///
+    /// `block.right` is the resident scratch the chain did **not** gather. It holds the previous
+    /// block's words and reading it is a defect; the chain overwrites it with the left plane at the
+    /// seam, before the first seam-side slot and before the scatter.
+    ///
+    /// Never called unless [`supports_mono_collapse`](Self::supports_mono_collapse) is `true`.
+    fn process_mono(&mut self, block: BankBlock<'_>) -> Result<(), RenderError> {
+        self.process(block)
+    }
+
+    /// Copy every lane's left-channel state onto the right channel.
+    ///
+    /// The collapse's disengage boundary. See
+    /// [`PreparedNativeEffectBank::desymmetrize_channels`] for what the copy has to cover and why.
+    fn desymmetrize(&mut self) {}
 }
 
 /// Adapter from the effect contract's prepared homogeneous bank to a chain stage.
@@ -334,6 +412,23 @@ pub struct EffectBankStage {
     width: BankWidth,
     quantum: u32,
     offsets: Box<[u32]>,
+    /// One flag per lane: the effect's own designed-word comparison, taken once at bind.
+    ///
+    /// # Why this is cached and why the cache cannot go stale
+    ///
+    /// `PreparedNativeEffectBank::lane_channel_symmetry` is a walk over every designed word the
+    /// kernel reads -- eight coefficients and five four-field ramps per lane for the compressor,
+    /// twenty-six words for the input chain. Pulling it once per lane per slot per block, which is
+    /// what the collapse's dispatch needs, would cost more than the collapse saves.
+    ///
+    /// The cache is sound because the designed words of a **bound** bank cannot move: a
+    /// console-free slot hands the bank an empty automation slice on every block
+    /// (`EffectBankStage::process`), and `reset`/`restore_track_state_payload` -- the two calls
+    /// that do move them -- are preparation-side and unreachable once a processor has been moved
+    /// into a chain. `ConsoleEffectBankStage` is the slot that *does* drain writes, and it caches
+    /// the same half for the same reason: a one-channel write clears the `LIVE` term, which that
+    /// slot pulls live, and a `Both` write leaves the two channels bit-equal.
+    designed: Box<[bool]>,
 }
 
 impl EffectBankStage {
@@ -349,11 +444,15 @@ impl EffectBankStage {
         if quantum == 0 {
             return Err(RackError::ZeroQuantum);
         }
+        let designed = (0..width.lanes() as usize)
+            .map(|lane| processor.lane_channel_symmetry(lane))
+            .collect();
         Ok(Self {
             processor,
             width,
             quantum,
             offsets: vec![0_u32; width.lanes() as usize + 1].into_boxed_slice(),
+            designed,
         })
     }
 }
@@ -362,7 +461,38 @@ impl BankStage for EffectBankStage {
     /// A console-free bank has no live channel at all, so the two live terms cannot be false and
     /// the whole witness is the effect's own designed-word comparison.
     fn lane_symmetry(&self, lane: usize) -> ChannelSymmetryWitnessV1 {
-        designed_lane_witness(self.processor.as_ref(), lane)
+        witness_of_designed(self.designed.get(lane).copied().unwrap_or(false))
+    }
+
+    /// Every prepared effect sits in `simd1`, `dynamic` or `simd2`, all three upstream of the
+    /// fader (`TrackStage` order), so an effect slot is never seam-side.
+    fn seam_side(&self) -> SeamSideV1 {
+        SeamSideV1::UpstreamOfSeam
+    }
+
+    fn supports_mono_collapse(&self) -> bool {
+        self.processor.supports_mono_collapse()
+    }
+
+    fn desymmetrize(&mut self) {
+        self.processor.desymmetrize_channels();
+    }
+
+    fn process_mono(&mut self, block: BankBlock<'_>) -> Result<(), RenderError> {
+        let block = EffectBankProcessBlock::new(
+            block.left,
+            block.right,
+            None,
+            block.frames,
+            self.width,
+            block.first_sample,
+            &[],
+            &self.offsets,
+            self.quantum,
+        )
+        .map_err(|_| RenderError::InvalidEnvelope)?;
+        let _ = self.processor.process_bank_mono(block);
+        Ok(())
     }
 
     fn process(&mut self, block: BankBlock<'_>) -> Result<(), RenderError> {
@@ -416,11 +546,20 @@ impl BankStage for EffectBankStage {
 /// `RESTORED` and the two live terms are conjoined by whoever owns them. Leaving them set is what
 /// makes the conjunction in [`BankChain::lane_symmetry`] mean "every stage agreed" rather than
 /// "every stage claimed everything".
-fn designed_lane_witness(
+pub fn designed_lane_witness(
     processor: &dyn PreparedNativeEffectBank,
     lane: usize,
 ) -> ChannelSymmetryWitnessV1 {
-    if processor.lane_channel_symmetry(lane) {
+    witness_of_designed(processor.lane_channel_symmetry(lane))
+}
+
+/// The same witness from an already-taken designed-word comparison.
+///
+/// One body, so a cached answer and a freshly pulled one cannot disagree about which term a
+/// `false` clears.
+#[must_use]
+pub const fn witness_of_designed(designed: bool) -> ChannelSymmetryWitnessV1 {
+    if designed {
         ChannelSymmetryWitnessV1::SYMMETRIC
     } else {
         ChannelSymmetryWitnessV1::symmetric_except(ChannelSymmetryWitnessV1::DESIGNED)
@@ -455,6 +594,15 @@ pub struct ConsoleEffectBankStage {
     /// Allocated at bind and only when the slot is observed at all, so an unobserved slot holds
     /// nothing and an observed one allocates nothing per block.
     samples: Box<[ObservationSampleV1]>,
+    /// One flag per lane: the effect's designed-word comparison, taken once at bind.
+    ///
+    /// See [`EffectBankStage::designed`] for why it is cached and why a drained write cannot make
+    /// it stale -- a one-channel write clears the `LIVE` term this slot still pulls live.
+    designed: Box<[bool]>,
+    /// Spans this block's drain packed into [`Self::packed`]. Written by
+    /// [`ConsoleEffectBankStage::drain`], read by the process body that follows it in the same
+    /// block.
+    staged_spans: usize,
     /// Records dropped because a lane's window was full of distinct targets. Zero by construction.
     dropped: u64,
     /// `Observe` records this slot had no capacity to apply. Zero by construction.
@@ -512,8 +660,12 @@ impl ConsoleEffectBankStage {
         } else {
             Vec::new().into_boxed_slice()
         };
+        let designed = (0..lane_count)
+            .map(|lane| processor.lane_channel_symmetry(lane))
+            .collect();
         Ok(Self {
             processor,
+            designed,
             width,
             quantum,
             offsets: vec![0_u32; lane_count + 1].into_boxed_slice(),
@@ -523,6 +675,7 @@ impl ConsoleEffectBankStage {
             shunt,
             observations: observed.then(|| observations.into_boxed_slice()),
             samples,
+            staged_spans: 0,
             dropped: 0,
             unbound: 0,
         })
@@ -606,11 +759,45 @@ impl BankStage for ConsoleEffectBankStage {
     /// [`Self::process`] maintains: a lane with no console channel has no live writes at all and
     /// contributes only the designed term.
     fn lane_symmetry(&self, lane: usize) -> ChannelSymmetryWitnessV1 {
-        let designed = designed_lane_witness(self.processor.as_ref(), lane);
+        let designed = witness_of_designed(self.designed.get(lane).copied().unwrap_or(false));
         match self.lanes.get(lane).and_then(Option::as_ref) {
             Some(channel) => designed.and(channel.symmetry()),
             None => designed,
         }
+    }
+
+    fn seam_side(&self) -> SeamSideV1 {
+        SeamSideV1::UpstreamOfSeam
+    }
+
+    fn supports_mono_collapse(&self) -> bool {
+        self.processor.supports_mono_collapse()
+    }
+
+    fn desymmetrize(&mut self) {
+        self.processor.desymmetrize_channels();
+    }
+
+    fn begin_block(&mut self, first_sample: u64) -> Result<(), RenderError> {
+        self.drain(first_sample);
+        Ok(())
+    }
+
+    /// [`ConsoleEffectBankStage::process`] with the bank call collapsed onto the left plane.
+    ///
+    /// Every other step is the dual one, in the same order and on the same words: the drain runs
+    /// before a sample is touched, the shunt captures and restores both planes, and the taps
+    /// publish after the bank ran. The shunt's right plane is the ungathered scratch, which is
+    /// sound for exactly one reason and it is worth stating: the seam overwrites the right plane
+    /// after this slot, so nothing downstream ever reads what the shunt put there. The *left*
+    /// restore is the one that matters and it is the dual one.
+    ///
+    /// A live bypass on any lane clears the witness' `UNBYPASSED` term, so a collapsed cohort has
+    /// no bypassed lane and the restore loop is a no-op whenever this body runs at all. It is kept
+    /// rather than asserted away because the two facts are maintained in different places and the
+    /// cheap one is the one that should not be load-bearing.
+    fn process_mono(&mut self, block: BankBlock<'_>) -> Result<(), RenderError> {
+        self.process_inner::<true>(block)
     }
 
     fn observation_binding_counts(&self) -> [u64; 3] {
@@ -631,8 +818,15 @@ impl BankStage for ConsoleEffectBankStage {
     }
 
     fn process(&mut self, block: BankBlock<'_>) -> Result<(), RenderError> {
+        self.process_inner::<false>(block)
+    }
+}
+
+impl ConsoleEffectBankStage {
+    /// Step 1 of the block, hoisted out of [`Self::process_inner`] so that it runs before the
+    /// chain's collapse dispatch reads the witness. See [`BankStage::begin_block`].
+    fn drain(&mut self, first_sample: u64) {
         let lane_count = self.width.lanes() as usize;
-        // 1. Drain, in lane order, into each lane's own window, then pack down.
         let mut packed = 0_usize;
         self.offsets[0] = 0;
         for lane in 0..lane_count {
@@ -642,7 +836,7 @@ impl BankStage for ConsoleEffectBankStage {
                     .as_deref_mut()
                     .and_then(|lanes| lanes.get_mut(lane))
                     .and_then(Option::as_mut);
-                let staged = channel.stage(&mut self.staging, block.first_sample, observation);
+                let staged = channel.stage(&mut self.staging, first_sample, observation);
                 self.dropped = self.dropped.saturating_add(u64::from(staged.dropped));
                 self.unbound = self.unbound.saturating_add(u64::from(staged.unbound));
                 // Packed at this lane's own offset, immediately: that offset is what makes the
@@ -653,6 +847,20 @@ impl BankStage for ConsoleEffectBankStage {
             }
             self.offsets[lane + 1] = packed as u32;
         }
+        self.staged_spans = packed;
+    }
+
+    /// The one console-slot body, dual or collapsed.
+    ///
+    /// `MONO` is a const generic rather than an argument so the two monomorphise: the dual
+    /// instantiation is the code that shipped before the collapse existed, which is what keeps
+    /// "adding a path does not move the path already there" a property of the build rather than a
+    /// hope about the inliner. The parametric EQ's `process_bank_inner` carries the measurement
+    /// that settled it.
+    fn process_inner<const MONO: bool>(&mut self, block: BankBlock<'_>) -> Result<(), RenderError> {
+        let lane_count = self.width.lanes() as usize;
+        // 1. The drain already ran, in `begin_block`, before the chain decided this block's mode.
+        let packed = self.staged_spans;
         // Issue #163 phase 4 item 4: which lanes, if any, are bypassed this block. Decided here
         // because it gates both the capture below and the restore in step 3, and because the
         // control drain in step 1 has already run — so this is the same verdict step 3 reaches,
@@ -668,12 +876,37 @@ impl BankStage for ConsoleEffectBankStage {
         // 2. Capture the dry block before the bank touches it. Skippable exactly when no lane
         //    will read it back and there is no latency line to keep fed; `dry_*` never crosses a
         //    block boundary, so the skip moves no rendered bit.
+        //
+        // A collapsed block captures the **left plane twice**, and this is the one place in the
+        // collapse where "the seam overwrites the right plane after this slot" is not the whole
+        // argument. `capture` does two things: it stages `dry_*`, which is read later in this same
+        // block and never crosses a boundary, and -- when the slot declares latency -- it exchanges
+        // that staging through a delay **line** that persists for `latency` samples. Handing the
+        // line the ungathered resident scratch poisons it for as long as it holds those samples,
+        // and a bypass engaged after the collapse disengages then restores that scratch into the
+        // bypassed lane's right channel. The seam is downstream of the line, so it cannot repair it.
+        //
+        // The left plane is the right answer, not a stand-in for one: under the collapse the
+        // counterfactual dual run's right plane **is** its left plane everywhere upstream of the
+        // seam, so `capture(left, left)` writes into `dry_right` and `line_right` exactly the words
+        // a never-collapsed run writes there, on every block. That is the same standard
+        // `desymmetrize_channels` meets, met continuously instead of at a boundary.
+        //
+        // Covering the shunt in the disengage copy instead would be weaker twice over: the line
+        // would hold ungathered scratch for the whole collapsed window, so any reader that is not
+        // the disengage boundary would still be wrong; and it would leave a read of `block.right`
+        // alive on the collapsed path, which is the exact class of defect this design excludes by
+        // construction rather than by argument. **A collapsed block reads no right plane at all.**
         if let Some(shunt) = self
             .shunt
             .as_mut()
             .filter(|shunt| any_bypassed || shunt.feeds_line())
         {
-            shunt.capture(block.left, block.right);
+            if MONO {
+                shunt.capture(block.left, block.left);
+            } else {
+                shunt.capture(block.left, block.right);
+            }
         }
         let frames = block.frames;
         let bank = EffectBankProcessBlock::new(
@@ -688,7 +921,11 @@ impl BankStage for ConsoleEffectBankStage {
             self.quantum,
         )
         .map_err(|_| RenderError::InvalidEnvelope)?;
-        let _ = self.processor.process_bank(bank);
+        let _ = if MONO {
+            self.processor.process_bank_mono(bank)
+        } else {
+            self.processor.process_bank(bank)
+        };
         // 4. Publish every armed tap, after the bank ran. One `observe_resident_bank` call per
         // armed tap fills every lane, so a cohort of eight costs one vector extraction rather than
         // eight scalar reads.
@@ -729,6 +966,18 @@ impl BankStage for ConsoleEffectBankStage {
                     .observe_resident_bank(tap as u32, &mut self.samples)
                 {
                     continue;
+                }
+                if MONO {
+                    // A collapsed block evolves one channel, so this bank's right-channel state is
+                    // whatever it was when the collapse engaged and a right-channel reading taken
+                    // from it would be stale. The value a *dual* run would publish is the left
+                    // one -- that is the induction the witness maintains and the same one the
+                    // disengage copy rests on -- so the tap publishes it. This is the observation
+                    // half of the seam: the right channel of a collapsed track **is** its left
+                    // channel, at the tap exactly as at the fader.
+                    for sample in self.samples.iter_mut() {
+                        sample.right = sample.left;
+                    }
                 }
                 for (lane, observation) in lanes.iter_mut().enumerate() {
                     let Some(observation) = observation.as_mut() else {
@@ -839,6 +1088,29 @@ pub trait BankMembers {
 ///
 /// Exactly one gather and one scatter per [`run`](BankChain::run), whatever the slot count
 /// (master plan §4.5).
+///
+/// # The mono collapse
+///
+/// A chain whose every active lane renders a track doing bit-identical work on both channels runs
+/// its **upstream** slots over one plane and duplicates that plane into its seam-side slots. The
+/// whole mechanism is four decisions and one copy:
+///
+/// 1. **Bind time.** [`collapse_prefix_of`](BankChain::collapse_prefix_of) works out how many
+///    leading slots a collapsed block would run one-plane, and answers `0` -- never collapse --
+///    unless the seam-side slots are a suffix, the prefix is non-empty, every prefix slot has
+///    written a one-plane body, and every slot runs on exactly this chain's lanes.
+/// 2. **Bind time, again.** [`arm_mono_collapse`](BankChain::arm_mono_collapse) records the
+///    *structural* half of the witness, which a chain cannot see for itself. Unarmed is declining.
+/// 3. **Per block, before a sample moves.** Every slot's live-console queue is drained
+///    ([`BankStage::begin_block`]) and *then* the witness is read, in that order and for the
+///    reason `begin_block` documents.
+/// 4. **The seam.** After the prefix, one copy of the resident block's left plane into its right.
+///    Everything downstream -- the fader, the matrix, the scatter, the route fold, the master
+///    accumulation -- then runs the arithmetic it runs on a dual block, in its own operation order.
+///
+/// Leaving the collapsed mode costs one whole-state copy per prefix slot
+/// ([`BankStage::desymmetrize`]) on the block that stops, which is what makes the first dual block
+/// after it bit-identical to a run that never collapsed.
 pub struct BankChain {
     scratch: AoSoaScratch,
     lanes: usize,
@@ -867,6 +1139,47 @@ pub struct BankChain {
     /// the mask is tested once per plane per block with `is_empty`, never per lane. See
     /// [`BankChain::arm_fold`].
     fold: Box<[bool]>,
+    /// Slots `0..collapse_prefix` are the upstream stages a collapsed block runs one-plane.
+    ///
+    /// Zero means this chain can never collapse, and it is zero for every chain that fails any
+    /// clause of [`BankChain::collapse_prefix_of`] -- including the one that fails it for the most
+    /// interesting reason, a chain of nothing but seam-side slots, whose witness is vacuously
+    /// symmetric and must never be read as collapse evidence.
+    collapse_prefix: usize,
+    /// The force-off switch: the second arm of the mono measurement, and a kill switch.
+    ///
+    /// Bind-time, per chain, and deliberately **not** an environment variable: the paired
+    /// measurement builds both arms in one process and alternates them per observation, so a
+    /// process-global switch could not express it.
+    collapse_forced_off: bool,
+    /// The chain rendered its previous block collapsed.
+    collapsed: bool,
+    /// A disengage has happened, and this chain does not collapse again.
+    ///
+    /// The engage direction is sound at any block whose witness holds -- the two channels' states
+    /// agree by the induction the witness maintains -- and the disengage direction is made sound by
+    /// the state copy. Re-engaging after a disengage is the one transition whose premise this
+    /// milestone does not own: it would have to argue that the *dual* blocks in between left the
+    /// two channels agreeing again, which is a statement about the reason the witness went false
+    /// and not about the witness itself. It is M3's, and until then a chain that has disengaged
+    /// once stays dual: declining is always safe.
+    collapse_retired: bool,
+    /// The **structural** half of every active lane's witness, joined at bind.
+    ///
+    /// `false` until [`BankChain::arm_mono_collapse`] says otherwise, and that default is the
+    /// whole safety argument for this field. The witness has five terms and a chain can see only
+    /// four of them: `SOURCE` -- "this track's two channels are fed by one source channel" -- is
+    /// decided on the control plane from the compiled session, keyed by *track id*, before any
+    /// prepared object exists, while a chain knows only anonymous lanes. `lane_symmetry` is
+    /// therefore **source agnostic by construction** and reports every lane of a two-source track
+    /// eligible.
+    ///
+    /// So a chain that nobody has performed the join for must decline, and does. The caller that
+    /// holds both halves -- `PreparedRenderPlan::arm_mono_collapse`, which has the session's
+    /// structural witnesses and the plan's per-lane track names -- is the only one that can arm it.
+    collapse_source: bool,
+    /// Blocks this chain rendered collapsed. Evidence only, read after render is disarmed.
+    collapses: u64,
 }
 
 impl BankChain {
@@ -903,6 +1216,7 @@ impl BankChain {
         // fixture is what exercises the fallback.
         let full_bank = active.iter().all(|lane| *lane);
         let staging = if full_bank { scratch.left.len() } else { 0 };
+        let collapse_prefix = Self::collapse_prefix_of(&slots, &active);
         Ok(Self {
             scratch,
             lanes,
@@ -914,7 +1228,56 @@ impl BankChain {
             staging_right: vec![0.0; staging].into_boxed_slice(),
             aux: Box::default(),
             fold: Box::default(),
+            collapse_prefix,
+            collapse_forced_off: false,
+            collapsed: false,
+            collapse_retired: false,
+            collapse_source: false,
+            collapses: 0,
         })
+    }
+
+    /// How many leading slots a collapsed block of this chain would run one-plane, or `0`.
+    ///
+    /// Decided once, at bind, from the slots' own declarations. Four clauses, and every one of them
+    /// is a way the collapse could otherwise read or write a plane that was never gathered:
+    ///
+    /// 1. **The upstream stages are a prefix.** The seam is a position in the strip, not a set:
+    ///    everything up to the fader is per-channel arithmetic and everything from it on reads the
+    ///    duplicated plane. A chain whose seam-side slots are not a suffix is one this executor
+    ///    does not understand, and it declines rather than guessing where to duplicate.
+    /// 2. **The prefix is non-empty.** A chain of nothing but fader and matrix slots reports every
+    ///    lane symmetric on every session, mono or not (`SEAM_SIDE_WITNESS` is an unconditional
+    ///    `SYMMETRIC`), so collapsing on its witness would be collapsing on an unconditional
+    ///    `true`. This is `PlanUnitEligibilityV1::witness_is_vacuous` enforced rather than
+    ///    reported.
+    /// 3. **Every prefix slot has a one-plane body.** A dual body handed the ungathered right
+    ///    plane would not merely write garbage into a plane the seam overwrites -- a linked
+    ///    detector reads *both* planes to compute the level it applies to the left one, so the
+    ///    left output would be wrong too.
+    /// 4. **Every slot runs on exactly this chain's active lanes.** The collapse is
+    ///    all-lanes-or-nothing and the witness is conjoined over the slots a lane runs; a slot that
+    ///    is an identity on some lanes would make "every active lane is eligible" and "every slot
+    ///    agreed for every active lane" two different statements.
+    fn collapse_prefix_of(slots: &[BankSlot], active: &[bool]) -> usize {
+        let prefix = slots
+            .iter()
+            .take_while(|slot| slot.stage.seam_side() == SeamSideV1::UpstreamOfSeam)
+            .count();
+        let seam_side_is_a_suffix = slots[prefix..]
+            .iter()
+            .all(|slot| slot.stage.seam_side() == SeamSideV1::SeamSide);
+        let prefix_is_collapsible = slots[..prefix]
+            .iter()
+            .all(|slot| slot.stage.supports_mono_collapse());
+        let lanes_agree = slots
+            .iter()
+            .all(|slot| slot.active_lanes.as_ref() == active);
+        if prefix > 0 && seam_side_is_a_suffix && prefix_is_collapsible && lanes_agree {
+            prefix
+        } else {
+            0
+        }
     }
 
     /// Arm an accumulating auxiliary destination on `lanes` (issue #210's PFL seam).
@@ -963,8 +1326,14 @@ impl BankChain {
     /// conjunction of at most `slots` already-computed values. That is the cost the collapse
     /// design priced as "an AND over eight lane witnesses, nanoseconds", and it is why nothing
     /// here is cached: a cache would add a per-block invalidation check to buy back an `and` over
-    /// four bools. In this phase nothing on the render path calls it at all, so the per-block cost
-    /// of the whole witness is exactly zero.
+    /// four bools.
+    ///
+    /// What *is* cached is one level down, and it has to be: `lane_channel_symmetry` is a walk over
+    /// every designed word a kernel reads, and [`BankChain::run`] pulls this once per lane per slot
+    /// per block. `EffectBankStage::designed` and its console twin take that comparison once, at
+    /// bind, where it is fixed for the life of the bound bank; the live terms stay live, because
+    /// they are the ones a drain moves. So the per-block cost of the whole witness is an `and` over
+    /// `slots * lanes` cached flags plus one stored byte per console-driven lane.
     ///
     /// An inactive lane declines: it renders no track, so there is nothing to collapse.
     #[must_use]
@@ -1083,17 +1452,79 @@ impl BankChain {
     ) -> Result<(), RenderError> {
         debug_assert!(frames >= 1 && frames <= self.scratch.quantum);
         let len = frames as usize * self.lanes;
-        self.gather(members, frames);
-        self.transposes = self.transposes.saturating_add(1);
+        // Step 0: every slot's live-console queue, drained before anything else. See
+        // `BankStage::begin_block` for why this cannot be folded into `process`.
         for slot in &mut self.slots {
+            // The same identity-slot guard `process` has always taken. A slot that is an identity
+            // on every lane renders nothing, and draining its queues would consume records for a
+            // block it does not run.
             if slot.active_lanes.iter().any(|lane| *lane) {
-                slot.stage.process(BankBlock {
+                slot.stage.begin_block(first_sample)?;
+            }
+        }
+        // The dispatch. One `bool` per block per chain, decided before a sample is gathered, from
+        // the event-maintained witness the slots already carry: `all_lanes_symmetric` is an `and`
+        // over `slots * lanes` cached flags plus, for a console slot, one stored byte per lane.
+        //
+        // A command lands at a block boundary, so the eligibility this reads is the eligibility
+        // that holds for every sample of this block -- which is what makes a per-block mode legal
+        // at all.
+        let collapse = self.collapse_prefix > 0
+            && self.collapse_source
+            && !self.collapse_forced_off
+            && !self.collapse_retired
+            && self.all_lanes_symmetric();
+        if self.collapsed && !collapse {
+            self.disengage_collapse();
+        }
+        self.collapsed = collapse;
+        if collapse {
+            self.collapses = self.collapses.saturating_add(1);
+            self.gather_mono(members, frames);
+        } else {
+            self.gather(members, frames);
+        }
+        self.transposes = self.transposes.saturating_add(1);
+        let prefix = if collapse {
+            self.collapse_prefix
+        } else {
+            self.slots.len()
+        };
+        for slot in &mut self.slots[..prefix] {
+            if slot.active_lanes.iter().any(|lane| *lane) {
+                let block = BankBlock {
                     left: &mut self.scratch.left[..len],
                     right: &mut self.scratch.right[..len],
                     frames,
                     first_sample,
                     lanes: self.lanes,
-                })?;
+                };
+                if collapse {
+                    slot.stage.process_mono(block)?;
+                } else {
+                    slot.stage.process(block)?;
+                }
+            }
+        }
+        if collapse {
+            // The seam. One extra copy of the resident block per collapsed chain per block, and it
+            // is the whole of the duplication: everything from here on -- the fader, the matrix,
+            // the scatter, the route fold, the master accumulation -- reads two planes and runs
+            // exactly the arithmetic it runs on a dual block, in exactly its operation order. The
+            // fold's `ll*l + lr*r` is *not* rewritten as `(ll + lr) * l` on the strength of
+            // `l == r`: the two round differently, and the second is not what a dual run computes.
+            let AoSoaScratch { left, right, .. } = &mut self.scratch;
+            right[..len].copy_from_slice(&left[..len]);
+            for slot in &mut self.slots[self.collapse_prefix..] {
+                if slot.active_lanes.iter().any(|lane| *lane) {
+                    slot.stage.process(BankBlock {
+                        left: &mut self.scratch.left[..len],
+                        right: &mut self.scratch.right[..len],
+                        frames,
+                        first_sample,
+                        lanes: self.lanes,
+                    })?;
+                }
             }
         }
         self.scatter(members, frames);
@@ -1103,6 +1534,123 @@ impl BankChain {
             self.accumulate_aux(members, frames);
         }
         Ok(())
+    }
+
+    /// The disengage boundary: restore every collapsed stage's right-channel state and retire.
+    ///
+    /// A collapsed run evolves one channel. The counterfactual dual run's right state is, by the
+    /// induction the witness maintains, the left one -- so copying it is not an approximation of
+    /// the dual run, it **is** the dual run's state, and the first dual block after this renders
+    /// exactly what a never-collapsed run would have.
+    ///
+    /// Only the prefix stages are copied, because only they ran one-plane: a seam-side slot ran
+    /// dual on every block, collapsed or not, and its two channels are already whatever the strip
+    /// asked for.
+    ///
+    /// This is a one-off of a few hundred kilobytes -- the compressor's two rings and the limiter's
+    /// four, per cohort -- on the block that stops collapsing, and it happens at most once per
+    /// chain per plan.
+    fn disengage_collapse(&mut self) {
+        for slot in &mut self.slots[..self.collapse_prefix] {
+            slot.stage.desymmetrize();
+        }
+        self.collapse_retired = true;
+    }
+
+    /// Planar -> AoSoA for the **left plane only**: the collapsed cohort's gather.
+    ///
+    /// [`Self::gather`]'s two shapes, one plane each. The right plane is not read and the right
+    /// scratch is not written; the seam writes it, after the prefix and before anything reads it.
+    fn gather_mono<M: BankMembers + ?Sized>(&mut self, members: &M, frames: u32) {
+        if self.full_bank {
+            match self.scratch.width {
+                BankWidth::Four => {
+                    self.gather_mono_tiled::<M, 4>(members, frames, transpose_tile_4)
+                }
+                BankWidth::Eight => {
+                    self.gather_mono_tiled::<M, 8>(members, frames, transpose_tile_8);
+                }
+            }
+            return;
+        }
+        for lane in 0..self.lanes {
+            if self.active[lane] {
+                let (left, _right) = members.plane(lane);
+                self.scratch.gather_lane_left(lane, left, 0, frames);
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn gather_mono_tiled<M: BankMembers + ?Sized, const W: usize>(
+        &mut self,
+        members: &M,
+        frames: u32,
+        transpose: impl Fn([[f32; W]; W]) -> [[f32; W]; W] + Copy,
+    ) {
+        debug_assert_eq!(self.lanes, W);
+        let frames_used = frames as usize;
+        let tiled = (frames_used / W) * W;
+        let mut left_planes: [&[f32]; W] = [&[]; W];
+        for (lane, plane) in left_planes.iter_mut().enumerate() {
+            let (left, right) = members.plane(lane);
+            debug_assert!(left.len() == frames_used && right.len() == frames_used);
+            *plane = left;
+        }
+        tile_gather(&mut self.scratch.left[..tiled * W], &left_planes, transpose);
+        if tiled < frames_used {
+            for (lane, plane) in left_planes.iter().enumerate() {
+                self.scratch.gather_lane_left(lane, plane, tiled, frames);
+            }
+        }
+    }
+
+    /// Record the structural half of this cohort's witness: the `SOURCE` term, joined at bind.
+    ///
+    /// `structural` is "every active lane of this chain renders a track whose two channels read
+    /// one source channel". Passing `false`, or never calling this at all, makes the chain decline
+    /// forever. See [`BankChain::collapse_source`] for why the chain cannot derive this itself.
+    pub const fn arm_mono_collapse(&mut self, structural: bool) {
+        self.collapse_source = structural;
+    }
+
+    /// Whether this chain can collapse at all: it has an upstream prefix and the join was armed.
+    #[must_use]
+    pub const fn can_collapse(&self) -> bool {
+        self.collapse_prefix > 0 && self.collapse_source
+    }
+
+    /// Force this chain's collapse off (or back on), for the paired measurement's second arm.
+    ///
+    /// Bind-time. Forcing it off on a chain that is currently collapsed does **not** skip the
+    /// disengage copy: the next `run` sees `collapsed && !collapse` and takes it, which is the
+    /// same boundary a witness going false takes.
+    pub const fn force_mono_collapse_off(&mut self, forced: bool) {
+        self.collapse_forced_off = forced;
+    }
+
+    /// Blocks this chain rendered collapsed. Read only after render is disarmed.
+    #[must_use]
+    pub const fn collapses(&self) -> u64 {
+        self.collapses
+    }
+
+    /// Leading slots a collapsed block runs one-plane; `0` when this chain can never collapse.
+    #[must_use]
+    pub const fn collapse_prefix(&self) -> usize {
+        self.collapse_prefix
+    }
+
+    /// Whether this chain rendered its last block collapsed. Evidence only.
+    #[must_use]
+    pub const fn is_collapsed(&self) -> bool {
+        self.collapsed
+    }
+
+    /// Whether this chain has disengaged and will not collapse again in this plan.
+    #[must_use]
+    pub const fn collapse_is_retired(&self) -> bool {
+        self.collapse_retired
     }
 
     /// Adds every armed lane's resident result into its auxiliary destination.
@@ -2265,5 +2813,449 @@ mod tests {
         assert_eq!(planes.left[3], vec![30.0; frames as usize]);
         assert_eq!(planes.right[1], vec![-10.0; frames as usize]);
         assert_eq!(planes.right[3], vec![-30.0; frames as usize]);
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // The mono collapse.
+    // ---------------------------------------------------------------------------------------
+
+    /// A stage that scales the left plane and, in its **dual** body, the right one too.
+    ///
+    /// The two bodies are deliberately distinguishable: the collapsed body leaves the right plane
+    /// alone, exactly as a real one-plane kernel does. So a chain that collapsed when it should not
+    /// have produces a right plane that is the *duplicated left* one rather than the scaled right
+    /// one, and the difference is visible in the output rather than only in a counter.
+    struct Scale {
+        gain: [f32; 2],
+        symmetric: bool,
+        mono: bool,
+        desymmetrized: usize,
+    }
+    impl Scale {
+        fn new(gain: [f32; 2], symmetric: bool) -> Self {
+            Self {
+                gain,
+                symmetric,
+                mono: false,
+                desymmetrized: 0,
+            }
+        }
+    }
+    impl BankStage for Scale {
+        fn process(&mut self, block: BankBlock<'_>) -> Result<(), RenderError> {
+            for word in block.left.iter_mut() {
+                *word *= self.gain[0];
+            }
+            for word in block.right.iter_mut() {
+                *word *= self.gain[1];
+            }
+            Ok(())
+        }
+        fn process_mono(&mut self, block: BankBlock<'_>) -> Result<(), RenderError> {
+            self.mono = true;
+            for word in block.left.iter_mut() {
+                *word *= self.gain[0];
+            }
+            Ok(())
+        }
+        fn supports_mono_collapse(&self) -> bool {
+            true
+        }
+        fn desymmetrize(&mut self) {
+            self.desymmetrized += 1;
+        }
+        fn lane_symmetry(&self, _lane: usize) -> ChannelSymmetryWitnessV1 {
+            if self.symmetric {
+                ChannelSymmetryWitnessV1::SYMMETRIC
+            } else {
+                ChannelSymmetryWitnessV1::symmetric_except(ChannelSymmetryWitnessV1::DESIGNED)
+            }
+        }
+    }
+
+    /// A seam-side 2x2, in the strip's frozen operation order.
+    ///
+    /// `yl = ll*l + lr*r` -- two multiplies and an add, never `(ll + lr) * l`. The two differ on
+    /// `-0.0` content: with `ll = 1.0`, `lr = -1.0` and `l = r = -0.0`,
+    /// `1.0*(-0.0) + (-1.0)*(-0.0)` is `(-0.0) + (+0.0) = +0.0`, while `(1.0 + (-1.0)) * (-0.0)`
+    /// is `0.0 * (-0.0) = -0.0`. `a_collapsed_seam_keeps_the_matrixs_operation_order` is the gate.
+    struct Matrix {
+        coefficients: [f32; 4],
+    }
+    impl BankStage for Matrix {
+        fn process(&mut self, block: BankBlock<'_>) -> Result<(), RenderError> {
+            let [ll, lr, rl, rr] = self.coefficients;
+            for (left, right) in block.left.iter_mut().zip(block.right.iter_mut()) {
+                let (l, r) = (*left, *right);
+                *left = ll * l + lr * r;
+                *right = rl * l + rr * r;
+            }
+            Ok(())
+        }
+        fn seam_side(&self) -> SeamSideV1 {
+            SeamSideV1::SeamSide
+        }
+        fn lane_symmetry(&self, _lane: usize) -> ChannelSymmetryWitnessV1 {
+            ChannelSymmetryWitnessV1::SYMMETRIC
+        }
+    }
+
+    fn mono_chain(lanes: usize, frames: u32, slots: Vec<Box<dyn BankStage>>) -> BankChain {
+        let active: Vec<bool> = vec![true; lanes];
+        let width = if lanes == 4 {
+            BankWidth::Four
+        } else {
+            BankWidth::Eight
+        };
+        let slots = slots
+            .into_iter()
+            .map(|stage| slot(active.clone(), stage))
+            .collect();
+        BankChain::new(
+            AoSoaScratch::new(width, frames).expect("scratch"),
+            active.into_boxed_slice(),
+            slots,
+        )
+        .expect("chain")
+    }
+
+    fn identical_planes(lanes: usize, frames: u32) -> Planes {
+        let frames = frames as usize;
+        let plane: Vec<Vec<f32>> = (0..lanes)
+            .map(|lane| {
+                (0..frames)
+                    .map(|frame| HOSTILE[(lane + frame) % HOSTILE.len()])
+                    .collect()
+            })
+            .collect();
+        Planes {
+            left: plane.clone(),
+            right: plane,
+        }
+    }
+
+    /// A chain nobody armed never collapses, whatever its witness says.
+    ///
+    /// The `SOURCE` term is decided on the control plane, keyed by track id, and a chain sees only
+    /// anonymous lanes -- so `lane_symmetry` admits a track whose two channels read two different
+    /// source channels. `arm_mono_collapse` is the join, and the default is `false`.
+    ///
+    /// Red mutation: initialise `collapse_source` to `true`. This fails, and so does the console
+    /// suite's `the_half_mono_cohort_banks_like_a_uniform_one`.
+    #[test]
+    fn an_unarmed_chain_never_collapses() {
+        let mut chain = mono_chain(
+            4,
+            8,
+            vec![
+                Box::new(Scale::new([2.0, 2.0], true)),
+                Box::new(Matrix {
+                    coefficients: [1.0, 0.0, 0.0, 1.0],
+                }),
+            ],
+        );
+        assert_eq!(
+            chain.collapse_prefix(),
+            1,
+            "one upstream slot, one seam slot"
+        );
+        assert!(!chain.can_collapse(), "unarmed until the join is performed");
+        let mut planes = identical_planes(4, 8);
+        chain.run(&mut planes, 8, 0).expect("render");
+        assert_eq!(chain.collapses(), 0);
+        chain.arm_mono_collapse(true);
+        chain.run(&mut planes, 8, 0).expect("render");
+        assert_eq!(chain.collapses(), 1, "armed, and every lane is symmetric");
+    }
+
+    /// An armed chain whose witness declines still renders the dual bits.
+    ///
+    /// This is the "force-collapse on an ineligible bank" gate, and it is stated as an output
+    /// comparison rather than as a counter so that a dispatch that engaged wrongly is caught by
+    /// what it *rendered*: the mock's collapsed body leaves the right plane alone, so a wrong
+    /// engagement publishes the duplicated left plane where the right one's own gain belonged.
+    ///
+    /// Red mutation: drop `self.all_lanes_symmetric()` from the dispatch conjunction in
+    /// `BankChain::run`. The right plane then comes back scaled by the *left* gain and this fails.
+    #[test]
+    fn an_ineligible_armed_chain_renders_the_dual_bits() {
+        for symmetric in [false, true] {
+            let mut chain = mono_chain(4, 8, vec![Box::new(Scale::new([2.0, 3.0], symmetric))]);
+            chain.arm_mono_collapse(true);
+            let mut planes = identical_planes(4, 8);
+            let mut reference = identical_planes(4, 8);
+            let mut dual = mono_chain(4, 8, vec![Box::new(Scale::new([2.0, 3.0], symmetric))]);
+            chain.run(&mut planes, 8, 0).expect("render");
+            dual.run(&mut reference, 8, 0).expect("render");
+            assert_eq!(chain.collapses(), u64::from(symmetric));
+            for lane in 0..4 {
+                let left_agrees = planes.left[lane]
+                    .iter()
+                    .zip(&reference.left[lane])
+                    .all(|(a, b)| a.to_bits() == b.to_bits());
+                assert!(
+                    left_agrees,
+                    "the left plane is the dual left plane either way"
+                );
+                let right_agrees = planes.right[lane]
+                    .iter()
+                    .zip(&reference.right[lane])
+                    .all(|(a, b)| a.to_bits() == b.to_bits());
+                assert_eq!(
+                    right_agrees, !symmetric,
+                    "an ineligible chain must publish its own right plane; an eligible one \
+                     publishes the duplicated left plane, which is the collapse"
+                );
+            }
+        }
+    }
+
+    /// The seam duplicates the plane **into** the matrix; it does not simplify the matrix.
+    ///
+    /// With `l == r` the strip's `yl = ll*l + lr*r` is arithmetically `(ll + lr) * l`, and a reader
+    /// looking for a saving at the seam would fold the two multiplies into one. It is not the same
+    /// value: on `-0.0` content with `ll = 1.0` and `lr = -1.0` the frozen form gives
+    /// `(-0.0) + (+0.0) = +0.0` and the folded one `0.0 * (-0.0) = -0.0`.
+    ///
+    /// So the expected words are written out here in the frozen order rather than taken from a
+    /// second chain running the same mock: a comparison of two chains cannot see a change made to
+    /// the arithmetic they share. Both the collapsed chain and the dual chain are required to match
+    /// it, which is what makes this a statement about the *operation order* and not about the
+    /// dispatch.
+    ///
+    /// Red mutations, both caught: rewrite `Matrix::process`'s lines as `(ll + lr) * l` /
+    /// `(rl + rr) * l` (the seam simplification), or fold only the collapsed path by moving the
+    /// matrix into the collapsed prefix.
+    #[test]
+    fn a_collapsed_seam_keeps_the_matrixs_operation_order() {
+        let coefficients = [1.0_f32, -1.0, -1.0, 1.0];
+        let [ll, lr, rl, rr] = coefficients;
+        let lanes = 4;
+        let frames = 16_u32;
+        let input = identical_planes(lanes, frames);
+        // The frozen strip arithmetic, written out. `l` and `r` are the same word here, which is
+        // exactly the case the folded form would claim to be equivalent on.
+        let expected: Vec<Vec<(f32, f32)>> = (0..lanes)
+            .map(|lane| {
+                input.left[lane]
+                    .iter()
+                    .zip(&input.right[lane])
+                    .map(|(l, r)| (ll * l + lr * r, rl * l + rr * r))
+                    .collect()
+            })
+            .collect();
+        // The teeth: on this content the folded form is a different word.
+        let folded_differs = input.left[0]
+            .iter()
+            .zip(&expected[0])
+            .any(|(l, (yl, _))| ((ll + lr) * l).to_bits() != yl.to_bits());
+        assert!(
+            folded_differs,
+            "the corpus must contain a frame where (ll + lr) * l differs from ll*l + lr*r"
+        );
+
+        for armed in [true, false] {
+            let mut chain = mono_chain(
+                lanes,
+                frames,
+                vec![
+                    Box::new(Scale::new([1.0, 1.0], true)),
+                    Box::new(Matrix { coefficients }),
+                ],
+            );
+            chain.arm_mono_collapse(armed);
+            let mut planes = identical_planes(lanes, frames);
+            chain.run(&mut planes, frames, 0).expect("render");
+            assert_eq!(chain.collapses(), u64::from(armed));
+            for (lane, lane_expected) in expected.iter().enumerate() {
+                for (frame, (yl, yr)) in lane_expected.iter().enumerate() {
+                    assert_eq!(
+                        planes.left[lane][frame].to_bits(),
+                        yl.to_bits(),
+                        "armed {armed} lane {lane} frame {frame}: left"
+                    );
+                    assert_eq!(
+                        planes.right[lane][frame].to_bits(),
+                        yr.to_bits(),
+                        "armed {armed} lane {lane} frame {frame}: right"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A chain whose seam-side slots are not a suffix declines, and so does one with no prefix.
+    #[test]
+    fn only_a_seam_suffix_over_a_collapsible_prefix_can_collapse() {
+        let seam = || -> Box<dyn BankStage> {
+            Box::new(Matrix {
+                coefficients: [1.0, 0.0, 0.0, 1.0],
+            })
+        };
+        let upstream = || -> Box<dyn BankStage> { Box::new(Scale::new([1.0, 1.0], true)) };
+        // Seam-side only: the witness is vacuously symmetric and must not be read as evidence.
+        assert_eq!(mono_chain(4, 8, vec![seam()]).collapse_prefix(), 0);
+        // A seam-side slot in the middle: this executor does not know where to duplicate.
+        assert_eq!(
+            mono_chain(4, 8, vec![upstream(), seam(), upstream()]).collapse_prefix(),
+            0
+        );
+        // An upstream slot with no one-plane body declines the whole chain.
+        assert_eq!(
+            mono_chain(4, 8, vec![Box::new(PassThrough), seam()]).collapse_prefix(),
+            0
+        );
+        // The strip's own shape.
+        assert_eq!(
+            mono_chain(4, 8, vec![upstream(), upstream(), seam(), seam()]).collapse_prefix(),
+            2
+        );
+    }
+
+    /// Planar planes whose two channels **differ**, for the cases where `L == R` would hide the bug.
+    ///
+    /// Every other collapse test in this module feeds identical planes, because that is what a
+    /// collapse-eligible track looks like. The two clauses of `collapse_prefix_of` that gate a
+    /// chain the collapse must *refuse* need the opposite: if the refusal failed and the seam ran,
+    /// the right plane would come back as the duplicated left one, and identical inputs would make
+    /// that invisible.
+    fn distinct_planes(lanes: usize, frames: u32) -> Planes {
+        let frames = frames as usize;
+        Planes {
+            left: (0..lanes)
+                .map(|lane| (0..frames).map(|f| (lane * 100 + f) as f32 + 1.0).collect())
+                .collect(),
+            right: (0..lanes)
+                .map(|lane| {
+                    (0..frames)
+                        .map(|f| -((lane * 100 + f) as f32) - 1.0)
+                        .collect()
+                })
+                .collect(),
+        }
+    }
+
+    /// An **armed** chain of nothing but seam-side slots must not collapse.
+    ///
+    /// Clause 2 of [`BankChain::collapse_prefix_of`], and the one whose failure is silent. A
+    /// fader-or-matrix-only chain reports every lane symmetric on every session, mono or not,
+    /// because `SEAM_SIDE_WITNESS` is an unconditional `SYMMETRIC` -- so `all_lanes_symmetric` and
+    /// the structural join both say yes and only the empty prefix says no. If the dispatch dropped
+    /// `collapse_prefix > 0`, the seam would publish the duplicated left plane as this chain's
+    /// right output on a session whose two channels legitimately differ.
+    ///
+    /// Red mutation: `collapse_prefix > 0` becomes `collapse_prefix >= 0` in `BankChain::run`.
+    #[test]
+    fn an_armed_seam_side_only_chain_renders_the_dual_bits() {
+        let coefficients = [1.0_f32, 0.5, 0.25, 2.0];
+        let mut chain = mono_chain(4, 8, vec![Box::new(Matrix { coefficients })]);
+        assert_eq!(
+            chain.collapse_prefix(),
+            0,
+            "a seam-side-only chain has no prefix"
+        );
+        chain.arm_mono_collapse(true);
+        let mut planes = distinct_planes(4, 8);
+        let source = distinct_planes(4, 8);
+        chain.run(&mut planes, 8, 0).expect("render");
+        assert_eq!(
+            chain.collapses(),
+            0,
+            "a vacuous witness must never read as collapse evidence"
+        );
+        let [ll, lr, rl, rr] = coefficients;
+        for lane in 0..4 {
+            for frame in 0..8 {
+                let (l, r) = (source.left[lane][frame], source.right[lane][frame]);
+                assert_eq!(
+                    planes.left[lane][frame].to_bits(),
+                    (ll * l + lr * r).to_bits(),
+                    "lane {lane} frame {frame}: left"
+                );
+                assert_eq!(
+                    planes.right[lane][frame].to_bits(),
+                    (rl * l + rr * r).to_bits(),
+                    "lane {lane} frame {frame}: the right plane must be the dual matrix output, \
+                     not the duplicated left one"
+                );
+            }
+        }
+    }
+
+    /// A chain holding a slot that runs on only some of its lanes must not collapse.
+    ///
+    /// Clause 4 of [`BankChain::collapse_prefix_of`]. The collapse is all-lanes-or-nothing and the
+    /// witness is conjoined over the slots a lane actually runs, so a slot that is an identity on
+    /// some lanes makes "every active lane is eligible" and "every slot agreed for every active
+    /// lane" two different statements -- and the dispatch reads the first. Declining the whole
+    /// chain is what keeps them one statement.
+    ///
+    /// Red mutation: drop the `lanes_agree` clause from `collapse_prefix_of`.
+    #[test]
+    fn a_partial_agreement_slot_declines_the_collapse() {
+        let active: Box<[bool]> = vec![true; 4].into_boxed_slice();
+        let slots = vec![
+            slot(active.to_vec(), Box::new(Scale::new([2.0, 3.0], true))),
+            slot(
+                vec![true, false, true, false],
+                Box::new(Scale::new([5.0, 7.0], true)),
+            ),
+        ];
+        let mut chain = BankChain::new(
+            AoSoaScratch::new(BankWidth::Four, 8).expect("scratch"),
+            active,
+            slots,
+        )
+        .expect("chain");
+        assert_eq!(
+            chain.collapse_prefix(),
+            0,
+            "a slot that does not run every lane of the chain zeroes the prefix"
+        );
+        chain.arm_mono_collapse(true);
+        let mut planes = distinct_planes(4, 8);
+        let source = distinct_planes(4, 8);
+        chain.run(&mut planes, 8, 0).expect("render");
+        assert_eq!(chain.collapses(), 0);
+        // Both stages run the whole resident block whenever any lane of theirs is live -- the mask
+        // gates the *slot*, not the words -- so the dual bits are both gains on every lane. What is
+        // load-bearing here is only that the right plane is the right channel's own arithmetic.
+        for lane in 0..4 {
+            assert_eq!(
+                planes.right[lane][0].to_bits(),
+                (source.right[lane][0] * 3.0 * 7.0).to_bits(),
+                "lane {lane}: the right plane must be its own, not the duplicated left"
+            );
+        }
+    }
+
+    /// The disengage copy runs once, on the block that stops collapsing, and only for the prefix.
+    #[test]
+    fn disengaging_copies_the_prefixs_state_once_and_retires_the_chain() {
+        let mut chain = mono_chain(
+            4,
+            8,
+            vec![
+                Box::new(Scale::new([1.0, 1.0], true)),
+                Box::new(Matrix {
+                    coefficients: [1.0, 0.0, 0.0, 1.0],
+                }),
+            ],
+        );
+        chain.arm_mono_collapse(true);
+        let mut planes = identical_planes(4, 8);
+        chain.run(&mut planes, 8, 0).expect("render");
+        assert!(chain.is_collapsed());
+        chain.force_mono_collapse_off(true);
+        chain.run(&mut planes, 8, 0).expect("render");
+        assert!(!chain.is_collapsed() && chain.collapse_is_retired());
+        // Re-arming does not re-engage: that transition is M3's.
+        chain.force_mono_collapse_off(false);
+        chain.run(&mut planes, 8, 0).expect("render");
+        assert_eq!(
+            chain.collapses(),
+            1,
+            "one collapsed block, and no re-engage"
+        );
     }
 }

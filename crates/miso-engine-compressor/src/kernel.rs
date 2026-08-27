@@ -126,6 +126,51 @@ impl<L: Lane> Channel<L> {
         channel
     }
 
+    /// Copies every word this channel carries **except** its preparation defaults from `source`.
+    ///
+    /// The mono collapse's disengage boundary (`PreparedNativeEffectBank::desymmetrize_channels`).
+    /// A collapsed block runs `process_block_mono`, which advances the left channel's ramps,
+    /// redesigns its coefficient words from them, writes its two rings and moves its cursor and
+    /// its one recursive word -- and touches none of the right channel's. This restores the right
+    /// channel to what the counterfactual dual run would hold, which by the witness' induction is
+    /// exactly the left channel's.
+    ///
+    /// # The copy list, term by term
+    ///
+    /// | word | why it is here |
+    /// |---|---|
+    /// | `words` | the eight designed coefficients the kernel loads. A ramp in flight rewrites them every frame, and only the left channel's were rewritten. |
+    /// | `ramps` | all four fields of every smoothed parameter. `max_remaining` sizes the ramping prefix and `advance_ramps` moves `current` toward `target` by `step`; a right channel left mid-ramp would resume from a stale position. |
+    /// | `lookahead_ms`, `delay` | the detector read-back distance and what it was derived from. `redesign` reads the former, `gather_detector`/`fill_taps`/`min_delay` the latter. |
+    /// | `gain_reduction_db` | the one recursive word -- the compressor's whole cross-frame dependency. |
+    /// | `cursor` | the shared ring write index. It advances once per frame on the collapsed channel only. |
+    /// | `main`, `detector` | the two delay rings, whole. A partial copy would read the collapsed run's samples at some taps and the pre-collapse ones at others. |
+    ///
+    /// `defaults` is deliberately **not** copied: it is the control-plane reset table, no kernel
+    /// reads it, and the counterfactual dual run never wrote it either. `ring_length` is a
+    /// preparation shape both channels share.
+    /// # Which entries are individually gated, and which are here by the rule
+    ///
+    /// `crates/miso-engine-compressor/tests/mono_collapse.rs` fails if any of `words`, `ramps`,
+    /// `gain_reduction_db`, `cursor`, `main` or `detector` is dropped. `lookahead_ms` and `delay`
+    /// are **not** individually gated and are on the list anyway: no rendered block writes them --
+    /// they move only at prepare, restore and a full reset, none of which is reachable on a bound
+    /// bank -- so a test cannot make them diverge today. They are copied because the rule is
+    /// *whole per-channel state*, and a rule that admits exceptions for "the fields nothing moves
+    /// yet" is a rule that fails the first time something moves one.
+    pub(crate) fn copy_state_from(&mut self, source: &Self) {
+        debug_assert_eq!(self.ring_length, source.ring_length);
+        debug_assert_eq!(self.main.len(), source.main.len());
+        self.words = source.words;
+        self.ramps = source.ramps;
+        self.lookahead_ms = source.lookahead_ms;
+        self.delay = source.delay;
+        self.gain_reduction_db = source.gain_reduction_db;
+        self.cursor = source.cursor;
+        self.main.copy_from_slice(&source.main);
+        self.detector.copy_from_slice(&source.detector);
+    }
+
     /// Points every ramp at its preparation value and redesigns, including the lookahead taps.
     fn seed_from_defaults(&mut self, sample_rate: u32) {
         let ring_length = self.ring_length as usize;
@@ -1025,4 +1070,204 @@ fn gain_mix<L: Lane>(delayed: L, smoothed: L, coef: &Coef<L>, invariants: &Invar
 /// state a rejected block resets.
 pub(crate) fn finish_channel<L: Lane>(io: &mut [f32], channel: &mut Channel<L>) -> u32 {
     bank::finish_channel::<L>(io, || channel.clear_state())
+}
+
+// ---------------------------------------------------------------------------------------------
+// The mono-collapse one-plane bodies.
+//
+// Each is the dual body with the right channel's arguments deleted and every remaining line left
+// where it was. Two things are **not** deletions and are the whole reason these are separate
+// bodies rather than a `right = left` alias:
+//
+// * the link is computed on the one plane read twice --
+//   `link_frame(detector, slot, main_left, main_left, ..)` -- and in the original operation order.
+//   That is not a simplification of the linked expression, it is the expression: `Maximum` gives
+//   `max(p, p) = p` bit-exact, and `Average` gives `0.5*p + 0.5*p`, whose two products and one add
+//   are what round -- `p` itself would be a different value for a subnormal `p`, where `0.5*p`
+//   loses a bit and the sum of two halves does not come back to `p`. Writing `p` there would be a
+//   rounding change on exactly the inputs nobody tests by ear;
+// * `Detector::Sidechain` still reads *both* sidechain planes through `link_frame`, so a collapsed
+//   bank must never be handed one. `process_bank` already refuses a sidechained block; the
+//   per-instance path declines on `Detector::Sidechain` for the same reason.
+//
+// The right channel's state is untouched. It is restored by `Channel::copy_state_from` at the
+// disengage boundary, before any dual block runs.
+// ---------------------------------------------------------------------------------------------
+
+/// [`segment_is_stageable`] for one channel.
+#[inline(always)]
+fn segment_is_stageable_mono<L: Lane>(channel: &Channel<L>, len: usize) -> bool {
+    len <= MAX_STAGED_FRAMES && min_delay(channel) >= len
+}
+
+/// [`process_block`] over one plane.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn process_block_mono<L: Lane>(
+    left: &mut [f32],
+    detector: Detector<'_>,
+    frames: usize,
+    link: LinkMode,
+    bypass: bool,
+    sample_rate: u32,
+    channel_left: &mut Channel<L>,
+    staged: &mut Staged<L>,
+) {
+    debug_assert_eq!(left.len(), frames * L::WIDTH);
+    let remaining = channel_left.max_remaining() as usize;
+    let ramping = if remaining < frames {
+        remaining
+    } else {
+        frames
+    };
+    if ramping > 0 {
+        frames_loop_mono::<L, true>(
+            left,
+            detector,
+            0,
+            ramping,
+            link,
+            bypass,
+            sample_rate,
+            channel_left,
+        );
+    }
+    if ramping < frames {
+        if segment_is_stageable_mono(channel_left, frames - ramping) {
+            let Staged {
+                taps_left,
+                target_left,
+                ..
+            } = staged;
+            idle_frames_staged_mono::<L>(
+                left,
+                detector,
+                ramping,
+                frames,
+                link,
+                bypass,
+                channel_left,
+                taps_left,
+                target_left,
+            );
+        } else {
+            frames_loop_mono::<L, false>(
+                left,
+                detector,
+                ramping,
+                frames,
+                link,
+                bypass,
+                sample_rate,
+                channel_left,
+            );
+        }
+    }
+}
+
+/// [`frames_loop`] over one plane.
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn frames_loop_mono<L: Lane, const RAMPING: bool>(
+    left: &mut [f32],
+    detector: Detector<'_>,
+    start: usize,
+    end: usize,
+    link: LinkMode,
+    bypass: bool,
+    sample_rate: u32,
+    channel_left: &mut Channel<L>,
+) {
+    let width = L::WIDTH;
+    let ring_length = channel_left.ring_length as usize;
+    let invariants = Invariants::<L>::new(link, bypass);
+
+    let mut coef_left = Coef::load(&channel_left.words);
+    let mut gather = [0.0_f32; MAX_WIDTH];
+
+    for frame in start..end {
+        if RAMPING {
+            channel_left.advance_ramps(sample_rate);
+            coef_left = Coef::load(&channel_left.words);
+        }
+        let slot = frame * width;
+
+        let main_left = L::load(&left[slot..]);
+        let (level_left, _level_right) =
+            link_frame(detector, slot, main_left, main_left, &invariants);
+
+        let write = channel_left.cursor as usize;
+        let next = write + 1;
+        let next = if next == ring_length { 0 } else { next };
+        main_left.store(&mut channel_left.main[write * width..]);
+        level_left.store(&mut channel_left.detector[write * width..]);
+        let delayed_left = L::load(&channel_left.main[next * width..]);
+        let detected_left = gather_detector(channel_left, write, &mut gather);
+
+        let output_left = one_frame(
+            delayed_left,
+            detected_left,
+            &coef_left,
+            &mut channel_left.gain_reduction_db,
+            &invariants,
+        );
+        output_left.store(&mut left[slot..]);
+
+        channel_left.cursor = next as u32;
+    }
+}
+
+/// [`idle_frames_staged`] over one plane.
+#[allow(clippy::too_many_arguments)]
+fn idle_frames_staged_mono<L: Lane>(
+    left: &mut [f32],
+    detector: Detector<'_>,
+    start: usize,
+    end: usize,
+    link: LinkMode,
+    bypass: bool,
+    channel_left: &mut Channel<L>,
+    taps_left: &mut [f32],
+    target_left: &mut [L],
+) {
+    let width = L::WIDTH;
+    let ring_length = channel_left.ring_length as usize;
+    let len = end - start;
+    debug_assert!(segment_is_stageable_mono(channel_left, len));
+    let invariants = Invariants::<L>::new(link, bypass);
+    let coef_left = Coef::load(&channel_left.words);
+
+    let head = channel_left.cursor as usize;
+    fill_taps(channel_left, head, len, taps_left);
+
+    let mut write = head;
+    for (index, (tap_left, frame_left)) in taps_left[..len * width]
+        .chunks_exact(width)
+        .zip(target_left[..len].iter_mut())
+        .enumerate()
+    {
+        let slot = (start + index) * width;
+        let main_left = L::load(&left[slot..]);
+        let (level_left, _level_right) =
+            link_frame(detector, slot, main_left, main_left, &invariants);
+        let next = write + 1;
+        let next = if next == ring_length { 0 } else { next };
+        main_left.store(&mut channel_left.main[write * width..]);
+        level_left.store(&mut channel_left.detector[write * width..]);
+        L::load(&channel_left.main[next * width..]).store(&mut left[slot..]);
+        *frame_left = curve_target(L::load(tap_left), &coef_left, &invariants);
+        write = next;
+    }
+    channel_left.cursor = write as u32;
+
+    let mut gain_left = channel_left.gain_reduction_db;
+    for frame_left in target_left[..len].iter_mut() {
+        *frame_left = ballistic(*frame_left, &mut gain_left, &coef_left);
+    }
+    channel_left.gain_reduction_db = gain_left;
+
+    for (index, smoothed_left) in target_left[..len].iter().enumerate() {
+        let slot = (start + index) * width;
+        let delayed_left = L::load(&left[slot..]);
+        gain_mix(delayed_left, *smoothed_left, &coef_left, &invariants).store(&mut left[slot..]);
+    }
 }

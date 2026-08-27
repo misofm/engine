@@ -106,3 +106,27 @@ Rows 218-6 to 218-8 are the honest half of this ledger. Each clause is kept beca
 hazard that is real in the lowered program and unreachable from a session the compiler can build,
 and the reason is written down beside the clause in `route_fold`'s doc comment rather than left to
 be rediscovered.
+
+## Mono-collapse M2 — the dispatch, the structural join and the transition
+
+The collapse renders the bits a dual run renders, so the rows below are counters and cross-arm
+comparisons; a digest gate on a single arm cannot see any of these failures. They live beside the
+console fixtures (`tools/miso-engine-console-workload/tests/chain_shape.rs`) because the *production*
+plan is what they are about and it is assembled there.
+
+Driver: one mutation at a time, `cargo test -p miso-engine-console-workload --test chain_shape`,
+tree restored (and `touch`ed) between rows.
+
+| # | mutation | file | test | result |
+|---|---|---|---|---|
+| M2-G1 | `Runtime::arm_mono_collapse` arms every banked unit regardless of its lanes' tracks (`let armed = !tracks.is_empty();`), so the structural join is performed and ignored | `graph/src/runtime.rs` | `the_half_mono_cohort_banks_like_a_uniform_one` (and `the_collapse_fires_on_every_mono_cohort_and_no_other`) | RED — 2 failed. The half-mono row renders the *uniform mono* row's bits, because its odd tracks' right channels become the duplicated left ones. This is the failure that found the hole: the runtime witness is source-agnostic by construction and admits every lane of that row |
+
+The join is where this row has to be cut, and an earlier draft cut it in the wrong place. Flipping
+`BankChain::new`'s `collapse_source` default to `true` is **green** on this suite: every plan the
+console builds is joined, and `arm_mono_collapse` writes the field on every chain, so the default is
+overwritten before a block renders. That mutation is still a real gate -- it reds
+`miso-engine-rack`'s `an_unarmed_chain_never_collapses`, where nothing performs the join -- but it is
+a gate on the *default*, not on the join, and the two are separate claims. Both are listed, in the
+crate whose test carries each.
+| M2-G2 | the disengage copy is skipped (`slot.stage.desymmetrize()` becomes a no-op) | `rack/src/lib.rs` `disengage_collapse` | `a_run_that_stops_collapsing_renders_what_a_never_collapsed_run_renders` | RED |
+| M2-G3 | the drain is moved back after the dispatch | `rack/src/lib.rs` `run` | `a_live_one_channel_retarget_disengages_on_the_block_it_lands` | RED — see the rack's M2-5 row for what the ordering protects |

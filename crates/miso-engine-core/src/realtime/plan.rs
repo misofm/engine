@@ -210,9 +210,10 @@ pub trait PreparedPlanExecutor: Send {
     /// upstream word, no upstream stage is live-bypassed, and every restored payload's two
     /// sections compared byte-equal.
     ///
-    /// **Nothing rendered reads this.** It is the census of a control-plane bit, walked over the
-    /// built runtime for the same reason `observation_binding_counts` is: the honest way to check
-    /// what a plan holds is to walk it. Read only after rendering is disarmed.
+    /// **Nothing rendered reads this census.** The *terms* it counts are read on the render path
+    /// since mono-collapse M2 -- that is what the collapse dispatches on -- but this pair of totals
+    /// is a walk over the built runtime, for the same reason `observation_binding_counts` is: the
+    /// honest way to check what a plan holds is to walk it. Read only after rendering is disarmed.
     ///
     /// # What this census counts, and what it must not be used for
     ///
@@ -268,6 +269,45 @@ pub trait PreparedPlanExecutor: Send {
     #[doc(hidden)]
     fn bank_route_folds(&self) -> u64 {
         0
+    }
+    /// `[blocks rendered with the mono collapse taken, cohorts that can take it at all]`.
+    ///
+    /// The mono collapse's counter, and it is a pair for the reason `bank_shape` is a pair: either
+    /// number alone is unreadable. The first says the collapse *fired* -- it is a per-block count,
+    /// so a plan that rendered `n` blocks with all `c` of its cohorts collapsed reports `n * c` --
+    /// and the second says how many cohorts could have taken it, which is fixed at bind and is what
+    /// "8 of 8 cohorts" is read off.
+    ///
+    /// A collapse moves no rendered bit -- that is the whole claim -- so a digest gate cannot see
+    /// whether it fired, and a count is the only honest way to state that it did. The same reason
+    /// `bank_scatter_redirects` and `bank_route_folds` exist. Read only after rendering is
+    /// disarmed.
+    #[doc(hidden)]
+    fn bank_collapse_counters(&self) -> [u64; 2] {
+        [0, 0]
+    }
+    /// Force every bank chain's mono collapse off, or back on.
+    ///
+    /// The second arm of the paired mono measurement, and a kill switch. Bind-time and per plan,
+    /// never a process-global: the measurement builds both arms in one process and alternates them
+    /// per observation, so a global switch could not express it. Off the render thread.
+    #[doc(hidden)]
+    fn force_mono_collapse_off(&mut self, forced: bool) {
+        let _ = forced;
+    }
+    /// Perform the mono collapse's structural join and arm the cohorts it admits.
+    ///
+    /// `eligible(track_id)` is the **structural** half of the channel-symmetry witness -- the
+    /// `SOURCE` term, decided from the compiled session by
+    /// `session_structural_symmetry_v1`. Every chain is unarmed until this is called, and an
+    /// unarmed chain never collapses: the runtime half a chain carries is source agnostic (see
+    /// [`PlanUnitEligibilityV1::lane_eligible`]) and would admit a track whose two channels read
+    /// two different source channels.
+    ///
+    /// Off the render thread, once, after bind.
+    #[doc(hidden)]
+    fn arm_mono_collapse(&mut self, eligible: &dyn Fn(&str) -> bool) {
+        let _ = eligible;
     }
     /// `[observed stages, declared taps, armed taps]`, walked over the **built** runtime.
     ///
@@ -588,6 +628,43 @@ impl PreparedRenderPlan {
         self.executor
             .as_deref()
             .map_or(0, PreparedPlanExecutor::bank_route_folds)
+    }
+    /// Read `[collapsed blocks, collapsible cohorts]` outside the render scope.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn bank_collapse_counters(&self) -> [u64; 2] {
+        assert!(
+            !super::audit::is_render_scope_active(),
+            "bank collapse counters are sealed until the render audit is disarmed"
+        );
+        self.executor
+            .as_deref()
+            .map_or([0, 0], PreparedPlanExecutor::bank_collapse_counters)
+    }
+    /// Perform the mono collapse's structural join and arm the cohorts it admits.
+    ///
+    /// See [`PreparedPlanExecutor::arm_mono_collapse`]. Until a caller does this, no chain of this
+    /// plan collapses -- which is the safe default and the reason the join is explicit.
+    #[doc(hidden)]
+    pub fn arm_mono_collapse(&mut self, eligible: &dyn Fn(&str) -> bool) {
+        assert!(
+            !super::audit::is_render_scope_active(),
+            "the mono collapse join is sealed while the render audit is armed"
+        );
+        if let Some(executor) = self.executor.as_deref_mut() {
+            executor.arm_mono_collapse(eligible);
+        }
+    }
+    /// Force every bank chain's mono collapse off, or back on. Bind-time, outside render.
+    #[doc(hidden)]
+    pub fn force_mono_collapse_off(&mut self, forced: bool) {
+        assert!(
+            !super::audit::is_render_scope_active(),
+            "the mono collapse switch is sealed while the render audit is armed"
+        );
+        if let Some(executor) = self.executor.as_deref_mut() {
+            executor.force_mono_collapse_off(forced);
+        }
     }
     /// Copy cumulative auxiliary-worker audit snapshots in stable worker order.
     #[doc(hidden)]

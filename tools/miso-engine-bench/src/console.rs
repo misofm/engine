@@ -1137,14 +1137,20 @@ const MONO_ARMS: [Workload; 2] = [
     Workload::SixtyFourTrackConsoleMonoDual,
 ];
 
-/// Pinned verbatim in the validator: what separates the two arms *in this tree*.
+/// Pinned verbatim in the validator: what separates the two arms.
 ///
-/// The sentence is the honesty. A reader who found a two-arm paired record with a near-zero delta
-/// and no such field would reasonably read it as "the collapse saves nothing"; what it actually
-/// says is that there is no collapse yet. Changing the claim means editing this constant and the
-/// validator that pins it, which is exactly the visibility the change deserves.
-const MONO_ARM_DIFFERENCE: &str =
-    "none: both arms are the mono fixture as written; no collapse exists in this tree";
+/// The sentence is the honesty, and it moved when the thing it describes arrived. It used to read
+/// "no collapse exists in this tree", because a reader who found a two-arm paired record with a
+/// near-zero delta and no such field would reasonably have read it as "the collapse saves
+/// nothing". It now names the mechanism, and the delta beside it is the mechanism's cost.
+///
+/// Both arms compile the *same* fixture. The difference is one bind-time switch
+/// (`PreparedRenderPlan::force_mono_collapse_off`) and nothing else -- not a second session, not a
+/// second parameter set -- which is what makes the paired delta the collapse and the digest
+/// equality beside it a class-A statement about it. Changing this claim means editing this
+/// constant, the validator that pins it and the mutation case that guards it, which is exactly the
+/// visibility the change deserves.
+const MONO_ARM_DIFFERENCE: &str = "collapse_eligible takes the mono collapse on every cohort; collapse_forced_off renders the same fixture dual";
 
 /// Pinned verbatim in the validator, for the reason every method sentence in this stream is.
 const MONO_STATISTICAL_METHOD: &str = "two arms alternated per observation; nearest-rank \
