@@ -1372,7 +1372,7 @@ impl PreparedPlanExecutor for GraphExecutor {
     ///
     /// The dynamic half comes from the same `RuntimeUnit::symmetry_counters` the census folds, so
     /// the rows and the totals cannot disagree -- summing `[eligible_lanes, lanes]` over these
-    /// rows *is* `symmetry_counters`, and `the_rows_sum_to_the_census` pins that.
+    /// rows *is* `symmetry_counters`, and `the_half_mono_cohort_banks_like_a_uniform_one (which asserts rows-sum-to-census inline)` pins that.
     fn unit_eligibility(&self) -> Vec<PlanUnitEligibilityV1> {
         self.runtime
             .units
