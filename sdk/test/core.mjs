@@ -36,10 +36,10 @@ async function check() {
     assert.equal(Object.isFrozen(description), true);
     assert.deepEqual(description.engine.sampleRates, [44_100, 48_000, 88_200, 96_000]);
     assert.equal(description.engine.quantumFrames, 128);
-    assert.equal(description.engine.wasmBytes, 2_494_615);
+    assert.equal(description.engine.wasmBytes, 2_496_015);
     assert.equal(
       description.engine.assetHashes["miso-engine-v2-audio-worklet.simd128.wasm"],
-      "99c08301577dc27799bee3c13fe74dfee87db36b0b54864d97c92935666368d6",
+      "06b7846aa4e74248f25da7014fd00ffe99e0726c05a4590dd7dcbfbf00d8d66a",
     );
     assert.equal(Object.isFrozen(description.engine.assetHashes), true);
     assert.equal(Object.isFrozen(sdk.COMMAND_REASON_NAMES), true);
