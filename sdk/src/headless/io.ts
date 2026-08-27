@@ -22,16 +22,6 @@ export async function readBytes(input: string | URL): Promise<Uint8Array> {
   }
 }
 
-/** Write one completed output byte sequence. Atomic release packaging remains Phase 4 work. */
-export async function writeBytes(path: string, bytes: Uint8Array): Promise<void> {
-  try {
-    const { writeFile } = await import("node:fs/promises");
-    await writeFile(path, bytes);
-  } catch (_error) {
-    throw new MisoOfflineError(`Output write failed: ${path}`, "output");
-  }
-}
-
 export async function sha256(bytes: Uint8Array): Promise<string> {
   const subtle = globalThis.crypto?.subtle;
   if (!subtle) throw new MisoOfflineError("Web Crypto SHA-256 is unavailable", "asset");

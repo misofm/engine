@@ -44,8 +44,11 @@ render failure is sticky engine state: diagnostics are read as a NUL-terminated 
 and recovery is dispose-and-recreate rather than an in-place retry. `validateSession()` always uses
 a fresh Wasm instance for the same reason.
 
-`renderToFile()` supports exact per-quantum `f32le-planar` records and interleaved stereo `wav32f`.
-`wav16` remains deferred because v1 has no quantization/dither policy. Raw `{ toml }` validation is
-fully engine-authoritative. For rendering, the frozen ABI cannot query a compiled source's nonzero
-region, so raw-TOML source inputs denote a complete zero-origin region; use a typed `SessionPlan`
-when a declared source region is not zero-origin.
+Path-backed WAV inputs are opened once and decoded with quantum-bounded reads; they are closed by
+`dispose()`. `renderToFile()` likewise writes exact per-quantum `f32le-planar` records or interleaved
+stereo `wav32f` blocks without retaining duration-scaled output, returns the incremental SHA-256,
+and refuses to overwrite an existing path. `renderAll()` and caller-supplied WAV bytes remain the
+explicit in-memory forms. `wav16` remains deferred because v1 has no quantization/dither policy.
+Raw `{ toml }` validation is fully engine-authoritative. For rendering, the frozen ABI cannot query
+a compiled source's nonzero region, so raw-TOML source inputs denote a complete zero-origin region;
+use a typed `SessionPlan` when a declared source region is not zero-origin.

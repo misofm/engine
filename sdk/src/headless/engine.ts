@@ -1,8 +1,9 @@
 import type { SessionPlan, SessionShape } from "../core/session.js";
+import { createHash } from "node:crypto";
+import { closeSync, openSync, unlinkSync, writeSync } from "node:fs";
 import { isSessionPlan, WasmBoundary, type EngineStatus } from "./abi.js";
 import { OfflineConsole } from "./console.js";
 import { MisoOfflineError, MisoSourceError } from "./errors.js";
-import { readBytes, sha256, writeBytes } from "./io.js";
 import type {
   MeterFrame,
   OfflineEngine,
@@ -11,7 +12,16 @@ import type {
   RenderReport,
   RenderedAudio,
 } from "./types.js";
-import { decodeWave, f32lePlanarBytes, parseWave, wav32fBytes, type WaveData } from "./wav.js";
+import {
+  decodeWave,
+  f32lePlanarBytes,
+  openWaveFile,
+  parseWave,
+  wav32fHeader,
+  wav32fInterleavedBytes,
+  type WaveData,
+  type WaveFile,
+} from "./wav.js";
 import { ABI_LAYOUT } from "../generated/abi.js";
 
 interface SourceDeclaration {
@@ -25,6 +35,7 @@ interface SourceDeclaration {
 interface PreparedSource {
   readonly declaration: SourceDeclaration;
   readonly read: (absoluteStart: number, frames: number) => readonly Float32Array[];
+  readonly close?: () => void;
   consumed: number;
 }
 
@@ -84,12 +95,19 @@ function memorySource(id: string, input: readonly Float32Array[], declaration: S
   };
 }
 
-function waveSource(id: string, wave: WaveData, declaration: SourceDeclaration, sessionRate: number): PreparedSource {
+function waveSource(id: string, wave: WaveData | WaveFile, declaration: SourceDeclaration, sessionRate: number): PreparedSource {
   const inferred = declaration.channels === 0 ? Object.freeze({ ...declaration, channels: wave.channels, frames: wave.frames }) : declaration;
   if (wave.sampleRateHz !== sessionRate || inferred.sampleRateHz !== sessionRate) throw new MisoSourceError("Source/session sample-rate mismatch; no implicit SRC exists", id, "sample_rate_hz");
   if (wave.channels !== inferred.channels) throw new MisoSourceError("WAV channel count differs from Session V1", id, "mapping.channel_count");
   if (inferred.startFrame + inferred.frames > wave.frames) throw new MisoSourceError("WAV is shorter than the declared source region", id, "mapping.region");
-  return { declaration: inferred, consumed: 0, read: (absoluteStart, frames) => decodeWave(wave, absoluteStart, frames, id) };
+  return {
+    declaration: inferred,
+    consumed: 0,
+    read: "decode" in wave
+      ? (absoluteStart, frames) => wave.decode(absoluteStart, frames)
+      : (absoluteStart, frames) => decodeWave(wave, absoluteStart, frames, id),
+    close: "close" in wave ? () => wave.close() : undefined,
+  };
 }
 
 async function prepareSources<S extends SessionShape>(plan: SessionPlan<S> | { readonly toml: string }, inputs: Readonly<Record<string, OfflineSource>>, sampleRateHz: number): Promise<readonly PreparedSource[]> {
@@ -97,18 +115,43 @@ async function prepareSources<S extends SessionShape>(plan: SessionPlan<S> | { r
   const expected = new Set(rows.map((row) => row.id));
   for (const id of Object.keys(inputs)) if (!expected.has(id)) throw new MisoSourceError("Source input is not declared by the session", id, "sources");
   const prepared: PreparedSource[] = [];
-  for (const row of rows) {
-    const input = inputs[row.id];
-    if (!input) throw new MisoSourceError("Session source has no headless input", row.id, "sources");
-    if (Array.isArray(input)) {
-      prepared.push(memorySource(row.id, input, row));
-    } else {
-      const wav = (input as Readonly<{ wav: Uint8Array | string }>).wav;
-      const bytes = wav instanceof Uint8Array ? new Uint8Array(wav) : await readBytes(wav);
-      prepared.push(waveSource(row.id, parseWave(bytes, row.id), row, sampleRateHz));
+  try {
+    for (const row of rows) {
+      const input = inputs[row.id];
+      if (!input) throw new MisoSourceError("Session source has no headless input", row.id, "sources");
+      if (Array.isArray(input)) {
+        prepared.push(memorySource(row.id, input, row));
+      } else {
+        const wav = (input as Readonly<{ wav: Uint8Array | string }>).wav;
+        if (wav instanceof Uint8Array) {
+          prepared.push(waveSource(row.id, parseWave(new Uint8Array(wav), row.id), row, sampleRateHz));
+        } else {
+          const file = openWaveFile(wav, row.id);
+          try { prepared.push(waveSource(row.id, file, row, sampleRateHz)); }
+          catch (error) { try { file.close(); } catch (_closeError) { /* primary typed error wins */ } throw error; }
+        }
+      }
     }
+    return Object.freeze(prepared.sort((left, right) => byteOrder(left.declaration.id, right.declaration.id)));
+  } catch (error) {
+    closeSources(prepared);
+    throw error;
   }
-  return Object.freeze(prepared.sort((left, right) => byteOrder(left.declaration.id, right.declaration.id)));
+}
+
+function writeExact(fd: number, bytes: Uint8Array): void {
+  let written = 0;
+  while (written < bytes.byteLength) {
+    const count = writeSync(fd, bytes, written, bytes.byteLength - written, null);
+    if (count <= 0) throw new Error("output write made no progress");
+    written += count;
+  }
+}
+
+function closeSources(sources: readonly PreparedSource[]): void {
+  for (const source of sources) {
+    try { source.close?.(); } catch (_error) { /* disposal remains idempotent and best effort */ }
+  }
 }
 
 class Engine<S extends SessionShape> implements OfflineEngine<S> {
@@ -197,13 +240,35 @@ class Engine<S extends SessionShape> implements OfflineEngine<S> {
   }
 
   async renderToFile(path: string, options: Readonly<{ format?: "f32le-planar" | "wav32f" }> = {}): Promise<RenderReport> {
+    this.assertLive();
     const format = options.format ?? "wav32f";
-    const audio = this.renderAll();
-    const bytes = format === "f32le-planar"
-      ? f32lePlanarBytes(audio.left, audio.right, this.boundary.quantumFrames)
-      : wav32fBytes(audio.left, audio.right, this.boundary.sampleRateHz);
-    await writeBytes(path, bytes);
-    return Object.freeze({ path, format, frames: audio.left.length, bytes: bytes.byteLength, sha256: await sha256(bytes) });
+    if (format !== "f32le-planar" && format !== "wav32f") throw new MisoOfflineError(`Unsupported output format: ${String(format)}`, "output");
+    const frames = Math.max(0, this.totalFrames - this.deliveredFrames);
+    const digest = createHash("sha256");
+    let fd = -1, byteCount = 0, created = false;
+    try {
+      fd = openSync(path, "wx"); created = true;
+      if (format === "wav32f") {
+        const header = wav32fHeader(frames, this.boundary.sampleRateHz);
+        writeExact(fd, header); digest.update(header); byteCount += header.byteLength;
+      }
+      let remaining = frames;
+      while (remaining > 0) {
+        const audio = this.render(Math.min(this.boundary.quantumFrames, remaining));
+        const bytes = format === "f32le-planar"
+          ? f32lePlanarBytes(audio.left, audio.right, this.boundary.quantumFrames)
+          : wav32fInterleavedBytes(audio.left, audio.right);
+        writeExact(fd, bytes); digest.update(bytes); byteCount += bytes.byteLength;
+        remaining -= audio.left.length;
+      }
+      closeSync(fd); fd = -1;
+      return Object.freeze({ path, format, frames, bytes: byteCount, sha256: digest.digest("hex") });
+    } catch (error) {
+      if (fd >= 0) { try { closeSync(fd); } catch (_closeError) { /* output failure wins */ } }
+      if (created) { try { unlinkSync(path); } catch (_unlinkError) { /* partial output cleanup is best effort */ } }
+      if (error instanceof MisoOfflineError || error instanceof MisoSourceError) throw error;
+      throw new MisoOfflineError(`Output write failed: ${path}`, "output");
+    }
   }
 
   pollMeters(): MeterFrame | null {
@@ -235,18 +300,21 @@ class Engine<S extends SessionShape> implements OfflineEngine<S> {
 
   dispose(): void {
     if (this.disposed) return;
-    this.boundary.dispose();
     this.disposed = true;
+    closeSources(this.sources);
+    this.boundary.dispose();
   }
 }
 
 export async function createOfflineEngine<S extends SessionShape>(options: OfflineEngineOptions<S>): Promise<OfflineEngine<S>> {
   const boundary = await WasmBoundary.create(options.session, options.limits, options.wasm);
+  let sources: readonly PreparedSource[] | undefined;
   try {
-    const sources = await prepareSources(options.session, options.sources, boundary.sampleRateHz);
+    sources = await prepareSources(options.session, options.sources, boundary.sampleRateHz);
     const plan = isSessionPlan(options.session as SessionPlan<SessionShape> | { readonly toml: string }) ? options.session as SessionPlan<S> : undefined;
     return new Engine(boundary, sources, plan, (options.limits?.consoleMeterBlocks ?? 0n) !== 0n);
   } catch (error) {
+    if (sources) closeSources(sources);
     boundary.dispose();
     throw error;
   }

@@ -109,6 +109,7 @@ async function runE7(sdk, wasm, nativeRunner) {
   try {
     for (const rate of [48_000, 96_000]) {
       const stem = `riff-${rate}`;
+      const sourcePath = resolve(fixtures, `${stem}.wav`);
       const nativeOutput = resolve(directory, `${stem}.native.f32le`);
       const sdkOutput = resolve(directory, `${stem}.sdk.f32le`);
       const native = spawnSync(nativeRunner, [
@@ -116,11 +117,33 @@ async function runE7(sdk, wasm, nativeRunner) {
         "--frames", "1024", "--output", nativeOutput,
       ], { cwd: repoRoot, encoding: "utf8" });
       assert.equal(native.status, 0, `E7 native runner failed at ${rate} Hz:\n${native.stdout}${native.stderr}`);
+      const memoryWave = sdk.parseWave(await readFile(sourcePath), `${stem}-memory`);
+      const pathWave = sdk.openWaveFile(sourcePath, `${stem}-path`);
+      try {
+        assert.equal(pathWave.frames, memoryWave.frames);
+        assert.equal(pathWave.sampleRateHz, memoryWave.sampleRateHz);
+        assert.deepEqual(pathWave.decode(3, 17), sdk.decodeWave(memoryWave, 3, 17), "path WAV bounded decode must equal in-memory decode");
+      } finally { pathWave.close(); }
+      assert.throws(() => pathWave.decode(0, 1), (error) => error?.code === "miso.source.v1" && error.path === "wav.lifecycle");
       const toml = await readFile(resolve(fixtures, `${stem}.toml`), "utf8");
-      const engine = await sdk.createOfflineEngine({ session: { toml }, sources: { "fixture-source": { wav: resolve(fixtures, `${stem}.wav`) } }, wasm: { bytes: wasm } });
-      try { await engine.renderToFile(sdkOutput, { format: "f32le-planar" }); } finally { engine.dispose(); }
+      const engine = await sdk.createOfflineEngine({ session: { toml }, sources: { "fixture-source": { wav: sourcePath } }, wasm: { bytes: wasm } });
+      let maximumRenderRequest = 0;
+      const render = engine.render.bind(engine);
+      engine.render = (frames) => { maximumRenderRequest = Math.max(maximumRenderRequest, frames); return render(frames); };
+      engine.renderAll = () => { throw new Error("renderToFile retained the whole output"); };
+      let report;
+      try {
+        report = await engine.renderToFile(sdkOutput, { format: "f32le-planar" });
+        assert.ok(maximumRenderRequest > 0 && maximumRenderRequest <= 128, "file output must render in quantum-bounded blocks");
+        const preserved = await readFile(sdkOutput);
+        await assert.rejects(engine.renderToFile(sdkOutput, { format: "f32le-planar" }), (error) => error?.code === "miso.offline.v1" && error.phase === "output");
+        assert.deepEqual(await readFile(sdkOutput), preserved, "overwrite refusal must preserve the existing output");
+      } finally { engine.dispose(); }
       const nativeBytes = await readFile(nativeOutput), sdkBytes = await readFile(sdkOutput);
       assertE7(nativeBytes, sdkBytes, expectedNative[rate], rate);
+      assert.equal(report.frames, 1_024);
+      assert.equal(report.bytes, sdkBytes.byteLength);
+      assert.equal(report.sha256, digest(sdkBytes));
       evidence[rate] = digest(sdkBytes);
     }
   } finally { await rm(directory, { recursive: true, force: true }); }

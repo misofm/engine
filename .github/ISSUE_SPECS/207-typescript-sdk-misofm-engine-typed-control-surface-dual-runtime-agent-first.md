@@ -379,3 +379,25 @@ final handoff names exact commits, gate counts/digests, unresolved findings, and
 - Real TypeScript/public-type checks and the complete Node/Bun E6-E10a gate remain green with the
   same digests and five red mutations. Duration-bounded path-backed WAV input and file output are
   the next tranche; full gates and independent review remain pending.
+
+### Phase 2 tranche D: duration-bounded file I/O (pending checkpoint)
+
+- String-path WAV sources now retain an open regular-file descriptor, parse only bounded metadata
+  records, and decode each submission with a quantum-bounded positioned read. Preparation failure,
+  constructor failure, and idempotent engine disposal close every retained source; caller-supplied
+  WAV byte arrays remain the explicit in-memory form.
+- `renderToFile()` no longer calls `renderAll()`. It renders and encodes at most one quantum at a
+  time, writes with short-write handling, computes SHA-256 incrementally, and refuses overwrite via
+  exclusive creation. A failed newly-created output is removed while an already-existing target is
+  left byte-for-byte intact. `renderAll()` remains the explicit duration-scaled return API.
+- E7 now replaces `renderAll()` with a throwing tripwire, records every render request, and proves
+  the maximum is one 128-frame quantum. It also compares path-backed and in-memory decoding over a
+  bounded region, checks closed-file refusal, checks the incremental report against the completed
+  bytes, and proves a second write refuses without altering the first output.
+- The serialized Node/Bun E6-E10a gate remains green after this change. Node 22.23.2 and Bun 1.4.0
+  retain E6 SHA-256 `67490eb8c623c7e6797ee88f46b777d4fe6c7da2b2873ab553871fd5019d0f43`,
+  E7 48 kHz `cef2b4282bb8478687b4dec5f764a9f04bc64fc7a35d3a8edd5b398a80494771`,
+  E7 96 kHz `dcb0de625cb09c064ea424dff6b1eca01896ba1e7ee602c72dc7454ad9b74f16`,
+  E8 sample 256, all six E9 reasons, E10a pre-instantiation rejection, and five of five deliberate
+  red mutations. TypeScript, public type, syntax, and diff-hygiene checks pass. Full repository
+  gates and independent Phase 2 review remain pending.
