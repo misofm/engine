@@ -6,3 +6,7 @@
 export * from "./generated/catalog.js";
 export * from "./generated/abi.js";
 export * from "./generated/provenance.js";
+export * from "./core/catalog.js";
+export * from "./core/command.js";
+export * from "./core/errors.js";
+export * from "./core/types.js";

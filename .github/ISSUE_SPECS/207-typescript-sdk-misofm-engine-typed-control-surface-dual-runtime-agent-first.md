@@ -35,6 +35,10 @@ may change.
   a compile-time error.
 - The builder only exposes Session V1 rack-effect automation. Live commands cover the
   `liveUpdatable` half of the builtin strip (fader, mute, matrix/pan), not polarity/trim/filters.
+- Implementation finding: the issue sketch's `linkMode: "linked"` is not a Session V1 token and
+  cannot round-trip through the real validator. The smallest truthful surface uses the engine's
+  closed `dual_mono`, `maximum`, and `average` tokens. Launch native effects remain `quality:
+  "normal"`; the wider schema quality tokens are not promised by the generated native catalog.
 - `validateSession()` creates a fresh Wasm instance for every call, reads diagnostics as a
   NUL-terminated prefix of the capacity-only buffer, and disposes the instance.
 - `render(frames)` accepts any non-negative integer frame count, renders whole engine quanta, and
@@ -141,3 +145,15 @@ final handoff names exact commits, gate counts/digests, unresolved findings, and
   self-test; generated codegen check; E1 self-test; metadata schema check against the SDK asset;
   and command-reason vocabulary self-test (19 red mutations). Full sweep, Cargo, and Wasm gates
   were intentionally not run in this tranche.
+
+### Phase 1 tranche B: core catalog and command primitives (pending checkpoint)
+
+- `describe()` returns one frozen `miso.sdk.describe.v1` document with the generated catalog,
+  revision, ABI, asset hashes, Wasm byte count, launch rates, and render quantum.
+- The command encoder takes all offsets, record size, maximum count, and wire kinds from generated
+  ABI data. Reserved bytes stay zero; invalid integer fields, NaN/infinity, and values that overflow
+  finite `f32` are rejected locally with a typed path.
+- Focused green evidence: generated-data gate self-test; real TypeScript compile; core runtime
+  self-test under Node. Red command mutations for NaN and finite-f64-to-infinite-f32 both fail.
+- The builder and its validator corpus remain outside this checkpoint by design; this tranche is a
+  recoverable core primitive boundary, not a Phase 1 PASS claim.
