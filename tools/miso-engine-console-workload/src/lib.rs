@@ -1294,7 +1294,7 @@ impl FrozenGraphSource {
     ///
     /// Exact zeros because "quiet" and "silent" are different measurements: a very small nonzero
     /// signal keeps every filter and every detector working, and on some hosts pushes them into
-    /// denormal arithmetic, which would make the idle row report a cost *higher* than the idle
+    /// denormal arithmetic, which would make the idle row report a cost *higher* than the console
     /// row for reasons that have nothing to do with idling.
     ///
     /// # Why the channel mapping is honoured here
