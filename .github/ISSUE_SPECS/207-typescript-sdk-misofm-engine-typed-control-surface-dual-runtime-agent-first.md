@@ -290,3 +290,23 @@ final handoff names exact commits, gate counts/digests, unresolved findings, and
   `effect-negative-cases=132`, `effect-prepare-cases=127`, `schema-envelope-cases=5`, and
   `ratio-asymmetry=PASS`. Final full gates and the terminal independent verdict remain pending;
   Phase 2 has not started.
+
+### Phase 1 terminal verdict: PASS (`38cdd37`)
+
+- Fresh owner gates after the terminal revision: `scripts/sweep.sh` passed `94/94` rows in `132s`;
+  `cargo fmt --all -- --check` passed; and
+  `cargo clippy --locked --workspace --all-targets -- -D warnings` passed. Every command ran through
+  the engagement CPU serializer.
+- Independent Sol terminal review returned PASS. It verified exact builder generic preservation and
+  effect tuples, all 25 generated-ABI prepare-limit fields and their `u32`/`u64` TypeScript shapes,
+  real stringify/parse negative-zero bit preservation, both quantum entry points at the `u32`
+  boundary, every U+007F through U+009F escape, paired and unpaired surrogate behavior, and
+  channel-policy-dependent parameter typing.
+- The review also reproduced the attempt-1 correction probes, confirmed E1/E2 parity, inspected the
+  249-document E3/E4 corpus and E5's `20/132/127/5` oracle split, and verified the exact compressor
+  ratio asymmetry required by coordinator comment `5435519665`. The copied host artifacts are
+  byte-identical, packaged siblings pass provenance, frozen web sources are unchanged, and no
+  Phase 2 files exist at this checkpoint.
+- Independent lightweight gates included the generated SDK self-test, environment-vocabulary red
+  mutations, effect-interchange policy red mutations, and public API verifier probes. Phase 1 is
+  separately mergeable; Phase 2 may begin only after this evidence checkpoint.
