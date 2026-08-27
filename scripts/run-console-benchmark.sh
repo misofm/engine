@@ -57,6 +57,18 @@
 # report the *same* transposes per block: the retired layout's cross-rack pair fuses too, so which
 # rack a slot was placed in no longer changes how many round-trips its cohort pays.
 #
+# `--strip1` and `--strip1-baseline` are the paired arms of the strip/overhead round's job 1: the
+# prepared-identity builtin-section elision. A builtin filter at a 0 Hz cutoff is *designed* as the
+# arithmetic identity rather than branched around, so the two disabled SVF sections of a rack-free
+# strip were executed as identities every block. A section whose six coefficient words and two
+# retained state words are bit-pattern-equal to that identity in every lane of the bank is now
+# decided elidable at bank construction, and a run of them is emitted as the single `add(+0.0)` the
+# run composes to, at the run's position in the chain. Class **A** -- every `output_sha256` must
+# reproduce the baseline arm's exactly, on every row and every leg, and the two records differ only
+# in time. `sixty_four_track_dispatch_only` is the row that moves; every other row's builtins carry
+# a real design and elide nothing. The baseline arm is the base commit with this arm registration
+# and nothing else.
+#
 # `--issue-loop-eq-r1` writes to `artifacts/issue-loop-eq-r1` and is the effect-optimization loop's
 # EQ round 1: parametric-EQ identity-section elision and the two-slot cohort chain (#181). Both are
 # **class A** -- every workload's output digest is the #175 digest to the bit, on every row and every
@@ -126,10 +138,12 @@ if [[ "$#" == 1 ]]; then
         --round2-composed) phase_directory=round2-composed ;;
         --audit-chain-merge) phase_directory=audit-chain-merge ;;
         --audit-chain-merge-baseline) phase_directory=audit-chain-merge-baseline ;;
-        *) printf 'usage: %s [--phase2|--phase3|--issue163-phase0|--issue163-phase1|--issue163-phase2|--issue163-phase3|--issue163-phase4|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue184|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline|--round2-lim|--round2-lim-baseline|--round2-composed|--audit-chain-merge|--audit-chain-merge-baseline]\n' "$0" >&2; exit 2 ;;
+        --strip1) phase_directory=strip1 ;;
+        --strip1-baseline) phase_directory=strip1-baseline ;;
+        *) printf 'usage: %s [--phase2|--phase3|--issue163-phase0|--issue163-phase1|--issue163-phase2|--issue163-phase3|--issue163-phase4|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue184|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline|--round2-lim|--round2-lim-baseline|--round2-composed|--audit-chain-merge|--audit-chain-merge-baseline|--strip1|--strip1-baseline]\n' "$0" >&2; exit 2 ;;
     esac
 elif [[ "$#" != 0 ]]; then
-    printf 'usage: %s [--phase2|--phase3|--issue163-phase0|--issue163-phase1|--issue163-phase2|--issue163-phase3|--issue163-phase4|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue184|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline|--round2-lim|--round2-lim-baseline|--round2-composed|--audit-chain-merge|--audit-chain-merge-baseline]\n' "$0" >&2
+    printf 'usage: %s [--phase2|--phase3|--issue163-phase0|--issue163-phase1|--issue163-phase2|--issue163-phase3|--issue163-phase4|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue184|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline|--round2-lim|--round2-lim-baseline|--round2-composed|--audit-chain-merge|--audit-chain-merge-baseline|--strip1|--strip1-baseline]\n' "$0" >&2
     exit 2
 fi
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)

@@ -448,14 +448,21 @@ fn frozen_scratch_report(capi_retained_bytes: u64) -> PlanResourceReport {
         latency_samples: 31,
         tail_kind: TAIL_INFINITE,
         tail_samples: 0,
-        graph_session_plus_plan_bytes: 199_054,
-        graph_incremental_plan_bytes: 186_766,
+        // Strip round job 1: `InputStage` gained the elision plan, and the field changed the
+        // struct's layout such that `size_of::<BuiltinBankProcessor>()` went 1248 -> 1216. This
+        // fixture binds two banks, so every absolute figure below that carries the processor
+        // payload moves by -64. The double-live oracle above does not move: it is a difference
+        // between two live compiles, and a uniform shift cancels in it. That asymmetry is the
+        // point of holding both -- the oracle proves the model tracks the tree, and these
+        // literals prove the absolute report is still the one that was reviewed.
+        graph_session_plus_plan_bytes: 198_990,
+        graph_incremental_plan_bytes: 186_702,
         graph_metadata_bytes: 49_975,
         graph_delay_bytes: 0,
         effect_bank_scratch_bytes: 8_192,
         effect_bank_runtime_buffer_bytes: 8_192,
         effect_bank_metadata_bytes: 648,
-        builtin_bank_bytes: 3_027,
+        builtin_bank_bytes: 2_963,
         builtin_bank_scratch_bytes: 16_384,
         source_pcm_payload_bytes: 8_192,
         source_overhead_bytes: 2_862,
@@ -795,6 +802,8 @@ struct InputStageEightMirror {
     trim: [[f32; 8]; 2],
     coef: [[SvfCoefEightMirror; 2]; 2],
     state: [[SvfStateEightMirror; 2]; 2],
+    /// The strip round's prepared-identity elision plan, `[channel][section]`.
+    plan: [[bool; 2]; 2],
     lifetime_recovered: [u64; 2],
 }
 
@@ -807,6 +816,8 @@ struct InputStageFourMirror {
     trim: [[f32; 4]; 2],
     coef: [[[f32; 4]; 6]; 4],
     state: [[[f32; 4]; 2]; 4],
+    /// The strip round's prepared-identity elision plan, `[channel][section]`.
+    plan: [[bool; 2]; 2],
     lifetime_recovered: [u64; 2],
 }
 
@@ -1292,8 +1303,14 @@ fn graph_owners() -> Vec<PrimitiveOwner> {
     let effect_bank_plane = quantum * bank_lanes * size_of::<f32>() as u64;
     let builtin_banks = tracks.div_ceil(bank_lanes);
     let builtin_bank_processor = bytes::<BuiltinBankProcessorMirror>(1);
+    // Strip round job 1: `InputStage` gained the elision plan. The field is four bytes and the
+    // struct got *smaller* -- 1248 -> 1216 -- because the four align-1 bytes let the layout
+    // algorithm pack the tail differently. That is exactly why this mirror exists rather than a
+    // `size_of` of the real type: the model has to restate the field list, and a restatement that
+    // disagreed with production would be caught by the one-below cap arms below rather than
+    // silently absorbed.
     assert_eq!(
-        builtin_bank_processor, 1_248,
+        builtin_bank_processor, 1_216,
         "primitive builtin bank processor"
     );
     vec![
@@ -1561,7 +1578,11 @@ fn primitive_replacement_oracle(current: &str, prospective: &str) -> PrimitiveRe
     // (`frozen_scratch_report`, which describes a single plan, moves by eight.) This is a real
     // retained byte and it is reported rather than absorbed: the whole point of the double-live
     // oracle is that a struct that grew says so, in both the model and the measurement.
-    assert_effective_owner_mutations(&graph, 431_352, "double-live graph/model");
+    //
+    // The strip round moved it by 128 in the other direction: `InputStage` gained the elision plan
+    // and `size_of::<BuiltinBankProcessor>()` went 1248 -> 1216, the fixture binds two banks, and
+    // this oracle holds two plans live -- so 2 x 2 x 32. A struct that *shrank* says so too.
+    assert_effective_owner_mutations(&graph, 431_224, "double-live graph/model");
 
     let source = source_owners();
     assert_eq!(owner_total(&source), 11_054, "primitive source total");
@@ -1937,7 +1958,7 @@ fn external_primitive_double_live_oracle_drives_exact_and_one_below_c_caps() {
     // bank, and this oracle is double-live -- so +16 here and +8 in the single-plan report. The
     // live oracle and the primitive model both move, which is the property this pair of pins
     // exists to check: a struct that grew is reported by both or by neither.
-    assert_eq!(oracle.graph, 431_352);
+    assert_eq!(oracle.graph, 431_224);
     assert_eq!(oracle.source_total, 22_108);
     assert_eq!(oracle.source_overhead, 5_724);
     assert_eq!(oracle.effect_state, 15_120);

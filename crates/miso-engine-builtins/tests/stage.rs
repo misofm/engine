@@ -648,3 +648,146 @@ fn bank_construction_accepts_one_to_width_members_only() {
         Some(BankWidth::Eight)
     );
 }
+
+/// T11: the prepared-identity elision -- when a bank decides it, when it refuses, and that
+/// deciding it moves no bit.
+///
+/// The lane crate's `input_chain_elision` gate proves the *rewrite* is exact at every width and
+/// section pattern. This is the bank's half: that the decision is made from the prepared words at
+/// construction, that it is all-lanes-or-nothing, and that the one post-preparation write to the
+/// retained state -- `set_lane_state_words`, the fault-injection seam -- re-decides it rather than
+/// leaving a stale `true` standing.
+#[test]
+fn identity_sections_are_elided_only_when_every_lane_and_word_says_so() {
+    let identity = BuiltinParameters::default();
+    assert_eq!(
+        identity.left.hpf_hz, 0.0,
+        "the default chain is the identity"
+    );
+    assert_eq!(identity.left.lpf_hz, 0.0);
+
+    // A scalar chain of all-zero cutoffs elides all four sections.
+    let chain = BuiltinChain::new(48_000, identity).expect("prepare");
+    assert_eq!(
+        test_support::input_elision_plan(test_support::chain_input(&chain)),
+        [[true, true], [true, true]],
+        "an all-identity chain elides every section"
+    );
+
+    // One real cutoff blocks exactly its own section.
+    let one_filter = BuiltinParameters {
+        left: ChannelParameters {
+            lpf_hz: 12_000.0,
+            ..ChannelParameters::default()
+        },
+        ..BuiltinParameters::default()
+    };
+    let chain = BuiltinChain::new(48_000, one_filter).expect("prepare");
+    assert_eq!(
+        test_support::input_elision_plan(test_support::chain_input(&chain)),
+        [[true, false], [true, true]],
+        "a real low-pass blocks the low-pass section and nothing else"
+    );
+
+    for (backend, width) in BANKS {
+        let lanes = width.lanes() as usize;
+        let build = |real_lanes: usize| {
+            let inputs: Vec<InputBuiltins> = (0..lanes)
+                .map(|index| {
+                    let parameters = if index < real_lanes {
+                        parameters_for(index)
+                    } else {
+                        BuiltinParameters::default()
+                    };
+                    prepared_input(48_000, parameters)
+                })
+                .collect();
+            BuiltinInputBankV1::new(backend, width, inputs).expect("bank")
+        };
+
+        // All lanes or nothing: one populated lane with a real filter is enough to keep the whole
+        // bank's sections, because the kernel body has no per-lane branch.
+        assert_eq!(
+            test_support::bank_elision_plan(&build(0)),
+            [[true, true], [true, true]],
+            "width={lanes}: an all-identity bank"
+        );
+        for real_lanes in 1..=lanes {
+            assert_eq!(
+                test_support::bank_elision_plan(&build(real_lanes)),
+                [[false, false], [false, false]],
+                "width={lanes}, real lanes={real_lanes}: one real lane blocks the bank"
+            );
+        }
+
+        // A padding lane is a real lane for this decision: it carries `SvfSection::IDENTITY`, so a
+        // partially populated identity bank still elides.
+        let partial = BuiltinInputBankV1::new(
+            backend,
+            width,
+            vec![prepared_input(48_000, BuiltinParameters::default())],
+        )
+        .expect("bank");
+        assert_eq!(
+            test_support::bank_elision_plan(&partial),
+            [[true, true], [true, true]],
+            "width={lanes}: identity members plus identity padding"
+        );
+
+        // The invalidation hook. `set_bank_lane_state_words` is the only post-preparation write to
+        // the retained state, and a `-1.0` integrator under identity coefficients is exactly the
+        // case that diverges: the chain emits `-0.0` for a `-0.0` input where the elided form
+        // emits `+0.0`.
+        const FRAMES: usize = 32;
+        let seeded = (-1.0_f32).to_bits();
+        let mut injected = build(0);
+        test_support::set_bank_lane_state_words(&mut injected, 1, [seeded; 8]);
+        assert_eq!(
+            test_support::bank_elision_plan(&injected),
+            [[false, false], [false, false]],
+            "width={lanes}: injected state must invalidate the plan"
+        );
+
+        // ... and the bits it produces are the ones the plan-free kernel produces. The oracle is
+        // the same bank with a real filter on one lane, which never elided in the first place: it
+        // is fed the same injected state and must agree sample for sample.
+        let mut oracle = build(0);
+        test_support::set_bank_lane_state_words(&mut oracle, 1, [seeded; 8]);
+        let signal: Vec<f32> = vec![-0.0; FRAMES * lanes];
+        let (mut left, mut right) = (signal.clone(), signal.clone());
+        let (mut oracle_left, mut oracle_right) = (signal.clone(), signal.clone());
+        let report = injected.process(&mut left, &mut right, FRAMES as u32);
+        let oracle_report = oracle.process(&mut oracle_left, &mut oracle_right, FRAMES as u32);
+        assert_eq!(report, oracle_report, "width={lanes}");
+        for index in 0..FRAMES * lanes {
+            assert_eq!(
+                left[index].to_bits(),
+                oracle_left[index].to_bits(),
+                "width={lanes}, index={index}"
+            );
+        }
+        // The seeded state is what makes the case bite: a `-0.0` input under the *unelided*
+        // identity chain comes out `-0.0` on the seeded lane, which is precisely what elision
+        // would have washed away -- and `+0.0` on every other lane, which is what it would have
+        // produced everywhere.
+        assert_eq!(
+            left[1].to_bits(),
+            (-0.0_f32).to_bits(),
+            "width={lanes}: the seeded lane carries the sign of a `-0.0` input"
+        );
+        assert_eq!(
+            left[0].to_bits(),
+            0,
+            "width={lanes}: an unseeded lane washes it, which is why the gate is per bank"
+        );
+
+        // A reset re-decides the plan in the other direction: the state is `+0.0` again, so the
+        // identity bank is elidable again.
+        injected.reset();
+        assert_eq!(
+            test_support::bank_elision_plan(&injected),
+            [[true, true], [true, true]],
+            "width={lanes}: a reset restores the elision"
+        );
+    }
+}

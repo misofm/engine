@@ -384,3 +384,245 @@ pub fn input_chain_block<L: Lane>(
         nonfinite,
     }
 }
+
+/// The bit pattern of `+1.0`, the direct-mix word of a disabled builtin section.
+const IDENTITY_M0_BITS: u32 = 0x3F80_0000;
+/// The bit pattern of `+0.0`, which every other identity word and both identity state words carry.
+const IDENTITY_ZERO_BITS: u32 = 0x0000_0000;
+
+/// True when every lane of `value` carries exactly `pattern`.
+///
+/// **Bit patterns, not `==`.** A float compare would call `-0.0` equal to `+0.0`, and the whole
+/// point of [`section_is_identity`] is that a `-0.0` retained word is *not* inert: it makes the
+/// section emit `-0.0` where the elided form emits `+0.0`. The comparison is therefore on
+/// [`Lane::store_bits`] words, and the answer is a control-plane `bool`.
+#[inline]
+fn every_lane_is<L: Lane>(value: L, pattern: u32) -> bool {
+    let mut words = [0_u32; 64];
+    value.store_bits(&mut words[..L::WIDTH]);
+    words[..L::WIDTH].iter().all(|word| *word == pattern)
+}
+
+/// True when one section of a prepared chain is the arithmetic identity in **every** lane, state
+/// included, and its whole contribution is therefore exactly one `add(+0.0)`.
+///
+/// # The map, and why the state words are part of the test
+///
+/// With `m0 = +1.0`, `m1 = m2 = c1 = a2 = a3 = +0.0` and both integrators at `+0.0`,
+/// [`super::svf_step`] holds both integrators at `+0.0` for every input, and the section's output
+/// mix collapses to `v |-> v + 0.0` — the map that sends `-0.0` to `+0.0` and fixes every other
+/// value. Nonfinites cannot reach it: [`sanitize_gain_block`]'s clear runs first and the trim
+/// domain is bounded.
+///
+/// One intermediate is *not* `+0.0`, and the derivation must not claim otherwise: `nc1 = neg(+0.0)`
+/// is `-0.0`, so `d1 = fma(-0.0, +0.0, +0.0 * v3)` is `-0.0` whenever `v3` is negative or `-0.0`.
+/// The conclusion survives it — `v1 = +0.0 + (-0.0) = +0.0` and `ic1' = flush(+0.0 + (-0.0)) =
+/// +0.0` — because `+0` absorbs `-0` under round-to-nearest.
+///
+/// The state words are checked for the same reason they are checked *bitwise*: identity
+/// coefficients over a `-0.0` integrator emit `-0.0`, which the elided form would have washed to
+/// `+0.0`. That is an observable divergence, and `-0.0 == 0.0` would have admitted it.
+///
+/// All lanes or none: the kernel is a vector body with no per-lane branch, so a bank elides a
+/// section only when every lane of it — padding lanes included — carries the identity.
+#[inline]
+pub fn section_is_identity<L: Lane>(c: &SvfCoef<L>, s: &SvfState<L>) -> bool {
+    every_lane_is::<L>(c.m0, IDENTITY_M0_BITS)
+        && every_lane_is::<L>(c.m1, IDENTITY_ZERO_BITS)
+        && every_lane_is::<L>(c.m2, IDENTITY_ZERO_BITS)
+        && every_lane_is::<L>(c.c1, IDENTITY_ZERO_BITS)
+        && every_lane_is::<L>(c.a2, IDENTITY_ZERO_BITS)
+        && every_lane_is::<L>(c.a3, IDENTITY_ZERO_BITS)
+        && every_lane_is::<L>(s.ic1, IDENTITY_ZERO_BITS)
+        && every_lane_is::<L>(s.ic2, IDENTITY_ZERO_BITS)
+}
+
+/// Which sections of a prepared input chain [`input_chain_block_elided`] may skip.
+///
+/// Decided once, by [`input_chain_plan`], at the point the coefficient and state words are written
+/// — never per call. A `true` entry can never go stale: the six coefficient words are
+/// `PreparedOnly` in the builtin parameter ABI, and an elided section's integrators are never
+/// written by the render path, so the only way out of the identity is an explicit state write,
+/// which recomputes the plan.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct InputChainPlan {
+    /// `[channel][section]`, indexed like [`InputChainCoef::section`]; `true` means elided.
+    pub elided: [[bool; 2]; 2],
+}
+
+impl InputChainPlan {
+    /// The plan that elides nothing, which is what every prepared chain that carries a real filter
+    /// gets.
+    pub const NONE: Self = Self {
+        elided: [[false; 2]; 2],
+    };
+}
+
+/// Decides [`InputChainPlan`] for one prepared chain from its coefficient and state words.
+#[inline]
+pub fn input_chain_plan<L: Lane>(c: &InputChainCoef<L>, s: &InputChainState<L>) -> InputChainPlan {
+    let mut plan = InputChainPlan::NONE;
+    for (channel, elided) in plan.elided.iter_mut().enumerate() {
+        for (section, elided) in elided.iter_mut().enumerate() {
+            *elided = section_is_identity::<L>(
+                &c.section[channel][section],
+                &s.section[channel][section],
+            );
+        }
+    }
+    plan
+}
+
+/// [`input_chain_block`] with the sections its `plan` marks identity replaced by the one
+/// `add(+0.0)` they compose to.
+///
+/// # Why this is class A
+///
+/// A run of `N` consecutive identity sections is the map `v |-> v + 0.0` composed `N` times, and
+/// that map is idempotent, so the run is exactly one `add(+0.0)` — see [`section_is_identity`] for
+/// the derivation and for why the state words are part of the test. The add is emitted **at the
+/// run's position** in the chain, because the washing of `-0.0` does not commute with a real
+/// section: an identity high-pass followed by a real low-pass must feed the low-pass `v + 0.0`,
+/// not `v`.
+///
+/// # The three shapes
+///
+/// * nothing elided — the call is [`input_chain_block`] itself, unchanged, so a chain that carries
+///   a real filter pays nothing for this feature;
+/// * every section elided — the whole chain is sanitise, trim, one add and the boundary scan, with
+///   no recurrence and no state traffic at all;
+/// * mixed — the frame body of [`input_chain_block`] with the run collapsed at its position.
+///
+/// The retained state of an elided section is not written: it is `+0.0` by the plan's own test and
+/// the section that would have written it is gone, so it stays `+0.0`.
+#[inline(always)]
+pub fn input_chain_block_elided<L: Lane>(
+    left: &mut [f32],
+    right: &mut [f32],
+    frames: usize,
+    c: &InputChainCoef<L>,
+    s: &mut InputChainState<L>,
+    plan: &InputChainPlan,
+) -> InputChainReport<L> {
+    match plan.elided {
+        [[false, false], [false, false]] => input_chain_block(left, right, frames, c, s),
+        [[true, true], [true, true]] => identity_chain_block(left, right, frames, c),
+        _ => mixed_chain_block(left, right, frames, c, s, plan),
+    }
+}
+
+/// The chain of a bank whose four sections are all the identity: no recurrence, no state.
+///
+/// Frozen operation order, per frame and per channel `ch`: steps 1-3 of [`input_chain_block`],
+/// then `v = v + 0.0` for the run of two identity sections, then its steps 5 and 6.
+#[inline(always)]
+fn identity_chain_block<L: Lane>(
+    left: &mut [f32],
+    right: &mut [f32],
+    frames: usize,
+    c: &InputChainCoef<L>,
+) -> InputChainReport<L> {
+    debug_assert_eq!(left.len(), frames * L::WIDTH);
+    debug_assert_eq!(right.len(), frames * L::WIDTH);
+    let limit = L::splat(NONFINITE_LIMIT);
+    let one = L::splat(1.0);
+    let zero = L::zero();
+
+    let mut count = [zero; 2];
+    let mut nonfinite = [no_lanes::<L>(); 2];
+    for (left_frame, right_frame) in left
+        .chunks_exact_mut(L::WIDTH)
+        .zip(right.chunks_exact_mut(L::WIDTH))
+    {
+        for (channel, frame) in [left_frame, right_frame].into_iter().enumerate() {
+            let x = L::load(frame);
+            let bad = L::mask_not(x.abs().lt(limit));
+            count[channel] = count[channel].add(L::select(bad, one, zero));
+            let v = x.andnot(bad).mul(c.trim[channel]).add(zero);
+            nonfinite[channel] = L::mask_or(nonfinite[channel], L::mask_not(v.abs().lt(limit)));
+            v.store(frame);
+        }
+    }
+
+    InputChainReport {
+        sanitized: count,
+        nonfinite,
+    }
+}
+
+/// The chain of a bank where some sections are the identity and some are not.
+///
+/// [`input_chain_block`]'s frame body, with each maximal run of elided sections replaced by one
+/// `add(+0.0)` at the run's position: before the real section that follows it, or after the real
+/// section that precedes it when the run ends the chain.
+#[inline(always)]
+fn mixed_chain_block<L: Lane>(
+    left: &mut [f32],
+    right: &mut [f32],
+    frames: usize,
+    c: &InputChainCoef<L>,
+    s: &mut InputChainState<L>,
+    plan: &InputChainPlan,
+) -> InputChainReport<L> {
+    debug_assert_eq!(left.len(), frames * L::WIDTH);
+    debug_assert_eq!(right.len(), frames * L::WIDTH);
+    let limit = L::splat(NONFINITE_LIMIT);
+    let one = L::splat(1.0);
+    let zero = L::zero();
+
+    let mut count = [zero; 2];
+    let mut nonfinite = [no_lanes::<L>(); 2];
+    let mut state = s.section;
+    let mut nc1 = [[zero; 2]; 2];
+    for (channel, coefficients) in c.section.iter().enumerate() {
+        for (section, coefficient) in coefficients.iter().enumerate() {
+            nc1[channel][section] = coefficient.c1.neg();
+        }
+    }
+
+    for (left_frame, right_frame) in left
+        .chunks_exact_mut(L::WIDTH)
+        .zip(right.chunks_exact_mut(L::WIDTH))
+    {
+        for (channel, frame) in [left_frame, right_frame].into_iter().enumerate() {
+            let x = L::load(frame);
+            let bad = L::mask_not(x.abs().lt(limit));
+            count[channel] = count[channel].add(L::select(bad, one, zero));
+            let mut v = x.andnot(bad).mul(c.trim[channel]);
+            let mut run = false;
+            for section in 0..2 {
+                if plan.elided[channel][section] {
+                    run = true;
+                    continue;
+                }
+                if run {
+                    v = v.add(zero);
+                    run = false;
+                }
+                let coefficient = &c.section[channel][section];
+                let v0 = v;
+                let (v1, v2) = svf_step(
+                    v0,
+                    nc1[channel][section],
+                    coefficient.a2,
+                    coefficient.a3,
+                    &mut state[channel][section],
+                );
+                v = coefficient
+                    .m2
+                    .fma(v2, coefficient.m1.fma(v1, coefficient.m0.mul(v0)));
+            }
+            if run {
+                v = v.add(zero);
+            }
+            nonfinite[channel] = L::mask_or(nonfinite[channel], L::mask_not(v.abs().lt(limit)));
+            v.store(frame);
+        }
+    }
+
+    s.section = state;
+    InputChainReport {
+        sanitized: count,
+        nonfinite,
+    }
+}

@@ -134,16 +134,27 @@ pub enum Workload {
     /// What this row is **not**: it is not the cost of dispatch alone, and the record says
     /// `identity` rather than `dispatch` for that reason. A builtin filter at 0 Hz is *disabled*,
     /// and `SvfSection::design` implements disabled by designing an identity section -- `m0 = 1`,
-    /// `m1 = m2 = 0`, `k = 0` (`miso-engine-builtins`, the version-1 cutoff contract). The
-    /// `enabled` flag it sets is consulted only when the plan computes its tail. The arithmetic
-    /// still runs, over the same lanes, every block. The same is true of a 0 dB fader and an
-    /// identity pan matrix.
+    /// `m1 = m2 = 0`, `k = 0` (`miso-engine-builtins`, the version-1 cutoff contract). A 0 dB fader
+    /// is still a multiply and a mask clear, and a settled identity pan matrix still evaluates both
+    /// arms of its per-lane select; both of those run over the same lanes every block.
+    ///
+    /// The two SVF sections no longer do. A prepared section that is the exact identity in every
+    /// lane and every word is the map `v |-> v + 0.0`, so a run of them is one `add(+0.0)`, and
+    /// `input_chain_block_elided` emits that instead of the recurrence when the bank's prepared
+    /// words say it may. The decision is made once, at bank construction, from the coefficient and
+    /// state bits.
     ///
     /// So this row measures: source fill, per-node graph dispatch, buffer plumbing, route
-    /// summation, **and** the whole builtins/fader/matrix chain executing identity kernels. Its
-    /// near-equality with `sixty_four_track_builtins_only` is the evidence for exactly that
-    /// reading -- the two rows differ only in the *coefficients* the same kernels run, so a large
-    /// gap between them would mean this description is wrong.
+    /// summation, the sanitisation and boundary-scan passes the D7 policy requires of every block,
+    /// and the fader and matrix kernels running their identity coefficients.
+    ///
+    /// **The near-equality reading is retired.** Before the elision, the two rack-free rows ran the
+    /// same instructions over the same lanes with different constants, and their near-equality was
+    /// the evidence for that reading; the ruling's own text recorded 22.833 and 21.962 µs. Now the
+    /// gap is the elision, and it is the *expected* shape: this row must come in materially below
+    /// `sixty_four_track_builtins_only`, and a return to near-equality would mean the elision
+    /// stopped firing. Neither the old gap nor the new one is pinned as a number here -- they are
+    /// host-dependent, and the sealed records under `artifacts/` are where the measurements live.
     SixtyFourTrackDispatchOnly,
     /// The idle row: the full console strip rendering silence.
     ///
