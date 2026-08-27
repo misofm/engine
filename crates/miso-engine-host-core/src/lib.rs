@@ -90,6 +90,7 @@
 pub mod diagnostics;
 pub mod prepare;
 pub mod render_session;
+pub mod solo;
 pub mod source;
 
 pub use diagnostics::{
@@ -102,6 +103,7 @@ pub use prepare::{
     prepare_host_session, prepare_host_session_with_console,
 };
 pub use render_session::StartedRenderSessionV1;
+pub use solo::{ConsoleMuteDelta, ConsoleSoloState};
 pub use source::{
     SourceControlError, SourceControlSet, SourceSubmission, control_table_bytes,
     source_id_arena_bytes,

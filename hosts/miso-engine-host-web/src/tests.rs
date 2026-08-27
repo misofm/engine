@@ -3058,3 +3058,698 @@ fn raw_ffi_source_introspection_mirrors_the_track_queries() {
     assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
     assert_eq!(miso_engine_web_v1_source_count(handle), 0);
 }
+
+// ---------------------------------------------------------------------------------------------
+// Issue #210 phase 1: solo in place (SIP).
+//
+// Solo is 100% control plane. Every eval below therefore drives the *shipped* command path and
+// reads the *rendered* output, because that is the only place a control-plane composition can be
+// wrong in a way anybody hears. The host-side mirror is asserted where the ABI has no other
+// witness for it (`ConsoleSoloState`'s own unit tests carry the algebra).
+// ---------------------------------------------------------------------------------------------
+
+/// A multi-track identity session: `tracks` copies of the browser fixture's identity strip, each
+/// with its own fader gain so no two tracks contribute the same value, all summed at one output.
+///
+/// Identity end to end means the rendered block is an exact function of which strips are gated:
+/// `sum over unmuted tracks of gain(track) * input`. Distinct gains are what make the oracle
+/// discriminate -- with equal gains, muting *any* set of the same size would render the same sum
+/// and the mute-set oracle would pass without proving anything.
+fn solo_session(quantum: u32, tracks: usize, mutes: &[[bool; 2]]) -> String {
+    use miso_engine_session::StableId;
+
+    let mut model = parse_session_toml(include_str!("../tests/browser-v1/session.toml"))
+        .expect("accepted identity fixture");
+    model.quantum_frames = quantum;
+    model.limits.pcm_ring_frames = u64::from(quantum) * 4;
+    model.limits.control_queue_messages = 256;
+    model.limits.memory_bytes = 1 << 26;
+    model.sources[0].mapping.region.length_samples = u64::from(quantum) * 64;
+    let track = model.tracks[0].clone();
+    let route = model.routes[0].clone();
+    model.tracks.clear();
+    model.routes.clear();
+    for index in 0..tracks {
+        let id = format!("t{index:02}");
+        let mut track = track.clone();
+        track.id = StableId::parse(&id).expect("track id");
+        // -0 dB, -3 dB, -6 dB, ... : distinct per track, and every one inside the declared domain.
+        let gain_db = -3.0 * index as f32;
+        track.fader.left_db = gain_db;
+        track.fader.right_db = gain_db;
+        let [left_mute, right_mute] = mutes.get(index).copied().unwrap_or([false, false]);
+        track.fader.left_mute = left_mute;
+        track.fader.right_mute = right_mute;
+        model.tracks.push(track);
+
+        let mut route = route.clone();
+        route.id = StableId::parse(&format!("{id}-main")).expect("route id");
+        let miso_engine_session::RouteSource::Track { track_id, .. } = &mut route.source else {
+            panic!("the identity fixture routes a track");
+        };
+        *track_id = StableId::parse(&id).expect("route track id");
+        model.routes.push(route);
+    }
+    canonical_session_toml(&model).expect("canonical solo session")
+}
+
+/// A console host over [`solo_session`]. No meters and no observation capacity: solo touches
+/// neither, and a test that bound them would be measuring something else.
+fn solo_host(quantum: u32, tracks: usize, mutes: &[[bool; 2]]) -> AudioWorkletEngineHost {
+    let toml = solo_session(quantum, tracks, mutes);
+    let mut config = WebPrepareConfigV1::console_defaults(48_000, quantum);
+    config.source_ring_frames = quantum * 4;
+    config.console_meter_blocks = 0;
+    let mut host = AudioWorkletEngineHost::new(config);
+    assert_eq!(host.prepare(), RESULT_OK);
+    host.session_toml_mut().expect("TOML")[..toml.len()].copy_from_slice(toml.as_bytes());
+    assert_eq!(
+        host.compile(toml.len()),
+        RESULT_OK,
+        "{:?}",
+        core::str::from_utf8(host.diagnostic())
+    );
+    host
+}
+
+/// Stage one `solo` record: `rack`/`channel` are both `255`, the bit rides `values[0]`.
+fn stage_solo(
+    host: &mut AudioWorkletEngineHost,
+    index: usize,
+    track: u32,
+    on: bool,
+    smoothing: u32,
+) {
+    let value = if on { 1.0 } else { 0.0 };
+    stage_command(
+        host,
+        index,
+        COMMAND_SOLO,
+        255,
+        255,
+        track,
+        0,
+        0,
+        smoothing,
+        [value, 0.0, 0.0, 0.0],
+    );
+}
+
+/// Stage one `mute` record addressed to both lanes.
+fn stage_mute(
+    host: &mut AudioWorkletEngineHost,
+    index: usize,
+    track: u32,
+    on: bool,
+    smoothing: u32,
+) {
+    let value = if on { 1.0 } else { 0.0 };
+    stage_command(
+        host,
+        index,
+        COMMAND_MUTE,
+        255,
+        2,
+        track,
+        0,
+        0,
+        smoothing,
+        [value, 0.0, 0.0, 0.0],
+    );
+}
+
+/// Feed the same constant to both arms and require the rendered blocks to be bit-identical.
+fn render_pair_and_compare(
+    left: &mut AudioWorkletEngineHost,
+    right: &mut AudioWorkletEngineHost,
+    blocks: u64,
+    first_block: u64,
+    value: f32,
+    what: &str,
+) {
+    for block in first_block..first_block + blocks {
+        feed_and_render(left, 1, block, value);
+        feed_and_render(right, 1, block, value);
+        let a = left.output_pcm().expect("left output").to_vec();
+        let b = right.output_pcm().expect("right output").to_vec();
+        assert!(
+            a.iter()
+                .zip(b.iter())
+                .all(|(x, y)| x.to_bits() == y.to_bits()),
+            "{what}: block {block} differs",
+        );
+    }
+}
+
+/// P1-1: solo `S` is *exactly* explicit mutes on `complement(S)`, bit-identically, from the very
+/// first block the acknowledgement names.
+///
+/// This is the whole architectural claim in one assertion. Solo composes at admission into the
+/// same `TrackFaderRecordV1::Mute` records an explicit mute lowers to, so a host told "solo these
+/// four" and a host told "mute the other four" must put the same bytes in the same queues and
+/// render the same samples. The two arms drive the same frozen fader section, and neither arm
+/// knows which one it is.
+///
+/// Red mutation: compose `effective_mute` as `user_mute || any_solo` (drop `&& !my_solo`) -> the
+/// soloed tracks silence too and block 1 differs.
+#[test]
+fn solo_is_bit_identically_mute_on_the_complement() {
+    const QUANTUM: u32 = 128;
+    const TRACKS: usize = 8;
+    for soloed in [
+        vec![1_u32, 4],
+        vec![0],
+        vec![7],
+        vec![0, 1, 2, 3, 4, 5, 6, 7],
+        vec![2, 3, 5],
+    ] {
+        let mut solo = solo_host(QUANTUM, TRACKS, &[]);
+        let mut mute = solo_host(QUANTUM, TRACKS, &[]);
+        render_pair_and_compare(&mut solo, &mut mute, 1, 0, -0.25, "before any command");
+
+        for (index, track) in soloed.iter().enumerate() {
+            stage_solo(&mut solo, index, *track, true, QUANTUM);
+        }
+        assert_eq!(solo.submit_commands(soloed.len() as u32), RESULT_OK);
+        let solo_at = solo.command_report().applied_at_sample;
+
+        let complement: Vec<u32> = (0..TRACKS as u32)
+            .filter(|track| !soloed.contains(track))
+            .collect();
+        for (index, track) in complement.iter().enumerate() {
+            stage_mute(&mut mute, index, *track, true, QUANTUM);
+        }
+        assert_eq!(mute.submit_commands(complement.len() as u32), RESULT_OK);
+        assert_eq!(mute.command_report().applied_at_sample, solo_at);
+
+        render_pair_and_compare(&mut solo, &mut mute, 4, 1, -0.25, "solo vs explicit mutes");
+    }
+}
+
+/// P1-2: disengaging solo restores the exact per-lane user-mute set, and the restored console is
+/// bit-identical to one that was never soloed.
+///
+/// The session bakes an *asymmetric* mute (`left_mute` only) on one track and a full mute on
+/// another, so the restore has to reproduce per-lane state that one `Mute{lanes, muted}` record
+/// cannot carry -- the two-records-per-track case. Both arms then render the same input and must
+/// agree sample for sample once the fades have settled.
+///
+/// Red mutation: restore from `any_solo` alone (re-emit `muted = false` for every track on the
+/// disengage) -> the baked mutes come back unmuted and every block after the settle differs.
+#[test]
+fn un_solo_restores_the_exact_per_lane_user_mute_set() {
+    const QUANTUM: u32 = 128;
+    const TRACKS: usize = 6;
+    let mutes = [
+        [true, false],
+        [false, false],
+        [true, true],
+        [false, true],
+        [false, false],
+        [false, false],
+    ];
+    let mut soloed = solo_host(QUANTUM, TRACKS, &mutes);
+    let mut never = solo_host(QUANTUM, TRACKS, &mutes);
+    render_pair_and_compare(&mut soloed, &mut never, 1, 0, -0.25, "before any command");
+
+    stage_solo(&mut soloed, 0, 1, true, QUANTUM);
+    assert_eq!(soloed.submit_commands(1), RESULT_OK);
+    for block in 1..4 {
+        feed_and_render(&mut soloed, 1, block, -0.25);
+        feed_and_render(&mut never, 1, block, -0.25);
+    }
+    stage_solo(&mut soloed, 0, 1, false, QUANTUM);
+    assert_eq!(soloed.submit_commands(1), RESULT_OK);
+    // Block 4 carries the disengage fade; from block 5 every ramp has settled.
+    feed_and_render(&mut soloed, 1, 4, -0.25);
+    feed_and_render(&mut never, 1, 4, -0.25);
+    render_pair_and_compare(
+        &mut soloed,
+        &mut never,
+        4,
+        5,
+        -0.25,
+        "restored vs never soloed",
+    );
+
+    // And the host mirror agrees with the session it was prepared from.
+    let state = soloed.console_solo().expect("solo state");
+    assert!(!state.any_solo());
+    for (track, expected) in mutes.iter().enumerate() {
+        assert_eq!(
+            [state.user_mute(track, 0), state.user_mute(track, 1)],
+            *expected,
+            "track {track} user mute",
+        );
+        assert_eq!(
+            [state.emitted_mute(track, 0), state.emitted_mute(track, 1)],
+            *expected,
+            "track {track} emitted mute",
+        );
+    }
+}
+
+/// P1-3: a solo gate is the same declicked fader endpoint a mute is -- a linear ramp bounded by
+/// the D11 law, and an exact snap when the window is zero.
+///
+/// Two tracks, both at unity, both identity: the rendered left plane is `input * (1 + gate)`
+/// where `gate` walks from 1 to 0 over the window. So the per-sample delta is bounded by
+/// `|input| / window` (the one division D11 permits, taken at the event), the walk is monotone,
+/// and the settled block is the soloed track alone -- exactly, including the sign of the zero the
+/// gated track contributes.
+#[test]
+fn a_solo_gate_is_a_bounded_ramp_and_a_zero_window_snaps() {
+    const QUANTUM: u32 = 128;
+    const INPUT: f32 = -0.5;
+    let quantum = QUANTUM as usize;
+
+    let mut host = solo_host(QUANTUM, 2, &[]);
+    feed_and_render(&mut host, 1, 0, INPUT);
+    let settled = host.output_pcm().expect("output")[0];
+
+    stage_solo(&mut host, 0, 0, true, QUANTUM);
+    assert_eq!(host.submit_commands(1), RESULT_OK);
+    feed_and_render(&mut host, 1, 1, INPUT);
+    let fade = host.output_pcm().expect("output").to_vec();
+
+    // Track 0 alone at unity is exactly the input; the pair is louder than that.
+    assert!(settled < INPUT, "two tracks sum below one: {settled}");
+    let bound = (settled - INPUT).abs() / QUANTUM as f32;
+    for index in 1..quantum {
+        assert!(
+            fade[index] >= fade[index - 1],
+            "the gate walks monotonically toward silence at {index}: {} then {}",
+            fade[index - 1],
+            fade[index],
+        );
+        let step = (fade[index] - fade[index - 1]).abs();
+        // The bound is the ramp law's own increment, recomputed here in a different order (the
+        // block's endpoints rather than the event's `(target - current) / n`), so it is compared
+        // with a rounding allowance and not exactly. Anything a discontinuity would produce is
+        // orders of magnitude outside it.
+        assert!(
+            step <= bound * 1.000_1,
+            "sample {index} moves {step}, past the {bound} the D11 ramp law allows",
+        );
+    }
+    assert_eq!(
+        fade[quantum - 1].to_bits(),
+        INPUT.to_bits(),
+        "the settled gate leaves the soloed track exactly, with no negative zero beside it",
+    );
+
+    // A zero window snaps on the first sample of the block it is acknowledged at.
+    stage_solo(&mut host, 0, 0, false, 0);
+    assert_eq!(host.submit_commands(1), RESULT_OK);
+    feed_and_render(&mut host, 1, 2, INPUT);
+    let snapped = host.output_pcm().expect("output").to_vec();
+    assert!(
+        snapped[..quantum]
+            .iter()
+            .all(|value| value.to_bits() == settled.to_bits()),
+        "a zero-window un-solo restores the prepared console exactly, from sample zero",
+    );
+}
+
+/// P1-4: user mute and solo are separate states. Neither gesture overwrites the other, in the
+/// rendered output and in the host mirror the ABI has no readback for.
+///
+/// Red mutation: have `set_solo` clear `user_mute` for the soloed track -> the mute-while-soloed
+/// leg still silences, but the un-solo brings the muted track back and the last assertion fails.
+#[test]
+fn mute_and_solo_are_separate_states() {
+    const QUANTUM: u32 = 128;
+    const INPUT: f32 = -0.5;
+    let mut host = solo_host(QUANTUM, 2, &[]);
+    feed_and_render(&mut host, 1, 0, INPUT);
+    let both = host.output_pcm().expect("output")[0];
+
+    // Solo track 0. A zero window keeps every assertion exact.
+    stage_solo(&mut host, 0, 0, true, 0);
+    assert_eq!(host.submit_commands(1), RESULT_OK);
+    feed_and_render(&mut host, 1, 1, INPUT);
+    assert_eq!(
+        host.output_pcm().expect("output")[0].to_bits(),
+        INPUT.to_bits()
+    );
+
+    // Muting the soloed track silences it: solo is not immunity.
+    stage_mute(&mut host, 0, 0, true, 0);
+    assert_eq!(host.submit_commands(1), RESULT_OK);
+    feed_and_render(&mut host, 1, 2, INPUT);
+    assert_eq!(
+        host.output_pcm().expect("output")[0].to_bits(),
+        0.0_f32.to_bits(),
+        "a muted soloed track is exact positive zero, not a negative zero",
+    );
+    {
+        let state = host.console_solo().expect("solo state");
+        assert!(state.solo(0) && !state.solo(1));
+        assert_eq!([state.user_mute(0, 0), state.user_mute(0, 1)], [true, true]);
+        assert_eq!(
+            [state.user_mute(1, 0), state.user_mute(1, 1)],
+            [false, false]
+        );
+        assert!(state.effective_mute(1, 0), "the un-soloed track is gated");
+    }
+
+    // Mute the *other* track too, while it is already gated by solo. That is user intent and it
+    // has to outlive the solo.
+    stage_mute(&mut host, 0, 1, true, 0);
+    assert_eq!(host.submit_commands(1), RESULT_OK);
+    feed_and_render(&mut host, 1, 3, INPUT);
+    assert_eq!(
+        host.output_pcm().expect("output")[0].to_bits(),
+        0.0_f32.to_bits()
+    );
+
+    // Unmute track 0 while it is still soloed: it comes back, alone.
+    stage_mute(&mut host, 0, 0, false, 0);
+    assert_eq!(host.submit_commands(1), RESULT_OK);
+    feed_and_render(&mut host, 1, 4, INPUT);
+    assert_eq!(
+        host.output_pcm().expect("output")[0].to_bits(),
+        INPUT.to_bits()
+    );
+
+    // Clearing solo restores exactly the mutes the user set under it -- track 1 stays muted.
+    stage_solo(&mut host, 0, 0, false, 0);
+    assert_eq!(host.submit_commands(1), RESULT_OK);
+    feed_and_render(&mut host, 1, 5, INPUT);
+    assert_eq!(
+        host.output_pcm().expect("output")[0].to_bits(),
+        INPUT.to_bits(),
+        "track 1 was muted while soloed away and is still muted now",
+    );
+    assert_ne!(both.to_bits(), INPUT.to_bits());
+    let state = host.console_solo().expect("solo state");
+    assert!(!state.any_solo());
+    assert_eq!(
+        [state.user_mute(0, 0), state.user_mute(0, 1)],
+        [false, false]
+    );
+    assert_eq!([state.user_mute(1, 0), state.user_mute(1, 1)], [true, true]);
+}
+
+/// P1-5: a solo submission refused for backpressure applies *nothing* -- not to a queue, and not
+/// to the host's own solo state.
+///
+/// This is the correction the adversarial verification named as the likeliest implementation bug:
+/// pass one mutates solo state while the submission is still being validated, so a pass-two
+/// refusal has to leave that state exactly as it was. The proof is a third host that never saw the
+/// refused batch: after the refusal, the refused host and the untouched host must render the same
+/// samples forever.
+///
+/// Red mutation: drop the `ready.solo.rollback()` on the refusal path -> the refused engage sticks
+/// in host state, the next admitted mute composes against it, and the comparison diverges.
+#[test]
+fn a_refused_solo_submission_leaves_the_console_untouched() {
+    const QUANTUM: u32 = 128;
+    const TRACKS: usize = 4;
+    const DEPTH: u32 = DEFAULT_COMMAND_QUEUE_RECORDS;
+    let mut refused = solo_host(QUANTUM, TRACKS, &[]);
+    let mut untouched = solo_host(QUANTUM, TRACKS, &[]);
+    render_pair_and_compare(
+        &mut refused,
+        &mut untouched,
+        1,
+        0,
+        -0.25,
+        "before any command",
+    );
+
+    // Fill track 0's fader queue exactly, without rendering: nothing drains until the next block.
+    for _ in 0..DEPTH {
+        stage_command(
+            &mut refused,
+            0,
+            COMMAND_FADER_DB,
+            255,
+            2,
+            0,
+            0,
+            0,
+            0,
+            [-1.0, 0.0, 0.0, 0.0],
+        );
+        assert_eq!(refused.submit_commands(1), RESULT_OK);
+        stage_command(
+            &mut untouched,
+            0,
+            COMMAND_FADER_DB,
+            255,
+            2,
+            0,
+            0,
+            0,
+            0,
+            [-1.0, 0.0, 0.0, 0.0],
+        );
+        assert_eq!(untouched.submit_commands(1), RESULT_OK);
+    }
+
+    // Soloing track 1 owes track 0 one gate record, and track 0 has no room for it.
+    stage_solo(&mut refused, 0, 1, true, QUANTUM);
+    assert_eq!(refused.submit_commands(1), RESULT_BACKPRESSURE);
+    assert_eq!(refused.command_report().reason, COMMAND_REASON_BACKPRESSURE,);
+    assert_eq!(refused.command_report().admitted, 0);
+    {
+        let state = refused.console_solo().expect("solo state");
+        assert!(!state.any_solo(), "a refused engage left a solo bit set");
+        assert_eq!(state.solo_count(), 0);
+        assert!(!state.transaction_open(), "the transaction was left open");
+        for track in 0..TRACKS {
+            assert!(!state.solo(track));
+            assert!(!state.user_mute(track, 0) && !state.user_mute(track, 1));
+            assert!(!state.emitted_mute(track, 0) && !state.emitted_mute(track, 1));
+        }
+    }
+
+    // The refused host is indistinguishable from one that never saw the batch, for good.
+    render_pair_and_compare(
+        &mut refused,
+        &mut untouched,
+        3,
+        1,
+        -0.25,
+        "after the refusal",
+    );
+    stage_solo(&mut refused, 0, 1, true, QUANTUM);
+    assert_eq!(refused.submit_commands(1), RESULT_OK);
+    stage_solo(&mut untouched, 0, 1, true, QUANTUM);
+    assert_eq!(untouched.submit_commands(1), RESULT_OK);
+    render_pair_and_compare(&mut refused, &mut untouched, 3, 4, -0.25, "after the retry");
+}
+
+/// A malformed or out-of-domain solo record is typed exactly as the mute record it mirrors, and
+/// still applies nothing.
+#[test]
+fn solo_records_are_shape_checked_like_mute_records() {
+    const QUANTUM: u32 = 128;
+    let mut host = solo_host(QUANTUM, 3, &[]);
+    feed_and_render(&mut host, 1, 0, -0.25);
+
+    let cases: [(u8, u8, [f32; 4], u32, u32, u32); 6] = [
+        // (rack, channel, values, track, expected result, expected reason)
+        (
+            0,
+            255,
+            [1.0, 0.0, 0.0, 0.0],
+            0,
+            RESULT_INVALID_ARGUMENT,
+            COMMAND_REASON_MALFORMED,
+        ),
+        (
+            255,
+            2,
+            [1.0, 0.0, 0.0, 0.0],
+            0,
+            RESULT_INVALID_ARGUMENT,
+            COMMAND_REASON_MALFORMED,
+        ),
+        (
+            255,
+            255,
+            [1.0, 1.0, 0.0, 0.0],
+            0,
+            RESULT_INVALID_ARGUMENT,
+            COMMAND_REASON_MALFORMED,
+        ),
+        (
+            255,
+            255,
+            [0.5, 0.0, 0.0, 0.0],
+            0,
+            RESULT_INVALID_ARGUMENT,
+            COMMAND_REASON_DOMAIN,
+        ),
+        (
+            255,
+            255,
+            [-1.0, 0.0, 0.0, 0.0],
+            0,
+            RESULT_INVALID_ARGUMENT,
+            COMMAND_REASON_DOMAIN,
+        ),
+        (
+            255,
+            255,
+            [1.0, 0.0, 0.0, 0.0],
+            3,
+            RESULT_INVALID_ARGUMENT,
+            COMMAND_REASON_UNKNOWN_TRACK,
+        ),
+    ];
+    for (rack, channel, values, track, result, reason) in cases {
+        stage_command(
+            &mut host,
+            0,
+            COMMAND_SOLO,
+            rack,
+            channel,
+            track,
+            0,
+            0,
+            QUANTUM,
+            values,
+        );
+        assert_eq!(host.submit_commands(1), result, "{values:?}");
+        assert_eq!(host.command_report().reason, reason, "{values:?}");
+        let state = host.console_solo().expect("solo state");
+        assert!(
+            !state.any_solo(),
+            "a refused solo record engaged a bit anyway"
+        );
+        assert!(!state.transaction_open());
+    }
+}
+
+/// The no-redundant-record rule, pinned red.
+///
+/// A solo gesture that changes no lane's effective mute must put *nothing* in a queue. That is not
+/// an optimisation: the fader stage's `set_mute` retargets unconditionally, so re-muting an
+/// already-settled-muted lane with a nonzero window re-enters the ramp kernel, which multiplies by
+/// the current gain instead of filling the plane -- and `gain * negative` is `-0.0` where the
+/// settled path gives exact `+0.0`. Digest visible, in the one place the browser fixture's own
+/// oracle looks.
+///
+/// A one-track console is the cleanest witness: soloing the only track changes nothing at all, so
+/// the muted plane must stay bit-for-bit `+0.0` across an engage and a disengage.
+///
+/// Red mutation: emit a record for every track on a solo transition instead of only for the lanes
+/// whose effective mute changed -> the muted lane re-enters the ramp and the plane reads `-0.0`.
+#[test]
+fn a_solo_that_changes_nothing_emits_nothing() {
+    const QUANTUM: u32 = 128;
+    let mut host = console_host(QUANTUM, 0);
+    feed_and_render(&mut host, 1, 0, -0.5);
+    stage_mute(&mut host, 0, 0, true, 0);
+    assert_eq!(host.submit_commands(1), RESULT_OK);
+    feed_and_render(&mut host, 1, 1, -0.5);
+    assert!(
+        host.output_pcm()
+            .expect("output")
+            .iter()
+            .all(|value| value.to_bits() == 0.0_f32.to_bits()),
+        "the zero-window mute settled to exact positive zero",
+    );
+
+    for (block, on) in [(2_u64, true), (3, false), (4, true)] {
+        stage_solo(&mut host, 0, 0, on, QUANTUM);
+        assert_eq!(host.submit_commands(1), RESULT_OK);
+        feed_and_render(&mut host, 1, block, -0.5);
+        let out = host.output_pcm().expect("output");
+        assert!(
+            out.iter().all(|value| value.to_bits() == 0.0_f32.to_bits()),
+            "block {block}: a solo that changes no effective mute re-entered the ramp path",
+        );
+    }
+    let state = host.console_solo().expect("solo state");
+    assert!(state.any_solo());
+    assert!(state.emitted_mute(0, 0) && state.emitted_mute(0, 1));
+}
+
+/// The batch-coalescing rule, pinned red.
+///
+/// A full 256-record batch of alternating solo toggles is one gesture. Applied per command it
+/// would fan out up to `2 * track_count` records *per transition* -- 256 transitions would
+/// overflow the decode staging and flood every per-track queue. Applied as the design requires --
+/// all state changes first, then one net emission -- the batch costs at most two records per
+/// track and lands exactly where the two-record batch with the same net effect lands.
+///
+/// Red mutation: emit the net delta inside the per-record loop instead of after it -> the batch is
+/// refused with `backpressure` (or trips the staging bound) and the comparison never runs.
+#[test]
+fn a_batch_of_alternating_solo_toggles_coalesces_to_its_net_effect() {
+    const QUANTUM: u32 = 128;
+    const TRACKS: usize = 8;
+    let mut batched = solo_host(QUANTUM, TRACKS, &[]);
+    let mut net = solo_host(QUANTUM, TRACKS, &[]);
+    render_pair_and_compare(&mut batched, &mut net, 1, 0, -0.25, "before any command");
+
+    let records = MAXIMUM_COMMAND_RECORDS as usize;
+    for index in 0..records - 1 {
+        stage_solo(&mut batched, index, 0, index % 2 == 0, QUANTUM);
+    }
+    // 255 alternating toggles leave track 0 engaged (index 254 is even); the last record engages
+    // track 5. The net effect is exactly the two-record batch the other arm submits.
+    stage_solo(&mut batched, records - 1, 5, true, QUANTUM);
+    assert_eq!(
+        batched.submit_commands(MAXIMUM_COMMAND_RECORDS),
+        RESULT_OK,
+        "reason {}",
+        batched.command_report().reason,
+    );
+
+    stage_solo(&mut net, 0, 0, true, QUANTUM);
+    stage_solo(&mut net, 1, 5, true, QUANTUM);
+    assert_eq!(net.submit_commands(2), RESULT_OK);
+
+    let state = batched.console_solo().expect("solo state");
+    assert_eq!(state.solo_count(), 2);
+    assert!(state.solo(0) && state.solo(5));
+    render_pair_and_compare(&mut batched, &mut net, 4, 1, -0.25, "coalesced vs net");
+}
+
+/// The class-A OFF gate, in the one form a unit test can carry: with no solo command ever
+/// admitted, every mute gesture stages byte-for-byte what it staged before solo existed.
+///
+/// The digest half of the gate is the sweep and the wasm legs; this pins the *code path*. Two
+/// hosts, identical sessions, identical mute traffic -- including the redundant re-mutes and the
+/// same-batch cancellations a coalescing implementation would be tempted to collapse -- and one of
+/// them additionally carries solo state that never engages.
+#[test]
+fn a_console_that_never_solos_renders_what_it_always_did() {
+    const QUANTUM: u32 = 128;
+    const TRACKS: usize = 4;
+    let mutes = [[true, false], [false, false], [false, true], [false, false]];
+    let mut host = solo_host(QUANTUM, TRACKS, &mutes);
+    let mut mirror = solo_host(QUANTUM, TRACKS, &mutes);
+    render_pair_and_compare(&mut host, &mut mirror, 1, 0, -0.25, "prepared mutes");
+
+    // A redundant re-mute of an already-muted lane, then a same-batch mute/unmute pair: both are
+    // gestures a net-emission rule would collapse, and neither may change what ships today.
+    for target in [&mut host, &mut mirror] {
+        stage_mute(target, 0, 0, true, QUANTUM);
+        stage_mute(target, 1, 1, true, QUANTUM);
+        stage_mute(target, 2, 1, false, QUANTUM);
+        assert_eq!(target.submit_commands(3), RESULT_OK);
+    }
+    render_pair_and_compare(
+        &mut host,
+        &mut mirror,
+        3,
+        1,
+        -0.25,
+        "redundant mute traffic",
+    );
+
+    let state = host.console_solo().expect("solo state");
+    assert!(!state.any_solo());
+    assert_eq!(state.solo_count(), 0);
+    assert_eq!([state.user_mute(0, 0), state.user_mute(0, 1)], [true, true]);
+    assert_eq!(
+        [state.user_mute(1, 0), state.user_mute(1, 1)],
+        [false, false]
+    );
+}
