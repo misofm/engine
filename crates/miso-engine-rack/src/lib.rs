@@ -983,6 +983,21 @@ impl BankChain {
         witness
     }
 
+    /// One flag per **active** lane, in lane order: does that lane's whole witness hold?
+    ///
+    /// The localisable form of [`symmetry_counters`](Self::symmetry_counters), and the form the
+    /// plan surface publishes: a count says how many lanes lost a term and never which, while
+    /// "exactly that track and no other" is the claim the witness tests actually make. Inactive
+    /// lanes are skipped rather than reported false, so the result indexes the same way a bank's
+    /// member list does.
+    #[must_use]
+    pub fn active_lane_eligibility(&self) -> Vec<bool> {
+        (0..self.lanes)
+            .filter(|lane| self.active[*lane])
+            .map(|lane| self.lane_symmetry(lane).eligible())
+            .collect()
+    }
+
     /// Whether **every** active lane of this cohort is collapse-eligible.
     ///
     /// All-lanes-or-nothing is not a simplification: the unit of savable work is a whole plane

@@ -22,14 +22,89 @@
 #![allow(missing_docs)]
 
 use core::cmp::Ordering;
-use miso_engine_effect_contract::{BankWidth, EffectProgramKeyV1};
+use miso_engine_effect_contract::{BankWidth, ChannelSymmetryWitnessV1, EffectProgramKeyV1};
 use miso_engine_rack::{BankSlotKey, RackLocationV1, RackProgramV1};
+
+/// Which pool a candidate competes in, beside its dependency level and its rack.
+///
+/// # Why the planner partitions on this at all
+///
+/// A cohort is *banked*; collapse eligibility is decided per **track**. The unit of savable work
+/// is a whole plane pass over the lane vector and a SIMD op executes every lane whether or not
+/// that lane needs it, so a bank whose lanes disagree about collapse saves nothing --
+/// `BankChain::all_lanes_symmetric` states that as all-lanes-or-nothing and calls the mixing "the
+/// planner's problem, not the chain's". This is the planner taking that problem: candidates that
+/// could collapse are pooled apart from candidates that could not, so the mixed cohort a
+/// half-eligible session would otherwise form becomes two homogeneous ones.
+///
+/// # It is a *class*, not a decision
+///
+/// Nothing here is load-bearing for correctness. Pooling regroups lanes and never changes
+/// per-lane arithmetic (AGENTS.md), so a wrong class costs at most a missed optimisation: too
+/// optimistic and the cohort simply declines at dispatch, too pessimistic and a collapse is
+/// missed. What it *must* be is **the same on both sides**: see [`CohortPoolClassV1::\
+/// of_prepare_witness`] for the two-planner obligation.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum CohortPoolClassV1 {
+    /// Every prepare-time term of this track's channel-symmetry witness holds: its two lanes read
+    /// one source channel and every designed per-lane word its upstream stages' kernels read
+    /// compares bit-equal between the channels.
+    MonoSymmetricAtPrepare,
+    /// Anything else. The default, and deliberately so: a candidate nobody classified pools with
+    /// the tracks that cannot collapse rather than contaminating a cohort that can.
+    #[default]
+    Stereo,
+}
+
+impl CohortPoolClassV1 {
+    /// Every class, in the order [`plan_bank_groups`] emits their groups.
+    pub const ALL: [Self; 2] = [Self::MonoSymmetricAtPrepare, Self::Stereo];
+
+    /// The witness terms a pool class may rest on: the two decided **at preparation**.
+    ///
+    /// `LIVE` and `UNBYPASSED` move block to block on the render thread and `RESTORED` moves at a
+    /// restore; none of the three is knowable when the plan is being built, and a class that
+    /// pretended otherwise would be a different partition on every recompile. They are the
+    /// dispatch's business, not the planner's, and the conjunction is taken there.
+    pub const PREPARE_TIME_TERMS: u8 =
+        ChannelSymmetryWitnessV1::SOURCE | ChannelSymmetryWitnessV1::DESIGNED;
+
+    /// The **single** predicate. Both bank planners must reach a class through this function.
+    ///
+    /// Issue #208's chain merges are proved lane by lane on the lowered program: a merge is
+    /// admissible only when two banks cover the same lanes *in the same order*, and nothing else
+    /// makes two planners agree about that. If the builtin-stage planner and the rack-chain
+    /// planner classified one track differently, their pools would hold different track sets, the
+    /// lane sets would slide out of step, and every `builtins -> EQ -> ...` merge would decline
+    /// **silently** -- same bits, no diagnostic, one round-trip per stage instead of one per
+    /// cohort. That is why the class is derived once per compile and handed to both planners, and
+    /// why this is the only constructor.
+    #[must_use]
+    pub const fn of_prepare_witness(witness: ChannelSymmetryWitnessV1) -> Self {
+        if witness.holds(Self::PREPARE_TIME_TERMS) {
+            Self::MonoSymmetricAtPrepare
+        } else {
+            Self::Stereo
+        }
+    }
+
+    /// The stable evidence name of this class.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::MonoSymmetricAtPrepare => "mono_symmetric_at_prepare",
+            Self::Stereo => "stereo",
+        }
+    }
+}
 
 /// One track's ordered rack program, addressed by a caller-chosen stable id.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CohortCandidate<Id, K = EffectProgramKeyV1> {
     pub id: Id,
     pub program: RackProgramV1<K>,
+    /// The pool this candidate competes in. See [`CohortPoolClassV1`].
+    pub class: CohortPoolClassV1,
 }
 
 /// Candidates already partitioned by dependency level by the caller: a bank never crosses a level,
@@ -45,6 +120,10 @@ pub struct CohortLevel<Id, K = EffectProgramKeyV1> {
 pub struct BankGroup<Id, K = EffectProgramKeyV1> {
     pub level: u64,
     pub rack: RackLocationV1,
+    /// The pool this group was formed in. Every member carried this class as a candidate, which
+    /// is what makes a group's collapse eligibility a property of the group rather than a lane
+    /// survey.
+    pub class: CohortPoolClassV1,
     /// The cohort leader's ordered program: a chain of `program.len()` slots.
     pub program: Box<[K]>,
     /// `len == width.lanes()`. `None` is a padding lane; padding lanes are always the highest
@@ -113,14 +192,43 @@ struct WorkingGroup<Id, K> {
     members: Vec<WorkingMember<Id>>,
 }
 
-fn order_members<Id: Ord>(members: &mut [WorkingMember<Id>]) {
-    // F5.2: tracks that run the whole leader program fill banks first, so a partial group's
-    // padding displaces the *least* work.
+/// Fixes the cohort's lane order: which members share a bank, and where each one sits in it.
+///
+/// Two rules, in this order, and they answer two different questions.
+///
+/// 1. **Which bank a member lands in** is F5.2: tracks that run the whole leader program fill
+///    banks first, so a partial group's padding displaces the *least* work. That is what the
+///    `(active_count desc, id)` sort decides, and `longest_program_leads_and_full_programs_fill_\
+///    first` is the gate on it.
+/// 2. **Where a member sits inside its bank** is issue #206: every emitted bank's member list has
+///    to be **strictly ascending by id**, because that is what `PreparedGraphPlan::\
+///    has_valid_structural_layout` requires of every bank it validates -- and, downstream of it,
+///    what makes `bank_member_nodes`' positional lane-by-lane comparison well defined at all.
+///
+/// The two used to be one sort, and the two derivations disagreed: a track whose program is a
+/// strict subsequence of its cohort leader's sorts to the *end* of the cohort by rule 1, so the
+/// last bank of a 64-track cohort came out as `["ch57".."ch63", "ch00"]` -- descending across its
+/// last pair, refused by structural validation, and reaching `unreachable!` in
+/// `PreparedBuiltinsGraphArtifact::into_bound`: a panic on a legal session.
+///
+/// The ruling is rule 2, applied *within* each bank rather than across the cohort. Sorting the
+/// whole cohort by id would have satisfied the graph and destroyed rule 1 -- the short-program
+/// tracks would fill the first banks and the padding would displace the *most* work -- so the
+/// chunking stays where F5.2 put it and only the lane order inside each chunk is canonicalised.
+/// Membership per bank is therefore byte-identical to what it was; the change is a permutation
+/// inside each bank, and a bank's lanes are independent, so no per-lane arithmetic moves.
+fn order_members<Id: Ord>(members: &mut [WorkingMember<Id>], lanes: usize) {
+    // Rule 1: F5.2. Decides *which* bank each member lands in.
     members.sort_by(|a, b| {
         b.active_count()
             .cmp(&a.active_count())
             .then_with(|| a.id.cmp(&b.id))
     });
+    // Rule 2: #206. Decides where it sits inside that bank, and cannot move it out of one --
+    // `chunks_mut(lanes)` is exactly the chunking the emit loop below performs.
+    for bank in members.chunks_mut(lanes) {
+        bank.sort_by(|a, b| a.id.cmp(&b.id));
+    }
 }
 
 /// The single cohort planner.
@@ -131,10 +239,14 @@ fn order_members<Id: Ord>(members: &mut [WorkingMember<Id>]) {
 /// otherwise step 2's pooling, which is exhaustive, would already have placed it there.
 /// `pooling_is_exhaustive_so_no_member_is_stranded` gates that argument.
 ///
-/// Deterministic: the output depends only on the multiset of `(level, id, program)` and on `width`,
-/// never on input order. Partial groups are padded rather than dropped (#96 F6); a program that is
+/// Deterministic: the output depends only on the multiset of `(level, id, program, class)` and on
+/// `width`, never on input order. Partial groups are padded rather than dropped (#96 F6); a program that is
 /// a subsequence of its cohort leader's joins that cohort with identity slots where it has no
 /// effect (#96 F1/F5).
+///
+/// Pools are keyed by `(level, rack, class)`. The class is the mono-collapse M1 addition; see
+/// [`CohortPoolClassV1`] for what it partitions and why it must be derived identically by every
+/// caller.
 ///
 /// # Errors
 /// [`RackCompileError::DuplicateId`] if the same id appears twice, including across levels.
@@ -164,68 +276,76 @@ pub fn plan_bank_groups<Id: Ord + Clone, K: BankSlotKey>(
     let mut scalar = Vec::new();
     for (level, candidates) in by_level {
         for rack in RackLocationV1::ALL {
-            // No canonicalising sort here: leader selection is a total `max_by` over unique ids,
-            // `order_members` fixes every group's lane order, and `scalar` is sorted on the way
-            // out, so the plan cannot depend on pool order. `output_is_input_order_invariant`
-            // is the gate on that claim.
-            let mut pool: Vec<&CohortCandidate<Id, K>> = candidates
-                .iter()
-                .copied()
-                .filter(|candidate| candidate.program.rack == rack)
-                .collect();
-            pool.retain(|candidate| {
-                if candidate.program.is_bankable() {
-                    true
-                } else {
-                    scalar.push(candidate.id.clone());
-                    false
-                }
-            });
-
-            let mut rack_groups: Vec<WorkingGroup<Id, K>> = Vec::new();
-            while !pool.is_empty() {
-                let leader = pool
+            // The third pool key, beside the level and the rack (mono-collapse M1). A cohort is
+            // banked and eligibility is decided per track, so candidates that could collapse are
+            // pooled apart from candidates that could not; see `CohortPoolClassV1`. A session
+            // whose tracks all carry one class -- every fixture but the half-mono row -- forms
+            // exactly the pools it formed before, in the same order, because the other class's
+            // pool is empty and emits nothing.
+            for class in CohortPoolClassV1::ALL {
+                // No canonicalising sort here: leader selection is a total `max_by` over unique ids,
+                // `order_members` fixes every group's lane order, and `scalar` is sorted on the way
+                // out, so the plan cannot depend on pool order. `output_is_input_order_invariant`
+                // is the gate on that claim.
+                let mut pool: Vec<&CohortCandidate<Id, K>> = candidates
                     .iter()
-                    .enumerate()
-                    .max_by(|(_, a), (_, b)| {
-                        a.program
-                            .slots
-                            .len()
-                            .cmp(&b.program.slots.len())
-                            .then_with(|| b.program.slots.cmp(&a.program.slots))
-                            .then_with(|| b.id.cmp(&a.id))
-                    })
-                    .map(|(index, _)| index)
-                    .unwrap_or(0);
-                let leader_program = pool[leader].program.clone();
-                let mut compatible = Vec::new();
-                let mut rest = Vec::new();
-                for candidate in pool {
-                    match candidate.program.subsequence_mask(&leader_program) {
-                        Some(mask) => compatible.push(WorkingMember {
-                            id: candidate.id.clone(),
-                            mask,
-                        }),
-                        None => rest.push(candidate),
+                    .copied()
+                    .filter(|candidate| candidate.program.rack == rack && candidate.class == class)
+                    .collect();
+                pool.retain(|candidate| {
+                    if candidate.program.is_bankable() {
+                        true
+                    } else {
+                        scalar.push(candidate.id.clone());
+                        false
                     }
-                }
-                order_members(&mut compatible);
-                let mut remaining = compatible.into_iter().peekable();
-                while remaining.peek().is_some() {
-                    let members: Vec<_> = remaining.by_ref().take(lanes).collect();
-                    rack_groups.push(WorkingGroup {
-                        program: leader_program.clone(),
-                        members,
-                    });
-                }
-                pool = rest;
-            }
+                });
 
-            groups.extend(
-                rack_groups
-                    .into_iter()
-                    .map(|group| materialize(level, rack, group, lanes)),
-            );
+                let mut rack_groups: Vec<WorkingGroup<Id, K>> = Vec::new();
+                while !pool.is_empty() {
+                    let leader = pool
+                        .iter()
+                        .enumerate()
+                        .max_by(|(_, a), (_, b)| {
+                            a.program
+                                .slots
+                                .len()
+                                .cmp(&b.program.slots.len())
+                                .then_with(|| b.program.slots.cmp(&a.program.slots))
+                                .then_with(|| b.id.cmp(&a.id))
+                        })
+                        .map(|(index, _)| index)
+                        .unwrap_or(0);
+                    let leader_program = pool[leader].program.clone();
+                    let mut compatible = Vec::new();
+                    let mut rest = Vec::new();
+                    for candidate in pool {
+                        match candidate.program.subsequence_mask(&leader_program) {
+                            Some(mask) => compatible.push(WorkingMember {
+                                id: candidate.id.clone(),
+                                mask,
+                            }),
+                            None => rest.push(candidate),
+                        }
+                    }
+                    order_members(&mut compatible, lanes);
+                    let mut remaining = compatible.into_iter().peekable();
+                    while remaining.peek().is_some() {
+                        let members: Vec<_> = remaining.by_ref().take(lanes).collect();
+                        rack_groups.push(WorkingGroup {
+                            program: leader_program.clone(),
+                            members,
+                        });
+                    }
+                    pool = rest;
+                }
+
+                groups.extend(
+                    rack_groups
+                        .into_iter()
+                        .map(|group| materialize(level, rack, class, group, lanes)),
+                );
+            }
         }
     }
     scalar.sort();
@@ -237,6 +357,7 @@ pub fn plan_bank_groups<Id: Ord + Clone, K: BankSlotKey>(
 fn materialize<Id, K>(
     level: u64,
     rack: RackLocationV1,
+    class: CohortPoolClassV1,
     group: WorkingGroup<Id, K>,
     lanes: usize,
 ) -> BankGroup<Id, K> {
@@ -255,6 +376,7 @@ fn materialize<Id, K>(
     BankGroup {
         level,
         rack,
+        class,
         program: group.program.slots,
         members: members.into_boxed_slice(),
         active_mask: active_mask.into_boxed_slice(),
@@ -272,6 +394,20 @@ fn plan_invariants_hold<Id: Ord + Clone, K: BankSlotKey>(
             || group.active_mask.len() != lanes
             || group.active_slots.len() != lanes
             || group.active_count() == 0
+        {
+            return false;
+        }
+        // Issue #206: strictly ascending by id, which is what `PreparedGraphPlan::\
+        // has_valid_structural_layout` requires of every bank it validates. Checked here as well
+        // as there so a planner regression fails in the planner's own debug assertions rather
+        // than as a bind-time refusal three crates away.
+        if group
+            .members
+            .iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .windows(2)
+            .any(|pair| pair[0] >= pair[1])
         {
             return false;
         }
@@ -358,9 +494,14 @@ mod tests {
     }
 
     fn candidate(id: u32, slots: &[usize]) -> CohortCandidate<u32> {
+        classed(id, slots, CohortPoolClassV1::Stereo)
+    }
+
+    fn classed(id: u32, slots: &[usize], class: CohortPoolClassV1) -> CohortCandidate<u32> {
         CohortCandidate {
             id,
             program: program(slots),
+            class,
         }
     }
 
@@ -541,26 +682,32 @@ mod tests {
             CohortCandidate {
                 id: 0,
                 program: program(&[]),
+                class: CohortPoolClassV1::Stereo,
             },
             CohortCandidate {
                 id: 1,
                 program: connected,
+                class: CohortPoolClassV1::Stereo,
             },
             CohortCandidate {
                 id: 2,
                 program: unconnected.clone(),
+                class: CohortPoolClassV1::Stereo,
             },
             CohortCandidate {
                 id: 3,
                 program: unconnected.clone(),
+                class: CohortPoolClassV1::Stereo,
             },
             CohortCandidate {
                 id: 4,
                 program: unconnected.clone(),
+                class: CohortPoolClassV1::Stereo,
             },
             CohortCandidate {
                 id: 5,
                 program: unconnected,
+                class: CohortPoolClassV1::Stereo,
             },
         ];
         let plan = plan_bank_groups(&one_level(candidates), BankWidth::Four).expect("plan");
@@ -612,7 +759,8 @@ mod tests {
         );
         assert_eq!(
             members(&plan.groups[1]),
-            vec![Some(8), Some(0), Some(1), Some(2)]
+            vec![Some(0), Some(1), Some(2), Some(8)],
+            "the same four members F5.2 chose, in the ascending lane order #206 requires"
         );
         assert_eq!(members(&plan.groups[2]), vec![Some(3), None, None, None]);
         assert_eq!(
@@ -621,11 +769,179 @@ mod tests {
             "a short program runs its own slots and takes identity elsewhere"
         );
         assert_eq!(
+            plan.groups[1].active_slots[3].as_ref(),
+            &[true, true, true],
+            "and the full-program track that shares its bank still runs every slot"
+        );
+        assert_eq!(
             plan.groups[2].active_slots[1].as_ref(),
             &[false, false, false]
         );
         assert!(!plan.groups[2].is_full());
         assert_eq!(plan.groups[2].active_count(), 1);
+    }
+
+    /// Issue #206: every emitted bank is strictly ascending by id, on the exact repro shape.
+    ///
+    /// The shape is the issue's: an intended 64-track session where **one** track's program is a
+    /// strict subsequence of its cohort leader's -- "remove one track's compressor from the
+    /// intended strip". Before the fix, F5.2's `(active_count desc, id)` sort put that track last
+    /// and the final bank came out `["ch57".."ch63", "ch00"]`, which
+    /// `PreparedGraphPlan::has_valid_structural_layout` refuses and
+    /// `PreparedBuiltinsGraphArtifact::into_bound` then turns into an `unreachable!` -- a panic on
+    /// a legal session.
+    ///
+    /// Red mutation: drop the `chunks_mut(lanes)` pass from `order_members` -> the ascending
+    /// assertion below fails at the last bank, and `plan_invariants_hold`'s own debug assertion
+    /// fails with it. Sort the whole cohort by id instead -> this test passes and
+    /// `longest_program_leads_and_full_programs_fill_first` fails, which is the pair that pins the
+    /// ruling in both directions.
+    #[test]
+    fn a_subsequence_program_still_emits_ascending_banks() {
+        for width in [BankWidth::Four, BankWidth::Eight] {
+            let lanes = width.lanes() as usize;
+            // 64 tracks, `id` ascending, all running the full two-slot strip except id 0.
+            let mut candidates: Vec<CohortCandidate<u32>> = (0..64u32)
+                .map(|id| candidate(id, if id == 0 { &[0] } else { &[0, 1] }))
+                .collect();
+            // Input order must not matter, and the panic shape depended on it not mattering.
+            candidates.reverse();
+            let plan = plan_bank_groups(&one_level(candidates), width).expect("plan");
+            let mut seen = Vec::new();
+            for (index, group) in plan.groups.iter().enumerate() {
+                let members: Vec<u32> = group.members.iter().flatten().copied().collect();
+                let mut sorted = members.clone();
+                sorted.sort_unstable();
+                sorted.dedup();
+                assert_eq!(
+                    members, sorted,
+                    "width={lanes}: bank {index} is not strictly ascending: {members:?}"
+                );
+                seen.extend(members);
+            }
+            seen.sort_unstable();
+            assert_eq!(seen, (0..64u32).collect::<Vec<_>>(), "width={lanes}");
+            // F5.2 is still doing its job: the subsequence track is not in the first bank.
+            assert!(
+                !plan.groups[0].members.iter().flatten().any(|id| *id == 0),
+                "width={lanes}: the short-program track must not displace a full-program one"
+            );
+        }
+    }
+
+    /// Mono-collapse M1: the pool class partitions cohorts, and a uniform session is untouched.
+    ///
+    /// The alternating case is the half-mono row's shape in miniature: 4 * `lanes` candidates,
+    /// even ids `MonoSymmetricAtPrepare` and odd ids `Stereo`, one level, one rack, all running
+    /// the same program. Before M1 that formed four *mixed* banks of eight; it now forms two
+    /// all-mono banks and two all-stereo ones -- the same bank **count** and the same slot count,
+    /// which is why pooling is class A, and a different membership, which is the whole point.
+    ///
+    /// Red mutation: drop `candidate.class == class` from the pool filter -> the alternating arm's
+    /// first group holds `{0, 1, 2, ...}` and the homogeneity assertion fails. Drop the
+    /// `for class` loop and emit once -> every candidate lands in the first class's pool and the
+    /// same assertion fails.
+    #[test]
+    fn the_pool_class_partitions_cohorts_and_leaves_a_uniform_session_alone() {
+        for width in [BankWidth::Four, BankWidth::Eight] {
+            let lanes = width.lanes();
+            let count = 4 * lanes;
+            let alternating: Vec<_> = (0..count)
+                .map(|id| {
+                    classed(
+                        id,
+                        &[0, 1],
+                        if id.is_multiple_of(2) {
+                            CohortPoolClassV1::MonoSymmetricAtPrepare
+                        } else {
+                            CohortPoolClassV1::Stereo
+                        },
+                    )
+                })
+                .collect();
+            let uniform: Vec<_> = (0..count).map(|id| candidate(id, &[0, 1])).collect();
+
+            let mixed = plan_bank_groups(&one_level(alternating), width).expect("plan");
+            let plain = plan_bank_groups(&one_level(uniform), width).expect("plan");
+
+            // Class A: the shape is the uniform session's, group for group.
+            assert_eq!(mixed.groups.len(), plain.groups.len(), "width={lanes}");
+            for (mixed_group, plain_group) in mixed.groups.iter().zip(plain.groups.iter()) {
+                assert_eq!(mixed_group.active_count(), plain_group.active_count());
+                assert_eq!(mixed_group.program, plain_group.program);
+            }
+            // ... and every bank is now homogeneous in the class, which it was not before.
+            for group in &mixed.groups {
+                for id in group.members.iter().flatten() {
+                    let expected = if id.is_multiple_of(2) {
+                        CohortPoolClassV1::MonoSymmetricAtPrepare
+                    } else {
+                        CohortPoolClassV1::Stereo
+                    };
+                    assert_eq!(group.class, expected, "width={lanes}: id {id}");
+                }
+            }
+            let mono = mixed
+                .groups
+                .iter()
+                .filter(|group| group.class == CohortPoolClassV1::MonoSymmetricAtPrepare)
+                .count();
+            assert_eq!(mono, 2, "width={lanes}: half the banks are the mono pool's");
+            // The uniform session pools exactly as it did before there was a class at all.
+            for group in &plain.groups {
+                assert_eq!(group.class, CohortPoolClassV1::Stereo);
+            }
+        }
+    }
+
+    /// The predicate is the two prepare-time terms and nothing else.
+    ///
+    /// Red mutation: add `LIVE` to `PREPARE_TIME_TERMS` -> the "live traffic is not the planner's
+    /// business" row flips and this fails.
+    #[test]
+    fn the_pool_class_rests_on_the_two_prepare_time_terms() {
+        use ChannelSymmetryWitnessV1 as W;
+        let cases: [(u8, CohortPoolClassV1); 6] = [
+            (
+                W::SYMMETRIC.terms(),
+                CohortPoolClassV1::MonoSymmetricAtPrepare,
+            ),
+            // Live traffic and restores are not the planner's business: the dispatch conjoins
+            // them, and a class that moved with them would repartition on every block.
+            (
+                W::symmetric_except(W::LIVE).terms(),
+                CohortPoolClassV1::MonoSymmetricAtPrepare,
+            ),
+            (
+                W::symmetric_except(W::UNBYPASSED).terms(),
+                CohortPoolClassV1::MonoSymmetricAtPrepare,
+            ),
+            (
+                W::symmetric_except(W::RESTORED).terms(),
+                CohortPoolClassV1::MonoSymmetricAtPrepare,
+            ),
+            // Both prepare-time terms gate it.
+            (
+                W::symmetric_except(W::SOURCE).terms(),
+                CohortPoolClassV1::Stereo,
+            ),
+            (
+                W::symmetric_except(W::DESIGNED).terms(),
+                CohortPoolClassV1::Stereo,
+            ),
+        ];
+        for (terms, expected) in cases {
+            assert_eq!(
+                CohortPoolClassV1::of_prepare_witness(W::from_terms(terms)),
+                expected,
+                "terms={terms:#b}"
+            );
+        }
+        assert_eq!(
+            CohortPoolClassV1::of_prepare_witness(W::DECLINED),
+            CohortPoolClassV1::Stereo
+        );
+        assert_eq!(CohortPoolClassV1::default(), CohortPoolClassV1::Stereo);
     }
 
     /// P5: pooling is exhaustive, so no member is ever stranded behind an earlier free lane.
@@ -656,6 +972,7 @@ mod tests {
                         RackLocationV1::Simd1,
                         slots.into_iter().map(key).collect(),
                     ),
+                    class: CohortPoolClassV1::Stereo,
                 });
             }
             let by_id: BTreeMap<u32, RackProgramV1> = candidates
@@ -708,6 +1025,7 @@ mod tests {
                         RackLocationV1::Simd1,
                         slots.into_iter().map(key).collect(),
                     ),
+                    class: CohortPoolClassV1::Stereo,
                 });
             }
             let by_id: BTreeMap<u32, RackProgramV1> = candidates
@@ -817,6 +1135,7 @@ mod tests {
                 by_level.entry(level).or_default().push(CohortCandidate {
                     id,
                     program: RackProgramV1::new(rack, slots.into_iter().map(key).collect()),
+                    class: CohortPoolClassV1::Stereo,
                 });
             }
             let input: Vec<_> = by_level

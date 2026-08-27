@@ -172,6 +172,28 @@ fn each_launch_effect_sees_its_own_designed_words_disagree() {
             left: -3.0,
             right: -1.0,
         },
+        // `lookahead`, index 2: the limiter's twin of the compressor case above, and the one that
+        // covers the two words the ramp comparison cannot reach.
+        //
+        // It is `AutomationRate::None` and `SmoothingRule::None`, so it is not ramped at all: it
+        // reaches the kernel only as `lane[l]` -- the van Herk window geometry
+        // `LaneShape { window, end_offset, box_offset }`, leg one of the `lanes_uniform` gate that
+        // chooses the uniform body over the general one -- and as `lookahead_ms[l]`, which
+        // `commit_lane` and `reset_to_defaults` read. Neither is covered by `ceiling`'s ramp case,
+        // so without this row an implementation that compared only the two `LinearRamp`s would
+        // pass every limiter assertion in this file.
+        //
+        // Asymmetric lookahead is **legal and prepared**: the descriptor's channel policy is
+        // `PerLane`, the declared latency is `lookahead_maximum + 6` regardless of the setting, and
+        // preparation accepts the pair. Nothing but this comparison stands between such a track and
+        // a collapse that would silently give one channel the other's window.
+        Case {
+            effect: "miso.true-peak-limiter",
+            prelude: &[],
+            parameter_index: 2,
+            left: 0.0,
+            right: 5.0,
+        },
         // `delay-ms`, index 0: moves the tap geometry, which is what `fill_windows` reads.
         Case {
             effect: "miso.delay",

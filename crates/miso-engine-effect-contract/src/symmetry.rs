@@ -55,6 +55,19 @@
 //!    one appears, the span source becomes a [`LiveConsoleRecordV1`] implementor and nothing else
 //!    changes.
 //!
+//! # The static-bypass convention, and its asymmetry
+//!
+//! `UNBYPASSED` is seeded from the **prepared** bypass ([`EffectControlLane::new`]) and then
+//! maintained by the drain, so a session that declares an effect bypassed declines that lane from
+//! the moment the plan exists rather than only after a `Bypass(true)` record arrives -- but only
+//! where a live-console channel exists to hold the term, because a console-free plan builds no
+//! [`EffectControlLane`] at all and its witness is the designed-word comparison alone
+//! (`miso_engine_rack::EffectBankStage::lane_symmetry`, `runtime::NodeKind::Effect`). The
+//! asymmetry is deliberate and safe in this phase (nothing reads the witness to decide anything
+//! rendered) and it is a **seam the collapse must close**: a statically bypassed stage is a dry
+//! shunt that copies both planes, so a phase that collapses on this witness has to decide the term
+//! for console-free plans too rather than inherit an unconditional `true`.
+//!
 //! # Why the seam side is a `const` on the record type
 //!
 //! Fader, mute, pan and matrix are **seam-side by design**: the collapse duplicates the single

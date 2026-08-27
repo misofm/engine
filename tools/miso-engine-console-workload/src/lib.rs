@@ -42,13 +42,17 @@ use core::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 use miso_engine_bench_support::digest::Sha256Sink;
 use miso_engine_builtins::{MeterConfig, MeterHandle, MeterTap};
 use miso_engine_builtins_compiler::{MeterConsumer, MeterRequest};
-use miso_engine_core::realtime::{PlanarBufferMut, PreparedRenderPlan, RenderIo, RenderTime};
+use miso_engine_core::realtime::{
+    PlanUnitEligibilityV1, PlanarBufferMut, PreparedRenderPlan, RenderIo, RenderTime,
+};
 use miso_engine_effect_compiler::{
     EffectCompileCaps, EffectControlProducerV1, EffectObservationHandleV1,
     attach_effect_console_v1, attach_effect_observation_v1, launch_native_effect_registry_v1,
     prepare_native_session_effects,
 };
-use miso_engine_effect_contract::{EffectControlRecordV1, ParameterChannel};
+use miso_engine_effect_contract::{
+    ChannelSymmetryWitnessV1, EffectControlRecordV1, ParameterChannel,
+};
 use miso_engine_graph::{
     GraphBindingBlock, GraphNodeBinding, GraphNodeId, GraphRuntimeBindings, GraphRuntimeProcessor,
     TrackStage,
@@ -726,14 +730,20 @@ pub struct SessionRuntime {
     meter_consumers: Vec<MeterConsumer>,
     controls: Vec<EffectControlProducerV1>,
     observations: Vec<EffectObservationHandleV1>,
-    /// Tracks whose *structural* channel-symmetry witness holds, taken at compile time.
+    /// Every track's *structural* channel-symmetry witness, in normalized track order, taken at
+    /// compile time.
     ///
     /// The `SOURCE` term is a function over the compiled session rather than a field of the
     /// prepared plan (`session_structural_symmetry_v1` says why: the cohort planner needs the
     /// class before any prepared object exists), so it cannot be read back off the plan the way
     /// [`SessionRuntime::symmetry_counters`] reads the rest of the witness. It is taken once, in
     /// `build_full`, and kept.
-    structural_mono_tracks: u64,
+    ///
+    /// Kept whole rather than as a count because the *join* is what a caller needs: this half is
+    /// keyed by track id and the runtime half ([`SessionRuntime::unit_eligibility`]) by anonymous
+    /// lanes, and a collapse decision is their conjunction. `PlanUnitEligibilityV1::lane_tracks`
+    /// is the relation between the two keys.
+    structural_symmetry: Vec<(Box<str>, ChannelSymmetryWitnessV1)>,
 }
 
 impl SessionRuntime {
@@ -921,12 +931,9 @@ impl SessionRuntime {
             meter_consumers,
             controls,
             observations,
-            structural_mono_tracks: miso_engine_builtins_compiler::session_structural_symmetry_v1(
+            structural_symmetry: miso_engine_builtins_compiler::session_structural_symmetry_v1(
                 &session,
-            )
-            .iter()
-            .filter(|(_, witness)| witness.eligible())
-            .count() as u64,
+            ),
         };
         if config.observation == ObservationArm::Armed {
             runtime.arm_observation();
@@ -1082,8 +1089,23 @@ impl SessionRuntime {
     ///
     /// Read outside the clock, like every other evidence accessor on this type.
     #[must_use]
-    pub const fn structural_mono_tracks(&self) -> u64 {
-        self.structural_mono_tracks
+    pub fn structural_mono_tracks(&self) -> u64 {
+        self.structural_symmetry
+            .iter()
+            .filter(|(_, witness)| witness.eligible())
+            .count() as u64
+    }
+
+    /// Every track's structural channel-symmetry witness, in normalized track order.
+    ///
+    /// The control-plane half of the collapse decision, keyed by track id. Conjoin it with
+    /// [`SessionRuntime::unit_eligibility`] through that surface's `lane_tracks` to get a real
+    /// per-cohort answer: the runtime half is deliberately **source agnostic** (`SOURCE` is not
+    /// one of its four terms), so a plan whose every designed word is symmetric reports every
+    /// lane eligible whatever its tracks' source mappings are. Neither half is the answer alone.
+    #[must_use]
+    pub fn structural_symmetry(&self) -> &[(Box<str>, ChannelSymmetryWitnessV1)] {
+        &self.structural_symmetry
     }
 
     /// `[collapse-eligible lanes, lanes]` this arm's plan realises: the channel-symmetry census
@@ -1100,6 +1122,18 @@ impl SessionRuntime {
     #[must_use]
     pub fn symmetry_counters(&self) -> [u64; 2] {
         self.plan.symmetry_counters()
+    }
+
+    /// One collapse-eligibility row per scheduling unit (mono-collapse M1).
+    ///
+    /// The per-cohort form of [`SessionRuntime::symmetry_counters`]. The census is a pair of
+    /// totals and a collapse decides per cohort, so the shape a mixed session realises -- four
+    /// all-eligible cohorts and four all-ineligible ones, rather than eight half-and-half ones --
+    /// is only visible here. See `miso_engine_core::realtime::PlanUnitEligibilityV1` for what a
+    /// row carries and the two checks a caller owes before reading one as evidence.
+    #[must_use]
+    pub fn unit_eligibility(&self) -> Vec<PlanUnitEligibilityV1> {
+        self.plan.unit_eligibility()
     }
 
     /// Bank-chain lanes whose route and master accumulation this plan folded into the chain's own

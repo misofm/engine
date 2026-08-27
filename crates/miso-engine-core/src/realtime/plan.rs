@@ -70,6 +70,101 @@ pub struct RenderIo<'a> {
     pub output: PlanarBufferMut<'a>,
 }
 
+/// One scheduling unit's collapse-eligibility row: the query surface the mono collapse's dispatch
+/// reads (mono-collapse M1).
+///
+/// # Why a row per unit rather than a pair of totals
+///
+/// [`PreparedPlanExecutor::symmetry_counters`] is a **census** and says so; it answers "how many
+/// lanes of this plan could collapse" and nothing more. The collapse decides per *cohort* -- the
+/// unit of savable work is a whole plane pass over one bank chain's lane vector, and a SIMD op
+/// executes every lane whether that lane needs it or not -- so the question the dispatch actually
+/// asks is "does **this** chain's every active lane hold", and the census cannot answer it. This
+/// can.
+///
+/// # The three joins this carries, and why each is here
+///
+/// * **Eligibility, per unit.** `eligible_lanes == lanes` is the cohort-level answer.
+/// * **The track join.** The structural half of the witness is keyed by *track id*
+///   (`session_structural_symmetry_v1`, because the planner needs the class before any prepared
+///   object exists) and the runtime half is keyed by anonymous *lanes*. Nothing else in the plan
+///   relates the two, so a caller holding both halves could not conjoin them at all.
+///   [`lane_tracks`](Self::lane_tracks) is that relation, in lane order.
+/// * **The seam classification.** A fader or matrix bank's witness is
+///   [vacuously symmetric](Self::witness_is_vacuous): the collapse duplicates its one computed
+///   plane *into* those stages, so their per-channel words are free to differ and are deliberately
+///   never checked. A caller that read such a unit's `eligible_lanes == lanes` as "this cohort may
+///   collapse" would be reading an unconditional `true` as evidence.
+///   [`upstream_of_seam_stages`](Self::upstream_of_seam_stages) is what makes that distinguishable
+///   rather than a footnote.
+///
+/// Nothing on the render path builds or reads this. It is materialised on demand, off render,
+/// after the render audit is disarmed, and it allocates.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlanUnitEligibilityV1 {
+    /// This unit's position in the built runtime's execution order.
+    pub unit: u32,
+    /// `true` for a homogeneous bank chain, `false` for a single dispatched op.
+    pub banked: bool,
+    /// Stages this unit renders: a chain's bound slots, or 1 for a single op.
+    pub stages: u32,
+    /// Of those, the stages that sit **upstream of the fader/matrix seam** -- the stages a
+    /// collapsed track would have computed once. Zero makes the unit's witness vacuous.
+    pub upstream_of_seam_stages: u32,
+    /// Lane -> the track this lane renders, in lane order. One entry per **active** lane; a
+    /// single op renders one "lane", its own node. Empty for a stage that names no track (a route,
+    /// a submix, the output, a compensation delay).
+    pub lane_tracks: Box<[Box<str>]>,
+    /// Lane -> whether that lane's whole runtime channel-symmetry witness holds. Same length and
+    /// same order as [`lane_tracks`](Self::lane_tracks).
+    ///
+    /// Per lane rather than a count, because a count cannot be *localised*: a bank reporting seven
+    /// eligible lanes of eight does not say which track lost the term, and "exactly that track and
+    /// no other" is the claim every witness test in the tree makes.
+    ///
+    /// Deliberately **not** the whole answer: this is the runtime half, and it is source agnostic
+    /// (`SOURCE` is decided on the control plane, by `session_structural_symmetry_v1`). Conjoin it
+    /// with the structural half through `lane_tracks`.
+    pub lane_eligible: Box<[bool]>,
+}
+
+impl PlanUnitEligibilityV1 {
+    /// Active lanes this unit renders.
+    #[must_use]
+    pub fn lanes(&self) -> u32 {
+        u32::try_from(self.lane_eligible.len()).unwrap_or(u32::MAX)
+    }
+
+    /// Of those, the lanes whose whole runtime witness holds.
+    #[must_use]
+    pub fn eligible_lanes(&self) -> u32 {
+        u32::try_from(self.lane_eligible.iter().filter(|lane| **lane).count()).unwrap_or(u32::MAX)
+    }
+
+    /// Every active lane of this unit is collapse-eligible.
+    ///
+    /// All-lanes-or-nothing, which is `miso_engine_rack::BankChain::all_lanes_symmetric`'s rule
+    /// restated at the plan surface: masking the eligible lanes of a mixed cohort would save
+    /// nothing, because the vector op runs every lane regardless. Making a cohort homogeneous is
+    /// the *planner's* job (`CohortPoolClassV1`), not the dispatch's.
+    #[must_use]
+    pub fn all_lanes_eligible(&self) -> bool {
+        !self.lane_eligible.is_empty() && self.lane_eligible.iter().all(|lane| *lane)
+    }
+
+    /// This unit renders nothing upstream of the seam, so its witness proves nothing.
+    ///
+    /// A fader or matrix bank is the case: `SEAM_SIDE_WITNESS` is an unconditional
+    /// `ChannelSymmetryWitnessV1::SYMMETRIC`, so such a unit reports every lane eligible on every
+    /// session, mono or not. That is correct as a statement about the seam and useless as
+    /// collapse evidence, and a caller must test this before believing
+    /// [`all_lanes_eligible`](Self::all_lanes_eligible).
+    #[must_use]
+    pub const fn witness_is_vacuous(&self) -> bool {
+        self.upstream_of_seam_stages == 0
+    }
+}
+
 /// Engine-internal prepared-plan dispatch seam.
 ///
 /// Implementations are constructed off the render thread and own all state needed to render a
@@ -118,9 +213,38 @@ pub trait PreparedPlanExecutor: Send {
     /// **Nothing rendered reads this.** It is the census of a control-plane bit, walked over the
     /// built runtime for the same reason `observation_binding_counts` is: the honest way to check
     /// what a plan holds is to walk it. Read only after rendering is disarmed.
+    ///
+    /// # What this census counts, and what it must not be used for
+    ///
+    /// It is **monotone evidence** and nothing else: a number that must not go down when a session
+    /// is made more symmetric, and must go down when one lane is desymmetrised. Every existing
+    /// gate on it is of that shape, and it is sound for all of them.
+    ///
+    /// It is **not usable for pool sizing** -- for "how many lanes would a collapse actually
+    /// save?" -- and the reason is in the denominator. A unit that is not per-track upstream work
+    /// at all contributes to *both* halves: an `Identity`, a `SourceInput` and a `Route` each
+    /// report `ChannelSymmetryWitnessV1::SYMMETRIC` and count one "lane" apiece, because there is
+    /// nothing about them that could make two channels disagree. So a 64-track plan's totals carry
+    /// its 64 source inputs and (when the #218 fold declines) its 64 route ops alongside its 64
+    /// bank lanes, and the ratio moves when the *plan shape* moves even though not one track's
+    /// symmetry did. Two sessions' censuses are comparable only when their unit inventories are.
+    ///
+    /// The mono collapse's dispatch must read [`unit_eligibility`](Self::unit_eligibility)
+    /// instead: it is per unit, it says whether a unit is banked, and it says how many of a unit's
+    /// stages are upstream of the seam -- which is exactly the three things this pair of totals
+    /// has folded away.
     #[doc(hidden)]
     fn symmetry_counters(&self) -> [u64; 2] {
         [0, 0]
+    }
+    /// One [`PlanUnitEligibilityV1`] row per scheduling unit, in execution order.
+    ///
+    /// The per-cohort form of [`symmetry_counters`](Self::symmetry_counters); that method's
+    /// documentation says what the census can and cannot be used for. Allocates, walks the built
+    /// runtime, and is read only after rendering is disarmed.
+    #[doc(hidden)]
+    fn unit_eligibility(&self) -> Vec<PlanUnitEligibilityV1> {
+        Vec::new()
     }
     /// Bank-chain lanes whose scatter was pointed at their consumer's buffer (issue #202 rec 3).
     ///
@@ -425,6 +549,21 @@ impl PreparedRenderPlan {
         self.executor
             .as_deref()
             .map_or([0, 0], PreparedPlanExecutor::symmetry_counters)
+    }
+    /// One collapse-eligibility row per scheduling unit, outside the render scope.
+    ///
+    /// See [`PlanUnitEligibilityV1`] for what a row carries and for the two things a caller must
+    /// check before reading one as evidence.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn unit_eligibility(&self) -> Vec<PlanUnitEligibilityV1> {
+        assert!(
+            !super::audit::is_render_scope_active(),
+            "unit eligibility is sealed until the render audit is disarmed"
+        );
+        self.executor
+            .as_deref()
+            .map_or_else(Vec::new, PreparedPlanExecutor::unit_eligibility)
     }
     /// Read the admitted scatter-redirect count outside the render scope (issue #202 rec 3).
     #[doc(hidden)]
