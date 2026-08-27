@@ -7,9 +7,9 @@ use super::*;
 use crate::canonical::node_text_len;
 use crate::pdc::TimingResult;
 
-/// Nine inputs because the estimate is a function of nine independent facts about the compile,
-/// and bundling them into a struct would only move the argument list. Was inside `lib.rs` before
-/// the #99 module split, where the crate-level allow covered it.
+/// Eleven inputs because the estimate is a function of that many independent facts about the
+/// compile, and bundling them into a struct would only move the argument list. Was inside `lib.rs`
+/// before the #99 module split, where the crate-level allow covered it.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn resource_estimate(
     quantum: u32,
@@ -21,6 +21,9 @@ pub(crate) fn resource_estimate(
     buffers: &[BufferAssignment],
     timing: &TimingResult,
     effects: &[EffectPreparedEntry],
+    // `sum(delay_samples) * 4` over both lanes of every delayed track (#210 phase 2).
+    track_delay_bytes: u64,
+    track_delays: &[PreparedTrackDelayV1],
 ) -> Option<GraphResourceEstimate> {
     let count = |value: usize| u64::try_from(value).ok();
     let logical_nodes = count(nodes.len())?;
@@ -68,7 +71,20 @@ pub(crate) fn resource_estimate(
         .checked_mul(quantum)?
         .checked_add(maximum_inputs)?;
     let audio_bytes = audio_buffer_samples.checked_mul(4)?;
-    let delay_bytes = timing.total_delay.checked_mul(8)?;
+    // Track delay rides the existing `delay_bytes` row, and is added **beside** PDC's term rather
+    // than through it. `timing.total_delay` is PDC's own accounting: it also feeds `delay_count`,
+    // the materialized node and edge counts, the schedule-item count and the compile report's
+    // rows, so folding a track delay into it would invent PDC nodes that do not exist and report
+    // compensation the graph never inserted. The bytes are the same kind of bytes and are charged
+    // once, here; the *samples* stay out of PDC entirely.
+    //
+    // `* 8` for PDC because one `CompensationDelay` of `n` samples is two `f32` rings of `n`.
+    // Track delay is per lane, so its two rings are sized independently and the caller has already
+    // summed `left * 4 + right * 4`.
+    let delay_bytes = timing
+        .total_delay
+        .checked_mul(8)?
+        .checked_add(track_delay_bytes)?;
     let mut declared_effect_bytes = 0_u64;
     for effect in effects {
         declared_effect_bytes = declared_effect_bytes
@@ -85,6 +101,14 @@ pub(crate) fn resource_estimate(
     let mut delay_lane_bytes = 0_u64;
     for delay in &timing.delays {
         delay_lane_bytes = delay_lane_bytes.max(delay.samples.0.checked_mul(4)?);
+    }
+    // A track-delay ring is one named allocation of one lane's samples, exactly as a PDC ring is,
+    // so it participates in `largest_allocation_bytes` on the same terms and the cap that guards
+    // that row guards it too.
+    for delay in track_delays {
+        delay_lane_bytes = delay_lane_bytes
+            .max(u64::from(delay.left_samples).checked_mul(4)?)
+            .max(u64::from(delay.right_samples).checked_mul(4)?);
     }
     let reduction_bytes = maximum_inputs.checked_mul(4)?;
     let largest_allocation_bytes = graph_metadata_bytes

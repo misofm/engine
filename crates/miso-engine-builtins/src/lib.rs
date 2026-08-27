@@ -344,7 +344,7 @@ pub enum BuiltinParameterReset {
     KeepTargetResetCurrent,
 }
 
-pub const BUILTIN_PARAMETER_DESCRIPTORS_V1: [BuiltinParameterDescriptorV1; 10] = [
+pub const BUILTIN_PARAMETER_DESCRIPTORS_V1: [BuiltinParameterDescriptorV1; 11] = [
     BuiltinParameterDescriptorV1 {
         id: 1,
         name: "polarity_invert",
@@ -494,6 +494,32 @@ pub const BUILTIN_PARAMETER_DESCRIPTORS_V1: [BuiltinParameterDescriptorV1; 10] =
         update_rate: BuiltinParameterUpdateRate::BlockTarget,
         smoothing: BuiltinSmoothingPolicy::LinearNUpdates,
         reset: BuiltinParameterReset::KeepTargetResetCurrent,
+        disabled_value: None,
+    },
+    // Issue #210 phase 2. Appended rather than inserted: the contract's self-test compares whole
+    // positional arrays, and appending shifts no existing row's index.
+    //
+    // `PreparedOnly` with `None` smoothing is the design's ruling, not an omission: changing a
+    // delay length mid-render re-times the ring and glitches unavoidably, and the declicked
+    // variant (a crossfaded dual read) is a recorded follow-up rather than speculative machinery.
+    // The change path is the transactional session edit every other prepared-only builtin uses.
+    BuiltinParameterDescriptorV1 {
+        id: 11,
+        name: "delay_samples",
+        scope: BuiltinParameterScope::PerLane,
+        mapping: BuiltinParameterMapping::Linear,
+        domain: BuiltinParameterDomain::FiniteInclusive {
+            minimum: 0.0,
+            maximum: 48_000.0,
+        },
+        default: 0.0,
+        update_rate: BuiltinParameterUpdateRate::PreparedOnly,
+        smoothing: BuiltinSmoothingPolicy::None,
+        reset: BuiltinParameterReset::RestorePreparedValue,
+        // Zero is "no delay", but `disabled_value` is the cutoff contract's escape hatch -- the
+        // value that takes a parameter *out* of its own domain (`hpf_hz = 0.0` is not a cutoff at
+        // all). Zero samples is an ordinary, in-domain point of a flat integer range, so this row
+        // has no disabled value in that sense.
         disabled_value: None,
     },
 ];
@@ -946,6 +972,13 @@ impl<L: Lane> InputStage<L> {
     ///   it is decided over **every** lane of the bank (`every_lane_is`), so reading it would make
     ///   one lane's witness depend on its neighbours' parameters, which is exactly the cross-lane
     ///   coupling the witness must not have.
+    /// * `delay_samples` (#210 phase 2) -- the track's input-side time alignment. It is a real
+    ///   per-lane designed word and an asymmetric one really does decline the track's collapse,
+    ///   but it is not a word *this kernel* reads: the delay is a graph node at
+    ///   `TrackStage::Input`, upstream of this bank, and `input_chain_block` never sees it. Its
+    ///   verdict is taken at prepare by `track_input_delay_symmetric_v1`, which conjoins it into
+    ///   the same `DESIGNED` term this function answers for; listing it here would be claiming a
+    ///   load that does not happen.
     /// * `members`, `active`, `lifetime_recovered` -- cohort shape and counters, not track
     ///   parameters. A lane's witness must not change because the cohort grew.
     fn lane_channel_symmetry(&self, lane: usize) -> bool {

@@ -834,9 +834,10 @@ pub(crate) mod session {
         pub(crate) const TRIM_DB: FieldSpec = FieldSpec::req(2, Wire::F32);
         pub(crate) const HPF_HZ: FieldSpec = FieldSpec::req(3, Wire::F32);
         pub(crate) const LPF_HZ: FieldSpec = FieldSpec::req(4, Wire::F32);
+        pub(crate) const DELAY_SAMPLES: FieldSpec = FieldSpec::req(5, Wire::U32);
         pub(crate) static SPEC: MessageSpec = MessageSpec {
             name: "ChannelBuiltins",
-            fields: &[POLARITY_INVERT, TRIM_DB, HPF_HZ, LPF_HZ],
+            fields: &[POLARITY_INVERT, TRIM_DB, HPF_HZ, LPF_HZ, DELAY_SAMPLES],
         };
     }
     pub(crate) mod builtins {

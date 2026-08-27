@@ -296,6 +296,18 @@ fn validate_tracks<'a>(
             validate_finite(diagnostics, values.trim_db, &channel_path.key("trim_db"));
             validate_nonnegative_finite(diagnostics, values.hpf_hz, &channel_path.key("hpf_hz"));
             validate_nonnegative_finite(diagnostics, values.lpf_hz, &channel_path.key("lpf_hz"));
+            // A flat integer domain, checked here alongside the finite checks. The upper bound is
+            // the schema's, not the DSP's: it is what bounds the ring allocation a hostile
+            // session can demand, which is why it is stage-2 schema work rather than issue-007
+            // Nyquist work.
+            if values.delay_samples > crate::CHANNEL_BUILTIN_DELAY_SAMPLES_MAXIMUM {
+                error(
+                    diagnostics,
+                    DiagnosticCode::NumericOutOfSchemaRange,
+                    &channel_path.key("delay_samples"),
+                    "builtin delay_samples exceeds the schema maximum of 48000",
+                );
+            }
         }
         let fader_path = path.key("fader");
         validate_finite(diagnostics, track.fader.left_db, &fader_path.key("left_db"));

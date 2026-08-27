@@ -19,8 +19,8 @@ use miso_engine_graph::{
     BufferAssignment, DependencyLevel, EffectNodeId, GraphCompileCaps, GraphDiagnostic,
     GraphDiagnosticSet, GraphEdge, GraphEdgeId, GraphNode, GraphNodeId, GraphPortId, GraphPortKind,
     GraphPreparedEffect, GraphResourceEstimate, GraphSpec, InsertedDelay, PreparedGraphPlan,
-    PreparedGraphPlanParts, PreparedRoute, RackId, ReductionRecord, RouteTiming, RouteTransform,
-    StableGraphId, TrackStage,
+    PreparedGraphPlanParts, PreparedRoute, PreparedTrackDelayV1, RackId, ReductionRecord,
+    RouteTiming, RouteTransform, StableGraphId, TrackStage,
 };
 /// Re-exported so a caller can name the compile input without taking a `miso-engine-lane`
 /// dependency of its own: the backend is this crate's input now, so this crate publishes its type

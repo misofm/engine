@@ -302,6 +302,7 @@ fn prepared_graph(
         envelope,
         required_bindings: vec![input.clone(), output.clone()],
         routes: Vec::new(),
+        track_delays: Vec::new(),
         effects: Vec::new(),
         effect_controls: Vec::new(),
         banks: Vec::new(),

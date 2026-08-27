@@ -500,6 +500,35 @@ impl GraphCompiler {
                 Ok(value) => value,
                 Err(diagnostic) => return Err(failure(effects, vec![diagnostic])),
             };
+        // Issue #210 phase 2. Only tracks that actually declared a delay appear, in normalized
+        // track order: an undelayed session produces an empty vector, and every downstream
+        // consumer -- the estimate term, the lowering, the runtime's line vector -- is then
+        // exactly what it was before this feature existed.
+        let track_delays: Vec<PreparedTrackDelayV1> = model
+            .tracks
+            .iter()
+            .filter(|track| {
+                track.builtins.left.delay_samples != 0 || track.builtins.right.delay_samples != 0
+            })
+            .map(|track| PreparedTrackDelayV1 {
+                node: track_node(track.id.as_str(), TrackStage::Input),
+                left_samples: track.builtins.left.delay_samples,
+                right_samples: track.builtins.right.delay_samples,
+            })
+            .collect();
+        let Some(track_delay_bytes) = track_delays.iter().try_fold(0_u64, |total, delay| {
+            total
+                .checked_add(u64::from(delay.left_samples).checked_mul(4)?)?
+                .checked_add(u64::from(delay.right_samples).checked_mul(4)?)
+        }) else {
+            return Err(failure(
+                effects,
+                vec![diag(
+                    "graph.resource.arithmetic_overflow",
+                    "$.graph.track_delays",
+                )],
+            ));
+        };
         let Some(mut estimate) = resource_estimate(
             session.quantum().0,
             session.resource_estimate().requested_runtime_bytes,
@@ -510,6 +539,8 @@ impl GraphCompiler {
             &buffers,
             &timing,
             &effects.entries,
+            track_delay_bytes,
+            &track_delays,
         ) else {
             return Err(failure(
                 effects,
@@ -633,6 +664,7 @@ impl GraphCompiler {
             },
             required_bindings,
             routes: route_transforms,
+            track_delays,
             effects: effect_nodes,
             banks,
             effect_controls,

@@ -955,6 +955,11 @@ fn tx_channel_builtins(sink: &mut dyn Sink, value: &ChannelBuiltins) -> Result<(
         sink,
         schema::session::channel_builtins::LPF_HZ,
         value.lpf_hz,
+    )?;
+    tx_u32(
+        sink,
+        schema::session::channel_builtins::DELAY_SAMPLES,
+        value.delay_samples,
     )
 }
 fn tx_rack(sink: &mut dyn Sink, value: &Rack) -> Result<(), EncodeError> {
@@ -1642,6 +1647,10 @@ fn parse_channel_builtins(message: Message<'_>) -> Result<ChannelBuiltins, Decod
         lpf_hz: read_f32_exact(one_spec!(
             message,
             schema::session::channel_builtins::LPF_HZ
+        )?)?,
+        delay_samples: read_u32_exact(one_spec!(
+            message,
+            schema::session::channel_builtins::DELAY_SAMPLES
         )?)?,
     })
 }

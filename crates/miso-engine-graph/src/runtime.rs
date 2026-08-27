@@ -174,12 +174,122 @@ impl CompensationDelay {
 }
 // REALTIME_POLICY_END
 
+/// One track's **input-side time alignment**: PDC's ring shape and PDC's kernel, deliberately
+/// none of PDC's accounting.
+///
+/// # Why this is not a `CompensationDelay`
+///
+/// `CompensationDelay` is one length for both lanes -- PDC computes a single per-edge skew, so its
+/// two rings are the same size and share one cursor (its `debug_assert_eq!` on the two cursors is
+/// that invariant written down). Track delay is declared **per lane** (`builtins.left.delay_samples`
+/// and `builtins.right.delay_samples` are independent words, per the dual-mono law), so the two
+/// rings can differ in length and their cursors advance independently. Rather than loosen PDC's
+/// type -- and move bytes under every plan that has nothing to do with this feature -- the two
+/// lanes get one independent ring and cursor each, driven by the same `pdc_delay_block` kernel.
+///
+/// # Why it is not latency
+///
+/// PDC equalizes *unrequested* arrival-time skew: `pdc::timings` computes every path's arrival
+/// from declared node latency and inserts compensating delays to make them agree. A track delay is
+/// the opposite -- a time shift the session asked for. Declaring it as node latency would make PDC
+/// insert matching delays on every other path and cancel exactly the alignment the user wanted. So
+/// a `TrackDelay` node contributes **zero** to `GraphNode.latency`, contributes nothing to
+/// `TimingResult::total_delay`, and never appears in `inserted_delays`. Its bytes are charged to
+/// the estimate separately (see `estimate::resource_estimate`); its samples are charged to nothing.
+pub(crate) struct TrackDelayLine {
+    left: Box<[f32]>,
+    right: Box<[f32]>,
+    left_cursor: usize,
+    right_cursor: usize,
+}
+
+impl TrackDelayLine {
+    pub(crate) fn new(left: usize, right: usize) -> Self {
+        Self {
+            left: vec![0.0; left].into_boxed_slice(),
+            right: vec![0.0; right].into_boxed_slice(),
+            left_cursor: 0,
+            right_cursor: 0,
+        }
+    }
+
+    /// This line's designed-word comparison: the two lanes' declared delays, compared exactly.
+    ///
+    /// # The word list, and why it is exactly this
+    ///
+    /// `process` reads one designed word per lane -- the ring length, which **is**
+    /// `delay_samples` for that lane. The cursors and the ring contents are running state, not
+    /// designed words, and are excluded for the same reason `InputChainState` is excluded from the
+    /// input stage's list.
+    ///
+    /// A track whose lanes declare different delays produces genuinely different left and right
+    /// audio out of a single source channel, so it is not mono-collapsible. That verdict is also
+    /// taken at prepare, from the session, by `session_structural_symmetry_v1`; this is the same
+    /// fact answered by the object that owns the rings.
+    #[cfg(test)]
+    pub(crate) const fn channels_agree(&self) -> bool {
+        self.left.len() == self.right.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn lane_samples(&self) -> [usize; 2] {
+        [self.left.len(), self.right.len()]
+    }
+}
+
+// REALTIME_POLICY_BEGIN
+impl TrackDelayLine {
+    pub(crate) fn process(&mut self, left: &mut [f32], right: &mut [f32]) {
+        delay_lane(&mut self.left, &mut self.left_cursor, left);
+        delay_lane(&mut self.right, &mut self.right_cursor, right);
+    }
+}
+
+/// One lane of a track delay: the same two-segment swap `CompensationDelay::process` runs, over one
+/// ring with its own cursor. No `%`, no per-sample loop, and a block longer than the ring is walked
+/// in ring-sized takes exactly as the PDC caller loop walks it.
+fn delay_lane(ring: &mut [f32], cursor: &mut usize, block: &mut [f32]) {
+    let samples = ring.len();
+    if samples == 0 {
+        return;
+    }
+    let mut offset = 0;
+    while offset < block.len() {
+        let take = core::cmp::min(samples, block.len() - offset);
+        pdc_delay_block(ring, cursor, &mut block[offset..offset + take]);
+        offset += take;
+    }
+}
+// REALTIME_POLICY_END
+
 /// What an op does to its reduced output.
 pub(crate) enum NodeKind {
     /// A stage boundary, a submix or the session output: the reduction is the whole node.
     Identity,
     /// A track input filled by the coordinator's source set: no reduction, no processing.
     SourceInput,
+    /// A track input filled by the coordinator's source set, then time-aligned in place.
+    ///
+    /// This variant **subsumes** [`NodeKind::SourceInput`] rather than sitting beside it. An input
+    /// node has no graph inputs and the coordinator has already written its output buffer for this
+    /// block, so there is no reduction to run: `reduce_plane` over an empty input list would
+    /// `fill(0.0)` straight over the source audio. `execute_op` therefore takes this arm in the
+    /// same early-return position the `SourceInput` arm occupies, keeps that arm's fill semantics
+    /// (there is no fill), and delays the buffer in place.
+    ///
+    /// A track that declares zero delay on both lanes is never lowered to this variant -- it falls
+    /// through to `SourceInput` exactly as before, so the compiled program of an undelayed session
+    /// is structurally identical to the program that session compiled to before this feature
+    /// existed.
+    TrackDelay {
+        /// Index into the runtime's track-delay lines.
+        line: u32,
+        /// Whether the two lanes declared the **same** delay, cached from the lowering.
+        ///
+        /// The witness is asked without the delay lines in hand, and `TrackDelayLine` is where the
+        /// truth lives; `the_node_witness_agrees_with_its_line` keeps the two from drifting.
+        channels_agree: bool,
+    },
     /// A host-supplied processor.
     Bound(Box<dyn GraphRuntimeProcessor>),
     /// A track-local prepared native effect.
@@ -458,6 +568,12 @@ impl NodeKind {
             }
         };
         match self {
+            // The one non-bank stage that can be asymmetric upstream of the seam: two lanes with
+            // different declared delays turn one source channel into two different signals, so the
+            // track is not collapsible. The same verdict is taken at prepare, from the session, by
+            // `session_structural_symmetry_v1` -- which is what actually arms the chain; this arm
+            // is the plan's own evidence row agreeing with it.
+            Self::TrackDelay { channels_agree, .. } => designed(*channels_agree),
             Self::Effect(effect) => designed(effect.processor.channel_symmetry()),
             Self::ConsoleEffect(console) => designed(console.effect.processor.channel_symmetry())
                 .and(console.control.symmetry()),
@@ -629,6 +745,10 @@ pub(crate) struct Runtime {
     /// This runtime's checked view of the plan's shared arena.
     pub(crate) lease: ArenaLeaseV1,
     pub(crate) delays: Box<[CompensationDelay]>,
+    /// Input-side track alignment lines, one per track that declared a nonzero delay on either
+    /// lane. Empty on every session that declared none, which is what keeps an undelayed plan on
+    /// the bytes and the program it had before this feature existed.
+    pub(crate) track_delays: Box<[TrackDelayLine]>,
     pub(crate) units: Box<[RuntimeUnit]>,
     /// One row per unit, in `units` order: the bind-time half of the collapse-eligibility query.
     pub(crate) identity: Box<[UnitIdentityV1]>,
@@ -703,6 +823,7 @@ impl Runtime {
     pub(crate) fn new(
         lease: ArenaLeaseV1,
         delays: Vec<CompensationDelay>,
+        track_delays: Vec<TrackDelayLine>,
         units: Vec<RuntimeUnit>,
         identity: Vec<UnitIdentityV1>,
         redirects: u64,
@@ -720,6 +841,7 @@ impl Runtime {
         Self {
             lease,
             delays: delays.into_boxed_slice(),
+            track_delays: track_delays.into_boxed_slice(),
             units: units.into_boxed_slice(),
             identity: identity.into_boxed_slice(),
             bank_inputs: vec![0; widest].into_boxed_slice(),
@@ -746,14 +868,16 @@ impl Runtime {
         let Self {
             lease,
             delays,
+            track_delays,
             units,
             bank_inputs,
             bank_outputs,
             ..
         } = self;
         let delays: &mut [CompensationDelay] = delays;
+        let track_delays: &mut [TrackDelayLine] = track_delays;
         match &mut units[index] {
-            RuntimeUnit::Op(op) => execute_op(op, lease, delays, first_sample),
+            RuntimeUnit::Op(op) => execute_op(op, lease, delays, track_delays, first_sample),
             RuntimeUnit::Bank {
                 members,
                 lanes,
@@ -769,7 +893,7 @@ impl Runtime {
                     if let Some(source) = bank_gather_source(member) {
                         bank_inputs[lane] = source;
                     } else {
-                        execute_op(member, lease, delays, first_sample)?;
+                        execute_op(member, lease, delays, track_delays, first_sample)?;
                         bank_inputs[lane] = member.output;
                     }
                 }
@@ -858,9 +982,21 @@ fn execute_op(
     op: &mut RuntimeOp,
     lease: &mut ArenaLeaseV1,
     delays: &mut [CompensationDelay],
+    track_delays: &mut [TrackDelayLine],
     first_sample: u64,
 ) -> Result<(), RenderError> {
     let output = op.output;
+    if let NodeKind::TrackDelay { line, .. } = op.kind {
+        // The delayed form of the `SourceInput` arm below, in the same position and for the same
+        // reason: the coordinator's source set already wrote this node's output for this block, and
+        // an input node has no graph inputs, so there is no reduction to run. Falling through would
+        // reach `reduce_plane` with an empty input list, whose `[]` arm fills the buffer with `0.0`
+        // -- straight over the source audio. The alignment therefore happens here, in place, and
+        // this returns exactly where the undelayed arm returns.
+        let (left, right) = lease.write_stereo(output);
+        track_delays[line as usize].process(left, right);
+        return Ok(());
+    }
     if matches!(op.kind, NodeKind::SourceInput) {
         // The coordinator's source set already wrote this node's output for this block.
         return Ok(());
@@ -886,15 +1022,20 @@ fn execute_op(
     // intended fixture -- and not one of those words is ever read.
     //
     // The clause is exactly "no graph inputs *and* a host processor". A `NodeKind::Identity` with
-    // no inputs is a submix nothing routes into and its fill **is** its audio; a `SourceInput` is
-    // already skipped above; every other kind reduces first and processes in place, so its fill is
-    // the value it processes.
+    // no inputs is a submix nothing routes into and its fill **is** its audio; a `SourceInput` and
+    // a `TrackDelay` are already skipped above; every other kind reduces first and processes in
+    // place, so its fill is the value it processes.
     if !op.inputs.is_empty() || !matches!(op.kind, NodeKind::Bound(_)) {
         reduce_plane(lease, 0, output, &op.inputs);
         reduce_plane(lease, 1, output, &op.inputs);
     }
     match &mut op.kind {
-        NodeKind::SourceInput | NodeKind::Identity | NodeKind::BankMember => {}
+        // `TrackDelay` returned above, before the reduction it must not run; it is named here only
+        // because the match is exhaustive.
+        NodeKind::TrackDelay { .. }
+        | NodeKind::SourceInput
+        | NodeKind::Identity
+        | NodeKind::BankMember => {}
         NodeKind::Route(coefficients) => {
             let (out_left, out_right) = lease.write_stereo(output);
             mix2x2_block::<FrameLane>(out_left, out_right, *coefficients);
@@ -1179,6 +1320,12 @@ pub(crate) struct RuntimeParts {
     pub(crate) bindings: BTreeMap<GraphNodeId, Option<Box<dyn GraphRuntimeProcessor>>>,
     pub(crate) observers: BTreeMap<GraphNodeId, Vec<GraphNodeObserverBinding>>,
     pub(crate) source_inputs: std::collections::BTreeSet<GraphNodeId>,
+    /// Issue #210 phase 2: declared per-lane input delay, by track input node. Only tracks that
+    /// declared a nonzero delay on at least one lane are present, so this map is empty -- and
+    /// `node_kind` never leaves the `SourceInput` arm -- for every session that declares none.
+    track_delays: BTreeMap<GraphNodeId, [u32; 2]>,
+    /// The lines `node_kind` allocated, in the order it allocated them.
+    track_delay_lines: Vec<TrackDelayLine>,
     banks: Vec<Option<GraphPreparedEffectBank>>,
     builtin_banks: Vec<Option<GraphPreparedBuiltinBank>>,
     membership: BankMembership,
@@ -1199,6 +1346,7 @@ impl RuntimeParts {
         observers: Vec<GraphNodeObserverBinding>,
         bindings: Vec<GraphNodeBinding>,
         source_inputs: std::collections::BTreeSet<GraphNodeId>,
+        track_delays: Vec<crate::PreparedTrackDelayV1>,
         frames: usize,
     ) -> Self {
         let membership = bank_membership(spec, &banks, &builtin_banks);
@@ -1232,6 +1380,11 @@ impl RuntimeParts {
                 .collect(),
             observers: by_node,
             source_inputs,
+            track_delays: track_delays
+                .into_iter()
+                .map(|delay| (delay.node, [delay.left_samples, delay.right_samples]))
+                .collect(),
+            track_delay_lines: Vec::new(),
             banks: banks.into_iter().map(Some).collect(),
             builtin_banks: builtin_banks.into_iter().map(Some).collect(),
             membership,
@@ -1246,7 +1399,23 @@ impl RuntimeParts {
     /// gain every frame (D3, #98 F4).
     fn node_kind(&mut self, node: &GraphNodeId, index: u32) -> NodeKind {
         if self.source_inputs.contains(node) {
-            NodeKind::SourceInput
+            // The delay arm takes this branch's place rather than sitting after it: an input node
+            // is a source input whether or not it is delayed, and `execute_op` must early-return
+            // for both. A track with no declared delay is absent from the map and lowers to
+            // `SourceInput`, byte for byte and op for op, exactly as it did before this feature.
+            match self.track_delays.remove(node) {
+                None => NodeKind::SourceInput,
+                Some([left, right]) => {
+                    let line =
+                        u32::try_from(self.track_delay_lines.len()).expect("delay line index");
+                    self.track_delay_lines
+                        .push(TrackDelayLine::new(left as usize, right as usize));
+                    NodeKind::TrackDelay {
+                        line,
+                        channels_agree: left == right,
+                    }
+                }
+            }
         } else if self.membership.contains_key(&index) {
             NodeKind::BankMember
         } else if let Some(Some(processor)) = self.bindings.remove(node) {
@@ -1587,6 +1756,9 @@ pub(crate) fn build_sequential(
     Runtime::new(
         leases.pop().expect("the sequential lease"),
         delays,
+        // Allocated by `node_kind` as it lowered each delayed input node, so the line indices the
+        // ops carry and this vector's order are the same walk.
+        core::mem::take(&mut parts.track_delay_lines),
         units,
         identity,
         redirects.len() as u64,
@@ -2873,7 +3045,7 @@ mod tests {
                 kind,
                 observers: Box::new([]),
             };
-            execute_op(&mut op, &mut lease, &mut [], 0).expect("op");
+            execute_op(&mut op, &mut lease, &mut [], &mut [], 0).expect("op");
             let (left, right) = lease.read_stereo(ARENA_BASE);
             assert!(
                 left.iter().all(|value| *value == expected.0)
