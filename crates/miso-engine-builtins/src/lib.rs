@@ -976,7 +976,7 @@ impl<L: Lane> InputStage<L> {
     ///   per-lane designed word and an asymmetric one really does decline the track's collapse,
     ///   but it is not a word *this kernel* reads: the delay is a graph node at
     ///   `TrackStage::Input`, upstream of this bank, and `input_chain_block` never sees it. Its
-    ///   verdict is taken at prepare by `track_input_delay_symmetric_v1`, which conjoins it into
+    ///   verdict is taken at prepare by `track_input_delay_symmetric`, which conjoins it into
     ///   the same `DESIGNED` term this function answers for; listing it here would be claiming a
     ///   load that does not happen.
     /// * `members`, `active`, `lifetime_recovered` -- cohort shape and counters, not track

@@ -23,7 +23,7 @@ pub(crate) fn resource_estimate(
     effects: &[EffectPreparedEntry],
     // `sum(delay_samples) * 4` over both lanes of every delayed track (#210 phase 2).
     track_delay_bytes: u64,
-    track_delays: &[PreparedTrackDelayV1],
+    track_delays: &[PreparedTrackDelay],
 ) -> Option<GraphResourceEstimate> {
     let count = |value: usize| u64::try_from(value).ok();
     let logical_nodes = count(nodes.len())?;

@@ -1346,7 +1346,7 @@ impl RuntimeParts {
         observers: Vec<GraphNodeObserverBinding>,
         bindings: Vec<GraphNodeBinding>,
         source_inputs: std::collections::BTreeSet<GraphNodeId>,
-        track_delays: Vec<crate::PreparedTrackDelayV1>,
+        track_delays: Vec<crate::PreparedTrackDelay>,
         frames: usize,
     ) -> Self {
         let membership = bank_membership(spec, &banks, &builtin_banks);

@@ -2539,8 +2539,11 @@ pub fn track_mono_source_v1(session: &CompiledSession, track: &Track) -> bool {
 /// it. Adding it to that list would be claiming the kernel reads a word it does not read. It is a
 /// prepared-only session word, so the honest owner of the verdict is the prepare-time structural
 /// witness -- here -- which is also the only one that runs before the chain is armed at all.
+/// Named without a `_v1` suffix on purpose, unlike its two neighbours: issue #215's owner ruling
+/// is that pre-launch internal implementation names are born unversioned, and the neighbours are
+/// on that issue's own rename list.
 #[must_use]
-pub fn track_input_delay_symmetric_v1(track: &Track) -> bool {
+pub fn track_input_delay_symmetric(track: &Track) -> bool {
     track.builtins.left.delay_samples == track.builtins.right.delay_samples
 }
 
@@ -2578,7 +2581,7 @@ pub fn session_structural_symmetry_v1(
             // zero -- leaves the witness exactly as it was before the feature existed.
             witness.set(
                 ChannelSymmetryWitnessV1::DESIGNED,
-                track_input_delay_symmetric_v1(track),
+                track_input_delay_symmetric(track),
             );
             (Box::<str>::from(track.id.as_str()), witness)
         })

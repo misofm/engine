@@ -186,7 +186,7 @@ fn compiled(left: u32, right: u32) -> Compiled {
 /// its `TrackDelay` arm only for a node present in this list, so an empty list is a proof about the
 /// lowered program rather than a claim about it.
 ///
-/// Red mutation: emit a `PreparedTrackDelayV1` unconditionally in `compile.rs` (drop the
+/// Red mutation: emit a `PreparedTrackDelay` unconditionally in `compile.rs` (drop the
 /// `filter`) -> this fails, and so does every digest row below.
 #[test]
 fn a_zero_delay_session_lowers_no_delay_node() {

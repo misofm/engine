@@ -384,7 +384,7 @@ fn a_symmetric_delay_keeps_every_track_eligible() {
 /// An asymmetric delay declines its own track, and only its own track.
 ///
 /// Red mutation: drop the `DESIGNED` `witness.set` from `session_structural_symmetry_v1` (or make
-/// `track_input_delay_symmetric_v1` return `true` unconditionally) -> this fails while the
+/// `track_input_delay_symmetric` return `true` unconditionally) -> this fails while the
 /// symmetric row above still passes, which is the pair that makes the term load-bearing.
 #[test]
 fn an_asymmetric_delay_declines_exactly_its_own_track() {

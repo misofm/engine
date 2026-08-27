@@ -359,7 +359,7 @@ pub struct PreparedGraphPlan {
     routes: Vec<PreparedRoute>,
     /// Issue #210 phase 2: input-side track alignment, one entry per delayed track. Empty on every
     /// session that declared no delay.
-    track_delays: Vec<PreparedTrackDelayV1>,
+    track_delays: Vec<PreparedTrackDelay>,
     effects: Vec<GraphPreparedEffect>,
     /// Issue #140 A: one entry per effect a live console drives. Empty for every session that
     /// asked for no console, which is what keeps the runtime on its byte-identical path.
@@ -594,7 +594,7 @@ impl PreparedGraphPlan {
     /// feature's off gate: an empty list means `node_kind` never leaves its `SourceInput` arm, so
     /// the lowered program is the one this plan would have had before the feature existed.
     #[must_use]
-    pub fn track_delays(&self) -> &[PreparedTrackDelayV1] {
+    pub fn track_delays(&self) -> &[PreparedTrackDelay] {
         &self.track_delays
     }
 
@@ -1026,7 +1026,7 @@ pub struct PreparedGraphPlanParts {
     pub required_bindings: Vec<GraphNodeId>,
     pub routes: Vec<PreparedRoute>,
     /// Issue #210 phase 2: input-side track alignment, one entry per delayed track.
-    pub track_delays: Vec<PreparedTrackDelayV1>,
+    pub track_delays: Vec<PreparedTrackDelay>,
     pub effects: Vec<GraphPreparedEffect>,
     /// Issue #140 A: live-console control channels, one per driven effect node.
     pub effect_controls: Vec<GraphEffectControlBindingV1>,
@@ -1281,8 +1281,11 @@ pub struct PreparedRoute {
 ///
 /// This is not latency and never becomes latency: it contributes nothing to `GraphNode.latency`,
 /// nothing to `RouteTiming`, and nothing to `inserted_delays`. See `runtime::TrackDelayLine`.
+///
+/// Unversioned by #215's ruling: pre-launch internal implementation types carry no `V1` suffix.
+/// It sits beside `PreparedRoute`, which is already spelled that way.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PreparedTrackDelayV1 {
+pub struct PreparedTrackDelay {
     /// The `TrackStage::Input` node this delay is applied at.
     pub node: GraphNodeId,
     /// `builtins.left.delay_samples`.

@@ -504,13 +504,13 @@ impl GraphCompiler {
         // track order: an undelayed session produces an empty vector, and every downstream
         // consumer -- the estimate term, the lowering, the runtime's line vector -- is then
         // exactly what it was before this feature existed.
-        let track_delays: Vec<PreparedTrackDelayV1> = model
+        let track_delays: Vec<PreparedTrackDelay> = model
             .tracks
             .iter()
             .filter(|track| {
                 track.builtins.left.delay_samples != 0 || track.builtins.right.delay_samples != 0
             })
-            .map(|track| PreparedTrackDelayV1 {
+            .map(|track| PreparedTrackDelay {
                 node: track_node(track.id.as_str(), TrackStage::Input),
                 left_samples: track.builtins.left.delay_samples,
                 right_samples: track.builtins.right.delay_samples,
