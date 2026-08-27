@@ -15,6 +15,13 @@ So the rows went stale, twice, with every gate green:
   no such mirror and was missed.
 * 0fb9325 (#216, Strip Job 2) moved them again, 722 -> 802 and 20492 -> 30374.
 
+#210 phase 2 (track delay) moved `bridgeMetadataBytes` 3809 -> 3855 and `bridgeRetainedBytes`
+1075185 -> 1075231, and re-pinned them here in the same commit. Both moved by the same 46: the
+bridge's retained session model grew by `size_of::<Track>()` (16 -> 20 bytes per lane's
+`ChannelBuiltins`, so +8 per track) plus the fixture's canonical text (one track, two lanes,
+`", delay_samples = 0"`, +38). `sessionTomlBytes` is the host's *limit*, not the document, so it
+did not move.
+
 Between them, thirty-three merges moved nothing: this is not accumulated drift, it is two
 un-re-pinned commits, and one gate red at either would have ended it.
 

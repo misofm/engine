@@ -66,6 +66,62 @@ fn model_with_delay(left: u32, right: u32) -> SessionTomlV1 {
     model
 }
 
+/// The same nine tracks, with a **latency-carrying** limiter added to track zero's `simd2` rack and
+/// to nothing else.
+///
+/// This is what makes P2-3 mean something. The fixture as checked in compiles to
+/// `output_latency = 0` with no inserted delays at all -- every path through it is the same length
+/// -- so asserting "the compensation sets did not move" on it would be asserting that an empty set
+/// stayed empty. One latent effect on one of nine tracks routed to a common output is the smallest
+/// session in which PDC has real work to do, and the delayed track is the one carrying it.
+fn latent_model_with_delay(left: u32, right: u32) -> SessionTomlV1 {
+    use miso_engine_session::{
+        Effect, EffectIdentity, EffectParam, EffectQuality, LinkMode, ParameterChannel,
+        ParameterUnit, SidechainDeclaration, StableId,
+    };
+    let mut model = model_with_delay(left, right);
+    model.tracks[0].simd2.effects.push(Effect {
+        id: StableId::parse("limiter").expect("effect id"),
+        identity: EffectIdentity::Native {
+            effect_id: StableId::parse("miso.true-peak-limiter").expect("native id"),
+        },
+        quality: EffectQuality::Normal,
+        bypass: false,
+        link_mode: LinkMode::Maximum,
+        params: vec![
+            EffectParam {
+                parameter_id: 1,
+                channel: ParameterChannel::Both,
+                unit: ParameterUnit::Db,
+                value: -0.5,
+            },
+            EffectParam {
+                parameter_id: 2,
+                channel: ParameterChannel::Both,
+                unit: ParameterUnit::Milliseconds,
+                value: 60.0,
+            },
+            EffectParam {
+                parameter_id: 3,
+                channel: ParameterChannel::Both,
+                unit: ParameterUnit::Milliseconds,
+                value: 5.0,
+            },
+        ],
+        sidechain: SidechainDeclaration::None,
+    });
+    model
+}
+
+fn latent(left: u32, right: u32) -> Compiled {
+    compile(
+        compile_session(&latent_model_with_delay(left, right), compile_caps())
+            .expect("session compiles"),
+        graph_caps(),
+    )
+    .expect("latent session compiles")
+}
+
 fn session_with_delay(left: u32, right: u32) -> CompiledSession {
     compile_session(&model_with_delay(left, right), compile_caps()).expect("session compiles")
 }
@@ -165,7 +221,8 @@ fn the_zero_delay_plan_digest_is_the_pre_feature_digest() {
 }
 
 /// Measured on `origin/main` (17682b4), whose `canonical.toml` has no `delay_samples` key at all.
-const PRE_FEATURE_CANONICAL_SHA256: &str = "PLACEHOLDER";
+const PRE_FEATURE_CANONICAL_SHA256: &str =
+    "60a22fd833ca1a2ffcb1329e7ba228e51a0b91246c4dd93fb805e7c47221ab96";
 
 /// ...and a delayed one is a genuinely different plan, so the digest above is not inert.
 #[test]
@@ -194,9 +251,19 @@ fn a_delayed_session_is_a_different_plan() {
 /// a second path.
 #[test]
 fn a_track_delay_moves_no_pdc_row() {
-    let zero = compiled(0, 0);
+    let zero = latent(0, 0);
+    // The precondition: PDC has real work on this session, so the equalities below are equalities
+    // between non-empty sets.
+    assert!(
+        zero.output_latency > 0,
+        "the latent fixture must declare latency"
+    );
+    assert!(
+        !zero.plan.inserted_delays.is_empty(),
+        "the latent fixture must make PDC insert at least one compensation delay"
+    );
     for (left, right) in [(1_u32, 1_u32), (128, 128), (4_800, 4_800), (48_000, 0)] {
-        let delayed = compiled(left, right);
+        let delayed = latent(left, right);
         assert_eq!(
             delayed.plan.inserted_delays, zero.plan.inserted_delays,
             "PDC inserted no delay for {left}/{right}"

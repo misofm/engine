@@ -23,8 +23,9 @@
 // eight are in the metadata JSON's `commandKinds`, each with the `plane` it applies on.
 //
 // * `matrix_ll/lr/rl/rr`, `fader_db` and `mute` declare `BuiltinParameterUpdateRate::BlockTarget`
-//   with a linear smoothing policy. `polarity_invert`, `trim_db`, `hpf_hz` and `lpf_hz` still
-//   declare `PreparedOnly` and have no command kind at all.
+//   with a linear smoothing policy. `polarity_invert`, `trim_db`, `hpf_hz`, `lpf_hz` and
+//   `delay_samples` (issue #210 phase 2, the track's input-side time alignment) all still declare
+//   `PreparedOnly` and have no command kind at all: they change through a session edit.
 // * An effect parameter is delivered to the running plan as a `PreparedAutomationSpan` -- the
 //   route the effect contract always had and that #137 found nothing was feeding. A parameter is
 //   movable exactly when its own descriptor declares it automatable; the build-time

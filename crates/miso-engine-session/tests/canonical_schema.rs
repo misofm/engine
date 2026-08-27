@@ -96,6 +96,9 @@ fn maximal_float_spellings_fit_the_canonical_size_estimate() {
         channel.trim_db = tiny;
         channel.hpf_hz = tiny;
         channel.lpf_hz = tiny;
+        // Not a float, but it is the widest spelling this key has: the canonical estimate must
+        // cover a five-digit integer on every lane too (#210 phase 2).
+        channel.delay_samples = miso_engine_session::CHANNEL_BUILTIN_DELAY_SAMPLES_MAXIMUM;
     }
     track.fader.left_db = tiny;
     track.fader.right_db = tiny;

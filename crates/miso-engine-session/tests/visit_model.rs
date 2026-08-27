@@ -88,6 +88,20 @@ fn visitor_counts_keys_tags_and_conditional_canonical_order_are_exact() {
         declared.records.contains(&(None, 10)),
         "track has ten wire fields"
     );
+    // Issue #210 phase 2 moved this from four to five. The count is the BTLV field count the
+    // visitor declares for `ChannelBuiltins`; a model field added without it stays out of the wire
+    // form silently, which is exactly the drift this row exists to catch.
+    assert_eq!(
+        declared
+            .records
+            .iter()
+            .filter(|(key, _)| *key == Some(keys::builtins::LEFT)
+                || *key == Some(keys::builtins::RIGHT))
+            .map(|(_, fields)| *fields)
+            .collect::<Vec<_>>(),
+        vec![5; model.tracks.len() * 2],
+        "every channel-builtins table declares five wire fields"
+    );
     assert!(declared.arrays.contains(&(keys::rack::EFFECTS, 1)));
     assert_eq!(
         &declared.ids[3..5]
