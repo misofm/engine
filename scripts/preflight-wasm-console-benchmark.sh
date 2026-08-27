@@ -49,6 +49,7 @@ case "${1:-}" in
     --compressor-round1) arm=compressor-round1; shift ;;
     --compressor-round1-baseline) arm=compressor-round1-baseline; shift ;;
     --round1-composed) arm=round1-composed; shift ;;
+    --issue183) arm=issue183; shift ;;
     --round2-lane) arm=round2-lane; shift ;;
     --round2-lane-baseline) arm=round2-lane-baseline; shift ;;
     --round2-eqrack) arm=round2-eqrack; shift ;;
