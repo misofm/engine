@@ -152,18 +152,29 @@ fn emitted_layout_matches_real_repr_c_structures() {
     require_layout(&miso_engine_parameter_metadata::render_abi_layout());
 }
 
-/// A wrong `prepareConfig` offset must not be satisfied by an identically named field elsewhere.
+/// A wrong `resourceReport` offset must not be satisfied by the identical prepare-config row.
 #[test]
 fn scoped_layout_checker_rejects_one_structure_specific_offset_mutation() {
     let document = miso_engine_parameter_metadata::render_abi_layout();
-    let mutated = document.replacen(
-        "\"name\": \"maximumTracks\", \"offset\": 40, \"type\": \"u64\"",
-        "\"name\": \"maximumTracks\", \"offset\": 41, \"type\": \"u64\"",
+    let resource = structure_section(
+        &document,
+        "resourceReport",
+        size_of::<WebResourceReportV1>(),
+    );
+    let mutated_resource = resource.replacen(
+        "\"name\": \"sampleRateHz\", \"offset\": 8, \"type\": \"u32\"",
+        "\"name\": \"sampleRateHz\", \"offset\": 9, \"type\": \"u32\"",
         1,
     );
+    let mutated = document.replacen(resource, &mutated_resource, 1);
     assert_ne!(
         document, mutated,
         "red mutation must match the generated layout"
+    );
+    assert!(
+        structure_section(&mutated, "prepareConfig", size_of::<WebPrepareConfigV1>())
+            .contains("\"name\": \"sampleRateHz\", \"offset\": 8, \"type\": \"u32\""),
+        "the duplicate prepare-config triple must remain to distinguish scoped from global checks"
     );
     assert!(std::panic::catch_unwind(|| require_layout(&mutated)).is_err());
 }
