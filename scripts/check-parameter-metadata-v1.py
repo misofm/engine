@@ -29,7 +29,20 @@ RATES = {1: "sample", 2: "block", 3: "none"}
 POLICIES = {1: "shared", 2: "perLane"}
 SMOOTHINGS = {1: "none", 2: "linear", 3: "onePole99"}
 
-COMMAND_KINDS = ["pan", "matrix", "faderDb", "mute", "effectParam", "effectBypass"]
+COMMAND_KINDS = [
+    "pan", "matrix", "faderDb", "mute", "effectParam", "effectBypass",
+    "observeSubscribe", "observeUnsubscribe",
+]
+# The two host-level transaction kinds. They are applied -- `admit_commands` binds or unbinds the
+# tap and acknowledges `none` -- but what they apply to is the `miso.observe.v1` subscription map,
+# not anything the render thread reads. The vocabulary is complete at eight; `plane` is what tells
+# the six DSP kinds apart from these two. Spelled here rather than imported on purpose, and
+# `scripts/check-command-kind-vocabulary.py` is what proves this list, the Rust constants, the
+# decode whitelist, the host JS set, the `.d.ts` enum and the generator are one vocabulary.
+OBSERVE_COMMAND_KINDS = ["observeSubscribe", "observeUnsubscribe"]
+COMMAND_KIND_KEYS = {"value", "name", "applied", "plane"}
+PLANE_RENDER = "render"
+PLANE_OBSERVATION = "observation"
 # Issue #143 added `unknownTap` (10) and `observationUnbound` (11); issue #151 found that this
 # list, the host JS acknowledgement bound and the generator all still stopped at `wrongState`.
 # The list is spelled here rather than imported on purpose -- this validator is deliberately a
@@ -102,12 +115,34 @@ def validate(document: dict) -> None:
     require(document["maximumCommandRecords"] >= 1, "maximum command records")
 
     kinds = document["commandKinds"]
+    require(all(set(kind) == COMMAND_KIND_KEYS for kind in kinds), "command kind keys")
     require([kind["name"] for kind in kinds] == COMMAND_KINDS, "command kinds")
-    require([kind["value"] for kind in kinds] == list(range(1, 7)), "command kind values")
+    # Derived, never a literal: this list used to read `range(1, 7)` while the wire decoded eight
+    # kinds, which is precisely the drift that went unnoticed for two releases.
+    require(
+        [kind["value"] for kind in kinds] == list(range(1, len(COMMAND_KINDS) + 1)),
+        "command kind values",
+    )
     applied = {kind["name"] for kind in kinds if kind["applied"]}
     # Issue #140: every declared kind is applied. Nothing in the ABI is declared-and-refused any
     # more, so a kind that reports `applied: false` is a regression, not a documented gap.
     require(applied == set(COMMAND_KINDS), "applied command kinds")
+    # What "applied" means splits by plane, and the split is exact in both directions: the six DSP
+    # kinds move state the render thread reads, the two observation kinds move the
+    # `miso.observe.v1` subscription map and nothing else. A DSP kind that reports the observation
+    # plane would be claiming it renders nothing; an observation kind that reports the render plane
+    # would put a subscribe on the applied-DSP list the #140 rule above stands on.
+    require(
+        all(kind["plane"] in (PLANE_RENDER, PLANE_OBSERVATION) for kind in kinds),
+        "command kind planes",
+    )
+    observation_plane = [kind["name"] for kind in kinds if kind["plane"] == PLANE_OBSERVATION]
+    require(observation_plane == OBSERVE_COMMAND_KINDS, "observation-plane command kinds")
+    render_plane = [kind["name"] for kind in kinds if kind["plane"] == PLANE_RENDER]
+    require(
+        render_plane == [name for name in COMMAND_KINDS if name not in OBSERVE_COMMAND_KINDS],
+        "render-plane command kinds",
+    )
     reasons = document["commandReasons"]
     require([reason["name"] for reason in reasons] == COMMAND_REASONS, "command reasons")
     require(
@@ -376,6 +411,25 @@ def self_test() -> int:
         ("abi", lambda d: d.update(abiVersion=1)),
         ("record bytes", lambda d: d.update(commandRecordBytes=32)),
         ("kind not applied", lambda d: d["commandKinds"][2].update(applied=False)),
+        # The 6-vs-8 split the kind-vocabulary gate exists to close: the shipped document stopped
+        # at `effectBypass` while the wire decoded eight kinds. Its shape is red here now, and so
+        # is every way the plane column can lie about what a kind applies to.
+        (
+            "kind vocabulary truncated at effectBypass",
+            lambda d: d["commandKinds"].__delitem__(slice(6, None)),
+        ),
+        ("kind renamed", lambda d: d["commandKinds"][6].update(name="observeArm")),
+        ("kind value renumbered", lambda d: d["commandKinds"][7].update(value=9)),
+        (
+            "an observation kind claims the render plane",
+            lambda d: d["commandKinds"][6].update(plane="render"),
+        ),
+        (
+            "a DSP kind claims the observation plane",
+            lambda d: d["commandKinds"][0].update(plane="observation"),
+        ),
+        ("a kind row drops its plane", lambda d: d["commandKinds"][0].pop("plane")),
+        ("a kind row invents a plane", lambda d: d["commandKinds"][0].update(plane="control")),
         ("reason order", lambda d: d["commandReasons"].reverse()),
         # Issue #151's exact defect shape: a vocabulary that stops one short of the reasons the
         # observation path returns, and one whose value column no longer matches its name column.

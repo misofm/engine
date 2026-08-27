@@ -4,12 +4,14 @@
   "commandRecordBytes": 48,
   "maximumCommandRecords": 256,
   "commandKinds": [
-    { "value": 1, "name": "pan", "applied": true },
-    { "value": 2, "name": "matrix", "applied": true },
-    { "value": 3, "name": "faderDb", "applied": true },
-    { "value": 4, "name": "mute", "applied": true },
-    { "value": 5, "name": "effectParam", "applied": true },
-    { "value": 6, "name": "effectBypass", "applied": true }
+    { "value": 1, "name": "pan", "applied": true, "plane": "render" },
+    { "value": 2, "name": "matrix", "applied": true, "plane": "render" },
+    { "value": 3, "name": "faderDb", "applied": true, "plane": "render" },
+    { "value": 4, "name": "mute", "applied": true, "plane": "render" },
+    { "value": 5, "name": "effectParam", "applied": true, "plane": "render" },
+    { "value": 6, "name": "effectBypass", "applied": true, "plane": "render" },
+    { "value": 7, "name": "observeSubscribe", "applied": true, "plane": "observation" },
+    { "value": 8, "name": "observeUnsubscribe", "applied": true, "plane": "observation" }
   ],
   "commandReasons": [
     { "value": 0, "name": "none" },
