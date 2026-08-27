@@ -47,6 +47,8 @@ function moduleTypes(kind, symbol) {
       + `export type EffectId = EffectDescriptor["id"];\n`
       + `export type EffectParameter<E extends EffectId> = Extract<EffectDescriptor, { readonly id: E }>["parameters"][number];\n`
       + `export type EffectParameterName<E extends EffectId> = EffectParameter<E>["name"];\n`
+      + `export type EffectObservation<E extends EffectId> = Extract<EffectDescriptor, { readonly id: E }>["observations"][number];\n`
+      + `export type TapName<E extends EffectId> = EffectObservation<E>["name"];\n`
       + `export type CommandReasonName = Catalog["commandReasons"][number]["name"];\n`
       + `export type ObservationTransactionKindName = Catalog["observationTransactionKinds"][number]["name"];\n`;
   }

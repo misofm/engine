@@ -50,5 +50,7 @@ stereo `wav32f` blocks without retaining duration-scaled output, returns the inc
 and refuses to overwrite an existing path. `renderAll()` and caller-supplied WAV bytes remain the
 explicit in-memory forms. `wav16` remains deferred because v1 has no quantization/dither policy.
 Raw `{ toml }` validation is fully engine-authoritative. For rendering, the frozen ABI cannot query
-a compiled source's nonzero region, so raw-TOML source inputs denote a complete zero-origin region;
-use a typed `SessionPlan` when a declared source region is not zero-origin.
+a compiled session's source map. Until the additive engine introspection ABI lands, raw-TOML
+rendering returns `MisoIntrospectionUnavailableError` with reason `introspectionUnavailable` rather
+than parsing TOML or guessing source regions in the SDK. This is a temporary integration state;
+external TOML remains a first-class rendering input in the completed API.

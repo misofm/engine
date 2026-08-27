@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { closeSync, openSync, unlinkSync, writeSync } from "node:fs";
 import { isSessionPlan, WasmBoundary, type EngineStatus } from "./abi.js";
 import { OfflineConsole } from "./console.js";
-import { MisoOfflineError, MisoSourceError } from "./errors.js";
+import { MisoIntrospectionUnavailableError, MisoOfflineError, MisoSourceError } from "./errors.js";
 import type {
   MeterFrame,
   OfflineEngine,
@@ -39,6 +39,13 @@ interface PreparedSource {
   consumed: number;
 }
 
+interface SessionIntrospection {
+  readonly sampleRateHz: number;
+  readonly quantumFrames: number;
+  readonly tracks: readonly string[];
+  readonly sources: readonly SourceDeclaration[];
+}
+
 const meterOffsets = Object.freeze(Object.fromEntries(ABI_LAYOUT.structures.meterHeader.fields.map((field) => [field.name, field.offset]))) as Readonly<Record<string, number>>;
 const encoder = new TextEncoder();
 
@@ -48,10 +55,10 @@ function numeric(value: unknown, sourceId: string, path: string): number {
   return number;
 }
 
-function declarations<S extends SessionShape>(plan: SessionPlan<S> | { readonly toml: string }, inputs: Readonly<Record<string, OfflineSource>>, sampleRateHz: number): readonly SourceDeclaration[] {
+function sessionIntrospection<S extends SessionShape>(plan: SessionPlan<S> | { readonly toml: string }): SessionIntrospection {
   const candidate = plan as SessionPlan<SessionShape> | { readonly toml: string };
   if (isSessionPlan(candidate)) {
-    return Object.freeze(candidate.json.sources.map((row) => {
+    const sources = Object.freeze(candidate.json.sources.map((row) => {
       const id = String(row.id);
       const mapping = row.mapping as Readonly<Record<string, unknown>>;
       const region = mapping.region as Readonly<Record<string, unknown>>;
@@ -63,16 +70,16 @@ function declarations<S extends SessionShape>(plan: SessionPlan<S> | { readonly 
         frames: numeric(region.length_samples, id, "mapping.region.length_samples"),
       });
     }));
+    return Object.freeze({
+      sampleRateHz: numeric(candidate.json.sample_rate_hz, "$", "sample_rate_hz"),
+      quantumFrames: numeric(candidate.json.quantum_frames, "$", "quantum_frames"),
+      tracks: Object.freeze(candidate.tracks.map((track) => track.id)),
+      sources,
+    });
   }
-  // The current Wasm ABI has no compiled-source introspection export. For the raw `{toml}` escape
-  // hatch, source input therefore denotes a complete region starting at zero. Validation remains
-  // engine-authoritative; callers needing a nonzero region use a typed SessionPlan until an ABI
-  // query exists instead of duplicating TOML parsing here.
-  return Object.freeze(Object.entries(inputs).map(([id, input]) => {
-    const channels = Array.isArray(input) ? input.length : 0;
-    const frames = Array.isArray(input) && input[0] ? input[0].length : 0;
-    return Object.freeze({ id, sampleRateHz, channels, startFrame: 0, frames });
-  }));
+  // Coordinator ruling 5438024085: do not grow a second TOML parser or guess zero-origin regions.
+  // The additive engine-owned query will replace this typed temporary refusal when its ABI lands.
+  throw new MisoIntrospectionUnavailableError("sources");
 }
 
 function byteOrder(left: string, right: string): number {
@@ -110,8 +117,8 @@ function waveSource(id: string, wave: WaveData | WaveFile, declaration: SourceDe
   };
 }
 
-async function prepareSources<S extends SessionShape>(plan: SessionPlan<S> | { readonly toml: string }, inputs: Readonly<Record<string, OfflineSource>>, sampleRateHz: number): Promise<readonly PreparedSource[]> {
-  const rows = declarations(plan, inputs, sampleRateHz);
+async function prepareSources(introspection: SessionIntrospection, inputs: Readonly<Record<string, OfflineSource>>): Promise<readonly PreparedSource[]> {
+  const rows = introspection.sources;
   const expected = new Set(rows.map((row) => row.id));
   for (const id of Object.keys(inputs)) if (!expected.has(id)) throw new MisoSourceError("Source input is not declared by the session", id, "sources");
   const prepared: PreparedSource[] = [];
@@ -124,10 +131,10 @@ async function prepareSources<S extends SessionShape>(plan: SessionPlan<S> | { r
       } else {
         const wav = (input as Readonly<{ wav: Uint8Array | string }>).wav;
         if (wav instanceof Uint8Array) {
-          prepared.push(waveSource(row.id, parseWave(new Uint8Array(wav), row.id), row, sampleRateHz));
+          prepared.push(waveSource(row.id, parseWave(new Uint8Array(wav), row.id), row, introspection.sampleRateHz));
         } else {
           const file = openWaveFile(wav, row.id);
-          try { prepared.push(waveSource(row.id, file, row, sampleRateHz)); }
+          try { prepared.push(waveSource(row.id, file, row, introspection.sampleRateHz)); }
           catch (error) { try { file.close(); } catch (_closeError) { /* primary typed error wins */ } throw error; }
         }
       }
@@ -307,15 +314,19 @@ class Engine<S extends SessionShape> implements OfflineEngine<S> {
 }
 
 export async function createOfflineEngine<S extends SessionShape>(options: OfflineEngineOptions<S>): Promise<OfflineEngine<S>> {
-  const boundary = await WasmBoundary.create(options.session, options.limits, options.wasm);
-  let sources: readonly PreparedSource[] | undefined;
+  const introspection = sessionIntrospection(options.session);
+  const sources = await prepareSources(introspection, options.sources);
+  let boundary: WasmBoundary | undefined;
   try {
-    sources = await prepareSources(options.session, options.sources, boundary.sampleRateHz);
+    boundary = await WasmBoundary.create(options.session, options.limits, options.wasm);
+    if (boundary.sampleRateHz !== introspection.sampleRateHz || boundary.quantumFrames !== introspection.quantumFrames) {
+      throw new MisoOfflineError("Engine preparation shape differs from SessionPlan introspection", "prepare");
+    }
     const plan = isSessionPlan(options.session as SessionPlan<SessionShape> | { readonly toml: string }) ? options.session as SessionPlan<S> : undefined;
     return new Engine(boundary, sources, plan, (options.limits?.consoleMeterBlocks ?? 0n) !== 0n);
   } catch (error) {
-    if (sources) closeSources(sources);
-    boundary.dispose();
+    closeSources(sources);
+    boundary?.dispose();
     throw error;
   }
 }

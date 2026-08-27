@@ -4,9 +4,10 @@ import type {
   EffectId,
   EffectParameter,
   EffectParameterName,
+  TapName,
 } from "../generated/catalog.js";
 
-export type { CommandReasonName, EffectId } from "../generated/catalog.js";
+export type { CommandReasonName, EffectId, TapName } from "../generated/catalog.js";
 
 export type Rack = "simd1" | "dynamic" | "simd2";
 export type Channel = "left" | "right" | "both";

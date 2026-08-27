@@ -1,5 +1,5 @@
 import type { CommandRecord } from "../core/command.js";
-import type { CommandAck, EffectDecl, EffectParamValues, Indices, Rack } from "../core/types.js";
+import type { CommandAck, EffectDecl, EffectParamValues, Indices, Rack, TapName } from "../core/types.js";
 import type { SessionShape } from "../core/session.js";
 import type { EngineResources, EngineStatus, SessionDiagnostics, WasmAssetOptions } from "./abi.js";
 
@@ -68,7 +68,7 @@ export interface OfflineEffectConsole<D extends EffectDecl = EffectDecl> {
   readonly slotId: string;
   set(params: EffectParamValues<D["effectId"]>): Promise<CommandAck>;
   bypass(on: boolean): Promise<CommandAck>;
-  observe(tap: string | number, options?: Readonly<{ windowBlocks?: number }>): Promise<ObservationHandle>;
+  observe(tap: TapName<D["effectId"]>, options?: Readonly<{ windowBlocks?: number }>): Promise<ObservationHandle>;
 }
 
 export interface OfflineTrackConsole<E extends readonly EffectDecl[] = readonly EffectDecl[]> {

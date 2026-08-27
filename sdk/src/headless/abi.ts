@@ -161,8 +161,7 @@ function writeConfig(exports: WebExports, handle: number, header: Readonly<{ sam
       const checked = u32(value as number, `limits.${field.name}`);
       view.setUint32(field.offset, checked, true);
     } else {
-      const consoleWord = field.offset >= 160;
-      view.setBigUint64(field.offset, u64(value as bigint, `limits.${field.name}`, !consoleWord), true);
+      view.setBigUint64(field.offset, u64(value as bigint, `limits.${field.name}`, false), true);
     }
   }
   if (tomlBytes > limits.sessionTomlBytes) throw new MisoOfflineError("Session TOML exceeds sessionTomlBytes", "prepare");

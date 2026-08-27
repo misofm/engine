@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -73,6 +73,33 @@ function assertE7(nativeBytes, sdkBytes, expected, rate) {
   assert.equal(digest(sdkBytes), expected, `E7 ${rate} Hz digest differs from the pinned manifest`);
 }
 
+function e7Plan(sdk, rate) {
+  let builder = sdk.session({
+    id: "parametric-eq-nine-track", sampleRateHz: rate, revision: 42, quantumFrames: 128,
+    limits: { pcmRingFrames: 1_024, controlQueueMessages: 64, memoryBytes: 16_777_216 },
+  }).source("fixture-source", { channels: 2, frames: 1_024, sampleRateHz: rate });
+  const builtins = { polarityInvert: false, trimDb: 0, hpfHz: 20, lpfHz: 20_000 };
+  for (let index = 0; index < 9; index += 1) {
+    const equalizer = index === 0
+      ? sdk.effect("miso.parametric-eq", {
+          "band-1-enabled": true, "band-1-kind": "bell", "band-1-frequency": [120, 2_400],
+          "band-1-gain": [6, -9], "band-1-q": 0.70710677, "band-1-shelf-slope": 1,
+        }, { slotId: "eq" })
+      : sdk.effect("miso.parametric-eq", {}, { slotId: "eq" });
+    builder = builder.track(`eq${index}`, {
+      source: "fixture-source", builtins, simd1: [equalizer], pan: { left: 1, right: 1, smoothingSamples: 16 },
+    });
+  }
+  builder = builder.output("main-out");
+  for (let index = 0; index < 9; index += 1) {
+    builder = builder.route({
+      id: `eq${index}-main`, source: { kind: "track", trackId: `eq${index}`, tap: "post_matrix" },
+      destination: { kind: "output_input", outputId: "main-out" },
+    });
+  }
+  return builder.build();
+}
+
 function assertE8(firstAffected, appliedAtSample, expected) {
   assert.equal(firstAffected, expected, "E8 first changed sample is not the next block boundary");
   assert.equal(appliedAtSample, BigInt(expected), "E8 acknowledgement names the wrong sample");
@@ -126,7 +153,18 @@ async function runE7(sdk, wasm, nativeRunner) {
       } finally { pathWave.close(); }
       assert.throws(() => pathWave.decode(0, 1), (error) => error?.code === "miso.source.v1" && error.path === "wav.lifecycle");
       const toml = await readFile(resolve(fixtures, `${stem}.toml`), "utf8");
-      const engine = await sdk.createOfflineEngine({ session: { toml }, sources: { "fixture-source": { wav: sourcePath } }, wasm: { bytes: wasm } });
+      const compile = WebAssembly.compile;
+      let rawCompileCalls = 0;
+      WebAssembly.compile = async (...args) => { rawCompileCalls += 1; return compile(...args); };
+      try {
+        await assert.rejects(
+          sdk.createOfflineEngine({ session: { toml }, sources: { "fixture-source": { wav: sourcePath } }, wasm: { bytes: wasm } }),
+          (error) => error?.code === "miso.introspection.unavailable.v1" && error.reason === "introspectionUnavailable",
+          "raw TOML must use the typed interim introspection refusal until the additive ABI lands",
+        );
+      } finally { WebAssembly.compile = compile; }
+      assert.equal(rawCompileCalls, 0, "the interim introspection refusal must not create a partial engine");
+      const engine = await sdk.createOfflineEngine({ session: e7Plan(sdk, rate), sources: { "fixture-source": { wav: sourcePath } }, wasm: { bytes: wasm } });
       let maximumRenderRequest = 0;
       const render = engine.render.bind(engine);
       engine.render = (frames) => { maximumRenderRequest = Math.max(maximumRenderRequest, frames); return render(frames); };
@@ -146,6 +184,11 @@ async function runE7(sdk, wasm, nativeRunner) {
       assert.equal(report.sha256, digest(sdkBytes));
       evidence[rate] = digest(sdkBytes);
     }
+    const rf64Path = resolve(fixtures, "rf64-48000.wav");
+    const rf64Memory = sdk.parseWave(await readFile(rf64Path), "rf64-memory");
+    const rf64File = sdk.openWaveFile(rf64Path, "rf64-path");
+    try { assert.deepEqual(rf64File.decode(1, 17), sdk.decodeWave(rf64Memory, 1, 17), "RF64 path and memory decoding must agree"); }
+    finally { rf64File.close(); }
   } finally { await rm(directory, { recursive: true, force: true }); }
   return Object.freeze(evidence);
 }
@@ -253,6 +296,25 @@ async function checkEdges(sdk, wasm) {
   assert.deepEqual(Array.from(pcm24), [-1, 0, Math.fround(8_388_607 / 8_388_608)]);
   const malformed = pcmWave(16, [0]); new DataView(malformed.buffer).setUint32(4, 0, true);
   assert.throws(() => sdk.parseWave(malformed, "malformed"), (error) => error?.code === "miso.source.v1" && error.path === "wav.riff");
+  const rf64 = new Uint8Array(await readFile(resolve(fixtures, "rf64-48000.wav")));
+  const zeroSampleCount = new Uint8Array(rf64); new DataView(zeroSampleCount.buffer).setBigUint64(36, 0n, true);
+  assert.equal(sdk.parseWave(zeroSampleCount, "rf64-zero-count").frames, 516, "RF64 zero sample-count means unspecified");
+  const wrongRoot = new Uint8Array(rf64); new DataView(wrongRoot.buffer).setUint32(4, 0, true);
+  assert.throws(() => sdk.parseWave(wrongRoot, "rf64-root"), (error) => error?.code === "miso.source.v1" && error.path === "wav.riff");
+  const cleanRiff = sdk.wav32fBytes(new Float32Array(1), new Float32Array(1), 48_000);
+  const trailingRiff = new Uint8Array(cleanRiff.byteLength + 1); trailingRiff.set(cleanRiff); new DataView(trailingRiff.buffer).setUint32(4, trailingRiff.byteLength - 8, true);
+  assert.throws(() => sdk.parseWave(trailingRiff, "riff-trailing"), (error) => error?.code === "miso.source.v1" && error.path === "wav.chunks");
+  const malformedDirectory = await mkdtemp(resolve(tmpdir(), "miso-sdk-wav-red-"));
+  try {
+    const zeroPath = resolve(malformedDirectory, "rf64-zero-count.wav");
+    const rootPath = resolve(malformedDirectory, "rf64-root.wav");
+    const trailingPath = resolve(malformedDirectory, "riff-trailing.wav");
+    await Promise.all([writeFile(zeroPath, zeroSampleCount), writeFile(rootPath, wrongRoot), writeFile(trailingPath, trailingRiff)]);
+    const zeroFile = sdk.openWaveFile(zeroPath, "rf64-zero-path");
+    try { assert.equal(zeroFile.frames, 516); } finally { zeroFile.close(); }
+    assert.throws(() => sdk.openWaveFile(rootPath, "rf64-root-path"), (error) => error?.code === "miso.source.v1" && error.path === "wav.riff");
+    assert.throws(() => sdk.openWaveFile(trailingPath, "riff-trailing-path"), (error) => error?.code === "miso.source.v1" && error.path === "wav.chunks");
+  } finally { await rm(malformedDirectory, { recursive: true, force: true }); }
   const frames = 256, planes = deterministicPlanes(frames, 7);
   const plan = sdk.session({ id: "sdk-partial", sampleRateHz: 48_000 }).source("source", { channels: 2, frames }).track("track", { source: "source", pan: { left: -1, right: 1 } }).build();
   const whole = await sdk.createOfflineEngine({ session: plan, sources: { source: planes }, wasm: { bytes: wasm } });
@@ -265,11 +327,17 @@ async function checkEdges(sdk, wasm) {
     assert.deepEqual(concatenate(first.right, second.right), expected.right, "partial render calls must retain an exact quantum tail");
   } finally { whole.dispose(); split.dispose(); }
   const mismatched = sdk.wav32fBytes(planes[0], planes[1], 44_100);
-  await assert.rejects(
-    sdk.createOfflineEngine({ session: plan, sources: { source: { wav: mismatched } }, wasm: { bytes: wasm } }),
-    (error) => error?.code === "miso.source.v1" && error.path === "sample_rate_hz",
-    "source/session rate mismatch must reject before render",
-  );
+  const compile = WebAssembly.compile;
+  let compileCalls = 0;
+  WebAssembly.compile = async (...args) => { compileCalls += 1; return compile(...args); };
+  try {
+    await assert.rejects(
+      sdk.createOfflineEngine({ session: plan, sources: { source: { wav: mismatched } }, wasm: { bytes: wasm } }),
+      (error) => error?.code === "miso.source.v1" && error.path === "sample_rate_hz",
+      "source/session rate mismatch must reject before render",
+    );
+  } finally { WebAssembly.compile = compile; }
+  assert.equal(compileCalls, 0, "source/session rate mismatch must reject before WebAssembly compilation");
 }
 
 function redMutations(evidence) {

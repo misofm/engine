@@ -10,9 +10,12 @@ declare const engine: OfflineEngine<Shape>;
 
 engine.console.track("lead").fader(-6);
 engine.console.track("lead").effect(0).set({ threshold: [-24, -12] });
+engine.console.track("lead").effect(0).observe("Gain Reduction");
 // @ts-expect-error Headless console track IDs remain exact.
 engine.console.track("missing");
 // @ts-expect-error Headless effect positions remain exact.
 engine.console.track("lead").effect(1);
 // @ts-expect-error Effect parameter names remain exact.
 engine.console.track("lead").effect(0).set({ missing: 1 });
+// @ts-expect-error Effect observation names remain exact.
+engine.console.track("lead").effect(0).observe("Output Peak");

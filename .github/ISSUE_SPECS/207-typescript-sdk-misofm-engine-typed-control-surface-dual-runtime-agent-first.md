@@ -401,3 +401,42 @@ final handoff names exact commits, gate counts/digests, unresolved findings, and
   E8 sample 256, all six E9 reasons, E10a pre-instantiation rejection, and five of five deliberate
   red mutations. TypeScript, public type, syntax, and diff-hygiene checks pass. Full repository
   gates and independent Phase 2 review remain pending.
+
+### Phase 2 attempt-1 Sol HOLD and coordinator ruling
+
+- Independent Sol review held `2a52efa` on seven findings: raw TOML could not support arbitrary
+  valid key syntax or nonzero source regions; RF64 differed from the native parser in three named
+  cases; the sweep accidentally required Bun before P6; source-rate refusal happened after Wasm
+  compilation; effect observations accepted arbitrary strings; and the prepare writer retained a
+  hand-maintained offset-160 threshold. The reviewer otherwise reproduced E6-E10a, the five red
+  mutations, the 95-row sweep, formatting/clippy, frozen-file isolation, and clean-tree evidence.
+- Coordinator comment `5438024085` confirms the raw-TOML contradiction and rules for Option 2: an
+  additive engine-owned session/source-introspection ABI. A TypeScript TOML reader and a permanent
+  validation-only downgrade are both rejected. Until that ABI lands, raw-TOML rendering must use a
+  typed `introspectionUnavailable` refusal, never guessed source declarations. Final Phase 2
+  acceptance therefore waits for the coordinated engine merge; the bounded corrections proceed.
+
+### Phase 2 attempt-2 bounded corrections (pending checkpoint)
+
+- Removed raw-TOML scalar/zero-origin guesses from engine creation in favor of an internal
+  `SessionIntrospection` boundary. The temporary raw path returns
+  `MisoIntrospectionUnavailableError` (`reason: "introspectionUnavailable"`) before Wasm compile;
+  typed plans supply exact header/source declarations. Path and in-memory source rate mismatches
+  are now checked before any `WebAssembly.compile` call.
+- RIFF/RF64 memory and path parsers now match the native runner's root-size placeholder,
+  RF64-data placeholder, `ds64` table sizing/order, 16 MiB skipped-metadata cap, zero sample-count,
+  and exact chunk-end rules. Positive path/memory RF64 decoding plus malformed root and trailing
+  byte probes cover both parser paths.
+- `TapName<EffectId>` is generated from each descriptor's observations, and the high-level effect
+  console now rejects an invalid observation name at compile time. Raw advanced observation
+  addresses retain their numeric/string escape hatch. The prepare writer consumes generated field
+  types/offsets without the literal offset-160 threshold.
+- `check-sdk-headless.sh` is Node-only by default, preserving sweep hermeticity and the P6 boundary;
+  explicit `--bun` runs the same eval under Bun for local Phase 2 evidence. Shell syntax, generated
+  parity, TypeScript/public type checks, and diff hygiene pass.
+- A first correction run turned red because the new typed introspection accidentally read
+  `quantum_frames` from `limits` instead of the Session V1 root. Correcting the production lookup,
+  without changing the eval, restored the gate. The final focused run is green under Node 22.23.2
+  and Bun 1.4.0 with unchanged E6/E7 digests, E8 sample 256, all E9 reasons, E10a pre-instantiation
+  rejection, and five of five deliberate red mutations. The E7 typed nine-track reconstruction is
+  byte-identical to the native raw-TOML fixture at 48 and 96 kHz.

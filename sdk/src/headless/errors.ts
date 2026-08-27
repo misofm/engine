@@ -42,3 +42,14 @@ export class MisoSourceError extends Error {
     this.name = "MisoSourceError";
   }
 }
+
+/** Temporary raw-TOML render refusal until the engine-owned source-introspection ABI is present. */
+export class MisoIntrospectionUnavailableError extends Error {
+  readonly code = "miso.introspection.unavailable.v1" as const;
+  readonly reason = "introspectionUnavailable" as const;
+
+  constructor(readonly capability: "sessionHeader" | "sources") {
+    super(`Engine session introspection is unavailable for raw TOML (${capability})`);
+    this.name = "MisoIntrospectionUnavailableError";
+  }
+}

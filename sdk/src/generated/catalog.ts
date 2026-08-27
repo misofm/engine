@@ -2334,5 +2334,7 @@ export type EffectDescriptor = Catalog["effects"][number];
 export type EffectId = EffectDescriptor["id"];
 export type EffectParameter<E extends EffectId> = Extract<EffectDescriptor, { readonly id: E }>["parameters"][number];
 export type EffectParameterName<E extends EffectId> = EffectParameter<E>["name"];
+export type EffectObservation<E extends EffectId> = Extract<EffectDescriptor, { readonly id: E }>["observations"][number];
+export type TapName<E extends EffectId> = EffectObservation<E>["name"];
 export type CommandReasonName = Catalog["commandReasons"][number]["name"];
 export type ObservationTransactionKindName = Catalog["observationTransactionKinds"][number]["name"];

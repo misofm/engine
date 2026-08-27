@@ -27,6 +27,9 @@ export interface WaveFile {
 const text = new TextDecoder("ascii");
 const PCM_GUID = "0100000000001000800000aa00389b71";
 const FLOAT_GUID = "0300000000001000800000aa00389b71";
+const RF64_PLACEHOLDER = 0xffff_ffff;
+const MAX_WAVE_CHUNKS = 4_096;
+const MAX_SKIPPED_METADATA_BYTES = 16 * 1024 * 1024;
 
 function tag(bytes: Uint8Array, offset: number): string {
   return text.decode(bytes.subarray(offset, offset + 4));
@@ -61,7 +64,9 @@ export function parseWave(bytes: Uint8Array, sourceId = "wav"): WaveData {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const container = tag(bytes, 0);
   if ((container !== "RIFF" && container !== "RF64") || tag(bytes, 8) !== "WAVE") sourceError(sourceId, "Expected RIFF/WAVE or RF64/WAVE");
-  if (container === "RIFF" && view.getUint32(4, true) + 8 !== bytes.byteLength) sourceError(sourceId, "RIFF size does not match the byte sequence", "wav.riff");
+  const rootSize = view.getUint32(4, true);
+  if ((container === "RIFF" && (rootSize === RF64_PLACEHOLDER || rootSize + 8 !== bytes.byteLength))
+      || (container === "RF64" && rootSize !== RF64_PLACEHOLDER)) sourceError(sourceId, "WAV root size is invalid", "wav.riff");
   let rf64DataBytes: bigint | undefined;
   let rf64RiffBytes: bigint | undefined;
   let rf64SampleCount: bigint | undefined;
@@ -70,23 +75,28 @@ export function parseWave(bytes: Uint8Array, sourceId = "wav"): WaveData {
   let dataBytes = -1;
   let offset = 12;
   let chunks = 0;
-  while (offset + 8 <= bytes.byteLength) {
+  let skipped = 0;
+  while (offset < bytes.byteLength) {
+    if (bytes.byteLength - offset < 8) sourceError(sourceId, "WAV has trailing non-chunk bytes", "wav.chunks");
     chunks += 1;
-    if (chunks > 4_096) sourceError(sourceId, "WAV chunk count exceeds 4096", "wav.chunks");
+    if (chunks > MAX_WAVE_CHUNKS) sourceError(sourceId, "WAV chunk count exceeds 4096", "wav.chunks");
     const id = tag(bytes, offset);
     const size32 = view.getUint32(offset + 4, true);
     const payload = offset + 8;
     let size = size32;
-    if (container === "RF64" && id === "data" && size32 === 0xffff_ffff) {
-      if (rf64DataBytes === undefined) sourceError(sourceId, "RF64 data precedes ds64", "wav.ds64");
+    if (container === "RF64" && id === "data") {
+      if (size32 !== RF64_PLACEHOLDER || rf64DataBytes === undefined) sourceError(sourceId, "RF64 data requires a preceding ds64 and placeholder size", "wav.ds64");
       size = safeNumber(rf64DataBytes, sourceId, "wav.data");
     }
     if (payload + size > bytes.byteLength) sourceError(sourceId, "WAV chunk exceeds the byte sequence", `wav.${id.trim() || "chunk"}`);
     if (id === "ds64") {
-      if (container !== "RF64" || size < 28 || rf64DataBytes !== undefined) sourceError(sourceId, "Invalid or duplicate RF64 ds64 chunk", "wav.ds64");
+      if (container !== "RF64" || size < 28 || rf64DataBytes !== undefined || dataOffset >= 0) sourceError(sourceId, "Invalid or duplicate RF64 ds64 chunk", "wav.ds64");
+      const tableLength = view.getUint32(payload + 24, true);
+      if (size !== 28 + tableLength * 12) sourceError(sourceId, "RF64 ds64 table size is inconsistent", "wav.ds64");
       rf64RiffBytes = view.getBigUint64(payload, true);
       rf64DataBytes = view.getBigUint64(payload + 8, true);
       rf64SampleCount = view.getBigUint64(payload + 16, true);
+      skipped += size - 28;
     } else if (id === "fmt ") {
       if (format) sourceError(sourceId, "Duplicate WAV fmt chunk", "wav.fmt");
       if (size !== 16 && size !== 40) sourceError(sourceId, "Unsupported WAV fmt chunk size", "wav.fmt");
@@ -108,7 +118,10 @@ export function parseWave(bytes: Uint8Array, sourceId = "wav"): WaveData {
       if (dataOffset >= 0) sourceError(sourceId, "Duplicate WAV data chunk", "wav.data");
       dataOffset = payload;
       dataBytes = size;
+    } else {
+      skipped += size;
     }
+    if (skipped > MAX_SKIPPED_METADATA_BYTES) sourceError(sourceId, "Skipped WAV metadata exceeds 16 MiB", "wav.metadata");
     const next = payload + size + (size & 1);
     if (next > bytes.byteLength) sourceError(sourceId, "WAV chunk padding exceeds the byte sequence", "wav.padding");
     offset = next;
@@ -118,7 +131,7 @@ export function parseWave(bytes: Uint8Array, sourceId = "wav"): WaveData {
     if (rf64RiffBytes === undefined || rf64DataBytes === undefined || rf64SampleCount === undefined
         || safeNumber(rf64RiffBytes + 8n, sourceId, "wav.ds64") !== bytes.byteLength
         || safeNumber(rf64DataBytes, sourceId, "wav.ds64") !== dataBytes
-        || safeNumber(rf64SampleCount, sourceId, "wav.ds64") !== dataBytes / format.blockAlign) sourceError(sourceId, "RF64 ds64 sizes do not match the container", "wav.ds64");
+        || (rf64SampleCount !== 0n && safeNumber(rf64SampleCount, sourceId, "wav.ds64") !== dataBytes / format.blockAlign)) sourceError(sourceId, "RF64 ds64 sizes do not match the container", "wav.ds64");
   }
   return Object.freeze({ bytes, ...format, frames: dataBytes / format.blockAlign, dataOffset });
 }
@@ -187,25 +200,30 @@ export function openWaveFile(path: string, sourceId = "wav"): WaveFile {
     const headerView = new DataView(header.buffer);
     const container = tag(header, 0);
     if ((container !== "RIFF" && container !== "RF64") || tag(header, 8) !== "WAVE") sourceError(sourceId, "Expected RIFF/WAVE or RF64/WAVE");
-    if (container === "RIFF" && headerView.getUint32(4, true) + 8 !== totalBytes) sourceError(sourceId, "RIFF size does not match the file", "wav.riff");
+    const rootSize = headerView.getUint32(4, true);
+    if ((container === "RIFF" && (rootSize === RF64_PLACEHOLDER || rootSize + 8 !== totalBytes))
+        || (container === "RF64" && rootSize !== RF64_PLACEHOLDER)) sourceError(sourceId, "WAV root size is invalid", "wav.riff");
     let rf64DataBytes: bigint | undefined, rf64RiffBytes: bigint | undefined, rf64SampleCount: bigint | undefined;
     let format: { sampleRateHz: number; channels: number; blockAlign: number; encoding: WaveEncoding } | undefined;
-    let dataOffset = -1, dataBytes = -1, offset = 12, chunks = 0;
-    while (offset + 8 <= totalBytes) {
+    let dataOffset = -1, dataBytes = -1, offset = 12, chunks = 0, skipped = 0;
+    while (offset < totalBytes) {
+      if (totalBytes - offset < 8) sourceError(sourceId, "WAV has trailing non-chunk bytes", "wav.chunks");
       chunks += 1;
-      if (chunks > 4_096) sourceError(sourceId, "WAV chunk count exceeds 4096", "wav.chunks");
+      if (chunks > MAX_WAVE_CHUNKS) sourceError(sourceId, "WAV chunk count exceeds 4096", "wav.chunks");
       const chunk = readExact(fd, offset, 8, sourceId), chunkView = new DataView(chunk.buffer);
       const id = tag(chunk, 0), size32 = chunkView.getUint32(4, true), payload = offset + 8;
       let size = size32;
-      if (container === "RF64" && id === "data" && size32 === 0xffff_ffff) {
-        if (rf64DataBytes === undefined) sourceError(sourceId, "RF64 data precedes ds64", "wav.ds64");
+      if (container === "RF64" && id === "data") {
+        if (size32 !== RF64_PLACEHOLDER || rf64DataBytes === undefined) sourceError(sourceId, "RF64 data requires a preceding ds64 and placeholder size", "wav.ds64");
         size = safeNumber(rf64DataBytes, sourceId, "wav.data");
       }
       if (payload + size > totalBytes) sourceError(sourceId, "WAV chunk exceeds the file", `wav.${id.trim() || "chunk"}`);
       if (id === "ds64") {
-        if (container !== "RF64" || size < 28 || rf64DataBytes !== undefined) sourceError(sourceId, "Invalid or duplicate RF64 ds64 chunk", "wav.ds64");
+        if (container !== "RF64" || size < 28 || rf64DataBytes !== undefined || dataOffset >= 0) sourceError(sourceId, "Invalid or duplicate RF64 ds64 chunk", "wav.ds64");
         const ds64 = readExact(fd, payload, 28, sourceId), view = new DataView(ds64.buffer);
+        if (size !== 28 + view.getUint32(24, true) * 12) sourceError(sourceId, "RF64 ds64 table size is inconsistent", "wav.ds64");
         rf64RiffBytes = view.getBigUint64(0, true); rf64DataBytes = view.getBigUint64(8, true); rf64SampleCount = view.getBigUint64(16, true);
+        skipped += size - 28;
       } else if (id === "fmt ") {
         if (format) sourceError(sourceId, "Duplicate WAV fmt chunk", "wav.fmt");
         if (size !== 16 && size !== 40) sourceError(sourceId, "Unsupported WAV fmt chunk size", "wav.fmt");
@@ -220,7 +238,10 @@ export function openWaveFile(path: string, sourceId = "wav"): WaveFile {
       } else if (id === "data") {
         if (dataOffset >= 0) sourceError(sourceId, "Duplicate WAV data chunk", "wav.data");
         dataOffset = payload; dataBytes = size;
+      } else {
+        skipped += size;
       }
+      if (skipped > MAX_SKIPPED_METADATA_BYTES) sourceError(sourceId, "Skipped WAV metadata exceeds 16 MiB", "wav.metadata");
       const next = payload + size + (size & 1);
       if (next > totalBytes) sourceError(sourceId, "WAV chunk padding exceeds the file", "wav.padding");
       offset = next;
@@ -229,7 +250,7 @@ export function openWaveFile(path: string, sourceId = "wav"): WaveFile {
     if (container === "RF64" && (rf64RiffBytes === undefined || rf64DataBytes === undefined || rf64SampleCount === undefined
       || safeNumber(rf64RiffBytes + 8n, sourceId, "wav.ds64") !== totalBytes
       || safeNumber(rf64DataBytes, sourceId, "wav.ds64") !== dataBytes
-      || safeNumber(rf64SampleCount, sourceId, "wav.ds64") !== dataBytes / format.blockAlign)) sourceError(sourceId, "RF64 ds64 sizes do not match the file", "wav.ds64");
+      || (rf64SampleCount !== 0n && safeNumber(rf64SampleCount, sourceId, "wav.ds64") !== dataBytes / format.blockAlign))) sourceError(sourceId, "RF64 ds64 sizes do not match the file", "wav.ds64");
     let closed = false;
     const result: WaveFile = {
       ...format, frames: dataBytes / format.blockAlign, dataOffset,
