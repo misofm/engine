@@ -310,3 +310,23 @@ final handoff names exact commits, gate counts/digests, unresolved findings, and
 - Independent lightweight gates included the generated SDK self-test, environment-vocabulary red
   mutations, effect-interchange policy red mutations, and public API verifier probes. Phase 1 is
   separately mergeable; Phase 2 may begin only after this evidence checkpoint.
+
+### Phase 2 tranche A: headless runtime foundation (pending checkpoint)
+
+- Added the generated-ABI-driven zero-import Wasm boundary, fresh-instance NUL-terminated session
+  diagnostics, exact pre-compilation SHA-256 attestation, RIFF/RF64 PCM and floating-point decoding,
+  native block-planar and WAV32f output encoders, source-ID byte-order pacing, partial-quantum output
+  retention, status/resources, console command reports, observation commands, and meter polling.
+- Unanticipated ABI fact: a raw `{ toml }` carries no out-of-band rate/quantum and the compiled host
+  exposes no source-declaration query. The smallest-footprint host reads only the two required root
+  integer scalars before giving the complete document to the real compiler; this is not a TOML
+  schema parser. Raw-TOML source inputs currently denote a complete region starting at zero because
+  nonzero region discovery is impossible through the frozen ABI; typed `SessionPlan` inputs retain
+  exact declared regions. This limitation is flagged rather than hidden or addressed by duplicating
+  TOML parsing.
+- The first live probe caught a JavaScript `WebAssembly.instantiate(bytes)` overload-shape mistake
+  before any eval claim. After correction, the real 48 kHz native-runner fixture rendered `1,024`
+  frames / `8,192` bytes with SHA-256
+  `cef2b4282bb8478687b4dec5f764a9f04bc64fc7a35d3a8edd5b398a80494771`, exactly matching the
+  independently pinned native manifest. Real `tsc --noEmit` and diff hygiene pass. Phase 2 eval
+  gates, deliberate red mutations, Bun coverage, 96 kHz cross-oracle, and full gates remain pending.
