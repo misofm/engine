@@ -134,6 +134,17 @@ pub trait PreparedPlanExecutor: Send {
     fn bank_scatter_redirects(&self) -> u64 {
         0
     }
+    /// Bank-chain lanes whose route and master accumulation were folded into the chain's own
+    /// epilogue (issue #218).
+    ///
+    /// The same kind of counter, and for the same reason: the fold removes a whole per-lane
+    /// `mix2x2_block` pass and a whole pass of the master reduction by *not doing* them, so it
+    /// moves no rendered bit and a digest gate cannot see whether it fired. Fixed at bind. Read
+    /// only after rendering is disarmed.
+    #[doc(hidden)]
+    fn bank_route_folds(&self) -> u64 {
+        0
+    }
     /// `[observed stages, declared taps, armed taps]`, walked over the **built** runtime.
     ///
     /// Issue #143 E5's structural gate. "A session that asked for no observation carries none" is
@@ -426,6 +437,18 @@ impl PreparedRenderPlan {
         self.executor
             .as_deref()
             .map_or(0, PreparedPlanExecutor::bank_scatter_redirects)
+    }
+    /// Read the admitted route-fold lane count outside the render scope (issue #218).
+    #[doc(hidden)]
+    #[must_use]
+    pub fn bank_route_folds(&self) -> u64 {
+        assert!(
+            !super::audit::is_render_scope_active(),
+            "bank route folds are sealed until the render audit is disarmed"
+        );
+        self.executor
+            .as_deref()
+            .map_or(0, PreparedPlanExecutor::bank_route_folds)
     }
     /// Copy cumulative auxiliary-worker audit snapshots in stable worker order.
     #[doc(hidden)]

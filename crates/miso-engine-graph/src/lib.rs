@@ -1161,6 +1161,19 @@ pub struct GraphBindingBlock<'a> {
     pub first_sample: u64,
 }
 pub trait GraphRuntimeProcessor: Send {
+    /// Process one block in place.
+    ///
+    /// # The contract for a node with no graph inputs (issue #218)
+    ///
+    /// A bound node the graph feeds nothing -- a track input, a host source -- **is** its node's
+    /// audio, and the buffer it is handed is *undefined* on entry: it may hold the previous
+    /// block's words. Such a processor must write every word of `left` and `right`, including the
+    /// silence it emits on an underrun. A processor that leaves the block untouched is asking for
+    /// a pass-through, and a pass-through is [`GraphNodeBinding::identity`], never a
+    /// do-nothing `process`.
+    ///
+    /// A bound node that *does* have graph inputs is handed its reduction, exactly as before, and
+    /// may read the block it is given.
     fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError>;
 
     /// This bound processor's channel-symmetry witness for the track it renders.
@@ -1322,6 +1335,10 @@ impl PreparedPlanExecutor for GraphExecutor {
 
     fn bank_scatter_redirects(&self) -> u64 {
         self.runtime.scatter_redirects()
+    }
+
+    fn bank_route_folds(&self) -> u64 {
+        self.runtime.route_folds()
     }
 
     fn bank_shape(&self) -> [u64; 2] {
