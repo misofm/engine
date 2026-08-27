@@ -33,3 +33,4 @@ fi
 "$repo_root/scripts/build-web-audioworklet.sh" "$output_dir"
 python3 -I -B "$repo_root/scripts/write-web-provenance-v1.py" "$output_dir" \
   --source-revision "$source_revision" --source-subject "$source_subject"
+python3 -I -B "$repo_root/scripts/check-web-provenance-v1.py" "$output_dir"
