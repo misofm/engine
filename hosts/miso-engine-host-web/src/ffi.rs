@@ -396,6 +396,101 @@ pub extern "C" fn miso_engine_web_v1_console_track_id(handle: u32, index: u32) -
     with_host_mut(handle, 0, |host| host.copy_console_track_id(index))
 }
 
+/// Return the number of sources the compiled session declares, or zero before compilation.
+///
+/// # Issue #207: source introspection
+///
+/// The browser ABI has exposed track discovery since #137 and nothing at all about sources, so a
+/// headless driver compiling raw session TOML could not learn which sources exist, how many
+/// channels they carry, or how many frames to feed them -- it could not drive the render loop it
+/// had just compiled. These six queries close that, additively, in the shape the track queries
+/// already established: a count, an ID copied through the staging buffer, and scalar shape reads.
+///
+/// **Canonical source order** is the normalized model's `sources` order -- `compile_session` sorts
+/// by stable ID -- and the queries read that list itself, so no second table exists to drift from
+/// it. **State gating** is the track queries' gating exactly: the answers come from the compiled
+/// session, so every query reports zero/absent until `compile` succeeds, and keeps answering
+/// afterwards for as long as the handle holds a compiled session, sticky failure included.
+///
+/// **This export is the bounds authority.** `source_channels`, `source_frames` and
+/// `source_sample_rate` return zero for an out-of-range index because zero is impossible for a
+/// compiled source, but `source_start_frame` has no spare value -- zero is an ordinary region
+/// start -- so a caller establishes the range here and then indexes inside it.
+///
+/// **[`crate::ABI_VERSION`] is deliberately not bumped.** The handshake the worklet actually
+/// enforces is exact equality of both `abi_version()` and `config_bytes()` against constants
+/// compiled into the JavaScript beside it, and the two ship from one build of one script -- it is
+/// a lockstep-pair identity, not a compatibility range a consumer could negotiate against. These
+/// exports add no configuration word and change no frozen structure, so `config_bytes()` is
+/// unmoved; and the precedent is explicit, because issue #137 added eight exports (the whole
+/// console surface, `console_track_count` included) without touching the version either. What
+/// pins the new surface is the frozen export set in `scripts/check-web-audioworklet.sh`, which is
+/// exact rather than a lower bound: an export that appears or disappears fails that gate.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_source_count(handle: u32) -> u32 {
+    with_host(handle, 0, |host| {
+        u32::try_from(host.session_source_count()).unwrap_or(0)
+    })
+}
+
+/// Copy one canonical source ID into the source-ID staging buffer; returns its byte length.
+///
+/// Zero means "no such source". Unlike [`miso_engine_web_v1_console_track_id`] it cannot also mean
+/// "the ID does not fit": compilation refuses a session whose source IDs exceed
+/// [`BUFFER_SOURCE_ID`], which is what that buffer is sized for.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_source_id(handle: u32, index: u32) -> u32 {
+    with_host_mut(handle, 0, |host| host.copy_session_source_id(index))
+}
+
+/// Return one source's declared channel count, or zero for an out-of-range index.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_source_channels(handle: u32, index: u32) -> u32 {
+    with_host(handle, 0, |host| {
+        host.session_source_shape(index)
+            .map_or(0, |shape| shape.channel_count)
+    })
+}
+
+/// Return one source's declared region length in source sample frames, or zero out of range.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_source_frames(handle: u32, index: u32) -> u64 {
+    with_host(handle, 0, |host| {
+        host.session_source_shape(index)
+            .map_or(0, |shape| shape.region_frames)
+    })
+}
+
+/// Return one source's declared region start in source sample frames.
+///
+/// Zero is an ordinary answer -- most sessions start their regions there -- so this export carries
+/// no out-of-range sentinel; [`miso_engine_web_v1_source_count`] is the bounds authority. It is
+/// load-bearing rather than decorative: preparation builds the source ring *at* this frame, so a
+/// driver that submitted from zero into a session with a nonzero region start would be feeding the
+/// ring frames it is not waiting for.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_source_start_frame(handle: u32, index: u32) -> u64 {
+    with_host(handle, 0, |host| {
+        host.session_source_shape(index)
+            .map_or(0, |shape| shape.region_start_frame)
+    })
+}
+
+/// Return one source's declared native sample rate in hertz, or zero for an out-of-range index.
+///
+/// A compiled session's per-source rate necessarily equals the session rate -- preparation refuses
+/// `host.source.rate.mismatch` because V1 has no sample-rate conversion -- so this reports the
+/// declaration rather than new information. It is exposed because the session model carries the
+/// field per source, and a consumer should read what the session says instead of re-deriving it
+/// from an invariant it cannot see.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_source_sample_rate(handle: u32, index: u32) -> u32 {
+    with_host(handle, 0, |host| {
+        host.session_source_shape(index)
+            .map_or(0, |shape| shape.sample_rate_hz)
+    })
+}
+
 /// Return the stable status address or zero for an invalid handle.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_status_ptr(handle: u32) -> u32 {
@@ -452,6 +547,15 @@ pub(crate) fn test_copy_staging(handle: u32, kind: u32, bytes: &[u8]) -> u32 {
         };
         target.copy_from_slice(bytes);
         RESULT_OK
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn test_read_source_id(handle: u32, length: u32) -> Option<Vec<u8>> {
+    with_host_mut(handle, None, |host| {
+        host.source_id_mut()
+            .and_then(|bytes| bytes.get(..length as usize))
+            .map(<[u8]>::to_vec)
     })
 }
 

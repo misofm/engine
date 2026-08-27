@@ -161,7 +161,13 @@ expected_exports=$(printf '%s\n' \
   miso_engine_web_v1_prepare \
   miso_engine_web_v1_render \
   miso_engine_web_v1_resource_ptr \
+  miso_engine_web_v1_source_channels \
+  miso_engine_web_v1_source_count \
+  miso_engine_web_v1_source_frames \
+  miso_engine_web_v1_source_id \
+  miso_engine_web_v1_source_sample_rate \
   miso_engine_web_v1_source_seek \
+  miso_engine_web_v1_source_start_frame \
   miso_engine_web_v1_source_submit \
   miso_engine_web_v1_status_ptr | sort)
 
@@ -351,6 +357,14 @@ python3 -B "$(dirname "${BASH_SOURCE[0]}")/check-command-reason-vocabulary.py" \
 # gate's list and the SHIPPED `commandKinds`. Before this gate the shipped document stopped at six
 # kinds while the wire decoded eight, and nothing in the tree could see it.
 python3 -B "$(dirname "${BASH_SOURCE[0]}")/check-command-kind-vocabulary.py" \
+  --artifacts "$artifact_dir" || exit 1
+
+# Issue #207: the session map's shape, across the five places that now spell it -- the Rust FFI's
+# introspection exports (which decide each field's width), the frozen export list above, the
+# worklet that calls them, the main-realm host's acknowledgement validator, and the `.d.ts` an SDK
+# generates against. `--artifacts` additionally holds the SHIPPED js/.d.ts to the tree's, so a
+# stale artifact fails here as it does for the two vocabulary gates.
+python3 -B "$(dirname "${BASH_SOURCE[0]}")/check-session-map-shape.py" \
   --artifacts "$artifact_dir" || exit 1
 
 echo "web AudioWorklet static/object checks passed"
