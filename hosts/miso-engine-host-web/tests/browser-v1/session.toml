@@ -21,7 +21,7 @@ id = "track"
 source_id = "fixture-source"
 left_source_channel = 0
 right_source_channel = 1
-builtins = { left = { polarity_invert = false, trim_db = 0.0, hpf_hz = 0.0, lpf_hz = 0.0 }, right = { polarity_invert = false, trim_db = 0.0, hpf_hz = 0.0, lpf_hz = 0.0 } }
+builtins = { left = { polarity_invert = false, trim_db = 0.0, hpf_hz = 0.0, lpf_hz = 0.0, delay_samples = 0 }, right = { polarity_invert = false, trim_db = 0.0, hpf_hz = 0.0, lpf_hz = 0.0, delay_samples = 0 } }
 simd1 = { effects = [] }
 dynamic = { effects = [] }
 simd2 = { effects = [] }

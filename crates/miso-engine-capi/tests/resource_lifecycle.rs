@@ -1269,7 +1269,10 @@ fn complete_capi_owners(
     // of the change: the first block a plan renders proves the canonical environment took on that
     // thread, and every block after it reads an already-set flag. Eight bytes per live plan handle,
     // once, and no per-block or per-track cost anywhere.
-    assert_effective_owner_mutations(&active, 141_785, "active CAPI");
+    //
+    // #210 phase 2 re-pin (+342): the active session's canonical TOML row is the fixture's own
+    // byte count, and every one of its nine tracks gained `", delay_samples = 0"` on both lanes.
+    assert_effective_owner_mutations(&active, 142_127, "active CAPI");
 
     let candidate_epoch_rows = [
         PrimitiveOwner {
@@ -1307,7 +1310,8 @@ fn complete_capi_owners(
     let prepared = owner_total(&prepared_rows);
     // #84 phase B re-pin (+24): `ControlSourceMirror` carries three spsc endpoints, each +8 for
     // its cached peer cursor.
-    assert_effective_owner_mutations(&candidate_epoch_rows, 10_453, "candidate CAPI epoch");
+    // #210 phase 2 re-pin (+342): the candidate's canonical TOML row, same key on the same tracks.
+    assert_effective_owner_mutations(&candidate_epoch_rows, 10_795, "candidate CAPI epoch");
     assert_effective_owner_mutations(&prepared_rows, 13_960, "prepared protocol");
     let largest = active
         .iter()
@@ -1801,7 +1805,12 @@ fn primitive_replacement_oracle(current: &str, prospective: &str) -> PrimitiveRe
     // one. Held over two live plans, as everything in this oracle is -- and `+75_980` is exactly
     // twice the `236_980 - 198_990` that `frozen_scratch_report` records for a single plan, which
     // is the cross-check that this model tracks the tree rather than having been tuned to it.
-    assert_effective_owner_mutations(&graph, 507_204, "double-live graph/model");
+    // Issue #210 phase 2 moved it by +828, all of it model rather than plan: `ChannelBuiltins`
+    // gained a required `delay_samples: u32`, so `size_of::<Track>()` grew by eight (two lanes,
+    // 16 -> 20 bytes each with the trailing padding reused) and the canonical text of each session
+    // grew by 342 (9 tracks x 2 lanes x `", delay_samples = 0"`). Held over two live plans:
+    // 2 x (9 x 8) + 2 x 342 = 828.
+    assert_effective_owner_mutations(&graph, 508_032, "double-live graph/model");
 
     let source = source_owners();
     assert_eq!(owner_total(&source), 11_054, "primitive source total");
@@ -1885,7 +1894,7 @@ fn primitive_replacement_oracle(current: &str, prospective: &str) -> PrimitiveRe
             bytes: prepared_protocol,
         },
     ];
-    assert_effective_owner_mutations(&capi_rows, 166_198, "double-live CAPI");
+    assert_effective_owner_mutations(&capi_rows, 166_882, "double-live CAPI");
 
     let graph_rows = graph_owners();
     let graph_largest = owner_total(&graph_rows[7..15]);
@@ -1970,7 +1979,7 @@ fn primitive_replacement_oracle(current: &str, prospective: &str) -> PrimitiveRe
     );
     assert_ne!(
         capi_rows.iter().map(|owner| owner.bytes).max(),
-        Some(166_198),
+        Some(166_882),
         "CAPI aggregate is not max-single"
     );
 
@@ -2171,10 +2180,11 @@ fn external_primitive_double_live_oracle_drives_exact_and_one_below_c_caps() {
         "session_id = \"double-live-cap\"",
         1,
     );
-    assert_eq!(session_toml.len(), 10_200, "current canonical fixture");
+    // Re-pinned by issue #210 phase 2 (+342 = 9 tracks x 2 lanes x ", delay_samples = 0").
+    assert_eq!(session_toml.len(), 10_542, "current canonical fixture");
     assert_eq!(
         prospective_toml.len(),
-        10_191,
+        10_533,
         "prospective canonical fixture"
     );
     let oracle = primitive_replacement_oracle(&session_toml, &prospective_toml);
@@ -2182,13 +2192,13 @@ fn external_primitive_double_live_oracle_drives_exact_and_one_below_c_caps() {
     // bank, and this oracle is double-live -- so +16 here and +8 in the single-plan report. The
     // live oracle and the primitive model both move, which is the property this pair of pins
     // exists to check: a struct that grew is reported by both or by neither.
-    assert_eq!(oracle.graph, 507_204);
+    assert_eq!(oracle.graph, 508_032);
     assert_eq!(oracle.source_total, 22_108);
     assert_eq!(oracle.source_overhead, 5_724);
     assert_eq!(oracle.effect_state, 15_120);
     assert_eq!(oracle.effect_scratch, 432);
     assert_eq!(oracle.builtin, 16_812);
-    assert_eq!(oracle.capi, 166_198);
+    assert_eq!(oracle.capi, 166_882);
     assert_eq!(oracle.largest, 58_694);
 
     let rows = [
@@ -2219,7 +2229,7 @@ fn external_primitive_double_live_oracle_drives_exact_and_one_below_c_caps() {
         // SAFETY: These handles are uniquely owned until their matching destroy calls.
         unsafe {
             let (session, plan) = compile_c(&session_toml, &exact_limits);
-            assert_eq!(resources_c(plan), frozen_scratch_report(141_785));
+            assert_eq!(resources_c(plan), frozen_scratch_report(142_127));
             let request = command(1, 42, "double-live-cap");
             let mut response = [0xa5_u8; 4_096];
             assert_eq!(submit(session, &request, &mut response), RESULT_OK, "{row}");
@@ -2237,7 +2247,7 @@ fn external_primitive_double_live_oracle_drives_exact_and_one_below_c_caps() {
                 miso_engine_v2_render_f32_planar(plan, 0, &output),
                 RESULT_OK
             );
-            assert_eq!(resources_c(plan), frozen_scratch_report(141_776));
+            assert_eq!(resources_c(plan), frozen_scratch_report(142_118));
             miso_engine_v2_session_destroy(session);
             miso_engine_v2_plan_destroy(plan);
         }

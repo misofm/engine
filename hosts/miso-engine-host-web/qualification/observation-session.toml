@@ -27,7 +27,7 @@ id = "track"
 source_id = "console-source"
 left_source_channel = 0
 right_source_channel = 1
-builtins = { left = { polarity_invert = false, trim_db = 0.0, hpf_hz = 0.0, lpf_hz = 0.0 }, right = { polarity_invert = false, trim_db = 0.0, hpf_hz = 0.0, lpf_hz = 0.0 } }
+builtins = { left = { polarity_invert = false, trim_db = 0.0, hpf_hz = 0.0, lpf_hz = 0.0, delay_samples = 0 }, right = { polarity_invert = false, trim_db = 0.0, hpf_hz = 0.0, lpf_hz = 0.0, delay_samples = 0 } }
 simd1 = { effects = [] }
 dynamic = { effects = [{ id = "comp", identity = { kind = "native", effect_id = "miso.compressor" }, quality = "normal", bypass = false, link_mode = "dual_mono", params = [{ parameter_id = 1, channel = "both", unit = "db", value = -30.0 }, { parameter_id = 2, channel = "both", unit = "ratio", value = 4.0 }, { parameter_id = 3, channel = "both", unit = "db", value = 6.0 }, { parameter_id = 4, channel = "both", unit = "milliseconds", value = 10.0 }, { parameter_id = 5, channel = "both", unit = "milliseconds", value = 100.0 }, { parameter_id = 6, channel = "both", unit = "db", value = 0.0 }, { parameter_id = 7, channel = "both", unit = "linear", value = 1.0 }, { parameter_id = 8, channel = "both", unit = "milliseconds", value = 5.0 }], sidechain = { kind = "none" } }] }
 simd2 = { effects = [] }

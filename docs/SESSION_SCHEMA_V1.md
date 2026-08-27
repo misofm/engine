@@ -42,7 +42,23 @@ V1 output is exactly two planar `f32` channels, matching its explicit 2x2 matric
 independent left and right source channels and declares independent builtins, fader/mute values,
 ordered `simd1`/`dynamic`/`simd2` racks, and either a smoothed pan pair or smoothed 2x2 matrix.
 Builtin cutoffs are finite nonnegative hertz values, but their DSP/Nyquist relationships are not
-issue-004 validation. Effect identity is tagged `native` with a stable `effect_id`, or `cid` with
+issue-004 validation.
+
+Each lane's builtins table carries exactly `polarity_invert`, `trim_db`, `hpf_hz`, `lpf_hz` and
+`delay_samples`, all required. `delay_samples` (issue #210 phase 2) is the track's input-side time
+alignment for multi-mic work, an integer count of samples in the inclusive range `0..=48000`
+validated by issue-004 -- a flat schema domain rather than a DSP one, because what it bounds is the
+ring allocation a session can demand. It is expressed in **samples**, not milliseconds: alignment is
+sample-exact, the engine is sample-domain throughout, and #147's unit-in-name rule makes the unit
+part of the key. A host converts from milliseconds; the session never does. The two lanes are
+independent under the dual-mono law, and a track whose lanes declare different delays is genuinely
+asymmetric upstream of the mono-collapse seam, so it declines that track's collapse.
+
+`delay_samples` is deliberately **not** plugin latency and PDC never compensates it: it is a time
+shift the session asked for, so it contributes zero to any node's declared latency and does not
+appear in the compiled plan's route timings or inserted delays. Its rings are charged to the
+plan's existing `graph_delay_bytes` row. It is prepared-only, changed through the ordinary
+transactional session edit, exactly as `trim_db` and the cutoffs are. Effect identity is tagged `native` with a stable `effect_id`, or `cid` with
 opaque nonempty text. Native availability/descriptor domains/latency/tail are downstream issue-011
 work; CID/package validity is downstream issue-029 work.
 

@@ -1,6 +1,26 @@
 //! Plugin-delay compensation: arrival times, per-edge compensation delays and tail propagation.
 //!
 //! Single-pass longest-path over the level-major schedule, with every add checked.
+//!
+//! # What PDC is not: the track delay (#210 phase 2)
+//!
+//! PDC exists to equalize **unrequested** arrival-time skew. Everything here is computed from
+//! *declared node latency*: a path that arrives late because an effect on it declares latency gets
+//! every sibling path delayed to match, so a session sounds the way it was written rather than the
+//! way its plugins happen to be implemented.
+//!
+//! A track's `builtins.*.delay_samples` is the opposite kind of object -- a time shift the session
+//! **asked for**, for multi-mic alignment. If it were declared as node latency, this module would
+//! faithfully insert compensating delays on every other path and cancel exactly the alignment the
+//! user wanted. So it is not latency and it is not here: a track delay contributes zero to
+//! `latencies`, produces no `InsertedDelay`, moves no `RouteTiming`, and changes neither
+//! `total_delay` nor `delay_count` nor `output_latency`. It shares this module's *ring type and
+//! kernel* (`runtime::TrackDelayLine` drives `pdc_delay_block`) and none of its *accounting*: its
+//! bytes are added to the estimate's `delay_bytes` beside `total_delay * 8` rather than through
+//! it, because `total_delay` is load-bearing for the counts above.
+//!
+//! The consequence a reader should carry away: a delayed track's **output shifts and its PDC
+//! report does not**, which is what eval P2-3 pins.
 
 use super::*;
 use crate::ids::diag;

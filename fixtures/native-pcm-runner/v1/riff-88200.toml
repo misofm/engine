@@ -29,7 +29,7 @@ id = "eq0"
 source_id = "fixture-source"
 left_source_channel = 0
 right_source_channel = 1
-builtins = { left = { polarity_invert = false, trim_db = 0.0, hpf_hz = 20.0, lpf_hz = 20000.0 }, right = { polarity_invert = false, trim_db = 0.0, hpf_hz = 20.0, lpf_hz = 20000.0 } }
+builtins = { left = { polarity_invert = false, trim_db = 0.0, hpf_hz = 20.0, lpf_hz = 20000.0, delay_samples = 0 }, right = { polarity_invert = false, trim_db = 0.0, hpf_hz = 20.0, lpf_hz = 20000.0, delay_samples = 0 } }
 simd1 = { effects = [{ id = "eq", identity = { kind = "native", effect_id = "miso.parametric-eq" }, quality = "normal", bypass = false, link_mode = "dual_mono", params = [{ parameter_id = 1, channel = "both", unit = "linear", value = 1.0 }, { parameter_id = 2, channel = "both", unit = "linear", value = 1.0 }, { parameter_id = 3, channel = "left", unit = "hz", value = 120.0 }, { parameter_id = 3, channel = "right", unit = "hz", value = 2400.0 }, { parameter_id = 4, channel = "left", unit = "db", value = 6.0 }, { parameter_id = 4, channel = "right", unit = "db", value = -9.0 }, { parameter_id = 5, channel = "both", unit = "ratio", value = 0.70710677 }, { parameter_id = 6, channel = "both", unit = "ratio", value = 1.0 }], sidechain = { kind = "none" } }] }
 dynamic = { effects = [] }
 simd2 = { effects = [] }
@@ -41,7 +41,7 @@ id = "eq1"
 source_id = "fixture-source"
 left_source_channel = 0
 right_source_channel = 1
-builtins = { left = { polarity_invert = false, trim_db = 0.0, hpf_hz = 20.0, lpf_hz = 20000.0 }, right = { polarity_invert = false, trim_db = 0.0, hpf_hz = 20.0, lpf_hz = 20000.0 } }
+builtins = { left = { polarity_invert = false, trim_db = 0.0, hpf_hz = 20.0, lpf_hz = 20000.0, delay_samples = 0 }, right = { polarity_invert = false, trim_db = 0.0, hpf_hz = 20.0, lpf_hz = 20000.0, delay_samples = 0 } }
 simd1 = { effects = [{ id = "eq", identity = { kind = "native", effect_id = "miso.parametric-eq" }, quality = "normal", bypass = false, link_mode = "dual_mono", params = [], sidechain = { kind = "none" } }] }
 dynamic = { effects = [] }
 simd2 = { effects = [] }
@@ -53,7 +53,7 @@ id = "eq2"
 source_id = "fixture-source"
 left_source_channel = 0
 right_source_channel = 1
-builtins = { left = { polarity_invert = false, trim_db = 0.0, hpf_hz = 20.0, lpf_hz = 20000.0 }, right = { polarity_invert = false, trim_db = 0.0, hpf_hz = 20.0, lpf_hz = 20000.0 } }
+builtins = { left = { polarity_invert = false, trim_db = 0.0, hpf_hz = 20.0, lpf_hz = 20000.0, delay_samples = 0 }, right = { polarity_invert = false, trim_db = 0.0, hpf_hz = 20.0, lpf_hz = 20000.0, delay_samples = 0 } }
 simd1 = { effects = [{ id = "eq", identity = { kind = "native", effect_id = "miso.parametric-eq" }, quality = "normal", bypass = false, link_mode = "dual_mono", params = [], sidechain = { kind = "none" } }] }
 dynamic = { effects = [] }
 simd2 = { effects = [] }
@@ -65,7 +65,7 @@ id = "eq3"
 source_id = "fixture-source"
 left_source_channel = 0
 right_source_channel = 1
-builtins = { left = { polarity_invert = false, trim_db = 0.0, hpf_hz = 20.0, lpf_hz = 20000.0 }, right = { polarity_invert = false, trim_db = 0.0, hpf_hz = 20.0, lpf_hz = 20000.0 } }
+builtins = { left = { polarity_invert = false, trim_db = 0.0, hpf_hz = 20.0, lpf_hz = 20000.0, delay_samples = 0 }, right = { polarity_invert = false, trim_db = 0.0, hpf_hz = 20.0, lpf_hz = 20000.0, delay_samples = 0 } }
 simd1 = { effects = [{ id = "eq", identity = { kind = "native", effect_id = "miso.parametric-eq" }, quality = "normal", bypass = false, link_mode = "dual_mono", params = [], sidechain = { kind = "none" } }] }
 dynamic = { effects = [] }
 simd2 = { effects = [] }
@@ -77,7 +77,7 @@ id = "eq4"
 source_id = "fixture-source"
 left_source_channel = 0
 right_source_channel = 1
-builtins = { left = { polarity_invert = false, trim_db = 0.0, hpf_hz = 20.0, lpf_hz = 20000.0 }, right = { polarity_invert = false, trim_db = 0.0, hpf_hz = 20.0, lpf_hz = 20000.0 } }
+builtins = { left = { polarity_invert = false, trim_db = 0.0, hpf_hz = 20.0, lpf_hz = 20000.0, delay_samples = 0 }, right = { polarity_invert = false, trim_db = 0.0, hpf_hz = 20.0, lpf_hz = 20000.0, delay_samples = 0 } }
 simd1 = { effects = [{ id = "eq", identity = { kind = "native", effect_id = "miso.parametric-eq" }, quality = "normal", bypass = false, link_mode = "dual_mono", params = [], sidechain = { kind = "none" } }] }
 dynamic = { effects = [] }
 simd2 = { effects = [] }
@@ -89,7 +89,7 @@ id = "eq5"
 source_id = "fixture-source"
 left_source_channel = 0
 right_source_channel = 1
-builtins = { left = { polarity_invert = false, trim_db = 0.0, hpf_hz = 20.0, lpf_hz = 20000.0 }, right = { polarity_invert = false, trim_db = 0.0, hpf_hz = 20.0, lpf_hz = 20000.0 } }
+builtins = { left = { polarity_invert = false, trim_db = 0.0, hpf_hz = 20.0, lpf_hz = 20000.0, delay_samples = 0 }, right = { polarity_invert = false, trim_db = 0.0, hpf_hz = 20.0, lpf_hz = 20000.0, delay_samples = 0 } }
 simd1 = { effects = [{ id = "eq", identity = { kind = "native", effect_id = "miso.parametric-eq" }, quality = "normal", bypass = false, link_mode = "dual_mono", params = [], sidechain = { kind = "none" } }] }
 dynamic = { effects = [] }
 simd2 = { effects = [] }
@@ -101,7 +101,7 @@ id = "eq6"
 source_id = "fixture-source"
 left_source_channel = 0
 right_source_channel = 1
-builtins = { left = { polarity_invert = false, trim_db = 0.0, hpf_hz = 20.0, lpf_hz = 20000.0 }, right = { polarity_invert = false, trim_db = 0.0, hpf_hz = 20.0, lpf_hz = 20000.0 } }
+builtins = { left = { polarity_invert = false, trim_db = 0.0, hpf_hz = 20.0, lpf_hz = 20000.0, delay_samples = 0 }, right = { polarity_invert = false, trim_db = 0.0, hpf_hz = 20.0, lpf_hz = 20000.0, delay_samples = 0 } }
 simd1 = { effects = [{ id = "eq", identity = { kind = "native", effect_id = "miso.parametric-eq" }, quality = "normal", bypass = false, link_mode = "dual_mono", params = [], sidechain = { kind = "none" } }] }
 dynamic = { effects = [] }
 simd2 = { effects = [] }
@@ -113,7 +113,7 @@ id = "eq7"
 source_id = "fixture-source"
 left_source_channel = 0
 right_source_channel = 1
-builtins = { left = { polarity_invert = false, trim_db = 0.0, hpf_hz = 20.0, lpf_hz = 20000.0 }, right = { polarity_invert = false, trim_db = 0.0, hpf_hz = 20.0, lpf_hz = 20000.0 } }
+builtins = { left = { polarity_invert = false, trim_db = 0.0, hpf_hz = 20.0, lpf_hz = 20000.0, delay_samples = 0 }, right = { polarity_invert = false, trim_db = 0.0, hpf_hz = 20.0, lpf_hz = 20000.0, delay_samples = 0 } }
 simd1 = { effects = [{ id = "eq", identity = { kind = "native", effect_id = "miso.parametric-eq" }, quality = "normal", bypass = false, link_mode = "dual_mono", params = [], sidechain = { kind = "none" } }] }
 dynamic = { effects = [] }
 simd2 = { effects = [] }
@@ -125,7 +125,7 @@ id = "eq8"
 source_id = "fixture-source"
 left_source_channel = 0
 right_source_channel = 1
-builtins = { left = { polarity_invert = false, trim_db = 0.0, hpf_hz = 20.0, lpf_hz = 20000.0 }, right = { polarity_invert = false, trim_db = 0.0, hpf_hz = 20.0, lpf_hz = 20000.0 } }
+builtins = { left = { polarity_invert = false, trim_db = 0.0, hpf_hz = 20.0, lpf_hz = 20000.0, delay_samples = 0 }, right = { polarity_invert = false, trim_db = 0.0, hpf_hz = 20.0, lpf_hz = 20000.0, delay_samples = 0 } }
 simd1 = { effects = [{ id = "eq", identity = { kind = "native", effect_id = "miso.parametric-eq" }, quality = "normal", bypass = false, link_mode = "dual_mono", params = [], sidechain = { kind = "none" } }] }
 dynamic = { effects = [] }
 simd2 = { effects = [] }

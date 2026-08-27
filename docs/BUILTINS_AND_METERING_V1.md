@@ -5,6 +5,16 @@ Issue 007 defines three fixed scalar graph sections per dual-mono track: input p
 The compiler binds these internally, so hosts continue to supply only source/input and output
 bindings. No rack, graph topology, or session-schema semantics are introduced here.
 
+Ahead of all of that, issue #210 phase 2 places the track's declared **input time alignment**:
+`builtins.<lane>.delay_samples`, a per-lane sample count applied by a graph node at the track's
+`Input` stage, before the fused input kernel. It sits there so that every downstream consumer sees
+aligned audio -- the `input` send tap, sidechain sources reading that tap, and the input meter
+included; anywhere later would leave those un-aligned. It is prepared-only (builtin parameter row
+11, `PreparedOnly`, smoothing `None`) because changing a delay length mid-render re-times the ring
+and glitches unavoidably. It is not latency: PDC never compensates it away. A track that declares
+zero on both lanes -- almost every track -- is not lowered to a delay node at all, and its compiled
+program is the one it had before the feature existed.
+
 Each input lane applies polarity, trim, an optional RBJ-second-order-Butterworth-response HPF,
 then an optional LPF. The production realization is the topology-preserving two-integrator
 state-variable recurrence of master plan #83 §4.2, and there is exactly **one** of it: the block

@@ -5077,7 +5077,7 @@ fn expected_benchmark_fields_v1(kind: BenchmarkKindV1, rate_hz: u32) -> Vec<(Str
             benchmark_field_pair_v1("meter_queue_capacity", "4"),
             benchmark_field_pair_v1("state_mode", "\"new_per_prepare\""),
             benchmark_field_pair_v1("session_template_path", "\"fixtures/session/v1/canonical.toml\""),
-            benchmark_field_pair_v1("session_template_sha256", "\"1ff2db241f84b1a641b50c69c4fd09eda0a1baa0a5735d3769c056212927f31a\""),
+            benchmark_field_pair_v1("session_template_sha256", "\"323768dd664277651ad79b6c5bae97eab0a4458cc533bd3e9267c41c24111999\""),
             benchmark_field_pair_v1("track_id_prefix", "\"benchmark-track-\""),
             benchmark_field_pair_v1("track_id_count", "256"),
             benchmark_field_pair_v1("empty_effect_racks", "true"),
@@ -5227,7 +5227,10 @@ mod tests {
         assert_eq!(manifest.entries.len(), 50, "frozen checked payload count");
         assert_eq!(
             sha256(&fs::read(root.join("MANIFEST.tsv")).expect("checked manifest bytes")),
-            "e4e630957d9931ae09105e193561c163fa078d12b49700f91165a8bc60604b01",
+            // Re-pinned by issue #210 phase 2: the two `prepare_256_tracks` workload fixtures name
+            // `fixtures/session/v1/canonical.toml` by digest, and that session grew a required
+            // `builtins.*.delay_samples` key. The payload count is unchanged.
+            "ad034b8880acd13e6144fd00c515dc5fa83ca3b044c2a2472453cc6cad9934d1",
             "accepted joined-corpus manifest identity"
         );
 
