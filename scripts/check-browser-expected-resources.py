@@ -67,6 +67,7 @@ import argparse
 import json
 import os
 import pathlib
+import re
 import shutil
 import subprocess
 import sys
@@ -77,6 +78,8 @@ FIXTURE = REPO / "hosts/miso-engine-host-web/tests/browser-v1"
 EXPECTED_JSON = FIXTURE / "expected.json"
 DIRECT_ORACLE = FIXTURE / "direct-oracle.mjs"
 DELIVERY_SCRIPT = REPO / "scripts/build-web-audioworklet.sh"
+WORKLET_JS = REPO / "hosts/miso-engine-host-web/web/miso-engine-v2-audio-worklet.js"
+FIXTURE_RUNNER_JS = FIXTURE / "browser-correctness.js"
 
 MODULE_NAME = "miso-engine-v2-audio-worklet.simd128.wasm"
 # Shared with every other `target/ci/*` gate: a persistent directory, so a sweep does not pay a
@@ -153,6 +156,28 @@ class Invalid(Exception):
 def require(condition: object, message: str) -> None:
     if not condition:
         raise Invalid(message)
+
+
+def balanced(text: str, start: int, opening: str, closing: str) -> str:
+    """Return `text[start:]` up to and including the bracket that closes the one at `start`."""
+    require(text[start] == opening, f"expected {opening!r} at offset {start}")
+    depth = 0
+    for index in range(start, len(text)):
+        if text[index] == opening:
+            depth += 1
+        elif text[index] == closing:
+            depth -= 1
+            if depth == 0:
+                return text[start : index + 1]
+    raise Invalid(f"unbalanced {opening!r} from offset {start}")
+
+
+def block_after(text: str, anchor: str, opening: str, closing: str) -> str:
+    """The bracketed block that follows `anchor`."""
+    at = text.find(anchor)
+    require(at >= 0, f"anchor not found: {anchor!r}")
+    start = text.index(opening, at + len(anchor) - 1)
+    return balanced(text, start, opening, closing)
 
 
 def resource_rows(document: dict) -> dict:
@@ -266,13 +291,60 @@ def check_native_witness(
     )
 
 
+def worklet_limit_fields(text: str) -> list[str]:
+    """The `exactFields` vocabulary the worklet refuses a `limits` object against."""
+    block = block_after(text, "const LIMIT_FIELDS = ", "[", "]")
+    names = re.findall(r'"([A-Za-z][A-Za-z0-9]*)"', block)
+    require(names, "the worklet declares no LIMIT_FIELDS")
+    return sorted(names)
+
+
+def fixture_limit_fields(text: str) -> list[str]:
+    """The keys the browser fixture's `limits()` actually builds."""
+    block = block_after(text, "function limits() {\n  return ", "{", "}")
+    names = re.findall(r"^\s{4}([A-Za-z][A-Za-z0-9]*):", block, re.MULTILINE)
+    require(names, "the browser fixture's limits() builds no keys")
+    return sorted(names)
+
+
+def check_limits_vocabulary(worklet: str, fixture: str) -> None:
+    """The fixture's `limits` object and the worklet's guard are one vocabulary.
+
+    The same staleness class as the resource rows, on the other half of the fixture, and it had
+    already bitten: issue #143 carved `consoleObservationTaps` and `consoleMasterTrackPlusOne`
+    out of the configuration's last two reserved words and added both to `LIMIT_FIELDS`, and the
+    fixture's `limits()` was never extended. `LIMIT_FIELDS` is checked with `exactFields`, so the
+    browser leg refused the fixture at boot with `RESULT_INVALID_ARGUMENT` from #143 until #217.
+    Nothing was red: the `--check` leg drives the module through `direct-oracle.mjs`, which writes
+    the configuration words itself and never crosses `miso-engine-v2-audio-worklet.js`, and the
+    browser leg is not a sweep row because its sibling modes need a browser.
+    """
+    declared = worklet_limit_fields(worklet)
+    supplied = fixture_limit_fields(fixture)
+    missing = [name for name in declared if name not in supplied]
+    extra = [name for name in supplied if name not in declared]
+    require(
+        not missing,
+        "the browser fixture's limits() is missing configuration words the worklet's "
+        f"exactFields guard requires, so the browser leg cannot boot: {missing}",
+    )
+    require(
+        not extra,
+        "the browser fixture's limits() supplies words the worklet's exactFields guard does not "
+        f"declare, so the browser leg cannot boot: {extra}",
+    )
+
+
 def validate(
     actual: dict,
     expected: dict,
     native_rows: dict,
+    worklet: str,
+    fixture: str,
     independent: frozenset = TARGET_INDEPENDENT,
     sensitive: frozenset = POINTER_OR_LANE_SENSITIVE,
 ) -> None:
+    check_limits_vocabulary(worklet, fixture)
     check_pins(actual, expected)
     wasm_rows = resource_rows(actual)
     check_partition(set(wasm_rows), independent, sensitive)
@@ -343,22 +415,26 @@ def native_report() -> dict:
     return json.loads(completed.stdout)
 
 
-def collect(artifacts: pathlib.Path | None) -> tuple[dict, dict, dict]:
+def collect(artifacts: pathlib.Path | None) -> tuple[dict, dict, dict, str, str]:
     expected = json.loads(EXPECTED_JSON.read_text())["directOracle"]
+    worklet = WORKLET_JS.read_text()
+    fixture = FIXTURE_RUNNER_JS.read_text()
     if artifacts is not None:
+        # The shipped worklet JS is the one the browser leg would actually load.
+        worklet = (artifacts / WORKLET_JS.name).read_text()
         actual = print_oracle(artifacts.resolve())
     else:
         with tempfile.TemporaryDirectory() as staging:
             module_directory = pathlib.Path(staging)
             build_module(module_directory)
             actual = print_oracle(module_directory)
-    return actual, expected, native_report()
+    return actual, expected, native_report(), worklet, fixture
 
 
 # --- the self-test --------------------------------------------------------------------------
 
 
-def consistent_triple() -> tuple[dict, dict, dict]:
+def consistent_triple() -> tuple[dict, dict, dict, str, str]:
     """A pin, a report that matches it, and a native witness the declared classes accept.
 
     Built from the committed `expected.json`, so the self-test's green case is the real document
@@ -376,76 +452,122 @@ def consistent_triple() -> tuple[dict, dict, dict]:
     )
     native.update({name: rows[name] for name in SHAPE_ROWS})
     native[BACKEND_ROW] = BACKEND_SCALAR
-    return actual, expected, native
+    return actual, expected, native, WORKLET_JS.read_text(), FIXTURE_RUNNER_JS.read_text()
 
 
 def self_test() -> int:
     base = consistent_triple()
-    validate(*base)
+    try:
+        validate(*base)
+    except Invalid as error:
+        # The mutations are differences from a green tree, so a red tree cannot be a baseline.
+        # The real diagnosis is printed by the comparison run; this says only that the self-test
+        # could not be performed, which is itself red.
+        print(
+            f"self-test cannot run: the tree is already red -- {error}",
+            file=sys.stderr,
+        )
+        return 1
 
     def with_expected_row(name: str, value: str):
-        def apply(triple: tuple[dict, dict, dict]) -> tuple:
-            actual, expected, native = triple
+        def apply(triple: tuple) -> tuple:
+            actual, expected, native, worklet, fixture = triple
             resource_rows(expected)[name] = value
-            return actual, expected, native
+            return actual, expected, native, worklet, fixture
 
         return apply
 
     def with_actual_row(name: str, value: str):
-        def apply(triple: tuple[dict, dict, dict]) -> tuple:
-            actual, expected, native = triple
+        def apply(triple: tuple) -> tuple:
+            actual, expected, native, worklet, fixture = triple
             resource_rows(actual)[name] = value
-            return actual, expected, native
+            return actual, expected, native, worklet, fixture
 
         return apply
 
     def with_native_row(name: str, value: object):
-        def apply(triple: tuple[dict, dict, dict]) -> tuple:
-            actual, expected, native = triple
+        def apply(triple: tuple) -> tuple:
+            actual, expected, native, worklet, fixture = triple
             native[name] = value
-            return actual, expected, native
+            return actual, expected, native, worklet, fixture
 
         return apply
 
     def native_equals_module(name: str):
         """Derived, never a literal: whatever the module reports, the native witness copies."""
 
-        def apply(triple: tuple[dict, dict, dict]) -> tuple:
-            actual, expected, native = triple
+        def apply(triple: tuple) -> tuple:
+            actual, expected, native, worklet, fixture = triple
             native[name] = resource_rows(actual)[name]
-            return actual, expected, native
+            return actual, expected, native, worklet, fixture
 
         return apply
 
     def drop_expected_row(name: str):
-        def apply(triple: tuple[dict, dict, dict]) -> tuple:
-            actual, expected, native = triple
+        def apply(triple: tuple) -> tuple:
+            actual, expected, native, worklet, fixture = triple
             del resource_rows(expected)[name]
-            return actual, expected, native
+            return actual, expected, native, worklet, fixture
 
         return apply
 
     def add_actual_row(name: str, value: str):
-        def apply(triple: tuple[dict, dict, dict]) -> tuple:
-            actual, expected, native = triple
+        def apply(triple: tuple) -> tuple:
+            actual, expected, native, worklet, fixture = triple
             resource_rows(actual)[name] = value
-            return actual, expected, native
+            return actual, expected, native, worklet, fixture
+
+        return apply
+
+    def drop_fixture_limit(name: str):
+        """Derived, never a literal: the whole `name: <whatever>,` line the fixture writes."""
+
+        def apply(triple: tuple) -> tuple:
+            actual, expected, native, worklet, fixture = triple
+            pattern = rf"\n    {name}: [^\n]*,"
+            require(
+                re.search(pattern, fixture) is not None,
+                f"self-test mutation matched nothing: {name}",
+            )
+            return actual, expected, native, worklet, re.sub(pattern, "", fixture, count=1)
+
+        return apply
+
+    def add_fixture_limit(name: str):
+        def apply(triple: tuple) -> tuple:
+            actual, expected, native, worklet, fixture = triple
+            anchor = "\n    consoleMasterTrackPlusOne: 0n,"
+            require(anchor in fixture, "self-test mutation matched nothing")
+            return actual, expected, native, worklet, fixture.replace(
+                anchor, f"{anchor}\n    {name}: 0n,", 1
+            )
+
+        return apply
+
+    def add_worklet_limit(name: str):
+        def apply(triple: tuple) -> tuple:
+            actual, expected, native, worklet, fixture = triple
+            anchor = '"consoleObservationTaps", "consoleMasterTrackPlusOne",'
+            require(anchor in worklet, "self-test mutation matched nothing")
+            return actual, expected, native, worklet.replace(
+                anchor, f'{anchor} "{name}",', 1
+            ), fixture
 
         return apply
 
     def move_digest(leg: str):
-        def apply(triple: tuple[dict, dict, dict]) -> tuple:
-            actual, expected, native = triple
+        def apply(triple: tuple) -> tuple:
+            actual, expected, native, worklet, fixture = triple
             actual[leg]["pcmF32leSha256"] = "0" * 64
-            return actual, expected, native
+            return actual, expected, native, worklet, fixture
 
         return apply
 
     def with_schema(value: str):
-        def apply(triple: tuple[dict, dict, dict]) -> tuple:
-            actual, expected, native = triple
+        def apply(triple: tuple) -> tuple:
+            actual, expected, native, worklet, fixture = triple
             actual["schema"] = value
-            return actual, expected, native
+            return actual, expected, native, worklet, fixture
 
         return apply
 
@@ -520,6 +642,32 @@ def self_test() -> int:
         ("the command-timeline digest moves", move_digest("commandTimeline"), None),
         ("the observation-timeline digest moves", move_digest("observationTimeline"), None),
         ("the oracle prints a different schema", with_schema("miso.web.browser.v1"), None),
+        # The limits vocabulary, and the exact #143 regression this fixture shipped with.
+        (
+            "the fixture's limits() drops the #143 observation-taps word again",
+            drop_fixture_limit("consoleObservationTaps"),
+            None,
+        ),
+        (
+            "the fixture's limits() drops the #143 master-designation word again",
+            drop_fixture_limit("consoleMasterTrackPlusOne"),
+            None,
+        ),
+        (
+            "the fixture's limits() drops a word that predates #143",
+            drop_fixture_limit("maximumMeterBytes"),
+            None,
+        ),
+        (
+            "the worklet declares a word the fixture does not supply",
+            add_worklet_limit("consoleAuxPlaneCount"),
+            None,
+        ),
+        (
+            "the fixture supplies a word the worklet does not declare",
+            add_fixture_limit("consoleAuxPlaneCount"),
+            None,
+        ),
         # The partition itself.
         (
             "a row is classified in neither class",
@@ -554,7 +702,7 @@ def self_test() -> int:
             POINTER_OR_LANE_SENSITIVE,
         )
         try:
-            validate(*triple, independent=independent, sensitive=sensitive)
+            validate(*triple, independent=independent, sensitive=sensitive)  # noqa: B026
         except Invalid:
             continue
         except Exception:  # noqa: BLE001 - a mutation that crashes the comparison still discriminates
