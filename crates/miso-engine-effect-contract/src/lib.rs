@@ -1688,6 +1688,63 @@ pub trait PreparedNativeEffectBank: Send {
     /// bound into a chain is not unpublished. The obligation is written here so that the first
     /// caller that *does* reach a bound bank finds it stated rather than has to derive it.
     fn desymmetrize_channels(&mut self) {}
+
+    /// Whether this bank can **prove**, right now, that its two channels' state is bit-equal.
+    ///
+    /// The mono collapse's way back (M3). A chain that has rendered dual blocks under a witness
+    /// that did not hold has two channels somewhere it cannot describe, and re-equal designed
+    /// words do not put them back -- so `miso_engine_rack::BankChain` refuses to collapse again
+    /// until something re-establishes the premise. The disengage copy is one such thing. This is
+    /// the other, and it is the only one that can recover a chain whose channels were driven apart
+    /// by the render rather than by the collapse.
+    ///
+    /// # The obligation
+    ///
+    /// `true` means: every word [`desymmetrize_channels`](Self::desymmetrize_channels) would copy
+    /// already compares **bit-equal** between the two channels, for every lane -- raw bits, so
+    /// `+0.0` and `-0.0` disagree, as everywhere else on this surface. Not "equivalent", not
+    /// "equal to within the fixed point", not "equal on the words that matter": the two lists are
+    /// the same list, because the thing being claimed is that calling `desymmetrize_channels` here
+    /// would move no byte.
+    ///
+    /// The default is `false`. An effect that has not written the comparison declines, and a wrong
+    /// `true` re-engages a collapse onto a right channel that is not the left one -- which is
+    /// wrong audio, not a missed optimisation, exactly as on
+    /// [`lane_channel_symmetry`](Self::lane_channel_symmetry).
+    ///
+    /// # Where it runs, and the cost rule
+    ///
+    /// On the render thread, at a block boundary, allocation-free and atomics-free like everything
+    /// else here. The chain asks it at most once per block per prefix slot and only inside a
+    /// *recovery window* -- the chain is otherwise ready to collapse and this is the only thing
+    /// declining -- so a session that never disagrees never calls it at all.
+    ///
+    /// That still forbids a naive answer. A launch effect's per-channel state is dominated by
+    /// delay lines: the compressor's two rings and the limiter's four run to tens of kilobytes per
+    /// lane, and a byte-compare of them every block would cost more than the collapse saves and
+    /// would be paid by exactly the sessions that are already not collapsing. So an implementation
+    /// is expected to **discharge the buffers rather than compare them**: the silence fixed point
+    /// each of these kernels already earns (`#163` phase 4 item 1) pins every ring to a known
+    /// uniform value, at which point equality of the rings is a property of the claim and the only
+    /// words left to compare are the coefficients, the ramps and the handful of recursive words --
+    /// a kilobyte or so, not a hundred. An effect whose whole state is small enough compares it
+    /// all and needs no fixed point at all. An effect that can do neither returns `false`, and its
+    /// chain simply does not recover; declining is always safe.
+    ///
+    /// # What deliberately is not here
+    ///
+    /// A **reset** boundary would re-establish agreement too, and it is not offered as a way back
+    /// because it cannot be reached and would not be sound if it were.
+    /// [`reset`](Self::reset) is preparation-side: no session, host, protocol or graph path
+    /// invokes it on a bound bank, exactly as `restore_track_state_payload` cannot reach one. And
+    /// [`ResetKind`] is not a symmetrising operation in any of the shipped effects -- both kinds
+    /// clear the *running* state to constants but re-seed the *designed* words from each channel's
+    /// own defaults or its own ramp targets, so a reset preserves whatever parameter asymmetry the
+    /// two channels already carried. It is the witness, not the reset, that would have to speak to
+    /// that half; the witness already does, and this method covers what it cannot see.
+    fn channels_agree(&self) -> bool {
+        false
+    }
 }
 #[derive(Default)]
 pub struct NativeEffectRegistry {

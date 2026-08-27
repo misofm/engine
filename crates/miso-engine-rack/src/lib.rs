@@ -401,6 +401,19 @@ pub trait BankStage: Send {
     /// The collapse's disengage boundary. See
     /// [`PreparedNativeEffectBank::desymmetrize_channels`] for what the copy has to cover and why.
     fn desymmetrize(&mut self) {}
+
+    /// Whether this stage can **prove**, right now, that its two channels' state is bit-equal.
+    ///
+    /// The re-engage rule's way back for a chain whose channels have already been driven apart.
+    /// See [`PreparedNativeEffectBank::channels_agree`] for the contract, the cost rule and what
+    /// each shipped effect proves it with; and [`BankChain::run`] for the one place it is asked.
+    ///
+    /// The default is `false`, for the same reason every default on this surface is the declining
+    /// one: a stage that cannot prove equality must not be believed to have it, and a wrong `true`
+    /// here re-engages a collapse onto a right channel that is not the left one.
+    fn channels_agree(&self) -> bool {
+        false
+    }
 }
 
 /// Adapter from the effect contract's prepared homogeneous bank to a chain stage.
@@ -476,6 +489,10 @@ impl BankStage for EffectBankStage {
 
     fn desymmetrize(&mut self) {
         self.processor.desymmetrize_channels();
+    }
+
+    fn channels_agree(&self) -> bool {
+        self.processor.channels_agree()
     }
 
     fn process_mono(&mut self, block: BankBlock<'_>) -> Result<(), RenderError> {
@@ -776,6 +793,10 @@ impl BankStage for ConsoleEffectBankStage {
 
     fn desymmetrize(&mut self) {
         self.processor.desymmetrize_channels();
+    }
+
+    fn channels_agree(&self) -> bool {
+        self.processor.channels_agree()
     }
 
     fn begin_block(&mut self, first_sample: u64) -> Result<(), RenderError> {
@@ -1111,6 +1132,35 @@ pub trait BankMembers {
 /// Leaving the collapsed mode costs one whole-state copy per prefix slot
 /// ([`BankStage::desymmetrize`]) on the block that stops, which is what makes the first dual block
 /// after it bit-identical to a run that never collapsed.
+///
+/// # Coming back (mono-collapse M3)
+///
+/// Engaging is sound only when the two channels' state already agrees, and the witness does not
+/// say that. The witness is a statement about a *block's* inputs -- one source channel, bit-equal
+/// designed words, no one-channel write, no divergent restore -- and a run whose witness has been
+/// false for a while is a run whose two channels have been evolving apart under different words.
+/// Re-equal words do not put the state back. Engaging on the witness alone would therefore be
+/// engaging on the wrong premise, and it is the reason M2 shipped the disengage as a one-way
+/// latch: a chain that stopped stayed stopped, because declining is always safe.
+///
+/// What the chain carries instead is [`collapse_channels_agree`](Self::collapse_channels_agree),
+/// an invariant maintained at every block boundary and read by the dispatch alongside the witness:
+///
+/// * it is **true at bind**, where every prefix stage's two channels hold the state preparation
+///   built them with, and every difference between them is a designed word the witness sees;
+/// * it is **re-established by the disengage copy**, which is not an approximation of the
+///   counterfactual dual run's right state but literally that state
+///   ([`disengage_collapse`](Self::disengage_collapse));
+/// * it is **preserved by any dual block whose witness preserves agreement**
+///   ([`ChannelSymmetryWitnessV1::AGREEING`]) -- equal inputs over equal state with equal words
+///   leave equal state, which is the same induction the engage direction has always rested on;
+/// * it is **cleared by any dual block that does not**, and after that only a proof brings it
+///   back ([`BankStage::channels_agree`]).
+///
+/// So the reachable cycle -- collapse, disengage on a forced-off arm or a lifted-then-restored
+/// bypass, re-engage when the switch or the term comes back -- is a cycle the chain takes, and the
+/// one transition M2 could not justify is now justified by an invariant rather than by an argument
+/// about why the witness went false. Counted in [`collapse_transitions`](Self::collapse_transitions).
 pub struct BankChain {
     scratch: AoSoaScratch,
     lanes: usize,
@@ -1154,16 +1204,17 @@ pub struct BankChain {
     collapse_forced_off: bool,
     /// The chain rendered its previous block collapsed.
     collapsed: bool,
-    /// A disengage has happened, and this chain does not collapse again.
+    /// The two channels' state agrees at the boundary of the next **dual** block.
     ///
-    /// The engage direction is sound at any block whose witness holds -- the two channels' states
-    /// agree by the induction the witness maintains -- and the disengage direction is made sound by
-    /// the state copy. Re-engaging after a disengage is the one transition whose premise this
-    /// milestone does not own: it would have to argue that the *dual* blocks in between left the
-    /// two channels agreeing again, which is a statement about the reason the witness went false
-    /// and not about the witness itself. It is M3's, and until then a chain that has disengaged
-    /// once stays dual: declining is always safe.
-    collapse_retired: bool,
+    /// The premise the engage direction needs and the witness does not supply. See the type's
+    /// `Coming back` section for the four clauses that maintain it; the awkward "next *dual*
+    /// block" in the sentence above is the one wrinkle and it is deliberate. A collapsed block
+    /// freezes the right channel, so between the block that engages and the block that stops the
+    /// two channels genuinely disagree -- but nothing dual reads them in that window, and
+    /// [`disengage_collapse`](Self::disengage_collapse) puts them back before anything does. The
+    /// flag therefore stays `true` across a collapsed run, which is what lets block `N + 1` collapse
+    /// after block `N` did.
+    collapse_channels_agree: bool,
     /// The **structural** half of every active lane's witness, joined at bind.
     ///
     /// `false` until [`BankChain::arm_mono_collapse`] says otherwise, and that default is the
@@ -1180,6 +1231,10 @@ pub struct BankChain {
     collapse_source: bool,
     /// Blocks this chain rendered collapsed. Evidence only, read after render is disarmed.
     collapses: u64,
+    /// `[disengages, re-engages, agreement proofs]`. Evidence only; see
+    /// [`collapse_transitions`](Self::collapse_transitions) for what each one counts and why a
+    /// block count alone cannot say it.
+    transitions: [u64; 3],
 }
 
 impl BankChain {
@@ -1231,9 +1286,13 @@ impl BankChain {
             collapse_prefix,
             collapse_forced_off: false,
             collapsed: false,
-            collapse_retired: false,
+            // True at bind: nothing has rendered, so every prefix stage's two channels hold the
+            // state preparation gave them, and any way in which they differ is a designed word the
+            // witness compares and declines on.
+            collapse_channels_agree: true,
             collapse_source: false,
             collapses: 0,
+            transitions: [0; 3],
         })
     }
 
@@ -1375,9 +1434,26 @@ impl BankChain {
     /// planner's problem, not the chain's.
     #[must_use]
     pub fn all_lanes_symmetric(&self) -> bool {
-        (0..self.lanes)
-            .filter(|lane| self.active[*lane])
-            .all(|lane| self.lane_symmetry(lane).eligible())
+        self.cohort_symmetry().eligible()
+    }
+
+    /// The conjunction of every active lane's witness: this cohort's witness.
+    ///
+    /// [`all_lanes_symmetric`](Self::all_lanes_symmetric) is `eligible()` of this, and the M3
+    /// invariant is [`ChannelSymmetryWitnessV1::preserves_channel_agreement`] of it, so the
+    /// dispatch takes one walk and asks it twice rather than walking the lanes once per question.
+    ///
+    /// An inactive lane contributes nothing: it renders no track. A chain always has at least one
+    /// active lane ([`BankChain::new`]), so this is never the vacuous `SYMMETRIC`.
+    #[must_use]
+    pub fn cohort_symmetry(&self) -> ChannelSymmetryWitnessV1 {
+        let mut witness = ChannelSymmetryWitnessV1::SYMMETRIC;
+        for lane in 0..self.lanes {
+            if self.active[lane] {
+                witness = witness.and(self.lane_symmetry(lane));
+            }
+        }
+        witness
     }
 
     /// `[eligible active lanes, active lanes]` for this chain. Evidence and gates only.
@@ -1469,15 +1545,50 @@ impl BankChain {
         // A command lands at a block boundary, so the eligibility this reads is the eligibility
         // that holds for every sample of this block -- which is what makes a per-block mode legal
         // at all.
-        let collapse = self.collapse_prefix > 0
-            && self.collapse_source
-            && !self.collapse_forced_off
-            && !self.collapse_retired
-            && self.all_lanes_symmetric();
+        //
+        // Two questions of one walk (`cohort_symmetry`): may this block collapse, and -- if it may
+        // not -- does rendering it dual leave the two channels where the next block's dispatch
+        // believes they are. The second is M3's invariant and it is why the first is sound.
+        let witness = self.cohort_symmetry();
+        let armed = self.collapse_prefix > 0 && self.collapse_source && !self.collapse_forced_off;
+        // The way back. Asked at most once per block and only inside a recovery window -- the
+        // chain is otherwise ready to collapse and the invariant is the only thing declining -- so
+        // a chain that never disagrees never pays for it, and a chain that disagrees for good
+        // pays one short-circuiting query per block. See `BankStage::channels_agree`.
+        if armed && !self.collapse_channels_agree && witness.eligible() {
+            let proven = self.slots[..self.collapse_prefix]
+                .iter()
+                .all(|slot| slot.stage.channels_agree());
+            if proven {
+                self.collapse_channels_agree = true;
+                self.transitions[2] = self.transitions[2].saturating_add(1);
+            }
+        }
+        let collapse = armed && witness.eligible() && self.collapse_channels_agree;
         if self.collapsed && !collapse {
             self.disengage_collapse();
+        } else if collapse && !self.collapsed && self.transitions[0] > 0 {
+            // A re-engage, and only that: the first engage of a chain that has never disengaged is
+            // not one, and neither is a second collapsed block in a row.
+            self.transitions[1] = self.transitions[1].saturating_add(1);
         }
         self.collapsed = collapse;
+        // The invariant, maintained for the block this dispatch just decided. A dual block whose
+        // witness does not preserve agreement is the one thing that drives the two channels apart,
+        // and after it nothing but a proof brings them back. A collapsed block drives them apart
+        // too -- it freezes the right channel -- but the disengage copy repairs that before any
+        // dual block reads it, which is exactly what the flag's "next dual block" wording says.
+        //
+        // `SOURCE` is deliberately not a clause here, and it is the one term that would have to be
+        // argued about. It is decided at bind from the compiled session and never moves within a
+        // plan, so it cannot be an *episode*: either it holds for every block, and the two planes
+        // carry the same samples on all of them, or it does not, and `armed` is false and this
+        // chain never collapses at all. A term that cannot change cannot break an invariant whose
+        // whole job is to survive change. `arm_mono_collapse` carries the obligation that makes
+        // that reading true.
+        if !collapse && !witness.preserves_channel_agreement() {
+            self.collapse_channels_agree = false;
+        }
         if collapse {
             self.collapses = self.collapses.saturating_add(1);
             self.gather_mono(members, frames);
@@ -1554,7 +1665,14 @@ impl BankChain {
         for slot in &mut self.slots[..self.collapse_prefix] {
             slot.stage.desymmetrize();
         }
-        self.collapse_retired = true;
+        self.transitions[0] = self.transitions[0].saturating_add(1);
+        // The copy **is** the proof, not evidence for one: every prefix stage's right channel now
+        // holds its left channel's whole state, so the two agree by construction at this boundary.
+        // M2 set a one-way latch here instead, because it had no invariant to hand this fact to.
+        // Note that this block still renders dual, and the invariant above will clear the flag
+        // again if this block's witness does not preserve agreement -- which is precisely the
+        // disengage-for-cause case, and precisely the case that must not re-engage.
+        self.collapse_channels_agree = true;
     }
 
     /// Planar -> AoSoA for the **left plane only**: the collapsed cohort's gather.
@@ -1610,6 +1728,17 @@ impl BankChain {
     /// `structural` is "every active lane of this chain renders a track whose two channels read
     /// one source channel". Passing `false`, or never calling this at all, makes the chain decline
     /// forever. See [`BankChain::collapse_source`] for why the chain cannot derive this itself.
+    ///
+    /// # The obligation, which M3's invariant rests on
+    ///
+    /// Bind-time: off the render thread, once, before this chain renders its first block.
+    /// `PreparedRenderPlan::arm_mono_collapse` enforces the render-scope half with an assertion.
+    /// The block-order half is a caller obligation because the chain cannot check it, and it is
+    /// what lets [`run`](Self::run) leave `SOURCE` out of the agreement invariant: a chain armed
+    /// before it renders has one answer to "do the two planes carry the same samples" for its whole
+    /// life, so that term cannot be the cause of a *transient* divergence. Arming a chain that has
+    /// already rendered blocks fed by two different source channels would break that reading, and
+    /// nothing in the engine does it -- the join runs once, from the compiled session, at bind.
     pub const fn arm_mono_collapse(&mut self, structural: bool) {
         self.collapse_source = structural;
     }
@@ -1647,10 +1776,27 @@ impl BankChain {
         self.collapsed
     }
 
-    /// Whether this chain has disengaged and will not collapse again in this plan.
+    /// Whether the two channels' state agrees at the next dual block's boundary.
+    ///
+    /// The re-engage rule's premise, and `false` is the retirement M2 latched: a chain whose
+    /// channels have been driven apart does not collapse again until something proves they agree.
+    /// Evidence only.
     #[must_use]
-    pub const fn collapse_is_retired(&self) -> bool {
-        self.collapse_retired
+    pub const fn collapse_channels_agree(&self) -> bool {
+        self.collapse_channels_agree
+    }
+
+    /// `[disengages, re-engages, agreement proofs]` for this chain. Evidence only.
+    ///
+    /// Three numbers because the cycle has three edges and a block count sees none of them: a
+    /// chain that collapsed for every block and one that collapsed, stopped and started again can
+    /// report the same [`collapses`](Self::collapses), and the second is the transition the
+    /// milestone is about. A **re-engage** is an engage by a chain that has disengaged at least
+    /// once; an **agreement proof** is a recovery through [`BankStage::channels_agree`], which is
+    /// the only way the invariant comes back other than the disengage copy that sets it.
+    #[must_use]
+    pub const fn collapse_transitions(&self) -> [u64; 3] {
+        self.transitions
     }
 
     /// Adds every armed lane's resident result into its auxiliary destination.
@@ -1926,6 +2072,7 @@ impl BankChain {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
 
     struct PassThrough;
     impl BankStage for PassThrough {
@@ -2934,6 +3081,40 @@ mod tests {
         }
     }
 
+    /// Finite, identical, per-block-distinct planes: the controlled input the M3 tests need.
+    ///
+    /// [`identical_planes`] salts NaN, both infinities and both zeros across every lane, which is
+    /// what the seam's operation-order gates exist for and exactly wrong here: a recursive state
+    /// fed an infinity saturates, and two channels that have saturated agree again however far
+    /// apart their coefficients drove them. These are ordinary numbers, identical on the two
+    /// planes -- the `SOURCE` term, made concrete.
+    fn finite_planes(lanes: usize, frames: u32, block: u64) -> Planes {
+        let plane: Vec<Vec<f32>> = (0..lanes)
+            .map(|lane| {
+                (0..frames)
+                    .map(|frame| {
+                        let step = block * u64::from(frames) + u64::from(frame);
+                        let salt = (lane as u64 * 7 + step * 13) % 97;
+                        0.125 + salt as f32 / 512.0
+                    })
+                    .collect()
+            })
+            .collect();
+        Planes {
+            left: plane.clone(),
+            right: plane,
+        }
+    }
+
+    /// [`finite_planes`] at exactly `+0.0`: the input a silence fixed point is earned on.
+    fn silent_planes(lanes: usize, frames: u32) -> Planes {
+        let plane: Vec<Vec<f32>> = (0..lanes).map(|_| vec![0.0; frames as usize]).collect();
+        Planes {
+            left: plane.clone(),
+            right: plane,
+        }
+    }
+
     /// A chain nobody armed never collapses, whatever its witness says.
     ///
     /// The `SOURCE` term is decided on the control plane, keyed by track id, and a chain sees only
@@ -3231,7 +3412,7 @@ mod tests {
 
     /// The disengage copy runs once, on the block that stops collapsing, and only for the prefix.
     #[test]
-    fn disengaging_copies_the_prefixs_state_once_and_retires_the_chain() {
+    fn disengaging_copies_the_prefixs_state_once() {
         let mut chain = mono_chain(
             4,
             8,
@@ -3248,14 +3429,457 @@ mod tests {
         assert!(chain.is_collapsed());
         chain.force_mono_collapse_off(true);
         chain.run(&mut planes, 8, 0).expect("render");
-        assert!(!chain.is_collapsed() && chain.collapse_is_retired());
-        // Re-arming does not re-engage: that transition is M3's.
-        chain.force_mono_collapse_off(false);
-        chain.run(&mut planes, 8, 0).expect("render");
+        assert!(!chain.is_collapsed());
+        assert_eq!(
+            chain.collapse_transitions(),
+            [1, 0, 0],
+            "one disengage, no re-engage yet and no proof: the copy is the premise, not a proof"
+        );
+        assert!(
+            chain.collapse_channels_agree(),
+            "the disengage copy re-establishes agreement; a witness that still holds keeps it"
+        );
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Mono-collapse M3: the re-engage rule.
+    // ---------------------------------------------------------------------------------------
+
+    /// A stage with genuine per-channel recursive state, a rest state, and a movable witness.
+    ///
+    /// [`Scale`] cannot exercise M3: its two channels differ only in what they *write*, so a
+    /// window rendered dual under a declining witness leaves them exactly as symmetric as it found
+    /// them and every re-engage looks sound. The rule is about state that has been driven apart,
+    /// so the stage that tests it has to have some.
+    ///
+    /// `state = state * coefficient[channel] + input`, per lane, flushed to `+0.0` below
+    /// [`FLUSH`](RecursiveCore::FLUSH). Two coefficients, so a dual window with the `DESIGNED` term
+    /// down genuinely separates the channels; a flush floor, so a window of silence brings them
+    /// back to one exact rest state -- which is the shipped effects' `silent_fixed_point` in
+    /// miniature, and what [`BankStage::channels_agree`] is able to prove.
+    ///
+    /// The core is shared so a test can move the witness and the coefficients between blocks, the
+    /// way a drain does, and read the counters back afterwards.
+    #[derive(Default)]
+    struct RecursiveCore {
+        coefficient: [f32; 2],
+        state: [[f32; 8]; 2],
+        witness: ChannelSymmetryWitnessV1,
+        desymmetrized: usize,
+        agreement_queries: usize,
+    }
+    impl RecursiveCore {
+        /// The denormal-ish floor that gives this kernel an exact rest state.
+        const FLUSH: f32 = 1e-12;
+
+        fn advance(&mut self, channel: usize, lane: usize, input: f32) -> f32 {
+            let mut next = self.state[channel][lane] * self.coefficient[channel] + input;
+            if next.abs() < Self::FLUSH {
+                next = 0.0;
+            }
+            self.state[channel][lane] = next;
+            next
+        }
+
+        /// Whether the two channels' state -- the whole of what `desymmetrize` copies -- is
+        /// bit-equal. The comparison is on raw bits, so `+0.0` and `-0.0` disagree.
+        fn states_agree(&self) -> bool {
+            self.state[0]
+                .iter()
+                .zip(self.state[1].iter())
+                .all(|(left, right)| left.to_bits() == right.to_bits())
+        }
+    }
+
+    #[derive(Clone)]
+    struct Recursive(Arc<Mutex<RecursiveCore>>);
+    impl Recursive {
+        fn new(coefficient: [f32; 2]) -> Self {
+            Self(Arc::new(Mutex::new(RecursiveCore {
+                coefficient,
+                witness: ChannelSymmetryWitnessV1::SYMMETRIC,
+                ..RecursiveCore::default()
+            })))
+        }
+        fn core(&self) -> std::sync::MutexGuard<'_, RecursiveCore> {
+            self.0.lock().expect("recursive core")
+        }
+    }
+    impl BankStage for Recursive {
+        fn process(&mut self, block: BankBlock<'_>) -> Result<(), RenderError> {
+            let mut core = self.core();
+            for frame in 0..block.frames as usize {
+                for lane in 0..block.lanes {
+                    let index = frame * block.lanes + lane;
+                    block.left[index] = core.advance(0, lane, block.left[index]);
+                    block.right[index] = core.advance(1, lane, block.right[index]);
+                }
+            }
+            Ok(())
+        }
+        fn process_mono(&mut self, block: BankBlock<'_>) -> Result<(), RenderError> {
+            let mut core = self.core();
+            for frame in 0..block.frames as usize {
+                for lane in 0..block.lanes {
+                    let index = frame * block.lanes + lane;
+                    block.left[index] = core.advance(0, lane, block.left[index]);
+                }
+            }
+            Ok(())
+        }
+        fn supports_mono_collapse(&self) -> bool {
+            true
+        }
+        fn desymmetrize(&mut self) {
+            let mut core = self.core();
+            core.state[1] = core.state[0];
+            core.desymmetrized += 1;
+        }
+        fn channels_agree(&self) -> bool {
+            let mut core = self.core();
+            core.agreement_queries += 1;
+            core.states_agree()
+        }
+        fn lane_symmetry(&self, _lane: usize) -> ChannelSymmetryWitnessV1 {
+            self.core().witness
+        }
+    }
+
+    /// One armed chain of a single [`Recursive`] prefix slot behind the frozen seam matrix.
+    fn recursive_chain(stage: &Recursive) -> BankChain {
+        let mut chain = mono_chain(
+            4,
+            8,
+            vec![
+                Box::new(stage.clone()),
+                Box::new(Matrix {
+                    coefficients: [1.0, 0.0, 0.0, 1.0],
+                }),
+            ],
+        );
+        chain.arm_mono_collapse(true);
+        chain
+    }
+
+    /// The switch coming back re-engages, and the whole cycle renders the never-collapsed bits.
+    ///
+    /// # What replaced what
+    ///
+    /// M2 latched the disengage: `collapse_retired` was set by the block that stopped and never
+    /// cleared, so a chain that stopped stayed dual for the life of the plan. The latch was not
+    /// timidity -- engaging on a re-equal witness is genuinely unsound, and
+    /// `re_equal_words_after_a_desymmetrised_episode_do_not_re_engage` is the session that proves
+    /// it -- it was that M2 had no way to tell this case from that one.
+    ///
+    /// This is the case the latch was wrong about. The force-off switch is the paired
+    /// measurement's second arm: it never touches a designed word, so the witness holds for every
+    /// block of the forced-off window, and the disengage copy that opened the window left the two
+    /// channels holding one state. Equal inputs over equal state with equal words leave equal
+    /// state, block after block, so at the moment the switch comes back the premise the engage
+    /// direction needs is exactly as true as it was the first time. The chain re-engages, and the
+    /// oracle -- the same chain, same input, never collapsed -- says it rendered the same bits.
+    ///
+    /// # Red mutation
+    ///
+    /// Delete `self.collapse_channels_agree = true;` from `disengage_collapse` and the chain never
+    /// comes back: the transition triple reads `[1, 0, 0]` and `collapses()` is 4 rather than 8.
+    #[test]
+    fn the_forced_off_window_re_engages_and_renders_the_never_collapsed_bits() {
+        let stage = Recursive::new([0.5, 0.5]);
+        let oracle_stage = Recursive::new([0.5, 0.5]);
+        let mut chain = recursive_chain(&stage);
+        let mut oracle = recursive_chain(&oracle_stage);
+        oracle.force_mono_collapse_off(true);
+
+        let mut observed = Vec::new();
+        let mut expected = Vec::new();
+        for block in 0..12_u64 {
+            if block == 4 {
+                chain.force_mono_collapse_off(true);
+            }
+            if block == 8 {
+                chain.force_mono_collapse_off(false);
+            }
+            let mut planes = finite_planes(4, 8, block);
+            let mut oracle_planes = finite_planes(4, 8, block);
+            chain.run(&mut planes, 8, block * 8).expect("render");
+            oracle
+                .run(&mut oracle_planes, 8, block * 8)
+                .expect("render");
+            for lane in 0..4 {
+                for frame in 0..8 {
+                    observed.push((
+                        planes.left[lane][frame].to_bits(),
+                        planes.right[lane][frame].to_bits(),
+                    ));
+                    expected.push((
+                        oracle_planes.left[lane][frame].to_bits(),
+                        oracle_planes.right[lane][frame].to_bits(),
+                    ));
+                }
+            }
+        }
+
+        assert_eq!(
+            chain.collapse_transitions(),
+            [1, 1, 0],
+            "one disengage, one re-engage, and no agreement proof: the disengage copy is what \
+             re-established the premise, so the recovery path was never asked"
+        );
+        assert_eq!(
+            stage.core().agreement_queries,
+            0,
+            "the recovery query is only asked inside a recovery window, and there was none"
+        );
         assert_eq!(
             chain.collapses(),
-            1,
-            "one collapsed block, and no re-engage"
+            8,
+            "four blocks either side of the window"
+        );
+        assert_eq!(oracle.collapses(), 0, "the oracle never collapsed");
+        assert_eq!(
+            observed, expected,
+            "a session that collapsed, stopped and started again must render the bits of one \
+             that never collapsed at all"
+        );
+    }
+
+    /// A bypass episode re-engages: it never moved the two channels apart.
+    ///
+    /// `UNBYPASSED` is the one witness term that comes back within a plan (a live `Bypass(true)`
+    /// followed by a `Bypass(false)`), and it is the one term whose absence does **not** separate
+    /// the channels -- a bypassed lane still runs the bank on both planes and the shunt restores
+    /// the same dry block into both. `ChannelSymmetryWitnessV1::AGREEING` is that distinction, and
+    /// this is what it buys: a chain that would otherwise be retired for the duration of a bypass
+    /// it rendered correctly on both channels throughout.
+    ///
+    /// # Red mutation
+    ///
+    /// Make `AGREEING` equal to `ALL` -- fold `UNBYPASSED` back into the invariant -- and the
+    /// bypass window retires this chain: `collapses()` falls to 4 and the transition triple loses
+    /// its re-engage.
+    #[test]
+    fn a_bypass_episode_re_engages_because_it_never_moved_the_channels_apart() {
+        let stage = Recursive::new([0.5, 0.5]);
+        let oracle_stage = Recursive::new([0.5, 0.5]);
+        let mut chain = recursive_chain(&stage);
+        let mut oracle = recursive_chain(&oracle_stage);
+        oracle.force_mono_collapse_off(true);
+
+        let mut observed = Vec::new();
+        let mut expected = Vec::new();
+        for block in 0..12_u64 {
+            let bypassed = (4..8).contains(&block);
+            let witness = if bypassed {
+                ChannelSymmetryWitnessV1::symmetric_except(ChannelSymmetryWitnessV1::UNBYPASSED)
+            } else {
+                ChannelSymmetryWitnessV1::SYMMETRIC
+            };
+            stage.core().witness = witness;
+            oracle_stage.core().witness = witness;
+            let mut planes = finite_planes(4, 8, block);
+            let mut oracle_planes = finite_planes(4, 8, block);
+            chain.run(&mut planes, 8, block * 8).expect("render");
+            oracle
+                .run(&mut oracle_planes, 8, block * 8)
+                .expect("render");
+            for lane in 0..4 {
+                for frame in 0..8 {
+                    observed.push((
+                        planes.left[lane][frame].to_bits(),
+                        planes.right[lane][frame].to_bits(),
+                    ));
+                    expected.push((
+                        oracle_planes.left[lane][frame].to_bits(),
+                        oracle_planes.right[lane][frame].to_bits(),
+                    ));
+                }
+            }
+        }
+
+        assert_eq!(chain.collapse_transitions(), [1, 1, 0]);
+        assert_eq!(chain.collapses(), 8);
+        assert_eq!(observed, expected);
+    }
+
+    /// Re-equal designed words after a de-symmetrised episode do **not** re-engage.
+    ///
+    /// # The one design flaw this rule exists to exclude
+    ///
+    /// "The witness came back, so collapse again" is unsound, and this is the session that shows
+    /// it. Blocks 4..8 render dual with the `DESIGNED` term down and the two coefficients
+    /// genuinely different, so the two channels' recursive state separates. At block 8 the
+    /// coefficients are made equal again -- a `ParameterChannel::Both` retarget reaching its
+    /// target is exactly this -- and the witness is eligible once more. Every term of it holds.
+    /// The states still differ, and a collapse here would publish the left channel's state as the
+    /// right channel's.
+    ///
+    /// The decline is not vacuous: this asserts the states really do disagree at that boundary, so
+    /// the test would still fail if the episode stopped separating them.
+    ///
+    /// # Red mutation
+    ///
+    /// Drop `&& self.collapse_channels_agree` from `BankChain::run`'s dispatch -- which is exactly
+    /// what M2 would do if its latch were simply deleted -- and this fails on the output
+    /// comparison, not on a counter: the re-engaged blocks publish the left plane on both channels
+    /// while the never-collapsed oracle publishes two channels that have been apart since block 4.
+    #[test]
+    fn re_equal_words_after_a_desymmetrised_episode_do_not_re_engage() {
+        let stage = Recursive::new([0.5, 0.5]);
+        let oracle_stage = Recursive::new([0.5, 0.5]);
+        let mut chain = recursive_chain(&stage);
+        let mut oracle = recursive_chain(&oracle_stage);
+        oracle.force_mono_collapse_off(true);
+
+        let mut observed = Vec::new();
+        let mut expected = Vec::new();
+        for block in 0..12_u64 {
+            for core in [&stage, &oracle_stage] {
+                let mut core = core.core();
+                if block == 4 {
+                    // The episode: one channel's word moves, and the witness says so.
+                    core.coefficient[1] = 0.25;
+                    core.witness = ChannelSymmetryWitnessV1::symmetric_except(
+                        ChannelSymmetryWitnessV1::DESIGNED,
+                    );
+                }
+                if block == 10 {
+                    // The words agree again. The states do not.
+                    core.coefficient[1] = core.coefficient[0];
+                    core.witness = ChannelSymmetryWitnessV1::SYMMETRIC;
+                }
+            }
+            let mut planes = finite_planes(4, 8, block);
+            let mut oracle_planes = finite_planes(4, 8, block);
+            chain.run(&mut planes, 8, block * 8).expect("render");
+            oracle
+                .run(&mut oracle_planes, 8, block * 8)
+                .expect("render");
+            for lane in 0..4 {
+                for frame in 0..8 {
+                    observed.push((
+                        planes.left[lane][frame].to_bits(),
+                        planes.right[lane][frame].to_bits(),
+                    ));
+                    expected.push((
+                        oracle_planes.left[lane][frame].to_bits(),
+                        oracle_planes.right[lane][frame].to_bits(),
+                    ));
+                }
+            }
+        }
+
+        assert!(
+            !stage.core().states_agree(),
+            "the episode must actually have separated the channels, or the decline proves nothing"
+        );
+        assert!(!chain.collapse_channels_agree());
+        assert_eq!(
+            chain.collapse_transitions(),
+            [1, 0, 0],
+            "one disengage, no re-engage, and no proof: the query was asked on the two eligible \
+             blocks after the words re-agreed and refused both times"
+        );
+        assert_eq!(
+            stage.core().agreement_queries,
+            2,
+            "the recovery window is exactly the eligible blocks the invariant declined"
+        );
+        assert_eq!(
+            chain.collapses(),
+            4,
+            "only the four blocks before the episode collapsed"
+        );
+        assert_eq!(
+            observed, expected,
+            "a chain that declined to re-engage renders the never-collapsed bits"
+        );
+    }
+
+    /// An earned agreement proof brings back a chain the witness alone could not.
+    ///
+    /// The same de-symmetrised episode as above, followed by a window of silence. The kernel has a
+    /// rest state -- the flush floor -- so both channels reach exactly `+0.0` and
+    /// `BankStage::channels_agree` can say so from the state words rather than from a theory about
+    /// where the recursion settles. That is the shipped effects' `silent_fixed_point` argument at
+    /// one word instead of four rings, and it is the only route back that does not go through the
+    /// disengage copy.
+    ///
+    /// # Red mutation
+    ///
+    /// Make `Recursive::channels_agree` return `true` unconditionally and the *previous* test
+    /// fails on its output comparison. Make it return `false` unconditionally and this one loses
+    /// its re-engage and its proof.
+    #[test]
+    fn an_earned_agreement_proof_re_engages_a_chain_the_witness_could_not() {
+        let stage = Recursive::new([0.5, 0.5]);
+        let oracle_stage = Recursive::new([0.5, 0.5]);
+        let mut chain = recursive_chain(&stage);
+        let mut oracle = recursive_chain(&oracle_stage);
+        oracle.force_mono_collapse_off(true);
+
+        let mut observed = Vec::new();
+        let mut expected = Vec::new();
+        for block in 0..40_u64 {
+            for handle in [&stage, &oracle_stage] {
+                let mut core = handle.core();
+                if block == 4 {
+                    core.coefficient[1] = 0.25;
+                    core.witness = ChannelSymmetryWitnessV1::symmetric_except(
+                        ChannelSymmetryWitnessV1::DESIGNED,
+                    );
+                }
+                if block == 8 {
+                    core.coefficient[1] = core.coefficient[0];
+                    core.witness = ChannelSymmetryWitnessV1::SYMMETRIC;
+                }
+            }
+            // Silence from block 8 on: the recursion decays into the flush floor and both channels
+            // land on the one rest state.
+            let silent = block >= 8;
+            let mut planes = if silent {
+                silent_planes(4, 8)
+            } else {
+                finite_planes(4, 8, block)
+            };
+            let mut oracle_planes = if silent {
+                silent_planes(4, 8)
+            } else {
+                finite_planes(4, 8, block)
+            };
+            chain.run(&mut planes, 8, block * 8).expect("render");
+            oracle
+                .run(&mut oracle_planes, 8, block * 8)
+                .expect("render");
+            for lane in 0..4 {
+                for frame in 0..8 {
+                    observed.push((
+                        planes.left[lane][frame].to_bits(),
+                        planes.right[lane][frame].to_bits(),
+                    ));
+                    expected.push((
+                        oracle_planes.left[lane][frame].to_bits(),
+                        oracle_planes.right[lane][frame].to_bits(),
+                    ));
+                }
+            }
+        }
+
+        let transitions = chain.collapse_transitions();
+        assert_eq!(transitions[0], 1, "one disengage");
+        assert_eq!(transitions[1], 1, "one re-engage, through the proof");
+        assert_eq!(
+            transitions[2], 1,
+            "and exactly one proof: it is latched by the invariant"
+        );
+        assert!(chain.collapse_channels_agree());
+        assert!(
+            chain.collapses() > 4,
+            "the chain collapsed again after the proof"
+        );
+        assert_eq!(
+            observed, expected,
+            "a chain that re-engaged on a proven agreement renders the never-collapsed bits"
         );
     }
 }

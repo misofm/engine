@@ -286,6 +286,15 @@ pub trait PreparedPlanExecutor: Send {
     fn bank_collapse_counters(&self) -> [u64; 2] {
         [0, 0]
     }
+    /// `[disengages, re-engages, agreement proofs]`, over every bank chain (mono-collapse M3).
+    ///
+    /// The companion to [`bank_collapse_counters`](Self::bank_collapse_counters), and it answers
+    /// the question that one cannot: a block count says how much of the session collapsed, never
+    /// how many times it stopped and started. Read only after rendering is disarmed.
+    #[doc(hidden)]
+    fn bank_collapse_transitions(&self) -> [u64; 3] {
+        [0; 3]
+    }
     /// Force every bank chain's mono collapse off, or back on.
     ///
     /// The second arm of the paired mono measurement, and a kill switch. Bind-time and per plan,
@@ -640,6 +649,18 @@ impl PreparedRenderPlan {
         self.executor
             .as_deref()
             .map_or([0, 0], PreparedPlanExecutor::bank_collapse_counters)
+    }
+    /// Read `[disengages, re-engages, agreement proofs]` outside the render scope.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn bank_collapse_transitions(&self) -> [u64; 3] {
+        assert!(
+            !super::audit::is_render_scope_active(),
+            "bank collapse transitions are sealed until the render audit is disarmed"
+        );
+        self.executor
+            .as_deref()
+            .map_or([0; 3], PreparedPlanExecutor::bank_collapse_transitions)
     }
     /// Perform the mono collapse's structural join and arm the cohorts it admits.
     ///

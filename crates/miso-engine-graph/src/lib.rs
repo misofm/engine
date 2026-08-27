@@ -583,6 +583,14 @@ pub trait GraphPreparedBuiltinBankProcessor: Send {
 
     /// Copy every lane's left-channel state onto the right channel (the disengage boundary).
     fn desymmetrize(&mut self) {}
+
+    /// Whether this bank can prove, right now, that its two channels' state is bit-equal.
+    ///
+    /// The mono collapse's way back (M3). Same contract, same declining default and same cost rule
+    /// as `miso_engine_effect_contract::PreparedNativeEffectBank::channels_agree`.
+    fn channels_agree(&self) -> bool {
+        false
+    }
 }
 impl PreparedGraphPlan {
     fn has_valid_structural_layout(&self) -> bool {
@@ -1384,6 +1392,10 @@ impl PreparedPlanExecutor for GraphExecutor {
 
     fn bank_collapse_counters(&self) -> [u64; 2] {
         self.runtime.collapse_counters()
+    }
+
+    fn bank_collapse_transitions(&self) -> [u64; 3] {
+        self.runtime.collapse_transitions()
     }
 
     fn force_mono_collapse_off(&mut self, forced: bool) {

@@ -1230,6 +1230,17 @@ impl SessionRuntime {
         self.plan.bank_collapse_counters()
     }
 
+    /// `[disengages, re-engages, agreement proofs]` over every cohort (mono-collapse M3).
+    ///
+    /// The transition evidence the block count cannot carry. A row that collapses on every block
+    /// reports `[0, 0, 0]`; a session that stops and starts reports the cycle it took.
+    ///
+    /// Read outside the clock, like every other evidence accessor on this type.
+    #[must_use]
+    pub fn bank_collapse_transitions(&self) -> [u64; 3] {
+        self.plan.bank_collapse_transitions()
+    }
+
     /// One collapse-eligibility row per scheduling unit (mono-collapse M1).
     ///
     /// The per-cohort form of [`SessionRuntime::symmetry_counters`]. The census is a pair of

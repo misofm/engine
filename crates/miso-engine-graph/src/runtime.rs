@@ -368,6 +368,18 @@ impl RuntimeUnit {
         }
     }
 
+    /// `[disengages, re-engages, agreement proofs]` for this unit (mono-collapse M3).
+    ///
+    /// The cycle's three edges. `collapse_counters` counts blocks, and a block count cannot tell a
+    /// chain that collapsed throughout from one that collapsed, stopped and started again -- which
+    /// is the transition M3 is about. See `BankChain::collapse_transitions`.
+    pub(crate) fn collapse_transitions(&self) -> [u64; 3] {
+        match self {
+            Self::Op(_) => [0; 3],
+            Self::Bank { chain, .. } => chain.collapse_transitions(),
+        }
+    }
+
     /// Force this unit's collapse off (or back on). Bind-time; see `BankChain::force_mono_collapse_off`.
     pub(crate) fn force_mono_collapse_off(&mut self, forced: bool) {
         if let Self::Bank { chain, .. } = self {
@@ -653,6 +665,17 @@ impl Runtime {
     pub(crate) fn collapse_counters(&self) -> [u64; 2] {
         self.units.iter().fold([0, 0], |mut total, unit| {
             let counters = unit.collapse_counters();
+            for (value, add) in total.iter_mut().zip(counters) {
+                *value = value.saturating_add(add);
+            }
+            total
+        })
+    }
+
+    /// `[disengages, re-engages, agreement proofs]`, over every unit.
+    pub(crate) fn collapse_transitions(&self) -> [u64; 3] {
+        self.units.iter().fold([0; 3], |mut total, unit| {
+            let counters = unit.collapse_transitions();
             for (value, add) in total.iter_mut().zip(counters) {
                 *value = value.saturating_add(add);
             }
@@ -1095,6 +1118,9 @@ impl BankStage for BuiltinStage {
     }
     fn desymmetrize(&mut self) {
         self.0.desymmetrize();
+    }
+    fn channels_agree(&self) -> bool {
+        self.0.channels_agree()
     }
 }
 

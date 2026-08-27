@@ -150,6 +150,28 @@ impl ChannelSymmetryWitnessV1 {
 
     const ALL: u8 = Self::SOURCE | Self::DESIGNED | Self::LIVE | Self::UNBYPASSED | Self::RESTORED;
 
+    /// The terms whose failure lets a **dual** block leave the two channels' state disagreeing.
+    ///
+    /// Every term but [`UNBYPASSED`](Self::UNBYPASSED), and the exclusion is the whole content of
+    /// this constant, so it is worth stating why it is sound rather than convenient.
+    ///
+    /// The other four terms are all statements about the *inputs* to a block: `SOURCE` says the two
+    /// planes carry the same samples, `DESIGNED` and `LIVE` say the two channels' kernels load the
+    /// same words, `RESTORED` says no payload wrote them apart. A dual block is a pure function of
+    /// (input, state, words), so equal inputs over equal state with equal words leave equal state --
+    /// and a block missing any one of those four leaves the two channels somewhere this chain
+    /// cannot describe.
+    ///
+    /// A live bypass is not such a statement. A bypassed lane still runs the bank -- the shunt
+    /// captures the dry block before the bank touches it and restores it into the bypassed lanes
+    /// afterwards -- so both channels advance through the same kernel on the same samples and come
+    /// out holding the same state. What the term gates is the *collapse*, not the agreement: a
+    /// collapsed block's shunt would feed the latency line a plane nobody gathered
+    /// (`miso_engine_rack::ConsoleEffectBankStage::process_inner`), which is why a bypassed lane
+    /// must render dual. Folding that into the agreement invariant would retire a chain for the
+    /// duration of a bypass it renders correctly on both channels throughout.
+    pub const AGREEING: u8 = Self::ALL & !Self::UNBYPASSED;
+
     /// Every term holds: this track (or stage) is collapse-eligible.
     pub const SYMMETRIC: Self = Self(Self::ALL);
 
@@ -186,6 +208,18 @@ impl ChannelSymmetryWitnessV1 {
     #[must_use]
     pub const fn eligible(self) -> bool {
         self.0 == Self::ALL
+    }
+
+    /// Whether a **dual** block rendered under this witness leaves the two channels' state
+    /// agreeing.
+    ///
+    /// Strictly weaker than [`eligible`](Self::eligible): every eligible witness preserves
+    /// agreement, and a witness that has lost only [`UNBYPASSED`](Self::UNBYPASSED) preserves it
+    /// without being eligible. See [`AGREEING`](Self::AGREEING) for why that one term is the
+    /// difference, and `miso_engine_rack::BankChain::run` for the invariant it maintains.
+    #[must_use]
+    pub const fn preserves_channel_agreement(self) -> bool {
+        self.holds(Self::AGREEING)
     }
 
     /// Whether one named term holds.
