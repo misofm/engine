@@ -75,8 +75,11 @@ may change.
 - E3/E4: at least 40 builder documents cover every effect and parameter boundary/choice, routing,
   sends, all automation shapes, and 1/2/64 tracks; every validator stage passes and canonical
   stdout is byte-identical.
-- E5: every parameter rejects values immediately outside its domain locally and through the real
-  validator with matching leaf authority. Type tests reject an out-of-range tuple effect index.
+- E5: every parameter rejects values immediately outside its domain locally. E5a drives
+  schema/model/builtin values through the real four-stage validator CLI; E5b drives effect values
+  through the full fresh-instance Wasm compile pipeline. Both require typed leaf authority, and
+  the pinned ratio witness proves the approved CLI-pass/Wasm-fail asymmetry. Type tests reject an
+  out-of-range tuple effect index.
 - `scripts/sweep.sh`, `cargo fmt --check`, and workspace clippy with `-D warnings` are green before
   Phase 2 begins.
 
@@ -130,7 +133,7 @@ final handoff names exact commits, gate counts/digests, unresolved findings, and
 - Delivery state: local Phase 0 is separately mergeable and green. No commit was pushed by owner
   instruction, so GitHub #209 remains open and is not claimed remotely synchronized or complete.
 
-### Phase 1 tranche A: generated data scaffold (pending checkpoint)
+### Phase 1 tranche A: generated data scaffold (`fe22270`)
 
 - `sdk/` now has the zero-runtime-dependency `@misofm/engine` package scaffold, strict NodeNext
   TypeScript configuration, and the seven exact Phase 0 artifacts copied from the accepted sealed
@@ -150,7 +153,7 @@ final handoff names exact commits, gate counts/digests, unresolved findings, and
   and command-reason vocabulary self-test (19 red mutations). Full sweep, Cargo, and Wasm gates
   were intentionally not run in this tranche.
 
-### Phase 1 tranche B: core catalog and command primitives (pending checkpoint)
+### Phase 1 tranche B: core catalog and command primitives (`a6db2dd`)
 
 - `describe()` returns one frozen `miso.sdk.describe.v1` document with the generated catalog,
   revision, ABI, asset hashes, Wasm byte count, launch rates, and render quantum.
@@ -162,7 +165,7 @@ final handoff names exact commits, gate counts/digests, unresolved findings, and
 - The builder and its validator corpus remain outside this checkpoint by design; this tranche is a
   recoverable core primitive boundary, not a Phase 1 PASS claim.
 
-### Phase 1 tranche C: typed Session V1 builder (pending checkpoint)
+### Phase 1 tranche C: typed Session V1 builder (`c314175`)
 
 - The persistent builder emits the exact 14-key Session V1 shape, resolves native effect metadata
   into typed parameter rows, creates stable rack-local slot IDs, supports explicit graph and
@@ -198,3 +201,22 @@ final handoff names exact commits, gate counts/digests, unresolved findings, and
 - The ratio probe is now a required asymmetric red witness: `20.000002` must PASS the four-stage CLI
   and fail the Wasm compile oracle with `effect.parameter.domain` at the effect leaf. The SDK does
   not extend the CLI; remote successor #211 owns its future fifth effect-preparation stage.
+
+### Phase 1 tranche D: E3-E5 corpus (pending checkpoint)
+
+- The E3/E4 green corpus contains 247 canonical Session V1 documents: all boundary/default/choice
+  rows for all 66 native effect parameters and all ten builtin parameters, all seven send taps,
+  all three automation shapes, and 1/2/64-track sessions. The real validator CLI accepts every
+  document at all four stages and returns byte-identical canonical stdout.
+- E5 locally rejects 20 builtin and 132 effect just-outside-domain cases with the complete generated
+  descriptor attached to `MisoSessionError`. The engine oracles reject every forced TOML mutation
+  at an exact typed leaf: builtin cases through the CLI, and effect cases through a new prepared
+  Wasm instance per document. Of the 132 effect cases, 127 reach `effect.parameter.domain`; five
+  meet the stricter Session V1 numeric envelope first and return its exact numeric leaf.
+- The compressor `ratio = 20.000002` witness passes the four-stage CLI canonically and fails the
+  full Wasm compile with
+  `effect.parameter.domain\t$.tracks[id=track].effects[id=effect]`. E3 schema, E4 canonical-byte,
+  and E5 local-domain deliberate mutations are each proven red under `--self-test`.
+- Focused serialized gate result: `documents=247`, `effect-parameters=66`,
+  `builtin-negative-cases=20`, `effect-negative-cases=132`, `effect-prepare-cases=127`,
+  `schema-envelope-cases=5`, `ratio-asymmetry=PASS`. Phase-wide sweep/fmt/clippy remain pending.

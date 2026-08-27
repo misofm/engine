@@ -162,16 +162,17 @@ function parameterValue(
   return values.map(([valueChannel, value]) => {
     let normalized: number;
     if (parameter.domainName === "boolean") {
-      normalized = bool(value, path) ? 1 : 0;
+      if (typeof value !== "boolean") fail("Expected a boolean", path, parameter as unknown as Record<string, unknown>);
+      normalized = value ? 1 : 0;
     } else if (parameter.domainName === "enumeration") {
-      if (typeof value !== "string") fail("Expected an enumeration label", path);
+      if (typeof value !== "string") fail("Expected an enumeration label", path, parameter as unknown as Record<string, unknown>);
       const choice = parameter.enumChoices.find((candidate) => candidate.label === value);
-      if (!choice) fail(`Unknown enumeration label '${value}'`, path);
+      if (!choice) fail(`Unknown enumeration label '${value}'`, path, parameter as unknown as Record<string, unknown>);
       normalized = choice.value;
     } else {
       if (typeof value !== "number") fail("Expected a numeric parameter value", path);
       normalized = f32(value, path);
-      if (normalized < parameter.minimum || normalized > parameter.maximum) {
+      if (normalized < f32(parameter.minimum, `${path}.minimum`) || normalized > f32(parameter.maximum, `${path}.maximum`)) {
         fail(`Parameter '${name}' is outside its local metadata domain`, path, parameter as unknown as Record<string, unknown>);
       }
     }
@@ -254,7 +255,7 @@ export class SessionBuilder<Tracks extends BuilderTracks = {}> {
     if (this.state.routes.some((route) => route.id === spec.id)) fail("Duplicate route ID", "route.id");
     routeSource(spec.source, "route.source");
     routeDestination(spec.destination, "route.destination");
-    if (spec.matrix) matrix(spec.matrix, "route.matrix");
+    if (spec.matrix) routeMatrix(spec.matrix, "route.matrix");
     if (spec.gainDb !== undefined) f32(spec.gainDb, "route.gainDb");
     return this.next({ routes: [...this.state.routes, freeze({ ...spec })] });
   }
@@ -322,8 +323,39 @@ function rate(value: number, path: string): SessionSampleRateHz {
   return value;
 }
 
-function matrix(value: Matrix2x2, path: string): Matrix2x2 {
+function trackBuiltinMatrix(value: Matrix2x2, path: string): Matrix2x2 {
+  return freeze({ ll: builtinNumber("matrix_ll", value.ll, `${path}.ll`), lr: builtinNumber("matrix_lr", value.lr, `${path}.lr`), rl: builtinNumber("matrix_rl", value.rl, `${path}.rl`), rr: builtinNumber("matrix_rr", value.rr, `${path}.rr`) });
+}
+function routeMatrix(value: Matrix2x2, path: string): Matrix2x2 {
   return freeze({ ll: f32(value.ll, `${path}.ll`), lr: f32(value.lr, `${path}.lr`), rl: f32(value.rl, `${path}.rl`), rr: f32(value.rr, `${path}.rr`) });
+}
+
+function builtinDescriptor(name: string): (typeof CATALOG.builtins.parameters)[number] {
+  const descriptor = CATALOG.builtins.parameters.find((candidate) => candidate.name === name);
+  if (!descriptor) fail(`Generated builtin descriptor is absent: ${name}`, "catalog.builtins");
+  return descriptor;
+}
+function builtinNumber(name: string, value: number, path: string): number {
+  const descriptor = builtinDescriptor(name), normalized = f32(value, path);
+  if (descriptor.domain === "finiteInclusive" && (normalized < f32(descriptor.minimum, `${path}.minimum`) || normalized > f32(descriptor.maximum, `${path}.maximum`))) fail("Builtin value is outside its metadata domain", path, descriptor as unknown as Record<string, unknown>);
+  return normalized;
+}
+function builtinBoolean(name: string, value: unknown, path: string): boolean {
+  const descriptor = builtinDescriptor(name);
+  if (typeof value !== "boolean") fail("Builtin requires a boolean", path, descriptor as unknown as Record<string, unknown>);
+  return value;
+}
+function builtinFilter(name: "hpf_hz" | "lpf_hz", value: number, rateHz: number, path: string): number {
+  const descriptor = builtinDescriptor(name), normalized = f32(value, path);
+  const rates = descriptor.maximumByRate as Readonly<Record<string, number>> | null;
+  const maximum = rates?.[String(rateHz)];
+  if (maximum === undefined) fail("Builtin filter descriptor lacks this launch rate", path, descriptor as unknown as Record<string, unknown>);
+  const minimum = descriptor.minimum;
+  if (minimum === null) fail("Builtin filter descriptor lacks a minimum", path, descriptor as unknown as Record<string, unknown>);
+  const disabled = descriptor.disabledValue;
+  if (disabled === null) fail("Builtin filter descriptor lacks a disabled value", path, descriptor as unknown as Record<string, unknown>);
+  if (normalized !== f32(disabled, `${path}.disabledValue`) && (normalized < f32(minimum, `${path}.minimum`) || normalized > f32(maximum, `${path}.maximum`))) fail("Builtin filter value is outside its metadata domain", path, descriptor as unknown as Record<string, unknown>);
+  return normalized;
 }
 
 function routeSource(value: RouteSource, path: string): void {
@@ -344,11 +376,14 @@ function validateTrackSpec(spec: TrackSpec, path: string): void {
   if (typeof spec.source === "string") stableId(spec.source, `${path}.source`);
   else { stableId(spec.source.left[0], `${path}.source.left[0]`); stableId(spec.source.right[0], `${path}.source.right[0]`); integer(spec.source.left[1], `${path}.source.left[1]`); integer(spec.source.right[1], `${path}.source.right[1]`); }
   validateBuiltins(spec.builtins, `${path}.builtins`);
-  if (spec.fader) for (const [key, value] of Object.entries(spec.fader)) {
-    if (key.endsWith("Mute")) bool(value, `${path}.fader.${key}`); else f32(value as number, `${path}.fader.${key}`);
+  if (spec.fader) {
+    if (spec.fader.leftDb !== undefined) builtinNumber("fader_db", spec.fader.leftDb, `${path}.fader.leftDb`);
+    if (spec.fader.rightDb !== undefined) builtinNumber("fader_db", spec.fader.rightDb, `${path}.fader.rightDb`);
+    if (spec.fader.leftMute !== undefined) builtinBoolean("mute", spec.fader.leftMute, `${path}.fader.leftMute`);
+    if (spec.fader.rightMute !== undefined) builtinBoolean("mute", spec.fader.rightMute, `${path}.fader.rightMute`);
   }
   if (spec.pan) {
-    if ("matrix" in spec.pan) matrix(spec.pan.matrix, `${path}.pan.matrix`);
+    if ("matrix" in spec.pan) trackBuiltinMatrix(spec.pan.matrix, `${path}.pan.matrix`);
     else { f32(spec.pan.left, `${path}.pan.left`); f32(spec.pan.right, `${path}.pan.right`); }
     if (spec.pan.smoothingSamples !== undefined) integer(spec.pan.smoothingSamples, `${path}.pan.smoothingSamples`);
   }
@@ -374,9 +409,9 @@ function validateBuiltins(raw: import("./types.js").PerLane<BuiltinsSpec> | unde
   if (!raw) return;
   const lanes = Array.isArray(raw) ? [raw[0], raw[1]] : isLaneValue(raw) ? [raw.left, raw.right] : [raw];
   for (const lane of lanes) {
-    if (lane.polarityInvert !== undefined) bool(lane.polarityInvert, `${path}.polarityInvert`);
-    if (lane.trimDb !== undefined) f32(lane.trimDb, `${path}.trimDb`);
-    for (const name of ["hpfHz", "lpfHz"] as const) if (lane[name] !== undefined && (f32(lane[name], `${path}.${name}`) < 0)) fail("Filter frequency must be zero or positive", `${path}.${name}`);
+    if (lane.polarityInvert !== undefined) builtinBoolean("polarity_invert", lane.polarityInvert, `${path}.polarityInvert`);
+    if (lane.trimDb !== undefined) builtinNumber("trim_db", lane.trimDb, `${path}.trimDb`);
+    for (const name of ["hpfHz", "lpfHz"] as const) if (lane[name] !== undefined && f32(lane[name], `${path}.${name}`) < 0) fail("Filter frequency must be zero or positive", `${path}.${name}`, builtinDescriptor(name === "hpfHz" ? "hpf_hz" : "lpf_hz") as unknown as Record<string, unknown>);
   }
 }
 
@@ -422,7 +457,7 @@ function validateAutomationParameterValue(parameter: EffectDescriptor["parameter
   const normalized = f32(value, path);
   if (parameter.domainName === "boolean" && normalized !== 0 && normalized !== 1) fail("Boolean automation values must be 0 or 1", path, parameter as unknown as Record<string, unknown>);
   if (parameter.domainName === "enumeration" && !parameter.enumChoices.some((choice) => choice.value === normalized)) fail("Enumeration automation value is not a declared choice", path, parameter as unknown as Record<string, unknown>);
-  if (parameter.domainName === "continuous" && (normalized < parameter.minimum || normalized > parameter.maximum)) fail("Automation value is outside its local metadata domain", path, parameter as unknown as Record<string, unknown>);
+  if (parameter.domainName === "continuous" && (normalized < f32(parameter.minimum, `${path}.minimum`) || normalized > f32(parameter.maximum, `${path}.maximum`))) fail("Automation value is outside its local metadata domain", path, parameter as unknown as Record<string, unknown>);
   return normalized;
 }
 
@@ -445,21 +480,18 @@ function normalizeTrack(id: string, spec: TrackSpec, sources: BuilderState["sour
   const source = typeof spec.source === "string" ? sources.find((candidate) => candidate.id === spec.source) : undefined;
   const sourceRef = typeof spec.source === "string" ? { left: [spec.source, 0], right: [spec.source, source!.spec.channels === 1 ? 0 : 1] } : { left: spec.source.left, right: spec.source.right };
   const builtins = normalizeBuiltins(spec.builtins, sampleRateHz);
-  return freeze({ id, source_id: sourceRef.left[0], left_source_channel: sourceRef.left[1], right_source_channel: sourceRef.right[1], builtins, simd1: freeze({ effects: normalizeRack(spec.simd1 ?? [], "simd1") }), dynamic: freeze({ effects: normalizeRack(spec.dynamic ?? [], "dynamic") }), simd2: freeze({ effects: normalizeRack(spec.simd2 ?? [], "simd2") }), fader: freeze({ left_db: f32(spec.fader?.leftDb ?? 0, `track.${id}.fader.leftDb`), right_db: f32(spec.fader?.rightDb ?? 0, `track.${id}.fader.rightDb`), left_mute: spec.fader?.leftMute ?? false, right_mute: spec.fader?.rightMute ?? false }), ...(spec.pan && "matrix" in spec.pan ? { matrix: freeze({ ...matrix(spec.pan.matrix, `track.${id}.matrix`), smoothing_samples: spec.pan.smoothingSamples ?? 0 }) } : { pan: freeze({ left: f32(spec.pan && "left" in spec.pan ? spec.pan.left : 1, `track.${id}.pan.left`), right: f32(spec.pan && "left" in spec.pan ? spec.pan.right : 1, `track.${id}.pan.right`), smoothing_samples: spec.pan?.smoothingSamples ?? 0 }) }) });
+  const fader = freeze({ left_db: builtinNumber("fader_db", spec.fader?.leftDb ?? 0, `track.${id}.fader.leftDb`), right_db: builtinNumber("fader_db", spec.fader?.rightDb ?? 0, `track.${id}.fader.rightDb`), left_mute: builtinBoolean("mute", spec.fader?.leftMute ?? false, `track.${id}.fader.leftMute`), right_mute: builtinBoolean("mute", spec.fader?.rightMute ?? false, `track.${id}.fader.rightMute`) });
+  const matrixOrPan = spec.pan && "matrix" in spec.pan ? { matrix: freeze({ ...trackBuiltinMatrix(spec.pan.matrix, `track.${id}.matrix`), smoothing_samples: spec.pan.smoothingSamples ?? 0 }) } : { pan: freeze({ left: f32(spec.pan && "left" in spec.pan ? spec.pan.left : 1, `track.${id}.pan.left`), right: f32(spec.pan && "left" in spec.pan ? spec.pan.right : 1, `track.${id}.pan.right`), smoothing_samples: spec.pan?.smoothingSamples ?? 0 }) };
+  return freeze({ id, source_id: sourceRef.left[0], left_source_channel: sourceRef.left[1], right_source_channel: sourceRef.right[1], builtins, simd1: freeze({ effects: normalizeRack(spec.simd1 ?? [], "simd1") }), dynamic: freeze({ effects: normalizeRack(spec.dynamic ?? [], "dynamic") }), simd2: freeze({ effects: normalizeRack(spec.simd2 ?? [], "simd2") }), fader, ...matrixOrPan });
 }
 
 function normalizeBuiltins(raw: TrackSpec["builtins"], sampleRateHz: number): JsonRecord {
   const left = raw && Array.isArray(raw) ? raw[0] : raw && isLaneValue(raw) ? raw.left : raw ?? DEFAULT_BUILTINS;
   const right = raw && Array.isArray(raw) ? raw[1] : raw && isLaneValue(raw) ? raw.right : raw ?? DEFAULT_BUILTINS;
-  const lane = (value: BuiltinsSpec): JsonRecord => freeze({ polarity_invert: value.polarityInvert ?? false, trim_db: f32(value.trimDb ?? 0, "builtins.trimDb"), hpf_hz: filter(value.hpfHz ?? 0, sampleRateHz, "builtins.hpfHz"), lpf_hz: filter(value.lpfHz ?? 0, sampleRateHz, "builtins.lpfHz") });
+  const lane = (value: BuiltinsSpec): JsonRecord => freeze({ polarity_invert: builtinBoolean("polarity_invert", value.polarityInvert ?? false, "builtins.polarityInvert"), trim_db: builtinNumber("trim_db", value.trimDb ?? 0, "builtins.trimDb"), hpf_hz: builtinFilter("hpf_hz", value.hpfHz ?? 0, sampleRateHz, "builtins.hpfHz"), lpf_hz: builtinFilter("lpf_hz", value.lpfHz ?? 0, sampleRateHz, "builtins.lpfHz") });
   return freeze({ left: lane(left), right: lane(right) });
 }
 
-function filter(value: number, sampleRateHz: number, path: string): number {
-  const normalized = f32(value, path);
-  if (normalized !== 0 && (normalized < 10 || normalized >= sampleRateHz / 2)) fail("Filter frequency is outside its metadata domain", path);
-  return normalized;
-}
 
 function normalizeRack(effects: readonly EffectDecl[], rack: Rack): readonly JsonRecord[] {
   return effects.map((decl, index) => {
@@ -470,7 +502,7 @@ function normalizeRack(effects: readonly EffectDecl[], rack: Rack): readonly Jso
 }
 
 function normalizeRoute(spec: RouteSpec): JsonRecord {
-  return freeze({ id: spec.id, source: normalizeRouteSource(spec.source), destination: normalizeRouteDestination(spec.destination), channel_matrix: matrix(spec.matrix ?? UNITY, `route.${spec.id}.matrix`), gain_db: f32(spec.gainDb ?? 0, `route.${spec.id}.gainDb`) });
+  return freeze({ id: spec.id, source: normalizeRouteSource(spec.source), destination: normalizeRouteDestination(spec.destination), channel_matrix: routeMatrix(spec.matrix ?? UNITY, `route.${spec.id}.matrix`), gain_db: f32(spec.gainDb ?? 0, `route.${spec.id}.gainDb`) });
 }
 
 function normalizeRouteSource(value: RouteSource): JsonRecord { return value.kind === "track" ? freeze({ kind: "track", track_id: value.trackId, tap: value.tap }) : freeze({ kind: "submix_output", submix_id: value.submixId }); }

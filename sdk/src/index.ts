@@ -1,8 +1,4 @@
-/**
- * Phase 1A generated SDK data surface.
- *
- * Session construction and runtime hosts deliberately arrive in later tranches.
- */
+/** Zero-runtime-dependency Engine V2 catalog, Session V1, and command-control surface. */
 export * from "./generated/catalog.js";
 export * from "./generated/abi.js";
 export * from "./generated/provenance.js";
