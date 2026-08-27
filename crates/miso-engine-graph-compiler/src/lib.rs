@@ -300,10 +300,13 @@ mod tests {
     /// chains against the cohort count.
     const STRIP_SLOTS_PER_COHORT: u64 = BANKABLE_TRACK_STAGES + 3;
     use core::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
-    use miso_engine_builtins::{MeterConfig, MeterHandle, MeterSnapshot, MeterTap};
+    use miso_engine_builtins::{
+        BuiltinLaneSelector, MeterConfig, MeterHandle, MeterSnapshot, MeterTap,
+    };
     use miso_engine_builtins_compiler::{
         BuiltinCompileCaps, MeterRequest, PreparedBuiltinsCorruption,
-        PreparedBuiltinsCorruptionCase, prepare_session_builtins,
+        PreparedBuiltinsCorruptionCase, TrackControlRequest, TrackFaderRecordV1,
+        prepare_session_builtins, prepare_session_builtins_with_console,
     };
     use miso_engine_conformance::DualAccumulatorDelayFactory;
     use miso_engine_core::realtime::{PlanarBufferMut, RenderIo, RenderTime, audit};
@@ -377,6 +380,49 @@ mod tests {
             block.right[0] = self.right;
             Ok(())
         }
+    }
+
+    /// A per-track constant on every sample of every block.
+    ///
+    /// The console fixture's own binding is an impulse at sample 0 and silence after it, which is
+    /// the right shape for testing state and the wrong one for testing *timing*: by the block a
+    /// live command lands in there is nothing left on the track to scale, so moving the command a
+    /// block either way moves no bit. A sustained input is what makes "the command landed on this
+    /// block and not the next one" observable at the session output at all
+    /// (`a_banked_fader_command_lands_on_the_block_it_was_admitted_in`).
+    struct SustainedTrackBinding {
+        left: f32,
+        right: f32,
+    }
+    impl GraphRuntimeProcessor for SustainedTrackBinding {
+        fn process(
+            &mut self,
+            block: GraphBindingBlock<'_>,
+        ) -> Result<(), miso_engine_core::realtime::RenderError> {
+            block.left.fill(self.left);
+            block.right.fill(self.right);
+            Ok(())
+        }
+    }
+
+    /// The sustained counterpart of [`console_track_input_binding`].
+    fn console_track_sustained_binding(node: &GraphNodeId) -> Box<dyn GraphRuntimeProcessor> {
+        let GraphNodeId::TrackStage {
+            track_id,
+            stage: TrackStage::Input,
+        } = node
+        else {
+            return Box::new(IdentityBinding);
+        };
+        let index = track_id
+            .as_str()
+            .strip_prefix("ch")
+            .and_then(|value| value.parse::<u32>().ok())
+            .expect("console fixture track id");
+        Box::new(SustainedTrackBinding {
+            left: 0.03125 * (index % 7 + 1) as f32,
+            right: -0.015625 * (index % 5 + 1) as f32,
+        })
     }
 
     /// A one-shot above-ceiling impulse followed by silence. The delayed limiter output therefore
@@ -5213,6 +5259,360 @@ mod tests {
             pcm.iter().flatten().any(|sample| *sample != 0.0),
             "the sent strip rendered audio"
         );
+    }
+
+    /// Issue #212: a banked fader honours the drain contract, bit-for-bit against the node form.
+    ///
+    /// # The contract, and why banking is where it could have been lost
+    ///
+    /// `TrackFaderRecordV1` rides a bounded SPSC queue with exactly one consumer, and the consumer
+    /// drains it *at the top of the block*, before any audio is touched -- so a record admitted
+    /// while block `N` is being prepared takes effect on the first sample of block `N` and not on
+    /// block `N + 1`. That is what the control side is acknowledged with, and it is the property
+    /// #210 Phase 1's solo depends on.
+    ///
+    /// Banking moves the consumer from a per-track node to a bank lane, which is exactly the kind
+    /// of move that silently costs a block of latency: a drain placed after the gather, or once
+    /// per bank instead of once per lane, or in the wrong order relative to the kernel, would all
+    /// still render plausible audio.
+    ///
+    /// So the oracle is the node form of the same session -- `Backend::Scalar` binds no bank at
+    /// all, so every track keeps its `ConsoleFaderProcessor` -- driven by the *same* commands at
+    /// the *same* blocks, and the two must agree word for word. Lane identity (#83 D4/D5) is what
+    /// makes the scalar arm a legitimate oracle for the vector one.
+    ///
+    /// # Two ways this test was vacuous before it was a gate, both recorded on purpose
+    ///
+    /// The falsifiability assertion below exists because the obvious shapes of this test do not
+    /// detect a one-block error at all, and both of them *passed*:
+    ///
+    /// * **Driving one track.** One track's fader ramp is a few percent of one of sixty-four
+    ///   contributions to the master sum and rounds away in `f32`. The node form was exactly as
+    ///   insensitive as the banked one, which is how the vacuity was caught rather than shipped.
+    /// * **Pushing commands during the priming window.** This plan's compensation delays and the
+    ///   limiter's lookahead put the first non-silent output at block 11, so a command admitted
+    ///   before then has settled long before anything it did could reach the session output.
+    ///
+    /// Red-mutation proven: draining `FaderBankProcessor`'s queues *after* `bank.process` instead
+    /// of before it -- one block of latency, and nothing else -- fails at block 14, the block the
+    /// first record was admitted in.
+    #[test]
+    fn a_banked_fader_command_lands_on_the_block_it_was_admitted_in() {
+        // This fixture's plan is deeply latent -- the strip's compensation delays and the
+        // limiter's lookahead put the first non-silent output at block 11 -- so a command pushed
+        // before then is settled long before anything it did could reach the session output. The
+        // script therefore lands *after* audio starts, and the render runs well past it.
+        const BLOCKS: u64 = 28;
+        const FIRST_AUDIBLE_BLOCK: u64 = 11;
+        // Commands are admitted between blocks, so the strongest case is a move admitted at a
+        // block boundary with a window that outlives the block: a ramp in flight across the
+        // boundary is what a one-block drain error corrupts most visibly.
+        let script: &[(u64, TrackFaderRecordV1)] = &[
+            (
+                FIRST_AUDIBLE_BLOCK + 3,
+                TrackFaderRecordV1::FaderDb {
+                    lanes: BuiltinLaneSelector::Both,
+                    db: -9.5,
+                    smoothing_samples: 311,
+                },
+            ),
+            (
+                FIRST_AUDIBLE_BLOCK + 5,
+                TrackFaderRecordV1::Mute {
+                    lanes: BuiltinLaneSelector::Left,
+                    muted: true,
+                    smoothing_samples: 97,
+                },
+            ),
+            (
+                FIRST_AUDIBLE_BLOCK + 8,
+                TrackFaderRecordV1::FaderDb {
+                    lanes: BuiltinLaneSelector::Right,
+                    db: 4.0,
+                    smoothing_samples: 0,
+                },
+            ),
+            (
+                FIRST_AUDIBLE_BLOCK + 11,
+                TrackFaderRecordV1::Mute {
+                    lanes: BuiltinLaneSelector::Left,
+                    muted: false,
+                    smoothing_samples: 41,
+                },
+            ),
+        ];
+
+        const TRACKS: usize = 64;
+        let banked = render_console_fader_script(host_dispatch(), 2_130, script, TRACKS, BLOCKS);
+        let node_form = render_console_fader_script(Backend::Scalar, 2_131, script, TRACKS, BLOCKS);
+        assert_eq!(
+            (node_form.1, node_form.2),
+            (0, 0),
+            "the scalar oracle must bind no bank at all, or it is not the node form"
+        );
+        assert!(
+            banked.1 > 0 && banked.2 > 0,
+            "the banked arm must actually bank, or this test compares two node forms"
+        );
+        // The gate is only a gate if a one-block error is visible in what it compares. The same
+        // script pushed one block later must render *different* audio -- otherwise "the command
+        // landed on the block it was admitted in" is unfalsifiable here and this test proves
+        // nothing about the drain's position at all.
+        let shifted: Vec<(u64, TrackFaderRecordV1)> = script
+            .iter()
+            .map(|(at, record)| (at + 1, *record))
+            .collect();
+        let late = render_console_fader_script(host_dispatch(), 2_135, &shifted, TRACKS, BLOCKS);
+        assert!(
+            late.0
+                .iter()
+                .zip(banked.0.iter())
+                .any(|(left, right)| left != right),
+            "a one-block command delay must be visible in this fixture, or the comparison below \
+             cannot detect one"
+        );
+        assert_pcm_bits_equal(
+            &banked.0,
+            &node_form.0,
+            "banked fader drain vs the per-node console",
+        );
+        assert!(
+            banked.0.iter().flatten().any(|sample| *sample != 0.0),
+            "the driven strip rendered audio"
+        );
+
+        // And the commands must actually have moved the audio, or the comparison above is between
+        // two runs of the same silence. The quiet arm pushes nothing and must differ.
+        let quiet = render_console_fader_script(host_dispatch(), 2_132, &[], TRACKS, BLOCKS);
+        assert!(
+            quiet
+                .0
+                .iter()
+                .zip(banked.0.iter())
+                .any(|(left, right)| left != right),
+            "a fader script that moves no bit proves nothing about when it landed"
+        );
+    }
+
+    /// Issue #212: a meter leased at `PostFader` splits the chain there, and still meters right.
+    ///
+    /// # The cliff, stated from both sides
+    ///
+    /// A meter at `PostMatrix` -- the tap the console actually leases, and the chain's *last*
+    /// slot -- is downstream of every merge and costs nothing;
+    /// `console_facilities_do_not_change_the_chain_shape_or_the_bits` pins that. A meter at
+    /// `PostFader` is not: the fader is now a slot with the matrix slot behind it, so an observer
+    /// on the fader node declines the fader -> matrix merge and that track's cohort renders as two
+    /// chains instead of one. One extra planar/AoSoA round-trip per block, for that cohort only,
+    /// paid only while the meter is leased.
+    ///
+    /// That is the same trade `a_leased_stage_meter_declines_the_merge_and_still_meters` documents
+    /// one stage earlier, and it is intended rather than tolerated: the meter must see post-fader,
+    /// pre-matrix audio, and a chain spanning that boundary would hand it the chain's input.
+    ///
+    /// Both halves are asserted, because either alone would pass for the wrong reason: a split
+    /// that metered garbage, or a meter that read correctly because the merge never fired at all.
+    #[test]
+    fn a_meter_leased_at_post_fader_splits_the_chain_and_still_meters() {
+        const BLOCKS: u64 = 12;
+        let Some(width) = BankWidth::for_backend(host_dispatch()) else {
+            return;
+        };
+        let cohorts = 64 / width.lanes() as u64;
+        let intended = parse_session_toml(CONSOLE_SIXTY_FOUR_TRACK_INTENDED_FIXTURE)
+            .expect("intended fixture");
+        let meters = vec![MeterRequest {
+            handle: MeterHandle(NonZeroU64::new(1).expect("constant")),
+            track_id: "ch00".to_owned(),
+            tap: MeterTap::PostFader,
+            config: MeterConfig {
+                period_frames: NonZeroU32::new(128).expect("constant"),
+                peak_hold_frames: 0,
+                peak_decay_db_per_second: 0.0,
+                queue_capacity: NonZeroUsize::new(64).expect("constant"),
+                reset_generation: 0,
+            },
+        }];
+        let registry = launch_native_effect_registry_v1().expect("launch registry");
+        let artifact = compile_console_model_with_builtins(&intended, 2_120, &meters, &registry);
+        let (pcm, transposes, chains, slots, frames, _) =
+            render_console_builtins_blocks(artifact, BLOCKS, Vec::new());
+        assert_eq!(
+            slots,
+            STRIP_SLOTS_PER_COHORT * cohorts,
+            "the meter changes no bank's membership"
+        );
+        assert_eq!(
+            chains,
+            cohorts + 1,
+            "ch00's cohort splits at the metered fader; every other cohort stays one chain"
+        );
+        assert_eq!(transposes, BLOCKS * chains, "G5 on the declining plan");
+
+        // And the meter reads the fader's output. The oracle is the same session with every effect
+        // on the per-node scalar path, where the strip's effect banks do not exist and the meter
+        // can only be reading the fader.
+        let scalar_artifact = compile_console_model_with_builtins(
+            &intended,
+            2_121,
+            &meters,
+            &scalar_console_registry(),
+        );
+        let (scalar_pcm, _, _, _, scalar_frames, _) =
+            render_console_builtins_blocks(scalar_artifact, BLOCKS, Vec::new());
+        assert_pcm_bits_equal(&pcm, &scalar_pcm, "64-track strip with a post-fader meter");
+        assert!(
+            !frames.is_empty(),
+            "the leased meter must publish windows, or this test proves nothing about it"
+        );
+        assert_eq!(
+            frames, scalar_frames,
+            "the metered fader must read the fader's output, not the chain's input"
+        );
+        assert!(
+            frames
+                .iter()
+                .any(|frame| frame.left.sample_peak != 0.0 || frame.right.sample_peak != 0.0),
+            "the metered windows must carry signal"
+        );
+    }
+
+    /// Compile and render the intended console fixture with a live fader channel on `ch00`,
+    /// pushing `script`'s records at the block they name, and return
+    /// `(pcm, builtin banks, effect banks)`.
+    ///
+    /// The dispatch is a parameter because that is the whole oracle: `Backend::Scalar` binds no
+    /// bank, so it renders the per-node console this test compares the banked one against.
+    fn render_console_fader_script(
+        dispatch: Backend,
+        plan_id: u64,
+        script: &[(u64, TrackFaderRecordV1)],
+        tracks: usize,
+        blocks: u64,
+    ) -> (Vec<Vec<f32>>, usize, usize) {
+        let model = parse_session_toml(CONSOLE_SIXTY_FOUR_TRACK_INTENDED_FIXTURE)
+            .expect("intended fixture");
+        let session = compile_session(
+            &model,
+            CompileCaps {
+                max_compiled_model_bytes: u64::MAX,
+                max_requested_runtime_bytes: u64::MAX,
+                max_single_allocation_bytes: u64::MAX,
+                max_queue_items: u64::MAX,
+                max_source_ring_frames: u64::MAX,
+                max_source_ring_bytes: u64::MAX,
+            },
+        )
+        .expect("compiled console model");
+        // Every track gets a channel, and the script drives every one of them. Driving a single
+        // track cannot gate this: one track's ramp is a few percent of one of sixty-four
+        // contributions to the master sum, and it rounds away in `f32` -- the *node form* is just
+        // as insensitive to command timing there as the banked one, which is what makes that shape
+        // a vacuous gate rather than a passing one. Driving every lane also means a bank that
+        // drained its lanes in the wrong order, or applied a record to the wrong lane, is caught
+        // here rather than by luck.
+        let controls: Vec<TrackControlRequest> = model
+            .tracks
+            .iter()
+            .map(|track| TrackControlRequest {
+                track_id: track.id.as_str().to_owned(),
+                queue_capacity: NonZeroUsize::new(16).expect("constant"),
+            })
+            .collect();
+        let builtins = prepare_session_builtins_with_console(
+            &session,
+            &[],
+            &controls,
+            BuiltinCompileCaps {
+                maximum_total_state_bytes: u64::MAX,
+                maximum_total_retained_payload_bytes: u64::MAX,
+                maximum_total_meter_items: u64::MAX,
+                maximum_total_meter_bytes: u64::MAX,
+                maximum_single_allocation_bytes: u64::MAX,
+                maximum_meter_streams: u64::MAX,
+                maximum_period_frames: u32::MAX,
+                maximum_peak_hold_frames: u32::MAX,
+                maximum_smoothing_samples: u32::MAX,
+            },
+        )
+        .expect("prepared console builtins");
+        let registry = launch_native_effect_registry_v1().expect("launch registry");
+        let artifact = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+            dispatch,
+            plan_id,
+            effects: prepare_native_session_effects(
+                &session,
+                &registry,
+                EffectCompileCaps {
+                    maximum_total_state_bytes: 1 << 22,
+                    maximum_scratch_bytes: 1 << 20,
+                    maximum_automation_spans_per_block: 32,
+                },
+            )
+            .expect("prepared console effects"),
+            builtins,
+            caps: integration_caps(),
+        })
+        .unwrap_or_else(|_| panic!("production console graph"));
+        let builtin_banks = artifact.prepared_builtin_bank_count();
+        let effect_banks = artifact.graph().prepared_bank_count();
+        let envelope = artifact.envelope();
+        let frames = envelope.quantum.0 as usize;
+        let nodes = artifact
+            .external_binding_nodes()
+            .map(|node| GraphNodeBinding::new(node.clone(), console_track_sustained_binding(node)))
+            .collect();
+        let bound = artifact
+            .into_bound(GraphRuntimeBindings {
+                envelope,
+                nodes,
+                observers: Vec::new(),
+            })
+            .unwrap_or_else(|failure| panic!("production console bind: {}", failure.code));
+        let mut plan = bound.plan;
+        let mut controls = bound.track_controls;
+        let pcm = (0..blocks)
+            .map(|block| {
+                // Admitted *before* the block renders, which is the contract under test: every
+                // sample of this block must be rendered by the post-command ramp.
+                for (at, record) in script {
+                    if *at != block {
+                        continue;
+                    }
+                    for (index, channel) in controls.iter_mut().enumerate().take(tracks) {
+                        // Each lane gets its own gain, so a record applied to the wrong lane
+                        // changes the output rather than being masked by a uniform move.
+                        let record = match *record {
+                            TrackFaderRecordV1::FaderDb {
+                                lanes,
+                                db,
+                                smoothing_samples,
+                            } => TrackFaderRecordV1::FaderDb {
+                                lanes,
+                                db: db + index as f32 * 0.125,
+                                smoothing_samples: smoothing_samples + index as u32,
+                            },
+                            other => other,
+                        };
+                        channel.fader.try_push(record).expect("queue has room");
+                    }
+                }
+                let mut pcm = vec![0.0_f32; frames * 2];
+                plan.render(
+                    RenderIo {
+                        input: None,
+                        output: PlanarBufferMut::try_new(&mut pcm, 2, frames, frames)
+                            .expect("output"),
+                    },
+                    RenderTime {
+                        absolute_sample: block * frames as u64,
+                    },
+                )
+                .expect("console render");
+                pcm
+            })
+            .collect();
+        (pcm, builtin_banks, effect_banks)
     }
 
     /// Compile one console session model into a prepared graph artifact.

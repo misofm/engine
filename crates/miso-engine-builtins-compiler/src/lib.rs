@@ -1474,8 +1474,14 @@ impl PreparedBuiltinsSession {
                     self.seal.tracks.push(track);
                 }
             }
+            // The seal records three stages per track and preparation owns them in two places
+            // since #212 -- one binding plus one `StripPreparation` -- so dropping either has to
+            // be caught. `strips.pop()` removes a track's fader *and* matrix stages at once,
+            // which is the shape a lost strip actually takes.
             PreparedBuiltinsCorruptionCase::ProcessorMissing => {
-                self.processors.pop();
+                if self.processors.pop().is_none() {
+                    self.strips.pop();
+                }
             }
             PreparedBuiltinsCorruptionCase::ProcessorExtra => self
                 .seal
@@ -4523,6 +4529,35 @@ mod tests {
         assert_eq!(
             transcript_hash, 13_708_826_867_739_612_709,
             "updated only through a deliberate frozen-case change"
+        );
+    }
+
+    /// Issue #212: a prepared session that lost a *strip* is caught, not only one that lost a
+    /// binding.
+    ///
+    /// Preparation owns three stages per track in two places -- one `GraphNodeBinding` for the
+    /// post-input stage, and one `StripPreparation` carrying the fader and the matrix -- while the
+    /// seal still records three stages per track flat. So `processors_match` has to count both,
+    /// and this is the half that did not exist before the strip's binding form became a lowering
+    /// decision. Without the strip term, a session missing a whole track's fader and matrix would
+    /// validate clean.
+    #[test]
+    fn a_prepared_session_that_lost_a_strip_fails_validation() {
+        let session = session();
+        let mut prepared =
+            prepare_session_builtins(&session, &[], caps()).expect("prepared builtins");
+        assert!(
+            prepared.validate_for_session(&session).0.is_empty(),
+            "the untouched preparation validates"
+        );
+        assert!(prepared.strips.pop().is_some(), "the fixture has a strip");
+        let diagnostics = prepared.validate_for_session(&session);
+        assert!(
+            diagnostics
+                .0
+                .iter()
+                .any(|diagnostic| diagnostic.code == "builtin.prepared.processor_set"),
+            "a lost strip must be diagnosed as a processor-set mismatch, got {diagnostics:?}"
         );
     }
 

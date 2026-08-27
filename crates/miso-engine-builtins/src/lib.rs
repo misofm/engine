@@ -1690,6 +1690,12 @@ impl BuiltinInputBankV1 {
 }
 
 /// The dispatched fader-ramp stage of a bank, at the width the selected backend chose.
+///
+/// Both variants are held inline for the reason [`InputStageKernel`] states: boxing the larger one
+/// would put the coefficients the render loop loads behind a pointer it chases once per bank per
+/// block, to save a few hundred bytes on a structure there is one of per cohort. The space is not
+/// worth the indirection.
+#[allow(clippy::large_enum_variant)]
 enum FaderStageKernel {
     /// Four lanes: AArch64 NEON and wasm `simd128`.
     Simd4(FaderRampStage<Simd4>),
@@ -1880,6 +1886,12 @@ impl BuiltinFaderBankV1 {
 }
 
 /// The dispatched matrix stage of a bank, at the width the selected backend chose.
+///
+/// Both variants are held inline for the reason [`InputStageKernel`] states: boxing the larger one
+/// would put the coefficients the render loop loads behind a pointer it chases once per bank per
+/// block, to save a few hundred bytes on a structure there is one of per cohort. The space is not
+/// worth the indirection.
+#[allow(clippy::large_enum_variant)]
 enum MatrixStageKernel {
     /// Four lanes: AArch64 NEON and wasm `simd128`.
     Simd4(MatrixStage<Simd4>),
