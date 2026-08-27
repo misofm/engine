@@ -1457,26 +1457,25 @@ impl BankChain {
     /// planner's problem, not the chain's.
     #[must_use]
     pub fn all_lanes_symmetric(&self) -> bool {
-        self.cohort_symmetry().eligible()
+        (0..self.lanes)
+            .filter(|lane| self.active[*lane])
+            .all(|lane| self.lane_symmetry(lane).eligible())
     }
 
-    /// The conjunction of every active lane's witness: this cohort's witness.
+    /// Whether a **dual** block rendered under this cohort's witness leaves every active lane's two
+    /// channels agreeing (mono-collapse M3).
     ///
-    /// [`all_lanes_symmetric`](Self::all_lanes_symmetric) is `eligible()` of this, and the M3
-    /// invariant is [`ChannelSymmetryWitnessV1::preserves_channel_agreement`] of it, so the
-    /// dispatch takes one walk and asks it twice rather than walking the lanes once per question.
+    /// Strictly weaker than [`all_lanes_symmetric`](Self::all_lanes_symmetric), by exactly the
+    /// `UNBYPASSED` term: see [`ChannelSymmetryWitnessV1::AGREEING`] for why a bypass window is the
+    /// one way to lose the witness without moving the two channels apart.
     ///
-    /// An inactive lane contributes nothing: it renders no track. A chain always has at least one
-    /// active lane ([`BankChain::new`]), so this is never the vacuous `SYMMETRIC`.
-    #[must_use]
-    pub fn cohort_symmetry(&self) -> ChannelSymmetryWitnessV1 {
-        let mut witness = ChannelSymmetryWitnessV1::SYMMETRIC;
-        for lane in 0..self.lanes {
-            if self.active[lane] {
-                witness = witness.and(self.lane_symmetry(lane));
-            }
-        }
-        witness
+    /// Short-circuits, like its sibling, and [`run`](Self::run) reaches it only when the answer can
+    /// change something -- see the guard chain there, which is what keeps this off the steady-state
+    /// path of every session that is not in the middle of a bypass.
+    fn all_lanes_preserve_agreement(&self) -> bool {
+        (0..self.lanes)
+            .filter(|lane| self.active[*lane])
+            .all(|lane| self.lane_symmetry(lane).preserves_channel_agreement())
     }
 
     /// `[eligible active lanes, active lanes]` for this chain. Evidence and gates only.
@@ -1569,16 +1568,15 @@ impl BankChain {
         // that holds for every sample of this block -- which is what makes a per-block mode legal
         // at all.
         //
-        // Two questions of one walk (`cohort_symmetry`): may this block collapse, and -- if it may
-        // not -- does rendering it dual leave the two channels where the next block's dispatch
-        // believes they are. The second is M3's invariant and it is why the first is sound.
-        let witness = self.cohort_symmetry();
+        // M3 adds one term to the M2 dispatch and no work to it: `collapse_channels_agree` is the
+        // premise the witness does not supply, maintained at the bottom of this section.
+        let witness = self.all_lanes_symmetric();
         let armed = self.collapse_prefix > 0 && self.collapse_source && !self.collapse_forced_off;
-        // The way back. Asked at most once per block and only inside a recovery window -- the
-        // chain is otherwise ready to collapse and the invariant is the only thing declining -- so
-        // a chain that never disagrees never pays for it, and a chain that disagrees for good
-        // pays one short-circuiting query per block. See `BankStage::channels_agree`.
-        if armed && !self.collapse_channels_agree && witness.eligible() {
+        // The way back for a chain the invariant has declined. Asked at most once per block per
+        // prefix slot, and only inside a *recovery window* -- the chain is otherwise ready to
+        // collapse and this is the only thing refusing it -- so a session that never disagrees
+        // never calls it at all. See `BankStage::channels_agree`.
+        if armed && witness && !self.collapse_channels_agree {
             let proven = self.slots[..self.collapse_prefix]
                 .iter()
                 .all(|slot| slot.stage.channels_agree());
@@ -1587,7 +1585,7 @@ impl BankChain {
                 self.transitions[2] = self.transitions[2].saturating_add(1);
             }
         }
-        let collapse = armed && witness.eligible() && self.collapse_channels_agree;
+        let collapse = armed && witness && self.collapse_channels_agree;
         if self.collapsed && !collapse {
             self.disengage_collapse();
         } else if collapse && !self.collapsed && self.transitions[0] > 0 {
@@ -1596,20 +1594,42 @@ impl BankChain {
             self.transitions[1] = self.transitions[1].saturating_add(1);
         }
         self.collapsed = collapse;
-        // The invariant, maintained for the block this dispatch just decided. A dual block whose
-        // witness does not preserve agreement is the one thing that drives the two channels apart,
-        // and after it nothing but a proof brings them back. A collapsed block drives them apart
-        // too -- it freezes the right channel -- but the disengage copy repairs that before any
-        // dual block reads it, which is exactly what the flag's "next dual block" wording says.
+        // The invariant, maintained for the block this dispatch just decided, and guarded so that
+        // it costs nothing in the steady state of any session -- which is what lets it be an
+        // unconditional rule rather than a mode.
+        //
+        // The four guards, in the order they are cheapest to refuse:
+        //
+        // * a **collapsed** block is skipped. It does freeze the right channel, but the disengage
+        //   copy repairs that before any dual block reads it, which is exactly what the flag's
+        //   "at the next dual block's boundary" wording says;
+        // * a chain that **can never collapse** is skipped: nothing reads the flag, so nothing is
+        //   owed. This is every stereo-source row and every chain with no collapsible prefix, and
+        //   it is why the M3 dispatch adds no work at all to the sessions M2 left alone;
+        // * a chain that has **already lost** agreement is skipped: only a proof brings it back,
+        //   and the proof is above;
+        // * a block whose witness was **eligible** is skipped, because eligible implies preserving
+        //   -- `AGREEING` is a subset of `ALL` -- so the second walk would be asking a question the
+        //   first already answered. That is what leaves the forced-off arm, which is eligible on
+        //   every block of its window, paying one already-computed `bool`.
+        //
+        // What is left is the case the walk is for: a collapsible chain rendering dual under a
+        // witness that is not eligible, with agreement still to lose. That is a bypass window, or
+        // it is the episode after which the chain must not come back.
         //
         // `SOURCE` is deliberately not a clause here, and it is the one term that would have to be
         // argued about. It is decided at bind from the compiled session and never moves within a
         // plan, so it cannot be an *episode*: either it holds for every block, and the two planes
-        // carry the same samples on all of them, or it does not, and `armed` is false and this
-        // chain never collapses at all. A term that cannot change cannot break an invariant whose
-        // whole job is to survive change. `arm_mono_collapse` carries the obligation that makes
-        // that reading true.
-        if !collapse && !witness.preserves_channel_agreement() {
+        // carry the same samples on all of them, or it does not, and `can_collapse` is false and
+        // this chain never collapses at all. A term that cannot change cannot break an invariant
+        // whose whole job is to survive change. `arm_mono_collapse` carries the obligation that
+        // makes that reading true.
+        if !collapse
+            && self.can_collapse()
+            && self.collapse_channels_agree
+            && !witness
+            && !self.all_lanes_preserve_agreement()
+        {
             self.collapse_channels_agree = false;
         }
         if collapse {
