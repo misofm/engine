@@ -399,18 +399,21 @@ and an unfolded reduction over sixty-four separate planar buffers. The two rows 
 
 Subtracting the second from the first therefore removes the fold's saving as well as the plumbing's
 four lane-ops, and the result lands **below** the 18-lane-op floor it is supposed to be measured
-against — an `isolated_percent_of_floor` above 100 %, which is the table stating that the quantity
-is not the one its name claims. The subtraction is retired rather than tolerated: `floor_control_row`
+against: on `artifacts/strip4/` the difference is 0.327 cycles/lane-sample against a floor of 0.608,
+an `isolated_percent_of_floor` of 186 % — the table stating that the quantity is not the one its name
+claims. The subtraction is retired rather than tolerated: `floor_control_row`
 is `none` on both rows, `floor.rs` and the jq restatement agree, and
 `the_overhead_inventories_differ_by_the_scaffolding_and_neither_row_claims_an_isolate` is what stops
 a later edit from quietly reinstating it.
 
 What survives is more interesting than the isolate would have been. `plumbing_only`'s own
 `percent_of_floor` is the *unfolded* plumbing measured against the four lane-ops plumbing requires,
-and it is by a wide margin the worst standing in this table — an order of magnitude worse than the
-idle row's 18 %, which boundary 5 already calls the strongest statement in the stream that a row's
-cost is dispatch rather than arithmetic. That gap is a direct measurement of what job 3's fold
-removed from every banked row, and the sealed `artifacts/strip4/` record is where the number lives.
+and `artifacts/strip4/` measures it at **6.7 %** — the worst standing in this table by a factor of
+nearly five. The next two are the identity rows at 31.9 % and 32.4 %, and the idle row, which
+boundary 5 singles out as the strongest statement in the stream that a row's cost is dispatch rather
+than arithmetic, is 35.4 % on that same host. Six microseconds a block of 64 dispatched route ops
+and an unfolded 64-buffer reduction, against four lane-ops of required arithmetic: that gap is a
+direct measurement of what job 3's fold removed from every banked row.
 The pair that *would* subtract cleanly is one where both sides bank and both sides fold:
 `sixty_four_track_builtins_only` against `gain_pan_only` differ by 69 − 22 = 47 lane-ops, which is
 the two 24-op SVF sections less the single `add(+0.0)` the elided run composes to, over two rows
