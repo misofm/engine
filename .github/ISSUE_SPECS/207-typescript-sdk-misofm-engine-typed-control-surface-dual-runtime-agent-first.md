@@ -260,3 +260,33 @@ final handoff names exact commits, gate counts/digests, unresolved findings, and
   `builtin-negative-cases=20`, `effect-negative-cases=132`, `effect-prepare-cases=127`,
   `schema-envelope-cases=5`, and `ratio-asymmetry=PASS`. Full gates and independent re-review remain
   pending; Phase 2 has not started.
+
+### Phase 1 adversarial attempt 2: HOLD and terminal bounded revision (pending checkpoint)
+
+- Independent Sol re-review of `a2dbcde` confirmed the attempt-1 findings closed, but returned a
+  second HOLD on six newly isolated contract gaps. The builder erased its generic shape instead of
+  returning `SessionPlan<S>` with typed tracks and prepare limits; JSON text round-trips still lost
+  signed zero; `quantum_frames` lacked its `u32` upper bound; canonical strings did not match Rust
+  control-character escaping or reject unpaired UTF-16 surrogates; generated effect input types
+  incorrectly allowed per-lane objects for shared parameters; and the README described the future
+  Phase 2 validator API in the present tense.
+- Red-before-fix evidence reproduced the type erasure and shared-parameter defect with real
+  `tsc --noEmit` failures (including unused expected-error directives), and the runtime builder
+  self-test failed because the returned plan had no typed track summary. This is the third and
+  terminal Phase 1 implementation attempt under the three-attempt rule.
+- The builder now returns `SessionPlan<Tracks>`, preserving exact track keys and effect tuples,
+  exposes a frozen typed track summary, and derives prepare-limit override fields from the generated
+  ABI layout. Effect parameter inputs derive scalar-versus-per-lane shape from each generated
+  parameter's `channelPolicyName`, so delay `cross feedback` rejects a lane object while per-lane
+  compressor parameters retain lane typing.
+- Session JSON uses a narrowly tagged representation for negative zero during `JSON.stringify`;
+  `SessionPlan.fromJson` decodes it and preserves the value. Both construction and `fromJson`
+  enforce the full positive `u32` quantum range. Canonical quoting escapes all Rust control
+  characters through U+009F and rejects unpaired surrogates while retaining valid pairs.
+- The README now distinguishes the current direct-Wasm E5b corpus from the Phase 2 public
+  `validateSession()` API. Focused green evidence: real TypeScript compilation, typecheck red
+  mutation, core and builder self-tests, JavaScript syntax, and diff hygiene. The serialized corpus
+  passes with `documents=249`, `effect-parameters=66`, `builtin-negative-cases=20`,
+  `effect-negative-cases=132`, `effect-prepare-cases=127`, `schema-envelope-cases=5`, and
+  `ratio-asymmetry=PASS`. Final full gates and the terminal independent verdict remain pending;
+  Phase 2 has not started.

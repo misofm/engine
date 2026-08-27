@@ -327,6 +327,11 @@ async function buildGreenCorpus(engine) {
     .build();
   assert.match(exponentPlan.toml, /gain_db = -0\.0000001/, "E4 negative exponent token must preserve the intended f32");
   documents.push({ name: "negative-exponent", plan: exponentPlan });
+  const controlPlan = engine.session({ id: "control-string", sampleRateHz: SAMPLE_RATE, limits: { pcmRingFrames: 128 } })
+    .source("source", { channels: 1, frames: 128, identity: "a\u007fb" })
+    .build();
+  assert.match(controlPlan.toml, /identity = "a\\u007Fb"/, "E4 control strings must use canonical escapes");
+  documents.push({ name: "control-string", plan: controlPlan });
   assert.ok(documents.length >= 40, `E3 requires >=40 documents, got ${documents.length}`);
   return documents;
 }

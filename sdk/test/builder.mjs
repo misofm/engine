@@ -48,6 +48,12 @@ async function check() {
       channel_matrix: { ll: 1, lr: 0, rl: 0, rr: 1 }, gain_db: 0,
     }]);
     assert.equal(plan.json.tracks[0].dynamic.effects[0].id, "vca");
+    assert.equal(plan.tracks[0].id, "lead", "SessionPlan must expose the typed track summary");
+    assert.equal(plan.tracks[0].effects[0].effectId, "miso.compressor");
+    const prepareLimits = plan.limits({ diagnosticBytes: 32_768 });
+    assert.equal(prepareLimits.diagnosticBytes, 32_768, "plan limits must apply explicit overrides");
+    assert.equal(prepareLimits.sourceRingFrames, 1_024, "plan limits must derive the session ring capacity");
+    assert.equal(Object.isFrozen(prepareLimits), true, "plan limits must be immutable");
     assert.deepEqual(plan.json.automation, [{ id: "vca-threshold", target: { entity_id: "lead", rack: "dynamic", effect_id: "vca", parameter_id: 1, channel: "both" }, segments: [{ shape: "linear", start_sample: "0", end_sample: "480", start_value: -18, end_value: -12, unit: "db" }] }]);
     assert.match(plan.toml, /^schema_version = 1\nsession_id = "builder.session"\n/m);
     assert.equal(sdk.SessionPlan.fromJson(JSON.parse(JSON.stringify(plan.json))).toml, plan.toml, "JSON round-trip must preserve canonical TOML bytes");
@@ -83,7 +89,12 @@ async function check() {
 
     const negativeZeroPlan = sdk.session({ id: "negative-zero", sampleRateHz: 48_000 }).source("voice", { channels: 1, frames: 1 })
       .track("mono", { source: "voice", pan: { matrix: { ll: -0, lr: 0, rl: 0, rr: 1 } } }).build();
-    assert.equal(sdk.SessionPlan.fromJson(negativeZeroPlan.json).toml, negativeZeroPlan.toml, "fromJson must preserve signed zero and canonical bytes");
+    const negativeZeroJsonText = JSON.stringify(negativeZeroPlan.json);
+    assert.match(negativeZeroJsonText, /"\$miso\.sdk\.f32":"-0"/, "JSON text must carry the documented signed-zero tag");
+    assert.equal(sdk.SessionPlan.fromJson(JSON.parse(negativeZeroJsonText)).toml, negativeZeroPlan.toml, "JSON text round-trip must preserve signed zero and canonical bytes");
+
+    const controlPlan = sdk.session({ id: "control-string", sampleRateHz: 48_000 }).source("voice", { channels: 1, frames: 1, identity: "a\u007fb" }).build();
+    assert.match(controlPlan.toml, /identity = "a\\u007Fb"/, "Unicode control characters must use Rust-compatible canonical escapes");
 
     const longestTrack = `t${"a".repeat(126)}`;
     const maximumIdPlan = sdk.session({ id: "max-id", sampleRateHz: 48_000 }).source("voice", { channels: 1, frames: 1 }).track(longestTrack, { source: "voice" }).build();
@@ -91,6 +102,8 @@ async function check() {
 
     const nonPowerOfTwo = sdk.session({ id: "quantum", sampleRateHz: 48_000, quantumFrames: 127 }).build();
     assert.equal(nonPowerOfTwo.json.quantum_frames, 127, "Session V1 requires a nonzero quantum, not a power of two");
+    const maximumQuantum = sdk.session({ id: "maximum-quantum", sampleRateHz: 48_000, quantumFrames: 0xffff_ffff }).build();
+    assert.equal(maximumQuantum.json.quantum_frames, 0xffff_ffff, "Session V1 quantum uses the full u32 domain");
   });
 }
 
@@ -161,6 +174,25 @@ async function selfTest() {
       (error) => error instanceof sdk.MisoSessionError,
       "a routed sidechain must reference a declared graph entity",
     );
+    assert.throws(
+      () => sdk.session({ id: "quantum-u32-red", sampleRateHz: 48_000, quantumFrames: 0x1_0000_0000 }).build(),
+      (error) => error instanceof sdk.MisoSessionError,
+      "quantum_frames above u32 must fail locally",
+    );
+    const invalidQuantumJson = JSON.parse(JSON.stringify(sdk.session({ id: "quantum-json-red", sampleRateHz: 48_000 }).build().json));
+    invalidQuantumJson.quantum_frames = 0x1_0000_0000;
+    assert.throws(
+      () => sdk.SessionPlan.fromJson(invalidQuantumJson),
+      (error) => error instanceof sdk.MisoSessionError && error.path === "quantum_frames",
+      "fromJson must enforce the same quantum_frames u32 boundary",
+    );
+    for (const [label, identity] of [["high", "a\ud800b"], ["low", "a\udc00b"]]) {
+      assert.throws(
+        () => sdk.session({ id: `surrogate-${label}`, sampleRateHz: 48_000 }).source("voice", { channels: 1, frames: 1, identity }).build(),
+        (error) => error instanceof sdk.MisoSessionError,
+        `unpaired ${label} surrogate must fail before TOML emission`,
+      );
+    }
   });
 }
 

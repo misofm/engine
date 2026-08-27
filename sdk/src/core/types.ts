@@ -27,9 +27,13 @@ type ParameterScalar<P> = P extends { readonly domainName: "boolean" }
     ? C extends { readonly label: infer Label extends string } ? Label : never
     : number;
 
+type ParameterInput<P> = P extends { readonly channelPolicyName: "perLane" }
+  ? PerLane<ParameterScalar<P>>
+  : ParameterScalar<P>;
+
 /** Values use display units. Per-lane descriptors additionally accept explicit left/right values. */
 export type EffectParamValues<E extends EffectId> = Partial<{
-  [Name in EffectParameterName<E>]: PerLane<ParameterScalar<EffectParameter<E> & { readonly name: Name }>>;
+  [Name in EffectParameterName<E>]: ParameterInput<Extract<EffectParameter<E>, { readonly name: Name }>>;
 }>;
 
 export interface EffectOptions {

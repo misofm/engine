@@ -1,3 +1,4 @@
+import { ABI_LAYOUT } from "../generated/abi.js";
 import { CATALOG, type EffectDescriptor, type EffectId } from "../generated/catalog.js";
 import { MisoSessionError } from "./errors.js";
 import type {
@@ -63,10 +64,36 @@ export interface SessionJson extends JsonRecord {
   readonly automation: readonly JsonRecord[];
 }
 
-export interface SessionPlan {
+export type SessionShape = Readonly<Record<string, readonly EffectDecl[]>>;
+
+export interface PlacedEffect<D extends EffectDecl = EffectDecl> {
+  readonly id: string;
+  readonly effectId: D["effectId"];
+  readonly rack: Rack;
+  readonly rackIndex: number;
+}
+
+type PlacedEffectTuple<Effects extends readonly EffectDecl[]> = Readonly<{
+  [Index in keyof Effects]: Effects[Index] extends EffectDecl ? PlacedEffect<Effects[Index]> : never;
+}>;
+
+export type SessionPlanTrack<Tracks extends SessionShape> = {
+  [Id in keyof Tracks & string]: Readonly<{ id: Id; effects: PlacedEffectTuple<Tracks[Id]> }>;
+}[keyof Tracks & string];
+
+type PrepareConfigField = typeof ABI_LAYOUT.structures.prepareConfig.fields[number];
+type PrepareHeaderName = "structSize" | "abiVersion" | "sampleRateHz" | "quantumFrames";
+type PrepareLimitField = Exclude<PrepareConfigField, { readonly name: PrepareHeaderName }>;
+export type PrepareLimits = {
+  readonly [Field in PrepareLimitField as Field["name"]]: Field["type"] extends "u32" ? number : bigint;
+};
+
+export interface SessionPlan<Tracks extends SessionShape = SessionShape> {
   readonly json: SessionJson;
   readonly toml: string;
+  readonly tracks: readonly SessionPlanTrack<Tracks>[];
   toJson(): SessionJson;
+  limits(overrides?: Partial<PrepareLimits>): PrepareLimits;
 }
 
 type NormalizedOptions = Readonly<{
@@ -85,7 +112,7 @@ type BuilderState = Readonly<{
   readonly automation: readonly AutomationSpec[];
 }>;
 
-type BuilderTracks = Readonly<Record<string, readonly EffectDecl[]>>;
+type BuilderTracks = SessionShape;
 type RackEffects<T> = T extends readonly EffectDecl[] ? T : readonly [];
 type TrackEffects<T extends TrackSpec> = readonly [
   ...RackEffects<T["simd1"]>,
@@ -280,10 +307,10 @@ export class SessionBuilder<Tracks extends BuilderTracks = {}> {
     return this.next({ automation: [...this.state.automation, freeze({ ...spec, segments: freeze([...spec.segments]) })] });
   }
 
-  build(): SessionPlan {
+  build(): SessionPlan<Tracks> {
     const json = normalize(this.state);
     validateGraph(json);
-    return freeze({ json, toml: writeToml(json), toJson: () => json });
+    return makePlan(json, summarizeBuilderTracks<Tracks>(this.state));
   }
 
   private graphIds(): Set<string> {
@@ -304,7 +331,7 @@ export function session(options: SessionOptions): SessionBuilder<{}> {
   const sampleRateHz = options.sampleRateHz;
   rate(sampleRateHz, "sampleRateHz");
   const quantumFrames = options.quantumFrames ?? 128;
-  integer(quantumFrames, "quantumFrames", 1);
+  u32(quantumFrames, "quantumFrames", 1);
   const limits = {
     pcmRingFrames: options.limits?.pcmRingFrames ?? DEFAULT_LIMITS.pcmRingFrames,
     controlQueueMessages: options.limits?.controlQueueMessages ?? DEFAULT_LIMITS.controlQueueMessages,
@@ -323,19 +350,104 @@ export function session(options: SessionOptions): SessionBuilder<{}> {
 
 /** Rebuilds an immutable plan from its JSON-safe normalized form. */
 export const SessionPlan = Object.freeze({
-  fromJson(json: SessionJson): SessionPlan {
-    const copy = freeze(cloneJson(json) as SessionJson);
+  fromJson(json: SessionJson): SessionPlan<SessionShape> {
+    const copy = jsonDocument(cloneJson(json) as SessionJson);
     validateJson(copy);
     validateGraph(copy);
-    return freeze({ json: copy, toml: writeToml(copy), toJson: () => copy });
+    return makePlan(copy, summarizeJsonTracks(copy));
   },
 });
+
+const NEGATIVE_ZERO_TAG = "$miso.sdk.f32";
+
+function jsonDocument(json: SessionJson): SessionJson {
+  Object.defineProperty(json, "toJSON", { enumerable: false, value: () => encodeJson(json) });
+  return freeze(json);
+}
+
+function encodeJson(value: unknown): unknown {
+  if (typeof value === "number" && Object.is(value, -0)) return { [NEGATIVE_ZERO_TAG]: "-0" };
+  if (value === null || typeof value === "string" || typeof value === "boolean" || typeof value === "number") return value;
+  if (Array.isArray(value)) return value.map(encodeJson);
+  if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, child]) => [key, encodeJson(child)]));
+  fail("Session JSON contains a non-JSON value", "json");
+}
 
 function cloneJson(value: unknown): unknown {
   if (value === null || typeof value === "string" || typeof value === "boolean" || typeof value === "number") return value;
   if (Array.isArray(value)) return value.map(cloneJson);
-  if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, child]) => [key, cloneJson(child)]));
+  if (value && typeof value === "object") {
+    const entries = Object.entries(value);
+    if (entries.length === 1 && entries[0][0] === NEGATIVE_ZERO_TAG && entries[0][1] === "-0") return -0;
+    return Object.fromEntries(entries.map(([key, child]) => [key, cloneJson(child)]));
+  }
   fail("Session JSON contains a non-JSON value", "json");
+}
+
+function summarizeBuilderTracks<Tracks extends SessionShape>(state: BuilderState): readonly SessionPlanTrack<Tracks>[] {
+  const summaries = [...state.tracks].sort((a, b) => asciiCompare(a.id, b.id)).map(({ id, spec }) => {
+    const effects = (["simd1", "dynamic", "simd2"] as const).flatMap((rack) => (spec[rack] ?? []).map((declaration, rackIndex) => freeze({
+      id: declaration.slotId ?? `${rack}-${rackIndex + 1}`,
+      effectId: declaration.effectId,
+      rack,
+      rackIndex,
+    })));
+    return freeze({ id, effects: freeze(effects) });
+  });
+  return freeze(summaries) as unknown as readonly SessionPlanTrack<Tracks>[];
+}
+
+function summarizeJsonTracks(json: SessionJson): readonly SessionPlanTrack<SessionShape>[] {
+  const summaries = json.tracks.map((track) => {
+    const effects = (["simd1", "dynamic", "simd2"] as const).flatMap((rack) => {
+      const rackValue = track[rack] as JsonRecord;
+      return (rackValue.effects as readonly JsonRecord[]).map((effect, rackIndex) => freeze({
+        id: String(effect.id),
+        effectId: String((effect.identity as JsonRecord).effect_id) as EffectId,
+        rack,
+        rackIndex,
+      }));
+    });
+    return freeze({ id: String(track.id), effects: freeze(effects) });
+  });
+  return freeze(summaries) as unknown as readonly SessionPlanTrack<SessionShape>[];
+}
+
+function prepareLimits(json: SessionJson, overrides: Partial<PrepareLimits> = {}): PrepareLimits {
+  const sessionLimits = json.limits as JsonRecord;
+  const effectCount = json.tracks.reduce((total, track) => total + (["simd1", "dynamic", "simd2"] as const).reduce((rackTotal, rack) => rackTotal + ((track[rack] as JsonRecord).effects as readonly JsonRecord[]).length, 0), 0);
+  const defaults: PrepareLimits = {
+    sessionTomlBytes: 1 << 20,
+    diagnosticBytes: 1 << 14,
+    sourceIdBytes: 1 << 10,
+    maximumSourceChannels: 8,
+    sourceRingFrames: Number(sessionLimits.pcm_ring_frames),
+    maximumAutomationSpansPerBlock: 256,
+    maximumTracks: BigInt(Math.max(1_024, json.tracks.length)),
+    maximumSources: BigInt(Math.max(1_024, json.sources.length)),
+    maximumRoutes: BigInt(Math.max(4_096, json.routes.length)),
+    maximumEffects: BigInt(Math.max(8_192, effectCount)),
+    maximumGraphSessionPlusPlanBytes: 64n << 20n,
+    maximumSourceTotalBytes: 64n << 20n,
+    maximumSourceOverheadBytes: 16n << 20n,
+    maximumEffectStateBytes: 16n << 20n,
+    maximumEffectScratchBytes: 16n << 20n,
+    maximumBuiltinRetainedBytes: 64n << 20n,
+    maximumHostRetainedBytes: 16n << 20n,
+    maximumNamedAllocationBytes: 64n << 20n,
+    maximumMeterStreams: 1_024n,
+    maximumMeterItems: 1n << 20n,
+    maximumMeterBytes: 16n << 20n,
+    consoleCommandQueueRecords: BigInt(Math.min(ABI_LAYOUT.constants.maximumCommandRecords, Number(sessionLimits.control_queue_messages))),
+    consoleMeterBlocks: 0n,
+    consoleObservationTaps: 0n,
+    consoleMasterTrackPlusOne: 0n,
+  };
+  return freeze({ ...defaults, ...overrides });
+}
+
+function makePlan<Tracks extends SessionShape>(json: SessionJson, tracks: readonly SessionPlanTrack<Tracks>[]): SessionPlan<Tracks> {
+  return freeze({ json, toml: writeToml(json), tracks, toJson: () => json, limits: (overrides?: Partial<PrepareLimits>) => prepareLimits(json, overrides) });
 }
 
 function rate(value: number, path: string): SessionSampleRateHz {
@@ -498,7 +610,7 @@ function normalize(state: BuilderState): SessionJson {
   const routes = (explicitRoutes ? state.routes.map(normalizeRoute) : [...state.tracks].sort((a, b) => asciiCompare(a.id, b.id)).map(({ id }, index) => freeze({ id: `auto-route-${index + 1}`, source: freeze({ kind: "track", track_id: id, tap: "post_matrix" }), destination: freeze({ kind: "output_input", output_id: "main" }), channel_matrix: UNITY, gain_db: 0 }))).sort(byId);
   const automation = state.automation.map((item) => normalizeAutomation(item, tracks)).sort(byId);
   for (const track of tracks) if (!trackIds.has(track.id as string)) fail("Unknown track", "tracks");
-  return freeze({ schema_version: 1, session_id: o.sessionId, revision: o.revision, sample_rate_hz: o.sampleRateHz, quantum_frames: o.quantumFrames, render_profile: freeze({ id: o.renderProfile.id, mode: o.renderProfile.mode }), output_profile: freeze({ id: o.outputProfile.id, channels: o.outputProfile.channels, sample_format: o.outputProfile.sampleFormat }), limits: freeze({ pcm_ring_frames: o.limits.pcmRingFrames, control_queue_messages: o.limits.controlQueueMessages, memory_bytes: o.limits.memoryBytes }), sources, tracks, submixes, outputs, routes, automation });
+  return jsonDocument({ schema_version: 1, session_id: o.sessionId, revision: o.revision, sample_rate_hz: o.sampleRateHz, quantum_frames: o.quantumFrames, render_profile: freeze({ id: o.renderProfile.id, mode: o.renderProfile.mode }), output_profile: freeze({ id: o.outputProfile.id, channels: o.outputProfile.channels, sample_format: o.outputProfile.sampleFormat }), limits: freeze({ pcm_ring_frames: o.limits.pcmRingFrames, control_queue_messages: o.limits.controlQueueMessages, memory_bytes: o.limits.memoryBytes }), sources, tracks, submixes, outputs, routes, automation } as SessionJson);
 }
 
 function normalizeTrack(id: string, spec: TrackSpec, sources: BuilderState["sources"], sampleRateHz: number): JsonRecord {
@@ -584,7 +696,7 @@ function validateGraph(json: SessionJson): void {
 
 function validateJson(json: SessionJson): void {
   if (json.schema_version !== 1) fail("Expected Session V1 JSON", "schema_version");
-  stableId(json.session_id, "session_id"); rate(json.sample_rate_hz, "sample_rate_hz"); integer(json.revision, "revision"); integer(json.quantum_frames, "quantum_frames", 1);
+  stableId(json.session_id, "session_id"); rate(json.sample_rate_hz, "sample_rate_hz"); integer(json.revision, "revision"); u32(json.quantum_frames, "quantum_frames", 1);
   for (const field of ["sources", "tracks", "submixes", "outputs", "routes", "automation"] as const) if (!Array.isArray(json[field])) fail("Expected an array", field);
   for (const [automationIndex, automation] of json.automation.entries()) {
     const segments = automation.segments;
@@ -635,7 +747,19 @@ function tomlValue(value: unknown, field?: string, rootArray = false): string {
   fail("Cannot emit non-TOML Session V1 value", "toml");
 }
 
-function quote(value: string): string { return `"${value.replace(/[\\"\u0000-\u001f]/g, (char) => ({ "\\": "\\\\", "\"": "\\\"", "\b": "\\b", "\t": "\\t", "\n": "\\n", "\f": "\\f", "\r": "\\r" }[char] ?? `\\u${char.charCodeAt(0).toString(16).padStart(4, "0").toUpperCase()}`))}"`; }
+function quote(value: string): string {
+  for (let index = 0; index < value.length; index += 1) {
+    const unit = value.charCodeAt(index);
+    if (unit >= 0xd800 && unit <= 0xdbff) {
+      const low = value.charCodeAt(index + 1);
+      if (!(low >= 0xdc00 && low <= 0xdfff)) fail("String contains an unpaired high surrogate", "toml.string");
+      index += 1;
+    } else if (unit >= 0xdc00 && unit <= 0xdfff) {
+      fail("String contains an unpaired low surrogate", "toml.string");
+    }
+  }
+  return `"${value.replace(/[\\"\u0000-\u001f\u007f-\u009f]/g, (char) => ({ "\\": "\\\\", "\"": "\\\"", "\b": "\\b", "\t": "\\t", "\n": "\\n", "\f": "\\f", "\r": "\\r" }[char] ?? `\\u${char.charCodeAt(0).toString(16).padStart(4, "0").toUpperCase()}`))}"`;
+}
 function number(value: number): string {
   const normalized = Math.fround(value);
   if (Object.is(normalized, -0)) return "-0.0";
