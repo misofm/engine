@@ -1182,14 +1182,25 @@ impl PcmSourceConsumer {
                 expected_frames: self.quantum_frames,
             });
         }
-        destination.fill(0.0);
-        if let Some(block) = self.played.as_ref() {
-            let frames = usize::try_from(self.played_frames).expect("u32 fits usize");
-            let offset = usize::try_from(channel)
-                .expect("u32 fits usize")
-                .checked_mul(quantum)
-                .expect("prepared channel offset");
-            destination[..frames].copy_from_slice(&block.samples[offset..offset + frames]);
+        // Zero only what the copy does not reach. The plane used to be filled with `0.0` in full
+        // and then, in the whole-quantum case, overwritten in full by the `copy_from_slice`
+        // below -- a dead 512-byte write per plane per track per block on the production source
+        // path, which the FrozenGraphSource-bound benchmark never sees. The two regions are
+        // disjoint, so which order they are written in cannot be observed.
+        match self.played.as_ref() {
+            Some(block) => {
+                let frames = usize::try_from(self.played_frames).expect("u32 fits usize");
+                let offset = usize::try_from(channel)
+                    .expect("u32 fits usize")
+                    .checked_mul(quantum)
+                    .expect("prepared channel offset");
+                destination[..frames].copy_from_slice(&block.samples[offset..offset + frames]);
+                // Exactly the region the old full fill left standing: the underrun tail of a
+                // short block, and nothing at all when `frames == quantum`.
+                destination[frames..].fill(0.0);
+            }
+            // No retained quantum: the whole plane is the underrun, as before.
+            None => destination.fill(0.0),
         }
         Ok(())
     }
@@ -1972,6 +1983,105 @@ mod tests {
         consumer.end_block();
         assert!(consumer.played.is_none());
         assert_eq!(consumer.telemetry().cumulative_read_frames, 6);
+    }
+
+    /// The pre-audit `copy_channel` body, kept verbatim as the oracle for the tail-only fill:
+    /// zero the whole plane, then overwrite the played prefix.
+    fn copy_channel_oracle(consumer: &PcmSourceConsumer, channel: u32, destination: &mut [f32]) {
+        let quantum = usize::try_from(consumer.quantum_frames).expect("u32 fits usize");
+        assert_eq!(destination.len(), quantum, "oracle plane length");
+        destination.fill(0.0);
+        if let Some(block) = consumer.played.as_ref() {
+            let frames = usize::try_from(consumer.played_frames).expect("u32 fits usize");
+            let offset = usize::try_from(channel)
+                .expect("u32 fits usize")
+                .checked_mul(quantum)
+                .expect("prepared channel offset");
+            destination[..frames].copy_from_slice(&block.samples[offset..offset + frames]);
+        }
+    }
+
+    /// Values a skipped write would leave standing. `-0.0` is in the list because the fill writes
+    /// `+0.0` and `-0.0 == 0.0`, so only a bit comparison can tell a fill that ran from one that
+    /// did not; `NAN` is there because it is not equal to itself.
+    const COPY_CHANNEL_POISON: [f32; 4] = [-0.0, f32::NAN, 1.0e30, -7.5];
+
+    /// Every poison start must leave `copy_channel` bit-identical to the old algorithm.
+    fn assert_copy_channel_matches_oracle(consumer: &PcmSourceConsumer, channel: u32, what: &str) {
+        let quantum = usize::try_from(consumer.quantum_frames).expect("u32 fits usize");
+        for poison in COPY_CHANNEL_POISON {
+            let mut actual = vec![poison; quantum];
+            let mut expected = vec![poison; quantum];
+            consumer
+                .copy_channel(channel, &mut actual)
+                .expect("copy_channel");
+            copy_channel_oracle(consumer, channel, &mut expected);
+            let actual_bits: Vec<u32> = actual.iter().map(|sample| sample.to_bits()).collect();
+            let expected_bits: Vec<u32> = expected.iter().map(|sample| sample.to_bits()).collect();
+            assert_eq!(
+                actual_bits, expected_bits,
+                "{what}: poison {poison} left a difference"
+            );
+        }
+    }
+
+    /// `copy_channel` zeroes exactly the region the copy does not reach, and nothing else.
+    ///
+    /// Red mutation: drop the `destination[frames..].fill(0.0)`. The short-block and underrun legs
+    /// then keep the poison in the tail and fail against the oracle. Red mutation the other way:
+    /// restore the leading `destination.fill(0.0)`; nothing fails, which is the point -- the write
+    /// it removes is dead, so only the disassembly and the bench can see it, and this test is here
+    /// to hold the *semantics* still while that write goes away.
+    #[test]
+    fn copy_channel_zeroes_only_the_tail_the_full_fill_used_to_reach() {
+        let (producer, mut consumer, _) = PcmSourceRing::prepare(config(2, 4, 8)).expect("ring");
+        let mut host = producer.into_host_chunk_provider(RATE);
+
+        // No retained quantum at all: the whole plane is the underrun.
+        assert!(consumer.played.is_none());
+        assert_copy_channel_matches_oracle(&consumer, 0, "before any block");
+
+        // `-0.0` and a subnormal-adjacent value in the payload, so a copy that was quietly
+        // replaced by a zero fill could not pass by comparing equal.
+        let left_full = [1.0, -0.0, f32::MIN_POSITIVE, 4.0];
+        let right_full = [-1.0, -2.0, -3.0, -4.0];
+        host.submit(chunk(1, 0, &[&left_full, &right_full], 4, false))
+            .expect("whole-quantum block");
+        let left_short = [5.0, -6.0];
+        let right_short = [-5.0, 6.0];
+        host.submit(chunk(1, 4, &[&left_short, &right_short], 2, true))
+            .expect("short EOF block");
+
+        // Whole quantum: the fill is skipped entirely and every sample is the copy.
+        let full = consumer.begin_block();
+        assert_eq!(full.copied_frames, 4);
+        assert_eq!(consumer.played_frames, 4);
+        assert_copy_channel_matches_oracle(&consumer, 0, "whole quantum, left");
+        assert_copy_channel_matches_oracle(&consumer, 1, "whole quantum, right");
+        let mut plane = [f32::NAN; 4];
+        consumer.copy_channel(0, &mut plane).expect("whole copy");
+        assert_eq!(plane.map(f32::to_bits), left_full.map(f32::to_bits));
+
+        // Short submission: the copied prefix, then a tail that must still come out `+0.0`.
+        let short = consumer.begin_block();
+        assert_eq!(short.copied_frames, 2);
+        assert_eq!(consumer.played_frames, 2);
+        assert_copy_channel_matches_oracle(&consumer, 0, "short quantum, left");
+        assert_copy_channel_matches_oracle(&consumer, 1, "short quantum, right");
+        let mut plane = [f32::NAN; 4];
+        consumer.copy_channel(1, &mut plane).expect("short copy");
+        let plane_bits = plane.map(f32::to_bits);
+        assert_eq!(plane_bits[..2], right_short.map(f32::to_bits));
+        assert_eq!(plane_bits[2..], [0_u32; 2]);
+
+        // Past the end of the region: nothing is retained, so the whole plane is zeroed.
+        let after = consumer.begin_block();
+        assert!(after.end_of_region);
+        assert!(consumer.played.is_none());
+        assert_copy_channel_matches_oracle(&consumer, 0, "past the end of the region");
+        let mut plane = [f32::NAN; 4];
+        consumer.copy_channel(0, &mut plane).expect("underrun copy");
+        assert_eq!(plane.map(f32::to_bits), [0_u32; 4]);
     }
 
     fn test_mapping(index: u32) -> SourceGraphTrackMapping {
