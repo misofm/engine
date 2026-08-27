@@ -122,6 +122,15 @@
 # rather than noise. A row that does not move at all is as much a finding as one that moves too
 # far. The baseline arm is the base commit with this arm registration and nothing else.
 #
+#
+# `--strip4` is the strip/overhead round's job 4, and it is the one arm in this list that has **no
+# baseline partner**. Job 4 adds no engine change at all: it is the measurement plane -- two
+# overhead decomposition rows (`sixty_four_track_plumbing_only`, the route and the master reduction
+# with no builtin prepared at all, and `sixty_four_track_gain_pan_only`, the identity sections with
+# the fixture's real fader and pan) and three mono rows on a new checked-in fixture. Every existing
+# row's `output_sha256` is unchanged from `strip3`, which is the arm this one is read against; the
+# five new rows have no earlier number to be read against, and that is the point of capturing them.
+# This capture is the post-strip-round baseline the sprint scoreboard quotes.
 # `--issue-loop-eq-r1` writes to `artifacts/issue-loop-eq-r1` and is the effect-optimization loop's
 # EQ round 1: parametric-EQ identity-section elision and the two-slot cohort chain (#181). Both are
 # **class A** -- every workload's output digest is the #175 digest to the bit, on every row and every
@@ -197,10 +206,11 @@ if [[ "$#" == 1 ]]; then
         --strip2-baseline) phase_directory=strip2-baseline ;;
         --strip3) phase_directory=strip3 ;;
         --strip3-baseline) phase_directory=strip3-baseline ;;
-        *) printf 'usage: %s [--phase2|--phase3|--issue163-phase0|--issue163-phase1|--issue163-phase2|--issue163-phase3|--issue163-phase4|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue184|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline|--round2-lim|--round2-lim-baseline|--round2-composed|--audit-chain-merge|--audit-chain-merge-baseline|--strip1|--strip1-baseline|--strip2|--strip2-baseline|--strip3|--strip3-baseline]\n' "$0" >&2; exit 2 ;;
+        --strip4) phase_directory=strip4 ;;
+        *) printf 'usage: %s [--phase2|--phase3|--issue163-phase0|--issue163-phase1|--issue163-phase2|--issue163-phase3|--issue163-phase4|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue184|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline|--round2-lim|--round2-lim-baseline|--round2-composed|--audit-chain-merge|--audit-chain-merge-baseline|--strip1|--strip1-baseline|--strip2|--strip2-baseline|--strip3|--strip3-baseline|--strip4]\n' "$0" >&2; exit 2 ;;
     esac
 elif [[ "$#" != 0 ]]; then
-    printf 'usage: %s [--phase2|--phase3|--issue163-phase0|--issue163-phase1|--issue163-phase2|--issue163-phase3|--issue163-phase4|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue184|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline|--round2-lim|--round2-lim-baseline|--round2-composed|--audit-chain-merge|--audit-chain-merge-baseline|--strip1|--strip1-baseline|--strip2|--strip2-baseline|--strip3|--strip3-baseline]\n' "$0" >&2
+    printf 'usage: %s [--phase2|--phase3|--issue163-phase0|--issue163-phase1|--issue163-phase2|--issue163-phase3|--issue163-phase4|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue184|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline|--round2-lim|--round2-lim-baseline|--round2-composed|--audit-chain-merge|--audit-chain-merge-baseline|--strip1|--strip1-baseline|--strip2|--strip2-baseline|--strip3|--strip3-baseline|--strip4]\n' "$0" >&2
     exit 2
 fi
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -538,7 +548,7 @@ if [[ -n "$counted" ]]; then
     }
 fi
 failure_reason=record_count
-[[ "$(wc -l <"$raw")" == 34 ]] || exit 1
+[[ "$(wc -l <"$raw")" == 46 ]] || exit 1
 failure_reason=validation_failed
 jq -s -e -L scripts -f scripts/console-benchmark-validator.jq "$raw" >/dev/null || exit 1
 failure_reason=accepted_promotion_failed

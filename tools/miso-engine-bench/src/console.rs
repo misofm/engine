@@ -183,6 +183,8 @@ pub(crate) fn main() {
     println!("{}", placement.record(round, backend, metadata));
     let automation = AutomationMeasurement::run();
     println!("{}", automation.record(round, backend, metadata));
+    let mono = MonoMeasurement::run();
+    println!("{}", mono.record(round, backend, metadata));
 }
 
 fn round_from_runner() -> u32 {
@@ -1112,6 +1114,216 @@ impl PlacementMeasurement {
 const PLACEMENT_STATISTICAL_METHOD: &str = "two arms alternated per observation; nearest-rank \
 percentiles over per-block nanoseconds; paired delta is merged_chain minus split_chains per \
 observation; descriptive only; no threshold";
+
+// ---------------------------------------------------------------------------------------------
+// The mono row-pair: the gate the mono collapse will be measured and constrained by.
+// ---------------------------------------------------------------------------------------------
+
+/// The two arms of the mono row-pair, in record order.
+///
+/// `collapse_eligible` is the mono fixture rendered as written; `collapse_forced_off` is the same
+/// session with the collapse suppressed. **Today they are one session.** No code in this tree
+/// reads the channel-symmetry witness to decide anything rendered, so the two arms compile,
+/// prepare and render identically, the paired delta is noise about zero, and the record says so in
+/// [`MONO_ARM_DIFFERENCE`] rather than leaving a reader to infer it.
+///
+/// The pair is built now, before the thing it measures, deliberately. When the collapse lands,
+/// this arm takes it and that arm forces it off, and the digest equality asserted below stops
+/// being trivial: it becomes the standing class-A gate on the entire mechanism -- a collapsed
+/// track must render, to the bit, what the same track renders uncollapsed. A gate written by the
+/// same change it is supposed to check is not a gate, which is the whole reason for the ordering.
+const MONO_ARMS: [Workload; 2] = [
+    Workload::SixtyFourTrackConsoleMono,
+    Workload::SixtyFourTrackConsoleMonoDual,
+];
+
+/// Pinned verbatim in the validator: what separates the two arms *in this tree*.
+///
+/// The sentence is the honesty. A reader who found a two-arm paired record with a near-zero delta
+/// and no such field would reasonably read it as "the collapse saves nothing"; what it actually
+/// says is that there is no collapse yet. Changing the claim means editing this constant and the
+/// validator that pins it, which is exactly the visibility the change deserves.
+const MONO_ARM_DIFFERENCE: &str =
+    "none: both arms are the mono fixture as written; no collapse exists in this tree";
+
+/// Pinned verbatim in the validator, for the reason every method sentence in this stream is.
+const MONO_STATISTICAL_METHOD: &str = "two arms alternated per observation; nearest-rank \
+percentiles over per-block nanoseconds; paired delta is collapse_forced_off minus \
+collapse_eligible per observation; descriptive only; no threshold";
+
+/// The mono-collapse row-pair, structurally a sibling of [`PlacementMeasurement`].
+///
+/// Alternated observation by observation for the same reason that one is: the claim under test is
+/// (today) that there is *no* difference, and "no difference" is precisely what a run-A-then-run-B
+/// benchmark cannot say honestly, because drift between two points in time is indistinguishable
+/// from an effect at that scale.
+struct MonoMeasurement {
+    ns_per_block: [Vec<u64>; 2],
+    digests: [String; 2],
+    /// Transposes attributable to the timed region, per arm, per block.
+    transposes_per_block: [u64; 2],
+    /// Tracks whose structural (`SOURCE`) witness holds, per arm.
+    mono_source_tracks: [u64; 2],
+    /// `[collapse-eligible lanes, lanes]` the built runtime realises, per arm.
+    symmetry_counters: [[u64; 2]; 2],
+    audit: audit::AuditSnapshot,
+    render_errors: u64,
+}
+
+impl MonoMeasurement {
+    fn run() -> Self {
+        let mut arms: Vec<SessionRuntime> =
+            MONO_ARMS.iter().map(|w| SessionRuntime::new(*w)).collect();
+        let mut hashes: Vec<Sha256Sink> = MONO_ARMS.iter().map(|_| Sha256Sink::new()).collect();
+        // The evidence that the fixture is what the row claims, read before anything is timed. A
+        // pair measured on a session with no mono-source track would be a pair measuring the
+        // standing console twice under another name, and the record carries both numbers so a
+        // reader can check that rather than trust the fixture's file name.
+        let mono_source_tracks: Vec<u64> = arms
+            .iter()
+            .map(SessionRuntime::structural_mono_tracks)
+            .collect();
+        let symmetry: Vec<[u64; 2]> = arms.iter().map(SessionRuntime::symmetry_counters).collect();
+        for arm in &mut arms {
+            for observation in 0..64 {
+                let _ = arm.render(observation);
+            }
+        }
+        let before: Vec<u64> = arms.iter().map(SessionRuntime::bank_transposes).collect();
+
+        let mut samples: Vec<Vec<u64>> = MONO_ARMS
+            .iter()
+            .map(|_| Vec::with_capacity(OBSERVATIONS))
+            .collect();
+        let mut render_errors = 0_u64;
+        audit::warm_up();
+        audit::reset();
+        for observation in 0..OBSERVATIONS as u64 {
+            for (index, arm) in arms.iter_mut().enumerate() {
+                let (elapsed_ns, result) = timing::timed(|| arm.render(observation));
+                if result.is_err() {
+                    render_errors += 1;
+                }
+                samples[index].push(elapsed_ns);
+            }
+            for (index, arm) in arms.iter_mut().enumerate() {
+                arm.hash_output(&mut hashes[index]);
+            }
+        }
+        let snapshot = audit::snapshot();
+        let digests: Vec<String> = hashes.into_iter().map(Sha256Sink::finish_hex).collect();
+
+        // The class-A statement, asserted in-run. Trivially true today and load-bearing the day
+        // the collapse exists: a track whose two channels are doing identical work must render,
+        // to the bit, what the same track renders with both channels computed.
+        assert_eq!(
+            digests[0], digests[1],
+            "the two mono arms rendered different output: a collapse-eligible session and the \
+             same session with the collapse forced off must agree to the bit"
+        );
+        // And the premise the equality is a statement *about*. Without this, a fixture that had
+        // silently lost its mono source mapping would still pass the assertion above -- by being
+        // two copies of an ordinary stereo session.
+        for (index, tracks) in mono_source_tracks.iter().enumerate() {
+            assert_eq!(
+                *tracks,
+                u64::from(MONO_ARMS[index].tracks()),
+                "{}: every track of the mono fixture must carry a mono source mapping",
+                MONO_ARMS[index].kind()
+            );
+            assert_eq!(
+                symmetry[index][0],
+                u64::from(MONO_ARMS[index].tracks()),
+                "{}: every track of the mono fixture must carry a symmetric prepared witness",
+                MONO_ARMS[index].kind()
+            );
+        }
+
+        let transposes: Vec<u64> = arms
+            .iter()
+            .zip(before.iter())
+            .map(|(arm, start)| (arm.bank_transposes() - start) / OBSERVATIONS as u64)
+            .collect();
+
+        Self {
+            ns_per_block: [samples[0].clone(), samples[1].clone()],
+            digests: [digests[0].clone(), digests[1].clone()],
+            transposes_per_block: [transposes[0], transposes[1]],
+            mono_source_tracks: [mono_source_tracks[0], mono_source_tracks[1]],
+            symmetry_counters: [symmetry[0], symmetry[1]],
+            audit: snapshot,
+            render_errors,
+        }
+    }
+
+    fn record(&self, round: u32, backend: Backend, metadata: &Metadata) -> String {
+        let eligible = Percentiles::from_samples(&self.ns_per_block[0]);
+        let forced = Percentiles::from_samples(&self.ns_per_block[1]);
+        let delta = paired_median(&self.ns_per_block[1], &self.ns_per_block[0]);
+        let tracks = f64::from(MONO_ARMS[0].tracks());
+        format!(
+            concat!(
+                "{{\"schema_version\":1,\"issue\":{issue},\"record\":\"console_mono\",",
+                "\"workload_kind\":\"sixty_four_track_mono_pair\",\"tracks\":{tracks},",
+                "\"round\":{round},\"backend\":\"{backend}\",",
+                "\"observations\":{obs},\"units\":\"ns_per_block\",",
+                "\"percentile_method\":\"nearest_rank\",",
+                "\"pairing\":\"alternating_per_observation\",",
+                "\"arms\":[\"collapse_eligible\",\"collapse_forced_off\"],",
+                "\"fixture_id\":\"{fixture}\",",
+                "\"collapse_eligible_p50_ns\":{eligible_p50},",
+                "\"collapse_eligible_p95_ns\":{eligible_p95},",
+                "\"collapse_eligible_p99_ns\":{eligible_p99},",
+                "\"collapse_forced_off_p50_ns\":{forced_p50},",
+                "\"collapse_forced_off_p95_ns\":{forced_p95},",
+                "\"collapse_forced_off_p99_ns\":{forced_p99},",
+                "\"paired_delta_median_ns\":{delta},",
+                "\"paired_delta_median_ns_per_track\":{delta_per_track},",
+                "\"collapse_eligible_transposes_per_block\":{eligible_transposes},",
+                "\"collapse_forced_off_transposes_per_block\":{forced_transposes},",
+                "\"mono_source_tracks\":{mono_tracks},",
+                "\"symmetric_lanes\":{symmetric_lanes},\"lanes\":{lanes},",
+                "\"collapse_eligible_output_sha256\":\"{eligible_digest}\",",
+                "\"collapse_forced_off_output_sha256\":\"{forced_digest}\",",
+                "\"bit_identity\":\"collapse_eligible == collapse_forced_off, asserted in-run\",",
+                "\"arm_difference\":\"{difference}\",",
+                "\"render_errors\":{errors},",
+                "\"render_total_forbidden_operations\":{forbidden},",
+                "{metadata}",
+                "\"descriptive_only\":true,",
+                "\"statistical_method\":\"{method}\"}}"
+            ),
+            issue = ISSUE,
+            tracks = MONO_ARMS[0].tracks(),
+            round = round,
+            backend = backend_name(backend),
+            obs = OBSERVATIONS,
+            fixture = json_escape(MONO_ARMS[0].fixture_id()),
+            eligible_p50 = eligible.p50,
+            eligible_p95 = eligible.p95,
+            eligible_p99 = eligible.p99,
+            forced_p50 = forced.p50,
+            forced_p95 = forced.p95,
+            forced_p99 = forced.p99,
+            delta = delta,
+            delta_per_track = format_f64(delta as f64 / tracks),
+            eligible_transposes = self.transposes_per_block[0],
+            forced_transposes = self.transposes_per_block[1],
+            // One number, not two: the run asserts the arms agree before it emits, so a pair of
+            // columns here could only ever restate the assertion.
+            mono_tracks = self.mono_source_tracks[0],
+            symmetric_lanes = self.symmetry_counters[0][0],
+            lanes = self.symmetry_counters[0][1],
+            eligible_digest = self.digests[0],
+            forced_digest = self.digests[1],
+            difference = MONO_ARM_DIFFERENCE,
+            errors = self.render_errors,
+            forbidden = self.audit.total(),
+            metadata = metadata.record_fields(),
+            method = MONO_STATISTICAL_METHOD,
+        )
+    }
+}
 
 // ---------------------------------------------------------------------------------------------
 // The compressor-automation measurement: the ramping body no standing row can see.

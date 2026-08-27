@@ -4,7 +4,7 @@
 //!
 //! `wasm32-unknown-unknown`'s view of the console benchmark subject. Compiled as a `cdylib` with
 //! `+simd128` and instantiated by the pinned wasmtime in `miso-engine-wasm-console`, it prepares
-//! one of the nine console workloads through the real session/builtins/effect/graph compilers and
+//! one of the sixteen console workloads through the real session/builtins/effect/graph compilers and
 //! renders it one block per exported call.
 //!
 //! Everything it renders comes from [`miso_engine_console_workload`], which the native leg of the
