@@ -71,6 +71,10 @@ const OBSERVE_UNSUBSCRIBE_KIND = 8;
 const SUBSCRIPTION_FIELDS = [
   "trackIndex", "rack", "effectIndex", "tapId", "windowBlocks", "armed",
 ];
+// Issue #207: one entry of the session map's source list. The names are the `.d.ts`'s and the
+// worklet's, spelled once here so the acknowledgement validator and the type declaration cannot
+// drift apart without `scripts/check-session-map-shape.py` seeing it.
+const SESSION_SOURCE_FIELDS = ["id", "channels", "sampleRateHz", "startFrame", "frames"];
 
 function validSubscription(subscription) {
   return hasExactFields(subscription, SUBSCRIPTION_FIELDS)
@@ -469,7 +473,7 @@ class MisoAudioWorkletHostV1 {
           "records",
         ]
         : pending.response === "sessionMap"
-          ? ["tag", "requestId", "result", "tracks", "metersAttached"]
+          ? ["tag", "requestId", "result", "tracks", "sources", "metersAttached"]
           : pending.response === "status"
         ? [
           "tag", "requestId", "result", "state", "lastResult", "backend", "sampleRateHz",
@@ -495,6 +499,15 @@ class MisoAudioWorkletHostV1 {
     const validSessionMap = pending.response !== "sessionMap" || (
       message.result === RESULT_OK && Array.isArray(message.tracks)
       && message.tracks.every((value) => typeof value === "string" && value.length > 0)
+      // Issue #207: the source list is held to what a *compiled* session can produce -- a nonzero
+      // channel count, a nonzero region length, a rate that is the session's -- so a malformed
+      // list fails the host loudly instead of reaching a consumer as plausible numbers.
+      && Array.isArray(message.sources)
+      && message.sources.every((source) => hasExactFields(source, SESSION_SOURCE_FIELDS)
+        && typeof source.id === "string" && source.id.length > 0
+        && validU32(source.channels) && source.channels > 0
+        && source.sampleRateHz === this.#sampleRateHz
+        && validU64(source.frames, true) && validU64(source.startFrame))
       && typeof message.metersAttached === "boolean"
     );
     const validStatus = pending.response !== "status" || (

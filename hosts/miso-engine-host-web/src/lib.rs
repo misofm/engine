@@ -617,9 +617,13 @@ struct ReadyOwnership {
     master_peak: [f32; 2],
     /// Windows folded into `meter_frame` since the host was compiled.
     meter_windows: u64,
-    /// Retained so the browser bridge keeps charging itself for the compiled model it holds; the
-    /// V1 browser ABI has no session query, so nothing reads it.
-    _session: CompiledSession,
+    /// The compiled session model, retained so the browser bridge keeps charging itself for what
+    /// it holds -- and, since issue #207, read by the source-introspection queries.
+    ///
+    /// The queries read it directly rather than copying a parallel table out of it, so the order
+    /// they report *is* the normalized model's order by construction: `compile_session` sorts
+    /// `sources` by stable ID, and there is no second list that could disagree with it.
+    session: CompiledSession,
 }
 
 impl ReadyOwnership {
@@ -715,6 +719,30 @@ enum AdmittedCommand {
     Effect(EffectControlRecordV1),
 }
 
+/// One compiled source's declared shape, in canonical normalized source order (issue #207).
+///
+/// This is exactly what the *compiled session* knows about a source and nothing more: the strict
+/// TOML declares a native rate, a channel count and an inclusive region, `compile_session`
+/// normalizes it, and preparation builds the source ring at `region_start_frame` with a region
+/// ending at `region_start_frame + region_frames`. A headless driver that must feed the render
+/// loop needs precisely these four numbers, because the ring it is feeding was positioned by them.
+///
+/// `sample_rate_hz` is declared per source and is therefore reported per source, but a *compiled*
+/// session's per-source rate necessarily equals the session rate: `prepare_host_session` refuses
+/// `host.source.rate.mismatch` before a plan exists, because V1 has no sample-rate conversion. It
+/// is reported so a consumer reads the declaration rather than inferring it from that invariant.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SessionSourceShape {
+    /// Declared source channels; nonzero for every source a compiled session holds.
+    pub channel_count: u32,
+    /// Declared native source sample rate in hertz; equal to the session rate once compiled.
+    pub sample_rate_hz: u32,
+    /// First source sample frame of the declared region. Zero is an ordinary value.
+    pub region_start_frame: u64,
+    /// Length of the declared region in source sample frames; nonzero for every compiled source.
+    pub region_frames: u64,
+}
+
 /// Safe ownership object backing one future AudioWorklet Wasm handle.
 pub struct AudioWorkletEngineHost {
     config: WebPrepareConfigV1,
@@ -790,6 +818,52 @@ impl AudioWorkletEngineHost {
     #[must_use]
     pub fn console_tracks(&self) -> &[Box<str>] {
         self.ready.as_ref().map_or(&[], |ready| &ready.tracks)
+    }
+
+    /// Number of sources the compiled session declares; zero before compilation (issue #207).
+    ///
+    /// This is the bounds authority for every other source query, exactly as
+    /// [`AudioWorkletEngineHost::console_tracks`] is for `track_index`: the shape queries report a
+    /// sentinel for an out-of-range index where they can, but `region_start_frame` has no spare
+    /// value, so a caller establishes the range here and then indexes inside it.
+    #[must_use]
+    pub fn session_source_count(&self) -> usize {
+        self.ready
+            .as_ref()
+            .map_or(0, |ready| ready.session.normalized_model().sources.len())
+    }
+
+    /// One canonical source ID, or `None` for an out-of-range index (issue #207).
+    ///
+    /// The order is the normalized model's: `compile_session` sorts `sources` by stable ID, and
+    /// this reads that list rather than a copy of it, so "canonical source order" has exactly one
+    /// definition in this crate.
+    #[must_use]
+    pub fn session_source_id(&self, index: u32) -> Option<&str> {
+        let ready = self.ready.as_ref()?;
+        let source = ready
+            .session
+            .normalized_model()
+            .sources
+            .get(index as usize)?;
+        Some(source.id.as_str())
+    }
+
+    /// One source's declared shape, or `None` for an out-of-range index (issue #207).
+    #[must_use]
+    pub fn session_source_shape(&self, index: u32) -> Option<SessionSourceShape> {
+        let ready = self.ready.as_ref()?;
+        let source = ready
+            .session
+            .normalized_model()
+            .sources
+            .get(index as usize)?;
+        Some(SessionSourceShape {
+            channel_count: u32::from(source.mapping.channel_count),
+            sample_rate_hz: source.sample_rate_hz,
+            region_start_frame: source.mapping.region.start_sample,
+            region_frames: source.mapping.region.length_samples,
+        })
     }
 
     /// The decimated meter frame (issue #137 D2, extended by #143 D5).
@@ -959,6 +1033,30 @@ impl AudioWorkletEngineHost {
             return 0;
         };
         let bytes = id.as_bytes();
+        let length = bytes.len();
+        let Some(buffers) = self.buffers.as_mut() else {
+            return 0;
+        };
+        let Some(target) = buffers.source_id.get_mut(..length) else {
+            return 0;
+        };
+        target.copy_from_slice(bytes);
+        u32::try_from(length).unwrap_or(0)
+    }
+
+    /// Copy one canonical source ID into source-ID staging; returns its byte length (issue #207).
+    ///
+    /// The twin of [`AudioWorkletEngineHost::copy_console_track_id`], and it cannot fail on
+    /// capacity the way that one can: `compile_ready` refuses `web.source.id.capacity` unless
+    /// every source ID fits this exact buffer, so the only zero this returns is "no such source".
+    pub(crate) fn copy_session_source_id(&mut self, index: u32) -> u32 {
+        let Some(ready) = self.ready.as_ref() else {
+            return 0;
+        };
+        let Some(source) = ready.session.normalized_model().sources.get(index as usize) else {
+            return 0;
+        };
+        let bytes = source.id.as_str().as_bytes();
         let length = bytes.len();
         let Some(buffers) = self.buffers.as_mut() else {
             return 0;
@@ -2336,7 +2434,7 @@ fn compile_ready(
         meter_frame: boxed_zero_meter_frame(track_count)?,
         master_peak: [0.0, 0.0],
         meter_windows: 0,
-        _session: session,
+        session,
     };
     Ok((ready, report))
 }
