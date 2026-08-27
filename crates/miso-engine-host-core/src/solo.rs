@@ -40,7 +40,7 @@
 //!
 //! > a solo-derived record is emitted for exactly those lanes whose effective mute **changed**.
 //!
-//! [`ConsoleSoloState::emitted`] is the mirror of what the render plane was last told, and
+//! [`ConsoleSoloState::emitted_mute`] is the mirror of what the render plane was last told, and
 //! [`ConsoleSoloState::track_delta`] is the difference between it and the composed effective mute.
 //!
 //! # The transaction
