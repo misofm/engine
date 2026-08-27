@@ -249,7 +249,9 @@ export class WasmBoundary {
     const pointer = this.exports.miso_engine_web_v1_status_ptr(this.handle);
     const view = new DataView(this.exports.memory.buffer, pointer, ABI_LAYOUT.structures.status.bytes);
     if (view.getUint32(statusOffsets.structSize, true) !== ABI_LAYOUT.structures.status.bytes
-        || view.getUint32(statusOffsets.abiVersion, true) !== ABI_LAYOUT.abiVersion) throw new MisoOfflineError("Invalid Wasm status structure", "lifecycle", 255);
+        || view.getUint32(statusOffsets.abiVersion, true) !== ABI_LAYOUT.abiVersion
+        || view.getUint32(statusOffsets.reserved0, true) !== 0
+        || [0, 1, 2, 3].some((index) => view.getBigUint64(statusOffsets.reserved + index * 8, true) !== 0n)) throw new MisoOfflineError("Invalid Wasm status structure", "lifecycle", 255);
     return Object.freeze({
       state: stateNames.get(view.getUint32(statusOffsets.state, true)) ?? "unknown",
       lastResult: resultName(view.getUint32(statusOffsets.lastResult, true)),
@@ -266,7 +268,9 @@ export class WasmBoundary {
     const pointer = this.exports.miso_engine_web_v1_resource_ptr(this.handle);
     const view = new DataView(this.exports.memory.buffer, pointer, ABI_LAYOUT.structures.resourceReport.bytes);
     if (view.getUint32(resourceOffsets.structSize, true) !== ABI_LAYOUT.structures.resourceReport.bytes
-        || view.getUint32(resourceOffsets.abiVersion, true) !== ABI_LAYOUT.abiVersion) throw new MisoOfflineError("Invalid Wasm resource structure", "prepare", 255);
+        || view.getUint32(resourceOffsets.abiVersion, true) !== ABI_LAYOUT.abiVersion
+        || [0, 1, 2].some((index) => view.getUint32(resourceOffsets.reserved0 + index * 4, true) !== 0)
+        || [0, 1, 2].some((index) => view.getBigUint64(resourceOffsets.reserved + index * 8, true) !== 0n)) throw new MisoOfflineError("Invalid Wasm resource structure", "prepare", 255);
     const resources: Record<string, number | bigint> = {};
     for (const field of ABI_LAYOUT.structures.resourceReport.fields) {
       if (field.name.startsWith("reserved") || field.name === "structSize" || field.name === "abiVersion") continue;
@@ -287,7 +291,7 @@ export class WasmBoundary {
 export async function validateSession(toml: string, wasm: WasmAssetOptions = {}): Promise<SessionDiagnostics> {
   let boundary: WasmBoundary | undefined;
   try {
-    boundary = await WasmBoundary.create({ toml }, {}, wasm, true);
+    boundary = await WasmBoundary.create({ toml }, { sessionTomlBytes: Math.max(1 << 20, encoder.encode(toml).byteLength) }, wasm, true);
     return Object.freeze({ ok: true, diagnostics: Object.freeze([]), resources: boundary.resources });
   } catch (error) {
     if (error instanceof MisoOfflineError && (error.phase === "compile" || error.phase === "prepare")) {

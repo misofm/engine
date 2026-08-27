@@ -148,6 +148,7 @@ async function runE8(sdk, wasm) {
     const actual = concatenate(before, after);
     const firstAffected = actual.findIndex((value, index) => Object.is(value, expected[index]) === false);
     assertE8(firstAffected, ack.appliedAtSample, 256);
+    assert.equal(ack.raw.appliedAtSample, ack.appliedAtSample, "E8 raw and typed acknowledgements must agree");
     return Object.freeze({ firstAffected, appliedAtSample: ack.appliedAtSample });
   } finally { baseline.dispose(); commanded.dispose(); }
 }
@@ -207,10 +208,10 @@ async function checkValidation(sdk, wasm) {
 }
 
 function pcmWave(bits, values) {
-  const sampleBytes = bits / 8, dataBytes = values.length * sampleBytes;
-  const bytes = new Uint8Array(44 + dataBytes), view = new DataView(bytes.buffer);
+  const sampleBytes = bits / 8, dataBytes = values.length * sampleBytes, padding = dataBytes & 1;
+  const bytes = new Uint8Array(44 + dataBytes + padding), view = new DataView(bytes.buffer);
   const put = (offset, value) => bytes.set(new TextEncoder().encode(value), offset);
-  put(0, "RIFF"); view.setUint32(4, 36 + dataBytes, true); put(8, "WAVE"); put(12, "fmt ");
+  put(0, "RIFF"); view.setUint32(4, 36 + dataBytes + padding, true); put(8, "WAVE"); put(12, "fmt ");
   view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true);
   view.setUint32(24, 48_000, true); view.setUint32(28, 48_000 * sampleBytes, true);
   view.setUint16(32, sampleBytes, true); view.setUint16(34, bits, true); put(36, "data"); view.setUint32(40, dataBytes, true);
@@ -227,11 +228,15 @@ async function checkEdges(sdk, wasm) {
   const pcm24 = sdk.decodeWave(sdk.parseWave(pcmWave(24, [-8_388_608, 0, 8_388_607]), "pcm24"), 0, 3, "pcm24")[0];
   assert.deepEqual(Array.from(pcm16), [-1, 0, Math.fround(32_767 / 32_768)]);
   assert.deepEqual(Array.from(pcm24), [-1, 0, Math.fround(8_388_607 / 8_388_608)]);
+  const malformed = pcmWave(16, [0]); new DataView(malformed.buffer).setUint32(4, 0, true);
+  assert.throws(() => sdk.parseWave(malformed, "malformed"), (error) => error?.code === "miso.source.v1" && error.path === "wav.riff");
   const frames = 256, planes = deterministicPlanes(frames, 7);
   const plan = sdk.session({ id: "sdk-partial", sampleRateHz: 48_000 }).source("source", { channels: 2, frames }).track("track", { source: "source", pan: { left: -1, right: 1 } }).build();
   const whole = await sdk.createOfflineEngine({ session: plan, sources: { source: planes }, wasm: { bytes: wasm } });
   const split = await sdk.createOfflineEngine({ session: plan, sources: { source: planes }, wasm: { bytes: wasm } });
   try {
+    assert.throws(() => split.console.track("track").fader(-145), (error) => error?.code === "miso.command.v1" && error.path === "fader.db");
+    assert.throws(() => split.console.track("track").pan(-1.01, 1), (error) => error?.code === "miso.command.v1" && error.path === "pan.left");
     const expected = whole.render(128), first = split.render(17), second = split.render(111);
     assert.deepEqual(concatenate(first.left, second.left), expected.left, "partial render calls must retain an exact quantum tail");
     assert.deepEqual(concatenate(first.right, second.right), expected.right, "partial render calls must retain an exact quantum tail");

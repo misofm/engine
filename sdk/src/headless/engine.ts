@@ -213,7 +213,9 @@ class Engine<S extends SessionShape> implements OfflineEngine<S> {
     const pointer = this.boundary.exports.miso_engine_web_v1_meter_header_ptr(this.boundary.handle);
     const header = new DataView(this.boundary.exports.memory.buffer, pointer, ABI_LAYOUT.structures.meterHeader.bytes);
     if (header.getUint32(meterOffsets.structSize, true) !== ABI_LAYOUT.structures.meterHeader.bytes
-        || header.getUint32(meterOffsets.abiVersion, true) !== ABI_LAYOUT.abiVersion) throw new MisoOfflineError("Invalid Wasm meter header", "lifecycle", 255);
+        || header.getUint32(meterOffsets.abiVersion, true) !== ABI_LAYOUT.abiVersion
+        || header.getBigUint64(meterOffsets.reserved, true) !== 0n
+        || header.getBigUint64(meterOffsets.reserved + 8, true) !== 0n) throw new MisoOfflineError("Invalid Wasm meter header", "lifecycle", 255);
     const trackCount = header.getUint32(meterOffsets.trackCount, true);
     const frame = this.boundary.buffer("meterFrame");
     if (frame.capacity !== (trackCount * 3 + 3) * 4) throw new MisoOfflineError("Invalid Wasm meter frame", "lifecycle", 255);

@@ -14,8 +14,8 @@ produce identical bytes.
 The four-stage `miso-engine-session-validator` CLI is the schema, typed-model, resource/canonical,
 and builtin-preparation oracle. Its success is necessary but is not sufficient for native effect
 parameters because that CLI currently stops before effect preparation. Phase 1's E5b corpus drives
-the shipped zero-import Wasm module directly to cover that gap. The Phase 2 headless entry will
-expose the same fresh-instance prepare/compile/NUL-diagnostic mechanism as `validateSession()`, the
+the shipped zero-import Wasm module directly to cover that gap. The headless entry exposes the same
+fresh-instance prepare/compile/NUL-diagnostic mechanism as `validateSession()`, the
 authoritative complete-session check for SDK callers.
 
 This distinction is tested explicitly. Compressor `ratio = 20.000002` is the next finite `f32`
@@ -29,3 +29,23 @@ uses the tagged object `{ "$miso.sdk.f32": "-0" }` only for negative zero, so
 
 Generated TypeScript is derived from the packaged JSON assets. `npm run check:generated` verifies
 that neither the generated catalog/ABI/provenance modules nor their source assets have drifted.
+
+## Headless Node and Bun
+
+The `@misofm/engine/headless` entry drives the shipped zero-import Wasm module directly under Node
+20+ and Bun 1.1+. `createOfflineEngine()` verifies SHA-256 before WebAssembly compilation, runs the
+real prepare/compile pipeline, accepts planar `Float32Array` sources or RIFF/RF64 PCM16/PCM24/32f
+WAV data, and exposes the typed console, meters, streaming render, and file output APIs.
+
+`render(frames)` accepts any non-negative safe integer. The host renders whole engine quanta,
+returns exactly the requested prefix, and retains the unused tail for the next call. Source/session
+sample-rate mismatch is rejected before source submission; no implicit SRC exists. A compile or
+render failure is sticky engine state: diagnostics are read as a NUL-terminated capacity prefix,
+and recovery is dispose-and-recreate rather than an in-place retry. `validateSession()` always uses
+a fresh Wasm instance for the same reason.
+
+`renderToFile()` supports exact per-quantum `f32le-planar` records and interleaved stereo `wav32f`.
+`wav16` remains deferred because v1 has no quantization/dither policy. Raw `{ toml }` validation is
+fully engine-authoritative. For rendering, the frozen ABI cannot query a compiled source's nonzero
+region, so raw-TOML source inputs denote a complete zero-origin region; use a typed `SessionPlan`
+when a declared source region is not zero-origin.

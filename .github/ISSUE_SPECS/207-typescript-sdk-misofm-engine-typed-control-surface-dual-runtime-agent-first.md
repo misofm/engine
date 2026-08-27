@@ -361,3 +361,21 @@ final handoff names exact commits, gate counts/digests, unresolved findings, and
   partial-quantum retention, early rate mismatch, and compile-time exact headless track/effect/
   parameter access. Generated/core/builder self-tests remain green. Full sweep/fmt/clippy and
   independent Phase 2 review remain pending.
+
+### Phase 2 tranche C: public-boundary hardening (pending checkpoint)
+
+- High-level fader, mute, pan, and bypass calls now reject malformed/out-of-domain values locally;
+  typed acknowledgements retain the exact raw numeric report; status, resource, command, and meter
+  structures verify every generated reserved word. `validateSession()` sizes TOML staging to the
+  supplied document rather than imposing an accidental 1 MiB ceiling.
+- WAV support is narrowed to the specified PCM16, PCM24, and IEEE-f32 formats and now checks RIFF/
+  RF64 declared sizes, RF64 `ds64` totals, duplicate format/data chunks, extensible fields, and pad
+  bytes. The stricter gate correctly turned red when its synthetic odd-byte PCM24 fixture lacked
+  the mandatory pad; fixing the fixture left the production parser strict and both native E7
+  digests unchanged.
+- The package declares its core and `./headless` subpaths with `sideEffects:false`. The README now
+  states the non-multiple render policy, early rate refusal, sticky failure recovery, fresh-instance
+  validation, supported output formats, and raw-TOML region limitation in present tense.
+- Real TypeScript/public-type checks and the complete Node/Bun E6-E10a gate remain green with the
+  same digests and five red mutations. Duration-bounded path-backed WAV input and file output are
+  the next tranche; full gates and independent review remain pending.

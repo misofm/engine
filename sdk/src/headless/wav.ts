@@ -49,7 +49,10 @@ export function parseWave(bytes: Uint8Array, sourceId = "wav"): WaveData {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const container = tag(bytes, 0);
   if ((container !== "RIFF" && container !== "RF64") || tag(bytes, 8) !== "WAVE") sourceError(sourceId, "Expected RIFF/WAVE or RF64/WAVE");
+  if (container === "RIFF" && view.getUint32(4, true) + 8 !== bytes.byteLength) sourceError(sourceId, "RIFF size does not match the byte sequence", "wav.riff");
   let rf64DataBytes: bigint | undefined;
+  let rf64RiffBytes: bigint | undefined;
+  let rf64SampleCount: bigint | undefined;
   let format: { sampleRateHz: number; channels: number; blockAlign: number; encoding: WaveEncoding } | undefined;
   let dataOffset = -1;
   let dataBytes = -1;
@@ -68,9 +71,12 @@ export function parseWave(bytes: Uint8Array, sourceId = "wav"): WaveData {
     }
     if (payload + size > bytes.byteLength) sourceError(sourceId, "WAV chunk exceeds the byte sequence", `wav.${id.trim() || "chunk"}`);
     if (id === "ds64") {
-      if (container !== "RF64" || size < 28) sourceError(sourceId, "Invalid RF64 ds64 chunk", "wav.ds64");
+      if (container !== "RF64" || size < 28 || rf64DataBytes !== undefined) sourceError(sourceId, "Invalid or duplicate RF64 ds64 chunk", "wav.ds64");
+      rf64RiffBytes = view.getBigUint64(payload, true);
       rf64DataBytes = view.getBigUint64(payload + 8, true);
+      rf64SampleCount = view.getBigUint64(payload + 16, true);
     } else if (id === "fmt ") {
+      if (format) sourceError(sourceId, "Duplicate WAV fmt chunk", "wav.fmt");
       if (size !== 16 && size !== 40) sourceError(sourceId, "Unsupported WAV fmt chunk size", "wav.fmt");
       const tagValue = view.getUint16(payload, true);
       const channels = view.getUint16(payload + 2, true);
@@ -78,6 +84,7 @@ export function parseWave(bytes: Uint8Array, sourceId = "wav"): WaveData {
       const byteRate = view.getUint32(payload + 8, true);
       const blockAlign = view.getUint16(payload + 12, true);
       const bits = view.getUint16(payload + 14, true);
+      if (size === 40 && (view.getUint16(payload + 16, true) !== 22 || view.getUint16(payload + 18, true) !== bits)) sourceError(sourceId, "Invalid extensible WAV fmt fields", "wav.fmt");
       const guid = size === 40 ? hex(bytes.subarray(payload + 24, payload + 40)) : undefined;
       const scalar = encoding(tagValue, bits, guid, sourceId);
       const bytesPerSample = scalar === "pcm16" ? 2 : scalar === "pcm24" ? 3 : 4;
@@ -86,12 +93,21 @@ export function parseWave(bytes: Uint8Array, sourceId = "wav"): WaveData {
       }
       format = { sampleRateHz, channels, blockAlign, encoding: scalar };
     } else if (id === "data") {
+      if (dataOffset >= 0) sourceError(sourceId, "Duplicate WAV data chunk", "wav.data");
       dataOffset = payload;
       dataBytes = size;
     }
-    offset = payload + size + (size & 1);
+    const next = payload + size + (size & 1);
+    if (next > bytes.byteLength) sourceError(sourceId, "WAV chunk padding exceeds the byte sequence", "wav.padding");
+    offset = next;
   }
   if (!format || dataOffset < 0 || dataBytes < 0 || dataBytes % format.blockAlign !== 0) sourceError(sourceId, "WAV requires one valid fmt and data chunk");
+  if (container === "RF64") {
+    if (rf64RiffBytes === undefined || rf64DataBytes === undefined || rf64SampleCount === undefined
+        || safeNumber(rf64RiffBytes + 8n, sourceId, "wav.ds64") !== bytes.byteLength
+        || safeNumber(rf64DataBytes, sourceId, "wav.ds64") !== dataBytes
+        || safeNumber(rf64SampleCount, sourceId, "wav.ds64") !== dataBytes / format.blockAlign) sourceError(sourceId, "RF64 ds64 sizes do not match the container", "wav.ds64");
+  }
   return Object.freeze({ bytes, ...format, frames: dataBytes / format.blockAlign, dataOffset });
 }
 

@@ -23,6 +23,14 @@ const rackByte: Readonly<Record<Rack, number>> = Object.freeze({ simd1: 0, dynam
 const channelByte = Object.freeze({ left: 0, right: 1, both: 2 });
 const NONE = 255;
 
+function localF32(value: number, path: string, minimum: number, maximum: number): number {
+  const rounded = Math.fround(value);
+  if (!Number.isFinite(value) || !Number.isFinite(rounded) || rounded < minimum || rounded > maximum) {
+    throw new MisoCommandError(`Expected a finite f32 in [${minimum}, ${maximum}]`, path);
+  }
+  return rounded;
+}
+
 interface EffectAddress {
   readonly trackIndex: number;
   readonly rack: Rack;
@@ -109,6 +117,7 @@ class EffectControl<D extends EffectDecl> implements OfflineEffectConsole<D> {
   }
 
   bypass(on: boolean): Promise<CommandAck> {
+    if (typeof on !== "boolean") throw new MisoCommandError("Effect bypass requires a boolean", "effect.bypass");
     return this.transport.submit([record({ kind: kind.effectBypass, rack: rackByte[this.address.rack], trackIndex: this.address.trackIndex, effectIndex: this.address.rackIndex, values: [on ? 1 : 0, 0, 0, 0] })]);
   }
 
@@ -126,15 +135,16 @@ class TrackControl<E extends readonly EffectDecl[]> implements OfflineTrackConso
   ) {}
 
   fader(db: number, options: Readonly<{ channel?: "left" | "right" | "both"; smoothingSamples?: number }> = {}): Promise<CommandAck> {
-    return this.transport.submit([record({ kind: kind.faderDb, channel: channelByte[options.channel ?? "both"], trackIndex: this.trackIndex, smoothingSamples: options.smoothingSamples ?? 0, values: [db, 0, 0, 0] })]);
+    return this.transport.submit([record({ kind: kind.faderDb, channel: channelByte[options.channel ?? "both"], trackIndex: this.trackIndex, smoothingSamples: options.smoothingSamples ?? 0, values: [localF32(db, "fader.db", -144, 24), 0, 0, 0] })]);
   }
 
   mute(on: boolean, options: Readonly<{ channel?: "left" | "right" | "both"; smoothingSamples?: number }> = {}): Promise<CommandAck> {
+    if (typeof on !== "boolean") throw new MisoCommandError("Mute requires a boolean", "mute.on");
     return this.transport.submit([record({ kind: kind.mute, channel: channelByte[options.channel ?? "both"], trackIndex: this.trackIndex, smoothingSamples: options.smoothingSamples ?? 0, values: [on ? 1 : 0, 0, 0, 0] })]);
   }
 
   pan(left: number, right: number, options: Readonly<{ smoothingSamples?: number }> = {}): Promise<CommandAck> {
-    return this.transport.submit([record({ kind: kind.pan, trackIndex: this.trackIndex, smoothingSamples: options.smoothingSamples ?? 0, values: [left, right, 0, 0] })]);
+    return this.transport.submit([record({ kind: kind.pan, trackIndex: this.trackIndex, smoothingSamples: options.smoothingSamples ?? 0, values: [localF32(left, "pan.left", -1, 1), localF32(right, "pan.right", -1, 1), 0, 0] })]);
   }
 
   effect<I extends import("../core/types.js").Indices<E> & keyof E>(index: I): OfflineEffectConsole<Extract<E[I], EffectDecl>> {
@@ -188,7 +198,9 @@ export class OfflineConsole<S extends SessionShape> implements EngineConsole<S> 
     const pointer = this.boundary.exports.miso_engine_web_v1_command_report_ptr(this.boundary.handle);
     const view = new DataView(this.boundary.exports.memory.buffer, pointer, ABI_LAYOUT.structures.commandReport.bytes);
     if (view.getUint32(reportOffsets.structSize, true) !== ABI_LAYOUT.structures.commandReport.bytes
-        || view.getUint32(reportOffsets.abiVersion, true) !== ABI_LAYOUT.abiVersion) throw new MisoOfflineError("Invalid command report", "lifecycle", 255);
+        || view.getUint32(reportOffsets.abiVersion, true) !== ABI_LAYOUT.abiVersion
+        || view.getBigUint64(reportOffsets.reserved, true) !== 0n
+        || view.getBigUint64(reportOffsets.reserved + 8, true) !== 0n) throw new MisoOfflineError("Invalid command report", "lifecycle", 255);
     const reason = reasonByValue.get(view.getUint32(reportOffsets.reason, true)) ?? "malformed";
     const raw = Object.freeze({
       result,
