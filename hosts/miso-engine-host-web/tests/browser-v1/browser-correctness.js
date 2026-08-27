@@ -30,6 +30,13 @@ function limits() {
     // channel, no meter observers -- which is what this fixture's digest was pinned against.
     consoleCommandQueueRecords: 0n,
     consoleMeterBlocks: 0n,
+    // Issue #143 D3/D6: the remaining two reserved words. The worklet's `LIMIT_FIELDS` guard is
+    // `exactFields`, so these are not optional -- a `limits` object missing them is refused with
+    // `RESULT_INVALID_ARGUMENT` before the module is instantiated. Zero in both is the same
+    // "no observation capacity, no master designation" every pre-#143 writer already meant, and
+    // is what this fixture's digests were pinned against.
+    consoleObservationTaps: 0n,
+    consoleMasterTrackPlusOne: 0n,
   };
 }
 
