@@ -31,6 +31,10 @@ may change.
 - Phase 1 synthesizes one `main` output and one unity `post_matrix` route per otherwise unrouted
   track, making the flagship one-track builder valid and audible. Explicit outputs/routes suppress
   this convenience.
+- The issue-sketch `{ left, right }` track-source convenience is constrained by the actual Session
+  V1 model: it has one `source_id`. The SDK therefore accepts the ergonomic form only when both
+  lanes name the same declared source and both channel indexes are within that source's declared
+  channel count; otherwise it raises a typed local error before TOML emission.
 - Tuple effect indices use `Exclude<Partial<T>["length"], T["length"]>`; an out-of-range literal is
   a compile-time error.
 - The builder only exposes Session V1 rack-effect automation. Live commands cover the
@@ -157,3 +161,21 @@ final handoff names exact commits, gate counts/digests, unresolved findings, and
   self-test under Node. Red command mutations for NaN and finite-f64-to-infinite-f32 both fail.
 - The builder and its validator corpus remain outside this checkpoint by design; this tranche is a
   recoverable core primitive boundary, not a Phase 1 PASS claim.
+
+### Phase 1 tranche C: typed Session V1 builder (pending checkpoint)
+
+- The persistent builder emits the exact 14-key Session V1 shape, resolves native effect metadata
+  into typed parameter rows, creates stable rack-local slot IDs, supports explicit graph and
+  rack-effect automation declarations, and supplies the corrected default `main` output plus one
+  unity `post_matrix` route per track when the graph is otherwise undeclared.
+- Canonical values use engine channel order and Rust-compatible finite-`f32` spellings, including
+  the two documented double-rounding patterns. JSON-safe automation sample strings serialize back
+  to bare TOML integers and are bounded to TOML `i64`.
+- The exact tuple-index constraint is compiled both green with `@ts-expect-error` and red as an
+  unsuppressed out-of-range call. Builder self-tests also reject metadata-domain overflow,
+  finite-f64-to-infinite-f32 values, invalid dual-source mappings, out-of-bounds channels,
+  overlapping automation, and sample times above TOML `i64`.
+- Independent Sol probe: the real serialized `miso-engine-session-validator` accepted the flagship
+  1,993-byte builder document at all four stages and its `--canonical` stdout was byte-identical.
+  A separate 127-frame-quantum mutation also passed all four stages, causing removal of an invented
+  power-of-two SDK restriction. The >=40-document E3/E4 corpus remains the next tranche.

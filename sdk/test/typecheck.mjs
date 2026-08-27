@@ -28,6 +28,11 @@ async function checkProject() {
   await requireCompiler();
   const result = compile(["--project", "tsconfig.json", "--noEmit"]);
   assert.equal(result.status, 0, `tsc --noEmit failed:\n${result.stdout}${result.stderr}`);
+  const fixture = resolve(sdkRoot, "test", "builder-types.ts");
+  const tupleResult = compile([
+    "--ignoreConfig", "--noEmit", "--strict", "--target", "ES2022", "--module", "NodeNext", "--moduleResolution", "NodeNext", fixture,
+  ]);
+  assert.equal(tupleResult.status, 0, `tuple index fixture failed:\n${tupleResult.stdout}${tupleResult.stderr}`);
 }
 
 async function selfTest() {
@@ -35,7 +40,14 @@ async function selfTest() {
   const directory = await mkdtemp(resolve(tmpdir(), "miso-sdk-tsc-"));
   try {
     const red = resolve(directory, "red.ts");
-    await writeFile(red, "const impossible: string = 1;\n", "utf8");
+    const sdkIndex = resolve(sdkRoot, "src", "index.js");
+    await writeFile(red, [
+      `import { effect, type TrackConsole } from ${JSON.stringify(sdkIndex)};`,
+      'const effects = [effect("miso.compressor", { threshold: -18 })] as const;',
+      'declare const track: TrackConsole<typeof effects>;',
+      'track.effect(1);',
+      '',
+    ].join("\n"), "utf8");
     const result = compile([
       "--ignoreConfig",
       "--noEmit",
@@ -45,8 +57,8 @@ async function selfTest() {
       "--moduleResolution", "NodeNext",
       red,
     ]);
-    assert.notEqual(result.status, 0, "tsc must reject the deliberate wrong-type mutation");
-    assert.match(result.stdout + result.stderr, /Type 'number' is not assignable to type 'string'/);
+    assert.notEqual(result.status, 0, "tsc must reject the deliberate unsuppressed tuple-index mutation");
+    assert.match(result.stdout + result.stderr, /Argument of type '1' is not assignable/);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -57,7 +69,7 @@ if (process.argv.length === 2) {
   console.log("SDK TypeScript project check passed");
 } else if (process.argv.length === 3 && process.argv[2] === "--self-test") {
   await selfTest();
-  console.log("SDK TypeScript self-test passed (wrong-type red mutation caught)");
+  console.log("SDK TypeScript self-test passed (deliberate unsuppressed tuple-index red mutation caught)");
 } else {
   throw new Error("usage: node sdk/test/typecheck.mjs [--self-test]");
 }

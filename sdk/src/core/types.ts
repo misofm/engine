@@ -45,9 +45,14 @@ export interface EffectOptions {
 
 export interface EffectDecl<E extends EffectId = EffectId> {
   readonly effectId: E;
-  readonly slotId: string;
+  /**
+   * An omitted factory slot is materialized deterministically by `session().track()`
+   * from its rack and declaration order.  The emitted Session V1 value always has
+   * a non-empty rack-local ID.
+   */
+  readonly slotId?: string;
   readonly parameters: EffectParamValues<E>;
-  readonly options: Required<Pick<EffectOptions, "bypass" | "quality" | "linkMode">>
+  readonly options: Required<Pick<EffectOptions, "bypass" | "quality" | "linkMode" | "channel">>
     & Pick<EffectOptions, "sidechain">;
 }
 
@@ -118,3 +123,20 @@ export interface CommandAck {
 }
 
 export type CatalogEffect = EffectDescriptor;
+
+/** Exact tuple positions; broad arrays intentionally have no statically known positions. */
+export type Indices<T extends readonly unknown[]> = Exclude<Partial<T>["length"], T["length"]>;
+
+/** A typed rack-local effect handle used by control-facing TrackConsole APIs. */
+export interface EffectConsole<D extends EffectDecl = EffectDecl> {
+  readonly declaration: D;
+  readonly slotId: string;
+}
+
+/**
+ * Tuple-indexed effect lookup.  `Indices` deliberately rejects the tuple length,
+ * preventing an off-by-one index from becoming a runtime command target.
+ */
+export interface TrackConsole<E extends readonly EffectDecl[] = readonly EffectDecl[]> {
+  effect<I extends Indices<E> & keyof E>(index: I): EffectConsole<Extract<E[I], EffectDecl>>;
+}
