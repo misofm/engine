@@ -355,6 +355,26 @@ impl RuntimeUnit {
         }
     }
 
+    /// `[blocks rendered collapsed, cohorts that can collapse at all]` for this unit.
+    ///
+    /// A per-block count and a bind-time one, together, because either alone is unreadable: the
+    /// block count says the collapse fired but not out of how many chains, and the cohort count
+    /// says a chain *could* collapse but not that any block did. A single op contributes neither
+    /// -- the per-instance path declines in this milestone.
+    pub(crate) fn collapse_counters(&self) -> [u64; 2] {
+        match self {
+            Self::Op(_) => [0, 0],
+            Self::Bank { chain, .. } => [chain.collapses(), u64::from(chain.can_collapse())],
+        }
+    }
+
+    /// Force this unit's collapse off (or back on). Bind-time; see `BankChain::force_mono_collapse_off`.
+    pub(crate) fn force_mono_collapse_off(&mut self, forced: bool) {
+        if let Self::Bank { chain, .. } = self {
+            chain.force_mono_collapse_off(forced);
+        }
+    }
+
     /// `[bank chains, bound bank slots]` this unit realises (issue #181).
     ///
     /// The two were the same number for every plan before a cohort chain could carry more than
@@ -627,6 +647,52 @@ impl Runtime {
     /// Lanes whose scatter this bind pointed at their consumer's buffer (issue #202 rec 3).
     pub(crate) const fn scatter_redirects(&self) -> u64 {
         self.redirects
+    }
+
+    /// `[blocks rendered collapsed, cohorts that can collapse at all]`, over every unit.
+    pub(crate) fn collapse_counters(&self) -> [u64; 2] {
+        self.units.iter().fold([0, 0], |mut total, unit| {
+            let counters = unit.collapse_counters();
+            for (value, add) in total.iter_mut().zip(counters) {
+                *value = value.saturating_add(add);
+            }
+            total
+        })
+    }
+
+    /// Perform the collapse's structural join and arm every chain it admits.
+    ///
+    /// `eligible` answers, for one track id, whether that track's **structural** witness holds --
+    /// the `SOURCE` term, which lives on the control plane and is keyed by track id. This is the
+    /// only place in the engine where the two halves of the channel-symmetry witness meet: the
+    /// runtime half is per lane and source agnostic, the structural half is per track, and
+    /// `UnitIdentityV1::lane_tracks` is the relation between the two keys.
+    ///
+    /// All lanes or nothing, exactly as `BankChain::all_lanes_symmetric` is: a cohort with one
+    /// two-source lane saves nothing by collapsing the others, because the vector op runs every
+    /// lane regardless. Making a cohort homogeneous is the planner's job (`CohortPoolClassV1`).
+    ///
+    /// A unit whose lane list is empty arms nothing: a chain that names no track is one this join
+    /// cannot speak for.
+    pub(crate) fn arm_mono_collapse(&mut self, eligible: &dyn Fn(&str) -> bool) {
+        for (unit, identity) in self.units.iter_mut().zip(self.identity.iter()) {
+            let RuntimeUnit::Bank { chain, .. } = unit else {
+                continue;
+            };
+            let tracks = &identity.lane_tracks;
+            let armed = !tracks.is_empty()
+                && tracks
+                    .iter()
+                    .all(|track| !track.is_empty() && eligible(track));
+            chain.arm_mono_collapse(armed);
+        }
+    }
+
+    /// Force every chain's collapse off (or back on). Bind-time, off the render thread.
+    pub(crate) fn force_mono_collapse_off(&mut self, forced: bool) {
+        for unit in self.units.iter_mut() {
+            unit.force_mono_collapse_off(forced);
+        }
     }
 
     /// Lanes whose route and master accumulation this bind folded into the chain's epilogue.
@@ -1013,6 +1079,22 @@ impl BankStage for BuiltinStage {
     }
     fn lane_symmetry(&self, lane: usize) -> ChannelSymmetryWitnessV1 {
         self.0.lane_symmetry(lane)
+    }
+    fn seam_side(&self) -> miso_engine_effect_contract::SeamSideV1 {
+        self.0.seam_side()
+    }
+    fn supports_mono_collapse(&self) -> bool {
+        self.0.supports_mono_collapse()
+    }
+    /// The one-plane body. `block.right` is the ungathered scratch and is not passed on: the
+    /// builtin banks take a single plane, so a mis-wired collapse cannot reach a stale plane
+    /// through this adapter at all.
+    fn process_mono(&mut self, block: BankBlock<'_>) -> Result<(), RenderError> {
+        self.0
+            .process_mono(block.left, block.frames, block.first_sample)
+    }
+    fn desymmetrize(&mut self) {
+        self.0.desymmetrize();
     }
 }
 

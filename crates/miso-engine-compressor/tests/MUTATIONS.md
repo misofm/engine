@@ -121,3 +121,17 @@ Host: `x86_64` (AMD Ryzen 7 9700X, Zen 5), workspace `.cargo/config.toml` pin
 |---|---|---|
 | 30 | `segment_is_stageable` returns `false` unconditionally, so every idle segment takes the per-frame body | Applied and run: **GREEN** in `staged_idle`, and necessarily so — that is the whole point of the guard. The staged body is a cost optimisation with no semantics of its own, exactly as the ramping/idle split of row 24 is, and no bit-identity test can distinguish a renderer from itself. What distinguishes the two is the benchmark: `examples/lane_sample_timing` reports 2.61 → 1.93 ns/lane-sample at `W = 8` with the staged body in and out. The mutation that *is* gated is the one that takes the staged body where it is illegal, which is rows 25 and 27 |
 | 32 | row 31's mutation, gated by a test that rejects the **right** channel rather than the left | Applied and run: **GREEN**, and necessarily so. `Channel::clear_state` zeroes the rejected channel's rings as well as its cursor, so when the *right* channel is the one reset every candidate tap row of its detector ring reads `+0.0` and the two cursors cannot be told apart. Only a **left**-only rejection leaves the diverged channel holding real signal, which is why row 31's test injects there. Recorded because the obvious way to write that test is vacuous |
+
+## Mono-collapse M2 — the collapsed kernel and the disengage copy
+
+Driver as above: one mutation at a time, `cargo test -p miso-engine-compressor --test mono_collapse`,
+tree restored between rows.
+
+| # | mutation | file | test | result |
+|---|---|---|---|---|
+| M2-C1 | the collapsed per-frame body computes the level as `main_left.abs()` instead of `link_frame(detector, slot, main_left, main_left, ..)` — the "the link is a no-op on a mono bank" simplification | `compressor/src/kernel.rs` `frames_loop_mono` | `the_collapsed_body_renders_the_dual_bodys_left_plane` | RED — `LinkMode::Average` is `0.5*|p| + 0.5*|p|`, which is not `|p|` for a subnormal `p`. Every *sample* assertion stays green (the detector floor clamps it); the serialised detector ring is where it shows, which is why this test compares state |
+| M2-C2 | the same, in the staged idle body | `compressor/src/kernel.rs` `idle_frames_staged_mono` | the same test | RED |
+| M2-C3..C8 | `Channel::copy_state_from` drops one of `words`, `ramps`, `gain_reduction_db`, `cursor`, `main`, `detector` | `compressor/src/kernel.rs` | `a_desymmetrized_bank_is_a_never_collapsed_bank` | RED, one row each. `words` is the interesting one: it is redundant *given* `ramps` on a continuously automated session and load-bearing on one whose ramp settled while collapsed, which is why that test retargets once and then stops |
+
+`lookahead_ms` and `delay` are on the copy list and are **not** individually red: no rendered block
+writes them. See `copy_state_from`'s doc for why they are copied anyway.

@@ -152,3 +152,24 @@ Row 218-R2 is why the lane order is asserted here and not only end to end: a sca
 into a destination several lanes share associates in the order the epilogue visits them, and the
 graph runtime's `route_fold` proves that order matches a frozen D9 reduction. If the chain quietly
 reordered its own lanes, that proof would be about the wrong sequence.
+
+## Mono-collapse M2 — the collapsed execution
+
+Every row below was applied to the working tree, the named test was run, the failure was observed,
+and the mutation was reverted in the same session. Host: `x86_64`, workspace `.cargo/config.toml`
+pin `-C target-feature=+avx2,+fma`, debug profile. Driver: one mutation at a time, tree restored
+(and `touch`ed, so cargo cannot serve a stale artifact) before the next row.
+
+The collapse renders the bits a dual run renders — that is the whole claim — so **no digest can see
+whether it fired, and no digest can see it firing wrongly on a lane whose two channels differ only
+in state.** Every row here is therefore either an output comparison against an independently
+computed expectation or a counter, and never a comparison of the collapsed path against itself.
+
+| # | mutation | file | test | result |
+|---|---|---|---|---|
+| M2-1 | `BankChain::new` initialises `collapse_source: true`, so a chain nobody performed the structural join for collapses anyway | `rack/src/lib.rs` | `an_unarmed_chain_never_collapses` (and `an_ineligible_armed_chain_renders_the_dual_bits`) | RED — 2 failed. The `SOURCE` term is keyed by track id and a chain sees anonymous lanes; without the join a two-source track's right channel becomes the duplicated left one |
+| M2-2 | the dispatch drops `self.all_lanes_symmetric()` | `rack/src/lib.rs` `run` | `an_ineligible_armed_chain_renders_the_dual_bits` | RED — the ineligible chain's right plane comes back scaled by the *left* gain |
+| M2-3 | the seam-side matrix is folded to `(ll + lr) * l` / `(rl + rr) * l` — the "obvious" saving once `l == r` | `rack/src/lib.rs` (test mock `Matrix`) | `a_collapsed_seam_keeps_the_matrixs_operation_order` | RED — `+0.0` against `-0.0` on every `-0.0` frame, on both the collapsed and the dual arm, which is why the expectation is written out rather than taken from a second chain |
+| M2-4 | the seam duplication is removed (`right[..len].copy_from_slice(&left[..len])` becomes a no-op) | `rack/src/lib.rs` `run` | `a_collapsed_seam_keeps_the_matrixs_operation_order` | RED — the seam-side slot reads the plane the collapsed gather never wrote |
+| M2-5 | the drain is moved back inside `process`, so the dispatch reads the witness *before* this block's records are admitted | `rack/src/lib.rs` `run` | `miso-engine-console-workload` `chain_shape::a_live_one_channel_retarget_disengages_on_the_block_it_lands` | RED — a `ParameterChannel::Left` retarget takes effect on a block that still ran collapsed, so the right channel receives a retarget addressed to the left one |
+| M2-6 | a collapsed slot's observation publish drops `sample.right = sample.left`, so the right-channel tap carries the state word frozen at the engage | `rack/src/lib.rs` `process_inner` | `miso-engine-console-workload` `chain_shape::a_collapsed_cohorts_right_channel_taps_read_what_a_dual_runs_do` | RED — and every digest assertion in that file stays green, which is exactly why the tap values are compared rather than counted |

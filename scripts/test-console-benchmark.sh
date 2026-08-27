@@ -5,7 +5,7 @@
 # mutated in turn and asserted red, so the aggregate's guarantees -- forty-six records, both
 # rounds, one host, one admissibility state, the decomposition rows' pinned strip contents, and
 # the class-A statements that neither the stationary smoother nor a meter nor an armed observation
-# tap nor a restated parameter nor (once it exists) a mono collapse changes a rendered bit -- are
+# tap nor a restated parameter nor the mono collapse changes a rendered bit -- are
 # properties the suite can actually lose.
 set -euo pipefail
 [[ "$#" -le 1 ]] || { printf 'usage: %s\n' "$0" >&2; exit 2; }
@@ -193,7 +193,7 @@ mono=$(jq -cn --arg a "$digest_a" --argjson m "$metadata" '$m + {
   mono_source_tracks: 64, symmetric_lanes: 64, lanes: 129,
   collapse_eligible_output_sha256: $a, collapse_forced_off_output_sha256: $a,
   bit_identity: "collapse_eligible == collapse_forced_off, asserted in-run",
-  arm_difference: "none: both arms are the mono fixture as written; no collapse exists in this tree",
+  arm_difference: "collapse_eligible takes the mono collapse on every cohort; collapse_forced_off renders the same fixture dual",
   render_errors: 0, render_total_forbidden_operations: 0,
   descriptive_only: true,
   statistical_method: "two arms alternated per observation; nearest-rank percentiles over per-block nanoseconds; paired delta is collapse_forced_off minus collapse_eligible per observation; descriptive only; no threshold"
@@ -717,8 +717,8 @@ mono_mutation '.mono_source_tracks = 32' 'a mono pair measured on a half-mono se
 mono_mutation '.symmetric_lanes = 0' 'a mono pair whose prepared lanes are not symmetric'
 mono_mutation '.lanes = 64' 'a lane census that counts only the lanes it calls symmetric'
 # The honesty field. A near-zero delta with this sentence removed reads as a measured saving.
-mono_mutation '.arm_difference = "the collapse is taken on the eligible arm"' \
-    'a mono record claiming a collapse this tree does not have'
+mono_mutation '.arm_difference = "none: both arms are the mono fixture as written; no collapse exists in this tree"' \
+    'a mono record claiming this tree has no collapse'
 mono_mutation '.arm_difference = ""' 'a mono record that dropped its arm-difference statement'
 # Two arms of one session are one plan.
 mono_mutation '.collapse_forced_off_transposes_per_block = 16' \

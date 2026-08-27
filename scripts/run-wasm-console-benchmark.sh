@@ -129,11 +129,12 @@ if [[ "$#" == 1 ]]; then
         --strip3) arm=strip3 ;;
         --strip3-baseline) arm=strip3-baseline ;;
         --strip4) arm=strip4 ;;
-        *) printf 'usage: %s [--after|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue183|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline|--round2-lim|--round2-lim-baseline|--round2-composed|--audit-chain-merge|--audit-chain-merge-baseline|--strip1|--strip1-baseline|--strip2|--strip2-baseline|--strip3|--strip3-baseline|--strip4]
+        --mono2) arm=mono2 ;;
+        *) printf 'usage: %s [--after|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue183|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline|--round2-lim|--round2-lim-baseline|--round2-composed|--audit-chain-merge|--audit-chain-merge-baseline|--strip1|--strip1-baseline|--strip2|--strip2-baseline|--strip3|--strip3-baseline|--strip4|--mono2]
 ' "$0" >&2; exit 2 ;;
     esac
 elif [[ "$#" != 0 ]]; then
-    printf 'usage: %s [--after|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue183|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline|--round2-lim|--round2-lim-baseline|--round2-composed|--audit-chain-merge|--audit-chain-merge-baseline|--strip1|--strip1-baseline|--strip2|--strip2-baseline|--strip3|--strip3-baseline|--strip4]
+    printf 'usage: %s [--after|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue183|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline|--round2-lim|--round2-lim-baseline|--round2-composed|--audit-chain-merge|--audit-chain-merge-baseline|--strip1|--strip1-baseline|--strip2|--strip2-baseline|--strip3|--strip3-baseline|--strip4|--mono2]
 ' "$0" >&2
     exit 2
 fi
@@ -194,6 +195,8 @@ elif [[ "$arm" == strip3-baseline ]]; then
     artifact_dir="$root/artifacts/strip3-baseline"
 elif [[ "$arm" == strip4 ]]; then
     artifact_dir="$root/artifacts/strip4"
+elif [[ "$arm" == mono2 ]]; then
+    artifact_dir="$root/artifacts/mono2"
 else
     artifact_dir="$root/artifacts/issue163-phase2-wasm-baseline"
 fi

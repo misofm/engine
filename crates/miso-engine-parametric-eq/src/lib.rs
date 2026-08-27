@@ -1219,6 +1219,128 @@ fn process_channels<L: Lane, const W: usize>(
     }
 }
 
+/// [`process_channels`] over one plane: the collapsed track's live channel.
+///
+/// The one-channel forms below are the dual bodies with the second channel's argument deleted and
+/// every remaining line left where it was. Two of the dual predicates read both channels and are
+/// therefore restated rather than dropped, and both restatements are *equalities* on a
+/// collapse-eligible bank rather than weakenings:
+///
+/// * `stationary` is `no_ramp_in_flight` on both channels. A collapse-eligible bank's two channels
+///   carry the same `remaining` array -- a `ParameterChannel::Both` retarget writes both, and a
+///   one-channel retarget clears the witness' `LIVE` term -- so the left channel's answer is the
+///   conjunction's;
+/// * `cascade_sections`' `dead` is `identity` on both channels, and the identity flag is derived
+///   from the coefficient words the `DESIGNED` term compares bit for bit. Same array, same answer.
+///
+/// What is **not** restated is the `-0.0` gate on the input planes: it is evaluated on the one
+/// plane the chain gathered, which is the only plane the collapsed cascade reads.
+#[inline(always)]
+fn process_channels_mono<L: Lane, const W: usize>(
+    channel: &mut Channel<L, W>,
+    io: &mut [f32],
+    frames: usize,
+    stationary: bool,
+) {
+    if !stationary {
+        channel.process_block(io, frames);
+        return;
+    }
+    debug_assert!(channel.identity_flags_agree());
+    let sections = cascade_sections_mono::<L, W>(channel, io, frames);
+    match L::SVF_CASCADE_DEPTH {
+        4 => interleave_mono::<L, W, 4>(channel, io, frames, sections),
+        2 => interleave_mono::<L, W, 2>(channel, io, frames, sections),
+        _ => interleave_mono::<L, W, 1>(channel, io, frames, sections),
+    }
+}
+
+/// [`cascade_sections`] over one channel. Every leg is [`cascade_sections`]'s, gated on the one
+/// live channel; the proof it rests on is that function's, unchanged.
+#[inline(always)]
+fn cascade_sections_mono<L: Lane, const W: usize>(
+    channel: &Channel<L, W>,
+    io: &[f32],
+    frames: usize,
+) -> ([usize; EQ_SECTION_COUNT_V1], usize) {
+    let all = (core::array::from_fn(|section| section), EQ_SECTION_COUNT_V1);
+    let dead = |section: usize| channel.identity[section];
+    let depth = L::SVF_CASCADE_DEPTH.clamp(1, EQ_SECTION_COUNT_V1);
+    let live = (0..EQ_SECTION_COUNT_V1)
+        .filter(|section| !dead(*section))
+        .count();
+    let kept = live.div_ceil(depth) * depth;
+    if kept >= EQ_SECTION_COUNT_V1 {
+        return all;
+    }
+    let words = frames * W;
+    if !block_admits_elision(&io[..words]) {
+        return all;
+    }
+    for section in 0..EQ_SECTION_COUNT_V1 {
+        let admissible = if dead(section) {
+            section_state_is_positive_zero(&channel.sections[section])
+        } else {
+            section_state_has_no_negative_zero(&channel.sections[section])
+        };
+        if !admissible {
+            return all;
+        }
+    }
+    let mut padding = kept - live;
+    let mut list = [0_usize; EQ_SECTION_COUNT_V1];
+    let mut length = 0;
+    for section in 0..EQ_SECTION_COUNT_V1 {
+        let keep = if dead(section) {
+            let take = padding > 0;
+            padding -= usize::from(take);
+            take
+        } else {
+            true
+        };
+        if keep {
+            list[length] = section;
+            length += 1;
+        }
+    }
+    debug_assert_eq!(length, kept);
+    (list, length)
+}
+
+/// [`interleave`] over one stream. Same kernel, same list, one channel of it.
+///
+/// This is a second instantiation of [`svf_cascade_interleaved`] -- at `CHANNELS = 1` where the
+/// dual path uses `2` -- and [`cascade_sections`] warns that a second arithmetic-carrying EQ kernel
+/// in the shipped wasm artifact reads to `KERNEL_ROSTER` as a kernel that moved. It was checked
+/// rather than assumed: at mono-collapse M2 the artifact carries one EQ symbol, because both
+/// cascades inline into `process_bank_inner`. The compressor and the limiter did grow a second
+/// symbol each, and the roster names them. If a later change splits this one out, the fix is a
+/// roster row, not a looser pattern.
+#[inline(always)]
+fn interleave_mono<L: Lane, const W: usize, const DEPTH: usize>(
+    channel: &mut Channel<L, W>,
+    io: &mut [f32],
+    frames: usize,
+    sections: ([usize; EQ_SECTION_COUNT_V1], usize),
+) {
+    debug_assert_eq!(EQ_SECTION_COUNT_V1 % DEPTH, 0);
+    let (list, length) = sections;
+    debug_assert_eq!(length % DEPTH, 0);
+    for pass in 0..length / DEPTH {
+        let base = pass * DEPTH;
+        let at: [usize; DEPTH] = core::array::from_fn(|k| list[base + k]);
+        let coefficients: [[SvfCoef<L>; DEPTH]; 1] =
+            [core::array::from_fn(|k| channel.sections[at[k]].coef)];
+        let mut state: [[SvfState<L>; DEPTH]; 1] =
+            [core::array::from_fn(|k| channel.sections[at[k]].state)];
+        svf_cascade_interleaved::<L, 1, DEPTH>([&mut *io], frames, &coefficients, &mut state);
+        let [only] = state;
+        for (k, word) in only.into_iter().enumerate() {
+            channel.sections[at[k]].state = word;
+        }
+    }
+}
+
 /// The cascade positions this stationary block will actually run, in cascade order.
 ///
 /// All four, unless identity-section elision is admissible — in which case the sections that are
@@ -1774,6 +1896,73 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
         failures
     }
 
+    /// [`render`](Self::render) over one plane: the collapsed track's live channel.
+    ///
+    /// `stationary` and `quiet` read the left channel alone, which on a collapse-eligible bank is
+    /// the same predicate the dual body evaluates -- see [`process_channels_mono`] for why the
+    /// two channels' `remaining` arrays and identity flags agree. `failures[1]` is copied from
+    /// `failures[0]`, because the right plane the seam is about to write is this left plane and a
+    /// dual run would have rejected it on the same words.
+    fn render_mono(&mut self, left: &mut [f32], frames: usize) -> [[bool; MAX_LANES]; 2] {
+        let mut failures = [[false; MAX_LANES]; 2];
+        let words = frames * W;
+        let stationary = self.left.no_ramp_in_flight();
+        let quiet = stationary && block_is_positive_zero(&left[..words]);
+        if quiet && self.silent_fixed_point {
+            return failures;
+        }
+        let mut before_left = [0_u32; EQ_SECTION_COUNT_V1 * 2 * MAX_LANES];
+        if quiet {
+            self.left.state_bits(&mut before_left);
+        }
+        process_channels_mono(&mut self.left, left, frames, stationary);
+        if !check_block::<L>(left) {
+            let mask = nonfinite_lane_mask::<L>(left);
+            left.fill(0.0);
+            self.left.reset_states();
+            for (lane, failed) in failures[0].iter_mut().enumerate().take(W) {
+                *failed = mask & (1 << lane) != 0;
+            }
+            failures[1] = failures[0];
+        }
+        self.silent_fixed_point = quiet && {
+            let mut after_left = [0_u32; EQ_SECTION_COUNT_V1 * 2 * MAX_LANES];
+            self.left.state_bits(&mut after_left);
+            after_left == before_left && block_is_positive_zero(&left[..words])
+        };
+        failures
+    }
+
+    /// Copies the left channel's whole per-channel state onto the right (the disengage boundary).
+    ///
+    /// # The copy list, term by term
+    ///
+    /// | word | why it is here |
+    /// |---|---|
+    /// | `sections[s].state` | the two integrators per section -- the cascade's whole cross-frame state. |
+    /// | `sections[s].coef` | the words the kernel loads. A ramp rewrites them per segment through `advance_words`, and a collapsed block advances only the left channel's. |
+    /// | `sections[s].step`, `sections[s].target` | the rest of the ramp: where the words are going and by how much per sample. |
+    /// | `remaining[s][lane]` | the per-lane ramp countdown, which is what `no_ramp_in_flight` and the block-splitting rule read. |
+    /// | `identity[s]` | the derived per-section identity flag the elision gate reads. It is a function of `coef`, so it must travel with it. |
+    ///
+    /// `targets` is deliberately **not** copied: it is the control-plane band table, no rendered
+    /// block writes it, and the counterfactual dual run never moved it either.
+    /// # Which entries are individually gated, and which are here by the rule
+    ///
+    /// `crates/miso-engine-parametric-eq/tests/mono_collapse.rs` fails if `sections` is dropped.
+    /// `remaining` and `identity` are **not** individually gated, and the reason is specific: both
+    /// are read only to choose a *schedule* -- `no_ramp_in_flight` selects the interleaved cascade
+    /// over the per-section one, and `identity` selects the elided cascade over the full one --
+    /// and this crate's own gates prove all three schedules render the same bits. So a stale copy
+    /// of either leaves the two channels taking different schedules to the same words. They are
+    /// copied because "the two channels are in the same state" is the invariant, not "the two
+    /// channels happen to agree on their output".
+    fn desymmetrize(&mut self) {
+        self.right.sections = self.left.sections;
+        self.right.remaining = self.left.remaining;
+        self.right.identity = self.left.identity;
+    }
+
     /// Restores every band of both channels to the parameters preparation was given.
     fn reset_to_defaults(&mut self) -> Result<(), EqDesignError> {
         let sample_rate = self.sample_rate();
@@ -2188,7 +2377,61 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedParametricEq<
         }
     }
 
+    fn supports_mono_collapse(&self) -> bool {
+        true
+    }
+
+    fn process_bank_mono(&mut self, block: EffectBankProcessBlock<'_>) -> BankProcessReport {
+        self.process_bank_inner::<true>(block)
+    }
+
+    fn desymmetrize_channels(&mut self) {
+        self.desymmetrize();
+    }
+
     fn process_bank(&mut self, block: EffectBankProcessBlock<'_>) -> BankProcessReport {
+        self.process_bank_inner::<false>(block)
+    }
+
+    fn snapshot_track_state_payload(
+        &self,
+        track_index: u32,
+        output: StatePayloadOutput<'_>,
+    ) -> Result<(), StatePayloadError> {
+        self.snapshot_track(bank_track_index(track_index, W)?, output)
+    }
+
+    fn restore_track_state_payload(
+        &mut self,
+        track_index: u32,
+        version: u32,
+        input: StatePayloadInput<'_>,
+    ) -> Result<(), StatePayloadError> {
+        // #163 phase 4 item 1: a restore writes integrators and coefficients this bank never
+        // rendered, so any standing fixed-point claim is void.
+        self.silent_fixed_point = false;
+        self.restore_track(bank_track_index(track_index, W)?, version, input)
+    }
+}
+
+impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
+    /// The one bank body, dual or collapsed: the shape guard, the automation drain, the bypass
+    /// short circuit and the report are the same statements in the same order, and `MONO` chooses
+    /// the render body and nothing else.
+    ///
+    /// # Why `MONO` is a const generic and not an argument
+    ///
+    /// It was an argument, and the measurement said no. One body carrying both cascades is one
+    /// function for the inliner to weigh, and the shipped dual path got slower: the
+    /// `sixty_four_track_eq_only` row moved 28% against its sealed number on a session that never
+    /// collapses. A const generic monomorphises the two, so the dual instantiation is the code that
+    /// shipped before the collapse existed and the collapsed one is its own function. "Adding a
+    /// path must not move the path already there" is the same rule `ConsoleEffectBankStage` exists
+    /// for, applied inside a kernel.
+    fn process_bank_inner<const MONO: bool>(
+        &mut self,
+        block: EffectBankProcessBlock<'_>,
+    ) -> BankProcessReport {
         let mut report = BankProcessReport::empty(self.bank.width);
         if !bank_block_matches(&block, self.bank.width, self.metadata.quantum)
             || self.bank.width.lanes() as usize != W
@@ -2216,32 +2459,16 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedParametricEq<
             return report;
         }
         let frames = block.frames as usize;
-        let failures = self.render(block.left, block.right, frames);
+        let failures = if MONO {
+            self.render_mono(block.left, frames)
+        } else {
+            self.render(block.left, block.right, frames)
+        };
         for (track, entry) in report.reports.iter_mut().enumerate().take(W) {
             entry.nonfinite_left_blocks = u64::from(failures[0][track]);
             entry.nonfinite_right_blocks = u64::from(failures[1][track]);
         }
         report
-    }
-
-    fn snapshot_track_state_payload(
-        &self,
-        track_index: u32,
-        output: StatePayloadOutput<'_>,
-    ) -> Result<(), StatePayloadError> {
-        self.snapshot_track(bank_track_index(track_index, W)?, output)
-    }
-
-    fn restore_track_state_payload(
-        &mut self,
-        track_index: u32,
-        version: u32,
-        input: StatePayloadInput<'_>,
-    ) -> Result<(), StatePayloadError> {
-        // #163 phase 4 item 1: a restore writes integrators and coefficients this bank never
-        // rendered, so any standing fixed-point claim is void.
-        self.silent_fixed_point = false;
-        self.restore_track(bank_track_index(track_index, W)?, version, input)
     }
 }
 

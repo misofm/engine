@@ -238,12 +238,25 @@ fi
 #   * a kernel does the same work with fewer operations, and the total falls.
 #
 # The property actually wanted is per kernel and scale free: *this kernel still does its arithmetic
-# in the vector family*. The analyser now asserts exactly that, over a roster of the eight named
+# in the vector family*. The analyser now asserts exactly that, over a roster of the named
 # `process_bank`/`process_section`/`process_block` bodies the old comment enumerated. Each roster
 # kernel must match exactly one arithmetic-carrying function, and its scalar `f32.{mul,add,sub,div}`
 # count must stay inside `max(ceiling * vector, 8)`. The ceilings, their derivation from the counts
 # measured on this artifact, and why four times the measured ratio is the right multiple are
 # documented in `KERNEL_ROSTER` in `check-web-audioworklet-callgraph.py`.
+#
+# The roster is eleven rows since mono-collapse M2, not eight: the compressor, the true-peak
+# limiter and the parametric EQ each ship a **second** block body, the one-plane variant a collapsed
+# bank chain runs. All three survive monomorphisation as their own symbols, so the eight-row roster
+# failed with "two matches" on those patterns -- the rule noticing that the artifact grew a kernel,
+# which is what it is for. Naming the new bodies rather than loosening the patterns is what keeps
+# the collapsed kernels held to the same shape rule as the dual ones, and that matters here more
+# than anywhere: a one-plane body that de-vectorised would make the browser slower while still
+# rendering exactly the right bits, and not one digest gate in this tree could see it.
+#
+# The *separation* of the two bodies is a requirement and not an accident, and it was measured: M2
+# first wrote them as one function behind a `bool`, and the shipped dual path got slower on a
+# console row that never collapses. `KERNEL_ROSTER`'s derivation note carries the numbers.
 #
 # Why the reshape is strictly stronger where it matters, and weaker only where it should be:
 #
@@ -256,23 +269,29 @@ fi
 #   * **Weaker.** It no longer asserts any absolute instruction count. That is the point: phases 1
 #     to 4 of #163 exist to lower those counts.
 #
-# Re-measured on the shipped artifact at f08d28f, for the record (vector / scalar). These are the
-# derivation's *input* and are deliberately not asserted:
+# Re-measured on the shipped artifact at mono-collapse M2, for the record (vector / scalar). These
+# are the derivation's *input* and are deliberately not asserted:
 #
-#   multiband f32x8        2224/20     multiband f32x4         1112/20
-#   transient-shaper f32x4  762/72     gate-expander f32x4      172/8
-#   compressor f32x4        162/0      true-peak-limiter f32x4  124/0
-#   parametric-eq f32x4      32/0      soft-clip f32x4           25/0
+#   multiband f32x8         2560/20    multiband f32x4          1280/20
+#   transient-shaper f32x4   786/72    gate-expander f32x4       180/8
+#   true-peak-limiter dual   448/0     true-peak-limiter mono    224/0
+#   compressor dual          267/0     compressor mono           138/0
+#   parametric-eq dual       168/0     parametric-eq mono         84/0
+#   soft-clip f32x4           25/0
 #
-# The `--kernel-min 8` half of the ratchet, which is the part that actually counts kernels, is
-# unchanged and still exact.
+# Each collapsed body sits at about half its dual sibling's vector count with zero scalar
+# arithmetic, which is what a correct one-plane variant looks like from here.
+#
+# The `--kernel-min` half of the ratchet -- the part that actually counts kernels -- rises from 8
+# to 11, by the three this wave added. It never drops. The artifact carries thirteen, so the floor
+# keeps exactly the two-kernel slack it had before.
 callgraph="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/check-web-audioworklet-callgraph.py"
 printf '%s
 ' "$simd_disassembly" |
   python3 -B "$callgraph" --callgraph miso_engine_web_v1_render || exit 1
 printf '%s
 ' "$simd_disassembly" |
-  python3 -B "$callgraph" --kernel-shape --kernel-pattern '4wide6f32x[48]' --kernel-min 8 ||
+  python3 -B "$callgraph" --kernel-shape --kernel-pattern '4wide6f32x[48]' --kernel-min 11 ||
   exit 1
 
 # #137 D1/D2: the two exports `process()` calls beside the render export get the same allocation

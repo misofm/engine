@@ -291,3 +291,29 @@ weaker reason: both resets land on `clear_runtime`, which *is* the rest state th
 so a claim that survived a reset would happen to be true. It is withdrawn because the claim is a
 statement about a block that was rendered and observed, and it must not come to depend on
 `clear_runtime` and `is_at_silent_rest` continuing to coincide.
+
+## Mono-collapse M2 — the collapsed kernel and the disengage copy
+
+Driver: one mutation at a time, `cargo test -p miso-engine-true-peak-limiter --test mono_collapse`,
+tree restored between rows.
+
+| # | mutation | file | test | result |
+|---|---|---|---|---|
+| M2-L1..L8 | `ChannelState::copy_state_from` drops one of `history`, `main_ring`, `required_ring`, `box_ring`, `reduction`, `box_sum`, `limit`, `release` | `true-peak-limiter/src/lib.rs` | `a_desymmetrized_bank_is_a_never_collapsed_bank` | RED, one row each |
+
+Three properties of the test corpus are what make those eight rows red, and each was arrived at by
+watching a row stay green first:
+
+* the ceiling is retargeted **below the signal**, so `required_ring` is not uniformly `1.0` and the
+  twelve oversampling history taps actually decide an output sample. Against a corpus under the
+  ceiling, `history` is green;
+* the content carries a per-block **envelope**. A steady loud signal drives the release recursion to
+  a fixed point within a few blocks, and a frozen recursive word that has converged to the same
+  value as a live one is a state difference no output can show. Against steady content, `reduction`
+  is green;
+* the release retarget is **away from the descriptor default**. Against the default value the span
+  is a no-op and `release` is green.
+
+`prefix`, `phase`, `lookahead_ms` and `lane` are on the copy list and are not individually red:
+the first two are re-derived at the next van Herk block boundary, and the last two move only at
+prepare, restore and a full reset, none of which is reachable on a bound bank.

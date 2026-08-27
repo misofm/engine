@@ -19,7 +19,7 @@ use miso_engine_core::{
 };
 use miso_engine_effect_contract::{
     ChannelSymmetryWitnessV1, EffectControlLane, LatencySamples, ObservationLaneV1,
-    PreparedEffectMetadata, PreparedNativeEffect, TailSamples,
+    PreparedEffectMetadata, PreparedNativeEffect, SeamSideV1, TailSamples,
 };
 use miso_engine_lane::Backend;
 use miso_engine_rack::AoSoaScratch;
@@ -551,6 +551,38 @@ pub trait GraphPreparedBuiltinBankProcessor: Send {
         let _ = lane;
         ChannelSymmetryWitnessV1::DECLINED
     }
+
+    /// Which side of the fader/matrix seam this builtin bank sits on.
+    ///
+    /// The default is [`SeamSideV1::UpstreamOfSeam`] for the reason
+    /// `miso_engine_rack::BankStage::seam_side` gives: it is the conservative answer, because an
+    /// upstream stage that has not written a one-plane body declines the whole chain.
+    fn seam_side(&self) -> SeamSideV1 {
+        SeamSideV1::UpstreamOfSeam
+    }
+
+    /// Whether this bank implements [`process_mono`](Self::process_mono) and
+    /// [`desymmetrize`](Self::desymmetrize).
+    fn supports_mono_collapse(&self) -> bool {
+        false
+    }
+
+    /// Render one block with the cohort's two channels collapsed onto `left`.
+    ///
+    /// There is no right plane here on purpose: a collapsed chain gathers one, and the seam writes
+    /// the other after this stage has run.
+    fn process_mono(
+        &mut self,
+        left: &mut [f32],
+        frames: u32,
+        first_sample: u64,
+    ) -> Result<(), RenderError> {
+        let _ = (left, frames, first_sample);
+        Err(RenderError::InvalidEnvelope)
+    }
+
+    /// Copy every lane's left-channel state onto the right channel (the disengage boundary).
+    fn desymmetrize(&mut self) {}
 }
 impl PreparedGraphPlan {
     fn has_valid_structural_layout(&self) -> bool {
@@ -1348,6 +1380,18 @@ impl PreparedPlanExecutor for GraphExecutor {
 
     fn bank_route_folds(&self) -> u64 {
         self.runtime.route_folds()
+    }
+
+    fn bank_collapse_counters(&self) -> [u64; 2] {
+        self.runtime.collapse_counters()
+    }
+
+    fn force_mono_collapse_off(&mut self, forced: bool) {
+        self.runtime.force_mono_collapse_off(forced);
+    }
+
+    fn arm_mono_collapse(&mut self, eligible: &dyn Fn(&str) -> bool) {
+        self.runtime.arm_mono_collapse(eligible);
     }
 
     fn bank_shape(&self) -> [u64; 2] {

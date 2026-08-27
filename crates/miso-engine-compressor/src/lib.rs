@@ -601,6 +601,70 @@ impl<L: Lane> Instance<L> {
         }
     }
 
+    /// Renders one block of the **collapsed** track: the left plane only.
+    ///
+    /// Every leg reads the left channel, which is the dual body's predicate with the right
+    /// channel's conjunct deleted -- and it is the same predicate, not a weaker one: a collapsed
+    /// bank's two channels hold the same ramps, the same rings and the same recursive word by the
+    /// induction the witness states, so `right.max_remaining() == 0` and
+    /// `block_is_positive_zero(right)` are the left conjuncts restated. Reading them off a right
+    /// plane the chain did not gather is what would be wrong.
+    ///
+    /// `record` is called with the **same** verdict for both channels, because the right plane the
+    /// seam is about to write is this left plane.
+    fn render_mono(
+        &mut self,
+        left: &mut [f32],
+        detector: Detector<'_>,
+        frames: usize,
+        mut record: impl FnMut(usize, bool, bool),
+    ) {
+        let words = frames * L::WIDTH;
+        let quiet = self.left.max_remaining() == 0
+            && matches!(detector, Detector::Main | Detector::Silent)
+            && self.silent_bypass == self.metadata.bypass
+            && block_is_positive_zero(&left[..words]);
+        if quiet && self.silent_fixed_point {
+            self.left.advance_cursor(frames as u32);
+            return;
+        }
+        let before = quiet.then(|| self.left.recursive_bits());
+        kernel::process_block_mono::<L>(
+            left,
+            detector,
+            frames,
+            self.metadata.link_mode,
+            self.metadata.bypass,
+            self.metadata.sample_rate,
+            &mut self.left,
+            &mut self.staged,
+        );
+        self.silent_fixed_point = match before {
+            Some(left_before) => {
+                left_before == self.left.recursive_bits()
+                    && self.left.rings_are_positive_zero()
+                    && block_is_positive_zero(&left[..words])
+            }
+            None => false,
+        };
+        self.silent_bypass = self.metadata.bypass;
+        let left_mask = kernel::finish_channel::<L>(left, &mut self.left);
+        if left_mask == 0 {
+            return;
+        }
+        for lane in 0..L::WIDTH {
+            let bit = 1 << lane;
+            record(lane, left_mask & bit != 0, left_mask & bit != 0);
+        }
+    }
+
+    /// Copies the left channel's whole state onto the right (the collapse's disengage boundary).
+    ///
+    /// See `kernel::Channel::copy_state_from` for the word-by-word list and why each is on it.
+    fn desymmetrize(&mut self) {
+        self.right.copy_state_from(&self.left);
+    }
+
     /// Writes one lane's payload.
     fn snapshot(
         &self,
@@ -924,7 +988,57 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedCompressorBank<L> {
         self.instance.reset(kind);
     }
 
+    fn supports_mono_collapse(&self) -> bool {
+        true
+    }
+
+    fn process_bank_mono(&mut self, block: EffectBankProcessBlock<'_>) -> BankProcessReport {
+        self.process_bank_inner::<true>(block)
+    }
+
+    fn desymmetrize_channels(&mut self) {
+        self.instance.desymmetrize();
+    }
+
     fn process_bank(&mut self, block: EffectBankProcessBlock<'_>) -> BankProcessReport {
+        self.process_bank_inner::<false>(block)
+    }
+
+    fn snapshot_track_state_payload(
+        &self,
+        track_index: u32,
+        output: StatePayloadOutput<'_>,
+    ) -> Result<(), StatePayloadError> {
+        let track = checked_track(track_index, L::WIDTH)?;
+        self.instance.snapshot(output, track)
+    }
+
+    fn restore_track_state_payload(
+        &mut self,
+        track_index: u32,
+        state_layout_version: u32,
+        input: StatePayloadInput<'_>,
+    ) -> Result<(), StatePayloadError> {
+        let track = checked_track(track_index, L::WIDTH)?;
+        self.instance.restore(state_layout_version, input, track)
+    }
+}
+
+impl<L: Lane> PreparedCompressorBank<L> {
+    /// The one bank body, dual or collapsed.
+    ///
+    /// `MONO` chooses which render body the block takes and nothing else: the shape guard, the
+    /// automation drain and the report are the same statements in the same order, because a
+    /// collapsed block's automation is the dual block's automation and its per-lane accounting is
+    /// the dual block's accounting with the right column duplicated from the left.
+    ///
+    /// A const generic rather than an argument, so the two monomorphise and the dual instantiation
+    /// is the code that shipped before the collapse existed. See the parametric EQ's copy of this
+    /// method for the measurement that settled it.
+    fn process_bank_inner<const MONO: bool>(
+        &mut self,
+        block: EffectBankProcessBlock<'_>,
+    ) -> BankProcessReport {
         let mut report = BankProcessReport::empty(self.metadata.width);
         let lanes = L::WIDTH;
         let frames = block.frames as usize;
@@ -980,12 +1094,9 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedCompressorBank<L> {
                 &mut report.reports[track],
             );
         }
-        self.instance.render(
-            block.left,
-            block.right,
-            Detector::Main,
-            frames,
-            |lane, left_failed, right_failed| {
+        {
+            let report = &mut report;
+            let record = move |lane: usize, left_failed: bool, right_failed: bool| {
                 if left_failed {
                     report.reports[lane].nonfinite_left_blocks =
                         report.reports[lane].nonfinite_left_blocks.saturating_add(1);
@@ -995,28 +1106,16 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedCompressorBank<L> {
                         .nonfinite_right_blocks
                         .saturating_add(1);
                 }
-            },
-        );
+            };
+            if MONO {
+                self.instance
+                    .render_mono(block.left, Detector::Main, frames, record);
+            } else {
+                self.instance
+                    .render(block.left, block.right, Detector::Main, frames, record);
+            }
+        }
         report
-    }
-
-    fn snapshot_track_state_payload(
-        &self,
-        track_index: u32,
-        output: StatePayloadOutput<'_>,
-    ) -> Result<(), StatePayloadError> {
-        let track = checked_track(track_index, L::WIDTH)?;
-        self.instance.snapshot(output, track)
-    }
-
-    fn restore_track_state_payload(
-        &mut self,
-        track_index: u32,
-        state_layout_version: u32,
-        input: StatePayloadInput<'_>,
-    ) -> Result<(), StatePayloadError> {
-        let track = checked_track(track_index, L::WIDTH)?;
-        self.instance.restore(state_layout_version, input, track)
     }
 }
 

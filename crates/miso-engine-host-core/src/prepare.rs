@@ -5,11 +5,12 @@
 //! else was identical, down to the order of the checks.
 
 use core::num::{NonZeroU32, NonZeroUsize};
+use std::collections::BTreeSet;
 
 use miso_engine_builtins::{MeterConfig, MeterHandle, MeterTap};
 use miso_engine_builtins_compiler::{
     BuiltinCompileCaps, MeterConsumer, MeterRequest, TrackControlProducer, TrackControlRequest,
-    prepare_session_builtins_with_console,
+    prepare_session_builtins_with_console, session_structural_symmetry_v1,
 };
 use miso_engine_core::{SampleRateHz, realtime::PreparedRenderPlan};
 use miso_engine_effect_compiler::{
@@ -856,9 +857,28 @@ pub fn prepare_host_runtime_with_console(
         largest_engine_allocation_bytes,
     };
 
+    // The mono collapse's structural join (mono-collapse M2). This is the one place a host has
+    // both halves of the channel-symmetry witness in hand: `session_structural_symmetry_v1`
+    // answers per **track id** from the compiled session, and the built plan's bank chains are
+    // keyed by anonymous **lanes**. The plan's own rows carry the relation, so the join is a call
+    // and not a re-derivation.
+    //
+    // It is the *arming*, not a tuning knob. `BankChain::collapse_source` defaults to declining,
+    // so a plan nobody joins never collapses at all -- which is what makes forgetting this call a
+    // missed optimisation rather than wrong audio, and it is why the default is that way round.
+    // On a session whose tracks read two source channels, which is every stereo session there is,
+    // this arms nothing.
+    let mut plan = bound.plan;
+    let mono_source: BTreeSet<Box<str>> = session_structural_symmetry_v1(compiled)
+        .into_iter()
+        .filter(|(_, witness)| witness.eligible())
+        .map(|(track, _)| track)
+        .collect();
+    plan.arm_mono_collapse(&|track: &str| mono_source.contains(track));
+
     Ok((
         PreparedHost {
-            plan: bound.plan,
+            plan,
             sources,
             report,
         },

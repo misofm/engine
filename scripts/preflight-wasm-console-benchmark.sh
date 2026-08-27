@@ -16,7 +16,7 @@
 # `--strip1` and `--strip1-baseline` are the wasm half of the strip round's job 1, the
 # prepared-identity builtin-section elision; see the runner's header.
 set -euo pipefail
-[[ "$#" -le 1 ]] || { printf 'usage: %s [--after|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue183|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline|--round2-lim|--round2-lim-baseline|--round2-composed|--audit-chain-merge|--audit-chain-merge-baseline|--strip1|--strip1-baseline|--strip2|--strip2-baseline|--strip3|--strip3-baseline|--strip4]
+[[ "$#" -le 1 ]] || { printf 'usage: %s [--after|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue183|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline|--round2-lim|--round2-lim-baseline|--round2-composed|--audit-chain-merge|--audit-chain-merge-baseline|--strip1|--strip1-baseline|--strip2|--strip2-baseline|--strip3|--strip3-baseline|--strip4|--mono2]
 ' "$0" >&2; exit 2; }
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$root"
@@ -77,8 +77,9 @@ case "${1:-}" in
     --strip3) arm=strip3; shift ;;
     --strip3-baseline) arm=strip3-baseline; shift ;;
     --strip4) arm=strip4; shift ;;
+    --mono2) arm=mono2; shift ;;
 esac
-[[ "$#" == 0 ]] || fail "usage: $0 [--after|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue183|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline|--round2-lim|--round2-lim-baseline|--round2-composed|--audit-chain-merge|--audit-chain-merge-baseline|--strip1|--strip1-baseline|--strip2|--strip2-baseline|--strip3|--strip3-baseline|--strip4]"
+[[ "$#" == 0 ]] || fail "usage: $0 [--after|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue183|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline|--round2-lim|--round2-lim-baseline|--round2-composed|--audit-chain-merge|--audit-chain-merge-baseline|--strip1|--strip1-baseline|--strip2|--strip2-baseline|--strip3|--strip3-baseline|--strip4|--mono2]"
 
 if [[ "$arm" == after ]]; then
     artifact_dir="$root/artifacts/issue163-phase2"
@@ -132,6 +133,8 @@ elif [[ "$arm" == strip3-baseline ]]; then
     artifact_dir="$root/artifacts/strip3-baseline"
 elif [[ "$arm" == strip4 ]]; then
     artifact_dir="$root/artifacts/strip4"
+elif [[ "$arm" == mono2 ]]; then
+    artifact_dir="$root/artifacts/mono2"
 else
     artifact_dir="$root/artifacts/issue163-phase2-wasm-baseline"
 fi

@@ -117,18 +117,21 @@ SCALAR_SLACK = 8
 # arithmetic-carrying kernel in the artifact; two matches or none is a failure, because a roster
 # that silently stopped naming a kernel is a gate that silently stopped checking one.
 #
-# ## Derivation of the ceilings (issue #163 phase 0e, re-measured on the shipped artifact)
+# ## Derivation of the ceilings (issue #163 phase 0e; re-derived at mono-collapse M2)
 #
-# Measured with this analyser on `miso-engine-v2-audio-worklet.simd128.wasm` built at `f08d28f`
+# Measured with this analyser on `miso-engine-v2-audio-worklet.simd128.wasm` built from this tree
 # (vector = `f32x4.{mul,add,sub,div}`, scalar = `f32.{mul,add,sub,div}`):
 #
-#   multiband-compressor f32x8   2224 / 20   ratio 0.0090
-#   multiband-compressor f32x4   1112 / 20   ratio 0.0180
-#   transient-shaper     f32x4    762 / 72   ratio 0.0945
-#   gate-expander        f32x4    172 /  8   ratio 0.0465
-#   compressor           f32x4    162 /  0   ratio 0
-#   true-peak-limiter    f32x4    124 /  0   ratio 0
-#   parametric-eq        f32x4     32 /  0   ratio 0
+#   multiband-compressor f32x8   2560 / 20   ratio 0.0078
+#   multiband-compressor f32x4   1280 / 20   ratio 0.0156
+#   transient-shaper     f32x4    786 / 72   ratio 0.0916
+#   true-peak-limiter    f32x4    448 /  0   ratio 0        (dual)
+#   compressor           f32x4    267 /  0   ratio 0        (dual)
+#   true-peak-limiter    f32x4    224 /  0   ratio 0        (collapsed)
+#   gate-expander        f32x4    180 /  8   ratio 0.0444
+#   parametric-eq        f32x4    168 /  0   ratio 0        (dual)
+#   compressor           f32x4    138 /  0   ratio 0        (collapsed)
+#   parametric-eq        f32x4     84 /  0   ratio 0        (collapsed)
 #   soft-clip            f32x4     25 /  0   ratio 0
 #
 # Each ceiling is **four times the measured ratio, floored at 0.10**. Four times, because that is
@@ -136,20 +139,72 @@ SCALAR_SLACK = 8
 # one `f32x4` operation to scalar at width four costs one vector operation and buys four scalar
 # ones, so even a single scalarised inner statement moves the ratio by far more than 4x its
 # starting value in every kernel here. Floored at 0.10, because a ratio of zero admits no budget
-# at all and the four zero-scalar kernels would then fail on a stray coefficient move.
+# at all and the zero-scalar kernels would then fail on a stray coefficient move.
 #
 # The counts above are deliberately **not** asserted. They are the derivation's input, not the
 # gate: a kernel is free to halve them, and the previous `--simd-floor 3450` total is exactly the
 # assertion this note replaces. What is asserted is that no kernel's arithmetic migrates out of
 # the vector family.
+#
+# ## What mono-collapse M2 did to this roster, and why the answer is three more rows
+#
+# The collapse gave the compressor, the true-peak limiter and the parametric EQ a **second** block
+# body each: a one-plane variant a bank chain runs when every lane of its cohort is
+# collapse-eligible. All three survive monomorphisation as their own symbols, so
+# `miso_engine_compressor.*4wide6f32x4` went from one match to two and the roster failed exactly as
+# it is designed to -- "two matches is a failure" is not a nuisance here, it is the rule noticing
+# that the artifact grew a kernel.
+#
+# The fix is to name the new kernels, not to loosen the patterns. Each row below pins a specific
+# body: the v0 mangling carries a length prefix (`12process_bank` against `17process_bank_mono`,
+# `13process_block` against `18process_block_mono`), so a dual and a collapsed pattern cannot drift
+# onto each other. The collapsed bodies are held to the same shape rule as the dual ones, which is
+# the point: a one-plane body that de-vectorised would be a collapse that made the browser *slower*
+# while still rendering the right bits, and no digest gate in the tree could see it.
+#
+# **The separation is itself a requirement, and it was measured.** M2 first wrote the two bodies as
+# one function behind a `mono: bool`, and the shipped *dual* path got slower -- the
+# `sixty_four_track_eq_only` console row, which never collapses, moved 28% against its sealed
+# number. The bodies are now split by a const generic, and this table is where that shows: the EQ
+# reads 168 + 84 where the merged form read one symbol at 252. Two matches per effect is therefore
+# the healthy state, and a future change that merges them back would show up here as a row that
+# vanished, not as a row that grew.
+#
+# Each collapsed body carries about **half** its dual sibling's vector arithmetic (138 against 267,
+# 224 against 448, 84 against 168) and zero scalar arithmetic, which is what a correct one-plane
+# variant looks like from here.
 KERNEL_ROSTER: tuple[tuple[str, str, float], ...] = (
     ("multiband-compressor f32x8", r"miso_engine_multiband_compressor.*4wide6f32x8", 0.10),
     ("multiband-compressor f32x4", r"miso_engine_multiband_compressor.*4wide6f32x4", 0.10),
     ("transient-shaper f32x4", r"miso_engine_transient_shaper.*4wide6f32x4", 0.38),
     ("gate-expander f32x4", r"miso_engine_gate_expander.*4wide6f32x4", 0.19),
-    ("compressor f32x4", r"miso_engine_compressor.*4wide6f32x4", 0.10),
-    ("true-peak-limiter f32x4", r"miso_engine_true_peak_limiter.*4wide6f32x4", 0.10),
-    ("parametric-eq f32x4", r"miso_engine_parametric_eq.*4wide6f32x4", 0.10),
+    ("compressor f32x4 dual", r"miso_engine_compressor6kernel13process_block.*4wide6f32x4", 0.10),
+    (
+        "compressor f32x4 collapsed",
+        r"miso_engine_compressor6kernel18process_block_mono.*4wide6f32x4",
+        0.10,
+    ),
+    (
+        "true-peak-limiter f32x4 dual",
+        r"miso_engine_true_peak_limiter.*11LimiterCore.*4wide6f32x4.*13process_block",
+        0.10,
+    ),
+    (
+        "true-peak-limiter f32x4 collapsed",
+        r"miso_engine_true_peak_limiter.*27PreparedTruePeakLimiterBank.*4wide6f32x4"
+        r".*17process_bank_mono",
+        0.10,
+    ),
+    (
+        "parametric-eq f32x4 dual",
+        r"miso_engine_parametric_eq.*4wide6f32x4.*12process_bank",
+        0.10,
+    ),
+    (
+        "parametric-eq f32x4 collapsed",
+        r"miso_engine_parametric_eq.*4wide6f32x4.*17process_bank_mono",
+        0.10,
+    ),
     ("soft-clip f32x4", r"miso_engine_soft_clip.*4wide6f32x4", 0.10),
 )
 

@@ -555,14 +555,15 @@ def automation_record_valid:
   .bit_identity == "quiet == restated, asserted in-run" and
   .render_errors == 0 and .render_total_forbidden_operations == 0;
 
-# The mono row-pair: the gate the mono collapse will be measured and constrained by.
+# The mono row-pair: the gate the mono collapse is measured and constrained by.
 #
-# Three claims are pinned here, and the third is the one that keeps the record honest *today*.
+# Three claims are pinned here, and the first is now load-bearing rather than trivial.
 #
 # The first is the class-A statement: a collapse-eligible session and the same session with the
-# collapse forced off must render the same bits. It is trivially true in this tree and it is
-# written now on purpose -- a gate authored by the same change it is supposed to check is not a
-# gate.
+# collapse forced off must render the same bits. It was written one milestone before the mechanism
+# it checks -- a gate authored by the same change it is supposed to check is not a gate -- and
+# since mono-collapse M2 the eligible arm takes the collapse on all eight cohorts and the forced-off
+# arm renders the same fixture dual, so the equality is a statement about the whole mechanism.
 #
 # The second is the premise that statement is *about*. `mono_source_tracks` is the count of tracks
 # whose structural (`SOURCE`) witness holds, and `symmetric_lanes`/`lanes` is the prepared plan's
@@ -570,9 +571,11 @@ def automation_record_valid:
 # on a session with no mono-source track would be the standing console measured twice under
 # another name -- and it would pass the digest equality perfectly.
 #
-# The third is `arm_difference`, pinned verbatim. A reader who found a two-arm paired record with a
-# near-zero delta and no such field would reasonably read it as "the collapse saves nothing"; what
-# it says is that there is no collapse yet. Changing that claim means editing this pin.
+# The third is `arm_difference`, pinned verbatim, and it moved when the mechanism arrived: it used
+# to say there was no collapse in the tree, because a reader who found a two-arm paired record with
+# a near-zero delta and no such field would reasonably have read it as "the collapse saves
+# nothing". It now names the one bind-time switch that separates the arms. Changing that claim
+# means editing this pin, `MONO_ARM_DIFFERENCE` in the bench, and the mutation case that guards it.
 def mono_record_valid:
   (keys | sort) == mono_keys and
   .record == "console_mono" and common_shape and
@@ -598,7 +601,7 @@ def mono_record_valid:
   ([.collapse_eligible_output_sha256,.collapse_forced_off_output_sha256] | all(sha256)) and
   .collapse_eligible_output_sha256 == .collapse_forced_off_output_sha256 and
   .bit_identity == "collapse_eligible == collapse_forced_off, asserted in-run" and
-  .arm_difference == "none: both arms are the mono fixture as written; no collapse exists in this tree" and
+  .arm_difference == "collapse_eligible takes the mono collapse on every cohort; collapse_forced_off renders the same fixture dual" and
   .render_errors == 0 and .render_total_forbidden_operations == 0;
 
 def console_benchmark_record_valid_lib:

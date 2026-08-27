@@ -1615,6 +1615,79 @@ pub trait PreparedNativeEffectBank: Send {
         let _ = lane;
         false
     }
+
+    /// Whether this bank implements the mono-collapse trio below.
+    ///
+    /// The default is `false`: a bank that has not written a one-plane body declines, and a chain
+    /// that holds it never collapses. Wrong here is wrong audio, so the whole surface is opt-in
+    /// and the opt-in is one bit an implementation sets only when it has written **all three** of
+    /// [`process_bank_mono`](Self::process_bank_mono),
+    /// [`desymmetrize_channels`](Self::desymmetrize_channels) and this.
+    ///
+    /// Decided off the render thread, at bind, and cached there: the answer is a property of the
+    /// implementation and never of a block.
+    fn supports_mono_collapse(&self) -> bool {
+        false
+    }
+
+    /// Render one AoSoA block with the track's two channels **collapsed onto the left plane**.
+    ///
+    /// # The contract, in both directions
+    ///
+    /// The caller guarantees, for every block of a collapsed run:
+    ///
+    /// * the left plane holds what a dual run's left plane would hold, to the bit;
+    /// * this bank's right-channel state is what a dual run's would be *at the moment the collapse
+    ///   engaged*, and nothing has read it since;
+    /// * `block.right` is **not** gathered. It holds whatever the last block left in the resident
+    ///   scratch, and reading it is a defect.
+    ///
+    /// The implementation guarantees:
+    ///
+    /// * the left plane and the left channel's state come out **bit-identical** to what
+    ///   [`process_bank`](Self::process_bank) would have produced on the same block with a right
+    ///   plane equal to the left. Every cross-channel term -- a link, a whole-instance
+    ///   short-circuit that reads both planes -- is computed on the one plane read twice, in the
+    ///   original operation order, because `link(p, p)` is not in general the same expression as
+    ///   `link(p, q)` simplified;
+    /// * the right-channel state is left exactly as it was. It is restored by
+    ///   [`desymmetrize_channels`](Self::desymmetrize_channels) before any dual block runs;
+    /// * per-lane right-channel *accounting* (report counters) is duplicated from the left, which
+    ///   is what the collapsed run's right plane will carry.
+    ///
+    /// Never called unless [`supports_mono_collapse`](Self::supports_mono_collapse) is `true`; the
+    /// default body is the dual one so that a mis-wired caller is a bug the gates catch rather
+    /// than a `panic!` on the render thread.
+    fn process_bank_mono(&mut self, block: EffectBankProcessBlock<'_>) -> BankProcessReport {
+        self.process_bank(block)
+    }
+
+    /// Copy every lane's **left**-channel state onto the right channel.
+    ///
+    /// This is the collapse's disengage boundary: a collapsed run evolves one channel's state, and
+    /// the counterfactual dual run's right state is -- by the induction the witness states -- the
+    /// left one. Copying it is therefore not an approximation of the dual run, it *is* the dual
+    /// run's state, so the first dual block after a disengage renders exactly what a
+    /// never-collapsed run would have.
+    ///
+    /// The copy is **whole per-channel state**, not the running words alone: a collapsed block
+    /// advances only the left channel's ramps, so the designed words a mid-flight ramp is writing
+    /// go stale on the right and must come across too. An implementation that copies a subset is
+    /// unsound; the transition oracle in the gates is what proves it did not.
+    ///
+    /// Off the render thread's hot path but *on* the render thread, at a block boundary, before
+    /// the first dual block. It allocates nothing.
+    ///
+    /// # Snapshotting a collapsed bank
+    ///
+    /// A state payload taken while a bank is collapsed would carry a right section that is whatever
+    /// the right channel held when the collapse engaged. Calling this first makes the payload the
+    /// one a dual run would have written, and calling it is always sound -- it is the counterfactual
+    /// state, not an approximation of it. Nothing in this tree needs to:
+    /// `snapshot_unpublished_effect_bank_track_state_v1` names its subject, and a bank that has been
+    /// bound into a chain is not unpublished. The obligation is written here so that the first
+    /// caller that *does* reach a bound bank finds it stated rather than has to derive it.
+    fn desymmetrize_channels(&mut self) {}
 }
 #[derive(Default)]
 pub struct NativeEffectRegistry {

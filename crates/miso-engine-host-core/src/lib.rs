@@ -130,8 +130,11 @@ pub use miso_engine_effect_compiler::{
 /// * `PreparedRenderPlan::symmetry_counters` answers from the **built runtime**: the census of the
 ///   four terms preparation, restore and the live drains maintain.
 ///
-/// The conjunction is [`ChannelSymmetryWitnessV1::and`]. Nothing in this engine reads either half
-/// to decide anything rendered; they are control-plane state and a query surface.
+/// The conjunction is [`ChannelSymmetryWitnessV1::and`], and since mono-collapse M2 it is what the
+/// bank chains dispatch on: a cohort whose every active lane holds both halves renders one plane
+/// and duplicates it at the fader/matrix seam. The two halves are joined once, off the render
+/// thread, by `PreparedRenderPlan::arm_mono_collapse`; a plan nobody joins never collapses, which
+/// is the safe default and the reason the join is an explicit call rather than an inference.
 pub use miso_engine_builtins_compiler::{session_structural_symmetry_v1, track_mono_source_v1};
 pub use miso_engine_effect_contract::{
     ChannelSymmetryWitnessV1, LiveConsoleRecordV1, SeamSideV1, SymmetryEventV1,

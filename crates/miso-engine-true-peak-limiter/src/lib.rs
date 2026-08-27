@@ -55,7 +55,9 @@ use miso_engine_effect_contract::{
     StatePayloadError, StatePayloadInput, StatePayloadOutput, StatePayloadSizes, TailSamples,
     expected_prepared_metadata,
 };
-use miso_engine_effect_runtime::bank::{NonFiniteReport, block_is_positive_zero, finish_block};
+use miso_engine_effect_runtime::bank::{
+    NonFiniteReport, block_is_positive_zero, check_block, finish_block, nonfinite_lane_mask,
+};
 use miso_engine_effect_runtime::params::{
     ParameterSpec, is_negative_zero, normalize_zero, parameter_value_valid,
 };
@@ -503,6 +505,54 @@ impl ChannelState {
         };
         state.reset_to_defaults(shape, defaults, rate);
         state
+    }
+
+    /// Copies every word `source` carries onto this channel: the collapse's disengage boundary.
+    ///
+    /// # The copy list, term by term
+    ///
+    /// This kernel's per-channel state is **all** of it, and the reason the list is exhaustive
+    /// rather than selective is that a collapsed block touches nearly every word: the detector
+    /// writes `history`, `channel_frame` writes `main_ring`, `required_ring`, `box_ring` and
+    /// `reduction`, and the uniform body additionally writes `prefix`, `box_sum` and `phase`. The
+    /// two ramps are advanced per frame off the hot copy and stored back, and `lane`/`lookahead_ms`
+    /// are the window shape the segment walk reads.
+    ///
+    /// | word | why it is here |
+    /// |---|---|
+    /// | `history` | the twelve oversampling taps -- the detector's whole cross-block state. |
+    /// | `main_ring` | the `B`-sample delay line the output is read out of. A partial copy would emit pre-collapse samples `N + 6` frames later. |
+    /// | `required_ring`, `box_ring` | the van Herk sliding-minimum rings. |
+    /// | `reduction` | the recursive release word, the only one the D7 flush applies to. |
+    /// | `prefix`, `box_sum`, `phase` | the uniform body's three van Herk registers, written back once per block. |
+    /// | `limit`, `release` | all four fields of each ramp: only the collapsed channel's were advanced. |
+    /// | `lookahead_ms`, `lane` | the window shape `segment` and `LaneShape` read. Not moved by a rendered block, and copied anyway, because "whole per-channel state" is the rule that survives a later field being added. |
+    ///
+    /// `width` is a preparation shape both channels share and is asserted rather than copied.
+    /// # Which entries are individually gated, and which are here by the rule
+    ///
+    /// `crates/miso-engine-true-peak-limiter/tests/mono_collapse.rs` fails if any of `history`,
+    /// `main_ring`, `required_ring`, `box_ring`, `reduction`, `box_sum`, `limit` or `release` is
+    /// dropped. `prefix` and `phase` are the van Herk block's two running registers and are
+    /// re-derived at the next block boundary from `box_ring` and `box_sum`, so a stale pair is
+    /// bounded rather than permanent and no test in the tree makes it show; `lookahead_ms` and
+    /// `lane` move only at prepare, restore and a full reset, none of which is reachable on a
+    /// bound bank. All four are copied because the rule is *whole per-channel state*.
+    fn copy_state_from(&mut self, source: &Self) {
+        debug_assert_eq!(self.width, source.width);
+        debug_assert_eq!(self.main_ring.len(), source.main_ring.len());
+        self.history.copy_from_slice(&source.history);
+        self.main_ring.copy_from_slice(&source.main_ring);
+        self.required_ring.copy_from_slice(&source.required_ring);
+        self.box_ring.copy_from_slice(&source.box_ring);
+        self.reduction.copy_from_slice(&source.reduction);
+        self.prefix.copy_from_slice(&source.prefix);
+        self.box_sum.copy_from_slice(&source.box_sum);
+        self.phase.copy_from_slice(&source.phase);
+        self.limit.copy_from_slice(&source.limit);
+        self.release.copy_from_slice(&source.release);
+        self.lookahead_ms.copy_from_slice(&source.lookahead_ms);
+        self.lane.copy_from_slice(&source.lane);
     }
 
     /// `FullToDefaults`: every runtime word cleared and every ramp snapped to the prepared value.
@@ -2091,6 +2141,63 @@ impl<L: Lane> LimiterCore<L> {
         });
     }
 
+    /// [`process_block`](Self::process_block) over one plane: the collapsed track's live channel.
+    ///
+    /// Every leg of the `quiet` admission reads the left channel, which on a collapse-eligible
+    /// cohort is the same predicate the dual body evaluates -- see the module note above
+    /// [`limiter_block_mono`] for why the two channels' ramps and window shapes agree.
+    ///
+    /// The §4.4 boundary check scans the one live plane. Its lane mask is the dual check's
+    /// `mask(left) | mask(right)` with `right` equal to `left`, so it is the same mask; the reset
+    /// it triggers still restores **both** channels and the cursors, exactly as the dual one does.
+    fn process_block_mono(&mut self, left_io: &mut [f32], frames: usize) {
+        let words = frames * L::WIDTH;
+        let quiet = self.silent_bypass == self.metadata.bypass
+            && ramps_are_stationary(&self.left.limit)
+            && ramps_are_stationary(&self.left.release)
+            && block_is_positive_zero(&left_io[..words]);
+        if quiet && self.silent_fixed_point {
+            self.left.advance_rest_phase(frames);
+            self.cursors.advance(frames, &self.shape);
+            #[cfg(test)]
+            {
+                self.silent_engagements = self.silent_engagements.saturating_add(1);
+            }
+            return;
+        }
+        limiter_block_mono::<L>(
+            left_io,
+            frames,
+            &self.coefficients,
+            &self.shape,
+            &mut self.left,
+            &mut self.cursors,
+        );
+        self.silent_fixed_point =
+            quiet && self.left.is_at_silent_rest() && block_is_positive_zero(&left_io[..words]);
+        self.silent_bypass = self.metadata.bypass;
+        if check_block::<L>(left_io) {
+            return;
+        }
+        self.report.nonfinite_lanes = nonfinite_lane_mask::<L>(left_io);
+        self.report.nonfinite_blocks = self.report.nonfinite_blocks.saturating_add(1);
+        left_io.fill(0.0);
+        let shape = self.shape;
+        let rate = self.metadata.sample_rate;
+        self.left
+            .reset_to_defaults(&shape, &self.left_defaults, rate);
+        self.right
+            .reset_to_defaults(&shape, &self.right_defaults, rate);
+        self.cursors = Cursors::default();
+    }
+
+    /// Copies the left channel's whole state onto the right (the collapse's disengage boundary).
+    ///
+    /// See [`ChannelState::copy_state_from`] for the word-by-word list and why it is exhaustive.
+    fn desymmetrize(&mut self) {
+        self.right.copy_state_from(&self.left);
+    }
+
     /// The boundary-check record, for the gates. Wiring it into `ProcessReport` belongs to #95.
     #[cfg(test)]
     const fn nonfinite_report(&self) -> NonFiniteReport {
@@ -2799,7 +2906,52 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedTruePeakLimiterBank<L> {
     /// `debug_assert!`s (#90 F8). The old guard returned the caller's buffers **untouched and
     /// undelayed**, which silently voided the declared `N + 6` latency for that block; nothing on
     /// this path can return without processing.
+    fn supports_mono_collapse(&self) -> bool {
+        true
+    }
+
+    fn process_bank_mono(&mut self, block: EffectBankProcessBlock<'_>) -> BankProcessReport {
+        self.process_bank_inner::<true>(block)
+    }
+
+    fn desymmetrize_channels(&mut self) {
+        self.core.desymmetrize();
+    }
+
     fn process_bank(&mut self, block: EffectBankProcessBlock<'_>) -> BankProcessReport {
+        self.process_bank_inner::<false>(block)
+    }
+
+    fn snapshot_track_state_payload(
+        &self,
+        track_index: u32,
+        mut output: StatePayloadOutput<'_>,
+    ) -> Result<(), StatePayloadError> {
+        let track = checked_track(track_index, L::WIDTH)?;
+        self.core.snapshot_track(track, &mut output)
+    }
+
+    fn restore_track_state_payload(
+        &mut self,
+        track_index: u32,
+        state_layout_version: u32,
+        input: StatePayloadInput<'_>,
+    ) -> Result<(), StatePayloadError> {
+        let track = checked_track(track_index, L::WIDTH)?;
+        self.core.restore_track(track, state_layout_version, &input)
+    }
+}
+
+impl<L: Lane> PreparedTruePeakLimiterBank<L> {
+    /// The one bank body, dual or collapsed. `MONO` chooses the render body and nothing else.
+    ///
+    /// A const generic rather than an argument, so the two monomorphise and the dual instantiation
+    /// is the code that shipped before the collapse existed. See the parametric EQ's copy of this
+    /// method for the measurement that settled it.
+    fn process_bank_inner<const MONO: bool>(
+        &mut self,
+        block: EffectBankProcessBlock<'_>,
+    ) -> BankProcessReport {
         debug_assert_eq!(block.width, self.metadata.width);
         debug_assert_eq!(block.width.lanes() as usize, L::WIDTH);
         debug_assert!(block.frames <= self.core.metadata.quantum);
@@ -2826,29 +2978,249 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedTruePeakLimiterBank<L> {
                 &mut report.reports[track],
             );
         }
-        self.core
-            .process_block(block.left, block.right, block.frames as usize);
+        if MONO {
+            self.core
+                .process_block_mono(block.left, block.frames as usize);
+        } else {
+            self.core
+                .process_block(block.left, block.right, block.frames as usize);
+        }
         report
     }
+}
 
-    fn snapshot_track_state_payload(
-        &self,
-        track_index: u32,
-        mut output: StatePayloadOutput<'_>,
-    ) -> Result<(), StatePayloadError> {
-        let track = checked_track(track_index, L::WIDTH)?;
-        self.core.snapshot_track(track, &mut output)
+// ---------------------------------------------------------------------------------------------
+// The mono-collapse one-plane bodies.
+//
+// Each is the dual body with the right channel's arguments deleted and every remaining line left
+// where it was. Three things are restatements rather than deletions:
+//
+// * the peak **link** is computed on the one plane read twice, in the original operation order:
+//   `peak_left.max(peak_left)`. This crate's link is `Maximum` only, and `max(p, p)` is `p` to the
+//   bit for every finite `p` -- so this one is provably a no-op, and it is written out rather than
+//   folded away so that the collapsed body and the dual body read the same;
+// * `stationary` is the four-ramp conjunction with the right channel's two conjuncts dropped. On a
+//   collapse-eligible bank the two channels' `limit` and `release` ramps are the same words (a
+//   one-channel retarget clears the witness' `LIVE` term), so the left pair's answer *is* the
+//   conjunction's;
+// * `lanes_uniform` is the whole-bank branch, and it takes the same reading for the same reason:
+//   `LaneShape` is derived from `lookahead_ms`, which the `DESIGNED` comparison covers.
+//
+// The right channel's state is untouched, and is restored by `ChannelState::copy_state_from` at
+// the disengage boundary before any dual block runs.
+// ---------------------------------------------------------------------------------------------
+
+/// [`limiter_block`] over one plane.
+#[inline(always)]
+fn limiter_block_mono<L: Lane>(
+    left_io: &mut [f32],
+    frames: usize,
+    coef: &LimiterCoef<L>,
+    shape: &Shape,
+    left: &mut ChannelState,
+    cursors: &mut Cursors,
+) {
+    if lanes_uniform(left) {
+        limiter_block_uniform_mono::<L>(left_io, frames, coef, shape, left, cursors);
+    } else {
+        limiter_block_per_lane_mono::<L>(left_io, frames, coef, shape, left, cursors);
+    }
+}
+
+/// [`limiter_block_per_lane`] over one plane.
+#[inline(always)]
+fn limiter_block_per_lane_mono<L: Lane>(
+    left_io: &mut [f32],
+    frames: usize,
+    coef: &LimiterCoef<L>,
+    shape: &Shape,
+    left: &mut ChannelState,
+    cursors: &mut Cursors,
+) {
+    let width = L::WIDTH;
+    debug_assert!(width <= MAXIMUM_WIDTH);
+    debug_assert_eq!(left.width, width);
+    debug_assert_eq!(left_io.len(), frames * width);
+
+    let mut hot_left = HotChannel::<L>::load(left);
+    let stationary = ramps_are_stationary(&left.limit) && ramps_are_stationary(&left.release);
+    let all = L::zero().eq(L::zero());
+    let none = L::mask_not(all);
+    let link = if coef.link_max { all } else { none };
+    let bypass = if coef.bypass { all } else { none };
+    let mut main_cursor = cursors.main as usize;
+    let mut ring_cursor = cursors.ring as usize;
+    let mut scratch = [0.0_f32; MAXIMUM_WIDTH];
+    let mut peaks_left = [0.0_f32; DETECTOR_CHUNK * MAXIMUM_WIDTH];
+
+    for chunk in (0..frames).step_by(DETECTOR_CHUNK) {
+        let span = core::cmp::min(DETECTOR_CHUNK, frames - chunk);
+        detector_chunk::<L>(
+            &mut hot_left.history,
+            left_io,
+            chunk,
+            span,
+            &coef.fir,
+            &mut peaks_left,
+        );
+
+        for frame in 0..span {
+            let base = (chunk + frame) * width;
+            let (limit_left, release_left) = if stationary {
+                (
+                    hot_left.limit.resting_value(),
+                    hot_left.release.resting_value(),
+                )
+            } else {
+                (hot_left.limit.advance(), hot_left.release.advance())
+            };
+
+            let peak_left = L::load(&peaks_left[frame * width..]);
+            let linked = peak_left.max(peak_left);
+            let peak_left = L::select(link, linked, peak_left);
+
+            channel_frame::<L>(
+                left_io,
+                base,
+                L::load(&left_io[base..]),
+                peak_left,
+                limit_left,
+                release_left,
+                &mut hot_left,
+                left,
+                shape.ring,
+                ring_cursor,
+                main_cursor,
+                bypass,
+                &mut scratch,
+            );
+
+            main_cursor += 1;
+            if main_cursor == shape.main {
+                main_cursor = 0;
+            }
+            ring_cursor += 1;
+            if ring_cursor == shape.ring {
+                ring_cursor = 0;
+            }
+        }
     }
 
-    fn restore_track_state_payload(
-        &mut self,
-        track_index: u32,
-        state_layout_version: u32,
-        input: StatePayloadInput<'_>,
-    ) -> Result<(), StatePayloadError> {
-        let track = checked_track(track_index, L::WIDTH)?;
-        self.core.restore_track(track, state_layout_version, &input)
-    }
+    hot_left.store(left);
+    cursors.main = main_cursor as u32;
+    cursors.ring = ring_cursor as u32;
+}
+
+/// [`limiter_block_uniform`] over one plane.
+#[inline(always)]
+fn limiter_block_uniform_mono<L: Lane>(
+    left_io: &mut [f32],
+    frames: usize,
+    coef: &LimiterCoef<L>,
+    shape: &Shape,
+    left: &mut ChannelState,
+    cursors: &mut Cursors,
+) {
+    let width = L::WIDTH;
+    debug_assert!(width <= MAXIMUM_WIDTH);
+    debug_assert_eq!(left.width, width);
+    debug_assert_eq!(left_io.len(), frames * width);
+
+    let mut hot_left = HotChannel::<L>::load(left);
+    let stationary = ramps_are_stationary(&left.limit) && ramps_are_stationary(&left.release);
+    let all = L::zero().eq(L::zero());
+    let none = L::mask_not(all);
+    let link = if coef.link_max { all } else { none };
+    let bypass = if coef.bypass { all } else { none };
+    let ring = shape.ring;
+    let main = shape.main;
+    let mut main_cursor = cursors.main as usize;
+    let mut ring_cursor = cursors.ring as usize;
+    let mut peaks_left = [0.0_f32; DETECTOR_CHUNK * MAXIMUM_WIDTH];
+
+    let (left_prefix, left_phase) = {
+        let mut uniform_left = UniformHot::<L>::new(left, shape);
+
+        for chunk in (0..frames).step_by(DETECTOR_CHUNK) {
+            let span = core::cmp::min(DETECTOR_CHUNK, frames - chunk);
+            detector_chunk::<L>(
+                &mut hot_left.history,
+                left_io,
+                chunk,
+                span,
+                &coef.fir,
+                &mut peaks_left,
+            );
+
+            let mut frame = 0;
+            while frame < span {
+                // The segment walk takes the one live channel's offsets for both of its window
+                // arguments: on a collapsed cohort the two channels' `LaneShape`s are the same
+                // words, so this is the same minimum the dual walk takes.
+                let walk = segment(
+                    shape,
+                    ring_cursor,
+                    main_cursor,
+                    span - frame,
+                    uniform_left.offsets,
+                    uniform_left.offsets,
+                );
+                let run = walk.run;
+
+                let base = (chunk + frame) * width;
+                let words = run * width;
+                let left_segment = &mut left_io[base..base + words];
+                let left_peaks = &peaks_left[frame * width..(frame + run) * width];
+
+                for (step, (left_frame, left_peak)) in left_segment
+                    .chunks_exact_mut(width)
+                    .zip(left_peaks.chunks_exact(width))
+                    .enumerate()
+                {
+                    let (limit_left, release_left) = if stationary {
+                        (
+                            hot_left.limit.resting_value(),
+                            hot_left.release.resting_value(),
+                        )
+                    } else {
+                        (hot_left.limit.advance(), hot_left.release.advance())
+                    };
+
+                    let peak_left = L::load(left_peak);
+                    let linked = peak_left.max(peak_left);
+                    let peak_left = L::select(link, linked, peak_left);
+
+                    let x_left = L::load(left_frame);
+
+                    channel_frame_uniform::<L>(
+                        left_frame,
+                        x_left,
+                        peak_left,
+                        limit_left,
+                        release_left,
+                        &mut hot_left,
+                        &mut uniform_left,
+                        ring,
+                        walk.left.advanced(step),
+                        bypass,
+                    );
+                }
+
+                frame += run;
+                ring_cursor = wrapped(ring_cursor + run, ring);
+                main_cursor = wrapped(main_cursor + run, main);
+            }
+        }
+
+        (uniform_left.prefix, uniform_left.phase)
+    };
+
+    left_prefix.store(&mut left.prefix);
+    left.phase.fill(left_phase);
+
+    hot_left.store(left);
+    cursors.main = main_cursor as u32;
+    cursors.ring = ring_cursor as u32;
 }
 
 #[cfg(test)]

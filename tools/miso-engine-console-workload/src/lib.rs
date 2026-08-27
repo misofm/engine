@@ -38,6 +38,7 @@
 //! driver owns a clock: `console.rs` for the native bench, the wasmtime host for the guest.
 
 use core::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
+use std::collections::BTreeSet;
 
 use miso_engine_bench_support::digest::Sha256Sink;
 use miso_engine_builtins::{MeterConfig, MeterHandle, MeterTap};
@@ -294,6 +295,24 @@ pub enum Workload {
     /// wasm host reports no shape, which is why that gate lives beside the fixtures rather than in
     /// the record.
     SixtyFourTrackConsoleHalfMono,
+}
+
+impl Workload {
+    /// Whether this row renders with the mono collapse **forced off**.
+    ///
+    /// True for exactly one row. `sixty_four_track_console_mono_dual` compiles the same
+    /// collapse-eligible fixture as `sixty_four_track_console_mono` and renders it dual, which is
+    /// what makes the pair a measurement of the collapse rather than of two sessions: the arms
+    /// differ by this `bool` and by nothing else, and the run asserts their digests agree before it
+    /// emits a number.
+    ///
+    /// Every other row -- the stereo fixture included -- leaves the collapse armed and simply
+    /// declines it, which is what makes "the stereo row is byte-identical to its seal" a statement
+    /// about the *dispatch* rather than about a switch someone remembered to set.
+    #[must_use]
+    pub const fn collapse_forced_off(self) -> bool {
+        matches!(self, Self::SixtyFourTrackConsoleMonoDual)
+    }
 }
 
 /// The standing session workloads, in the order their records are emitted.
@@ -925,6 +944,22 @@ impl SessionRuntime {
             workload.kind()
         );
 
+        let mut plan = plan;
+        // The collapse's structural join, performed exactly where the M1 plumbing said it would
+        // be: `session_structural_symmetry_v1` is keyed by track id, the plan's rows are keyed by
+        // anonymous lanes, and this is the one call site that holds both. A plan nobody joins
+        // never collapses, so this is not an optimisation switch -- it is the arming.
+        let structural = miso_engine_builtins_compiler::session_structural_symmetry_v1(&session);
+        let eligible: BTreeSet<&str> = structural
+            .iter()
+            .filter(|(_, witness)| witness.eligible())
+            .map(|(track, _)| track.as_ref())
+            .collect();
+        plan.arm_mono_collapse(&|track: &str| eligible.contains(track));
+        // The mono measurement's second arm. Both arms compile the *same* fixture -- that is what
+        // makes the paired delta the collapse and nothing else -- so the difference between them
+        // has to be this switch and cannot be a fixture edit.
+        plan.force_mono_collapse_off(workload.collapse_forced_off());
         let mut runtime = Self {
             plan,
             output: vec![0.0; QUANTUM * 2],
@@ -1046,6 +1081,30 @@ impl SessionRuntime {
             .sum()
     }
 
+    /// Every armed tap's most recent published window, in prepared-lane then reader order.
+    ///
+    /// The *values*, not a count. `published_windows` says a tap published; this says what it
+    /// published, which is the only way to state that a collapsed cohort's right-channel taps carry
+    /// the reading a dual run would have produced. A collapsed bank evolves one channel's state, so
+    /// a right-channel tap read straight off that state would be frozen at the value it held when
+    /// the collapse engaged -- and no digest of the rendered audio could see it, because the audio
+    /// is correct either way.
+    ///
+    /// A reader with nothing published yet contributes `None`, so the shape of the result is
+    /// itself part of the comparison. Read outside the clock.
+    #[must_use]
+    pub fn observation_readings(&self) -> Vec<Option<(u64, f32, f32)>> {
+        self.observations
+            .iter()
+            .flat_map(|handle| handle.readers.iter())
+            .map(|reader| {
+                reader
+                    .read()
+                    .map(|window| (window.sequence, window.left, window.right))
+            })
+            .collect()
+    }
+
     /// Completed planar/AoSoA transpose round-trips since this plan was bound.
     ///
     /// The G5 shape gate's counter (master plan §4.5), surfaced so a benchmark can *record* the
@@ -1122,6 +1181,32 @@ impl SessionRuntime {
     #[must_use]
     pub fn symmetry_counters(&self) -> [u64; 2] {
         self.plan.symmetry_counters()
+    }
+
+    /// Force every bank chain's mono collapse off, or back on, between blocks.
+    ///
+    /// The arm switch, exposed mid-session for one job: the transition oracle. A run that collapses
+    /// for a while and then stops must render, from the block it stops on, exactly what a run that
+    /// never collapsed renders -- which is the whole claim the disengage state copy makes, and the
+    /// only way to test it is to take the transition in the middle of a session.
+    ///
+    /// Outside the clock, like every other control on this type.
+    pub fn force_mono_collapse_off(&mut self, forced: bool) {
+        self.plan.force_mono_collapse_off(forced);
+    }
+
+    /// `[blocks rendered with the mono collapse taken, cohorts that can take it at all]`.
+    ///
+    /// The evidence that the collapse *fired*, and the only evidence there can be: a collapsed
+    /// block renders the bits a dual block renders, so no digest and no output comparison can see
+    /// it. The second number is fixed at bind and is what "eight of eight cohorts" is read off; the
+    /// first is per block, so a plan that rendered `n` blocks with all `c` cohorts collapsed
+    /// reports `n * c`.
+    ///
+    /// Read outside the clock, like every other evidence accessor on this type.
+    #[must_use]
+    pub fn bank_collapse_counters(&self) -> [u64; 2] {
+        self.plan.bank_collapse_counters()
     }
 
     /// One collapse-eligibility row per scheduling unit (mono-collapse M1).

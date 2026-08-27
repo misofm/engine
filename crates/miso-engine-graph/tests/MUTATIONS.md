@@ -106,3 +106,19 @@ Rows 218-6 to 218-8 are the honest half of this ledger. Each clause is kept beca
 hazard that is real in the lowered program and unreachable from a session the compiler can build,
 and the reason is written down beside the clause in `route_fold`'s doc comment rather than left to
 be rediscovered.
+
+## Mono-collapse M2 — the dispatch, the structural join and the transition
+
+The collapse renders the bits a dual run renders, so the rows below are counters and cross-arm
+comparisons; a digest gate on a single arm cannot see any of these failures. They live beside the
+console fixtures (`tools/miso-engine-console-workload/tests/chain_shape.rs`) because the *production*
+plan is what they are about and it is assembled there.
+
+Driver: one mutation at a time, `cargo test -p miso-engine-console-workload --test chain_shape`,
+tree restored (and `touch`ed) between rows.
+
+| # | mutation | file | test | result |
+|---|---|---|---|---|
+| M2-G1 | `BankChain::new` initialises `collapse_source: true`, dropping the structural join | `rack/src/lib.rs` | `the_half_mono_cohort_banks_like_a_uniform_one` | RED — the half-mono row renders the *uniform mono* row's bits, because its odd tracks' right channels become the duplicated left ones. This is the failure that found the hole: the runtime witness is source-agnostic by construction and admits every lane of that row |
+| M2-G2 | the disengage copy is skipped (`slot.stage.desymmetrize()` becomes a no-op) | `rack/src/lib.rs` `disengage_collapse` | `a_run_that_stops_collapsing_renders_what_a_never_collapsed_run_renders` | RED |
+| M2-G3 | the drain is moved back after the dispatch | `rack/src/lib.rs` `run` | `a_live_one_channel_retarget_disengages_on_the_block_it_lands` | RED — see the rack's M2-5 row for what the ordering protects |

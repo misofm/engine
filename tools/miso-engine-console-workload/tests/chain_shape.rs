@@ -797,3 +797,441 @@ fn the_folded_master_is_the_reductions_own_bits() {
         );
     }
 }
+
+/// The collapse fires on every cohort of the mono row, on half the half-mono row's, and on nothing
+/// else -- and the arms of the mono pair differ by the switch and not by a fixture edit.
+///
+/// # Why a count, and why this count
+///
+/// A collapsed block renders the bits a dual block renders. That is the whole claim, and it means
+/// no digest, no output comparison and no shape number can see whether the collapse fired at all:
+/// a dispatch that silently stopped engaging would leave every other assertion in this file green
+/// and only show up as a slower row. `bank_collapse_counters` is the only honest statement, exactly
+/// as `bank_route_folds` and `bank_scatter_redirects` are for the two optimisations before it.
+///
+/// The pair is `[collapsed blocks, collapsible cohorts]`. The second is fixed at bind and is what
+/// "eight of eight cohorts" is read off; the first is per block, so `BLOCKS` blocks with every
+/// cohort collapsing is `BLOCKS * cohorts` and nothing else -- which is what makes "it fired on
+/// **every** block" a checkable statement rather than "it fired at least once".
+///
+/// # The three rows, and what each one is here to catch
+///
+/// * `_mono` -- every track carries a mono source mapping and symmetric designed words, so every
+///   cohort collapses on every block. A dispatch that never engages fails here.
+/// * `_mono_dual` -- the *same* fixture with the collapse forced off. Its cohorts are still
+///   collapsible (the count is bind-time), and not one block took it. A force-off switch that did
+///   not actually reach the chains fails here, and that is the switch the paired measurement's
+///   second arm is.
+/// * `half_mono` -- half the tracks read two source channels. Since M1 they pool into four all-mono
+///   cohorts and four all-stereo ones, so exactly half the cohorts are collapsible. A dispatch that
+///   dropped the **structural** join -- the `SOURCE` term, which the chain's own witness cannot see
+///   (`PlanUnitEligibilityV1::lane_eligible` says why) -- would report eight collapsible cohorts
+///   here, and `the_half_mono_cohort_banks_like_a_uniform_one`'s `assert_ne!` would then fail
+///   because the odd tracks' right channels would be the duplicated left ones. That is the pair of
+///   failures the join has to be checked by, and it is checked by both.
+/// * `console` and every non-mono row -- no track reads one source channel, and the designed words
+///   differ per channel besides, so nothing is collapsible and nothing collapses. A dispatch that
+///   dropped `all_lanes_symmetric` would collapse this row and move its digest away from its seal.
+#[test]
+fn the_collapse_fires_on_every_mono_cohort_and_no_other() {
+    let counted = |workload| {
+        let mut runtime = SessionRuntime::build(workload, PlanConfig::BASELINE);
+        for block in 0..BLOCKS {
+            runtime.render(block).expect("console render");
+        }
+        (runtime.bank_collapse_counters(), runtime.bank_shape())
+    };
+
+    let (mono, mono_shape) = counted(Workload::SixtyFourTrackConsoleMono);
+    let cohorts_in_plan = cohorts(mono_shape[1]);
+    assert_eq!(
+        mono,
+        [BLOCKS * cohorts_in_plan, cohorts_in_plan],
+        "every cohort of the mono row must collapse on every block"
+    );
+
+    let (dual, dual_shape) = counted(Workload::SixtyFourTrackConsoleMonoDual);
+    assert_eq!(
+        dual_shape, mono_shape,
+        "the two arms of the pair are one fixture and must realise one shape"
+    );
+    assert_eq!(
+        dual,
+        [0, cohorts_in_plan],
+        "the forced-off arm must render the same collapsible cohorts and take none of them"
+    );
+
+    let (half, half_shape) = counted(Workload::SixtyFourTrackConsoleHalfMono);
+    assert_eq!(half_shape, mono_shape);
+    assert_eq!(
+        half,
+        [BLOCKS * cohorts_in_plan / 2, cohorts_in_plan / 2],
+        "half the half-mono row's cohorts are collapsible, and each of those collapses every block"
+    );
+
+    for workload in WORKLOADS {
+        if matches!(
+            workload,
+            Workload::SixtyFourTrackConsoleMono
+                | Workload::SixtyFourTrackConsoleMonoDual
+                | Workload::SixtyFourTrackConsoleHalfMono
+        ) {
+            continue;
+        }
+        assert_eq!(
+            counted(workload).0,
+            [0, 0],
+            "{}: no track of a stereo-source fixture may collapse",
+            workload.kind()
+        );
+    }
+}
+
+/// The transition oracle: a run that stops collapsing mid-session is a run that never collapsed.
+///
+/// # What this is the only test of
+///
+/// A collapsed block evolves **one** channel's state. The right channel's rings, ramps, cursors and
+/// recursive words stand still, and the block that stops collapsing has to put them back before the
+/// first dual block reads them. `PreparedNativeEffectBank::desymmetrize_channels` is that copy, and
+/// its correctness is a property of the *list of words* each effect copies -- a list no digest of a
+/// wholly collapsed run and no digest of a wholly dual run can see, because neither ever crosses
+/// the boundary.
+///
+/// This crosses it. Both arms render the same fixture for the same number of blocks and differ only
+/// in that one of them collapsed for the first half. If the copy is complete they agree to the bit
+/// from the transition block onward -- which, since they also agreed before it, means one digest.
+///
+/// # The red mutation, and it is per field
+///
+/// Delete any one line of any `copy_state_from` -- the compressor's `cursor`, the limiter's
+/// `box_sum`, the EQ's `identity`, the input chain's second integrator -- and this test fails while
+/// every other test in the tree stays green. That is the whole reason it exists: a partial copy is
+/// invisible to a run that never disengages, and every other gate here is such a run.
+#[test]
+fn a_run_that_stops_collapsing_renders_what_a_never_collapsed_run_renders() {
+    // Long enough that the limiter's lookahead line and the compressor's detector ring are full of
+    // collapsed-run samples before the transition, so a stale ring is a difference the delay lines
+    // carry out rather than one the transition block hides.
+    const SWITCH: u64 = BLOCKS / 2;
+
+    let mut mixed =
+        SessionRuntime::build(Workload::SixtyFourTrackConsoleMono, PlanConfig::BASELINE);
+    let mut never =
+        SessionRuntime::build(Workload::SixtyFourTrackConsoleMono, PlanConfig::BASELINE);
+    never.force_mono_collapse_off(true);
+
+    let mut mixed_digest = Sha256Sink::new();
+    let mut never_digest = Sha256Sink::new();
+    for block in 0..BLOCKS {
+        if block == SWITCH {
+            mixed.force_mono_collapse_off(true);
+        }
+        mixed.render(block).expect("console render");
+        never.render(block).expect("console render");
+        mixed.hash_output(&mut mixed_digest);
+        never.hash_output(&mut never_digest);
+    }
+
+    let collapsed = mixed.bank_collapse_counters();
+    let cohorts_in_plan = cohorts(mixed.bank_shape()[1]);
+    assert_eq!(
+        collapsed,
+        [SWITCH * cohorts_in_plan, cohorts_in_plan],
+        "the mixed arm must have collapsed for exactly the blocks before the transition"
+    );
+    assert_eq!(
+        never.bank_collapse_counters(),
+        [0, cohorts_in_plan],
+        "the reference arm must never have collapsed"
+    );
+    assert_eq!(
+        mixed_digest.finish_hex(),
+        never_digest.finish_hex(),
+        "a session that stopped collapsing mid-render must be bit-identical to one that never did"
+    );
+}
+
+/// A chain that has disengaged does not collapse again in this plan.
+///
+/// M2 owns the engage direction and the disengage direction; **re-engage** is M3's, and this states
+/// that as a checkable property rather than as a note. Re-engaging would have to argue that the
+/// dual blocks in between left the two channels agreeing again, which is a statement about *why*
+/// the witness went false and not about the witness itself -- so until that argument exists, a
+/// chain that has stopped stays stopped. Declining is always safe.
+#[test]
+fn a_disengaged_chain_stays_dual_even_when_the_switch_comes_back() {
+    let mut runtime =
+        SessionRuntime::build(Workload::SixtyFourTrackConsoleMono, PlanConfig::BASELINE);
+    let cohorts_in_plan = cohorts(runtime.bank_shape()[1]);
+    for block in 0..4 {
+        runtime.render(block).expect("console render");
+    }
+    runtime.force_mono_collapse_off(true);
+    for block in 4..8 {
+        runtime.render(block).expect("console render");
+    }
+    runtime.force_mono_collapse_off(false);
+    for block in 8..12 {
+        runtime.render(block).expect("console render");
+    }
+    assert_eq!(
+        runtime.bank_collapse_counters(),
+        [4 * cohorts_in_plan, cohorts_in_plan],
+        "only the four blocks before the disengage collapsed"
+    );
+}
+
+/// A live one-channel retarget disengages the collapse on the block it lands, not the block after.
+///
+/// # The ordering this is really about
+///
+/// Two rules meet on one block boundary and they have to be observed in one order.
+///
+/// * An admitted record takes effect on the **first sample of the block that drains it** (#137 E1,
+///   and every console gate in the tree rests on it).
+/// * A `ParameterChannel::Left` retarget clears the channel-symmetry witness' `LIVE` term, which is
+///   what tells the collapse to stop.
+///
+/// If the dispatch read the witness before the drain, the record's *audio* would land on a block
+/// that still ran collapsed -- and a collapsed block publishes the left plane on both channels, so
+/// a retarget addressed to the left channel would silently reach the right one too. That is a
+/// wrong-audio bug on exactly one block, in the direction nobody would look. `BankChain::run`
+/// therefore drains every slot first (`BankStage::begin_block`), then reads the witness.
+///
+/// # Why this is also the strongest copy-list oracle in the tree
+///
+/// The transition here happens with **ramps in flight**: the retarget opens a smoothing window on
+/// the left channel at the same block the chain stops collapsing. So the disengage copy has to
+/// carry not just the rings but the ramp state and the coefficient words derived from it, and the
+/// blocks after it render a moving coefficient on one channel and a settled one on the other.
+///
+/// Red mutations: swap the drain and the dispatch in `BankChain::run` (the ordering above); drop
+/// any ramp or coefficient entry from any effect's `copy_state_from`.
+#[test]
+fn a_live_one_channel_retarget_disengages_on_the_block_it_lands() {
+    const CONTROL: PlanConfig = PlanConfig {
+        meters: false,
+        control: true,
+        observation: ObservationArm::Absent,
+    };
+    const SWITCH: u64 = BLOCKS / 2;
+
+    let mut collapsing = SessionRuntime::build(Workload::SixtyFourTrackConsoleMono, CONTROL);
+    let mut never = SessionRuntime::build(Workload::SixtyFourTrackConsoleMono, CONTROL);
+    never.force_mono_collapse_off(true);
+
+    // One retarget per strip slot, all on the same track and all on the **left** channel only.
+    //
+    // Three, not one, because each slot's disengage copy has a different list and only its own
+    // parameter can move it: the compressor's threshold opens its ramps and rewrites its
+    // coefficient words, the EQ's band gain opens the cascade's per-lane ramp countdown, and the
+    // limiter's ceiling both opens its two linear ramps and drops the ceiling far enough that the
+    // detector's twelve oversampling taps actually decide an output sample -- which is what makes
+    // the limiter's `history` a word the copy has to carry rather than one no fixture reads.
+    let retargets: Vec<(usize, u32, f32)> = [
+        ("miso.compressor", 0_u32, -24.0_f32),
+        ("miso.parametric-eq", 3, 6.0),
+        ("miso.true-peak-limiter", 0, -20.0),
+    ]
+    .into_iter()
+    .map(|(effect, parameter, value)| {
+        let channel = collapsing
+            .first_track_control_channel(effect)
+            .unwrap_or_else(|| panic!("the mono fixture carries a {effect} on every track"));
+        assert_eq!(
+            never.first_track_control_channel(effect),
+            Some(channel),
+            "both arms must address the same track, or they are two sessions"
+        );
+        (channel, parameter, value)
+    })
+    .collect();
+    let track = collapsing.control_identity(retargets[0].0).0.to_owned();
+    for (channel, _, _) in &retargets {
+        assert_eq!(
+            collapsing.control_identity(*channel).0,
+            track,
+            "every retarget must address one track, so exactly one cohort disengages"
+        );
+    }
+
+    let mut collapsing_digest = Sha256Sink::new();
+    let mut never_digest = Sha256Sink::new();
+    for block in 0..BLOCKS {
+        if block == SWITCH {
+            for runtime in [&mut collapsing, &mut never] {
+                for (channel, parameter, value) in &retargets {
+                    assert!(
+                        runtime.push_parameter(
+                            *channel,
+                            *parameter,
+                            miso_engine_effect_contract::ParameterChannel::Left,
+                            *value,
+                        ),
+                        "the bounded control queue must have room"
+                    );
+                }
+            }
+        }
+        collapsing.render(block).expect("console render");
+        never.render(block).expect("console render");
+        collapsing.hash_output(&mut collapsing_digest);
+        never.hash_output(&mut never_digest);
+    }
+
+    let cohorts_in_plan = cohorts(collapsing.bank_shape()[1]);
+    let collapsed = collapsing.bank_collapse_counters();
+    assert_eq!(
+        collapsed[1], cohorts_in_plan,
+        "every cohort of the mono fixture is collapsible"
+    );
+    // One cohort holds the retargeted track and stops on the block the record lands; the other
+    // seven never see a record and collapse throughout. If the dispatch had read the witness
+    // before the drain, the retargeted cohort would have collapsed on the landing block too, and
+    // this count would be one cohort-block higher.
+    assert_eq!(
+        collapsed[0],
+        BLOCKS * cohorts_in_plan - (BLOCKS - SWITCH),
+        "the retargeted cohort must stop collapsing on the block its record lands"
+    );
+    assert_eq!(
+        collapsing_digest.finish_hex(),
+        never_digest.finish_hex(),
+        "a session that disengaged on a live retarget must render what a never-collapsed one does"
+    );
+}
+
+/// A collapsed cohort's right-channel observation taps read what a dual run's would.
+///
+/// # The one contract surface a digest gate cannot cover
+///
+/// The collapse's whole claim is that the *audio* is identical, so every digest in this file is
+/// blind to what it does to state. A resident observation tap reads state directly --
+/// `observe_resident_bank` extracts the compressor's `gain_reduction_db` and the limiter's
+/// `reduction` per lane, per channel -- and a collapsed bank's right channel is frozen at the value
+/// it held when the collapse engaged. A tap that published that frozen word would be publishing a
+/// number no dual run ever produces, on a session whose audio is bit-perfect.
+///
+/// So the seam applies to taps too: a collapsed block publishes the left channel's reading for the
+/// right channel's tap. That is the same induction the fader duplication and the disengage copy
+/// rest on -- the right channel of a collapsed track *is* its left channel -- and this is the gate
+/// on it.
+///
+/// Red mutation: delete the `sample.right = sample.left` loop in `ConsoleEffectBankStage::process_
+/// mono`. Every digest assertion in this file stays green and the two arms' tap readings diverge on
+/// the first window a compressor actually reduces.
+#[test]
+fn a_collapsed_cohorts_right_channel_taps_read_what_a_dual_runs_do() {
+    const OBSERVED: PlanConfig = PlanConfig {
+        meters: false,
+        control: true,
+        observation: ObservationArm::Armed,
+    };
+    let mut collapsed = SessionRuntime::build(Workload::SixtyFourTrackConsoleMono, OBSERVED);
+    let mut dual = SessionRuntime::build(Workload::SixtyFourTrackConsoleMonoDual, OBSERVED);
+    assert!(
+        collapsed.observation_taps() > 0,
+        "the armed arm must declare taps"
+    );
+
+    let mut collapsed_digest = Sha256Sink::new();
+    let mut dual_digest = Sha256Sink::new();
+    for block in 0..BLOCKS {
+        collapsed.render(block).expect("console render");
+        dual.render(block).expect("console render");
+        collapsed.hash_output(&mut collapsed_digest);
+        dual.hash_output(&mut dual_digest);
+    }
+
+    assert!(
+        collapsed.bank_collapse_counters()[0] > 0,
+        "the observed arm must actually have collapsed, or this proves nothing"
+    );
+    assert_eq!(
+        dual.bank_collapse_counters()[0],
+        0,
+        "the reference arm must not have collapsed"
+    );
+    assert_eq!(
+        collapsed_digest.finish_hex(),
+        dual_digest.finish_hex(),
+        "observing a collapsed session must not move a rendered bit"
+    );
+
+    let observed = collapsed.observation_readings();
+    let reference = dual.observation_readings();
+    assert_eq!(
+        observed.len(),
+        reference.len(),
+        "both arms declare the same taps"
+    );
+    // The readings have to *mean* something, or agreeing about them is agreeing about nothing: at
+    // least one window must carry a non-zero reduction on both channels.
+    assert!(
+        reference
+            .iter()
+            .flatten()
+            .any(|(_, left, right)| *left != 0.0 && *right != 0.0),
+        "the corpus must drive at least one tap away from its rest value on both channels"
+    );
+    for (index, (observed, reference)) in observed.iter().zip(reference.iter()).enumerate() {
+        assert_eq!(
+            observed.map(|(sequence, left, right)| (sequence, left.to_bits(), right.to_bits())),
+            reference.map(|(sequence, left, right)| (sequence, left.to_bits(), right.to_bits())),
+            "tap {index}: a collapsed cohort's published window must be the dual run's, both channels"
+        );
+    }
+}
+
+/// A run that *starts* collapsing mid-session is a run that always collapsed.
+///
+/// The disengage direction has a copy behind it; the **engage** direction has only an argument, and
+/// this is the gate on that argument. Engaging is sound exactly when the right channel's state
+/// already equals the left channel's at that block, and it does: the two channels of a
+/// collapse-eligible track are fed one source channel, read designed words that compare bit-equal,
+/// and have therefore evolved through the same values since the plan was built. Nothing copies
+/// anything here, so if that induction were wrong the two arms would diverge from the block the
+/// switch flips.
+///
+/// Red mutation: make `render_mono`, `process_block_mono` or `input_chain_block_mono` read any word
+/// the dual body reads from the *right* channel — the state that has been evolving in parallel and
+/// that a collapsed block stops touching.
+#[test]
+fn a_run_that_starts_collapsing_renders_what_an_always_collapsed_run_renders() {
+    const SWITCH: u64 = BLOCKS / 2;
+
+    let mut late = SessionRuntime::build(Workload::SixtyFourTrackConsoleMono, PlanConfig::BASELINE);
+    let mut always =
+        SessionRuntime::build(Workload::SixtyFourTrackConsoleMono, PlanConfig::BASELINE);
+    late.force_mono_collapse_off(true);
+
+    let mut late_digest = Sha256Sink::new();
+    let mut always_digest = Sha256Sink::new();
+    for block in 0..BLOCKS {
+        if block == SWITCH {
+            late.force_mono_collapse_off(false);
+        }
+        late.render(block).expect("console render");
+        always.render(block).expect("console render");
+        late.hash_output(&mut late_digest);
+        always.hash_output(&mut always_digest);
+    }
+
+    let cohorts_in_plan = cohorts(late.bank_shape()[1]);
+    assert_eq!(
+        late.bank_collapse_counters(),
+        [(BLOCKS - SWITCH) * cohorts_in_plan, cohorts_in_plan],
+        "the late arm must have collapsed only from the switch onward"
+    );
+    assert_eq!(
+        always.bank_collapse_counters(),
+        [BLOCKS * cohorts_in_plan, cohorts_in_plan],
+        "the reference arm must have collapsed throughout"
+    );
+    assert_eq!(
+        late_digest.finish_hex(),
+        always_digest.finish_hex(),
+        "a session that started collapsing mid-render must be bit-identical to one that always did"
+    );
+}
