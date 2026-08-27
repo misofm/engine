@@ -4920,6 +4920,73 @@ mod tests {
         );
     }
 
+    /// Issue #206: a track whose rack program is a strict subsequence of its cohort leader's
+    /// compiles, binds and renders instead of panicking.
+    ///
+    /// # The bug this is the end-to-end gate on
+    ///
+    /// `order_members` chose lane order by `(active_count desc, id)` and
+    /// `PreparedGraphPlan::has_valid_structural_layout` requires every bank's members to be
+    /// **strictly ascending**. On the issue's own repro shape -- the intended 64-track strip with
+    /// one track's compressor removed -- the two disagreed: the short-program track sorted to the
+    /// end of its cohort, the last bank came out `["ch57".."ch63", "ch00"]`, structural validation
+    /// refused the plan, and `PreparedBuiltinsGraphArtifact::into_bound` reached
+    /// `unreachable!("sealed wrapper prevalidated its complete graph bindings")`. A panic on a
+    /// legal session, reachable from an ordinary console edit.
+    ///
+    /// Red mutation: drop the per-bank ascending pass from
+    /// `miso_engine_rack_compiler::order_members` -> this test panics at `into_bound`, which is
+    /// the exact failure the issue reports.
+    ///
+    /// The render is not decoration: a plan that bound the cohort and then rendered nothing would
+    /// pass a bind-only assertion. It is compared against the scalar registry for the same reason
+    /// every other cohort test here is -- banking regroups lanes and must move no rendered bit,
+    /// and this change is a *permutation inside one bank*, which is the narrowest form of that
+    /// claim.
+    #[test]
+    fn a_subsequence_program_track_binds_instead_of_panicking() {
+        const BLOCKS: u64 = 12;
+        let Some(_width) = BankWidth::for_backend(host_dispatch()) else {
+            return;
+        };
+        let mut model = parse_session_toml(CONSOLE_SIXTY_FOUR_TRACK_INTENDED_FIXTURE)
+            .expect("intended fixture");
+        // The issue's edit, exactly: one track loses one slot of its `simd1` chain, so its program
+        // is a strict subsequence of every other track's and it joins their cohort with an
+        // identity slot rather than forming one of its own.
+        let leader_slots = model.tracks[1].simd1.effects.len();
+        assert!(
+            leader_slots > 1,
+            "the fixture's simd1 must be a multi-slot chain for the subsequence to exist"
+        );
+        model.tracks[0].simd1.effects.remove(leader_slots - 1);
+        assert_eq!(model.tracks[0].simd1.effects.len(), leader_slots - 1);
+
+        let registry = launch_native_effect_registry_v1().expect("launch registry");
+        let artifact = compile_console_model_with_builtins(&model, 2_060, &[], &registry);
+        // Every bank the plan retained is ascending; the graph would have refused the bind
+        // otherwise, and this says so in the planner's own terms rather than as a panic message.
+        for bank in artifact.prepared_builtin_banks() {
+            let ids: Vec<_> = bank.members.to_vec();
+            let mut sorted = ids.clone();
+            sorted.sort();
+            assert_eq!(ids, sorted, "a builtin bank's members are not ascending");
+        }
+        let (pcm, ..) = render_console_builtins_blocks(artifact, BLOCKS, Vec::new());
+        assert!(
+            pcm.iter().flatten().any(|sample| *sample != 0.0),
+            "the subsequence session rendered audio"
+        );
+        let scalar =
+            compile_console_model_with_builtins(&model, 2_061, &[], &scalar_console_registry());
+        let (scalar_pcm, ..) = render_console_builtins_blocks(scalar, BLOCKS, Vec::new());
+        assert_pcm_bits_equal(
+            &pcm,
+            &scalar_pcm,
+            "64-track strip with one subsequence track",
+        );
+    }
+
     /// Misaligned lane sets decline the merge: the lane-alignment hole, made visible.
     ///
     /// A merge is only ever admissible when two banks cover the same lanes **in the same order**,
