@@ -36,7 +36,9 @@ use miso_engine_graph::{
 };
 use miso_engine_lane::Backend;
 use miso_engine_rack::{AoSoaScratch, BankSlotKey, RackLocationV1, RackProgramV1};
-use miso_engine_rack_compiler::{CohortCandidate, CohortLevel, plan_bank_groups};
+use miso_engine_rack_compiler::{
+    CohortCandidate, CohortLevel, CohortPoolClassV1, plan_bank_groups,
+};
 use miso_engine_session::{CompiledSession, MatrixOrPan, Track};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -456,16 +458,24 @@ fn add_bank_resource(
 
 /// The whole strip's bank plan: one group list per bankable stage, in render order.
 ///
-/// The three stages are planned over the *same* track list with the *same* planner, so lane `i` of
-/// a cohort's fader bank is the same track as lane `i` of its builtins bank wherever the
-/// dependency levels line up. Nothing relies on that: `runtime::chains_into` proves the lane-wise
+/// The three stages are planned over the *same* track list with the *same* planner and the *same*
+/// pool classes, so lane `i` of a cohort's fader bank is the same track as lane `i` of its
+/// builtins bank wherever the dependency levels line up. Nothing relies on that: `runtime::chains_into` proves the lane-wise
 /// relation on the lowered program and simply declines the merge where the orders disagree. What
 /// planning them alike buys is that on a homogeneous session they *do* agree, and the strip fuses
 /// into one chain per cohort.
+/// The fader and the matrix are **seam-side** stages and their pool class is not about them: a
+/// collapsed track duplicates its one plane *into* them, so their own per-channel words never gate
+/// anything ([`SEAM_SIDE_WITNESS`]). They are pooled by the class anyway, and deliberately -- the
+/// class here is the *track's*, not the stage's, so partitioning all three stages alike is exactly
+/// what keeps a cohort's builtins, fader and matrix banks covering the same lanes in the same
+/// order, which is the condition `runtime::chains_into` needs to fuse them into one chain. Pooling
+/// only the upstream stage would have split the strip's chain on every mixed session.
 fn planned_strip_banks(
     tracks: &[Box<str>],
     dispatch: Backend,
     levels: &[DependencyLevel],
+    classes: &SessionPoolClassesV1,
 ) -> [(TrackStage, Vec<Box<[GraphNodeId]>>); 3] {
     [
         TrackStage::PostInputBuiltins,
@@ -475,7 +485,7 @@ fn planned_strip_banks(
     .map(|stage| {
         (
             stage,
-            planned_builtin_bank_members(tracks, stage, dispatch, levels),
+            planned_builtin_bank_members(tracks, stage, dispatch, levels, classes),
         )
     })
 }
@@ -507,6 +517,7 @@ fn planned_builtin_bank_members(
     stage: TrackStage,
     dispatch: Backend,
     levels: &[DependencyLevel],
+    classes: &SessionPoolClassesV1,
 ) -> Vec<Box<[GraphNodeId]>> {
     let Some(width) = BankWidth::for_backend(dispatch) else {
         return Vec::new();
@@ -531,6 +542,7 @@ fn planned_builtin_bank_members(
             by_level.entry(level).or_default().push(CohortCandidate {
                 id: node,
                 program: RackProgramV1::new(RackLocationV1::Simd1, vec![BuiltinStageKeyV1]),
+                class: classes.class_of(track),
             });
         }
     }
@@ -1297,6 +1309,24 @@ impl PreparedBuiltinsSession {
         bindings
     }
 
+    /// Every track's prepared **input-builtins** channel-symmetry witness, in track order.
+    ///
+    /// The upstream-of-seam half of this crate's contribution to a track's pool class: the input
+    /// section is the one stage here that a collapse would run once, so its designed-word
+    /// comparison gates the class. The fader and the matrix are seam-side ([`SEAM_SIDE_WITNESS`])
+    /// and are deliberately absent -- a collapsed track duplicates its plane *into* them, so
+    /// folding their vacuously-symmetric witness in here would add a term that can never be false
+    /// and read, to a later caller, as if the seam had been checked.
+    ///
+    /// Read from the **bank** copy of each track's input section, which is the one a banked plan
+    /// renders. It is prepared from the same parameters as the scalar fallback by the same
+    /// `BuiltinChain::new` call shape, so the two cannot design different words.
+    pub fn input_channel_symmetry(&self) -> impl Iterator<Item = (&str, ChannelSymmetryWitnessV1)> {
+        self.bank_inputs
+            .iter()
+            .map(|(track, input)| (track.as_ref(), input.channel_symmetry()))
+    }
+
     /// Exact retained resource addition for the selected production bank layout.
     ///
     /// This is a read-only transactional preflight: graph/session caps can reject the final
@@ -1305,12 +1335,13 @@ impl PreparedBuiltinsSession {
         &self,
         dispatch: Backend,
         levels: &[DependencyLevel],
+        classes: &SessionPoolClassesV1,
     ) -> Option<GraphBuiltinBankResourceEstimate> {
         let Some(width) = BankWidth::for_backend(dispatch) else {
             return Some(GraphBuiltinBankResourceEstimate::default());
         };
         let mut total = GraphBuiltinBankResourceEstimate::default();
-        for (stage, groups) in planned_strip_banks(&self.seal.tracks, dispatch, levels) {
+        for (stage, groups) in planned_strip_banks(&self.seal.tracks, dispatch, levels, classes) {
             let processor_bytes = strip_processor_bytes(stage, width)?;
             let kind = builtin_bank_resource(&groups, width, self.seal.quantum, processor_bytes)?;
             total = add_bank_resource(total, kind)?;
@@ -1333,11 +1364,12 @@ impl PreparedBuiltinsSession {
         report: R,
         dispatch: Backend,
         levels: &[DependencyLevel],
+        classes: &SessionPoolClassesV1,
     ) -> PreparedBuiltinsGraphArtifact<R> {
         let Some(width) = BankWidth::for_backend(dispatch) else {
             return self.into_graph_artifact(graph, report);
         };
-        let plan = planned_strip_banks(&self.seal.tracks, dispatch, levels);
+        let plan = planned_strip_banks(&self.seal.tracks, dispatch, levels, classes);
         if plan.iter().all(|(_, groups)| groups.is_empty()) {
             return self.into_graph_artifact(graph, report);
         }
@@ -2492,6 +2524,97 @@ pub fn session_structural_symmetry_v1(
         .collect()
 }
 
+/// Every track's pool class for one compile, derived **once** and handed to both bank planners.
+///
+/// # Why this exists as an object rather than as a predicate each planner calls
+///
+/// The obligation stated on [`CohortPoolClassV1::of_prepare_witness`] is that the builtin-stage
+/// planner and the rack-chain planner must classify every track *identically*: issue #208's chain
+/// merges are proved lane by lane on the lowered program, and two planners whose pools hold
+/// different track sets produce banks whose lane sets slide out of step, so every
+/// `builtins -> EQ -> compressor -> limiter` merge declines **silently** -- the same rendered
+/// bits, no diagnostic, one planar/AoSoA round-trip per stage where the strip used to pay one per
+/// cohort.
+///
+/// A predicate each planner calls would make that agreement a property of two call sites staying
+/// in step. This makes it a property of there being one value: `GraphCompiler` derives this once
+/// per compile, `bind_rack_banks` reads it, and `into_graph_artifact_with_banks` reads the same
+/// object. `the_two_planners_agree_on_every_track_class` is the gate on the *observable*
+/// consequence -- the two planners' lane sets line up track for track -- because that, and not
+/// the map, is what the merge actually needs.
+///
+/// # What a track's class is derived from
+///
+/// The conjunction of every prepare-time witness that speaks for the track, then
+/// [`CohortPoolClassV1::of_prepare_witness`]:
+///
+/// * `SOURCE` from [`track_mono_source_v1`], through [`session_structural_symmetry_v1`]. This is
+///   the term the M0 phase built and the only one the compiled session can answer alone.
+/// * `DESIGNED` from each prepared upstream-of-seam stage the compile actually prepared: the
+///   track's input builtins ([`InputBuiltins::channel_symmetry`]) and each of its prepared native
+///   effects. A compile that prepared no builtins (`GraphCompiler::compile`) simply has one fewer
+///   contributor -- honest, because there is no input stage in that plan to be asymmetric.
+///
+/// Absent terms are never assumed: an unknown track answers [`CohortPoolClassV1::Stereo`], which
+/// is the class that cannot over-claim.
+#[derive(Clone, Debug, Default)]
+pub struct SessionPoolClassesV1 {
+    by_track: BTreeMap<Box<str>, ChannelSymmetryWitnessV1>,
+}
+
+impl SessionPoolClassesV1 {
+    /// Seeds every track's witness with its structural (`SOURCE`) term.
+    #[must_use]
+    pub fn from_session(session: &CompiledSession) -> Self {
+        Self {
+            by_track: session_structural_symmetry_v1(session)
+                .into_iter()
+                .collect(),
+        }
+    }
+
+    /// Conjoins one prepared stage's witness into its track's.
+    ///
+    /// Conjunction, never assignment: a track has several upstream stages and a single declining
+    /// one declines the track, which is the same rule `ChannelSymmetryWitnessV1::and` states for
+    /// every other composition of these witnesses. A stage naming a track the session does not
+    /// have is ignored rather than inserted, so a mismatched caller cannot invent a class.
+    pub fn conjoin(&mut self, track_id: &str, witness: ChannelSymmetryWitnessV1) {
+        if let Some(existing) = self.by_track.get_mut(track_id) {
+            *existing = existing.and(witness);
+        }
+    }
+
+    /// This track's pool class. An unknown track is [`CohortPoolClassV1::Stereo`].
+    #[must_use]
+    pub fn class_of(&self, track_id: &str) -> CohortPoolClassV1 {
+        self.by_track
+            .get(track_id)
+            .copied()
+            .map_or(CohortPoolClassV1::Stereo, |witness| {
+                CohortPoolClassV1::of_prepare_witness(witness)
+            })
+    }
+
+    /// Every track's class, in normalized track order. Evidence and diagnosis only.
+    pub fn classes(&self) -> impl Iterator<Item = (&str, CohortPoolClassV1)> {
+        self.by_track.iter().map(|(track, witness)| {
+            (
+                track.as_ref(),
+                CohortPoolClassV1::of_prepare_witness(*witness),
+            )
+        })
+    }
+
+    /// How many tracks fall in [`CohortPoolClassV1::MonoSymmetricAtPrepare`].
+    #[must_use]
+    pub fn mono_track_count(&self) -> usize {
+        self.classes()
+            .filter(|(_, class)| *class == CohortPoolClassV1::MonoSymmetricAtPrepare)
+            .count()
+    }
+}
+
 struct InputProcessor(InputBuiltins);
 impl GraphRuntimeProcessor for InputProcessor {
     fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
@@ -3313,6 +3436,7 @@ mod tests {
                 TrackStage::PostInputBuiltins,
                 dispatch,
                 &levels,
+                &SessionPoolClassesV1::default(),
             );
             let sizes: Vec<_> = groups.iter().map(|members| members.len()).collect();
             assert_eq!(sizes, expected_sizes, "{:?}", dispatch);
@@ -3343,8 +3467,14 @@ mod tests {
         }
         let scalar = Backend::Scalar;
         assert!(
-            planned_builtin_bank_members(&inputs, TrackStage::PostInputBuiltins, scalar, &levels)
-                .is_empty()
+            planned_builtin_bank_members(
+                &inputs,
+                TrackStage::PostInputBuiltins,
+                scalar,
+                &levels,
+                &SessionPoolClassesV1::default(),
+            )
+            .is_empty()
         );
     }
     /// F4/F11: a bank is charged for the two main planes it actually owns and for the member ids
@@ -3683,7 +3813,9 @@ mod tests {
         let compiled = n_track_session(n);
         let builtins = prepare_session_builtins(&compiled, &[], caps()).expect("harness builtins");
         let (graph, levels) = track_graph(n);
-        let mut artifact = builtins.into_graph_artifact_with_banks(graph, (), dispatch, &levels);
+        let classes = SessionPoolClassesV1::from_session(&compiled);
+        let mut artifact =
+            builtins.into_graph_artifact_with_banks(graph, (), dispatch, &levels, &classes);
         let bank_count = artifact.graph.prepared_builtin_bank_count();
         let captures: Vec<_> = (0..n)
             .map(|_| Arc::new(std::sync::Mutex::new(Vec::new())))

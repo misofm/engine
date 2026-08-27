@@ -13,8 +13,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use miso_engine_core::{
     QuantumFrames,
     realtime::{
-        BufferArena, PlanarBufferMut, PlanarBufferRef, PrepareRenderPlan, PreparedPlanExecutor,
-        PreparedRenderPlan, RenderEnvelope, RenderError,
+        BufferArena, PlanUnitEligibilityV1, PlanarBufferMut, PlanarBufferRef, PrepareRenderPlan,
+        PreparedPlanExecutor, PreparedRenderPlan, RenderEnvelope, RenderError,
     },
 };
 use miso_engine_effect_contract::{
@@ -658,6 +658,15 @@ impl PreparedGraphPlan {
         self.builtin_banks
             .iter()
             .flat_map(|bank| bank.members.iter())
+    }
+    /// Every retained effect bank's members, in lane order.
+    ///
+    /// The counterpart of [`builtin_bank_members`](Self::builtin_bank_members), and grouped rather
+    /// than flattened for the reason `bank_member_nodes` gives: which lanes a bank covers **in
+    /// what order** is the whole of what a downstream merge or a track-to-lane join can use, and a
+    /// flat union destroys it.
+    pub fn effect_bank_members(&self) -> impl Iterator<Item = &[EffectNodeId]> {
+        self.banks.iter().map(|bank| bank.members.as_ref())
     }
     /// Address-free semantic membership retained by production builtin banks.
     pub fn builtin_bank_info(&self) -> impl Iterator<Item = GraphPreparedBuiltinBankInfo<'_>> {
@@ -1357,6 +1366,28 @@ impl PreparedPlanExecutor for GraphExecutor {
             total[1] = total[1].saturating_add(counters[1]);
             total
         })
+    }
+
+    /// The per-unit form of the census, joined to its bind-time identity.
+    ///
+    /// The dynamic half comes from the same `RuntimeUnit::symmetry_counters` the census folds, so
+    /// the rows and the totals cannot disagree -- summing `[eligible_lanes, lanes]` over these
+    /// rows *is* `symmetry_counters`, and `the_rows_sum_to_the_census` pins that.
+    fn unit_eligibility(&self) -> Vec<PlanUnitEligibilityV1> {
+        self.runtime
+            .units
+            .iter()
+            .zip(self.runtime.identity.iter())
+            .enumerate()
+            .map(|(unit, (runtime_unit, identity))| PlanUnitEligibilityV1 {
+                unit: u32::try_from(unit).unwrap_or(u32::MAX),
+                banked: identity.banked,
+                stages: identity.stages,
+                upstream_of_seam_stages: identity.upstream_of_seam_stages,
+                lane_tracks: identity.lane_tracks.clone(),
+                lane_eligible: runtime_unit.lane_eligibility().into_boxed_slice(),
+            })
+            .collect()
     }
 
     fn observation_binding_counts(&self) -> [u64; 3] {

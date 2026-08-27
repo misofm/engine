@@ -125,6 +125,11 @@ impl GraphCompiler {
             compiled.report,
             dispatch,
             &levels,
+            // The *same* object `bind_rack_banks` was handed inside the compile above. This is
+            // the whole of the two-planner agreement mechanism (`SessionPoolClassesV1`): there
+            // is one derivation and both planners read it, so they cannot form different
+            // opinions about a track and silently decline the strip's chain merges.
+            &compiled.pool_classes,
         ))
     }
     // The frozen transactional API returns the complete prepared-effect input by value on
@@ -465,11 +470,36 @@ impl GraphCompiler {
         let ports = ports_for(&nodes, &edges);
         // Reductions were only ever computed for the canonical text; `GraphCompiler::evidence`
         // recomputes them from the plan's spec when something asks (#99 F5).
-        let (banks, rack_cohorts) = match bind_rack_banks(&effects, &effect_ids, &levels, dispatch)
-        {
-            Ok(value) => value,
-            Err(diagnostic) => return Err(failure(effects, vec![diagnostic])),
-        };
+        // Mono-collapse M1: one derivation of the pool class per compile, handed to **both** bank
+        // planners. `SessionPoolClassesV1` states the obligation and why the map is an object
+        // rather than a predicate each planner calls; the short version is that two planners that
+        // disagreed about one track would slide their banks' lane sets out of step and every #208
+        // chain merge would decline silently.
+        //
+        // The contributors are the prepare-time terms of every upstream-of-seam stage this compile
+        // actually prepared: `SOURCE` from the compiled session, `DESIGNED` from each prepared
+        // native effect and -- when this is the `compile_with_builtins` path -- from each track's
+        // prepared input section. `GraphCompiler::compile` has no input sections in its plan at
+        // all, so having one fewer contributor there is the honest answer rather than a gap.
+        let mut pool_classes = SessionPoolClassesV1::from_session(&session);
+        for entry in &effects.entries {
+            let mut witness = ChannelSymmetryWitnessV1::SYMMETRIC;
+            witness.set(
+                ChannelSymmetryWitnessV1::DESIGNED,
+                entry.processor.channel_symmetry(),
+            );
+            pool_classes.conjoin(&entry.track_id, witness);
+        }
+        if let Some(builtins) = prepared_builtins {
+            for (track, witness) in builtins.input_channel_symmetry() {
+                pool_classes.conjoin(track, witness);
+            }
+        }
+        let (banks, rack_cohorts) =
+            match bind_rack_banks(&effects, &effect_ids, &levels, dispatch, &pool_classes) {
+                Ok(value) => value,
+                Err(diagnostic) => return Err(failure(effects, vec![diagnostic])),
+            };
         let Some(mut estimate) = resource_estimate(
             session.quantum().0,
             session.resource_estimate().requested_runtime_bytes,
@@ -511,7 +541,7 @@ impl GraphCompiler {
         let mut capped_estimate = estimate.clone();
         if let Some(builtins) = prepared_builtins {
             let Some(resource) =
-                builtins.graph_builtin_bank_resource(rack_cohorts.dispatch, &levels)
+                builtins.graph_builtin_bank_resource(rack_cohorts.dispatch, &levels, &pool_classes)
             else {
                 return Err(failure(
                     effects,
@@ -611,6 +641,7 @@ impl GraphCompiler {
             effect_observations,
         });
         Ok(PreparedGraphArtifact {
+            pool_classes,
             graph,
             report: GraphCompileReport {
                 output_latency: timing.output_latency,

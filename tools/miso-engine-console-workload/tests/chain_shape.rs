@@ -16,10 +16,13 @@
 //! byte-identical audio and only show up as a slower row, which is exactly the failure mode a
 //! digest gate cannot see.
 
+use std::collections::BTreeMap;
+
 use miso_engine_bench_support::digest::Sha256Sink;
 use miso_engine_console_workload::{
     ObservationArm, PlanConfig, SessionRuntime, WORKLOADS, Workload,
 };
+use miso_engine_effect_contract::ChannelSymmetryWitnessV1;
 
 /// Enough blocks for the limiter's lookahead to clear and every detector to settle.
 const BLOCKS: u64 = 64;
@@ -353,6 +356,40 @@ fn every_standing_workload_folds_one_route_per_track() {
             );
             continue;
         }
+        // The half-mono row is the second exception, and mono-collapse M1 made it one
+        // deliberately. Issue #218's fold is admissible only when the folded chains' lanes, taken
+        // in render order, are **exactly** the master reduction's contributor order -- a
+        // floating-point sum is not associative, so the same summands in a different order are
+        // different bits, and `route_fold` proves the two sequences equal rather than assuming it.
+        // The reduction's order is track order. M1 pools cohorts by collapse class, and this row's
+        // classes *alternate* by construction, so its chains cover `{ch00, ch02, ...}` and
+        // `{ch01, ch03, ...}` and the two sequences are no longer equal. The fold declines, for
+        // exactly the clause its own doc comment names: "a cohort whose planner ordered its lanes
+        // differently from the edge order ... declines the whole fold".
+        //
+        // This is a forfeited optimisation and not a wrong render -- the row's digest is
+        // byte-identical across M1 -- which is why it is asserted here as a count.
+        //
+        // It is also a property of the **interleaving** and not of pooling: the graph compiler's
+        // `class_pooling_forfeits_the_route_fold_only_on_an_interleaved_session` runs the same
+        // 64 tracks split contiguously (32 mono then 32 stereo, the shape a real session takes)
+        // and all 64 routes still fold. Asserting zero here rather than skipping the row is what
+        // keeps that reading honest: a future change that quietly restored the fold on the
+        // alternating row would be changing the association proof, and this would say so.
+        if workload == Workload::SixtyFourTrackConsoleHalfMono {
+            assert_eq!(
+                runtime.bank_route_folds(),
+                0,
+                "the alternating row's pooled lane sets are not the reduction's order, so the \
+                 fold declines"
+            );
+            assert_eq!(
+                runtime.bank_shape(),
+                [8, 48],
+                "and it declines without moving a bank: the shape is the uniform rows'"
+            );
+            continue;
+        }
         assert_eq!(
             runtime.bank_route_folds(),
             u64::from(workload.tracks()),
@@ -362,7 +399,8 @@ fn every_standing_workload_folds_one_route_per_track() {
     }
 }
 
-/// The mixed-eligibility cohort banks exactly like a uniform one.
+/// The mixed-eligibility cohort banks exactly like a uniform one -- and, since mono-collapse M1,
+/// is no longer mixed.
 ///
 /// # Why this gate exists before the thing it gates
 ///
@@ -372,13 +410,26 @@ fn every_standing_workload_folds_one_route_per_track() {
 /// homogeneous. `half_mono` alternates -- even tracks read one source channel, odd tracks read two
 /// -- which makes every eight-lane cohort four and four.
 ///
-/// Today the claim is that the mixed session is *shaped* like the uniform ones: same chains, same
-/// slots, same planar/AoSoA round-trips, because nothing yet reads the witness. That equality is
-/// the baseline a collapse must either preserve or deliberately move, and it is asserted here
-/// rather than in a record because the wasm host reports no shape at all.
+/// # What M1 moved, and what it did not
 ///
-/// The census is asserted too, in both directions. A `half_mono` row whose derivation had silently
-/// stopped firing would be `_mono` under another name and would pass every shape assertion below.
+/// M1 gave the cohort planner a third pool key beside the level and the rack: the track's
+/// collapse class (`CohortPoolClassV1`). The 32 mono tracks and the 32 stereo ones now pool
+/// separately, so this row's eight cohorts are **four all-mono and four all-stereo** where they
+/// were eight half-and-half. That is the regroup the collapse needs and it is the whole of M1's
+/// behaviour change.
+///
+/// It is **class A**, and the shape assertions below are how that is stated: same `[chains,
+/// slots]` as both uniform rows, same planar/AoSoA round-trip count, same digest. Pooling
+/// regroups lanes and never changes per-lane arithmetic (AGENTS.md), so a regroup that moved a
+/// rendered bit would be a defect and not a trade-off. The one thing it *does* move is the #218
+/// route fold, which `every_standing_workload_folds_one_route_per_track` states and derives.
+///
+/// # The per-cohort assertion is the new one, and it is the one that could not be made before
+///
+/// The census (`[eligible lanes, lanes]`) is a pair of totals and cannot tell four-and-four from
+/// eight-and-zero: both give 32 eligible lanes over 64. `unit_eligibility` is per unit, so the
+/// difference between "every cohort is half eligible" and "half the cohorts are wholly eligible"
+/// is visible -- and that difference is precisely what M2's dispatch will read.
 #[test]
 fn the_half_mono_cohort_banks_like_a_uniform_one() {
     let mono = render(
@@ -425,11 +476,27 @@ fn the_half_mono_cohort_banks_like_a_uniform_one() {
         (64, [64, 129]),
         "every track of the mono fixture is collapse-eligible"
     );
+    // The half-mono row's own census, derived rather than pinned -- and it is the standing worked
+    // example of why `symmetry_counters` is monotone evidence and **not** a pool sizing number.
+    //
+    // The uniform mono row counts 129 "lanes": 64 bank-chain lanes, 64 source-input ops and the
+    // master, its 64 route ops having been absorbed by the #218 fold and never built as units at
+    // all. The half-mono row's fold declines (see
+    // `every_standing_workload_folds_one_route_per_track` for the association-order derivation),
+    // so its 64 route ops *are* dispatched: 193 lanes, not 129. And a `Route` reports
+    // `ChannelSymmetryWitnessV1::SYMMETRIC` -- it is not per-track upstream work, so nothing about
+    // it can make two channels disagree -- which adds 64 to the eligible half as well.
+    //
+    // So the pair moves from `[64, 129]` to `[128, 193]` on a row where **not one track's
+    // symmetry changed**: 32 of its tracks are collapse-eligible before and after, which is what
+    // `structural_mono_tracks` still reports and what the per-cohort rows below actually measure.
+    // Two censuses are comparable only when the plans' unit inventories are; this is that caveat
+    // with numbers on it.
     assert_eq!(
         counted(Workload::SixtyFourTrackConsoleHalfMono),
-        (32, [64, 129]),
-        "half the tracks of the half-mono row read two source channels; every track's designed \
-         words are still symmetric, which is what makes the SOURCE term the only thing that moved"
+        (32, [64 + 64, 129 + 64]),
+        "half the tracks of the half-mono row read two source channels; the census additionally \
+         carries the 64 route ops this row's declined fold left dispatched"
     );
     assert_eq!(
         counted(Workload::SixtyFourTrackConsole).0,
@@ -441,6 +508,156 @@ fn the_half_mono_cohort_banks_like_a_uniform_one() {
         "the half-mono row must render different bits from the uniform mono row, or its odd \
          tracks are not reading a second source channel at all"
     );
+
+    // Mono-collapse M1: the cohorts are pooled by class, so no bank chain is mixed any more.
+    //
+    // Read as: of the row's `chains` upstream-of-seam bank chains, half are wholly eligible and
+    // half are wholly ineligible, and every chain is one or the other. Before M1 every one of them
+    // was four-and-four, which the census below cannot distinguish from this.
+    //
+    // Red mutation: make `SessionPoolClassesV1::class_of` return `CohortPoolClassV1::Stereo`
+    // unconditionally -- the pre-M1 behaviour, one pool per (level, rack) -- and every chain goes
+    // back to holding four even tracks and four odd ones: the per-chain homogeneity assertion
+    // fails and `collapsible` falls to zero, while every shape and digest assertion above stays
+    // green. That is the shape of failure this test exists for, and the reason it is a *count*.
+    let runtime = SessionRuntime::build(
+        Workload::SixtyFourTrackConsoleHalfMono,
+        PlanConfig::BASELINE,
+    );
+    let rows = runtime.unit_eligibility();
+    let cohorts_in_plan = half.1[0];
+    let banked: Vec<_> = rows.iter().filter(|row| row.banked).collect();
+    assert_eq!(
+        banked.len() as u64,
+        cohorts_in_plan,
+        "one row per bank chain"
+    );
+    // Every chain of this row spans the whole strip, so none of them is seam-side only. The check
+    // is not decoration: a fader-only chain's witness is unconditionally symmetric
+    // (`SEAM_SIDE_WITNESS`), and counting one as "wholly eligible" would be counting an
+    // unconditional `true`.
+    assert!(
+        banked.iter().all(|row| !row.witness_is_vacuous()),
+        "every chain here renders upstream-of-seam stages, so no row's witness is vacuous"
+    );
+    // The runtime half alone cannot see the split, and that is not a defect: `SOURCE` is not one
+    // of its four terms (`session_structural_symmetry_v1` says why it lives on the control plane),
+    // and this row's designed words are symmetric on *every* track -- the half-mono derivation
+    // moves the source mapping and nothing else. So every chain reports every lane eligible here,
+    // exactly as the uniform mono row does.
+    assert!(
+        banked.iter().all(|row| row.all_lanes_eligible()),
+        "the runtime witness is source agnostic, so it admits every lane of this row"
+    );
+
+    // The join is what answers the question. The structural half is keyed by **track id** and the
+    // runtime half by anonymous **lanes**; `lane_tracks` is the only relation between the two
+    // keys, and a collapse decision is their conjunction. Performing it here is what proves the
+    // plumbing M2's dispatch needs is actually connected end to end.
+    let structural: BTreeMap<&str, ChannelSymmetryWitnessV1> = runtime
+        .structural_symmetry()
+        .iter()
+        .map(|(track, witness)| (track.as_ref(), *witness))
+        .collect();
+    let mut collapsible = 0_u64;
+    for row in &banked {
+        let lanes: Vec<ChannelSymmetryWitnessV1> = row
+            .lane_tracks
+            .iter()
+            .map(|track| {
+                structural
+                    .get(track.as_ref())
+                    .copied()
+                    .expect("every bank lane names a track of the session")
+            })
+            .collect();
+        assert_eq!(lanes.len() as u32, row.lanes(), "one track per active lane");
+        let eligible = lanes.iter().filter(|witness| witness.eligible()).count();
+        // The M1 claim, per cohort: no chain is mixed any more. Before M1 every one of them was
+        // four-and-four, and the census cannot tell that apart from this at all.
+        assert!(
+            eligible == 0 || eligible == lanes.len(),
+            "a chain mixed the two pool classes: {:?}",
+            row.lane_tracks
+        );
+        if eligible == lanes.len() && row.all_lanes_eligible() {
+            collapsible += 1;
+        }
+    }
+    assert_eq!(
+        collapsible,
+        cohorts_in_plan / 2,
+        "half this row's cohorts are wholly collapse-eligible once both halves are conjoined"
+    );
+    // And the rows are the census, so the two surfaces cannot drift apart.
+    let folded = rows.iter().fold([0_u64, 0], |mut total, row| {
+        total[0] += u64::from(row.eligible_lanes());
+        total[1] += u64::from(row.lanes());
+        total
+    });
+    assert_eq!(
+        folded,
+        runtime.symmetry_counters(),
+        "the per-unit rows must sum to the census"
+    );
+}
+
+/// A seam-side-only chain's witness is *vacuous*, and the plan surface says so.
+///
+/// # The trap this closes
+///
+/// `SEAM_SIDE_WITNESS` is an unconditional `ChannelSymmetryWitnessV1::SYMMETRIC`: the collapse
+/// duplicates its one computed plane *into* the fader and the matrix, so their per-channel words
+/// are free to differ and are deliberately never compared. A unit built only from those two stages
+/// therefore reports every lane eligible on **every** session, mono or stereo. A dispatch that
+/// read that as "this cohort may collapse" would be reading a constant `true` as evidence, and no
+/// digest could see the mistake -- which is why the classification is a queryable field rather
+/// than a note in a doc comment.
+///
+/// The nine-track ragged fixture is where such a unit actually exists. Its one-track tail cannot
+/// bank its effects (a one-member group strands), so its post-input bank has no successor to chain
+/// into, while its fader and matrix banks chain into each other: one unit, two stages, both
+/// seam-side. `the_ragged_tail_banks_like_any_other_cohort_and_pays_one_chain_for_it` is where
+/// that shape is derived; this is what it means for the collapse.
+///
+/// Red mutation: make `runtime::upstream_of_seam` return `true` for `PostFader`/`PostMatrix` ->
+/// no row is vacuous and the first assertion fails. Make it return `false` for
+/// `GraphNodeId::Effect` -> the full strip's chains lose two thirds of their upstream stages and
+/// the last assertion fails.
+#[test]
+fn a_seam_side_only_chain_reads_as_vacuous_rather_than_eligible() {
+    let ragged = SessionRuntime::build(Workload::NineTrackRaggedStrip, PlanConfig::BASELINE);
+    let rows = ragged.unit_eligibility();
+    let vacuous: Vec<_> = rows
+        .iter()
+        .filter(|row| row.banked && row.witness_is_vacuous())
+        .collect();
+    assert_eq!(
+        vacuous.len(),
+        1,
+        "the ragged tail's fused fader/matrix pair is the one seam-side-only chain"
+    );
+    let seam = vacuous[0];
+    assert_eq!(seam.stages, 2, "the fader and the matrix, fused");
+    assert_eq!(seam.upstream_of_seam_stages, 0);
+    assert!(
+        seam.all_lanes_eligible(),
+        "and it claims eligibility unconditionally, which is exactly why the flag is needed"
+    );
+
+    // The other side of the pair: the full 64-track strip's chains span both sides of the seam,
+    // four upstream stages (post-input builtins, EQ, compressor, limiter) and two seam-side ones,
+    // so none of them is vacuous.
+    let strip = SessionRuntime::build(Workload::SixtyFourTrackConsole, PlanConfig::BASELINE);
+    for row in strip.unit_eligibility().iter().filter(|row| row.banked) {
+        assert!(!row.witness_is_vacuous());
+        assert_eq!(row.stages, SLOTS_PER_COHORT as u32);
+        assert_eq!(
+            row.upstream_of_seam_stages,
+            SLOTS_PER_COHORT as u32 - 2,
+            "the fader and the matrix are the two seam-side slots of the strip"
+        );
+    }
 }
 
 /// The mono row-pair is one session today, to the bit.

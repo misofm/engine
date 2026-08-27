@@ -7,11 +7,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use miso_engine_builtins::BuiltinTail;
 use miso_engine_builtins_compiler::{
     PreparedBuiltinsGraphArtifact, PreparedBuiltinsGraphBindFailure, PreparedBuiltinsGraphBound,
-    PreparedBuiltinsSession,
+    PreparedBuiltinsSession, SessionPoolClassesV1,
 };
 use miso_engine_core::realtime::RenderEnvelope;
 use miso_engine_effect_compiler::{EffectPreparedEntry, EffectPreparedSession, EffectRack};
-use miso_engine_effect_contract::BankWidth;
+use miso_engine_effect_contract::{BankWidth, ChannelSymmetryWitnessV1};
 use miso_engine_effect_contract::{
     LatencySamples, PrepareEffectBankRequest, PreparedSidechainPort, TailSamples,
 };
@@ -57,6 +57,13 @@ pub struct GraphCompiler;
 pub struct PreparedGraphArtifact {
     pub graph: PreparedGraphPlan,
     pub report: GraphCompileReport,
+    /// Every track's cohort pool class, as this compile derived it (mono-collapse M1).
+    ///
+    /// Published because it is the object `compile_with_builtins` must hand to the *second*
+    /// planner: `bind_rack_banks` ran inside the compile and read this, and
+    /// `PreparedBuiltinsSession::into_graph_artifact_with_banks` reads the same value rather than
+    /// re-deriving one. See [`miso_engine_builtins_compiler::SessionPoolClassesV1`].
+    pub pool_classes: SessionPoolClassesV1,
 }
 pub struct GraphCompileFailure {
     pub effects: EffectPreparedSession,
@@ -338,6 +345,8 @@ mod tests {
         include_str!("../../../fixtures/session/v1/console-sixty-four-track.toml");
     const CONSOLE_SIXTY_FOUR_TRACK_INTENDED_FIXTURE: &str =
         include_str!("../../../fixtures/session/v1/console-sixty-four-track-intended.toml");
+    const CONSOLE_SIXTY_FOUR_TRACK_MONO_FIXTURE: &str =
+        include_str!("../../../fixtures/session/v1/console-sixty-four-track-mono.toml");
     const PARAMETRIC_EQ_NINE_TRACK_FIXTURE: &str =
         include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.toml");
 
@@ -2666,8 +2675,14 @@ mod tests {
             let lanes = BankWidth::for_backend(dispatch)
                 .expect("vector backend")
                 .lanes() as usize;
-            let (banks, report) = bind_rack_banks(&rebound, &ids, &dependency_levels, dispatch)
-                .expect("off-render factory bind");
+            let (banks, report) = bind_rack_banks(
+                &rebound,
+                &ids,
+                &dependency_levels,
+                dispatch,
+                &SessionPoolClassesV1::default(),
+            )
+            .expect("off-render factory bind");
             assert_eq!(banks.len(), 12 / lanes);
             assert!(banks.iter().all(|bank| {
                 bank.members.len() == lanes && bank.active_mask.iter().all(|active| *active)
@@ -2730,6 +2745,7 @@ mod tests {
             &connected_ids,
             &dependency_levels,
             eight,
+            &SessionPoolClassesV1::default(),
         )
         .expect("connected sidechain is scalar fallback, not failure");
         assert!(connected_banks.0.iter().all(|bank| {
@@ -2767,9 +2783,14 @@ mod tests {
         // F12: a bank never crosses a dependency level. Before #96 the whole chunk holding a
         // level-incompatible member was dropped; the planner now partitions by level *before*
         // chunking, so the member itself never banks while its level-compatible peers still do.
-        let (split_banks, split_report) =
-            bind_rack_banks(&same_wave, &same_wave_ids, &incompatible_levels, eight)
-                .expect("a level split is a scalar fallback, not a failure");
+        let (split_banks, split_report) = bind_rack_banks(
+            &same_wave,
+            &same_wave_ids,
+            &incompatible_levels,
+            eight,
+            &SessionPoolClassesV1::default(),
+        )
+        .expect("a level split is a scalar fallback, not a failure");
         assert!(
             split_banks
                 .iter()
@@ -2818,7 +2839,13 @@ mod tests {
         )
         .expect("prepare scalar ownership");
         let rejected_ids = ids_for(&rejected);
-        let error = match bind_rack_banks(&rejected, &rejected_ids, &dependency_levels, eight) {
+        let error = match bind_rack_banks(
+            &rejected,
+            &rejected_ids,
+            &dependency_levels,
+            eight,
+            &SessionPoolClassesV1::default(),
+        ) {
             Ok(_) => panic!("factory failure must reject transactionally"),
             Err(error) => error,
         };
@@ -3248,7 +3275,11 @@ mod tests {
             .unwrap_or_else(|failure| panic!("cohort-boundary graph: {:?}", failure.diagnostics));
             let bank_count =
                 artifact.graph.prepared_bank_count() + artifact.graph.prepared_builtin_bank_count();
-            let PreparedGraphArtifact { graph, report: _ } = artifact;
+            let PreparedGraphArtifact {
+                graph,
+                report: _,
+                pool_classes: _,
+            } = artifact;
             let envelope = graph.envelope;
             let frames = envelope.quantum.0 as usize;
             let nodes = graph
@@ -3469,6 +3500,7 @@ mod tests {
         let expected_route_timings = bank_artifact.graph.route_timings.clone();
 
         let PreparedGraphArtifact {
+            pool_classes: _,
             graph: bank_graph,
             report: _,
         } = bank_artifact;
@@ -3514,6 +3546,7 @@ mod tests {
             })
             .unwrap_or_else(|failure| panic!("bank graph bind: {}", failure.code));
         let PreparedGraphArtifact {
+            pool_classes: _,
             graph: scalar_graph,
             report: _,
         } = scalar_artifact;
@@ -3774,10 +3807,12 @@ mod tests {
         let expected_route_timings = artifact.graph.route_timings.clone();
 
         let PreparedGraphArtifact {
+            pool_classes: _,
             graph: bank_graph,
             report: _,
         } = artifact;
         let PreparedGraphArtifact {
+            pool_classes: _,
             graph: scalar_graph,
             report: _,
         } = scalar_artifact;
@@ -4917,6 +4952,250 @@ mod tests {
             redirects, 0,
             "a send taken from `PostSimd1` is upstream of the limiter, so it declines the chain \
              merge without touching the scatter accounting at the far end of the strip"
+        );
+    }
+
+    /// Mono-collapse M1: the two bank planners classify every track alike, and the proof is the
+    /// thing the merge actually needs -- their banks cover the same lanes in the same order.
+    ///
+    /// # Why this and not a map comparison
+    ///
+    /// `SessionPoolClassesV1` makes the two planners read one value, so comparing the map against
+    /// itself would prove nothing. What can still go wrong is the *consequence*: a class that
+    /// partitioned the strip-stage pools differently from the rack-chain pools would leave bank
+    /// `{ch00, ch02, ...}` feeding bank `{ch00, ch01, ...}`, `runtime::chains_into` would decline
+    /// every `builtins -> EQ -> compressor -> limiter` merge lane by lane, and the plan would
+    /// render **byte-identical audio** while paying one planar/AoSoA round-trip per stage instead
+    /// of one per cohort. That is the failure F6 named and the only kind a digest cannot see, so
+    /// this asserts the lane sets and the chain count, not the map.
+    ///
+    /// Red mutation: derive the effect-chain candidate's class from anything but
+    /// `classes.class_of(track)` -- for instance hard-code `CohortPoolClassV1::Stereo` in
+    /// `bind_rack_banks` -- and the strip's `chains` jumps from one per cohort to one per stage
+    /// per cohort while every digest here stays green.
+    #[test]
+    fn the_two_planners_agree_on_every_track_class() {
+        const BLOCKS: u64 = 12;
+        let Some(width) = BankWidth::for_backend(host_dispatch()) else {
+            return;
+        };
+        let lanes = width.lanes() as usize;
+        let mut model =
+            parse_session_toml(CONSOLE_SIXTY_FOUR_TRACK_MONO_FIXTURE).expect("mono fixture");
+        // The half-mono shape: alternate tracks get the standing fixture's stereo mapping back, so
+        // every `lanes`-wide cohort would be half and half without the pool class.
+        for (index, track) in model.tracks.iter_mut().enumerate() {
+            if !index.is_multiple_of(2) {
+                track.right_source_channel = 1;
+            }
+        }
+        let registry = launch_native_effect_registry_v1().expect("launch registry");
+        let artifact = compile_console_model_with_builtins(&model, 2_070, &[], &registry);
+
+        // Every builtin bank is class-homogeneous, which is the strip-stage planner's half.
+        let mono = |track: &str| {
+            track
+                .strip_prefix("ch")
+                .and_then(|index| index.parse::<usize>().ok())
+                .expect("fixture track id")
+                .is_multiple_of(2)
+        };
+        let mut builtin_lane_sets: Vec<Vec<String>> = Vec::new();
+        for bank in artifact.prepared_builtin_banks() {
+            let tracks: Vec<String> = bank
+                .members
+                .iter()
+                .map(|node| match node {
+                    GraphNodeId::TrackStage { track_id, .. } => track_id.as_str().to_owned(),
+                    other => panic!("a builtin bank named {other:?}"),
+                })
+                .collect();
+            assert!(
+                tracks.iter().all(|track| mono(track)) || tracks.iter().all(|track| !mono(track)),
+                "a builtin bank mixed the two pool classes: {tracks:?}"
+            );
+            builtin_lane_sets.push(tracks);
+        }
+        assert_eq!(
+            builtin_lane_sets.len(),
+            3 * (64 / lanes),
+            "three strip stages"
+        );
+
+        // And every effect bank covers one of those lane sets, in the same lane order. This is the
+        // agreement in the only form the merge can use.
+        let mut effect_lane_sets: Vec<Vec<String>> = Vec::new();
+        for bank in artifact.graph().effect_bank_members() {
+            let tracks: Vec<String> = bank
+                .iter()
+                .map(|member| member.track_id.as_str().to_owned())
+                .collect();
+            assert!(
+                tracks.iter().all(|track| mono(track)) || tracks.iter().all(|track| !mono(track)),
+                "an effect bank mixed the two pool classes: {tracks:?}"
+            );
+            assert!(
+                builtin_lane_sets.contains(&tracks),
+                "an effect bank's lane set matches no strip-stage bank's: {tracks:?}"
+            );
+            effect_lane_sets.push(tracks);
+        }
+        assert_eq!(
+            effect_lane_sets.len(),
+            3 * (64 / lanes),
+            "eq, comp, limiter"
+        );
+
+        // The consequence, counted: the whole strip is still one chain per cohort.
+        let (pcm, transposes, chains, slots, _, _, _) =
+            render_console_builtins_blocks(artifact, BLOCKS, Vec::new());
+        assert_eq!(
+            chains,
+            (64 / lanes) as u64,
+            "one chain per cohort, on a session whose cohorts are pooled by class"
+        );
+        assert_eq!(slots, 6 * chains, "six slots per cohort");
+        assert_eq!(transposes, BLOCKS * chains, "G5 holds under class pooling");
+        assert!(pcm.iter().flatten().any(|sample| *sample != 0.0));
+    }
+
+    /// Mono-collapse M1: what class pooling costs, and on which sessions -- the effect banks.
+    ///
+    /// # The finding, measured rather than argued
+    ///
+    /// An effect bank binds only when its group is **full**: every launch effect factory refuses
+    /// `requests.len() != lanes` (#96 F7), so a group of fewer than `lanes` members renders on the
+    /// per-node scalar path. Pooling by class therefore has a remainder cost that pooling by rack
+    /// and level did not: a class whose pool is not a multiple of the lane width strands its tail,
+    /// and *both* classes now have a tail where one cohort had none.
+    ///
+    /// One odd track out of 64 is the worst realistic case and it is what this measures: 63 tracks
+    /// in one pool bind seven full banks and strand seven, and the lone track in the other pool
+    /// strands too -- eight tracks' worth of effect slots lost out of 64, one cohort in eight.
+    ///
+    /// It is a **forfeited optimisation and not a wrong render**: the digest is asserted equal to
+    /// the unsplit session's, because the split changes which tracks bank and never what a lane
+    /// computes.
+    ///
+    /// This is the number a ruling on the class predicate has to be made against. The predicate
+    /// M1 was briefed with is `SOURCE && DESIGNED`, both prepare-time terms; narrowing it to
+    /// `SOURCE` alone would make this case cost nothing (a polarity flip would no longer split a
+    /// pool) at the price of pooling some tracks as mono that will decline at dispatch. Neither is
+    /// unsound; the choice is a measurement, and this is the measurement.
+    #[test]
+    fn a_single_odd_track_strands_both_pools_remainders() {
+        const BLOCKS: u64 = 12;
+        let Some(width) = BankWidth::for_backend(host_dispatch()) else {
+            return;
+        };
+        let lanes = width.lanes() as usize;
+        let registry = launch_native_effect_registry_v1().expect("launch registry");
+
+        let uniform =
+            parse_session_toml(CONSOLE_SIXTY_FOUR_TRACK_MONO_FIXTURE).expect("mono fixture");
+        let mut odd = uniform.clone();
+        odd.tracks[7].right_source_channel = 1;
+
+        let unsplit = compile_console_model_with_builtins(&uniform, 2_074, &[], &registry);
+        let split = compile_console_model_with_builtins(&odd, 2_075, &[], &registry);
+        let unsplit_slots = unsplit.graph().prepared_bank_count();
+        let split_slots = split.graph().prepared_bank_count();
+
+        // Three effect slots per full cohort (EQ, compressor, limiter).
+        assert_eq!(
+            unsplit_slots,
+            3 * (64 / lanes),
+            "every cohort of 64 is full"
+        );
+        let full_cohorts_after = (64 - 1) / lanes;
+        assert_eq!(
+            split_slots,
+            3 * full_cohorts_after,
+            "the 63-track pool binds {full_cohorts_after} full cohorts and strands its tail; the \
+             one-track pool strands outright"
+        );
+        assert_eq!(
+            unsplit_slots - split_slots,
+            3,
+            "one whole cohort's worth of effect slots, lost to a single odd track"
+        );
+
+        // Class A: the tracks that stopped banking render the same bits per lane.
+        let (unsplit_pcm, ..) = render_console_builtins_blocks(unsplit, BLOCKS, Vec::new());
+        let scalar =
+            compile_console_model_with_builtins(&uniform, 2_076, &[], &scalar_console_registry());
+        let (scalar_pcm, ..) = render_console_builtins_blocks(scalar, BLOCKS, Vec::new());
+        assert_pcm_bits_equal(&unsplit_pcm, &scalar_pcm, "uniform mono strip");
+        let (split_pcm, ..) = render_console_builtins_blocks(split, BLOCKS, Vec::new());
+        let scalar_split =
+            compile_console_model_with_builtins(&odd, 2_077, &[], &scalar_console_registry());
+        let (scalar_split_pcm, ..) =
+            render_console_builtins_blocks(scalar_split, BLOCKS, Vec::new());
+        assert_pcm_bits_equal(&split_pcm, &scalar_split_pcm, "one-odd-track strip");
+    }
+
+    /// Mono-collapse M1: what class pooling costs, and on which sessions -- the route fold.
+    ///
+    /// # The finding
+    ///
+    /// Issue #218's route fold is admissible only when the folded chains' lanes, taken in render
+    /// order, are **exactly** the master reduction's contributor order (`route_fold`'s association
+    /// proof: a floating-point sum is not associative, so "the same summands" is not "the same
+    /// bits"). The reduction's order is track order. Pooling by class reorders a mixed session's
+    /// lanes, so on an **interleaved** session the fold declines -- correctly, and for the reason
+    /// the proof states: "a cohort whose planner ordered its lanes differently from the edge order
+    /// ... declines the whole fold".
+    ///
+    /// That is a forfeited optimisation, not a wrong render: the digest is unchanged either way,
+    /// which is exactly why it is asserted as a **count** here.
+    ///
+    /// # And it is a property of the interleaving, not of pooling
+    ///
+    /// The contiguous arm is the control. Split the same 64 tracks into the first 32 mono and the
+    /// last 32 stereo -- the shape a real session takes, and the shape the alternating bench row
+    /// deliberately is not -- and each pool's lane sets are contiguous runs of track order, so the
+    /// chains' order still equals the reduction's and all 64 routes fold. A reader who saw only
+    /// the alternating row would conclude pooling costs the fold outright; it does not.
+    #[test]
+    fn class_pooling_forfeits_the_route_fold_only_on_an_interleaved_session() {
+        const BLOCKS: u64 = 12;
+        let Some(width) = BankWidth::for_backend(host_dispatch()) else {
+            return;
+        };
+        let lanes = width.lanes() as u64;
+        let registry = launch_native_effect_registry_v1().expect("launch registry");
+        let mut folds = Vec::new();
+        for (name, plan_id, stereo_at) in [
+            (
+                "uniform mono",
+                2_071_u64,
+                (|_: usize| false) as fn(usize) -> bool,
+            ),
+            ("alternating", 2_072, |index: usize| {
+                !index.is_multiple_of(2)
+            }),
+            ("contiguous", 2_073, |index: usize| index >= 32),
+        ] {
+            let mut model =
+                parse_session_toml(CONSOLE_SIXTY_FOUR_TRACK_MONO_FIXTURE).expect("mono fixture");
+            for (index, track) in model.tracks.iter_mut().enumerate() {
+                if stereo_at(index) {
+                    track.right_source_channel = 1;
+                }
+            }
+            let artifact = compile_console_model_with_builtins(&model, plan_id, &[], &registry);
+            let (_, transposes, chains, slots, _, _, fold) =
+                render_console_builtins_blocks(artifact, BLOCKS, Vec::new());
+            assert_eq!(chains, 64 / lanes, "{name}: one chain per cohort");
+            assert_eq!(slots, 6 * chains, "{name}: six slots per cohort");
+            assert_eq!(transposes, BLOCKS * chains, "{name}: G5");
+            folds.push((name, fold));
+        }
+        assert_eq!(
+            folds,
+            vec![("uniform mono", 64), ("alternating", 0), ("contiguous", 64)],
+            "the fold survives a class split whose lane sets stay in track order and declines the \
+             one whose do not"
         );
     }
 
@@ -6409,10 +6688,12 @@ mod tests {
         let expected_schedule = artifact.graph.sequential_schedule.clone();
         let expected_route_timings = artifact.graph.route_timings.clone();
         let PreparedGraphArtifact {
+            pool_classes: _,
             graph: bank_graph,
             report: _,
         } = artifact;
         let PreparedGraphArtifact {
+            pool_classes: _,
             graph: scalar_graph,
             report: _,
         } = scalar_artifact;
@@ -6758,10 +7039,12 @@ mod tests {
         let minimum_plan_bytes = artifact.report.estimate.incremental_plan_bytes;
 
         let PreparedGraphArtifact {
+            pool_classes: _,
             graph: bank_graph,
             report: _,
         } = artifact;
         let PreparedGraphArtifact {
+            pool_classes: _,
             graph: scalar_graph,
             report: _,
         } = scalar_artifact;
@@ -7144,9 +7427,12 @@ mod tests {
         let minimum_plan_bytes = artifact.report.estimate.incremental_plan_bytes;
 
         let PreparedGraphArtifact {
-            graph: bank_graph, ..
+            pool_classes: _,
+            graph: bank_graph,
+            ..
         } = artifact;
         let PreparedGraphArtifact {
+            pool_classes: _,
             graph: scalar_graph,
             ..
         } = scalar_artifact;
@@ -7522,9 +7808,12 @@ mod tests {
         let minimum_plan_bytes = artifact.report.estimate.incremental_plan_bytes;
 
         let PreparedGraphArtifact {
-            graph: bank_graph, ..
+            pool_classes: _,
+            graph: bank_graph,
+            ..
         } = artifact;
         let PreparedGraphArtifact {
+            pool_classes: _,
             graph: scalar_graph,
             ..
         } = scalar_artifact;
@@ -7901,9 +8190,12 @@ mod tests {
         let minimum_plan_bytes = artifact.report.estimate.incremental_plan_bytes;
 
         let PreparedGraphArtifact {
-            graph: bank_graph, ..
+            pool_classes: _,
+            graph: bank_graph,
+            ..
         } = artifact;
         let PreparedGraphArtifact {
+            pool_classes: _,
             graph: scalar_graph,
             ..
         } = scalar_artifact;

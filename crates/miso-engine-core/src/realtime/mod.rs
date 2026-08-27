@@ -24,8 +24,9 @@ pub use observe::{
     observation_slot, observation_slot_retained_bytes,
 };
 pub use plan::{
-    ExecutorHandover, PrepareRenderPlan, PreparedPlanExecutor, PreparedProgram, PreparedRenderPlan,
-    RenderEnvelope, RenderError, RenderIo, RenderReport, RenderTime,
+    ExecutorHandover, PlanUnitEligibilityV1, PrepareRenderPlan, PreparedPlanExecutor,
+    PreparedProgram, PreparedRenderPlan, RenderEnvelope, RenderError, RenderIo, RenderReport,
+    RenderTime,
 };
 pub use plan_exchange::{
     PlanEpoch, PlanExchangeConfig, PlanExchangeResourceReport, PlanPublisher,

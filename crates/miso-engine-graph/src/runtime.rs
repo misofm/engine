@@ -392,6 +392,17 @@ impl RuntimeUnit {
         }
     }
 
+    /// One flag per active lane, in lane order (mono-collapse M1).
+    ///
+    /// The localisable form of [`symmetry_counters`](Self::symmetry_counters); folding this gives
+    /// that, which is what keeps the census and the per-unit rows from ever disagreeing.
+    pub(crate) fn lane_eligibility(&self) -> Vec<bool> {
+        match self {
+            Self::Op(op) => vec![op.kind.channel_symmetry().eligible()],
+            Self::Bank { chain, .. } => chain.active_lane_eligibility(),
+        }
+    }
+
     /// `[observed stages, declared taps, armed taps]` for this unit (issue #143 E5).
     pub(crate) fn observation_binding_counts(&self) -> [u64; 3] {
         match self {
@@ -539,12 +550,68 @@ impl BankMembers for ArenaMembers<'_> {
 
 // REALTIME_POLICY_END
 
+/// The static half of one unit's [`PlanUnitEligibilityV1`] row, fixed at bind.
+///
+/// Split from the dynamic half because the two move at different times and for different reasons.
+/// Which track a lane renders, how many stages a unit has and which side of the seam each stage
+/// sits on are decided when the plan is built and cannot change afterwards; how many of the unit's
+/// lanes are *eligible* moves whenever a live-console record is drained. So the identity is
+/// computed once, here, from the node ids the lowering already resolved -- and the counters are
+/// pulled from the chain on demand.
+pub(crate) struct UnitIdentityV1 {
+    pub(crate) banked: bool,
+    pub(crate) stages: u32,
+    pub(crate) upstream_of_seam_stages: u32,
+    pub(crate) lane_tracks: Box<[Box<str>]>,
+}
+
+/// Which side of the fader/matrix seam one graph node's stage sits on.
+///
+/// The seam is `miso_engine_effect_contract::SeamSideV1`'s: the 2x2 matrix is the earliest
+/// genuinely cross-channel operation in the strip and the fader is immediately before it, so
+/// everything from `PostFader` on reads the plane a collapsed track duplicated and may legitimately
+/// differ between the channels. It is read off `TrackStage` rather than off the processor, because
+/// the *stage* is what decides it: a fader bank and an EQ bank are the same kind of object and only
+/// their position in the strip separates them.
+///
+/// A node that is not per-track strip work at all -- a route, a submix, the output, a compensation
+/// delay -- is **not** upstream: it is not a stage a collapse would have computed once, so counting
+/// it as upstream would let a route op's unconditionally-symmetric witness read as collapse
+/// evidence, which is precisely what the seam classification exists to prevent.
+fn upstream_of_seam(node: &GraphNodeId) -> bool {
+    match node {
+        GraphNodeId::TrackStage { stage, .. } => !matches!(
+            stage,
+            crate::TrackStage::PostFader | crate::TrackStage::PostMatrix
+        ),
+        GraphNodeId::Effect(_) => true,
+        GraphNodeId::Route { .. }
+        | GraphNodeId::Submix { .. }
+        | GraphNodeId::Output { .. }
+        | GraphNodeId::CompensationDelay { .. } => false,
+    }
+}
+
+/// The track one graph node renders, or `""` for a node that names none.
+fn node_track(node: &GraphNodeId) -> Box<str> {
+    match node {
+        GraphNodeId::TrackStage { track_id, .. } => Box::from(track_id.as_str()),
+        GraphNodeId::Effect(effect) => Box::from(effect.track_id.as_str()),
+        GraphNodeId::Route { .. }
+        | GraphNodeId::Submix { .. }
+        | GraphNodeId::Output { .. }
+        | GraphNodeId::CompensationDelay { .. } => Box::from(""),
+    }
+}
+
 /// Ops, their audio and their delay lines: everything one executor (or one native parcel) owns.
 pub(crate) struct Runtime {
     /// This runtime's checked view of the plan's shared arena.
     pub(crate) lease: ArenaLeaseV1,
     pub(crate) delays: Box<[CompensationDelay]>,
     pub(crate) units: Box<[RuntimeUnit]>,
+    /// One row per unit, in `units` order: the bind-time half of the collapse-eligibility query.
+    pub(crate) identity: Box<[UnitIdentityV1]>,
     /// Scratch for a bank chain's gather-source buffers, sized to the widest bank at bind.
     bank_inputs: Box<[u32]>,
     /// Scratch for a bank chain's scatter-target buffers, sized to the widest bank at bind.
@@ -571,9 +638,11 @@ impl Runtime {
         lease: ArenaLeaseV1,
         delays: Vec<CompensationDelay>,
         units: Vec<RuntimeUnit>,
+        identity: Vec<UnitIdentityV1>,
         redirects: u64,
         folds: u64,
     ) -> Self {
+        debug_assert_eq!(identity.len(), units.len());
         let widest = units
             .iter()
             .map(|unit| match unit {
@@ -586,6 +655,7 @@ impl Runtime {
             lease,
             delays: delays.into_boxed_slice(),
             units: units.into_boxed_slice(),
+            identity: identity.into_boxed_slice(),
             bank_inputs: vec![0; widest].into_boxed_slice(),
             bank_outputs: vec![0; widest].into_boxed_slice(),
             redirects,
@@ -1339,6 +1409,11 @@ pub(crate) fn build_sequential(
     // Run unit -> the unit index it was emitted at, for the chains the fold arms.
     let mut unit_of_run: Vec<Option<usize>> = vec![None; run_units.len()];
     let mut units = Vec::with_capacity(run_units.len());
+    // The bind-time half of the collapse-eligibility query, one row per emitted unit. Built here
+    // rather than by a later walk because this is the only place the unit's ops and the spec's
+    // node ids are both in hand: `RuntimeOp` deliberately carries no node id, and reconstructing
+    // one from the arena buffers afterwards would be a second opinion about which lane is which.
+    let mut identity: Vec<UnitIdentityV1> = Vec::with_capacity(run_units.len());
     for (run, (membership, ops)) in run_units.iter().enumerate() {
         // A retired route op is absorbed by its cohort's epilogue: no unit, no dispatch, no
         // reduction, no `mix2x2_block` pass of its own.
@@ -1347,6 +1422,27 @@ pub(crate) fn build_sequential(
         }
         let membership = membership.clone();
         unit_of_run[run] = Some(units.len());
+        {
+            // `ops` is slot major with `lanes` ops per slot (`units_of` sorts by the member's
+            // position within its bank), so slot `s`'s lane `l` is `ops[s * lanes + l]` and lane
+            // `l`'s track is read off the first slot. A plain op is one stage over one "lane".
+            let stages = membership.len().max(1);
+            let lanes = ops.len() / stages;
+            let node_of = |index: usize| &spec.nodes[program.ops[index].node as usize].id;
+            identity.push(UnitIdentityV1 {
+                banked: !membership.is_empty(),
+                stages: u32::try_from(stages).unwrap_or(u32::MAX),
+                upstream_of_seam_stages: u32::try_from(
+                    (0..stages)
+                        .filter(|slot| upstream_of_seam(node_of(ops[slot * lanes])))
+                        .count(),
+                )
+                .unwrap_or(u32::MAX),
+                lane_tracks: (0..lanes)
+                    .map(|lane| node_track(node_of(ops[lane])))
+                    .collect(),
+            });
+        }
         for (member, index) in ops.iter().enumerate() {
             op_slot[*index] = Some((units.len(), member));
         }
@@ -1410,6 +1506,7 @@ pub(crate) fn build_sequential(
         leases.pop().expect("the sequential lease"),
         delays,
         units,
+        identity,
         redirects.len() as u64,
         folds,
     )

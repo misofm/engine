@@ -69,6 +69,7 @@ pub(crate) fn bind_rack_banks(
     ids: &BTreeMap<(String, RackId, String), EffectNodeId>,
     levels: &[DependencyLevel],
     dispatch: Backend,
+    classes: &SessionPoolClassesV1,
 ) -> Result<
     (
         Vec<miso_engine_graph::GraphPreparedEffectBank>,
@@ -214,6 +215,12 @@ pub(crate) fn bind_rack_banks(
             .or_default()
             .push(CohortCandidate {
                 id: chain.clone(),
+                // Mono-collapse M1: the *track's* class, from the one map `GraphCompiler` derived
+                // for this compile and also handed to the strip-bank planner. A chain is one
+                // track's rack program, so the track's class is the chain's; deriving it here
+                // from anything else is exactly the two-planner disagreement
+                // `SessionPoolClassesV1` exists to make impossible.
+                class: classes.class_of(&chain.track_id),
                 program: programs[chain].clone(),
             });
     }
