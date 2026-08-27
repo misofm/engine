@@ -519,6 +519,10 @@ impl BankMembers for ArenaMembers<'_> {
     /// * the master meets `sum_into_block::<FrameLane>`, the same kernel `reduce_plane`'s
     ///   left-to-right accumulation used, in the same order -- which `route_fold` proves rather
     ///   than assumes.
+    ///
+    /// The accumulation is two independent per-plane calls, so a mono collapse drops one of them
+    /// and changes nothing else. The 2x2 above it is irreducibly cross-plane -- that is what a
+    /// route *is* (D3) -- and is not something a plane-wise factoring could have separated.
     fn fold_plane(&mut self, lane: usize, left: &mut [f32], right: &mut [f32]) {
         let fold = self.fold[lane];
         mix2x2_block::<FrameLane>(left, right, fold.coefficients);
