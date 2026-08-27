@@ -16,11 +16,11 @@ use std::sync::Mutex;
 use sha2::{Digest, Sha256};
 
 use miso_engine_builtins::{
-    BuiltinChain, BuiltinInputBankV1, BuiltinLaneSelector, BuiltinParameterError,
-    BuiltinParameters, BuiltinTail, ChannelParameters, DualMonoBlock, FaderMuteBuiltins,
-    FaderMuteRampBuiltinsV1, InputBuiltins, Matrix2x2, MatrixBuiltins, MeterAccumulator,
-    MeterConfig, MeterConfigError, MeterHandle, MeterSnapshot, MeterTap, PreparedMeter, pan_matrix,
-    validate_builtin_filter_cutoff_v1,
+    BuiltinChain, BuiltinFaderBankV1, BuiltinInputBankV1, BuiltinLaneSelector, BuiltinMatrixBankV1,
+    BuiltinParameterError, BuiltinParameters, BuiltinTail, ChannelParameters, DualMonoBlock,
+    FaderMuteBuiltins, FaderMuteRampBuiltinsV1, InputBuiltins, Matrix2x2, MatrixBuiltins,
+    MeterAccumulator, MeterConfig, MeterConfigError, MeterHandle, MeterSnapshot, MeterTap,
+    PreparedMeter, pan_matrix, validate_builtin_filter_cutoff_v1,
 };
 use miso_engine_core::realtime::{
     Consumer, PreparedRenderPlan, Producer, QueueGeneration, RenderEnvelope, RenderError,
@@ -170,10 +170,55 @@ pub struct MeterConsumer {
     pub consumer: Consumer<MeterSnapshot>,
 }
 
+/// The live console's two consumers for one track.
+///
+/// They travel together because they are leased together (`TrackControlProducer` holds both
+/// producers) and because whichever owner ends up rendering the track's fader also ends up
+/// rendering its matrix -- a per-node pair, or two slots of one cohort chain. Keeping them in one
+/// value is what makes "one track, one console channel" hold on the consumer side too.
+struct StripControlConsumers {
+    /// `None` once a strip bank has claimed this side. The two sides are claimed together --
+    /// `planned_strip_banks` plans both stages over one track list -- so a half-claimed strip is
+    /// unreachable, and `strip_bindings` says so rather than papering over it.
+    fader: Option<Consumer<TrackFaderRecordV1>>,
+    matrix: Option<Consumer<TrackControlRecordV1>>,
+}
+
+/// Everything one track's fader and matrix stages need, before their binding form is decided.
+///
+/// Both shapes are built from this: the per-node processors [`PreparedBuiltinsSession::\
+/// strip_bindings`] makes, and the bank lanes `into_graph_artifact_with_banks` gathers. The
+/// prepared `fader`/`matrix` sections are the scalar fallback and `parameters` is what a bank
+/// lane is built from -- prepared independently, exactly as `bank_inputs` is prepared beside the
+/// scalar `InputBuiltins`, so selecting one never mutates the other.
+struct StripPreparation {
+    track_id: Box<str>,
+    graph_id: StableGraphId,
+    parameters: BuiltinParameters,
+    fader: FaderMuteBuiltins,
+    matrix: MatrixBuiltins,
+    control: Option<StripControlConsumers>,
+}
+
 /// Opaque, sealed builtin payload. It can only be lowered into a graph once.
 pub struct PreparedBuiltinsSession {
     seal: BuiltinSessionSeal,
+    /// Post-input builtin bindings, one per track.
+    ///
+    /// The fader and matrix bindings are deliberately **not** here. Whether a track's fader is a
+    /// per-node processor or one lane of a strip bank is a *lowering* decision -- it needs the
+    /// selected dispatch backend and the graph's dependency levels, neither of which exists when
+    /// a session is prepared -- so both stages are held as [`StripPreparation`] until then and
+    /// bound by [`PreparedBuiltinsSession::strip_bindings`] (issue #212). The seal is unchanged:
+    /// it still records three stages per track, and `processors_match` still proves all three are
+    /// owned, counting the strip preparations alongside these bindings.
     processors: Vec<miso_engine_graph::GraphNodeBinding>,
+    /// The fader and matrix section of every track, in normalized track order, with the live
+    /// console's consumers where one drives the track.
+    ///
+    /// Declared after `processors` and before `track_controls` so a dropped preparation releases
+    /// the producers before the consumers that own the ring storage.
+    strips: Vec<StripPreparation>,
     bank_inputs: Vec<(Box<str>, InputBuiltins)>,
     observers: Vec<GraphNodeObserverBinding>,
     meter_consumers: Vec<MeterConsumer>,
@@ -184,16 +229,6 @@ pub struct PreparedBuiltinsSession {
     tails: Vec<(Box<str>, BuiltinTail)>,
     requests: Vec<MeterRequestSeal>,
     resources: BuiltinResourceEstimate,
-}
-
-/// Sealed production representation of one full post-input builtin bank.
-///
-/// It owns the real TPT adapter and is only materialized by the builtin/graph preparation seam.
-pub struct PreparedBuiltinInputBankV1 {
-    backend: Backend,
-    members: Box<[GraphNodeId]>,
-    processor: BuiltinBankProcessor,
-    scratch: AoSoaScratch,
 }
 
 struct BuiltinBankProcessor {
@@ -222,17 +257,198 @@ impl GraphPreparedBuiltinBankProcessor for BuiltinBankProcessor {
     }
 }
 
-impl PreparedBuiltinInputBankV1 {
-    /// The whole-layout resource was already computed once, before the graph was touched; this
-    /// only moves ownership, so there is nothing left to recompute here.
-    fn into_graph_bank(self) -> GraphPreparedBuiltinBank {
-        GraphPreparedBuiltinBank {
-            backend: self.backend,
-            members: self.members,
-            processor: Box::new(self.processor),
-            scratch: self.scratch,
+/// One strip fader bank and the console channels of its member lanes (issue #212).
+///
+/// # The drain contract, at bank level
+///
+/// `TrackFaderRecordV1` rides a bounded SPSC queue with exactly one consumer, and that consumer is
+/// whoever renders the track's fader. Banking moves the renderer from a per-track node to one lane
+/// of this bank, so the consumer moves with it -- the queue, its depth, its record semantics and
+/// its slot in the host's frozen queue-slot layout are all untouched. The single-consumer property
+/// is preserved because it is preserved *structurally*: `into_graph_artifact_with_banks` moves
+/// each `Consumer` out of its `StripPreparation` exactly once, so a track is either a bank lane or
+/// a per-node processor and never both.
+///
+/// This is the bank-level wiring the plan calls for, and not a per-track node sibling: there is no
+/// second drainer, and the drain is one loop over member lanes at the top of the block, before a
+/// single sample is touched. An admitted move therefore takes effect at exactly the block boundary
+/// the control side was acknowledged with, which is the same rule `ConsoleFaderProcessor` followed.
+///
+/// `try_pop` moves one `Copy` record and a retarget performs at most one division per channel;
+/// neither allocates, locks, nor drops, which is what keeps the shipped artifact's render
+/// call-graph gate green.
+struct FaderBankProcessor {
+    bank: BuiltinFaderBankV1,
+    /// One channel per bank lane; `None` for a lane no console addresses. Always `lanes` long, so
+    /// the lane index is the array index and no lane map is stored.
+    controls: Box<[Option<Consumer<TrackFaderRecordV1>>]>,
+    process_calls: u64,
+    frames_processed: u64,
+}
+
+impl GraphPreparedBuiltinBankProcessor for FaderBankProcessor {
+    fn process(
+        &mut self,
+        left: &mut [f32],
+        right: &mut [f32],
+        frames: u32,
+        first_sample: u64,
+    ) -> Result<(), RenderError> {
+        let _ = first_sample;
+        let Self { bank, controls, .. } = self;
+        for (lane, control) in controls.iter_mut().enumerate() {
+            let Some(control) = control.as_mut() else {
+                continue;
+            };
+            while let Ok(record) = control.try_pop() {
+                match record {
+                    TrackFaderRecordV1::FaderDb {
+                        lanes,
+                        db,
+                        smoothing_samples,
+                    } => bank
+                        .set_fader_db(lane, lanes, db, smoothing_samples)
+                        .map_err(render_error)?,
+                    TrackFaderRecordV1::Mute {
+                        lanes,
+                        muted,
+                        smoothing_samples,
+                    } => bank
+                        .set_mute(lane, lanes, muted, smoothing_samples)
+                        .map_err(render_error)?,
+                }
+            }
         }
+        bank.process(left, right, frames);
+        self.process_calls = self.process_calls.saturating_add(1);
+        self.frames_processed = self.frames_processed.saturating_add(u64::from(frames));
+        Ok(())
     }
+
+    fn qualification_counters(&self) -> [u64; 2] {
+        [self.process_calls, self.frames_processed]
+    }
+}
+
+/// One strip matrix/pan bank and the console channels of its member lanes (issue #212).
+///
+/// The mirror of [`FaderBankProcessor`], on `TrackControlRecordV1`, and it carries the same drain
+/// contract for the same reason -- see that type for the argument.
+struct MatrixBankProcessor {
+    bank: BuiltinMatrixBankV1,
+    /// One channel per bank lane; `None` for a lane no console addresses.
+    controls: Box<[Option<Consumer<TrackControlRecordV1>>]>,
+    process_calls: u64,
+    frames_processed: u64,
+}
+
+impl GraphPreparedBuiltinBankProcessor for MatrixBankProcessor {
+    fn process(
+        &mut self,
+        left: &mut [f32],
+        right: &mut [f32],
+        frames: u32,
+        first_sample: u64,
+    ) -> Result<(), RenderError> {
+        let _ = first_sample;
+        let Self { bank, controls, .. } = self;
+        for (lane, control) in controls.iter_mut().enumerate() {
+            let Some(control) = control.as_mut() else {
+                continue;
+            };
+            while let Ok(record) = control.try_pop() {
+                bank.set_target_smoothed(lane, record.matrix, record.smoothing_samples)
+                    .map_err(render_error)?;
+            }
+        }
+        bank.process(left, right, frames);
+        self.process_calls = self.process_calls.saturating_add(1);
+        self.frames_processed = self.frames_processed.saturating_add(u64::from(frames));
+        Ok(())
+    }
+
+    fn qualification_counters(&self) -> [u64; 2] {
+        [self.process_calls, self.frames_processed]
+    }
+}
+
+/// Retained bytes of one strip bank's per-lane console-consumer array.
+///
+/// Charged whether or not a console is attached: the array is `lanes` long either way, and a lane
+/// with no channel holds `None`. That is deliberate -- it is what makes a banked session's
+/// retained payload independent of whether the host leased a console, rather than merely equal to
+/// what it was before consoles existed.
+fn strip_control_bytes<T: Copy + Send + 'static>(
+    width: miso_engine_effect_contract::BankWidth,
+) -> Option<u64> {
+    u64::try_from(core::mem::size_of::<Option<Consumer<T>>>())
+        .ok()?
+        .checked_mul(u64::from(width.lanes()))
+}
+
+/// The whole per-bank processor cost of one bankable stage: the struct plus the heap it owns.
+fn strip_processor_bytes(
+    stage: TrackStage,
+    width: miso_engine_effect_contract::BankWidth,
+) -> Option<u64> {
+    let inline = match stage {
+        TrackStage::PostInputBuiltins => core::mem::size_of::<BuiltinBankProcessor>(),
+        TrackStage::PostFader => core::mem::size_of::<FaderBankProcessor>(),
+        TrackStage::PostMatrix => core::mem::size_of::<MatrixBankProcessor>(),
+        _ => return None,
+    };
+    let inline = u64::try_from(inline).ok()?;
+    match stage {
+        TrackStage::PostInputBuiltins => Some(inline),
+        TrackStage::PostFader => {
+            inline.checked_add(strip_control_bytes::<TrackFaderRecordV1>(width)?)
+        }
+        _ => inline.checked_add(strip_control_bytes::<TrackControlRecordV1>(width)?),
+    }
+}
+
+/// Folds one kind's estimate into a running total over every builtin bank kind.
+fn add_bank_resource(
+    total: GraphBuiltinBankResourceEstimate,
+    add: GraphBuiltinBankResourceEstimate,
+) -> Option<GraphBuiltinBankResourceEstimate> {
+    Some(GraphBuiltinBankResourceEstimate {
+        bank_count: total.bank_count.checked_add(add.bank_count)?,
+        payload_bytes: total.payload_bytes.checked_add(add.payload_bytes)?,
+        scratch_bytes: total.scratch_bytes.checked_add(add.scratch_bytes)?,
+        scratch_samples: total.scratch_samples.checked_add(add.scratch_samples)?,
+        metadata_bytes: total.metadata_bytes.checked_add(add.metadata_bytes)?,
+        // A ceiling on the single largest allocation, so the maximum is taken and never summed.
+        largest_allocation_bytes: total
+            .largest_allocation_bytes
+            .max(add.largest_allocation_bytes),
+    })
+}
+
+/// The whole strip's bank plan: one group list per bankable stage, in render order.
+///
+/// The three stages are planned over the *same* track list with the *same* planner, so lane `i` of
+/// a cohort's fader bank is the same track as lane `i` of its builtins bank wherever the
+/// dependency levels line up. Nothing relies on that: `runtime::chains_into` proves the lane-wise
+/// relation on the lowered program and simply declines the merge where the orders disagree. What
+/// planning them alike buys is that on a homogeneous session they *do* agree, and the strip fuses
+/// into one chain per cohort.
+fn planned_strip_banks(
+    tracks: &[Box<str>],
+    dispatch: Backend,
+    levels: &[DependencyLevel],
+) -> [(TrackStage, Vec<Box<[GraphNodeId]>>); 3] {
+    [
+        TrackStage::PostInputBuiltins,
+        TrackStage::PostFader,
+        TrackStage::PostMatrix,
+    ]
+    .map(|stage| {
+        (
+            stage,
+            planned_builtin_bank_members(tracks, stage, dispatch, levels),
+        )
+    })
 }
 
 /// The cohort key of the fixed post-input builtin stage.
@@ -247,7 +463,7 @@ struct BuiltinStageKeyV1;
 
 impl BankSlotKey for BuiltinStageKeyV1 {}
 
-/// Groups every post-input builtin node of a dependency level into `ceil(n / W)` banks.
+/// Groups every node of one bankable track stage, per dependency level, into `ceil(n / W)` banks.
 ///
 /// The last bank of a level is short: it holds `1..=W` members and the bank pads the remaining
 /// lanes with identity lanes.  Every post-input node on a vector host is therefore a bank member,
@@ -258,7 +474,8 @@ impl BankSlotKey for BuiltinStageKeyV1 {}
 /// Padding, level partitioning and the trailing-`None` lane order are that planner's rules, so
 /// this function only turns each planned group back into the member list the graph attaches.
 fn planned_builtin_bank_members(
-    inputs: &[(Box<str>, InputBuiltins)],
+    tracks: &[Box<str>],
+    stage: TrackStage,
     dispatch: Backend,
     levels: &[DependencyLevel],
 ) -> Vec<Box<[GraphNodeId]>> {
@@ -276,10 +493,10 @@ fn planned_builtin_bank_members(
         })
         .collect();
     let mut by_level = BTreeMap::<u64, Vec<CohortCandidate<GraphNodeId, BuiltinStageKeyV1>>>::new();
-    for (track, _) in inputs {
+    for track in tracks {
         let node = GraphNodeId::TrackStage {
             track_id: StableGraphId::parse(track).expect("prepared stable ID"),
-            stage: TrackStage::PostInputBuiltins,
+            stage,
         };
         if let Some(level) = level_by_node.get(&node).copied() {
             by_level.entry(level).or_default().push(CohortCandidate {
@@ -293,9 +510,9 @@ fn planned_builtin_bank_members(
         .map(|(level, candidates)| CohortLevel { level, candidates })
         .collect();
     let plan = plan_bank_groups(&levels_in, width)
-        .expect("one post-input builtin node per track, so ids are unique");
-    // Every post-input node is bankable, so the planner's scalar list is empty; if a future stage
-    // key ever blocks banking, those tracks simply keep their scalar bindings.
+        .expect("one node per track per stage, so ids are unique");
+    // Every strip node is bankable, so the planner's scalar list is empty; if a future stage key
+    // ever blocks banking, those tracks simply keep their scalar bindings.
     debug_assert!(plan.scalar.is_empty());
     plan.groups
         .into_iter()
@@ -317,10 +534,17 @@ fn build_input_bank(
         .expect("planner emits 1..=W members at the width the selected backend chose")
 }
 
+/// Exact retained storage of one *kind* of builtin bank.
+///
+/// `processor_bytes` is the whole per-bank processor cost of that kind: the inline struct plus any
+/// heap it owns. The three strip kinds differ only there -- an input bank owns nothing beyond its
+/// kernel, while a fader or matrix bank owns a `lanes`-long array of optional console consumers --
+/// so the rest of the accounting is shared rather than restated three times.
 fn builtin_bank_resource(
     groups: &[Box<[GraphNodeId]>],
     width: miso_engine_effect_contract::BankWidth,
     quantum: u32,
+    processor_bytes: u64,
 ) -> Option<GraphBuiltinBankResourceEstimate> {
     let bank_count = u64::try_from(groups.len()).ok()?;
     let lanes = u64::from(width.lanes());
@@ -331,7 +555,6 @@ fn builtin_bank_resource(
         return None;
     }
     let node_bytes = u64::try_from(core::mem::size_of::<GraphNodeId>()).ok()?;
-    let processor_bytes = u64::try_from(core::mem::size_of::<BuiltinBankProcessor>()).ok()?;
     // Two planes: `AoSoaScratch` has no sidechain surface at all (#96 F9 deleted it).
     let scratch_plane_samples = u64::from(quantum).checked_mul(lanes)?;
     let scratch_plane_bytes = scratch_plane_samples.checked_mul(4)?;
@@ -847,9 +1070,13 @@ impl PreparedBuiltinsSession {
     }
 
     /// Number of sealed builtin processor bindings.
+    ///
+    /// Three per track, as it has always been: the post-input binding plus the fader and matrix
+    /// stages, which are held as [`StripPreparation`] until their binding form is chosen and are
+    /// counted here in the shape they will take (issue #212).
     #[must_use]
     pub fn processor_count(&self) -> usize {
-        self.processors.len()
+        self.processors.len() + self.strips.len() * 2
     }
 
     /// Number of sealed builtin tails.
@@ -903,7 +1130,7 @@ impl PreparedBuiltinsSession {
         }
         let expected_processors = processor_seal(&expected_tracks);
         if self.seal.processors != expected_processors
-            || !processors_match(&self.processors, &expected_processors)
+            || !processors_match(&self.processors, &self.strips, &expected_processors)
         {
             diagnostics.push(diag(
                 "builtin.prepared.processor_set",
@@ -968,18 +1195,77 @@ impl PreparedBuiltinsSession {
     /// This is deliberately a one-way conversion: callers may carry and bind the resulting
     /// artifact, but cannot extract, replace, or clone its provenance-bearing parts.
     pub fn into_graph_artifact<R>(
-        self,
+        mut self,
         graph: PreparedGraphPlan,
         report: R,
     ) -> PreparedBuiltinsGraphArtifact<R> {
+        let mut processors = core::mem::take(&mut self.processors);
+        processors.append(&mut self.strip_bindings());
         PreparedBuiltinsGraphArtifact {
             graph,
-            builtin_processors: self.processors,
+            builtin_processors: processors,
             builtin_observers: self.observers,
             report,
             track_controls: self.track_controls,
             meter_consumers: self.meter_consumers,
         }
+    }
+
+    /// The per-node fader and matrix bindings of every track still holding a [`StripPreparation`].
+    ///
+    /// A track a strip bank claimed had its parts moved out first, so it is simply not here. This
+    /// is the *only* place the per-node shapes are built, which is what keeps "a track is a bank
+    /// lane or a per-node processor, never both" a structural fact rather than a rule.
+    fn strip_bindings(&mut self) -> Vec<miso_engine_graph::GraphNodeBinding> {
+        let mut bindings = Vec::with_capacity(self.strips.len() * 2);
+        for strip in core::mem::take(&mut self.strips) {
+            let StripPreparation {
+                graph_id,
+                parameters,
+                fader,
+                matrix,
+                control,
+                ..
+            } = strip;
+            let (fader_processor, matrix_processor): (
+                Box<dyn GraphRuntimeProcessor>,
+                Box<dyn GraphRuntimeProcessor>,
+            ) = match control {
+                None => (
+                    Box::new(FaderProcessor(fader)),
+                    Box::new(MatrixProcessor(matrix)),
+                ),
+                Some(control) => {
+                    // Issue #140 B: the live fader is a *separate* section, built from the same
+                    // prepared parameters, and preparation already proved the domain.
+                    let ramped = FaderMuteRampBuiltinsV1::new(parameters)
+                        .expect("preparation validated the ramped fader's gain domain");
+                    (
+                        Box::new(ConsoleFaderProcessor {
+                            fader: ramped,
+                            control: control
+                                .fader
+                                .expect("a strip is banked on both stages or on neither"),
+                        }),
+                        Box::new(ConsoleMatrixProcessor {
+                            matrix,
+                            control: control
+                                .matrix
+                                .expect("a strip is banked on both stages or on neither"),
+                        }),
+                    )
+                }
+            };
+            bindings.push(miso_engine_graph::GraphNodeBinding::new(
+                stage_node(graph_id.clone(), TrackStage::PostFader),
+                fader_processor,
+            ));
+            bindings.push(miso_engine_graph::GraphNodeBinding::new(
+                stage_node(graph_id, TrackStage::PostMatrix),
+                matrix_processor,
+            ));
+        }
+        bindings
     }
 
     /// Exact retained resource addition for the selected production bank layout.
@@ -994,8 +1280,13 @@ impl PreparedBuiltinsSession {
         let Some(width) = BankWidth::for_backend(dispatch) else {
             return Some(GraphBuiltinBankResourceEstimate::default());
         };
-        let groups = planned_builtin_bank_members(&self.bank_inputs, dispatch, levels);
-        builtin_bank_resource(&groups, width, self.seal.quantum)
+        let mut total = GraphBuiltinBankResourceEstimate::default();
+        for (stage, groups) in planned_strip_banks(&self.seal.tracks, dispatch, levels) {
+            let processor_bytes = strip_processor_bytes(stage, width)?;
+            let kind = builtin_bank_resource(&groups, width, self.seal.quantum, processor_bytes)?;
+            total = add_bank_resource(total, kind)?;
+        }
+        Some(total)
     }
 
     /// Materialize post-input builtin banks using the already-selected host dispatch.
@@ -1017,54 +1308,142 @@ impl PreparedBuiltinsSession {
         let Some(width) = BankWidth::for_backend(dispatch) else {
             return self.into_graph_artifact(graph, report);
         };
-        let groups = planned_builtin_bank_members(&self.bank_inputs, dispatch, levels);
-        if groups.is_empty() {
+        let plan = planned_strip_banks(&self.seal.tracks, dispatch, levels);
+        if plan.iter().all(|(_, groups)| groups.is_empty()) {
             return self.into_graph_artifact(graph, report);
         }
-        let resource = builtin_bank_resource(&groups, width, self.seal.quantum)
+        let mut resource = GraphBuiltinBankResourceEstimate::default();
+        for (stage, groups) in &plan {
+            let kind = builtin_bank_resource(
+                groups,
+                width,
+                self.seal.quantum,
+                strip_processor_bytes(*stage, width).expect("bankable stage"),
+            )
             .expect("preflighted builtin-bank resource");
+            resource =
+                add_bank_resource(resource, kind).expect("preflighted builtin-bank resource");
+        }
+
         let mut bank_inputs: BTreeMap<Box<str>, InputBuiltins> =
             core::mem::take(&mut self.bank_inputs).into_iter().collect();
-        let mut selected = BTreeSet::new();
-        let mut banks = Vec::with_capacity(groups.len());
-        for members in groups {
-            let inputs = members
-                .iter()
-                .map(|member| {
-                    let GraphNodeId::TrackStage { track_id, .. } = member else {
-                        unreachable!("prepared builtin member shape")
-                    };
-                    bank_inputs
-                        .remove(track_id.as_str())
-                        .expect("planner members are owned prepared builtin tracks")
-                })
-                .collect();
-            let bank = build_input_bank(dispatch, width, inputs);
-            selected.extend(members.iter().cloned());
-            banks.push(PreparedBuiltinInputBankV1 {
-                backend: dispatch,
-                members,
-                processor: BuiltinBankProcessor {
-                    bank,
-                    process_calls: 0,
-                    frames_processed: 0,
-                },
-                scratch: AoSoaScratch::new(width, self.seal.quantum)
-                    .expect("prepared nonzero graph quantum"),
-            });
-        }
-        self.processors
-            .retain(|binding| !selected.contains(&binding.node));
-        let graph_banks: Vec<_> = banks
+        // The strip preparations are indexed by track and *consumed* by whichever bank claims
+        // them, so a track's console consumers can only ever reach one owner. Whatever is left
+        // afterwards keeps its per-node bindings.
+        let mut strips: BTreeMap<Box<str>, StripPreparation> = core::mem::take(&mut self.strips)
             .into_iter()
-            .map(PreparedBuiltinInputBankV1::into_graph_bank)
+            .map(|strip| (strip.track_id.clone(), strip))
             .collect();
+        let lanes = width.lanes() as usize;
+        let mut selected = BTreeSet::new();
+        let mut claimed_fader: BTreeSet<Box<str>> = BTreeSet::new();
+        let mut claimed_matrix: BTreeSet<Box<str>> = BTreeSet::new();
+        let mut graph_banks = Vec::new();
+
+        for (stage, groups) in plan {
+            for members in groups {
+                let track_of = |member: &GraphNodeId| -> Box<str> {
+                    let GraphNodeId::TrackStage { track_id, .. } = member else {
+                        unreachable!("prepared strip member shape")
+                    };
+                    Box::<str>::from(track_id.as_str())
+                };
+                let processor: Box<dyn GraphPreparedBuiltinBankProcessor> = match stage {
+                    TrackStage::PostInputBuiltins => {
+                        let inputs = members
+                            .iter()
+                            .map(|member| {
+                                bank_inputs
+                                    .remove(track_of(member).as_ref())
+                                    .expect("planner members are owned prepared builtin tracks")
+                            })
+                            .collect();
+                        Box::new(BuiltinBankProcessor {
+                            bank: build_input_bank(dispatch, width, inputs),
+                            process_calls: 0,
+                            frames_processed: 0,
+                        })
+                    }
+                    TrackStage::PostFader => {
+                        let mut controls: Vec<Option<Consumer<TrackFaderRecordV1>>> =
+                            (0..lanes).map(|_| None).collect();
+                        let mut parameters = Vec::with_capacity(members.len());
+                        for (lane, member) in members.iter().enumerate() {
+                            let strip = strips
+                                .get_mut(track_of(member).as_ref())
+                                .expect("planner members are owned prepared strip tracks");
+                            parameters.push(strip.parameters);
+                            controls[lane] = strip
+                                .control
+                                .as_mut()
+                                .and_then(|control| control.fader.take());
+                            claimed_fader.insert(strip.track_id.clone());
+                        }
+                        Box::new(FaderBankProcessor {
+                            bank: BuiltinFaderBankV1::new(dispatch, width, parameters)
+                                .expect("planner emits 1..=W members at the selected width"),
+                            controls: controls.into_boxed_slice(),
+                            process_calls: 0,
+                            frames_processed: 0,
+                        })
+                    }
+                    TrackStage::PostMatrix => {
+                        let mut controls: Vec<Option<Consumer<TrackControlRecordV1>>> =
+                            (0..lanes).map(|_| None).collect();
+                        let mut targets = Vec::with_capacity(members.len());
+                        for (lane, member) in members.iter().enumerate() {
+                            let strip = strips
+                                .get_mut(track_of(member).as_ref())
+                                .expect("planner members are owned prepared strip tracks");
+                            targets.push((
+                                strip.parameters.matrix,
+                                strip.parameters.smoothing_samples,
+                            ));
+                            controls[lane] = strip
+                                .control
+                                .as_mut()
+                                .and_then(|control| control.matrix.take());
+                            claimed_matrix.insert(strip.track_id.clone());
+                        }
+                        Box::new(MatrixBankProcessor {
+                            bank: BuiltinMatrixBankV1::new(dispatch, width, targets)
+                                .expect("preparation validated every matrix coefficient"),
+                            controls: controls.into_boxed_slice(),
+                            process_calls: 0,
+                            frames_processed: 0,
+                        })
+                    }
+                    _ => unreachable!("planned_strip_banks yields only bankable stages"),
+                };
+                selected.extend(members.iter().cloned());
+                graph_banks.push(GraphPreparedBuiltinBank {
+                    backend: dispatch,
+                    members,
+                    processor,
+                    scratch: AoSoaScratch::new(width, self.seal.quantum)
+                        .expect("prepared nonzero graph quantum"),
+                });
+            }
+        }
+
+        // A track whose fader and matrix both went into banks has nothing left to bind; one whose
+        // stages were only partly claimed keeps both per-node bindings, and the half that was
+        // moved out is dead storage the bank never renders. That case cannot arise from
+        // `planned_strip_banks` -- it plans all three stages over one track list -- and the drain
+        // ownership is still single, because a `take`n consumer is `None` on the side that lost it.
+        strips
+            .retain(|track, _| !(claimed_fader.contains(track) && claimed_matrix.contains(track)));
+        self.strips = strips.into_values().collect();
+        let mut processors = core::mem::take(&mut self.processors);
+        processors.retain(|binding| !selected.contains(&binding.node));
+        processors.append(&mut self.strip_bindings());
+
         let graph = graph
             .with_builtin_banks(graph_banks, resource)
             .expect("validated fixed builtin member shape");
         PreparedBuiltinsGraphArtifact {
             graph,
-            builtin_processors: self.processors,
+            builtin_processors: processors,
             builtin_observers: self.observers,
             report,
             track_controls: self.track_controls,
@@ -1465,8 +1844,15 @@ fn processor_seal(tracks: &[Box<str>]) -> Vec<(Box<str>, TrackStage)> {
     values
 }
 
+/// Whether a prepared session owns exactly the stages its seal records.
+///
+/// A prepared session holds its post-input stages as bindings and its fader and matrix stages as
+/// [`StripPreparation`]s, so ownership is proven over both (issue #212). The seal itself is
+/// unchanged -- three stages per track -- and so is what this refuses: a missing stage, a
+/// duplicated one, or a binding on a node that is not a track stage at all.
 fn processors_match(
     processors: &[miso_engine_graph::GraphNodeBinding],
+    strips: &[StripPreparation],
     expected: &[(Box<str>, TrackStage)],
 ) -> bool {
     let mut actual: Vec<_> = processors
@@ -1478,8 +1864,13 @@ fn processors_match(
             _ => None,
         })
         .collect();
+    let bindings = actual.len();
+    for strip in strips {
+        actual.push((strip.track_id.clone(), TrackStage::PostFader));
+        actual.push((strip.track_id.clone(), TrackStage::PostMatrix));
+    }
     actual.sort();
-    actual.len() == processors.len() && actual == expected
+    bindings == processors.len() && actual == expected
 }
 
 fn expected_tails(session: &CompiledSession) -> Result<Vec<(Box<str>, BuiltinTail)>, ()> {
@@ -1644,10 +2035,8 @@ pub fn prepare_session_builtins_with_console(
     #[cfg(feature = "test-support")]
     let _phase_two_tracker = TestPhaseTwoAllocationGuard::begin();
     let track_count = session.normalized_model().tracks.len();
-    let processor_count = track_count
-        .checked_mul(3)
-        .expect("preflighted processor count");
-    let mut processors = Vec::with_capacity(processor_count);
+    let mut processors = Vec::with_capacity(track_count);
+    let mut strips = Vec::with_capacity(track_count);
     let mut bank_inputs = Vec::with_capacity(track_count);
     let mut tails = Vec::with_capacity(track_count);
     let mut control_capacity: BTreeMap<&str, NonZeroUsize> = BTreeMap::new();
@@ -1682,14 +2071,8 @@ pub fn prepare_session_builtins_with_console(
                 &format!("$.controls[track_id={}]", track.id.as_str()),
             )])
         };
-        let (fader_processor, matrix_processor): (
-            Box<dyn GraphRuntimeProcessor>,
-            Box<dyn GraphRuntimeProcessor>,
-        ) = match control_capacity.get(track.id.as_str()) {
-            None => (
-                Box::new(FaderProcessor(fader)),
-                Box::new(MatrixProcessor(matrix)),
-            ),
+        let control = match control_capacity.get(track.id.as_str()) {
+            None => None,
             Some(capacity) => {
                 let (producer, control) =
                     bounded_spsc::<TrackControlRecordV1>(*capacity, QueueGeneration(0))
@@ -1697,10 +2080,10 @@ pub fn prepare_session_builtins_with_console(
                 let (fader_producer, fader_control) =
                     bounded_spsc::<TrackFaderRecordV1>(*capacity, QueueGeneration(0))
                         .map_err(|_| control_failure())?;
-                // Issue #140 B: the live fader is a *separate* section, built from the same
-                // prepared parameters. `FaderMuteBuiltins` above is untouched and simply not
-                // bound for this track, which is why no builtins layout or fixture digest moves.
-                let ramped = FaderMuteRampBuiltinsV1::new(parameters).map_err(|_| {
+                // The ramped fader is validated here rather than at binding, so a declared
+                // `fader_db` outside the live domain is a preparation diagnostic on the track that
+                // carries it -- the same failure, at the same place, as before the strip banked.
+                FaderMuteRampBuiltinsV1::new(parameters).map_err(|_| {
                     BuiltinDiagnosticSet::sorted(vec![parameter_diagnostic(
                         track,
                         BuiltinParameterError::GainDomain,
@@ -1713,23 +2096,20 @@ pub fn prepare_session_builtins_with_console(
                     fader: fader_producer,
                 });
                 control_seal.push((Box::<str>::from(track.id.as_str()), capacity.get()));
-                (
-                    Box::new(ConsoleFaderProcessor {
-                        fader: ramped,
-                        control: fader_control,
-                    }),
-                    Box::new(ConsoleMatrixProcessor { matrix, control }),
-                )
+                Some(StripControlConsumers {
+                    fader: Some(fader_control),
+                    matrix: Some(control),
+                })
             }
         };
-        processors.push(miso_engine_graph::GraphNodeBinding::new(
-            stage_node(graph_id.clone(), TrackStage::PostFader),
-            fader_processor,
-        ));
-        processors.push(miso_engine_graph::GraphNodeBinding::new(
-            stage_node(graph_id, TrackStage::PostMatrix),
-            matrix_processor,
-        ));
+        strips.push(StripPreparation {
+            track_id: Box::<str>::from(track.id.as_str()),
+            graph_id,
+            parameters,
+            fader,
+            matrix,
+            control,
+        });
     }
     control_seal.sort_unstable();
     let mut observers = Vec::with_capacity(requests.len());
@@ -1791,6 +2171,7 @@ pub fn prepare_session_builtins_with_console(
             resources,
         },
         processors,
+        strips,
         bank_inputs,
         observers,
         meter_consumers,
@@ -1811,22 +2192,24 @@ fn resource_plan(
     controls: &[TrackControlRequest],
 ) -> Result<BuiltinResourcePlan, BuiltinDiagnostic> {
     let track_count = session.normalized_model().tracks.len();
-    let processor_count = track_count
+    // The seal still records three stages per track even though preparation binds one and defers
+    // two, so the seal vector below is charged at the seal's own count and not at the bindings'.
+    let sealed_stage_count = track_count
         .checked_mul(3)
         .ok_or_else(|| diag("builtin.resource.arithmetic_overflow", "$.tracks"))?;
     let request_count = requests.len();
     let mut processor = ResourceAccumulator::default();
     let mut meter = ResourceAccumulator::default();
-    add_vector_layout::<miso_engine_graph::GraphNodeBinding>(&mut processor, processor_count)?;
+    // One binding per track, not three: the fader and matrix stages are held as
+    // `StripPreparation` until their binding form is chosen at lowering (#212), so preparation
+    // allocates the strip vector instead of two boxed processors per track.
+    add_vector_layout::<miso_engine_graph::GraphNodeBinding>(&mut processor, track_count)?;
+    add_vector_layout::<StripPreparation>(&mut processor, track_count)?;
     add_vector_layout::<(Box<str>, InputBuiltins)>(&mut processor, track_count)?;
     add_vector_layout::<(Box<str>, BuiltinTail)>(&mut processor, track_count)?;
     add_vector_layout::<Box<str>>(&mut processor, track_count)?;
-    add_vector_layout::<(Box<str>, TrackStage)>(&mut processor, processor_count)?;
+    add_vector_layout::<(Box<str>, TrackStage)>(&mut processor, sealed_stage_count)?;
     add_vector_layout::<(Box<str>, BuiltinTail)>(&mut processor, track_count)?;
-    let controlled: BTreeSet<&str> = controls
-        .iter()
-        .map(|control| control.track_id.as_str())
-        .collect();
     for track in &session.normalized_model().tracks {
         let bytes = track.id.as_str().len();
         // The three graph IDs are independently cloned into their stage bindings, alongside the
@@ -1837,25 +2220,15 @@ fn resource_plan(
                 .add_bytes(bytes)
                 .ok_or_else(|| diag("builtin.resource.arithmetic_overflow", "$.tracks"))?;
         }
-        // Issue #140 B adds the second half of the same rule: a controlled track binds
-        // `ConsoleFaderProcessor` (the ramped section) instead of `FaderProcessor`, so its
-        // processor payload row is charged for exactly what it holds. An uncontrolled track
-        // charges the same two layouts it always did.
-        let (fader_layout, matrix_layout) = if controlled.contains(track.id.as_str()) {
-            (
-                core::alloc::Layout::new::<ConsoleFaderProcessor>(),
-                core::alloc::Layout::new::<ConsoleMatrixProcessor>(),
-            )
-        } else {
-            (
-                core::alloc::Layout::new::<FaderProcessor>(),
-                core::alloc::Layout::new::<MatrixProcessor>(),
-            )
-        };
+        // Only the post-input processor is boxed here. Issue #140 B's rule -- a controlled track
+        // holds the ramped section, an uncontrolled one the prepared section -- still holds, but
+        // both now live *inline* in the strip vector charged above rather than behind a `Box`, so
+        // they are charged by that vector's layout and not per track. `controlled` therefore no
+        // longer changes a byte of the processor payload, which is the stronger statement: with
+        // the strip banked, leasing a console costs the same storage as not leasing one, and the
+        // only console-dependent rows left are the two bounded rings charged below.
         processor
             .add_layout(core::alloc::Layout::new::<InputProcessor>())
-            .and_then(|_| processor.add_layout(fader_layout))
-            .and_then(|_| processor.add_layout(matrix_layout))
             .ok_or_else(|| diag("builtin.resource.arithmetic_overflow", "$.tracks"))?;
     }
     add_vector_layout::<GraphNodeObserverBinding>(&mut meter, request_count)?;
@@ -2802,15 +3175,8 @@ mod tests {
 
     #[test]
     fn builtin_bank_layout_regroups_by_dependency_wave_and_scalar_falls_back() {
-        let inputs: Vec<_> = (0..17)
-            .map(|index| {
-                (
-                    Box::<str>::from(format!("bank{index}")),
-                    BuiltinChain::new(48_000, BuiltinParameters::default())
-                        .expect("input")
-                        .into_input_builtins(),
-                )
-            })
+        let inputs: Vec<Box<str>> = (0..17)
+            .map(|index| Box::<str>::from(format!("bank{index}")))
             .collect();
         let node = |index| GraphNodeId::TrackStage {
             track_id: StableGraphId::parse(&format!("bank{index}")).expect("id"),
@@ -2840,7 +3206,12 @@ mod tests {
             // means fusion is written, not inferred, so those tracks stay on the scalar `Lane`.
             (Backend::Scalar, &[][..]),
         ] {
-            let groups = planned_builtin_bank_members(&inputs, dispatch, &levels);
+            let groups = planned_builtin_bank_members(
+                &inputs,
+                TrackStage::PostInputBuiltins,
+                dispatch,
+                &levels,
+            );
             let sizes: Vec<_> = groups.iter().map(|members| members.len()).collect();
             assert_eq!(sizes, expected_sizes, "{:?}", dispatch);
             assert_eq!(
@@ -2869,7 +3240,10 @@ mod tests {
             );
         }
         let scalar = Backend::Scalar;
-        assert!(planned_builtin_bank_members(&inputs, scalar, &levels).is_empty());
+        assert!(
+            planned_builtin_bank_members(&inputs, TrackStage::PostInputBuiltins, scalar, &levels)
+                .is_empty()
+        );
     }
     /// F4/F11: a bank is charged for the two main planes it actually owns and for the member ids
     /// it actually holds -- a padded bank is not charged a full-width id array, and no bank is
@@ -2899,7 +3273,9 @@ mod tests {
                         .into_boxed_slice()
                 })
                 .collect();
-            let resource = builtin_bank_resource(&groups, width, quantum)
+            let processor_bytes =
+                strip_processor_bytes(TrackStage::PostInputBuiltins, width).expect("bankable");
+            let resource = builtin_bank_resource(&groups, width, quantum, processor_bytes)
                 .expect("padded layout is chargeable");
 
             // Hand formula, written from `size_of` rather than from the function under test.
@@ -2955,7 +3331,8 @@ mod tests {
             builtin_bank_resource(
                 &[Vec::new().into_boxed_slice()],
                 miso_engine_effect_contract::BankWidth::Four,
-                64
+                64,
+                0
             )
             .is_none()
         );
@@ -2963,7 +3340,8 @@ mod tests {
             builtin_bank_resource(
                 &[(0..5).map(node).collect::<Vec<_>>().into_boxed_slice()],
                 miso_engine_effect_contract::BankWidth::Four,
-                64
+                64,
+                0
             )
             .is_none()
         );
@@ -3304,10 +3682,12 @@ mod tests {
             let (scalar, scalar_banks) = render_post_input_bits(n, scalar_dispatch());
             assert_eq!(scalar_banks, 0, "the scalar oracle banks nothing");
             match BankWidth::for_backend(host) {
+                // Three bankable stages per track since #212 -- post-input builtins, fader,
+                // matrix -- each grouping the same `n` tracks into the same padded banks.
                 Some(width) => assert_eq!(
                     bank_count,
-                    n.div_ceil(width.lanes() as usize),
-                    "padded bank count for {n} tracks"
+                    3 * n.div_ceil(width.lanes() as usize),
+                    "padded bank count for {n} tracks over three bankable stages"
                 ),
                 None => assert_eq!(bank_count, 0),
             }
@@ -3397,7 +3777,10 @@ mod tests {
         })
         .collect();
         let prepared = prepare_session_builtins(&session(), &requests, caps()).expect("prepare");
-        assert_eq!(prepared.processors.len(), 3);
+        // One post-input binding plus the track's two deferred strip stages (#212).
+        assert_eq!(prepared.processor_count(), 3);
+        assert_eq!(prepared.processors.len(), 1);
+        assert_eq!(prepared.strips.len(), 1);
         assert_eq!(prepared.observers.len(), 7);
         assert_eq!(prepared.meter_consumers.len(), 7);
         assert_eq!(prepared.resources.meter_items, 35);
@@ -4126,8 +4509,19 @@ mod tests {
             BTreeSet::from([0, 1, 2, 127, 128, u32::MAX])
         );
         assert!(classes.into_iter().all(core::convert::identity));
+        // Moved by issue #212, and only through the resource dimension. Classes 32-35 derive
+        // their caps *from* `report.engine_owned_processor_payload_bytes`, so the reported payload
+        // is part of every case's description -- and that payload moved by exactly +48 bytes per
+        // track: two `GraphNodeBinding`s (2 x 72) and the boxed `FaderProcessor` (16) and
+        // `MatrixProcessor` (136) left preparation, and the 344-byte `StripPreparation` vector
+        // entry replaced them. 906 -> 954 at one track, and one fewer allocation (19 -> 18).
+        //
+        // Nothing else in the transcript moved: `expected` is declared per frozen class rather
+        // than read off the report, and the boundary classes stay exact because they are stated
+        // relative to the report rather than as literals -- case 32 admits at the payload and case
+        // 33 rejects one byte below it, whatever the payload is.
         assert_eq!(
-            transcript_hash, 1_799_220_726_181_273_071,
+            transcript_hash, 13_708_826_867_739_612_709,
             "updated only through a deliberate frozen-case change"
         );
     }

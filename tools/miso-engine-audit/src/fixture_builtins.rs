@@ -324,6 +324,16 @@ const BOXED_TAIL_ENTRY_BYTES_V1: u64 = 24;
 const BOXED_STR_BYTES_V1: u64 = 16;
 const BOXED_STAGE_ENTRY_BYTES_V1: u64 = 24;
 const INPUT_PROCESSOR_BYTES_V1: u64 = 168;
+/// One `StripPreparation`: the fader and matrix section of a track, held inline in the strip
+/// vector until issue #212's lowering decides whether they bind per node or as bank lanes.
+///
+/// The one size here that `verify_pinned_native_resource_abi_v1` cannot cross-check, because the
+/// type is private to the builtins compiler and so cannot be named outside production. It is
+/// defended instead by that crate's `phase_two_allocator_layouts_match_the_checked_resource_report`,
+/// which observes every phase-two allocation through a global allocator and requires the reported
+/// grid to match it exactly -- so a drift here shows up there, on the same three track counts this
+/// projection uses.
+const STRIP_PREPARATION_BYTES_V1: u64 = 344;
 const FADER_PROCESSOR_BYTES_V1: u64 = 16;
 const MATRIX_PROCESSOR_BYTES_V1: u64 = 136;
 const GRAPH_OBSERVER_BINDING_BYTES_V1: u64 = 80;
@@ -3286,22 +3296,21 @@ fn expected_resource_records_v1() -> Result<Vec<ResourceRecordV1>, String> {
 
 fn derive_resource_record_v1(tracks: u64, meters: u64) -> Result<ResourceRecordV1, String> {
     let processor_count = resource_product_v1(tracks, 3)?;
+    // One binding per track since #212, not three: the fader and matrix stages ride the strip
+    // vector instead, and are boxed only if lowering keeps them as per-node processors.
     let processor_vectors = resource_sum_v1(&[
-        resource_product_v1(processor_count, GRAPH_NODE_BINDING_BYTES_V1)?,
+        resource_product_v1(tracks, GRAPH_NODE_BINDING_BYTES_V1)?,
+        resource_product_v1(tracks, STRIP_PREPARATION_BYTES_V1)?,
         resource_product_v1(tracks, BOXED_INPUT_ENTRY_BYTES_V1)?,
         resource_product_v1(tracks, BOXED_TAIL_ENTRY_BYTES_V1)?,
         resource_product_v1(tracks, BOXED_STR_BYTES_V1)?,
         resource_product_v1(processor_count, BOXED_STAGE_ENTRY_BYTES_V1)?,
         resource_product_v1(tracks, BOXED_TAIL_ENTRY_BYTES_V1)?,
     ])?;
-    let processor_objects = resource_product_v1(
-        tracks,
-        resource_sum_v1(&[
-            INPUT_PROCESSOR_BYTES_V1,
-            FADER_PROCESSOR_BYTES_V1,
-            MATRIX_PROCESSOR_BYTES_V1,
-        ])?,
-    )?;
+    // Only the post-input processor is boxed at preparation. The fader and matrix sections are
+    // still exactly `FaderMuteBuiltins` and `MatrixBuiltins`, but they now sit inline inside
+    // `STRIP_PREPARATION_BYTES_V1` above rather than behind a `Box` of their own.
+    let processor_objects = resource_product_v1(tracks, INPUT_PROCESSOR_BYTES_V1)?;
     let track_identity_bytes = resource_track_identity_bytes_v1(tracks)?;
     let processor_bytes = resource_sum_v1(&[
         processor_vectors,
@@ -3309,20 +3318,21 @@ fn derive_resource_record_v1(tracks: u64, meters: u64) -> Result<ResourceRecordV
         resource_product_v1(track_identity_bytes, 10)?,
     ])?;
     let processor_maximum = [
-        resource_product_v1(processor_count, GRAPH_NODE_BINDING_BYTES_V1)?,
+        resource_product_v1(tracks, GRAPH_NODE_BINDING_BYTES_V1)?,
+        resource_product_v1(tracks, STRIP_PREPARATION_BYTES_V1)?,
         resource_product_v1(tracks, BOXED_INPUT_ENTRY_BYTES_V1)?,
         resource_product_v1(tracks, BOXED_TAIL_ENTRY_BYTES_V1)?,
         resource_product_v1(tracks, BOXED_STR_BYTES_V1)?,
         resource_product_v1(processor_count, BOXED_STAGE_ENTRY_BYTES_V1)?,
         INPUT_PROCESSOR_BYTES_V1,
-        FADER_PROCESSOR_BYTES_V1,
-        MATRIX_PROCESSOR_BYTES_V1,
         resource_maximum_track_identity_bytes_v1(tracks),
     ]
     .into_iter()
     .max()
     .ok_or_else(|| "empty processor resource projection".to_owned())?;
-    let processor_allocations = resource_sum_v1(&[6, resource_product_v1(tracks, 13)?])?;
+    // Seven vectors (the strip vector joined them), and eleven allocations per track: the one
+    // boxed post-input processor plus the ten independently retained copies of the track's ID.
+    let processor_allocations = resource_sum_v1(&[7, resource_product_v1(tracks, 11)?])?;
 
     let queue_capacity = if meters == 7 { 4 } else { 1 };
     let slot_count = queue_capacity + 1;
@@ -5217,7 +5227,7 @@ mod tests {
         assert_eq!(manifest.entries.len(), 50, "frozen checked payload count");
         assert_eq!(
             sha256(&fs::read(root.join("MANIFEST.tsv")).expect("checked manifest bytes")),
-            "ddb4b201dcd4cc00ad445013c9a1b29d9d5f6071f018e649748963c74af4c55b",
+            "e4e630957d9931ae09105e193561c163fa078d12b49700f91165a8bc60604b01",
             "accepted joined-corpus manifest identity"
         );
 

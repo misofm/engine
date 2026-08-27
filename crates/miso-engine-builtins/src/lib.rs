@@ -1822,8 +1822,12 @@ impl BuiltinFaderBankV1 {
             return Err(BuiltinParameterError::LaneLength);
         }
         match &mut self.stage {
-            FaderStageKernel::Simd4(stage) => stage.set_mute(lane, channels, muted, smoothing_samples),
-            FaderStageKernel::Simd8(stage) => stage.set_mute(lane, channels, muted, smoothing_samples),
+            FaderStageKernel::Simd4(stage) => {
+                stage.set_mute(lane, channels, muted, smoothing_samples)
+            }
+            FaderStageKernel::Simd8(stage) => {
+                stage.set_mute(lane, channels, muted, smoothing_samples)
+            }
         }
         Ok(())
     }

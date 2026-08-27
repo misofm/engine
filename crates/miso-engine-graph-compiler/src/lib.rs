@@ -284,6 +284,21 @@ mod tests {
     fn host_dispatch() -> Backend {
         Backend::current()
     }
+
+    /// Track stages the builtins compiler banks, one bank each per cohort.
+    ///
+    /// Three since issue #212: the post-input builtin stage, the fader, and the pan matrix. It was
+    /// one, and the fader and matrix were 128 individually dispatched per-track ops sitting
+    /// *between* the cohorts' chains.
+    const BANKABLE_TRACK_STAGES: u64 = 3;
+
+    /// Bank slots one cohort of the intended 64-track strip binds, in cascade order: the post-input
+    /// builtins, the EQ, the compressor, the limiter, the fader, the pan matrix.
+    ///
+    /// The whole run fuses into one chain, so the number that must *not* move when this grows is
+    /// `chains`, and the assertions below are written that way -- slots against this constant,
+    /// chains against the cohort count.
+    const STRIP_SLOTS_PER_COHORT: u64 = BANKABLE_TRACK_STAGES + 3;
     use core::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
     use miso_engine_builtins::{MeterConfig, MeterHandle, MeterSnapshot, MeterTap};
     use miso_engine_builtins_compiler::{
@@ -4723,7 +4738,11 @@ mod tests {
         let artifact = compile_console_model_with_builtins(&intended, 2_030, &meters, &registry);
         let (pcm, transposes, chains, slots, frames, redirects) =
             render_console_builtins_blocks(artifact, BLOCKS, Vec::new());
-        assert_eq!(slots, 4 * cohorts, "the meter changes no bank's membership");
+        assert_eq!(
+            slots,
+            STRIP_SLOTS_PER_COHORT * cohorts,
+            "the meter changes no bank's membership"
+        );
         assert_eq!(
             chains,
             cohorts + 1,
@@ -4747,9 +4766,15 @@ mod tests {
         );
         let (scalar_pcm, _, scalar_chains, _, scalar_frames, scalar_redirects) =
             render_console_builtins_blocks(scalar_artifact, BLOCKS, Vec::new());
+        // Two chains per cohort on the oracle arm, not one. The three bankable track stages still
+        // bind their banks -- only the *effects* are on the scalar path here -- and the fader bank
+        // chains into the matrix bank because nothing planar reads between them. The post-input
+        // bank cannot join them: its successor is a per-node EQ op, which is not a bank slot.
+        const ORACLE_CHAINS_PER_COHORT: u64 = 2;
         assert_eq!(
-            scalar_chains, cohorts,
-            "the oracle arm realises only its builtin banks"
+            scalar_chains,
+            ORACLE_CHAINS_PER_COHORT * cohorts,
+            "the oracle arm realises its builtin banks and fuses the fader into the matrix"
         );
         assert_pcm_bits_equal(
             &pcm,
@@ -4765,9 +4790,9 @@ mod tests {
             "the metered boundary must read the compressor's output, not the chain's input"
         );
         assert_eq!(
-            redirects, 64,
+            redirects, 0,
             "a meter at `PostSimd1` is upstream of the limiter: it declines the chain merge and \
-             leaves the scatter redirect at the far end of the strip alone"
+             leaves the scatter accounting at the far end of the strip alone"
         );
         assert!(
             scalar_redirects > 0,
@@ -4817,7 +4842,11 @@ mod tests {
         let artifact = compile_console_model_with_builtins(&sent, 2_040, &[], &registry);
         let (pcm, transposes, chains, slots, _, redirects) =
             render_console_builtins_blocks(artifact, BLOCKS, Vec::new());
-        assert_eq!(slots, 4 * cohorts, "the send changes no bank's membership");
+        assert_eq!(
+            slots,
+            STRIP_SLOTS_PER_COHORT * cohorts,
+            "the send changes no bank's membership"
+        );
         assert_eq!(
             chains,
             cohorts + 1,
@@ -4832,10 +4861,16 @@ mod tests {
             pcm.iter().flatten().any(|sample| *sample != 0.0),
             "the sent strip rendered audio"
         );
+        // The redirect count is zero for every lane on this fixture since issue #212 -- see
+        // `the_intended_strip_fuses_the_whole_signal_path_into_one_chain_per_cohort` for why the
+        // strip's chain now ends in a buffer its consumer already reads in place. What this test
+        // still says is that a send taken from `PostSimd1` changes nothing at the *far end* of the
+        // strip: it splits ch00's cohort at the observed boundary, and the scatter accounting on
+        // every lane, ch00's included, is exactly what it is without the send.
         assert_eq!(
-            redirects, 64,
+            redirects, 0,
             "a send taken from `PostSimd1` is upstream of the limiter, so it declines the chain \
-             merge without touching the scatter redirect at the far end of the strip"
+             merge without touching the scatter accounting at the far end of the strip"
         );
     }
 
@@ -4881,9 +4916,17 @@ mod tests {
         let (pcm, transposes, chains, slots, _, redirects) =
             render_console_builtins_blocks(artifact, BLOCKS, Vec::new());
         assert_eq!(slots, effect_slots + builtin_slots);
+        // The three bankable stages do not group alike on a misaligned session, and that is the
+        // point of the fixture. Every track's post-input node sits at one dependency level, so the
+        // post-input stage banks all 64 into `cohorts` groups. The fader and the matrix sit one
+        // level *later for a track that carries a strip than for a bare one*, so each of those two
+        // stages splits into the 60 stripped tracks (`8` groups: seven full and a four-member tail)
+        // plus the four bare ones (`1` group) -- nine apiece.
+        let strip_stage_groups = (64 - lanes / 2).div_ceil(lanes) + 1;
         assert_eq!(
-            builtin_slots, cohorts,
-            "every track still has a builtin bank"
+            builtin_slots,
+            cohorts + 2 * strip_stage_groups,
+            "every track still banks all three of its bankable stages"
         );
         assert_eq!(transposes, BLOCKS * chains, "G5 holds however little fuses");
         // The derivation. 60 tracks carry the strip, so each effect rack binds
@@ -4897,19 +4940,35 @@ mod tests {
             3 * strip_cohorts,
             "the tracks that keep their strip still bind three slots per full cohort"
         );
+        // The derivation, continued. `strip_cohorts` of the fader groups hold exactly the tracks a
+        // full effect cohort holds, so those chains run the whole strip; the two remaining fader
+        // groups -- the stranded stripped tail and the four bare tracks -- have no effect bank to
+        // join and fuse only into their own matrix group. The post-input banks join nothing, for
+        // the reason they never did: their lane sets do not line up with any effect bank's.
         assert_eq!(
             chains,
-            cohorts + strip_cohorts,
-            "the effect racks fuse with each other and none of them fuses with a builtin bank"
+            cohorts + strip_cohorts + 2,
+            "the effect racks fuse with each other and into the fader and matrix banks whose lane \
+             sets line up; the post-input banks and the two leftover strip groups stay their own"
         );
         assert!(
             chains > cohorts,
             "a misaligned session must realise more than the aligned one chain per cohort"
         );
+        // Four lanes take the redirect here, and the number matters less than the fact that it is
+        // neither 0 nor 64. It is what makes the intended fixture's *zero* a statement about that
+        // fixture rather than about dead code: on a session whose stages line up, every chain ends
+        // in a buffer its consumer already reads in place and no lane needs redirecting; on this
+        // one, where they deliberately do not, the per-lane decision still fires. Both readings
+        // come from the same `scatter_target` clauses over the same lowered program.
         assert_eq!(
-            redirects, 64,
+            redirects, 4,
             "the scatter redirect is decided per lane on the lowered program, so a session whose \
-             lane sets never line up still takes every one of them"
+             lane sets never line up still takes the lanes that qualify"
+        );
+        assert!(
+            redirects > 0,
+            "a fixture that redirects nothing cannot defend the redirect's clauses"
         );
         let scalar_artifact =
             compile_console_model_with_builtins(&ragged, 2_051, &[], &scalar_console_registry());
@@ -5038,15 +5097,32 @@ mod tests {
         let artifact = compile_console_model_with_builtins(&intended, 2_060, &meters, &registry);
         let (pcm, transposes, chains, slots, frames, redirects) =
             render_console_builtins_blocks(artifact, BLOCKS, Vec::new());
-        assert_eq!(slots, 4 * cohorts, "the meter changes no bank's membership");
         assert_eq!(
-            chains, cohorts,
-            "the meter sits on the *last* slot's alias, so it declines no chain merge"
+            slots,
+            STRIP_SLOTS_PER_COHORT * cohorts,
+            "the meter changes no bank's membership"
+        );
+        // Issue #212 moved this boundary from the end of the chain to the middle of it. When the
+        // chain was `builtins -> EQ -> compressor -> limiter`, `PostSimd2PreFader` aliased the
+        // *last* slot's output and was downstream of every merge, so an observer there declined
+        // nothing. The fader and the matrix are now slots of the same chain, so that alias sits
+        // between two of them -- and an observer on it declines the limiter -> fader merge, exactly
+        // as `chains_into`'s observed-alias clause says it must.
+        //
+        // This is the documented cliff, and it is a cost paid only when the observer is there:
+        // leasing a stage meter at `PostSimd2PreFader` costs that track's cohort one extra
+        // planar/AoSoA round-trip per block, because its chain can no longer span the stage the
+        // meter reads. The meter must see pre-fader audio and a merged chain would hand it the
+        // chain's input, so this is the intended trade -- and both halves of it are pinned here.
+        assert_eq!(
+            chains,
+            cohorts + 1,
+            "the meter sits on an alias *inside* the chain, so ch00's cohort splits there"
         );
         assert_eq!(transposes, BLOCKS * chains);
         assert_eq!(
-            redirects, 63,
-            "exactly ch00's lane declines; every other track still scatters into its fader"
+            redirects, 0,
+            "the strip's chains still end in buffers their consumers read in place, metered or not"
         );
 
         // And the meter reads the limiter's output. The oracle is the same session with every
@@ -5108,15 +5184,26 @@ mod tests {
         let artifact = compile_console_model_with_builtins(&sent, 2_070, &[], &registry);
         let (pcm, transposes, chains, slots, _, redirects) =
             render_console_builtins_blocks(artifact, BLOCKS, Vec::new());
-        assert_eq!(slots, 4 * cohorts, "the send changes no bank's membership");
         assert_eq!(
-            chains, cohorts,
-            "the send is downstream of every merge, so it declines none of them"
+            slots,
+            STRIP_SLOTS_PER_COHORT * cohorts,
+            "the send changes no bank's membership"
+        );
+        // The same boundary move as
+        // `an_observed_alias_on_the_last_slot_declines_that_lanes_scatter_redirect`, through the
+        // other clause. A send taken from `PostSimd2PreFader` gives ch00's limiter output a second
+        // reader, and since #212 that alias sits *inside* the chain rather than at its end -- so
+        // `chains_into`'s sole-readership clause declines the limiter -> fader merge and ch00's
+        // cohort splits there. A send from a stage the chain does not span still costs nothing.
+        assert_eq!(
+            chains,
+            cohorts + 1,
+            "the send is taken from an alias inside the chain, so ch00's cohort splits there"
         );
         assert_eq!(transposes, BLOCKS * chains);
         assert_eq!(
-            redirects, 63,
-            "exactly ch00's lane declines: its limiter output now has two readers"
+            redirects, 0,
+            "the strip's chains still end in buffers their consumers read in place, sent or not"
         );
         let scalar_artifact =
             compile_console_model_with_builtins(&sent, 2_071, &[], &scalar_console_registry());
@@ -5346,8 +5433,9 @@ mod tests {
             "the intended strip binds three effect slots per cohort: EQ, compressor and limiter"
         );
         assert_eq!(
-            builtin_slots, cohorts,
-            "and one post-input builtin bank per cohort"
+            builtin_slots,
+            BANKABLE_TRACK_STAGES * cohorts,
+            "and one builtin bank per bankable stage per cohort: post-input, fader, matrix"
         );
 
         let (pcm, transposes, chains, slots, _, redirects) =
@@ -5361,11 +5449,16 @@ mod tests {
             effect_slots + builtin_slots,
             "every bound bank is a slot of exactly one realised chain"
         );
-        // The derivation, stated: 4 slots per cohort, 3 merges per cohort, 1 chain per cohort.
-        assert_eq!(slots, 4 * cohorts, "four bank slots per cohort");
+        // The derivation, stated: 6 slots per cohort, 5 merges per cohort, 1 chain per cohort.
+        assert_eq!(
+            slots,
+            STRIP_SLOTS_PER_COHORT * cohorts,
+            "six bank slots per cohort"
+        );
         assert_eq!(
             chains, cohorts,
-            "the whole strip is one chain per cohort: builtins -> EQ -> compressor -> limiter"
+            "the whole strip is one chain per cohort: builtins -> EQ -> compressor -> limiter -> \
+             fader -> matrix"
         );
         assert_eq!(
             transposes,
@@ -5374,16 +5467,30 @@ mod tests {
         );
         assert_eq!(
             slots - chains,
-            3 * cohorts,
-            "three of the four slots per cohort are fused into their predecessor"
+            (STRIP_SLOTS_PER_COHORT - 1) * cohorts,
+            "every slot but the first of each cohort is fused into its predecessor"
         );
 
-        // Issue #202 rec 3, measured on the same plan: every one of the 64 lanes points its
-        // scatter at the fader op it feeds, so the 64 stereo block copies `reduce_plane` made out
-        // of the limiter's dedicated buffer are gone.
+        // Issue #202 rec 3 removed 64 stereo block copies here by pointing each chain's scatter at
+        // the fader op it fed, because `program::is_dedicated` refused to let the fader consume the
+        // limiter's buffer in place. Issue #212 removes the same 64 copies a different way, and the
+        // redirect count going to **zero** is how that says so.
+        //
+        // The fader is now a *slot* of the chain rather than its consumer, and a later slot's op is
+        // never executed -- so the `reduce_plane` copy out of the limiter's dedicated buffer does
+        // not happen at all, rather than happening into a redirected target. What the chain scatters
+        // into is the last slot's buffer, and the last slot is now the matrix: the matrix op folds
+        // in place onto the fader's buffer (the fader is not dedicated storage), and the track's
+        // route op folds in place onto that. So the chain already scatters straight into the buffer
+        // its consumer reads, `scatter_target` declines on its "not already in place" clause, and
+        // there is nothing left for a redirect to remove.
+        //
+        // This is the one assertion in this test that would read the same if the merge had silently
+        // stopped firing, so it is stated *with* the chain count above and never on its own.
         assert_eq!(
-            redirects, 64,
-            "every track's chain must scatter straight into its fader op"
+            redirects, 0,
+            "the strip's chain ends in a buffer its consumer already reads in place, so no lane \
+             needs its scatter redirected"
         );
 
         // Bits: the merged strip renders exactly what the bank-free strip renders. Necessary, and
@@ -7682,10 +7789,12 @@ mod tests {
         let artifact = prepare_artifact(78, compiled.clone());
         let repeat_artifact = prepare_artifact(79, compiled);
         let dispatch = Backend::current();
-        // #86 F3: `T.div_ceil(W)` banks, the last one padded with identity lanes, and no
-        // scalar post-input tail on a vector host.
-        let expected_banks = BankWidth::for_backend(dispatch)
-            .map_or(0, |width| 12_usize.div_ceil(width.lanes() as usize));
+        // #86 F3: `T.div_ceil(W)` banks per bankable stage, the last one of each padded with
+        // identity lanes, and no scalar post-input tail on a vector host. Three bankable stages
+        // since #212 -- post-input builtins, fader, matrix -- all grouping the same twelve tracks.
+        let expected_banks = BankWidth::for_backend(dispatch).map_or(0, |width| {
+            BANKABLE_TRACK_STAGES as usize * 12_usize.div_ceil(width.lanes() as usize)
+        });
         let expected_tail = BankWidth::for_backend(dispatch).map_or(12, |_| 0);
         assert_eq!(artifact.prepared_builtin_bank_count(), expected_banks);
         assert_eq!(
@@ -7719,28 +7828,54 @@ mod tests {
                 "simultaneously active builtin-bank members have distinct colors"
             );
         }
-        let member_ids: Vec<_> = artifact
-            .prepared_builtin_banks()
-            .flat_map(|bank| {
-                assert_eq!(bank.backend, dispatch);
-                assert_eq!(Some(bank.width), BankWidth::for_backend(dispatch));
-                assert!(!bank.members.is_empty());
-                assert!(bank.members.len() <= bank.width.lanes() as usize);
-                bank.members.iter().map(|member| match member {
-                    GraphNodeId::TrackStage { track_id, stage } => {
-                        assert_eq!(*stage, TrackStage::PostInputBuiltins);
-                        track_id.as_str().to_owned()
-                    }
-                    _ => panic!("builtin bank member kind"),
-                })
-            })
-            .collect();
+        // Membership is checked per bankable stage. Every bank names exactly one stage on every
+        // lane -- `with_builtin_banks` refuses a bank that mixes them -- and each stage banks the
+        // same twelve tracks, so the three per-stage member lists are identical.
+        let mut member_ids_by_stage: BTreeMap<TrackStage, Vec<String>> = BTreeMap::new();
+        for bank in artifact.prepared_builtin_banks() {
+            assert_eq!(bank.backend, dispatch);
+            assert_eq!(Some(bank.width), BankWidth::for_backend(dispatch));
+            assert!(!bank.members.is_empty());
+            assert!(bank.members.len() <= bank.width.lanes() as usize);
+            let mut stage_of_bank = None;
+            for member in bank.members.iter() {
+                let GraphNodeId::TrackStage { track_id, stage } = member else {
+                    panic!("builtin bank member kind");
+                };
+                assert!(
+                    matches!(
+                        stage,
+                        TrackStage::PostInputBuiltins
+                            | TrackStage::PostFader
+                            | TrackStage::PostMatrix
+                    ),
+                    "a builtin bank may only name a bankable track stage"
+                );
+                assert_eq!(
+                    *stage_of_bank.get_or_insert(*stage),
+                    *stage,
+                    "one bank renders one stage on every lane"
+                );
+                member_ids_by_stage
+                    .entry(*stage)
+                    .or_default()
+                    .push(track_id.as_str().to_owned());
+            }
+        }
         let mut expected_member_ids: Vec<_> = (0..12).map(|index| format!("bank{index}")).collect();
         expected_member_ids.sort();
         if BankWidth::for_backend(dispatch).is_none() {
             expected_member_ids.clear();
+            assert!(member_ids_by_stage.is_empty());
+        } else {
+            assert_eq!(member_ids_by_stage.len(), BANKABLE_TRACK_STAGES as usize);
+            for (stage, member_ids) in &member_ids_by_stage {
+                assert_eq!(
+                    *member_ids, expected_member_ids,
+                    "stage {stage:?} membership"
+                );
+            }
         }
-        assert_eq!(member_ids, expected_member_ids);
         assert_eq!(12 - expected_member_ids.len(), expected_tail);
         let resource = artifact.graph_resource_estimate();
         assert_eq!(resource.builtin_bank_count, expected_banks as u64);
@@ -8057,8 +8192,11 @@ mod tests {
                 })
                 .unwrap_or_else(|_| panic!("native seeded graph"));
             let width = BankWidth::for_backend(Backend::current());
-            // #86 F3: `count.div_ceil(W)` banks per level (one level here), last one padded.
-            let expected_banks = width.map_or(0, |width| count.div_ceil(width.lanes() as usize));
+            // #86 F3: `count.div_ceil(W)` banks per level (one level per stage here), last one
+            // padded -- times the three bankable track stages since #212.
+            let expected_banks = width.map_or(0, |width| {
+                BANKABLE_TRACK_STAGES as usize * count.div_ceil(width.lanes() as usize)
+            });
             let expected_tail = width.map_or(count, |_| 0);
             assert_eq!(artifact.prepared_builtin_bank_count(), expected_banks);
             assert_eq!(
@@ -8227,10 +8365,18 @@ mod tests {
         //                          rendered sample moved and with it every layout's `pcm_hash`,
         //                          for all 100 layouts and every fan-in.
         //
-        // The membership and counter halves of the transcript string are unchanged at every link
-        // in that chain, which is what makes it a chain rather than three unrelated numbers: the
-        // per-layout membership, bank-count, tail and counter assertions above all still hold
-        // against their own expectations, and only the `pcm_hash` field of the string moved.
+        //   0xe095_f3ad_a9cc_cf46  #212 -- the fader and the matrix became bankable stages, so
+        //                          `expected_banks` and the `counters` pair tripled for every
+        //                          layout. This is the **first** link that moves those fields and
+        //                          not `pcm_hash`: it is a structural change, not a numeric one.
+        //
+        // Every link before #212 moved `pcm_hash` and left the membership and counter halves
+        // alone; #212 does the opposite, and the two halves being separable is what makes this a
+        // chain rather than a sequence of unrelated numbers. That `pcm_hash` did not move is not
+        // inferred from the change's intent: all 100 layouts' `pcm_hash` values were captured on
+        // the base commit and on this one and compared, and every one of the 100 is identical.
+        // The per-layout membership, bank-count, tail and counter assertions above still hold
+        // against their own expectations, which are derived rather than written down.
         //
         // It is *not* pinned from production output: the per-layout `assert_eq!` above derives the
         // expected output from the recorded per-track post-matrix contributions folded left to
@@ -8238,7 +8384,7 @@ mod tests {
         // an `f64` restatement independent of the `f32` vector body -- for all 100 layouts, before
         // this literal is compared.
         assert_eq!(
-            transcript, 0x0b9d_839a_7df9_3ac8,
+            transcript, 0xe095_f3ad_a9cc_cf46,
             "frozen Issue-037 seeded layout transcript"
         );
     }

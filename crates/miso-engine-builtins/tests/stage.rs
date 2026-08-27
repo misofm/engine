@@ -907,12 +907,9 @@ fn render_banked(
     planar: &[Vec<f32>],
 ) -> Vec<Vec<f32>> {
     let lanes = width.lanes() as usize;
-    let mut fader = BuiltinFaderBankV1::new(
-        backend,
-        width,
-        (0..members).map(parameters_for).collect(),
-    )
-    .expect("fader bank");
+    let mut fader =
+        BuiltinFaderBankV1::new(backend, width, (0..members).map(parameters_for).collect())
+            .expect("fader bank");
     let mut matrix = BuiltinMatrixBankV1::new(
         backend,
         width,
@@ -968,10 +965,7 @@ fn render_banked(
             let sample = block * frames + frame;
             for lane in 0..lanes {
                 let (l, r) = if lane < members {
-                    (
-                        planar[lane][sample],
-                        planar[lane][blocks * frames + sample],
-                    )
+                    (planar[lane][sample], planar[lane][blocks * frames + sample])
                 } else {
                     let poison = f32::from_bits(POISON[(sample + lane) % POISON.len()]);
                     (poison, poison)
@@ -1048,10 +1042,8 @@ fn render_per_track(
             let mut left = planar[lane][start..start + frames].to_vec();
             let mut right =
                 planar[lane][blocks * frames + start..blocks * frames + start + frames].to_vec();
-            faders[lane]
-                .process(DualMonoBlock::new(&mut left, &mut right, 0).expect("block"));
-            matrices[lane]
-                .process(DualMonoBlock::new(&mut left, &mut right, 0).expect("block"));
+            faders[lane].process(DualMonoBlock::new(&mut left, &mut right, 0).expect("block"));
+            matrices[lane].process(DualMonoBlock::new(&mut left, &mut right, 0).expect("block"));
             output[lane].extend_from_slice(&left);
             output[lane].extend_from_slice(&right);
         }
@@ -1081,10 +1073,13 @@ fn banked_fader_and_matrix_are_bit_identical_to_the_per_track_sections() {
             for frames in [1, 7, 64, 128] {
                 let mut rng = Rng(0x5A17_0BED ^ members as u64 ^ (frames as u64) << 8);
                 let planar: Vec<Vec<f32>> = (0..members)
-                    .map(|_| (0..BLOCKS * frames * 2).map(|_| rng.next_sample()).collect())
+                    .map(|_| {
+                        (0..BLOCKS * frames * 2)
+                            .map(|_| rng.next_sample())
+                            .collect()
+                    })
                     .collect();
-                let banked =
-                    render_banked(backend, width, members, BLOCKS, frames, &planar);
+                let banked = render_banked(backend, width, members, BLOCKS, frames, &planar);
                 let per_track = render_per_track(members, BLOCKS, frames, &planar);
                 for lane in 0..members {
                     for (index, (bank, track)) in
@@ -1116,9 +1111,7 @@ fn a_settled_banked_mute_is_exactly_positive_zero() {
         let mut bank = BuiltinFaderBankV1::new(
             backend,
             width,
-            (0..lanes)
-                .map(|_| BuiltinParameters::default())
-                .collect(),
+            (0..lanes).map(|_| BuiltinParameters::default()).collect(),
         )
         .expect("fader bank");
         // Lane 0 mutes over a window that settles inside block 1; lane 1 is muted instantly.

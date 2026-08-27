@@ -37,22 +37,41 @@ fn render(workload: Workload, config: PlanConfig, blocks: u64) -> (String, [u64;
     )
 }
 
+/// Bank slots one cohort of the intended strip binds, in cascade order.
+///
+/// Six since issue #212 banked the strip's own fader and matrix: the post-input builtin stage, the
+/// EQ, the compressor, the limiter, the fader, the pan matrix. It was four before, when the fader
+/// and the matrix were 128 individually dispatched per-track ops sitting *between* the cohorts'
+/// chains -- which is the whole point of the count below, because banking them added sixteen slots
+/// to the 64-track fixture and not one round-trip.
+const SLOTS_PER_COHORT: u64 = 6;
+
 /// The eight cohorts of the 64-track fixture at the launch eight-lane width.
 ///
 /// Read from the plan rather than written down: a four-lane host runs sixteen cohorts, and the law
 /// under test is per cohort, not per eight tracks.
 fn cohorts(slots: u64) -> u64 {
-    // Four bank slots per cohort: the post-input builtin stage, the EQ, the compressor, the
-    // limiter.
     assert_eq!(
-        slots % 4,
+        slots % SLOTS_PER_COHORT,
         0,
-        "the intended strip binds four slots per cohort"
+        "the intended strip binds {SLOTS_PER_COHORT} slots per cohort"
     );
-    slots / 4
+    slots / SLOTS_PER_COHORT
 }
 
-/// The finding: four bank slots per cohort, one chain per cohort, one round-trip per chain.
+/// The finding: six bank slots per cohort, one chain per cohort, one round-trip per chain.
+///
+/// # What issue #212 had to move here, and what it deliberately did not
+///
+/// Banking the fader and the matrix takes the 64-track fixture from 32 slots to 48 -- two more per
+/// cohort -- and leaves `chains` and `transposes` **exactly** where they were, at one per cohort
+/// per block. That equality is the claim: sixteen new bank slots joined chains that already
+/// existed, so the strip pays no round-trip for them, and the 128 per-track fader and matrix ops
+/// that used to sit between the cohorts' chains are gone rather than relocated.
+///
+/// A count is the only thing that can see this. Fusing the fader in is bit-identical by
+/// construction (`FaderRampStage` is one body at every width), so a digest gate would stay green
+/// whether the merge fired or not; only `chains` staying at 8 while `slots` went to 48 says it did.
 #[test]
 fn the_intended_strip_is_one_chain_per_cohort() {
     let (_, [chains, slots], transposes) = render(
@@ -64,12 +83,13 @@ fn the_intended_strip_is_one_chain_per_cohort() {
     let cohorts = cohorts(slots);
     assert_eq!(
         chains, cohorts,
-        "the whole strip is one chain per cohort: builtins -> EQ -> compressor -> limiter"
+        "the whole strip is one chain per cohort: builtins -> EQ -> compressor -> limiter -> \
+         fader -> matrix"
     );
     assert_eq!(
         slots - chains,
-        3 * cohorts,
-        "three of the four slots per cohort are fused into their predecessor"
+        (SLOTS_PER_COHORT - 1) * cohorts,
+        "every slot but the first of each cohort is fused into its predecessor"
     );
     assert_eq!(
         transposes,

@@ -466,27 +466,49 @@ impl MixedRuntime {
             Ok(value) => value,
             Err(_) => panic!("mixed production graph"),
         };
-        // #86 F3: twelve post-input nodes at W8 are `12.div_ceil(8) == 2` banks -- one full and
-        // one padded to eight with four identity lanes -- and no scalar post-input tail.
+        // #86 F3, extended by #212: twelve nodes at W8 are `12.div_ceil(8) == 2` banks -- one
+        // full and one padded to eight with four identity lanes -- and there are now *three*
+        // bankable stages per track rather than one, because the strip's own fader and matrix are
+        // banked alongside the post-input builtins. So `3 * 2 == 6` banks, each stage contributing
+        // the same `[8, 4]` shape, and no scalar tail on any of them.
+        const BANKABLE_STAGES: usize = 3;
         assert_eq!(
             artifact.prepared_builtin_bank_count(),
-            2,
-            "host-selected production builtin banks, last one padded"
+            BANKABLE_STAGES * 2,
+            "host-selected production builtin banks, last of each stage padded"
         );
         let builtin_banks: Vec<_> = artifact.prepared_builtin_banks().collect();
-        assert_eq!(builtin_banks.len(), 2);
+        assert_eq!(builtin_banks.len(), BANKABLE_STAGES * 2);
         assert!(
             builtin_banks
                 .iter()
                 .all(|bank| bank.backend == backend && bank.width.lanes() == 8)
         );
+        // Grouped by stage, not by emission order. The planner partitions per dependency level
+        // and emits level-major, and this fixture is deliberately *mixed*: its tracks do not all
+        // carry the same rack depth, so the post-input stage sits at one level for all twelve
+        // while the fader and matrix stages straddle two. Each stage therefore banks the same
+        // twelve tracks into the same `[4, 8]` multiset, in an order that is a property of the
+        // levels rather than of the stage.
+        let mut by_stage: std::collections::BTreeMap<u8, Vec<usize>> = Default::default();
+        for bank in &builtin_banks {
+            let miso_engine_graph::GraphNodeId::TrackStage { stage, .. } = &bank.members[0] else {
+                panic!("a builtin bank member is a track stage");
+            };
+            by_stage
+                .entry(*stage as u8)
+                .or_default()
+                .push(bank.members.len());
+        }
         assert_eq!(
-            builtin_banks
-                .iter()
-                .map(|bank| bank.members.len())
-                .collect::<Vec<_>>(),
-            vec![8, 4]
+            by_stage.len(),
+            BANKABLE_STAGES,
+            "three bankable stages: post-input builtins, fader, matrix"
         );
+        for (stage, mut sizes) in by_stage {
+            sizes.sort_unstable();
+            assert_eq!(sizes, vec![4, 8], "stage {stage} banks all twelve tracks");
+        }
         let cohorts = &artifact.report().rack_cohorts;
         assert_eq!(cohorts.dispatch, backend);
         // #96: the report is the *bound* plan, from the same planner that produced the banks.
