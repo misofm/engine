@@ -17,7 +17,9 @@
 //! digest gate cannot see.
 
 use miso_engine_bench_support::digest::Sha256Sink;
-use miso_engine_console_workload::{ObservationArm, PlanConfig, SessionRuntime, Workload};
+use miso_engine_console_workload::{
+    ObservationArm, PlanConfig, SessionRuntime, WORKLOADS, Workload,
+};
 
 /// Enough blocks for the limiter's lookahead to clear and every detector to settle.
 const BLOCKS: u64 = 64;
@@ -308,5 +310,83 @@ fn the_ragged_tail_banks_like_any_other_cohort_and_pays_one_chain_for_it() {
             "{name}: the ragged chain shape moved"
         );
         assert_eq!(other_transposes, transposes, "{name}: G5 moved");
+    }
+}
+
+/// Issue #218: every track's route and the whole master reduction fold into the cohorts'
+/// epilogues, on every standing workload.
+///
+/// The count is the claim. Folding renders the same bits by construction -- that is the next test
+/// -- so a bind that silently stopped admitting the fold would be invisible to a digest gate and
+/// would only show up as a slower row, which is the failure mode this file exists for.
+///
+/// One fold per *track*, not per cohort: the epilogue is per lane. The 128-track stretch row
+/// therefore folds twice what the 64-track console row does, which is where the doubled absolute
+/// saving on that row comes from.
+#[test]
+fn every_standing_workload_folds_one_route_per_track() {
+    for workload in WORKLOADS {
+        let mut runtime = SessionRuntime::build(workload, PlanConfig::BASELINE);
+        for block in 0..4 {
+            runtime.render(block).expect("console render");
+        }
+        assert_eq!(
+            runtime.bank_route_folds(),
+            u64::from(workload.tracks()),
+            "{}: every track's route must fold into its cohort's epilogue",
+            workload.kind()
+        );
+    }
+}
+
+/// The folded master carries the reduction's own bits, and the meter arm is the oracle that says
+/// so.
+///
+/// # Why the meter arm is a legitimate oracle
+///
+/// The console leases one meter per track at `post_matrix`, and `post_matrix` is the chain's last
+/// slot. An observer there reads a planar buffer the fold stops writing, so `route_fold` declines
+/// the whole plan -- which leaves the Job-2 shape standing: a route op per track, then the D9
+/// `sum2_block`/`sum_into_block` reduction over their buffers. The two arms therefore differ in
+/// *exactly* the thing under test and in a meter that AGENTS.md requires not to change signal
+/// flow.
+///
+/// # What this catches that nothing else does
+///
+/// The association order. A floating-point sum is not associative, so accumulating the same 64
+/// contributions in a different order is a different number; `route_fold` proves the epilogues'
+/// order is the reduction's order on the lowered program, and this is the end-to-end check of that
+/// proof on a session with eight cohorts whose partial sums genuinely differ.
+///
+/// Red mutation: build `RouteFold::runs` from the candidate list reversed (leaving the association
+/// proof reading the forward order, so the plan still folds) -- every 64-track row's digest
+/// diverges from its meter arm at the first block.
+#[test]
+fn the_folded_master_is_the_reductions_own_bits() {
+    const METERED: PlanConfig = PlanConfig {
+        meters: true,
+        control: false,
+        observation: ObservationArm::Absent,
+    };
+    for workload in WORKLOADS {
+        let folded = render(workload, PlanConfig::BASELINE, BLOCKS);
+        let mut metered_runtime = SessionRuntime::build(workload, METERED);
+        let mut metered = Sha256Sink::new();
+        for block in 0..BLOCKS {
+            metered_runtime.render(block).expect("console render");
+            metered_runtime.hash_output(&mut metered);
+        }
+        assert_eq!(
+            metered_runtime.bank_route_folds(),
+            0,
+            "{}: a meter on the matrix must decline the fold, or this is not an oracle",
+            workload.kind()
+        );
+        assert_eq!(
+            folded.0,
+            metered.finish_hex(),
+            "{}: the folded master is not the reduction's bits",
+            workload.kind()
+        );
     }
 }

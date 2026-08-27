@@ -135,3 +135,20 @@ pin `-C target-feature=+avx2,+fma`, debug profile. Sweep driver: one mutation at
 | # | mutation | file | test | result |
 |---|---|---|---|---|
 | 143-E5-rack | build the per-lane sample scratch unconditionally in `ConsoleEffectBankStage::new` | `rack/src/lib.rs` | `console_bank::an_unobserved_bank_slot_reports_no_observation_state_at_all` | RED — an unobserved slot stops being structurally distinguishable from an observed one, and `is_observed` stops meaning anything |
+
+## Issue #218 — the chain's fold epilogue
+
+Every row below was applied to the working tree, the named test was run, the failure was observed,
+and the mutation was reverted in the same session. Host: `x86_64`, workspace `.cargo/config.toml`
+pin `-C target-feature=+avx2,+fma`, debug profile. Driver: one mutation at a time,
+`cargo test -p miso-engine-rack`, tree restored before the next row.
+
+| # | mutation | file | test | result |
+|---|---|---|---|---|
+| 218-R1 | a folded lane's plane is written *as well as* handed over (the `else` becomes an unconditional block), so the fold is a second destination rather than a replacement | `rack/src/lib.rs` `scatter_tiled` | `the_fold_epilogue_is_absent_by_default_and_replaces_the_lane_write_when_armed` | RED (`lane 0: a folded lane's own plane must not be written`) |
+| 218-R2 | the tiled scatter's lane loop runs `(0..W).rev()`, so the epilogue visits lanes in descending order | `rack/src/lib.rs` `scatter_tiled` | the same test | RED (`the epilogue visits lanes in order`) |
+
+Row 218-R2 is why the lane order is asserted here and not only end to end: a scatter-accumulate
+into a destination several lanes share associates in the order the epilogue visits them, and the
+graph runtime's `route_fold` proves that order matches a frozen D9 reduction. If the chain quietly
+reordered its own lanes, that proof would be about the wrong sequence.

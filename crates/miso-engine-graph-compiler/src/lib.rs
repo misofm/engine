@@ -4782,7 +4782,7 @@ mod tests {
         }];
         let registry = launch_native_effect_registry_v1().expect("launch registry");
         let artifact = compile_console_model_with_builtins(&intended, 2_030, &meters, &registry);
-        let (pcm, transposes, chains, slots, frames, redirects) =
+        let (pcm, transposes, chains, slots, frames, redirects, _) =
             render_console_builtins_blocks(artifact, BLOCKS, Vec::new());
         assert_eq!(
             slots,
@@ -4810,7 +4810,7 @@ mod tests {
             0,
             "the oracle arm must bind no effect bank at all"
         );
-        let (scalar_pcm, _, scalar_chains, _, scalar_frames, scalar_redirects) =
+        let (scalar_pcm, _, scalar_chains, _, scalar_frames, scalar_redirects, _) =
             render_console_builtins_blocks(scalar_artifact, BLOCKS, Vec::new());
         // Two chains per cohort on the oracle arm, not one. The three bankable track stages still
         // bind their banks -- only the *effects* are on the scalar path here -- and the fader bank
@@ -4886,7 +4886,7 @@ mod tests {
 
         let registry = launch_native_effect_registry_v1().expect("launch registry");
         let artifact = compile_console_model_with_builtins(&sent, 2_040, &[], &registry);
-        let (pcm, transposes, chains, slots, _, redirects) =
+        let (pcm, transposes, chains, slots, _, redirects, _) =
             render_console_builtins_blocks(artifact, BLOCKS, Vec::new());
         assert_eq!(
             slots,
@@ -4959,7 +4959,7 @@ mod tests {
         let artifact = compile_console_model_with_builtins(&ragged, 2_050, &[], &registry);
         let effect_slots = artifact.graph().prepared_bank_count() as u64;
         let builtin_slots = artifact.graph().prepared_builtin_bank_count() as u64;
-        let (pcm, transposes, chains, slots, _, redirects) =
+        let (pcm, transposes, chains, slots, _, redirects, _) =
             render_console_builtins_blocks(artifact, BLOCKS, Vec::new());
         assert_eq!(slots, effect_slots + builtin_slots);
         // The three bankable stages do not group alike on a misaligned session, and that is the
@@ -5070,7 +5070,7 @@ mod tests {
         // this test asserts is the *difference* the meter makes and not a transcribed count.
         let quiet =
             compile_console_model_with_builtins(&intended, 2_080, &[], &scalar_console_registry());
-        let (quiet_pcm, _, _, _, _, quiet_redirects) =
+        let (quiet_pcm, _, _, _, _, quiet_redirects, _) =
             render_console_builtins_blocks(quiet, BLOCKS, Vec::new());
         assert!(
             quiet_redirects > 0,
@@ -5083,7 +5083,7 @@ mod tests {
             &[meter(1, MeterTap::PostInputBuiltins)],
             &scalar_console_registry(),
         );
-        let (metered_pcm, _, _, _, frames, metered_redirects) =
+        let (metered_pcm, _, _, _, frames, metered_redirects, _) =
             render_console_builtins_blocks(metered, BLOCKS, Vec::new());
         assert_eq!(
             metered_redirects,
@@ -5141,7 +5141,7 @@ mod tests {
         }];
         let registry = launch_native_effect_registry_v1().expect("launch registry");
         let artifact = compile_console_model_with_builtins(&intended, 2_060, &meters, &registry);
-        let (pcm, transposes, chains, slots, frames, redirects) =
+        let (pcm, transposes, chains, slots, frames, redirects, _) =
             render_console_builtins_blocks(artifact, BLOCKS, Vec::new());
         assert_eq!(
             slots,
@@ -5179,7 +5179,7 @@ mod tests {
             &meters,
             &scalar_console_registry(),
         );
-        let (scalar_pcm, _, _, _, scalar_frames, _) =
+        let (scalar_pcm, _, _, _, scalar_frames, _, _) =
             render_console_builtins_blocks(scalar_artifact, BLOCKS, Vec::new());
         assert_pcm_bits_equal(
             &pcm,
@@ -5228,7 +5228,7 @@ mod tests {
 
         let registry = launch_native_effect_registry_v1().expect("launch registry");
         let artifact = compile_console_model_with_builtins(&sent, 2_070, &[], &registry);
-        let (pcm, transposes, chains, slots, _, redirects) =
+        let (pcm, transposes, chains, slots, _, redirects, _) =
             render_console_builtins_blocks(artifact, BLOCKS, Vec::new());
         assert_eq!(
             slots,
@@ -5258,6 +5258,254 @@ mod tests {
         assert!(
             pcm.iter().flatten().any(|sample| *sample != 0.0),
             "the sent strip rendered audio"
+        );
+    }
+
+    /// Issue #218: the intended strip folds every route and the whole master reduction into its
+    /// cohorts' epilogues, and the bits do not move.
+    ///
+    /// # Two oracles, because the obvious one is not one
+    ///
+    /// `scalar_console_registry` is this file's standing oracle: it puts every *effect* on the
+    /// per-node path. It does **not** put the strip's builtins, fader and matrix there -- those
+    /// bank on any backend that has a width -- so the scalar arm still forms cohort chains and
+    /// still folds all sixty-four routes. It is an oracle for the effects and not for the fold, and
+    /// saying so is the point of asserting its fold count rather than assuming it.
+    ///
+    /// The fold's own oracle is a **post-matrix meter**, which binds an observer to the chain's
+    /// last slot and declines the fold plan-wide (see
+    /// `a_meter_on_the_matrix_declines_the_route_fold_and_still_meters`). That arm renders the
+    /// route ops and the D9 reduction the fold replaced, and AGENTS.md requires a meter not to
+    /// change signal flow, so the two arms differ in exactly the thing under test.
+    #[test]
+    fn the_intended_strip_folds_every_route_into_its_cohorts_epilogue() {
+        const BLOCKS: u64 = 12;
+        let Some(width) = BankWidth::for_backend(host_dispatch()) else {
+            return;
+        };
+        let cohorts = 64 / width.lanes() as u64;
+        let intended = parse_session_toml(CONSOLE_SIXTY_FOUR_TRACK_INTENDED_FIXTURE)
+            .expect("intended fixture");
+        let registry = launch_native_effect_registry_v1().expect("launch registry");
+        let artifact = compile_console_model_with_builtins(&intended, 2_180, &[], &registry);
+        let (pcm, transposes, chains, slots, _, _, folds) =
+            render_console_builtins_blocks(artifact, BLOCKS, Vec::new());
+        assert_eq!(
+            chains, cohorts,
+            "the whole strip is still one chain per cohort"
+        );
+        assert_eq!(slots, STRIP_SLOTS_PER_COHORT * cohorts);
+        assert_eq!(transposes, BLOCKS * chains, "G5 is unmoved by the fold");
+        assert_eq!(
+            folds, 64,
+            "every track's route folds into its cohort's epilogue"
+        );
+        let scalar_artifact =
+            compile_console_model_with_builtins(&intended, 2_181, &[], &scalar_console_registry());
+        let (scalar_pcm, _, _, _, _, _, scalar_folds) =
+            render_console_builtins_blocks(scalar_artifact, BLOCKS, Vec::new());
+        assert_eq!(
+            scalar_folds, 64,
+            "the per-node arm still banks the strip's builtins, fader and matrix, so it folds too"
+        );
+        assert_pcm_bits_equal(&pcm, &scalar_pcm, "64-track strip with the route fold");
+
+        // The fold's own oracle: the same session with a post-matrix meter, which declines it.
+        let meters = vec![MeterRequest {
+            handle: MeterHandle(NonZeroU64::new(1).expect("constant")),
+            track_id: "ch00".to_owned(),
+            tap: MeterTap::PostMatrix,
+            config: MeterConfig {
+                period_frames: NonZeroU32::new(128).expect("constant"),
+                peak_hold_frames: 0,
+                peak_decay_db_per_second: 0.0,
+                queue_capacity: NonZeroUsize::new(64).expect("constant"),
+                reset_generation: 0,
+            },
+        }];
+        let unfolded_artifact =
+            compile_console_model_with_builtins(&intended, 2_188, &meters, &registry);
+        let (unfolded_pcm, _, _, _, _, _, unfolded_folds) =
+            render_console_builtins_blocks(unfolded_artifact, BLOCKS, Vec::new());
+        assert_eq!(
+            unfolded_folds, 0,
+            "the metered arm must decline the fold, or it is not an oracle for it"
+        );
+        assert_pcm_bits_equal(
+            &pcm,
+            &unfolded_pcm,
+            "the folded master against the reduction",
+        );
+        assert!(
+            pcm.iter().flatten().any(|sample| *sample != 0.0),
+            "the folded strip rendered audio"
+        );
+    }
+
+    /// A second reader of a track's matrix declines the route fold.
+    ///
+    /// The sole-readership clause, reached the way a session reaches it: ch00 is routed to the
+    /// master twice. Its matrix -- the chain's last slot -- then has two readers, and a folded lane
+    /// stops writing that buffer altogether, so the second route would carry the previous block.
+    ///
+    /// The decline is plan-wide rather than lane-wide on purpose, and this test pins that too: a
+    /// half-folded plan would have to insert the unfolded lane's summand at a position in the
+    /// chains' order that the chains' order has no room for, so `route_fold` folds every
+    /// contributor of one reduction or none.
+    ///
+    /// Red mutation: drop the `readers[producer].len() != 1` clause -- ch00's first route folds,
+    /// its second reads a buffer nothing writes any more, and the digest diverges from the scalar
+    /// arm at the first block.
+    #[test]
+    fn a_second_route_from_a_tracks_matrix_declines_the_route_fold() {
+        const BLOCKS: u64 = 12;
+        if BankWidth::for_backend(host_dispatch()).is_none() {
+            return;
+        }
+        let mut doubled = parse_session_toml(CONSOLE_SIXTY_FOUR_TRACK_INTENDED_FIXTURE)
+            .expect("intended fixture");
+        let mut route = doubled.routes[0].clone();
+        route.id = StableId::parse("ch00-second-main").expect("route id");
+        doubled.routes.push(route);
+        doubled.routes.sort_by(|left, right| left.id.cmp(&right.id));
+
+        let registry = launch_native_effect_registry_v1().expect("launch registry");
+        let artifact = compile_console_model_with_builtins(&doubled, 2_182, &[], &registry);
+        let (pcm, _, _, _, _, _, folds) =
+            render_console_builtins_blocks(artifact, BLOCKS, Vec::new());
+        assert_eq!(
+            folds, 0,
+            "a second reader of one matrix declines the whole reduction's fold"
+        );
+        let scalar_artifact =
+            compile_console_model_with_builtins(&doubled, 2_183, &[], &scalar_console_registry());
+        let (scalar_pcm, ..) = render_console_builtins_blocks(scalar_artifact, BLOCKS, Vec::new());
+        assert_pcm_bits_equal(&pcm, &scalar_pcm, "64-track strip with ch00 routed twice");
+        assert!(
+            pcm.iter().flatten().any(|sample| *sample != 0.0),
+            "the doubly-routed strip rendered audio"
+        );
+    }
+
+    /// A meter on the matrix declines the route fold, and still meters.
+    ///
+    /// The observer clause. `MeterTap::PostMatrix` binds a `GraphNodeObserverBinding` to the chain's
+    /// **last slot**, whose planar buffer a folded lane stops writing: the meter would read the
+    /// previous block for ever. The cost is stated rather than hidden -- a console that leases a
+    /// post-matrix meter gives up the fold for the whole plan -- and it is the same trade
+    /// `a_leased_stage_meter_declines_the_merge_and_still_meters` records for the chain merge.
+    ///
+    /// Red mutation: drop the `observed(program, spec, parts, producer)` clause -- the plan folds
+    /// and every metered window reports the previous block's peak, which the falsifiability
+    /// assertion below turns red.
+    #[test]
+    fn a_meter_on_the_matrix_declines_the_route_fold_and_still_meters() {
+        const BLOCKS: u64 = 12;
+        if BankWidth::for_backend(host_dispatch()).is_none() {
+            return;
+        }
+        let intended = parse_session_toml(CONSOLE_SIXTY_FOUR_TRACK_INTENDED_FIXTURE)
+            .expect("intended fixture");
+        let meters = vec![MeterRequest {
+            handle: MeterHandle(NonZeroU64::new(1).expect("constant")),
+            track_id: "ch00".to_owned(),
+            tap: MeterTap::PostMatrix,
+            config: MeterConfig {
+                period_frames: NonZeroU32::new(128).expect("constant"),
+                peak_hold_frames: 0,
+                peak_decay_db_per_second: 0.0,
+                queue_capacity: NonZeroUsize::new(64).expect("constant"),
+                reset_generation: 0,
+            },
+        }];
+        let registry = launch_native_effect_registry_v1().expect("launch registry");
+        let artifact = compile_console_model_with_builtins(&intended, 2_184, &meters, &registry);
+        let (pcm, _, _, _, frames, _, folds) =
+            render_console_builtins_blocks(artifact, BLOCKS, Vec::new());
+        assert_eq!(folds, 0, "a post-matrix meter declines the fold");
+
+        let scalar_artifact = compile_console_model_with_builtins(
+            &intended,
+            2_185,
+            &meters,
+            &scalar_console_registry(),
+        );
+        let (scalar_pcm, _, _, _, scalar_frames, _, _) =
+            render_console_builtins_blocks(scalar_artifact, BLOCKS, Vec::new());
+        assert_pcm_bits_equal(&pcm, &scalar_pcm, "64-track strip with a post-matrix meter");
+        assert_eq!(
+            frames.len(),
+            scalar_frames.len(),
+            "the declining plan publishes the same meter windows"
+        );
+        for (banked, scalar) in frames.iter().zip(scalar_frames.iter()) {
+            assert_eq!(
+                (
+                    banked.left.sample_peak.to_bits(),
+                    banked.right.sample_peak.to_bits()
+                ),
+                (
+                    scalar.left.sample_peak.to_bits(),
+                    scalar.right.sample_peak.to_bits()
+                ),
+                "a post-matrix meter must read post-matrix audio"
+            );
+        }
+        assert!(
+            frames
+                .iter()
+                .any(|frame| frame.left.sample_peak != 0.0 || frame.right.sample_peak != 0.0),
+            "the metered windows must carry signal"
+        );
+    }
+
+    /// Route ids ordered against the cohorts decline the fold: the association proof, at session
+    /// level.
+    ///
+    /// The reduction is D9 -- `sum2_block` then `sum_into_block`, left to right in stable edge-ID
+    /// order -- and the epilogues accumulate in **chain** order. On every checked-in fixture those
+    /// two orders coincide, because route ids sort the way tracks do; a floating-point sum is not
+    /// associative, so that coincidence is a fact about the fixture and not a property of the
+    /// engine. This session breaks it deliberately: track `chNN`'s route is named so that the
+    /// routes sort in *reverse* track order while the cohorts still render in track order.
+    ///
+    /// `route_fold` must decline, and the render must be the reduction's own bits.
+    ///
+    /// Red mutation: keep the length check and drop the element-wise comparison in the association
+    /// proof -- the plan folds all 64 lanes in chain order, sums 64 contributions in the reverse of
+    /// the order the reduction would have, and diverges from the scalar arm at the first block.
+    #[test]
+    fn route_ids_ordered_against_the_cohorts_decline_the_route_fold() {
+        const BLOCKS: u64 = 12;
+        if BankWidth::for_backend(host_dispatch()).is_none() {
+            return;
+        }
+        let mut reversed = parse_session_toml(CONSOLE_SIXTY_FOUR_TRACK_INTENDED_FIXTURE)
+            .expect("intended fixture");
+        let count = reversed.routes.len();
+        for (index, route) in reversed.routes.iter_mut().enumerate() {
+            route.id = StableId::parse(&format!("r{:03}-main", count - 1 - index))
+                .expect("reversed route id");
+        }
+        reversed
+            .routes
+            .sort_by(|left, right| left.id.cmp(&right.id));
+
+        let registry = launch_native_effect_registry_v1().expect("launch registry");
+        let artifact = compile_console_model_with_builtins(&reversed, 2_186, &[], &registry);
+        let (pcm, _, _, _, _, _, folds) =
+            render_console_builtins_blocks(artifact, BLOCKS, Vec::new());
+        assert_eq!(
+            folds, 0,
+            "the chains accumulate in track order and the reduction sums in reverse: no fold"
+        );
+        let scalar_artifact =
+            compile_console_model_with_builtins(&reversed, 2_187, &[], &scalar_console_registry());
+        let (scalar_pcm, ..) = render_console_builtins_blocks(scalar_artifact, BLOCKS, Vec::new());
+        assert_pcm_bits_equal(&pcm, &scalar_pcm, "64-track strip with reversed route ids");
+        assert!(
+            pcm.iter().flatten().any(|sample| *sample != 0.0),
+            "the reversed-route strip rendered audio"
         );
     }
 
@@ -5435,7 +5683,7 @@ mod tests {
         }];
         let registry = launch_native_effect_registry_v1().expect("launch registry");
         let artifact = compile_console_model_with_builtins(&intended, 2_120, &meters, &registry);
-        let (pcm, transposes, chains, slots, frames, _) =
+        let (pcm, transposes, chains, slots, frames, _, _) =
             render_console_builtins_blocks(artifact, BLOCKS, Vec::new());
         assert_eq!(
             slots,
@@ -5458,7 +5706,7 @@ mod tests {
             &meters,
             &scalar_console_registry(),
         );
-        let (scalar_pcm, _, _, _, scalar_frames, _) =
+        let (scalar_pcm, _, _, _, scalar_frames, _, _) =
             render_console_builtins_blocks(scalar_artifact, BLOCKS, Vec::new());
         assert_pcm_bits_equal(&pcm, &scalar_pcm, "64-track strip with a post-fader meter");
         assert!(
@@ -5741,7 +5989,7 @@ mod tests {
         artifact: PreparedGraphBuiltinsArtifact,
         blocks: u64,
         observers: Vec<GraphNodeObserverBinding>,
-    ) -> (Vec<Vec<f32>>, u64, u64, u64, Vec<MeterSnapshot>, u64) {
+    ) -> (Vec<Vec<f32>>, u64, u64, u64, Vec<MeterSnapshot>, u64, u64) {
         let envelope = artifact.envelope();
         let frames = envelope.quantum.0 as usize;
         let nodes = artifact
@@ -5783,7 +6031,16 @@ mod tests {
         let transposes = plan.bank_transposes();
         let [chains, slots] = plan.bank_shape();
         let redirects = plan.bank_scatter_redirects();
-        (pcm, transposes, chains, slots, meter_frames, redirects)
+        let folds = plan.bank_route_folds();
+        (
+            pcm,
+            transposes,
+            chains,
+            slots,
+            meter_frames,
+            redirects,
+            folds,
+        )
     }
 
     /// Issue #202 rec 2: the intended strip is **one chain per cohort**, end to end.
@@ -5838,7 +6095,7 @@ mod tests {
             "and one builtin bank per bankable stage per cohort: post-input, fader, matrix"
         );
 
-        let (pcm, transposes, chains, slots, _, redirects) =
+        let (pcm, transposes, chains, slots, _, redirects, _) =
             render_console_builtins_blocks(artifact, BLOCKS, Vec::new());
         assert!(
             pcm.iter().flatten().any(|sample| *sample != 0.0),

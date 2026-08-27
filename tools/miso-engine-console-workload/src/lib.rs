@@ -825,6 +825,16 @@ impl SessionRuntime {
         self.plan.bank_shape()
     }
 
+    /// Bank-chain lanes whose route and master accumulation this plan folded into the chain's own
+    /// epilogue (issue #218).
+    ///
+    /// A count, for the reason every other shape number here is a count: the fold renders the same
+    /// bits by construction, so nothing but a count can say whether it fired.
+    #[must_use]
+    pub fn bank_route_folds(&self) -> u64 {
+        self.plan.bank_route_folds()
+    }
+
     /// Meter frames drained from every stream. Outside the clock, like every evidence step.
     pub fn drain_meters(&mut self) -> u64 {
         let mut frames = 0;

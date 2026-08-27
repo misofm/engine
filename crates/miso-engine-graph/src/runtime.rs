@@ -332,6 +332,11 @@ pub(crate) enum RuntimeUnit {
         /// Lanes per slot; `members.len()` is a whole multiple of it.
         lanes: usize,
         chain: BankChain,
+        /// One entry per lane when this chain's epilogue folds its routes into the master bus,
+        /// empty otherwise (issue #218). Decided once, at bind, by [`route_fold`].
+        fold: Box<[FoldLane]>,
+        /// The master buffer a folded lane accumulates into. Meaningless when `fold` is empty.
+        master: u32,
     },
 }
 
@@ -471,6 +476,27 @@ struct ArenaMembers<'a> {
     lease: &'a mut ArenaLeaseV1,
     inputs: &'a [u32],
     outputs: &'a [u32],
+    /// One entry per lane when this chain's epilogue folds its routes, empty otherwise.
+    fold: &'a [FoldLane],
+    /// The buffer a folded lane's routed tile lands in. Meaningless when `fold` is empty.
+    master: u32,
+}
+
+/// One folded lane's epilogue: the route's bind-folded 2x2, and how its tile meets the master.
+///
+/// `store` is the D9 association restated for a scatter-accumulate: the reduction this replaces is
+/// `sum2_block(in0, in1)` then `sum_into_block` left to right, so the **first** contributor writes
+/// the master and every later one adds into it. Writing then adding computes `in0 + in1` with the
+/// same operation and the same rounding `sum2_block` does. Zero-filling first and accumulating
+/// every contributor would not: `0.0 + (-0.0)` is `+0.0` where `in0 + in1` on a `-0.0` first
+/// contributor is `-0.0`, and a fan-in-one master would lose its sign outright.
+#[derive(Clone, Copy)]
+pub(crate) struct FoldLane {
+    /// The route's 2x2 with its linear gain already folded in (D3), exactly as `NodeKind::Route`
+    /// carries it: the epilogue applies the same constants through the same `mix2x2_block`.
+    coefficients: [f32; 4],
+    /// This lane is the master's first contributor, so it stores rather than accumulates.
+    store: bool,
 }
 
 impl BankMembers for ArenaMembers<'_> {
@@ -479,6 +505,35 @@ impl BankMembers for ArenaMembers<'_> {
     }
     fn plane_mut(&mut self, lane: usize) -> (&mut [f32], &mut [f32]) {
         self.lease.write_stereo(self.outputs[lane])
+    }
+    /// The route and the master accumulation, in the lane's own transposed tile (issue #218).
+    ///
+    /// Three frozen facts make this the reduction it replaces rather than a re-derivation of it:
+    ///
+    /// * the tile is `frames` words long, exactly as `lease.write_stereo` hands the route op its
+    ///   buffer, so `mix2x2_block::<FrameLane>` takes the same vector/tail split and emits the same
+    ///   per-sample op order over the same constants;
+    /// * the route stays its own arithmetic step. It is **not** merged into the matrix slot above
+    ///   it: two 2x2s multiplied out is a different rounding, and D3 folds the *gain* into the
+    ///   route's own coefficients and nothing else;
+    /// * the master meets `sum_into_block::<FrameLane>`, the same kernel `reduce_plane`'s
+    ///   left-to-right accumulation used, in the same order -- which `route_fold` proves rather
+    ///   than assumes.
+    ///
+    /// The accumulation is two independent per-plane calls, so a mono collapse drops one of them
+    /// and changes nothing else. The 2x2 above it is irreducibly cross-plane -- that is what a
+    /// route *is* (D3) -- and is not something a plane-wise factoring could have separated.
+    fn fold_plane(&mut self, lane: usize, left: &mut [f32], right: &mut [f32]) {
+        let fold = self.fold[lane];
+        mix2x2_block::<FrameLane>(left, right, fold.coefficients);
+        let (master_left, master_right) = self.lease.write_stereo(self.master);
+        if fold.store {
+            master_left.copy_from_slice(left);
+            master_right.copy_from_slice(right);
+        } else {
+            sum_into_block::<FrameLane>(master_left, left);
+            sum_into_block::<FrameLane>(master_right, right);
+        }
     }
 }
 
@@ -496,6 +551,9 @@ pub(crate) struct Runtime {
     bank_outputs: Box<[u32]>,
     /// Lanes whose scatter this bind pointed at their consumer's buffer (issue #202 rec 3).
     redirects: u64,
+    /// Lanes whose route and master accumulation this bind folded into their chain's epilogue
+    /// (issue #218).
+    folds: u64,
 }
 
 impl Runtime {
@@ -504,11 +562,17 @@ impl Runtime {
         self.redirects
     }
 
+    /// Lanes whose route and master accumulation this bind folded into the chain's epilogue.
+    pub(crate) const fn route_folds(&self) -> u64 {
+        self.folds
+    }
+
     pub(crate) fn new(
         lease: ArenaLeaseV1,
         delays: Vec<CompensationDelay>,
         units: Vec<RuntimeUnit>,
         redirects: u64,
+        folds: u64,
     ) -> Self {
         let widest = units
             .iter()
@@ -525,6 +589,7 @@ impl Runtime {
             bank_inputs: vec![0; widest].into_boxed_slice(),
             bank_outputs: vec![0; widest].into_boxed_slice(),
             redirects,
+            folds,
         }
     }
 
@@ -557,6 +622,8 @@ impl Runtime {
                 members,
                 lanes,
                 chain,
+                fold,
+                master,
             } => {
                 let lanes = *lanes;
                 // Only the first slot reduces graph inputs; the chain computes the rest -- and a
@@ -580,6 +647,8 @@ impl Runtime {
                         lease,
                         inputs: &bank_inputs[..lanes],
                         outputs: &bank_outputs[..lanes],
+                        fold,
+                        master: *master,
                     },
                     u32::try_from(frames).unwrap_or(u32::MAX),
                     first_sample,
@@ -673,8 +742,21 @@ fn execute_op(
         let (staged_left, staged_right) = lease.write_stereo(staged.staging);
         delays[staged.line as usize].process(staged_left, staged_right);
     }
-    reduce_plane(lease, 0, output, &op.inputs);
-    reduce_plane(lease, 1, output, &op.inputs);
+    // The fan-in-zero fill is dead under a bound source (issue #218). `reduce_plane`'s `[]` arm
+    // fills the buffer with `0.0` so that a node with no contributors renders silence; a bound
+    // node with no graph inputs has a contributor, and it is the host's processor, which is
+    // required to write every word of the block it is handed. Filling first and overwriting
+    // second is two whole stereo blocks of stores per bound source per block -- 64 of them on the
+    // intended fixture -- and not one of those words is ever read.
+    //
+    // The clause is exactly "no graph inputs *and* a host processor". A `NodeKind::Identity` with
+    // no inputs is a submix nothing routes into and its fill **is** its audio; a `SourceInput` is
+    // already skipped above; every other kind reduces first and processes in place, so its fill is
+    // the value it processes.
+    if !op.inputs.is_empty() || !matches!(op.kind, NodeKind::Bound(_)) {
+        reduce_plane(lease, 0, output, &op.inputs);
+        reduce_plane(lease, 1, output, &op.inputs);
+    }
     match &mut op.kind {
         NodeKind::SourceInput | NodeKind::Identity | NodeKind::BankMember => {}
         NodeKind::Route(coefficients) => {
@@ -1032,12 +1114,7 @@ impl RuntimeParts {
                 ))),
             }
         } else if let Some(transform) = self.routes.remove(node) {
-            NodeKind::Route([
-                transform.gain * transform.ll,
-                transform.gain * transform.lr,
-                transform.gain * transform.rl,
-                transform.gain * transform.rr,
-            ])
+            NodeKind::Route(folded_route(&transform))
         } else {
             NodeKind::Identity
         }
@@ -1229,20 +1306,47 @@ pub(crate) fn build_sequential(
             )
         })
         .collect();
+    // Issue #218: decided here, before `build_op` consumes `parts.observers` and before any op is
+    // built, because it decides which ops are built at all.
+    let fold = route_fold(program, spec, &parts, &run_units);
+    let folded_runs: std::collections::BTreeSet<usize> = fold
+        .as_ref()
+        .map(|fold| fold.runs.iter().map(|(run, _)| *run).collect())
+        .unwrap_or_default();
+    let retired: std::collections::BTreeSet<usize> = fold
+        .as_ref()
+        .map_or_else(Default::default, |fold| fold.retired.clone());
     // Issue #202 rec 3: decided here, before `build_op` consumes `parts.observers`, because two of
     // the clauses are about what is bound to a node rather than about the program.
-    let redirects = scatter_redirects(
+    //
+    // A folded chain is excluded: the redirect points a lane's scatter at its consumer's buffer,
+    // and a folded lane has no scatter to point anywhere -- its tile goes to the epilogue and its
+    // consumer no longer runs. Excluding it keeps the two counters honest as well as the code:
+    // `bank_scatter_redirects` reports the lanes that still relocate a scatter, not the lanes the
+    // fold made the question moot for.
+    let redirects: Vec<ScatterRedirect> = scatter_redirects(
         program,
         spec,
         &parts.membership,
         &parts.observers,
         &run_units,
-    );
+    )
+    .into_iter()
+    .filter(|(run, _, _)| !folded_runs.contains(run))
+    .collect();
     // Where each op's `RuntimeOp` ended up, so a redirect can neutralise the consumer's reduction.
     let mut op_slot: Vec<Option<(usize, usize)>> = vec![None; program.ops.len()];
+    // Run unit -> the unit index it was emitted at, for the chains the fold arms.
+    let mut unit_of_run: Vec<Option<usize>> = vec![None; run_units.len()];
     let mut units = Vec::with_capacity(run_units.len());
-    for (membership, ops) in &run_units {
+    for (run, (membership, ops)) in run_units.iter().enumerate() {
+        // A retired route op is absorbed by its cohort's epilogue: no unit, no dispatch, no
+        // reduction, no `mix2x2_block` pass of its own.
+        if ops.iter().all(|index| retired.contains(index)) {
+            continue;
+        }
         let membership = membership.clone();
+        unit_of_run[run] = Some(units.len());
         for (member, index) in ops.iter().enumerate() {
             op_slot[*index] = Some((units.len(), member));
         }
@@ -1292,6 +1396,7 @@ pub(crate) fn build_sequential(
         units.push(finish_unit(&mut parts, &membership, members));
     }
     apply_scatter_redirects(program, &redirects, &op_slot, &mut units);
+    let folds = apply_route_fold(fold.as_ref(), &unit_of_run, &op_slot, arena, &mut units);
     let mut builder = ArenaLeaseSetBuilder::new(
         NonZeroUsize::new(2).expect("stereo planes"),
         NonZeroUsize::new(frames.max(1)).expect("nonzero frames"),
@@ -1306,7 +1411,75 @@ pub(crate) fn build_sequential(
         delays,
         units,
         redirects.len() as u64,
+        folds,
     )
+}
+
+/// Arm every admitted chain's epilogue and neutralise the reduction it performed.
+///
+/// Three edits, and they are each other's counterparts. The chain is told which lanes to hand to
+/// `fold_plane` and given the master buffer and the per-lane constants; the retired route ops were
+/// never built into units at all; and the master op's inputs become its own output, which is the
+/// shape `reduce_plane` already treats as "nothing to copy", so the op still runs -- with whatever
+/// kind it has, a host binding included -- over the sum its cohorts' epilogues already wrote.
+///
+/// Returns the number of lanes armed, which is the only honest way to state that the fold fired:
+/// like the scatter redirect it optimises by *not doing* something, so there is no output
+/// difference to observe and no timing difference a gate may rest on.
+fn apply_route_fold(
+    fold: Option<&RouteFold>,
+    unit_of_run: &[Option<usize>],
+    op_slot: &[Option<(usize, usize)>],
+    arena: impl Fn(u32) -> u32,
+    units: &mut [RuntimeUnit],
+) -> u64 {
+    let Some(fold) = fold else {
+        return 0;
+    };
+    let master = arena(fold.master.0);
+    let mut armed = 0_u64;
+    for (run, lanes) in &fold.runs {
+        let Some(unit) = unit_of_run[*run] else {
+            continue;
+        };
+        let RuntimeUnit::Bank {
+            chain,
+            fold: slot,
+            master: destination,
+            ..
+        } = &mut units[unit]
+        else {
+            // Unreachable by construction: `route_fold` only ever names a banked run unit.
+            debug_assert!(false, "only a bank chain carries a folded epilogue");
+            continue;
+        };
+        let width = chain.width().lanes() as usize;
+        let mut mask = vec![false; width].into_boxed_slice();
+        for lane in 0..lanes.len().min(width) {
+            mask[lane] = true;
+        }
+        if chain.arm_fold(mask).is_err() {
+            // Unreachable by construction: the mask is the chain's own rendered lanes, which are
+            // exactly its active ones. Left inert rather than half-armed.
+            debug_assert!(false, "a chain's rendered lanes are its active lanes");
+            continue;
+        }
+        armed += lanes.len() as u64;
+        *destination = master;
+        *slot = lanes.clone().into_boxed_slice();
+    }
+    if armed == 0 {
+        return 0;
+    }
+    if let Some((unit, _)) = op_slot[fold.master_op] {
+        match &mut units[unit] {
+            RuntimeUnit::Op(op) => op.inputs = vec![master].into_boxed_slice(),
+            // Unreachable by construction: `route_fold` declines a banked master outright, because
+            // such a master's reduction is its chain's gather.
+            RuntimeUnit::Bank { .. } => debug_assert!(false, "a banked master never folds"),
+        }
+    }
+    armed
 }
 
 /// One chain's scatter redirect: `(run, lane, consumer op)` for every lane whose scatter may land
@@ -1640,6 +1813,374 @@ fn apply_scatter_redirects(
     }
 }
 
+/// A route's 2x2 with its linear gain folded in, once, at bind (D3, #98 F4).
+///
+/// One derivation, two callers: [`RuntimeParts::node_kind`] builds `NodeKind::Route` from it and
+/// [`route_fold`] builds `FoldLane` from it, so a chain's epilogue cannot apply constants that
+/// differ from the ones the route op it replaced would have applied.
+const fn folded_route(transform: &RouteTransform) -> [f32; 4] {
+    [
+        transform.gain * transform.ll,
+        transform.gain * transform.lr,
+        transform.gain * transform.rl,
+        transform.gain * transform.rr,
+    ]
+}
+
+/// The route constants `node_kind` *would* hand this node, asked without consuming anything.
+///
+/// [`RuntimeParts::node_kind`] takes the node's binding, its prepared effect and its route out of
+/// `parts` as it answers, so it can be asked exactly once and only while its op is being built.
+/// The fold has to know before any op is built -- it decides which ops are built at all -- so this
+/// restates the same cascade as a query, in the same precedence order, and returns `None` for
+/// every arm that is not a plain route. A node that a host bound, that a bank owns, that a source
+/// set fills or that carries a prepared effect is not a route however the session named it.
+fn plain_route_gains(parts: &RuntimeParts, node: &GraphNodeId, index: u32) -> Option<[f32; 4]> {
+    if parts.source_inputs.contains(node)
+        || parts.membership.contains_key(&index)
+        || matches!(parts.bindings.get(node), Some(Some(_)))
+        || parts.effects.contains_key(node)
+    {
+        return None;
+    }
+    parts.routes.get(node).map(folded_route)
+}
+
+/// Whether anything can *see* the buffer op `index` writes other than by reading it as an input.
+///
+/// Two ways, and they are the pair [`chains_into`] and [`scatter_target`] already carry: an
+/// observer bound to the producing node, and an observer bound to an elided node whose alias
+/// resolves to this op's buffer (`program::Tap`). `parts.observers` is keyed by node, so the second
+/// has to name the alias node rather than the producing one.
+fn observed(
+    program: &ExecutionProgram,
+    spec: &GraphSpec,
+    parts: &RuntimeParts,
+    index: usize,
+) -> bool {
+    let node = &spec.nodes[program.ops[index].node as usize].id;
+    if parts.observers.contains_key(node) {
+        return true;
+    }
+    program
+        .taps
+        .iter()
+        .filter(|tap| tap.after_op as usize == index)
+        .any(|tap| {
+            parts
+                .observers
+                .contains_key(&spec.nodes[tap.node as usize].id)
+        })
+}
+
+/// One chain's folded epilogue: which run unit it is, and one entry per rendered lane.
+type FoldedRun = (usize, Vec<FoldLane>);
+
+/// One candidate chain mid-proof: its run unit, and `(route op, folded 2x2)` for every lane.
+type FoldCandidate = (usize, Vec<(usize, [f32; 4])>);
+
+/// What [`route_fold`] admitted: the chains that fold, the route ops that stop running, and the
+/// reduction that was replaced.
+struct RouteFold {
+    /// Folded chains in render order; the order the master is accumulated in.
+    runs: Vec<FoldedRun>,
+    /// Route ops the epilogues absorbed. These are not built into units at all.
+    retired: std::collections::BTreeSet<usize>,
+    /// The op whose reduction the epilogues performed. It still runs; its inputs become its own
+    /// output, which is the no-op `reduce_plane` already performs for a single input that is its
+    /// own output.
+    master_op: usize,
+    /// The buffer that op writes, in the lowering's numbering.
+    master: crate::program::BufferRef,
+}
+
+/// The producer of each of op `target`'s main inputs, in `inputs` order.
+///
+/// The same last-writer walk [`op_dataflow`] does, stopped at `target` and kept *per input
+/// position* rather than for position zero alone -- which is exactly the sequence the association
+/// proof in [`route_fold`] has to compare against.
+fn input_producers(program: &ExecutionProgram, target: usize) -> Vec<Option<usize>> {
+    let mut owner: Vec<Option<usize>> = vec![None; program.buffers as usize];
+    for (index, op) in program.ops.iter().enumerate() {
+        if index == target {
+            return program
+                .inputs_of(op)
+                .iter()
+                .map(|input| owner[input.buffer.0 as usize])
+                .collect();
+        }
+        owner[op.output.0 as usize] = Some(index);
+    }
+    Vec::new()
+}
+
+/// One lane's route, if that lane's chain may absorb it: `(route op, folded 2x2)`.
+///
+/// `producer` is the chain's last slot for this lane. Every clause is one way absorbing the route
+/// could be observed; see [`route_fold`] for the ledger.
+fn foldable_lane(
+    program: &ExecutionProgram,
+    spec: &GraphSpec,
+    parts: &RuntimeParts,
+    readers: &[Vec<usize>],
+    first_producer: &[Option<usize>],
+    producer: usize,
+) -> Option<(usize, [f32; 4])> {
+    if readers[producer].len() != 1 {
+        return None;
+    }
+    let route = readers[producer][0];
+    let producer_op = &program.ops[producer];
+    let route_op = &program.ops[route];
+    if route_op.input_count() != 1
+        || route_op.sidechain.is_some()
+        || program.inputs_of(route_op)[0].delay.is_some()
+        || first_producer[route] != Some(producer)
+    {
+        return None;
+    }
+    if producer_op.output == program.output || route_op.output == program.output {
+        return None;
+    }
+    if observed(program, spec, parts, producer) || observed(program, spec, parts, route) {
+        return None;
+    }
+    let node = &spec.nodes[route_op.node as usize].id;
+    let gains = plain_route_gains(parts, node, route_op.node)?;
+    Some((route, gains))
+}
+
+/// Fold every cohort chain's routes and the master reduction into the chains' own epilogues.
+///
+/// The shape this replaces, on the intended 64-track strip, is one route op per track -- a whole
+/// stereo block of `mix2x2_block` over a buffer the chain had just scattered -- followed by a
+/// 63-pass `sum_into_block` reduction over those 64 buffers. The shape it renders instead is one
+/// pass: each lane's tile is routed where the transpose left it and goes straight into the master,
+/// the first contributor storing and the rest accumulating.
+///
+/// # The association proof, which is the whole of the correctness argument
+///
+/// D9 fixes the reduction as `sum2_block(in0, in1)` then `sum_into_block` left to right over
+/// `spec.edges` order, and a floating-point sum is not associative, so "the same summands" is not
+/// "the same bits". The epilogues accumulate in **chain execution order**, which is a different
+/// sequence written down in a different place. They are only the same reduction if the two
+/// sequences are equal, and this function proves that rather than assuming it: it walks the lowered
+/// program, resolves the producer of *every* input position of the reduction (`input_producers`),
+/// and requires that list to equal, element for element and in order, the route ops of the folded
+/// chains taken in render order, lane by lane. Anything else -- a contributor that is not a folded
+/// lane, a lane out of place, a cohort whose planner ordered its lanes differently from the edge
+/// order -- fails the equality and declines the whole fold. This mirrors how `chains_into` proves
+/// lane alignment on the lowered program instead of trusting two planners to agree.
+///
+/// Equality of the *whole* list is also what makes coverage total: a master with one contributor
+/// that is not a folded lane cannot be folded at all, because there is no position in the chains'
+/// order at which that contributor's summand could be inserted.
+///
+/// # Which clauses a mutation makes red (the house ledger, measured)
+///
+/// Dropping a clause and running the graph, graph-compiler and console-workload suites gives:
+///
+/// * **the association order** -> `route_ids_ordered_against_the_cohorts_decline_the_route_fold`,
+///   plus `a_leased_stage_meter_declines_the_merge_and_still_meters` and
+///   `an_observed_alias_on_the_last_slot_declines_that_lanes_scatter_redirect`. Keeping the length
+///   check and dropping the element-wise comparison is the unsound direction, and it is the one
+///   measured.
+/// * **no observer on the route/output path** -> `the_folded_master_is_the_reductions_own_bits`.
+///   That test's oracle is a post-matrix meter, so dropping this clause destroys the oracle *and*
+///   the plan it was oracle for; it goes red either way, which is what the ledger records.
+/// * **the opening chain's ops are excluded from the in-between scan** -> every fold in the tree
+///   stops firing and `every_standing_workload_folds_one_route_per_track` goes red. That is the
+///   conservative direction, and it is worth pinning: the colouring gives the session output the
+///   physical slot of track zero's *input* buffer on every console fixture, so without the
+///   exclusion the standing fixture never folds at all.
+/// * **the first contributor stores** ->
+///   `the_first_contributor_stores_so_a_negative_zero_master_keeps_its_sign`.
+/// * **the whole fold** -> `every_standing_workload_folds_one_route_per_track`, on a count. There
+///   is no output difference to see: that is the point of the counter.
+///
+/// Four clauses have **no** red test, and each is kept for a stated reason rather than a measured
+/// one. Saying so is the point of writing the ledger down:
+///
+/// * **sole readership of a chain's last slot.** Genuinely load-bearing -- a folded lane stops
+///   writing that buffer, so a second reader would carry the previous block -- but *shadowed* in
+///   every session a compiler can build. A second route from the same tap adds a summand the
+///   master's input list has, so the association proof declines on length first; a sidechain from
+///   that tap is read by an op scheduled *before* the route, so `readers[producer][0]` is not a
+///   route and the plain-route clause declines instead. Dropping the clause reddens nothing, and
+///   that is reported rather than dressed up.
+/// * **nothing in between names the master.** No compiled session reaches the hazard, and the
+///   reason is structural: the master's colour is the first colour the lowering frees, which is
+///   track zero's input buffer, and track zero is always in the *opening* cohort -- whose ops the
+///   scan excludes because they all precede the first master write. A later cohort naming the
+///   master's slot is expressible in a lowered program and not in a session, exactly as
+///   `scatter_target`'s compensation-delay clause is.
+/// * **one master op for the whole plan.** A session whose tracks reduce into several submixes
+///   could fold each submix separately; this folds one reduction or none. The proof would have to
+///   be run per master and the chains partitioned between them, and no fixture in the tree needs
+///   it. Dropping it is shadowed by the association proof's length check.
+/// * **the master buffer is distinct from every folded buffer.** The colouring cannot hand the
+///   master a slot a folded lane still writes -- a chain's last slot is `program::is_dedicated`
+///   storage and is never returned to the free list -- so this is a construction check, in the
+///   same sense as `scatter_redirects`' pairwise-distinct guard, and is deliberately not presented
+///   as a hazard defence.
+fn route_fold(
+    program: &ExecutionProgram,
+    spec: &GraphSpec,
+    parts: &RuntimeParts,
+    run_units: &[(Vec<Membership>, Vec<usize>)],
+) -> Option<RouteFold> {
+    let (readers, first_producer) = op_dataflow(program);
+    // (run unit, one (route op, folded 2x2) per rendered lane), in render order.
+    let mut candidates: Vec<FoldCandidate> = Vec::new();
+    for (run, (membership, ops)) in run_units.iter().enumerate() {
+        if membership.is_empty() || ops.is_empty() {
+            continue;
+        }
+        let lanes = ops.len() / membership.len();
+        let last = ops.len() - lanes;
+        let mut folded = Vec::with_capacity(lanes);
+        for lane in 0..lanes {
+            match foldable_lane(
+                program,
+                spec,
+                parts,
+                &readers,
+                &first_producer,
+                ops[last + lane],
+            ) {
+                Some(lane_fold) => folded.push(lane_fold),
+                // A chain folds every lane or none: a half-folded chain would have to keep its
+                // scatter for the rest, and its unfolded lanes' routes would then have to be
+                // inserted into the master's order somewhere the chains' order has no room for.
+                None => {
+                    folded.clear();
+                    break;
+                }
+            }
+        }
+        if folded.is_empty() {
+            continue;
+        }
+        candidates.push((run, folded));
+    }
+    let first_route = candidates.first()?.1.first()?.0;
+    if readers[first_route].len() != 1 {
+        return None;
+    }
+    let master_op = readers[first_route][0];
+    // Every candidate must reduce into that one master, and only into it.
+    candidates.retain(|(_, lanes)| {
+        lanes
+            .iter()
+            .all(|(route, _)| readers[*route].len() == 1 && readers[*route][0] == master_op)
+    });
+    if candidates.is_empty() {
+        return None;
+    }
+    let master = &program.ops[master_op];
+    if master.sidechain.is_some()
+        || program
+            .inputs_of(master)
+            .iter()
+            .any(|input| input.delay.is_some())
+        || parts.membership.contains_key(&master.node)
+        || parts
+            .source_inputs
+            .contains(&spec.nodes[master.node as usize].id)
+    {
+        return None;
+    }
+    // The association proof: the reduction's contributors, in its own edge order, are exactly the
+    // folded lanes in render order.
+    let ordered: Vec<usize> = candidates
+        .iter()
+        .flat_map(|(_, lanes)| lanes.iter().map(|(route, _)| *route))
+        .collect();
+    let producers = input_producers(program, master_op);
+    if producers.len() != ordered.len()
+        || producers
+            .iter()
+            .zip(ordered.iter())
+            .any(|(producer, route)| *producer != Some(*route))
+    {
+        return None;
+    }
+    let target = master.output;
+    // A folded lane's own buffers stop being written, so the master must not be one of them.
+    if candidates.iter().any(|(_, lanes)| {
+        lanes
+            .iter()
+            .any(|(route, _)| program.ops[*route].output == target)
+    }) {
+        return None;
+    }
+    // The epilogues write the master at each chain's position, which is earlier -- often much
+    // earlier -- than the reduction they replaced. Everything scheduled in between must therefore
+    // leave the buffer alone: a reader would see a partial sum, and a writer would clobber one.
+    //
+    // The window is over *units*, not op indices, because a unit is what runs. Three exclusions,
+    // each for a reason:
+    //
+    // * **the opening folded chain's own unit.** Every op it owns runs before its chain does, and
+    //   its chain's scatter is the first write to the master, so nothing it names can be a hazard.
+    //   This is load-bearing rather than tidy: the colouring reuses the session output's physical
+    //   slot for track zero's *input* buffer on every console fixture in the tree, so the opening
+    //   cohort's lane-zero gather reads the master's slot -- before the master exists -- on every
+    //   block. Excluding only the retired routes declines the whole fold on the standing fixture.
+    // * **every unit at or after the master's.** The master op is the value they are entitled to
+    //   read, and the master's own unit holds nothing but the master op (a banked master is
+    //   declined above).
+    // * **the retired routes**, which no longer run at all.
+    //
+    // Everything else is checked, chain members included: a later cohort's first-slot reduction
+    // runs *after* the opening cohort's scatter, and its gather source is one of the inputs
+    // `op_names_buffer` counts, so a cohort whose gather read the master's slot declines here.
+    let retired: std::collections::BTreeSet<usize> = ordered.iter().copied().collect();
+    let opening = candidates.first().expect("a non-empty candidate list").0;
+    let master_run = run_units
+        .iter()
+        .position(|(_, ops)| ops.contains(&master_op))?;
+    if master_run <= opening {
+        return None;
+    }
+    for (run, (_, ops)) in run_units.iter().enumerate() {
+        if run <= opening || run >= master_run {
+            continue;
+        }
+        if ops
+            .iter()
+            .filter(|index| !retired.contains(index))
+            .any(|index| op_names_buffer(program, &program.ops[*index], target))
+        {
+            return None;
+        }
+    }
+    let mut store = true;
+    let runs = candidates
+        .into_iter()
+        .map(|(run, lanes)| {
+            let fold = lanes
+                .into_iter()
+                .map(|(_, coefficients)| {
+                    let lane = FoldLane {
+                        coefficients,
+                        store,
+                    };
+                    store = false;
+                    lane
+                })
+                .collect();
+            (run, fold)
+        })
+        .collect();
+    Some(RouteFold {
+        runs,
+        retired,
+        master_op,
+        master: target,
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_op(
     parts: &mut RuntimeParts,
@@ -1681,6 +2222,8 @@ fn finish_unit(
         members: members.into_boxed_slice(),
         lanes,
         chain,
+        fold: Box::default(),
+        master: 0,
     }
 }
 
@@ -1946,6 +2489,219 @@ mod tests {
         builder.lease(0, owned.clone(), owned);
         let (_arena, mut leases) = builder.finish().expect("one disjoint lease");
         leases.pop().expect("the lease")
+    }
+
+    /// One stereo lease over `buffers` buffers, the shape `build_sequential` builds.
+    fn stereo_lease(frames: usize, buffers: usize) -> ArenaLeaseV1 {
+        let mut builder = ArenaLeaseSetBuilder::new(
+            NonZeroUsize::new(2).expect("stereo planes"),
+            NonZeroUsize::new(frames).expect("frames"),
+        );
+        let owned: Vec<u32> = (0..buffers).map(|_| builder.reserve()).collect();
+        builder.lease(0, owned.clone(), owned);
+        let (_arena, mut leases) = builder.finish().expect("one disjoint lease");
+        leases.pop().expect("the lease")
+    }
+
+    /// The folded epilogue is the route op followed by the D9 reduction, word for word.
+    ///
+    /// The oracle is the shape this replaces, built out of the very kernels the route op and
+    /// `reduce_plane` call: `mix2x2_block` per contributor into its own buffer, then
+    /// `sum2_block(first, second)` and `sum_into_block` for the rest, left to right. Nothing here
+    /// is a restatement of the epilogue's arithmetic -- both sides are the production kernels, and
+    /// what is under test is that the epilogue puts them in the same order.
+    ///
+    /// Block lengths that are not a multiple of the lane width are included, because the epilogue
+    /// hands `mix2x2_block` a *staging* slice where the route op handed it an arena buffer: if the
+    /// two lengths could differ the vector/tail split would differ with them, and the bits with it.
+    ///
+    /// Red mutations: accumulate the first contributor instead of storing it -- the `-0.0` case
+    /// below fails; reverse the lane order -- the multi-contributor cases fail.
+    #[test]
+    fn a_folded_epilogue_is_the_route_and_the_reduction_bit_for_bit() {
+        let coefficients = [
+            [0.5_f32, -0.25, 0.125, 0.75],
+            [1.0, 0.0, 0.0, 1.0],
+            [-0.3, 0.9, 0.4, -0.6],
+        ];
+        for frames in [1_usize, 3, 7, 63, 64, 65, 128] {
+            let mut state = 0x0bad_f00du32;
+            let tiles: Vec<(Vec<f32>, Vec<f32>)> = (0..coefficients.len())
+                .map(|_| {
+                    (
+                        (0..frames).map(|_| lcg(&mut state)).collect(),
+                        (0..frames).map(|_| lcg(&mut state)).collect(),
+                    )
+                })
+                .collect();
+
+            // The oracle: one route buffer per contributor, then the D9 left-to-right reduction.
+            let mut lease = stereo_lease(frames, coefficients.len() + 1);
+            // The arena reserves buffer zero as the always-zero silence slot.
+            let master = ARENA_BASE;
+            let routes: Vec<u32> =
+                (ARENA_BASE + 1..=ARENA_BASE + coefficients.len() as u32).collect();
+            for (index, buffer) in routes.iter().enumerate() {
+                let (left, right) = lease.write_stereo(*buffer);
+                left.copy_from_slice(&tiles[index].0);
+                right.copy_from_slice(&tiles[index].1);
+                mix2x2_block::<FrameLane>(left, right, coefficients[index]);
+            }
+            reduce_plane(&mut lease, 0, master, &routes);
+            reduce_plane(&mut lease, 1, master, &routes);
+            let (oracle_left, oracle_right) = lease.read_stereo(master);
+            let oracle: (Vec<u32>, Vec<u32>) = (
+                oracle_left.iter().map(|value| value.to_bits()).collect(),
+                oracle_right.iter().map(|value| value.to_bits()).collect(),
+            );
+
+            // The epilogue: the same tiles, folded lane by lane in the same order.
+            let mut folded_lease = stereo_lease(frames, 1);
+            let fold: Vec<FoldLane> = coefficients
+                .iter()
+                .enumerate()
+                .map(|(index, coefficients)| FoldLane {
+                    coefficients: *coefficients,
+                    store: index == 0,
+                })
+                .collect();
+            let mut members = ArenaMembers {
+                lease: &mut folded_lease,
+                inputs: &[],
+                outputs: &[],
+                fold: &fold,
+                master,
+            };
+            for (index, tile) in tiles.iter().enumerate() {
+                let mut left = tile.0.clone();
+                let mut right = tile.1.clone();
+                members.fold_plane(index, &mut left, &mut right);
+            }
+            let (folded_left, folded_right) = folded_lease.read_stereo(master);
+            assert_eq!(
+                (
+                    folded_left
+                        .iter()
+                        .map(|value| value.to_bits())
+                        .collect::<Vec<_>>(),
+                    folded_right
+                        .iter()
+                        .map(|value| value.to_bits())
+                        .collect::<Vec<_>>()
+                ),
+                oracle,
+                "{frames} frames: the epilogue is not the route plus the reduction"
+            );
+        }
+    }
+
+    /// The first contributor **stores**: a master whose only summand is `-0.0` stays `-0.0`.
+    ///
+    /// This is the law correction 1 of the plan states, and it is an absolute property rather than
+    /// a comparison, because both arms of a differential move together under the mutation that
+    /// breaks it. Zero-filling the master and accumulating every contributor computes
+    /// `0.0 + (-0.0)`, which is `+0.0`; `sum2_block` computes `t0 + t1` directly, and a fan-in-one
+    /// reduction is a *copy*, which is why `reduce_plane` has never been `fold(0.0, +)` either.
+    ///
+    /// Red mutation: replace the `store` arm's `copy_from_slice` with `sum_into_block` -- the
+    /// master is `+0.0` (bits 0) where `-0.0` (bits 0x8000_0000) is required.
+    #[test]
+    fn the_first_contributor_stores_so_a_negative_zero_master_keeps_its_sign() {
+        const FRAMES: usize = 8;
+        let mut lease = stereo_lease(FRAMES, 1);
+        // The arena starts at `+0.0`, which is exactly the value a zero-fill would leave.
+        assert!(
+            lease
+                .read_stereo(ARENA_BASE)
+                .0
+                .iter()
+                .all(|value| *value == 0.0)
+        );
+        let fold = [FoldLane {
+            // Identity, so the route stage cannot itself manufacture a sign: `0.0 * (-0.0)` is
+            // `-0.0` and `-0.0 + -0.0` is `-0.0`.
+            coefficients: [1.0, 0.0, 0.0, 1.0],
+            store: true,
+        }];
+        let mut members = ArenaMembers {
+            lease: &mut lease,
+            inputs: &[],
+            outputs: &[],
+            fold: &fold,
+            master: ARENA_BASE,
+        };
+        let mut left = vec![-0.0_f32; FRAMES];
+        let mut right = vec![-0.0_f32; FRAMES];
+        members.fold_plane(0, &mut left, &mut right);
+        let (master_left, master_right) = lease.read_stereo(ARENA_BASE);
+        for frame in 0..FRAMES {
+            assert_eq!(
+                master_left[frame].to_bits(),
+                0x8000_0000,
+                "frame {frame}: the first contributor's sign was lost on the left"
+            );
+            assert_eq!(
+                master_right[frame].to_bits(),
+                0x8000_0000,
+                "frame {frame}: the first contributor's sign was lost on the right"
+            );
+        }
+    }
+
+    /// The fan-in-zero fill is skipped under a bound source and kept everywhere else.
+    ///
+    /// Both directions, because only one of them is the optimisation:
+    ///
+    /// * A **bound** node with no graph inputs is written entirely by its host processor, so the
+    ///   `fill(0.0)` in front of it is two stereo blocks of dead stores. The buffer is left holding
+    ///   the previous block's words on the way in, which is what the trait contract now says.
+    /// * An **identity** node with no graph inputs is a submix nothing routes into, and the fill
+    ///   *is* its audio. Dropping the `NodeKind::Bound` guard reddens this arm at once.
+    #[test]
+    fn the_fan_in_zero_fill_is_dead_only_under_a_bound_source() {
+        /// A host source that writes every word it is handed, as the contract requires.
+        struct Fill(f32);
+        impl crate::GraphRuntimeProcessor for Fill {
+            fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
+                block.left.fill(self.0);
+                block.right.fill(-self.0);
+                Ok(())
+            }
+        }
+        const FRAMES: usize = 16;
+        const STALE: f32 = 1.5;
+
+        for (case, kind, expected) in [
+            (
+                "a bound source overwrites the block, so the fill is dead",
+                NodeKind::Bound(Box::new(Fill(0.25))),
+                (0.25_f32, -0.25_f32),
+            ),
+            (
+                "an identity node with no contributors renders silence, and the fill is that",
+                NodeKind::Identity,
+                (0.0, 0.0),
+            ),
+        ] {
+            let mut lease = stereo_lease(FRAMES, 1);
+            lease.write(0, ARENA_BASE).fill(STALE);
+            lease.write(1, ARENA_BASE).fill(STALE);
+            let mut op = RuntimeOp {
+                inputs: Box::new([]),
+                staged: Box::new([]),
+                sidechain: None,
+                output: ARENA_BASE,
+                kind,
+                observers: Box::new([]),
+            };
+            execute_op(&mut op, &mut lease, &mut [], 0).expect("op");
+            let (left, right) = lease.read_stereo(ARENA_BASE);
+            assert!(
+                left.iter().all(|value| *value == expected.0)
+                    && right.iter().all(|value| *value == expected.1),
+                "{case}"
+            );
+        }
     }
 
     /// The dedication copy is skipped for exactly the shape that is only a copy, and for nothing

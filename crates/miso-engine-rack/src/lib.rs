@@ -808,6 +808,31 @@ pub trait BankMembers {
         let _ = lane;
         None
     }
+
+    /// Take one lane's planar result **instead of** writing it to [`BankMembers::plane_mut`].
+    ///
+    /// Called exactly once per block, for each lane [`BankChain::arm_fold`] named, at the point in
+    /// the scatter where that lane's plane copy would have happened. `left` and `right` are the
+    /// lane's own `frames`-word planar tile, already transposed out of the resident block and
+    /// mutable, so the implementor may finish the lane in place and put the result wherever it
+    /// belongs -- including into a destination several lanes share.
+    ///
+    /// # Why this is not [`BankMembers::plane_mut`] and not [`BankMembers::aux_plane_mut`]
+    ///
+    /// `plane_mut` is a *relocation* of the lane's one scatter target and the targets must stay
+    /// pairwise distinct; `aux_plane_mut` is a *second*, accumulating destination that leaves the
+    /// first standing. This is the third shape: the lane's planar buffer is not written at all, so
+    /// there is no scatter target to keep distinct, and what the lane does with its own tile --
+    /// apply a constant, sum it into a shared bus, both -- is the implementor's arithmetic and not
+    /// the chain's. The chain contributes the transpose it was going to do anyway and nothing else.
+    ///
+    /// A chain that arms this is asserting that **nothing reads the lane's planar buffer**: it is
+    /// left holding the previous block's words, exactly as a merged chain leaves its intermediate
+    /// slots. Proving that is the caller's obligation, and the graph runtime's `route_fold` is
+    /// where it is proved.
+    fn fold_plane(&mut self, lane: usize, left: &mut [f32], right: &mut [f32]) {
+        let _ = (lane, left, right);
+    }
 }
 
 /// One bank chain: a resident L/R AoSoA block plus its ordered slots.
@@ -835,6 +860,13 @@ pub struct BankChain {
     /// touches no auxiliary state at all -- that is the "zero cost when absent" claim, and it is
     /// structural rather than measured. See [`BankMembers::aux_plane_mut`] for what arming buys.
     aux: Box<[bool]>,
+    /// Lanes whose scatter is handed to [`BankMembers::fold_plane`] instead of written to the
+    /// lane's plane (issue #218's route fold).
+    ///
+    /// Empty means unarmed, and an unarmed chain takes the byte-for-byte scatter it always did:
+    /// the mask is tested once per plane per block with `is_empty`, never per lane. See
+    /// [`BankChain::arm_fold`].
+    fold: Box<[bool]>,
 }
 
 impl BankChain {
@@ -881,6 +913,7 @@ impl BankChain {
             staging_left: vec![0.0; staging].into_boxed_slice(),
             staging_right: vec![0.0; staging].into_boxed_slice(),
             aux: Box::default(),
+            fold: Box::default(),
         })
     }
 
@@ -977,6 +1010,52 @@ impl BankChain {
             }
         }
         counters
+    }
+
+    /// Hand `lanes`' scatter to [`BankMembers::fold_plane`] instead of writing their planes.
+    ///
+    /// An armed lane's planar tile is still produced -- the transpose is the one the scatter was
+    /// going to do anyway -- but it lands in this chain's staging block and is handed over rather
+    /// than copied into the lane's own buffer, which is left holding the previous block's words.
+    /// Passing an all-`false` mask disarms the chain back to the byte-for-byte scatter it had
+    /// before, and to its zero-cost path.
+    ///
+    /// Arming allocates the staging block a partial bank does not otherwise own; a full bank
+    /// already holds one for its tiled scatter and reuses it. This is bind-time work, never
+    /// render-time: `run` allocates nothing whether the chain is armed or not.
+    ///
+    /// # Errors
+    ///
+    /// [`RackError::Shape`] if `lanes` is not exactly this chain's lane count, or if it arms a
+    /// lane the chain does not render -- an inactive lane's scratch is never written, so folding
+    /// it would publish the zero fill rather than audio.
+    pub fn arm_fold(&mut self, lanes: Box<[bool]>) -> Result<(), RackError> {
+        if lanes.len() != self.lanes {
+            return Err(RackError::Shape);
+        }
+        if lanes
+            .iter()
+            .zip(self.active.iter())
+            .any(|(armed, active)| *armed && !*active)
+        {
+            return Err(RackError::Shape);
+        }
+        if !lanes.iter().any(|lane| *lane) {
+            self.fold = Box::default();
+            return Ok(());
+        }
+        if self.staging_left.len() != self.scratch.left.len() {
+            self.staging_left = vec![0.0; self.scratch.left.len()].into_boxed_slice();
+            self.staging_right = vec![0.0; self.scratch.right.len()].into_boxed_slice();
+        }
+        self.fold = lanes;
+        Ok(())
+    }
+
+    /// Lanes whose scatter this chain folds; empty when it folds none. Evidence only.
+    #[must_use]
+    pub fn fold_lanes(&self) -> &[bool] {
+        &self.fold
     }
 
     /// Gather every active lane, run every non-identity slot over the resident block, scatter every
@@ -1102,6 +1181,11 @@ impl BankChain {
     }
 
     /// AoSoA -> planar for the whole bank, the inverse of [`Self::gather`] under the same rule.
+    ///
+    /// A folded lane (see [`BankChain::arm_fold`]) takes the same transpose and then goes to
+    /// [`BankMembers::fold_plane`] instead of to its own plane. On the per-lane scalar path that
+    /// means transposing into this chain's staging block first, which is the one thing arming
+    /// costs a partial bank; the tiled path already lands there.
     fn scatter<M: BankMembers + ?Sized>(&mut self, members: &mut M, frames: u32) {
         if self.full_bank {
             match self.scratch.width {
@@ -1110,10 +1194,38 @@ impl BankChain {
             }
             return;
         }
-        for lane in 0..self.lanes {
-            if self.active[lane] {
+        if self.fold.is_empty() {
+            for lane in 0..self.lanes {
+                if self.active[lane] {
+                    let (left, right) = members.plane_mut(lane);
+                    self.scratch.scatter_lane(lane, left, right, 0, frames);
+                }
+            }
+            return;
+        }
+        let Self {
+            scratch,
+            lanes,
+            active,
+            staging_left,
+            staging_right,
+            fold,
+            ..
+        } = self;
+        let stride = scratch.quantum as usize;
+        let used = frames as usize;
+        for lane in 0..*lanes {
+            if !active[lane] {
+                continue;
+            }
+            if fold[lane] {
+                let left = &mut staging_left[lane * stride..lane * stride + used];
+                let right = &mut staging_right[lane * stride..lane * stride + used];
+                scratch.scatter_lane(lane, left, right, 0, frames);
+                members.fold_plane(lane, left, right);
+            } else {
                 let (left, right) = members.plane_mut(lane);
-                self.scratch.scatter_lane(lane, left, right, 0, frames);
+                scratch.scatter_lane(lane, left, right, 0, frames);
             }
         }
     }
@@ -1149,11 +1261,36 @@ impl BankChain {
                 self.staging_right[lane * stride + frame] = self.scratch.right[frame * W + lane];
             }
         }
+        if self.fold.is_empty() {
+            for lane in 0..W {
+                let (left, right) = members.plane_mut(lane);
+                debug_assert!(left.len() == frames_used && right.len() == frames_used);
+                left.copy_from_slice(
+                    &self.staging_left[lane * stride..lane * stride + frames_used],
+                );
+                right.copy_from_slice(
+                    &self.staging_right[lane * stride..lane * stride + frames_used],
+                );
+            }
+            return;
+        }
+        let Self {
+            staging_left,
+            staging_right,
+            fold,
+            ..
+        } = self;
         for lane in 0..W {
-            let (left, right) = members.plane_mut(lane);
-            debug_assert!(left.len() == frames_used && right.len() == frames_used);
-            left.copy_from_slice(&self.staging_left[lane * stride..lane * stride + frames_used]);
-            right.copy_from_slice(&self.staging_right[lane * stride..lane * stride + frames_used]);
+            let left = &mut staging_left[lane * stride..lane * stride + frames_used];
+            let right = &mut staging_right[lane * stride..lane * stride + frames_used];
+            if fold[lane] {
+                members.fold_plane(lane, left, right);
+            } else {
+                let (plane_left, plane_right) = members.plane_mut(lane);
+                debug_assert!(plane_left.len() == frames_used && plane_right.len() == frames_used);
+                plane_left.copy_from_slice(left);
+                plane_right.copy_from_slice(right);
+            }
         }
     }
 
@@ -1546,6 +1683,204 @@ mod tests {
     ///
     /// An inactive lane's scratch is never written, so summing it into a bus would publish the
     /// zero fill as if it were audio. That is a shape error, not a silent no-op.
+    /// Planes plus one shared destination every folded lane finishes into (issue #218).
+    ///
+    /// `fold_plane` applies a per-lane constant in place and then sums the tile into `bus`, which
+    /// is the shape the graph runtime's route fold has: the route's 2x2, then the master.
+    struct PlanesWithFold {
+        planes: Planes,
+        gains: Vec<f32>,
+        bus_left: Vec<f32>,
+        bus_right: Vec<f32>,
+        /// Lanes `fold_plane` was called for, in call order.
+        taken: Vec<usize>,
+    }
+    impl BankMembers for PlanesWithFold {
+        fn plane(&self, lane: usize) -> (&[f32], &[f32]) {
+            self.planes.plane(lane)
+        }
+        fn plane_mut(&mut self, lane: usize) -> (&mut [f32], &mut [f32]) {
+            self.planes.plane_mut(lane)
+        }
+        fn fold_plane(&mut self, lane: usize, left: &mut [f32], right: &mut [f32]) {
+            self.taken.push(lane);
+            let gain = self.gains[lane];
+            for (frame, sample) in left.iter_mut().enumerate() {
+                *sample *= gain;
+                self.bus_left[frame] += *sample;
+            }
+            for (frame, sample) in right.iter_mut().enumerate() {
+                *sample *= gain;
+                self.bus_right[frame] += *sample;
+            }
+        }
+    }
+
+    /// The fold epilogue: absent by default, and when armed it *replaces* the lane's plane write
+    /// with the same words handed over.
+    ///
+    /// Four claims:
+    ///
+    /// 1. **Absent by default.** A chain built the way every chain in the engine is built folds
+    ///    nothing and never calls `fold_plane`, whatever the members offer.
+    /// 2. **The handed-over tile is the scatter's own words.** The unarmed run's planar output is
+    ///    the oracle: what a folded lane receives, before it applies anything of its own, must be
+    ///    bit-identical to what the plane would have been given.
+    /// 3. **The lane's plane is not written at all.** A folded lane's buffer keeps the words it
+    ///    held before the run -- which is what makes the caller's "nothing reads it" obligation the
+    ///    load-bearing one.
+    /// 4. **Lane order.** The epilogue visits lanes in ascending order, which is what a
+    ///    scatter-accumulate into a shared destination associates in.
+    ///
+    /// Both transpose paths are exercised: the full bank takes the tiled scatter, the masked chain
+    /// takes the per-lane scalar one, and a folded partial bank is the case that made `arm_fold`
+    /// allocate a staging block a partial bank does not otherwise own.
+    #[test]
+    fn the_fold_epilogue_is_absent_by_default_and_replaces_the_lane_write_when_armed() {
+        let frames = 48_u32;
+        let lanes = 8_usize;
+        for full in [true, false] {
+            let mut active = vec![true; lanes];
+            if !full {
+                active[6] = false;
+                active[7] = false;
+            }
+            let build = || PlanesWithFold {
+                planes: Planes {
+                    left: (0..lanes)
+                        .map(|lane| vec![1.0_f32 + lane as f32; frames as usize])
+                        .collect(),
+                    right: (0..lanes)
+                        .map(|lane| vec![-2.0_f32 - lane as f32; frames as usize])
+                        .collect(),
+                },
+                gains: (0..lanes).map(|lane| 0.5 + lane as f32).collect(),
+                bus_left: vec![0.0; frames as usize],
+                bus_right: vec![0.0; frames as usize],
+                taken: Vec::new(),
+            };
+            let chain = |active: &[bool]| {
+                BankChain::new(
+                    AoSoaScratch::new(BankWidth::Eight, frames).expect("scratch"),
+                    active.to_vec().into_boxed_slice(),
+                    vec![slot(active.to_vec(), Box::new(ScaleByLane))],
+                )
+                .expect("chain")
+            };
+
+            // (1) Absent by default.
+            let mut unarmed = chain(&active);
+            assert!(
+                unarmed.fold_lanes().is_empty(),
+                "a fresh chain folds nothing"
+            );
+            let mut oracle = build();
+            unarmed.run(&mut oracle, frames, 0).expect("unarmed run");
+            assert!(
+                oracle.taken.is_empty(),
+                "an unarmed chain must never call fold_plane"
+            );
+
+            // Fold every rendered lane but lane 1, which keeps its plane write.
+            let mut mask = active.clone();
+            mask[1] = false;
+            let mut folded = chain(&active);
+            folded
+                .arm_fold(mask.clone().into_boxed_slice())
+                .expect("arm");
+            assert_eq!(folded.fold_lanes(), &mask[..]);
+            let mut armed = build();
+            folded.run(&mut armed, frames, 0).expect("folded run");
+
+            // (4) Ascending lane order.
+            let expected: Vec<usize> = (0..lanes).filter(|lane| mask[*lane]).collect();
+            assert_eq!(armed.taken, expected, "the epilogue visits lanes in order");
+
+            for lane in 0..lanes {
+                if !active[lane] {
+                    continue;
+                }
+                if mask[lane] {
+                    // (3) A folded lane's plane is exactly what it was before the run.
+                    assert!(
+                        armed.planes.left[lane]
+                            .iter()
+                            .all(|value| { value.to_bits() == (1.0_f32 + lane as f32).to_bits() }),
+                        "lane {lane}: a folded lane's own plane must not be written"
+                    );
+                } else {
+                    // An unfolded lane still scatters, bit for bit.
+                    assert_eq!(
+                        armed.planes.left[lane], oracle.planes.left[lane],
+                        "lane {lane}: an unfolded lane's scatter moved"
+                    );
+                }
+            }
+
+            // (2) The handed-over tile was the scatter's own words. The bus is the epilogue's own
+            // arithmetic over them, so recomputing it from the *unarmed* run's planes -- in the
+            // same lane order, with the same per-lane gain -- must reproduce it word for word.
+            for frame in 0..frames as usize {
+                let mut expected_left = 0.0_f32;
+                let mut expected_right = 0.0_f32;
+                for lane in (0..lanes).filter(|lane| mask[*lane]) {
+                    expected_left += oracle.planes.left[lane][frame] * armed.gains[lane];
+                    expected_right += oracle.planes.right[lane][frame] * armed.gains[lane];
+                }
+                assert_eq!(
+                    armed.bus_left[frame].to_bits(),
+                    expected_left.to_bits(),
+                    "frame {frame}: a folded lane received words the scatter would not have written"
+                );
+                assert_eq!(
+                    armed.bus_right[frame].to_bits(),
+                    expected_right.to_bits(),
+                    "frame {frame}: a folded lane received words the scatter would not have written"
+                );
+            }
+        }
+    }
+
+    /// The fold refuses a mask it cannot render, exactly as the auxiliary seam does.
+    #[test]
+    fn arming_a_fold_refuses_an_unrenderable_mask() {
+        let frames = 32_u32;
+        let lanes = 8_usize;
+        let mut active = vec![true; lanes];
+        active[7] = false;
+        let scratch = AoSoaScratch::new(BankWidth::Eight, frames).expect("scratch");
+        let mut chain = BankChain::new(
+            scratch,
+            active.clone().into_boxed_slice(),
+            vec![slot(active.clone(), Box::new(PassThrough))],
+        )
+        .expect("chain");
+        assert_eq!(
+            chain.arm_fold(vec![true; lanes - 1].into_boxed_slice()),
+            Err(RackError::Shape),
+            "a mask that is not the chain's lane count is refused"
+        );
+        assert_eq!(
+            chain.arm_fold(vec![true; lanes].into_boxed_slice()),
+            Err(RackError::Shape),
+            "folding lane 7, which this chain does not render, is refused"
+        );
+        assert!(
+            chain.fold_lanes().is_empty(),
+            "a refused arm leaves the chain on the zero-cost path"
+        );
+        chain
+            .arm_fold(active.into_boxed_slice())
+            .expect("folding exactly the rendered lanes is admitted");
+        chain
+            .arm_fold(vec![false; lanes].into_boxed_slice())
+            .expect("disarm");
+        assert!(
+            chain.fold_lanes().is_empty(),
+            "disarming empties the mask rather than leaving an all-false one"
+        );
+    }
+
     #[test]
     fn arming_an_auxiliary_destination_refuses_an_unrenderable_mask() {
         let frames = 32_u32;
