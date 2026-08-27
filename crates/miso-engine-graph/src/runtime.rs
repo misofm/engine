@@ -1189,7 +1189,13 @@ pub(crate) fn build_sequential(
         .collect();
     // Issue #202 rec 3: decided here, before `build_op` consumes `parts.observers`, because two of
     // the clauses are about what is bound to a node rather than about the program.
-    let redirects = scatter_redirects(program, spec, &parts, &run_units);
+    let redirects = scatter_redirects(
+        program,
+        spec,
+        &parts.membership,
+        &parts.observers,
+        &run_units,
+    );
     // Where each op's `RuntimeOp` ended up, so a redirect can neutralise the consumer's reduction.
     let mut op_slot: Vec<Option<(usize, usize)>> = vec![None; program.ops.len()];
     let mut units = Vec::with_capacity(run_units.len());
@@ -1324,7 +1330,8 @@ type ScatterRedirect = (usize, usize, usize);
 fn scatter_redirects(
     program: &ExecutionProgram,
     spec: &GraphSpec,
-    parts: &RuntimeParts,
+    bank_membership: &BankMembership,
+    observers: &BTreeMap<GraphNodeId, Vec<GraphNodeObserverBinding>>,
     run_units: &[(Vec<Membership>, Vec<usize>)],
 ) -> Vec<ScatterRedirect> {
     let (readers, first_producer) = op_dataflow(program);
@@ -1346,7 +1353,8 @@ fn scatter_redirects(
                 scatter_target(
                     program,
                     spec,
-                    parts,
+                    bank_membership,
+                    observers,
                     &readers,
                     &first_producer,
                     ops,
@@ -1392,10 +1400,18 @@ fn scatter_redirects(
 ///   `an_observed_alias_on_the_last_slot_declines_that_lanes_scatter_redirect`
 /// * **no observer on the producer** ->
 ///   `a_meter_on_a_bank_member_declines_that_lanes_scatter_redirect`
-/// * **nothing in between names the buffer** -> seven tests, including the fixture's own
-///   `the_intended_strip_fuses_the_whole_signal_path_into_one_chain_per_cohort`
+/// * **nothing in between names the buffer** -> seven session-level tests, including the fixture's
+///   own `the_intended_strip_fuses_the_whole_signal_path_into_one_chain_per_cohort`, *and* --
+///   for the scan's **end boundary**, which none of those seven pin --
+///   `cohort_chain_merging_preserves_dataflow_on_random_graphs` through
+///   [`scatter_redirects_over_program`]. Shortening the scan by a single op reddens it at graph 24.
+/// * **no compensation delay on the consumer's input** -> the same differential eval, at graph 0.
+///   No *compiled session* reaches a delayed consumer of a chain's last slot -- PDC is inserted on
+///   route edges between tracks, never between a rack slot and the fader it feeds -- so this clause
+///   has no session-level red test and never will. The corpus builds the case 38,725 times, so the
+///   eval is where it is defended.
 ///
-/// Five clauses have **no** red test, and each is kept for a stated reason rather than a measured
+/// Four clauses have **no** red test, and each is kept for a stated reason rather than a measured
 /// one. Saying so is the point of writing the ledger down:
 ///
 /// * **no sidechain on the consumer** is conservative and nothing more. A sidechained consumer's
@@ -1403,10 +1419,6 @@ fn scatter_redirects(
 ///   `write_read_stereo` names, so no hazard is known here. It is kept because
 ///   [`bank_gather_source`] carries the same clause and a reader comparing the two should not have
 ///   to work out why one side omits it.
-/// * **no compensation delay on the consumer's input** is load-bearing and unreachable. A delayed
-///   input reads its *staging* buffer, so neutralising the reduction would drop the delay line
-///   entirely -- but PDC is inserted on route edges between tracks, never between a rack slot and
-///   the fader it feeds, so no compiled session reaches it.
 /// * **`first_producer` agrees** is redundant given the two above it: if the producer's sole reader
 ///   is this consumer and the consumer has exactly one main input, that input is the producer's
 ///   buffer. It re-derives the fact from the colouring rather than inferring it.
@@ -1415,9 +1427,16 @@ fn scatter_redirects(
 /// * **not the session output** is subsumed by the clause above wherever it can fire -- an output
 ///   node folded onto its producer in place satisfies both -- and is kept because "the host reads
 ///   this buffer after the last unit" is the thing being defended, not "the output op is in place".
-/// * **pairwise-distinct scatter targets** defends a collision the colouring can produce but this
-///   fixture set does not: a consumer's buffer is coloured after its own producer's is released, so
-///   one lane's consumer can be handed the physical slot another lane still scatters into.
+///
+/// **Pairwise-distinct scatter targets is defensive by construction, not merely unreached.** The
+/// adversarial verification of issue #202 closed this one: for a bank that satisfies the contract
+/// the collision cannot arise at all. A chain's last slot is `program::is_dedicated` storage, and a
+/// dedicated buffer is never returned to the free list, so no consumer can ever be coloured onto a
+/// slot another lane is still scattering into; and where two lanes' consumers *are* ordered such
+/// that one could be, the earlier lane has already declined on another clause. The guard is
+/// therefore a construction check rather than a hazard defence -- it costs one `BTreeSet` per chain
+/// at bind and it is what makes "a chain scatters every lane in one pass" a checked fact rather
+/// than an inherited assumption. It is deliberately **not** presented as a measured clause.
 ///
 /// The consumer's *own* observers are deliberately **not** a clause. The redirect changes nothing
 /// about what the consumer's buffer holds by the time its observers run, so there is nothing there
@@ -1429,7 +1448,8 @@ fn scatter_redirects(
 fn scatter_target(
     program: &ExecutionProgram,
     spec: &GraphSpec,
-    parts: &RuntimeParts,
+    membership: &BankMembership,
+    observers: &BTreeMap<GraphNodeId, Vec<GraphNodeObserverBinding>>,
     readers: &[Vec<usize>],
     first_producer: &[Option<usize>],
     run: &[usize],
@@ -1452,22 +1472,18 @@ fn scatter_target(
     if consumer_op.output == producer_op.output || producer_op.output == program.output {
         return None;
     }
-    if parts.membership.contains_key(&consumer_op.node) {
+    if membership.contains_key(&consumer_op.node) {
         return None;
     }
     let node = &spec.nodes[producer_op.node as usize].id;
-    if parts.observers.contains_key(node) {
+    if observers.contains_key(node) {
         return None;
     }
     if program
         .taps
         .iter()
         .filter(|tap| tap.after_op as usize == producer)
-        .any(|tap| {
-            parts
-                .observers
-                .contains_key(&spec.nodes[tap.node as usize].id)
-        })
+        .any(|tap| observers.contains_key(&spec.nodes[tap.node as usize].id))
     {
         return None;
     }
@@ -1494,6 +1510,59 @@ fn op_names_buffer(program: &ExecutionProgram, op: &Op, buffer: crate::program::
         || op.sidechain.as_ref().is_some_and(staging_or_buffer)
 }
 
+/// The **runtime's own** scatter-redirect decision, driven over a program that has no bindings.
+///
+/// `program::tests::cohort_chain_merging_preserves_dataflow_on_random_graphs` interprets the
+/// executor through a *model* of [`scatter_target`]'s clauses. A model is an oracle only while it
+/// and the thing it models agree, and the model cannot check that by itself: the adversarial
+/// verification of issue #202 found that shortening [`scatter_target`]'s in-between scan by a
+/// single op -- `take(consumer)` to `take(consumer - 1)`, which is the unsound direction -- reddens
+/// nothing anywhere, while the same one-token change to the model reddens the corpus at once. The
+/// corpus was building the hazard at exactly that boundary and then only ever asking the model
+/// about it.
+///
+/// This is the missing half. The corpus now drives *this* function, and the two answers must be
+/// equal graph for graph, so every clause the corpus exercises has the corpus as its red test on
+/// both sides of the model/runtime pair -- the same correspondence #194 established on the gather
+/// side.
+///
+/// Returns `producer op -> consumer op` for every admitted lane. A program-level fixture binds no
+/// observers, which is why the two observer clauses take an empty map here: they are covered by
+/// the session-level tests in the graph compiler, and this eval covers the rest.
+#[cfg(test)]
+pub(crate) fn scatter_redirects_over_program(
+    program: &ExecutionProgram,
+    spec: &GraphSpec,
+    lanes: &BTreeMap<u32, (usize, usize)>,
+    runs: &[Vec<Vec<usize>>],
+) -> BTreeMap<usize, usize> {
+    let bank_membership: BankMembership = lanes
+        .iter()
+        .map(|(node, (bank, lane))| (*node, (Membership::Effect(*bank), *lane)))
+        .collect();
+    let observers = BTreeMap::new();
+    // `build_sequential` builds this shape from `units_of`; here it is built from the model's runs,
+    // so the only thing that differs between the two sides is which copy of the clauses answers.
+    // A plain unit carries an empty membership list, which is what marks it as not a bank.
+    let run_units: Vec<(Vec<Membership>, Vec<usize>)> = runs
+        .iter()
+        .map(|run| {
+            let last = run.last().expect("a run has at least one slot");
+            let banked = last.len() > 1 || lanes.contains_key(&program.ops[last[0]].node);
+            let membership = if banked {
+                vec![Membership::Effect(0); run.len()]
+            } else {
+                Vec::new()
+            };
+            (membership, run.iter().flatten().copied().collect())
+        })
+        .collect();
+    scatter_redirects(program, spec, &bank_membership, &observers, &run_units)
+        .into_iter()
+        .map(|(run, member, consumer)| (run_units[run].1[member], consumer))
+        .collect()
+}
+
 /// Point each admitted lane's scatter at its consumer's buffer and neutralise the consumer's
 /// reduction.
 ///
@@ -1514,14 +1583,17 @@ fn apply_scatter_redirects(
             continue;
         };
         members[member].output = target;
-        let Some((unit, slot)) = op_slot[consumer] else {
+        let Some((unit, _)) = op_slot[consumer] else {
             continue;
         };
         match &mut units[unit] {
             RuntimeUnit::Op(op) => op.inputs = vec![target].into_boxed_slice(),
-            RuntimeUnit::Bank { members, .. } => {
-                members[slot].inputs = vec![target].into_boxed_slice();
-            }
+            // Unreachable by construction: `scatter_target` declines a banked consumer outright,
+            // because such a consumer's own gather may already read the producer's buffer
+            // (`bank_gather_source`) and the two redirects would then disagree about which buffer
+            // holds this block's audio. Left inert rather than applying, so that if that clause is
+            // ever loosened this arm does nothing instead of doing the wrong thing.
+            RuntimeUnit::Bank { .. } => debug_assert!(false, "a banked consumer never redirects"),
         }
     }
 }

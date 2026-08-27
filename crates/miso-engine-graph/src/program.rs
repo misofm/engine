@@ -2451,7 +2451,20 @@ mod tests {
             );
             let realised = runs_in_runtime_order(&program, &lanes);
             merged_runs += realised.iter().filter(|run| run.len() > 1).count();
-            redirected_lanes += redirects_in_runtime_order(&program, &lanes, &realised).len();
+            let modelled = redirects_in_runtime_order(&program, &lanes, &realised);
+            redirected_lanes += modelled.len();
+            // The model is an oracle only while it and the runtime agree, and the model cannot
+            // check that by itself. Issue #202's adversarial verification found the gap: shortening
+            // `runtime::scatter_target`'s in-between scan by one op -- the unsound direction --
+            // reddened nothing, while the same one-token change to `scatter_target_model` reddened
+            // this corpus at graph 0. The corpus was building the hazard and then only ever asking
+            // the model about it. So the corpus now drives the runtime's own clauses too, and every
+            // clause it exercises has this eval as its red test on both sides of the pair.
+            assert_eq!(
+                crate::runtime::scatter_redirects_over_program(&program, &spec, &lanes, &realised),
+                modelled,
+                "graph {graph}: the runtime and the model disagree about which lanes redirect"
+            );
 
             // The narrow-window arm: every bank's own span, and no union across banks.
             let narrow = lower_with_per_bank_windows(&spec, &schedule, &levels, &delays, &banks)
