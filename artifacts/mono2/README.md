@@ -43,8 +43,10 @@ Per leg, `sixty_four_track_console_mono` p50 ns/block, `strip4` → this capture
 `sixty_four_track_console_half_mono`, whose four all-mono cohorts collapse and whose four all-stereo
 ones do not, lands where half a collapse should: −12.3% native `Simd8`, −17.6% wasm.
 
-Every non-collapsing row is within +2.5% of its `strip4` seal on every leg, which is the band two
-capture sessions on this machine agree to.
+Non-collapsing rows sit within +2.5% of their `strip4` seals on every leg — the band two capture
+sessions on this machine agree to — with one exception the data itself shows: `dispatch_only`
+native Simd8 reads +4.33%/+3.68% (~0.3 µs on a ~7 µs row; the wasm harness's native_simd8 leg of
+the same row reads +1.16%, so this is run variance, not a code effect).
 
 ### Why the native `Simd4` leg gains so little, and why it is not a defect
 

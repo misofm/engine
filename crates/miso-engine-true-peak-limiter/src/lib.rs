@@ -543,10 +543,12 @@ impl ChannelState {
     ///   bank -- so nothing can make them diverge today.
     /// * `prefix` and `phase` are the uniform body's two van Herk registers, and they *are* running
     ///   state: `UniformHot::new` loads them out of this arena and the block write-back stores them
-    ///   into it. A collapsed block advances only the left channel's. **No test in the tree makes
-    ///   dropping them show, and this comment does not claim to know why** -- an earlier draft
-    ///   asserted they were re-derived at the next block boundary, which is not true of either
-    ///   word, and asserting a mechanism nobody measured is worse than recording the gap.
+    ///   into it. A collapsed block advances only the left channel's. Dropping either IS red --
+    ///   via the whole-strip transition oracle
+    ///   (`chain_shape::a_run_that_stops_collapsing_renders_what_a_never_collapsed_run_renders`),
+    ///   not this crate's local corpus -- which is why an earlier draft mislabelled them ungated.
+    ///   (A yet-earlier draft asserted re-derivation at the next block boundary, which is not true
+    ///   of either word.)
     ///
     /// All four are copied because the rule is *whole per-channel state*, which is the rule
     /// precisely so that a word nobody has a divergence for is still carried.
