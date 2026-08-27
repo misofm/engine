@@ -73,6 +73,7 @@ if [[ "$#" == 1 ]]; then
         --compressor-round1) arm=compressor-round1 ;;
         --compressor-round1-baseline) arm=compressor-round1-baseline ;;
         --round1-composed) arm=round1-composed ;;
+        --issue183) arm=issue183 ;;
         --round2-lane) arm=round2-lane ;;
         --round2-lane-baseline) arm=round2-lane-baseline ;;
         --round2-eqrack) arm=round2-eqrack ;;
