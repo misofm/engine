@@ -208,9 +208,11 @@ fn a_zero_delay_session_lowers_no_delay_node() {
 /// `requested_runtime_bytes` (a function of counts and limits) rather than the canonical byte
 /// count. So a schema key that no plan reads moves no plan byte.
 ///
-/// Red mutation: give `NodeKind::TrackDelay` a zero-length line for undelayed tracks instead of
-/// falling through to `SourceInput` -> the delay list is non-empty, the estimate row moves and
-/// this digest changes.
+/// Red mutation: none of this row's own. Measured, not assumed: emitting a *zero-length* entry for
+/// every track (dropping `compile.rs`'s `filter`) leaves this digest **unchanged**, because a
+/// zero-sample ring adds nothing to `delay_bytes` and the canonical text never names the entry. The
+/// digest catches a delay that reaches the estimate; only `a_zero_delay_session_lowers_no_delay_node`
+/// catches one that reaches the *program*. That is why both rows exist, and neither is redundant.
 #[test]
 fn the_zero_delay_plan_digest_is_the_pre_feature_digest() {
     assert_eq!(
@@ -307,9 +309,11 @@ fn a_track_delay_moves_no_pdc_row() {
 /// `n`, because PDC's skew is per edge and therefore per pair. A track delay is declared per lane,
 /// so the two rings are sized independently and each lane is charged for its own.
 ///
-/// Red mutation: route the term through `TimingResult::total_delay` instead of adding it beside
-/// -> `delay_bytes` still lands on the right total, but `delay_count` and the materialized node
-/// and schedule counts all move with it, which `the_pdc_counts_are_untouched` below catches.
+/// Red mutations, both measured: folding the term into `timing.total_delay` before the `* 8`
+/// instead of adding it beside trips this row (the per-lane sum stops being recoverable from the
+/// per-pair one); declaring `delay_samples` as the input node's `GraphNode.latency` trips this row,
+/// `a_track_delay_moves_no_pdc_row` and `the_pdc_counts_are_untouched` together, which is the
+/// three-way signature of the one mistake this feature most needs to be unable to make.
 #[test]
 fn the_estimate_charges_each_lane_its_own_ring() {
     let base = compiled(0, 0).delay_bytes;
