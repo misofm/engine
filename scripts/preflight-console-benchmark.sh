@@ -13,6 +13,27 @@
 # `--round2-lane` and `--round2-lane-baseline` are the paired class-A arms of round 2's lane
 # lowerings; see the runner's header for what they measure and why their digests must match.
 #
+# `--strip2` and `--strip2-baseline` are the paired arms of the strip/overhead round's job 2: the
+# fader and the pan matrix become strip-intrinsic banked chain slots. They were 128 individually
+# dispatched per-track `Bound` ops at `L = f32` sitting *between* the cohorts' chains; they are now
+# builtin banks at the cohort's lane order, so issue #202 rec 2's dataflow candidacy fuses
+# `builtins -> EQ -> compressor -> limiter -> fader -> matrix` into ONE chain per cohort. The
+# counters say so without ambiguity: the 64-track fixture goes from 32 bank slots to 48 with
+# `chains` and `transposes` staying at one per cohort per block. Class **A** -- every
+# `output_sha256` must reproduce the baseline arm's exactly, on every row and every leg, and the
+# two records differ only in time.
+#
+# What is removed: 128 per-op passes, their buffers and most of the `execute_op` scaffolding for
+# them, and the 64 `reduce_plane` stereo block copies out of the limiter's dedicated buffer -- the
+# fader is now a chain *slot*, and a later slot's op is never executed at all. What is added:
+# 63 arena buffers on this fixture, because a chain that spans two more stages holds its bank
+# window over a longer op range. `dispatch_only` is the row that should move most; `console` is the
+# row the round is for. The nine-track ragged row is expected to move the *other* way by a little:
+# its one-track tail now banks its fader and matrix like any other cohort and pays one extra
+# planar/AoSoA round-trip per block for them, which is reported rather than hidden.
+#
+# The baseline arm is the base commit with this arm registration and nothing else.
+#
 # `--strip1` and `--strip1-baseline` are the paired class-A arms of the strip round's job 1,
 # the prepared-identity builtin-section elision; see the runner's header.
 set -euo pipefail
@@ -46,10 +67,12 @@ if [[ "$#" == 1 ]]; then
         --audit-chain-merge-baseline) phase_directory=audit-chain-merge-baseline ;;
         --strip1) phase_directory=strip1 ;;
         --strip1-baseline) phase_directory=strip1-baseline ;;
-        *) printf 'usage: %s [--phase2|--phase3|--issue163-phase0|--issue163-phase1|--issue163-phase2|--issue163-phase3|--issue163-phase4|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue184|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline|--round2-lim|--round2-lim-baseline|--round2-composed|--audit-chain-merge|--audit-chain-merge-baseline|--strip1|--strip1-baseline]\n' "$0" >&2; exit 2 ;;
+        --strip2) phase_directory=strip2 ;;
+        --strip2-baseline) phase_directory=strip2-baseline ;;
+        *) printf 'usage: %s [--phase2|--phase3|--issue163-phase0|--issue163-phase1|--issue163-phase2|--issue163-phase3|--issue163-phase4|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue184|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline|--round2-lim|--round2-lim-baseline|--round2-composed|--audit-chain-merge|--audit-chain-merge-baseline|--strip1|--strip1-baseline|--strip2|--strip2-baseline]\n' "$0" >&2; exit 2 ;;
     esac
 elif [[ "$#" != 0 ]]; then
-    printf 'usage: %s [--phase2|--phase3|--issue163-phase0|--issue163-phase1|--issue163-phase2|--issue163-phase3|--issue163-phase4|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue184|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline|--round2-lim|--round2-lim-baseline|--round2-composed|--audit-chain-merge|--audit-chain-merge-baseline|--strip1|--strip1-baseline]\n' "$0" >&2
+    printf 'usage: %s [--phase2|--phase3|--issue163-phase0|--issue163-phase1|--issue163-phase2|--issue163-phase3|--issue163-phase4|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue184|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline|--round2-lim|--round2-lim-baseline|--round2-composed|--audit-chain-merge|--audit-chain-merge-baseline|--strip1|--strip1-baseline|--strip2|--strip2-baseline]\n' "$0" >&2
     exit 2
 fi
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)

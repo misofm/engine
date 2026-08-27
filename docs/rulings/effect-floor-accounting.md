@@ -325,6 +325,17 @@ The `dispatch_only` row, per lane-sample, once both sections are elided:
 > holds both halves: the equivalence, and an independent scalar recount of what the D7 boundary
 > should have counted.
 
+> **The strip round's job 2 moves no row of this table, and that is the point.** Banking the fader
+> and the pan matrix (issue #212) makes them slots of the cohort's chain instead of 128 individually
+> dispatched per-track ops. A floor is an inventory of **lane-ops** -- the arithmetic one lane of one
+> sample must pass through -- and banking changes none of it: the fader is the same `mul` and
+> `andnot`, dispatched from the settled arm of the ramped stage rather than from the prepared-only
+> one, and the pan matrix is the same `matrix2x2_block` it always was. What banking removes is
+> dispatch, buffers and planar round-trips, none of which this table counts. So the derived floors
+> below are unchanged, and the round's result shows up as measured rows moving *toward* them rather
+> than as the floors moving. A round that claimed a floor reduction here would be claiming to have
+> removed arithmetic it did not touch.
+
 Sanitisation, the boundary scan, the fader and the pan matrix keep their full cost, and that is the
 whole reason this is 22 and not something smaller. The D7 policy requires the input clear and the
 output scan of *every* block regardless of what the chain between them does; a 0 dB fader is still a

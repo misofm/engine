@@ -7,10 +7,16 @@
 # defect cannot consume the one authorised measurement. Nothing here is timed, and nothing here
 # instantiates the guest for anything but a shape check.
 #
+# `--strip2` and `--strip2-baseline` are the wasm half of the strip round's job 2, the banked
+# fader and pan matrix. Same class-A statement as the native pair and the same expected shape of
+# motion, larger here because the four-lane guest pays proportionally more per dispatched op: the
+# round removes 128 of them per block on the 64-track fixture. Every leg's `output_sha256` must
+# reproduce the baseline arm's exactly, and `digest_identity` must stay `all_legs_identical`.
+#
 # `--strip1` and `--strip1-baseline` are the wasm half of the strip round's job 1, the
 # prepared-identity builtin-section elision; see the runner's header.
 set -euo pipefail
-[[ "$#" -le 1 ]] || { printf 'usage: %s [--after|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue183|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline|--round2-lim|--round2-lim-baseline|--round2-composed|--audit-chain-merge|--audit-chain-merge-baseline|--strip1|--strip1-baseline]
+[[ "$#" -le 1 ]] || { printf 'usage: %s [--after|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue183|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline|--round2-lim|--round2-lim-baseline|--round2-composed|--audit-chain-merge|--audit-chain-merge-baseline|--strip1|--strip1-baseline|--strip2|--strip2-baseline]
 ' "$0" >&2; exit 2; }
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$root"
@@ -66,8 +72,10 @@ case "${1:-}" in
     --audit-chain-merge-baseline) arm=audit-chain-merge-baseline; shift ;;
     --strip1) arm=strip1; shift ;;
     --strip1-baseline) arm=strip1-baseline; shift ;;
+    --strip2) arm=strip2; shift ;;
+    --strip2-baseline) arm=strip2-baseline; shift ;;
 esac
-[[ "$#" == 0 ]] || fail "usage: $0 [--after|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue183|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline|--round2-lim|--round2-lim-baseline|--round2-composed|--audit-chain-merge|--audit-chain-merge-baseline|--strip1|--strip1-baseline]"
+[[ "$#" == 0 ]] || fail "usage: $0 [--after|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue183|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline|--round2-lim|--round2-lim-baseline|--round2-composed|--audit-chain-merge|--audit-chain-merge-baseline|--strip1|--strip1-baseline|--strip2|--strip2-baseline]"
 
 if [[ "$arm" == after ]]; then
     artifact_dir="$root/artifacts/issue163-phase2"
@@ -111,6 +119,10 @@ elif [[ "$arm" == strip1 ]]; then
     artifact_dir="$root/artifacts/strip1"
 elif [[ "$arm" == strip1-baseline ]]; then
     artifact_dir="$root/artifacts/strip1-baseline"
+elif [[ "$arm" == strip2 ]]; then
+    artifact_dir="$root/artifacts/strip2"
+elif [[ "$arm" == strip2-baseline ]]; then
+    artifact_dir="$root/artifacts/strip2-baseline"
 else
     artifact_dir="$root/artifacts/issue163-phase2-wasm-baseline"
 fi

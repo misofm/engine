@@ -165,6 +165,68 @@ pub fn gain_mute_block<L: Lane>(io: &mut [f32], frames: usize, gain: L, mute: L:
     }
 }
 
+/// State of a ramping fader/mute, one set per lane (issue #212, the banked strip fader).
+///
+/// One channel of one bank: every array is `[lane]`, and a dual-mono stage carries two of these.
+#[derive(Clone, Copy)]
+pub struct GainMuteRamp<L: Lane> {
+    /// The gain applied to the current frame.
+    pub current: L,
+    /// The gain assigned exactly on the last ramping frame (D11: the snap is an assignment).
+    pub target: L,
+    /// Per-sample increment, `(target - start) / n`, computed once per event.
+    pub step: L,
+    /// Frames left in this lane's ramp, as an exact `f32` integer (the caller clamps to `2^24`).
+    pub remaining: L,
+    /// Muted lanes. A muted lane is cleared from the frame its ramp settles on, never after.
+    pub mute: L::Mask,
+}
+
+/// Applies a ramping fader and mute (D11) to one AoSoA plane.
+///
+/// This is the banked form of the per-track scalar ramp, and it is the *only* form: the scalar
+/// track is this kernel at `L = f32`, so lane identity is a property of the code and not of two
+/// implementations agreeing (the same rule `input_chain_block` follows).
+///
+/// Frozen operation order, per frame:
+/// 1. `remaining = remaining - 1`
+/// 2. `done = remaining <= 0`
+/// 3. `current = select(done, target, current + step)`
+/// 4. `store(frame, andnot(load(frame) * current, done & mute))`
+///
+/// # Why the clear is gated on `done` and not on the block
+///
+/// A settled mute must be exactly `+0.0`, including for a negative input, which is what
+/// [`gain_mute_block`]'s `andnot` gives the prepared path. Step 3 assigns the target exactly on
+/// the frame the ramp settles on, so that frame's product already has magnitude zero and only its
+/// sign is in question; clearing from exactly that frame -- not the one after -- is what makes
+/// "every sample of a completed mute is `+0.0`" true of the settling sample too. An unmuted lane
+/// has an all-zero mask and is one multiply, so gain `1.0` still preserves signed zero.
+///
+/// `remaining` and `current` are advanced in place, so a lane's ramp carries across block
+/// boundaries and evolves by its own additions regardless of block size or of its neighbours:
+/// partition and cohort invariance hold by construction, exactly as they do for
+/// [`matrix2x2_ramp_block`].
+#[inline(always)]
+pub fn gain_mute_ramp_block<L: Lane>(io: &mut [f32], frames: usize, r: &mut GainMuteRamp<L>) {
+    debug_assert_eq!(io.len(), frames * L::WIDTH);
+    let one = L::splat(1.0);
+    let zero = L::zero();
+    let mut remaining = r.remaining;
+    let mut current = r.current;
+    for frame in io.chunks_exact_mut(L::WIDTH) {
+        remaining = remaining.sub(one);
+        let done = remaining.le(zero);
+        current = L::select(done, r.target, current.add(r.step));
+        L::load(frame)
+            .mul(current)
+            .andnot(L::mask_and(done, r.mute))
+            .store(frame);
+    }
+    r.remaining = remaining;
+    r.current = current;
+}
+
 /// Coefficients of a settled 2x2 channel matrix, one set per lane.
 #[derive(Clone, Copy)]
 pub struct Matrix2x2Coef<L: Lane> {

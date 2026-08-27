@@ -488,6 +488,24 @@ fn bank_member_nodes(
         .collect()
 }
 
+/// The track stages a compiler-owned builtin bank may render (issue #212).
+///
+/// All three are *fixed* graph stages with no automation or sidechain surface, one per track, at
+/// one dependency level each -- which is what makes them bankable at all. The three internal rack
+/// boundaries are not here because they are elided alias candidates that own no op
+/// (`program::is_alias_candidate`), and `Input` is not because it is the source node the host
+/// fills.
+///
+/// Adding a stage here is not sufficient to bank it: the compiler still has to prepare a kernel
+/// for it and the planner still has to group it. This predicate is only the graph layer's
+/// statement of which stages a bank *may* name.
+const fn is_bankable_track_stage(stage: TrackStage) -> bool {
+    matches!(
+        stage,
+        TrackStage::PostInputBuiltins | TrackStage::PostFader | TrackStage::PostMatrix
+    )
+}
+
 /// A compiler-owned homogeneous post-input-builtin bank.  Unlike effect banks, this is a
 /// fixed graph stage and therefore has no automation or sidechain surface.
 ///
@@ -662,18 +680,26 @@ impl PreparedGraphPlan {
             })
             .collect();
         for bank in &banks {
+            // Every member of one bank renders the same stage at the same lane order, so the
+            // stage is read off lane 0 and every other lane must agree with it. A bank mixing
+            // stages would be a kernel applied to the wrong audio; there is no lane mask that
+            // could rescue it, so it is refused here rather than declined later.
+            let stage_of = |node: &GraphNodeId| match node {
+                GraphNodeId::TrackStage { stage, .. } if is_bankable_track_stage(*stage) => {
+                    Some(*stage)
+                }
+                _ => None,
+            };
+            let Some(stage) = bank.members.first().and_then(stage_of) else {
+                return Err(GraphBuiltinBankAttachError::InvalidMembers);
+            };
             if bank.members.is_empty()
                 || bank.members.len() > bank.scratch.width().lanes() as usize
                 || !bank.scratch.width().matches_backend(bank.backend)
-                || bank.members.iter().any(|node| {
-                    !matches!(
-                        node,
-                        GraphNodeId::TrackStage {
-                            stage: TrackStage::PostInputBuiltins,
-                            ..
-                        }
-                    ) || !seen.insert(node.clone())
-                })
+                || bank
+                    .members
+                    .iter()
+                    .any(|node| stage_of(node) != Some(stage) || !seen.insert(node.clone()))
             {
                 return Err(GraphBuiltinBankAttachError::InvalidMembers);
             }

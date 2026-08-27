@@ -730,6 +730,37 @@ pub struct BankSlot {
 pub trait BankMembers {
     fn plane(&self, lane: usize) -> (&[f32], &[f32]);
     fn plane_mut(&mut self, lane: usize) -> (&mut [f32], &mut [f32]);
+
+    /// One lane's **accumulating auxiliary destination**, or `None` when it has none.
+    ///
+    /// # What this is for, and why it is not [`BankMembers::plane_mut`] again (issue #210)
+    ///
+    /// A chain scatters each lane's result into exactly one buffer, and those buffers must stay
+    /// pairwise distinct -- the scatter writes them all in one pass, so two lanes sharing one
+    /// would race within the pass. `BankChain::new` and the graph's `scatter_redirects` both
+    /// enforce that, the latter by declining every redirect in a chain whose targets collide.
+    ///
+    /// A second destination is a different shape and must not be forced through the same hole. It
+    /// is **accumulating**, so two lanes may name the same buffer and the result is their sum, and
+    /// it is a *second* write rather than a relocation of the first -- the lane's own scatter
+    /// target is untouched. That is what a pre-fade-listen bus needs: an arbitrary subset of lanes
+    /// summing into one destination that the rest of the graph reads separately, with no lane
+    /// losing its own output. Because such a destination is never a redirect target, the
+    /// pairwise-distinct construction check does not see it and cannot decline on it.
+    ///
+    /// # The seam, and what is deliberately not here
+    ///
+    /// Nothing in the engine arms this today: every implementor takes the default, `None` on every
+    /// lane, and a chain with no armed lane never runs the accumulation loop at all
+    /// ([`BankChain::arm_aux`]). PFL itself -- which lanes, which buffer, the arena reservation
+    /// that gives the destination a slot, the control surface that turns it on -- is a later
+    /// phase's work. What exists now is the shape that phase needs: a per-lane optional
+    /// destination on the chain's epilogue, outside the redirect-target set, that can be armed
+    /// without restructuring the scatter.
+    fn aux_plane_mut(&mut self, lane: usize) -> Option<(&mut [f32], &mut [f32])> {
+        let _ = lane;
+        None
+    }
 }
 
 /// One bank chain: a resident L/R AoSoA block plus its ordered slots.
@@ -750,6 +781,13 @@ pub struct BankChain {
     staging_left: Box<[f32]>,
     /// See [`Self::staging_left`].
     staging_right: Box<[f32]>,
+    /// Lanes with an armed accumulating auxiliary destination (issue #210's PFL seam).
+    ///
+    /// **Empty, and never allocated, on every chain the engine builds today.** The epilogue tests
+    /// it once per block with `is_empty`, so an unarmed chain pays one predictable branch and
+    /// touches no auxiliary state at all -- that is the "zero cost when absent" claim, and it is
+    /// structural rather than measured. See [`BankMembers::aux_plane_mut`] for what arming buys.
+    aux: Box<[bool]>,
 }
 
 impl BankChain {
@@ -795,7 +833,45 @@ impl BankChain {
             full_bank,
             staging_left: vec![0.0; staging].into_boxed_slice(),
             staging_right: vec![0.0; staging].into_boxed_slice(),
+            aux: Box::default(),
         })
+    }
+
+    /// Arm an accumulating auxiliary destination on `lanes` (issue #210's PFL seam).
+    ///
+    /// An armed lane's result is *added* into whatever [`BankMembers::aux_plane_mut`] returns for
+    /// it, after the scatter and without touching it, so several lanes may share one destination
+    /// and a lane keeps its own output either way. Passing an all-`false` mask disarms the chain
+    /// back to its default and returns it to the zero-cost path.
+    ///
+    /// # Errors
+    ///
+    /// [`RackError::Shape`] if `lanes` is not exactly this chain's lane count, or if it arms a
+    /// lane the chain does not render -- an inactive lane's scratch is never written, so summing
+    /// it into a bus would publish the zero fill rather than audio.
+    pub fn arm_aux(&mut self, lanes: Box<[bool]>) -> Result<(), RackError> {
+        if lanes.len() != self.lanes {
+            return Err(RackError::Shape);
+        }
+        if lanes
+            .iter()
+            .zip(self.active.iter())
+            .any(|(armed, active)| *armed && !*active)
+        {
+            return Err(RackError::Shape);
+        }
+        self.aux = if lanes.iter().any(|lane| *lane) {
+            lanes
+        } else {
+            Box::default()
+        };
+        Ok(())
+    }
+
+    /// Lanes with an armed auxiliary destination; empty when the chain has none. Evidence only.
+    #[must_use]
+    pub fn aux_lanes(&self) -> &[bool] {
+        &self.aux
     }
 
     /// Gather every active lane, run every non-identity slot over the resident block, scatter every
@@ -822,7 +898,41 @@ impl BankChain {
             }
         }
         self.scatter(members, frames);
+        // The epilogue. Empty on every chain the engine builds today, so this is one branch and
+        // no auxiliary state; see `BankMembers::aux_plane_mut` for what arming it is for.
+        if !self.aux.is_empty() {
+            self.accumulate_aux(members, frames);
+        }
         Ok(())
+    }
+
+    /// Adds every armed lane's resident result into its auxiliary destination.
+    ///
+    /// Reads the resident block rather than the scattered planes, so it is unaffected by whether
+    /// a lane's scatter was redirected, and it *accumulates* rather than assigns, so two lanes may
+    /// name one destination and a third may leave that destination's prior contents standing.
+    fn accumulate_aux<M: BankMembers + ?Sized>(&mut self, members: &mut M, frames: u32) {
+        let Self {
+            scratch,
+            lanes,
+            aux,
+            ..
+        } = self;
+        let lanes = *lanes;
+        let frames = frames as usize;
+        for lane in 0..lanes {
+            if !aux[lane] {
+                continue;
+            }
+            let Some((left, right)) = members.aux_plane_mut(lane) else {
+                continue;
+            };
+            debug_assert!(left.len() == frames && right.len() == frames);
+            for frame in 0..frames {
+                left[frame] += scratch.left[frame * lanes + lane];
+                right[frame] += scratch.right[frame * lanes + lane];
+            }
+        }
     }
 
     /// Planar -> AoSoA for the whole bank: one tiled transpose per plane when every lane is
@@ -1203,6 +1313,166 @@ mod tests {
     /// The mask below has inactive lanes, so this is the **partial-bank scalar path** -- the one a
     /// ragged-tail bank takes, and the one that carries the "an inactive lane is never read and
     /// never written" invariant.
+    /// Planes with one shared accumulating auxiliary destination (issue #210's PFL seam).
+    ///
+    /// Every armed lane names *the same* `aux` buffer on purpose: that is the case the seam exists
+    /// for, and the case the chain's pairwise-distinct scatter targets cannot express.
+    struct PlanesWithSharedAux {
+        planes: Planes,
+        armed: Vec<bool>,
+        aux_left: Vec<f32>,
+        aux_right: Vec<f32>,
+    }
+    impl BankMembers for PlanesWithSharedAux {
+        fn plane(&self, lane: usize) -> (&[f32], &[f32]) {
+            self.planes.plane(lane)
+        }
+        fn plane_mut(&mut self, lane: usize) -> (&mut [f32], &mut [f32]) {
+            self.planes.plane_mut(lane)
+        }
+        fn aux_plane_mut(&mut self, lane: usize) -> Option<(&mut [f32], &mut [f32])> {
+            self.armed[lane].then_some((&mut self.aux_left[..], &mut self.aux_right[..]))
+        }
+    }
+
+    /// A stage that multiplies every lane by its lane index, so lanes are distinguishable.
+    struct ScaleByLane;
+    impl BankStage for ScaleByLane {
+        fn process(&mut self, block: BankBlock<'_>) -> Result<(), RenderError> {
+            for frame in 0..block.frames as usize {
+                for lane in 0..block.lanes {
+                    let index = frame * block.lanes + lane;
+                    block.left[index] *= lane as f32;
+                    block.right[index] *= lane as f32;
+                }
+            }
+            Ok(())
+        }
+    }
+
+    /// The PFL seam: absent by default, accumulating when armed, and shareable across lanes.
+    ///
+    /// Three claims, and the third is the one the seam exists for:
+    ///
+    /// 1. **Absent by default.** A chain built the way every chain in the engine is built has no
+    ///    armed lane, runs no epilogue, and leaves the auxiliary buffers exactly as it found them.
+    /// 2. **The lane's own output is untouched.** Arming adds a destination; it does not move one.
+    /// 3. **Two lanes may share one destination**, and the result is their sum -- which is exactly
+    ///    what a pairwise-distinct scatter target could not express, and why this is a second
+    ///    write on the epilogue rather than a redirect.
+    ///
+    /// Red-mutation proven: making `accumulate_aux` assign (`=`) instead of accumulate (`+=`)
+    /// leaves the sum equal to whichever armed lane runs last and fails claim 3.
+    #[test]
+    fn the_auxiliary_destination_seam_is_absent_by_default_and_accumulates_when_armed() {
+        let frames = 64_u32;
+        let lanes = 8_usize;
+        let scratch = AoSoaScratch::new(BankWidth::Eight, frames).expect("scratch");
+        let mut chain = BankChain::new(
+            scratch,
+            vec![true; lanes].into_boxed_slice(),
+            vec![slot(vec![true; lanes], Box::new(ScaleByLane))],
+        )
+        .expect("chain");
+
+        let build = |armed: Vec<bool>| PlanesWithSharedAux {
+            planes: Planes {
+                left: (0..lanes).map(|_| vec![1.0_f32; frames as usize]).collect(),
+                right: (0..lanes).map(|_| vec![2.0_f32; frames as usize]).collect(),
+            },
+            armed,
+            aux_left: vec![0.5_f32; frames as usize],
+            aux_right: vec![-0.5_f32; frames as usize],
+        };
+
+        // (1) Absent by default: the members offer an aux plane on every lane, and the chain must
+        // not touch it, because nothing armed it.
+        assert!(chain.aux_lanes().is_empty(), "a fresh chain arms nothing");
+        let mut absent = build(vec![true; lanes]);
+        chain.run(&mut absent, frames, 0).expect("unarmed run");
+        assert!(
+            absent.aux_left.iter().all(|value| *value == 0.5)
+                && absent.aux_right.iter().all(|value| *value == -0.5),
+            "an unarmed chain must not write an auxiliary destination"
+        );
+
+        // (3) Arm lanes 2 and 5, which share one destination.
+        let mut armed_mask = vec![false; lanes];
+        armed_mask[2] = true;
+        armed_mask[5] = true;
+        chain
+            .arm_aux(armed_mask.clone().into_boxed_slice())
+            .expect("arm");
+        assert_eq!(chain.aux_lanes(), &armed_mask[..]);
+        let mut armed = build(armed_mask.clone());
+        chain.run(&mut armed, frames, 0).expect("armed run");
+
+        for frame in 0..frames as usize {
+            // (2) Every lane's own output is exactly what the unarmed run produced.
+            for lane in 0..lanes {
+                assert_eq!(
+                    armed.planes.left[lane][frame].to_bits(),
+                    absent.planes.left[lane][frame].to_bits(),
+                    "lane {lane} frame {frame}: arming moved a lane's own output"
+                );
+            }
+            // (3) The shared destination carries the *sum* of both armed lanes, on top of what it
+            // already held. Assigning instead of accumulating would give 5.0 and 10.0.
+            assert_eq!(
+                armed.aux_left[frame],
+                0.5 + 2.0 + 5.0,
+                "frame {frame}: two armed lanes must sum into one destination"
+            );
+            assert_eq!(
+                armed.aux_right[frame],
+                -0.5 + 4.0 + 10.0,
+                "frame {frame}: two armed lanes must sum into one destination"
+            );
+        }
+
+        // Disarming returns the chain to the zero-cost path rather than leaving an all-false mask.
+        chain
+            .arm_aux(vec![false; lanes].into_boxed_slice())
+            .expect("disarm");
+        assert!(chain.aux_lanes().is_empty(), "disarming empties the mask");
+    }
+
+    /// The seam refuses a mask it cannot render: wrong length, or a lane the chain does not run.
+    ///
+    /// An inactive lane's scratch is never written, so summing it into a bus would publish the
+    /// zero fill as if it were audio. That is a shape error, not a silent no-op.
+    #[test]
+    fn arming_an_auxiliary_destination_refuses_an_unrenderable_mask() {
+        let frames = 32_u32;
+        let lanes = 8_usize;
+        let mut active = vec![true; lanes];
+        active[7] = false;
+        let scratch = AoSoaScratch::new(BankWidth::Eight, frames).expect("scratch");
+        let mut chain = BankChain::new(
+            scratch,
+            active.clone().into_boxed_slice(),
+            vec![slot(active.clone(), Box::new(PassThrough))],
+        )
+        .expect("chain");
+        assert_eq!(
+            chain.arm_aux(vec![true; lanes - 1].into_boxed_slice()),
+            Err(RackError::Shape),
+            "a mask that is not the chain's lane count is refused"
+        );
+        assert_eq!(
+            chain.arm_aux(vec![true; lanes].into_boxed_slice()),
+            Err(RackError::Shape),
+            "arming lane 7, which this chain does not render, is refused"
+        );
+        assert!(
+            chain.aux_lanes().is_empty(),
+            "a refused arm leaves the chain on the zero-cost path"
+        );
+        chain
+            .arm_aux(active.into_boxed_slice())
+            .expect("arming exactly the rendered lanes is admitted");
+    }
+
     #[test]
     fn gather_scatter_round_trip_is_bit_exact() {
         let frames = 128_u32;

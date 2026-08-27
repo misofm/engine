@@ -37,22 +37,41 @@ fn render(workload: Workload, config: PlanConfig, blocks: u64) -> (String, [u64;
     )
 }
 
+/// Bank slots one cohort of the intended strip binds, in cascade order.
+///
+/// Six since issue #212 banked the strip's own fader and matrix: the post-input builtin stage, the
+/// EQ, the compressor, the limiter, the fader, the pan matrix. It was four before, when the fader
+/// and the matrix were 128 individually dispatched per-track ops sitting *between* the cohorts'
+/// chains -- which is the whole point of the count below, because banking them added sixteen slots
+/// to the 64-track fixture and not one round-trip.
+const SLOTS_PER_COHORT: u64 = 6;
+
 /// The eight cohorts of the 64-track fixture at the launch eight-lane width.
 ///
 /// Read from the plan rather than written down: a four-lane host runs sixteen cohorts, and the law
 /// under test is per cohort, not per eight tracks.
 fn cohorts(slots: u64) -> u64 {
-    // Four bank slots per cohort: the post-input builtin stage, the EQ, the compressor, the
-    // limiter.
     assert_eq!(
-        slots % 4,
+        slots % SLOTS_PER_COHORT,
         0,
-        "the intended strip binds four slots per cohort"
+        "the intended strip binds {SLOTS_PER_COHORT} slots per cohort"
     );
-    slots / 4
+    slots / SLOTS_PER_COHORT
 }
 
-/// The finding: four bank slots per cohort, one chain per cohort, one round-trip per chain.
+/// The finding: six bank slots per cohort, one chain per cohort, one round-trip per chain.
+///
+/// # What issue #212 had to move here, and what it deliberately did not
+///
+/// Banking the fader and the matrix takes the 64-track fixture from 32 slots to 48 -- two more per
+/// cohort -- and leaves `chains` and `transposes` **exactly** where they were, at one per cohort
+/// per block. That equality is the claim: sixteen new bank slots joined chains that already
+/// existed, so the strip pays no round-trip for them, and the 128 per-track fader and matrix ops
+/// that used to sit between the cohorts' chains are gone rather than relocated.
+///
+/// A count is the only thing that can see this. Fusing the fader in is bit-identical by
+/// construction (`FaderRampStage` is one body at every width), so a digest gate would stay green
+/// whether the merge fired or not; only `chains` staying at 8 while `slots` went to 48 says it did.
 #[test]
 fn the_intended_strip_is_one_chain_per_cohort() {
     let (_, [chains, slots], transposes) = render(
@@ -64,12 +83,13 @@ fn the_intended_strip_is_one_chain_per_cohort() {
     let cohorts = cohorts(slots);
     assert_eq!(
         chains, cohorts,
-        "the whole strip is one chain per cohort: builtins -> EQ -> compressor -> limiter"
+        "the whole strip is one chain per cohort: builtins -> EQ -> compressor -> limiter -> \
+         fader -> matrix"
     );
     assert_eq!(
         slots - chains,
-        3 * cohorts,
-        "three of the four slots per cohort are fused into their predecessor"
+        (SLOTS_PER_COHORT - 1) * cohorts,
+        "every slot but the first of each cohort is fused into its predecessor"
     );
     assert_eq!(
         transposes,
@@ -211,4 +231,82 @@ fn the_two_placements_realise_the_same_chain_shape() {
         merged.1[0] < merged.1[1],
         "each cohort must still fuse more than one slot into its chain"
     );
+}
+
+/// The ragged nine-track fixture: one full eight-lane bank plus a one-member tail, and what the
+/// tail costs.
+///
+/// # The partial bank keeps the per-lane scalar path
+///
+/// `BankChain::new` takes the tiled `W`-frame transpose only when *every* lane of the chain is
+/// active, because the tiled scatter fully overwrites every lane's planar buffer and holds every
+/// lane's planar view at once -- neither is true of a padded bank. The nine-track fixture is the
+/// only fixture in the suite that exercises that fallback, and it exercises it on every block: its
+/// second cohort holds one track in an eight-lane bank.
+///
+/// # The tail cohort costs one chain, and that is reported rather than hidden
+///
+/// Issue #212 took this fixture from `[2 chains, 5 slots]` to `[3 chains, 9 slots]`. The full
+/// eight-lane cohort gained the fader and matrix slots into the chain it already had, exactly as
+/// the 64-track fixture did. The one-track tail could not: its effects never bank (a one-member
+/// group strands), so its post-input bank's successor is a per-node EQ op and cannot be chained
+/// into, while its fader and matrix banks *can* chain into each other. That is one planar/AoSoA
+/// round-trip per block that the tail did not pay before, on one track.
+///
+/// It is the honest price of treating the tail like any other cohort rather than special-casing
+/// it, it is bounded by the number of ragged tails a session has, and the `nine_track_ragged_strip`
+/// bench row is where it is measured rather than argued.
+#[test]
+fn the_ragged_tail_banks_like_any_other_cohort_and_pays_one_chain_for_it() {
+    let (digest, [chains, slots], transposes) =
+        render(Workload::NineTrackRaggedStrip, PlanConfig::BASELINE, BLOCKS);
+    assert_eq!(
+        transposes,
+        BLOCKS * chains,
+        "G5: one planar/AoSoA round-trip per realised chain per block"
+    );
+    assert!(
+        chains < slots,
+        "the ragged fixture must still fuse something, or it is not testing a chain"
+    );
+    // Read as: the eight-lane cohort runs the whole strip as one chain of six slots; the one-track
+    // tail runs its post-input bank alone and its fader and matrix banks as a pair.
+    assert_eq!(
+        [chains, slots],
+        [3, 9],
+        "one full strip chain, plus the tail's lone post-input bank and its fused fader/matrix pair"
+    );
+    // Bits, against the same fixture rendered with every console facility attached: a partial
+    // bank's scalar transpose must be the tiled path's equal, whatever is bound around it.
+    for (name, config) in [
+        (
+            "meters",
+            PlanConfig {
+                meters: true,
+                control: false,
+                observation: ObservationArm::Absent,
+            },
+        ),
+        (
+            "control",
+            PlanConfig {
+                meters: false,
+                control: true,
+                observation: ObservationArm::Absent,
+            },
+        ),
+    ] {
+        let (other_digest, shape, other_transposes) =
+            render(Workload::NineTrackRaggedStrip, config, BLOCKS);
+        assert_eq!(
+            other_digest, digest,
+            "{name}: the ragged fixture's bits moved"
+        );
+        assert_eq!(
+            shape,
+            [chains, slots],
+            "{name}: the ragged chain shape moved"
+        );
+        assert_eq!(other_transposes, transposes, "{name}: G5 moved");
+    }
 }

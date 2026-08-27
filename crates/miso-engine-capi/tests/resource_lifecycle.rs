@@ -455,23 +455,42 @@ fn frozen_scratch_report(capi_retained_bytes: u64) -> PlanResourceReport {
         // between two live compiles, and a uniform shift cancels in it. That asymmetry is the
         // point of holding both -- the oracle proves the model tracks the tree, and these
         // literals prove the absolute report is still the one that was reviewed.
-        graph_session_plus_plan_bytes: 198_990,
-        graph_incremental_plan_bytes: 186_702,
-        graph_metadata_bytes: 49_975,
+        //
+        // Strip round job 2 banked the strip's own fader and matrix, so this nine-track fixture
+        // now binds **six** builtin banks where it bound two: `9.div_ceil(8) == 2` per bankable
+        // stage, times three stages. Each figure below moves for a stated reason.
+        //
+        // * `builtin_bank_scratch_bytes` 16_384 -> 49_152 is exactly three times the old value.
+        //   One `AoSoaScratch` is charged per bound *slot* -- 128 frames x 8 lanes x 2 planes x 4
+        //   bytes = 8_192 each -- and there are three times as many slots. The estimate now
+        //   over-states what the plan retains by more than it did, because a merged chain keeps
+        //   its first slot's scratch and drops the rest at bind (`runtime::chain_for`). Over-
+        //   stating is the safe direction for a memory ceiling and is deliberate: whether a merge
+        //   is admissible is not knowable before the lowered program exists.
+        // * `builtin_bank_bytes` 2_963 -> 7_865 adds the four new banks' member arrays, member
+        //   strings and processors -- the fader and matrix processors each carrying an eight-entry
+        //   array of optional console consumers, charged whether or not a console is attached.
+        // * `builtin_processor_payload_bytes` 7_974 -> 8_406 is +432, exactly 9 tracks x 48: two
+        //   `GraphNodeBinding`s (2 x 72) and the boxed `FaderProcessor` (16) and `MatrixProcessor`
+        //   (136) left preparation, and the 344-byte `StripPreparation` vector entry replaced them.
+        // * The three `graph_*` figures carry the four extra banks' plan-side metadata.
+        graph_session_plus_plan_bytes: 236_980,
+        graph_incremental_plan_bytes: 224_692,
+        graph_metadata_bytes: 50_295,
         graph_delay_bytes: 0,
         effect_bank_scratch_bytes: 8_192,
         effect_bank_runtime_buffer_bytes: 8_192,
         effect_bank_metadata_bytes: 648,
-        builtin_bank_bytes: 2_963,
-        builtin_bank_scratch_bytes: 16_384,
+        builtin_bank_bytes: 7_865,
+        builtin_bank_scratch_bytes: 49_152,
         source_pcm_payload_bytes: 8_192,
         source_overhead_bytes: 2_862,
         source_total_bytes: 11_054,
         effect_scalar_state_bytes: 7_560,
         effect_scalar_scratch_bytes: 216,
-        builtin_processor_payload_bytes: 7_974,
+        builtin_processor_payload_bytes: 8_406,
         builtin_meter_payload_bytes: 0,
-        builtin_retained_payload_bytes: 7_974,
+        builtin_retained_payload_bytes: 8_406,
         capi_retained_bytes,
         largest_named_allocation_bytes: 49_167,
         reserved: [0; 4],
@@ -842,6 +861,180 @@ struct BuiltinBankProcessorMirror {
     bank: BuiltinInputBankMirror,
     process_calls: u64,
     tpt_kernel_calls: u64,
+}
+
+/// `GainMuteRamp<Simd8>`: four eight-lane words plus the mute mask.
+#[allow(dead_code)]
+#[repr(align(32))]
+struct GainMuteRampEightMirror {
+    current: [f32; 8],
+    target: [f32; 8],
+    step: [f32; 8],
+    remaining: [f32; 8],
+    mute: [u32; 8],
+}
+
+/// `GainMuteRamp<Simd4>`: the four-lane arm.
+#[allow(dead_code)]
+#[repr(align(16))]
+struct GainMuteRampFourMirror {
+    current: [f32; 4],
+    target: [f32; 4],
+    step: [f32; 4],
+    remaining: [f32; 4],
+    mute: [u32; 4],
+}
+
+/// `FaderRampStage<Simd8>`, the eight-lane arm of `FaderStageKernel`.
+#[allow(dead_code)]
+#[repr(align(32))]
+struct FaderRampStageEightMirror {
+    ramp: [GainMuteRampEightMirror; 2],
+    fader_gain: [[f32; 8]; 2],
+    muted: [[bool; 8]; 2],
+    remaining: [[u32; 8]; 2],
+}
+
+/// `FaderRampStage<Simd4>`, the four-lane arm.
+#[allow(dead_code)]
+#[repr(align(16))]
+struct FaderRampStageFourMirror {
+    ramp: [GainMuteRampFourMirror; 2],
+    fader_gain: [[f32; 8]; 2],
+    muted: [[bool; 8]; 2],
+    remaining: [[u32; 8]; 2],
+}
+
+#[allow(dead_code, clippy::large_enum_variant)]
+enum FaderStageKernelMirror {
+    Simd4(FaderRampStageFourMirror),
+    Simd8(FaderRampStageEightMirror),
+}
+
+#[allow(dead_code)]
+struct BuiltinFaderBankMirror {
+    backend: Backend,
+    width: miso_engine_effect_contract::BankWidth,
+    members: usize,
+    stage: FaderStageKernelMirror,
+}
+
+/// `Matrix2x2Coef<Simd8>` / `Matrix2x2Ramp<Simd8>` and the per-lane bookkeeping around them.
+#[allow(dead_code)]
+#[repr(align(32))]
+struct MatrixStageEightMirror {
+    coef: [[f32; 8]; 5],
+    ramp_current: [[f32; 8]; 4],
+    ramp_target: [[f32; 8]; 4],
+    ramp_step: [[f32; 8]; 4],
+    ramp_remaining: [f32; 8],
+    smoothing_samples: [u32; 8],
+    remaining: [u32; 8],
+}
+
+#[allow(dead_code)]
+#[repr(align(16))]
+struct MatrixStageFourMirror {
+    coef: [[f32; 4]; 5],
+    ramp_current: [[f32; 4]; 4],
+    ramp_target: [[f32; 4]; 4],
+    ramp_step: [[f32; 4]; 4],
+    ramp_remaining: [f32; 4],
+    smoothing_samples: [u32; 8],
+    remaining: [u32; 8],
+}
+
+#[allow(dead_code, clippy::large_enum_variant)]
+enum MatrixStageKernelMirror {
+    Simd4(MatrixStageFourMirror),
+    Simd8(MatrixStageEightMirror),
+}
+
+#[allow(dead_code)]
+struct BuiltinMatrixBankMirror {
+    backend: Backend,
+    width: miso_engine_effect_contract::BankWidth,
+    members: usize,
+    stage: MatrixStageKernelMirror,
+}
+
+/// `Consumer<T>`: an `Arc` to the shared ring plus the consumer's own cursors and counters.
+///
+/// The ring itself is not here -- it is charged where it is created, per controlled track -- so
+/// this mirrors only the handle a bank lane holds.
+#[allow(dead_code)]
+struct ConsumerMirror {
+    /// `Arc<Ring<T>>`. Non-null, so `Option<Consumer<T>>` takes the pointer's niche and costs a
+    /// lane nothing for being unaddressed -- which is why the array below is charged flat.
+    ring: core::ptr::NonNull<()>,
+    local: usize,
+    cached_producer: usize,
+    successes: u64,
+    empty: u64,
+}
+
+/// `ChannelParameters`: one dual-mono side of a track's declared builtin parameters.
+#[allow(dead_code)]
+struct ChannelParametersMirror {
+    polarity_invert: bool,
+    trim_db: f32,
+    hpf_hz: f32,
+    lpf_hz: f32,
+    fader_db: f32,
+    muted: bool,
+}
+
+/// `BuiltinParameters`: both sides, the declared matrix and its window.
+#[allow(dead_code)]
+struct BuiltinParametersMirror {
+    left: ChannelParametersMirror,
+    right: ChannelParametersMirror,
+    matrix: Matrix2x2Mirror,
+    smoothing_samples: u32,
+}
+
+/// `StripControlConsumers`: one track's two live-console consumers.
+#[allow(dead_code)]
+struct StripControlConsumersMirror {
+    fader: Option<ConsumerMirror>,
+    matrix: Option<ConsumerMirror>,
+}
+
+/// `StripPreparation`: a track's fader and matrix sections before their binding form is chosen.
+///
+/// Held inline in the strip vector since issue #212, which is why the boxed `FaderProcessor` and
+/// `MatrixProcessor` rows are gone from `builtin_owners` -- the same two sections, one indirection
+/// fewer, and the console's consumers alongside them so that whichever owner ends up rendering the
+/// track gets them.
+#[allow(dead_code)]
+struct StripPreparationMirror {
+    track_id: Box<str>,
+    graph_id: miso_engine_graph::StableGraphId,
+    parameters: BuiltinParametersMirror,
+    fader: FaderBuiltinsMirror,
+    matrix: MatrixBuiltinsMirror,
+    control: Option<StripControlConsumersMirror>,
+}
+
+/// `FaderBankProcessor`: the bank plus one optional console consumer per lane.
+///
+/// The consumer array is a `Box<[Option<Consumer<T>>]>` of exactly `lanes` entries, allocated
+/// whether or not a console is attached -- so it is a row of its own below rather than part of
+/// this struct's own size.
+#[allow(dead_code)]
+struct FaderBankProcessorMirror {
+    bank: BuiltinFaderBankMirror,
+    controls: (usize, usize),
+    process_calls: u64,
+    frames_processed: u64,
+}
+
+#[allow(dead_code)]
+struct MatrixBankProcessorMirror {
+    bank: BuiltinMatrixBankMirror,
+    controls: (usize, usize),
+    process_calls: u64,
+    frames_processed: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -1313,6 +1506,17 @@ fn graph_owners() -> Vec<PrimitiveOwner> {
         builtin_bank_processor, 1_216,
         "primitive builtin bank processor"
     );
+    // Strip round job 2: the fader and the matrix are bankable stages too, so this fixture binds
+    // `3 * 9.div_ceil(8) == 6` builtin banks. Each stage groups the same nine tracks the same way,
+    // so the descriptor, member-ID, member-string and scratch rows are all three times what they
+    // were, while the processor row splits into three per-kind rows.
+    let strip_stages = 3_u64;
+    let strip_banks = builtin_banks * strip_stages;
+    let fader_bank_processor = bytes::<FaderBankProcessorMirror>(1);
+    let matrix_bank_processor = bytes::<MatrixBankProcessorMirror>(1);
+    // One `Option<Consumer<_>>` per lane, allocated whether or not a console is attached: a
+    // banked session's retained payload does not depend on whether the host leased one.
+    let strip_control_array = bytes::<Option<ConsumerMirror>>(bank_lanes as usize);
     vec![
         PrimitiveOwner {
             name: "control queue typed item storage",
@@ -1404,23 +1608,31 @@ fn graph_owners() -> Vec<PrimitiveOwner> {
         // stored anywhere: membership is the mask.
         PrimitiveOwner {
             name: "builtin-bank descriptor array",
-            bytes: bytes::<miso_engine_graph::GraphPreparedBuiltinBank>(builtin_banks as usize),
+            bytes: bytes::<miso_engine_graph::GraphPreparedBuiltinBank>(strip_banks as usize),
         },
         PrimitiveOwner {
             name: "builtin-bank member IDs",
-            bytes: bytes::<miso_engine_graph::GraphNodeId>(tracks as usize),
+            bytes: bytes::<miso_engine_graph::GraphNodeId>((tracks * strip_stages) as usize),
         },
         PrimitiveOwner {
             name: "builtin-bank member strings",
-            bytes: tracks * 3,
+            bytes: tracks * 3 * strip_stages,
         },
         PrimitiveOwner {
-            name: "builtin-bank processors",
+            name: "builtin-bank post-input processors",
             bytes: builtin_bank_processor * builtin_banks,
         },
         PrimitiveOwner {
+            name: "builtin-bank fader processors",
+            bytes: (fader_bank_processor + strip_control_array) * builtin_banks,
+        },
+        PrimitiveOwner {
+            name: "builtin-bank matrix processors",
+            bytes: (matrix_bank_processor + strip_control_array) * builtin_banks,
+        },
+        PrimitiveOwner {
             name: "builtin-bank two-plane scratch",
-            bytes: effect_bank_plane * 2 * builtin_banks,
+            bytes: effect_bank_plane * 2 * strip_banks,
         },
     ]
 }
@@ -1474,9 +1686,16 @@ fn builtin_owners() -> Vec<PrimitiveOwner> {
     let tracks = 9_usize;
     let processors = tracks * 3;
     vec![
+        // One binding per track since #212: the post-input stage. The fader and matrix stages
+        // ride the strip vector below until lowering decides whether they bind per node or as
+        // bank lanes, so preparation no longer boxes a processor for either.
         PrimitiveOwner {
             name: "builtin graph bindings",
-            bytes: bytes::<miso_engine_graph::GraphNodeBinding>(processors),
+            bytes: bytes::<miso_engine_graph::GraphNodeBinding>(tracks),
+        },
+        PrimitiveOwner {
+            name: "builtin strip preparations",
+            bytes: bytes::<StripPreparationMirror>(tracks),
         },
         PrimitiveOwner {
             name: "builtin bank-input table",
@@ -1505,14 +1724,6 @@ fn builtin_owners() -> Vec<PrimitiveOwner> {
         PrimitiveOwner {
             name: "builtin input processors",
             bytes: bytes::<InputBuiltinsMirror>(tracks),
-        },
-        PrimitiveOwner {
-            name: "builtin fader processors",
-            bytes: bytes::<FaderBuiltinsMirror>(tracks),
-        },
-        PrimitiveOwner {
-            name: "builtin matrix processors",
-            bytes: bytes::<MatrixBuiltinsMirror>(tracks),
         },
     ]
 }
@@ -1582,7 +1793,15 @@ fn primitive_replacement_oracle(current: &str, prospective: &str) -> PrimitiveRe
     // The strip round moved it by 128 in the other direction: `InputStage` gained the elision plan
     // and `size_of::<BuiltinBankProcessor>()` went 1248 -> 1216, the fixture binds two banks, and
     // this oracle holds two plans live -- so 2 x 2 x 32. A struct that *shrank* says so too.
-    assert_effective_owner_mutations(&graph, 431_224, "double-live graph/model");
+    //
+    // Strip round job 2 moved it by +75_980: the fader and the matrix became bankable stages, so
+    // the fixture binds six builtin banks where it bound two, and the descriptor, member-ID,
+    // member-string and two-plane-scratch rows all tripled while two per-kind processor rows --
+    // each carrying its eight-entry array of optional console consumers -- joined the post-input
+    // one. Held over two live plans, as everything in this oracle is -- and `+75_980` is exactly
+    // twice the `236_980 - 198_990` that `frozen_scratch_report` records for a single plan, which
+    // is the cross-check that this model tracks the tree rather than having been tuned to it.
+    assert_effective_owner_mutations(&graph, 507_204, "double-live graph/model");
 
     let source = source_owners();
     assert_eq!(owner_total(&source), 11_054, "primitive source total");
@@ -1640,10 +1859,15 @@ fn primitive_replacement_oracle(current: &str, prospective: &str) -> PrimitiveRe
     ];
     assert_effective_owner_mutations(&effect_scratch_rows, 432, "double-live effect scratch");
     let builtin = builtin_owners();
-    assert_effective_owner_mutations(&builtin, 7_974, "current builtin payload");
+    // Strip round job 2: +48 bytes per track, and nine tracks makes +432. Two `GraphNodeBinding`s
+    // (2 x 72) and the boxed fader (16) and matrix (136) sections left preparation, and the
+    // 344-byte `StripPreparation` entry replaced them. This total is reached by restating the
+    // field lists, and it agrees with `frozen_scratch_report`'s independently measured
+    // `builtin_processor_payload_bytes` -- which is the whole point of holding both.
+    assert_effective_owner_mutations(&builtin, 8_406, "current builtin payload");
     let mut double_builtin = builtin.clone();
     double_builtin.extend(builtin);
-    assert_effective_owner_mutations(&double_builtin, 15_948, "double-live builtin payload");
+    assert_effective_owner_mutations(&double_builtin, 16_812, "double-live builtin payload");
 
     let (current_capi, candidate_epoch, prepared_protocol, capi_largest) =
         complete_capi_owners(current.len(), prospective.len());
@@ -1958,12 +2182,12 @@ fn external_primitive_double_live_oracle_drives_exact_and_one_below_c_caps() {
     // bank, and this oracle is double-live -- so +16 here and +8 in the single-plan report. The
     // live oracle and the primitive model both move, which is the property this pair of pins
     // exists to check: a struct that grew is reported by both or by neither.
-    assert_eq!(oracle.graph, 431_224);
+    assert_eq!(oracle.graph, 507_204);
     assert_eq!(oracle.source_total, 22_108);
     assert_eq!(oracle.source_overhead, 5_724);
     assert_eq!(oracle.effect_state, 15_120);
     assert_eq!(oracle.effect_scratch, 432);
-    assert_eq!(oracle.builtin, 15_948);
+    assert_eq!(oracle.builtin, 16_812);
     assert_eq!(oracle.capi, 166_198);
     assert_eq!(oracle.largest, 58_694);
 
