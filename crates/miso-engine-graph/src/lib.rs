@@ -571,6 +571,12 @@ pub trait GraphPreparedBuiltinBankProcessor: Send {
     ///
     /// There is no right plane here on purpose: a collapsed chain gathers one, and the seam writes
     /// the other after this stage has run.
+    ///
+    /// Whatever this call publishes besides the plane -- per-channel recovery counts, sanitised
+    /// totals, lifetime counters -- must be what a dual block would have published, not the half
+    /// this call computed: the right plane the seam is about to write carries exactly the left
+    /// plane's samples. `miso_engine_rack::BankStage::process_mono` states the rule and
+    /// `miso-engine-builtins/tests/mono_collapse.rs` is the gate on the one bank that has any.
     fn process_mono(
         &mut self,
         left: &mut [f32],

@@ -1581,10 +1581,39 @@ pub trait PreparedNativeEffectBank: Send {
     ///
     /// Same `&self` rule, for the same reason, as
     /// [`PreparedNativeEffect::observe_resident`].
+    ///
+    /// # Reading a collapsed bank
+    ///
+    /// An implementation reports **what it holds**, and while a bank is collapsed what it holds on
+    /// the right channel is whatever that channel held when the collapse engaged. That is stale,
+    /// and it is deliberately not this method's problem: a bank does not know whether the chain
+    /// that owns it is collapsing, the answer would have to be a per-block argument rather than a
+    /// per-instance one, and a `&self` reader cannot be handed the block's mode without inventing a
+    /// second entry point for it.
+    ///
+    /// The **caller** owns the substitution, because the caller is what knows the mode.
+    /// `miso_engine_rack::ConsoleEffectBankStage::process_mono` overwrites every published sample's
+    /// right field with its left one before the taps accumulate, which is the observation half of
+    /// the same seam the fader duplication is: the right channel of a collapsed track *is* its left
+    /// channel, at the tap exactly as at the fader. So an implementation writes the two channels it
+    /// has and never tries to guess; a bank that "helpfully" duplicated here would be wrong on
+    /// every dual block.
     fn observe_resident_bank(&self, tap_index: u32, out: &mut [ObservationSampleV1]) -> bool {
         let _ = (tap_index, out);
         false
     }
+    /// Write one track's state payload.
+    ///
+    /// # Snapshotting a collapsed bank
+    ///
+    /// A bank whose chain is currently collapsed holds a right channel frozen at the moment the
+    /// collapse engaged, so a payload taken from it would carry a right section no dual run ever
+    /// produced. [`desymmetrize_channels`](Self::desymmetrize_channels) documents the obligation
+    /// and why nothing in this tree owes it yet -- the only snapshot entry point in the engine is
+    /// `snapshot_unpublished_effect_bank_track_state_v1`, which names its subject, and a bank bound
+    /// into a chain is not unpublished. The note is repeated from here because this is the method a
+    /// caller reaches for, and a caller that finds a way to a bound bank must call
+    /// `desymmetrize_channels` first.
     fn snapshot_track_state_payload(
         &self,
         track_index: u32,
@@ -1652,8 +1681,14 @@ pub trait PreparedNativeEffectBank: Send {
     ///   `link(p, q)` simplified;
     /// * the right-channel state is left exactly as it was. It is restored by
     ///   [`desymmetrize_channels`](Self::desymmetrize_channels) before any dual block runs;
-    /// * per-lane right-channel *accounting* (report counters) is duplicated from the left, which
-    ///   is what the collapsed run's right plane will carry.
+    /// * every **report** this call produces is the report the dual run would have produced, not
+    ///   the half of it this call happened to compute. Per-lane right-channel counters are
+    ///   duplicated from the left, because the right plane the seam is about to write carries
+    ///   exactly the left plane's samples; a whole-instance total that sums both channels is
+    ///   therefore *twice* the left count and not equal to it. This is the surface no digest gate
+    ///   can see -- a body that halved a sanitised total while rendering perfect audio would leave
+    ///   every other gate in the tree green -- so each effect owes it a crate-local test
+    ///   (`miso-engine-builtins/tests/mono_collapse.rs` is the worked one).
     ///
     /// Never called unless [`supports_mono_collapse`](Self::supports_mono_collapse) is `true`; the
     /// default body is the dual one so that a mis-wired caller is a bug the gates catch rather
@@ -1742,6 +1777,40 @@ pub trait PreparedNativeEffectBank: Send {
     /// own defaults or its own ramp targets, so a reset preserves whatever parameter asymmetry the
     /// two channels already carried. It is the witness, not the reset, that would have to speak to
     /// that half; the witness already does, and this method covers what it cannot see.
+    ///
+    /// # Why no shipped effect implements this yet
+    ///
+    /// Every launch effect takes the declining default, and that is a decision rather than an
+    /// omission. Within one plan the channel-symmetry witness can go from holding to not holding
+    /// and back for exactly one term: [`UNBYPASSED`](crate::ChannelSymmetryWitnessV1::UNBYPASSED),
+    /// which `ChannelSymmetryWitnessV1::admit` restores on `Bypass(false)`. `LIVE` has no restoring
+    /// arm, `DESIGNED` is cached at bind on a bound bank, and `SOURCE` and `RESTORED` are decided
+    /// off the render thread. And a bypass window is precisely the window that does **not** move
+    /// the two channels apart, so it never clears the chain's agreement invariant in the first
+    /// place. There is therefore no session this engine can build in which a bank is asked to
+    /// prove agreement and the answer would change anything: `miso_engine_rack::BankChain` recovers
+    /// every reachable case through the disengage copy instead.
+    ///
+    /// Reading each crate's rest state is what settles that it *would* be implementable, and the
+    /// reading is worth recording because it is not uniform:
+    ///
+    /// * **`miso-engine-parametric-eq`** and the builtin input chain have no delay lines at all --
+    ///   two integrator words per section -- so their whole per-channel state is a few hundred
+    ///   bytes and the comparison needs no fixed point to be affordable.
+    /// * **`miso-engine-true-peak-limiter`** has the cleanest rest state in the tree:
+    ///   `ChannelState::is_at_silent_rest` reads back `clear_runtime`'s own list and pins every
+    ///   running word to a constant (`+0.0`, `1.0`, or the lane's window), so a channel at rest is
+    ///   at *the* rest state rather than at *a* fixed point, and two channels at it agree.
+    /// * **`miso-engine-compressor`** is the one that needs care. Its `silent_fixed_point` proves
+    ///   both delay rings are entirely `+0.0` -- which is what would discharge the expensive part
+    ///   of the comparison -- but it proves the recursive gain-reduction word only *unchanged*,
+    ///   not equal between the channels. A release that has stalled at two different values is
+    ///   still a fixed point at both, so an implementation must compare that word explicitly and
+    ///   must not read the flag as a claim about agreement.
+    ///
+    /// A full byte-compare including the rings is the third way and is deliberately not the design:
+    /// at tens of kilobytes per lane it is paid every block by exactly the sessions that are
+    /// already not collapsing, which inverts the trade the collapse exists to make.
     fn channels_agree(&self) -> bool {
         false
     }

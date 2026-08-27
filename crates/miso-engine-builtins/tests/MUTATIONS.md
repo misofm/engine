@@ -106,3 +106,22 @@ and `+0.0` on the other, so it never collapses. It cannot arise on a collapse-el
 elision test is a function of the coefficient words the `DESIGNED` term compares over a state that
 starts `+0.0` in both channels — and the gate exists so that the one way it could is a decline
 rather than a guess.
+
+## Mono-collapse M3 — the collapsed body's accounting
+
+Driver: one mutation at a time, `cargo test -p miso-engine-builtins --test mono_collapse`, tree
+restored between rows. Crate-local rather than end to end, and that is the point: the graph adapter
+drops `BuiltinProcessReport`, so the console workload cannot see any of this, and the audio is
+identical under every row below.
+
+| # | mutation | file | test | result |
+|---|---|---|---|---|
+| M3-B1 | `InputStage::process_mono` drops `.saturating_add(self.members_sum(report.sanitized[1]))` from `sanitized_input` | `builtins/src/lib.rs` | `mono_collapse::the_collapsed_body_publishes_the_dual_bodys_report` | RED — `width=4: the collapsed block's sanitised total is the dual block's`. The collapsed body reports half the samples a dual body reports |
+| M3-B2 | `recovered_right_state` is left at `0` on the collapsed path | `builtins/src/lib.rs` | `mono_collapse::the_collapsed_body_publishes_the_dual_bodys_report` | RED — the per-channel recovery counts diverge, on a block whose plane is bit-identical |
+| M3-B3 | the collapsed path adds `recovered` to `lifetime_recovered[0]` alone | `builtins/src/lib.rs` | `mono_collapse::the_collapsed_body_publishes_the_dual_bodys_report` (via the second block's report) | RED |
+
+The rule these gate is stated on `miso_engine_rack::BankStage::process_mono` and on
+`PreparedNativeEffectBank::process_bank_mono`: a collapsed block owes the *dual* block's report, not
+the half it computed. `sanitized_input` sums both channels, so the collapsed answer is twice the
+left count rather than equal to it — a body that duplicated the mask but summed one channel passes a
+duplication check and fails this one.

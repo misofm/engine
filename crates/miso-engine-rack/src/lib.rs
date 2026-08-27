@@ -392,6 +392,29 @@ pub trait BankStage: Send {
     /// seam, before the first seam-side slot and before the scatter.
     ///
     /// Never called unless [`supports_mono_collapse`](Self::supports_mono_collapse) is `true`.
+    ///
+    /// # What a collapsed block owes besides the plane
+    ///
+    /// The plane is the visible half and the gates that cover it are digests. Everything a block
+    /// publishes *other* than samples is the half no digest can see, and a collapsed body owes the
+    /// dual body's answer there too:
+    ///
+    /// * **Observations.** A resident tap reads bank state, and a collapsed bank's right-channel
+    ///   state is frozen at the moment the collapse engaged. The stage substitutes the left
+    ///   channel's reading for the right channel's after the bank runs -- see
+    ///   [`ConsoleEffectBankStage::process_mono`] -- because the right channel of a collapsed track
+    ///   *is* its left channel at the tap exactly as at the fader.
+    /// * **Reports and counters.** Per-channel accounting is duplicated from the left, and a total
+    ///   that sums both channels is twice the left count. See
+    ///   [`PreparedNativeEffectBank::process_bank_mono`], which states the rule for the effects,
+    ///   and `miso-engine-builtins/tests/mono_collapse.rs`, which is the worked gate on it.
+    /// * **Latency lines.** Anything a stage stages for a *later* block -- a dry shunt's delay line
+    ///   is the one in this tree -- must be fed the left plane rather than the ungathered right
+    ///   scratch, because the seam is downstream of the line and cannot repair it.
+    ///   `ConsoleEffectBankStage::process_inner` carries that argument in full.
+    ///
+    /// The common shape of all three is that the collapse is invisible to samples and visible to
+    /// state, so a stage whose only mono gate is a digest has not been gated.
     fn process_mono(&mut self, block: BankBlock<'_>) -> Result<(), RenderError> {
         self.process(block)
     }
@@ -1669,9 +1692,21 @@ impl BankChain {
         // The copy **is** the proof, not evidence for one: every prefix stage's right channel now
         // holds its left channel's whole state, so the two agree by construction at this boundary.
         // M2 set a one-way latch here instead, because it had no invariant to hand this fact to.
-        // Note that this block still renders dual, and the invariant above will clear the flag
-        // again if this block's witness does not preserve agreement -- which is precisely the
-        // disengage-for-cause case, and precisely the case that must not re-engage.
+        // The block that takes this branch still renders *dual*, and the maintenance step in `run`
+        // will clear the flag again if that block's witness does not preserve agreement -- which is
+        // precisely the disengage-for-cause case, and precisely the case that must not re-engage.
+        //
+        // The assignment is redundant today and is kept anyway, which is worth being explicit
+        // about rather than quietly relying on: reaching here requires `self.collapsed`, and a
+        // chain only collapses while the flag holds, so the flag is already `true`. What the line
+        // states is the *reason* it stays true across a boundary where the right channel was
+        // frozen, and it is the line a future disengage path -- one reached from somewhere other
+        // than a collapsed block -- would otherwise have to remember to add. The debug assertion
+        // is what keeps the redundancy honest: if it ever stops holding, this becomes mechanism.
+        debug_assert!(
+            self.collapse_channels_agree,
+            "a chain only collapses while its channels agree, so a disengage cannot find them apart"
+        );
         self.collapse_channels_agree = true;
     }
 

@@ -2943,6 +2943,20 @@ pub mod test_support {
         }
     }
 
+    /// Cumulative per-channel recovered-lane counts of a bank, `[left, right]`.
+    ///
+    /// The one piece of a block's accounting that survives the call: `BuiltinProcessReport` is
+    /// dropped by the graph adapter, so a collapsed body that fed only the left counter would be
+    /// invisible everywhere else. `mono_collapse::the_collapsed_body_publishes_the_dual_bodys_report`
+    /// is the gate.
+    #[must_use]
+    pub fn bank_lifetime_recovered(bank: &BuiltinInputBankV1) -> [u64; 2] {
+        match &bank.stage {
+            InputStageKernel::Simd4(stage) => stage.lifetime_recovered,
+            InputStageKernel::Simd8(stage) => stage.lifetime_recovered,
+        }
+    }
+
     /// Overwrites the retained state words of one bank lane.
     pub fn set_bank_lane_state_words(bank: &mut BuiltinInputBankV1, lane: usize, words: [u32; 8]) {
         match &mut bank.stage {
