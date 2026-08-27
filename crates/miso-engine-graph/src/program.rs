@@ -1745,6 +1745,103 @@ mod tests {
         }
     }
 
+    /// `runtime::scatter_target`, restated for the interpreter.
+    ///
+    /// The observer clauses are omitted for the reason [`chains_into_model`] omits them: a
+    /// program-level fixture binds none, so both are vacuously satisfied and omitting them makes
+    /// the model at least as permissive as the runtime.
+    fn scatter_target_model(
+        program: &ExecutionProgram,
+        lanes: &std::collections::BTreeMap<u32, (usize, usize)>,
+        readers: &[Vec<usize>],
+        first_producer: &[Option<usize>],
+        run: &[usize],
+        first_op: usize,
+        producer: usize,
+    ) -> Option<usize> {
+        if readers[producer].len() != 1 {
+            return None;
+        }
+        let consumer = readers[producer][0];
+        let producer_op = &program.ops[producer];
+        let consumer_op = &program.ops[consumer];
+        if consumer_op.input_count() != 1
+            || consumer_op.sidechain.is_some()
+            || program.inputs_of(consumer_op)[0].delay.is_some()
+            || first_producer[consumer] != Some(producer)
+            || consumer_op.output == producer_op.output
+            || producer_op.output == program.output
+            || lanes.contains_key(&consumer_op.node)
+        {
+            return None;
+        }
+        let target = consumer_op.output;
+        let names = |op: &Op| {
+            let hit = |input: &InputRef| {
+                input.buffer == target || input.delay.is_some_and(|delay| delay.staging == target)
+            };
+            op.output == target
+                || program.inputs_of(op).iter().any(hit)
+                || op.sidechain.as_ref().is_some_and(hit)
+        };
+        for (index, op) in program.ops.iter().enumerate().take(consumer).skip(first_op) {
+            if !run.contains(&index) && names(op) {
+                return None;
+            }
+        }
+        Some(consumer)
+    }
+
+    /// `runtime::scatter_redirects`, restated for the interpreter: last-slot op -> the consumer op
+    /// whose buffer the chain scatters into instead of its own.
+    fn redirects_in_runtime_order(
+        program: &ExecutionProgram,
+        lanes: &std::collections::BTreeMap<u32, (usize, usize)>,
+        runs: &[Vec<Vec<usize>>],
+    ) -> std::collections::BTreeMap<usize, usize> {
+        let (readers, first_producer) = op_dataflow_model(program);
+        let mut redirects = std::collections::BTreeMap::new();
+        for run in runs {
+            let Some(first_op) = run.iter().flatten().min().copied() else {
+                continue;
+            };
+            let flat: Vec<usize> = run.iter().flatten().copied().collect();
+            let last = run.last().expect("a run has at least one slot");
+            if last.len() < 2 && !lanes.contains_key(&program.ops[last[0]].node) {
+                continue;
+            }
+            let lane_targets: Vec<Option<usize>> = last
+                .iter()
+                .map(|producer| {
+                    scatter_target_model(
+                        program,
+                        lanes,
+                        &readers,
+                        &first_producer,
+                        &flat,
+                        first_op,
+                        *producer,
+                    )
+                })
+                .collect();
+            let scattered: Vec<BufferRef> = last
+                .iter()
+                .zip(lane_targets.iter())
+                .map(|(producer, target)| program.ops[target.unwrap_or(*producer)].output)
+                .collect();
+            let distinct: std::collections::BTreeSet<_> = scattered.iter().collect();
+            if distinct.len() != scattered.len() {
+                continue;
+            }
+            for (producer, target) in last.iter().zip(lane_targets) {
+                if let Some(consumer) = target {
+                    redirects.insert(*producer, consumer);
+                }
+            }
+        }
+        redirects
+    }
+
     /// Interpret the program the way the executor runs it -- banks hoisted -- and compare against
     /// the semantic graph, node by node.
     ///
@@ -1791,14 +1888,23 @@ mod tests {
                 Expr::Node(op.node, Box::new(gathered))
             }
         };
-        for run in runs_in_runtime_order(program, lanes) {
+        let runs = runs_in_runtime_order(program, lanes);
+        let redirect_of_lane = redirects_in_runtime_order(program, lanes, &runs);
+        for run in runs {
             let first = &run[0];
             // A bank gathers *every* member before the kernel touches any of them, so a member's
             // storage must survive every other member's gather.
             let banked = first.len() > 1 || lanes.contains_key(&program.ops[first[0]].node);
             if !banked {
                 let op = &program.ops[first[0]];
-                let gathered = gather(&mut arena, op);
+                // A redirected consumer does not reduce: the chain already scattered its input
+                // into this very buffer, which is what `reduce_plane` does for a lone input that
+                // is its own output.
+                let gathered = if redirect_of_lane.values().any(|op| *op == first[0]) {
+                    arena[op.output.0 as usize].clone()
+                } else {
+                    gather(&mut arena, op)
+                };
                 arena[op.output.0 as usize] = transform(op, gathered);
                 if arena[op.output.0 as usize] != expected[op.node as usize] {
                     return Some(format!(
@@ -1836,13 +1942,18 @@ mod tests {
             let last = run.last().expect("a run has at least one slot");
             for (lane, index) in last.iter().enumerate() {
                 let op = &program.ops[*index];
-                arena[op.output.0 as usize] = resident[lane].clone();
-                if arena[op.output.0 as usize] != expected[op.node as usize] {
+                if resident[lane] != expected[op.node as usize] {
                     return Some(format!(
                         "op {index} (node {}) rendered a foreign value",
                         op.node
                     ));
                 }
+                // The scatter lands in the consumer's buffer when this lane was redirected, and
+                // the last slot's own buffer is then never written at all.
+                let target = redirect_of_lane
+                    .get(index)
+                    .map_or(op.output, |consumer| program.ops[*consumer].output);
+                arena[target.0 as usize] = resident[lane].clone();
             }
         }
         let output_node = spec
@@ -2219,6 +2330,7 @@ mod tests {
         let mut state = 0x0fed_cba9_8765_4321_u64;
         let mut chained_graphs = 0usize;
         let mut merged_runs = 0usize;
+        let mut redirected_lanes = 0usize;
         let mut narrow_divergences = 0usize;
         let mut unaware_divergences = 0usize;
         for graph in 0..4000_u32 {
@@ -2337,10 +2449,9 @@ mod tests {
                 None,
                 "graph {graph}"
             );
-            merged_runs += runs_in_runtime_order(&program, &lanes)
-                .iter()
-                .filter(|run| run.len() > 1)
-                .count();
+            let realised = runs_in_runtime_order(&program, &lanes);
+            merged_runs += realised.iter().filter(|run| run.len() > 1).count();
+            redirected_lanes += redirects_in_runtime_order(&program, &lanes, &realised).len();
 
             // The narrow-window arm: every bank's own span, and no union across banks.
             let narrow = lower_with_per_bank_windows(&spec, &schedule, &levels, &delays, &banks)
@@ -2361,13 +2472,18 @@ mod tests {
              above is passing on a corpus where nothing merges"
         );
         assert_eq!(
-            narrow_divergences, 928,
+            redirected_lanes, 1669,
+            "the number of lanes whose scatter is redirected into their consumer moved (#202 \
+             rec 3): a zero here would mean this eval never interprets one"
+        );
+        assert_eq!(
+            narrow_divergences, 885,
             "the number of graphs a per-bank window gets wrong moved -- this is the measurement \
              of what the cohort-chain window union buys, and a zero here would mean the union is \
              held for nothing"
         );
         assert_eq!(
-            unaware_divergences, 1730,
+            unaware_divergences, 1665,
             "the number of graphs reaching the pre-#169 defect moved"
         );
     }

@@ -1276,6 +1276,10 @@ impl PreparedPlanExecutor for GraphExecutor {
             .fold(0_u64, |total, unit| total.saturating_add(unit.transposes()))
     }
 
+    fn bank_scatter_redirects(&self) -> u64 {
+        self.runtime.scatter_redirects()
+    }
+
     fn bank_shape(&self) -> [u64; 2] {
         self.runtime.units.iter().fold([0, 0], |mut total, unit| {
             let shape = unit.bank_shape();

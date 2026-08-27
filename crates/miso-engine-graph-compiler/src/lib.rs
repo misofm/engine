@@ -4721,7 +4721,7 @@ mod tests {
         }];
         let registry = launch_native_effect_registry_v1().expect("launch registry");
         let artifact = compile_console_model_with_builtins(&intended, 2_030, &meters, &registry);
-        let (pcm, transposes, chains, slots, frames) =
+        let (pcm, transposes, chains, slots, frames, redirects) =
             render_console_builtins_blocks(artifact, BLOCKS, Vec::new());
         assert_eq!(slots, 4 * cohorts, "the meter changes no bank's membership");
         assert_eq!(
@@ -4745,7 +4745,7 @@ mod tests {
             0,
             "the oracle arm must bind no effect bank at all"
         );
-        let (scalar_pcm, _, scalar_chains, _, scalar_frames) =
+        let (scalar_pcm, _, scalar_chains, _, scalar_frames, scalar_redirects) =
             render_console_builtins_blocks(scalar_artifact, BLOCKS, Vec::new());
         assert_eq!(
             scalar_chains, cohorts,
@@ -4764,6 +4764,15 @@ mod tests {
             frames, scalar_frames,
             "the metered boundary must read the compressor's output, not the chain's input"
         );
+        assert_eq!(
+            redirects, 64,
+            "a meter at `PostSimd1` is upstream of the limiter: it declines the chain merge and \
+             leaves the scatter redirect at the far end of the strip alone"
+        );
+        assert!(
+            scalar_redirects > 0,
+            "the bank-free arm still redirects its builtin banks' scatters"
+        );
         assert!(
             frames
                 .iter()
@@ -4772,7 +4781,7 @@ mod tests {
         );
         println!(
             "#202 leased stage meter: {slots} slots -> {chains} chains \
-             ({} published windows over {BLOCKS} blocks)",
+             ({} published windows over {BLOCKS} blocks), {redirects} scatter redirects",
             frames.len()
         );
     }
@@ -4806,7 +4815,7 @@ mod tests {
 
         let registry = launch_native_effect_registry_v1().expect("launch registry");
         let artifact = compile_console_model_with_builtins(&sent, 2_040, &[], &registry);
-        let (pcm, transposes, chains, slots, _) =
+        let (pcm, transposes, chains, slots, _, redirects) =
             render_console_builtins_blocks(artifact, BLOCKS, Vec::new());
         assert_eq!(slots, 4 * cohorts, "the send changes no bank's membership");
         assert_eq!(
@@ -4822,6 +4831,11 @@ mod tests {
         assert!(
             pcm.iter().flatten().any(|sample| *sample != 0.0),
             "the sent strip rendered audio"
+        );
+        assert_eq!(
+            redirects, 64,
+            "a send taken from `PostSimd1` is upstream of the limiter, so it declines the chain \
+             merge without touching the scatter redirect at the far end of the strip"
         );
     }
 
@@ -4864,7 +4878,7 @@ mod tests {
         let artifact = compile_console_model_with_builtins(&ragged, 2_050, &[], &registry);
         let effect_slots = artifact.graph().prepared_bank_count() as u64;
         let builtin_slots = artifact.graph().prepared_builtin_bank_count() as u64;
-        let (pcm, transposes, chains, slots, _) =
+        let (pcm, transposes, chains, slots, _, redirects) =
             render_console_builtins_blocks(artifact, BLOCKS, Vec::new());
         assert_eq!(slots, effect_slots + builtin_slots);
         assert_eq!(
@@ -4892,6 +4906,11 @@ mod tests {
             chains > cohorts,
             "a misaligned session must realise more than the aligned one chain per cohort"
         );
+        assert_eq!(
+            redirects, 64,
+            "the scatter redirect is decided per lane on the lowered program, so a session whose \
+             lane sets never line up still takes every one of them"
+        );
         let scalar_artifact =
             compile_console_model_with_builtins(&ragged, 2_051, &[], &scalar_console_registry());
         let (scalar_pcm, ..) = render_console_builtins_blocks(scalar_artifact, BLOCKS, Vec::new());
@@ -4902,7 +4921,210 @@ mod tests {
         );
         println!(
             "#202 misaligned lane sets: {effect_slots} effect slots + {builtin_slots} builtin \
-             slots = {slots} slots -> {chains} chains (aligned would be {cohorts})"
+             slots = {slots} slots -> {chains} chains (aligned would be {cohorts}), \
+             {redirects} scatter redirects"
+        );
+    }
+
+    /// An observer bound to the last slot's **own node** declines that lane's scatter redirect.
+    ///
+    /// The producer-observer clause, reached the only way a session can reach it. A graph observer
+    /// may only be bound to a `TrackStage` node, so the last slot has to *be* one -- which it is on
+    /// the bank-free arm, where the post-input builtin bank is a one-slot chain whose consumer is a
+    /// per-node EQ. A meter leased at `PostInputBuiltins` on that arm observes the bank member
+    /// itself, and after a redirect that member's buffer is never written.
+    ///
+    /// Redirecting anyway would hand the meter the previous block's words, and the session output
+    /// would be untouched: no digest comparison could see it, which is why the clause has a test of
+    /// its own rather than resting on the strip's bits.
+    #[test]
+    fn a_meter_on_a_bank_member_declines_that_lanes_scatter_redirect() {
+        const BLOCKS: u64 = 12;
+        if BankWidth::for_backend(host_dispatch()).is_none() {
+            return;
+        }
+        let intended = parse_session_toml(CONSOLE_SIXTY_FOUR_TRACK_INTENDED_FIXTURE)
+            .expect("intended fixture");
+        // A late track on purpose: the *first* cohort's chain has every other cohort's ops between
+        // its scatter and its consumer, so the in-between clause already declines all eight of its
+        // lanes and a meter there would change nothing. Metering a lane that is admitted is what
+        // makes this a test of the observer clause.
+        let meter = |handle: u64, tap| MeterRequest {
+            handle: MeterHandle(NonZeroU64::new(handle).expect("constant")),
+            track_id: "ch63".to_owned(),
+            tap,
+            config: MeterConfig {
+                period_frames: NonZeroU32::new(128).expect("constant"),
+                peak_hold_frames: 0,
+                peak_decay_db_per_second: 0.0,
+                queue_capacity: NonZeroUsize::new(64).expect("constant"),
+                reset_generation: 0,
+            },
+        };
+        // The unmetered bank-free arm is the reference the metered one is read against, so what
+        // this test asserts is the *difference* the meter makes and not a transcribed count.
+        let quiet =
+            compile_console_model_with_builtins(&intended, 2_080, &[], &scalar_console_registry());
+        let (quiet_pcm, _, _, _, _, quiet_redirects) =
+            render_console_builtins_blocks(quiet, BLOCKS, Vec::new());
+        assert!(
+            quiet_redirects > 0,
+            "the bank-free arm must redirect its builtin banks' scatters, or this test is vacuous"
+        );
+
+        let metered = compile_console_model_with_builtins(
+            &intended,
+            2_081,
+            &[meter(1, MeterTap::PostInputBuiltins)],
+            &scalar_console_registry(),
+        );
+        let (metered_pcm, _, _, _, frames, metered_redirects) =
+            render_console_builtins_blocks(metered, BLOCKS, Vec::new());
+        assert_eq!(
+            metered_redirects,
+            quiet_redirects - 1,
+            "exactly ch63's lane declines when its bank member is observed"
+        );
+        assert_pcm_bits_equal(
+            &metered_pcm,
+            &quiet_pcm,
+            "leasing a meter must move no rendered bit",
+        );
+        assert!(
+            !frames.is_empty(),
+            "the leased meter must publish windows, or this test proves nothing about it"
+        );
+        assert!(
+            frames
+                .iter()
+                .any(|frame| frame.left.sample_peak != 0.0 || frame.right.sample_peak != 0.0),
+            "the metered windows must carry signal"
+        );
+    }
+
+    /// Issue #202 rec 3: an observer on the last slot's own alias declines that lane's scatter
+    /// redirect -- and the observer still reads what it is supposed to read.
+    ///
+    /// `PostSimd2PreFader` is elided into a `program::Tap` on the limiter's op, so a meter leased
+    /// there reads the limiter's own buffer. The redirect leaves that buffer unwritten -- the chain
+    /// scatters into the fader instead -- so the meter would read the previous block's words. The
+    /// clause is keyed on the **alias node**, exactly as `chains_into`'s is, and keying it on the
+    /// producing node would miss it: nobody observes the limiter, the observer is bound to
+    /// `ch00/PostSimd2PreFader`.
+    ///
+    /// The cost is one lane, not one chain: 63 of the 64 tracks still redirect.
+    #[test]
+    fn an_observed_alias_on_the_last_slot_declines_that_lanes_scatter_redirect() {
+        const BLOCKS: u64 = 12;
+        let Some(width) = BankWidth::for_backend(host_dispatch()) else {
+            return;
+        };
+        let cohorts = 64 / width.lanes() as u64;
+        let intended = parse_session_toml(CONSOLE_SIXTY_FOUR_TRACK_INTENDED_FIXTURE)
+            .expect("intended fixture");
+        let meters = vec![MeterRequest {
+            handle: MeterHandle(NonZeroU64::new(1).expect("constant")),
+            track_id: "ch00".to_owned(),
+            tap: MeterTap::PostSimd2PreFader,
+            config: MeterConfig {
+                period_frames: NonZeroU32::new(128).expect("constant"),
+                peak_hold_frames: 0,
+                peak_decay_db_per_second: 0.0,
+                queue_capacity: NonZeroUsize::new(64).expect("constant"),
+                reset_generation: 0,
+            },
+        }];
+        let registry = launch_native_effect_registry_v1().expect("launch registry");
+        let artifact = compile_console_model_with_builtins(&intended, 2_060, &meters, &registry);
+        let (pcm, transposes, chains, slots, frames, redirects) =
+            render_console_builtins_blocks(artifact, BLOCKS, Vec::new());
+        assert_eq!(slots, 4 * cohorts, "the meter changes no bank's membership");
+        assert_eq!(
+            chains, cohorts,
+            "the meter sits on the *last* slot's alias, so it declines no chain merge"
+        );
+        assert_eq!(transposes, BLOCKS * chains);
+        assert_eq!(
+            redirects, 63,
+            "exactly ch00's lane declines; every other track still scatters into its fader"
+        );
+
+        // And the meter reads the limiter's output. The oracle is the same session with every
+        // effect on the per-node scalar path, where no chain -- and so no redirect -- exists.
+        let scalar_artifact = compile_console_model_with_builtins(
+            &intended,
+            2_061,
+            &meters,
+            &scalar_console_registry(),
+        );
+        let (scalar_pcm, _, _, _, scalar_frames, _) =
+            render_console_builtins_blocks(scalar_artifact, BLOCKS, Vec::new());
+        assert_pcm_bits_equal(
+            &pcm,
+            &scalar_pcm,
+            "64-track strip with a pre-fader stage meter",
+        );
+        assert!(
+            !frames.is_empty(),
+            "the leased meter must publish windows, or this test proves nothing about it"
+        );
+        assert_eq!(
+            frames, scalar_frames,
+            "the metered boundary must read the limiter's output, not the previous block's words"
+        );
+        assert!(
+            frames
+                .iter()
+                .any(|frame| frame.left.sample_peak != 0.0 || frame.right.sample_peak != 0.0),
+            "the metered windows must carry signal"
+        );
+    }
+
+    /// A second reader of the last slot's output declines that lane's scatter redirect.
+    ///
+    /// The sole-readership clause, reached the way a session reaches it: a send taken from
+    /// `PostSimd2PreFader`. The alias resolves back to the limiter, so `op_dataflow` counts the
+    /// send as a second reader of the limiter's output -- and after a redirect that buffer is never
+    /// written, so the send would carry the previous block.
+    #[test]
+    fn a_send_from_the_last_slots_alias_declines_that_lanes_scatter_redirect() {
+        const BLOCKS: u64 = 12;
+        let Some(width) = BankWidth::for_backend(host_dispatch()) else {
+            return;
+        };
+        let cohorts = 64 / width.lanes() as u64;
+        let mut sent = parse_session_toml(CONSOLE_SIXTY_FOUR_TRACK_INTENDED_FIXTURE)
+            .expect("intended fixture");
+        let mut route = sent.routes[0].clone();
+        route.id = StableId::parse("ch00-pre-fader-send").expect("route id");
+        route.source = RouteSource::Track {
+            track_id: StableId::parse("ch00").expect("track id"),
+            tap: miso_engine_session::SendTap::PostSimd2PreFader,
+        };
+        sent.routes.push(route);
+        sent.routes.sort_by(|left, right| left.id.cmp(&right.id));
+
+        let registry = launch_native_effect_registry_v1().expect("launch registry");
+        let artifact = compile_console_model_with_builtins(&sent, 2_070, &[], &registry);
+        let (pcm, transposes, chains, slots, _, redirects) =
+            render_console_builtins_blocks(artifact, BLOCKS, Vec::new());
+        assert_eq!(slots, 4 * cohorts, "the send changes no bank's membership");
+        assert_eq!(
+            chains, cohorts,
+            "the send is downstream of every merge, so it declines none of them"
+        );
+        assert_eq!(transposes, BLOCKS * chains);
+        assert_eq!(
+            redirects, 63,
+            "exactly ch00's lane declines: its limiter output now has two readers"
+        );
+        let scalar_artifact =
+            compile_console_model_with_builtins(&sent, 2_071, &[], &scalar_console_registry());
+        let (scalar_pcm, ..) = render_console_builtins_blocks(scalar_artifact, BLOCKS, Vec::new());
+        assert_pcm_bits_equal(&pcm, &scalar_pcm, "64-track strip with a pre-fader send");
+        assert!(
+            pcm.iter().flatten().any(|sample| *sample != 0.0),
+            "the sent strip rendered audio"
         );
     }
 
@@ -5032,7 +5254,7 @@ mod tests {
         artifact: PreparedGraphBuiltinsArtifact,
         blocks: u64,
         observers: Vec<GraphNodeObserverBinding>,
-    ) -> (Vec<Vec<f32>>, u64, u64, u64, Vec<MeterSnapshot>) {
+    ) -> (Vec<Vec<f32>>, u64, u64, u64, Vec<MeterSnapshot>, u64) {
         let envelope = artifact.envelope();
         let frames = envelope.quantum.0 as usize;
         let nodes = artifact
@@ -5073,7 +5295,8 @@ mod tests {
             .collect();
         let transposes = plan.bank_transposes();
         let [chains, slots] = plan.bank_shape();
-        (pcm, transposes, chains, slots, meter_frames)
+        let redirects = plan.bank_scatter_redirects();
+        (pcm, transposes, chains, slots, meter_frames, redirects)
     }
 
     /// Issue #202 rec 2: the intended strip is **one chain per cohort**, end to end.
@@ -5127,7 +5350,7 @@ mod tests {
             "and one post-input builtin bank per cohort"
         );
 
-        let (pcm, transposes, chains, slots, _) =
+        let (pcm, transposes, chains, slots, _, redirects) =
             render_console_builtins_blocks(artifact, BLOCKS, Vec::new());
         assert!(
             pcm.iter().flatten().any(|sample| *sample != 0.0),
@@ -5155,6 +5378,14 @@ mod tests {
             "three of the four slots per cohort are fused into their predecessor"
         );
 
+        // Issue #202 rec 3, measured on the same plan: every one of the 64 lanes points its
+        // scatter at the fader op it feeds, so the 64 stereo block copies `reduce_plane` made out
+        // of the limiter's dedicated buffer are gone.
+        assert_eq!(
+            redirects, 64,
+            "every track's chain must scatter straight into its fader op"
+        );
+
         // Bits: the merged strip renders exactly what the bank-free strip renders. Necessary, and
         // on its own not sufficient -- which is why the chain count above is asserted too.
         let scalar_registry = scalar_console_registry();
@@ -5173,7 +5404,8 @@ mod tests {
         );
         println!(
             "#202 intended strip: {effect_slots} effect slots + {builtin_slots} builtin slots \
-             = {slots} slots -> {chains} chains ({transposes} transposes over {BLOCKS} blocks)"
+             = {slots} slots -> {chains} chains ({transposes} transposes over {BLOCKS} blocks), \
+             {redirects} scatter redirects"
         );
     }
 

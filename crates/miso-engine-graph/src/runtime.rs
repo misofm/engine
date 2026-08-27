@@ -455,13 +455,21 @@ pub(crate) struct Runtime {
     bank_inputs: Box<[u32]>,
     /// Scratch for a bank chain's scatter-target buffers, sized to the widest bank at bind.
     bank_outputs: Box<[u32]>,
+    /// Lanes whose scatter this bind pointed at their consumer's buffer (issue #202 rec 3).
+    redirects: u64,
 }
 
 impl Runtime {
+    /// Lanes whose scatter this bind pointed at their consumer's buffer (issue #202 rec 3).
+    pub(crate) const fn scatter_redirects(&self) -> u64 {
+        self.redirects
+    }
+
     pub(crate) fn new(
         lease: ArenaLeaseV1,
         delays: Vec<CompensationDelay>,
         units: Vec<RuntimeUnit>,
+        redirects: u64,
     ) -> Self {
         let widest = units
             .iter()
@@ -477,6 +485,7 @@ impl Runtime {
             units: units.into_boxed_slice(),
             bank_inputs: vec![0; widest].into_boxed_slice(),
             bank_outputs: vec![0; widest].into_boxed_slice(),
+            redirects,
         }
     }
 
@@ -500,6 +509,7 @@ impl Runtime {
             units,
             bank_inputs,
             bank_outputs,
+            ..
         } = self;
         let delays: &mut [CompensationDelay] = delays;
         match &mut units[index] {
@@ -1166,14 +1176,28 @@ pub(crate) fn build_sequential(
     // Issue #181: consecutive slots of one cohort chain become one unit with one chain, so the
     // pair pays one planar/AoSoA round-trip per block where it used to pay two.
     let runs = cohort_runs(program, spec, &parts, &grouped);
-    let mut units = Vec::with_capacity(runs.len());
-    for run in runs {
-        let membership: Vec<Membership> =
-            run.iter().filter_map(|index| grouped[*index].0).collect();
-        let ops: Vec<usize> = run
-            .iter()
-            .flat_map(|index| grouped[*index].1.iter().copied())
-            .collect();
+    let run_units: Vec<(Vec<Membership>, Vec<usize>)> = runs
+        .iter()
+        .map(|run| {
+            (
+                run.iter().filter_map(|index| grouped[*index].0).collect(),
+                run.iter()
+                    .flat_map(|index| grouped[*index].1.iter().copied())
+                    .collect(),
+            )
+        })
+        .collect();
+    // Issue #202 rec 3: decided here, before `build_op` consumes `parts.observers`, because two of
+    // the clauses are about what is bound to a node rather than about the program.
+    let redirects = scatter_redirects(program, spec, &parts, &run_units);
+    // Where each op's `RuntimeOp` ended up, so a redirect can neutralise the consumer's reduction.
+    let mut op_slot: Vec<Option<(usize, usize)>> = vec![None; program.ops.len()];
+    let mut units = Vec::with_capacity(run_units.len());
+    for (membership, ops) in &run_units {
+        let membership = membership.clone();
+        for (member, index) in ops.iter().enumerate() {
+            op_slot[*index] = Some((units.len(), member));
+        }
         let members: Vec<RuntimeOp> = ops
             .iter()
             .map(|index| {
@@ -1219,6 +1243,7 @@ pub(crate) fn build_sequential(
             .collect();
         units.push(finish_unit(&mut parts, &membership, members));
     }
+    apply_scatter_redirects(program, &redirects, &op_slot, &mut units);
     let mut builder = ArenaLeaseSetBuilder::new(
         NonZeroUsize::new(2).expect("stereo planes"),
         NonZeroUsize::new(frames.max(1)).expect("nonzero frames"),
@@ -1228,7 +1253,277 @@ pub(crate) fn build_sequential(
     let (_arena, mut leases) = builder
         .finish()
         .expect("one lease over one coloured arena is disjoint by construction");
-    Runtime::new(leases.pop().expect("the sequential lease"), delays, units)
+    Runtime::new(
+        leases.pop().expect("the sequential lease"),
+        delays,
+        units,
+        redirects.len() as u64,
+    )
+}
+
+/// One chain's scatter redirect: `(run, lane, consumer op)` for every lane whose scatter may land
+/// in its consumer's buffer instead of the last slot's own (issue #202 rec 3).
+type ScatterRedirect = (usize, usize, usize);
+
+/// The buffers a chain's scatter may land in **instead of** the last slot's own outputs.
+///
+/// The mirror image of [`bank_gather_source`], on the other side of the round trip. The gather
+/// side removed the copy a *member's* reduction made into a dedicated bank buffer; this removes
+/// the copy the *consumer's* reduction makes out of one. On the 64-track intended strip that copy
+/// is `reduce_plane` memcpying a whole stereo block from the limiter's dedicated buffer into the
+/// fader op, once per track per block -- 64 stereo block copies that exist only because
+/// `program::is_dedicated` refuses the in-place fold (`program::lower`, the `in_place` clause).
+///
+/// The redirect makes the consumer behave exactly as an `in_place` op would: the chain scatters
+/// straight into the consumer's buffer, and the consumer's reduction becomes the no-op
+/// `reduce_plane` already performs for a single input that is its own output. Nothing else about
+/// the consumer changes -- it still runs, in its own unit, at its own position.
+///
+/// This does **not** touch `program::is_dedicated`. Dedication *by bank membership* was measured
+/// and rejected (`program::lower` records why, #169), and this is not that: `is_dedicated` stays
+/// exactly the classification by node kind it has always been, and what moves is where one chain
+/// scatters. It is likewise not the #194 "scatter straight into the planes" null, which was about
+/// staging the transpose itself and not about which buffer the scatter targets.
+///
+/// `None` on any doubt. Every clause is one way the redirect could be observed:
+///
+/// * **Sole readership.** The last slot's output must have exactly one reader, and that reader is
+///   the consumer. A second reader -- a send, a meter, a sidechain source, all of which
+///   `op_dataflow` counts -- would read a buffer the scatter no longer fills.
+/// * **The consumer's reduction is a pure copy.** One main input, no sidechain, no
+///   compensation-delay staging, and that input is the last slot's output. Two inputs is a sum and
+///   zero is a `fill(0.0)`; either way the consumer's buffer is not simply the chain's output, and
+///   neutralising its reduction would drop a summand. A delayed input owns a line that must still
+///   be pumped.
+/// * **Not already in place.** `consumer.output == producer.output` is the lowering having elided
+///   the copy already, and redirecting the scatter would change nothing.
+/// * **The consumer is not a bank member.** A banked consumer's own gather may already read the
+///   producer's buffer directly ([`bank_gather_source`]), and redirecting the scatter away from it
+///   would hand that gather the previous block's words. The two redirects are each other's only
+///   incompatibility, so this is where they are kept apart.
+/// * **Not the session output.** The host copies the session output out of its buffer after the
+///   last unit; leaving it stale would silence the render.
+/// * **No observer, and no observed alias, on the producer.** After the redirect the last slot's
+///   own buffer is never written, so anything that reads it reads the previous block. That is the
+///   same pair of clauses `chains_into` carries, keyed the same way -- `parts.observers` is keyed
+///   by node, so the alias check names the elided stage node and not the producing one.
+/// * **Nothing between the scatter and the consumer names the consumer's buffer.** This is the one
+///   clause with no counterpart on the gather side, and it is the load-bearing one. The scatter now
+///   writes the consumer's buffer at the *chain's* position, which is earlier -- often much
+///   earlier -- than the consumer's own op, and the colouring only owns that physical slot from the
+///   consumer's op onwards. Whatever held the slot before then is still live for the ops in
+///   between. So every op in `[chain's first op, consumer's op)` that is not part of the chain is
+///   checked, and any mention of the buffer -- as an output, an input, a sidechain or a staging
+///   slot -- declines. The chain's own ops are excluded because they all run *before* the scatter:
+///   the first slot's reductions are the gather, and no later slot's op is executed at all.
+///
+///   Ops outside that range cannot be a hazard. One before the chain's first op belongs to a unit
+///   emitted at or before that op, so it has already run. One at or after the consumer's op that
+///   names the buffer is a legitimate reader of the value the consumer produces, and a bank that
+///   hoisted it past the consumer would be the #169 defect the bank window already forbids.
+fn scatter_redirects(
+    program: &ExecutionProgram,
+    spec: &GraphSpec,
+    parts: &RuntimeParts,
+    run_units: &[(Vec<Membership>, Vec<usize>)],
+) -> Vec<ScatterRedirect> {
+    let (readers, first_producer) = op_dataflow(program);
+    let mut redirects = Vec::new();
+    for (run, (membership, ops)) in run_units.iter().enumerate() {
+        if membership.is_empty() || ops.is_empty() {
+            continue;
+        }
+        let lanes = ops.len() / membership.len();
+        let last = ops.len() - lanes;
+        let Some(first_op) = ops.iter().min().copied() else {
+            continue;
+        };
+        let mut chain: Vec<(usize, Option<usize>)> = Vec::with_capacity(lanes);
+        for lane in 0..lanes {
+            let producer = ops[last + lane];
+            chain.push((
+                producer,
+                scatter_target(
+                    program,
+                    spec,
+                    parts,
+                    &readers,
+                    &first_producer,
+                    ops,
+                    first_op,
+                    producer,
+                ),
+            ));
+        }
+        // A chain scatters every lane in one pass, so its targets have to stay pairwise distinct.
+        // They can stop being so: a consumer's buffer is coloured after its own producer's is
+        // released, so one lane's consumer may have been handed the *physical slot* another lane's
+        // last slot still scatters into. Two lanes would then write one buffer in the same pass.
+        // The colouring is what decides this and it is not knowable lane by lane, so it is checked
+        // over the whole chain, and a collision declines every redirect in it rather than picking a
+        // winner.
+        let scattered: Vec<crate::program::BufferRef> = chain
+            .iter()
+            .map(|(producer, target)| program.ops[target.unwrap_or(*producer)].output)
+            .collect();
+        let distinct: std::collections::BTreeSet<_> = scattered.iter().collect();
+        if distinct.len() != scattered.len() {
+            continue;
+        }
+        for (lane, (_, target)) in chain.into_iter().enumerate() {
+            if let Some(consumer) = target {
+                redirects.push((run, last + lane, consumer));
+            }
+        }
+    }
+    redirects
+}
+
+/// # Which clauses a mutation makes red (the house ledger, measured)
+///
+/// Dropping a clause and running the graph and graph-compiler suites gives:
+///
+/// * **sole readership** -> `a_send_from_the_last_slots_alias_declines_that_lanes_scatter_redirect`
+/// * **one main input** -> `id_ordered_bank_plan_rejects_transactionally_and_returned_ownership_\
+///   is_reusable`
+/// * **the consumer is not a bank member** -> `misaligned_lane_sets_decline_the_merge` and two
+///   others
+/// * **no observed alias** ->
+///   `an_observed_alias_on_the_last_slot_declines_that_lanes_scatter_redirect`
+/// * **no observer on the producer** ->
+///   `a_meter_on_a_bank_member_declines_that_lanes_scatter_redirect`
+/// * **nothing in between names the buffer** -> seven tests, including the fixture's own
+///   `the_intended_strip_fuses_the_whole_signal_path_into_one_chain_per_cohort`
+///
+/// Five clauses have **no** red test, and each is kept for a stated reason rather than a measured
+/// one. Saying so is the point of writing the ledger down:
+///
+/// * **no sidechain on the consumer** is conservative and nothing more. A sidechained consumer's
+///   *reduction* is still a pure copy and the redirect does not touch which buffer its
+///   `write_read_stereo` names, so no hazard is known here. It is kept because
+///   [`bank_gather_source`] carries the same clause and a reader comparing the two should not have
+///   to work out why one side omits it.
+/// * **no compensation delay on the consumer's input** is load-bearing and unreachable. A delayed
+///   input reads its *staging* buffer, so neutralising the reduction would drop the delay line
+///   entirely -- but PDC is inserted on route edges between tracks, never between a rack slot and
+///   the fader it feeds, so no compiled session reaches it.
+/// * **`first_producer` agrees** is redundant given the two above it: if the producer's sole reader
+///   is this consumer and the consumer has exactly one main input, that input is the producer's
+///   buffer. It re-derives the fact from the colouring rather than inferring it.
+/// * **not already in place** is an early-out: if the consumer already writes the producer's
+///   buffer, the redirect's target *is* that buffer and nothing changes.
+/// * **not the session output** is subsumed by the clause above wherever it can fire -- an output
+///   node folded onto its producer in place satisfies both -- and is kept because "the host reads
+///   this buffer after the last unit" is the thing being defended, not "the output op is in place".
+/// * **pairwise-distinct scatter targets** defends a collision the colouring can produce but this
+///   fixture set does not: a consumer's buffer is coloured after its own producer's is released, so
+///   one lane's consumer can be handed the physical slot another lane still scatters into.
+///
+/// The consumer's *own* observers are deliberately **not** a clause. The redirect changes nothing
+/// about what the consumer's buffer holds by the time its observers run, so there is nothing there
+/// for one to see.
+///
+/// The consumer whose buffer one lane's scatter may land in, or `None`. See [`scatter_redirects`]
+/// for what each clause is defending.
+#[allow(clippy::too_many_arguments)]
+fn scatter_target(
+    program: &ExecutionProgram,
+    spec: &GraphSpec,
+    parts: &RuntimeParts,
+    readers: &[Vec<usize>],
+    first_producer: &[Option<usize>],
+    run: &[usize],
+    first_op: usize,
+    producer: usize,
+) -> Option<usize> {
+    if readers[producer].len() != 1 {
+        return None;
+    }
+    let consumer = readers[producer][0];
+    let producer_op = &program.ops[producer];
+    let consumer_op = &program.ops[consumer];
+    if consumer_op.input_count() != 1
+        || consumer_op.sidechain.is_some()
+        || program.inputs_of(consumer_op)[0].delay.is_some()
+        || first_producer[consumer] != Some(producer)
+    {
+        return None;
+    }
+    if consumer_op.output == producer_op.output || producer_op.output == program.output {
+        return None;
+    }
+    if parts.membership.contains_key(&consumer_op.node) {
+        return None;
+    }
+    let node = &spec.nodes[producer_op.node as usize].id;
+    if parts.observers.contains_key(node) {
+        return None;
+    }
+    if program
+        .taps
+        .iter()
+        .filter(|tap| tap.after_op as usize == producer)
+        .any(|tap| {
+            parts
+                .observers
+                .contains_key(&spec.nodes[tap.node as usize].id)
+        })
+    {
+        return None;
+    }
+    let target = consumer_op.output;
+    for (index, op) in program.ops.iter().enumerate().take(consumer).skip(first_op) {
+        if run.contains(&index) {
+            continue;
+        }
+        if op_names_buffer(program, op, target) {
+            return None;
+        }
+    }
+    Some(consumer)
+}
+
+/// Whether `op` mentions `buffer` at all: as its output, a main input, a sidechain, or the staging
+/// slot of either.
+fn op_names_buffer(program: &ExecutionProgram, op: &Op, buffer: crate::program::BufferRef) -> bool {
+    let staging_or_buffer = |input: &crate::program::InputRef| {
+        input.buffer == buffer || input.delay.is_some_and(|delay| delay.staging == buffer)
+    };
+    op.output == buffer
+        || program.inputs_of(op).iter().any(staging_or_buffer)
+        || op.sidechain.as_ref().is_some_and(staging_or_buffer)
+}
+
+/// Point each admitted lane's scatter at its consumer's buffer and neutralise the consumer's
+/// reduction.
+///
+/// Two edits, and they are each other's counterpart: the member's `output` is what
+/// `Runtime::execute` reads to build the chain's scatter list, and the consumer's single input
+/// becomes its own output, which is the shape `reduce_plane` already treats as "nothing to copy".
+/// The consumer therefore runs exactly as an `in_place` op does, which is what it would have been
+/// had its producer not been dedicated storage.
+fn apply_scatter_redirects(
+    program: &ExecutionProgram,
+    redirects: &[ScatterRedirect],
+    op_slot: &[Option<(usize, usize)>],
+    units: &mut [RuntimeUnit],
+) {
+    for (run, member, consumer) in redirects.iter().copied() {
+        let target = ARENA_BASE + program.ops[consumer].output.0;
+        let RuntimeUnit::Bank { members, .. } = &mut units[run] else {
+            continue;
+        };
+        members[member].output = target;
+        let Some((unit, slot)) = op_slot[consumer] else {
+            continue;
+        };
+        match &mut units[unit] {
+            RuntimeUnit::Op(op) => op.inputs = vec![target].into_boxed_slice(),
+            RuntimeUnit::Bank { members, .. } => {
+                members[slot].inputs = vec![target].into_boxed_slice();
+            }
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
