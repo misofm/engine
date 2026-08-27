@@ -224,8 +224,17 @@ expect_accept "$meters" 'the base meters record'
 expect_accept "$observation" 'the base observation record'
 expect_accept "$placement" 'the base placement record'
 expect_accept "$automation" 'the base automation record'
+# The identity row's own inventory. Since the prepared-identity elision the two rack-free rows do
+# not share a floor -- `dispatch_only` elides both SVF sections rather than executing them -- so
+# this row is the one that proves the split is enforced rather than merely written down.
+session_floor_dispatch=$(printf '%s' "$session" | jq -c -L "$scripts_dir" --arg s "$core_clock_source" \
+    "$add_floor"' .workload_kind = "sixty_four_track_dispatch_only" | .synthetic_fixture = true
+      | .strip_content = "identity" | .strip_layout = "builtins"
+      | with_floor(5480000000; $s)')
+
 expect_accept "$session_floor" 'the base session record carrying the floor columns'
 expect_accept "$session_floor_not_derived" 'a row whose fixture was never inventoried'
+expect_accept "$session_floor_dispatch" 'the identity row carrying the identity inventory'
 
 # ---------------------------------------------------------------------------------------------
 # Per-key structural mutations: every key is load-bearing in both directions.
@@ -315,6 +324,20 @@ session_floor_mutation '.floor_control_row = "sixty_four_track_builtins_only"' '
 session_floor_mutation '.floor_control_row = "none"' 'a row that claims an isolate and names no control'
 session_floor_mutation '.isolated_cycles_per_lane_sample = -1' 'an isolate that costs less than nothing'
 session_floor_mutation '.isolated_percent_of_floor = -1' 'an isolate percentage below zero'
+# The rack-free split. A `dispatch_only` record that restates the 69-op builtins inventory --
+# self-consistently, floor and percentage together, so the only thing wrong with it is the
+# inventory itself -- is a row that claims to execute sections the render path elides.
+expect_reject "$(printf '%s' "$session_floor_dispatch" | jq -c \
+    '.floor_cycles_per_lane_sample = (69 / (8 * 3.7))
+     | .percent_of_floor = (100 * (69 / (8 * 3.7)) / .cycles_per_lane_sample)')" \
+    'an identity row costed as if it executed its filters'
+expect_reject "$(printf '%s' "$session_floor_dispatch" | jq -c \
+    '.floor_basis = "docs/rulings/effect-floor-accounting.md: builtins"')" \
+    'an identity row citing the executed-filter inventory'
+# And the other direction: the row that does execute them must not borrow the identity inventory.
+expect_reject "$(printf '%s' "$session_floor" | jq -c \
+    '.floor_basis = "docs/rulings/effect-floor-accounting.md: builtins, identity"')" \
+    'a row citing the identity inventory it does not qualify for'
 # The not-derived row is the other half of the same rule: it must not invent a floor either.
 expect_reject "$(printf '%s' "$session_floor_not_derived" | jq -c '.floor_cycles_per_lane_sample = 11.892 | .percent_of_floor = 12.5')" 'an uninventoried fixture given a floor anyway'
 expect_reject "$(printf '%s' "$session_floor_not_derived" | jq -c '.floor_basis = "docs/rulings/effect-floor-accounting.md: builtins+eq"')" 'an uninventoried fixture citing an inventory'

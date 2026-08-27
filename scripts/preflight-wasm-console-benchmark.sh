@@ -6,8 +6,11 @@
 # shell exit semantics and overwrite refusal *before* the timed workload runs, so that a runner
 # defect cannot consume the one authorised measurement. Nothing here is timed, and nothing here
 # instantiates the guest for anything but a shape check.
+#
+# `--strip1` and `--strip1-baseline` are the wasm half of the strip round's job 1, the
+# prepared-identity builtin-section elision; see the runner's header.
 set -euo pipefail
-[[ "$#" -le 1 ]] || { printf 'usage: %s [--after|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue183|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline|--round2-lim|--round2-lim-baseline|--round2-composed|--audit-chain-merge|--audit-chain-merge-baseline]
+[[ "$#" -le 1 ]] || { printf 'usage: %s [--after|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue183|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline|--round2-lim|--round2-lim-baseline|--round2-composed|--audit-chain-merge|--audit-chain-merge-baseline|--strip1|--strip1-baseline]
 ' "$0" >&2; exit 2; }
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$root"
@@ -61,8 +64,10 @@ case "${1:-}" in
     --round2-composed) arm=round2-composed; shift ;;
     --audit-chain-merge) arm=audit-chain-merge; shift ;;
     --audit-chain-merge-baseline) arm=audit-chain-merge-baseline; shift ;;
+    --strip1) arm=strip1; shift ;;
+    --strip1-baseline) arm=strip1-baseline; shift ;;
 esac
-[[ "$#" == 0 ]] || fail "usage: $0 [--after|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue183|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline|--round2-lim|--round2-lim-baseline|--round2-composed|--audit-chain-merge|--audit-chain-merge-baseline]"
+[[ "$#" == 0 ]] || fail "usage: $0 [--after|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue183|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline|--round2-lim|--round2-lim-baseline|--round2-composed|--audit-chain-merge|--audit-chain-merge-baseline|--strip1|--strip1-baseline]"
 
 if [[ "$arm" == after ]]; then
     artifact_dir="$root/artifacts/issue163-phase2"
@@ -102,6 +107,10 @@ elif [[ "$arm" == audit-chain-merge ]]; then
     artifact_dir="$root/artifacts/audit-chain-merge"
 elif [[ "$arm" == audit-chain-merge-baseline ]]; then
     artifact_dir="$root/artifacts/audit-chain-merge-baseline"
+elif [[ "$arm" == strip1 ]]; then
+    artifact_dir="$root/artifacts/strip1"
+elif [[ "$arm" == strip1-baseline ]]; then
+    artifact_dir="$root/artifacts/strip1-baseline"
 else
     artifact_dir="$root/artifacts/issue163-phase2-wasm-baseline"
 fi

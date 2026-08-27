@@ -70,13 +70,25 @@ const EQ_LANE_OPS: f64 = 51.0;
 ///
 /// `docs/rulings/effect-floor-accounting.md`, "Limiter inventory".
 const LIMITER_LANE_OPS: f64 = 138.0;
-/// Required arithmetic per lane-sample, the builtins chain and the fixture's routing.
+/// Required arithmetic per lane-sample, the builtins chain and the fixture's routing, with both
+/// SVF sections per channel carrying a real design.
 ///
-/// The input stage's two SVF sections per channel are executed unconditionally: a disabled filter
-/// is designed as the arithmetic identity, not branched around, so the section count is fixed at
-/// two per channel and an *enabled*-section count does not move this figure. That is why the two
-/// rack-free rows share a floor. `docs/rulings/effect-floor-accounting.md`, "Builtins inventory".
+/// `docs/rulings/effect-floor-accounting.md`, "Builtins inventory".
 const BUILTINS_LANE_OPS: f64 = 69.0;
+
+/// Required arithmetic per lane-sample when every builtin section is the prepared identity.
+///
+/// The two rack-free rows no longer share a floor. A section whose prepared design is the exact
+/// identity is not a recurrence the spec requires: it is the map `v |-> v + 0.0`, and a run of them
+/// is one `add(+0.0)` (`input_chain_block_elided`, and the appendix to the ruling). So the class-A
+/// arithmetic of the `dispatch_only` row is the 69 with both 24-op sections replaced by that single
+/// add: 7 sanitise + 1 identity add + 4 boundary scan + 2 fader + 4 pan + 3 route + 1 reduction.
+///
+/// The fader and the pan matrix stay at their full cost even though this row asks both for their
+/// identity: a 0 dB fader is still a multiply and a mask clear, and a settled identity matrix still
+/// evaluates both arms of its per-lane select. Only the input sections have a prepared-identity
+/// rewrite; `docs/rulings/effect-floor-accounting.md`, "Builtins inventory".
+const BUILTINS_IDENTITY_LANE_OPS: f64 = 22.0;
 
 /// The width penalty of a ragged track count, as a multiple of the full-bank floor.
 ///
@@ -162,14 +174,21 @@ pub(crate) fn floor_row(workload: Workload) -> Option<FloorRow> {
             control: None,
             basis: "docs/rulings/effect-floor-accounting.md: builtins, silent",
         },
-        // Both rack-free rows run the same builtins kernels over the same lanes; the identity row
-        // differs only in the coefficients they carry, which is the reading the near-equality of
-        // the two measured rows is the evidence for.
-        Workload::SixtyFourTrackBuiltinsOnly | Workload::SixtyFourTrackDispatchOnly => FloorRow {
+        Workload::SixtyFourTrackBuiltinsOnly => FloorRow {
             lane_ops: BUILTINS_LANE_OPS,
             width_factor: full,
             control: None,
             basis: "docs/rulings/effect-floor-accounting.md: builtins",
+        },
+        // The two rack-free rows no longer share a floor, and the split is the whole point of the
+        // row: every builtin section on this one is the prepared identity, and the prepared
+        // identity is elided rather than executed. Its class-A arithmetic is what is left --
+        // sanitisation, one identity add, the boundary scan, the fader, the pan and the routing.
+        Workload::SixtyFourTrackDispatchOnly => FloorRow {
+            lane_ops: BUILTINS_IDENTITY_LANE_OPS,
+            width_factor: full,
+            control: None,
+            basis: "docs/rulings/effect-floor-accounting.md: builtins, identity",
         },
     })
 }

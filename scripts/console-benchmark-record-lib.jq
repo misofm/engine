@@ -46,6 +46,11 @@ def session_floor_keys: (session_keys + floor_keys) | sort;
 # `session_kind_shape` applies to a workload's track count is applied to its floor.
 def lane_ops_per_cycle: 8 * 3.7;
 def builtins_lane_ops: 69;
+# The rack-free rows do not share a floor. A builtin section prepared as the exact identity is
+# elided, not executed, so the identity row's arithmetic is the 69 with both 24-op SVF sections
+# replaced by the single `add(+0.0)` a run of identity sections composes to:
+# 7 sanitise + 1 identity add + 4 boundary + 2 fader + 4 pan + 3 route + 1 reduction.
+def builtins_identity_lane_ops: 22;
 def eq_lane_ops: 51;
 def compressor_lane_ops: 94;
 def limiter_lane_ops: 138;
@@ -59,6 +64,7 @@ def floor_document: "docs/rulings/effect-floor-accounting.md: ";
 # never inventoried, and it must say `not_derived` rather than guess.
 def floor_pins:
   (builtins_lane_ops) as $b |
+  (builtins_identity_lane_ops) as $bi |
   (builtins_lane_ops + eq_lane_ops) as $be |
   (builtins_lane_ops + compressor_lane_ops) as $bc |
   (builtins_lane_ops + eq_lane_ops + compressor_lane_ops) as $bec |
@@ -87,7 +93,7 @@ def floor_pins:
     "sixty_four_track_builtins_only":
       [$b, 1, "none", floor_document + "builtins"],
     "sixty_four_track_dispatch_only":
-      [$b, 1, "none", floor_document + "builtins"]
+      [$bi, 1, "none", floor_document + "builtins, identity"]
   };
 
 # Absolute agreement to the precision the subject prints (three decimals), with a little slack for

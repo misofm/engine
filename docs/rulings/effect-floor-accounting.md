@@ -16,9 +16,14 @@ did not survive the derivation and are ruled against below, with the evidence:
   eight lanes a `Simd8` bank renders per instruction, the floor is **3.18** cycles/lane-sample and
   the compressor stands at **19.0 %** of it, not 88 % (boundary 1);
 * *"the identity-section content is workload-dependent — floors are stated per enabled-section
-  count"* is not true of this tree. A disabled builtins filter is designed as the arithmetic
-  identity rather than branched around, the section count is fixed at two per channel by the
-  prepared type, and the enabled count moves no instruction at all (boundary 5).
+  count"* was not true of this tree when this ruling was written. A disabled builtins filter is
+  designed as the arithmetic identity rather than branched around, the section count is fixed at
+  two per channel by the prepared type, and the enabled count moved no instruction at all
+  (boundary 5). **Amended by the appendix:** that last clause was a fact about the implementation,
+  not a statement of the spec, and the strip round changed it. The directive's instinct was right
+  and its reasoning was wrong — the two rack-free rows now have different floors, but because a
+  prepared identity section is *elided*, not because the executed section count varies with the
+  workload.
 
 Both are recorded here rather than quietly worked around, because a floor that agrees with an
 expectation it cannot reproduce is not a measurement.
@@ -252,7 +257,7 @@ the graph's routing in `crates/miso-engine-graph/src/runtime.rs`. Per lane-sampl
 
 | stage | lane-ops |
 |---|---:|
-| input sanitise and trim: `abs`, `lt`, `mask_not`, `select`, `add` (the counter), `andnot`, `mul` | 7 |
+| input sanitise and trim: `abs`, `lt`, `mask_not`, `1.0 & bad`, `add` (the counter), `andnot`, `mul` | 7 |
 | HPF section (one 2nd-order TPT SVF, Butterworth `k = sqrt(2)`) | 24 |
 | LPF section | 24 |
 | output boundary scan: `abs`, `lt`, `mask_not`, `mask_or` | 4 |
@@ -277,15 +282,56 @@ section's content was believed to be workload-dependent. It is not:
 
 So the section count is fixed at **two per channel** by the prepared type `[[SvfCoef<L>; 2]; 2]`,
 and the *enabled* count changes only the values in the coefficient registers. The floor is stated
-per **executed** section — `24 x sections`, with `sections = 2` unconditionally — and the two
-rack-free benchmark rows share one floor for that reason. In the standing fixture every one of the
-128 channel-lanes declares a non-zero HPF (30-70 Hz) and LPF (17 250-19 000 Hz), so enabled and
-executed happen to coincide; the point is that they would coincide anyway.
+per **executed** section — `24 x sections` — and at the time of writing `sections = 2`
+unconditionally, so the two rack-free benchmark rows shared one floor. In the standing fixture every
+one of the 128 channel-lanes declares a non-zero HPF (30-70 Hz) and LPF (17 250-19 000 Hz), so
+enabled and executed coincide there.
 
-This is also the evidence for the near-equality the decomposition rows already rely on:
-`sixty_four_track_builtins_only` and `sixty_four_track_dispatch_only` measure 22.833 and 21.962 µs,
-0.87 µs (3.8 %) apart, because the same instructions run over the same lanes with different
+This was also the evidence for the near-equality the decomposition rows relied on:
+`sixty_four_track_builtins_only` and `sixty_four_track_dispatch_only` measured 22.833 and 21.962 µs,
+0.87 µs (3.8 %) apart, because the same instructions ran over the same lanes with different
 constants.
+
+> **Amended — see "Appendix: the prepared-identity elision".** The ruling above stands as a ruling
+> about *enabled counts*: the render path still has no `enabled` flag and still no per-lane branch.
+> What changed is that a section whose prepared words are the **exact identity in every lane** is no
+> longer executed at all: it is a `v |-> v + 0.0` map, a run of them is one `add(+0.0)`, and
+> `input_chain_block_elided` emits that. `sections` is therefore the count of sections that are not
+> the prepared identity, decided once per bank at construction. The standing fixture is unaffected —
+> every one of its sections is real — but `sixty_four_track_dispatch_only`, whose whole content is
+> the identity, drops from 69 lane-ops to 22 and the two rack-free rows stop sharing a floor.
+
+### Identity inventory
+
+The `dispatch_only` row, per lane-sample, once both sections are elided:
+
+| stage | lane-ops |
+|---|---:|
+| input sanitise and trim: `abs`, `lt`, `mask_not`, `1.0 & bad`, `add` (the counter), `andnot`, `mul` | 7 |
+| the run of two identity sections, collapsed: one `add` | 1 |
+| output boundary scan: `abs`, `lt`, `mask_not`, `mask_or` | 4 |
+| fader: `mul`, `andnot` (mute) | 2 |
+| pan matrix: two `mul`, an `add`, a `select`, per channel | 4 |
+| route `mix2x2`: `mul` + unfused `fma` per channel | 3 |
+| output node's 64-input reduction, amortised per track | 1 |
+| **total** | **22** |
+
+> **The counter's spelling, not its cost.** The sanitise row used to read `select` where it now
+> reads `1.0 & bad`. `sanitize_gain_block` and the three copies of its prologue accumulate the
+> counter as `count + (1.0 & bad)` rather than `count + select(bad, 1.0, 0.0)`, which is the same
+> bits on a canonical mask — `select(m, a, +0.0)` *is* `m & a` when `m` is all-ones or all-zeros —
+> and the same **one** mask-and-value operation. The inventory is unchanged at 7 and no floor row
+> moves; only the instruction the row names does. `crates/miso-engine-lane/tests/sanitise_counter.rs`
+> holds both halves: the equivalence, and an independent scalar recount of what the D7 boundary
+> should have counted.
+
+Sanitisation, the boundary scan, the fader and the pan matrix keep their full cost, and that is the
+whole reason this is 22 and not something smaller. The D7 policy requires the input clear and the
+output scan of *every* block regardless of what the chain between them does; a 0 dB fader is still a
+multiply and a mask clear (`gain_mute_block` has no identity arm, deliberately — the `andnot` is
+what makes a muted `-1.0` exactly `+0.0`); and a settled identity pan matrix evaluates both arms of
+its per-lane select unconditionally (`matrix2x2_block`). Only the input sections have a
+prepared-identity rewrite.
 
 ---
 
@@ -319,7 +365,7 @@ report it.
 | eq only | 37.942 | 12.634 | 4.054 | 32.1 % | **4.984** *(eq)* | **34.6 %** |
 | idle (silence) | 38.974 | 12.978 | 2.331 | **18.0 %** | — | — |
 | builtins only | 22.833 | 7.603 | 2.331 | 30.7 % | — | — |
-| dispatch only (identity) | 21.962 | 7.313 | 2.331 | 31.9 % | — | — |
+| dispatch only (identity) | 21.962 | 7.313 | 2.331 † | 31.9 % † | — | — |
 | nine-track ragged strip | 24.978 | 59.144 | 21.141 | 35.7 % | — | — |
 | nine-track eq fixture | 6.092 | 14.425 | *not derived* | — | — | — |
 
@@ -331,6 +377,12 @@ report it.
 | true-peak limiter | 13.918 | 4.662 | **33.5 %** | `sixty_four_track_eq_comp_simd1` |
 | compressor | 16.691 | 3.176 | **19.0 %** | `sixty_four_track_builtins_only` |
 | builtins and routing (row, not isolated) | 7.603 | 2.331 | **30.7 %** | — |
+
+† Superseded by the prepared-identity elision. Both the measurement and the floor in that row are
+the #184 pair and are left as measured: the floor column was 69 lane-ops and the row's kernels
+executed 69 lane-ops' worth of work. Under the elision the same row's derived floor is
+`22 / (8 x 3.7) = 0.743` cycles/lane-sample, and its measurement is a different measurement. The two
+are not mixed here; the strip round's sealed records carry the new pair.
 
 The compressor's 16.691 is 3.059 nanoseconds per lane-sample, which is 15.0 cycles at 4.92 GHz —
 the directive's measured figure, reproduced — and agrees to three digits with the 3.043
@@ -465,6 +517,12 @@ is almost entirely the AoSoA transposes and the graph dispatch that the fixed po
 The rack performs one planar/AoSoA round trip per realised chain per block whether the chain
 computes anything or not — 24 chains per block on this fixture, of which the three rack chains
 compute nothing at all on this row.
+
+**Amendment.** This boundary's floor is unchanged by the prepared-identity elision, and the reason
+is worth stating because it is the same reason the boundary was drawn: the idle row's strip is the
+*standing console strip*, whose 128 channel-lanes every one declare a real HPF and a real LPF. Its
+builtins chain elides nothing, so its floor stays 69 lane-ops and its measurement does not move.
+The row that moves is `dispatch_only`, whose builtins are the identity by construction.
 
 ---
 
@@ -660,6 +718,130 @@ what it is claimed to be.
 
 ---
 
+## Appendix — the prepared-identity elision
+
+Added by the strip/overhead round. This appendix states the derivation the elision rests on, the
+gate that decides it, and the two things an adversarial reader should check first.
+
+### The map
+
+A builtin section is disabled by *designing* it, not by branching around it: `SvfSection::design`
+returns `SvfSection::IDENTITY` for a 0 Hz cutoff — `m0 = +1.0`, `m1 = m2 = c1 = a2 = a3 = +0.0`.
+Take such a section whose two integrators are also `+0.0`, and run one frame of
+`input_chain_block`'s body over any input `v0` the chain can produce.
+
+`svf_step`'s frozen order, with `nc1 = neg(c1) = neg(+0.0) = -0.0`:
+
+1. `v3 = v0 - ic2 = v0 - (+0.0) = v0`
+2. `d1 = fma(nc1, ic1, a2 * v3) = fma(-0.0, +0.0, +0.0 * v3) = (-0.0) + (±0.0)`
+3. `v1 = ic1 + d1 = (+0.0) + d1`
+4. `d2 = fma(a3, v3, a2 * ic1) = fma(+0.0, v3, +0.0 * (+0.0)) = (±0.0) + (+0.0) = +0.0`
+5. `v2 = ic2 + d2 = (+0.0) + (+0.0) = +0.0`
+6. `ic1' = flush(ic1 + (d1 + d1)) = flush((+0.0) + (d1 + d1))`
+7. `ic2' = flush(ic2 + (+0.0 + +0.0)) = +0.0`
+
+**Correction to the first draft of this derivation, which claimed every intermediate is `+0.0`.**
+Step 2 is `-0.0` whenever `v3` is negative or `-0.0`, because `a2 * v3` is then `-0.0` and
+`(-0.0) + (-0.0) = -0.0`. The conclusion survives it, and it survives it for a reason that must be
+written down rather than assumed: `+0` **absorbs** `-0` under round-to-nearest. So step 3 is
+`(+0.0) + (-0.0) = +0.0` and step 6 is `flush((+0.0) + (-0.0)) = +0.0`. Both integrators are `+0.0`
+after the frame, so the section is a fixed point of its own state and the argument runs for every
+frame of every block, forever.
+
+With `v1 = v2 = +0.0`, the output mix — `m2.fma(v2, m1.fma(v1, m0.mul(v0)))`, in that order — is
+`(+0.0) + ((+0.0) + (1.0 * v0))`, which is the map
+
+> `v |-> v + 0.0`
+
+exactly: it sends `-0.0` to `+0.0` and fixes every other value. It is idempotent, so a run of `N`
+consecutive identity sections is **one** `add(+0.0)`, and `input_chain_block_elided` emits exactly
+one, **at the run's position in the chain**. The position matters: an identity high-pass followed by
+a real low-pass must feed the low-pass `v + 0.0` and not `v`, or a `-0.0` reaches the recurrence that
+should never have seen one.
+
+Nonfinites are excluded upstream and are not part of this argument: `sanitize_gain_block` clears any
+`|x| >= 1e30` (NaN included, by the one ordered compare) to exactly `+0.0` before the trim, and the
+trim domain is the bounded −144..+24 dB of the version-1 contract. The environment premise is the
+one the whole tree runs under: `CanonicalFpEnv` pins round-to-nearest with FTZ and DAZ clear at
+every native entry, and wasm is spec-IEEE with no relaxed operations anywhere (`check-lane-policy`).
+
+### The gate, and why it is on bit patterns
+
+`input_chain_plan` elides a section only when **six coefficient words and two state words** are
+**bit-pattern-equal** to the identity in **every lane of the bank**, padding lanes included. Three
+separate claims, each load-bearing:
+
+**Bitwise, not `==`.** Float equality calls `-0.0` equal to `+0.0`, and `-0.0` in a mix word is a
+real divergence, not a pedantic one. With `m1 = m2 = -0.0` in both sections — a set of words a `==`
+gate accepts as the identity — the chain emits `-0.0` for a `-0.0` input where the elided form emits
+`+0.0`: `-0.0 * v1` is `-0.0` for a non-negative `v1`, and `-0.0` added to the `-0.0` the direct term
+carries stays `-0.0`. The case is in the tree, measured, as
+`negative_zero_mix_words_are_not_the_identity`.
+
+*A correction to the finding that prompted this paragraph.* The divergence was originally attributed
+to `-0.0` **state** words. That attribution is wrong, and the probe that produced this appendix says
+so: with exact identity coefficients and both integrators in `{+0.0, -0.0}`, the section **is**
+`v |-> v + 0.0` — `v1` can never be `-0.0`, because `ic1 = -0.0` forces `d1 = +0.0` (the product
+`(-0.0) * (-0.0)` is `+0.0`) and `(-0.0) + (+0.0) = +0.0`, while `ic1 = +0.0` gives
+`(+0.0) + (±0.0) = +0.0`; and the one path to `v2 = -0.0` needs `ic1 = -0.0`, which has just been
+shown to wash `v1`. So a `-0.0` state word is genuinely inert. The state words stay in the bitwise
+test anyway, for two reasons that are about the rule and not about this pattern: it is one rule
+rather than two, and a `==` state test would need its own standing proof that no `==`-equal pattern
+diverges — which is exactly the proof that just failed for the coefficients.
+
+**The state words at all.** A genuinely non-zero negative integrator *is* a divergence: seeded at
+`-1.0` in both sections, the identity chain emits `-0.0` for a `-0.0` input where the elided form
+emits `+0.0`. `identity_coefficients_over_non_zero_state_are_not_elidable` forces the elision and
+watches the bits move, so the check is not defensive.
+
+**Every lane or none.** The kernel body is a vector body with no per-lane branch, so one real lane
+keeps the section for the whole bank. A padding lane is not an exception in either direction: it
+carries `SvfSection::IDENTITY` and `+0.0` state, so it qualifies, and it is tested on the same
+footing as a member.
+
+### Why "prepare time" is not an optimisation of "per call"
+
+The plan is decided at bank construction and can never go stale in the unsafe direction:
+
+* the six coefficient words are written once, at preparation. `hpf_hz`, `lpf_hz`, `trim_db` and
+  `polarity_invert` all declare `BuiltinParameterUpdateRate::PreparedOnly` in
+  `BUILTIN_PARAMETER_DESCRIPTORS_V1`, so no live surface can move them;
+* an elided section's integrators are never written by the render path — the section that would
+  have written them is gone. The render path's one write to the retained state anywhere is the
+  boundary-check recovery, `state.andnot(bad)`, and that write is **monotone toward the identity**:
+  it either leaves a word alone or replaces it with the `+0.0` the identity pattern wants. It can
+  therefore never invalidate a `true`, and it is left bit-for-bit as it was rather than made to
+  re-decide anything — a section it happens to make newly *elidable* simply stays unelided until the
+  next reset, which is a missed saving and not a moved bit;
+* the post-preparation writes that are not monotone are `InputStage::set_lane_state_words` — the
+  fault-injection seam `tests/stage.rs` T5 and T6 use — and `InputStage::reset`, and both
+  **re-decide the plan**. So the rule in the file is one line: every write to `state` outside the
+  render path re-decides `plan`, and the render path's only write cannot need to.
+
+The sanitise/trim/boundary-scan law, the sanitisation counter and the output-recovery path are
+untouched by the elision and run bit-identically on every path.
+
+### What an adversarial reader should check first
+
+1. **That the elided path still counts and still scans.** The saving is the recurrence, not the D7
+   policy. `identity_chain_block` keeps the per-frame sanitisation compare, the counter accumulation
+   and the output boundary `mask_or`, in the same order, and returns the same `InputChainReport`.
+2. **That nothing elides that should not.** The gate is `input_chain_plan`; the sixteen
+   enabled/disabled section patterns at three widths are
+   `elision_is_bit_identical_at_every_width_and_section_pattern`, and the two forced-elision arms are
+   the evidence that the gate is buying something.
+3. **That the gate sweeps section *shape*, not just section presence.** This one caught a real hole
+   in the first draft of the gate, and it is the reason the sweep is 16 patterns x 16 shapes rather
+   than 16 patterns. A real **low-pass** washes the sign of a `-0.0` on its own — its mix is
+   `m0 = m1 = 0`, so the direct term that carries the sign is multiplied away — while a real
+   **high-pass** does not, because `m0 = 1`. The console's chain is high-pass then low-pass, so a
+   gate that ties each section's shape to its index only ever puts a *low-pass* after an elided
+   section, and a misplaced `add(+0.0)` is invisible: dropping the run's add before a following real
+   section was a **surviving mutant** until the shape axis was added, and dies at
+   `pattern=0010, shapes=0010` — an elided section 0 followed by a real high-pass — once it is.
+
+---
+
 ## Links
 
 * **Directive:** issue #184, owner 2026-08-26; sequenced after the round-1 merges (#181, #182,
@@ -668,6 +850,10 @@ what it is claimed to be.
 * **Validator (independent restatement):** `scripts/console-benchmark-record-lib.jq`,
   `scripts/console-benchmark-validator.jq`.
 * **Mutation coverage:** `scripts/test-console-benchmark.sh`.
+* **The elision and its gates:** `crates/miso-engine-lane/src/kernels/builtins.rs`
+  (`input_chain_plan`, `input_chain_block_elided`),
+  `crates/miso-engine-lane/tests/input_chain_elision.rs`,
+  `crates/miso-engine-builtins/tests/stage.rs` T11.
 * **Runner and its counter:** `scripts/run-console-benchmark.sh`,
   `scripts/check-bench-preconditions.sh`.
 * **Inventoried sources:** `crates/miso-engine-compressor/src/kernel.rs`,

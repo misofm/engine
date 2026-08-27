@@ -33,9 +33,9 @@ use miso_engine_lane::{
     kernels::{
         SvfCoef,
         builtins::{
-            InputChainCoef, InputChainState, Matrix2x2Coef, Matrix2x2Ramp, gain_mute_block,
-            input_chain_block, lanes_below, mask_from_flags, matrix2x2_block, matrix2x2_ramp_block,
-            no_lanes, zero_lanes_block,
+            InputChainCoef, InputChainPlan, InputChainState, Matrix2x2Coef, Matrix2x2Ramp,
+            gain_mute_block, input_chain_block_elided, input_chain_plan, lanes_below,
+            mask_from_flags, matrix2x2_block, matrix2x2_ramp_block, no_lanes, zero_lanes_block,
         },
     },
 };
@@ -682,6 +682,21 @@ pub(crate) struct InputStage<L: Lane> {
     coef: InputChainCoef<L>,
     /// Retained integrator state, indexed like [`InputChainCoef::section`].
     state: InputChainState<L>,
+    /// Which sections the render path may skip, decided from the words in [`InputStage::coef`]
+    /// and [`InputStage::state`] and re-decided by every write to either.
+    ///
+    /// The coefficients are written once, here, because `hpf_hz`, `lpf_hz`, `trim_db` and
+    /// `polarity_invert` are all `PreparedOnly` in `BUILTIN_PARAMETER_DESCRIPTORS_V1`; the state
+    /// words are written by [`InputStage::reset`] and by the evidence-only
+    /// [`InputStage::set_lane_state_words`], and both re-decide the plan.
+    ///
+    /// The render path writes `state` in exactly one place -- the boundary-check recovery in
+    /// [`InputStage::process`], which is `state.andnot(bad)` -- and that write is *monotone*
+    /// toward the identity: it either leaves a word alone or replaces it with the `+0.0` the
+    /// identity pattern wants. So it can never invalidate a `true`, and it is deliberately left
+    /// bit-for-bit as it was rather than made to re-decide the plan. A section it happens to make
+    /// newly elidable simply stays unelided until the next reset, which costs correctness nothing.
+    plan: InputChainPlan,
     /// Lifetime boundary-check recoveries per channel.
     lifetime_recovered: [u64; 2],
 }
@@ -702,17 +717,24 @@ impl<L: Lane> InputStage<L> {
                 sections[channel * 2 + 1][lane] = input.lpf;
             }
         }
+        let coef = InputChainCoef {
+            trim: [lane_words::<L>(&trim[0]), lane_words::<L>(&trim[1])],
+            section: [
+                [svf_coef::<L>(&sections[0]), svf_coef::<L>(&sections[1])],
+                [svf_coef::<L>(&sections[2]), svf_coef::<L>(&sections[3])],
+            ],
+        };
+        let state = InputChainState::default();
+        // `InputChainState::default()` is `+0.0` in every word, so a bank whose designs are all
+        // disabled is decided elidable here and stays so: nothing after preparation writes an
+        // elided section's coefficients or its state.
+        let plan = input_chain_plan::<L>(&coef, &state);
         Self {
             members,
             active: lanes_below::<L>(members),
-            coef: InputChainCoef {
-                trim: [lane_words::<L>(&trim[0]), lane_words::<L>(&trim[1])],
-                section: [
-                    [svf_coef::<L>(&sections[0]), svf_coef::<L>(&sections[1])],
-                    [svf_coef::<L>(&sections[2]), svf_coef::<L>(&sections[3])],
-                ],
-            },
-            state: InputChainState::default(),
+            coef,
+            state,
+            plan,
             lifetime_recovered: [0; 2],
         }
     }
@@ -739,7 +761,14 @@ impl<L: Lane> InputStage<L> {
         right: &mut [f32],
         frames: usize,
     ) -> BuiltinProcessReport {
-        let report = input_chain_block::<L>(left, right, frames, &self.coef, &mut self.state);
+        let report = input_chain_block_elided::<L>(
+            left,
+            right,
+            frames,
+            &self.coef,
+            &mut self.state,
+            &self.plan,
+        );
         let mut recovered = [0_u64; 2];
         for (channel, recovered) in recovered.iter_mut().enumerate() {
             let bad = L::mask_and(report.nonfinite[channel], self.active);
@@ -771,8 +800,15 @@ impl<L: Lane> InputStage<L> {
     }
 
     /// Clears every retained integrator word; prepared coefficients are untouched.
+    ///
+    /// The elision plan is re-decided, because it is a function of the state words as well as the
+    /// coefficients. A reset can only ever make a section *more* elidable -- it writes `+0.0`
+    /// everywhere -- so leaving the plan alone would be sound; it is recomputed anyway, because
+    /// the cheap rule is the one worth keeping: every write to `state` outside the render path
+    /// re-decides `plan`.
     fn reset(&mut self) {
         self.state = InputChainState::default();
+        self.plan = input_chain_plan::<L>(&self.coef, &self.state);
     }
 
     /// Recovers the prepared record of one lane from the coefficient words.
@@ -817,6 +853,11 @@ impl<L: Lane> InputStage<L> {
         }
     }
 
+    /// Which sections this stage elides, `[channel][section]`. Evidence only.
+    fn elision_plan(&self) -> [[bool; 2]; 2] {
+        self.plan.elided
+    }
+
     /// The eight retained words of one lane: `[l_hpf_ic1, l_hpf_ic2, l_lpf_ic1, l_lpf_ic2, r..]`.
     fn lane_state_words(&self, lane: usize) -> [u32; 8] {
         let mut words = [0_u32; 8];
@@ -831,6 +872,12 @@ impl<L: Lane> InputStage<L> {
     }
 
     /// Overwrites the eight retained words of one lane. Evidence and fault-injection only.
+    ///
+    /// This is the one post-preparation write to the retained state, so it is the one place the
+    /// elision plan could go stale, and it re-decides it. The case that makes the hook
+    /// load-bearing rather than defensive: identity coefficients over an injected `-0.0`
+    /// integrator emit `-0.0` where the elided form emits `+0.0`, so a plan left standing here
+    /// would move bits.
     fn set_lane_state_words(&mut self, lane: usize, words: [u32; 8]) {
         for channel in 0..2 {
             for section in 0..2 {
@@ -843,6 +890,7 @@ impl<L: Lane> InputStage<L> {
                 state.ic2 = lane_words::<L>(&ic2);
             }
         }
+        self.plan = input_chain_plan::<L>(&self.coef, &self.state);
     }
 }
 
@@ -2165,6 +2213,21 @@ pub mod test_support {
     /// Overwrites the retained state words of one input chain.
     pub fn set_input_state_words(input: &mut InputBuiltins, words: [u32; 8]) {
         input.stage.set_lane_state_words(0, words);
+    }
+
+    /// Which sections of a chain the render path elides, `[channel][section]`, section `0` first.
+    #[must_use]
+    pub fn input_elision_plan(input: &InputBuiltins) -> [[bool; 2]; 2] {
+        input.stage.elision_plan()
+    }
+
+    /// Which sections of a bank the render path elides, in the [`input_elision_plan`] order.
+    #[must_use]
+    pub fn bank_elision_plan(bank: &BuiltinInputBankV1) -> [[bool; 2]; 2] {
+        match &bank.stage {
+            InputStageKernel::Simd4(stage) => stage.elision_plan(),
+            InputStageKernel::Simd8(stage) => stage.elision_plan(),
+        }
     }
 
     /// Retained state words of one bank lane, in the [`input_state_words`] order.
