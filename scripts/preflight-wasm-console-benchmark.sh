@@ -16,7 +16,7 @@
 # `--strip1` and `--strip1-baseline` are the wasm half of the strip round's job 1, the
 # prepared-identity builtin-section elision; see the runner's header.
 set -euo pipefail
-[[ "$#" -le 1 ]] || { printf 'usage: %s [--after|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue183|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline|--round2-lim|--round2-lim-baseline|--round2-composed|--audit-chain-merge|--audit-chain-merge-baseline|--strip1|--strip1-baseline|--strip2|--strip2-baseline|--strip3|--strip3-baseline]
+[[ "$#" -le 1 ]] || { printf 'usage: %s [--after|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue183|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline|--round2-lim|--round2-lim-baseline|--round2-composed|--audit-chain-merge|--audit-chain-merge-baseline|--strip1|--strip1-baseline|--strip2|--strip2-baseline|--strip3|--strip3-baseline|--strip4]
 ' "$0" >&2; exit 2; }
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$root"
@@ -76,8 +76,9 @@ case "${1:-}" in
     --strip2-baseline) arm=strip2-baseline; shift ;;
     --strip3) arm=strip3; shift ;;
     --strip3-baseline) arm=strip3-baseline; shift ;;
+    --strip4) arm=strip4; shift ;;
 esac
-[[ "$#" == 0 ]] || fail "usage: $0 [--after|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue183|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline|--round2-lim|--round2-lim-baseline|--round2-composed|--audit-chain-merge|--audit-chain-merge-baseline|--strip1|--strip1-baseline|--strip2|--strip2-baseline|--strip3|--strip3-baseline]"
+[[ "$#" == 0 ]] || fail "usage: $0 [--after|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue183|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline|--round2-lim|--round2-lim-baseline|--round2-composed|--audit-chain-merge|--audit-chain-merge-baseline|--strip1|--strip1-baseline|--strip2|--strip2-baseline|--strip3|--strip3-baseline|--strip4]"
 
 if [[ "$arm" == after ]]; then
     artifact_dir="$root/artifacts/issue163-phase2"
@@ -129,6 +130,8 @@ elif [[ "$arm" == strip3 ]]; then
     artifact_dir="$root/artifacts/strip3"
 elif [[ "$arm" == strip3-baseline ]]; then
     artifact_dir="$root/artifacts/strip3-baseline"
+elif [[ "$arm" == strip4 ]]; then
+    artifact_dir="$root/artifacts/strip4"
 else
     artifact_dir="$root/artifacts/issue163-phase2-wasm-baseline"
 fi
@@ -232,12 +235,14 @@ jq -n -S \
     --arg fixture_sha256 "$(sha256sum fixtures/session/v1/console-sixty-four-track.toml | awk '{print $1}')" \
     --arg standing_fixture_sha256 "$(sha256sum fixtures/session/v1/console-sixty-four-track-intended.toml | awk '{print $1}')" \
     --arg fixture_generator_sha256 "$(sha256sum scripts/derive-intended-console-fixture.py | awk '{print $1}')" \
+    --arg mono_fixture_sha256 "$(sha256sum fixtures/session/v1/console-sixty-four-track-mono.toml | awk '{print $1}')" \
+    --arg mono_fixture_generator_sha256 "$(sha256sum scripts/derive-mono-console-fixture.py | awk '{print $1}')" \
     --arg runner_sha256 "$(sha256sum scripts/run-wasm-console-benchmark.sh | awk '{print $1}')" \
     --arg validator_sha256 "$(sha256sum scripts/wasm-console-benchmark-validator.jq | awk '{print $1}')" \
     --arg preconditions_sha256 "$(sha256sum scripts/check-bench-preconditions.sh | awk '{print $1}')" \
     '{schema_version: 1, issue: 163, phase: "2-step1",
       kind: "wasm_console_benchmark_preflight",
-      workload_launches: 0, warmup_rounds: 1, measured_rounds: 2, records_required: 22,
+      workload_launches: 0, warmup_rounds: 1, measured_rounds: 2, records_required: 32,
       candidate_commit: $commit, candidate_commit_sha256: $commit_sha256,
       binary_sha256: $binary_sha256, guest_module_sha256: $guest_sha256,
       guest_simd8_module_sha256: $guest_simd8_sha256,
@@ -245,6 +250,8 @@ jq -n -S \
       subject_source_sha256: $subject_sha256, fixture_sha256: $fixture_sha256,
       standing_fixture_sha256: $standing_fixture_sha256,
       fixture_generator_sha256: $fixture_generator_sha256,
+      mono_fixture_sha256: $mono_fixture_sha256,
+      mono_fixture_generator_sha256: $mono_fixture_generator_sha256,
       runner_sha256: $runner_sha256, validator_sha256: $validator_sha256,
       preconditions_sha256: $preconditions_sha256}'
 

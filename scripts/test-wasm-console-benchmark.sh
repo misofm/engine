@@ -2,7 +2,7 @@
 # Mutation coverage for the issue #163 phase 2 step 1 wasm console arm's validator.
 #
 # Hermetic: no wasmtime, no guest module, no timing, no measurement. It builds one frozen
-# twenty-two-record set with `jq -cn`, asserts the validator accepts it, then destroys one claim at
+# thirty-two-record set with `jq -cn`, asserts the validator accepts it, then destroys one claim at
 # a time and asserts the validator rejects each. Every case carries a prose label naming the claim
 # it breaks, because a mutation suite whose cases are unlabelled is a list of jq expressions rather
 # than a statement of what the validator is for.
@@ -57,7 +57,12 @@ records=$(jq -cn '
       ["sixty_four_track_dispatch_only", 64, true, "identity", "builtins", "tone", "fixtures/session/v1/console-sixty-four-track-intended.toml"],
       ["sixty_four_track_idle", 64, true, "eq+compressor+limiter", "simd1:eq+compressor,simd2:limiter", "silence", "fixtures/session/v1/console-sixty-four-track-intended.toml"],
       ["sixty_four_track_console_legacy", 64, false, "eq+compressor", "simd1:eq,dynamic:compressor", "tone", "fixtures/session/v1/console-sixty-four-track.toml"],
-      ["sixty_four_track_eq_comp_simd1", 64, true, "eq+compressor", "simd1:eq+compressor", "tone", "fixtures/session/v1/console-sixty-four-track-intended.toml"]
+      ["sixty_four_track_eq_comp_simd1", 64, true, "eq+compressor", "simd1:eq+compressor", "tone", "fixtures/session/v1/console-sixty-four-track-intended.toml"],
+      ["sixty_four_track_plumbing_only", 64, true, "plumbing", "plumbing", "tone", "fixtures/session/v1/console-sixty-four-track-intended.toml"],
+      ["sixty_four_track_gain_pan_only", 64, true, "gain+pan", "builtins", "tone", "fixtures/session/v1/console-sixty-four-track-intended.toml"],
+      ["sixty_four_track_console_mono", 64, false, "eq+compressor+limiter", "simd1:eq+compressor,simd2:limiter", "tone", "fixtures/session/v1/console-sixty-four-track-mono.toml"],
+      ["sixty_four_track_console_mono_dual", 64, false, "eq+compressor+limiter", "simd1:eq+compressor,simd2:limiter", "tone", "fixtures/session/v1/console-sixty-four-track-mono.toml"],
+      ["sixty_four_track_console_half_mono", 64, true, "eq+compressor+limiter", "simd1:eq+compressor,simd2:limiter", "tone", "fixtures/session/v1/console-sixty-four-track-mono.toml"]
     ];
   [ (1, 2) as $round | pins[] | . as $pin |
     ([ leg("native_simd8"; "native"; "Simd8"; "host_process_heap"; 89000; $pin[0]),
@@ -97,10 +102,10 @@ records=$(jq -cn '
 set_all() { printf '%s' "$records" | jq -c "[.[] | $1] | .[]"; }
 mutate() { expect_reject "$(printf '%s' "$records" | jq -c "$1 | .[]")" "$2"; }
 
-expect_accept "$(printf '%s' "$records" | jq -c '.[]')" 'the frozen twenty-two-record set'
+expect_accept "$(printf '%s' "$records" | jq -c '.[]')" 'the frozen thirty-two-record set'
 
 # Shape of the set.
-mutate 'del(.[0])' 'twenty-one records'
+mutate 'del(.[0])' 'thirty-one records'
 mutate '. as $r | ($r + [$r[0]])' 'a duplicated workload row'
 mutate '.[0].round = 2' 'a workload measured twice in one round and never in the other'
 mutate '[.[] | .round = 1]' 'a set with only one measured round'
@@ -122,7 +127,7 @@ mutate '.[0].digest_identity = "divergent"' \
     'a summary claiming divergence over legs whose digests agree'
 mutate '.[0].digest_identity = "probably_fine"' \
     'a digest identity outside the two words the field may carry'
-mutate '.[11].legs[0].output_sha256 = ("e" * 64)' \
+mutate '.[16].legs[0].output_sha256 = ("e" * 64)' \
     'a second round that rendered something other than what the first round rendered'
 
 # Claim 3: the published ratios are the legs own.
@@ -157,6 +162,21 @@ mutate '.[2].strip_layout = "simd1:eq,dynamic:compressor"' \
     'the standing console row claiming the retired layout'
 mutate '.[2].strip_content = "eq+compressor"' \
     'the standing console row claiming it carries no limiter'
+# The rows this arm gained with the strip round's job 4. The overhead pair separates on
+# `strip_layout` alone -- `plumbing` against `builtins` -- which is the same trap #175's row-pair
+# set, seen from the other end: two rows whose whole difference is what is *not* prepared.
+mutate '.[11].strip_layout = "builtins"' \
+    'the overhead floor row claiming the builtins layout it is the floor of'
+mutate '.[12].strip_content = "identity"' \
+    'the gain-and-pan row claiming the identity fader and pan'
+mutate '.[13].fixture_id = "fixtures/session/v1/console-sixty-four-track-intended.toml"' \
+    'a mono row rendered from the standing stereo fixture'
+mutate '.[13].synthetic_fixture = true' \
+    'a mono row reported as derived in code'
+mutate '.[15].synthetic_fixture = false' \
+    'the mixed-cohort row reported as a checked-in fixture'
+mutate '.[2].fixture_id = "fixtures/session/v1/console-sixty-four-track-mono.toml"' \
+    'the standing console row rendered from the mono fixture'
 
 # Leg labelling and leg internals.
 mutate '.[0].legs[2].target = "native"' 'a wasm leg labelled as a native one'
@@ -214,10 +234,10 @@ paired_set_all() { printf '%s' "$paired" | jq -c "[.[] | $1] | .[]"; }
 paired_mutate() { expect_reject "$(printf '%s' "$paired" | jq -c "$1 | .[]")" "$2"; }
 
 expect_accept "$(printf '%s' "$paired" | jq -c '.[]')" \
-    'the frozen twenty-two-record paired W4/W8 set'
+    'the frozen thirty-two-record paired W4/W8 set'
 
 # The pairing itself: a record set is paired in every row or in none.
-paired_mutate '.[0:11] = ([.[0:11][] | del(.guest_simd8_module_sha256)
+paired_mutate '.[0:16] = ([.[0:16][] | del(.guest_simd8_module_sha256)
                           | .legs = .legs[0:3] | .ratios = .ratios[0:2]])' \
     'half a set carrying the eight-lane leg and half not'
 paired_mutate '[.[] | del(.guest_simd8_module_sha256)]' \

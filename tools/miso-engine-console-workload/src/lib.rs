@@ -17,7 +17,7 @@
 //! statement that the subject could not target wasm. So the port needed no crate change at all:
 //! it needed the subject to live somewhere both a native binary and a wasm guest can link it.
 //!
-//! That is this crate. It holds the nine console workloads, the model derivation, and the
+//! That is this crate. It holds the sixteen console workloads, the model derivation, and the
 //! prepared-plan runtime that renders them -- lifted verbatim out of `console.rs`, which now links
 //! it. Nothing was reimplemented for wasm and nothing is conditional on the target, so the wasm
 //! guest and the native bench execute **the same subject**: the same fixtures, the same strip
@@ -53,7 +53,7 @@ use miso_engine_graph::{
     GraphBindingBlock, GraphNodeBinding, GraphNodeId, GraphRuntimeBindings, GraphRuntimeProcessor,
     TrackStage,
 };
-use miso_engine_graph_compiler::{GraphBuiltinsCompileRequest, GraphCompiler};
+use miso_engine_graph_compiler::{GraphBuiltinsCompileRequest, GraphCompileRequest, GraphCompiler};
 use miso_engine_lane::Backend;
 use miso_engine_session::{
     CompileCaps, DualMonoFader, MatrixOrPan, SessionTomlV1, StableId, compile_session,
@@ -93,6 +93,20 @@ const SIXTY_FOUR_TRACK_LEGACY: &str =
 /// byte-identical between the two files and the only arithmetic that is new is the limiter's.
 const SIXTY_FOUR_TRACK: &str =
     include_str!("../../../fixtures/session/v1/console-sixty-four-track-intended.toml");
+/// The mono qualification fixture: the standing strip, collapse-eligible upstream of the seam.
+///
+/// Generated from the standing fixture by `scripts/derive-mono-console-fixture.py`, which makes
+/// three edits and every one of them is upstream of the fader/matrix seam -- both channels read
+/// source channel 0, `builtins.right` copies `builtins.left`, and every `channel = "right"`
+/// effect parameter takes its `channel = "left"` sibling's value. Those are exactly the two
+/// structural terms of the per-track channel-symmetry witness
+/// (`miso_engine_effect_contract::ChannelSymmetryWitnessV1`: `SOURCE` and `DESIGNED`), so every
+/// track of this fixture is collapse-eligible.
+///
+/// The fader and pan asymmetry and the limiter's `maximum` link are deliberately *kept*; the
+/// generator's header says why, and so does the fixture's own.
+const SIXTY_FOUR_TRACK_MONO: &str =
+    include_str!("../../../fixtures/session/v1/console-sixty-four-track-mono.toml");
 
 /// The standing session workloads, in emission order.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -197,6 +211,85 @@ pub enum Workload {
     /// `sixty_four_track_console_legacy - sixty_four_track_eq_comp_simd1` is the chain-shape
     /// delta -- one AoSoA round-trip per bank per block, and no arithmetic at all.
     SixtyFourTrackEqCompSimd1,
+    /// The overhead floor: every rack emptied **and no builtin bindings prepared at all**.
+    ///
+    /// The row below `sixty_four_track_dispatch_only`, and the reason it exists is that
+    /// `dispatch_only` is not a floor. An identity strip still pays the D7 input sanitisation and
+    /// output boundary scan, a 0 dB fader's multiply and mask clear, and a settled identity pan
+    /// matrix's per-lane select -- 22 lane-ops of real arithmetic on every lane of every block.
+    /// This row pays none of it: `prepare_session_builtins` is never called, so the strip's input
+    /// stage, fader and matrix do not exist as bindings, every `TrackStage` lowers to an elided
+    /// alias, and what remains between a track's source and the master bus is the route's
+    /// `mix2x2` and the master reduction.
+    ///
+    /// So `sixty_four_track_gain_pan_only - sixty_four_track_plumbing_only` is the builtins
+    /// scaffolding *without* its filters -- sanitise, boundary scan, fader and pan -- isolated
+    /// from the graph plumbing underneath it for the first time. The row is the denominator every
+    /// overhead claim in this stream was previously missing: before it, "overhead" meant
+    /// `dispatch_only`, which is 22 lane-ops of spec-required arithmetic wearing the name of a
+    /// floor.
+    ///
+    /// It is also the one row in the set that binds **no bank chain at all**, which is why the
+    /// chain-shape gates name it explicitly instead of iterating over it: with no builtin banks
+    /// there is nothing for a route to fold into, and a fold count of zero here is the correct
+    /// answer rather than a regression.
+    SixtyFourTrackPlumbingOnly,
+    /// Decomposition: every rack emptied and every input builtin asked for its identity, with the
+    /// fixture's **real** fader and pan values left as written.
+    ///
+    /// The controlled partner of `sixty_four_track_dispatch_only`. The two rows execute the same
+    /// instructions over the same lanes -- both elide their prepared-identity input sections, both
+    /// run `gain_mute_block` and `matrix2x2_block` unconditionally -- and differ only in the
+    /// *constants* those two kernels carry: 0 dB and hard identity there, the fixture's declared
+    /// per-channel fader trims and pan positions here.
+    ///
+    /// That makes the pair a direct measurement of a claim the floor table asserts and nothing had
+    /// yet tested: a 0 dB fader and a settled identity matrix cost exactly what a real one costs,
+    /// because neither kernel has an identity arm. The two rows share a floor (22 lane-ops) for
+    /// precisely that reason, and a material gap between them would mean one of the two kernels
+    /// had acquired a data-dependent path.
+    SixtyFourTrackGainPanOnly,
+    /// The mono qualification session: sixty-four collapse-eligible strips, rendered as written.
+    ///
+    /// The same strip, the same coefficients and the same input as `sixty_four_track_console`,
+    /// from a fixture whose every track satisfies the channel-symmetry witness' two structural
+    /// terms. Today it is an ordinary session row: no code reads the witness and nothing collapses,
+    /// so this row and [`Self::SixtyFourTrackConsoleMonoDual`] compile, prepare and render exactly
+    /// the same plan.
+    ///
+    /// That is deliberate and it is the point. When the collapse lands, *this* row is the one that
+    /// takes it and the `_dual` row is the one that forces it off, and the digest equality between
+    /// them -- asserted in-run today, trivially -- becomes the standing class-A gate on the whole
+    /// mechanism. Building the pair now means the gate exists before the thing it gates, rather
+    /// than being written by the same change it is supposed to check.
+    SixtyFourTrackConsoleMono,
+    /// The mono row's control arm: the identical session with the collapse forced off.
+    ///
+    /// See [`Self::SixtyFourTrackConsoleMono`]. The two arms are one session today and the
+    /// `console_mono` record says so in its own `arms_identical_today` field, so a reader cannot
+    /// mistake today's zero delta for a measured saving.
+    SixtyFourTrackConsoleMonoDual,
+    /// The mixed-cohort row: thirty-two collapse-eligible tracks and thirty-two that are not,
+    /// alternating, so every eight-lane cohort carries four of each.
+    ///
+    /// Derived in code from the mono fixture by putting `right_source_channel = 1` back on the odd
+    /// tracks -- undoing, on half the tracks, the one edit the generator made to the source
+    /// mapping. Those tracks then read two different source channels, which clears the witness'
+    /// `SOURCE` term, and they render genuinely different left and right samples rather than
+    /// merely declaring that they might.
+    ///
+    /// It exists because a cohort is banked, not a track. A collapse that is decided per track has
+    /// to survive a bank whose lanes disagree about it, and the uniform rows cannot see that
+    /// failure at all: `_mono` collapses every lane and `console` collapses none, so both are
+    /// homogeneous cohorts. Alternating is what makes every cohort mixed rather than only the
+    /// boundary ones.
+    ///
+    /// Its class-A statement is a *shape* statement and is asserted natively, in
+    /// `tools/miso-engine-console-workload/tests/chain_shape.rs`: a mixed cohort must realise the
+    /// same `[chains, slots]` and the same planar/AoSoA round-trip count as a uniform one. The
+    /// wasm host reports no shape, which is why that gate lives beside the fixtures rather than in
+    /// the record.
+    SixtyFourTrackConsoleHalfMono,
 }
 
 /// The standing session workloads, in the order their records are emitted.
@@ -204,7 +297,7 @@ pub enum Workload {
 /// **Append-only.** The wasm console guest is addressed by *index* into this array
 /// (`miso_console_prepare(index)`), so reordering it silently re-labels every wasm record. New
 /// rows go on the end.
-pub const WORKLOADS: [Workload; 11] = [
+pub const WORKLOADS: [Workload; 16] = [
     Workload::NineTrackBaseline,
     Workload::NineTrackRaggedStrip,
     Workload::SixtyFourTrackConsole,
@@ -216,6 +309,11 @@ pub const WORKLOADS: [Workload; 11] = [
     Workload::SixtyFourTrackIdle,
     Workload::SixtyFourTrackConsoleLegacy,
     Workload::SixtyFourTrackEqCompSimd1,
+    Workload::SixtyFourTrackPlumbingOnly,
+    Workload::SixtyFourTrackGainPanOnly,
+    Workload::SixtyFourTrackConsoleMono,
+    Workload::SixtyFourTrackConsoleMonoDual,
+    Workload::SixtyFourTrackConsoleHalfMono,
 ];
 
 /// What a decomposition row does to the fixture's channel strip before it is compiled.
@@ -242,6 +340,33 @@ enum Strip {
     BuiltinsOnly,
     /// Every rack is emptied and every builtin, fader and matrix is set to its identity.
     Identity,
+    /// Every rack is emptied and every *input* builtin is set to its identity; the fader and the
+    /// pan matrix keep the values the fixture declared.
+    ///
+    /// One field apart from [`Self::Identity`], deliberately: the two rows exist to be subtracted
+    /// from each other, and a second transcription of the neutralisation would be a second thing
+    /// that could drift.
+    GainPan,
+    /// Every rack is emptied **and no builtins are prepared at all**.
+    ///
+    /// The one strip edit that is not only a model edit. Clearing the racks is what this arm does
+    /// to the *session*; the rest of it is what [`SessionRuntime::build_full`] does with the
+    /// result, which is to take the builtins-less compile path
+    /// (`GraphCompiler::compile`) instead of `compile_with_builtins`. The track's declared
+    /// builtins, fader and pan are left exactly as the fixture wrote them and are simply never
+    /// prepared, so nothing here neutralises a coefficient that a later reader might mistake for a
+    /// measured identity.
+    PlumbingOnly,
+    /// The mono fixture with the odd tracks' stereo source mapping put back.
+    ///
+    /// The one edit in this enum that *widens* a row rather than narrowing it, and it is called
+    /// out here because the rule above ("every edit is a removal or a neutralisation") is the rule
+    /// that makes the decomposition rows subtractable. This row is not a decomposition row: it is
+    /// not a subset of any other row's work and nothing subtracts it. It restores, on half the
+    /// tracks, the exact field `scripts/derive-mono-console-fixture.py` changed -- so its odd
+    /// tracks carry the standing fixture's source mapping and its even tracks the mono fixture's,
+    /// and no third session exists anywhere.
+    HalfMono,
 }
 
 /// Retains only the slots of `rack` whose native effect id is `effect_id`.
@@ -276,6 +401,11 @@ impl Workload {
             Self::SixtyFourTrackIdle => "sixty_four_track_idle",
             Self::SixtyFourTrackConsoleLegacy => "sixty_four_track_console_legacy",
             Self::SixtyFourTrackEqCompSimd1 => "sixty_four_track_eq_comp_simd1",
+            Self::SixtyFourTrackPlumbingOnly => "sixty_four_track_plumbing_only",
+            Self::SixtyFourTrackGainPanOnly => "sixty_four_track_gain_pan_only",
+            Self::SixtyFourTrackConsoleMono => "sixty_four_track_console_mono",
+            Self::SixtyFourTrackConsoleMonoDual => "sixty_four_track_console_mono_dual",
+            Self::SixtyFourTrackConsoleHalfMono => "sixty_four_track_console_half_mono",
         }
     }
     /// How many console tracks this workload renders.
@@ -293,6 +423,11 @@ impl Workload {
             Self::SixtyFourTrackConsoleLegacy => {
                 "fixtures/session/v1/console-sixty-four-track.toml"
             }
+            Self::SixtyFourTrackConsoleMono
+            | Self::SixtyFourTrackConsoleMonoDual
+            | Self::SixtyFourTrackConsoleHalfMono => {
+                "fixtures/session/v1/console-sixty-four-track-mono.toml"
+            }
             _ => "fixtures/session/v1/console-sixty-four-track-intended.toml",
         }
     }
@@ -308,6 +443,11 @@ impl Workload {
             Self::NineTrackBaseline
                 | Self::SixtyFourTrackConsole
                 | Self::SixtyFourTrackConsoleLegacy
+                // Both mono arms render the mono fixture exactly as it is checked in. They are two
+                // rows of one session, not two sessions -- which is the property the row-pair's
+                // digest equality will rest on once the collapse exists.
+                | Self::SixtyFourTrackConsoleMono
+                | Self::SixtyFourTrackConsoleMonoDual
         )
     }
     /// The edit this row makes to the fixture's channel strip.
@@ -318,6 +458,9 @@ impl Workload {
             Self::SixtyFourTrackBuiltinsOnly => Strip::BuiltinsOnly,
             Self::SixtyFourTrackDispatchOnly => Strip::Identity,
             Self::SixtyFourTrackEqCompSimd1 => Strip::LimiterRemoved,
+            Self::SixtyFourTrackPlumbingOnly => Strip::PlumbingOnly,
+            Self::SixtyFourTrackGainPanOnly => Strip::GainPan,
+            Self::SixtyFourTrackConsoleHalfMono => Strip::HalfMono,
             _ => Strip::AsWritten,
         }
     }
@@ -332,6 +475,10 @@ impl Workload {
             Self::SixtyFourTrackBuiltinsOnly => "builtins",
             Self::SixtyFourTrackDispatchOnly => "identity",
             Self::SixtyFourTrackConsoleLegacy | Self::SixtyFourTrackEqCompSimd1 => "eq+compressor",
+            // Nothing of the strip is prepared on this row -- not even the input stage -- so the
+            // vocabulary needs a word that is not "builtins" and not an effect list.
+            Self::SixtyFourTrackPlumbingOnly => "plumbing",
+            Self::SixtyFourTrackGainPanOnly => "gain+pan",
             _ => "eq+compressor+limiter",
         }
     }
@@ -352,7 +499,14 @@ impl Workload {
         match self {
             Self::NineTrackBaseline | Self::SixtyFourTrackEqOnly => "simd1:eq",
             Self::SixtyFourTrackCompressorOnly => "simd1:compressor",
-            Self::SixtyFourTrackBuiltinsOnly | Self::SixtyFourTrackDispatchOnly => "builtins",
+            Self::SixtyFourTrackBuiltinsOnly
+            | Self::SixtyFourTrackDispatchOnly
+            | Self::SixtyFourTrackGainPanOnly => "builtins",
+            // The third word of the layout vocabulary, beside `rack:slot` and `builtins`: a plan
+            // with no rack effect *and* no builtin binding. It is a distinct layout rather than an
+            // empty `builtins` one, because the difference between it and the `builtins` rows is
+            // exactly what the row measures.
+            Self::SixtyFourTrackPlumbingOnly => "plumbing",
             // The retired layout: two one-slot chains, one per rack.
             Self::SixtyFourTrackConsoleLegacy => "simd1:eq,dynamic:compressor",
             // The chain-shape row: one two-slot chain, no limiter.
@@ -390,7 +544,7 @@ fn apply_strip(model: &mut SessionTomlV1, strip: Strip) {
     if strip == Strip::AsWritten {
         return;
     }
-    for track in &mut model.tracks {
+    for (index, track) in model.tracks.iter_mut().enumerate() {
         match strip {
             Strip::AsWritten => unreachable!("returned above"),
             Strip::EqOnly => retain_effect(&mut track.simd1, "miso.parametric-eq"),
@@ -398,11 +552,16 @@ fn apply_strip(model: &mut SessionTomlV1, strip: Strip) {
             // `simd2` is cleared for every derived row below, so this arm's whole edit is that
             // clearing: the `simd1` chain is deliberately left exactly as the fixture wrote it.
             Strip::LimiterRemoved => {}
-            Strip::BuiltinsOnly => {
+            // The racks go and nothing else does. What separates this row from `BuiltinsOnly` is
+            // not an edit to the session at all: it is that `build_full` never prepares builtins
+            // for it. Neutralising the declared trims and cutoffs here would be worse than
+            // pointless -- nothing reads them, and a later reader would take the zeros as a
+            // measured identity rather than as an unprepared declaration.
+            Strip::PlumbingOnly | Strip::BuiltinsOnly => {
                 track.simd1.effects.clear();
                 track.dynamic.effects.clear();
             }
-            Strip::Identity => {
+            Strip::Identity | Strip::GainPan => {
                 track.simd1.effects.clear();
                 track.dynamic.effects.clear();
                 for channel in [&mut track.builtins.left, &mut track.builtins.right] {
@@ -413,17 +572,31 @@ fn apply_strip(model: &mut SessionTomlV1, strip: Strip) {
                     channel.hpf_hz = 0.0;
                     channel.lpf_hz = 0.0;
                 }
-                track.fader = DualMonoFader {
-                    left_db: 0.0,
-                    right_db: 0.0,
-                    left_mute: false,
-                    right_mute: false,
-                };
-                track.matrix_or_pan = MatrixOrPan::Pan {
-                    left: 1.0,
-                    right: 1.0,
-                    smoothing_samples: 0,
-                };
+                // The one field that separates the two rows. `GainPan` keeps the fixture's
+                // declared fader trims and pan positions; `Identity` asks both kernels for the
+                // value that would let them do nothing, which neither of them has an arm for.
+                if strip == Strip::Identity {
+                    track.fader = DualMonoFader {
+                        left_db: 0.0,
+                        right_db: 0.0,
+                        left_mute: false,
+                        right_mute: false,
+                    };
+                    track.matrix_or_pan = MatrixOrPan::Pan {
+                        left: 1.0,
+                        right: 1.0,
+                        smoothing_samples: 0,
+                    };
+                }
+            }
+            // Half the tracks get the standing fixture's stereo source mapping back. The racks
+            // are untouched: this row renders the whole strip, and the only thing that varies
+            // across its lanes is whether a track's two channels read one source channel or two.
+            Strip::HalfMono => {
+                if index % 2 == 1 {
+                    track.right_source_channel = 1;
+                }
+                continue;
             }
         }
         track.simd2.effects.clear();
@@ -485,6 +658,9 @@ fn console_model(workload: Workload) -> SessionTomlV1 {
     let text = match workload {
         Workload::NineTrackBaseline => NINE_TRACK,
         Workload::SixtyFourTrackConsoleLegacy => SIXTY_FOUR_TRACK_LEGACY,
+        Workload::SixtyFourTrackConsoleMono
+        | Workload::SixtyFourTrackConsoleMonoDual
+        | Workload::SixtyFourTrackConsoleHalfMono => SIXTY_FOUR_TRACK_MONO,
         _ => SIXTY_FOUR_TRACK,
     };
     let mut model = parse_session_toml(text).expect("frozen console session fixture");
@@ -550,6 +726,14 @@ pub struct SessionRuntime {
     meter_consumers: Vec<MeterConsumer>,
     controls: Vec<EffectControlProducerV1>,
     observations: Vec<EffectObservationHandleV1>,
+    /// Tracks whose *structural* channel-symmetry witness holds, taken at compile time.
+    ///
+    /// The `SOURCE` term is a function over the compiled session rather than a field of the
+    /// prepared plan (`session_structural_symmetry_v1` says why: the cohort planner needs the
+    /// class before any prepared object exists), so it cannot be read back off the plan the way
+    /// [`SessionRuntime::symmetry_counters`] reads the rest of the witness. It is taken once, in
+    /// `build_full`, and kept.
+    structural_mono_tracks: u64,
 }
 
 impl SessionRuntime {
@@ -612,17 +796,22 @@ impl SessionRuntime {
     ) -> Self {
         let model = console_model(workload);
         let session = compile_session(&model, compile_caps()).expect("compiled console session");
+        // The overhead floor row prepares no builtins at all, so it can carry no console facility
+        // either: a meter stream is leased from the prepared builtins session and the record would
+        // otherwise claim a facility that was silently dropped. Every arm that asks for one is
+        // taken on `SixtyFourTrackConsole`, so this refusal is unreachable rather than limiting,
+        // and it fails loudly instead of measuring something other than what it says.
+        let plumbing_only = workload.strip() == Strip::PlumbingOnly;
+        assert!(
+            !plumbing_only || config == PlanConfig::BASELINE,
+            "{}: the builtins-less row cannot carry a console facility",
+            workload.kind()
+        );
         let meters = if config.meters {
             meter_requests(&model)
         } else {
             Vec::new()
         };
-        let builtins = miso_engine_builtins_compiler::prepare_session_builtins(
-            &session,
-            &meters,
-            builtin_caps(),
-        )
-        .expect("prepared console builtins");
         let registry = launch_native_effect_registry_v1().expect("launch effect registry");
         let mut effects = prepare_native_session_effects(&session, &registry, effect_caps())
             .expect("prepared console effects");
@@ -644,45 +833,100 @@ impl SessionRuntime {
             attach_effect_observation_v1(&mut effects, MAXIMUM_OBSERVATION_TAPS, WINDOW_BLOCKS)
                 .expect("effect observation capacity")
         };
-        let artifact = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
-            dispatch,
-            plan_id: PLAN_ID,
-            effects,
-            builtins,
-            caps: graph_caps(),
-        })
-        .unwrap_or_else(|_| panic!("{}: production console graph", workload.kind()));
-
-        let envelope = artifact.envelope();
         let silent = workload.input_signal() == "silence";
-        let nodes = artifact
-            .external_binding_nodes()
-            .map(|node| GraphNodeBinding::new(node.clone(), source_binding(node, silent, &source)))
-            .collect();
-        // `observers` stays empty on purpose: it is the *external* observer slot. A meter observer
-        // is compiler-owned and is appended to this vector by the sealed builtins artifact inside
-        // `into_bound`, which is why `meters: true` is expressed as a meter *request* and not as a
-        // hand-built observer. Driving the real path is the whole point of the arm.
-        let bound = artifact
-            .into_bound(GraphRuntimeBindings {
-                envelope,
-                nodes,
-                observers: Vec::new(),
+        let mappings = channel_mappings(&model);
+        let (plan, meter_consumers) = if plumbing_only {
+            // The builtins-less compile path. `GraphCompiler::compile` is the same entry point
+            // every non-console graph is built through and is not a benchmark-only shape: what it
+            // produces here is the session's own dataflow with nothing attached to the track
+            // stages, so each `TrackStage` lowers to an elided alias and the route and the master
+            // reduction are all that stand between a track's source and the output.
+            let compiled = GraphCompiler::compile(GraphCompileRequest {
+                dispatch,
+                plan_id: PLAN_ID,
+                effects,
+                caps: graph_caps(),
             })
-            .unwrap_or_else(|_| panic!("{}: console graph bindings", workload.kind()));
+            .unwrap_or_else(|_| panic!("{}: builtins-less console graph", workload.kind()));
+            let graph = compiled.graph;
+            let envelope = graph.envelope;
+            let nodes = graph
+                .required_bindings
+                .iter()
+                .map(|node| {
+                    GraphNodeBinding::new(
+                        node.clone(),
+                        source_binding(node, silent, &source, &mappings),
+                    )
+                })
+                .collect();
+            let plan = graph
+                .bind(GraphRuntimeBindings {
+                    envelope,
+                    nodes,
+                    observers: Vec::new(),
+                })
+                .unwrap_or_else(|_| panic!("{}: console graph bindings", workload.kind()));
+            (plan, Vec::new())
+        } else {
+            let builtins = miso_engine_builtins_compiler::prepare_session_builtins(
+                &session,
+                &meters,
+                builtin_caps(),
+            )
+            .expect("prepared console builtins");
+            let artifact = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
+                dispatch,
+                plan_id: PLAN_ID,
+                effects,
+                builtins,
+                caps: graph_caps(),
+            })
+            .unwrap_or_else(|_| panic!("{}: production console graph", workload.kind()));
+
+            let envelope = artifact.envelope();
+            let nodes = artifact
+                .external_binding_nodes()
+                .map(|node| {
+                    GraphNodeBinding::new(
+                        node.clone(),
+                        source_binding(node, silent, &source, &mappings),
+                    )
+                })
+                .collect();
+            // `observers` stays empty on purpose: it is the *external* observer slot. A meter
+            // observer is compiler-owned and is appended to this vector by the sealed builtins
+            // artifact inside `into_bound`, which is why `meters: true` is expressed as a meter
+            // *request* and not as a hand-built observer. Driving the real path is the whole point
+            // of the arm.
+            let bound = artifact
+                .into_bound(GraphRuntimeBindings {
+                    envelope,
+                    nodes,
+                    observers: Vec::new(),
+                })
+                .unwrap_or_else(|_| panic!("{}: console graph bindings", workload.kind()));
+            (bound.plan, bound.meter_consumers)
+        };
         assert_eq!(
-            bound.meter_consumers.len(),
+            meter_consumers.len(),
             meters.len(),
             "{}: every requested meter stream must reach the plan",
             workload.kind()
         );
 
         let mut runtime = Self {
-            plan: bound.plan,
+            plan,
             output: vec![0.0; QUANTUM * 2],
-            meter_consumers: bound.meter_consumers,
+            meter_consumers,
             controls,
             observations,
+            structural_mono_tracks: miso_engine_builtins_compiler::session_structural_symmetry_v1(
+                &session,
+            )
+            .iter()
+            .filter(|(_, witness)| witness.eligible())
+            .count() as u64,
         };
         if config.observation == ObservationArm::Armed {
             runtime.arm_observation();
@@ -823,6 +1067,39 @@ impl SessionRuntime {
     #[must_use]
     pub fn bank_shape(&self) -> [u64; 2] {
         self.plan.bank_shape()
+    }
+
+    /// Tracks whose structural channel-symmetry witness holds: the `SOURCE` term, per track.
+    ///
+    /// The other half of the mono evidence, and it has to be reported beside
+    /// [`SessionRuntime::symmetry_counters`] rather than folded into it. The plan's census carries
+    /// every term the *prepared* objects can speak to -- `DESIGNED`, `LIVE`, `UNBYPASSED`,
+    /// `RESTORED` -- and deliberately not `SOURCE`, which lives in the compiled session. So a row
+    /// can have a full census and no mono source at all: `sixty_four_track_dispatch_only` does,
+    /// because an identity strip's designed words are trivially symmetric while its tracks still
+    /// read two different source channels. Reporting only the census would make that row look
+    /// collapse-eligible, which it is not.
+    ///
+    /// Read outside the clock, like every other evidence accessor on this type.
+    #[must_use]
+    pub const fn structural_mono_tracks(&self) -> u64 {
+        self.structural_mono_tracks
+    }
+
+    /// `[collapse-eligible lanes, lanes]` this arm's plan realises: the channel-symmetry census
+    /// (mono-collapse M0).
+    ///
+    /// A lane is eligible when every term of its channel-symmetry witness holds, which is decided
+    /// at preparation for the two structural terms and maintained at the drains for the rest.
+    /// **Nothing in this tree reads it to decide anything rendered**; it is control-plane evidence,
+    /// and it is surfaced here so the mono rows can *record* that their fixture is what it claims
+    /// to be rather than assert it in prose. A mono row whose census showed no eligible lane would
+    /// be measuring the standing session under a different name.
+    ///
+    /// Read outside the clock, like every other evidence accessor on this type.
+    #[must_use]
+    pub fn symmetry_counters(&self) -> [u64; 2] {
+        self.plan.symmetry_counters()
     }
 
     /// Bank-chain lanes whose route and master accumulation this plan folded into the chain's own
@@ -1017,13 +1294,41 @@ impl FrozenGraphSource {
     ///
     /// Exact zeros because "quiet" and "silent" are different measurements: a very small nonzero
     /// signal keeps every filter and every detector working, and on some hosts pushes them into
-    /// denormal arithmetic, which would make the idle row report a cost *higher* than the console
+    /// denormal arithmetic, which would make the idle row report a cost *higher* than the idle
     /// row for reasons that have nothing to do with idling.
-    fn from_block(block: &[f32]) -> Self {
+    ///
+    /// # Why the channel mapping is honoured here
+    ///
+    /// `mapping` is the track's declared `(left_source_channel, right_source_channel)`, and this
+    /// is where the declaration becomes samples. Every fixture in this suite but the mono one maps
+    /// `(0, 1)`, so this changed no existing row's bits when it arrived -- but the mono fixture
+    /// maps `(0, 0)`, and a binding that ignored that would have written the tone into the left
+    /// plane and its scaled inverse into the right plane of a session that *declares* both
+    /// channels to be one source channel.
+    ///
+    /// That is not a cosmetic difference. The channel-symmetry witness' `SOURCE` term is decided
+    /// from the declaration, so a mono session fed asymmetric samples would be a session the
+    /// witness calls collapse-eligible and whose two channels genuinely differ -- exactly the
+    /// state in which a collapse renders wrong audio, arriving through the *benchmark's* input
+    /// rather than through the engine. The subject honours the mapping so that the mono row-pair's
+    /// digest equality is a statement about the collapse and not about the harness.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the mapping names a channel the frozen block does not carry. The block is
+    /// stereo by construction ([`SOURCE_BLOCK_VALUES`]), so a third channel index is a fixture the
+    /// subject cannot feed, and feeding it silence instead would be a measurement of a fiction.
+    fn from_block(block: &[f32], mapping: (usize, usize)) -> Self {
+        let planes = [&block[..QUANTUM], &block[QUANTUM..SOURCE_BLOCK_VALUES]];
+        let plane = |channel: usize| {
+            *planes
+                .get(channel)
+                .unwrap_or_else(|| panic!("the frozen source block carries no channel {channel}"))
+        };
         let mut left = [0.0; QUANTUM];
         let mut right = [0.0; QUANTUM];
-        left.copy_from_slice(&block[..QUANTUM]);
-        right.copy_from_slice(&block[QUANTUM..SOURCE_BLOCK_VALUES]);
+        left.copy_from_slice(plane(mapping.0));
+        right.copy_from_slice(plane(mapping.1));
         Self { left, right }
     }
 }
@@ -1050,10 +1355,30 @@ impl GraphRuntimeProcessor for GraphIdentity {
     }
 }
 
+/// Every track's declared `(left_source_channel, right_source_channel)`, in model order.
+///
+/// Read from the compiled model rather than assumed, because it is the field the mono fixture
+/// moves and the field the `half_mono` row moves back on half its tracks. See
+/// [`FrozenGraphSource::from_block`] for why the subject honours it instead of always writing a
+/// stereo pair.
+fn channel_mappings(model: &SessionTomlV1) -> Vec<(usize, usize)> {
+    model
+        .tracks
+        .iter()
+        .map(|track| {
+            (
+                usize::from(track.left_source_channel),
+                usize::from(track.right_source_channel),
+            )
+        })
+        .collect()
+}
+
 fn source_binding(
     node: &GraphNodeId,
     silent: bool,
     source: &SourceSignal,
+    mappings: &[(usize, usize)],
 ) -> Box<dyn GraphRuntimeProcessor> {
     if let GraphNodeId::TrackStage {
         track_id,
@@ -1068,7 +1393,11 @@ fn source_binding(
         let block = source
             .block(track, silent)
             .unwrap_or_else(|| panic!("the injected source table must cover track {track}"));
-        Box::new(FrozenGraphSource::from_block(&block))
+        let mapping = mappings
+            .get(track)
+            .copied()
+            .unwrap_or_else(|| panic!("the model must declare a source mapping for track {track}"));
+        Box::new(FrozenGraphSource::from_block(&block, mapping))
     } else {
         Box::new(GraphIdentity)
     }

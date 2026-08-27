@@ -7,8 +7,12 @@ from the frozen spec, fast-dB polynomial ops included because they *are* the spe
 measured machine throughput, derived in a ruling doc in the #163 style, and carried into the
 standing records as `cycles_per_lane_sample` and `percent_of_floor` columns.
 
-**Status.** Adopted for all four kernels of the standing strip. Two of the directive's own premises
-did not survive the derivation and are ruled against below, with the evidence:
+**Status.** Adopted for all four kernels of the standing strip, and extended twice since: by the
+appendix, which split the two rack-free rows' floors once a prepared-identity section stopped being
+executed, and by the strip round's job 4, which added the *plumbing* inventory below them — the
+route and the master reduction, which is what a lane-sample costs when no builtin is prepared at
+all, and which is the floor of the whole table. Two of the directive's own premises did not survive
+the derivation and are ruled against below, with the evidence:
 
 * the standing figure *"compressor ~13.2 derived cycles/lane-sample"* does not divide by lane
   width. The compressor's inventory is 94 operations per lane-sample and 94 ÷ 13.2 is 7.1, which is
@@ -344,17 +348,128 @@ what makes a muted `-1.0` exactly `+0.0`); and a settled identity pan matrix eva
 its per-lane select unconditionally (`matrix2x2_block`). Only the input sections have a
 prepared-identity rewrite.
 
+That last claim was, until the strip round's job 4, an argument rather than a measurement. It has a
+row now: `sixty_four_track_gain_pan_only` makes the *same* strip edit as `dispatch_only` but for one
+field — it keeps the fixture's declared per-channel fader trims and pan positions where
+`dispatch_only` asks for 0 dB and hard identity. The two rows therefore execute the same
+instructions over the same lanes with different constants, they are costed at **one** inventory in
+`floor.rs` and in the jq restatement, and that shared inventory *is* the claim. A material gap
+between the two measured rows would mean `gain_mute_block` or `matrix2x2_block` had acquired a
+data-dependent path, and the shared basis string is what makes that show up as a contradiction
+between two rows rather than as an unexplained microsecond.
+
+---
+
+## Plumbing inventory, and the overhead floor
+
+`sixty_four_track_dispatch_only` has been read as "the overhead" since it was added, and it is not.
+An identity strip still executes 22 lane-ops of arithmetic the frozen spec requires of every block.
+The row *below* it — `sixty_four_track_plumbing_only`, added by the strip round's job 4 — is the one
+that prepares nothing: `prepare_session_builtins` is never called for it, so the graph is built
+through `GraphCompiler::compile`, every `TrackStage` lowers to an elided alias, and no bank chain is
+bound at all (`[chains, slots] == [0, 0]`, and therefore no planar/AoSoA round-trip and no route
+fold — the chain-shape gate pins all three). Per lane-sample:
+
+| stage | lane-ops |
+|---|---:|
+| route `mix2x2`: `mul` + unfused `fma` per channel | 3 |
+| output node's 64-input reduction, amortised per track | 1 |
+| **total** | **4** |
+
+Both lines are already lines of the builtins inventory and of the identity inventory, so the two
+*inventories* subtract exactly:
+
+    sixty_four_track_gain_pan_only − sixty_four_track_plumbing_only  =  22 − 4  =  18
+
+and those 18 are precisely the sanitise (7), the collapsed run of identity sections (1), the output
+boundary scan (4), the fader (2) and the pan matrix (4).
+
+### Why these two rows are **not** a control pair
+
+The obvious next step is to make `plumbing_only` the control row of `gain_pan_only` and publish that
+18 as an isolate. It was tried, and the floor table itself refused it — which is the most useful
+thing this row has done so far.
+
+`gain_pan_only` binds eight bank chains, so issue #218's route fold fires on every one of its
+sixty-four lanes: its route and its share of the master reduction are an epilogue on a tile the
+chain has already transposed, and they cost almost nothing. `plumbing_only` binds **no chain at
+all**, so there is no epilogue to fold into: it pays sixty-four individually dispatched route ops
+and an unfolded reduction over sixty-four separate planar buffers. The two rows execute the same
+*arithmetic* plumbing and completely different *plans* for it.
+
+Subtracting the second from the first therefore removes the fold's saving as well as the plumbing's
+four lane-ops, and the result lands **below** the 18-lane-op floor it is supposed to be measured
+against — an `isolated_percent_of_floor` above 100 %, which is the table stating that the quantity
+is not the one its name claims. The subtraction is retired rather than tolerated: `floor_control_row`
+is `none` on both rows, `floor.rs` and the jq restatement agree, and
+`the_overhead_inventories_differ_by_the_scaffolding_and_neither_row_claims_an_isolate` is what stops
+a later edit from quietly reinstating it.
+
+What survives is more interesting than the isolate would have been. `plumbing_only`'s own
+`percent_of_floor` is the *unfolded* plumbing measured against the four lane-ops plumbing requires,
+and it is by a wide margin the worst standing in this table — an order of magnitude worse than the
+idle row's 18 %, which boundary 5 already calls the strongest statement in the stream that a row's
+cost is dispatch rather than arithmetic. That gap is a direct measurement of what job 3's fold
+removed from every banked row, and the sealed `artifacts/strip4/` record is where the number lives.
+The pair that *would* subtract cleanly is one where both sides bank and both sides fold:
+`sixty_four_track_builtins_only` against `gain_pan_only` differ by 69 − 22 = 47 lane-ops, which is
+the two 24-op SVF sections less the single `add(+0.0)` the elided run composes to, over two rows
+that realise the same twenty-four bank slots and the same eight round-trips. That control is not
+declared here — it would move an existing row's `floor_control_row`, which is not this job's to do —
+and it is written down so the next person reaching for an overhead isolate reaches for that one
+rather than for the plumbing row. The plumbing row's job is to be the floor, not the control.
+
+**The post-fold recheck, and why the number did not move.** Job 3 folded the route application and
+the master accumulation into the cohort chain's own epilogue, which is where the route and the
+reduction now live on every banked row. The inventory above is stated on the *post*-fold tree and is
+unchanged from the pre-fold one, for the same reason job 2's banking moved no row of the builtins
+table: `ArenaMembers::fold_plane` runs the same `mix2x2_block` over the same bind-folded 2×2 on a
+slice of the same length, and then the same `sum_into_block` — with the first contributor storing
+instead of accumulating, which is what keeps sixty-four contributors at sixty-three adds rather than
+sixty-four. The route is deliberately *not* merged into the matrix slot above it (two 2×2s
+multiplied out is a different rounding), so no operation was eliminated and none was added. What the
+fold removed is 64 whole passes over buffers the chain had just scattered, 63 reduction passes and
+64 dead fan-in-zero fills — dispatch, buffers and stores, none of which this table counts.
+
+The plumbing row is the *floor of the whole table*, and `floor.rs` asserts that: no row in this
+stream may be costed below it, because a row that renders sixty-four tracks into one master pays a
+route matrix and its share of the reduction whatever else it does or does not prepare.
+
+### The mono rows
+
+`sixty_four_track_console_mono`, `sixty_four_track_console_mono_dual` and
+`sixty_four_track_console_half_mono` render `fixtures/session/v1/console-sixty-four-track-mono.toml`,
+which is the standing fixture with its source mapping and its upstream per-channel parameters
+symmetrised. They carry the whole intended strip and are costed at the whole intended strip's
+inventory — 352 lane-ops — because their fixture differs from the standing one in per-channel
+*values* only, and a floor is an inventory of operations, not of operands.
+
+**One question is deliberately left open**, and it is left open here rather than answered quietly in
+the table. The mono collapse does not exist in this tree. When it lands, a collapsed track will
+compute one plane where the spec describes two, and whether a collapsed row's floor halves is a
+ruling this document does not yet make: the honest candidates are "the spec requires the arithmetic
+of both channels and the collapse is an implementation that exploits their equality, so the floor
+stands at 352 and the row's %-of-floor rises above what a stereo row can reach", and "a lane-sample
+whose value is determined by another lane-sample is not independent arithmetic, so the upstream half
+of the inventory halves". Both are defensible and they give different numbers for the same row. The
+rows exist now so that the question is asked against measurements; the pinned equality in
+`floor.rs`'s `the_mono_rows_carry_the_standing_strips_floor` is what makes answering it a deliberate
+edit rather than a table drift. This joins the #193 max/min re-pricing as open floor-accounting debt;
+today's pricing is unchanged by either.
+
 ---
 
 ## The derived floors, and the standing %-of-floor table
 
-Composed by `tools/miso-engine-bench/src/floor.rs` from the four inventories above, restated
+Composed by `tools/miso-engine-bench/src/floor.rs` from the inventories above, restated
 independently by `scripts/console-benchmark-record-lib.jq`, and carried in every
 `console_session` record of a run whose runner could measure the core clock.
 
 | kernel | lane-ops | derived floor, cycles/lane-sample |
 |---|---:|---:|
+| route and master reduction (the plumbing floor) | 4 | 0.135 |
 | builtins chain and routing | 69 | 2.331 |
+| builtins chain, identity sections (`dispatch_only`, `gain_pan_only`) | 22 | 0.743 |
 | parametric EQ, two kept sections | 51 | 1.723 |
 | compressor | 94 | 3.176 |
 | true-peak limiter, uniform cohort | 138 | 4.662 |

@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # scripts/sweep.sh -- the hermetic check/test sweep. 92 explicit rows.
 #
-# Why this exists: the repo has 91 check-*/test-* scripts and ci.yml names 36 of them, so 52 gates
-# had no committed runner at all -- they were reachable only by knowing they existed. Every row
-# below is written out by name. There are deliberately no globs: a glob silently absorbs a new
+# Why this exists: the repo has 95 check-*/test-* scripts and ci.yml names 37 of them, so most
+# gates had no committed runner at all -- they were reachable only by knowing they existed. Every
+# row below is written out by name. There are deliberately no globs: a glob silently absorbs a new
 # script (and silently drops a renamed one), which is how the coverage gap got here in the first
 # place. Adding a script means adding its row.
 #
@@ -82,6 +82,7 @@ row scripts/check-command-reason-vocabulary.py
 row scripts/check-conformance-boundaries.sh
 row scripts/check-console-benchmark-fixture.sh
 row scripts/check-intended-console-fixture.sh
+row scripts/check-mono-console-fixture.sh
 row scripts/check-effect-interchange-benchmark-108.sh
 row scripts/check-effect-interchange-qualification.sh
 row scripts/check-effect-runtime-fixtures.sh

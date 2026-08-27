@@ -330,6 +330,29 @@ fn every_standing_workload_folds_one_route_per_track() {
         for block in 0..4 {
             runtime.render(block).expect("console render");
         }
+        // The overhead floor row is the one exception, and it is an exception by construction
+        // rather than by exemption: it prepares no builtins, so it binds no bank chain, so there
+        // is no epilogue for a route to fold into. Zero is the right answer here and a nonzero
+        // count would mean the row had acquired a bank it is defined by not having -- which is why
+        // the arm asserts the shape as well as the fold, instead of skipping the row.
+        if workload == Workload::SixtyFourTrackPlumbingOnly {
+            assert_eq!(
+                runtime.bank_shape(),
+                [0, 0],
+                "the plumbing row must bind no bank chain at all"
+            );
+            assert_eq!(
+                runtime.bank_transposes(),
+                0,
+                "a plan with no bank transposes nothing"
+            );
+            assert_eq!(
+                runtime.bank_route_folds(),
+                0,
+                "a plan with no chain has no epilogue to fold a route into"
+            );
+            continue;
+        }
         assert_eq!(
             runtime.bank_route_folds(),
             u64::from(workload.tracks()),
@@ -337,6 +360,165 @@ fn every_standing_workload_folds_one_route_per_track() {
             workload.kind()
         );
     }
+}
+
+/// The mixed-eligibility cohort banks exactly like a uniform one.
+///
+/// # Why this gate exists before the thing it gates
+///
+/// A cohort is banked; collapse eligibility is decided per *track*. So the failure the mono work
+/// has to survive is a bank whose eight lanes disagree about whether they collapse, and neither
+/// uniform row can see it: `_mono` is eligible in every lane and `console` in none, so both are
+/// homogeneous. `half_mono` alternates -- even tracks read one source channel, odd tracks read two
+/// -- which makes every eight-lane cohort four and four.
+///
+/// Today the claim is that the mixed session is *shaped* like the uniform ones: same chains, same
+/// slots, same planar/AoSoA round-trips, because nothing yet reads the witness. That equality is
+/// the baseline a collapse must either preserve or deliberately move, and it is asserted here
+/// rather than in a record because the wasm host reports no shape at all.
+///
+/// The census is asserted too, in both directions. A `half_mono` row whose derivation had silently
+/// stopped firing would be `_mono` under another name and would pass every shape assertion below.
+#[test]
+fn the_half_mono_cohort_banks_like_a_uniform_one() {
+    let mono = render(
+        Workload::SixtyFourTrackConsoleMono,
+        PlanConfig::BASELINE,
+        BLOCKS,
+    );
+    let half = render(
+        Workload::SixtyFourTrackConsoleHalfMono,
+        PlanConfig::BASELINE,
+        BLOCKS,
+    );
+    let console = render(
+        Workload::SixtyFourTrackConsole,
+        PlanConfig::BASELINE,
+        BLOCKS,
+    );
+    assert_eq!(
+        half.1, mono.1,
+        "a mixed-eligibility cohort must realise the uniform mono shape"
+    );
+    assert_eq!(
+        half.1, console.1,
+        "and the standing stereo shape: eligibility moves no bank today"
+    );
+    assert_eq!(
+        half.2, mono.2,
+        "a mixed cohort must pay the uniform count of round-trips"
+    );
+    assert_eq!(half.2, console.2);
+    assert_eq!(half.1[0], cohorts(half.1[1]));
+    // The derivation actually fired. Half the tracks read two source channels again, so the
+    // structural witness declines them -- and they render different bits from the uniform mono
+    // session, which is what makes this a mixed cohort rather than a relabelled one.
+    let counted = |workload| {
+        let runtime = SessionRuntime::build(workload, PlanConfig::BASELINE);
+        (
+            runtime.structural_mono_tracks(),
+            runtime.symmetry_counters(),
+        )
+    };
+    assert_eq!(
+        counted(Workload::SixtyFourTrackConsoleMono),
+        (64, [64, 129]),
+        "every track of the mono fixture is collapse-eligible"
+    );
+    assert_eq!(
+        counted(Workload::SixtyFourTrackConsoleHalfMono),
+        (32, [64, 129]),
+        "half the tracks of the half-mono row read two source channels; every track's designed \
+         words are still symmetric, which is what makes the SOURCE term the only thing that moved"
+    );
+    assert_eq!(
+        counted(Workload::SixtyFourTrackConsole).0,
+        0,
+        "no track of the standing fixture reads one source channel"
+    );
+    assert_ne!(
+        half.0, mono.0,
+        "the half-mono row must render different bits from the uniform mono row, or its odd \
+         tracks are not reading a second source channel at all"
+    );
+}
+
+/// The mono row-pair is one session today, to the bit.
+///
+/// The bench asserts this in-run before it emits its `console_mono` record; asserting it here too
+/// is what keeps it a *gate* rather than a benchmark-only claim, because the bench is a one-shot
+/// measurement runner and this file is swept.
+#[test]
+fn the_mono_row_pair_renders_one_session() {
+    let eligible = render(
+        Workload::SixtyFourTrackConsoleMono,
+        PlanConfig::BASELINE,
+        BLOCKS,
+    );
+    let forced = render(
+        Workload::SixtyFourTrackConsoleMonoDual,
+        PlanConfig::BASELINE,
+        BLOCKS,
+    );
+    assert_eq!(
+        eligible.0, forced.0,
+        "the mono row-pair must render identical output"
+    );
+    assert_eq!(eligible.1, forced.1, "and realise an identical bank shape");
+    assert_eq!(
+        eligible.2, forced.2,
+        "and pay an identical round-trip count"
+    );
+}
+
+/// The overhead floor row prepares nothing, and what it renders is the plumbing alone.
+///
+/// Three claims, and the third is the one that makes the row a *floor* rather than another
+/// decomposition row: `plumbing_only` binds no bank, so it pays neither the D7 sanitise and
+/// boundary passes nor the fader and matrix kernels that `gain_pan_only` and `dispatch_only` both
+/// pay -- and it therefore renders different bits from both, which is how a reader knows the two
+/// rows are not measuring the same plan under two names.
+#[test]
+fn the_plumbing_row_binds_no_strip_at_all() {
+    let plumbing = render(
+        Workload::SixtyFourTrackPlumbingOnly,
+        PlanConfig::BASELINE,
+        BLOCKS,
+    );
+    let identity = render(
+        Workload::SixtyFourTrackDispatchOnly,
+        PlanConfig::BASELINE,
+        BLOCKS,
+    );
+    let gain_pan = render(
+        Workload::SixtyFourTrackGainPanOnly,
+        PlanConfig::BASELINE,
+        BLOCKS,
+    );
+    assert_eq!(
+        plumbing.1,
+        [0, 0],
+        "the plumbing row must bind no bank slot"
+    );
+    assert_eq!(plumbing.2, 0, "and therefore no planar/AoSoA round-trip");
+    assert_ne!(
+        plumbing.0, identity.0,
+        "the plumbing row must render different bits from the identity row, or the strip it \
+         claims not to prepare is being prepared"
+    );
+    // The identity pair, from the other side: `gain_pan_only` and `dispatch_only` bank the same
+    // slots and pay the same round-trips -- the floor table costs them at one inventory for that
+    // reason -- and render different bits, because their fader and matrix carry different
+    // constants.
+    assert_eq!(
+        gain_pan.1, identity.1,
+        "the two identity-section rows must realise the same bank shape"
+    );
+    assert_eq!(gain_pan.2, identity.2);
+    assert_ne!(
+        gain_pan.0, identity.0,
+        "a real fader and pan must not render what a 0 dB fader and a hard-identity pan render"
+    );
 }
 
 /// The folded master carries the reduction's own bits, and the meter arm is the oracle that says
@@ -369,6 +551,14 @@ fn the_folded_master_is_the_reductions_own_bits() {
         observation: ObservationArm::Absent,
     };
     for workload in WORKLOADS {
+        // The oracle is a meter lease, and a meter stream is leased from the prepared builtins
+        // session that the overhead floor row deliberately does not have. There is nothing to
+        // check on that row anyway: it folds no route, so the fold's association order is not a
+        // property it has. `every_standing_workload_folds_one_route_per_track` pins what it does
+        // have.
+        if workload == Workload::SixtyFourTrackPlumbingOnly {
+            continue;
+        }
         let folded = render(workload, PlanConfig::BASELINE, BLOCKS);
         let mut metered_runtime = SessionRuntime::build(workload, METERED);
         let mut metered = Sha256Sink::new();
