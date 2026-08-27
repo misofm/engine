@@ -78,6 +78,30 @@
 #
 # The baseline arm is the base commit with this arm registration and nothing else.
 #
+#
+# `--strip3` and `--strip3-baseline` are the paired arms of the strip/overhead round's job 3: the
+# route application and the master-bus accumulation fold into the cohort chain's own epilogue. The
+# 64-track fixture paid, per block, 64 route ops -- a whole `mix2x2_block` pass over a buffer the
+# chain had just scattered -- and then a 63-pass `sum_into_block` reduction over those 64 buffers.
+# It now pays one pass: each lane's tile is routed where the transpose left it and goes straight
+# into the master, the first contributor storing and the rest accumulating. The dead fan-in-zero
+# fill under a bound source goes with it: a host source writes every word it is handed, so the
+# `fill(0.0)` in front of it was two stereo blocks of dead stores per track per block.
+#
+# Class **A** -- every `output_sha256` must reproduce the baseline arm's exactly, on every row and
+# every leg, and the two records differ only in time. That the epilogues sum in the reduction's own
+# order is proved at bind on the lowered program, not assumed; a plan that cannot prove it renders
+# the job-2 shape unchanged.
+#
+# The counter that says the fold fired is `bank_route_folds`, and it is a count for the same reason
+# `bank_scatter_redirects` is: the optimisation is a thing *not done*, so it moves no rendered bit
+# and no gate may rest on a timing difference. The 64-track fixture folds 64 lanes, the 128-track
+# stretch folds 128, and the nine-track fixtures fold 9. `chains`, `slots` and `transposes` are
+# unmoved throughout. `dispatch_only` is the row that should move most; the stretch row should move
+# about twice the console row's absolute.
+#
+# The baseline arm is the base commit with this arm registration and nothing else.
+#
 # `--strip1` and `--strip1-baseline` are the paired arms of the strip/overhead round's job 1: the
 # prepared-identity builtin-section elision. A builtin filter at a 0 Hz cutoff is *designed* as the
 # arithmetic identity rather than branched around, so the two disabled SVF sections of a rack-free
@@ -171,10 +195,12 @@ if [[ "$#" == 1 ]]; then
         --strip1-baseline) phase_directory=strip1-baseline ;;
         --strip2) phase_directory=strip2 ;;
         --strip2-baseline) phase_directory=strip2-baseline ;;
-        *) printf 'usage: %s [--phase2|--phase3|--issue163-phase0|--issue163-phase1|--issue163-phase2|--issue163-phase3|--issue163-phase4|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue184|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline|--round2-lim|--round2-lim-baseline|--round2-composed|--audit-chain-merge|--audit-chain-merge-baseline|--strip1|--strip1-baseline|--strip2|--strip2-baseline]\n' "$0" >&2; exit 2 ;;
+        --strip3) phase_directory=strip3 ;;
+        --strip3-baseline) phase_directory=strip3-baseline ;;
+        *) printf 'usage: %s [--phase2|--phase3|--issue163-phase0|--issue163-phase1|--issue163-phase2|--issue163-phase3|--issue163-phase4|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue184|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline|--round2-lim|--round2-lim-baseline|--round2-composed|--audit-chain-merge|--audit-chain-merge-baseline|--strip1|--strip1-baseline|--strip2|--strip2-baseline|--strip3|--strip3-baseline]\n' "$0" >&2; exit 2 ;;
     esac
 elif [[ "$#" != 0 ]]; then
-    printf 'usage: %s [--phase2|--phase3|--issue163-phase0|--issue163-phase1|--issue163-phase2|--issue163-phase3|--issue163-phase4|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue184|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline|--round2-lim|--round2-lim-baseline|--round2-composed|--audit-chain-merge|--audit-chain-merge-baseline|--strip1|--strip1-baseline|--strip2|--strip2-baseline]\n' "$0" >&2
+    printf 'usage: %s [--phase2|--phase3|--issue163-phase0|--issue163-phase1|--issue163-phase2|--issue163-phase3|--issue163-phase4|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue184|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline|--round2-lim|--round2-lim-baseline|--round2-composed|--audit-chain-merge|--audit-chain-merge-baseline|--strip1|--strip1-baseline|--strip2|--strip2-baseline|--strip3|--strip3-baseline]\n' "$0" >&2
     exit 2
 fi
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)

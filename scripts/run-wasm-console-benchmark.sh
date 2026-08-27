@@ -76,6 +76,14 @@
 # round removes 128 of them per block on the 64-track fixture. Every leg's `output_sha256` must
 # reproduce the baseline arm's exactly, and `digest_identity` must stay `all_legs_identical`.
 #
+# `--strip3` and `--strip3-baseline` are the wasm half of the strip round's job 3, the route fold
+# and the in-order scatter-accumulate mixdown. The four-lane guest pays proportionally more per
+# dispatched op and per pass over a planar buffer than the native leg does, and this round removes
+# 64 route ops, 63 reduction passes and 64 dead fan-in-zero fills per block on the 64-track
+# fixture, so the saving is expected to be the larger one here. Same class-A statement as the
+# native pair: every leg's `output_sha256` must reproduce the baseline arm's exactly, and
+# `digest_identity` must stay `all_legs_identical`.
+#
 # `--strip1` and `--strip1-baseline` are the wasm half of the strip round's job 1, the
 # prepared-identity builtin-section elision. The decision is made at bank construction from the
 # prepared words and is therefore identical on both targets; what the wasm leg adds is the proof
@@ -109,11 +117,13 @@ if [[ "$#" == 1 ]]; then
         --strip1-baseline) arm=strip1-baseline ;;
         --strip2) arm=strip2 ;;
         --strip2-baseline) arm=strip2-baseline ;;
-        *) printf 'usage: %s [--after|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue183|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline|--round2-lim|--round2-lim-baseline|--round2-composed|--audit-chain-merge|--audit-chain-merge-baseline|--strip1|--strip1-baseline|--strip2|--strip2-baseline]
+        --strip3) arm=strip3 ;;
+        --strip3-baseline) arm=strip3-baseline ;;
+        *) printf 'usage: %s [--after|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue183|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline|--round2-lim|--round2-lim-baseline|--round2-composed|--audit-chain-merge|--audit-chain-merge-baseline|--strip1|--strip1-baseline|--strip2|--strip2-baseline|--strip3|--strip3-baseline]
 ' "$0" >&2; exit 2 ;;
     esac
 elif [[ "$#" != 0 ]]; then
-    printf 'usage: %s [--after|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue183|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline|--round2-lim|--round2-lim-baseline|--round2-composed|--audit-chain-merge|--audit-chain-merge-baseline|--strip1|--strip1-baseline|--strip2|--strip2-baseline]
+    printf 'usage: %s [--after|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue183|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline|--round2-lim|--round2-lim-baseline|--round2-composed|--audit-chain-merge|--audit-chain-merge-baseline|--strip1|--strip1-baseline|--strip2|--strip2-baseline|--strip3|--strip3-baseline]
 ' "$0" >&2
     exit 2
 fi
@@ -168,6 +178,10 @@ elif [[ "$arm" == strip2 ]]; then
     artifact_dir="$root/artifacts/strip2"
 elif [[ "$arm" == strip2-baseline ]]; then
     artifact_dir="$root/artifacts/strip2-baseline"
+elif [[ "$arm" == strip3 ]]; then
+    artifact_dir="$root/artifacts/strip3"
+elif [[ "$arm" == strip3-baseline ]]; then
+    artifact_dir="$root/artifacts/strip3-baseline"
 else
     artifact_dir="$root/artifacts/issue163-phase2-wasm-baseline"
 fi
