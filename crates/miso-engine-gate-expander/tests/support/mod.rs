@@ -6,11 +6,11 @@ use miso_engine_effect_contract::{
     AutomationSpanKind, BankWidth, EffectProcessBlock, EffectQuality, InitialParameterValue,
     LinkMode, NativeEffectFactory, ParameterChannel, PortId, PrepareEffectBankRequest,
     PrepareEffectLimits, PrepareEffectRequest, PreparedAutomationSpan, PreparedNativeEffect,
-    PreparedNativeEffectBank, PreparedPortsV1, PreparedSidechainPort, ProcessReport,
+    PreparedNativeEffectBank, PreparedPorts, PreparedSidechainPort, ProcessReport,
     StatePayloadOutput,
 };
 use miso_engine_gate_expander::{
-    GATE_EXPANDER_DESCRIPTOR_V1, GATE_EXPANDER_PARAMETERS_V1, GateExpanderFactory,
+    GATE_EXPANDER_DESCRIPTOR, GATE_EXPANDER_PARAMETERS, GateExpanderFactory,
 };
 
 /// Number of frozen parameters.
@@ -67,7 +67,7 @@ pub fn initial_values() -> Values {
         } else {
             ParameterChannel::Right
         },
-        value: GATE_EXPANDER_PARAMETERS_V1[index / 2].default_value,
+        value: GATE_EXPANDER_PARAMETERS[index / 2].default_value,
     })
 }
 
@@ -110,7 +110,7 @@ pub fn request_at(
     sample_rate: u32,
     quantum: u32,
 ) -> PrepareEffectRequest<'_> {
-    let quality = GATE_EXPANDER_DESCRIPTOR_V1
+    let quality = GATE_EXPANDER_DESCRIPTOR
         .qualities
         .iter()
         .find(|quality| quality.sample_rate == sample_rate)
@@ -121,7 +121,7 @@ pub fn request_at(
         quality: EffectQuality::Normal,
         bypass: false,
         link_mode: LinkMode::DualMono,
-        ports: PreparedPortsV1 {
+        ports: PreparedPorts {
             sidechain: PreparedSidechainPort::Unconnected {
                 id: sidechain_port(),
                 required: false,

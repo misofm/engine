@@ -11,13 +11,13 @@ use core::num::{NonZeroU32, NonZeroUsize};
 use miso_engine_builtins::MeterTap;
 use miso_engine_core::realtime::{PlanarBufferMut, RenderIo, RenderTime};
 use miso_engine_effect_contract::{
-    AutomationSpanKind, EffectControlRecordV1, EffectProcessBlock, EffectQuality,
-    InitialParameterValue, LinkMode, NativeEffectFactory, ObservationSampleV1, ParameterChannel,
+    AutomationSpanKind, EffectControlRecord, EffectProcessBlock, EffectQuality,
+    InitialParameterValue, LinkMode, NativeEffectFactory, ObservationSample, ParameterChannel,
     PrepareEffectLimits, PrepareEffectRequest, PreparedAutomationSpan, PreparedNativeEffect,
-    PreparedPortsV1, PreparedSidechainPort,
+    PreparedPorts, PreparedSidechainPort,
 };
 use miso_engine_host_core::{
-    EffectRack, HostConsoleHandlesV1, HostConsoleRequestV1, HostPrepareCaps, HostShapePolicy,
+    EffectRack, HostConsoleHandles, HostConsoleRequest, HostPrepareCaps, HostShapePolicy,
     PreparedHost, SourceSubmission, prepare_host_session_with_console,
 };
 
@@ -72,12 +72,12 @@ enum Leg {
     AllArmed,
 }
 
-fn console(leg: Leg) -> HostConsoleRequestV1 {
+fn console(leg: Leg) -> HostConsoleRequest {
     let console = matches!(
         leg,
         Leg::ConsoleNoCapacity | Leg::CapacityUnarmed | Leg::AllArmed
     );
-    HostConsoleRequestV1 {
+    HostConsoleRequest {
         control_queue_depth: console.then(|| NonZeroUsize::new(8).expect("depth")),
         meter_period_frames: console
             .then(|| NonZeroU32::new(QUANTUM as u32 * WINDOW_BLOCKS).expect("period")),
@@ -93,7 +93,7 @@ fn console(leg: Leg) -> HostConsoleRequestV1 {
 
 struct Session {
     prepared: PreparedHost,
-    handles: HostConsoleHandlesV1,
+    handles: HostConsoleHandles,
     block: usize,
 }
 
@@ -168,7 +168,7 @@ fn subscribe_all(session: &mut Session, armed: bool, window_blocks: u32) -> u64 
     for producer in session.handles.effect_controls.iter_mut() {
         producer
             .producer
-            .try_push(EffectControlRecordV1::Observe {
+            .try_push(EffectControlRecord::Observe {
                 tap_index: 0,
                 armed,
                 window_blocks,
@@ -180,9 +180,9 @@ fn subscribe_all(session: &mut Session, armed: bool, window_blocks: u32) -> u64 
 
 /// The reader for one track's compressor tap, in whichever rack the fixture declared it.
 fn reader(
-    handles: &HostConsoleHandlesV1,
+    handles: &HostConsoleHandles,
     track: usize,
-) -> &miso_engine_core::realtime::ObservationReaderV1 {
+) -> &miso_engine_core::realtime::ObservationReader {
     let id = handles.tracks[track].as_ref();
     let handle = handles
         .effect_observations
@@ -199,9 +199,9 @@ fn reader(
 }
 
 /// An independently prepared scalar compressor at `threshold`, fed the same constant.
-fn scalar_reference(threshold: f32, blocks: usize) -> ObservationSampleV1 {
+fn scalar_reference(threshold: f32, blocks: usize) -> ObservationSample {
     let mut values: Vec<InitialParameterValue> = Vec::new();
-    for (index, parameter) in miso_engine_compressor::COMPRESSOR_PARAMETERS_V1
+    for (index, parameter) in miso_engine_compressor::COMPRESSOR_PARAMETERS
         .iter()
         .enumerate()
     {
@@ -224,7 +224,7 @@ fn scalar_reference(threshold: f32, blocks: usize) -> ObservationSampleV1 {
         quality: EffectQuality::Normal,
         bypass: false,
         link_mode: LinkMode::DualMono,
-        ports: PreparedPortsV1 {
+        ports: PreparedPorts {
             sidechain: PreparedSidechainPort::Unconnected {
                 id: miso_engine_effect_contract::PortId::new("sidechain-in").expect("port"),
                 required: false,
@@ -240,7 +240,7 @@ fn scalar_reference(threshold: f32, blocks: usize) -> ObservationSampleV1 {
     let mut effect: Box<dyn PreparedNativeEffect> = miso_engine_compressor::CompressorFactory
         .prepare(request)
         .expect("scalar prepare");
-    let mut peak = ObservationSampleV1::default();
+    let mut peak = ObservationSample::default();
     for block in 0..blocks {
         let mut left = [LEVEL; QUANTUM];
         let mut right = [LEVEL; QUANTUM];
@@ -254,7 +254,7 @@ fn scalar_reference(threshold: f32, blocks: usize) -> ObservationSampleV1 {
         )
         .expect("block");
         let _ = effect.process(process);
-        let mut sample = ObservationSampleV1::default();
+        let mut sample = ObservationSample::default();
         assert!(effect.observe_resident(0, &mut sample));
         peak.left = peak.left.max(sample.left.abs());
         peak.right = peak.right.max(sample.right.abs());
@@ -446,7 +446,7 @@ fn the_first_window_at_or_after_applied_at_sample_reflects_the_command() {
     for channel in [ParameterChannel::Left, ParameterChannel::Right] {
         producer
             .producer
-            .try_push(EffectControlRecordV1::Parameter {
+            .try_push(EffectControlRecord::Parameter {
                 parameter_index: THRESHOLD_INDEX,
                 channel,
                 value: -30.0,
@@ -550,9 +550,9 @@ fn scalar_reference_windows(
     initial: f32,
     retarget: Option<(usize, f32)>,
     blocks: usize,
-) -> Vec<ObservationSampleV1> {
+) -> Vec<ObservationSample> {
     let mut values: Vec<InitialParameterValue> = Vec::new();
-    for (index, parameter) in miso_engine_compressor::COMPRESSOR_PARAMETERS_V1
+    for (index, parameter) in miso_engine_compressor::COMPRESSOR_PARAMETERS
         .iter()
         .enumerate()
     {
@@ -575,7 +575,7 @@ fn scalar_reference_windows(
         quality: EffectQuality::Normal,
         bypass: false,
         link_mode: LinkMode::DualMono,
-        ports: PreparedPortsV1 {
+        ports: PreparedPorts {
             sidechain: PreparedSidechainPort::Unconnected {
                 id: miso_engine_effect_contract::PortId::new("sidechain-in").expect("port"),
                 required: false,
@@ -592,7 +592,7 @@ fn scalar_reference_windows(
         .prepare(request)
         .expect("scalar prepare");
     let mut windows = Vec::new();
-    let mut peak = ObservationSampleV1::default();
+    let mut peak = ObservationSample::default();
     for block in 0..blocks {
         let first_sample = (block * QUANTUM) as u64;
         let spans: Vec<PreparedAutomationSpan> = match retarget {
@@ -626,13 +626,13 @@ fn scalar_reference_windows(
             report.invalid_spans, 0,
             "the reference accepted the retarget"
         );
-        let mut sample = ObservationSampleV1::default();
+        let mut sample = ObservationSample::default();
         assert!(effect.observe_resident(0, &mut sample));
         peak.left = peak.left.max(sample.left.abs());
         peak.right = peak.right.max(sample.right.abs());
         if (block + 1) % WINDOW_BLOCKS as usize == 0 {
             windows.push(peak);
-            peak = ObservationSampleV1::default();
+            peak = ObservationSample::default();
         }
     }
     windows
@@ -649,7 +649,7 @@ fn scalar_reference_windows(
 /// #137-E1 mirror) -> the published window is one block stale and the bit comparison fails.
 #[test]
 fn the_per_node_scalar_path_publishes_its_own_block() {
-    let request = HostConsoleRequestV1 {
+    let request = HostConsoleRequest {
         control_queue_depth: Some(NonZeroUsize::new(8).expect("depth")),
         meter_period_frames: Some(NonZeroU32::new(QUANTUM as u32 * WINDOW_BLOCKS).expect("period")),
         meter_queue_depth: NonZeroUsize::new(16).expect("meter depth"),
@@ -696,7 +696,7 @@ fn the_per_node_scalar_path_publishes_its_own_block() {
             for channel in [ParameterChannel::Left, ParameterChannel::Right] {
                 producer
                     .producer
-                    .try_push(EffectControlRecordV1::Parameter {
+                    .try_push(EffectControlRecord::Parameter {
                         parameter_index: THRESHOLD_INDEX,
                         channel,
                         value: -30.0,
@@ -809,7 +809,7 @@ fn observation_retained_bytes_are_the_declared_menu_times_one_row_and_one_slot()
 /// Observation capacity without a console is a rejection, not a silent half-attach.
 #[test]
 fn observation_without_a_control_channel_is_refused() {
-    let request = HostConsoleRequestV1 {
+    let request = HostConsoleRequest {
         control_queue_depth: None,
         meter_period_frames: Some(NonZeroU32::new(QUANTUM as u32 * WINDOW_BLOCKS).expect("period")),
         meter_queue_depth: NonZeroUsize::new(16).expect("meter depth"),
@@ -826,7 +826,7 @@ fn observation_without_a_control_channel_is_refused() {
     );
 
     // And a designated master must name a track this session has.
-    let request = HostConsoleRequestV1 {
+    let request = HostConsoleRequest {
         control_queue_depth: Some(NonZeroUsize::new(8).expect("depth")),
         master_track: Some(TRACKS as u32),
         ..request
@@ -864,22 +864,22 @@ fn observation_without_a_control_channel_is_refused() {
 fn observation_cost_classes_are_what_they_claim() {
     use miso_engine_core::realtime::observation_slot;
     use miso_engine_effect_contract::{
-        ObservationCadenceV1, ObservationChannelsV1, ObservationCostV1, ObservationDescriptorV1,
-        ObservationFoldV1, ObservationKindV1, ObservationLaneV1, ObservationTapId, ParameterUnit,
+        ObservationCadence, ObservationChannels, ObservationCost, ObservationDescriptor,
+        ObservationFold, ObservationKind, ObservationLane, ObservationTapId, ParameterUnit,
     };
     use std::cell::Cell;
     use std::time::Instant;
 
-    static MENU: [ObservationDescriptorV1; 1] = [ObservationDescriptorV1 {
+    static MENU: [ObservationDescriptor; 1] = [ObservationDescriptor {
         id: ObservationTapId(1),
         display_name: "Gain Reduction",
         display_unit: "dB",
-        kind: ObservationKindV1::GainReductionDb,
+        kind: ObservationKind::GainReductionDb,
         unit: ParameterUnit::Db,
-        cost: ObservationCostV1::Resident,
-        cadence: ObservationCadenceV1::PerBlock,
-        fold: ObservationFoldV1::PeakMagnitude,
-        channels: ObservationChannelsV1::PerLane,
+        cost: ObservationCost::Resident,
+        cadence: ObservationCadence::PerBlock,
+        fold: ObservationFold::PeakMagnitude,
+        channels: ObservationChannels::PerLane,
         minimum: 0.0,
         maximum: 100.0,
     }];
@@ -889,7 +889,7 @@ fn observation_cost_classes_are_what_they_claim() {
         reads: Cell<u64>,
     }
     impl Counting {
-        fn observe_resident(&self, _tap: u32, out: &mut ObservationSampleV1) -> bool {
+        fn observe_resident(&self, _tap: u32, out: &mut ObservationSample) -> bool {
             self.reads.set(self.reads.get() + 1);
             out.left = -6.0;
             out.right = -6.0;
@@ -898,8 +898,8 @@ fn observation_cost_classes_are_what_they_claim() {
     }
 
     // The publish step, transcribed from `graph::runtime::publish_observations`.
-    fn publish(lane: &mut ObservationLaneV1, effect: &Counting, first_sample: u64, frames: u64) {
-        let mut sample = ObservationSampleV1::default();
+    fn publish(lane: &mut ObservationLane, effect: &Counting, first_sample: u64, frames: u64) {
+        let mut sample = ObservationSample::default();
         for tap in 0..lane.len() {
             if !lane.wants(tap) {
                 continue;
@@ -915,7 +915,7 @@ fn observation_cost_classes_are_what_they_claim() {
         reads: Cell::new(0),
     };
     let (publisher, _reader) = observation_slot();
-    let mut lane = ObservationLaneV1::new(&MENU, vec![publisher], 4).expect("lane");
+    let mut lane = ObservationLane::new(&MENU, vec![publisher], 4).expect("lane");
 
     // Capacity, unarmed: the loop runs and the effect is never asked.
     for block in 0..BLOCKS {

@@ -26,7 +26,7 @@ use std::{
 };
 
 use miso_engine_capi as capi;
-use miso_engine_session::{SessionTomlV1, parse_session_toml};
+use miso_engine_session::{SessionToml, parse_session_toml};
 use miso_engine_source::{
     NativeWaveDecoder, NativeWaveError, NativeWaveParseCaps, NativeWaveRegion, SourceFrame,
     parse_native_wave,
@@ -309,7 +309,7 @@ fn read_bounded_session(path: &Path) -> Result<Vec<u8>, RunnerError> {
 
 fn validate_scalar_contract(
     arguments: &RunnerArgs,
-    model: &SessionTomlV1,
+    model: &SessionToml,
 ) -> Result<(), RunnerError> {
     if !matches!(model.sample_rate_hz, 44_100 | 48_000 | 88_200 | 96_000) {
         return Err(RunnerError::new(
@@ -435,7 +435,7 @@ fn hash_reader(reader: &mut File) -> Result<[u8; 32], RunnerError> {
     Ok(hasher.finalize().into())
 }
 
-fn resolve_sources(model: &SessionTomlV1, root: &Path) -> Result<Vec<PreparedSource>, RunnerError> {
+fn resolve_sources(model: &SessionToml, root: &Path) -> Result<Vec<PreparedSource>, RunnerError> {
     let root_metadata = fs::symlink_metadata(root)
         .map_err(|_| RunnerError::new(FailurePhase::Resolve, "root.open"))?;
     if !root_metadata.file_type().is_dir() || root_metadata.file_type().is_symlink() {

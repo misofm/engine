@@ -44,7 +44,7 @@ fn render(stage: &mut impl FnMut(&mut [f32], &mut [f32]), input: &[f32]) -> (Vec
 
 const INPUT: [f32; 8] = [1.0, -1.0, 0.5, -0.5, 0.25, -0.25, 0.125, -0.125];
 
-/// Red mutation: make the settled tail of `FaderMuteRampBuiltinsV1::process_lane` multiply by
+/// Red mutation: make the settled tail of `FaderMuteRampBuiltins::process_lane` multiply by
 /// `self.current[lane]` even when the lane is muted -> the muted right plane renders `-0.0` where
 /// the prepared `andnot` renders `+0.0`, and the `to_bits` comparison below fails.
 #[test]
@@ -58,7 +58,7 @@ fn an_uncommanded_live_fader_is_bit_identical_to_the_prepared_one() {
     ] {
         let params = parameters(left_db, right_db, left_mute, right_mute);
         let mut prepared_stage = prepared(params);
-        let mut live = FaderMuteRampBuiltinsV1::new(params).expect("live fader");
+        let mut live = FaderMuteRampBuiltins::new(params).expect("live fader");
         let (prepared_left, prepared_right) = render(
             &mut |left: &mut [f32], right: &mut [f32]| {
                 prepared_stage.process(DualMonoBlock::new(left, right, 0).expect("block"));
@@ -93,7 +93,7 @@ fn an_uncommanded_live_fader_is_bit_identical_to_the_prepared_one() {
 /// A zero-window fader move is instantaneous and exact from the first sample of the block.
 #[test]
 fn a_zero_window_move_takes_effect_on_the_first_sample() {
-    let mut live = FaderMuteRampBuiltinsV1::new(parameters(0.0, 0.0, false, false)).expect("fader");
+    let mut live = FaderMuteRampBuiltins::new(parameters(0.0, 0.0, false, false)).expect("fader");
     live.set_fader_db(BuiltinLaneSelector::Left, -6.020_6, 0)
         .expect("domain");
     let mut left = [1.0_f32; 4];
@@ -127,7 +127,7 @@ fn a_windowed_move_is_monotone_and_lands_exactly_on_its_target() {
         (-1.0, 2),
     ] {
         let mut live =
-            FaderMuteRampBuiltinsV1::new(parameters(0.0, 0.0, false, false)).expect("fader");
+            FaderMuteRampBuiltins::new(parameters(0.0, 0.0, false, false)).expect("fader");
         live.set_fader_db(BuiltinLaneSelector::Both, db, window)
             .expect("domain");
         let target = live.target_gain(0);
@@ -179,7 +179,7 @@ fn a_windowed_move_is_monotone_and_lands_exactly_on_its_target() {
 #[test]
 fn mute_is_a_fader_endpoint_and_settles_to_exact_positive_zero() {
     const WINDOW: u32 = 4;
-    let mut live = FaderMuteRampBuiltinsV1::new(parameters(0.0, 0.0, false, false)).expect("fader");
+    let mut live = FaderMuteRampBuiltins::new(parameters(0.0, 0.0, false, false)).expect("fader");
     live.set_mute(BuiltinLaneSelector::Both, true, WINDOW);
     assert!(live.is_muted(0) && live.is_muted(1));
     let mut left = [-1.0_f32; 8];
@@ -213,7 +213,7 @@ fn mute_is_a_fader_endpoint_and_settles_to_exact_positive_zero() {
 /// input: that is the "mute button" case, and it must not carry `-0.0`.
 #[test]
 fn a_zero_window_mute_is_the_exact_prepared_mute() {
-    let mut live = FaderMuteRampBuiltinsV1::new(parameters(0.0, 0.0, false, false)).expect("fader");
+    let mut live = FaderMuteRampBuiltins::new(parameters(0.0, 0.0, false, false)).expect("fader");
     live.set_mute(BuiltinLaneSelector::Right, true, 0);
     let mut left = [-1.0_f32; 4];
     let mut right = [-1.0_f32; 4];
@@ -229,7 +229,7 @@ fn a_zero_window_mute_is_the_exact_prepared_mute() {
 /// A fader move made while muted is remembered and applies on unmute, like a physical fader.
 #[test]
 fn a_move_made_while_muted_applies_on_unmute() {
-    let mut live = FaderMuteRampBuiltinsV1::new(parameters(0.0, 0.0, true, true)).expect("fader");
+    let mut live = FaderMuteRampBuiltins::new(parameters(0.0, 0.0, true, true)).expect("fader");
     live.set_fader_db(BuiltinLaneSelector::Both, -6.020_6, 0)
         .expect("domain");
     let mut left = [1.0_f32; 4];
@@ -256,7 +256,7 @@ fn a_move_made_while_muted_applies_on_unmute() {
 /// The declared domain is enforced at the setter, off the render thread.
 #[test]
 fn the_fader_domain_is_enforced_at_the_setter() {
-    let mut live = FaderMuteRampBuiltinsV1::new(parameters(0.0, 0.0, false, false)).expect("fader");
+    let mut live = FaderMuteRampBuiltins::new(parameters(0.0, 0.0, false, false)).expect("fader");
     assert!(
         live.set_fader_db(BuiltinLaneSelector::Both, 24.1, 0)
             .is_err()
@@ -285,7 +285,7 @@ fn the_fader_domain_is_enforced_at_the_setter() {
 fn a_cross_block_ramp_is_partition_invariant() {
     let build = || {
         let mut live =
-            FaderMuteRampBuiltinsV1::new(parameters(0.0, 0.0, false, false)).expect("fader");
+            FaderMuteRampBuiltins::new(parameters(0.0, 0.0, false, false)).expect("fader");
         live.set_fader_db(BuiltinLaneSelector::Both, -20.0, 6)
             .expect("domain");
         live

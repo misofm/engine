@@ -1,7 +1,7 @@
 use crate::{
-    EFFECT_DESCRIPTOR_WIRE_V1_UNAVAILABLE, EFFECT_PACKAGE_V1_UNAVAILABLE_INDEX,
-    EFFECT_PACKAGE_V1_UNAVAILABLE_OFFSET, EffectPackageDiagnosticCodeV1 as Code,
-    EffectPackageDiagnosticV1 as Diagnostic, effect_descriptor_identity_v1,
+    EFFECT_DESCRIPTOR_WIRE_UNAVAILABLE, EFFECT_PACKAGE_UNAVAILABLE_INDEX,
+    EFFECT_PACKAGE_UNAVAILABLE_OFFSET, EffectPackageDiagnostic as Diagnostic,
+    EffectPackageDiagnosticCode as Code, effect_descriptor_identity,
 };
 use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
@@ -16,15 +16,15 @@ type ArtifactOrder = [u16; HARD_ARTIFACT_CAP];
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 #[repr(u32)]
-pub enum EffectArtifactKindV1 {
+pub enum EffectArtifactKind {
     Source = 1,
     CoreWasm = 2,
     TargetNative = 3,
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct EffectArtifactAuthoringV1<'a> {
-    pub kind: EffectArtifactKindV1,
+pub struct EffectArtifactAuthoring<'a> {
+    pub kind: EffectArtifactKind,
     pub path: &'a str,
     pub target: &'a str,
     pub features: &'a str,
@@ -32,13 +32,13 @@ pub struct EffectArtifactAuthoringV1<'a> {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct EffectPackageAuthoringV1<'a> {
+pub struct EffectPackageAuthoring<'a> {
     pub descriptor: &'a [u8],
-    pub artifacts: &'a [EffectArtifactAuthoringV1<'a>],
+    pub artifacts: &'a [EffectArtifactAuthoring<'a>],
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct EffectPackageLimitsV1 {
+pub struct EffectPackageLimits {
     pub maximum_descriptor_bytes: u64,
     pub maximum_manifest_bytes: u64,
     pub maximum_package_bytes: u64,
@@ -47,13 +47,13 @@ pub struct EffectPackageLimitsV1 {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct ArtifactSelectionRequestV1<'a> {
-    pub kind: EffectArtifactKindV1,
+pub struct ArtifactSelectionRequest<'a> {
+    pub kind: EffectArtifactKind,
     pub target: &'a str,
     pub capabilities: &'a [&'a str],
 }
 
-impl Default for EffectPackageLimitsV1 {
+impl Default for EffectPackageLimits {
     fn default() -> Self {
         Self {
             maximum_descriptor_bytes: HARD_DESCRIPTOR_CAP,
@@ -66,7 +66,7 @@ impl Default for EffectPackageLimitsV1 {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct VerifiedEffectPackageV1<'a> {
+pub struct VerifiedEffectPackage<'a> {
     bytes: &'a [u8],
     descriptor: &'a [u8],
     table: &'a [u8],
@@ -74,7 +74,7 @@ pub struct VerifiedEffectPackageV1<'a> {
     count: u32,
 }
 
-impl<'a> VerifiedEffectPackageV1<'a> {
+impl<'a> VerifiedEffectPackage<'a> {
     pub const fn as_bytes(self) -> &'a [u8] {
         self.bytes
     }
@@ -84,8 +84,8 @@ impl<'a> VerifiedEffectPackageV1<'a> {
     pub const fn artifact_count(self) -> u32 {
         self.count
     }
-    pub const fn artifacts(self) -> VerifiedEffectArtifactIteratorV1<'a> {
-        VerifiedEffectArtifactIteratorV1 {
+    pub const fn artifacts(self) -> VerifiedEffectArtifactIterator<'a> {
+        VerifiedEffectArtifactIterator {
             table: self.table,
             contents: self.contents,
             cursor: 0,
@@ -96,9 +96,9 @@ impl<'a> VerifiedEffectPackageV1<'a> {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct VerifiedArtifactV1<'a> {
+pub struct VerifiedArtifact<'a> {
     artifact_index: u32,
-    kind: EffectArtifactKindV1,
+    kind: EffectArtifactKind,
     path: &'a str,
     target: &'a str,
     features: &'a str,
@@ -106,11 +106,11 @@ pub struct VerifiedArtifactV1<'a> {
     sha2_256: [u8; 32],
 }
 
-impl<'a> VerifiedArtifactV1<'a> {
+impl<'a> VerifiedArtifact<'a> {
     pub const fn artifact_index(self) -> u32 {
         self.artifact_index
     }
-    pub const fn kind(self) -> EffectArtifactKindV1 {
+    pub const fn kind(self) -> EffectArtifactKind {
         self.kind
     }
     pub const fn path(self) -> &'a str {
@@ -131,7 +131,7 @@ impl<'a> VerifiedArtifactV1<'a> {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct VerifiedEffectArtifactIteratorV1<'a> {
+pub struct VerifiedEffectArtifactIterator<'a> {
     table: &'a [u8],
     contents: &'a [u8],
     cursor: usize,
@@ -139,14 +139,14 @@ pub struct VerifiedEffectArtifactIteratorV1<'a> {
     count: u32,
 }
 
-impl<'a> Iterator for VerifiedEffectArtifactIteratorV1<'a> {
-    type Item = VerifiedArtifactV1<'a>;
+impl<'a> Iterator for VerifiedEffectArtifactIterator<'a> {
+    type Item = VerifiedArtifact<'a>;
     fn next(&mut self) -> Option<Self::Item> {
         if self.index == self.count {
             return None;
         }
         let r = trusted_record(self.table, self.cursor);
-        let item = VerifiedArtifactV1 {
+        let item = VerifiedArtifact {
             artifact_index: self.index,
             kind: r.kind,
             path: r.path,
@@ -164,7 +164,7 @@ impl<'a> Iterator for VerifiedEffectArtifactIteratorV1<'a> {
         (n, Some(n))
     }
 }
-impl ExactSizeIterator for VerifiedEffectArtifactIteratorV1<'_> {}
+impl ExactSizeIterator for VerifiedEffectArtifactIterator<'_> {}
 
 #[derive(Clone, Copy)]
 struct Layout {
@@ -187,7 +187,7 @@ struct RawRecord<'a> {
 }
 #[derive(Clone, Copy)]
 struct TrustedRecord<'a> {
-    kind: EffectArtifactKindV1,
+    kind: EffectArtifactKind,
     path: &'a str,
     target: &'a str,
     features: &'a str,
@@ -202,10 +202,10 @@ fn diag(code: Code, index: u32, offset: u64) -> Diagnostic {
     Diagnostic::new(code, 0, index, offset)
 }
 fn package_diag(code: Code, offset: u64) -> Diagnostic {
-    diag(code, EFFECT_PACKAGE_V1_UNAVAILABLE_INDEX, offset)
+    diag(code, EFFECT_PACKAGE_UNAVAILABLE_INDEX, offset)
 }
 fn author_diag(code: Code, index: u32) -> Diagnostic {
-    diag(code, index, EFFECT_PACKAGE_V1_UNAVAILABLE_OFFSET)
+    diag(code, index, EFFECT_PACKAGE_UNAVAILABLE_OFFSET)
 }
 fn add(a: u64, b: u64, offset: u64) -> Result<u64, Diagnostic> {
     a.checked_add(b)
@@ -226,24 +226,24 @@ fn descriptor_identity(bytes: &[u8], maximum: u64) -> Result<[u8; 32], Diagnosti
     if bytes.len() as u64 > cap {
         return Err(package_diag(Code::Limit, 24));
     }
-    effect_descriptor_identity_v1(bytes, cap as u32)
+    effect_descriptor_identity(bytes, cap as u32)
         .map(|v| *v.as_bytes())
         .map_err(|e| {
-            let offset = if e.byte_offset == EFFECT_DESCRIPTOR_WIRE_V1_UNAVAILABLE {
-                EFFECT_PACKAGE_V1_UNAVAILABLE_OFFSET
+            let offset = if e.byte_offset == EFFECT_DESCRIPTOR_WIRE_UNAVAILABLE {
+                EFFECT_PACKAGE_UNAVAILABLE_OFFSET
             } else {
                 HEADER_BYTES + u64::from(e.byte_offset)
             };
             Diagnostic::new(
                 Code::Descriptor,
                 e.code as u32,
-                EFFECT_PACKAGE_V1_UNAVAILABLE_INDEX,
+                EFFECT_PACKAGE_UNAVAILABLE_INDEX,
                 offset,
             )
         })
 }
 
-fn artifact_cap(limits: EffectPackageLimitsV1) -> u32 {
+fn artifact_cap(limits: EffectPackageLimits) -> u32 {
     limits.maximum_artifacts.min(HARD_ARTIFACT_CAP as u32)
 }
 
@@ -252,7 +252,7 @@ fn artifact_cap(limits: EffectPackageLimitsV1) -> u32 {
 ///
 /// Callers guarantee `artifacts.len() <= HARD_ARTIFACT_CAP`.
 fn canonical_order(
-    artifacts: &[EffectArtifactAuthoringV1<'_>],
+    artifacts: &[EffectArtifactAuthoring<'_>],
     order: &mut ArtifactOrder,
 ) -> Option<u32> {
     let order = &mut order[..artifacts.len()];
@@ -268,7 +268,7 @@ fn canonical_order(
         .min()
 }
 
-fn key_cmp(a: &EffectArtifactAuthoringV1<'_>, b: &EffectArtifactAuthoringV1<'_>) -> Ordering {
+fn key_cmp(a: &EffectArtifactAuthoring<'_>, b: &EffectArtifactAuthoring<'_>) -> Ordering {
     (
         a.kind,
         a.target.as_bytes(),
@@ -344,22 +344,22 @@ fn valid_feature_token(token: &[u8]) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-')
 }
 fn validate_artifact(
-    a: &EffectArtifactAuthoringV1<'_>,
+    a: &EffectArtifactAuthoring<'_>,
     index: u32,
-    limits: EffectPackageLimitsV1,
+    limits: EffectPackageLimits,
 ) -> Result<(), Diagnostic> {
     if !valid_path(a.path.as_bytes()) {
         return Err(author_diag(Code::Path, index));
     }
     let target = match a.kind {
-        EffectArtifactKindV1::Source => a.target.is_empty(),
-        EffectArtifactKindV1::CoreWasm => a.target == "wasm32-unknown-unknown",
-        EffectArtifactKindV1::TargetNative => valid_native_target(a.target.as_bytes()),
+        EffectArtifactKind::Source => a.target.is_empty(),
+        EffectArtifactKind::CoreWasm => a.target == "wasm32-unknown-unknown",
+        EffectArtifactKind::TargetNative => valid_native_target(a.target.as_bytes()),
     };
     if !target {
         return Err(author_diag(Code::Target, index));
     }
-    if (a.kind == EffectArtifactKindV1::Source && !a.features.is_empty())
+    if (a.kind == EffectArtifactKind::Source && !a.features.is_empty())
         || !valid_features(a.features.as_bytes())
     {
         return Err(author_diag(Code::Features, index));
@@ -374,8 +374,8 @@ fn validate_artifact(
 }
 
 fn preflight(
-    package: &EffectPackageAuthoringV1<'_>,
-    limits: EffectPackageLimitsV1,
+    package: &EffectPackageAuthoring<'_>,
+    limits: EffectPackageLimits,
     order: &mut ArtifactOrder,
 ) -> Result<Layout, Diagnostic> {
     let identity = descriptor_identity(package.descriptor, limits.maximum_descriptor_bytes)?;
@@ -390,7 +390,7 @@ fn preflight(
     let mut source = false;
     for (i, artifact) in package.artifacts.iter().enumerate() {
         validate_artifact(artifact, i as u32, limits)?;
-        source |= artifact.kind == EffectArtifactKindV1::Source;
+        source |= artifact.kind == EffectArtifactKind::Source;
         if duplicate == Some(i as u32) {
             return Err(author_diag(Code::Order, i as u32));
         }
@@ -398,29 +398,29 @@ fn preflight(
             add(
                 artifact.path.len() as u64,
                 artifact.target.len() as u64,
-                EFFECT_PACKAGE_V1_UNAVAILABLE_OFFSET,
+                EFFECT_PACKAGE_UNAVAILABLE_OFFSET,
             )?,
             artifact.features.len() as u64,
-            EFFECT_PACKAGE_V1_UNAVAILABLE_OFFSET,
+            EFFECT_PACKAGE_UNAVAILABLE_OFFSET,
         )?;
         table = add(
             table,
             align8(
-                add(RECORD_BYTES, strings, EFFECT_PACKAGE_V1_UNAVAILABLE_OFFSET)?,
-                EFFECT_PACKAGE_V1_UNAVAILABLE_OFFSET,
+                add(RECORD_BYTES, strings, EFFECT_PACKAGE_UNAVAILABLE_OFFSET)?,
+                EFFECT_PACKAGE_UNAVAILABLE_OFFSET,
             )?,
-            EFFECT_PACKAGE_V1_UNAVAILABLE_OFFSET,
+            EFFECT_PACKAGE_UNAVAILABLE_OFFSET,
         )?;
         content = add(
             content,
             artifact.content.len() as u64,
-            EFFECT_PACKAGE_V1_UNAVAILABLE_OFFSET,
+            EFFECT_PACKAGE_UNAVAILABLE_OFFSET,
         )?;
     }
     if !source {
         return Err(package_diag(
             Code::Unavailable,
-            EFFECT_PACKAGE_V1_UNAVAILABLE_OFFSET,
+            EFFECT_PACKAGE_UNAVAILABLE_OFFSET,
         ));
     }
     let manifest = add(
@@ -445,16 +445,16 @@ fn preflight(
     })
 }
 
-pub fn effect_package_v1_required_size(
-    package: &EffectPackageAuthoringV1<'_>,
-    limits: EffectPackageLimitsV1,
+pub fn effect_package_required_size(
+    package: &EffectPackageAuthoring<'_>,
+    limits: EffectPackageLimits,
 ) -> Result<u64, Diagnostic> {
     let mut order = [0; HARD_ARTIFACT_CAP];
     preflight(package, limits, &mut order).map(|v| v.total)
 }
-pub fn encode_effect_package_v1(
-    package: &EffectPackageAuthoringV1<'_>,
-    limits: EffectPackageLimitsV1,
+pub fn encode_effect_package(
+    package: &EffectPackageAuthoring<'_>,
+    limits: EffectPackageLimits,
     output: &mut [u8],
 ) -> Result<usize, Diagnostic> {
     let mut order = [0; HARD_ARTIFACT_CAP];
@@ -559,19 +559,19 @@ fn raw_record<'a>(
         next,
     })
 }
-fn kind(raw: u32, index: u32, offset: u64) -> Result<EffectArtifactKindV1, Diagnostic> {
+fn kind(raw: u32, index: u32, offset: u64) -> Result<EffectArtifactKind, Diagnostic> {
     match raw {
-        1 => Ok(EffectArtifactKindV1::Source),
-        2 => Ok(EffectArtifactKindV1::CoreWasm),
-        3 => Ok(EffectArtifactKindV1::TargetNative),
+        1 => Ok(EffectArtifactKind::Source),
+        2 => Ok(EffectArtifactKind::CoreWasm),
+        3 => Ok(EffectArtifactKind::TargetNative),
         _ => Err(diag(Code::Enum, index, offset)),
     }
 }
 
-pub fn verify_effect_package_v1(
+pub fn verify_effect_package(
     bytes: &[u8],
-    limits: EffectPackageLimitsV1,
-) -> Result<VerifiedEffectPackageV1<'_>, Diagnostic> {
+    limits: EffectPackageLimits,
+) -> Result<VerifiedEffectPackage<'_>, Diagnostic> {
     if bytes.len() as u64 > limits.maximum_package_bytes {
         return Err(package_diag(Code::Limit, 16));
     }
@@ -717,14 +717,14 @@ pub fn verify_effect_package_v1(
             return Err(diag(Code::Path, i, at + 8));
         }
         let tv = match k {
-            EffectArtifactKindV1::Source => r.target.is_empty(),
-            EffectArtifactKindV1::CoreWasm => r.target == b"wasm32-unknown-unknown",
-            EffectArtifactKindV1::TargetNative => valid_native_target(r.target),
+            EffectArtifactKind::Source => r.target.is_empty(),
+            EffectArtifactKind::CoreWasm => r.target == b"wasm32-unknown-unknown",
+            EffectArtifactKind::TargetNative => valid_native_target(r.target),
         };
         if !tv {
             return Err(diag(Code::Target, i, at + 12));
         }
-        if (k == EffectArtifactKindV1::Source && !r.features.is_empty())
+        if (k == EffectArtifactKind::Source && !r.features.is_empty())
             || !valid_features(r.features)
         {
             return Err(diag(Code::Features, i, at + 16));
@@ -756,16 +756,16 @@ pub fn verify_effect_package_v1(
     let mut source = false;
     for i in 0..count {
         let r = raw_record(table, cursor, i, base)?;
-        source |= kind(r.kind, i, base + cursor as u64)? == EffectArtifactKindV1::Source;
+        source |= kind(r.kind, i, base + cursor as u64)? == EffectArtifactKind::Source;
         cursor = r.next;
     }
     if !source {
         return Err(package_diag(
             Code::Unavailable,
-            EFFECT_PACKAGE_V1_UNAVAILABLE_OFFSET,
+            EFFECT_PACKAGE_UNAVAILABLE_OFFSET,
         ));
     }
-    Ok(VerifiedEffectPackageV1 {
+    Ok(VerifiedEffectPackage {
         bytes,
         descriptor,
         table,
@@ -788,16 +788,16 @@ fn trusted_record(table: &[u8], cursor: usize) -> TrustedRecord<'_> {
     }
 }
 
-fn validate_selection_request(request: ArtifactSelectionRequestV1<'_>) -> Result<(), Diagnostic> {
+fn validate_selection_request(request: ArtifactSelectionRequest<'_>) -> Result<(), Diagnostic> {
     let target_valid = match request.kind {
-        EffectArtifactKindV1::Source => request.target.is_empty(),
-        EffectArtifactKindV1::CoreWasm => request.target == "wasm32-unknown-unknown",
-        EffectArtifactKindV1::TargetNative => valid_native_target(request.target.as_bytes()),
+        EffectArtifactKind::Source => request.target.is_empty(),
+        EffectArtifactKind::CoreWasm => request.target == "wasm32-unknown-unknown",
+        EffectArtifactKind::TargetNative => valid_native_target(request.target.as_bytes()),
     };
     if !target_valid {
         return Err(package_diag(
             Code::Target,
-            EFFECT_PACKAGE_V1_UNAVAILABLE_OFFSET,
+            EFFECT_PACKAGE_UNAVAILABLE_OFFSET,
         ));
     }
     let mut prior: Option<&[u8]> = None;
@@ -807,17 +807,17 @@ fn validate_selection_request(request: ArtifactSelectionRequestV1<'_>) -> Result
         if !valid_feature_token(token) || prior.is_some_and(|value| value >= token) {
             return Err(package_diag(
                 Code::Features,
-                EFFECT_PACKAGE_V1_UNAVAILABLE_OFFSET,
+                EFFECT_PACKAGE_UNAVAILABLE_OFFSET,
             ));
         }
         joined_bytes = joined_bytes
             .checked_add(token.len())
             .and_then(|value| value.checked_add(usize::from(index != 0)))
-            .ok_or_else(|| package_diag(Code::Overflow, EFFECT_PACKAGE_V1_UNAVAILABLE_OFFSET))?;
+            .ok_or_else(|| package_diag(Code::Overflow, EFFECT_PACKAGE_UNAVAILABLE_OFFSET))?;
         if joined_bytes > 255 {
             return Err(package_diag(
                 Code::Features,
-                EFFECT_PACKAGE_V1_UNAVAILABLE_OFFSET,
+                EFFECT_PACKAGE_UNAVAILABLE_OFFSET,
             ));
         }
         prior = Some(token);
@@ -851,10 +851,7 @@ fn feature_count(features: &str) -> usize {
     }
 }
 
-fn preferred_candidate(
-    candidate: VerifiedArtifactV1<'_>,
-    selected: VerifiedArtifactV1<'_>,
-) -> bool {
+fn preferred_candidate(candidate: VerifiedArtifact<'_>, selected: VerifiedArtifact<'_>) -> bool {
     let candidate_count = feature_count(candidate.features());
     let selected_count = feature_count(selected.features());
     candidate_count > selected_count
@@ -864,7 +861,7 @@ fn preferred_candidate(
                     && candidate.path() < selected.path())))
 }
 
-fn artifact_hash_offset(package: VerifiedEffectPackageV1<'_>, artifact_index: u32) -> u64 {
+fn artifact_hash_offset(package: VerifiedEffectPackage<'_>, artifact_index: u32) -> u64 {
     let mut cursor = 0usize;
     for index in 0..package.count {
         if index == artifact_index {
@@ -872,13 +869,13 @@ fn artifact_hash_offset(package: VerifiedEffectPackageV1<'_>, artifact_index: u3
         }
         cursor = trusted_record(package.table, cursor).next;
     }
-    EFFECT_PACKAGE_V1_UNAVAILABLE_OFFSET
+    EFFECT_PACKAGE_UNAVAILABLE_OFFSET
 }
 
-pub fn select_effect_package_artifact_v1<'a>(
-    package: &VerifiedEffectPackageV1<'a>,
-    request: ArtifactSelectionRequestV1<'_>,
-) -> Result<VerifiedArtifactV1<'a>, Diagnostic> {
+pub fn select_effect_package_artifact<'a>(
+    package: &VerifiedEffectPackage<'a>,
+    request: ArtifactSelectionRequest<'_>,
+) -> Result<VerifiedArtifact<'a>, Diagnostic> {
     validate_selection_request(request)?;
     let mut selected = None;
     for candidate in package.artifacts() {
@@ -893,7 +890,7 @@ pub fn select_effect_package_artifact_v1<'a>(
         }
     }
     let selected = selected
-        .ok_or_else(|| package_diag(Code::Unavailable, EFFECT_PACKAGE_V1_UNAVAILABLE_OFFSET))?;
+        .ok_or_else(|| package_diag(Code::Unavailable, EFFECT_PACKAGE_UNAVAILABLE_OFFSET))?;
     if Sha256::digest(selected.content()).as_slice() != selected.sha2_256() {
         return Err(diag(
             Code::Hash,
@@ -928,130 +925,130 @@ mod tests {
     fn encoded() -> Vec<u8> {
         let d = descriptor();
         let aa = [
-            EffectArtifactAuthoringV1 {
-                kind: EffectArtifactKindV1::TargetNative,
+            EffectArtifactAuthoring {
+                kind: EffectArtifactKind::TargetNative,
                 path: "bin/linux.so",
                 target: "x86_64-unknown-linux-gnu",
                 features: "avx2,fma",
                 content: b"native",
             },
-            EffectArtifactAuthoringV1 {
-                kind: EffectArtifactKindV1::Source,
+            EffectArtifactAuthoring {
+                kind: EffectArtifactKind::Source,
                 path: "src/lib.rs",
                 target: "",
                 features: "",
                 content: b"source",
             },
-            EffectArtifactAuthoringV1 {
-                kind: EffectArtifactKindV1::CoreWasm,
+            EffectArtifactAuthoring {
+                kind: EffectArtifactKind::CoreWasm,
                 path: "wasm/core.wasm",
                 target: "wasm32-unknown-unknown",
                 features: "simd128",
                 content: b"wasm",
             },
         ];
-        let p = EffectPackageAuthoringV1 {
+        let p = EffectPackageAuthoring {
             descriptor: &d,
             artifacts: &aa,
         };
         let mut b = vec![
             0;
-            effect_package_v1_required_size(&p, EffectPackageLimitsV1::default()).unwrap()
+            effect_package_required_size(&p, EffectPackageLimits::default()).unwrap()
                 as usize
         ];
-        encode_effect_package_v1(&p, EffectPackageLimitsV1::default(), &mut b).unwrap();
+        encode_effect_package(&p, EffectPackageLimits::default(), &mut b).unwrap();
         b
     }
 
     fn selection_bytes(reverse: bool) -> Vec<u8> {
         let descriptor = descriptor();
         let mut artifacts = [
-            EffectArtifactAuthoringV1 {
-                kind: EffectArtifactKindV1::Source,
+            EffectArtifactAuthoring {
+                kind: EffectArtifactKind::Source,
                 path: "src/a.rs",
                 target: "",
                 features: "",
                 content: b"source-a",
             },
-            EffectArtifactAuthoringV1 {
-                kind: EffectArtifactKindV1::Source,
+            EffectArtifactAuthoring {
+                kind: EffectArtifactKind::Source,
                 path: "src/z.rs",
                 target: "",
                 features: "",
                 content: b"source-z",
             },
-            EffectArtifactAuthoringV1 {
-                kind: EffectArtifactKindV1::CoreWasm,
+            EffectArtifactAuthoring {
+                kind: EffectArtifactKind::CoreWasm,
                 path: "core/base-a.wasm",
                 target: "wasm32-unknown-unknown",
                 features: "",
                 content: b"core-base-a",
             },
-            EffectArtifactAuthoringV1 {
-                kind: EffectArtifactKindV1::CoreWasm,
+            EffectArtifactAuthoring {
+                kind: EffectArtifactKind::CoreWasm,
                 path: "core/base-b.wasm",
                 target: "wasm32-unknown-unknown",
                 features: "",
                 content: b"core-base-b",
             },
-            EffectArtifactAuthoringV1 {
-                kind: EffectArtifactKindV1::CoreWasm,
+            EffectArtifactAuthoring {
+                kind: EffectArtifactKind::CoreWasm,
                 path: "core/bulk.wasm",
                 target: "wasm32-unknown-unknown",
                 features: "bulk-memory,simd128",
                 content: b"core-bulk",
             },
-            EffectArtifactAuthoringV1 {
-                kind: EffectArtifactKindV1::CoreWasm,
+            EffectArtifactAuthoring {
+                kind: EffectArtifactKind::CoreWasm,
                 path: "core/relaxed.wasm",
                 target: "wasm32-unknown-unknown",
                 features: "relaxed-simd,simd128",
                 content: b"core-relaxed",
             },
-            EffectArtifactAuthoringV1 {
-                kind: EffectArtifactKindV1::CoreWasm,
+            EffectArtifactAuthoring {
+                kind: EffectArtifactKind::CoreWasm,
                 path: "core/simd-a.wasm",
                 target: "wasm32-unknown-unknown",
                 features: "simd128",
                 content: b"core-simd-a",
             },
-            EffectArtifactAuthoringV1 {
-                kind: EffectArtifactKindV1::CoreWasm,
+            EffectArtifactAuthoring {
+                kind: EffectArtifactKind::CoreWasm,
                 path: "core/simd-b.wasm",
                 target: "wasm32-unknown-unknown",
                 features: "simd128",
                 content: b"core-simd-b",
             },
-            EffectArtifactAuthoringV1 {
-                kind: EffectArtifactKindV1::CoreWasm,
+            EffectArtifactAuthoring {
+                kind: EffectArtifactKind::CoreWasm,
                 path: "core/threads.wasm",
                 target: "wasm32-unknown-unknown",
                 features: "threads",
                 content: b"core-threads",
             },
-            EffectArtifactAuthoringV1 {
-                kind: EffectArtifactKindV1::TargetNative,
+            EffectArtifactAuthoring {
+                kind: EffectArtifactKind::TargetNative,
                 path: "native/x86-base.so",
                 target: "x86_64-unknown-linux-gnu",
                 features: "",
                 content: b"native-base",
             },
-            EffectArtifactAuthoringV1 {
-                kind: EffectArtifactKindV1::TargetNative,
+            EffectArtifactAuthoring {
+                kind: EffectArtifactKind::TargetNative,
                 path: "native/x86-avx2.so",
                 target: "x86_64-unknown-linux-gnu",
                 features: "avx2",
                 content: b"native-avx2",
             },
-            EffectArtifactAuthoringV1 {
-                kind: EffectArtifactKindV1::TargetNative,
+            EffectArtifactAuthoring {
+                kind: EffectArtifactKind::TargetNative,
                 path: "native/x86-fma.so",
                 target: "x86_64-unknown-linux-gnu",
                 features: "avx2,fma",
                 content: b"native-fma",
             },
-            EffectArtifactAuthoringV1 {
-                kind: EffectArtifactKindV1::TargetNative,
+            EffectArtifactAuthoring {
+                kind: EffectArtifactKind::TargetNative,
                 path: "native/arm.so",
                 target: "aarch64-unknown-linux-gnu",
                 features: "",
@@ -1061,83 +1058,82 @@ mod tests {
         if reverse {
             artifacts.reverse();
         }
-        let package = EffectPackageAuthoringV1 {
+        let package = EffectPackageAuthoring {
             descriptor: &descriptor,
             artifacts: &artifacts,
         };
         let mut bytes = vec![
             0;
-            effect_package_v1_required_size(&package, EffectPackageLimitsV1::default()).unwrap()
+            effect_package_required_size(&package, EffectPackageLimits::default()).unwrap()
                 as usize
         ];
-        encode_effect_package_v1(&package, EffectPackageLimitsV1::default(), &mut bytes).unwrap();
+        encode_effect_package(&package, EffectPackageLimits::default(), &mut bytes).unwrap();
         bytes
     }
 
     fn select_path<'a>(
-        package: &VerifiedEffectPackageV1<'a>,
-        kind: EffectArtifactKindV1,
+        package: &VerifiedEffectPackage<'a>,
+        kind: EffectArtifactKind,
         target: &str,
         capabilities: &[&str],
     ) -> Result<&'a str, Diagnostic> {
-        select_effect_package_artifact_v1(
+        select_effect_package_artifact(
             package,
-            ArtifactSelectionRequestV1 {
+            ArtifactSelectionRequest {
                 kind,
                 target,
                 capabilities,
             },
         )
-        .map(VerifiedArtifactV1::path)
+        .map(VerifiedArtifact::path)
     }
     #[test]
     fn round_trip_layout_and_borrows() {
         let b = encoded();
         assert_eq!(&b[..8], MAGIC);
         assert_eq!(u16_at(&b, 10), 96);
-        let v = verify_effect_package_v1(&b, EffectPackageLimitsV1::default()).unwrap();
+        let v = verify_effect_package(&b, EffectPackageLimits::default()).unwrap();
         assert_eq!(v.as_bytes().as_ptr(), b.as_ptr());
         assert_eq!(v.artifact_count(), 3);
         let a: Vec<_> = v.artifacts().collect();
-        assert_eq!(a[0].kind(), EffectArtifactKindV1::Source);
+        assert_eq!(a[0].kind(), EffectArtifactKind::Source);
         assert_eq!(a[0].content(), b"source");
-        assert_eq!(a[1].kind(), EffectArtifactKindV1::CoreWasm);
+        assert_eq!(a[1].kind(), EffectArtifactKind::CoreWasm);
     }
     #[test]
     fn permutation_and_short_atomic() {
         let d = descriptor();
-        let a = EffectArtifactAuthoringV1 {
-            kind: EffectArtifactKindV1::Source,
+        let a = EffectArtifactAuthoring {
+            kind: EffectArtifactKind::Source,
             path: "a",
             target: "",
             features: "",
             content: b"a",
         };
-        let b = EffectArtifactAuthoringV1 {
+        let b = EffectArtifactAuthoring {
             path: "b",
             content: b"b",
             ..a
         };
         let x = [a, b];
         let y = [b, a];
-        let px = EffectPackageAuthoringV1 {
+        let px = EffectPackageAuthoring {
             descriptor: &d,
             artifacts: &x,
         };
-        let py = EffectPackageAuthoringV1 {
+        let py = EffectPackageAuthoring {
             descriptor: &d,
             artifacts: &y,
         };
-        let n = effect_package_v1_required_size(&px, EffectPackageLimitsV1::default()).unwrap()
-            as usize;
+        let n = effect_package_required_size(&px, EffectPackageLimits::default()).unwrap() as usize;
         let (mut ox, mut oy) = (vec![0; n], vec![0; n]);
-        encode_effect_package_v1(&px, EffectPackageLimitsV1::default(), &mut ox).unwrap();
-        encode_effect_package_v1(&py, EffectPackageLimitsV1::default(), &mut oy).unwrap();
+        encode_effect_package(&px, EffectPackageLimits::default(), &mut ox).unwrap();
+        encode_effect_package(&py, EffectPackageLimits::default(), &mut oy).unwrap();
         assert_eq!(ox, oy);
         let mut short = vec![0xa5; n - 1];
         let old = short.clone();
         assert_eq!(
-            encode_effect_package_v1(&px, EffectPackageLimitsV1::default(), &mut short),
+            encode_effect_package(&px, EffectPackageLimits::default(), &mut short),
             Err(Diagnostic::buffer_too_small(n as u64))
         );
         assert_eq!(short, old);
@@ -1163,7 +1159,7 @@ mod tests {
             let mut b = base.clone();
             b[o] ^= 1;
             assert_eq!(
-                verify_effect_package_v1(&b, EffectPackageLimitsV1::default())
+                verify_effect_package(&b, EffectPackageLimits::default())
                     .unwrap_err()
                     .code,
                 c,
@@ -1175,7 +1171,7 @@ mod tests {
             let mut b = base.clone();
             b[table + r] ^= 1;
             assert_eq!(
-                verify_effect_package_v1(&b, EffectPackageLimitsV1::default())
+                verify_effect_package(&b, EffectPackageLimits::default())
                     .unwrap_err()
                     .code,
                 c,
@@ -1186,49 +1182,46 @@ mod tests {
     #[test]
     fn authoring_grammar_and_limit() {
         let d = descriptor();
-        let a = EffectArtifactAuthoringV1 {
-            kind: EffectArtifactKindV1::Source,
+        let a = EffectArtifactAuthoring {
+            kind: EffectArtifactKind::Source,
             path: "src/a.rs",
             target: "",
             features: "",
             content: b"x",
         };
         for (bad, c) in [
-            (EffectArtifactAuthoringV1 { path: "../a", ..a }, Code::Path),
-            (EffectArtifactAuthoringV1 { target: "x", ..a }, Code::Target),
+            (EffectArtifactAuthoring { path: "../a", ..a }, Code::Path),
+            (EffectArtifactAuthoring { target: "x", ..a }, Code::Target),
             (
-                EffectArtifactAuthoringV1 { features: "x", ..a },
+                EffectArtifactAuthoring { features: "x", ..a },
                 Code::Features,
             ),
-            (
-                EffectArtifactAuthoringV1 { content: b"", ..a },
-                Code::Length,
-            ),
+            (EffectArtifactAuthoring { content: b"", ..a }, Code::Length),
         ] {
             let aa = [bad];
-            let p = EffectPackageAuthoringV1 {
+            let p = EffectPackageAuthoring {
                 descriptor: &d,
                 artifacts: &aa,
             };
             assert_eq!(
-                effect_package_v1_required_size(&p, EffectPackageLimitsV1::default())
+                effect_package_required_size(&p, EffectPackageLimits::default())
                     .unwrap_err()
                     .code,
                 c
             );
         }
         let aa = [a];
-        let p = EffectPackageAuthoringV1 {
+        let p = EffectPackageAuthoring {
             descriptor: &d,
             artifacts: &aa,
         };
-        let n = effect_package_v1_required_size(&p, EffectPackageLimitsV1::default()).unwrap();
-        let l = EffectPackageLimitsV1 {
+        let n = effect_package_required_size(&p, EffectPackageLimits::default()).unwrap();
+        let l = EffectPackageLimits {
             maximum_package_bytes: n - 1,
-            ..EffectPackageLimitsV1::default()
+            ..EffectPackageLimits::default()
         };
         assert_eq!(
-            effect_package_v1_required_size(&p, l).unwrap_err().code,
+            effect_package_required_size(&p, l).unwrap_err().code,
             Code::Limit
         );
     }
@@ -1255,7 +1248,7 @@ mod tests {
         offsets
     }
     fn assert_code(bytes: &[u8], code: Code) -> Diagnostic {
-        let error = verify_effect_package_v1(bytes, EffectPackageLimitsV1::default()).unwrap_err();
+        let error = verify_effect_package(bytes, EffectPackageLimits::default()).unwrap_err();
         assert_eq!(error.code, code);
         error
     }
@@ -1281,12 +1274,12 @@ mod tests {
         overflow[10..12].copy_from_slice(&96u16.to_le_bytes());
         put_u64(&mut overflow, 16, u64::MAX);
         put_u64(&mut overflow, 32, u64::MAX);
-        let limits = EffectPackageLimitsV1 {
+        let limits = EffectPackageLimits {
             maximum_package_bytes: u64::MAX,
-            ..EffectPackageLimitsV1::default()
+            ..EffectPackageLimits::default()
         };
         assert_eq!(
-            verify_effect_package_v1(&overflow, limits).unwrap_err(),
+            verify_effect_package(&overflow, limits).unwrap_err(),
             package_diag(Code::Overflow, 32)
         );
     }
@@ -1330,33 +1323,33 @@ mod tests {
 
         let descriptor = descriptor();
         let ordered_artifacts = [
-            EffectArtifactAuthoringV1 {
-                kind: EffectArtifactKindV1::Source,
+            EffectArtifactAuthoring {
+                kind: EffectArtifactKind::Source,
                 path: "a",
                 target: "",
                 features: "",
                 content: b"a",
             },
-            EffectArtifactAuthoringV1 {
-                kind: EffectArtifactKindV1::Source,
+            EffectArtifactAuthoring {
+                kind: EffectArtifactKind::Source,
                 path: "b",
                 target: "",
                 features: "",
                 content: b"b",
             },
         ];
-        let ordered_package = EffectPackageAuthoringV1 {
+        let ordered_package = EffectPackageAuthoring {
             descriptor: &descriptor,
             artifacts: &ordered_artifacts,
         };
         let mut order_bad = vec![
             0;
-            effect_package_v1_required_size(&ordered_package, EffectPackageLimitsV1::default())
-                .unwrap() as usize
+            effect_package_required_size(&ordered_package, EffectPackageLimits::default()).unwrap()
+                as usize
         ];
-        encode_effect_package_v1(
+        encode_effect_package(
             &ordered_package,
-            EffectPackageLimitsV1::default(),
+            EffectPackageLimits::default(),
             &mut order_bad,
         )
         .unwrap();
@@ -1427,7 +1420,7 @@ mod tests {
     #[test]
     fn exact_and_one_below_limits_cover_all_five_caps() {
         let bytes = encoded();
-        let verified = verify_effect_package_v1(&bytes, EffectPackageLimitsV1::default()).unwrap();
+        let verified = verify_effect_package(&bytes, EffectPackageLimits::default()).unwrap();
         let descriptor_len = verified.descriptor().len() as u64;
         let manifest = 96 + descriptor_len + u64_at(&bytes, 32);
         let maximum_artifact = verified
@@ -1435,14 +1428,14 @@ mod tests {
             .map(|a| a.content().len() as u64)
             .max()
             .unwrap();
-        let exact = EffectPackageLimitsV1 {
+        let exact = EffectPackageLimits {
             maximum_descriptor_bytes: descriptor_len,
             maximum_manifest_bytes: manifest,
             maximum_package_bytes: bytes.len() as u64,
             maximum_artifacts: verified.artifact_count(),
             maximum_artifact_bytes: maximum_artifact,
         };
-        verify_effect_package_v1(&bytes, exact).unwrap();
+        verify_effect_package(&bytes, exact).unwrap();
         let mut descriptor_below = exact;
         descriptor_below.maximum_descriptor_bytes = descriptor_len - 1;
         let mut manifest_below = exact;
@@ -1461,34 +1454,34 @@ mod tests {
             artifact_below,
         ] {
             assert_eq!(
-                verify_effect_package_v1(&bytes, below).unwrap_err().code,
+                verify_effect_package(&bytes, below).unwrap_err().code,
                 Code::Limit
             );
         }
 
         let descriptor = descriptor();
         let artifacts = [
-            EffectArtifactAuthoringV1 {
-                kind: EffectArtifactKindV1::Source,
+            EffectArtifactAuthoring {
+                kind: EffectArtifactKind::Source,
                 path: "a",
                 target: "",
                 features: "",
                 content: b"source",
             },
-            EffectArtifactAuthoringV1 {
-                kind: EffectArtifactKindV1::CoreWasm,
+            EffectArtifactAuthoring {
+                kind: EffectArtifactKind::CoreWasm,
                 path: "b",
                 target: "wasm32-unknown-unknown",
                 features: "simd128",
                 content: b"wasm",
             },
         ];
-        let package = EffectPackageAuthoringV1 {
+        let package = EffectPackageAuthoring {
             descriptor: &descriptor,
             artifacts: &artifacts,
         };
         let required =
-            effect_package_v1_required_size(&package, EffectPackageLimitsV1::default()).unwrap();
+            effect_package_required_size(&package, EffectPackageLimits::default()).unwrap();
         let table = artifacts
             .iter()
             .map(|artifact| {
@@ -1496,7 +1489,7 @@ mod tests {
                     & !7
             })
             .sum::<usize>() as u64;
-        let authoring_exact = EffectPackageLimitsV1 {
+        let authoring_exact = EffectPackageLimits {
             maximum_descriptor_bytes: descriptor.len() as u64,
             maximum_manifest_bytes: 96 + descriptor.len() as u64 + table,
             maximum_package_bytes: required,
@@ -1504,12 +1497,12 @@ mod tests {
             maximum_artifact_bytes: 6,
         };
         assert_eq!(
-            effect_package_v1_required_size(&package, authoring_exact),
+            effect_package_required_size(&package, authoring_exact),
             Ok(required)
         );
         let mut output = vec![0xa5; required as usize + 8];
         assert_eq!(
-            encode_effect_package_v1(&package, authoring_exact, &mut output),
+            encode_effect_package(&package, authoring_exact, &mut output),
             Ok(required as usize)
         );
         assert!(output[required as usize..].iter().all(|byte| *byte == 0xa5));
@@ -1521,14 +1514,14 @@ mod tests {
         below_limits[4].maximum_artifact_bytes -= 1;
         for below in below_limits {
             assert_eq!(
-                effect_package_v1_required_size(&package, below)
+                effect_package_required_size(&package, below)
                     .unwrap_err()
                     .code,
                 Code::Limit
             );
             let mut canary = vec![0xa5; required as usize + 8];
             assert_eq!(
-                encode_effect_package_v1(&package, below, &mut canary)
+                encode_effect_package(&package, below, &mut canary)
                     .unwrap_err()
                     .code,
                 Code::Limit
@@ -1558,7 +1551,7 @@ mod tests {
         put_u64(
             &mut limit_and_header,
             first + 32,
-            EffectPackageLimitsV1::default().maximum_artifact_bytes + 1,
+            EffectPackageLimits::default().maximum_artifact_bytes + 1,
         );
         assert_eq!(
             assert_code(&limit_and_header, Code::Limit).artifact_index,
@@ -1597,7 +1590,7 @@ mod tests {
         put_u64(
             &mut malformed_path_and_limit,
             first + 32,
-            EffectPackageLimitsV1::default().maximum_artifact_bytes + 1,
+            EffectPackageLimits::default().maximum_artifact_bytes + 1,
         );
         let error = assert_code(&malformed_path_and_limit, Code::Limit);
         assert_eq!(error.artifact_index, 0);
@@ -1621,7 +1614,7 @@ mod tests {
         put_u64(
             &mut truncated_after_first_prefix,
             first + 32,
-            EffectPackageLimitsV1::default().maximum_artifact_bytes + 1,
+            EffectPackageLimits::default().maximum_artifact_bytes + 1,
         );
         truncated_after_first_prefix.truncate(first + 40);
         let error = assert_code(&truncated_after_first_prefix, Code::Limit);
@@ -1640,8 +1633,8 @@ mod tests {
     #[test]
     fn authoring_duplicate_source_invariant_and_native_feature_grammars() {
         let descriptor = descriptor();
-        let source = EffectArtifactAuthoringV1 {
-            kind: EffectArtifactKindV1::Source,
+        let source = EffectArtifactAuthoring {
+            kind: EffectArtifactKind::Source,
             path: "a",
             target: "",
             features: "",
@@ -1649,32 +1642,32 @@ mod tests {
         };
         let duplicates = [
             source,
-            EffectArtifactAuthoringV1 {
+            EffectArtifactAuthoring {
                 content: b"y",
                 ..source
             },
         ];
-        let package = EffectPackageAuthoringV1 {
+        let package = EffectPackageAuthoring {
             descriptor: &descriptor,
             artifacts: &duplicates,
         };
-        let error = effect_package_v1_required_size(&package, EffectPackageLimitsV1::default())
-            .unwrap_err();
+        let error =
+            effect_package_required_size(&package, EffectPackageLimits::default()).unwrap_err();
         assert_eq!((error.code, error.artifact_index), (Code::Order, 1));
 
-        let no_source = [EffectArtifactAuthoringV1 {
-            kind: EffectArtifactKindV1::CoreWasm,
+        let no_source = [EffectArtifactAuthoring {
+            kind: EffectArtifactKind::CoreWasm,
             path: "a",
             target: "wasm32-unknown-unknown",
             features: "",
             content: b"x",
         }];
-        let package = EffectPackageAuthoringV1 {
+        let package = EffectPackageAuthoring {
             descriptor: &descriptor,
             artifacts: &no_source,
         };
         assert_eq!(
-            effect_package_v1_required_size(&package, EffectPackageLimitsV1::default())
+            effect_package_required_size(&package, EffectPackageLimits::default())
                 .unwrap_err()
                 .code,
             Code::Unavailable
@@ -1688,20 +1681,20 @@ mod tests {
         ] {
             let artifacts = [
                 source,
-                EffectArtifactAuthoringV1 {
-                    kind: EffectArtifactKindV1::TargetNative,
+                EffectArtifactAuthoring {
+                    kind: EffectArtifactKind::TargetNative,
                     path: "b",
                     target,
                     features: "",
                     content: b"y",
                 },
             ];
-            let package = EffectPackageAuthoringV1 {
+            let package = EffectPackageAuthoring {
                 descriptor: &descriptor,
                 artifacts: &artifacts,
             };
             assert_eq!(
-                effect_package_v1_required_size(&package, EffectPackageLimitsV1::default())
+                effect_package_required_size(&package, EffectPackageLimits::default())
                     .unwrap_err()
                     .code,
                 Code::Target
@@ -1710,20 +1703,20 @@ mod tests {
         for features in ["a,a", "b,a", "a,,b", "1a", "a_b", "a+", "A"] {
             let artifacts = [
                 source,
-                EffectArtifactAuthoringV1 {
-                    kind: EffectArtifactKindV1::CoreWasm,
+                EffectArtifactAuthoring {
+                    kind: EffectArtifactKind::CoreWasm,
                     path: "b",
                     target: "wasm32-unknown-unknown",
                     features,
                     content: b"y",
                 },
             ];
-            let package = EffectPackageAuthoringV1 {
+            let package = EffectPackageAuthoring {
                 descriptor: &descriptor,
                 artifacts: &artifacts,
             };
             assert_eq!(
-                effect_package_v1_required_size(&package, EffectPackageLimitsV1::default())
+                effect_package_required_size(&package, EffectPackageLimits::default())
                     .unwrap_err()
                     .code,
                 Code::Features,
@@ -1735,15 +1728,15 @@ mod tests {
     #[test]
     fn selection_baselines_supersets_and_total_ties_are_exact() {
         let bytes = selection_bytes(false);
-        let package = verify_effect_package_v1(&bytes, EffectPackageLimitsV1::default()).unwrap();
+        let package = verify_effect_package(&bytes, EffectPackageLimits::default()).unwrap();
         assert_eq!(
-            select_path(&package, EffectArtifactKindV1::Source, "", &[]),
+            select_path(&package, EffectArtifactKind::Source, "", &[]),
             Ok("src/a.rs")
         );
         assert_eq!(
             select_path(
                 &package,
-                EffectArtifactKindV1::CoreWasm,
+                EffectArtifactKind::CoreWasm,
                 "wasm32-unknown-unknown",
                 &[]
             ),
@@ -1752,7 +1745,7 @@ mod tests {
         assert_eq!(
             select_path(
                 &package,
-                EffectArtifactKindV1::CoreWasm,
+                EffectArtifactKind::CoreWasm,
                 "wasm32-unknown-unknown",
                 &["simd128"]
             ),
@@ -1761,7 +1754,7 @@ mod tests {
         assert_eq!(
             select_path(
                 &package,
-                EffectArtifactKindV1::CoreWasm,
+                EffectArtifactKind::CoreWasm,
                 "wasm32-unknown-unknown",
                 &["simd128", "threads"]
             ),
@@ -1770,7 +1763,7 @@ mod tests {
         assert_eq!(
             select_path(
                 &package,
-                EffectArtifactKindV1::CoreWasm,
+                EffectArtifactKind::CoreWasm,
                 "wasm32-unknown-unknown",
                 &["bulk-memory", "relaxed-simd", "simd128"],
             ),
@@ -1779,7 +1772,7 @@ mod tests {
         assert_eq!(
             select_path(
                 &package,
-                EffectArtifactKindV1::TargetNative,
+                EffectArtifactKind::TargetNative,
                 "x86_64-unknown-linux-gnu",
                 &["avx2", "fma"],
             ),
@@ -1788,7 +1781,7 @@ mod tests {
         assert_eq!(
             select_path(
                 &package,
-                EffectArtifactKindV1::TargetNative,
+                EffectArtifactKind::TargetNative,
                 "x86_64-unknown-linux-gnu",
                 &["fma"],
             ),
@@ -1799,11 +1792,11 @@ mod tests {
     #[test]
     fn selection_has_no_feature_kind_or_target_implication() {
         let bytes = selection_bytes(false);
-        let package = verify_effect_package_v1(&bytes, EffectPackageLimitsV1::default()).unwrap();
+        let package = verify_effect_package(&bytes, EffectPackageLimits::default()).unwrap();
         assert_eq!(
             select_path(
                 &package,
-                EffectArtifactKindV1::CoreWasm,
+                EffectArtifactKind::CoreWasm,
                 "wasm32-unknown-unknown",
                 &["relaxed-simd"],
             ),
@@ -1812,7 +1805,7 @@ mod tests {
         assert_eq!(
             select_path(
                 &package,
-                EffectArtifactKindV1::TargetNative,
+                EffectArtifactKind::TargetNative,
                 "riscv64-unknown-linux-gnu",
                 &[],
             )
@@ -1823,7 +1816,7 @@ mod tests {
         assert_eq!(
             select_path(
                 &package,
-                EffectArtifactKindV1::TargetNative,
+                EffectArtifactKind::TargetNative,
                 "aarch64-unknown-linux-gnu",
                 &["avx2", "fma"],
             ),
@@ -1832,7 +1825,7 @@ mod tests {
         assert_eq!(
             select_path(
                 &package,
-                EffectArtifactKindV1::CoreWasm,
+                EffectArtifactKind::CoreWasm,
                 "x86_64-unknown-linux-gnu",
                 &[],
             )
@@ -1845,7 +1838,7 @@ mod tests {
     #[test]
     fn selection_request_capabilities_are_canonical_and_strict() {
         let bytes = selection_bytes(false);
-        let package = verify_effect_package_v1(&bytes, EffectPackageLimitsV1::default()).unwrap();
+        let package = verify_effect_package(&bytes, EffectPackageLimits::default()).unwrap();
         for capabilities in [
             &["simd128", "avx2"][..],
             &["simd128", "simd128"][..],
@@ -1857,7 +1850,7 @@ mod tests {
         ] {
             let error = select_path(
                 &package,
-                EffectArtifactKindV1::CoreWasm,
+                EffectArtifactKind::CoreWasm,
                 "wasm32-unknown-unknown",
                 capabilities,
             )
@@ -1871,7 +1864,7 @@ mod tests {
         assert_eq!(
             select_path(
                 &package,
-                EffectArtifactKindV1::CoreWasm,
+                EffectArtifactKind::CoreWasm,
                 "wasm32-unknown-unknown",
                 &[too_long],
             )
@@ -1888,7 +1881,7 @@ mod tests {
         assert_eq!(
             select_path(
                 &package,
-                EffectArtifactKindV1::CoreWasm,
+                EffectArtifactKind::CoreWasm,
                 "wasm32-unknown-unknown",
                 &references,
             )
@@ -1902,7 +1895,7 @@ mod tests {
         assert_eq!(
             select_path(
                 &package,
-                EffectArtifactKindV1::CoreWasm,
+                EffectArtifactKind::CoreWasm,
                 "wasm32-unknown-unknown",
                 &references,
             )
@@ -1917,11 +1910,11 @@ mod tests {
         let forward = selection_bytes(false);
         let reverse = selection_bytes(true);
         assert_eq!(forward, reverse);
-        let package = verify_effect_package_v1(&forward, EffectPackageLimitsV1::default()).unwrap();
-        let selected = select_effect_package_artifact_v1(
+        let package = verify_effect_package(&forward, EffectPackageLimits::default()).unwrap();
+        let selected = select_effect_package_artifact(
             &package,
-            ArtifactSelectionRequestV1 {
-                kind: EffectArtifactKindV1::CoreWasm,
+            ArtifactSelectionRequest {
+                kind: EffectArtifactKind::CoreWasm,
                 target: "wasm32-unknown-unknown",
                 capabilities: &["bulk-memory", "relaxed-simd", "simd128"],
             },
@@ -1942,15 +1935,14 @@ mod tests {
     #[test]
     fn selection_rehash_detects_post_verification_content_tamper() {
         let mut bytes = selection_bytes(false);
-        let request = ArtifactSelectionRequestV1 {
-            kind: EffectArtifactKindV1::CoreWasm,
+        let request = ArtifactSelectionRequest {
+            kind: EffectArtifactKind::CoreWasm,
             target: "wasm32-unknown-unknown",
             capabilities: &["simd128"],
         };
         let (selected_index, content_offset) = {
-            let package =
-                verify_effect_package_v1(&bytes, EffectPackageLimitsV1::default()).unwrap();
-            let selected = select_effect_package_artifact_v1(&package, request).unwrap();
+            let package = verify_effect_package(&bytes, EffectPackageLimits::default()).unwrap();
+            let selected = select_effect_package_artifact(&package, request).unwrap();
             (
                 selected.artifact_index(),
                 selected.content().as_ptr() as usize - bytes.as_ptr() as usize,
@@ -1959,14 +1951,14 @@ mod tests {
         bytes[content_offset] ^= 1;
         let descriptor_end = table_start(&bytes);
         let manifest = descriptor_end + u64_at(&bytes, 32) as usize;
-        let forged = VerifiedEffectPackageV1 {
+        let forged = VerifiedEffectPackage {
             bytes: &bytes,
             descriptor: &bytes[96..descriptor_end],
             table: &bytes[descriptor_end..manifest],
             contents: &bytes[manifest..],
             count: u32_at(&bytes, 48),
         };
-        let error = select_effect_package_artifact_v1(&forged, request).unwrap_err();
+        let error = select_effect_package_artifact(&forged, request).unwrap_err();
         assert_eq!(
             (error.code, error.artifact_index),
             (Code::Hash, selected_index)

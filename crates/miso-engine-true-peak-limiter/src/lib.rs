@@ -44,15 +44,15 @@ pub mod corpus;
 
 use miso_engine_effect_contract::{
     AutomationRate, AutomationSpanKind, BankProcessReport, BankWidth, EffectBankProcessBlock,
-    EffectDescriptorV1, EffectPrepareError, EffectProcessBlock, EffectQuality,
-    InitialParameterValue, LatencySamples, LinkMode, LinkModeSet, NativeEffectFactory,
-    ObservationCadenceV1, ObservationChannelsV1, ObservationCostV1, ObservationDescriptorV1,
-    ObservationFoldV1, ObservationKindV1, ObservationSampleV1, ObservationTapId, ParameterChannel,
-    ParameterChannelPolicy, ParameterDescriptorV1, ParameterDomain, ParameterId, ParameterMapping,
-    ParameterUnit, PortDescriptorV1, PortId, PortLayout, PortRole, PrepareEffectBankRequest,
-    PrepareEffectRequest, PreparedAutomationSpan, PreparedBankMetadata, PreparedEffectMetadata,
-    PreparedNativeEffect, PreparedNativeEffectBank, ProcessReport, ResetKind, SmoothingRule,
-    StatePayloadError, StatePayloadInput, StatePayloadOutput, StatePayloadSizes, TailSamples,
+    EffectDescriptor, EffectPrepareError, EffectProcessBlock, EffectQuality, InitialParameterValue,
+    LatencySamples, LinkMode, LinkModeSet, NativeEffectFactory, ObservationCadence,
+    ObservationChannels, ObservationCost, ObservationDescriptor, ObservationFold, ObservationKind,
+    ObservationSample, ObservationTapId, ParameterChannel, ParameterChannelPolicy,
+    ParameterDescriptor, ParameterDomain, ParameterId, ParameterMapping, ParameterUnit,
+    PortDescriptor, PortId, PortLayout, PortRole, PrepareEffectBankRequest, PrepareEffectRequest,
+    PreparedAutomationSpan, PreparedBankMetadata, PreparedEffectMetadata, PreparedNativeEffect,
+    PreparedNativeEffectBank, ProcessReport, ResetKind, SmoothingRule, StatePayloadError,
+    StatePayloadInput, StatePayloadOutput, StatePayloadSizes, TailSamples,
     expected_prepared_metadata,
 };
 use miso_engine_effect_runtime::bank::{
@@ -137,8 +137,8 @@ const fn parameter(
     automation_rate: AutomationRate,
     smoothing: SmoothingRule,
     smoothing_samples: u32,
-) -> ParameterDescriptorV1 {
-    ParameterDescriptorV1 {
+) -> ParameterDescriptor {
+    ParameterDescriptor {
         id: parameter_id(id),
         display_name: name,
         display_unit,
@@ -159,7 +159,7 @@ const fn parameter(
 }
 
 /// Frozen descriptor rows. Descriptor position and stable numeric ID agree.
-pub const TRUE_PEAK_LIMITER_PARAMETERS_V1: [ParameterDescriptorV1; PARAMETER_COUNT] = [
+pub const TRUE_PEAK_LIMITER_PARAMETERS: [ParameterDescriptor; PARAMETER_COUNT] = [
     parameter(
         1,
         "ceiling",
@@ -201,14 +201,14 @@ pub const TRUE_PEAK_LIMITER_PARAMETERS_V1: [ParameterDescriptorV1; PARAMETER_COU
     ),
 ];
 
-const PORTS: [PortDescriptorV1; 2] = [
-    PortDescriptorV1 {
+const PORTS: [PortDescriptor; 2] = [
+    PortDescriptor {
         id: port_id("main-in"),
         role: PortRole::MainInput,
         required: true,
         layout: PortLayout::DualMonoPlanar,
     },
-    PortDescriptorV1 {
+    PortDescriptor {
         id: port_id("main-out"),
         role: PortRole::MainOutput,
         required: true,
@@ -223,11 +223,11 @@ const PORTS: [PortDescriptorV1; 2] = [
 /// no box ring and no minimum-filter words, hence the re-pin). The common section is the two-word
 /// version/length header `miso-engine-effect-runtime` stamps into every payload, which is why
 /// `common_bytes` is eight and no longer zero. The latency column does not move.
-const fn quality(rate: u32) -> miso_engine_effect_contract::QualityDescriptorV1 {
+const fn quality(rate: u32) -> miso_engine_effect_contract::QualityDescriptor {
     let lookahead_maximum = rate / 100;
     let lane_words = 3 * lookahead_maximum + 35;
     let lane_bytes = lane_words * 4;
-    miso_engine_effect_contract::QualityDescriptorV1 {
+    miso_engine_effect_contract::QualityDescriptor {
         quality: EffectQuality::Normal,
         sample_rate: rate,
         latency: LatencySamples((lookahead_maximum + 6) as u64),
@@ -242,7 +242,7 @@ const fn quality(rate: u32) -> miso_engine_effect_contract::QualityDescriptorV1 
     }
 }
 
-const QUALITIES: [miso_engine_effect_contract::QualityDescriptorV1; 4] = [
+const QUALITIES: [miso_engine_effect_contract::QualityDescriptor; 4] = [
     quality(44_100),
     quality(48_000),
     quality(88_200),
@@ -260,23 +260,22 @@ const QUALITIES: [miso_engine_effect_contract::QualityDescriptorV1; 4] = [
 /// declared fold and after that one unit conversion -- decibels of reduction, `0 .. 100`. `unit`
 /// describes what crosses the transport. They differ here and only here, and the difference is the
 /// whole point of declaring the transport unit separately.
-pub const TRUE_PEAK_LIMITER_OBSERVATIONS_V1: [ObservationDescriptorV1; 1] =
-    [ObservationDescriptorV1 {
-        id: ObservationTapId(1),
-        display_name: "Gain Reduction",
-        display_unit: "dB",
-        kind: ObservationKindV1::GainReductionDb,
-        unit: ParameterUnit::Linear,
-        cost: ObservationCostV1::Resident,
-        cadence: ObservationCadenceV1::PerBlock,
-        fold: ObservationFoldV1::PeakMagnitude,
-        channels: ObservationChannelsV1::PerLane,
-        minimum: 0.0,
-        maximum: 100.0,
-    }];
+pub const TRUE_PEAK_LIMITER_OBSERVATIONS: [ObservationDescriptor; 1] = [ObservationDescriptor {
+    id: ObservationTapId(1),
+    display_name: "Gain Reduction",
+    display_unit: "dB",
+    kind: ObservationKind::GainReductionDb,
+    unit: ParameterUnit::Linear,
+    cost: ObservationCost::Resident,
+    cadence: ObservationCadence::PerBlock,
+    fold: ObservationFold::PeakMagnitude,
+    channels: ObservationChannels::PerLane,
+    minimum: 0.0,
+    maximum: 100.0,
+}];
 
 /// Immutable launch true-peak limiter descriptor.
-pub const TRUE_PEAK_LIMITER_DESCRIPTOR_V1: EffectDescriptorV1 = EffectDescriptorV1 {
+pub const TRUE_PEAK_LIMITER_DESCRIPTOR: EffectDescriptor = EffectDescriptor {
     id: effect_id("miso.true-peak-limiter"),
     display_name: "True-Peak Limiter",
     contract_major: 1,
@@ -289,10 +288,10 @@ pub const TRUE_PEAK_LIMITER_DESCRIPTOR_V1: EffectDescriptorV1 = EffectDescriptor
         Some(value) => value,
         None => panic!("frozen link bits"),
     },
-    parameters: &TRUE_PEAK_LIMITER_PARAMETERS_V1,
+    parameters: &TRUE_PEAK_LIMITER_PARAMETERS,
     ports: &PORTS,
     qualities: &QUALITIES,
-    observations: &TRUE_PEAK_LIMITER_OBSERVATIONS_V1,
+    observations: &TRUE_PEAK_LIMITER_OBSERVATIONS,
 };
 
 /// The state layout this crate reads and writes.
@@ -1965,7 +1964,7 @@ fn limiter_block_uniform<L: Lane>(
 
 /// The parameter domains, in descriptor order, for the runtime validator.
 ///
-/// The same three rows as [`TRUE_PEAK_LIMITER_PARAMETERS_V1`]; the descriptor keeps the identity,
+/// The same three rows as [`TRUE_PEAK_LIMITER_PARAMETERS`]; the descriptor keeps the identity,
 /// unit, automation rate and smoothing rule, and `miso-engine-effect-runtime` owns the validation
 /// so this crate no longer carries its own copy of `parameter_value_valid` (#90 F9).
 const PARAMETER_SPECS: [ParameterSpec; PARAMETER_COUNT] = [
@@ -2686,8 +2685,8 @@ struct PreparedTruePeakLimiterBank<L: Lane> {
 }
 
 impl NativeEffectFactory for TruePeakLimiterFactory {
-    fn descriptor(&self) -> &'static EffectDescriptorV1 {
-        &TRUE_PEAK_LIMITER_DESCRIPTOR_V1
+    fn descriptor(&self) -> &'static EffectDescriptor {
+        &TRUE_PEAK_LIMITER_DESCRIPTOR
     }
 
     fn prepare(
@@ -2835,7 +2834,7 @@ impl PreparedNativeEffect for PreparedTruePeakLimiter {
     /// A plain indexed read of the planar word the block already wrote -- no release step, no
     /// logarithm, no second recursion. Freshening the state here would make two routes to one
     /// value diverge, which is exactly what E6's red mutation demonstrates.
-    fn observe_resident(&self, tap_index: u32, out: &mut ObservationSampleV1) -> bool {
+    fn observe_resident(&self, tap_index: u32, out: &mut ObservationSample) -> bool {
         if tap_index != 0 {
             return false;
         }
@@ -2893,7 +2892,7 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedTruePeakLimiterBank<L> {
         self.core.designed_channel_symmetry(lane)
     }
 
-    fn observe_resident_bank(&self, tap_index: u32, out: &mut [ObservationSampleV1]) -> bool {
+    fn observe_resident_bank(&self, tap_index: u32, out: &mut [ObservationSample]) -> bool {
         let lanes = L::WIDTH;
         if tap_index != 0
             || out.len() != lanes
@@ -3242,7 +3241,7 @@ mod tests {
     use super::*;
     use miso_engine_dsp_reference::reference_annex2_phases;
     use miso_engine_effect_contract::{
-        PrepareEffectLimits, PreparedPortsV1, PreparedSidechainPort, validate_descriptor_v1,
+        PrepareEffectLimits, PreparedPorts, PreparedSidechainPort, validate_descriptor,
     };
 
     /// Deterministic SplitMix64 noise, so a corpus is a seed and never a file.
@@ -3267,7 +3266,7 @@ mod tests {
             } else {
                 ParameterChannel::Right
             },
-            value: TRUE_PEAK_LIMITER_PARAMETERS_V1[index / 2].default_value,
+            value: TRUE_PEAK_LIMITER_PARAMETERS[index / 2].default_value,
         })
     }
 
@@ -3326,7 +3325,7 @@ mod tests {
             quality: EffectQuality::Normal,
             bypass: false,
             link_mode: LinkMode::DualMono,
-            ports: PreparedPortsV1 {
+            ports: PreparedPorts {
                 sidechain: PreparedSidechainPort::None,
             },
             initial_values: values,
@@ -3444,16 +3443,13 @@ mod tests {
 
     #[test]
     fn descriptor_metadata_and_exact_resource_rows_are_frozen() {
-        validate_descriptor_v1(&TRUE_PEAK_LIMITER_DESCRIPTOR_V1).expect("descriptor");
+        validate_descriptor(&TRUE_PEAK_LIMITER_DESCRIPTOR).expect("descriptor");
         assert_eq!(
-            TRUE_PEAK_LIMITER_DESCRIPTOR_V1.id.as_str(),
+            TRUE_PEAK_LIMITER_DESCRIPTOR.id.as_str(),
             "miso.true-peak-limiter"
         );
-        assert_eq!(
-            TRUE_PEAK_LIMITER_DESCRIPTOR_V1.supported_link_modes.bits(),
-            3
-        );
-        assert_eq!(TRUE_PEAK_LIMITER_DESCRIPTOR_V1.state_layout_version, 2);
+        assert_eq!(TRUE_PEAK_LIMITER_DESCRIPTOR.supported_link_modes.bits(), 3);
+        assert_eq!(TRUE_PEAK_LIMITER_DESCRIPTOR.state_layout_version, 2);
         // Latency is a contract fixture and does not move; the state rows are the #90 re-pin
         // (3N + 35 lane words, plus the runtime's two-word common header).
         for (quality, expected) in QUALITIES.iter().zip([
@@ -4460,7 +4456,7 @@ mod tests {
         let values = values_with(ceiling, release, lookahead);
         let mut preparation = request(&values);
         preparation.link_mode = LinkMode::DualMono;
-        let metadata = expected_prepared_metadata(&TRUE_PEAK_LIMITER_DESCRIPTOR_V1, preparation)
+        let metadata = expected_prepared_metadata(&TRUE_PEAK_LIMITER_DESCRIPTOR, preparation)
             .expect("metadata");
         let (left, right) = initial_defaults(&values).expect("defaults");
         LimiterCore::<L>::new(
@@ -4747,7 +4743,7 @@ mod tests {
         let values = values_with(-6.0, 100.0, 5.0);
         let mut preparation = request(&values);
         preparation.link_mode = LinkMode::DualMono;
-        let metadata = expected_prepared_metadata(&TRUE_PEAK_LIMITER_DESCRIPTOR_V1, preparation)
+        let metadata = expected_prepared_metadata(&TRUE_PEAK_LIMITER_DESCRIPTOR, preparation)
             .expect("metadata");
         let (left_defaults, right_defaults) = initial_defaults(&values).expect("defaults");
         let mut effect = PreparedTruePeakLimiter {
@@ -4760,7 +4756,7 @@ mod tests {
         };
 
         let mut taps = Vec::new();
-        let mut tap = ObservationSampleV1::default();
+        let mut tap = ObservationSample::default();
         // One tone block, then long enough for the 486-sample line to drain and the claim to be
         // earned and used.
         for block in 0..16_usize {
@@ -4911,9 +4907,8 @@ mod tests {
             let values = values_with(-6.0, 100.0, 5.0);
             let mut preparation = request(&values);
             preparation.link_mode = LinkMode::DualMono;
-            let metadata =
-                expected_prepared_metadata(&TRUE_PEAK_LIMITER_DESCRIPTOR_V1, preparation)
-                    .expect("metadata");
+            let metadata = expected_prepared_metadata(&TRUE_PEAK_LIMITER_DESCRIPTOR, preparation)
+                .expect("metadata");
             let (left_defaults, right_defaults) = initial_defaults(&values).expect("defaults");
             let mut effect = PreparedTruePeakLimiter {
                 core: LimiterCore::<f32>::new(
@@ -5101,7 +5096,7 @@ mod tests {
         let values = values_with(-6.0, 100.0, 5.0);
         let mut preparation = request(&values);
         preparation.link_mode = LinkMode::DualMono;
-        let metadata = expected_prepared_metadata(&TRUE_PEAK_LIMITER_DESCRIPTOR_V1, preparation)
+        let metadata = expected_prepared_metadata(&TRUE_PEAK_LIMITER_DESCRIPTOR, preparation)
             .expect("metadata");
         let mut bank = PreparedTruePeakLimiterBank::<Simd8> {
             metadata: PreparedBankMetadata {
@@ -5230,7 +5225,7 @@ mod tests {
         let values = values_with(-6.0, 100.0, 5.0);
         let mut preparation = request(&values);
         preparation.link_mode = LinkMode::DualMono;
-        let metadata = expected_prepared_metadata(&TRUE_PEAK_LIMITER_DESCRIPTOR_V1, preparation)
+        let metadata = expected_prepared_metadata(&TRUE_PEAK_LIMITER_DESCRIPTOR, preparation)
             .expect("metadata");
         let (left_defaults, right_defaults) = initial_defaults(&values).expect("defaults");
         let mut core = LimiterCore::<f32>::new(

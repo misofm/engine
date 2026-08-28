@@ -32,8 +32,7 @@ fn identity_session(quantum: u32, ring_frames: u32, length_samples: u64) -> Stri
 }
 
 fn prepared_host(quantum: u32) -> AudioWorkletEngineHost {
-    let mut host =
-        AudioWorkletEngineHost::new(WebPrepareConfigV1::launch_defaults(48_000, quantum));
+    let mut host = AudioWorkletEngineHost::new(WebPrepareConfig::launch_defaults(48_000, quantum));
     assert_eq!(host.prepare(), RESULT_OK);
     host
 }
@@ -54,9 +53,9 @@ fn ready_host(quantum: u32) -> AudioWorkletEngineHost {
 
 #[test]
 fn frozen_layouts_and_values_are_exact() {
-    assert_eq!(size_of::<WebPrepareConfigV1>(), 192);
-    assert_eq!(size_of::<WebStatusV1>(), 80);
-    assert_eq!(size_of::<WebResourceReportV1>(), 224);
+    assert_eq!(size_of::<WebPrepareConfig>(), 192);
+    assert_eq!(size_of::<WebStatus>(), 80);
+    assert_eq!(size_of::<WebResourceReport>(), 224);
     assert_eq!(
         [
             RESULT_OK,
@@ -99,7 +98,7 @@ fn frozen_layouts_and_values_are_exact() {
     // Issue #137 D1: the two console words are the first two of the frozen configuration's four
     // reserved words. Every V1 writer already sets them to zero, which is exactly "default command
     // queue depth, no meters attached", so the 192-byte layout and every existing caller stand.
-    assert_eq!(size_of::<WebCommandReportV1>(), 48);
+    assert_eq!(size_of::<WebCommandReport>(), 48);
     assert_eq!(COMMAND_REPORT_BYTES, 48);
     assert_eq!(COMMAND_RECORD_BYTES, 48);
     assert_eq!(MAXIMUM_COMMAND_RECORDS, 256);
@@ -135,57 +134,54 @@ fn frozen_layouts_and_values_are_exact() {
         ],
         [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
     );
-    assert_eq!(offset_of!(WebPrepareConfigV1, struct_size), 0);
-    assert_eq!(offset_of!(WebPrepareConfigV1, quantum_frames), 12);
-    assert_eq!(offset_of!(WebPrepareConfigV1, maximum_tracks), 40);
-    assert_eq!(offset_of!(WebPrepareConfigV1, maximum_meter_bytes), 152);
+    assert_eq!(offset_of!(WebPrepareConfig, struct_size), 0);
+    assert_eq!(offset_of!(WebPrepareConfig, quantum_frames), 12);
+    assert_eq!(offset_of!(WebPrepareConfig, maximum_tracks), 40);
+    assert_eq!(offset_of!(WebPrepareConfig, maximum_meter_bytes), 152);
     assert_eq!(
-        offset_of!(WebPrepareConfigV1, console_command_queue_records),
+        offset_of!(WebPrepareConfig, console_command_queue_records),
         160
     );
-    assert_eq!(offset_of!(WebPrepareConfigV1, console_meter_blocks), 168);
+    assert_eq!(offset_of!(WebPrepareConfig, console_meter_blocks), 168);
     // Issue #143 D3/D6: the configuration's remaining two reserved words, carved exactly as #137
     // carved the first two. The structure is still 192 bytes and every existing offset is where it
     // was, so a V1 writer that zeroes them gets "no observation capacity, no master designation".
+    assert_eq!(offset_of!(WebPrepareConfig, console_observation_taps), 176);
     assert_eq!(
-        offset_of!(WebPrepareConfigV1, console_observation_taps),
-        176
-    );
-    assert_eq!(
-        offset_of!(WebPrepareConfigV1, console_master_track_plus_one),
+        offset_of!(WebPrepareConfig, console_master_track_plus_one),
         184
     );
     assert_eq!(MAXIMUM_OBSERVATION_TAPS, 16);
     // The meter header is a new fixed structure, not a change to an existing one.
-    assert_eq!(size_of::<WebMeterHeaderV1>(), 64);
+    assert_eq!(size_of::<WebMeterHeader>(), 64);
     assert_eq!(METER_HEADER_BYTES, 64);
-    assert_eq!(offset_of!(WebMeterHeaderV1, track_count), 8);
-    assert_eq!(offset_of!(WebMeterHeaderV1, windows), 12);
-    assert_eq!(offset_of!(WebMeterHeaderV1, first_sample), 16);
-    assert_eq!(offset_of!(WebMeterHeaderV1, end_sample), 24);
-    assert_eq!(offset_of!(WebMeterHeaderV1, sequence), 32);
-    assert_eq!(offset_of!(WebMeterHeaderV1, master_track_plus_one), 40);
-    assert_eq!(offset_of!(WebMeterHeaderV1, master_gr_present), 44);
-    assert_eq!(offset_of!(WebMeterHeaderV1, reserved), 48);
-    assert_eq!(offset_of!(WebCommandReportV1, result), 8);
-    assert_eq!(offset_of!(WebCommandReportV1, rejected_index), 16);
-    assert_eq!(offset_of!(WebCommandReportV1, applied_at_sample), 24);
-    assert_eq!(offset_of!(WebCommandReportV1, reserved), 32);
-    assert_eq!(offset_of!(WebStatusV1, state), 8);
-    assert_eq!(offset_of!(WebStatusV1, next_absolute_sample), 32);
-    assert_eq!(offset_of!(WebStatusV1, reserved), 48);
-    assert_eq!(offset_of!(WebResourceReportV1, config_bytes), 32);
+    assert_eq!(offset_of!(WebMeterHeader, track_count), 8);
+    assert_eq!(offset_of!(WebMeterHeader, windows), 12);
+    assert_eq!(offset_of!(WebMeterHeader, first_sample), 16);
+    assert_eq!(offset_of!(WebMeterHeader, end_sample), 24);
+    assert_eq!(offset_of!(WebMeterHeader, sequence), 32);
+    assert_eq!(offset_of!(WebMeterHeader, master_track_plus_one), 40);
+    assert_eq!(offset_of!(WebMeterHeader, master_gr_present), 44);
+    assert_eq!(offset_of!(WebMeterHeader, reserved), 48);
+    assert_eq!(offset_of!(WebCommandReport, result), 8);
+    assert_eq!(offset_of!(WebCommandReport, rejected_index), 16);
+    assert_eq!(offset_of!(WebCommandReport, applied_at_sample), 24);
+    assert_eq!(offset_of!(WebCommandReport, reserved), 32);
+    assert_eq!(offset_of!(WebStatus, state), 8);
+    assert_eq!(offset_of!(WebStatus, next_absolute_sample), 32);
+    assert_eq!(offset_of!(WebStatus, reserved), 48);
+    assert_eq!(offset_of!(WebResourceReport, config_bytes), 32);
     assert_eq!(
-        offset_of!(WebResourceReportV1, largest_named_allocation_bytes),
+        offset_of!(WebResourceReport, largest_named_allocation_bytes),
         184
     );
     // Issue #143: the report's first reserved word becomes `observation_retained_bytes`; the
     // structure is still 224 bytes and every existing offset is unmoved.
     assert_eq!(
-        offset_of!(WebResourceReportV1, observation_retained_bytes),
+        offset_of!(WebResourceReport, observation_retained_bytes),
         192
     );
-    assert_eq!(offset_of!(WebResourceReportV1, reserved), 200);
+    assert_eq!(offset_of!(WebResourceReport, reserved), 200);
 
     // Issue #137: `bridgeMetadataBytes` in `tests/browser-v1/expected.json` is not a magic number
     // and never was. It is exactly this formula over the host shell, so when the shell grows the
@@ -214,7 +210,7 @@ fn raw_ffi_validates_handle_layout_overflow_and_transactional_failure() {
     let handle = miso_engine_web_v1_config_new();
     assert_ne!(handle, 0);
     assert_eq!(miso_engine_web_v1_config_new(), 0);
-    let mut overflow = WebPrepareConfigV1::launch_defaults(48_000, 256);
+    let mut overflow = WebPrepareConfig::launch_defaults(48_000, 256);
     overflow.maximum_source_channels = u32::MAX;
     assert_eq!(crate::ffi::test_configure(handle, overflow), RESULT_OK);
     assert_eq!(miso_engine_web_v1_prepare(handle), RESULT_INVALID_ARGUMENT);
@@ -225,7 +221,7 @@ fn raw_ffi_validates_handle_layout_overflow_and_transactional_failure() {
     assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
 
     let handle = miso_engine_web_v1_config_new();
-    let config = WebPrepareConfigV1::launch_defaults(48_000, 128);
+    let config = WebPrepareConfig::launch_defaults(48_000, 128);
     assert_eq!(crate::ffi::test_configure(handle, config), RESULT_OK);
     assert_eq!(miso_engine_web_v1_prepare(handle), RESULT_OK);
     assert_eq!(
@@ -262,7 +258,7 @@ fn raw_ffi_uses_stable_staging_and_exact_output_quantum_without_growth() {
     let toml = one_track_session(quantum);
     let handle = miso_engine_web_v1_config_new();
     assert_ne!(handle, 0);
-    let mut config = WebPrepareConfigV1::launch_defaults(48_000, quantum);
+    let mut config = WebPrepareConfig::launch_defaults(48_000, quantum);
     config.source_ring_frames = quantum;
     assert_eq!(crate::ffi::test_configure(handle, config), RESULT_OK);
     let status_address = crate::ffi::test_status_address(handle);
@@ -363,7 +359,7 @@ fn preparation_accepts_explicit_64_128_and_256_quanta_with_stable_buffers() {
 
 #[test]
 fn malformed_config_and_atomic_compile_failure_are_sticky() {
-    let mut bad = WebPrepareConfigV1::launch_defaults(48_000, 128);
+    let mut bad = WebPrepareConfig::launch_defaults(48_000, 128);
     bad.abi_version = 0;
     let mut host = AudioWorkletEngineHost::new(bad);
     assert_eq!(host.prepare(), RESULT_ABI_MISMATCH);
@@ -400,7 +396,7 @@ fn compile_resource_caps_are_inclusive_and_one_below_rejects() {
             RESULT_WRONG_STATE,
         ),
     ] {
-        let mut config = WebPrepareConfigV1::launch_defaults(48_000, 128);
+        let mut config = WebPrepareConfig::launch_defaults(48_000, 128);
         config.maximum_host_retained_bytes = host_cap;
         config.maximum_named_allocation_bytes = named_cap;
         let mut host = AudioWorkletEngineHost::new(config);
@@ -431,7 +427,7 @@ fn compile_resource_caps_are_inclusive_and_one_below_rejects() {
 fn source_backpressure_seek_render_and_stable_output_are_bounded() {
     let quantum = 128_usize;
     let toml = one_track_session(quantum as u32);
-    let mut config = WebPrepareConfigV1::launch_defaults(48_000, quantum as u32);
+    let mut config = WebPrepareConfig::launch_defaults(48_000, quantum as u32);
     config.source_ring_frames = quantum as u32;
     let mut host = AudioWorkletEngineHost::new(config);
     assert_eq!(host.prepare(), RESULT_OK);
@@ -580,7 +576,7 @@ fn render_failure_retains_ownership_and_silences() {
 #[test]
 fn facade_source_rules_reach_the_browser_host() {
     let quantum = 128_usize;
-    let mut config = WebPrepareConfigV1::launch_defaults(48_000, quantum as u32);
+    let mut config = WebPrepareConfig::launch_defaults(48_000, quantum as u32);
     config.source_ring_frames = quantum as u32;
     let toml = one_track_session(quantum as u32);
     let mut host = AudioWorkletEngineHost::new(config);
@@ -710,7 +706,7 @@ fn default_ring_covers_stall_tolerance() {
             "the ring must cover the stall plus the consumer and recycle quanta"
         );
         assert_eq!(
-            WebPrepareConfigV1::launch_defaults(sample_rate_hz, quantum).source_ring_frames,
+            WebPrepareConfig::launch_defaults(sample_rate_hz, quantum).source_ring_frames,
             expected,
             "launch defaults are the only place the formula is applied"
         );
@@ -737,7 +733,7 @@ fn ring_prefill_survives_stall() {
 
     let length_samples = u64::from(ring_frames) + 2 * u64::from(QUANTUM);
     let toml = identity_session(QUANTUM, ring_frames, length_samples);
-    let mut host = AudioWorkletEngineHost::new(WebPrepareConfigV1::launch_defaults(RATE, QUANTUM));
+    let mut host = AudioWorkletEngineHost::new(WebPrepareConfig::launch_defaults(RATE, QUANTUM));
     assert_eq!(host.prepare(), RESULT_OK);
     host.session_toml_mut().expect("TOML")[..toml.len()].copy_from_slice(toml.as_bytes());
     assert_eq!(
@@ -833,7 +829,7 @@ fn native_identity_session_digest_pins_the_wasm_parity() {
     let silent = vec![0.0_f32; QUANTUM as usize];
 
     let toml = identity_session(QUANTUM, QUANTUM, 256);
-    let mut host = AudioWorkletEngineHost::new(WebPrepareConfigV1::launch_defaults(RATE, QUANTUM));
+    let mut host = AudioWorkletEngineHost::new(WebPrepareConfig::launch_defaults(RATE, QUANTUM));
     // The browser fixture pins a one-quantum ring, which is what makes its backpressure
     // observable; the default ring would swallow the second submission.
     host.config_mut().expect("config state").source_ring_frames = QUANTUM;
@@ -961,7 +957,7 @@ fn native_command_timeline_digest_pins_the_wasm_parity() {
     // parametric EQ whose band 1 is a low shelf -- a shelf, not a bell, so a DC fixture can
     // actually witness the parameter move.
     let toml = include_str!("../tests/browser-v1/command-session.toml");
-    let mut config = WebPrepareConfigV1::launch_defaults(RATE, QUANTUM);
+    let mut config = WebPrepareConfig::launch_defaults(RATE, QUANTUM);
     config.source_ring_frames = QUANTUM;
     config.console_command_queue_records = u64::from(DEPTH);
     let mut host = AudioWorkletEngineHost::new(config);
@@ -1280,7 +1276,7 @@ fn stage_command(
 /// A console host over the browser identity fixture: one track, unity everything, one-quantum ring.
 fn console_host(quantum: u32, meter_blocks: u64) -> AudioWorkletEngineHost {
     let toml = identity_session(quantum, quantum, u64::from(quantum) * 64);
-    let mut config = WebPrepareConfigV1::console_defaults(48_000, quantum);
+    let mut config = WebPrepareConfig::console_defaults(48_000, quantum);
     config.source_ring_frames = quantum;
     config.console_meter_blocks = meter_blocks;
     config.maximum_meter_streams = 16;
@@ -1416,7 +1412,7 @@ fn command_ack_names_the_exact_application_sample() {
 /// parametric EQ, so an effect-addressed command has something real to address (issue #140 A).
 fn effect_console_host(quantum: u32, depth: u64) -> AudioWorkletEngineHost {
     let toml = include_str!("../tests/browser-v1/command-session.toml");
-    let mut config = WebPrepareConfigV1::launch_defaults(48_000, quantum);
+    let mut config = WebPrepareConfig::launch_defaults(48_000, quantum);
     config.source_ring_frames = quantum;
     config.console_command_queue_records = depth;
     let mut host = AudioWorkletEngineHost::new(config);
@@ -1516,7 +1512,7 @@ fn a_fader_command_names_the_exact_application_sample() {
 /// #140 B: mute is a fader endpoint. A zero-window mute is the exact `+0.0` the prepared path
 /// gives; a windowed mute fades over the window and only then reaches that exact zero.
 ///
-/// Red mutation: make `FaderMuteRampBuiltinsV1::set_mute` snap instead of retargeting -> the
+/// Red mutation: make `FaderMuteRampBuiltins::set_mute` snap instead of retargeting -> the
 /// windowed mute is already silent on its first sample and the "still audible" assertion fails.
 #[test]
 fn a_mute_command_is_a_fader_endpoint_not_a_discontinuity() {
@@ -2119,7 +2115,7 @@ fn observation_host(
     master: Option<u32>,
 ) -> AudioWorkletEngineHost {
     let toml = include_str!("../../../fixtures/session/v1/observation-frame-shape.toml");
-    let mut config = WebPrepareConfigV1::console_defaults(48_000, quantum);
+    let mut config = WebPrepareConfig::console_defaults(48_000, quantum);
     config.source_ring_frames = quantum * 4;
     config.console_meter_blocks = meter_blocks;
     config.console_observation_taps = 4;
@@ -2417,7 +2413,7 @@ fn observation_misuse_is_typed_and_all_or_nothing() {
 fn a_subscription_without_capacity_is_observation_unbound() {
     const QUANTUM: u32 = 128;
     let toml = include_str!("../../../fixtures/session/v1/observation-frame-shape.toml");
-    let mut config = WebPrepareConfigV1::console_defaults(48_000, QUANTUM);
+    let mut config = WebPrepareConfig::console_defaults(48_000, QUANTUM);
     config.source_ring_frames = QUANTUM * 4;
     config.console_observation_taps = 0;
     config.maximum_meter_streams = 16;
@@ -2447,7 +2443,7 @@ fn a_subscription_without_capacity_is_observation_unbound() {
 /// Observation capacity is refused at configuration time when nothing can carry the subscription.
 #[test]
 fn observation_configuration_words_are_validated() {
-    let mut config = WebPrepareConfigV1::launch_defaults(48_000, 128);
+    let mut config = WebPrepareConfig::launch_defaults(48_000, 128);
     config.console_observation_taps = 4;
     let mut host = AudioWorkletEngineHost::new(config);
     assert_eq!(
@@ -2456,12 +2452,12 @@ fn observation_configuration_words_are_validated() {
         "a subscription rides the command queue, so capacity without one has no delivery path"
     );
 
-    let mut config = WebPrepareConfigV1::console_defaults(48_000, 128);
+    let mut config = WebPrepareConfig::console_defaults(48_000, 128);
     config.console_observation_taps = u64::from(MAXIMUM_OBSERVATION_TAPS) + 1;
     let mut host = AudioWorkletEngineHost::new(config);
     assert_eq!(host.prepare(), RESULT_INVALID_ARGUMENT);
 
-    let mut config = WebPrepareConfigV1::console_defaults(48_000, 128);
+    let mut config = WebPrepareConfig::console_defaults(48_000, 128);
     config.console_master_track_plus_one = 1;
     let mut host = AudioWorkletEngineHost::new(config);
     assert_eq!(
@@ -2471,7 +2467,7 @@ fn observation_configuration_words_are_validated() {
     );
 
     // And a zeroed pair is exactly what every pre-#143 writer already sends.
-    let mut host = AudioWorkletEngineHost::new(WebPrepareConfigV1::console_defaults(48_000, 128));
+    let mut host = AudioWorkletEngineHost::new(WebPrepareConfig::console_defaults(48_000, 128));
     assert_eq!(host.prepare(), RESULT_OK);
 }
 
@@ -2499,7 +2495,7 @@ fn native_observation_timeline_digest_pins_the_wasm_parity() {
 
     let toml = include_str!("../tests/browser-v1/observation-session.toml");
     let run = |taps: u64| -> (String, f32, Option<f32>, f32, u64, u32, u32) {
-        let mut config = WebPrepareConfigV1::launch_defaults(RATE, QUANTUM);
+        let mut config = WebPrepareConfig::launch_defaults(RATE, QUANTUM);
         config.source_ring_frames = QUANTUM;
         config.console_command_queue_records = u64::from(DEPTH);
         config.console_meter_blocks = u64::from(WINDOW_BLOCKS);
@@ -2639,24 +2635,24 @@ fn native_observation_timeline_digest_pins_the_wasm_parity() {
 ///
 /// | field | wasm32 | x86-64 |
 /// |---|---|---|
-/// | `effect_observations: Box<[Option<EffectObservationHandleV1>]>` | 8 | 16 |
+/// | `effect_observations: Box<[Option<EffectObservationHandle>]>` | 8 | 16 |
 /// | `observation_tracks: Box<[u32]>` | 8 | 16 |
 /// | `observation_present: Box<[bool]>` | 8 | 16 |
 /// | `observation_armed: Box<[u32]>` | 8 | 16 |
 /// | `master_track: Option<u32>` | 8 | 8 |
-/// | `meter_header: WebMeterHeaderV1` | 64 | 64 |
+/// | `meter_header: WebMeterHeader` | 64 | 64 |
 /// | **sum** | **104** | **136** |
 ///
 /// The shipped wasm32 rows moved by `112`, which is `104` rounded up to the structure's 8-byte
 /// alignment. Nothing else in the report moved, which the oracle's `deepStrictEqual` proves.
 #[test]
 fn the_observation_fields_account_for_the_moved_bridge_rows() {
-    let fields = size_of::<Box<[Option<miso_engine_host_core::EffectObservationHandleV1>]>>()
+    let fields = size_of::<Box<[Option<miso_engine_host_core::EffectObservationHandle>]>>()
         + size_of::<Box<[u32]>>()
         + size_of::<Box<[bool]>>()
         + size_of::<Box<[u32]>>()
         + size_of::<Option<u32>>()
-        + size_of::<WebMeterHeaderV1>();
+        + size_of::<WebMeterHeader>();
     let pointer = size_of::<usize>();
     assert_eq!(
         fields,
@@ -2684,43 +2680,35 @@ fn the_observation_fields_account_for_the_moved_bridge_rows() {
 #[test]
 fn a_computed_tap_is_refused_with_unsupported_kind() {
     use miso_engine_effect_contract::{
-        EffectDescriptorV1, EffectId, LinkModeSet, ObservationCadenceV1, ObservationChannelsV1,
-        ObservationCostV1, ObservationDescriptorV1, ObservationFoldV1, ObservationKindV1,
-        ObservationTapId, ParameterUnit,
+        EffectDescriptor, EffectId, LinkModeSet, ObservationCadence, ObservationChannels,
+        ObservationCost, ObservationDescriptor, ObservationFold, ObservationKind, ObservationTapId,
+        ParameterUnit,
     };
 
     const fn tap(
         id: u32,
-        cost: ObservationCostV1,
-        cadence: ObservationCadenceV1,
-    ) -> ObservationDescriptorV1 {
-        ObservationDescriptorV1 {
+        cost: ObservationCost,
+        cadence: ObservationCadence,
+    ) -> ObservationDescriptor {
+        ObservationDescriptor {
             id: ObservationTapId(id),
             display_name: "Gain Reduction",
             display_unit: "dB",
-            kind: ObservationKindV1::GainReductionDb,
+            kind: ObservationKind::GainReductionDb,
             unit: ParameterUnit::Db,
             cost,
             cadence,
-            fold: ObservationFoldV1::PeakMagnitude,
-            channels: ObservationChannelsV1::Shared,
+            fold: ObservationFold::PeakMagnitude,
+            channels: ObservationChannels::Shared,
             minimum: 0.0,
             maximum: 100.0,
         }
     }
-    static MENU: [ObservationDescriptorV1; 2] = [
-        tap(
-            1,
-            ObservationCostV1::Resident,
-            ObservationCadenceV1::PerBlock,
-        ),
-        tap(
-            2,
-            ObservationCostV1::Computed,
-            ObservationCadenceV1::PerWindow,
-        ),
+    static MENU: [ObservationDescriptor; 2] = [
+        tap(1, ObservationCost::Resident, ObservationCadence::PerBlock),
+        tap(2, ObservationCost::Computed, ObservationCadence::PerWindow),
     ];
-    static DESCRIPTOR: EffectDescriptorV1 = EffectDescriptorV1 {
+    static DESCRIPTOR: EffectDescriptor = EffectDescriptor {
         id: match EffectId::new("test.observation") {
             Ok(value) => value,
             Err(_) => panic!("fixture id"),
@@ -2785,20 +2773,20 @@ fn a_computed_tap_is_refused_with_unsupported_kind() {
 #[test]
 fn observation_unit_conversion_is_declared_and_clamped() {
     use miso_engine_effect_contract::{
-        ObservationCadenceV1, ObservationChannelsV1, ObservationCostV1, ObservationDescriptorV1,
-        ObservationFoldV1, ObservationKindV1, ObservationTapId, ParameterUnit,
+        ObservationCadence, ObservationChannels, ObservationCost, ObservationDescriptor,
+        ObservationFold, ObservationKind, ObservationTapId, ParameterUnit,
     };
-    const fn tap(unit: ParameterUnit) -> ObservationDescriptorV1 {
-        ObservationDescriptorV1 {
+    const fn tap(unit: ParameterUnit) -> ObservationDescriptor {
+        ObservationDescriptor {
             id: ObservationTapId(1),
             display_name: "Gain Reduction",
             display_unit: "dB",
-            kind: ObservationKindV1::GainReductionDb,
+            kind: ObservationKind::GainReductionDb,
             unit,
-            cost: ObservationCostV1::Resident,
-            cadence: ObservationCadenceV1::PerBlock,
-            fold: ObservationFoldV1::PeakMagnitude,
-            channels: ObservationChannelsV1::PerLane,
+            cost: ObservationCost::Resident,
+            cadence: ObservationCadence::PerBlock,
+            fold: ObservationFold::PeakMagnitude,
+            channels: ObservationChannels::PerLane,
             minimum: 0.0,
             maximum: 100.0,
         }
@@ -2972,7 +2960,7 @@ fn raw_ffi_source_introspection_mirrors_the_track_queries() {
         assert_eq!(miso_engine_web_v1_source_sample_rate(probe, 0), 0);
     }
 
-    let mut config = WebPrepareConfigV1::launch_defaults(48_000, QUANTUM);
+    let mut config = WebPrepareConfig::launch_defaults(48_000, QUANTUM);
     config.source_ring_frames = QUANTUM;
     config.maximum_source_channels = 4;
     assert_eq!(crate::ffi::test_configure(handle, config), RESULT_OK);
@@ -3117,7 +3105,7 @@ fn solo_session(quantum: u32, tracks: usize, mutes: &[[bool; 2]]) -> String {
 /// neither, and a test that bound them would be measuring something else.
 fn solo_host(quantum: u32, tracks: usize, mutes: &[[bool; 2]]) -> AudioWorkletEngineHost {
     let toml = solo_session(quantum, tracks, mutes);
-    let mut config = WebPrepareConfigV1::console_defaults(48_000, quantum);
+    let mut config = WebPrepareConfig::console_defaults(48_000, quantum);
     config.source_ring_frames = quantum * 4;
     config.console_meter_blocks = 0;
     let mut host = AudioWorkletEngineHost::new(config);
@@ -3205,7 +3193,7 @@ fn render_pair_and_compare(
 /// first block the acknowledgement names.
 ///
 /// This is the whole architectural claim in one assertion. Solo composes at admission into the
-/// same `TrackFaderRecordV1::Mute` records an explicit mute lowers to, so a host told "solo these
+/// same `TrackFaderRecord::Mute` records an explicit mute lowers to, so a host told "solo these
 /// four" and a host told "mute the other four" must put the same bytes in the same queues and
 /// render the same samples. The two arms drive the same frozen fader section, and neither arm
 /// knows which one it is.
@@ -3825,7 +3813,7 @@ fn effect_solo_host(quantum: u32, tracks: usize, depth: u64) -> AudioWorkletEngi
         model.routes.push(route);
     }
     let toml = canonical_session_toml(&model).expect("canonical effect solo session");
-    let mut config = WebPrepareConfigV1::launch_defaults(48_000, quantum);
+    let mut config = WebPrepareConfig::launch_defaults(48_000, quantum);
     config.source_ring_frames = quantum * 4;
     config.console_command_queue_records = depth;
     let mut host = AudioWorkletEngineHost::new(config);

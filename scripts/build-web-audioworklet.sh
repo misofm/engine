@@ -55,7 +55,7 @@ cp --update=none "$repo_root/hosts/miso-engine-host-web/web/miso-engine-v2-audio
 
 # Issue #137 D4: the parameter metadata ships beside the module, so the app never introspects the
 # Wasm for names, units, ranges, defaults or enumerations. The effect list is read from
-# `launch_native_effect_registry_v1()`, so an effect cannot be in the engine and missing here.
+# `launch_native_effect_registry()`, so an effect cannot be in the engine and missing here.
 (
   cd "$repo_root"
   cargo run --locked --release -q -p miso-engine-parameter-metadata -- --write "$output_dir"

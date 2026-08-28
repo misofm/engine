@@ -34,7 +34,7 @@ const FLUSH_EPS: f32 = 1.0e-20;
 /// the analytic value by 0.0085 dB (bell) to 0.0154 dB (low pass) — thirty per cent of the frozen
 /// 0.05 dB budget spent before the production path is even involved.
 fn reference_window(
-    kind: miso_engine_parametric_eq::EqBandKindV1,
+    kind: miso_engine_parametric_eq::EqBandKind,
     frequency: f32,
     gain: f32,
     q: f32,
@@ -103,7 +103,7 @@ fn one_second_impulse_dfts_match_the_independent_oracle_at_all_frozen_edges() {
 #[test]
 fn flush_keeps_decaying_state_out_of_the_subnormal_range() {
     let configured = single_section_values(
-        miso_engine_parametric_eq::EqBandKindV1::Bell,
+        miso_engine_parametric_eq::EqBandKind::Bell,
         20_000.0,
         24.0,
         18.0,
@@ -247,7 +247,7 @@ fn forty_eight_frozen_million_sample_sequences_remain_valid_without_recovery() {
 #[test]
 fn a_non_finite_input_block_is_zeroed_counted_once_and_leaves_the_next_block_clean() {
     let configured = single_section_values(
-        miso_engine_parametric_eq::EqBandKindV1::HighPass,
+        miso_engine_parametric_eq::EqBandKind::HighPass,
         1_000.0,
         0.0,
         1.0,
@@ -284,8 +284,8 @@ fn a_non_finite_input_block_is_zeroed_counted_once_and_leaves_the_next_block_cle
 #[test]
 fn a_non_launch_sample_rate_is_not_a_legal_design() {
     assert!(
-        miso_engine_parametric_eq::design_svf_v1(
-            miso_engine_parametric_eq::EqBandKindV1::Bell,
+        miso_engine_parametric_eq::design_svf(
+            miso_engine_parametric_eq::EqBandKind::Bell,
             1_000.0,
             6.0,
             1.0,

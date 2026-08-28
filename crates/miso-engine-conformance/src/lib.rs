@@ -18,7 +18,7 @@ pub use effect::{
     ConformanceConfig, DUAL_ACCUMULATOR_DELAY_DESCRIPTOR, DualAccumulatorDelayFactory,
     EffectConformanceReport, EffectConformanceTierReport, FaultKind, run_effect_conformance,
 };
-pub use fixture::{FixtureError, FixtureLimits, PcmFixtureV1, crc32c};
+pub use fixture::{FixtureError, FixtureLimits, PcmFixture, crc32c};
 pub use manifest::{ManifestEntry, ManifestError, parse_manifest};
 pub use miso_engine_core::SampleRateHz;
 pub use miso_engine_dsp_reference::{F64PlanarBuffer, IdentityProcessor, render_planar_f64};
@@ -29,7 +29,7 @@ mod tests {
     use super::*;
 
     fn bytes() -> Vec<u8> {
-        PcmFixtureV1::encode(
+        PcmFixture::encode(
             SampleRateHz(48_000),
             2,
             2,
@@ -46,7 +46,7 @@ mod tests {
     #[test]
     fn fixture_preserves_bits_and_detects_every_bit_flip() {
         let original = bytes();
-        let decoded = PcmFixtureV1::parse(&original, Default::default()).expect("decode");
+        let decoded = PcmFixture::parse(&original, Default::default()).expect("decode");
         assert_eq!(decoded.samples()[1].to_bits(), (-0.0_f32).to_bits());
         assert_eq!(decoded.samples()[2].to_bits(), 0x7fc0_0042);
         for index in 0..original.len() {
@@ -54,10 +54,10 @@ mod tests {
                 let mut changed = original.clone();
                 changed[index] ^= 1 << bit;
                 assert!(
-                    std::panic::catch_unwind(|| PcmFixtureV1::parse(&changed, Default::default()))
+                    std::panic::catch_unwind(|| PcmFixture::parse(&changed, Default::default()))
                         .is_ok()
                 );
-                assert!(PcmFixtureV1::parse(&changed, Default::default()).is_err());
+                assert!(PcmFixture::parse(&changed, Default::default()).is_err());
             }
         }
     }
@@ -66,23 +66,23 @@ mod tests {
     fn fixture_header_limits_and_exact_length_reject() {
         let original = bytes();
         assert_eq!(
-            PcmFixtureV1::parse(&original[..47], Default::default()),
+            PcmFixture::parse(&original[..47], Default::default()),
             Err(FixtureError::TruncatedHeader)
         );
         let mut flags = original.clone();
         flags[12] = 1;
         assert_eq!(
-            PcmFixtureV1::parse(&flags, Default::default()),
+            PcmFixture::parse(&flags, Default::default()),
             Err(FixtureError::InvalidField)
         );
         let mut payload = original.clone();
         payload.push(0);
         assert_eq!(
-            PcmFixtureV1::parse(&payload, Default::default()),
+            PcmFixture::parse(&payload, Default::default()),
             Err(FixtureError::LengthMismatch)
         );
         assert_eq!(
-            PcmFixtureV1::parse(
+            PcmFixture::parse(
                 &original,
                 FixtureLimits {
                     max_frames: 1,

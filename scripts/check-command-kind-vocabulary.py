@@ -12,7 +12,7 @@ already drifted -- silently, in the shipped artifact:
 * `hosts/miso-engine-host-web/web/miso-engine-v2-audio-worklet-host.js` -- the `COMMAND_KINDS` set
   `validCommand` gates every submitted record through.
 * `hosts/miso-engine-host-web/web/miso-engine-v2-audio-worklet-host.d.ts` -- the
-  `MisoCommandKindV1` enum a typed consumer compiles against.
+  `MisoCommandKind` enum a typed consumer compiles against.
 * `tools/miso-engine-parameter-metadata/src/lib.rs` -- the `commandKinds` rows of the shipped JSON,
   which is where an app reads the vocabulary from.
 * `scripts/check-parameter-metadata-v1.py` -- the schema gate's deliberately independent list.
@@ -161,7 +161,7 @@ def host_js_set(text: str) -> list[int]:
 
 def dts_enum_members(text: str) -> list[tuple[int, str, str]]:
     """`(value, camelCase name, the doc comment that precedes it)` for the `.d.ts` enum."""
-    block = block_after(text, "export const enum MisoCommandKindV1 ", "{", "}")
+    block = block_after(text, "export const enum MisoCommandKind ", "{", "}")
     members: list[tuple[int, str, str]] = []
     doc: list[str] = []
     for line in block.splitlines():
@@ -175,7 +175,7 @@ def dts_enum_members(text: str) -> list[tuple[int, str, str]]:
             doc = []
         elif stripped:
             doc = []
-    require(members, "the .d.ts MisoCommandKindV1 enum is empty")
+    require(members, "the .d.ts MisoCommandKind enum is empty")
     return sorted(members)
 
 
@@ -297,12 +297,12 @@ def validate(texts: dict[pathlib.Path, str], document: dict | None = None) -> No
     generator_rows, generator_observation = metadata_generator_table(texts[METADATA_GENERATOR])
     spellings = {
         "rust host constants": rust_constants(texts[RUST_CONSTANTS]),
-        ".d.ts MisoCommandKindV1": host_dts_enum(texts[HOST_DTS]),
+        ".d.ts MisoCommandKind": host_dts_enum(texts[HOST_DTS]),
         "metadata generator rows": generator_rows,
         "schema gate list": schema_gate_list(texts[SCHEMA_GATE]),
     }
     planes = {
-        ".d.ts MisoCommandKindV1": dts_observation_plane(texts[HOST_DTS]),
+        ".d.ts MisoCommandKind": dts_observation_plane(texts[HOST_DTS]),
         "metadata generator rows": generator_observation,
         "schema gate list": schema_gate_observation_plane(texts[SCHEMA_GATE]),
     }

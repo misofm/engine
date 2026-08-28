@@ -1,26 +1,26 @@
 use core::num::NonZeroUsize;
 use miso_engine_core::realtime::{
-    ObservationReaderV1, Producer, QueueGeneration, bounded_spsc, observation_slot,
+    ObservationReader, Producer, QueueGeneration, bounded_spsc, observation_slot,
 };
 use miso_engine_effect_contract::{
-    BankWidth, ChannelSymmetryWitnessV1, EffectControlLane, EffectControlRecordV1,
-    EffectDescriptorV1, EffectProgramKeyV1, EffectQuality, InitialParameterValue, LinkMode,
-    NativeEffectFactory, NativeEffectRegistry, ObservationLaneV1, ParameterChannel,
-    ParameterChannelPolicy, ParameterUnit, PrepareEffectBankRequest, PrepareEffectLimits,
-    PrepareEffectRequest, PreparedBankMetadata, PreparedEffectMetadata, PreparedNativeEffect,
-    PreparedNativeEffectBank, PreparedPortsV1, PreparedSidechainPort, RegistryError,
-    StatePayloadInput, StatePayloadOutput, expected_prepared_metadata, payload_sections_agree,
+    BankWidth, ChannelSymmetryWitness, EffectControlLane, EffectControlRecord, EffectDescriptor,
+    EffectProgramKey, EffectQuality, InitialParameterValue, LinkMode, NativeEffectFactory,
+    NativeEffectRegistry, ObservationLane, ParameterChannel, ParameterChannelPolicy, ParameterUnit,
+    PrepareEffectBankRequest, PrepareEffectLimits, PrepareEffectRequest, PreparedBankMetadata,
+    PreparedEffectMetadata, PreparedNativeEffect, PreparedNativeEffectBank, PreparedPorts,
+    PreparedSidechainPort, RegistryError, StatePayloadInput, StatePayloadOutput,
+    expected_prepared_metadata, payload_sections_agree,
 };
 use miso_engine_effect_package::{
-    BoundEffectDescriptorWireV1, EFFECT_STATE_V1_BUFFER_ENVELOPE_OUTPUT,
-    EFFECT_STATE_V1_BUFFER_INITIAL_VALUE_SCRATCH, EFFECT_STATE_V1_BUFFER_PAYLOAD_SCRATCH,
-    EFFECT_STATE_V1_UNAVAILABLE_INDEX, EFFECT_STATE_V1_UNAVAILABLE_OFFSET,
-    EffectDescriptorBindingErrorKindV1, EffectStateDerivedResourcesV1, EffectStateDiagnosticCodeV1,
-    EffectStateDiagnosticV1, EffectStateLimitsV1, EffectStateReplayViewV1,
-    EffectStateRequirementsV1, VerifiedEffectStateV1, bind_effect_descriptor_wire_v1,
-    effect_state_derived_resources_v1, effect_state_expected_metadata_v1,
-    effect_state_v1_requirements, encode_effect_state_v1, validate_effect_state_current_layout_v1,
-    validate_effect_state_metadata_v1, validate_effect_state_replay_v1, verify_effect_state_v1,
+    BoundEffectDescriptorWire, EFFECT_STATE_BUFFER_ENVELOPE_OUTPUT,
+    EFFECT_STATE_BUFFER_INITIAL_VALUE_SCRATCH, EFFECT_STATE_BUFFER_PAYLOAD_SCRATCH,
+    EFFECT_STATE_UNAVAILABLE_INDEX, EFFECT_STATE_UNAVAILABLE_OFFSET,
+    EffectDescriptorBindingErrorKind, EffectStateDerivedResources, EffectStateDiagnostic,
+    EffectStateDiagnosticCode, EffectStateLimits, EffectStateReplayView, EffectStateRequirements,
+    VerifiedEffectState, bind_effect_descriptor_wire, effect_state_derived_resources,
+    effect_state_expected_metadata, effect_state_requirements, encode_effect_state,
+    validate_effect_state_current_layout, validate_effect_state_metadata,
+    validate_effect_state_replay, verify_effect_state,
 };
 use miso_engine_session::{
     CompiledSession, EffectIdentity, LinkMode as SessionLinkMode,
@@ -47,37 +47,37 @@ pub struct EffectPreparedEntry {
     /// Factory retained only for transactional off-render bank binding.
     pub factory: Arc<dyn miso_engine_effect_contract::NativeEffectFactory>,
     /// Exact owned request inputs used to prepare the scalar processor.
-    pub bank_preparation: EffectBankPreparationV1,
+    pub bank_preparation: EffectBankPreparation,
     /// The consumer half of this instance's live-console control channel (issue #140 A).
     ///
-    /// `None` unless [`attach_effect_console_v1`] was called, which is the only way one is ever
+    /// `None` unless [`attach_effect_console`] was called, which is the only way one is ever
     /// created. It travels with the entry into `GraphPreparedEffect`, so the plan that renders the
     /// effect is the one that drains its queue, and a session with no console carries a `None`
     /// that the runtime turns back into the byte-identical console-free path.
     pub control: Option<Box<EffectControlLane>>,
     /// This instance's observation taps (issue #143 D3, level 1).
     ///
-    /// `None` unless [`attach_effect_observation_v1`] was called, which is the only way one is
+    /// `None` unless [`attach_effect_observation`] was called, which is the only way one is
     /// ever created. A session whose console request named no observation capacity carries `None`
     /// here, and the runtime turns that back into the byte-identical unobserved path: there is no
     /// lane, no slot and no vector anywhere in the compiled plan.
-    pub observation: Option<Box<ObservationLaneV1>>,
+    pub observation: Option<Box<ObservationLane>>,
 }
 
 /// Owned replayable portion of an accepted prepare request. It never crosses into render.
 #[derive(Clone, Debug)]
-pub struct EffectBankPreparationV1 {
+pub struct EffectBankPreparation {
     pub sample_rate: u32,
     pub quantum: u32,
     pub quality: EffectQuality,
     pub bypass: bool,
     pub link_mode: LinkMode,
-    pub ports: PreparedPortsV1,
+    pub ports: PreparedPorts,
     pub initial_values: Box<[InitialParameterValue]>,
     pub limits: PrepareEffectLimits,
 }
 
-impl EffectBankPreparationV1 {
+impl EffectBankPreparation {
     #[must_use]
     pub fn request(&self) -> PrepareEffectRequest<'_> {
         PrepareEffectRequest {
@@ -96,64 +96,63 @@ impl EffectBankPreparationV1 {
     pub fn state_replay(
         &self,
         effect_id: miso_engine_effect_contract::EffectId,
-    ) -> EffectStateReplayViewV1<'_> {
-        EffectStateReplayViewV1 {
+    ) -> EffectStateReplayView<'_> {
+        EffectStateReplayView {
             effect_id,
             request: self.request(),
         }
     }
 }
 
-pub struct WireBoundNativeEffectFactoryV1<'wire> {
+pub struct WireBoundNativeEffectFactory<'wire> {
     factory: Arc<dyn NativeEffectFactory>,
-    descriptor: &'static EffectDescriptorV1,
-    bound_descriptor: BoundEffectDescriptorWireV1<'wire>,
+    descriptor: &'static EffectDescriptor,
+    bound_descriptor: BoundEffectDescriptorWire<'wire>,
 }
 
-impl core::fmt::Debug for WireBoundNativeEffectFactoryV1<'_> {
+impl core::fmt::Debug for WireBoundNativeEffectFactory<'_> {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         formatter
-            .debug_struct("WireBoundNativeEffectFactoryV1")
+            .debug_struct("WireBoundNativeEffectFactory")
             .field("effect_id", &self.descriptor.id)
             .field("descriptor_identity", &self.bound_descriptor.identity())
             .finish_non_exhaustive()
     }
 }
 
-impl<'wire> WireBoundNativeEffectFactoryV1<'wire> {
+impl<'wire> WireBoundNativeEffectFactory<'wire> {
     #[must_use]
     pub fn factory(&self) -> &Arc<dyn NativeEffectFactory> {
         &self.factory
     }
 
     #[must_use]
-    pub const fn descriptor(&self) -> &'static EffectDescriptorV1 {
+    pub const fn descriptor(&self) -> &'static EffectDescriptor {
         self.descriptor
     }
 
     #[must_use]
-    pub const fn bound_descriptor(&self) -> BoundEffectDescriptorWireV1<'wire> {
+    pub const fn bound_descriptor(&self) -> BoundEffectDescriptorWire<'wire> {
         self.bound_descriptor
     }
 }
 
 fn descriptor_binding_diagnostic(
-    error: miso_engine_effect_package::EffectDescriptorBindingErrorV1,
-) -> EffectStateDiagnosticV1 {
+    error: miso_engine_effect_package::EffectDescriptorBindingError,
+) -> EffectStateDiagnostic {
     let nested = error.diagnostic();
     let kind = match error.kind() {
-        EffectDescriptorBindingErrorKindV1::ExternalWire => 1,
-        EffectDescriptorBindingErrorKindV1::StaticDescriptorMismatch => 2,
+        EffectDescriptorBindingErrorKind::ExternalWire => 1,
+        EffectDescriptorBindingErrorKind::StaticDescriptorMismatch => 2,
     };
-    let byte_offset = if nested.byte_offset
-        == miso_engine_effect_package::EFFECT_DESCRIPTOR_WIRE_V1_UNAVAILABLE
-    {
-        EFFECT_STATE_V1_UNAVAILABLE_OFFSET
-    } else {
-        u64::from(nested.byte_offset)
-    };
-    let mut diagnostic = EffectStateDiagnosticV1::new(
-        EffectStateDiagnosticCodeV1::Descriptor,
+    let byte_offset =
+        if nested.byte_offset == miso_engine_effect_package::EFFECT_DESCRIPTOR_WIRE_UNAVAILABLE {
+            EFFECT_STATE_UNAVAILABLE_OFFSET
+        } else {
+            u64::from(nested.byte_offset)
+        };
+    let mut diagnostic = EffectStateDiagnostic::new(
+        EffectStateDiagnosticCode::Descriptor,
         (kind << 16) | nested.code as u32,
         nested.record_index,
         byte_offset,
@@ -162,16 +161,16 @@ fn descriptor_binding_diagnostic(
     diagnostic
 }
 
-pub fn bind_native_effect_factory_state_v1(
+pub fn bind_native_effect_factory_state(
     factory: Arc<dyn NativeEffectFactory>,
     descriptor_wire: &[u8],
     maximum_descriptor_bytes: u32,
-) -> Result<WireBoundNativeEffectFactoryV1<'_>, EffectStateDiagnosticV1> {
+) -> Result<WireBoundNativeEffectFactory<'_>, EffectStateDiagnostic> {
     let descriptor = factory.descriptor();
     let bound_descriptor =
-        bind_effect_descriptor_wire_v1(descriptor, descriptor_wire, maximum_descriptor_bytes)
+        bind_effect_descriptor_wire(descriptor, descriptor_wire, maximum_descriptor_bytes)
             .map_err(descriptor_binding_diagnostic)?;
-    Ok(WireBoundNativeEffectFactoryV1 {
+    Ok(WireBoundNativeEffectFactory {
         factory,
         descriptor,
         bound_descriptor,
@@ -179,7 +178,7 @@ pub fn bind_native_effect_factory_state_v1(
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct EffectStateRestoreAdmissionV1 {
+pub struct EffectStateRestoreAdmission {
     pub sample_rate: u32,
     pub quantum: u32,
     pub maximum_total_state_bytes: u64,
@@ -187,26 +186,26 @@ pub struct EffectStateRestoreAdmissionV1 {
     pub maximum_automation_spans_per_block: u32,
 }
 
-pub struct RestoredScalarEffectStateV1<'wire> {
+pub struct RestoredScalarEffectState<'wire> {
     processor: Box<dyn PreparedNativeEffect>,
     metadata: PreparedEffectMetadata,
-    bound_factory: WireBoundNativeEffectFactoryV1<'wire>,
-    replay: EffectBankPreparationV1,
+    bound_factory: WireBoundNativeEffectFactory<'wire>,
+    replay: EffectBankPreparation,
     /// This restore's channel-symmetry witness, decided from the envelope's own bytes.
-    symmetry: ChannelSymmetryWitnessV1,
+    symmetry: ChannelSymmetryWitness,
 }
 
-impl core::fmt::Debug for RestoredScalarEffectStateV1<'_> {
+impl core::fmt::Debug for RestoredScalarEffectState<'_> {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         formatter
-            .debug_struct("RestoredScalarEffectStateV1")
+            .debug_struct("RestoredScalarEffectState")
             .field("metadata", &self.metadata)
             .field("replay", &self.replay)
             .finish_non_exhaustive()
     }
 }
 
-impl RestoredScalarEffectStateV1<'_> {
+impl RestoredScalarEffectState<'_> {
     /// This restored instance's channel-symmetry witness.
     ///
     /// `RESTORED` holds exactly when the envelope's left and right payload sections compared
@@ -222,7 +221,7 @@ impl RestoredScalarEffectStateV1<'_> {
     /// only the byte comparison sees that. It is also the cheapest possible form: one `memcmp` of
     /// two equal-length slices, off the render thread, once.
     #[must_use]
-    pub const fn channel_symmetry(&self) -> ChannelSymmetryWitnessV1 {
+    pub const fn channel_symmetry(&self) -> ChannelSymmetryWitness {
         self.symmetry
     }
 
@@ -242,36 +241,36 @@ impl RestoredScalarEffectStateV1<'_> {
     }
 
     #[must_use]
-    pub fn bound_factory(&self) -> &WireBoundNativeEffectFactoryV1<'_> {
+    pub fn bound_factory(&self) -> &WireBoundNativeEffectFactory<'_> {
         &self.bound_factory
     }
 
     #[must_use]
-    pub fn replay(&self) -> &EffectBankPreparationV1 {
+    pub fn replay(&self) -> &EffectBankPreparation {
         &self.replay
     }
 }
 
-pub struct UnpublishedEffectBankStateV1<'wire> {
+pub struct UnpublishedEffectBankState<'wire> {
     bank: Box<dyn PreparedNativeEffectBank>,
     metadata: PreparedBankMetadata,
     backend: Backend,
     width: BankWidth,
-    bound_factory: WireBoundNativeEffectFactoryV1<'wire>,
-    replays: Box<[EffectBankPreparationV1]>,
+    bound_factory: WireBoundNativeEffectFactory<'wire>,
+    replays: Box<[EffectBankPreparation]>,
     /// Per-lane `RESTORED` term, one entry per lane of the bound width.
     ///
     /// A freshly bound bank has restored nothing, so every lane starts `true`: the term says "no
     /// restore has contradicted this lane", and a lane that was never restored has not been
-    /// contradicted. Each `restore_unpublished_effect_bank_track_state_v1` writes exactly its own
+    /// contradicted. Each `restore_unpublished_effect_bank_track_state` writes exactly its own
     /// lane's entry, which is what keeps the per-lane witnesses free of cross-lane coupling.
     restored: Box<[bool]>,
 }
 
-impl core::fmt::Debug for UnpublishedEffectBankStateV1<'_> {
+impl core::fmt::Debug for UnpublishedEffectBankState<'_> {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         formatter
-            .debug_struct("UnpublishedEffectBankStateV1")
+            .debug_struct("UnpublishedEffectBankState")
             .field("metadata", &self.metadata)
             .field("backend", &self.backend)
             .field("width", &self.width)
@@ -280,22 +279,22 @@ impl core::fmt::Debug for UnpublishedEffectBankStateV1<'_> {
     }
 }
 
-impl UnpublishedEffectBankStateV1<'_> {
+impl UnpublishedEffectBankState<'_> {
     /// One lane's channel-symmetry witness for this bound bank.
     ///
     /// `RESTORED` is what that lane's restore decided (see
-    /// [`RestoredScalarEffectStateV1::channel_symmetry`] for the argument); `DESIGNED` is the
+    /// [`RestoredScalarEffectState::channel_symmetry`] for the argument); `DESIGNED` is the
     /// bank's own comparison of the words its kernel reads for that lane. A lane index the bound
     /// width does not have declines outright.
     #[must_use]
-    pub fn lane_channel_symmetry(&self, lane: usize) -> ChannelSymmetryWitnessV1 {
+    pub fn lane_channel_symmetry(&self, lane: usize) -> ChannelSymmetryWitness {
         let Some(restored) = self.restored.get(lane).copied() else {
-            return ChannelSymmetryWitnessV1::DECLINED;
+            return ChannelSymmetryWitness::DECLINED;
         };
-        let mut witness = ChannelSymmetryWitnessV1::SYMMETRIC;
-        witness.set(ChannelSymmetryWitnessV1::RESTORED, restored);
+        let mut witness = ChannelSymmetryWitness::SYMMETRIC;
+        witness.set(ChannelSymmetryWitness::RESTORED, restored);
         witness.set(
-            ChannelSymmetryWitnessV1::DESIGNED,
+            ChannelSymmetryWitness::DESIGNED,
             self.bank.lane_channel_symmetry(lane),
         );
         witness
@@ -327,36 +326,36 @@ impl UnpublishedEffectBankStateV1<'_> {
     }
 
     #[must_use]
-    pub fn bound_factory(&self) -> &WireBoundNativeEffectFactoryV1<'_> {
+    pub fn bound_factory(&self) -> &WireBoundNativeEffectFactory<'_> {
         &self.bound_factory
     }
 
     #[must_use]
-    pub fn replays(&self) -> &[EffectBankPreparationV1] {
+    pub fn replays(&self) -> &[EffectBankPreparation] {
         &self.replays
     }
 }
 
 fn state_diagnostic(
-    code: EffectStateDiagnosticCodeV1,
+    code: EffectStateDiagnosticCode,
     detail: u32,
     byte_offset: u64,
-) -> EffectStateDiagnosticV1 {
-    EffectStateDiagnosticV1::new(code, detail, EFFECT_STATE_V1_UNAVAILABLE_INDEX, byte_offset)
+) -> EffectStateDiagnostic {
+    EffectStateDiagnostic::new(code, detail, EFFECT_STATE_UNAVAILABLE_INDEX, byte_offset)
 }
 
-fn state_unavailable(code: EffectStateDiagnosticCodeV1, detail: u32) -> EffectStateDiagnosticV1 {
-    state_diagnostic(code, detail, EFFECT_STATE_V1_UNAVAILABLE_OFFSET)
+fn state_unavailable(code: EffectStateDiagnosticCode, detail: u32) -> EffectStateDiagnostic {
+    state_diagnostic(code, detail, EFFECT_STATE_UNAVAILABLE_OFFSET)
 }
 
-fn bank_restore_error(detail: u32) -> EffectStateDiagnosticV1 {
-    state_unavailable(EffectStateDiagnosticCodeV1::Restore, detail)
+fn bank_restore_error(detail: u32) -> EffectStateDiagnostic {
+    state_unavailable(EffectStateDiagnosticCode::Restore, detail)
 }
 
 fn admit_bank_preparation(
-    replay: &EffectBankPreparationV1,
-    admission: EffectStateRestoreAdmissionV1,
-) -> Result<(), EffectStateDiagnosticV1> {
+    replay: &EffectBankPreparation,
+    admission: EffectStateRestoreAdmission,
+) -> Result<(), EffectStateDiagnostic> {
     if !miso_engine_core::is_launch_sample_rate(miso_engine_core::SampleRateHz(
         admission.sample_rate,
     )) || replay.sample_rate != admission.sample_rate
@@ -389,13 +388,13 @@ fn admit_bank_preparation(
 }
 
 fn admit_bank_derived_resources(
-    resources: EffectStateDerivedResourcesV1,
-    admission: EffectStateRestoreAdmissionV1,
-) -> Result<(), EffectStateDiagnosticV1> {
+    resources: EffectStateDerivedResources,
+    admission: EffectStateRestoreAdmission,
+) -> Result<(), EffectStateDiagnostic> {
     let payload_bytes = resources
         .state_sizes
         .total()
-        .ok_or_else(|| state_unavailable(EffectStateDiagnosticCodeV1::Overflow, 0))?;
+        .ok_or_else(|| state_unavailable(EffectStateDiagnosticCode::Overflow, 0))?;
     if payload_bytes > admission.maximum_total_state_bytes {
         return Err(state_limit(216, payload_bytes));
     }
@@ -409,14 +408,14 @@ fn admit_bank_derived_resources(
 }
 
 fn expected_bank_program_key(
-    bound_factory: &WireBoundNativeEffectFactoryV1<'_>,
+    bound_factory: &WireBoundNativeEffectFactory<'_>,
     backend: Backend,
     width: BankWidth,
-    replays: &[EffectBankPreparationV1],
-    admission: EffectStateRestoreAdmissionV1,
-) -> Result<EffectProgramKeyV1, EffectStateDiagnosticV1> {
+    replays: &[EffectBankPreparation],
+    admission: EffectStateRestoreAdmission,
+) -> Result<EffectProgramKey, EffectStateDiagnostic> {
     if !width.matches_backend(backend) || replays.len() != width.lanes() as usize {
-        return Err(state_unavailable(EffectStateDiagnosticCodeV1::Factory, 2));
+        return Err(state_unavailable(EffectStateDiagnosticCode::Factory, 2));
     }
     let mut program_key = None;
     for (track_index, replay) in replays.iter().enumerate() {
@@ -426,40 +425,36 @@ fn expected_bank_program_key(
         })?;
         let replay_view = replay.state_replay(bound_factory.descriptor.id);
         let resources =
-            effect_state_derived_resources_v1(bound_factory.bound_descriptor, replay.request())
-                .map_err(|_| state_unavailable(EffectStateDiagnosticCodeV1::Factory, 2))?;
+            effect_state_derived_resources(bound_factory.bound_descriptor, replay.request())
+                .map_err(|_| state_unavailable(EffectStateDiagnosticCode::Factory, 2))?;
         admit_bank_derived_resources(resources, admission).map_err(|mut diagnostic| {
             diagnostic.item_index = track_index as u32;
             diagnostic
         })?;
-        let metadata =
-            effect_state_expected_metadata_v1(bound_factory.bound_descriptor, replay_view)
-                .map_err(|_| state_unavailable(EffectStateDiagnosticCodeV1::Factory, 2))?;
+        let metadata = effect_state_expected_metadata(bound_factory.bound_descriptor, replay_view)
+            .map_err(|_| state_unavailable(EffectStateDiagnosticCode::Factory, 2))?;
         let candidate = metadata.program_key();
         if program_key
             .as_ref()
             .is_some_and(|expected| expected != &candidate)
         {
-            return Err(state_unavailable(EffectStateDiagnosticCodeV1::Factory, 2));
+            return Err(state_unavailable(EffectStateDiagnosticCode::Factory, 2));
         }
         program_key = Some(candidate);
     }
-    program_key.ok_or_else(|| state_unavailable(EffectStateDiagnosticCodeV1::Factory, 2))
+    program_key.ok_or_else(|| state_unavailable(EffectStateDiagnosticCode::Factory, 2))
 }
 
-pub fn prepare_unpublished_effect_bank_state_v1<'wire>(
-    bound_factory: WireBoundNativeEffectFactoryV1<'wire>,
+pub fn prepare_unpublished_effect_bank_state<'wire>(
+    bound_factory: WireBoundNativeEffectFactory<'wire>,
     backend: Backend,
     width: BankWidth,
-    replays: Box<[EffectBankPreparationV1]>,
-    admission: EffectStateRestoreAdmissionV1,
-) -> Result<UnpublishedEffectBankStateV1<'wire>, EffectStateDiagnosticV1> {
+    replays: Box<[EffectBankPreparation]>,
+    admission: EffectStateRestoreAdmission,
+) -> Result<UnpublishedEffectBankState<'wire>, EffectStateDiagnostic> {
     let program_key =
         expected_bank_program_key(&bound_factory, backend, width, replays.as_ref(), admission)?;
-    let requests: Vec<_> = replays
-        .iter()
-        .map(EffectBankPreparationV1::request)
-        .collect();
+    let requests: Vec<_> = replays.iter().map(EffectBankPreparation::request).collect();
     let bank = bound_factory
         .factory
         .bind_homogeneous_bank(PrepareEffectBankRequest {
@@ -467,17 +462,17 @@ pub fn prepare_unpublished_effect_bank_state_v1<'wire>(
             width,
             requests: &requests,
         })
-        .map_err(|_| state_unavailable(EffectStateDiagnosticCodeV1::Factory, 3))?
-        .ok_or_else(|| state_unavailable(EffectStateDiagnosticCodeV1::Factory, 3))?;
+        .map_err(|_| state_unavailable(EffectStateDiagnosticCode::Factory, 3))?
+        .ok_or_else(|| state_unavailable(EffectStateDiagnosticCode::Factory, 3))?;
     let metadata = bank.metadata();
     if metadata.width != width || metadata.program_key != program_key {
-        return Err(state_unavailable(EffectStateDiagnosticCodeV1::Factory, 4));
+        return Err(state_unavailable(EffectStateDiagnosticCode::Factory, 4));
     }
     if !core::ptr::eq(bound_factory.factory.descriptor(), bound_factory.descriptor) {
-        return Err(state_unavailable(EffectStateDiagnosticCodeV1::Factory, 4));
+        return Err(state_unavailable(EffectStateDiagnosticCode::Factory, 4));
     }
     let restored = vec![true; width.lanes() as usize].into_boxed_slice();
-    Ok(UnpublishedEffectBankStateV1 {
+    Ok(UnpublishedEffectBankState {
         bank,
         metadata,
         backend,
@@ -489,9 +484,9 @@ pub fn prepare_unpublished_effect_bank_state_v1<'wire>(
 }
 
 fn unpublished_bank_track_replay<'a>(
-    capability: &'a UnpublishedEffectBankStateV1<'_>,
+    capability: &'a UnpublishedEffectBankState<'_>,
     track_index: u32,
-) -> Result<&'a EffectBankPreparationV1, EffectStateDiagnosticV1> {
+) -> Result<&'a EffectBankPreparation, EffectStateDiagnostic> {
     let replay = capability
         .replays
         .get(track_index as usize)
@@ -508,14 +503,14 @@ fn unpublished_bank_track_replay<'a>(
 }
 
 fn validate_unpublished_bank_program_and_provenance(
-    capability: &UnpublishedEffectBankStateV1<'_>,
-    replay: &EffectBankPreparationV1,
-) -> Result<(), EffectStateDiagnosticV1> {
+    capability: &UnpublishedEffectBankState<'_>,
+    replay: &EffectBankPreparation,
+) -> Result<(), EffectStateDiagnostic> {
     let metadata = capability.bank.metadata();
     if metadata.width != capability.width {
         return Err(bank_restore_error(2));
     }
-    let expected = effect_state_expected_metadata_v1(
+    let expected = effect_state_expected_metadata(
         capability.bound_factory.bound_descriptor,
         replay.state_replay(capability.bound_factory.descriptor.id),
     )
@@ -534,36 +529,36 @@ fn validate_unpublished_bank_program_and_provenance(
     Ok(())
 }
 
-pub fn snapshot_unpublished_effect_bank_track_state_v1(
-    capability: &UnpublishedEffectBankStateV1<'_>,
+pub fn snapshot_unpublished_effect_bank_track_state(
+    capability: &UnpublishedEffectBankState<'_>,
     track_index: u32,
-    limits: EffectStateLimitsV1,
+    limits: EffectStateLimits,
     payload_scratch: &mut [u8],
     output: &mut [u8],
-) -> Result<u64, EffectStateDiagnosticV1> {
+) -> Result<u64, EffectStateDiagnostic> {
     let replay = capability
         .replays
         .get(track_index as usize)
         .ok_or_else(|| bank_restore_error(1))?;
     let replay_view = replay.state_replay(capability.bound_factory.descriptor.id);
-    let requirements = effect_state_v1_requirements(
+    let requirements = effect_state_requirements(
         capability.bound_factory.bound_descriptor,
         replay_view,
         limits,
     )?;
     let output_bytes = usize::try_from(requirements.envelope_bytes)
-        .map_err(|_| state_unavailable(EffectStateDiagnosticCodeV1::Overflow, 0))?;
+        .map_err(|_| state_unavailable(EffectStateDiagnosticCode::Overflow, 0))?;
     if output.len() < output_bytes {
-        return Err(EffectStateDiagnosticV1::buffer_too_small(
-            EFFECT_STATE_V1_BUFFER_ENVELOPE_OUTPUT,
+        return Err(EffectStateDiagnostic::buffer_too_small(
+            EFFECT_STATE_BUFFER_ENVELOPE_OUTPUT,
             requirements.envelope_bytes,
         ));
     }
     let scratch_bytes = usize::try_from(requirements.payload_snapshot_scratch_bytes)
-        .map_err(|_| state_unavailable(EffectStateDiagnosticCodeV1::Overflow, 0))?;
+        .map_err(|_| state_unavailable(EffectStateDiagnosticCode::Overflow, 0))?;
     if payload_scratch.len() < scratch_bytes {
-        return Err(EffectStateDiagnosticV1::buffer_too_small(
-            EFFECT_STATE_V1_BUFFER_PAYLOAD_SCRATCH,
+        return Err(EffectStateDiagnostic::buffer_too_small(
+            EFFECT_STATE_BUFFER_PAYLOAD_SCRATCH,
             requirements.payload_snapshot_scratch_bytes,
         ));
     }
@@ -574,12 +569,12 @@ pub fn snapshot_unpublished_effect_bank_track_state_v1(
         payload_scratch[..scratch_bytes].split_at_mut(sizes.common_bytes as usize);
     let (left, right) = remainder.split_at_mut(sizes.left_bytes as usize);
     let payload_output = StatePayloadOutput::new(common, left, right, sizes)
-        .map_err(|_| state_unavailable(EffectStateDiagnosticCodeV1::Payload, 2))?;
+        .map_err(|_| state_unavailable(EffectStateDiagnosticCode::Payload, 2))?;
     capability
         .bank
         .snapshot_track_state_payload(track_index, payload_output)
-        .map_err(|_| state_unavailable(EffectStateDiagnosticCodeV1::Payload, 2))?;
-    encode_effect_state_v1(
+        .map_err(|_| state_unavailable(EffectStateDiagnosticCode::Payload, 2))?;
+    encode_effect_state(
         capability.bound_factory.bound_descriptor,
         replay.state_replay(capability.bound_factory.descriptor.id),
         common,
@@ -590,19 +585,18 @@ pub fn snapshot_unpublished_effect_bank_track_state_v1(
     )
 }
 
-pub fn restore_unpublished_effect_bank_track_state_v1<'wire>(
-    mut capability: UnpublishedEffectBankStateV1<'wire>,
+pub fn restore_unpublished_effect_bank_track_state<'wire>(
+    mut capability: UnpublishedEffectBankState<'wire>,
     track_index: u32,
     envelope: &[u8],
-    limits: EffectStateLimitsV1,
-    admission: EffectStateRestoreAdmissionV1,
-) -> Result<UnpublishedEffectBankStateV1<'wire>, EffectStateDiagnosticV1> {
-    let state =
-        verify_effect_state_v1(capability.bound_factory.bound_descriptor, envelope, limits)?;
+    limits: EffectStateLimits,
+    admission: EffectStateRestoreAdmission,
+) -> Result<UnpublishedEffectBankState<'wire>, EffectStateDiagnostic> {
+    let state = verify_effect_state(capability.bound_factory.bound_descriptor, envelope, limits)?;
     admit_restored_state(state, admission)?;
     let replay = unpublished_bank_track_replay(&capability, track_index)?;
-    validate_effect_state_current_layout_v1(state)?;
-    validate_effect_state_replay_v1(
+    validate_effect_state_current_layout(state)?;
+    validate_effect_state_replay(
         state,
         replay.state_replay(capability.bound_factory.descriptor.id),
     )
@@ -621,74 +615,74 @@ pub fn restore_unpublished_effect_bank_track_state_v1<'wire>(
         right,
         capability.metadata.program_key.state_sizes,
     )
-    .map_err(|_| state_unavailable(EffectStateDiagnosticCodeV1::Payload, 4))?;
+    .map_err(|_| state_unavailable(EffectStateDiagnosticCode::Payload, 4))?;
     capability
         .bank
         .restore_track_state_payload(track_index, state.state_layout_version(), payload_input)
-        .map_err(|_| state_unavailable(EffectStateDiagnosticCodeV1::Payload, 4))?;
+        .map_err(|_| state_unavailable(EffectStateDiagnosticCode::Payload, 4))?;
     if let Some(lane) = capability.restored.get_mut(track_index as usize) {
         *lane = *lane && sections_agree;
     }
     Ok(capability)
 }
 
-fn state_limit(byte_offset: u64, required_bytes: u64) -> EffectStateDiagnosticV1 {
-    let mut diagnostic = state_diagnostic(EffectStateDiagnosticCodeV1::Limit, 0, byte_offset);
+fn state_limit(byte_offset: u64, required_bytes: u64) -> EffectStateDiagnostic {
+    let mut diagnostic = state_diagnostic(EffectStateDiagnosticCode::Limit, 0, byte_offset);
     diagnostic.required_bytes = required_bytes;
     diagnostic
 }
 
-pub fn scalar_effect_state_v1_requirements(
-    bound_factory: &WireBoundNativeEffectFactoryV1<'_>,
-    replay: &EffectBankPreparationV1,
-    limits: EffectStateLimitsV1,
-) -> Result<EffectStateRequirementsV1, EffectStateDiagnosticV1> {
-    effect_state_v1_requirements(
+pub fn scalar_effect_state_requirements(
+    bound_factory: &WireBoundNativeEffectFactory<'_>,
+    replay: &EffectBankPreparation,
+    limits: EffectStateLimits,
+) -> Result<EffectStateRequirements, EffectStateDiagnostic> {
+    effect_state_requirements(
         bound_factory.bound_descriptor,
         replay.state_replay(bound_factory.descriptor.id),
         limits,
     )
 }
 
-pub fn snapshot_scalar_effect_state_v1(
-    bound_factory: &WireBoundNativeEffectFactoryV1<'_>,
-    replay: &EffectBankPreparationV1,
+pub fn snapshot_scalar_effect_state(
+    bound_factory: &WireBoundNativeEffectFactory<'_>,
+    replay: &EffectBankPreparation,
     processor: &dyn PreparedNativeEffect,
-    limits: EffectStateLimitsV1,
+    limits: EffectStateLimits,
     payload_scratch: &mut [u8],
     output: &mut [u8],
-) -> Result<u64, EffectStateDiagnosticV1> {
+) -> Result<u64, EffectStateDiagnostic> {
     let replay_view = replay.state_replay(bound_factory.descriptor.id);
     let requirements =
-        effect_state_v1_requirements(bound_factory.bound_descriptor, replay_view, limits)?;
+        effect_state_requirements(bound_factory.bound_descriptor, replay_view, limits)?;
     let output_bytes = usize::try_from(requirements.envelope_bytes)
-        .map_err(|_| state_unavailable(EffectStateDiagnosticCodeV1::Overflow, 0))?;
+        .map_err(|_| state_unavailable(EffectStateDiagnosticCode::Overflow, 0))?;
     if output.len() < output_bytes {
-        return Err(EffectStateDiagnosticV1::buffer_too_small(
-            EFFECT_STATE_V1_BUFFER_ENVELOPE_OUTPUT,
+        return Err(EffectStateDiagnostic::buffer_too_small(
+            EFFECT_STATE_BUFFER_ENVELOPE_OUTPUT,
             requirements.envelope_bytes,
         ));
     }
     let scratch_bytes = usize::try_from(requirements.payload_snapshot_scratch_bytes)
-        .map_err(|_| state_unavailable(EffectStateDiagnosticCodeV1::Overflow, 0))?;
+        .map_err(|_| state_unavailable(EffectStateDiagnosticCode::Overflow, 0))?;
     if payload_scratch.len() < scratch_bytes {
-        return Err(EffectStateDiagnosticV1::buffer_too_small(
-            EFFECT_STATE_V1_BUFFER_PAYLOAD_SCRATCH,
+        return Err(EffectStateDiagnostic::buffer_too_small(
+            EFFECT_STATE_BUFFER_PAYLOAD_SCRATCH,
             requirements.payload_snapshot_scratch_bytes,
         ));
     }
     let metadata = processor.metadata();
-    validate_effect_state_metadata_v1(bound_factory.bound_descriptor, replay_view, metadata)?;
+    validate_effect_state_metadata(bound_factory.bound_descriptor, replay_view, metadata)?;
     let sizes = metadata.state_sizes;
     let (common, remainder) =
         payload_scratch[..scratch_bytes].split_at_mut(sizes.common_bytes as usize);
     let (left, right) = remainder.split_at_mut(sizes.left_bytes as usize);
     let payload_output = StatePayloadOutput::new(common, left, right, sizes)
-        .map_err(|_| state_unavailable(EffectStateDiagnosticCodeV1::Payload, 1))?;
+        .map_err(|_| state_unavailable(EffectStateDiagnosticCode::Payload, 1))?;
     processor
         .snapshot_state_payload(payload_output)
-        .map_err(|_| state_unavailable(EffectStateDiagnosticCodeV1::Payload, 1))?;
-    encode_effect_state_v1(
+        .map_err(|_| state_unavailable(EffectStateDiagnosticCode::Payload, 1))?;
+    encode_effect_state(
         bound_factory.bound_descriptor,
         replay_view,
         common,
@@ -700,9 +694,9 @@ pub fn snapshot_scalar_effect_state_v1(
 }
 
 pub(crate) fn admit_restored_state(
-    state: VerifiedEffectStateV1<'_>,
-    admission: EffectStateRestoreAdmissionV1,
-) -> Result<(), EffectStateDiagnosticV1> {
+    state: VerifiedEffectState<'_>,
+    admission: EffectStateRestoreAdmission,
+) -> Result<(), EffectStateDiagnostic> {
     if !miso_engine_core::is_launch_sample_rate(miso_engine_core::SampleRateHz(
         admission.sample_rate,
     )) || state.sample_rate() != admission.sample_rate
@@ -729,7 +723,7 @@ pub(crate) fn admit_restored_state(
     let payload_bytes = state
         .state_sizes()
         .total()
-        .ok_or_else(|| state_unavailable(EffectStateDiagnosticCodeV1::Overflow, 0))?;
+        .ok_or_else(|| state_unavailable(EffectStateDiagnosticCode::Overflow, 0))?;
     if payload_bytes > admission.maximum_total_state_bytes {
         return Err(state_limit(216, payload_bytes));
     }
@@ -743,9 +737,9 @@ pub(crate) fn admit_restored_state(
 }
 
 fn restored_ports(
-    descriptor: &'static EffectDescriptorV1,
-    state: VerifiedEffectStateV1<'_>,
-) -> Result<PreparedPortsV1, EffectStateDiagnosticV1> {
+    descriptor: &'static EffectDescriptor,
+    state: VerifiedEffectState<'_>,
+) -> Result<PreparedPorts, EffectStateDiagnostic> {
     let (kind, id, required) = state.sidechain();
     let sidechain = match kind {
         0 => PreparedSidechainPort::None,
@@ -758,7 +752,7 @@ fn restored_ports(
                         && port.id.as_str() == id
                         && port.required == required
                 })
-                .ok_or_else(|| state_unavailable(EffectStateDiagnosticCodeV1::Metadata, 9))?;
+                .ok_or_else(|| state_unavailable(EffectStateDiagnosticCode::Metadata, 9))?;
             if kind == 1 {
                 PreparedSidechainPort::Unconnected {
                     id: port.id,
@@ -771,29 +765,29 @@ fn restored_ports(
                 }
             }
         }
-        _ => return Err(state_unavailable(EffectStateDiagnosticCodeV1::Metadata, 9)),
+        _ => return Err(state_unavailable(EffectStateDiagnosticCode::Metadata, 9)),
     };
-    Ok(PreparedPortsV1 { sidechain })
+    Ok(PreparedPorts { sidechain })
 }
 
-pub fn restore_scalar_effect_state_v1<'wire>(
-    bound_factory: WireBoundNativeEffectFactoryV1<'wire>,
+pub fn restore_scalar_effect_state<'wire>(
+    bound_factory: WireBoundNativeEffectFactory<'wire>,
     envelope: &[u8],
-    limits: EffectStateLimitsV1,
-    admission: EffectStateRestoreAdmissionV1,
+    limits: EffectStateLimits,
+    admission: EffectStateRestoreAdmission,
     initial_value_scratch: &mut [InitialParameterValue],
-) -> Result<RestoredScalarEffectStateV1<'wire>, EffectStateDiagnosticV1> {
-    let state = verify_effect_state_v1(bound_factory.bound_descriptor, envelope, limits)?;
+) -> Result<RestoredScalarEffectState<'wire>, EffectStateDiagnostic> {
+    let state = verify_effect_state(bound_factory.bound_descriptor, envelope, limits)?;
     admit_restored_state(state, admission)?;
-    validate_effect_state_current_layout_v1(state)?;
+    validate_effect_state_current_layout(state)?;
     let initial_count = state.initial_values().len();
     if initial_value_scratch.len() < initial_count {
         let required_bytes = initial_count
             .checked_mul(core::mem::size_of::<InitialParameterValue>())
             .and_then(|bytes| u64::try_from(bytes).ok())
-            .ok_or_else(|| state_unavailable(EffectStateDiagnosticCodeV1::Overflow, 0))?;
-        return Err(EffectStateDiagnosticV1::buffer_too_small(
-            EFFECT_STATE_V1_BUFFER_INITIAL_VALUE_SCRATCH,
+            .ok_or_else(|| state_unavailable(EffectStateDiagnosticCode::Overflow, 0))?;
+        return Err(EffectStateDiagnostic::buffer_too_small(
+            EFFECT_STATE_BUFFER_INITIAL_VALUE_SCRATCH,
             required_bytes,
         ));
     }
@@ -806,7 +800,7 @@ pub fn restore_scalar_effect_state_v1<'wire>(
     let ports = restored_ports(bound_factory.descriptor, state)?;
     let (maximum_total_state_bytes, maximum_scratch_bytes, maximum_automation_spans_per_block) =
         state.request_limits();
-    let replay = EffectBankPreparationV1 {
+    let replay = EffectBankPreparation {
         sample_rate: state.sample_rate(),
         quantum: state.quantum(),
         quality: state.quality(),
@@ -823,29 +817,29 @@ pub fn restore_scalar_effect_state_v1<'wire>(
         },
     };
     let replay_view = replay.state_replay(bound_factory.descriptor.id);
-    validate_effect_state_replay_v1(state, replay_view)?;
+    validate_effect_state_replay(state, replay_view)?;
     let mut processor = bound_factory
         .factory
         .prepare(replay.request())
-        .map_err(|_| state_unavailable(EffectStateDiagnosticCodeV1::Factory, 3))?;
+        .map_err(|_| state_unavailable(EffectStateDiagnosticCode::Factory, 3))?;
     let metadata = processor.metadata();
-    validate_effect_state_metadata_v1(bound_factory.bound_descriptor, replay_view, metadata)
-        .map_err(|_| state_unavailable(EffectStateDiagnosticCodeV1::Factory, 4))?;
+    validate_effect_state_metadata(bound_factory.bound_descriptor, replay_view, metadata)
+        .map_err(|_| state_unavailable(EffectStateDiagnosticCode::Factory, 4))?;
     let (common, left, right) = state.payloads();
-    // The restore hook; see `restore_unpublished_effect_bank_track_state_v1` for the argument.
+    // The restore hook; see `restore_unpublished_effect_bank_track_state` for the argument.
     let sections_agree = payload_sections_agree(left, right);
     let payload_input = StatePayloadInput::new(common, left, right, metadata.state_sizes)
-        .map_err(|_| state_unavailable(EffectStateDiagnosticCodeV1::Payload, 3))?;
+        .map_err(|_| state_unavailable(EffectStateDiagnosticCode::Payload, 3))?;
     processor
         .restore_state_payload(state.state_layout_version(), payload_input)
-        .map_err(|_| state_unavailable(EffectStateDiagnosticCodeV1::Payload, 3))?;
-    let mut symmetry = ChannelSymmetryWitnessV1::SYMMETRIC;
-    symmetry.set(ChannelSymmetryWitnessV1::RESTORED, sections_agree);
+        .map_err(|_| state_unavailable(EffectStateDiagnosticCode::Payload, 3))?;
+    let mut symmetry = ChannelSymmetryWitness::SYMMETRIC;
+    symmetry.set(ChannelSymmetryWitness::RESTORED, sections_agree);
     symmetry.set(
-        ChannelSymmetryWitnessV1::DESIGNED,
+        ChannelSymmetryWitness::DESIGNED,
         processor.channel_symmetry(),
     );
-    Ok(RestoredScalarEffectStateV1 {
+    Ok(RestoredScalarEffectState {
         processor,
         metadata,
         bound_factory,
@@ -868,7 +862,7 @@ pub struct EffectPreparedSession {
 ///
 /// Registry construction is control-plane work. Callers retain and inject the immutable registry
 /// into [`prepare_native_session_effects`]; there is no render-reachable global catalog.
-pub fn launch_native_effect_registry_v1() -> Result<NativeEffectRegistry, RegistryError> {
+pub fn launch_native_effect_registry() -> Result<NativeEffectRegistry, RegistryError> {
     NativeEffectRegistry::new([
         Box::new(miso_engine_parametric_eq::ParametricEqFactory) as Box<dyn NativeEffectFactory>,
         Box::new(miso_engine_compressor::CompressorFactory) as Box<dyn NativeEffectFactory>,
@@ -1080,10 +1074,10 @@ pub fn prepare_native_session_effects(
                     port.role == miso_engine_effect_contract::PortRole::SidechainInput
                 });
                 let ports = match (&effect.sidechain, declared_sidechain) {
-                    (SidechainDeclaration::None, None) => PreparedPortsV1 {
+                    (SidechainDeclaration::None, None) => PreparedPorts {
                         sidechain: PreparedSidechainPort::None,
                     },
-                    (SidechainDeclaration::None, Some(port)) if !port.required => PreparedPortsV1 {
+                    (SidechainDeclaration::None, Some(port)) if !port.required => PreparedPorts {
                         sidechain: PreparedSidechainPort::Unconnected {
                             id: port.id,
                             required: false,
@@ -1108,7 +1102,7 @@ pub fn prepare_native_session_effects(
                             port.role == miso_engine_effect_contract::PortRole::SidechainInput
                                 && port.id.as_str() == sidechain.port_id.as_str()
                         }) {
-                            Some(port) => PreparedPortsV1 {
+                            Some(port) => PreparedPorts {
                                 sidechain: PreparedSidechainPort::Connected {
                                     id: port.id,
                                     required: port.required,
@@ -1124,7 +1118,7 @@ pub fn prepare_native_session_effects(
                         }
                     }
                 };
-                let bank_preparation = EffectBankPreparationV1 {
+                let bank_preparation = EffectBankPreparation {
                     sample_rate: session.sample_rate().0,
                     quantum: session.quantum().0,
                     quality,
@@ -1214,7 +1208,7 @@ pub fn prepare_native_session_effects(
 /// The producer half stays on the control plane; the consumer half rode into the plan inside the
 /// entry. A producer must be dropped before the plan that owns its consumer, which is why
 /// `PreparedHost`'s field order puts the plan first.
-pub struct EffectControlProducerV1 {
+pub struct EffectControlProducer {
     /// Session-stable track identity this channel addresses.
     pub track_id: Box<str>,
     /// Which rack the effect sits in.
@@ -1230,9 +1224,9 @@ pub struct EffectControlProducerV1 {
     /// The effect's declared parameter table, so an admitting host can map a wire `parameter_id`
     /// to the `parameter_index` the render side stages, and check the value's domain, without a
     /// second copy of the registry.
-    pub descriptor: &'static EffectDescriptorV1,
+    pub descriptor: &'static EffectDescriptor,
     /// Bounded producer endpoint; `try_push` returns the record on a full queue.
-    pub producer: Producer<EffectControlRecordV1>,
+    pub producer: Producer<EffectControlRecord>,
 }
 
 /// Attach one bounded live-console control channel to every prepared effect of the session.
@@ -1240,7 +1234,7 @@ pub struct EffectControlProducerV1 {
 /// # The capacity rule that makes the render-side drain exact
 ///
 /// A channel is prepared at `min(depth, automation_capacity)` records. Each drained
-/// [`EffectControlRecordV1::Parameter`] produces at most one span and duplicates collapse, so a
+/// [`EffectControlRecord::Parameter`] produces at most one span and duplicates collapse, so a
 /// full drain can never stage more spans than the effect's own
 /// [`PreparedEffectMetadata::automation_capacity`](miso_engine_effect_contract::PreparedEffectMetadata).
 /// "The staging window cannot overflow" is therefore an invariant of preparation, not a runtime
@@ -1251,10 +1245,10 @@ pub struct EffectControlProducerV1 {
 /// `effect.control.prepare` if a bounded queue cannot be built, and
 /// `effect.control.capacity` if an effect declares a zero automation capacity, which no launch
 /// effect does and which would leave the channel unable to deliver anything.
-pub fn attach_effect_console_v1(
+pub fn attach_effect_console(
     prepared: &mut EffectPreparedSession,
     depth: NonZeroUsize,
-) -> Result<Vec<EffectControlProducerV1>, EffectDiagnosticSet> {
+) -> Result<Vec<EffectControlProducer>, EffectDiagnosticSet> {
     let declared = declared_effect_indices(&prepared.session);
     let mut producers = Vec::with_capacity(prepared.entries.len());
     let mut diagnostics = Vec::new();
@@ -1280,7 +1274,7 @@ pub fn attach_effect_console_v1(
             continue;
         };
         let Ok((producer, consumer)) =
-            bounded_spsc::<EffectControlRecordV1>(depth.min(capacity), QueueGeneration(0))
+            bounded_spsc::<EffectControlRecord>(depth.min(capacity), QueueGeneration(0))
         else {
             diagnostics.push(EffectDiagnostic {
                 code: "effect.control.prepare",
@@ -1288,7 +1282,7 @@ pub fn attach_effect_console_v1(
             });
             continue;
         };
-        producers.push(EffectControlProducerV1 {
+        producers.push(EffectControlProducer {
             track_id: entry.track_id.as_str().into(),
             rack: entry.rack,
             effect_index,
@@ -1310,10 +1304,10 @@ pub fn attach_effect_console_v1(
 
 /// The control-side reader half of one prepared effect instance's observation taps (issue #143).
 ///
-/// Addressed exactly as an [`EffectControlProducerV1`] is -- by `(track_id, rack, effect_index)` --
+/// Addressed exactly as an [`EffectControlProducer`] is -- by `(track_id, rack, effect_index)` --
 /// because a subscription and the parameter commands it correlates with address the same instance
 /// through the same numbers. `readers[i]` belongs to `descriptor.observations[i]`.
-pub struct EffectObservationHandleV1 {
+pub struct EffectObservationHandle {
     /// Normalized track identity this instance belongs to.
     pub track_id: Box<str>,
     /// Which rack of that track.
@@ -1324,16 +1318,16 @@ pub struct EffectObservationHandleV1 {
     pub effect_id: Box<str>,
     /// The effect's declared menu, so an admitting host maps a wire `tap_id` to a `tap_index` and
     /// checks the cost class without a second copy of the registry.
-    pub descriptor: &'static EffectDescriptorV1,
+    pub descriptor: &'static EffectDescriptor,
     /// One reader per declared tap, in declaration order.
-    pub readers: Box<[ObservationReaderV1]>,
+    pub readers: Box<[ObservationReader]>,
 }
 
 /// Attach observation capacity to every prepared effect that declares at least one tap.
 ///
 /// # Level 1 of the two-level zero (issue #143 D3)
 ///
-/// This function is the **only** thing that creates an [`ObservationLaneV1`]. A session whose
+/// This function is the **only** thing that creates an [`ObservationLane`]. A session whose
 /// console request named no observation capacity never calls it, so its compiled plan contains no
 /// lane, no accumulator and no conflating cell -- not a disabled one, none. That is what makes
 /// "observation off costs nothing" an identity rather than a claim, and it is what
@@ -1350,11 +1344,11 @@ pub struct EffectObservationHandleV1 {
 ///
 /// `effect.observation.prepare` if an instance cannot be located in the declared order, and
 /// `effect.observation.taps` if an effect declares more taps than the request's cap allows.
-pub fn attach_effect_observation_v1(
+pub fn attach_effect_observation(
     prepared: &mut EffectPreparedSession,
     maximum_taps: u32,
     window_blocks: u32,
-) -> Result<Vec<EffectObservationHandleV1>, EffectDiagnosticSet> {
+) -> Result<Vec<EffectObservationHandle>, EffectDiagnosticSet> {
     let declared = declared_effect_indices(&prepared.session);
     let mut handles = Vec::new();
     let mut diagnostics = Vec::new();
@@ -1390,7 +1384,7 @@ pub fn attach_effect_observation_v1(
             publishers.push(publisher);
             readers.push(reader);
         }
-        let Some(lane) = ObservationLaneV1::new(descriptor.observations, publishers, window_blocks)
+        let Some(lane) = ObservationLane::new(descriptor.observations, publishers, window_blocks)
         else {
             diagnostics.push(EffectDiagnostic {
                 code: "effect.observation.prepare",
@@ -1398,7 +1392,7 @@ pub fn attach_effect_observation_v1(
             });
             continue;
         };
-        handles.push(EffectObservationHandleV1 {
+        handles.push(EffectObservationHandle {
             track_id: entry.track_id.as_str().into(),
             rack: entry.rack,
             effect_index,

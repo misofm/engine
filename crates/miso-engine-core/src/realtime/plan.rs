@@ -86,7 +86,7 @@ pub struct RenderIo<'a> {
 ///
 /// * **Eligibility, per unit.** `eligible_lanes == lanes` is the cohort-level answer.
 /// * **The track join.** The structural half of the witness is keyed by *track id*
-///   (`session_structural_symmetry_v1`, because the planner needs the class before any prepared
+///   (`session_structural_symmetry`, because the planner needs the class before any prepared
 ///   object exists) and the runtime half is keyed by anonymous *lanes*. Nothing else in the plan
 ///   relates the two, so a caller holding both halves could not conjoin them at all.
 ///   [`lane_tracks`](Self::lane_tracks) is that relation, in lane order.
@@ -101,7 +101,7 @@ pub struct RenderIo<'a> {
 /// Nothing on the render path builds or reads this. It is materialised on demand, off render,
 /// after the render audit is disarmed, and it allocates.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PlanUnitEligibilityV1 {
+pub struct PlanUnitEligibility {
     /// This unit's position in the built runtime's execution order.
     pub unit: u32,
     /// `true` for a homogeneous bank chain, `false` for a single dispatched op.
@@ -123,12 +123,12 @@ pub struct PlanUnitEligibilityV1 {
     /// no other" is the claim every witness test in the tree makes.
     ///
     /// Deliberately **not** the whole answer: this is the runtime half, and it is source agnostic
-    /// (`SOURCE` is decided on the control plane, by `session_structural_symmetry_v1`). Conjoin it
+    /// (`SOURCE` is decided on the control plane, by `session_structural_symmetry`). Conjoin it
     /// with the structural half through `lane_tracks`.
     pub lane_eligible: Box<[bool]>,
 }
 
-impl PlanUnitEligibilityV1 {
+impl PlanUnitEligibility {
     /// Active lanes this unit renders.
     #[must_use]
     pub fn lanes(&self) -> u32 {
@@ -146,7 +146,7 @@ impl PlanUnitEligibilityV1 {
     /// All-lanes-or-nothing, which is `miso_engine_rack::BankChain::all_lanes_symmetric`'s rule
     /// restated at the plan surface: masking the eligible lanes of a mixed cohort would save
     /// nothing, because the vector op runs every lane regardless. Making a cohort homogeneous is
-    /// the *planner's* job (`CohortPoolClassV1`), not the dispatch's.
+    /// the *planner's* job (`CohortPoolClass`), not the dispatch's.
     #[must_use]
     pub fn all_lanes_eligible(&self) -> bool {
         !self.lane_eligible.is_empty() && self.lane_eligible.iter().all(|lane| *lane)
@@ -155,7 +155,7 @@ impl PlanUnitEligibilityV1 {
     /// This unit renders nothing upstream of the seam, so its witness proves nothing.
     ///
     /// A fader or matrix bank is the case: `SEAM_SIDE_WITNESS` is an unconditional
-    /// `ChannelSymmetryWitnessV1::SYMMETRIC`, so such a unit reports every lane eligible on every
+    /// `ChannelSymmetryWitness::SYMMETRIC`, so such a unit reports every lane eligible on every
     /// session, mono or not. That is correct as a statement about the seam and useless as
     /// collapse evidence, and a caller must test this before believing
     /// [`all_lanes_eligible`](Self::all_lanes_eligible).
@@ -224,7 +224,7 @@ pub trait PreparedPlanExecutor: Send {
     /// It is **not usable for pool sizing** -- for "how many lanes would a collapse actually
     /// save?" -- and the reason is in the denominator. A unit that is not per-track upstream work
     /// at all contributes to *both* halves: an `Identity`, a `SourceInput` and a `Route` each
-    /// report `ChannelSymmetryWitnessV1::SYMMETRIC` and count one "lane" apiece, because there is
+    /// report `ChannelSymmetryWitness::SYMMETRIC` and count one "lane" apiece, because there is
     /// nothing about them that could make two channels disagree. So a 64-track plan's totals carry
     /// its 64 source inputs and (when the #218 fold declines) its 64 route ops alongside its 64
     /// bank lanes, and the ratio moves when the *plan shape* moves even though not one track's
@@ -238,13 +238,13 @@ pub trait PreparedPlanExecutor: Send {
     fn symmetry_counters(&self) -> [u64; 2] {
         [0, 0]
     }
-    /// One [`PlanUnitEligibilityV1`] row per scheduling unit, in execution order.
+    /// One [`PlanUnitEligibility`] row per scheduling unit, in execution order.
     ///
     /// The per-cohort form of [`symmetry_counters`](Self::symmetry_counters); that method's
     /// documentation says what the census can and cannot be used for. Allocates, walks the built
     /// runtime, and is read only after rendering is disarmed.
     #[doc(hidden)]
-    fn unit_eligibility(&self) -> Vec<PlanUnitEligibilityV1> {
+    fn unit_eligibility(&self) -> Vec<PlanUnitEligibility> {
         Vec::new()
     }
     /// Bank-chain lanes whose scatter was pointed at their consumer's buffer (issue #202 rec 3).
@@ -308,9 +308,9 @@ pub trait PreparedPlanExecutor: Send {
     ///
     /// `eligible(track_id)` is the **structural** half of the channel-symmetry witness -- the
     /// `SOURCE` term, decided from the compiled session by
-    /// `session_structural_symmetry_v1`. Every chain is unarmed until this is called, and an
+    /// `session_structural_symmetry`. Every chain is unarmed until this is called, and an
     /// unarmed chain never collapses: the runtime half a chain carries is source agnostic (see
-    /// [`PlanUnitEligibilityV1::lane_eligible`]) and would admit a track whose two channels read
+    /// [`PlanUnitEligibility::lane_eligible`]) and would admit a track whose two channels read
     /// two different source channels.
     ///
     /// Off the render thread, once, after bind.
@@ -601,11 +601,11 @@ impl PreparedRenderPlan {
     }
     /// One collapse-eligibility row per scheduling unit, outside the render scope.
     ///
-    /// See [`PlanUnitEligibilityV1`] for what a row carries and for the two things a caller must
+    /// See [`PlanUnitEligibility`] for what a row carries and for the two things a caller must
     /// check before reading one as evidence.
     #[doc(hidden)]
     #[must_use]
-    pub fn unit_eligibility(&self) -> Vec<PlanUnitEligibilityV1> {
+    pub fn unit_eligibility(&self) -> Vec<PlanUnitEligibility> {
         assert!(
             !super::audit::is_render_scope_active(),
             "unit eligibility is sealed until the render audit is disarmed"

@@ -18,7 +18,7 @@
 use std::sync::{Arc, Mutex};
 
 use miso_engine_core::realtime::RenderError;
-use miso_engine_effect_contract::{BankWidth, ChannelSymmetryWitnessV1, SeamSideV1};
+use miso_engine_effect_contract::{BankWidth, ChannelSymmetryWitness, SeamSide};
 use miso_engine_rack::{AoSoaScratch, BankBlock, BankChain, BankMembers, BankSlot, BankStage};
 
 /// Planar per-lane buffers, the shape a chain gathers from and scatters to.
@@ -60,11 +60,11 @@ impl BankStage for Matrix {
         }
         Ok(())
     }
-    fn seam_side(&self) -> SeamSideV1 {
-        SeamSideV1::SeamSide
+    fn seam_side(&self) -> SeamSide {
+        SeamSide::SeamSide
     }
-    fn lane_symmetry(&self, _lane: usize) -> ChannelSymmetryWitnessV1 {
-        ChannelSymmetryWitnessV1::SYMMETRIC
+    fn lane_symmetry(&self, _lane: usize) -> ChannelSymmetryWitness {
+        ChannelSymmetryWitness::SYMMETRIC
     }
 }
 
@@ -140,7 +140,7 @@ fn silent_planes(lanes: usize, frames: u32) -> Planes {
 struct RecursiveCore {
     coefficient: [f32; 2],
     state: [[f32; 8]; 2],
-    witness: ChannelSymmetryWitnessV1,
+    witness: ChannelSymmetryWitness,
     desymmetrized: usize,
     agreement_queries: usize,
 }
@@ -173,7 +173,7 @@ impl Recursive {
     fn new(coefficient: [f32; 2]) -> Self {
         Self(Arc::new(Mutex::new(RecursiveCore {
             coefficient,
-            witness: ChannelSymmetryWitnessV1::SYMMETRIC,
+            witness: ChannelSymmetryWitness::SYMMETRIC,
             ..RecursiveCore::default()
         })))
     }
@@ -216,7 +216,7 @@ impl BankStage for Recursive {
         core.agreement_queries += 1;
         core.states_agree()
     }
-    fn lane_symmetry(&self, _lane: usize) -> ChannelSymmetryWitnessV1 {
+    fn lane_symmetry(&self, _lane: usize) -> ChannelSymmetryWitness {
         self.core().witness
     }
 }
@@ -325,7 +325,7 @@ fn the_forced_off_window_re_engages_and_renders_the_never_collapsed_bits() {
 /// `UNBYPASSED` is the one witness term that comes back within a plan (a live `Bypass(true)`
 /// followed by a `Bypass(false)`), and it is the one term whose absence does **not** separate
 /// the channels -- a bypassed lane still runs the bank on both planes and the shunt restores
-/// the same dry block into both. `ChannelSymmetryWitnessV1::AGREEING` is that distinction, and
+/// the same dry block into both. `ChannelSymmetryWitness::AGREEING` is that distinction, and
 /// this is what it buys: a chain that would otherwise be retired for the duration of a bypass
 /// it rendered correctly on both channels throughout.
 ///
@@ -347,9 +347,9 @@ fn a_bypass_episode_re_engages_because_it_never_moved_the_channels_apart() {
     for block in 0..12_u64 {
         let bypassed = (4..8).contains(&block);
         let witness = if bypassed {
-            ChannelSymmetryWitnessV1::symmetric_except(ChannelSymmetryWitnessV1::UNBYPASSED)
+            ChannelSymmetryWitness::symmetric_except(ChannelSymmetryWitness::UNBYPASSED)
         } else {
-            ChannelSymmetryWitnessV1::SYMMETRIC
+            ChannelSymmetryWitness::SYMMETRIC
         };
         stage.core().witness = witness;
         oracle_stage.core().witness = witness;
@@ -416,12 +416,12 @@ fn re_equal_words_after_a_desymmetrised_episode_do_not_re_engage() {
                 // The episode: one channel's word moves, and the witness says so.
                 core.coefficient[1] = 0.25;
                 core.witness =
-                    ChannelSymmetryWitnessV1::symmetric_except(ChannelSymmetryWitnessV1::DESIGNED);
+                    ChannelSymmetryWitness::symmetric_except(ChannelSymmetryWitness::DESIGNED);
             }
             if block == 10 {
                 // The words agree again. The states do not.
                 core.coefficient[1] = core.coefficient[0];
-                core.witness = ChannelSymmetryWitnessV1::SYMMETRIC;
+                core.witness = ChannelSymmetryWitness::SYMMETRIC;
             }
         }
         let mut planes = finite_planes(4, 8, block);
@@ -501,11 +501,11 @@ fn an_earned_agreement_proof_re_engages_a_chain_the_witness_could_not() {
             if block == 4 {
                 core.coefficient[1] = 0.25;
                 core.witness =
-                    ChannelSymmetryWitnessV1::symmetric_except(ChannelSymmetryWitnessV1::DESIGNED);
+                    ChannelSymmetryWitness::symmetric_except(ChannelSymmetryWitness::DESIGNED);
             }
             if block == 8 {
                 core.coefficient[1] = core.coefficient[0];
-                core.witness = ChannelSymmetryWitnessV1::SYMMETRIC;
+                core.witness = ChannelSymmetryWitness::SYMMETRIC;
             }
         }
         // Silence from block 8 on: the recursion decays into the flush floor and both channels

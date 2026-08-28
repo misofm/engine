@@ -16,11 +16,11 @@
 
 use miso_engine_effect_contract::{
     EffectProcessBlock, EffectQuality, InitialParameterValue, LinkMode, NativeEffectFactory,
-    ObservationSampleV1, ParameterChannel, PrepareEffectLimits, PrepareEffectRequest,
-    PreparedNativeEffect, PreparedPortsV1, PreparedSidechainPort, StatePayloadOutput,
+    ObservationSample, ParameterChannel, PrepareEffectLimits, PrepareEffectRequest,
+    PreparedNativeEffect, PreparedPorts, PreparedSidechainPort, StatePayloadOutput,
 };
 use miso_engine_true_peak_limiter::{
-    TRUE_PEAK_LIMITER_DESCRIPTOR_V1, TRUE_PEAK_LIMITER_PARAMETERS_V1, TruePeakLimiterFactory,
+    TRUE_PEAK_LIMITER_DESCRIPTOR, TRUE_PEAK_LIMITER_PARAMETERS, TruePeakLimiterFactory,
 };
 
 /// `words::REDUCTION` in the crate's own per-lane payload layout.
@@ -34,12 +34,12 @@ fn values() -> [InitialParameterValue; 6] {
         } else {
             ParameterChannel::Right
         },
-        value: TRUE_PEAK_LIMITER_PARAMETERS_V1[index / 2].default_value,
+        value: TRUE_PEAK_LIMITER_PARAMETERS[index / 2].default_value,
     })
 }
 
-fn quality() -> &'static miso_engine_effect_contract::QualityDescriptorV1 {
-    TRUE_PEAK_LIMITER_DESCRIPTOR_V1
+fn quality() -> &'static miso_engine_effect_contract::QualityDescriptor {
+    TRUE_PEAK_LIMITER_DESCRIPTOR
         .qualities
         .iter()
         .find(|quality| quality.sample_rate == 48_000)
@@ -53,7 +53,7 @@ fn request(values: &[InitialParameterValue]) -> PrepareEffectRequest<'_> {
         quality: EffectQuality::Normal,
         bypass: false,
         link_mode: LinkMode::Maximum,
-        ports: PreparedPortsV1 {
+        ports: PreparedPorts {
             sidechain: PreparedSidechainPort::None,
         },
         initial_values: values,
@@ -65,8 +65,8 @@ fn request(values: &[InitialParameterValue]) -> PrepareEffectRequest<'_> {
     }
 }
 
-fn observe(effect: &dyn PreparedNativeEffect) -> ObservationSampleV1 {
-    let mut sample = ObservationSampleV1::default();
+fn observe(effect: &dyn PreparedNativeEffect) -> ObservationSample {
+    let mut sample = ObservationSample::default();
     assert!(
         effect.observe_resident(0, &mut sample),
         "the limiter implements its one declared tap"

@@ -20,17 +20,16 @@ use std::collections::BTreeMap;
 
 use miso_engine_builtins::{BuiltinLaneSelector, Matrix2x2, MeterSnapshot, MeterTap, pan_matrix};
 use miso_engine_builtins_compiler::{
-    MeterConsumer, TrackControlProducer, TrackControlRecordV1, TrackFaderRecordV1,
-    TrackInputRecordV1,
+    MeterConsumer, TrackControlProducer, TrackControlRecord, TrackFaderRecord, TrackInputRecord,
 };
 use miso_engine_core::realtime::{PlanarBufferMut, RenderIo, RenderTime};
 use miso_engine_effect_contract::{
-    EffectControlRecordV1, ParameterChannel, ParameterChannelPolicy, parameter_value_valid,
+    EffectControlRecord, ParameterChannel, ParameterChannelPolicy, parameter_value_valid,
 };
 use miso_engine_host_core::{
-    CompiledSession, ConsoleSoloState, EffectControlProducerV1, EffectObservationHandleV1,
-    EffectRack, HostConsoleRequestV1, HostPrepareCaps, HostShapePolicy, PreparedHost,
-    SourceControlError, SourceSubmission, control_table_bytes, prepare_host_session_with_console,
+    CompiledSession, ConsoleSoloState, EffectControlProducer, EffectObservationHandle, EffectRack,
+    HostConsoleRequest, HostPrepareCaps, HostShapePolicy, PreparedHost, SourceControlError,
+    SourceSubmission, control_table_bytes, prepare_host_session_with_console,
     source_id_arena_bytes,
 };
 
@@ -141,7 +140,7 @@ pub const COMMAND_OBSERVE_UNSUBSCRIBE: u32 = 8;
 /// It moves no state of its own on the render thread. Admission composes
 /// `effective_mute = user_mute || (any_solo && !my_solo)` over the console's
 /// [`miso_engine_host_core::ConsoleSoloState`] and emits the *existing*
-/// `TrackFaderRecordV1::Mute` records into the *existing* per-track fader queues, so this kind is
+/// `TrackFaderRecord::Mute` records into the *existing* per-track fader queues, so this kind is
 /// on the `render` plane (it moves what the render thread reads) while adding nothing below
 /// `admit_commands`. Refusals reuse the existing vocabulary: `malformed` for a wrong-shaped
 /// record, `domain` for a `values[0]` outside `{0.0, 1.0}` (exactly as `mute` does),
@@ -156,7 +155,7 @@ pub const COMMAND_SOLO: u32 = 9;
 /// A `channel = 2` command is **one** record carrying `BuiltinLaneSelector::Both`, not two
 /// per-lane records: the input stage is upstream of the fader/matrix seam, and a both-channel
 /// retarget must be admitted as one symmetry-preserving event or it would retire the track's mono
-/// collapse. `miso_engine_builtins_compiler::TrackInputRecordV1` carries the argument in full.
+/// collapse. `miso_engine_builtins_compiler::TrackInputRecord` carries the argument in full.
 ///
 /// The lane's polarity is preserved: a trim ride does not clear a flip.
 pub const COMMAND_TRIM_DB: u32 = 10;
@@ -265,7 +264,7 @@ pub const DEFAULT_METER_BLOCKS: u32 = 12;
 /// single sample of audio.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct WebCommandReportV1 {
+pub struct WebCommandReport {
     /// Exact structure byte size.
     pub struct_size: u32,
     /// ABI version.
@@ -284,8 +283,8 @@ pub struct WebCommandReportV1 {
     pub reserved: [u64; 2],
 }
 
-/// Byte size of [`WebCommandReportV1`].
-pub const COMMAND_REPORT_BYTES: u32 = size_of::<WebCommandReportV1>() as u32;
+/// Byte size of [`WebCommandReport`].
+pub const COMMAND_REPORT_BYTES: u32 = size_of::<WebCommandReport>() as u32;
 
 /// The sample window and shape of the meter frame the `f32` buffer cannot carry (issue #143 D5).
 ///
@@ -302,7 +301,7 @@ pub const COMMAND_REPORT_BYTES: u32 = size_of::<WebCommandReportV1>() as u32;
 /// against a wall clock.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct WebMeterHeaderV1 {
+pub struct WebMeterHeader {
     /// Exact structure byte size.
     pub struct_size: u32,
     /// ABI version.
@@ -325,14 +324,14 @@ pub struct WebMeterHeaderV1 {
     pub reserved: [u64; 2],
 }
 
-/// Byte size of [`WebMeterHeaderV1`].
-pub const METER_HEADER_BYTES: u32 = size_of::<WebMeterHeaderV1>() as u32;
+/// Byte size of [`WebMeterHeader`].
+pub const METER_HEADER_BYTES: u32 = size_of::<WebMeterHeader>() as u32;
 
 /// The header a handle with no compiled session reports: the zeroed shape, never a stale one.
-static EMPTY_METER_HEADER: WebMeterHeaderV1 = empty_meter_header();
+static EMPTY_METER_HEADER: WebMeterHeader = empty_meter_header();
 
-const fn empty_meter_header() -> WebMeterHeaderV1 {
-    WebMeterHeaderV1 {
+const fn empty_meter_header() -> WebMeterHeader {
+    WebMeterHeader {
         struct_size: METER_HEADER_BYTES,
         abi_version: ABI_VERSION,
         track_count: 0,
@@ -346,17 +345,17 @@ const fn empty_meter_header() -> WebMeterHeaderV1 {
     }
 }
 
-/// Byte size of [`WebPrepareConfigV1`].
-pub const PREPARE_CONFIG_BYTES: u32 = size_of::<WebPrepareConfigV1>() as u32;
-/// Byte size of [`WebStatusV1`].
-pub const STATUS_BYTES: u32 = size_of::<WebStatusV1>() as u32;
-/// Byte size of [`WebResourceReportV1`].
-pub const RESOURCE_REPORT_BYTES: u32 = size_of::<WebResourceReportV1>() as u32;
+/// Byte size of [`WebPrepareConfig`].
+pub const PREPARE_CONFIG_BYTES: u32 = size_of::<WebPrepareConfig>() as u32;
+/// Byte size of [`WebStatus`].
+pub const STATUS_BYTES: u32 = size_of::<WebStatus>() as u32;
+/// Byte size of [`WebResourceReport`].
+pub const RESOURCE_REPORT_BYTES: u32 = size_of::<WebResourceReport>() as u32;
 
 /// Exact versioned preparation configuration shared with JavaScript.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct WebPrepareConfigV1 {
+pub struct WebPrepareConfig {
     /// Exact structure byte size.
     pub struct_size: u32,
     /// Must equal [`ABI_VERSION`].
@@ -442,7 +441,7 @@ pub struct WebPrepareConfigV1 {
     pub console_master_track_plus_one: u64,
 }
 
-impl WebPrepareConfigV1 {
+impl WebPrepareConfig {
     /// A bounded launch configuration suitable for small embedding tests and examples.
     #[must_use]
     pub const fn launch_defaults(sample_rate_hz: u32, quantum_frames: u32) -> Self {
@@ -493,7 +492,7 @@ impl WebPrepareConfigV1 {
 /// Fixed browser-visible status snapshot.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct WebStatusV1 {
+pub struct WebStatus {
     /// Exact structure byte size.
     pub struct_size: u32,
     /// ABI version.
@@ -521,7 +520,7 @@ pub struct WebStatusV1 {
 /// Exact retained-resource projection for the browser bridge and production artifacts.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct WebResourceReportV1 {
+pub struct WebResourceReport {
     /// Exact structure byte size.
     pub struct_size: u32,
     /// ABI version.
@@ -613,7 +612,7 @@ struct ReadyOwnership {
     /// Issue #140 A: one control-side producer per prepared effect instance, in the dense
     /// `queue_slot` order [`ReadyOwnership::effect_slot`] computes, so an addressed command
     /// reaches its queue with one index and no search.
-    effect_controls: Box<[Option<EffectControlProducerV1>]>,
+    effect_controls: Box<[Option<EffectControlProducer>]>,
     /// Per-track prefix sum of effect instances, so `effect_slot` is arithmetic, not a lookup.
     effect_base: Box<[u32]>,
     /// Room needed per destination queue by the submission being validated. Allocated at
@@ -646,7 +645,7 @@ struct ReadyOwnership {
     /// Issue #143: one reader set per observed effect instance, in the same dense `effect_slot`
     /// order the command producers use, so an addressed subscription reaches its lane with one
     /// index and no search. Empty when the configuration named no observation capacity.
-    effect_observations: Box<[Option<EffectObservationHandleV1>]>,
+    effect_observations: Box<[Option<EffectObservationHandle>]>,
     /// Track index of each observed effect slot, or `u32::MAX` for a slot with no taps. Built once
     /// at compilation, so the poll's fold is arithmetic rather than a search.
     observation_tracks: Box<[u32]>,
@@ -668,7 +667,7 @@ struct ReadyOwnership {
     /// master GR]` -- `3T + 3` words. The peak section is byte-for-byte where it always was.
     meter_frame: Box<[f32]>,
     /// The window and shape the `f32` frame cannot carry (issue #143 D5).
-    meter_header: WebMeterHeaderV1,
+    meter_header: WebMeterHeader,
     /// Master peaks folded over the rendered block while the lease is on.
     master_peak: [f32; 2],
     /// Windows folded into `meter_frame` since the host was compiled.
@@ -758,7 +757,7 @@ impl ReadyOwnership {
                 let effect = slot - tracks * 3;
                 // Issue #143: the armed set is control-plane state and is updated here, where the
                 // record is admitted, so it can never disagree with what the render side was told.
-                if let EffectControlRecordV1::Observe {
+                if let EffectControlRecord::Observe {
                     tap_index, armed, ..
                 } = record
                     && let Some(mask) = self.observation_armed.get_mut(effect)
@@ -783,13 +782,13 @@ impl ReadyOwnership {
 #[derive(Clone, Copy)]
 enum AdmittedCommand {
     /// The matrix/pan channel #137 D1 shipped.
-    Matrix(TrackControlRecordV1),
+    Matrix(TrackControlRecord),
     /// The fader/mute channel (#140 B).
-    Fader(TrackFaderRecordV1),
+    Fader(TrackFaderRecord),
     /// The input trim/polarity channel (#210 phase 3).
-    Input(TrackInputRecordV1),
+    Input(TrackInputRecord),
     /// One effect instance's channel (#140 A).
-    Effect(EffectControlRecordV1),
+    Effect(EffectControlRecord),
 }
 
 /// One compiled source's declared shape, in canonical normalized source order (issue #207).
@@ -818,10 +817,10 @@ pub struct SessionSourceShape {
 
 /// Safe ownership object backing one future AudioWorklet Wasm handle.
 pub struct AudioWorkletEngineHost {
-    config: WebPrepareConfigV1,
-    status: WebStatusV1,
-    resources: WebResourceReportV1,
-    command_report: WebCommandReportV1,
+    config: WebPrepareConfig,
+    status: WebStatus,
+    resources: WebResourceReport,
+    command_report: WebCommandReport,
     /// Issue #137 D2: the meter lease. `false` skips the master fold and every drain.
     meter_lease: bool,
     buffers: Option<PreparedBuffers>,
@@ -832,11 +831,11 @@ pub struct AudioWorkletEngineHost {
 impl AudioWorkletEngineHost {
     /// Create a configuration-only host. No session or staging storage is allocated.
     #[must_use]
-    pub const fn new(config: WebPrepareConfigV1) -> Self {
+    pub const fn new(config: WebPrepareConfig) -> Self {
         let backend = selected_backend();
         Self {
             config,
-            status: WebStatusV1 {
+            status: WebStatus {
                 struct_size: STATUS_BYTES,
                 abi_version: ABI_VERSION,
                 state: STATE_CONFIG,
@@ -860,30 +859,30 @@ impl AudioWorkletEngineHost {
 
     /// Read the immutable preparation configuration.
     #[must_use]
-    pub const fn config(&self) -> &WebPrepareConfigV1 {
+    pub const fn config(&self) -> &WebPrepareConfig {
         &self.config
     }
 
     /// Mutably borrow configuration storage before preparation.
-    pub fn config_mut(&mut self) -> Option<&mut WebPrepareConfigV1> {
+    pub fn config_mut(&mut self) -> Option<&mut WebPrepareConfig> {
         (self.status.state == STATE_CONFIG).then_some(&mut self.config)
     }
 
     /// Read fixed status without allocation.
     #[must_use]
-    pub const fn status(&self) -> &WebStatusV1 {
+    pub const fn status(&self) -> &WebStatus {
         &self.status
     }
 
     /// Read the current exact resource projection.
     #[must_use]
-    pub const fn resources(&self) -> &WebResourceReportV1 {
+    pub const fn resources(&self) -> &WebResourceReport {
         &self.resources
     }
 
     /// Read the last live-console submission report (issue #137 D1).
     #[must_use]
-    pub const fn command_report(&self) -> &WebCommandReportV1 {
+    pub const fn command_report(&self) -> &WebCommandReport {
         &self.command_report
     }
 
@@ -951,7 +950,7 @@ impl AudioWorkletEngineHost {
 
     /// The sample window and shape the `f32` frame cannot carry (issue #143 D5).
     #[must_use]
-    pub fn meter_header(&self) -> &WebMeterHeaderV1 {
+    pub fn meter_header(&self) -> &WebMeterHeader {
         self.ready
             .as_ref()
             .map_or(&EMPTY_METER_HEADER, |ready| &ready.meter_header)
@@ -1700,7 +1699,7 @@ impl CommandRecord {
     /// Lower one addressed track-builtin record, or say why it cannot be.
     ///
     /// Issue #140 C: `fader_db` and `mute` are no longer refused here. They lower onto the live
-    /// ramped fader section (`FaderMuteRampBuiltinsV1`), which a console-attached track binds in
+    /// ramped fader section (`FaderMuteRampBuiltins`), which a console-attached track binds in
     /// place of the prepared `FaderMuteBuiltins`. A track with no console still refuses them --
     /// with [`COMMAND_REASON_UNSUPPORTED_KIND`], because the target exists and the value is legal
     /// and this *session* has no write path -- which is exactly what the reason means.
@@ -1716,7 +1715,7 @@ impl CommandRecord {
                 }
                 let matrix = pan_matrix(self.values[0], self.values[1])
                     .map_err(|_| COMMAND_REASON_DOMAIN)?;
-                Ok(AdmittedCommand::Matrix(TrackControlRecordV1 {
+                Ok(AdmittedCommand::Matrix(TrackControlRecord {
                     matrix,
                     smoothing_samples: self.smoothing_samples,
                 }))
@@ -1733,7 +1732,7 @@ impl CommandRecord {
                 }
                 .checked()
                 .map_err(|_| COMMAND_REASON_DOMAIN)?;
-                Ok(AdmittedCommand::Matrix(TrackControlRecordV1 {
+                Ok(AdmittedCommand::Matrix(TrackControlRecord {
                     matrix,
                     smoothing_samples: self.smoothing_samples,
                 }))
@@ -1743,11 +1742,11 @@ impl CommandRecord {
                     return Err(COMMAND_REASON_MALFORMED);
                 }
                 let lanes = lane_selector(self.channel).ok_or(COMMAND_REASON_MALFORMED)?;
-                // The declared domain of `fader_db` in `BUILTIN_PARAMETER_DESCRIPTORS_V1`.
+                // The declared domain of `fader_db` in `BUILTIN_PARAMETER_DESCRIPTORS`.
                 if !(-144.0..=24.0).contains(&self.values[0]) {
                     return Err(COMMAND_REASON_DOMAIN);
                 }
-                Ok(AdmittedCommand::Fader(TrackFaderRecordV1::FaderDb {
+                Ok(AdmittedCommand::Fader(TrackFaderRecord::FaderDb {
                     lanes,
                     db: self.values[0],
                     smoothing_samples: self.smoothing_samples,
@@ -1761,7 +1760,7 @@ impl CommandRecord {
                 if self.values[0] != 0.0 && self.values[0] != 1.0 {
                     return Err(COMMAND_REASON_DOMAIN);
                 }
-                Ok(AdmittedCommand::Fader(TrackFaderRecordV1::Mute {
+                Ok(AdmittedCommand::Fader(TrackFaderRecord::Mute {
                     lanes,
                     muted: self.values[0] == 1.0,
                     smoothing_samples: self.smoothing_samples,
@@ -1776,13 +1775,13 @@ impl CommandRecord {
                     return Err(COMMAND_REASON_MALFORMED);
                 }
                 let lanes = lane_selector(self.channel).ok_or(COMMAND_REASON_MALFORMED)?;
-                // The declared domain of `trim_db` in `BUILTIN_PARAMETER_DESCRIPTORS_V1`. It is
+                // The declared domain of `trim_db` in `BUILTIN_PARAMETER_DESCRIPTORS`. It is
                 // the same range `fader_db` carries and is spelled again rather than shared, which
                 // is this file's convention: the comment names the authority.
                 if !(-144.0..=24.0).contains(&self.values[0]) {
                     return Err(COMMAND_REASON_DOMAIN);
                 }
-                Ok(AdmittedCommand::Input(TrackInputRecordV1::TrimDb {
+                Ok(AdmittedCommand::Input(TrackInputRecord::TrimDb {
                     lanes,
                     db: self.values[0],
                     smoothing_samples: self.smoothing_samples,
@@ -1797,7 +1796,7 @@ impl CommandRecord {
                 if self.values[0] != 0.0 && self.values[0] != 1.0 {
                     return Err(COMMAND_REASON_DOMAIN);
                 }
-                Ok(AdmittedCommand::Input(TrackInputRecordV1::PolarityInvert {
+                Ok(AdmittedCommand::Input(TrackInputRecord::PolarityInvert {
                     lanes,
                     inverted: self.values[0] == 1.0,
                     smoothing_samples: self.smoothing_samples,
@@ -1843,7 +1842,7 @@ impl CommandRecord {
     /// caller that confuses them learns which one it got wrong.
     fn into_observe_record(
         self,
-        descriptor: &'static miso_engine_effect_contract::EffectDescriptorV1,
+        descriptor: &'static miso_engine_effect_contract::EffectDescriptor,
         observed: bool,
     ) -> Result<AdmittedCommand, u32> {
         if self.channel != 255 || self.values.iter().any(|value| *value != 0.0) {
@@ -1864,7 +1863,7 @@ impl CommandRecord {
         // and saying so is better than binding a lane that would never publish.
         if !matches!(
             tap.cost,
-            miso_engine_effect_contract::ObservationCostV1::Resident
+            miso_engine_effect_contract::ObservationCost::Resident
         ) {
             return Err(COMMAND_REASON_UNSUPPORTED_KIND);
         }
@@ -1873,7 +1872,7 @@ impl CommandRecord {
             return Err(COMMAND_REASON_OBSERVATION_UNBOUND);
         }
         let tap_index = u32::try_from(tap_index).map_err(|_| COMMAND_REASON_MALFORMED)?;
-        Ok(AdmittedCommand::Effect(EffectControlRecordV1::Observe {
+        Ok(AdmittedCommand::Effect(EffectControlRecord::Observe {
             tap_index,
             armed: self.kind == COMMAND_OBSERVE_SUBSCRIBE,
             window_blocks: self.smoothing_samples,
@@ -1882,7 +1881,7 @@ impl CommandRecord {
 
     fn into_effect_records(
         self,
-        descriptor: &'static miso_engine_effect_contract::EffectDescriptorV1,
+        descriptor: &'static miso_engine_effect_contract::EffectDescriptor,
         out: &mut [AdmittedCommand; 2],
     ) -> Result<usize, u32> {
         if self.kind == COMMAND_EFFECT_BYPASS {
@@ -1896,7 +1895,7 @@ impl CommandRecord {
             if self.values[0] != 0.0 && self.values[0] != 1.0 {
                 return Err(COMMAND_REASON_DOMAIN);
             }
-            out[0] = AdmittedCommand::Effect(EffectControlRecordV1::Bypass(self.values[0] == 1.0));
+            out[0] = AdmittedCommand::Effect(EffectControlRecord::Bypass(self.values[0] == 1.0));
             return Ok(1);
         }
         if self.channel > 2 || self.values[1..].iter().any(|value| *value != 0.0) {
@@ -1926,7 +1925,7 @@ impl CommandRecord {
         let parameter_index =
             u32::try_from(parameter_index).map_err(|_| COMMAND_REASON_MALFORMED)?;
         let record = |channel: ParameterChannel| {
-            AdmittedCommand::Effect(EffectControlRecordV1::Parameter {
+            AdmittedCommand::Effect(EffectControlRecord::Parameter {
                 parameter_index,
                 channel,
                 value: self.values[0],
@@ -2039,7 +2038,7 @@ fn admit_commands_staged(
         if track >= track_count {
             return Err(refuse(COMMAND_REASON_UNKNOWN_TRACK, index));
         }
-        let mut staged = [AdmittedCommand::Effect(EffectControlRecordV1::Bypass(false)); 2];
+        let mut staged = [AdmittedCommand::Effect(EffectControlRecord::Bypass(false)); 2];
         let (slot, produced) = match command.kind {
             // The three kinds that lower to one record on one of the three per-track bands. The
             // band is read off the lowered variant rather than off the kind, so a kind added to
@@ -2073,7 +2072,7 @@ fn admit_commands_staged(
                 if ready.controls.get(track).is_none() {
                     return Err(refuse(COMMAND_REASON_UNSUPPORTED_KIND, index));
                 }
-                let AdmittedCommand::Fader(TrackFaderRecordV1::Mute {
+                let AdmittedCommand::Fader(TrackFaderRecord::Mute {
                     lanes,
                     muted,
                     smoothing_samples,
@@ -2086,7 +2085,7 @@ fn admit_commands_staged(
                 }
                 let effective = muted || (ready.solo.any_solo() && !ready.solo.solo(track));
                 ready.solo.record_emitted(track, lanes, effective);
-                staged[0] = AdmittedCommand::Fader(TrackFaderRecordV1::Mute {
+                staged[0] = AdmittedCommand::Fader(TrackFaderRecord::Mute {
                     lanes,
                     muted: effective,
                     smoothing_samples,
@@ -2191,7 +2190,7 @@ fn admit_commands_staged(
                 };
                 *entry = (
                     slot as u32,
-                    AdmittedCommand::Fader(TrackFaderRecordV1::Mute {
+                    AdmittedCommand::Fader(TrackFaderRecord::Mute {
                         lanes,
                         muted,
                         smoothing_samples: solo_smoothing,
@@ -2238,7 +2237,7 @@ fn admit_commands_staged(
 /// The result is clamped into the tap's own declared range, so a consumer never has to guess what
 /// a number outside it would have meant.
 fn observed_decibels(
-    tap: miso_engine_effect_contract::ObservationDescriptorV1,
+    tap: miso_engine_effect_contract::ObservationDescriptor,
     magnitude: f32,
 ) -> f32 {
     use miso_engine_effect_contract::ParameterUnit;
@@ -2269,8 +2268,8 @@ fn observed_decibels(
     }
 }
 
-const fn empty_command_report() -> WebCommandReportV1 {
-    WebCommandReportV1 {
+const fn empty_command_report() -> WebCommandReport {
+    WebCommandReport {
         struct_size: COMMAND_REPORT_BYTES,
         abi_version: ABI_VERSION,
         result: RESULT_OK,
@@ -2290,16 +2289,16 @@ const fn selected_backend() -> u32 {
     }
 }
 
-const fn empty_resource_report(backend: u32) -> WebResourceReportV1 {
-    WebResourceReportV1 {
+const fn empty_resource_report(backend: u32) -> WebResourceReport {
+    WebResourceReport {
         struct_size: RESOURCE_REPORT_BYTES,
         abi_version: ABI_VERSION,
         sample_rate_hz: 0,
         quantum_frames: 0,
         backend,
         reserved0: [0; 3],
-        config_bytes: size_of::<WebPrepareConfigV1>() as u64,
-        status_bytes: size_of::<WebStatusV1>() as u64,
+        config_bytes: size_of::<WebPrepareConfig>() as u64,
+        status_bytes: size_of::<WebStatus>() as u64,
         session_toml_bytes: 0,
         diagnostic_bytes: 0,
         source_id_bytes: 0,
@@ -2323,9 +2322,7 @@ const fn empty_resource_report(backend: u32) -> WebResourceReportV1 {
     }
 }
 
-fn prepare_buffers(
-    config: WebPrepareConfigV1,
-) -> Result<(PreparedBuffers, WebResourceReportV1), u32> {
+fn prepare_buffers(config: WebPrepareConfig) -> Result<(PreparedBuffers, WebResourceReport), u32> {
     validate_config(config)?;
     let source_samples = checked_product([
         u64::from(config.maximum_source_channels),
@@ -2403,7 +2400,7 @@ fn prepare_buffers(
     Ok((buffers, report))
 }
 
-fn validate_config(config: WebPrepareConfigV1) -> Result<(), u32> {
+fn validate_config(config: WebPrepareConfig) -> Result<(), u32> {
     if config.struct_size != PREPARE_CONFIG_BYTES || config.abi_version != ABI_VERSION {
         return Err(RESULT_ABI_MISMATCH);
     }
@@ -2487,7 +2484,7 @@ fn source_result(error: SourceControlError) -> u32 {
 /// This is the only place the mapping is spelled. `HostShapePolicy::Exact`: unlike the C ABI host,
 /// the browser host is handed its `AudioContext` rate and the caller's quantum and must refuse any
 /// session that declares anything else -- there is no resampler and no requantiser.
-const fn prepare_caps(config: WebPrepareConfigV1) -> HostPrepareCaps {
+const fn prepare_caps(config: WebPrepareConfig) -> HostPrepareCaps {
     HostPrepareCaps {
         shape: HostShapePolicy::Exact {
             sample_rate_hz: config.sample_rate_hz,
@@ -2521,9 +2518,9 @@ const fn prepare_caps(config: WebPrepareConfigV1) -> HostPrepareCaps {
 /// browser caps are applied here because they are the *browser's* caps on the shared report.
 fn compile_ready(
     toml: &str,
-    config: WebPrepareConfigV1,
-    mut report: WebResourceReportV1,
-) -> Result<(ReadyOwnership, WebResourceReportV1), Vec<u8>> {
+    config: WebPrepareConfig,
+    mut report: WebResourceReport,
+) -> Result<(ReadyOwnership, WebResourceReport), Vec<u8>> {
     let caps = prepare_caps(config);
     let console = console_request(config).ok_or_else(|| fixed_diagnostic("web.console.config"))?;
     let (session, host, handles) = prepare_host_session_with_console(toml, &caps, &console)
@@ -2626,7 +2623,7 @@ fn compile_ready(
         .enumerate()
         .map(|(index, id)| (id.as_ref(), index))
         .collect();
-    let mut effect_controls: Vec<Option<EffectControlProducerV1>> = Vec::new();
+    let mut effect_controls: Vec<Option<EffectControlProducer>> = Vec::new();
     effect_controls
         .try_reserve_exact(total_effects as usize)
         .map_err(|_| fixed_diagnostic("web.resource.allocation"))?;
@@ -2658,7 +2655,7 @@ fn compile_ready(
         .ok_or_else(|| fixed_diagnostic("web.console.effects"))?;
     // Issue #143: the observation handles are permuted into the same dense `effect_slot` order
     // the command producers use, so one index serves both the subscribe path and the poll.
-    let mut effect_observations: Vec<Option<EffectObservationHandleV1>> = Vec::new();
+    let mut effect_observations: Vec<Option<EffectObservationHandle>> = Vec::new();
     effect_observations
         .try_reserve_exact(total_effects as usize)
         .map_err(|_| fixed_diagnostic("web.resource.allocation"))?;
@@ -2728,7 +2725,7 @@ fn compile_ready(
 ///
 /// `console_meter_blocks == 0` is the honest form of "metering off": no observer is bound, so the
 /// render path folds nothing at all. The port lease is a second, finer switch over posting.
-fn console_request(config: WebPrepareConfigV1) -> Option<HostConsoleRequestV1> {
+fn console_request(config: WebPrepareConfig) -> Option<HostConsoleRequest> {
     let control_queue_depth = match config.console_command_queue_records {
         0 => None,
         records => Some(NonZeroUsize::new(u32::try_from(records).ok()? as usize)?),
@@ -2739,7 +2736,7 @@ fn console_request(config: WebPrepareConfigV1) -> Option<HostConsoleRequestV1> {
         let blocks = u32::try_from(config.console_meter_blocks).ok()?;
         Some(NonZeroU32::new(blocks.checked_mul(config.quantum_frames)?)?)
     };
-    Some(HostConsoleRequestV1 {
+    Some(HostConsoleRequest {
         control_queue_depth,
         meter_period_frames,
         // One window per track per post, plus headroom for a control-side stall of a few windows.
@@ -2787,7 +2784,7 @@ fn boxed_command_staging(track_count: usize) -> Result<Box<[(u32, AdmittedComman
     // Plus `2 * track_count` for issue #210 phase 1's coalesced solo emission. A submission that
     // moves a solo bit owes the console the difference between the composed effective mute and
     // what the render plane was last told; that is at most two records per track, because
-    // `TrackFaderRecordV1::Mute` carries one `muted` bool and a track whose user mute is
+    // `TrackFaderRecord::Mute` carries one `muted` bool and a track whose user mute is
     // asymmetric needs one record per lane to restore. The two terms add rather than max: a batch
     // may carry 256 effect-parameter records *and* a solo toggle.
     let count = (MAXIMUM_COMMAND_RECORDS as usize * 2)
@@ -2795,7 +2792,7 @@ fn boxed_command_staging(track_count: usize) -> Result<Box<[(u32, AdmittedComman
         .ok_or_else(arithmetic)?;
     let empty = (
         0_u32,
-        AdmittedCommand::Effect(EffectControlRecordV1::Bypass(false)),
+        AdmittedCommand::Effect(EffectControlRecord::Bypass(false)),
     );
     let mut value = Vec::new();
     value

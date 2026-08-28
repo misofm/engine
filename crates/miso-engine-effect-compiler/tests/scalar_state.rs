@@ -22,7 +22,7 @@ const fn port_id(value: &'static str) -> PortId {
     }
 }
 
-static PARAMETERS: [ParameterDescriptorV1; 1] = [ParameterDescriptorV1 {
+static PARAMETERS: [ParameterDescriptor; 1] = [ParameterDescriptor {
     id: ParameterId(1),
     display_name: "value",
     display_unit: "linear",
@@ -40,22 +40,22 @@ static PARAMETERS: [ParameterDescriptorV1; 1] = [ParameterDescriptorV1 {
     automatable: true,
     enum_choices: &[],
 }];
-static PORTS: [PortDescriptorV1; 2] = [
-    PortDescriptorV1 {
+static PORTS: [PortDescriptor; 2] = [
+    PortDescriptor {
         id: port_id("main-in"),
         role: PortRole::MainInput,
         required: true,
         layout: PortLayout::DualMonoPlanar,
     },
-    PortDescriptorV1 {
+    PortDescriptor {
         id: port_id("main-out"),
         role: PortRole::MainOutput,
         required: true,
         layout: PortLayout::DualMonoPlanar,
     },
 ];
-const fn quality(sample_rate: u32) -> QualityDescriptorV1 {
-    QualityDescriptorV1 {
+const fn quality(sample_rate: u32) -> QualityDescriptor {
+    QualityDescriptor {
         quality: EffectQuality::Normal,
         sample_rate,
         latency: LatencySamples(0),
@@ -69,13 +69,13 @@ const fn quality(sample_rate: u32) -> QualityDescriptorV1 {
         scratch_bytes_per_frame: 0,
     }
 }
-static QUALITIES: [QualityDescriptorV1; 4] = [
+static QUALITIES: [QualityDescriptor; 4] = [
     quality(44_100),
     quality(48_000),
     quality(88_200),
     quality(96_000),
 ];
-static DESCRIPTOR: EffectDescriptorV1 = EffectDescriptorV1 {
+static DESCRIPTOR: EffectDescriptor = EffectDescriptor {
     id: effect_id("test.scalar-state"),
     display_name: "Scalar state",
     contract_major: 1,
@@ -87,7 +87,7 @@ static DESCRIPTOR: EffectDescriptorV1 = EffectDescriptorV1 {
     qualities: &QUALITIES,
     observations: &[],
 };
-static ALTERNATE_DESCRIPTOR: EffectDescriptorV1 = EffectDescriptorV1 {
+static ALTERNATE_DESCRIPTOR: EffectDescriptor = EffectDescriptor {
     display_name: "Other scalar",
     ..DESCRIPTOR
 };
@@ -127,7 +127,7 @@ struct MockEffect {
 }
 
 impl NativeEffectFactory for MockFactory {
-    fn descriptor(&self) -> &'static EffectDescriptorV1 {
+    fn descriptor(&self) -> &'static EffectDescriptor {
         &DESCRIPTOR
     }
     fn prepare(
@@ -206,14 +206,14 @@ impl PreparedNativeEffect for MockEffect {
     }
 }
 
-fn preparation(sample_rate: u32) -> EffectBankPreparationV1 {
-    EffectBankPreparationV1 {
+fn preparation(sample_rate: u32) -> EffectBankPreparation {
+    EffectBankPreparation {
         sample_rate,
         quantum: 32,
         quality: EffectQuality::Normal,
         bypass: false,
         link_mode: LinkMode::DualMono,
-        ports: PreparedPortsV1 {
+        ports: PreparedPorts {
             sidechain: PreparedSidechainPort::None,
         },
         initial_values: INITIAL.into(),
@@ -225,22 +225,22 @@ fn preparation(sample_rate: u32) -> EffectBankPreparationV1 {
     }
 }
 
-fn wire(descriptor: &'static EffectDescriptorV1) -> Vec<u8> {
-    let required = effect_descriptor_wire_v1_required_size(descriptor, 1 << 20).unwrap();
+fn wire(descriptor: &'static EffectDescriptor) -> Vec<u8> {
+    let required = effect_descriptor_wire_required_size(descriptor, 1 << 20).unwrap();
     let mut output = vec![0; required as usize];
-    encode_effect_descriptor_wire_v1(descriptor, 1 << 20, &mut output).unwrap();
+    encode_effect_descriptor_wire(descriptor, 1 << 20, &mut output).unwrap();
     output
 }
 
-fn bound<'a>(controls: &Arc<Controls>, wire: &'a [u8]) -> WireBoundNativeEffectFactoryV1<'a> {
+fn bound<'a>(controls: &Arc<Controls>, wire: &'a [u8]) -> WireBoundNativeEffectFactory<'a> {
     let factory: Arc<dyn NativeEffectFactory> = Arc::new(MockFactory {
         controls: Arc::clone(controls),
     });
-    bind_native_effect_factory_state_v1(factory, wire, 1 << 20).unwrap()
+    bind_native_effect_factory_state(factory, wire, 1 << 20).unwrap()
 }
 
-fn admission(preparation: &EffectBankPreparationV1) -> EffectStateRestoreAdmissionV1 {
-    EffectStateRestoreAdmissionV1 {
+fn admission(preparation: &EffectBankPreparation) -> EffectStateRestoreAdmission {
+    EffectStateRestoreAdmission {
         sample_rate: preparation.sample_rate,
         quantum: preparation.quantum,
         maximum_total_state_bytes: preparation.limits.maximum_total_state_bytes,
@@ -252,23 +252,20 @@ fn admission(preparation: &EffectBankPreparationV1) -> EffectStateRestoreAdmissi
 fn snapshot(
     controls: &Arc<Controls>,
     descriptor_wire: &[u8],
-    preparation: &EffectBankPreparationV1,
+    preparation: &EffectBankPreparation,
 ) -> Vec<u8> {
     let capability = bound(controls, descriptor_wire);
     let processor = capability.factory().prepare(preparation.request()).unwrap();
-    let requirements = scalar_effect_state_v1_requirements(
-        &capability,
-        preparation,
-        EffectStateLimitsV1::default(),
-    )
-    .unwrap();
+    let requirements =
+        scalar_effect_state_requirements(&capability, preparation, EffectStateLimits::default())
+            .unwrap();
     let mut scratch = vec![0xa5; requirements.payload_snapshot_scratch_bytes as usize + 3];
     let mut output = vec![0x5a; requirements.envelope_bytes as usize + 5];
-    snapshot_scalar_effect_state_v1(
+    snapshot_scalar_effect_state(
         &capability,
         preparation,
         processor.as_ref(),
-        EffectStateLimitsV1::default(),
+        EffectStateLimits::default(),
         &mut scratch,
         &mut output,
     )
@@ -320,10 +317,10 @@ fn scalar_restore_is_transactional_and_admission_precedes_prepare() {
                 value: 0.5,
             },
         ];
-        let restored = restore_scalar_effect_state_v1(
+        let restored = restore_scalar_effect_state(
             capability,
             &envelope,
-            EffectStateLimitsV1::default(),
+            EffectStateLimits::default(),
             admission(&preparation),
             &mut initial_scratch,
         )
@@ -337,17 +334,17 @@ fn scalar_restore_is_transactional_and_admission_precedes_prepare() {
         let mut too_small = admission(&preparation);
         too_small.maximum_total_state_bytes = 4;
         let before = controls.prepare_calls.load(Ordering::SeqCst);
-        let error = restore_scalar_effect_state_v1(
+        let error = restore_scalar_effect_state(
             capability,
             &envelope,
-            EffectStateLimitsV1::default(),
+            EffectStateLimits::default(),
             too_small,
             &mut scratch,
         )
         .unwrap_err();
         assert_eq!(
             (error.code, error.byte_offset),
-            (EffectStateDiagnosticCodeV1::Limit, 192)
+            (EffectStateDiagnosticCode::Limit, 192)
         );
         assert_eq!(controls.prepare_calls.load(Ordering::SeqCst), before);
 
@@ -358,10 +355,10 @@ fn scalar_restore_is_transactional_and_admission_precedes_prepare() {
             value: 0.25,
         }];
         let before = controls.prepare_calls.load(Ordering::SeqCst);
-        let error = restore_scalar_effect_state_v1(
+        let error = restore_scalar_effect_state(
             capability,
             &envelope,
-            EffectStateLimitsV1::default(),
+            EffectStateLimits::default(),
             admission(&preparation),
             &mut short,
         )
@@ -369,8 +366,8 @@ fn scalar_restore_is_transactional_and_admission_precedes_prepare() {
         assert_eq!(
             (error.code, error.detail),
             (
-                EffectStateDiagnosticCodeV1::BufferTooSmall,
-                EFFECT_STATE_V1_BUFFER_INITIAL_VALUE_SCRATCH
+                EffectStateDiagnosticCode::BufferTooSmall,
+                EFFECT_STATE_BUFFER_INITIAL_VALUE_SCRATCH
             )
         );
         assert_eq!(short[0].parameter_index, 77);
@@ -381,16 +378,16 @@ fn scalar_restore_is_transactional_and_admission_precedes_prepare() {
         let capability = bound(&controls, &descriptor_wire);
         let before = controls.prepare_calls.load(Ordering::SeqCst);
         assert_eq!(
-            restore_scalar_effect_state_v1(
+            restore_scalar_effect_state(
                 capability,
                 &bad_digest,
-                EffectStateLimitsV1::default(),
+                EffectStateLimits::default(),
                 admission(&preparation),
                 &mut scratch
             )
             .unwrap_err()
             .code,
-            EffectStateDiagnosticCodeV1::Digest
+            EffectStateDiagnosticCode::Digest
         );
         assert_eq!(controls.prepare_calls.load(Ordering::SeqCst), before);
         assert!(controls.prepare_calls.load(Ordering::SeqCst) > calls_after_snapshot);
@@ -404,7 +401,7 @@ fn every_restore_admission_owner_rejects_before_prepare() {
     let preparation = preparation(48_000);
     let envelope = snapshot(&controls, &descriptor_wire, &preparation);
     let base = admission(&preparation);
-    let mut cases: Vec<(Vec<u8>, EffectStateRestoreAdmissionV1, u64, u64)> = Vec::new();
+    let mut cases: Vec<(Vec<u8>, EffectStateRestoreAdmission, u64, u64)> = Vec::new();
 
     let mut admission = base;
     admission.sample_rate = 44_100;
@@ -470,17 +467,17 @@ fn every_restore_admission_owner_rejects_before_prepare() {
             value: 0.5,
         }; 2];
         let before = controls.prepare_calls.load(Ordering::SeqCst);
-        let error = restore_scalar_effect_state_v1(
+        let error = restore_scalar_effect_state(
             capability,
             &envelope,
-            EffectStateLimitsV1::default(),
+            EffectStateLimits::default(),
             admission,
             &mut scratch,
         )
         .unwrap_err();
         assert_eq!(
             (error.code, error.byte_offset, error.required_bytes),
-            (EffectStateDiagnosticCodeV1::Limit, offset, required)
+            (EffectStateDiagnosticCode::Limit, offset, required)
         );
         assert!(scratch.iter().all(|value| value.parameter_index == 91));
         assert_eq!(controls.prepare_calls.load(Ordering::SeqCst), before);
@@ -494,22 +491,19 @@ fn snapshot_and_restore_failures_publish_nothing() {
     let preparation = preparation(48_000);
     let capability = bound(&controls, &descriptor_wire);
     let processor = capability.factory().prepare(preparation.request()).unwrap();
-    let requirements = scalar_effect_state_v1_requirements(
-        &capability,
-        &preparation,
-        EffectStateLimitsV1::default(),
-    )
-    .unwrap();
+    let requirements =
+        scalar_effect_state_requirements(&capability, &preparation, EffectStateLimits::default())
+            .unwrap();
     let snapshot_calls = controls.snapshot_calls.load(Ordering::SeqCst);
     let mut exact_scratch = vec![0x22; requirements.payload_snapshot_scratch_bytes as usize];
     let mut short_output = vec![0x23; requirements.envelope_bytes as usize + 3];
     let short_output_baseline = short_output.clone();
     let short_output_len = requirements.envelope_bytes as usize - 1;
-    let error = snapshot_scalar_effect_state_v1(
+    let error = snapshot_scalar_effect_state(
         &capability,
         &preparation,
         processor.as_ref(),
-        EffectStateLimitsV1::default(),
+        EffectStateLimits::default(),
         &mut exact_scratch,
         &mut short_output[..short_output_len],
     )
@@ -517,8 +511,8 @@ fn snapshot_and_restore_failures_publish_nothing() {
     assert_eq!(
         (error.code, error.detail, error.required_bytes),
         (
-            EffectStateDiagnosticCodeV1::BufferTooSmall,
-            EFFECT_STATE_V1_BUFFER_ENVELOPE_OUTPUT,
+            EffectStateDiagnosticCode::BufferTooSmall,
+            EFFECT_STATE_BUFFER_ENVELOPE_OUTPUT,
             requirements.envelope_bytes
         )
     );
@@ -533,11 +527,11 @@ fn snapshot_and_restore_failures_publish_nothing() {
     let short_scratch_len = requirements.payload_snapshot_scratch_bytes as usize - 1;
     let mut exact_output = vec![0x25; requirements.envelope_bytes as usize];
     let exact_output_baseline = exact_output.clone();
-    let error = snapshot_scalar_effect_state_v1(
+    let error = snapshot_scalar_effect_state(
         &capability,
         &preparation,
         processor.as_ref(),
-        EffectStateLimitsV1::default(),
+        EffectStateLimits::default(),
         &mut short_scratch[..short_scratch_len],
         &mut exact_output,
     )
@@ -545,8 +539,8 @@ fn snapshot_and_restore_failures_publish_nothing() {
     assert_eq!(
         (error.code, error.detail, error.required_bytes),
         (
-            EffectStateDiagnosticCodeV1::BufferTooSmall,
-            EFFECT_STATE_V1_BUFFER_PAYLOAD_SCRATCH,
+            EffectStateDiagnosticCode::BufferTooSmall,
+            EFFECT_STATE_BUFFER_PAYLOAD_SCRATCH,
             requirements.payload_snapshot_scratch_bytes
         )
     );
@@ -562,18 +556,18 @@ fn snapshot_and_restore_failures_publish_nothing() {
     let mut scratch = vec![0x44; requirements.payload_snapshot_scratch_bytes as usize + 2];
     let mut output = vec![0x66; requirements.envelope_bytes as usize + 2];
     let baseline = output.clone();
-    let error = snapshot_scalar_effect_state_v1(
+    let error = snapshot_scalar_effect_state(
         &capability,
         &preparation,
         processor.as_ref(),
-        EffectStateLimitsV1::default(),
+        EffectStateLimits::default(),
         &mut scratch,
         &mut output,
     )
     .unwrap_err();
     assert_eq!(
         (error.code, error.detail),
-        (EffectStateDiagnosticCodeV1::Payload, 1)
+        (EffectStateDiagnosticCode::Payload, 1)
     );
     assert_eq!(output, baseline);
     assert_eq!(
@@ -586,49 +580,49 @@ fn snapshot_and_restore_failures_publish_nothing() {
     controls.fail_restore.store(true, Ordering::SeqCst);
     let capability = bound(&controls, &descriptor_wire);
     let mut initial = INITIAL;
-    let error = restore_scalar_effect_state_v1(
+    let error = restore_scalar_effect_state(
         capability,
         &envelope,
-        EffectStateLimitsV1::default(),
+        EffectStateLimits::default(),
         admission(&preparation),
         &mut initial,
     )
     .unwrap_err();
     assert_eq!(
         (error.code, error.detail),
-        (EffectStateDiagnosticCodeV1::Payload, 3)
+        (EffectStateDiagnosticCode::Payload, 3)
     );
 
     controls.fail_restore.store(false, Ordering::SeqCst);
     controls.fail_prepare.store(true, Ordering::SeqCst);
     let capability = bound(&controls, &descriptor_wire);
-    let error = restore_scalar_effect_state_v1(
+    let error = restore_scalar_effect_state(
         capability,
         &envelope,
-        EffectStateLimitsV1::default(),
+        EffectStateLimits::default(),
         admission(&preparation),
         &mut initial,
     )
     .unwrap_err();
     assert_eq!(
         (error.code, error.detail),
-        (EffectStateDiagnosticCodeV1::Factory, 3)
+        (EffectStateDiagnosticCode::Factory, 3)
     );
 
     controls.fail_prepare.store(false, Ordering::SeqCst);
     controls.wrong_metadata.store(true, Ordering::SeqCst);
     let capability = bound(&controls, &descriptor_wire);
-    let error = restore_scalar_effect_state_v1(
+    let error = restore_scalar_effect_state(
         capability,
         &envelope,
-        EffectStateLimitsV1::default(),
+        EffectStateLimits::default(),
         admission(&preparation),
         &mut initial,
     )
     .unwrap_err();
     assert_eq!(
         (error.code, error.detail),
-        (EffectStateDiagnosticCodeV1::Factory, 4)
+        (EffectStateDiagnosticCode::Factory, 4)
     );
     let sentinel_capability = bound(&controls, &descriptor_wire);
     let sentinel_after = snapshot_processor(&sentinel_capability, &preparation, processor.as_ref());
@@ -643,13 +637,13 @@ fn binding_and_snapshot_metadata_failures_are_exact_and_atomic() {
     let factory: Arc<dyn NativeEffectFactory> = Arc::new(MockFactory {
         controls: Arc::clone(&controls),
     });
-    let error = bind_native_effect_factory_state_v1(Arc::clone(&factory), &alternate_wire, 1 << 20)
+    let error = bind_native_effect_factory_state(Arc::clone(&factory), &alternate_wire, 1 << 20)
         .unwrap_err();
     assert_eq!(
         error.detail >> 16,
-        EffectDescriptorBindingErrorKindV1::StaticDescriptorMismatch as u32
+        EffectDescriptorBindingErrorKind::StaticDescriptorMismatch as u32
     );
-    let error = bind_native_effect_factory_state_v1(factory, &[], 1 << 20).unwrap_err();
+    let error = bind_native_effect_factory_state(factory, &[], 1 << 20).unwrap_err();
     assert_eq!(error.detail >> 16, 1);
     assert_eq!(error.byte_offset, 0);
 
@@ -657,28 +651,25 @@ fn binding_and_snapshot_metadata_failures_are_exact_and_atomic() {
     let capability = bound(&controls, &descriptor_wire);
     let preparation = preparation(48_000);
     let processor = capability.factory().prepare(preparation.request()).unwrap();
-    let requirements = scalar_effect_state_v1_requirements(
-        &capability,
-        &preparation,
-        EffectStateLimitsV1::default(),
-    )
-    .unwrap();
+    let requirements =
+        scalar_effect_state_requirements(&capability, &preparation, EffectStateLimits::default())
+            .unwrap();
     let mut scratch = vec![0x33; requirements.payload_snapshot_scratch_bytes as usize];
     let mut output = vec![0x55; requirements.envelope_bytes as usize];
     let baseline = output.clone();
     let calls = controls.snapshot_calls.load(Ordering::SeqCst);
-    let error = snapshot_scalar_effect_state_v1(
+    let error = snapshot_scalar_effect_state(
         &capability,
         &preparation,
         processor.as_ref(),
-        EffectStateLimitsV1::default(),
+        EffectStateLimits::default(),
         &mut scratch,
         &mut output,
     )
     .unwrap_err();
     assert_eq!(
         (error.code, error.detail),
-        (EffectStateDiagnosticCodeV1::Metadata, 1)
+        (EffectStateDiagnosticCode::Metadata, 1)
     );
     assert_eq!(output, baseline);
     assert_eq!(controls.snapshot_calls.load(Ordering::SeqCst), calls);
@@ -700,17 +691,17 @@ fn malformed_replay_is_rejected_before_initial_scratch() {
         value: 0.5,
     }; 2];
     let before = controls.prepare_calls.load(Ordering::SeqCst);
-    let error = restore_scalar_effect_state_v1(
+    let error = restore_scalar_effect_state(
         capability,
         &envelope,
-        EffectStateLimitsV1::default(),
+        EffectStateLimits::default(),
         admission(&preparation),
         &mut initial,
     )
     .unwrap_err();
     assert_eq!(
         (error.code, error.detail),
-        (EffectStateDiagnosticCodeV1::Metadata, 1)
+        (EffectStateDiagnosticCode::Metadata, 1)
     );
     assert!(initial.iter().all(|value| value.parameter_index == 88));
     assert_eq!(controls.prepare_calls.load(Ordering::SeqCst), before);
@@ -721,24 +712,24 @@ fn malformed_replay_is_rejected_before_initial_scratch() {
     refresh_digest(&mut wrong_sizes);
     let capability = bound(&controls, &descriptor_wire);
     let before = controls.prepare_calls.load(Ordering::SeqCst);
-    let error = restore_scalar_effect_state_v1(
+    let error = restore_scalar_effect_state(
         capability,
         &wrong_sizes,
-        EffectStateLimitsV1::default(),
+        EffectStateLimits::default(),
         admission(&preparation),
         &mut initial,
     )
     .unwrap_err();
     assert_eq!(
         (error.code, error.detail),
-        (EffectStateDiagnosticCodeV1::Metadata, 12)
+        (EffectStateDiagnosticCode::Metadata, 12)
     );
     assert!(initial.iter().all(|value| value.parameter_index == 88));
     assert_eq!(controls.prepare_calls.load(Ordering::SeqCst), before);
 }
 
-fn delay_preparation(sample_rate: u32) -> EffectBankPreparationV1 {
-    let descriptor = &miso_engine_delay::DELAY_DESCRIPTOR_V1;
+fn delay_preparation(sample_rate: u32) -> EffectBankPreparation {
+    let descriptor = &miso_engine_delay::DELAY_DESCRIPTOR;
     let values: Vec<_> = descriptor
         .parameters
         .iter()
@@ -777,13 +768,13 @@ fn delay_preparation(sample_rate: u32) -> EffectBankPreparationV1 {
         .iter()
         .find(|quality| quality.sample_rate == sample_rate)
         .unwrap();
-    EffectBankPreparationV1 {
+    EffectBankPreparation {
         sample_rate,
         quantum: 128,
         quality: EffectQuality::Normal,
         bypass: false,
         link_mode: LinkMode::DualMono,
-        ports: PreparedPortsV1 {
+        ports: PreparedPorts {
             sidechain: PreparedSidechainPort::None,
         },
         initial_values: values,
@@ -817,20 +808,19 @@ fn render_partition(
 }
 
 fn snapshot_processor(
-    capability: &WireBoundNativeEffectFactoryV1<'_>,
-    replay: &EffectBankPreparationV1,
+    capability: &WireBoundNativeEffectFactory<'_>,
+    replay: &EffectBankPreparation,
     processor: &dyn PreparedNativeEffect,
 ) -> Vec<u8> {
     let requirements =
-        scalar_effect_state_v1_requirements(capability, replay, EffectStateLimitsV1::default())
-            .unwrap();
+        scalar_effect_state_requirements(capability, replay, EffectStateLimits::default()).unwrap();
     let mut scratch = vec![0; requirements.payload_snapshot_scratch_bytes as usize];
     let mut output = vec![0; requirements.envelope_bytes as usize];
-    snapshot_scalar_effect_state_v1(
+    snapshot_scalar_effect_state(
         capability,
         replay,
         processor,
-        EffectStateLimitsV1::default(),
+        EffectStateLimits::default(),
         &mut scratch,
         &mut output,
     )
@@ -840,12 +830,11 @@ fn snapshot_processor(
 
 #[test]
 fn production_delay_active_common_and_lane_state_continues_exactly() {
-    let descriptor_wire = wire(&miso_engine_delay::DELAY_DESCRIPTOR_V1);
+    let descriptor_wire = wire(&miso_engine_delay::DELAY_DESCRIPTOR);
     let replay = delay_preparation(48_000);
     let factory: Arc<dyn NativeEffectFactory> = Arc::new(miso_engine_delay::DelayFactory);
     let capability =
-        bind_native_effect_factory_state_v1(Arc::clone(&factory), &descriptor_wire, 1 << 20)
-            .unwrap();
+        bind_native_effect_factory_state(Arc::clone(&factory), &descriptor_wire, 1 << 20).unwrap();
     let mut original = factory.prepare(replay.request()).unwrap();
     let mut cursor = 0_u64;
     for frames in [73, 41, 89, 54] {
@@ -854,14 +843,13 @@ fn production_delay_active_common_and_lane_state_continues_exactly() {
     }
     let envelope = snapshot_processor(&capability, &replay, original.as_ref());
     let restore_capability =
-        bind_native_effect_factory_state_v1(Arc::clone(&factory), &descriptor_wire, 1 << 20)
-            .unwrap();
+        bind_native_effect_factory_state(Arc::clone(&factory), &descriptor_wire, 1 << 20).unwrap();
     let mut initial_scratch = vec![replay.initial_values[0]; replay.initial_values.len() + 2];
     initial_scratch[replay.initial_values.len()].parameter_index = 77;
-    let mut restored = restore_scalar_effect_state_v1(
+    let mut restored = restore_scalar_effect_state(
         restore_capability,
         &envelope,
-        EffectStateLimitsV1::default(),
+        EffectStateLimits::default(),
         admission(&replay),
         &mut initial_scratch,
     )
@@ -888,24 +876,24 @@ fn production_delay_active_common_and_lane_state_continues_exactly() {
 
 #[test]
 fn production_delay_state_round_trips_at_every_launch_rate() {
-    let descriptor_wire = wire(&miso_engine_delay::DELAY_DESCRIPTOR_V1);
+    let descriptor_wire = wire(&miso_engine_delay::DELAY_DESCRIPTOR);
     let factory: Arc<dyn NativeEffectFactory> = Arc::new(miso_engine_delay::DelayFactory);
     for sample_rate in [44_100, 48_000, 88_200, 96_000] {
         let replay = delay_preparation(sample_rate);
         let capability =
-            bind_native_effect_factory_state_v1(Arc::clone(&factory), &descriptor_wire, 1 << 20)
+            bind_native_effect_factory_state(Arc::clone(&factory), &descriptor_wire, 1 << 20)
                 .unwrap();
         let mut original = factory.prepare(replay.request()).unwrap();
         let _ = render_partition(original.as_mut(), 0, 97);
         let envelope = snapshot_processor(&capability, &replay, original.as_ref());
         let restore_capability =
-            bind_native_effect_factory_state_v1(Arc::clone(&factory), &descriptor_wire, 1 << 20)
+            bind_native_effect_factory_state(Arc::clone(&factory), &descriptor_wire, 1 << 20)
                 .unwrap();
         let mut initial_scratch = vec![replay.initial_values[0]; replay.initial_values.len()];
-        let restored = restore_scalar_effect_state_v1(
+        let restored = restore_scalar_effect_state(
             restore_capability,
             &envelope,
-            EffectStateLimitsV1::default(),
+            EffectStateLimits::default(),
             admission(&replay),
             &mut initial_scratch,
         )

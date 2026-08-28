@@ -27,7 +27,7 @@ use miso_engine_core::{
 };
 pub mod corpus;
 
-use miso_engine_effect_contract::{BankWidth, ChannelSymmetryWitnessV1};
+use miso_engine_effect_contract::{BankWidth, ChannelSymmetryWitness};
 use miso_engine_lane::{
     Backend, Lane, Simd4, Simd8,
     kernels::{
@@ -213,7 +213,7 @@ pub enum BuiltinTail {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct BuiltinParameterDescriptorV1 {
+pub struct BuiltinParameterDescriptor {
     pub id: u32,
     pub name: &'static str,
     /// The state ownership boundary for this stable parameter ID.
@@ -253,7 +253,7 @@ pub enum BuiltinParameterDomain {
     FiniteInclusive { minimum: f32, maximum: f32 },
     /// Version 1 cutoff contract: exact zero disables; enabled values are bounded by the
     /// representable maximum recorded for the prepared launch sample rate.
-    DisabledOrRateKeyedHertzV1 { disabled: f32, minimum_hz: f32 },
+    DisabledOrRateKeyedHertz { disabled: f32, minimum_hz: f32 },
 }
 
 impl BuiltinParameterDomain {
@@ -267,12 +267,10 @@ impl BuiltinParameterDomain {
             Self::FiniteInclusive { minimum, maximum } => {
                 value.is_finite() && value >= minimum && value <= maximum
             }
-            Self::DisabledOrRateKeyedHertzV1 {
+            Self::DisabledOrRateKeyedHertz {
                 disabled,
                 minimum_hz,
-            } => {
-                validate_builtin_filter_cutoff_v1(value, sample_rate, disabled, minimum_hz).is_ok()
-            }
+            } => validate_builtin_filter_cutoff(value, sample_rate, disabled, minimum_hz).is_ok(),
         }
     }
 }
@@ -282,7 +280,7 @@ impl BuiltinParameterDomain {
 /// These are greatest contiguous shared HPF/LPF maxima.  The immediate successor of each value
 /// is deliberately outside the public prepared domain.
 #[must_use]
-pub const fn builtin_filter_cutoff_maximum_hz_v1(sample_rate: u32) -> Option<f32> {
+pub const fn builtin_filter_cutoff_maximum_hz(sample_rate: u32) -> Option<f32> {
     match sample_rate {
         44_100 => Some(f32::from_bits(0x46ac_42f7)),
         48_000 => Some(f32::from_bits(0x46bb_7ede)),
@@ -297,13 +295,13 @@ pub const fn builtin_filter_cutoff_maximum_hz_v1(sample_rate: u32) -> Option<f32
 /// Session compilation rejects unsupported rates before builtins preparation. For the retained
 /// direct TPT compatibility checks at extended research rates, the helper keeps their previous
 /// finite open-Nyquist mathematical domain; it does not expand the launch descriptor contract.
-pub fn validate_builtin_filter_cutoff_v1(
+pub fn validate_builtin_filter_cutoff(
     value: f32,
     sample_rate: u32,
     disabled: f32,
     minimum_hz: f32,
 ) -> Result<(), BuiltinParameterError> {
-    let launch_maximum = builtin_filter_cutoff_maximum_hz_v1(sample_rate);
+    let launch_maximum = builtin_filter_cutoff_maximum_hz(sample_rate);
     let is_extended_compatibility =
         is_extended_compatibility_sample_rate(SampleRateHz(sample_rate));
     if launch_maximum.is_none() && !is_extended_compatibility {
@@ -345,8 +343,8 @@ pub enum BuiltinParameterReset {
     KeepTargetResetCurrent,
 }
 
-pub const BUILTIN_PARAMETER_DESCRIPTORS_V1: [BuiltinParameterDescriptorV1; 11] = [
-    BuiltinParameterDescriptorV1 {
+pub const BUILTIN_PARAMETER_DESCRIPTORS: [BuiltinParameterDescriptor; 11] = [
+    BuiltinParameterDescriptor {
         id: 1,
         name: "polarity_invert",
         scope: BuiltinParameterScope::PerLane,
@@ -363,7 +361,7 @@ pub const BUILTIN_PARAMETER_DESCRIPTORS_V1: [BuiltinParameterDescriptorV1; 11] =
         reset: BuiltinParameterReset::RestorePreparedValue,
         disabled_value: None,
     },
-    BuiltinParameterDescriptorV1 {
+    BuiltinParameterDescriptor {
         id: 2,
         name: "trim_db",
         scope: BuiltinParameterScope::PerLane,
@@ -382,12 +380,12 @@ pub const BUILTIN_PARAMETER_DESCRIPTORS_V1: [BuiltinParameterDescriptorV1; 11] =
         reset: BuiltinParameterReset::RestorePreparedValue,
         disabled_value: None,
     },
-    BuiltinParameterDescriptorV1 {
+    BuiltinParameterDescriptor {
         id: 3,
         name: "hpf_hz",
         scope: BuiltinParameterScope::PerLane,
         mapping: BuiltinParameterMapping::Hertz,
-        domain: BuiltinParameterDomain::DisabledOrRateKeyedHertzV1 {
+        domain: BuiltinParameterDomain::DisabledOrRateKeyedHertz {
             disabled: 0.0,
             minimum_hz: 10.0,
         },
@@ -397,12 +395,12 @@ pub const BUILTIN_PARAMETER_DESCRIPTORS_V1: [BuiltinParameterDescriptorV1; 11] =
         reset: BuiltinParameterReset::RestorePreparedValue,
         disabled_value: Some(0.0),
     },
-    BuiltinParameterDescriptorV1 {
+    BuiltinParameterDescriptor {
         id: 4,
         name: "lpf_hz",
         scope: BuiltinParameterScope::PerLane,
         mapping: BuiltinParameterMapping::Hertz,
-        domain: BuiltinParameterDomain::DisabledOrRateKeyedHertzV1 {
+        domain: BuiltinParameterDomain::DisabledOrRateKeyedHertz {
             disabled: 0.0,
             minimum_hz: 10.0,
         },
@@ -413,13 +411,13 @@ pub const BUILTIN_PARAMETER_DESCRIPTORS_V1: [BuiltinParameterDescriptorV1; 11] =
         disabled_value: Some(0.0),
     },
     // Issue #140 B: `fader_db` and `mute` become block targets with linear-N smoothing, because
-    // the engine now has a post-preparation write path for them -- `FaderMuteRampBuiltinsV1`,
+    // the engine now has a post-preparation write path for them -- `FaderMuteRampBuiltins`,
     // bound by `ConsoleFaderProcessor` for a track a live console drives. This row states the
     // parameter's *capability*, exactly as `matrix_ll..rr` do: a session with no console has
     // nothing that writes either surface, and the prepared `FaderMuteBuiltins` it binds instead
     // is unchanged. `mute` is smoothed for the same reason it is a block target: a mute is a
     // retarget of the same gain to zero, over the same ramp window, not a discontinuity.
-    BuiltinParameterDescriptorV1 {
+    BuiltinParameterDescriptor {
         id: 5,
         name: "fader_db",
         scope: BuiltinParameterScope::PerLane,
@@ -434,7 +432,7 @@ pub const BUILTIN_PARAMETER_DESCRIPTORS_V1: [BuiltinParameterDescriptorV1; 11] =
         reset: BuiltinParameterReset::RestorePreparedValue,
         disabled_value: None,
     },
-    BuiltinParameterDescriptorV1 {
+    BuiltinParameterDescriptor {
         id: 6,
         name: "mute",
         scope: BuiltinParameterScope::PerLane,
@@ -446,7 +444,7 @@ pub const BUILTIN_PARAMETER_DESCRIPTORS_V1: [BuiltinParameterDescriptorV1; 11] =
         reset: BuiltinParameterReset::RestorePreparedValue,
         disabled_value: None,
     },
-    BuiltinParameterDescriptorV1 {
+    BuiltinParameterDescriptor {
         id: 7,
         name: "matrix_ll",
         scope: BuiltinParameterScope::MatrixShared,
@@ -461,7 +459,7 @@ pub const BUILTIN_PARAMETER_DESCRIPTORS_V1: [BuiltinParameterDescriptorV1; 11] =
         reset: BuiltinParameterReset::KeepTargetResetCurrent,
         disabled_value: None,
     },
-    BuiltinParameterDescriptorV1 {
+    BuiltinParameterDescriptor {
         id: 8,
         name: "matrix_lr",
         scope: BuiltinParameterScope::MatrixShared,
@@ -476,7 +474,7 @@ pub const BUILTIN_PARAMETER_DESCRIPTORS_V1: [BuiltinParameterDescriptorV1; 11] =
         reset: BuiltinParameterReset::KeepTargetResetCurrent,
         disabled_value: None,
     },
-    BuiltinParameterDescriptorV1 {
+    BuiltinParameterDescriptor {
         id: 9,
         name: "matrix_rl",
         scope: BuiltinParameterScope::MatrixShared,
@@ -491,7 +489,7 @@ pub const BUILTIN_PARAMETER_DESCRIPTORS_V1: [BuiltinParameterDescriptorV1; 11] =
         reset: BuiltinParameterReset::KeepTargetResetCurrent,
         disabled_value: None,
     },
-    BuiltinParameterDescriptorV1 {
+    BuiltinParameterDescriptor {
         id: 10,
         name: "matrix_rr",
         scope: BuiltinParameterScope::MatrixShared,
@@ -513,7 +511,7 @@ pub const BUILTIN_PARAMETER_DESCRIPTORS_V1: [BuiltinParameterDescriptorV1; 11] =
     // delay length mid-render re-times the ring and glitches unavoidably, and the declicked
     // variant (a crossfaded dual read) is a recorded follow-up rather than speculative machinery.
     // The change path is the transactional session edit every other prepared-only builtin uses.
-    BuiltinParameterDescriptorV1 {
+    BuiltinParameterDescriptor {
         id: 11,
         name: "delay_samples",
         scope: BuiltinParameterScope::PerLane,
@@ -580,7 +578,7 @@ impl SvfSection {
     /// The design is `f64` throughout in the frozen operation order below, with exactly one cast
     /// per stored word. Rejection is coefficient representability only: the public cutoff domain
     /// is the issue-036 table, enforced before preparation by
-    /// [`validate_builtin_filter_cutoff_v1`].
+    /// [`validate_builtin_filter_cutoff`].
     fn design(rate: u32, cutoff: f32, high_pass: bool) -> Result<Self, BuiltinParameterError> {
         if cutoff == 0.0 {
             return Ok(Self::IDENTITY);
@@ -728,7 +726,7 @@ pub(crate) struct InputStage<L: Lane> {
     /// The plan is a pure function of the **six SVF coefficient words per section and the two
     /// integrators per section** -- [`section_is_identity`] reads those eight and nothing else.
     /// `trim` is not among them. `hpf_hz` and `lpf_hz`, which are the only parameters that design
-    /// those six words, remain `PreparedOnly` in `BUILTIN_PARAMETER_DESCRIPTORS_V1`, so the
+    /// those six words, remain `PreparedOnly` in `BUILTIN_PARAMETER_DESCRIPTORS`, so the
     /// coefficients are still written exactly once, here.
     ///
     /// `trim_db` and `polarity_invert` are live since phase 3 and write [`InputStage::coef`]'s
@@ -1507,8 +1505,8 @@ impl<L: Lane> FaderStage<L> {
 /// # One body, so lane identity is a property of the code
 ///
 /// This is the *only* ramped-fader implementation in the workspace. A live-console track is this
-/// type at `L = f32` over planar slices ([`FaderMuteRampBuiltinsV1`]); a banked strip slot is the
-/// same type at `Simd4` or `Simd8` over an AoSoA block ([`BuiltinFaderBankV1`]). The banked form is
+/// type at `L = f32` over planar slices ([`FaderMuteRampBuiltins`]); a banked strip slot is the
+/// same type at `Simd4` or `Simd8` over an AoSoA block ([`BuiltinFaderBank`]). The banked form is
 /// therefore op-order-identical to the per-track form by construction rather than by two
 /// implementations being compared -- the same rule [`InputStage`] follows, and the reason the
 /// per-track scalar path was rewritten onto this type instead of being left beside it.
@@ -2082,8 +2080,8 @@ fn prepare_sections(
         {
             return Err(BuiltinParameterError::GainDomain);
         }
-        validate_builtin_filter_cutoff_v1(lane.hpf_hz, sample_rate, 0.0, 10.0)?;
-        validate_builtin_filter_cutoff_v1(lane.lpf_hz, sample_rate, 0.0, 10.0)?;
+        validate_builtin_filter_cutoff(lane.hpf_hz, sample_rate, 0.0, 10.0)?;
+        validate_builtin_filter_cutoff(lane.lpf_hz, sample_rate, 0.0, 10.0)?;
         if lane.hpf_hz > 0.0 && lane.lpf_hz > 0.0 && lane.hpf_hz >= lane.lpf_hz {
             return Err(BuiltinParameterError::FilterOrder);
         }
@@ -2128,24 +2126,24 @@ impl InputBuiltins {
     /// deliberately so:
     ///
     /// * `SOURCE` is the track's **source mapping**, which this crate never sees; it is decided on
-    ///   the control plane by `miso_engine_builtins_compiler::track_mono_source_v1` and conjoined
+    ///   the control plane by `miso_engine_builtins_compiler::track_mono_source` and conjoined
     ///   there. It is not stamped into this object because the prepared size of this type is a
     ///   sealed fixture-ABI accounting (the builtin-compiler mutation-matrix transcript), and a phase that changes no
     ///   behaviour must not move a sealed byte count to carry a bit nothing rendered reads.
     /// * The two live terms stay set because this object has no queue: a per-node scalar input
     ///   section is reached by the console through `ConsoleInputProcessor`, which owns the
-    ///   consumer, folds `ChannelSymmetryWitnessV1::admit` per record and conjoins the result with
+    ///   consumer, folds `ChannelSymmetryWitness::admit` per record and conjoins the result with
     ///   this value -- exactly as `BuiltinBankProcessor` does for the banked form. The seam the
-    ///   builtins liveness work was to land on is closed (#210 phase 3): `TrackInputRecordV1`
-    ///   implements `LiveConsoleRecordV1` with `SEAM = UpstreamOfSeam`, so an asymmetric
+    ///   builtins liveness work was to land on is closed (#210 phase 3): `TrackInputRecord`
+    ///   implements `LiveConsoleRecord` with `SEAM = UpstreamOfSeam`, so an asymmetric
     ///   `trim_db` or `polarity_invert` retarget clears `LIVE` at the drain, before the collapse
     ///   dispatch reads the witness. `hpf_hz` and `lpf_hz` remain `PreparedOnly` and have no
     ///   write path at all.
     #[must_use]
-    pub fn channel_symmetry(&self) -> ChannelSymmetryWitnessV1 {
-        let mut witness = ChannelSymmetryWitnessV1::SYMMETRIC;
+    pub fn channel_symmetry(&self) -> ChannelSymmetryWitness {
+        let mut witness = ChannelSymmetryWitness::SYMMETRIC;
         witness.set(
-            ChannelSymmetryWitnessV1::DESIGNED,
+            ChannelSymmetryWitness::DESIGNED,
             self.stage.lane_channel_symmetry(0),
         );
         witness
@@ -2158,7 +2156,7 @@ impl InputBuiltins {
     }
     /// Retargets this track's `trim_db` on the addressed channels, over an explicit window.
     ///
-    /// The scalar sibling of [`BuiltinInputBankV1::set_trim_db`]: one body, one width, so a
+    /// The scalar sibling of [`BuiltinInputBank::set_trim_db`]: one body, one width, so a
     /// per-node console track and a bank lane cannot drift.
     ///
     /// # Errors
@@ -2248,26 +2246,26 @@ enum InputStageKernel {
 /// report counter and from the block boundary check, and their samples are never observed. The
 /// caller assigns lanes in sorted member order and is responsible for never gathering into or
 /// scattering from a padding lane; there is no `&[bool]` argument and no stored mask copy.
-pub struct BuiltinInputBankV1 {
+pub struct BuiltinInputBank {
     backend: Backend,
     width: BankWidth,
     members: usize,
     stage: InputStageKernel,
 }
 
-impl BuiltinInputBankV1 {
+impl BuiltinInputBank {
     /// Lane `lane`'s track's channel-symmetry witness, as far as the input builtins speak to it.
     ///
     /// The banked form of [`InputBuiltins::channel_symmetry`]; a padding lane, which no track
     /// owns, declines.
     #[must_use]
-    pub fn lane_symmetry(&self, lane: usize) -> ChannelSymmetryWitnessV1 {
+    pub fn lane_symmetry(&self, lane: usize) -> ChannelSymmetryWitness {
         let designed = match &self.stage {
             InputStageKernel::Simd4(stage) => stage.lane_channel_symmetry(lane),
             InputStageKernel::Simd8(stage) => stage.lane_channel_symmetry(lane),
         };
-        let mut witness = ChannelSymmetryWitnessV1::SYMMETRIC;
-        witness.set(ChannelSymmetryWitnessV1::DESIGNED, designed);
+        let mut witness = ChannelSymmetryWitness::SYMMETRIC;
+        witness.set(ChannelSymmetryWitness::DESIGNED, designed);
         witness
     }
 
@@ -2351,7 +2349,7 @@ impl BuiltinInputBankV1 {
         }
     }
 
-    /// Whether this bank may run [`BuiltinInputBankV1::process_mono`] at all.
+    /// Whether this bank may run [`BuiltinInputBank::process_mono`] at all.
     ///
     /// Fixed by preparation: the elision plan is decided once, from the coefficient words and a
     /// `+0.0` state, and nothing on the render path re-decides it.
@@ -2506,16 +2504,16 @@ enum FaderStageKernel {
 ///
 /// This type exposes the retargets ([`Self::set_fader_db`], [`Self::set_mute`]) and knows nothing
 /// about queues. The bank's owner drains its members' per-track command queues at the top of the
-/// block and calls these, which is what keeps `TrackFaderRecordV1`'s single-consumer SPSC
+/// block and calls these, which is what keeps `TrackFaderRecord`'s single-consumer SPSC
 /// contract intact while the consumer moves from the per-track node to the bank.
-pub struct BuiltinFaderBankV1 {
+pub struct BuiltinFaderBank {
     backend: Backend,
     width: BankWidth,
     members: usize,
     stage: FaderStageKernel,
 }
 
-impl BuiltinFaderBankV1 {
+impl BuiltinFaderBank {
     /// Builds a bank from one to `width.lanes()` independently prepared tracks.
     ///
     /// # Errors
@@ -2689,16 +2687,16 @@ enum MatrixStageKernel {
 /// state. Padding lanes carry [`Matrix2x2::IDENTITY`] with a zero window, so they settle
 /// immediately into the stage's identity mask and pass their samples through untouched.
 ///
-/// As with [`BuiltinFaderBankV1`], the queue lives one level up: this type exposes the retarget
-/// and the owner drains `TrackControlRecordV1` for each member at the top of the block.
-pub struct BuiltinMatrixBankV1 {
+/// As with [`BuiltinFaderBank`], the queue lives one level up: this type exposes the retarget
+/// and the owner drains `TrackControlRecord` for each member at the top of the block.
+pub struct BuiltinMatrixBank {
     backend: Backend,
     width: BankWidth,
     members: usize,
     stage: MatrixStageKernel,
 }
 
-impl BuiltinMatrixBankV1 {
+impl BuiltinMatrixBank {
     /// Builds a bank from one to `width.lanes()` prepared `(matrix, window)` pairs.
     ///
     /// # Errors
@@ -2865,13 +2863,13 @@ impl BuiltinLaneSelector {
 /// `step = (target - current) / N` at the moment the target changes, then `current += step` per
 /// sample and an exact assignment of `target` on update `N` (master plan D11). There is no
 /// division per sample and no allocation anywhere on this path.
-pub struct FaderMuteRampBuiltinsV1 {
+pub struct FaderMuteRampBuiltins {
     /// The one ramped-fader body, at width one. `lane` is always `0`; the two dual-mono sides are
     /// the stage's two channels.
     stage: FaderRampStage<f32>,
 }
 
-impl FaderMuteRampBuiltinsV1 {
+impl FaderMuteRampBuiltins {
     /// Builds the ramped fader from the same prepared parameters [`FaderMuteBuiltins`] uses.
     ///
     /// # Errors
@@ -2947,7 +2945,7 @@ fn checked_fader_gain(db: f32) -> Result<f32, BuiltinParameterError> {
 
 /// Validates one live `trim_db` against the declared domain and converts it to a coefficient.
 ///
-/// The domain is `trim_db`'s own in `BUILTIN_PARAMETER_DESCRIPTORS_V1` -- the same `[-144, 24]`
+/// The domain is `trim_db`'s own in `BUILTIN_PARAMETER_DESCRIPTORS` -- the same `[-144, 24]`
 /// `fader_db` carries, and the same range `prepare_sections` checks a declared value against -- so
 /// a live move is admitted on exactly the terms a declared one is. Sharing this with preparation
 /// is what keeps the two from drifting, which is the argument [`checked_fader_gain`] makes for the
@@ -3471,7 +3469,7 @@ fn zero(value: f32) -> f32 {
 #[doc(hidden)]
 pub mod test_support {
     use super::{
-        BuiltinChain, BuiltinInputBankV1, BuiltinParameterError, InputBuiltins, InputStageKernel,
+        BuiltinChain, BuiltinInputBank, BuiltinParameterError, InputBuiltins, InputStageKernel,
         Matrix2x2, MatrixBuiltins, SvfSection,
     };
 
@@ -3532,7 +3530,7 @@ pub mod test_support {
 
     /// [`input_trim_ramp_words`] for one lane of a bank.
     #[must_use]
-    pub fn bank_trim_ramp_words(bank: &BuiltinInputBankV1, lane: usize) -> [u32; 8] {
+    pub fn bank_trim_ramp_words(bank: &BuiltinInputBank, lane: usize) -> [u32; 8] {
         match &bank.stage {
             InputStageKernel::Simd4(stage) => stage.trim_ramp_words(lane),
             InputStageKernel::Simd8(stage) => stage.trim_ramp_words(lane),
@@ -3552,7 +3550,7 @@ pub mod test_support {
 
     /// Which sections of a bank the render path elides, in the [`input_elision_plan`] order.
     #[must_use]
-    pub fn bank_elision_plan(bank: &BuiltinInputBankV1) -> [[bool; 2]; 2] {
+    pub fn bank_elision_plan(bank: &BuiltinInputBank) -> [[bool; 2]; 2] {
         match &bank.stage {
             InputStageKernel::Simd4(stage) => stage.elision_plan(),
             InputStageKernel::Simd8(stage) => stage.elision_plan(),
@@ -3561,7 +3559,7 @@ pub mod test_support {
 
     /// Retained state words of one bank lane, in the [`input_state_words`] order.
     #[must_use]
-    pub fn bank_lane_state_words(bank: &BuiltinInputBankV1, lane: usize) -> [u32; 8] {
+    pub fn bank_lane_state_words(bank: &BuiltinInputBank, lane: usize) -> [u32; 8] {
         match &bank.stage {
             InputStageKernel::Simd4(stage) => stage.lane_state_words(lane),
             InputStageKernel::Simd8(stage) => stage.lane_state_words(lane),
@@ -3575,7 +3573,7 @@ pub mod test_support {
     /// invisible everywhere else. `mono_collapse::the_collapsed_body_publishes_the_dual_bodys_report`
     /// is the gate.
     #[must_use]
-    pub fn bank_lifetime_recovered(bank: &BuiltinInputBankV1) -> [u64; 2] {
+    pub fn bank_lifetime_recovered(bank: &BuiltinInputBank) -> [u64; 2] {
         match &bank.stage {
             InputStageKernel::Simd4(stage) => stage.lifetime_recovered,
             InputStageKernel::Simd8(stage) => stage.lifetime_recovered,
@@ -3583,7 +3581,7 @@ pub mod test_support {
     }
 
     /// Overwrites the retained state words of one bank lane.
-    pub fn set_bank_lane_state_words(bank: &mut BuiltinInputBankV1, lane: usize, words: [u32; 8]) {
+    pub fn set_bank_lane_state_words(bank: &mut BuiltinInputBank, lane: usize, words: [u32; 8]) {
         match &mut bank.stage {
             InputStageKernel::Simd4(stage) => stage.set_lane_state_words(lane, words),
             InputStageKernel::Simd8(stage) => stage.set_lane_state_words(lane, words),

@@ -9,30 +9,30 @@ use common::*;
 use miso_engine_effect_contract::{
     BankWidth, EffectPrepareError, LatencySamples, LinkMode, NativeEffectFactory, ParameterChannel,
     PrepareEffectBankRequest, PreparedNativeEffect, ResetKind, StatePayloadError,
-    StatePayloadInput, TailSamples, validate_descriptor_v1,
+    StatePayloadInput, TailSamples, validate_descriptor,
 };
 use miso_engine_effect_runtime::envelope::retention_coefficient;
 use miso_engine_lane::Backend;
 use miso_engine_transient_shaper::{
-    TRANSIENT_SHAPER_COEFFICIENT_BITS_V1, TRANSIENT_SHAPER_DESCRIPTOR_V1,
+    TRANSIENT_SHAPER_COEFFICIENT_BITS, TRANSIENT_SHAPER_DESCRIPTOR,
     TRANSIENT_SHAPER_TIME_CONSTANTS_MS, TransientShaperFactory,
 };
 
-/// Red mutation: flip one bit of `TRANSIENT_SHAPER_COEFFICIENT_BITS_V1`.
+/// Red mutation: flip one bit of `TRANSIENT_SHAPER_COEFFICIENT_BITS`.
 #[test]
 fn descriptor_coefficients_resources_and_transactional_caps_are_frozen() {
-    validate_descriptor_v1(&TRANSIENT_SHAPER_DESCRIPTOR_V1).expect("descriptor");
+    validate_descriptor(&TRANSIENT_SHAPER_DESCRIPTOR).expect("descriptor");
     assert_eq!(
-        TRANSIENT_SHAPER_DESCRIPTOR_V1.id.as_str(),
+        TRANSIENT_SHAPER_DESCRIPTOR.id.as_str(),
         "miso.transient-shaper"
     );
-    assert_eq!(TRANSIENT_SHAPER_DESCRIPTOR_V1.parameters.len(), 3);
-    assert_eq!(TRANSIENT_SHAPER_DESCRIPTOR_V1.qualities.len(), 4);
-    assert_eq!(TRANSIENT_SHAPER_DESCRIPTOR_V1.state_layout_version, 1);
-    for (quality, bits) in TRANSIENT_SHAPER_DESCRIPTOR_V1
+    assert_eq!(TRANSIENT_SHAPER_DESCRIPTOR.parameters.len(), 3);
+    assert_eq!(TRANSIENT_SHAPER_DESCRIPTOR.qualities.len(), 4);
+    assert_eq!(TRANSIENT_SHAPER_DESCRIPTOR.state_layout_version, 1);
+    for (quality, bits) in TRANSIENT_SHAPER_DESCRIPTOR
         .qualities
         .iter()
-        .zip(TRANSIENT_SHAPER_COEFFICIENT_BITS_V1)
+        .zip(TRANSIENT_SHAPER_COEFFICIENT_BITS)
     {
         assert_eq!(quality.latency, LatencySamples(0));
         assert_eq!(quality.tail, TailSamples::Finite(0));
@@ -87,8 +87,8 @@ fn independent_coefficients_time_constants_layout_and_both_caps_are_exact() {
     let values = initial_values();
     for ((sample_rate, production_bits), quality) in RATES
         .into_iter()
-        .zip(TRANSIENT_SHAPER_COEFFICIENT_BITS_V1)
-        .zip(TRANSIENT_SHAPER_DESCRIPTOR_V1.qualities)
+        .zip(TRANSIENT_SHAPER_COEFFICIENT_BITS)
+        .zip(TRANSIENT_SHAPER_DESCRIPTOR.qualities)
     {
         assert_eq!(quality.sample_rate, sample_rate);
         for ((time_ms, bits), index) in TRANSIENT_SHAPER_TIME_CONSTANTS_MS
@@ -363,7 +363,7 @@ fn identity_rules_are_bit_exact_and_the_followers_still_warm() {
 #[test]
 fn link_modes_drive_the_detector_as_specified() {
     let values = values_of(1.0, 0.0, 1.0);
-    let one_minus_attack = 1.0_f32 - f32::from_bits(TRANSIENT_SHAPER_COEFFICIENT_BITS_V1[1][0]);
+    let one_minus_attack = 1.0_f32 - f32::from_bits(TRANSIENT_SHAPER_COEFFICIENT_BITS[1][0]);
     let half = 0.5_f32;
     let expected = [
         (LinkMode::DualMono, 1.0_f32, 0.25_f32),

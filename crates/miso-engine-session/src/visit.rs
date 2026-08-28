@@ -183,7 +183,7 @@ mod walk {
     }
 
     records! {
-        SessionTomlV1=>session |s,v,o,f| [(8+s.sources.len()+s.tracks.len()+s.submixes.len()+s.outputs.len()+s.routes.len()+s.automation.len()) as u32] {
+        SessionToml=>session |s,v,o,f| [(8+s.sources.len()+s.tracks.len()+s.submixes.len()+s.outputs.len()+s.routes.len()+s.automation.len()) as u32] {
           v.u32(f::SCHEMA_VERSION,s.schema_version),v.id(f::SESSION_ID,&s.session_id),v.u64(f::REVISION,s.revision),v.u32(f::SAMPLE_RATE_HZ,s.sample_rate_hz),v.u32(f::QUANTUM_FRAMES,s.quantum_frames),
           s.render_profile.record(Some(f::RENDER_PROFILE),o,v),s.output_profile.record(Some(f::OUTPUT_PROFILE),o,v),s.limits.record(Some(f::LIMITS),o,v),
           sorted_array(f::SOURCES,&s.sources,o,v),sorted_array(f::TRACKS,&s.tracks,o,v),sorted_array(f::SUBMIXES,&s.submixes,o,v),

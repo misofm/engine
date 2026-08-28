@@ -34,7 +34,7 @@ un-re-pinned commits, and one gate red at either would have ended it.
    no WebDriver, no audio device.
 2. *The native leg, which keeps the first one honest about what it is proving.* Compile the same
    `session.toml` through the same `AudioWorkletEngineHost` facade with the same
-   `WebPrepareConfigV1` the oracle writes -- `examples/browser_fixture_resources.rs` -- and check
+   `WebPrepareConfig` the oracle writes -- `examples/browser_fixture_resources.rs` -- and check
    each row against the wasm32 answer according to the class it is declared in.
 
 **Why the native leg cannot simply be the gate.** The obvious cheap tripwire is "compile the

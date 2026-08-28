@@ -85,7 +85,7 @@ fn prepared_input(rate: u32, parameters: BuiltinParameters) -> InputBuiltins {
 fn prepared_sections_match_reference_coefficients() {
     for rate in launch_and_extended_compatibility_rates() {
         let mut cutoffs = vec![10.0_f32, 100.0, 1_000.0, 0.45 * rate as f32];
-        if let Some(maximum) = builtin_filter_cutoff_maximum_hz_v1(rate) {
+        if let Some(maximum) = builtin_filter_cutoff_maximum_hz(rate) {
             cutoffs.push(maximum);
         }
         for cutoff in cutoffs {
@@ -216,7 +216,7 @@ fn bank_is_bit_identical_to_scalar_stage_at_every_width() {
             let bank_inputs: Vec<InputBuiltins> = (0..members)
                 .map(|index| prepared_input(48_000, parameters_for(index)))
                 .collect();
-            let mut bank = BuiltinInputBankV1::new(backend, width, bank_inputs).expect("bank");
+            let mut bank = BuiltinInputBank::new(backend, width, bank_inputs).expect("bank");
             assert_eq!(bank.active_lanes(), members);
 
             const FRAMES: usize = 257;
@@ -291,7 +291,7 @@ fn bank_is_bit_identical_to_scalar_stage_at_every_width() {
             // `active` mask, one padding lane would zero the whole block's member output.
             if members < lanes {
                 let fresh = || {
-                    BuiltinInputBankV1::new(
+                    BuiltinInputBank::new(
                         backend,
                         width,
                         (0..members)
@@ -340,7 +340,7 @@ fn boundary_check_is_lane_local_per_block() {
             let inputs: Vec<InputBuiltins> = (0..lanes)
                 .map(|index| prepared_input(48_000, parameters_for(index)))
                 .collect();
-            BuiltinInputBankV1::new(backend, width, inputs).expect("bank")
+            BuiltinInputBank::new(backend, width, inputs).expect("bank")
         };
         let mut bank = build();
         let mut control = build();
@@ -620,22 +620,22 @@ fn bank_construction_accepts_one_to_width_members_only() {
                 .map(|index| prepared_input(48_000, parameters_for(index)))
                 .collect()
         };
-        assert!(BuiltinInputBankV1::new(backend, width, inputs(0)).is_err());
-        assert!(BuiltinInputBankV1::new(backend, width, inputs(lanes + 1)).is_err());
+        assert!(BuiltinInputBank::new(backend, width, inputs(0)).is_err());
+        assert!(BuiltinInputBank::new(backend, width, inputs(lanes + 1)).is_err());
         for members in 1..=lanes {
-            let bank = BuiltinInputBankV1::new(backend, width, inputs(members)).expect("bank");
+            let bank = BuiltinInputBank::new(backend, width, inputs(members)).expect("bank");
             assert_eq!(bank.active_lanes(), members);
             assert_eq!(bank.backend(), backend);
             assert_eq!(bank.width(), width);
         }
         // The scalar backend has no bank width, so it is refused whatever width is asked for.
-        assert!(BuiltinInputBankV1::new(Backend::Scalar, width, inputs(1)).is_err());
+        assert!(BuiltinInputBank::new(Backend::Scalar, width, inputs(1)).is_err());
         // So is the *other* vector backend: a bank's width must be the one its backend selects.
         let other = match backend {
             Backend::Simd4 => Backend::Simd8,
             _ => Backend::Simd4,
         };
-        assert!(BuiltinInputBankV1::new(other, width, inputs(1)).is_err());
+        assert!(BuiltinInputBank::new(other, width, inputs(1)).is_err());
     }
     // #84 phase A: `BankWidth::for_backend` is the workspace's one backend-to-width law.
     assert_eq!(BankWidth::for_backend(Backend::Scalar), None);
@@ -702,7 +702,7 @@ fn identity_sections_are_elided_only_when_every_lane_and_word_says_so() {
                     prepared_input(48_000, parameters)
                 })
                 .collect();
-            BuiltinInputBankV1::new(backend, width, inputs).expect("bank")
+            BuiltinInputBank::new(backend, width, inputs).expect("bank")
         };
 
         // All lanes or nothing: one populated lane with a real filter is enough to keep the whole
@@ -722,7 +722,7 @@ fn identity_sections_are_elided_only_when_every_lane_and_word_says_so() {
 
         // A padding lane is a real lane for this decision: it carries `SvfSection::IDENTITY`, so a
         // partially populated identity bank still elides.
-        let partial = BuiltinInputBankV1::new(
+        let partial = BuiltinInputBank::new(
             backend,
             width,
             vec![prepared_input(48_000, BuiltinParameters::default())],
@@ -908,9 +908,9 @@ fn render_banked(
 ) -> Vec<Vec<f32>> {
     let lanes = width.lanes() as usize;
     let mut fader =
-        BuiltinFaderBankV1::new(backend, width, (0..members).map(parameters_for).collect())
+        BuiltinFaderBank::new(backend, width, (0..members).map(parameters_for).collect())
             .expect("fader bank");
-    let mut matrix = BuiltinMatrixBankV1::new(
+    let mut matrix = BuiltinMatrixBank::new(
         backend,
         width,
         (0..members)
@@ -996,8 +996,8 @@ fn render_per_track(
     planar: &[Vec<f32>],
 ) -> Vec<Vec<f32>> {
     let script = automation_script(members);
-    let mut faders: Vec<FaderMuteRampBuiltinsV1> = (0..members)
-        .map(|index| FaderMuteRampBuiltinsV1::new(parameters_for(index)).expect("fader"))
+    let mut faders: Vec<FaderMuteRampBuiltins> = (0..members)
+        .map(|index| FaderMuteRampBuiltins::new(parameters_for(index)).expect("fader"))
         .collect();
     let mut matrices: Vec<MatrixBuiltins> = (0..members)
         .map(|index| {
@@ -1108,7 +1108,7 @@ fn banked_fader_and_matrix_are_bit_identical_to_the_per_track_sections() {
 fn a_settled_banked_mute_is_exactly_positive_zero() {
     for (backend, width) in BANKS {
         let lanes = width.lanes() as usize;
-        let mut bank = BuiltinFaderBankV1::new(
+        let mut bank = BuiltinFaderBank::new(
             backend,
             width,
             (0..lanes).map(|_| BuiltinParameters::default()).collect(),

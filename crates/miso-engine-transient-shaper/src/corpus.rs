@@ -30,11 +30,9 @@
 
 use miso_engine_lane::{Lane, Simd4, Simd8};
 
-use crate::{
-    PARAMETER_COUNT, RAMP_SAMPLES, Shaper, TRANSIENT_SHAPER_DESCRIPTOR_V1, coefficient_row,
-};
+use crate::{PARAMETER_COUNT, RAMP_SAMPLES, Shaper, TRANSIENT_SHAPER_DESCRIPTOR, coefficient_row};
 use miso_engine_effect_contract::{
-    EffectQuality, LatencySamples, LinkMode, PreparedEffectMetadata, PreparedPortsV1,
+    EffectQuality, LatencySamples, LinkMode, PreparedEffectMetadata, PreparedPorts,
     PreparedSidechainPort, StatePayloadSizes, TailSamples,
 };
 
@@ -180,9 +178,9 @@ pub fn run_case(case: usize, width: usize, out: &mut [u32]) {
 /// A prepared-metadata value for the corpus: the launch descriptor at 48 kHz, one link mode per
 /// case, never bypassed.
 fn metadata(case: usize) -> PreparedEffectMetadata {
-    let quality = TRANSIENT_SHAPER_DESCRIPTOR_V1.qualities[1];
+    let quality = TRANSIENT_SHAPER_DESCRIPTOR.qualities[1];
     PreparedEffectMetadata {
-        descriptor: &TRANSIENT_SHAPER_DESCRIPTOR_V1,
+        descriptor: &TRANSIENT_SHAPER_DESCRIPTOR,
         sample_rate: 48_000,
         quantum: BLOCK as u32,
         quality: EffectQuality::Normal,
@@ -192,7 +190,7 @@ fn metadata(case: usize) -> PreparedEffectMetadata {
             1 => LinkMode::Maximum,
             _ => LinkMode::Average,
         },
-        ports: PreparedPortsV1 {
+        ports: PreparedPorts {
             sidechain: PreparedSidechainPort::None,
         },
         latency: LatencySamples(0),

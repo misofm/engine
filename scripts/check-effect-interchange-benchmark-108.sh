@@ -25,7 +25,7 @@ source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
 expected_rates = ["44_100", "48_000", "88_200", "96_000"]
 for layout in (1, 2, 3):
     match = re.search(
-        rf"static MIGRATION_Q{layout}: \[QualityDescriptorV1; 4\] = \[(.*?)\];",
+        rf"static MIGRATION_Q{layout}: \[QualityDescriptor; 4\] = \[(.*?)\];",
         source,
         re.S,
     )

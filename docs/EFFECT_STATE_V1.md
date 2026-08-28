@@ -128,7 +128,7 @@ Default caller limits are 4,194,304 descriptor bytes, 268,435,456 envelope bytes
 payload bytes, and 4,096 initial values. Caps are inclusive. All sums, multiplication, integer
 conversions, host fit, and slicing are checked.
 
-`EffectStateDiagnosticV1` is a 32-byte C-layout value: `code: u32` at byte 0, `detail: u32` at byte
+`EffectStateDiagnostic` is a 32-byte C-layout value: `code: u32` at byte 0, `detail: u32` at byte
 4, `item_index: u32` at byte 8, zero `reserved: u32` at byte 12, `byte_offset: u64` at byte 16,
 and `required_bytes: u64` at byte 24. Diagnostics follow frozen phase order: caller limits and
 arithmetic; fixed header; reserved fields; structural lengths and padding; enums, text, and initial

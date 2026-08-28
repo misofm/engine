@@ -24,10 +24,10 @@ use std::time::Instant;
 use miso_engine_effect_contract::{
     BankWidth, EffectBankProcessBlock, EffectQuality, InitialParameterValue, LinkMode,
     NativeEffectFactory, ParameterChannel, PrepareEffectBankRequest, PrepareEffectLimits,
-    PrepareEffectRequest, PreparedNativeEffectBank, PreparedPortsV1, PreparedSidechainPort,
+    PrepareEffectRequest, PreparedNativeEffectBank, PreparedPorts, PreparedSidechainPort,
 };
 use miso_engine_lane::Backend;
-use miso_engine_soft_clip::{SOFT_CLIP_PARAMETERS_V1, SoftClipFactory};
+use miso_engine_soft_clip::{SOFT_CLIP_PARAMETERS, SoftClipFactory};
 
 const LANES: usize = 8;
 const FRAMES: usize = 128;
@@ -35,7 +35,7 @@ const WARMUP_BLOCKS: usize = 200;
 const ROUND_BLOCKS: usize = 4_000;
 
 fn initial_values(drive_db: f32) -> Vec<InitialParameterValue> {
-    (0..SOFT_CLIP_PARAMETERS_V1.len() * 2)
+    (0..SOFT_CLIP_PARAMETERS.len() * 2)
         .map(|index| InitialParameterValue {
             parameter_index: (index / 2) as u32,
             channel: if index.is_multiple_of(2) {
@@ -46,7 +46,7 @@ fn initial_values(drive_db: f32) -> Vec<InitialParameterValue> {
             value: if index / 2 == 0 {
                 drive_db
             } else {
-                SOFT_CLIP_PARAMETERS_V1[index / 2].default_value
+                SOFT_CLIP_PARAMETERS[index / 2].default_value
             },
         })
         .collect()
@@ -59,7 +59,7 @@ fn request<'a>(values: &'a [InitialParameterValue]) -> PrepareEffectRequest<'a> 
         quality: EffectQuality::Normal,
         bypass: false,
         link_mode: LinkMode::DualMono,
-        ports: PreparedPortsV1 {
+        ports: PreparedPorts {
             sidechain: PreparedSidechainPort::None,
         },
         initial_values: values,

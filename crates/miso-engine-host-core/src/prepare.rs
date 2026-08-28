@@ -10,13 +10,12 @@ use std::collections::BTreeSet;
 use miso_engine_builtins::{MeterConfig, MeterHandle, MeterTap};
 use miso_engine_builtins_compiler::{
     BuiltinCompileCaps, MeterConsumer, MeterRequest, TrackControlProducer, TrackControlRequest,
-    prepare_session_builtins_with_console, session_structural_symmetry_v1,
+    prepare_session_builtins_with_console, session_structural_symmetry,
 };
 use miso_engine_core::{SampleRateHz, realtime::PreparedRenderPlan};
 use miso_engine_effect_compiler::{
-    EffectCompileCaps, EffectControlProducerV1, EffectObservationHandleV1,
-    attach_effect_console_v1, attach_effect_observation_v1, launch_native_effect_registry_v1,
-    prepare_native_session_effects,
+    EffectCompileCaps, EffectControlProducer, EffectObservationHandle, attach_effect_console,
+    attach_effect_observation, launch_native_effect_registry, prepare_native_session_effects,
 };
 use miso_engine_effect_contract::TailSamples;
 use miso_engine_graph::{
@@ -25,7 +24,7 @@ use miso_engine_graph::{
 };
 use miso_engine_graph_compiler::{Backend, GraphBuiltinsCompileRequest, GraphCompiler};
 use miso_engine_session::{
-    CompileCaps, CompiledSession, SessionTomlV1, compile_session, parse_session_toml,
+    CompileCaps, CompiledSession, SessionToml, compile_session, parse_session_toml,
 };
 use miso_engine_source::{
     PcmSourceRing, PcmSourceRingConfig, SourceFrame, SourceGeneration, SourceGraphSource,
@@ -232,7 +231,7 @@ pub struct HostPrepareReport {
 /// [`prepare_host_runtime`] is exactly `prepare_host_runtime_with_console(.., &Default::default())`
 /// and a host that wants no console allocates nothing extra.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct HostConsoleRequestV1 {
+pub struct HostConsoleRequest {
     /// Bounded per-channel control-queue depth, or `None` for no live control channel.
     ///
     /// Issue #140 turns this into the depth of *every* live channel a track owns: the matrix/pan
@@ -249,7 +248,7 @@ pub struct HostConsoleRequestV1 {
     /// Maximum declared observation taps to bind per effect instance, or `0` for **no observation
     /// capacity at all** (issue #143 D3, level 1).
     ///
-    /// Zero is the honest form of "observation off": `attach_effect_observation_v1` is never
+    /// Zero is the honest form of "observation off": `attach_effect_observation` is never
     /// called, so the compiled plan holds no lane, no accumulator and no conflating cell — not a
     /// disabled one, none — and `observation_retained_bytes` is zero. Nonzero requires a control
     /// channel, because a subscription rides the effect's existing command queue.
@@ -266,7 +265,7 @@ pub struct HostConsoleRequestV1 {
     pub master_track: Option<u32>,
 }
 
-impl Default for HostConsoleRequestV1 {
+impl Default for HostConsoleRequest {
     fn default() -> Self {
         Self {
             control_queue_depth: None,
@@ -284,7 +283,7 @@ impl Default for HostConsoleRequestV1 {
 /// `tracks` is the compiled session's normalized track order and is the addressing authority: a
 /// host addresses a track by its index in this vector, and `track_controls[i]` / `meters[i]`
 /// belong to `tracks[i]` whenever they are present.
-pub struct HostConsoleHandlesV1 {
+pub struct HostConsoleHandles {
     /// Canonical normalized track identities.
     pub tracks: Vec<Box<str>>,
     /// One control producer per track, in `tracks` order; empty when no channel was requested.
@@ -295,7 +294,7 @@ pub struct HostConsoleHandlesV1 {
     /// One control producer per prepared effect instance (#140 A); empty when no channel was
     /// requested. Addressed by `(track_id, rack, effect_index)`, where `effect_index` is the
     /// effect's position within its rack in session declaration order.
-    pub effect_controls: Vec<EffectControlProducerV1>,
+    pub effect_controls: Vec<EffectControlProducer>,
     /// One meter consumer per track, in `tracks` order; empty when no meters were requested.
     pub meters: Vec<MeterConsumer>,
     /// One reader set per prepared effect instance that declares an observation tap (issue #143).
@@ -303,7 +302,7 @@ pub struct HostConsoleHandlesV1 {
     /// Empty when the request named no observation capacity, and empty for every effect whose
     /// descriptor declares no tap. Addressed by `(track_id, rack, effect_index)`, exactly as
     /// [`Self::effect_controls`] is.
-    pub effect_observations: Vec<EffectObservationHandleV1>,
+    pub effect_observations: Vec<EffectObservationHandle>,
     /// The designated master track index, echoed back after validation against `tracks`.
     pub master_track: Option<u32>,
 }
@@ -351,7 +350,7 @@ impl core::fmt::Debug for PreparedHost {
 }
 
 /// Parse one session TOML document.
-pub fn parse_host_session(toml: &str) -> Result<SessionTomlV1, PrepareDiagnostics> {
+pub fn parse_host_session(toml: &str) -> Result<SessionToml, PrepareDiagnostics> {
     parse_session_toml(toml).map_err(|value| {
         PrepareDiagnostics::new(
             PrepareRejection::Session,
@@ -407,8 +406,8 @@ pub fn prepare_host_session(
 pub fn prepare_host_session_with_console(
     toml: &str,
     caps: &HostPrepareCaps,
-    console: &HostConsoleRequestV1,
-) -> Result<(CompiledSession, PreparedHost, HostConsoleHandlesV1), PrepareDiagnostics> {
+    console: &HostConsoleRequest,
+) -> Result<(CompiledSession, PreparedHost, HostConsoleHandles), PrepareDiagnostics> {
     let compiled = compile_host_session(toml, caps)?;
     let (prepared, handles) = prepare_host_runtime_with_console(&compiled, caps, console)?;
     Ok((compiled, prepared, handles))
@@ -424,7 +423,7 @@ pub fn prepare_host_runtime(
     caps: &HostPrepareCaps,
 ) -> Result<PreparedHost, PrepareDiagnostics> {
     let (prepared, handles) =
-        prepare_host_runtime_with_console(compiled, caps, &HostConsoleRequestV1::default())?;
+        prepare_host_runtime_with_console(compiled, caps, &HostConsoleRequest::default())?;
     debug_assert!(handles.track_controls.is_empty() && handles.meters.is_empty());
     Ok(prepared)
 }
@@ -438,8 +437,8 @@ pub fn prepare_host_runtime(
 pub fn prepare_host_runtime_with_console(
     compiled: &CompiledSession,
     caps: &HostPrepareCaps,
-    console: &HostConsoleRequestV1,
-) -> Result<(PreparedHost, HostConsoleHandlesV1), PrepareDiagnostics> {
+    console: &HostConsoleRequest,
+) -> Result<(PreparedHost, HostConsoleHandles), PrepareDiagnostics> {
     let model = compiled.normalized_model();
     let track_count = u64::try_from(model.tracks.len()).map_err(|_| platform("host.count"))?;
     let source_count = u64::try_from(model.sources.len()).map_err(|_| platform("host.count"))?;
@@ -525,7 +524,7 @@ pub fn prepare_host_runtime_with_console(
         .collect::<Result<Vec<_>, PrepareDiagnostics>>()?;
 
     let registry =
-        launch_native_effect_registry_v1().map_err(|_| effect_failure("host.effect.registry"))?;
+        launch_native_effect_registry().map_err(|_| effect_failure("host.effect.registry"))?;
     let mut effects = prepare_native_session_effects(
         compiled,
         &registry,
@@ -578,9 +577,9 @@ pub fn prepare_host_runtime_with_console(
     // depth the builtin channels use and capped at each effect's own automation capacity. This is
     // the only thing that creates one; a host that asks for no console attaches nothing and the
     // plan renders the byte-identical console-free path.
-    let effect_controls: Vec<EffectControlProducerV1> = match console.control_queue_depth {
+    let effect_controls: Vec<EffectControlProducer> = match console.control_queue_depth {
         None => Vec::new(),
-        Some(depth) => attach_effect_console_v1(&mut effects, depth).map_err(|diagnostics| {
+        Some(depth) => attach_effect_console(&mut effects, depth).map_err(|diagnostics| {
             PrepareDiagnostics::new(
                 PrepareRejection::Effect,
                 diagnostic_lines(
@@ -601,14 +600,14 @@ pub fn prepare_host_runtime_with_console(
         (Some(period), quantum) if quantum > 0 => (period.get() / quantum).max(1),
         _ => 1,
     };
-    let effect_observations: Vec<EffectObservationHandleV1> = match console.observation_taps {
+    let effect_observations: Vec<EffectObservationHandle> = match console.observation_taps {
         0 => Vec::new(),
         taps if console.control_queue_depth.is_none() => {
             let _ = taps;
             return Err(shape("host.observation.console"));
         }
-        taps => attach_effect_observation_v1(&mut effects, taps, observation_window_blocks)
-            .map_err(|diagnostics| {
+        taps => attach_effect_observation(&mut effects, taps, observation_window_blocks).map_err(
+            |diagnostics| {
                 PrepareDiagnostics::new(
                     PrepareRejection::Effect,
                     diagnostic_lines(
@@ -618,11 +617,12 @@ pub fn prepare_host_runtime_with_console(
                             .map(|diagnostic| (diagnostic.code, &diagnostic.path)),
                     ),
                 )
-            })?,
+            },
+        )?,
     };
 
     // Issue #137 D1/D2: the console requests are derived here, once, from the canonical track
-    // order, so `HostConsoleHandlesV1::tracks` and the requested channels cannot disagree.
+    // order, so `HostConsoleHandles::tracks` and the requested channels cannot disagree.
     let console_tracks: Vec<Box<str>> = model
         .tracks
         .iter()
@@ -858,7 +858,7 @@ pub fn prepare_host_runtime_with_console(
     };
 
     // The mono collapse's structural join (mono-collapse M2). This is the one place a host has
-    // both halves of the channel-symmetry witness in hand: `session_structural_symmetry_v1`
+    // both halves of the channel-symmetry witness in hand: `session_structural_symmetry`
     // answers per **track id** from the compiled session, and the built plan's bank chains are
     // keyed by anonymous **lanes**. The plan's own rows carry the relation, so the join is a call
     // and not a re-derivation.
@@ -869,7 +869,7 @@ pub fn prepare_host_runtime_with_console(
     // On a session whose tracks read two source channels, which is every stereo session there is,
     // this arms nothing.
     let mut plan = bound.plan;
-    let mono_source: BTreeSet<Box<str>> = session_structural_symmetry_v1(compiled)
+    let mono_source: BTreeSet<Box<str>> = session_structural_symmetry(compiled)
         .into_iter()
         .filter(|(_, witness)| witness.eligible())
         .map(|(track, _)| track)
@@ -882,7 +882,7 @@ pub fn prepare_host_runtime_with_console(
             sources,
             report,
         },
-        HostConsoleHandlesV1 {
+        HostConsoleHandles {
             tracks: console_tracks,
             track_controls,
             effect_controls,
@@ -894,7 +894,7 @@ pub fn prepare_host_runtime_with_console(
 }
 
 /// Total effect instances across every rack of every track.
-pub fn count_effects(model: &SessionTomlV1) -> Result<u64, PrepareDiagnostics> {
+pub fn count_effects(model: &SessionToml) -> Result<u64, PrepareDiagnostics> {
     model.tracks.iter().try_fold(0_u64, |total, track| {
         let count = track
             .simd1

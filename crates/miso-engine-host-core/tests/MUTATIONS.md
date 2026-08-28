@@ -240,7 +240,7 @@ Every mutation below was applied, run, recorded and reverted on the delivery hos
 ### M-146-1 — the guard is removed from the host facade's render entry
 
 * Mutation: delete `let _fp_env = CanonicalFpEnv::enter();` from
-  `StartedRenderSessionV1::render_planar` in `src/render_session.rs`.
+  `StartedRenderSession::render_planar` in `src/render_session.rs`.
 * Command: `cargo test -p miso-engine-host-core --test fp_environment`
 * Result: **RED**
 
@@ -299,20 +299,20 @@ that the digest comparison discriminates.
 ### M-146-4 — the started session becomes movable between threads
 
 * Mutation: in `src/render_session.rs`, replace the `PhantomData<*const ()>` field of
-  `StartedRenderSessionV1` with `PhantomData<()>`. The same edit applied to `CanonicalFpEnv` in
+  `StartedRenderSession` with `PhantomData<()>`. The same edit applied to `CanonicalFpEnv` in
   `crates/miso-engine-lane/src/fpenv.rs`.
 * Commands: `cargo test -p miso-engine-host-core --doc`, `cargo test -p miso-engine-lane --doc`
 * Result: **RED**, and the two halves are red for different reasons, which is the fact worth
   recording:
 
   ```
-  crates/miso-engine-host-core/src/render_session.rs - StartedRenderSessionV1 (line 47) - compile fail ... FAILED
+  crates/miso-engine-host-core/src/render_session.rs - StartedRenderSession (line 47) - compile fail ... FAILED
   crates/miso-engine-lane/src/fpenv.rs - CanonicalFpEnv (line 250) - compile fail ... FAILED
   crates/miso-engine-lane/src/fpenv.rs - CanonicalFpEnv (line 255) - compile fail ... FAILED
   ```
 
   `CanonicalFpEnv` loses **both** claims: the marker is the only thing making it `!Send` and
-  `!Sync`. `StartedRenderSessionV1` loses only the `Send` claim -- its `!Sync` survives, because
+  `!Sync`. `StartedRenderSession` loses only the `Send` claim -- its `!Sync` survives, because
   `PreparedRenderPlan` is already `!Sync` and the session owns one. The marker is therefore
   load-bearing for exactly one of the session's two claims, and the doctest that proves the other
   is proving the plan's property rather than the session's. Both are asserted, and neither is

@@ -16,9 +16,9 @@ use miso_engine_effect_contract::{
     BankWidth, EffectBankProcessBlock, EffectProcessBlock, EffectQuality, InitialParameterValue,
     LinkMode, NativeEffectFactory, ParameterChannel, PortId, PrepareEffectBankRequest,
     PrepareEffectLimits, PrepareEffectRequest, PreparedNativeEffect, PreparedNativeEffectBank,
-    PreparedPortsV1, PreparedSidechainPort,
+    PreparedPorts, PreparedSidechainPort,
 };
-use miso_engine_gate_expander::{GATE_EXPANDER_DESCRIPTOR_V1, GateExpanderFactory};
+use miso_engine_gate_expander::{GATE_EXPANDER_DESCRIPTOR, GateExpanderFactory};
 use miso_engine_lane::Backend;
 
 /// Frozen block count, matching the other realtime audits.
@@ -215,7 +215,7 @@ fn prepare_scalar(connected: bool) -> Box<dyn PreparedNativeEffect> {
 }
 
 fn request(values: &[InitialParameterValue], connected: bool) -> PrepareEffectRequest<'_> {
-    let quality = GATE_EXPANDER_DESCRIPTOR_V1
+    let quality = GATE_EXPANDER_DESCRIPTOR
         .qualities
         .iter()
         .find(|quality| quality.sample_rate == 48_000)
@@ -227,7 +227,7 @@ fn request(values: &[InitialParameterValue], connected: bool) -> PrepareEffectRe
         quality: EffectQuality::Normal,
         bypass: false,
         link_mode: LinkMode::DualMono,
-        ports: PreparedPortsV1 {
+        ports: PreparedPorts {
             sidechain: if connected {
                 PreparedSidechainPort::Connected {
                     id,

@@ -23,7 +23,7 @@ const fn port_id(value: &'static str) -> PortId {
     }
 }
 
-static PARAMETERS: [ParameterDescriptorV1; 1] = [ParameterDescriptorV1 {
+static PARAMETERS: [ParameterDescriptor; 1] = [ParameterDescriptor {
     id: ParameterId(1),
     display_name: "value",
     display_unit: "linear",
@@ -41,22 +41,22 @@ static PARAMETERS: [ParameterDescriptorV1; 1] = [ParameterDescriptorV1 {
     automatable: true,
     enum_choices: &[],
 }];
-static PORTS: [PortDescriptorV1; 2] = [
-    PortDescriptorV1 {
+static PORTS: [PortDescriptor; 2] = [
+    PortDescriptor {
         id: port_id("main-in"),
         role: PortRole::MainInput,
         required: true,
         layout: PortLayout::DualMonoPlanar,
     },
-    PortDescriptorV1 {
+    PortDescriptor {
         id: port_id("main-out"),
         role: PortRole::MainOutput,
         required: true,
         layout: PortLayout::DualMonoPlanar,
     },
 ];
-const fn quality(sample_rate: u32) -> QualityDescriptorV1 {
-    QualityDescriptorV1 {
+const fn quality(sample_rate: u32) -> QualityDescriptor {
+    QualityDescriptor {
         quality: EffectQuality::Normal,
         sample_rate,
         latency: LatencySamples(0),
@@ -70,13 +70,13 @@ const fn quality(sample_rate: u32) -> QualityDescriptorV1 {
         scratch_bytes_per_frame: 0,
     }
 }
-static QUALITIES: [QualityDescriptorV1; 4] = [
+static QUALITIES: [QualityDescriptor; 4] = [
     quality(44_100),
     quality(48_000),
     quality(88_200),
     quality(96_000),
 ];
-static DESCRIPTOR: EffectDescriptorV1 = EffectDescriptorV1 {
+static DESCRIPTOR: EffectDescriptor = EffectDescriptor {
     id: effect_id("test.bank-state"),
     display_name: "Bank state",
     contract_major: 1,
@@ -88,7 +88,7 @@ static DESCRIPTOR: EffectDescriptorV1 = EffectDescriptorV1 {
     qualities: &QUALITIES,
     observations: &[],
 };
-static ALTERNATE_DESCRIPTOR: EffectDescriptorV1 = EffectDescriptorV1 {
+static ALTERNATE_DESCRIPTOR: EffectDescriptor = EffectDescriptor {
     display_name: "Alternate bank state",
     ..DESCRIPTOR
 };
@@ -152,7 +152,7 @@ struct MockFactory {
 }
 
 impl MockFactory {
-    fn current_descriptor(&self) -> &'static EffectDescriptorV1 {
+    fn current_descriptor(&self) -> &'static EffectDescriptor {
         if self.controls.alternate_descriptor.load(Ordering::SeqCst) {
             &ALTERNATE_DESCRIPTOR
         } else {
@@ -179,7 +179,7 @@ impl Drop for MockBank {
 }
 
 impl NativeEffectFactory for MockFactory {
-    fn descriptor(&self) -> &'static EffectDescriptorV1 {
+    fn descriptor(&self) -> &'static EffectDescriptor {
         self.current_descriptor()
     }
 
@@ -320,21 +320,21 @@ impl PreparedNativeEffectBank for MockBank {
     }
 }
 
-fn wire(descriptor: &'static EffectDescriptorV1) -> Vec<u8> {
-    let required = effect_descriptor_wire_v1_required_size(descriptor, 1 << 20).unwrap();
+fn wire(descriptor: &'static EffectDescriptor) -> Vec<u8> {
+    let required = effect_descriptor_wire_required_size(descriptor, 1 << 20).unwrap();
     let mut output = vec![0; required as usize];
-    encode_effect_descriptor_wire_v1(descriptor, 1 << 20, &mut output).unwrap();
+    encode_effect_descriptor_wire(descriptor, 1 << 20, &mut output).unwrap();
     output
 }
 
-fn replay(seed: u32) -> EffectBankPreparationV1 {
-    EffectBankPreparationV1 {
+fn replay(seed: u32) -> EffectBankPreparation {
+    EffectBankPreparation {
         sample_rate: 48_000,
         quantum: 32,
         quality: EffectQuality::Normal,
         bypass: false,
         link_mode: LinkMode::DualMono,
-        ports: PreparedPortsV1 {
+        ports: PreparedPorts {
             sidechain: PreparedSidechainPort::None,
         },
         initial_values: [
@@ -358,8 +358,8 @@ fn replay(seed: u32) -> EffectBankPreparationV1 {
     }
 }
 
-fn admission(replay: &EffectBankPreparationV1) -> EffectStateRestoreAdmissionV1 {
-    EffectStateRestoreAdmissionV1 {
+fn admission(replay: &EffectBankPreparation) -> EffectStateRestoreAdmission {
+    EffectStateRestoreAdmission {
         sample_rate: replay.sample_rate,
         quantum: replay.quantum,
         maximum_total_state_bytes: replay.limits.maximum_total_state_bytes,
@@ -371,18 +371,18 @@ fn admission(replay: &EffectBankPreparationV1) -> EffectStateRestoreAdmissionV1 
 fn mock_bound<'a>(
     controls: &Arc<Controls>,
     descriptor_wire: &'a [u8],
-) -> WireBoundNativeEffectFactoryV1<'a> {
+) -> WireBoundNativeEffectFactory<'a> {
     let factory: Arc<dyn NativeEffectFactory> = Arc::new(MockFactory {
         controls: Arc::clone(controls),
     });
-    bind_native_effect_factory_state_v1(factory, descriptor_wire, 1 << 20).unwrap()
+    bind_native_effect_factory_state(factory, descriptor_wire, 1 << 20).unwrap()
 }
 
 fn mock_bank<'a>(
     controls: &Arc<Controls>,
     descriptor_wire: &'a [u8],
-) -> UnpublishedEffectBankStateV1<'a> {
-    prepare_unpublished_effect_bank_state_v1(
+) -> UnpublishedEffectBankState<'a> {
+    prepare_unpublished_effect_bank_state(
         mock_bound(controls, descriptor_wire),
         Backend::Simd4,
         BankWidth::Four,
@@ -393,20 +393,19 @@ fn mock_bank<'a>(
 }
 
 fn scalar_snapshot(
-    capability: &WireBoundNativeEffectFactoryV1<'_>,
-    replay: &EffectBankPreparationV1,
+    capability: &WireBoundNativeEffectFactory<'_>,
+    replay: &EffectBankPreparation,
     processor: &dyn PreparedNativeEffect,
 ) -> Vec<u8> {
     let requirements =
-        scalar_effect_state_v1_requirements(capability, replay, EffectStateLimitsV1::default())
-            .unwrap();
+        scalar_effect_state_requirements(capability, replay, EffectStateLimits::default()).unwrap();
     let mut scratch = vec![0; requirements.payload_snapshot_scratch_bytes as usize];
     let mut output = vec![0; requirements.envelope_bytes as usize];
-    snapshot_scalar_effect_state_v1(
+    snapshot_scalar_effect_state(
         capability,
         replay,
         processor,
-        EffectStateLimitsV1::default(),
+        EffectStateLimits::default(),
         &mut scratch,
         &mut output,
     )
@@ -414,20 +413,20 @@ fn scalar_snapshot(
     output
 }
 
-fn bank_snapshot(capability: &UnpublishedEffectBankStateV1<'_>, track_index: u32) -> Vec<u8> {
+fn bank_snapshot(capability: &UnpublishedEffectBankState<'_>, track_index: u32) -> Vec<u8> {
     let replay = &capability.replays()[track_index as usize];
-    let requirements = scalar_effect_state_v1_requirements(
+    let requirements = scalar_effect_state_requirements(
         capability.bound_factory(),
         replay,
-        EffectStateLimitsV1::default(),
+        EffectStateLimits::default(),
     )
     .unwrap();
     let mut scratch = vec![0; requirements.payload_snapshot_scratch_bytes as usize];
     let mut output = vec![0; requirements.envelope_bytes as usize];
-    snapshot_unpublished_effect_bank_track_state_v1(
+    snapshot_unpublished_effect_bank_track_state(
         capability,
         track_index,
-        EffectStateLimitsV1::default(),
+        EffectStateLimits::default(),
         &mut scratch,
         &mut output,
     )
@@ -446,7 +445,7 @@ fn process_scalar(processor: &mut dyn PreparedNativeEffect, frames: usize) -> (V
 }
 
 fn process_mock_bank(
-    capability: &mut UnpublishedEffectBankStateV1<'_>,
+    capability: &mut UnpublishedEffectBankState<'_>,
     frames: usize,
 ) -> (Vec<u32>, Vec<u32>) {
     let width = capability.width().lanes() as usize;
@@ -487,7 +486,7 @@ fn preparation_admits_every_sibling_before_one_bind_and_none_is_failure() {
             3 => last.limits.maximum_scratch_bytes = 3,
             _ => last.limits.maximum_automation_spans_per_block = 8,
         }
-        let error = prepare_unpublished_effect_bank_state_v1(
+        let error = prepare_unpublished_effect_bank_state(
             mock_bound(&controls, &descriptor_wire),
             Backend::Simd4,
             BankWidth::Four,
@@ -495,7 +494,7 @@ fn preparation_admits_every_sibling_before_one_bind_and_none_is_failure() {
             admission(&replay(1)),
         )
         .unwrap_err();
-        assert_eq!(error.code, EffectStateDiagnosticCodeV1::Limit);
+        assert_eq!(error.code, EffectStateDiagnosticCode::Limit);
         assert_eq!(error.item_index, 3);
         assert_eq!(controls.bank_bind_calls.load(Ordering::SeqCst), 0);
     }
@@ -506,7 +505,7 @@ fn preparation_admits_every_sibling_before_one_bind_and_none_is_failure() {
     replays[0].initial_values[0].value = f32::NAN;
     let mut derived_admission = admission(&replay(1));
     derived_admission.maximum_total_state_bytes = 4;
-    let error = prepare_unpublished_effect_bank_state_v1(
+    let error = prepare_unpublished_effect_bank_state(
         mock_bound(&controls, &descriptor_wire),
         Backend::Simd4,
         BankWidth::Four,
@@ -521,13 +520,13 @@ fn preparation_admits_every_sibling_before_one_bind_and_none_is_failure() {
             error.required_bytes,
             error.item_index
         ),
-        (EffectStateDiagnosticCodeV1::Limit, 216, 5, 0)
+        (EffectStateDiagnosticCode::Limit, 216, 5, 0)
     );
     assert_eq!(controls.bank_bind_calls.load(Ordering::SeqCst), 0);
 
     let controls = Arc::new(Controls::default());
     controls.return_none.store(true, Ordering::SeqCst);
-    let error = prepare_unpublished_effect_bank_state_v1(
+    let error = prepare_unpublished_effect_bank_state(
         mock_bound(&controls, &descriptor_wire),
         Backend::Simd4,
         BankWidth::Four,
@@ -537,7 +536,7 @@ fn preparation_admits_every_sibling_before_one_bind_and_none_is_failure() {
     .unwrap_err();
     assert_eq!(
         (error.code, error.detail),
-        (EffectStateDiagnosticCodeV1::Factory, 3)
+        (EffectStateDiagnosticCode::Factory, 3)
     );
     assert_eq!(controls.bank_bind_calls.load(Ordering::SeqCst), 1);
 }
@@ -556,11 +555,11 @@ fn scalar_and_bank_payloads_interchange_and_continue_exactly() {
     let scalar_envelope = scalar_snapshot(&scalar_capability, &replay, scalar.as_ref());
 
     let bank = mock_bank(&controls, &descriptor_wire);
-    let mut bank = restore_unpublished_effect_bank_track_state_v1(
+    let mut bank = restore_unpublished_effect_bank_track_state(
         bank,
         1,
         &scalar_envelope,
-        EffectStateLimitsV1::default(),
+        EffectStateLimits::default(),
         admission(&replay),
     )
     .unwrap();
@@ -591,10 +590,10 @@ fn scalar_and_bank_payloads_interchange_and_continue_exactly() {
     let bank_envelope = bank_snapshot(&bank, 1);
     let scalar_restore_capability = mock_bound(&controls, &descriptor_wire);
     let mut initial_scratch = vec![replay.initial_values[0]; replay.initial_values.len()];
-    let mut restored_scalar = restore_scalar_effect_state_v1(
+    let mut restored_scalar = restore_scalar_effect_state(
         scalar_restore_capability,
         &bank_envelope,
-        EffectStateLimitsV1::default(),
+        EffectStateLimits::default(),
         admission(&replay),
         &mut initial_scratch,
     )
@@ -633,19 +632,19 @@ fn bank_restore_is_serial_and_isolates_siblings() {
     let second = bank_snapshot(&source, 2);
     let destination = mock_bank(&controls, &descriptor_wire);
     let sibling_before = bank_snapshot(&destination, 0);
-    let destination = restore_unpublished_effect_bank_track_state_v1(
+    let destination = restore_unpublished_effect_bank_track_state(
         destination,
         1,
         &first,
-        EffectStateLimitsV1::default(),
+        EffectStateLimits::default(),
         admission(&replay(2)),
     )
     .unwrap();
-    let mut destination = restore_unpublished_effect_bank_track_state_v1(
+    let mut destination = restore_unpublished_effect_bank_track_state(
         destination,
         2,
         &second,
-        EffectStateLimitsV1::default(),
+        EffectStateLimits::default(),
         admission(&replay(3)),
     )
     .unwrap();
@@ -702,99 +701,99 @@ fn bank_failures_drop_partial_ownership_and_preserve_first_error_order() {
 
     let bad_index = mock_bank(&controls, &descriptor_wire);
     controls.wrong_program_key.store(true, Ordering::SeqCst);
-    let error = restore_unpublished_effect_bank_track_state_v1(
+    let error = restore_unpublished_effect_bank_track_state(
         bad_index,
         9,
         &envelope,
-        EffectStateLimitsV1::default(),
+        EffectStateLimits::default(),
         admission(&replay(2)),
     )
     .unwrap_err();
     assert_eq!(
         (error.code, error.detail),
-        (EffectStateDiagnosticCodeV1::Restore, 1)
+        (EffectStateDiagnosticCode::Restore, 1)
     );
     controls.wrong_program_key.store(false, Ordering::SeqCst);
 
     let bad_config = mock_bank(&controls, &descriptor_wire);
     controls.wrong_width.store(true, Ordering::SeqCst);
     controls.wrong_program_key.store(true, Ordering::SeqCst);
-    let error = restore_unpublished_effect_bank_track_state_v1(
+    let error = restore_unpublished_effect_bank_track_state(
         bad_config,
         1,
         &envelope,
-        EffectStateLimitsV1::default(),
+        EffectStateLimits::default(),
         admission(&replay(2)),
     )
     .unwrap_err();
     assert_eq!(
         (error.code, error.detail),
-        (EffectStateDiagnosticCodeV1::Restore, 2)
+        (EffectStateDiagnosticCode::Restore, 2)
     );
     controls.wrong_width.store(false, Ordering::SeqCst);
     controls.wrong_program_key.store(false, Ordering::SeqCst);
 
     let bad_replay = mock_bank(&controls, &descriptor_wire);
     controls.wrong_program_key.store(true, Ordering::SeqCst);
-    let error = restore_unpublished_effect_bank_track_state_v1(
+    let error = restore_unpublished_effect_bank_track_state(
         bad_replay,
         2,
         &envelope,
-        EffectStateLimitsV1::default(),
+        EffectStateLimits::default(),
         admission(&replay(3)),
     )
     .unwrap_err();
     assert_eq!(
         (error.code, error.detail),
-        (EffectStateDiagnosticCodeV1::Restore, 2)
+        (EffectStateDiagnosticCode::Restore, 2)
     );
     controls.wrong_program_key.store(false, Ordering::SeqCst);
 
     let bad_key = mock_bank(&controls, &descriptor_wire);
     controls.wrong_program_key.store(true, Ordering::SeqCst);
-    let error = restore_unpublished_effect_bank_track_state_v1(
+    let error = restore_unpublished_effect_bank_track_state(
         bad_key,
         1,
         &envelope,
-        EffectStateLimitsV1::default(),
+        EffectStateLimits::default(),
         admission(&replay(2)),
     )
     .unwrap_err();
     assert_eq!(
         (error.code, error.detail),
-        (EffectStateDiagnosticCodeV1::Restore, 3)
+        (EffectStateDiagnosticCode::Restore, 3)
     );
     controls.wrong_program_key.store(false, Ordering::SeqCst);
 
     let bad_provenance = mock_bank(&controls, &descriptor_wire);
     controls.alternate_descriptor.store(true, Ordering::SeqCst);
-    let error = restore_unpublished_effect_bank_track_state_v1(
+    let error = restore_unpublished_effect_bank_track_state(
         bad_provenance,
         1,
         &envelope,
-        EffectStateLimitsV1::default(),
+        EffectStateLimits::default(),
         admission(&replay(2)),
     )
     .unwrap_err();
     assert_eq!(
         (error.code, error.detail),
-        (EffectStateDiagnosticCodeV1::Restore, 4)
+        (EffectStateDiagnosticCode::Restore, 4)
     );
     controls.alternate_descriptor.store(false, Ordering::SeqCst);
 
     let partial = mock_bank(&controls, &descriptor_wire);
     controls.fail_restore.store(true, Ordering::SeqCst);
-    let error = restore_unpublished_effect_bank_track_state_v1(
+    let error = restore_unpublished_effect_bank_track_state(
         partial,
         1,
         &envelope,
-        EffectStateLimitsV1::default(),
+        EffectStateLimits::default(),
         admission(&replay(2)),
     )
     .unwrap_err();
     assert_eq!(
         (error.code, error.detail),
-        (EffectStateDiagnosticCodeV1::Payload, 4)
+        (EffectStateDiagnosticCode::Payload, 4)
     );
     assert!(controls.bank_restore_calls.load(Ordering::SeqCst) > 0);
     assert_eq!(
@@ -809,10 +808,10 @@ fn bank_snapshot_one_short_never_calls_hook_or_publishes_output() {
     let descriptor_wire = wire(&DESCRIPTOR);
     let bank = mock_bank(&controls, &descriptor_wire);
     let replay = &bank.replays()[1];
-    let requirements = scalar_effect_state_v1_requirements(
+    let requirements = scalar_effect_state_requirements(
         bank.bound_factory(),
         replay,
-        EffectStateLimitsV1::default(),
+        EffectStateLimits::default(),
     )
     .unwrap();
     let calls = controls.bank_snapshot_calls.load(Ordering::SeqCst);
@@ -820,10 +819,10 @@ fn bank_snapshot_one_short_never_calls_hook_or_publishes_output() {
     let mut output = vec![0x41; requirements.envelope_bytes as usize + 3];
     let baseline = output.clone();
     let output_len = requirements.envelope_bytes as usize - 1;
-    let error = snapshot_unpublished_effect_bank_track_state_v1(
+    let error = snapshot_unpublished_effect_bank_track_state(
         &bank,
         1,
-        EffectStateLimitsV1::default(),
+        EffectStateLimits::default(),
         &mut scratch,
         &mut output[..output_len],
     )
@@ -831,8 +830,8 @@ fn bank_snapshot_one_short_never_calls_hook_or_publishes_output() {
     assert_eq!(
         (error.code, error.detail),
         (
-            EffectStateDiagnosticCodeV1::BufferTooSmall,
-            EFFECT_STATE_V1_BUFFER_ENVELOPE_OUTPUT
+            EffectStateDiagnosticCode::BufferTooSmall,
+            EFFECT_STATE_BUFFER_ENVELOPE_OUTPUT
         )
     );
     assert_eq!(output, baseline);
@@ -843,10 +842,10 @@ fn bank_snapshot_one_short_never_calls_hook_or_publishes_output() {
     let scratch_len = requirements.payload_snapshot_scratch_bytes as usize - 1;
     let mut exact_output = vec![0x61; requirements.envelope_bytes as usize];
     let output_baseline = exact_output.clone();
-    let error = snapshot_unpublished_effect_bank_track_state_v1(
+    let error = snapshot_unpublished_effect_bank_track_state(
         &bank,
         1,
-        EffectStateLimitsV1::default(),
+        EffectStateLimits::default(),
         &mut short_scratch[..scratch_len],
         &mut exact_output,
     )
@@ -854,8 +853,8 @@ fn bank_snapshot_one_short_never_calls_hook_or_publishes_output() {
     assert_eq!(
         (error.code, error.detail),
         (
-            EffectStateDiagnosticCodeV1::BufferTooSmall,
-            EFFECT_STATE_V1_BUFFER_PAYLOAD_SCRATCH
+            EffectStateDiagnosticCode::BufferTooSmall,
+            EFFECT_STATE_BUFFER_PAYLOAD_SCRATCH
         )
     );
     assert_eq!(short_scratch, scratch_baseline);
@@ -863,7 +862,7 @@ fn bank_snapshot_one_short_never_calls_hook_or_publishes_output() {
     assert_eq!(controls.bank_snapshot_calls.load(Ordering::SeqCst), calls);
 }
 
-fn production_replay(descriptor: &'static EffectDescriptorV1) -> EffectBankPreparationV1 {
+fn production_replay(descriptor: &'static EffectDescriptor) -> EffectBankPreparation {
     let initial_values = descriptor
         .parameters
         .iter()
@@ -888,13 +887,13 @@ fn production_replay(descriptor: &'static EffectDescriptorV1) -> EffectBankPrepa
         .iter()
         .find(|quality| quality.quality == EffectQuality::Normal && quality.sample_rate == 48_000)
         .unwrap();
-    EffectBankPreparationV1 {
+    EffectBankPreparation {
         sample_rate: 48_000,
         quantum: 128,
         quality: EffectQuality::Normal,
         bypass: false,
         link_mode: LinkMode::DualMono,
-        ports: PreparedPortsV1 {
+        ports: PreparedPorts {
             sidechain: PreparedSidechainPort::None,
         },
         initial_values,
@@ -913,13 +912,13 @@ fn production_soft_clip_w8_member_restores_and_isolates_siblings() {
     if backend != Backend::Simd8 {
         return;
     }
-    let descriptor = &miso_engine_soft_clip::SOFT_CLIP_DESCRIPTOR_V1;
+    let descriptor = &miso_engine_soft_clip::SOFT_CLIP_DESCRIPTOR;
     let descriptor_wire = wire(descriptor);
     let factory: Arc<dyn NativeEffectFactory> = Arc::new(miso_engine_soft_clip::SoftClipFactory);
     let replay = production_replay(descriptor);
     let prepare_bank = || {
-        prepare_unpublished_effect_bank_state_v1(
-            bind_native_effect_factory_state_v1(Arc::clone(&factory), &descriptor_wire, 1 << 20)
+        prepare_unpublished_effect_bank_state(
+            bind_native_effect_factory_state(Arc::clone(&factory), &descriptor_wire, 1 << 20)
                 .unwrap(),
             backend,
             BankWidth::Eight,
@@ -955,11 +954,11 @@ fn production_soft_clip_w8_member_restores_and_isolates_siblings() {
     let envelope = bank_snapshot(&source, 3);
     let destination = prepare_bank();
     let sibling_before = bank_snapshot(&destination, 2);
-    let mut destination = restore_unpublished_effect_bank_track_state_v1(
+    let mut destination = restore_unpublished_effect_bank_track_state(
         destination,
         3,
         &envelope,
-        EffectStateLimitsV1::default(),
+        EffectStateLimits::default(),
         admission(&replay),
     )
     .unwrap();

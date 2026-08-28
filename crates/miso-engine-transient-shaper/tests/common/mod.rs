@@ -9,11 +9,11 @@ use miso_engine_effect_contract::{
     AutomationSpanKind, BankWidth, EffectPrepareError, EffectQuality, InitialParameterValue,
     LinkMode, NativeEffectFactory, ParameterChannel, PrepareEffectBankRequest, PrepareEffectLimits,
     PrepareEffectRequest, PreparedAutomationSpan, PreparedNativeEffect, PreparedNativeEffectBank,
-    PreparedPortsV1, PreparedSidechainPort, StatePayloadOutput, StatePayloadSizes,
+    PreparedPorts, PreparedSidechainPort, StatePayloadOutput, StatePayloadSizes,
 };
 use miso_engine_effect_runtime::state_payload::{read_f32, read_u32, write_f32, write_u32};
 use miso_engine_lane::Backend;
-use miso_engine_transient_shaper::{TRANSIENT_SHAPER_PARAMETERS_V1, TransientShaperFactory};
+use miso_engine_transient_shaper::{TRANSIENT_SHAPER_PARAMETERS, TransientShaperFactory};
 
 /// Parameters per lane.
 pub(crate) const PARAMETER_COUNT: usize = 3;
@@ -33,7 +33,7 @@ pub(crate) fn initial_values() -> [InitialParameterValue; PARAMETER_COUNT * 2] {
         } else {
             ParameterChannel::Right
         },
-        value: TRANSIENT_SHAPER_PARAMETERS_V1[index / 2].default_value,
+        value: TRANSIENT_SHAPER_PARAMETERS[index / 2].default_value,
     })
 }
 
@@ -82,7 +82,7 @@ pub(crate) fn request_full<'a>(
         quality: EffectQuality::Normal,
         bypass,
         link_mode,
-        ports: PreparedPortsV1 {
+        ports: PreparedPorts {
             sidechain: PreparedSidechainPort::None,
         },
         initial_values: values,

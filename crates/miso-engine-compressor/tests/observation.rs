@@ -2,7 +2,7 @@
 //!
 //! This file is #140 D's `gain_reduction.rs`, re-expressed on the declared tap after R5 removed
 //! `PreparedNativeEffect::gain_reduction`. The reason the method went away is worth keeping: two
-//! routes to one value diverge, and a defaulted `Option<GainReductionV1>` accessor that nothing in
+//! routes to one value diverge, and a defaulted `Option<GainReduction>` accessor that nothing in
 //! the runtime called was the second route. Every assertion below is the same assertion it was --
 //! the reading is the kernel's own smoother state, in the contract's negative-for-reduction
 //! convention -- addressed through `observe_resident` instead.
@@ -10,8 +10,7 @@
 mod support;
 
 use miso_engine_effect_contract::{
-    EffectProcessBlock, ObservationSampleV1, PreparedNativeEffect, ResetKind,
-    validate_descriptor_v1,
+    EffectProcessBlock, ObservationSample, PreparedNativeEffect, ResetKind, validate_descriptor,
 };
 
 use support::{initial_values, prepare, request};
@@ -21,8 +20,8 @@ fn prepared() -> Box<dyn PreparedNativeEffect> {
     prepare(request(&values))
 }
 
-fn observe(effect: &dyn PreparedNativeEffect) -> ObservationSampleV1 {
-    let mut sample = ObservationSampleV1::default();
+fn observe(effect: &dyn PreparedNativeEffect) -> ObservationSample {
+    let mut sample = ObservationSample::default();
     assert!(
         effect.observe_resident(0, &mut sample),
         "the compressor implements its one declared tap"
@@ -30,9 +29,9 @@ fn observe(effect: &dyn PreparedNativeEffect) -> ObservationSampleV1 {
     sample
 }
 
-fn render(effect: &mut dyn PreparedNativeEffect, value: f32, blocks: usize) -> ObservationSampleV1 {
+fn render(effect: &mut dyn PreparedNativeEffect, value: f32, blocks: usize) -> ObservationSample {
     let quantum = effect.metadata().quantum;
-    let mut reduction = ObservationSampleV1::default();
+    let mut reduction = ObservationSample::default();
     for block in 0..blocks {
         let mut left = vec![value; quantum as usize];
         let mut right = vec![value; quantum as usize];
@@ -50,28 +49,28 @@ fn render(effect: &mut dyn PreparedNativeEffect, value: f32, blocks: usize) -> O
 #[test]
 fn the_compressor_declares_one_resident_gain_reduction_tap() {
     use miso_engine_effect_contract::{
-        ObservationCadenceV1, ObservationChannelsV1, ObservationCostV1, ObservationFoldV1,
-        ObservationKindV1, ObservationTapId, ParameterUnit,
+        ObservationCadence, ObservationChannels, ObservationCost, ObservationFold, ObservationKind,
+        ObservationTapId, ParameterUnit,
     };
-    let descriptor = miso_engine_compressor::COMPRESSOR_DESCRIPTOR_V1;
-    validate_descriptor_v1(&miso_engine_compressor::COMPRESSOR_DESCRIPTOR_V1).unwrap();
+    let descriptor = miso_engine_compressor::COMPRESSOR_DESCRIPTOR;
+    validate_descriptor(&miso_engine_compressor::COMPRESSOR_DESCRIPTOR).unwrap();
     assert_eq!(descriptor.observations.len(), 1);
     let tap = descriptor.observations[0];
     assert_eq!(tap.id, ObservationTapId(1));
     assert_eq!(tap.display_name, "Gain Reduction");
     assert_eq!(tap.display_unit, "dB");
-    assert_eq!(tap.kind, ObservationKindV1::GainReductionDb);
+    assert_eq!(tap.kind, ObservationKind::GainReductionDb);
     assert_eq!(tap.unit, ParameterUnit::Db);
-    assert_eq!(tap.cost, ObservationCostV1::Resident);
-    assert_eq!(tap.cadence, ObservationCadenceV1::PerBlock);
-    assert_eq!(tap.fold, ObservationFoldV1::PeakMagnitude);
-    assert_eq!(tap.channels, ObservationChannelsV1::PerLane);
+    assert_eq!(tap.cost, ObservationCost::Resident);
+    assert_eq!(tap.cadence, ObservationCadence::PerBlock);
+    assert_eq!(tap.fold, ObservationFold::PeakMagnitude);
+    assert_eq!(tap.channels, ObservationChannels::PerLane);
     assert_eq!(tap.minimum.to_bits(), 0.0_f32.to_bits());
     assert_eq!(tap.maximum, 100.0);
     // The addressing rule: a tap the descriptor does not declare is refused, never answered with
     // a stale or zeroed reading.
     let effect = prepared();
-    let mut sample = ObservationSampleV1 {
+    let mut sample = ObservationSample {
         left: f32::NAN,
         right: f32::NAN,
     };
@@ -219,7 +218,7 @@ fn every_bank_lane_reads_its_own_reduction() {
         &[],
     );
 
-    let mut published = vec![ObservationSampleV1::default(); lanes];
+    let mut published = vec![ObservationSample::default(); lanes];
     assert!(
         bank.observe_resident_bank(0, &mut published),
         "the bank implements its one declared tap"

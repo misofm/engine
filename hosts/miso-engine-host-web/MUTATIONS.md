@@ -1,6 +1,6 @@
 | `test-web-audioworklet.mjs` unsupported-browser test (W4-D1) | delete the `if (!WebAssembly.validate(SIMD128_PROBE)) throw unsupportedBrowser("simd128");` guard in `createMisoAudioWorkletHost` | the refusal becomes a generic `miso.error.v1` 255 and the `compileCount` assertion fails |
 | `test-web-audioworklet.mjs` source-ID UTF-8 parity test (#132) | change the four-byte sequence's `0xf0` lead-byte mask to `0xe0` in `writeBoundedUtf8` | the non-ASCII submit and seek bytes differ from the independent `TextEncoder` oracle |
-| `check-web-audioworklet-callgraph.py --callgraph` on the shipped artifact (E1/E2) | restore `self.ready = None;` in `fail` and rebuild the artifact | closure 6 -> 23, traps 5 -> 16, 13 forbidden names appear (`drop_glue<Option<ReadyOwnership>>`, `drop_glue<PreparedRenderPlan>`, `drop_glue<SessionTomlV1>`, `BTreeMap<StableId,_>` drop glue, `Arc<spsc::Ring<_>>::drop_slow` x2, `__rdl_dealloc`, `__rust_dealloc`, `dlmalloc::free`, `unlink_chunk`, `insert_large_chunk`, ...), and four of them become unexpected trap owners |
+| `check-web-audioworklet-callgraph.py --callgraph` on the shipped artifact (E1/E2) | restore `self.ready = None;` in `fail` and rebuild the artifact | closure 6 -> 23, traps 5 -> 16, 13 forbidden names appear (`drop_glue<Option<ReadyOwnership>>`, `drop_glue<PreparedRenderPlan>`, `drop_glue<SessionToml>`, `BTreeMap<StableId,_>` drop glue, `Arc<spsc::Ring<_>>::drop_slow` x2, `__rdl_dealloc`, `__rust_dealloc`, `dlmalloc::free`, `unlink_chunk`, `insert_large_chunk`, ...), and four of them become unexpected trap owners |
 | `check-web-audioworklet-callgraph.py --self-test` (a)-(f) | synthetic disassembly per case | each case is the red mutation of one rule; the runner fails if any escapes |
 | `test-web-audioworklet.mjs` trap-containment test (F5) | remove the `try` around `miso_engine_web_v1_render` in `process()` | the `process()` call throws instead of returning `true` |
 | `tests::facade_source_rules_reach_the_browser_host` (F1) | delete the `end_of_region != (end == region_end)` check from `miso_engine_host_core::SourceControlSet::submit` | the region-end submission returns `RESULT_BACKPRESSURE` (6) instead of `RESULT_INVALID_ARGUMENT` (1) |
@@ -101,7 +101,7 @@ audio**. Four self-test mutations run against every browser's real result:
 ### And the same mutation against a real engine, in a real browser
 
 The self-test mutates a *result*. To prove the gate catches a mutated *engine*, the
-`ObservationLaneV1::accumulate` armed guard was changed to `return;` — so no armed tap ever
+`ObservationLane::accumulate` armed guard was changed to `return;` — so no armed tap ever
 accumulates — the browser artifact was rebuilt from that tree, and chromium was re-qualified:
 
 ```

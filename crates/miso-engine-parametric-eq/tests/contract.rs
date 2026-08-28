@@ -11,11 +11,11 @@ use miso_engine_core::SampleRateHz;
 use miso_engine_effect_contract::{
     AutomationRate, EffectProcessBlock, NativeEffectFactory, ParameterChannel, ParameterDomain,
     ParameterMapping, ResetKind, SmoothingRule, StatePayloadError, StatePayloadInput,
-    StatePayloadOutput, validate_descriptor_v1,
+    StatePayloadOutput, validate_descriptor,
 };
 use miso_engine_parametric_eq::{
-    EQ_BAND_DESCRIPTORS_V1, EQ_SECTION_COUNT_V1, EqBandKindV1, EqSvfWordsV1,
-    PARAMETRIC_EQ_DESCRIPTOR_V1, ParametricEqFactory, design_svf_v1,
+    EQ_BAND_DESCRIPTORS, EQ_SECTION_COUNT, EqBandKind, EqSvfWords, PARAMETRIC_EQ_DESCRIPTOR,
+    ParametricEqFactory, design_svf,
 };
 use support::{
     COMMON_BYTES, LANE_BYTES, SECTIONS, WORDS_PER_BAND, band_word, point, process_zeros, request,
@@ -25,11 +25,11 @@ use support::{
 /// The frozen public surface: identifiers, domains, smoothing and the version-2 state size.
 #[test]
 fn descriptor_is_frozen() {
-    validate_descriptor_v1(&PARAMETRIC_EQ_DESCRIPTOR_V1).expect("descriptor");
-    let parameters = PARAMETRIC_EQ_DESCRIPTOR_V1.parameters;
+    validate_descriptor(&PARAMETRIC_EQ_DESCRIPTOR).expect("descriptor");
+    let parameters = PARAMETRIC_EQ_DESCRIPTOR.parameters;
     assert_eq!(parameters.len(), 24);
-    assert_eq!(PARAMETRIC_EQ_DESCRIPTOR_V1.state_layout_version, 2);
-    for quality in PARAMETRIC_EQ_DESCRIPTOR_V1.qualities {
+    assert_eq!(PARAMETRIC_EQ_DESCRIPTOR.state_layout_version, 2);
+    for quality in PARAMETRIC_EQ_DESCRIPTOR.qualities {
         assert_eq!(quality.maximum_state.common_bytes, COMMON_BYTES as u32);
         assert_eq!(quality.maximum_state.left_bytes, LANE_BYTES as u32);
         assert_eq!(quality.maximum_state.right_bytes, LANE_BYTES as u32);
@@ -53,7 +53,7 @@ fn descriptor_is_frozen() {
         ParameterMapping::Linear,
     ];
     let frequencies = [80.0_f32, 400.0, 2_000.0, 10_000.0];
-    for (band, descriptor) in EQ_BAND_DESCRIPTORS_V1.iter().enumerate() {
+    for (band, descriptor) in EQ_BAND_DESCRIPTORS.iter().enumerate() {
         let base = band as u32 * 16 + 1;
         assert_eq!(descriptor.index, band as u8);
         assert_eq!(descriptor.cascade_order, band as u8);
@@ -99,7 +99,7 @@ fn descriptor_is_frozen() {
         assert_eq!(parameters[band * 6 + 2].default_value, frequencies[band]);
         assert_eq!(parameters[band * 6 + 1].enum_choices.len(), 6);
     }
-    assert_eq!(SECTIONS, EQ_SECTION_COUNT_V1);
+    assert_eq!(SECTIONS, EQ_SECTION_COUNT);
     assert_eq!(SECTIONS * WORDS_PER_BAND * 4, LANE_BYTES);
 }
 
@@ -111,9 +111,9 @@ fn bell_values() -> Vec<miso_engine_effect_contract::InitialParameterValue> {
     values
 }
 
-fn expected_words(gain: f32) -> EqSvfWordsV1 {
-    design_svf_v1(
-        EqBandKindV1::Bell,
+fn expected_words(gain: f32) -> EqSvfWords {
+    design_svf(
+        EqBandKind::Bell,
         1_000.0,
         gain,
         core::f32::consts::FRAC_1_SQRT_2,
@@ -127,7 +127,7 @@ fn expected_words(gain: f32) -> EqSvfWordsV1 {
 #[test]
 fn automation_starts_a_64_sample_word_ramp() {
     assert_eq!(
-        PARAMETRIC_EQ_DESCRIPTOR_V1.parameters[3].id.0, 4,
+        PARAMETRIC_EQ_DESCRIPTOR.parameters[3].id.0, 4,
         "public stable ID is sparse identity"
     );
     let values = bell_values();
@@ -626,7 +626,7 @@ fn bypass_copies_dry_bits_and_leaves_the_state_alone() {
 /// The two resets mean two different things and both are exact.
 #[test]
 fn resets_restore_defaults_or_only_clear_history() {
-    let values = single_section_values(EqBandKindV1::HighPass, 1_000.0, 0.0, 1.0, 1.0);
+    let values = single_section_values(EqBandKind::HighPass, 1_000.0, 0.0, 1.0, 1.0);
     let mut effect = ParametricEqFactory
         .prepare(request(&values, false))
         .expect("prepare");
@@ -654,8 +654,8 @@ fn resets_restore_defaults_or_only_clear_history() {
         5_000.0,
         "the automated parameter survived"
     );
-    let settled = design_svf_v1(
-        EqBandKindV1::HighPass,
+    let settled = design_svf(
+        EqBandKind::HighPass,
         5_000.0,
         0.0,
         1.0,

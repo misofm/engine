@@ -192,8 +192,8 @@ They disagree about how much it costs to compute it, and that disagreement is th
 
 Source: `crates/miso-engine-parametric-eq/src/lib.rs` and the shared
 `crates/miso-engine-lane/src/kernels.rs` SVF. The standing fixture declares band 1 only on all 64
-tracks; the other three of `EQ_SECTION_COUNT_V1 = 4` take the descriptor default `enabled = 0.0`
-and design to `EqSvfWordsV1::IDENTITY`. Round 1's elision keeps `live.div_ceil(depth) * depth` = 2
+tracks; the other three of `EQ_SECTION_COUNT = 4` take the descriptor default `enabled = 0.0`
+and design to `EqSvfWords::IDENTITY`. Round 1's elision keeps `live.div_ceil(depth) * depth` = 2
 sections at `SVF_CASCADE_DEPTH = 2`, which is the crate's own pinned case for this fixture. Per
 lane-sample:
 
@@ -982,7 +982,7 @@ The plan is decided at bank construction and can never go stale in the unsafe di
   six words and the section's two integrators** and nothing else (`section_is_identity`), so the
   only parameters that can invalidate a decision are the ones that design them: `hpf_hz` and
   `lpf_hz`, both of which declare `BuiltinParameterUpdateRate::PreparedOnly` in
-  `BUILTIN_PARAMETER_DESCRIPTORS_V1`. No live surface can move them.
+  `BUILTIN_PARAMETER_DESCRIPTORS`. No live surface can move them.
 
   **Amended by #210 phase 3.** This clause used to read "`hpf_hz`, `lpf_hz`, `trim_db` and
   `polarity_invert` all declare `PreparedOnly` … so no live surface can move them", and that

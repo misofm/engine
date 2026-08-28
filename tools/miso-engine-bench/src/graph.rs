@@ -22,7 +22,7 @@ use miso_engine_graph::{GraphCompileCaps, GraphResourceEstimate};
 use miso_engine_graph_compiler::{GraphCompileRequest, GraphCompiler};
 use miso_engine_session::{
     ChannelMatrix, CompileCaps, CompiledSession, EffectIdentity, EffectParam, ParameterChannel,
-    ParameterUnit, Route, RouteDestination, RouteSource, SendTap, SessionTomlV1, Sidechain,
+    ParameterUnit, Route, RouteDestination, RouteSource, SendTap, SessionToml, Sidechain,
     SidechainDeclaration, StableId, Submix, canonical_session_toml, compile_session,
     parse_session_toml,
 };
@@ -237,7 +237,7 @@ fn scale_fixture() -> Fixture {
     fixture("scale-sparse", model)
 }
 
-fn fixture(label: &'static str, model: SessionTomlV1) -> Fixture {
+fn fixture(label: &'static str, model: SessionToml) -> Fixture {
     let tracks = model.tracks.len();
     let routes = model.routes.len();
     let submixes = model.submixes.len();

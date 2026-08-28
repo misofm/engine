@@ -226,14 +226,14 @@ pub(crate) fn route_transform(gain_db: f32, matrix: &ChannelMatrix) -> Option<Ro
 ///
 /// The two vectors are returned side by side rather than as one because
 /// `core::mem::size_of::<RuntimeOp>()` is a reported byte: see
-/// [`miso_engine_graph::GraphEffectControlBindingV1`].
+/// [`miso_engine_graph::GraphEffectControlBinding`].
 pub(crate) fn into_effects(
     entries: Vec<EffectPreparedEntry>,
     ids: &BTreeMap<(String, RackId, String), EffectNodeId>,
 ) -> (
     Vec<GraphPreparedEffect>,
-    Vec<miso_engine_graph::GraphEffectControlBindingV1>,
-    Vec<miso_engine_graph::GraphEffectObservationBindingV1>,
+    Vec<miso_engine_graph::GraphEffectControlBinding>,
+    Vec<miso_engine_graph::GraphEffectObservationBinding>,
 ) {
     let mut effects = Vec::with_capacity(entries.len());
     let mut controls = Vec::new();
@@ -246,13 +246,13 @@ pub(crate) fn into_effects(
         );
         let node = ids[&key].clone();
         if let Some(control) = entry.control {
-            controls.push(miso_engine_graph::GraphEffectControlBindingV1 {
+            controls.push(miso_engine_graph::GraphEffectControlBinding {
                 node: node.clone(),
                 control,
             });
         }
         if let Some(observation) = entry.observation {
-            observations.push(miso_engine_graph::GraphEffectObservationBindingV1 {
+            observations.push(miso_engine_graph::GraphEffectObservationBinding {
                 node: node.clone(),
                 observation,
             });

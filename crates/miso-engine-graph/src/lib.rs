@@ -13,13 +13,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use miso_engine_core::{
     QuantumFrames,
     realtime::{
-        BufferArena, PlanUnitEligibilityV1, PlanarBufferMut, PlanarBufferRef, PrepareRenderPlan,
+        BufferArena, PlanUnitEligibility, PlanarBufferMut, PlanarBufferRef, PrepareRenderPlan,
         PreparedPlanExecutor, PreparedRenderPlan, RenderEnvelope, RenderError,
     },
 };
 use miso_engine_effect_contract::{
-    ChannelSymmetryWitnessV1, EffectControlLane, LatencySamples, ObservationLaneV1,
-    PreparedEffectMetadata, PreparedNativeEffect, SeamSideV1, TailSamples,
+    ChannelSymmetryWitness, EffectControlLane, LatencySamples, ObservationLane,
+    PreparedEffectMetadata, PreparedNativeEffect, SeamSide, TailSamples,
 };
 use miso_engine_lane::Backend;
 use miso_engine_rack::AoSoaScratch;
@@ -363,11 +363,11 @@ pub struct PreparedGraphPlan {
     effects: Vec<GraphPreparedEffect>,
     /// Issue #140 A: one entry per effect a live console drives. Empty for every session that
     /// asked for no console, which is what keeps the runtime on its byte-identical path.
-    effect_controls: Vec<GraphEffectControlBindingV1>,
+    effect_controls: Vec<GraphEffectControlBinding>,
     /// Issue #143 D3: one entry per effect that has observation taps. Empty for every session
     /// that named no observation capacity, which is what keeps the runtime unobserved *and*
     /// byte-identical rather than merely disabled.
-    effect_observations: Vec<GraphEffectObservationBindingV1>,
+    effect_observations: Vec<GraphEffectObservationBinding>,
     banks: Vec<GraphPreparedEffectBank>,
     builtin_banks: Vec<GraphPreparedBuiltinBank>,
     observers: Vec<GraphNodeObserverBinding>,
@@ -391,7 +391,7 @@ pub struct GraphPreparedEffect {
 /// session in the workspace, console or not. Keeping the channel in its own vector leaves
 /// `NodeKind`'s largest variant untouched: the new `NodeKind::ConsoleEffect(Box<ConsoleEffect>)`
 /// is one pointer, far below it, so a console-free plan reports the same bytes it always did.
-pub struct GraphEffectControlBindingV1 {
+pub struct GraphEffectControlBinding {
     /// The effect node this channel drives.
     pub node: EffectNodeId,
     /// Consumer half of the bounded channel; the producer stays on the control plane.
@@ -401,14 +401,14 @@ pub struct GraphEffectControlBindingV1 {
 /// One prepared effect's observation taps, carried beside the prepared effects (issue #143 D3).
 ///
 /// Beside, and not inside, for exactly the reason
-/// [`GraphEffectControlBindingV1`] is: `size_of::<runtime::RuntimeOp>()` is a reported byte, so a
+/// [`GraphEffectControlBinding`] is: `size_of::<runtime::RuntimeOp>()` is a reported byte, so a
 /// field on `GraphPreparedEffect` would move the retained-byte report of every session in the
 /// workspace, observed or not.
-pub struct GraphEffectObservationBindingV1 {
+pub struct GraphEffectObservationBinding {
     /// The effect node these taps observe.
     pub node: EffectNodeId,
     /// The render-side lane; the readers stay on the control plane.
-    pub observation: Box<ObservationLaneV1>,
+    pub observation: Box<ObservationLane>,
 }
 /// A prepared homogeneous native bank and its original graph member identities.
 pub struct GraphPreparedEffectBank {
@@ -427,12 +427,12 @@ pub struct GraphPreparedEffectBank {
     ///
     /// **The runtime no longer reads it** (issue #202 rec 2). It was `runtime::cohort_runs`'s
     /// source of merge candidates, and that was strictly narrower than the merge needs: a group is
-    /// pooled per `RackLocationV1` and a builtin bank has no group at all, so `builtins -> simd1`
+    /// pooled per `RackLocation` and a builtin bank has no group at all, so `builtins -> simd1`
     /// and `simd1 -> simd2` were not expressible candidates however plainly one fed the other.
     /// Candidacy now comes from the lowered program's dataflow and the whole lane-wise relation is
     /// proved on it, so this stays as the planner's own report of what it grouped rather than as
     /// an input to what the runtime builds.
-    pub cohort: GraphBankCohortV1,
+    pub cohort: GraphBankCohort,
 }
 
 /// Where one bound bank sits in its cohort chain.
@@ -442,7 +442,7 @@ pub struct GraphPreparedEffectBank {
 /// in the chain's program, and it is strictly increasing along the chain but need not be
 /// contiguous: a slot every lane leaves at identity, or one no lane can bind, is skipped.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
-pub struct GraphBankCohortV1 {
+pub struct GraphBankCohort {
     /// The plan group this bank was bound from.
     pub group: u32,
     /// This bank's slot index in that group's program.
@@ -565,18 +565,18 @@ pub trait GraphPreparedBuiltinBankProcessor: Send {
     ///
     /// The default declines, for the reason `miso_engine_rack::BankStage::lane_symmetry` gives:
     /// an unclassified stage must not claim eligibility for work nobody checked.
-    fn lane_symmetry(&self, lane: usize) -> ChannelSymmetryWitnessV1 {
+    fn lane_symmetry(&self, lane: usize) -> ChannelSymmetryWitness {
         let _ = lane;
-        ChannelSymmetryWitnessV1::DECLINED
+        ChannelSymmetryWitness::DECLINED
     }
 
     /// Which side of the fader/matrix seam this builtin bank sits on.
     ///
-    /// The default is [`SeamSideV1::UpstreamOfSeam`] for the reason
+    /// The default is [`SeamSide::UpstreamOfSeam`] for the reason
     /// `miso_engine_rack::BankStage::seam_side` gives: it is the conservative answer, because an
     /// upstream stage that has not written a one-plane body declines the whole chain.
-    fn seam_side(&self) -> SeamSideV1 {
-        SeamSideV1::UpstreamOfSeam
+    fn seam_side(&self) -> SeamSide {
+        SeamSide::UpstreamOfSeam
     }
 
     /// Whether this bank implements [`process_mono`](Self::process_mono) and
@@ -1058,9 +1058,9 @@ pub struct PreparedGraphPlanParts {
     pub track_delays: Vec<PreparedTrackDelay>,
     pub effects: Vec<GraphPreparedEffect>,
     /// Issue #140 A: live-console control channels, one per driven effect node.
-    pub effect_controls: Vec<GraphEffectControlBindingV1>,
+    pub effect_controls: Vec<GraphEffectControlBinding>,
     /// Issue #143 D3: observation taps, one entry per observed effect node.
-    pub effect_observations: Vec<GraphEffectObservationBindingV1>,
+    pub effect_observations: Vec<GraphEffectObservationBinding>,
     pub banks: Vec<GraphPreparedEffectBank>,
     pub builtin_banks: Vec<GraphPreparedBuiltinBank>,
     pub observers: Vec<GraphNodeObserverBinding>,
@@ -1267,8 +1267,8 @@ pub trait GraphRuntimeProcessor: Send {
     /// The scalar-tail sibling of `GraphPreparedBuiltinBankProcessor::lane_symmetry`, defaulted to
     /// declining for the same reason. A host-supplied processor is opaque to the engine and
     /// therefore declines: nothing has compared its two channels' words.
-    fn channel_symmetry(&self) -> ChannelSymmetryWitnessV1 {
-        ChannelSymmetryWitnessV1::DECLINED
+    fn channel_symmetry(&self) -> ChannelSymmetryWitness {
+        ChannelSymmetryWitness::DECLINED
     }
 }
 /// Immutable post-node observation input. Observers cannot alter graph audio.
@@ -1488,13 +1488,13 @@ impl PreparedPlanExecutor for GraphExecutor {
     /// The dynamic half comes from the same `RuntimeUnit::symmetry_counters` the census folds, so
     /// the rows and the totals cannot disagree -- summing `[eligible_lanes, lanes]` over these
     /// rows *is* `symmetry_counters`, and `the_half_mono_cohort_banks_like_a_uniform_one (which asserts rows-sum-to-census inline)` pins that.
-    fn unit_eligibility(&self) -> Vec<PlanUnitEligibilityV1> {
+    fn unit_eligibility(&self) -> Vec<PlanUnitEligibility> {
         self.runtime
             .units
             .iter()
             .zip(self.runtime.identity.iter())
             .enumerate()
-            .map(|(unit, (runtime_unit, identity))| PlanUnitEligibilityV1 {
+            .map(|(unit, (runtime_unit, identity))| PlanUnitEligibility {
                 unit: u32::try_from(unit).unwrap_or(u32::MAX),
                 banked: identity.banked,
                 stages: identity.stages,
@@ -1549,7 +1549,7 @@ mod observation_size_accounting {
     #[test]
     fn the_observation_lane_costs_one_nullable_pointer_in_the_console_effect() {
         assert_eq!(
-            size_of::<Option<Box<miso_engine_effect_contract::ObservationLaneV1>>>(),
+            size_of::<Option<Box<miso_engine_effect_contract::ObservationLane>>>(),
             size_of::<usize>(),
             "an absent lane is a null pointer, not a discriminant plus a pointer"
         );
@@ -1559,7 +1559,7 @@ mod observation_size_accounting {
                 + size_of::<Box<miso_engine_effect_contract::EffectControlLane>>()
                 + size_of::<Box<[miso_engine_effect_contract::PreparedAutomationSpan]>>()
                 + size_of::<miso_engine_effect_contract::BypassShunt>()
-                + size_of::<Option<Box<miso_engine_effect_contract::ObservationLaneV1>>>(),
+                + size_of::<Option<Box<miso_engine_effect_contract::ObservationLane>>>(),
             "the console effect is exactly its five fields, and #143 added the fifth"
         );
     }
@@ -1589,10 +1589,10 @@ mod tests {
     use miso_engine_conformance::DualAccumulatorDelayFactory;
     use miso_engine_core::LAUNCH_SAMPLE_RATES;
     use miso_engine_effect_contract::{
-        BankWidth, EffectDescriptorV1, EffectId, EffectProcessBlock, EffectQuality,
+        BankWidth, EffectDescriptor, EffectId, EffectProcessBlock, EffectQuality,
         InitialParameterValue, LinkMode, LinkModeSet, NativeEffectFactory, ParameterChannel,
-        PortDescriptorV1, PortId, PortLayout, PortRole, PrepareEffectLimits, PrepareEffectRequest,
-        PreparedPortsV1, PreparedSidechainPort, ProcessReport, ResetKind, StatePayloadError,
+        PortDescriptor, PortId, PortLayout, PortRole, PrepareEffectLimits, PrepareEffectRequest,
+        PreparedPorts, PreparedSidechainPort, ProcessReport, ResetKind, StatePayloadError,
         StatePayloadInput, StatePayloadOutput, StatePayloadSizes,
     };
     use std::sync::{
@@ -1722,27 +1722,27 @@ mod tests {
         Ok(value) => value,
         Err(_) => panic!("ID"),
     };
-    static SUM_PORTS: [PortDescriptorV1; 3] = [
-        PortDescriptorV1 {
+    static SUM_PORTS: [PortDescriptor; 3] = [
+        PortDescriptor {
             id: SUM_MAIN_IN,
             role: PortRole::MainInput,
             required: true,
             layout: PortLayout::DualMonoPlanar,
         },
-        PortDescriptorV1 {
+        PortDescriptor {
             id: SUM_MAIN_OUT,
             role: PortRole::MainOutput,
             required: true,
             layout: PortLayout::DualMonoPlanar,
         },
-        PortDescriptorV1 {
+        PortDescriptor {
             id: SUM_SIDECHAIN,
             role: PortRole::SidechainInput,
             required: false,
             layout: PortLayout::DualMonoPlanar,
         },
     ];
-    static SUM_DESCRIPTOR: EffectDescriptorV1 = EffectDescriptorV1 {
+    static SUM_DESCRIPTOR: EffectDescriptor = EffectDescriptor {
         id: SUM_ID,
         display_name: "Sidechain sum fixture",
         contract_major: 1,
@@ -2765,7 +2765,7 @@ mod tests {
             quality: EffectQuality::Normal,
             bypass: false,
             link_mode: LinkMode::DualMono,
-            ports: PreparedPortsV1 {
+            ports: PreparedPorts {
                 sidechain: PreparedSidechainPort::Connected {
                     id: SUM_SIDECHAIN,
                     required: false,
@@ -3653,8 +3653,8 @@ mod tests {
         Ok(id) => id,
         Err(_) => panic!("static effect ID"),
     };
-    static GAIN_PARAMETERS: [miso_engine_effect_contract::ParameterDescriptorV1; 1] =
-        [miso_engine_effect_contract::ParameterDescriptorV1 {
+    static GAIN_PARAMETERS: [miso_engine_effect_contract::ParameterDescriptor; 1] =
+        [miso_engine_effect_contract::ParameterDescriptor {
             id: match miso_engine_effect_contract::ParameterId::new(1) {
                 Some(id) => id,
                 None => panic!("nonzero"),
@@ -3675,7 +3675,7 @@ mod tests {
             automatable: true,
             enum_choices: &[],
         }];
-    static GAIN_DESCRIPTOR: EffectDescriptorV1 = EffectDescriptorV1 {
+    static GAIN_DESCRIPTOR: EffectDescriptor = EffectDescriptor {
         id: GAIN_ID,
         display_name: "Live gain fixture",
         contract_major: 1,
@@ -3807,7 +3807,7 @@ mod tests {
             quality: EffectQuality::Normal,
             bypass: false,
             link_mode: LinkMode::DualMono,
-            ports: PreparedPortsV1 {
+            ports: PreparedPorts {
                 sidechain: PreparedSidechainPort::None,
             },
             latency: LatencySamples(latency),
@@ -3900,7 +3900,7 @@ mod tests {
             }],
             effect_controls: match control {
                 None => Vec::new(),
-                Some(control) => vec![GraphEffectControlBindingV1 {
+                Some(control) => vec![GraphEffectControlBinding {
                     node: effect_id,
                     control,
                 }],
@@ -3969,11 +3969,11 @@ mod tests {
     fn control_pair(
         depth: usize,
     ) -> (
-        miso_engine_core::realtime::Producer<miso_engine_effect_contract::EffectControlRecordV1>,
+        miso_engine_core::realtime::Producer<miso_engine_effect_contract::EffectControlRecord>,
         Box<EffectControlLane>,
     ) {
         let (producer, consumer) = miso_engine_core::realtime::bounded_spsc::<
-            miso_engine_effect_contract::EffectControlRecordV1,
+            miso_engine_effect_contract::EffectControlRecord,
         >(
             core::num::NonZeroUsize::new(depth).expect("depth"),
             miso_engine_core::realtime::QueueGeneration(0),
@@ -4001,7 +4001,7 @@ mod tests {
 
         producer
             .try_push(
-                miso_engine_effect_contract::EffectControlRecordV1::Parameter {
+                miso_engine_effect_contract::EffectControlRecord::Parameter {
                     parameter_index: 0,
                     channel: ParameterChannel::Left,
                     value: 0.5,
@@ -4033,7 +4033,7 @@ mod tests {
         let mut plan = console_effect_plan(LATENCY, Some(control), Box::new(SampleIndexSource));
         producer
             .try_push(
-                miso_engine_effect_contract::EffectControlRecordV1::Parameter {
+                miso_engine_effect_contract::EffectControlRecord::Parameter {
                     parameter_index: 0,
                     channel: ParameterChannel::Left,
                     value: 0.0,
@@ -4048,7 +4048,7 @@ mod tests {
         );
 
         producer
-            .try_push(miso_engine_effect_contract::EffectControlRecordV1::Bypass(
+            .try_push(miso_engine_effect_contract::EffectControlRecord::Bypass(
                 true,
             ))
             .expect("room");
@@ -4061,7 +4061,7 @@ mod tests {
         assert_eq!(&bypassed[4..], &[-6.0, -7.0, -8.0, -9.0]);
 
         producer
-            .try_push(miso_engine_effect_contract::EffectControlRecordV1::Bypass(
+            .try_push(miso_engine_effect_contract::EffectControlRecord::Bypass(
                 false,
             ))
             .expect("room");
@@ -4108,7 +4108,7 @@ mod tests {
         for channel in [ParameterChannel::Left, ParameterChannel::Right] {
             producer
                 .try_push(
-                    miso_engine_effect_contract::EffectControlRecordV1::Parameter {
+                    miso_engine_effect_contract::EffectControlRecord::Parameter {
                         parameter_index: 0,
                         channel,
                         value: 2.0,
@@ -4230,7 +4230,7 @@ mod tests {
             quality: EffectQuality::Normal,
             bypass: false,
             link_mode: LinkMode::DualMono,
-            ports: PreparedPortsV1 {
+            ports: PreparedPorts {
                 sidechain: PreparedSidechainPort::Connected {
                     id: SUM_SIDECHAIN,
                     required: false,
@@ -4429,7 +4429,7 @@ mod tests {
                 quality: EffectQuality::Normal,
                 bypass,
                 link_mode: LinkMode::DualMono,
-                ports: PreparedPortsV1 {
+                ports: PreparedPorts {
                     sidechain: PreparedSidechainPort::Unconnected {
                         id: PortId::new("sidechain-in").expect("port"),
                         required: false,

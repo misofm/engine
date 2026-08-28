@@ -91,7 +91,7 @@ fn bench_input_stage_ns_per_track_frame() {
                 .into_input_builtins()
         })
         .collect();
-    let mut bank = BuiltinInputBankV1::new(Backend::Simd8, BankWidth::Eight, inputs).expect("bank");
+    let mut bank = BuiltinInputBank::new(Backend::Simd8, BankWidth::Eight, inputs).expect("bank");
     let mut bank_left = signal(FRAMES * 8);
     let mut bank_right = signal(FRAMES * 8);
     for _ in 0..256 {

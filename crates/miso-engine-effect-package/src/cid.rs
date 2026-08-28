@@ -1,7 +1,6 @@
 use crate::{
-    EFFECT_PACKAGE_V1_UNAVAILABLE_INDEX, EFFECT_PACKAGE_V1_UNAVAILABLE_OFFSET,
-    EffectPackageDiagnosticCodeV1, EffectPackageDiagnosticV1, EffectPackageLimitsV1,
-    VerifiedEffectPackageV1, verify_effect_package_v1,
+    EFFECT_PACKAGE_UNAVAILABLE_INDEX, EFFECT_PACKAGE_UNAVAILABLE_OFFSET, EffectPackageDiagnostic,
+    EffectPackageDiagnosticCode, EffectPackageLimits, VerifiedEffectPackage, verify_effect_package,
 };
 use core::{fmt, str::FromStr};
 use sha2::{Digest, Sha256};
@@ -69,32 +68,32 @@ impl EffectCid {
     pub fn verify_package(
         &self,
         bytes: &[u8],
-        limits: EffectPackageLimitsV1,
-    ) -> Result<(), EffectPackageDiagnosticV1> {
-        verify_effect_package_cid_v1(bytes, limits, self).map(|_| ())
+        limits: EffectPackageLimits,
+    ) -> Result<(), EffectPackageDiagnostic> {
+        verify_effect_package_cid(bytes, limits, self).map(|_| ())
     }
 }
 
-pub fn effect_package_cid_v1(
+pub fn effect_package_cid(
     bytes: &[u8],
-    limits: EffectPackageLimitsV1,
-) -> Result<EffectCid, EffectPackageDiagnosticV1> {
-    let verified = verify_effect_package_v1(bytes, limits)?;
+    limits: EffectPackageLimits,
+) -> Result<EffectCid, EffectPackageDiagnostic> {
+    let verified = verify_effect_package(bytes, limits)?;
     Ok(EffectCid::from_raw_bytes(verified.as_bytes()))
 }
 
-pub fn verify_effect_package_cid_v1<'a>(
+pub fn verify_effect_package_cid<'a>(
     bytes: &'a [u8],
-    limits: EffectPackageLimitsV1,
+    limits: EffectPackageLimits,
     expected: &EffectCid,
-) -> Result<VerifiedEffectPackageV1<'a>, EffectPackageDiagnosticV1> {
-    let verified = verify_effect_package_v1(bytes, limits)?;
+) -> Result<VerifiedEffectPackage<'a>, EffectPackageDiagnostic> {
+    let verified = verify_effect_package(bytes, limits)?;
     if EffectCid::from_raw_bytes(verified.as_bytes()) != *expected {
-        return Err(EffectPackageDiagnosticV1::new(
-            EffectPackageDiagnosticCodeV1::Cid,
+        return Err(EffectPackageDiagnostic::new(
+            EffectPackageDiagnosticCode::Cid,
             0,
-            EFFECT_PACKAGE_V1_UNAVAILABLE_INDEX,
-            EFFECT_PACKAGE_V1_UNAVAILABLE_OFFSET,
+            EFFECT_PACKAGE_UNAVAILABLE_INDEX,
+            EFFECT_PACKAGE_UNAVAILABLE_OFFSET,
         ));
     }
     Ok(verified)
@@ -183,8 +182,8 @@ fn decode_base32(text: &[u8], output: &mut [u8; CID_BYTES]) -> Result<(), CidErr
 mod tests {
     use super::*;
     use crate::{
-        EffectArtifactAuthoringV1, EffectArtifactKindV1, EffectPackageAuthoringV1,
-        effect_package_v1_required_size, encode_effect_package_v1,
+        EffectArtifactAuthoring, EffectArtifactKind, EffectPackageAuthoring,
+        effect_package_required_size, encode_effect_package,
     };
 
     fn descriptor() -> Vec<u8> {
@@ -208,21 +207,21 @@ mod tests {
 
     fn package() -> Vec<u8> {
         let descriptor = descriptor();
-        let artifacts = [EffectArtifactAuthoringV1 {
-            kind: EffectArtifactKindV1::Source,
+        let artifacts = [EffectArtifactAuthoring {
+            kind: EffectArtifactKind::Source,
             path: "src/lib.rs",
             target: "",
             features: "",
             content: b"source",
         }];
-        let authoring = EffectPackageAuthoringV1 {
+        let authoring = EffectPackageAuthoring {
             descriptor: &descriptor,
             artifacts: &artifacts,
         };
-        let required = effect_package_v1_required_size(&authoring, EffectPackageLimitsV1::default())
+        let required = effect_package_required_size(&authoring, EffectPackageLimits::default())
             .unwrap() as usize;
         let mut bytes = vec![0; required];
-        encode_effect_package_v1(&authoring, EffectPackageLimitsV1::default(), &mut bytes).unwrap();
+        encode_effect_package(&authoring, EffectPackageLimits::default(), &mut bytes).unwrap();
         bytes
     }
 
@@ -343,26 +342,26 @@ mod tests {
     #[test]
     fn package_creation_and_expected_verification_are_strict() {
         let bytes = package();
-        let cid = effect_package_cid_v1(&bytes, EffectPackageLimitsV1::default()).unwrap();
+        let cid = effect_package_cid(&bytes, EffectPackageLimits::default()).unwrap();
         assert_eq!(cid, EffectCid::from_raw_bytes(&bytes));
         let verified =
-            verify_effect_package_cid_v1(&bytes, EffectPackageLimitsV1::default(), &cid).unwrap();
+            verify_effect_package_cid(&bytes, EffectPackageLimits::default(), &cid).unwrap();
         assert_eq!(verified.as_bytes().as_ptr(), bytes.as_ptr());
-        cid.verify_package(&bytes, EffectPackageLimitsV1::default())
+        cid.verify_package(&bytes, EffectPackageLimits::default())
             .unwrap();
         let wrong = EffectCid::from_raw_bytes(b"wrong");
-        let error = verify_effect_package_cid_v1(&bytes, EffectPackageLimitsV1::default(), &wrong)
-            .unwrap_err();
-        assert_eq!(error.code, EffectPackageDiagnosticCodeV1::Cid);
+        let error =
+            verify_effect_package_cid(&bytes, EffectPackageLimits::default(), &wrong).unwrap_err();
+        assert_eq!(error.code, EffectPackageDiagnosticCode::Cid);
         assert_eq!(error.artifact_index, u32::MAX);
         assert_eq!(error.byte_offset, u64::MAX);
         let mut invalid = bytes.clone();
         invalid[0] ^= 1;
         assert_eq!(
-            effect_package_cid_v1(&invalid, EffectPackageLimitsV1::default())
+            effect_package_cid(&invalid, EffectPackageLimits::default())
                 .unwrap_err()
                 .code,
-            EffectPackageDiagnosticCodeV1::Header
+            EffectPackageDiagnosticCode::Header
         );
     }
 }

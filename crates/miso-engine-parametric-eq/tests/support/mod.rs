@@ -8,11 +8,11 @@
 use miso_engine_effect_contract::{
     AutomationSpanKind, EffectProcessBlock, EffectQuality as Quality, InitialParameterValue,
     LinkMode, NativeEffectFactory, ParameterChannel, PrepareEffectLimits, PrepareEffectRequest,
-    PreparedAutomationSpan, PreparedNativeEffect, PreparedPortsV1, PreparedSidechainPort,
+    PreparedAutomationSpan, PreparedNativeEffect, PreparedPorts, PreparedSidechainPort,
     ProcessReport, StatePayloadOutput,
 };
 use miso_engine_parametric_eq::{
-    EQ_SECTION_COUNT_V1, EqBandKindV1, PARAMETRIC_EQ_DESCRIPTOR_V1, ParametricEqFactory,
+    EQ_SECTION_COUNT, EqBandKind, PARAMETRIC_EQ_DESCRIPTOR, ParametricEqFactory,
 };
 
 /// Bytes in each channel section of a version-2 payload.
@@ -34,13 +34,13 @@ pub const FROZEN_GAINS: [f32; 5] = [-24.0, -6.0, 0.0, 6.0, 24.0];
 /// The frozen shelf slopes of the 1,488-row grid.
 pub const FROZEN_SLOPES: [f32; 3] = [0.1, 0.5, 1.0];
 /// Every family, in the frozen order.
-pub const FROZEN_KINDS: [EqBandKindV1; 6] = [
-    EqBandKindV1::Bell,
-    EqBandKindV1::LowShelf,
-    EqBandKindV1::HighShelf,
-    EqBandKindV1::LowPass,
-    EqBandKindV1::HighPass,
-    EqBandKindV1::Notch,
+pub const FROZEN_KINDS: [EqBandKind; 6] = [
+    EqBandKind::Bell,
+    EqBandKind::LowShelf,
+    EqBandKind::HighShelf,
+    EqBandKind::LowPass,
+    EqBandKind::HighPass,
+    EqBandKind::Notch,
 ];
 /// The two frozen parameter corners each time-domain gate drives.
 pub const FROZEN_EDGES: [(f32, f32, f32, f32); 2] =
@@ -50,7 +50,7 @@ pub const FROZEN_EDGES: [(f32, f32, f32, f32); 2] =
 #[derive(Clone, Copy, Debug)]
 pub struct GridRow {
     /// Section family.
-    pub kind: EqBandKindV1,
+    pub kind: EqBandKind,
     /// Sample rate in Hz.
     pub rate: u32,
     /// Design frequency in Hz.
@@ -75,7 +75,7 @@ pub fn frozen_grid() -> Vec<GridRow> {
             for q in FROZEN_QS {
                 for gain in FROZEN_GAINS {
                     rows.push(GridRow {
-                        kind: EqBandKindV1::Bell,
+                        kind: EqBandKind::Bell,
                         rate,
                         frequency,
                         gain,
@@ -83,11 +83,7 @@ pub fn frozen_grid() -> Vec<GridRow> {
                         slope: 1.0,
                     });
                 }
-                for kind in [
-                    EqBandKindV1::LowPass,
-                    EqBandKindV1::HighPass,
-                    EqBandKindV1::Notch,
-                ] {
+                for kind in [EqBandKind::LowPass, EqBandKind::HighPass, EqBandKind::Notch] {
                     rows.push(GridRow {
                         kind,
                         rate,
@@ -100,7 +96,7 @@ pub fn frozen_grid() -> Vec<GridRow> {
             }
             for gain in FROZEN_GAINS {
                 for slope in FROZEN_SLOPES {
-                    for kind in [EqBandKindV1::LowShelf, EqBandKindV1::HighShelf] {
+                    for kind in [EqBandKind::LowShelf, EqBandKind::HighShelf] {
                         rows.push(GridRow {
                             kind,
                             rate,
@@ -119,29 +115,29 @@ pub fn frozen_grid() -> Vec<GridRow> {
 
 /// The independent oracle's spelling of a section family.
 #[must_use]
-pub fn reference_kind(kind: EqBandKindV1) -> miso_engine_dsp_reference::ReferenceParametricEqKind {
+pub fn reference_kind(kind: EqBandKind) -> miso_engine_dsp_reference::ReferenceParametricEqKind {
     use miso_engine_dsp_reference::ReferenceParametricEqKind as Reference;
     match kind {
-        EqBandKindV1::Bell => Reference::Bell,
-        EqBandKindV1::LowShelf => Reference::LowShelf,
-        EqBandKindV1::HighShelf => Reference::HighShelf,
-        EqBandKindV1::LowPass => Reference::LowPass,
-        EqBandKindV1::HighPass => Reference::HighPass,
-        EqBandKindV1::Notch => Reference::Notch,
+        EqBandKind::Bell => Reference::Bell,
+        EqBandKind::LowShelf => Reference::LowShelf,
+        EqBandKind::HighShelf => Reference::HighShelf,
+        EqBandKind::LowPass => Reference::LowPass,
+        EqBandKind::HighPass => Reference::HighPass,
+        EqBandKind::Notch => Reference::Notch,
     }
 }
 
 /// The reference SVF's spelling of a section family.
 #[must_use]
-pub fn reference_svf_kind(kind: EqBandKindV1) -> miso_engine_dsp_reference::ReferenceSvfKind {
+pub fn reference_svf_kind(kind: EqBandKind) -> miso_engine_dsp_reference::ReferenceSvfKind {
     use miso_engine_dsp_reference::ReferenceSvfKind as Reference;
     match kind {
-        EqBandKindV1::Bell => Reference::Bell,
-        EqBandKindV1::LowShelf => Reference::LowShelf,
-        EqBandKindV1::HighShelf => Reference::HighShelf,
-        EqBandKindV1::LowPass => Reference::LowPass,
-        EqBandKindV1::HighPass => Reference::HighPass,
-        EqBandKindV1::Notch => Reference::Notch,
+        EqBandKind::Bell => Reference::Bell,
+        EqBandKind::LowShelf => Reference::LowShelf,
+        EqBandKind::HighShelf => Reference::HighShelf,
+        EqBandKind::LowPass => Reference::LowPass,
+        EqBandKind::HighPass => Reference::HighPass,
+        EqBandKind::Notch => Reference::Notch,
     }
 }
 
@@ -149,7 +145,7 @@ pub fn reference_svf_kind(kind: EqBandKindV1) -> miso_engine_dsp_reference::Refe
 #[must_use]
 pub fn values() -> Vec<InitialParameterValue> {
     let mut values = Vec::new();
-    for (index, parameter) in PARAMETRIC_EQ_DESCRIPTOR_V1.parameters.iter().enumerate() {
+    for (index, parameter) in PARAMETRIC_EQ_DESCRIPTOR.parameters.iter().enumerate() {
         for channel in [ParameterChannel::Left, ParameterChannel::Right] {
             values.push(InitialParameterValue {
                 parameter_index: index as u32,
@@ -180,7 +176,7 @@ pub fn set_initial(
 /// Band one enabled with the given parameters on both channels; the other three stay disabled.
 #[must_use]
 pub fn single_section_values(
-    kind: EqBandKindV1,
+    kind: EqBandKind,
     frequency: f32,
     gain: f32,
     q: f32,
@@ -217,7 +213,7 @@ pub fn request_at_rate<'a>(
         quality: Quality::Normal,
         bypass,
         link_mode: LinkMode::DualMono,
-        ports: PreparedPortsV1 {
+        ports: PreparedPorts {
             sidechain: PreparedSidechainPort::None,
         },
         initial_values: values,
@@ -315,7 +311,7 @@ pub fn process_zeros(
 /// Drives a one-second impulse through the public factory in 128-frame blocks.
 #[must_use]
 pub fn one_second_impulse(
-    kind: EqBandKindV1,
+    kind: EqBandKind,
     frequency: f32,
     gain: f32,
     q: f32,
@@ -408,4 +404,4 @@ pub fn deterministic_noise(state: &mut u64) -> f32 {
 }
 
 /// Number of cascade sections, re-exported so gates need one import.
-pub const SECTIONS: usize = EQ_SECTION_COUNT_V1;
+pub const SECTIONS: usize = EQ_SECTION_COUNT;

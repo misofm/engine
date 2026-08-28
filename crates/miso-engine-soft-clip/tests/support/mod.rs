@@ -10,10 +10,10 @@ use miso_engine_effect_contract::{
     BankWidth, EffectBankProcessBlock, EffectProcessBlock, EffectQuality, InitialParameterValue,
     LinkMode, NativeEffectFactory, ParameterChannel, PrepareEffectBankRequest, PrepareEffectLimits,
     PrepareEffectRequest, PreparedAutomationSpan, PreparedNativeEffect, PreparedNativeEffectBank,
-    PreparedPortsV1, PreparedSidechainPort, ProcessReport, StatePayloadInput, StatePayloadOutput,
+    PreparedPorts, PreparedSidechainPort, ProcessReport, StatePayloadInput, StatePayloadOutput,
 };
 use miso_engine_lane::Backend;
-use miso_engine_soft_clip::{SOFT_CLIP_DESCRIPTOR_V1, SOFT_CLIP_PARAMETERS_V1, SoftClipFactory};
+use miso_engine_soft_clip::{SOFT_CLIP_DESCRIPTOR, SOFT_CLIP_PARAMETERS, SoftClipFactory};
 
 /// Parameters: drive, output, mix.
 pub const PARAMETERS: usize = 3;
@@ -23,7 +23,7 @@ pub const QUANTUM: u32 = 128;
 
 /// Total payload bytes of one prepared instance under state layout 2.
 pub fn total_state_bytes() -> u64 {
-    SOFT_CLIP_DESCRIPTOR_V1.qualities[1]
+    SOFT_CLIP_DESCRIPTOR.qualities[1]
         .maximum_state
         .total()
         .expect("state sizes")
@@ -38,7 +38,7 @@ pub fn initial_values() -> [InitialParameterValue; PARAMETERS * 2] {
         } else {
             ParameterChannel::Right
         },
-        value: SOFT_CLIP_PARAMETERS_V1[index / 2].default_value,
+        value: SOFT_CLIP_PARAMETERS[index / 2].default_value,
     })
 }
 
@@ -60,7 +60,7 @@ pub fn request<'a>(values: &'a [InitialParameterValue]) -> PrepareEffectRequest<
         quality: EffectQuality::Normal,
         bypass: false,
         link_mode: LinkMode::DualMono,
-        ports: PreparedPortsV1 {
+        ports: PreparedPorts {
             sidechain: PreparedSidechainPort::None,
         },
         initial_values: values,

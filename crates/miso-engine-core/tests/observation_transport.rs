@@ -19,14 +19,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Barrier};
 use std::thread;
 
-use miso_engine_core::realtime::{ObservationWindowV1, observation_slot};
+use miso_engine_core::realtime::{ObservationWindow, observation_slot};
 
 /// One million windows, which is the eval's number.
 const WINDOWS: u64 = 1_000_000;
 
 /// Every field derived from the sequence, so any cross-window mixture is detectable.
-fn window(sequence: u64) -> ObservationWindowV1 {
-    ObservationWindowV1 {
+fn window(sequence: u64) -> ObservationWindow {
+    ObservationWindow {
         first_sample: sequence.wrapping_mul(128),
         end_sample: sequence.wrapping_mul(128) + 128,
         sequence,
@@ -36,7 +36,7 @@ fn window(sequence: u64) -> ObservationWindowV1 {
     }
 }
 
-fn consistent(observed: ObservationWindowV1) -> bool {
+fn consistent(observed: ObservationWindow) -> bool {
     observed == window(observed.sequence)
 }
 
@@ -162,7 +162,7 @@ fn a_stalled_reader_resumes_on_the_newest_window_with_a_counted_gap() {
 #[test]
 fn published_words_are_bit_exact() {
     let (publisher, reader) = observation_slot();
-    let exact = ObservationWindowV1 {
+    let exact = ObservationWindow {
         first_sample: u64::MAX - 1,
         end_sample: u64::MAX,
         sequence: 7,

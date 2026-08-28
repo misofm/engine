@@ -11,10 +11,9 @@
 
 use miso_engine_core::realtime::RenderError;
 use miso_engine_effect_contract::{
-    BankWidth, BypassShunt, ChannelSymmetryWitnessV1, EffectBankProcessBlock, EffectControlLane,
-    EffectProgramKeyV1, ObservationLaneV1, ObservationSampleV1, PreparedAutomationSpan,
-    PreparedNativeEffectBank, PreparedSidechainPort, SeamSideV1, transpose_tile_4,
-    transpose_tile_8,
+    BankWidth, BypassShunt, ChannelSymmetryWitness, EffectBankProcessBlock, EffectControlLane,
+    EffectProgramKey, ObservationLane, ObservationSample, PreparedAutomationSpan,
+    PreparedNativeEffectBank, PreparedSidechainPort, SeamSide, transpose_tile_4, transpose_tile_8,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -36,17 +35,17 @@ pub enum RackError {
 /// plugins").
 ///
 /// The variant exists on the *cohort* type so that a dynamic chain can never share a cohort with a
-/// SIMD chain: [`RackProgramV1::subsequence_mask`] compares `rack` first, and
+/// SIMD chain: [`RackProgram::subsequence_mask`] compares `rack` first, and
 /// `miso_engine_rack_compiler::plan_bank_groups` pools per location.
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub enum RackLocationV1 {
+pub enum RackLocation {
     Simd1 = 1,
     Simd2 = 2,
     Dynamic = 3,
 }
 
-impl RackLocationV1 {
+impl RackLocation {
     /// Every bank location, in cohort-planning order.
     ///
     /// `plan_bank_groups` iterates this, so a new location is planned by construction rather than
@@ -67,7 +66,7 @@ pub trait BankSlotKey: Clone + Eq + Ord {
     }
 }
 
-impl BankSlotKey for EffectProgramKeyV1 {
+impl BankSlotKey for EffectProgramKey {
     /// A connected sidechain reads a second graph buffer that a homogeneous bank has no port for
     /// (#96 F9), so such a program renders per node.
     fn blocks_banking(&self) -> bool {
@@ -80,21 +79,21 @@ impl BankSlotKey for EffectProgramKeyV1 {
 
 /// The ordered per-track program of one SIMD rack.
 ///
-/// There is no rate, quantum or routing field: every [`EffectProgramKeyV1`] slot already carries
+/// There is no rate, quantum or routing field: every [`EffectProgramKey`] slot already carries
 /// `sample_rate`, `quantum` and `ports.sidechain`, so a second copy could only disagree (#96 F5.4).
 ///
-/// `K` is the slot key, defaulting to [`EffectProgramKeyV1`] — the SIMD racks' key. A fixed graph
+/// `K` is the slot key, defaulting to [`EffectProgramKey`] — the SIMD racks' key. A fixed graph
 /// stage with a key of its own (the post-input builtin bank, #86) is planned by the same planner
 /// without either side having to fabricate the other's key type.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct RackProgramV1<K = EffectProgramKeyV1> {
-    pub rack: RackLocationV1,
+pub struct RackProgram<K = EffectProgramKey> {
+    pub rack: RackLocation,
     pub slots: Box<[K]>,
 }
 
-impl<K: BankSlotKey> RackProgramV1<K> {
+impl<K: BankSlotKey> RackProgram<K> {
     #[must_use]
-    pub fn new(rack: RackLocationV1, slots: Vec<K>) -> Self {
+    pub fn new(rack: RackLocation, slots: Vec<K>) -> Self {
         Self {
             rack,
             slots: slots.into_boxed_slice(),
@@ -111,7 +110,7 @@ impl<K: BankSlotKey> RackProgramV1<K> {
     ///
     /// Returns the leader-indexed activity mask (`true` = this track runs that slot, `false` = the
     /// slot is an identity for this lane), or `None` when no match exists. Slots compare by
-    /// [`EffectProgramKeyV1`] equality only - never by occurrence index (#96 F5.3). Greedy
+    /// [`EffectProgramKey`] equality only - never by occurrence index (#96 F5.3). Greedy
     /// leftmost matching decides subsequence membership exactly: any match can be left-shifted
     /// into the greedy one.
     #[must_use]
@@ -332,15 +331,15 @@ pub trait BankStage: Send {
 
     /// This stage's channel-symmetry witness for one lane of the cohort.
     ///
-    /// The default is [`ChannelSymmetryWitnessV1::DECLINED`], not `SYMMETRIC`: a stage that has
+    /// The default is [`ChannelSymmetryWitness::DECLINED`], not `SYMMETRIC`: a stage that has
     /// not derived a witness from its kernel's read surface declines, so an unclassified stage in
     /// a chain makes the whole cohort decline rather than silently claiming eligibility for work
     /// nobody checked -- and since mono-collapse M2 the chain **does** read this to decide whether
     /// to render one plane or two, so the declining default is the difference between a missed
     /// optimisation and wrong audio.
-    fn lane_symmetry(&self, lane: usize) -> ChannelSymmetryWitnessV1 {
+    fn lane_symmetry(&self, lane: usize) -> ChannelSymmetryWitness {
         let _ = lane;
-        ChannelSymmetryWitnessV1::DECLINED
+        ChannelSymmetryWitness::DECLINED
     }
 
     /// Drain this stage's live-console queues, before any lane of the block is dispatched.
@@ -366,14 +365,14 @@ pub trait BankStage: Send {
 
     /// Which side of the fader/matrix seam this stage sits on.
     ///
-    /// The default is [`SeamSideV1::UpstreamOfSeam`], which is the **conservative** answer here and
+    /// The default is [`SeamSide::UpstreamOfSeam`], which is the **conservative** answer here and
     /// not the permissive one: an upstream stage is one a collapsed chain would have to run
     /// one-plane, so a stage that has not spoken is one the collapse must be able to run through --
     /// and it cannot, because [`supports_mono_collapse`](Self::supports_mono_collapse) defaults to
     /// `false`. An unclassified stage therefore declines the whole chain rather than being silently
     /// treated as seam-side and left to read a plane nobody gathered.
-    fn seam_side(&self) -> SeamSideV1 {
-        SeamSideV1::UpstreamOfSeam
+    fn seam_side(&self) -> SeamSide {
+        SeamSide::UpstreamOfSeam
     }
 
     /// Whether this stage implements [`process_mono`](Self::process_mono) and
@@ -496,14 +495,14 @@ impl EffectBankStage {
 impl BankStage for EffectBankStage {
     /// A console-free bank has no live channel at all, so the two live terms cannot be false and
     /// the whole witness is the effect's own designed-word comparison.
-    fn lane_symmetry(&self, lane: usize) -> ChannelSymmetryWitnessV1 {
+    fn lane_symmetry(&self, lane: usize) -> ChannelSymmetryWitness {
         witness_of_designed(self.designed.get(lane).copied().unwrap_or(false))
     }
 
     /// Every prepared effect sits in `simd1`, `dynamic` or `simd2`, all three upstream of the
     /// fader (`TrackStage` order), so an effect slot is never seam-side.
-    fn seam_side(&self) -> SeamSideV1 {
-        SeamSideV1::UpstreamOfSeam
+    fn seam_side(&self) -> SeamSide {
+        SeamSide::UpstreamOfSeam
     }
 
     fn supports_mono_collapse(&self) -> bool {
@@ -589,7 +588,7 @@ impl BankStage for EffectBankStage {
 pub fn designed_lane_witness(
     processor: &dyn PreparedNativeEffectBank,
     lane: usize,
-) -> ChannelSymmetryWitnessV1 {
+) -> ChannelSymmetryWitness {
     witness_of_designed(processor.lane_channel_symmetry(lane))
 }
 
@@ -598,11 +597,11 @@ pub fn designed_lane_witness(
 /// One body, so a cached answer and a freshly pulled one cannot disagree about which term a
 /// `false` clears.
 #[must_use]
-pub const fn witness_of_designed(designed: bool) -> ChannelSymmetryWitnessV1 {
+pub const fn witness_of_designed(designed: bool) -> ChannelSymmetryWitness {
     if designed {
-        ChannelSymmetryWitnessV1::SYMMETRIC
+        ChannelSymmetryWitness::SYMMETRIC
     } else {
-        ChannelSymmetryWitnessV1::symmetric_except(ChannelSymmetryWitnessV1::DESIGNED)
+        ChannelSymmetryWitness::symmetric_except(ChannelSymmetryWitness::DESIGNED)
     }
 }
 
@@ -628,12 +627,12 @@ pub struct ConsoleEffectBankStage {
     shunt: Option<BypassShunt>,
     /// Issue #143 D3: one observation lane per bank lane, or `None` for the whole slot when the
     /// plan named no observation capacity. `None` is the byte-identical unobserved path.
-    observations: Option<Box<[Option<ObservationLaneV1>]>>,
+    observations: Option<Box<[Option<ObservationLane>]>>,
     /// One reading per lane, filled by a single `observe_resident_bank` call per armed tap.
     ///
     /// Allocated at bind and only when the slot is observed at all, so an unobserved slot holds
     /// nothing and an observed one allocates nothing per block.
-    samples: Box<[ObservationSampleV1]>,
+    samples: Box<[ObservationSample]>,
     /// One flag per lane: the effect's designed-word comparison, taken once at bind.
     ///
     /// See [`EffectBankStage::designed`] for why it is cached and why a drained write cannot make
@@ -653,7 +652,7 @@ impl ConsoleEffectBankStage {
     /// Builds the console stage for one bound bank slot.
     ///
     /// `latency` is the slot's declared [`miso_engine_effect_contract::PreparedEffectMetadata::latency`]. Every lane of a bank
-    /// shares one [`EffectProgramKeyV1`], so they share one latency and one AoSoA delay line:
+    /// shares one [`EffectProgramKey`], so they share one latency and one AoSoA delay line:
     /// delaying the interleaved plane by `latency * lanes` words delays every lane by exactly
     /// `latency` frames.
     ///
@@ -666,7 +665,7 @@ impl ConsoleEffectBankStage {
         width: BankWidth,
         quantum: u32,
         lanes: Vec<Option<EffectControlLane>>,
-        observations: Vec<Option<ObservationLaneV1>>,
+        observations: Vec<Option<ObservationLane>>,
         latency: usize,
     ) -> Result<Self, RackError> {
         if processor.metadata().width != width
@@ -696,7 +695,7 @@ impl ConsoleEffectBankStage {
         // vector nor the per-lane sample scratch.
         let observed = observations.iter().any(Option::is_some);
         let samples = if observed {
-            vec![ObservationSampleV1::default(); lane_count].into_boxed_slice()
+            vec![ObservationSample::default(); lane_count].into_boxed_slice()
         } else {
             Vec::new().into_boxed_slice()
         };
@@ -756,7 +755,7 @@ impl ConsoleEffectBankStage {
             .iter()
             .flat_map(|lanes| lanes.iter())
             .filter_map(Option::as_ref)
-            .map(ObservationLaneV1::retained_bytes)
+            .map(ObservationLane::retained_bytes)
             .sum()
     }
 
@@ -798,7 +797,7 @@ impl BankStage for ConsoleEffectBankStage {
     /// The live half comes from [`EffectControlLane::symmetry`], which the drain in
     /// [`Self::process`] maintains: a lane with no console channel has no live writes at all and
     /// contributes only the designed term.
-    fn lane_symmetry(&self, lane: usize) -> ChannelSymmetryWitnessV1 {
+    fn lane_symmetry(&self, lane: usize) -> ChannelSymmetryWitness {
         let designed = witness_of_designed(self.designed.get(lane).copied().unwrap_or(false));
         match self.lanes.get(lane).and_then(Option::as_ref) {
             Some(channel) => designed.and(channel.symmetry()),
@@ -806,8 +805,8 @@ impl BankStage for ConsoleEffectBankStage {
         }
     }
 
-    fn seam_side(&self) -> SeamSideV1 {
-        SeamSideV1::UpstreamOfSeam
+    fn seam_side(&self) -> SeamSide {
+        SeamSide::UpstreamOfSeam
     }
 
     fn supports_mono_collapse(&self) -> bool {
@@ -978,7 +977,7 @@ impl ConsoleEffectBankStage {
         // called "one pass over a `bool` array" for a tap no lane armed was, for the slot as a
         // whole, an O(lanes) `max()` to find the tap count plus an O(taps x lanes) `.any()` walk
         // -- 4 096 flag loads per block for the 64-lane, 64-tap console shape, every block,
-        // whether or not anything was subscribed. `ObservationLaneV1::any_armed` is now O(1) per
+        // whether or not anything was subscribed. `ObservationLane::any_armed` is now O(1) per
         // lane, so this gate is O(lanes) and the whole publish section costs nothing at all until
         // a subscription exists.
         //
@@ -989,12 +988,12 @@ impl ConsoleEffectBankStage {
             lanes
                 .iter()
                 .filter_map(Option::as_ref)
-                .any(ObservationLaneV1::any_armed)
+                .any(ObservationLane::any_armed)
         }) {
             let taps = lanes
                 .iter()
                 .filter_map(Option::as_ref)
-                .map(ObservationLaneV1::len)
+                .map(ObservationLane::len)
                 .max()
                 .unwrap_or(0);
             for tap in 0..taps {
@@ -1175,7 +1174,7 @@ pub trait BankMembers {
 ///   counterfactual dual run's right state but literally that state
 ///   ([`disengage_collapse`](Self::disengage_collapse));
 /// * it is **preserved by any dual block whose witness preserves agreement**
-///   ([`ChannelSymmetryWitnessV1::AGREEING`]) -- equal inputs over equal state with equal words
+///   ([`ChannelSymmetryWitness::AGREEING`]) -- equal inputs over equal state with equal words
 ///   leave equal state, which is the same induction the engage direction has always rested on;
 /// * it is **cleared by any dual block that does not**, and after that only a proof brings it
 ///   back ([`BankStage::channels_agree`]).
@@ -1331,7 +1330,7 @@ impl BankChain {
     /// 2. **The prefix is non-empty.** A chain of nothing but fader and matrix slots reports every
     ///    lane symmetric on every session, mono or not (`SEAM_SIDE_WITNESS` is an unconditional
     ///    `SYMMETRIC`), so collapsing on its witness would be collapsing on an unconditional
-    ///    `true`. This is `PlanUnitEligibilityV1::witness_is_vacuous` enforced rather than
+    ///    `true`. This is `PlanUnitEligibility::witness_is_vacuous` enforced rather than
     ///    reported.
     /// 3. **Every prefix slot has a one-plane body.** A dual body handed the ungathered right
     ///    plane would not merely write garbage into a plane the seam overwrites -- a linked
@@ -1344,11 +1343,11 @@ impl BankChain {
     fn collapse_prefix_of(slots: &[BankSlot], active: &[bool]) -> usize {
         let prefix = slots
             .iter()
-            .take_while(|slot| slot.stage.seam_side() == SeamSideV1::UpstreamOfSeam)
+            .take_while(|slot| slot.stage.seam_side() == SeamSide::UpstreamOfSeam)
             .count();
         let seam_side_is_a_suffix = slots[prefix..]
             .iter()
-            .all(|slot| slot.stage.seam_side() == SeamSideV1::SeamSide);
+            .all(|slot| slot.stage.seam_side() == SeamSide::SeamSide);
         let prefix_is_collapsible = slots[..prefix]
             .iter()
             .all(|slot| slot.stage.supports_mono_collapse());
@@ -1419,11 +1418,11 @@ impl BankChain {
     ///
     /// An inactive lane declines: it renders no track, so there is nothing to collapse.
     #[must_use]
-    pub fn lane_symmetry(&self, lane: usize) -> ChannelSymmetryWitnessV1 {
+    pub fn lane_symmetry(&self, lane: usize) -> ChannelSymmetryWitness {
         if !self.active.get(lane).copied().unwrap_or(false) {
-            return ChannelSymmetryWitnessV1::DECLINED;
+            return ChannelSymmetryWitness::DECLINED;
         }
-        let mut witness = ChannelSymmetryWitnessV1::SYMMETRIC;
+        let mut witness = ChannelSymmetryWitness::SYMMETRIC;
         for slot in &self.slots {
             // A slot that is an identity on this lane renders nothing for it, so it has nothing
             // to say about whether the lane's two channels agree.
@@ -1466,7 +1465,7 @@ impl BankChain {
     /// channels agreeing (mono-collapse M3).
     ///
     /// Strictly weaker than [`all_lanes_symmetric`](Self::all_lanes_symmetric), by exactly the
-    /// `UNBYPASSED` term: see [`ChannelSymmetryWitnessV1::AGREEING`] for why a bypass window is the
+    /// `UNBYPASSED` term: see [`ChannelSymmetryWitness::AGREEING`] for why a bypass window is the
     /// one way to lose the witness without moving the two channels apart.
     ///
     /// Short-circuits, like its sibling, and [`run`](Self::run) reaches it only when the answer can
@@ -3065,11 +3064,11 @@ mod tests {
         fn desymmetrize(&mut self) {
             self.desymmetrized += 1;
         }
-        fn lane_symmetry(&self, _lane: usize) -> ChannelSymmetryWitnessV1 {
+        fn lane_symmetry(&self, _lane: usize) -> ChannelSymmetryWitness {
             if self.symmetric {
-                ChannelSymmetryWitnessV1::SYMMETRIC
+                ChannelSymmetryWitness::SYMMETRIC
             } else {
-                ChannelSymmetryWitnessV1::symmetric_except(ChannelSymmetryWitnessV1::DESIGNED)
+                ChannelSymmetryWitness::symmetric_except(ChannelSymmetryWitness::DESIGNED)
             }
         }
     }
@@ -3093,11 +3092,11 @@ mod tests {
             }
             Ok(())
         }
-        fn seam_side(&self) -> SeamSideV1 {
-            SeamSideV1::SeamSide
+        fn seam_side(&self) -> SeamSide {
+            SeamSide::SeamSide
         }
-        fn lane_symmetry(&self, _lane: usize) -> ChannelSymmetryWitnessV1 {
-            ChannelSymmetryWitnessV1::SYMMETRIC
+        fn lane_symmetry(&self, _lane: usize) -> ChannelSymmetryWitness {
+            ChannelSymmetryWitness::SYMMETRIC
         }
     }
 

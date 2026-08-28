@@ -23,33 +23,32 @@ fn descriptor() -> Vec<u8> {
 #[test]
 fn accepted_descriptor_package_round_trip_and_raw_cid_mutation() {
     let descriptor = descriptor();
-    let artifacts = [EffectArtifactAuthoringV1 {
-        kind: EffectArtifactKindV1::Source,
+    let artifacts = [EffectArtifactAuthoring {
+        kind: EffectArtifactKind::Source,
         path: "source/a.rs",
         target: "",
         features: "",
         content: b"hello",
     }];
-    let package = EffectPackageAuthoringV1 {
+    let package = EffectPackageAuthoring {
         descriptor: &descriptor,
         artifacts: &artifacts,
     };
-    let required =
-        effect_package_v1_required_size(&package, EffectPackageLimitsV1::default()).unwrap();
+    let required = effect_package_required_size(&package, EffectPackageLimits::default()).unwrap();
     let mut bytes = vec![0; required as usize];
-    encode_effect_package_v1(&package, EffectPackageLimitsV1::default(), &mut bytes).unwrap();
-    let cid = effect_package_cid_v1(&bytes, EffectPackageLimitsV1::default()).unwrap();
+    encode_effect_package(&package, EffectPackageLimits::default(), &mut bytes).unwrap();
+    let cid = effect_package_cid(&bytes, EffectPackageLimits::default()).unwrap();
     assert_eq!(cid.to_string().parse::<EffectCid>().unwrap(), cid);
-    assert!(verify_effect_package_v1(&bytes, EffectPackageLimitsV1::default()).is_ok());
-    assert!(verify_effect_package_cid_v1(&bytes, EffectPackageLimitsV1::default(), &cid).is_ok());
+    assert!(verify_effect_package(&bytes, EffectPackageLimits::default()).is_ok());
+    assert!(verify_effect_package_cid(&bytes, EffectPackageLimits::default(), &cid).is_ok());
     let last = bytes.len() - 1;
     bytes[last] ^= 1;
     assert_ne!(EffectCid::from_raw_bytes(&bytes), cid);
     assert_eq!(
-        effect_package_cid_v1(&bytes, EffectPackageLimitsV1::default())
+        effect_package_cid(&bytes, EffectPackageLimits::default())
             .unwrap_err()
             .code,
-        EffectPackageDiagnosticCodeV1::Hash
+        EffectPackageDiagnosticCode::Hash
     );
 }
 

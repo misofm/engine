@@ -2,7 +2,7 @@
 use crate::{
     AutomationShape, AutomationTarget, Diagnostic, DiagnosticCode, DiagnosticSet, Effect,
     MatrixOrPan, ParameterChannel, ParameterUnit, Rack, RackName, RenderMode, RouteDestination,
-    RouteSource, SESSION_SCHEMA_VERSION_V1, SessionTomlV1, Source, Track, diagnostic::PathRef,
+    RouteSource, SESSION_SCHEMA_VERSION_V1, SessionToml, Source, Track, diagnostic::PathRef,
 };
 use miso_engine_core::{SampleRateHz, is_launch_sample_rate};
 use std::collections::{HashMap, HashSet};
@@ -21,7 +21,7 @@ struct LocalUniqueness<'a> {
     effect_ids: HashSet<&'a str>,
     parameters: HashSet<(u32, u8)>,
 }
-pub(crate) fn validate_session(session: &SessionTomlV1) -> Result<(), DiagnosticSet> {
+pub(crate) fn validate_session(session: &SessionToml) -> Result<(), DiagnosticSet> {
     let mut diagnostics = Vec::new();
     let root = PathRef::ROOT;
     if session.schema_version != SESSION_SCHEMA_VERSION_V1 {
@@ -178,11 +178,7 @@ fn duplicate(diagnostics: &mut Vec<Diagnostic>, path: &PathRef<'_>) {
     );
 }
 
-fn validate_sources(
-    session: &SessionTomlV1,
-    root: &PathRef<'_>,
-    diagnostics: &mut Vec<Diagnostic>,
-) {
+fn validate_sources(session: &SessionToml, root: &PathRef<'_>, diagnostics: &mut Vec<Diagnostic>) {
     let sources_path = root.key("sources");
     for (position, source) in session.sources.iter().enumerate() {
         let path = sources_path.index(position);
@@ -253,7 +249,7 @@ fn validate_sources(
 }
 
 fn validate_tracks<'a>(
-    session: &'a SessionTomlV1,
+    session: &'a SessionToml,
     index: &Index<'_>,
     root: &PathRef<'_>,
     diagnostics: &mut Vec<Diagnostic>,
@@ -415,7 +411,7 @@ fn validate_effect(
 }
 
 fn validate_routes(
-    session: &SessionTomlV1,
+    session: &SessionToml,
     index: &Index<'_>,
     root: &PathRef<'_>,
     diagnostics: &mut Vec<Diagnostic>,
@@ -514,7 +510,7 @@ fn validate_route_destination(
 /// omitted. It carries a fixed, validated literal instead, which is the C2 rule applied to a key
 /// whose value is determined: the document still declares five target fields and the reader still
 /// reads five, and a target that names anything else is refused rather than silently ignored.
-pub const BUILTIN_AUTOMATION_EFFECT_ID_V1: &str = "strip";
+pub const BUILTIN_AUTOMATION_EFFECT_ID: &str = "strip";
 
 /// The builtin parameters a session may name as an automation target, `(id, per_lane)`.
 ///
@@ -522,7 +518,7 @@ pub const BUILTIN_AUTOMATION_EFFECT_ID_V1: &str = "strip";
 ///
 /// `miso-engine-session` depends on `miso-engine-core` and nothing else -- that is a policy
 /// (`scripts/check-session-policy.sh`), not an accident -- so this crate cannot read
-/// `BUILTIN_PARAMETER_DESCRIPTORS_V1` and this is a deliberate second spelling of it, exactly as
+/// `BUILTIN_PARAMETER_DESCRIPTORS` and this is a deliberate second spelling of it, exactly as
 /// `scripts/check-parameter-metadata-v1.py` is a second spelling of the command-kind list. The two
 /// are held together by `miso_engine_builtins_compiler`'s
 /// `builtin_automation_targets_match_the_parameter_abi`, which can see both crates and compares
@@ -540,7 +536,7 @@ pub const BUILTIN_AUTOMATION_EFFECT_ID_V1: &str = "strip";
 /// `per_lane` is the descriptor's `BuiltinParameterScope`: a `PerLane` parameter may be addressed
 /// `left`, `right` or `both`, while the four matrix coefficients are one shared 2x2 and can only
 /// be addressed `both`.
-pub const BUILTIN_AUTOMATION_TARGETS_V1: [(u32, bool); 8] = [
+pub const BUILTIN_AUTOMATION_TARGETS: [(u32, bool); 8] = [
     // `polarity_invert` and `trim_db`: live since #210 phase 3.
     (1, true),
     (2, true),
@@ -563,7 +559,7 @@ pub const BUILTIN_AUTOMATION_TARGETS_V1: [(u32, bool); 8] = [
 /// is valid-and-inert syntax today: it authors, it round-trips, it survives the canonical writer,
 /// and it renders nothing. Builtin automation *rendering* is gated on issue #140's span feed,
 /// whose natural destination is the very drains #210 phases 1 and 3 built
-/// (`TrackInputRecordV1`, `TrackFaderRecordV1`, `TrackControlRecordV1`), because a span's
+/// (`TrackInputRecord`, `TrackFaderRecord`, `TrackControlRecord`), because a span's
 /// block-first-sample semantics already match the drain contract. Nothing here builds that feed
 /// and nothing here should be read as having built it.
 fn validate_builtin_automation_target(
@@ -572,7 +568,7 @@ fn validate_builtin_automation_target(
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     let target_path = path.key("target");
-    if target.effect_id.as_str() != BUILTIN_AUTOMATION_EFFECT_ID_V1 {
+    if target.effect_id.as_str() != BUILTIN_AUTOMATION_EFFECT_ID {
         error(
             diagnostics,
             DiagnosticCode::MissingEntityReference,
@@ -580,7 +576,7 @@ fn validate_builtin_automation_target(
             "builtins automation must name the strip",
         );
     }
-    let Some((_, per_lane)) = BUILTIN_AUTOMATION_TARGETS_V1
+    let Some((_, per_lane)) = BUILTIN_AUTOMATION_TARGETS
         .iter()
         .find(|(id, _)| *id == target.parameter_id)
     else {
@@ -603,7 +599,7 @@ fn validate_builtin_automation_target(
 }
 
 fn validate_automation(
-    session: &SessionTomlV1,
+    session: &SessionToml,
     index: &Index<'_>,
     root: &PathRef<'_>,
     diagnostics: &mut Vec<Diagnostic>,

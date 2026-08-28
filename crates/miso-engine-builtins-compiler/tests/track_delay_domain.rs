@@ -9,12 +9,12 @@
 //!
 //! Red mutation: change either literal alone -> this fails.
 
-use miso_engine_builtins::{BUILTIN_PARAMETER_DESCRIPTORS_V1, BuiltinParameterDomain};
+use miso_engine_builtins::{BUILTIN_PARAMETER_DESCRIPTORS, BuiltinParameterDomain};
 use miso_engine_session::CHANNEL_BUILTIN_DELAY_SAMPLES_MAXIMUM;
 
 #[test]
 fn the_descriptor_and_the_schema_publish_the_same_delay_domain() {
-    let delay = BUILTIN_PARAMETER_DESCRIPTORS_V1
+    let delay = BUILTIN_PARAMETER_DESCRIPTORS
         .iter()
         .find(|descriptor| descriptor.name == "delay_samples")
         .expect("the builtin table declares an input delay row");

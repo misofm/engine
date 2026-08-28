@@ -12,7 +12,7 @@
 //!
 //! # Completeness is structural
 //!
-//! The effect list comes from `launch_native_effect_registry_v1()` through
+//! The effect list comes from `launch_native_effect_registry()` through
 //! `NativeEffectRegistry::descriptors`, so "an effect in the registry is missing from the output"
 //! is not a rule anybody has to remember: there is no second list to fall out of step with. The
 //! `--check` mode regenerates and compares byte for byte, which is what makes the emitted file a
@@ -53,7 +53,7 @@
 //! # Issue #127 (named nudge sizes)
 //!
 //! Each parameter carries `"nudge": null`. When #127 lands its ladder on
-//! `ParameterDescriptorV1`, that slot becomes an object and nothing else in this schema moves --
+//! `ParameterDescriptor`, that slot becomes an object and nothing else in this schema moves --
 //! which is the whole reason it is a declared null rather than an absent key.
 
 use std::io::Write as _;
@@ -61,16 +61,15 @@ use std::path::{Path, PathBuf};
 
 use miso_engine_bench_support::json::escape;
 use miso_engine_builtins::{
-    BUILTIN_PARAMETER_DESCRIPTORS_V1, BuiltinParameterDescriptorV1, BuiltinParameterDomain,
+    BUILTIN_PARAMETER_DESCRIPTORS, BuiltinParameterDescriptor, BuiltinParameterDomain,
     BuiltinParameterMapping, BuiltinParameterReset, BuiltinParameterScope,
-    BuiltinParameterUpdateRate, BuiltinSmoothingPolicy, builtin_filter_cutoff_maximum_hz_v1,
+    BuiltinParameterUpdateRate, BuiltinSmoothingPolicy, builtin_filter_cutoff_maximum_hz,
 };
-use miso_engine_effect_compiler::launch_native_effect_registry_v1;
+use miso_engine_effect_compiler::launch_native_effect_registry;
 use miso_engine_effect_contract::{
-    AutomationRate, EffectDescriptorV1, ObservationCadenceV1, ObservationChannelsV1,
-    ObservationCostV1, ObservationDescriptorV1, ObservationFoldV1, ObservationKindV1,
-    ParameterChannelPolicy, ParameterDescriptorV1, ParameterDomain, ParameterMapping,
-    ParameterUnit, SmoothingRule,
+    AutomationRate, EffectDescriptor, ObservationCadence, ObservationChannels, ObservationCost,
+    ObservationDescriptor, ObservationFold, ObservationKind, ParameterChannelPolicy,
+    ParameterDescriptor, ParameterDomain, ParameterMapping, ParameterUnit, SmoothingRule,
 };
 use miso_engine_host_web::{
     ABI_VERSION, COMMAND_EFFECT_BYPASS, COMMAND_EFFECT_PARAM, COMMAND_FADER_DB, COMMAND_MATRIX,
@@ -117,7 +116,7 @@ fn output_path(directory: &Path) -> PathBuf {
 /// Render the whole document. Deterministic: registry order is `EffectId` order.
 #[must_use]
 pub fn render() -> String {
-    let registry = launch_native_effect_registry_v1().expect("launch effect registry");
+    let registry = launch_native_effect_registry().expect("launch effect registry");
     let mut out = String::with_capacity(1 << 16);
     out.push_str("{\n");
     out.push_str(&format!("  \"schema\": \"{SCHEMA}\",\n"));
@@ -198,34 +197,34 @@ pub fn render() -> String {
     let vocabularies: [(&str, &[(u32, &str)]); 5] = [
         (
             "kinds",
-            &[(ObservationKindV1::GainReductionDb as u32, "gainReductionDb")],
+            &[(ObservationKind::GainReductionDb as u32, "gainReductionDb")],
         ),
         (
             "costs",
             &[
-                (ObservationCostV1::Resident as u32, "resident"),
-                (ObservationCostV1::Computed as u32, "computed"),
+                (ObservationCost::Resident as u32, "resident"),
+                (ObservationCost::Computed as u32, "computed"),
             ],
         ),
         (
             "cadences",
             &[
-                (ObservationCadenceV1::PerBlock as u32, "perBlock"),
-                (ObservationCadenceV1::PerWindow as u32, "perWindow"),
+                (ObservationCadence::PerBlock as u32, "perBlock"),
+                (ObservationCadence::PerWindow as u32, "perWindow"),
             ],
         ),
         (
             "folds",
             &[
-                (ObservationFoldV1::Latest as u32, "latest"),
-                (ObservationFoldV1::PeakMagnitude as u32, "peakMagnitude"),
+                (ObservationFold::Latest as u32, "latest"),
+                (ObservationFold::PeakMagnitude as u32, "peakMagnitude"),
             ],
         ),
         (
             "channels",
             &[
-                (ObservationChannelsV1::Shared as u32, "shared"),
-                (ObservationChannelsV1::PerLane as u32, "perLane"),
+                (ObservationChannels::Shared as u32, "shared"),
+                (ObservationChannels::PerLane as u32, "perLane"),
             ],
         ),
     ];
@@ -241,14 +240,14 @@ pub fn render() -> String {
     }
     out.push_str("  },\n");
     out.push_str("  \"builtins\": {\n    \"parameters\": [\n");
-    let builtins = BUILTIN_PARAMETER_DESCRIPTORS_V1;
+    let builtins = BUILTIN_PARAMETER_DESCRIPTORS;
     for (index, parameter) in builtins.iter().enumerate() {
         out.push_str(&builtin_parameter(parameter));
         out.push_str(&format!("{}\n", comma(index, builtins.len())));
     }
     out.push_str("    ]\n  },\n");
     out.push_str("  \"effects\": [\n");
-    let descriptors: Vec<&'static EffectDescriptorV1> = registry.descriptors().collect();
+    let descriptors: Vec<&'static EffectDescriptor> = registry.descriptors().collect();
     assert_eq!(
         descriptors.len(),
         registry.len(),
@@ -267,7 +266,7 @@ fn comma(index: usize, total: usize) -> &'static str {
 }
 
 /// Finite `f32` as JSON. Non-finite values cannot occur: every descriptor field is validated
-/// finite by `validate_descriptor_v1` before a factory may enter the registry.
+/// finite by `validate_descriptor` before a factory may enter the registry.
 fn number(value: f32) -> String {
     assert!(value.is_finite(), "descriptor values are finite");
     let text = format!("{value:?}");
@@ -282,7 +281,7 @@ fn optional_number(value: Option<f32>) -> String {
     value.map_or_else(|| "null".to_owned(), number)
 }
 
-fn effect(descriptor: &EffectDescriptorV1) -> String {
+fn effect(descriptor: &EffectDescriptor) -> String {
     let mut out = String::new();
     out.push_str("    {\n");
     out.push_str(&format!(
@@ -320,14 +319,14 @@ fn effect(descriptor: &EffectDescriptorV1) -> String {
     out
 }
 
-fn effect_observation(observation: &ObservationDescriptorV1) -> String {
+fn effect_observation(observation: &ObservationDescriptor) -> String {
     // `subscribable` is derived from the cost class exactly as `liveUpdatable` is derived from
     // `automatable`: a `Resident` tap is a copy out of state the block already wrote and the
     // subscribe path binds it; a `Computed` tap has no implementation in V1 and the subscribe path
     // answers `unsupportedKind`. The two statements are the same statement, which is why this is
     // derived rather than written down -- and why the schema gate refuses a computed tap that
     // claims to be subscribable.
-    let subscribable = matches!(observation.cost, ObservationCostV1::Resident);
+    let subscribable = matches!(observation.cost, ObservationCost::Resident);
     format!(
         "        {{ \"id\": {}, \"name\": \"{}\", \"displayUnit\": \"{}\", \
 \"kind\": {}, \"kindName\": \"{}\", \"unit\": {}, \"unitName\": \"{}\", \
@@ -355,41 +354,41 @@ fn effect_observation(observation: &ObservationDescriptorV1) -> String {
     )
 }
 
-const fn observation_kind_name(kind: ObservationKindV1) -> &'static str {
+const fn observation_kind_name(kind: ObservationKind) -> &'static str {
     match kind {
-        ObservationKindV1::GainReductionDb => "gainReductionDb",
+        ObservationKind::GainReductionDb => "gainReductionDb",
     }
 }
 
-const fn observation_cost_name(cost: ObservationCostV1) -> &'static str {
+const fn observation_cost_name(cost: ObservationCost) -> &'static str {
     match cost {
-        ObservationCostV1::Resident => "resident",
-        ObservationCostV1::Computed => "computed",
+        ObservationCost::Resident => "resident",
+        ObservationCost::Computed => "computed",
     }
 }
 
-const fn observation_cadence_name(cadence: ObservationCadenceV1) -> &'static str {
+const fn observation_cadence_name(cadence: ObservationCadence) -> &'static str {
     match cadence {
-        ObservationCadenceV1::PerBlock => "perBlock",
-        ObservationCadenceV1::PerWindow => "perWindow",
+        ObservationCadence::PerBlock => "perBlock",
+        ObservationCadence::PerWindow => "perWindow",
     }
 }
 
-const fn observation_fold_name(fold: ObservationFoldV1) -> &'static str {
+const fn observation_fold_name(fold: ObservationFold) -> &'static str {
     match fold {
-        ObservationFoldV1::Latest => "latest",
-        ObservationFoldV1::PeakMagnitude => "peakMagnitude",
+        ObservationFold::Latest => "latest",
+        ObservationFold::PeakMagnitude => "peakMagnitude",
     }
 }
 
-const fn observation_channels_name(channels: ObservationChannelsV1) -> &'static str {
+const fn observation_channels_name(channels: ObservationChannels) -> &'static str {
     match channels {
-        ObservationChannelsV1::Shared => "shared",
-        ObservationChannelsV1::PerLane => "perLane",
+        ObservationChannels::Shared => "shared",
+        ObservationChannels::PerLane => "perLane",
     }
 }
 
-fn effect_parameter(parameter: &ParameterDescriptorV1) -> String {
+fn effect_parameter(parameter: &ParameterDescriptor) -> String {
     let mut out = String::new();
     out.push_str("        {\n");
     out.push_str(&format!("          \"id\": {},\n", parameter.id.0));
@@ -470,8 +469,8 @@ fn effect_parameter(parameter: &ParameterDescriptorV1) -> String {
     out
 }
 
-fn builtin_parameter(parameter: &BuiltinParameterDescriptorV1) -> String {
-    // A rate-keyed cutoff has no single maximum: `builtin_filter_cutoff_maximum_hz_v1` gives one
+fn builtin_parameter(parameter: &BuiltinParameterDescriptor) -> String {
+    // A rate-keyed cutoff has no single maximum: `builtin_filter_cutoff_maximum_hz` gives one
     // per launch rate, so the row carries the exact `f32` for each rather than a number that would
     // be wrong at three of the four.
     let mut maximum_by_rate = String::from("null");
@@ -480,14 +479,14 @@ fn builtin_parameter(parameter: &BuiltinParameterDescriptorV1) -> String {
         BuiltinParameterDomain::FiniteInclusive { minimum, maximum } => {
             (Some(minimum), Some(maximum), "finiteInclusive")
         }
-        BuiltinParameterDomain::DisabledOrRateKeyedHertzV1 { minimum_hz, .. } => {
+        BuiltinParameterDomain::DisabledOrRateKeyedHertz { minimum_hz, .. } => {
             maximum_by_rate = format!(
                 "{{ {} }}",
                 LAUNCH_RATES_HZ
                     .iter()
                     .map(|rate| format!(
                         "\"{rate}\": {}",
-                        optional_number(builtin_filter_cutoff_maximum_hz_v1(*rate))
+                        optional_number(builtin_filter_cutoff_maximum_hz(*rate))
                     ))
                     .collect::<Vec<_>>()
                     .join(", ")

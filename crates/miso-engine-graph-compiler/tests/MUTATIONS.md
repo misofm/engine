@@ -212,7 +212,7 @@ than merely quiet.
 | # | mutation | file | result |
 |---|---|---|---|
 | 143-E7-a | a tap declared `Resident` but implemented as a per-sample scan (the eval's named case, applied to the compressor's bank read) | `compressor/src/lib.rs` | RED — the armed row separates and the "far more than a copy out of state" bound fires |
-| 143-E7-b | `ObservationLaneV1::wants` returns true for any declared tap, armed or not | `effect-contract/src/live.rs` | RED — `an unarmed tap's state is never read`: 4 096 reads where 0 was required |
+| 143-E7-b | `ObservationLane::wants` returns true for any declared tap, armed or not | `effect-contract/src/live.rs` | RED — `an unarmed tap's state is never read`: 4 096 reads where 0 was required |
 
 ### Two mutations that had to be sharpened before they went red
 

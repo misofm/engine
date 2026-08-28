@@ -43,7 +43,7 @@ done
 # fails this check instead of silently losing its coverage.
 if ! find "$scratch" -type f -name '*.o' -print0 |
     xargs -0 -r rg -l --binary 'observe' >/dev/null 2>&1 &&
-    ! rg -q 'ObservationSlotV1' crates/miso-engine-core/src/realtime/observe.rs; then
+    ! rg -q 'ObservationSlot' crates/miso-engine-core/src/realtime/observe.rs; then
     printf 'the observation transport is not in the inspected browser-local set\n' >&2
     exit 1
 fi

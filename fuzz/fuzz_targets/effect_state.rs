@@ -2,14 +2,14 @@
 
 use libfuzzer_sys::fuzz_target;
 use miso_engine_effect_contract::{
-    AutomationRate, EffectDescriptorV1, EffectId, EffectQuality, LatencySamples, LinkModeSet,
-    ParameterChannelPolicy, ParameterDescriptorV1, ParameterDomain, ParameterId, ParameterMapping,
-    ParameterUnit, PortDescriptorV1, PortId, PortLayout, PortRole, QualityDescriptorV1,
+    AutomationRate, EffectDescriptor, EffectId, EffectQuality, LatencySamples, LinkModeSet,
+    ParameterChannelPolicy, ParameterDescriptor, ParameterDomain, ParameterId, ParameterMapping,
+    ParameterUnit, PortDescriptor, PortId, PortLayout, PortRole, QualityDescriptor,
     SmoothingRule, StatePayloadSizes, TailSamples,
 };
 use miso_engine_effect_package::{
-    bind_effect_descriptor_wire_v1, effect_descriptor_wire_v1_required_size,
-    encode_effect_descriptor_wire_v1, verify_effect_state_v1, EffectStateLimitsV1,
+    bind_effect_descriptor_wire, effect_descriptor_wire_required_size,
+    encode_effect_descriptor_wire, verify_effect_state, EffectStateLimits,
 };
 use std::sync::LazyLock;
 
@@ -27,7 +27,7 @@ const fn port_id(value: &'static str) -> PortId {
     }
 }
 
-static PARAMETERS: [ParameterDescriptorV1; 1] = [ParameterDescriptorV1 {
+static PARAMETERS: [ParameterDescriptor; 1] = [ParameterDescriptor {
     id: ParameterId(1),
     display_name: "Value",
     display_unit: "linear",
@@ -45,22 +45,22 @@ static PARAMETERS: [ParameterDescriptorV1; 1] = [ParameterDescriptorV1 {
     automatable: true,
     enum_choices: &[],
 }];
-static PORTS: [PortDescriptorV1; 2] = [
-    PortDescriptorV1 {
+static PORTS: [PortDescriptor; 2] = [
+    PortDescriptor {
         id: port_id("main-in"),
         role: PortRole::MainInput,
         required: true,
         layout: PortLayout::DualMonoPlanar,
     },
-    PortDescriptorV1 {
+    PortDescriptor {
         id: port_id("main-out"),
         role: PortRole::MainOutput,
         required: true,
         layout: PortLayout::DualMonoPlanar,
     },
 ];
-const fn quality(sample_rate: u32) -> QualityDescriptorV1 {
-    QualityDescriptorV1 {
+const fn quality(sample_rate: u32) -> QualityDescriptor {
+    QualityDescriptor {
         quality: EffectQuality::Normal,
         sample_rate,
         latency: LatencySamples(0),
@@ -74,13 +74,13 @@ const fn quality(sample_rate: u32) -> QualityDescriptorV1 {
         scratch_bytes_per_frame: 0,
     }
 }
-static QUALITIES: [QualityDescriptorV1; 4] = [
+static QUALITIES: [QualityDescriptor; 4] = [
     quality(44_100),
     quality(48_000),
     quality(88_200),
     quality(96_000),
 ];
-static DESCRIPTOR: EffectDescriptorV1 = EffectDescriptorV1 {
+static DESCRIPTOR: EffectDescriptor = EffectDescriptor {
     id: effect_id("fuzz.state"),
     display_name: "Fuzz state",
     contract_major: 1,
@@ -93,13 +93,13 @@ static DESCRIPTOR: EffectDescriptorV1 = EffectDescriptorV1 {
     observations: &[],
 };
 static DESCRIPTOR_WIRE: LazyLock<Vec<u8>> = LazyLock::new(|| {
-    let required = effect_descriptor_wire_v1_required_size(&DESCRIPTOR, 1 << 20).unwrap();
+    let required = effect_descriptor_wire_required_size(&DESCRIPTOR, 1 << 20).unwrap();
     let mut wire = vec![0; required as usize];
-    encode_effect_descriptor_wire_v1(&DESCRIPTOR, 1 << 20, &mut wire).unwrap();
+    encode_effect_descriptor_wire(&DESCRIPTOR, 1 << 20, &mut wire).unwrap();
     wire
 });
 
 fuzz_target!(|data: &[u8]| {
-    let bound = bind_effect_descriptor_wire_v1(&DESCRIPTOR, &DESCRIPTOR_WIRE, 1 << 20).unwrap();
-    let _ = verify_effect_state_v1(bound, data, EffectStateLimitsV1::default());
+    let bound = bind_effect_descriptor_wire(&DESCRIPTOR, &DESCRIPTOR_WIRE, 1 << 20).unwrap();
+    let _ = verify_effect_state(bound, data, EffectStateLimits::default());
 });

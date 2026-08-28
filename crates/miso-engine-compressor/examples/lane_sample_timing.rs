@@ -8,12 +8,12 @@
 //! not an allocator. The reported unit is nanoseconds per *lane-sample*: one sample of one channel
 //! of one track, which is the only unit in which a scalar instance and a `W`-wide bank compare.
 
-use miso_engine_compressor::{COMPRESSOR_PARAMETERS_V1, CompressorFactory};
+use miso_engine_compressor::{COMPRESSOR_PARAMETERS, CompressorFactory};
 use miso_engine_conformance::SplitMix64;
 use miso_engine_effect_contract::{
     BankWidth, EffectBankProcessBlock, EffectProcessBlock, EffectQuality, InitialParameterValue,
     LinkMode, NativeEffectFactory, ParameterChannel, PortId, PrepareEffectBankRequest,
-    PrepareEffectLimits, PrepareEffectRequest, PreparedPortsV1, PreparedSidechainPort,
+    PrepareEffectLimits, PrepareEffectRequest, PreparedPorts, PreparedSidechainPort,
 };
 use miso_engine_lane::Backend;
 
@@ -30,7 +30,7 @@ fn initial_values() -> [InitialParameterValue; 16] {
         } else {
             ParameterChannel::Right
         },
-        value: COMPRESSOR_PARAMETERS_V1[index / 2].default_value,
+        value: COMPRESSOR_PARAMETERS[index / 2].default_value,
     })
 }
 
@@ -41,7 +41,7 @@ fn request<'a>(values: &'a [InitialParameterValue]) -> PrepareEffectRequest<'a> 
         quality: EffectQuality::Normal,
         bypass: false,
         link_mode: LinkMode::DualMono,
-        ports: PreparedPortsV1 {
+        ports: PreparedPorts {
             sidechain: PreparedSidechainPort::Unconnected {
                 id: PortId::new("sidechain-in").expect("port id"),
                 required: false,

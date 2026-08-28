@@ -46,7 +46,7 @@
 #
 # `--audit-chain-merge` and `--audit-chain-merge-baseline` are the paired arms of issue #202
 # recommendation 2: the cross-rack cohort chain merge. `runtime::cohort_runs` took its merge
-# candidates from the cohort planner's groups, which are pooled per `RackLocationV1` and do not
+# candidates from the cohort planner's groups, which are pooled per `RackLocation` and do not
 # exist at all for a builtin bank, so the 64-track intended strip ran three bank chains per cohort
 # -- `{builtins, simd1, simd2}` -- and paid one planar/AoSoA round-trip for each. Candidacy is now
 # taken from the lowered program's dataflow and proved lane by lane on it, so the whole strip fuses

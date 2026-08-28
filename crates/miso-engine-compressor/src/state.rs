@@ -15,7 +15,7 @@
 //! ```
 //!
 //! 83c's `state_payload::{snapshot, restore}` stamp a two-word version/length header into the
-//! **common** section. The compressor's `common_bytes` is `0` in every `QualityDescriptorV1` row,
+//! **common** section. The compressor's `common_bytes` is `0` in every `QualityDescriptor` row,
 //! and #88's plan freezes the payload layout and the descriptor rows, so adopting the header would
 //! change a contract fixture this job is explicitly forbidden from touching. What is adopted is
 //! the part that is pure arithmetic: the word codec (`write_u32`/`write_f32`/`read_u32`/

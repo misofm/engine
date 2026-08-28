@@ -7,18 +7,17 @@ use std::alloc::{GlobalAlloc, System};
 
 use miso_engine_effect_contract::*;
 use miso_engine_effect_package::{
-    ArtifactSelectionRequestV1, EffectArtifactAuthoringV1, EffectArtifactKindV1, EffectCid,
-    EffectDescriptorEnumChoiceRecordV1, EffectDescriptorParameterRecordV1,
-    EffectDescriptorPortRecordV1, EffectDescriptorQualityRecordV1, EffectDescriptorSummaryV1,
-    EffectDescriptorWireDiagnosticCodeV1, EffectDescriptorWireDiagnosticV1,
-    EffectPackageAuthoringV1, EffectPackageDiagnosticCodeV1, EffectPackageLimitsV1,
-    EffectStateLimitsV1, EffectStateReplayViewV1, bind_effect_descriptor_wire_v1,
-    effect_descriptor_identity_v1, effect_package_cid_v1, effect_package_v1_required_size,
-    effect_state_v1_requirements, encode_effect_package_v1, encode_effect_state_v1,
-    inspect_effect_state_selector_v1, miso_engine_effect_descriptor_v1_inspect,
-    select_effect_package_artifact_v1, validate_effect_state_current_layout_v1,
-    validate_effect_state_replay_v1, verify_effect_descriptor_wire_v1, verify_effect_package_v1,
-    verify_effect_state_v1,
+    ArtifactSelectionRequest, EffectArtifactAuthoring, EffectArtifactKind, EffectCid,
+    EffectDescriptorEnumChoiceRecord, EffectDescriptorParameterRecord, EffectDescriptorPortRecord,
+    EffectDescriptorQualityRecord, EffectDescriptorSummary, EffectDescriptorWireDiagnostic,
+    EffectDescriptorWireDiagnosticCode, EffectPackageAuthoring, EffectPackageDiagnosticCode,
+    EffectPackageLimits, EffectStateLimits, EffectStateReplayView, bind_effect_descriptor_wire,
+    effect_descriptor_identity, effect_package_cid, effect_package_required_size,
+    effect_state_requirements, encode_effect_package, encode_effect_state,
+    inspect_effect_state_selector, miso_engine_effect_descriptor_v1_inspect,
+    select_effect_package_artifact, validate_effect_state_current_layout,
+    validate_effect_state_replay, verify_effect_descriptor_wire, verify_effect_package,
+    verify_effect_state,
 };
 
 const fn effect_id(value: &'static str) -> EffectId {
@@ -35,8 +34,8 @@ const fn port_id(value: &'static str) -> PortId {
     }
 }
 
-static STATE_PARAMETERS: [ParameterDescriptorV1; 2] = [
-    ParameterDescriptorV1 {
+static STATE_PARAMETERS: [ParameterDescriptor; 2] = [
+    ParameterDescriptor {
         id: ParameterId(1),
         display_name: "Shared",
         display_unit: "linear",
@@ -54,7 +53,7 @@ static STATE_PARAMETERS: [ParameterDescriptorV1; 2] = [
         automatable: true,
         enum_choices: &[],
     },
-    ParameterDescriptorV1 {
+    ParameterDescriptor {
         id: ParameterId(2),
         display_name: "Per lane",
         display_unit: "linear",
@@ -73,28 +72,28 @@ static STATE_PARAMETERS: [ParameterDescriptorV1; 2] = [
         enum_choices: &[],
     },
 ];
-static STATE_PORTS: [PortDescriptorV1; 3] = [
-    PortDescriptorV1 {
+static STATE_PORTS: [PortDescriptor; 3] = [
+    PortDescriptor {
         id: port_id("main-in"),
         role: PortRole::MainInput,
         required: true,
         layout: PortLayout::DualMonoPlanar,
     },
-    PortDescriptorV1 {
+    PortDescriptor {
         id: port_id("main-out"),
         role: PortRole::MainOutput,
         required: true,
         layout: PortLayout::DualMonoPlanar,
     },
-    PortDescriptorV1 {
+    PortDescriptor {
         id: port_id("detector"),
         role: PortRole::SidechainInput,
         required: false,
         layout: PortLayout::DualMonoPlanar,
     },
 ];
-const fn state_quality(sample_rate: u32) -> QualityDescriptorV1 {
-    QualityDescriptorV1 {
+const fn state_quality(sample_rate: u32) -> QualityDescriptor {
+    QualityDescriptor {
         quality: EffectQuality::Normal,
         sample_rate,
         latency: LatencySamples(9),
@@ -108,13 +107,13 @@ const fn state_quality(sample_rate: u32) -> QualityDescriptorV1 {
         scratch_bytes_per_frame: 2,
     }
 }
-static STATE_QUALITIES: [QualityDescriptorV1; 4] = [
+static STATE_QUALITIES: [QualityDescriptor; 4] = [
     state_quality(44_100),
     state_quality(48_000),
     state_quality(88_200),
     state_quality(96_000),
 ];
-static STATE_DESCRIPTOR: EffectDescriptorV1 = EffectDescriptorV1 {
+static STATE_DESCRIPTOR: EffectDescriptor = EffectDescriptor {
     id: effect_id("test.state"),
     display_name: "State test",
     contract_major: 1,
@@ -301,8 +300,8 @@ fn hex_bytes(text: &str) -> Vec<u8> {
         .collect()
 }
 
-fn state_replay() -> EffectStateReplayViewV1<'static> {
-    EffectStateReplayViewV1 {
+fn state_replay() -> EffectStateReplayView<'static> {
+    EffectStateReplayView {
         effect_id: STATE_DESCRIPTOR.id,
         request: PrepareEffectRequest {
             sample_rate: 48_000,
@@ -310,7 +309,7 @@ fn state_replay() -> EffectStateReplayViewV1<'static> {
             quality: EffectQuality::Normal,
             bypass: true,
             link_mode: LinkMode::Maximum,
-            ports: PreparedPortsV1 {
+            ports: PreparedPorts {
                 sidechain: PreparedSidechainPort::Connected {
                     id: port_id("detector"),
                     required: false,
@@ -340,7 +339,7 @@ fn each_package_publication_has_one_nested_descriptor_pass_and_no_native_allocat
     let bytes = fixture();
     let descriptor_len = u64::from_le_bytes(bytes[24..32].try_into().unwrap()) as usize;
     let descriptor = &bytes[96..96 + descriptor_len];
-    let (_, descriptor_pass) = measure(|| effect_descriptor_identity_v1(descriptor, 4_194_304));
+    let (_, descriptor_pass) = measure(|| effect_descriptor_identity(descriptor, 4_194_304));
     assert!(descriptor_pass.allocations > 0);
     assert_eq!(descriptor_pass.live_bytes, 0);
     assert_eq!(
@@ -348,13 +347,13 @@ fn each_package_publication_has_one_nested_descriptor_pass_and_no_native_allocat
         descriptor_pass.deallocated_bytes
     );
     let (_, descriptor_verify_pass) =
-        measure(|| verify_effect_descriptor_wire_v1(descriptor, 4_194_304));
+        measure(|| verify_effect_descriptor_wire(descriptor, 4_194_304));
     assert_eq!(descriptor_verify_pass, descriptor_pass);
 
-    let verified = verify_effect_package_v1(&bytes, EffectPackageLimitsV1::default()).unwrap();
+    let verified = verify_effect_package(&bytes, EffectPackageLimits::default()).unwrap();
     let artifacts: Vec<_> = verified
         .artifacts()
-        .map(|artifact| EffectArtifactAuthoringV1 {
+        .map(|artifact| EffectArtifactAuthoring {
             kind: artifact.kind(),
             path: artifact.path(),
             target: artifact.target(),
@@ -362,38 +361,37 @@ fn each_package_publication_has_one_nested_descriptor_pass_and_no_native_allocat
             content: artifact.content(),
         })
         .collect();
-    let authoring = EffectPackageAuthoringV1 {
+    let authoring = EffectPackageAuthoring {
         descriptor,
         artifacts: &artifacts,
     };
     let mut output = vec![0; bytes.len()];
 
     let (required, required_snapshot) =
-        measure(|| effect_package_v1_required_size(&authoring, EffectPackageLimitsV1::default()));
+        measure(|| effect_package_required_size(&authoring, EffectPackageLimits::default()));
     assert_eq!(required.unwrap(), bytes.len() as u64);
     assert_eq!(required_snapshot, descriptor_pass);
 
-    let (encoded, encode_snapshot) = measure(|| {
-        encode_effect_package_v1(&authoring, EffectPackageLimitsV1::default(), &mut output)
-    });
+    let (encoded, encode_snapshot) =
+        measure(|| encode_effect_package(&authoring, EffectPackageLimits::default(), &mut output));
     assert_eq!(encoded.unwrap(), bytes.len());
     assert_eq!(encode_snapshot, descriptor_pass);
 
     let (verified, verify_snapshot) =
-        measure(|| verify_effect_package_v1(&bytes, EffectPackageLimitsV1::default()));
+        measure(|| verify_effect_package(&bytes, EffectPackageLimits::default()));
     let verified = verified.unwrap();
     assert_eq!(verify_snapshot, descriptor_pass);
 
     let (cid, cid_snapshot) =
-        measure(|| effect_package_cid_v1(&bytes, EffectPackageLimitsV1::default()));
+        measure(|| effect_package_cid(&bytes, EffectPackageLimits::default()));
     let cid = cid.unwrap();
     assert_eq!(cid_snapshot, descriptor_pass);
 
     let (selected, select_snapshot) = measure(|| {
-        select_effect_package_artifact_v1(
+        select_effect_package_artifact(
             &verified,
-            ArtifactSelectionRequestV1 {
-                kind: EffectArtifactKindV1::CoreWasm,
+            ArtifactSelectionRequest {
+                kind: EffectArtifactKind::CoreWasm,
                 target: "wasm32-unknown-unknown",
                 capabilities: &["bulk-memory", "simd128"],
             },
@@ -446,7 +444,7 @@ fn encode_at_the_frozen_artifact_cap_has_one_nested_descriptor_pass_and_no_nativ
     let bytes = fixture();
     let descriptor_len = u64::from_le_bytes(bytes[24..32].try_into().unwrap()) as usize;
     let descriptor = &bytes[96..96 + descriptor_len];
-    let (_, descriptor_pass) = measure(|| effect_descriptor_identity_v1(descriptor, 4_194_304));
+    let (_, descriptor_pass) = measure(|| effect_descriptor_identity(descriptor, 4_194_304));
     assert!(descriptor_pass.allocations > 0);
 
     let count = 4_096usize;
@@ -455,28 +453,27 @@ fn encode_at_the_frozen_artifact_cap_has_one_nested_descriptor_pass_and_no_nativ
         .map(|index| format!("src/file-{index:04}.rs"))
         .collect();
     let contents: Vec<[u8; 1]> = (0..count).map(|index| [index as u8]).collect();
-    let artifacts: Vec<EffectArtifactAuthoringV1<'_>> = (0..count)
-        .map(|index| EffectArtifactAuthoringV1 {
-            kind: EffectArtifactKindV1::Source,
+    let artifacts: Vec<EffectArtifactAuthoring<'_>> = (0..count)
+        .map(|index| EffectArtifactAuthoring {
+            kind: EffectArtifactKind::Source,
             path: &paths[index],
             target: "",
             features: "",
             content: &contents[index],
         })
         .collect();
-    let authoring = EffectPackageAuthoringV1 {
+    let authoring = EffectPackageAuthoring {
         descriptor,
         artifacts: &artifacts,
     };
 
     let started = std::time::Instant::now();
     let (required, required_snapshot) =
-        measure(|| effect_package_v1_required_size(&authoring, EffectPackageLimitsV1::default()));
+        measure(|| effect_package_required_size(&authoring, EffectPackageLimits::default()));
     let required = required.unwrap() as usize;
     let mut output = vec![0; required];
-    let (encoded, encode_snapshot) = measure(|| {
-        encode_effect_package_v1(&authoring, EffectPackageLimitsV1::default(), &mut output)
-    });
+    let (encoded, encode_snapshot) =
+        measure(|| encode_effect_package(&authoring, EffectPackageLimits::default(), &mut output));
     let elapsed = started.elapsed();
     assert_eq!(encoded.unwrap(), required);
     assert_eq!(required_snapshot, descriptor_pass);
@@ -487,7 +484,7 @@ fn encode_at_the_frozen_artifact_cap_has_one_nested_descriptor_pass_and_no_nativ
         "required_size + encode at the artifact cap took {elapsed:?}"
     );
 
-    let verified = verify_effect_package_v1(&output, EffectPackageLimitsV1::default()).unwrap();
+    let verified = verify_effect_package(&output, EffectPackageLimits::default()).unwrap();
     assert_eq!(verified.artifact_count(), count as u32);
     assert!(
         verified
@@ -496,23 +493,23 @@ fn encode_at_the_frozen_artifact_cap_has_one_nested_descriptor_pass_and_no_nativ
             .is_sorted()
     );
 
-    let extra = [EffectArtifactAuthoringV1 {
+    let extra = [EffectArtifactAuthoring {
         path: "src/zzz.rs",
         ..artifacts[0]
     }];
     let grown: Vec<_> = artifacts.iter().copied().chain(extra).collect();
-    let one_over = EffectPackageAuthoringV1 {
+    let one_over = EffectPackageAuthoring {
         descriptor,
         artifacts: &grown,
     };
-    let generous = EffectPackageLimitsV1 {
+    let generous = EffectPackageLimits {
         maximum_artifacts: u32::MAX,
-        ..EffectPackageLimitsV1::default()
+        ..EffectPackageLimits::default()
     };
-    let error = effect_package_v1_required_size(&one_over, generous).unwrap_err();
+    let error = effect_package_required_size(&one_over, generous).unwrap_err();
     assert_eq!(
         (error.code, error.byte_offset),
-        (EffectPackageDiagnosticCodeV1::Limit, 48)
+        (EffectPackageDiagnosticCode::Limit, 48)
     );
     println!(
         "issue097_package_cap artifacts={count} bytes={required} elapsed={elapsed:?} \
@@ -527,28 +524,27 @@ fn c_inspect_performs_exactly_one_nested_descriptor_pass() {
     let bytes = fixture();
     let descriptor_len = u64::from_le_bytes(bytes[24..32].try_into().unwrap()) as usize;
     let descriptor = &bytes[96..96 + descriptor_len];
-    let (identity, descriptor_pass) =
-        measure(|| effect_descriptor_identity_v1(descriptor, 4_194_304));
+    let (identity, descriptor_pass) = measure(|| effect_descriptor_identity(descriptor, 4_194_304));
     let identity = identity.unwrap();
     assert!(descriptor_pass.allocations > 0);
 
-    let verified = verify_effect_descriptor_wire_v1(descriptor, 4_194_304).unwrap();
+    let verified = verify_effect_descriptor_wire(descriptor, 4_194_304).unwrap();
     let (parameter_capacity, port_capacity, quality_capacity, choice_capacity) = (
         verified.parameter_count(),
         verified.port_count(),
         verified.quality_count(),
         verified.enum_choice_count(),
     );
-    let mut summary = EffectDescriptorSummaryV1::default();
+    let mut summary = EffectDescriptorSummary::default();
     let mut parameters =
-        vec![EffectDescriptorParameterRecordV1::default(); parameter_capacity as usize];
-    let mut ports = vec![EffectDescriptorPortRecordV1::default(); port_capacity as usize];
-    let mut qualities = vec![EffectDescriptorQualityRecordV1::default(); quality_capacity as usize];
-    let mut choices = vec![EffectDescriptorEnumChoiceRecordV1::default(); choice_capacity as usize];
+        vec![EffectDescriptorParameterRecord::default(); parameter_capacity as usize];
+    let mut ports = vec![EffectDescriptorPortRecord::default(); port_capacity as usize];
+    let mut qualities = vec![EffectDescriptorQualityRecord::default(); quality_capacity as usize];
+    let mut choices = vec![EffectDescriptorEnumChoiceRecord::default(); choice_capacity as usize];
     let (mut required_parameters, mut required_ports) = (0u32, 0u32);
     let (mut required_qualities, mut required_choices) = (0u32, 0u32);
-    let mut diagnostic = EffectDescriptorWireDiagnosticV1::new(
-        EffectDescriptorWireDiagnosticCodeV1::Ok,
+    let mut diagnostic = EffectDescriptorWireDiagnostic::new(
+        EffectDescriptorWireDiagnosticCode::Ok,
         u32::MAX,
         u32::MAX,
     );
@@ -577,7 +573,7 @@ fn c_inspect_performs_exactly_one_nested_descriptor_pass() {
             )
         }
     });
-    assert_eq!(code, EffectDescriptorWireDiagnosticCodeV1::Ok as u32);
+    assert_eq!(code, EffectDescriptorWireDiagnosticCode::Ok as u32);
     assert_eq!(snapshot, descriptor_pass);
     assert_eq!(summary.identity, *identity.as_bytes());
     assert_eq!(
@@ -601,17 +597,17 @@ fn c_inspect_performs_exactly_one_nested_descriptor_pass() {
 /// wire diagnostic the verifier gives for empty input, not `Null`, and must zero the counts.
 #[test]
 fn c_inspect_reports_a_wire_diagnostic_for_an_empty_null_wire() {
-    let expected = verify_effect_descriptor_wire_v1(&[], 4_194_304).unwrap_err();
-    assert_ne!(expected.code, EffectDescriptorWireDiagnosticCodeV1::Null);
-    let mut summary = EffectDescriptorSummaryV1 {
+    let expected = verify_effect_descriptor_wire(&[], 4_194_304).unwrap_err();
+    assert_ne!(expected.code, EffectDescriptorWireDiagnosticCode::Null);
+    let mut summary = EffectDescriptorSummary {
         abi_version: 0xdead_beef,
-        ..EffectDescriptorSummaryV1::default()
+        ..EffectDescriptorSummary::default()
     };
     let untouched = summary;
     let (mut required_parameters, mut required_ports) = (0xa5a5_a5a5u32, 0xa5a5_a5a5u32);
     let (mut required_qualities, mut required_choices) = (0xa5a5_a5a5u32, 0xa5a5_a5a5u32);
-    let mut diagnostic = EffectDescriptorWireDiagnosticV1::new(
-        EffectDescriptorWireDiagnosticCodeV1::Ok,
+    let mut diagnostic = EffectDescriptorWireDiagnostic::new(
+        EffectDescriptorWireDiagnosticCode::Ok,
         u32::MAX,
         u32::MAX,
     );
@@ -660,38 +656,37 @@ fn prebound_state_selection_verification_replay_requirements_and_encode_allocate
     ));
     let state = include_bytes!("../../../fixtures/effect-state/v1/canonical.state.bin");
     let state_before = *state;
-    let bound = bind_effect_descriptor_wire_v1(&STATE_DESCRIPTOR, &wire, 1 << 20).unwrap();
+    let bound = bind_effect_descriptor_wire(&STATE_DESCRIPTOR, &wire, 1 << 20).unwrap();
 
     let (selector, selector_allocations) =
-        measure(|| inspect_effect_state_selector_v1(state, EffectStateLimitsV1::default()));
+        measure(|| inspect_effect_state_selector(state, EffectStateLimits::default()));
     assert_eq!(selector.unwrap().descriptor_identity(), bound.identity());
     assert_eq!(selector_allocations, ZERO_ALLOCATION);
 
     let (verified, verify_allocations) =
-        measure(|| verify_effect_state_v1(bound, state, EffectStateLimitsV1::default()));
+        measure(|| verify_effect_state(bound, state, EffectStateLimits::default()));
     let verified = verified.unwrap();
     assert_eq!(verify_allocations, ZERO_ALLOCATION);
-    let (_, current_allocations) = measure(|| validate_effect_state_current_layout_v1(verified));
+    let (_, current_allocations) = measure(|| validate_effect_state_current_layout(verified));
     assert_eq!(current_allocations, ZERO_ALLOCATION);
     let (_, replay_allocations) =
-        measure(|| validate_effect_state_replay_v1(verified, state_replay()));
+        measure(|| validate_effect_state_replay(verified, state_replay()));
     assert_eq!(replay_allocations, ZERO_ALLOCATION);
-    let (requirements, requirement_allocations) = measure(|| {
-        effect_state_v1_requirements(bound, state_replay(), EffectStateLimitsV1::default())
-    });
+    let (requirements, requirement_allocations) =
+        measure(|| effect_state_requirements(bound, state_replay(), EffectStateLimits::default()));
     let requirements = requirements.unwrap();
     assert_eq!(requirement_allocations, ZERO_ALLOCATION);
 
     let (common, left, right) = verified.payloads();
     let mut output = vec![0x6d; requirements.envelope_bytes as usize + 7];
     let (written, encode_allocations) = measure(|| {
-        encode_effect_state_v1(
+        encode_effect_state(
             bound,
             state_replay(),
             common,
             left,
             right,
-            EffectStateLimitsV1::default(),
+            EffectStateLimits::default(),
             &mut output,
         )
     });
@@ -703,13 +698,13 @@ fn prebound_state_selection_verification_replay_requirements_and_encode_allocate
     let mut short = vec![0xa5; state.len() - 1];
     let short_before = short.clone();
     let (failure, short_allocations) = measure(|| {
-        encode_effect_state_v1(
+        encode_effect_state(
             bound,
             state_replay(),
             common,
             left,
             right,
-            EffectStateLimitsV1::default(),
+            EffectStateLimits::default(),
             &mut short,
         )
     });

@@ -2,15 +2,15 @@
 
 use core::str::FromStr;
 use miso_engine_effect_package::{
-    ArtifactSelectionRequestV1, EffectArtifactAuthoringV1, EffectArtifactKindV1, EffectCid,
-    EffectPackageAuthoringV1, EffectPackageLimitsV1, effect_descriptor_identity_v1,
-    effect_package_cid_v1, effect_package_v1_required_size, encode_effect_package_v1,
-    select_effect_package_artifact_v1, verify_effect_package_v1,
+    ArtifactSelectionRequest, EffectArtifactAuthoring, EffectArtifactKind, EffectCid,
+    EffectPackageAuthoring, EffectPackageLimits, effect_descriptor_identity, effect_package_cid,
+    effect_package_required_size, encode_effect_package, select_effect_package_artifact,
+    verify_effect_package,
 };
 use sha2::{Digest, Sha256};
 
 struct Artifact<'a> {
-    kind: EffectArtifactKindV1,
+    kind: EffectArtifactKind,
     path: &'a str,
     target: &'a str,
     features: &'a str,
@@ -19,7 +19,7 @@ struct Artifact<'a> {
 }
 
 struct Selection<'a> {
-    kind: EffectArtifactKindV1,
+    kind: EffectArtifactKind,
     target: &'a str,
     capabilities: &'a [&'a str],
     path: &'a str,
@@ -65,7 +65,7 @@ fn hex_string(bytes: &[u8]) -> String {
     output
 }
 
-fn kind_value(kind: EffectArtifactKindV1) -> u32 {
+fn kind_value(kind: EffectArtifactKind) -> u32 {
     kind as u32
 }
 
@@ -73,10 +73,10 @@ fn check_vector(vector: &Vector<'_>) -> Vec<u8> {
     let bytes = hex(vector.package_hex);
     assert_eq!(bytes.len(), vector.package_bytes);
     assert_eq!(hex_string(&Sha256::digest(&bytes)), vector.package_sha);
-    let verified = verify_effect_package_v1(&bytes, EffectPackageLimitsV1::default()).unwrap();
+    let verified = verify_effect_package(&bytes, EffectPackageLimits::default()).unwrap();
     assert_eq!(
         hex(vector.descriptor_identity),
-        effect_descriptor_identity_v1(verified.descriptor(), 4_194_304)
+        effect_descriptor_identity(verified.descriptor(), 4_194_304)
             .unwrap()
             .as_bytes()
     );
@@ -96,14 +96,14 @@ fn check_vector(vector: &Vector<'_>) -> Vec<u8> {
         assert!((package_start..package_start + bytes.len()).contains(&start));
     }
 
-    let cid = effect_package_cid_v1(&bytes, EffectPackageLimitsV1::default()).unwrap();
+    let cid = effect_package_cid(&bytes, EffectPackageLimits::default()).unwrap();
     assert_eq!(cid.as_binary(), hex(vector.cid_binary).as_slice());
     assert_eq!(cid.to_string(), vector.cid_text);
     assert_eq!(EffectCid::from_str(vector.cid_text).unwrap(), cid);
     for selection in vector.selections {
-        let selected = select_effect_package_artifact_v1(
+        let selected = select_effect_package_artifact(
             &verified,
-            ArtifactSelectionRequestV1 {
+            ArtifactSelectionRequest {
                 kind: selection.kind,
                 target: selection.target,
                 capabilities: selection.capabilities,
@@ -115,7 +115,7 @@ fn check_vector(vector: &Vector<'_>) -> Vec<u8> {
 
     let mut authoring: Vec<_> = actual
         .iter()
-        .map(|artifact| EffectArtifactAuthoringV1 {
+        .map(|artifact| EffectArtifactAuthoring {
             kind: artifact.kind(),
             path: artifact.path(),
             target: artifact.target(),
@@ -124,16 +124,15 @@ fn check_vector(vector: &Vector<'_>) -> Vec<u8> {
         })
         .collect();
     authoring.reverse();
-    let model = EffectPackageAuthoringV1 {
+    let model = EffectPackageAuthoring {
         descriptor: verified.descriptor(),
         artifacts: &authoring,
     };
-    let required =
-        effect_package_v1_required_size(&model, EffectPackageLimitsV1::default()).unwrap();
+    let required = effect_package_required_size(&model, EffectPackageLimits::default()).unwrap();
     assert_eq!(required, bytes.len() as u64);
     let mut output = vec![0xa5; bytes.len() + 8];
     assert_eq!(
-        encode_effect_package_v1(&model, EffectPackageLimitsV1::default(), &mut output).unwrap(),
+        encode_effect_package(&model, EffectPackageLimits::default(), &mut output).unwrap(),
         bytes.len()
     );
     assert_eq!(&output[..bytes.len()], bytes);
@@ -143,7 +142,7 @@ fn check_vector(vector: &Vector<'_>) -> Vec<u8> {
 
 const A_ARTIFACTS: &[Artifact<'_>] = &[
     Artifact {
-        kind: EffectArtifactKindV1::Source,
+        kind: EffectArtifactKind::Source,
         path: "src/a.rs",
         target: "",
         features: "",
@@ -151,7 +150,7 @@ const A_ARTIFACTS: &[Artifact<'_>] = &[
         hash_hex: "ebcd1e1cf252671bac35015b5e68348cd9aa73f5c9461ea7d7807ab50e406d18",
     },
     Artifact {
-        kind: EffectArtifactKindV1::Source,
+        kind: EffectArtifactKind::Source,
         path: "src/z.rs",
         target: "",
         features: "",
@@ -159,7 +158,7 @@ const A_ARTIFACTS: &[Artifact<'_>] = &[
         hash_hex: "f891253b187296a1e51b8ea016d5c2b6f86dd194cbbe3cf6c5516b4bb32b368f",
     },
     Artifact {
-        kind: EffectArtifactKindV1::CoreWasm,
+        kind: EffectArtifactKind::CoreWasm,
         path: "wasm/base.wasm",
         target: "wasm32-unknown-unknown",
         features: "",
@@ -167,7 +166,7 @@ const A_ARTIFACTS: &[Artifact<'_>] = &[
         hash_hex: "99ab3fd8f923338645c9ac751de2fc137d24c11a564aae2c88ca46e615dc209d",
     },
     Artifact {
-        kind: EffectArtifactKindV1::CoreWasm,
+        kind: EffectArtifactKind::CoreWasm,
         path: "wasm/bulk.wasm",
         target: "wasm32-unknown-unknown",
         features: "bulk-memory,simd128",
@@ -175,7 +174,7 @@ const A_ARTIFACTS: &[Artifact<'_>] = &[
         hash_hex: "3fa3edf499363cea7820bed9045bc97b8025e777c1c2202290490e256100edff",
     },
     Artifact {
-        kind: EffectArtifactKindV1::CoreWasm,
+        kind: EffectArtifactKind::CoreWasm,
         path: "wasm/simd.wasm",
         target: "wasm32-unknown-unknown",
         features: "simd128",
@@ -183,7 +182,7 @@ const A_ARTIFACTS: &[Artifact<'_>] = &[
         hash_hex: "f42c959a633cab345e79e7612658530039d6cbd012032553bf14ce8b5cf4527b",
     },
     Artifact {
-        kind: EffectArtifactKindV1::TargetNative,
+        kind: EffectArtifactKind::TargetNative,
         path: "native/x86-base.so",
         target: "x86_64-unknown-linux-gnu",
         features: "",
@@ -191,7 +190,7 @@ const A_ARTIFACTS: &[Artifact<'_>] = &[
         hash_hex: "e14273d6df76488c573627247d87348435305c9557a529bcf489fa5c6a7df7b2",
     },
     Artifact {
-        kind: EffectArtifactKindV1::TargetNative,
+        kind: EffectArtifactKind::TargetNative,
         path: "native/x86-fma.so",
         target: "x86_64-unknown-linux-gnu",
         features: "avx2,fma",
@@ -202,7 +201,7 @@ const A_ARTIFACTS: &[Artifact<'_>] = &[
 
 const B_ARTIFACTS: &[Artifact<'_>] = &[
     Artifact {
-        kind: EffectArtifactKindV1::Source,
+        kind: EffectArtifactKind::Source,
         path: "source/lib.rs",
         target: "",
         features: "",
@@ -210,7 +209,7 @@ const B_ARTIFACTS: &[Artifact<'_>] = &[
         hash_hex: "b92cf637f522c5a3cdf2864dc5a6deffafca01c0510be29790181a10db939060",
     },
     Artifact {
-        kind: EffectArtifactKindV1::CoreWasm,
+        kind: EffectArtifactKind::CoreWasm,
         path: "module/base.wasm",
         target: "wasm32-unknown-unknown",
         features: "",
@@ -218,7 +217,7 @@ const B_ARTIFACTS: &[Artifact<'_>] = &[
         hash_hex: "a1f8cf0699f32ffd5d04af0667b9eaa8df1b2bab1e5effe01ea34c04697116e3",
     },
     Artifact {
-        kind: EffectArtifactKindV1::CoreWasm,
+        kind: EffectArtifactKind::CoreWasm,
         path: "module/core.wasm",
         target: "wasm32-unknown-unknown",
         features: "simd128",
@@ -226,7 +225,7 @@ const B_ARTIFACTS: &[Artifact<'_>] = &[
         hash_hex: "3ed7e6360fa4234557551a903077bc42d671e682c48cc4e52e613cea7203e246",
     },
     Artifact {
-        kind: EffectArtifactKindV1::TargetNative,
+        kind: EffectArtifactKind::TargetNative,
         path: "module/arm64.dylib",
         target: "aarch64-apple-darwin",
         features: "neon",
@@ -237,25 +236,25 @@ const B_ARTIFACTS: &[Artifact<'_>] = &[
 
 const A_SELECTIONS: &[Selection<'_>] = &[
     Selection {
-        kind: EffectArtifactKindV1::CoreWasm,
+        kind: EffectArtifactKind::CoreWasm,
         target: "wasm32-unknown-unknown",
         capabilities: &[],
         path: "wasm/base.wasm",
     },
     Selection {
-        kind: EffectArtifactKindV1::CoreWasm,
+        kind: EffectArtifactKind::CoreWasm,
         target: "wasm32-unknown-unknown",
         capabilities: &["simd128"],
         path: "wasm/simd.wasm",
     },
     Selection {
-        kind: EffectArtifactKindV1::CoreWasm,
+        kind: EffectArtifactKind::CoreWasm,
         target: "wasm32-unknown-unknown",
         capabilities: &["bulk-memory", "simd128"],
         path: "wasm/bulk.wasm",
     },
     Selection {
-        kind: EffectArtifactKindV1::TargetNative,
+        kind: EffectArtifactKind::TargetNative,
         target: "x86_64-unknown-linux-gnu",
         capabilities: &["avx2", "fma"],
         path: "native/x86-fma.so",
@@ -264,25 +263,25 @@ const A_SELECTIONS: &[Selection<'_>] = &[
 
 const B_SELECTIONS: &[Selection<'_>] = &[
     Selection {
-        kind: EffectArtifactKindV1::Source,
+        kind: EffectArtifactKind::Source,
         target: "",
         capabilities: &[],
         path: "source/lib.rs",
     },
     Selection {
-        kind: EffectArtifactKindV1::CoreWasm,
+        kind: EffectArtifactKind::CoreWasm,
         target: "wasm32-unknown-unknown",
         capabilities: &[],
         path: "module/base.wasm",
     },
     Selection {
-        kind: EffectArtifactKindV1::CoreWasm,
+        kind: EffectArtifactKind::CoreWasm,
         target: "wasm32-unknown-unknown",
         capabilities: &["simd128"],
         path: "module/core.wasm",
     },
     Selection {
-        kind: EffectArtifactKindV1::TargetNative,
+        kind: EffectArtifactKind::TargetNative,
         target: "aarch64-apple-darwin",
         capabilities: &["neon"],
         path: "module/arm64.dylib",
@@ -316,8 +315,8 @@ fn python_authored_vectors_match_every_frozen_identity_and_selection() {
         selections: B_SELECTIONS,
     });
     assert_ne!(
-        effect_package_cid_v1(&a, EffectPackageLimitsV1::default()).unwrap(),
-        effect_package_cid_v1(&b, EffectPackageLimitsV1::default()).unwrap()
+        effect_package_cid(&a, EffectPackageLimits::default()).unwrap(),
+        effect_package_cid(&b, EffectPackageLimits::default()).unwrap()
     );
 }
 
@@ -326,7 +325,7 @@ fn legal_content_and_descriptor_changes_accept_and_change_cid() {
     let bytes = hex(include_str!(
         "../../../fixtures/effect-package/v1/comprehensive-a.package.hex"
     ));
-    let old_cid = effect_package_cid_v1(&bytes, EffectPackageLimitsV1::default()).unwrap();
+    let old_cid = effect_package_cid(&bytes, EffectPackageLimits::default()).unwrap();
     let descriptor_len = u64::from_le_bytes(bytes[24..32].try_into().unwrap()) as usize;
     let table_len = u64::from_le_bytes(bytes[32..40].try_into().unwrap()) as usize;
     let table_start = 96 + descriptor_len;
@@ -337,19 +336,19 @@ fn legal_content_and_descriptor_changes_accept_and_change_cid() {
         &changed[content_start..content_start + A_ARTIFACTS[0].content_hex.len() / 2],
     );
     changed[table_start + 40..table_start + 72].copy_from_slice(&digest);
-    verify_effect_package_v1(&changed, EffectPackageLimitsV1::default()).unwrap();
+    verify_effect_package(&changed, EffectPackageLimits::default()).unwrap();
     assert_ne!(
-        effect_package_cid_v1(&changed, EffectPackageLimitsV1::default()).unwrap(),
+        effect_package_cid(&changed, EffectPackageLimits::default()).unwrap(),
         old_cid
     );
 
-    let verified = verify_effect_package_v1(&bytes, EffectPackageLimitsV1::default()).unwrap();
+    let verified = verify_effect_package(&bytes, EffectPackageLimits::default()).unwrap();
     let descriptor_b = hex(include_str!(
         "../../../fixtures/effect-descriptor/v1/comprehensive-b.wire.hex"
     ));
     let artifacts: Vec<_> = verified
         .artifacts()
-        .map(|artifact| EffectArtifactAuthoringV1 {
+        .map(|artifact| EffectArtifactAuthoring {
             kind: artifact.kind(),
             path: artifact.path(),
             target: artifact.target(),
@@ -357,26 +356,26 @@ fn legal_content_and_descriptor_changes_accept_and_change_cid() {
             content: artifact.content(),
         })
         .collect();
-    let model = EffectPackageAuthoringV1 {
+    let model = EffectPackageAuthoring {
         descriptor: &descriptor_b,
         artifacts: &artifacts,
     };
     let mut other = vec![
         0;
-        effect_package_v1_required_size(&model, EffectPackageLimitsV1::default()).unwrap()
+        effect_package_required_size(&model, EffectPackageLimits::default()).unwrap()
             as usize
     ];
-    encode_effect_package_v1(&model, EffectPackageLimitsV1::default(), &mut other).unwrap();
-    verify_effect_package_v1(&other, EffectPackageLimitsV1::default()).unwrap();
+    encode_effect_package(&model, EffectPackageLimits::default(), &mut other).unwrap();
+    verify_effect_package(&other, EffectPackageLimits::default()).unwrap();
     assert_ne!(
-        effect_package_cid_v1(&other, EffectPackageLimitsV1::default()).unwrap(),
+        effect_package_cid(&other, EffectPackageLimits::default()).unwrap(),
         old_cid
     );
 }
 
 #[test]
 fn enum_discriminants_used_by_the_manifest_are_frozen() {
-    assert_eq!(kind_value(EffectArtifactKindV1::Source), 1);
-    assert_eq!(kind_value(EffectArtifactKindV1::CoreWasm), 2);
-    assert_eq!(kind_value(EffectArtifactKindV1::TargetNative), 3);
+    assert_eq!(kind_value(EffectArtifactKind::Source), 1);
+    assert_eq!(kind_value(EffectArtifactKind::CoreWasm), 2);
+    assert_eq!(kind_value(EffectArtifactKind::TargetNative), 3);
 }

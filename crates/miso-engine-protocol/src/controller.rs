@@ -28,7 +28,7 @@ use crate::{
     ParameterDescriptor, ParameterDomain, ParameterHandle, ParameterMetadataPage,
     ParameterMetadataRequest, ParameterStatePage, ParameterStateRequest,
     PreparedSessionTransaction, ProtocolCodec, ProtocolQueues, QueueReport, ReliablePayload,
-    ReliableSlot, RequestId, SampleTime, SessionCommitted, SessionEditV1, SessionRevision,
+    ReliableSlot, RequestId, SampleTime, SessionCommitted, SessionEdit, SessionRevision,
     SessionSnapshot, SessionStore, SessionStoreError, StatusCode, SuccessResponsePayload,
     TelemetryConfiguration, TelemetryKey, TelemetryRecord, TransactionApplied, TransportSetRequest,
     TransportSnapshot, TransportState, TransportStateEvent, TypedEventFrame,
@@ -1025,7 +1025,7 @@ pub enum ControlCommand<'a> {
         max_bytes: u32,
     },
     SessionTransactionApply {
-        edits: &'a [SessionEditV1],
+        edits: &'a [SessionEdit],
     },
     ParameterMetadataGet {
         request: ParameterMetadataRequest,
@@ -4334,7 +4334,7 @@ mod tests {
     #[test]
     fn full_frame_ingress_dispatches_every_registered_command_through_typed_frames() {
         let revision = ExpectedRevision::Exact(SessionRevision(7));
-        let transaction = [SessionEditV1::SetSessionId {
+        let transaction = [SessionEdit::SetSessionId {
             session_id: miso_engine_session::StableId::parse("framed-session").expect("ID"),
         }];
         let parameter_state = ParameterStateRequest { handles: vec![1] };
@@ -4597,7 +4597,7 @@ mod tests {
         PREPARED_IMMEDIATE_CALLS.with(|calls| calls.set(0));
         PROSPECTIVE_REPLAY_CLONES.with(|clones| clones.set(0));
         RESPONSE_STAGING_VECS.with(|allocations| allocations.set(0));
-        let first_edits = [SessionEditV1::SetSessionId {
+        let first_edits = [SessionEdit::SetSessionId {
             session_id: miso_engine_session::StableId::parse("direct-transaction").expect("ID"),
         }];
         let first = full_command(
@@ -4634,7 +4634,7 @@ mod tests {
             "one-call commit and exact replay emit one event total"
         );
 
-        let changed_edits = [SessionEditV1::SetSessionId {
+        let changed_edits = [SessionEdit::SetSessionId {
             session_id: miso_engine_session::StableId::parse("changed-reuse").expect("ID"),
         }];
         let changed = full_command(
@@ -4677,7 +4677,7 @@ mod tests {
             );
         });
 
-        let conflict_edits = [SessionEditV1::SetSessionId {
+        let conflict_edits = [SessionEdit::SetSessionId {
             session_id: miso_engine_session::StableId::parse("must-not-commit").expect("ID"),
         }];
         let conflict = full_command(
@@ -4699,7 +4699,7 @@ mod tests {
             );
         });
 
-        let invalid_edits = [SessionEditV1::SetSampleRateHz { sample_rate_hz: 0 }];
+        let invalid_edits = [SessionEdit::SetSampleRateHz { sample_rate_hz: 0 }];
         let invalid = full_command(
             4,
             ExpectedRevision::Exact(SessionRevision(7)),
@@ -4770,7 +4770,7 @@ mod tests {
 
     #[test]
     fn full_frame_ingress_preserves_output_ownership_and_correlates_payload_errors() {
-        let transaction = [SessionEditV1::SetSessionId {
+        let transaction = [SessionEdit::SetSessionId {
             session_id: miso_engine_session::StableId::parse("not-committed").expect("ID"),
         }];
         let input = full_command(
@@ -4905,7 +4905,7 @@ mod tests {
 
     #[test]
     fn structural_prepare_is_invisible_until_commit_and_byte_identical_to_one_call() {
-        let transaction = [SessionEditV1::SetSessionId {
+        let transaction = [SessionEdit::SetSessionId {
             session_id: miso_engine_session::StableId::parse("prepared-session").expect("ID"),
         }];
         let input = full_command(
@@ -4992,7 +4992,7 @@ mod tests {
         }
 
         let edit = |name: &'static str| {
-            [SessionEditV1::SetSessionId {
+            [SessionEdit::SetSessionId {
                 session_id: miso_engine_session::StableId::parse(name).expect("ID"),
             }]
         };
@@ -5184,7 +5184,7 @@ mod tests {
             expected_revision: ExpectedRevision::Exact(SessionRevision(7)),
             canonical_bytes: b"invalid",
             command: ControlCommand::SessionTransactionApply {
-                edits: &[SessionEditV1::RemoveSource {
+                edits: &[SessionEdit::RemoveSource {
                     source_id: miso_engine_session::StableId::parse("voice").expect("id"),
                 }],
             },
@@ -5230,7 +5230,7 @@ mod tests {
             expected_revision: ExpectedRevision::Exact(SessionRevision(7)),
             canonical_bytes: b"two-validation-diagnostics",
             command: ControlCommand::SessionTransactionApply {
-                edits: &[SessionEditV1::SetTrackFader {
+                edits: &[SessionEdit::SetTrackFader {
                     track_id: miso_engine_session::StableId::parse("vocal").expect("stable ID"),
                     fader,
                 }],
@@ -5287,7 +5287,7 @@ mod tests {
             expected_revision: ExpectedRevision::Exact(SessionRevision(7)),
             canonical_bytes: b"missing-source-edit",
             command: ControlCommand::SessionTransactionApply {
-                edits: &[SessionEditV1::RemoveSource {
+                edits: &[SessionEdit::RemoveSource {
                     source_id: miso_engine_session::StableId::parse("missing").expect("stable ID"),
                 }],
             },
@@ -5517,7 +5517,7 @@ mod tests {
     #[test]
     fn decoded_btlv_transaction_reaches_same_atomic_session_store() {
         let mut controller = controller(4, 1);
-        let edits = [SessionEditV1::SetSessionId {
+        let edits = [SessionEdit::SetSessionId {
             session_id: miso_engine_session::StableId::parse("renamed").expect("ID"),
         }];
         let frame = crate::SessionTransactionFrame {
@@ -5565,7 +5565,7 @@ mod tests {
             response: &ControllerResponse,
             before_revision: SessionRevision,
             before_snapshot: &str,
-            before_model: &miso_engine_session::SessionTomlV1,
+            before_model: &miso_engine_session::SessionToml,
             before_events: QueueReport,
         ) {
             assert_eq!(response.status, StatusCode::ValidationFailed);
@@ -5598,7 +5598,7 @@ mod tests {
         }
 
         for rate in [176_400, 192_000, 352_800, 384_000, 0, 32_000, 192_001] {
-            let edits = [SessionEditV1::SetSampleRateHz {
+            let edits = [SessionEdit::SetSampleRateHz {
                 sample_rate_hz: rate,
             }];
 
@@ -5663,7 +5663,7 @@ mod tests {
             .fader
             .clone();
         fader.left_db = -2.0;
-        let edits = [SessionEditV1::SetTrackFader {
+        let edits = [SessionEdit::SetTrackFader {
             track_id: miso_engine_session::StableId::parse("vocal").expect("ID"),
             fader,
         }];
@@ -5701,7 +5701,7 @@ mod tests {
     #[test]
     fn decoded_route_edit_reaches_same_atomic_session_store() {
         let mut controller = controller(4, 1);
-        let edits = [SessionEditV1::SetRouteGainDb {
+        let edits = [SessionEdit::SetRouteGainDb {
             route_id: miso_engine_session::StableId::parse("to-main").expect("ID"),
             gain_db: -1.0,
         }];
@@ -5738,7 +5738,7 @@ mod tests {
     fn decoded_invalid_automation_rolls_back_after_final_compilation() {
         let mut controller = controller(4, 1);
         let before = controller.session().canonical_snapshot().to_owned();
-        let edits = [SessionEditV1::SetAutomationSegments {
+        let edits = [SessionEdit::SetAutomationSegments {
             automation_id: miso_engine_session::StableId::parse("eq-gain").expect("ID"),
             segments: vec![miso_engine_session::AutomationSegment {
                 shape: miso_engine_session::AutomationShape::Exponential,
@@ -6519,7 +6519,7 @@ mod tests {
                 .status,
             StatusCode::Unavailable
         );
-        let edits = [SessionEditV1::SetSessionId {
+        let edits = [SessionEdit::SetSessionId {
             session_id: miso_engine_session::StableId::parse("disabled-events").expect("id"),
         }];
         assert_eq!(
@@ -6581,7 +6581,7 @@ mod tests {
                 1,
             ))
             .expect("fill prepared event queue");
-        let edits = [SessionEditV1::SetSessionId {
+        let edits = [SessionEdit::SetSessionId {
             session_id: miso_engine_session::StableId::parse("blocked-commit").expect("ID"),
         }];
         let response = controller.process(ControllerRequest {
@@ -6598,7 +6598,7 @@ mod tests {
     #[test]
     fn committed_transaction_emits_typed_zero_header_id_event() {
         let mut controller = controller(4, 1);
-        let edits = [SessionEditV1::SetSessionId {
+        let edits = [SessionEdit::SetSessionId {
             session_id: miso_engine_session::StableId::parse("evented-commit").expect("ID"),
         }];
         let response = controller.process(ControllerRequest {

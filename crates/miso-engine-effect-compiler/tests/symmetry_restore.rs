@@ -36,7 +36,7 @@ const fn port_id(value: &'static str) -> PortId {
 
 const LANE_BYTES: usize = 4;
 
-static PARAMETERS: [ParameterDescriptorV1; 1] = [ParameterDescriptorV1 {
+static PARAMETERS: [ParameterDescriptor; 1] = [ParameterDescriptor {
     id: ParameterId(1),
     display_name: "value",
     display_unit: "linear",
@@ -54,22 +54,22 @@ static PARAMETERS: [ParameterDescriptorV1; 1] = [ParameterDescriptorV1 {
     automatable: true,
     enum_choices: &[],
 }];
-static PORTS: [PortDescriptorV1; 2] = [
-    PortDescriptorV1 {
+static PORTS: [PortDescriptor; 2] = [
+    PortDescriptor {
         id: port_id("main-in"),
         role: PortRole::MainInput,
         required: true,
         layout: PortLayout::DualMonoPlanar,
     },
-    PortDescriptorV1 {
+    PortDescriptor {
         id: port_id("main-out"),
         role: PortRole::MainOutput,
         required: true,
         layout: PortLayout::DualMonoPlanar,
     },
 ];
-const fn quality(sample_rate: u32) -> QualityDescriptorV1 {
-    QualityDescriptorV1 {
+const fn quality(sample_rate: u32) -> QualityDescriptor {
+    QualityDescriptor {
         quality: EffectQuality::Normal,
         sample_rate,
         latency: LatencySamples(0),
@@ -83,13 +83,13 @@ const fn quality(sample_rate: u32) -> QualityDescriptorV1 {
         scratch_bytes_per_frame: 0,
     }
 }
-static QUALITIES: [QualityDescriptorV1; 4] = [
+static QUALITIES: [QualityDescriptor; 4] = [
     quality(44_100),
     quality(48_000),
     quality(88_200),
     quality(96_000),
 ];
-static DESCRIPTOR: EffectDescriptorV1 = EffectDescriptorV1 {
+static DESCRIPTOR: EffectDescriptor = EffectDescriptor {
     id: effect_id("test.symmetry-restore"),
     display_name: "Symmetry restore",
     contract_major: 1,
@@ -149,7 +149,7 @@ fn sections(asymmetric: bool) -> ([u8; LANE_BYTES], [u8; LANE_BYTES]) {
 }
 
 impl NativeEffectFactory for MockFactory {
-    fn descriptor(&self) -> &'static EffectDescriptorV1 {
+    fn descriptor(&self) -> &'static EffectDescriptor {
         &DESCRIPTOR
     }
     fn prepare(
@@ -250,14 +250,14 @@ impl PreparedNativeEffectBank for MockBank {
     }
 }
 
-fn preparation(sample_rate: u32) -> EffectBankPreparationV1 {
-    EffectBankPreparationV1 {
+fn preparation(sample_rate: u32) -> EffectBankPreparation {
+    EffectBankPreparation {
         sample_rate,
         quantum: 32,
         quality: EffectQuality::Normal,
         bypass: false,
         link_mode: LinkMode::DualMono,
-        ports: PreparedPortsV1 {
+        ports: PreparedPorts {
             sidechain: PreparedSidechainPort::None,
         },
         initial_values: INITIAL.into(),
@@ -270,21 +270,21 @@ fn preparation(sample_rate: u32) -> EffectBankPreparationV1 {
 }
 
 fn wire() -> Vec<u8> {
-    let required = effect_descriptor_wire_v1_required_size(&DESCRIPTOR, 1 << 20).unwrap();
+    let required = effect_descriptor_wire_required_size(&DESCRIPTOR, 1 << 20).unwrap();
     let mut output = vec![0; required as usize];
-    encode_effect_descriptor_wire_v1(&DESCRIPTOR, 1 << 20, &mut output).unwrap();
+    encode_effect_descriptor_wire(&DESCRIPTOR, 1 << 20, &mut output).unwrap();
     output
 }
 
-fn bound<'a>(controls: &Arc<Controls>, wire: &'a [u8]) -> WireBoundNativeEffectFactoryV1<'a> {
+fn bound<'a>(controls: &Arc<Controls>, wire: &'a [u8]) -> WireBoundNativeEffectFactory<'a> {
     let factory: Arc<dyn NativeEffectFactory> = Arc::new(MockFactory {
         controls: Arc::clone(controls),
     });
-    bind_native_effect_factory_state_v1(factory, wire, 1 << 20).unwrap()
+    bind_native_effect_factory_state(factory, wire, 1 << 20).unwrap()
 }
 
-fn admission(preparation: &EffectBankPreparationV1) -> EffectStateRestoreAdmissionV1 {
-    EffectStateRestoreAdmissionV1 {
+fn admission(preparation: &EffectBankPreparation) -> EffectStateRestoreAdmission {
+    EffectStateRestoreAdmission {
         sample_rate: preparation.sample_rate,
         quantum: preparation.quantum,
         maximum_total_state_bytes: preparation.limits.maximum_total_state_bytes,
@@ -301,19 +301,16 @@ fn envelope(asymmetric: bool) -> Vec<u8> {
     let capability = bound(&controls, &descriptor_wire);
     let preparation = preparation(48_000);
     let processor = capability.factory().prepare(preparation.request()).unwrap();
-    let requirements = scalar_effect_state_v1_requirements(
-        &capability,
-        &preparation,
-        EffectStateLimitsV1::default(),
-    )
-    .unwrap();
+    let requirements =
+        scalar_effect_state_requirements(&capability, &preparation, EffectStateLimits::default())
+            .unwrap();
     let mut scratch = vec![0; requirements.payload_snapshot_scratch_bytes as usize];
     let mut output = vec![0; requirements.envelope_bytes as usize];
-    snapshot_scalar_effect_state_v1(
+    snapshot_scalar_effect_state(
         &capability,
         &preparation,
         processor.as_ref(),
-        EffectStateLimitsV1::default(),
+        EffectStateLimits::default(),
         &mut scratch,
         &mut output,
     )
@@ -322,7 +319,7 @@ fn envelope(asymmetric: bool) -> Vec<u8> {
 }
 
 /// Red mutation: replace the `payload_sections_agree(left, right)` call in
-/// `restore_scalar_effect_state_v1` with `true` -> the asymmetric case fails.
+/// `restore_scalar_effect_state` with `true` -> the asymmetric case fails.
 /// Replace it with `false` -> the symmetric case fails. The pair pins both directions.
 #[test]
 fn a_scalar_restore_declines_exactly_when_the_channel_sections_differ() {
@@ -332,10 +329,10 @@ fn a_scalar_restore_declines_exactly_when_the_channel_sections_differ() {
         let descriptor_wire = wire();
         let capability = bound(&controls, &descriptor_wire);
         let preparation = preparation(48_000);
-        let restored = restore_scalar_effect_state_v1(
+        let restored = restore_scalar_effect_state(
             capability,
             &bytes,
-            EffectStateLimitsV1::default(),
+            EffectStateLimits::default(),
             admission(&preparation),
             &mut [InitialParameterValue {
                 parameter_index: 0,
@@ -347,11 +344,11 @@ fn a_scalar_restore_declines_exactly_when_the_channel_sections_differ() {
 
         let witness = restored.channel_symmetry();
         assert!(
-            witness.holds(ChannelSymmetryWitnessV1::DESIGNED),
+            witness.holds(ChannelSymmetryWitness::DESIGNED),
             "the designed term is unconditionally true for this mock, so it cannot mask the restore"
         );
         assert_eq!(
-            witness.holds(ChannelSymmetryWitnessV1::RESTORED),
+            witness.holds(ChannelSymmetryWitness::RESTORED),
             !asymmetric,
             "asymmetric = {asymmetric}"
         );
@@ -359,7 +356,7 @@ fn a_scalar_restore_declines_exactly_when_the_channel_sections_differ() {
         if asymmetric {
             assert_eq!(
                 witness.declined(),
-                ChannelSymmetryWitnessV1::RESTORED,
+                ChannelSymmetryWitness::RESTORED,
                 "an unequal restore declines on RESTORED and nothing else"
             );
         }
@@ -378,10 +375,10 @@ fn one_declining_restore_does_not_contaminate_a_sibling() {
     let preparation = preparation(48_000);
 
     let controls = Arc::new(Controls::default());
-    let first = restore_scalar_effect_state_v1(
+    let first = restore_scalar_effect_state(
         bound(&controls, &descriptor_wire),
         &asymmetric,
-        EffectStateLimitsV1::default(),
+        EffectStateLimits::default(),
         admission(&preparation),
         &mut [InitialParameterValue {
             parameter_index: 0,
@@ -390,10 +387,10 @@ fn one_declining_restore_does_not_contaminate_a_sibling() {
         }; 8],
     )
     .unwrap();
-    let second = restore_scalar_effect_state_v1(
+    let second = restore_scalar_effect_state(
         bound(&controls, &descriptor_wire),
         &symmetric,
-        EffectStateLimitsV1::default(),
+        EffectStateLimits::default(),
         admission(&preparation),
         &mut [InitialParameterValue {
             parameter_index: 0,
@@ -419,8 +416,8 @@ fn a_bank_restore_declines_exactly_the_lane_whose_sections_differ() {
         return;
     };
     let lanes = width.lanes() as usize;
-    let replays: Box<[EffectBankPreparationV1]> = (0..lanes).map(|_| preparation.clone()).collect();
-    let mut bank = prepare_unpublished_effect_bank_state_v1(
+    let replays: Box<[EffectBankPreparation]> = (0..lanes).map(|_| preparation.clone()).collect();
+    let mut bank = prepare_unpublished_effect_bank_state(
         capability,
         miso_engine_lane::Backend::current(),
         width,
@@ -441,11 +438,11 @@ fn a_bank_restore_declines_exactly_the_lane_whose_sections_differ() {
     let symmetric = envelope(false);
     for lane in 0..lanes {
         let bytes = if lane == 1 { &asymmetric } else { &symmetric };
-        bank = restore_unpublished_effect_bank_track_state_v1(
+        bank = restore_unpublished_effect_bank_track_state(
             bank,
             lane as u32,
             bytes,
-            EffectStateLimitsV1::default(),
+            EffectStateLimits::default(),
             admission(&preparation),
         )
         .expect("restore");
@@ -460,7 +457,7 @@ fn a_bank_restore_declines_exactly_the_lane_whose_sections_differ() {
     }
     assert_eq!(
         bank.lane_channel_symmetry(lanes).declined(),
-        ChannelSymmetryWitnessV1::from_terms(0).declined(),
+        ChannelSymmetryWitness::from_terms(0).declined(),
         "a lane index the width does not have declines on every term"
     );
 }

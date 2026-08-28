@@ -22,8 +22,8 @@
 #![allow(missing_docs)]
 
 use core::cmp::Ordering;
-use miso_engine_effect_contract::{BankWidth, ChannelSymmetryWitnessV1, EffectProgramKeyV1};
-use miso_engine_rack::{BankSlotKey, RackLocationV1, RackProgramV1};
+use miso_engine_effect_contract::{BankWidth, ChannelSymmetryWitness, EffectProgramKey};
+use miso_engine_rack::{BankSlotKey, RackLocation, RackProgram};
 
 /// Which pool a candidate competes in, beside its dependency level and its rack.
 ///
@@ -42,10 +42,10 @@ use miso_engine_rack::{BankSlotKey, RackLocationV1, RackProgramV1};
 /// Nothing here is load-bearing for correctness. Pooling regroups lanes and never changes
 /// per-lane arithmetic (AGENTS.md), so a wrong class costs at most a missed optimisation: too
 /// optimistic and the cohort simply declines at dispatch, too pessimistic and a collapse is
-/// missed. What it *must* be is **the same on both sides**: see [`CohortPoolClassV1::\
+/// missed. What it *must* be is **the same on both sides**: see [`CohortPoolClass::\
 /// of_prepare_witness`] for the two-planner obligation.
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub enum CohortPoolClassV1 {
+pub enum CohortPoolClass {
     /// Every prepare-time term of this track's channel-symmetry witness holds: its two lanes read
     /// one source channel and every designed per-lane word its upstream stages' kernels read
     /// compares bit-equal between the channels.
@@ -56,7 +56,7 @@ pub enum CohortPoolClassV1 {
     Stereo,
 }
 
-impl CohortPoolClassV1 {
+impl CohortPoolClass {
     /// Every class, in the order [`plan_bank_groups`] emits their groups.
     pub const ALL: [Self; 2] = [Self::MonoSymmetricAtPrepare, Self::Stereo];
 
@@ -67,7 +67,7 @@ impl CohortPoolClassV1 {
     /// pretended otherwise would be a different partition on every recompile. They are the
     /// dispatch's business, not the planner's, and the conjunction is taken there.
     pub const PREPARE_TIME_TERMS: u8 =
-        ChannelSymmetryWitnessV1::SOURCE | ChannelSymmetryWitnessV1::DESIGNED;
+        ChannelSymmetryWitness::SOURCE | ChannelSymmetryWitness::DESIGNED;
 
     /// The **single** predicate. Both bank planners must reach a class through this function.
     ///
@@ -80,7 +80,7 @@ impl CohortPoolClassV1 {
     /// cohort. That is why the class is derived once per compile and handed to both planners, and
     /// why this is the only constructor.
     #[must_use]
-    pub const fn of_prepare_witness(witness: ChannelSymmetryWitnessV1) -> Self {
+    pub const fn of_prepare_witness(witness: ChannelSymmetryWitness) -> Self {
         if witness.holds(Self::PREPARE_TIME_TERMS) {
             Self::MonoSymmetricAtPrepare
         } else {
@@ -100,30 +100,30 @@ impl CohortPoolClassV1 {
 
 /// One track's ordered rack program, addressed by a caller-chosen stable id.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CohortCandidate<Id, K = EffectProgramKeyV1> {
+pub struct CohortCandidate<Id, K = EffectProgramKey> {
     pub id: Id,
-    pub program: RackProgramV1<K>,
-    /// The pool this candidate competes in. See [`CohortPoolClassV1`].
-    pub class: CohortPoolClassV1,
+    pub program: RackProgram<K>,
+    /// The pool this candidate competes in. See [`CohortPoolClass`].
+    pub class: CohortPoolClass,
 }
 
 /// Candidates already partitioned by dependency level by the caller: a bank never crosses a level,
 /// because its members must all be ready in the same wave (#96 F12).
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CohortLevel<Id, K = EffectProgramKeyV1> {
+pub struct CohortLevel<Id, K = EffectProgramKey> {
     pub level: u64,
     pub candidates: Vec<CohortCandidate<Id, K>>,
 }
 
 /// One planned bank: a cohort leader's program plus the lanes that run it.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BankGroup<Id, K = EffectProgramKeyV1> {
+pub struct BankGroup<Id, K = EffectProgramKey> {
     pub level: u64,
-    pub rack: RackLocationV1,
+    pub rack: RackLocation,
     /// The pool this group was formed in. Every member carried this class as a candidate, which
     /// is what makes a group's collapse eligibility a property of the group rather than a lane
     /// survey.
-    pub class: CohortPoolClassV1,
+    pub class: CohortPoolClass,
     /// The cohort leader's ordered program: a chain of `program.len()` slots.
     pub program: Box<[K]>,
     /// `len == width.lanes()`. `None` is a padding lane; padding lanes are always the highest
@@ -153,10 +153,10 @@ impl<Id, K: BankSlotKey> BankGroup<Id, K> {
             .iter()
             .any(|lane| lane.get(slot).copied().unwrap_or(false))
     }
-    /// The leader program as a [`RackProgramV1`], for callers that re-derive masks.
+    /// The leader program as a [`RackProgram`], for callers that re-derive masks.
     #[must_use]
-    pub fn program_v1(&self) -> RackProgramV1<K> {
-        RackProgramV1 {
+    pub fn program(&self) -> RackProgram<K> {
+        RackProgram {
             rack: self.rack,
             slots: self.program.clone(),
         }
@@ -165,7 +165,7 @@ impl<Id, K: BankSlotKey> BankGroup<Id, K> {
 
 /// The planner's whole output: banked groups plus the candidates that never bank.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BankPlan<Id, K = EffectProgramKeyV1> {
+pub struct BankPlan<Id, K = EffectProgramKey> {
     pub groups: Vec<BankGroup<Id, K>>,
     /// Candidates that never bank (empty program, or a connected sidechain), in `id` order.
     pub scalar: Vec<Id>,
@@ -188,7 +188,7 @@ impl<Id> WorkingMember<Id> {
 }
 
 struct WorkingGroup<Id, K> {
-    program: RackProgramV1<K>,
+    program: RackProgram<K>,
     members: Vec<WorkingMember<Id>>,
 }
 
@@ -245,7 +245,7 @@ fn order_members<Id: Ord>(members: &mut [WorkingMember<Id>], lanes: usize) {
 /// effect (#96 F1/F5).
 ///
 /// Pools are keyed by `(level, rack, class)`. The class is the mono-collapse M1 addition; see
-/// [`CohortPoolClassV1`] for what it partitions and why it must be derived identically by every
+/// [`CohortPoolClass`] for what it partitions and why it must be derived identically by every
 /// caller.
 ///
 /// # Errors
@@ -275,14 +275,14 @@ pub fn plan_bank_groups<Id: Ord + Clone, K: BankSlotKey>(
     let mut groups = Vec::new();
     let mut scalar = Vec::new();
     for (level, candidates) in by_level {
-        for rack in RackLocationV1::ALL {
+        for rack in RackLocation::ALL {
             // The third pool key, beside the level and the rack (mono-collapse M1). A cohort is
             // banked and eligibility is decided per track, so candidates that could collapse are
-            // pooled apart from candidates that could not; see `CohortPoolClassV1`. A session
+            // pooled apart from candidates that could not; see `CohortPoolClass`. A session
             // whose tracks all carry one class -- every fixture but the half-mono row -- forms
             // exactly the pools it formed before, in the same order, because the other class's
             // pool is empty and emits nothing.
-            for class in CohortPoolClassV1::ALL {
+            for class in CohortPoolClass::ALL {
                 // No canonicalising sort here: leader selection is a total `max_by` over unique ids,
                 // `order_members` fixes every group's lane order, and `scalar` is sorted on the way
                 // out, so the plan cannot depend on pool order. `output_is_input_order_invariant`
@@ -356,8 +356,8 @@ pub fn plan_bank_groups<Id: Ord + Clone, K: BankSlotKey>(
 
 fn materialize<Id, K>(
     level: u64,
-    rack: RackLocationV1,
-    class: CohortPoolClassV1,
+    rack: RackLocation,
+    class: CohortPoolClass,
     group: WorkingGroup<Id, K>,
     lanes: usize,
 ) -> BankGroup<Id, K> {
@@ -439,7 +439,7 @@ fn plan_invariants_hold<Id: Ord + Clone, K: BankSlotKey>(
 
 /// Total order over program keys, exposed so callers can reproduce cohort order in tests.
 #[must_use]
-pub fn compare_programs<K: BankSlotKey>(a: &RackProgramV1<K>, b: &RackProgramV1<K>) -> Ordering {
+pub fn compare_programs<K: BankSlotKey>(a: &RackProgram<K>, b: &RackProgram<K>) -> Ordering {
     a.rack.cmp(&b.rack).then_with(|| a.slots.cmp(&b.slots))
 }
 
@@ -447,16 +447,16 @@ pub fn compare_programs<K: BankSlotKey>(a: &RackProgramV1<K>, b: &RackProgramV1<
 mod tests {
     use super::*;
     use miso_engine_effect_contract::{
-        EffectId, EffectQuality, LatencySamples, LinkMode, PortId, PreparedPortsV1,
+        EffectId, EffectQuality, LatencySamples, LinkMode, PortId, PreparedPorts,
         PreparedSidechainPort, StatePayloadSizes, TailSamples,
     };
     use std::collections::BTreeMap;
 
-    fn key(index: usize) -> EffectProgramKeyV1 {
+    fn key(index: usize) -> EffectProgramKey {
         key_with(index, PreparedSidechainPort::None)
     }
 
-    fn key_with(index: usize, sidechain: PreparedSidechainPort) -> EffectProgramKeyV1 {
+    fn key_with(index: usize, sidechain: PreparedSidechainPort) -> EffectProgramKey {
         let effect_id = match index {
             0 => EffectId::new("fixture.a"),
             1 => EffectId::new("fixture.b"),
@@ -464,7 +464,7 @@ mod tests {
             _ => EffectId::new("fixture.d"),
         }
         .expect("static id");
-        EffectProgramKeyV1 {
+        EffectProgramKey {
             effect_id,
             contract_major: 1,
             state_layout_version: 1,
@@ -473,7 +473,7 @@ mod tests {
             quality: EffectQuality::Normal,
             bypass: false,
             link_mode: LinkMode::DualMono,
-            ports: PreparedPortsV1 { sidechain },
+            ports: PreparedPorts { sidechain },
             latency: LatencySamples(0),
             tail: TailSamples::Finite(0),
             state_sizes: StatePayloadSizes {
@@ -486,18 +486,18 @@ mod tests {
         }
     }
 
-    fn program(slots: &[usize]) -> RackProgramV1 {
-        RackProgramV1::new(
-            RackLocationV1::Simd1,
+    fn program(slots: &[usize]) -> RackProgram {
+        RackProgram::new(
+            RackLocation::Simd1,
             slots.iter().copied().map(key).collect(),
         )
     }
 
     fn candidate(id: u32, slots: &[usize]) -> CohortCandidate<u32> {
-        classed(id, slots, CohortPoolClassV1::Stereo)
+        classed(id, slots, CohortPoolClass::Stereo)
     }
 
-    fn classed(id: u32, slots: &[usize], class: CohortPoolClassV1) -> CohortCandidate<u32> {
+    fn classed(id: u32, slots: &[usize], class: CohortPoolClass) -> CohortCandidate<u32> {
         CohortCandidate {
             id,
             program: program(slots),
@@ -538,7 +538,7 @@ mod tests {
         candidates: &[(u64, CohortCandidate<u32>)],
         lanes: usize,
     ) -> Vec<Vec<u32>> {
-        let mut by_program: BTreeMap<RackProgramV1, Vec<(u64, u32)>> = BTreeMap::new();
+        let mut by_program: BTreeMap<RackProgram, Vec<(u64, u32)>> = BTreeMap::new();
         for (level, candidate) in candidates {
             if !candidate.program.is_bankable() {
                 continue;
@@ -623,7 +623,7 @@ mod tests {
             }
 
             let mixed = {
-                let mut level_by_program: BTreeMap<RackProgramV1, u64> = BTreeMap::new();
+                let mut level_by_program: BTreeMap<RackProgram, u64> = BTreeMap::new();
                 let mut mixed = false;
                 for (level, candidate) in &flat {
                     match level_by_program.get(&candidate.program) {
@@ -658,8 +658,8 @@ mod tests {
     /// P2: empty programs and connected sidechains never bank.
     #[test]
     fn empty_programs_and_connected_sidechains_never_bank() {
-        let connected = RackProgramV1::new(
-            RackLocationV1::Simd1,
+        let connected = RackProgram::new(
+            RackLocation::Simd1,
             vec![key_with(
                 0,
                 PreparedSidechainPort::Connected {
@@ -668,8 +668,8 @@ mod tests {
                 },
             )],
         );
-        let unconnected = RackProgramV1::new(
-            RackLocationV1::Simd1,
+        let unconnected = RackProgram::new(
+            RackLocation::Simd1,
             vec![key_with(
                 0,
                 PreparedSidechainPort::Unconnected {
@@ -682,32 +682,32 @@ mod tests {
             CohortCandidate {
                 id: 0,
                 program: program(&[]),
-                class: CohortPoolClassV1::Stereo,
+                class: CohortPoolClass::Stereo,
             },
             CohortCandidate {
                 id: 1,
                 program: connected,
-                class: CohortPoolClassV1::Stereo,
+                class: CohortPoolClass::Stereo,
             },
             CohortCandidate {
                 id: 2,
                 program: unconnected.clone(),
-                class: CohortPoolClassV1::Stereo,
+                class: CohortPoolClass::Stereo,
             },
             CohortCandidate {
                 id: 3,
                 program: unconnected.clone(),
-                class: CohortPoolClassV1::Stereo,
+                class: CohortPoolClass::Stereo,
             },
             CohortCandidate {
                 id: 4,
                 program: unconnected.clone(),
-                class: CohortPoolClassV1::Stereo,
+                class: CohortPoolClass::Stereo,
             },
             CohortCandidate {
                 id: 5,
                 program: unconnected,
-                class: CohortPoolClassV1::Stereo,
+                class: CohortPoolClass::Stereo,
             },
         ];
         let plan = plan_bank_groups(&one_level(candidates), BankWidth::Four).expect("plan");
@@ -729,7 +729,7 @@ mod tests {
         );
         assert!(program(&[0, 0]).subsequence_mask(&leader).is_none());
         assert!(program(&[1, 0, 1, 0]).subsequence_mask(&leader).is_none());
-        let other_rack = RackProgramV1::new(RackLocationV1::Simd2, vec![key(1)]);
+        let other_rack = RackProgram::new(RackLocation::Simd2, vec![key(1)]);
         assert!(other_rack.subsequence_mask(&leader).is_none());
     }
 
@@ -852,9 +852,9 @@ mod tests {
                         id,
                         &[0, 1],
                         if id.is_multiple_of(2) {
-                            CohortPoolClassV1::MonoSymmetricAtPrepare
+                            CohortPoolClass::MonoSymmetricAtPrepare
                         } else {
-                            CohortPoolClassV1::Stereo
+                            CohortPoolClass::Stereo
                         },
                     )
                 })
@@ -874,9 +874,9 @@ mod tests {
             for group in &mixed.groups {
                 for id in group.members.iter().flatten() {
                     let expected = if id.is_multiple_of(2) {
-                        CohortPoolClassV1::MonoSymmetricAtPrepare
+                        CohortPoolClass::MonoSymmetricAtPrepare
                     } else {
-                        CohortPoolClassV1::Stereo
+                        CohortPoolClass::Stereo
                     };
                     assert_eq!(group.class, expected, "width={lanes}: id {id}");
                 }
@@ -884,12 +884,12 @@ mod tests {
             let mono = mixed
                 .groups
                 .iter()
-                .filter(|group| group.class == CohortPoolClassV1::MonoSymmetricAtPrepare)
+                .filter(|group| group.class == CohortPoolClass::MonoSymmetricAtPrepare)
                 .count();
             assert_eq!(mono, 2, "width={lanes}: half the banks are the mono pool's");
             // The uniform session pools exactly as it did before there was a class at all.
             for group in &plain.groups {
-                assert_eq!(group.class, CohortPoolClassV1::Stereo);
+                assert_eq!(group.class, CohortPoolClass::Stereo);
             }
         }
     }
@@ -900,48 +900,48 @@ mod tests {
     /// business" row flips and this fails.
     #[test]
     fn the_pool_class_rests_on_the_two_prepare_time_terms() {
-        use ChannelSymmetryWitnessV1 as W;
-        let cases: [(u8, CohortPoolClassV1); 6] = [
+        use ChannelSymmetryWitness as W;
+        let cases: [(u8, CohortPoolClass); 6] = [
             (
                 W::SYMMETRIC.terms(),
-                CohortPoolClassV1::MonoSymmetricAtPrepare,
+                CohortPoolClass::MonoSymmetricAtPrepare,
             ),
             // Live traffic and restores are not the planner's business: the dispatch conjoins
             // them, and a class that moved with them would repartition on every block.
             (
                 W::symmetric_except(W::LIVE).terms(),
-                CohortPoolClassV1::MonoSymmetricAtPrepare,
+                CohortPoolClass::MonoSymmetricAtPrepare,
             ),
             (
                 W::symmetric_except(W::UNBYPASSED).terms(),
-                CohortPoolClassV1::MonoSymmetricAtPrepare,
+                CohortPoolClass::MonoSymmetricAtPrepare,
             ),
             (
                 W::symmetric_except(W::RESTORED).terms(),
-                CohortPoolClassV1::MonoSymmetricAtPrepare,
+                CohortPoolClass::MonoSymmetricAtPrepare,
             ),
             // Both prepare-time terms gate it.
             (
                 W::symmetric_except(W::SOURCE).terms(),
-                CohortPoolClassV1::Stereo,
+                CohortPoolClass::Stereo,
             ),
             (
                 W::symmetric_except(W::DESIGNED).terms(),
-                CohortPoolClassV1::Stereo,
+                CohortPoolClass::Stereo,
             ),
         ];
         for (terms, expected) in cases {
             assert_eq!(
-                CohortPoolClassV1::of_prepare_witness(W::from_terms(terms)),
+                CohortPoolClass::of_prepare_witness(W::from_terms(terms)),
                 expected,
                 "terms={terms:#b}"
             );
         }
         assert_eq!(
-            CohortPoolClassV1::of_prepare_witness(W::DECLINED),
-            CohortPoolClassV1::Stereo
+            CohortPoolClass::of_prepare_witness(W::DECLINED),
+            CohortPoolClass::Stereo
         );
-        assert_eq!(CohortPoolClassV1::default(), CohortPoolClassV1::Stereo);
+        assert_eq!(CohortPoolClass::default(), CohortPoolClass::Stereo);
     }
 
     /// P5: pooling is exhaustive, so no member is ever stranded behind an earlier free lane.
@@ -968,14 +968,14 @@ mod tests {
                     .collect();
                 candidates.push(CohortCandidate {
                     id,
-                    program: RackProgramV1::new(
-                        RackLocationV1::Simd1,
+                    program: RackProgram::new(
+                        RackLocation::Simd1,
                         slots.into_iter().map(key).collect(),
                     ),
-                    class: CohortPoolClassV1::Stereo,
+                    class: CohortPoolClass::Stereo,
                 });
             }
-            let by_id: BTreeMap<u32, RackProgramV1> = candidates
+            let by_id: BTreeMap<u32, RackProgram> = candidates
                 .iter()
                 .map(|candidate| (candidate.id, candidate.program.clone()))
                 .collect();
@@ -987,9 +987,7 @@ mod tests {
                 for later in plan.groups.iter().skip(index + 1) {
                     for member in later.members.iter().flatten() {
                         assert!(
-                            by_id[member]
-                                .subsequence_mask(&group.program_v1())
-                                .is_none(),
+                            by_id[member].subsequence_mask(&group.program()).is_none(),
                             "case={case}: id {member} could have filled a free lane in group {index}"
                         );
                     }
@@ -1021,14 +1019,14 @@ mod tests {
                     .collect();
                 candidates.push(CohortCandidate {
                     id,
-                    program: RackProgramV1::new(
-                        RackLocationV1::Simd1,
+                    program: RackProgram::new(
+                        RackLocation::Simd1,
                         slots.into_iter().map(key).collect(),
                     ),
-                    class: CohortPoolClassV1::Stereo,
+                    class: CohortPoolClass::Stereo,
                 });
             }
-            let by_id: BTreeMap<u32, RackProgramV1> = candidates
+            let by_id: BTreeMap<u32, RackProgram> = candidates
                 .iter()
                 .map(|candidate| (candidate.id, candidate.program.clone()))
                 .collect();
@@ -1038,13 +1036,13 @@ mod tests {
                     let Some(id) = member else { continue };
                     // The lane's own program, read off in leader-slot order, is exactly the leader
                     // keys at the positions the lane is active on.
-                    let run: Vec<&EffectProgramKeyV1> = group.active_slots[lane]
+                    let run: Vec<&EffectProgramKey> = group.active_slots[lane]
                         .iter()
                         .enumerate()
                         .filter(|(_, active)| **active)
                         .map(|(slot, _)| &group.program[slot])
                         .collect();
-                    let own: Vec<&EffectProgramKeyV1> = by_id[id].slots.iter().collect();
+                    let own: Vec<&EffectProgramKey> = by_id[id].slots.iter().collect();
                     assert_eq!(run, own, "case={case} lane={lane}");
                 }
                 for slot in 0..group.program.len() {
@@ -1127,15 +1125,15 @@ mod tests {
                     .map(|_| (splitmix(&mut state) % 3) as usize)
                     .collect();
                 let rack = if splitmix(&mut state).is_multiple_of(2) {
-                    RackLocationV1::Simd1
+                    RackLocation::Simd1
                 } else {
-                    RackLocationV1::Simd2
+                    RackLocation::Simd2
                 };
                 let level = splitmix(&mut state) % 3;
                 by_level.entry(level).or_default().push(CohortCandidate {
                     id,
-                    program: RackProgramV1::new(rack, slots.into_iter().map(key).collect()),
-                    class: CohortPoolClassV1::Stereo,
+                    program: RackProgram::new(rack, slots.into_iter().map(key).collect()),
+                    class: CohortPoolClass::Stereo,
                 });
             }
             let input: Vec<_> = by_level
@@ -1158,7 +1156,7 @@ mod tests {
                     assert_eq!(
                         candidate
                             .program
-                            .subsequence_mask(&group.program_v1())
+                            .subsequence_mask(&group.program())
                             .as_deref(),
                         Some(group.active_slots[lane].as_ref()),
                         "case={case} lane={lane}"
@@ -1187,7 +1185,7 @@ mod tests {
         assert_eq!(
             compare_programs(
                 &program(&[0]),
-                &RackProgramV1::new(RackLocationV1::Simd2, vec![key(0)])
+                &RackProgram::new(RackLocation::Simd2, vec![key(0)])
             ),
             Ordering::Less
         );

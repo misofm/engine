@@ -41,7 +41,7 @@ cargo test --locked -p miso-engine-parametric-eq --test <test binary>
 | 11 | the identity section is `m0 = 1 - 2^-24` instead of `1.0` | `src/lib.rs` | `contract` | RED |
 | 12 | the ramp increment is `2^-6 * (1 + 1e-7)` instead of exactly `2^-6` | `src/lib.rs` | `determinism` | RED |
 | 13 | the D7 flush is the identity | `../miso-engine-lane/src/lib.rs` | `time_domain` | RED |
-| 14 | `design_svf_v1` drops its spectral-norm guard | `src/lib.rs` | `analytic` | SURVIVED |
+| 14 | `design_svf` drops its spectral-norm guard | `src/lib.rs` | `analytic` | SURVIVED |
 | 15 | the automation domain check always validates against the frequency spec | `src/lib.rs` | `contract` | RED |
 | 16 | a settled band accepts stored words that disagree with its stored parameters | `src/lib.rs` | `contract` | RED |
 | 17 | the payload header stamps version 1 | `src/lib.rs` | `contract` | RED |

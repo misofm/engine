@@ -10,7 +10,7 @@ use miso_engine_core::realtime::audit;
 use miso_engine_effect_contract::{
     EffectProcessBlock, EffectQuality, InitialParameterValue, LinkMode, NativeEffectFactory,
     ParameterChannel, PrepareEffectLimits, PrepareEffectRequest, PreparedNativeEffect,
-    PreparedPortsV1, PreparedSidechainPort,
+    PreparedPorts, PreparedSidechainPort,
 };
 use miso_engine_parametric_eq::ParametricEqFactory;
 
@@ -126,7 +126,7 @@ fn prepare_eq() -> Box<dyn PreparedNativeEffect> {
             quality: EffectQuality::Normal,
             bypass: false,
             link_mode: LinkMode::DualMono,
-            ports: PreparedPortsV1 {
+            ports: PreparedPorts {
                 sidechain: PreparedSidechainPort::None,
             },
             initial_values: &initial_values,

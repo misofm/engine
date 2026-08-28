@@ -104,7 +104,7 @@ window the peak beside it describes — the observation window length is derived
 
 The frame is `3 * trackCount + 3` `f32` words: the frozen `2T + 2` peak section exactly where it
 was, then one **non-negative decibel magnitude** per track and the designated master's. The sample
-window rides a fixed `WebMeterHeaderV1` structure, because a `u64` does not survive an `f32` and
+window rides a fixed `WebMeterHeader` structure, because a `u64` does not survive an `f32` and
 splitting one across two lanes would put a decoding rule in the app that nothing could check.
 
 A session that asks for no observation capacity allocates none of it, renders byte-identical audio,

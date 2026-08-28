@@ -2,11 +2,11 @@
 
 #![allow(unsafe_code)]
 
-use crate::EffectDescriptorWireDiagnosticV1;
+use crate::EffectDescriptorWireDiagnostic;
 #[cfg(feature = "c-abi")]
 use crate::{
-    EFFECT_DESCRIPTOR_WIRE_V1_UNAVAILABLE, EffectDescriptorWireDiagnosticCodeV1,
-    verify_effect_descriptor_wire_v1,
+    EFFECT_DESCRIPTOR_WIRE_UNAVAILABLE, EffectDescriptorWireDiagnosticCode,
+    verify_effect_descriptor_wire,
 };
 #[cfg(feature = "c-abi")]
 use core::slice;
@@ -15,7 +15,7 @@ pub const EFFECT_DESCRIPTOR_INSPECTION_ABI_VERSION_V1: u32 = 0x0001_0000;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[repr(C)]
-pub struct EffectDescriptorParameterRecordV1 {
+pub struct EffectDescriptorParameterRecord {
     pub id: u32,
     pub unit: u32,
     pub domain: u32,
@@ -40,7 +40,7 @@ pub struct EffectDescriptorParameterRecordV1 {
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[repr(C)]
-pub struct EffectDescriptorPortRecordV1 {
+pub struct EffectDescriptorPortRecord {
     pub id_offset: u32,
     pub id_length: u32,
     pub role: u32,
@@ -51,7 +51,7 @@ pub struct EffectDescriptorPortRecordV1 {
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[repr(C)]
-pub struct EffectDescriptorQualityRecordV1 {
+pub struct EffectDescriptorQualityRecord {
     pub quality: u32,
     pub sample_rate: u32,
     pub latency_samples: u64,
@@ -68,7 +68,7 @@ pub struct EffectDescriptorQualityRecordV1 {
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[repr(C)]
-pub struct EffectDescriptorEnumChoiceRecordV1 {
+pub struct EffectDescriptorEnumChoiceRecord {
     pub value_bits: u32,
     pub label_offset: u32,
     pub label_length: u32,
@@ -82,7 +82,7 @@ pub struct EffectDescriptorEnumChoiceRecordV1 {
 /// parameter and port projections do, so a C caller reads one uniform record shape.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[repr(C)]
-pub struct EffectDescriptorObservationRecordV1 {
+pub struct EffectDescriptorObservationRecord {
     pub id: u32,
     pub kind: u32,
     pub unit: u32,
@@ -101,7 +101,7 @@ pub struct EffectDescriptorObservationRecordV1 {
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[repr(C)]
-pub struct EffectDescriptorSummaryV1 {
+pub struct EffectDescriptorSummary {
     pub abi_version: u32,
     pub total_bytes: u32,
     pub parameter_count: u32,
@@ -133,8 +133,8 @@ fn read_u64(bytes: &[u8], offset: usize) -> u64 {
 
 #[cfg(feature = "c-abi")]
 unsafe fn write_diagnostic(
-    output: *mut EffectDescriptorWireDiagnosticV1,
-    value: EffectDescriptorWireDiagnosticV1,
+    output: *mut EffectDescriptorWireDiagnostic,
+    value: EffectDescriptorWireDiagnostic,
 ) {
     // SAFETY: The caller promises writable storage for the mandatory diagnostic record.
     unsafe { output.write(value) };
@@ -156,17 +156,17 @@ unsafe fn zero_required_counts(
 }
 
 #[cfg(feature = "c-abi")]
-fn null_diagnostic() -> EffectDescriptorWireDiagnosticV1 {
-    EffectDescriptorWireDiagnosticV1::new(
-        EffectDescriptorWireDiagnosticCodeV1::Null,
-        EFFECT_DESCRIPTOR_WIRE_V1_UNAVAILABLE,
-        EFFECT_DESCRIPTOR_WIRE_V1_UNAVAILABLE,
+fn null_diagnostic() -> EffectDescriptorWireDiagnostic {
+    EffectDescriptorWireDiagnostic::new(
+        EffectDescriptorWireDiagnosticCode::Null,
+        EFFECT_DESCRIPTOR_WIRE_UNAVAILABLE,
+        EFFECT_DESCRIPTOR_WIRE_UNAVAILABLE,
     )
 }
 
 #[cfg(feature = "c-abi")]
-fn parameter_record(bytes: &[u8], offset: usize) -> EffectDescriptorParameterRecordV1 {
-    EffectDescriptorParameterRecordV1 {
+fn parameter_record(bytes: &[u8], offset: usize) -> EffectDescriptorParameterRecord {
+    EffectDescriptorParameterRecord {
         id: read_u32(bytes, offset),
         unit: read_u32(bytes, offset + 4),
         domain: read_u32(bytes, offset + 8),
@@ -191,8 +191,8 @@ fn parameter_record(bytes: &[u8], offset: usize) -> EffectDescriptorParameterRec
 }
 
 #[cfg(feature = "c-abi")]
-fn port_record(bytes: &[u8], offset: usize) -> EffectDescriptorPortRecordV1 {
-    EffectDescriptorPortRecordV1 {
+fn port_record(bytes: &[u8], offset: usize) -> EffectDescriptorPortRecord {
+    EffectDescriptorPortRecord {
         id_offset: read_u32(bytes, offset),
         id_length: read_u32(bytes, offset + 4),
         role: read_u32(bytes, offset + 8),
@@ -203,8 +203,8 @@ fn port_record(bytes: &[u8], offset: usize) -> EffectDescriptorPortRecordV1 {
 }
 
 #[cfg(feature = "c-abi")]
-fn quality_record(bytes: &[u8], offset: usize) -> EffectDescriptorQualityRecordV1 {
-    EffectDescriptorQualityRecordV1 {
+fn quality_record(bytes: &[u8], offset: usize) -> EffectDescriptorQualityRecord {
+    EffectDescriptorQualityRecord {
         quality: read_u32(bytes, offset),
         sample_rate: read_u32(bytes, offset + 4),
         latency_samples: read_u64(bytes, offset + 8),
@@ -221,8 +221,8 @@ fn quality_record(bytes: &[u8], offset: usize) -> EffectDescriptorQualityRecordV
 }
 
 #[cfg(feature = "c-abi")]
-fn observation_record(bytes: &[u8], offset: usize) -> EffectDescriptorObservationRecordV1 {
-    EffectDescriptorObservationRecordV1 {
+fn observation_record(bytes: &[u8], offset: usize) -> EffectDescriptorObservationRecord {
+    EffectDescriptorObservationRecord {
         id: read_u32(bytes, offset),
         kind: u32::from(bytes[offset + 4]),
         unit: u32::from(bytes[offset + 5]),
@@ -241,8 +241,8 @@ fn observation_record(bytes: &[u8], offset: usize) -> EffectDescriptorObservatio
 }
 
 #[cfg(feature = "c-abi")]
-fn enum_choice_record(bytes: &[u8], offset: usize) -> EffectDescriptorEnumChoiceRecordV1 {
-    EffectDescriptorEnumChoiceRecordV1 {
+fn enum_choice_record(bytes: &[u8], offset: usize) -> EffectDescriptorEnumChoiceRecord {
+    EffectDescriptorEnumChoiceRecord {
         value_bits: read_u32(bytes, offset),
         label_offset: read_u32(bytes, offset + 4),
         label_length: read_u32(bytes, offset + 8),
@@ -269,23 +269,23 @@ pub unsafe extern "C" fn miso_engine_effect_descriptor_v1_inspect(
     wire: *const u8,
     wire_len: usize,
     maximum_wire_bytes: u32,
-    summary: *mut EffectDescriptorSummaryV1,
-    parameters: *mut EffectDescriptorParameterRecordV1,
+    summary: *mut EffectDescriptorSummary,
+    parameters: *mut EffectDescriptorParameterRecord,
     parameter_capacity: u32,
-    ports: *mut EffectDescriptorPortRecordV1,
+    ports: *mut EffectDescriptorPortRecord,
     port_capacity: u32,
-    qualities: *mut EffectDescriptorQualityRecordV1,
+    qualities: *mut EffectDescriptorQualityRecord,
     quality_capacity: u32,
-    enum_choices: *mut EffectDescriptorEnumChoiceRecordV1,
+    enum_choices: *mut EffectDescriptorEnumChoiceRecord,
     enum_choice_capacity: u32,
     required_parameters: *mut u32,
     required_ports: *mut u32,
     required_qualities: *mut u32,
     required_enum_choices: *mut u32,
-    diagnostic: *mut EffectDescriptorWireDiagnosticV1,
+    diagnostic: *mut EffectDescriptorWireDiagnostic,
 ) -> u32 {
     if diagnostic.is_null() {
-        return EffectDescriptorWireDiagnosticCodeV1::Null as u32;
+        return EffectDescriptorWireDiagnosticCode::Null as u32;
     }
     let mandatory_null = summary.is_null()
         || required_parameters.is_null()
@@ -309,7 +309,7 @@ pub unsafe extern "C" fn miso_engine_effect_descriptor_v1_inspect(
             );
             write_diagnostic(diagnostic, null_diagnostic());
         }
-        return EffectDescriptorWireDiagnosticCodeV1::Null as u32;
+        return EffectDescriptorWireDiagnosticCode::Null as u32;
     }
     let wire_bytes = if wire_len == 0 {
         &[]
@@ -318,7 +318,7 @@ pub unsafe extern "C" fn miso_engine_effect_descriptor_v1_inspect(
         // exactly `wire_len` bytes for this call.
         unsafe { slice::from_raw_parts(wire, wire_len) }
     };
-    let verified = match verify_effect_descriptor_wire_v1(wire_bytes, maximum_wire_bytes) {
+    let verified = match verify_effect_descriptor_wire(wire_bytes, maximum_wire_bytes) {
         Ok(value) => value,
         Err(error) => {
             // SAFETY: All required pointers and the diagnostic are mandatory and nonnull here.
@@ -349,10 +349,10 @@ pub unsafe extern "C" fn miso_engine_effect_descriptor_v1_inspect(
             .and_then(|value| value.checked_add(required_quality_count.checked_mul(64)?))
             .and_then(|value| value.checked_add(required_choice_count.checked_mul(16)?));
         let Some(required_bytes) = required_bytes else {
-            let error = EffectDescriptorWireDiagnosticV1::new(
-                EffectDescriptorWireDiagnosticCodeV1::Overflow,
-                EFFECT_DESCRIPTOR_WIRE_V1_UNAVAILABLE,
-                EFFECT_DESCRIPTOR_WIRE_V1_UNAVAILABLE,
+            let error = EffectDescriptorWireDiagnostic::new(
+                EffectDescriptorWireDiagnosticCode::Overflow,
+                EFFECT_DESCRIPTOR_WIRE_UNAVAILABLE,
+                EFFECT_DESCRIPTOR_WIRE_UNAVAILABLE,
             );
             // SAFETY: Mandatory outputs were checked nonnull.
             unsafe {
@@ -366,7 +366,7 @@ pub unsafe extern "C" fn miso_engine_effect_descriptor_v1_inspect(
             }
             return error.code as u32;
         };
-        let error = EffectDescriptorWireDiagnosticV1::buffer_too_small(required_bytes);
+        let error = EffectDescriptorWireDiagnostic::buffer_too_small(required_bytes);
         // SAFETY: Mandatory count and diagnostic outputs were checked nonnull; no summary or
         // record array has been written.
         unsafe {
@@ -381,7 +381,7 @@ pub unsafe extern "C" fn miso_engine_effect_descriptor_v1_inspect(
     // Issue 078 forbids validating the same descriptor twice: the identity comes from the value
     // the single verification pass above already proved canonical.
     let identity = *verified.identity().as_bytes();
-    let summary_value = EffectDescriptorSummaryV1 {
+    let summary_value = EffectDescriptorSummary {
         abi_version: EFFECT_DESCRIPTOR_INSPECTION_ABI_VERSION_V1,
         total_bytes: wire_bytes.len() as u32,
         parameter_count: required_parameter_count,
@@ -427,14 +427,14 @@ pub unsafe extern "C" fn miso_engine_effect_descriptor_v1_inspect(
         required_enum_choices.write(required_choice_count);
         write_diagnostic(
             diagnostic,
-            EffectDescriptorWireDiagnosticV1::new(
-                EffectDescriptorWireDiagnosticCodeV1::Ok,
-                EFFECT_DESCRIPTOR_WIRE_V1_UNAVAILABLE,
-                EFFECT_DESCRIPTOR_WIRE_V1_UNAVAILABLE,
+            EffectDescriptorWireDiagnostic::new(
+                EffectDescriptorWireDiagnosticCode::Ok,
+                EFFECT_DESCRIPTOR_WIRE_UNAVAILABLE,
+                EFFECT_DESCRIPTOR_WIRE_UNAVAILABLE,
             ),
         );
     }
-    EffectDescriptorWireDiagnosticCodeV1::Ok as u32
+    EffectDescriptorWireDiagnosticCode::Ok as u32
 }
 
 /// Inspect the observation menu of one complete canonical descriptor wire value (issue #143).
@@ -444,7 +444,7 @@ pub unsafe extern "C" fn miso_engine_effect_descriptor_v1_inspect(
 /// its record layouts are frozen C ABI, and #143 changes no existing field, offset or size. A
 /// caller that does not care about observations never learns this symbol exists.
 ///
-/// Returns [`EffectDescriptorWireDiagnosticCodeV1::Ok`] and writes `required_observations` records;
+/// Returns [`EffectDescriptorWireDiagnosticCode::Ok`] and writes `required_observations` records;
 /// a zero-tap descriptor writes zero records and is not an error.
 ///
 /// # Safety
@@ -459,13 +459,13 @@ pub unsafe extern "C" fn miso_engine_effect_descriptor_v1_inspect_observations(
     wire: *const u8,
     wire_len: usize,
     maximum_wire_bytes: u32,
-    observations: *mut EffectDescriptorObservationRecordV1,
+    observations: *mut EffectDescriptorObservationRecord,
     observation_capacity: u32,
     required_observations: *mut u32,
-    diagnostic: *mut EffectDescriptorWireDiagnosticV1,
+    diagnostic: *mut EffectDescriptorWireDiagnostic,
 ) -> u32 {
     if diagnostic.is_null() {
-        return EffectDescriptorWireDiagnosticCodeV1::Null as u32;
+        return EffectDescriptorWireDiagnosticCode::Null as u32;
     }
     if required_observations.is_null()
         || (wire.is_null() && wire_len != 0)
@@ -478,7 +478,7 @@ pub unsafe extern "C" fn miso_engine_effect_descriptor_v1_inspect_observations(
             }
             write_diagnostic(diagnostic, null_diagnostic());
         }
-        return EffectDescriptorWireDiagnosticCodeV1::Null as u32;
+        return EffectDescriptorWireDiagnosticCode::Null as u32;
     }
     let wire_bytes = if wire_len == 0 {
         &[]
@@ -487,7 +487,7 @@ pub unsafe extern "C" fn miso_engine_effect_descriptor_v1_inspect_observations(
         // exactly `wire_len` bytes for this call.
         unsafe { slice::from_raw_parts(wire, wire_len) }
     };
-    let verified = match verify_effect_descriptor_wire_v1(wire_bytes, maximum_wire_bytes) {
+    let verified = match verify_effect_descriptor_wire(wire_bytes, maximum_wire_bytes) {
         Ok(value) => value,
         Err(error) => {
             // SAFETY: Both mandatory outputs were checked nonnull.
@@ -501,10 +501,10 @@ pub unsafe extern "C" fn miso_engine_effect_descriptor_v1_inspect_observations(
     let required = verified.observation_count();
     if observation_capacity < required {
         let Some(required_bytes) = required.checked_mul(32) else {
-            let error = EffectDescriptorWireDiagnosticV1::new(
-                EffectDescriptorWireDiagnosticCodeV1::Overflow,
-                EFFECT_DESCRIPTOR_WIRE_V1_UNAVAILABLE,
-                EFFECT_DESCRIPTOR_WIRE_V1_UNAVAILABLE,
+            let error = EffectDescriptorWireDiagnostic::new(
+                EffectDescriptorWireDiagnosticCode::Overflow,
+                EFFECT_DESCRIPTOR_WIRE_UNAVAILABLE,
+                EFFECT_DESCRIPTOR_WIRE_UNAVAILABLE,
             );
             // SAFETY: Both mandatory outputs were checked nonnull.
             unsafe {
@@ -513,7 +513,7 @@ pub unsafe extern "C" fn miso_engine_effect_descriptor_v1_inspect_observations(
             }
             return error.code as u32;
         };
-        let error = EffectDescriptorWireDiagnosticV1::buffer_too_small(required_bytes);
+        let error = EffectDescriptorWireDiagnostic::buffer_too_small(required_bytes);
         // SAFETY: Both mandatory outputs were checked nonnull; no record has been written.
         unsafe {
             required_observations.write(required);
@@ -537,31 +537,31 @@ pub unsafe extern "C" fn miso_engine_effect_descriptor_v1_inspect_observations(
         required_observations.write(required);
         write_diagnostic(
             diagnostic,
-            EffectDescriptorWireDiagnosticV1::new(
-                EffectDescriptorWireDiagnosticCodeV1::Ok,
-                EFFECT_DESCRIPTOR_WIRE_V1_UNAVAILABLE,
-                EFFECT_DESCRIPTOR_WIRE_V1_UNAVAILABLE,
+            EffectDescriptorWireDiagnostic::new(
+                EffectDescriptorWireDiagnosticCode::Ok,
+                EFFECT_DESCRIPTOR_WIRE_UNAVAILABLE,
+                EFFECT_DESCRIPTOR_WIRE_UNAVAILABLE,
             ),
         );
     }
-    EffectDescriptorWireDiagnosticCodeV1::Ok as u32
+    EffectDescriptorWireDiagnosticCode::Ok as u32
 }
 
 const _: () = {
-    assert!(size_of::<EffectDescriptorObservationRecordV1>() == 56);
-    assert!(align_of::<EffectDescriptorObservationRecordV1>() == 4);
-    assert!(size_of::<EffectDescriptorParameterRecordV1>() == 80);
-    assert!(align_of::<EffectDescriptorParameterRecordV1>() == 4);
-    assert!(size_of::<EffectDescriptorPortRecordV1>() == 24);
-    assert!(align_of::<EffectDescriptorPortRecordV1>() == 4);
-    assert!(size_of::<EffectDescriptorQualityRecordV1>() == 64);
-    assert!(align_of::<EffectDescriptorQualityRecordV1>() == 8);
-    assert!(size_of::<EffectDescriptorEnumChoiceRecordV1>() == 16);
-    assert!(align_of::<EffectDescriptorEnumChoiceRecordV1>() == 4);
-    assert!(size_of::<EffectDescriptorSummaryV1>() == 64);
-    assert!(align_of::<EffectDescriptorSummaryV1>() == 4);
-    assert!(size_of::<EffectDescriptorWireDiagnosticV1>() == 16);
-    assert!(align_of::<EffectDescriptorWireDiagnosticV1>() == 4);
+    assert!(size_of::<EffectDescriptorObservationRecord>() == 56);
+    assert!(align_of::<EffectDescriptorObservationRecord>() == 4);
+    assert!(size_of::<EffectDescriptorParameterRecord>() == 80);
+    assert!(align_of::<EffectDescriptorParameterRecord>() == 4);
+    assert!(size_of::<EffectDescriptorPortRecord>() == 24);
+    assert!(align_of::<EffectDescriptorPortRecord>() == 4);
+    assert!(size_of::<EffectDescriptorQualityRecord>() == 64);
+    assert!(align_of::<EffectDescriptorQualityRecord>() == 8);
+    assert!(size_of::<EffectDescriptorEnumChoiceRecord>() == 16);
+    assert!(align_of::<EffectDescriptorEnumChoiceRecord>() == 4);
+    assert!(size_of::<EffectDescriptorSummary>() == 64);
+    assert!(align_of::<EffectDescriptorSummary>() == 4);
+    assert!(size_of::<EffectDescriptorWireDiagnostic>() == 16);
+    assert!(align_of::<EffectDescriptorWireDiagnostic>() == 4);
 };
 
 #[cfg(test)]
@@ -574,64 +574,61 @@ mod tests {
     fn c_records_have_the_frozen_sizes_alignments_and_offsets() {
         assert_eq!(
             (
-                size_of::<EffectDescriptorParameterRecordV1>(),
-                align_of::<EffectDescriptorParameterRecordV1>()
+                size_of::<EffectDescriptorParameterRecord>(),
+                align_of::<EffectDescriptorParameterRecord>()
             ),
             (80, 4)
         );
         assert_eq!(
             (
-                size_of::<EffectDescriptorPortRecordV1>(),
-                align_of::<EffectDescriptorPortRecordV1>()
+                size_of::<EffectDescriptorPortRecord>(),
+                align_of::<EffectDescriptorPortRecord>()
             ),
             (24, 4)
         );
         assert_eq!(
             (
-                size_of::<EffectDescriptorQualityRecordV1>(),
-                align_of::<EffectDescriptorQualityRecordV1>()
+                size_of::<EffectDescriptorQualityRecord>(),
+                align_of::<EffectDescriptorQualityRecord>()
             ),
             (64, 8)
         );
         assert_eq!(
             (
-                size_of::<EffectDescriptorEnumChoiceRecordV1>(),
-                align_of::<EffectDescriptorEnumChoiceRecordV1>()
+                size_of::<EffectDescriptorEnumChoiceRecord>(),
+                align_of::<EffectDescriptorEnumChoiceRecord>()
             ),
             (16, 4)
         );
         assert_eq!(
             (
-                size_of::<EffectDescriptorSummaryV1>(),
-                align_of::<EffectDescriptorSummaryV1>()
+                size_of::<EffectDescriptorSummary>(),
+                align_of::<EffectDescriptorSummary>()
             ),
             (64, 4)
         );
         assert_eq!(
             (
-                size_of::<EffectDescriptorWireDiagnosticV1>(),
-                align_of::<EffectDescriptorWireDiagnosticV1>()
+                size_of::<EffectDescriptorWireDiagnostic>(),
+                align_of::<EffectDescriptorWireDiagnostic>()
             ),
             (16, 4)
         );
         assert_eq!(
-            offset_of!(EffectDescriptorParameterRecordV1, default_bits),
+            offset_of!(EffectDescriptorParameterRecord, default_bits),
             44
         );
-        assert_eq!(offset_of!(EffectDescriptorParameterRecordV1, reserved1), 76);
-        assert_eq!(offset_of!(EffectDescriptorPortRecordV1, reserved), 20);
+        assert_eq!(offset_of!(EffectDescriptorParameterRecord, reserved1), 76);
+        assert_eq!(offset_of!(EffectDescriptorPortRecord, reserved), 20);
+        assert_eq!(offset_of!(EffectDescriptorQualityRecord, tail_samples), 24);
         assert_eq!(
-            offset_of!(EffectDescriptorQualityRecordV1, tail_samples),
-            24
-        );
-        assert_eq!(
-            offset_of!(EffectDescriptorQualityRecordV1, scratch_bytes_per_frame),
+            offset_of!(EffectDescriptorQualityRecord, scratch_bytes_per_frame),
             56
         );
-        assert_eq!(offset_of!(EffectDescriptorEnumChoiceRecordV1, reserved), 12);
-        assert_eq!(offset_of!(EffectDescriptorSummaryV1, identity), 32);
+        assert_eq!(offset_of!(EffectDescriptorEnumChoiceRecord, reserved), 12);
+        assert_eq!(offset_of!(EffectDescriptorSummary, identity), 32);
         assert_eq!(
-            offset_of!(EffectDescriptorWireDiagnosticV1, required_bytes),
+            offset_of!(EffectDescriptorWireDiagnostic, required_bytes),
             12
         );
     }
@@ -661,7 +658,7 @@ mod tests {
                 ptr::null_mut(),
             )
         };
-        assert_eq!(code, EffectDescriptorWireDiagnosticCodeV1::Null as u32);
+        assert_eq!(code, EffectDescriptorWireDiagnosticCode::Null as u32);
     }
 
     #[test]
@@ -671,7 +668,7 @@ mod tests {
         let mut required_qualities = u32::MAX;
         let mut required_choices = u32::MAX;
         let mut diagnostic =
-            EffectDescriptorWireDiagnosticV1::new(EffectDescriptorWireDiagnosticCodeV1::Ok, 7, 9);
+            EffectDescriptorWireDiagnostic::new(EffectDescriptorWireDiagnosticCode::Ok, 7, 9);
         // SAFETY: All nonnull outputs point to one writable value. Null record pointers have zero
         // capacity; the deliberately null mandatory summary is the behavior under test.
         let code = unsafe {
@@ -695,7 +692,7 @@ mod tests {
                 &mut diagnostic,
             )
         };
-        assert_eq!(code, EffectDescriptorWireDiagnosticCodeV1::Null as u32);
+        assert_eq!(code, EffectDescriptorWireDiagnosticCode::Null as u32);
         assert_eq!(
             [
                 required_parameters,

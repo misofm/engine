@@ -10,9 +10,9 @@
 //!
 //! Legacy engine-v2-old solved the same problem with `MountedSession::start`: the mount is one
 //! thing, *starting* it on the render thread is another, and the started object is the only thing
-//! that can render. [`StartedRenderSessionV1`] is that shape.
+//! that can render. [`StartedRenderSession`] is that shape.
 //!
-//! * [`StartedRenderSessionV1::start`] runs on the render thread and re-attests there --
+//! * [`StartedRenderSession::start`] runs on the render thread and re-attests there --
 //!   `miso_engine_lane::attest_fp_environment` proves the canonical word can be installed *and*
 //!   the caller's word restored bit-exactly on this thread -- rather than trusting the boot-time
 //!   attestation of whatever thread happened to call `prepare_host_session`.
@@ -20,10 +20,10 @@
 //!   so a handle that could be moved or shared would let a host launder it onto a thread that was
 //!   never attested. [`PreparedHost`] stays `Send` (moving preparation to the render thread is the
 //!   supported hand-off); what cannot move is the *started* session.
-//! * [`StartedRenderSessionV1::render`] is the guarded entry: it pins the canonical environment for
+//! * [`StartedRenderSession::render`] is the guarded entry: it pins the canonical environment for
 //!   the block and restores the caller's exact word on every path out, success or rejection.
 //! * There is no `plan_mut`. A host cannot borrow the plan out of a started session and render it
-//!   unguarded; it calls [`StartedRenderSessionV1::stop`], which consumes the handle and gives the
+//!   unguarded; it calls [`StartedRenderSession::stop`], which consumes the handle and gives the
 //!   plan back for a control-thread teardown or a plan replacement.
 //!
 //! `stop` is also what makes the failure path of `start` honest: an attestation failure hands the
@@ -48,19 +48,19 @@ use crate::source::SourceControlSet;
 ///
 /// ```compile_fail
 /// fn requires_send<T: Send>() {}
-/// requires_send::<miso_engine_host_core::StartedRenderSessionV1>();
+/// requires_send::<miso_engine_host_core::StartedRenderSession>();
 /// ```
 ///
 /// ```compile_fail
 /// fn requires_sync<T: Sync>() {}
-/// requires_sync::<miso_engine_host_core::StartedRenderSessionV1>();
+/// requires_sync::<miso_engine_host_core::StartedRenderSession>();
 /// ```
-pub struct StartedRenderSessionV1 {
+pub struct StartedRenderSession {
     plan: PreparedRenderPlan,
     _not_send_not_sync: PhantomData<*const ()>,
 }
 
-impl StartedRenderSessionV1 {
+impl StartedRenderSession {
     /// Attest this thread's floating-point environment and take ownership of the plan.
     ///
     /// Call this from the render thread, once, before the first block -- not from the control
@@ -164,11 +164,11 @@ impl StartedRenderSessionV1 {
     }
 }
 
-impl core::fmt::Debug for StartedRenderSessionV1 {
+impl core::fmt::Debug for StartedRenderSession {
     /// Address-free: the plan is not printable, so only its clock position appears.
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         formatter
-            .debug_struct("StartedRenderSessionV1")
+            .debug_struct("StartedRenderSession")
             .field("next_absolute_sample", &self.plan.next_absolute_sample())
             .finish_non_exhaustive()
     }
@@ -178,7 +178,7 @@ impl PreparedHost {
     /// Split a prepared host into a render-thread session and its control-side halves.
     ///
     /// Call the whole thing on the render thread the session will render on, or move the
-    /// [`PreparedHost`] there first: [`StartedRenderSessionV1`] cannot be moved afterwards. The
+    /// [`PreparedHost`] there first: [`StartedRenderSession`] cannot be moved afterwards. The
     /// returned [`SourceControlSet`] and [`HostPrepareReport`] are `Send` and go back to the
     /// control thread.
     ///
@@ -195,7 +195,7 @@ impl PreparedHost {
     pub fn start_render_session(
         self,
     ) -> Result<
-        (StartedRenderSessionV1, SourceControlSet, HostPrepareReport),
+        (StartedRenderSession, SourceControlSet, HostPrepareReport),
         (Self, FpEnvironmentRejection),
     > {
         let Self {
@@ -203,7 +203,7 @@ impl PreparedHost {
             sources,
             report,
         } = self;
-        match StartedRenderSessionV1::start(plan) {
+        match StartedRenderSession::start(plan) {
             Ok(started) => Ok((started, sources, report)),
             Err((plan, rejection)) => Err((
                 Self {

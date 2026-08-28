@@ -47,8 +47,8 @@
 //! | call | thread | rule |
 //! |---|---|---|
 //! | [`prepare_host_session`] / [`prepare_host_runtime`] | control | allocates, parses and compiles; never inside an audio callback |
-//! | [`PreparedHost::start_render_session`] / [`StartedRenderSessionV1::start`] | render, once | attests this thread's floating-point environment before the first block and returns the plan on refusal |
-//! | [`StartedRenderSessionV1::render_contiguous`] | render, exclusively | the guarded render entry: pins the canonical floating-point environment for the block and restores the caller's exact control word |
+//! | [`PreparedHost::start_render_session`] / [`StartedRenderSession::start`] | render, once | attests this thread's floating-point environment before the first block and returns the plan on refusal |
+//! | [`StartedRenderSession::render_contiguous`] | render, exclusively | the guarded render entry: pins the canonical floating-point environment for the block and restores the caller's exact control word |
 //! | [`SourceControlSet::submit`] / [`SourceControlSet::seek`] | control, one thread at a time | copies once into the ring, returns typed backpressure, never blocks and never allocates |
 //! | `PreparedRenderPlan::render(io, RenderTime { absolute_sample })` | render, exclusively | exactly once per quantum; `absolute_sample` must equal the previous report's `next_absolute_sample`, and `0` on the first call; no other call touches the plan from any other thread |
 //! | `drop(PreparedHost)` / `PlanRetirer::try_reclaim` | control | only after the render thread has quiesced; never from the callback |
@@ -78,7 +78,7 @@
 //!   flush law can reach. So the entry saves the caller's control word, installs the canonical one,
 //!   renders, and restores the caller's exact word -- on the success path, on every rejection path
 //!   and while unwinding. A host does not have to configure its thread, and gets its thread back
-//!   unchanged. [`StartedRenderSessionV1`] is that entry for an embedding host;
+//!   unchanged. [`StartedRenderSession`] is that entry for an embedding host;
 //!   `miso_engine_v2_render_f32_planar` is it for the C ABI. Browser Wasm needs neither: the core
 //!   specification fixes round-to-nearest-even and full subnormal arithmetic, so the guard is a
 //!   zero-sized value there and the shipped artifact is unchanged.
@@ -97,12 +97,12 @@ pub use diagnostics::{
     PrepareDiagnostics, PrepareRejection, diagnostic_lines, fixed_diagnostic_line,
 };
 pub use prepare::{
-    HostConsoleHandlesV1, HostConsoleRequestV1, HostPrepareCaps, HostPrepareReport,
-    HostShapePolicy, LAUNCH_SAMPLE_RATES_HZ, PreparedHost, compile_host_session, count_effects,
-    parse_host_session, prepare_host_runtime, prepare_host_runtime_with_console,
-    prepare_host_session, prepare_host_session_with_console,
+    HostConsoleHandles, HostConsoleRequest, HostPrepareCaps, HostPrepareReport, HostShapePolicy,
+    LAUNCH_SAMPLE_RATES_HZ, PreparedHost, compile_host_session, count_effects, parse_host_session,
+    prepare_host_runtime, prepare_host_runtime_with_console, prepare_host_session,
+    prepare_host_session_with_console,
 };
-pub use render_session::StartedRenderSessionV1;
+pub use render_session::StartedRenderSession;
 pub use solo::{ConsoleMuteDelta, ConsoleSoloState};
 pub use source::{
     SourceControlError, SourceControlSet, SourceSubmission, control_table_bytes,
@@ -113,9 +113,7 @@ pub use source::{
 ///
 /// Re-exported here so a host does not have to depend on `miso-engine-effect-compiler` -- the
 /// compile pipeline stays in this crate (#106 F1) and a host names only what its own ABI names.
-pub use miso_engine_effect_compiler::{
-    EffectControlProducerV1, EffectObservationHandleV1, EffectRack,
-};
+pub use miso_engine_effect_compiler::{EffectControlProducer, EffectObservationHandle, EffectRack};
 
 /// The channel-symmetry witness vocabulary, re-exported for hosts and planners.
 ///
@@ -125,19 +123,19 @@ pub use miso_engine_effect_compiler::{
 /// and they are deliberately separate because they are decided at different times by different
 /// owners:
 ///
-/// * [`session_structural_symmetry_v1`] answers from the **compiled session**, before any plan
+/// * [`session_structural_symmetry`] answers from the **compiled session**, before any plan
 ///   exists: the `SOURCE` term, which is the planner's pooling class.
 /// * `PreparedRenderPlan::symmetry_counters` answers from the **built runtime**: the census of the
 ///   four terms preparation, restore and the live drains maintain.
 ///
-/// The conjunction is [`ChannelSymmetryWitnessV1::and`], and since mono-collapse M2 it is what the
+/// The conjunction is [`ChannelSymmetryWitness::and`], and since mono-collapse M2 it is what the
 /// bank chains dispatch on: a cohort whose every active lane holds both halves renders one plane
 /// and duplicates it at the fader/matrix seam. The two halves are joined once, off the render
 /// thread, by `PreparedRenderPlan::arm_mono_collapse`; a plan nobody joins never collapses, which
 /// is the safe default and the reason the join is an explicit call rather than an inference.
-pub use miso_engine_builtins_compiler::{session_structural_symmetry_v1, track_mono_source_v1};
+pub use miso_engine_builtins_compiler::{session_structural_symmetry, track_mono_source};
 pub use miso_engine_effect_contract::{
-    ChannelSymmetryWitnessV1, LiveConsoleRecordV1, SeamSideV1, SymmetryEventV1,
+    ChannelSymmetryWitness, LiveConsoleRecord, SeamSide, SymmetryEvent,
 };
 
 #[doc(hidden)]

@@ -49,7 +49,7 @@ alternation, two measured rounds:
 The hoisted arm was **slower**, reproducibly, in both rounds and at both track counts. Two reasons,
 and both are worth keeping:
 
-1. The `f64` `design_svf_v1` coefficient design runs on every automation event in *both* arms and
+1. The `f64` `design_svf` coefficient design runs on every automation event in *both* arms and
    is nearly the entire cost of the traffic. The ramp arithmetic the hoist was skipping is small
    beside it.
 2. The hoist's `settle` writes eighteen lane words (`coef`, `target`, `step`) where the

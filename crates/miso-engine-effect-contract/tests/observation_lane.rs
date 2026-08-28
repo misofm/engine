@@ -8,37 +8,37 @@
 #![allow(missing_docs)]
 
 use miso_engine_core::realtime::{
-    ObservationReaderV1, QueueGeneration, bounded_spsc, observation_slot,
+    ObservationReader, QueueGeneration, bounded_spsc, observation_slot,
 };
 use miso_engine_effect_contract::{
-    AutomationSpanKind, EffectControlLane, EffectControlRecordV1, ObservationCadenceV1,
-    ObservationChannelsV1, ObservationCostV1, ObservationDescriptorV1, ObservationFoldV1,
-    ObservationKindV1, ObservationLaneV1, ObservationSampleV1, ObservationTapId, ParameterChannel,
-    ParameterUnit, PreparedAutomationSpan,
+    AutomationSpanKind, EffectControlLane, EffectControlRecord, ObservationCadence,
+    ObservationChannels, ObservationCost, ObservationDescriptor, ObservationFold, ObservationKind,
+    ObservationLane, ObservationSample, ObservationTapId, ParameterChannel, ParameterUnit,
+    PreparedAutomationSpan,
 };
 
-const fn tap(id: u32, fold: ObservationFoldV1) -> ObservationDescriptorV1 {
-    ObservationDescriptorV1 {
+const fn tap(id: u32, fold: ObservationFold) -> ObservationDescriptor {
+    ObservationDescriptor {
         id: ObservationTapId(id),
         display_name: "Gain Reduction",
         display_unit: "dB",
-        kind: ObservationKindV1::GainReductionDb,
+        kind: ObservationKind::GainReductionDb,
         unit: ParameterUnit::Db,
-        cost: ObservationCostV1::Resident,
-        cadence: ObservationCadenceV1::PerBlock,
+        cost: ObservationCost::Resident,
+        cadence: ObservationCadence::PerBlock,
         fold,
-        channels: ObservationChannelsV1::PerLane,
+        channels: ObservationChannels::PerLane,
         minimum: 0.0,
         maximum: 100.0,
     }
 }
 
-static MENU: [ObservationDescriptorV1; 2] = [
-    tap(1, ObservationFoldV1::PeakMagnitude),
-    tap(2, ObservationFoldV1::Latest),
+static MENU: [ObservationDescriptor; 2] = [
+    tap(1, ObservationFold::PeakMagnitude),
+    tap(2, ObservationFold::Latest),
 ];
 
-fn lane(default_window_blocks: u32) -> (ObservationLaneV1, Vec<ObservationReaderV1>) {
+fn lane(default_window_blocks: u32) -> (ObservationLane, Vec<ObservationReader>) {
     let mut publishers = Vec::new();
     let mut readers = Vec::new();
     for _ in 0..MENU.len() {
@@ -47,7 +47,7 @@ fn lane(default_window_blocks: u32) -> (ObservationLaneV1, Vec<ObservationReader
         readers.push(reader);
     }
     (
-        ObservationLaneV1::new(&MENU, publishers, default_window_blocks).expect("one per tap"),
+        ObservationLane::new(&MENU, publishers, default_window_blocks).expect("one per tap"),
         readers,
     )
 }
@@ -68,8 +68,8 @@ fn depth(value: usize) -> core::num::NonZeroUsize {
     core::num::NonZeroUsize::new(value).expect("nonzero")
 }
 
-fn sample(left: f32, right: f32) -> ObservationSampleV1 {
-    ObservationSampleV1 { left, right }
+fn sample(left: f32, right: f32) -> ObservationSample {
+    ObservationSample { left, right }
 }
 
 /// An `Observe` record emits no span and does not consume staging capacity.
@@ -79,26 +79,26 @@ fn sample(left: f32, right: f32) -> ObservationSampleV1 {
 #[test]
 fn an_observe_record_rides_the_parameter_queue_and_emits_no_span() {
     let (mut producer, consumer) =
-        bounded_spsc::<EffectControlRecordV1>(depth(8), QueueGeneration(0)).expect("queue");
+        bounded_spsc::<EffectControlRecord>(depth(8), QueueGeneration(0)).expect("queue");
     let mut control = EffectControlLane::new(consumer, false);
     let (mut observation, _readers) = lane(4);
 
     producer
-        .try_push(EffectControlRecordV1::Parameter {
+        .try_push(EffectControlRecord::Parameter {
             parameter_index: 0,
             channel: ParameterChannel::Both,
             value: 0.25,
         })
         .expect("room");
     producer
-        .try_push(EffectControlRecordV1::Observe {
+        .try_push(EffectControlRecord::Observe {
             tap_index: 0,
             armed: true,
             window_blocks: 3,
         })
         .expect("room");
     producer
-        .try_push(EffectControlRecordV1::Observe {
+        .try_push(EffectControlRecord::Observe {
             tap_index: 1,
             armed: true,
             window_blocks: 0,
@@ -122,10 +122,10 @@ fn an_observe_record_rides_the_parameter_queue_and_emits_no_span() {
 #[test]
 fn an_observe_record_against_an_incapable_plan_is_reported_unbound() {
     let (mut producer, consumer) =
-        bounded_spsc::<EffectControlRecordV1>(depth(4), QueueGeneration(0)).expect("queue");
+        bounded_spsc::<EffectControlRecord>(depth(4), QueueGeneration(0)).expect("queue");
     let mut control = EffectControlLane::new(consumer, false);
     producer
-        .try_push(EffectControlRecordV1::Observe {
+        .try_push(EffectControlRecord::Observe {
             tap_index: 0,
             armed: true,
             window_blocks: 1,
@@ -139,7 +139,7 @@ fn an_observe_record_against_an_incapable_plan_is_reported_unbound() {
     // And so is a tap index the menu does not have.
     let (mut observation, _readers) = lane(2);
     producer
-        .try_push(EffectControlRecordV1::Observe {
+        .try_push(EffectControlRecord::Observe {
             tap_index: 7,
             armed: true,
             window_blocks: 1,
@@ -274,6 +274,6 @@ fn retained_bytes_are_a_formula_over_the_declared_menu() {
 #[test]
 fn a_lane_refuses_a_publisher_count_that_does_not_match_the_menu() {
     let (publisher, _reader) = observation_slot();
-    assert!(ObservationLaneV1::new(&MENU, vec![publisher], 4).is_none());
-    assert!(ObservationLaneV1::new(&MENU, Vec::new(), 4).is_none());
+    assert!(ObservationLane::new(&MENU, vec![publisher], 4).is_none());
+    assert!(ObservationLane::new(&MENU, Vec::new(), 4).is_none());
 }

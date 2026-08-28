@@ -5,12 +5,12 @@
 //! crate's internals, so a test that passes is a statement about the shipped path.
 #![allow(dead_code, unreachable_pub)]
 
-use miso_engine_compressor::{COMPRESSOR_PARAMETERS_V1, CompressorFactory};
+use miso_engine_compressor::{COMPRESSOR_PARAMETERS, CompressorFactory};
 use miso_engine_effect_contract::{
     BankWidth, EffectBankProcessBlock, EffectProcessBlock, EffectQuality, InitialParameterValue,
     LinkMode, NativeEffectFactory, ParameterChannel, PortId, PrepareEffectBankRequest,
     PrepareEffectLimits, PrepareEffectRequest, PreparedAutomationSpan, PreparedNativeEffect,
-    PreparedNativeEffectBank, PreparedPortsV1, PreparedSidechainPort, ProcessReport,
+    PreparedNativeEffectBank, PreparedPorts, PreparedSidechainPort, ProcessReport,
     StatePayloadInput, StatePayloadOutput,
 };
 use miso_engine_lane::Backend;
@@ -35,7 +35,7 @@ pub fn initial_values() -> [InitialParameterValue; PARAMETER_COUNT * 2] {
         } else {
             ParameterChannel::Right
         },
-        value: COMPRESSOR_PARAMETERS_V1[index / 2].default_value,
+        value: COMPRESSOR_PARAMETERS[index / 2].default_value,
     })
 }
 
@@ -60,7 +60,7 @@ pub fn request_with_quantum<'a>(
         quality: EffectQuality::Normal,
         bypass: false,
         link_mode: LinkMode::DualMono,
-        ports: PreparedPortsV1 {
+        ports: PreparedPorts {
             sidechain: PreparedSidechainPort::Unconnected {
                 id: sidechain_port(),
                 required: false,

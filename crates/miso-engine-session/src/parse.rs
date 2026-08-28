@@ -4,7 +4,7 @@ use crate::{
     DiagnosticCode, DiagnosticPath as OwnedDiagnosticPath, DiagnosticSet, DualMonoBuiltins,
     DualMonoFader, Effect, EffectIdentity, EffectParam, MatrixOrPan, Output, OutputProfile, Rack,
     RenderProfile, Route, RouteDestination, RouteSource, SESSION_SCHEMA_VERSION_V1, SessionLimits,
-    SessionTomlV1, Sidechain, SidechainDeclaration, Source, SourceContent, SourceMapping,
+    SessionToml, Sidechain, SidechainDeclaration, Source, SourceContent, SourceMapping,
     SourceRegion, SourceSpan, StableId, Submix, Track,
     diagnostic::{PathRef as DiagnosticPath, PathSegment},
     model::ClosedToken,
@@ -476,7 +476,7 @@ impl<'i> Parser<'i> {
 }
 
 /// Parse TOML text (`toml_parser` 1.1 grammar) into the V1 typed model and validate it.
-pub fn parse_session_toml(source: &str) -> Result<SessionTomlV1, DiagnosticSet> {
+pub fn parse_session_toml(source: &str) -> Result<SessionToml, DiagnosticSet> {
     let root = match DeTable::parse(source) {
         Ok(value) => value,
         Err(error) => {
@@ -564,7 +564,7 @@ fn parse_root(
     parser: &mut Parser<'_>,
     table: TableRef<'_, '_>,
     path: DiagnosticPath<'_>,
-) -> Option<SessionTomlV1> {
+) -> Option<SessionToml> {
     let schema_path = path.key("schema_version");
     if !table.table.contains_key("schema_version") {
         parser.error_at(
@@ -657,7 +657,7 @@ fn parse_root(
             Some(outputs),
             Some(routes),
             Some(automation),
-        ) => Some(SessionTomlV1 {
+        ) => Some(SessionToml {
             schema_version,
             session_id,
             revision,

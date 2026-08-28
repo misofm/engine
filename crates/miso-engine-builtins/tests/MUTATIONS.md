@@ -86,7 +86,7 @@ pin `-C target-feature=+avx2,+fma`, debug profile. Sweep driver: one mutation at
 | # | mutation | file | test | result |
 |---|---|---|---|---|
 | 140-7 | a settled muted lane multiplies by its gain instead of clearing, so `-1.0 * +0.0` keeps the sign | `builtins/src/lib.rs` | `fader_ramp::an_uncommanded_live_fader_is_bit_identical_to_the_prepared_one` | RED (`left plane at 0 dB (muted=true) must be bit-identical`) |
-| 140-8 | `FaderMuteRampBuiltinsV1::set_mute` snaps (`retarget(.., 0)`) instead of retargeting over the caller's window | `builtins/src/lib.rs` | `fader_ramp::mute_is_a_fader_endpoint_and_settles_to_exact_positive_zero` | RED (`the first sample of a mute fade is still audible`) |
+| 140-8 | `FaderMuteRampBuiltins::set_mute` snaps (`retarget(.., 0)`) instead of retargeting over the caller's window | `builtins/src/lib.rs` | `fader_ramp::mute_is_a_fader_endpoint_and_settles_to_exact_positive_zero` | RED (`the first sample of a mute fade is still audible`) |
 | 140-9 | D11's exact assignment of the target on update `N` is dropped, leaving pure accumulation | `builtins/src/lib.rs` | `fader_ramp::a_windowed_move_is_monotone_and_lands_exactly_on_its_target` | RED (`db=-6.0206 window=3: the last update assigns the target exactly (D11)`) |
 
 ## Mono-collapse M2 — the collapsed input chain and its disengage copy

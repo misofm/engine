@@ -15,7 +15,7 @@
 //!
 //! Audio lives in one [`DisjointArena`](miso_engine_core::realtime::DisjointArena) per prepared
 //! plan: two planar `f32` planes of `buffers * frames` words, reached only through a checked
-//! [`ArenaLeaseV1`]. The lease API is the one implementation of *where the audio is* as well as
+//! [`ArenaLease`]. The lease API is the one implementation of *where the audio is* as well as
 //! of what happens to it.
 //!
 //! The sequential executor holds a single lease over the whole coloured arena. A delayed edge
@@ -38,14 +38,14 @@ use std::collections::BTreeMap;
 
 use core::num::NonZeroUsize;
 
-use miso_engine_core::realtime::{ArenaLeaseSetBuilder, ArenaLeaseV1, RenderError};
+use miso_engine_core::realtime::{ArenaLease, ArenaLeaseSetBuilder, RenderError};
 
 /// The arena reserves buffer zero as the always-zero silence slot, so every executor buffer is
 /// offset by one.
 pub(crate) const ARENA_BASE: u32 = 1;
 use miso_engine_effect_contract::{
-    BypassShunt, ChannelSymmetryWitnessV1, EffectControlLane, EffectProcessBlock,
-    ObservationLaneV1, ObservationSampleV1, PreparedAutomationSpan, PreparedNativeEffect,
+    BypassShunt, ChannelSymmetryWitness, EffectControlLane, EffectProcessBlock, ObservationLane,
+    ObservationSample, PreparedAutomationSpan, PreparedNativeEffect,
 };
 use miso_engine_lane::kernels::{mix2x2_block, pdc_delay_block, sum_into_block, sum2_block};
 use miso_engine_rack::{BankChain, BankMembers};
@@ -86,7 +86,7 @@ pub(crate) type FrameLane = f32;
 /// how the lowering removes a pass-through's copy -- so `-0.0` survives; `a + b` then accumulates
 /// left to right, exactly as the scalar reference `inputs.reduce(|a, b| a + b)` does.
 #[inline]
-fn reduce_plane(lease: &mut ArenaLeaseV1, plane: usize, out: u32, inputs: &[u32]) {
+fn reduce_plane(lease: &mut ArenaLease, plane: usize, out: u32, inputs: &[u32]) {
     match inputs {
         [] => lease.write(plane, out).fill(0.0),
         [single] => {
@@ -224,7 +224,7 @@ impl TrackDelayLine {
     ///
     /// A track whose lanes declare different delays produces genuinely different left and right
     /// audio out of a single source channel, so it is not mono-collapsible. That verdict is also
-    /// taken at prepare, from the session, by `session_structural_symmetry_v1`; this is the same
+    /// taken at prepare, from the session, by `session_structural_symmetry`; this is the same
     /// fact answered by the object that owns the rings.
     #[cfg(test)]
     pub(crate) const fn channels_agree(&self) -> bool {
@@ -323,14 +323,14 @@ pub(crate) struct ConsoleEffect {
     /// Issue #143 D3: this instance's observation taps, or `None` in a plan with no observation
     /// capacity. `None` is one null pointer and one predicted branch per block -- and, crucially,
     /// it is the *only* observation state such a plan holds.
-    observation: Option<Box<ObservationLaneV1>>,
+    observation: Option<Box<ObservationLane>>,
 }
 
 impl ConsoleEffect {
     fn new(
         effect: GraphPreparedEffect,
         control: Box<EffectControlLane>,
-        observation: Option<Box<ObservationLaneV1>>,
+        observation: Option<Box<ObservationLane>>,
         frames: usize,
     ) -> Self {
         let capacity = effect.metadata.automation_capacity as usize;
@@ -376,7 +376,7 @@ impl ConsoleEffect {
 /// is what keeps an armed lane from reading an unarmed sibling tap, and the two gates are a
 /// conjunction, never a replacement.
 fn publish_observations(
-    observation: &mut ObservationLaneV1,
+    observation: &mut ObservationLane,
     processor: &dyn PreparedNativeEffect,
     first_sample: u64,
     frames: u64,
@@ -384,7 +384,7 @@ fn publish_observations(
     if !observation.any_armed() {
         return;
     }
-    let mut sample = ObservationSampleV1 {
+    let mut sample = ObservationSample {
         left: 0.0,
         right: 0.0,
     };
@@ -571,19 +571,19 @@ impl NodeKind {
     /// work at all. Everything else answers for itself, and the two effect variants answer with
     /// the effect's own designed-word comparison -- plus, for a console-driven one, the live terms
     /// its drain maintains.
-    pub(crate) fn channel_symmetry(&self) -> ChannelSymmetryWitnessV1 {
+    pub(crate) fn channel_symmetry(&self) -> ChannelSymmetryWitness {
         let designed = |symmetric: bool| {
             if symmetric {
-                ChannelSymmetryWitnessV1::SYMMETRIC
+                ChannelSymmetryWitness::SYMMETRIC
             } else {
-                ChannelSymmetryWitnessV1::symmetric_except(ChannelSymmetryWitnessV1::DESIGNED)
+                ChannelSymmetryWitness::symmetric_except(ChannelSymmetryWitness::DESIGNED)
             }
         };
         match self {
             // The one non-bank stage that can be asymmetric upstream of the seam: two lanes with
             // different declared delays turn one source channel into two different signals, so the
             // track is not collapsible. The same verdict is taken at prepare, from the session, by
-            // `session_structural_symmetry_v1` -- which is what actually arms the chain; this arm
+            // `session_structural_symmetry` -- which is what actually arms the chain; this arm
             // is the plan's own evidence row agreeing with it.
             Self::TrackDelay { channels_agree, .. } => designed(*channels_agree),
             Self::Effect(effect) => designed(effect.processor.channel_symmetry()),
@@ -593,7 +593,7 @@ impl NodeKind {
             // Not a per-track upstream stage: nothing here can make the two channels disagree,
             // and nothing here is collapsed.
             Self::Identity | Self::SourceInput | Self::Route(_) | Self::BankMember => {
-                ChannelSymmetryWitnessV1::SYMMETRIC
+                ChannelSymmetryWitness::SYMMETRIC
             }
         }
     }
@@ -618,7 +618,7 @@ impl NodeKind {
             Self::ConsoleEffect(console) => console
                 .observation
                 .as_deref()
-                .map_or(0, ObservationLaneV1::retained_bytes),
+                .map_or(0, ObservationLane::retained_bytes),
             _ => 0,
         }
     }
@@ -632,7 +632,7 @@ impl NodeKind {
 /// what the rest of the graph reads. A single-slot chain passes the same list twice, which is the
 /// in-place round-trip it has always done.
 struct ArenaMembers<'a> {
-    lease: &'a mut ArenaLeaseV1,
+    lease: &'a mut ArenaLease,
     inputs: &'a [u32],
     outputs: &'a [u32],
     /// One entry per lane when this chain's epilogue folds its routes, empty otherwise.
@@ -698,7 +698,7 @@ impl BankMembers for ArenaMembers<'_> {
 
 // REALTIME_POLICY_END
 
-/// The static half of one unit's [`PlanUnitEligibilityV1`] row, fixed at bind.
+/// The static half of one unit's [`PlanUnitEligibility`] row, fixed at bind.
 ///
 /// Split from the dynamic half because the two move at different times and for different reasons.
 /// Which track a lane renders, how many stages a unit has and which side of the seam each stage
@@ -706,7 +706,7 @@ impl BankMembers for ArenaMembers<'_> {
 /// lanes are *eligible* moves whenever a live-console record is drained. So the identity is
 /// computed once, here, from the node ids the lowering already resolved -- and the counters are
 /// pulled from the chain on demand.
-pub(crate) struct UnitIdentityV1 {
+pub(crate) struct UnitIdentity {
     pub(crate) banked: bool,
     pub(crate) stages: u32,
     pub(crate) upstream_of_seam_stages: u32,
@@ -715,7 +715,7 @@ pub(crate) struct UnitIdentityV1 {
 
 /// Which side of the fader/matrix seam one graph node's stage sits on.
 ///
-/// The seam is `miso_engine_effect_contract::SeamSideV1`'s: the 2x2 matrix is the earliest
+/// The seam is `miso_engine_effect_contract::SeamSide`'s: the 2x2 matrix is the earliest
 /// genuinely cross-channel operation in the strip and the fader is immediately before it, so
 /// everything from `PostFader` on reads the plane a collapsed track duplicated and may legitimately
 /// differ between the channels. It is read off `TrackStage` rather than off the processor, because
@@ -755,7 +755,7 @@ fn node_track(node: &GraphNodeId) -> Box<str> {
 /// Ops, their audio and their delay lines: everything one executor (or one native parcel) owns.
 pub(crate) struct Runtime {
     /// This runtime's checked view of the plan's shared arena.
-    pub(crate) lease: ArenaLeaseV1,
+    pub(crate) lease: ArenaLease,
     pub(crate) delays: Box<[CompensationDelay]>,
     /// Input-side track alignment lines, one per track that declared a nonzero delay on either
     /// lane. Empty on every session that declared none, which is what keeps an undelayed plan on
@@ -763,7 +763,7 @@ pub(crate) struct Runtime {
     pub(crate) track_delays: Box<[TrackDelayLine]>,
     pub(crate) units: Box<[RuntimeUnit]>,
     /// One row per unit, in `units` order: the bind-time half of the collapse-eligibility query.
-    pub(crate) identity: Box<[UnitIdentityV1]>,
+    pub(crate) identity: Box<[UnitIdentity]>,
     /// Scratch for a bank chain's gather-source buffers, sized to the widest bank at bind.
     bank_inputs: Box<[u32]>,
     /// Scratch for a bank chain's scatter-target buffers, sized to the widest bank at bind.
@@ -809,11 +809,11 @@ impl Runtime {
     /// the `SOURCE` term, which lives on the control plane and is keyed by track id. This is the
     /// only place in the engine where the two halves of the channel-symmetry witness meet: the
     /// runtime half is per lane and source agnostic, the structural half is per track, and
-    /// `UnitIdentityV1::lane_tracks` is the relation between the two keys.
+    /// `UnitIdentity::lane_tracks` is the relation between the two keys.
     ///
     /// All lanes or nothing, exactly as `BankChain::all_lanes_symmetric` is: a cohort with one
     /// two-source lane saves nothing by collapsing the others, because the vector op runs every
-    /// lane regardless. Making a cohort homogeneous is the planner's job (`CohortPoolClassV1`).
+    /// lane regardless. Making a cohort homogeneous is the planner's job (`CohortPoolClass`).
     ///
     /// A unit whose lane list is empty arms nothing: a chain that names no track is one this join
     /// cannot speak for.
@@ -844,11 +844,11 @@ impl Runtime {
     }
 
     pub(crate) fn new(
-        lease: ArenaLeaseV1,
+        lease: ArenaLease,
         delays: Vec<CompensationDelay>,
         track_delays: Vec<TrackDelayLine>,
         units: Vec<RuntimeUnit>,
-        identity: Vec<UnitIdentityV1>,
+        identity: Vec<UnitIdentity>,
         redirects: u64,
         folds: u64,
     ) -> Self {
@@ -1003,7 +1003,7 @@ fn bank_gather_source(member: &RuntimeOp) -> Option<u32> {
 /// The one implementation of node semantics, shared by both executors.
 fn execute_op(
     op: &mut RuntimeOp,
-    lease: &mut ArenaLeaseV1,
+    lease: &mut ArenaLease,
     delays: &mut [CompensationDelay],
     track_delays: &mut [TrackDelayLine],
     first_sample: u64,
@@ -1184,7 +1184,7 @@ fn execute_op(
     Ok(())
 }
 
-fn observe(op: &mut RuntimeOp, lease: &ArenaLeaseV1, first_sample: u64) -> Result<(), RenderError> {
+fn observe(op: &mut RuntimeOp, lease: &ArenaLease, first_sample: u64) -> Result<(), RenderError> {
     if op.observers.is_empty() {
         return Ok(());
     }
@@ -1246,10 +1246,10 @@ impl BankStage for BuiltinStage {
     fn qualification_counters(&self) -> [u64; 2] {
         self.0.qualification_counters()
     }
-    fn lane_symmetry(&self, lane: usize) -> ChannelSymmetryWitnessV1 {
+    fn lane_symmetry(&self, lane: usize) -> ChannelSymmetryWitness {
         self.0.lane_symmetry(lane)
     }
-    fn seam_side(&self) -> miso_engine_effect_contract::SeamSideV1 {
+    fn seam_side(&self) -> miso_engine_effect_contract::SeamSide {
         self.0.seam_side()
     }
     fn supports_mono_collapse(&self) -> bool {
@@ -1347,7 +1347,7 @@ pub(crate) struct RuntimeParts {
     effect_controls: BTreeMap<crate::EffectNodeId, Box<EffectControlLane>>,
     /// Issue #143 D3: observation lanes by effect node, taken by whichever owner renders that
     /// node. Empty for a plan with no observation capacity, so `node_kind` hands out `None`.
-    effect_observations: BTreeMap<crate::EffectNodeId, Box<ObservationLaneV1>>,
+    effect_observations: BTreeMap<crate::EffectNodeId, Box<ObservationLane>>,
     pub(crate) bindings: BTreeMap<GraphNodeId, Option<Box<dyn GraphRuntimeProcessor>>>,
     pub(crate) observers: BTreeMap<GraphNodeId, Vec<GraphNodeObserverBinding>>,
     pub(crate) source_inputs: std::collections::BTreeSet<GraphNodeId>,
@@ -1370,8 +1370,8 @@ impl RuntimeParts {
         spec: &GraphSpec,
         routes: Vec<PreparedRoute>,
         effects: Vec<GraphPreparedEffect>,
-        effect_controls: Vec<crate::GraphEffectControlBindingV1>,
-        effect_observations: Vec<crate::GraphEffectObservationBindingV1>,
+        effect_controls: Vec<crate::GraphEffectControlBinding>,
+        effect_observations: Vec<crate::GraphEffectObservationBinding>,
         banks: Vec<GraphPreparedEffectBank>,
         builtin_banks: Vec<GraphPreparedBuiltinBank>,
         observers: Vec<GraphNodeObserverBinding>,
@@ -1528,7 +1528,7 @@ impl RuntimeParts {
                     .collect();
                 // Issue #143: one observation lane per bank lane, moved out in the same lane order
                 // so a slot has exactly one owner per lane and a lane nobody observes stays `None`.
-                let observations: Vec<Option<ObservationLaneV1>> = (0..width.lanes() as usize)
+                let observations: Vec<Option<ObservationLane>> = (0..width.lanes() as usize)
                     .map(|lane| {
                         bank.members
                             .get(lane)
@@ -1695,7 +1695,7 @@ pub(crate) fn build_sequential(
     // rather than by a later walk because this is the only place the unit's ops and the spec's
     // node ids are both in hand: `RuntimeOp` deliberately carries no node id, and reconstructing
     // one from the arena buffers afterwards would be a second opinion about which lane is which.
-    let mut identity: Vec<UnitIdentityV1> = Vec::with_capacity(run_units.len());
+    let mut identity: Vec<UnitIdentity> = Vec::with_capacity(run_units.len());
     for (run, (membership, ops)) in run_units.iter().enumerate() {
         // A retired route op is absorbed by its cohort's epilogue: no unit, no dispatch, no
         // reduction, no `mix2x2_block` pass of its own.
@@ -1711,7 +1711,7 @@ pub(crate) fn build_sequential(
             let stages = membership.len().max(1);
             let lanes = ops.len() / stages;
             let node_of = |index: usize| &spec.nodes[program.ops[index].node as usize].id;
-            identity.push(UnitIdentityV1 {
+            identity.push(UnitIdentity {
                 banked: !membership.is_empty(),
                 stages: u32::try_from(stages).unwrap_or(u32::MAX),
                 upstream_of_seam_stages: u32::try_from(
@@ -2682,7 +2682,7 @@ fn op_dataflow(program: &ExecutionProgram) -> (Vec<Vec<usize>>, Vec<Option<usize
 /// the meter must see post-compressor audio, and a merged chain would hand it the chain's input --
 /// and `a_leased_stage_meter_declines_the_merge_and_still_meters` pins both halves of it.
 ///
-/// Effect observation (`ObservationLaneV1`) is *not* such an observer and must not be confused
+/// Effect observation (`ObservationLane`) is *not* such an observer and must not be confused
 /// with one: it reads the effect's own resident state through `observe_resident`, never a planar
 /// stage buffer, so an armed console lane neither declines the merge nor is disturbed by one.
 fn chains_into(
@@ -2744,7 +2744,7 @@ fn chains_into(
 /// Issue #181 asked the cohort planner which bound slots came out of one group and offered only
 /// those pairs to [`chains_into`]. That is a strictly narrower question than the one the merge
 /// actually needs answered, and it left three quarters of the intended strip's round-trips on the
-/// table: `plan_bank_groups` pools per `RackLocationV1`, so no candidate ever crossed a rack
+/// table: `plan_bank_groups` pools per `RackLocation`, so no candidate ever crossed a rack
 /// boundary, and a builtin bank has no cohort group at all, so the `builtins -> simd1` boundary
 /// was not even expressible. On the 64-track intended fixture that is 8 groups x {builtins, simd1,
 /// simd2} = 24 chains where 8 will do.
@@ -2930,7 +2930,7 @@ mod tests {
     }
 
     /// One lease that owns `buffers` buffers of one plane, as the sequential executor does.
-    fn single_lease(frames: usize, buffers: usize) -> ArenaLeaseV1 {
+    fn single_lease(frames: usize, buffers: usize) -> ArenaLease {
         let mut builder = ArenaLeaseSetBuilder::new(
             NonZeroUsize::new(1).expect("one plane"),
             NonZeroUsize::new(frames).expect("frames"),
@@ -2942,7 +2942,7 @@ mod tests {
     }
 
     /// One stereo lease over `buffers` buffers, the shape `build_sequential` builds.
-    fn stereo_lease(frames: usize, buffers: usize) -> ArenaLeaseV1 {
+    fn stereo_lease(frames: usize, buffers: usize) -> ArenaLease {
         let mut builder = ArenaLeaseSetBuilder::new(
             NonZeroUsize::new(2).expect("stereo planes"),
             NonZeroUsize::new(frames).expect("frames"),

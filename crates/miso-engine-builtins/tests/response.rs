@@ -797,7 +797,7 @@ fn representable_cutoff_domain_prepares_everywhere_and_rejects_successor() {
             for bits in start_bits..=maximum_bits {
                 let cutoff = f32::from_bits(bits);
                 assert!(
-                    validate_builtin_filter_cutoff_v1(cutoff, rate, 0.0, 10.0).is_ok(),
+                    validate_builtin_filter_cutoff(cutoff, rate, 0.0, 10.0).is_ok(),
                     "domain rate={rate}, high_pass={high_pass}, cutoff={bits:08x}"
                 );
                 test_support::section_words(rate, cutoff, high_pass).unwrap_or_else(|error| {
@@ -820,7 +820,7 @@ fn representable_cutoff_domain_prepares_everywhere_and_rejects_successor() {
             }
             let successor = f32::from_bits(maximum_bits + 1);
             assert_eq!(
-                validate_builtin_filter_cutoff_v1(successor, rate, 0.0, 10.0),
+                validate_builtin_filter_cutoff(successor, rate, 0.0, 10.0),
                 Err(BuiltinParameterError::FilterCutoff),
                 "successor rate={rate}, high_pass={high_pass}"
             );

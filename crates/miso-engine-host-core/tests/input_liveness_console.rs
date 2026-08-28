@@ -42,10 +42,10 @@ use core::num::{NonZeroU32, NonZeroUsize};
 use std::collections::BTreeMap;
 
 use miso_engine_builtins::{BuiltinLaneSelector, MeterTap};
-use miso_engine_builtins_compiler::TrackInputRecordV1;
+use miso_engine_builtins_compiler::TrackInputRecord;
 use miso_engine_core::realtime::{PlanarBufferMut, RenderIo, RenderTime};
 use miso_engine_host_core::{
-    HostConsoleHandlesV1, HostConsoleRequestV1, HostPrepareCaps, HostShapePolicy, PreparedHost,
+    HostConsoleHandles, HostConsoleRequest, HostPrepareCaps, HostShapePolicy, PreparedHost,
     SourceSubmission, prepare_host_session, prepare_host_session_with_console,
 };
 
@@ -89,8 +89,8 @@ fn caps() -> HostPrepareCaps {
     }
 }
 
-fn console() -> HostConsoleRequestV1 {
-    HostConsoleRequestV1 {
+fn console() -> HostConsoleRequest {
+    HostConsoleRequest {
         control_queue_depth: Some(NonZeroUsize::new(8).expect("depth")),
         meter_period_frames: Some(NonZeroU32::new(QUANTUM as u32).expect("period")),
         meter_queue_depth: NonZeroUsize::new(16).expect("meter depth"),
@@ -102,7 +102,7 @@ fn console() -> HostConsoleRequestV1 {
 
 struct Host {
     prepared: PreparedHost,
-    handles: Option<HostConsoleHandlesV1>,
+    handles: Option<HostConsoleHandles>,
     block: usize,
     peaks: BTreeMap<String, Vec<[u32; 2]>>,
 }
@@ -207,7 +207,7 @@ fn peaks(host: &Host) -> &BTreeMap<String, Vec<[u32; 2]>> {
     &host.peaks
 }
 
-fn push(host: &mut Host, track: usize, record: TrackInputRecordV1) {
+fn push(host: &mut Host, track: usize, record: TrackInputRecord) {
     host.handles
         .as_mut()
         .expect("a console")
@@ -291,7 +291,7 @@ fn a_command_moves_exactly_the_addressed_track() {
         push(
             &mut host,
             index,
-            TrackInputRecordV1::TrimDb {
+            TrackInputRecord::TrimDb {
                 lanes: BuiltinLaneSelector::Both,
                 db: -144.0,
                 smoothing_samples: 0,
@@ -331,7 +331,7 @@ fn two_commands_are_not_interchangeable() {
         push(
             &mut host,
             first,
-            TrackInputRecordV1::TrimDb {
+            TrackInputRecord::TrimDb {
                 lanes: BuiltinLaneSelector::Both,
                 db: -144.0,
                 smoothing_samples: 0,
@@ -340,7 +340,7 @@ fn two_commands_are_not_interchangeable() {
         push(
             &mut host,
             second,
-            TrackInputRecordV1::PolarityInvert {
+            TrackInputRecord::PolarityInvert {
                 lanes: BuiltinLaneSelector::Both,
                 inverted: true,
                 smoothing_samples: 0,
@@ -386,7 +386,7 @@ fn a_command_takes_effect_on_the_whole_block_that_drains_it() {
     push(
         &mut host,
         3,
-        TrackInputRecordV1::TrimDb {
+        TrackInputRecord::TrimDb {
             lanes: BuiltinLaneSelector::Both,
             db: -40.0,
             smoothing_samples: 0,
@@ -403,7 +403,7 @@ fn a_command_takes_effect_on_the_whole_block_that_drains_it() {
     push(
         &mut declared,
         3,
-        TrackInputRecordV1::TrimDb {
+        TrackInputRecord::TrimDb {
             lanes: BuiltinLaneSelector::Both,
             db: -40.0,
             smoothing_samples: 0,
@@ -454,7 +454,7 @@ fn the_collapse_census_follows_the_commands() {
         push(
             &mut symmetric,
             track,
-            TrackInputRecordV1::TrimDb {
+            TrackInputRecord::TrimDb {
                 lanes: BuiltinLaneSelector::Both,
                 db: -12.0,
                 smoothing_samples: 256,
@@ -473,7 +473,7 @@ fn the_collapse_census_follows_the_commands() {
     push(
         &mut asymmetric,
         2,
-        TrackInputRecordV1::TrimDb {
+        TrackInputRecord::TrimDb {
             lanes: BuiltinLaneSelector::Left,
             db: -12.0,
             smoothing_samples: 256,
@@ -490,7 +490,7 @@ fn the_collapse_census_follows_the_commands() {
     push(
         &mut asymmetric,
         2,
-        TrackInputRecordV1::TrimDb {
+        TrackInputRecord::TrimDb {
             lanes: BuiltinLaneSelector::Right,
             db: -12.0,
             smoothing_samples: 256,
@@ -509,7 +509,7 @@ fn the_collapse_census_follows_the_commands() {
     push(
         &mut flipped,
         7,
-        TrackInputRecordV1::PolarityInvert {
+        TrackInputRecord::PolarityInvert {
             lanes: BuiltinLaneSelector::Right,
             inverted: true,
             smoothing_samples: 64,
@@ -544,7 +544,7 @@ fn a_symmetric_ride_renders_the_same_bits_collapsed_or_not() {
         push(
             &mut collapsed,
             track,
-            TrackInputRecordV1::TrimDb {
+            TrackInputRecord::TrimDb {
                 lanes: BuiltinLaneSelector::Both,
                 db: -9.0,
                 smoothing_samples: 512,
@@ -556,7 +556,7 @@ fn a_symmetric_ride_renders_the_same_bits_collapsed_or_not() {
             push(
                 &mut dual,
                 track,
-                TrackInputRecordV1::TrimDb {
+                TrackInputRecord::TrimDb {
                     lanes,
                     db: -9.0,
                     smoothing_samples: 512,
@@ -644,7 +644,7 @@ fn a_per_lane_record_drained_on_the_disengaging_block_reaches_one_channel() {
     for (label, record) in [
         (
             "a mid-window Left trim ride",
-            TrackInputRecordV1::TrimDb {
+            TrackInputRecord::TrimDb {
                 lanes: BuiltinLaneSelector::Left,
                 db: -12.0,
                 smoothing_samples: 256,
@@ -652,7 +652,7 @@ fn a_per_lane_record_drained_on_the_disengaging_block_reaches_one_channel() {
         ),
         (
             "a Left trim snap",
-            TrackInputRecordV1::TrimDb {
+            TrackInputRecord::TrimDb {
                 lanes: BuiltinLaneSelector::Left,
                 db: -30.0,
                 smoothing_samples: 0,
@@ -660,7 +660,7 @@ fn a_per_lane_record_drained_on_the_disengaging_block_reaches_one_channel() {
         ),
         (
             "a mid-window Right polarity flip",
-            TrackInputRecordV1::PolarityInvert {
+            TrackInputRecord::PolarityInvert {
                 lanes: BuiltinLaneSelector::Right,
                 inverted: true,
                 smoothing_samples: 128,
@@ -668,7 +668,7 @@ fn a_per_lane_record_drained_on_the_disengaging_block_reaches_one_channel() {
         ),
         (
             "a Right polarity snap",
-            TrackInputRecordV1::PolarityInvert {
+            TrackInputRecord::PolarityInvert {
                 lanes: BuiltinLaneSelector::Right,
                 inverted: true,
                 smoothing_samples: 0,
@@ -733,7 +733,7 @@ fn re_equalising_after_a_disengaging_drain_holds_the_never_collapsed_bits() {
         push(
             host,
             2,
-            TrackInputRecordV1::TrimDb {
+            TrackInputRecord::TrimDb {
                 lanes: BuiltinLaneSelector::Left,
                 db: -12.0,
                 smoothing_samples: 64,
@@ -750,7 +750,7 @@ fn re_equalising_after_a_disengaging_drain_holds_the_never_collapsed_bits() {
         push(
             host,
             2,
-            TrackInputRecordV1::TrimDb {
+            TrackInputRecord::TrimDb {
                 lanes: BuiltinLaneSelector::Right,
                 db: -12.0,
                 smoothing_samples: 64,
@@ -791,7 +791,7 @@ fn a_both_lane_record_drained_while_collapsed_keeps_the_collapse() {
             push(
                 host,
                 track,
-                TrackInputRecordV1::TrimDb {
+                TrackInputRecord::TrimDb {
                     lanes: BuiltinLaneSelector::Both,
                     db: -9.0,
                     smoothing_samples: 192,

@@ -8,11 +8,11 @@
 
 use miso_engine_bench_support::alloc as bench_alloc;
 use miso_engine_core::realtime::audit;
-use miso_engine_delay::{DELAY_PARAMETERS_V1, DelayFactory};
+use miso_engine_delay::{DELAY_PARAMETERS, DelayFactory};
 use miso_engine_effect_contract::{
     AutomationSpanKind, EffectProcessBlock, EffectQuality, InitialParameterValue, LinkMode,
     NativeEffectFactory, ParameterChannel, PrepareEffectLimits, PrepareEffectRequest,
-    PreparedAutomationSpan, PreparedNativeEffect, PreparedPortsV1, PreparedSidechainPort,
+    PreparedAutomationSpan, PreparedNativeEffect, PreparedPorts, PreparedSidechainPort,
     ProcessReport,
 };
 
@@ -140,7 +140,7 @@ fn automation(block: u64, first_sample: u64) -> [PreparedAutomationSpan; 3] {
 fn prepare_delay(cross: f32) -> Box<dyn PreparedNativeEffect> {
     let factory = DelayFactory;
     let mut initial_values: Vec<InitialParameterValue> = Vec::with_capacity(9);
-    for (index, parameter) in DELAY_PARAMETERS_V1.iter().enumerate().take(4) {
+    for (index, parameter) in DELAY_PARAMETERS.iter().enumerate().take(4) {
         for channel in [ParameterChannel::Left, ParameterChannel::Right] {
             initial_values.push(InitialParameterValue {
                 parameter_index: u32::try_from(index).expect("frozen descriptor count"),
@@ -161,7 +161,7 @@ fn prepare_delay(cross: f32) -> Box<dyn PreparedNativeEffect> {
             quality: EffectQuality::Normal,
             bypass: false,
             link_mode: LinkMode::DualMono,
-            ports: PreparedPortsV1 {
+            ports: PreparedPorts {
                 sidechain: PreparedSidechainPort::None,
             },
             initial_values: &initial_values,

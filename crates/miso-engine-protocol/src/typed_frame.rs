@@ -12,7 +12,7 @@ use crate::{
     DiagnosticsPage, DiagnosticsRequest, EncodeError, EventHeader, FrameKind, MessageId,
     MeterBatch, NonOkResponse, OUTER_HEADER_BYTES, ParameterMetadataPage, ParameterMetadataRequest,
     ParameterStatePage, ParameterStateRequest, ProtocolCodec, RequestId, ResponseHeader,
-    SessionCommitted, SessionEditV1, SessionRevision, SessionSnapshot, SessionSnapshotRequest,
+    SessionCommitted, SessionEdit, SessionRevision, SessionSnapshot, SessionSnapshotRequest,
     StatusCode, TelemetryConfiguration, TransactionApplied, TransportSetRequest, TransportSnapshot,
     TransportStateEvent,
 };
@@ -42,7 +42,7 @@ pub(crate) fn frame_writer_passes() -> (usize, usize) {
 pub enum CommandPayload<'a> {
     CapabilitiesGet,
     SessionSnapshotGet(SessionSnapshotRequest),
-    SessionTransactionApply(&'a [SessionEditV1]),
+    SessionTransactionApply(&'a [SessionEdit]),
     ParameterMetadataGet(ParameterMetadataRequest),
     ParameterStateGet(&'a ParameterStateRequest),
     AutomationEnqueue(AutomationEnqueue<'a>),
@@ -118,7 +118,7 @@ pub struct TypedEventFrame<'a> {
 pub enum DecodedCommandPayload<'a> {
     CapabilitiesGet,
     SessionSnapshotGet(SessionSnapshotRequest),
-    SessionTransactionApply(Vec<SessionEditV1>),
+    SessionTransactionApply(Vec<SessionEdit>),
     ParameterMetadataGet(ParameterMetadataRequest),
     ParameterStateGet(ParameterStateRequest),
     AutomationEnqueue(DecodedAutomationEnqueue<'a>),
@@ -928,7 +928,7 @@ mod tests {
     #[test]
     fn full_command_frames_cover_every_registered_command_without_payload_escape() {
         let codec = ProtocolCodec::default();
-        let edits = [SessionEditV1::SetSessionId {
+        let edits = [SessionEdit::SetSessionId {
             session_id: miso_engine_session::StableId::parse("renamed").expect("stable ID"),
         }];
         let state = ParameterStateRequest { handles: vec![1] };

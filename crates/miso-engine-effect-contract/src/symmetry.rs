@@ -20,7 +20,7 @@
 //!   chain must be handed that half explicitly (`BankChain::arm_mono_collapse`) and declines until
 //!   it is. The join is `PreparedRenderPlan::arm_mono_collapse`.
 //!
-//! [`SOURCE`]: ChannelSymmetryWitnessV1::SOURCE
+//! [`SOURCE`]: ChannelSymmetryWitness::SOURCE
 //!
 //! # The five terms, and why the witness is a set rather than a `bool`
 //!
@@ -31,16 +31,16 @@
 //!
 //! | term | set by | cleared by |
 //! |---|---|---|
-//! | [`SOURCE`](ChannelSymmetryWitnessV1::SOURCE) | preparation: the track's two channels read one source channel, or a one-channel source | a recompile with a different source mapping |
-//! | [`DESIGNED`](ChannelSymmetryWitnessV1::DESIGNED) | preparation: every designed per-lane word the stage's kernel reads compares bit-equal between the channels | a recompile with asymmetric parameters |
-//! | [`RESTORED`](ChannelSymmetryWitnessV1::RESTORED) | restore: the left and right payload sections compared byte-equal | a restore whose sections differ |
-//! | [`LIVE`](ChannelSymmetryWitnessV1::LIVE) | preparation | an admitted record that writes one channel's upstream word |
-//! | [`UNBYPASSED`](ChannelSymmetryWitnessV1::UNBYPASSED) | preparation | a live bypass on an upstream stage; **restored** when it is lifted |
+//! | [`SOURCE`](ChannelSymmetryWitness::SOURCE) | preparation: the track's two channels read one source channel, or a one-channel source | a recompile with a different source mapping |
+//! | [`DESIGNED`](ChannelSymmetryWitness::DESIGNED) | preparation: every designed per-lane word the stage's kernel reads compares bit-equal between the channels | a recompile with asymmetric parameters |
+//! | [`RESTORED`](ChannelSymmetryWitness::RESTORED) | restore: the left and right payload sections compared byte-equal | a restore whose sections differ |
+//! | [`LIVE`](ChannelSymmetryWitness::LIVE) | preparation | an admitted record that writes one channel's upstream word |
+//! | [`UNBYPASSED`](ChannelSymmetryWitness::UNBYPASSED) | preparation | a live bypass on an upstream stage; **restored** when it is lifted |
 //!
 //! # The hook rule is structural, not a list of kinds
 //!
 //! The rule is *"every record admitted onto a live-console queue declares what it does to an
-//! upstream per-lane word"*, and it is carried by [`LiveConsoleRecordV1`] rather than by an
+//! upstream per-lane word"*, and it is carried by [`LiveConsoleRecord`] rather than by an
 //! `if` over today's record kinds. A new live-console record type -- an automation span, anything
 //! a later issue adds -- cannot be drained into a witness-carrying stage without implementing that
 //! trait, and the trait's two obligations are exactly the two facts the witness needs: which side
@@ -55,9 +55,9 @@
 //! module's to state:
 //!
 //! 1. **Builtins liveness -- CLOSED by #210 phase 3.** `trim_db` and `polarity_invert` are live:
-//!    the input-builtins stage has a queue, and `miso_engine_builtins_compiler::TrackInputRecordV1`
-//!    implements [`LiveConsoleRecordV1`] with `SEAM = UpstreamOfSeam` and is folded through
-//!    [`ChannelSymmetryWitnessV1::admit`] by its drain, exactly as `EffectControlLane::stage` folds
+//!    the input-builtins stage has a queue, and `miso_engine_builtins_compiler::TrackInputRecord`
+//!    implements [`LiveConsoleRecord`] with `SEAM = UpstreamOfSeam` and is folded through
+//!    [`ChannelSymmetryWitness::admit`] by its drain, exactly as `EffectControlLane::stage` folds
 //!    an effect record. The trait bound is what made that an obligation rather than a reminder,
 //!    and it is what a *third* builtin record type would meet next. `hpf_hz` and `lpf_hz` are
 //!    still `PreparedOnly`; their liveness carries a separate obligation, recorded in
@@ -66,7 +66,7 @@
 //!    [`ParameterChannel`](crate::ParameterChannel) exactly as a live record does, so the rule is
 //!    already written: [`ParameterChannel::writes_one_channel`]. What does not exist yet is the
 //!    admission point -- a compiled session's spans are not drained through any queue -- so when
-//!    one appears, the span source becomes a [`LiveConsoleRecordV1`] implementor and nothing else
+//!    one appears, the span source becomes a [`LiveConsoleRecord`] implementor and nothing else
 //!    changes.
 //!
 //! # The static-bypass convention, and its asymmetry
@@ -89,7 +89,7 @@
 //! That is not an opinion a drain should re-derive per record; it is a property of the record
 //! type, so it is a `const` and the seam-side arm compiles away.
 
-use crate::{EffectControlRecordV1, ParameterChannel};
+use crate::{EffectControlRecord, ParameterChannel};
 
 /// Which side of the fader/matrix seam a live-console record's stage sits on.
 ///
@@ -98,7 +98,7 @@ use crate::{EffectControlRecordV1, ParameterChannel};
 /// that a collapsed track would run once; everything from the fader on reads the duplicated
 /// plane and may legitimately differ between the channels.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub enum SeamSideV1 {
+pub enum SeamSide {
     /// The record writes a word a collapsed track would have computed once. It gates collapse.
     UpstreamOfSeam,
     /// The record writes a fader, mute, pan or matrix word. It never gates collapse.
@@ -107,7 +107,7 @@ pub enum SeamSideV1 {
 
 /// What one admitted live-console record does to the two channels' agreement.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub enum SymmetryEventV1 {
+pub enum SymmetryEvent {
     /// The record leaves the channels doing identical work.
     ///
     /// A `ParameterChannel::Both` retarget is this case and not a hedge: both channels' ramps are
@@ -127,9 +127,9 @@ pub enum SymmetryEventV1 {
 /// structural terms preparation decided. That is why the type is one type and not two: the
 /// combinator is the whole relationship.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct ChannelSymmetryWitnessV1(u8);
+pub struct ChannelSymmetryWitness(u8);
 
-impl ChannelSymmetryWitnessV1 {
+impl ChannelSymmetryWitness {
     /// The track's two channels are fed by one source channel (or by a one-channel source).
     pub const SOURCE: u8 = 1 << 0;
     /// Every designed per-lane word this stage's kernel reads compares bit-equal between the
@@ -259,19 +259,19 @@ impl ChannelSymmetryWitnessV1 {
     ///
     /// Seam-side records are a compile-time no-op: the collapse duplicates the plane *into* the
     /// fader and the matrix, so their per-channel words never gate it.
-    pub fn admit<R: LiveConsoleRecordV1>(&mut self, record: &R) {
-        if R::SEAM == SeamSideV1::SeamSide {
+    pub fn admit<R: LiveConsoleRecord>(&mut self, record: &R) {
+        if R::SEAM == SeamSide::SeamSide {
             return;
         }
         match record.symmetry_event() {
-            SymmetryEventV1::Preserve => {}
-            SymmetryEventV1::Desymmetrize => self.clear(Self::LIVE),
-            SymmetryEventV1::Bypass(value) => self.set(Self::UNBYPASSED, !value),
+            SymmetryEvent::Preserve => {}
+            SymmetryEvent::Desymmetrize => self.clear(Self::LIVE),
+            SymmetryEvent::Bypass(value) => self.set(Self::UNBYPASSED, !value),
         }
     }
 }
 
-impl Default for ChannelSymmetryWitnessV1 {
+impl Default for ChannelSymmetryWitness {
     /// [`DECLINED`](Self::DECLINED): a witness nobody has spoken for claims nothing.
     fn default() -> Self {
         Self::DECLINED
@@ -285,16 +285,16 @@ impl Default for ChannelSymmetryWitnessV1 {
 ///
 /// The de-symmetrising surface is not "the kinds someone remembered": it is *every admission that
 /// writes an upstream per-lane word*. A drain that folds records into a witness takes
-/// `R: LiveConsoleRecordV1`, so a record type that has not answered the two questions cannot be
+/// `R: LiveConsoleRecord`, so a record type that has not answered the two questions cannot be
 /// drained there at all. That is the whole mechanism -- the future kinds this has to cover
 /// (builtins trim/polarity liveness, automation spans) are covered because the compiler will not
 /// let them past, not because a list was kept up to date.
-pub trait LiveConsoleRecordV1: Copy {
+pub trait LiveConsoleRecord: Copy {
     /// Which side of the fader/matrix seam the stage this record addresses sits on.
-    const SEAM: SeamSideV1;
+    const SEAM: SeamSide;
 
     /// What admitting this record does to the two channels' agreement.
-    fn symmetry_event(&self) -> SymmetryEventV1;
+    fn symmetry_event(&self) -> SymmetryEvent;
 }
 
 impl ParameterChannel {
@@ -311,26 +311,26 @@ impl ParameterChannel {
     }
 }
 
-impl LiveConsoleRecordV1 for EffectControlRecordV1 {
+impl LiveConsoleRecord for EffectControlRecord {
     /// Every prepared effect instance sits in `simd1`, `dynamic` or `simd2` -- all three racks are
     /// upstream of the fader (`TrackStage` order), so every record on this queue is upstream.
-    const SEAM: SeamSideV1 = SeamSideV1::UpstreamOfSeam;
+    const SEAM: SeamSide = SeamSide::UpstreamOfSeam;
 
-    fn symmetry_event(&self) -> SymmetryEventV1 {
+    fn symmetry_event(&self) -> SymmetryEvent {
         // Exhaustive, with no wildcard arm on purpose: a new variant is a compile error here,
         // which is the structural half of the hook rule.
         match *self {
             Self::Parameter { channel, .. } => {
                 if channel.writes_one_channel() {
-                    SymmetryEventV1::Desymmetrize
+                    SymmetryEvent::Desymmetrize
                 } else {
-                    SymmetryEventV1::Preserve
+                    SymmetryEvent::Preserve
                 }
             }
             // A subscription changes what is *read* after the block, never what the block
             // renders, so it cannot move a designed word.
-            Self::Observe { .. } => SymmetryEventV1::Preserve,
-            Self::Bypass(value) => SymmetryEventV1::Bypass(value),
+            Self::Observe { .. } => SymmetryEvent::Preserve,
+            Self::Bypass(value) => SymmetryEvent::Bypass(value),
         }
     }
 }
@@ -356,22 +356,22 @@ mod tests {
 
     #[test]
     fn a_declined_witness_names_every_term_it_is_missing() {
-        let witness = ChannelSymmetryWitnessV1::DECLINED;
+        let witness = ChannelSymmetryWitness::DECLINED;
         assert!(!witness.eligible());
-        assert_eq!(witness.declined(), ChannelSymmetryWitnessV1::ALL);
-        for (term, _) in ChannelSymmetryWitnessV1::TERMS {
+        assert_eq!(witness.declined(), ChannelSymmetryWitness::ALL);
+        for (term, _) in ChannelSymmetryWitness::TERMS {
             assert!(!witness.holds(term));
         }
     }
 
     #[test]
     fn every_single_missing_term_declines_the_conjunction() {
-        for (term, name) in ChannelSymmetryWitnessV1::TERMS {
-            let witness = ChannelSymmetryWitnessV1::symmetric_except(term);
+        for (term, name) in ChannelSymmetryWitness::TERMS {
+            let witness = ChannelSymmetryWitness::symmetric_except(term);
             assert!(!witness.eligible(), "{name} did not gate eligibility");
             assert_eq!(witness.declined(), term);
             assert!(
-                ChannelSymmetryWitnessV1::SYMMETRIC.eligible(),
+                ChannelSymmetryWitness::SYMMETRIC.eligible(),
                 "the all-terms value must be eligible"
             );
         }
@@ -379,50 +379,50 @@ mod tests {
 
     #[test]
     fn the_conjunction_declines_when_either_operand_declines() {
-        let symmetric = ChannelSymmetryWitnessV1::SYMMETRIC;
-        let no_live = ChannelSymmetryWitnessV1::symmetric_except(ChannelSymmetryWitnessV1::LIVE);
+        let symmetric = ChannelSymmetryWitness::SYMMETRIC;
+        let no_live = ChannelSymmetryWitness::symmetric_except(ChannelSymmetryWitness::LIVE);
         assert!(symmetric.and(symmetric).eligible());
         assert!(!symmetric.and(no_live).eligible());
         assert!(!no_live.and(symmetric).eligible());
         assert_eq!(
             symmetric.and(no_live).declined(),
-            ChannelSymmetryWitnessV1::LIVE
+            ChannelSymmetryWitness::LIVE
         );
     }
 
     #[test]
     fn a_left_channel_parameter_desymmetrises_and_a_both_channel_one_does_not() {
-        let left = EffectControlRecordV1::Parameter {
+        let left = EffectControlRecord::Parameter {
             parameter_index: 3,
             channel: ParameterChannel::Left,
             value: 0.5,
         };
-        let right = EffectControlRecordV1::Parameter {
+        let right = EffectControlRecord::Parameter {
             parameter_index: 3,
             channel: ParameterChannel::Right,
             value: 0.5,
         };
-        let both = EffectControlRecordV1::Parameter {
+        let both = EffectControlRecord::Parameter {
             parameter_index: 3,
             channel: ParameterChannel::Both,
             value: 0.5,
         };
-        assert_eq!(left.symmetry_event(), SymmetryEventV1::Desymmetrize);
-        assert_eq!(right.symmetry_event(), SymmetryEventV1::Desymmetrize);
-        assert_eq!(both.symmetry_event(), SymmetryEventV1::Preserve);
+        assert_eq!(left.symmetry_event(), SymmetryEvent::Desymmetrize);
+        assert_eq!(right.symmetry_event(), SymmetryEvent::Desymmetrize);
+        assert_eq!(both.symmetry_event(), SymmetryEvent::Preserve);
 
-        let mut witness = ChannelSymmetryWitnessV1::SYMMETRIC;
+        let mut witness = ChannelSymmetryWitness::SYMMETRIC;
         witness.admit(&both);
         assert!(witness.eligible(), "a both-channel command must preserve");
         witness.admit(&left);
         assert!(!witness.eligible());
-        assert_eq!(witness.declined(), ChannelSymmetryWitnessV1::LIVE);
+        assert_eq!(witness.declined(), ChannelSymmetryWitness::LIVE);
     }
 
     #[test]
     fn a_subscription_never_moves_the_witness() {
-        let mut witness = ChannelSymmetryWitnessV1::SYMMETRIC;
-        witness.admit(&EffectControlRecordV1::Observe {
+        let mut witness = ChannelSymmetryWitness::SYMMETRIC;
+        witness.admit(&EffectControlRecord::Observe {
             tap_index: 0,
             armed: true,
             window_blocks: 4,
@@ -432,23 +432,23 @@ mod tests {
 
     #[test]
     fn bypass_is_reversible_and_asymmetric_parameters_are_not() {
-        let mut witness = ChannelSymmetryWitnessV1::SYMMETRIC;
-        witness.admit(&EffectControlRecordV1::Bypass(true));
+        let mut witness = ChannelSymmetryWitness::SYMMETRIC;
+        witness.admit(&EffectControlRecord::Bypass(true));
         assert_eq!(
             witness.declined(),
-            ChannelSymmetryWitnessV1::UNBYPASSED,
+            ChannelSymmetryWitness::UNBYPASSED,
             "a live bypass declines the cohort while it is on"
         );
-        witness.admit(&EffectControlRecordV1::Bypass(false));
+        witness.admit(&EffectControlRecord::Bypass(false));
         assert!(witness.eligible(), "lifting the bypass re-earns the term");
 
-        witness.admit(&EffectControlRecordV1::Parameter {
+        witness.admit(&EffectControlRecord::Parameter {
             parameter_index: 0,
             channel: ParameterChannel::Left,
             value: 1.0,
         });
-        witness.admit(&EffectControlRecordV1::Bypass(true));
-        witness.admit(&EffectControlRecordV1::Bypass(false));
+        witness.admit(&EffectControlRecord::Bypass(true));
+        witness.admit(&EffectControlRecord::Bypass(false));
         assert!(
             !witness.eligible(),
             "an asymmetric parameter write is not undone by bypass traffic"
@@ -459,14 +459,14 @@ mod tests {
     fn a_seam_side_record_never_moves_the_witness() {
         #[derive(Clone, Copy)]
         struct SeamRecord;
-        impl LiveConsoleRecordV1 for SeamRecord {
-            const SEAM: SeamSideV1 = SeamSideV1::SeamSide;
-            fn symmetry_event(&self) -> SymmetryEventV1 {
+        impl LiveConsoleRecord for SeamRecord {
+            const SEAM: SeamSide = SeamSide::SeamSide;
+            fn symmetry_event(&self) -> SymmetryEvent {
                 // Deliberately the worst answer: the seam-side const must win regardless.
-                SymmetryEventV1::Desymmetrize
+                SymmetryEvent::Desymmetrize
             }
         }
-        let mut witness = ChannelSymmetryWitnessV1::SYMMETRIC;
+        let mut witness = ChannelSymmetryWitness::SYMMETRIC;
         witness.admit(&SeamRecord);
         assert!(witness.eligible());
     }

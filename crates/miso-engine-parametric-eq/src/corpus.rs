@@ -24,7 +24,7 @@
 //! stable sections, inputs in `[-1, 1]` — and `tests/determinism.rs` asserts finiteness rather than
 //! assuming it.
 
-use crate::{BandTarget, Channel, EQ_SECTION_COUNT_V1, EqBandKindV1, RAMP_SAMPLES, SampleRateHz};
+use crate::{BandTarget, Channel, EQ_SECTION_COUNT, EqBandKind, RAMP_SAMPLES, SampleRateHz};
 use miso_engine_lane::{Lane, Simd4, Simd8};
 
 /// Independent single-track configurations in every case; a multiple of the widest backend.
@@ -51,12 +51,12 @@ pub const CASE_NAMES: [&str; CASE_COUNT] = [
 pub(crate) const CORPUS_RATE: SampleRateHz = SampleRateHz(48_000);
 
 /// The four-band configuration of one track, spread across the frozen parameter domain.
-pub(crate) fn bands(track: usize) -> [BandTarget; EQ_SECTION_COUNT_V1] {
-    const KINDS: [EqBandKindV1; EQ_SECTION_COUNT_V1] = [
-        EqBandKindV1::Bell,
-        EqBandKindV1::LowShelf,
-        EqBandKindV1::HighPass,
-        EqBandKindV1::Notch,
+pub(crate) fn bands(track: usize) -> [BandTarget; EQ_SECTION_COUNT] {
+    const KINDS: [EqBandKind; EQ_SECTION_COUNT] = [
+        EqBandKind::Bell,
+        EqBandKind::LowShelf,
+        EqBandKind::HighPass,
+        EqBandKind::Notch,
     ];
     const FREQUENCIES: [f32; LANES] = [
         20.0, 60.0, 180.0, 540.0, 1_620.0, 4_860.0, 14_580.0, 19_000.0,
@@ -146,7 +146,7 @@ fn run<L: Lane, const W: usize>(case: usize, out: &mut [u32]) {
         if case == 1 {
             for lane in 0..W {
                 let track = group * W + lane;
-                let section = track % EQ_SECTION_COUNT_V1;
+                let section = track % EQ_SECTION_COUNT;
                 let words = ramp_target(track, section)
                     .words(CORPUS_RATE)
                     .expect("every corpus ramp target is a legal design");

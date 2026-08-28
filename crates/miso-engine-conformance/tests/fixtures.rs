@@ -1,6 +1,6 @@
 //! Public API integration coverage for checked-in fixtures.
 
-use miso_engine_conformance::{FixtureLimits, PcmFixtureV1, PlanarBlock, parse_manifest};
+use miso_engine_conformance::{FixtureLimits, PcmFixture, PlanarBlock, parse_manifest};
 use miso_engine_core::{EXTENDED_COMPATIBILITY_SAMPLE_RATES, LAUNCH_SAMPLE_RATES, SampleRateHz};
 
 #[test]
@@ -12,7 +12,7 @@ fn checked_in_manifest_lists_only_valid_exact_fixtures() {
     for entry in entries {
         let bytes = std::fs::read(root.join(&entry.path)).expect("listed fixture");
         assert_eq!(bytes.len(), entry.length);
-        let fixture = PcmFixtureV1::parse(&bytes, FixtureLimits::default()).expect("valid fixture");
+        let fixture = PcmFixture::parse(&bytes, FixtureLimits::default()).expect("valid fixture");
         assert_eq!(fixture.checksum(), entry.crc32c);
         assert!(fixture.samples().iter().all(|sample| sample.is_finite()));
     }
@@ -24,10 +24,10 @@ fn fixture_trailing_and_truncated_bytes_fail_before_decode() {
         include_bytes!("../../../fixtures/conformance/v1/rate-048000-impulse-dual-mono.mepcm")
             .to_vec();
     bytes.push(0);
-    assert!(PcmFixtureV1::parse(&bytes, Default::default()).is_err());
+    assert!(PcmFixture::parse(&bytes, Default::default()).is_err());
     let bytes =
         include_bytes!("../../../fixtures/conformance/v1/rate-048000-impulse-dual-mono.mepcm");
-    assert!(PcmFixtureV1::parse(&bytes[..bytes.len() - 1], Default::default()).is_err());
+    assert!(PcmFixture::parse(&bytes[..bytes.len() - 1], Default::default()).is_err());
 }
 
 #[test]

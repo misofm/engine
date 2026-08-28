@@ -4,7 +4,7 @@ use core::{convert::Infallible, fmt::Write as _};
 use miso_engine_session::{
     AutomationShape, CompileCaps, DiagnosticCode, DiagnosticSet, FieldKey, MatrixOrPan,
     ModelVisitor, Output, ParameterChannel, ParameterUnit, Rack, RackName, RouteDestination,
-    RouteSource, SendTap, SessionTomlV1, Sidechain, SidechainDeclaration, StableId, Token,
+    RouteSource, SendTap, SessionToml, Sidechain, SidechainDeclaration, StableId, Token,
     VisitModel, WalkOrder, canonical_session_toml, compile_session, parse_session_toml,
 };
 
@@ -27,7 +27,7 @@ struct Case {
     name: &'static str,
     code: DiagnosticCode,
     path: &'static str,
-    typed: fn(&mut SessionTomlV1),
+    typed: fn(&mut SessionToml),
 }
 fn target<'a>(errors: &'a DiagnosticSet, case: &Case) -> &'a miso_engine_session::Diagnostic {
     errors
@@ -41,7 +41,7 @@ fn target<'a>(errors: &'a DiagnosticSet, case: &Case) -> &'a miso_engine_session
             )
         })
 }
-fn set_sidechain(model: &mut SessionTomlV1, rack: RackName, source: RouteSource) {
+fn set_sidechain(model: &mut SessionToml, rack: RackName, source: RouteSource) {
     let mut effect = model.tracks[0].dynamic.effects[0].clone();
     effect.sidechain = SidechainDeclaration::Routed(Sidechain {
         source,
@@ -895,7 +895,7 @@ fn write_quoted(output: &mut String, value: &str) {
     }
     output.push('"');
 }
-fn unvalidated_toml(model: &SessionTomlV1) -> String {
+fn unvalidated_toml(model: &SessionToml) -> String {
     let mut writer = Writer {
         output: String::new(),
         depth: 0,

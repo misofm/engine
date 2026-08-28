@@ -23,7 +23,7 @@
 //!   time and recovers every issued parcel through the SPSC release/acquire pair before it issues
 //!   the next, so an earlier wave's writes are visible to a later wave's reads.
 //! * **I4 — a parcel the coordinator does not own is never read.** When a worker misses its
-//!   deadline the coordinator marks its buffers muted ([`ArenaLeaseV1::set_muted`]); a muted read
+//!   deadline the coordinator marks its buffers muted ([`ArenaLease::set_muted`]); a muted read
 //!   returns the always-zero silence buffer instead. A late worker can therefore only ever write
 //!   its own unique slots, which nobody reads until its parcel is reaped.
 //!
@@ -83,7 +83,7 @@ pub struct DisjointArena {
     frames: usize,
 }
 
-// SAFETY: the arena hands out access only through `ArenaLeaseV1`, and a lease set is constructed
+// SAFETY: the arena hands out access only through `ArenaLease`, and a lease set is constructed
 // only by `ArenaLeaseSetBuilder::finish`, which proves I1 and I2 (module documentation). I3 and
 // I4 are discharged by the scheduler: one wave at a time with an acquire/release edge between
 // waves, and no read of a parcel the coordinator does not own. Under I1 no two leases can
@@ -142,7 +142,7 @@ pub type ArenaStereoPair<'a> = ((&'a mut [f32], &'a mut [f32]), (&'a [f32], &'a 
 ///
 /// The lease is the only way to reach arena storage. It is `Send` (it travels with its parcel to
 /// an auxiliary worker) and deliberately not `Sync`.
-pub struct ArenaLeaseV1 {
+pub struct ArenaLease {
     arena: Arc<DisjointArena>,
     /// Per buffer: bit 0 writable by this lease, bit 1 muted for this lease.
     access: Box<[u8]>,
@@ -152,17 +152,17 @@ pub struct ArenaLeaseV1 {
 const ACCESS_WRITE: u8 = 0b01;
 const ACCESS_MUTED: u8 = 0b10;
 
-impl core::fmt::Debug for ArenaLeaseV1 {
+impl core::fmt::Debug for ArenaLease {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         formatter
-            .debug_struct("ArenaLeaseV1")
+            .debug_struct("ArenaLease")
             .field("wave", &self.wave)
             .field("buffers", &self.arena.buffers)
             .finish()
     }
 }
 
-impl ArenaLeaseV1 {
+impl ArenaLease {
     /// The wave this lease belongs to.
     #[must_use]
     pub const fn wave(&self) -> usize {
@@ -474,7 +474,7 @@ impl ArenaLeaseSetBuilder {
     ///
     /// # Errors
     /// Returns the first violated invariant; nothing is allocated on failure.
-    pub fn finish(self) -> Result<(Arc<DisjointArena>, Vec<ArenaLeaseV1>), DisjointArenaError> {
+    pub fn finish(self) -> Result<(Arc<DisjointArena>, Vec<ArenaLease>), DisjointArenaError> {
         let buffers = self.reserved;
         // I1: at most one writer per buffer, and never the silence buffer.
         let mut owner: Vec<Option<usize>> = vec![None; buffers];
@@ -553,7 +553,7 @@ impl ArenaLeaseSetBuilder {
                 for buffer in lease.writes {
                     access[buffer as usize] |= ACCESS_WRITE;
                 }
-                ArenaLeaseV1 {
+                ArenaLease {
                     arena: Arc::clone(&arena),
                     access,
                     wave: lease.wave,

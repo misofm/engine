@@ -27,10 +27,10 @@
 use miso_engine_effect_contract::{
     AutomationSpanKind, EffectProcessBlock, EffectQuality, InitialParameterValue, LinkMode,
     NativeEffectFactory, ParameterChannel, PrepareEffectLimits, PrepareEffectRequest,
-    PreparedAutomationSpan, PreparedPortsV1, PreparedSidechainPort,
+    PreparedAutomationSpan, PreparedPorts, PreparedSidechainPort,
 };
 
-use crate::{DELAY_PARAMETERS_V1, DelayFactory};
+use crate::{DELAY_PARAMETERS, DelayFactory};
 
 /// Sample rate every case renders at.
 pub const SAMPLE_RATE: u32 = 48_000;
@@ -87,7 +87,7 @@ fn initial_values(case: usize) -> [InitialParameterValue; 9] {
             } else {
                 ParameterChannel::Right
             },
-            value: DELAY_PARAMETERS_V1[index / 2].default_value,
+            value: DELAY_PARAMETERS[index / 2].default_value,
         });
     values[8] = InitialParameterValue {
         parameter_index: 4,
@@ -163,7 +163,7 @@ pub fn run_case(case: usize, out: &mut [u32]) {
             quality: EffectQuality::Normal,
             bypass: false,
             link_mode: LinkMode::DualMono,
-            ports: PreparedPortsV1 {
+            ports: PreparedPorts {
                 sidechain: PreparedSidechainPort::None,
             },
             initial_values: &values,

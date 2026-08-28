@@ -7,7 +7,7 @@ transport**. Gain reduction is the first resident tap; it is not the design.
 ## The declared menu
 
 An effect declares what may be observed, in the same descriptor that declares its parameters and
-never anywhere else. `EffectDescriptorV1::observations` is a `&'static [ObservationDescriptorV1]`
+never anywhere else. `EffectDescriptor::observations` is a `&'static [ObservationDescriptor]`
 and each entry states an effect-local nonzero ascending `id`, a display name and unit, a `kind`, a
 transport `unit`, a `cost`, a `cadence`, a `fold`, a `channels` policy, and the declared bounds of
 the value a consumer reads.
@@ -16,7 +16,7 @@ The effect is the only thing that knows which of its internal values exist, what
 whether reading one is a copy or a second computation. A host-side table would be a second source
 of truth that goes stale the moment a kernel changes.
 
-`validate_descriptor_v1` enforces three rules beyond text and bounds:
+`validate_descriptor` enforces three rules beyond text and bounds:
 
 * a `Computed` tap may not claim `PerBlock` cadence — that would put an analysis pass on the render
   thread, which is exactly what the cost split exists to prevent;
@@ -47,12 +47,12 @@ zero with no way for the caller to learn why.
 
 **Level 1 — structural.** A session whose console request names no observation capacity
 (`observation_taps == 0`) has no observation state in the compiled plan *at all*: no lane, no
-accumulator, no conflating cell. Not a disabled one — none. `attach_effect_observation_v1` is the
+accumulator, no conflating cell. Not a disabled one — none. `attach_effect_observation` is the
 only thing that creates one and it is never called. `observation_retained_bytes` is `0`, and that
 zero is **walked over the built runtime** rather than computed from the request.
 
 **Level 2 — arm/disarm.** Inside a capable plan, subscribe and unsubscribe ride the effect's
-existing bounded control channel as `EffectControlRecordV1::Observe`, applied at the block
+existing bounded control channel as `EffectControlRecord::Observe`, applied at the block
 boundary and acknowledged with the exact `applied_at_sample`. Slots are preallocated from the
 declared menu, so subscribe allocates nothing and disarm frees nothing: `retained_bytes` is
 unchanged across both. An unarmed tap's state is never read, transformed or stored; the honest cost
@@ -77,7 +77,7 @@ without the `atomics` feature every operation lowers to a plain load or store.
 
 **Read-reset without a second writer.** The reader owns `consumed_sequence` and is its only writer.
 It does not gate publication; it makes what was overwritten *countable*
-(`ObservationReaderV1::missed_windows`), which turns "the meter froze" from an invisible failure
+(`ObservationReader::missed_windows`), which turns "the meter froze" from an invisible failure
 into a counted one.
 
 **Windows tile.** A window closes at exactly `window_blocks` blocks and the next opens where it
@@ -106,13 +106,13 @@ declaring the transport unit separately.
   render thread may not take, so the host converts once per **closed window** on the control plane:
   `-20 log10(1 - d)`, clamped into the tap's declared range.
 
-`ObservationFoldV1::PeakMagnitude` is `max(|x|)` over the window. That is what turns an effect's
+`ObservationFold::PeakMagnitude` is `max(|x|)` over the window. That is what turns an effect's
 own negative-for-reduction convention into the non-negative magnitude a meter reads, and it is why
 an app's `Math.max(0, x ?? 0)` is a **no-op** rather than a silent zeroing.
 
 ## Absent-effect semantics
 
-`MisoMeterFrameV1.trackGrDb` is positional and `trackCount` long, and every entry is finite.
+`MisoMeterFrame.trackGrDb` is positional and `trackCount` long, and every entry is finite.
 `0` deliberately conflates "not reducing" with "no observed effect on this track", because the
 array is read without null checks. The distinction lives in the `miso.observe.v1` acknowledgement's
 subscription map — `{ trackIndex, rack, effectIndex, tapId, frameSlot, windowBlocks }` — which is

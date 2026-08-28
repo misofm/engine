@@ -40,15 +40,15 @@
 
 use miso_engine_effect_contract::{
     AutomationRate, AutomationSpanKind, BankProcessReport, BankWidth, EffectBankProcessBlock,
-    EffectDescriptorV1, EffectPrepareError, EffectProcessBlock, EffectQuality,
-    InitialParameterValue, LatencySamples, LinkMode, LinkModeSet, NativeEffectFactory,
-    ObservationCadenceV1, ObservationChannelsV1, ObservationCostV1, ObservationDescriptorV1,
-    ObservationFoldV1, ObservationKindV1, ObservationSampleV1, ObservationTapId, ParameterChannel,
-    ParameterChannelPolicy, ParameterDescriptorV1, ParameterDomain, ParameterId, ParameterMapping,
-    ParameterUnit, PortDescriptorV1, PortId, PortLayout, PortRole, PrepareEffectBankRequest,
-    PrepareEffectRequest, PreparedAutomationSpan, PreparedBankMetadata, PreparedEffectMetadata,
-    PreparedNativeEffect, PreparedNativeEffectBank, ProcessReport, ResetKind, SmoothingRule,
-    StatePayloadError, StatePayloadInput, StatePayloadOutput, StatePayloadSizes, TailSamples,
+    EffectDescriptor, EffectPrepareError, EffectProcessBlock, EffectQuality, InitialParameterValue,
+    LatencySamples, LinkMode, LinkModeSet, NativeEffectFactory, ObservationCadence,
+    ObservationChannels, ObservationCost, ObservationDescriptor, ObservationFold, ObservationKind,
+    ObservationSample, ObservationTapId, ParameterChannel, ParameterChannelPolicy,
+    ParameterDescriptor, ParameterDomain, ParameterId, ParameterMapping, ParameterUnit,
+    PortDescriptor, PortId, PortLayout, PortRole, PrepareEffectBankRequest, PrepareEffectRequest,
+    PreparedAutomationSpan, PreparedBankMetadata, PreparedEffectMetadata, PreparedNativeEffect,
+    PreparedNativeEffectBank, ProcessReport, ResetKind, SmoothingRule, StatePayloadError,
+    StatePayloadInput, StatePayloadOutput, StatePayloadSizes, TailSamples,
     expected_prepared_metadata,
 };
 use miso_engine_effect_runtime::bank::{self, NonFiniteReport};
@@ -141,8 +141,8 @@ const fn parameter(
     automation_rate: AutomationRate,
     smoothing: SmoothingRule,
     smoothing_samples: u32,
-) -> ParameterDescriptorV1 {
-    ParameterDescriptorV1 {
+) -> ParameterDescriptor {
+    ParameterDescriptor {
         id: parameter_id(id),
         display_name,
         display_unit,
@@ -163,7 +163,7 @@ const fn parameter(
 }
 
 /// Frozen parameter order and stable numeric IDs for the V1 two-band product.
-pub const MULTIBAND_COMPRESSOR_PARAMETERS_V1: [ParameterDescriptorV1; PARAMETER_COUNT] = [
+pub const MULTIBAND_COMPRESSOR_PARAMETERS: [ParameterDescriptor; PARAMETER_COUNT] = [
     parameter(
         1,
         "crossover",
@@ -322,14 +322,14 @@ pub const MULTIBAND_COMPRESSOR_PARAMETERS_V1: [ParameterDescriptorV1; PARAMETER_
     ),
 ];
 
-const PORTS: [PortDescriptorV1; 2] = [
-    PortDescriptorV1 {
+const PORTS: [PortDescriptor; 2] = [
+    PortDescriptor {
         id: port_id("main-in"),
         role: PortRole::MainInput,
         required: true,
         layout: PortLayout::DualMonoPlanar,
     },
-    PortDescriptorV1 {
+    PortDescriptor {
         id: port_id("main-out"),
         role: PortRole::MainOutput,
         required: true,
@@ -348,9 +348,9 @@ const fn lane_bytes(sample_rate: u32) -> u32 {
     (LANE_HEADER_WORDS as u32 + 2 * ring) * 4
 }
 
-const fn quality(sample_rate: u32) -> miso_engine_effect_contract::QualityDescriptorV1 {
+const fn quality(sample_rate: u32) -> miso_engine_effect_contract::QualityDescriptor {
     let bytes = lane_bytes(sample_rate);
-    miso_engine_effect_contract::QualityDescriptorV1 {
+    miso_engine_effect_contract::QualityDescriptor {
         quality: EffectQuality::Normal,
         sample_rate,
         latency: LatencySamples((sample_rate / 50) as u64),
@@ -372,7 +372,7 @@ const fn quality(sample_rate: u32) -> miso_engine_effect_contract::QualityDescri
     }
 }
 
-const QUALITIES: [miso_engine_effect_contract::QualityDescriptorV1; 4] = [
+const QUALITIES: [miso_engine_effect_contract::QualityDescriptor; 4] = [
     quality(44_100),
     quality(48_000),
     quality(88_200),
@@ -385,23 +385,22 @@ const QUALITIES: [miso_engine_effect_contract::QualityDescriptorV1; 4] = [
 /// minimum of the two is the largest reduction the channel is applying. One aggregate tap ships in
 /// V1 because the meter frame carries one slot per track; per-band taps are an additive follow-up
 /// once per-tap frame slots exist, and they need no wire, contract or transport change to arrive.
-pub const MULTIBAND_COMPRESSOR_OBSERVATIONS_V1: [ObservationDescriptorV1; 1] =
-    [ObservationDescriptorV1 {
-        id: ObservationTapId(1),
-        display_name: "Gain Reduction",
-        display_unit: "dB",
-        kind: ObservationKindV1::GainReductionDb,
-        unit: ParameterUnit::Db,
-        cost: ObservationCostV1::Resident,
-        cadence: ObservationCadenceV1::PerBlock,
-        fold: ObservationFoldV1::PeakMagnitude,
-        channels: ObservationChannelsV1::PerLane,
-        minimum: 0.0,
-        maximum: 100.0,
-    }];
+pub const MULTIBAND_COMPRESSOR_OBSERVATIONS: [ObservationDescriptor; 1] = [ObservationDescriptor {
+    id: ObservationTapId(1),
+    display_name: "Gain Reduction",
+    display_unit: "dB",
+    kind: ObservationKind::GainReductionDb,
+    unit: ParameterUnit::Db,
+    cost: ObservationCost::Resident,
+    cadence: ObservationCadence::PerBlock,
+    fold: ObservationFold::PeakMagnitude,
+    channels: ObservationChannels::PerLane,
+    minimum: 0.0,
+    maximum: 100.0,
+}];
 
 /// Immutable descriptor for the launch two-band multiband compressor.
-pub const MULTIBAND_COMPRESSOR_DESCRIPTOR_V1: EffectDescriptorV1 = EffectDescriptorV1 {
+pub const MULTIBAND_COMPRESSOR_DESCRIPTOR: EffectDescriptor = EffectDescriptor {
     id: effect_id("miso.multiband-compressor"),
     display_name: "Multiband Compressor",
     contract_major: 1,
@@ -411,10 +410,10 @@ pub const MULTIBAND_COMPRESSOR_DESCRIPTOR_V1: EffectDescriptorV1 = EffectDescrip
     contract_minor: 1,
     state_layout_version: STATE_LAYOUT_VERSION,
     supported_link_modes: LinkModeSet::ALL,
-    parameters: &MULTIBAND_COMPRESSOR_PARAMETERS_V1,
+    parameters: &MULTIBAND_COMPRESSOR_PARAMETERS,
     ports: &PORTS,
     qualities: &QUALITIES,
-    observations: &MULTIBAND_COMPRESSOR_OBSERVATIONS_V1,
+    observations: &MULTIBAND_COMPRESSOR_OBSERVATIONS,
 };
 
 /// The domain of one parameter, in the shared runtime's vocabulary.
@@ -423,7 +422,7 @@ pub const MULTIBAND_COMPRESSOR_DESCRIPTOR_V1: EffectDescriptorV1 = EffectDescrip
 /// control-surface concern and is not used here, so every spec is built as continuous over the
 /// descriptor's own bounds.
 const fn spec(index: usize) -> ParameterSpec {
-    let descriptor = &MULTIBAND_COMPRESSOR_PARAMETERS_V1[index];
+    let descriptor = &MULTIBAND_COMPRESSOR_PARAMETERS[index];
     let minimum = match descriptor.minimum {
         Some(value) => value,
         None => 0.0,
@@ -1753,8 +1752,8 @@ fn prepare_bank<L: Lane, const W: usize>(
 }
 
 impl NativeEffectFactory for MultibandCompressorFactory {
-    fn descriptor(&self) -> &'static EffectDescriptorV1 {
-        &MULTIBAND_COMPRESSOR_DESCRIPTOR_V1
+    fn descriptor(&self) -> &'static EffectDescriptor {
+        &MULTIBAND_COMPRESSOR_DESCRIPTOR
     }
 
     fn prepare(
@@ -1802,7 +1801,7 @@ impl PreparedNativeEffect for PreparedMultibandCompressor {
     }
 
     /// Issue #143 D2 / R3: the deeper of the two bands' smoother words, read for lane 0.
-    fn observe_resident(&self, tap_index: u32, out: &mut ObservationSampleV1) -> bool {
+    fn observe_resident(&self, tap_index: u32, out: &mut ObservationSample) -> bool {
         if tap_index != 0 {
             return false;
         }
@@ -1860,7 +1859,7 @@ impl<L: Lane, const W: usize> PreparedNativeEffectBank for PreparedMultibandComp
         self.metadata.clone()
     }
 
-    fn observe_resident_bank(&self, tap_index: u32, out: &mut [ObservationSampleV1]) -> bool {
+    fn observe_resident_bank(&self, tap_index: u32, out: &mut [ObservationSample]) -> bool {
         if tap_index != 0 || out.len() != W || W != L::WIDTH {
             return false;
         }

@@ -14,10 +14,10 @@ use std::time::Instant;
 use miso_engine_effect_contract::{
     BankWidth, EffectBankProcessBlock, EffectProcessBlock, EffectQuality, InitialParameterValue,
     LinkMode, NativeEffectFactory, ParameterChannel, PrepareEffectBankRequest, PrepareEffectLimits,
-    PrepareEffectRequest, PreparedPortsV1, PreparedSidechainPort,
+    PrepareEffectRequest, PreparedPorts, PreparedSidechainPort,
 };
 use miso_engine_true_peak_limiter::{
-    TRUE_PEAK_LIMITER_DESCRIPTOR_V1, TRUE_PEAK_LIMITER_PARAMETERS_V1, TruePeakLimiterFactory,
+    TRUE_PEAK_LIMITER_DESCRIPTOR, TRUE_PEAK_LIMITER_PARAMETERS, TruePeakLimiterFactory,
 };
 
 fn values() -> [InitialParameterValue; 6] {
@@ -28,12 +28,12 @@ fn values() -> [InitialParameterValue; 6] {
         } else {
             ParameterChannel::Right
         },
-        value: TRUE_PEAK_LIMITER_PARAMETERS_V1[index / 2].default_value,
+        value: TRUE_PEAK_LIMITER_PARAMETERS[index / 2].default_value,
     })
 }
 
 fn request(values: &[InitialParameterValue]) -> PrepareEffectRequest<'_> {
-    let quality = TRUE_PEAK_LIMITER_DESCRIPTOR_V1
+    let quality = TRUE_PEAK_LIMITER_DESCRIPTOR
         .qualities
         .iter()
         .find(|quality| quality.sample_rate == 48_000)
@@ -44,7 +44,7 @@ fn request(values: &[InitialParameterValue]) -> PrepareEffectRequest<'_> {
         quality: EffectQuality::Normal,
         bypass: false,
         link_mode: LinkMode::Maximum,
-        ports: PreparedPortsV1 {
+        ports: PreparedPorts {
             sidechain: PreparedSidechainPort::None,
         },
         initial_values: values,

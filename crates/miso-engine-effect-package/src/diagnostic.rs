@@ -1,9 +1,9 @@
-pub const EFFECT_PACKAGE_V1_UNAVAILABLE_INDEX: u32 = u32::MAX;
-pub const EFFECT_PACKAGE_V1_UNAVAILABLE_OFFSET: u64 = u64::MAX;
+pub const EFFECT_PACKAGE_UNAVAILABLE_INDEX: u32 = u32::MAX;
+pub const EFFECT_PACKAGE_UNAVAILABLE_OFFSET: u64 = u64::MAX;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u32)]
-pub enum EffectPackageDiagnosticCodeV1 {
+pub enum EffectPackageDiagnosticCode {
     Ok = 0,
     Limit = 1,
     BufferTooSmall = 2,
@@ -25,8 +25,8 @@ pub enum EffectPackageDiagnosticCodeV1 {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(C)]
-pub struct EffectPackageDiagnosticV1 {
-    pub code: EffectPackageDiagnosticCodeV1,
+pub struct EffectPackageDiagnostic {
+    pub code: EffectPackageDiagnosticCode,
     pub detail: u32,
     pub artifact_index: u32,
     pub reserved: u32,
@@ -34,9 +34,9 @@ pub struct EffectPackageDiagnosticV1 {
     pub required_bytes: u64,
 }
 
-impl EffectPackageDiagnosticV1 {
+impl EffectPackageDiagnostic {
     pub const fn new(
-        code: EffectPackageDiagnosticCodeV1,
+        code: EffectPackageDiagnosticCode,
         detail: u32,
         artifact_index: u32,
         byte_offset: u64,
@@ -53,22 +53,22 @@ impl EffectPackageDiagnosticV1 {
 
     pub const fn buffer_too_small(required_bytes: u64) -> Self {
         Self {
-            code: EffectPackageDiagnosticCodeV1::BufferTooSmall,
+            code: EffectPackageDiagnosticCode::BufferTooSmall,
             detail: 0,
-            artifact_index: EFFECT_PACKAGE_V1_UNAVAILABLE_INDEX,
+            artifact_index: EFFECT_PACKAGE_UNAVAILABLE_INDEX,
             reserved: 0,
-            byte_offset: EFFECT_PACKAGE_V1_UNAVAILABLE_OFFSET,
+            byte_offset: EFFECT_PACKAGE_UNAVAILABLE_OFFSET,
             required_bytes,
         }
     }
 }
 
-pub const EFFECT_STATE_V1_UNAVAILABLE_INDEX: u32 = u32::MAX;
-pub const EFFECT_STATE_V1_UNAVAILABLE_OFFSET: u64 = u64::MAX;
+pub const EFFECT_STATE_UNAVAILABLE_INDEX: u32 = u32::MAX;
+pub const EFFECT_STATE_UNAVAILABLE_OFFSET: u64 = u64::MAX;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u32)]
-pub enum EffectStateDiagnosticCodeV1 {
+pub enum EffectStateDiagnosticCode {
     Ok = 0,
     Limit = 1,
     BufferTooSmall = 2,
@@ -90,8 +90,8 @@ pub enum EffectStateDiagnosticCodeV1 {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(C)]
-pub struct EffectStateDiagnosticV1 {
-    pub code: EffectStateDiagnosticCodeV1,
+pub struct EffectStateDiagnostic {
+    pub code: EffectStateDiagnosticCode,
     pub detail: u32,
     pub item_index: u32,
     pub reserved: u32,
@@ -99,9 +99,9 @@ pub struct EffectStateDiagnosticV1 {
     pub required_bytes: u64,
 }
 
-impl EffectStateDiagnosticV1 {
+impl EffectStateDiagnostic {
     pub const fn new(
-        code: EffectStateDiagnosticCodeV1,
+        code: EffectStateDiagnosticCode,
         detail: u32,
         item_index: u32,
         byte_offset: u64,
@@ -118,21 +118,21 @@ impl EffectStateDiagnosticV1 {
 
     pub const fn buffer_too_small(detail: u32, required_bytes: u64) -> Self {
         Self {
-            code: EffectStateDiagnosticCodeV1::BufferTooSmall,
+            code: EffectStateDiagnosticCode::BufferTooSmall,
             detail,
-            item_index: EFFECT_STATE_V1_UNAVAILABLE_INDEX,
+            item_index: EFFECT_STATE_UNAVAILABLE_INDEX,
             reserved: 0,
-            byte_offset: EFFECT_STATE_V1_UNAVAILABLE_OFFSET,
+            byte_offset: EFFECT_STATE_UNAVAILABLE_OFFSET,
             required_bytes,
         }
     }
 }
 
-pub const EFFECT_DESCRIPTOR_WIRE_V1_UNAVAILABLE: u32 = u32::MAX;
+pub const EFFECT_DESCRIPTOR_WIRE_UNAVAILABLE: u32 = u32::MAX;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u32)]
-pub enum EffectDescriptorWireDiagnosticCodeV1 {
+pub enum EffectDescriptorWireDiagnosticCode {
     Ok = 0,
     Null = 1,
     Limit = 2,
@@ -150,7 +150,7 @@ pub enum EffectDescriptorWireDiagnosticCodeV1 {
     Overflow = 14,
 }
 
-impl EffectDescriptorWireDiagnosticCodeV1 {
+impl EffectDescriptorWireDiagnosticCode {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Ok => "effect.descriptor.wire.ok",
@@ -174,16 +174,16 @@ impl EffectDescriptorWireDiagnosticCodeV1 {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(C)]
-pub struct EffectDescriptorWireDiagnosticV1 {
-    pub code: EffectDescriptorWireDiagnosticCodeV1,
+pub struct EffectDescriptorWireDiagnostic {
+    pub code: EffectDescriptorWireDiagnosticCode,
     pub byte_offset: u32,
     pub record_index: u32,
     pub required_bytes: u32,
 }
 
-impl EffectDescriptorWireDiagnosticV1 {
+impl EffectDescriptorWireDiagnostic {
     pub const fn new(
-        code: EffectDescriptorWireDiagnosticCodeV1,
+        code: EffectDescriptorWireDiagnosticCode,
         byte_offset: u32,
         record_index: u32,
     ) -> Self {
@@ -197,9 +197,9 @@ impl EffectDescriptorWireDiagnosticV1 {
 
     pub const fn buffer_too_small(required_bytes: u32) -> Self {
         Self {
-            code: EffectDescriptorWireDiagnosticCodeV1::BufferTooSmall,
-            byte_offset: EFFECT_DESCRIPTOR_WIRE_V1_UNAVAILABLE,
-            record_index: EFFECT_DESCRIPTOR_WIRE_V1_UNAVAILABLE,
+            code: EffectDescriptorWireDiagnosticCode::BufferTooSmall,
+            byte_offset: EFFECT_DESCRIPTOR_WIRE_UNAVAILABLE,
+            record_index: EFFECT_DESCRIPTOR_WIRE_UNAVAILABLE,
             required_bytes,
         }
     }
@@ -215,77 +215,77 @@ mod tests {
     fn descriptor_wire_diagnostic_codes_and_strings_are_frozen() {
         for (code, value, text) in [
             (
-                EffectDescriptorWireDiagnosticCodeV1::Ok,
+                EffectDescriptorWireDiagnosticCode::Ok,
                 0,
                 "effect.descriptor.wire.ok",
             ),
             (
-                EffectDescriptorWireDiagnosticCodeV1::Null,
+                EffectDescriptorWireDiagnosticCode::Null,
                 1,
                 "effect.descriptor.wire.null",
             ),
             (
-                EffectDescriptorWireDiagnosticCodeV1::Limit,
+                EffectDescriptorWireDiagnosticCode::Limit,
                 2,
                 "effect.descriptor.wire.limit",
             ),
             (
-                EffectDescriptorWireDiagnosticCodeV1::BufferTooSmall,
+                EffectDescriptorWireDiagnosticCode::BufferTooSmall,
                 3,
                 "effect.descriptor.wire.buffer_too_small",
             ),
             (
-                EffectDescriptorWireDiagnosticCodeV1::Header,
+                EffectDescriptorWireDiagnosticCode::Header,
                 4,
                 "effect.descriptor.wire.header",
             ),
             (
-                EffectDescriptorWireDiagnosticCodeV1::Length,
+                EffectDescriptorWireDiagnosticCode::Length,
                 5,
                 "effect.descriptor.wire.length",
             ),
             (
-                EffectDescriptorWireDiagnosticCodeV1::Reserved,
+                EffectDescriptorWireDiagnosticCode::Reserved,
                 6,
                 "effect.descriptor.wire.reserved",
             ),
             (
-                EffectDescriptorWireDiagnosticCodeV1::Enum,
+                EffectDescriptorWireDiagnosticCode::Enum,
                 7,
                 "effect.descriptor.wire.enum",
             ),
             (
-                EffectDescriptorWireDiagnosticCodeV1::Flags,
+                EffectDescriptorWireDiagnosticCode::Flags,
                 8,
                 "effect.descriptor.wire.flags",
             ),
             (
-                EffectDescriptorWireDiagnosticCodeV1::Order,
+                EffectDescriptorWireDiagnosticCode::Order,
                 9,
                 "effect.descriptor.wire.order",
             ),
             (
-                EffectDescriptorWireDiagnosticCodeV1::Offset,
+                EffectDescriptorWireDiagnosticCode::Offset,
                 10,
                 "effect.descriptor.wire.offset",
             ),
             (
-                EffectDescriptorWireDiagnosticCodeV1::Text,
+                EffectDescriptorWireDiagnosticCode::Text,
                 11,
                 "effect.descriptor.wire.text",
             ),
             (
-                EffectDescriptorWireDiagnosticCodeV1::Float,
+                EffectDescriptorWireDiagnosticCode::Float,
                 12,
                 "effect.descriptor.wire.float",
             ),
             (
-                EffectDescriptorWireDiagnosticCodeV1::Semantic,
+                EffectDescriptorWireDiagnosticCode::Semantic,
                 13,
                 "effect.descriptor.wire.semantic",
             ),
             (
-                EffectDescriptorWireDiagnosticCodeV1::Overflow,
+                EffectDescriptorWireDiagnosticCode::Overflow,
                 14,
                 "effect.descriptor.wire.overflow",
             ),
