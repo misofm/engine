@@ -37,7 +37,7 @@ function store(backend, locks, options = {}) {
     tabId: options.tabId,
     hooks: options.hooks,
     now: options.now,
-    readDeadlineMs: 1_000,
+    readDeadlineMs: options.readDeadlineMs ?? 1_000,
     ingestReadDeadlineMs: options.ingestReadDeadlineMs ?? 1_000,
   })
 }
@@ -272,6 +272,106 @@ async function promoteAtomicityAndCrashSweep() {
     false,
     "unindexed final debris is never trusted"
   )
+}
+
+async function fallbackWritesObeyAbortAndDeadline() {
+  const stem = fixture("fallback-write-abort", 8192)
+  const finalName = `sha256-${stem.identity.slice(7)}`
+  const never = new Promise(() => {})
+  let writeStarted
+  const started = new Promise((resolve) => { writeStarted = resolve })
+  const abortBackend = new FakeOpfsBackend({
+    moveSupported: false,
+    writeBlocker({ fileName }) {
+      if (fileName !== finalName) return undefined
+      writeStarted()
+      return never
+    },
+    abortBlocker({ fileName }) {
+      return fileName === finalName ? never : undefined
+    },
+  })
+  const abortController = new AbortController()
+  const localDeadlineMs = 100
+  const abortStore = store(abortBackend, new FakeLockManager(), {
+    tabId: "fallback-write-abort",
+    readDeadlineMs: localDeadlineMs,
+  })
+  const opening = abortStore.openSession({
+    sessionId: "fallback-write-abort",
+    stems: requirements([stem]),
+    resolver: new MemoryStemResolver(stemMap([stem])),
+    signal: abortController.signal,
+  })
+  await started
+  const abortStartedAt = performance.now()
+  abortController.abort(new DOMException("mix switched", "AbortError"))
+  const abortOutcome = await Promise.race([
+    opening.then(
+      () => "opened",
+      (error) => error
+    ),
+    new Promise((resolve) => setTimeout(() => resolve("timed-out"), 300)),
+  ])
+  const abortElapsedMs = performance.now() - abortStartedAt
+  assert.notEqual(
+    abortOutcome,
+    "timed-out",
+    "fallback final write ignored mix-switch abort"
+  )
+  assert.equal(abortOutcome.name, "AbortError", "fallback abort must stay typed")
+  assert.ok(
+    abortElapsedMs < localDeadlineMs,
+    `fallback abort escaped its ${localDeadlineMs} ms local-store deadline: ${abortElapsedMs} ms`
+  )
+  assert.deepEqual(abortBackend.names("miso-stems-v1/staging"), [])
+  assert.equal(
+    abortBackend.has(`miso-stems-v1/${finalName}`),
+    false,
+    "aborted fallback promotion left unindexed final debris"
+  )
+
+  for (const operation of ["createWritable", "write", "close"]) {
+    const deadlineStem = fixture(`fallback-${operation}-deadline`, 4096)
+    const deadlineFinal = `sha256-${deadlineStem.identity.slice(7)}`
+    const blocker = ({ fileName }) =>
+      fileName === deadlineFinal ? never : undefined
+    const backend = new FakeOpfsBackend({
+      moveSupported: false,
+      ...(operation === "createWritable"
+        ? { createWritableBlocker: blocker }
+        : operation === "write"
+          ? { writeBlocker: blocker }
+          : { closeBlocker: blocker }),
+    })
+    const opfs = store(backend, new FakeLockManager(), {
+      tabId: `fallback-${operation}-deadline`,
+      readDeadlineMs: 20,
+    })
+    const outcome = await Promise.race([
+      opfs.openSession({
+        sessionId: `fallback-${operation}-deadline`,
+        stems: requirements([deadlineStem]),
+        resolver: new MemoryStemResolver(stemMap([deadlineStem])),
+      }).then(
+        () => "opened",
+        (error) => error
+      ),
+      new Promise((resolve) => setTimeout(() => resolve("timed-out"), 200)),
+    ])
+    assert.notEqual(
+      outcome,
+      "timed-out",
+      `wedged fallback ${operation} escaped its local-store deadline`
+    )
+    assert.equal(outcome.code, "storage.write_stalled")
+    assert.deepEqual(backend.names("miso-stems-v1/staging"), [])
+    assert.equal(
+      backend.has(`miso-stems-v1/${deadlineFinal}`),
+      false,
+      `wedged fallback ${operation} left unindexed final debris`
+    )
+  }
 }
 
 async function openerDoesNotSweepActivePromote() {
@@ -691,6 +791,7 @@ await twoTabCollision()
 await corruptionSelfHeals()
 await indexRecoveryAdoptsSelfVerifyingFinals()
 await promoteAtomicityAndCrashSweep()
+await fallbackWritesObeyAbortAndDeadline()
 await openerDoesNotSweepActivePromote()
 await crashedSessionPinsAreRecoverable()
 await quotaFailureKeepsSurvivors()

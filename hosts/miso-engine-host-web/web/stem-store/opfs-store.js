@@ -513,9 +513,19 @@ export class OpfsStemStore {
     const finalHandle = await this.#directory.getFileHandle(finalName, {
       create: true,
     })
-    const writable = await finalHandle.createWritable()
-    const reader = stagedFile.stream().getReader()
+    let writablePromise
+    let writable
+    let reader
     try {
+      writablePromise = finalHandle.createWritable()
+      writable = await withDeadline(
+        writablePromise,
+        this.#readDeadlineMs,
+        "storage.write_stalled",
+        `Opening fallback final for ${stem.identity} made no progress`,
+        options.signal
+      )
+      reader = stagedFile.stream().getReader()
       while (true) {
         throwIfAborted(options.signal)
         const result = await withDeadline(
@@ -526,15 +536,38 @@ export class OpfsStemStore {
           options.signal
         )
         if (result.done) break
-        await writable.write(result.value)
+        await withDeadline(
+          writable.write(result.value),
+          this.#readDeadlineMs,
+          "storage.write_stalled",
+          `Writing fallback final for ${stem.identity} made no progress`,
+          options.signal
+        )
       }
-      await writable.close()
+      await withDeadline(
+        writable.close(),
+        this.#readDeadlineMs,
+        "storage.write_stalled",
+        `Closing fallback final for ${stem.identity} made no progress`,
+        options.signal
+      )
     } catch (error) {
-      await writable.abort(error).catch(() => {})
-      void reader.cancel(error).catch(() => {})
+      // A timed-out OPFS operation may never settle. Start cleanup, but do not
+      // re-await that same writable before returning typed cancellation. The
+      // second removal attempt runs if a late create/abort eventually settles.
+      if (writablePromise !== undefined) {
+        void abortFallbackWritable(
+          writablePromise,
+          error,
+          this.#directory,
+          finalName
+        )
+      }
+      void removeEntry(this.#directory, finalName).catch(() => {})
+      void reader?.cancel(error).catch(() => {})
       throw error
     } finally {
-      releaseReader(reader)
+      if (reader !== undefined) releaseReader(reader)
     }
     await this.#hooks.afterFallbackCopy?.({
       identity: stem.identity,
@@ -1125,6 +1158,16 @@ async function removeEntry(directory, name) {
   } catch (error) {
     if (error?.name !== "NotFoundError") throw error
   }
+}
+
+async function abortFallbackWritable(writablePromise, reason, directory, name) {
+  try {
+    const writable = await writablePromise
+    await writable.abort(reason)
+  } catch {
+    // The original typed abort/deadline error remains authoritative.
+  }
+  await removeEntry(directory, name).catch(() => {})
 }
 
 function classifyStorageError(error, action, overrides = {}) {

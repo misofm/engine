@@ -8,6 +8,10 @@ export class FakeOpfsBackend {
     this.moveSupported = options.moveSupported ?? true
     this.moveError = options.moveError
     this.writeFailure = options.writeFailure
+    this.createWritableBlocker = options.createWritableBlocker
+    this.writeBlocker = options.writeBlocker
+    this.closeBlocker = options.closeBlocker
+    this.abortBlocker = options.abortBlocker
   }
 
   get usage() {
@@ -133,9 +137,12 @@ class FakeFileHandle {
     let closed = false
     const backend = this.backend
     const node = this.node
+    const fileName = this.name
+    await backend.createWritableBlocker?.({ fileName })
     return {
       async write(value) {
         if (closed) throw new Error("fake writable is closed")
+        await backend.writeBlocker?.({ fileName, value })
         if (backend.writeFailure?.({ handle: this, value, chunks })) {
           backend.quotaFailures += 1
           throw domError("QuotaExceededError", "fake quota exhausted")
@@ -148,6 +155,7 @@ class FakeFileHandle {
       },
       async close() {
         if (closed) return
+        await backend.closeBlocker?.({ fileName })
         closed = true
         const bytes = concatenate(chunks)
         const replaced = node.bytes.byteLength
@@ -158,7 +166,8 @@ class FakeFileHandle {
         node.bytes = bytes
         node.lastModified = Date.now()
       },
-      async abort() {
+      async abort(reason) {
+        await backend.abortBlocker?.({ fileName, reason })
         closed = true
       },
     }

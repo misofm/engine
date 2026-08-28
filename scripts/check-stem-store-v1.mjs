@@ -215,6 +215,15 @@ async function runMutationLedger() {
       test: "stem-store-core-v1.mjs",
       expectedFailure: "write-time quota race reported a zero shortfall",
     },
+    {
+      name: "restore the pre-successor direct fallback final write",
+      file: "web/stem-store/opfs-store.js",
+      search:
+        '        await withDeadline(\n          writable.write(result.value),\n          this.#readDeadlineMs,\n          "storage.write_stalled",\n          `Writing fallback final for ${stem.identity} made no progress`,\n          options.signal\n        )',
+      replace: "        await writable.write(result.value)",
+      test: "stem-store-core-v1.mjs",
+      expectedFailure: "fallback final write ignored mix-switch abort",
+    },
   ]
 
   for (const mutation of mutations) {

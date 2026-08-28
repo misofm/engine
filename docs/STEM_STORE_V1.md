@@ -116,6 +116,14 @@ a wedged reader cancellation, and remove staging before refusing typed. Range
 retries are accepted only when the server proves the requested `206
 Content-Range`, so resumption can never duplicate bytes into the decoder.
 
+The [authorized bounded #244 successor](https://github.com/misofm/engine-v2/issues/244#issuecomment-5458432638)
+applies that same abort/deadline race to fallback-final `createWritable`,
+`write`, and `close`. On interruption, writable abort and final-file removal
+start immediately but are not re-awaited: cleanup cannot turn the original
+typed cancellation or `storage.write_stalled` refusal into another wedge. A
+late writable settlement retries removal, and the unindexed-final sweep remains
+the crash backstop.
+
 ## Hash implementation and provenance
 
 `incremental-sha256.js` is a repository-owned implementation of NIST FIPS
