@@ -18,6 +18,7 @@ create_fixture() {
         "$root/crates/miso-engine-effect-package/tests" \
         "$root/crates/miso-engine-session/tests" \
         "$root/hosts/miso-engine-host-web/src" \
+        "$root/hosts/miso-engine-host-web/tests" \
         "$root/tools/miso-engine-bench-support/src" \
         "$root/tools/miso-engine-audit/src" \
         "$root/tools/miso-engine-native-pcm-runner/src" \
@@ -87,6 +88,12 @@ create_fixture() {
         '#![allow(unsafe_code)]' \
         'unsafe fn web_boundary() {}' \
         >"$root/hosts/miso-engine-host-web/src/ffi.rs"
+    # Issue #240: the exact peak fixture's forwarding allocator is a measured audit boundary.
+    printf '%s\n' \
+        '#![allow(unsafe_code)]' \
+        'unsafe impl GlobalAlloc for PeakAllocator {}' \
+        'struct PeakAllocator;' \
+        >"$root/hosts/miso-engine-host-web/tests/boot_transient_budget.rs"
     printf '%s\n' \
         '#![allow(unsafe_code)]' \
         'unsafe impl Send for CapiAudit {}' \
@@ -176,6 +183,8 @@ expect_failure unsafe-outside-web-ffi \
     'printf "%s\n" "pub unsafe extern \"C\" fn bad() {}" >"$root/hosts/miso-engine-host-web/src/lib.rs"'
 expect_failure unsafe-in-second-web-ffi-path \
     'mkdir -p "$root/hosts/miso-engine-host-web/src/ffi"; printf "%s\n" "unsafe fn bad() {}" >"$root/hosts/miso-engine-host-web/src/ffi/other.rs"'
+expect_failure unsafe-outside-web-peak-audit \
+    'printf "%s\n" "unsafe fn bad() {}" >"$root/hosts/miso-engine-host-web/tests/other.rs"'
 expect_failure unsafe-outside-disjoint-arena \
     'printf "%s\n" "unsafe fn bad() {}" >"$root/crates/miso-engine-core/src/realtime/disjoint_extra.rs"'
 expect_failure unsafe-outside-lane-softfma \
