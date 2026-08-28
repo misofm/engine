@@ -1,4 +1,4 @@
-export declare const MISO_FLAC_DECODER_SHA256: string;
+export declare const MISO_ENGINE_FLAC_DECODER_SHA256: string;
 
 export declare class MisoFlacDecoderError extends Error {
   readonly code: string;

@@ -1,6 +1,6 @@
 // Provenance-pinned FLAC delivery adapter. This module is Worker-safe and never touches audio APIs.
 
-export const MISO_FLAC_DECODER_SHA256 =
+export const MISO_ENGINE_FLAC_DECODER_SHA256 =
   "fe3f4ddd2490c17dbf28e6f7c1b95f62e3e9de7c57f5a0fd417cf8d07c6f782d";
 
 const ABI_VERSION = 0x0001_0000;
@@ -119,7 +119,7 @@ class PinnedFlacDecoder {
 export async function instantiatePinnedFlacDecoder(bytes) {
   const artifact = asBytes(bytes);
   const observed = bytesToHex(new Uint8Array(await crypto.subtle.digest("SHA-256", artifact)));
-  if (observed !== MISO_FLAC_DECODER_SHA256) {
+  if (observed !== MISO_ENGINE_FLAC_DECODER_SHA256) {
     throw new MisoFlacDecoderError("miso.flac.decoder.artifact_mismatch");
   }
   let module;

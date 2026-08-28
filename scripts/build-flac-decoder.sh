@@ -36,7 +36,7 @@ pin_file="$repo_root/hosts/miso-engine-flac-decoder/decoder-artifact.sha256"
 expected=$(tr -d '\n' <"$pin_file")
 loader="$repo_root/hosts/miso-engine-flac-decoder/miso-engine-flac-decoder.js"
 
-if [[ "${MISO_FLAC_DECODER_REPIN:-0}" == 1 ]]; then
+if [[ "${MISO_ENGINE_FLAC_DECODER_REPIN:-0}" == 1 ]]; then
   printf '%s\n' "$observed"
   exit 0
 fi

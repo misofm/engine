@@ -31,7 +31,7 @@ const loaderUrl = pathToFileURL(
   path.join(artifactDirectory, "miso-engine-flac-decoder.js"),
 );
 const loader = await import(`${loaderUrl.href}?artifact-check`);
-assert.equal(loader.MISO_FLAC_DECODER_SHA256, expected);
+assert.equal(loader.MISO_ENGINE_FLAC_DECODER_SHA256, expected);
 const decoder = await loader.instantiatePinnedFlacDecoder(artifact);
 
 const root = path.resolve(import.meta.dirname, "..");
