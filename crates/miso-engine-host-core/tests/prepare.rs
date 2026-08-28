@@ -5,9 +5,10 @@
 //! checked against the row the facade itself reports, and every source-control rejection is typed.
 
 use miso_engine_host_core::{
-    HostPrepareCaps, HostPrepareReport, HostShapePolicy, PrepareRejection, SourceControlError,
-    SourceSubmission, compile_host_session, control_table_bytes, prepare_host_runtime,
-    prepare_host_session, source_id_arena_bytes,
+    HostPrepareCaps, HostPrepareReport, HostShapePolicy, LAUNCH_SAMPLE_RATES_HZ, PrepareRejection,
+    SOURCE_STALL_TOLERANCE_MS, SourceControlError, SourceSubmission, compile_host_session,
+    control_table_bytes, default_source_ring_frames, prepare_host_runtime, prepare_host_session,
+    source_id_arena_bytes,
 };
 use miso_engine_source::{HostChunkError, SourceSeekError};
 
@@ -376,6 +377,46 @@ fn shape_policy_pins_rate_and_quantum() {
     assert!(caps().validate_shape(&compiled).is_ok());
     assert!(wrong_rate.validate_shape(&compiled).is_err());
     assert!(prepare_host_runtime(&compiled, &caps()).is_ok());
+}
+
+/// The session validator owns the launch-rate set, so boot can rely on the field-local session
+/// diagnostic before applying a host shape policy.
+#[test]
+fn session_validation_owns_the_launch_rate_set() {
+    const RATE: &str = "sample_rate_hz = 48000";
+    let at = |rate: u32| SESSION.replace(RATE, &format!("sample_rate_hz = {rate}"));
+    for rate in LAUNCH_SAMPLE_RATES_HZ {
+        assert!(compile_host_session(&at(rate), &caps()).is_ok(), "{rate}");
+    }
+    for rate in LAUNCH_SAMPLE_RATES_HZ
+        .into_iter()
+        .flat_map(|rate| [rate - 1, rate + 1])
+        .chain([1, 8_000, 22_050, 32_000, 176_400, 192_000])
+    {
+        let failure = compile_host_session(&at(rate), &caps()).expect_err("unsupported rate");
+        assert_eq!(failure.kind(), PrepareRejection::Session, "{rate}");
+        assert_eq!(
+            failure.as_bytes(),
+            b"sample_rate.unsupported_at_launch\t$.sample_rate_hz\n",
+            "{rate}"
+        );
+    }
+}
+
+/// The shared derivation is pinned across every launch tier and includes the adversarial 127-frame
+/// quantum from the boot brief.
+#[test]
+fn default_ring_derivation_covers_the_stall_and_two_in_flight_quanta() {
+    for rate in LAUNCH_SAMPLE_RATES_HZ {
+        for quantum in [64_u32, 127, 128, 4_096] {
+            let frames = default_source_ring_frames(rate, quantum);
+            assert_ne!(frames, 0);
+            assert_eq!(frames % quantum, 0);
+            let stall = u64::from(rate) * u64::from(SOURCE_STALL_TOLERANCE_MS) / 1_000;
+            assert!(u64::from(frames) >= stall + 2 * u64::from(quantum));
+        }
+    }
+    assert_eq!(default_source_ring_frames(96_000, 127), 9_906);
 }
 
 /// A per-source channel cap is a host policy, not a session rule: the C ABI host does not set one

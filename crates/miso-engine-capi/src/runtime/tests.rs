@@ -440,6 +440,30 @@ fn generated_session_prepares_independent_source_and_plan_ownership() {
 }
 
 #[test]
+fn ring_zero_derives_from_the_document_and_matches_the_explicit_value() {
+    let model = parse_session_toml(SESSION).expect("session");
+    let derived = miso_engine_host_core::default_source_ring_frames(
+        model.sample_rate_hz,
+        model.quantum_frames,
+    );
+    assert_eq!(derived, 5_120);
+
+    let mut zero = limits();
+    zero.source_ring_frames = 0;
+    let zero = compile_children(SESSION, zero).expect("zero derives");
+
+    let mut explicit = limits();
+    explicit.source_ring_frames = derived;
+    let explicit = compile_children(SESSION, explicit).expect("explicit derived value");
+
+    assert_eq!(zero.plan.resources(), explicit.plan.resources());
+    assert_eq!(
+        zero.session.providers.sources.retained_bytes(),
+        explicit.session.providers.sources.retained_bytes()
+    );
+}
+
+#[test]
 fn structural_command_keeps_protocol_plan_provider_and_event_epochs_atomic() {
     let mut children = compile_children(SESSION, limits()).expect("children");
     let left = [0.25_f32; 128];

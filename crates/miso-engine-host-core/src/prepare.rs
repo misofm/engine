@@ -37,6 +37,29 @@ use crate::source::{ControlSourceBuilder, SourceControlSet};
 /// The launch sample-rate set (issue 032). A host that does not pin one rate accepts these four.
 pub const LAUNCH_SAMPLE_RATES_HZ: [u32; 4] = [44_100, 48_000, 88_200, 96_000];
 
+/// The longest producer-thread stall the default source ring hides without an underrun.
+pub const SOURCE_STALL_TOLERANCE_MS: u32 = 100;
+
+/// Derive the default per-source ring capacity from the document's rate and quantum.
+///
+/// The ring covers `ceil(100 ms * fs / quantum)` quanta plus one quantum held by the consumer and
+/// one in the recycle path. The result is therefore always a whole number of quanta. A zero
+/// quantum returns zero; callers validate the document before using the answer.
+#[must_use]
+pub const fn default_source_ring_frames(sample_rate_hz: u32, quantum_frames: u32) -> u32 {
+    if quantum_frames == 0 {
+        return 0;
+    }
+    let stall_frames = (sample_rate_hz as u64 * SOURCE_STALL_TOLERANCE_MS as u64) / 1_000;
+    let quanta = stall_frames.div_ceil(quantum_frames as u64) + 2;
+    let frames = quanta * quantum_frames as u64;
+    if frames > u32::MAX as u64 {
+        0
+    } else {
+        frames as u32
+    }
+}
+
 /// How strictly a host constrains the session's external render shape.
 ///
 /// The C ABI host compiles whatever rate the session declares, as long as it is a launch rate; the
@@ -376,7 +399,19 @@ pub fn compile_host_session(
 ) -> Result<CompiledSession, PrepareDiagnostics> {
     let model = parse_host_session(toml)?;
     let compile_caps = caps.compile_caps(model.sources.len())?;
-    compile_session(&model, compile_caps).map_err(|value| {
+    compile_host_model(&model, compile_caps)
+}
+
+/// Compile an already parsed session model under explicit compiler caps.
+///
+/// Boot v2 parses once, derives the physical host shape from that model, and then compiles the
+/// same model. Keeping the diagnostic mapping here prevents that path from growing a second
+/// session-compiler adapter.
+pub fn compile_host_model(
+    model: &SessionToml,
+    caps: CompileCaps,
+) -> Result<CompiledSession, PrepareDiagnostics> {
+    compile_session(model, caps).map_err(|value| {
         PrepareDiagnostics::new(
             PrepareRejection::Session,
             diagnostic_lines(
@@ -387,6 +422,20 @@ pub fn compile_host_session(
             ),
         )
     })
+}
+
+/// Validate the launch invariant that every source uses the session sample rate.
+///
+/// The engine has no implicit sample-rate conversion. This whole-document shape rule runs before
+/// source-ring allocation so scratch boot and full preparation return the same typed refusal.
+pub fn validate_source_rates(compiled: &CompiledSession) -> Result<(), PrepareDiagnostics> {
+    let session_rate_hz = compiled.sample_rate().0;
+    for source in &compiled.normalized_model().sources {
+        if source.sample_rate_hz != session_rate_hz {
+            return Err(shape("host.source.rate.mismatch"));
+        }
+    }
+    Ok(())
 }
 
 /// Parse, compile and prepare one session in a single call.
@@ -452,6 +501,7 @@ pub fn prepare_host_runtime_with_console(
         return Err(resource("host.resource.count"));
     }
     caps.validate_shape(compiled)?;
+    validate_source_rates(compiled)?;
 
     let source_id_bytes = model.sources.iter().try_fold(0_usize, |total, source| {
         total
@@ -465,9 +515,6 @@ pub fn prepare_host_runtime_with_console(
     let mut builder = ControlSourceBuilder::with_capacity(source_id_bytes, compiled.source_count())
         .map_err(|()| resource("host.resource.allocation"))?;
     for source in &model.sources {
-        if source.sample_rate_hz != compiled.sample_rate().0 {
-            return Err(shape("host.source.rate.mismatch"));
-        }
         if caps
             .maximum_source_channels
             .is_some_and(|maximum| u32::from(source.mapping.channel_count) > maximum)

@@ -90,6 +90,7 @@
 pub mod diagnostics;
 pub mod prepare;
 pub mod render_session;
+pub mod shape;
 pub mod solo;
 pub mod source;
 
@@ -98,11 +99,13 @@ pub use diagnostics::{
 };
 pub use prepare::{
     HostConsoleHandles, HostConsoleRequest, HostPrepareCaps, HostPrepareReport, HostShapePolicy,
-    LAUNCH_SAMPLE_RATES_HZ, PreparedHost, compile_host_session, count_effects, parse_host_session,
+    LAUNCH_SAMPLE_RATES_HZ, PreparedHost, SOURCE_STALL_TOLERANCE_MS, compile_host_model,
+    compile_host_session, count_effects, default_source_ring_frames, parse_host_session,
     prepare_host_runtime, prepare_host_runtime_with_console, prepare_host_session,
-    prepare_host_session_with_console,
+    prepare_host_session_with_console, validate_source_rates,
 };
 pub use render_session::StartedRenderSession;
+pub use shape::{HostSessionShape, compiled_session_shape};
 pub use solo::{ConsoleMuteDelta, ConsoleSoloState};
 pub use source::{
     SourceControlError, SourceControlSet, SourceSubmission, control_table_bytes,
