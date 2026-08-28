@@ -37,6 +37,7 @@ members = [
     "tools/miso-engine-console-workload",
     "tools/miso-engine-audit",
     "tools/miso-engine-native-pcm-runner",
+    "tools/miso-engine-stem-hasher",
     "tools/miso-engine-wasm-gate-corpus",
     "tools/miso-engine-wasm-gate-guest",
     "tools/miso-engine-wasm-console-guest",
