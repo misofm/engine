@@ -32,28 +32,26 @@ fn identity_session(quantum: u32, ring_frames: u32, length_samples: u64) -> Stri
 }
 
 fn prepared_host(quantum: u32) -> AudioWorkletEngineHost {
-    let mut host = AudioWorkletEngineHost::new(WebPrepareConfig::launch_defaults(48_000, quantum));
-    assert_eq!(host.prepare(), RESULT_OK);
-    host
+    let toml = one_track_session(quantum);
+    AudioWorkletEngineHost::boot(toml.as_bytes(), boot_options(quantum))
+        .unwrap_or_else(|failure| panic!("boot: {}", String::from_utf8_lossy(failure.diagnostic())))
 }
 
 fn ready_host(quantum: u32) -> AudioWorkletEngineHost {
-    let toml = one_track_session(quantum);
-    let mut host = prepared_host(quantum);
-    host.session_toml_mut().expect("prepared TOML buffer")[..toml.len()]
-        .copy_from_slice(toml.as_bytes());
-    assert_eq!(
-        host.compile(toml.len()),
-        RESULT_OK,
-        "{:?}",
-        host.diagnostic()
-    );
-    host
+    prepared_host(quantum)
+}
+
+fn boot_options(quantum: u32) -> WebBootOptions {
+    WebBootOptions {
+        require_sample_rate_hz: 48_000,
+        require_quantum_frames: quantum,
+        ..WebBootOptions::explicit_defaults()
+    }
 }
 
 #[test]
 fn frozen_layouts_and_values_are_exact() {
-    assert_eq!(size_of::<WebPrepareConfig>(), 192);
+    assert_eq!(size_of::<WebBootOptions>(), 64);
     assert_eq!(size_of::<WebStatus>(), 80);
     assert_eq!(size_of::<WebResourceReport>(), 224);
     assert_eq!(
@@ -72,20 +70,10 @@ fn frozen_layouts_and_values_are_exact() {
         ],
         [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 255]
     );
-    assert_eq!(
-        [
-            STATE_CONFIG,
-            STATE_PREPARED,
-            STATE_READY,
-            STATE_FAILED,
-            STATE_DISPOSED
-        ],
-        [0, 1, 2, 3, 4]
-    );
+    assert_eq!([STATE_READY, STATE_FAILED, STATE_DISPOSED], [2, 3, 4]);
     assert_eq!([BACKEND_SCALAR, BACKEND_SIMD128], [0, 1]);
     assert_eq!(
         [
-            BUFFER_SESSION_TOML,
             BUFFER_SOURCE_ID,
             BUFFER_SOURCE_PCM,
             BUFFER_DIAGNOSTIC,
@@ -93,7 +81,7 @@ fn frozen_layouts_and_values_are_exact() {
             BUFFER_COMMAND,
             BUFFER_METER_FRAME
         ],
-        [1, 2, 3, 4, 5, 6, 7]
+        [2, 3, 4, 5, 6, 7]
     );
     // Issue #137 D1: the two console words are the first two of the frozen configuration's four
     // reserved words. Every V1 writer already sets them to zero, which is exactly "default command
@@ -134,22 +122,22 @@ fn frozen_layouts_and_values_are_exact() {
         ],
         [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
     );
-    assert_eq!(offset_of!(WebPrepareConfig, struct_size), 0);
-    assert_eq!(offset_of!(WebPrepareConfig, quantum_frames), 12);
-    assert_eq!(offset_of!(WebPrepareConfig, maximum_tracks), 40);
-    assert_eq!(offset_of!(WebPrepareConfig, maximum_meter_bytes), 152);
+    assert_eq!(offset_of!(WebBootOptions, struct_size), 0);
+    assert_eq!(offset_of!(WebBootOptions, require_quantum_frames), 12);
+    assert_eq!(offset_of!(WebBootOptions, source_ring_frames), 16);
+    assert_eq!(offset_of!(WebBootOptions, maximum_memory_bytes), 24);
     assert_eq!(
-        offset_of!(WebPrepareConfig, console_command_queue_records),
-        160
+        offset_of!(WebBootOptions, console_command_queue_records),
+        32
     );
-    assert_eq!(offset_of!(WebPrepareConfig, console_meter_blocks), 168);
+    assert_eq!(offset_of!(WebBootOptions, console_meter_blocks), 40);
     // Issue #143 D3/D6: the configuration's remaining two reserved words, carved exactly as #137
     // carved the first two. The structure is still 192 bytes and every existing offset is where it
     // was, so a V1 writer that zeroes them gets "no observation capacity, no master designation".
-    assert_eq!(offset_of!(WebPrepareConfig, console_observation_taps), 176);
+    assert_eq!(offset_of!(WebBootOptions, console_observation_taps), 48);
     assert_eq!(
-        offset_of!(WebPrepareConfig, console_master_track_plus_one),
-        184
+        offset_of!(WebBootOptions, console_master_track_plus_one),
+        56
     );
     assert_eq!(MAXIMUM_OBSERVATION_TAPS, 16);
     // The meter header is a new fixed structure, not a change to an existing one.
@@ -170,7 +158,7 @@ fn frozen_layouts_and_values_are_exact() {
     assert_eq!(offset_of!(WebStatus, state), 8);
     assert_eq!(offset_of!(WebStatus, next_absolute_sample), 32);
     assert_eq!(offset_of!(WebStatus, reserved), 48);
-    assert_eq!(offset_of!(WebResourceReport, config_bytes), 32);
+    assert_eq!(offset_of!(WebResourceReport, options_bytes), 32);
     assert_eq!(
         offset_of!(WebResourceReport, largest_named_allocation_bytes),
         184
@@ -190,82 +178,47 @@ fn frozen_layouts_and_values_are_exact() {
     // derived rather than read off a run.
     let host = prepared_host(128);
     let plane_references = 8 * size_of::<&[f32]>() as u64;
-    assert_eq!(
-        host.resources().bridge_metadata_bytes,
-        size_of::<AudioWorkletEngineHost>() as u64
-            - u64::from(PREPARE_CONFIG_BYTES)
-            - u64::from(STATUS_BYTES)
-            + plane_references,
-        "the bridge metadata row is the host shell minus the two structures charged separately"
+    assert!(
+        host.resources().bridge_metadata_bytes
+            >= size_of::<AudioWorkletEngineHost>() as u64
+                - u64::from(BOOT_OPTIONS_BYTES)
+                - u64::from(STATUS_BYTES)
+                + plane_references,
+        "ready metadata is added to the exact fixed bridge projection"
     );
 }
 
 #[test]
 fn raw_ffi_validates_handle_layout_overflow_and_transactional_failure() {
     assert_eq!(miso_engine_web_v1_abi_version(), ABI_VERSION);
-    assert_eq!(miso_engine_web_v1_config_bytes(), PREPARE_CONFIG_BYTES);
-    assert_eq!(miso_engine_web_v1_prepare(0), RESULT_INVALID_ARGUMENT);
     assert_eq!(miso_engine_web_v1_dispose(0), RESULT_OK);
+    crate::ffi::test_stage_document(b"no=");
+    assert_eq!(miso_engine_web_v1_boot(3), 0);
+    assert_eq!(miso_engine_web_v1_boot_result(), RESULT_REFUSED_DOCUMENT);
+    assert!(miso_engine_web_v1_boot_diagnostic_bytes() > 0);
 
-    let handle = miso_engine_web_v1_config_new();
+    let toml = one_track_session(128);
+    let handle = crate::ffi::test_boot(toml.as_bytes(), boot_options(128));
     assert_ne!(handle, 0);
-    assert_eq!(miso_engine_web_v1_config_new(), 0);
-    let mut overflow = WebPrepareConfig::launch_defaults(48_000, 256);
-    overflow.maximum_source_channels = u32::MAX;
-    assert_eq!(crate::ffi::test_configure(handle, overflow), RESULT_OK);
-    assert_eq!(miso_engine_web_v1_prepare(handle), RESULT_INVALID_ARGUMENT);
-    assert_eq!(
-        crate::ffi::test_status(handle).expect("status").state,
-        STATE_CONFIG
-    );
+    crate::ffi::test_stage_document(toml.as_bytes());
+    assert_eq!(miso_engine_web_v1_boot(toml.len() as u32), 0);
+    assert_eq!(miso_engine_web_v1_boot_result(), RESULT_REFUSED_LIFECYCLE);
     assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
-
-    let handle = miso_engine_web_v1_config_new();
-    let config = WebPrepareConfig::launch_defaults(48_000, 128);
-    assert_eq!(crate::ffi::test_configure(handle, config), RESULT_OK);
-    assert_eq!(miso_engine_web_v1_prepare(handle), RESULT_OK);
-    assert_eq!(
-        miso_engine_web_v1_buffer_capacity(handle, BUFFER_OUTPUT_PCM),
-        2 * 128 * 4
-    );
-    assert_ne!(
-        crate::ffi::test_buffer_address(handle, BUFFER_DIAGNOSTIC),
-        0
-    );
-    assert_eq!(
-        crate::ffi::test_copy_staging(handle, BUFFER_SESSION_TOML, b"no="),
-        RESULT_OK
-    );
-    assert_eq!(
-        miso_engine_web_v1_compile(handle, 3),
-        RESULT_PREPARE_REJECTED
-    );
-    assert_eq!(
-        crate::ffi::test_status(handle).expect("status").state,
-        STATE_FAILED
-    );
-    assert_ne!(
-        crate::ffi::test_buffer_address(handle, BUFFER_DIAGNOSTIC),
-        0
-    );
-    assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
-    assert_eq!(miso_engine_web_v1_prepare(handle), RESULT_INVALID_ARGUMENT);
 }
 
 #[test]
 fn raw_ffi_uses_stable_staging_and_exact_output_quantum_without_growth() {
     let quantum = 64_u32;
     let toml = one_track_session(quantum);
-    let handle = miso_engine_web_v1_config_new();
+    let options = WebBootOptions {
+        source_ring_frames: quantum,
+        ..boot_options(quantum)
+    };
+    let handle = crate::ffi::test_boot(toml.as_bytes(), options);
     assert_ne!(handle, 0);
-    let mut config = WebPrepareConfig::launch_defaults(48_000, quantum);
-    config.source_ring_frames = quantum;
-    assert_eq!(crate::ffi::test_configure(handle, config), RESULT_OK);
     let status_address = crate::ffi::test_status_address(handle);
     let resource_address = crate::ffi::test_resource_address(handle);
-    assert_eq!(miso_engine_web_v1_prepare(handle), RESULT_OK);
     let addresses = [
-        BUFFER_SESSION_TOML,
         BUFFER_SOURCE_ID,
         BUFFER_SOURCE_PCM,
         BUFFER_DIAGNOSTIC,
@@ -273,14 +226,6 @@ fn raw_ffi_uses_stable_staging_and_exact_output_quantum_without_growth() {
     ]
     .map(|kind| crate::ffi::test_buffer_address(handle, kind));
     assert!(addresses.into_iter().all(|address| address != 0));
-    assert_eq!(
-        crate::ffi::test_copy_staging(handle, BUFFER_SESSION_TOML, toml.as_bytes()),
-        RESULT_OK
-    );
-    assert_eq!(
-        miso_engine_web_v1_compile(handle, toml.len() as u32),
-        RESULT_OK
-    );
     assert_eq!(status_address, crate::ffi::test_status_address(handle));
     assert_eq!(resource_address, crate::ffi::test_resource_address(handle));
     assert_eq!(
@@ -304,7 +249,6 @@ fn raw_ffi_uses_stable_staging_and_exact_output_quantum_without_growth() {
     assert_eq!(miso_engine_web_v1_source_seek(handle, 14, 2, 0), RESULT_OK);
     assert_eq!(miso_engine_web_v1_render(handle, quantum), RESULT_OK);
     let after = [
-        BUFFER_SESSION_TOML,
         BUFFER_SOURCE_ID,
         BUFFER_SOURCE_PCM,
         BUFFER_DIAGNOSTIC,
@@ -324,10 +268,10 @@ fn raw_ffi_uses_stable_staging_and_exact_output_quantum_without_growth() {
     assert_eq!(mismatch.rendered_quanta, 2);
     assert_eq!(mismatch.next_absolute_sample, u64::from(quantum) * 2);
     let resources = crate::ffi::test_resources(handle).expect("resources");
-    assert!(resources.bridge_retained_bytes <= config.maximum_host_retained_bytes);
+    assert!(resources.bridge_retained_bytes <= DEFAULT_MAXIMUM_MEMORY_BYTES);
     assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
     assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_INVALID_ARGUMENT);
-    let replacement = miso_engine_web_v1_config_new();
+    let replacement = crate::ffi::test_boot(toml.as_bytes(), options);
     assert_ne!(replacement, 0);
     assert_ne!(replacement, handle);
     assert_eq!(miso_engine_web_v1_dispose(replacement), RESULT_OK);
@@ -337,20 +281,18 @@ fn raw_ffi_uses_stable_staging_and_exact_output_quantum_without_growth() {
 fn preparation_accepts_explicit_64_128_and_256_quanta_with_stable_buffers() {
     for quantum in [64, 128, 256] {
         let mut host = prepared_host(quantum);
-        assert_eq!(host.status().state, STATE_PREPARED);
-        let toml_ptr = host.session_toml_mut().expect("TOML").as_ptr();
+        assert_eq!(host.status().state, STATE_READY);
         let source_id_ptr = host.source_id_mut().expect("ID").as_ptr();
         let source_pcm_ptr = host.source_pcm_mut().expect("PCM").as_ptr();
         let output_ptr = host.output_pcm().expect("output").as_ptr();
         assert_eq!(
             host.source_pcm_mut().expect("PCM").len(),
-            8 * quantum as usize
+            2 * quantum as usize
         );
         assert_eq!(
             host.output_pcm().expect("output").len(),
             2 * quantum as usize
         );
-        assert_eq!(toml_ptr, host.session_toml_mut().expect("TOML").as_ptr());
         assert_eq!(source_id_ptr, host.source_id_mut().expect("ID").as_ptr());
         assert_eq!(source_pcm_ptr, host.source_pcm_mut().expect("PCM").as_ptr());
         assert_eq!(output_ptr, host.output_pcm().expect("output").as_ptr());
@@ -359,90 +301,57 @@ fn preparation_accepts_explicit_64_128_and_256_quanta_with_stable_buffers() {
 
 #[test]
 fn malformed_config_and_atomic_compile_failure_are_sticky() {
-    let mut bad = WebPrepareConfig::launch_defaults(48_000, 128);
-    bad.abi_version = 0;
-    let mut host = AudioWorkletEngineHost::new(bad);
-    assert_eq!(host.prepare(), RESULT_ABI_MISMATCH);
-    assert_eq!(host.status().state, STATE_CONFIG);
+    let mut bad = boot_options(128);
+    bad.abi_version = 1;
+    let failure = AudioWorkletEngineHost::boot(one_track_session(128).as_bytes(), bad)
+        .err()
+        .expect("wrong ABI");
+    assert_eq!(failure.result(), RESULT_REFUSED_OPTIONS);
+    assert_eq!(failure.diagnostic(), b"web.options.abi_version\t$\n");
 
-    let mut host = prepared_host(128);
-    host.session_toml_mut().expect("TOML")[..3].copy_from_slice(b"no=");
-    assert_eq!(host.compile(3), RESULT_PREPARE_REJECTED);
-    assert_eq!(host.status().state, STATE_FAILED);
-    assert!(!host.diagnostic().is_empty());
-    assert_eq!(host.compile(3), RESULT_WRONG_STATE);
+    let failure = AudioWorkletEngineHost::boot(b"no=", boot_options(128))
+        .err()
+        .expect("bad document");
+    assert_eq!(failure.result(), RESULT_REFUSED_DOCUMENT);
+    assert!(!failure.diagnostic().is_empty());
 }
 
 #[test]
 fn compile_resource_caps_are_inclusive_and_one_below_rejects() {
-    let reference = ready_host(128);
-    let expected_host = reference.resources().bridge_retained_bytes;
-    let expected_named = reference.resources().largest_named_allocation_bytes;
-    drop(reference);
-
     let toml = one_track_session(128);
-    for (host_cap, named_cap, prepare_result, compile_result) in [
-        (expected_host, expected_named, RESULT_OK, RESULT_OK),
-        (
-            expected_host - 1,
-            expected_named,
-            RESULT_OK,
-            RESULT_PREPARE_REJECTED,
-        ),
-        (
-            expected_host,
-            expected_named - 1,
-            RESULT_PREPARE_REJECTED,
-            RESULT_WRONG_STATE,
-        ),
-    ] {
-        let mut config = WebPrepareConfig::launch_defaults(48_000, 128);
-        config.maximum_host_retained_bytes = host_cap;
-        config.maximum_named_allocation_bytes = named_cap;
-        let mut host = AudioWorkletEngineHost::new(config);
-        assert_eq!(host.prepare(), prepare_result);
-        if prepare_result == RESULT_OK {
-            host.session_toml_mut().expect("TOML")[..toml.len()].copy_from_slice(toml.as_bytes());
-        }
-        assert_eq!(
-            host.compile(toml.len()),
-            compile_result,
-            "diagnostic={:?} host_cap={host_cap} named_cap={named_cap}",
-            host.diagnostic()
-        );
-        assert_eq!(
-            host.status().state,
-            if compile_result == RESULT_OK {
-                STATE_READY
-            } else if prepare_result == RESULT_OK {
-                STATE_FAILED
-            } else {
-                STATE_CONFIG
-            }
-        );
-    }
+    let parse_projection = toml.len() as u64 * PARSE_TRANSIENT_MULTIPLIER;
+    let accepted = WebBootOptions {
+        maximum_memory_bytes: parse_projection,
+        ..boot_options(128)
+    };
+    AudioWorkletEngineHost::boot(toml.as_bytes(), accepted).expect("inclusive budget");
+    let refused = WebBootOptions {
+        maximum_memory_bytes: parse_projection - 1,
+        ..boot_options(128)
+    };
+    let failure = AudioWorkletEngineHost::boot(toml.as_bytes(), refused)
+        .err()
+        .expect("one byte below parse projection");
+    assert_eq!(failure.result(), RESULT_REFUSED_BUDGET);
+    assert!(
+        failure
+            .diagnostic()
+            .starts_with(b"host.budget.parse_projection\t")
+    );
 }
 
 #[test]
 fn source_backpressure_seek_render_and_stable_output_are_bounded() {
     let quantum = 128_usize;
     let toml = one_track_session(quantum as u32);
-    let mut config = WebPrepareConfig::launch_defaults(48_000, quantum as u32);
-    config.source_ring_frames = quantum as u32;
-    let mut host = AudioWorkletEngineHost::new(config);
-    assert_eq!(host.prepare(), RESULT_OK);
-    let toml_ptr = host.session_toml_mut().expect("TOML").as_ptr();
+    let options = WebBootOptions {
+        source_ring_frames: quantum as u32,
+        ..boot_options(quantum as u32)
+    };
+    let mut host = AudioWorkletEngineHost::boot(toml.as_bytes(), options).expect("boot");
     let source_id_ptr = host.source_id_mut().expect("ID").as_ptr();
     let source_pcm_ptr = host.source_pcm_mut().expect("PCM").as_ptr();
     let output_ptr = host.output_pcm().expect("output").as_ptr();
-    host.session_toml_mut().expect("TOML")[..toml.len()].copy_from_slice(toml.as_bytes());
-    assert_eq!(
-        host.compile(toml.len()),
-        RESULT_OK,
-        "{:?}",
-        host.diagnostic()
-    );
-    assert_eq!(toml_ptr, host.session_toml_mut().expect("TOML").as_ptr());
     assert_eq!(source_id_ptr, host.source_id_mut().expect("ID").as_ptr());
     assert_eq!(source_pcm_ptr, host.source_pcm_mut().expect("PCM").as_ptr());
     assert_eq!(output_ptr, host.output_pcm().expect("output").as_ptr());
@@ -576,18 +485,12 @@ fn render_failure_retains_ownership_and_silences() {
 #[test]
 fn facade_source_rules_reach_the_browser_host() {
     let quantum = 128_usize;
-    let mut config = WebPrepareConfig::launch_defaults(48_000, quantum as u32);
-    config.source_ring_frames = quantum as u32;
     let toml = one_track_session(quantum as u32);
-    let mut host = AudioWorkletEngineHost::new(config);
-    assert_eq!(host.prepare(), RESULT_OK);
-    host.session_toml_mut().expect("TOML")[..toml.len()].copy_from_slice(toml.as_bytes());
-    assert_eq!(
-        host.compile(toml.len()),
-        RESULT_OK,
-        "{:?}",
-        host.diagnostic()
-    );
+    let options = WebBootOptions {
+        source_ring_frames: quantum as u32,
+        ..boot_options(quantum as u32)
+    };
+    let host = AudioWorkletEngineHost::boot(toml.as_bytes(), options).expect("boot");
 
     let left = vec![0.25_f32; quantum];
     let right = vec![-0.5_f32; quantum];
@@ -706,9 +609,8 @@ fn default_ring_covers_stall_tolerance() {
             "the ring must cover the stall plus the consumer and recycle quanta"
         );
         assert_eq!(
-            WebPrepareConfig::launch_defaults(sample_rate_hz, quantum).source_ring_frames,
-            expected,
-            "launch defaults are the only place the formula is applied"
+            default_source_ring_frames(sample_rate_hz, quantum),
+            expected
         );
     }
 }
@@ -733,15 +635,8 @@ fn ring_prefill_survives_stall() {
 
     let length_samples = u64::from(ring_frames) + 2 * u64::from(QUANTUM);
     let toml = identity_session(QUANTUM, ring_frames, length_samples);
-    let mut host = AudioWorkletEngineHost::new(WebPrepareConfig::launch_defaults(RATE, QUANTUM));
-    assert_eq!(host.prepare(), RESULT_OK);
-    host.session_toml_mut().expect("TOML")[..toml.len()].copy_from_slice(toml.as_bytes());
-    assert_eq!(
-        host.compile(toml.len()),
-        RESULT_OK,
-        "{:?}",
-        host.diagnostic()
-    );
+    let mut host = AudioWorkletEngineHost::boot(toml.as_bytes(), boot_options(QUANTUM))
+        .expect("boot with derived ring");
 
     // A distinct value per absolute frame, so a stale or repeated block cannot pass by accident.
     let ramp = |block: u32, index: u32| (block * QUANTUM + index) as f32 / 65_536.0;
@@ -829,18 +724,11 @@ fn native_identity_session_digest_pins_the_wasm_parity() {
     let silent = vec![0.0_f32; QUANTUM as usize];
 
     let toml = identity_session(QUANTUM, QUANTUM, 256);
-    let mut host = AudioWorkletEngineHost::new(WebPrepareConfig::launch_defaults(RATE, QUANTUM));
-    // The browser fixture pins a one-quantum ring, which is what makes its backpressure
-    // observable; the default ring would swallow the second submission.
-    host.config_mut().expect("config state").source_ring_frames = QUANTUM;
-    assert_eq!(host.prepare(), RESULT_OK);
-    host.session_toml_mut().expect("TOML")[..toml.len()].copy_from_slice(toml.as_bytes());
-    assert_eq!(
-        host.compile(toml.len()),
-        RESULT_OK,
-        "{:?}",
-        host.diagnostic()
-    );
+    let options = WebBootOptions {
+        source_ring_frames: QUANTUM,
+        ..boot_options(QUANTUM)
+    };
+    let mut host = AudioWorkletEngineHost::boot(toml.as_bytes(), options).expect("boot");
 
     let submit = |host: &mut AudioWorkletEngineHost, left: &[f32], generation, start, last| {
         let planes: [&[f32]; 2] = [left, &silent];
@@ -957,18 +845,12 @@ fn native_command_timeline_digest_pins_the_wasm_parity() {
     // parametric EQ whose band 1 is a low shelf -- a shelf, not a bell, so a DC fixture can
     // actually witness the parameter move.
     let toml = include_str!("../tests/browser-v1/command-session.toml");
-    let mut config = WebPrepareConfig::launch_defaults(RATE, QUANTUM);
-    config.source_ring_frames = QUANTUM;
-    config.console_command_queue_records = u64::from(DEPTH);
-    let mut host = AudioWorkletEngineHost::new(config);
-    assert_eq!(host.prepare(), RESULT_OK);
-    host.session_toml_mut().expect("TOML")[..toml.len()].copy_from_slice(toml.as_bytes());
-    assert_eq!(
-        host.compile(toml.len()),
-        RESULT_OK,
-        "{:?}",
-        core::str::from_utf8(host.diagnostic())
-    );
+    let options = WebBootOptions {
+        source_ring_frames: QUANTUM,
+        console_command_queue_records: u64::from(DEPTH),
+        ..boot_options(QUANTUM)
+    };
+    let mut host = AudioWorkletEngineHost::boot(toml.as_bytes(), options).expect("boot");
     assert_eq!(host.console_tracks().len(), 1);
 
     let plane = vec![0.25_f32; QUANTUM as usize];
@@ -1276,27 +1158,20 @@ fn stage_command(
 /// A console host over the browser identity fixture: one track, unity everything, one-quantum ring.
 fn console_host(quantum: u32, meter_blocks: u64) -> AudioWorkletEngineHost {
     let toml = identity_session(quantum, quantum, u64::from(quantum) * 64);
-    let mut config = WebPrepareConfig::console_defaults(48_000, quantum);
-    config.source_ring_frames = quantum;
-    config.console_meter_blocks = meter_blocks;
-    config.maximum_meter_streams = 16;
-    config.maximum_meter_items = 1 << 16;
-    config.maximum_meter_bytes = 1 << 24;
-    let mut host = AudioWorkletEngineHost::new(config);
-    assert_eq!(host.prepare(), RESULT_OK);
-    host.session_toml_mut().expect("TOML")[..toml.len()].copy_from_slice(toml.as_bytes());
-    assert_eq!(
-        host.compile(toml.len()),
-        RESULT_OK,
-        "{:?}",
-        core::str::from_utf8(host.diagnostic())
-    );
-    host
+    let options = WebBootOptions {
+        require_sample_rate_hz: 48_000,
+        require_quantum_frames: quantum,
+        source_ring_frames: quantum,
+        console_command_queue_records: DEFAULT_COMMAND_QUEUE_RECORDS as u64,
+        console_meter_blocks: meter_blocks,
+        ..WebBootOptions::explicit_defaults()
+    };
+    AudioWorkletEngineHost::boot(toml.as_bytes(), options).expect("console boot")
 }
 
 /// Feed one full quantum of a constant left plane and render it.
 fn feed_and_render(host: &mut AudioWorkletEngineHost, generation: u64, block: u64, value: f32) {
-    let quantum = host.config().quantum_frames as usize;
+    let quantum = host.status().quantum_frames as usize;
     let left = vec![value; quantum];
     let right = vec![value; quantum];
     let planes: [&[f32]; 2] = [&left, &right];
@@ -1412,19 +1287,12 @@ fn command_ack_names_the_exact_application_sample() {
 /// parametric EQ, so an effect-addressed command has something real to address (issue #140 A).
 fn effect_console_host(quantum: u32, depth: u64) -> AudioWorkletEngineHost {
     let toml = include_str!("../tests/browser-v1/command-session.toml");
-    let mut config = WebPrepareConfig::launch_defaults(48_000, quantum);
-    config.source_ring_frames = quantum;
-    config.console_command_queue_records = depth;
-    let mut host = AudioWorkletEngineHost::new(config);
-    assert_eq!(host.prepare(), RESULT_OK);
-    host.session_toml_mut().expect("TOML")[..toml.len()].copy_from_slice(toml.as_bytes());
-    assert_eq!(
-        host.compile(toml.len()),
-        RESULT_OK,
-        "{:?}",
-        core::str::from_utf8(host.diagnostic())
-    );
-    host
+    let options = WebBootOptions {
+        source_ring_frames: quantum,
+        console_command_queue_records: depth,
+        ..boot_options(quantum)
+    };
+    AudioWorkletEngineHost::boot(toml.as_bytes(), options).expect("effect console boot")
 }
 
 /// #140 B / E1: a fader command's acknowledgement names the exact sample it takes effect at.
@@ -2115,24 +1983,15 @@ fn observation_host(
     master: Option<u32>,
 ) -> AudioWorkletEngineHost {
     let toml = include_str!("../../../fixtures/session/v1/observation-frame-shape.toml");
-    let mut config = WebPrepareConfig::console_defaults(48_000, quantum);
-    config.source_ring_frames = quantum * 4;
-    config.console_meter_blocks = meter_blocks;
-    config.console_observation_taps = 4;
-    config.console_master_track_plus_one = master.map_or(0, |track| u64::from(track) + 1);
-    config.maximum_meter_streams = 16;
-    config.maximum_meter_items = 1 << 16;
-    config.maximum_meter_bytes = 1 << 24;
-    let mut host = AudioWorkletEngineHost::new(config);
-    assert_eq!(host.prepare(), RESULT_OK);
-    host.session_toml_mut().expect("TOML")[..toml.len()].copy_from_slice(toml.as_bytes());
-    assert_eq!(
-        host.compile(toml.len()),
-        RESULT_OK,
-        "{:?}",
-        core::str::from_utf8(host.diagnostic())
-    );
-    host
+    let options = WebBootOptions {
+        source_ring_frames: quantum * 4,
+        console_command_queue_records: DEFAULT_COMMAND_QUEUE_RECORDS as u64,
+        console_meter_blocks: meter_blocks,
+        console_observation_taps: 4,
+        console_master_track_plus_one: master.map_or(0, |track| u64::from(track) + 1),
+        ..boot_options(quantum)
+    };
+    AudioWorkletEngineHost::boot(toml.as_bytes(), options).expect("observation boot")
 }
 
 /// Feed one quantum of a constant to every track's shared source and render it.
@@ -2370,7 +2229,7 @@ fn observation_misuse_is_typed_and_all_or_nothing() {
     // the frame is untouched.
     assert_eq!(observe(&mut host, 0, 1, 0, 1, 2, true), RESULT_OK);
     let before = host.meter_frame().to_vec();
-    let depth = host.config().console_command_queue_records as usize;
+    let depth = host.options().console_command_queue_records as usize;
     let flood = (depth + 2).min(MAXIMUM_COMMAND_RECORDS as usize);
     for index in 0..flood {
         stage_command(
@@ -2413,16 +2272,13 @@ fn observation_misuse_is_typed_and_all_or_nothing() {
 fn a_subscription_without_capacity_is_observation_unbound() {
     const QUANTUM: u32 = 128;
     let toml = include_str!("../../../fixtures/session/v1/observation-frame-shape.toml");
-    let mut config = WebPrepareConfig::console_defaults(48_000, QUANTUM);
-    config.source_ring_frames = QUANTUM * 4;
-    config.console_observation_taps = 0;
-    config.maximum_meter_streams = 16;
-    config.maximum_meter_items = 1 << 16;
-    config.maximum_meter_bytes = 1 << 24;
-    let mut host = AudioWorkletEngineHost::new(config);
-    assert_eq!(host.prepare(), RESULT_OK);
-    host.session_toml_mut().expect("TOML")[..toml.len()].copy_from_slice(toml.as_bytes());
-    assert_eq!(host.compile(toml.len()), RESULT_OK);
+    let options = WebBootOptions {
+        source_ring_frames: QUANTUM * 4,
+        console_command_queue_records: DEFAULT_COMMAND_QUEUE_RECORDS as u64,
+        console_meter_blocks: DEFAULT_METER_BLOCKS as u64,
+        ..boot_options(QUANTUM)
+    };
+    let mut host = AudioWorkletEngineHost::boot(toml.as_bytes(), options).expect("boot");
     assert!(!host.observation_attached());
     assert_eq!(host.resources().observation_retained_bytes, 0);
     assert_eq!(
@@ -2443,32 +2299,30 @@ fn a_subscription_without_capacity_is_observation_unbound() {
 /// Observation capacity is refused at configuration time when nothing can carry the subscription.
 #[test]
 fn observation_configuration_words_are_validated() {
-    let mut config = WebPrepareConfig::launch_defaults(48_000, 128);
-    config.console_observation_taps = 4;
-    let mut host = AudioWorkletEngineHost::new(config);
-    assert_eq!(
-        host.prepare(),
-        RESULT_INVALID_ARGUMENT,
-        "a subscription rides the command queue, so capacity without one has no delivery path"
-    );
-
-    let mut config = WebPrepareConfig::console_defaults(48_000, 128);
-    config.console_observation_taps = u64::from(MAXIMUM_OBSERVATION_TAPS) + 1;
-    let mut host = AudioWorkletEngineHost::new(config);
-    assert_eq!(host.prepare(), RESULT_INVALID_ARGUMENT);
-
-    let mut config = WebPrepareConfig::console_defaults(48_000, 128);
-    config.console_master_track_plus_one = 1;
-    let mut host = AudioWorkletEngineHost::new(config);
-    assert_eq!(
-        host.prepare(),
-        RESULT_INVALID_ARGUMENT,
-        "a master designation with no observation capacity would report nothing"
-    );
-
-    // And a zeroed pair is exactly what every pre-#143 writer already sends.
-    let mut host = AudioWorkletEngineHost::new(WebPrepareConfig::console_defaults(48_000, 128));
-    assert_eq!(host.prepare(), RESULT_OK);
+    let toml = one_track_session(128);
+    for options in [
+        WebBootOptions {
+            console_observation_taps: 4,
+            ..boot_options(128)
+        },
+        WebBootOptions {
+            console_command_queue_records: DEFAULT_COMMAND_QUEUE_RECORDS as u64,
+            console_observation_taps: u64::from(MAXIMUM_OBSERVATION_TAPS) + 1,
+            ..boot_options(128)
+        },
+        WebBootOptions {
+            console_command_queue_records: DEFAULT_COMMAND_QUEUE_RECORDS as u64,
+            console_master_track_plus_one: 1,
+            ..boot_options(128)
+        },
+    ] {
+        let failure = AudioWorkletEngineHost::boot(toml.as_bytes(), options)
+            .err()
+            .expect("invalid console options");
+        assert_eq!(failure.result(), RESULT_REFUSED_OPTIONS);
+    }
+    AudioWorkletEngineHost::boot(toml.as_bytes(), WebBootOptions::console_defaults())
+        .expect("zero observation words remain valid");
 }
 
 /// Issue #143 E1/E12, native leg: the observation timeline's determinism digest.
@@ -2495,21 +2349,15 @@ fn native_observation_timeline_digest_pins_the_wasm_parity() {
 
     let toml = include_str!("../tests/browser-v1/observation-session.toml");
     let run = |taps: u64| -> (String, f32, Option<f32>, f32, u64, u32, u32) {
-        let mut config = WebPrepareConfig::launch_defaults(RATE, QUANTUM);
-        config.source_ring_frames = QUANTUM;
-        config.console_command_queue_records = u64::from(DEPTH);
-        config.console_meter_blocks = u64::from(WINDOW_BLOCKS);
-        config.console_observation_taps = taps;
-        config.console_master_track_plus_one = if taps == 0 { 0 } else { 1 };
-        let mut host = AudioWorkletEngineHost::new(config);
-        assert_eq!(host.prepare(), RESULT_OK);
-        host.session_toml_mut().expect("TOML")[..toml.len()].copy_from_slice(toml.as_bytes());
-        assert_eq!(
-            host.compile(toml.len()),
-            RESULT_OK,
-            "{:?}",
-            core::str::from_utf8(host.diagnostic())
-        );
+        let options = WebBootOptions {
+            source_ring_frames: QUANTUM,
+            console_command_queue_records: u64::from(DEPTH),
+            console_meter_blocks: u64::from(WINDOW_BLOCKS),
+            console_observation_taps: taps,
+            console_master_track_plus_one: if taps == 0 { 0 } else { 1 },
+            ..boot_options(QUANTUM)
+        };
+        let mut host = AudioWorkletEngineHost::boot(toml.as_bytes(), options).expect("boot");
         assert_eq!(host.console_tracks().len(), 1);
         assert_eq!(
             host.resources().observation_retained_bytes == 0,
@@ -2869,22 +2717,11 @@ fn three_source_session(quantum: u32) -> String {
 fn session_source_introspection_is_canonical_ordered_shaped_and_bounded() {
     const QUANTUM: u32 = 128;
     let toml = three_source_session(QUANTUM);
-    let mut host = prepared_host(QUANTUM);
-
-    // Before compilation there is no session, so there are no sources -- the same state gating the
-    // track queries carry, for the same reason: the answer lives in the compiled session.
-    assert_eq!(host.session_source_count(), 0);
-    assert_eq!(host.session_source_id(0), None);
-    assert_eq!(host.session_source_shape(0), None);
-
-    host.session_toml_mut().expect("prepared TOML buffer")[..toml.len()]
-        .copy_from_slice(toml.as_bytes());
-    assert_eq!(
-        host.compile(toml.len()),
-        RESULT_OK,
-        "{:?}",
-        core::str::from_utf8(host.diagnostic())
-    );
+    let options = WebBootOptions {
+        source_ring_frames: QUANTUM,
+        ..boot_options(QUANTUM)
+    };
+    let host = AudioWorkletEngineHost::boot(toml.as_bytes(), options).expect("boot");
 
     assert_eq!(host.session_source_count(), 3);
     let ids: Vec<&str> = (0..3)
@@ -2947,7 +2784,11 @@ fn session_source_introspection_is_canonical_ordered_shaped_and_bounded() {
 fn raw_ffi_source_introspection_mirrors_the_track_queries() {
     const QUANTUM: u32 = 128;
     let toml = three_source_session(QUANTUM);
-    let handle = miso_engine_web_v1_config_new();
+    let options = WebBootOptions {
+        source_ring_frames: QUANTUM,
+        ..boot_options(QUANTUM)
+    };
+    let handle = crate::ffi::test_boot(toml.as_bytes(), options);
     assert_ne!(handle, 0);
 
     // An invalid handle answers the invalid value on every query, as every other export does.
@@ -2959,26 +2800,6 @@ fn raw_ffi_source_introspection_mirrors_the_track_queries() {
         assert_eq!(miso_engine_web_v1_source_start_frame(probe, 0), 0);
         assert_eq!(miso_engine_web_v1_source_sample_rate(probe, 0), 0);
     }
-
-    let mut config = WebPrepareConfig::launch_defaults(48_000, QUANTUM);
-    config.source_ring_frames = QUANTUM;
-    config.maximum_source_channels = 4;
-    assert_eq!(crate::ffi::test_configure(handle, config), RESULT_OK);
-    assert_eq!(miso_engine_web_v1_prepare(handle), RESULT_OK);
-
-    // Prepared but not compiled: staging exists, a session does not.
-    assert_eq!(miso_engine_web_v1_source_count(handle), 0);
-    assert_eq!(miso_engine_web_v1_source_id(handle, 0), 0);
-    assert_eq!(miso_engine_web_v1_console_track_count(handle), 0);
-
-    assert_eq!(
-        crate::ffi::test_copy_staging(handle, BUFFER_SESSION_TOML, toml.as_bytes()),
-        RESULT_OK
-    );
-    assert_eq!(
-        miso_engine_web_v1_compile(handle, toml.len() as u32),
-        RESULT_OK
-    );
 
     assert_eq!(miso_engine_web_v1_source_count(handle), 3);
     let read = |index: u32| {
@@ -3105,19 +2926,12 @@ fn solo_session(quantum: u32, tracks: usize, mutes: &[[bool; 2]]) -> String {
 /// neither, and a test that bound them would be measuring something else.
 fn solo_host(quantum: u32, tracks: usize, mutes: &[[bool; 2]]) -> AudioWorkletEngineHost {
     let toml = solo_session(quantum, tracks, mutes);
-    let mut config = WebPrepareConfig::console_defaults(48_000, quantum);
-    config.source_ring_frames = quantum * 4;
-    config.console_meter_blocks = 0;
-    let mut host = AudioWorkletEngineHost::new(config);
-    assert_eq!(host.prepare(), RESULT_OK);
-    host.session_toml_mut().expect("TOML")[..toml.len()].copy_from_slice(toml.as_bytes());
-    assert_eq!(
-        host.compile(toml.len()),
-        RESULT_OK,
-        "{:?}",
-        core::str::from_utf8(host.diagnostic())
-    );
-    host
+    let options = WebBootOptions {
+        source_ring_frames: quantum * 4,
+        console_command_queue_records: DEFAULT_COMMAND_QUEUE_RECORDS as u64,
+        ..boot_options(quantum)
+    };
+    AudioWorkletEngineHost::boot(toml.as_bytes(), options).expect("solo boot")
 }
 
 /// Stage one `solo` record: `rack`/`channel` are both `255`, the bit rides `values[0]`.
@@ -3813,19 +3627,12 @@ fn effect_solo_host(quantum: u32, tracks: usize, depth: u64) -> AudioWorkletEngi
         model.routes.push(route);
     }
     let toml = canonical_session_toml(&model).expect("canonical effect solo session");
-    let mut config = WebPrepareConfig::launch_defaults(48_000, quantum);
-    config.source_ring_frames = quantum * 4;
-    config.console_command_queue_records = depth;
-    let mut host = AudioWorkletEngineHost::new(config);
-    assert_eq!(host.prepare(), RESULT_OK);
-    host.session_toml_mut().expect("TOML")[..toml.len()].copy_from_slice(toml.as_bytes());
-    assert_eq!(
-        host.compile(toml.len()),
-        RESULT_OK,
-        "{:?}",
-        core::str::from_utf8(host.diagnostic())
-    );
-    host
+    let options = WebBootOptions {
+        source_ring_frames: quantum * 4,
+        console_command_queue_records: depth,
+        ..boot_options(quantum)
+    };
+    AudioWorkletEngineHost::boot(toml.as_bytes(), options).expect("effect solo boot")
 }
 
 /// The decode staging is sized for the worst batch the ABI can describe, and that batch is

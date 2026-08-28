@@ -6,17 +6,15 @@
 //! harness, which is not a sweep row.
 //!
 //! `scripts/check-browser-expected-resources.py` closes that. This example is its native leg: the
-//! *same* fixture session, through the *same* facade, with the *same* configuration the direct
-//! oracle writes into the module's `WebPrepareConfig` staging block -- differing only in the
+//! *same* fixture session, through the *same* facade, with the *same* options the direct
+//! oracle writes into the module's `WebBootOptions` block -- differing only in the
 //! target it is compiled for. The gate uses it as an independent witness for the rows that are
 //! target-independent, and to prove that the rows that are *not* really are not.
 //!
-//! The configuration below must stay equal to `writeConfig`'s `LIMITS32`/`LIMITS64` in
-//! `tests/browser-v1/direct-oracle.mjs`. `WebPrepareConfig::launch_defaults` is that vector
-//! exactly, save for `source_ring_frames`: the oracle writes the quantum, the constructor derives
-//! a launch default from the sample rate.
+//! The options below stay equal to the direct oracle: physical rate/quantum plus a one-quantum
+//! ring override that makes backpressure deterministic.
 
-use miso_engine_host_web::{AudioWorkletEngineHost, RESULT_OK, WebPrepareConfig};
+use miso_engine_host_web::{AudioWorkletEngineHost, WebBootOptions};
 
 const SAMPLE_RATE_HZ: u32 = 48_000;
 const QUANTUM_FRAMES: u32 = 128;
@@ -25,33 +23,22 @@ const QUANTUM_FRAMES: u32 = 128;
 const SESSION_TOML: &str = include_str!("../tests/browser-v1/session.toml");
 
 fn main() {
-    let config = WebPrepareConfig {
-        // The oracle writes `QUANTUM` here, not `default_source_ring_frames`.
+    let options = WebBootOptions {
+        require_sample_rate_hz: SAMPLE_RATE_HZ,
+        require_quantum_frames: QUANTUM_FRAMES,
         source_ring_frames: QUANTUM_FRAMES,
-        ..WebPrepareConfig::launch_defaults(SAMPLE_RATE_HZ, QUANTUM_FRAMES)
+        ..WebBootOptions::explicit_defaults()
     };
-    let mut host = AudioWorkletEngineHost::new(config);
-    assert_eq!(
-        host.prepare(),
-        RESULT_OK,
-        "prepare the browser fixture host"
-    );
-    let staging = host
-        .session_toml_mut()
-        .expect("prepared session TOML staging");
-    staging[..SESSION_TOML.len()].copy_from_slice(SESSION_TOML.as_bytes());
-    assert_eq!(
-        host.compile(SESSION_TOML.len()),
-        RESULT_OK,
-        "compile the browser fixture session: {:?}",
-        host.diagnostic()
-    );
+    let host =
+        AudioWorkletEngineHost::boot(SESSION_TOML.as_bytes(), options).unwrap_or_else(|failure| {
+            panic!("boot: {}", String::from_utf8_lossy(failure.diagnostic()))
+        });
 
     // Printed in the JSON shape and the key spelling `expected.json` uses, u64 rows as strings,
     // so the gate compares the two documents without a per-row translation table.
     let report = host.resources();
     let rows: [(&str, u64); 21] = [
-        ("configBytes", report.config_bytes),
+        ("optionsBytes", report.options_bytes),
         ("statusBytes", report.status_bytes),
         ("sessionTomlBytes", report.session_toml_bytes),
         ("diagnosticBytes", report.diagnostic_bytes),

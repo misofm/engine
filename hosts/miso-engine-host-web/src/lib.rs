@@ -29,12 +29,40 @@ use miso_engine_effect_contract::{
 use miso_engine_host_core::{
     CompiledSession, ConsoleSoloState, EffectControlProducer, EffectObservationHandle, EffectRack,
     HostConsoleRequest, HostPrepareCaps, HostShapePolicy, PreparedHost, SourceControlError,
-    SourceSubmission, control_table_bytes, prepare_host_session_with_console,
-    source_id_arena_bytes,
+    SourceSubmission, compile_host_model, compiled_session_shape, control_table_bytes,
+    parse_host_session, prepare_host_runtime_with_console, source_id_arena_bytes,
+    validate_source_rates,
 };
+use miso_engine_session::CompileCaps;
 
-/// Frozen browser host ABI version 1.0.
-pub const ABI_VERSION: u32 = 0x0001_0000;
+pub use miso_engine_host_core::{SOURCE_STALL_TOLERANCE_MS, default_source_ring_frames};
+
+/// Browser host ABI version 2.0. Export names retain their de-versioned `v1` spelling.
+pub const ABI_VERSION: u32 = 0x0002_0000;
+
+/// Maximum exact staged document length. Dense automation belongs in future content-addressed
+/// binary blobs rather than unbounded TOML.
+pub const MAXIMUM_DOCUMENT_BYTES: u32 = 1 << 20;
+
+/// Conservative transient parse projection in bytes per staged document byte.
+///
+/// A9 measured the adversarial accepted-document wasm leg at approximately 145 MiB for 2.1 MiB of
+/// TOML, about 69.1 bytes per input byte. The pin rounds upward to 80 (15% headroom). Boot checks
+/// `document_bytes * PARSE_TRANSIENT_MULTIPLIER` against the effective budget before UTF-8 decode
+/// or parsing; the peak-transient fixture re-measures the worst accepted shape so parser growth
+/// cannot silently outrun this constant. This is the conservative pre-parse mechanism authorized
+/// by issue #240 ruling 5458432482; fallible parser allocation is intentionally out of scope.
+pub const PARSE_TRANSIENT_MULTIPLIER: u64 = 80;
+
+/// Default host memory ceiling used only when the embedding passes zero.
+///
+/// 512 MiB matches the native runner profile and the browser app's historical quota-reserve
+/// scale. It leaves more than four times the retained headroom of every frozen corpus fixture and
+/// more than seven times the measured ~70 MiB worst transient at the 1 MiB document cap.
+pub const DEFAULT_MAXIMUM_MEMORY_BYTES: u64 = 512 << 20;
+
+/// Fixed live diagnostic capacity after a successful boot.
+pub const DIAGNOSTIC_BYTES: u32 = 1 << 14;
 
 /// Successful operation.
 pub const RESULT_OK: u32 = 0;
@@ -63,10 +91,15 @@ pub const RESULT_REPREPARE_REQUIRED: u32 = 9;
 /// JavaScript (see the `.d.ts` header); nothing inside Rust catches it.
 pub const RESULT_INTERNAL: u32 = 255;
 
-/// Newly allocated configuration state.
-pub const STATE_CONFIG: u32 = 0;
-/// Fixed buffers have been prepared.
-pub const STATE_PREPARED: u32 = 1;
+/// Boot refused the staged document; diagnostics replaced its staged prefix.
+pub const RESULT_REFUSED_DOCUMENT: u32 = RESULT_INVALID_ARGUMENT;
+/// Boot refused the options structure.
+pub const RESULT_REFUSED_OPTIONS: u32 = RESULT_ABI_MISMATCH;
+/// Boot refused the effective memory budget.
+pub const RESULT_REFUSED_BUDGET: u32 = RESULT_PREPARE_REJECTED;
+/// Boot was attempted while a live handle already existed.
+pub const RESULT_REFUSED_LIFECYCLE: u32 = RESULT_WRONG_STATE;
+
 /// A session and render plan are ready.
 pub const STATE_READY: u32 = 2;
 /// A sticky preparation or render failure occurred.
@@ -79,8 +112,6 @@ pub const BACKEND_SCALAR: u32 = 0;
 /// Base Wasm `simd128` backend.
 pub const BACKEND_SIMD128: u32 = 1;
 
-/// Session TOML staging buffer.
-pub const BUFFER_SESSION_TOML: u32 = 1;
 /// Source-ID staging buffer.
 pub const BUFFER_SOURCE_ID: u32 = 2;
 /// Planar source PCM staging buffer.
@@ -224,34 +255,6 @@ pub const COMMAND_REASON_UNKNOWN_TAP: u32 = 10;
 /// none. A caller fixes it by preparing with `console_observation_taps` set, not by retrying.
 pub const COMMAND_REASON_OBSERVATION_UNBOUND: u32 = 11;
 
-/// The longest main-thread stall the default source ring hides without an underrun.
-///
-/// Chrome reports any main-thread task over 50 ms as a long task; a major garbage collection or a
-/// layout burst in a real page runs 10-100 ms. The AudioWorklet render thread keeps pulling
-/// quanta throughout, so a ring shorter than the stall underruns every source in the session. This
-/// is a JIT-streaming budget, not a latency budget: the ring is prefilled ahead of the render
-/// position and adds no output latency.
-pub const SOURCE_STALL_TOLERANCE_MS: u32 = 100;
-
-/// The default per-source ring capacity in frames for one rate and quantum.
-///
-/// `ceil(tolerance * fs / quantum)` quanta to cover the stall, plus two: one quantum is held by the
-/// render consumer while it is being read, and one is in the recycle path between the consumer and
-/// the producer. The result is always a whole number of quanta, which is what `PcmSourceRing`
-/// requires of a capacity.
-///
-/// At 48 kHz / 128 that is 5 120 frames, 40 KiB for a stereo `f32` source -- 1 024 such sources fit
-/// inside the 64 MiB default `maximum_source_total_bytes`.
-///
-/// `quantum_frames` must be nonzero. Every caller inside this crate runs after `validate_config`,
-/// which rejects a zero quantum before any ring is built.
-#[must_use]
-pub const fn default_source_ring_frames(sample_rate_hz: u32, quantum_frames: u32) -> u32 {
-    let stall_frames = (sample_rate_hz as u64 * SOURCE_STALL_TOLERANCE_MS as u64) / 1000;
-    let quanta = stall_frames.div_ceil(quantum_frames as u64) + 2;
-    (quanta * quantum_frames as u64) as u32
-}
-
 /// Default meter window in render blocks: ~31 frames per second at 48 kHz with a 128-frame quantum.
 pub const DEFAULT_METER_BLOCKS: u32 = 12;
 
@@ -345,75 +348,36 @@ const fn empty_meter_header() -> WebMeterHeader {
     }
 }
 
-/// Byte size of [`WebPrepareConfig`].
-pub const PREPARE_CONFIG_BYTES: u32 = size_of::<WebPrepareConfig>() as u32;
+/// Byte size of [`WebBootOptions`].
+pub const BOOT_OPTIONS_BYTES: u32 = size_of::<WebBootOptions>() as u32;
 /// Byte size of [`WebStatus`].
 pub const STATUS_BYTES: u32 = size_of::<WebStatus>() as u32;
 /// Byte size of [`WebResourceReport`].
 pub const RESOURCE_REPORT_BYTES: u32 = size_of::<WebResourceReport>() as u32;
 
-/// Exact versioned preparation configuration shared with JavaScript.
+/// Exact versioned boot policy shared with JavaScript.
+///
+/// An all-zero value selects engine defaults. If either handshake word is nonzero, both must name
+/// this exact layout and ABI version.
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct WebPrepareConfig {
-    /// Exact structure byte size.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct WebBootOptions {
+    /// Zero for defaults, otherwise [`BOOT_OPTIONS_BYTES`].
     pub struct_size: u32,
-    /// Must equal [`ABI_VERSION`].
+    /// Zero for defaults, otherwise [`ABI_VERSION`].
     pub abi_version: u32,
-    /// Explicit browser context sample rate.
-    pub sample_rate_hz: u32,
-    /// Explicit caller-supplied render quantum.
-    pub quantum_frames: u32,
-    /// Session TOML staging capacity.
-    pub session_toml_bytes: u32,
-    /// Diagnostic staging capacity.
-    pub diagnostic_bytes: u32,
-    /// Source-ID staging capacity.
-    pub source_id_bytes: u32,
-    /// Maximum staged source plane count.
-    pub maximum_source_channels: u32,
-    /// Per-source bounded ring capacity in frames.
+    /// Required physical output sample rate, or zero to accept the document's rate.
+    pub require_sample_rate_hz: u32,
+    /// Required physical output quantum, or zero to accept the document's quantum.
+    pub require_quantum_frames: u32,
+    /// Per-source ring override, or zero for the engine's 100 ms derivation.
     pub source_ring_frames: u32,
-    /// Maximum effect automation spans per render block.
-    pub maximum_automation_spans_per_block: u32,
-    /// Maximum tracks.
-    pub maximum_tracks: u64,
-    /// Maximum sources.
-    pub maximum_sources: u64,
-    /// Maximum routes.
-    pub maximum_routes: u64,
-    /// Maximum effects.
-    pub maximum_effects: u64,
-    /// Maximum graph session-plus-plan bytes.
-    pub maximum_graph_session_plus_plan_bytes: u64,
-    /// Maximum source-owned total bytes.
-    pub maximum_source_total_bytes: u64,
-    /// Maximum source overhead bytes.
-    pub maximum_source_overhead_bytes: u64,
-    /// Maximum scalar effect state bytes.
-    pub maximum_effect_state_bytes: u64,
-    /// Maximum scalar effect scratch bytes.
-    pub maximum_effect_scratch_bytes: u64,
-    /// Maximum retained builtin bytes.
-    pub maximum_builtin_retained_bytes: u64,
-    /// Maximum browser bridge retained bytes.
-    pub maximum_host_retained_bytes: u64,
-    /// Maximum single named allocation.
-    pub maximum_named_allocation_bytes: u64,
-    /// Maximum meter streams.
-    pub maximum_meter_streams: u64,
-    /// Maximum meter items.
-    pub maximum_meter_items: u64,
-    /// Maximum meter bytes.
-    pub maximum_meter_bytes: u64,
+    /// Must be zero.
+    pub reserved0: u32,
+    /// Total boot memory budget, or zero for [`DEFAULT_MAXIMUM_MEMORY_BYTES`].
+    pub maximum_memory_bytes: u64,
     /// Per-track live-console control-queue depth in records, or `0` to attach no control channel
     /// and no command staging at all (issue #137 D1).
-    ///
-    /// Carved out of the frozen configuration's first reserved word, which every V1 writer already
-    /// sets to zero. Zero is the honest form of "no live console": no queue is allocated, no
-    /// staging buffer is allocated, the matrix processors keep the exact storage they had before
-    /// this ABI existed, and a submission is refused with [`RESULT_UNSUPPORTED`]. The 192-byte
-    /// layout is unchanged either way.
     pub console_command_queue_records: u64,
     /// Meter window in render blocks, or `0` to attach no meters at all (issue #137 D2).
     ///
@@ -425,52 +389,28 @@ pub struct WebPrepareConfig {
     /// Maximum declared observation taps to bind per effect, or `0` for no observation capacity
     /// at all (issue #143 D3, level 1).
     ///
-    /// Carved out of the frozen configuration's second reserved word, which every V1 writer
-    /// already sets to zero — the same expansion `console_command_queue_records` took. Zero is the
-    /// honest form: no lane, no accumulator and no conflating cell is allocated anywhere in the
-    /// compiled plan, `observation_retained_bytes` is zero, and a subscription is refused with
-    /// [`COMMAND_REASON_OBSERVATION_UNBOUND`]. The 192-byte layout is unchanged either way.
-    ///
     /// Requires `console_command_queue_records != 0`: a subscription rides the effect's own
     /// command queue, so observation without a console has no delivery path.
     pub console_observation_taps: u64,
     /// The designated master track, **plus one**, or `0` for none (issue #143 D6).
     ///
-    /// V1 has no structural master bus, so `masterGrDb` is a designation rather than a discovery.
+    /// Boot v2 has no structural master bus, so `masterGrDb` is a designation rather than a discovery.
     /// Plus one because zero has to keep meaning "unset" in a word every V1 writer already zeroes.
     pub console_master_track_plus_one: u64,
 }
 
-impl WebPrepareConfig {
-    /// A bounded launch configuration suitable for small embedding tests and examples.
+impl WebBootOptions {
+    /// Explicit handshake with every policy word left at its engine default.
     #[must_use]
-    pub const fn launch_defaults(sample_rate_hz: u32, quantum_frames: u32) -> Self {
+    pub const fn explicit_defaults() -> Self {
         Self {
-            struct_size: PREPARE_CONFIG_BYTES,
+            struct_size: BOOT_OPTIONS_BYTES,
             abi_version: ABI_VERSION,
-            sample_rate_hz,
-            quantum_frames,
-            session_toml_bytes: 1 << 20,
-            diagnostic_bytes: 1 << 14,
-            source_id_bytes: 1 << 10,
-            maximum_source_channels: 8,
-            source_ring_frames: default_source_ring_frames(sample_rate_hz, quantum_frames),
-            maximum_automation_spans_per_block: 256,
-            maximum_tracks: 1_024,
-            maximum_sources: 1_024,
-            maximum_routes: 4_096,
-            maximum_effects: 8_192,
-            maximum_graph_session_plus_plan_bytes: 64 << 20,
-            maximum_source_total_bytes: 64 << 20,
-            maximum_source_overhead_bytes: 16 << 20,
-            maximum_effect_state_bytes: 16 << 20,
-            maximum_effect_scratch_bytes: 16 << 20,
-            maximum_builtin_retained_bytes: 64 << 20,
-            maximum_host_retained_bytes: 16 << 20,
-            maximum_named_allocation_bytes: 64 << 20,
-            maximum_meter_streams: 1_024,
-            maximum_meter_items: 1 << 20,
-            maximum_meter_bytes: 16 << 20,
+            require_sample_rate_hz: 0,
+            require_quantum_frames: 0,
+            source_ring_frames: 0,
+            reserved0: 0,
+            maximum_memory_bytes: 0,
             console_command_queue_records: 0,
             console_meter_blocks: 0,
             console_observation_taps: 0,
@@ -478,13 +418,13 @@ impl WebPrepareConfig {
         }
     }
 
-    /// The launch defaults with the live web console attached (issue #137 D1/D2).
+    /// Explicit defaults with the live web console attached.
     #[must_use]
-    pub const fn console_defaults(sample_rate_hz: u32, quantum_frames: u32) -> Self {
+    pub const fn console_defaults() -> Self {
         Self {
             console_command_queue_records: DEFAULT_COMMAND_QUEUE_RECORDS as u64,
             console_meter_blocks: DEFAULT_METER_BLOCKS as u64,
-            ..Self::launch_defaults(sample_rate_hz, quantum_frames)
+            ..Self::explicit_defaults()
         }
     }
 }
@@ -533,8 +473,8 @@ pub struct WebResourceReport {
     pub backend: u32,
     /// Required zero words.
     pub reserved0: [u32; 3],
-    /// Config allocation bytes.
-    pub config_bytes: u64,
+    /// Boot-options allocation bytes.
+    pub options_bytes: u64,
     /// Status allocation bytes.
     pub status_bytes: u64,
     /// Session TOML staging bytes.
@@ -584,7 +524,6 @@ pub struct WebResourceReport {
 }
 
 struct PreparedBuffers {
-    session_toml: Box<[u8]>,
     diagnostic: Box<[u8]>,
     source_id: Box<[u8]>,
     source_pcm: Box<[f32]>,
@@ -817,7 +756,7 @@ pub struct SessionSourceShape {
 
 /// Safe ownership object backing one future AudioWorklet Wasm handle.
 pub struct AudioWorkletEngineHost {
-    config: WebPrepareConfig,
+    options: WebBootOptions,
     status: WebStatus,
     resources: WebResourceReport,
     command_report: WebCommandReport,
@@ -829,43 +768,130 @@ pub struct AudioWorkletEngineHost {
 }
 
 impl AudioWorkletEngineHost {
-    /// Create a configuration-only host. No session or staging storage is allocated.
-    #[must_use]
-    pub const fn new(config: WebPrepareConfig) -> Self {
+    /// Parse, validate, self-configure, project, prepare and publish one running host.
+    ///
+    /// The document is interpreted once. Every refusal is typed and nothing is published until
+    /// both the shared runtime and all bridge staging buffers exist.
+    pub fn boot(document: &[u8], options: WebBootOptions) -> Result<Self, BootFailure> {
+        let document_bytes = u32::try_from(document.len()).map_err(|_| {
+            BootFailure::fixed(RESULT_REFUSED_DOCUMENT, "web.document.maximum_bytes")
+        })?;
+        if document_bytes > MAXIMUM_DOCUMENT_BYTES {
+            return Err(BootFailure::fixed(
+                RESULT_REFUSED_DOCUMENT,
+                "web.document.maximum_bytes",
+            ));
+        }
+        let options = validate_options(options)?;
+        let memory_budget = if options.maximum_memory_bytes == 0 {
+            DEFAULT_MAXIMUM_MEMORY_BYTES
+        } else {
+            options.maximum_memory_bytes
+        };
+        let parse_projection = u64::from(document_bytes)
+            .checked_mul(PARSE_TRANSIENT_MULTIPLIER)
+            .ok_or_else(|| BootFailure::fixed(RESULT_REFUSED_BUDGET, "host.budget.arithmetic"))?;
+        if parse_projection > memory_budget {
+            return Err(BootFailure::budget(
+                "host.budget.parse_projection",
+                parse_projection,
+                memory_budget,
+            ));
+        }
+        let toml = core::str::from_utf8(document)
+            .map_err(|_| BootFailure::fixed(RESULT_REFUSED_DOCUMENT, "web.toml.utf8"))?;
+        let model = parse_host_session(toml)
+            .map_err(|failure| BootFailure::document(failure.into_bytes()))?;
+        let compile_caps = CompileCaps {
+            max_compiled_model_bytes: u64::MAX,
+            max_requested_runtime_bytes: u64::MAX,
+            max_single_allocation_bytes: u64::MAX,
+            max_queue_items: u64::MAX,
+            max_source_ring_frames: u64::MAX,
+            max_source_ring_bytes: u64::MAX,
+        };
+        let session = compile_host_model(&model, compile_caps)
+            .map_err(|failure| BootFailure::document(failure.into_bytes()))?;
+        validate_source_rates(&session)
+            .map_err(|failure| BootFailure::document(failure.into_bytes()))?;
+        let shape = compiled_session_shape(&session)
+            .map_err(|failure| BootFailure::document(failure.into_bytes()))?;
+        if (options.require_sample_rate_hz != 0
+            && options.require_sample_rate_hz != shape.sample_rate_hz)
+            || (options.require_quantum_frames != 0
+                && options.require_quantum_frames != shape.quantum_frames)
+        {
+            return Err(BootFailure::fixed(
+                RESULT_REPREPARE_REQUIRED,
+                "host.session.shape",
+            ));
+        }
+        let source_ring_frames = if options.source_ring_frames == 0 {
+            default_source_ring_frames(shape.sample_rate_hz, shape.quantum_frames)
+        } else {
+            options.source_ring_frames
+        };
+        if source_ring_frames < shape.quantum_frames
+            || !source_ring_frames.is_multiple_of(shape.quantum_frames)
+        {
+            return Err(BootFailure::fixed(
+                RESULT_REFUSED_OPTIONS,
+                "web.options.source_ring_frames",
+            ));
+        }
+        let projection = project_buffers(
+            document_bytes,
+            shape.sample_rate_hz,
+            shape.quantum_frames,
+            shape.maximum_source_channels,
+            shape.longest_source_id_bytes,
+            options,
+        )?;
+        let retained_projection = projected_retained_bytes(
+            &session,
+            source_ring_frames,
+            projection.report.bridge_retained_bytes,
+        )?;
+        if retained_projection > memory_budget {
+            return Err(BootFailure::budget(
+                "host.budget.retained_projection",
+                retained_projection,
+                memory_budget,
+            ));
+        }
+        let caps = prepare_caps(&session, options, source_ring_frames, memory_budget);
+        let (ready, resources) = compile_ready(session, &caps, options, projection.report)
+            .map_err(BootFailure::document)?;
+        let buffers = allocate_buffers(projection)?;
         let backend = selected_backend();
-        Self {
-            config,
+        Ok(Self {
+            options,
             status: WebStatus {
                 struct_size: STATUS_BYTES,
                 abi_version: ABI_VERSION,
-                state: STATE_CONFIG,
+                state: STATE_READY,
                 last_result: RESULT_OK,
                 backend,
-                sample_rate_hz: 0,
-                quantum_frames: 0,
+                sample_rate_hz: shape.sample_rate_hz,
+                quantum_frames: shape.quantum_frames,
                 reserved0: 0,
                 next_absolute_sample: 0,
                 rendered_quanta: 0,
                 reserved: [0; 4],
             },
-            resources: empty_resource_report(backend),
+            resources,
             command_report: empty_command_report(),
             meter_lease: false,
-            buffers: None,
-            ready: None,
+            buffers: Some(buffers),
+            ready: Some(ready),
             diagnostic_len: 0,
-        }
+        })
     }
 
-    /// Read the immutable preparation configuration.
+    /// Read the immutable boot options.
     #[must_use]
-    pub const fn config(&self) -> &WebPrepareConfig {
-        &self.config
-    }
-
-    /// Mutably borrow configuration storage before preparation.
-    pub fn config_mut(&mut self) -> Option<&mut WebPrepareConfig> {
-        (self.status.state == STATE_CONFIG).then_some(&mut self.config)
+    pub const fn options(&self) -> &WebBootOptions {
+        &self.options
     }
 
     /// Read fixed status without allocation.
@@ -1020,29 +1046,6 @@ impl AudioWorkletEngineHost {
         self.record(RESULT_OK)
     }
 
-    /// Allocate and publish every fixed staging buffer transactionally.
-    pub fn prepare(&mut self) -> u32 {
-        if self.status.state != STATE_CONFIG {
-            return self.record(RESULT_WRONG_STATE);
-        }
-        let result = prepare_buffers(self.config);
-        let (buffers, report) = match result {
-            Ok(value) => value,
-            Err(code) => return self.record(code),
-        };
-        self.buffers = Some(buffers);
-        self.resources = report;
-        self.status.state = STATE_PREPARED;
-        self.status.sample_rate_hz = self.config.sample_rate_hz;
-        self.status.quantum_frames = self.config.quantum_frames;
-        self.record(RESULT_OK)
-    }
-
-    /// Mutable session TOML staging storage, available only after preparation.
-    pub fn session_toml_mut(&mut self) -> Option<&mut [u8]> {
-        self.buffers.as_mut().map(|value| &mut *value.session_toml)
-    }
-
     /// Mutable source-ID staging storage, available only after preparation.
     pub fn source_id_mut(&mut self) -> Option<&mut [u8]> {
         self.buffers.as_mut().map(|value| &mut *value.source_id)
@@ -1154,33 +1157,6 @@ impl AudioWorkletEngineHost {
         })
     }
 
-    /// Parse, compile and atomically publish one immutable session and plan.
-    pub fn compile(&mut self, toml_bytes: usize) -> u32 {
-        if self.status.state != STATE_PREPARED {
-            return self.record(RESULT_WRONG_STATE);
-        }
-        let Some(buffers) = self.buffers.as_ref() else {
-            return self.fail(RESULT_INTERNAL, b"web.internal.buffers\t$\n");
-        };
-        let Some(bytes) = buffers.session_toml.get(..toml_bytes) else {
-            return self.record(RESULT_BUFFER_TOO_SMALL);
-        };
-        let toml = match core::str::from_utf8(bytes) {
-            Ok(value) => value,
-            Err(_) => return self.fail(RESULT_INVALID_ARGUMENT, b"web.toml.utf8\t$\n"),
-        };
-        match compile_ready(toml, self.config, self.resources) {
-            Ok((ready, resources)) => {
-                self.ready = Some(ready);
-                self.resources = resources;
-                self.diagnostic_len = 0;
-                self.status.state = STATE_READY;
-                self.record(RESULT_OK)
-            }
-            Err(failure) => self.fail(RESULT_PREPARE_REJECTED, &failure),
-        }
-    }
-
     /// Submit one generation-tagged, exact-rate borrowed planar source chunk.
     ///
     /// The host owns two rules: the `STATE_READY` gate, and the staging-shaped bound
@@ -1204,7 +1180,7 @@ impl AudioWorkletEngineHost {
         if self.status.state != STATE_READY {
             return self.record(RESULT_WRONG_STATE);
         }
-        if frames > self.config.quantum_frames {
+        if frames > self.status.quantum_frames {
             return self.record(RESULT_INVALID_ARGUMENT);
         }
         let Some(ready) = self.ready.as_mut() else {
@@ -1250,7 +1226,7 @@ impl AudioWorkletEngineHost {
         }
         // Lossless on every supported target (wasm32 and every 64-bit host); `try_from` would
         // leave an `expect_failed` trap owner in the render export's call graph.
-        let quantum = self.config.quantum_frames as usize;
+        let quantum = self.status.quantum_frames as usize;
         let Some(ready) = self.ready.as_mut() else {
             return self.fail(RESULT_INTERNAL, b"web.internal.ready\t$\n");
         };
@@ -1546,7 +1522,7 @@ impl AudioWorkletEngineHost {
         if self.status.state != STATE_READY {
             return self.record(RESULT_WRONG_STATE);
         }
-        if actual_frames == self.config.quantum_frames {
+        if actual_frames == self.status.quantum_frames {
             return self.record(RESULT_OK);
         }
         self.status.state = STATE_FAILED;
@@ -2297,7 +2273,7 @@ const fn empty_resource_report(backend: u32) -> WebResourceReport {
         quantum_frames: 0,
         backend,
         reserved0: [0; 3],
-        config_bytes: size_of::<WebPrepareConfig>() as u64,
+        options_bytes: size_of::<WebBootOptions>() as u64,
         status_bytes: size_of::<WebStatus>() as u64,
         session_toml_bytes: 0,
         diagnostic_bytes: 0,
@@ -2322,146 +2298,228 @@ const fn empty_resource_report(backend: u32) -> WebResourceReport {
     }
 }
 
-fn prepare_buffers(config: WebPrepareConfig) -> Result<(PreparedBuffers, WebResourceReport), u32> {
-    validate_config(config)?;
-    let source_samples = checked_product([
-        u64::from(config.maximum_source_channels),
-        u64::from(config.quantum_frames),
-    ])?;
-    let source_pcm_bytes = source_samples
-        .checked_mul(4)
-        .ok_or(RESULT_PREPARE_REJECTED)?;
-    let output_pcm_bytes = u64::from(config.quantum_frames)
+/// One typed boot refusal. The FFI copies its bounded diagnostic over the staged document prefix.
+#[derive(Debug, Eq, PartialEq)]
+pub struct BootFailure {
+    result: u32,
+    diagnostic: Vec<u8>,
+}
+
+impl BootFailure {
+    /// Frozen boot result code.
+    #[must_use]
+    pub const fn result(&self) -> u32 {
+        self.result
+    }
+
+    /// `code\tpath\n` diagnostic bytes.
+    #[must_use]
+    pub fn diagnostic(&self) -> &[u8] {
+        &self.diagnostic
+    }
+
+    fn fixed(result: u32, code: &str) -> Self {
+        Self {
+            result,
+            diagnostic: fixed_diagnostic(code),
+        }
+    }
+
+    fn document(diagnostic: Vec<u8>) -> Self {
+        Self {
+            result: RESULT_REFUSED_DOCUMENT,
+            diagnostic,
+        }
+    }
+
+    fn budget(code: &str, projected: u64, budget: u64) -> Self {
+        Self {
+            result: RESULT_REFUSED_BUDGET,
+            diagnostic: format!(
+                "{code}\t$.maximum_memory_bytes[projected_bytes={projected},budget_bytes={budget}]\n"
+            )
+            .into_bytes(),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct PreparedBufferProjection {
+    source_samples: u64,
+    command_records: u32,
+    report: WebResourceReport,
+}
+
+fn project_buffers(
+    document_bytes: u32,
+    sample_rate_hz: u32,
+    quantum_frames: u32,
+    maximum_source_channels: u32,
+    longest_source_id_bytes: u64,
+    options: WebBootOptions,
+) -> Result<PreparedBufferProjection, BootFailure> {
+    let arithmetic = || BootFailure::fixed(RESULT_REFUSED_BUDGET, "host.budget.arithmetic");
+    let source_samples = u64::from(maximum_source_channels)
+        .checked_mul(u64::from(quantum_frames))
+        .ok_or_else(arithmetic)?;
+    let source_pcm_bytes = source_samples.checked_mul(4).ok_or_else(arithmetic)?;
+    let output_pcm_bytes = u64::from(quantum_frames)
         .checked_mul(8)
-        .ok_or(RESULT_PREPARE_REJECTED)?;
-    let command_records = if config.console_command_queue_records == 0 {
+        .ok_or_else(arithmetic)?;
+    let command_records = if options.console_command_queue_records == 0 {
         0
     } else {
         MAXIMUM_COMMAND_RECORDS
     };
     let command_bytes = u64::from(command_records)
         .checked_mul(u64::from(COMMAND_RECORD_BYTES))
-        .ok_or(RESULT_PREPARE_REJECTED)?;
-    let plane_reference_bytes = u64::from(config.maximum_source_channels)
+        .ok_or_else(arithmetic)?;
+    let plane_reference_bytes = u64::from(maximum_source_channels)
         .checked_mul(size_of::<&[f32]>() as u64)
-        .ok_or(RESULT_PREPARE_REJECTED)?;
+        .ok_or_else(arithmetic)?;
     let host_shell_bytes =
-        u64::try_from(size_of::<AudioWorkletEngineHost>()).map_err(|_| RESULT_PREPARE_REJECTED)?;
+        u64::try_from(size_of::<AudioWorkletEngineHost>()).map_err(|_| arithmetic())?;
     let fixed_metadata = host_shell_bytes
-        .checked_sub(u64::from(PREPARE_CONFIG_BYTES) + u64::from(STATUS_BYTES))
-        .ok_or(RESULT_INTERNAL)?;
+        .checked_sub(u64::from(BOOT_OPTIONS_BYTES) + u64::from(STATUS_BYTES))
+        .ok_or_else(arithmetic)?;
     let bridge_metadata = fixed_metadata
         .checked_add(plane_reference_bytes)
-        .ok_or(RESULT_PREPARE_REJECTED)?;
+        .ok_or_else(arithmetic)?;
     let rows = [
-        u64::from(PREPARE_CONFIG_BYTES),
+        u64::from(BOOT_OPTIONS_BYTES),
         u64::from(STATUS_BYTES),
-        u64::from(config.session_toml_bytes),
-        u64::from(config.diagnostic_bytes),
-        u64::from(config.source_id_bytes),
+        u64::from(document_bytes),
+        u64::from(DIAGNOSTIC_BYTES),
+        longest_source_id_bytes,
         source_pcm_bytes,
         output_pcm_bytes,
         command_bytes,
         bridge_metadata,
     ];
-    let retained = checked_sum(rows)?;
+    let retained = rows.into_iter().try_fold(0_u64, |total, row| {
+        total.checked_add(row).ok_or_else(arithmetic)
+    })?;
     let largest = rows
         .into_iter()
         .max()
         .unwrap_or(0)
         .max(host_shell_bytes)
         .max(plane_reference_bytes);
-    if retained > config.maximum_host_retained_bytes
-        || largest > config.maximum_named_allocation_bytes
-    {
-        return Err(RESULT_PREPARE_REJECTED);
-    }
-    let buffers = PreparedBuffers {
-        session_toml: boxed_zero_u8(config.session_toml_bytes)?,
-        diagnostic: boxed_zero_u8(config.diagnostic_bytes)?,
-        source_id: boxed_zero_u8(config.source_id_bytes)?,
-        source_pcm: boxed_zero_f32(source_samples)?,
-        output_pcm: boxed_zero_f32(u64::from(config.quantum_frames) * 2)?,
-        command: boxed_zero_u8(command_records * COMMAND_RECORD_BYTES)?,
-        plane_references: boxed_uninit_planes(config.maximum_source_channels)?,
-    };
     let mut report = empty_resource_report(selected_backend());
-    report.sample_rate_hz = config.sample_rate_hz;
-    report.quantum_frames = config.quantum_frames;
-    report.session_toml_bytes = u64::from(config.session_toml_bytes);
-    report.diagnostic_bytes = u64::from(config.diagnostic_bytes);
-    report.source_id_bytes = u64::from(config.source_id_bytes);
+    report.sample_rate_hz = sample_rate_hz;
+    report.quantum_frames = quantum_frames;
+    report.session_toml_bytes = u64::from(document_bytes);
+    report.diagnostic_bytes = u64::from(DIAGNOSTIC_BYTES);
+    report.source_id_bytes = longest_source_id_bytes;
     report.source_pcm_staging_bytes = source_pcm_bytes;
     report.output_pcm_bytes = output_pcm_bytes;
     report.bridge_metadata_bytes = bridge_metadata;
     report.bridge_retained_bytes = retained;
     report.largest_bridge_allocation_bytes = largest;
     report.largest_named_allocation_bytes = largest;
-    Ok((buffers, report))
+    Ok(PreparedBufferProjection {
+        source_samples,
+        command_records,
+        report,
+    })
 }
 
-fn validate_config(config: WebPrepareConfig) -> Result<(), u32> {
-    if config.struct_size != PREPARE_CONFIG_BYTES || config.abi_version != ABI_VERSION {
-        return Err(RESULT_ABI_MISMATCH);
+fn allocate_buffers(projection: PreparedBufferProjection) -> Result<PreparedBuffers, BootFailure> {
+    let allocation = |_| BootFailure::fixed(RESULT_REFUSED_BUDGET, "web.resource.allocation");
+    Ok(PreparedBuffers {
+        diagnostic: boxed_zero_u8(DIAGNOSTIC_BYTES).map_err(allocation)?,
+        source_id: boxed_zero_u8(
+            u32::try_from(projection.report.source_id_bytes)
+                .map_err(|_| BootFailure::fixed(RESULT_REFUSED_BUDGET, "web.resource.platform"))?,
+        )
+        .map_err(allocation)?,
+        source_pcm: boxed_zero_f32(projection.source_samples).map_err(allocation)?,
+        output_pcm: boxed_zero_f32(u64::from(projection.report.quantum_frames) * 2)
+            .map_err(allocation)?,
+        command: boxed_zero_u8(projection.command_records * COMMAND_RECORD_BYTES)
+            .map_err(allocation)?,
+        plane_references: boxed_uninit_planes(
+            u32::try_from(projection.source_samples / u64::from(projection.report.quantum_frames))
+                .map_err(|_| BootFailure::fixed(RESULT_REFUSED_BUDGET, "web.resource.platform"))?,
+        )
+        .map_err(allocation)?,
+    })
+}
+
+fn validate_options(mut options: WebBootOptions) -> Result<WebBootOptions, BootFailure> {
+    if options.struct_size == 0 && options.abi_version == 0 {
+        options.struct_size = BOOT_OPTIONS_BYTES;
+        options.abi_version = ABI_VERSION;
+    } else if options.struct_size != BOOT_OPTIONS_BYTES {
+        return Err(BootFailure::fixed(
+            RESULT_REFUSED_OPTIONS,
+            "web.options.struct_size",
+        ));
+    } else if options.abi_version != ABI_VERSION {
+        return Err(BootFailure::fixed(
+            RESULT_REFUSED_OPTIONS,
+            "web.options.abi_version",
+        ));
     }
     // Issue #143: observation capacity requires a command queue to carry the subscription, and a
     // master designation must be a plausible track index. The session-level range check is the
     // facade's; this one only refuses what cannot be a track index at all.
-    if config.console_observation_taps > u64::from(MAXIMUM_OBSERVATION_TAPS)
-        || (config.console_observation_taps != 0 && config.console_command_queue_records == 0)
-        || config.console_master_track_plus_one > u64::from(u32::MAX)
-        || (config.console_master_track_plus_one != 0 && config.console_observation_taps == 0)
-        || config.console_command_queue_records > u64::from(MAXIMUM_COMMAND_RECORDS)
-        || config.console_meter_blocks > u64::from(u32::MAX)
-        || !matches!(config.sample_rate_hz, 44_100 | 48_000 | 88_200 | 96_000)
-        || config.quantum_frames == 0
-        || config.session_toml_bytes == 0
-        || config.diagnostic_bytes == 0
-        || config.source_id_bytes == 0
-        || config.maximum_source_channels == 0
-        || config.source_ring_frames < config.quantum_frames
-        || !config
-            .source_ring_frames
-            .is_multiple_of(config.quantum_frames)
-        || config.maximum_automation_spans_per_block == 0
+    if options.reserved0 != 0 {
+        return Err(BootFailure::fixed(
+            RESULT_REFUSED_OPTIONS,
+            "web.options.reserved0",
+        ));
+    }
+    if options.console_observation_taps > u64::from(MAXIMUM_OBSERVATION_TAPS)
+        || (options.console_observation_taps != 0 && options.console_command_queue_records == 0)
+        || options.console_master_track_plus_one > u64::from(u32::MAX)
+        || (options.console_master_track_plus_one != 0 && options.console_observation_taps == 0)
+        || options.console_command_queue_records > u64::from(MAXIMUM_COMMAND_RECORDS)
+        || options.console_meter_blocks > u64::from(u32::MAX)
     {
-        return Err(RESULT_INVALID_ARGUMENT);
+        return Err(BootFailure::fixed(
+            RESULT_REFUSED_OPTIONS,
+            "web.options.console",
+        ));
     }
-    let limits = [
-        config.maximum_tracks,
-        config.maximum_sources,
-        config.maximum_routes,
-        config.maximum_effects,
-        config.maximum_graph_session_plus_plan_bytes,
-        config.maximum_source_total_bytes,
-        config.maximum_source_overhead_bytes,
-        config.maximum_effect_state_bytes,
-        config.maximum_effect_scratch_bytes,
-        config.maximum_builtin_retained_bytes,
-        config.maximum_host_retained_bytes,
-        config.maximum_named_allocation_bytes,
-        config.maximum_meter_streams,
-        config.maximum_meter_items,
-        config.maximum_meter_bytes,
-    ];
-    if limits
-        .into_iter()
-        .any(|value| value == 0 || value > u64::from(u32::MAX))
-    {
-        return Err(RESULT_INVALID_ARGUMENT);
-    }
-    let source_bytes = checked_product([
-        u64::from(config.maximum_source_channels),
-        u64::from(config.quantum_frames),
-        4,
-    ])?;
-    let output_bytes = u64::from(config.quantum_frames)
-        .checked_mul(8)
-        .ok_or(RESULT_PREPARE_REJECTED)?;
-    if source_bytes > i32::MAX as u64 || output_bytes > i32::MAX as u64 {
-        return Err(RESULT_INVALID_ARGUMENT);
-    }
-    Ok(())
+    Ok(options)
+}
+
+/// Project all retained declaration/runtime bytes whose allocation shape is known after compile.
+///
+/// The compiled-model row is the session estimator's post-canonical exact row. The runtime row is
+/// re-derived from the ring boot actually chose rather than the soon-to-be-removed document limits
+/// word. Bridge storage is the exact layout projection above. Preparation's graph/effect/builtin
+/// subcompilers receive this same total budget and retain their existing checked pre-allocation
+/// estimators, so no structural count ceiling is introduced here.
+fn projected_retained_bytes(
+    compiled: &CompiledSession,
+    source_ring_frames: u32,
+    bridge_retained_bytes: u64,
+) -> Result<u64, BootFailure> {
+    let arithmetic = || BootFailure::fixed(RESULT_REFUSED_BUDGET, "host.budget.arithmetic");
+    let source_ring_bytes = compiled
+        .normalized_model()
+        .sources
+        .iter()
+        .try_fold(0_u64, |total, source| {
+            let bytes = u64::from(source_ring_frames)
+                .checked_mul(u64::from(source.mapping.channel_count))?
+                .checked_mul(size_of::<f32>() as u64)?;
+            total.checked_add(bytes)
+        })
+        .ok_or_else(arithmetic)?;
+    let estimate = compiled.resource_estimate();
+    [
+        bridge_retained_bytes,
+        estimate.compiled_model_bytes,
+        estimate.queue_bytes,
+        source_ring_bytes,
+    ]
+    .into_iter()
+    .try_fold(0_u64, |total, row| {
+        total.checked_add(row).ok_or_else(arithmetic)
+    })
 }
 
 /// Map the facade's one typed source rejection onto the frozen browser result codes.
@@ -2479,34 +2537,59 @@ fn source_result(error: SourceControlError) -> u32 {
     }
 }
 
-/// Translate the frozen browser configuration into the facade's caps, field for field.
+/// Translate document-derived shape plus host policy into the shared preparation caps.
 ///
-/// This is the only place the mapping is spelled. `HostShapePolicy::Exact`: unlike the C ABI host,
-/// the browser host is handed its `AudioContext` rate and the caller's quantum and must refuse any
-/// session that declares anything else -- there is no resampler and no requantiser.
-const fn prepare_caps(config: WebPrepareConfig) -> HostPrepareCaps {
+/// Count ceilings are intentionally unbounded: boot v2 has one physics gate, not structural caps.
+/// Byte ceilings are the same effective memory budget, so every subsystem retains its own checked
+/// pre-allocation arithmetic while the aggregate projection is checked before preparation starts.
+fn prepare_caps(
+    compiled: &CompiledSession,
+    options: WebBootOptions,
+    source_ring_frames: u32,
+    memory_budget: u64,
+) -> HostPrepareCaps {
+    let sample_rate_hz = if options.require_sample_rate_hz == 0 {
+        compiled.sample_rate().0
+    } else {
+        options.require_sample_rate_hz
+    };
+    let quantum_frames = if options.require_quantum_frames == 0 {
+        compiled.quantum().0
+    } else {
+        options.require_quantum_frames
+    };
+    let automation_spans = compiled
+        .normalized_model()
+        .automation
+        .iter()
+        .try_fold(0_u32, |total, lane| {
+            total.checked_add(u32::try_from(lane.segments.len()).ok()?)
+        })
+        .unwrap_or(u32::MAX)
+        .max(u32::try_from(options.console_command_queue_records).unwrap_or(u32::MAX))
+        .max(1);
     HostPrepareCaps {
         shape: HostShapePolicy::Exact {
-            sample_rate_hz: config.sample_rate_hz,
-            quantum_frames: config.quantum_frames,
+            sample_rate_hz,
+            quantum_frames,
         },
-        source_ring_frames: config.source_ring_frames,
-        maximum_source_channels: Some(config.maximum_source_channels),
-        maximum_automation_spans_per_block: config.maximum_automation_spans_per_block,
-        maximum_tracks: config.maximum_tracks,
-        maximum_sources: config.maximum_sources,
-        maximum_routes: config.maximum_routes,
-        maximum_effects: config.maximum_effects,
-        maximum_graph_session_plus_plan_bytes: config.maximum_graph_session_plus_plan_bytes,
-        maximum_source_total_bytes: config.maximum_source_total_bytes,
-        maximum_source_overhead_bytes: config.maximum_source_overhead_bytes,
-        maximum_effect_state_bytes: config.maximum_effect_state_bytes,
-        maximum_effect_scratch_bytes: config.maximum_effect_scratch_bytes,
-        maximum_builtin_retained_bytes: config.maximum_builtin_retained_bytes,
-        maximum_named_allocation_bytes: config.maximum_named_allocation_bytes,
-        maximum_meter_streams: config.maximum_meter_streams,
-        maximum_meter_items: config.maximum_meter_items,
-        maximum_meter_bytes: config.maximum_meter_bytes,
+        source_ring_frames,
+        maximum_source_channels: None,
+        maximum_automation_spans_per_block: automation_spans,
+        maximum_tracks: u64::MAX,
+        maximum_sources: u64::MAX,
+        maximum_routes: u64::MAX,
+        maximum_effects: u64::MAX,
+        maximum_graph_session_plus_plan_bytes: memory_budget,
+        maximum_source_total_bytes: memory_budget,
+        maximum_source_overhead_bytes: memory_budget,
+        maximum_effect_state_bytes: memory_budget,
+        maximum_effect_scratch_bytes: memory_budget,
+        maximum_builtin_retained_bytes: memory_budget,
+        maximum_named_allocation_bytes: memory_budget,
+        maximum_meter_streams: u64::MAX,
+        maximum_meter_items: u64::MAX,
+        maximum_meter_bytes: memory_budget,
     }
 }
 
@@ -2517,21 +2600,16 @@ const fn prepare_caps(config: WebPrepareConfig) -> HostPrepareCaps {
 /// host shell, the plane-reference table) were already computed by `prepare_buffers`, and the three
 /// browser caps are applied here because they are the *browser's* caps on the shared report.
 fn compile_ready(
-    toml: &str,
-    config: WebPrepareConfig,
+    session: CompiledSession,
+    caps: &HostPrepareCaps,
+    options: WebBootOptions,
     mut report: WebResourceReport,
 ) -> Result<(ReadyOwnership, WebResourceReport), Vec<u8>> {
-    let caps = prepare_caps(config);
-    let console = console_request(config).ok_or_else(|| fixed_diagnostic("web.console.config"))?;
-    let (session, host, handles) = prepare_host_session_with_console(toml, &caps, &console)
+    let console = console_request(options, session.quantum().0)
+        .ok_or_else(|| fixed_diagnostic("web.console.config"))?;
+    let (host, handles) = prepare_host_runtime_with_console(&session, caps, &console)
         .map_err(|value| value.into_bytes())?;
     let engine = host.report;
-
-    // Browser-only: every source ID must fit the fixed staging buffer JavaScript writes it into.
-    // The facade has no such buffer, so this rule stays the host's.
-    if host.sources.longest_id_bytes() > config.source_id_bytes as usize {
-        return Err(fixed_diagnostic("web.source.id.capacity"));
-    }
 
     let control_table = control_table_bytes(engine.source_count as usize)
         .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))?;
@@ -2555,12 +2633,6 @@ fn compile_ready(
         .max(id_arena)
         .max(engine.session_largest_allocation_bytes);
     let largest_named = bridge_largest.max(engine.largest_engine_allocation_bytes);
-    if bridge_retained > config.maximum_host_retained_bytes
-        || largest_named > config.maximum_named_allocation_bytes
-    {
-        return Err(fixed_diagnostic("web.resource.limit"));
-    }
-
     report.bridge_metadata_bytes = bridge_metadata;
     report.bridge_retained_bytes = bridge_retained;
     report.largest_bridge_allocation_bytes = bridge_largest;
@@ -2725,16 +2797,16 @@ fn compile_ready(
 ///
 /// `console_meter_blocks == 0` is the honest form of "metering off": no observer is bound, so the
 /// render path folds nothing at all. The port lease is a second, finer switch over posting.
-fn console_request(config: WebPrepareConfig) -> Option<HostConsoleRequest> {
-    let control_queue_depth = match config.console_command_queue_records {
+fn console_request(options: WebBootOptions, quantum_frames: u32) -> Option<HostConsoleRequest> {
+    let control_queue_depth = match options.console_command_queue_records {
         0 => None,
         records => Some(NonZeroUsize::new(u32::try_from(records).ok()? as usize)?),
     };
-    let meter_period_frames = if config.console_meter_blocks == 0 {
+    let meter_period_frames = if options.console_meter_blocks == 0 {
         None
     } else {
-        let blocks = u32::try_from(config.console_meter_blocks).ok()?;
-        Some(NonZeroU32::new(blocks.checked_mul(config.quantum_frames)?)?)
+        let blocks = u32::try_from(options.console_meter_blocks).ok()?;
+        Some(NonZeroU32::new(blocks.checked_mul(quantum_frames)?)?)
     };
     Some(HostConsoleRequest {
         control_queue_depth,
@@ -2743,8 +2815,8 @@ fn console_request(config: WebPrepareConfig) -> Option<HostConsoleRequest> {
         meter_queue_depth: NonZeroUsize::new(8)?,
         meter_tap: MeterTap::PostMatrix,
         // Issue #143 D3/D6: both are carved browser configuration words, translated once, here.
-        observation_taps: u32::try_from(config.console_observation_taps).ok()?,
-        master_track: match config.console_master_track_plus_one {
+        observation_taps: u32::try_from(options.console_observation_taps).ok()?,
+        master_track: match options.console_master_track_plus_one {
             0 => None,
             value => Some(u32::try_from(value.checked_sub(1)?).ok()?),
         },
@@ -2811,23 +2883,11 @@ fn fixed_diagnostic(code: &str) -> Vec<u8> {
     miso_engine_host_core::fixed_diagnostic_line(code)
 }
 
-fn checked_sum(values: impl IntoIterator<Item = u64>) -> Result<u64, u32> {
-    values.into_iter().try_fold(0_u64, |total, value| {
-        total.checked_add(value).ok_or(RESULT_PREPARE_REJECTED)
-    })
-}
-
 fn checked_sum_prepare(values: impl IntoIterator<Item = u64>) -> Result<u64, Vec<u8>> {
     values.into_iter().try_fold(0_u64, |total, value| {
         total
             .checked_add(value)
             .ok_or_else(|| fixed_diagnostic("web.resource.arithmetic"))
-    })
-}
-
-fn checked_product<const N: usize>(values: [u64; N]) -> Result<u64, u32> {
-    values.into_iter().try_fold(1_u64, |total, value| {
-        total.checked_mul(value).ok_or(RESULT_PREPARE_REJECTED)
     })
 }
 

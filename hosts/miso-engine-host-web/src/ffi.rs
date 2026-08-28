@@ -15,9 +15,9 @@
 
 use crate::{
     ABI_VERSION, AudioWorkletEngineHost, BUFFER_COMMAND, BUFFER_DIAGNOSTIC, BUFFER_METER_FRAME,
-    BUFFER_OUTPUT_PCM, BUFFER_SESSION_TOML, BUFFER_SOURCE_ID, BUFFER_SOURCE_PCM,
-    PREPARE_CONFIG_BYTES, RESULT_INTERNAL, RESULT_INVALID_ARGUMENT, RESULT_OK, STATE_READY,
-    WebPrepareConfig,
+    BUFFER_OUTPUT_PCM, BUFFER_SOURCE_ID, BUFFER_SOURCE_PCM, BootFailure, MAXIMUM_DOCUMENT_BYTES,
+    RESULT_INTERNAL, RESULT_INVALID_ARGUMENT, RESULT_OK, RESULT_REFUSED_BUDGET,
+    RESULT_REFUSED_DOCUMENT, RESULT_REFUSED_LIFECYCLE, STATE_READY, WebBootOptions,
 };
 use core::{
     cell::{Cell, RefCell},
@@ -30,9 +30,46 @@ struct LiveHost {
     host: Box<AudioWorkletEngineHost>,
 }
 
+struct BootStaging {
+    options: Box<WebBootOptions>,
+    document: Vec<u8>,
+    result: u32,
+    diagnostic_bytes: u32,
+    document_valid: bool,
+}
+
+impl BootStaging {
+    fn new() -> Self {
+        Self {
+            options: Box::new(WebBootOptions::default()),
+            document: Vec::new(),
+            result: RESULT_OK,
+            diagnostic_bytes: 0,
+            document_valid: false,
+        }
+    }
+
+    fn record_failure(&mut self, failure: BootFailure) {
+        self.result = failure.result();
+        let length = failure.diagnostic().len().min(self.document.len());
+        self.document[..length].copy_from_slice(&failure.diagnostic()[..length]);
+        self.diagnostic_bytes = u32::try_from(length).unwrap_or(0);
+        self.document_valid = false;
+    }
+
+    fn reset_after_dispose(&mut self) {
+        *self.options = WebBootOptions::default();
+        self.document = Vec::new();
+        self.result = RESULT_OK;
+        self.diagnostic_bytes = 0;
+        self.document_valid = false;
+    }
+}
+
 thread_local! {
     static LIVE_HOST: RefCell<Option<LiveHost>> = const { RefCell::new(None) };
     static NEXT_HANDLE: Cell<u32> = const { Cell::new(1) };
+    static BOOT_STAGING: RefCell<BootStaging> = RefCell::new(BootStaging::new());
 }
 
 fn next_handle() -> u32 {
@@ -87,9 +124,6 @@ fn pointer_u32<T>(pointer: *const T) -> u32 {
 
 fn buffer_pointer(host: &mut AudioWorkletEngineHost, kind: u32) -> *mut u8 {
     match kind {
-        BUFFER_SESSION_TOML => host
-            .session_toml_mut()
-            .map_or(ptr::null_mut(), <[u8]>::as_mut_ptr),
         BUFFER_SOURCE_ID => host
             .source_id_mut()
             .map_or(ptr::null_mut(), <[u8]>::as_mut_ptr),
@@ -120,7 +154,6 @@ fn buffer_pointer(host: &mut AudioWorkletEngineHost, kind: u32) -> *mut u8 {
 fn buffer_capacity(host: &AudioWorkletEngineHost, kind: u32) -> u32 {
     let resources = host.resources();
     let bytes = match kind {
-        BUFFER_SESSION_TOML => resources.session_toml_bytes,
         BUFFER_SOURCE_ID => resources.source_id_bytes,
         BUFFER_SOURCE_PCM => resources.source_pcm_staging_bytes,
         BUFFER_DIAGNOSTIC => resources.diagnostic_bytes,
@@ -138,50 +171,52 @@ pub extern "C" fn miso_engine_web_v1_abi_version() -> u32 {
     ABI_VERSION
 }
 
-/// Allocate the sole configuration handle, or return zero while another handle is live.
+/// Return the module-owned, zero-default boot-options address.
 #[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_web_v1_config_new() -> u32 {
-    LIVE_HOST.with(|slot| {
-        let Ok(mut slot) = slot.try_borrow_mut() else {
+pub extern "C" fn miso_engine_web_v1_boot_options_ptr() -> u32 {
+    BOOT_STAGING.with(|staging| {
+        let Ok(mut staging) = staging.try_borrow_mut() else {
             return 0;
         };
-        if slot.is_some() {
+        pointer_u32(ptr::from_mut(&mut *staging.options))
+    })
+}
+
+/// Stage an exact-length document before boot. Refuses lengths above the engine bound.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_document_ptr(len: u32) -> u32 {
+    let live = LIVE_HOST.with(|slot| slot.try_borrow().map_or(true, |slot| slot.is_some()));
+    BOOT_STAGING.with(|staging| {
+        let Ok(mut staging) = staging.try_borrow_mut() else {
+            return 0;
+        };
+        if live {
+            staging.result = RESULT_REFUSED_LIFECYCLE;
+            staging.diagnostic_bytes = 0;
+            staging.document_valid = false;
             return 0;
         }
-        let handle = next_handle();
-        *slot = Some(LiveHost {
-            handle,
-            host: Box::new(AudioWorkletEngineHost::new(
-                WebPrepareConfig::launch_defaults(48_000, 128),
-            )),
-        });
-        handle
+        if len > MAXIMUM_DOCUMENT_BYTES {
+            staging.result = RESULT_REFUSED_DOCUMENT;
+            staging.diagnostic_bytes = 0;
+            staging.document_valid = false;
+            return 0;
+        }
+        let count = len as usize;
+        let mut document = Vec::new();
+        if document.try_reserve_exact(count).is_err() {
+            staging.result = RESULT_REFUSED_BUDGET;
+            staging.diagnostic_bytes = 0;
+            staging.document_valid = false;
+            return 0;
+        }
+        document.resize(count, 0);
+        staging.document = document;
+        staging.result = RESULT_OK;
+        staging.diagnostic_bytes = 0;
+        staging.document_valid = true;
+        pointer_u32(staging.document.as_mut_ptr())
     })
-}
-
-/// Return the mutable configuration address while the handle is in config state.
-#[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_web_v1_config_ptr(handle: u32) -> u32 {
-    with_host_mut(handle, 0, |host| {
-        host.config_mut()
-            .map_or(0, |config| pointer_u32(ptr::from_mut(config)))
-    })
-}
-
-/// Return the exact frozen configuration byte size.
-#[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_web_v1_config_bytes() -> u32 {
-    PREPARE_CONFIG_BYTES
-}
-
-/// Validate configuration and allocate all fixed staging storage.
-#[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_web_v1_prepare(handle: u32) -> u32 {
-    with_host_mut(
-        handle,
-        RESULT_INVALID_ARGUMENT,
-        AudioWorkletEngineHost::prepare,
-    )
 }
 
 /// Return one prepared stable staging-buffer address or zero.
@@ -196,11 +231,79 @@ pub extern "C" fn miso_engine_web_v1_buffer_capacity(handle: u32, kind: u32) -> 
     with_host(handle, 0, |host| buffer_capacity(host, kind))
 }
 
-/// Compile the staged strict TOML prefix and atomically publish session plus plan ownership.
+/// Boot the exact staged document and atomically publish the sole running handle.
 #[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_web_v1_compile(handle: u32, toml_bytes: u32) -> u32 {
-    with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
-        host.compile(toml_bytes as usize)
+pub extern "C" fn miso_engine_web_v1_boot(len: u32) -> u32 {
+    let already_live = LIVE_HOST.with(|slot| slot.try_borrow().map_or(true, |slot| slot.is_some()));
+    if already_live {
+        BOOT_STAGING.with(|staging| {
+            if let Ok(mut staging) = staging.try_borrow_mut() {
+                staging.result = RESULT_REFUSED_LIFECYCLE;
+                staging.diagnostic_bytes = 0;
+                staging.document_valid = false;
+            }
+        });
+        return 0;
+    }
+    let booted = BOOT_STAGING.with(|staging| {
+        let Ok(mut staging) = staging.try_borrow_mut() else {
+            return None;
+        };
+        if !staging.document_valid || staging.document.len() != len as usize {
+            staging.result = RESULT_REFUSED_DOCUMENT;
+            staging.diagnostic_bytes = 0;
+            staging.document_valid = false;
+            return None;
+        }
+        match AudioWorkletEngineHost::boot(&staging.document, *staging.options) {
+            Ok(host) => {
+                staging.result = RESULT_OK;
+                staging.diagnostic_bytes = 0;
+                staging.document_valid = false;
+                Some(host)
+            }
+            Err(failure) => {
+                staging.record_failure(failure);
+                None
+            }
+        }
+    });
+    let Some(host) = booted else {
+        return 0;
+    };
+    LIVE_HOST.with(|slot| {
+        let Ok(mut slot) = slot.try_borrow_mut() else {
+            return 0;
+        };
+        if slot.is_some() {
+            return 0;
+        }
+        let handle = next_handle();
+        *slot = Some(LiveHost {
+            handle,
+            host: Box::new(host),
+        });
+        handle
+    })
+}
+
+/// Return the frozen result code of the last boot attempt.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_boot_result() -> u32 {
+    BOOT_STAGING.with(|staging| {
+        staging
+            .try_borrow()
+            .map_or(RESULT_INTERNAL, |staging| staging.result)
+    })
+}
+
+/// Return the valid diagnostic prefix that replaced the refused staged document.
+#[unsafe(no_mangle)]
+pub extern "C" fn miso_engine_web_v1_boot_diagnostic_bytes() -> u32 {
+    BOOT_STAGING.with(|staging| {
+        staging
+            .try_borrow()
+            .map_or(0, |staging| staging.diagnostic_bytes)
     })
 }
 
@@ -223,11 +326,11 @@ pub extern "C" fn miso_engine_web_v1_source_submit(
                 host.submit_source(&[], 0, 0, 0, &[], 0, false)
             };
         }
-        let quantum = host.config().quantum_frames as usize;
+        let quantum = host.status().quantum_frames as usize;
         let channel_count = channels as usize;
         let frame_count = frames as usize;
         let id_count = source_id_bytes as usize;
-        let sample_rate = host.config().sample_rate_hz;
+        let sample_rate = host.status().sample_rate_hz;
         let Some((pcm, plane_slots, ids)) = host.ffi_source_staging_mut() else {
             return host.record_boundary_result(RESULT_INTERNAL);
         };
@@ -311,7 +414,7 @@ pub extern "C" fn miso_engine_web_v1_source_seek(
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_render(handle: u32, actual_frames: u32) -> u32 {
     with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
-        if host.status().state == STATE_READY && host.config().quantum_frames != actual_frames {
+        if host.status().state == STATE_READY && host.status().quantum_frames != actual_frames {
             return host.reject_output_quantum(actual_frames);
         }
         host.render_next()
@@ -516,26 +619,38 @@ pub extern "C" fn miso_engine_web_v1_dispose(handle: u32) -> u32 {
         };
         let result = live.host.dispose();
         drop(live);
+        BOOT_STAGING.with(|staging| {
+            if let Ok(mut staging) = staging.try_borrow_mut() {
+                staging.reset_after_dispose();
+            }
+        });
         result
     })
 }
 
 #[cfg(test)]
-pub(crate) fn test_configure(handle: u32, config: WebPrepareConfig) -> u32 {
-    with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
-        let Some(target) = host.config_mut() else {
-            return RESULT_INVALID_ARGUMENT;
-        };
-        *target = config;
-        RESULT_OK
+pub(crate) fn test_stage_document(bytes: &[u8]) {
+    BOOT_STAGING.with(|staging| {
+        let mut staging = staging.borrow_mut();
+        staging.document.clear();
+        staging.document.extend_from_slice(bytes);
+        staging.document_valid = true;
+        staging.result = RESULT_OK;
+        staging.diagnostic_bytes = 0;
     })
+}
+
+#[cfg(test)]
+pub(crate) fn test_boot(bytes: &[u8], options: WebBootOptions) -> u32 {
+    BOOT_STAGING.with(|staging| *staging.borrow_mut().options = options);
+    test_stage_document(bytes);
+    miso_engine_web_v1_boot(bytes.len() as u32)
 }
 
 #[cfg(test)]
 pub(crate) fn test_copy_staging(handle: u32, kind: u32, bytes: &[u8]) -> u32 {
     with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
         let target = match kind {
-            BUFFER_SESSION_TOML => host.session_toml_mut(),
             BUFFER_SOURCE_ID => host.source_id_mut(),
             _ => None,
         };
