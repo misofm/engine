@@ -33,29 +33,29 @@ use sha2::{Digest, Sha256};
 
 const MANIFEST_HEADER: &str = "path\tlength\tsha256\n";
 /// The checked graph fixture identity pinned by the two meter benchmark inputs.
-const GRAPH_TAP_PCM_SHA256_V1: &str =
+const GRAPH_TAP_PCM_SHA256: &str =
     "508c8e94244b99ae1ee59e4863088ba69c6462127eb0256f85ec72e775a17a19";
 const RATES: [u32; 4] = [44_100, 48_000, 88_200, 96_000];
 const QUANTA: [u32; 5] = [1, 127, 128, 255, 1_024];
-const CASE_COUNT_V1: usize = 1_652;
-const RESPONSE_CASE_COUNT_V1: usize = 1_630;
-const RESPONSE_ROW_COUNT_V1: usize = 1_630;
-const PCM_PAYLOAD_COUNT_V1: usize = 33;
-const BENCHMARK_RATES_V1: [u32; 2] = [48_000, 96_000];
-const BENCHMARK_KINDS_V1: [&str; 5] = [
+const CASE_COUNT: usize = 1_652;
+const RESPONSE_CASE_COUNT: usize = 1_630;
+const RESPONSE_ROW_COUNT: usize = 1_630;
+const PCM_PAYLOAD_COUNT: usize = 33;
+const BENCHMARK_RATES: [u32; 2] = [48_000, 96_000];
+const BENCHMARK_KINDS: [&str; 5] = [
     "full_chain_filters",
     "identity_chain",
     "matrix_ramp",
     "meter_success_full",
     "prepare_256_tracks",
 ];
-const RESPONSE_CAST_STATE_TOLERANCE_DB_V1: f64 = 0.005;
-const RESPONSE_IMPULSE_DFT_TOLERANCE_DB_V1: f64 = 0.05;
-const RESPONSE_FUNDAMENTAL_TOLERANCE_DB_V1: f64 = 0.05;
-const RESPONSE_RESIDUAL_LIMIT_DB_V1: f64 = -100.0;
-const RESPONSE_ATTENUATED_TOTAL_LIMIT_DB_V1: f64 = -88.0;
-const RESPONSE_RBJ_SERIALIZATION_TOLERANCE_DB_V1: f64 = 5e-12;
-const METADATA_V1: &str = concat!(
+const RESPONSE_CAST_STATE_TOLERANCE_DB: f64 = 0.005;
+const RESPONSE_IMPULSE_DFT_TOLERANCE_DB: f64 = 0.05;
+const RESPONSE_FUNDAMENTAL_TOLERANCE_DB: f64 = 0.05;
+const RESPONSE_RESIDUAL_LIMIT_DB: f64 = -100.0;
+const RESPONSE_ATTENUATED_TOTAL_LIMIT_DB: f64 = -88.0;
+const RESPONSE_RBJ_SERIALIZATION_TOLERANCE_DB: f64 = 5e-12;
+const METADATA: &str = concat!(
     "fixture_schema = 1\n",
     "producer = \"miso-engine-builtins-fixture\"\n",
     "production_pcm = \"miso-engine-builtins scalar f32, planar L then R\"\n",
@@ -64,7 +64,7 @@ const METADATA_V1: &str = concat!(
     "launch_rates_hz = [44100, 48000, 88200, 96000]\n",
     "quanta_frames = [1, 127, 128, 255, 1024]\n"
 );
-const FUNCTIONAL_CASES_V1: [(&str, &str, &str); 22] = [
+const FUNCTIONAL_CASES: [(&str, &str, &str); 22] = [
     (
         "identity-signed-zero",
         "pcm",
@@ -100,8 +100,8 @@ const FUNCTIONAL_CASES_V1: [(&str, &str, &str); 22] = [
         "tracks=1,4,65537; meters=0,1,7",
     ),
 ];
-const PCM_INPUT_LEFT_V1: [f32; 8] = [0.0, -0.0, 0.25, -0.5, 1.0, -1.0, 0.125, -0.25];
-const PCM_INPUT_RIGHT_V1: [f32; 8] = [-0.0, 0.0, -0.125, 0.5, -1.0, 1.0, -0.25, 0.25];
+const PCM_INPUT_LEFT: [f32; 8] = [0.0, -0.0, 0.25, -0.5, 1.0, -1.0, 0.125, -0.25];
+const PCM_INPUT_RIGHT: [f32; 8] = [-0.0, 0.0, -0.125, 0.5, -1.0, 1.0, -0.25, 0.25];
 
 pub(crate) fn main() {
     if let Err(error) = run(env::args().skip(1).collect()) {
@@ -113,7 +113,7 @@ pub(crate) fn main() {
 fn run(arguments: Vec<String>) -> Result<(), String> {
     match arguments.as_slice() {
         [mode, root] if mode == "--write" => write_and_verify(Path::new(root)),
-        [mode, root] if mode == "--check" => check_read_only_fixture_root_v1(Path::new(root)),
+        [mode, root] if mode == "--check" => check_read_only_fixture_root(Path::new(root)),
         _ => {
             Err("usage: miso_engine_builtins_fixture --write|--check SCRATCH_DIRECTORY".to_owned())
         }
@@ -122,7 +122,7 @@ fn run(arguments: Vec<String>) -> Result<(), String> {
 
 /// The checked-in builtin fixture layout.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-enum FixturePathClassV1 {
+enum FixturePathClass {
     /// The expanded fixture tuple list.
     Cases,
     /// Headerless planar PCM expected bytes.
@@ -143,22 +143,22 @@ enum FixturePathClassV1 {
 
 /// A parsed, byte-addressable fixture-manifest row.
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct FixtureManifestEntryV1 {
+struct FixtureManifestEntry {
     path: String,
     length: u64,
     sha256: String,
-    class: FixturePathClassV1,
+    class: FixturePathClass,
 }
 
 /// The strictly sorted manifest that names every fixture payload.
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct FixtureManifestV1 {
-    entries: Vec<FixtureManifestEntryV1>,
+struct FixtureManifest {
+    entries: Vec<FixtureManifestEntry>,
 }
 
 /// One exact non-response declaration from `cases.toml`.
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct FunctionalCaseV1 {
+struct FunctionalCase {
     id: String,
     category: String,
     rate_hz: u32,
@@ -168,9 +168,9 @@ struct FunctionalCaseV1 {
 
 /// The two typed subsets of the complete cases declaration file.
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct VerifiedCasesV1 {
-    response_cases: BTreeMap<String, ResponseCaseV1>,
-    functional_cases: BTreeMap<String, FunctionalCaseV1>,
+struct VerifiedCases {
+    response_cases: BTreeMap<String, ResponseCase>,
+    functional_cases: BTreeMap<String, FunctionalCase>,
 }
 
 /// One complete typed response declaration from `cases.toml`.
@@ -179,11 +179,11 @@ struct VerifiedCasesV1 {
 /// representation.  That avoids both a permissive TOML parser surface and accidental tolerance
 /// comparisons on the fixture's control coordinates.
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct ResponseCaseV1 {
+struct ResponseCase {
     id: String,
     rate_hz: u32,
     quantum_frames: u32,
-    section: ResponseSectionV1,
+    section: ResponseSection,
     cutoff_bits: u64,
     probe_bits: u64,
     oracle: String,
@@ -192,7 +192,7 @@ struct ResponseCaseV1 {
 /// The serialized measurements that must agree byte-for-byte across all five partitions of one
 /// frozen response coordinate.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct ResponseMeasurementWordsV1 {
+struct ResponseMeasurementWords {
     rbj_magnitude_db: u64,
     cast_state_magnitude_db: u64,
     impulse_dft_magnitude_db: u64,
@@ -205,7 +205,7 @@ struct ResponseMeasurementWordsV1 {
 
 /// One canonical meter snapshot, represented by its serialized IEEE-754 words.
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct MeterSnapshotV1 {
+struct MeterSnapshot {
     case: String,
     tap: Option<String>,
     handle: u64,
@@ -230,8 +230,8 @@ struct MeterSnapshotV1 {
 
 /// The three canonical meter record forms in the V1 fixture corpus.
 #[derive(Clone, Debug, Eq, PartialEq)]
-enum MeterRecordV1 {
-    Snapshot(MeterSnapshotV1),
+enum MeterRecord {
+    Snapshot(MeterSnapshot),
     Partial {
         case: String,
         observed_frames: u64,
@@ -247,7 +247,7 @@ enum MeterRecordV1 {
 
 /// One sorted stable diagnostic tuple.
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct DiagnosticRecordV1 {
+struct DiagnosticRecord {
     case: String,
     code: String,
     path: String,
@@ -256,7 +256,7 @@ struct DiagnosticRecordV1 {
 
 /// One checked resource-accounting record from the fixed V1 grid.
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct ResourceRecordV1 {
+struct ResourceRecord {
     tracks: u64,
     meters: u64,
     queue_capacity: u64,
@@ -272,15 +272,15 @@ struct ResourceRecordV1 {
 /// accepts neither duplicate keys nor escape-based alternate serializations; canonical output is
 /// checked separately below.
 #[derive(Clone, Debug, Eq, PartialEq)]
-enum JsonValueV1 {
+enum JsonValue {
     String(String),
     Unsigned(u64),
     Null,
-    Object(BTreeMap<String, JsonValueV1>),
+    Object(BTreeMap<String, JsonValue>),
 }
 
 #[derive(Clone, Copy, Debug)]
-struct ReferenceMeterConfigV1 {
+struct ReferenceMeterConfig {
     period_frames: u32,
     queue_capacity: usize,
     reset_generation: u64,
@@ -289,7 +289,7 @@ struct ReferenceMeterConfigV1 {
 }
 
 #[derive(Clone, Copy, Debug)]
-struct ReferenceMeterLaneV1 {
+struct ReferenceMeterLane {
     peak: f32,
     energy: f64,
     clipped: u64,
@@ -300,35 +300,35 @@ struct ReferenceMeterLaneV1 {
 
 /// Independent scalar meter recurrence used only to validate checked fixture tuples.
 #[derive(Clone, Debug)]
-struct ReferenceMeterV1 {
-    config: ReferenceMeterConfigV1,
+struct ReferenceMeter {
+    config: ReferenceMeterConfig,
     decay: f32,
     start: Option<u64>,
     frames: u32,
     sequence: u64,
-    left: ReferenceMeterLaneV1,
-    right: ReferenceMeterLaneV1,
+    left: ReferenceMeterLane,
+    right: ReferenceMeterLane,
     clipped: u64,
     sanitized: u64,
     discontinuities: u64,
     dropped: u64,
-    queued: Vec<MeterSnapshotV1>,
+    queued: Vec<MeterSnapshot>,
 }
 
 // Pinned 64-bit-native allocation element sizes used by the independent resource projection.
-// These are layout facts, not observed aggregate rows; `verify_pinned_native_resource_abi_v1`
+// These are layout facts, not observed aggregate rows; `verify_pinned_native_resource_abi`
 // checks every public type and the queue payload boundary that can be named outside production.
-const GRAPH_NODE_BINDING_BYTES_V1: u64 = 72;
-const BOXED_INPUT_ENTRY_BYTES_V1: u64 = 288;
-const BOXED_TAIL_ENTRY_BYTES_V1: u64 = 24;
-const BOXED_STR_BYTES_V1: u64 = 16;
-const BOXED_STAGE_ENTRY_BYTES_V1: u64 = 24;
+const GRAPH_NODE_BINDING_BYTES: u64 = 72;
+const BOXED_INPUT_ENTRY_BYTES: u64 = 288;
+const BOXED_TAIL_ENTRY_BYTES: u64 = 24;
+const BOXED_STR_BYTES: u64 = 16;
+const BOXED_STAGE_ENTRY_BYTES: u64 = 24;
 /// One `InputBuiltins`, 168 -> 272 at #210 phase 3: `InputStage<f32>` gained the live trim ramp
 /// (four `f32` words per channel), its `[[u32; 8]; 2]` countdown and the `ramping` off gate.
 ///
-/// It is no longer *boxed* at preparation -- the section rides `STRIP_PREPARATION_BYTES_V1` -- but
+/// It is no longer *boxed* at preparation -- the section rides `STRIP_PREPARATION_BYTES` -- but
 /// the size is still pinned here because the bank-input table below is an entry of it.
-const INPUT_PROCESSOR_BYTES_V1: u64 = 272;
+const INPUT_PROCESSOR_BYTES: u64 = 272;
 /// One `StripPreparation`: the whole strip of a track -- input, fader and matrix section -- held
 /// inline in the strip vector until lowering decides whether they bind per node or as bank lanes
 /// (issue #212 for the fader and the matrix, #210 phase 3 for the input).
@@ -336,30 +336,30 @@ const INPUT_PROCESSOR_BYTES_V1: u64 = 272;
 /// 344 -> 656 at phase 3: the 272-byte input section moved in, and `StripControlConsumers` gained
 /// a third 40-byte `Option<Consumer<_>>` for the input trim/polarity channel.
 ///
-/// The one size here that `verify_pinned_native_resource_abi_v1` cannot cross-check, because the
+/// The one size here that `verify_pinned_native_resource_abi` cannot cross-check, because the
 /// type is private to the builtins compiler and so cannot be named outside production. It is
 /// defended instead by that crate's `phase_two_allocator_layouts_match_the_checked_resource_report`,
 /// which observes every phase-two allocation through a global allocator and requires the reported
 /// grid to match it exactly -- so a drift here shows up there, on the same three track counts this
 /// projection uses.
-const STRIP_PREPARATION_BYTES_V1: u64 = 656;
-const FADER_PROCESSOR_BYTES_V1: u64 = 16;
-const MATRIX_PROCESSOR_BYTES_V1: u64 = 136;
-const GRAPH_OBSERVER_BINDING_BYTES_V1: u64 = 80;
-const METER_CONSUMER_BYTES_V1: u64 = 72;
-const METER_REQUEST_SEAL_BYTES_V1: u64 = 56;
-const OBSERVER_SEAL_BYTES_V1: u64 = 32;
-const CONSUMER_SEAL_BYTES_V1: u64 = 32;
-const METER_QUEUE_HEADER_BYTES_V1: u64 = 256;
-const METER_OBSERVER_BYTES_V1: u64 = 224;
-const METER_SNAPSHOT_BYTES_V1: u64 = 160;
+const STRIP_PREPARATION_BYTES: u64 = 656;
+const FADER_PROCESSOR_BYTES: u64 = 16;
+const MATRIX_PROCESSOR_BYTES: u64 = 136;
+const GRAPH_OBSERVER_BINDING_BYTES: u64 = 80;
+const METER_CONSUMER_BYTES: u64 = 72;
+const METER_REQUEST_SEAL_BYTES: u64 = 56;
+const OBSERVER_SEAL_BYTES: u64 = 32;
+const CONSUMER_SEAL_BYTES: u64 = 32;
+const METER_QUEUE_HEADER_BYTES: u64 = 256;
+const METER_OBSERVER_BYTES: u64 = 224;
+const METER_SNAPSHOT_BYTES: u64 = 160;
 
 /// One parsed independent response row from the checked V1 CSV.
 #[derive(Clone, Debug)]
-struct ResponseCsvRowV1 {
+struct ResponseCsvRow {
     id: String,
     rate_hz: u32,
-    section: ResponseSectionV1,
+    section: ResponseSection,
     cutoff_hz: f64,
     probe_hz: f64,
     quantum_frames: u32,
@@ -375,7 +375,7 @@ struct ResponseCsvRowV1 {
 
 /// The frozen response topology encoded by one CSV row.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-enum ResponseSectionV1 {
+enum ResponseSection {
     /// One high-pass Butterworth section.
     HighPass,
     /// One low-pass Butterworth section.
@@ -386,9 +386,9 @@ enum ResponseSectionV1 {
 
 /// One rate/quantum/section/cutoff/probe response coordinate.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-struct ResponseCoordinateV1 {
+struct ResponseCoordinate {
     rate_hz: u32,
-    section: ResponseSectionV1,
+    section: ResponseSection,
     cutoff_bits: u64,
     probe_bits: u64,
     quantum_frames: u32,
@@ -396,16 +396,16 @@ struct ResponseCoordinateV1 {
 
 /// A response coordinate independent of render partition size.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-struct ResponseInvariantCoordinateV1 {
+struct ResponseInvariantCoordinate {
     rate_hz: u32,
-    section: ResponseSectionV1,
+    section: ResponseSection,
     cutoff_bits: u64,
     probe_bits: u64,
 }
 
 /// Measurements independently reconstructed from the retained-`f32` recurrence.
 #[derive(Clone, Copy, Debug)]
-struct IndependentResponseMeasurementV1 {
+struct IndependentResponseMeasurement {
     impulse_dft_magnitude_db: f64,
     sustained_fundamental_db: Option<f64>,
     sustained_residual_db: Option<f64>,
@@ -416,15 +416,15 @@ struct IndependentResponseMeasurementV1 {
 
 /// One strict, complete benchmark input declaration.
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct BenchmarkInputV1 {
-    kind: BenchmarkKindV1,
+struct BenchmarkInput {
+    kind: BenchmarkKind,
     rate_hz: u32,
     fields: Vec<(String, String)>,
 }
 
 /// The frozen benchmark input kind.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum BenchmarkKindV1 {
+enum BenchmarkKind {
     /// One asymmetric filter/matrix render track.
     FullChainFilters,
     /// One exact-identity render track.
@@ -461,12 +461,12 @@ fn generated() -> Vec<(String, Vec<u8>)> {
     for (id, pcm) in pcm_cases() {
         files.push((format!("pcm/{id}.f32le"), pcm));
     }
-    for kind in BENCHMARK_KINDS_V1 {
-        let kind = BenchmarkKindV1::parse(kind).expect("frozen benchmark kind");
-        for rate_hz in BENCHMARK_RATES_V1 {
+    for kind in BENCHMARK_KINDS {
+        let kind = BenchmarkKind::parse(kind).expect("frozen benchmark kind");
+        for rate_hz in BENCHMARK_RATES {
             files.push((
                 format!("benchmark/{}-{rate_hz}.toml", kind.as_str()),
-                canonical_benchmark_input_v1(kind, rate_hz).into_bytes(),
+                canonical_benchmark_input(kind, rate_hz).into_bytes(),
             ));
         }
     }
@@ -483,7 +483,7 @@ impl GraphRuntimeProcessor for FixtureSource {
             .zip(block.right.iter_mut())
             .enumerate()
         {
-            (*left, *right) = fixture_source_frame_v1(index);
+            (*left, *right) = fixture_source_frame(index);
         }
         Ok(())
     }
@@ -497,8 +497,8 @@ impl GraphRuntimeProcessor for FixtureIdentity {
 }
 
 fn graph_tap_fixtures() -> (Vec<u8>, String) {
-    let artifact = graph_tap_artifact_v1();
-    verify_graph_tap_pdc_v1(artifact.graph()).expect("fixture PDC");
+    let artifact = graph_tap_artifact();
+    verify_graph_tap_pdc(artifact.graph()).expect("fixture PDC");
     let envelope = artifact.envelope();
     let bindings = artifact
         .external_binding_nodes()
@@ -551,7 +551,7 @@ fn graph_tap_fixtures() -> (Vec<u8>, String) {
     )
 }
 
-fn graph_tap_artifact_v1() -> miso_engine_graph_compiler::PreparedGraphBuiltinsArtifact {
+fn graph_tap_artifact() -> miso_engine_graph_compiler::PreparedGraphBuiltinsArtifact {
     let mut model = parse_session_toml(include_str!("../../../fixtures/session/v1/canonical.toml"))
         .expect("fixture session");
     let mut fixture_effect = model.tracks[0].dynamic.effects[0].clone();
@@ -673,7 +673,7 @@ fn graph_tap_artifact_v1() -> miso_engine_graph_compiler::PreparedGraphBuiltinsA
     .unwrap_or_else(|_| panic!("compile graph"))
 }
 
-fn fixture_source_frame_v1(index: usize) -> (f32, f32) {
+fn fixture_source_frame(index: usize) -> (f32, f32) {
     if index == 0 {
         (1.0, -0.5)
     } else {
@@ -681,7 +681,7 @@ fn fixture_source_frame_v1(index: usize) -> (f32, f32) {
     }
 }
 
-fn verify_graph_tap_pdc_v1(graph: &PreparedGraphPlan) -> Result<(), String> {
+fn verify_graph_tap_pdc(graph: &PreparedGraphPlan) -> Result<(), String> {
     let timing = |id: &str| {
         graph
             .route_timings
@@ -701,7 +701,7 @@ fn verify_graph_tap_pdc_v1(graph: &PreparedGraphPlan) -> Result<(), String> {
             )
         })
         .collect();
-    verify_graph_tap_pdc_relation_v1(
+    verify_graph_tap_pdc_relation(
         (
             late.source_arrival.0,
             late.compensation_delay.0,
@@ -717,7 +717,7 @@ fn verify_graph_tap_pdc_v1(graph: &PreparedGraphPlan) -> Result<(), String> {
 }
 
 /// Checks the exact compiled route timings and one inserted early-route PDC delay.
-fn verify_graph_tap_pdc_relation_v1(
+fn verify_graph_tap_pdc_relation(
     late: (u64, u64, u64),
     early: (u64, u64, u64),
     inserted_early_delays: impl IntoIterator<Item = u64>,
@@ -735,7 +735,7 @@ fn verify_graph_tap_pdc_relation_v1(
 }
 
 fn metadata() -> String {
-    METADATA_V1.to_owned()
+    METADATA.to_owned()
 }
 
 fn cases() -> String {
@@ -744,7 +744,7 @@ fn cases() -> String {
         for quantum in QUANTA {
             for section in ["high_pass", "low_pass"] {
                 for (cutoff_index, cutoff) in response_cutoffs(rate).into_iter().enumerate() {
-                    for (probe_index, probe) in frozen_single_section_probes_v1(rate, cutoff)
+                    for (probe_index, probe) in frozen_single_section_probes(rate, cutoff)
                         .into_iter()
                         .enumerate()
                     {
@@ -757,7 +757,7 @@ fn cases() -> String {
                     }
                 }
             }
-            for (probe_index, probe) in frozen_cascade_probes_v1(rate).into_iter().enumerate() {
+            for (probe_index, probe) in frozen_cascade_probes(rate).into_iter().enumerate() {
                 entries.push((
                     format!("response-cascade-{rate}-{quantum}-fixed-{probe_index}"),
                     format!(
@@ -767,7 +767,7 @@ fn cases() -> String {
             }
         }
     }
-    for (id, category, detail) in FUNCTIONAL_CASES_V1 {
+    for (id, category, detail) in FUNCTIONAL_CASES {
         entries.push((id.to_owned(), format!("category = \"{category}\"\nrate_hz = 48000\nquantum_frames = 128\ndetail = \"{detail}\"\n")));
     }
     entries.sort_by(|left, right| left.0.cmp(&right.0));
@@ -802,7 +802,7 @@ fn responses() -> String {
             ("low_pass", ReferenceFilterKind::LowPass),
         ] {
             for (cutoff_index, cutoff) in response_cutoffs(rate).into_iter().enumerate() {
-                for (probe_index, probe) in frozen_single_section_probes_v1(rate, cutoff)
+                for (probe_index, probe) in frozen_single_section_probes(rate, cutoff)
                     .into_iter()
                     .enumerate()
                 {
@@ -815,7 +815,7 @@ fn responses() -> String {
                 }
             }
         }
-        for (probe_index, probe) in frozen_cascade_probes_v1(rate).into_iter().enumerate() {
+        for (probe_index, probe) in frozen_cascade_probes(rate).into_iter().enumerate() {
             let rbj = rbj_butterworth_magnitude_db(
                 f64::from(rate),
                 100.0,
@@ -1636,13 +1636,13 @@ fn render_matrix_retarget() -> Vec<u8> {
     pack_pcm(&left, &right)
 }
 
-struct ResetFixtureV1 {
+struct ResetFixture {
     pcm: Vec<u8>,
     executed_resets: [BuiltinResetKind; 2],
 }
 
 fn render_reset() -> Vec<u8> {
-    let fixture = render_reset_fixture_v1();
+    let fixture = render_reset_fixture();
     debug_assert_eq!(
         fixture.executed_resets,
         [
@@ -1653,7 +1653,7 @@ fn render_reset() -> Vec<u8> {
     fixture.pcm
 }
 
-fn render_reset_fixture_v1() -> ResetFixtureV1 {
+fn render_reset_fixture() -> ResetFixture {
     let parameters = BuiltinParameters {
         left: ChannelParameters {
             hpf_hz: 100.0,
@@ -1683,7 +1683,7 @@ fn render_reset_fixture_v1() -> ResetFixtureV1 {
     right.extend(post_right);
     left.extend(full_left);
     right.extend(full_right);
-    ResetFixtureV1 {
+    ResetFixture {
         pcm: pack_pcm(&left, &right),
         executed_resets: [discontinuity, full],
     }
@@ -1760,7 +1760,7 @@ fn write_and_verify(root: &Path) -> Result<(), String> {
     fs::write(root.join("MANIFEST.tsv"), manifest(&files))
         .map_err(|error| format!("write manifest: {error}"))?;
     verify_generated_scratch(root, &files)?;
-    check_read_only_fixture_root_v1(root)
+    check_read_only_fixture_root(root)
 }
 
 fn verify_generated_scratch(root: &Path, expected: &[(String, Vec<u8>)]) -> Result<(), String> {
@@ -1783,34 +1783,34 @@ fn verify_generated_scratch(root: &Path, expected: &[(String, Vec<u8>)]) -> Resu
     Ok(())
 }
 
-fn check_fixture_root_v1(root: &Path) -> Result<(), String> {
-    let manifest = parse_manifest_v1(root)?;
-    verify_manifest_bytes_v1(root, &manifest)?;
-    verify_path_class_coverage_v1(&manifest)?;
-    let cases = verify_cases_v1(root)?;
-    verify_reference_oracle_v1(root, &cases.response_cases)?;
-    verify_metadata_v1(root)?;
-    verify_functional_fixture_completeness_v1(root, &manifest, &cases.functional_cases)?;
-    verify_jsonl_payloads_v1(root)?;
-    verify_meter_corpus_v1(root)?;
-    verify_diagnostics_v1(root)?;
-    verify_resources_v1(root)?;
-    verify_benchmark_inputs_v1(root, &manifest)?;
+fn check_fixture_root(root: &Path) -> Result<(), String> {
+    let manifest = parse_manifest(root)?;
+    verify_manifest_bytes(root, &manifest)?;
+    verify_path_class_coverage(&manifest)?;
+    let cases = verify_cases(root)?;
+    verify_reference_oracle(root, &cases.response_cases)?;
+    verify_metadata(root)?;
+    verify_functional_fixture_completeness(root, &manifest, &cases.functional_cases)?;
+    verify_jsonl_payloads(root)?;
+    verify_meter_corpus(root)?;
+    verify_diagnostics(root)?;
+    verify_resources(root)?;
+    verify_benchmark_inputs(root, &manifest)?;
     Ok(())
 }
 
 /// Runs the supplied-root checker while proving the read-only path did not mutate any byte.
-fn check_read_only_fixture_root_v1(root: &Path) -> Result<(), String> {
-    let before = fixture_tree_hash_v1(root)?;
-    check_fixture_root_v1(root)?;
-    let after = fixture_tree_hash_v1(root)?;
+fn check_read_only_fixture_root(root: &Path) -> Result<(), String> {
+    let before = fixture_tree_hash(root)?;
+    check_fixture_root(root)?;
+    let after = fixture_tree_hash(root)?;
     if before != after {
         return Err("--check mutated the fixture tree".to_owned());
     }
     Ok(())
 }
 
-fn parse_manifest_v1(root: &Path) -> Result<FixtureManifestV1, String> {
+fn parse_manifest(root: &Path) -> Result<FixtureManifest, String> {
     let bytes = read_regular_file(&root.join("MANIFEST.tsv"), "manifest")?;
     let text = std::str::from_utf8(&bytes).map_err(|_| "manifest is not UTF-8".to_owned())?;
     let mut lines = text.split_inclusive('\n');
@@ -1840,18 +1840,18 @@ fn parse_manifest_v1(root: &Path) -> Result<FixtureManifestV1, String> {
         if !is_lower_sha256(sha256) {
             return Err(format!("manifest sha256 is not lowercase hex: {path}"));
         }
-        entries.push(FixtureManifestEntryV1 {
+        entries.push(FixtureManifestEntry {
             path: path.to_owned(),
             length,
             sha256: sha256.to_owned(),
-            class: classify_fixture_path_v1(path)?,
+            class: classify_fixture_path(path)?,
         });
         previous = Some(path);
     }
     if entries.is_empty() {
         return Err("manifest has no payload entries".to_owned());
     }
-    Ok(FixtureManifestV1 { entries })
+    Ok(FixtureManifest { entries })
 }
 
 fn is_lower_sha256(value: &str) -> bool {
@@ -1861,23 +1861,23 @@ fn is_lower_sha256(value: &str) -> bool {
         })
 }
 
-fn classify_fixture_path_v1(path: &str) -> Result<FixturePathClassV1, String> {
+fn classify_fixture_path(path: &str) -> Result<FixturePathClass, String> {
     if !is_safe_fixture_relative_path(path) {
         return Err(format!("manifest path is unsafe: {path}"));
     }
     match path {
-        "cases.toml" => Ok(FixturePathClassV1::Cases),
-        "reference/filter-response.csv" => Ok(FixturePathClassV1::Reference),
-        "diagnostics.jsonl" => Ok(FixturePathClassV1::Diagnostics),
-        "resources.jsonl" => Ok(FixturePathClassV1::Resources),
-        "metadata.toml" => Ok(FixturePathClassV1::Metadata),
-        "meters/graph-taps.jsonl" | "meters/window-and-drop.jsonl" => Ok(FixturePathClassV1::Meter),
-        _ if benchmark_path_v1(path).is_some() => Ok(FixturePathClassV1::Benchmark),
+        "cases.toml" => Ok(FixturePathClass::Cases),
+        "reference/filter-response.csv" => Ok(FixturePathClass::Reference),
+        "diagnostics.jsonl" => Ok(FixturePathClass::Diagnostics),
+        "resources.jsonl" => Ok(FixturePathClass::Resources),
+        "metadata.toml" => Ok(FixturePathClass::Metadata),
+        "meters/graph-taps.jsonl" | "meters/window-and-drop.jsonl" => Ok(FixturePathClass::Meter),
+        _ if benchmark_path(path).is_some() => Ok(FixturePathClass::Benchmark),
         _ if path.starts_with("pcm/")
             && path.ends_with(".f32le")
             && is_fixture_case_id(&path[4..path.len() - 6]) =>
         {
-            Ok(FixturePathClassV1::Pcm)
+            Ok(FixturePathClass::Pcm)
         }
         _ => Err(format!("manifest path has no V1 fixture class: {path}")),
     }
@@ -1904,7 +1904,7 @@ fn is_fixture_case_id(value: &str) -> bool {
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
 }
 
-fn verify_manifest_bytes_v1(root: &Path, manifest: &FixtureManifestV1) -> Result<(), String> {
+fn verify_manifest_bytes(root: &Path, manifest: &FixtureManifest) -> Result<(), String> {
     let expected: BTreeSet<_> = manifest
         .entries
         .iter()
@@ -1935,20 +1935,20 @@ fn read_regular_file(path: &Path, label: &str) -> Result<Vec<u8>, String> {
     fs::read(path).map_err(|error| format!("read {label}: {error}"))
 }
 
-fn verify_path_class_coverage_v1(manifest: &FixtureManifestV1) -> Result<(), String> {
+fn verify_path_class_coverage(manifest: &FixtureManifest) -> Result<(), String> {
     let mut counts = BTreeMap::new();
     for entry in &manifest.entries {
         *counts.entry(entry.class.clone()).or_insert(0_usize) += 1;
     }
     for (class, expected) in [
-        (FixturePathClassV1::Cases, 1),
-        (FixturePathClassV1::Reference, 1),
-        (FixturePathClassV1::Diagnostics, 1),
-        (FixturePathClassV1::Resources, 1),
-        (FixturePathClassV1::Metadata, 1),
-        (FixturePathClassV1::Meter, 2),
-        (FixturePathClassV1::Pcm, PCM_PAYLOAD_COUNT_V1),
-        (FixturePathClassV1::Benchmark, 10),
+        (FixturePathClass::Cases, 1),
+        (FixturePathClass::Reference, 1),
+        (FixturePathClass::Diagnostics, 1),
+        (FixturePathClass::Resources, 1),
+        (FixturePathClass::Metadata, 1),
+        (FixturePathClass::Meter, 2),
+        (FixturePathClass::Pcm, PCM_PAYLOAD_COUNT),
+        (FixturePathClass::Benchmark, 10),
     ] {
         if counts.get(&class) != Some(&expected) {
             return Err(format!(
@@ -1959,7 +1959,7 @@ fn verify_path_class_coverage_v1(manifest: &FixtureManifestV1) -> Result<(), Str
     Ok(())
 }
 
-fn verify_cases_v1(root: &Path) -> Result<VerifiedCasesV1, String> {
+fn verify_cases(root: &Path) -> Result<VerifiedCases, String> {
     let bytes = read_regular_file(&root.join("cases.toml"), "cases.toml")?;
     let text = std::str::from_utf8(&bytes).map_err(|_| "cases.toml is not UTF-8".to_owned())?;
     let mut blocks = text.split("[[case]]\n");
@@ -1983,7 +1983,7 @@ fn verify_cases_v1(root: &Path) -> Result<VerifiedCasesV1, String> {
         }
         previous = Some(id.to_owned());
         if quoted_case_field(block, "category") == Some("filter_response") {
-            let response = parse_response_case_v1(block)?;
+            let response = parse_response_case(block)?;
             if response.id != id {
                 return Err(format!("response case ID parse mismatch: {id}"));
             }
@@ -1991,7 +1991,7 @@ fn verify_cases_v1(root: &Path) -> Result<VerifiedCasesV1, String> {
                 return Err(format!("cases.toml duplicate response ID: {id}"));
             }
         } else {
-            let functional = parse_functional_case_v1(block)?;
+            let functional = parse_functional_case(block)?;
             if functional.id != id {
                 return Err(format!("functional case ID parse mismatch: {id}"));
             }
@@ -2000,24 +2000,24 @@ fn verify_cases_v1(root: &Path) -> Result<VerifiedCasesV1, String> {
             }
         }
     }
-    if case_count != CASE_COUNT_V1 || response_cases.len() != RESPONSE_CASE_COUNT_V1 {
+    if case_count != CASE_COUNT || response_cases.len() != RESPONSE_CASE_COUNT {
         return Err(format!(
             "cases.toml coverage count differs: cases={case_count} responses={}",
             response_cases.len()
         ));
     }
-    verify_response_cases_v1(&response_cases)?;
-    verify_functional_cases_v1(&functional_cases)?;
-    Ok(VerifiedCasesV1 {
+    verify_response_cases(&response_cases)?;
+    verify_functional_cases(&functional_cases)?;
+    Ok(VerifiedCases {
         response_cases,
         functional_cases,
     })
 }
 
-fn verify_response_cases_v1(
-    response_cases: &BTreeMap<String, ResponseCaseV1>,
+fn verify_response_cases(
+    response_cases: &BTreeMap<String, ResponseCase>,
 ) -> Result<(), String> {
-    if *response_cases == expected_response_cases_v1() {
+    if *response_cases == expected_response_cases() {
         Ok(())
     } else {
         Err("cases.toml response tuples differ from the frozen grid".to_owned())
@@ -2031,17 +2031,17 @@ fn quoted_case_field<'a>(block: &'a str, key: &str) -> Option<&'a str> {
     })
 }
 
-fn parse_functional_case_v1(block: &str) -> Result<FunctionalCaseV1, String> {
+fn parse_functional_case(block: &str) -> Result<FunctionalCase, String> {
     let lines: Vec<_> = block.lines().filter(|line| !line.is_empty()).collect();
     let [id, category, rate_hz, quantum_frames, detail] = lines.as_slice() else {
         return Err("functional case does not have exactly five canonical fields".to_owned());
     };
-    let id = parse_case_string_field_v1(id, "id")?;
-    let category = parse_case_string_field_v1(category, "category")?;
-    let rate_hz = parse_case_u32_field_v1(rate_hz, "rate_hz")?;
-    let quantum_frames = parse_case_u32_field_v1(quantum_frames, "quantum_frames")?;
-    let detail = parse_case_string_field_v1(detail, "detail")?;
-    Ok(FunctionalCaseV1 {
+    let id = parse_case_string_field(id, "id")?;
+    let category = parse_case_string_field(category, "category")?;
+    let rate_hz = parse_case_u32_field(rate_hz, "rate_hz")?;
+    let quantum_frames = parse_case_u32_field(quantum_frames, "quantum_frames")?;
+    let detail = parse_case_string_field(detail, "detail")?;
+    Ok(FunctionalCase {
         id,
         category,
         rate_hz,
@@ -2050,7 +2050,7 @@ fn parse_functional_case_v1(block: &str) -> Result<FunctionalCaseV1, String> {
     })
 }
 
-fn parse_response_case_v1(block: &str) -> Result<ResponseCaseV1, String> {
+fn parse_response_case(block: &str) -> Result<ResponseCase, String> {
     let lines: Vec<_> = block.lines().filter(|line| !line.is_empty()).collect();
     let [
         id,
@@ -2065,24 +2065,24 @@ fn parse_response_case_v1(block: &str) -> Result<ResponseCaseV1, String> {
     else {
         return Err("response case does not have exactly eight canonical fields".to_owned());
     };
-    let id = parse_case_string_field_v1(id, "id")?;
-    if parse_case_string_field_v1(category, "category")? != "filter_response" {
+    let id = parse_case_string_field(id, "id")?;
+    if parse_case_string_field(category, "category")? != "filter_response" {
         return Err(format!("response case has invalid category: {id}"));
     }
-    let section = parse_response_section_v1(&parse_case_string_field_v1(section, "section")?)
+    let section = parse_response_section(&parse_case_string_field(section, "section")?)
         .ok_or_else(|| format!("response case has invalid section: {id}"))?;
-    Ok(ResponseCaseV1 {
+    Ok(ResponseCase {
         id,
-        rate_hz: parse_case_u32_field_v1(rate_hz, "rate_hz")?,
-        quantum_frames: parse_case_u32_field_v1(quantum_frames, "quantum_frames")?,
+        rate_hz: parse_case_u32_field(rate_hz, "rate_hz")?,
+        quantum_frames: parse_case_u32_field(quantum_frames, "quantum_frames")?,
         section,
-        cutoff_bits: parse_case_f64_17_v1(cutoff_hz, "cutoff_hz")?.to_bits(),
-        probe_bits: parse_case_f64_17_v1(probe_hz, "probe_hz")?.to_bits(),
-        oracle: parse_case_string_field_v1(oracle, "oracle")?,
+        cutoff_bits: parse_case_f64_17(cutoff_hz, "cutoff_hz")?.to_bits(),
+        probe_bits: parse_case_f64_17(probe_hz, "probe_hz")?.to_bits(),
+        oracle: parse_case_string_field(oracle, "oracle")?,
     })
 }
 
-fn parse_case_string_field_v1(line: &str, key: &str) -> Result<String, String> {
+fn parse_case_string_field(line: &str, key: &str) -> Result<String, String> {
     let value = line
         .strip_prefix(key)
         .and_then(|line| line.strip_prefix(" = \""))
@@ -2094,7 +2094,7 @@ fn parse_case_string_field_v1(line: &str, key: &str) -> Result<String, String> {
     Ok(value.to_owned())
 }
 
-fn parse_case_u32_field_v1(line: &str, key: &str) -> Result<u32, String> {
+fn parse_case_u32_field(line: &str, key: &str) -> Result<u32, String> {
     let value = line
         .strip_prefix(key)
         .and_then(|line| line.strip_prefix(" = "))
@@ -2108,23 +2108,23 @@ fn parse_case_u32_field_v1(line: &str, key: &str) -> Result<u32, String> {
     Ok(parsed)
 }
 
-fn parse_case_f64_17_v1(line: &str, key: &str) -> Result<f64, String> {
+fn parse_case_f64_17(line: &str, key: &str) -> Result<f64, String> {
     let value = line
         .strip_prefix(key)
         .and_then(|line| line.strip_prefix(" = "))
         .ok_or_else(|| format!("response case has invalid {key} field"))?;
-    parse_canonical_response_f64_v1(value, &format!("response case {key}"))
+    parse_canonical_response_f64(value, &format!("response case {key}"))
 }
 
-fn verify_functional_cases_v1(cases: &BTreeMap<String, FunctionalCaseV1>) -> Result<(), String> {
-    if cases.len() != FUNCTIONAL_CASES_V1.len() {
+fn verify_functional_cases(cases: &BTreeMap<String, FunctionalCase>) -> Result<(), String> {
+    if cases.len() != FUNCTIONAL_CASES.len() {
         return Err(format!(
             "cases.toml functional coverage differs: cases={} expected={}",
             cases.len(),
-            FUNCTIONAL_CASES_V1.len()
+            FUNCTIONAL_CASES.len()
         ));
     }
-    for (id, category, detail) in FUNCTIONAL_CASES_V1 {
+    for (id, category, detail) in FUNCTIONAL_CASES {
         let case = cases
             .get(id)
             .ok_or_else(|| format!("cases.toml missing functional case: {id}"))?;
@@ -2139,9 +2139,9 @@ fn verify_functional_cases_v1(cases: &BTreeMap<String, FunctionalCaseV1>) -> Res
     Ok(())
 }
 
-fn verify_metadata_v1(root: &Path) -> Result<(), String> {
+fn verify_metadata(root: &Path) -> Result<(), String> {
     let bytes = read_regular_file(&root.join("metadata.toml"), "metadata.toml")?;
-    if bytes != METADATA_V1.as_bytes() {
+    if bytes != METADATA.as_bytes() {
         return Err(
             "metadata.toml does not contain the exact canonical seven-key V1 metadata".to_owned(),
         );
@@ -2149,12 +2149,12 @@ fn verify_metadata_v1(root: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn verify_functional_fixture_completeness_v1(
+fn verify_functional_fixture_completeness(
     root: &Path,
-    manifest: &FixtureManifestV1,
-    cases: &BTreeMap<String, FunctionalCaseV1>,
+    manifest: &FixtureManifest,
+    cases: &BTreeMap<String, FunctionalCase>,
 ) -> Result<(), String> {
-    let ownership = functional_payload_ownership_v1();
+    let ownership = functional_payload_ownership();
     let case_ids: BTreeSet<_> = cases.keys().map(String::as_str).collect();
     let ownership_ids: BTreeSet<_> = ownership.keys().copied().collect();
     if case_ids != ownership_ids {
@@ -2171,10 +2171,10 @@ fn verify_functional_fixture_completeness_v1(
         .filter(|entry| {
             matches!(
                 entry.class,
-                FixturePathClassV1::Pcm
-                    | FixturePathClassV1::Meter
-                    | FixturePathClassV1::Diagnostics
-                    | FixturePathClassV1::Resources
+                FixturePathClass::Pcm
+                    | FixturePathClass::Meter
+                    | FixturePathClass::Diagnostics
+                    | FixturePathClass::Resources
             )
         })
         .map(|entry| entry.path.as_str())
@@ -2193,12 +2193,12 @@ fn verify_functional_fixture_completeness_v1(
         ));
     }
 
-    verify_pcm_semantics_v1(root)?;
-    verify_graph_tap_output_relation_v1(root)?;
+    verify_pcm_semantics(root)?;
+    verify_graph_tap_output_relation(root)?;
     Ok(())
 }
 
-fn functional_payload_ownership_v1() -> BTreeMap<&'static str, BTreeSet<String>> {
+fn functional_payload_ownership() -> BTreeMap<&'static str, BTreeSet<String>> {
     let mut ownership = BTreeMap::new();
     for id in [
         "identity-signed-zero",
@@ -2230,7 +2230,7 @@ fn functional_payload_ownership_v1() -> BTreeMap<&'static str, BTreeSet<String>>
             "meters/graph-taps.jsonl".to_owned(),
         ]),
     );
-    for id in FUNCTIONAL_CASES_V1
+    for id in FUNCTIONAL_CASES
         .iter()
         .filter_map(|(id, category, _)| (*category == "meter").then_some(*id))
     {
@@ -2250,39 +2250,39 @@ fn functional_payload_ownership_v1() -> BTreeMap<&'static str, BTreeSet<String>>
     ownership
 }
 
-fn verify_pcm_semantics_v1(root: &Path) -> Result<(), String> {
-    verify_pcm_words_v1(
+fn verify_pcm_semantics(root: &Path) -> Result<(), String> {
+    verify_pcm_words(
         root,
         "pcm/identity-signed-zero.f32le",
-        &pcm_words_v1(
-            &identity_input_stage_v1(&PCM_INPUT_LEFT_V1),
-            &identity_input_stage_v1(&PCM_INPUT_RIGHT_V1),
+        &pcm_words(
+            &identity_input_stage(&PCM_INPUT_LEFT),
+            &identity_input_stage(&PCM_INPUT_RIGHT),
         ),
     )?;
 
-    let polarity_gain_left: Vec<_> = PCM_INPUT_LEFT_V1
+    let polarity_gain_left: Vec<_> = PCM_INPUT_LEFT
         .iter()
         .copied()
         .map(|sample| {
             // The polarity is folded into the trim at preparation: `x * -trim`, one multiply.
-            let trimmed = sample * -independent_db_gain_v1(-6.0);
-            identity_section_v1(trimmed) * independent_db_gain_v1(-3.0)
+            let trimmed = sample * -independent_db_gain(-6.0);
+            identity_section(trimmed) * independent_db_gain(-3.0)
         })
         .collect();
-    let polarity_gain_right: Vec<_> = PCM_INPUT_RIGHT_V1
+    let polarity_gain_right: Vec<_> = PCM_INPUT_RIGHT
         .iter()
         .copied()
-        .map(|sample| identity_section_v1(sample * independent_db_gain_v1(3.0)))
+        .map(|sample| identity_section(sample * independent_db_gain(3.0)))
         .collect();
-    verify_pcm_words_v1(
+    verify_pcm_words(
         root,
         "pcm/polarity-gain.f32le",
-        &pcm_words_v1(&polarity_gain_left, &polarity_gain_right),
+        &pcm_words(&polarity_gain_left, &polarity_gain_right),
     )?;
-    verify_pcm_words_v1(root, "pcm/mute.f32le", &[0.0_f32.to_bits(); 16])?;
+    verify_pcm_words(root, "pcm/mute.f32le", &[0.0_f32.to_bits(); 16])?;
 
-    verify_filter_pcm_semantics_v1(root)?;
-    verify_matrix_pcm_semantics_v1(root)?;
+    verify_filter_pcm_semantics(root)?;
+    verify_matrix_pcm_semantics(root)?;
     Ok(())
 }
 
@@ -2291,40 +2291,40 @@ fn verify_pcm_semantics_v1(root: &Path) -> Result<(), String> {
 /// It is exact for every finite input except a negative zero, which the trailing `+0.0` addition
 /// turns into a positive zero. That is the one bit #85 changed on a bypassed chain, and it is
 /// uniform across every width and target -- which is the property D5 buys.
-fn identity_section_v1(sample: f32) -> f32 {
+fn identity_section(sample: f32) -> f32 {
     if sample == 0.0 { 0.0 } else { sample }
 }
 
 /// The input stage of a chain whose sections are both disabled: trim by one, then two identities.
-fn identity_input_stage_v1(samples: &[f32]) -> Vec<f32> {
-    samples.iter().copied().map(identity_section_v1).collect()
+fn identity_input_stage(samples: &[f32]) -> Vec<f32> {
+    samples.iter().copied().map(identity_section).collect()
 }
 
-fn independent_db_gain_v1(db: f32) -> f32 {
+fn independent_db_gain(db: f32) -> f32 {
     10.0_f64.powf(f64::from(db) / 20.0) as f32
 }
 
-fn verify_filter_pcm_semantics_v1(root: &Path) -> Result<(), String> {
+fn verify_filter_pcm_semantics(root: &Path) -> Result<(), String> {
     // The chain is high-pass then low-pass: the left channel's low-pass is disabled and the
     // right channel's high-pass is, so each carries one identity section on the other side.
-    let filters_left = identity_input_stage_v1(&retained_tpt_outputs_v1(
-        &PCM_INPUT_LEFT_V1,
+    let filters_left = identity_input_stage(&retained_tpt_outputs(
+        &PCM_INPUT_LEFT,
         100.0,
         ReferenceTptOutput::HighPass,
     )?);
-    let filters_right = retained_tpt_outputs_v1(
-        &identity_input_stage_v1(&PCM_INPUT_RIGHT_V1),
+    let filters_right = retained_tpt_outputs(
+        &identity_input_stage(&PCM_INPUT_RIGHT),
         1_000.0,
         ReferenceTptOutput::LowPass,
     )?;
-    verify_pcm_words_v1(
+    verify_pcm_words(
         root,
         "pcm/filters-asymmetric.f32le",
-        &pcm_words_v1(&filters_left, &filters_right),
+        &pcm_words(&filters_left, &filters_right),
     )?;
 
     let reset_input = [1.0, 0.0, 0.0, 0.0];
-    let reset_segment = identity_input_stage_v1(&retained_tpt_outputs_v1(
+    let reset_segment = identity_input_stage(&retained_tpt_outputs(
         &reset_input,
         100.0,
         ReferenceTptOutput::HighPass,
@@ -2335,46 +2335,46 @@ fn verify_filter_pcm_semantics_v1(root: &Path) -> Result<(), String> {
     // independently checks the resulting three fresh impulse responses.
     reset_left.extend_from_slice(&reset_segment);
     reset_left.extend_from_slice(&reset_segment);
-    verify_pcm_words_v1(
+    verify_pcm_words(
         root,
         "pcm/reset.f32le",
-        &pcm_words_v1(&reset_left, &[0.0; 12]),
+        &pcm_words(&reset_left, &[0.0; 12]),
     )?;
 
-    let isolation_left = identity_input_stage_v1(&retained_tpt_outputs_v1(
+    let isolation_left = identity_input_stage(&retained_tpt_outputs(
         &[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
         100.0,
         ReferenceTptOutput::HighPass,
     )?);
-    let isolation_right = retained_tpt_outputs_v1(
-        &identity_input_stage_v1(&[0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+    let isolation_right = retained_tpt_outputs(
+        &identity_input_stage(&[0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
         1_000.0,
         ReferenceTptOutput::LowPass,
     )?;
-    verify_pcm_words_v1(
+    verify_pcm_words(
         root,
         "pcm/lr-isolation.f32le",
-        &pcm_words_v1(&isolation_left, &isolation_right),
+        &pcm_words(&isolation_left, &isolation_right),
     )?;
 
-    let partition_left = identity_input_stage_v1(&retained_tpt_outputs_v1(
+    let partition_left = identity_input_stage(&retained_tpt_outputs(
         &[1.0, 0.0, -0.5, 0.25, 0.0, 0.0, 0.75, -0.25],
         100.0,
         ReferenceTptOutput::HighPass,
     )?);
-    let partition_right = retained_tpt_outputs_v1(
-        &identity_input_stage_v1(&[-0.5, 0.0, 1.0, -0.25, 0.0, 0.5, 0.0, 0.25]),
+    let partition_right = retained_tpt_outputs(
+        &identity_input_stage(&[-0.5, 0.0, 1.0, -0.25, 0.0, 0.5, 0.0, 0.25]),
         1_000.0,
         ReferenceTptOutput::LowPass,
     )?;
-    verify_pcm_words_v1(
+    verify_pcm_words(
         root,
         "pcm/partition.f32le",
-        &pcm_words_v1(&partition_left, &partition_right),
+        &pcm_words(&partition_left, &partition_right),
     )
 }
 
-fn retained_tpt_outputs_v1(
+fn retained_tpt_outputs(
     input: &[f32],
     cutoff_hz: f32,
     output: ReferenceTptOutput,
@@ -2390,23 +2390,23 @@ fn retained_tpt_outputs_v1(
         .collect())
 }
 
-fn verify_matrix_pcm_semantics_v1(root: &Path) -> Result<(), String> {
+fn verify_matrix_pcm_semantics(root: &Path) -> Result<(), String> {
     // Every `render_pcm` matrix case runs the whole chain, so the samples reaching the matrix
     // have already passed the two identity sections of the input stage.
-    let staged_left = identity_input_stage_v1(&PCM_INPUT_LEFT_V1);
-    let staged_right = identity_input_stage_v1(&PCM_INPUT_RIGHT_V1);
+    let staged_left = identity_input_stage(&PCM_INPUT_LEFT);
+    let staged_right = identity_input_stage(&PCM_INPUT_RIGHT);
     let swap = [0.0, 1.0, 1.0, 0.0];
-    verify_pcm_words_v1(
+    verify_pcm_words(
         root,
         "pcm/matrix-corner.f32le",
-        &matrix_pcm_words_v1(swap, &staged_left, &staged_right),
+        &matrix_pcm_words(swap, &staged_left, &staged_right),
     )?;
     // The unsuffixed payload is the prepared 64-byte swap-matrix case, not one of the
     // 128-frame target-update ramps.  It must equal the matching matrix-corner payload.
-    verify_pcm_words_v1(
+    verify_pcm_words(
         root,
         "pcm/matrix-ramp.f32le",
-        &matrix_pcm_words_v1(swap, &staged_left, &staged_right),
+        &matrix_pcm_words(swap, &staged_left, &staged_right),
     )?;
     for bits in 0_u8..16 {
         let matrix = [
@@ -2415,41 +2415,41 @@ fn verify_matrix_pcm_semantics_v1(root: &Path) -> Result<(), String> {
             f32::from((bits >> 2) & 1),
             f32::from((bits >> 3) & 1),
         ];
-        verify_pcm_words_v1(
+        verify_pcm_words(
             root,
             &format!("pcm/matrix-corner-{bits:02}.f32le"),
-            &matrix_pcm_words_v1(matrix, &staged_left, &staged_right),
+            &matrix_pcm_words(matrix, &staged_left, &staged_right),
         )?;
     }
     for updates in [0_u32, 1, 2, 127, 128, u32::MAX] {
-        let (left, right) = matrix_ramp_outputs_v1(updates);
-        verify_pcm_words_v1(
+        let (left, right) = matrix_ramp_outputs(updates);
+        verify_pcm_words(
             root,
             &format!("pcm/matrix-ramp-{updates}.f32le"),
-            &pcm_words_v1(&left, &right),
+            &pcm_words(&left, &right),
         )?;
     }
 
-    let (left, right) = matrix_retarget_outputs_v1();
-    verify_pcm_words_v1(
+    let (left, right) = matrix_retarget_outputs();
+    verify_pcm_words(
         root,
         "pcm/matrix-retarget.f32le",
-        &pcm_words_v1(&left, &right),
+        &pcm_words(&left, &right),
     )
 }
 
-fn matrix_pcm_words_v1(matrix: [f32; 4], left: &[f32], right: &[f32]) -> Vec<u32> {
-    let (left, right) = matrix_outputs_v1(matrix, left, right);
-    pcm_words_v1(&left, &right)
+fn matrix_pcm_words(matrix: [f32; 4], left: &[f32], right: &[f32]) -> Vec<u32> {
+    let (left, right) = matrix_outputs(matrix, left, right);
+    pcm_words(&left, &right)
 }
 
-fn matrix_outputs_v1(matrix: [f32; 4], left: &[f32], right: &[f32]) -> (Vec<f32>, Vec<f32>) {
-    matrix_outputs_v1_at(matrix, true, left, right)
+fn matrix_outputs(matrix: [f32; 4], left: &[f32], right: &[f32]) -> (Vec<f32>, Vec<f32>) {
+    matrix_outputs_at(matrix, true, left, right)
 }
 
 /// The matrix arithmetic. The identity pass-through applies only to a **settled** lane: a ramping
 /// lane keeps running the arithmetic even where it passes through the identity matrix.
-fn matrix_outputs_v1_at(
+fn matrix_outputs_at(
     matrix: [f32; 4],
     settled: bool,
     left: &[f32],
@@ -2468,14 +2468,14 @@ fn matrix_outputs_v1_at(
 }
 
 /// The D11 matrix ramp, written out independently of the kernel.
-struct MatrixRampV1 {
+struct MatrixRamp {
     current: [f32; 4],
     target: [f32; 4],
     step: [f32; 4],
     remaining: u32,
 }
 
-impl MatrixRampV1 {
+impl MatrixRamp {
     fn settled(current: [f32; 4]) -> Self {
         Self {
             current,
@@ -2517,44 +2517,44 @@ impl MatrixRampV1 {
     }
 }
 
-fn matrix_ramp_outputs_v1(updates: u32) -> (Vec<f32>, Vec<f32>) {
-    let mut ramp = MatrixRampV1::settled([1.0, 0.0, 0.0, 1.0]);
+fn matrix_ramp_outputs(updates: u32) -> (Vec<f32>, Vec<f32>) {
+    let mut ramp = MatrixRamp::settled([1.0, 0.0, 0.0, 1.0]);
     ramp.set_target([0.0, 1.0, 1.0, 0.0], updates);
     let mut left = Vec::with_capacity(128);
     let mut right = Vec::with_capacity(128);
     for _ in 0..128 {
         let (current, settled) = ramp.advance();
-        let (output_left, output_right) = matrix_outputs_v1_at(current, settled, &[1.0], &[-0.5]);
+        let (output_left, output_right) = matrix_outputs_at(current, settled, &[1.0], &[-0.5]);
         left.push(output_left[0]);
         right.push(output_right[0]);
     }
     (left, right)
 }
 
-fn matrix_retarget_outputs_v1() -> (Vec<f32>, Vec<f32>) {
+fn matrix_retarget_outputs() -> (Vec<f32>, Vec<f32>) {
     let swap = [0.0, 1.0, 1.0, 0.0];
     let identity = [1.0, 0.0, 0.0, 1.0];
-    let mut ramp = MatrixRampV1::settled(identity);
+    let mut ramp = MatrixRamp::settled(identity);
     ramp.set_target(swap, 8);
     let mut left = Vec::with_capacity(12);
     let mut right = Vec::with_capacity(12);
     for _ in 0..4 {
         let (current, settled) = ramp.advance();
-        let (output_left, output_right) = matrix_outputs_v1_at(current, settled, &[1.0], &[-0.5]);
+        let (output_left, output_right) = matrix_outputs_at(current, settled, &[1.0], &[-0.5]);
         left.push(output_left[0]);
         right.push(output_right[0]);
     }
     ramp.set_target(identity, 8);
     for _ in 0..8 {
         let (current, settled) = ramp.advance();
-        let (output_left, output_right) = matrix_outputs_v1_at(current, settled, &[1.0], &[-0.5]);
+        let (output_left, output_right) = matrix_outputs_at(current, settled, &[1.0], &[-0.5]);
         left.push(output_left[0]);
         right.push(output_right[0]);
     }
     (left, right)
 }
 
-fn pcm_words_v1(left: &[f32], right: &[f32]) -> Vec<u32> {
+fn pcm_words(left: &[f32], right: &[f32]) -> Vec<u32> {
     left.iter()
         .chain(right)
         .copied()
@@ -2562,8 +2562,8 @@ fn pcm_words_v1(left: &[f32], right: &[f32]) -> Vec<u32> {
         .collect()
 }
 
-fn verify_pcm_words_v1(root: &Path, path: &str, expected: &[u32]) -> Result<(), String> {
-    let actual = read_pcm_words_v1(root, path)?;
+fn verify_pcm_words(root: &Path, path: &str, expected: &[u32]) -> Result<(), String> {
+    let actual = read_pcm_words(root, path)?;
     if actual == expected {
         return Ok(());
     }
@@ -2579,7 +2579,7 @@ fn verify_pcm_words_v1(root: &Path, path: &str, expected: &[u32]) -> Result<(), 
     ))
 }
 
-fn read_pcm_words_v1(root: &Path, path: &str) -> Result<Vec<u32>, String> {
+fn read_pcm_words(root: &Path, path: &str) -> Result<Vec<u32>, String> {
     let bytes = read_regular_file(&root.join(path), path)?;
     let chunks = bytes.chunks_exact(4);
     if !chunks.remainder().is_empty() || bytes.len() % 8 != 0 {
@@ -2592,9 +2592,9 @@ fn read_pcm_words_v1(root: &Path, path: &str) -> Result<Vec<u32>, String> {
         .collect())
 }
 
-fn verify_graph_tap_output_relation_v1(root: &Path) -> Result<(), String> {
-    let expected = graph_fixture_expected_v1()?;
-    verify_pcm_words_v1(root, "pcm/graph-taps.f32le", &expected.output_words())?;
+fn verify_graph_tap_output_relation(root: &Path) -> Result<(), String> {
+    let expected = graph_fixture_expected()?;
+    verify_pcm_words(root, "pcm/graph-taps.f32le", &expected.output_words())?;
     if expected.early.0[..9]
         .iter()
         .chain(&expected.early.1[..9])
@@ -2628,7 +2628,7 @@ fn verify_graph_tap_output_relation_v1(root: &Path) -> Result<(), String> {
     ]);
     let actual_taps: BTreeSet<_> = records
         .iter()
-        .map(|record| json_string_field_v1(record, "tap"))
+        .map(|record| json_string_field(record, "tap"))
         .collect::<Result<_, _>>()?;
     if actual_taps != expected_taps || records.len() != expected_taps.len() {
         return Err(
@@ -2637,10 +2637,10 @@ fn verify_graph_tap_output_relation_v1(root: &Path) -> Result<(), String> {
     }
     let post_matrix = records
         .iter()
-        .find(|record| json_string_field_v1(record, "tap") == Ok("PostMatrix"))
+        .find(|record| json_string_field(record, "tap") == Ok("PostMatrix"))
         .ok_or_else(|| "graph-taps has no PostMatrix record".to_owned())?;
-    if json_string_field_v1(post_matrix, "case")? != "graph-taps"
-        || json_u64_field_v1(post_matrix, "frames")? != 128
+    if json_string_field(post_matrix, "case")? != "graph-taps"
+        || json_u64_field(post_matrix, "frames")? != 128
     {
         return Err("graph-taps PostMatrix declaration is invalid".to_owned());
     }
@@ -2656,11 +2656,11 @@ fn verify_graph_tap_output_relation_v1(root: &Path) -> Result<(), String> {
         .iter()
         .map(|sample| sample.to_bits())
         .collect();
-    verify_graph_lane_summary_v1(post_matrix, "left", &matrix_left)?;
-    verify_graph_lane_summary_v1(post_matrix, "right", &matrix_right)
+    verify_graph_lane_summary(post_matrix, "left", &matrix_left)?;
+    verify_graph_lane_summary(post_matrix, "right", &matrix_right)
 }
 
-fn verify_graph_lane_summary_v1(record: &str, lane: &str, words: &[u32]) -> Result<(), String> {
+fn verify_graph_lane_summary(record: &str, lane: &str, words: &[u32]) -> Result<(), String> {
     let peak = words
         .iter()
         .fold(0.0_f32, |peak, bits| peak.max(f32::from_bits(*bits).abs()));
@@ -2670,8 +2670,8 @@ fn verify_graph_lane_summary_v1(record: &str, lane: &str, words: &[u32]) -> Resu
     });
     let peak_field = format!("{lane}_peak");
     let energy_field = format!("{lane}_energy");
-    if json_u32_hex_field_v1(record, &peak_field)? != peak.to_bits()
-        || json_u64_hex_field_v1(record, &energy_field)? != energy.to_bits()
+    if json_u32_hex_field(record, &peak_field)? != peak.to_bits()
+        || json_u64_hex_field(record, &energy_field)? != energy.to_bits()
     {
         return Err(format!(
             "graph-taps PostMatrix {lane} summary does not match the independent stage model"
@@ -2680,7 +2680,7 @@ fn verify_graph_lane_summary_v1(record: &str, lane: &str, words: &[u32]) -> Resu
     Ok(())
 }
 
-fn json_string_field_v1<'a>(record: &'a str, key: &str) -> Result<&'a str, String> {
+fn json_string_field<'a>(record: &'a str, key: &str) -> Result<&'a str, String> {
     let prefix = format!("\"{key}\":\"");
     let value = record
         .split_once(&prefix)
@@ -2690,7 +2690,7 @@ fn json_string_field_v1<'a>(record: &'a str, key: &str) -> Result<&'a str, Strin
     Ok(value)
 }
 
-fn json_u64_field_v1(record: &str, key: &str) -> Result<u64, String> {
+fn json_u64_field(record: &str, key: &str) -> Result<u64, String> {
     let prefix = format!("\"{key}\":");
     let value = record
         .split_once(&prefix)
@@ -2702,23 +2702,23 @@ fn json_u64_field_v1(record: &str, key: &str) -> Result<u64, String> {
         .map_err(|_| format!("JSONL field is not a decimal u64: {key}"))
 }
 
-fn json_u32_hex_field_v1(record: &str, key: &str) -> Result<u32, String> {
-    u32::from_str_radix(json_string_field_v1(record, key)?, 16)
+fn json_u32_hex_field(record: &str, key: &str) -> Result<u32, String> {
+    u32::from_str_radix(json_string_field(record, key)?, 16)
         .map_err(|_| format!("JSONL field is not a u32 hex word: {key}"))
 }
 
-fn json_u64_hex_field_v1(record: &str, key: &str) -> Result<u64, String> {
-    u64::from_str_radix(json_string_field_v1(record, key)?, 16)
+fn json_u64_hex_field(record: &str, key: &str) -> Result<u64, String> {
+    u64::from_str_radix(json_string_field(record, key)?, 16)
         .map_err(|_| format!("JSONL field is not a u64 hex word: {key}"))
 }
 
-struct JsonParserV1<'a> {
+struct JsonParser<'a> {
     input: &'a [u8],
     cursor: usize,
 }
 
-impl<'a> JsonParserV1<'a> {
-    fn object(input: &'a str) -> Result<BTreeMap<String, JsonValueV1>, String> {
+impl<'a> JsonParser<'a> {
+    fn object(input: &'a str) -> Result<BTreeMap<String, JsonValue>, String> {
         let mut parser = Self {
             input: input.as_bytes(),
             cursor: 0,
@@ -2730,7 +2730,7 @@ impl<'a> JsonParserV1<'a> {
         Ok(object)
     }
 
-    fn parse_object(&mut self) -> Result<BTreeMap<String, JsonValueV1>, String> {
+    fn parse_object(&mut self) -> Result<BTreeMap<String, JsonValue>, String> {
         self.require(b'{')?;
         let mut values = BTreeMap::new();
         if self.take(b'}') {
@@ -2750,19 +2750,19 @@ impl<'a> JsonParserV1<'a> {
         }
     }
 
-    fn parse_value(&mut self) -> Result<JsonValueV1, String> {
+    fn parse_value(&mut self) -> Result<JsonValue, String> {
         match self.peek() {
-            Some(b'"') => self.parse_string().map(JsonValueV1::String),
-            Some(b'{') => self.parse_object().map(JsonValueV1::Object),
+            Some(b'"') => self.parse_string().map(JsonValue::String),
+            Some(b'{') => self.parse_object().map(JsonValue::Object),
             Some(b'n') => {
                 if self.input.get(self.cursor..self.cursor + 4) == Some(b"null") {
                     self.cursor += 4;
-                    Ok(JsonValueV1::Null)
+                    Ok(JsonValue::Null)
                 } else {
                     Err("JSONL value is not canonical null".to_owned())
                 }
             }
-            Some(b'0'..=b'9') => self.parse_unsigned().map(JsonValueV1::Unsigned),
+            Some(b'0'..=b'9') => self.parse_unsigned().map(JsonValue::Unsigned),
             _ => Err("JSONL value has an unsupported type".to_owned()),
         }
     }
@@ -2823,7 +2823,7 @@ impl<'a> JsonParserV1<'a> {
     }
 }
 
-fn exact_json_keys_v1(object: &BTreeMap<String, JsonValueV1>, keys: &[&str]) -> Result<(), String> {
+fn exact_json_keys(object: &BTreeMap<String, JsonValue>, keys: &[&str]) -> Result<(), String> {
     if object.len() == keys.len() && keys.iter().all(|key| object.contains_key(*key)) {
         Ok(())
     } else {
@@ -2831,39 +2831,39 @@ fn exact_json_keys_v1(object: &BTreeMap<String, JsonValueV1>, keys: &[&str]) -> 
     }
 }
 
-fn json_object_string_v1<'a>(
-    object: &'a BTreeMap<String, JsonValueV1>,
+fn json_object_string<'a>(
+    object: &'a BTreeMap<String, JsonValue>,
     key: &str,
 ) -> Result<&'a str, String> {
     match object.get(key) {
-        Some(JsonValueV1::String(value)) => Ok(value),
+        Some(JsonValue::String(value)) => Ok(value),
         _ => Err(format!("JSONL record is missing string field: {key}")),
     }
 }
 
-fn json_object_u64_v1(object: &BTreeMap<String, JsonValueV1>, key: &str) -> Result<u64, String> {
+fn json_object_u64(object: &BTreeMap<String, JsonValue>, key: &str) -> Result<u64, String> {
     match object.get(key) {
-        Some(JsonValueV1::Unsigned(value)) => Ok(*value),
+        Some(JsonValue::Unsigned(value)) => Ok(*value),
         _ => Err(format!("JSONL record is missing unsigned field: {key}")),
     }
 }
 
-fn json_object_v1<'a>(
-    object: &'a BTreeMap<String, JsonValueV1>,
+fn json_object<'a>(
+    object: &'a BTreeMap<String, JsonValue>,
     key: &str,
-) -> Result<&'a BTreeMap<String, JsonValueV1>, String> {
+) -> Result<&'a BTreeMap<String, JsonValue>, String> {
     match object.get(key) {
-        Some(JsonValueV1::Object(value)) => Ok(value),
+        Some(JsonValue::Object(value)) => Ok(value),
         _ => Err(format!("JSONL record is missing object field: {key}")),
     }
 }
 
-fn json_object_hex_v1(
-    object: &BTreeMap<String, JsonValueV1>,
+fn json_object_hex(
+    object: &BTreeMap<String, JsonValue>,
     key: &str,
     width: usize,
 ) -> Result<u64, String> {
-    let value = json_object_string_v1(object, key)?;
+    let value = json_object_string(object, key)?;
     if value.len() != width
         || !value
             .bytes()
@@ -2876,16 +2876,16 @@ fn json_object_hex_v1(
     u64::from_str_radix(value, 16).map_err(|_| format!("JSONL field is not hexadecimal: {key}"))
 }
 
-fn verify_meter_corpus_v1(root: &Path) -> Result<(), String> {
-    let graph = parse_canonical_meter_records_v1(root, "meters/graph-taps.jsonl")?;
-    let expected_graph = expected_graph_meter_records_v1()?;
+fn verify_meter_corpus(root: &Path) -> Result<(), String> {
+    let graph = parse_canonical_meter_records(root, "meters/graph-taps.jsonl")?;
+    let expected_graph = expected_graph_meter_records()?;
     if graph != expected_graph {
         return Err(
             "meters/graph-taps.jsonl differs from the independent seven-tap tuple set".to_owned(),
         );
     }
-    let window = parse_canonical_meter_records_v1(root, "meters/window-and-drop.jsonl")?;
-    let expected_window = expected_window_meter_records_v1()?;
+    let window = parse_canonical_meter_records(root, "meters/window-and-drop.jsonl")?;
+    let expected_window = expected_window_meter_records()?;
     if window != expected_window {
         return Err(
             "meters/window-and-drop.jsonl differs from the independent 15-record tuple set"
@@ -2895,7 +2895,7 @@ fn verify_meter_corpus_v1(root: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn parse_canonical_meter_records_v1(root: &Path, path: &str) -> Result<Vec<MeterRecordV1>, String> {
+fn parse_canonical_meter_records(root: &Path, path: &str) -> Result<Vec<MeterRecord>, String> {
     let bytes = read_regular_file(&root.join(path), path)?;
     let text = std::str::from_utf8(&bytes).map_err(|_| format!("JSONL is not UTF-8: {path}"))?;
     let mut records = Vec::new();
@@ -2904,8 +2904,8 @@ fn parse_canonical_meter_records_v1(root: &Path, path: &str) -> Result<Vec<Meter
         let line = line
             .strip_suffix('\n')
             .ok_or_else(|| format!("meter record is not LF terminated: {path}:{}", index + 1))?;
-        let parsed = parse_meter_record_v1(line)?;
-        let canonical = canonical_meter_record_v1(&parsed);
+        let parsed = parse_meter_record(line)?;
+        let canonical = canonical_meter_record(&parsed);
         if line != canonical {
             return Err(format!(
                 "meter record is not canonical: {path}:{}",
@@ -2927,10 +2927,10 @@ fn parse_canonical_meter_records_v1(root: &Path, path: &str) -> Result<Vec<Meter
     Ok(records)
 }
 
-fn parse_meter_record_v1(record: &str) -> Result<MeterRecordV1, String> {
-    let object = JsonParserV1::object(record)?;
-    if matches!(object.get("snapshot"), Some(JsonValueV1::Null)) {
-        exact_json_keys_v1(
+fn parse_meter_record(record: &str) -> Result<MeterRecord, String> {
+    let object = JsonParser::object(record)?;
+    if matches!(object.get("snapshot"), Some(JsonValue::Null)) {
+        exact_json_keys(
             &object,
             &[
                 "case",
@@ -2940,40 +2940,40 @@ fn parse_meter_record_v1(record: &str) -> Result<MeterRecordV1, String> {
                 "start",
             ],
         )?;
-        return Ok(MeterRecordV1::Partial {
-            case: json_object_string_v1(&object, "case")?.to_owned(),
-            observed_frames: json_object_u64_v1(&object, "observed_frames")?,
-            period_frames: json_object_u64_v1(&object, "period_frames")?,
-            start: json_object_hex_v1(&object, "start", 16)?,
+        return Ok(MeterRecord::Partial {
+            case: json_object_string(&object, "case")?.to_owned(),
+            observed_frames: json_object_u64(&object, "observed_frames")?,
+            period_frames: json_object_u64(&object, "period_frames")?,
+            start: json_object_hex(&object, "start", 16)?,
         });
     }
     if object.contains_key("error") {
-        exact_json_keys_v1(&object, &["case", "error", "path"])?;
-        return Ok(MeterRecordV1::Overflow {
-            case: json_object_string_v1(&object, "case")?.to_owned(),
-            error: json_object_string_v1(&object, "error")?.to_owned(),
-            path: json_object_string_v1(&object, "path")?.to_owned(),
+        exact_json_keys(&object, &["case", "error", "path"])?;
+        return Ok(MeterRecord::Overflow {
+            case: json_object_string(&object, "case")?.to_owned(),
+            error: json_object_string(&object, "error")?.to_owned(),
+            path: json_object_string(&object, "path")?.to_owned(),
         });
     }
     let (tap, snapshot) = if object.contains_key("tap") || object.contains_key("snapshot") {
-        exact_json_keys_v1(&object, &["tap", "snapshot"])?;
+        exact_json_keys(&object, &["tap", "snapshot"])?;
         (
-            Some(json_object_string_v1(&object, "tap")?.to_owned()),
-            json_object_v1(&object, "snapshot")?,
+            Some(json_object_string(&object, "tap")?.to_owned()),
+            json_object(&object, "snapshot")?,
         )
     } else {
         (None, &object)
     };
-    Ok(MeterRecordV1::Snapshot(parse_meter_snapshot_v1(
+    Ok(MeterRecord::Snapshot(parse_meter_snapshot(
         snapshot, tap,
     )?))
 }
 
-fn parse_meter_snapshot_v1(
-    object: &BTreeMap<String, JsonValueV1>,
+fn parse_meter_snapshot(
+    object: &BTreeMap<String, JsonValue>,
     tap: Option<String>,
-) -> Result<MeterSnapshotV1, String> {
-    exact_json_keys_v1(
+) -> Result<MeterSnapshot, String> {
+    exact_json_keys(
         object,
         &[
             "case",
@@ -2997,38 +2997,38 @@ fn parse_meter_snapshot_v1(
             "discontinuities",
         ],
     )?;
-    Ok(MeterSnapshotV1 {
-        case: json_object_string_v1(object, "case")?.to_owned(),
+    Ok(MeterSnapshot {
+        case: json_object_string(object, "case")?.to_owned(),
         tap,
-        handle: json_object_hex_v1(object, "handle", 16)?,
-        reset_generation: json_object_hex_v1(object, "reset_generation", 16)?,
-        sequence: json_object_hex_v1(object, "sequence", 16)?,
-        start: json_object_hex_v1(object, "start", 16)?,
-        end: json_object_hex_v1(object, "end", 16)?,
-        frames: json_object_u64_v1(object, "frames")?,
-        left_peak: u32::try_from(json_object_hex_v1(object, "left_peak", 8)?)
+        handle: json_object_hex(object, "handle", 16)?,
+        reset_generation: json_object_hex(object, "reset_generation", 16)?,
+        sequence: json_object_hex(object, "sequence", 16)?,
+        start: json_object_hex(object, "start", 16)?,
+        end: json_object_hex(object, "end", 16)?,
+        frames: json_object_u64(object, "frames")?,
+        left_peak: u32::try_from(json_object_hex(object, "left_peak", 8)?)
             .map_err(|_| "JSONL left_peak does not fit u32".to_owned())?,
-        right_peak: u32::try_from(json_object_hex_v1(object, "right_peak", 8)?)
+        right_peak: u32::try_from(json_object_hex(object, "right_peak", 8)?)
             .map_err(|_| "JSONL right_peak does not fit u32".to_owned())?,
-        left_held_peak: u32::try_from(json_object_hex_v1(object, "left_held_peak", 8)?)
+        left_held_peak: u32::try_from(json_object_hex(object, "left_held_peak", 8)?)
             .map_err(|_| "JSONL left_held_peak does not fit u32".to_owned())?,
-        right_held_peak: u32::try_from(json_object_hex_v1(object, "right_held_peak", 8)?)
+        right_held_peak: u32::try_from(json_object_hex(object, "right_held_peak", 8)?)
             .map_err(|_| "JSONL right_held_peak does not fit u32".to_owned())?,
-        left_energy: json_object_hex_v1(object, "left_energy", 16)?,
-        right_energy: json_object_hex_v1(object, "right_energy", 16)?,
-        left_rms: json_object_hex_v1(object, "left_rms", 16)?,
-        right_rms: json_object_hex_v1(object, "right_rms", 16)?,
-        clipped: json_object_hex_v1(object, "clipped", 16)?,
-        sanitized: json_object_hex_v1(object, "sanitized", 16)?,
-        dropped: json_object_hex_v1(object, "dropped", 16)?,
-        discontinuities: json_object_hex_v1(object, "discontinuities", 16)?,
+        left_energy: json_object_hex(object, "left_energy", 16)?,
+        right_energy: json_object_hex(object, "right_energy", 16)?,
+        left_rms: json_object_hex(object, "left_rms", 16)?,
+        right_rms: json_object_hex(object, "right_rms", 16)?,
+        clipped: json_object_hex(object, "clipped", 16)?,
+        sanitized: json_object_hex(object, "sanitized", 16)?,
+        dropped: json_object_hex(object, "dropped", 16)?,
+        discontinuities: json_object_hex(object, "discontinuities", 16)?,
     })
 }
 
-fn canonical_meter_record_v1(record: &MeterRecordV1) -> String {
+fn canonical_meter_record(record: &MeterRecord) -> String {
     match record {
-        MeterRecordV1::Snapshot(snapshot) => {
-            let canonical_snapshot = canonical_meter_snapshot_v1(snapshot);
+        MeterRecord::Snapshot(snapshot) => {
+            let canonical_snapshot = canonical_meter_snapshot(snapshot);
             snapshot
                 .tap
                 .as_ref()
@@ -3036,7 +3036,7 @@ fn canonical_meter_record_v1(record: &MeterRecordV1) -> String {
                     format!("{{\"tap\":\"{tap}\",\"snapshot\":{canonical_snapshot}}}")
                 })
         }
-        MeterRecordV1::Partial {
+        MeterRecord::Partial {
             case,
             observed_frames,
             period_frames,
@@ -3044,13 +3044,13 @@ fn canonical_meter_record_v1(record: &MeterRecordV1) -> String {
         } => format!(
             "{{\"case\":\"{case}\",\"snapshot\":null,\"observed_frames\":{observed_frames},\"period_frames\":{period_frames},\"start\":\"{start:016x}\"}}"
         ),
-        MeterRecordV1::Overflow { case, error, path } => {
+        MeterRecord::Overflow { case, error, path } => {
             format!("{{\"case\":\"{case}\",\"error\":\"{error}\",\"path\":\"{path}\"}}")
         }
     }
 }
 
-fn canonical_meter_snapshot_v1(snapshot: &MeterSnapshotV1) -> String {
+fn canonical_meter_snapshot(snapshot: &MeterSnapshot) -> String {
     format!(
         "{{\"case\":\"{}\",\"handle\":\"{:016x}\",\"reset_generation\":\"{:016x}\",\"sequence\":\"{:016x}\",\"start\":\"{:016x}\",\"end\":\"{:016x}\",\"frames\":{},\"left_peak\":\"{:08x}\",\"right_peak\":\"{:08x}\",\"left_held_peak\":\"{:08x}\",\"right_held_peak\":\"{:08x}\",\"left_energy\":\"{:016x}\",\"right_energy\":\"{:016x}\",\"left_rms\":\"{:016x}\",\"right_rms\":\"{:016x}\",\"clipped\":\"{:016x}\",\"sanitized\":\"{:016x}\",\"dropped\":\"{:016x}\",\"discontinuities\":\"{:016x}\"}}",
         snapshot.case,
@@ -3075,12 +3075,12 @@ fn canonical_meter_snapshot_v1(snapshot: &MeterSnapshotV1) -> String {
     )
 }
 
-fn verify_diagnostics_v1(root: &Path) -> Result<(), String> {
+fn verify_diagnostics(root: &Path) -> Result<(), String> {
     let bytes = read_regular_file(&root.join("diagnostics.jsonl"), "diagnostics.jsonl")?;
     let text =
         std::str::from_utf8(&bytes).map_err(|_| "diagnostics.jsonl is not UTF-8".to_owned())?;
-    let actual = parse_canonical_diagnostics_v1(text)?;
-    let expected = expected_diagnostics_v1();
+    let actual = parse_canonical_diagnostics(text)?;
+    let expected = expected_diagnostics();
     if actual != expected {
         return Err(
             "diagnostics.jsonl differs from the exact 13 stable code/path tuples".to_owned(),
@@ -3089,28 +3089,28 @@ fn verify_diagnostics_v1(root: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn parse_canonical_diagnostics_v1(text: &str) -> Result<Vec<DiagnosticRecordV1>, String> {
+fn parse_canonical_diagnostics(text: &str) -> Result<Vec<DiagnosticRecord>, String> {
     let mut records = Vec::new();
     let mut previous = None::<String>;
     for (index, line) in text.split_inclusive('\n').enumerate() {
         let line = line
             .strip_suffix('\n')
             .ok_or_else(|| format!("diagnostic record is not LF terminated: {}", index + 1))?;
-        let object = JsonParserV1::object(line)?;
+        let object = JsonParser::object(line)?;
         let error = if object.contains_key("error") {
-            exact_json_keys_v1(&object, &["case", "code", "path", "error"])?;
-            Some(json_object_string_v1(&object, "error")?.to_owned())
+            exact_json_keys(&object, &["case", "code", "path", "error"])?;
+            Some(json_object_string(&object, "error")?.to_owned())
         } else {
-            exact_json_keys_v1(&object, &["case", "code", "path"])?;
+            exact_json_keys(&object, &["case", "code", "path"])?;
             None
         };
-        let parsed = DiagnosticRecordV1 {
-            case: json_object_string_v1(&object, "case")?.to_owned(),
-            code: json_object_string_v1(&object, "code")?.to_owned(),
-            path: json_object_string_v1(&object, "path")?.to_owned(),
+        let parsed = DiagnosticRecord {
+            case: json_object_string(&object, "case")?.to_owned(),
+            code: json_object_string(&object, "code")?.to_owned(),
+            path: json_object_string(&object, "path")?.to_owned(),
             error,
         };
-        let canonical = canonical_diagnostic_v1(&parsed);
+        let canonical = canonical_diagnostic(&parsed);
         if line != canonical {
             return Err(format!("diagnostic record is not canonical: {}", index + 1));
         }
@@ -3126,7 +3126,7 @@ fn parse_canonical_diagnostics_v1(text: &str) -> Result<Vec<DiagnosticRecordV1>,
     Ok(records)
 }
 
-fn canonical_diagnostic_v1(record: &DiagnosticRecordV1) -> String {
+fn canonical_diagnostic(record: &DiagnosticRecord) -> String {
     let mut output = format!(
         "{{\"case\":\"{}\",\"code\":\"{}\",\"path\":\"{}\"",
         record.case, record.code, record.path
@@ -3138,7 +3138,7 @@ fn canonical_diagnostic_v1(record: &DiagnosticRecordV1) -> String {
     output
 }
 
-fn expected_diagnostics_v1() -> Vec<DiagnosticRecordV1> {
+fn expected_diagnostics() -> Vec<DiagnosticRecord> {
     [
         (
             "block-length",
@@ -3220,7 +3220,7 @@ fn expected_diagnostics_v1() -> Vec<DiagnosticRecordV1> {
         ),
     ]
     .into_iter()
-    .map(|(case, code, path, error)| DiagnosticRecordV1 {
+    .map(|(case, code, path, error)| DiagnosticRecord {
         case: case.to_owned(),
         code: code.to_owned(),
         path: path.to_owned(),
@@ -3229,8 +3229,8 @@ fn expected_diagnostics_v1() -> Vec<DiagnosticRecordV1> {
     .collect()
 }
 
-fn verify_resources_v1(root: &Path) -> Result<(), String> {
-    verify_pinned_native_resource_abi_v1()?;
+fn verify_resources(root: &Path) -> Result<(), String> {
+    verify_pinned_native_resource_abi()?;
     let bytes = read_regular_file(&root.join("resources.jsonl"), "resources.jsonl")?;
     let text =
         std::str::from_utf8(&bytes).map_err(|_| "resources.jsonl is not UTF-8".to_owned())?;
@@ -3240,8 +3240,8 @@ fn verify_resources_v1(root: &Path) -> Result<(), String> {
         let line = line
             .strip_suffix('\n')
             .ok_or_else(|| format!("resource record is not LF terminated: {}", index + 1))?;
-        let parsed = parse_resource_record_v1(line)?;
-        if line != canonical_resource_v1(&parsed) {
+        let parsed = parse_resource_record(line)?;
+        if line != canonical_resource(&parsed) {
             return Err(format!("resource record is not canonical: {}", index + 1));
         }
         if previous.as_deref().is_some_and(|previous| previous >= line) {
@@ -3251,19 +3251,19 @@ fn verify_resources_v1(root: &Path) -> Result<(), String> {
             ));
         }
         previous = Some(line.to_owned());
-        validate_resource_record_v1(&parsed)?;
+        validate_resource_record(&parsed)?;
         actual.push(parsed);
     }
-    let expected = expected_resource_records_v1()?;
+    let expected = expected_resource_records()?;
     if actual != expected {
         return Err("resources.jsonl differs from the exact 3-by-3 V1 resource grid".to_owned());
     }
     Ok(())
 }
 
-fn parse_resource_record_v1(record: &str) -> Result<ResourceRecordV1, String> {
-    let object = JsonParserV1::object(record)?;
-    exact_json_keys_v1(
+fn parse_resource_record(record: &str) -> Result<ResourceRecord, String> {
+    let object = JsonParser::object(record)?;
+    exact_json_keys(
         &object,
         &[
             "tracks",
@@ -3277,90 +3277,90 @@ fn parse_resource_record_v1(record: &str) -> Result<ResourceRecordV1, String> {
             "retained_allocation_count",
         ],
     )?;
-    Ok(ResourceRecordV1 {
-        tracks: json_object_u64_v1(&object, "tracks")?,
-        meters: json_object_u64_v1(&object, "meters")?,
-        queue_capacity: json_object_u64_v1(&object, "queue_capacity")?,
-        meter_items: json_object_u64_v1(&object, "meter_items")?,
-        processor_bytes: json_object_u64_v1(&object, "engine_owned_processor_payload_bytes")?,
-        meter_bytes: json_object_u64_v1(&object, "engine_owned_meter_payload_bytes")?,
-        retained_bytes: json_object_u64_v1(&object, "engine_owned_retained_payload_bytes")?,
-        maximum_single_allocation_bytes: json_object_u64_v1(
+    Ok(ResourceRecord {
+        tracks: json_object_u64(&object, "tracks")?,
+        meters: json_object_u64(&object, "meters")?,
+        queue_capacity: json_object_u64(&object, "queue_capacity")?,
+        meter_items: json_object_u64(&object, "meter_items")?,
+        processor_bytes: json_object_u64(&object, "engine_owned_processor_payload_bytes")?,
+        meter_bytes: json_object_u64(&object, "engine_owned_meter_payload_bytes")?,
+        retained_bytes: json_object_u64(&object, "engine_owned_retained_payload_bytes")?,
+        maximum_single_allocation_bytes: json_object_u64(
             &object,
             "maximum_single_allocation_bytes",
         )?,
-        allocation_count: json_object_u64_v1(&object, "retained_allocation_count")?,
+        allocation_count: json_object_u64(&object, "retained_allocation_count")?,
     })
 }
 
-fn expected_resource_records_v1() -> Result<Vec<ResourceRecordV1>, String> {
+fn expected_resource_records() -> Result<Vec<ResourceRecord>, String> {
     let mut records = Vec::with_capacity(9);
     for tracks in [1_u64, 4, 65_537] {
         for meters in [0_u64, 1, 7] {
-            records.push(derive_resource_record_v1(tracks, meters)?);
+            records.push(derive_resource_record(tracks, meters)?);
         }
     }
     Ok(records)
 }
 
-fn derive_resource_record_v1(tracks: u64, meters: u64) -> Result<ResourceRecordV1, String> {
-    let processor_count = resource_product_v1(tracks, 3)?;
+fn derive_resource_record(tracks: u64, meters: u64) -> Result<ResourceRecord, String> {
+    let processor_count = resource_product(tracks, 3)?;
     // **No** binding per track since #210 phase 3: all three stages ride the strip vector, and are
     // boxed only if lowering keeps them as per-node processors. The binding vector is empty at
-    // preparation and so allocates nothing -- `GRAPH_NODE_BINDING_BYTES_V1` stays pinned above,
+    // preparation and so allocates nothing -- `GRAPH_NODE_BINDING_BYTES` stays pinned above,
     // because the *lowering* still builds that vector and the ABI check still names the type.
-    let processor_vectors = resource_sum_v1(&[
-        resource_product_v1(tracks, STRIP_PREPARATION_BYTES_V1)?,
-        resource_product_v1(tracks, BOXED_INPUT_ENTRY_BYTES_V1)?,
-        resource_product_v1(tracks, BOXED_TAIL_ENTRY_BYTES_V1)?,
-        resource_product_v1(tracks, BOXED_STR_BYTES_V1)?,
-        resource_product_v1(processor_count, BOXED_STAGE_ENTRY_BYTES_V1)?,
-        resource_product_v1(tracks, BOXED_TAIL_ENTRY_BYTES_V1)?,
+    let processor_vectors = resource_sum(&[
+        resource_product(tracks, STRIP_PREPARATION_BYTES)?,
+        resource_product(tracks, BOXED_INPUT_ENTRY_BYTES)?,
+        resource_product(tracks, BOXED_TAIL_ENTRY_BYTES)?,
+        resource_product(tracks, BOXED_STR_BYTES)?,
+        resource_product(processor_count, BOXED_STAGE_ENTRY_BYTES)?,
+        resource_product(tracks, BOXED_TAIL_ENTRY_BYTES)?,
     ])?;
     // Nothing is boxed at preparation. The input, fader and matrix sections are still exactly
     // `InputBuiltins`, `FaderMuteBuiltins` and `MatrixBuiltins`, but all three now sit inline
-    // inside `STRIP_PREPARATION_BYTES_V1` above rather than behind a `Box` of their own.
-    let track_identity_bytes = resource_track_identity_bytes_v1(tracks)?;
-    let processor_bytes = resource_sum_v1(&[
+    // inside `STRIP_PREPARATION_BYTES` above rather than behind a `Box` of their own.
+    let track_identity_bytes = resource_track_identity_bytes(tracks)?;
+    let processor_bytes = resource_sum(&[
         processor_vectors,
-        resource_product_v1(track_identity_bytes, 9)?,
+        resource_product(track_identity_bytes, 9)?,
     ])?;
     let processor_maximum = [
-        resource_product_v1(tracks, STRIP_PREPARATION_BYTES_V1)?,
-        resource_product_v1(tracks, BOXED_INPUT_ENTRY_BYTES_V1)?,
-        resource_product_v1(tracks, BOXED_TAIL_ENTRY_BYTES_V1)?,
-        resource_product_v1(tracks, BOXED_STR_BYTES_V1)?,
-        resource_product_v1(processor_count, BOXED_STAGE_ENTRY_BYTES_V1)?,
-        resource_maximum_track_identity_bytes_v1(tracks),
+        resource_product(tracks, STRIP_PREPARATION_BYTES)?,
+        resource_product(tracks, BOXED_INPUT_ENTRY_BYTES)?,
+        resource_product(tracks, BOXED_TAIL_ENTRY_BYTES)?,
+        resource_product(tracks, BOXED_STR_BYTES)?,
+        resource_product(processor_count, BOXED_STAGE_ENTRY_BYTES)?,
+        resource_maximum_track_identity_bytes(tracks),
     ]
     .into_iter()
     .max()
     .ok_or_else(|| "empty processor resource projection".to_owned())?;
     // Six vectors (the binding vector left), and nine allocations per track: the nine
     // independently retained copies of the track's ID, and no boxed processor at all.
-    let processor_allocations = resource_sum_v1(&[6, resource_product_v1(tracks, 9)?])?;
+    let processor_allocations = resource_sum(&[6, resource_product(tracks, 9)?])?;
 
     let queue_capacity = if meters == 7 { 4 } else { 1 };
     let slot_count = queue_capacity + 1;
-    let meter_items = resource_product_v1(meters, slot_count)?;
+    let meter_items = resource_product(meters, slot_count)?;
     let request_identity_bytes = if tracks == 1 { 5 } else { 7 };
-    let meter_vector_bytes_per_request = resource_sum_v1(&[
-        GRAPH_OBSERVER_BINDING_BYTES_V1,
-        METER_CONSUMER_BYTES_V1,
-        METER_REQUEST_SEAL_BYTES_V1,
-        METER_REQUEST_SEAL_BYTES_V1,
-        OBSERVER_SEAL_BYTES_V1,
-        CONSUMER_SEAL_BYTES_V1,
+    let meter_vector_bytes_per_request = resource_sum(&[
+        GRAPH_OBSERVER_BINDING_BYTES,
+        METER_CONSUMER_BYTES,
+        METER_REQUEST_SEAL_BYTES,
+        METER_REQUEST_SEAL_BYTES,
+        OBSERVER_SEAL_BYTES,
+        CONSUMER_SEAL_BYTES,
     ])?;
-    let meter_payload_bytes_per_request = resource_sum_v1(&[
-        METER_QUEUE_HEADER_BYTES_V1,
-        resource_product_v1(slot_count, METER_SNAPSHOT_BYTES_V1)?,
-        METER_OBSERVER_BYTES_V1,
-        resource_product_v1(request_identity_bytes, 6)?,
+    let meter_payload_bytes_per_request = resource_sum(&[
+        METER_QUEUE_HEADER_BYTES,
+        resource_product(slot_count, METER_SNAPSHOT_BYTES)?,
+        METER_OBSERVER_BYTES,
+        resource_product(request_identity_bytes, 6)?,
     ])?;
-    let meter_bytes = resource_product_v1(
+    let meter_bytes = resource_product(
         meters,
-        resource_sum_v1(&[
+        resource_sum(&[
             meter_vector_bytes_per_request,
             meter_payload_bytes_per_request,
         ])?,
@@ -3369,14 +3369,14 @@ fn derive_resource_record_v1(tracks: u64, meters: u64) -> Result<ResourceRecordV
         0
     } else {
         [
-            resource_product_v1(meters, GRAPH_OBSERVER_BINDING_BYTES_V1)?,
-            resource_product_v1(meters, METER_CONSUMER_BYTES_V1)?,
-            resource_product_v1(meters, METER_REQUEST_SEAL_BYTES_V1)?,
-            resource_product_v1(meters, OBSERVER_SEAL_BYTES_V1)?,
-            resource_product_v1(meters, CONSUMER_SEAL_BYTES_V1)?,
-            METER_QUEUE_HEADER_BYTES_V1,
-            resource_product_v1(slot_count, METER_SNAPSHOT_BYTES_V1)?,
-            METER_OBSERVER_BYTES_V1,
+            resource_product(meters, GRAPH_OBSERVER_BINDING_BYTES)?,
+            resource_product(meters, METER_CONSUMER_BYTES)?,
+            resource_product(meters, METER_REQUEST_SEAL_BYTES)?,
+            resource_product(meters, OBSERVER_SEAL_BYTES)?,
+            resource_product(meters, CONSUMER_SEAL_BYTES)?,
+            METER_QUEUE_HEADER_BYTES,
+            resource_product(slot_count, METER_SNAPSHOT_BYTES)?,
+            METER_OBSERVER_BYTES,
             request_identity_bytes,
         ]
         .into_iter()
@@ -3386,10 +3386,10 @@ fn derive_resource_record_v1(tracks: u64, meters: u64) -> Result<ResourceRecordV
     let meter_allocations = if meters == 0 {
         0
     } else {
-        resource_sum_v1(&[6, resource_product_v1(meters, 9)?])?
+        resource_sum(&[6, resource_product(meters, 9)?])?
     };
-    let retained_bytes = resource_sum_v1(&[processor_bytes, meter_bytes])?;
-    Ok(ResourceRecordV1 {
+    let retained_bytes = resource_sum(&[processor_bytes, meter_bytes])?;
+    Ok(ResourceRecord {
         tracks,
         meters,
         queue_capacity,
@@ -3398,28 +3398,28 @@ fn derive_resource_record_v1(tracks: u64, meters: u64) -> Result<ResourceRecordV
         meter_bytes,
         retained_bytes,
         maximum_single_allocation_bytes: processor_maximum.max(meter_maximum),
-        allocation_count: resource_sum_v1(&[processor_allocations, meter_allocations])?,
+        allocation_count: resource_sum(&[processor_allocations, meter_allocations])?,
     })
 }
 
-fn resource_track_identity_bytes_v1(tracks: u64) -> Result<u64, String> {
+fn resource_track_identity_bytes(tracks: u64) -> Result<u64, String> {
     if tracks == 1 {
         return Ok(5);
     }
     (0..tracks).try_fold(0_u64, |total, index| {
-        resource_sum_v1(&[total, 6, decimal_digits_v1(index)])
+        resource_sum(&[total, 6, decimal_digits(index)])
     })
 }
 
-fn resource_maximum_track_identity_bytes_v1(tracks: u64) -> u64 {
+fn resource_maximum_track_identity_bytes(tracks: u64) -> u64 {
     if tracks == 1 {
         5
     } else {
-        6 + decimal_digits_v1(tracks - 1)
+        6 + decimal_digits(tracks - 1)
     }
 }
 
-fn decimal_digits_v1(mut value: u64) -> u64 {
+fn decimal_digits(mut value: u64) -> u64 {
     let mut digits = 1;
     while value >= 10 {
         value /= 10;
@@ -3428,12 +3428,12 @@ fn decimal_digits_v1(mut value: u64) -> u64 {
     digits
 }
 
-fn resource_product_v1(left: u64, right: u64) -> Result<u64, String> {
+fn resource_product(left: u64, right: u64) -> Result<u64, String> {
     left.checked_mul(right)
         .ok_or_else(|| "pinned resource projection multiplication overflowed".to_owned())
 }
 
-fn resource_sum_v1(values: &[u64]) -> Result<u64, String> {
+fn resource_sum(values: &[u64]) -> Result<u64, String> {
     values.iter().try_fold(0_u64, |total, value| {
         total
             .checked_add(*value)
@@ -3441,7 +3441,7 @@ fn resource_sum_v1(values: &[u64]) -> Result<u64, String> {
     })
 }
 
-fn verify_pinned_native_resource_abi_v1() -> Result<(), String> {
+fn verify_pinned_native_resource_abi() -> Result<(), String> {
     let expected = [
         (
             "usize",
@@ -3459,77 +3459,77 @@ fn verify_pinned_native_resource_abi_v1() -> Result<(), String> {
         ),
         (
             "MeterSnapshot",
-            METER_SNAPSHOT_BYTES_V1 as usize,
+            METER_SNAPSHOT_BYTES as usize,
             8,
             core::mem::size_of::<miso_engine_builtins::MeterSnapshot>(),
             core::mem::align_of::<miso_engine_builtins::MeterSnapshot>(),
         ),
         (
             "GraphNodeBinding",
-            GRAPH_NODE_BINDING_BYTES_V1 as usize,
+            GRAPH_NODE_BINDING_BYTES as usize,
             8,
             core::mem::size_of::<miso_engine_graph::GraphNodeBinding>(),
             core::mem::align_of::<miso_engine_graph::GraphNodeBinding>(),
         ),
         (
             "boxed InputBuiltins entry",
-            BOXED_INPUT_ENTRY_BYTES_V1 as usize,
+            BOXED_INPUT_ENTRY_BYTES as usize,
             8,
             core::mem::size_of::<(Box<str>, miso_engine_builtins::InputBuiltins)>(),
             core::mem::align_of::<(Box<str>, miso_engine_builtins::InputBuiltins)>(),
         ),
         (
             "boxed BuiltinTail entry",
-            BOXED_TAIL_ENTRY_BYTES_V1 as usize,
+            BOXED_TAIL_ENTRY_BYTES as usize,
             8,
             core::mem::size_of::<(Box<str>, miso_engine_builtins::BuiltinTail)>(),
             core::mem::align_of::<(Box<str>, miso_engine_builtins::BuiltinTail)>(),
         ),
         (
             "boxed TrackStage entry",
-            BOXED_STAGE_ENTRY_BYTES_V1 as usize,
+            BOXED_STAGE_ENTRY_BYTES as usize,
             8,
             core::mem::size_of::<(Box<str>, miso_engine_graph::TrackStage)>(),
             core::mem::align_of::<(Box<str>, miso_engine_graph::TrackStage)>(),
         ),
         (
             "InputBuiltins",
-            INPUT_PROCESSOR_BYTES_V1 as usize,
+            INPUT_PROCESSOR_BYTES as usize,
             8,
             core::mem::size_of::<miso_engine_builtins::InputBuiltins>(),
             core::mem::align_of::<miso_engine_builtins::InputBuiltins>(),
         ),
         (
             "FaderMuteBuiltins",
-            FADER_PROCESSOR_BYTES_V1 as usize,
+            FADER_PROCESSOR_BYTES as usize,
             4,
             core::mem::size_of::<miso_engine_builtins::FaderMuteBuiltins>(),
             core::mem::align_of::<miso_engine_builtins::FaderMuteBuiltins>(),
         ),
         (
             "MatrixBuiltins",
-            MATRIX_PROCESSOR_BYTES_V1 as usize,
+            MATRIX_PROCESSOR_BYTES as usize,
             4,
             core::mem::size_of::<miso_engine_builtins::MatrixBuiltins>(),
             core::mem::align_of::<miso_engine_builtins::MatrixBuiltins>(),
         ),
         (
             "GraphNodeObserverBinding",
-            GRAPH_OBSERVER_BINDING_BYTES_V1 as usize,
+            GRAPH_OBSERVER_BINDING_BYTES as usize,
             8,
             core::mem::size_of::<miso_engine_graph::GraphNodeObserverBinding>(),
             core::mem::align_of::<miso_engine_graph::GraphNodeObserverBinding>(),
         ),
         (
             "MeterConsumer",
-            METER_CONSUMER_BYTES_V1 as usize,
+            METER_CONSUMER_BYTES as usize,
             8,
             core::mem::size_of::<miso_engine_builtins_compiler::MeterConsumer>(),
             core::mem::align_of::<miso_engine_builtins_compiler::MeterConsumer>(),
         ),
         (
             "MeterAccumulator",
-            METER_OBSERVER_BYTES_V1 as usize,
+            METER_OBSERVER_BYTES as usize,
             8,
             core::mem::size_of::<miso_engine_builtins::MeterAccumulator>(),
             core::mem::align_of::<miso_engine_builtins::MeterAccumulator>(),
@@ -3553,9 +3553,9 @@ fn verify_pinned_native_resource_abi_v1() -> Result<(), String> {
                 size != expected_size || align != expected_align
             })
         || queue.slot_count != 2
-        || queue.ring_header_bytes != METER_QUEUE_HEADER_BYTES_V1 as usize
+        || queue.ring_header_bytes != METER_QUEUE_HEADER_BYTES as usize
         || queue.ring_header_align != 64
-        || queue.slot_payload_bytes != resource_product_v1(2, METER_SNAPSHOT_BYTES_V1)? as usize
+        || queue.slot_payload_bytes != resource_product(2, METER_SNAPSHOT_BYTES)? as usize
         || queue.slot_payload_align != 8
     {
         return Err("resources.jsonl requires the pinned 64-bit native fixture ABI".to_owned());
@@ -3563,7 +3563,7 @@ fn verify_pinned_native_resource_abi_v1() -> Result<(), String> {
     Ok(())
 }
 
-fn canonical_resource_v1(record: &ResourceRecordV1) -> String {
+fn canonical_resource(record: &ResourceRecord) -> String {
     format!(
         "{{\"tracks\":{},\"meters\":{},\"queue_capacity\":{},\"meter_items\":{},\"engine_owned_processor_payload_bytes\":{},\"engine_owned_meter_payload_bytes\":{},\"engine_owned_retained_payload_bytes\":{},\"maximum_single_allocation_bytes\":{},\"retained_allocation_count\":{}}}",
         record.tracks,
@@ -3578,7 +3578,7 @@ fn canonical_resource_v1(record: &ResourceRecordV1) -> String {
     )
 }
 
-fn validate_resource_record_v1(record: &ResourceRecordV1) -> Result<(), String> {
+fn validate_resource_record(record: &ResourceRecord) -> Result<(), String> {
     let expected_capacity = if record.meters == 7 { 4 } else { 1 };
     let expected_items = match record.meters {
         0 => 0,
@@ -3603,9 +3603,9 @@ fn validate_resource_record_v1(record: &ResourceRecordV1) -> Result<(), String> 
     Ok(())
 }
 
-impl ReferenceMeterV1 {
-    fn new(config: ReferenceMeterConfigV1) -> Self {
-        let decay = reference_sanitize_f32_v1(
+impl ReferenceMeter {
+    fn new(config: ReferenceMeterConfig) -> Self {
+        let decay = reference_sanitize_f32(
             10.0_f64.powf(-f64::from(config.peak_decay_db_per_second) / (20.0 * 48_000.0)) as f32,
         );
         Self {
@@ -3614,8 +3614,8 @@ impl ReferenceMeterV1 {
             start: None,
             frames: 0,
             sequence: 0,
-            left: reference_meter_lane_v1(),
-            right: reference_meter_lane_v1(),
+            left: reference_meter_lane(),
+            right: reference_meter_lane(),
             clipped: 0,
             sanitized: 0,
             discontinuities: 0,
@@ -3642,7 +3642,7 @@ impl ReferenceMeterV1 {
             self.start = Some(first_sample);
         }
         for (&left, &right) in left.iter().zip(right) {
-            reference_meter_observe_lane_v1(
+            reference_meter_observe_lane(
                 &mut self.left,
                 left,
                 self.config,
@@ -3650,7 +3650,7 @@ impl ReferenceMeterV1 {
                 &mut self.clipped,
                 &mut self.sanitized,
             );
-            reference_meter_observe_lane_v1(
+            reference_meter_observe_lane(
                 &mut self.right,
                 right,
                 self.config,
@@ -3669,7 +3669,7 @@ impl ReferenceMeterV1 {
     fn emit(&mut self) {
         let start = self.start.expect("reference meter start");
         let end = start + u64::from(self.frames);
-        let snapshot = MeterSnapshotV1 {
+        let snapshot = MeterSnapshot {
             case: String::new(),
             tap: None,
             handle: 1,
@@ -3701,19 +3701,19 @@ impl ReferenceMeterV1 {
         self.sequence = self.sequence.saturating_add(1);
         self.start = Some(end);
         self.frames = 0;
-        clear_reference_meter_interval_v1(&mut self.left);
-        clear_reference_meter_interval_v1(&mut self.right);
+        clear_reference_meter_interval(&mut self.left);
+        clear_reference_meter_interval(&mut self.right);
     }
 
-    fn pop(&mut self, case: &str) -> Option<MeterRecordV1> {
+    fn pop(&mut self, case: &str) -> Option<MeterRecord> {
         (!self.queued.is_empty()).then(|| {
             let mut snapshot = self.queued.remove(0);
             snapshot.case = case.to_owned();
-            MeterRecordV1::Snapshot(snapshot)
+            MeterRecord::Snapshot(snapshot)
         })
     }
 
-    fn drain(&mut self, case: &str, output: &mut Vec<MeterRecordV1>) {
+    fn drain(&mut self, case: &str, output: &mut Vec<MeterRecord>) {
         while let Some(snapshot) = self.pop(case) {
             output.push(snapshot);
         }
@@ -3722,8 +3722,8 @@ impl ReferenceMeterV1 {
     fn reset(&mut self, full: bool) {
         self.start = None;
         self.frames = 0;
-        self.left = reference_meter_lane_v1();
-        self.right = reference_meter_lane_v1();
+        self.left = reference_meter_lane();
+        self.right = reference_meter_lane();
         if full {
             self.sequence = 0;
             self.clipped = 0;
@@ -3736,14 +3736,14 @@ impl ReferenceMeterV1 {
     fn discontinuity(&mut self, first_sample: u64) {
         self.start = Some(first_sample);
         self.frames = 0;
-        self.left = reference_meter_lane_v1();
-        self.right = reference_meter_lane_v1();
+        self.left = reference_meter_lane();
+        self.right = reference_meter_lane();
         self.discontinuities = self.discontinuities.saturating_add(1);
     }
 }
 
-fn reference_meter_lane_v1() -> ReferenceMeterLaneV1 {
-    ReferenceMeterLaneV1 {
+fn reference_meter_lane() -> ReferenceMeterLane {
+    ReferenceMeterLane {
         peak: 0.0,
         energy: 0.0,
         clipped: 0,
@@ -3753,17 +3753,17 @@ fn reference_meter_lane_v1() -> ReferenceMeterLaneV1 {
     }
 }
 
-fn clear_reference_meter_interval_v1(lane: &mut ReferenceMeterLaneV1) {
+fn clear_reference_meter_interval(lane: &mut ReferenceMeterLane) {
     lane.peak = 0.0;
     lane.energy = 0.0;
     lane.clipped = 0;
     lane.sanitized = 0;
 }
 
-fn reference_meter_observe_lane_v1(
-    lane: &mut ReferenceMeterLaneV1,
+fn reference_meter_observe_lane(
+    lane: &mut ReferenceMeterLane,
     sample: f32,
-    config: ReferenceMeterConfigV1,
+    config: ReferenceMeterConfig,
     decay: f32,
     clipped: &mut u64,
     sanitized: &mut u64,
@@ -3787,11 +3787,11 @@ fn reference_meter_observe_lane_v1(
     } else if lane.hold_remaining > 0 {
         lane.hold_remaining -= 1;
     } else if config.peak_decay_db_per_second != 0.0 {
-        lane.held = reference_sanitize_f32_v1(lane.held * decay);
+        lane.held = reference_sanitize_f32(lane.held * decay);
     }
 }
 
-fn reference_sanitize_f32_v1(value: f32) -> f32 {
+fn reference_sanitize_f32(value: f32) -> f32 {
     if value.is_normal() || value == 0.0 {
         value
     } else {
@@ -3799,31 +3799,31 @@ fn reference_sanitize_f32_v1(value: f32) -> f32 {
     }
 }
 
-fn expected_window_meter_records_v1() -> Result<Vec<MeterRecordV1>, String> {
-    let config = |period_frames, queue_capacity| ReferenceMeterConfigV1 {
+fn expected_window_meter_records() -> Result<Vec<MeterRecord>, String> {
+    let config = |period_frames, queue_capacity| ReferenceMeterConfig {
         period_frames,
         queue_capacity,
         reset_generation: 3,
         peak_hold_frames: 1,
         peak_decay_db_per_second: 12.0,
     };
-    let mut partial = ReferenceMeterV1::new(config(4, 4));
+    let mut partial = ReferenceMeter::new(config(4, 4));
     partial.observe(&[1.0, 0.5], &[0.0, -1.0], 3)?;
     if partial.pop("partial").is_some() {
         return Err("independent partial meter emitted before its window completed".to_owned());
     }
-    let mut records = vec![MeterRecordV1::Partial {
+    let mut records = vec![MeterRecord::Partial {
         case: "partial".to_owned(),
         observed_frames: 2,
         period_frames: 4,
         start: 3,
     }];
 
-    let mut multiple = ReferenceMeterV1::new(config(2, 8));
+    let mut multiple = ReferenceMeter::new(config(2, 8));
     multiple.observe(&[1.0, 0.5, 0.25, 0.0], &[0.0, -1.0, 0.5, -0.25], 3)?;
     multiple.drain("multiple", &mut records);
 
-    let mut wrap = ReferenceMeterV1::new(config(2, 2));
+    let mut wrap = ReferenceMeter::new(config(2, 2));
     wrap.observe(&[1.0, 0.5, 0.25, 0.0], &[0.0, -1.0, 0.5, -0.25], 3)?;
     records.push(
         wrap.pop("wrap")
@@ -3832,7 +3832,7 @@ fn expected_window_meter_records_v1() -> Result<Vec<MeterRecordV1>, String> {
     wrap.observe(&[0.75, 0.25, 0.5, 0.0], &[-0.5, 0.0, 0.25, -0.25], 7)?;
     wrap.drain("wrap", &mut records);
 
-    let mut full = ReferenceMeterV1::new(config(2, 1));
+    let mut full = ReferenceMeter::new(config(2, 1));
     full.observe(&[1.0, 0.0, 0.5, 0.0], &[0.0, 1.0, 0.0, 0.5], 3)?;
     records.push(
         full.pop("full")
@@ -3841,12 +3841,12 @@ fn expected_window_meter_records_v1() -> Result<Vec<MeterRecordV1>, String> {
     full.observe(&[0.25, 0.0], &[0.0, -0.25], 7)?;
     full.drain("drop", &mut records);
 
-    let mut discontinuity = ReferenceMeterV1::new(config(2, 4));
+    let mut discontinuity = ReferenceMeter::new(config(2, 4));
     discontinuity.observe(&[1.0, 0.0], &[0.0, 1.0], 3)?;
     discontinuity.observe(&[0.5, 0.0], &[0.0, 0.5], 9)?;
     discontinuity.drain("discontinuity", &mut records);
 
-    let mut reset = ReferenceMeterV1::new(config(2, 4));
+    let mut reset = ReferenceMeter::new(config(2, 4));
     reset.observe(&[1.0, 0.0], &[0.0, 1.0], 3)?;
     records.push(
         reset
@@ -3868,42 +3868,42 @@ fn expected_window_meter_records_v1() -> Result<Vec<MeterRecordV1>, String> {
             .ok_or_else(|| "reference reset full snapshot".to_owned())?,
     );
 
-    let mut sanitized = ReferenceMeterV1::new(config(2, 4));
+    let mut sanitized = ReferenceMeter::new(config(2, 4));
     sanitized.observe(&[f32::NAN, 0.5], &[f32::INFINITY, -0.5], 3)?;
     records.push(
         sanitized
             .pop("sanitization")
             .ok_or_else(|| "reference sanitization snapshot".to_owned())?,
     );
-    records.push(MeterRecordV1::Overflow {
+    records.push(MeterRecord::Overflow {
         case: "overflow".to_owned(),
         error: "SampleTimeOverflow".to_owned(),
         path: "$.meter.first_sample".to_owned(),
     });
-    records.sort_by_key(canonical_meter_record_v1);
+    records.sort_by_key(canonical_meter_record);
     Ok(records)
 }
 
-fn expected_graph_meter_records_v1() -> Result<Vec<MeterRecordV1>, String> {
-    let expected = graph_fixture_expected_v1()?;
+fn expected_graph_meter_records() -> Result<Vec<MeterRecord>, String> {
+    let expected = graph_fixture_expected()?;
     let mut records = vec![
-        graph_meter_snapshot_v1("Input", 1, &expected.input.0, &expected.input.1)?,
-        graph_meter_snapshot_v1(
+        graph_meter_snapshot("Input", 1, &expected.input.0, &expected.input.1)?,
+        graph_meter_snapshot(
             "PostInputBuiltins",
             2,
             &expected.post_input.0,
             &expected.post_input.1,
         )?,
-        graph_meter_snapshot_v1("PostSimd1", 3, &expected.simd1.0, &expected.simd1.1)?,
-        graph_meter_snapshot_v1("PostDynamic", 4, &expected.dynamic.0, &expected.dynamic.1)?,
-        graph_meter_snapshot_v1("PostSimd2PreFader", 5, &expected.simd2.0, &expected.simd2.1)?,
-        graph_meter_snapshot_v1("PostFader", 6, &expected.fader.0, &expected.fader.1)?,
-        graph_meter_snapshot_v1("PostMatrix", 7, &expected.matrix.0, &expected.matrix.1)?,
+        graph_meter_snapshot("PostSimd1", 3, &expected.simd1.0, &expected.simd1.1)?,
+        graph_meter_snapshot("PostDynamic", 4, &expected.dynamic.0, &expected.dynamic.1)?,
+        graph_meter_snapshot("PostSimd2PreFader", 5, &expected.simd2.0, &expected.simd2.1)?,
+        graph_meter_snapshot("PostFader", 6, &expected.fader.0, &expected.fader.1)?,
+        graph_meter_snapshot("PostMatrix", 7, &expected.matrix.0, &expected.matrix.1)?,
     ];
     let distinct_summaries: BTreeSet<_> = records
         .iter()
         .map(|record| match record {
-            MeterRecordV1::Snapshot(snapshot) => vec![
+            MeterRecord::Snapshot(snapshot) => vec![
                 u64::from(snapshot.left_peak),
                 u64::from(snapshot.right_peak),
                 snapshot.left_energy,
@@ -3917,11 +3917,11 @@ fn expected_graph_meter_records_v1() -> Result<Vec<MeterRecordV1>, String> {
     if distinct_summaries.len() != records.len() {
         return Err("independent graph tap summaries are not pairwise distinct".to_owned());
     }
-    records.sort_by_key(canonical_meter_record_v1);
+    records.sort_by_key(canonical_meter_record);
     Ok(records)
 }
 
-struct GraphFixtureExpectedV1 {
+struct GraphFixtureExpected {
     input: (Vec<f32>, Vec<f32>),
     post_input: (Vec<f32>, Vec<f32>),
     simd1: (Vec<f32>, Vec<f32>),
@@ -3933,7 +3933,7 @@ struct GraphFixtureExpectedV1 {
     output: (Vec<f32>, Vec<f32>),
 }
 
-impl GraphFixtureExpectedV1 {
+impl GraphFixtureExpected {
     fn output_words(&self) -> Vec<u32> {
         self.output
             .0
@@ -3948,27 +3948,27 @@ impl GraphFixtureExpectedV1 {
 /// This is deliberately a pre-candidate, retained-f32 operation model.  It contains the fixed
 /// input builtins, all three 3-sample rack delays, the prepared fader/matrix, both route matrices,
 /// and the exact 9-sample early-route PDC placement; it never reads a fixture candidate.
-fn graph_fixture_expected_v1() -> Result<GraphFixtureExpectedV1, String> {
-    let input: (Vec<_>, Vec<_>) = (0..128).map(fixture_source_frame_v1).unzip();
+fn graph_fixture_expected() -> Result<GraphFixtureExpected, String> {
+    let input: (Vec<_>, Vec<_>) = (0..128).map(fixture_source_frame).unzip();
     let post_input = (
-        retained_tpt_filter_chain_v1(&input.0)?,
-        retained_tpt_filter_chain_v1(&input.1)?,
+        retained_tpt_filter_chain(&input.0)?,
+        retained_tpt_filter_chain(&input.1)?,
     );
-    let simd1 = (delay_three_v1(&post_input.0), delay_three_v1(&post_input.1));
-    let dynamic = (delay_three_v1(&simd1.0), delay_three_v1(&simd1.1));
-    let simd2 = (delay_three_v1(&dynamic.0), delay_three_v1(&dynamic.1));
+    let simd1 = (delay_three(&post_input.0), delay_three(&post_input.1));
+    let dynamic = (delay_three(&simd1.0), delay_three(&simd1.1));
+    let simd2 = (delay_three(&dynamic.0), delay_three(&dynamic.1));
     // The fixture session owns these stages through prepared builtins.  The explicitly frozen
     // nonidentity fader values and canonical left=right=1 pan endpoint are modeled independently.
     let fader: (Vec<_>, Vec<_>) = (
         simd2
             .0
             .iter()
-            .map(|sample| *sample * independent_db_gain_v1(-6.0))
+            .map(|sample| *sample * independent_db_gain(-6.0))
             .collect(),
         simd2
             .1
             .iter()
-            .map(|sample| *sample * independent_db_gain_v1(3.0))
+            .map(|sample| *sample * independent_db_gain(3.0))
             .collect(),
     );
     let cross = (core::f64::consts::FRAC_PI_2.cos()) as f32;
@@ -3997,7 +3997,7 @@ fn graph_fixture_expected_v1() -> Result<GraphFixtureExpectedV1, String> {
             (late_left + early_left, late_right + early_right)
         })
         .unzip();
-    Ok(GraphFixtureExpectedV1 {
+    Ok(GraphFixtureExpected {
         input,
         post_input,
         simd1,
@@ -4010,7 +4010,7 @@ fn graph_fixture_expected_v1() -> Result<GraphFixtureExpectedV1, String> {
     })
 }
 
-fn delay_three_v1(input: &[f32]) -> Vec<f32> {
+fn delay_three(input: &[f32]) -> Vec<f32> {
     let mut delay = [0.0; 3];
     input
         .iter()
@@ -4025,7 +4025,7 @@ fn delay_three_v1(input: &[f32]) -> Vec<f32> {
         .collect()
 }
 
-fn retained_tpt_filter_chain_v1(input: &[f32]) -> Result<Vec<f32>, String> {
+fn retained_tpt_filter_chain(input: &[f32]) -> Result<Vec<f32>, String> {
     let mut high_pass = ReferenceRetainedTptF32::conditioned_butterworth(
         48_000,
         20.0,
@@ -4048,13 +4048,13 @@ fn retained_tpt_filter_chain_v1(input: &[f32]) -> Result<Vec<f32>, String> {
         .collect())
 }
 
-fn graph_meter_snapshot_v1(
+fn graph_meter_snapshot(
     tap: &str,
     handle: u64,
     left: &[f32],
     right: &[f32],
-) -> Result<MeterRecordV1, String> {
-    let mut meter = ReferenceMeterV1::new(ReferenceMeterConfigV1 {
+) -> Result<MeterRecord, String> {
+    let mut meter = ReferenceMeter::new(ReferenceMeterConfig {
         period_frames: 128,
         queue_capacity: 1,
         reset_generation: 0,
@@ -4062,17 +4062,17 @@ fn graph_meter_snapshot_v1(
         peak_decay_db_per_second: 0.0,
     });
     meter.observe(left, right, 0)?;
-    let Some(MeterRecordV1::Snapshot(mut snapshot)) = meter.pop("graph-taps") else {
+    let Some(MeterRecord::Snapshot(mut snapshot)) = meter.pop("graph-taps") else {
         return Err("independent graph meter did not emit its exact window".to_owned());
     };
     snapshot.handle = handle;
     snapshot.tap = Some(tap.to_owned());
-    Ok(MeterRecordV1::Snapshot(snapshot))
+    Ok(MeterRecord::Snapshot(snapshot))
 }
 
-fn verify_reference_oracle_v1(
+fn verify_reference_oracle(
     root: &Path,
-    response_cases: &BTreeMap<String, ResponseCaseV1>,
+    response_cases: &BTreeMap<String, ResponseCase>,
 ) -> Result<(), String> {
     let bytes = read_regular_file(
         &root.join("reference/filter-response.csv"),
@@ -4101,7 +4101,7 @@ fn verify_reference_oracle_v1(
                 index + 2
             ));
         }
-        let row = parse_response_csv_row_v1(fields, index + 2)?;
+        let row = parse_response_csv_row(fields, index + 2)?;
         if !ids.insert(row.id.clone()) {
             return Err(format!(
                 "reference/filter-response.csv has duplicate case: {}",
@@ -4110,80 +4110,80 @@ fn verify_reference_oracle_v1(
         }
         rows.push(row);
     }
-    if rows.len() != RESPONSE_ROW_COUNT_V1 {
+    if rows.len() != RESPONSE_ROW_COUNT {
         return Err(format!(
-            "reference/filter-response.csv coverage count differs: rows={} expected={RESPONSE_ROW_COUNT_V1}",
+            "reference/filter-response.csv coverage count differs: rows={} expected={RESPONSE_ROW_COUNT}",
             rows.len()
         ));
     }
-    if ids != expected_response_ids_v1() {
-        let expected = expected_response_ids_v1();
+    if ids != expected_response_ids() {
+        let expected = expected_response_ids();
         let missing: Vec<_> = expected.difference(&ids).take(1).collect();
         let unexpected: Vec<_> = ids.difference(&expected).take(1).collect();
         return Err(format!(
             "reference/filter-response.csv IDs differ from the frozen grid; missing={missing:?} unexpected={unexpected:?}"
         ));
     }
-    verify_response_grid_v1(&rows)?;
-    verify_response_case_csv_tuples_v1(response_cases, &rows)?;
-    verify_response_partition_equality_v1(&rows)?;
-    verify_response_oracle_tolerances_v1(&rows)?;
+    verify_response_grid(&rows)?;
+    verify_response_case_csv_tuples(response_cases, &rows)?;
+    verify_response_partition_equality(&rows)?;
+    verify_response_oracle_tolerances(&rows)?;
     Ok(())
 }
 
-fn parse_response_csv_row_v1(
+fn parse_response_csv_row(
     fields: Vec<&str>,
     line_number: usize,
-) -> Result<ResponseCsvRowV1, String> {
-    let rate_hz = parse_canonical_response_u32_v1(fields[1], "rate_hz", line_number)?;
-    let section = parse_response_section_v1(fields[2]).ok_or_else(|| {
+) -> Result<ResponseCsvRow, String> {
+    let rate_hz = parse_canonical_response_u32(fields[1], "rate_hz", line_number)?;
+    let section = parse_response_section(fields[2]).ok_or_else(|| {
         format!("reference/filter-response.csv section is invalid at row {line_number}")
     })?;
-    let cutoff_hz = parse_response_f64_v1(fields[3], "cutoff_hz", line_number)?;
-    let probe_hz = parse_response_f64_v1(fields[4], "probe_hz", line_number)?;
-    let quantum_frames = parse_canonical_response_u32_v1(fields[5], "quantum_frames", line_number)?;
-    Ok(ResponseCsvRowV1 {
+    let cutoff_hz = parse_response_f64(fields[3], "cutoff_hz", line_number)?;
+    let probe_hz = parse_response_f64(fields[4], "probe_hz", line_number)?;
+    let quantum_frames = parse_canonical_response_u32(fields[5], "quantum_frames", line_number)?;
+    Ok(ResponseCsvRow {
         id: fields[0].to_owned(),
         rate_hz,
         section,
         cutoff_hz,
         probe_hz,
         quantum_frames,
-        rbj_magnitude_db: parse_response_f64_v1(fields[6], "rbj_magnitude_db", line_number)?,
-        cast_state_magnitude_db: parse_response_f64_v1(
+        rbj_magnitude_db: parse_response_f64(fields[6], "rbj_magnitude_db", line_number)?,
+        cast_state_magnitude_db: parse_response_f64(
             fields[7],
             "cast_state_magnitude_db",
             line_number,
         )?,
-        impulse_dft_magnitude_db: parse_response_f64_v1(
+        impulse_dft_magnitude_db: parse_response_f64(
             fields[8],
             "impulse_dft_magnitude_db",
             line_number,
         )?,
-        sustained_fundamental_db: parse_response_f64_v1(
+        sustained_fundamental_db: parse_response_f64(
             fields[9],
             "sustained_fundamental_db",
             line_number,
         )?,
-        sustained_residual_db: parse_response_f64_v1(
+        sustained_residual_db: parse_response_f64(
             fields[10],
             "sustained_residual_db",
             line_number,
         )?,
-        sustained_total_db: parse_response_f64_v1(fields[11], "sustained_total_db", line_number)?,
-        tail_energy: parse_response_f64_v1(fields[12], "tail_energy", line_number)?,
-        recovery_count: parse_canonical_response_u64_v1(fields[13], "recovery_count", line_number)?,
+        sustained_total_db: parse_response_f64(fields[11], "sustained_total_db", line_number)?,
+        tail_energy: parse_response_f64(fields[12], "tail_energy", line_number)?,
+        recovery_count: parse_canonical_response_u64(fields[13], "recovery_count", line_number)?,
     })
 }
 
-fn parse_response_f64_v1(value: &str, field: &str, line_number: usize) -> Result<f64, String> {
-    parse_canonical_response_f64_v1(
+fn parse_response_f64(value: &str, field: &str, line_number: usize) -> Result<f64, String> {
+    parse_canonical_response_f64(
         value,
         &format!("reference/filter-response.csv {field} at row {line_number}"),
     )
 }
 
-fn parse_canonical_response_f64_v1(value: &str, label: &str) -> Result<f64, String> {
+fn parse_canonical_response_f64(value: &str, label: &str) -> Result<f64, String> {
     let parsed = value
         .parse::<f64>()
         .map_err(|_| format!("{label} is not an f64"))?;
@@ -4196,7 +4196,7 @@ fn parse_canonical_response_f64_v1(value: &str, label: &str) -> Result<f64, Stri
     Ok(parsed)
 }
 
-fn parse_canonical_response_u32_v1(
+fn parse_canonical_response_u32(
     value: &str,
     field: &str,
     line_number: usize,
@@ -4212,7 +4212,7 @@ fn parse_canonical_response_u32_v1(
     Ok(parsed)
 }
 
-fn parse_canonical_response_u64_v1(
+fn parse_canonical_response_u64(
     value: &str,
     field: &str,
     line_number: usize,
@@ -4228,21 +4228,21 @@ fn parse_canonical_response_u64_v1(
     Ok(parsed)
 }
 
-fn parse_response_section_v1(value: &str) -> Option<ResponseSectionV1> {
+fn parse_response_section(value: &str) -> Option<ResponseSection> {
     match value {
-        "high_pass" => Some(ResponseSectionV1::HighPass),
-        "low_pass" => Some(ResponseSectionV1::LowPass),
-        "cascade" => Some(ResponseSectionV1::Cascade),
+        "high_pass" => Some(ResponseSection::HighPass),
+        "low_pass" => Some(ResponseSection::LowPass),
+        "cascade" => Some(ResponseSection::Cascade),
         _ => None,
     }
 }
 
-fn verify_response_grid_v1(rows: &[ResponseCsvRowV1]) -> Result<(), String> {
-    let actual: BTreeSet<_> = rows.iter().map(response_coordinate_v1).collect();
+fn verify_response_grid(rows: &[ResponseCsvRow]) -> Result<(), String> {
+    let actual: BTreeSet<_> = rows.iter().map(response_coordinate).collect();
     if actual.len() != rows.len() {
         return Err("reference/filter-response.csv has duplicate response coordinates".to_owned());
     }
-    let expected = expected_response_coordinates_v1();
+    let expected = expected_response_coordinates();
     if actual != expected {
         let missing: Vec<_> = expected.difference(&actual).take(1).collect();
         let unexpected: Vec<_> = actual.difference(&expected).take(1).collect();
@@ -4253,8 +4253,8 @@ fn verify_response_grid_v1(rows: &[ResponseCsvRowV1]) -> Result<(), String> {
     Ok(())
 }
 
-fn response_coordinate_v1(row: &ResponseCsvRowV1) -> ResponseCoordinateV1 {
-    ResponseCoordinateV1 {
+fn response_coordinate(row: &ResponseCsvRow) -> ResponseCoordinate {
+    ResponseCoordinate {
         rate_hz: row.rate_hz,
         section: row.section,
         cutoff_bits: row.cutoff_hz.to_bits(),
@@ -4263,8 +4263,8 @@ fn response_coordinate_v1(row: &ResponseCsvRowV1) -> ResponseCoordinateV1 {
     }
 }
 
-fn response_invariant_coordinate_v1(row: &ResponseCsvRowV1) -> ResponseInvariantCoordinateV1 {
-    ResponseInvariantCoordinateV1 {
+fn response_invariant_coordinate(row: &ResponseCsvRow) -> ResponseInvariantCoordinate {
+    ResponseInvariantCoordinate {
         rate_hz: row.rate_hz,
         section: row.section,
         cutoff_bits: row.cutoff_hz.to_bits(),
@@ -4272,8 +4272,8 @@ fn response_invariant_coordinate_v1(row: &ResponseCsvRowV1) -> ResponseInvariant
     }
 }
 
-fn response_measurement_words_v1(row: &ResponseCsvRowV1) -> ResponseMeasurementWordsV1 {
-    ResponseMeasurementWordsV1 {
+fn response_measurement_words(row: &ResponseCsvRow) -> ResponseMeasurementWords {
+    ResponseMeasurementWords {
         rbj_magnitude_db: row.rbj_magnitude_db.to_bits(),
         cast_state_magnitude_db: row.cast_state_magnitude_db.to_bits(),
         impulse_dft_magnitude_db: row.impulse_dft_magnitude_db.to_bits(),
@@ -4285,14 +4285,14 @@ fn response_measurement_words_v1(row: &ResponseCsvRowV1) -> ResponseMeasurementW
     }
 }
 
-fn verify_response_partition_equality_v1(rows: &[ResponseCsvRowV1]) -> Result<(), String> {
+fn verify_response_partition_equality(rows: &[ResponseCsvRow]) -> Result<(), String> {
     let mut partitions = BTreeMap::<
-        ResponseInvariantCoordinateV1,
-        (ResponseMeasurementWordsV1, BTreeSet<u32>),
+        ResponseInvariantCoordinate,
+        (ResponseMeasurementWords, BTreeSet<u32>),
     >::new();
     for row in rows {
-        let coordinate = response_invariant_coordinate_v1(row);
-        let measurements = response_measurement_words_v1(row);
+        let coordinate = response_invariant_coordinate(row);
+        let measurements = response_measurement_words(row);
         match partitions.get_mut(&coordinate) {
             Some((expected, quanta)) => {
                 if *expected != measurements {
@@ -4329,15 +4329,15 @@ fn verify_response_partition_equality_v1(rows: &[ResponseCsvRowV1]) -> Result<()
     Ok(())
 }
 
-fn expected_response_coordinates_v1() -> BTreeSet<ResponseCoordinateV1> {
+fn expected_response_coordinates() -> BTreeSet<ResponseCoordinate> {
     let mut expected = BTreeSet::new();
     for rate_hz in RATES {
         for quantum_frames in QUANTA {
             for cutoff_hz in response_cutoffs(rate_hz) {
-                let probes = frozen_single_section_probes_v1(rate_hz, cutoff_hz);
-                for section in [ResponseSectionV1::HighPass, ResponseSectionV1::LowPass] {
+                let probes = frozen_single_section_probes(rate_hz, cutoff_hz);
+                for section in [ResponseSection::HighPass, ResponseSection::LowPass] {
                     for probe_hz in &probes {
-                        expected.insert(ResponseCoordinateV1 {
+                        expected.insert(ResponseCoordinate {
                             rate_hz,
                             section,
                             cutoff_bits: cutoff_hz.to_bits(),
@@ -4347,10 +4347,10 @@ fn expected_response_coordinates_v1() -> BTreeSet<ResponseCoordinateV1> {
                     }
                 }
             }
-            for probe_hz in frozen_cascade_probes_v1(rate_hz) {
-                expected.insert(ResponseCoordinateV1 {
+            for probe_hz in frozen_cascade_probes(rate_hz) {
+                expected.insert(ResponseCoordinate {
                     rate_hz,
-                    section: ResponseSectionV1::Cascade,
+                    section: ResponseSection::Cascade,
                     cutoff_bits: 100.0_f64.to_bits(),
                     probe_bits: probe_hz.to_bits(),
                     quantum_frames,
@@ -4361,29 +4361,29 @@ fn expected_response_coordinates_v1() -> BTreeSet<ResponseCoordinateV1> {
     expected
 }
 
-fn expected_response_ids_v1() -> BTreeSet<String> {
-    expected_response_cases_v1().into_keys().collect()
+fn expected_response_ids() -> BTreeSet<String> {
+    expected_response_cases().into_keys().collect()
 }
 
-fn expected_response_cases_v1() -> BTreeMap<String, ResponseCaseV1> {
+fn expected_response_cases() -> BTreeMap<String, ResponseCase> {
     let mut expected = BTreeMap::new();
     for rate_hz in RATES {
         for quantum_frames in QUANTA {
             for (cutoff_index, cutoff_hz) in response_cutoffs(rate_hz).into_iter().enumerate() {
-                for (probe_index, probe_hz) in frozen_single_section_probes_v1(rate_hz, cutoff_hz)
+                for (probe_index, probe_hz) in frozen_single_section_probes(rate_hz, cutoff_hz)
                     .into_iter()
                     .enumerate()
                 {
                     for (section_name, section) in [
-                        ("high_pass", ResponseSectionV1::HighPass),
-                        ("low_pass", ResponseSectionV1::LowPass),
+                        ("high_pass", ResponseSection::HighPass),
+                        ("low_pass", ResponseSection::LowPass),
                     ] {
                         let id = format!(
                             "response-{section_name}-{rate_hz}-{quantum_frames}-{cutoff_index}-{probe_index}"
                         );
                         expected.insert(
                             id.clone(),
-                            ResponseCaseV1 {
+                            ResponseCase {
                                 id,
                                 rate_hz,
                                 quantum_frames,
@@ -4396,16 +4396,16 @@ fn expected_response_cases_v1() -> BTreeMap<String, ResponseCaseV1> {
                     }
                 }
             }
-            for (probe_index, probe_hz) in frozen_cascade_probes_v1(rate_hz).into_iter().enumerate()
+            for (probe_index, probe_hz) in frozen_cascade_probes(rate_hz).into_iter().enumerate()
             {
                 let id = format!("response-cascade-{rate_hz}-{quantum_frames}-fixed-{probe_index}");
                 expected.insert(
                     id.clone(),
-                    ResponseCaseV1 {
+                    ResponseCase {
                         id,
                         rate_hz,
                         quantum_frames,
-                        section: ResponseSectionV1::Cascade,
+                        section: ResponseSection::Cascade,
                         cutoff_bits: 100.0_f64.to_bits(),
                         probe_bits: probe_hz.to_bits(),
                         oracle: "rbj_f64_and_cast_state".to_owned(),
@@ -4417,9 +4417,9 @@ fn expected_response_cases_v1() -> BTreeMap<String, ResponseCaseV1> {
     expected
 }
 
-fn verify_response_case_csv_tuples_v1(
-    response_cases: &BTreeMap<String, ResponseCaseV1>,
-    rows: &[ResponseCsvRowV1],
+fn verify_response_case_csv_tuples(
+    response_cases: &BTreeMap<String, ResponseCase>,
+    rows: &[ResponseCsvRow],
 ) -> Result<(), String> {
     if response_cases.len() != rows.len() {
         return Err("response case/CSV counts differ".to_owned());
@@ -4446,29 +4446,29 @@ fn verify_response_case_csv_tuples_v1(
     Ok(())
 }
 
-fn frozen_single_section_probes_v1(rate_hz: u32, cutoff_hz: f64) -> Vec<f64> {
+fn frozen_single_section_probes(rate_hz: u32, cutoff_hz: f64) -> Vec<f64> {
     let mut probes = probes(rate_hz, cutoff_hz);
     probes.push(cutoff_hz);
     probes.push(0.49 * f64::from(rate_hz));
-    sort_and_deduplicate_f64_v1(&mut probes);
+    sort_and_deduplicate_f64(&mut probes);
     probes
 }
 
-fn frozen_cascade_probes_v1(rate_hz: u32) -> Vec<f64> {
+fn frozen_cascade_probes(rate_hz: u32) -> Vec<f64> {
     let mut values = probes(rate_hz, 100.0);
     values.extend(probes(rate_hz, 1_000.0));
-    sort_and_deduplicate_f64_v1(&mut values);
+    sort_and_deduplicate_f64(&mut values);
     values
 }
 
-fn sort_and_deduplicate_f64_v1(values: &mut Vec<f64>) {
+fn sort_and_deduplicate_f64(values: &mut Vec<f64>) {
     values.sort_by(f64::total_cmp);
     values.dedup_by(|left, right| left.to_bits() == right.to_bits());
 }
 
-fn verify_response_oracle_tolerances_v1(rows: &[ResponseCsvRowV1]) -> Result<(), String> {
+fn verify_response_oracle_tolerances(rows: &[ResponseCsvRow]) -> Result<(), String> {
     let mut independent =
-        BTreeMap::<ResponseInvariantCoordinateV1, IndependentResponseMeasurementV1>::new();
+        BTreeMap::<ResponseInvariantCoordinate, IndependentResponseMeasurement>::new();
     for row in rows {
         if row.recovery_count != 0 {
             return Err(format!(
@@ -4476,11 +4476,11 @@ fn verify_response_oracle_tolerances_v1(rows: &[ResponseCsvRowV1]) -> Result<(),
                 row.id, row.recovery_count
             ));
         }
-        let coordinate = response_invariant_coordinate_v1(row);
+        let coordinate = response_invariant_coordinate(row);
         if !independent.contains_key(&coordinate) {
             independent.insert(
                 coordinate.clone(),
-                independent_response_measurement_v1(row)?,
+                independent_response_measurement(row)?,
             );
         }
         let measurement = independent
@@ -4492,15 +4492,15 @@ fn verify_response_oracle_tolerances_v1(rows: &[ResponseCsvRowV1]) -> Result<(),
                 row.id, measurement.recovery_count
             ));
         }
-        let rbj = independent_rbj_magnitude_db_v1(row)?;
-        if (row.rbj_magnitude_db - rbj).abs() > RESPONSE_RBJ_SERIALIZATION_TOLERANCE_DB_V1 {
+        let rbj = independent_rbj_magnitude_db(row)?;
+        if (row.rbj_magnitude_db - rbj).abs() > RESPONSE_RBJ_SERIALIZATION_TOLERANCE_DB {
             return Err(format!(
                 "reference/filter-response.csv independent RBJ provenance differs: {}",
                 row.id
             ));
         }
         if rbj >= -120.0
-            && (row.cast_state_magnitude_db - rbj).abs() > RESPONSE_CAST_STATE_TOLERANCE_DB_V1
+            && (row.cast_state_magnitude_db - rbj).abs() > RESPONSE_CAST_STATE_TOLERANCE_DB
         {
             return Err(format!(
                 "reference/filter-response.csv cast-state tolerance exceeds 0.005 dB: {}",
@@ -4508,9 +4508,9 @@ fn verify_response_oracle_tolerances_v1(rows: &[ResponseCsvRowV1]) -> Result<(),
             ));
         }
         if rbj >= -120.0
-            && ((row.impulse_dft_magnitude_db - rbj).abs() > RESPONSE_IMPULSE_DFT_TOLERANCE_DB_V1
+            && ((row.impulse_dft_magnitude_db - rbj).abs() > RESPONSE_IMPULSE_DFT_TOLERANCE_DB
                 || (measurement.impulse_dft_magnitude_db - rbj).abs()
-                    > RESPONSE_IMPULSE_DFT_TOLERANCE_DB_V1)
+                    > RESPONSE_IMPULSE_DFT_TOLERANCE_DB)
         {
             return Err(format!(
                 "reference/filter-response.csv or independent recurrence impulse-DFT exceeds the 0.05 dB RBJ gate: {}",
@@ -4518,7 +4518,7 @@ fn verify_response_oracle_tolerances_v1(rows: &[ResponseCsvRowV1]) -> Result<(),
             ));
         }
         if (row.impulse_dft_magnitude_db - measurement.impulse_dft_magnitude_db).abs()
-            > RESPONSE_IMPULSE_DFT_TOLERANCE_DB_V1
+            > RESPONSE_IMPULSE_DFT_TOLERANCE_DB
         {
             return Err(format!(
                 "reference/filter-response.csv impulse-DFT differs from the independent recurrence: {}",
@@ -4531,7 +4531,7 @@ fn verify_response_oracle_tolerances_v1(rows: &[ResponseCsvRowV1]) -> Result<(),
                 row.id
             ));
         }
-        if !is_coherent_measurement_probe_v1(row) {
+        if !is_coherent_measurement_probe(row) {
             continue;
         }
         let fundamental = measurement
@@ -4544,8 +4544,8 @@ fn verify_response_oracle_tolerances_v1(rows: &[ResponseCsvRowV1]) -> Result<(),
             .sustained_total_db
             .expect("coherent rows retain sustained metrics");
         if rbj >= -90.0 {
-            if (row.sustained_fundamental_db - rbj).abs() > RESPONSE_FUNDAMENTAL_TOLERANCE_DB_V1
-                || (fundamental - rbj).abs() > RESPONSE_FUNDAMENTAL_TOLERANCE_DB_V1
+            if (row.sustained_fundamental_db - rbj).abs() > RESPONSE_FUNDAMENTAL_TOLERANCE_DB
+                || (fundamental - rbj).abs() > RESPONSE_FUNDAMENTAL_TOLERANCE_DB
             {
                 return Err(format!(
                     "reference/filter-response.csv or independent recurrence sustained fundamental exceeds the 0.05 dB RBJ gate: {}",
@@ -4553,23 +4553,23 @@ fn verify_response_oracle_tolerances_v1(rows: &[ResponseCsvRowV1]) -> Result<(),
                 ));
             }
             if (row.sustained_fundamental_db - fundamental).abs()
-                > RESPONSE_FUNDAMENTAL_TOLERANCE_DB_V1
+                > RESPONSE_FUNDAMENTAL_TOLERANCE_DB
             {
                 return Err(format!(
                     "reference/filter-response.csv sustained fundamental differs from the independent recurrence: {}",
                     row.id
                 ));
             }
-            if row.sustained_residual_db > RESPONSE_RESIDUAL_LIMIT_DB_V1
-                || residual > RESPONSE_RESIDUAL_LIMIT_DB_V1
+            if row.sustained_residual_db > RESPONSE_RESIDUAL_LIMIT_DB
+                || residual > RESPONSE_RESIDUAL_LIMIT_DB
             {
                 return Err(format!(
                     "reference/filter-response.csv sustained residual exceeds -100 dB: {}",
                     row.id
                 ));
             }
-        } else if row.sustained_total_db > RESPONSE_ATTENUATED_TOTAL_LIMIT_DB_V1
-            || total > RESPONSE_ATTENUATED_TOTAL_LIMIT_DB_V1
+        } else if row.sustained_total_db > RESPONSE_ATTENUATED_TOTAL_LIMIT_DB
+            || total > RESPONSE_ATTENUATED_TOTAL_LIMIT_DB
         {
             return Err(format!(
                 "reference/filter-response.csv attenuated total exceeds -88 dB: {}",
@@ -4580,7 +4580,7 @@ fn verify_response_oracle_tolerances_v1(rows: &[ResponseCsvRowV1]) -> Result<(),
     Ok(())
 }
 
-enum IndependentResponseProcessorV1 {
+enum IndependentResponseProcessor {
     HighPass(ReferenceRetainedTptF32),
     LowPass(ReferenceRetainedTptF32),
     Cascade {
@@ -4589,8 +4589,8 @@ enum IndependentResponseProcessorV1 {
     },
 }
 
-impl IndependentResponseProcessorV1 {
-    fn from_row(row: &ResponseCsvRowV1) -> Result<Self, String> {
+impl IndependentResponseProcessor {
+    fn from_row(row: &ResponseCsvRow) -> Result<Self, String> {
         let section = |cutoff_hz, output| {
             ReferenceRetainedTptF32::conditioned_butterworth(row.rate_hz, cutoff_hz, output)
                 .ok_or_else(|| {
@@ -4601,15 +4601,15 @@ impl IndependentResponseProcessorV1 {
                 })
         };
         match row.section {
-            ResponseSectionV1::HighPass => Ok(Self::HighPass(section(
+            ResponseSection::HighPass => Ok(Self::HighPass(section(
                 row.cutoff_hz as f32,
                 ReferenceTptOutput::HighPass,
             )?)),
-            ResponseSectionV1::LowPass => Ok(Self::LowPass(section(
+            ResponseSection::LowPass => Ok(Self::LowPass(section(
                 row.cutoff_hz as f32,
                 ReferenceTptOutput::LowPass,
             )?)),
-            ResponseSectionV1::Cascade => {
+            ResponseSection::Cascade => {
                 if row.cutoff_hz.to_bits() != 100.0_f64.to_bits() {
                     return Err(format!(
                         "independent retained-f32 cascade has non-frozen cutoff: {}",
@@ -4643,10 +4643,10 @@ impl IndependentResponseProcessorV1 {
     }
 }
 
-fn independent_response_measurement_v1(
-    row: &ResponseCsvRowV1,
-) -> Result<IndependentResponseMeasurementV1, String> {
-    let mut processor = IndependentResponseProcessorV1::from_row(row)?;
+fn independent_response_measurement(
+    row: &ResponseCsvRow,
+) -> Result<IndependentResponseMeasurement, String> {
+    let mut processor = IndependentResponseProcessor::from_row(row)?;
     let mut impulse = Vec::with_capacity(row.rate_hz as usize);
     let mut recovery_count = 0_u64;
     for frame in 0..row.rate_hz as usize {
@@ -4659,13 +4659,13 @@ fn independent_response_measurement_v1(
         .map(|sample| f64::from(*sample).powi(2))
         .sum();
     let (sustained_fundamental_db, sustained_residual_db, sustained_total_db) =
-        if is_coherent_measurement_probe_v1(row) {
-            let (fundamental, residual, total) = independent_sustained_metrics_v1(row)?;
+        if is_coherent_measurement_probe(row) {
+            let (fundamental, residual, total) = independent_sustained_metrics(row)?;
             (Some(fundamental), Some(residual), Some(total))
         } else {
             (None, None, None)
         };
-    Ok(IndependentResponseMeasurementV1 {
+    Ok(IndependentResponseMeasurement {
         impulse_dft_magnitude_db: dft_magnitude_db(&impulse, f64::from(row.rate_hz), row.probe_hz),
         sustained_fundamental_db,
         sustained_residual_db,
@@ -4675,8 +4675,8 @@ fn independent_response_measurement_v1(
     })
 }
 
-fn independent_sustained_metrics_v1(row: &ResponseCsvRowV1) -> Result<(f64, f64, f64), String> {
-    let mut processor = IndependentResponseProcessorV1::from_row(row)?;
+fn independent_sustained_metrics(row: &ResponseCsvRow) -> Result<(f64, f64, f64), String> {
+    let mut processor = IndependentResponseProcessor::from_row(row)?;
     let settle = row.rate_hz as usize / 2;
     let frames = row.rate_hz as usize / 4;
     let mut samples = Vec::with_capacity(frames);
@@ -4728,35 +4728,35 @@ fn independent_sustained_metrics_v1(row: &ResponseCsvRowV1) -> Result<(f64, f64,
     ))
 }
 
-fn is_coherent_measurement_probe_v1(row: &ResponseCsvRowV1) -> bool {
+fn is_coherent_measurement_probe(row: &ResponseCsvRow) -> bool {
     match row.section {
-        ResponseSectionV1::HighPass | ResponseSectionV1::LowPass => {
+        ResponseSection::HighPass | ResponseSection::LowPass => {
             probes(row.rate_hz, row.cutoff_hz)
                 .into_iter()
                 .any(|probe_hz| probe_hz.to_bits() == row.probe_hz.to_bits())
         }
-        ResponseSectionV1::Cascade => frozen_cascade_probes_v1(row.rate_hz)
+        ResponseSection::Cascade => frozen_cascade_probes(row.rate_hz)
             .into_iter()
             .any(|probe_hz| probe_hz.to_bits() == row.probe_hz.to_bits()),
     }
 }
 
-fn independent_rbj_magnitude_db_v1(row: &ResponseCsvRowV1) -> Result<f64, String> {
+fn independent_rbj_magnitude_db(row: &ResponseCsvRow) -> Result<f64, String> {
     let rate_hz = f64::from(row.rate_hz);
     let magnitude = match row.section {
-        ResponseSectionV1::HighPass => rbj_butterworth_magnitude_db(
+        ResponseSection::HighPass => rbj_butterworth_magnitude_db(
             rate_hz,
             row.cutoff_hz,
             ReferenceFilterKind::HighPass,
             row.probe_hz,
         ),
-        ResponseSectionV1::LowPass => rbj_butterworth_magnitude_db(
+        ResponseSection::LowPass => rbj_butterworth_magnitude_db(
             rate_hz,
             row.cutoff_hz,
             ReferenceFilterKind::LowPass,
             row.probe_hz,
         ),
-        ResponseSectionV1::Cascade => {
+        ResponseSection::Cascade => {
             if row.cutoff_hz.to_bits() != 100.0_f64.to_bits() {
                 return Err(format!(
                     "reference/filter-response.csv cascade cutoff is not fixed 100 Hz: {}",
@@ -4786,7 +4786,7 @@ fn independent_rbj_magnitude_db_v1(row: &ResponseCsvRowV1) -> Result<f64, String
     })
 }
 
-fn verify_jsonl_payloads_v1(root: &Path) -> Result<(), String> {
+fn verify_jsonl_payloads(root: &Path) -> Result<(), String> {
     for path in [
         "meters/graph-taps.jsonl",
         "meters/window-and-drop.jsonl",
@@ -4816,17 +4816,17 @@ fn verify_jsonl_payloads_v1(root: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn benchmark_path_v1(path: &str) -> Option<(BenchmarkKindV1, u32)> {
+fn benchmark_path(path: &str) -> Option<(BenchmarkKind, u32)> {
     let name = path.strip_prefix("benchmark/")?.strip_suffix(".toml")?;
     let (kind, rate_hz) = name.rsplit_once('-')?;
     let rate_hz = rate_hz.parse().ok()?;
-    let kind = BenchmarkKindV1::parse(kind)?;
-    BENCHMARK_RATES_V1
+    let kind = BenchmarkKind::parse(kind)?;
+    BENCHMARK_RATES
         .contains(&rate_hz)
         .then_some((kind, rate_hz))
 }
 
-impl BenchmarkKindV1 {
+impl BenchmarkKind {
     fn parse(value: &str) -> Option<Self> {
         match value {
             "full_chain_filters" => Some(Self::FullChainFilters),
@@ -4853,7 +4853,7 @@ impl BenchmarkKindV1 {
     }
 }
 
-fn verify_benchmark_inputs_v1(root: &Path, manifest: &FixtureManifestV1) -> Result<(), String> {
+fn verify_benchmark_inputs(root: &Path, manifest: &FixtureManifest) -> Result<(), String> {
     let manifest_entries: BTreeMap<_, _> = manifest
         .entries
         .iter()
@@ -4863,14 +4863,14 @@ fn verify_benchmark_inputs_v1(root: &Path, manifest: &FixtureManifestV1) -> Resu
         .entries
         .iter()
         .filter_map(|entry| match entry.class {
-            FixturePathClassV1::Benchmark => Some(entry.path.as_str()),
+            FixturePathClass::Benchmark => Some(entry.path.as_str()),
             _ => None,
         })
         .collect();
-    let expected: BTreeSet<_> = BENCHMARK_KINDS_V1
+    let expected: BTreeSet<_> = BENCHMARK_KINDS
         .into_iter()
         .flat_map(|kind| {
-            BENCHMARK_RATES_V1
+            BENCHMARK_RATES
                 .into_iter()
                 .map(move |rate_hz| format!("benchmark/{kind}-{rate_hz}.toml"))
         })
@@ -4879,26 +4879,26 @@ fn verify_benchmark_inputs_v1(root: &Path, manifest: &FixtureManifestV1) -> Resu
     if actual != expected {
         return Err("benchmark input paths differ from the frozen V1 grid".to_owned());
     }
-    for kind in BENCHMARK_KINDS_V1 {
-        for rate_hz in BENCHMARK_RATES_V1 {
+    for kind in BENCHMARK_KINDS {
+        for rate_hz in BENCHMARK_RATES {
             let path = format!("benchmark/{kind}-{rate_hz}.toml");
-            let input = parse_benchmark_input_v1(root, &path)?;
+            let input = parse_benchmark_input(root, &path)?;
             if input.kind.as_str() != kind || input.rate_hz != rate_hz {
                 return Err(format!("benchmark input identity mismatch: {path}"));
             }
             if input.kind.references_pcm() {
-                let pcm_path = benchmark_field_v1(&input, "input_pcm_path")
+                let pcm_path = benchmark_field(&input, "input_pcm_path")
                     .ok_or_else(|| format!("benchmark input has no PCM path: {path}"))?;
-                let pcm_sha256 = benchmark_field_v1(&input, "input_pcm_sha256")
+                let pcm_sha256 = benchmark_field(&input, "input_pcm_sha256")
                     .ok_or_else(|| format!("benchmark input has no PCM hash: {path}"))?;
-                let pcm_path = quoted_toml_string_v1(pcm_path)
+                let pcm_path = quoted_toml_string(pcm_path)
                     .ok_or_else(|| format!("benchmark input PCM path is not quoted: {path}"))?;
-                let pcm_sha256 = quoted_toml_string_v1(pcm_sha256)
+                let pcm_sha256 = quoted_toml_string(pcm_sha256)
                     .ok_or_else(|| format!("benchmark input PCM hash is not quoted: {path}"))?;
                 let manifest_entry = manifest_entries.get(pcm_path).ok_or_else(|| {
                     format!("benchmark input references unlisted PCM: {path} -> {pcm_path}")
                 })?;
-                if manifest_entry.class != FixturePathClassV1::Pcm
+                if manifest_entry.class != FixturePathClass::Pcm
                     || manifest_entry.sha256 != pcm_sha256
                 {
                     return Err(format!(
@@ -4911,8 +4911,8 @@ fn verify_benchmark_inputs_v1(root: &Path, manifest: &FixtureManifestV1) -> Resu
     Ok(())
 }
 
-fn parse_benchmark_input_v1(root: &Path, path: &str) -> Result<BenchmarkInputV1, String> {
-    let (_, path_rate_hz) = benchmark_path_v1(path)
+fn parse_benchmark_input(root: &Path, path: &str) -> Result<BenchmarkInput, String> {
+    let (_, path_rate_hz) = benchmark_path(path)
         .ok_or_else(|| format!("benchmark input path is invalid: {path}"))?;
     let bytes = read_regular_file(&root.join(path), path)?;
     let text =
@@ -4946,167 +4946,167 @@ fn parse_benchmark_input_v1(root: &Path, path: &str) -> Result<BenchmarkInputV1,
         }
         fields.push((key.to_owned(), value.to_owned()));
     }
-    let kind = benchmark_field_from_pairs_v1(&fields, "workload_kind")
-        .and_then(quoted_toml_string_v1)
-        .and_then(BenchmarkKindV1::parse)
+    let kind = benchmark_field_from_pairs(&fields, "workload_kind")
+        .and_then(quoted_toml_string)
+        .and_then(BenchmarkKind::parse)
         .ok_or_else(|| format!("benchmark input workload_kind is invalid: {path}"))?;
-    let rate_hz = benchmark_field_from_pairs_v1(&fields, "sample_rate_hz")
+    let rate_hz = benchmark_field_from_pairs(&fields, "sample_rate_hz")
         .and_then(|value| value.parse::<u32>().ok())
         .ok_or_else(|| format!("benchmark input sample_rate_hz is invalid: {path}"))?;
     if rate_hz != path_rate_hz {
         return Err(format!("benchmark input rate does not match path: {path}"));
     }
-    let expected = expected_benchmark_fields_v1(kind, rate_hz);
+    let expected = expected_benchmark_fields(kind, rate_hz);
     if fields != expected {
         return Err(format!(
             "benchmark input fields are incomplete or noncanonical: {path}"
         ));
     }
-    Ok(BenchmarkInputV1 {
+    Ok(BenchmarkInput {
         kind,
         rate_hz,
         fields,
     })
 }
 
-fn benchmark_field_v1<'a>(input: &'a BenchmarkInputV1, key: &str) -> Option<&'a str> {
-    benchmark_field_from_pairs_v1(&input.fields, key)
+fn benchmark_field<'a>(input: &'a BenchmarkInput, key: &str) -> Option<&'a str> {
+    benchmark_field_from_pairs(&input.fields, key)
 }
 
-fn benchmark_field_from_pairs_v1<'a>(fields: &'a [(String, String)], key: &str) -> Option<&'a str> {
+fn benchmark_field_from_pairs<'a>(fields: &'a [(String, String)], key: &str) -> Option<&'a str> {
     fields
         .iter()
         .find_map(|(field, value)| (field == key).then_some(value.as_str()))
 }
 
-fn quoted_toml_string_v1(value: &str) -> Option<&str> {
+fn quoted_toml_string(value: &str) -> Option<&str> {
     value.strip_prefix('"')?.strip_suffix('"')
 }
 
-fn expected_benchmark_fields_v1(kind: BenchmarkKindV1, rate_hz: u32) -> Vec<(String, String)> {
+fn expected_benchmark_fields(kind: BenchmarkKind, rate_hz: u32) -> Vec<(String, String)> {
     let mut fields = vec![
-        benchmark_field_pair_v1("fixture_schema", "1"),
-        benchmark_field_pair_v1("issue", "35"),
-        benchmark_field_pair_v1("workload_kind", &format!("\"{}\"", kind.as_str())),
-        benchmark_field_pair_v1(
+        benchmark_field_pair("fixture_schema", "1"),
+        benchmark_field_pair("issue", "35"),
+        benchmark_field_pair("workload_kind", &format!("\"{}\"", kind.as_str())),
+        benchmark_field_pair(
             "workload_id",
             &format!("\"issue035.{}.{}hz.q128\"", kind.as_str(), rate_hz),
         ),
-        benchmark_field_pair_v1("sample_rate_hz", &rate_hz.to_string()),
-        benchmark_field_pair_v1("quantum_frames", "128"),
+        benchmark_field_pair("sample_rate_hz", &rate_hz.to_string()),
+        benchmark_field_pair("quantum_frames", "128"),
     ];
     match kind {
-        BenchmarkKindV1::FullChainFilters => fields.extend([
-            benchmark_field_pair_v1("tracks", "1"),
-            benchmark_field_pair_v1("meter_observers", "0"),
-            benchmark_field_pair_v1("meter_queue_capacity", "0"),
-            benchmark_field_pair_v1("state_mode", "\"continuous\""),
-            benchmark_field_pair_v1("input_pcm_path", "\"pcm/filters-asymmetric.f32le\""),
-            benchmark_field_pair_v1("input_pcm_sha256", "\"e53eead1da91f80b8c93a730bd1a45629f4efdddf90c3642d38498d29952d1ff\""),
-            benchmark_field_pair_v1("left_hpf_hz", "100.0"),
-            benchmark_field_pair_v1("right_hpf_hz", "200.0"),
-            benchmark_field_pair_v1("left_lpf_hz", "1000.0"),
-            benchmark_field_pair_v1("right_lpf_hz", "2000.0"),
-            benchmark_field_pair_v1("left_trim_db", "-3.0"),
-            benchmark_field_pair_v1("right_trim_db", "2.0"),
-            benchmark_field_pair_v1("left_fader_db", "-1.0"),
-            benchmark_field_pair_v1("right_fader_db", "-4.0"),
-            benchmark_field_pair_v1("matrix_ll", "0.8"),
-            benchmark_field_pair_v1("matrix_lr", "0.2"),
-            benchmark_field_pair_v1("matrix_rl", "-0.3"),
-            benchmark_field_pair_v1("matrix_rr", "0.7"),
+        BenchmarkKind::FullChainFilters => fields.extend([
+            benchmark_field_pair("tracks", "1"),
+            benchmark_field_pair("meter_observers", "0"),
+            benchmark_field_pair("meter_queue_capacity", "0"),
+            benchmark_field_pair("state_mode", "\"continuous\""),
+            benchmark_field_pair("input_pcm_path", "\"pcm/filters-asymmetric.f32le\""),
+            benchmark_field_pair("input_pcm_sha256", "\"e53eead1da91f80b8c93a730bd1a45629f4efdddf90c3642d38498d29952d1ff\""),
+            benchmark_field_pair("left_hpf_hz", "100.0"),
+            benchmark_field_pair("right_hpf_hz", "200.0"),
+            benchmark_field_pair("left_lpf_hz", "1000.0"),
+            benchmark_field_pair("right_lpf_hz", "2000.0"),
+            benchmark_field_pair("left_trim_db", "-3.0"),
+            benchmark_field_pair("right_trim_db", "2.0"),
+            benchmark_field_pair("left_fader_db", "-1.0"),
+            benchmark_field_pair("right_fader_db", "-4.0"),
+            benchmark_field_pair("matrix_ll", "0.8"),
+            benchmark_field_pair("matrix_lr", "0.2"),
+            benchmark_field_pair("matrix_rl", "-0.3"),
+            benchmark_field_pair("matrix_rr", "0.7"),
         ]),
-        BenchmarkKindV1::IdentityChain => fields.extend([
-            benchmark_field_pair_v1("tracks", "1"),
-            benchmark_field_pair_v1("meter_observers", "0"),
-            benchmark_field_pair_v1("meter_queue_capacity", "0"),
-            benchmark_field_pair_v1("state_mode", "\"continuous\""),
-            benchmark_field_pair_v1("input_pcm_path", "\"pcm/identity-signed-zero.f32le\""),
-            benchmark_field_pair_v1("input_pcm_sha256", "\"6bf5968e626491089468fe9289c4891116c9c5e3f159238cb2bbb3f37fdf6572\""),
-            benchmark_field_pair_v1("left_hpf_hz", "0.0"),
-            benchmark_field_pair_v1("right_hpf_hz", "0.0"),
-            benchmark_field_pair_v1("left_lpf_hz", "0.0"),
-            benchmark_field_pair_v1("right_lpf_hz", "0.0"),
-            benchmark_field_pair_v1("left_trim_db", "0.0"),
-            benchmark_field_pair_v1("right_trim_db", "0.0"),
-            benchmark_field_pair_v1("left_fader_db", "0.0"),
-            benchmark_field_pair_v1("right_fader_db", "0.0"),
-            benchmark_field_pair_v1("matrix_ll", "1.0"),
-            benchmark_field_pair_v1("matrix_lr", "0.0"),
-            benchmark_field_pair_v1("matrix_rl", "0.0"),
-            benchmark_field_pair_v1("matrix_rr", "1.0"),
+        BenchmarkKind::IdentityChain => fields.extend([
+            benchmark_field_pair("tracks", "1"),
+            benchmark_field_pair("meter_observers", "0"),
+            benchmark_field_pair("meter_queue_capacity", "0"),
+            benchmark_field_pair("state_mode", "\"continuous\""),
+            benchmark_field_pair("input_pcm_path", "\"pcm/identity-signed-zero.f32le\""),
+            benchmark_field_pair("input_pcm_sha256", "\"6bf5968e626491089468fe9289c4891116c9c5e3f159238cb2bbb3f37fdf6572\""),
+            benchmark_field_pair("left_hpf_hz", "0.0"),
+            benchmark_field_pair("right_hpf_hz", "0.0"),
+            benchmark_field_pair("left_lpf_hz", "0.0"),
+            benchmark_field_pair("right_lpf_hz", "0.0"),
+            benchmark_field_pair("left_trim_db", "0.0"),
+            benchmark_field_pair("right_trim_db", "0.0"),
+            benchmark_field_pair("left_fader_db", "0.0"),
+            benchmark_field_pair("right_fader_db", "0.0"),
+            benchmark_field_pair("matrix_ll", "1.0"),
+            benchmark_field_pair("matrix_lr", "0.0"),
+            benchmark_field_pair("matrix_rl", "0.0"),
+            benchmark_field_pair("matrix_rr", "1.0"),
         ]),
-        BenchmarkKindV1::MatrixRamp => fields.extend([
-            benchmark_field_pair_v1("tracks", "1"),
-            benchmark_field_pair_v1("meter_observers", "0"),
-            benchmark_field_pair_v1("meter_queue_capacity", "0"),
-            benchmark_field_pair_v1("state_mode", "\"continuous\""),
-            benchmark_field_pair_v1("input_pcm_path", "\"pcm/matrix-ramp-128.f32le\""),
-            benchmark_field_pair_v1("input_pcm_sha256", "\"4b302238e21a45301a1faca72b292d92feacde0dd17df7ddc8f9c271bc693fb8\""),
-            benchmark_field_pair_v1("smoothing_updates", "128"),
-            benchmark_field_pair_v1("target_selection", "\"alternating_by_operation\""),
-            benchmark_field_pair_v1("initial_matrix_ll", "0.7"),
-            benchmark_field_pair_v1("initial_matrix_lr", "0.3"),
-            benchmark_field_pair_v1("initial_matrix_rl", "-0.2"),
-            benchmark_field_pair_v1("initial_matrix_rr", "0.8"),
-            benchmark_field_pair_v1("even_target_ll", "0.6"),
-            benchmark_field_pair_v1("even_target_lr", "0.4"),
-            benchmark_field_pair_v1("even_target_rl", "-0.4"),
-            benchmark_field_pair_v1("even_target_rr", "0.6"),
-            benchmark_field_pair_v1("odd_target_ll", "0.9"),
-            benchmark_field_pair_v1("odd_target_lr", "-0.1"),
-            benchmark_field_pair_v1("odd_target_rl", "0.2"),
-            benchmark_field_pair_v1("odd_target_rr", "0.8"),
+        BenchmarkKind::MatrixRamp => fields.extend([
+            benchmark_field_pair("tracks", "1"),
+            benchmark_field_pair("meter_observers", "0"),
+            benchmark_field_pair("meter_queue_capacity", "0"),
+            benchmark_field_pair("state_mode", "\"continuous\""),
+            benchmark_field_pair("input_pcm_path", "\"pcm/matrix-ramp-128.f32le\""),
+            benchmark_field_pair("input_pcm_sha256", "\"4b302238e21a45301a1faca72b292d92feacde0dd17df7ddc8f9c271bc693fb8\""),
+            benchmark_field_pair("smoothing_updates", "128"),
+            benchmark_field_pair("target_selection", "\"alternating_by_operation\""),
+            benchmark_field_pair("initial_matrix_ll", "0.7"),
+            benchmark_field_pair("initial_matrix_lr", "0.3"),
+            benchmark_field_pair("initial_matrix_rl", "-0.2"),
+            benchmark_field_pair("initial_matrix_rr", "0.8"),
+            benchmark_field_pair("even_target_ll", "0.6"),
+            benchmark_field_pair("even_target_lr", "0.4"),
+            benchmark_field_pair("even_target_rl", "-0.4"),
+            benchmark_field_pair("even_target_rr", "0.6"),
+            benchmark_field_pair("odd_target_ll", "0.9"),
+            benchmark_field_pair("odd_target_lr", "-0.1"),
+            benchmark_field_pair("odd_target_rl", "0.2"),
+            benchmark_field_pair("odd_target_rr", "0.8"),
         ]),
-        BenchmarkKindV1::MeterSuccessFull => fields.extend([
-            benchmark_field_pair_v1("tracks", "1"),
-            benchmark_field_pair_v1("meter_observers", "14"),
-            benchmark_field_pair_v1("meter_queue_capacity", "1"),
-            benchmark_field_pair_v1("state_mode", "\"continuous\""),
-            benchmark_field_pair_v1("input_pcm_path", "\"pcm/graph-taps.f32le\""),
-            benchmark_field_pair_v1(
+        BenchmarkKind::MeterSuccessFull => fields.extend([
+            benchmark_field_pair("tracks", "1"),
+            benchmark_field_pair("meter_observers", "14"),
+            benchmark_field_pair("meter_queue_capacity", "1"),
+            benchmark_field_pair("state_mode", "\"continuous\""),
+            benchmark_field_pair("input_pcm_path", "\"pcm/graph-taps.f32le\""),
+            benchmark_field_pair(
                 "input_pcm_sha256",
-                &format!("\"{GRAPH_TAP_PCM_SHA256_V1}\""),
+                &format!("\"{GRAPH_TAP_PCM_SHA256}\""),
             ),
-            benchmark_field_pair_v1("meter_period_frames", "128"),
-            benchmark_field_pair_v1("meter_peak_hold_frames", "0"),
-            benchmark_field_pair_v1("meter_peak_decay_db_per_second", "0.0"),
-            benchmark_field_pair_v1("meter_reset_generation", "7"),
-            benchmark_field_pair_v1("success_taps", "\"input,post_input_builtins,post_simd1,post_dynamic,post_simd2_pre_fader,post_fader,post_matrix\""),
-            benchmark_field_pair_v1("full_taps", "\"input,post_input_builtins,post_simd1,post_dynamic,post_simd2_pre_fader,post_fader,post_matrix\""),
-            benchmark_field_pair_v1("success_drain_per_operation", "true"),
-            benchmark_field_pair_v1("full_prefill", "true"),
+            benchmark_field_pair("meter_period_frames", "128"),
+            benchmark_field_pair("meter_peak_hold_frames", "0"),
+            benchmark_field_pair("meter_peak_decay_db_per_second", "0.0"),
+            benchmark_field_pair("meter_reset_generation", "7"),
+            benchmark_field_pair("success_taps", "\"input,post_input_builtins,post_simd1,post_dynamic,post_simd2_pre_fader,post_fader,post_matrix\""),
+            benchmark_field_pair("full_taps", "\"input,post_input_builtins,post_simd1,post_dynamic,post_simd2_pre_fader,post_fader,post_matrix\""),
+            benchmark_field_pair("success_drain_per_operation", "true"),
+            benchmark_field_pair("full_prefill", "true"),
         ]),
-        BenchmarkKindV1::Prepare256Tracks => fields.extend([
-            benchmark_field_pair_v1("tracks", "256"),
-            benchmark_field_pair_v1("meter_observers", "56"),
-            benchmark_field_pair_v1("meter_queue_capacity", "4"),
-            benchmark_field_pair_v1("state_mode", "\"new_per_prepare\""),
-            benchmark_field_pair_v1("session_template_path", "\"fixtures/session/v1/canonical.toml\""),
-            benchmark_field_pair_v1("session_template_sha256", "\"323768dd664277651ad79b6c5bae97eab0a4458cc533bd3e9267c41c24111999\""),
-            benchmark_field_pair_v1("track_id_prefix", "\"benchmark-track-\""),
-            benchmark_field_pair_v1("track_id_count", "256"),
-            benchmark_field_pair_v1("empty_effect_racks", "true"),
-            benchmark_field_pair_v1("route_source_track_id", "\"benchmark-track-0\""),
-            benchmark_field_pair_v1("route_source_tap", "\"post_matrix\""),
-            benchmark_field_pair_v1("meter_track_ids", "\"benchmark-track-0,benchmark-track-1,benchmark-track-2,benchmark-track-3,benchmark-track-4,benchmark-track-5,benchmark-track-6,benchmark-track-7\""),
-            benchmark_field_pair_v1("meter_taps", "\"input,post_input_builtins,post_simd1,post_dynamic,post_simd2_pre_fader,post_fader,post_matrix\""),
-            benchmark_field_pair_v1("meter_period_frames", "128"),
-            benchmark_field_pair_v1("meter_peak_hold_frames", "0"),
-            benchmark_field_pair_v1("meter_peak_decay_db_per_second", "0.0"),
-            benchmark_field_pair_v1("meter_reset_generation", "7"),
+        BenchmarkKind::Prepare256Tracks => fields.extend([
+            benchmark_field_pair("tracks", "256"),
+            benchmark_field_pair("meter_observers", "56"),
+            benchmark_field_pair("meter_queue_capacity", "4"),
+            benchmark_field_pair("state_mode", "\"new_per_prepare\""),
+            benchmark_field_pair("session_template_path", "\"fixtures/session/v1/canonical.toml\""),
+            benchmark_field_pair("session_template_sha256", "\"323768dd664277651ad79b6c5bae97eab0a4458cc533bd3e9267c41c24111999\""),
+            benchmark_field_pair("track_id_prefix", "\"benchmark-track-\""),
+            benchmark_field_pair("track_id_count", "256"),
+            benchmark_field_pair("empty_effect_racks", "true"),
+            benchmark_field_pair("route_source_track_id", "\"benchmark-track-0\""),
+            benchmark_field_pair("route_source_tap", "\"post_matrix\""),
+            benchmark_field_pair("meter_track_ids", "\"benchmark-track-0,benchmark-track-1,benchmark-track-2,benchmark-track-3,benchmark-track-4,benchmark-track-5,benchmark-track-6,benchmark-track-7\""),
+            benchmark_field_pair("meter_taps", "\"input,post_input_builtins,post_simd1,post_dynamic,post_simd2_pre_fader,post_fader,post_matrix\""),
+            benchmark_field_pair("meter_period_frames", "128"),
+            benchmark_field_pair("meter_peak_hold_frames", "0"),
+            benchmark_field_pair("meter_peak_decay_db_per_second", "0.0"),
+            benchmark_field_pair("meter_reset_generation", "7"),
         ]),
     }
     fields
 }
 
-fn benchmark_field_pair_v1(key: &str, value: &str) -> (String, String) {
+fn benchmark_field_pair(key: &str, value: &str) -> (String, String) {
     (key.to_owned(), value.to_owned())
 }
 
-fn canonical_benchmark_input_v1(kind: BenchmarkKindV1, rate_hz: u32) -> String {
+fn canonical_benchmark_input(kind: BenchmarkKind, rate_hz: u32) -> String {
     let mut output = String::new();
-    for (key, value) in expected_benchmark_fields_v1(kind, rate_hz) {
+    for (key, value) in expected_benchmark_fields(kind, rate_hz) {
         writeln!(output, "{key} = {value}").expect("string");
     }
     output
@@ -5144,7 +5144,7 @@ fn list_files(root: &Path) -> Result<Vec<String>, String> {
     Ok(files)
 }
 
-fn fixture_tree_hash_v1(root: &Path) -> Result<[u8; 32], String> {
+fn fixture_tree_hash(root: &Path) -> Result<[u8; 32], String> {
     let mut paths = list_files(root)?;
     paths.push("MANIFEST.tsv".to_owned());
     paths.sort();
@@ -5177,7 +5177,7 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-    enum CorpusClassV1 {
+    enum CorpusClass {
         Toml,
         F32Le,
         Csv,
@@ -5187,7 +5187,7 @@ mod tests {
     }
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-    enum CorpusMutationV1 {
+    enum CorpusMutation {
         Delete,
         StaleManifestByteAlteration,
         UnlistedAdd,
@@ -5195,7 +5195,7 @@ mod tests {
     }
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-    enum CorpusRejectionV1 {
+    enum CorpusRejection {
         FixtureTree,
         ManifestSha256,
         CasesCoverage,
@@ -5207,15 +5207,15 @@ mod tests {
     }
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-    struct CorpusCorruptionResultV1 {
-        class: CorpusClassV1,
-        mutation: CorpusMutationV1,
-        rejection: CorpusRejectionV1,
+    struct CorpusCorruptionResult {
+        class: CorpusClass,
+        mutation: CorpusMutation,
+        rejection: CorpusRejection,
     }
 
     #[test]
     fn issue064_checked_corpus_is_read_only_complete_and_has_no_authoring_reachability() {
-        let root = copied_checked_in_fixture_root_v1("read-only");
+        let root = copied_checked_in_fixture_root("read-only");
         let before = read_fixture_tree(&root);
 
         run(vec![
@@ -5229,7 +5229,7 @@ mod tests {
             read_fixture_tree(&root),
             "--check mutated the fixture root"
         );
-        let manifest = parse_manifest_v1(&root).expect("checked manifest");
+        let manifest = parse_manifest(&root).expect("checked manifest");
         assert_eq!(manifest.entries.len(), 50, "frozen checked payload count");
         assert_eq!(
             sha256(&fs::read(root.join("MANIFEST.tsv")).expect("checked manifest bytes")),
@@ -5250,13 +5250,13 @@ mod tests {
         let source = include_str!("fixture_builtins.rs");
         assert!(
             source.contains(
-                "[mode, root] if mode == \"--check\" => check_read_only_fixture_root_v1(Path::new(root)),"
+                "[mode, root] if mode == \"--check\" => check_read_only_fixture_root(Path::new(root)),"
             ),
             "--check dispatch must remain the read-only checker entry"
         );
-        let checker_region = source_segment_v1(
+        let checker_region = source_segment(
             source,
-            "fn check_fixture_root_v1",
+            "fn check_fixture_root",
             "#[cfg(test)]\nmod tests",
         );
         for forbidden in [
@@ -5264,7 +5264,7 @@ mod tests {
             "write_and_verify(",
             "verify_generated_scratch(",
             "graph_tap_fixtures(",
-            "graph_tap_artifact_v1(",
+            "graph_tap_artifact(",
             "cases()",
             "responses()",
             "measure_response(",
@@ -5276,7 +5276,7 @@ mod tests {
             "render_matrix_ramp(",
             "render_matrix_retarget(",
             "render_reset(",
-            "render_reset_fixture_v1(",
+            "render_reset_fixture(",
             "render_lr_isolation(",
             "render_partition(",
             "fixture_session(",
@@ -5297,34 +5297,34 @@ mod tests {
     #[test]
     fn issue064_checked_corpus_rejects_exactly_twenty_four_corruptions() {
         let classes = [
-            CorpusClassV1::Toml,
-            CorpusClassV1::F32Le,
-            CorpusClassV1::Csv,
-            CorpusClassV1::MeterJsonl,
-            CorpusClassV1::DiagnosticsJsonl,
-            CorpusClassV1::ResourcesJsonl,
+            CorpusClass::Toml,
+            CorpusClass::F32Le,
+            CorpusClass::Csv,
+            CorpusClass::MeterJsonl,
+            CorpusClass::DiagnosticsJsonl,
+            CorpusClass::ResourcesJsonl,
         ];
         let mutations = [
-            CorpusMutationV1::Delete,
-            CorpusMutationV1::StaleManifestByteAlteration,
-            CorpusMutationV1::UnlistedAdd,
-            CorpusMutationV1::ManifestValidSemanticHole,
+            CorpusMutation::Delete,
+            CorpusMutation::StaleManifestByteAlteration,
+            CorpusMutation::UnlistedAdd,
+            CorpusMutation::ManifestValidSemanticHole,
         ];
         let mut actual = Vec::new();
         for class in classes {
             for mutation in mutations {
-                let root = copied_checked_in_fixture_root_v1(&format!("{class:?}-{mutation:?}"));
-                apply_issue064_mutation_v1(&root, class, mutation);
-                if mutation == CorpusMutationV1::ManifestValidSemanticHole {
-                    let manifest = parse_manifest_v1(&root).expect("manifest-valid semantic hole");
-                    verify_manifest_bytes_v1(&root, &manifest)
+                let root = copied_checked_in_fixture_root(&format!("{class:?}-{mutation:?}"));
+                apply_issue064_mutation(&root, class, mutation);
+                if mutation == CorpusMutation::ManifestValidSemanticHole {
+                    let manifest = parse_manifest(&root).expect("manifest-valid semantic hole");
+                    verify_manifest_bytes(&root, &manifest)
                         .expect("semantic hole must pass manifest verification first");
                 }
-                let error = check_fixture_root_v1(&root).expect_err("corruption must reject");
-                actual.push(CorpusCorruptionResultV1 {
+                let error = check_fixture_root(&root).expect_err("corruption must reject");
+                actual.push(CorpusCorruptionResult {
                     class,
                     mutation,
-                    rejection: issue064_rejection_identity_v1(class, mutation, &error),
+                    rejection: issue064_rejection_identity(class, mutation, &error),
                 });
                 remove_temporary_root(root);
             }
@@ -5335,18 +5335,18 @@ mod tests {
             .flat_map(|class| {
                 mutations
                     .into_iter()
-                    .map(move |mutation| CorpusCorruptionResultV1 {
+                    .map(move |mutation| CorpusCorruptionResult {
                         class,
                         mutation,
                         rejection: match mutation {
-                            CorpusMutationV1::Delete | CorpusMutationV1::UnlistedAdd => {
-                                CorpusRejectionV1::FixtureTree
+                            CorpusMutation::Delete | CorpusMutation::UnlistedAdd => {
+                                CorpusRejection::FixtureTree
                             }
-                            CorpusMutationV1::StaleManifestByteAlteration => {
-                                CorpusRejectionV1::ManifestSha256
+                            CorpusMutation::StaleManifestByteAlteration => {
+                                CorpusRejection::ManifestSha256
                             }
-                            CorpusMutationV1::ManifestValidSemanticHole => {
-                                issue064_semantic_rejection_v1(class)
+                            CorpusMutation::ManifestValidSemanticHole => {
+                                issue064_semantic_rejection(class)
                             }
                         },
                     })
@@ -5360,13 +5360,13 @@ mod tests {
         let files = complete_files();
         let root = temporary_root("issue067-graph-baseline");
         write_fixture(&root, &files);
-        check_read_only_fixture_root_v1(&root).expect("issue067 graph fixture baseline");
-        let records = parse_canonical_meter_records_v1(&root, "meters/graph-taps.jsonl")
+        check_read_only_fixture_root(&root).expect("issue067 graph fixture baseline");
+        let records = parse_canonical_meter_records(&root, "meters/graph-taps.jsonl")
             .expect("seven graph meter records");
         let summaries: BTreeSet<_> = records
             .iter()
             .map(|record| match record {
-                MeterRecordV1::Snapshot(snapshot) => (
+                MeterRecord::Snapshot(snapshot) => (
                     snapshot.left_peak,
                     snapshot.right_peak,
                     snapshot.left_energy,
@@ -5385,11 +5385,11 @@ mod tests {
         );
         remove_temporary_root(root);
 
-        reject_manifest_valid_graph_tap_mutation_v1(&files, "pcm-word", |files| {
+        reject_manifest_valid_graph_tap_mutation(&files, "pcm-word", |files| {
             files.get_mut("pcm/graph-taps.f32le").expect("graph PCM")
                 [9 * core::mem::size_of::<f32>()] ^= 1;
         });
-        reject_manifest_valid_graph_tap_mutation_v1(&files, "tap-field", |files| {
+        reject_manifest_valid_graph_tap_mutation(&files, "tap-field", |files| {
             replace_jsonl_fragment(
                 files
                     .get_mut("meters/graph-taps.jsonl")
@@ -5398,32 +5398,32 @@ mod tests {
                 "\"tap\":\"PostInputBuiltins\"",
             );
         });
-        reject_manifest_valid_graph_tap_mutation_v1(&files, "dependent-toml-hash", |files| {
+        reject_manifest_valid_graph_tap_mutation(&files, "dependent-toml-hash", |files| {
             let path = "benchmark/meter_success_full-48000.toml";
             let input = String::from_utf8(files.get(path).expect("benchmark input").clone())
                 .expect("benchmark input UTF-8");
             files.insert(
                 path.to_owned(),
                 input
-                    .replacen(GRAPH_TAP_PCM_SHA256_V1, &"0".repeat(64), 1)
+                    .replacen(GRAPH_TAP_PCM_SHA256, &"0".repeat(64), 1)
                     .into_bytes(),
             );
         });
 
-        assert!(verify_graph_tap_pdc_relation_v1((9, 0, 9), (0, 8, 8), [8]).is_err());
-        assert!(verify_graph_tap_pdc_relation_v1((9, 0, 9), (0, 9, 9), [8]).is_err());
+        assert!(verify_graph_tap_pdc_relation((9, 0, 9), (0, 8, 8), [8]).is_err());
+        assert!(verify_graph_tap_pdc_relation((9, 0, 9), (0, 9, 9), [8]).is_err());
     }
 
     #[test]
     fn issue061_response_tuples_decimals_and_partitions_reject_semantic_mutations() {
-        let expected = expected_response_cases_v1();
+        let expected = expected_response_cases();
         let id = "response-high_pass-44100-1-0-0";
         let mut changed = expected.clone();
         changed.get_mut(id).expect("frozen response case").oracle = "wrong".to_owned();
-        assert!(verify_response_cases_v1(&changed).is_err());
-        assert!(parse_canonical_response_f64_v1("10.0", "test").is_err());
+        assert!(verify_response_cases(&changed).is_err());
+        assert!(parse_canonical_response_f64("10.0", "test").is_err());
 
-        let row = parse_response_csv_row_v1(
+        let row = parse_response_csv_row(
             "response-high_pass-44100-1-0-0,44100,high_pass,10.00000000000000000,4.00000000000000000,1,-16.02738287747026291,-16.02738235825830770,-16.02737817066901727,-16.02738648600919902,-131.33618179292395212,-16.02738648903881824,0.00000000000000000,0"
                 .split(',')
                 .collect(),
@@ -5432,11 +5432,11 @@ mod tests {
         .expect("canonical response row");
         let mut oracle_mutation = row.clone();
         oracle_mutation.impulse_dft_magnitude_db = 0.0;
-        assert!(verify_response_oracle_tolerances_v1(&[oracle_mutation]).is_err());
+        assert!(verify_response_oracle_tolerances(&[oracle_mutation]).is_err());
         let mut altered = row.clone();
         altered.quantum_frames = 127;
         altered.impulse_dft_magnitude_db = 0.0;
-        assert!(verify_response_partition_equality_v1(&[row, altered]).is_err());
+        assert!(verify_response_partition_equality(&[row, altered]).is_err());
     }
 
     #[test]
@@ -5445,13 +5445,13 @@ mod tests {
             .into_iter()
             .find_map(|(id, bytes)| (id == "matrix-ramp").then_some(bytes))
             .expect("unsuffixed matrix ramp");
-        let (left, right) = matrix_outputs_v1(
+        let (left, right) = matrix_outputs(
             [0.0, 1.0, 1.0, 0.0],
-            &PCM_INPUT_LEFT_V1,
-            &PCM_INPUT_RIGHT_V1,
+            &PCM_INPUT_LEFT,
+            &PCM_INPUT_RIGHT,
         );
         assert_eq!(ramp, pack_pcm(&left, &right));
-        let reset = render_reset_fixture_v1();
+        let reset = render_reset_fixture();
         assert_eq!(
             reset.executed_resets,
             [
@@ -5470,7 +5470,7 @@ mod tests {
         let mut ramp_mutation = fs::read(&ramp_path).expect("unsuffixed matrix ramp");
         ramp_mutation[0] ^= 1;
         fs::write(&ramp_path, ramp_mutation).expect("mutated unsuffixed matrix ramp");
-        assert!(verify_matrix_pcm_semantics_v1(&root).is_err());
+        assert!(verify_matrix_pcm_semantics(&root).is_err());
 
         for (id, bytes) in pcm_cases() {
             fs::write(root.join(format!("pcm/{id}.f32le")), bytes).expect("PCM fixture reset");
@@ -5479,7 +5479,7 @@ mod tests {
         let mut reset_mutation = fs::read(&reset_path).expect("reset PCM");
         reset_mutation[8 * core::mem::size_of::<f32>()] ^= 1;
         fs::write(&reset_path, reset_mutation).expect("mutated reset PCM");
-        assert!(verify_filter_pcm_semantics_v1(&root).is_err());
+        assert!(verify_filter_pcm_semantics(&root).is_err());
         remove_temporary_root(root);
     }
 
@@ -5576,24 +5576,24 @@ mod tests {
 
     #[test]
     fn v1_owned_jsonl_parsers_reject_duplicate_extra_reordered_and_wrong_variants() {
-        assert!(JsonParserV1::object(r#"{"case":"one","case":"two"}"#).is_err());
-        assert!(parse_meter_record_v1(
+        assert!(JsonParser::object(r#"{"case":"one","case":"two"}"#).is_err());
+        assert!(parse_meter_record(
             r#"{"case":"partial","snapshot":null,"observed_frames":2,"period_frames":4,"start":"0000000000000003","extra":0}"#,
         )
         .is_err());
-        assert!(parse_meter_record_v1(
+        assert!(parse_meter_record(
             r#"{"case":"partial","snapshot":{},"observed_frames":2,"period_frames":4,"start":"0000000000000003"}"#,
         )
         .is_err());
-        assert!(parse_canonical_diagnostics_v1(
+        assert!(parse_canonical_diagnostics(
             "{\"code\":\"builtin.filter.order\",\"case\":\"filter-order\",\"path\":\"$.tracks[id=vocal].builtins.left.lpf_hz\"}\n",
         )
         .is_err());
-        assert!(parse_canonical_diagnostics_v1(
+        assert!(parse_canonical_diagnostics(
             "{\"case\":\"filter-order\",\"code\":\"builtin.filter.order\",\"path\":\"$.tracks[id=vocal].builtins.left.lpf_hz\",\"extra\":\"no\"}\n",
         )
         .is_err());
-        assert!(parse_resource_record_v1(
+        assert!(parse_resource_record(
             r#"{"tracks":1,"meters":0,"queue_capacity":1,"meter_items":0,"engine_owned_processor_payload_bytes":597,"engine_owned_meter_payload_bytes":0,"engine_owned_retained_payload_bytes":597,"maximum_single_allocation_bytes":216,"retained_allocation_count":"17"}"#,
         )
         .is_err());
@@ -5607,7 +5607,7 @@ mod tests {
 
         fs::remove_file(root.join("MANIFEST.tsv")).expect("remove manifest");
         assert!(
-            check_fixture_root_v1(&root).is_err(),
+            check_fixture_root(&root).is_err(),
             "accepted missing manifest"
         );
         write_fixture(&root, &files);
@@ -5615,7 +5615,7 @@ mod tests {
         fs::write(root.join("MANIFEST.tsv"), "path\tlength\tsha256\n../unsafe\t1\t0000000000000000000000000000000000000000000000000000000000000000\n")
             .expect("unsafe manifest");
         assert!(
-            check_fixture_root_v1(&root).is_err(),
+            check_fixture_root(&root).is_err(),
             "accepted unsafe manifest path"
         );
         write_fixture(&root, &files);
@@ -5628,7 +5628,7 @@ mod tests {
         )
         .expect("duplicate manifest entry");
         assert!(
-            check_fixture_root_v1(&root).is_err(),
+            check_fixture_root(&root).is_err(),
             "accepted duplicate manifest entry"
         );
         remove_temporary_root(root);
@@ -5640,18 +5640,18 @@ mod tests {
         for (name, mutate) in [
             (
                 "workload_id",
-                benchmark_text_mutation_v1(
+                benchmark_text_mutation(
                     "workload_id = \"issue035.full_chain_filters.48000hz.q128\"",
                     "workload_id = \"issue035.full_chain_filters.96000hz.q128\"",
                 ),
             ),
             (
                 "missing_parameter",
-                benchmark_text_mutation_v1("matrix_rr = 0.7\n", ""),
+                benchmark_text_mutation("matrix_rr = 0.7\n", ""),
             ),
             (
                 "declared_pcm_hash",
-                benchmark_text_mutation_v1(
+                benchmark_text_mutation(
                     "input_pcm_sha256 = \"e53eead1da91f80b8c93a730bd1a45629f4efdddf90c3642d38498d29952d1ff\"",
                     "input_pcm_sha256 = \"0000000000000000000000000000000000000000000000000000000000000000\"",
                 ),
@@ -5662,7 +5662,7 @@ mod tests {
             mutate(&mut mutated);
             write_fixture(&root, &mutated);
             assert!(
-                check_fixture_root_v1(&root).is_err(),
+                check_fixture_root(&root).is_err(),
                 "accepted benchmark {name} mutation"
             );
             remove_temporary_root(root);
@@ -5676,7 +5676,7 @@ mod tests {
             .push(0);
         write_fixture(&root, &mutated);
         assert!(
-            check_fixture_root_v1(&root).is_err(),
+            check_fixture_root(&root).is_err(),
             "accepted benchmark PCM manifest-hash mismatch"
         );
         remove_temporary_root(root);
@@ -5692,13 +5692,13 @@ mod tests {
         write_fixture(&root, files);
         mutate(&root);
         assert!(
-            check_fixture_root_v1(&root).is_err(),
+            check_fixture_root(&root).is_err(),
             "accepted {class} {mutation} mutation"
         );
         remove_temporary_root(root);
     }
 
-    fn reject_manifest_valid_graph_tap_mutation_v1(
+    fn reject_manifest_valid_graph_tap_mutation(
         files: &BTreeMap<String, Vec<u8>>,
         name: &str,
         mutate: impl FnOnce(&mut BTreeMap<String, Vec<u8>>),
@@ -5708,7 +5708,7 @@ mod tests {
         mutate(&mut mutated);
         write_fixture(&root, &mutated);
         assert!(
-            check_fixture_root_v1(&root).is_err(),
+            check_fixture_root(&root).is_err(),
             "accepted manifest-valid issue067 mutation: {name}"
         );
         remove_temporary_root(root);
@@ -5725,7 +5725,7 @@ mod tests {
         mutate(mutated.get_mut(path).expect("owned JSONL fixture"));
         write_fixture(&root, &mutated);
         assert!(
-            check_fixture_root_v1(&root).is_err(),
+            check_fixture_root(&root).is_err(),
             "accepted owned JSONL mutation: {name}"
         );
         remove_temporary_root(root);
@@ -5753,7 +5753,7 @@ mod tests {
         mutate(&mut mutated);
         write_fixture(&root, &mutated);
         assert!(
-            check_fixture_root_v1(&root).is_err(),
+            check_fixture_root(&root).is_err(),
             "accepted {class} manifest-valid coverage hole"
         );
         remove_temporary_root(root);
@@ -5761,19 +5761,19 @@ mod tests {
 
     fn complete_files() -> BTreeMap<String, Vec<u8>> {
         let mut files: BTreeMap<_, _> = generated().into_iter().collect();
-        for kind in BENCHMARK_KINDS_V1 {
-            let kind = BenchmarkKindV1::parse(kind).expect("frozen benchmark kind");
-            for rate_hz in BENCHMARK_RATES_V1 {
+        for kind in BENCHMARK_KINDS {
+            let kind = BenchmarkKind::parse(kind).expect("frozen benchmark kind");
+            for rate_hz in BENCHMARK_RATES {
                 files.insert(
                     format!("benchmark/{}-{rate_hz}.toml", kind.as_str()),
-                    canonical_benchmark_input_v1(kind, rate_hz).into_bytes(),
+                    canonical_benchmark_input(kind, rate_hz).into_bytes(),
                 );
             }
         }
         files
     }
 
-    fn benchmark_text_mutation_v1(
+    fn benchmark_text_mutation(
         from: &'static str,
         to: &'static str,
     ) -> impl FnOnce(&mut BTreeMap<String, Vec<u8>>) {
@@ -5858,7 +5858,7 @@ mod tests {
         fs::remove_dir_all(root).expect("remove fixture root");
     }
 
-    impl CorpusClassV1 {
+    impl CorpusClass {
         const fn payload_path(self) -> &'static str {
             match self {
                 Self::Toml => "cases.toml",
@@ -5871,18 +5871,18 @@ mod tests {
         }
     }
 
-    fn issue064_semantic_rejection_v1(class: CorpusClassV1) -> CorpusRejectionV1 {
+    fn issue064_semantic_rejection(class: CorpusClass) -> CorpusRejection {
         match class {
-            CorpusClassV1::Toml => CorpusRejectionV1::CasesCoverage,
-            CorpusClassV1::F32Le => CorpusRejectionV1::PcmTuple,
-            CorpusClassV1::Csv => CorpusRejectionV1::ReferenceCoverage,
-            CorpusClassV1::MeterJsonl => CorpusRejectionV1::MeterTuple,
-            CorpusClassV1::DiagnosticsJsonl => CorpusRejectionV1::DiagnosticTuple,
-            CorpusClassV1::ResourcesJsonl => CorpusRejectionV1::ResourceGrid,
+            CorpusClass::Toml => CorpusRejection::CasesCoverage,
+            CorpusClass::F32Le => CorpusRejection::PcmTuple,
+            CorpusClass::Csv => CorpusRejection::ReferenceCoverage,
+            CorpusClass::MeterJsonl => CorpusRejection::MeterTuple,
+            CorpusClass::DiagnosticsJsonl => CorpusRejection::DiagnosticTuple,
+            CorpusClass::ResourcesJsonl => CorpusRejection::ResourceGrid,
         }
     }
 
-    fn copied_checked_in_fixture_root_v1(label: &str) -> PathBuf {
+    fn copied_checked_in_fixture_root(label: &str) -> PathBuf {
         let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/builtins/v1");
         let root = temporary_root(label);
         fs::create_dir_all(&root).expect("copied fixture root");
@@ -5898,51 +5898,51 @@ mod tests {
         root
     }
 
-    fn apply_issue064_mutation_v1(root: &Path, class: CorpusClassV1, mutation: CorpusMutationV1) {
+    fn apply_issue064_mutation(root: &Path, class: CorpusClass, mutation: CorpusMutation) {
         let path = class.payload_path();
         match mutation {
-            CorpusMutationV1::Delete => {
+            CorpusMutation::Delete => {
                 fs::remove_file(root.join(path)).expect("delete required fixture payload");
             }
-            CorpusMutationV1::StaleManifestByteAlteration => {
+            CorpusMutation::StaleManifestByteAlteration => {
                 let mut bytes = fs::read(root.join(path)).expect("fixture payload bytes");
                 bytes[0] ^= 1;
                 fs::write(root.join(path), bytes).expect("alter fixture payload byte");
             }
-            CorpusMutationV1::UnlistedAdd => {
+            CorpusMutation::UnlistedAdd => {
                 fs::write(
                     root.join(format!("issue064-unlisted-{class:?}")),
                     b"unexpected\n",
                 )
                 .expect("add unlisted fixture payload");
             }
-            CorpusMutationV1::ManifestValidSemanticHole => {
-                mutate_issue064_semantic_hole_v1(root, class);
-                refresh_manifest_entry_v1(root, path);
+            CorpusMutation::ManifestValidSemanticHole => {
+                mutate_issue064_semantic_hole(root, class);
+                refresh_manifest_entry(root, path);
             }
         }
     }
 
-    fn mutate_issue064_semantic_hole_v1(root: &Path, class: CorpusClassV1) {
+    fn mutate_issue064_semantic_hole(root: &Path, class: CorpusClass) {
         let path = root.join(class.payload_path());
         let bytes = fs::read(&path).expect("semantic-hole fixture bytes");
         let mutated = match class {
-            CorpusClassV1::Toml => remove_first_response_case(
+            CorpusClass::Toml => remove_first_response_case(
                 std::str::from_utf8(&bytes).expect("cases fixture UTF-8"),
             )
             .into_bytes(),
-            CorpusClassV1::F32Le => {
+            CorpusClass::F32Le => {
                 let mut truncated = bytes;
                 truncated.truncate(truncated.len() - 2 * core::mem::size_of::<f32>());
                 truncated
             }
-            CorpusClassV1::Csv => {
+            CorpusClass::Csv => {
                 remove_first_data_row(std::str::from_utf8(&bytes).expect("reference fixture UTF-8"))
                     .into_bytes()
             }
-            CorpusClassV1::MeterJsonl
-            | CorpusClassV1::DiagnosticsJsonl
-            | CorpusClassV1::ResourcesJsonl => {
+            CorpusClass::MeterJsonl
+            | CorpusClass::DiagnosticsJsonl
+            | CorpusClass::ResourcesJsonl => {
                 let mut records = bytes;
                 remove_first_jsonl_record(&mut records);
                 records
@@ -5951,7 +5951,7 @@ mod tests {
         fs::write(path, mutated).expect("write semantic-hole fixture payload");
     }
 
-    fn refresh_manifest_entry_v1(root: &Path, path: &str) {
+    fn refresh_manifest_entry(root: &Path, path: &str) {
         let bytes = fs::read(root.join(path)).expect("manifest payload bytes");
         let old = fs::read_to_string(root.join("MANIFEST.tsv")).expect("manifest text");
         let replacement = format!("{path}\t{}\t{}", bytes.len(), sha256(&bytes));
@@ -5974,47 +5974,47 @@ mod tests {
         fs::write(root.join("MANIFEST.tsv"), manifest).expect("updated manifest entry");
     }
 
-    fn issue064_rejection_identity_v1(
-        class: CorpusClassV1,
-        mutation: CorpusMutationV1,
+    fn issue064_rejection_identity(
+        class: CorpusClass,
+        mutation: CorpusMutation,
         error: &str,
-    ) -> CorpusRejectionV1 {
+    ) -> CorpusRejection {
         match mutation {
-            CorpusMutationV1::Delete | CorpusMutationV1::UnlistedAdd => {
+            CorpusMutation::Delete | CorpusMutation::UnlistedAdd => {
                 assert_eq!(error, "fixture tree has missing or unlisted payload files");
-                CorpusRejectionV1::FixtureTree
+                CorpusRejection::FixtureTree
             }
-            CorpusMutationV1::StaleManifestByteAlteration => {
+            CorpusMutation::StaleManifestByteAlteration => {
                 assert_eq!(
                     error,
                     format!("fixture sha256 mismatch: {}", class.payload_path())
                 );
-                CorpusRejectionV1::ManifestSha256
+                CorpusRejection::ManifestSha256
             }
-            CorpusMutationV1::ManifestValidSemanticHole => {
-                let expected = issue064_semantic_rejection_v1(class);
+            CorpusMutation::ManifestValidSemanticHole => {
+                let expected = issue064_semantic_rejection(class);
                 let matches = match expected {
-                    CorpusRejectionV1::CasesCoverage => {
+                    CorpusRejection::CasesCoverage => {
                         error.starts_with("cases.toml coverage count differs")
                     }
-                    CorpusRejectionV1::PcmTuple => {
+                    CorpusRejection::PcmTuple => {
                         error.starts_with("PCM semantic mismatch: pcm/identity-signed-zero.f32le")
                     }
-                    CorpusRejectionV1::ReferenceCoverage => {
+                    CorpusRejection::ReferenceCoverage => {
                         error.starts_with("reference/filter-response.csv coverage count differs")
                     }
-                    CorpusRejectionV1::MeterTuple => {
+                    CorpusRejection::MeterTuple => {
                         error
                             == "meters/window-and-drop.jsonl differs from the independent 15-record tuple set"
                     }
-                    CorpusRejectionV1::DiagnosticTuple => {
+                    CorpusRejection::DiagnosticTuple => {
                         error
                             == "diagnostics.jsonl differs from the exact 13 stable code/path tuples"
                     }
-                    CorpusRejectionV1::ResourceGrid => {
+                    CorpusRejection::ResourceGrid => {
                         error == "resources.jsonl differs from the exact 3-by-3 V1 resource grid"
                     }
-                    CorpusRejectionV1::FixtureTree | CorpusRejectionV1::ManifestSha256 => false,
+                    CorpusRejection::FixtureTree | CorpusRejection::ManifestSha256 => false,
                 };
                 assert!(
                     matches,
@@ -6025,7 +6025,7 @@ mod tests {
         }
     }
 
-    fn source_segment_v1<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
+    fn source_segment<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
         let (_, source) = source.split_once(start).expect("source start");
         let (source, _) = source.split_once(end).expect("source end");
         source
