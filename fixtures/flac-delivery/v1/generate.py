@@ -15,7 +15,8 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[2]
 IDENTITY = ROOT / "fixtures" / "stem-identity" / "v1"
 BLOCK_SIZES = (32, 4096)
-GENERATED_ROOTS = ("FLAC_VECTORS.tsv", "flac", "masters", "mini-catalog")
+DELIVERY_FRAMES = 4096
+GENERATED_ROOTS = ("FLAC_VECTORS.tsv", "flac", "masters", "mini-catalog", "pcm")
 
 
 def vectors() -> list[dict[str, str]]:
@@ -25,8 +26,21 @@ def vectors() -> list[dict[str, str]]:
     return [dict(zip(names, line.split("\t"), strict=True)) for line in lines[2:]]
 
 
-def wave_bytes(vector: dict[str, str]) -> bytes:
+def expanded_pcm(vector: dict[str, str]) -> bytes:
     pcm = (IDENTITY / vector["pcm_file"]).read_bytes()
+    channels = int(vector["channels"])
+    bit_depth = int(vector["bit_depth"])
+    frames = int(vector["frames"])
+    frame_bytes = channels * (bit_depth // 8)
+    assert len(pcm) == frames * frame_bytes
+    assert f"sha256:{hashlib.sha256(pcm).hexdigest()}" == vector["identity"]
+    repetitions, remaining_frames = divmod(DELIVERY_FRAMES, frames)
+    expanded = pcm * repetitions + pcm[: remaining_frames * frame_bytes]
+    assert len(expanded) == DELIVERY_FRAMES * frame_bytes
+    return expanded
+
+
+def wave_bytes(vector: dict[str, str], pcm: bytes) -> bytes:
     channels = int(vector["channels"])
     bit_depth = int(vector["bit_depth"])
     sample_rate = 48_000
@@ -51,6 +65,7 @@ def run(command: list[str]) -> subprocess.CompletedProcess[str]:
 def build_tree(output: Path) -> None:
     (output / "flac").mkdir(parents=True)
     (output / "masters").mkdir()
+    (output / "pcm").mkdir()
     mini = output / "mini-catalog"
     (mini / "masters").mkdir(parents=True)
     manifest = [
@@ -60,7 +75,11 @@ def build_tree(output: Path) -> None:
     catalog_rows = ["schema_version\t1", "name\told_identity\tmaster_wave"]
     old_identities: list[tuple[str, str]] = []
     for vector in vectors():
-        master = wave_bytes(vector)
+        canonical_pcm = expanded_pcm(vector)
+        pcm_name = f'{vector["name"]}.pcm'
+        (output / "pcm" / pcm_name).write_bytes(canonical_pcm)
+        identity = f"sha256:{hashlib.sha256(canonical_pcm).hexdigest()}"
+        master = wave_bytes(vector, canonical_pcm)
         master_name = f'{vector["name"]}.wav'
         (output / "masters" / master_name).write_bytes(master)
         (mini / "masters" / master_name).write_bytes(master)
@@ -75,13 +94,13 @@ def build_tree(output: Path) -> None:
                 "--output-dir", str(publish), "--block-frames", str(block_size),
             ])
             identity, delivery_name = completed.stdout.strip().split("\t")
-            assert identity == vector["identity"]
+            assert identity == f"sha256:{hashlib.sha256(canonical_pcm).hexdigest()}"
             encoded = (publish / delivery_name).read_bytes()
             flac_name = f'{vector["name"]}-b{block_size}.flac'
             (output / "flac" / flac_name).write_bytes(encoded)
             manifest.append("\t".join([
-                vector["name"], vector["bit_depth"], vector["channels"], vector["frames"],
-                str(block_size), vector["identity"], vector["pcm_file"],
+                vector["name"], vector["bit_depth"], vector["channels"], str(DELIVERY_FRAMES),
+                str(block_size), identity, f"pcm/{pcm_name}",
                 f"flac/{flac_name}", hashlib.sha256(encoded).hexdigest(),
             ]))
             shutil.rmtree(publish)

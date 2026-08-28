@@ -3,7 +3,8 @@
 use std::{fs, path::Path};
 
 use miso_engine_flac_decoder::{
-    RESULT_DECODE_REFUSED, RESULT_RESOURCE_LIMIT, RESULT_SHAPE_MISMATCH, decode_flac_to_writer,
+    FlacBlockDecoder, RESULT_DECODE_REFUSED, RESULT_RESOURCE_LIMIT, RESULT_SHAPE_MISMATCH,
+    decode_flac_to_writer,
 };
 use miso_engine_stem_hasher::{CanonicalBitDepth, CanonicalPcmShape, canonicalize_raw_pcm};
 
@@ -11,11 +12,6 @@ const FIXTURES: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../fixtures/flac-delivery/v1"
 );
-const IDENTITY_FIXTURES: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../fixtures/stem-identity/v1"
-);
-
 #[derive(Debug)]
 struct Vector<'a> {
     vector: &'a str,
@@ -47,8 +43,7 @@ fn every_flac_variant_decodes_to_the_shared_canonical_pcm_pin() {
     );
     for vector in vectors {
         let encoded = fs::read(Path::new(FIXTURES).join(vector.flac_file)).expect("FLAC fixture");
-        let expected =
-            fs::read(Path::new(IDENTITY_FIXTURES).join(vector.pcm_file)).expect("shared PCM");
+        let expected = fs::read(Path::new(FIXTURES).join(vector.pcm_file)).expect("derived PCM");
         let mut actual = Vec::new();
         let report = decode_flac_to_writer(
             &encoded,
@@ -62,7 +57,7 @@ fn every_flac_variant_decodes_to_the_shared_canonical_pcm_pin() {
         assert_eq!(report.stream.frames, vector.frames);
         assert_eq!(
             report.stream.minimum_block_frames, vector.configured_block_frames,
-            "STREAMINFO preserves the configured block size even for a short final block"
+            "STREAMINFO minimum block size"
         );
         assert_eq!(
             report.stream.maximum_block_frames,
@@ -80,6 +75,40 @@ fn every_flac_variant_decodes_to_the_shared_canonical_pcm_pin() {
             .identity();
         assert_eq!(identity, vector.identity, "{}", vector.vector);
     }
+}
+
+#[test]
+fn fixture_names_match_every_actual_flac_frame() {
+    let manifest = fs::read_to_string(Path::new(FIXTURES).join("FLAC_VECTORS.tsv"))
+        .expect("FLAC vector manifest");
+    for vector in parse_vectors(&manifest) {
+        let encoded = fs::read(Path::new(FIXTURES).join(vector.flac_file)).expect("FLAC fixture");
+        assert_eq!(
+            block_frames_from_name(vector.flac_file).expect("block-size suffix"),
+            u64::from(vector.configured_block_frames),
+            "manifest and fixture name disagree: {}",
+            vector.flac_file
+        );
+        assert_name_matches_actual_frames(vector.flac_file, &encoded)
+            .unwrap_or_else(|error| panic!("{error}"));
+    }
+}
+
+#[test]
+fn fixture_name_content_mismatch_mutation_is_red() {
+    let manifest = fs::read_to_string(Path::new(FIXTURES).join("FLAC_VECTORS.tsv"))
+        .expect("FLAC vector manifest");
+    let vector = parse_vectors(&manifest)
+        .into_iter()
+        .find(|vector| vector.flac_file.ends_with("-b32.flac"))
+        .expect("32-frame fixture");
+    let encoded = fs::read(Path::new(FIXTURES).join(vector.flac_file)).expect("FLAC fixture");
+    assert_name_matches_actual_frames(vector.flac_file, &encoded).expect("unaltered fixture");
+    let mutated_name = vector.flac_file.replace("-b32.flac", "-b4096.flac");
+    let error = assert_name_matches_actual_frames(&mutated_name, &encoded)
+        .expect_err("name/content mismatch must be red");
+    assert!(error.contains("declares 4096"), "{error}");
+    assert!(error.contains("actual frame 0 has 32"), "{error}");
 }
 
 #[test]
@@ -149,4 +178,53 @@ fn parse_vectors(manifest: &str) -> Vec<Vector<'_>> {
             }
         })
         .collect()
+}
+
+fn assert_name_matches_actual_frames(flac_file: &str, encoded: &[u8]) -> Result<(), String> {
+    let declared = block_frames_from_name(flac_file)?;
+    let mut decoder = FlacBlockDecoder::new(encoded.to_vec(), u64::MAX)
+        .map_err(|error| format!("{flac_file}: {error}"))?;
+    let stream = decoder.stream_info();
+    let frame_bytes = usize::from(stream.channels)
+        .checked_mul(usize::from(stream.bit_depth.bytes_per_sample()))
+        .ok_or_else(|| format!("{flac_file}: frame-byte overflow"))?;
+    let mut frame_index = 0_u64;
+    while decoder
+        .decode_next_block()
+        .map_err(|error| format!("{flac_file}: {error}"))?
+    {
+        let block_bytes = decoder.canonical_block().len();
+        if block_bytes % frame_bytes != 0 {
+            return Err(format!(
+                "{flac_file}: decoded block {frame_index} is not frame-aligned"
+            ));
+        }
+        let actual = u64::try_from(block_bytes / frame_bytes)
+            .map_err(|_| format!("{flac_file}: decoded block length overflow"))?;
+        if actual != declared {
+            return Err(format!(
+                "{flac_file}: name declares {declared} frames but actual frame {frame_index} has {actual}"
+            ));
+        }
+        frame_index += 1;
+    }
+    decoder
+        .finish_report()
+        .map_err(|error| format!("{flac_file}: {error}"))?;
+    if frame_index == 0 {
+        return Err(format!("{flac_file}: contains no FLAC frames"));
+    }
+    Ok(())
+}
+
+fn block_frames_from_name(flac_file: &str) -> Result<u64, String> {
+    let stem = flac_file
+        .strip_suffix(".flac")
+        .ok_or_else(|| format!("{flac_file}: missing .flac suffix"))?;
+    let (_, block_frames) = stem
+        .rsplit_once("-b")
+        .ok_or_else(|| format!("{flac_file}: missing -b<frames> suffix"))?;
+    block_frames
+        .parse()
+        .map_err(|_| format!("{flac_file}: invalid block-frame suffix"))
 }

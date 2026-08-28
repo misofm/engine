@@ -46,21 +46,29 @@ assert.equal(
   "vector\tbit_depth\tchannels\tframes\tconfigured_block_frames\tidentity\tpcm_file\tflac_file\tflac_sha256",
 );
 for (const line of lines.slice(2)) {
-  const [vector, bitDepth, channels, frames, , identity, pcmFile, flacFile, flacSha256] =
+  const [vector, bitDepth, channels, frames, configuredBlockFrames, identity, pcmFile, flacFile, flacSha256] =
     line.split("\t");
   const flac = new Uint8Array(await readFile(
     path.join(root, "fixtures/flac-delivery/v1", flacFile),
   ));
   assert.equal(createHash("sha256").update(flac).digest("hex"), flacSha256, flacFile);
   const expectedPcm = new Uint8Array(await readFile(
-    path.join(root, "fixtures/stem-identity/v1", pcmFile),
+    path.join(root, "fixtures/flac-delivery/v1", pcmFile),
   ));
+  const namedBlockFrames = Number(flacFile.match(/-b([0-9]+)\.flac$/)?.[1]);
+  assert.equal(namedBlockFrames, Number(configuredBlockFrames), `${flacFile}: name/manifest`);
+  const canonicalFrameBytes = Number(channels) * (Number(bitDepth) / 8);
   const blocks = [];
   let stream;
   for await (const block of decoder.decodeBlocks(flac, {
     maximumCanonicalBytes: expectedPcm.byteLength,
   })) {
     stream = block.stream;
+    assert.equal(
+      block.pcm.byteLength / canonicalFrameBytes,
+      namedBlockFrames,
+      `${flacFile}: name/actual frame content`,
+    );
     blocks.push(block.pcm);
   }
   const actual = new Uint8Array(blocks.reduce((sum, block) => sum + block.byteLength, 0));

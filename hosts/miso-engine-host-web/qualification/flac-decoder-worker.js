@@ -14,12 +14,14 @@ self.onmessage = async ({ data }) => {
       if (!response.ok) throw new Error(`fixture fetch failed: ${vector.flacFile}`);
       const encoded = new Uint8Array(await response.arrayBuffer());
       const blocks = [];
+      const blockFrames = [];
       let stream = null;
       for await (const block of decoder.decodeBlocks(encoded, {
         maximumCanonicalBytes: vector.canonicalBytes,
       })) {
         stream = block.stream;
         blocks.push(block.pcm);
+        blockFrames.push(block.pcm.byteLength / (stream.channels * (stream.bitDepth / 8)));
       }
       const pcm = new Uint8Array(blocks.reduce((sum, block) => sum + block.byteLength, 0));
       let offset = 0;
@@ -36,6 +38,7 @@ self.onmessage = async ({ data }) => {
         vector: vector.vector,
         flacFile: vector.flacFile,
         stream: { ...stream, frames: stream.frames.toString() },
+        blockFrames,
         canonicalHex: hex(pcm),
         digest,
         mutatedDigest,

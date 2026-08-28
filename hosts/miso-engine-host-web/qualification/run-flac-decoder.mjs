@@ -29,13 +29,14 @@ async function vectors() {
   return Promise.all(lines.map(async (line) => {
     const fields = line.split("\t");
     const pcm = new Uint8Array(await readFile(
-      path.join(ROOT, "fixtures/stem-identity/v1", fields[6]),
+      path.join(ROOT, "fixtures/flac-delivery/v1", fields[6]),
     ));
     return {
       vector: fields[0],
       bitDepth: Number(fields[1]),
       channels: Number(fields[2]),
       frames: fields[3],
+      blockFrames: Number(fields[4]),
       identity: fields[5],
       pcmFile: fields[6],
       flacFile: path.basename(fields[7]),
@@ -55,6 +56,11 @@ function validate(browserName, result, expected) {
     assert.equal(row.vector, vector.vector);
     assert.equal(row.canonicalHex, vector.canonicalHex, `${browserName}: ${vector.flacFile}`);
     assert.equal(`sha256:${row.digest}`, vector.identity, `${browserName}: ${vector.flacFile}`);
+    assert.deepEqual(
+      row.blockFrames,
+      Array(Number(vector.frames) / vector.blockFrames).fill(vector.blockFrames),
+      `${browserName}: ${vector.flacFile}: name/actual frame content`,
+    );
     assert.notEqual(
       `sha256:${row.mutatedDigest}`,
       vector.identity,
