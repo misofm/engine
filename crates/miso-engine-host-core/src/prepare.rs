@@ -289,8 +289,8 @@ pub struct HostConsoleHandlesV1 {
     pub tracks: Vec<Box<str>>,
     /// One control producer per track, in `tracks` order; empty when no channel was requested.
     ///
-    /// Each carries both of a track's builtin channels: the matrix/pan queue (#137 D1) and the
-    /// fader/mute queue (#140 B).
+    /// Each carries all three of a track's builtin channels: the matrix/pan queue (#137 D1), the
+    /// fader/mute queue (#140 B) and the input trim/polarity queue (#210 phase 3).
     pub track_controls: Vec<TrackControlProducer>,
     /// One control producer per prepared effect instance (#140 A); empty when no channel was
     /// requested. Addressed by `(track_id, rack, effect_index)`, where `effect_index` is the

@@ -959,6 +959,18 @@ impl<L: Lane> InputStage<L> {
                 let remaining = self.remaining[channel][lane].saturating_sub(frames);
                 self.remaining[channel][lane] = remaining;
                 if remaining == 0 {
+                    // A **restatement**, not a correction: the kernel's step 3 already assigned
+                    // this exact word on the frame the countdown reached zero, and the assertion
+                    // below is what keeps the redundancy honest. It is kept because it is the
+                    // line a future path that settles a lane *outside* the kernel -- a snap, a
+                    // reset, a restore -- would otherwise have to remember to add, and because
+                    // the authoritative countdown is this `u32` rather than the kernel's
+                    // clamped `f32` word.
+                    debug_assert_eq!(
+                        current[lane].to_bits(),
+                        target[lane].to_bits(),
+                        "the ramp kernel assigns the exact target on the frame it settles"
+                    );
                     current[lane] = target[lane];
                 } else {
                     ramping = true;
@@ -1151,6 +1163,21 @@ impl<L: Lane> InputStage<L> {
         );
         self.state.section[1] = self.state.section[0];
         self.mirror_trim_ramp();
+    }
+
+    /// The eight live trim-ramp words of one lane. Evidence only.
+    fn trim_ramp_words(&self, lane: usize) -> [u32; 8] {
+        let read = |value: L| lane_read::<L>(value)[lane].to_bits();
+        [
+            read(self.ramp.current[0]),
+            read(self.ramp.current[1]),
+            read(self.ramp.target[0]),
+            read(self.ramp.target[1]),
+            read(self.ramp.step[0]),
+            read(self.ramp.step[1]),
+            read(self.ramp.remaining[0]),
+            read(self.ramp.remaining[1]),
+        ]
     }
 
     /// Whether every per-channel trim-ramp word compares bit-equal between the two channels.
@@ -3445,6 +3472,28 @@ pub mod test_support {
     #[must_use]
     pub fn input_state_words(input: &InputBuiltins) -> [u32; 8] {
         input.stage.lane_state_words(0)
+    }
+
+    /// The live trim ramp's eight words, `[current_l, current_r, target_l, target_r, step_l,
+    /// step_r, countdown_l, countdown_r]` (#210 phase 3).
+    ///
+    /// The **countdown** words are what make this more than a readback: they are written only by
+    /// the ramping kernel, so a settled block that leaves them at `+0.0` is a settled block that
+    /// took the settled arm. That is the one observable the class-A OFF dispatch has -- the two
+    /// arms are bit-identical in the *plane*, by the elision proof, so a digest cannot tell them
+    /// apart and only the ramp state can.
+    #[must_use]
+    pub fn input_trim_ramp_words(input: &InputBuiltins) -> [u32; 8] {
+        input.stage.trim_ramp_words(0)
+    }
+
+    /// [`input_trim_ramp_words`] for one lane of a bank.
+    #[must_use]
+    pub fn bank_trim_ramp_words(bank: &BuiltinInputBankV1, lane: usize) -> [u32; 8] {
+        match &bank.stage {
+            InputStageKernel::Simd4(stage) => stage.trim_ramp_words(lane),
+            InputStageKernel::Simd8(stage) => stage.trim_ramp_words(lane),
+        }
     }
 
     /// Overwrites the retained state words of one input chain.

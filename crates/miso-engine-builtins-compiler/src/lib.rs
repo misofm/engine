@@ -1778,6 +1778,18 @@ impl PreparedBuiltinsSession {
         // that were moved out are dead storage the banks never render. That case cannot arise from
         // `planned_strip_banks` -- it plans all three stages over one track list -- and the drain
         // ownership is still single, because a `take`n consumer is `None` on the side that lost it.
+        // `planned_strip_banks` plans all three stages over one track list, so the three claimed
+        // sets are the same set. Stated as an assertion rather than assumed: the retain below is
+        // written for the partly-claimed case because that case must not silently bind a track
+        // twice, and this is what says the case is unreachable rather than merely unhandled.
+        debug_assert_eq!(
+            claimed_input, claimed_fader,
+            "the planner claims stages together"
+        );
+        debug_assert_eq!(
+            claimed_input, claimed_matrix,
+            "the planner claims stages together"
+        );
         strips.retain(|track, _| {
             !(claimed_input.contains(track)
                 && claimed_fader.contains(track)
@@ -5185,6 +5197,113 @@ mod tests {
         assert_eq!(
             transcript_hash, 4_741_579_849_300_275_697,
             "updated only through a deliberate frozen-case change"
+        );
+    }
+
+    /// The per-node console input processor: the arm a scalar-backend host binds (#210 phase 3).
+    ///
+    /// `Backend::current()` is a compile-time constant, so on every architecture the workspace's
+    /// tests run on the strip is banked and `ConsoleInputProcessor` is unreachable from an
+    /// end-to-end fixture. It is not unreachable in *production* -- a target with no SIMD binds
+    /// it, and so does any lowering the planner leaves unbanked -- so it is driven directly here,
+    /// through the same `GraphRuntimeProcessor::process` the runtime calls.
+    ///
+    /// The two facts it owes, and the two the banked drain owes for the same reason: the record
+    /// reaches the section, and the witness records what the record did.
+    ///
+    /// Red mutation: make the drain loop `continue` past every record without applying it -> the
+    /// coefficient never moves. Red mutation: drop `self.live.admit(&record)` -> the per-lane arm
+    /// keeps claiming symmetry.
+    #[test]
+    fn the_per_node_console_input_processor_drains_and_folds_its_witness() {
+        let parameters = BuiltinParameters {
+            left: ChannelParameters {
+                trim_db: 0.0,
+                ..ChannelParameters::default()
+            },
+            right: ChannelParameters {
+                trim_db: 0.0,
+                ..ChannelParameters::default()
+            },
+            ..BuiltinParameters::default()
+        };
+        let build = || {
+            let input = BuiltinChain::new(48_000, parameters)
+                .expect("chain")
+                .into_input_builtins();
+            let (producer, control) = bounded_spsc::<TrackInputRecordV1>(
+                NonZeroUsize::new(8).expect("depth"),
+                QueueGeneration(0),
+            )
+            .expect("queue");
+            (
+                producer,
+                ConsoleInputProcessor {
+                    input,
+                    control,
+                    live: ChannelSymmetryWitnessV1::SYMMETRIC,
+                },
+            )
+        };
+
+        // A `Both` retarget moves the coefficient and preserves every term.
+        let (mut producer, mut processor) = build();
+        producer
+            .try_push(TrackInputRecordV1::TrimDb {
+                lanes: BuiltinLaneSelector::Both,
+                db: -144.0,
+                smoothing_samples: 0,
+            })
+            .expect("room");
+        let mut left = [1.0_f32; 4];
+        let mut right = [1.0_f32; 4];
+        processor
+            .process(GraphBindingBlock {
+                left: &mut left,
+                right: &mut right,
+                first_sample: 0,
+            })
+            .expect("render");
+        assert!(
+            left.iter().all(|value| *value < 1.0e-6) && right.iter().all(|value| *value < 1.0e-6),
+            "the record reached the section: {left:?} {right:?}"
+        );
+        assert!(
+            processor.channel_symmetry().eligible(),
+            "a `Both` retarget is symmetry-preserving on the per-node arm too"
+        );
+
+        // A per-lane retarget declines the `LIVE` term and moves one plane only.
+        let (mut producer, mut processor) = build();
+        producer
+            .try_push(TrackInputRecordV1::PolarityInvert {
+                lanes: BuiltinLaneSelector::Right,
+                inverted: true,
+                smoothing_samples: 0,
+            })
+            .expect("room");
+        let mut left = [1.0_f32; 4];
+        let mut right = [1.0_f32; 4];
+        processor
+            .process(GraphBindingBlock {
+                left: &mut left,
+                right: &mut right,
+                first_sample: 0,
+            })
+            .expect("render");
+        assert!(
+            left.iter().all(|value| *value > 0.0),
+            "the left plane is untouched"
+        );
+        assert!(
+            right.iter().all(|value| *value < 0.0),
+            "the right plane is inverted"
+        );
+        assert!(
+            !processor
+                .channel_symmetry()
+                .holds(ChannelSymmetryWitnessV1::LIVE),
+            "a one-channel write clears the LIVE term on the per-node arm"
         );
     }
 
