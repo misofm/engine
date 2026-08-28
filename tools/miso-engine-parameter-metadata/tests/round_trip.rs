@@ -12,7 +12,7 @@ use miso_engine_effect_compiler::launch_native_effect_registry;
 use miso_engine_host_web::{
     AudioWorkletEngineHost, COMMAND_EFFECT_BYPASS, COMMAND_EFFECT_PARAM, COMMAND_MATRIX,
     COMMAND_REASON_NONE, COMMAND_REASON_UNSUPPORTED_KIND, COMMAND_RECORD_BYTES, RESULT_OK,
-    RESULT_UNSUPPORTED, WebPrepareConfigV1,
+    RESULT_UNSUPPORTED, WebPrepareConfig,
 };
 
 /// A one-track session whose dynamic rack holds every launch effect at its declared defaults.
@@ -106,7 +106,7 @@ fn every_metadata_id_resolves_through_a_command_acknowledgement() {
     }
 
     let toml = session_with_every_effect(&ids);
-    let mut config = WebPrepareConfigV1::console_defaults(48_000, 128);
+    let mut config = WebPrepareConfig::console_defaults(48_000, 128);
     config.source_ring_frames = 128;
     config.console_meter_blocks = 0;
     let mut host = AudioWorkletEngineHost::new(config);
@@ -253,7 +253,7 @@ fn every_metadata_observation_tap_resolves_through_a_command_acknowledgement() {
     );
 
     let toml = session_with_every_effect(&ids);
-    let mut config = WebPrepareConfigV1::console_defaults(48_000, 128);
+    let mut config = WebPrepareConfig::console_defaults(48_000, 128);
     config.source_ring_frames = 128;
     config.console_meter_blocks = 4;
     config.console_observation_taps = 4;

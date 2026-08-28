@@ -112,7 +112,7 @@ an app's `Math.max(0, x ?? 0)` is a **no-op** rather than a silent zeroing.
 
 ## Absent-effect semantics
 
-`MisoMeterFrameV1.trackGrDb` is positional and `trackCount` long, and every entry is finite.
+`MisoMeterFrame.trackGrDb` is positional and `trackCount` long, and every entry is finite.
 `0` deliberately conflates "not reducing" with "no observed effect on this track", because the
 array is read without null checks. The distinction lives in the `miso.observe.v1` acknowledgement's
 subscription map — `{ trackIndex, rack, effectIndex, tapId, frameSlot, windowBlocks }` — which is

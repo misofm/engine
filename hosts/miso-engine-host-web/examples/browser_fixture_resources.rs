@@ -7,16 +7,16 @@
 //!
 //! `scripts/check-browser-expected-resources.py` closes that. This example is its native leg: the
 //! *same* fixture session, through the *same* facade, with the *same* configuration the direct
-//! oracle writes into the module's `WebPrepareConfigV1` staging block -- differing only in the
+//! oracle writes into the module's `WebPrepareConfig` staging block -- differing only in the
 //! target it is compiled for. The gate uses it as an independent witness for the rows that are
 //! target-independent, and to prove that the rows that are *not* really are not.
 //!
 //! The configuration below must stay equal to `writeConfig`'s `LIMITS32`/`LIMITS64` in
-//! `tests/browser-v1/direct-oracle.mjs`. `WebPrepareConfigV1::launch_defaults` is that vector
+//! `tests/browser-v1/direct-oracle.mjs`. `WebPrepareConfig::launch_defaults` is that vector
 //! exactly, save for `source_ring_frames`: the oracle writes the quantum, the constructor derives
 //! a launch default from the sample rate.
 
-use miso_engine_host_web::{AudioWorkletEngineHost, RESULT_OK, WebPrepareConfigV1};
+use miso_engine_host_web::{AudioWorkletEngineHost, RESULT_OK, WebPrepareConfig};
 
 const SAMPLE_RATE_HZ: u32 = 48_000;
 const QUANTUM_FRAMES: u32 = 128;
@@ -25,10 +25,10 @@ const QUANTUM_FRAMES: u32 = 128;
 const SESSION_TOML: &str = include_str!("../tests/browser-v1/session.toml");
 
 fn main() {
-    let config = WebPrepareConfigV1 {
+    let config = WebPrepareConfig {
         // The oracle writes `QUANTUM` here, not `default_source_ring_frames`.
         source_ring_frames: QUANTUM_FRAMES,
-        ..WebPrepareConfigV1::launch_defaults(SAMPLE_RATE_HZ, QUANTUM_FRAMES)
+        ..WebPrepareConfig::launch_defaults(SAMPLE_RATE_HZ, QUANTUM_FRAMES)
     };
     let mut host = AudioWorkletEngineHost::new(config);
     assert_eq!(

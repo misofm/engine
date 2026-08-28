@@ -265,7 +265,7 @@ pub const DEFAULT_METER_BLOCKS: u32 = 12;
 /// single sample of audio.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct WebCommandReportV1 {
+pub struct WebCommandReport {
     /// Exact structure byte size.
     pub struct_size: u32,
     /// ABI version.
@@ -284,8 +284,8 @@ pub struct WebCommandReportV1 {
     pub reserved: [u64; 2],
 }
 
-/// Byte size of [`WebCommandReportV1`].
-pub const COMMAND_REPORT_BYTES: u32 = size_of::<WebCommandReportV1>() as u32;
+/// Byte size of [`WebCommandReport`].
+pub const COMMAND_REPORT_BYTES: u32 = size_of::<WebCommandReport>() as u32;
 
 /// The sample window and shape of the meter frame the `f32` buffer cannot carry (issue #143 D5).
 ///
@@ -302,7 +302,7 @@ pub const COMMAND_REPORT_BYTES: u32 = size_of::<WebCommandReportV1>() as u32;
 /// against a wall clock.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct WebMeterHeaderV1 {
+pub struct WebMeterHeader {
     /// Exact structure byte size.
     pub struct_size: u32,
     /// ABI version.
@@ -325,14 +325,14 @@ pub struct WebMeterHeaderV1 {
     pub reserved: [u64; 2],
 }
 
-/// Byte size of [`WebMeterHeaderV1`].
-pub const METER_HEADER_BYTES: u32 = size_of::<WebMeterHeaderV1>() as u32;
+/// Byte size of [`WebMeterHeader`].
+pub const METER_HEADER_BYTES: u32 = size_of::<WebMeterHeader>() as u32;
 
 /// The header a handle with no compiled session reports: the zeroed shape, never a stale one.
-static EMPTY_METER_HEADER: WebMeterHeaderV1 = empty_meter_header();
+static EMPTY_METER_HEADER: WebMeterHeader = empty_meter_header();
 
-const fn empty_meter_header() -> WebMeterHeaderV1 {
-    WebMeterHeaderV1 {
+const fn empty_meter_header() -> WebMeterHeader {
+    WebMeterHeader {
         struct_size: METER_HEADER_BYTES,
         abi_version: ABI_VERSION,
         track_count: 0,
@@ -346,17 +346,17 @@ const fn empty_meter_header() -> WebMeterHeaderV1 {
     }
 }
 
-/// Byte size of [`WebPrepareConfigV1`].
-pub const PREPARE_CONFIG_BYTES: u32 = size_of::<WebPrepareConfigV1>() as u32;
-/// Byte size of [`WebStatusV1`].
-pub const STATUS_BYTES: u32 = size_of::<WebStatusV1>() as u32;
-/// Byte size of [`WebResourceReportV1`].
-pub const RESOURCE_REPORT_BYTES: u32 = size_of::<WebResourceReportV1>() as u32;
+/// Byte size of [`WebPrepareConfig`].
+pub const PREPARE_CONFIG_BYTES: u32 = size_of::<WebPrepareConfig>() as u32;
+/// Byte size of [`WebStatus`].
+pub const STATUS_BYTES: u32 = size_of::<WebStatus>() as u32;
+/// Byte size of [`WebResourceReport`].
+pub const RESOURCE_REPORT_BYTES: u32 = size_of::<WebResourceReport>() as u32;
 
 /// Exact versioned preparation configuration shared with JavaScript.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct WebPrepareConfigV1 {
+pub struct WebPrepareConfig {
     /// Exact structure byte size.
     pub struct_size: u32,
     /// Must equal [`ABI_VERSION`].
@@ -442,7 +442,7 @@ pub struct WebPrepareConfigV1 {
     pub console_master_track_plus_one: u64,
 }
 
-impl WebPrepareConfigV1 {
+impl WebPrepareConfig {
     /// A bounded launch configuration suitable for small embedding tests and examples.
     #[must_use]
     pub const fn launch_defaults(sample_rate_hz: u32, quantum_frames: u32) -> Self {
@@ -493,7 +493,7 @@ impl WebPrepareConfigV1 {
 /// Fixed browser-visible status snapshot.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct WebStatusV1 {
+pub struct WebStatus {
     /// Exact structure byte size.
     pub struct_size: u32,
     /// ABI version.
@@ -521,7 +521,7 @@ pub struct WebStatusV1 {
 /// Exact retained-resource projection for the browser bridge and production artifacts.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct WebResourceReportV1 {
+pub struct WebResourceReport {
     /// Exact structure byte size.
     pub struct_size: u32,
     /// ABI version.
@@ -668,7 +668,7 @@ struct ReadyOwnership {
     /// master GR]` -- `3T + 3` words. The peak section is byte-for-byte where it always was.
     meter_frame: Box<[f32]>,
     /// The window and shape the `f32` frame cannot carry (issue #143 D5).
-    meter_header: WebMeterHeaderV1,
+    meter_header: WebMeterHeader,
     /// Master peaks folded over the rendered block while the lease is on.
     master_peak: [f32; 2],
     /// Windows folded into `meter_frame` since the host was compiled.
@@ -818,10 +818,10 @@ pub struct SessionSourceShape {
 
 /// Safe ownership object backing one future AudioWorklet Wasm handle.
 pub struct AudioWorkletEngineHost {
-    config: WebPrepareConfigV1,
-    status: WebStatusV1,
-    resources: WebResourceReportV1,
-    command_report: WebCommandReportV1,
+    config: WebPrepareConfig,
+    status: WebStatus,
+    resources: WebResourceReport,
+    command_report: WebCommandReport,
     /// Issue #137 D2: the meter lease. `false` skips the master fold and every drain.
     meter_lease: bool,
     buffers: Option<PreparedBuffers>,
@@ -832,11 +832,11 @@ pub struct AudioWorkletEngineHost {
 impl AudioWorkletEngineHost {
     /// Create a configuration-only host. No session or staging storage is allocated.
     #[must_use]
-    pub const fn new(config: WebPrepareConfigV1) -> Self {
+    pub const fn new(config: WebPrepareConfig) -> Self {
         let backend = selected_backend();
         Self {
             config,
-            status: WebStatusV1 {
+            status: WebStatus {
                 struct_size: STATUS_BYTES,
                 abi_version: ABI_VERSION,
                 state: STATE_CONFIG,
@@ -860,30 +860,30 @@ impl AudioWorkletEngineHost {
 
     /// Read the immutable preparation configuration.
     #[must_use]
-    pub const fn config(&self) -> &WebPrepareConfigV1 {
+    pub const fn config(&self) -> &WebPrepareConfig {
         &self.config
     }
 
     /// Mutably borrow configuration storage before preparation.
-    pub fn config_mut(&mut self) -> Option<&mut WebPrepareConfigV1> {
+    pub fn config_mut(&mut self) -> Option<&mut WebPrepareConfig> {
         (self.status.state == STATE_CONFIG).then_some(&mut self.config)
     }
 
     /// Read fixed status without allocation.
     #[must_use]
-    pub const fn status(&self) -> &WebStatusV1 {
+    pub const fn status(&self) -> &WebStatus {
         &self.status
     }
 
     /// Read the current exact resource projection.
     #[must_use]
-    pub const fn resources(&self) -> &WebResourceReportV1 {
+    pub const fn resources(&self) -> &WebResourceReport {
         &self.resources
     }
 
     /// Read the last live-console submission report (issue #137 D1).
     #[must_use]
-    pub const fn command_report(&self) -> &WebCommandReportV1 {
+    pub const fn command_report(&self) -> &WebCommandReport {
         &self.command_report
     }
 
@@ -951,7 +951,7 @@ impl AudioWorkletEngineHost {
 
     /// The sample window and shape the `f32` frame cannot carry (issue #143 D5).
     #[must_use]
-    pub fn meter_header(&self) -> &WebMeterHeaderV1 {
+    pub fn meter_header(&self) -> &WebMeterHeader {
         self.ready
             .as_ref()
             .map_or(&EMPTY_METER_HEADER, |ready| &ready.meter_header)
@@ -2269,8 +2269,8 @@ fn observed_decibels(
     }
 }
 
-const fn empty_command_report() -> WebCommandReportV1 {
-    WebCommandReportV1 {
+const fn empty_command_report() -> WebCommandReport {
+    WebCommandReport {
         struct_size: COMMAND_REPORT_BYTES,
         abi_version: ABI_VERSION,
         result: RESULT_OK,
@@ -2290,16 +2290,16 @@ const fn selected_backend() -> u32 {
     }
 }
 
-const fn empty_resource_report(backend: u32) -> WebResourceReportV1 {
-    WebResourceReportV1 {
+const fn empty_resource_report(backend: u32) -> WebResourceReport {
+    WebResourceReport {
         struct_size: RESOURCE_REPORT_BYTES,
         abi_version: ABI_VERSION,
         sample_rate_hz: 0,
         quantum_frames: 0,
         backend,
         reserved0: [0; 3],
-        config_bytes: size_of::<WebPrepareConfigV1>() as u64,
-        status_bytes: size_of::<WebStatusV1>() as u64,
+        config_bytes: size_of::<WebPrepareConfig>() as u64,
+        status_bytes: size_of::<WebStatus>() as u64,
         session_toml_bytes: 0,
         diagnostic_bytes: 0,
         source_id_bytes: 0,
@@ -2324,8 +2324,8 @@ const fn empty_resource_report(backend: u32) -> WebResourceReportV1 {
 }
 
 fn prepare_buffers(
-    config: WebPrepareConfigV1,
-) -> Result<(PreparedBuffers, WebResourceReportV1), u32> {
+    config: WebPrepareConfig,
+) -> Result<(PreparedBuffers, WebResourceReport), u32> {
     validate_config(config)?;
     let source_samples = checked_product([
         u64::from(config.maximum_source_channels),
@@ -2403,7 +2403,7 @@ fn prepare_buffers(
     Ok((buffers, report))
 }
 
-fn validate_config(config: WebPrepareConfigV1) -> Result<(), u32> {
+fn validate_config(config: WebPrepareConfig) -> Result<(), u32> {
     if config.struct_size != PREPARE_CONFIG_BYTES || config.abi_version != ABI_VERSION {
         return Err(RESULT_ABI_MISMATCH);
     }
@@ -2487,7 +2487,7 @@ fn source_result(error: SourceControlError) -> u32 {
 /// This is the only place the mapping is spelled. `HostShapePolicy::Exact`: unlike the C ABI host,
 /// the browser host is handed its `AudioContext` rate and the caller's quantum and must refuse any
 /// session that declares anything else -- there is no resampler and no requantiser.
-const fn prepare_caps(config: WebPrepareConfigV1) -> HostPrepareCaps {
+const fn prepare_caps(config: WebPrepareConfig) -> HostPrepareCaps {
     HostPrepareCaps {
         shape: HostShapePolicy::Exact {
             sample_rate_hz: config.sample_rate_hz,
@@ -2521,9 +2521,9 @@ const fn prepare_caps(config: WebPrepareConfigV1) -> HostPrepareCaps {
 /// browser caps are applied here because they are the *browser's* caps on the shared report.
 fn compile_ready(
     toml: &str,
-    config: WebPrepareConfigV1,
-    mut report: WebResourceReportV1,
-) -> Result<(ReadyOwnership, WebResourceReportV1), Vec<u8>> {
+    config: WebPrepareConfig,
+    mut report: WebResourceReport,
+) -> Result<(ReadyOwnership, WebResourceReport), Vec<u8>> {
     let caps = prepare_caps(config);
     let console = console_request(config).ok_or_else(|| fixed_diagnostic("web.console.config"))?;
     let (session, host, handles) = prepare_host_session_with_console(toml, &caps, &console)
@@ -2728,7 +2728,7 @@ fn compile_ready(
 ///
 /// `console_meter_blocks == 0` is the honest form of "metering off": no observer is bound, so the
 /// render path folds nothing at all. The port lease is a second, finer switch over posting.
-fn console_request(config: WebPrepareConfigV1) -> Option<HostConsoleRequestV1> {
+fn console_request(config: WebPrepareConfig) -> Option<HostConsoleRequestV1> {
     let control_queue_depth = match config.console_command_queue_records {
         0 => None,
         records => Some(NonZeroUsize::new(u32::try_from(records).ok()? as usize)?),

@@ -17,7 +17,7 @@ use crate::{
     ABI_VERSION, AudioWorkletEngineHost, BUFFER_COMMAND, BUFFER_DIAGNOSTIC, BUFFER_METER_FRAME,
     BUFFER_OUTPUT_PCM, BUFFER_SESSION_TOML, BUFFER_SOURCE_ID, BUFFER_SOURCE_PCM,
     PREPARE_CONFIG_BYTES, RESULT_INTERNAL, RESULT_INVALID_ARGUMENT, RESULT_OK, STATE_READY,
-    WebPrepareConfigV1,
+    WebPrepareConfig,
 };
 use core::{
     cell::{Cell, RefCell},
@@ -152,7 +152,7 @@ pub extern "C" fn miso_engine_web_v1_config_new() -> u32 {
         *slot = Some(LiveHost {
             handle,
             host: Box::new(AudioWorkletEngineHost::new(
-                WebPrepareConfigV1::launch_defaults(48_000, 128),
+                WebPrepareConfig::launch_defaults(48_000, 128),
             )),
         });
         handle
@@ -521,7 +521,7 @@ pub extern "C" fn miso_engine_web_v1_dispose(handle: u32) -> u32 {
 }
 
 #[cfg(test)]
-pub(crate) fn test_configure(handle: u32, config: WebPrepareConfigV1) -> u32 {
+pub(crate) fn test_configure(handle: u32, config: WebPrepareConfig) -> u32 {
     with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
         let Some(target) = host.config_mut() else {
             return RESULT_INVALID_ARGUMENT;
@@ -576,12 +576,12 @@ pub(crate) fn test_buffer_address(handle: u32, kind: u32) -> usize {
 }
 
 #[cfg(test)]
-pub(crate) fn test_status(handle: u32) -> Option<crate::WebStatusV1> {
+pub(crate) fn test_status(handle: u32) -> Option<crate::WebStatus> {
     with_host(handle, None, |host| Some(*host.status()))
 }
 
 #[cfg(test)]
-pub(crate) fn test_resources(handle: u32) -> Option<crate::WebResourceReportV1> {
+pub(crate) fn test_resources(handle: u32) -> Option<crate::WebResourceReport> {
     with_host(handle, None, |host| Some(*host.resources()))
 }
 

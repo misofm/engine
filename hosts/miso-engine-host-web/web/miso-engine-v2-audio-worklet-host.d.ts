@@ -16,7 +16,7 @@
 // ## What the control path can and cannot move, and why
 //
 // **This is the most important thing to know before writing an app against it.** Issue #140 made
-// every declared kind live, so the honest summary is now short: `MisoCommandKindV1.Pan`,
+// every declared kind live, so the honest summary is now short: `MisoCommandKind.Pan`,
 // `.Matrix`, `.FaderDb`, `.Mute`, `.EffectParam`, `.EffectBypass`, `.Solo`, `.TrimDb` and
 // `.PolarityInvert` are all **applied**. So are `.ObserveSubscribe` and `.ObserveUnsubscribe`
 // (issue 143), on the observation plane rather than the render one -- they move the
@@ -39,7 +39,7 @@
 //   is delayed by exactly the effect's declared latency, so every compiled PDC route timing stays
 //   correct.
 //
-// `MisoCommandReasonV1.UnsupportedKind` (`result: 7`) has **not** gone away, and it still means
+// `MisoCommandReason.UnsupportedKind` (`result: 7`) has **not** gone away, and it still means
 // exactly what it said: the target is real and the value is legal, and *this session* has no write
 // path for it. A host compiled with `consoleCommandQueueRecords === 0n` is that session -- there
 // is no control channel and no staging buffer -- and so is a future effect parameter that declares
@@ -90,7 +90,7 @@
 // What a tap costs is declared, not guessed. Every effect publishes an `observations` menu in the
 // build-time metadata JSON; a `resident` tap is a copy out of state the block already wrote and is
 // `subscribable`, a `computed` tap is an analysis pass that does not ship in V1 and is refused with
-// `MisoCommandReasonV1.UnsupportedKind`. A session that never asks for observation
+// `MisoCommandReason.UnsupportedKind`. A session that never asks for observation
 // (`consoleObservationTaps === 0n`) allocates none of it and renders byte-identical audio; inside a
 // session that does, an unarmed tap costs one predicted branch per driven effect per block.
 //
@@ -109,7 +109,7 @@
 // Owner decision W4-D1: the shipped module is built with `+simd128`. There is no scalar artifact
 // and no dual-artifact selection. `createMisoAudioWorkletHost` validates a canned `simd128` module
 // with `WebAssembly.validate` before it fetches anything and rejects with a typed
-// `MisoUnsupportedBrowserV1` (`tag: "miso.unsupported.v1"`, `capability: "simd128"`) when the probe
+// `MisoUnsupportedBrowser` (`tag: "miso.unsupported.v1"`, `capability: "simd128"`) when the probe
 // fails -- the browser twin of the native x86-64-v3 boot attestation. A browser below the floor is
 // refused, never silently degraded.
 //
@@ -160,14 +160,14 @@
 /// The frozen backend names of the issue-024 ABI. Only `"simd128"` is shipped (W4-D1); `"scalar"`
 /// remains a legal ABI value because the Rust artifact still reports backend `0` when it is built
 /// without `+simd128`, and the processor rejects such a module rather than rendering with it.
-export type MisoWebBackendV1 = "scalar" | "simd128";
+export type MisoWebBackend = "scalar" | "simd128";
 
 /// Typed refusal of a browser that cannot run the shipped artifact.
 ///
-/// Distinct from `MisoErrorV1` on purpose: a caller must be able to tell "this browser is out of
+/// Distinct from `MisoError` on purpose: a caller must be able to tell "this browser is out of
 /// scope" apart from "something went wrong". It is thrown by `createMisoAudioWorkletHost` before
 /// any node exists and never crosses the `MessagePort`.
-export interface MisoUnsupportedBrowserV1 {
+export interface MisoUnsupportedBrowser {
   readonly tag: "miso.unsupported.v1";
   readonly requestId: 0;
   readonly result: 7;
@@ -183,7 +183,7 @@ export interface MisoUnsupportedBrowserV1 {
 /// declared and refused (issue 140). Nine of them move state the render thread reads; the two
 /// observation kinds move the `miso.observe.v1` subscription map and nothing rendered, which is
 /// what the metadata JSON's per-kind `plane` field reports.
-export const enum MisoCommandKindV1 {
+export const enum MisoCommandKind {
   /// Retarget the track's pan pair over an explicit ramp window. Applied.
   Pan = 1,
   /// Retarget the track's full 2x2 matrix over an explicit ramp window. Applied.
@@ -270,7 +270,7 @@ export const enum MisoCommandKindV1 {
 }
 
 /// Frozen typed reasons a live-console submission was refused (issue 137 D1).
-export const enum MisoCommandReasonV1 {
+export const enum MisoCommandReason {
   /// The submission was admitted whole.
   None = 0,
   /// Unknown kind, nonzero reserved word, non-finite value, or a field set for the wrong kind.
@@ -304,8 +304,8 @@ export const enum MisoCommandReasonV1 {
 }
 
 /// One live-console command. `255` means "not applicable to this kind".
-export interface MisoCommandV1 {
-  kind: MisoCommandKindV1;
+export interface MisoCommand {
+  kind: MisoCommandKind;
   /// `0` simd1, `1` dynamic, `2` simd2, `255` for a builtin-addressed kind.
   rack: number;
   /// `0` left, `1` right, `2` both, `255` for a kind with no lane.
@@ -323,17 +323,17 @@ export interface MisoCommandV1 {
   values: [number, number, number, number];
 }
 
-export interface MisoCommandRequestV1 {
+export interface MisoCommandRequest {
   requestId: number;
-  commands: MisoCommandV1[];
+  commands: MisoCommand[];
 }
 
 /// One live-console acknowledgement. `result` is `0` only when the whole batch was admitted.
-export interface MisoCommandAckV1 {
+export interface MisoCommandAck {
   readonly tag: "miso.ack.v1";
   readonly requestId: number;
   readonly result: number;
-  readonly reason: MisoCommandReasonV1;
+  readonly reason: MisoCommandReason;
   /// Index of the first refused record; `0` on success.
   readonly rejectedIndex: number;
   /// The whole batch, or zero.
@@ -371,7 +371,7 @@ export interface MisoSessionSource {
 }
 
 /// The compiled session's addressing authority (issue 137 D1, extended by issue 207).
-export interface MisoSessionMapV1 {
+export interface MisoSessionMap {
   readonly tag: "miso.sessionmap.v1";
   readonly requestId: number;
   readonly result: number;
@@ -389,7 +389,7 @@ export interface MisoSessionMapV1 {
 }
 
 /// One decimated meter window (issue 137 D2, extended by issue 143).
-export interface MisoMeterFrameV1 {
+export interface MisoMeterFrame {
   readonly tag: "miso.meter.v1";
   readonly sequence: number;
   /// Complete windows folded into this frame; normally `1`.
@@ -415,7 +415,7 @@ export interface MisoMeterFrameV1 {
   readonly masterGrDb: number | null;
   /// Absolute sample the reported window opened at, inclusive.
   ///
-  /// Correlate this against a `MisoCommandAckV1.appliedAtSample`: the first window whose
+  /// Correlate this against a `MisoCommandAck.appliedAtSample`: the first window whose
   /// `firstSample >= appliedAtSample` is the first that reflects the command. Consecutive windows
   /// tile with no gap, so `firstSample` of the next frame is this frame's `endSample`.
   readonly firstSample: bigint;
@@ -428,7 +428,7 @@ export interface MisoMeterFrameV1 {
 /// Exactly these six fields, and no others: `observe()` rejects a subscription object carrying an
 /// unknown field with `RESULT_INVALID_ARGUMENT` (1) before anything reaches the port, so an
 /// optional-looking extra property is a local refusal rather than a field the engine ignores.
-export interface MisoObservationSubscriptionV1 {
+export interface MisoObservationSubscription {
   /// Index into the canonical track order `sessionMap()` returns.
   trackIndex: number;
   /// `0` simd1, `1` dynamic, `2` simd2. There is no `255` here: a tap always names a rack.
@@ -437,7 +437,7 @@ export interface MisoObservationSubscriptionV1 {
   /// The effect-local tap id from the metadata JSON's per-effect `observations[].id`. Never `0`.
   ///
   /// This is a *tap* id, not a parameter id: they are different namespaces on one effect, and a
-  /// parameter id sent here comes back as `MisoCommandReasonV1.UnknownTap`, never
+  /// parameter id sent here comes back as `MisoCommandReason.UnknownTap`, never
   /// `UnknownParameter`.
   tapId: number;
   /// Render blocks per published window, or `0` for the plan's default (`consoleMeterBlocks`).
@@ -450,24 +450,24 @@ export interface MisoObservationSubscriptionV1 {
 }
 
 /// One observation batch. Like a command batch, it is one transaction (issues 143, 151).
-export interface MisoObservationRequestV1 {
+export interface MisoObservationRequest {
   requestId: number;
   /// At least one and at most `256` subscriptions, arming and disarming freely mixed.
-  subscriptions: MisoObservationSubscriptionV1[];
+  subscriptions: MisoObservationSubscription[];
 }
 
 /// The subscription map one `miso.observe.v1` acknowledgement carries (issue 143).
 ///
 /// This is where "which tracks have an observed effect at all" lives. `trackGrDb` is positional
 /// and cannot express absence; this can.
-export interface MisoObservationBindingV1 {
+export interface MisoObservationBinding {
   readonly trackIndex: number;
   /// `0` simd1, `1` dynamic, `2` simd2.
   readonly rack: number;
   readonly effectIndex: number;
   /// The effect-local tap id, matching the metadata JSON's per-effect `observations[].id`.
   readonly tapId: number;
-  /// Index into `MisoMeterFrameV1.trackGrDb` this tap folds into.
+  /// Index into `MisoMeterFrame.trackGrDb` this tap folds into.
   readonly frameSlot: number;
   /// Render blocks per published window, as it is actually in force.
   readonly windowBlocks: number;
@@ -480,12 +480,12 @@ export interface MisoObservationBindingV1 {
 /// `observe()` settles with this record whenever the engine answered at all, including when it
 /// refused: `result` is nonzero, `reason` names why, and `bindings` is the map **unchanged**,
 /// because a batch is all-or-nothing and a refused batch armed nothing. The two reasons the
-/// observation path returns are `MisoCommandReasonV1.UnknownTap` (10, `result: 1`) and
-/// `MisoCommandReasonV1.ObservationUnbound` (11, `result: 7`).
+/// observation path returns are `MisoCommandReason.UnknownTap` (10, `result: 1`) and
+/// `MisoCommandReason.ObservationUnbound` (11, `result: 7`).
 ///
 /// A refusal is per request and costs the host nothing: later commands, meter frames, renders and
 /// further `observe()` calls all keep working. Only a locally malformed request rejects, with
-/// `MisoErrorV1` and `result: 1`, before anything is sent.
+/// `MisoError` and `result: 1`, before anything is sent.
 ///
 /// # Subscriptions are per plan
 ///
@@ -493,17 +493,17 @@ export interface MisoObservationBindingV1 {
 /// applied to: the replacement's lanes exist and are unarmed, and the readers the old plan handed
 /// out simply stop advancing. An app re-subscribes against the new plan and receives a fresh map
 /// whose sequences restart at `1`. Nothing carries over, and nothing has to be torn down.
-export interface MisoObservationAckV1 {
+export interface MisoObservationAck {
   readonly tag: "miso.observe.v1";
   readonly requestId: number;
   readonly result: number;
-  readonly reason: MisoCommandReasonV1;
+  readonly reason: MisoCommandReason;
   /// Every armed tap of the current plan, in canonical `(track, rack, effectIndex, tapId)` order.
-  readonly bindings: MisoObservationBindingV1[];
+  readonly bindings: MisoObservationBinding[];
 }
 
 /// One windowed render-telemetry frame (issue 137 D3). JavaScript only; Wasm never sees the lease.
-export interface MisoTelemetryFrameV1 {
+export interface MisoTelemetryFrame {
   readonly tag: "miso.telemetry.v1";
   readonly sequence: number;
   /// Blocks in the window.
@@ -521,7 +521,7 @@ export interface MisoTelemetryFrameV1 {
   readonly belowResolution: boolean;
 }
 
-export interface MisoWebPrepareLimitsV1 {
+export interface MisoWebPrepareLimits {
   sessionTomlBytes: number;
   diagnosticBytes: number;
   sourceIdBytes: number;
@@ -551,7 +551,7 @@ export interface MisoWebPrepareLimitsV1 {
   ///
   /// Zero is the honest form: no lane, no accumulator and no conflating cell is allocated anywhere
   /// in the compiled plan, `observationRetainedBytes` is `0n`, and a subscription is refused with
-  /// `MisoCommandReasonV1.ObservationUnbound`. Requires `consoleCommandQueueRecords !== 0n`,
+  /// `MisoCommandReason.ObservationUnbound`. Requires `consoleCommandQueueRecords !== 0n`,
   /// because a subscription rides the effect's own command queue.
   consoleObservationTaps: bigint;
   /// The designated master track **plus one**, or `0n` for none (issue 143).
@@ -562,7 +562,7 @@ export interface MisoWebPrepareLimitsV1 {
   consoleMasterTrackPlusOne: bigint;
 }
 
-export interface MisoWebResourceReportV1 {
+export interface MisoWebResourceReport {
   readonly sampleRateHz: number;
   readonly quantumFrames: number;
   readonly backend: number;
@@ -593,7 +593,7 @@ export interface MisoWebResourceReportV1 {
   readonly observationRetainedBytes: bigint;
 }
 
-export interface MisoStatusV1 {
+export interface MisoStatus {
   readonly tag: "miso.status.v1";
   readonly requestId: number;
   readonly result: number;
@@ -607,21 +607,21 @@ export interface MisoStatusV1 {
   readonly memoryBytes: number;
 }
 
-export interface MisoAckV1 {
+export interface MisoAck {
   readonly tag: "miso.ack.v1";
   readonly requestId: number;
   readonly result: number;
   readonly planes?: Float32Array[];
 }
 
-export interface MisoErrorV1 {
+export interface MisoError {
   readonly tag: "miso.error.v1";
   readonly requestId: number;
   readonly result: number;
   readonly planes?: Float32Array[];
 }
 
-export interface MisoSourceRequestV1 {
+export interface MisoSourceRequest {
   requestId: number;
   sourceId: string;
   generation: bigint;
@@ -632,7 +632,7 @@ export interface MisoSourceRequestV1 {
   endOfRegion: boolean;
 }
 
-export interface MisoSeekRequestV1 {
+export interface MisoSeekRequest {
   requestId: number;
   sourceId: string;
   generation: bigint;
@@ -641,46 +641,46 @@ export interface MisoSeekRequestV1 {
 
 export interface MisoAudioWorkletHost {
   readonly node: AudioWorkletNode;
-  readonly backend: MisoWebBackendV1;
-  readonly resources: MisoWebResourceReportV1;
+  readonly backend: MisoWebBackend;
+  readonly resources: MisoWebResourceReport;
   readonly memoryBytes: number;
-  submitSource(request: MisoSourceRequestV1): Promise<MisoAckV1>;
-  seekSource(request: MisoSeekRequestV1): Promise<MisoAckV1>;
-  status(): Promise<MisoStatusV1>;
+  submitSource(request: MisoSourceRequest): Promise<MisoAck>;
+  seekSource(request: MisoSeekRequest): Promise<MisoAck>;
+  status(): Promise<MisoStatus>;
   /// Submit one live-console batch as a single transaction (issue 137 D1).
-  command(request: MisoCommandRequestV1): Promise<MisoCommandAckV1>;
+  command(request: MisoCommandRequest): Promise<MisoCommandAck>;
   /// Arm or disarm declared observation taps and read back the subscription map (issues 143, 151).
   ///
   /// It is wire kinds `ObserveSubscribe`/`ObserveUnsubscribe` on one `miso.command.v1` batch --
   /// one transaction, one `appliedAtSample` -- plus the map that answers what the positional
-  /// `MisoMeterFrameV1.trackGrDb` array structurally cannot: which tracks have an observed effect
-  /// at all. See `MisoObservationAckV1` for what a refusal settles as.
-  observe(request: MisoObservationRequestV1): Promise<MisoObservationAckV1>;
+  /// `MisoMeterFrame.trackGrDb` array structurally cannot: which tracks have an observed effect
+  /// at all. See `MisoObservationAck` for what a refusal settles as.
+  observe(request: MisoObservationRequest): Promise<MisoObservationAck>;
   /// Read the compiled session's canonical track and source order (issues 137 D1, 207).
   ///
   /// `tracks` is what `trackIndex` addresses; `sources` is what `submitSource`/`seekSource` feed,
   /// with the channel count and region every submission has to agree with.
-  sessionMap(): Promise<MisoSessionMapV1>;
+  sessionMap(): Promise<MisoSessionMap>;
   /// Take or release the decimated meter lease (issue 137 D2).
   meters(
-    request: { requestId: number; enabled: boolean; onFrame: ((frame: MisoMeterFrameV1) => void) | null },
-  ): Promise<MisoAckV1>;
+    request: { requestId: number; enabled: boolean; onFrame: ((frame: MisoMeterFrame) => void) | null },
+  ): Promise<MisoAck>;
   /// Take or release the render-telemetry lease (issue 137 D3).
   telemetry(
-    request: { requestId: number; enabled: boolean; onFrame: ((frame: MisoTelemetryFrameV1) => void) | null },
-  ): Promise<MisoAckV1>;
+    request: { requestId: number; enabled: boolean; onFrame: ((frame: MisoTelemetryFrame) => void) | null },
+  ): Promise<MisoAck>;
   dispose(): Promise<void>;
 }
 
-export interface CreateMisoAudioWorkletHostOptionsV1 {
+export interface CreateMisoAudioWorkletHostOptions {
   context: BaseAudioContext;
   quantumFrames: number;
   sessionToml: Uint8Array;
-  limits: MisoWebPrepareLimitsV1;
+  limits: MisoWebPrepareLimits;
   simd128ModuleUrl: string;
   workletModuleUrl: string;
 }
 
 export function createMisoAudioWorkletHost(
-  options: CreateMisoAudioWorkletHostOptionsV1,
+  options: CreateMisoAudioWorkletHostOptions,
 ): Promise<MisoAudioWorkletHost>;

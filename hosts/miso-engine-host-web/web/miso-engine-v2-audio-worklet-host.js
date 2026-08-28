@@ -93,7 +93,7 @@ function validSubscription(subscription) {
 // derived from it and never written as a literal again, and
 // `scripts/check-command-reason-vocabulary.py` holds this table equal to
 // `hosts/miso-engine-host-web/src/lib.rs`'s `COMMAND_REASON_*` constants, the `.d.ts`
-// `MisoCommandReasonV1` enum, the metadata generator's `commandReasons` rows and the schema
+// `MisoCommandReason` enum, the metadata generator's `commandReasons` rows and the schema
 // gate's own list. Bump a Rust reason without the rest and that gate is red.
 const COMMAND_REASONS = Object.freeze([
   "none",
@@ -322,7 +322,7 @@ function isUnsupportedBrowser(value) {
 ///
 /// Nothing is dropped silently: a request over its bound is rejected locally, before transfer, with
 /// a typed `RESULT_BACKPRESSURE` and its planes still owned by the caller.
-class MisoAudioWorkletHostV1 {
+class MisoAudioWorkletHost {
   #port;
   #pending = new Map();
   #inFlightSources = new Map();
@@ -921,7 +921,7 @@ export async function createMisoAudioWorkletHost(options) {
       node.port.onmessageerror = () => finish(reject, webError(255));
       node.onprocessorerror = () => finish(reject, webError(255));
     });
-    return new MisoAudioWorkletHostV1(
+    return new MisoAudioWorkletHost(
       node,
       selected.backend,
       options.context.sampleRate,

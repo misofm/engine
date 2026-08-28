@@ -11,7 +11,7 @@ syntax, and issue #151's field defect is exactly what that costs when they drift
   failed the *whole host* with a sticky 255. One refused subscription cost the session.
 * `hosts/miso-engine-host-web/web/miso-engine-v2-audio-worklet.js` -- the render-thread worklet,
   which names only the subset of reasons it refuses a request with itself.
-* `hosts/miso-engine-host-web/web/miso-engine-v2-audio-worklet-host.d.ts` -- the `MisoCommandReasonV1`
+* `hosts/miso-engine-host-web/web/miso-engine-v2-audio-worklet-host.d.ts` -- the `MisoCommandReason`
   enum a typed consumer compiles against.
 * `tools/miso-engine-parameter-metadata/src/lib.rs` -- the `commandReasons` rows of the shipped
   JSON, which is where an app reads the vocabulary from.
@@ -115,12 +115,12 @@ def host_js_table(text: str) -> list[tuple[int, str]]:
 
 
 def host_dts_enum(text: str) -> list[tuple[int, str]]:
-    block = block_after(text, "export const enum MisoCommandReasonV1 ", "{", "}")
+    block = block_after(text, "export const enum MisoCommandReason ", "{", "}")
     rows = [
         (int(value), camel_from_pascal(name))
         for name, value in re.findall(r"^\s*([A-Z][A-Za-z0-9]*) = (\d+),", block, re.MULTILINE)
     ]
-    require(rows, "the .d.ts MisoCommandReasonV1 enum is empty")
+    require(rows, "the .d.ts MisoCommandReason enum is empty")
     return sorted(rows)
 
 
@@ -204,24 +204,24 @@ def check_observe_typing(js: str, dts: str) -> None:
     )
     require(
         re.search(
-            r"observe\(request: MisoObservationRequestV1\): Promise<MisoObservationAckV1>;",
+            r"observe\(request: MisoObservationRequest\): Promise<MisoObservationAck>;",
             host_interface,
         ),
         "observe() is declared with a signature other than "
-        "(MisoObservationRequestV1) => Promise<MisoObservationAckV1>",
+        "(MisoObservationRequest) => Promise<MisoObservationAck>",
     )
 
     # The request shape is whatever `validSubscription` actually accepts, exactly.
     implemented = js_string_array(js, "const SUBSCRIPTION_FIELDS = ")
-    declared = dts_interface_fields(dts, "MisoObservationSubscriptionV1")
+    declared = dts_interface_fields(dts, "MisoObservationSubscription")
     require(
         declared == implemented,
-        "MisoObservationSubscriptionV1 does not match the shipped SUBSCRIPTION_FIELDS: "
+        "MisoObservationSubscription does not match the shipped SUBSCRIPTION_FIELDS: "
         f"declared {declared}, implemented {implemented}",
     )
     require(
-        dts_interface_fields(dts, "MisoObservationRequestV1") == ["requestId", "subscriptions"],
-        "MisoObservationRequestV1 does not match observe()'s accepted request fields",
+        dts_interface_fields(dts, "MisoObservationRequest") == ["requestId", "subscriptions"],
+        "MisoObservationRequest does not match observe()'s accepted request fields",
     )
     body = block_after(js, "async observe(request) ", "{", "}")
     request_fields = js_string_array(body, "hasExactFields(request, ")
@@ -233,15 +233,15 @@ def check_observe_typing(js: str, dts: str) -> None:
     # The response shapes are whatever `observe()` actually builds, exactly.
     binding = js_object_keys(body, "this.#observations.set(key, ")
     require(
-        dts_interface_fields(dts, "MisoObservationBindingV1") == binding,
-        "MisoObservationBindingV1 does not match the binding observe() stores: "
-        f"declared {dts_interface_fields(dts, 'MisoObservationBindingV1')}, implemented {binding}",
+        dts_interface_fields(dts, "MisoObservationBinding") == binding,
+        "MisoObservationBinding does not match the binding observe() stores: "
+        f"declared {dts_interface_fields(dts, 'MisoObservationBinding')}, implemented {binding}",
     )
     ack = js_object_keys(body, "return Object.freeze(")
     require(
-        dts_interface_fields(dts, "MisoObservationAckV1") == ack,
-        "MisoObservationAckV1 does not match the acknowledgement observe() returns: "
-        f"declared {dts_interface_fields(dts, 'MisoObservationAckV1')}, implemented {ack}",
+        dts_interface_fields(dts, "MisoObservationAck") == ack,
+        "MisoObservationAck does not match the acknowledgement observe() returns: "
+        f"declared {dts_interface_fields(dts, 'MisoObservationAck')}, implemented {ack}",
     )
 
 
@@ -271,7 +271,7 @@ def validate(texts: dict[pathlib.Path, str], document: dict | None = None) -> No
     spellings = {
         "rust host constants": rust_constants(texts[RUST_CONSTANTS]),
         "host JS table": host_js_table(texts[HOST_JS]),
-        ".d.ts MisoCommandReasonV1": host_dts_enum(texts[HOST_DTS]),
+        ".d.ts MisoCommandReason": host_dts_enum(texts[HOST_DTS]),
         "metadata generator rows": metadata_generator_table(texts[METADATA_GENERATOR]),
         "schema gate list": schema_gate_list(texts[SCHEMA_GATE]),
     }
@@ -418,7 +418,7 @@ def self_test() -> int:
             "the .d.ts stops declaring observe()",
             mutate(
                 HOST_DTS,
-                "  observe(request: MisoObservationRequestV1): Promise<MisoObservationAckV1>;\n",
+                "  observe(request: MisoObservationRequest): Promise<MisoObservationAck>;\n",
                 "",
             ),
         ),
@@ -440,7 +440,7 @@ def self_test() -> int:
         ),
         (
             "the declared acknowledgement drops reason",
-            mutate(HOST_DTS, "  readonly reason: MisoCommandReasonV1;\n  /// Every armed tap", "  /// Every armed tap"),
+            mutate(HOST_DTS, "  readonly reason: MisoCommandReason;\n  /// Every armed tap", "  /// Every armed tap"),
         ),
         (
             "the implementation gains a binding field the .d.ts does not declare",

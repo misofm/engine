@@ -280,7 +280,7 @@ def check(texts: dict[pathlib.Path, str]) -> None:
         f"{sorted(pushed)}",
     )
 
-    declared_map = dts_interface(texts[HOST_DTS], "MisoSessionMapV1")
+    declared_map = dts_interface(texts[HOST_DTS], "MisoSessionMap")
     require(
         sorted(declared_map) == sorted(posted_map),
         f"the .d.ts declares session-map fields {sorted(declared_map)}, the worklet posts "
@@ -289,7 +289,7 @@ def check(texts: dict[pathlib.Path, str]) -> None:
     element = declared_map["sources"].strip()
     require(
         element.endswith("[]"),
-        f"MisoSessionMapV1.sources is not an array type: {element!r}",
+        f"MisoSessionMap.sources is not an array type: {element!r}",
     )
     element_name = element[:-2].strip()
     declared_source = dts_interface(texts[HOST_DTS], element_name)
