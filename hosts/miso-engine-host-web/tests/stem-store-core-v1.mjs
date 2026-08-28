@@ -7,6 +7,7 @@ import {
   detectSharedReadOnlyMode,
 } from "../web/stem-store/opfs-store.js"
 import { MemoryStemResolver } from "../web/stem-store/resolver.js"
+import { StemSessionGate } from "../web/stem-store/session-gate.js"
 import { FakeLockManager, FakeOpfsBackend } from "./stem-store-fakes.mjs"
 
 const encoder = new TextEncoder()
@@ -328,44 +329,116 @@ async function crashedSessionPinsAreRecoverable() {
 }
 
 async function quotaFailureKeepsSurvivors() {
+  const evictableStem = fixture("quota-unrelated-evictable", 2048)
   const firstStem = fixture("quota-first", 4096)
   const secondStem = fixture("quota-second", 4096)
-  const backend = new FakeOpfsBackend({ quota: 30_000, reportedQuota: 30_000 })
+  const shortfallBytes = 37
+  const backend = new FakeOpfsBackend({ quota: 100_000, reportedQuota: 100_000 })
   const locks = new FakeLockManager()
-  const resolver = new MemoryStemResolver(stemMap([firstStem, secondStem]))
-  const opfs = store(backend, locks, { tabId: "quota" })
-  const survivor = await opfs.openSession({
-    sessionId: "survivor",
-    stems: requirements([firstStem]),
-    resolver,
+  let firstPromoted
+  const firstIsPromoted = new Promise((resolve) => { firstPromoted = resolve })
+  const opfs = store(backend, locks, {
+    tabId: "quota",
+    hooks: {
+      afterIndex({ identity }) {
+        if (identity !== firstStem.identity) return
+        backend.quota = backend.usage + secondStem.bytes - shortfallBytes
+        firstPromoted()
+      },
+    },
   })
-  backend.reportedQuota = backend.usage + secondStem.bytes - 1
+  const unrelated = await opfs.openSession({
+    sessionId: "unrelated",
+    stems: requirements([evictableStem]),
+    resolver: new MemoryStemResolver(stemMap([evictableStem])),
+  })
+  await unrelated.close()
+
+  const memory = new MemoryStemResolver(stemMap([firstStem, secondStem]))
+  const resolver = {
+    requests: memory.requests,
+    async resolve(identity, options) {
+      if (identity === secondStem.identity) await firstIsPromoted
+      return memory.resolve(identity, options)
+    },
+  }
+  const gate = new StemSessionGate(opfs, resolver)
+  const progress = []
   await assert.rejects(
-    opfs.openSession({
-      sessionId: "too-big",
+    gate.open({
+      sessionId: "write-race",
       stems: requirements([firstStem, secondStem]),
-      resolver,
+      resume() {},
+      onProgress(event) { progress.push(event) },
     }),
     (error) => {
       assert.equal(error.code, "storage.insufficient")
-      assert.equal(error.details.shortfallBytes, 1)
-      assert.equal(error.details.evictableBytes, 0)
+      assert.equal(error.details.requiredBytes, secondStem.bytes)
+      assert.ok(
+        error.details.availableBytes >= secondStem.bytes,
+        "the eval must preserve the stale estimate/write race"
+      )
+      assert.equal(
+        error.details.shortfallBytes,
+        1,
+        "write-time quota race reported a zero shortfall"
+      )
+      assert.equal(error.details.shortfallIsLowerBound, true)
+      assert.equal(
+        error.details.evictableBytes,
+        evictableStem.bytes,
+        "write-time quota accounting counted an opening-session survivor as evictable"
+      )
       return true
     }
   )
+  assert.equal(backend.quotaFailures, 1, "later stem must fail inside the OPFS write")
+  assert.equal(gate.state, "refused", "quota failure must keep the gate closed")
+  assert.equal(progress.some((event) => event.stage === "interactive"), false)
+  assert.equal(
+    progress.some(
+      (event) => event.stage === "promoted" && event.identity === firstStem.identity
+    ),
+    true,
+    "an earlier opening-session stem must promote before the later write fails"
+  )
+  assert.equal(
+    progress.some(
+      (event) => event.stage === "promoted" && event.identity === secondStem.identity
+    ),
+    false
+  )
+  assert.deepEqual(backend.names("miso-stems-v1/staging"), [])
+  const failedIndex = JSON.parse(
+    new TextDecoder().decode(backend.bytes("miso-stems-v1/index.json"))
+  )
+  assert.deepEqual(
+    failedIndex.stems[firstStem.identity].pins,
+    [],
+    "survivor protection must precede durable session-pin installation"
+  )
   assert.equal(await opfs.verify(firstStem.identity), true, "promoted survivor remains")
-  backend.reportedQuota = 30_000
-  const retry = await opfs.openSession({
-    sessionId: "retry",
+  assert.equal(await opfs.verify(evictableStem.identity), true, "unrelated row remains reusable")
+  assert.equal(await opfs.verify(secondStem.identity), false, "failing stem never promotes")
+
+  backend.quota = 100_000
+  backend.reportedQuota = 100_000
+  await gate.open({
+    sessionId: "write-race",
     stems: requirements([firstStem, secondStem]),
-    resolver,
+    resume() {},
   })
   assert.equal(
     resolver.requests.filter((identity) => identity === firstStem.identity).length,
     1,
-    "retry reuses the promoted survivor"
+    "retry must reuse the promoted opening-session survivor"
   )
-  await Promise.all([survivor.close(), retry.close()])
+  assert.equal(
+    resolver.requests.filter((identity) => identity === secondStem.identity).length,
+    2,
+    "retry must resolve only the stem whose write failed"
+  )
+  await gate.close()
 }
 
 async function lruEvictsOnlyUnpinned() {

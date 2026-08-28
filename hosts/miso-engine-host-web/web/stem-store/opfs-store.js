@@ -136,6 +136,7 @@ export class OpfsStemStore {
       throw new TypeError("openSession needs a StemResolver")
     }
     const stems = normalizeRequirements(options.stems)
+    const protectedIdentities = new Set(stems.map((stem) => stem.identity))
     throwIfAborted(options.signal)
     const missing = []
 
@@ -146,7 +147,7 @@ export class OpfsStemStore {
       if (!present) missing.push(stem)
     }
 
-    await this.#preflight(missing, new Set(stems.map((stem) => stem.identity)))
+    await this.#preflight(missing, protectedIdentities)
 
     const ingestAbort = new AbortController()
     const removeParentAbort = forwardAbort(options.signal, ingestAbort)
@@ -156,6 +157,7 @@ export class OpfsStemStore {
           this.#ensureIngested(stem, options.resolver, {
             signal: ingestAbort.signal,
             onProgress: options.onProgress,
+            protectedIdentities,
           }).catch((error) => {
             ingestAbort.abort(error)
             throw error
@@ -470,7 +472,18 @@ export class OpfsStemStore {
     } catch (error) {
       if (error?.leaveStaging === true) leaveDebris = true
       if (isQuotaError(error)) {
-        throw await this.#quotaError(stem.bytes, error)
+        // The failing identity is not a survivor: a quota error may have
+        // happened during fallback-final or index writing after its staging
+        // bytes were complete. Remove any unindexed final so retry is clean.
+        await removeEntry(
+          this.#directory,
+          stemFileName(stem.identity)
+        ).catch(() => {})
+        throw await this.#quotaError(
+          stem.bytes,
+          error,
+          options.protectedIdentities
+        )
       }
       throw error
     } finally {
@@ -662,11 +675,7 @@ export class OpfsStemStore {
     if (availableBytes >= requiredBytes) return
 
     const index = await this.#withIndexLock(() => this.#readIndex(true))
-    const victims = Object.entries(index.stems)
-      .filter(
-        ([identity, row]) =>
-          row.pins.length === 0 && !protectedIdentities.has(identity)
-      )
+    const victims = this.#evictableRows(index, protectedIdentities)
       .sort((left, right) => left[1].lastUsedAt - right[1].lastUsedAt)
     const evictableBytes = checkedByteSum(
       victims.map((entry) => entry[1].bytes),
@@ -705,33 +714,50 @@ export class OpfsStemStore {
     })
   }
 
-  async #quotaError(requiredBytes, cause) {
-    let availableBytes = 0
+  #evictableRows(index, protectedIdentities) {
+    return Object.entries(index.stems).filter(
+      ([identity, row]) =>
+        row.pins.length === 0 && !protectedIdentities.has(identity)
+    )
+  }
+
+  async #quotaError(requiredBytes, cause, protectedIdentities) {
+    let availableBytes = null
     let evictableBytes = 0
     try {
-      const [estimate, index] = await Promise.all([
-        this.#storage.estimate?.(),
-        this.#withIndexLock(() => this.#readIndex(true)),
-      ])
+      const estimate = await this.#storage.estimate?.()
       if (finiteNonnegative(estimate?.quota) && finiteNonnegative(estimate?.usage)) {
         availableBytes = Math.max(0, estimate.quota - estimate.usage)
       }
+    } catch {
+      // The quota exception remains authoritative when the estimate races or fails.
+    }
+    try {
+      const index = await this.#withIndexLock(() => this.#readIndex(true))
       evictableBytes = checkedByteSum(
-        Object.values(index.stems)
-          .filter((row) => row.pins.length === 0)
-          .map((row) => row.bytes),
+        this.#evictableRows(index, protectedIdentities).map(
+          ([, row]) => row.bytes
+        ),
         "evictable stem byte total"
       )
     } catch {
-      // Write-time quota failure remains authoritative even when estimates fail.
+      // Index damage cannot make the write-time quota refusal disappear.
     }
+    const estimatedShortfall =
+      availableBytes === null ? 0 : requiredBytes - availableBytes
+    // A QuotaExceededError proves some nonzero shortfall even when estimate()
+    // raced the write and still claims enough space. One byte is the only
+    // universally truthful lower bound in that case.
+    const shortfallBytes = Math.max(1, estimatedShortfall)
     return new StemStoreError(
       "storage.insufficient",
-      `Stem store is short ${Math.max(0, requiredBytes - availableBytes)} bytes`,
+      `Stem store write is short at least ${shortfallBytes} bytes`,
       {
         requiredBytes,
         availableBytes,
-        shortfallBytes: Math.max(0, requiredBytes - availableBytes),
+        shortfallBytes,
+        shortfallIsLowerBound:
+          availableBytes === null || availableBytes >= requiredBytes,
         evictableBytes,
       },
       cause

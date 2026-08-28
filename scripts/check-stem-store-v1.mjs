@@ -198,6 +198,23 @@ async function runMutationLedger() {
       test: "stem-store-core-v1.mjs",
       expectedFailure: "missing crash-only index must adopt a self-verifying final without re-ingest",
     },
+    {
+      name: "count an opening-session survivor as write-time evictable",
+      file: "web/stem-store/opfs-store.js",
+      search:
+        "        row.pins.length === 0 && !protectedIdentities.has(identity)",
+      replace: "        row.pins.length === 0",
+      test: "stem-store-core-v1.mjs",
+      expectedFailure: "write-time quota accounting counted an opening-session survivor as evictable",
+    },
+    {
+      name: "allow a stale estimate to report zero write-time shortfall",
+      file: "web/stem-store/opfs-store.js",
+      search: "const shortfallBytes = Math.max(1, estimatedShortfall)",
+      replace: "const shortfallBytes = Math.max(0, estimatedShortfall)",
+      test: "stem-store-core-v1.mjs",
+      expectedFailure: "write-time quota race reported a zero shortfall",
+    },
   ]
 
   for (const mutation of mutations) {

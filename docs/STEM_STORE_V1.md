@@ -93,8 +93,14 @@ semantic or a timeout relaxation.
 Quota preflight counts the canonical bytes of misses only. Unpinned LRU rows
 outside the opening session may be evicted; open-session and offline pins are
 never victims. `storage.insufficient` reports required, available, shortfall,
-and evictable bytes. Write-time quota failure removes the failing staging file,
-keeps already promoted stems, keeps the gate closed, and permits a clean retry.
+and evictable bytes. Every identity in the currently opening session is already
+protected from eviction and evictable-byte accounting before its durable
+session pin is installed. Write-time quota failure is authoritative over a
+racing `estimate()`: its shortfall is always a truthful nonzero value (marked as
+a lower bound when the estimate is absent or still claims enough space). It
+removes the failing staging file and any failing unindexed final, keeps earlier
+promoted stems, keeps the gate closed, and permits a clean retry that reuses
+those survivors.
 The index is crash-only metadata: if it is missing or structurally corrupt, the
 store scans final names, fully hashes each unlocked candidate, adopts an exact
 `hash(file) == filename` match with empty recovered pins, and removes candidates

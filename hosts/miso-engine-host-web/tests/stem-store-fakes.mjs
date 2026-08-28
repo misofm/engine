@@ -1,4 +1,6 @@
 export class FakeOpfsBackend {
+  quotaFailures = 0
+
   constructor(options = {}) {
     this.root = directoryNode()
     this.quota = options.quota ?? Number.MAX_SAFE_INTEGER
@@ -135,6 +137,7 @@ class FakeFileHandle {
       async write(value) {
         if (closed) throw new Error("fake writable is closed")
         if (backend.writeFailure?.({ handle: this, value, chunks })) {
+          backend.quotaFailures += 1
           throw domError("QuotaExceededError", "fake quota exhausted")
         }
         if (typeof value === "string") chunks.push(new TextEncoder().encode(value))
@@ -149,6 +152,7 @@ class FakeFileHandle {
         const bytes = concatenate(chunks)
         const replaced = node.bytes.byteLength
         if (backend.usage - replaced + bytes.byteLength > backend.quota) {
+          backend.quotaFailures += 1
           throw domError("QuotaExceededError", "fake quota exhausted")
         }
         node.bytes = bytes
