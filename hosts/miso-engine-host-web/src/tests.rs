@@ -3902,6 +3902,10 @@ fn the_decode_staging_holds_a_full_batch_plus_a_solo_transition() {
 // Issue #210 phase 3: command kinds 10 (`trimDb`) and 11 (`polarityInvert`).
 // ---------------------------------------------------------------------------------------------
 
+/// One row of the trim/polarity refusal matrix:
+/// `(kind, rack, channel, track, values, expected result, expected reason)`.
+type TrimRefusalCase = (u32, u8, u8, u32, [f32; 4], u32, u32);
+
 /// Stage one `trimDb` record. `rack` is `255`, the dB rides `values[0]`, the lane is `channel`.
 fn stage_trim(
     host: &mut AudioWorkletEngineHost,
@@ -3986,7 +3990,7 @@ fn trim_and_polarity_are_admitted_on_every_lane_selector() {
 fn trim_and_polarity_refuse_on_the_declared_terms() {
     const QUANTUM: u32 = 128;
     const TRACKS: usize = 4;
-    let cases: [(u32, u8, u8, u32, [f32; 4], u32, u32); 14] = [
+    let cases: [TrimRefusalCase; 14] = [
         // A rack byte on a builtin-addressed kind is a shape error.
         (
             COMMAND_TRIM_DB,
