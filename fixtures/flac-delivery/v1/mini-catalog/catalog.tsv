@@ -1,0 +1,6 @@
+schema_version	1
+name	old_identity	master_wave
+pcm16-mono-boundaries	sha256:2266785bb605cc8cf513196994a873cb199ca518c0134026e97aa5b089b217ed	masters/pcm16-mono-boundaries.wav
+pcm16-stereo-boundaries	sha256:03cacade67c6d7531f847391f05ca3c2fabc9b231984bb4a5729de0630deb353	masters/pcm16-stereo-boundaries.wav
+pcm24-mono-boundaries	sha256:8adaade7f62616da3d27e1a24cac1a273beae90aef8a431459ef84260a2c529b	masters/pcm24-mono-boundaries.wav
+pcm24-stereo-boundaries	sha256:17f7695b91d2cfc8a60e12a1a231e1bd52b6e5079a21fe166bb8e6e674ada92c	masters/pcm24-stereo-boundaries.wav
