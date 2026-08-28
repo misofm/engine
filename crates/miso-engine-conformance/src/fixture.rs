@@ -46,14 +46,14 @@ pub enum FixtureError {
 
 /// Validated PCM fixture preserving raw `f32` bit patterns.
 #[derive(Clone, Debug, PartialEq)]
-pub struct PcmFixtureV1 {
+pub struct PcmFixture {
     rate: SampleRateHz,
     channels: u16,
     frames: u64,
     samples: Vec<f32>,
     checksum: u32,
 }
-impl PcmFixtureV1 {
+impl PcmFixture {
     /// Parses exactly one v1 fixture with no trailing data.
     pub fn parse(bytes: &[u8], limits: FixtureLimits) -> Result<Self, FixtureError> {
         if bytes.len() < HEADER_LEN {

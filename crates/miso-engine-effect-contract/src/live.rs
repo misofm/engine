@@ -33,12 +33,12 @@
 //! refuses to make larger than the automation capacity.
 
 use miso_engine_core::realtime::{
-    Consumer, ObservationPublisherV1, ObservationWindowV1, observation_slot_retained_bytes,
+    Consumer, ObservationPublisher, ObservationWindow, observation_slot_retained_bytes,
 };
 use miso_engine_lane::kernels::pdc_delay_block;
 
 use crate::{
-    AutomationSpanKind, ChannelSymmetryWitness, ObservationDescriptor, ObservationFoldV1,
+    AutomationSpanKind, ChannelSymmetryWitness, ObservationDescriptor, ObservationFold,
     ObservationSample, ParameterChannel, PreparedAutomationSpan,
 };
 
@@ -285,9 +285,9 @@ pub struct Staged {
 /// arming allocates nothing and disarming frees nothing: subscribe is a flag, not a resource.
 #[derive(Debug)]
 struct ObservationTap {
-    publisher: ObservationPublisherV1,
+    publisher: ObservationPublisher,
     /// The declared fold, copied once at bind so the render path never walks the descriptor.
-    fold: ObservationFoldV1,
+    fold: ObservationFold,
     armed: bool,
     /// Blocks per published window; never zero once armed.
     window_blocks: u32,
@@ -332,7 +332,7 @@ impl ObservationLane {
     #[must_use]
     pub fn new(
         observations: &'static [ObservationDescriptor],
-        publishers: Vec<ObservationPublisherV1>,
+        publishers: Vec<ObservationPublisher>,
         default_window_blocks: u32,
     ) -> Option<Self> {
         if publishers.len() != observations.len() {
@@ -507,7 +507,7 @@ impl ObservationLane {
             // non-negative magnitude a meter reads. It is one `abs` and one compare per lane per
             // block, and it is the whole reason the app's `Math.max(0, x)` is a no-op rather than
             // a silent zeroing.
-            ObservationFoldV1::PeakMagnitude => {
+            ObservationFold::PeakMagnitude => {
                 let left = sample.left.abs();
                 let right = sample.right.abs();
                 if left > tap.peak_left {
@@ -517,7 +517,7 @@ impl ObservationLane {
                     tap.peak_right = right;
                 }
             }
-            ObservationFoldV1::Latest => {
+            ObservationFold::Latest => {
                 tap.peak_left = sample.left;
                 tap.peak_right = sample.right;
             }
@@ -527,7 +527,7 @@ impl ObservationLane {
             return;
         }
         tap.sequence = tap.sequence.saturating_add(1);
-        tap.publisher.publish(ObservationWindowV1 {
+        tap.publisher.publish(ObservationWindow {
             first_sample: tap.first_sample,
             end_sample: tap.end_sample,
             sequence: tap.sequence,

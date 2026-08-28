@@ -67,8 +67,8 @@ use miso_engine_builtins::{
 };
 use miso_engine_effect_compiler::launch_native_effect_registry;
 use miso_engine_effect_contract::{
-    AutomationRate, EffectDescriptor, ObservationCadenceV1, ObservationChannelsV1,
-    ObservationCostV1, ObservationDescriptor, ObservationFoldV1, ObservationKindV1,
+    AutomationRate, EffectDescriptor, ObservationCadence, ObservationChannels,
+    ObservationCost, ObservationDescriptor, ObservationFold, ObservationKind,
     ParameterChannelPolicy, ParameterDescriptor, ParameterDomain, ParameterMapping,
     ParameterUnit, SmoothingRule,
 };
@@ -198,34 +198,34 @@ pub fn render() -> String {
     let vocabularies: [(&str, &[(u32, &str)]); 5] = [
         (
             "kinds",
-            &[(ObservationKindV1::GainReductionDb as u32, "gainReductionDb")],
+            &[(ObservationKind::GainReductionDb as u32, "gainReductionDb")],
         ),
         (
             "costs",
             &[
-                (ObservationCostV1::Resident as u32, "resident"),
-                (ObservationCostV1::Computed as u32, "computed"),
+                (ObservationCost::Resident as u32, "resident"),
+                (ObservationCost::Computed as u32, "computed"),
             ],
         ),
         (
             "cadences",
             &[
-                (ObservationCadenceV1::PerBlock as u32, "perBlock"),
-                (ObservationCadenceV1::PerWindow as u32, "perWindow"),
+                (ObservationCadence::PerBlock as u32, "perBlock"),
+                (ObservationCadence::PerWindow as u32, "perWindow"),
             ],
         ),
         (
             "folds",
             &[
-                (ObservationFoldV1::Latest as u32, "latest"),
-                (ObservationFoldV1::PeakMagnitude as u32, "peakMagnitude"),
+                (ObservationFold::Latest as u32, "latest"),
+                (ObservationFold::PeakMagnitude as u32, "peakMagnitude"),
             ],
         ),
         (
             "channels",
             &[
-                (ObservationChannelsV1::Shared as u32, "shared"),
-                (ObservationChannelsV1::PerLane as u32, "perLane"),
+                (ObservationChannels::Shared as u32, "shared"),
+                (ObservationChannels::PerLane as u32, "perLane"),
             ],
         ),
     ];
@@ -327,7 +327,7 @@ fn effect_observation(observation: &ObservationDescriptor) -> String {
     // answers `unsupportedKind`. The two statements are the same statement, which is why this is
     // derived rather than written down -- and why the schema gate refuses a computed tap that
     // claims to be subscribable.
-    let subscribable = matches!(observation.cost, ObservationCostV1::Resident);
+    let subscribable = matches!(observation.cost, ObservationCost::Resident);
     format!(
         "        {{ \"id\": {}, \"name\": \"{}\", \"displayUnit\": \"{}\", \
 \"kind\": {}, \"kindName\": \"{}\", \"unit\": {}, \"unitName\": \"{}\", \
@@ -355,37 +355,37 @@ fn effect_observation(observation: &ObservationDescriptor) -> String {
     )
 }
 
-const fn observation_kind_name(kind: ObservationKindV1) -> &'static str {
+const fn observation_kind_name(kind: ObservationKind) -> &'static str {
     match kind {
-        ObservationKindV1::GainReductionDb => "gainReductionDb",
+        ObservationKind::GainReductionDb => "gainReductionDb",
     }
 }
 
-const fn observation_cost_name(cost: ObservationCostV1) -> &'static str {
+const fn observation_cost_name(cost: ObservationCost) -> &'static str {
     match cost {
-        ObservationCostV1::Resident => "resident",
-        ObservationCostV1::Computed => "computed",
+        ObservationCost::Resident => "resident",
+        ObservationCost::Computed => "computed",
     }
 }
 
-const fn observation_cadence_name(cadence: ObservationCadenceV1) -> &'static str {
+const fn observation_cadence_name(cadence: ObservationCadence) -> &'static str {
     match cadence {
-        ObservationCadenceV1::PerBlock => "perBlock",
-        ObservationCadenceV1::PerWindow => "perWindow",
+        ObservationCadence::PerBlock => "perBlock",
+        ObservationCadence::PerWindow => "perWindow",
     }
 }
 
-const fn observation_fold_name(fold: ObservationFoldV1) -> &'static str {
+const fn observation_fold_name(fold: ObservationFold) -> &'static str {
     match fold {
-        ObservationFoldV1::Latest => "latest",
-        ObservationFoldV1::PeakMagnitude => "peakMagnitude",
+        ObservationFold::Latest => "latest",
+        ObservationFold::PeakMagnitude => "peakMagnitude",
     }
 }
 
-const fn observation_channels_name(channels: ObservationChannelsV1) -> &'static str {
+const fn observation_channels_name(channels: ObservationChannels) -> &'static str {
     match channels {
-        ObservationChannelsV1::Shared => "shared",
-        ObservationChannelsV1::PerLane => "perLane",
+        ObservationChannels::Shared => "shared",
+        ObservationChannels::PerLane => "perLane",
     }
 }
 

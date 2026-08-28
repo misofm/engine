@@ -29,7 +29,7 @@ use miso_engine_effect_contract::{
 };
 use miso_engine_host_core::{
     CompiledSession, ConsoleSoloState, EffectControlProducer, EffectObservationHandle,
-    EffectRack, HostConsoleRequestV1, HostPrepareCaps, HostShapePolicy, PreparedHost,
+    EffectRack, HostConsoleRequest, HostPrepareCaps, HostShapePolicy, PreparedHost,
     SourceControlError, SourceSubmission, control_table_bytes, prepare_host_session_with_console,
     source_id_arena_bytes,
 };
@@ -1864,7 +1864,7 @@ impl CommandRecord {
         // and saying so is better than binding a lane that would never publish.
         if !matches!(
             tap.cost,
-            miso_engine_effect_contract::ObservationCostV1::Resident
+            miso_engine_effect_contract::ObservationCost::Resident
         ) {
             return Err(COMMAND_REASON_UNSUPPORTED_KIND);
         }
@@ -2728,7 +2728,7 @@ fn compile_ready(
 ///
 /// `console_meter_blocks == 0` is the honest form of "metering off": no observer is bound, so the
 /// render path folds nothing at all. The port lease is a second, finer switch over posting.
-fn console_request(config: WebPrepareConfig) -> Option<HostConsoleRequestV1> {
+fn console_request(config: WebPrepareConfig) -> Option<HostConsoleRequest> {
     let control_queue_depth = match config.console_command_queue_records {
         0 => None,
         records => Some(NonZeroUsize::new(u32::try_from(records).ok()? as usize)?),
@@ -2739,7 +2739,7 @@ fn console_request(config: WebPrepareConfig) -> Option<HostConsoleRequestV1> {
         let blocks = u32::try_from(config.console_meter_blocks).ok()?;
         Some(NonZeroU32::new(blocks.checked_mul(config.quantum_frames)?)?)
     };
-    Some(HostConsoleRequestV1 {
+    Some(HostConsoleRequest {
         control_queue_depth,
         meter_period_frames,
         // One window per track per post, plus headroom for a control-side stall of a few windows.

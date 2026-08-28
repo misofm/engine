@@ -461,20 +461,20 @@ fn stage_construction_rejects_a_lane_count_or_quantum_mismatch() {
 fn an_unobserved_bank_slot_reports_no_observation_state_at_all() {
     use miso_engine_core::realtime::observation_slot;
     use miso_engine_effect_contract::{
-        ObservationCadenceV1, ObservationChannelsV1, ObservationCostV1, ObservationDescriptor,
-        ObservationFoldV1, ObservationKindV1, ObservationLane, ObservationTapId, ParameterUnit,
+        ObservationCadence, ObservationChannels, ObservationCost, ObservationDescriptor,
+        ObservationFold, ObservationKind, ObservationLane, ObservationTapId, ParameterUnit,
     };
 
     static MENU: [ObservationDescriptor; 1] = [ObservationDescriptor {
         id: ObservationTapId(1),
         display_name: "Gain Reduction",
         display_unit: "dB",
-        kind: ObservationKindV1::GainReductionDb,
+        kind: ObservationKind::GainReductionDb,
         unit: ParameterUnit::Db,
-        cost: ObservationCostV1::Resident,
-        cadence: ObservationCadenceV1::PerBlock,
-        fold: ObservationFoldV1::PeakMagnitude,
-        channels: ObservationChannelsV1::PerLane,
+        cost: ObservationCost::Resident,
+        cadence: ObservationCadence::PerBlock,
+        fold: ObservationFold::PeakMagnitude,
+        channels: ObservationChannels::PerLane,
         minimum: 0.0,
         maximum: 100.0,
     }];

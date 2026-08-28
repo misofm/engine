@@ -21,7 +21,7 @@ fn caps() -> CompileCaps {
     }
 }
 
-fn model_at(scale: usize) -> miso_engine_session::SessionTomlV1 {
+fn model_at(scale: usize) -> miso_engine_session::SessionToml {
     let mut model = parse_session_toml(CANONICAL).expect("fixture parses");
     let mut track = model.tracks[0].clone();
     track.simd1.effects.clear();

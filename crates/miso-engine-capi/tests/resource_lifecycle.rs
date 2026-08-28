@@ -19,7 +19,7 @@ use miso_engine_lane::Backend;
 use miso_engine_protocol::{
     AUTOMATION_BATCH_RECORDS, AutomationBatchSlot, AutomationRecord, CommandPayload,
     ControlCommandSlot, CounterId, CounterTelemetryRecord, CounterValue, ExpectedRevision,
-    ProtocolCodec, ReliableSlot, RequestId, SessionEditV1, SessionRevision, StatusCode,
+    ProtocolCodec, ReliableSlot, RequestId, SessionEdit, SessionRevision, StatusCode,
     TelemetryRecord, TypedCommandFrame,
 };
 use miso_engine_session::StableId;
@@ -178,7 +178,7 @@ fn limits() -> CompileLimits {
 }
 
 fn command(request_id: u64, revision: u64, session_id: &'static str) -> Vec<u8> {
-    let edit = SessionEditV1::SetSessionId {
+    let edit = SessionEdit::SetSessionId {
         session_id: StableId::parse(session_id).expect("static session ID"),
     };
     let mut bytes = vec![0_u8; 4_096];

@@ -71,7 +71,7 @@ fn caps() -> CompileCaps {
     }
 }
 
-fn large_model() -> miso_engine_session::SessionTomlV1 {
+fn large_model() -> miso_engine_session::SessionToml {
     let mut model = parse_session_toml(CANONICAL).expect("fixture parses");
     let track = model.tracks[0].clone();
     let route = model.routes[0].clone();

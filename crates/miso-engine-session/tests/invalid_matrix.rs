@@ -3,7 +3,7 @@
 use miso_engine_session::{
     AutomationShape, CompileCaps, DiagnosticCode, DiagnosticSet, Effect, MatrixOrPan, Output,
     ParameterChannel, ParameterUnit, Rack, RackName, RouteDestination, RouteSource, SendTap,
-    SessionTomlV1, Sidechain, SidechainDeclaration, StableId, canonical_session_toml,
+    SessionToml, Sidechain, SidechainDeclaration, StableId, canonical_session_toml,
     compile_session, estimate_session_resources, parse_session_toml,
 };
 
@@ -42,7 +42,7 @@ fn parse_case(count: &mut usize, source: &str, code: DiagnosticCode, path: &str)
 
 fn model_case(
     count: &mut usize,
-    mutate: impl FnOnce(&mut SessionTomlV1),
+    mutate: impl FnOnce(&mut SessionToml),
     code: DiagnosticCode,
     path: &str,
 ) {
@@ -55,7 +55,7 @@ fn model_case(
 
 #[test]
 fn u64_model_fields_are_bounded_to_toml_i64_at_leaf_paths() {
-    type Mutation = fn(&mut SessionTomlV1);
+    type Mutation = fn(&mut SessionToml);
     let cases: &[(Mutation, &str)] = &[
         (
             |session| session.revision = i64::MAX as u64 + 1,
@@ -1014,7 +1014,7 @@ fn automation_category_has_20_distinct_cases() {
     assert_eq!(count, 20);
 }
 
-fn overflow_session(source_count: usize, channel_count: u8, ring_frames: u64) -> SessionTomlV1 {
+fn overflow_session(source_count: usize, channel_count: u8, ring_frames: u64) -> SessionToml {
     let mut session = parse_session_toml(EXAMPLE).expect("fixture parses");
     let template = session.sources[0].clone();
     session.sources.clear();

@@ -82,7 +82,7 @@ pub type ConsoleMuteDelta = [Option<(BuiltinLaneSelector, bool)>; 2];
 
 /// Solo-in-place console state for one prepared session.
 ///
-/// Track indices are the canonical track order (`HostConsoleHandlesV1::tracks`), which is the
+/// Track indices are the canonical track order (`HostConsoleHandles::tracks`), which is the
 /// compiled session's normalized order and the same order every queue and meter slot uses.
 #[derive(Debug)]
 pub struct ConsoleSoloState {

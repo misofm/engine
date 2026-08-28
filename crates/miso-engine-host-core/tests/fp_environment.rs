@@ -6,18 +6,18 @@
 //!
 //! * **canonical** -- the caller's control word already has FTZ and DAZ clear, and the plan is
 //!   rendered directly. This is the pin: the bytes the frozen corpus and every browser leg agree on.
-//! * **guarded** -- the caller sets FTZ+DAZ and renders through [`StartedRenderSessionV1`]. It must
+//! * **guarded** -- the caller sets FTZ+DAZ and renders through [`StartedRenderSession`]. It must
 //!   produce the canonical bytes, which is the claim issue #146 exists to make true.
 //! * **unguarded control** -- the caller sets FTZ+DAZ and renders the plan directly, bypassing the
 //!   entry. It must *differ*, or the guarded arm proves nothing and the test is vacuous.
 //!
 //! Red mutation (recorded in `tests/MUTATIONS.md`): delete the `CanonicalFpEnv::enter()` line from
-//! `StartedRenderSessionV1::render_contiguous`. The guarded arm then equals the unguarded control
+//! `StartedRenderSession::render_contiguous`. The guarded arm then equals the unguarded control
 //! arm and differs from the canonical pin.
 
 use miso_engine_core::realtime::{PlanarBufferMut, PreparedRenderPlan, RenderIo};
 use miso_engine_host_core::{
-    HostPrepareCaps, HostShapePolicy, SourceControlSet, SourceSubmission, StartedRenderSessionV1,
+    HostPrepareCaps, HostShapePolicy, SourceControlSet, SourceSubmission, StartedRenderSession,
     prepare_host_session,
 };
 
@@ -100,7 +100,7 @@ fn render_unguarded(plan: &mut PreparedRenderPlan, sources: &mut SourceControlSe
 
 /// Renders `BLOCKS` quanta through the started-session render entry, which pins the environment.
 fn render_guarded(
-    session: &mut StartedRenderSessionV1,
+    session: &mut StartedRenderSession,
     sources: &mut SourceControlSet,
 ) -> Vec<u32> {
     let mut rendered = Vec::with_capacity(BLOCKS * QUANTUM * 2);
@@ -125,7 +125,7 @@ fn prepare() -> (PreparedRenderPlan, SourceControlSet) {
 #[test]
 fn a_started_session_hands_the_plan_back_when_it_stops() {
     let (plan, _sources) = prepare();
-    let session = StartedRenderSessionV1::start(plan)
+    let session = StartedRenderSession::start(plan)
         .unwrap_or_else(|(_plan, rejection)| panic!("attestation: {rejection}"));
     assert_eq!(session.next_absolute_sample(), 0);
     let plan = session.stop();
@@ -135,7 +135,7 @@ fn a_started_session_hands_the_plan_back_when_it_stops() {
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 mod x86 {
     use super::{
-        BLOCKS, PreparedRenderPlan, QUANTUM, SourceControlSet, StartedRenderSessionV1, prepare,
+        BLOCKS, PreparedRenderPlan, QUANTUM, SourceControlSet, StartedRenderSession, prepare,
         render_guarded, render_unguarded,
     };
     use miso_engine_lane::softfma::{MXCSR_DAZ, MXCSR_FTZ, read_mxcsr, write_mxcsr};
@@ -166,7 +166,7 @@ mod x86 {
 
         let (plan, mut sources) = prepare();
         let rendered = if guarded {
-            let mut session = StartedRenderSessionV1::start(plan)
+            let mut session = StartedRenderSession::start(plan)
                 .unwrap_or_else(|(_plan, rejection)| panic!("attestation: {rejection}"));
             let rendered = render_guarded(&mut session, &mut sources);
             // The plan leaves the render thread the way the contract says it must.
@@ -237,7 +237,7 @@ mod x86 {
         write_mxcsr(caller);
 
         let (plan, mut sources) = prepare();
-        let mut session = StartedRenderSessionV1::start(plan)
+        let mut session = StartedRenderSession::start(plan)
             .unwrap_or_else(|(_plan, rejection)| panic!("attestation: {rejection}"));
         assert_eq!(
             read_mxcsr(),

@@ -77,7 +77,7 @@ without the `atomics` feature every operation lowers to a plain load or store.
 
 **Read-reset without a second writer.** The reader owns `consumed_sequence` and is its only writer.
 It does not gate publication; it makes what was overwritten *countable*
-(`ObservationReaderV1::missed_windows`), which turns "the meter froze" from an invisible failure
+(`ObservationReader::missed_windows`), which turns "the meter froze" from an invisible failure
 into a counted one.
 
 **Windows tile.** A window closes at exactly `window_blocks` blocks and the next opens where it
@@ -106,7 +106,7 @@ declaring the transport unit separately.
   render thread may not take, so the host converts once per **closed window** on the control plane:
   `-20 log10(1 - d)`, clamped into the tap's declared range.
 
-`ObservationFoldV1::PeakMagnitude` is `max(|x|)` over the window. That is what turns an effect's
+`ObservationFold::PeakMagnitude` is `max(|x|)` over the window. That is what turns an effect's
 own negative-for-reduction convention into the non-negative magnitude a meter reads, and it is why
 an app's `Math.max(0, x ?? 0)` is a **no-op** rather than a silent zeroing.
 

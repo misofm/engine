@@ -3,17 +3,17 @@
 use core::{convert::Infallible, fmt::Write as _};
 
 use crate::{
-    FieldKey, ModelVisitor, SessionTomlV1, Token, VisitModel, WalkOrder,
+    FieldKey, ModelVisitor, SessionToml, Token, VisitModel, WalkOrder,
     validate::validate_session, value::write_f32,
 };
 
 /// Produce canonical V1 TOML bytes as UTF-8 text with LF line endings and one final newline.
-pub fn canonical_session_toml(session: &SessionTomlV1) -> Result<String, crate::DiagnosticSet> {
+pub fn canonical_session_toml(session: &SessionToml) -> Result<String, crate::DiagnosticSet> {
     validate_session(session)?;
     Ok(write_canonical(session))
 }
 
-pub(crate) fn write_canonical(session: &SessionTomlV1) -> String {
+pub(crate) fn write_canonical(session: &SessionToml) -> String {
     let mut writer = TomlWriter {
         output: String::new(),
         depth: 0,

@@ -467,7 +467,7 @@ fn structural_command_keeps_protocol_plan_provider_and_event_epochs_atomic() {
         )
         .expect("old plan block");
     assert!(pcm.iter().any(|sample| *sample != 0.0), "old provider PCM");
-    let edit = miso_engine_protocol::SessionEditV1::SetSessionId {
+    let edit = miso_engine_protocol::SessionEdit::SetSessionId {
         session_id: miso_engine_session::StableId::parse("capi-replaced").expect("stable ID"),
     };
     let first_request = command_bytes_at_revision(
@@ -545,7 +545,7 @@ fn structural_command_keeps_protocol_plan_provider_and_event_epochs_atomic() {
     let model = parse_session_toml(SESSION).expect("source-changing model");
     let mut mapping = model.sources[0].mapping.clone();
     mapping.region.length_samples = 512;
-    let second_edit = miso_engine_protocol::SessionEditV1::SetSourceMapping {
+    let second_edit = miso_engine_protocol::SessionEdit::SetSourceMapping {
         source_id: model.sources[0].id.clone(),
         mapping,
     };
@@ -751,7 +751,7 @@ fn all_six_event_families_cross_c_dequeue_with_exact_oracle_bytes() {
     let (automation_result, automation_response) = command_c(c_session, &automation);
     assert_eq!(automation_result, crate::RESULT_OK);
     assert_eq!(automation_response, pinned_hex(RESPONSES[2]));
-    let edit = miso_engine_protocol::SessionEditV1::SetSessionId {
+    let edit = miso_engine_protocol::SessionEdit::SetSessionId {
         session_id: miso_engine_session::StableId::parse("event-origin").expect("stable ID"),
     };
     let structural = command_bytes_at_revision(
@@ -889,7 +889,7 @@ fn all_six_event_families_cross_c_dequeue_with_exact_oracle_bytes() {
 fn plan_first_destroy_guards_structural_publication_without_visible_mutation() {
     let (c_session, c_plan) = boxed_c_children(SESSION);
     crate::ffi::test_plan_destroy(c_plan);
-    let edit = miso_engine_protocol::SessionEditV1::SetSessionId {
+    let edit = miso_engine_protocol::SessionEdit::SetSessionId {
         session_id: miso_engine_session::StableId::parse("destroyed-plan").expect("stable ID"),
     };
     let request = command_bytes_at_revision(
@@ -967,7 +967,7 @@ fn every_structural_phase_and_ordered_dual_fault_preserves_owners_and_credits() 
             crate::ffi::test_reset_lifecycle_observer();
             let (c_session, c_plan) = boxed_c_children(SESSION);
             crate::ffi::test_set_structural_faults(c_session, [Some(first), Some(second)]);
-            let edit = miso_engine_protocol::SessionEditV1::SetSessionId {
+            let edit = miso_engine_protocol::SessionEdit::SetSessionId {
                 session_id: miso_engine_session::StableId::parse("fault-matrix")
                     .expect("stable ID"),
             };
@@ -1040,7 +1040,7 @@ fn every_structural_phase_and_ordered_dual_fault_preserves_owners_and_credits() 
             expected.current_plan_disposed += 1;
             assert_eq!(crate::ffi::test_owner_counters(c_session), expected);
 
-            let retry_edit = miso_engine_protocol::SessionEditV1::SetSessionId {
+            let retry_edit = miso_engine_protocol::SessionEdit::SetSessionId {
                 session_id: miso_engine_session::StableId::parse("fault-matrix-retry")
                     .expect("stable ID"),
             };
@@ -1298,7 +1298,7 @@ fn capi_controller_dispatches_every_advertised_command_family() {
         ),
         miso_engine_protocol::MessageId::DiagnosticsGet
     );
-    let structural = miso_engine_protocol::SessionEditV1::SetSessionId {
+    let structural = miso_engine_protocol::SessionEdit::SetSessionId {
         session_id: miso_engine_session::StableId::parse("all-command-families")
             .expect("stable ID"),
     };
@@ -1388,7 +1388,7 @@ fn exported_c_replay_revision_event_and_publication_pressure_statuses_are_exact(
     }
     dispatch!(first, StatusCode::ReplayExpired, pinned_hex(EXPIRED));
 
-    let edit = miso_engine_protocol::SessionEditV1::SetSessionId {
+    let edit = miso_engine_protocol::SessionEdit::SetSessionId {
         session_id: miso_engine_session::StableId::parse("pressure-one").expect("stable ID"),
     };
     let stale = command_bytes_at_revision(
@@ -1447,7 +1447,7 @@ fn exported_c_replay_revision_event_and_publication_pressure_statuses_are_exact(
     assert_eq!(commit_event.0, crate::RESULT_OK);
     assert_eq!(commit_event.1, pinned_hex(COMMIT_EVENT));
 
-    let second_edit = miso_engine_protocol::SessionEditV1::SetSessionId {
+    let second_edit = miso_engine_protocol::SessionEdit::SetSessionId {
         session_id: miso_engine_session::StableId::parse("pressure-two").expect("stable ID"),
     };
     let publication_full = command_bytes_at_revision(

@@ -25,7 +25,7 @@ pub use estimate::{ResourceEstimate, estimate_session_resources};
 pub use id::StableId;
 pub use model::*;
 pub use parse::parse_session_toml;
-pub use validate::{BUILTIN_AUTOMATION_EFFECT_ID_V1, BUILTIN_AUTOMATION_TARGETS_V1};
+pub use validate::{BUILTIN_AUTOMATION_EFFECT_ID, BUILTIN_AUTOMATION_TARGETS};
 pub use visit::{FieldKey, ModelVisitor, Token, VisitModel, WalkOrder, keys};
 
 /// The only schema version accepted by [`parse_session_toml`].

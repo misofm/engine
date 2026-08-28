@@ -56,8 +56,8 @@ except where the "result" column says otherwise.
 |---|---|---|---|---|
 | N1 | accept a second writer for an arena buffer (delete the I1 check) | `miso-engine-core` `ArenaLeaseSetBuilder::finish` | `disjoint::tests::overlapping_writes_are_rejected` | RED |
 | N2 | accept a read of a producer in the reader's own wave (delete the I2 check) | `miso-engine-core` `ArenaLeaseSetBuilder::finish` | `disjoint::tests::a_read_from_the_same_wave_is_rejected` | RED |
-| N3 | read a muted buffer directly instead of the silence slot | `miso-engine-core` `ArenaLeaseV1::effective` | `disjoint::tests::a_muted_read_is_silence_and_unmuting_restores_it` | RED |
-| N4 | off-by-one in the arena's write address, so a lease writes its neighbour | `miso-engine-core` `ArenaLeaseV1::write` | `disjoint::tests::concurrent_leases_never_write_a_foreign_word` (`--release`) | RED |
+| N3 | read a muted buffer directly instead of the silence slot | `miso-engine-core` `ArenaLease::effective` | `disjoint::tests::a_muted_read_is_silence_and_unmuting_restores_it` | RED |
+| N4 | off-by-one in the arena's write address, so a lease writes its neighbour | `miso-engine-core` `ArenaLease::write` | `disjoint::tests::concurrent_leases_never_write_a_foreign_word` (`--release`) | RED |
 | N5 | never take the executor hand-over at the block-boundary swap | `miso-engine-core` `RealtimePlanOwner::enter_block` | `realtime::tests::enter_block_moves_the_executor_handover_and_returns_a_refused_one` | RED |
 | N6 | add `unsafe` to a second `realtime/` file | `scripts/check-realtime-policy.sh` fixture | `scripts/test-realtime-policy.sh` (`unsafe-outside-disjoint-arena`) | RED |
 | N17 | forget the silence-slot offset in the sequential executor's output buffer | `miso-engine-graph` `GraphExecutor::new` | builtins-fixture `issue067_graph_pdc_and_dependent_identity_mutations_are_rejected` | RED (observed as a real defect during this work, then fixed) |

@@ -17,7 +17,7 @@ use miso_engine_session::{
 /// nested values from the checked-in strict V1 TOML fixture, so the transaction follows the
 /// accepted typed model rather than maintaining a second shadow session representation.
 #[must_use]
-pub fn complete_all_opcode_fixture() -> Vec<SessionEditV1> {
+pub fn complete_all_opcode_fixture() -> Vec<SessionEdit> {
     let session = miso_engine_session::parse_session_toml(include_str!(
         "../../../fixtures/session/v1/canonical.toml"
     ))
@@ -31,175 +31,175 @@ pub fn complete_all_opcode_fixture() -> Vec<SessionEditV1> {
     let effect_id = effect.id.clone();
     let id = |value| StableId::parse(value).expect("literal stable ID");
     vec![
-        SessionEditV1::SetSessionId {
+        SessionEdit::SetSessionId {
             session_id: id("demo.session"),
         },
-        SessionEditV1::SetSampleRateHz {
+        SessionEdit::SetSampleRateHz {
             sample_rate_hz: 48_000,
         },
-        SessionEditV1::SetQuantumFrames {
+        SessionEdit::SetQuantumFrames {
             quantum_frames: 128,
         },
-        SessionEditV1::SetRenderProfile {
+        SessionEdit::SetRenderProfile {
             render_profile: session.render_profile.clone(),
         },
-        SessionEditV1::SetOutputProfile {
+        SessionEdit::SetOutputProfile {
             output_profile: session.output_profile.clone(),
         },
-        SessionEditV1::SetLimits {
+        SessionEdit::SetLimits {
             limits: session.limits.clone(),
         },
-        SessionEditV1::UpsertSource {
+        SessionEdit::UpsertSource {
             source: source.clone(),
         },
-        SessionEditV1::RemoveSource {
+        SessionEdit::RemoveSource {
             source_id: source.id.clone(),
         },
-        SessionEditV1::SetSourceSampleRateHz {
+        SessionEdit::SetSourceSampleRateHz {
             source_id: source.id.clone(),
             sample_rate_hz: 48_000,
         },
-        SessionEditV1::SetSourceContent {
+        SessionEdit::SetSourceContent {
             source_id: source.id.clone(),
             content: source.content.clone(),
         },
-        SessionEditV1::SetSourceMapping {
+        SessionEdit::SetSourceMapping {
             source_id: source.id.clone(),
             mapping: source.mapping.clone(),
         },
-        SessionEditV1::UpsertTrack {
+        SessionEdit::UpsertTrack {
             track: track.clone(),
         },
-        SessionEditV1::RemoveTrack {
+        SessionEdit::RemoveTrack {
             track_id: track_id.clone(),
         },
-        SessionEditV1::SetTrackSourceAssignment {
+        SessionEdit::SetTrackSourceAssignment {
             track_id: track_id.clone(),
             source_id: source.id.clone(),
             left_source_channel: 0,
             right_source_channel: 1,
         },
-        SessionEditV1::SetTrackBuiltins {
+        SessionEdit::SetTrackBuiltins {
             track_id: track_id.clone(),
             builtins: track.builtins.clone(),
         },
-        SessionEditV1::SetTrackRack {
+        SessionEdit::SetTrackRack {
             track_id: track_id.clone(),
             rack_name: RackName::Dynamic,
             rack: track.dynamic.clone(),
         },
-        SessionEditV1::PutTrackEffect {
+        SessionEdit::PutTrackEffect {
             track_id: track_id.clone(),
             rack_name: RackName::Dynamic,
             final_position: 0,
             effect: effect.clone(),
         },
-        SessionEditV1::RemoveTrackEffect {
+        SessionEdit::RemoveTrackEffect {
             track_id: track_id.clone(),
             rack_name: RackName::Dynamic,
             effect_id: effect_id.clone(),
         },
-        SessionEditV1::SetTrackEffectOrder {
+        SessionEdit::SetTrackEffectOrder {
             track_id: track_id.clone(),
             rack_name: RackName::Dynamic,
             effect_ids: vec![effect_id.clone()],
         },
-        SessionEditV1::SetEffectIdentity {
+        SessionEdit::SetEffectIdentity {
             track_id: track_id.clone(),
             rack_name: RackName::Dynamic,
             effect_id: effect_id.clone(),
             identity: effect.identity.clone(),
         },
-        SessionEditV1::SetEffectQuality {
+        SessionEdit::SetEffectQuality {
             track_id: track_id.clone(),
             rack_name: RackName::Dynamic,
             effect_id: effect_id.clone(),
             quality: effect.quality,
         },
-        SessionEditV1::SetEffectBypass {
+        SessionEdit::SetEffectBypass {
             track_id: track_id.clone(),
             rack_name: RackName::Dynamic,
             effect_id: effect_id.clone(),
             bypass: effect.bypass,
         },
-        SessionEditV1::SetEffectLinkMode {
+        SessionEdit::SetEffectLinkMode {
             track_id: track_id.clone(),
             rack_name: RackName::Dynamic,
             effect_id: effect_id.clone(),
             link_mode: effect.link_mode,
         },
-        SessionEditV1::SetEffectSidechain {
+        SessionEdit::SetEffectSidechain {
             track_id: track_id.clone(),
             rack_name: RackName::Dynamic,
             effect_id: effect_id.clone(),
             sidechain: effect.sidechain.clone(),
         },
-        SessionEditV1::UpsertEffectParam {
+        SessionEdit::UpsertEffectParam {
             track_id: track_id.clone(),
             rack_name: RackName::Dynamic,
             effect_id: effect_id.clone(),
             param: effect.params[0].clone(),
         },
-        SessionEditV1::RemoveEffectParam {
+        SessionEdit::RemoveEffectParam {
             track_id: track_id.clone(),
             rack_name: RackName::Dynamic,
             effect_id: effect_id.clone(),
             parameter_id: effect.params[0].parameter_id,
             channel: effect.params[0].channel,
         },
-        SessionEditV1::SetTrackFader {
+        SessionEdit::SetTrackFader {
             track_id: track_id.clone(),
             fader: track.fader.clone(),
         },
-        SessionEditV1::SetTrackMatrixOrPan {
+        SessionEdit::SetTrackMatrixOrPan {
             track_id: track_id.clone(),
             matrix_or_pan: track.matrix_or_pan.clone(),
         },
-        SessionEditV1::UpsertSubmix {
+        SessionEdit::UpsertSubmix {
             submix: Submix { id: id("drums") },
         },
-        SessionEditV1::RemoveSubmix {
+        SessionEdit::RemoveSubmix {
             submix_id: id("drums"),
         },
-        SessionEditV1::UpsertOutput {
+        SessionEdit::UpsertOutput {
             output: Output { id: id("alt-out") },
         },
-        SessionEditV1::RemoveOutput {
+        SessionEdit::RemoveOutput {
             output_id: id("alt-out"),
         },
-        SessionEditV1::UpsertRoute {
+        SessionEdit::UpsertRoute {
             route: route.clone(),
         },
-        SessionEditV1::RemoveRoute {
+        SessionEdit::RemoveRoute {
             route_id: route.id.clone(),
         },
-        SessionEditV1::SetRouteSource {
+        SessionEdit::SetRouteSource {
             route_id: route.id.clone(),
             source: route.source.clone(),
         },
-        SessionEditV1::SetRouteDestination {
+        SessionEdit::SetRouteDestination {
             route_id: route.id.clone(),
             destination: route.destination.clone(),
         },
-        SessionEditV1::SetRouteChannelMatrix {
+        SessionEdit::SetRouteChannelMatrix {
             route_id: route.id.clone(),
             channel_matrix: route.channel_matrix.clone(),
         },
-        SessionEditV1::SetRouteGainDb {
+        SessionEdit::SetRouteGainDb {
             route_id: route.id.clone(),
             gain_db: route.gain_db,
         },
-        SessionEditV1::UpsertAutomation {
+        SessionEdit::UpsertAutomation {
             automation: automation.clone(),
         },
-        SessionEditV1::RemoveAutomation {
+        SessionEdit::RemoveAutomation {
             automation_id: automation.id.clone(),
         },
-        SessionEditV1::SetAutomationTarget {
+        SessionEdit::SetAutomationTarget {
             automation_id: automation.id.clone(),
             target: automation.target.clone(),
         },
-        SessionEditV1::SetAutomationSegments {
+        SessionEdit::SetAutomationSegments {
             automation_id: automation.id.clone(),
             segments: automation.segments.clone(),
         },
@@ -208,7 +208,7 @@ pub fn complete_all_opcode_fixture() -> Vec<SessionEditV1> {
 
 use crate::{
     CommandFrame, CommandHeader, DecodeError, DecodeScratch, DecodedFrame, EncodeError,
-    ExpectedRevision, Frame, MessageId, ProtocolCodec, RequestId, SessionEditV1,
+    ExpectedRevision, Frame, MessageId, ProtocolCodec, RequestId, SessionEdit,
     btlv::{
         CountSink, Fields as Message, MessageMeasure, Sink, SliceSink, read_f32,
         read_u8 as read_u8_exact, read_u16 as read_u16_exact, read_u32 as read_u32_exact,
@@ -238,7 +238,7 @@ pub struct SessionTransactionFrame<'a> {
     /// Structural transaction precondition. A dispatcher rejects `Any` for mutation execution.
     pub expected_revision: ExpectedRevision,
     /// Edits in frozen wire execution order.
-    pub edits: &'a [SessionEditV1],
+    pub edits: &'a [SessionEdit],
 }
 
 /// A strictly decoded transaction with a borrowed frame and owned accepted-session edit values.
@@ -247,7 +247,7 @@ pub struct DecodedSessionTransaction<'a> {
     /// Validated outer command frame borrowed from caller input.
     pub frame: DecodedFrame<'a>,
     /// Typed session edits in the exact received wire order.
-    pub edits: Vec<SessionEditV1>,
+    pub edits: Vec<SessionEdit>,
 }
 
 impl ProtocolCodec {
@@ -509,7 +509,7 @@ pub(crate) const fn transaction_envelope_limits(
 
 fn encode_transaction_payload_into(
     sink: &mut dyn Sink,
-    edits: &[SessionEditV1],
+    edits: &[SessionEdit],
 ) -> Result<(), EncodeError> {
     let count = schema::session::transaction::SPEC
         .field_count(&[(schema::session::transaction::EDIT, edits.len())])?;
@@ -522,7 +522,7 @@ fn encode_transaction_payload_into(
     Ok(())
 }
 
-fn tx_edit_message(sink: &mut dyn Sink, edit: &SessionEditV1) -> Result<(), EncodeError> {
+fn tx_edit_message(sink: &mut dyn Sink, edit: &SessionEdit) -> Result<(), EncodeError> {
     tx_start_message(sink, schema::session::edit::SPEC.field_count(&[])?)?;
     tx_u16(sink, schema::session::edit::OPCODE, edit.opcode().raw())?;
     tx_message(sink, schema::session::edit::PAYLOAD, |nested| {
@@ -530,58 +530,58 @@ fn tx_edit_message(sink: &mut dyn Sink, edit: &SessionEditV1) -> Result<(), Enco
     })
 }
 
-fn tx_edit_payload(sink: &mut dyn Sink, edit: &SessionEditV1) -> Result<(), EncodeError> {
+fn tx_edit_payload(sink: &mut dyn Sink, edit: &SessionEdit) -> Result<(), EncodeError> {
     let spec = schema::session::payload_spec(edit.opcode());
     let fields = spec.fields;
     let count = match edit {
-        SessionEditV1::SetTrackEffectOrder { effect_ids, .. } => {
+        SessionEdit::SetTrackEffectOrder { effect_ids, .. } => {
             spec.field_count(&[(fields[2], effect_ids.len())])?
         }
-        SessionEditV1::SetAutomationSegments { segments, .. } => {
+        SessionEdit::SetAutomationSegments { segments, .. } => {
             spec.field_count(&[(fields[1], segments.len())])?
         }
         _ => spec.field_count(&[])?,
     };
     tx_start_message(sink, count)?;
     match edit {
-        SessionEditV1::SetSessionId { session_id } => tx_id(sink, fields[0], session_id),
-        SessionEditV1::SetSampleRateHz { sample_rate_hz } => {
+        SessionEdit::SetSessionId { session_id } => tx_id(sink, fields[0], session_id),
+        SessionEdit::SetSampleRateHz { sample_rate_hz } => {
             tx_u32(sink, fields[0], *sample_rate_hz)
         }
-        SessionEditV1::SetQuantumFrames { quantum_frames } => {
+        SessionEdit::SetQuantumFrames { quantum_frames } => {
             tx_u32(sink, fields[0], *quantum_frames)
         }
-        SessionEditV1::SetRenderProfile { render_profile } => {
+        SessionEdit::SetRenderProfile { render_profile } => {
             tx_message(sink, fields[0], |v| tx_render_profile(v, render_profile))
         }
-        SessionEditV1::SetOutputProfile { output_profile } => {
+        SessionEdit::SetOutputProfile { output_profile } => {
             tx_message(sink, fields[0], |v| tx_output_profile(v, output_profile))
         }
-        SessionEditV1::SetLimits { limits } => {
+        SessionEdit::SetLimits { limits } => {
             tx_message(sink, fields[0], |v| tx_limits(v, limits))
         }
-        SessionEditV1::UpsertSource { source } => {
+        SessionEdit::UpsertSource { source } => {
             tx_message(sink, fields[0], |v| tx_source(v, source))
         }
-        SessionEditV1::RemoveSource { source_id } => tx_id(sink, fields[0], source_id),
-        SessionEditV1::SetSourceSampleRateHz {
+        SessionEdit::RemoveSource { source_id } => tx_id(sink, fields[0], source_id),
+        SessionEdit::SetSourceSampleRateHz {
             source_id,
             sample_rate_hz,
         } => {
             tx_id(sink, fields[0], source_id)?;
             tx_u32(sink, fields[1], *sample_rate_hz)
         }
-        SessionEditV1::SetSourceContent { source_id, content } => {
+        SessionEdit::SetSourceContent { source_id, content } => {
             tx_id(sink, fields[0], source_id)?;
             tx_message(sink, fields[1], |v| tx_content(v, content))
         }
-        SessionEditV1::SetSourceMapping { source_id, mapping } => {
+        SessionEdit::SetSourceMapping { source_id, mapping } => {
             tx_id(sink, fields[0], source_id)?;
             tx_message(sink, fields[1], |v| tx_mapping(v, mapping))
         }
-        SessionEditV1::UpsertTrack { track } => tx_message(sink, fields[0], |v| tx_track(v, track)),
-        SessionEditV1::RemoveTrack { track_id } => tx_id(sink, fields[0], track_id),
-        SessionEditV1::SetTrackSourceAssignment {
+        SessionEdit::UpsertTrack { track } => tx_message(sink, fields[0], |v| tx_track(v, track)),
+        SessionEdit::RemoveTrack { track_id } => tx_id(sink, fields[0], track_id),
+        SessionEdit::SetTrackSourceAssignment {
             track_id,
             source_id,
             left_source_channel,
@@ -592,11 +592,11 @@ fn tx_edit_payload(sink: &mut dyn Sink, edit: &SessionEditV1) -> Result<(), Enco
             tx_u8(sink, fields[2], *left_source_channel)?;
             tx_u8(sink, fields[3], *right_source_channel)
         }
-        SessionEditV1::SetTrackBuiltins { track_id, builtins } => {
+        SessionEdit::SetTrackBuiltins { track_id, builtins } => {
             tx_id(sink, fields[0], track_id)?;
             tx_message(sink, fields[1], |v| tx_builtins(v, builtins))
         }
-        SessionEditV1::SetTrackRack {
+        SessionEdit::SetTrackRack {
             track_id,
             rack_name,
             rack,
@@ -609,7 +609,7 @@ fn tx_edit_payload(sink: &mut dyn Sink, edit: &SessionEditV1) -> Result<(), Enco
             )?;
             tx_message(sink, fields[2], |v| tx_rack(v, rack))
         }
-        SessionEditV1::PutTrackEffect {
+        SessionEdit::PutTrackEffect {
             track_id,
             rack_name,
             final_position,
@@ -624,7 +624,7 @@ fn tx_edit_payload(sink: &mut dyn Sink, edit: &SessionEditV1) -> Result<(), Enco
             tx_u32(sink, fields[2], *final_position)?;
             tx_message(sink, fields[3], |v| tx_effect(v, effect))
         }
-        SessionEditV1::RemoveTrackEffect {
+        SessionEdit::RemoveTrackEffect {
             track_id,
             rack_name,
             effect_id,
@@ -637,7 +637,7 @@ fn tx_edit_payload(sink: &mut dyn Sink, edit: &SessionEditV1) -> Result<(), Enco
             )?;
             tx_id(sink, fields[2], effect_id)
         }
-        SessionEditV1::SetTrackEffectOrder {
+        SessionEdit::SetTrackEffectOrder {
             track_id,
             rack_name,
             effect_ids,
@@ -653,7 +653,7 @@ fn tx_edit_payload(sink: &mut dyn Sink, edit: &SessionEditV1) -> Result<(), Enco
             }
             Ok(())
         }
-        SessionEditV1::SetEffectIdentity {
+        SessionEdit::SetEffectIdentity {
             track_id,
             rack_name,
             effect_id,
@@ -661,7 +661,7 @@ fn tx_edit_payload(sink: &mut dyn Sink, edit: &SessionEditV1) -> Result<(), Enco
         } => tx_effect_edit_message(sink, fields, track_id, *rack_name, effect_id, |v| {
             tx_identity(v, identity)
         }),
-        SessionEditV1::SetEffectQuality {
+        SessionEdit::SetEffectQuality {
             track_id,
             rack_name,
             effect_id,
@@ -674,7 +674,7 @@ fn tx_edit_payload(sink: &mut dyn Sink, edit: &SessionEditV1) -> Result<(), Enco
             effect_id,
             enum_quality(*quality),
         ),
-        SessionEditV1::SetEffectBypass {
+        SessionEdit::SetEffectBypass {
             track_id,
             rack_name,
             effect_id,
@@ -683,7 +683,7 @@ fn tx_edit_payload(sink: &mut dyn Sink, edit: &SessionEditV1) -> Result<(), Enco
             tx_effect_edit_prefix(sink, fields, track_id, *rack_name, effect_id)?;
             tx_bool(sink, fields[3], *bypass)
         }
-        SessionEditV1::SetEffectLinkMode {
+        SessionEdit::SetEffectLinkMode {
             track_id,
             rack_name,
             effect_id,
@@ -696,7 +696,7 @@ fn tx_edit_payload(sink: &mut dyn Sink, edit: &SessionEditV1) -> Result<(), Enco
             effect_id,
             enum_link(*link_mode),
         ),
-        SessionEditV1::SetEffectSidechain {
+        SessionEdit::SetEffectSidechain {
             track_id,
             rack_name,
             effect_id,
@@ -704,7 +704,7 @@ fn tx_edit_payload(sink: &mut dyn Sink, edit: &SessionEditV1) -> Result<(), Enco
         } => tx_effect_edit_message(sink, fields, track_id, *rack_name, effect_id, |v| {
             tx_sidechain(v, sidechain)
         }),
-        SessionEditV1::UpsertEffectParam {
+        SessionEdit::UpsertEffectParam {
             track_id,
             rack_name,
             effect_id,
@@ -712,7 +712,7 @@ fn tx_edit_payload(sink: &mut dyn Sink, edit: &SessionEditV1) -> Result<(), Enco
         } => tx_effect_edit_message(sink, fields, track_id, *rack_name, effect_id, |v| {
             tx_param(v, param)
         }),
-        SessionEditV1::RemoveEffectParam {
+        SessionEdit::RemoveEffectParam {
             track_id,
             rack_name,
             effect_id,
@@ -727,61 +727,61 @@ fn tx_edit_payload(sink: &mut dyn Sink, edit: &SessionEditV1) -> Result<(), Enco
                 schema::session_parameter_channel_wire(*channel),
             )
         }
-        SessionEditV1::SetTrackFader { track_id, fader } => {
+        SessionEdit::SetTrackFader { track_id, fader } => {
             tx_id(sink, fields[0], track_id)?;
             tx_message(sink, fields[1], |v| tx_fader(v, fader))
         }
-        SessionEditV1::SetTrackMatrixOrPan {
+        SessionEdit::SetTrackMatrixOrPan {
             track_id,
             matrix_or_pan,
         } => {
             tx_id(sink, fields[0], track_id)?;
             tx_message(sink, fields[1], |v| tx_matrix_or_pan(v, matrix_or_pan))
         }
-        SessionEditV1::UpsertSubmix { submix } => {
+        SessionEdit::UpsertSubmix { submix } => {
             tx_message(sink, fields[0], |v| tx_submix(v, submix))
         }
-        SessionEditV1::RemoveSubmix { submix_id } => tx_id(sink, fields[0], submix_id),
-        SessionEditV1::UpsertOutput { output } => {
+        SessionEdit::RemoveSubmix { submix_id } => tx_id(sink, fields[0], submix_id),
+        SessionEdit::UpsertOutput { output } => {
             tx_message(sink, fields[0], |v| tx_output(v, output))
         }
-        SessionEditV1::RemoveOutput { output_id } => tx_id(sink, fields[0], output_id),
-        SessionEditV1::UpsertRoute { route } => tx_message(sink, fields[0], |v| tx_route(v, route)),
-        SessionEditV1::RemoveRoute { route_id } => tx_id(sink, fields[0], route_id),
-        SessionEditV1::SetRouteSource { route_id, source } => {
+        SessionEdit::RemoveOutput { output_id } => tx_id(sink, fields[0], output_id),
+        SessionEdit::UpsertRoute { route } => tx_message(sink, fields[0], |v| tx_route(v, route)),
+        SessionEdit::RemoveRoute { route_id } => tx_id(sink, fields[0], route_id),
+        SessionEdit::SetRouteSource { route_id, source } => {
             tx_id(sink, fields[0], route_id)?;
             tx_message(sink, fields[1], |v| tx_route_source(v, source))
         }
-        SessionEditV1::SetRouteDestination {
+        SessionEdit::SetRouteDestination {
             route_id,
             destination,
         } => {
             tx_id(sink, fields[0], route_id)?;
             tx_message(sink, fields[1], |v| tx_route_destination(v, destination))
         }
-        SessionEditV1::SetRouteChannelMatrix {
+        SessionEdit::SetRouteChannelMatrix {
             route_id,
             channel_matrix,
         } => {
             tx_id(sink, fields[0], route_id)?;
             tx_message(sink, fields[1], |v| tx_channel_matrix(v, channel_matrix))
         }
-        SessionEditV1::SetRouteGainDb { route_id, gain_db } => {
+        SessionEdit::SetRouteGainDb { route_id, gain_db } => {
             tx_id(sink, fields[0], route_id)?;
             tx_f32(sink, fields[1], *gain_db)
         }
-        SessionEditV1::UpsertAutomation { automation } => {
+        SessionEdit::UpsertAutomation { automation } => {
             tx_message(sink, fields[0], |v| tx_automation(v, automation))
         }
-        SessionEditV1::RemoveAutomation { automation_id } => tx_id(sink, fields[0], automation_id),
-        SessionEditV1::SetAutomationTarget {
+        SessionEdit::RemoveAutomation { automation_id } => tx_id(sink, fields[0], automation_id),
+        SessionEdit::SetAutomationTarget {
             automation_id,
             target,
         } => {
             tx_id(sink, fields[0], automation_id)?;
             tx_message(sink, fields[1], |v| tx_automation_target(v, target))
         }
-        SessionEditV1::SetAutomationSegments {
+        SessionEdit::SetAutomationSegments {
             automation_id,
             segments,
         } => {
@@ -1289,7 +1289,7 @@ fn tx_automation(sink: &mut dyn Sink, value: &Automation) -> Result<(), EncodeEr
     Ok(())
 }
 
-fn parse_edit(message: Message<'_>) -> Result<SessionEditV1, DecodeError> {
+fn parse_edit(message: Message<'_>) -> Result<SessionEdit, DecodeError> {
     let message = message.schema_spec(&schema::session::edit::SPEC)?;
     let opcode = crate::SessionEditOpcode::from_raw(read_u16_exact(one_spec!(
         message,
@@ -1301,74 +1301,74 @@ fn parse_edit(message: Message<'_>) -> Result<SessionEditV1, DecodeError> {
         .schema_spec(schema::session::payload_spec(opcode))?;
     let fields = schema::session::payload_spec(opcode).fields;
     match opcode {
-        crate::SessionEditOpcode::SetSessionId => Ok(SessionEditV1::SetSessionId {
+        crate::SessionEditOpcode::SetSessionId => Ok(SessionEdit::SetSessionId {
             session_id: stable_id(one_spec!(payload, fields[0])?)?,
         }),
-        crate::SessionEditOpcode::SetSampleRateHz => Ok(SessionEditV1::SetSampleRateHz {
+        crate::SessionEditOpcode::SetSampleRateHz => Ok(SessionEdit::SetSampleRateHz {
             sample_rate_hz: read_u32_exact(one_spec!(payload, fields[0])?)?,
         }),
-        crate::SessionEditOpcode::SetQuantumFrames => Ok(SessionEditV1::SetQuantumFrames {
+        crate::SessionEditOpcode::SetQuantumFrames => Ok(SessionEdit::SetQuantumFrames {
             quantum_frames: read_u32_exact(one_spec!(payload, fields[0])?)?,
         }),
-        crate::SessionEditOpcode::SetRenderProfile => Ok(SessionEditV1::SetRenderProfile {
+        crate::SessionEditOpcode::SetRenderProfile => Ok(SessionEdit::SetRenderProfile {
             render_profile: parse_render_profile(
                 payload.nested_value(one_spec!(payload, fields[0])?)?,
             )?,
         }),
-        crate::SessionEditOpcode::SetOutputProfile => Ok(SessionEditV1::SetOutputProfile {
+        crate::SessionEditOpcode::SetOutputProfile => Ok(SessionEdit::SetOutputProfile {
             output_profile: parse_output_profile(
                 payload.nested_value(one_spec!(payload, fields[0])?)?,
             )?,
         }),
-        crate::SessionEditOpcode::SetLimits => Ok(SessionEditV1::SetLimits {
+        crate::SessionEditOpcode::SetLimits => Ok(SessionEdit::SetLimits {
             limits: parse_limits(payload.nested_value(one_spec!(payload, fields[0])?)?)?,
         }),
-        crate::SessionEditOpcode::UpsertSource => Ok(SessionEditV1::UpsertSource {
+        crate::SessionEditOpcode::UpsertSource => Ok(SessionEdit::UpsertSource {
             source: parse_source(payload.nested_value(one_spec!(payload, fields[0])?)?)?,
         }),
-        crate::SessionEditOpcode::RemoveSource => Ok(SessionEditV1::RemoveSource {
+        crate::SessionEditOpcode::RemoveSource => Ok(SessionEdit::RemoveSource {
             source_id: stable_id(one_spec!(payload, fields[0])?)?,
         }),
         crate::SessionEditOpcode::SetSourceSampleRateHz => {
-            Ok(SessionEditV1::SetSourceSampleRateHz {
+            Ok(SessionEdit::SetSourceSampleRateHz {
                 source_id: stable_id(one_spec!(payload, fields[0])?)?,
                 sample_rate_hz: read_u32_exact(one_spec!(payload, fields[1])?)?,
             })
         }
-        crate::SessionEditOpcode::SetSourceContent => Ok(SessionEditV1::SetSourceContent {
+        crate::SessionEditOpcode::SetSourceContent => Ok(SessionEdit::SetSourceContent {
             source_id: stable_id(one_spec!(payload, fields[0])?)?,
             content: parse_content(payload.nested_value(one_spec!(payload, fields[1])?)?)?,
         }),
-        crate::SessionEditOpcode::SetSourceMapping => Ok(SessionEditV1::SetSourceMapping {
+        crate::SessionEditOpcode::SetSourceMapping => Ok(SessionEdit::SetSourceMapping {
             source_id: stable_id(one_spec!(payload, fields[0])?)?,
             mapping: parse_mapping(payload.nested_value(one_spec!(payload, fields[1])?)?)?,
         }),
-        crate::SessionEditOpcode::UpsertTrack => Ok(SessionEditV1::UpsertTrack {
+        crate::SessionEditOpcode::UpsertTrack => Ok(SessionEdit::UpsertTrack {
             track: parse_track(payload.nested_value(one_spec!(payload, fields[0])?)?)?,
         }),
-        crate::SessionEditOpcode::RemoveTrack => Ok(SessionEditV1::RemoveTrack {
+        crate::SessionEditOpcode::RemoveTrack => Ok(SessionEdit::RemoveTrack {
             track_id: stable_id(one_spec!(payload, fields[0])?)?,
         }),
         crate::SessionEditOpcode::SetTrackSourceAssignment => {
-            Ok(SessionEditV1::SetTrackSourceAssignment {
+            Ok(SessionEdit::SetTrackSourceAssignment {
                 track_id: stable_id(one_spec!(payload, fields[0])?)?,
                 source_id: stable_id(one_spec!(payload, fields[1])?)?,
                 left_source_channel: read_u8_exact(one_spec!(payload, fields[2])?)?,
                 right_source_channel: read_u8_exact(one_spec!(payload, fields[3])?)?,
             })
         }
-        crate::SessionEditOpcode::SetTrackBuiltins => Ok(SessionEditV1::SetTrackBuiltins {
+        crate::SessionEditOpcode::SetTrackBuiltins => Ok(SessionEdit::SetTrackBuiltins {
             track_id: stable_id(one_spec!(payload, fields[0])?)?,
             builtins: parse_builtins(payload.nested_value(one_spec!(payload, fields[1])?)?)?,
         }),
-        crate::SessionEditOpcode::SetTrackRack => Ok(SessionEditV1::SetTrackRack {
+        crate::SessionEditOpcode::SetTrackRack => Ok(SessionEdit::SetTrackRack {
             track_id: stable_id(one_spec!(payload, fields[0])?)?,
             rack_name: schema::session_parameter_rack_from_wire(read_u8_exact(one_spec!(
                 payload, fields[1]
             )?)?)?,
             rack: parse_rack_message(payload.nested_value(one_spec!(payload, fields[2])?)?)?,
         }),
-        crate::SessionEditOpcode::PutTrackEffect => Ok(SessionEditV1::PutTrackEffect {
+        crate::SessionEditOpcode::PutTrackEffect => Ok(SessionEdit::PutTrackEffect {
             track_id: stable_id(one_spec!(payload, fields[0])?)?,
             rack_name: schema::session_parameter_rack_from_wire(read_u8_exact(one_spec!(
                 payload, fields[1]
@@ -1378,13 +1378,13 @@ fn parse_edit(message: Message<'_>) -> Result<SessionEditV1, DecodeError> {
         }),
         crate::SessionEditOpcode::RemoveTrackEffect => {
             let (track_id, rack_name, effect_id) = parse_track_effect_ref(&payload, fields)?;
-            Ok(SessionEditV1::RemoveTrackEffect {
+            Ok(SessionEdit::RemoveTrackEffect {
                 track_id,
                 rack_name,
                 effect_id,
             })
         }
-        crate::SessionEditOpcode::SetTrackEffectOrder => Ok(SessionEditV1::SetTrackEffectOrder {
+        crate::SessionEditOpcode::SetTrackEffectOrder => Ok(SessionEdit::SetTrackEffectOrder {
             track_id: stable_id(one_spec!(payload, fields[0])?)?,
             rack_name: schema::session_parameter_rack_from_wire(read_u8_exact(one_spec!(
                 payload, fields[1]
@@ -1395,7 +1395,7 @@ fn parse_edit(message: Message<'_>) -> Result<SessionEditV1, DecodeError> {
         }),
         crate::SessionEditOpcode::SetEffectIdentity => {
             let (track_id, rack_name, effect_id) = parse_track_effect_ref(&payload, fields)?;
-            Ok(SessionEditV1::SetEffectIdentity {
+            Ok(SessionEdit::SetEffectIdentity {
                 track_id,
                 rack_name,
                 effect_id,
@@ -1404,7 +1404,7 @@ fn parse_edit(message: Message<'_>) -> Result<SessionEditV1, DecodeError> {
         }
         crate::SessionEditOpcode::SetEffectQuality => {
             let (track_id, rack_name, effect_id) = parse_track_effect_ref(&payload, fields)?;
-            Ok(SessionEditV1::SetEffectQuality {
+            Ok(SessionEdit::SetEffectQuality {
                 track_id,
                 rack_name,
                 effect_id,
@@ -1413,7 +1413,7 @@ fn parse_edit(message: Message<'_>) -> Result<SessionEditV1, DecodeError> {
         }
         crate::SessionEditOpcode::SetEffectBypass => {
             let (track_id, rack_name, effect_id) = parse_track_effect_ref(&payload, fields)?;
-            Ok(SessionEditV1::SetEffectBypass {
+            Ok(SessionEdit::SetEffectBypass {
                 track_id,
                 rack_name,
                 effect_id,
@@ -1422,7 +1422,7 @@ fn parse_edit(message: Message<'_>) -> Result<SessionEditV1, DecodeError> {
         }
         crate::SessionEditOpcode::SetEffectLinkMode => {
             let (track_id, rack_name, effect_id) = parse_track_effect_ref(&payload, fields)?;
-            Ok(SessionEditV1::SetEffectLinkMode {
+            Ok(SessionEdit::SetEffectLinkMode {
                 track_id,
                 rack_name,
                 effect_id,
@@ -1431,7 +1431,7 @@ fn parse_edit(message: Message<'_>) -> Result<SessionEditV1, DecodeError> {
         }
         crate::SessionEditOpcode::SetEffectSidechain => {
             let (track_id, rack_name, effect_id) = parse_track_effect_ref(&payload, fields)?;
-            Ok(SessionEditV1::SetEffectSidechain {
+            Ok(SessionEdit::SetEffectSidechain {
                 track_id,
                 rack_name,
                 effect_id,
@@ -1440,14 +1440,14 @@ fn parse_edit(message: Message<'_>) -> Result<SessionEditV1, DecodeError> {
         }
         crate::SessionEditOpcode::UpsertEffectParam => {
             let (track_id, rack_name, effect_id) = parse_track_effect_ref(&payload, fields)?;
-            Ok(SessionEditV1::UpsertEffectParam {
+            Ok(SessionEdit::UpsertEffectParam {
                 track_id,
                 rack_name,
                 effect_id,
                 param: parse_param(payload.nested_value(one_spec!(payload, fields[3])?)?)?,
             })
         }
-        crate::SessionEditOpcode::RemoveEffectParam => Ok(SessionEditV1::RemoveEffectParam {
+        crate::SessionEditOpcode::RemoveEffectParam => Ok(SessionEdit::RemoveEffectParam {
             track_id: stable_id(one_spec!(payload, fields[0])?)?,
             rack_name: schema::session_parameter_rack_from_wire(read_u8_exact(one_spec!(
                 payload, fields[1]
@@ -1458,68 +1458,68 @@ fn parse_edit(message: Message<'_>) -> Result<SessionEditV1, DecodeError> {
                 payload, fields[4]
             )?)?)?,
         }),
-        crate::SessionEditOpcode::SetTrackFader => Ok(SessionEditV1::SetTrackFader {
+        crate::SessionEditOpcode::SetTrackFader => Ok(SessionEdit::SetTrackFader {
             track_id: stable_id(one_spec!(payload, fields[0])?)?,
             fader: parse_fader(payload.nested_value(one_spec!(payload, fields[1])?)?)?,
         }),
-        crate::SessionEditOpcode::SetTrackMatrixOrPan => Ok(SessionEditV1::SetTrackMatrixOrPan {
+        crate::SessionEditOpcode::SetTrackMatrixOrPan => Ok(SessionEdit::SetTrackMatrixOrPan {
             track_id: stable_id(one_spec!(payload, fields[0])?)?,
             matrix_or_pan: parse_matrix_or_pan(
                 payload.nested_value(one_spec!(payload, fields[1])?)?,
             )?,
         }),
-        crate::SessionEditOpcode::UpsertSubmix => Ok(SessionEditV1::UpsertSubmix {
+        crate::SessionEditOpcode::UpsertSubmix => Ok(SessionEdit::UpsertSubmix {
             submix: parse_submix(payload.nested_value(one_spec!(payload, fields[0])?)?)?,
         }),
-        crate::SessionEditOpcode::RemoveSubmix => Ok(SessionEditV1::RemoveSubmix {
+        crate::SessionEditOpcode::RemoveSubmix => Ok(SessionEdit::RemoveSubmix {
             submix_id: stable_id(one_spec!(payload, fields[0])?)?,
         }),
-        crate::SessionEditOpcode::UpsertOutput => Ok(SessionEditV1::UpsertOutput {
+        crate::SessionEditOpcode::UpsertOutput => Ok(SessionEdit::UpsertOutput {
             output: parse_output(payload.nested_value(one_spec!(payload, fields[0])?)?)?,
         }),
-        crate::SessionEditOpcode::RemoveOutput => Ok(SessionEditV1::RemoveOutput {
+        crate::SessionEditOpcode::RemoveOutput => Ok(SessionEdit::RemoveOutput {
             output_id: stable_id(one_spec!(payload, fields[0])?)?,
         }),
-        crate::SessionEditOpcode::UpsertRoute => Ok(SessionEditV1::UpsertRoute {
+        crate::SessionEditOpcode::UpsertRoute => Ok(SessionEdit::UpsertRoute {
             route: parse_route(payload.nested_value(one_spec!(payload, fields[0])?)?)?,
         }),
-        crate::SessionEditOpcode::RemoveRoute => Ok(SessionEditV1::RemoveRoute {
+        crate::SessionEditOpcode::RemoveRoute => Ok(SessionEdit::RemoveRoute {
             route_id: stable_id(one_spec!(payload, fields[0])?)?,
         }),
-        crate::SessionEditOpcode::SetRouteSource => Ok(SessionEditV1::SetRouteSource {
+        crate::SessionEditOpcode::SetRouteSource => Ok(SessionEdit::SetRouteSource {
             route_id: stable_id(one_spec!(payload, fields[0])?)?,
             source: parse_route_source(payload.nested_value(one_spec!(payload, fields[1])?)?)?,
         }),
-        crate::SessionEditOpcode::SetRouteDestination => Ok(SessionEditV1::SetRouteDestination {
+        crate::SessionEditOpcode::SetRouteDestination => Ok(SessionEdit::SetRouteDestination {
             route_id: stable_id(one_spec!(payload, fields[0])?)?,
             destination: parse_route_destination(
                 payload.nested_value(one_spec!(payload, fields[1])?)?,
             )?,
         }),
         crate::SessionEditOpcode::SetRouteChannelMatrix => {
-            Ok(SessionEditV1::SetRouteChannelMatrix {
+            Ok(SessionEdit::SetRouteChannelMatrix {
                 route_id: stable_id(one_spec!(payload, fields[0])?)?,
                 channel_matrix: parse_channel_matrix(
                     payload.nested_value(one_spec!(payload, fields[1])?)?,
                 )?,
             })
         }
-        crate::SessionEditOpcode::SetRouteGainDb => Ok(SessionEditV1::SetRouteGainDb {
+        crate::SessionEditOpcode::SetRouteGainDb => Ok(SessionEdit::SetRouteGainDb {
             route_id: stable_id(one_spec!(payload, fields[0])?)?,
             gain_db: read_f32_exact(one_spec!(payload, fields[1])?)?,
         }),
-        crate::SessionEditOpcode::UpsertAutomation => Ok(SessionEditV1::UpsertAutomation {
+        crate::SessionEditOpcode::UpsertAutomation => Ok(SessionEdit::UpsertAutomation {
             automation: parse_automation(payload.nested_value(one_spec!(payload, fields[0])?)?)?,
         }),
-        crate::SessionEditOpcode::RemoveAutomation => Ok(SessionEditV1::RemoveAutomation {
+        crate::SessionEditOpcode::RemoveAutomation => Ok(SessionEdit::RemoveAutomation {
             automation_id: stable_id(one_spec!(payload, fields[0])?)?,
         }),
-        crate::SessionEditOpcode::SetAutomationTarget => Ok(SessionEditV1::SetAutomationTarget {
+        crate::SessionEditOpcode::SetAutomationTarget => Ok(SessionEdit::SetAutomationTarget {
             automation_id: stable_id(one_spec!(payload, fields[0])?)?,
             target: parse_automation_target(payload.nested_value(one_spec!(payload, fields[1])?)?)?,
         }),
         crate::SessionEditOpcode::SetAutomationSegments => {
-            Ok(SessionEditV1::SetAutomationSegments {
+            Ok(SessionEdit::SetAutomationSegments {
                 automation_id: stable_id(one_spec!(payload, fields[0])?)?,
                 segments: values_spec!(payload, fields[1])?
                     .map(|value| parse_automation_segment(payload.nested_value(value)?))
@@ -2054,7 +2054,7 @@ mod tests {
     #[test]
     fn exact_set_session_id_golden_and_no_partial_output() {
         let codec = ProtocolCodec::default();
-        let edits = [SessionEditV1::SetSessionId {
+        let edits = [SessionEdit::SetSessionId {
             session_id: id("next"),
         }];
         let transaction = SessionTransactionFrame {
@@ -2097,29 +2097,29 @@ mod tests {
     #[test]
     fn six_session_edit_encoders_are_canonical_and_ordered() {
         let edits = [
-            SessionEditV1::SetSessionId {
+            SessionEdit::SetSessionId {
                 session_id: id("next"),
             },
-            SessionEditV1::SetSampleRateHz {
+            SessionEdit::SetSampleRateHz {
                 sample_rate_hz: 48_000,
             },
-            SessionEditV1::SetQuantumFrames {
+            SessionEdit::SetQuantumFrames {
                 quantum_frames: 128,
             },
-            SessionEditV1::SetRenderProfile {
+            SessionEdit::SetRenderProfile {
                 render_profile: RenderProfile {
                     id: id("render"),
                     mode: RenderMode::SingleThread,
                 },
             },
-            SessionEditV1::SetOutputProfile {
+            SessionEdit::SetOutputProfile {
                 output_profile: OutputProfile {
                     id: id("output"),
                     channels: 2,
                     sample_format: SampleFormat::F32Planar,
                 },
             },
-            SessionEditV1::SetLimits {
+            SessionEdit::SetLimits {
                 limits: SessionLimits {
                     pcm_ring_frames: 64,
                     control_queue_messages: 8,
@@ -2156,13 +2156,13 @@ mod tests {
     fn transaction_outer_header_uses_sizing_sink_repeated_count() {
         let codec = ProtocolCodec::default();
         let edits = [
-            SessionEditV1::SetSessionId {
+            SessionEdit::SetSessionId {
                 session_id: id("measured"),
             },
-            SessionEditV1::SetSampleRateHz {
+            SessionEdit::SetSampleRateHz {
                 sample_rate_hz: 48_000,
             },
-            SessionEditV1::SetQuantumFrames {
+            SessionEdit::SetQuantumFrames {
                 quantum_frames: 128,
             },
         ];
@@ -2205,7 +2205,7 @@ mod tests {
         }
     }
 
-    fn all_opcode_edits_64() -> Vec<SessionEditV1> {
+    fn all_opcode_edits_64() -> Vec<SessionEdit> {
         let session =
             parse_session_toml(include_str!("../../../fixtures/session/v1/canonical.toml"))
                 .expect("fixture");
@@ -2217,175 +2217,175 @@ mod tests {
         let track_id = track.id.clone();
         let effect_id = effect.id.clone();
         let mut edits = vec![
-            SessionEditV1::SetSessionId {
+            SessionEdit::SetSessionId {
                 session_id: id("demo.session"),
             },
-            SessionEditV1::SetSampleRateHz {
+            SessionEdit::SetSampleRateHz {
                 sample_rate_hz: 48_000,
             },
-            SessionEditV1::SetQuantumFrames {
+            SessionEdit::SetQuantumFrames {
                 quantum_frames: 128,
             },
-            SessionEditV1::SetRenderProfile {
+            SessionEdit::SetRenderProfile {
                 render_profile: session.render_profile.clone(),
             },
-            SessionEditV1::SetOutputProfile {
+            SessionEdit::SetOutputProfile {
                 output_profile: session.output_profile.clone(),
             },
-            SessionEditV1::SetLimits {
+            SessionEdit::SetLimits {
                 limits: session.limits.clone(),
             },
-            SessionEditV1::UpsertSource {
+            SessionEdit::UpsertSource {
                 source: source.clone(),
             },
-            SessionEditV1::RemoveSource {
+            SessionEdit::RemoveSource {
                 source_id: source.id.clone(),
             },
-            SessionEditV1::SetSourceSampleRateHz {
+            SessionEdit::SetSourceSampleRateHz {
                 source_id: source.id.clone(),
                 sample_rate_hz: 48_000,
             },
-            SessionEditV1::SetSourceContent {
+            SessionEdit::SetSourceContent {
                 source_id: source.id.clone(),
                 content: source.content.clone(),
             },
-            SessionEditV1::SetSourceMapping {
+            SessionEdit::SetSourceMapping {
                 source_id: source.id.clone(),
                 mapping: source.mapping.clone(),
             },
-            SessionEditV1::UpsertTrack {
+            SessionEdit::UpsertTrack {
                 track: track.clone(),
             },
-            SessionEditV1::RemoveTrack {
+            SessionEdit::RemoveTrack {
                 track_id: track_id.clone(),
             },
-            SessionEditV1::SetTrackSourceAssignment {
+            SessionEdit::SetTrackSourceAssignment {
                 track_id: track_id.clone(),
                 source_id: source.id.clone(),
                 left_source_channel: 0,
                 right_source_channel: 1,
             },
-            SessionEditV1::SetTrackBuiltins {
+            SessionEdit::SetTrackBuiltins {
                 track_id: track_id.clone(),
                 builtins: track.builtins.clone(),
             },
-            SessionEditV1::SetTrackRack {
+            SessionEdit::SetTrackRack {
                 track_id: track_id.clone(),
                 rack_name: RackName::Dynamic,
                 rack: track.dynamic.clone(),
             },
-            SessionEditV1::PutTrackEffect {
+            SessionEdit::PutTrackEffect {
                 track_id: track_id.clone(),
                 rack_name: RackName::Dynamic,
                 final_position: 0,
                 effect: effect.clone(),
             },
-            SessionEditV1::RemoveTrackEffect {
+            SessionEdit::RemoveTrackEffect {
                 track_id: track_id.clone(),
                 rack_name: RackName::Dynamic,
                 effect_id: effect_id.clone(),
             },
-            SessionEditV1::SetTrackEffectOrder {
+            SessionEdit::SetTrackEffectOrder {
                 track_id: track_id.clone(),
                 rack_name: RackName::Dynamic,
                 effect_ids: vec![effect_id.clone()],
             },
-            SessionEditV1::SetEffectIdentity {
+            SessionEdit::SetEffectIdentity {
                 track_id: track_id.clone(),
                 rack_name: RackName::Dynamic,
                 effect_id: effect_id.clone(),
                 identity: effect.identity.clone(),
             },
-            SessionEditV1::SetEffectQuality {
+            SessionEdit::SetEffectQuality {
                 track_id: track_id.clone(),
                 rack_name: RackName::Dynamic,
                 effect_id: effect_id.clone(),
                 quality: effect.quality,
             },
-            SessionEditV1::SetEffectBypass {
+            SessionEdit::SetEffectBypass {
                 track_id: track_id.clone(),
                 rack_name: RackName::Dynamic,
                 effect_id: effect_id.clone(),
                 bypass: effect.bypass,
             },
-            SessionEditV1::SetEffectLinkMode {
+            SessionEdit::SetEffectLinkMode {
                 track_id: track_id.clone(),
                 rack_name: RackName::Dynamic,
                 effect_id: effect_id.clone(),
                 link_mode: effect.link_mode,
             },
-            SessionEditV1::SetEffectSidechain {
+            SessionEdit::SetEffectSidechain {
                 track_id: track_id.clone(),
                 rack_name: RackName::Dynamic,
                 effect_id: effect_id.clone(),
                 sidechain: effect.sidechain.clone(),
             },
-            SessionEditV1::UpsertEffectParam {
+            SessionEdit::UpsertEffectParam {
                 track_id: track_id.clone(),
                 rack_name: RackName::Dynamic,
                 effect_id: effect_id.clone(),
                 param: effect.params[0].clone(),
             },
-            SessionEditV1::RemoveEffectParam {
+            SessionEdit::RemoveEffectParam {
                 track_id: track_id.clone(),
                 rack_name: RackName::Dynamic,
                 effect_id: effect_id.clone(),
                 parameter_id: effect.params[0].parameter_id,
                 channel: effect.params[0].channel,
             },
-            SessionEditV1::SetTrackFader {
+            SessionEdit::SetTrackFader {
                 track_id: track_id.clone(),
                 fader: track.fader.clone(),
             },
-            SessionEditV1::SetTrackMatrixOrPan {
+            SessionEdit::SetTrackMatrixOrPan {
                 track_id: track_id.clone(),
                 matrix_or_pan: track.matrix_or_pan.clone(),
             },
-            SessionEditV1::UpsertSubmix {
+            SessionEdit::UpsertSubmix {
                 submix: Submix { id: id("drums") },
             },
-            SessionEditV1::RemoveSubmix {
+            SessionEdit::RemoveSubmix {
                 submix_id: id("drums"),
             },
-            SessionEditV1::UpsertOutput {
+            SessionEdit::UpsertOutput {
                 output: Output { id: id("alt-out") },
             },
-            SessionEditV1::RemoveOutput {
+            SessionEdit::RemoveOutput {
                 output_id: id("alt-out"),
             },
-            SessionEditV1::UpsertRoute {
+            SessionEdit::UpsertRoute {
                 route: route.clone(),
             },
-            SessionEditV1::RemoveRoute {
+            SessionEdit::RemoveRoute {
                 route_id: route.id.clone(),
             },
-            SessionEditV1::SetRouteSource {
+            SessionEdit::SetRouteSource {
                 route_id: route.id.clone(),
                 source: route.source.clone(),
             },
-            SessionEditV1::SetRouteDestination {
+            SessionEdit::SetRouteDestination {
                 route_id: route.id.clone(),
                 destination: route.destination.clone(),
             },
-            SessionEditV1::SetRouteChannelMatrix {
+            SessionEdit::SetRouteChannelMatrix {
                 route_id: route.id.clone(),
                 channel_matrix: route.channel_matrix.clone(),
             },
-            SessionEditV1::SetRouteGainDb {
+            SessionEdit::SetRouteGainDb {
                 route_id: route.id.clone(),
                 gain_db: route.gain_db,
             },
-            SessionEditV1::UpsertAutomation {
+            SessionEdit::UpsertAutomation {
                 automation: automation.clone(),
             },
-            SessionEditV1::RemoveAutomation {
+            SessionEdit::RemoveAutomation {
                 automation_id: automation.id.clone(),
             },
-            SessionEditV1::SetAutomationTarget {
+            SessionEdit::SetAutomationTarget {
                 automation_id: automation.id.clone(),
                 target: automation.target.clone(),
             },
-            SessionEditV1::SetAutomationSegments {
+            SessionEdit::SetAutomationSegments {
                 automation_id: automation.id.clone(),
                 segments: automation.segments.clone(),
             },
@@ -2393,7 +2393,7 @@ mod tests {
             // round-trip corpus rather than in a test of its own because the fourth `RackName`
             // token changes no message shape -- `RACK` was already a `Wire::U8` -- so the thing
             // worth proving is that the byte still survives encode/decode with the new value.
-            SessionEditV1::SetAutomationTarget {
+            SessionEdit::SetAutomationTarget {
                 automation_id: automation.id.clone(),
                 target: AutomationTarget {
                     entity_id: automation.target.entity_id.clone(),
@@ -2405,7 +2405,7 @@ mod tests {
             },
         ];
         while edits.len() < 64 {
-            edits.push(SessionEditV1::SetSessionId {
+            edits.push(SessionEdit::SetSessionId {
                 session_id: id("demo.session"),
             });
         }
@@ -2440,7 +2440,7 @@ mod tests {
         }
     }
 
-    fn encode(edits: &[SessionEditV1]) -> Vec<u8> {
+    fn encode(edits: &[SessionEdit]) -> Vec<u8> {
         let transaction = SessionTransactionFrame {
             request_id: RequestId::new(9).expect("request"),
             expected_revision: ExpectedRevision::Exact(crate::SessionRevision(7)),
@@ -2498,7 +2498,7 @@ mod tests {
 
     #[test]
     fn transaction_repeated_fields_match_schema_derived_count() {
-        let edits = [SessionEditV1::SetTrackEffectOrder {
+        let edits = [SessionEdit::SetTrackEffectOrder {
             track_id: id("track.repeated"),
             rack_name: RackName::Dynamic,
             effect_ids: vec![id("effect.one"), id("effect.two"), id("effect.three")],
@@ -2538,7 +2538,7 @@ mod tests {
         let any = SessionTransactionFrame {
             request_id: RequestId::new(1).expect("request"),
             expected_revision: ExpectedRevision::Any,
-            edits: &[SessionEditV1::SetSessionId {
+            edits: &[SessionEdit::SetSessionId {
                 session_id: StableId::parse("exact-required").expect("stable ID"),
             }],
         };
@@ -2546,7 +2546,7 @@ mod tests {
             codec.encoded_session_transaction_len(&any),
             Err(EncodeError::MessageKindMismatch)
         );
-        let mut wrong_wire = encode(&[SessionEditV1::SetSessionId {
+        let mut wrong_wire = encode(&[SessionEdit::SetSessionId {
             session_id: StableId::parse("wrong-wire").expect("stable ID"),
         }]);
         wrong_wire[crate::OUTER_HEADER_BYTES + 2] = WIRE_UTF8;
@@ -2605,7 +2605,7 @@ mod tests {
 
     #[test]
     fn transaction_encoder_reserves_envelope_depth_for_frozen_deep_fixture() {
-        let flat_edits = [SessionEditV1::SetSessionId {
+        let flat_edits = [SessionEdit::SetSessionId {
             session_id: id("depth-envelope"),
         }];
         let flat = SessionTransactionFrame {
@@ -2666,7 +2666,7 @@ mod tests {
 
     #[test]
     fn transaction_descendants_retain_string_limits() {
-        let edits = [SessionEditV1::SetRenderProfile {
+        let edits = [SessionEdit::SetRenderProfile {
             render_profile: RenderProfile {
                 id: id("long-render-profile"),
                 mode: RenderMode::SingleThread,
@@ -2703,21 +2703,21 @@ mod tests {
     fn source_variants_decode_and_reencode_canonically() {
         let source = source();
         let edits = [
-            SessionEditV1::UpsertSource {
+            SessionEdit::UpsertSource {
                 source: source.clone(),
             },
-            SessionEditV1::RemoveSource {
+            SessionEdit::RemoveSource {
                 source_id: source.id.clone(),
             },
-            SessionEditV1::SetSourceSampleRateHz {
+            SessionEdit::SetSourceSampleRateHz {
                 source_id: source.id.clone(),
                 sample_rate_hz: 44_100,
             },
-            SessionEditV1::SetSourceContent {
+            SessionEdit::SetSourceContent {
                 source_id: source.id.clone(),
                 content: source.content.clone(),
             },
-            SessionEditV1::SetSourceMapping {
+            SessionEdit::SetSourceMapping {
                 source_id: source.id.clone(),
                 mapping: source.mapping.clone(),
             },
@@ -2820,19 +2820,19 @@ mod tests {
         let track_id = full_track.id.clone();
         let source_id = full_track.source_id.clone();
         let mut edits = vec![
-            SessionEditV1::UpsertTrack {
+            SessionEdit::UpsertTrack {
                 track: full_track.clone(),
             },
-            SessionEditV1::RemoveTrack {
+            SessionEdit::RemoveTrack {
                 track_id: track_id.clone(),
             },
-            SessionEditV1::SetTrackSourceAssignment {
+            SessionEdit::SetTrackSourceAssignment {
                 track_id: track_id.clone(),
                 source_id,
                 left_source_channel: 1,
                 right_source_channel: 0,
             },
-            SessionEditV1::SetTrackBuiltins {
+            SessionEdit::SetTrackBuiltins {
                 track_id: track_id.clone(),
                 builtins: full_track.builtins.clone(),
             },
@@ -2842,96 +2842,96 @@ mod tests {
             (RackName::Dynamic, full_track.dynamic.clone()),
             (RackName::Simd2, full_track.simd2.clone()),
         ] {
-            edits.push(SessionEditV1::SetTrackRack {
+            edits.push(SessionEdit::SetTrackRack {
                 track_id: track_id.clone(),
                 rack_name,
                 rack,
             });
         }
         edits.extend([
-            SessionEditV1::PutTrackEffect {
+            SessionEdit::PutTrackEffect {
                 track_id: track_id.clone(),
                 rack_name: RackName::Dynamic,
                 final_position: 1,
                 effect: native.clone(),
             },
-            SessionEditV1::RemoveTrackEffect {
+            SessionEdit::RemoveTrackEffect {
                 track_id: track_id.clone(),
                 rack_name: RackName::Dynamic,
                 effect_id: cid.id.clone(),
             },
-            SessionEditV1::SetTrackEffectOrder {
+            SessionEdit::SetTrackEffectOrder {
                 track_id: track_id.clone(),
                 rack_name: RackName::Dynamic,
                 effect_ids: vec![cid.id.clone(), high.id.clone()],
             },
-            SessionEditV1::SetEffectIdentity {
+            SessionEdit::SetEffectIdentity {
                 track_id: track_id.clone(),
                 rack_name: RackName::Dynamic,
                 effect_id: native.id.clone(),
                 identity: native.identity.clone(),
             },
-            SessionEditV1::SetEffectIdentity {
+            SessionEdit::SetEffectIdentity {
                 track_id: track_id.clone(),
                 rack_name: RackName::Dynamic,
                 effect_id: cid.id.clone(),
                 identity: cid.identity.clone(),
             },
-            SessionEditV1::SetEffectQuality {
+            SessionEdit::SetEffectQuality {
                 track_id: track_id.clone(),
                 rack_name: RackName::Simd1,
                 effect_id: native.id.clone(),
                 quality: EffectQuality::Draft,
             },
-            SessionEditV1::SetEffectQuality {
+            SessionEdit::SetEffectQuality {
                 track_id: track_id.clone(),
                 rack_name: RackName::Dynamic,
                 effect_id: cid.id.clone(),
                 quality: EffectQuality::Normal,
             },
-            SessionEditV1::SetEffectQuality {
+            SessionEdit::SetEffectQuality {
                 track_id: track_id.clone(),
                 rack_name: RackName::Simd2,
                 effect_id: high.id.clone(),
                 quality: EffectQuality::High,
             },
-            SessionEditV1::SetEffectBypass {
+            SessionEdit::SetEffectBypass {
                 track_id: track_id.clone(),
                 rack_name: RackName::Dynamic,
                 effect_id: native.id.clone(),
                 bypass: true,
             },
-            SessionEditV1::SetEffectLinkMode {
+            SessionEdit::SetEffectLinkMode {
                 track_id: track_id.clone(),
                 rack_name: RackName::Simd1,
                 effect_id: native.id.clone(),
                 link_mode: LinkMode::DualMono,
             },
-            SessionEditV1::SetEffectLinkMode {
+            SessionEdit::SetEffectLinkMode {
                 track_id: track_id.clone(),
                 rack_name: RackName::Dynamic,
                 effect_id: cid.id.clone(),
                 link_mode: LinkMode::Maximum,
             },
-            SessionEditV1::SetEffectLinkMode {
+            SessionEdit::SetEffectLinkMode {
                 track_id: track_id.clone(),
                 rack_name: RackName::Simd2,
                 effect_id: high.id.clone(),
                 link_mode: LinkMode::Average,
             },
-            SessionEditV1::SetEffectSidechain {
+            SessionEdit::SetEffectSidechain {
                 track_id: track_id.clone(),
                 rack_name: RackName::Dynamic,
                 effect_id: native.id.clone(),
                 sidechain: SidechainDeclaration::None,
             },
-            SessionEditV1::SetEffectSidechain {
+            SessionEdit::SetEffectSidechain {
                 track_id: track_id.clone(),
                 rack_name: RackName::Dynamic,
                 effect_id: cid.id.clone(),
                 sidechain: cid.sidechain.clone(),
             },
-            SessionEditV1::SetEffectSidechain {
+            SessionEdit::SetEffectSidechain {
                 track_id: track_id.clone(),
                 rack_name: RackName::Simd2,
                 effect_id: high.id.clone(),
@@ -2939,7 +2939,7 @@ mod tests {
             },
         ]);
         for parameter in parameters {
-            edits.push(SessionEditV1::UpsertEffectParam {
+            edits.push(SessionEdit::UpsertEffectParam {
                 track_id: track_id.clone(),
                 rack_name: RackName::Dynamic,
                 effect_id: native.id.clone(),
@@ -2947,22 +2947,22 @@ mod tests {
             });
         }
         edits.extend([
-            SessionEditV1::RemoveEffectParam {
+            SessionEdit::RemoveEffectParam {
                 track_id: track_id.clone(),
                 rack_name: RackName::Dynamic,
                 effect_id: native.id.clone(),
                 parameter_id: 11,
                 channel: ParameterChannel::Left,
             },
-            SessionEditV1::SetTrackFader {
+            SessionEdit::SetTrackFader {
                 track_id: track_id.clone(),
                 fader: full_track.fader.clone(),
             },
-            SessionEditV1::SetTrackMatrixOrPan {
+            SessionEdit::SetTrackMatrixOrPan {
                 track_id: track_id.clone(),
                 matrix_or_pan: full_track.matrix_or_pan.clone(),
             },
-            SessionEditV1::SetTrackMatrixOrPan {
+            SessionEdit::SetTrackMatrixOrPan {
                 track_id,
                 matrix_or_pan: MatrixOrPan::Matrix {
                     ll: 1.0,
@@ -2981,7 +2981,7 @@ mod tests {
             .expect("typed track/effect decode");
         assert_eq!(decoded.edits, edits);
         assert_eq!(encode(&decoded.edits), bytes);
-        let SessionEditV1::UpsertTrack {
+        let SessionEdit::UpsertTrack {
             track: decoded_track,
         } = &decoded.edits[0]
         else {
@@ -3119,50 +3119,50 @@ mod tests {
             ],
         };
         let edits = vec![
-            SessionEditV1::UpsertSubmix {
+            SessionEdit::UpsertSubmix {
                 submix: Submix { id: id("drums") },
             },
-            SessionEditV1::RemoveSubmix {
+            SessionEdit::RemoveSubmix {
                 submix_id: id("drums"),
             },
-            SessionEditV1::UpsertOutput {
+            SessionEdit::UpsertOutput {
                 output: Output { id: id("alt-out") },
             },
-            SessionEditV1::RemoveOutput {
+            SessionEdit::RemoveOutput {
                 output_id: id("alt-out"),
             },
-            SessionEditV1::UpsertRoute {
+            SessionEdit::UpsertRoute {
                 route: route.clone(),
             },
-            SessionEditV1::RemoveRoute {
+            SessionEdit::RemoveRoute {
                 route_id: route.id.clone(),
             },
-            SessionEditV1::SetRouteSource {
+            SessionEdit::SetRouteSource {
                 route_id: route.id.clone(),
                 source: RouteSource::Track {
                     track_id: id("vocal"),
                     tap: SendTap::PostMatrix,
                 },
             },
-            SessionEditV1::SetRouteSource {
+            SessionEdit::SetRouteSource {
                 route_id: route.id.clone(),
                 source: RouteSource::SubmixOutput {
                     submix_id: id("drums"),
                 },
             },
-            SessionEditV1::SetRouteDestination {
+            SessionEdit::SetRouteDestination {
                 route_id: route.id.clone(),
                 destination: RouteDestination::SubmixInput {
                     submix_id: id("drums"),
                 },
             },
-            SessionEditV1::SetRouteDestination {
+            SessionEdit::SetRouteDestination {
                 route_id: route.id.clone(),
                 destination: RouteDestination::OutputInput {
                     output_id: id("main-out"),
                 },
             },
-            SessionEditV1::SetRouteChannelMatrix {
+            SessionEdit::SetRouteChannelMatrix {
                 route_id: route.id.clone(),
                 channel_matrix: ChannelMatrix {
                     ll: 1.0,
@@ -3171,21 +3171,21 @@ mod tests {
                     rr: 1.0,
                 },
             },
-            SessionEditV1::SetRouteGainDb {
+            SessionEdit::SetRouteGainDb {
                 route_id: route.id.clone(),
                 gain_db: -1.5,
             },
-            SessionEditV1::UpsertAutomation {
+            SessionEdit::UpsertAutomation {
                 automation: automation.clone(),
             },
-            SessionEditV1::RemoveAutomation {
+            SessionEdit::RemoveAutomation {
                 automation_id: automation.id.clone(),
             },
-            SessionEditV1::SetAutomationTarget {
+            SessionEdit::SetAutomationTarget {
                 automation_id: automation.id.clone(),
                 target: target.clone(),
             },
-            SessionEditV1::SetAutomationSegments {
+            SessionEdit::SetAutomationSegments {
                 automation_id: automation.id.clone(),
                 segments: automation.segments.clone(),
             },
@@ -3198,7 +3198,7 @@ mod tests {
             .expect("typed route/automation decode");
         assert_eq!(decoded.edits, edits);
         assert_eq!(encode(&decoded.edits), bytes);
-        let SessionEditV1::UpsertAutomation { automation } = &decoded.edits[12] else {
+        let SessionEdit::UpsertAutomation { automation } = &decoded.edits[12] else {
             panic!("upsert automation");
         };
         assert_eq!(
@@ -3235,7 +3235,7 @@ mod tests {
 
     #[test]
     fn optional_fields_skip_but_required_and_corrupt_nested_fields_reject() {
-        let edits = [SessionEditV1::SetSessionId {
+        let edits = [SessionEdit::SetSessionId {
             session_id: id("next"),
         }];
         let canonical = encode(&edits);
@@ -3266,7 +3266,7 @@ mod tests {
 
     #[test]
     fn every_byte_of_transaction_golden_truncates() {
-        let bytes = encode(&[SessionEditV1::SetSessionId {
+        let bytes = encode(&[SessionEdit::SetSessionId {
             session_id: id("next"),
         }]);
         let codec = ProtocolCodec::default();

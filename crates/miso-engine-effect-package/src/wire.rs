@@ -7,8 +7,8 @@ use miso_engine_core::{
 };
 use miso_engine_effect_contract::{
     AutomationRate, DescriptorDiagnosticCode, EffectDescriptor, EffectQuality, LinkMode,
-    LinkModeSet, ObservationCadenceV1, ObservationChannelsV1, ObservationCostV1, ObservationFoldV1,
-    ObservationKindV1, ParameterChannelPolicy, ParameterDomain, ParameterMapping, ParameterUnit,
+    LinkModeSet, ObservationCadence, ObservationChannels, ObservationCost, ObservationFold,
+    ObservationKind, ParameterChannelPolicy, ParameterDomain, ParameterMapping, ParameterUnit,
     PortDescriptor, PortLayout, PortRole, SmoothingRule, TailSamples, validate_descriptor,
 };
 use sha2::{Digest, Sha256};
@@ -543,9 +543,9 @@ struct BorrowedPort<'a> {
 #[derive(Clone, Copy)]
 struct BorrowedObservation<'a> {
     id: u32,
-    cost: ObservationCostV1,
-    cadence: ObservationCadenceV1,
-    channels: ObservationChannelsV1,
+    cost: ObservationCost,
+    cadence: ObservationCadence,
+    channels: ObservationChannels,
     minimum: f32,
     maximum: f32,
     display_name: &'a str,
@@ -617,9 +617,9 @@ impl<'a> BorrowedEffectDescriptorView<'a> {
         let byte = |offset: usize| u32::from(self.bytes[record + offset]);
         BorrowedObservation {
             id: read_u32(self.bytes, record),
-            cost: ObservationCostV1::from_raw(byte(6)).unwrap(),
-            cadence: ObservationCadenceV1::from_raw(byte(7)).unwrap(),
-            channels: ObservationChannelsV1::from_raw(byte(9)).unwrap(),
+            cost: ObservationCost::from_raw(byte(6)).unwrap(),
+            cadence: ObservationCadence::from_raw(byte(7)).unwrap(),
+            channels: ObservationChannels::from_raw(byte(9)).unwrap(),
             minimum: f32::from_bits(read_u32(self.bytes, record + 12)),
             maximum: f32::from_bits(read_u32(self.bytes, record + 16)),
             display_name: self.text(
@@ -1036,7 +1036,7 @@ fn parse_borrowed_wire(
         let fields = [
             (
                 4,
-                ObservationKindV1::from_raw(u32::from(bytes[record + 4])).is_some(),
+                ObservationKind::from_raw(u32::from(bytes[record + 4])).is_some(),
             ),
             (
                 5,
@@ -1044,19 +1044,19 @@ fn parse_borrowed_wire(
             ),
             (
                 6,
-                ObservationCostV1::from_raw(u32::from(bytes[record + 6])).is_some(),
+                ObservationCost::from_raw(u32::from(bytes[record + 6])).is_some(),
             ),
             (
                 7,
-                ObservationCadenceV1::from_raw(u32::from(bytes[record + 7])).is_some(),
+                ObservationCadence::from_raw(u32::from(bytes[record + 7])).is_some(),
             ),
             (
                 8,
-                ObservationFoldV1::from_raw(u32::from(bytes[record + 8])).is_some(),
+                ObservationFold::from_raw(u32::from(bytes[record + 8])).is_some(),
             ),
             (
                 9,
-                ObservationChannelsV1::from_raw(u32::from(bytes[record + 9])).is_some(),
+                ObservationChannels::from_raw(u32::from(bytes[record + 9])).is_some(),
             ),
         ];
         if let Some((field, _)) = fields.into_iter().find(|(_, valid)| !valid) {
@@ -1478,9 +1478,9 @@ fn borrowed_semantic_errors(
             && canonical_float(observation.minimum)
             && canonical_float(observation.maximum)
             && observation.minimum < observation.maximum
-            && !(matches!(observation.cost, ObservationCostV1::Computed)
-                && matches!(observation.cadence, ObservationCadenceV1::PerBlock))
-            && (!matches!(observation.channels, ObservationChannelsV1::PerLane) || per_lane_state);
+            && !(matches!(observation.cost, ObservationCost::Computed)
+                && matches!(observation.cadence, ObservationCadence::PerBlock))
+            && (!matches!(observation.channels, ObservationChannels::PerLane) || per_lane_state);
         if !valid {
             push(
                 "observations",

@@ -825,7 +825,7 @@ fn the_folded_master_is_the_reductions_own_bits() {
 /// * `half_mono` -- half the tracks read two source channels. Since M1 they pool into four all-mono
 ///   cohorts and four all-stereo ones, so exactly half the cohorts are collapsible. A dispatch that
 ///   dropped the **structural** join -- the `SOURCE` term, which the chain's own witness cannot see
-///   (`PlanUnitEligibilityV1::lane_eligible` says why) -- would report eight collapsible cohorts
+///   (`PlanUnitEligibility::lane_eligible` says why) -- would report eight collapsible cohorts
 ///   here, and `the_half_mono_cohort_banks_like_a_uniform_one`'s `assert_ne!` would then fail
 ///   because the odd tracks' right channels would be the duplicated left ones. That is the pair of
 ///   failures the join has to be checked by, and it is checked by both.

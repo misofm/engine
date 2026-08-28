@@ -45,7 +45,7 @@ use miso_engine_builtins::{BuiltinLaneSelector, MeterTap};
 use miso_engine_builtins_compiler::TrackInputRecord;
 use miso_engine_core::realtime::{PlanarBufferMut, RenderIo, RenderTime};
 use miso_engine_host_core::{
-    HostConsoleHandlesV1, HostConsoleRequestV1, HostPrepareCaps, HostShapePolicy, PreparedHost,
+    HostConsoleHandles, HostConsoleRequest, HostPrepareCaps, HostShapePolicy, PreparedHost,
     SourceSubmission, prepare_host_session, prepare_host_session_with_console,
 };
 
@@ -89,8 +89,8 @@ fn caps() -> HostPrepareCaps {
     }
 }
 
-fn console() -> HostConsoleRequestV1 {
-    HostConsoleRequestV1 {
+fn console() -> HostConsoleRequest {
+    HostConsoleRequest {
         control_queue_depth: Some(NonZeroUsize::new(8).expect("depth")),
         meter_period_frames: Some(NonZeroU32::new(QUANTUM as u32).expect("period")),
         meter_queue_depth: NonZeroUsize::new(16).expect("meter depth"),
@@ -102,7 +102,7 @@ fn console() -> HostConsoleRequestV1 {
 
 struct Host {
     prepared: PreparedHost,
-    handles: Option<HostConsoleHandlesV1>,
+    handles: Option<HostConsoleHandles>,
     block: usize,
     peaks: BTreeMap<String, Vec<[u32; 2]>>,
 }

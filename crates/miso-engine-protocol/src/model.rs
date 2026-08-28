@@ -1,6 +1,6 @@
 //! Typed session edits and the transactional control-plane session store.
 //!
-//! These edits operate on the accepted issue-004 `SessionTomlV1` model. They neither prepare nor
+//! These edits operate on the accepted issue-004 `SessionToml` model. They neither prepare nor
 //! publish a render plan; a successful replacement retains only issue-004's immutable,
 //! non-publishable `CompiledSession` control-plane artifact.
 
@@ -10,13 +10,13 @@ use miso_engine_session::{
     Automation, AutomationSegment, AutomationTarget, ChannelMatrix, CompileCaps, CompiledSession,
     DualMonoBuiltins, DualMonoFader, Effect, EffectIdentity, EffectParam, EffectQuality,
     MatrixOrPan, Output, OutputProfile, Rack, RackName, RenderProfile, Route, RouteDestination,
-    RouteSource, SessionLimits, SessionTomlV1, SidechainDeclaration, Source, SourceContent,
+    RouteSource, SessionLimits, SessionToml, SidechainDeclaration, Source, SourceContent,
     SourceMapping, StableId, Submix, compile_session,
 };
 
 use crate::{ExpectedRevision, SessionRevision};
 
-/// Stable numeric registry for every V1 `SessionEditV1` variant.
+/// Stable numeric registry for every V1 `SessionEdit` variant.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 #[repr(u16)]
 pub enum SessionEditOpcode {
@@ -168,7 +168,7 @@ impl SessionEditOpcode {
 /// BTLV specification; the later wire-schema codec maps these variants one-to-one.
 #[derive(Clone, Debug, PartialEq)]
 #[allow(missing_docs)] // Variant docs name the frozen payload; field names are the frozen mapping.
-pub enum SessionEditV1 {
+pub enum SessionEdit {
     /// Replace the session stable ID.
     SetSessionId { session_id: StableId },
     /// Replace the explicit engine sample rate without implying SRC.
@@ -386,7 +386,7 @@ pub enum SessionEditV1 {
     },
 }
 
-impl SessionEditV1 {
+impl SessionEdit {
     /// Return the stable numeric opcode for this typed edit.
     #[must_use]
     pub const fn opcode(&self) -> SessionEditOpcode {
@@ -461,47 +461,47 @@ impl std::error::Error for SessionEditError {}
 /// Apply one edit to a caller-owned candidate model. This does not validate or compile the
 /// candidate: [`SessionStore::apply_transaction`] does both atomically after all edits resolve.
 pub fn apply_session_edit(
-    session: &mut SessionTomlV1,
-    edit: &SessionEditV1,
+    session: &mut SessionToml,
+    edit: &SessionEdit,
 ) -> Result<(), SessionEditError> {
     match edit {
-        SessionEditV1::SetSessionId { session_id } => session.session_id = session_id.clone(),
-        SessionEditV1::SetSampleRateHz { sample_rate_hz } => {
+        SessionEdit::SetSessionId { session_id } => session.session_id = session_id.clone(),
+        SessionEdit::SetSampleRateHz { sample_rate_hz } => {
             session.sample_rate_hz = *sample_rate_hz
         }
-        SessionEditV1::SetQuantumFrames { quantum_frames } => {
+        SessionEdit::SetQuantumFrames { quantum_frames } => {
             session.quantum_frames = *quantum_frames
         }
-        SessionEditV1::SetRenderProfile { render_profile } => {
+        SessionEdit::SetRenderProfile { render_profile } => {
             session.render_profile = render_profile.clone()
         }
-        SessionEditV1::SetOutputProfile { output_profile } => {
+        SessionEdit::SetOutputProfile { output_profile } => {
             session.output_profile = output_profile.clone()
         }
-        SessionEditV1::SetLimits { limits } => session.limits = limits.clone(),
-        SessionEditV1::UpsertSource { source } => {
+        SessionEdit::SetLimits { limits } => session.limits = limits.clone(),
+        SessionEdit::UpsertSource { source } => {
             upsert(&mut session.sources, source, |item| &item.id)
         }
-        SessionEditV1::RemoveSource { source_id } => {
+        SessionEdit::RemoveSource { source_id } => {
             remove(&mut session.sources, source_id, |item| &item.id)?
         }
-        SessionEditV1::SetSourceSampleRateHz {
+        SessionEdit::SetSourceSampleRateHz {
             source_id,
             sample_rate_hz,
         } => {
             source_mut(session, source_id)?.sample_rate_hz = *sample_rate_hz;
         }
-        SessionEditV1::SetSourceContent { source_id, content } => {
+        SessionEdit::SetSourceContent { source_id, content } => {
             source_mut(session, source_id)?.content = content.clone();
         }
-        SessionEditV1::SetSourceMapping { source_id, mapping } => {
+        SessionEdit::SetSourceMapping { source_id, mapping } => {
             source_mut(session, source_id)?.mapping = mapping.clone();
         }
-        SessionEditV1::UpsertTrack { track } => upsert(&mut session.tracks, track, |item| &item.id),
-        SessionEditV1::RemoveTrack { track_id } => {
+        SessionEdit::UpsertTrack { track } => upsert(&mut session.tracks, track, |item| &item.id),
+        SessionEdit::RemoveTrack { track_id } => {
             remove(&mut session.tracks, track_id, |item| &item.id)?
         }
-        SessionEditV1::SetTrackSourceAssignment {
+        SessionEdit::SetTrackSourceAssignment {
             track_id,
             source_id,
             left_source_channel,
@@ -512,17 +512,17 @@ pub fn apply_session_edit(
             track.left_source_channel = *left_source_channel;
             track.right_source_channel = *right_source_channel;
         }
-        SessionEditV1::SetTrackBuiltins { track_id, builtins } => {
+        SessionEdit::SetTrackBuiltins { track_id, builtins } => {
             track_mut(session, track_id)?.builtins = builtins.clone();
         }
-        SessionEditV1::SetTrackRack {
+        SessionEdit::SetTrackRack {
             track_id,
             rack_name,
             rack,
         } => {
             *rack_mut(track_mut(session, track_id)?, *rack_name)? = rack.clone();
         }
-        SessionEditV1::PutTrackEffect {
+        SessionEdit::PutTrackEffect {
             track_id,
             rack_name,
             final_position,
@@ -539,7 +539,7 @@ pub fn apply_session_edit(
             }
             effects.insert(position, effect.clone());
         }
-        SessionEditV1::RemoveTrackEffect {
+        SessionEdit::RemoveTrackEffect {
             track_id,
             rack_name,
             effect_id,
@@ -551,7 +551,7 @@ pub fn apply_session_edit(
                 .ok_or(SessionEditError::NotFound)?;
             effects.remove(index);
         }
-        SessionEditV1::SetTrackEffectOrder {
+        SessionEdit::SetTrackEffectOrder {
             track_id,
             rack_name,
             effect_ids,
@@ -575,7 +575,7 @@ pub fn apply_session_edit(
             }
             *effects = ordered;
         }
-        SessionEditV1::SetEffectIdentity {
+        SessionEdit::SetEffectIdentity {
             track_id,
             rack_name,
             effect_id,
@@ -583,7 +583,7 @@ pub fn apply_session_edit(
         } => {
             effect_mut(session, track_id, *rack_name, effect_id)?.identity = identity.clone();
         }
-        SessionEditV1::SetEffectQuality {
+        SessionEdit::SetEffectQuality {
             track_id,
             rack_name,
             effect_id,
@@ -591,7 +591,7 @@ pub fn apply_session_edit(
         } => {
             effect_mut(session, track_id, *rack_name, effect_id)?.quality = *quality;
         }
-        SessionEditV1::SetEffectBypass {
+        SessionEdit::SetEffectBypass {
             track_id,
             rack_name,
             effect_id,
@@ -599,7 +599,7 @@ pub fn apply_session_edit(
         } => {
             effect_mut(session, track_id, *rack_name, effect_id)?.bypass = *bypass;
         }
-        SessionEditV1::SetEffectLinkMode {
+        SessionEdit::SetEffectLinkMode {
             track_id,
             rack_name,
             effect_id,
@@ -607,7 +607,7 @@ pub fn apply_session_edit(
         } => {
             effect_mut(session, track_id, *rack_name, effect_id)?.link_mode = *link_mode;
         }
-        SessionEditV1::SetEffectSidechain {
+        SessionEdit::SetEffectSidechain {
             track_id,
             rack_name,
             effect_id,
@@ -615,7 +615,7 @@ pub fn apply_session_edit(
         } => {
             effect_mut(session, track_id, *rack_name, effect_id)?.sidechain = sidechain.clone();
         }
-        SessionEditV1::UpsertEffectParam {
+        SessionEdit::UpsertEffectParam {
             track_id,
             rack_name,
             effect_id,
@@ -630,7 +630,7 @@ pub fn apply_session_edit(
                 params.push(param.clone());
             }
         }
-        SessionEditV1::RemoveEffectParam {
+        SessionEdit::RemoveEffectParam {
             track_id,
             rack_name,
             effect_id,
@@ -644,62 +644,62 @@ pub fn apply_session_edit(
                 .ok_or(SessionEditError::NotFound)?;
             params.remove(index);
         }
-        SessionEditV1::SetTrackFader { track_id, fader } => {
+        SessionEdit::SetTrackFader { track_id, fader } => {
             track_mut(session, track_id)?.fader = fader.clone()
         }
-        SessionEditV1::SetTrackMatrixOrPan {
+        SessionEdit::SetTrackMatrixOrPan {
             track_id,
             matrix_or_pan,
         } => {
             track_mut(session, track_id)?.matrix_or_pan = matrix_or_pan.clone();
         }
-        SessionEditV1::UpsertSubmix { submix } => {
+        SessionEdit::UpsertSubmix { submix } => {
             upsert(&mut session.submixes, submix, |item| &item.id)
         }
-        SessionEditV1::RemoveSubmix { submix_id } => {
+        SessionEdit::RemoveSubmix { submix_id } => {
             remove(&mut session.submixes, submix_id, |item| &item.id)?
         }
-        SessionEditV1::UpsertOutput { output } => {
+        SessionEdit::UpsertOutput { output } => {
             upsert(&mut session.outputs, output, |item| &item.id)
         }
-        SessionEditV1::RemoveOutput { output_id } => {
+        SessionEdit::RemoveOutput { output_id } => {
             remove(&mut session.outputs, output_id, |item| &item.id)?
         }
-        SessionEditV1::UpsertRoute { route } => upsert(&mut session.routes, route, |item| &item.id),
-        SessionEditV1::RemoveRoute { route_id } => {
+        SessionEdit::UpsertRoute { route } => upsert(&mut session.routes, route, |item| &item.id),
+        SessionEdit::RemoveRoute { route_id } => {
             remove(&mut session.routes, route_id, |item| &item.id)?
         }
-        SessionEditV1::SetRouteSource { route_id, source } => {
+        SessionEdit::SetRouteSource { route_id, source } => {
             route_mut(session, route_id)?.source = source.clone()
         }
-        SessionEditV1::SetRouteDestination {
+        SessionEdit::SetRouteDestination {
             route_id,
             destination,
         } => {
             route_mut(session, route_id)?.destination = destination.clone();
         }
-        SessionEditV1::SetRouteChannelMatrix {
+        SessionEdit::SetRouteChannelMatrix {
             route_id,
             channel_matrix,
         } => {
             route_mut(session, route_id)?.channel_matrix = channel_matrix.clone();
         }
-        SessionEditV1::SetRouteGainDb { route_id, gain_db } => {
+        SessionEdit::SetRouteGainDb { route_id, gain_db } => {
             route_mut(session, route_id)?.gain_db = *gain_db
         }
-        SessionEditV1::UpsertAutomation { automation } => {
+        SessionEdit::UpsertAutomation { automation } => {
             upsert(&mut session.automation, automation, |item| &item.id);
         }
-        SessionEditV1::RemoveAutomation { automation_id } => {
+        SessionEdit::RemoveAutomation { automation_id } => {
             remove(&mut session.automation, automation_id, |item| &item.id)?;
         }
-        SessionEditV1::SetAutomationTarget {
+        SessionEdit::SetAutomationTarget {
             automation_id,
             target,
         } => {
             automation_mut(session, automation_id)?.target = target.clone();
         }
-        SessionEditV1::SetAutomationSegments {
+        SessionEdit::SetAutomationSegments {
             automation_id,
             segments,
         } => {
@@ -800,7 +800,7 @@ pub struct SessionStore {
 impl SessionStore {
     /// Compile the first authoritative typed model under fixed control-plane compiler caps.
     pub fn new(
-        initial: SessionTomlV1,
+        initial: SessionToml,
         caps: CompileCaps,
     ) -> Result<Self, miso_engine_session::DiagnosticSet> {
         Ok(Self {
@@ -832,7 +832,7 @@ impl SessionStore {
     pub fn apply_transaction(
         &mut self,
         expected_revision: ExpectedRevision,
-        edits: &[SessionEditV1],
+        edits: &[SessionEdit],
     ) -> Result<SessionCommit, SessionStoreError> {
         let prepared = self.prepare_transaction(expected_revision, edits)?;
         Ok(self.commit_prepared(prepared))
@@ -843,7 +843,7 @@ impl SessionStore {
     pub fn prepare_transaction(
         &self,
         expected_revision: ExpectedRevision,
-        edits: &[SessionEditV1],
+        edits: &[SessionEdit],
     ) -> Result<PreparedSessionTransaction, SessionStoreError> {
         let ExpectedRevision::Exact(expected_revision) = expected_revision else {
             return Err(SessionStoreError::ExactRevisionRequired);
@@ -922,7 +922,7 @@ fn remove<T>(
 }
 
 fn source_mut<'a>(
-    session: &'a mut SessionTomlV1,
+    session: &'a mut SessionToml,
     id: &StableId,
 ) -> Result<&'a mut Source, SessionEditError> {
     session
@@ -933,7 +933,7 @@ fn source_mut<'a>(
 }
 
 fn track_mut<'a>(
-    session: &'a mut SessionTomlV1,
+    session: &'a mut SessionToml,
     id: &StableId,
 ) -> Result<&'a mut miso_engine_session::Track, SessionEditError> {
     session
@@ -944,7 +944,7 @@ fn track_mut<'a>(
 }
 
 fn route_mut<'a>(
-    session: &'a mut SessionTomlV1,
+    session: &'a mut SessionToml,
     id: &StableId,
 ) -> Result<&'a mut Route, SessionEditError> {
     session
@@ -955,7 +955,7 @@ fn route_mut<'a>(
 }
 
 fn automation_mut<'a>(
-    session: &'a mut SessionTomlV1,
+    session: &'a mut SessionToml,
     id: &StableId,
 ) -> Result<&'a mut Automation, SessionEditError> {
     session
@@ -965,7 +965,7 @@ fn automation_mut<'a>(
         .ok_or(SessionEditError::NotFound)
 }
 
-/// The `Rack` a `SessionEditV1` rack-addressed edit names.
+/// The `Rack` a `SessionEdit` rack-addressed edit names.
 ///
 /// `RackName::Builtins` (#178, ruled by #210's D2) is not one: it is the strip's own builtin
 /// section, which is a `DualMonoBuiltins` and holds no `effects` vector at all, so every edit that
@@ -990,7 +990,7 @@ fn rack_mut(
 }
 
 fn effect_mut<'a>(
-    session: &'a mut SessionTomlV1,
+    session: &'a mut SessionToml,
     track_id: &StableId,
     rack_name: RackName,
     effect_id: &StableId,
@@ -1040,7 +1040,7 @@ mod tests {
         let commit = store
             .apply_transaction(
                 ExpectedRevision::Exact(SessionRevision(7)),
-                &[SessionEditV1::SetSessionId {
+                &[SessionEdit::SetSessionId {
                     session_id: id("next-session"),
                 }],
             )
@@ -1065,7 +1065,7 @@ mod tests {
             let commit = store
                 .apply_transaction(
                     ExpectedRevision::Exact(revision),
-                    &[SessionEditV1::SetSampleRateHz {
+                    &[SessionEdit::SetSampleRateHz {
                         sample_rate_hz: rate.0,
                     }],
                 )
@@ -1081,7 +1081,7 @@ mod tests {
         let before = store.canonical_snapshot().to_owned();
         let failed = store.apply_transaction(
             ExpectedRevision::Exact(store.revision()),
-            &[SessionEditV1::SetRouteGainDb {
+            &[SessionEdit::SetRouteGainDb {
                 route_id: id("missing"),
                 gain_db: 1.0,
             }],
@@ -1098,10 +1098,10 @@ mod tests {
         let invalid = store.apply_transaction(
             ExpectedRevision::Exact(store.revision()),
             &[
-                SessionEditV1::SetSessionId {
+                SessionEdit::SetSessionId {
                     session_id: id("temporary"),
                 },
-                SessionEditV1::RemoveSource {
+                SessionEdit::RemoveSource {
                     source_id: id("voice"),
                 },
             ],
@@ -1126,7 +1126,7 @@ mod tests {
             let before_revision = store.revision();
             let before_snapshot = store.canonical_snapshot().to_owned();
             let before_model = store.compiled().normalized_model().clone();
-            let edits = [SessionEditV1::SetSampleRateHz {
+            let edits = [SessionEdit::SetSampleRateHz {
                 sample_rate_hz: rate,
             }];
             let error = store
@@ -1158,10 +1158,10 @@ mod tests {
         let mut store = store();
         let revision = store.revision();
         let edits = [
-            SessionEditV1::SetSampleRateHz {
+            SessionEdit::SetSampleRateHz {
                 sample_rate_hz: 176_400,
             },
-            SessionEditV1::SetSampleRateHz {
+            SessionEdit::SetSampleRateHz {
                 sample_rate_hz: 96_000,
             },
         ];
@@ -1175,7 +1175,7 @@ mod tests {
     #[test]
     fn effects_and_parameters_follow_exact_key_rules() {
         let mut store = store();
-        let edit = SessionEditV1::UpsertEffectParam {
+        let edit = SessionEdit::UpsertEffectParam {
             track_id: id("vocal"),
             rack_name: RackName::Dynamic,
             effect_id: id("eq"),
@@ -1227,7 +1227,7 @@ mod tests {
         assert_eq!(
             store.apply_transaction(
                 ExpectedRevision::Exact(SessionRevision(MAX_SESSION_REVISION)),
-                &[SessionEditV1::SetSessionId {
+                &[SessionEdit::SetSessionId {
                     session_id: id("never-committed"),
                 }],
             ),
@@ -1239,7 +1239,7 @@ mod tests {
     #[test]
     fn opcode_registry_covers_noneditable_revision_and_schema_exclusion() {
         assert_eq!(
-            SessionEditV1::SetQuantumFrames {
+            SessionEdit::SetQuantumFrames {
                 quantum_frames: 128
             }
             .opcode() as u16,

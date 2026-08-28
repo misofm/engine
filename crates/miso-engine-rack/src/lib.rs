@@ -1331,7 +1331,7 @@ impl BankChain {
     /// 2. **The prefix is non-empty.** A chain of nothing but fader and matrix slots reports every
     ///    lane symmetric on every session, mono or not (`SEAM_SIDE_WITNESS` is an unconditional
     ///    `SYMMETRIC`), so collapsing on its witness would be collapsing on an unconditional
-    ///    `true`. This is `PlanUnitEligibilityV1::witness_is_vacuous` enforced rather than
+    ///    `true`. This is `PlanUnitEligibility::witness_is_vacuous` enforced rather than
     ///    reported.
     /// 3. **Every prefix slot has a one-plane body.** A dual body handed the ungathered right
     ///    plane would not merely write garbage into a plane the seam overwrites -- a linked

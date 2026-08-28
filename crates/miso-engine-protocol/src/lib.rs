@@ -29,7 +29,7 @@ pub use message_wire::{
     TransportState, TransportStateEvent,
 };
 pub use model::{
-    PreparedSessionTransaction, SessionCommit, SessionEditError, SessionEditOpcode, SessionEditV1,
+    PreparedSessionTransaction, SessionCommit, SessionEditError, SessionEditOpcode, SessionEdit,
     SessionStore, SessionStoreError, apply_session_edit,
 };
 pub use queue::{

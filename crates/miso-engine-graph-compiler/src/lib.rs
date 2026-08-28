@@ -677,7 +677,7 @@ mod tests {
         })
     }
 
-    fn accepted_compressor_graph_fixture() -> miso_engine_session::SessionTomlV1 {
+    fn accepted_compressor_graph_fixture() -> miso_engine_session::SessionToml {
         let mut model =
             parse_session_toml(PARAMETRIC_EQ_NINE_TRACK_FIXTURE).expect("accepted base fixture");
         let mut tail = model.tracks[7].clone();
@@ -718,7 +718,7 @@ mod tests {
     /// with exactly one non-identity stage in it. That is what lets
     /// `rack_placement_changes_the_bank_but_never_the_samples` be a bit test instead of a
     /// tolerance.
-    fn accepted_dynamic_rack_compressor_fixture() -> miso_engine_session::SessionTomlV1 {
+    fn accepted_dynamic_rack_compressor_fixture() -> miso_engine_session::SessionToml {
         let mut model = accepted_compressor_graph_fixture();
         for track in &mut model.tracks {
             assert!(
@@ -736,7 +736,7 @@ mod tests {
     /// path. Same session, same dispatch, same parameters -- the *only* variable is whether the
     /// arithmetic is done a lane at a time or `width` lanes at a time.
     fn compile_bank_and_per_node(
-        model: &miso_engine_session::SessionTomlV1,
+        model: &miso_engine_session::SessionToml,
         effect_id: &str,
         plan_id: u64,
     ) -> (PreparedGraphArtifact, PreparedGraphArtifact) {
@@ -789,7 +789,7 @@ mod tests {
 
     /// Compile one accepted model against the real launch registry.
     fn compile_bank_only(
-        model: &miso_engine_session::SessionTomlV1,
+        model: &miso_engine_session::SessionToml,
         plan_id: u64,
     ) -> PreparedGraphArtifact {
         let session = compile_session(
@@ -872,7 +872,7 @@ mod tests {
         }
     }
 
-    fn accepted_gate_expander_graph_fixture() -> miso_engine_session::SessionTomlV1 {
+    fn accepted_gate_expander_graph_fixture() -> miso_engine_session::SessionToml {
         let mut model = accepted_compressor_graph_fixture();
         for track in &mut model.tracks {
             let effect = &mut track.simd1.effects[0];
@@ -884,7 +884,7 @@ mod tests {
         model
     }
 
-    fn accepted_true_peak_limiter_graph_fixture() -> miso_engine_session::SessionTomlV1 {
+    fn accepted_true_peak_limiter_graph_fixture() -> miso_engine_session::SessionToml {
         let mut model = accepted_compressor_graph_fixture();
         for (index, track) in model.tracks.iter_mut().enumerate() {
             let effect = &mut track.simd1.effects[0];
@@ -925,7 +925,7 @@ mod tests {
         model
     }
 
-    fn accepted_multiband_compressor_graph_fixture() -> miso_engine_session::SessionTomlV1 {
+    fn accepted_multiband_compressor_graph_fixture() -> miso_engine_session::SessionToml {
         let mut model = accepted_compressor_graph_fixture();
         for track in &mut model.tracks {
             let effect = &mut track.simd1.effects[0];
@@ -940,7 +940,7 @@ mod tests {
         model
     }
 
-    fn accepted_soft_clip_graph_fixture() -> miso_engine_session::SessionTomlV1 {
+    fn accepted_soft_clip_graph_fixture() -> miso_engine_session::SessionToml {
         let mut model = accepted_compressor_graph_fixture();
         for (index, track) in model.tracks.iter_mut().enumerate() {
             let effect = &mut track.simd1.effects[0];
@@ -969,7 +969,7 @@ mod tests {
         model
     }
 
-    fn accepted_transient_shaper_graph_fixture() -> miso_engine_session::SessionTomlV1 {
+    fn accepted_transient_shaper_graph_fixture() -> miso_engine_session::SessionToml {
         let mut model = accepted_compressor_graph_fixture();
         for (index, track) in model.tracks.iter_mut().enumerate() {
             let effect = &mut track.simd1.effects[0];
@@ -1003,7 +1003,7 @@ mod tests {
         model
     }
 
-    fn accepted_delay_graph_fixture() -> miso_engine_session::SessionTomlV1 {
+    fn accepted_delay_graph_fixture() -> miso_engine_session::SessionToml {
         let mut model = accepted_compressor_graph_fixture();
         for (index, track) in model.tracks.iter_mut().enumerate() {
             let mut effect = track.simd1.effects.remove(0);
@@ -6211,7 +6211,7 @@ mod tests {
 
     /// Compile one console session model into a prepared graph artifact.
     fn compile_console_model(
-        model: &miso_engine_session::SessionTomlV1,
+        model: &miso_engine_session::SessionToml,
         plan_id: u64,
     ) -> PreparedGraphArtifact {
         let session = compile_session(
@@ -6253,7 +6253,7 @@ mod tests {
     /// across exactly that boundary, so every test that measures it has to compile the production
     /// pair rather than the effect-only one.
     fn compile_console_model_with_builtins(
-        model: &miso_engine_session::SessionTomlV1,
+        model: &miso_engine_session::SessionToml,
         plan_id: u64,
         meters: &[MeterRequest],
         registry: &NativeEffectRegistry,

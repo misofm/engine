@@ -25,7 +25,7 @@ use miso_engine_graph::{
 };
 use miso_engine_graph_compiler::{Backend, GraphBuiltinsCompileRequest, GraphCompiler};
 use miso_engine_session::{
-    CompileCaps, CompiledSession, SessionTomlV1, compile_session, parse_session_toml,
+    CompileCaps, CompiledSession, SessionToml, compile_session, parse_session_toml,
 };
 use miso_engine_source::{
     PcmSourceRing, PcmSourceRingConfig, SourceFrame, SourceGeneration, SourceGraphSource,
@@ -232,7 +232,7 @@ pub struct HostPrepareReport {
 /// [`prepare_host_runtime`] is exactly `prepare_host_runtime_with_console(.., &Default::default())`
 /// and a host that wants no console allocates nothing extra.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct HostConsoleRequestV1 {
+pub struct HostConsoleRequest {
     /// Bounded per-channel control-queue depth, or `None` for no live control channel.
     ///
     /// Issue #140 turns this into the depth of *every* live channel a track owns: the matrix/pan
@@ -266,7 +266,7 @@ pub struct HostConsoleRequestV1 {
     pub master_track: Option<u32>,
 }
 
-impl Default for HostConsoleRequestV1 {
+impl Default for HostConsoleRequest {
     fn default() -> Self {
         Self {
             control_queue_depth: None,
@@ -284,7 +284,7 @@ impl Default for HostConsoleRequestV1 {
 /// `tracks` is the compiled session's normalized track order and is the addressing authority: a
 /// host addresses a track by its index in this vector, and `track_controls[i]` / `meters[i]`
 /// belong to `tracks[i]` whenever they are present.
-pub struct HostConsoleHandlesV1 {
+pub struct HostConsoleHandles {
     /// Canonical normalized track identities.
     pub tracks: Vec<Box<str>>,
     /// One control producer per track, in `tracks` order; empty when no channel was requested.
@@ -351,7 +351,7 @@ impl core::fmt::Debug for PreparedHost {
 }
 
 /// Parse one session TOML document.
-pub fn parse_host_session(toml: &str) -> Result<SessionTomlV1, PrepareDiagnostics> {
+pub fn parse_host_session(toml: &str) -> Result<SessionToml, PrepareDiagnostics> {
     parse_session_toml(toml).map_err(|value| {
         PrepareDiagnostics::new(
             PrepareRejection::Session,
@@ -407,8 +407,8 @@ pub fn prepare_host_session(
 pub fn prepare_host_session_with_console(
     toml: &str,
     caps: &HostPrepareCaps,
-    console: &HostConsoleRequestV1,
-) -> Result<(CompiledSession, PreparedHost, HostConsoleHandlesV1), PrepareDiagnostics> {
+    console: &HostConsoleRequest,
+) -> Result<(CompiledSession, PreparedHost, HostConsoleHandles), PrepareDiagnostics> {
     let compiled = compile_host_session(toml, caps)?;
     let (prepared, handles) = prepare_host_runtime_with_console(&compiled, caps, console)?;
     Ok((compiled, prepared, handles))
@@ -424,7 +424,7 @@ pub fn prepare_host_runtime(
     caps: &HostPrepareCaps,
 ) -> Result<PreparedHost, PrepareDiagnostics> {
     let (prepared, handles) =
-        prepare_host_runtime_with_console(compiled, caps, &HostConsoleRequestV1::default())?;
+        prepare_host_runtime_with_console(compiled, caps, &HostConsoleRequest::default())?;
     debug_assert!(handles.track_controls.is_empty() && handles.meters.is_empty());
     Ok(prepared)
 }
@@ -438,8 +438,8 @@ pub fn prepare_host_runtime(
 pub fn prepare_host_runtime_with_console(
     compiled: &CompiledSession,
     caps: &HostPrepareCaps,
-    console: &HostConsoleRequestV1,
-) -> Result<(PreparedHost, HostConsoleHandlesV1), PrepareDiagnostics> {
+    console: &HostConsoleRequest,
+) -> Result<(PreparedHost, HostConsoleHandles), PrepareDiagnostics> {
     let model = compiled.normalized_model();
     let track_count = u64::try_from(model.tracks.len()).map_err(|_| platform("host.count"))?;
     let source_count = u64::try_from(model.sources.len()).map_err(|_| platform("host.count"))?;
@@ -622,7 +622,7 @@ pub fn prepare_host_runtime_with_console(
     };
 
     // Issue #137 D1/D2: the console requests are derived here, once, from the canonical track
-    // order, so `HostConsoleHandlesV1::tracks` and the requested channels cannot disagree.
+    // order, so `HostConsoleHandles::tracks` and the requested channels cannot disagree.
     let console_tracks: Vec<Box<str>> = model
         .tracks
         .iter()
@@ -882,7 +882,7 @@ pub fn prepare_host_runtime_with_console(
             sources,
             report,
         },
-        HostConsoleHandlesV1 {
+        HostConsoleHandles {
             tracks: console_tracks,
             track_controls,
             effect_controls,
@@ -894,7 +894,7 @@ pub fn prepare_host_runtime_with_console(
 }
 
 /// Total effect instances across every rack of every track.
-pub fn count_effects(model: &SessionTomlV1) -> Result<u64, PrepareDiagnostics> {
+pub fn count_effects(model: &SessionToml) -> Result<u64, PrepareDiagnostics> {
     model.tracks.iter().try_fold(0_u64, |total, track| {
         let count = track
             .simd1

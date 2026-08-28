@@ -1,4 +1,4 @@
-//! Issue #178: a `SessionEditV1` that addresses the strip **as a rack** is refused.
+//! Issue #178: a `SessionEdit` that addresses the strip **as a rack** is refused.
 //!
 //! `RackName` gained a fourth token so an automation *target* can name the strip. Nothing else in
 //! the session grammar grew: the strip is a `DualMonoBuiltins` and holds no `effects` vector, so
@@ -17,12 +17,12 @@
 //! Red mutation: give `rack_mut`'s `RackName::Builtins` arm `Ok(&mut track.simd1)` -> the four
 //! refusal arms below start reporting `Ok` and the effect lands in `simd1`.
 
-use miso_engine_protocol::{SessionEditError, SessionEditV1, apply_session_edit};
-use miso_engine_session::{RackName, SessionTomlV1, parse_session_toml};
+use miso_engine_protocol::{SessionEditError, SessionEdit, apply_session_edit};
+use miso_engine_session::{RackName, SessionToml, parse_session_toml};
 
 const SESSION: &str = include_str!("../../../fixtures/session/v1/canonical.toml");
 
-fn session() -> SessionTomlV1 {
+fn session() -> SessionToml {
     parse_session_toml(SESSION).expect("the canonical fixture parses")
 }
 
@@ -37,7 +37,7 @@ fn rack_addressed_edits_refuse_the_builtins_token() {
     for (name, edit) in [
         (
             "SetTrackRack",
-            SessionEditV1::SetTrackRack {
+            SessionEdit::SetTrackRack {
                 track_id: track_id(),
                 rack_name: RackName::Builtins,
                 rack: rack.clone(),
@@ -45,7 +45,7 @@ fn rack_addressed_edits_refuse_the_builtins_token() {
         ),
         (
             "PutTrackEffect",
-            SessionEditV1::PutTrackEffect {
+            SessionEdit::PutTrackEffect {
                 track_id: track_id(),
                 rack_name: RackName::Builtins,
                 final_position: 0,
@@ -54,7 +54,7 @@ fn rack_addressed_edits_refuse_the_builtins_token() {
         ),
         (
             "RemoveTrackEffect",
-            SessionEditV1::RemoveTrackEffect {
+            SessionEdit::RemoveTrackEffect {
                 track_id: track_id(),
                 rack_name: RackName::Builtins,
                 effect_id: effect.id.clone(),
@@ -62,7 +62,7 @@ fn rack_addressed_edits_refuse_the_builtins_token() {
         ),
         (
             "SetTrackEffectOrder",
-            SessionEditV1::SetTrackEffectOrder {
+            SessionEdit::SetTrackEffectOrder {
                 track_id: track_id(),
                 rack_name: RackName::Builtins,
                 effect_ids: vec![effect.id.clone()],
@@ -92,7 +92,7 @@ fn the_same_edits_against_a_real_rack_are_applied() {
     assert_eq!(
         apply_session_edit(
             &mut model,
-            &SessionEditV1::SetTrackRack {
+            &SessionEdit::SetTrackRack {
                 track_id: track_id(),
                 rack_name: RackName::Simd1,
                 rack: rack.clone(),
@@ -112,7 +112,7 @@ fn the_strip_is_still_editable_through_set_track_builtins() {
     assert_eq!(
         apply_session_edit(
             &mut model,
-            &SessionEditV1::SetTrackBuiltins {
+            &SessionEdit::SetTrackBuiltins {
                 track_id: track_id(),
                 builtins: builtins.clone(),
             },

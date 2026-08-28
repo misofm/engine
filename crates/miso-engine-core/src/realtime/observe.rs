@@ -43,7 +43,7 @@ use std::sync::Arc;
 /// default-valued (`sequence == 0`) read means "nothing has been published yet" and is reported as
 /// absent rather than as a window of zeros.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct ObservationWindowV1 {
+pub struct ObservationWindow {
     /// Absolute sample the window opened at, inclusive.
     pub first_sample: u64,
     /// Absolute sample the window closed at, exclusive.
@@ -72,7 +72,7 @@ const MAXIMUM_READ_ATTEMPTS: usize = 64;
 
 /// The shared conflating cell. Not constructed directly: [`observation_slot`] makes the pair.
 #[derive(Debug, Default)]
-pub struct ObservationSlotV1 {
+pub struct ObservationSlot {
     /// Odd while a publication is in flight, even between them.
     sequence_lock: AtomicU32,
     first_sample: AtomicU64,
@@ -92,39 +92,39 @@ pub struct ObservationSlotV1 {
 /// pointer each and are counted by whatever owns them.
 #[must_use]
 pub const fn observation_slot_retained_bytes() -> usize {
-    core::mem::size_of::<ObservationSlotV1>()
+    core::mem::size_of::<ObservationSlot>()
 }
 
 /// The render-side half. Wait-free, single writer, never blocks and never allocates.
 #[derive(Debug)]
-pub struct ObservationPublisherV1 {
-    slot: Arc<ObservationSlotV1>,
+pub struct ObservationPublisher {
+    slot: Arc<ObservationSlot>,
 }
 
 /// The control-side half. Reads off the render thread and may retry.
 #[derive(Debug)]
-pub struct ObservationReaderV1 {
-    slot: Arc<ObservationSlotV1>,
+pub struct ObservationReader {
+    slot: Arc<ObservationSlot>,
 }
 
 /// Build one conflating slot and its two endpoints. The only allocation this module makes.
 #[must_use]
-pub fn observation_slot() -> (ObservationPublisherV1, ObservationReaderV1) {
-    let slot = Arc::new(ObservationSlotV1::default());
+pub fn observation_slot() -> (ObservationPublisher, ObservationReader) {
+    let slot = Arc::new(ObservationSlot::default());
     let reader = Arc::clone(&slot);
     (
-        ObservationPublisherV1 { slot },
-        ObservationReaderV1 { slot: reader },
+        ObservationPublisher { slot },
+        ObservationReader { slot: reader },
     )
 }
 
 // REALTIME_POLICY_BEGIN
-impl ObservationPublisherV1 {
+impl ObservationPublisher {
     /// Overwrite the cell with `window`. Wait-free: seven stores and two counter stores.
     ///
     /// Latest wins, always. There is no full, no backpressure and no return value, because there
     /// is no outcome a render thread could act on.
-    pub fn publish(&self, window: ObservationWindowV1) {
+    pub fn publish(&self, window: ObservationWindow) {
         let opening = self
             .slot
             .sequence_lock
@@ -160,19 +160,19 @@ impl ObservationPublisherV1 {
 }
 // REALTIME_POLICY_END
 
-impl ObservationReaderV1 {
+impl ObservationReader {
     /// The newest whole window, or `None` if nothing has been published or the read tore.
     ///
     /// Never a partial window: the fields are taken between two equal even counter reads, so what
     /// comes back is exactly one publication.
     #[must_use]
-    pub fn read(&self) -> Option<ObservationWindowV1> {
+    pub fn read(&self) -> Option<ObservationWindow> {
         for _ in 0..MAXIMUM_READ_ATTEMPTS {
             let before = self.slot.sequence_lock.load(Ordering::Acquire);
             if !before.is_multiple_of(2) {
                 continue;
             }
-            let window = ObservationWindowV1 {
+            let window = ObservationWindow {
                 first_sample: self.slot.first_sample.load(Ordering::Relaxed),
                 end_sample: self.slot.end_sample.load(Ordering::Relaxed),
                 sequence: self.slot.sequence.load(Ordering::Relaxed),

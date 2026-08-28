@@ -2684,26 +2684,26 @@ fn the_observation_fields_account_for_the_moved_bridge_rows() {
 #[test]
 fn a_computed_tap_is_refused_with_unsupported_kind() {
     use miso_engine_effect_contract::{
-        EffectDescriptor, EffectId, LinkModeSet, ObservationCadenceV1, ObservationChannelsV1,
-        ObservationCostV1, ObservationDescriptor, ObservationFoldV1, ObservationKindV1,
+        EffectDescriptor, EffectId, LinkModeSet, ObservationCadence, ObservationChannels,
+        ObservationCost, ObservationDescriptor, ObservationFold, ObservationKind,
         ObservationTapId, ParameterUnit,
     };
 
     const fn tap(
         id: u32,
-        cost: ObservationCostV1,
-        cadence: ObservationCadenceV1,
+        cost: ObservationCost,
+        cadence: ObservationCadence,
     ) -> ObservationDescriptor {
         ObservationDescriptor {
             id: ObservationTapId(id),
             display_name: "Gain Reduction",
             display_unit: "dB",
-            kind: ObservationKindV1::GainReductionDb,
+            kind: ObservationKind::GainReductionDb,
             unit: ParameterUnit::Db,
             cost,
             cadence,
-            fold: ObservationFoldV1::PeakMagnitude,
-            channels: ObservationChannelsV1::Shared,
+            fold: ObservationFold::PeakMagnitude,
+            channels: ObservationChannels::Shared,
             minimum: 0.0,
             maximum: 100.0,
         }
@@ -2711,13 +2711,13 @@ fn a_computed_tap_is_refused_with_unsupported_kind() {
     static MENU: [ObservationDescriptor; 2] = [
         tap(
             1,
-            ObservationCostV1::Resident,
-            ObservationCadenceV1::PerBlock,
+            ObservationCost::Resident,
+            ObservationCadence::PerBlock,
         ),
         tap(
             2,
-            ObservationCostV1::Computed,
-            ObservationCadenceV1::PerWindow,
+            ObservationCost::Computed,
+            ObservationCadence::PerWindow,
         ),
     ];
     static DESCRIPTOR: EffectDescriptor = EffectDescriptor {
@@ -2785,20 +2785,20 @@ fn a_computed_tap_is_refused_with_unsupported_kind() {
 #[test]
 fn observation_unit_conversion_is_declared_and_clamped() {
     use miso_engine_effect_contract::{
-        ObservationCadenceV1, ObservationChannelsV1, ObservationCostV1, ObservationDescriptor,
-        ObservationFoldV1, ObservationKindV1, ObservationTapId, ParameterUnit,
+        ObservationCadence, ObservationChannels, ObservationCost, ObservationDescriptor,
+        ObservationFold, ObservationKind, ObservationTapId, ParameterUnit,
     };
     const fn tap(unit: ParameterUnit) -> ObservationDescriptor {
         ObservationDescriptor {
             id: ObservationTapId(1),
             display_name: "Gain Reduction",
             display_unit: "dB",
-            kind: ObservationKindV1::GainReductionDb,
+            kind: ObservationKind::GainReductionDb,
             unit,
-            cost: ObservationCostV1::Resident,
-            cadence: ObservationCadenceV1::PerBlock,
-            fold: ObservationFoldV1::PeakMagnitude,
-            channels: ObservationChannelsV1::PerLane,
+            cost: ObservationCost::Resident,
+            cadence: ObservationCadence::PerBlock,
+            fold: ObservationFold::PeakMagnitude,
+            channels: ObservationChannels::PerLane,
             minimum: 0.0,
             maximum: 100.0,
         }

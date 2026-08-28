@@ -44,7 +44,7 @@ use miso_engine_bench_support::digest::Sha256Sink;
 use miso_engine_builtins::{MeterConfig, MeterHandle, MeterTap};
 use miso_engine_builtins_compiler::{MeterConsumer, MeterRequest};
 use miso_engine_core::realtime::{
-    PlanUnitEligibilityV1, PlanarBufferMut, PreparedRenderPlan, RenderIo, RenderTime,
+    PlanUnitEligibility, PlanarBufferMut, PreparedRenderPlan, RenderIo, RenderTime,
 };
 use miso_engine_effect_compiler::{
     EffectCompileCaps, EffectControlProducer, EffectObservationHandle,
@@ -61,7 +61,7 @@ use miso_engine_graph::{
 use miso_engine_graph_compiler::{GraphBuiltinsCompileRequest, GraphCompileRequest, GraphCompiler};
 use miso_engine_lane::Backend;
 use miso_engine_session::{
-    CompileCaps, DualMonoFader, MatrixOrPan, SessionTomlV1, StableId, compile_session,
+    CompileCaps, DualMonoFader, MatrixOrPan, SessionToml, StableId, compile_session,
     parse_session_toml,
 };
 
@@ -563,7 +563,7 @@ impl Workload {
 /// Every edit is a *removal or a neutralisation*, never an addition: a row can only ever measure a
 /// subset of what `sixty_four_track_console` measures, which is what makes the differences between
 /// the rows subtractions rather than comparisons of two different sessions.
-fn apply_strip(model: &mut SessionTomlV1, strip: Strip) {
+fn apply_strip(model: &mut SessionToml, strip: Strip) {
     if strip == Strip::AsWritten {
         return;
     }
@@ -677,7 +677,7 @@ impl PlanConfig {
 /// Split out of `SessionRuntime` so the meter and observation arms build the *same* model the
 /// `sixty_four_track_console` row builds, through the same code, rather than a second transcription
 /// of it.
-fn console_model(workload: Workload) -> SessionTomlV1 {
+fn console_model(workload: Workload) -> SessionToml {
     let text = match workload {
         Workload::NineTrackBaseline => NINE_TRACK,
         Workload::SixtyFourTrackConsoleLegacy => SIXTY_FOUR_TRACK_LEGACY,
@@ -707,7 +707,7 @@ fn console_model(workload: Workload) -> SessionTomlV1 {
 /// `index + 1` so they are nonzero and stable, the tap is the one a console meters by default, and
 /// the window is [`WINDOW_BLOCKS`] blocks. Nothing here is a benchmark convenience -- an arm that
 /// metered a shape no host prepares would report a cost nobody pays.
-fn meter_requests(model: &SessionTomlV1) -> Vec<MeterRequest> {
+fn meter_requests(model: &SessionToml) -> Vec<MeterRequest> {
     let config = MeterConfig {
         period_frames: NonZeroU32::new(WINDOW_BLOCKS * QUANTUM as u32).expect("nonzero period"),
         peak_hold_frames: 0,
@@ -760,7 +760,7 @@ pub struct SessionRuntime {
     ///
     /// Kept whole rather than as a count because the *join* is what a caller needs: this half is
     /// keyed by track id and the runtime half ([`SessionRuntime::unit_eligibility`]) by anonymous
-    /// lanes, and a collapse decision is their conjunction. `PlanUnitEligibilityV1::lane_tracks`
+    /// lanes, and a collapse decision is their conjunction. `PlanUnitEligibility::lane_tracks`
     /// is the relation between the two keys.
     structural_symmetry: Vec<(Box<str>, ChannelSymmetryWitness)>,
 }
@@ -1246,10 +1246,10 @@ impl SessionRuntime {
     /// The per-cohort form of [`SessionRuntime::symmetry_counters`]. The census is a pair of
     /// totals and a collapse decides per cohort, so the shape a mixed session realises -- four
     /// all-eligible cohorts and four all-ineligible ones, rather than eight half-and-half ones --
-    /// is only visible here. See `miso_engine_core::realtime::PlanUnitEligibilityV1` for what a
+    /// is only visible here. See `miso_engine_core::realtime::PlanUnitEligibility` for what a
     /// row carries and the two checks a caller owes before reading one as evidence.
     #[must_use]
-    pub fn unit_eligibility(&self) -> Vec<PlanUnitEligibilityV1> {
+    pub fn unit_eligibility(&self) -> Vec<PlanUnitEligibility> {
         self.plan.unit_eligibility()
     }
 
@@ -1312,7 +1312,7 @@ impl SessionRuntime {
 /// model rather than a second checked-in session because nothing about 128 tracks is a new
 /// *shape* -- it is sixteen full banks instead of eight -- and a second 288 KiB fixture would be
 /// 128 tracks of duplicated text to review for no additional coverage.
-fn synthesise_tracks(model: &mut miso_engine_session::SessionTomlV1, tracks: usize) {
+fn synthesise_tracks(model: &mut miso_engine_session::SessionToml, tracks: usize) {
     let template: Vec<_> = model.tracks.clone();
     let route = model.routes[0].clone();
     model.tracks.clear();
@@ -1512,7 +1512,7 @@ impl GraphRuntimeProcessor for GraphIdentity {
 /// moves and the field the `half_mono` row moves back on half its tracks. See
 /// [`FrozenGraphSource::from_block`] for why the subject honours it instead of always writing a
 /// stereo pair.
-fn channel_mappings(model: &SessionTomlV1) -> Vec<(usize, usize)> {
+fn channel_mappings(model: &SessionToml) -> Vec<(usize, usize)> {
     model
         .tracks
         .iter()

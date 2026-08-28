@@ -15,7 +15,7 @@
 //!
 //! Audio lives in one [`DisjointArena`](miso_engine_core::realtime::DisjointArena) per prepared
 //! plan: two planar `f32` planes of `buffers * frames` words, reached only through a checked
-//! [`ArenaLeaseV1`]. The lease API is the one implementation of *where the audio is* as well as
+//! [`ArenaLease`]. The lease API is the one implementation of *where the audio is* as well as
 //! of what happens to it.
 //!
 //! The sequential executor holds a single lease over the whole coloured arena. A delayed edge
@@ -38,7 +38,7 @@ use std::collections::BTreeMap;
 
 use core::num::NonZeroUsize;
 
-use miso_engine_core::realtime::{ArenaLeaseSetBuilder, ArenaLeaseV1, RenderError};
+use miso_engine_core::realtime::{ArenaLeaseSetBuilder, ArenaLease, RenderError};
 
 /// The arena reserves buffer zero as the always-zero silence slot, so every executor buffer is
 /// offset by one.
@@ -86,7 +86,7 @@ pub(crate) type FrameLane = f32;
 /// how the lowering removes a pass-through's copy -- so `-0.0` survives; `a + b` then accumulates
 /// left to right, exactly as the scalar reference `inputs.reduce(|a, b| a + b)` does.
 #[inline]
-fn reduce_plane(lease: &mut ArenaLeaseV1, plane: usize, out: u32, inputs: &[u32]) {
+fn reduce_plane(lease: &mut ArenaLease, plane: usize, out: u32, inputs: &[u32]) {
     match inputs {
         [] => lease.write(plane, out).fill(0.0),
         [single] => {
@@ -632,7 +632,7 @@ impl NodeKind {
 /// what the rest of the graph reads. A single-slot chain passes the same list twice, which is the
 /// in-place round-trip it has always done.
 struct ArenaMembers<'a> {
-    lease: &'a mut ArenaLeaseV1,
+    lease: &'a mut ArenaLease,
     inputs: &'a [u32],
     outputs: &'a [u32],
     /// One entry per lane when this chain's epilogue folds its routes, empty otherwise.
@@ -698,7 +698,7 @@ impl BankMembers for ArenaMembers<'_> {
 
 // REALTIME_POLICY_END
 
-/// The static half of one unit's [`PlanUnitEligibilityV1`] row, fixed at bind.
+/// The static half of one unit's [`PlanUnitEligibility`] row, fixed at bind.
 ///
 /// Split from the dynamic half because the two move at different times and for different reasons.
 /// Which track a lane renders, how many stages a unit has and which side of the seam each stage
@@ -706,7 +706,7 @@ impl BankMembers for ArenaMembers<'_> {
 /// lanes are *eligible* moves whenever a live-console record is drained. So the identity is
 /// computed once, here, from the node ids the lowering already resolved -- and the counters are
 /// pulled from the chain on demand.
-pub(crate) struct UnitIdentityV1 {
+pub(crate) struct UnitIdentity {
     pub(crate) banked: bool,
     pub(crate) stages: u32,
     pub(crate) upstream_of_seam_stages: u32,
@@ -755,7 +755,7 @@ fn node_track(node: &GraphNodeId) -> Box<str> {
 /// Ops, their audio and their delay lines: everything one executor (or one native parcel) owns.
 pub(crate) struct Runtime {
     /// This runtime's checked view of the plan's shared arena.
-    pub(crate) lease: ArenaLeaseV1,
+    pub(crate) lease: ArenaLease,
     pub(crate) delays: Box<[CompensationDelay]>,
     /// Input-side track alignment lines, one per track that declared a nonzero delay on either
     /// lane. Empty on every session that declared none, which is what keeps an undelayed plan on
@@ -763,7 +763,7 @@ pub(crate) struct Runtime {
     pub(crate) track_delays: Box<[TrackDelayLine]>,
     pub(crate) units: Box<[RuntimeUnit]>,
     /// One row per unit, in `units` order: the bind-time half of the collapse-eligibility query.
-    pub(crate) identity: Box<[UnitIdentityV1]>,
+    pub(crate) identity: Box<[UnitIdentity]>,
     /// Scratch for a bank chain's gather-source buffers, sized to the widest bank at bind.
     bank_inputs: Box<[u32]>,
     /// Scratch for a bank chain's scatter-target buffers, sized to the widest bank at bind.
@@ -809,7 +809,7 @@ impl Runtime {
     /// the `SOURCE` term, which lives on the control plane and is keyed by track id. This is the
     /// only place in the engine where the two halves of the channel-symmetry witness meet: the
     /// runtime half is per lane and source agnostic, the structural half is per track, and
-    /// `UnitIdentityV1::lane_tracks` is the relation between the two keys.
+    /// `UnitIdentity::lane_tracks` is the relation between the two keys.
     ///
     /// All lanes or nothing, exactly as `BankChain::all_lanes_symmetric` is: a cohort with one
     /// two-source lane saves nothing by collapsing the others, because the vector op runs every
@@ -844,11 +844,11 @@ impl Runtime {
     }
 
     pub(crate) fn new(
-        lease: ArenaLeaseV1,
+        lease: ArenaLease,
         delays: Vec<CompensationDelay>,
         track_delays: Vec<TrackDelayLine>,
         units: Vec<RuntimeUnit>,
-        identity: Vec<UnitIdentityV1>,
+        identity: Vec<UnitIdentity>,
         redirects: u64,
         folds: u64,
     ) -> Self {
@@ -1003,7 +1003,7 @@ fn bank_gather_source(member: &RuntimeOp) -> Option<u32> {
 /// The one implementation of node semantics, shared by both executors.
 fn execute_op(
     op: &mut RuntimeOp,
-    lease: &mut ArenaLeaseV1,
+    lease: &mut ArenaLease,
     delays: &mut [CompensationDelay],
     track_delays: &mut [TrackDelayLine],
     first_sample: u64,
@@ -1184,7 +1184,7 @@ fn execute_op(
     Ok(())
 }
 
-fn observe(op: &mut RuntimeOp, lease: &ArenaLeaseV1, first_sample: u64) -> Result<(), RenderError> {
+fn observe(op: &mut RuntimeOp, lease: &ArenaLease, first_sample: u64) -> Result<(), RenderError> {
     if op.observers.is_empty() {
         return Ok(());
     }
@@ -1370,8 +1370,8 @@ impl RuntimeParts {
         spec: &GraphSpec,
         routes: Vec<PreparedRoute>,
         effects: Vec<GraphPreparedEffect>,
-        effect_controls: Vec<crate::GraphEffectControlBindingV1>,
-        effect_observations: Vec<crate::GraphEffectObservationBindingV1>,
+        effect_controls: Vec<crate::GraphEffectControlBinding>,
+        effect_observations: Vec<crate::GraphEffectObservationBinding>,
         banks: Vec<GraphPreparedEffectBank>,
         builtin_banks: Vec<GraphPreparedBuiltinBank>,
         observers: Vec<GraphNodeObserverBinding>,
@@ -1695,7 +1695,7 @@ pub(crate) fn build_sequential(
     // rather than by a later walk because this is the only place the unit's ops and the spec's
     // node ids are both in hand: `RuntimeOp` deliberately carries no node id, and reconstructing
     // one from the arena buffers afterwards would be a second opinion about which lane is which.
-    let mut identity: Vec<UnitIdentityV1> = Vec::with_capacity(run_units.len());
+    let mut identity: Vec<UnitIdentity> = Vec::with_capacity(run_units.len());
     for (run, (membership, ops)) in run_units.iter().enumerate() {
         // A retired route op is absorbed by its cohort's epilogue: no unit, no dispatch, no
         // reduction, no `mix2x2_block` pass of its own.
@@ -1711,7 +1711,7 @@ pub(crate) fn build_sequential(
             let stages = membership.len().max(1);
             let lanes = ops.len() / stages;
             let node_of = |index: usize| &spec.nodes[program.ops[index].node as usize].id;
-            identity.push(UnitIdentityV1 {
+            identity.push(UnitIdentity {
                 banked: !membership.is_empty(),
                 stages: u32::try_from(stages).unwrap_or(u32::MAX),
                 upstream_of_seam_stages: u32::try_from(
@@ -2930,7 +2930,7 @@ mod tests {
     }
 
     /// One lease that owns `buffers` buffers of one plane, as the sequential executor does.
-    fn single_lease(frames: usize, buffers: usize) -> ArenaLeaseV1 {
+    fn single_lease(frames: usize, buffers: usize) -> ArenaLease {
         let mut builder = ArenaLeaseSetBuilder::new(
             NonZeroUsize::new(1).expect("one plane"),
             NonZeroUsize::new(frames).expect("frames"),
@@ -2942,7 +2942,7 @@ mod tests {
     }
 
     /// One stereo lease over `buffers` buffers, the shape `build_sequential` builds.
-    fn stereo_lease(frames: usize, buffers: usize) -> ArenaLeaseV1 {
+    fn stereo_lease(frames: usize, buffers: usize) -> ArenaLease {
         let mut builder = ArenaLeaseSetBuilder::new(
             NonZeroUsize::new(2).expect("stereo planes"),
             NonZeroUsize::new(frames).expect("frames"),

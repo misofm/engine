@@ -49,7 +49,7 @@ macro_rules! closed_tokens {
 
 /// Strict V1 TOML input after syntax/schema parsing.
 #[derive(Clone, Debug, PartialEq)]
-pub struct SessionTomlV1 {
+pub struct SessionToml {
     /// Must equal `SESSION_SCHEMA_VERSION_V1`.
     pub schema_version: u32,
     /// Stable session identity.

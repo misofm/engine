@@ -1356,7 +1356,7 @@ mod tests {
     }
 
     #[test]
-    fn engine_creation_is_transactional_and_validates_v1() {
+    fn engine_creation_is_transactional_and_validates() {
         let mut engine = ptr::dangling_mut::<Engine>();
         let mut wrong_version = config();
         wrong_version.abi_version += 1;
@@ -1675,7 +1675,7 @@ mod tests {
         );
         assert_eq!(event_out.required_bytes, 0);
 
-        let edit = miso_engine_protocol::SessionEditV1::SetSessionId {
+        let edit = miso_engine_protocol::SessionEdit::SetSessionId {
             session_id: miso_engine_session::StableId::parse("capi-ffi-replaced")
                 .expect("stable ID"),
         };

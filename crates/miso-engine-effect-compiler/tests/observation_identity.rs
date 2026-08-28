@@ -8,7 +8,7 @@
 #![allow(missing_docs)]
 
 use miso_engine_effect_compiler::launch_native_effect_registry;
-use miso_engine_effect_contract::{EffectDescriptor, ObservationCostV1, validate_descriptor};
+use miso_engine_effect_contract::{EffectDescriptor, ObservationCost, validate_descriptor};
 use miso_engine_effect_package::{
     effect_descriptor_wire_required_size, encode_effect_descriptor_wire,
 };
@@ -110,7 +110,7 @@ fn a_declared_tap_moves_contract_minor_and_leaves_the_state_layout_alone() {
         assert_eq!(tap.id.0, 1, "{}", descriptor.id);
         assert_eq!(tap.display_name, "Gain Reduction", "{}", descriptor.id);
         assert_eq!(tap.display_unit, "dB", "{}", descriptor.id);
-        assert_eq!(tap.cost, ObservationCostV1::Resident, "{}", descriptor.id);
+        assert_eq!(tap.cost, ObservationCost::Resident, "{}", descriptor.id);
         // The same 48 bytes for all four, because the two strings are the same two strings.
         assert_eq!(32 + tap.display_name.len() + tap.display_unit.len(), 48);
     }

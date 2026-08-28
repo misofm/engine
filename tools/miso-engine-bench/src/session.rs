@@ -13,7 +13,7 @@ use std::{
 };
 
 use miso_engine_session::{
-    CompileCaps, RouteSource, SessionTomlV1, StableId, canonical_session_toml, compile_session,
+    CompileCaps, RouteSource, SessionToml, StableId, canonical_session_toml, compile_session,
     parse_session_toml,
 };
 
@@ -96,7 +96,7 @@ struct FixtureCounts {
 }
 
 impl FixtureCounts {
-    fn from_session(session: &SessionTomlV1) -> Self {
+    fn from_session(session: &SessionToml) -> Self {
         let racks = session
             .tracks
             .iter()
@@ -124,7 +124,7 @@ impl FixtureCounts {
     }
 }
 
-fn representative_fixture() -> (String, SessionTomlV1) {
+fn representative_fixture() -> (String, SessionToml) {
     let mut model = parse_session_toml(CANONICAL_EXAMPLE).expect("canonical seed fixture parses");
     let track_template = model.tracks.pop().expect("seed has one track");
     let route_template = model.routes.pop().expect("seed has one route");
@@ -166,7 +166,7 @@ fn stable_id(value: &str) -> StableId {
     StableId::parse(value).expect("generated benchmark ID is schema-valid")
 }
 
-fn run_round(method: Method, fixture: &str, model: &SessionTomlV1) -> Round {
+fn run_round(method: Method, fixture: &str, model: &SessionToml) -> Round {
     for _ in 0..WARMUP_BATCHES {
         run_batch(method, fixture, model);
     }
@@ -185,7 +185,7 @@ fn run_round(method: Method, fixture: &str, model: &SessionTomlV1) -> Round {
     }
 }
 
-fn run_batch(method: Method, fixture: &str, model: &SessionTomlV1) {
+fn run_batch(method: Method, fixture: &str, model: &SessionToml) {
     for _ in 0..OPERATIONS_PER_BATCH {
         match method {
             Method::ParseCanonical => {

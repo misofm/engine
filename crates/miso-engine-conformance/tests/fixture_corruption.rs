@@ -3,11 +3,11 @@
 use std::panic::catch_unwind;
 
 use miso_engine_conformance::{
-    FixtureError, FixtureLimits, PcmFixtureV1, SampleRateHz, SplitMix64, crc32c, parse_manifest,
+    FixtureError, FixtureLimits, PcmFixture, SampleRateHz, SplitMix64, crc32c, parse_manifest,
 };
 
 fn fixture() -> Vec<u8> {
-    PcmFixtureV1::encode(SampleRateHz(48_000), 2, 2, &[1.0, -0.0, 0.25, -0.25]).expect("fixture")
+    PcmFixture::encode(SampleRateHz(48_000), 2, 2, &[1.0, -0.0, 0.25, -0.25]).expect("fixture")
 }
 
 fn set_crc(bytes: &mut [u8]) {
@@ -23,22 +23,22 @@ fn every_header_field_limit_overflow_truncation_and_eof_is_rejected() {
         let mut changed = original.clone();
         changed[range.start] ^= 1;
         assert_eq!(
-            PcmFixtureV1::parse(&changed, Default::default()),
+            PcmFixture::parse(&changed, Default::default()),
             Err(FixtureError::InvalidHeader)
         );
     }
     for offset in [12, 16, 20, 22, 24, 44] {
         let mut changed = original.clone();
         changed[offset] ^= 1;
-        assert!(PcmFixtureV1::parse(&changed, Default::default()).is_err());
+        assert!(PcmFixture::parse(&changed, Default::default()).is_err());
     }
     for length in 0..original.len() {
-        assert!(PcmFixtureV1::parse(&original[..length], Default::default()).is_err());
+        assert!(PcmFixture::parse(&original[..length], Default::default()).is_err());
     }
     let mut trailing = original.clone();
     trailing.extend_from_slice(&[0, 1, 2]);
     assert_eq!(
-        PcmFixtureV1::parse(&trailing, Default::default()),
+        PcmFixture::parse(&trailing, Default::default()),
         Err(FixtureError::LengthMismatch)
     );
     for limits in [
@@ -56,7 +56,7 @@ fn every_header_field_limit_overflow_truncation_and_eof_is_rejected() {
         },
     ] {
         assert_eq!(
-            PcmFixtureV1::parse(&original, limits),
+            PcmFixture::parse(&original, limits),
             Err(FixtureError::LimitsExceeded)
         );
     }
@@ -66,7 +66,7 @@ fn every_header_field_limit_overflow_truncation_and_eof_is_rejected() {
     overflow[32..40].copy_from_slice(&u64::MAX.to_le_bytes());
     set_crc(&mut overflow);
     assert_eq!(
-        PcmFixtureV1::parse(
+        PcmFixture::parse(
             &overflow,
             FixtureLimits {
                 max_channels: u16::MAX,
@@ -85,7 +85,7 @@ fn every_bit_and_4096_seeded_mutations_are_panic_free_and_detected() {
         for bit in 0..8 {
             let mut changed = original.clone();
             changed[byte] ^= 1 << bit;
-            let result = catch_unwind(|| PcmFixtureV1::parse(&changed, Default::default()));
+            let result = catch_unwind(|| PcmFixture::parse(&changed, Default::default()));
             assert!(result.is_ok());
             assert!(result.unwrap().is_err());
         }
@@ -96,7 +96,7 @@ fn every_bit_and_4096_seeded_mutations_are_panic_free_and_detected() {
         let index = generator.next_u64() as usize % changed.len();
         let bit = (generator.next_u64() & 7) as u8;
         changed[index] ^= 1_u8 << bit;
-        let result = catch_unwind(|| PcmFixtureV1::parse(&changed, Default::default()));
+        let result = catch_unwind(|| PcmFixture::parse(&changed, Default::default()));
         assert!(result.is_ok());
         assert!(result.unwrap().is_err());
     }

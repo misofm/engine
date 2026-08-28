@@ -1,7 +1,7 @@
 //! Accepted parser grammar and text-versus-typed diagnostic provenance.
 
 use miso_engine_session::{
-    DiagnosticCode, SessionTomlV1, canonical_session_toml, parse_session_toml,
+    DiagnosticCode, SessionToml, canonical_session_toml, parse_session_toml,
 };
 
 const CANONICAL: &str = include_str!("../../../fixtures/session/v1/canonical.toml");
@@ -72,7 +72,7 @@ fn textual_u64_max_rejects_at_revision_with_a_span() {
 
 #[test]
 fn typed_u64_above_i64_max_has_matching_code_and_path_without_span() {
-    let mut model: SessionTomlV1 = parse_session_toml(CANONICAL).expect("fixture parses");
+    let mut model: SessionToml = parse_session_toml(CANONICAL).expect("fixture parses");
     model.revision = i64::MAX as u64 + 1;
     let error = canonical_session_toml(&model).expect_err("typed revision exceeds TOML range");
     let diagnostic = only_diagnostic(

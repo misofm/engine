@@ -11,7 +11,7 @@ use std::{
 use miso_engine_builtins::{
     BuiltinChain, BuiltinParameters, ChannelParameters, DualMonoBlock, Matrix2x2,
 };
-use miso_engine_conformance::{FixtureLimits, PcmFixtureV1};
+use miso_engine_conformance::{FixtureLimits, PcmFixture};
 use sha2::{Digest, Sha256};
 
 const RATE: u32 = 48_000;
@@ -279,8 +279,8 @@ fn bool_json(values: &[bool]) -> String {
     format!("[{body}]")
 }
 
-fn parse_fixture(bytes: &[u8], max_frames: u64) -> Result<PcmFixtureV1, String> {
-    PcmFixtureV1::parse(
+fn parse_fixture(bytes: &[u8], max_frames: u64) -> Result<PcmFixture, String> {
+    PcmFixture::parse(
         bytes,
         FixtureLimits {
             max_frames,
@@ -293,7 +293,7 @@ fn parse_fixture(bytes: &[u8], max_frames: u64) -> Result<PcmFixtureV1, String> 
     .map_err(|error| format!("invalid mepcm fixture: {error:?}"))
 }
 
-fn source_stereo(fixture: &PcmFixtureV1) -> Result<Stereo, String> {
+fn source_stereo(fixture: &PcmFixture) -> Result<Stereo, String> {
     if fixture.rate().0 != RATE || fixture.channels() != 2 || fixture.frames() != FRAMES as u64 {
         return Err("source must be stereo 48000 Hz with exactly 480000 frames".to_owned());
     }
@@ -318,7 +318,7 @@ fn source_stereo(fixture: &PcmFixtureV1) -> Result<Stereo, String> {
     Ok(stereo)
 }
 
-fn probe_stereo(fixture: &PcmFixtureV1) -> Result<Stereo, String> {
+fn probe_stereo(fixture: &PcmFixture) -> Result<Stereo, String> {
     if fixture.rate().0 != RATE || fixture.channels() != 2 {
         return Err("probe must be stereo at 48000 Hz".to_owned());
     }
@@ -334,7 +334,7 @@ fn probe_stereo(fixture: &PcmFixtureV1) -> Result<Stereo, String> {
     Ok(stereo)
 }
 
-fn fixture_stereo(fixture: &PcmFixtureV1) -> Result<Stereo, String> {
+fn fixture_stereo(fixture: &PcmFixture) -> Result<Stereo, String> {
     let frames = usize::try_from(fixture.frames()).map_err(|_| "frame count does not fit host")?;
     let samples = fixture.samples();
     if samples.len() != frames.checked_mul(2).ok_or("sample count overflow")? {
@@ -615,7 +615,7 @@ mod tests {
     fn fixture_bytes(value: &Stereo) -> Vec<u8> {
         let mut samples = value.left.clone();
         samples.extend_from_slice(&value.right);
-        PcmFixtureV1::encode(SampleRateHz(RATE), 2, value.left.len() as u64, &samples)
+        PcmFixture::encode(SampleRateHz(RATE), 2, value.left.len() as u64, &samples)
             .expect("fixture")
     }
 
@@ -624,7 +624,7 @@ mod tests {
         if channels == 2 {
             samples.extend_from_slice(&value.right);
         }
-        PcmFixtureV1::encode(
+        PcmFixture::encode(
             SampleRateHz(rate),
             channels,
             value.left.len() as u64,
@@ -739,7 +739,7 @@ mod tests {
     #[test]
     fn probe_seed_and_cli_rejections_are_exact() {
         let mono = stereo(2_048);
-        let wrong_rate = PcmFixtureV1::parse(
+        let wrong_rate = PcmFixture::parse(
             &fixture_bytes_at(&mono, 44_100, 2),
             FixtureLimits {
                 max_frames: 1_000_000,
@@ -749,7 +749,7 @@ mod tests {
         )
         .unwrap();
         assert!(probe_stereo(&wrong_rate).is_err());
-        let wrong_channels = PcmFixtureV1::parse(
+        let wrong_channels = PcmFixture::parse(
             &fixture_bytes_at(&mono, RATE, 1),
             FixtureLimits {
                 max_frames: 1_000_000,

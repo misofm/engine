@@ -2,7 +2,7 @@
 //!
 //! This file is #140 D's `gain_reduction.rs`, re-expressed on the declared tap after R5 removed
 //! `PreparedNativeEffect::gain_reduction`. The reason the method went away is worth keeping: two
-//! routes to one value diverge, and a defaulted `Option<GainReductionV1>` accessor that nothing in
+//! routes to one value diverge, and a defaulted `Option<GainReduction>` accessor that nothing in
 //! the runtime called was the second route. Every assertion below is the same assertion it was --
 //! the reading is the kernel's own smoother state, in the contract's negative-for-reduction
 //! convention -- addressed through `observe_resident` instead.
@@ -50,8 +50,8 @@ fn render(effect: &mut dyn PreparedNativeEffect, value: f32, blocks: usize) -> O
 #[test]
 fn the_compressor_declares_one_resident_gain_reduction_tap() {
     use miso_engine_effect_contract::{
-        ObservationCadenceV1, ObservationChannelsV1, ObservationCostV1, ObservationFoldV1,
-        ObservationKindV1, ObservationTapId, ParameterUnit,
+        ObservationCadence, ObservationChannels, ObservationCost, ObservationFold,
+        ObservationKind, ObservationTapId, ParameterUnit,
     };
     let descriptor = miso_engine_compressor::COMPRESSOR_DESCRIPTOR_V1;
     validate_descriptor(&miso_engine_compressor::COMPRESSOR_DESCRIPTOR_V1).unwrap();
@@ -60,12 +60,12 @@ fn the_compressor_declares_one_resident_gain_reduction_tap() {
     assert_eq!(tap.id, ObservationTapId(1));
     assert_eq!(tap.display_name, "Gain Reduction");
     assert_eq!(tap.display_unit, "dB");
-    assert_eq!(tap.kind, ObservationKindV1::GainReductionDb);
+    assert_eq!(tap.kind, ObservationKind::GainReductionDb);
     assert_eq!(tap.unit, ParameterUnit::Db);
-    assert_eq!(tap.cost, ObservationCostV1::Resident);
-    assert_eq!(tap.cadence, ObservationCadenceV1::PerBlock);
-    assert_eq!(tap.fold, ObservationFoldV1::PeakMagnitude);
-    assert_eq!(tap.channels, ObservationChannelsV1::PerLane);
+    assert_eq!(tap.cost, ObservationCost::Resident);
+    assert_eq!(tap.cadence, ObservationCadence::PerBlock);
+    assert_eq!(tap.fold, ObservationFold::PeakMagnitude);
+    assert_eq!(tap.channels, ObservationChannels::PerLane);
     assert_eq!(tap.minimum.to_bits(), 0.0_f32.to_bits());
     assert_eq!(tap.maximum, 100.0);
     // The addressing rule: a tap the descriptor does not declare is refused, never answered with

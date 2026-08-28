@@ -299,7 +299,7 @@ pub(crate) fn bind_rack_banks(
                 // Issue #181: the group this slot came out of, carried forward so the runtime can
                 // build one chain per cohort instead of one per slot. It is the same `(group,
                 // slot)` pair `bound_slots` already reports; the report was the only consumer.
-                cohort: miso_engine_graph::GraphBankCohortV1 {
+                cohort: miso_engine_graph::GraphBankCohort {
                     group: u32::try_from(group_index)
                         .map_err(|_| diag("graph.resource.arithmetic_overflow", "$.graph"))?,
                     slot: u32::try_from(slot)

@@ -20,7 +20,7 @@ use miso_engine_protocol::{
     ParameterAutomationRate, ParameterChannel, ParameterDescriptor, ParameterDomain,
     ParameterMapping, ParameterMetadataPage, ParameterRack, ParameterStatePage,
     ParameterStateRecord, ParameterUnit, ParameterValueKind, ProtocolCodec, ProtocolVersion,
-    RequestId, SampleTime, SessionEditV1, SessionRevision, StatusCode, SuccessResponsePayload,
+    RequestId, SampleTime, SessionEdit, SessionRevision, StatusCode, SuccessResponsePayload,
     TransactionApplied, TypedCommandFrame, TypedEventFrame, TypedNonOkResponseFrame,
     TypedSuccessResponseFrame,
 };
@@ -174,7 +174,7 @@ fn logical_text(field: u16, index: usize, subfield: u16, value: &str) -> Logical
 enum BtlvSource {
     CapabilitiesQuery,
     CapabilitiesResponse,
-    Transaction(Vec<SessionEditV1>),
+    Transaction(Vec<SessionEdit>),
     Metadata(ParameterMetadataPage),
     State(ParameterStatePage),
     Automation(Vec<AutomationRecord>),
@@ -343,7 +343,7 @@ fn corpus() -> Vec<WorkFrame> {
     );
 
     let edits = (0..TRANSACTION_EDITS)
-        .map(|index| SessionEditV1::SetSessionId {
+        .map(|index| SessionEdit::SetSessionId {
             session_id: StableId::parse(&format!("benchmark-edit-{index:02}"))
                 .expect("generated stable ID"),
         })
@@ -706,7 +706,7 @@ fn logical_values(source: &BtlvSource) -> Vec<LogicalValue> {
                     1,
                     u64::from(edit.opcode().raw()),
                 ));
-                let SessionEditV1::SetSessionId { session_id } = edit else {
+                let SessionEdit::SetSessionId { session_id } = edit else {
                     panic!("frozen comparison transaction uses SetSessionId operations");
                 };
                 values.push(logical_text(1, index, 2, session_id.as_str()));

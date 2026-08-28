@@ -8,37 +8,37 @@
 #![allow(missing_docs)]
 
 use miso_engine_core::realtime::{
-    ObservationReaderV1, QueueGeneration, bounded_spsc, observation_slot,
+    ObservationReader, QueueGeneration, bounded_spsc, observation_slot,
 };
 use miso_engine_effect_contract::{
-    AutomationSpanKind, EffectControlLane, EffectControlRecord, ObservationCadenceV1,
-    ObservationChannelsV1, ObservationCostV1, ObservationDescriptor, ObservationFoldV1,
-    ObservationKindV1, ObservationLane, ObservationSample, ObservationTapId, ParameterChannel,
+    AutomationSpanKind, EffectControlLane, EffectControlRecord, ObservationCadence,
+    ObservationChannels, ObservationCost, ObservationDescriptor, ObservationFold,
+    ObservationKind, ObservationLane, ObservationSample, ObservationTapId, ParameterChannel,
     ParameterUnit, PreparedAutomationSpan,
 };
 
-const fn tap(id: u32, fold: ObservationFoldV1) -> ObservationDescriptor {
+const fn tap(id: u32, fold: ObservationFold) -> ObservationDescriptor {
     ObservationDescriptor {
         id: ObservationTapId(id),
         display_name: "Gain Reduction",
         display_unit: "dB",
-        kind: ObservationKindV1::GainReductionDb,
+        kind: ObservationKind::GainReductionDb,
         unit: ParameterUnit::Db,
-        cost: ObservationCostV1::Resident,
-        cadence: ObservationCadenceV1::PerBlock,
+        cost: ObservationCost::Resident,
+        cadence: ObservationCadence::PerBlock,
         fold,
-        channels: ObservationChannelsV1::PerLane,
+        channels: ObservationChannels::PerLane,
         minimum: 0.0,
         maximum: 100.0,
     }
 }
 
 static MENU: [ObservationDescriptor; 2] = [
-    tap(1, ObservationFoldV1::PeakMagnitude),
-    tap(2, ObservationFoldV1::Latest),
+    tap(1, ObservationFold::PeakMagnitude),
+    tap(2, ObservationFold::Latest),
 ];
 
-fn lane(default_window_blocks: u32) -> (ObservationLane, Vec<ObservationReaderV1>) {
+fn lane(default_window_blocks: u32) -> (ObservationLane, Vec<ObservationReader>) {
     let mut publishers = Vec::new();
     let mut readers = Vec::new();
     for _ in 0..MENU.len() {

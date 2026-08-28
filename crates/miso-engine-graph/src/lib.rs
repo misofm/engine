@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use miso_engine_core::{
     QuantumFrames,
     realtime::{
-        BufferArena, PlanUnitEligibilityV1, PlanarBufferMut, PlanarBufferRef, PrepareRenderPlan,
+        BufferArena, PlanUnitEligibility, PlanarBufferMut, PlanarBufferRef, PrepareRenderPlan,
         PreparedPlanExecutor, PreparedRenderPlan, RenderEnvelope, RenderError,
     },
 };
@@ -363,11 +363,11 @@ pub struct PreparedGraphPlan {
     effects: Vec<GraphPreparedEffect>,
     /// Issue #140 A: one entry per effect a live console drives. Empty for every session that
     /// asked for no console, which is what keeps the runtime on its byte-identical path.
-    effect_controls: Vec<GraphEffectControlBindingV1>,
+    effect_controls: Vec<GraphEffectControlBinding>,
     /// Issue #143 D3: one entry per effect that has observation taps. Empty for every session
     /// that named no observation capacity, which is what keeps the runtime unobserved *and*
     /// byte-identical rather than merely disabled.
-    effect_observations: Vec<GraphEffectObservationBindingV1>,
+    effect_observations: Vec<GraphEffectObservationBinding>,
     banks: Vec<GraphPreparedEffectBank>,
     builtin_banks: Vec<GraphPreparedBuiltinBank>,
     observers: Vec<GraphNodeObserverBinding>,
@@ -391,7 +391,7 @@ pub struct GraphPreparedEffect {
 /// session in the workspace, console or not. Keeping the channel in its own vector leaves
 /// `NodeKind`'s largest variant untouched: the new `NodeKind::ConsoleEffect(Box<ConsoleEffect>)`
 /// is one pointer, far below it, so a console-free plan reports the same bytes it always did.
-pub struct GraphEffectControlBindingV1 {
+pub struct GraphEffectControlBinding {
     /// The effect node this channel drives.
     pub node: EffectNodeId,
     /// Consumer half of the bounded channel; the producer stays on the control plane.
@@ -401,10 +401,10 @@ pub struct GraphEffectControlBindingV1 {
 /// One prepared effect's observation taps, carried beside the prepared effects (issue #143 D3).
 ///
 /// Beside, and not inside, for exactly the reason
-/// [`GraphEffectControlBindingV1`] is: `size_of::<runtime::RuntimeOp>()` is a reported byte, so a
+/// [`GraphEffectControlBinding`] is: `size_of::<runtime::RuntimeOp>()` is a reported byte, so a
 /// field on `GraphPreparedEffect` would move the retained-byte report of every session in the
 /// workspace, observed or not.
-pub struct GraphEffectObservationBindingV1 {
+pub struct GraphEffectObservationBinding {
     /// The effect node these taps observe.
     pub node: EffectNodeId,
     /// The render-side lane; the readers stay on the control plane.
@@ -432,7 +432,7 @@ pub struct GraphPreparedEffectBank {
     /// Candidacy now comes from the lowered program's dataflow and the whole lane-wise relation is
     /// proved on it, so this stays as the planner's own report of what it grouped rather than as
     /// an input to what the runtime builds.
-    pub cohort: GraphBankCohortV1,
+    pub cohort: GraphBankCohort,
 }
 
 /// Where one bound bank sits in its cohort chain.
@@ -442,7 +442,7 @@ pub struct GraphPreparedEffectBank {
 /// in the chain's program, and it is strictly increasing along the chain but need not be
 /// contiguous: a slot every lane leaves at identity, or one no lane can bind, is skipped.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
-pub struct GraphBankCohortV1 {
+pub struct GraphBankCohort {
     /// The plan group this bank was bound from.
     pub group: u32,
     /// This bank's slot index in that group's program.
@@ -1058,9 +1058,9 @@ pub struct PreparedGraphPlanParts {
     pub track_delays: Vec<PreparedTrackDelay>,
     pub effects: Vec<GraphPreparedEffect>,
     /// Issue #140 A: live-console control channels, one per driven effect node.
-    pub effect_controls: Vec<GraphEffectControlBindingV1>,
+    pub effect_controls: Vec<GraphEffectControlBinding>,
     /// Issue #143 D3: observation taps, one entry per observed effect node.
-    pub effect_observations: Vec<GraphEffectObservationBindingV1>,
+    pub effect_observations: Vec<GraphEffectObservationBinding>,
     pub banks: Vec<GraphPreparedEffectBank>,
     pub builtin_banks: Vec<GraphPreparedBuiltinBank>,
     pub observers: Vec<GraphNodeObserverBinding>,
@@ -1488,13 +1488,13 @@ impl PreparedPlanExecutor for GraphExecutor {
     /// The dynamic half comes from the same `RuntimeUnit::symmetry_counters` the census folds, so
     /// the rows and the totals cannot disagree -- summing `[eligible_lanes, lanes]` over these
     /// rows *is* `symmetry_counters`, and `the_half_mono_cohort_banks_like_a_uniform_one (which asserts rows-sum-to-census inline)` pins that.
-    fn unit_eligibility(&self) -> Vec<PlanUnitEligibilityV1> {
+    fn unit_eligibility(&self) -> Vec<PlanUnitEligibility> {
         self.runtime
             .units
             .iter()
             .zip(self.runtime.identity.iter())
             .enumerate()
-            .map(|(unit, (runtime_unit, identity))| PlanUnitEligibilityV1 {
+            .map(|(unit, (runtime_unit, identity))| PlanUnitEligibility {
                 unit: u32::try_from(unit).unwrap_or(u32::MAX),
                 banked: identity.banked,
                 stages: identity.stages,
@@ -3900,7 +3900,7 @@ mod tests {
             }],
             effect_controls: match control {
                 None => Vec::new(),
-                Some(control) => vec![GraphEffectControlBindingV1 {
+                Some(control) => vec![GraphEffectControlBinding {
                     node: effect_id,
                     control,
                 }],

@@ -20,7 +20,7 @@ use miso_engine_effect_compiler::{
 use miso_engine_graph::{GraphCompileCaps, PreparedGraphPlan};
 use miso_engine_graph_compiler::{Backend, GraphCompileRequest, GraphCompiler};
 use miso_engine_session::{
-    CompileCaps, CompiledSession, SessionTomlV1, compile_session, parse_session_toml,
+    CompileCaps, CompiledSession, SessionToml, compile_session, parse_session_toml,
 };
 
 /// Nine tracks, a real parametric EQ on each, routes into the session output, and a non-zero
@@ -56,7 +56,7 @@ fn compile_caps() -> CompileCaps {
 }
 
 /// The fixture with the one track's two lanes delayed by `left` and `right` samples.
-fn model_with_delay(left: u32, right: u32) -> SessionTomlV1 {
+fn model_with_delay(left: u32, right: u32) -> SessionToml {
     let mut model = parse_session_toml(SESSION).expect("fixture parses");
     model.limits.memory_bytes = i64::MAX as u64;
     // One delayed track among nine. The other eight are the control: whatever PDC does to them
@@ -74,7 +74,7 @@ fn model_with_delay(left: u32, right: u32) -> SessionTomlV1 {
 /// -- so asserting "the compensation sets did not move" on it would be asserting that an empty set
 /// stayed empty. One latent effect on one of nine tracks routed to a common output is the smallest
 /// session in which PDC has real work to do, and the delayed track is the one carrying it.
-fn latent_model_with_delay(left: u32, right: u32) -> SessionTomlV1 {
+fn latent_model_with_delay(left: u32, right: u32) -> SessionToml {
     use miso_engine_session::{
         Effect, EffectIdentity, EffectParam, EffectQuality, LinkMode, ParameterChannel,
         ParameterUnit, SidechainDeclaration, StableId,

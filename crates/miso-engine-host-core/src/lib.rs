@@ -47,8 +47,8 @@
 //! | call | thread | rule |
 //! |---|---|---|
 //! | [`prepare_host_session`] / [`prepare_host_runtime`] | control | allocates, parses and compiles; never inside an audio callback |
-//! | [`PreparedHost::start_render_session`] / [`StartedRenderSessionV1::start`] | render, once | attests this thread's floating-point environment before the first block and returns the plan on refusal |
-//! | [`StartedRenderSessionV1::render_contiguous`] | render, exclusively | the guarded render entry: pins the canonical floating-point environment for the block and restores the caller's exact control word |
+//! | [`PreparedHost::start_render_session`] / [`StartedRenderSession::start`] | render, once | attests this thread's floating-point environment before the first block and returns the plan on refusal |
+//! | [`StartedRenderSession::render_contiguous`] | render, exclusively | the guarded render entry: pins the canonical floating-point environment for the block and restores the caller's exact control word |
 //! | [`SourceControlSet::submit`] / [`SourceControlSet::seek`] | control, one thread at a time | copies once into the ring, returns typed backpressure, never blocks and never allocates |
 //! | `PreparedRenderPlan::render(io, RenderTime { absolute_sample })` | render, exclusively | exactly once per quantum; `absolute_sample` must equal the previous report's `next_absolute_sample`, and `0` on the first call; no other call touches the plan from any other thread |
 //! | `drop(PreparedHost)` / `PlanRetirer::try_reclaim` | control | only after the render thread has quiesced; never from the callback |
@@ -78,7 +78,7 @@
 //!   flush law can reach. So the entry saves the caller's control word, installs the canonical one,
 //!   renders, and restores the caller's exact word -- on the success path, on every rejection path
 //!   and while unwinding. A host does not have to configure its thread, and gets its thread back
-//!   unchanged. [`StartedRenderSessionV1`] is that entry for an embedding host;
+//!   unchanged. [`StartedRenderSession`] is that entry for an embedding host;
 //!   `miso_engine_v2_render_f32_planar` is it for the C ABI. Browser Wasm needs neither: the core
 //!   specification fixes round-to-nearest-even and full subnormal arithmetic, so the guard is a
 //!   zero-sized value there and the shipped artifact is unchanged.
@@ -97,12 +97,12 @@ pub use diagnostics::{
     PrepareDiagnostics, PrepareRejection, diagnostic_lines, fixed_diagnostic_line,
 };
 pub use prepare::{
-    HostConsoleHandlesV1, HostConsoleRequestV1, HostPrepareCaps, HostPrepareReport,
+    HostConsoleHandles, HostConsoleRequest, HostPrepareCaps, HostPrepareReport,
     HostShapePolicy, LAUNCH_SAMPLE_RATES_HZ, PreparedHost, compile_host_session, count_effects,
     parse_host_session, prepare_host_runtime, prepare_host_runtime_with_console,
     prepare_host_session, prepare_host_session_with_console,
 };
-pub use render_session::StartedRenderSessionV1;
+pub use render_session::StartedRenderSession;
 pub use solo::{ConsoleMuteDelta, ConsoleSoloState};
 pub use source::{
     SourceControlError, SourceControlSet, SourceSubmission, control_table_bytes,

@@ -1,6 +1,6 @@
 use core::num::NonZeroUsize;
 use miso_engine_core::realtime::{
-    ObservationReaderV1, Producer, QueueGeneration, bounded_spsc, observation_slot,
+    ObservationReader, Producer, QueueGeneration, bounded_spsc, observation_slot,
 };
 use miso_engine_effect_contract::{
     BankWidth, ChannelSymmetryWitness, EffectControlLane, EffectControlRecord,
@@ -1326,7 +1326,7 @@ pub struct EffectObservationHandle {
     /// checks the cost class without a second copy of the registry.
     pub descriptor: &'static EffectDescriptor,
     /// One reader per declared tap, in declaration order.
-    pub readers: Box<[ObservationReaderV1]>,
+    pub readers: Box<[ObservationReader]>,
 }
 
 /// Attach observation capacity to every prepared effect that declares at least one tap.

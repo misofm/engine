@@ -8,7 +8,7 @@ use miso_engine_protocol::{
     CounterId, CounterSnapshot, CounterValue, DecodeScratch, DiagnosticsRequest, EventPayload,
     ExpectedRevision, MessageId, MeterComponent, MeterRecord, MockProvider, NonOkResponse,
     ProtocolCodec, ProtocolController, ProtocolQueueConfig, ProtocolQueues, ReplayCache,
-    ReplayCacheConfig, RequestId, SampleTime, SessionEditV1, SessionRevision, SessionStore,
+    ReplayCacheConfig, RequestId, SampleTime, SessionEdit, SessionRevision, SessionStore,
     StatusCode, SuccessResponsePayload, TelemetryConfiguration, TransactionApplied,
     TypedCommandFrame, TypedEventFrame, TypedNonOkResponseFrame, TypedSuccessResponseFrame,
 };
@@ -34,7 +34,7 @@ fn assert_zero_allocations(operation: impl FnOnce()) {
 struct Corpus {
     codec: ProtocolCodec,
     full_frames: Vec<Vec<u8>>,
-    transaction_edits: Vec<SessionEditV1>,
+    transaction_edits: Vec<SessionEdit>,
     non_ok: NonOkResponse,
     frame_output: Vec<u8>,
     decode_fields: [u16; 1024],
@@ -86,7 +86,7 @@ impl Corpus {
 fn prepare_corpus() -> Corpus {
     let codec = ProtocolCodec::default();
     let edits = (0..64)
-        .map(|index| SessionEditV1::SetSessionId {
+        .map(|index| SessionEdit::SetSessionId {
             session_id: StableId::parse(&format!("audit-{index}")).expect("prepared stable ID"),
         })
         .collect::<Vec<_>>();

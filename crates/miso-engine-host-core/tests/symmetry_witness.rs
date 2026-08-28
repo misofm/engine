@@ -44,7 +44,7 @@ use core::num::{NonZeroU32, NonZeroUsize};
 use miso_engine_builtins::MeterTap;
 use miso_engine_effect_contract::{EffectControlRecord, ParameterChannel};
 use miso_engine_host_core::{
-    ChannelSymmetryWitness, EffectRack, HostConsoleHandlesV1, HostConsoleRequestV1,
+    ChannelSymmetryWitness, EffectRack, HostConsoleHandles, HostConsoleRequest,
     HostPrepareCaps, HostShapePolicy, PreparedHost, SourceSubmission,
     prepare_host_session_with_console, session_structural_symmetry,
 };
@@ -86,8 +86,8 @@ fn caps() -> HostPrepareCaps {
     }
 }
 
-fn console() -> HostConsoleRequestV1 {
-    HostConsoleRequestV1 {
+fn console() -> HostConsoleRequest {
+    HostConsoleRequest {
         control_queue_depth: Some(NonZeroUsize::new(8).expect("depth")),
         meter_period_frames: Some(NonZeroU32::new(QUANTUM as u32).expect("period")),
         meter_queue_depth: NonZeroUsize::new(16).expect("meter depth"),
@@ -99,7 +99,7 @@ fn console() -> HostConsoleRequestV1 {
 
 struct Console {
     prepared: PreparedHost,
-    handles: HostConsoleHandlesV1,
+    handles: HostConsoleHandles,
     block: usize,
 }
 
@@ -327,7 +327,7 @@ fn the_two_halves_of_the_witness_are_decided_independently() {
 /// 41, and a difference of one lane cannot be read off a denominator that moved by sixteen.
 ///
 /// The claim was never about the totals anyway. It is "exactly that track, and no other", and
-/// `PlanUnitEligibilityV1` states it directly: the runtime witness is per lane and `lane_tracks`
+/// `PlanUnitEligibility` states it directly: the runtime witness is per lane and `lane_tracks`
 /// says which track each lane is. That form is also immune to the plan shape, so it holds whether
 /// the track's stages are bank lanes or per-node ops.
 ///

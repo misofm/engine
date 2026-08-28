@@ -19,7 +19,7 @@ fn main() -> ExitCode {
     // Issue #146: this process can pin the canonical floating-point environment and hand the
     // caller's word back bit-exactly. It is the process-wide smoke check, not the load-bearing one
     // -- a control word belongs to a thread, so the render thread re-attests for itself when
-    // `miso_engine_host_core::StartedRenderSessionV1::start` runs there. Refusing here means the
+    // `miso_engine_host_core::StartedRenderSession::start` runs there. Refusing here means the
     // build cannot pin at all, which no real audio callback would survive either.
     if let Err(rejection) = miso_engine_lane::attest_fp_environment() {
         eprintln!("miso-engine-host-native refusing to start: {rejection}");

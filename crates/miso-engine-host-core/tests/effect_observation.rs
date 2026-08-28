@@ -17,7 +17,7 @@ use miso_engine_effect_contract::{
     PreparedPorts, PreparedSidechainPort,
 };
 use miso_engine_host_core::{
-    EffectRack, HostConsoleHandlesV1, HostConsoleRequestV1, HostPrepareCaps, HostShapePolicy,
+    EffectRack, HostConsoleHandles, HostConsoleRequest, HostPrepareCaps, HostShapePolicy,
     PreparedHost, SourceSubmission, prepare_host_session_with_console,
 };
 
@@ -72,12 +72,12 @@ enum Leg {
     AllArmed,
 }
 
-fn console(leg: Leg) -> HostConsoleRequestV1 {
+fn console(leg: Leg) -> HostConsoleRequest {
     let console = matches!(
         leg,
         Leg::ConsoleNoCapacity | Leg::CapacityUnarmed | Leg::AllArmed
     );
-    HostConsoleRequestV1 {
+    HostConsoleRequest {
         control_queue_depth: console.then(|| NonZeroUsize::new(8).expect("depth")),
         meter_period_frames: console
             .then(|| NonZeroU32::new(QUANTUM as u32 * WINDOW_BLOCKS).expect("period")),
@@ -93,7 +93,7 @@ fn console(leg: Leg) -> HostConsoleRequestV1 {
 
 struct Session {
     prepared: PreparedHost,
-    handles: HostConsoleHandlesV1,
+    handles: HostConsoleHandles,
     block: usize,
 }
 
@@ -180,9 +180,9 @@ fn subscribe_all(session: &mut Session, armed: bool, window_blocks: u32) -> u64 
 
 /// The reader for one track's compressor tap, in whichever rack the fixture declared it.
 fn reader(
-    handles: &HostConsoleHandlesV1,
+    handles: &HostConsoleHandles,
     track: usize,
-) -> &miso_engine_core::realtime::ObservationReaderV1 {
+) -> &miso_engine_core::realtime::ObservationReader {
     let id = handles.tracks[track].as_ref();
     let handle = handles
         .effect_observations
@@ -649,7 +649,7 @@ fn scalar_reference_windows(
 /// #137-E1 mirror) -> the published window is one block stale and the bit comparison fails.
 #[test]
 fn the_per_node_scalar_path_publishes_its_own_block() {
-    let request = HostConsoleRequestV1 {
+    let request = HostConsoleRequest {
         control_queue_depth: Some(NonZeroUsize::new(8).expect("depth")),
         meter_period_frames: Some(NonZeroU32::new(QUANTUM as u32 * WINDOW_BLOCKS).expect("period")),
         meter_queue_depth: NonZeroUsize::new(16).expect("meter depth"),
@@ -809,7 +809,7 @@ fn observation_retained_bytes_are_the_declared_menu_times_one_row_and_one_slot()
 /// Observation capacity without a console is a rejection, not a silent half-attach.
 #[test]
 fn observation_without_a_control_channel_is_refused() {
-    let request = HostConsoleRequestV1 {
+    let request = HostConsoleRequest {
         control_queue_depth: None,
         meter_period_frames: Some(NonZeroU32::new(QUANTUM as u32 * WINDOW_BLOCKS).expect("period")),
         meter_queue_depth: NonZeroUsize::new(16).expect("meter depth"),
@@ -826,7 +826,7 @@ fn observation_without_a_control_channel_is_refused() {
     );
 
     // And a designated master must name a track this session has.
-    let request = HostConsoleRequestV1 {
+    let request = HostConsoleRequest {
         control_queue_depth: Some(NonZeroUsize::new(8).expect("depth")),
         master_track: Some(TRACKS as u32),
         ..request
@@ -864,8 +864,8 @@ fn observation_without_a_control_channel_is_refused() {
 fn observation_cost_classes_are_what_they_claim() {
     use miso_engine_core::realtime::observation_slot;
     use miso_engine_effect_contract::{
-        ObservationCadenceV1, ObservationChannelsV1, ObservationCostV1, ObservationDescriptor,
-        ObservationFoldV1, ObservationKindV1, ObservationLane, ObservationTapId, ParameterUnit,
+        ObservationCadence, ObservationChannels, ObservationCost, ObservationDescriptor,
+        ObservationFold, ObservationKind, ObservationLane, ObservationTapId, ParameterUnit,
     };
     use std::cell::Cell;
     use std::time::Instant;
@@ -874,12 +874,12 @@ fn observation_cost_classes_are_what_they_claim() {
         id: ObservationTapId(1),
         display_name: "Gain Reduction",
         display_unit: "dB",
-        kind: ObservationKindV1::GainReductionDb,
+        kind: ObservationKind::GainReductionDb,
         unit: ParameterUnit::Db,
-        cost: ObservationCostV1::Resident,
-        cadence: ObservationCadenceV1::PerBlock,
-        fold: ObservationFoldV1::PeakMagnitude,
-        channels: ObservationChannelsV1::PerLane,
+        cost: ObservationCost::Resident,
+        cadence: ObservationCadence::PerBlock,
+        fold: ObservationFold::PeakMagnitude,
+        channels: ObservationChannels::PerLane,
         minimum: 0.0,
         maximum: 100.0,
     }];

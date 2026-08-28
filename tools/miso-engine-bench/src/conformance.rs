@@ -11,7 +11,7 @@ use std::{
 };
 
 use miso_engine_conformance::{
-    ComparisonTolerance, PcmFixtureV1, PlanarBlock, SampleRateHz, compare_f32_to_f64,
+    ComparisonTolerance, PcmFixture, PlanarBlock, SampleRateHz, compare_f32_to_f64,
 };
 
 const WARMUP_BATCHES: usize = 512;
@@ -24,14 +24,14 @@ pub(crate) fn main() {
     let rounds = parse_rounds();
     let samples = generated_samples();
     let reference = samples.iter().copied().map(f64::from).collect::<Vec<_>>();
-    let fixture = PcmFixtureV1::encode(
+    let fixture = PcmFixture::encode(
         SampleRateHz(48_000),
         CHANNELS as u16,
         FRAMES as u64,
         &samples,
     )
     .expect("fixture encode");
-    let fixture_crc = PcmFixtureV1::parse(&fixture, Default::default())
+    let fixture_crc = PcmFixture::parse(&fixture, Default::default())
         .expect("fixture parse")
         .checksum();
     let metadata = Metadata::gather();
@@ -82,7 +82,7 @@ fn execute(method: Method, samples: &[f32], reference: &[f64], fixture: &[u8]) {
     match method {
         Method::Decode => {
             black_box(
-                PcmFixtureV1::parse(black_box(fixture), Default::default()).expect("fixture parse"),
+                PcmFixture::parse(black_box(fixture), Default::default()).expect("fixture parse"),
             );
         }
         Method::Compare => {

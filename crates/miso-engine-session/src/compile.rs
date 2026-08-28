@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use miso_engine_core::{QuantumFrames, SampleRateHz};
 
 use crate::{
-    Diagnostic, DiagnosticCode, DiagnosticPath, DiagnosticSet, ResourceEstimate, SessionTomlV1,
+    Diagnostic, DiagnosticCode, DiagnosticPath, DiagnosticSet, ResourceEstimate, SessionToml,
     StableId,
     canonical::write_canonical,
     estimate::{estimate_session, with_canonical_bytes},
@@ -45,7 +45,7 @@ pub struct CompiledSession {
     resource_estimate: ResourceEstimate,
 }
 #[derive(Clone, Debug)]
-struct NormalizedSession(SessionTomlV1);
+struct NormalizedSession(SessionToml);
 
 /// Planar PCM output shape retained by a compiled session.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -97,7 +97,7 @@ impl CompiledSession {
     }
     /// Read-only normalized declaration retained by this non-publishable artifact.
     #[must_use]
-    pub fn normalized_model(&self) -> &SessionTomlV1 {
+    pub fn normalized_model(&self) -> &SessionToml {
         &self.normalized.0
     }
 }
@@ -106,7 +106,7 @@ impl CompiledSession {
 /// The checked preflight and all cap comparisons occur before canonical-string allocation,
 /// model cloning, sorting, or index-map construction. No plan is prepared or published.
 pub fn compile_session(
-    session: &SessionTomlV1,
+    session: &SessionToml,
     caps: CompileCaps,
 ) -> Result<CompiledSession, DiagnosticSet> {
     let estimate = estimate_session(session)?;
@@ -172,7 +172,7 @@ pub fn compile_session(
     })
 }
 fn check_caps(
-    session: &SessionTomlV1,
+    session: &SessionToml,
     estimate: ResourceEstimate,
     caps: CompileCaps,
 ) -> Result<(), DiagnosticSet> {

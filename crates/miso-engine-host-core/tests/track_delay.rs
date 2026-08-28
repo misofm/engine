@@ -27,7 +27,7 @@ use core::num::{NonZeroU32, NonZeroUsize};
 use miso_engine_builtins::MeterTap;
 use miso_engine_core::realtime::{PlanarBufferMut, RenderIo, RenderTime};
 use miso_engine_host_core::{
-    HostConsoleRequestV1, HostPrepareCaps, HostShapePolicy, SourceSubmission,
+    HostConsoleRequest, HostPrepareCaps, HostShapePolicy, SourceSubmission,
     prepare_host_session_with_console, session_structural_symmetry,
 };
 
@@ -59,8 +59,8 @@ fn caps() -> HostPrepareCaps {
     }
 }
 
-fn console() -> HostConsoleRequestV1 {
-    HostConsoleRequestV1 {
+fn console() -> HostConsoleRequest {
+    HostConsoleRequest {
         control_queue_depth: Some(NonZeroUsize::new(8).expect("depth")),
         meter_period_frames: Some(NonZeroU32::new(QUANTUM as u32).expect("period")),
         meter_queue_depth: NonZeroUsize::new(16).expect("meter depth"),

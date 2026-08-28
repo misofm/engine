@@ -101,7 +101,7 @@ pub struct RenderIo<'a> {
 /// Nothing on the render path builds or reads this. It is materialised on demand, off render,
 /// after the render audit is disarmed, and it allocates.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PlanUnitEligibilityV1 {
+pub struct PlanUnitEligibility {
     /// This unit's position in the built runtime's execution order.
     pub unit: u32,
     /// `true` for a homogeneous bank chain, `false` for a single dispatched op.
@@ -128,7 +128,7 @@ pub struct PlanUnitEligibilityV1 {
     pub lane_eligible: Box<[bool]>,
 }
 
-impl PlanUnitEligibilityV1 {
+impl PlanUnitEligibility {
     /// Active lanes this unit renders.
     #[must_use]
     pub fn lanes(&self) -> u32 {
@@ -238,13 +238,13 @@ pub trait PreparedPlanExecutor: Send {
     fn symmetry_counters(&self) -> [u64; 2] {
         [0, 0]
     }
-    /// One [`PlanUnitEligibilityV1`] row per scheduling unit, in execution order.
+    /// One [`PlanUnitEligibility`] row per scheduling unit, in execution order.
     ///
     /// The per-cohort form of [`symmetry_counters`](Self::symmetry_counters); that method's
     /// documentation says what the census can and cannot be used for. Allocates, walks the built
     /// runtime, and is read only after rendering is disarmed.
     #[doc(hidden)]
-    fn unit_eligibility(&self) -> Vec<PlanUnitEligibilityV1> {
+    fn unit_eligibility(&self) -> Vec<PlanUnitEligibility> {
         Vec::new()
     }
     /// Bank-chain lanes whose scatter was pointed at their consumer's buffer (issue #202 rec 3).
@@ -310,7 +310,7 @@ pub trait PreparedPlanExecutor: Send {
     /// `SOURCE` term, decided from the compiled session by
     /// `session_structural_symmetry`. Every chain is unarmed until this is called, and an
     /// unarmed chain never collapses: the runtime half a chain carries is source agnostic (see
-    /// [`PlanUnitEligibilityV1::lane_eligible`]) and would admit a track whose two channels read
+    /// [`PlanUnitEligibility::lane_eligible`]) and would admit a track whose two channels read
     /// two different source channels.
     ///
     /// Off the render thread, once, after bind.
@@ -601,11 +601,11 @@ impl PreparedRenderPlan {
     }
     /// One collapse-eligibility row per scheduling unit, outside the render scope.
     ///
-    /// See [`PlanUnitEligibilityV1`] for what a row carries and for the two things a caller must
+    /// See [`PlanUnitEligibility`] for what a row carries and for the two things a caller must
     /// check before reading one as evidence.
     #[doc(hidden)]
     #[must_use]
-    pub fn unit_eligibility(&self) -> Vec<PlanUnitEligibilityV1> {
+    pub fn unit_eligibility(&self) -> Vec<PlanUnitEligibility> {
         assert!(
             !super::audit::is_render_scope_active(),
             "unit eligibility is sealed until the render audit is disarmed"

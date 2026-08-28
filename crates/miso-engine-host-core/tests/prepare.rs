@@ -426,17 +426,17 @@ fn contract_types_are_send_and_not_sync() {
 #[test]
 fn console_attaches_bounded_control_and_meter_halves_in_canonical_track_order() {
     use core::num::{NonZeroU32, NonZeroUsize};
-    use miso_engine_host_core::{HostConsoleRequestV1, prepare_host_session_with_console};
+    use miso_engine_host_core::{HostConsoleRequest, prepare_host_session_with_console};
 
     let mut console_caps = caps();
     console_caps.maximum_meter_streams = 16;
     console_caps.maximum_meter_items = 1 << 16;
     console_caps.maximum_meter_bytes = 1 << 24;
-    let console = HostConsoleRequestV1 {
+    let console = HostConsoleRequest {
         control_queue_depth: Some(NonZeroUsize::new(4).expect("nonzero")),
         meter_period_frames: Some(NonZeroU32::new(128).expect("nonzero")),
         meter_queue_depth: NonZeroUsize::new(8).expect("nonzero"),
-        ..HostConsoleRequestV1::default()
+        ..HostConsoleRequest::default()
     };
     let (compiled, prepared, mut handles) =
         prepare_host_session_with_console(SESSION, &console_caps, &console).unwrap_or_else(
@@ -491,12 +491,12 @@ fn console_attaches_bounded_control_and_meter_halves_in_canonical_track_order() 
 #[test]
 fn no_console_request_attaches_nothing_and_charges_nothing() {
     use miso_engine_host_core::{
-        HostConsoleRequestV1, compile_host_session as compile, prepare_host_runtime_with_console,
+        HostConsoleRequest, compile_host_session as compile, prepare_host_runtime_with_console,
     };
 
     let compiled = compile(SESSION, &caps()).expect("compiled fixture");
     let (plain, handles) =
-        prepare_host_runtime_with_console(&compiled, &caps(), &HostConsoleRequestV1::default())
+        prepare_host_runtime_with_console(&compiled, &caps(), &HostConsoleRequest::default())
             .unwrap_or_else(|failure| {
                 panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes()))
             });
