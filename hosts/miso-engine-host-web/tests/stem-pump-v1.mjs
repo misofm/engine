@@ -206,6 +206,51 @@ async function resumeInsideGestureGate() {
   await gate.close()
 }
 
+async function sameSessionReplacementReleasesPredecessorPin() {
+  const bytes = pcm16([0, 1, -1, 32767], 1)
+  const stemIdentity = identity(bytes)
+  const backend = new FakeOpfsBackend()
+  const gate = new StemSessionGate(
+    new OpfsStemStore({
+      storage: backend.storage(),
+      locks: new FakeLockManager(),
+      tabId: "same-reopen",
+    }),
+    new MemoryStemResolver({ [stemIdentity]: bytes })
+  )
+  const options = {
+    sessionId: "same",
+    stems: [{ identity: stemIdentity, bytes: bytes.byteLength }],
+    resume() {},
+  }
+  const first = await gate.open(options)
+  const replacement = await Promise.race([
+    gate.open(options),
+    new Promise((resolve) => setTimeout(() => resolve("timed-out"), 100)),
+  ])
+  assert.notEqual(
+    replacement,
+    "timed-out",
+    "same-session replacement waited on its own predecessor pin lock"
+  )
+  assert.equal(gate.state, "interactive")
+  await assert.rejects(first.read(stemIdentity), (error) => {
+    assert.equal(error.code, "stem.session.closed")
+    return true
+  })
+  let index = JSON.parse(
+    new TextDecoder().decode(backend.bytes("miso-stems-v1/index.json"))
+  )
+  assert.deepEqual(index.stems[stemIdentity].pins, [
+    "session:same-reopen:same",
+  ])
+  await gate.close()
+  index = JSON.parse(
+    new TextDecoder().decode(backend.bytes("miso-stems-v1/index.json"))
+  )
+  assert.deepEqual(index.stems[stemIdentity].pins, [])
+}
+
 async function refusedGateNeverBecomesInteractive() {
   const events = []
   let resumed = false
@@ -260,6 +305,7 @@ await transformContract()
 await workerPumpContract()
 await readFailureHardStops()
 await resumeInsideGestureGate()
+await sameSessionReplacementReleasesPredecessorPin()
 await refusedGateNeverBecomesInteractive()
 await rejectedResumeDoesNotLeakPins()
 process.stdout.write("stem-pump-v1: PASS\n")

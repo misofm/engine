@@ -37,6 +37,7 @@ function store(backend, locks, options = {}) {
     hooks: options.hooks,
     now: options.now,
     readDeadlineMs: 1_000,
+    ingestReadDeadlineMs: options.ingestReadDeadlineMs ?? 1_000,
   })
 }
 
@@ -184,6 +185,46 @@ async function corruptionSelfHeals() {
   assert.equal(resolver.requests.length, 4, "verify-on-open catches and heals truncation")
   assert.equal(await opfs.verify(stem.identity), true)
   await third.close()
+}
+
+async function indexRecoveryAdoptsSelfVerifyingFinals() {
+  for (const damage of ["missing", "corrupt"]) {
+    const stem = fixture(`index-${damage}`, 8192)
+    const backend = new FakeOpfsBackend()
+    const locks = new FakeLockManager()
+    const seeded = store(backend, locks, { tabId: `seed-${damage}` })
+    const seedLease = await seeded.openSession({
+      sessionId: "seed",
+      stems: requirements([stem]),
+      resolver: new MemoryStemResolver(stemMap([stem])),
+    })
+    await seedLease.close()
+
+    if (damage === "missing") backend.remove("miso-stems-v1/index.json")
+    else backend.setBytes("miso-stems-v1/index.json", encoder.encode("{not-json"))
+
+    const resolver = new MemoryStemResolver(stemMap([stem]))
+    const recovered = store(backend, locks, { tabId: `recover-${damage}` })
+    const lease = await recovered.openSession({
+      sessionId: "recovered",
+      stems: requirements([stem]),
+      resolver,
+    })
+    assert.equal(
+      resolver.requests.length,
+      0,
+      `${damage} crash-only index must adopt a self-verifying final without re-ingest`
+    )
+    const index = JSON.parse(
+      new TextDecoder().decode(backend.bytes("miso-stems-v1/index.json"))
+    )
+    assert.equal(index.stems[stem.identity].bytes, stem.bytes)
+    assert.deepEqual(
+      backend.bytes(`miso-stems-v1/sha256-${stem.identity.slice(7)}`),
+      stem.pcm
+    )
+    await lease.close()
+  }
 }
 
 async function promoteAtomicityAndCrashSweep() {
@@ -429,6 +470,73 @@ async function abortCleansStaging() {
   )
 }
 
+async function wedgedDecoderObeysAbortAndDeadline() {
+  const stem = fixture("wedged-decoder", 4096)
+  const makeResolver = (onPull) => ({
+    async resolve() {
+      return {
+        stream: new ReadableStream({
+          pull() {
+            onPull()
+            return new Promise(() => {})
+          },
+        }, { highWaterMark: 0 }),
+      }
+    },
+  })
+
+  const abortBackend = new FakeOpfsBackend()
+  const abortController = new AbortController()
+  let readStarted
+  const started = new Promise((resolve) => { readStarted = resolve })
+  const abortStore = store(abortBackend, new FakeLockManager(), {
+    tabId: "wedge-abort",
+    ingestReadDeadlineMs: 1_000,
+  })
+  const opening = abortStore.openSession({
+    sessionId: "wedge-abort",
+    stems: requirements([stem]),
+    resolver: makeResolver(readStarted),
+    signal: abortController.signal,
+  })
+  await started
+  abortController.abort(new DOMException("mix switched", "AbortError"))
+  const abortOutcome = await Promise.race([
+    opening.then(
+      () => "opened",
+      (error) => error
+    ),
+    new Promise((resolve) => setTimeout(() => resolve("timed-out"), 100)),
+  ])
+  assert.notEqual(
+    abortOutcome,
+    "timed-out",
+    "wedged decoder ignored mix-switch abort"
+  )
+  assert.equal(abortOutcome.name, "AbortError")
+  assert.deepEqual(abortBackend.names("miso-stems-v1/staging"), [])
+
+  const deadlineBackend = new FakeOpfsBackend()
+  const deadlineStore = store(deadlineBackend, new FakeLockManager(), {
+    tabId: "wedge-deadline",
+    ingestReadDeadlineMs: 20,
+  })
+  const deadlineOutcome = await Promise.race([
+    deadlineStore.openSession({
+      sessionId: "wedge-deadline",
+      stems: requirements([stem]),
+      resolver: makeResolver(() => {}),
+    }).then(
+      () => "opened",
+      (error) => error
+    ),
+    new Promise((resolve) => setTimeout(() => resolve("timed-out"), 200)),
+  ])
+  assert.notEqual(deadlineOutcome, "timed-out", "wedged decoder escaped its deadline")
+  assert.equal(deadlineOutcome.code, "stem.decode.stalled")
+  assert.deepEqual(deadlineBackend.names("miso-stems-v1/staging"), [])
+}
+
 async function storageUnavailable() {
   const opfs = new OpfsStemStore({ storage: {}, locks: new FakeLockManager() })
   await assert.rejects(opfs.open(), (error) => {
@@ -508,6 +616,7 @@ async function modeDetection() {
 await fanMixNarrative()
 await twoTabCollision()
 await corruptionSelfHeals()
+await indexRecoveryAdoptsSelfVerifyingFinals()
 await promoteAtomicityAndCrashSweep()
 await openerDoesNotSweepActivePromote()
 await crashedSessionPinsAreRecoverable()
@@ -515,6 +624,7 @@ await quotaFailureKeepsSurvivors()
 await lruEvictsOnlyUnpinned()
 await tabCloseMidStaging()
 await abortCleansStaging()
+await wedgedDecoderObeysAbortAndDeadline()
 await storageUnavailable()
 await latencyRows()
 await modeDetection()

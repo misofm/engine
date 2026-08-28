@@ -100,11 +100,14 @@ function assertPumpHasNoNetwork(text) {
 async function runMutationLedger() {
   const mutations = [
     {
-      name: "content-key -> session-shaped key",
-      file: "web/stem-store/identity.js",
-      search: "return `sha256-${stemDigest(identity)}`",
-      replace: "return `sha256-${stemDigest(identity)}-session-keyed`",
+      name: "content-key -> per-session store directory",
+      file: "web/stem-store/opfs-store.js",
+      search:
+        '    await this.open()\n    const sessionId = nonemptyText(options.sessionId, "sessionId")',
+      replace:
+        '    await this.open()\n    this.__mutationRoot ??= this.#directory\n    const mutationSession = encodeURIComponent(String(options.sessionId))\n    this.#directory = await this.__mutationRoot.getDirectoryHandle(`session-${mutationSession}`, { create: true })\n    this.#staging = await this.#directory.getDirectoryHandle("staging", { create: true })\n    const sessionId = nonemptyText(options.sessionId, "sessionId")',
       test: "stem-store-core-v1.mjs",
+      expectedFailure: "mix B fetches only its two misses",
     },
     {
       name: "remove Web Lock single-flight",
@@ -157,6 +160,44 @@ async function runMutationLedger() {
         '    return access?.mode === "read-only"\n  } catch (error) {\n    if (error?.name === "NoModificationAllowedError") return false\n    throw error',
       test: "stem-store-core-v1.mjs",
     },
+    {
+      name: "disable wedged decoder read deadline",
+      file: "web/stem-store/opfs-store.js",
+      search:
+        '            reader.read(),\n            this.#ingestReadDeadlineMs,\n            "stem.decode.stalled",',
+      replace:
+        '            reader.read(),\n            60_000,\n            "stem.decode.stalled",',
+      test: "stem-store-core-v1.mjs",
+      expectedFailure: "wedged decoder escaped its deadline",
+    },
+    {
+      name: "omit AbortSignal from wedged decoder read race",
+      file: "web/stem-store/opfs-store.js",
+      search:
+        '            `Decoded PCM for ${stem.identity} made no progress`,\n            options.signal,\n            StemResolverError',
+      replace:
+        '            `Decoded PCM for ${stem.identity} made no progress`,\n            undefined,\n            StemResolverError',
+      test: "stem-store-core-v1.mjs",
+      expectedFailure: "wedged decoder ignored mix-switch abort",
+    },
+    {
+      name: "retain predecessor pin on same-session replacement",
+      file: "web/stem-store/session-gate.js",
+      search: "if (this.#lease?.sessionId === options.sessionId) {",
+      replace: "if (false && this.#lease?.sessionId === options.sessionId) {",
+      test: "stem-pump-v1.mjs",
+      expectedFailure: "same-session replacement waited on its own predecessor pin lock",
+    },
+    {
+      name: "treat missing index as an empty authoritative index",
+      file: "web/stem-store/opfs-store.js",
+      search:
+        '      if (error?.name === "NotFoundError") {\n        if (!repair) return emptyIndex()\n        return this.#rebuildIndex()\n      }',
+      replace:
+        '      if (error?.name === "NotFoundError") return emptyIndex()',
+      test: "stem-store-core-v1.mjs",
+      expectedFailure: "missing crash-only index must adopt a self-verifying final without re-ingest",
+    },
   ]
 
   for (const mutation of mutations) {
@@ -177,7 +218,22 @@ async function runMutationLedger() {
       if (result.status === 0) {
         throw new Error(`mutation stayed green: ${mutation.name}`)
       }
-      process.stdout.write(`RED: ${mutation.name}\n`)
+      const failureOutput = `${result.stdout ?? ""}\n${result.stderr ?? ""}`
+      if (
+        mutation.expectedFailure !== undefined &&
+        !failureOutput.includes(mutation.expectedFailure)
+      ) {
+        throw new Error(
+          `mutation went red outside its target gate: ${mutation.name}\n${failureOutput}`
+        )
+      }
+      process.stdout.write(
+        `RED: ${mutation.name}${
+          mutation.expectedFailure === undefined
+            ? ""
+            : ` [target: ${mutation.expectedFailure}]`
+        }\n`
+      )
     } finally {
       await rm(temporary, { recursive: true, force: true })
     }

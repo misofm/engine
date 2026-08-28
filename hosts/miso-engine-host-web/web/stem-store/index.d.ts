@@ -103,6 +103,7 @@ export class OpfsStemStore {
     now?: () => number
     tabId?: string
     readDeadlineMs?: number
+    ingestReadDeadlineMs?: number
   })
   readonly folderName: string
   open(): Promise<this>

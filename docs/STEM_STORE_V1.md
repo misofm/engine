@@ -68,6 +68,9 @@ uses the promoted result. Per-tab staging names remain distinct as a second
 line of defense. Switching mixes aborts outstanding resolver streams and
 removes their staging entries; already promoted content remains reusable.
 Store open queries held and pending locks before removing crash debris.
+Reopening the currently interactive session under the same session ID first
+closes its predecessor lease, because both leases name the same exclusive pin
+lock; the replacement then verifies and installs exactly one fresh pin.
 
 Playback reads use `getFile()` snapshots, never long-lived access handles.
 Where a caller probes sync read-only mode, it trusts only
@@ -92,13 +95,20 @@ outside the opening session may be evicted; open-session and offline pins are
 never victims. `storage.insufficient` reports required, available, shortfall,
 and evictable bytes. Write-time quota failure removes the failing staging file,
 keeps already promoted stems, keeps the gate closed, and permits a clean retry.
+The index is crash-only metadata: if it is missing or structurally corrupt, the
+store scans final names, fully hashes each unlocked candidate, adopts an exact
+`hash(file) == filename` match with empty recovered pins, and removes candidates
+that cannot self-verify. With a structurally valid index, an absent row still
+means the unindexed final is promote debris and the sweep removes it.
 An environment without `navigator.storage.getDirectory` refuses typed
 `storage.unavailable`; there is deliberately no RAM-resident degraded mode.
 
-The local-store read deadline is 15 seconds and the network no-progress
-watchdog is 30 seconds. Range retries are accepted only when the server proves
-the requested `206 Content-Range`, so resumption can never duplicate bytes into
-the decoder.
+The local-store read/write deadline is 15 seconds. Resolver establishment,
+network delivery, and decoded-stream output use the 30-second ingest
+no-progress watchdog; both deadlines race the mix-switch abort signal, abandon
+a wedged reader cancellation, and remove staging before refusing typed. Range
+retries are accepted only when the server proves the requested `206
+Content-Range`, so resumption can never duplicate bytes into the decoder.
 
 ## Hash implementation and provenance
 

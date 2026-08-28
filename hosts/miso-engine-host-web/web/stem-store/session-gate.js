@@ -56,22 +56,37 @@ export class StemSessionGate {
         error
       )
     }
+    const resumeOutcome = Promise.resolve(resumeResult).then(
+      () => ({ ok: true }),
+      (error) => ({ ok: false, error })
+    )
 
     this.#state = "loading"
     options.onProgress?.({ stage: "loading", sessionId: options.sessionId })
     let lease
-    const storeOpening = this.#store.openSession({
-      sessionId: options.sessionId,
-      stems: options.stems,
-      resolver: this.#resolver,
-      signal: opening.signal,
-      onProgress: options.onProgress,
-    })
+    let storeOpening
     try {
-      const [opened] = await Promise.all([
+      // The lease holds a Web Lock whose name includes the session ID. Release
+      // an identically named predecessor before asking the store to acquire its
+      // replacement; other session IDs keep their old lease until the new gate
+      // is green so their pins remain protected during a mix switch.
+      if (this.#lease?.sessionId === options.sessionId) {
+        const replaced = this.#lease
+        this.#lease = undefined
+        await replaced.close()
+      }
+      storeOpening = this.#store.openSession({
+        sessionId: options.sessionId,
+        stems: options.stems,
+        resolver: this.#resolver,
+        signal: opening.signal,
+        onProgress: options.onProgress,
+      })
+      const [opened, resumed] = await Promise.all([
         storeOpening,
-        Promise.resolve(resumeResult),
+        resumeOutcome,
       ])
+      if (!resumed.ok) throw resumed.error
       lease = opened
       if (this.#opening !== opening) {
         await lease.close()
@@ -87,7 +102,7 @@ export class StemSessionGate {
       return lease
     } catch (error) {
       opening.abort(error)
-      const orphanedLease = await storeOpening.catch(() => undefined)
+      const orphanedLease = await storeOpening?.catch(() => undefined)
       if (orphanedLease !== lease) await orphanedLease?.close().catch(() => {})
       await lease?.close().catch(() => {})
       if (this.#opening === opening) this.#state = "refused"

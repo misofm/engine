@@ -32,6 +32,15 @@ export class FakeOpfsBackend {
     node.lastModified = Date.now()
   }
 
+  remove(path) {
+    const names = path.split("/").filter(Boolean)
+    const name = names.pop()
+    if (name === undefined) throw new TypeError("fake path must name an entry")
+    const parent = findNode(this.root, names.join("/"))
+    if (parent.kind !== "directory") throw new TypeError(`${path} has no directory parent`)
+    if (!parent.entries.delete(name)) throw domError("NotFoundError", `${path} is absent`)
+  }
+
   has(path) {
     try {
       findNode(this.root, path)

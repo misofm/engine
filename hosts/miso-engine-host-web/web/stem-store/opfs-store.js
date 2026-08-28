@@ -35,6 +35,7 @@ export class OpfsStemStore {
   #now
   #tabId
   #readDeadlineMs
+  #ingestReadDeadlineMs
   #hooks
   #directory
   #staging
@@ -50,6 +51,7 @@ export class OpfsStemStore {
    *   now?: () => number,
    *   tabId?: string,
    *   readDeadlineMs?: number,
+   *   ingestReadDeadlineMs?: number,
    *   hooks?: Record<string, Function>,
    * }} [options]
    */
@@ -64,6 +66,10 @@ export class OpfsStemStore {
     this.#readDeadlineMs = positiveInteger(
       options.readDeadlineMs ?? 15_000,
       "readDeadlineMs"
+    )
+    this.#ingestReadDeadlineMs = positiveInteger(
+      options.ingestReadDeadlineMs ?? 30_000,
+      "ingestReadDeadlineMs"
     )
     this.#hooks = options.hooks ?? {}
   }
@@ -312,11 +318,18 @@ export class OpfsStemStore {
     try {
       let resolved
       try {
-        resolved = await resolver.resolve(stem.identity, {
-          signal: options.signal,
-          onProgress: (event) =>
-            options.onProgress?.({ ...event, identity: stem.identity }),
-        })
+        resolved = await withDeadline(
+          resolver.resolve(stem.identity, {
+            signal: options.signal,
+            onProgress: (event) =>
+              options.onProgress?.({ ...event, identity: stem.identity }),
+          }),
+          this.#ingestReadDeadlineMs,
+          "stem.resolve.stalled",
+          `Resolving ${stem.identity} made no progress`,
+          options.signal,
+          StemResolverError
+        )
       } catch (error) {
         if (error instanceof StemResolverError) throw error
         throw new StemResolverError(
@@ -334,14 +347,27 @@ export class OpfsStemStore {
         )
       }
 
-      const writable = await handle.createWritable()
+      const writable = await withDeadline(
+        handle.createWritable(),
+        this.#readDeadlineMs,
+        "storage.write_stalled",
+        `Opening staging for ${stem.identity} made no progress`,
+        options.signal
+      )
       const hash = new IncrementalSha256()
       const reader = resolved.stream.getReader()
       let bytes = 0
       try {
         while (true) {
           throwIfAborted(options.signal)
-          const result = await reader.read()
+          const result = await withDeadline(
+            reader.read(),
+            this.#ingestReadDeadlineMs,
+            "stem.decode.stalled",
+            `Decoded PCM for ${stem.identity} made no progress`,
+            options.signal,
+            StemResolverError
+          )
           if (result.done) break
           if (!(result.value instanceof Uint8Array)) {
             throw new StemResolverError(
@@ -351,7 +377,13 @@ export class OpfsStemStore {
             )
           }
           hash.update(result.value)
-          await writable.write(result.value)
+          await withDeadline(
+            writable.write(result.value),
+            this.#readDeadlineMs,
+            "storage.write_stalled",
+            `Writing staging for ${stem.identity} made no progress`,
+            options.signal
+          )
           bytes += result.value.byteLength
           options.onProgress?.({
             stage: "hashed",
@@ -365,9 +397,20 @@ export class OpfsStemStore {
             stagingName,
           })
         }
-        await writable.close()
+        await withDeadline(
+          writable.close(),
+          this.#readDeadlineMs,
+          "storage.write_stalled",
+          `Closing staging for ${stem.identity} made no progress`,
+          options.signal
+        )
       } catch (error) {
-        await writable.abort(error).catch(() => {})
+        await withDeadline(
+          writable.abort(error),
+          this.#readDeadlineMs,
+          "storage.write_stalled",
+          `Aborting staging for ${stem.identity} made no progress`
+        ).catch(() => {})
         void reader.cancel(error).catch(() => {})
         if (error?.leaveStaging === true) leaveDebris = true
         throw error
@@ -451,7 +494,8 @@ export class OpfsStemStore {
       stagingHandle.getFile(),
       this.#readDeadlineMs,
       "storage.read_stalled",
-      `Reading staged ${stem.identity} made no progress`
+      `Reading staged ${stem.identity} made no progress`,
+      options.signal
     )
     const finalHandle = await this.#directory.getFileHandle(finalName, {
       create: true,
@@ -465,7 +509,8 @@ export class OpfsStemStore {
           reader.read(),
           this.#readDeadlineMs,
           "storage.read_stalled",
-          `Copying ${stem.identity} made no progress`
+          `Copying ${stem.identity} made no progress`,
+          options.signal
         )
         if (result.done) break
         await writable.write(result.value)
@@ -532,7 +577,7 @@ export class OpfsStemStore {
       })
       return true
     } catch (error) {
-      if (error?.name === "AbortError") throw error
+      if (signal?.aborted || error?.name === "AbortError") throw error
       await this.#demote(stem.identity)
       return false
     }
@@ -543,7 +588,8 @@ export class OpfsStemStore {
       handle.getFile(),
       this.#readDeadlineMs,
       "storage.read_stalled",
-      `Opening ${options.identity} made no progress`
+      `Opening ${options.identity} made no progress`,
+      options.signal
     )
     const reader = file.stream().getReader()
     const hash = new IncrementalSha256()
@@ -555,7 +601,8 @@ export class OpfsStemStore {
           reader.read(),
           this.#readDeadlineMs,
           "storage.read_stalled",
-          `Reading ${options.identity} made no progress`
+          `Reading ${options.identity} made no progress`,
+          options.signal
         )
         if (result.done) break
         hash.update(result.value)
@@ -717,7 +764,10 @@ export class OpfsStemStore {
         )
       )
     } catch (error) {
-      if (error?.name === "NotFoundError") return emptyIndex()
+      if (error?.name === "NotFoundError") {
+        if (!repair) return emptyIndex()
+        return this.#rebuildIndex()
+      }
       if (!repair) throw error
       return this.#rebuildIndex()
     }
@@ -728,10 +778,15 @@ export class OpfsStemStore {
 
   async #rebuildIndex() {
     const rebuilt = emptyIndex()
+    const liveLocks = await this.#liveLockNames()
     for await (const [name, handle] of this.#directory.entries()) {
       const match = FINAL_NAME.exec(name)
       if (match === null || handle.kind !== "file") continue
       const identity = `sha256:${match[1]}`
+      // A final protected by an in-flight promote is not yet an unambiguous
+      // crash artifact. Its owner will either index it or leave it for a later
+      // recovery pass after releasing the lock.
+      if (liveLocks?.has(this.#stemLockName(identity))) continue
       try {
         const observed = await this.#hashFile(handle, {
           stage: "verify-rebuild",
@@ -1154,17 +1209,36 @@ function forwardAbort(signal, controller) {
   return () => signal.removeEventListener("abort", abort)
 }
 
-async function withDeadline(operation, milliseconds, code, message) {
+async function withDeadline(
+  operation,
+  milliseconds,
+  code,
+  message,
+  signal,
+  TimeoutError = StemStoreError
+) {
+  throwIfAborted(signal)
   let timer
-  const timeout = new Promise((_resolve, reject) => {
+  let abort
+  const interruption = new Promise((_resolve, reject) => {
     timer = setTimeout(
-      () => reject(new StemStoreError(code, message, { milliseconds })),
+      () => reject(new TimeoutError(code, message, { milliseconds })),
       milliseconds
     )
+    if (signal !== undefined) {
+      abort = () =>
+        reject(
+          signal.reason ??
+            new DOMException("Stem operation aborted", "AbortError")
+        )
+      signal.addEventListener("abort", abort, { once: true })
+      if (signal.aborted) abort()
+    }
   })
   try {
-    return await Promise.race([operation, timeout])
+    return await Promise.race([operation, interruption])
   } finally {
     clearTimeout(timer)
+    if (abort !== undefined) signal.removeEventListener("abort", abort)
   }
 }
