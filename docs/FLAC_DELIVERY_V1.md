@@ -64,7 +64,10 @@ law, computes the new canonical-PCM identity through the shared hasher, and emit
 
 There is no reverse mapping, alias, fallback, or dual-identity compatibility window. This tool
 does not edit the app repository; #246 applies the pinned mapping and performs the app-side
-regeneration in one stroke.
+regeneration in one stroke. The
+[one-time catalog re-hash runbook](FLAC_CATALOG_REHASH_RUNBOOK.md) keeps the real-catalog execution
+as an operations step gated on owner-provided storage access and a scheduled maintenance window;
+neither gate is satisfied by repository qualification.
 
 The non-gating cold-ingest sanity runner is `npm run flac-throughput` in
 `hosts/miso-engine-host-web/qualification`. It accepts a pinned decoder artifact directory, one
