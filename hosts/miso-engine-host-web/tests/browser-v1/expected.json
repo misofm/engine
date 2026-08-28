@@ -36,7 +36,7 @@
         "quantumFrames": 128,
         "nextAbsoluteSample": "0",
         "renderedQuanta": "0",
-        "memoryBytes": 2359296
+        "memoryBytes": 1310720
       },
       "beforeDisposeStatus": {
         "state": 2,
@@ -46,22 +46,22 @@
         "quantumFrames": 128,
         "nextAbsoluteSample": "384",
         "renderedQuanta": "3",
-        "memoryBytes": 2359296
+        "memoryBytes": 1310720
       },
       "resources": {
         "sampleRateHz": 48000,
         "quantumFrames": 128,
         "backend": 1,
-        "configBytes": "192",
+        "optionsBytes": "64",
         "statusBytes": "80",
-        "sessionTomlBytes": "1048576",
+        "sessionTomlBytes": "1428",
         "diagnosticBytes": "16384",
-        "sourceIdBytes": "1024",
-        "sourcePcmStagingBytes": "4096",
+        "sourceIdBytes": "14",
+        "sourcePcmStagingBytes": "1024",
         "outputPcmBytes": "1024",
-        "bridgeMetadataBytes": "3855",
-        "bridgeRetainedBytes": "1075231",
-        "largestBridgeAllocationBytes": "1048576",
+        "bridgeMetadataBytes": "3799",
+        "bridgeRetainedBytes": "23817",
+        "largestBridgeAllocationBytes": "16384",
         "sourceTotalBytes": "2206",
         "sourceOverheadBytes": "1182",
         "effectScalarStateBytes": "0",
@@ -71,7 +71,7 @@
         "graphIncrementalPlanBytes": "29286",
         "graphMetadataBytes": "3455",
         "graphDelayBytes": "0",
-        "largestNamedAllocationBytes": "1048576",
+        "largestNamedAllocationBytes": "16384",
         "observationRetainedBytes": "0"
       },
       "results": {
@@ -166,7 +166,7 @@
         "quantumFrames": 128,
         "nextAbsoluteSample": "1280",
         "renderedQuanta": "10",
-        "memoryBytes": 2359296
+        "memoryBytes": 1310720
       },
       "pcmF32leSha256": "fc760629464396730a4716027e59ba89a80fbe9c4f47aa103c68b0b6bde847b7"
     },

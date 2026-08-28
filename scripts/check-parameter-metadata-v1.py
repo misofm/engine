@@ -20,7 +20,7 @@ import pathlib
 import sys
 
 SCHEMA = "miso.web.parameter-metadata.v1"
-ABI_VERSION = 0x0001_0000
+ABI_VERSION = 0x0002_0000
 
 UNITS = {1: "db", 2: "hz", 3: "milliseconds", 4: "samples", 5: "linear", 6: "ratio"}
 DOMAINS = {1: "continuous", 2: "boolean", 3: "enumeration"}

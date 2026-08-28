@@ -512,7 +512,7 @@ pub extern "C" fn miso_engine_web_v1_console_track_id(handle: u32, index: u32) -
 /// **Canonical source order** is the normalized model's `sources` order -- `compile_session` sorts
 /// by stable ID -- and the queries read that list itself, so no second table exists to drift from
 /// it. **State gating** is the track queries' gating exactly: the answers come from the compiled
-/// session, so every query reports zero/absent until `compile` succeeds, and keeps answering
+/// session, so every query reports zero/absent until `boot` succeeds, and keeps answering
 /// afterwards for as long as the handle holds a compiled session, sticky failure included.
 ///
 /// **This export is the bounds authority.** `source_channels`, `source_frames` and
@@ -520,15 +520,9 @@ pub extern "C" fn miso_engine_web_v1_console_track_id(handle: u32, index: u32) -
 /// compiled source, but `source_start_frame` has no spare value -- zero is an ordinary region
 /// start -- so a caller establishes the range here and then indexes inside it.
 ///
-/// **[`crate::ABI_VERSION`] is deliberately not bumped.** The handshake the worklet actually
-/// enforces is exact equality of both `abi_version()` and `config_bytes()` against constants
-/// compiled into the JavaScript beside it, and the two ship from one build of one script -- it is
-/// a lockstep-pair identity, not a compatibility range a consumer could negotiate against. These
-/// exports add no configuration word and change no frozen structure, so `config_bytes()` is
-/// unmoved; and the precedent is explicit, because issue #137 added eight exports (the whole
-/// console surface, `console_track_count` included) without touching the version either. What
-/// pins the new surface is the frozen export set in `scripts/check-web-audioworklet.sh`, which is
-/// exact rather than a lower bound: an export that appears or disappears fails that gate.
+/// These queries survived issue #240's ABI-v2 boot recut unchanged. What pins the complete surface
+/// is the frozen export set in `scripts/check-web-audioworklet.sh`, which is exact rather than a
+/// lower bound: an export that appears or disappears fails that gate.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_source_count(handle: u32) -> u32 {
     with_host(handle, 0, |host| {

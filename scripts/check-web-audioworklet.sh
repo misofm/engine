@@ -144,21 +144,21 @@ worklet_js="$artifact_dir/miso-engine-v2-audio-worklet.js"
 expected_exports=$(printf '%s\n' \
   memory \
   miso_engine_web_v1_abi_version \
+  miso_engine_web_v1_boot \
+  miso_engine_web_v1_boot_diagnostic_bytes \
+  miso_engine_web_v1_boot_options_ptr \
+  miso_engine_web_v1_boot_result \
   miso_engine_web_v1_buffer_capacity \
   miso_engine_web_v1_buffer_ptr \
   miso_engine_web_v1_command_report_ptr \
   miso_engine_web_v1_command_submit \
-  miso_engine_web_v1_compile \
-  miso_engine_web_v1_config_bytes \
-  miso_engine_web_v1_config_new \
-  miso_engine_web_v1_config_ptr \
   miso_engine_web_v1_console_track_count \
   miso_engine_web_v1_console_track_id \
+  miso_engine_web_v1_document_ptr \
   miso_engine_web_v1_dispose \
   miso_engine_web_v1_meter_header_ptr \
   miso_engine_web_v1_meter_lease \
   miso_engine_web_v1_meter_poll \
-  miso_engine_web_v1_prepare \
   miso_engine_web_v1_render \
   miso_engine_web_v1_resource_ptr \
   miso_engine_web_v1_source_channels \

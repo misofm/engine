@@ -19,8 +19,8 @@ So the rows went stale, twice, with every gate green:
 1075185 -> 1075231, and re-pinned them here in the same commit. Both moved by the same 46: the
 bridge's retained session model grew by `size_of::<Track>()` (16 -> 20 bytes per lane's
 `ChannelBuiltins`, so +8 per track) plus the fixture's canonical text (one track, two lanes,
-`", delay_samples = 0"`, +38). `sessionTomlBytes` is the host's *limit*, not the document, so it
-did not move.
+`", delay_samples = 0"`, +38). Issue #240 changes `sessionTomlBytes` to the exact staged document,
+so the boot-v2 re-pin deliberately moves that row.
 
 Between them, thirty-three merges moved nothing: this is not accumulated drift, it is two
 un-re-pinned commits, and one gate red at either would have ended it.
@@ -34,7 +34,7 @@ un-re-pinned commits, and one gate red at either would have ended it.
    no WebDriver, no audio device.
 2. *The native leg, which keeps the first one honest about what it is proving.* Compile the same
    `session.toml` through the same `AudioWorkletEngineHost` facade with the same
-   `WebPrepareConfig` the oracle writes -- `examples/browser_fixture_resources.rs` -- and check
+   `WebBootOptions` the oracle writes -- `examples/browser_fixture_resources.rs` -- and check
    each row against the wasm32 answer according to the class it is declared in.
 
 **Why the native leg cannot simply be the gate.** The obvious cheap tripwire is "compile the
@@ -102,14 +102,13 @@ DIRECT_ORACLE_SCHEMA = "miso.web.browser.direct-oracle.v2"
 BACKEND_SIMD128 = 1
 BACKEND_SCALAR = 0
 
-# Rows whose value is a byte count both builds must agree on. Config-derived staging capacities
-# (the caller writes them and the report echoes them back), the two `max()` rows this fixture's
-# 1 MiB session-TOML staging dominates, and the four rows this identity fixture drives to zero --
+# Rows whose value is a byte count both builds must agree on. Boot-derived staging capacities,
+# the two `max()` rows, and the four rows this identity fixture drives to zero --
 # it has no delay, no scalar effect and no observation capacity. None of them reads a host
 # pointer or a lane count.
 TARGET_INDEPENDENT = frozenset(
     {
-        "configBytes",
+        "optionsBytes",
         "statusBytes",
         "sessionTomlBytes",
         "diagnosticBytes",
@@ -299,28 +298,28 @@ def check_native_witness(
 
 
 def worklet_limit_fields(text: str) -> list[str]:
-    """The `exactFields` vocabulary the worklet refuses a `limits` object against."""
-    block = block_after(text, "const LIMIT_FIELDS = ", "[", "]")
+    """The `exactFields` vocabulary the worklet refuses an `options` object against."""
+    block = block_after(text, "const OPTION_FIELDS = ", "[", "]")
     names = re.findall(r'"([A-Za-z][A-Za-z0-9]*)"', block)
-    require(names, "the worklet declares no LIMIT_FIELDS")
+    require(names, "the worklet declares no OPTION_FIELDS")
     return sorted(names)
 
 
 def fixture_limit_fields(text: str) -> list[str]:
-    """The keys the browser fixture's `limits()` actually builds."""
-    block = block_after(text, "function limits() {\n  return ", "{", "}")
+    """The keys the browser fixture's `bootOptions()` actually builds."""
+    block = block_after(text, "function bootOptions() {\n  return ", "{", "}")
     names = re.findall(r"^\s{4}([A-Za-z][A-Za-z0-9]*):", block, re.MULTILINE)
-    require(names, "the browser fixture's limits() builds no keys")
+    require(names, "the browser fixture's bootOptions() builds no keys")
     return sorted(names)
 
 
 def check_limits_vocabulary(worklet: str, fixture: str) -> None:
-    """The fixture's `limits` object and the worklet's guard are one vocabulary.
+    """The fixture's boot `options` object and the worklet's guard are one vocabulary.
 
     The same staleness class as the resource rows, on the other half of the fixture, and it had
     already bitten: issue #143 carved `consoleObservationTaps` and `consoleMasterTrackPlusOne`
-    out of the configuration's last two reserved words and added both to `LIMIT_FIELDS`, and the
-    fixture's `limits()` was never extended. `LIMIT_FIELDS` is checked with `exactFields`, so the
+    out of the configuration's last two reserved words and added both to the old guard, and the
+    fixture's policy object was never extended. The field list is checked with `exactFields`, so the
     browser leg refused the fixture at boot with `RESULT_INVALID_ARGUMENT` from #143 until #217.
     Nothing was red: the `--check` leg drives the module through `direct-oracle.mjs`, which writes
     the configuration words itself and never crosses `miso-engine-v2-audio-worklet.js`, and the
@@ -332,12 +331,12 @@ def check_limits_vocabulary(worklet: str, fixture: str) -> None:
     extra = [name for name in supplied if name not in declared]
     require(
         not missing,
-        "the browser fixture's limits() is missing configuration words the worklet's "
+        "the browser fixture's bootOptions() is missing policy words the worklet's "
         f"exactFields guard requires, so the browser leg cannot boot: {missing}",
     )
     require(
         not extra,
-        "the browser fixture's limits() supplies words the worklet's exactFields guard does not "
+        "the browser fixture's bootOptions() supplies words the worklet's exactFields guard does not "
         f"declare, so the browser leg cannot boot: {extra}",
     )
 
@@ -649,20 +648,20 @@ def self_test() -> int:
         ("the command-timeline digest moves", move_digest("commandTimeline"), None),
         ("the observation-timeline digest moves", move_digest("observationTimeline"), None),
         ("the oracle prints a different schema", with_schema("miso.web.browser.v1"), None),
-        # The limits vocabulary, and the exact #143 regression this fixture shipped with.
+        # The boot-options vocabulary, and the exact #143 regression this fixture shipped with.
         (
-            "the fixture's limits() drops the #143 observation-taps word again",
+            "the fixture's bootOptions() drops the #143 observation-taps word again",
             drop_fixture_limit("consoleObservationTaps"),
             None,
         ),
         (
-            "the fixture's limits() drops the #143 master-designation word again",
+            "the fixture's bootOptions() drops the #143 master-designation word again",
             drop_fixture_limit("consoleMasterTrackPlusOne"),
             None,
         ),
         (
-            "the fixture's limits() drops a word that predates #143",
-            drop_fixture_limit("maximumMeterBytes"),
+            "the fixture's bootOptions() drops a word that predates #143",
+            drop_fixture_limit("sourceRingFrames"),
             None,
         ),
         (

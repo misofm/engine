@@ -1,11 +1,10 @@
-// Browser AudioWorklet host, ABI version 1 (issue 024, amended by issues 106, 083 W4-D1 and 137).
+// Browser AudioWorklet host, ABI version 2 (issue 240).
 //
 // # The live console (issue 137)
 //
 // V1 as issue 024 froze it was a deterministic *renderer*: create, stream, render, dispose. Issue
 // 137 adds the three things a live mixing console needs on top, additively -- no existing message,
-// field or result code changed meaning, and the 192-byte configuration and 224-byte resource
-// report kept their exact layouts.
+// field or live result code changed meaning, and the resource report keeps its 224-byte layout.
 //
 //   1. `miso.command.v1`, a control path from the main realm into the engine, acknowledged with
 //      the exact absolute sample the batch took effect at.
@@ -521,29 +520,12 @@ export interface MisoTelemetryFrame {
   readonly belowResolution: boolean;
 }
 
-export interface MisoWebPrepareLimits {
-  sessionTomlBytes: number;
-  diagnosticBytes: number;
-  sourceIdBytes: number;
-  maximumSourceChannels: number;
+export interface MisoWebBootOptions {
+  /// Per-source ring override, or `0` for the engine's 100 ms plus two-quanta derivation.
   sourceRingFrames: number;
-  maximumAutomationSpansPerBlock: number;
-  maximumTracks: bigint;
-  maximumSources: bigint;
-  maximumRoutes: bigint;
-  maximumEffects: bigint;
-  maximumGraphSessionPlusPlanBytes: bigint;
-  maximumSourceTotalBytes: bigint;
-  maximumSourceOverheadBytes: bigint;
-  maximumEffectStateBytes: bigint;
-  maximumEffectScratchBytes: bigint;
-  maximumBuiltinRetainedBytes: bigint;
-  maximumHostRetainedBytes: bigint;
-  maximumNamedAllocationBytes: bigint;
-  maximumMeterStreams: bigint;
-  maximumMeterItems: bigint;
-  maximumMeterBytes: bigint;
-  /// Per-track control-queue depth in records, or `0n` for the engine default of 64 (issue 137).
+  /// Total boot memory budget, or `0n` for the engine-owned default ceiling.
+  maximumMemoryBytes: bigint;
+  /// Per-track control-queue depth in records, or `0n` to attach no control channel (issue 137).
   consoleCommandQueueRecords: bigint;
   /// Meter window in render blocks, or `0n` to bind no meter observer at all (issue 137).
   consoleMeterBlocks: bigint;
@@ -566,7 +548,7 @@ export interface MisoWebResourceReport {
   readonly sampleRateHz: number;
   readonly quantumFrames: number;
   readonly backend: number;
-  readonly configBytes: bigint;
+  readonly optionsBytes: bigint;
   readonly statusBytes: bigint;
   readonly sessionTomlBytes: bigint;
   readonly diagnosticBytes: bigint;
@@ -674,9 +656,8 @@ export interface MisoAudioWorkletHost {
 
 export interface CreateMisoAudioWorkletHostOptions {
   context: BaseAudioContext;
-  quantumFrames: number;
-  sessionToml: Uint8Array;
-  limits: MisoWebPrepareLimits;
+  document: Uint8Array;
+  options: MisoWebBootOptions;
   simd128ModuleUrl: string;
   workletModuleUrl: string;
 }
