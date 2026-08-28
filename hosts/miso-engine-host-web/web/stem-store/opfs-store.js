@@ -368,11 +368,11 @@ export class OpfsStemStore {
         await writable.close()
       } catch (error) {
         await writable.abort(error).catch(() => {})
-        await reader.cancel(error).catch(() => {})
+        void reader.cancel(error).catch(() => {})
         if (error?.leaveStaging === true) leaveDebris = true
         throw error
       } finally {
-        reader.releaseLock()
+        releaseReader(reader)
       }
 
       const streamedHex = hash.digestHex()
@@ -473,10 +473,10 @@ export class OpfsStemStore {
       await writable.close()
     } catch (error) {
       await writable.abort(error).catch(() => {})
-      await reader.cancel(error).catch(() => {})
+      void reader.cancel(error).catch(() => {})
       throw error
     } finally {
-      reader.releaseLock()
+      releaseReader(reader)
     }
     await this.#hooks.afterFallbackCopy?.({
       identity: stem.identity,
@@ -567,11 +567,14 @@ export class OpfsStemStore {
           totalBytes: file.size,
         })
       }
+    } catch (error) {
+      void reader.cancel(error).catch(() => {})
+      throw error
     } finally {
       if (options.signal?.aborted) {
-        await reader.cancel(options.signal.reason).catch(() => {})
+        void reader.cancel(options.signal.reason).catch(() => {})
       }
-      reader.releaseLock()
+      releaseReader(reader)
     }
     return { bytes, hex: hash.digestHex() }
   }
@@ -597,7 +600,10 @@ export class OpfsStemStore {
 
   async #preflight(missing, protectedIdentities) {
     if (missing.length === 0 || typeof this.#storage?.estimate !== "function") return
-    const requiredBytes = missing.reduce((sum, stem) => sum + stem.bytes, 0)
+    const requiredBytes = checkedByteSum(
+      missing.map((stem) => stem.bytes),
+      "missing stem byte total"
+    )
     let estimate
     try {
       estimate = await this.#storage.estimate()
@@ -615,7 +621,10 @@ export class OpfsStemStore {
           row.pins.length === 0 && !protectedIdentities.has(identity)
       )
       .sort((left, right) => left[1].lastUsedAt - right[1].lastUsedAt)
-    const evictableBytes = victims.reduce((sum, entry) => sum + entry[1].bytes, 0)
+    const evictableBytes = checkedByteSum(
+      victims.map((entry) => entry[1].bytes),
+      "evictable stem byte total"
+    )
     for (const [identity, row] of victims) {
       if (availableBytes >= requiredBytes) break
       const evicted = await this.#evictUnpinned(identity)
@@ -660,9 +669,12 @@ export class OpfsStemStore {
       if (finiteNonnegative(estimate?.quota) && finiteNonnegative(estimate?.usage)) {
         availableBytes = Math.max(0, estimate.quota - estimate.usage)
       }
-      evictableBytes = Object.values(index.stems)
-        .filter((row) => row.pins.length === 0)
-        .reduce((sum, row) => sum + row.bytes, 0)
+      evictableBytes = checkedByteSum(
+        Object.values(index.stems)
+          .filter((row) => row.pins.length === 0)
+          .map((row) => row.bytes),
+        "evictable stem byte total"
+      )
     } catch {
       // Write-time quota failure remains authoritative even when estimates fail.
     }
@@ -696,7 +708,14 @@ export class OpfsStemStore {
         "storage.read_stalled",
         "Reading the stem index made no progress"
       )
-      parsed = JSON.parse(await file.text())
+      parsed = JSON.parse(
+        await withDeadline(
+          file.text(),
+          this.#readDeadlineMs,
+          "storage.read_stalled",
+          "Reading the stem index body made no progress"
+        )
+      )
     } catch (error) {
       if (error?.name === "NotFoundError") return emptyIndex()
       if (!repair) throw error
@@ -827,9 +846,11 @@ export class OpfsStemStore {
   async #acquireSessionPinLock(pin) {
     if (typeof this.#locks?.request !== "function") return () => {}
     let acquired
+    let acquisitionFailed
     let release
-    const ready = new Promise((resolve) => {
+    const ready = new Promise((resolve, reject) => {
       acquired = resolve
+      acquisitionFailed = reject
     })
     const hold = new Promise((resolve) => {
       release = resolve
@@ -842,8 +863,9 @@ export class OpfsStemStore {
         await hold
       }
     )
-    request.catch(() => {})
+    request.catch(acquisitionFailed)
     await ready
+    request.catch(() => {})
     return release
   }
 
@@ -1089,6 +1111,30 @@ function nonnegativeSafe(value) {
 
 function finiteNonnegative(value) {
   return typeof value === "number" && Number.isFinite(value) && value >= 0
+}
+
+function checkedByteSum(values, label) {
+  let total = 0
+  for (const value of values) {
+    total += value
+    if (!Number.isSafeInteger(total)) {
+      throw new StemStoreError(
+        "storage.size_overflow",
+        `${label} exceeds JavaScript's exact integer range`,
+        { label }
+      )
+    }
+  }
+  return total
+}
+
+function releaseReader(reader) {
+  try {
+    reader.releaseLock()
+  } catch {
+    // A timed-out read may remain pending forever. Its Blob is abandoned; the
+    // deadline would be meaningless if cleanup waited on the same operation.
+  }
 }
 
 function throwIfAborted(signal) {

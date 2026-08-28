@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# scripts/sweep.sh -- the hermetic check/test sweep. 93 explicit rows.
+# scripts/sweep.sh -- the hermetic check/test sweep. 94 explicit rows.
 #
 # Why this exists: the repo has 96 check-*/test-* scripts and ci.yml names 37 of them, so most
 # gates had no committed runner at all -- they were reachable only by knowing they existed. Every
@@ -101,6 +101,7 @@ row scripts/check-rack-benchmark-fixture.sh
 row scripts/check-rack-policy.sh
 row scripts/check-realtime-policy.sh
 row scripts/check-session-policy.sh
+row scripts/check-stem-store-v1.mjs --self-test
 row scripts/check-workspace-policy.sh
 row scripts/check-capi-qualification-v1.sh
 row scripts/check-dsp-research.sh

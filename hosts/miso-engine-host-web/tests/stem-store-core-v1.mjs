@@ -232,6 +232,60 @@ async function promoteAtomicityAndCrashSweep() {
   )
 }
 
+async function openerDoesNotSweepActivePromote() {
+  const stem = fixture("active-promote", 4096)
+  const backend = new FakeOpfsBackend()
+  const locks = new FakeLockManager()
+  let moved
+  let continuePromote
+  const reachedMove = new Promise((resolve) => { moved = resolve })
+  const holdPromote = new Promise((resolve) => { continuePromote = resolve })
+  const ingesting = store(backend, locks, {
+    tabId: "promoting",
+    hooks: {
+      async afterMove() {
+        moved()
+        await holdPromote
+      },
+    },
+  })
+  const opening = ingesting.openSession({
+    sessionId: "promoting",
+    stems: requirements([stem]),
+    resolver: new MemoryStemResolver(stemMap([stem])),
+  })
+  await reachedMove
+  const finalPath = `miso-stems-v1/sha256-${stem.identity.slice(7)}`
+  assert.equal(backend.has(finalPath), true)
+  await store(backend, locks, { tabId: "observer" }).open()
+  assert.equal(
+    backend.has(finalPath),
+    true,
+    "an opener must not sweep a final protected by a live ingest lock"
+  )
+  continuePromote()
+  const lease = await opening
+  await lease.close()
+}
+
+async function crashedSessionPinsAreRecoverable() {
+  const stem = fixture("crashed-pin", 4096)
+  const backend = new FakeOpfsBackend()
+  const locks = new FakeLockManager()
+  const lease = await store(backend, locks, { tabId: "crashed" }).openSession({
+    sessionId: "gone",
+    stems: requirements([stem]),
+    resolver: new MemoryStemResolver(stemMap([stem])),
+  })
+  lease.releasePinLock()
+  while ((await locks.query()).held.length !== 0) await Promise.resolve()
+  await store(backend, locks, { tabId: "recovery" }).open()
+  const index = JSON.parse(
+    new TextDecoder().decode(backend.bytes("miso-stems-v1/index.json"))
+  )
+  assert.deepEqual(index.stems[stem.identity].pins, [])
+}
+
 async function quotaFailureKeepsSurvivors() {
   const firstStem = fixture("quota-first", 4096)
   const secondStem = fixture("quota-second", 4096)
@@ -434,6 +488,8 @@ await fanMixNarrative()
 await twoTabCollision()
 await corruptionSelfHeals()
 await promoteAtomicityAndCrashSweep()
+await openerDoesNotSweepActivePromote()
+await crashedSessionPinsAreRecoverable()
 await quotaFailureKeepsSurvivors()
 await lruEvictsOnlyUnpinned()
 await tabCloseMidStaging()

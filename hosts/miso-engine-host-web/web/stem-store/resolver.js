@@ -117,7 +117,17 @@ export class FetchStemResolver {
    */
   async resolve(identity, options = {}) {
     stemDigest(identity)
-    const url = String(this.#urlForIdentity(identity))
+    let url
+    try {
+      url = String(this.#urlForIdentity(identity))
+    } catch (error) {
+      throw new StemResolverError(
+        "stem.resolve.address",
+        `No network address is available for ${identity}`,
+        { identity },
+        error
+      )
+    }
     const delivered = resumableFetchStream({
       url,
       fetcher: this.#fetch,
@@ -148,19 +158,31 @@ export class FetchStemResolver {
         { identity, url }
       )
     }
-    return { stream: progressStream(decoded, options) }
+    return { stream: progressStream(decoded, identity, options) }
   }
 }
 
-/** @param {ReadableStream<Uint8Array>} stream @param {object} options */
-function progressStream(stream, options) {
+/** @param {ReadableStream<Uint8Array>} stream @param {string} identity @param {object} options */
+function progressStream(stream, identity, options) {
   const reader = stream.getReader()
   let decoded = 0
   return new ReadableStream({
     async pull(controller) {
       throwIfAborted(options.signal)
-      const result = await reader.read()
+      let result
+      try {
+        result = await reader.read()
+      } catch (error) {
+        if (error instanceof StemResolverError) throw error
+        throw new StemResolverError(
+          "stem.decode.failed",
+          `Stem decoder failed while streaming ${identity}`,
+          { identity },
+          error
+        )
+      }
       if (result.done) {
+        reader.releaseLock()
         controller.close()
         return
       }
@@ -168,8 +190,8 @@ function progressStream(stream, options) {
       options.onProgress?.({ stage: "decoded", bytes: decoded })
       controller.enqueue(result.value)
     },
-    async cancel(reason) {
-      await reader.cancel(reason)
+    cancel(reason) {
+      void reader.cancel(reason).catch(() => {})
     },
   })
 }
@@ -205,7 +227,7 @@ function resumableFetchStream(options) {
       )
     }
     const expectedStatus = offset === 0 ? 200 : 206
-    if (!response.ok || (offset !== 0 && response.status !== expectedStatus)) {
+    if (!response.ok || response.status !== expectedStatus) {
       throw new StemResolverError(
         offset === 0
           ? "stem.resolve.http"
@@ -262,7 +284,10 @@ function resumableFetchStream(options) {
           controller.enqueue(result.value)
           return
         } catch (error) {
-          await reader.cancel(error).catch(() => {})
+          // A no-progress deadline exists precisely for a read that may never
+          // settle. Abandon its cancellation rather than waiting on the same
+          // wedged source a second time.
+          void reader.cancel(error).catch(() => {})
           reader = undefined
           attempts += 1
           if (attempts > options.maximumResumeAttempts) {
@@ -277,8 +302,8 @@ function resumableFetchStream(options) {
         }
       }
     },
-    async cancel(reason) {
-      await reader?.cancel(reason).catch(() => {})
+    cancel(reason) {
+      void reader?.cancel(reason).catch(() => {})
     },
   })
 }

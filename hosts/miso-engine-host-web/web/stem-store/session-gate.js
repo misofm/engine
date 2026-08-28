@@ -60,15 +60,16 @@ export class StemSessionGate {
     this.#state = "loading"
     options.onProgress?.({ stage: "loading", sessionId: options.sessionId })
     let lease
+    const storeOpening = this.#store.openSession({
+      sessionId: options.sessionId,
+      stems: options.stems,
+      resolver: this.#resolver,
+      signal: opening.signal,
+      onProgress: options.onProgress,
+    })
     try {
       const [opened] = await Promise.all([
-        this.#store.openSession({
-          sessionId: options.sessionId,
-          stems: options.stems,
-          resolver: this.#resolver,
-          signal: opening.signal,
-          onProgress: options.onProgress,
-        }),
+        storeOpening,
         Promise.resolve(resumeResult),
       ])
       lease = opened
@@ -85,6 +86,9 @@ export class StemSessionGate {
       })
       return lease
     } catch (error) {
+      opening.abort(error)
+      const orphanedLease = await storeOpening.catch(() => undefined)
+      if (orphanedLease !== lease) await orphanedLease?.close().catch(() => {})
       await lease?.close().catch(() => {})
       if (this.#opening === opening) this.#state = "refused"
       throw error

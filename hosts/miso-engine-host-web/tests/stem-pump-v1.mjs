@@ -227,9 +227,39 @@ async function refusedGateNeverBecomesInteractive() {
   assert.equal(events.includes("interactive"), false)
 }
 
+async function rejectedResumeDoesNotLeakPins() {
+  const bytes = pcm16([0, 1, 2, 3], 1)
+  const stemIdentity = identity(bytes)
+  const backend = new FakeOpfsBackend()
+  const gate = new StemSessionGate(
+    new OpfsStemStore({
+      storage: backend.storage(),
+      locks: new FakeLockManager(),
+      tabId: "resume-reject",
+    }),
+    new MemoryStemResolver({ [stemIdentity]: bytes })
+  )
+  await assert.rejects(
+    gate.open({
+      sessionId: "resume-reject",
+      stems: [{ identity: stemIdentity, bytes: bytes.byteLength }],
+      resume: () =>
+        new Promise((_resolve, reject) =>
+          setTimeout(() => reject(new Error("route changed")), 10)
+        ),
+    }),
+    /route changed/
+  )
+  const index = JSON.parse(
+    new TextDecoder().decode(backend.bytes("miso-stems-v1/index.json"))
+  )
+  assert.deepEqual(index.stems[stemIdentity].pins, [])
+}
+
 await transformContract()
 await workerPumpContract()
 await readFailureHardStops()
 await resumeInsideGestureGate()
 await refusedGateNeverBecomesInteractive()
+await rejectedResumeDoesNotLeakPins()
 process.stdout.write("stem-pump-v1: PASS\n")

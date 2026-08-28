@@ -202,10 +202,7 @@ export class CanonicalPcmPump {
   }
 
   async seek(frame) {
-    const target = Math.max(
-      0,
-      Math.min(positiveOrZeroInteger(frame, "frame"), ...this.#states.map((state) => state.frames))
-    )
+    const target = positiveOrZeroInteger(frame, "frame")
     this.#generation += 1n
     for (const state of this.#states) {
       state.cursor = Math.min(target, state.frames)
@@ -280,7 +277,12 @@ export function deinterleaveCanonicalPcm(
   planes
 ) {
   if (!(bytes instanceof Uint8Array)) throw new TypeError("PCM window must be bytes")
-  if (planes.length !== channels) throw new RangeError("PCM plane count mismatch")
+  if (
+    planes.length !== channels ||
+    planes.some((plane) => !(plane instanceof Float32Array) || plane.length < frames)
+  ) {
+    throw new RangeError("PCM plane shape mismatch")
+  }
   const bytesPerSample = bitDepth / 8
   const frameBytes = channels * bytesPerSample
   const needed = (firstFrame + frames) * frameBytes
