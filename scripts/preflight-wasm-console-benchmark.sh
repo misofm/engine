@@ -16,7 +16,7 @@
 # `--strip1` and `--strip1-baseline` are the wasm half of the strip round's job 1, the
 # prepared-identity builtin-section elision; see the runner's header.
 set -euo pipefail
-[[ "$#" -le 1 ]] || { printf 'usage: %s [--after|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue183|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline|--round2-lim|--round2-lim-baseline|--round2-composed|--audit-chain-merge|--audit-chain-merge-baseline|--strip1|--strip1-baseline|--strip2|--strip2-baseline|--strip3|--strip3-baseline|--strip4|--mono2]
+[[ "$#" -le 1 ]] || { printf 'usage: %s [--after|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue183|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline|--round2-lim|--round2-lim-baseline|--round2-composed|--audit-chain-merge|--audit-chain-merge-baseline|--strip1|--strip1-baseline|--strip2|--strip2-baseline|--strip3|--strip3-baseline|--strip4|--mono2|--mono3|--mono3-baseline]
 ' "$0" >&2; exit 2; }
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$root"
@@ -49,6 +49,8 @@ fail() { printf 'wasm console preflight failure: %s\n' "$1" >&2; exit 1; }
 # every row and every leg and differ only in time.
 # `--round2-comp` and `--round2-comp-baseline` are the same pairing for the compressor's round 2,
 # the staged idle body and the pre-gathered detector taps, which is class A on the same terms.
+# `--mono3` and `--mono3-baseline` are the wasm halves of the M3 / #210-phase-3 pair; see the
+# native runner's header.
 arm=baseline
 case "${1:-}" in
     --after) arm=after; shift ;;
@@ -78,8 +80,10 @@ case "${1:-}" in
     --strip3-baseline) arm=strip3-baseline; shift ;;
     --strip4) arm=strip4; shift ;;
     --mono2) arm=mono2; shift ;;
+    --mono3) arm=mono3; shift ;;
+    --mono3-baseline) arm=mono3-baseline; shift ;;
 esac
-[[ "$#" == 0 ]] || fail "usage: $0 [--after|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue183|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline|--round2-lim|--round2-lim-baseline|--round2-composed|--audit-chain-merge|--audit-chain-merge-baseline|--strip1|--strip1-baseline|--strip2|--strip2-baseline|--strip3|--strip3-baseline|--strip4|--mono2]"
+[[ "$#" == 0 ]] || fail "usage: $0 [--after|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue183|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline|--round2-lim|--round2-lim-baseline|--round2-composed|--audit-chain-merge|--audit-chain-merge-baseline|--strip1|--strip1-baseline|--strip2|--strip2-baseline|--strip3|--strip3-baseline|--strip4|--mono2|--mono3|--mono3-baseline]"
 
 if [[ "$arm" == after ]]; then
     artifact_dir="$root/artifacts/issue163-phase2"
@@ -135,6 +139,10 @@ elif [[ "$arm" == strip4 ]]; then
     artifact_dir="$root/artifacts/strip4"
 elif [[ "$arm" == mono2 ]]; then
     artifact_dir="$root/artifacts/mono2"
+elif [[ "$arm" == mono3 ]]; then
+    artifact_dir="$root/artifacts/mono3"
+elif [[ "$arm" == mono3-baseline ]]; then
+    artifact_dir="$root/artifacts/mono3-baseline"
 else
     artifact_dir="$root/artifacts/issue163-phase2-wasm-baseline"
 fi

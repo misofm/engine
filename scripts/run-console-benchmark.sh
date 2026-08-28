@@ -172,6 +172,39 @@
 # round-1 arm, `console_placement`'s `merged_chain_transposes_per_block` must *not* move: this round
 # makes each transpose cheaper and does not remove one.
 #
+# `--mono3` and `--mono3-baseline` are the paired arms of mono re-engage M3 (PR #230) and, on the
+# same two captures, of #210 phase 3's class-A OFF claim (PR #231). Two arms, two trees, four
+# readings -- and the reason one pair carries all four is that a sealed capture describes *a tree*,
+# so a third directory measuring a tree one of these two already measured would be a second
+# authority for one tree and an invitation to quote whichever read better.
+#
+# `--mono3-baseline` is `e4691f2b^1` (`3cc44de7`, the merge of #230) with this arm registration and
+# nothing else: M3 present, phase 3 absent. `--mono3` is the current `main` (`565349a6`): M3
+# present, phase 3 present, plus #232's de-versioning renames.
+#
+# What the four readings are:
+#
+# 1. **M3's cost.** `mono3-baseline` read against the sealed `mono2` capture. Between `mono2`'s
+#    tree and this one lie exactly two merges, #229 (track delay) and #230 (M3), so the pair is
+#    nearly clean; #229's contribution is separately established as null. This is the reading M3
+#    shipped without and the reason this arm exists.
+# 2. **Phase 3's cost (C3).** `mono3` against `mono3-baseline`, one tree apart but for #232.
+#    Phase 3 claims class A with the feature OFF: an uncommanded console dispatches the untouched
+#    settled kernel, one bool per bank per block. Every row here is uncommanded, so every row is
+#    the OFF path.
+# 3. **The standing mono pair, re-measured.** The `console_mono` record's two arms are the same
+#    fixture with the collapse taken and forced off, alternated observation by observation, so its
+#    delta is the mechanism's cost measured against itself on one machine at one moment. Both arms
+#    carry it, so the pair is measured twice on two trees.
+# 4. **Class A, twice over.** Every `output_sha256` on both arms must reproduce the sealed `mono2`
+#    values on every row and every leg. M3 and phase 3 are both class A; a single digit of
+#    difference is a defect, not a re-pin.
+#
+# #232 rides on the `mono3` arm and not on `mono3-baseline`, so the C3 delta is `#231 + #232`
+# rather than `#231` alone. That is stated rather than hidden: #232 is a rename-only refactor
+# (146 files, no control flow touched, and the console subject's own diff across it is nine
+# identifier renames), and its class-A obligation is discharged by the digest equality above.
+#
 # # Admissibility (#144 item 13, #163 phase 0a)
 #
 # Everything from `check-bench-preconditions.sh` down to the warmup is a *precondition*, not a
@@ -217,10 +250,12 @@ if [[ "$#" == 1 ]]; then
         --strip3-baseline) phase_directory=strip3-baseline ;;
         --strip4) phase_directory=strip4 ;;
         --mono2) phase_directory=mono2 ;;
-        *) printf 'usage: %s [--phase2|--phase3|--issue163-phase0|--issue163-phase1|--issue163-phase2|--issue163-phase3|--issue163-phase4|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue184|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline|--round2-lim|--round2-lim-baseline|--round2-composed|--audit-chain-merge|--audit-chain-merge-baseline|--strip1|--strip1-baseline|--strip2|--strip2-baseline|--strip3|--strip3-baseline|--strip4|--mono2]\n' "$0" >&2; exit 2 ;;
+        --mono3) phase_directory=mono3 ;;
+        --mono3-baseline) phase_directory=mono3-baseline ;;
+        *) printf 'usage: %s [--phase2|--phase3|--issue163-phase0|--issue163-phase1|--issue163-phase2|--issue163-phase3|--issue163-phase4|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue184|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline|--round2-lim|--round2-lim-baseline|--round2-composed|--audit-chain-merge|--audit-chain-merge-baseline|--strip1|--strip1-baseline|--strip2|--strip2-baseline|--strip3|--strip3-baseline|--strip4|--mono2|--mono3|--mono3-baseline]\n' "$0" >&2; exit 2 ;;
     esac
 elif [[ "$#" != 0 ]]; then
-    printf 'usage: %s [--phase2|--phase3|--issue163-phase0|--issue163-phase1|--issue163-phase2|--issue163-phase3|--issue163-phase4|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue184|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline|--round2-lim|--round2-lim-baseline|--round2-composed|--audit-chain-merge|--audit-chain-merge-baseline|--strip1|--strip1-baseline|--strip2|--strip2-baseline|--strip3|--strip3-baseline|--strip4|--mono2]\n' "$0" >&2
+    printf 'usage: %s [--phase2|--phase3|--issue163-phase0|--issue163-phase1|--issue163-phase2|--issue163-phase3|--issue163-phase4|--issue175|--issue182|--issue-loop-eq-r1|--compressor-round1|--compressor-round1-baseline|--round1-composed|--issue184|--round2-lane|--round2-lane-baseline|--round2-eqrack|--round2-eqrack-baseline|--round2-comp|--round2-comp-baseline|--round2-lim|--round2-lim-baseline|--round2-composed|--audit-chain-merge|--audit-chain-merge-baseline|--strip1|--strip1-baseline|--strip2|--strip2-baseline|--strip3|--strip3-baseline|--strip4|--mono2|--mono3|--mono3-baseline]\n' "$0" >&2
     exit 2
 fi
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
