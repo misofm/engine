@@ -4,7 +4,7 @@
 //!
 //! The render plane already carries everything solo-in-place needs: a per-lane declicked gate
 //! whose target is `0.0` or the lane's fader gain, fed by a per-track bounded queue of
-//! `TrackFaderRecordV1` records. SIP therefore adds **no render-thread code at all**. It is a
+//! `TrackFaderRecord` records. SIP therefore adds **no render-thread code at all**. It is a
 //! state machine at command admission that composes
 //!
 //! ```text
@@ -25,7 +25,7 @@
 //! admitted mute command. Un-soloing restores exactly that set, which is what makes
 //! snapshot/restore correct by construction: solo and user mute never overwrite each other.
 //!
-//! Restore is **per lane**. `TrackFaderRecordV1::Mute` carries one `muted` bool, so a track whose
+//! Restore is **per lane**. `TrackFaderRecord::Mute` carries one `muted` bool, so a track whose
 //! user mute is `[true, false]` needs two records, not one; the worst case for a whole console is
 //! `2 * track_count` records. [`ConsoleSoloState::track_delta`] is what states that bound.
 //!

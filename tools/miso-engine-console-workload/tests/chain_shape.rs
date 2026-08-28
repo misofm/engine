@@ -413,7 +413,7 @@ fn every_standing_workload_folds_one_route_per_track() {
 /// # What M1 moved, and what it did not
 ///
 /// M1 gave the cohort planner a third pool key beside the level and the rack: the track's
-/// collapse class (`CohortPoolClassV1`). The 32 mono tracks and the 32 stereo ones now pool
+/// collapse class (`CohortPoolClass`). The 32 mono tracks and the 32 stereo ones now pool
 /// separately, so this row's eight cohorts are **four all-mono and four all-stereo** where they
 /// were eight half-and-half. That is the regroup the collapse needs and it is the whole of M1's
 /// behaviour change.
@@ -515,7 +515,7 @@ fn the_half_mono_cohort_banks_like_a_uniform_one() {
     // half are wholly ineligible, and every chain is one or the other. Before M1 every one of them
     // was four-and-four, which the census below cannot distinguish from this.
     //
-    // Red mutation: make `SessionPoolClassesV1::class_of` return `CohortPoolClassV1::Stereo`
+    // Red mutation: make `SessionPoolClasses::class_of` return `CohortPoolClass::Stereo`
     // unconditionally -- the pre-M1 behaviour, one pool per (level, rack) -- and every chain goes
     // back to holding four even tracks and four odd ones: the per-chain homogeneity assertion
     // fails and `collapsible` falls to zero, while every shape and digest assertion above stays
@@ -541,7 +541,7 @@ fn the_half_mono_cohort_banks_like_a_uniform_one() {
         "every chain here renders upstream-of-seam stages, so no row's witness is vacuous"
     );
     // The runtime half alone cannot see the split, and that is not a defect: `SOURCE` is not one
-    // of its four terms (`session_structural_symmetry_v1` says why it lives on the control plane),
+    // of its four terms (`session_structural_symmetry` says why it lives on the control plane),
     // and this row's designed words are symmetric on *every* track -- the half-mono derivation
     // moves the source mapping and nothing else. So every chain reports every lane eligible here,
     // exactly as the uniform mono row does.

@@ -753,7 +753,7 @@ pub struct SessionRuntime {
     /// compile time.
     ///
     /// The `SOURCE` term is a function over the compiled session rather than a field of the
-    /// prepared plan (`session_structural_symmetry_v1` says why: the cohort planner needs the
+    /// prepared plan (`session_structural_symmetry` says why: the cohort planner needs the
     /// class before any prepared object exists), so it cannot be read back off the plan the way
     /// [`SessionRuntime::symmetry_counters`] reads the rest of the witness. It is taken once, in
     /// `build_full`, and kept.
@@ -946,10 +946,10 @@ impl SessionRuntime {
 
         let mut plan = plan;
         // The collapse's structural join, performed exactly where the M1 plumbing said it would
-        // be: `session_structural_symmetry_v1` is keyed by track id, the plan's rows are keyed by
+        // be: `session_structural_symmetry` is keyed by track id, the plan's rows are keyed by
         // anonymous lanes, and this is the one call site that holds both. A plan nobody joins
         // never collapses, so this is not an optimisation switch -- it is the arming.
-        let structural = miso_engine_builtins_compiler::session_structural_symmetry_v1(&session);
+        let structural = miso_engine_builtins_compiler::session_structural_symmetry(&session);
         let eligible: BTreeSet<&str> = structural
             .iter()
             .filter(|(_, witness)| witness.eligible())
@@ -966,7 +966,7 @@ impl SessionRuntime {
             meter_consumers,
             controls,
             observations,
-            structural_symmetry: miso_engine_builtins_compiler::session_structural_symmetry_v1(
+            structural_symmetry: miso_engine_builtins_compiler::session_structural_symmetry(
                 &session,
             ),
         };

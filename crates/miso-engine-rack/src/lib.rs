@@ -36,17 +36,17 @@ pub enum RackError {
 /// plugins").
 ///
 /// The variant exists on the *cohort* type so that a dynamic chain can never share a cohort with a
-/// SIMD chain: [`RackProgramV1::subsequence_mask`] compares `rack` first, and
+/// SIMD chain: [`RackProgram::subsequence_mask`] compares `rack` first, and
 /// `miso_engine_rack_compiler::plan_bank_groups` pools per location.
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub enum RackLocationV1 {
+pub enum RackLocation {
     Simd1 = 1,
     Simd2 = 2,
     Dynamic = 3,
 }
 
-impl RackLocationV1 {
+impl RackLocation {
     /// Every bank location, in cohort-planning order.
     ///
     /// `plan_bank_groups` iterates this, so a new location is planned by construction rather than
@@ -87,14 +87,14 @@ impl BankSlotKey for EffectProgramKey {
 /// stage with a key of its own (the post-input builtin bank, #86) is planned by the same planner
 /// without either side having to fabricate the other's key type.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct RackProgramV1<K = EffectProgramKey> {
-    pub rack: RackLocationV1,
+pub struct RackProgram<K = EffectProgramKey> {
+    pub rack: RackLocation,
     pub slots: Box<[K]>,
 }
 
-impl<K: BankSlotKey> RackProgramV1<K> {
+impl<K: BankSlotKey> RackProgram<K> {
     #[must_use]
-    pub fn new(rack: RackLocationV1, slots: Vec<K>) -> Self {
+    pub fn new(rack: RackLocation, slots: Vec<K>) -> Self {
         Self {
             rack,
             slots: slots.into_boxed_slice(),

@@ -61,9 +61,9 @@ use std::path::{Path, PathBuf};
 
 use miso_engine_bench_support::json::escape;
 use miso_engine_builtins::{
-    BUILTIN_PARAMETER_DESCRIPTORS_V1, BuiltinParameterDescriptorV1, BuiltinParameterDomain,
+    BUILTIN_PARAMETER_DESCRIPTORS, BuiltinParameterDescriptor, BuiltinParameterDomain,
     BuiltinParameterMapping, BuiltinParameterReset, BuiltinParameterScope,
-    BuiltinParameterUpdateRate, BuiltinSmoothingPolicy, builtin_filter_cutoff_maximum_hz_v1,
+    BuiltinParameterUpdateRate, BuiltinSmoothingPolicy, builtin_filter_cutoff_maximum_hz,
 };
 use miso_engine_effect_compiler::launch_native_effect_registry;
 use miso_engine_effect_contract::{
@@ -241,7 +241,7 @@ pub fn render() -> String {
     }
     out.push_str("  },\n");
     out.push_str("  \"builtins\": {\n    \"parameters\": [\n");
-    let builtins = BUILTIN_PARAMETER_DESCRIPTORS_V1;
+    let builtins = BUILTIN_PARAMETER_DESCRIPTORS;
     for (index, parameter) in builtins.iter().enumerate() {
         out.push_str(&builtin_parameter(parameter));
         out.push_str(&format!("{}\n", comma(index, builtins.len())));
@@ -470,8 +470,8 @@ fn effect_parameter(parameter: &ParameterDescriptor) -> String {
     out
 }
 
-fn builtin_parameter(parameter: &BuiltinParameterDescriptorV1) -> String {
-    // A rate-keyed cutoff has no single maximum: `builtin_filter_cutoff_maximum_hz_v1` gives one
+fn builtin_parameter(parameter: &BuiltinParameterDescriptor) -> String {
+    // A rate-keyed cutoff has no single maximum: `builtin_filter_cutoff_maximum_hz` gives one
     // per launch rate, so the row carries the exact `f32` for each rather than a number that would
     // be wrong at three of the four.
     let mut maximum_by_rate = String::from("null");
@@ -480,14 +480,14 @@ fn builtin_parameter(parameter: &BuiltinParameterDescriptorV1) -> String {
         BuiltinParameterDomain::FiniteInclusive { minimum, maximum } => {
             (Some(minimum), Some(maximum), "finiteInclusive")
         }
-        BuiltinParameterDomain::DisabledOrRateKeyedHertzV1 { minimum_hz, .. } => {
+        BuiltinParameterDomain::DisabledOrRateKeyedHertz { minimum_hz, .. } => {
             maximum_by_rate = format!(
                 "{{ {} }}",
                 LAUNCH_RATES_HZ
                     .iter()
                     .map(|rate| format!(
                         "\"{rate}\": {}",
-                        optional_number(builtin_filter_cutoff_maximum_hz_v1(*rate))
+                        optional_number(builtin_filter_cutoff_maximum_hz(*rate))
                     ))
                     .collect::<Vec<_>>()
                     .join(", ")

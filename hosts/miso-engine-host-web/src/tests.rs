@@ -1516,7 +1516,7 @@ fn a_fader_command_names_the_exact_application_sample() {
 /// #140 B: mute is a fader endpoint. A zero-window mute is the exact `+0.0` the prepared path
 /// gives; a windowed mute fades over the window and only then reaches that exact zero.
 ///
-/// Red mutation: make `FaderMuteRampBuiltinsV1::set_mute` snap instead of retargeting -> the
+/// Red mutation: make `FaderMuteRampBuiltins::set_mute` snap instead of retargeting -> the
 /// windowed mute is already silent on its first sample and the "still audible" assertion fails.
 #[test]
 fn a_mute_command_is_a_fader_endpoint_not_a_discontinuity() {
@@ -3205,7 +3205,7 @@ fn render_pair_and_compare(
 /// first block the acknowledgement names.
 ///
 /// This is the whole architectural claim in one assertion. Solo composes at admission into the
-/// same `TrackFaderRecordV1::Mute` records an explicit mute lowers to, so a host told "solo these
+/// same `TrackFaderRecord::Mute` records an explicit mute lowers to, so a host told "solo these
 /// four" and a host told "mute the other four" must put the same bytes in the same queues and
 /// render the same samples. The two arms drive the same frozen fader section, and neither arm
 /// knows which one it is.

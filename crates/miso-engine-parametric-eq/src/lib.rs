@@ -58,11 +58,11 @@ use miso_engine_lane::kernels::{
 use miso_engine_lane::{Backend, Lane, Simd4, Simd8};
 
 /// Fixed cascade length in V1.
-pub const EQ_SECTION_COUNT_V1: usize = 4;
+pub const EQ_SECTION_COUNT: usize = 4;
 
 /// Coefficient words one SVF section carries, in the pinned `c1, a2, a3, m0, m1, m2` order.
 ///
-/// This is the width of `EqSvfWordsV1::to_array`, of `SvfCoef`, and of `SvfCoefStep`: exactly the
+/// This is the width of `EqSvfWords::to_array`, of `SvfCoef`, and of `SvfCoefStep`: exactly the
 /// per-section surface the cascade kernel loads.
 const EQ_COEFFICIENT_WORDS: usize = 6;
 
@@ -71,7 +71,7 @@ const STATE_LAYOUT_VERSION: u32 = 2;
 /// Words one band occupies in a lane section of the payload.
 const STATE_WORDS_PER_BAND: usize = 19;
 /// Effect-owned words in each channel section.
-const STATE_LANE_WORDS: usize = EQ_SECTION_COUNT_V1 * STATE_WORDS_PER_BAND;
+const STATE_LANE_WORDS: usize = EQ_SECTION_COUNT * STATE_WORDS_PER_BAND;
 /// The payload shape, stamped into the common section by the shared codec.
 ///
 /// W2-D2's rule for a crate that has to bump its layout anyway: adopt the runtime header **inside**
@@ -97,7 +97,7 @@ const MAX_LANES: usize = 8;
 /// Frozen V1 section filter families.
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum EqBandKindV1 {
+pub enum EqBandKind {
     /// Peaking bell.
     Bell = 1,
     /// Low shelving.
@@ -112,7 +112,7 @@ pub enum EqBandKindV1 {
     Notch = 6,
 }
 
-impl EqBandKindV1 {
+impl EqBandKind {
     /// Decodes the enumeration parameter's frozen numeric encoding.
     fn from_value(value: f32) -> Option<Self> {
         match value.to_bits() {
@@ -129,14 +129,14 @@ impl EqBandKindV1 {
 
 /// Stable parameter IDs for one cascade position.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct EqBandDescriptorV1 {
-    /// Band index, `0..EQ_SECTION_COUNT_V1`.
+pub struct EqBandDescriptor {
+    /// Band index, `0..EQ_SECTION_COUNT`.
     pub index: u8,
     /// Position in the cascade; equal to `index` in V1.
     pub cascade_order: u8,
     /// Boolean enable.
     pub enabled: ParameterId,
-    /// Filter family, one of [`EqBandKindV1`].
+    /// Filter family, one of [`EqBandKind`].
     pub kind: ParameterId,
     /// Centre or corner frequency in Hz.
     pub frequency_hz: ParameterId,
@@ -175,8 +175,8 @@ const fn band_base(band: usize) -> u32 {
 }
 
 /// Four static cascade positions in increasing order.
-pub const EQ_BAND_DESCRIPTORS_V1: [EqBandDescriptorV1; EQ_SECTION_COUNT_V1] = {
-    let mut bands = [EqBandDescriptorV1 {
+pub const EQ_BAND_DESCRIPTORS: [EqBandDescriptor; EQ_SECTION_COUNT] = {
+    let mut bands = [EqBandDescriptor {
         index: 0,
         cascade_order: 0,
         enabled: parameter_id(1),
@@ -185,11 +185,11 @@ pub const EQ_BAND_DESCRIPTORS_V1: [EqBandDescriptorV1; EQ_SECTION_COUNT_V1] = {
         gain_db: parameter_id(4),
         q: parameter_id(5),
         shelf_slope: parameter_id(6),
-    }; EQ_SECTION_COUNT_V1];
+    }; EQ_SECTION_COUNT];
     let mut band = 0;
-    while band < EQ_SECTION_COUNT_V1 {
+    while band < EQ_SECTION_COUNT {
         let base = band_base(band);
-        bands[band] = EqBandDescriptorV1 {
+        bands[band] = EqBandDescriptor {
             index: band as u8,
             cascade_order: band as u8,
             enabled: parameter_id(base),
@@ -233,7 +233,7 @@ const KIND_CHOICES: [EnumChoice; 6] = [
 
 /// Display names, band major, in descriptor order. The table below is generated from them, so the
 /// twenty-four descriptors cannot drift apart in a field no reader is comparing.
-const PARAMETER_NAMES: [&str; EQ_SECTION_COUNT_V1 * 6] = [
+const PARAMETER_NAMES: [&str; EQ_SECTION_COUNT * 6] = [
     "band-1-enabled",
     "band-1-kind",
     "band-1-frequency",
@@ -261,7 +261,7 @@ const PARAMETER_NAMES: [&str; EQ_SECTION_COUNT_V1 * 6] = [
 ];
 
 /// Default centre frequency of each band, in Hz.
-const FREQUENCY_DEFAULTS: [f32; EQ_SECTION_COUNT_V1] = [80.0, 400.0, 2_000.0, 10_000.0];
+const FREQUENCY_DEFAULTS: [f32; EQ_SECTION_COUNT] = [80.0, 400.0, 2_000.0, 10_000.0];
 
 /// Lowest and highest admitted frequency, gain, Q and shelf slope, in field order 2..6.
 const NUMERIC_SPECS: [ParameterSpec; 4] = [
@@ -346,10 +346,10 @@ const fn parameter(band: usize, field: usize) -> ParameterDescriptor {
     }
 }
 
-const EQ_PARAMETERS: [ParameterDescriptor; EQ_SECTION_COUNT_V1 * 6] = {
-    let mut table = [parameter(0, 0); EQ_SECTION_COUNT_V1 * 6];
+const EQ_PARAMETERS: [ParameterDescriptor; EQ_SECTION_COUNT * 6] = {
+    let mut table = [parameter(0, 0); EQ_SECTION_COUNT * 6];
     let mut band = 0;
-    while band < EQ_SECTION_COUNT_V1 {
+    while band < EQ_SECTION_COUNT {
         let mut field = 0;
         while field < 6 {
             table[band * 6 + field] = parameter(band, field);
@@ -399,7 +399,7 @@ const fn quality(sample_rate: u32) -> QualityDescriptor {
 }
 
 /// Authoritative static V1 effect metadata.
-pub static PARAMETRIC_EQ_DESCRIPTOR_V1: EffectDescriptor = EffectDescriptor {
+pub static PARAMETRIC_EQ_DESCRIPTOR: EffectDescriptor = EffectDescriptor {
     id: effect_id("miso.parametric-eq"),
     display_name: "Parametric EQ",
     contract_major: 1,
@@ -417,7 +417,7 @@ pub static PARAMETRIC_EQ_DESCRIPTOR_V1: EffectDescriptor = EffectDescriptor {
 /// Designed in `f64` and rounded exactly once, which is what makes the words a target-independent
 /// function of the parameters (the `f64` design uses `miso-engine-math`, never the platform libm).
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct EqSvfWordsV1 {
+pub struct EqSvfWords {
     /// `t / (1 + t)` with `t = g * (g + k)` — the pole's distance from `z = 1` (amendment A1).
     pub c1: f32,
     /// `g * (1 - c1)`.
@@ -432,7 +432,7 @@ pub struct EqSvfWordsV1 {
     pub m2: f32,
 }
 
-impl EqSvfWordsV1 {
+impl EqSvfWords {
     /// The exact identity section: `y = x` bit for bit, with no state growth and no mask.
     pub const IDENTITY: Self = Self {
         c1: 0.0,
@@ -449,7 +449,7 @@ impl EqSvfWordsV1 {
         [self.c1, self.a2, self.a3, self.m0, self.m1, self.m2]
     }
 
-    /// Rebuilds a set from [`EqSvfWordsV1::to_array`] order.
+    /// Rebuilds a set from [`EqSvfWords::to_array`] order.
     #[must_use]
     pub const fn from_array(words: [f32; 6]) -> Self {
         Self {
@@ -479,10 +479,10 @@ pub enum EqDesignError {
 /// `alpha_S` and `alpha_Q` the same quantity and the shelf transfer the cookbook's.
 ///
 /// Returned in the pinned order `c1, a2, a3, m0, m1, m2`. Public because it is the quantity an
-/// oracle compares against: [`design_svf_v1`] is exactly this followed by one rounding.
+/// oracle compares against: [`design_svf`] is exactly this followed by one rounding.
 #[must_use]
 pub fn design_svf_words_f64(
-    kind: EqBandKindV1,
+    kind: EqBandKind,
     frequency_hz: f64,
     gain_db: f64,
     q: f64,
@@ -493,21 +493,21 @@ pub fn design_svf_words_f64(
     let warped = miso_engine_math::tan(core::f64::consts::PI * frequency_hz / sample_rate_hz);
     let shelf_k = ((amplitude + 1.0 / amplitude) * (1.0 / shelf_slope - 1.0) + 2.0).sqrt();
     let (g, k, m0, m1, m2) = match kind {
-        EqBandKindV1::LowPass => (warped, 1.0 / q, 0.0, 0.0, 1.0),
-        EqBandKindV1::HighPass => (warped, 1.0 / q, 1.0, -(1.0 / q), -1.0),
-        EqBandKindV1::Notch => (warped, 1.0 / q, 1.0, -(1.0 / q), 0.0),
-        EqBandKindV1::Bell => {
+        EqBandKind::LowPass => (warped, 1.0 / q, 0.0, 0.0, 1.0),
+        EqBandKind::HighPass => (warped, 1.0 / q, 1.0, -(1.0 / q), -1.0),
+        EqBandKind::Notch => (warped, 1.0 / q, 1.0, -(1.0 / q), 0.0),
+        EqBandKind::Bell => {
             let k = 1.0 / (q * amplitude);
             (warped, k, 1.0, k * (amplitude * amplitude - 1.0), 0.0)
         }
-        EqBandKindV1::LowShelf => (
+        EqBandKind::LowShelf => (
             warped / amplitude.sqrt(),
             shelf_k,
             1.0,
             shelf_k * (amplitude - 1.0),
             amplitude * amplitude - 1.0,
         ),
-        EqBandKindV1::HighShelf => (
+        EqBandKind::HighShelf => (
             warped * amplitude.sqrt(),
             shelf_k,
             amplitude * amplitude,
@@ -530,7 +530,7 @@ pub fn design_svf_words_f64(
 /// stability predicate that replaces the delta realization's Jury test: it is a statement about the
 /// matrix the kernel actually iterates, not about a polynomial nothing evaluates.
 #[must_use]
-pub fn word_spectral_norm(words: EqSvfWordsV1) -> f64 {
+pub fn word_spectral_norm(words: EqSvfWords) -> f64 {
     let a00 = 1.0 - 2.0 * f64::from(words.c1);
     let a01 = -2.0 * f64::from(words.a2);
     let a10 = 2.0 * f64::from(words.a2);
@@ -553,14 +553,14 @@ const NORM_TOLERANCE: f64 = 1.0 + 1.0 / 4_194_304.0;
 /// [`EqDesignError::InvalidInput`] if the sample rate is not a launch rate, a parameter is outside
 /// its domain, or the centre frequency is at or above Nyquist. [`EqDesignError::Coefficients`] if
 /// the rounded words are not finite or not contractive.
-pub fn design_svf_v1(
-    kind: EqBandKindV1,
+pub fn design_svf(
+    kind: EqBandKind,
     frequency_hz: f32,
     gain_db: f32,
     q: f32,
     shelf_slope: f32,
     sample_rate: SampleRateHz,
-) -> Result<EqSvfWordsV1, EqDesignError> {
+) -> Result<EqSvfWords, EqDesignError> {
     if !is_launch_sample_rate(sample_rate)
         || !numeric_value_valid(0, frequency_hz)
         || !numeric_value_valid(1, gain_db)
@@ -581,7 +581,7 @@ pub fn design_svf_v1(
     // The single rounding. `-0.0` is normalised away so that adding a zero ramp increment to a word
     // is bit-preserving on every lane, which is what makes an idle lane of a ramping bank identical
     // to the same lane of a settled one.
-    let words = EqSvfWordsV1::from_array(exact.map(|value| {
+    let words = EqSvfWords::from_array(exact.map(|value| {
         let rounded = value as f32;
         if rounded == 0.0 { 0.0 } else { rounded }
     }));
@@ -606,7 +606,7 @@ fn numeric_value_valid(field: usize, value: f32) -> bool {
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct BandTarget {
     enabled: bool,
-    kind: EqBandKindV1,
+    kind: EqBandKind,
     frequency: f32,
     gain: f32,
     q: f32,
@@ -615,11 +615,11 @@ struct BandTarget {
 
 impl BandTarget {
     /// The words this band settles at. A disabled band is the exact identity at every parameter.
-    fn words(&self, sample_rate: SampleRateHz) -> Result<EqSvfWordsV1, EqDesignError> {
+    fn words(&self, sample_rate: SampleRateHz) -> Result<EqSvfWords, EqDesignError> {
         if !self.enabled {
-            return Ok(EqSvfWordsV1::IDENTITY);
+            return Ok(EqSvfWords::IDENTITY);
         }
-        design_svf_v1(
+        design_svf(
             self.kind,
             self.frequency,
             self.gain,
@@ -748,13 +748,13 @@ const MAGNITUDE_MASK: u32 = 0x7fff_ffff;
 /// the bound is what keeps a live section from overflowing into one mid-cascade.
 const ELISION_MAGNITUDE_CEILING: u32 = BLOCK_LIMIT.to_bits();
 
-/// The six [`EqSvfWordsV1::IDENTITY`] words as raw bits, in the pinned order.
+/// The six [`EqSvfWords::IDENTITY`] words as raw bits, in the pinned order.
 ///
 /// Bits rather than floats, for the same reason [`Channel::state_bits`] uses them: the flag this
 /// feeds claims a section is the *exact* identity, and `-0.0 == 0.0` would let a section that is
 /// not claim that it is.
 const IDENTITY_WORD_BITS: [u32; 6] = {
-    let words = EqSvfWordsV1::IDENTITY.to_array();
+    let words = EqSvfWords::IDENTITY.to_array();
     [
         words[0].to_bits(),
         words[1].to_bits(),
@@ -830,12 +830,12 @@ fn block_admits_elision(io: &[f32]) -> bool {
 /// instantiation of the same body, because a planar block is already a one-lane AoSoA block. There
 /// is no second copy of the recurrence, of the ramp law, or of the reset rules to keep in step.
 struct Channel<L: Lane, const W: usize> {
-    sections: [Section<L>; EQ_SECTION_COUNT_V1],
+    sections: [Section<L>; EQ_SECTION_COUNT],
     /// Samples still to be produced before each lane's ramp is at its target.
-    remaining: [[u32; W]; EQ_SECTION_COUNT_V1],
+    remaining: [[u32; W]; EQ_SECTION_COUNT],
     /// Live parameter targets, per track.
-    targets: [[BandTarget; EQ_SECTION_COUNT_V1]; W],
-    /// Per section: this section's coefficient words are [`EqSvfWordsV1::IDENTITY`] to the bit on
+    targets: [[BandTarget; EQ_SECTION_COUNT]; W],
+    /// Per section: this section's coefficient words are [`EqSvfWords::IDENTITY`] to the bit on
     /// **every** lane of this channel.
     ///
     /// Maintained only where coefficients change -- [`settle`](Self::settle),
@@ -849,13 +849,13 @@ struct Channel<L: Lane, const W: usize> {
     /// [`identity_flags_agree`](Self::identity_flags_agree) re-derives the whole array from the
     /// words and is asserted in debug builds on every stationary block, so a coefficient-change
     /// site added later without a refresh is a test failure rather than a silent wrong render.
-    identity: [bool; EQ_SECTION_COUNT_V1],
+    identity: [bool; EQ_SECTION_COUNT],
 }
 
 impl<L: Lane, const W: usize> Channel<L, W> {
     /// Builds a settled channel from per-track band parameters.
     fn new(
-        targets: [[BandTarget; EQ_SECTION_COUNT_V1]; W],
+        targets: [[BandTarget; EQ_SECTION_COUNT]; W],
         sample_rate: SampleRateHz,
     ) -> Result<Self, EqDesignError> {
         let identity = SvfCoef {
@@ -872,11 +872,11 @@ impl<L: Lane, const W: usize> Channel<L, W> {
                 step: SvfCoefStep::default(),
                 target: identity,
                 state: SvfState::default(),
-            }; EQ_SECTION_COUNT_V1],
-            remaining: [[0; W]; EQ_SECTION_COUNT_V1],
+            }; EQ_SECTION_COUNT],
+            remaining: [[0; W]; EQ_SECTION_COUNT],
             targets,
             // Every `(section, track)` pair is settled below, and `settle` refreshes the flag.
-            identity: [false; EQ_SECTION_COUNT_V1],
+            identity: [false; EQ_SECTION_COUNT],
         };
         for (track, bands) in targets.iter().enumerate() {
             for (section, band) in bands.iter().enumerate() {
@@ -888,7 +888,7 @@ impl<L: Lane, const W: usize> Channel<L, W> {
     }
 
     /// Places lane `track` of `section` at `words` with no ramp in flight.
-    fn settle(&mut self, section: usize, track: usize, words: EqSvfWordsV1) {
+    fn settle(&mut self, section: usize, track: usize, words: EqSvfWords) {
         let slot = &mut self.sections[section];
         for (index, word) in words.to_array().into_iter().enumerate() {
             lane_set(coef_word_mut(&mut slot.coef, index), track, word);
@@ -918,7 +918,7 @@ impl<L: Lane, const W: usize> Channel<L, W> {
     /// Asserted in debug builds on every stationary block. It is the standing check that the list
     /// of coefficient-change sites is complete.
     fn identity_flags_agree(&self) -> bool {
-        (0..EQ_SECTION_COUNT_V1).all(|section| {
+        (0..EQ_SECTION_COUNT).all(|section| {
             let coef = &self.sections[section].coef;
             let observed = (0..6)
                 .all(|index| lane_bits_all::<L>(coef_word(coef, index), IDENTITY_WORD_BITS[index]));
@@ -944,7 +944,7 @@ impl<L: Lane, const W: usize> Channel<L, W> {
     ///
     /// [`LinearRamp::stationary_at`] decides it by bit compare. The lane is settled instead, which
     /// is bit-identical because a zero increment is bit-preserving on every word -- exactly the
-    /// property `design_svf_v1` normalises `-0.0` away to guarantee, and the same property that
+    /// property `design_svf` normalises `-0.0` away to guarantee, and the same property that
     /// makes an idle lane of a ramping bank identical to the same lane of a settled one.
     /// `#[inline(never)]`: this is coefficient *design*, not render arithmetic. It runs only when
     /// an admitted automation span retargets a band, it is per lane and scalar by nature (six
@@ -954,7 +954,7 @@ impl<L: Lane, const W: usize> Channel<L, W> {
     /// of `process_bank` on its own; phase 3 made that function small enough that it stopped, so
     /// the shape is pinned here rather than left to a heuristic.
     #[inline(never)]
-    fn start_ramp(&mut self, section: usize, track: usize, words: EqSvfWordsV1) {
+    fn start_ramp(&mut self, section: usize, track: usize, words: EqSvfWords) {
         if self.stationary_at(section, track, words) {
             self.settle(section, track, words);
             return;
@@ -982,15 +982,15 @@ impl<L: Lane, const W: usize> Channel<L, W> {
     /// band and the sample rate, and `Section::target` holds exactly what it returned the last
     /// time this lane's band changed. So when an automation point restates a band it has already
     /// been given, the design does not have to be recomputed -- it can be read. That matters far
-    /// more than the ramp arithmetic: the design is an `f64` `design_svf_v1` per lane per event,
+    /// more than the ramp arithmetic: the design is an `f64` `design_svf` per lane per event,
     /// and a console that refreshes its automation is paying it on every refresh for every band it
     /// did not move.
     ///
     /// This is bit-identical rather than approximately equal, by determinism: same band, same
     /// rate, same function, same words.
-    fn target_words(&self, section: usize, track: usize) -> EqSvfWordsV1 {
+    fn target_words(&self, section: usize, track: usize) -> EqSvfWords {
         let slot = &self.sections[section];
-        EqSvfWordsV1::from_array(core::array::from_fn(|index| {
+        EqSvfWords::from_array(core::array::from_fn(|index| {
             lane_get(coef_word(&slot.target, index), track)
         }))
     }
@@ -1000,7 +1000,7 @@ impl<L: Lane, const W: usize> Channel<L, W> {
     /// All six words must agree bitwise, and each must pass [`LinearRamp::stationary_at`], which
     /// is where the `-0.0` and non-finite exclusions live. A partial match is not a hoist: five
     /// settled words and one moving word is a ramp.
-    fn stationary_at(&self, section: usize, track: usize, words: EqSvfWordsV1) -> bool {
+    fn stationary_at(&self, section: usize, track: usize, words: EqSvfWords) -> bool {
         let slot = &self.sections[section];
         words
             .to_array()
@@ -1056,7 +1056,7 @@ impl<L: Lane, const W: usize> Channel<L, W> {
     /// kernel reads to that gate as a kernel that moved, not as the ramp fallback it is.
     #[inline(always)]
     fn process_block(&mut self, io: &mut [f32], frames: usize) {
-        for section in 0..EQ_SECTION_COUNT_V1 {
+        for section in 0..EQ_SECTION_COUNT {
             self.process_section(section, io, frames);
         }
     }
@@ -1142,7 +1142,7 @@ impl<L: Lane, const W: usize> Channel<L, W> {
     /// integrator that settles at `-0.0` is still settled, but a float compare would also call a
     /// pair that moved between the two zeros "unchanged", which is exactly the bit the fast path
     /// promises not to move.
-    fn state_bits(&self, out: &mut [u32; EQ_SECTION_COUNT_V1 * 2 * MAX_LANES]) {
+    fn state_bits(&self, out: &mut [u32; EQ_SECTION_COUNT * 2 * MAX_LANES]) {
         for (index, section) in self.sections.iter().enumerate() {
             let base = index * 2 * L::WIDTH;
             section
@@ -1166,7 +1166,7 @@ impl<L: Lane, const W: usize> Channel<L, W> {
     /// Ends every ramp at its target and clears the integrators (a seek or a transport stop).
     fn discontinuity_reset(&mut self) {
         self.reset_states();
-        for section in 0..EQ_SECTION_COUNT_V1 {
+        for section in 0..EQ_SECTION_COUNT {
             // Every lane, so this is the whole-section snap by construction; one refresh per
             // section rather than one per lane.
             self.snap_section(section);
@@ -1179,7 +1179,7 @@ impl<L: Lane, const W: usize> Channel<L, W> {
 ///
 /// Issue #163 phase 3. `stationary` means no lane of either channel has a ramp in flight, so
 /// every section would run [`svf_block`] with fixed coefficients over the whole block --
-/// exactly `EQ_SECTION_COUNT_V1 * 2` serial passes, each one a recurrence whose next frame
+/// exactly `EQ_SECTION_COUNT * 2` serial passes, each one a recurrence whose next frame
 /// cannot start until this one's integrators are written. That shape is latency-bound: it
 /// leaves the vector units idle for most of every frame, and it is why the EQ took the same
 /// wall time at `Simd4` as at `Simd8`.
@@ -1210,7 +1210,7 @@ fn process_channels<L: Lane, const W: usize>(
     let sections = cascade_sections::<L, W>(channels.0, channels.1, left, right, frames);
     // `SVF_CASCADE_DEPTH` is a constant, so exactly one arm survives monomorphisation and the
     // match costs nothing. Every arm is bit-identical; a depth that did not divide the cascade
-    // would silently drop sections, so only the divisors of `EQ_SECTION_COUNT_V1` are reached
+    // would silently drop sections, so only the divisors of `EQ_SECTION_COUNT` are reached
     // and anything else falls back to the always-valid depth of one.
     match L::SVF_CASCADE_DEPTH {
         4 => interleave::<L, W, 4>(channels, left, right, frames, sections),
@@ -1262,22 +1262,22 @@ fn cascade_sections_mono<L: Lane, const W: usize>(
     channel: &Channel<L, W>,
     io: &[f32],
     frames: usize,
-) -> ([usize; EQ_SECTION_COUNT_V1], usize) {
-    let all = (core::array::from_fn(|section| section), EQ_SECTION_COUNT_V1);
+) -> ([usize; EQ_SECTION_COUNT], usize) {
+    let all = (core::array::from_fn(|section| section), EQ_SECTION_COUNT);
     let dead = |section: usize| channel.identity[section];
-    let depth = L::SVF_CASCADE_DEPTH.clamp(1, EQ_SECTION_COUNT_V1);
-    let live = (0..EQ_SECTION_COUNT_V1)
+    let depth = L::SVF_CASCADE_DEPTH.clamp(1, EQ_SECTION_COUNT);
+    let live = (0..EQ_SECTION_COUNT)
         .filter(|section| !dead(*section))
         .count();
     let kept = live.div_ceil(depth) * depth;
-    if kept >= EQ_SECTION_COUNT_V1 {
+    if kept >= EQ_SECTION_COUNT {
         return all;
     }
     let words = frames * W;
     if !block_admits_elision(&io[..words]) {
         return all;
     }
-    for section in 0..EQ_SECTION_COUNT_V1 {
+    for section in 0..EQ_SECTION_COUNT {
         let admissible = if dead(section) {
             section_state_is_positive_zero(&channel.sections[section])
         } else {
@@ -1288,9 +1288,9 @@ fn cascade_sections_mono<L: Lane, const W: usize>(
         }
     }
     let mut padding = kept - live;
-    let mut list = [0_usize; EQ_SECTION_COUNT_V1];
+    let mut list = [0_usize; EQ_SECTION_COUNT];
     let mut length = 0;
-    for section in 0..EQ_SECTION_COUNT_V1 {
+    for section in 0..EQ_SECTION_COUNT {
         let keep = if dead(section) {
             let take = padding > 0;
             padding -= usize::from(take);
@@ -1321,9 +1321,9 @@ fn interleave_mono<L: Lane, const W: usize, const DEPTH: usize>(
     channel: &mut Channel<L, W>,
     io: &mut [f32],
     frames: usize,
-    sections: ([usize; EQ_SECTION_COUNT_V1], usize),
+    sections: ([usize; EQ_SECTION_COUNT], usize),
 ) {
-    debug_assert_eq!(EQ_SECTION_COUNT_V1 % DEPTH, 0);
+    debug_assert_eq!(EQ_SECTION_COUNT % DEPTH, 0);
     let (list, length) = sections;
     debug_assert_eq!(length % DEPTH, 0);
     for pass in 0..length / DEPTH {
@@ -1349,7 +1349,7 @@ fn interleave_mono<L: Lane, const W: usize, const DEPTH: usize>(
 ///
 /// # Why a section can be dropped at all
 ///
-/// `BandTarget::words` maps `enabled = false` to [`EqSvfWordsV1::IDENTITY`] at every other
+/// `BandTarget::words` maps `enabled = false` to [`EqSvfWords::IDENTITY`] at every other
 /// parameter, so a disabled band is not "nearly" a pass-through, it is `c1 = a2 = a3 = m1 = m2 =
 /// +0.0, m0 = 1.0`. A console that ships four bands and uses two spends half the cascade there.
 /// The bank runs both channels through [`svf_cascade_interleaved`] at a fixed
@@ -1389,7 +1389,7 @@ fn interleave_mono<L: Lane, const W: usize, const DEPTH: usize>(
 ///   An `f32` addition yields `-0.0` **only** when both addends are `-0.0`: a nonzero exact sum in
 ///   the subnormal range is representable, so addition never underflows to a zero of either sign,
 ///   and exact cancellation `a + (-a)` gives `+0.0` under round-to-nearest. So `y = -0.0` requires
-///   all three of `m2 * v2`, `m1 * v1` and `m0 * v0` to be `-0.0`. `design_svf_v1` normalises
+///   all three of `m2 * v2`, `m1 * v1` and `m0 * v0` to be `-0.0`. `design_svf` normalises
 ///   `-0.0` out of every designed word, and the `m0` column of `design_svf_words_f64` is `+0.0`
 ///   for a low-pass and strictly positive for every other kind, so `m0 >= +0.0` always. Two cases:
 ///   - `m0 > 0`. Then `m0 * v0 = -0.0` needs either `v0 = -0.0` — excluded by induction, this
@@ -1430,11 +1430,11 @@ fn cascade_sections<L: Lane, const W: usize>(
     left: &[f32],
     right: &[f32],
     frames: usize,
-) -> ([usize; EQ_SECTION_COUNT_V1], usize) {
-    let all = (core::array::from_fn(|section| section), EQ_SECTION_COUNT_V1);
+) -> ([usize; EQ_SECTION_COUNT], usize) {
+    let all = (core::array::from_fn(|section| section), EQ_SECTION_COUNT);
     let dead = |section: usize| left_channel.identity[section] && right_channel.identity[section];
-    let depth = L::SVF_CASCADE_DEPTH.clamp(1, EQ_SECTION_COUNT_V1);
-    let live = (0..EQ_SECTION_COUNT_V1)
+    let depth = L::SVF_CASCADE_DEPTH.clamp(1, EQ_SECTION_COUNT);
+    let live = (0..EQ_SECTION_COUNT)
         .filter(|section| !dead(*section))
         .count();
     // The kernel runs whole passes of `DEPTH` sections, so the list has to divide by the depth.
@@ -1443,7 +1443,7 @@ fn cascade_sections<L: Lane, const W: usize>(
     // pass would need a second `DEPTH`, and a second arithmetic-carrying EQ kernel in the wasm
     // artifact reads to `KERNEL_ROSTER` as a kernel that moved.
     let kept = live.div_ceil(depth) * depth;
-    if kept >= EQ_SECTION_COUNT_V1 {
+    if kept >= EQ_SECTION_COUNT {
         return all;
     }
     // (a) Neither input plane carries `-0.0`, an infinity, a NaN, or a magnitude above the §4.4
@@ -1452,7 +1452,7 @@ fn cascade_sections<L: Lane, const W: usize>(
     if !block_admits_elision(&left[..words]) || !block_admits_elision(&right[..words]) {
         return all;
     }
-    for section in 0..EQ_SECTION_COUNT_V1 {
+    for section in 0..EQ_SECTION_COUNT {
         let admissible = if dead(section) {
             // (b) An elided section must already be at the `+0.0` state the proof's induction
             // starts from -- otherwise its state would move in the full cascade and not here.
@@ -1471,9 +1471,9 @@ fn cascade_sections<L: Lane, const W: usize>(
         }
     }
     let mut padding = kept - live;
-    let mut list = [0_usize; EQ_SECTION_COUNT_V1];
+    let mut list = [0_usize; EQ_SECTION_COUNT];
     let mut length = 0;
-    for section in 0..EQ_SECTION_COUNT_V1 {
+    for section in 0..EQ_SECTION_COUNT {
         let keep = if dead(section) {
             let take = padding > 0;
             padding -= usize::from(take);
@@ -1502,9 +1502,9 @@ fn interleave<L: Lane, const W: usize, const DEPTH: usize>(
     left: &mut [f32],
     right: &mut [f32],
     frames: usize,
-    sections: ([usize; EQ_SECTION_COUNT_V1], usize),
+    sections: ([usize; EQ_SECTION_COUNT], usize),
 ) {
-    debug_assert_eq!(EQ_SECTION_COUNT_V1 % DEPTH, 0);
+    debug_assert_eq!(EQ_SECTION_COUNT % DEPTH, 0);
     let (list, length) = sections;
     debug_assert_eq!(length % DEPTH, 0);
     for pass in 0..length / DEPTH {
@@ -1569,7 +1569,7 @@ struct RestoredBand {
 impl<L: Lane, const W: usize> Channel<L, W> {
     /// Writes lane `track`'s state words in the version-2 order.
     fn snapshot_track(&self, track: usize, out: &mut [u32; STATE_LANE_WORDS]) {
-        for section in 0..EQ_SECTION_COUNT_V1 {
+        for section in 0..EQ_SECTION_COUNT {
             let base = section * STATE_WORDS_PER_BAND;
             let slot = &self.sections[section];
             out[base] = lane_get(slot.state.ic1, track).to_bits();
@@ -1599,7 +1599,7 @@ impl<L: Lane, const W: usize> Channel<L, W> {
         &mut self,
         track: usize,
         words: &[u32; STATE_LANE_WORDS],
-        configuration: &[BandTarget; EQ_SECTION_COUNT_V1],
+        configuration: &[BandTarget; EQ_SECTION_COUNT],
         sample_rate: SampleRateHz,
     ) -> Result<(), StatePayloadError> {
         let invalid = StatePayloadError {
@@ -1611,8 +1611,8 @@ impl<L: Lane, const W: usize> Channel<L, W> {
             step: [0.0; 6],
             remaining: 0,
             target: configuration[0],
-        }; EQ_SECTION_COUNT_V1];
-        for section in 0..EQ_SECTION_COUNT_V1 {
+        }; EQ_SECTION_COUNT];
+        for section in 0..EQ_SECTION_COUNT {
             let base = section * STATE_WORDS_PER_BAND;
             let read = |offset: usize| f32::from_bits(words[base + offset]);
             let band = RestoredBand {
@@ -1653,7 +1653,7 @@ impl<L: Lane, const W: usize> Channel<L, W> {
             let target_words = band
                 .target
                 .words(sample_rate)
-                .unwrap_or(EqSvfWordsV1::IDENTITY);
+                .unwrap_or(EqSvfWords::IDENTITY);
             let slot = &mut self.sections[section];
             lane_set(&mut slot.state.ic1, track, band.integrators[0]);
             lane_set(&mut slot.state.ic2, track, band.integrators[1]);
@@ -1677,7 +1677,7 @@ impl<L: Lane, const W: usize> Channel<L, W> {
             self.remaining[section][track] = band.remaining;
             self.targets[track][section] = band.target;
         }
-        for section in 0..EQ_SECTION_COUNT_V1 {
+        for section in 0..EQ_SECTION_COUNT {
             self.refresh_identity(section);
         }
         Ok(())
@@ -1692,7 +1692,7 @@ pub struct ParametricEqFactory;
 struct PreparedParametricEq<L: Lane, const W: usize> {
     metadata: PreparedEffectMetadata,
     bank: PreparedBankMetadata,
-    initial: [[[BandTarget; EQ_SECTION_COUNT_V1]; 2]; W],
+    initial: [[[BandTarget; EQ_SECTION_COUNT]; 2]; W],
     left: Channel<L, W>,
     right: Channel<L, W>,
     /// Issue #163 phase 4 item 1: the previous block proved this bank is at a silent fixed point.
@@ -1737,7 +1737,7 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
             *invalid_spans = invalid_spans.saturating_add(spans.len() as u64);
             return;
         }
-        let mut pending = [None; EQ_SECTION_COUNT_V1 * 4 * 2];
+        let mut pending = [None; EQ_SECTION_COUNT * 4 * 2];
         let mut prior_sort_key = None;
         for span in spans {
             let sort_key = (span.start_sample, span.parameter_index, span.channel);
@@ -1765,7 +1765,7 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
             prior_sort_key = Some(sort_key);
         }
         let sample_rate = self.sample_rate();
-        for section in 0..EQ_SECTION_COUNT_V1 {
+        for section in 0..EQ_SECTION_COUNT {
             for channel in 0..2 {
                 let updates: [Option<f32>; 4] =
                     core::array::from_fn(|field| pending[(section * 4 + field) * 2 + channel]);
@@ -1851,8 +1851,8 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
             // inside the §4.4 bound, so no lane failed.
             return failures;
         }
-        let mut before_left = [0_u32; EQ_SECTION_COUNT_V1 * 2 * MAX_LANES];
-        let mut before_right = [0_u32; EQ_SECTION_COUNT_V1 * 2 * MAX_LANES];
+        let mut before_left = [0_u32; EQ_SECTION_COUNT * 2 * MAX_LANES];
+        let mut before_right = [0_u32; EQ_SECTION_COUNT * 2 * MAX_LANES];
         if quiet {
             self.left.state_bits(&mut before_left);
             self.right.state_bits(&mut before_right);
@@ -1884,8 +1884,8 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
         // exactly as they went in, and the output the sections wrote was `+0.0` to the bit. Only
         // then is "write nothing" a faithful replay of "run the kernel".
         self.silent_fixed_point = quiet && {
-            let mut after_left = [0_u32; EQ_SECTION_COUNT_V1 * 2 * MAX_LANES];
-            let mut after_right = [0_u32; EQ_SECTION_COUNT_V1 * 2 * MAX_LANES];
+            let mut after_left = [0_u32; EQ_SECTION_COUNT * 2 * MAX_LANES];
+            let mut after_right = [0_u32; EQ_SECTION_COUNT * 2 * MAX_LANES];
             self.left.state_bits(&mut after_left);
             self.right.state_bits(&mut after_right);
             after_left == before_left
@@ -1911,7 +1911,7 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
         if quiet && self.silent_fixed_point {
             return failures;
         }
-        let mut before_left = [0_u32; EQ_SECTION_COUNT_V1 * 2 * MAX_LANES];
+        let mut before_left = [0_u32; EQ_SECTION_COUNT * 2 * MAX_LANES];
         if quiet {
             self.left.state_bits(&mut before_left);
         }
@@ -1926,7 +1926,7 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
             failures[1] = failures[0];
         }
         self.silent_fixed_point = quiet && {
-            let mut after_left = [0_u32; EQ_SECTION_COUNT_V1 * 2 * MAX_LANES];
+            let mut after_left = [0_u32; EQ_SECTION_COUNT * 2 * MAX_LANES];
             self.left.state_bits(&mut after_left);
             after_left == before_left && block_is_positive_zero(&left[..words])
         };
@@ -1977,7 +1977,7 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
 /// Returns the cascade section and the automatable field index (0 frequency .. 3 shelf slope).
 fn numeric_parameter(parameter_index: usize) -> Option<(usize, usize)> {
     let section = parameter_index / 6;
-    if section >= EQ_SECTION_COUNT_V1 || parameter_index % 6 < 2 {
+    if section >= EQ_SECTION_COUNT || parameter_index % 6 < 2 {
         return None;
     }
     Some((section, parameter_index % 6 - 2))
@@ -2000,20 +2000,20 @@ fn band_targets(
     values: &[InitialParameterValue],
     channel: usize,
     sample_rate: SampleRateHz,
-) -> Result<[BandTarget; EQ_SECTION_COUNT_V1], EffectPrepareError> {
+) -> Result<[BandTarget; EQ_SECTION_COUNT], EffectPrepareError> {
     let mut bands = [BandTarget {
         enabled: false,
-        kind: EqBandKindV1::Bell,
+        kind: EqBandKind::Bell,
         frequency: 0.0,
         gain: 0.0,
         q: 0.0,
         slope: 0.0,
-    }; EQ_SECTION_COUNT_V1];
+    }; EQ_SECTION_COUNT];
     for (section, band) in bands.iter_mut().enumerate() {
         let field = |index: usize| values[(section * 6 + index) * 2 + channel].value;
         *band = BandTarget {
             enabled: field(0).to_bits() == 1.0_f32.to_bits(),
-            kind: EqBandKindV1::from_value(field(1)).ok_or(EffectPrepareError {
+            kind: EqBandKind::from_value(field(1)).ok_or(EffectPrepareError {
                 code: "effect.parameter.initial",
             })?,
             frequency: field(2),
@@ -2038,12 +2038,12 @@ fn prepare_width<L: Lane, const W: usize>(
     let sample_rate = SampleRateHz(metadata.sample_rate);
     let mut initial = [[[BandTarget {
         enabled: false,
-        kind: EqBandKindV1::Bell,
+        kind: EqBandKind::Bell,
         frequency: 0.0,
         gain: 0.0,
         q: 0.0,
         slope: 0.0,
-    }; EQ_SECTION_COUNT_V1]; 2]; W];
+    }; EQ_SECTION_COUNT]; 2]; W];
     for (track, request) in requests.iter().enumerate() {
         initial[track][0] = band_targets(request.initial_values, 0, sample_rate)?;
         initial[track][1] = band_targets(request.initial_values, 1, sample_rate)?;
@@ -2069,7 +2069,7 @@ fn prepare_width<L: Lane, const W: usize>(
 
 impl NativeEffectFactory for ParametricEqFactory {
     fn descriptor(&self) -> &'static EffectDescriptor {
-        &PARAMETRIC_EQ_DESCRIPTOR_V1
+        &PARAMETRIC_EQ_DESCRIPTOR
     }
 
     fn prepare(
@@ -2266,7 +2266,7 @@ impl<L: Lane, const W: usize> PreparedParametricEq<L, W> {
         if lane >= W || lane >= L::WIDTH {
             return false;
         }
-        for section in 0..EQ_SECTION_COUNT_V1 {
+        for section in 0..EQ_SECTION_COUNT {
             let left = &self.left.sections[section];
             let right = &self.right.sections[section];
             for word in 0..EQ_COEFFICIENT_WORDS {
@@ -2525,7 +2525,7 @@ pub mod corpus;
 /// runtime tuning knob is added to reach it.
 #[cfg(test)]
 mod interleave_identity {
-    use super::{BandTarget, Channel, EQ_SECTION_COUNT_V1, MAX_LANES, corpus, process_channels};
+    use super::{BandTarget, Channel, EQ_SECTION_COUNT, MAX_LANES, corpus, process_channels};
     use miso_engine_lane::{Lane, Simd4, Simd8};
 
     /// Frames per case: the corpus length, several blocks' worth of settling.
@@ -2534,7 +2534,7 @@ mod interleave_identity {
     /// One channel of `W` tracks from the corpus band table, offset so the two channels of a case
     /// never carry the same configuration.
     fn channel<L: Lane, const W: usize>(offset: usize) -> Channel<L, W> {
-        let targets: [[BandTarget; EQ_SECTION_COUNT_V1]; W] =
+        let targets: [[BandTarget; EQ_SECTION_COUNT]; W] =
             core::array::from_fn(|lane| corpus::bands((offset + lane) % corpus::LANES));
         Channel::new(targets, corpus::CORPUS_RATE).expect("every corpus row is a legal design")
     }
@@ -2559,7 +2559,7 @@ mod interleave_identity {
         left: &Channel<L, W>,
         right: &Channel<L, W>,
     ) -> Vec<u32> {
-        let mut words = [0_u32; EQ_SECTION_COUNT_V1 * 2 * MAX_LANES];
+        let mut words = [0_u32; EQ_SECTION_COUNT * 2 * MAX_LANES];
         let mut out = Vec::new();
         left.state_bits(&mut words);
         out.extend_from_slice(&words);
@@ -2583,7 +2583,7 @@ mod interleave_identity {
             let mut left_channel = channel::<L, W>(0);
             let mut right_channel = channel::<L, W>(3);
             if seed_state {
-                for section in 0..EQ_SECTION_COUNT_V1 {
+                for section in 0..EQ_SECTION_COUNT {
                     left_channel.sections[section].state.ic1 = L::splat(1.0e-40);
                     left_channel.sections[section].state.ic2 = L::splat(-1.0e-41);
                     right_channel.sections[section].state.ic1 = L::splat(-3.5e-7);
@@ -2659,9 +2659,9 @@ mod interleave_identity {
             <Simd8 as Lane>::SVF_CASCADE_DEPTH,
         ] {
             assert_eq!(
-                EQ_SECTION_COUNT_V1 % depth,
+                EQ_SECTION_COUNT % depth,
                 0,
-                "#163 phase 3: a cascade depth that does not divide {EQ_SECTION_COUNT_V1} \
+                "#163 phase 3: a cascade depth that does not divide {EQ_SECTION_COUNT} \
                  sections would silently drop sections"
             );
         }
@@ -2689,23 +2689,23 @@ mod interleave_identity {
 #[cfg(test)]
 mod elision {
     use super::{
-        BandTarget, Channel, EQ_SECTION_COUNT_V1, EqSvfWordsV1, MAX_LANES, RAMP_SAMPLES,
+        BandTarget, Channel, EQ_SECTION_COUNT, EqSvfWords, MAX_LANES, RAMP_SAMPLES,
         cascade_sections, corpus, process_channels,
     };
     use miso_engine_lane::{Lane, Simd4, Simd8};
 
     const FRAMES: usize = corpus::FRAMES;
     /// Every subset of the four cascade positions, as a bitmask of *live* sections.
-    const MASKS: core::ops::Range<u8> = 0..(1 << EQ_SECTION_COUNT_V1);
+    const MASKS: core::ops::Range<u8> = 0..(1 << EQ_SECTION_COUNT);
 
     /// A channel whose section `s` is a real corpus band when `live` has bit `s` set, and the
     /// exact identity when it does not.
     ///
     /// Disabling is expressed through `BandTarget::enabled`, which is the production route: it is
-    /// what `BandTarget::words` maps to [`EqSvfWordsV1::IDENTITY`], so the test is exercising the
+    /// what `BandTarget::words` maps to [`EqSvfWords::IDENTITY`], so the test is exercising the
     /// same words a session with a disabled band prepares.
     fn channel<L: Lane, const W: usize>(offset: usize, live: u8) -> Channel<L, W> {
-        let targets: [[BandTarget; EQ_SECTION_COUNT_V1]; W] = core::array::from_fn(|lane| {
+        let targets: [[BandTarget; EQ_SECTION_COUNT]; W] = core::array::from_fn(|lane| {
             let mut bands = corpus::bands((offset + lane) % corpus::LANES);
             for (section, band) in bands.iter_mut().enumerate() {
                 band.enabled = live & (1 << section) != 0;
@@ -2733,7 +2733,7 @@ mod elision {
         left: &Channel<L, W>,
         right: &Channel<L, W>,
     ) -> Vec<u32> {
-        let mut words = [0_u32; EQ_SECTION_COUNT_V1 * 2 * MAX_LANES];
+        let mut words = [0_u32; EQ_SECTION_COUNT * 2 * MAX_LANES];
         let mut out = Vec::new();
         left.state_bits(&mut words);
         out.extend_from_slice(&words);
@@ -2769,12 +2769,12 @@ mod elision {
         seed_state: bool,
     ) -> usize {
         let mut arms = Vec::new();
-        let mut ran = EQ_SECTION_COUNT_V1;
+        let mut ran = EQ_SECTION_COUNT;
         for stationary in [true, false] {
             let mut left_channel = channel::<L, W>(0, left_live);
             let mut right_channel = channel::<L, W>(3, right_live);
             if seed_state {
-                for section in 0..EQ_SECTION_COUNT_V1 {
+                for section in 0..EQ_SECTION_COUNT {
                     // Only *live* sections are seeded: a non-`+0.0` state in a dead section is a
                     // refusal leg with its own test, and seeding it here would silently disable
                     // the very engagement this function is asserting.
@@ -2857,7 +2857,7 @@ mod elision {
                 let expected = live.div_ceil(depth) * depth;
                 assert_eq!(
                     ran,
-                    expected.min(EQ_SECTION_COUNT_V1),
+                    expected.min(EQ_SECTION_COUNT),
                     "a section is elidable only when it is identity on both channels \
                      ({left_live:04b}/{right_live:04b})"
                 );
@@ -2880,7 +2880,7 @@ mod elision {
                 kept(&left_channel, &right_channel, &left, &right),
                 expected,
                 "a bank with live mask {live:04b} should run {expected} of \
-                 {EQ_SECTION_COUNT_V1} sections"
+                 {EQ_SECTION_COUNT} sections"
             );
         }
         // Three live sections cannot be shortened at depth two: the list has to divide by the
@@ -2894,7 +2894,7 @@ mod elision {
                 &block::<8>(0, 0),
                 &block::<8>(0, 3)
             ),
-            EQ_SECTION_COUNT_V1,
+            EQ_SECTION_COUNT,
             "three live sections round up to the whole cascade at depth two"
         );
     }
@@ -2902,7 +2902,7 @@ mod elision {
     /// A section that is identity on some lanes and live on others is not elidable.
     #[test]
     fn a_section_live_on_one_lane_is_not_elided() {
-        let mut targets: [[BandTarget; EQ_SECTION_COUNT_V1]; 8] =
+        let mut targets: [[BandTarget; EQ_SECTION_COUNT]; 8] =
             core::array::from_fn(corpus::bands);
         for bands in &mut targets {
             for band in bands.iter_mut() {
@@ -2945,7 +2945,7 @@ mod elision {
                 }
                 assert_eq!(
                     kept(&left_channel, &right_channel, &left, &right),
-                    EQ_SECTION_COUNT_V1,
+                    EQ_SECTION_COUNT,
                     "a -0.0 at word {position} of plane {plane} must refuse elision"
                 );
                 // A `+0.0` in the same place must not.
@@ -2983,7 +2983,7 @@ mod elision {
             left[17] = sample;
             assert_eq!(
                 kept(&left_channel, &right_channel, &left, &right),
-                EQ_SECTION_COUNT_V1,
+                EQ_SECTION_COUNT,
                 "{sample} must refuse elision"
             );
         }
@@ -3014,7 +3014,7 @@ mod elision {
             let right = block::<8>(0, 3);
             assert_eq!(
                 kept(&left_channel, &right_channel, &left, &right),
-                EQ_SECTION_COUNT_V1,
+                EQ_SECTION_COUNT,
                 "a dead section holding {word} must refuse elision"
             );
         }
@@ -3045,7 +3045,7 @@ mod elision {
                     &block::<8>(0, 0),
                     &block::<8>(0, 3)
                 ),
-                EQ_SECTION_COUNT_V1,
+                EQ_SECTION_COUNT,
                 "a live section holding -0.0 in integrator {word} must refuse elision"
             );
         }
@@ -3098,7 +3098,7 @@ mod elision {
         let negative = vec![-0.0_f32; FRAMES * 8];
         assert_eq!(
             kept(&left_channel, &right_channel, &negative, &negative),
-            EQ_SECTION_COUNT_V1,
+            EQ_SECTION_COUNT,
             "an all -0.0 block is refused"
         );
     }
@@ -3132,8 +3132,8 @@ mod elision {
                 if step == 5 {
                     // And goes off again.
                     for lane in 0..8 {
-                        left_channel.start_ramp(2, lane, EqSvfWordsV1::IDENTITY);
-                        right_channel.start_ramp(2, lane, EqSvfWordsV1::IDENTITY);
+                        left_channel.start_ramp(2, lane, EqSvfWords::IDENTITY);
+                        right_channel.start_ramp(2, lane, EqSvfWords::IDENTITY);
                     }
                 }
                 let mut left = block::<8>(0, step % corpus::LANES);
@@ -3144,7 +3144,7 @@ mod elision {
                 // cascade; `elide = false` forces the per-section path, which never does.
                 let stationary = stationary && elide;
                 if stationary
-                    && kept(&left_channel, &right_channel, &left, &right) < EQ_SECTION_COUNT_V1
+                    && kept(&left_channel, &right_channel, &left, &right) < EQ_SECTION_COUNT
                 {
                     engaged += 1;
                 }

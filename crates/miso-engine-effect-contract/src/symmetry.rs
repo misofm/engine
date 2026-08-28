@@ -55,7 +55,7 @@
 //! module's to state:
 //!
 //! 1. **Builtins liveness -- CLOSED by #210 phase 3.** `trim_db` and `polarity_invert` are live:
-//!    the input-builtins stage has a queue, and `miso_engine_builtins_compiler::TrackInputRecordV1`
+//!    the input-builtins stage has a queue, and `miso_engine_builtins_compiler::TrackInputRecord`
 //!    implements [`LiveConsoleRecord`] with `SEAM = UpstreamOfSeam` and is folded through
 //!    [`ChannelSymmetryWitness::admit`] by its drain, exactly as `EffectControlLane::stage` folds
 //!    an effect record. The trait bound is what made that an obligation rather than a reminder,

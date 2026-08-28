@@ -9,7 +9,7 @@ use miso_engine_bench_support::stats;
 use miso_engine_bench_support::digest::{Sha256Sink, sha256_hex};
 use miso_engine_bench_support::timing;
 use miso_engine_builtins::{
-    BuiltinChain, BuiltinInputBankV1, BuiltinParameters, ChannelParameters, DualMonoBlock,
+    BuiltinChain, BuiltinInputBank, BuiltinParameters, ChannelParameters, DualMonoBlock,
 };
 use miso_engine_builtins_compiler::{BuiltinCompileCaps, prepare_session_builtins};
 use miso_engine_conformance::DualAccumulatorDelayFactory;
@@ -25,7 +25,7 @@ use miso_engine_graph::{
 };
 use miso_engine_graph_compiler::{GraphBuiltinsCompileRequest, GraphCompiler};
 use miso_engine_lane::Backend;
-use miso_engine_rack::RackLocationV1;
+use miso_engine_rack::RackLocation;
 use miso_engine_session::{
     CompileCaps, EffectIdentity, EffectParam, ParameterChannel, ParameterUnit, RouteSource,
     SendTap, Sidechain, SidechainDeclaration, StableId, compile_session, parse_session_toml,
@@ -283,7 +283,7 @@ impl ScalarRuntime {
 }
 
 struct BankRuntime {
-    bank: BuiltinInputBankV1,
+    bank: BuiltinInputBank,
     backend_name: &'static str,
     left: Vec<f32>,
     right: Vec<f32>,
@@ -295,7 +295,7 @@ impl BankRuntime {
             .map(BuiltinChain::into_input_builtins)
             .collect();
         Self {
-            bank: BuiltinInputBankV1::new(
+            bank: BuiltinInputBank::new(
                 backend,
                 miso_engine_effect_contract::BankWidth::Eight,
                 inputs,
@@ -512,7 +512,7 @@ impl MixedRuntime {
         let cohorts = &artifact.report().rack_cohorts;
         assert_eq!(cohorts.dispatch, backend);
         // #96: the report is the *bound* plan, from the same planner that produced the banks.
-        let bound_groups: Vec<_> = cohorts.bound_groups_in(RackLocationV1::Simd1).collect();
+        let bound_groups: Vec<_> = cohorts.bound_groups_in(RackLocation::Simd1).collect();
         // #99 F3: the cohort is now the whole rack *chain*, not one effect. Eight tracks carry
         // the two-slot program `[delay-leading (bypassed), delay-main]`; the two tracks that carry
         // only `delay-main` join the same cohort through their subsequence mask and land in the
@@ -531,7 +531,7 @@ impl MixedRuntime {
             "only full groups are bound"
         );
         assert!(bound_groups.iter().all(|group| group.active_count() == 8));
-        let bound_slots: Vec<_> = cohorts.bound_slots_in(RackLocationV1::Simd1).collect();
+        let bound_slots: Vec<_> = cohorts.bound_slots_in(RackLocation::Simd1).collect();
         assert_eq!(bound_slots.len(), 2, "one bank per slot of the chain");
         assert!(bound_slots.iter().all(|bound| bound.members.len() == 8));
         assert_eq!(
@@ -539,7 +539,7 @@ impl MixedRuntime {
             artifact.graph_resource_estimate().effect_bank_count,
             "the report is the bound plan: one bound slot per prepared bank"
         );
-        let scalar = cohorts.scalar_in(RackLocationV1::Simd1);
+        let scalar = cohorts.scalar_in(RackLocation::Simd1);
         let compatible_tails = scalar
             .iter()
             .filter(|member| member.track_id.as_str().starts_with("rack"))

@@ -427,7 +427,7 @@ pub struct GraphPreparedEffectBank {
     ///
     /// **The runtime no longer reads it** (issue #202 rec 2). It was `runtime::cohort_runs`'s
     /// source of merge candidates, and that was strictly narrower than the merge needs: a group is
-    /// pooled per `RackLocationV1` and a builtin bank has no group at all, so `builtins -> simd1`
+    /// pooled per `RackLocation` and a builtin bank has no group at all, so `builtins -> simd1`
     /// and `simd1 -> simd2` were not expressible candidates however plainly one fed the other.
     /// Candidacy now comes from the lowered program's dataflow and the whole lane-wise relation is
     /// proved on it, so this stays as the planner's own report of what it grouped rather than as

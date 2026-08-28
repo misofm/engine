@@ -4,7 +4,7 @@
 //!
 //! `miso-engine-session` depends on `miso-engine-core` and nothing else, and that is a policy
 //! rather than an accident: `scripts/check-session-policy.sh` pins the crate's whole dependency
-//! list. So the session crate cannot read `BUILTIN_PARAMETER_DESCRIPTORS_V1`, and its
+//! list. So the session crate cannot read `BUILTIN_PARAMETER_DESCRIPTORS`, and its
 //! `BUILTIN_AUTOMATION_TARGETS_V1` is a deliberate second spelling of it -- the same shape as
 //! `scripts/check-parameter-metadata-v1.py`'s second spelling of the command-kind list.
 //!
@@ -19,7 +19,7 @@
 //! them rather than accepting them and doing nothing.
 
 use miso_engine_builtins::{
-    BUILTIN_PARAMETER_DESCRIPTORS_V1, BuiltinParameterScope, BuiltinParameterUpdateRate,
+    BUILTIN_PARAMETER_DESCRIPTORS, BuiltinParameterScope, BuiltinParameterUpdateRate,
 };
 use miso_engine_session::{BUILTIN_AUTOMATION_EFFECT_ID_V1, BUILTIN_AUTOMATION_TARGETS_V1};
 
@@ -27,7 +27,7 @@ use miso_engine_session::{BUILTIN_AUTOMATION_EFFECT_ID_V1, BUILTIN_AUTOMATION_TA
 /// parameter ABI, with each row's `per_lane` flag taken from its declared scope.
 #[test]
 fn builtin_automation_targets_match_the_parameter_abi() {
-    let expected: Vec<(u32, bool)> = BUILTIN_PARAMETER_DESCRIPTORS_V1
+    let expected: Vec<(u32, bool)> = BUILTIN_PARAMETER_DESCRIPTORS
         .iter()
         .filter(|descriptor| descriptor.update_rate == BuiltinParameterUpdateRate::BlockTarget)
         .map(|descriptor| {
@@ -57,7 +57,7 @@ fn refused_targets_are_exactly_the_prepared_only_rows() {
         .iter()
         .map(|(id, _)| *id)
         .collect();
-    for descriptor in &BUILTIN_PARAMETER_DESCRIPTORS_V1 {
+    for descriptor in &BUILTIN_PARAMETER_DESCRIPTORS {
         let live = descriptor.update_rate == BuiltinParameterUpdateRate::BlockTarget;
         assert_eq!(
             admitted.contains(&descriptor.id),

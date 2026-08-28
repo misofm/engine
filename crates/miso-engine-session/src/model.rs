@@ -230,7 +230,7 @@ pub struct ChannelBuiltins {
     ///
     /// Per-lane, following the dual-mono law. A track whose two lanes declare **different**
     /// delays is genuinely asymmetric upstream of the mono-collapse seam and declines that
-    /// track's collapse; see `session_structural_symmetry_v1`.
+    /// track's collapse; see `session_structural_symmetry`.
     ///
     /// This is deliberately **not** plugin latency. PDC equalizes unrequested arrival-time skew;
     /// this is a musical time shift the session asked for, so it contributes zero to

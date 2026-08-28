@@ -86,7 +86,7 @@ pub struct RenderIo<'a> {
 ///
 /// * **Eligibility, per unit.** `eligible_lanes == lanes` is the cohort-level answer.
 /// * **The track join.** The structural half of the witness is keyed by *track id*
-///   (`session_structural_symmetry_v1`, because the planner needs the class before any prepared
+///   (`session_structural_symmetry`, because the planner needs the class before any prepared
 ///   object exists) and the runtime half is keyed by anonymous *lanes*. Nothing else in the plan
 ///   relates the two, so a caller holding both halves could not conjoin them at all.
 ///   [`lane_tracks`](Self::lane_tracks) is that relation, in lane order.
@@ -123,7 +123,7 @@ pub struct PlanUnitEligibilityV1 {
     /// no other" is the claim every witness test in the tree makes.
     ///
     /// Deliberately **not** the whole answer: this is the runtime half, and it is source agnostic
-    /// (`SOURCE` is decided on the control plane, by `session_structural_symmetry_v1`). Conjoin it
+    /// (`SOURCE` is decided on the control plane, by `session_structural_symmetry`). Conjoin it
     /// with the structural half through `lane_tracks`.
     pub lane_eligible: Box<[bool]>,
 }
@@ -146,7 +146,7 @@ impl PlanUnitEligibilityV1 {
     /// All-lanes-or-nothing, which is `miso_engine_rack::BankChain::all_lanes_symmetric`'s rule
     /// restated at the plan surface: masking the eligible lanes of a mixed cohort would save
     /// nothing, because the vector op runs every lane regardless. Making a cohort homogeneous is
-    /// the *planner's* job (`CohortPoolClassV1`), not the dispatch's.
+    /// the *planner's* job (`CohortPoolClass`), not the dispatch's.
     #[must_use]
     pub fn all_lanes_eligible(&self) -> bool {
         !self.lane_eligible.is_empty() && self.lane_eligible.iter().all(|lane| *lane)
@@ -308,7 +308,7 @@ pub trait PreparedPlanExecutor: Send {
     ///
     /// `eligible(track_id)` is the **structural** half of the channel-symmetry witness -- the
     /// `SOURCE` term, decided from the compiled session by
-    /// `session_structural_symmetry_v1`. Every chain is unarmed until this is called, and an
+    /// `session_structural_symmetry`. Every chain is unarmed until this is called, and an
     /// unarmed chain never collapses: the runtime half a chain carries is source agnostic (see
     /// [`PlanUnitEligibilityV1::lane_eligible`]) and would admit a track whose two channels read
     /// two different source channels.

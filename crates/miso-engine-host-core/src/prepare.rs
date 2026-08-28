@@ -10,7 +10,7 @@ use std::collections::BTreeSet;
 use miso_engine_builtins::{MeterConfig, MeterHandle, MeterTap};
 use miso_engine_builtins_compiler::{
     BuiltinCompileCaps, MeterConsumer, MeterRequest, TrackControlProducer, TrackControlRequest,
-    prepare_session_builtins_with_console, session_structural_symmetry_v1,
+    prepare_session_builtins_with_console, session_structural_symmetry,
 };
 use miso_engine_core::{SampleRateHz, realtime::PreparedRenderPlan};
 use miso_engine_effect_compiler::{
@@ -858,7 +858,7 @@ pub fn prepare_host_runtime_with_console(
     };
 
     // The mono collapse's structural join (mono-collapse M2). This is the one place a host has
-    // both halves of the channel-symmetry witness in hand: `session_structural_symmetry_v1`
+    // both halves of the channel-symmetry witness in hand: `session_structural_symmetry`
     // answers per **track id** from the compiled session, and the built plan's bank chains are
     // keyed by anonymous **lanes**. The plan's own rows carry the relation, so the join is a call
     // and not a re-derivation.
@@ -869,7 +869,7 @@ pub fn prepare_host_runtime_with_console(
     // On a session whose tracks read two source channels, which is every stereo session there is,
     // this arms nothing.
     let mut plan = bound.plan;
-    let mono_source: BTreeSet<Box<str>> = session_structural_symmetry_v1(compiled)
+    let mono_source: BTreeSet<Box<str>> = session_structural_symmetry(compiled)
         .into_iter()
         .filter(|(_, witness)| witness.eligible())
         .map(|(track, _)| track)

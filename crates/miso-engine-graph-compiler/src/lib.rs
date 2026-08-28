@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use miso_engine_builtins::BuiltinTail;
 use miso_engine_builtins_compiler::{
     PreparedBuiltinsGraphArtifact, PreparedBuiltinsGraphBindFailure, PreparedBuiltinsGraphBound,
-    PreparedBuiltinsSession, SessionPoolClassesV1,
+    PreparedBuiltinsSession, SessionPoolClasses,
 };
 use miso_engine_core::realtime::RenderEnvelope;
 use miso_engine_effect_compiler::{EffectPreparedEntry, EffectPreparedSession, EffectRack};
@@ -27,7 +27,7 @@ use miso_engine_graph::{
 /// (#99 F6). The build's backend is read by the caller -- `miso_engine_lane::Backend::current()`
 /// -- and never inside the compiler.
 pub use miso_engine_lane::Backend;
-use miso_engine_rack::{RackLocationV1, RackProgramV1};
+use miso_engine_rack::{RackLocation, RackProgram};
 use miso_engine_rack_compiler::{
     BankGroup, BankPlan, CohortCandidate, CohortLevel, plan_bank_groups,
 };
@@ -62,8 +62,8 @@ pub struct PreparedGraphArtifact {
     /// Published because it is the object `compile_with_builtins` must hand to the *second*
     /// planner: `bind_rack_banks` ran inside the compile and read this, and
     /// `PreparedBuiltinsSession::into_graph_artifact_with_banks` reads the same value rather than
-    /// re-deriving one. See [`miso_engine_builtins_compiler::SessionPoolClassesV1`].
-    pub pool_classes: SessionPoolClassesV1,
+    /// re-deriving one. See [`miso_engine_builtins_compiler::SessionPoolClasses`].
+    pub pool_classes: SessionPoolClasses,
 }
 pub struct GraphCompileFailure {
     pub effects: EffectPreparedSession,
@@ -188,7 +188,7 @@ pub struct GraphRackBankReport {
 /// #96's planner takes one candidate per *effect*, which can only ever form single-slot banks.
 /// AGENTS.md's cohort model is a whole-rack signature -- "slot types/order, quality, and
 /// compatible routing", with absent slots as identity kernels -- so #99 passes whole chains and
-/// lets `RackProgramV1::subsequence_mask` decide which lanes run which slot.
+/// lets `RackProgram::subsequence_mask` decide which lanes run which slot.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct RackChainId {
     pub track_id: String,
@@ -207,7 +207,7 @@ pub struct GraphRackBoundSlot {
 }
 
 impl GraphRackBankReport {
-    pub fn groups_in(&self, rack: RackLocationV1) -> impl Iterator<Item = &BankGroup<RackChainId>> {
+    pub fn groups_in(&self, rack: RackLocation) -> impl Iterator<Item = &BankGroup<RackChainId>> {
         self.plan
             .groups
             .iter()
@@ -216,7 +216,7 @@ impl GraphRackBankReport {
     /// Groups with at least one slot actually bound as a bank.
     pub fn bound_groups_in(
         &self,
-        rack: RackLocationV1,
+        rack: RackLocation,
     ) -> impl Iterator<Item = &BankGroup<RackChainId>> {
         self.plan
             .groups
@@ -230,7 +230,7 @@ impl GraphRackBankReport {
     /// Banks bound in one rack, in bind order.
     pub fn bound_slots_in(
         &self,
-        rack: RackLocationV1,
+        rack: RackLocation,
     ) -> impl Iterator<Item = &GraphRackBoundSlot> {
         self.bound_slots
             .iter()
@@ -239,7 +239,7 @@ impl GraphRackBankReport {
     /// Effect nodes that render on the per-node scalar path in one rack, in id order: every node
     /// of a candidate that never banked, plus every node at a slot that was not bound.
     #[must_use]
-    pub fn scalar_in(&self, rack: RackLocationV1) -> Vec<EffectNodeId> {
+    pub fn scalar_in(&self, rack: RackLocation) -> Vec<EffectNodeId> {
         let banked: std::collections::BTreeSet<&EffectNodeId> = self
             .bound_slots
             .iter()
@@ -312,7 +312,7 @@ mod tests {
     };
     use miso_engine_builtins_compiler::{
         BuiltinCompileCaps, MeterRequest, PreparedBuiltinsCorruption,
-        PreparedBuiltinsCorruptionCase, TrackControlRequest, TrackFaderRecordV1,
+        PreparedBuiltinsCorruptionCase, TrackControlRequest, TrackFaderRecord,
         prepare_session_builtins, prepare_session_builtins_with_console,
     };
     use miso_engine_conformance::DualAccumulatorDelayFactory;
@@ -2276,7 +2276,7 @@ mod tests {
         let artifact = compile_chain_fixture(effects);
         let report = &artifact.report.rack_cohorts;
 
-        let groups: Vec<_> = report.groups_in(RackLocationV1::Simd1).collect();
+        let groups: Vec<_> = report.groups_in(RackLocation::Simd1).collect();
         assert_eq!(groups.len(), 1, "one cohort for one shared rack program");
         assert_eq!(
             groups[0].program.len(),
@@ -2285,7 +2285,7 @@ mod tests {
         );
         assert!(groups[0].is_full());
 
-        let bound: Vec<_> = report.bound_slots_in(RackLocationV1::Simd1).collect();
+        let bound: Vec<_> = report.bound_slots_in(RackLocation::Simd1).collect();
         assert_eq!(bound.len(), 2, "one bank per slot of the chain");
         assert_eq!(bound[0].slot, 0);
         assert_eq!(bound[1].slot, 1);
@@ -2303,7 +2303,7 @@ mod tests {
             );
         }
         assert_eq!(artifact.graph.prepared_bank_count(), 2);
-        assert!(report.scalar_in(RackLocationV1::Simd1).is_empty());
+        assert!(report.scalar_in(RackLocation::Simd1).is_empty());
     }
 
     /// #99 F3: bank membership does not depend on `EffectPreparedSession::entries` order.
@@ -2362,7 +2362,7 @@ mod tests {
         let artifact = compile_chain_fixture(effects);
         let report = &artifact.report.rack_cohorts;
 
-        let groups: Vec<_> = report.groups_in(RackLocationV1::Simd1).collect();
+        let groups: Vec<_> = report.groups_in(RackLocation::Simd1).collect();
         assert_eq!(
             groups.len(),
             1,
@@ -2379,11 +2379,11 @@ mod tests {
 
         // Slot 0 binds; slot 1 cannot, because the effect contract has no per-lane bypass mask
         // yet (#96 F7 / #95), so its members stay on the per-node scalar path.
-        let bound: Vec<_> = report.bound_slots_in(RackLocationV1::Simd1).collect();
+        let bound: Vec<_> = report.bound_slots_in(RackLocation::Simd1).collect();
         assert_eq!(bound.len(), 1);
         assert_eq!(bound[0].slot, 0);
         assert_eq!(bound[0].members.len(), lanes);
-        assert_eq!(report.scalar_in(RackLocationV1::Simd1).len(), lanes / 2);
+        assert_eq!(report.scalar_in(RackLocation::Simd1).len(), lanes / 2);
     }
 
     /// Twelve tracks that each carry one bankable SIMD-1 effect, plus a route per track.
@@ -2680,7 +2680,7 @@ mod tests {
                 &ids,
                 &dependency_levels,
                 dispatch,
-                &SessionPoolClassesV1::default(),
+                &SessionPoolClasses::default(),
             )
             .expect("off-render factory bind");
             assert_eq!(banks.len(), 12 / lanes);
@@ -2698,8 +2698,8 @@ mod tests {
                 "each track here has a one-slot rack chain"
             );
             assert_eq!(
-                report.scalar_in(RackLocationV1::Simd1).len()
-                    + report.scalar_in(RackLocationV1::Simd2).len(),
+                report.scalar_in(RackLocation::Simd1).len()
+                    + report.scalar_in(RackLocation::Simd2).len(),
                 12 % lanes
             );
         }
@@ -2745,7 +2745,7 @@ mod tests {
             &connected_ids,
             &dependency_levels,
             eight,
-            &SessionPoolClassesV1::default(),
+            &SessionPoolClasses::default(),
         )
         .expect("connected sidechain is scalar fallback, not failure");
         assert!(connected_banks.0.iter().all(|bank| {
@@ -2756,7 +2756,7 @@ mod tests {
         assert!(
             connected_banks
                 .1
-                .scalar_in(RackLocationV1::Simd1)
+                .scalar_in(RackLocation::Simd1)
                 .iter()
                 .any(|member| member.track_id.as_str() == "bank0"),
             "a connected sidechain never banks, and the report says so"
@@ -2788,7 +2788,7 @@ mod tests {
             &same_wave_ids,
             &incompatible_levels,
             eight,
-            &SessionPoolClassesV1::default(),
+            &SessionPoolClasses::default(),
         )
         .expect("a level split is a scalar fallback, not a failure");
         assert!(
@@ -2844,7 +2844,7 @@ mod tests {
             &rejected_ids,
             &dependency_levels,
             eight,
-            &SessionPoolClassesV1::default(),
+            &SessionPoolClasses::default(),
         ) {
             Ok(_) => panic!("factory failure must reject transactionally"),
             Err(error) => error,
@@ -3452,7 +3452,7 @@ mod tests {
             bank_artifact
                 .report
                 .rack_cohorts
-                .bound_groups_in(RackLocationV1::Simd1)
+                .bound_groups_in(RackLocation::Simd1)
                 .count(),
             expected_banks
         );
@@ -3460,7 +3460,7 @@ mod tests {
             bank_artifact
                 .report
                 .rack_cohorts
-                .scalar_in(RackLocationV1::Simd1)
+                .scalar_in(RackLocation::Simd1)
                 .len(),
             expected_scalar_tails
         );
@@ -3479,7 +3479,7 @@ mod tests {
             scalar_artifact
                 .report
                 .rack_cohorts
-                .scalar_in(RackLocationV1::Simd1)
+                .scalar_in(RackLocation::Simd1)
                 .len(),
             9,
             "a declined bind puts every member on the per-node scalar path"
@@ -3752,7 +3752,7 @@ mod tests {
                 artifact
                     .report
                     .rack_cohorts
-                    .bound_groups_in(RackLocationV1::Simd1)
+                    .bound_groups_in(RackLocation::Simd1)
                     .count(),
                 expected_banks
             );
@@ -3760,7 +3760,7 @@ mod tests {
                 artifact
                     .report
                     .rack_cohorts
-                    .scalar_in(RackLocationV1::Simd1)
+                    .scalar_in(RackLocation::Simd1)
                     .len(),
                 expected_scalar_tails
             );
@@ -3768,7 +3768,7 @@ mod tests {
                 artifact
                     .report
                     .rack_cohorts
-                    .scalar_in(RackLocationV1::Simd1)
+                    .scalar_in(RackLocation::Simd1)
                     .iter()
                     .any(|id| id.track_id.as_str() == "eq8")
             );
@@ -3776,7 +3776,7 @@ mod tests {
                 artifact
                     .report
                     .rack_cohorts
-                    .scalar_in(RackLocationV1::Simd1)
+                    .scalar_in(RackLocation::Simd1)
                     .iter()
                     .any(|id| id.track_id.as_str() == "eq9")
             );
@@ -3786,7 +3786,7 @@ mod tests {
                 artifact
                     .report
                     .rack_cohorts
-                    .scalar_in(RackLocationV1::Simd1)
+                    .scalar_in(RackLocation::Simd1)
                     .len(),
                 10
             );
@@ -3956,16 +3956,16 @@ mod tests {
             let cohorts = &bank.report.rack_cohorts;
             assert_eq!(bank.graph.prepared_bank_count(), 9 / lanes);
             assert_eq!(
-                cohorts.bound_groups_in(RackLocationV1::Dynamic).count(),
+                cohorts.bound_groups_in(RackLocation::Dynamic).count(),
                 9 / lanes,
                 "the dynamic rack binds full cohorts"
             );
             assert_eq!(
-                cohorts.groups_in(RackLocationV1::Simd1).count(),
+                cohorts.groups_in(RackLocation::Simd1).count(),
                 0,
                 "no compressor is left in SIMD-1"
             );
-            let scalar = cohorts.scalar_in(RackLocationV1::Dynamic);
+            let scalar = cohorts.scalar_in(RackLocation::Dynamic);
             assert_eq!(scalar.len(), 1 + 9 % lanes);
             assert!(
                 scalar.iter().any(|id| id.track_id.as_str() == "eq8"),
@@ -4030,24 +4030,24 @@ mod tests {
             simd1
                 .report
                 .rack_cohorts
-                .bound_slots_in(RackLocationV1::Simd1)
+                .bound_slots_in(RackLocation::Simd1)
                 .count(),
             dynamic
                 .report
                 .rack_cohorts
-                .bound_slots_in(RackLocationV1::Dynamic)
+                .bound_slots_in(RackLocation::Dynamic)
                 .count(),
         );
         assert_eq!(
             simd1
                 .report
                 .rack_cohorts
-                .scalar_in(RackLocationV1::Simd1)
+                .scalar_in(RackLocation::Simd1)
                 .len(),
             dynamic
                 .report
                 .rack_cohorts
-                .scalar_in(RackLocationV1::Dynamic)
+                .scalar_in(RackLocation::Dynamic)
                 .len(),
             "the same tracks fall back, for the same reasons"
         );
@@ -4114,12 +4114,12 @@ mod tests {
         // Eight homogeneous compressors remain; the gate/expander and the sidechained compressor
         // are each alone in their cohort and bind nothing.
         assert_eq!(bank.graph.prepared_bank_count(), 8 / lanes);
-        let scalar = cohorts.scalar_in(RackLocationV1::Dynamic);
+        let scalar = cohorts.scalar_in(RackLocation::Dynamic);
         assert_eq!(scalar.len(), 2, "exactly the two odd tracks fall back");
         assert!(scalar.iter().any(|id| id.track_id.as_str() == "eq7"));
         assert!(scalar.iter().any(|id| id.track_id.as_str() == "eq8"));
         // A heterogeneous member is never quietly folded into a bank of the wrong program.
-        for bound in cohorts.bound_slots_in(RackLocationV1::Dynamic) {
+        for bound in cohorts.bound_slots_in(RackLocation::Dynamic) {
             assert!(
                 bound
                     .members
@@ -4204,7 +4204,7 @@ mod tests {
         let scalar = artifact
             .report
             .rack_cohorts
-            .scalar_in(RackLocationV1::Dynamic);
+            .scalar_in(RackLocation::Dynamic);
         for effect in ["compressor", "compressor-sc"] {
             assert!(
                 scalar
@@ -4224,7 +4224,7 @@ mod tests {
             for bound in artifact
                 .report
                 .rack_cohorts
-                .bound_slots_in(RackLocationV1::Dynamic)
+                .bound_slots_in(RackLocation::Dynamic)
             {
                 assert!(
                     bound.members.iter().all(|id| id.track_id.as_str() != "eq5"),
@@ -4475,18 +4475,18 @@ mod tests {
         assert_eq!(64 % lanes, 0, "the fixture is a whole number of cohorts");
         let cohorts = &bank.report.rack_cohorts;
         assert_eq!(
-            cohorts.bound_slots_in(RackLocationV1::Simd1).count(),
+            cohorts.bound_slots_in(RackLocation::Simd1).count(),
             64 / lanes,
             "the EQ banked before phase 1b and still does"
         );
         assert_eq!(
-            cohorts.bound_slots_in(RackLocationV1::Dynamic).count(),
+            cohorts.bound_slots_in(RackLocation::Dynamic).count(),
             64 / lanes,
             "and the dynamic-rack compressor now banks at the same width"
         );
-        assert!(cohorts.scalar_in(RackLocationV1::Simd1).is_empty());
+        assert!(cohorts.scalar_in(RackLocation::Simd1).is_empty());
         assert!(
-            cohorts.scalar_in(RackLocationV1::Dynamic).is_empty(),
+            cohorts.scalar_in(RackLocation::Dynamic).is_empty(),
             "no compressor is left on the per-node path"
         );
         assert_eq!(bank.graph.prepared_bank_count(), 2 * (64 / lanes));
@@ -4509,7 +4509,7 @@ mod tests {
         //     chains = bound slots - one merge per cohort = 2 * (64 / lanes) - 64 / lanes
         //
         // Before rec 2 the merge was never proposed, because the cohort planner pools per
-        // `RackLocationV1` and these two slots sit in different racks.
+        // `RackLocation` and these two slots sit in different racks.
         let cohorts = 64 / lanes;
         let expected_chains = bound_slots - cohorts as u64;
         let banked = render_console_blocks(bank, BLOCKS);
@@ -4614,12 +4614,12 @@ mod tests {
         // (2) Structure. The retired layout: one cohort in `simd1`, one in `dynamic`.
         let split_cohorts = &split_artifact.report.rack_cohorts;
         assert_eq!(
-            split_cohorts.bound_slots_in(RackLocationV1::Simd1).count(),
+            split_cohorts.bound_slots_in(RackLocation::Simd1).count(),
             cohorts_per_rack
         );
         assert_eq!(
             split_cohorts
-                .bound_slots_in(RackLocationV1::Dynamic)
+                .bound_slots_in(RackLocation::Dynamic)
                 .count(),
             cohorts_per_rack
         );
@@ -4631,17 +4631,17 @@ mod tests {
         // The merged layout: both slots bound inside one `simd1` cohort, nothing in `dynamic`.
         let merged_cohorts = &merged_artifact.report.rack_cohorts;
         assert_eq!(
-            merged_cohorts.bound_slots_in(RackLocationV1::Simd1).count(),
+            merged_cohorts.bound_slots_in(RackLocation::Simd1).count(),
             2 * cohorts_per_rack,
             "both slots of the two-slot chain must bind"
         );
         assert_eq!(
             merged_cohorts
-                .bound_slots_in(RackLocationV1::Dynamic)
+                .bound_slots_in(RackLocation::Dynamic)
                 .count(),
             0
         );
-        assert!(merged_cohorts.scalar_in(RackLocationV1::Simd1).is_empty());
+        assert!(merged_cohorts.scalar_in(RackLocation::Simd1).is_empty());
         // **The finding, and where it moved in #181.** Both layouts realise the *same number of
         // prepared banks*, because a prepared bank is a bound **slot**, not a chain: the retired
         // layout's sixteen are one EQ slot and one compressor slot per cohort in two racks, and
@@ -4693,7 +4693,7 @@ mod tests {
         // that gap as the value of moving the compressor into `simd1`. The gap was never the
         // compressor's placement. It was that `runtime::cohort_runs` offered only the cohort
         // planner's own groups as merge candidates, and `plan_bank_groups` pools per
-        // `RackLocationV1` -- so `simd1 -> dynamic` could not even be proposed, however plainly
+        // `RackLocation` -- so `simd1 -> dynamic` could not even be proposed, however plainly
         // the EQ fed the compressor. Candidacy is now taken from the lowered program's dataflow,
         // and the EQ feeds the compressor across the elided `PostSimd1` boundary exactly as
         // directly as it does inside one rack. **Both layouts now realise one chain per cohort**,
@@ -4960,7 +4960,7 @@ mod tests {
     ///
     /// # Why this and not a map comparison
     ///
-    /// `SessionPoolClassesV1` makes the two planners read one value, so comparing the map against
+    /// `SessionPoolClasses` makes the two planners read one value, so comparing the map against
     /// itself would prove nothing. What can still go wrong is the *consequence*: a class that
     /// partitioned the strip-stage pools differently from the rack-chain pools would leave bank
     /// `{ch00, ch02, ...}` feeding bank `{ch00, ch01, ...}`, `runtime::chains_into` would decline
@@ -4970,7 +4970,7 @@ mod tests {
     /// this asserts the lane sets and the chain count, not the map.
     ///
     /// Red mutation: derive the effect-chain candidate's class from anything but
-    /// `classes.class_of(track)` -- for instance hard-code `CohortPoolClassV1::Stereo` in
+    /// `classes.class_of(track)` -- for instance hard-code `CohortPoolClass::Stereo` in
     /// `bind_rack_banks` -- and the strip's `chains` jumps from one per cohort to one per stage
     /// per cohort while every digest here stays green.
     #[test]
@@ -5859,7 +5859,7 @@ mod tests {
     ///
     /// # The contract, and why banking is where it could have been lost
     ///
-    /// `TrackFaderRecordV1` rides a bounded SPSC queue with exactly one consumer, and the consumer
+    /// `TrackFaderRecord` rides a bounded SPSC queue with exactly one consumer, and the consumer
     /// drains it *at the top of the block*, before any audio is touched -- so a record admitted
     /// while block `N` is being prepared takes effect on the first sample of block `N` and not on
     /// block `N + 1`. That is what the control side is acknowledged with, and it is the property
@@ -5901,10 +5901,10 @@ mod tests {
         // Commands are admitted between blocks, so the strongest case is a move admitted at a
         // block boundary with a window that outlives the block: a ramp in flight across the
         // boundary is what a one-block drain error corrupts most visibly.
-        let script: &[(u64, TrackFaderRecordV1)] = &[
+        let script: &[(u64, TrackFaderRecord)] = &[
             (
                 FIRST_AUDIBLE_BLOCK + 3,
-                TrackFaderRecordV1::FaderDb {
+                TrackFaderRecord::FaderDb {
                     lanes: BuiltinLaneSelector::Both,
                     db: -9.5,
                     smoothing_samples: 311,
@@ -5912,7 +5912,7 @@ mod tests {
             ),
             (
                 FIRST_AUDIBLE_BLOCK + 5,
-                TrackFaderRecordV1::Mute {
+                TrackFaderRecord::Mute {
                     lanes: BuiltinLaneSelector::Left,
                     muted: true,
                     smoothing_samples: 97,
@@ -5920,7 +5920,7 @@ mod tests {
             ),
             (
                 FIRST_AUDIBLE_BLOCK + 8,
-                TrackFaderRecordV1::FaderDb {
+                TrackFaderRecord::FaderDb {
                     lanes: BuiltinLaneSelector::Right,
                     db: 4.0,
                     smoothing_samples: 0,
@@ -5928,7 +5928,7 @@ mod tests {
             ),
             (
                 FIRST_AUDIBLE_BLOCK + 11,
-                TrackFaderRecordV1::Mute {
+                TrackFaderRecord::Mute {
                     lanes: BuiltinLaneSelector::Left,
                     muted: false,
                     smoothing_samples: 41,
@@ -5952,7 +5952,7 @@ mod tests {
         // script pushed one block later must render *different* audio -- otherwise "the command
         // landed on the block it was admitted in" is unfalsifiable here and this test proves
         // nothing about the drain's position at all.
-        let shifted: Vec<(u64, TrackFaderRecordV1)> = script
+        let shifted: Vec<(u64, TrackFaderRecord)> = script
             .iter()
             .map(|(at, record)| (at + 1, *record))
             .collect();
@@ -6080,7 +6080,7 @@ mod tests {
     fn render_console_fader_script(
         dispatch: Backend,
         plan_id: u64,
-        script: &[(u64, TrackFaderRecordV1)],
+        script: &[(u64, TrackFaderRecord)],
         tracks: usize,
         blocks: u64,
     ) -> (Vec<Vec<f32>>, usize, usize) {
@@ -6177,11 +6177,11 @@ mod tests {
                         // Each lane gets its own gain, so a record applied to the wrong lane
                         // changes the output rather than being masked by a uniform move.
                         let record = match *record {
-                            TrackFaderRecordV1::FaderDb {
+                            TrackFaderRecord::FaderDb {
                                 lanes,
                                 db,
                                 smoothing_samples,
-                            } => TrackFaderRecordV1::FaderDb {
+                            } => TrackFaderRecord::FaderDb {
                                 lanes,
                                 db: db + index as f32 * 0.125,
                                 smoothing_samples: smoothing_samples + index as u32,
@@ -6395,7 +6395,7 @@ mod tests {
     /// binds four bank slots per cohort -- the post-input builtin stage, the EQ, the compressor and
     /// the limiter -- and issue #181 rendered them as three chains: the builtin bank had no cohort
     /// group at all, so `builtins -> simd1` was not an expressible candidate, and the cohort
-    /// planner pools per `RackLocationV1`, so `simd1 -> simd2` was not either. Eight cohorts times
+    /// planner pools per `RackLocation`, so `simd1 -> simd2` was not either. Eight cohorts times
     /// three chains is the 24 planar/AoSoA round-trips a block that the audit measured, of which
     /// 16 separated stages with nothing planar reading between them.
     ///
@@ -6627,7 +6627,7 @@ mod tests {
                 artifact
                     .report
                     .rack_cohorts
-                    .bound_groups_in(RackLocationV1::Simd1)
+                    .bound_groups_in(RackLocation::Simd1)
                     .count(),
                 expected_banks
             );
@@ -6635,14 +6635,14 @@ mod tests {
                 artifact
                     .report
                     .rack_cohorts
-                    .bound_groups_in(RackLocationV1::Simd1)
+                    .bound_groups_in(RackLocation::Simd1)
                     .all(|bank| bank.active_count() == lanes)
             );
             assert_eq!(
                 artifact
                     .report
                     .rack_cohorts
-                    .scalar_in(RackLocationV1::Simd1)
+                    .scalar_in(RackLocation::Simd1)
                     .len(),
                 expected_scalar_tails
             );
@@ -6650,7 +6650,7 @@ mod tests {
                 artifact
                     .report
                     .rack_cohorts
-                    .scalar_in(RackLocationV1::Simd1)
+                    .scalar_in(RackLocation::Simd1)
                     .iter()
                     .any(|id| id.track_id.as_str() == "eq8")
             );
@@ -6658,7 +6658,7 @@ mod tests {
                 artifact
                     .report
                     .rack_cohorts
-                    .scalar_in(RackLocationV1::Simd1)
+                    .scalar_in(RackLocation::Simd1)
                     .iter()
                     .any(|id| id.track_id.as_str() == "eq9")
             );
@@ -6668,7 +6668,7 @@ mod tests {
                 artifact
                     .report
                     .rack_cohorts
-                    .scalar_in(RackLocationV1::Simd1)
+                    .scalar_in(RackLocation::Simd1)
                     .len(),
                 10
             );
@@ -6874,7 +6874,7 @@ mod tests {
             artifact
                 .report
                 .rack_cohorts
-                .bound_groups_in(RackLocationV1::Simd1)
+                .bound_groups_in(RackLocation::Simd1)
                 .count(),
             expected_banks
         );
@@ -6882,14 +6882,14 @@ mod tests {
             artifact
                 .report
                 .rack_cohorts
-                .scalar_in(RackLocationV1::Simd1)
+                .scalar_in(RackLocation::Simd1)
                 .len(),
             expected_scalar_tails
         );
         let actual_members: Vec<Vec<String>> = artifact
             .report
             .rack_cohorts
-            .bound_groups_in(RackLocationV1::Simd1)
+            .bound_groups_in(RackLocation::Simd1)
             .map(|bank| {
                 bank.members
                     .iter()
@@ -6915,7 +6915,7 @@ mod tests {
         let actual_tails: Vec<_> = artifact
             .report
             .rack_cohorts
-            .scalar_in(RackLocationV1::Simd1)
+            .scalar_in(RackLocation::Simd1)
             .iter()
             .map(|tail| tail.track_id.as_str().to_owned())
             .collect();
@@ -6939,7 +6939,7 @@ mod tests {
             + artifact
                 .report
                 .rack_cohorts
-                .bound_groups_in(RackLocationV1::Simd1)
+                .bound_groups_in(RackLocation::Simd1)
                 .flat_map(|bank| bank.members.iter().flatten())
                 .map(|member| {
                     u64::try_from(core::mem::size_of::<EffectNodeId>())
@@ -7291,7 +7291,7 @@ mod tests {
             artifact
                 .report
                 .rack_cohorts
-                .bound_groups_in(RackLocationV1::Simd1)
+                .bound_groups_in(RackLocation::Simd1)
                 .count(),
             expected_banks
         );
@@ -7299,14 +7299,14 @@ mod tests {
             artifact
                 .report
                 .rack_cohorts
-                .scalar_in(RackLocationV1::Simd1)
+                .scalar_in(RackLocation::Simd1)
                 .len(),
             expected_scalar_tails
         );
         let actual_members: Vec<Vec<String>> = artifact
             .report
             .rack_cohorts
-            .bound_groups_in(RackLocationV1::Simd1)
+            .bound_groups_in(RackLocation::Simd1)
             .map(|bank| {
                 bank.members
                     .iter()
@@ -7334,7 +7334,7 @@ mod tests {
             artifact
                 .report
                 .rack_cohorts
-                .scalar_in(RackLocationV1::Simd1)
+                .scalar_in(RackLocation::Simd1)
                 .iter()
                 .map(|tail| tail.track_id.as_str().to_owned())
                 .collect::<Vec<_>>(),
@@ -7359,7 +7359,7 @@ mod tests {
             + artifact
                 .report
                 .rack_cohorts
-                .bound_groups_in(RackLocationV1::Simd1)
+                .bound_groups_in(RackLocation::Simd1)
                 .flat_map(|bank| bank.members.iter().flatten())
                 .map(|member| {
                     u64::try_from(core::mem::size_of::<EffectNodeId>())
@@ -7675,7 +7675,7 @@ mod tests {
             artifact
                 .report
                 .rack_cohorts
-                .bound_groups_in(RackLocationV1::Simd1)
+                .bound_groups_in(RackLocation::Simd1)
                 .count(),
             expected_banks
         );
@@ -7683,14 +7683,14 @@ mod tests {
             artifact
                 .report
                 .rack_cohorts
-                .scalar_in(RackLocationV1::Simd1)
+                .scalar_in(RackLocation::Simd1)
                 .len(),
             expected_scalar_tails
         );
         let actual_members = artifact
             .report
             .rack_cohorts
-            .bound_groups_in(RackLocationV1::Simd1)
+            .bound_groups_in(RackLocation::Simd1)
             .map(|bank| {
                 bank.members
                     .iter()
@@ -7715,7 +7715,7 @@ mod tests {
             artifact
                 .report
                 .rack_cohorts
-                .scalar_in(RackLocationV1::Simd1)
+                .scalar_in(RackLocation::Simd1)
                 .iter()
                 .map(|tail| tail.track_id.as_str().to_owned())
                 .collect::<Vec<_>>(),
@@ -7740,7 +7740,7 @@ mod tests {
             + artifact
                 .report
                 .rack_cohorts
-                .bound_groups_in(RackLocationV1::Simd1)
+                .bound_groups_in(RackLocation::Simd1)
                 .flat_map(|bank| bank.members.iter().flatten())
                 .map(|member| {
                     u64::try_from(core::mem::size_of::<EffectNodeId>())
@@ -8060,7 +8060,7 @@ mod tests {
             artifact
                 .report
                 .rack_cohorts
-                .bound_groups_in(RackLocationV1::Simd1)
+                .bound_groups_in(RackLocation::Simd1)
                 .count(),
             expected_banks
         );
@@ -8068,14 +8068,14 @@ mod tests {
             artifact
                 .report
                 .rack_cohorts
-                .scalar_in(RackLocationV1::Simd1)
+                .scalar_in(RackLocation::Simd1)
                 .len(),
             expected_scalar_tails
         );
         let actual_members = artifact
             .report
             .rack_cohorts
-            .bound_groups_in(RackLocationV1::Simd1)
+            .bound_groups_in(RackLocation::Simd1)
             .map(|bank| {
                 bank.members
                     .iter()
@@ -8100,7 +8100,7 @@ mod tests {
             artifact
                 .report
                 .rack_cohorts
-                .scalar_in(RackLocationV1::Simd1)
+                .scalar_in(RackLocation::Simd1)
                 .iter()
                 .map(|tail| tail.track_id.as_str().to_owned())
                 .collect::<Vec<_>>(),
@@ -8125,7 +8125,7 @@ mod tests {
             + artifact
                 .report
                 .rack_cohorts
-                .bound_groups_in(RackLocationV1::Simd1)
+                .bound_groups_in(RackLocation::Simd1)
                 .flat_map(|bank| bank.members.iter().flatten())
                 .map(|member| {
                     u64::try_from(core::mem::size_of::<EffectNodeId>())
@@ -8398,7 +8398,7 @@ mod tests {
         assert_eq!(artifact.graph.prepared_bank_count(), 0);
         // Every delay lives in the dynamic rack, so neither SIMD rack has a candidate at all: the
         // planner sees an empty pool and produces no groups and no scalar members.
-        for rack in [RackLocationV1::Simd1, RackLocationV1::Simd2] {
+        for rack in [RackLocation::Simd1, RackLocation::Simd2] {
             assert_eq!(artifact.report.rack_cohorts.groups_in(rack).count(), 0);
             assert!(artifact.report.rack_cohorts.scalar_in(rack).is_empty());
         }
@@ -8413,7 +8413,7 @@ mod tests {
             artifact
                 .report
                 .rack_cohorts
-                .groups_in(RackLocationV1::Dynamic)
+                .groups_in(RackLocation::Dynamic)
                 .count()
                 > 0,
             "the dynamic rack must reach the planner, or this fixture gates nothing"
@@ -8422,7 +8422,7 @@ mod tests {
             artifact
                 .report
                 .rack_cohorts
-                .bound_slots_in(RackLocationV1::Dynamic)
+                .bound_slots_in(RackLocation::Dynamic)
                 .count(),
             0,
             "an effect with no homogeneous bank kernel must bind no bank in any rack"
@@ -8431,7 +8431,7 @@ mod tests {
             artifact
                 .report
                 .rack_cohorts
-                .scalar_in(RackLocationV1::Dynamic)
+                .scalar_in(RackLocation::Dynamic)
                 .len(),
             10,
             "every delay stays on the per-node path"

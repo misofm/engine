@@ -2,7 +2,7 @@
 //!
 //! The bank's own arithmetic is gated in `miso-engine-builtins`
 //! (`tests/input_liveness.rs`, `tests/input_liveness_mono.rs`). This file gates the *record*: what
-//! `TrackInputRecordV1` declares to the channel-symmetry witness, which is the fact the collapse
+//! `TrackInputRecord` declares to the channel-symmetry witness, which is the fact the collapse
 //! dispatch reads and the one thing no digest can see.
 //!
 //! # Why the record type is the right unit to test
@@ -14,21 +14,21 @@
 //! to hold.
 
 use miso_engine_builtins::BuiltinLaneSelector;
-use miso_engine_builtins_compiler::TrackInputRecordV1;
+use miso_engine_builtins_compiler::TrackInputRecord;
 use miso_engine_effect_contract::{
     ChannelSymmetryWitness, LiveConsoleRecord, SeamSide, SymmetryEvent,
 };
 
-fn trim(lanes: BuiltinLaneSelector) -> TrackInputRecordV1 {
-    TrackInputRecordV1::TrimDb {
+fn trim(lanes: BuiltinLaneSelector) -> TrackInputRecord {
+    TrackInputRecord::TrimDb {
         lanes,
         db: -6.0,
         smoothing_samples: 64,
     }
 }
 
-fn polarity(lanes: BuiltinLaneSelector) -> TrackInputRecordV1 {
-    TrackInputRecordV1::PolarityInvert {
+fn polarity(lanes: BuiltinLaneSelector) -> TrackInputRecord {
+    TrackInputRecord::PolarityInvert {
         lanes,
         inverted: true,
         smoothing_samples: 64,
@@ -38,13 +38,13 @@ fn polarity(lanes: BuiltinLaneSelector) -> TrackInputRecordV1 {
 /// The input chain is upstream of the fader/matrix seam, so every record on this queue gates the
 /// collapse.
 ///
-/// Red mutation: set `TrackInputRecordV1::SEAM` to `SeamSide::SeamSide` -> `admit` compiles the
+/// Red mutation: set `TrackInputRecord::SEAM` to `SeamSide::SeamSide` -> `admit` compiles the
 /// clearing arm away entirely, every assertion below about a declining witness fails, and a
 /// one-lane trim ride would publish on both channels of a collapsed block.
 #[test]
 fn the_input_record_is_upstream_of_the_seam() {
     assert_eq!(
-        TrackInputRecordV1::SEAM,
+        TrackInputRecord::SEAM,
         SeamSide::UpstreamOfSeam,
         "the input chain runs once on a collapsed track, so its records gate the collapse"
     );
@@ -58,7 +58,7 @@ fn the_input_record_is_upstream_of_the_seam() {
 #[test]
 fn a_per_lane_record_desymmetrizes_and_a_both_record_preserves() {
     for build in [
-        trim as fn(BuiltinLaneSelector) -> TrackInputRecordV1,
+        trim as fn(BuiltinLaneSelector) -> TrackInputRecord,
         polarity,
     ] {
         for (lanes, expected) in [

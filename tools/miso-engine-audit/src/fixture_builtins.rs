@@ -3535,11 +3535,11 @@ fn verify_pinned_native_resource_abi() -> Result<(), String> {
             core::mem::align_of::<miso_engine_builtins::MeterAccumulator>(),
         ),
         (
-            "BuiltinRetainedLayoutV1",
+            "BuiltinRetainedLayout",
             24,
             8,
-            core::mem::size_of::<miso_engine_builtins_compiler::BuiltinRetainedLayoutV1>(),
-            core::mem::align_of::<miso_engine_builtins_compiler::BuiltinRetainedLayoutV1>(),
+            core::mem::size_of::<miso_engine_builtins_compiler::BuiltinRetainedLayout>(),
+            core::mem::align_of::<miso_engine_builtins_compiler::BuiltinRetainedLayout>(),
         ),
     ];
     let queue = miso_engine_core::realtime::bounded_spsc_retained_payload::<

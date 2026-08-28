@@ -125,7 +125,7 @@ pub use miso_engine_effect_compiler::{
 /// and they are deliberately separate because they are decided at different times by different
 /// owners:
 ///
-/// * [`session_structural_symmetry_v1`] answers from the **compiled session**, before any plan
+/// * [`session_structural_symmetry`] answers from the **compiled session**, before any plan
 ///   exists: the `SOURCE` term, which is the planner's pooling class.
 /// * `PreparedRenderPlan::symmetry_counters` answers from the **built runtime**: the census of the
 ///   four terms preparation, restore and the live drains maintain.
@@ -135,7 +135,7 @@ pub use miso_engine_effect_compiler::{
 /// and duplicates it at the fader/matrix seam. The two halves are joined once, off the render
 /// thread, by `PreparedRenderPlan::arm_mono_collapse`; a plan nobody joins never collapses, which
 /// is the safe default and the reason the join is an explicit call rather than an inference.
-pub use miso_engine_builtins_compiler::{session_structural_symmetry_v1, track_mono_source_v1};
+pub use miso_engine_builtins_compiler::{session_structural_symmetry, track_mono_source};
 pub use miso_engine_effect_contract::{
     ChannelSymmetryWitness, LiveConsoleRecord, SeamSide, SymmetryEvent,
 };

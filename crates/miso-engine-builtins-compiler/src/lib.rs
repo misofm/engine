@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use core::sync::atomic::{AtomicBool, Ordering};
 
 #[cfg(test)]
-use miso_engine_builtins::builtin_filter_cutoff_maximum_hz_v1;
+use miso_engine_builtins::builtin_filter_cutoff_maximum_hz;
 
 #[cfg(feature = "test-support")]
 use std::sync::Mutex;
@@ -16,11 +16,11 @@ use std::sync::Mutex;
 use sha2::{Digest, Sha256};
 
 use miso_engine_builtins::{
-    BuiltinChain, BuiltinFaderBankV1, BuiltinInputBankV1, BuiltinLaneSelector, BuiltinMatrixBankV1,
+    BuiltinChain, BuiltinFaderBank, BuiltinInputBank, BuiltinLaneSelector, BuiltinMatrixBank,
     BuiltinParameterError, BuiltinParameters, BuiltinTail, ChannelParameters, DualMonoBlock,
-    FaderMuteBuiltins, FaderMuteRampBuiltinsV1, InputBuiltins, Matrix2x2, MatrixBuiltins,
+    FaderMuteBuiltins, FaderMuteRampBuiltins, InputBuiltins, Matrix2x2, MatrixBuiltins,
     MeterAccumulator, MeterConfig, MeterConfigError, MeterHandle, MeterSnapshot, MeterTap,
-    PreparedMeter, pan_matrix, validate_builtin_filter_cutoff_v1,
+    PreparedMeter, pan_matrix, validate_builtin_filter_cutoff,
 };
 use miso_engine_core::realtime::{
     Consumer, PreparedRenderPlan, Producer, QueueGeneration, RenderEnvelope, RenderError,
@@ -37,9 +37,9 @@ use miso_engine_graph::{
     StableGraphId, TrackStage,
 };
 use miso_engine_lane::Backend;
-use miso_engine_rack::{AoSoaScratch, BankSlotKey, RackLocationV1, RackProgramV1};
+use miso_engine_rack::{AoSoaScratch, BankSlotKey, RackLocation, RackProgram};
 use miso_engine_rack_compiler::{
-    CohortCandidate, CohortLevel, CohortPoolClassV1, plan_bank_groups,
+    CohortCandidate, CohortLevel, CohortPoolClass, plan_bank_groups,
 };
 use miso_engine_session::{CompiledSession, MatrixOrPan, Track};
 
@@ -68,13 +68,13 @@ pub struct MeterRequest {
 ///
 /// # Why the matrix stage, and what the sentence here used to say
 ///
-/// `BUILTIN_PARAMETER_DESCRIPTORS_V1` is the builtin parameter ABI, and it is explicit about which
+/// `BUILTIN_PARAMETER_DESCRIPTORS` is the builtin parameter ABI, and it is explicit about which
 /// builtin parameters may move after preparation. When #137 D1 wrote this channel, the four
 /// `matrix_ll/lr/rl/rr` rows were the **only** ones declaring
 /// `BuiltinParameterUpdateRate::BlockTarget` and this comment said so, listing every other row as
 /// `PreparedOnly`. That list has been overtaken twice and is not maintained here any more: #140 B
-/// made `fader_db` and `mute` live ([`TrackFaderRecordV1`]), and #210 phase 3 made `trim_db` and
-/// `polarity_invert` live ([`TrackInputRecordV1`]). The rows that remain `PreparedOnly` are
+/// made `fader_db` and `mute` live ([`TrackFaderRecord`]), and #210 phase 3 made `trim_db` and
+/// `polarity_invert` live ([`TrackInputRecord`]). The rows that remain `PreparedOnly` are
 /// `hpf_hz`, `lpf_hz` and `delay_samples`, and the descriptor table is the authority rather than
 /// this paragraph.
 ///
@@ -85,7 +85,7 @@ pub struct MeterRequest {
 /// The record is `Copy` and fixed-size, so the queue is a plain `bounded_spsc` and the render-side
 /// drain allocates nothing.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct TrackControlRecordV1 {
+pub struct TrackControlRecord {
     /// New 2x2 target, already domain-checked by the producer.
     pub matrix: Matrix2x2,
     /// Ramp length in sample updates for this retarget.
@@ -98,18 +98,18 @@ pub struct TrackControlRecordV1 {
 ///
 /// The matrix stage and the fader stage are two different graph nodes, so one SPSC queue cannot
 /// serve both -- a queue has exactly one consumer, and that consumer is the processor bound to the
-/// node. `TrackControlRecordV1` therefore stays exactly the 20-byte matrix record #137 froze, and
+/// node. `TrackControlRecord` therefore stays exactly the 20-byte matrix record #137 froze, and
 /// this rides its own bounded queue to `TrackStage::PostFader`.
 ///
 /// `fader_db` and `mute` declare `BuiltinParameterUpdateRate::BlockTarget` in
-/// `BUILTIN_PARAMETER_DESCRIPTORS_V1`. (This paragraph read "still declare `PreparedOnly`" until
+/// `BUILTIN_PARAMETER_DESCRIPTORS`. (This paragraph read "still declare `PreparedOnly`" until
 /// the rows were flipped; the ABI table is the authority.) The *prepared* fader section,
 /// `FaderMuteBuiltins`, genuinely has no post-preparation write path and is unchanged; what #140
-/// adds is a distinct live section, `FaderMuteRampBuiltinsV1`, bound only where a console asked
+/// adds is a distinct live section, `FaderMuteRampBuiltins`, bound only where a console asked
 /// for one, and the parameter-metadata `liveUpdatable` flag is what tells a caller which of the
 /// two a session is running.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub enum TrackFaderRecordV1 {
+pub enum TrackFaderRecord {
     /// Retarget the addressed lanes' fader gain, in decibels, over an explicit ramp window.
     FaderDb {
         /// Which lane(s) this record addresses.
@@ -134,10 +134,10 @@ pub enum TrackFaderRecordV1 {
 ///
 /// # Why this is a third record type and a third queue
 ///
-/// The same reason [`TrackFaderRecordV1`] is a second one, one stage earlier: a queue has exactly
+/// The same reason [`TrackFaderRecord`] is a second one, one stage earlier: a queue has exactly
 /// one consumer, and that consumer is whoever renders the addressed stage. The input section is a
 /// different stage from the fader, on a different node and in a different bank, so it needs its
-/// own channel. `TrackControlRecordV1` and `TrackFaderRecordV1` are unchanged.
+/// own channel. `TrackControlRecord` and `TrackFaderRecord` are unchanged.
 ///
 /// # Why one record carries `Both` rather than two per-lane records
 ///
@@ -155,7 +155,7 @@ pub enum TrackFaderRecordV1 {
 /// applying it; the builtins have no such constraint, and `BuiltinLaneSelector` exists precisely
 /// to carry the distinction.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub enum TrackInputRecordV1 {
+pub enum TrackInputRecord {
     /// Retarget the addressed lanes' input trim, in decibels, over an explicit ramp window.
     ///
     /// The lane's polarity is preserved: `trim_db` and `polarity_invert` are two parameters that
@@ -184,7 +184,7 @@ pub enum TrackInputRecordV1 {
     },
 }
 
-impl LiveConsoleRecord for TrackInputRecordV1 {
+impl LiveConsoleRecord for TrackInputRecord {
     /// The input chain is the first stage of the strip, before the fader and the matrix: a
     /// collapsed track runs it **once**, so every record on this queue gates the collapse.
     const SEAM: SeamSide = SeamSide::UpstreamOfSeam;
@@ -221,16 +221,16 @@ pub struct TrackControlProducer {
     pub track_id: Box<str>,
     /// Bounded producer endpoint for the matrix/pan stage; `try_push` returns the record on a
     /// full queue.
-    pub producer: Producer<TrackControlRecordV1>,
+    pub producer: Producer<TrackControlRecord>,
     /// Bounded producer endpoint for the fader/mute stage (issue #140 B), at the same depth.
     ///
     /// It is a field of the same struct rather than a second vector so that "one track, one
     /// console channel" stays one object with one lifetime: all three halves are created together,
     /// handed to the caller together, and dropped before the plan that owns their consumers.
-    pub fader: Producer<TrackFaderRecordV1>,
+    pub fader: Producer<TrackFaderRecord>,
     /// Bounded producer endpoint for the input trim/polarity stage (#210 phase 3), at the same
     /// depth, for the reason the field above states.
-    pub input: Producer<TrackInputRecordV1>,
+    pub input: Producer<TrackInputRecord>,
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -268,9 +268,9 @@ struct StripControlConsumers {
     /// `None` once a strip bank has claimed this side. The three sides are claimed together --
     /// `planned_strip_banks` plans all three stages over one track list -- so a partly claimed
     /// strip is unreachable, and `strip_bindings` says so rather than papering over it.
-    input: Option<Consumer<TrackInputRecordV1>>,
-    fader: Option<Consumer<TrackFaderRecordV1>>,
-    matrix: Option<Consumer<TrackControlRecordV1>>,
+    input: Option<Consumer<TrackInputRecord>>,
+    fader: Option<Consumer<TrackFaderRecord>>,
+    matrix: Option<Consumer<TrackControlRecord>>,
 }
 
 /// Everything one track's fader and matrix stages need, before their binding form is decided.
@@ -339,9 +339,9 @@ const SEAM_SIDE_WITNESS: ChannelSymmetryWitness = ChannelSymmetryWitness::SYMMET
 ///
 /// # The third drain, and why it is at bank level
 ///
-/// `TrackInputRecordV1` rides a bounded SPSC queue with exactly one consumer, and that consumer is
+/// `TrackInputRecord` rides a bounded SPSC queue with exactly one consumer, and that consumer is
 /// whoever renders the track's input section. The input builtins are **banked** --
-/// `BuiltinInputBankV1` over eight member tracks -- so the consumer is this processor, draining
+/// `BuiltinInputBank` over eight member tracks -- so the consumer is this processor, draining
 /// its members' queues in one loop, and not a per-track node sibling. The single-consumer property
 /// is preserved structurally, exactly as it is for the fader and the matrix:
 /// `into_graph_artifact_with_banks` moves each `Consumer` out of its `StripPreparation` once, so a
@@ -364,10 +364,10 @@ const SEAM_SIDE_WITNESS: ChannelSymmetryWitness = ChannelSymmetryWitness::SYMMET
 /// neither allocates, locks, nor drops, which is what keeps the shipped artifact's render
 /// call-graph gate green.
 struct BuiltinBankProcessor {
-    bank: BuiltinInputBankV1,
+    bank: BuiltinInputBank,
     /// One channel per bank lane; `None` for a lane no console addresses. Always `lanes` long, so
     /// the lane index is the array index and no lane map is stored.
-    controls: Box<[Option<Consumer<TrackInputRecordV1>>]>,
+    controls: Box<[Option<Consumer<TrackInputRecord>>]>,
     /// Each lane's **live** channel-symmetry terms, retained across blocks for the reason
     /// `EffectControlLane::symmetry` gives: the terms describe what the drained records did, so
     /// they have to survive the block that drained them.
@@ -410,14 +410,14 @@ impl GraphPreparedBuiltinBankProcessor for BuiltinBankProcessor {
                     witness.admit(&record);
                 }
                 match record {
-                    TrackInputRecordV1::TrimDb {
+                    TrackInputRecord::TrimDb {
                         lanes,
                         db,
                         smoothing_samples,
                     } => bank
                         .set_trim_db(lane, lanes, db, smoothing_samples)
                         .map_err(render_error)?,
-                    TrackInputRecordV1::PolarityInvert {
+                    TrackInputRecord::PolarityInvert {
                         lanes,
                         inverted,
                         smoothing_samples,
@@ -452,7 +452,7 @@ impl GraphPreparedBuiltinBankProcessor for BuiltinBankProcessor {
     ///
     /// # Two independent guards on the same fact, and why both are kept
     ///
-    /// `BuiltinInputBankV1::lane_symmetry` compares every word the input kernel loads per channel,
+    /// `BuiltinInputBank::lane_symmetry` compares every word the input kernel loads per channel,
     /// and since #210 phase 3 that includes the **live** trim ramp record -- current, target, step
     /// and countdown -- so an asymmetric retarget is visible in the words on the very block it is
     /// admitted. The `LIVE` term this conjoins says the same thing from the other end: a record
@@ -521,7 +521,7 @@ impl GraphPreparedBuiltinBankProcessor for BuiltinBankProcessor {
 ///
 /// # The drain contract, at bank level
 ///
-/// `TrackFaderRecordV1` rides a bounded SPSC queue with exactly one consumer, and that consumer is
+/// `TrackFaderRecord` rides a bounded SPSC queue with exactly one consumer, and that consumer is
 /// whoever renders the track's fader. Banking moves the renderer from a per-track node to one lane
 /// of this bank, so the consumer moves with it -- the queue, its depth, its record semantics and
 /// its slot in the host's frozen queue-slot layout are all untouched. The single-consumer property
@@ -538,10 +538,10 @@ impl GraphPreparedBuiltinBankProcessor for BuiltinBankProcessor {
 /// neither allocates, locks, nor drops, which is what keeps the shipped artifact's render
 /// call-graph gate green.
 struct FaderBankProcessor {
-    bank: BuiltinFaderBankV1,
+    bank: BuiltinFaderBank,
     /// One channel per bank lane; `None` for a lane no console addresses. Always `lanes` long, so
     /// the lane index is the array index and no lane map is stored.
-    controls: Box<[Option<Consumer<TrackFaderRecordV1>>]>,
+    controls: Box<[Option<Consumer<TrackFaderRecord>>]>,
     process_calls: u64,
     frames_processed: u64,
 }
@@ -562,14 +562,14 @@ impl GraphPreparedBuiltinBankProcessor for FaderBankProcessor {
             };
             while let Ok(record) = control.try_pop() {
                 match record {
-                    TrackFaderRecordV1::FaderDb {
+                    TrackFaderRecord::FaderDb {
                         lanes,
                         db,
                         smoothing_samples,
                     } => bank
                         .set_fader_db(lane, lanes, db, smoothing_samples)
                         .map_err(render_error)?,
-                    TrackFaderRecordV1::Mute {
+                    TrackFaderRecord::Mute {
                         lanes,
                         muted,
                         smoothing_samples,
@@ -589,7 +589,7 @@ impl GraphPreparedBuiltinBankProcessor for FaderBankProcessor {
         [self.process_calls, self.frames_processed]
     }
 
-    /// Seam-side: see [`SEAM_SIDE_WITNESS`]. `TrackFaderRecordV1` is a seam-side record type, so
+    /// Seam-side: see [`SEAM_SIDE_WITNESS`]. `TrackFaderRecord` is a seam-side record type, so
     /// its drain above deliberately folds nothing into a witness -- and could not, because
     /// `LiveConsoleRecord::SEAM` compiles the seam-side arm away.
     fn lane_symmetry(&self, lane: usize) -> ChannelSymmetryWitness {
@@ -607,12 +607,12 @@ impl GraphPreparedBuiltinBankProcessor for FaderBankProcessor {
 
 /// One strip matrix/pan bank and the console channels of its member lanes (issue #212).
 ///
-/// The mirror of [`FaderBankProcessor`], on `TrackControlRecordV1`, and it carries the same drain
+/// The mirror of [`FaderBankProcessor`], on `TrackControlRecord`, and it carries the same drain
 /// contract for the same reason -- see that type for the argument.
 struct MatrixBankProcessor {
-    bank: BuiltinMatrixBankV1,
+    bank: BuiltinMatrixBank,
     /// One channel per bank lane; `None` for a lane no console addresses.
-    controls: Box<[Option<Consumer<TrackControlRecordV1>>]>,
+    controls: Box<[Option<Consumer<TrackControlRecord>>]>,
     process_calls: u64,
     frames_processed: u64,
 }
@@ -688,12 +688,12 @@ fn strip_processor_bytes(
     let inline = u64::try_from(inline).ok()?;
     match stage {
         TrackStage::PostInputBuiltins => {
-            inline.checked_add(strip_control_bytes::<TrackInputRecordV1>(width)?)
+            inline.checked_add(strip_control_bytes::<TrackInputRecord>(width)?)
         }
         TrackStage::PostFader => {
-            inline.checked_add(strip_control_bytes::<TrackFaderRecordV1>(width)?)
+            inline.checked_add(strip_control_bytes::<TrackFaderRecord>(width)?)
         }
-        _ => inline.checked_add(strip_control_bytes::<TrackControlRecordV1>(width)?),
+        _ => inline.checked_add(strip_control_bytes::<TrackControlRecord>(width)?),
     }
 }
 
@@ -734,7 +734,7 @@ fn planned_strip_banks(
     tracks: &[Box<str>],
     dispatch: Backend,
     levels: &[DependencyLevel],
-    classes: &SessionPoolClassesV1,
+    classes: &SessionPoolClasses,
 ) -> [(TrackStage, Vec<Box<[GraphNodeId]>>); 3] {
     [
         TrackStage::PostInputBuiltins,
@@ -757,9 +757,9 @@ fn planned_strip_banks(
 /// is exactly the cohort the planner forms. If a per-track variant is ever added (a quality, a
 /// second section order), it becomes a field here and the planner splits the cohorts for free.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-struct BuiltinStageKeyV1;
+struct BuiltinStageKey;
 
-impl BankSlotKey for BuiltinStageKeyV1 {}
+impl BankSlotKey for BuiltinStageKey {}
 
 /// Groups every node of one bankable track stage, per dependency level, into `ceil(n / W)` banks.
 ///
@@ -776,7 +776,7 @@ fn planned_builtin_bank_members(
     stage: TrackStage,
     dispatch: Backend,
     levels: &[DependencyLevel],
-    classes: &SessionPoolClassesV1,
+    classes: &SessionPoolClasses,
 ) -> Vec<Box<[GraphNodeId]>> {
     let Some(width) = BankWidth::for_backend(dispatch) else {
         return Vec::new();
@@ -791,7 +791,7 @@ fn planned_builtin_bank_members(
                 .map(move |node| (node, level.level))
         })
         .collect();
-    let mut by_level = BTreeMap::<u64, Vec<CohortCandidate<GraphNodeId, BuiltinStageKeyV1>>>::new();
+    let mut by_level = BTreeMap::<u64, Vec<CohortCandidate<GraphNodeId, BuiltinStageKey>>>::new();
     for track in tracks {
         let node = GraphNodeId::TrackStage {
             track_id: StableGraphId::parse(track).expect("prepared stable ID"),
@@ -800,7 +800,7 @@ fn planned_builtin_bank_members(
         if let Some(level) = level_by_node.get(&node).copied() {
             by_level.entry(level).or_default().push(CohortCandidate {
                 id: node,
-                program: RackProgramV1::new(RackLocationV1::Simd1, vec![BuiltinStageKeyV1]),
+                program: RackProgram::new(RackLocation::Simd1, vec![BuiltinStageKey]),
                 class: classes.class_of(track),
             });
         }
@@ -823,14 +823,14 @@ fn planned_builtin_bank_members(
 /// Builds one padded bank from `inputs.len()` tracks in member order.
 ///
 /// Lanes `inputs.len()..width.lanes()` become the bank's identity lanes: the builtins crate owns
-/// that contract (`BuiltinInputBankV1::new` accepts `1..=W` inputs and pads the rest), and this
+/// that contract (`BuiltinInputBank::new` accepts `1..=W` inputs and pads the rest), and this
 /// is the single call site, so the compiler never builds a mask of its own.
 fn build_input_bank(
     dispatch: Backend,
     width: miso_engine_effect_contract::BankWidth,
     inputs: Vec<InputBuiltins>,
-) -> BuiltinInputBankV1 {
-    BuiltinInputBankV1::new(dispatch, width, inputs)
+) -> BuiltinInputBank {
+    BuiltinInputBank::new(dispatch, width, inputs)
         .expect("planner emits 1..=W members at the width the selected backend chose")
 }
 
@@ -942,7 +942,7 @@ static TEST_PHASE_TWO_LAYOUTS: Mutex<TestPhaseTwoLayoutTable> =
 
 #[cfg(feature = "test-support")]
 struct TestPhaseTwoLayoutTable {
-    values: [BuiltinRetainedLayoutV1; BUILTIN_RETAINED_LAYOUT_CLASS_CAPACITY],
+    values: [BuiltinRetainedLayout; BUILTIN_RETAINED_LAYOUT_CLASS_CAPACITY],
     len: usize,
     overflowed: bool,
 }
@@ -951,7 +951,7 @@ struct TestPhaseTwoLayoutTable {
 impl TestPhaseTwoLayoutTable {
     const fn new() -> Self {
         Self {
-            values: [BuiltinRetainedLayoutV1::ZERO; BUILTIN_RETAINED_LAYOUT_CLASS_CAPACITY],
+            values: [BuiltinRetainedLayout::ZERO; BUILTIN_RETAINED_LAYOUT_CLASS_CAPACITY],
             len: 0,
             overflowed: false,
         }
@@ -985,7 +985,7 @@ impl TestPhaseTwoLayoutTable {
             self.overflowed = true;
             return;
         };
-        *slot = BuiltinRetainedLayoutV1 {
+        *slot = BuiltinRetainedLayout {
             size_bytes,
             align_bytes,
             allocation_count: 1,
@@ -1002,7 +1002,7 @@ pub struct TestPhaseTwoAllocationSnapshot {
     pub total_bytes: u64,
     pub largest_allocation_bytes: u64,
     pub allocation_count: u64,
-    pub layouts: Vec<BuiltinRetainedLayoutV1>,
+    pub layouts: Vec<BuiltinRetainedLayout>,
     pub overflowed: bool,
 }
 
@@ -1216,13 +1216,13 @@ pub const BUILTIN_RETAINED_LAYOUT_CLASS_CAPACITY: usize = 160;
 
 /// One exact `(size, alignment)` class in the retained allocation multiset.
 #[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
-pub struct BuiltinRetainedLayoutV1 {
+pub struct BuiltinRetainedLayout {
     pub size_bytes: u64,
     pub align_bytes: u64,
     pub allocation_count: u64,
 }
 
-impl BuiltinRetainedLayoutV1 {
+impl BuiltinRetainedLayout {
     const ZERO: Self = Self {
         size_bytes: 0,
         align_bytes: 0,
@@ -1246,7 +1246,7 @@ pub struct BuiltinResourceEstimate {
     /// Number of populated entries in [`Self::retained_layouts`].
     pub retained_layout_class_count: u16,
     /// Exact ordered multiset classes for all retained allocation requests.
-    pub retained_layouts: [BuiltinRetainedLayoutV1; BUILTIN_RETAINED_LAYOUT_CLASS_CAPACITY],
+    pub retained_layouts: [BuiltinRetainedLayout; BUILTIN_RETAINED_LAYOUT_CLASS_CAPACITY],
 }
 
 impl Default for BuiltinResourceEstimate {
@@ -1259,7 +1259,7 @@ impl Default for BuiltinResourceEstimate {
             maximum_single_allocation_bytes: 0,
             retained_allocation_count: 0,
             retained_layout_class_count: 0,
-            retained_layouts: [BuiltinRetainedLayoutV1::ZERO;
+            retained_layouts: [BuiltinRetainedLayout::ZERO;
                 BUILTIN_RETAINED_LAYOUT_CLASS_CAPACITY],
         }
     }
@@ -1268,7 +1268,7 @@ impl Default for BuiltinResourceEstimate {
 impl BuiltinResourceEstimate {
     /// Populated exact retained layout classes in deterministic `(size, align)` order.
     #[must_use]
-    pub fn retained_layouts(&self) -> &[BuiltinRetainedLayoutV1] {
+    pub fn retained_layouts(&self) -> &[BuiltinRetainedLayout] {
         &self.retained_layouts[..usize::from(self.retained_layout_class_count)]
     }
 }
@@ -1277,7 +1277,7 @@ impl BuiltinResourceEstimate {
 ///
 /// This is deliberately an alias rather than a duplicate accounting type: a caller cannot
 /// accidentally read one report while the compiler validates another.
-pub type BuiltinResourceReportV1 = BuiltinResourceEstimate;
+pub type BuiltinResourceReport = BuiltinResourceEstimate;
 
 #[derive(Clone, Copy, Debug)]
 struct ResourceAccumulator {
@@ -1285,7 +1285,7 @@ struct ResourceAccumulator {
     largest: u64,
     allocations: u64,
     layout_class_count: u16,
-    layouts: [BuiltinRetainedLayoutV1; BUILTIN_RETAINED_LAYOUT_CLASS_CAPACITY],
+    layouts: [BuiltinRetainedLayout; BUILTIN_RETAINED_LAYOUT_CLASS_CAPACITY],
 }
 
 impl Default for ResourceAccumulator {
@@ -1295,7 +1295,7 @@ impl Default for ResourceAccumulator {
             largest: 0,
             allocations: 0,
             layout_class_count: 0,
-            layouts: [BuiltinRetainedLayoutV1::ZERO; BUILTIN_RETAINED_LAYOUT_CLASS_CAPACITY],
+            layouts: [BuiltinRetainedLayout::ZERO; BUILTIN_RETAINED_LAYOUT_CLASS_CAPACITY],
         }
     }
 }
@@ -1327,7 +1327,7 @@ impl ResourceAccumulator {
             return Some(());
         }
         let slot = self.layouts.get_mut(populated)?;
-        *slot = BuiltinRetainedLayoutV1 {
+        *slot = BuiltinRetainedLayout {
             size_bytes,
             align_bytes,
             allocation_count,
@@ -1549,7 +1549,7 @@ impl PreparedBuiltinsSession {
                 Some(control) => {
                     // Issue #140 B: the live fader is a *separate* section, built from the same
                     // prepared parameters, and preparation already proved the domain.
-                    let ramped = FaderMuteRampBuiltinsV1::new(parameters)
+                    let ramped = FaderMuteRampBuiltins::new(parameters)
                         .expect("preparation validated the ramped fader's gain domain");
                     (
                         Box::new(ConsoleInputProcessor {
@@ -1616,7 +1616,7 @@ impl PreparedBuiltinsSession {
         &self,
         dispatch: Backend,
         levels: &[DependencyLevel],
-        classes: &SessionPoolClassesV1,
+        classes: &SessionPoolClasses,
     ) -> Option<GraphBuiltinBankResourceEstimate> {
         let Some(width) = BankWidth::for_backend(dispatch) else {
             return Some(GraphBuiltinBankResourceEstimate::default());
@@ -1645,7 +1645,7 @@ impl PreparedBuiltinsSession {
         report: R,
         dispatch: Backend,
         levels: &[DependencyLevel],
-        classes: &SessionPoolClassesV1,
+        classes: &SessionPoolClasses,
     ) -> PreparedBuiltinsGraphArtifact<R> {
         let Some(width) = BankWidth::for_backend(dispatch) else {
             return self.into_graph_artifact(graph, report);
@@ -1693,7 +1693,7 @@ impl PreparedBuiltinsSession {
                 };
                 let processor: Box<dyn GraphPreparedBuiltinBankProcessor> = match stage {
                     TrackStage::PostInputBuiltins => {
-                        let mut controls: Vec<Option<Consumer<TrackInputRecordV1>>> =
+                        let mut controls: Vec<Option<Consumer<TrackInputRecord>>> =
                             (0..lanes).map(|_| None).collect();
                         let mut inputs = Vec::with_capacity(members.len());
                         for (lane, member) in members.iter().enumerate() {
@@ -1720,7 +1720,7 @@ impl PreparedBuiltinsSession {
                         })
                     }
                     TrackStage::PostFader => {
-                        let mut controls: Vec<Option<Consumer<TrackFaderRecordV1>>> =
+                        let mut controls: Vec<Option<Consumer<TrackFaderRecord>>> =
                             (0..lanes).map(|_| None).collect();
                         let mut parameters = Vec::with_capacity(members.len());
                         for (lane, member) in members.iter().enumerate() {
@@ -1735,7 +1735,7 @@ impl PreparedBuiltinsSession {
                             claimed_fader.insert(strip.track_id.clone());
                         }
                         Box::new(FaderBankProcessor {
-                            bank: BuiltinFaderBankV1::new(dispatch, width, parameters)
+                            bank: BuiltinFaderBank::new(dispatch, width, parameters)
                                 .expect("planner emits 1..=W members at the selected width"),
                             controls: controls.into_boxed_slice(),
                             process_calls: 0,
@@ -1743,7 +1743,7 @@ impl PreparedBuiltinsSession {
                         })
                     }
                     TrackStage::PostMatrix => {
-                        let mut controls: Vec<Option<Consumer<TrackControlRecordV1>>> =
+                        let mut controls: Vec<Option<Consumer<TrackControlRecord>>> =
                             (0..lanes).map(|_| None).collect();
                         let mut targets = Vec::with_capacity(members.len());
                         for (lane, member) in members.iter().enumerate() {
@@ -1761,7 +1761,7 @@ impl PreparedBuiltinsSession {
                             claimed_matrix.insert(strip.track_id.clone());
                         }
                         Box::new(MatrixBankProcessor {
-                            bank: BuiltinMatrixBankV1::new(dispatch, width, targets)
+                            bank: BuiltinMatrixBank::new(dispatch, width, targets)
                                 .expect("preparation validated every matrix coefficient"),
                             controls: controls.into_boxed_slice(),
                             process_calls: 0,
@@ -2454,18 +2454,18 @@ pub fn prepare_session_builtins_with_console(
             None => None,
             Some(capacity) => {
                 let (producer, control) =
-                    bounded_spsc::<TrackControlRecordV1>(*capacity, QueueGeneration(0))
+                    bounded_spsc::<TrackControlRecord>(*capacity, QueueGeneration(0))
                         .map_err(|_| control_failure())?;
                 let (fader_producer, fader_control) =
-                    bounded_spsc::<TrackFaderRecordV1>(*capacity, QueueGeneration(0))
+                    bounded_spsc::<TrackFaderRecord>(*capacity, QueueGeneration(0))
                         .map_err(|_| control_failure())?;
                 let (input_producer, input_control) =
-                    bounded_spsc::<TrackInputRecordV1>(*capacity, QueueGeneration(0))
+                    bounded_spsc::<TrackInputRecord>(*capacity, QueueGeneration(0))
                         .map_err(|_| control_failure())?;
                 // The ramped fader is validated here rather than at binding, so a declared
                 // `fader_db` outside the live domain is a preparation diagnostic on the track that
                 // carries it -- the same failure, at the same place, as before the strip banked.
-                FaderMuteRampBuiltinsV1::new(parameters).map_err(|_| {
+                FaderMuteRampBuiltins::new(parameters).map_err(|_| {
                     BuiltinDiagnosticSet::sorted(vec![parameter_diagnostic(
                         track,
                         BuiltinParameterError::GainDomain,
@@ -2632,7 +2632,7 @@ fn resource_plan(
         // #140 B's fader/mute channel and #210 phase 3's input trim/polarity channel. All three
         // are charged here, in the same accumulator, for the same reason -- they are per-track
         // processor storage, not meter storage.
-        let matrix_queue = bounded_spsc_retained_payload::<TrackControlRecordV1>(
+        let matrix_queue = bounded_spsc_retained_payload::<TrackControlRecord>(
             control.queue_capacity,
         )
         .map_err(|_| {
@@ -2641,7 +2641,7 @@ fn resource_plan(
                 &control_path(control),
             )
         })?;
-        let fader_queue = bounded_spsc_retained_payload::<TrackFaderRecordV1>(
+        let fader_queue = bounded_spsc_retained_payload::<TrackFaderRecord>(
             control.queue_capacity,
         )
         .map_err(|_| {
@@ -2650,7 +2650,7 @@ fn resource_plan(
                 &control_path(control),
             )
         })?;
-        let input_queue = bounded_spsc_retained_payload::<TrackInputRecordV1>(
+        let input_queue = bounded_spsc_retained_payload::<TrackInputRecord>(
             control.queue_capacity,
         )
         .map_err(|_| {
@@ -2814,7 +2814,7 @@ fn add_vector_layout<T>(
 /// `session` is taken so this stays the one predicate both bank planners call even after the rule
 /// grows a term the track alone cannot answer.
 #[must_use]
-pub fn track_mono_source_v1(session: &CompiledSession, track: &Track) -> bool {
+pub fn track_mono_source(session: &CompiledSession, track: &Track) -> bool {
     let _ = session;
     track.left_source_channel == track.right_source_channel
 }
@@ -2857,7 +2857,7 @@ pub fn track_input_delay_symmetric(track: &Track) -> bool {
 /// bit into each track's input stage, so the runtime witness carries it too. This function is what
 /// a caller with a `CompiledSession` and no plan asks.
 #[must_use]
-pub fn session_structural_symmetry_v1(
+pub fn session_structural_symmetry(
     session: &CompiledSession,
 ) -> Vec<(Box<str>, ChannelSymmetryWitness)> {
     session
@@ -2868,7 +2868,7 @@ pub fn session_structural_symmetry_v1(
             let mut witness = ChannelSymmetryWitness::SYMMETRIC;
             witness.set(
                 ChannelSymmetryWitness::SOURCE,
-                track_mono_source_v1(session, track),
+                track_mono_source(session, track),
             );
             // Issue #210 phase 2. Prepared-only state, so the whole verdict is available here and
             // needs no per-block maintenance: an asymmetric delay declines this track's collapse
@@ -2887,7 +2887,7 @@ pub fn session_structural_symmetry_v1(
 ///
 /// # Why this exists as an object rather than as a predicate each planner calls
 ///
-/// The obligation stated on [`CohortPoolClassV1::of_prepare_witness`] is that the builtin-stage
+/// The obligation stated on [`CohortPoolClass::of_prepare_witness`] is that the builtin-stage
 /// planner and the rack-chain planner must classify every track *identically*: issue #208's chain
 /// merges are proved lane by lane on the lowered program, and two planners whose pools hold
 /// different track sets produce banks whose lane sets slide out of step, so every
@@ -2905,28 +2905,28 @@ pub fn session_structural_symmetry_v1(
 /// # What a track's class is derived from
 ///
 /// The conjunction of every prepare-time witness that speaks for the track, then
-/// [`CohortPoolClassV1::of_prepare_witness`]:
+/// [`CohortPoolClass::of_prepare_witness`]:
 ///
-/// * `SOURCE` from [`track_mono_source_v1`], through [`session_structural_symmetry_v1`]. This is
+/// * `SOURCE` from [`track_mono_source`], through [`session_structural_symmetry`]. This is
 ///   the term the M0 phase built and the only one the compiled session can answer alone.
 /// * `DESIGNED` from each prepared upstream-of-seam stage the compile actually prepared: the
 ///   track's input builtins ([`InputBuiltins::channel_symmetry`]) and each of its prepared native
 ///   effects. A compile that prepared no builtins (`GraphCompiler::compile`) simply has one fewer
 ///   contributor -- honest, because there is no input stage in that plan to be asymmetric.
 ///
-/// Absent terms are never assumed: an unknown track answers [`CohortPoolClassV1::Stereo`], which
+/// Absent terms are never assumed: an unknown track answers [`CohortPoolClass::Stereo`], which
 /// is the class that cannot over-claim.
 #[derive(Clone, Debug, Default)]
-pub struct SessionPoolClassesV1 {
+pub struct SessionPoolClasses {
     by_track: BTreeMap<Box<str>, ChannelSymmetryWitness>,
 }
 
-impl SessionPoolClassesV1 {
+impl SessionPoolClasses {
     /// Seeds every track's witness with its structural (`SOURCE`) term.
     #[must_use]
     pub fn from_session(session: &CompiledSession) -> Self {
         Self {
-            by_track: session_structural_symmetry_v1(session)
+            by_track: session_structural_symmetry(session)
                 .into_iter()
                 .collect(),
         }
@@ -2944,32 +2944,32 @@ impl SessionPoolClassesV1 {
         }
     }
 
-    /// This track's pool class. An unknown track is [`CohortPoolClassV1::Stereo`].
+    /// This track's pool class. An unknown track is [`CohortPoolClass::Stereo`].
     #[must_use]
-    pub fn class_of(&self, track_id: &str) -> CohortPoolClassV1 {
+    pub fn class_of(&self, track_id: &str) -> CohortPoolClass {
         self.by_track
             .get(track_id)
             .copied()
-            .map_or(CohortPoolClassV1::Stereo, |witness| {
-                CohortPoolClassV1::of_prepare_witness(witness)
+            .map_or(CohortPoolClass::Stereo, |witness| {
+                CohortPoolClass::of_prepare_witness(witness)
             })
     }
 
     /// Every track's class, in normalized track order. Evidence and diagnosis only.
-    pub fn classes(&self) -> impl Iterator<Item = (&str, CohortPoolClassV1)> {
+    pub fn classes(&self) -> impl Iterator<Item = (&str, CohortPoolClass)> {
         self.by_track.iter().map(|(track, witness)| {
             (
                 track.as_ref(),
-                CohortPoolClassV1::of_prepare_witness(*witness),
+                CohortPoolClass::of_prepare_witness(*witness),
             )
         })
     }
 
-    /// How many tracks fall in [`CohortPoolClassV1::MonoSymmetricAtPrepare`].
+    /// How many tracks fall in [`CohortPoolClass::MonoSymmetricAtPrepare`].
     #[must_use]
     pub fn mono_track_count(&self) -> usize {
         self.classes()
-            .filter(|(_, class)| *class == CohortPoolClassV1::MonoSymmetricAtPrepare)
+            .filter(|(_, class)| *class == CohortPoolClass::MonoSymmetricAtPrepare)
             .count()
     }
 }
@@ -3029,7 +3029,7 @@ impl GraphRuntimeProcessor for MatrixProcessor {
 /// meant. If a later phase gives the scalar tail a collapse, the answer is already correct here.
 struct ConsoleInputProcessor {
     input: InputBuiltins,
-    control: Consumer<TrackInputRecordV1>,
+    control: Consumer<TrackInputRecord>,
     /// This track's live channel-symmetry terms, retained across blocks exactly as
     /// `EffectControlLane::symmetry` is and for the same reason.
     live: ChannelSymmetryWitness,
@@ -3039,7 +3039,7 @@ impl GraphRuntimeProcessor for ConsoleInputProcessor {
         while let Ok(record) = self.control.try_pop() {
             self.live.admit(&record);
             match record {
-                TrackInputRecordV1::TrimDb {
+                TrackInputRecord::TrimDb {
                     lanes,
                     db,
                     smoothing_samples,
@@ -3047,7 +3047,7 @@ impl GraphRuntimeProcessor for ConsoleInputProcessor {
                     .input
                     .set_trim_db(lanes, db, smoothing_samples)
                     .map_err(render_error)?,
-                TrackInputRecordV1::PolarityInvert {
+                TrackInputRecord::PolarityInvert {
                     lanes,
                     inverted,
                     smoothing_samples,
@@ -3080,7 +3080,7 @@ impl GraphRuntimeProcessor for ConsoleInputProcessor {
 /// locks, nor drops, which is what keeps the shipped artifact's render call-graph gate green.
 struct ConsoleMatrixProcessor {
     matrix: MatrixBuiltins,
-    control: Consumer<TrackControlRecordV1>,
+    control: Consumer<TrackControlRecord>,
 }
 impl GraphRuntimeProcessor for ConsoleMatrixProcessor {
     fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
@@ -3103,14 +3103,14 @@ impl GraphRuntimeProcessor for ConsoleMatrixProcessor {
 /// admitted fader move or mute takes effect at exactly the block boundary the control side was
 /// acknowledged with.
 struct ConsoleFaderProcessor {
-    fader: FaderMuteRampBuiltinsV1,
-    control: Consumer<TrackFaderRecordV1>,
+    fader: FaderMuteRampBuiltins,
+    control: Consumer<TrackFaderRecord>,
 }
 impl GraphRuntimeProcessor for ConsoleFaderProcessor {
     fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
         while let Ok(record) = self.control.try_pop() {
             match record {
-                TrackFaderRecordV1::FaderDb {
+                TrackFaderRecord::FaderDb {
                     lanes,
                     db,
                     smoothing_samples,
@@ -3118,7 +3118,7 @@ impl GraphRuntimeProcessor for ConsoleFaderProcessor {
                     .fader
                     .set_fader_db(lanes, db, smoothing_samples)
                     .map_err(render_error)?,
-                TrackFaderRecordV1::Mute {
+                TrackFaderRecord::Mute {
                     lanes,
                     muted,
                     smoothing_samples,
@@ -3295,7 +3295,7 @@ fn filter_order_path(track: &Track, track_path: &str) -> String {
 }
 
 fn invalid_cutoff(value: f32, sample_rate: u32) -> bool {
-    validate_builtin_filter_cutoff_v1(value, sample_rate, 0.0, 10.0).is_err()
+    validate_builtin_filter_cutoff(value, sample_rate, 0.0, 10.0).is_err()
 }
 
 fn matrix_path(track: &Track, track_path: &str) -> String {
@@ -3851,7 +3851,7 @@ mod tests {
                 TrackStage::PostInputBuiltins,
                 dispatch,
                 &levels,
-                &SessionPoolClassesV1::default(),
+                &SessionPoolClasses::default(),
             );
             let sizes: Vec<_> = groups.iter().map(|members| members.len()).collect();
             assert_eq!(sizes, expected_sizes, "{:?}", dispatch);
@@ -3887,7 +3887,7 @@ mod tests {
                 TrackStage::PostInputBuiltins,
                 scalar,
                 &levels,
-                &SessionPoolClassesV1::default(),
+                &SessionPoolClasses::default(),
             )
             .is_empty()
         );
@@ -3936,7 +3936,7 @@ mod tests {
             // one. Written out here rather than read off `strip_processor_bytes`, which is the
             // function under test.
             let processor_bytes = core::mem::size_of::<BuiltinBankProcessor>() as u64
-                + core::mem::size_of::<Option<Consumer<TrackInputRecordV1>>>() as u64 * lanes;
+                + core::mem::size_of::<Option<Consumer<TrackInputRecord>>>() as u64 * lanes;
             let plane_bytes = u64::from(quantum) * lanes * 4;
             let string_lengths: Vec<u64> = groups
                 .iter()
@@ -4236,7 +4236,7 @@ mod tests {
         let compiled = n_track_session(n);
         let builtins = prepare_session_builtins(&compiled, &[], caps()).expect("harness builtins");
         let (graph, levels) = track_graph(n);
-        let classes = SessionPoolClassesV1::from_session(&compiled);
+        let classes = SessionPoolClasses::from_session(&compiled);
         let mut artifact =
             builtins.into_graph_artifact_with_banks(graph, (), dispatch, &levels, &classes);
         let bank_count = artifact.graph.prepared_builtin_bank_count();
@@ -4968,7 +4968,7 @@ mod tests {
                     }
                 }
                 46 => {
-                    let maximum = builtin_filter_cutoff_maximum_hz_v1(rate)
+                    let maximum = builtin_filter_cutoff_maximum_hz(rate)
                         .expect("matrix only uses launch rates");
                     let successor = f32::from_bits(maximum.to_bits() + 1);
                     model.tracks[0].builtins.left.hpf_hz = 0.0;
@@ -5194,7 +5194,7 @@ mod tests {
         // the same +171, plus 40 for the wider `TrackControlProducer` vector entry (96 -> 136, the
         // third producer) and 364 for the third bounded ring -- a 256-byte header at 64-byte
         // alignment plus 108 bytes of slot payload, which is byte-for-byte what the fader ring
-        // costs, because `TrackInputRecordV1` and `TrackFaderRecordV1` are both 12 bytes. 1_884 ->
+        // costs, because `TrackInputRecord` and `TrackFaderRecord` are both 12 bytes. 1_884 ->
         // 2_459 on this fixture with one depth-8 channel. `maximum_single_allocation_bytes` moves
         // 344 -> 656 with `StripPreparation`, which is the largest single allocation at one track.
         //
@@ -5239,7 +5239,7 @@ mod tests {
             let input = BuiltinChain::new(48_000, parameters)
                 .expect("chain")
                 .into_input_builtins();
-            let (producer, control) = bounded_spsc::<TrackInputRecordV1>(
+            let (producer, control) = bounded_spsc::<TrackInputRecord>(
                 NonZeroUsize::new(8).expect("depth"),
                 QueueGeneration(0),
             )
@@ -5257,7 +5257,7 @@ mod tests {
         // A `Both` retarget moves the coefficient and preserves every term.
         let (mut producer, mut processor) = build();
         producer
-            .try_push(TrackInputRecordV1::TrimDb {
+            .try_push(TrackInputRecord::TrimDb {
                 lanes: BuiltinLaneSelector::Both,
                 db: -144.0,
                 smoothing_samples: 0,
@@ -5284,7 +5284,7 @@ mod tests {
         // A per-lane retarget declines the `LIVE` term and moves one plane only.
         let (mut producer, mut processor) = build();
         producer
-            .try_push(TrackInputRecordV1::PolarityInvert {
+            .try_push(TrackInputRecord::PolarityInvert {
                 lanes: BuiltinLaneSelector::Right,
                 inverted: true,
                 smoothing_samples: 0,

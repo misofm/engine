@@ -16,7 +16,7 @@ use miso_engine_dsp_reference::{
     ReferenceParametricEqCoefficients, ReferenceSvfCoefficients, ReferenceSvfStateSpace,
     shelf_slope_to_q,
 };
-use miso_engine_parametric_eq::{EqBandKindV1, EqSvfWordsV1, design_svf_v1};
+use miso_engine_parametric_eq::{EqBandKind, EqSvfWords, design_svf};
 use support::{
     FROZEN_GAINS, FROZEN_QS, FROZEN_SLOPES, GridRow, LAUNCH_RATES, frozen_grid, reference_kind,
     reference_svf_kind,
@@ -32,7 +32,7 @@ const NOTCH_NULL: f64 = 1.0e-5;
 const FREQUENCY_TOLERANCE_RATIO: f64 = 0.001;
 
 /// The state space of the words the kernel holds, in `f64`, from the exact `f32` bits.
-fn realized(words: EqSvfWordsV1) -> ReferenceSvfStateSpace {
+fn realized(words: EqSvfWords) -> ReferenceSvfStateSpace {
     ReferenceSvfStateSpace::new(
         f64::from(words.c1),
         f64::from(words.a2),
@@ -45,8 +45,8 @@ fn realized(words: EqSvfWordsV1) -> ReferenceSvfStateSpace {
     )
 }
 
-fn design(row: GridRow) -> EqSvfWordsV1 {
-    design_svf_v1(
+fn design(row: GridRow) -> EqSvfWords {
+    design_svf(
         row.kind,
         row.frequency,
         row.gain,
@@ -69,13 +69,13 @@ fn oracle(row: GridRow) -> ReferenceParametricEqCoefficients {
     .expect("every frozen row is a legal independent reference design")
 }
 
-fn magnitude_db(words: EqSvfWordsV1, rate: u32, probe: f64) -> f64 {
+fn magnitude_db(words: EqSvfWords, rate: u32, probe: f64) -> f64 {
     realized(words)
         .magnitude_db(f64::from(rate), probe)
         .expect("probe inside Nyquist")
 }
 
-fn magnitude(words: EqSvfWordsV1, rate: u32, probe: f64) -> f64 {
+fn magnitude(words: EqSvfWords, rate: u32, probe: f64) -> f64 {
     let response = realized(words)
         .response(f64::from(rate), probe)
         .expect("probe inside Nyquist");
@@ -108,7 +108,7 @@ fn the_f64_mapping_reproduces_the_verified_reference_mapping() {
     let mut worst_error = 0.0_f64;
     for row in frozen_grid() {
         rows += 1;
-        let q = if matches!(row.kind, EqBandKindV1::LowShelf | EqBandKindV1::HighShelf) {
+        let q = if matches!(row.kind, EqBandKind::LowShelf | EqBandKind::HighShelf) {
             shelf_slope_to_q(f64::from(row.gain), f64::from(row.slope)).expect("legal shelf slope")
         } else {
             f64::from(row.q)
@@ -222,7 +222,7 @@ fn svf_words_match_the_independent_oracle_on_the_complete_grid() {
                 "{row:?} probe={probe}: error={error} dB"
             );
         }
-        if row.kind == EqBandKindV1::Notch {
+        if row.kind == EqBandKind::Notch {
             assert!(
                 magnitude(words, row.rate, f64::from(row.frequency)) <= NOTCH_NULL,
                 "{row:?} did not retain the -100 dB null"
@@ -234,7 +234,7 @@ fn svf_words_match_the_independent_oracle_on_the_complete_grid() {
     eprintln!("issue-087 E1 grid rows=1488 worst_error_db={worst_error:.6e}");
 }
 
-fn find_crossing(words: EqSvfWordsV1, rate: u32, target_db: f64) -> f64 {
+fn find_crossing(words: EqSvfWords, rate: u32, target_db: f64) -> f64 {
     let mut low = 0.0;
     let mut high = f64::from(rate) * 0.5;
     let mut low_side = magnitude_db(words, rate, low) >= target_db;
@@ -256,7 +256,7 @@ fn find_crossing(words: EqSvfWordsV1, rate: u32, target_db: f64) -> f64 {
     (low + high) * 0.5
 }
 
-fn find_log_extremum(words: EqSvfWordsV1, rate: u32, maximum: bool) -> f64 {
+fn find_log_extremum(words: EqSvfWords, rate: u32, maximum: bool) -> f64 {
     let mut low = f64::from(rate) * 1.0e-12;
     let mut high = f64::from(rate) * 0.5;
     for _ in 0..96 {
@@ -302,7 +302,7 @@ fn frequency_searches_cover_cutoff_center_midpoint_and_notch_minimum() {
                 q,
                 slope,
             };
-            for kind in [EqBandKindV1::LowPass, EqBandKindV1::HighPass] {
+            for kind in [EqBandKind::LowPass, EqBandKind::HighPass] {
                 let words = design(row(kind, 0.0, core::f32::consts::FRAC_1_SQRT_2, 1.0));
                 let found = find_crossing(words, rate, -3.010_299_956_6);
                 assert_frequency_match(found, frequency, "Butterworth cutoff");
@@ -313,7 +313,7 @@ fn frequency_searches_cover_cutoff_center_midpoint_and_notch_minimum() {
                     if gain == 0.0 {
                         continue;
                     }
-                    let words = design(row(EqBandKindV1::Bell, gain, q, 1.0));
+                    let words = design(row(EqBandKind::Bell, gain, q, 1.0));
                     let found = find_log_extremum(words, rate, gain > 0.0);
                     assert_frequency_match(found, frequency, "bell center");
                     assert!(
@@ -323,7 +323,7 @@ fn frequency_searches_cover_cutoff_center_midpoint_and_notch_minimum() {
                     );
                     searches += 1;
                 }
-                let words = design(row(EqBandKindV1::Notch, 0.0, q, 1.0));
+                let words = design(row(EqBandKind::Notch, 0.0, q, 1.0));
                 let found = find_log_extremum(words, rate, false);
                 assert_frequency_match(found, frequency, "notch minimum");
                 assert!(
@@ -337,7 +337,7 @@ fn frequency_searches_cover_cutoff_center_midpoint_and_notch_minimum() {
                     continue;
                 }
                 for slope in FROZEN_SLOPES {
-                    for kind in [EqBandKindV1::LowShelf, EqBandKindV1::HighShelf] {
+                    for kind in [EqBandKind::LowShelf, EqBandKind::HighShelf] {
                         let words = design(row(kind, gain, 1.0, slope));
                         let found = find_crossing(words, rate, f64::from(gain) * 0.5);
                         assert_frequency_match(found, frequency, "shelf midpoint");
@@ -427,7 +427,7 @@ fn word_ramps_are_contractive_on_every_grid_row() {
         .into_iter()
         .filter(|row| row.rate == 44_100)
         .collect();
-    let words: Vec<EqSvfWordsV1> = rows.iter().copied().map(design).collect();
+    let words: Vec<EqSvfWords> = rows.iter().copied().map(design).collect();
     let mut worst = 0.0_f64;
     for value in &words {
         worst = worst.max(norm(*value));
@@ -436,7 +436,7 @@ fn word_ramps_are_contractive_on_every_grid_row() {
     for (first_index, first) in words.iter().enumerate() {
         for second in &words[first_index + 1..] {
             for lambda in [0.25_f32, 0.5, 0.75] {
-                let mixed = EqSvfWordsV1::from_array(core::array::from_fn(|index| {
+                let mixed = EqSvfWords::from_array(core::array::from_fn(|index| {
                     let a = first.to_array()[index];
                     let b = second.to_array()[index];
                     a + (b - a) * lambda
@@ -471,7 +471,7 @@ fn the_pcm_fixture_rows_are_oracle_bounded() {
     for rate in LAUNCH_RATES {
         for (frequency, gain) in [(120.0_f32, 6.0_f32), (2_400.0, -9.0)] {
             let row = GridRow {
-                kind: EqBandKindV1::Bell,
+                kind: EqBandKind::Bell,
                 rate,
                 frequency,
                 gain,
@@ -505,7 +505,7 @@ fn the_pcm_fixture_rows_are_oracle_bounded() {
 
 /// The stability predicate separates contractive from expansive word triples.
 ///
-/// `word_spectral_norm` is the guard `design_svf_v1` applies and the quantity the ramp gate above
+/// `word_spectral_norm` is the guard `design_svf` applies and the quantity the ramp gate above
 /// measures, so it has to be discriminating in its own right. Spectral *radius* is not enough: this
 /// triple has both eigenvalues on the unit circle and an operator norm of 1.4, because the state
 /// matrix is strongly non-normal — which is exactly the failure mode a per-sample coefficient
@@ -513,7 +513,7 @@ fn the_pcm_fixture_rows_are_oracle_bounded() {
 #[test]
 fn the_spectral_norm_predicate_separates_contractive_from_expansive_words() {
     let tolerance = 1.0 + 1.0 / 4_194_304.0;
-    let expansive = EqSvfWordsV1 {
+    let expansive = EqSvfWords {
         c1: 0.1,
         a2: 0.3,
         a3: 0.9,
@@ -528,7 +528,7 @@ fn the_spectral_norm_predicate_separates_contractive_from_expansive_words() {
         "expansive triple scored {norm}"
     );
     assert_eq!(
-        miso_engine_parametric_eq::word_spectral_norm(EqSvfWordsV1::IDENTITY),
+        miso_engine_parametric_eq::word_spectral_norm(EqSvfWords::IDENTITY),
         1.0,
         "the identity section is an isometry"
     );

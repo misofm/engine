@@ -20,8 +20,8 @@ use std::collections::BTreeMap;
 
 use miso_engine_builtins::{BuiltinLaneSelector, Matrix2x2, MeterSnapshot, MeterTap, pan_matrix};
 use miso_engine_builtins_compiler::{
-    MeterConsumer, TrackControlProducer, TrackControlRecordV1, TrackFaderRecordV1,
-    TrackInputRecordV1,
+    MeterConsumer, TrackControlProducer, TrackControlRecord, TrackFaderRecord,
+    TrackInputRecord,
 };
 use miso_engine_core::realtime::{PlanarBufferMut, RenderIo, RenderTime};
 use miso_engine_effect_contract::{
@@ -141,7 +141,7 @@ pub const COMMAND_OBSERVE_UNSUBSCRIBE: u32 = 8;
 /// It moves no state of its own on the render thread. Admission composes
 /// `effective_mute = user_mute || (any_solo && !my_solo)` over the console's
 /// [`miso_engine_host_core::ConsoleSoloState`] and emits the *existing*
-/// `TrackFaderRecordV1::Mute` records into the *existing* per-track fader queues, so this kind is
+/// `TrackFaderRecord::Mute` records into the *existing* per-track fader queues, so this kind is
 /// on the `render` plane (it moves what the render thread reads) while adding nothing below
 /// `admit_commands`. Refusals reuse the existing vocabulary: `malformed` for a wrong-shaped
 /// record, `domain` for a `values[0]` outside `{0.0, 1.0}` (exactly as `mute` does),
@@ -156,7 +156,7 @@ pub const COMMAND_SOLO: u32 = 9;
 /// A `channel = 2` command is **one** record carrying `BuiltinLaneSelector::Both`, not two
 /// per-lane records: the input stage is upstream of the fader/matrix seam, and a both-channel
 /// retarget must be admitted as one symmetry-preserving event or it would retire the track's mono
-/// collapse. `miso_engine_builtins_compiler::TrackInputRecordV1` carries the argument in full.
+/// collapse. `miso_engine_builtins_compiler::TrackInputRecord` carries the argument in full.
 ///
 /// The lane's polarity is preserved: a trim ride does not clear a flip.
 pub const COMMAND_TRIM_DB: u32 = 10;
@@ -783,11 +783,11 @@ impl ReadyOwnership {
 #[derive(Clone, Copy)]
 enum AdmittedCommand {
     /// The matrix/pan channel #137 D1 shipped.
-    Matrix(TrackControlRecordV1),
+    Matrix(TrackControlRecord),
     /// The fader/mute channel (#140 B).
-    Fader(TrackFaderRecordV1),
+    Fader(TrackFaderRecord),
     /// The input trim/polarity channel (#210 phase 3).
-    Input(TrackInputRecordV1),
+    Input(TrackInputRecord),
     /// One effect instance's channel (#140 A).
     Effect(EffectControlRecord),
 }
@@ -1700,7 +1700,7 @@ impl CommandRecord {
     /// Lower one addressed track-builtin record, or say why it cannot be.
     ///
     /// Issue #140 C: `fader_db` and `mute` are no longer refused here. They lower onto the live
-    /// ramped fader section (`FaderMuteRampBuiltinsV1`), which a console-attached track binds in
+    /// ramped fader section (`FaderMuteRampBuiltins`), which a console-attached track binds in
     /// place of the prepared `FaderMuteBuiltins`. A track with no console still refuses them --
     /// with [`COMMAND_REASON_UNSUPPORTED_KIND`], because the target exists and the value is legal
     /// and this *session* has no write path -- which is exactly what the reason means.
@@ -1716,7 +1716,7 @@ impl CommandRecord {
                 }
                 let matrix = pan_matrix(self.values[0], self.values[1])
                     .map_err(|_| COMMAND_REASON_DOMAIN)?;
-                Ok(AdmittedCommand::Matrix(TrackControlRecordV1 {
+                Ok(AdmittedCommand::Matrix(TrackControlRecord {
                     matrix,
                     smoothing_samples: self.smoothing_samples,
                 }))
@@ -1733,7 +1733,7 @@ impl CommandRecord {
                 }
                 .checked()
                 .map_err(|_| COMMAND_REASON_DOMAIN)?;
-                Ok(AdmittedCommand::Matrix(TrackControlRecordV1 {
+                Ok(AdmittedCommand::Matrix(TrackControlRecord {
                     matrix,
                     smoothing_samples: self.smoothing_samples,
                 }))
@@ -1743,11 +1743,11 @@ impl CommandRecord {
                     return Err(COMMAND_REASON_MALFORMED);
                 }
                 let lanes = lane_selector(self.channel).ok_or(COMMAND_REASON_MALFORMED)?;
-                // The declared domain of `fader_db` in `BUILTIN_PARAMETER_DESCRIPTORS_V1`.
+                // The declared domain of `fader_db` in `BUILTIN_PARAMETER_DESCRIPTORS`.
                 if !(-144.0..=24.0).contains(&self.values[0]) {
                     return Err(COMMAND_REASON_DOMAIN);
                 }
-                Ok(AdmittedCommand::Fader(TrackFaderRecordV1::FaderDb {
+                Ok(AdmittedCommand::Fader(TrackFaderRecord::FaderDb {
                     lanes,
                     db: self.values[0],
                     smoothing_samples: self.smoothing_samples,
@@ -1761,7 +1761,7 @@ impl CommandRecord {
                 if self.values[0] != 0.0 && self.values[0] != 1.0 {
                     return Err(COMMAND_REASON_DOMAIN);
                 }
-                Ok(AdmittedCommand::Fader(TrackFaderRecordV1::Mute {
+                Ok(AdmittedCommand::Fader(TrackFaderRecord::Mute {
                     lanes,
                     muted: self.values[0] == 1.0,
                     smoothing_samples: self.smoothing_samples,
@@ -1776,13 +1776,13 @@ impl CommandRecord {
                     return Err(COMMAND_REASON_MALFORMED);
                 }
                 let lanes = lane_selector(self.channel).ok_or(COMMAND_REASON_MALFORMED)?;
-                // The declared domain of `trim_db` in `BUILTIN_PARAMETER_DESCRIPTORS_V1`. It is
+                // The declared domain of `trim_db` in `BUILTIN_PARAMETER_DESCRIPTORS`. It is
                 // the same range `fader_db` carries and is spelled again rather than shared, which
                 // is this file's convention: the comment names the authority.
                 if !(-144.0..=24.0).contains(&self.values[0]) {
                     return Err(COMMAND_REASON_DOMAIN);
                 }
-                Ok(AdmittedCommand::Input(TrackInputRecordV1::TrimDb {
+                Ok(AdmittedCommand::Input(TrackInputRecord::TrimDb {
                     lanes,
                     db: self.values[0],
                     smoothing_samples: self.smoothing_samples,
@@ -1797,7 +1797,7 @@ impl CommandRecord {
                 if self.values[0] != 0.0 && self.values[0] != 1.0 {
                     return Err(COMMAND_REASON_DOMAIN);
                 }
-                Ok(AdmittedCommand::Input(TrackInputRecordV1::PolarityInvert {
+                Ok(AdmittedCommand::Input(TrackInputRecord::PolarityInvert {
                     lanes,
                     inverted: self.values[0] == 1.0,
                     smoothing_samples: self.smoothing_samples,
@@ -2073,7 +2073,7 @@ fn admit_commands_staged(
                 if ready.controls.get(track).is_none() {
                     return Err(refuse(COMMAND_REASON_UNSUPPORTED_KIND, index));
                 }
-                let AdmittedCommand::Fader(TrackFaderRecordV1::Mute {
+                let AdmittedCommand::Fader(TrackFaderRecord::Mute {
                     lanes,
                     muted,
                     smoothing_samples,
@@ -2086,7 +2086,7 @@ fn admit_commands_staged(
                 }
                 let effective = muted || (ready.solo.any_solo() && !ready.solo.solo(track));
                 ready.solo.record_emitted(track, lanes, effective);
-                staged[0] = AdmittedCommand::Fader(TrackFaderRecordV1::Mute {
+                staged[0] = AdmittedCommand::Fader(TrackFaderRecord::Mute {
                     lanes,
                     muted: effective,
                     smoothing_samples,
@@ -2191,7 +2191,7 @@ fn admit_commands_staged(
                 };
                 *entry = (
                     slot as u32,
-                    AdmittedCommand::Fader(TrackFaderRecordV1::Mute {
+                    AdmittedCommand::Fader(TrackFaderRecord::Mute {
                         lanes,
                         muted,
                         smoothing_samples: solo_smoothing,
@@ -2787,7 +2787,7 @@ fn boxed_command_staging(track_count: usize) -> Result<Box<[(u32, AdmittedComman
     // Plus `2 * track_count` for issue #210 phase 1's coalesced solo emission. A submission that
     // moves a solo bit owes the console the difference between the composed effective mute and
     // what the render plane was last told; that is at most two records per track, because
-    // `TrackFaderRecordV1::Mute` carries one `muted` bool and a track whose user mute is
+    // `TrackFaderRecord::Mute` carries one `muted` bool and a track whose user mute is
     // asymmetric needs one record per lane to restore. The two terms add rather than max: a batch
     // may carry 256 effect-parameter records *and* a solo toggle.
     let count = (MAXIMUM_COMMAND_RECORDS as usize * 2)

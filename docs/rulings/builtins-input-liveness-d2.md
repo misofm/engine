@@ -78,7 +78,7 @@ collapse machinery had to be taught about them in three places:
 * a `channel = both` command is **one** record carrying `BuiltinLaneSelector::Both` and is admitted
   as `SymmetryEvent::Preserve`, so a symmetric ride keeps the collapse bit-identically. This is a
   deliberate departure from the effect-parameter lowering, where `both` on a `PerLane` parameter
-  becomes two records and therefore two `Desymmetrize` events; `TrackInputRecordV1` carries the
+  becomes two records and therefore two `Desymmetrize` events; `TrackInputRecord` carries the
   argument.
 
 **The disengage boundary, and the correction it took.** The first cut of this phase copied the

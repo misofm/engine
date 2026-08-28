@@ -224,7 +224,7 @@ impl TrackDelayLine {
     ///
     /// A track whose lanes declare different delays produces genuinely different left and right
     /// audio out of a single source channel, so it is not mono-collapsible. That verdict is also
-    /// taken at prepare, from the session, by `session_structural_symmetry_v1`; this is the same
+    /// taken at prepare, from the session, by `session_structural_symmetry`; this is the same
     /// fact answered by the object that owns the rings.
     #[cfg(test)]
     pub(crate) const fn channels_agree(&self) -> bool {
@@ -583,7 +583,7 @@ impl NodeKind {
             // The one non-bank stage that can be asymmetric upstream of the seam: two lanes with
             // different declared delays turn one source channel into two different signals, so the
             // track is not collapsible. The same verdict is taken at prepare, from the session, by
-            // `session_structural_symmetry_v1` -- which is what actually arms the chain; this arm
+            // `session_structural_symmetry` -- which is what actually arms the chain; this arm
             // is the plan's own evidence row agreeing with it.
             Self::TrackDelay { channels_agree, .. } => designed(*channels_agree),
             Self::Effect(effect) => designed(effect.processor.channel_symmetry()),
@@ -813,7 +813,7 @@ impl Runtime {
     ///
     /// All lanes or nothing, exactly as `BankChain::all_lanes_symmetric` is: a cohort with one
     /// two-source lane saves nothing by collapsing the others, because the vector op runs every
-    /// lane regardless. Making a cohort homogeneous is the planner's job (`CohortPoolClassV1`).
+    /// lane regardless. Making a cohort homogeneous is the planner's job (`CohortPoolClass`).
     ///
     /// A unit whose lane list is empty arms nothing: a chain that names no track is one this join
     /// cannot speak for.
@@ -2744,7 +2744,7 @@ fn chains_into(
 /// Issue #181 asked the cohort planner which bound slots came out of one group and offered only
 /// those pairs to [`chains_into`]. That is a strictly narrower question than the one the merge
 /// actually needs answered, and it left three quarters of the intended strip's round-trips on the
-/// table: `plan_bank_groups` pools per `RackLocationV1`, so no candidate ever crossed a rack
+/// table: `plan_bank_groups` pools per `RackLocation`, so no candidate ever crossed a rack
 /// boundary, and a builtin bank has no cohort group at all, so the `builtins -> simd1` boundary
 /// was not even expressible. On the 64-track intended fixture that is 8 groups x {builtins, simd1,
 /// simd2} = 24 chains where 8 will do.

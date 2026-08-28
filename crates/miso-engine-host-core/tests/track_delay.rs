@@ -28,7 +28,7 @@ use miso_engine_builtins::MeterTap;
 use miso_engine_core::realtime::{PlanarBufferMut, RenderIo, RenderTime};
 use miso_engine_host_core::{
     HostConsoleRequestV1, HostPrepareCaps, HostShapePolicy, SourceSubmission,
-    prepare_host_session_with_console, session_structural_symmetry_v1,
+    prepare_host_session_with_console, session_structural_symmetry,
 };
 
 const SESSION: &str = include_str!("../../../fixtures/session/v1/canonical.toml");
@@ -365,7 +365,7 @@ fn eligible(toml: &str) -> Vec<bool> {
         },
     )
     .expect("session compiles");
-    session_structural_symmetry_v1(&session)
+    session_structural_symmetry(&session)
         .into_iter()
         .map(|(_, witness)| witness.eligible())
         .collect()
@@ -385,7 +385,7 @@ fn a_symmetric_delay_keeps_every_track_eligible() {
 
 /// An asymmetric delay declines its own track, and only its own track.
 ///
-/// Red mutation: drop the `DESIGNED` `witness.set` from `session_structural_symmetry_v1` (or make
+/// Red mutation: drop the `DESIGNED` `witness.set` from `session_structural_symmetry` (or make
 /// `track_input_delay_symmetric` return `true` unconditionally) -> this fails while the
 /// symmetric row above still passes, which is the pair that makes the term load-bearing.
 #[test]

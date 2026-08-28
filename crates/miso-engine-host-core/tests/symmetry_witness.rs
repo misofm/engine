@@ -22,7 +22,7 @@
 //! The witness has two owners, because its terms are decided at different times by different
 //! parties:
 //!
-//! * `session_structural_symmetry_v1` answers the `SOURCE` term from the **compiled session**,
+//! * `session_structural_symmetry` answers the `SOURCE` term from the **compiled session**,
 //!   before any plan exists. That is the planner's pooling class -- the later phase partitions
 //!   cohorts by it -- and it is a control-plane function rather than a field of a prepared object
 //!   for a concrete reason: the prepared input section's byte size is a sealed fixture-ABI number
@@ -46,7 +46,7 @@ use miso_engine_effect_contract::{EffectControlRecord, ParameterChannel};
 use miso_engine_host_core::{
     ChannelSymmetryWitness, EffectRack, HostConsoleHandlesV1, HostConsoleRequestV1,
     HostPrepareCaps, HostShapePolicy, PreparedHost, SourceSubmission,
-    prepare_host_session_with_console, session_structural_symmetry_v1,
+    prepare_host_session_with_console, session_structural_symmetry,
 };
 use miso_engine_session::CompiledSession;
 
@@ -215,7 +215,7 @@ fn parameter(channel: ParameterChannel, value: f32) -> EffectControlRecord {
 // The structural term
 // ---------------------------------------------------------------------------------------------
 
-/// Red mutation: make `track_mono_source_v1` return `true` unconditionally -> the stereo row's
+/// Red mutation: make `track_mono_source` return `true` unconditionally -> the stereo row's
 /// `assert!(!witness.eligible())` fails. Make it return `false` unconditionally -> both mono rows
 /// fail.
 #[test]
@@ -237,7 +237,7 @@ fn the_structural_witness_follows_the_source_mapping() {
             toml = toml.replace("left_source_channel = 0", "left_source_channel = 1");
         }
         let (session, _console) = prepare(&toml);
-        let witnesses = session_structural_symmetry_v1(&session);
+        let witnesses = session_structural_symmetry(&session);
         assert_eq!(witnesses.len(), TRACKS, "{name}: one witness per track");
         for (track, witness) in &witnesses {
             assert_eq!(
@@ -266,7 +266,7 @@ fn the_structural_witness_follows_the_source_mapping() {
 /// ineligible.
 ///
 /// Red mutation: make `symmetry_counters` fold `ChannelSymmetryWitness::DECLINED` for any node
-/// kind, or make `track_mono_source_v1` constant -> one of the two halves stops discriminating and
+/// kind, or make `track_mono_source` constant -> one of the two halves stops discriminating and
 /// this fails.
 #[test]
 fn the_two_halves_of_the_witness_are_decided_independently() {
@@ -289,13 +289,13 @@ fn the_two_halves_of_the_witness_are_decided_independently() {
     // The structural half, from the compiled session alone, with no plan at all -- and it is the
     // half that separates them.
     assert!(
-        session_structural_symmetry_v1(&stereo_session)
+        session_structural_symmetry(&stereo_session)
             .iter()
             .all(|(_, witness)| !witness.eligible()),
         "the planner's half declines every track of the stereo session"
     );
     assert!(
-        session_structural_symmetry_v1(&mono_session_model)
+        session_structural_symmetry(&mono_session_model)
             .iter()
             .all(|(_, witness)| witness.eligible()),
         "and admits every track of the mono one"
@@ -304,7 +304,7 @@ fn the_two_halves_of_the_witness_are_decided_independently() {
     // The conjunction is what a collapse would ask, and it is nobody's default: an eligible lane
     // and an ineligible track compose to ineligible.
     let combined = ChannelSymmetryWitness::SYMMETRIC
-        .and(session_structural_symmetry_v1(&stereo_session)[0].1);
+        .and(session_structural_symmetry(&stereo_session)[0].1);
     assert!(!combined.eligible());
     assert_eq!(combined.declined(), ChannelSymmetryWitness::SOURCE);
 }
@@ -358,7 +358,7 @@ fn an_asymmetric_input_builtin_declines_its_own_track_only() {
     );
     // The fixture's tracks are `eq1`..`eq8` and the mutation edits the first `builtins.right`
     // table in the text, so the declining track is the first in normalized order.
-    let first = session_structural_symmetry_v1(&_session)
+    let first = session_structural_symmetry(&_session)
         .first()
         .map(|(track, _)| track.clone())
         .expect("a track");
@@ -702,7 +702,7 @@ fn an_observe_record_never_moves_the_witness() {
 }
 
 /// Seam-side traffic -- fader, mute, pan, matrix -- is excluded by design, and the exclusion is
-/// structural: `TrackFaderRecordV1` and `TrackControlRecordV1` are seam-side record types, so no
+/// structural: `TrackFaderRecord` and `TrackControlRecord` are seam-side record types, so no
 /// drain of theirs can reach a witness.
 ///
 /// Red mutation: change `SEAM_SIDE_WITNESS` to `DECLINED`, or make
@@ -711,7 +711,7 @@ fn an_observe_record_never_moves_the_witness() {
 fn seam_side_console_traffic_leaves_every_lane_eligible() {
     use miso_engine_builtins::BuiltinLaneSelector;
     use miso_engine_builtins::Matrix2x2;
-    use miso_engine_builtins_compiler::{TrackControlRecordV1, TrackFaderRecordV1};
+    use miso_engine_builtins_compiler::{TrackControlRecord, TrackFaderRecord};
 
     let (_session, mut console) = prepare(&mono_session());
     let [before, lanes] = census(&console);
@@ -725,7 +725,7 @@ fn seam_side_console_traffic_leaves_every_lane_eligible() {
         .expect("a control channel for the addressed track");
     control
         .fader
-        .try_push(TrackFaderRecordV1::FaderDb {
+        .try_push(TrackFaderRecord::FaderDb {
             // One lane only: the most asymmetric fader move the ABI can express.
             lanes: BuiltinLaneSelector::Left,
             db: -18.0,
@@ -734,7 +734,7 @@ fn seam_side_console_traffic_leaves_every_lane_eligible() {
         .expect("room in the bounded queue");
     control
         .producer
-        .try_push(TrackControlRecordV1 {
+        .try_push(TrackControlRecord {
             matrix: Matrix2x2 {
                 ll: 0.25,
                 lr: 0.75,

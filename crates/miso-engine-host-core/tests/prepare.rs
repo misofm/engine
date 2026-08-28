@@ -466,7 +466,7 @@ fn console_attaches_bounded_control_and_meter_halves_in_canonical_track_order() 
     assert!(prepared.report.builtin_meter_payload_bytes > 0);
 
     // The control queue is bounded and a full queue hands the record back rather than dropping it.
-    let record = miso_engine_builtins_compiler::TrackControlRecordV1 {
+    let record = miso_engine_builtins_compiler::TrackControlRecord {
         matrix: miso_engine_builtins::Matrix2x2 {
             ll: 1.0,
             lr: 0.0,

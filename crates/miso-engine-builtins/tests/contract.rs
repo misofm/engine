@@ -19,7 +19,7 @@ fn parameters_with_cutoff(cutoff: f32, high_pass: bool) -> BuiltinParameters {
 
 #[test]
 fn parameter_descriptors_have_complete_stable_contracts() {
-    let descriptors = BUILTIN_PARAMETER_DESCRIPTORS_V1;
+    let descriptors = BUILTIN_PARAMETER_DESCRIPTORS;
     assert_eq!(
         descriptors.map(|descriptor| descriptor.id),
         [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
@@ -168,11 +168,11 @@ fn parameter_descriptors_have_complete_stable_contracts() {
                 minimum: -144.0,
                 maximum: 24.0,
             },
-            BuiltinParameterDomain::DisabledOrRateKeyedHertzV1 {
+            BuiltinParameterDomain::DisabledOrRateKeyedHertz {
                 disabled: 0.0,
                 minimum_hz: 10.0,
             },
-            BuiltinParameterDomain::DisabledOrRateKeyedHertzV1 {
+            BuiltinParameterDomain::DisabledOrRateKeyedHertz {
                 disabled: 0.0,
                 minimum_hz: 10.0,
             },
@@ -208,17 +208,17 @@ fn parameter_descriptors_have_complete_stable_contracts() {
 #[test]
 fn descriptor_domains_are_exhaustive_at_launch_rates() {
     for rate in [44_100, 48_000, 88_200, 96_000] {
-        for descriptor in BUILTIN_PARAMETER_DESCRIPTORS_V1 {
+        for descriptor in BUILTIN_PARAMETER_DESCRIPTORS {
             assert!(descriptor.domain.contains(descriptor.default, rate));
             assert!(!descriptor.domain.contains(f32::NAN, rate));
             assert!(!descriptor.domain.contains(f32::INFINITY, rate));
             assert!(!descriptor.domain.contains(f32::NEG_INFINITY, rate));
         }
         for descriptor in [
-            BUILTIN_PARAMETER_DESCRIPTORS_V1[2],
-            BUILTIN_PARAMETER_DESCRIPTORS_V1[3],
+            BUILTIN_PARAMETER_DESCRIPTORS[2],
+            BUILTIN_PARAMETER_DESCRIPTORS[3],
         ] {
-            let maximum = builtin_filter_cutoff_maximum_hz_v1(rate)
+            let maximum = builtin_filter_cutoff_maximum_hz(rate)
                 .expect("launch rate has an exact cutoff maximum");
             let successor = f32::from_bits(maximum.to_bits() + 1);
             let nyquist = rate as f32 / 2.0;
@@ -234,8 +234,8 @@ fn descriptor_domains_are_exhaustive_at_launch_rates() {
         }
     }
     for boolean in [
-        BUILTIN_PARAMETER_DESCRIPTORS_V1[0],
-        BUILTIN_PARAMETER_DESCRIPTORS_V1[5],
+        BUILTIN_PARAMETER_DESCRIPTORS[0],
+        BUILTIN_PARAMETER_DESCRIPTORS[5],
     ] {
         assert!(boolean.domain.contains(0.0, 48_000));
         assert!(boolean.domain.contains(1.0, 48_000));
@@ -243,8 +243,8 @@ fn descriptor_domains_are_exhaustive_at_launch_rates() {
         assert!(!boolean.domain.contains(0.5, 48_000));
     }
     for decibels in [
-        BUILTIN_PARAMETER_DESCRIPTORS_V1[1],
-        BUILTIN_PARAMETER_DESCRIPTORS_V1[4],
+        BUILTIN_PARAMETER_DESCRIPTORS[1],
+        BUILTIN_PARAMETER_DESCRIPTORS[4],
     ] {
         assert!(decibels.domain.contains(-144.0, 48_000));
         assert!(decibels.domain.contains(24.0, 48_000));
@@ -253,13 +253,13 @@ fn descriptor_domains_are_exhaustive_at_launch_rates() {
     }
     // Bounded, not open-ended: issue #210 phase 2 appended `delay_samples` after the matrix rows,
     // and an open `[6..]` would have quietly swept it into the matrix contract.
-    for matrix in &BUILTIN_PARAMETER_DESCRIPTORS_V1[6..10] {
+    for matrix in &BUILTIN_PARAMETER_DESCRIPTORS[6..10] {
         assert!(matrix.domain.contains(-1.0, 48_000));
         assert!(matrix.domain.contains(1.0, 48_000));
         assert!(!matrix.domain.contains(-1.001, 48_000));
         assert!(!matrix.domain.contains(1.001, 48_000));
     }
-    let delay = BUILTIN_PARAMETER_DESCRIPTORS_V1[10];
+    let delay = BUILTIN_PARAMETER_DESCRIPTORS[10];
     assert_eq!(delay.name, "delay_samples");
     for rate in [44_100, 48_000, 88_200, 96_000] {
         // A flat integer range: rate-independent, unlike the two cutoff rows above.
@@ -279,10 +279,10 @@ fn descriptor_domains_are_exhaustive_at_launch_rates() {
 #[test]
 fn compatibility_fallback_is_limited_to_the_exact_extended_rate_tier() {
     for rate in EXTENDED_COMPATIBILITY_SAMPLE_RATES.map(|rate| rate.0) {
-        assert_eq!(builtin_filter_cutoff_maximum_hz_v1(rate), None);
+        assert_eq!(builtin_filter_cutoff_maximum_hz(rate), None);
         for descriptor in [
-            BUILTIN_PARAMETER_DESCRIPTORS_V1[2],
-            BUILTIN_PARAMETER_DESCRIPTORS_V1[3],
+            BUILTIN_PARAMETER_DESCRIPTORS[2],
+            BUILTIN_PARAMETER_DESCRIPTORS[3],
         ] {
             assert!(descriptor.domain.contains(0.0, rate));
             assert!(descriptor.domain.contains(10.0, rate));
@@ -291,10 +291,10 @@ fn compatibility_fallback_is_limited_to_the_exact_extended_rate_tier() {
         assert!(BuiltinChain::new(rate, BuiltinParameters::default()).is_ok());
     }
     for rate in [0, 32_000, 192_001] {
-        assert_eq!(builtin_filter_cutoff_maximum_hz_v1(rate), None);
+        assert_eq!(builtin_filter_cutoff_maximum_hz(rate), None);
         for descriptor in [
-            BUILTIN_PARAMETER_DESCRIPTORS_V1[2],
-            BUILTIN_PARAMETER_DESCRIPTORS_V1[3],
+            BUILTIN_PARAMETER_DESCRIPTORS[2],
+            BUILTIN_PARAMETER_DESCRIPTORS[3],
         ] {
             assert!(!descriptor.domain.contains(0.0, rate));
             assert!(!descriptor.domain.contains(10.0, rate));
@@ -314,14 +314,14 @@ fn representable_cutoff_domain_is_shared_by_descriptors_and_preparation() {
         (88_200, 0x472c_42f7),
         (96_000, 0x473b_7ede),
     ] {
-        let maximum = builtin_filter_cutoff_maximum_hz_v1(rate).expect("launch rate has maximum");
+        let maximum = builtin_filter_cutoff_maximum_hz(rate).expect("launch rate has maximum");
         assert_eq!(maximum.to_bits(), maximum_bits, "rate={rate}");
         let successor = f32::from_bits(maximum_bits + 1);
         let nyquist = rate as f32 * 0.5;
         let nyquist_predecessor = f32::from_bits(nyquist.to_bits() - 1);
         for (descriptor, high_pass) in [
-            (BUILTIN_PARAMETER_DESCRIPTORS_V1[2], true),
-            (BUILTIN_PARAMETER_DESCRIPTORS_V1[3], false),
+            (BUILTIN_PARAMETER_DESCRIPTORS[2], true),
+            (BUILTIN_PARAMETER_DESCRIPTORS[3], false),
         ] {
             for (cutoff, expected) in [
                 (0.0, true),

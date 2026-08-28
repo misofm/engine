@@ -13,7 +13,7 @@
 //! the counters live in `lifetime_recovered` and in the audit's fixture check, neither of which the
 //! console workload reads.
 //!
-//! Everything here goes through the shipped surface: `BuiltinInputBankV1::process`,
+//! Everything here goes through the shipped surface: `BuiltinInputBank::process`,
 //! `process_mono`, `desymmetrize`, `supports_mono_collapse`.
 
 use miso_engine_builtins::*;
@@ -44,7 +44,7 @@ fn symmetric_parameters(index: usize) -> BuiltinParameters {
     }
 }
 
-fn bank(backend: Backend, width: BankWidth) -> BuiltinInputBankV1 {
+fn bank(backend: Backend, width: BankWidth) -> BuiltinInputBank {
     let inputs: Vec<InputBuiltins> = (0..width.lanes() as usize)
         .map(|index| {
             BuiltinChain::new(48_000, symmetric_parameters(index))
@@ -52,7 +52,7 @@ fn bank(backend: Backend, width: BankWidth) -> BuiltinInputBankV1 {
                 .into_input_builtins()
         })
         .collect();
-    BuiltinInputBankV1::new(backend, width, inputs).expect("bank")
+    BuiltinInputBank::new(backend, width, inputs).expect("bank")
 }
 
 /// A block whose every fourth sample is one the boundary policy has to sanitise.

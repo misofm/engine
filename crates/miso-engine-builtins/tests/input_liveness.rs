@@ -23,7 +23,7 @@
 //!    elidable bank's identity sections, and those sections' integrators must come back exactly
 //!    `+0.0` -- which is what makes the plan Job 1 decided still true afterwards.
 //!
-//! Everything here goes through the shipped surface: `BuiltinInputBankV1` and `InputBuiltins`.
+//! Everything here goes through the shipped surface: `BuiltinInputBank` and `InputBuiltins`.
 
 use miso_engine_builtins::test_support::{
     bank_elision_plan, bank_lane_state_words, bank_trim_ramp_words, input_elision_plan,
@@ -211,7 +211,7 @@ fn an_uncommanded_bank_keeps_its_elision_plan() {
         let inputs: Vec<InputBuiltins> = (0..width.lanes() as usize)
             .map(|_| input(disabled))
             .collect();
-        let mut bank = BuiltinInputBankV1::new(backend, width, inputs).expect("bank");
+        let mut bank = BuiltinInputBank::new(backend, width, inputs).expect("bank");
         assert_eq!(
             bank_elision_plan(&bank),
             [[true; 2]; 2],
@@ -458,7 +458,7 @@ fn a_ramping_block_leaves_an_elidable_banks_integrators_at_positive_zero() {
             channel(-2.0, false, 0.0, 0.0),
         );
         let inputs: Vec<InputBuiltins> = (0..lanes).map(|_| input(disabled)).collect();
-        let mut bank = BuiltinInputBankV1::new(backend, width, inputs).expect("bank");
+        let mut bank = BuiltinInputBank::new(backend, width, inputs).expect("bank");
         assert_eq!(bank_elision_plan(&bank), [[true; 2]; 2]);
         bank.set_trim_db(0, BuiltinLaneSelector::Both, -20.0, 16)
             .expect("trim domain");
@@ -674,7 +674,7 @@ fn the_live_trim_domain_is_the_declared_one() {
 fn a_bank_refuses_a_retarget_addressed_past_its_members() {
     for (backend, width) in BANKS {
         let params = parameters(channel(0.0, false, 0.0, 0.0), channel(0.0, false, 0.0, 0.0));
-        let mut bank = BuiltinInputBankV1::new(backend, width, vec![input(params), input(params)])
+        let mut bank = BuiltinInputBank::new(backend, width, vec![input(params), input(params)])
             .expect("a two-member bank");
         assert!(
             bank.set_trim_db(1, BuiltinLaneSelector::Both, -6.0, 4)
@@ -714,7 +714,7 @@ fn a_banked_lane_ramps_exactly_as_the_same_track_alone() {
             parameters(value, value)
         };
         let inputs: Vec<InputBuiltins> = (0..lanes).map(|index| input(params(index))).collect();
-        let mut bank = BuiltinInputBankV1::new(backend, width, inputs).expect("bank");
+        let mut bank = BuiltinInputBank::new(backend, width, inputs).expect("bank");
         for lane in 0..lanes {
             bank.set_trim_db(lane, BuiltinLaneSelector::Both, -9.0 - lane as f32, SAMPLES)
                 .expect("trim domain");

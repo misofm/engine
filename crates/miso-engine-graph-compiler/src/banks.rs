@@ -5,7 +5,7 @@
 use super::*;
 use crate::ids::{diag, rack_id};
 
-/// The `RackLocationV1` a graph rack id addresses.
+/// The `RackLocation` a graph rack id addresses.
 ///
 /// Total, and deliberately so. This used to return `Option`, with `RackId::Dynamic => None`, and
 /// that `None` was the only reason a dynamic-rack effect never banked: the candidate loop skipped
@@ -16,11 +16,11 @@ use crate::ids::{diag, rack_id};
 /// rack, and that opaque third-party Wasm is per-instance because it "breaks the known
 /// homogeneous/fused SIMD bank contract". The disqualifier is **opacity, not location**, so the
 /// gate now lives on identity (see [`banks_are_permitted`]) and every rack has a location.
-pub(crate) const fn rack_location(rack: RackId) -> RackLocationV1 {
+pub(crate) const fn rack_location(rack: RackId) -> RackLocation {
     match rack {
-        RackId::Simd1 => RackLocationV1::Simd1,
-        RackId::Simd2 => RackLocationV1::Simd2,
-        RackId::Dynamic => RackLocationV1::Dynamic,
+        RackId::Simd1 => RackLocation::Simd1,
+        RackId::Simd2 => RackLocation::Simd2,
+        RackId::Dynamic => RackLocation::Dynamic,
     }
 }
 
@@ -69,7 +69,7 @@ pub(crate) fn bind_rack_banks(
     ids: &BTreeMap<(String, RackId, String), EffectNodeId>,
     levels: &[DependencyLevel],
     dispatch: Backend,
-    classes: &SessionPoolClassesV1,
+    classes: &SessionPoolClasses,
 ) -> Result<
     (
         Vec<miso_engine_graph::GraphPreparedEffectBank>,
@@ -95,7 +95,7 @@ pub(crate) fn bind_rack_banks(
 
     // One chain per (track, bankable rack), in session slot order.
     let mut chains: BTreeMap<RackChainId, Vec<EffectNodeId>> = BTreeMap::new();
-    let mut programs: BTreeMap<RackChainId, RackProgramV1> = BTreeMap::new();
+    let mut programs: BTreeMap<RackChainId, RackProgram> = BTreeMap::new();
     for track in &model.tracks {
         for (rack, declared) in [
             (RackId::Simd1, &track.simd1.effects),
@@ -137,7 +137,7 @@ pub(crate) fn bind_rack_banks(
                 nodes.push(node.clone());
                 slots.push(entry.metadata.program_key());
             }
-            programs.insert(chain.clone(), RackProgramV1::new(location, slots));
+            programs.insert(chain.clone(), RackProgram::new(location, slots));
             chains.insert(chain, nodes);
         }
     }
@@ -219,7 +219,7 @@ pub(crate) fn bind_rack_banks(
                 // for this compile and also handed to the strip-bank planner. A chain is one
                 // track's rack program, so the track's class is the chain's; deriving it here
                 // from anything else is exactly the two-planner disagreement
-                // `SessionPoolClassesV1` exists to make impossible.
+                // `SessionPoolClasses` exists to make impossible.
                 class: classes.class_of(&chain.track_id),
                 program: programs[chain].clone(),
             });

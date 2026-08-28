@@ -522,7 +522,7 @@ pub const BUILTIN_AUTOMATION_EFFECT_ID_V1: &str = "strip";
 ///
 /// `miso-engine-session` depends on `miso-engine-core` and nothing else -- that is a policy
 /// (`scripts/check-session-policy.sh`), not an accident -- so this crate cannot read
-/// `BUILTIN_PARAMETER_DESCRIPTORS_V1` and this is a deliberate second spelling of it, exactly as
+/// `BUILTIN_PARAMETER_DESCRIPTORS` and this is a deliberate second spelling of it, exactly as
 /// `scripts/check-parameter-metadata-v1.py` is a second spelling of the command-kind list. The two
 /// are held together by `miso_engine_builtins_compiler`'s
 /// `builtin_automation_targets_match_the_parameter_abi`, which can see both crates and compares
@@ -563,7 +563,7 @@ pub const BUILTIN_AUTOMATION_TARGETS_V1: [(u32, bool); 8] = [
 /// is valid-and-inert syntax today: it authors, it round-trips, it survives the canonical writer,
 /// and it renders nothing. Builtin automation *rendering* is gated on issue #140's span feed,
 /// whose natural destination is the very drains #210 phases 1 and 3 built
-/// (`TrackInputRecordV1`, `TrackFaderRecordV1`, `TrackControlRecordV1`), because a span's
+/// (`TrackInputRecord`, `TrackFaderRecord`, `TrackControlRecord`), because a span's
 /// block-first-sample semantics already match the drain contract. Nothing here builds that feed
 /// and nothing here should be read as having built it.
 fn validate_builtin_automation_target(
