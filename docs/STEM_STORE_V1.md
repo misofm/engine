@@ -72,9 +72,20 @@ Store open queries held and pending locks before removing crash debris.
 Playback reads use `getFile()` snapshots, never long-lived access handles.
 Where a caller probes sync read-only mode, it trusts only
 `accessHandle.mode === "read-only"`; option acceptance is not evidence because
-Firefox accepts the option while retaining exclusive behavior. A read failure
-during playback releases every ring and reports a typed session error; it never
-turns damage into silent audio.
+Firefox accepts the option while retaining exclusive behavior and WebKit
+ignores `mode` entirely. The existing-file contention contract is deliberately
+error-name-agnostic: **any** `createSyncAccessHandle()` rejection declines the
+sync path and falls back to a `getFile()` snapshot. It must never match a named
+exception: WebKit reports `InvalidStateError`, while Chromium and Firefox report
+`NoModificationAllowedError`. Real-device probes confirm that the fallback can
+read flushed bytes while the writer remains held. A read failure during
+playback releases every ring and reports a typed session error; it never turns
+damage into silent audio.
+
+The real-device P-2 two-tab harness must foreground both iOS Safari tabs at
+least once before coordinating them; otherwise iOS tab throttling can make a
+contention cell appear stalled. This is a harness prerequisite, not a store
+semantic or a timeout relaxation.
 
 Quota preflight counts the canonical bytes of misses only. Unpinned LRU rows
 outside the opening session may be evicted; open-session and offline pins are

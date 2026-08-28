@@ -64,6 +64,15 @@ async function staticChecks(repository) {
 
   const storeSource = await readFile(join(runtime, "opfs-store.js"), "utf8")
   assert.match(storeSource, /access\?\.mode === "read-only"/)
+  const modeProbe = storeSource.slice(
+    storeSource.indexOf("export async function detectSharedReadOnlyMode"),
+    storeSource.indexOf("function normalizeRequirements")
+  )
+  assert.doesNotMatch(
+    modeProbe,
+    /NoModificationAllowedError|InvalidStateError|error\?*\.name/,
+    "access-handle contention detection must not match an engine-specific error name"
+  )
   assert.match(storeSource, /await stagingHandle\.move\(this\.#directory, finalName\)/)
   assert.match(storeSource, /const observed = await this\.#hashOpenFile/)
   const workerClient = await readFile(join(runtime, "worker-client.js"), "utf8")
@@ -137,6 +146,15 @@ async function runMutationLedger() {
         "const observed = await this.#hashOpenFile(handle, stem, onProgress, signal)",
       replace:
         "const observed = { bytes: stem.bytes, hex: stemDigest(stem.identity) }",
+      test: "stem-store-core-v1.mjs",
+    },
+    {
+      name: "match one access-handle contention error name",
+      file: "web/stem-store/opfs-store.js",
+      search:
+        '    return access?.mode === "read-only"\n  } catch {\n    // Do not inspect the error name: WebKit and Blink/Gecko disagree on it.\n    return false',
+      replace:
+        '    return access?.mode === "read-only"\n  } catch (error) {\n    if (error?.name === "NoModificationAllowedError") return false\n    throw error',
       test: "stem-store-core-v1.mjs",
     },
   ]

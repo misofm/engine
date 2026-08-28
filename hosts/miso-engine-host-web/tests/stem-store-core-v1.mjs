@@ -466,14 +466,35 @@ async function latencyRows() {
 }
 
 async function modeDetection() {
-  let closed = false
-  const lyingFirefoxModel = {
-    async createSyncAccessHandle(_acceptedOptions) {
-      return { close() { closed = true } }
+  const flushed = new Uint8Array([0x49, 0x44, 0x33, 0x04])
+  let snapshotReads = 0
+  const safariWriterContention = {
+    async createSyncAccessHandle(options) {
+      assert.deepEqual(options, { mode: "read-only" })
+      const error = new Error("existing file already has WebKit's exclusive writer")
+      error.name = "InvalidStateError"
+      throw error
+    },
+    async getFile() {
+      snapshotReads += 1
+      return new Blob([flushed])
     },
   }
-  assert.equal(await detectSharedReadOnlyMode(lyingFirefoxModel), false)
-  assert.equal(closed, true)
+  assert.equal(await detectSharedReadOnlyMode(safariWriterContention), false)
+  const fallback = await safariWriterContention.getFile()
+  assert.deepEqual(new Uint8Array(await fallback.arrayBuffer()), flushed)
+  assert.equal(snapshotReads, 1, "contention must fall back to a flushed getFile snapshot")
+
+  let ignoredModeClosed = false
+  const safariIgnoredMode = {
+    async createSyncAccessHandle(options) {
+      assert.deepEqual(options, { mode: "read-only" })
+      return { close() { ignoredModeClosed = true } }
+    },
+  }
+  assert.equal(await detectSharedReadOnlyMode(safariIgnoredMode), false)
+  assert.equal(ignoredModeClosed, true)
+
   assert.equal(
     await detectSharedReadOnlyMode({
       async createSyncAccessHandle() {

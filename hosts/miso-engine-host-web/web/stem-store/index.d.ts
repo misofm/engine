@@ -215,6 +215,11 @@ export function deinterleaveCanonicalPcm(
   planes: Float32Array[]
 ): void
 
+/**
+ * Returns true only for an access handle reporting `mode === "read-only"`.
+ * Any creation failure is contention regardless of its DOMException name; a
+ * false result requires snapshot reads through `fileHandle.getFile()`.
+ */
 export function detectSharedReadOnlyMode(fileHandle: FileSystemFileHandle): Promise<boolean>
 
 export function createStemPumpWorker(options?: {
