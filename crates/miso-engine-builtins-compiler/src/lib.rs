@@ -27,7 +27,7 @@ use miso_engine_core::realtime::{
     bounded_spsc, bounded_spsc_retained_payload,
 };
 use miso_engine_effect_contract::{
-    BankWidth, ChannelSymmetryWitnessV1, LiveConsoleRecordV1, SeamSideV1, SymmetryEventV1,
+    BankWidth, ChannelSymmetryWitness, LiveConsoleRecord, SeamSide, SymmetryEvent,
 };
 use miso_engine_graph::{
     DependencyLevel, GraphBindingBlock, GraphBuiltinBankResourceEstimate, GraphNodeId,
@@ -145,12 +145,12 @@ pub enum TrackFaderRecordV1 {
 /// command on a `PerLane` parameter becomes *two* records
 /// (`CommandRecord::into_effect_records`). It is the fader/mute lowering that is copied here
 /// instead, and the reason is the channel-symmetry witness rather than economy: this record type
-/// is **upstream of the seam**, so [`ChannelSymmetryWitnessV1::admit`] reads it, and a pair of
+/// is **upstream of the seam**, so [`ChannelSymmetryWitness::admit`] reads it, and a pair of
 /// per-lane records would present as two `Desymmetrize` events and retire the track's mono
 /// collapse for the life of the plan -- on a command that changes both channels identically, at
 /// one block boundary, over one window. `BuiltinLaneSelector::Both` says exactly what happened and
-/// is admitted as [`SymmetryEventV1::Preserve`], which is what
-/// `SymmetryEventV1::Preserve`'s own documentation says a both-channel retarget is. The effect
+/// is admitted as [`SymmetryEvent::Preserve`], which is what
+/// `SymmetryEvent::Preserve`'s own documentation says a both-channel retarget is. The effect
 /// path splits because a launch effect counts a policy-violating span as invalid rather than
 /// applying it; the builtins have no such constraint, and `BuiltinLaneSelector` exists precisely
 /// to carry the distinction.
@@ -184,20 +184,20 @@ pub enum TrackInputRecordV1 {
     },
 }
 
-impl LiveConsoleRecordV1 for TrackInputRecordV1 {
+impl LiveConsoleRecord for TrackInputRecordV1 {
     /// The input chain is the first stage of the strip, before the fader and the matrix: a
     /// collapsed track runs it **once**, so every record on this queue gates the collapse.
-    const SEAM: SeamSideV1 = SeamSideV1::UpstreamOfSeam;
+    const SEAM: SeamSide = SeamSide::UpstreamOfSeam;
 
-    fn symmetry_event(&self) -> SymmetryEventV1 {
+    fn symmetry_event(&self) -> SymmetryEvent {
         // Exhaustive, with no wildcard arm on purpose: a new variant is a compile error here,
         // which is the structural half of the hook rule.
         let lanes = match *self {
             Self::TrimDb { lanes, .. } | Self::PolarityInvert { lanes, .. } => lanes,
         };
         match lanes {
-            BuiltinLaneSelector::Both => SymmetryEventV1::Preserve,
-            BuiltinLaneSelector::Left | BuiltinLaneSelector::Right => SymmetryEventV1::Desymmetrize,
+            BuiltinLaneSelector::Both => SymmetryEvent::Preserve,
+            BuiltinLaneSelector::Left | BuiltinLaneSelector::Right => SymmetryEvent::Desymmetrize,
         }
     }
 }
@@ -333,7 +333,7 @@ pub struct PreparedBuiltinsSession {
 /// words are free to differ and must never gate the collapse. The measured evidence for the seam
 /// sitting exactly here is a session with per-track asymmetric faders and non-identity pans whose
 /// collapsed and dual renders are byte-identical.
-const SEAM_SIDE_WITNESS: ChannelSymmetryWitnessV1 = ChannelSymmetryWitnessV1::SYMMETRIC;
+const SEAM_SIDE_WITNESS: ChannelSymmetryWitness = ChannelSymmetryWitness::SYMMETRIC;
 
 /// One strip input bank and the console channels of its member lanes (#210 phase 3).
 ///
@@ -379,7 +379,7 @@ struct BuiltinBankProcessor {
     /// `LIVE` term in the tree, **never restored within a plan** -- see
     /// [`Self::lane_symmetry`] for why that is the conservative half of the M3 re-engage rule
     /// rather than a missing feature.
-    live: [ChannelSymmetryWitnessV1; MAXIMUM_BANK_LANES],
+    live: [ChannelSymmetryWitness; MAXIMUM_BANK_LANES],
     process_calls: u64,
     frames_processed: u64,
 }
@@ -405,7 +405,7 @@ impl GraphPreparedBuiltinBankProcessor for BuiltinBankProcessor {
             while let Ok(record) = control.try_pop() {
                 // The one hook. `admit` takes the record by trait, not by kind, so a record type
                 // added to this queue later cannot reach the render state without declaring what
-                // it does to the witness (`effect_contract::symmetry::LiveConsoleRecordV1`).
+                // it does to the witness (`effect_contract::symmetry::LiveConsoleRecord`).
                 if let Some(witness) = live.get_mut(lane) {
                     witness.admit(&record);
                 }
@@ -477,12 +477,12 @@ impl GraphPreparedBuiltinBankProcessor for BuiltinBankProcessor {
     /// Making `LIVE` recoverable would be a change to the M-series machinery -- the proof would
     /// have to be consulted before the witness rather than after it -- and is deliberately not one
     /// this phase makes.
-    fn lane_symmetry(&self, lane: usize) -> ChannelSymmetryWitnessV1 {
+    fn lane_symmetry(&self, lane: usize) -> ChannelSymmetryWitness {
         let live = self
             .live
             .get(lane)
             .copied()
-            .unwrap_or(ChannelSymmetryWitnessV1::DECLINED);
+            .unwrap_or(ChannelSymmetryWitness::DECLINED);
         self.bank.lane_symmetry(lane).and(live)
     }
 
@@ -591,8 +591,8 @@ impl GraphPreparedBuiltinBankProcessor for FaderBankProcessor {
 
     /// Seam-side: see [`SEAM_SIDE_WITNESS`]. `TrackFaderRecordV1` is a seam-side record type, so
     /// its drain above deliberately folds nothing into a witness -- and could not, because
-    /// `LiveConsoleRecordV1::SEAM` compiles the seam-side arm away.
-    fn lane_symmetry(&self, lane: usize) -> ChannelSymmetryWitnessV1 {
+    /// `LiveConsoleRecord::SEAM` compiles the seam-side arm away.
+    fn lane_symmetry(&self, lane: usize) -> ChannelSymmetryWitness {
         let _ = lane;
         SEAM_SIDE_WITNESS
     }
@@ -600,8 +600,8 @@ impl GraphPreparedBuiltinBankProcessor for FaderBankProcessor {
     /// The fader is the first stage that reads the duplicated plane, so the seam is immediately
     /// before it. It never runs one-plane: its two channels' gains and mutes are free to differ,
     /// and on the standing mono fixture 49 of 64 tracks' faders do.
-    fn seam_side(&self) -> SeamSideV1 {
-        SeamSideV1::SeamSide
+    fn seam_side(&self) -> SeamSide {
+        SeamSide::SeamSide
     }
 }
 
@@ -649,14 +649,14 @@ impl GraphPreparedBuiltinBankProcessor for MatrixBankProcessor {
     /// Seam-side: see [`SEAM_SIDE_WITNESS`]. The 2x2 matrix **is** the seam -- it is the earliest
     /// genuinely cross-channel operation in the strip -- so it is the one stage that is
     /// structurally guaranteed to sit on the free side of it.
-    fn lane_symmetry(&self, lane: usize) -> ChannelSymmetryWitnessV1 {
+    fn lane_symmetry(&self, lane: usize) -> ChannelSymmetryWitness {
         let _ = lane;
         SEAM_SIDE_WITNESS
     }
 
     /// Irreducibly cross-plane: `yl = ll*l + lr*r` reads both. See [`Self::lane_symmetry`].
-    fn seam_side(&self) -> SeamSideV1 {
-        SeamSideV1::SeamSide
+    fn seam_side(&self) -> SeamSide {
+        SeamSide::SeamSide
     }
 }
 
@@ -1557,7 +1557,7 @@ impl PreparedBuiltinsSession {
                             control: control
                                 .input
                                 .expect("a strip is banked on all three stages or on none"),
-                            live: ChannelSymmetryWitnessV1::SYMMETRIC,
+                            live: ChannelSymmetryWitness::SYMMETRIC,
                         }),
                         Box::new(ConsoleFaderProcessor {
                             fader: ramped,
@@ -1602,7 +1602,7 @@ impl PreparedBuiltinsSession {
     /// Read from the **bank** copy of each track's input section, which is the one a banked plan
     /// renders. It is prepared from the same parameters as the scalar fallback by the same
     /// `BuiltinChain::new` call shape, so the two cannot design different words.
-    pub fn input_channel_symmetry(&self) -> impl Iterator<Item = (&str, ChannelSymmetryWitnessV1)> {
+    pub fn input_channel_symmetry(&self) -> impl Iterator<Item = (&str, ChannelSymmetryWitness)> {
         self.bank_inputs
             .iter()
             .map(|(track, input)| (track.as_ref(), input.channel_symmetry()))
@@ -1714,7 +1714,7 @@ impl PreparedBuiltinsSession {
                         Box::new(BuiltinBankProcessor {
                             bank: build_input_bank(dispatch, width, inputs),
                             controls: controls.into_boxed_slice(),
-                            live: [ChannelSymmetryWitnessV1::SYMMETRIC; MAXIMUM_BANK_LANES],
+                            live: [ChannelSymmetryWitness::SYMMETRIC; MAXIMUM_BANK_LANES],
                             process_calls: 0,
                             frames_processed: 0,
                         })
@@ -2859,15 +2859,15 @@ pub fn track_input_delay_symmetric(track: &Track) -> bool {
 #[must_use]
 pub fn session_structural_symmetry_v1(
     session: &CompiledSession,
-) -> Vec<(Box<str>, ChannelSymmetryWitnessV1)> {
+) -> Vec<(Box<str>, ChannelSymmetryWitness)> {
     session
         .normalized_model()
         .tracks
         .iter()
         .map(|track| {
-            let mut witness = ChannelSymmetryWitnessV1::SYMMETRIC;
+            let mut witness = ChannelSymmetryWitness::SYMMETRIC;
             witness.set(
-                ChannelSymmetryWitnessV1::SOURCE,
+                ChannelSymmetryWitness::SOURCE,
                 track_mono_source_v1(session, track),
             );
             // Issue #210 phase 2. Prepared-only state, so the whole verdict is available here and
@@ -2875,7 +2875,7 @@ pub fn session_structural_symmetry_v1(
             // for the life of the plan, and a symmetric one -- including the overwhelmingly common
             // zero -- leaves the witness exactly as it was before the feature existed.
             witness.set(
-                ChannelSymmetryWitnessV1::DESIGNED,
+                ChannelSymmetryWitness::DESIGNED,
                 track_input_delay_symmetric(track),
             );
             (Box::<str>::from(track.id.as_str()), witness)
@@ -2918,7 +2918,7 @@ pub fn session_structural_symmetry_v1(
 /// is the class that cannot over-claim.
 #[derive(Clone, Debug, Default)]
 pub struct SessionPoolClassesV1 {
-    by_track: BTreeMap<Box<str>, ChannelSymmetryWitnessV1>,
+    by_track: BTreeMap<Box<str>, ChannelSymmetryWitness>,
 }
 
 impl SessionPoolClassesV1 {
@@ -2935,10 +2935,10 @@ impl SessionPoolClassesV1 {
     /// Conjoins one prepared stage's witness into its track's.
     ///
     /// Conjunction, never assignment: a track has several upstream stages and a single declining
-    /// one declines the track, which is the same rule `ChannelSymmetryWitnessV1::and` states for
+    /// one declines the track, which is the same rule `ChannelSymmetryWitness::and` states for
     /// every other composition of these witnesses. A stage naming a track the session does not
     /// have is ignored rather than inserted, so a mismatched caller cannot invent a class.
-    pub fn conjoin(&mut self, track_id: &str, witness: ChannelSymmetryWitnessV1) {
+    pub fn conjoin(&mut self, track_id: &str, witness: ChannelSymmetryWitness) {
         if let Some(existing) = self.by_track.get_mut(track_id) {
             *existing = existing.and(witness);
         }
@@ -2982,7 +2982,7 @@ impl GraphRuntimeProcessor for InputProcessor {
         self.0.process(block);
         Ok(())
     }
-    fn channel_symmetry(&self) -> ChannelSymmetryWitnessV1 {
+    fn channel_symmetry(&self) -> ChannelSymmetryWitness {
         self.0.channel_symmetry()
     }
 }
@@ -2994,7 +2994,7 @@ impl GraphRuntimeProcessor for FaderProcessor {
         self.0.process(block);
         Ok(())
     }
-    fn channel_symmetry(&self) -> ChannelSymmetryWitnessV1 {
+    fn channel_symmetry(&self) -> ChannelSymmetryWitness {
         SEAM_SIDE_WITNESS
     }
 }
@@ -3006,7 +3006,7 @@ impl GraphRuntimeProcessor for MatrixProcessor {
         self.0.process(block);
         Ok(())
     }
-    fn channel_symmetry(&self) -> ChannelSymmetryWitnessV1 {
+    fn channel_symmetry(&self) -> ChannelSymmetryWitness {
         SEAM_SIDE_WITNESS
     }
 }
@@ -3032,7 +3032,7 @@ struct ConsoleInputProcessor {
     control: Consumer<TrackInputRecordV1>,
     /// This track's live channel-symmetry terms, retained across blocks exactly as
     /// `EffectControlLane::symmetry` is and for the same reason.
-    live: ChannelSymmetryWitnessV1,
+    live: ChannelSymmetryWitness,
 }
 impl GraphRuntimeProcessor for ConsoleInputProcessor {
     fn process(&mut self, block: GraphBindingBlock<'_>) -> Result<(), RenderError> {
@@ -3061,7 +3061,7 @@ impl GraphRuntimeProcessor for ConsoleInputProcessor {
         self.input.process(block);
         Ok(())
     }
-    fn channel_symmetry(&self) -> ChannelSymmetryWitnessV1 {
+    fn channel_symmetry(&self) -> ChannelSymmetryWitness {
         self.input.channel_symmetry().and(self.live)
     }
 }
@@ -5249,7 +5249,7 @@ mod tests {
                 ConsoleInputProcessor {
                     input,
                     control,
-                    live: ChannelSymmetryWitnessV1::SYMMETRIC,
+                    live: ChannelSymmetryWitness::SYMMETRIC,
                 },
             )
         };
@@ -5310,7 +5310,7 @@ mod tests {
         assert!(
             !processor
                 .channel_symmetry()
-                .holds(ChannelSymmetryWitnessV1::LIVE),
+                .holds(ChannelSymmetryWitness::LIVE),
             "a one-channel write clears the LIVE term on the per-node arm"
         );
     }

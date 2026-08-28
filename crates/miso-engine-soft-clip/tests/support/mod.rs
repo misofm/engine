@@ -10,7 +10,7 @@ use miso_engine_effect_contract::{
     BankWidth, EffectBankProcessBlock, EffectProcessBlock, EffectQuality, InitialParameterValue,
     LinkMode, NativeEffectFactory, ParameterChannel, PrepareEffectBankRequest, PrepareEffectLimits,
     PrepareEffectRequest, PreparedAutomationSpan, PreparedNativeEffect, PreparedNativeEffectBank,
-    PreparedPortsV1, PreparedSidechainPort, ProcessReport, StatePayloadInput, StatePayloadOutput,
+    PreparedPorts, PreparedSidechainPort, ProcessReport, StatePayloadInput, StatePayloadOutput,
 };
 use miso_engine_lane::Backend;
 use miso_engine_soft_clip::{SOFT_CLIP_DESCRIPTOR_V1, SOFT_CLIP_PARAMETERS_V1, SoftClipFactory};
@@ -60,7 +60,7 @@ pub fn request<'a>(values: &'a [InitialParameterValue]) -> PrepareEffectRequest<
         quality: EffectQuality::Normal,
         bypass: false,
         link_mode: LinkMode::DualMono,
-        ports: PreparedPortsV1 {
+        ports: PreparedPorts {
             sidechain: PreparedSidechainPort::None,
         },
         initial_values: values,

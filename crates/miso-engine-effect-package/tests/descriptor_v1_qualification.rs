@@ -1,19 +1,19 @@
 #![allow(missing_docs)]
 
 use miso_engine_effect_contract::{
-    AutomationRate, EffectDescriptorV1, EffectId, EffectQuality, EnumChoiceV1, LatencySamples,
+    AutomationRate, EffectDescriptor, EffectId, EffectQuality, EnumChoice, LatencySamples,
     LinkModeSet, ObservationCadenceV1, ObservationChannelsV1, ObservationCostV1,
-    ObservationDescriptorV1, ObservationFoldV1, ObservationKindV1, ObservationTapId,
-    ParameterChannelPolicy, ParameterDescriptorV1, ParameterDomain, ParameterId, ParameterMapping,
-    ParameterUnit, PortDescriptorV1, PortId, PortLayout, PortRole, QualityDescriptorV1,
-    SmoothingRule, StatePayloadSizes, TailSamples, validate_descriptor_v1,
+    ObservationDescriptor, ObservationFoldV1, ObservationKindV1, ObservationTapId,
+    ParameterChannelPolicy, ParameterDescriptor, ParameterDomain, ParameterId, ParameterMapping,
+    ParameterUnit, PortDescriptor, PortId, PortLayout, PortRole, QualityDescriptor,
+    SmoothingRule, StatePayloadSizes, TailSamples, validate_descriptor,
 };
 use miso_engine_effect_package::{
-    EFFECT_DESCRIPTOR_WIRE_V1_UNAVAILABLE, EffectArtifactAuthoringV1, EffectArtifactKindV1,
-    EffectDescriptorWireDiagnosticCodeV1 as Code, EffectPackageAuthoringV1, EffectPackageLimitsV1,
-    effect_descriptor_identity_v1, effect_descriptor_wire_v1_required_size, effect_package_cid_v1,
-    effect_package_v1_required_size, encode_effect_descriptor_wire_v1, encode_effect_package_v1,
-    verify_effect_descriptor_wire_v1, verify_effect_package_v1,
+    EFFECT_DESCRIPTOR_WIRE_UNAVAILABLE, EffectArtifactAuthoring, EffectArtifactKind,
+    EffectDescriptorWireDiagnosticCode as Code, EffectPackageAuthoring, EffectPackageLimits,
+    effect_descriptor_identity, effect_descriptor_wire_required_size, effect_package_cid,
+    effect_package_required_size, encode_effect_descriptor_wire, encode_effect_package,
+    verify_effect_descriptor_wire, verify_effect_package,
 };
 use std::{fs, path::PathBuf};
 
@@ -31,23 +31,23 @@ const fn port_id(value: &'static str) -> PortId {
     }
 }
 
-static CHOICES: [EnumChoiceV1; 3] = [
-    EnumChoiceV1 {
+static CHOICES: [EnumChoice; 3] = [
+    EnumChoice {
         value: -1.0,
         label: "Low",
     },
-    EnumChoiceV1 {
+    EnumChoice {
         value: 0.0,
         label: "Mid",
     },
-    EnumChoiceV1 {
+    EnumChoice {
         value: 1.0,
         label: "High",
     },
 ];
 
-static PARAMETERS: [ParameterDescriptorV1; 6] = [
-    ParameterDescriptorV1 {
+static PARAMETERS: [ParameterDescriptor; 6] = [
+    ParameterDescriptor {
         id: ParameterId(1),
         display_name: "Gain",
         display_unit: "dB",
@@ -65,7 +65,7 @@ static PARAMETERS: [ParameterDescriptorV1; 6] = [
         automatable: true,
         enum_choices: &[],
     },
-    ParameterDescriptorV1 {
+    ParameterDescriptor {
         id: ParameterId(2),
         display_name: "Frequency",
         display_unit: "Hz",
@@ -83,7 +83,7 @@ static PARAMETERS: [ParameterDescriptorV1; 6] = [
         automatable: true,
         enum_choices: &[],
     },
-    ParameterDescriptorV1 {
+    ParameterDescriptor {
         id: ParameterId(3),
         display_name: "Time",
         display_unit: "ms",
@@ -101,7 +101,7 @@ static PARAMETERS: [ParameterDescriptorV1; 6] = [
         automatable: true,
         enum_choices: &[],
     },
-    ParameterDescriptorV1 {
+    ParameterDescriptor {
         id: ParameterId(4),
         display_name: "Bypass",
         display_unit: "state",
@@ -119,7 +119,7 @@ static PARAMETERS: [ParameterDescriptorV1; 6] = [
         automatable: true,
         enum_choices: &[],
     },
-    ParameterDescriptorV1 {
+    ParameterDescriptor {
         id: ParameterId(5),
         display_name: "Mode",
         display_unit: "choice",
@@ -137,7 +137,7 @@ static PARAMETERS: [ParameterDescriptorV1; 6] = [
         automatable: false,
         enum_choices: &CHOICES,
     },
-    ParameterDescriptorV1 {
+    ParameterDescriptor {
         id: ParameterId(6),
         display_name: "Ratio",
         display_unit: ":1",
@@ -157,27 +157,27 @@ static PARAMETERS: [ParameterDescriptorV1; 6] = [
     },
 ];
 
-const MAIN_IN: PortDescriptorV1 = PortDescriptorV1 {
+const MAIN_IN: PortDescriptor = PortDescriptor {
     id: port_id("main-in"),
     role: PortRole::MainInput,
     required: true,
     layout: PortLayout::DualMonoPlanar,
 };
-const MAIN_OUT: PortDescriptorV1 = PortDescriptorV1 {
+const MAIN_OUT: PortDescriptor = PortDescriptor {
     id: port_id("main-out"),
     role: PortRole::MainOutput,
     required: true,
     layout: PortLayout::DualMonoPlanar,
 };
-const SIDECHAIN: PortDescriptorV1 = PortDescriptorV1 {
+const SIDECHAIN: PortDescriptor = PortDescriptor {
     id: port_id("sidechain"),
     role: PortRole::SidechainInput,
     required: false,
     layout: PortLayout::DualMonoPlanar,
 };
-static PORTS_UNSORTED: [PortDescriptorV1; 3] = [SIDECHAIN, MAIN_OUT, MAIN_IN];
-static PORTS_PERMUTED: [PortDescriptorV1; 3] = [MAIN_IN, SIDECHAIN, MAIN_OUT];
-static PORTS_MAIN: [PortDescriptorV1; 2] = [MAIN_OUT, MAIN_IN];
+static PORTS_UNSORTED: [PortDescriptor; 3] = [SIDECHAIN, MAIN_OUT, MAIN_IN];
+static PORTS_PERMUTED: [PortDescriptor; 3] = [MAIN_IN, SIDECHAIN, MAIN_OUT];
+static PORTS_MAIN: [PortDescriptor; 2] = [MAIN_OUT, MAIN_IN];
 
 #[allow(clippy::too_many_arguments)]
 const fn quality(
@@ -189,8 +189,8 @@ const fn quality(
     lane: u32,
     scratch: u64,
     per_frame: u64,
-) -> QualityDescriptorV1 {
-    QualityDescriptorV1 {
+) -> QualityDescriptor {
+    QualityDescriptor {
         quality,
         sample_rate,
         latency: LatencySamples(latency),
@@ -205,7 +205,7 @@ const fn quality(
     }
 }
 
-static QUALITIES_A: [QualityDescriptorV1; 12] = [
+static QUALITIES_A: [QualityDescriptor; 12] = [
     quality(
         EffectQuality::Draft,
         44_100,
@@ -328,7 +328,7 @@ static QUALITIES_A: [QualityDescriptorV1; 12] = [
     ),
 ];
 
-static QUALITIES_B: [QualityDescriptorV1; 8] = [
+static QUALITIES_B: [QualityDescriptor; 8] = [
     quality(
         EffectQuality::Normal,
         44_100,
@@ -411,7 +411,7 @@ static QUALITIES_B: [QualityDescriptorV1; 8] = [
     ),
 ];
 
-static DESCRIPTOR_A: EffectDescriptorV1 = EffectDescriptorV1 {
+static DESCRIPTOR_A: EffectDescriptor = EffectDescriptor {
     id: effect_id("fixture.comprehensive-a"),
     display_name: "Comprehensive A",
     contract_major: 1,
@@ -428,8 +428,8 @@ static DESCRIPTOR_A: EffectDescriptorV1 = EffectDescriptorV1 {
 /// The id and the display name are the same byte lengths as A's, so
 /// `total(C) - total(A)` is exactly the observation section plus its two strings per tap. That is
 /// the formula E10 asserts, in-tree, on both encoders.
-static OBSERVATIONS_C: [ObservationDescriptorV1; 2] = [
-    ObservationDescriptorV1 {
+static OBSERVATIONS_C: [ObservationDescriptor; 2] = [
+    ObservationDescriptor {
         id: ObservationTapId(1),
         display_name: "Gain Reduction",
         display_unit: "dB",
@@ -442,7 +442,7 @@ static OBSERVATIONS_C: [ObservationDescriptorV1; 2] = [
         minimum: 0.0,
         maximum: 100.0,
     },
-    ObservationDescriptorV1 {
+    ObservationDescriptor {
         id: ObservationTapId(7),
         display_name: "Reduction Envelope",
         display_unit: "dB",
@@ -456,17 +456,17 @@ static OBSERVATIONS_C: [ObservationDescriptorV1; 2] = [
         maximum: 60.0,
     },
 ];
-static DESCRIPTOR_C: EffectDescriptorV1 = EffectDescriptorV1 {
+static DESCRIPTOR_C: EffectDescriptor = EffectDescriptor {
     id: effect_id("fixture.comprehensive-c"),
     display_name: "Comprehensive C",
     observations: &OBSERVATIONS_C,
     ..DESCRIPTOR_A
 };
-static DESCRIPTOR_A_PERMUTED: EffectDescriptorV1 = EffectDescriptorV1 {
+static DESCRIPTOR_A_PERMUTED: EffectDescriptor = EffectDescriptor {
     ports: &PORTS_PERMUTED,
     ..DESCRIPTOR_A
 };
-static DESCRIPTOR_B: EffectDescriptorV1 = EffectDescriptorV1 {
+static DESCRIPTOR_B: EffectDescriptor = EffectDescriptor {
     id: effect_id("fixture.comprehensive-b"),
     display_name: "Unicode\u{2028}Boundary",
     contract_major: 1,
@@ -505,12 +505,12 @@ fn hex_bytes(name: &str) -> Vec<u8> {
         .collect()
 }
 
-fn encoded(descriptor: &'static EffectDescriptorV1) -> Vec<u8> {
-    validate_descriptor_v1(descriptor).unwrap();
-    let required = effect_descriptor_wire_v1_required_size(descriptor, 1 << 20).unwrap();
+fn encoded(descriptor: &'static EffectDescriptor) -> Vec<u8> {
+    validate_descriptor(descriptor).unwrap();
+    let required = effect_descriptor_wire_required_size(descriptor, 1 << 20).unwrap();
     let mut guarded = vec![0x5a; required as usize + 16];
     assert_eq!(
-        encode_effect_descriptor_wire_v1(descriptor, 1 << 20, &mut guarded),
+        encode_effect_descriptor_wire(descriptor, 1 << 20, &mut guarded),
         Ok(required)
     );
     assert_eq!(&guarded[required as usize..], &[0x5a; 16]);
@@ -540,20 +540,20 @@ fn checked_vectors_match_independent_wire_identity_and_port_permutation() {
         let wire = encoded(descriptor);
         assert_eq!(wire, hex_bytes(wire_name));
         assert_eq!(
-            verify_effect_descriptor_wire_v1(&wire, 1 << 20)
+            verify_effect_descriptor_wire(&wire, 1 << 20)
                 .unwrap()
                 .as_bytes(),
             wire
         );
         assert_eq!(
-            effect_descriptor_identity_v1(&wire, 1 << 20)
+            effect_descriptor_identity(&wire, 1 << 20)
                 .unwrap()
                 .as_bytes(),
             hex_bytes(identity_name).as_slice()
         );
         let mut short = vec![0xa5; wire.len() - 1];
         let before = short.clone();
-        let error = encode_effect_descriptor_wire_v1(descriptor, 1 << 20, &mut short).unwrap_err();
+        let error = encode_effect_descriptor_wire(descriptor, 1 << 20, &mut short).unwrap_err();
         assert_eq!(
             (error.code, error.required_bytes),
             (Code::BufferTooSmall, wire.len() as u32)
@@ -577,28 +577,28 @@ fn every_current_production_descriptor_encodes_and_verifies() {
     ];
     for descriptor in descriptors {
         let wire = encoded(descriptor);
-        verify_effect_descriptor_wire_v1(&wire, 1 << 20).unwrap();
-        effect_descriptor_identity_v1(&wire, 1 << 20).unwrap();
-        let artifacts = [EffectArtifactAuthoringV1 {
-            kind: EffectArtifactKindV1::Source,
+        verify_effect_descriptor_wire(&wire, 1 << 20).unwrap();
+        effect_descriptor_identity(&wire, 1 << 20).unwrap();
+        let artifacts = [EffectArtifactAuthoring {
+            kind: EffectArtifactKind::Source,
             path: "src/lib.rs",
             target: "",
             features: "",
             content: b"production descriptor package coverage",
         }];
-        let authoring = EffectPackageAuthoringV1 {
+        let authoring = EffectPackageAuthoring {
             descriptor: &wire,
             artifacts: &artifacts,
         };
         let mut package = vec![
             0;
-            effect_package_v1_required_size(&authoring, EffectPackageLimitsV1::default()).unwrap()
+            effect_package_required_size(&authoring, EffectPackageLimits::default()).unwrap()
                 as usize
         ];
-        encode_effect_package_v1(&authoring, EffectPackageLimitsV1::default(), &mut package)
+        encode_effect_package(&authoring, EffectPackageLimits::default(), &mut package)
             .unwrap();
-        verify_effect_package_v1(&package, EffectPackageLimitsV1::default()).unwrap();
-        effect_package_cid_v1(&package, EffectPackageLimitsV1::default()).unwrap();
+        verify_effect_package(&package, EffectPackageLimits::default()).unwrap();
+        effect_package_cid(&package, EffectPackageLimits::default()).unwrap();
     }
 }
 
@@ -615,14 +615,14 @@ fn put_u64(bytes: &mut [u8], offset: usize, value: u64) {
 }
 
 fn assert_valid_identity_change(original: &[u8], name: &str, mutate: impl FnOnce(&mut [u8])) {
-    let before = *effect_descriptor_identity_v1(original, 1 << 20)
+    let before = *effect_descriptor_identity(original, 1 << 20)
         .unwrap()
         .as_bytes();
     let mut changed = original.to_vec();
     mutate(&mut changed);
-    verify_effect_descriptor_wire_v1(&changed, 1 << 20)
+    verify_effect_descriptor_wire(&changed, 1 << 20)
         .unwrap_or_else(|error| panic!("{name}: legal semantic mutation rejected: {error:?}"));
-    let after = effect_descriptor_identity_v1(&changed, 1 << 20).unwrap();
+    let after = effect_descriptor_identity(&changed, 1 << 20).unwrap();
     assert_ne!(&before, after.as_bytes(), "{name}: identity did not change");
 }
 
@@ -731,10 +731,10 @@ fn every_legally_mutable_semantic_field_class_changes_identity() {
 
     let alternate = encoded(&DESCRIPTOR_B);
     assert_ne!(
-        effect_descriptor_identity_v1(&original, 1 << 20)
+        effect_descriptor_identity(&original, 1 << 20)
             .unwrap()
             .as_bytes(),
-        effect_descriptor_identity_v1(&alternate, 1 << 20)
+        effect_descriptor_identity(&alternate, 1 << 20)
             .unwrap()
             .as_bytes(),
         "parameter/port/quality table-shape classes must change identity"
@@ -748,8 +748,8 @@ fn raw_closed_values_and_field_overflows_have_exact_public_diagnostics() {
     let port = u32::from_le_bytes(original[60..64].try_into().unwrap()) as usize;
     let quality = u32::from_le_bytes(original[68..72].try_into().unwrap()) as usize;
     let cases = [
-        (28, 0, Code::Enum, 28, EFFECT_DESCRIPTOR_WIRE_V1_UNAVAILABLE),
-        (28, 8, Code::Enum, 28, EFFECT_DESCRIPTOR_WIRE_V1_UNAVAILABLE),
+        (28, 0, Code::Enum, 28, EFFECT_DESCRIPTOR_WIRE_UNAVAILABLE),
+        (28, 8, Code::Enum, 28, EFFECT_DESCRIPTOR_WIRE_UNAVAILABLE),
         (parameter + 4, 0, Code::Enum, parameter + 4, 0),
         (parameter + 8, 0, Code::Enum, parameter + 8, 0),
         (parameter + 12, 0, Code::Enum, parameter + 12, 0),
@@ -766,7 +766,7 @@ fn raw_closed_values_and_field_overflows_have_exact_public_diagnostics() {
     for (field, value, code, offset, index) in cases {
         let mut mutated = original.clone();
         put_u32(&mut mutated, field, value);
-        let error = verify_effect_descriptor_wire_v1(&mutated, 1 << 20).unwrap_err();
+        let error = verify_effect_descriptor_wire(&mutated, 1 << 20).unwrap_err();
         assert_eq!(
             (error.code, error.byte_offset, error.record_index),
             (code, offset as u32, index)
@@ -775,7 +775,7 @@ fn raw_closed_values_and_field_overflows_have_exact_public_diagnostics() {
     for field in [48, 56, 64, 72, 80] {
         let mut mutated = original.clone();
         put_u32(&mut mutated, field, u32::MAX);
-        let error = verify_effect_descriptor_wire_v1(&mutated, u32::MAX).unwrap_err();
+        let error = verify_effect_descriptor_wire(&mutated, u32::MAX).unwrap_err();
         assert_eq!(
             (error.code, error.byte_offset),
             (Code::Overflow, field as u32)
@@ -811,10 +811,10 @@ fn observation_section_is_additive_and_stale_readers_refuse_it() {
     assert_eq!(stale_reader_reserved_zero(&zero_tap), None);
     assert_eq!(stale_reader_reserved_zero(&tap_bearing), Some(0));
 
-    let verified = verify_effect_descriptor_wire_v1(&tap_bearing, 1 << 20).unwrap();
+    let verified = verify_effect_descriptor_wire(&tap_bearing, 1 << 20).unwrap();
     assert_eq!(verified.observation_count(), 2);
     assert_eq!(
-        verify_effect_descriptor_wire_v1(&zero_tap, 1 << 20)
+        verify_effect_descriptor_wire(&zero_tap, 1 << 20)
             .unwrap()
             .observation_count(),
         0
@@ -826,7 +826,7 @@ fn observation_section_is_additive_and_stale_readers_refuse_it() {
     let mut mutated = zero_tap.clone();
     let string_offset = u32::from_le_bytes(mutated[84..88].try_into().unwrap());
     mutated[92..96].copy_from_slice(&string_offset.to_le_bytes());
-    let error = verify_effect_descriptor_wire_v1(&mutated, 1 << 20).unwrap_err();
+    let error = verify_effect_descriptor_wire(&mutated, 1 << 20).unwrap_err();
     assert_eq!(error.code, Code::Reserved);
     assert_eq!(error.byte_offset, 92);
 }

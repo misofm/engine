@@ -143,7 +143,7 @@ const fn port_id(value: &'static str) -> PortId {
     }
 }
 
-static PARAMETERS: [ParameterDescriptorV1; 1] = [ParameterDescriptorV1 {
+static PARAMETERS: [ParameterDescriptor; 1] = [ParameterDescriptor {
     id: ParameterId(1),
     display_name: "value",
     display_unit: "linear",
@@ -161,14 +161,14 @@ static PARAMETERS: [ParameterDescriptorV1; 1] = [ParameterDescriptorV1 {
     automatable: true,
     enum_choices: &[],
 }];
-static PORTS: [PortDescriptorV1; 2] = [
-    PortDescriptorV1 {
+static PORTS: [PortDescriptor; 2] = [
+    PortDescriptor {
         id: port_id("main-in"),
         role: PortRole::MainInput,
         required: true,
         layout: PortLayout::DualMonoPlanar,
     },
-    PortDescriptorV1 {
+    PortDescriptor {
         id: port_id("main-out"),
         role: PortRole::MainOutput,
         required: true,
@@ -182,8 +182,8 @@ const fn sizes(layout: u32) -> StatePayloadSizes {
         right_bytes: layout + 1,
     }
 }
-const fn quality(rate: u32, layout: u32) -> QualityDescriptorV1 {
-    QualityDescriptorV1 {
+const fn quality(rate: u32, layout: u32) -> QualityDescriptor {
+    QualityDescriptor {
         quality: EffectQuality::Normal,
         sample_rate: rate,
         latency: LatencySamples(0),
@@ -193,25 +193,25 @@ const fn quality(rate: u32, layout: u32) -> QualityDescriptorV1 {
         scratch_bytes_per_frame: 0,
     }
 }
-static Q1: [QualityDescriptorV1; 4] = [
+static Q1: [QualityDescriptor; 4] = [
     quality(44_100, 1),
     quality(48_000, 1),
     quality(88_200, 1),
     quality(96_000, 1),
 ];
-static Q2: [QualityDescriptorV1; 4] = [
+static Q2: [QualityDescriptor; 4] = [
     quality(44_100, 2),
     quality(48_000, 2),
     quality(88_200, 2),
     quality(96_000, 2),
 ];
-static Q3: [QualityDescriptorV1; 4] = [
+static Q3: [QualityDescriptor; 4] = [
     quality(44_100, 3),
     quality(48_000, 3),
     quality(88_200, 3),
     quality(96_000, 3),
 ];
-static D1: EffectDescriptorV1 = EffectDescriptorV1 {
+static D1: EffectDescriptor = EffectDescriptor {
     id: effect_id("test.migration-terminal"),
     display_name: "Migration terminal",
     contract_major: 1,
@@ -223,17 +223,17 @@ static D1: EffectDescriptorV1 = EffectDescriptorV1 {
     qualities: &Q1,
     observations: &[],
 };
-static D2: EffectDescriptorV1 = EffectDescriptorV1 {
+static D2: EffectDescriptor = EffectDescriptor {
     state_layout_version: 2,
     qualities: &Q2,
     ..D1
 };
-static D3: EffectDescriptorV1 = EffectDescriptorV1 {
+static D3: EffectDescriptor = EffectDescriptor {
     state_layout_version: 3,
     qualities: &Q3,
     ..D1
 };
-static D3_CLONE: EffectDescriptorV1 = EffectDescriptorV1 { ..D3 };
+static D3_CLONE: EffectDescriptor = EffectDescriptor { ..D3 };
 static INITIAL: [InitialParameterValue; 2] = [
     InitialParameterValue {
         parameter_index: 0,
@@ -264,7 +264,7 @@ struct Calls {
 }
 
 struct Factory {
-    descriptor: &'static EffectDescriptorV1,
+    descriptor: &'static EffectDescriptor,
     calls: Arc<Calls>,
 }
 struct Scalar {
@@ -305,7 +305,7 @@ fn copy_in(input: StatePayloadInput<'_>) -> Vec<u8> {
 }
 
 impl NativeEffectFactory for Factory {
-    fn descriptor(&self) -> &'static EffectDescriptorV1 {
+    fn descriptor(&self) -> &'static EffectDescriptor {
         if self.calls.descriptor_drift.load(Ordering::SeqCst) {
             &D2
         } else {
@@ -458,7 +458,7 @@ struct StepControl {
 struct GrowStep {
     control: Arc<StepControl>,
 }
-impl EffectStateMigrationStepV1 for GrowStep {
+impl EffectStateMigrationStep for GrowStep {
     fn scratch_bytes(&self) -> u64 {
         3
     }
@@ -469,7 +469,7 @@ impl EffectStateMigrationStepV1 for GrowStep {
         source: StatePayloadInput<'_>,
         target: StatePayloadOutput<'_>,
         scratch: &mut [u8],
-    ) -> Result<EffectStateMigrationStepReportV1, EffectStateMigrationStepFailureV1> {
+    ) -> Result<EffectStateMigrationStepReport, EffectStateMigrationStepFailure> {
         self.control.calls.fetch_add(1, Ordering::SeqCst);
         assert_eq!(target_layout, source_layout + 1);
         assert_eq!(scratch.len(), 3);
@@ -478,7 +478,7 @@ impl EffectStateMigrationStepV1 for GrowStep {
             target.common[0] = 1;
         }
         if self.control.reject.load(Ordering::SeqCst) {
-            return Err(EffectStateMigrationStepFailureV1::Rejected);
+            return Err(EffectStateMigrationStepFailure::Rejected);
         }
         for (from, to) in [
             (source.common, target.common),
@@ -490,7 +490,7 @@ impl EffectStateMigrationStepV1 for GrowStep {
         }
         let sizes = sizes(target_layout);
         let fault = self.control.report_fault.load(Ordering::SeqCst);
-        Ok(EffectStateMigrationStepReportV1 {
+        Ok(EffectStateMigrationStepReport {
             common_bytes: sizes.common_bytes - u32::from(fault == 1),
             left_bytes: sizes.left_bytes - u32::from(fault == 2),
             right_bytes: sizes.right_bytes - u32::from(fault == 3),
@@ -499,20 +499,20 @@ impl EffectStateMigrationStepV1 for GrowStep {
     }
 }
 
-fn wire(descriptor: &'static EffectDescriptorV1) -> &'static [u8] {
-    let required = effect_descriptor_wire_v1_required_size(descriptor, 1 << 20).unwrap();
+fn wire(descriptor: &'static EffectDescriptor) -> &'static [u8] {
+    let required = effect_descriptor_wire_required_size(descriptor, 1 << 20).unwrap();
     let mut bytes = vec![0; required as usize];
-    encode_effect_descriptor_wire_v1(descriptor, 1 << 20, &mut bytes).unwrap();
+    encode_effect_descriptor_wire(descriptor, 1 << 20, &mut bytes).unwrap();
     Box::leak(bytes.into_boxed_slice())
 }
-fn bound(descriptor: &'static EffectDescriptorV1) -> BoundEffectDescriptorWireV1<'static> {
-    bind_effect_descriptor_wire_v1(descriptor, wire(descriptor), 1 << 20).unwrap()
+fn bound(descriptor: &'static EffectDescriptor) -> BoundEffectDescriptorWire<'static> {
+    bind_effect_descriptor_wire(descriptor, wire(descriptor), 1 << 20).unwrap()
 }
 fn capability(
-    descriptor: &'static EffectDescriptorV1,
+    descriptor: &'static EffectDescriptor,
     calls: &Arc<Calls>,
-) -> WireBoundNativeEffectFactoryV1<'static> {
-    bind_native_effect_factory_state_v1(
+) -> WireBoundNativeEffectFactory<'static> {
+    bind_native_effect_factory_state(
         Arc::new(Factory {
             descriptor,
             calls: Arc::clone(calls),
@@ -523,46 +523,46 @@ fn capability(
     .unwrap()
 }
 fn shared_capabilities(
-    descriptor: &'static EffectDescriptorV1,
+    descriptor: &'static EffectDescriptor,
     calls: &Arc<Calls>,
 ) -> (
-    WireBoundNativeEffectFactoryV1<'static>,
-    WireBoundNativeEffectFactoryV1<'static>,
+    WireBoundNativeEffectFactory<'static>,
+    WireBoundNativeEffectFactory<'static>,
 ) {
     let factory: Arc<dyn NativeEffectFactory> = Arc::new(Factory {
         descriptor,
         calls: Arc::clone(calls),
     });
     (
-        bind_native_effect_factory_state_v1(Arc::clone(&factory), wire(descriptor), 1 << 20)
+        bind_native_effect_factory_state(Arc::clone(&factory), wire(descriptor), 1 << 20)
             .unwrap(),
-        bind_native_effect_factory_state_v1(factory, wire(descriptor), 1 << 20).unwrap(),
+        bind_native_effect_factory_state(factory, wire(descriptor), 1 << 20).unwrap(),
     )
 }
 fn shared_capabilities_three(
-    descriptor: &'static EffectDescriptorV1,
+    descriptor: &'static EffectDescriptor,
     calls: &Arc<Calls>,
-) -> [WireBoundNativeEffectFactoryV1<'static>; 3] {
+) -> [WireBoundNativeEffectFactory<'static>; 3] {
     let factory: Arc<dyn NativeEffectFactory> = Arc::new(Factory {
         descriptor,
         calls: Arc::clone(calls),
     });
     [
-        bind_native_effect_factory_state_v1(Arc::clone(&factory), wire(descriptor), 1 << 20)
+        bind_native_effect_factory_state(Arc::clone(&factory), wire(descriptor), 1 << 20)
             .unwrap(),
-        bind_native_effect_factory_state_v1(Arc::clone(&factory), wire(descriptor), 1 << 20)
+        bind_native_effect_factory_state(Arc::clone(&factory), wire(descriptor), 1 << 20)
             .unwrap(),
-        bind_native_effect_factory_state_v1(factory, wire(descriptor), 1 << 20).unwrap(),
+        bind_native_effect_factory_state(factory, wire(descriptor), 1 << 20).unwrap(),
     ]
 }
-fn replay() -> EffectBankPreparationV1 {
-    EffectBankPreparationV1 {
+fn replay() -> EffectBankPreparation {
+    EffectBankPreparation {
         sample_rate: 48_000,
         quantum: 32,
         quality: EffectQuality::Normal,
         bypass: false,
         link_mode: LinkMode::DualMono,
-        ports: PreparedPortsV1 {
+        ports: PreparedPorts {
             sidechain: PreparedSidechainPort::None,
         },
         initial_values: INITIAL.into(),
@@ -573,8 +573,8 @@ fn replay() -> EffectBankPreparationV1 {
         },
     }
 }
-fn admission() -> EffectStateRestoreAdmissionV1 {
-    EffectStateRestoreAdmissionV1 {
+fn admission() -> EffectStateRestoreAdmission {
+    EffectStateRestoreAdmission {
         sample_rate: 48_000,
         quantum: 32,
         maximum_total_state_bytes: 64,
@@ -582,69 +582,69 @@ fn admission() -> EffectStateRestoreAdmissionV1 {
         maximum_automation_spans_per_block: 8,
     }
 }
-fn migration_admission() -> EffectStateMigrationAdmissionV1 {
-    EffectStateMigrationAdmissionV1 {
+fn migration_admission() -> EffectStateMigrationAdmission {
+    EffectStateMigrationAdmission {
         maximum_chain_steps: 2,
         maximum_intermediate_envelope_bytes: 1 << 20,
         maximum_migration_scratch_bytes: 1 << 20,
     }
 }
-fn envelope(descriptor: &'static EffectDescriptorV1, payload: &[u8]) -> Vec<u8> {
+fn envelope(descriptor: &'static EffectDescriptor, payload: &[u8]) -> Vec<u8> {
     let bound = bound(descriptor);
     let r = replay();
-    let req = effect_state_v1_requirements(
+    let req = effect_state_requirements(
         bound,
         r.state_replay(descriptor.id),
-        EffectStateLimitsV1::default(),
+        EffectStateLimits::default(),
     )
     .unwrap();
     let s = sizes(descriptor.state_layout_version);
     let c = s.common_bytes as usize;
     let l = s.left_bytes as usize;
     let mut out = vec![0; req.envelope_bytes as usize];
-    encode_effect_state_v1(
+    encode_effect_state(
         bound,
         r.state_replay(descriptor.id),
         &payload[..c],
         &payload[c..c + l],
         &payload[c + l..],
-        EffectStateLimitsV1::default(),
+        EffectStateLimits::default(),
         &mut out,
     )
     .unwrap();
     out
 }
 fn snapshot_scalar(
-    cap: &WireBoundNativeEffectFactoryV1<'_>,
-    replay: &EffectBankPreparationV1,
+    cap: &WireBoundNativeEffectFactory<'_>,
+    replay: &EffectBankPreparation,
     processor: &dyn PreparedNativeEffect,
 ) -> Vec<u8> {
     let req =
-        scalar_effect_state_v1_requirements(cap, replay, EffectStateLimitsV1::default()).unwrap();
+        scalar_effect_state_requirements(cap, replay, EffectStateLimits::default()).unwrap();
     let mut scratch = vec![0; req.payload_snapshot_scratch_bytes as usize];
     let mut out = vec![0; req.envelope_bytes as usize];
-    snapshot_scalar_effect_state_v1(
+    snapshot_scalar_effect_state(
         cap,
         replay,
         processor,
-        EffectStateLimitsV1::default(),
+        EffectStateLimits::default(),
         &mut scratch,
         &mut out,
     )
     .unwrap();
     out
 }
-fn snapshot_bank(cap: &UnpublishedEffectBankStateV1<'_>, index: u32) -> Vec<u8> {
+fn snapshot_bank(cap: &UnpublishedEffectBankState<'_>, index: u32) -> Vec<u8> {
     let r = &cap.replays()[index as usize];
     let req =
-        scalar_effect_state_v1_requirements(cap.bound_factory(), r, EffectStateLimitsV1::default())
+        scalar_effect_state_requirements(cap.bound_factory(), r, EffectStateLimits::default())
             .unwrap();
     let mut scratch = vec![0; req.payload_snapshot_scratch_bytes as usize];
     let mut out = vec![0; req.envelope_bytes as usize];
-    snapshot_unpublished_effect_bank_track_state_v1(
+    snapshot_unpublished_effect_bank_track_state(
         cap,
         index,
-        EffectStateLimitsV1::default(),
+        EffectStateLimits::default(),
         &mut scratch,
         &mut out,
     )
@@ -652,15 +652,15 @@ fn snapshot_bank(cap: &UnpublishedEffectBankStateV1<'_>, index: u32) -> Vec<u8> 
     out
 }
 fn bank_cap(
-    capability: WireBoundNativeEffectFactoryV1<'static>,
-) -> UnpublishedEffectBankStateV1<'static> {
+    capability: WireBoundNativeEffectFactory<'static>,
+) -> UnpublishedEffectBankState<'static> {
     bank_cap_with_replays(capability, (0..4).map(|_| replay()).collect::<Vec<_>>())
 }
 fn bank_cap_with_replays(
-    capability: WireBoundNativeEffectFactoryV1<'static>,
-    replays: Vec<EffectBankPreparationV1>,
-) -> UnpublishedEffectBankStateV1<'static> {
-    prepare_unpublished_effect_bank_state_v1(
+    capability: WireBoundNativeEffectFactory<'static>,
+    replays: Vec<EffectBankPreparation>,
+) -> UnpublishedEffectBankState<'static> {
+    prepare_unpublished_effect_bank_state(
         capability,
         Backend::Simd4,
         BankWidth::Four,
@@ -695,17 +695,17 @@ fn two_step_scalar_and_bank_restore_publish_identical_current_state() {
     let controls = Arc::new(Calls::default());
     let s1 = Arc::new(StepControl::default());
     let s2 = Arc::new(StepControl::default());
-    let registry = StateMigrationRegistryV1::new(
+    let registry = StateMigrationRegistry::new(
         2,
         vec![
-            EffectStateMigrationRegistrationV1::from_bound_descriptors(
+            EffectStateMigrationRegistration::from_bound_descriptors(
                 bound(&D1),
                 bound(&D2),
                 Arc::new(GrowStep {
                     control: Arc::clone(&s1),
                 }),
             ),
-            EffectStateMigrationRegistrationV1::from_bound_descriptors(
+            EffectStateMigrationRegistration::from_bound_descriptors(
                 bound(&D2),
                 bound(&D3),
                 Arc::new(GrowStep {
@@ -724,11 +724,11 @@ fn two_step_scalar_and_bank_restore_publish_identical_current_state() {
     let source = snapshot_scalar(&old_scalar_cap, &replay(), old_scalar.as_ref());
     let expected = envelope(&D3, &migrated_payload(initial_payload(1, 0x10), 1, 3));
     let current = capability(&D3, &controls);
-    let resolved = resolve_effect_state_migration_v1(
+    let resolved = resolve_effect_state_migration(
         &registry,
         &current,
         &source,
-        EffectStateLimitsV1::default(),
+        EffectStateLimits::default(),
         migration_admission(),
         admission(),
     )
@@ -738,7 +738,7 @@ fn two_step_scalar_and_bank_restore_publish_identical_current_state() {
     let mut second = vec![0; req.second_envelope_bytes as usize];
     let mut scratch = vec![0; req.migration_scratch_bytes as usize - 1];
     let mut initial = vec![INITIAL[0]; req.scalar_initial_value_scratch_slots as usize - 1];
-    let error = restore_scalar_effect_state_with_migration_v1(
+    let error = restore_scalar_effect_state_with_migration(
         resolved,
         current,
         &mut first,
@@ -749,15 +749,15 @@ fn two_step_scalar_and_bank_restore_publish_identical_current_state() {
     .unwrap_err();
     assert_eq!(
         (error.code, error.detail),
-        (EffectStateMigrationDiagnosticCodeV1::BufferTooSmall, 3)
+        (EffectStateMigrationDiagnosticCode::BufferTooSmall, 3)
     );
 
     let current = capability(&D3, &controls);
-    let resolved = resolve_effect_state_migration_v1(
+    let resolved = resolve_effect_state_migration(
         &registry,
         &current,
         &source,
-        EffectStateLimitsV1::default(),
+        EffectStateLimits::default(),
         migration_admission(),
         admission(),
     )
@@ -772,7 +772,7 @@ fn two_step_scalar_and_bank_restore_publish_identical_current_state() {
         value: 0.125,
     };
     let mut initial = vec![initial_sentinel; req.scalar_initial_value_scratch_slots as usize + 1];
-    let restored = restore_scalar_effect_state_with_migration_v1(
+    let restored = restore_scalar_effect_state_with_migration(
         resolved,
         current,
         &mut first,
@@ -817,11 +817,11 @@ fn two_step_scalar_and_bank_restore_publish_identical_current_state() {
     );
     let (current, bank_factory) = shared_capabilities(&D3, &controls);
     let bank = bank_cap(bank_factory);
-    let resolved = resolve_effect_state_migration_v1(
+    let resolved = resolve_effect_state_migration(
         &registry,
         &current,
         &source,
-        EffectStateLimitsV1::default(),
+        EffectStateLimits::default(),
         migration_admission(),
         admission(),
     )
@@ -830,7 +830,7 @@ fn two_step_scalar_and_bank_restore_publish_identical_current_state() {
     let mut first = vec![0; req.first_envelope_bytes as usize];
     let mut second = vec![0; req.second_envelope_bytes as usize];
     let mut scratch = vec![0; req.migration_scratch_bytes as usize];
-    let bank = restore_unpublished_effect_bank_track_state_with_migration_v1(
+    let bank = restore_unpublished_effect_bank_track_state_with_migration(
         resolved,
         bank,
         2,
@@ -842,7 +842,7 @@ fn two_step_scalar_and_bank_restore_publish_identical_current_state() {
     assert_eq!(snapshot_bank(&bank, 2), scalar_state);
     assert_ne!(snapshot_bank(&bank, 1), scalar_state);
 
-    let old_bank = prepare_unpublished_effect_bank_state_v1(
+    let old_bank = prepare_unpublished_effect_bank_state(
         capability(&D1, &controls),
         Backend::Simd4,
         BankWidth::Four,
@@ -856,11 +856,11 @@ fn two_step_scalar_and_bank_restore_publish_identical_current_state() {
     let bank_source = snapshot_bank(&old_bank, 2);
     let expected_bank = envelope(&D3, &migrated_payload(initial_payload(1, 0x40), 1, 3));
     let current = capability(&D3, &controls);
-    let resolved = resolve_effect_state_migration_v1(
+    let resolved = resolve_effect_state_migration(
         &registry,
         &current,
         &bank_source,
-        EffectStateLimitsV1::default(),
+        EffectStateLimits::default(),
         migration_admission(),
         admission(),
     )
@@ -870,7 +870,7 @@ fn two_step_scalar_and_bank_restore_publish_identical_current_state() {
     let mut second = vec![0; req.second_envelope_bytes as usize];
     let mut scratch = vec![0; req.migration_scratch_bytes as usize];
     let mut initial = vec![INITIAL[0]; req.scalar_initial_value_scratch_slots as usize];
-    let restored = restore_scalar_effect_state_with_migration_v1(
+    let restored = restore_scalar_effect_state_with_migration(
         resolved,
         current,
         &mut first,
@@ -895,9 +895,9 @@ fn two_step_scalar_and_bank_restore_publish_identical_current_state() {
 fn workspace_and_step_failures_precede_hooks_and_drop_banks() {
     let controls = Arc::new(Calls::default());
     let step = Arc::new(StepControl::default());
-    let registry = StateMigrationRegistryV1::new(
+    let registry = StateMigrationRegistry::new(
         1,
-        vec![EffectStateMigrationRegistrationV1::from_bound_descriptors(
+        vec![EffectStateMigrationRegistration::from_bound_descriptors(
             bound(&D2),
             bound(&D3),
             Arc::new(GrowStep {
@@ -911,11 +911,11 @@ fn workspace_and_step_failures_precede_hooks_and_drop_banks() {
     for detail in 1..=3 {
         let (current, bank_factory) = shared_capabilities(&D3, &controls);
         let bank = bank_cap(bank_factory);
-        let resolved = resolve_effect_state_migration_v1(
+        let resolved = resolve_effect_state_migration(
             &registry,
             &current,
             &source,
-            EffectStateLimitsV1::default(),
+            EffectStateLimits::default(),
             migration_admission(),
             admission(),
         )
@@ -937,7 +937,7 @@ fn workspace_and_step_failures_precede_hooks_and_drop_banks() {
         if detail == 2 {
             continue;
         }
-        let error = restore_unpublished_effect_bank_track_state_with_migration_v1(
+        let error = restore_unpublished_effect_bank_track_state_with_migration(
             resolved,
             bank,
             0,
@@ -948,7 +948,7 @@ fn workspace_and_step_failures_precede_hooks_and_drop_banks() {
         .unwrap_err();
         assert_eq!(
             (error.code, error.detail),
-            (EffectStateMigrationDiagnosticCodeV1::BufferTooSmall, detail)
+            (EffectStateMigrationDiagnosticCode::BufferTooSmall, detail)
         );
         assert_eq!(step.calls.load(Ordering::SeqCst), 0);
     }
@@ -956,11 +956,11 @@ fn workspace_and_step_failures_precede_hooks_and_drop_banks() {
         step.partial.store(partial, Ordering::SeqCst);
         step.reject.store(true, Ordering::SeqCst);
         let current = capability(&D3, &controls);
-        let resolved = resolve_effect_state_migration_v1(
+        let resolved = resolve_effect_state_migration(
             &registry,
             &current,
             &source,
-            EffectStateLimitsV1::default(),
+            EffectStateLimits::default(),
             migration_admission(),
             admission(),
         )
@@ -970,7 +970,7 @@ fn workspace_and_step_failures_precede_hooks_and_drop_banks() {
         let mut scratch = vec![0; req.migration_scratch_bytes as usize];
         let mut initial = vec![INITIAL[0]; req.scalar_initial_value_scratch_slots as usize];
         let prepares = controls.prepare.load(Ordering::SeqCst);
-        let error = restore_scalar_effect_state_with_migration_v1(
+        let error = restore_scalar_effect_state_with_migration(
             resolved,
             current,
             &mut first,
@@ -982,7 +982,7 @@ fn workspace_and_step_failures_precede_hooks_and_drop_banks() {
         assert_eq!(
             (error.code, error.detail),
             (
-                EffectStateMigrationDiagnosticCodeV1::Step,
+                EffectStateMigrationDiagnosticCode::Step,
                 if partial { 2 } else { 1 }
             )
         );
@@ -993,11 +993,11 @@ fn workspace_and_step_failures_precede_hooks_and_drop_banks() {
     step.reject.store(true, Ordering::SeqCst);
     let (current, bank_factory) = shared_capabilities(&D3, &controls);
     let bank = bank_cap(bank_factory);
-    let resolved = resolve_effect_state_migration_v1(
+    let resolved = resolve_effect_state_migration(
         &registry,
         &current,
         &source,
-        EffectStateLimitsV1::default(),
+        EffectStateLimits::default(),
         migration_admission(),
         admission(),
     )
@@ -1007,7 +1007,7 @@ fn workspace_and_step_failures_precede_hooks_and_drop_banks() {
     let mut second = vec![];
     let mut scratch = vec![0; req.migration_scratch_bytes as usize];
     let drops = controls.bank_drop.load(Ordering::SeqCst);
-    let error = restore_unpublished_effect_bank_track_state_with_migration_v1(
+    let error = restore_unpublished_effect_bank_track_state_with_migration(
         resolved,
         bank,
         0,
@@ -1018,7 +1018,7 @@ fn workspace_and_step_failures_precede_hooks_and_drop_banks() {
     .unwrap_err();
     assert_eq!(
         (error.code, error.detail),
-        (EffectStateMigrationDiagnosticCodeV1::Step, 2)
+        (EffectStateMigrationDiagnosticCode::Step, 2)
     );
     assert!(first.iter().all(|byte| *byte == 0));
     assert_eq!(controls.bank_restore.load(Ordering::SeqCst), 0);
@@ -1036,11 +1036,11 @@ fn workspace_and_step_failures_precede_hooks_and_drop_banks() {
         step.report_fault.store(report_fault, Ordering::SeqCst);
         let (current, bank_factory) = shared_capabilities(&D3, &controls);
         let bank = bank_cap(bank_factory);
-        let resolved = resolve_effect_state_migration_v1(
+        let resolved = resolve_effect_state_migration(
             &registry,
             &current,
             &source,
-            EffectStateLimitsV1::default(),
+            EffectStateLimits::default(),
             migration_admission(),
             admission(),
         )
@@ -1049,7 +1049,7 @@ fn workspace_and_step_failures_precede_hooks_and_drop_banks() {
         let mut first = vec![0; req.first_envelope_bytes as usize];
         let mut scratch = vec![0; req.migration_scratch_bytes as usize];
         let drops = controls.bank_drop.load(Ordering::SeqCst);
-        let error = restore_unpublished_effect_bank_track_state_with_migration_v1(
+        let error = restore_unpublished_effect_bank_track_state_with_migration(
             resolved,
             bank,
             0,
@@ -1060,7 +1060,7 @@ fn workspace_and_step_failures_precede_hooks_and_drop_banks() {
         .unwrap_err();
         assert_eq!(
             (error.code, error.detail),
-            (EffectStateMigrationDiagnosticCodeV1::Step, detail)
+            (EffectStateMigrationDiagnosticCode::Step, detail)
         );
         assert_eq!(controls.bank_drop.load(Ordering::SeqCst), drops + 1);
     }
@@ -1077,17 +1077,17 @@ fn every_workspace_and_bank_destination_failure_is_pre_hook_and_exact() {
     let controls = Arc::new(Calls::default());
     let one = Arc::new(StepControl::default());
     let two = Arc::new(StepControl::default());
-    let registry = StateMigrationRegistryV1::new(
+    let registry = StateMigrationRegistry::new(
         2,
         vec![
-            EffectStateMigrationRegistrationV1::from_bound_descriptors(
+            EffectStateMigrationRegistration::from_bound_descriptors(
                 bound(&D1),
                 bound(&D2),
                 Arc::new(GrowStep {
                     control: Arc::clone(&one),
                 }),
             ),
-            EffectStateMigrationRegistrationV1::from_bound_descriptors(
+            EffectStateMigrationRegistration::from_bound_descriptors(
                 bound(&D2),
                 bound(&D3),
                 Arc::new(GrowStep {
@@ -1103,11 +1103,11 @@ fn every_workspace_and_bank_destination_failure_is_pre_hook_and_exact() {
     for detail in [1_u32, 2, 3] {
         let (current, bank_factory) = shared_capabilities(&D3, &controls);
         let bank = bank_cap(bank_factory);
-        let resolved = resolve_effect_state_migration_v1(
+        let resolved = resolve_effect_state_migration(
             &registry,
             &current,
             &source,
-            EffectStateLimitsV1::default(),
+            EffectStateLimits::default(),
             migration_admission(),
             admission(),
         )
@@ -1133,7 +1133,7 @@ fn every_workspace_and_bank_destination_failure_is_pre_hook_and_exact() {
         }
         let drops = controls.bank_drop.load(Ordering::SeqCst);
         let live_sentinel = [0x5a_u8; 8];
-        let error = restore_unpublished_effect_bank_track_state_with_migration_v1(
+        let error = restore_unpublished_effect_bank_track_state_with_migration(
             resolved,
             bank,
             0,
@@ -1144,17 +1144,17 @@ fn every_workspace_and_bank_destination_failure_is_pre_hook_and_exact() {
         .unwrap_err();
         assert_eq!(
             (error.code, error.detail),
-            (EffectStateMigrationDiagnosticCodeV1::BufferTooSmall, detail)
+            (EffectStateMigrationDiagnosticCode::BufferTooSmall, detail)
         );
         assert_eq!(controls.bank_drop.load(Ordering::SeqCst), drops + 1);
         assert_eq!(live_sentinel, [0x5a; 8]);
     }
     let current = capability(&D3, &controls);
-    let resolved = resolve_effect_state_migration_v1(
+    let resolved = resolve_effect_state_migration(
         &registry,
         &current,
         &source,
-        EffectStateLimitsV1::default(),
+        EffectStateLimits::default(),
         migration_admission(),
         admission(),
     )
@@ -1164,7 +1164,7 @@ fn every_workspace_and_bank_destination_failure_is_pre_hook_and_exact() {
     let mut second = vec![0; req.second_envelope_bytes as usize];
     let mut scratch = vec![0; req.migration_scratch_bytes as usize];
     let mut initial = vec![INITIAL[0]; req.scalar_initial_value_scratch_slots as usize - 1];
-    let error = restore_scalar_effect_state_with_migration_v1(
+    let error = restore_scalar_effect_state_with_migration(
         resolved,
         current,
         &mut first,
@@ -1176,7 +1176,7 @@ fn every_workspace_and_bank_destination_failure_is_pre_hook_and_exact() {
     assert_eq!(
         (error.code, error.detail, error.required_bytes),
         (
-            EffectStateMigrationDiagnosticCodeV1::BufferTooSmall,
+            EffectStateMigrationDiagnosticCode::BufferTooSmall,
             4,
             req.scalar_initial_value_scratch_bytes
         )
@@ -1185,11 +1185,11 @@ fn every_workspace_and_bank_destination_failure_is_pre_hook_and_exact() {
     assert_eq!(two.calls.load(Ordering::SeqCst), 0);
 
     let current = capability(&D3, &controls);
-    let resolved = resolve_effect_state_migration_v1(
+    let resolved = resolve_effect_state_migration(
         &registry,
         &current,
         &source,
-        EffectStateLimitsV1::default(),
+        EffectStateLimits::default(),
         migration_admission(),
         admission(),
     )
@@ -1199,7 +1199,7 @@ fn every_workspace_and_bank_destination_failure_is_pre_hook_and_exact() {
     let mut second = vec![0; req.second_envelope_bytes as usize];
     let mut scratch = vec![0; req.migration_scratch_bytes as usize];
     let mut initial = vec![INITIAL[0]; req.scalar_initial_value_scratch_slots as usize];
-    let error = restore_scalar_effect_state_with_migration_v1(
+    let error = restore_scalar_effect_state_with_migration(
         resolved,
         capability(&D3, &controls),
         &mut first,
@@ -1210,16 +1210,16 @@ fn every_workspace_and_bank_destination_failure_is_pre_hook_and_exact() {
     .unwrap_err();
     assert_eq!(
         (error.code, error.detail),
-        (EffectStateMigrationDiagnosticCodeV1::Chain, 3)
+        (EffectStateMigrationDiagnosticCode::Chain, 3)
     );
     assert_eq!(one.calls.load(Ordering::SeqCst), 0);
 
     let (current, execution) = shared_capabilities(&D3, &controls);
-    let resolved = resolve_effect_state_migration_v1(
+    let resolved = resolve_effect_state_migration(
         &registry,
         &current,
         &source,
-        EffectStateLimitsV1::default(),
+        EffectStateLimits::default(),
         migration_admission(),
         admission(),
     )
@@ -1230,7 +1230,7 @@ fn every_workspace_and_bank_destination_failure_is_pre_hook_and_exact() {
     let mut scratch = vec![0; req.migration_scratch_bytes as usize];
     let mut initial = vec![INITIAL[0]; req.scalar_initial_value_scratch_slots as usize];
     controls.descriptor_drift.store(true, Ordering::SeqCst);
-    let error = restore_scalar_effect_state_with_migration_v1(
+    let error = restore_scalar_effect_state_with_migration(
         resolved,
         execution,
         &mut first,
@@ -1242,17 +1242,17 @@ fn every_workspace_and_bank_destination_failure_is_pre_hook_and_exact() {
     controls.descriptor_drift.store(false, Ordering::SeqCst);
     assert_eq!(
         (error.code, error.detail),
-        (EffectStateMigrationDiagnosticCodeV1::Chain, 3)
+        (EffectStateMigrationDiagnosticCode::Chain, 3)
     );
     assert_eq!(one.calls.load(Ordering::SeqCst), 0);
 
     let (current, bank_factory) = shared_capabilities(&D3, &controls);
     let bank = bank_cap(bank_factory);
-    let resolved = resolve_effect_state_migration_v1(
+    let resolved = resolve_effect_state_migration(
         &registry,
         &current,
         &source,
-        EffectStateLimitsV1::default(),
+        EffectStateLimits::default(),
         migration_admission(),
         admission(),
     )
@@ -1263,7 +1263,7 @@ fn every_workspace_and_bank_destination_failure_is_pre_hook_and_exact() {
     let mut scratch = vec![0; req.migration_scratch_bytes as usize];
     let drops = controls.bank_drop.load(Ordering::SeqCst);
     controls.descriptor_drift.store(true, Ordering::SeqCst);
-    let error = restore_unpublished_effect_bank_track_state_with_migration_v1(
+    let error = restore_unpublished_effect_bank_track_state_with_migration(
         resolved,
         bank,
         0,
@@ -1275,7 +1275,7 @@ fn every_workspace_and_bank_destination_failure_is_pre_hook_and_exact() {
     controls.descriptor_drift.store(false, Ordering::SeqCst);
     assert_eq!(
         (error.code, error.detail, error.nested_state.detail),
-        (EffectStateMigrationDiagnosticCodeV1::Restore, 2, 4)
+        (EffectStateMigrationDiagnosticCode::Restore, 2, 4)
     );
     assert_eq!(one.calls.load(Ordering::SeqCst), 0);
     assert_eq!(controls.bank_drop.load(Ordering::SeqCst), drops + 1);
@@ -1295,11 +1295,11 @@ fn every_workspace_and_bank_destination_failure_is_pre_hook_and_exact() {
         if expected_nested <= 2 {
             controls.wrong_width.store(true, Ordering::SeqCst);
         }
-        let resolved = resolve_effect_state_migration_v1(
+        let resolved = resolve_effect_state_migration(
             &registry,
             &current,
             &source,
-            EffectStateLimitsV1::default(),
+            EffectStateLimits::default(),
             migration_admission(),
             admission(),
         )
@@ -1310,7 +1310,7 @@ fn every_workspace_and_bank_destination_failure_is_pre_hook_and_exact() {
         let mut scratch = vec![0; req.migration_scratch_bytes as usize];
         let index = if expected_nested == 1 { 99 } else { 0 };
         let drops = controls.bank_drop.load(Ordering::SeqCst);
-        let error = restore_unpublished_effect_bank_track_state_with_migration_v1(
+        let error = restore_unpublished_effect_bank_track_state_with_migration(
             resolved,
             bank,
             index,
@@ -1327,9 +1327,9 @@ fn every_workspace_and_bank_destination_failure_is_pre_hook_and_exact() {
                 error.nested_state.detail
             ),
             (
-                EffectStateMigrationDiagnosticCodeV1::Restore,
+                EffectStateMigrationDiagnosticCode::Restore,
                 2,
-                EffectStateDiagnosticCodeV1::Restore,
+                EffectStateDiagnosticCode::Restore,
                 expected_nested
             )
         );
@@ -1351,12 +1351,12 @@ fn zero_step_scalar_and_serial_one_step_bank_restores_are_exact_and_isolated() {
     let controls = Arc::new(Calls::default());
     let current = capability(&D3, &controls);
     let source = envelope(&D3, &initial_payload(3, 0x61));
-    let empty = StateMigrationRegistryV1::new(0, Box::new([])).unwrap();
-    let resolved = resolve_effect_state_migration_v1(
+    let empty = StateMigrationRegistry::new(0, Box::new([])).unwrap();
+    let resolved = resolve_effect_state_migration(
         &empty,
         &current,
         &source,
-        EffectStateLimitsV1::default(),
+        EffectStateLimits::default(),
         migration_admission(),
         admission(),
     )
@@ -1372,7 +1372,7 @@ fn zero_step_scalar_and_serial_one_step_bank_restores_are_exact_and_isolated() {
         (0, 0, 0, 0)
     );
     let mut initial = vec![INITIAL[0]; req.scalar_initial_value_scratch_slots as usize];
-    let restored = restore_scalar_effect_state_with_migration_v1(
+    let restored = restore_scalar_effect_state_with_migration(
         resolved,
         current,
         &mut [],
@@ -1391,11 +1391,11 @@ fn zero_step_scalar_and_serial_one_step_bank_restores_are_exact_and_isolated() {
     );
     let (current, bank_factory) = shared_capabilities(&D3, &controls);
     let bank = bank_cap(bank_factory);
-    let resolved = resolve_effect_state_migration_v1(
+    let resolved = resolve_effect_state_migration(
         &empty,
         &current,
         &source,
-        EffectStateLimitsV1::default(),
+        EffectStateLimits::default(),
         migration_admission(),
         admission(),
     )
@@ -1403,7 +1403,7 @@ fn zero_step_scalar_and_serial_one_step_bank_restores_are_exact_and_isolated() {
     let mut first = [0xc1_u8; 3];
     let mut second = [0xc2_u8; 3];
     let mut scratch = [0xc3_u8; 3];
-    let bank = restore_unpublished_effect_bank_track_state_with_migration_v1(
+    let bank = restore_unpublished_effect_bank_track_state_with_migration(
         resolved,
         bank,
         0,
@@ -1416,9 +1416,9 @@ fn zero_step_scalar_and_serial_one_step_bank_restores_are_exact_and_isolated() {
     assert_eq!((first, second, scratch), ([0xc1; 3], [0xc2; 3], [0xc3; 3]));
 
     let step = Arc::new(StepControl::default());
-    let registry = StateMigrationRegistryV1::new(
+    let registry = StateMigrationRegistry::new(
         1,
-        vec![EffectStateMigrationRegistrationV1::from_bound_descriptors(
+        vec![EffectStateMigrationRegistration::from_bound_descriptors(
             bound(&D2),
             bound(&D3),
             Arc::new(GrowStep {
@@ -1434,11 +1434,11 @@ fn zero_step_scalar_and_serial_one_step_bank_restores_are_exact_and_isolated() {
     let source_a = envelope(&D2, &initial_payload(2, 0x71));
     let source_b = envelope(&D2, &initial_payload(2, 0x91));
     let current = capability(&D3, &controls);
-    let resolved = resolve_effect_state_migration_v1(
+    let resolved = resolve_effect_state_migration(
         &registry,
         &current,
         &source_a,
-        EffectStateLimitsV1::default(),
+        EffectStateLimits::default(),
         migration_admission(),
         admission(),
     )
@@ -1448,7 +1448,7 @@ fn zero_step_scalar_and_serial_one_step_bank_restores_are_exact_and_isolated() {
     let mut scalar_scratch = vec![0; req_scalar.migration_scratch_bytes as usize];
     let mut scalar_initial =
         vec![INITIAL[0]; req_scalar.scalar_initial_value_scratch_slots as usize];
-    let restored = restore_scalar_effect_state_with_migration_v1(
+    let restored = restore_scalar_effect_state_with_migration(
         resolved,
         current,
         &mut scalar_first,
@@ -1465,11 +1465,11 @@ fn zero_step_scalar_and_serial_one_step_bank_restores_are_exact_and_isolated() {
         ),
         envelope(&D3, &migrated_payload(initial_payload(2, 0x71), 2, 3))
     );
-    let resolved_a = resolve_effect_state_migration_v1(
+    let resolved_a = resolve_effect_state_migration(
         &registry,
         &resolve_a,
         &source_a,
-        EffectStateLimitsV1::default(),
+        EffectStateLimits::default(),
         migration_admission(),
         admission(),
     )
@@ -1477,7 +1477,7 @@ fn zero_step_scalar_and_serial_one_step_bank_restores_are_exact_and_isolated() {
     let req = resolved_a.requirements();
     let mut first = vec![0; req.first_envelope_bytes as usize];
     let mut scratch = vec![0; req.migration_scratch_bytes as usize];
-    let bank = restore_unpublished_effect_bank_track_state_with_migration_v1(
+    let bank = restore_unpublished_effect_bank_track_state_with_migration(
         resolved_a,
         bank,
         0,
@@ -1486,18 +1486,18 @@ fn zero_step_scalar_and_serial_one_step_bank_restores_are_exact_and_isolated() {
         &mut scratch,
     )
     .unwrap();
-    let resolved_b = resolve_effect_state_migration_v1(
+    let resolved_b = resolve_effect_state_migration(
         &registry,
         &resolve_b,
         &source_b,
-        EffectStateLimitsV1::default(),
+        EffectStateLimits::default(),
         migration_admission(),
         admission(),
     )
     .unwrap();
     let mut first = vec![0; req.first_envelope_bytes as usize];
     let mut scratch = vec![0; req.migration_scratch_bytes as usize];
-    let bank = restore_unpublished_effect_bank_track_state_with_migration_v1(
+    let bank = restore_unpublished_effect_bank_track_state_with_migration(
         resolved_b,
         bank,
         2,
@@ -1528,9 +1528,9 @@ fn terminal_factory_and_partial_restore_failures_publish_nothing() {
     let live_bank_before = snapshot_bank(&live_bank, 1);
     let controls = Arc::new(Calls::default());
     let step = Arc::new(StepControl::default());
-    let registry = StateMigrationRegistryV1::new(
+    let registry = StateMigrationRegistry::new(
         1,
-        vec![EffectStateMigrationRegistrationV1::from_bound_descriptors(
+        vec![EffectStateMigrationRegistration::from_bound_descriptors(
             bound(&D2),
             bound(&D3),
             Arc::new(GrowStep {
@@ -1542,9 +1542,9 @@ fn terminal_factory_and_partial_restore_failures_publish_nothing() {
     .unwrap();
     let source = envelope(&D2, &initial_payload(2, 0xb1));
     for (prepare_failure, restore_failure, metadata_failure, expected_code, expected_detail) in [
-        (true, false, false, EffectStateDiagnosticCodeV1::Factory, 3),
-        (false, true, false, EffectStateDiagnosticCodeV1::Payload, 3),
-        (false, false, true, EffectStateDiagnosticCodeV1::Factory, 4),
+        (true, false, false, EffectStateDiagnosticCode::Factory, 3),
+        (false, true, false, EffectStateDiagnosticCode::Payload, 3),
+        (false, false, true, EffectStateDiagnosticCode::Factory, 4),
     ] {
         controls
             .fail_prepare
@@ -1556,11 +1556,11 @@ fn terminal_factory_and_partial_restore_failures_publish_nothing() {
             .wrong_metadata
             .store(metadata_failure, Ordering::SeqCst);
         let current = capability(&D3, &controls);
-        let resolved = resolve_effect_state_migration_v1(
+        let resolved = resolve_effect_state_migration(
             &registry,
             &current,
             &source,
-            EffectStateLimitsV1::default(),
+            EffectStateLimits::default(),
             migration_admission(),
             admission(),
         )
@@ -1569,7 +1569,7 @@ fn terminal_factory_and_partial_restore_failures_publish_nothing() {
         let mut first = vec![0; req.first_envelope_bytes as usize];
         let mut scratch = vec![0; req.migration_scratch_bytes as usize];
         let mut initial = vec![INITIAL[0]; req.scalar_initial_value_scratch_slots as usize];
-        let error = restore_scalar_effect_state_with_migration_v1(
+        let error = restore_scalar_effect_state_with_migration(
             resolved,
             current,
             &mut first,
@@ -1586,7 +1586,7 @@ fn terminal_factory_and_partial_restore_failures_publish_nothing() {
                 error.nested_state.detail
             ),
             (
-                EffectStateMigrationDiagnosticCodeV1::Restore,
+                EffectStateMigrationDiagnosticCode::Restore,
                 1,
                 expected_code,
                 expected_detail
@@ -1600,11 +1600,11 @@ fn terminal_factory_and_partial_restore_failures_publish_nothing() {
     let (current, bank_factory) = shared_capabilities(&D3, &controls);
     let bank = bank_cap(bank_factory);
     let drops = controls.bank_drop.load(Ordering::SeqCst);
-    let resolved = resolve_effect_state_migration_v1(
+    let resolved = resolve_effect_state_migration(
         &registry,
         &current,
         &source,
-        EffectStateLimitsV1::default(),
+        EffectStateLimits::default(),
         migration_admission(),
         admission(),
     )
@@ -1612,7 +1612,7 @@ fn terminal_factory_and_partial_restore_failures_publish_nothing() {
     let req = resolved.requirements();
     let mut first = vec![0; req.first_envelope_bytes as usize];
     let mut scratch = vec![0; req.migration_scratch_bytes as usize];
-    let error = restore_unpublished_effect_bank_track_state_with_migration_v1(
+    let error = restore_unpublished_effect_bank_track_state_with_migration(
         resolved,
         bank,
         0,
@@ -1629,9 +1629,9 @@ fn terminal_factory_and_partial_restore_failures_publish_nothing() {
             error.nested_state.detail
         ),
         (
-            EffectStateMigrationDiagnosticCodeV1::Restore,
+            EffectStateMigrationDiagnosticCode::Restore,
             2,
-            EffectStateDiagnosticCodeV1::Payload,
+            EffectStateDiagnosticCode::Payload,
             4
         )
     );
@@ -1655,9 +1655,9 @@ fn intermediate_identity_and_replay_mutation_are_unreachable_by_construction() {
         .unwrap();
     assert!(executor.contains("StatePayloadInput"));
     assert!(executor.contains("StatePayloadOutput"));
-    assert!(executor.contains("encode_effect_state_v1"));
-    assert!(executor.contains("verify_effect_state_v1"));
-    assert!(executor.contains("validate_effect_state_replay_configuration_v1"));
+    assert!(executor.contains("encode_effect_state"));
+    assert!(executor.contains("verify_effect_state"));
+    assert!(executor.contains("validate_effect_state_replay_configuration"));
     assert!(!executor.contains("descriptor_identity"));
     assert!(!executor.contains("descriptor_wire"));
 }
@@ -1666,8 +1666,8 @@ fn qualification_replay(
     sample_rate: u32,
     step_count: u32,
     historical_bank: bool,
-) -> EffectBankPreparationV1 {
-    EffectBankPreparationV1 {
+) -> EffectBankPreparation {
+    EffectBankPreparation {
         sample_rate,
         quantum: 128,
         quality: EffectQuality::Normal,
@@ -1678,7 +1678,7 @@ fn qualification_replay(
             2 => LinkMode::Average,
             _ => panic!("qualification step count"),
         },
-        ports: PreparedPortsV1 {
+        ports: PreparedPorts {
             sidechain: PreparedSidechainPort::None,
         },
         initial_values: INITIAL.into(),
@@ -1690,8 +1690,8 @@ fn qualification_replay(
     }
 }
 
-fn qualification_admission(sample_rate: u32) -> EffectStateRestoreAdmissionV1 {
-    EffectStateRestoreAdmissionV1 {
+fn qualification_admission(sample_rate: u32) -> EffectStateRestoreAdmission {
+    EffectStateRestoreAdmission {
         sample_rate,
         quantum: 128,
         maximum_total_state_bytes: 64,
@@ -1701,10 +1701,10 @@ fn qualification_admission(sample_rate: u32) -> EffectStateRestoreAdmissionV1 {
 }
 
 fn qualification_bank_cap(
-    capability: WireBoundNativeEffectFactoryV1<'static>,
-    replay: &EffectBankPreparationV1,
-) -> UnpublishedEffectBankStateV1<'static> {
-    prepare_unpublished_effect_bank_state_v1(
+    capability: WireBoundNativeEffectFactory<'static>,
+    replay: &EffectBankPreparation,
+) -> UnpublishedEffectBankState<'static> {
+    prepare_unpublished_effect_bank_state(
         capability,
         Backend::Simd4,
         BankWidth::Four,
@@ -1718,29 +1718,29 @@ fn qualification_bank_cap(
 }
 
 fn qualification_envelope(
-    descriptor: &'static EffectDescriptorV1,
-    replay: &EffectBankPreparationV1,
+    descriptor: &'static EffectDescriptor,
+    replay: &EffectBankPreparation,
     payload: &[u8],
 ) -> Vec<u8> {
     let descriptor_bound = bound(descriptor);
     let state_replay = replay.state_replay(descriptor.id);
-    let requirements = effect_state_v1_requirements(
+    let requirements = effect_state_requirements(
         descriptor_bound,
         state_replay,
-        EffectStateLimitsV1::default(),
+        EffectStateLimits::default(),
     )
     .unwrap();
     let payload_sizes = sizes(descriptor.state_layout_version);
     let common = payload_sizes.common_bytes as usize;
     let left = payload_sizes.left_bytes as usize;
     let mut output = vec![0xa5; requirements.envelope_bytes as usize];
-    encode_effect_state_v1(
+    encode_effect_state(
         descriptor_bound,
         state_replay,
         &payload[..common],
         &payload[common..common + left],
         &payload[common + left..],
-        EffectStateLimitsV1::default(),
+        EffectStateLimits::default(),
         &mut output,
     )
     .unwrap();
@@ -1762,17 +1762,17 @@ fn run_qualification_rows(
                     let calls = Arc::new(Calls::default());
                     let first_control = Arc::new(StepControl::default());
                     let second_control = Arc::new(StepControl::default());
-                    let registry = StateMigrationRegistryV1::new(
+                    let registry = StateMigrationRegistry::new(
                         2,
                         vec![
-                            EffectStateMigrationRegistrationV1::from_bound_descriptors(
+                            EffectStateMigrationRegistration::from_bound_descriptors(
                                 bound(&D1),
                                 bound(&D2),
                                 Arc::new(GrowStep {
                                     control: Arc::clone(&first_control),
                                 }),
                             ),
-                            EffectStateMigrationRegistrationV1::from_bound_descriptors(
+                            EffectStateMigrationRegistration::from_bound_descriptors(
                                 bound(&D2),
                                 bound(&D3),
                                 Arc::new(GrowStep {
@@ -1814,18 +1814,18 @@ fn run_qualification_rows(
                     let expected_next = qualification_envelope(&D3, &replay, &continued_payload);
                     let (resolution_capability, destination_capability) =
                         shared_capabilities(&D3, &calls);
-                    let resolved = resolve_effect_state_migration_v1(
+                    let resolved = resolve_effect_state_migration(
                         &registry,
                         &resolution_capability,
                         &source,
-                        EffectStateLimitsV1::default(),
+                        EffectStateLimits::default(),
                         migration_admission(),
                         qualification_admission(sample_rate),
                     )
                     .unwrap();
                     assert_eq!(resolved.chain_step_count(), step_count as usize);
                     assert_eq!(
-                        inspect_effect_state_selector_v1(&source, EffectStateLimitsV1::default())
+                        inspect_effect_state_selector(&source, EffectStateLimits::default())
                             .unwrap()
                             .descriptor_identity(),
                         bound(source_descriptor).identity()
@@ -1842,7 +1842,7 @@ fn run_qualification_rows(
                             snapshot_bank(&destination, 3),
                         ];
                         let mut destination =
-                            restore_unpublished_effect_bank_track_state_with_migration_v1(
+                            restore_unpublished_effect_bank_track_state_with_migration(
                                 resolved,
                                 destination,
                                 2,
@@ -1884,7 +1884,7 @@ fn run_qualification_rows(
                                 sentinel;
                                 requirements.scalar_initial_value_scratch_slots as usize + 2
                             ];
-                        let mut restored = restore_scalar_effect_state_with_migration_v1(
+                        let mut restored = restore_scalar_effect_state_with_migration(
                             resolved,
                             destination_capability,
                             &mut first,
@@ -1991,17 +1991,17 @@ fn registry_resolution_and_bank_execution_allocation_boundaries_are_isolated() {
     let second_source = bound(&D2);
     let second_target = bound(&D3);
     let (_, registry_allocations) = measure_allocations(|| {
-        let registry = StateMigrationRegistryV1::new(
+        let registry = StateMigrationRegistry::new(
             2,
             vec![
-                EffectStateMigrationRegistrationV1::from_bound_descriptors(
+                EffectStateMigrationRegistration::from_bound_descriptors(
                     first_source,
                     first_target,
                     Arc::new(GrowStep {
                         control: Arc::clone(&first_control),
                     }),
                 ),
-                EffectStateMigrationRegistrationV1::from_bound_descriptors(
+                EffectStateMigrationRegistration::from_bound_descriptors(
                     second_source,
                     second_target,
                     Arc::new(GrowStep {
@@ -2022,17 +2022,17 @@ fn registry_resolution_and_bank_execution_allocation_boundaries_are_isolated() {
         registry_allocations.deallocated_bytes
     );
 
-    let registry = StateMigrationRegistryV1::new(
+    let registry = StateMigrationRegistry::new(
         2,
         vec![
-            EffectStateMigrationRegistrationV1::from_bound_descriptors(
+            EffectStateMigrationRegistration::from_bound_descriptors(
                 first_source,
                 first_target,
                 Arc::new(GrowStep {
                     control: Arc::clone(&first_control),
                 }),
             ),
-            EffectStateMigrationRegistrationV1::from_bound_descriptors(
+            EffectStateMigrationRegistration::from_bound_descriptors(
                 second_source,
                 second_target,
                 Arc::new(GrowStep {
@@ -2051,11 +2051,11 @@ fn registry_resolution_and_bank_execution_allocation_boundaries_are_isolated() {
     let destination = qualification_bank_cap(destination_factory, &replay);
 
     let (_, resolution_allocations) = measure_allocations(|| {
-        let resolved = resolve_effect_state_migration_v1(
+        let resolved = resolve_effect_state_migration(
             &registry,
             &current,
             &source,
-            EffectStateLimitsV1::default(),
+            EffectStateLimits::default(),
             migration_admission(),
             qualification_admission(48_000),
         )
@@ -2070,11 +2070,11 @@ fn registry_resolution_and_bank_execution_allocation_boundaries_are_isolated() {
         resolution_allocations.deallocated_bytes
     );
 
-    let requirements = resolve_effect_state_migration_v1(
+    let requirements = resolve_effect_state_migration(
         &registry,
         &current,
         &source,
-        EffectStateLimitsV1::default(),
+        EffectStateLimits::default(),
         migration_admission(),
         qualification_admission(48_000),
     )
@@ -2084,16 +2084,16 @@ fn registry_resolution_and_bank_execution_allocation_boundaries_are_isolated() {
     let mut second = vec![0xa5; requirements.second_envelope_bytes as usize];
     let mut scratch = vec![0xa5; requirements.migration_scratch_bytes as usize];
     let (restored, execution_allocations) = measure_allocations(|| {
-        let resolved = resolve_effect_state_migration_v1(
+        let resolved = resolve_effect_state_migration(
             &registry,
             &current,
             &source,
-            EffectStateLimitsV1::default(),
+            EffectStateLimits::default(),
             migration_admission(),
             qualification_admission(48_000),
         )
         .unwrap();
-        restore_unpublished_effect_bank_track_state_with_migration_v1(
+        restore_unpublished_effect_bank_track_state_with_migration(
             resolved,
             destination,
             1,
@@ -2114,11 +2114,11 @@ fn registry_resolution_and_bank_execution_allocation_boundaries_are_isolated() {
     );
 
     let (scalar_current, scalar_destination) = shared_capabilities(&D3, &calls);
-    let scalar_requirements = resolve_effect_state_migration_v1(
+    let scalar_requirements = resolve_effect_state_migration(
         &registry,
         &scalar_current,
         &source,
-        EffectStateLimitsV1::default(),
+        EffectStateLimits::default(),
         migration_admission(),
         qualification_admission(48_000),
     )
@@ -2130,11 +2130,11 @@ fn registry_resolution_and_bank_execution_allocation_boundaries_are_isolated() {
     let mut initial =
         vec![INITIAL[0]; scalar_requirements.scalar_initial_value_scratch_slots as usize];
     let (scalar_resolved, scalar_resolution_retained) = measure_allocations(|| {
-        resolve_effect_state_migration_v1(
+        resolve_effect_state_migration(
             &registry,
             &scalar_current,
             &source,
-            EffectStateLimitsV1::default(),
+            EffectStateLimits::default(),
             migration_admission(),
             qualification_admission(48_000),
         )
@@ -2142,7 +2142,7 @@ fn registry_resolution_and_bank_execution_allocation_boundaries_are_isolated() {
     });
     assert!(scalar_resolution_retained.live_bytes > 0);
     let (scalar, scalar_allocations) = measure_allocations(|| {
-        restore_scalar_effect_state_with_migration_v1(
+        restore_scalar_effect_state_with_migration(
             scalar_resolved,
             scalar_destination,
             &mut scalar_first,

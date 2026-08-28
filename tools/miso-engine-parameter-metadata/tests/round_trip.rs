@@ -8,7 +8,7 @@
 //! something that does not exist. For every live builtin parameter the acknowledgement must be
 //! `RESULT_OK`.
 
-use miso_engine_effect_compiler::launch_native_effect_registry_v1;
+use miso_engine_effect_compiler::launch_native_effect_registry;
 use miso_engine_host_web::{
     AudioWorkletEngineHost, COMMAND_EFFECT_BYPASS, COMMAND_EFFECT_PARAM, COMMAND_MATRIX,
     COMMAND_REASON_NONE, COMMAND_REASON_UNSUPPORTED_KIND, COMMAND_RECORD_BYTES, RESULT_OK,
@@ -92,7 +92,7 @@ fn stage(
 #[test]
 fn every_metadata_id_resolves_through_a_command_acknowledgement() {
     let document = miso_engine_parameter_metadata::render();
-    let registry = launch_native_effect_registry_v1().expect("launch registry");
+    let registry = launch_native_effect_registry().expect("launch registry");
     let ids: Vec<&'static str> = registry
         .descriptors()
         .map(|descriptor| descriptor.id.as_str())
@@ -221,7 +221,7 @@ fn every_metadata_observation_tap_resolves_through_a_command_acknowledgement() {
     };
 
     let document = miso_engine_parameter_metadata::render();
-    let registry = launch_native_effect_registry_v1().expect("launch registry");
+    let registry = launch_native_effect_registry().expect("launch registry");
     let ids: Vec<&'static str> = registry
         .descriptors()
         .map(|descriptor| descriptor.id.as_str())

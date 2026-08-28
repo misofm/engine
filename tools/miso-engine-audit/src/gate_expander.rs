@@ -16,7 +16,7 @@ use miso_engine_effect_contract::{
     BankWidth, EffectBankProcessBlock, EffectProcessBlock, EffectQuality, InitialParameterValue,
     LinkMode, NativeEffectFactory, ParameterChannel, PortId, PrepareEffectBankRequest,
     PrepareEffectLimits, PrepareEffectRequest, PreparedNativeEffect, PreparedNativeEffectBank,
-    PreparedPortsV1, PreparedSidechainPort,
+    PreparedPorts, PreparedSidechainPort,
 };
 use miso_engine_gate_expander::{GATE_EXPANDER_DESCRIPTOR_V1, GateExpanderFactory};
 use miso_engine_lane::Backend;
@@ -227,7 +227,7 @@ fn request(values: &[InitialParameterValue], connected: bool) -> PrepareEffectRe
         quality: EffectQuality::Normal,
         bypass: false,
         link_mode: LinkMode::DualMono,
-        ports: PreparedPortsV1 {
+        ports: PreparedPorts {
             sidechain: if connected {
                 PreparedSidechainPort::Connected {
                     id,

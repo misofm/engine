@@ -72,58 +72,58 @@ fn absorb(summary: &mut Summary, parser: &[u8], trial: usize, outcome: &[u8], ac
 }
 
 fn assert_descriptor_diagnostic_shape(
-    error: EffectDescriptorWireDiagnosticV1,
+    error: EffectDescriptorWireDiagnostic,
     candidate_len: usize,
 ) {
     assert_eq!(error.required_bytes, 0);
     assert!(
-        error.byte_offset == EFFECT_DESCRIPTOR_WIRE_V1_UNAVAILABLE
+        error.byte_offset == EFFECT_DESCRIPTOR_WIRE_UNAVAILABLE
             || (error.byte_offset as usize) < candidate_len
     );
-    if error.record_index != EFFECT_DESCRIPTOR_WIRE_V1_UNAVAILABLE {
+    if error.record_index != EFFECT_DESCRIPTOR_WIRE_UNAVAILABLE {
         assert!(error.record_index < 4_096);
-        assert_ne!(error.byte_offset, EFFECT_DESCRIPTOR_WIRE_V1_UNAVAILABLE);
+        assert_ne!(error.byte_offset, EFFECT_DESCRIPTOR_WIRE_UNAVAILABLE);
     }
 }
 
-fn assert_package_diagnostic_shape(error: EffectPackageDiagnosticV1, candidate_len: usize) {
+fn assert_package_diagnostic_shape(error: EffectPackageDiagnostic, candidate_len: usize) {
     assert_eq!(error.reserved, 0);
     assert_eq!(error.required_bytes, 0);
     assert!(
-        error.byte_offset == EFFECT_PACKAGE_V1_UNAVAILABLE_OFFSET
+        error.byte_offset == EFFECT_PACKAGE_UNAVAILABLE_OFFSET
             || error.byte_offset < candidate_len as u64
     );
-    if error.artifact_index != EFFECT_PACKAGE_V1_UNAVAILABLE_INDEX {
+    if error.artifact_index != EFFECT_PACKAGE_UNAVAILABLE_INDEX {
         assert!(error.artifact_index < 4_096);
-        assert_ne!(error.byte_offset, EFFECT_PACKAGE_V1_UNAVAILABLE_OFFSET);
+        assert_ne!(error.byte_offset, EFFECT_PACKAGE_UNAVAILABLE_OFFSET);
     }
-    if matches!(error.code, EffectPackageDiagnosticCodeV1::Descriptor) {
-        assert_eq!(error.artifact_index, EFFECT_PACKAGE_V1_UNAVAILABLE_INDEX);
+    if matches!(error.code, EffectPackageDiagnosticCode::Descriptor) {
+        assert_eq!(error.artifact_index, EFFECT_PACKAGE_UNAVAILABLE_INDEX);
     }
 }
 
-fn assert_state_diagnostic_shape(error: EffectStateDiagnosticV1, candidate_len: usize) {
+fn assert_state_diagnostic_shape(error: EffectStateDiagnostic, candidate_len: usize) {
     assert_eq!(error.reserved, 0);
-    if matches!(error.code, EffectStateDiagnosticCodeV1::Limit) {
+    if matches!(error.code, EffectStateDiagnosticCode::Limit) {
         assert_eq!(error.detail, 0);
-        assert_eq!(error.item_index, EFFECT_STATE_V1_UNAVAILABLE_INDEX);
-        assert_eq!(error.byte_offset, EFFECT_STATE_V1_UNAVAILABLE_OFFSET);
+        assert_eq!(error.item_index, EFFECT_STATE_UNAVAILABLE_INDEX);
+        assert_eq!(error.byte_offset, EFFECT_STATE_UNAVAILABLE_OFFSET);
         assert!(error.required_bytes > 0);
         return;
     }
     assert_eq!(error.required_bytes, 0);
     assert!(error.byte_offset < candidate_len as u64);
-    if error.item_index != EFFECT_STATE_V1_UNAVAILABLE_INDEX {
+    if error.item_index != EFFECT_STATE_UNAVAILABLE_INDEX {
         assert!(error.item_index < 4_096);
     }
 }
 
 fn descriptor_outcome(candidate: &[u8]) -> Vec<u8> {
-    match verify_effect_descriptor_wire_v1(candidate, 4_194_304) {
+    match verify_effect_descriptor_wire(candidate, 4_194_304) {
         Ok(view) => {
             assert_eq!(view.as_bytes().as_ptr(), candidate.as_ptr());
             assert_eq!(view.as_bytes().len(), candidate.len());
-            let identity = effect_descriptor_identity_v1(candidate, 4_194_304).unwrap();
+            let identity = effect_descriptor_identity(candidate, 4_194_304).unwrap();
             let mut row = vec![1];
             row.extend_from_slice(identity.as_bytes());
             for value in [
@@ -155,11 +155,11 @@ fn descriptor_outcome(candidate: &[u8]) -> Vec<u8> {
 }
 
 fn package_outcome(candidate: &[u8]) -> Vec<u8> {
-    match verify_effect_package_v1(candidate, EffectPackageLimitsV1::default()) {
+    match verify_effect_package(candidate, EffectPackageLimits::default()) {
         Ok(view) => {
             assert_eq!(view.as_bytes().as_ptr(), candidate.as_ptr());
             assert_eq!(view.as_bytes().len(), candidate.len());
-            let cid = effect_package_cid_v1(candidate, EffectPackageLimitsV1::default()).unwrap();
+            let cid = effect_package_cid(candidate, EffectPackageLimits::default()).unwrap();
             let artifacts: Vec<_> = view
                 .artifacts()
                 .map(|artifact| {
@@ -167,7 +167,7 @@ fn package_outcome(candidate: &[u8]) -> Vec<u8> {
                     let end = start + candidate.len();
                     let content = artifact.content().as_ptr() as usize;
                     assert!(content >= start && content + artifact.content().len() <= end);
-                    EffectArtifactAuthoringV1 {
+                    EffectArtifactAuthoring {
                         kind: artifact.kind(),
                         path: artifact.path(),
                         target: artifact.target(),
@@ -176,18 +176,18 @@ fn package_outcome(candidate: &[u8]) -> Vec<u8> {
                     }
                 })
                 .collect();
-            let authoring = EffectPackageAuthoringV1 {
+            let authoring = EffectPackageAuthoring {
                 descriptor: view.descriptor(),
                 artifacts: &artifacts,
             };
             let required =
-                effect_package_v1_required_size(&authoring, EffectPackageLimitsV1::default())
+                effect_package_required_size(&authoring, EffectPackageLimits::default())
                     .unwrap();
             assert_eq!(required, candidate.len() as u64);
             let mut encoded = vec![0xa5; candidate.len()];
-            let written = encode_effect_package_v1(
+            let written = encode_effect_package(
                 &authoring,
-                EffectPackageLimitsV1::default(),
+                EffectPackageLimits::default(),
                 &mut encoded,
             )
             .unwrap();
@@ -217,7 +217,7 @@ fn package_outcome(candidate: &[u8]) -> Vec<u8> {
 }
 
 fn state_outcome(candidate: &[u8]) -> Vec<u8> {
-    match inspect_effect_state_selector_v1(candidate, EffectStateLimitsV1::default()) {
+    match inspect_effect_state_selector(candidate, EffectStateLimits::default()) {
         Ok(selector) => {
             let mut row = vec![1];
             row.extend_from_slice(selector.descriptor_identity().as_bytes());

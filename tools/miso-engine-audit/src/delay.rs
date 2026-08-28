@@ -12,7 +12,7 @@ use miso_engine_delay::{DELAY_PARAMETERS_V1, DelayFactory};
 use miso_engine_effect_contract::{
     AutomationSpanKind, EffectProcessBlock, EffectQuality, InitialParameterValue, LinkMode,
     NativeEffectFactory, ParameterChannel, PrepareEffectLimits, PrepareEffectRequest,
-    PreparedAutomationSpan, PreparedNativeEffect, PreparedPortsV1, PreparedSidechainPort,
+    PreparedAutomationSpan, PreparedNativeEffect, PreparedPorts, PreparedSidechainPort,
     ProcessReport,
 };
 
@@ -161,7 +161,7 @@ fn prepare_delay(cross: f32) -> Box<dyn PreparedNativeEffect> {
             quality: EffectQuality::Normal,
             bypass: false,
             link_mode: LinkMode::DualMono,
-            ports: PreparedPortsV1 {
+            ports: PreparedPorts {
                 sidechain: PreparedSidechainPort::None,
             },
             initial_values: &initial_values,

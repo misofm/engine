@@ -81,8 +81,8 @@ fn digest_hex(bytes: &[u8]) -> String {
         .collect()
 }
 
-static STATE_PARAMETERS: [ParameterDescriptorV1; 2] = [
-    ParameterDescriptorV1 {
+static STATE_PARAMETERS: [ParameterDescriptor; 2] = [
+    ParameterDescriptor {
         id: ParameterId(1),
         display_name: "Shared",
         display_unit: "linear",
@@ -100,7 +100,7 @@ static STATE_PARAMETERS: [ParameterDescriptorV1; 2] = [
         automatable: true,
         enum_choices: &[],
     },
-    ParameterDescriptorV1 {
+    ParameterDescriptor {
         id: ParameterId(2),
         display_name: "Per lane",
         display_unit: "linear",
@@ -119,28 +119,28 @@ static STATE_PARAMETERS: [ParameterDescriptorV1; 2] = [
         enum_choices: &[],
     },
 ];
-static STATE_PORTS: [PortDescriptorV1; 3] = [
-    PortDescriptorV1 {
+static STATE_PORTS: [PortDescriptor; 3] = [
+    PortDescriptor {
         id: port_id("main-in"),
         role: PortRole::MainInput,
         required: true,
         layout: PortLayout::DualMonoPlanar,
     },
-    PortDescriptorV1 {
+    PortDescriptor {
         id: port_id("main-out"),
         role: PortRole::MainOutput,
         required: true,
         layout: PortLayout::DualMonoPlanar,
     },
-    PortDescriptorV1 {
+    PortDescriptor {
         id: port_id("detector"),
         role: PortRole::SidechainInput,
         required: false,
         layout: PortLayout::DualMonoPlanar,
     },
 ];
-const fn state_quality(sample_rate: u32) -> QualityDescriptorV1 {
-    QualityDescriptorV1 {
+const fn state_quality(sample_rate: u32) -> QualityDescriptor {
+    QualityDescriptor {
         quality: EffectQuality::Normal,
         sample_rate,
         latency: LatencySamples(9),
@@ -154,13 +154,13 @@ const fn state_quality(sample_rate: u32) -> QualityDescriptorV1 {
         scratch_bytes_per_frame: 2,
     }
 }
-static STATE_QUALITIES: [QualityDescriptorV1; 4] = [
+static STATE_QUALITIES: [QualityDescriptor; 4] = [
     state_quality(44_100),
     state_quality(48_000),
     state_quality(88_200),
     state_quality(96_000),
 ];
-static STATE_DESCRIPTOR: EffectDescriptorV1 = EffectDescriptorV1 {
+static STATE_DESCRIPTOR: EffectDescriptor = EffectDescriptor {
     id: effect_id("test.state"),
     display_name: "State test",
     contract_major: 1,
@@ -190,8 +190,8 @@ static STATE_INITIAL: [InitialParameterValue; 3] = [
     },
 ];
 
-fn state_replay() -> EffectStateReplayViewV1<'static> {
-    EffectStateReplayViewV1 {
+fn state_replay() -> EffectStateReplayView<'static> {
+    EffectStateReplayView {
         effect_id: STATE_DESCRIPTOR.id,
         request: PrepareEffectRequest {
             sample_rate: 48_000,
@@ -199,7 +199,7 @@ fn state_replay() -> EffectStateReplayViewV1<'static> {
             quality: EffectQuality::Normal,
             bypass: true,
             link_mode: LinkMode::Maximum,
-            ports: PreparedPortsV1 {
+            ports: PreparedPorts {
                 sidechain: PreparedSidechainPort::Connected {
                     id: port_id("detector"),
                     required: false,
@@ -215,7 +215,7 @@ fn state_replay() -> EffectStateReplayViewV1<'static> {
     }
 }
 
-static MIGRATION_PARAMETERS: [ParameterDescriptorV1; 1] = [ParameterDescriptorV1 {
+static MIGRATION_PARAMETERS: [ParameterDescriptor; 1] = [ParameterDescriptor {
     id: ParameterId(1),
     display_name: "value",
     display_unit: "linear",
@@ -233,14 +233,14 @@ static MIGRATION_PARAMETERS: [ParameterDescriptorV1; 1] = [ParameterDescriptorV1
     automatable: true,
     enum_choices: &[],
 }];
-static MIGRATION_PORTS: [PortDescriptorV1; 2] = [
-    PortDescriptorV1 {
+static MIGRATION_PORTS: [PortDescriptor; 2] = [
+    PortDescriptor {
         id: port_id("main-in"),
         role: PortRole::MainInput,
         required: true,
         layout: PortLayout::DualMonoPlanar,
     },
-    PortDescriptorV1 {
+    PortDescriptor {
         id: port_id("main-out"),
         role: PortRole::MainOutput,
         required: true,
@@ -254,8 +254,8 @@ const fn migration_sizes(layout: u32) -> StatePayloadSizes {
         right_bytes: layout + 1,
     }
 }
-const fn migration_quality(rate: u32, layout: u32) -> QualityDescriptorV1 {
-    QualityDescriptorV1 {
+const fn migration_quality(rate: u32, layout: u32) -> QualityDescriptor {
+    QualityDescriptor {
         quality: EffectQuality::Normal,
         sample_rate: rate,
         latency: LatencySamples(0),
@@ -265,25 +265,25 @@ const fn migration_quality(rate: u32, layout: u32) -> QualityDescriptorV1 {
         scratch_bytes_per_frame: 0,
     }
 }
-static MIGRATION_Q1: [QualityDescriptorV1; 4] = [
+static MIGRATION_Q1: [QualityDescriptor; 4] = [
     migration_quality(44_100, 1),
     migration_quality(48_000, 1),
     migration_quality(88_200, 1),
     migration_quality(96_000, 1),
 ];
-static MIGRATION_Q2: [QualityDescriptorV1; 4] = [
+static MIGRATION_Q2: [QualityDescriptor; 4] = [
     migration_quality(44_100, 2),
     migration_quality(48_000, 2),
     migration_quality(88_200, 2),
     migration_quality(96_000, 2),
 ];
-static MIGRATION_Q3: [QualityDescriptorV1; 4] = [
+static MIGRATION_Q3: [QualityDescriptor; 4] = [
     migration_quality(44_100, 3),
     migration_quality(48_000, 3),
     migration_quality(88_200, 3),
     migration_quality(96_000, 3),
 ];
-static MIGRATION_D1: EffectDescriptorV1 = EffectDescriptorV1 {
+static MIGRATION_D1: EffectDescriptor = EffectDescriptor {
     id: effect_id("bench.migration"),
     display_name: "Benchmark migration",
     contract_major: 1,
@@ -295,12 +295,12 @@ static MIGRATION_D1: EffectDescriptorV1 = EffectDescriptorV1 {
     qualities: &MIGRATION_Q1,
     observations: &[],
 };
-static MIGRATION_D2: EffectDescriptorV1 = EffectDescriptorV1 {
+static MIGRATION_D2: EffectDescriptor = EffectDescriptor {
     state_layout_version: 2,
     qualities: &MIGRATION_Q2,
     ..MIGRATION_D1
 };
-static MIGRATION_D3: EffectDescriptorV1 = EffectDescriptorV1 {
+static MIGRATION_D3: EffectDescriptor = EffectDescriptor {
     state_layout_version: 3,
     qualities: &MIGRATION_Q3,
     ..MIGRATION_D1
@@ -358,7 +358,7 @@ struct MigrationBank {
 }
 
 impl NativeEffectFactory for MigrationFactory {
-    fn descriptor(&self) -> &'static EffectDescriptorV1 {
+    fn descriptor(&self) -> &'static EffectDescriptor {
         &MIGRATION_D3
     }
 
@@ -434,7 +434,7 @@ impl PreparedNativeEffectBank for MigrationBank {
 }
 
 struct GrowStep;
-impl EffectStateMigrationStepV1 for GrowStep {
+impl EffectStateMigrationStep for GrowStep {
     fn scratch_bytes(&self) -> u64 {
         3
     }
@@ -446,7 +446,7 @@ impl EffectStateMigrationStepV1 for GrowStep {
         source: StatePayloadInput<'_>,
         target: StatePayloadOutput<'_>,
         scratch: &mut [u8],
-    ) -> Result<EffectStateMigrationStepReportV1, EffectStateMigrationStepFailureV1> {
+    ) -> Result<EffectStateMigrationStepReport, EffectStateMigrationStepFailure> {
         assert_eq!(target_layout, source_layout + 1);
         assert_eq!(scratch.len(), 3);
         scratch.fill(target_layout as u8);
@@ -459,7 +459,7 @@ impl EffectStateMigrationStepV1 for GrowStep {
             to[from.len()..].fill(0x80 | target_layout as u8);
         }
         let sizes = migration_sizes(target_layout);
-        Ok(EffectStateMigrationStepReportV1 {
+        Ok(EffectStateMigrationStepReport {
             common_bytes: sizes.common_bytes,
             left_bytes: sizes.left_bytes,
             right_bytes: sizes.right_bytes,
@@ -468,14 +468,14 @@ impl EffectStateMigrationStepV1 for GrowStep {
     }
 }
 
-fn descriptor_wire(descriptor: &'static EffectDescriptorV1) -> &'static [u8] {
+fn descriptor_wire(descriptor: &'static EffectDescriptor) -> &'static [u8] {
     static WIRES: OnceLock<[Vec<u8>; 3]> = OnceLock::new();
     let wires = WIRES.get_or_init(|| {
         [&MIGRATION_D1, &MIGRATION_D2, &MIGRATION_D3].map(|value| {
-            let required = effect_descriptor_wire_v1_required_size(value, 1 << 20)
+            let required = effect_descriptor_wire_required_size(value, 1 << 20)
                 .expect("descriptor requirements");
             let mut wire = vec![0; required as usize];
-            encode_effect_descriptor_wire_v1(value, 1 << 20, &mut wire)
+            encode_effect_descriptor_wire(value, 1 << 20, &mut wire)
                 .expect("descriptor encoding");
             wire
         })
@@ -489,20 +489,20 @@ fn descriptor_wire(descriptor: &'static EffectDescriptorV1) -> &'static [u8] {
 }
 
 fn bound_descriptor(
-    descriptor: &'static EffectDescriptorV1,
-) -> BoundEffectDescriptorWireV1<'static> {
-    bind_effect_descriptor_wire_v1(descriptor, descriptor_wire(descriptor), 1 << 20)
+    descriptor: &'static EffectDescriptor,
+) -> BoundEffectDescriptorWire<'static> {
+    bind_effect_descriptor_wire(descriptor, descriptor_wire(descriptor), 1 << 20)
         .expect("bound descriptor")
 }
 
-fn migration_replay() -> EffectBankPreparationV1 {
-    EffectBankPreparationV1 {
+fn migration_replay() -> EffectBankPreparation {
+    EffectBankPreparation {
         sample_rate: 48_000,
         quantum: 128,
         quality: EffectQuality::Normal,
         bypass: false,
         link_mode: LinkMode::Average,
-        ports: PreparedPortsV1 {
+        ports: PreparedPorts {
             sidechain: PreparedSidechainPort::None,
         },
         initial_values: MIGRATION_INITIAL.into(),
@@ -514,8 +514,8 @@ fn migration_replay() -> EffectBankPreparationV1 {
     }
 }
 
-fn restore_admission() -> EffectStateRestoreAdmissionV1 {
-    EffectStateRestoreAdmissionV1 {
+fn restore_admission() -> EffectStateRestoreAdmission {
+    EffectStateRestoreAdmission {
         sample_rate: 48_000,
         quantum: 128,
         maximum_total_state_bytes: 64,
@@ -527,10 +527,10 @@ fn restore_admission() -> EffectStateRestoreAdmissionV1 {
 fn migration_envelope() -> Vec<u8> {
     let replay = migration_replay();
     let bound = bound_descriptor(&MIGRATION_D1);
-    let requirements = effect_state_v1_requirements(
+    let requirements = effect_state_requirements(
         bound,
         replay.state_replay(MIGRATION_D1.id),
-        EffectStateLimitsV1::default(),
+        EffectStateLimits::default(),
     )
     .expect("source state requirements");
     let payload = migration_payload(1, 0x10);
@@ -538,13 +538,13 @@ fn migration_envelope() -> Vec<u8> {
     let common = sizes.common_bytes as usize;
     let left = sizes.left_bytes as usize;
     let mut envelope = vec![0; requirements.envelope_bytes as usize];
-    encode_effect_state_v1(
+    encode_effect_state(
         bound,
         replay.state_replay(MIGRATION_D1.id),
         &payload[..common],
         &payload[common..common + left],
         &payload[common + left..],
-        EffectStateLimitsV1::default(),
+        EffectStateLimits::default(),
         &mut envelope,
     )
     .expect("source state encode");
@@ -565,7 +565,7 @@ fn validate_migration_descriptors() {
             assert_eq!(quality.scratch_bytes_per_frame, 0);
         }
         let wire = descriptor_wire(descriptor);
-        verify_effect_descriptor_wire_v1(wire, 1 << 20).expect("migration descriptor wire");
+        verify_effect_descriptor_wire(wire, 1 << 20).expect("migration descriptor wire");
         let bound = bound_descriptor(descriptor);
         assert_eq!(bound.wire(), wire);
     }
@@ -608,19 +608,19 @@ impl MigrationTimer for UntimedMigration {
     }
 }
 
-fn snapshot_bank_member(bank: &UnpublishedEffectBankStateV1<'_>, index: u32) -> Vec<u8> {
-    let requirements = scalar_effect_state_v1_requirements(
+fn snapshot_bank_member(bank: &UnpublishedEffectBankState<'_>, index: u32) -> Vec<u8> {
+    let requirements = scalar_effect_state_requirements(
         bank.bound_factory(),
         &bank.replays()[index as usize],
-        EffectStateLimitsV1::default(),
+        EffectStateLimits::default(),
     )
     .expect("member snapshot requirements");
     let mut payload = vec![0; requirements.payload_snapshot_scratch_bytes as usize];
     let mut output = vec![0; requirements.envelope_bytes as usize];
-    snapshot_unpublished_effect_bank_track_state_v1(
+    snapshot_unpublished_effect_bank_track_state(
         bank,
         index,
-        EffectStateLimitsV1::default(),
+        EffectStateLimits::default(),
         &mut payload,
         &mut output,
     )
@@ -630,15 +630,15 @@ fn snapshot_bank_member(bank: &UnpublishedEffectBankStateV1<'_>, index: u32) -> 
 
 fn execute_migration<T: MigrationTimer>(mut timer: T) -> (u64, Vec<u8>) {
     validate_migration_descriptors();
-    let registry = StateMigrationRegistryV1::new(
+    let registry = StateMigrationRegistry::new(
         2,
         vec![
-            EffectStateMigrationRegistrationV1::from_bound_descriptors(
+            EffectStateMigrationRegistration::from_bound_descriptors(
                 bound_descriptor(&MIGRATION_D1),
                 bound_descriptor(&MIGRATION_D2),
                 Arc::new(GrowStep),
             ),
-            EffectStateMigrationRegistrationV1::from_bound_descriptors(
+            EffectStateMigrationRegistration::from_bound_descriptors(
                 bound_descriptor(&MIGRATION_D2),
                 bound_descriptor(&MIGRATION_D3),
                 Arc::new(GrowStep),
@@ -648,23 +648,23 @@ fn execute_migration<T: MigrationTimer>(mut timer: T) -> (u64, Vec<u8>) {
     )
     .expect("migration registry");
     let factory: Arc<dyn NativeEffectFactory> = Arc::new(MigrationFactory);
-    let resolve_factory = bind_native_effect_factory_state_v1(
+    let resolve_factory = bind_native_effect_factory_state(
         Arc::clone(&factory),
         descriptor_wire(&MIGRATION_D3),
         1 << 20,
     )
     .expect("resolve factory");
     let destination_factory =
-        bind_native_effect_factory_state_v1(factory, descriptor_wire(&MIGRATION_D3), 1 << 20)
+        bind_native_effect_factory_state(factory, descriptor_wire(&MIGRATION_D3), 1 << 20)
             .expect("destination factory");
     let replay = migration_replay();
     let source = migration_envelope();
-    let resolved = resolve_effect_state_migration_v1(
+    let resolved = resolve_effect_state_migration(
         &registry,
         &resolve_factory,
         &source,
-        EffectStateLimitsV1::default(),
-        EffectStateMigrationAdmissionV1 {
+        EffectStateLimits::default(),
+        EffectStateMigrationAdmission {
             maximum_chain_steps: 2,
             maximum_intermediate_envelope_bytes: 1 << 20,
             maximum_migration_scratch_bytes: 1 << 20,
@@ -677,7 +677,7 @@ fn execute_migration<T: MigrationTimer>(mut timer: T) -> (u64, Vec<u8>) {
     let mut first = vec![0; requirements.first_envelope_bytes as usize];
     let mut second = vec![0; requirements.second_envelope_bytes as usize];
     let mut scratch = vec![0; requirements.migration_scratch_bytes as usize];
-    let bank = prepare_unpublished_effect_bank_state_v1(
+    let bank = prepare_unpublished_effect_bank_state(
         destination_factory,
         Backend::Simd4,
         BankWidth::Four,
@@ -688,16 +688,16 @@ fn execute_migration<T: MigrationTimer>(mut timer: T) -> (u64, Vec<u8>) {
         restore_admission(),
     )
     .expect("destination bank");
-    let snapshot_requirements = scalar_effect_state_v1_requirements(
+    let snapshot_requirements = scalar_effect_state_requirements(
         bank.bound_factory(),
         &bank.replays()[1],
-        EffectStateLimitsV1::default(),
+        EffectStateLimits::default(),
     )
     .expect("snapshot requirements");
     let mut payload = vec![0; snapshot_requirements.payload_snapshot_scratch_bytes as usize];
     let mut output = vec![0; snapshot_requirements.envelope_bytes as usize];
     timer.start();
-    let bank = restore_unpublished_effect_bank_track_state_with_migration_v1(
+    let bank = restore_unpublished_effect_bank_track_state_with_migration(
         resolved,
         bank,
         1,
@@ -706,23 +706,23 @@ fn execute_migration<T: MigrationTimer>(mut timer: T) -> (u64, Vec<u8>) {
         &mut scratch,
     )
     .expect("bank migration restore");
-    snapshot_unpublished_effect_bank_track_state_v1(
+    snapshot_unpublished_effect_bank_track_state(
         &bank,
         1,
-        EffectStateLimitsV1::default(),
+        EffectStateLimits::default(),
         &mut payload,
         &mut output,
     )
     .expect("final bank snapshot");
     let elapsed = timer.finish();
-    let verified = verify_effect_state_v1(
+    let verified = verify_effect_state(
         bound_descriptor(&MIGRATION_D3),
         &output,
-        EffectStateLimitsV1::default(),
+        EffectStateLimits::default(),
     )
     .expect("final migrated state");
-    validate_effect_state_current_layout_v1(verified).expect("final current layout");
-    validate_effect_state_replay_v1(verified, migration_replay().state_replay(MIGRATION_D3.id))
+    validate_effect_state_current_layout(verified).expect("final current layout");
+    validate_effect_state_replay(verified, migration_replay().state_replay(MIGRATION_D3.id))
         .expect("final replay");
     let (common, left, right) = verified.payloads();
     let final_payload = [common, left, right].concat();
@@ -735,13 +735,13 @@ fn execute_migration<T: MigrationTimer>(mut timer: T) -> (u64, Vec<u8>) {
     let common_bytes = sizes.common_bytes as usize;
     let left_bytes = sizes.left_bytes as usize;
     let mut expected_envelope = vec![0; output.len()];
-    encode_effect_state_v1(
+    encode_effect_state(
         bound_descriptor(&MIGRATION_D3),
         migration_replay().state_replay(MIGRATION_D3.id),
         &EXPECTED_MIGRATION_PAYLOAD[..common_bytes],
         &EXPECTED_MIGRATION_PAYLOAD[common_bytes..common_bytes + left_bytes],
         &EXPECTED_MIGRATION_PAYLOAD[common_bytes + left_bytes..],
-        EffectStateLimitsV1::default(),
+        EffectStateLimits::default(),
         &mut expected_envelope,
     )
     .expect("expected final envelope");
@@ -749,15 +749,15 @@ fn execute_migration<T: MigrationTimer>(mut timer: T) -> (u64, Vec<u8>) {
     assert_eq!(output, expected_envelope);
     for (index, seed) in [(0, 0x20), (2, 0x40), (3, 0x50)] {
         let sibling = snapshot_bank_member(&bank, index);
-        let sibling_state = verify_effect_state_v1(
+        let sibling_state = verify_effect_state(
             bound_descriptor(&MIGRATION_D3),
             &sibling,
-            EffectStateLimitsV1::default(),
+            EffectStateLimits::default(),
         )
         .expect("unaffected sibling state");
-        validate_effect_state_current_layout_v1(sibling_state)
+        validate_effect_state_current_layout(sibling_state)
             .expect("unaffected sibling current layout");
-        validate_effect_state_replay_v1(
+        validate_effect_state_replay(
             sibling_state,
             migration_replay().state_replay(MIGRATION_D3.id),
         )
@@ -775,9 +775,9 @@ fn migration_workload() -> (u64, Vec<u8>) {
 fn descriptor_workload(wire: &[u8]) -> (u64, Vec<u8>) {
     let start = Instant::now();
     let verified =
-        verify_effect_descriptor_wire_v1(wire, 1 << 22).expect("accepted descriptor fixture");
+        verify_effect_descriptor_wire(wire, 1 << 22).expect("accepted descriptor fixture");
     let identity =
-        effect_descriptor_identity_v1(wire, 1 << 22).expect("accepted descriptor identity");
+        effect_descriptor_identity(wire, 1 << 22).expect("accepted descriptor identity");
     let elapsed = u64::try_from(start.elapsed().as_nanos().max(1)).expect("nanoseconds fit u64");
     assert_eq!(verified.as_bytes(), wire);
     let output = identity.as_bytes().to_vec();
@@ -786,14 +786,14 @@ fn descriptor_workload(wire: &[u8]) -> (u64, Vec<u8>) {
 
 fn package_workload(package: &[u8]) -> (u64, Vec<u8>) {
     let start = Instant::now();
-    let verified = verify_effect_package_v1(package, EffectPackageLimitsV1::default())
+    let verified = verify_effect_package(package, EffectPackageLimits::default())
         .expect("accepted package fixture");
-    let cid = effect_package_cid_v1(package, EffectPackageLimitsV1::default())
+    let cid = effect_package_cid(package, EffectPackageLimits::default())
         .expect("accepted package CID");
-    let selected = select_effect_package_artifact_v1(
+    let selected = select_effect_package_artifact(
         &verified,
-        ArtifactSelectionRequestV1 {
-            kind: EffectArtifactKindV1::TargetNative,
+        ArtifactSelectionRequest {
+            kind: EffectArtifactKind::TargetNative,
             target: "x86_64-unknown-linux-gnu",
             capabilities: &["avx2", "fma"],
         },
@@ -809,20 +809,20 @@ fn state_workload(wire: &[u8]) -> (u64, Vec<u8>) {
     let state = include_bytes!("../../../fixtures/effect-state/v1/canonical.state.bin");
     let mut output = vec![0; state.len()];
     let start = Instant::now();
-    let bound = bind_effect_descriptor_wire_v1(&STATE_DESCRIPTOR, wire, 1 << 20)
+    let bound = bind_effect_descriptor_wire(&STATE_DESCRIPTOR, wire, 1 << 20)
         .expect("accepted state descriptor");
-    let verified = verify_effect_state_v1(bound, state, EffectStateLimitsV1::default())
+    let verified = verify_effect_state(bound, state, EffectStateLimits::default())
         .expect("accepted state fixture");
-    validate_effect_state_current_layout_v1(verified).expect("current state layout");
-    validate_effect_state_replay_v1(verified, state_replay()).expect("state replay");
+    validate_effect_state_current_layout(verified).expect("current state layout");
+    validate_effect_state_replay(verified, state_replay()).expect("state replay");
     let (common, left, right) = verified.payloads();
-    encode_effect_state_v1(
+    encode_effect_state(
         bound,
         state_replay(),
         common,
         left,
         right,
-        EffectStateLimitsV1::default(),
+        EffectStateLimits::default(),
         &mut output,
     )
     .expect("state re-encode");

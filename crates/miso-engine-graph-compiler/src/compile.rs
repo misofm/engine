@@ -483,9 +483,9 @@ impl GraphCompiler {
         // all, so having one fewer contributor there is the honest answer rather than a gap.
         let mut pool_classes = SessionPoolClassesV1::from_session(&session);
         for entry in &effects.entries {
-            let mut witness = ChannelSymmetryWitnessV1::SYMMETRIC;
+            let mut witness = ChannelSymmetryWitness::SYMMETRIC;
             witness.set(
-                ChannelSymmetryWitnessV1::DESIGNED,
+                ChannelSymmetryWitness::DESIGNED,
                 entry.processor.channel_symmetry(),
             );
             pool_classes.conjoin(&entry.track_id, witness);

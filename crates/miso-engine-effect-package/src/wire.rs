@@ -1,15 +1,15 @@
 use crate::{
-    EFFECT_DESCRIPTOR_WIRE_V1_UNAVAILABLE, EffectDescriptorWireDiagnosticCodeV1 as Code,
-    EffectDescriptorWireDiagnosticV1 as Diagnostic,
+    EFFECT_DESCRIPTOR_WIRE_UNAVAILABLE, EffectDescriptorWireDiagnosticCode as Code,
+    EffectDescriptorWireDiagnostic as Diagnostic,
 };
 use miso_engine_core::{
     LAUNCH_SAMPLE_RATES, SampleRateHz, is_extended_compatibility_sample_rate, is_launch_sample_rate,
 };
 use miso_engine_effect_contract::{
-    AutomationRate, DescriptorDiagnosticCode, EffectDescriptorV1, EffectQuality, LinkMode,
+    AutomationRate, DescriptorDiagnosticCode, EffectDescriptor, EffectQuality, LinkMode,
     LinkModeSet, ObservationCadenceV1, ObservationChannelsV1, ObservationCostV1, ObservationFoldV1,
     ObservationKindV1, ParameterChannelPolicy, ParameterDomain, ParameterMapping, ParameterUnit,
-    PortDescriptorV1, PortLayout, PortRole, SmoothingRule, TailSamples, validate_descriptor_v1,
+    PortDescriptor, PortLayout, PortRole, SmoothingRule, TailSamples, validate_descriptor,
 };
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -47,9 +47,9 @@ const OBSERVATION_BYTES: usize = 32;
 const IDENTITY_DOMAIN: &[u8] = b"miso.engine.effect-descriptor.identity.v1\0";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct EffectDescriptorIdentityV1([u8; 32]);
+pub struct EffectDescriptorIdentity([u8; 32]);
 
-impl EffectDescriptorIdentityV1 {
+impl EffectDescriptorIdentity {
     pub const fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
@@ -61,19 +61,19 @@ impl EffectDescriptorIdentityV1 {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u32)]
-pub enum EffectDescriptorBindingErrorKindV1 {
+pub enum EffectDescriptorBindingErrorKind {
     ExternalWire = 1,
     StaticDescriptorMismatch = 2,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct EffectDescriptorBindingErrorV1 {
-    kind: EffectDescriptorBindingErrorKindV1,
+pub struct EffectDescriptorBindingError {
+    kind: EffectDescriptorBindingErrorKind,
     diagnostic: Diagnostic,
 }
 
-impl EffectDescriptorBindingErrorV1 {
-    pub const fn kind(self) -> EffectDescriptorBindingErrorKindV1 {
+impl EffectDescriptorBindingError {
+    pub const fn kind(self) -> EffectDescriptorBindingErrorKind {
         self.kind
     }
 
@@ -86,28 +86,28 @@ impl EffectDescriptorBindingErrorV1 {
 ///
 /// Private fields prevent raw wire or identity bytes from being treated as factory provenance.
 #[derive(Clone, Copy, Debug)]
-pub struct BoundEffectDescriptorWireV1<'a> {
-    descriptor: &'static EffectDescriptorV1,
+pub struct BoundEffectDescriptorWire<'a> {
+    descriptor: &'static EffectDescriptor,
     wire: &'a [u8],
-    identity: EffectDescriptorIdentityV1,
+    identity: EffectDescriptorIdentity,
 }
 
-impl<'a> BoundEffectDescriptorWireV1<'a> {
+impl<'a> BoundEffectDescriptorWire<'a> {
     pub const fn wire(&self) -> &'a [u8] {
         self.wire
     }
 
-    pub const fn identity(&self) -> EffectDescriptorIdentityV1 {
+    pub const fn identity(&self) -> EffectDescriptorIdentity {
         self.identity
     }
 
-    pub(crate) const fn descriptor(&self) -> &'static EffectDescriptorV1 {
+    pub(crate) const fn descriptor(&self) -> &'static EffectDescriptor {
         self.descriptor
     }
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct VerifiedEffectDescriptorWireV1<'a> {
+pub struct VerifiedEffectDescriptorWire<'a> {
     bytes: &'a [u8],
     parameter_count: u32,
     port_count: u32,
@@ -118,7 +118,7 @@ pub struct VerifiedEffectDescriptorWireV1<'a> {
     supported_link_mode_bits: u32,
 }
 
-impl<'a> VerifiedEffectDescriptorWireV1<'a> {
+impl<'a> VerifiedEffectDescriptorWire<'a> {
     pub const fn as_bytes(self) -> &'a [u8] {
         self.bytes
     }
@@ -153,7 +153,7 @@ impl<'a> VerifiedEffectDescriptorWireV1<'a> {
     }
 
     /// Identity of bytes this value already proved canonical; performs no second validation pass.
-    pub fn identity(self) -> EffectDescriptorIdentityV1 {
+    pub fn identity(self) -> EffectDescriptorIdentity {
         descriptor_identity(self.bytes)
     }
 }
@@ -194,10 +194,10 @@ impl Layout {
 fn diagnostic(code: Code, byte_offset: usize, record_index: Option<usize>) -> Diagnostic {
     Diagnostic::new(
         code,
-        u32::try_from(byte_offset).unwrap_or(EFFECT_DESCRIPTOR_WIRE_V1_UNAVAILABLE),
+        u32::try_from(byte_offset).unwrap_or(EFFECT_DESCRIPTOR_WIRE_UNAVAILABLE),
         record_index
             .and_then(|index| u32::try_from(index).ok())
-            .unwrap_or(EFFECT_DESCRIPTOR_WIRE_V1_UNAVAILABLE),
+            .unwrap_or(EFFECT_DESCRIPTOR_WIRE_UNAVAILABLE),
     )
 }
 
@@ -232,14 +232,14 @@ fn add_text_size(total: &mut u32, value: &str) -> Result<(), Diagnostic> {
     Ok(())
 }
 
-fn port_key(port: &PortDescriptorV1) -> (u32, &[u8]) {
+fn port_key(port: &PortDescriptor) -> (u32, &[u8]) {
     (port.role as u32, port.id.as_str().as_bytes())
 }
 
 fn canonical_port_at(
-    ports: &'static [PortDescriptorV1],
+    ports: &'static [PortDescriptor],
     index: usize,
-) -> &'static PortDescriptorV1 {
+) -> &'static PortDescriptor {
     ports
         .iter()
         .find(|candidate| {
@@ -250,10 +250,10 @@ fn canonical_port_at(
 }
 
 fn descriptor_layout(
-    descriptor: &'static EffectDescriptorV1,
+    descriptor: &'static EffectDescriptor,
     maximum_descriptor_bytes: u32,
 ) -> Result<Layout, Diagnostic> {
-    validate_descriptor_v1(descriptor).map_err(|_| diagnostic(Code::Semantic, 0, None))?;
+    validate_descriptor(descriptor).map_err(|_| diagnostic(Code::Semantic, 0, None))?;
     if maximum_descriptor_bytes == 0 {
         return Err(diagnostic(Code::Limit, 16, None));
     }
@@ -327,8 +327,8 @@ fn descriptor_layout(
     })
 }
 
-pub fn effect_descriptor_wire_v1_required_size(
-    descriptor: &'static EffectDescriptorV1,
+pub fn effect_descriptor_wire_required_size(
+    descriptor: &'static EffectDescriptor,
     maximum_descriptor_bytes: u32,
 ) -> Result<u32, Diagnostic> {
     Ok(descriptor_layout(descriptor, maximum_descriptor_bytes)?.total)
@@ -355,8 +355,8 @@ fn write_text(output: &mut [u8], cursor: &mut u32, value: &str) -> (u32, u32) {
     (offset, length)
 }
 
-pub fn encode_effect_descriptor_wire_v1(
-    descriptor: &'static EffectDescriptorV1,
+pub fn encode_effect_descriptor_wire(
+    descriptor: &'static EffectDescriptor,
     maximum_descriptor_bytes: u32,
     output: &mut [u8],
 ) -> Result<u32, Diagnostic> {
@@ -504,7 +504,7 @@ fn read_u64(bytes: &[u8], offset: usize) -> u64 {
 }
 
 #[derive(Clone, Copy)]
-struct BorrowedEffectDescriptorViewV1<'a> {
+struct BorrowedEffectDescriptorView<'a> {
     bytes: &'a [u8],
     layout: Layout,
     effect_id: &'a str,
@@ -515,7 +515,7 @@ struct BorrowedEffectDescriptorViewV1<'a> {
 }
 
 #[derive(Clone, Copy)]
-struct BorrowedParameterV1<'a> {
+struct BorrowedParameter<'a> {
     id: u32,
     domain: ParameterDomain,
     mapping: ParameterMapping,
@@ -533,7 +533,7 @@ struct BorrowedParameterV1<'a> {
 }
 
 #[derive(Clone, Copy)]
-struct BorrowedPortV1<'a> {
+struct BorrowedPort<'a> {
     id: &'a str,
     role: PortRole,
     required: bool,
@@ -541,7 +541,7 @@ struct BorrowedPortV1<'a> {
 }
 
 #[derive(Clone, Copy)]
-struct BorrowedObservationV1<'a> {
+struct BorrowedObservation<'a> {
     id: u32,
     cost: ObservationCostV1,
     cadence: ObservationCadenceV1,
@@ -553,26 +553,26 @@ struct BorrowedObservationV1<'a> {
 }
 
 #[derive(Clone, Copy)]
-struct BorrowedQualityV1 {
+struct BorrowedQuality {
     quality: EffectQuality,
     sample_rate: u32,
     left_bytes: u32,
     right_bytes: u32,
 }
 
-impl<'a> BorrowedEffectDescriptorViewV1<'a> {
+impl<'a> BorrowedEffectDescriptorView<'a> {
     fn text(self, offset: usize, length: usize) -> &'a str {
         core::str::from_utf8(&self.bytes[offset..offset + length]).expect("text phase checked")
     }
 
-    fn parameter(self, index: usize) -> BorrowedParameterV1<'a> {
+    fn parameter(self, index: usize) -> BorrowedParameter<'a> {
         let record = self.layout.parameter_offset as usize + index * PARAMETER_BYTES;
         let flags = read_u32(self.bytes, record + 32);
         let name_offset = read_u32(self.bytes, record + 56) as usize;
         let name_length = read_u32(self.bytes, record + 60) as usize;
         let unit_offset = read_u32(self.bytes, record + 64) as usize;
         let unit_length = read_u32(self.bytes, record + 68) as usize;
-        BorrowedParameterV1 {
+        BorrowedParameter {
             id: read_u32(self.bytes, record),
             domain: ParameterDomain::from_raw(read_u32(self.bytes, record + 8)).unwrap(),
             mapping: ParameterMapping::from_raw(read_u32(self.bytes, record + 12)).unwrap(),
@@ -600,11 +600,11 @@ impl<'a> BorrowedEffectDescriptorViewV1<'a> {
         )
     }
 
-    fn port(self, index: usize) -> BorrowedPortV1<'a> {
+    fn port(self, index: usize) -> BorrowedPort<'a> {
         let record = self.layout.port_offset as usize + index * PORT_BYTES;
         let offset = read_u32(self.bytes, record) as usize;
         let length = read_u32(self.bytes, record + 4) as usize;
-        BorrowedPortV1 {
+        BorrowedPort {
             id: self.text(offset, length),
             role: PortRole::from_raw(read_u32(self.bytes, record + 8)).unwrap(),
             required: read_u32(self.bytes, record + 12) == 1,
@@ -612,10 +612,10 @@ impl<'a> BorrowedEffectDescriptorViewV1<'a> {
         }
     }
 
-    fn observation(self, index: usize) -> BorrowedObservationV1<'a> {
+    fn observation(self, index: usize) -> BorrowedObservation<'a> {
         let record = self.layout.observation_offset as usize + index * OBSERVATION_BYTES;
         let byte = |offset: usize| u32::from(self.bytes[record + offset]);
-        BorrowedObservationV1 {
+        BorrowedObservation {
             id: read_u32(self.bytes, record),
             cost: ObservationCostV1::from_raw(byte(6)).unwrap(),
             cadence: ObservationCadenceV1::from_raw(byte(7)).unwrap(),
@@ -633,9 +633,9 @@ impl<'a> BorrowedEffectDescriptorViewV1<'a> {
         }
     }
 
-    fn quality(self, index: usize) -> BorrowedQualityV1 {
+    fn quality(self, index: usize) -> BorrowedQuality {
         let record = self.layout.quality_offset as usize + index * QUALITY_BYTES;
-        BorrowedQualityV1 {
+        BorrowedQuality {
             quality: EffectQuality::from_raw(read_u32(self.bytes, record)).unwrap(),
             sample_rate: read_u32(self.bytes, record + 4),
             left_bytes: read_u32(self.bytes, record + 36),
@@ -686,7 +686,7 @@ fn take_text<'a>(
 fn parse_borrowed_wire(
     bytes: &[u8],
     maximum_descriptor_bytes: u32,
-) -> Result<BorrowedEffectDescriptorViewV1<'_>, Diagnostic> {
+) -> Result<BorrowedEffectDescriptorView<'_>, Diagnostic> {
     // Phase 2: explicit limit and host-fit checks. Rust references already cover argument validity.
     if maximum_descriptor_bytes == 0
         || bytes.len() > maximum_descriptor_bytes as usize
@@ -1156,7 +1156,7 @@ fn parse_borrowed_wire(
         }
     }
 
-    Ok(BorrowedEffectDescriptorViewV1 {
+    Ok(BorrowedEffectDescriptorView {
         bytes,
         layout,
         effect_id,
@@ -1176,8 +1176,8 @@ struct BorrowedSemanticError {
 }
 
 fn parameter_value_valid(
-    view: BorrowedEffectDescriptorViewV1<'_>,
-    parameter: BorrowedParameterV1<'_>,
+    view: BorrowedEffectDescriptorView<'_>,
+    parameter: BorrowedParameter<'_>,
     value: f32,
 ) -> bool {
     if !value.is_finite() {
@@ -1196,8 +1196,8 @@ fn parameter_value_valid(
 }
 
 fn parameter_semantics_valid(
-    view: BorrowedEffectDescriptorViewV1<'_>,
-    parameter: BorrowedParameterV1<'_>,
+    view: BorrowedEffectDescriptorView<'_>,
+    parameter: BorrowedParameter<'_>,
 ) -> bool {
     if !valid_text(parameter.display_name)
         || !valid_text(parameter.display_unit)
@@ -1266,7 +1266,7 @@ fn parameter_semantics_valid(
 }
 
 fn borrowed_semantic_errors(
-    view: BorrowedEffectDescriptorViewV1<'_>,
+    view: BorrowedEffectDescriptorView<'_>,
 ) -> Vec<BorrowedSemanticError> {
     let mut errors = Vec::new();
     let mut push = |path, code, byte_offset, record_index| {
@@ -1446,7 +1446,7 @@ fn borrowed_semantic_errors(
             );
         }
     }
-    // Issue #143: the borrowed mirror of `validate_descriptor_v1`'s observation rules. The
+    // Issue #143: the borrowed mirror of `validate_descriptor`'s observation rules. The
     // per-lane rule reads the *decoded* qualities rather than the static descriptor, so external
     // wire is judged by its own bytes and never by a descriptor it claims to be.
     let per_lane_state =
@@ -1500,8 +1500,8 @@ fn semantic_mismatch(byte_offset: usize, record_index: Option<usize>) -> Diagnos
 }
 
 fn compare_static_descriptor(
-    view: BorrowedEffectDescriptorViewV1<'_>,
-    descriptor: &'static EffectDescriptorV1,
+    view: BorrowedEffectDescriptorView<'_>,
+    descriptor: &'static EffectDescriptor,
 ) -> Result<(), Diagnostic> {
     if read_u16(view.bytes, 20) != descriptor.contract_major {
         return Err(semantic_mismatch(20, None));
@@ -1689,26 +1689,26 @@ fn compare_static_descriptor(
     Ok(())
 }
 
-fn descriptor_identity(bytes: &[u8]) -> EffectDescriptorIdentityV1 {
+fn descriptor_identity(bytes: &[u8]) -> EffectDescriptorIdentity {
     let mut hasher = Sha256::new();
     hasher.update(IDENTITY_DOMAIN);
     hasher.update((bytes.len() as u64).to_le_bytes());
     hasher.update(bytes);
-    EffectDescriptorIdentityV1(hasher.finalize().into())
+    EffectDescriptorIdentity(hasher.finalize().into())
 }
 
-pub fn bind_effect_descriptor_wire_v1<'a>(
-    descriptor: &'static EffectDescriptorV1,
+pub fn bind_effect_descriptor_wire<'a>(
+    descriptor: &'static EffectDescriptor,
     wire: &'a [u8],
     maximum_descriptor_bytes: u32,
-) -> Result<BoundEffectDescriptorWireV1<'a>, EffectDescriptorBindingErrorV1> {
-    validate_descriptor_v1(descriptor).map_err(|_| EffectDescriptorBindingErrorV1 {
-        kind: EffectDescriptorBindingErrorKindV1::StaticDescriptorMismatch,
+) -> Result<BoundEffectDescriptorWire<'a>, EffectDescriptorBindingError> {
+    validate_descriptor(descriptor).map_err(|_| EffectDescriptorBindingError {
+        kind: EffectDescriptorBindingErrorKind::StaticDescriptorMismatch,
         diagnostic: semantic_mismatch(0, None),
     })?;
     let view = parse_borrowed_wire(wire, maximum_descriptor_bytes).map_err(|diagnostic| {
-        EffectDescriptorBindingErrorV1 {
-            kind: EffectDescriptorBindingErrorKindV1::ExternalWire,
+        EffectDescriptorBindingError {
+            kind: EffectDescriptorBindingErrorKind::ExternalWire,
             diagnostic,
         }
     })?;
@@ -1716,28 +1716,28 @@ pub fn bind_effect_descriptor_wire_v1<'a>(
         .into_iter()
         .min_by_key(|error| (error.byte_offset, error.record_index))
     {
-        return Err(EffectDescriptorBindingErrorV1 {
-            kind: EffectDescriptorBindingErrorKindV1::ExternalWire,
+        return Err(EffectDescriptorBindingError {
+            kind: EffectDescriptorBindingErrorKind::ExternalWire,
             diagnostic: diagnostic(Code::Semantic, error.byte_offset, error.record_index),
         });
     }
     compare_static_descriptor(view, descriptor).map_err(|diagnostic| {
-        EffectDescriptorBindingErrorV1 {
-            kind: EffectDescriptorBindingErrorKindV1::StaticDescriptorMismatch,
+        EffectDescriptorBindingError {
+            kind: EffectDescriptorBindingErrorKind::StaticDescriptorMismatch,
             diagnostic,
         }
     })?;
-    Ok(BoundEffectDescriptorWireV1 {
+    Ok(BoundEffectDescriptorWire {
         descriptor,
         wire,
         identity: descriptor_identity(wire),
     })
 }
 
-pub fn verify_effect_descriptor_wire_v1(
+pub fn verify_effect_descriptor_wire(
     bytes: &[u8],
     maximum_descriptor_bytes: u32,
-) -> Result<VerifiedEffectDescriptorWireV1<'_>, Diagnostic> {
+) -> Result<VerifiedEffectDescriptorWire<'_>, Diagnostic> {
     let view = parse_borrowed_wire(bytes, maximum_descriptor_bytes)?;
     if let Some(error) = borrowed_semantic_errors(view)
         .into_iter()
@@ -1749,7 +1749,7 @@ pub fn verify_effect_descriptor_wire_v1(
             error.record_index,
         ));
     }
-    Ok(VerifiedEffectDescriptorWireV1 {
+    Ok(VerifiedEffectDescriptorWire {
         bytes,
         parameter_count: view.layout.parameters,
         port_count: view.layout.ports,
@@ -1761,19 +1761,19 @@ pub fn verify_effect_descriptor_wire_v1(
     })
 }
 
-pub fn effect_descriptor_identity_v1(
+pub fn effect_descriptor_identity(
     bytes: &[u8],
     maximum_descriptor_bytes: u32,
-) -> Result<EffectDescriptorIdentityV1, Diagnostic> {
-    Ok(verify_effect_descriptor_wire_v1(bytes, maximum_descriptor_bytes)?.identity())
+) -> Result<EffectDescriptorIdentity, Diagnostic> {
+    Ok(verify_effect_descriptor_wire(bytes, maximum_descriptor_bytes)?.identity())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use miso_engine_effect_contract::{
-        DescriptorError, EffectId, EnumChoiceV1, LatencySamples, ParameterDescriptorV1,
-        ParameterId, PortDescriptorV1, PortId, QualityDescriptorV1, StatePayloadSizes,
+        DescriptorError, EffectId, EnumChoice, LatencySamples, ParameterDescriptor,
+        ParameterId, PortDescriptor, PortId, QualityDescriptor, StatePayloadSizes,
     };
 
     const fn effect_id(value: &'static str) -> EffectId {
@@ -1790,43 +1790,43 @@ mod tests {
         }
     }
 
-    static CHOICES: [EnumChoiceV1; 2] = [
-        EnumChoiceV1 {
+    static CHOICES: [EnumChoice; 2] = [
+        EnumChoice {
             value: 0.0,
             label: "No",
         },
-        EnumChoiceV1 {
+        EnumChoice {
             value: 1.0,
             label: "Up",
         },
     ];
-    static DUPLICATE_LABEL_CHOICES: [EnumChoiceV1; 2] = [
-        EnumChoiceV1 {
+    static DUPLICATE_LABEL_CHOICES: [EnumChoice; 2] = [
+        EnumChoice {
             value: 0.0,
             label: "No",
         },
-        EnumChoiceV1 {
+        EnumChoice {
             value: 1.0,
             label: "No",
         },
     ];
-    static OUT_OF_ORDER_CHOICES: [EnumChoiceV1; 2] = [CHOICES[1], CHOICES[0]];
-    static NONFINITE_CHOICES: [EnumChoiceV1; 2] = [
-        EnumChoiceV1 {
+    static OUT_OF_ORDER_CHOICES: [EnumChoice; 2] = [CHOICES[1], CHOICES[0]];
+    static NONFINITE_CHOICES: [EnumChoice; 2] = [
+        EnumChoice {
             value: f32::NAN,
             label: "No",
         },
         CHOICES[1],
     ];
-    static CONTROL_LABEL_CHOICES: [EnumChoiceV1; 2] = [
-        EnumChoiceV1 {
+    static CONTROL_LABEL_CHOICES: [EnumChoice; 2] = [
+        EnumChoice {
             label: "\n",
             ..CHOICES[0]
         },
         CHOICES[1],
     ];
-    static PARAMETERS: [ParameterDescriptorV1; 3] = [
-        ParameterDescriptorV1 {
+    static PARAMETERS: [ParameterDescriptor; 3] = [
+        ParameterDescriptor {
             id: ParameterId(1),
             display_name: "Gain",
             display_unit: "dB",
@@ -1844,7 +1844,7 @@ mod tests {
             automatable: true,
             enum_choices: &[],
         },
-        ParameterDescriptorV1 {
+        ParameterDescriptor {
             id: ParameterId(2),
             display_name: "Bypass",
             display_unit: "state",
@@ -1862,7 +1862,7 @@ mod tests {
             automatable: true,
             enum_choices: &[],
         },
-        ParameterDescriptorV1 {
+        ParameterDescriptor {
             id: ParameterId(3),
             display_name: "Mode",
             display_unit: "choice",
@@ -1881,125 +1881,125 @@ mod tests {
             enum_choices: &CHOICES,
         },
     ];
-    static ZERO_ID_PARAMETERS: [ParameterDescriptorV1; 3] = [
-        ParameterDescriptorV1 {
+    static ZERO_ID_PARAMETERS: [ParameterDescriptor; 3] = [
+        ParameterDescriptor {
             id: ParameterId(0),
             ..PARAMETERS[0]
         },
         PARAMETERS[1],
         PARAMETERS[2],
     ];
-    static BAD_DEFAULT_PARAMETERS: [ParameterDescriptorV1; 3] = [
-        ParameterDescriptorV1 {
+    static BAD_DEFAULT_PARAMETERS: [ParameterDescriptor; 3] = [
+        ParameterDescriptor {
             default_value: 25.0,
             ..PARAMETERS[0]
         },
         PARAMETERS[1],
         PARAMETERS[2],
     ];
-    static BAD_BOOLEAN_PARAMETERS: [ParameterDescriptorV1; 3] = [
+    static BAD_BOOLEAN_PARAMETERS: [ParameterDescriptor; 3] = [
         PARAMETERS[0],
-        ParameterDescriptorV1 {
+        ParameterDescriptor {
             minimum: Some(0.0),
             ..PARAMETERS[1]
         },
         PARAMETERS[2],
     ];
-    static BAD_SMOOTHING_PARAMETERS: [ParameterDescriptorV1; 3] = [
-        ParameterDescriptorV1 {
+    static BAD_SMOOTHING_PARAMETERS: [ParameterDescriptor; 3] = [
+        ParameterDescriptor {
             smoothing_samples: 0,
             ..PARAMETERS[0]
         },
         PARAMETERS[1],
         PARAMETERS[2],
     ];
-    static BAD_LABEL_PARAMETERS: [ParameterDescriptorV1; 3] = [
+    static BAD_LABEL_PARAMETERS: [ParameterDescriptor; 3] = [
         PARAMETERS[0],
         PARAMETERS[1],
-        ParameterDescriptorV1 {
+        ParameterDescriptor {
             enum_choices: &DUPLICATE_LABEL_CHOICES,
             ..PARAMETERS[2]
         },
     ];
-    static DUPLICATE_ID_PARAMETERS: [ParameterDescriptorV1; 3] = [
+    static DUPLICATE_ID_PARAMETERS: [ParameterDescriptor; 3] = [
         PARAMETERS[0],
-        ParameterDescriptorV1 {
+        ParameterDescriptor {
             id: ParameterId(1),
             ..PARAMETERS[1]
         },
         PARAMETERS[2],
     ];
-    static OUT_OF_ORDER_PARAMETERS: [ParameterDescriptorV1; 3] =
+    static OUT_OF_ORDER_PARAMETERS: [ParameterDescriptor; 3] =
         [PARAMETERS[1], PARAMETERS[0], PARAMETERS[2]];
-    static MISSING_MINIMUM_PARAMETERS: [ParameterDescriptorV1; 3] = [
-        ParameterDescriptorV1 {
+    static MISSING_MINIMUM_PARAMETERS: [ParameterDescriptor; 3] = [
+        ParameterDescriptor {
             minimum: None,
             ..PARAMETERS[0]
         },
         PARAMETERS[1],
         PARAMETERS[2],
     ];
-    static BAD_LOG_PARAMETERS: [ParameterDescriptorV1; 3] = [
-        ParameterDescriptorV1 {
+    static BAD_LOG_PARAMETERS: [ParameterDescriptor; 3] = [
+        ParameterDescriptor {
             mapping: ParameterMapping::Logarithmic,
             ..PARAMETERS[0]
         },
         PARAMETERS[1],
         PARAMETERS[2],
     ];
-    static BAD_BOOLEAN_DEFAULT_PARAMETERS: [ParameterDescriptorV1; 3] = [
+    static BAD_BOOLEAN_DEFAULT_PARAMETERS: [ParameterDescriptor; 3] = [
         PARAMETERS[0],
-        ParameterDescriptorV1 {
+        ParameterDescriptor {
             default_value: 0.5,
             ..PARAMETERS[1]
         },
         PARAMETERS[2],
     ];
-    static SHORT_ENUM_PARAMETERS: [ParameterDescriptorV1; 3] = [
+    static SHORT_ENUM_PARAMETERS: [ParameterDescriptor; 3] = [
         PARAMETERS[0],
         PARAMETERS[1],
-        ParameterDescriptorV1 {
+        ParameterDescriptor {
             enum_choices: &[CHOICES[0]],
             ..PARAMETERS[2]
         },
     ];
-    static BAD_ENUM_DEFAULT_PARAMETERS: [ParameterDescriptorV1; 3] = [
+    static BAD_ENUM_DEFAULT_PARAMETERS: [ParameterDescriptor; 3] = [
         PARAMETERS[0],
         PARAMETERS[1],
-        ParameterDescriptorV1 {
+        ParameterDescriptor {
             default_value: 2.0,
             ..PARAMETERS[2]
         },
     ];
-    static BAD_AUTOMATION_PARAMETERS: [ParameterDescriptorV1; 3] = [
-        ParameterDescriptorV1 {
+    static BAD_AUTOMATION_PARAMETERS: [ParameterDescriptor; 3] = [
+        ParameterDescriptor {
             automatable: false,
             ..PARAMETERS[0]
         },
         PARAMETERS[1],
-        ParameterDescriptorV1 {
+        ParameterDescriptor {
             automatable: true,
             ..PARAMETERS[2]
         },
     ];
-    static NONFINITE_PARAMETERS: [ParameterDescriptorV1; 3] = [
-        ParameterDescriptorV1 {
+    static NONFINITE_PARAMETERS: [ParameterDescriptor; 3] = [
+        ParameterDescriptor {
             minimum: Some(f32::NAN),
             ..PARAMETERS[0]
         },
         PARAMETERS[1],
         PARAMETERS[2],
     ];
-    static NEGATIVE_ZERO_PARAMETERS: [ParameterDescriptorV1; 3] = [
-        ParameterDescriptorV1 {
+    static NEGATIVE_ZERO_PARAMETERS: [ParameterDescriptor; 3] = [
+        ParameterDescriptor {
             default_value: -0.0,
             ..PARAMETERS[0]
         },
         PARAMETERS[1],
         PARAMETERS[2],
     ];
-    static REVERSED_BOUND_PARAMETERS: [ParameterDescriptorV1; 3] = [
-        ParameterDescriptorV1 {
+    static REVERSED_BOUND_PARAMETERS: [ParameterDescriptor; 3] = [
+        ParameterDescriptor {
             minimum: Some(24.0),
             maximum: Some(-24.0),
             ..PARAMETERS[0]
@@ -2007,98 +2007,98 @@ mod tests {
         PARAMETERS[1],
         PARAMETERS[2],
     ];
-    static CONTINUOUS_CHOICES_PARAMETERS: [ParameterDescriptorV1; 3] = [
-        ParameterDescriptorV1 {
+    static CONTINUOUS_CHOICES_PARAMETERS: [ParameterDescriptor; 3] = [
+        ParameterDescriptor {
             enum_choices: &CHOICES,
             ..PARAMETERS[0]
         },
         PARAMETERS[1],
         PARAMETERS[2],
     ];
-    static BOOLEAN_MAPPING_PARAMETERS: [ParameterDescriptorV1; 3] = [
+    static BOOLEAN_MAPPING_PARAMETERS: [ParameterDescriptor; 3] = [
         PARAMETERS[0],
-        ParameterDescriptorV1 {
+        ParameterDescriptor {
             mapping: ParameterMapping::Linear,
             ..PARAMETERS[1]
         },
         PARAMETERS[2],
     ];
-    static OUT_OF_ORDER_ENUM_PARAMETERS: [ParameterDescriptorV1; 3] = [
+    static OUT_OF_ORDER_ENUM_PARAMETERS: [ParameterDescriptor; 3] = [
         PARAMETERS[0],
         PARAMETERS[1],
-        ParameterDescriptorV1 {
+        ParameterDescriptor {
             enum_choices: &OUT_OF_ORDER_CHOICES,
             ..PARAMETERS[2]
         },
     ];
-    static NONFINITE_ENUM_PARAMETERS: [ParameterDescriptorV1; 3] = [
+    static NONFINITE_ENUM_PARAMETERS: [ParameterDescriptor; 3] = [
         PARAMETERS[0],
         PARAMETERS[1],
-        ParameterDescriptorV1 {
+        ParameterDescriptor {
             enum_choices: &NONFINITE_CHOICES,
             ..PARAMETERS[2]
         },
     ];
-    static CONTROL_LABEL_PARAMETERS: [ParameterDescriptorV1; 3] = [
+    static CONTROL_LABEL_PARAMETERS: [ParameterDescriptor; 3] = [
         PARAMETERS[0],
         PARAMETERS[1],
-        ParameterDescriptorV1 {
+        ParameterDescriptor {
             enum_choices: &CONTROL_LABEL_CHOICES,
             ..PARAMETERS[2]
         },
     ];
 
-    static PORTS_UNSORTED: [PortDescriptorV1; 3] = [
-        PortDescriptorV1 {
+    static PORTS_UNSORTED: [PortDescriptor; 3] = [
+        PortDescriptor {
             id: port_id("sidechain"),
             role: PortRole::SidechainInput,
             required: false,
             layout: PortLayout::DualMonoPlanar,
         },
-        PortDescriptorV1 {
+        PortDescriptor {
             id: port_id("main-out"),
             role: PortRole::MainOutput,
             required: true,
             layout: PortLayout::DualMonoPlanar,
         },
-        PortDescriptorV1 {
+        PortDescriptor {
             id: port_id("main-in"),
             role: PortRole::MainInput,
             required: true,
             layout: PortLayout::DualMonoPlanar,
         },
     ];
-    static PORTS_SORTED: [PortDescriptorV1; 3] =
+    static PORTS_SORTED: [PortDescriptor; 3] =
         [PORTS_UNSORTED[2], PORTS_UNSORTED[1], PORTS_UNSORTED[0]];
-    static BAD_PORTS: [PortDescriptorV1; 3] = [
-        PortDescriptorV1 {
+    static BAD_PORTS: [PortDescriptor; 3] = [
+        PortDescriptor {
             required: false,
             ..PORTS_SORTED[0]
         },
         PORTS_SORTED[1],
         PORTS_SORTED[2],
     ];
-    static DUPLICATE_PORTS: [PortDescriptorV1; 3] = [
+    static DUPLICATE_PORTS: [PortDescriptor; 3] = [
         PORTS_SORTED[0],
-        PortDescriptorV1 {
+        PortDescriptor {
             id: PORTS_SORTED[0].id,
             ..PORTS_SORTED[1]
         },
         PORTS_SORTED[2],
     ];
-    static MISSING_OUTPUT_PORTS: [PortDescriptorV1; 1] = [PORTS_SORTED[0]];
-    static TWO_SIDECHAIN_PORTS: [PortDescriptorV1; 4] = [
+    static MISSING_OUTPUT_PORTS: [PortDescriptor; 1] = [PORTS_SORTED[0]];
+    static TWO_SIDECHAIN_PORTS: [PortDescriptor; 4] = [
         PORTS_SORTED[0],
         PORTS_SORTED[1],
         PORTS_SORTED[2],
-        PortDescriptorV1 {
+        PortDescriptor {
             id: port_id("key-input"),
             ..PORTS_SORTED[2]
         },
     ];
 
-    const fn quality(sample_rate: u32) -> QualityDescriptorV1 {
-        QualityDescriptorV1 {
+    const fn quality(sample_rate: u32) -> QualityDescriptor {
+        QualityDescriptor {
             quality: EffectQuality::Normal,
             sample_rate,
             latency: LatencySamples(4),
@@ -2117,7 +2117,7 @@ mod tests {
         }
     }
 
-    static QUALITIES: [QualityDescriptorV1; 8] = [
+    static QUALITIES: [QualityDescriptor; 8] = [
         quality(44_100),
         quality(48_000),
         quality(88_200),
@@ -2127,7 +2127,7 @@ mod tests {
         quality(352_800),
         quality(384_000),
     ];
-    static BAD_RATE_QUALITIES: [QualityDescriptorV1; 8] = [
+    static BAD_RATE_QUALITIES: [QualityDescriptor; 8] = [
         quality(12_345),
         QUALITIES[1],
         QUALITIES[2],
@@ -2137,8 +2137,8 @@ mod tests {
         QUALITIES[6],
         QUALITIES[7],
     ];
-    static BAD_STATE_QUALITIES: [QualityDescriptorV1; 8] = [
-        QualityDescriptorV1 {
+    static BAD_STATE_QUALITIES: [QualityDescriptor; 8] = [
+        QualityDescriptor {
             maximum_state: StatePayloadSizes {
                 common_bytes: u32::MAX,
                 left_bytes: 16,
@@ -2154,7 +2154,7 @@ mod tests {
         QUALITIES[6],
         QUALITIES[7],
     ];
-    static OUT_OF_ORDER_QUALITIES: [QualityDescriptorV1; 8] = [
+    static OUT_OF_ORDER_QUALITIES: [QualityDescriptor; 8] = [
         QUALITIES[1],
         QUALITIES[0],
         QUALITIES[2],
@@ -2164,7 +2164,7 @@ mod tests {
         QUALITIES[6],
         QUALITIES[7],
     ];
-    static MISSING_RATE_QUALITIES: [QualityDescriptorV1; 7] = [
+    static MISSING_RATE_QUALITIES: [QualityDescriptor; 7] = [
         QUALITIES[0],
         QUALITIES[1],
         QUALITIES[2],
@@ -2173,42 +2173,42 @@ mod tests {
         QUALITIES[6],
         QUALITIES[7],
     ];
-    static DRAFT_ONLY_QUALITIES: [QualityDescriptorV1; 8] = [
-        QualityDescriptorV1 {
+    static DRAFT_ONLY_QUALITIES: [QualityDescriptor; 8] = [
+        QualityDescriptor {
             quality: EffectQuality::Draft,
             ..QUALITIES[0]
         },
-        QualityDescriptorV1 {
+        QualityDescriptor {
             quality: EffectQuality::Draft,
             ..QUALITIES[1]
         },
-        QualityDescriptorV1 {
+        QualityDescriptor {
             quality: EffectQuality::Draft,
             ..QUALITIES[2]
         },
-        QualityDescriptorV1 {
+        QualityDescriptor {
             quality: EffectQuality::Draft,
             ..QUALITIES[3]
         },
-        QualityDescriptorV1 {
+        QualityDescriptor {
             quality: EffectQuality::Draft,
             ..QUALITIES[4]
         },
-        QualityDescriptorV1 {
+        QualityDescriptor {
             quality: EffectQuality::Draft,
             ..QUALITIES[5]
         },
-        QualityDescriptorV1 {
+        QualityDescriptor {
             quality: EffectQuality::Draft,
             ..QUALITIES[6]
         },
-        QualityDescriptorV1 {
+        QualityDescriptor {
             quality: EffectQuality::Draft,
             ..QUALITIES[7]
         },
     ];
 
-    static DESCRIPTOR: EffectDescriptorV1 = EffectDescriptorV1 {
+    static DESCRIPTOR: EffectDescriptor = EffectDescriptor {
         id: effect_id("test.effect"),
         display_name: "Test Effect",
         contract_major: 1,
@@ -2220,172 +2220,172 @@ mod tests {
         qualities: &QUALITIES,
         observations: &[],
     };
-    static SORTED_PORT_DESCRIPTOR: EffectDescriptorV1 = EffectDescriptorV1 {
+    static SORTED_PORT_DESCRIPTOR: EffectDescriptor = EffectDescriptor {
         ports: &PORTS_SORTED,
         ..DESCRIPTOR
     };
-    static EMPTY_PARAMETER_DESCRIPTOR: EffectDescriptorV1 = EffectDescriptorV1 {
+    static EMPTY_PARAMETER_DESCRIPTOR: EffectDescriptor = EffectDescriptor {
         parameters: &[],
         ..DESCRIPTOR
     };
-    static NO_SIDECHAIN_PORTS: [PortDescriptorV1; 2] = [PORTS_SORTED[0], PORTS_SORTED[1]];
-    static NO_SIDECHAIN_DESCRIPTOR: EffectDescriptorV1 = EffectDescriptorV1 {
+    static NO_SIDECHAIN_PORTS: [PortDescriptor; 2] = [PORTS_SORTED[0], PORTS_SORTED[1]];
+    static NO_SIDECHAIN_DESCRIPTOR: EffectDescriptor = EffectDescriptor {
         ports: &NO_SIDECHAIN_PORTS,
         ..DESCRIPTOR
     };
-    static LAUNCH_QUALITIES: [QualityDescriptorV1; 4] =
+    static LAUNCH_QUALITIES: [QualityDescriptor; 4] =
         [QUALITIES[0], QUALITIES[1], QUALITIES[2], QUALITIES[3]];
-    static LAUNCH_QUALITY_DESCRIPTOR: EffectDescriptorV1 = EffectDescriptorV1 {
+    static LAUNCH_QUALITY_DESCRIPTOR: EffectDescriptor = EffectDescriptor {
         qualities: &LAUNCH_QUALITIES,
         ..DESCRIPTOR
     };
-    static NO_CHOICE_PARAMETERS: [ParameterDescriptorV1; 3] = [
+    static NO_CHOICE_PARAMETERS: [ParameterDescriptor; 3] = [
         PARAMETERS[0],
         PARAMETERS[1],
-        ParameterDescriptorV1 {
+        ParameterDescriptor {
             domain: ParameterDomain::Boolean,
             default_value: 1.0,
             enum_choices: &[],
             ..PARAMETERS[2]
         },
     ];
-    static NO_CHOICE_DESCRIPTOR: EffectDescriptorV1 = EffectDescriptorV1 {
+    static NO_CHOICE_DESCRIPTOR: EffectDescriptor = EffectDescriptor {
         parameters: &NO_CHOICE_PARAMETERS,
         ..DESCRIPTOR
     };
-    static BAD_CONTRACT: EffectDescriptorV1 = EffectDescriptorV1 {
+    static BAD_CONTRACT: EffectDescriptor = EffectDescriptor {
         contract_major: 2,
         ..DESCRIPTOR
     };
-    static BAD_STATE_VERSION: EffectDescriptorV1 = EffectDescriptorV1 {
+    static BAD_STATE_VERSION: EffectDescriptor = EffectDescriptor {
         state_layout_version: 0,
         ..DESCRIPTOR
     };
-    static BAD_DISPLAY: EffectDescriptorV1 = EffectDescriptorV1 {
+    static BAD_DISPLAY: EffectDescriptor = EffectDescriptor {
         display_name: "Test\nEffect",
         ..DESCRIPTOR
     };
-    static BAD_ZERO_ID: EffectDescriptorV1 = EffectDescriptorV1 {
+    static BAD_ZERO_ID: EffectDescriptor = EffectDescriptor {
         parameters: &ZERO_ID_PARAMETERS,
         ..DESCRIPTOR
     };
-    static BAD_DEFAULT: EffectDescriptorV1 = EffectDescriptorV1 {
+    static BAD_DEFAULT: EffectDescriptor = EffectDescriptor {
         parameters: &BAD_DEFAULT_PARAMETERS,
         ..DESCRIPTOR
     };
-    static BAD_BOOLEAN: EffectDescriptorV1 = EffectDescriptorV1 {
+    static BAD_BOOLEAN: EffectDescriptor = EffectDescriptor {
         parameters: &BAD_BOOLEAN_PARAMETERS,
         ..DESCRIPTOR
     };
-    static BAD_SMOOTHING: EffectDescriptorV1 = EffectDescriptorV1 {
+    static BAD_SMOOTHING: EffectDescriptor = EffectDescriptor {
         parameters: &BAD_SMOOTHING_PARAMETERS,
         ..DESCRIPTOR
     };
-    static BAD_LABEL: EffectDescriptorV1 = EffectDescriptorV1 {
+    static BAD_LABEL: EffectDescriptor = EffectDescriptor {
         parameters: &BAD_LABEL_PARAMETERS,
         ..DESCRIPTOR
     };
-    static BAD_PORT: EffectDescriptorV1 = EffectDescriptorV1 {
+    static BAD_PORT: EffectDescriptor = EffectDescriptor {
         ports: &BAD_PORTS,
         ..DESCRIPTOR
     };
-    static BAD_RATE: EffectDescriptorV1 = EffectDescriptorV1 {
+    static BAD_RATE: EffectDescriptor = EffectDescriptor {
         qualities: &BAD_RATE_QUALITIES,
         ..DESCRIPTOR
     };
-    static BAD_STATE: EffectDescriptorV1 = EffectDescriptorV1 {
+    static BAD_STATE: EffectDescriptor = EffectDescriptor {
         qualities: &BAD_STATE_QUALITIES,
         ..DESCRIPTOR
     };
-    static DUPLICATE_ID: EffectDescriptorV1 = EffectDescriptorV1 {
+    static DUPLICATE_ID: EffectDescriptor = EffectDescriptor {
         parameters: &DUPLICATE_ID_PARAMETERS,
         ..DESCRIPTOR
     };
-    static OUT_OF_ORDER_PARAMETER: EffectDescriptorV1 = EffectDescriptorV1 {
+    static OUT_OF_ORDER_PARAMETER: EffectDescriptor = EffectDescriptor {
         parameters: &OUT_OF_ORDER_PARAMETERS,
         ..DESCRIPTOR
     };
-    static MISSING_MINIMUM: EffectDescriptorV1 = EffectDescriptorV1 {
+    static MISSING_MINIMUM: EffectDescriptor = EffectDescriptor {
         parameters: &MISSING_MINIMUM_PARAMETERS,
         ..DESCRIPTOR
     };
-    static BAD_LOG: EffectDescriptorV1 = EffectDescriptorV1 {
+    static BAD_LOG: EffectDescriptor = EffectDescriptor {
         parameters: &BAD_LOG_PARAMETERS,
         ..DESCRIPTOR
     };
-    static BAD_BOOLEAN_DEFAULT: EffectDescriptorV1 = EffectDescriptorV1 {
+    static BAD_BOOLEAN_DEFAULT: EffectDescriptor = EffectDescriptor {
         parameters: &BAD_BOOLEAN_DEFAULT_PARAMETERS,
         ..DESCRIPTOR
     };
-    static SHORT_ENUM: EffectDescriptorV1 = EffectDescriptorV1 {
+    static SHORT_ENUM: EffectDescriptor = EffectDescriptor {
         parameters: &SHORT_ENUM_PARAMETERS,
         ..DESCRIPTOR
     };
-    static BAD_ENUM_DEFAULT: EffectDescriptorV1 = EffectDescriptorV1 {
+    static BAD_ENUM_DEFAULT: EffectDescriptor = EffectDescriptor {
         parameters: &BAD_ENUM_DEFAULT_PARAMETERS,
         ..DESCRIPTOR
     };
-    static BAD_AUTOMATION: EffectDescriptorV1 = EffectDescriptorV1 {
+    static BAD_AUTOMATION: EffectDescriptor = EffectDescriptor {
         parameters: &BAD_AUTOMATION_PARAMETERS,
         ..DESCRIPTOR
     };
-    static NONFINITE: EffectDescriptorV1 = EffectDescriptorV1 {
+    static NONFINITE: EffectDescriptor = EffectDescriptor {
         parameters: &NONFINITE_PARAMETERS,
         ..DESCRIPTOR
     };
-    static NEGATIVE_ZERO: EffectDescriptorV1 = EffectDescriptorV1 {
+    static NEGATIVE_ZERO: EffectDescriptor = EffectDescriptor {
         parameters: &NEGATIVE_ZERO_PARAMETERS,
         ..DESCRIPTOR
     };
-    static REVERSED_BOUND: EffectDescriptorV1 = EffectDescriptorV1 {
+    static REVERSED_BOUND: EffectDescriptor = EffectDescriptor {
         parameters: &REVERSED_BOUND_PARAMETERS,
         ..DESCRIPTOR
     };
-    static CONTINUOUS_CHOICES: EffectDescriptorV1 = EffectDescriptorV1 {
+    static CONTINUOUS_CHOICES: EffectDescriptor = EffectDescriptor {
         parameters: &CONTINUOUS_CHOICES_PARAMETERS,
         ..DESCRIPTOR
     };
-    static BOOLEAN_MAPPING: EffectDescriptorV1 = EffectDescriptorV1 {
+    static BOOLEAN_MAPPING: EffectDescriptor = EffectDescriptor {
         parameters: &BOOLEAN_MAPPING_PARAMETERS,
         ..DESCRIPTOR
     };
-    static OUT_OF_ORDER_ENUM: EffectDescriptorV1 = EffectDescriptorV1 {
+    static OUT_OF_ORDER_ENUM: EffectDescriptor = EffectDescriptor {
         parameters: &OUT_OF_ORDER_ENUM_PARAMETERS,
         ..DESCRIPTOR
     };
-    static NONFINITE_ENUM: EffectDescriptorV1 = EffectDescriptorV1 {
+    static NONFINITE_ENUM: EffectDescriptor = EffectDescriptor {
         parameters: &NONFINITE_ENUM_PARAMETERS,
         ..DESCRIPTOR
     };
-    static CONTROL_LABEL: EffectDescriptorV1 = EffectDescriptorV1 {
+    static CONTROL_LABEL: EffectDescriptor = EffectDescriptor {
         parameters: &CONTROL_LABEL_PARAMETERS,
         ..DESCRIPTOR
     };
-    static DUPLICATE_PORT: EffectDescriptorV1 = EffectDescriptorV1 {
+    static DUPLICATE_PORT: EffectDescriptor = EffectDescriptor {
         ports: &DUPLICATE_PORTS,
         ..DESCRIPTOR
     };
-    static MISSING_OUTPUT: EffectDescriptorV1 = EffectDescriptorV1 {
+    static MISSING_OUTPUT: EffectDescriptor = EffectDescriptor {
         ports: &MISSING_OUTPUT_PORTS,
         ..DESCRIPTOR
     };
-    static TWO_SIDECHAINS: EffectDescriptorV1 = EffectDescriptorV1 {
+    static TWO_SIDECHAINS: EffectDescriptor = EffectDescriptor {
         ports: &TWO_SIDECHAIN_PORTS,
         ..DESCRIPTOR
     };
-    static OUT_OF_ORDER_QUALITY: EffectDescriptorV1 = EffectDescriptorV1 {
+    static OUT_OF_ORDER_QUALITY: EffectDescriptor = EffectDescriptor {
         qualities: &OUT_OF_ORDER_QUALITIES,
         ..DESCRIPTOR
     };
-    static MISSING_RATE: EffectDescriptorV1 = EffectDescriptorV1 {
+    static MISSING_RATE: EffectDescriptor = EffectDescriptor {
         qualities: &MISSING_RATE_QUALITIES,
         ..DESCRIPTOR
     };
-    static MISSING_NORMAL: EffectDescriptorV1 = EffectDescriptorV1 {
+    static MISSING_NORMAL: EffectDescriptor = EffectDescriptor {
         qualities: &DRAFT_ONLY_QUALITIES,
         ..DESCRIPTOR
     };
-    static MULTI_ERROR: EffectDescriptorV1 = EffectDescriptorV1 {
+    static MULTI_ERROR: EffectDescriptor = EffectDescriptor {
         contract_major: 2,
         state_layout_version: 0,
         parameters: &DUPLICATE_ID_PARAMETERS,
@@ -2394,17 +2394,17 @@ mod tests {
         ..DESCRIPTOR
     };
 
-    fn encode(descriptor: &'static EffectDescriptorV1) -> Vec<u8> {
-        let required = effect_descriptor_wire_v1_required_size(descriptor, 1 << 20).unwrap();
+    fn encode(descriptor: &'static EffectDescriptor) -> Vec<u8> {
+        let required = effect_descriptor_wire_required_size(descriptor, 1 << 20).unwrap();
         let mut bytes = vec![0xa5; required as usize];
         assert_eq!(
-            encode_effect_descriptor_wire_v1(descriptor, 1 << 20, &mut bytes),
+            encode_effect_descriptor_wire(descriptor, 1 << 20, &mut bytes),
             Ok(required)
         );
         bytes
     }
 
-    fn semantic_test_view(bytes: &[u8]) -> BorrowedEffectDescriptorViewV1<'_> {
+    fn semantic_test_view(bytes: &[u8]) -> BorrowedEffectDescriptorView<'_> {
         let layout = Layout {
             total: read_u32(bytes, 16),
             parameters: read_u32(bytes, 48),
@@ -2425,7 +2425,7 @@ mod tests {
         let id_length = read_u32(bytes, 36) as usize;
         let display_offset = read_u32(bytes, 40) as usize;
         let display_length = read_u32(bytes, 44) as usize;
-        BorrowedEffectDescriptorViewV1 {
+        BorrowedEffectDescriptorView {
             bytes,
             layout,
             effect_id: core::str::from_utf8(&bytes[id_offset..id_offset + id_length]).unwrap(),
@@ -2439,8 +2439,8 @@ mod tests {
         }
     }
 
-    fn accepted_errors(descriptor: &'static EffectDescriptorV1) -> Vec<DescriptorError> {
-        validate_descriptor_v1(descriptor).unwrap_err().0
+    fn accepted_errors(descriptor: &'static EffectDescriptor) -> Vec<DescriptorError> {
+        validate_descriptor(descriptor).unwrap_err().0
     }
 
     fn borrowed_errors(bytes: &[u8]) -> Vec<DescriptorError> {
@@ -2453,7 +2453,7 @@ mod tests {
             .collect()
     }
 
-    fn assert_parity(descriptor: &'static EffectDescriptorV1, mutate: impl FnOnce(&mut [u8])) {
+    fn assert_parity(descriptor: &'static EffectDescriptor, mutate: impl FnOnce(&mut [u8])) {
         let mut bytes = encode(&DESCRIPTOR);
         mutate(&mut bytes);
         assert_eq!(borrowed_errors(&bytes), accepted_errors(descriptor));
@@ -2468,7 +2468,7 @@ mod tests {
         assert_eq!(read_u32(&bytes, 60), 96 + 3 * 80);
         assert_eq!(read_u32(&bytes, 68), 96 + 3 * 80 + 3 * 24);
         assert_eq!(read_u32(&bytes, 76), 96 + 3 * 80 + 3 * 24 + 8 * 64);
-        let verified = verify_effect_descriptor_wire_v1(&bytes, 1 << 20).unwrap();
+        let verified = verify_effect_descriptor_wire(&bytes, 1 << 20).unwrap();
         assert_eq!(verified.as_bytes(), bytes);
         assert_eq!(verified.parameter_count(), 3);
         assert_eq!(verified.port_count(), 3);
@@ -2476,7 +2476,7 @@ mod tests {
         assert_eq!(verified.enum_choice_count(), 2);
         assert_eq!(verified.state_layout_version(), 7);
         assert_eq!(verified.supported_link_mode_bits(), 7);
-        let identity = effect_descriptor_identity_v1(&bytes, 1 << 20).unwrap();
+        let identity = effect_descriptor_identity(&bytes, 1 << 20).unwrap();
         let mut independent = Sha256::new();
         independent.update(IDENTITY_DOMAIN);
         independent.update((bytes.len() as u64).to_le_bytes());
@@ -2489,22 +2489,22 @@ mod tests {
 
     #[test]
     fn exact_size_and_one_short_have_complete_canaries() {
-        let required = effect_descriptor_wire_v1_required_size(&DESCRIPTOR, 1 << 20).unwrap();
+        let required = effect_descriptor_wire_required_size(&DESCRIPTOR, 1 << 20).unwrap();
         let mut exact = vec![0x5a; required as usize + 16];
         assert_eq!(
-            encode_effect_descriptor_wire_v1(&DESCRIPTOR, 1 << 20, &mut exact),
+            encode_effect_descriptor_wire(&DESCRIPTOR, 1 << 20, &mut exact),
             Ok(required)
         );
         assert_eq!(&exact[required as usize..], &[0x5a; 16]);
         let mut short = vec![0x6b; required as usize - 1];
         let before = short.clone();
         assert_eq!(
-            encode_effect_descriptor_wire_v1(&DESCRIPTOR, 1 << 20, &mut short),
+            encode_effect_descriptor_wire(&DESCRIPTOR, 1 << 20, &mut short),
             Err(Diagnostic::buffer_too_small(required))
         );
         assert_eq!(short, before);
         assert_eq!(
-            effect_descriptor_wire_v1_required_size(&DESCRIPTOR, required - 1)
+            effect_descriptor_wire_required_size(&DESCRIPTOR, required - 1)
                 .unwrap_err()
                 .code,
             Code::Limit
@@ -2517,15 +2517,15 @@ mod tests {
         let sorted = encode(&SORTED_PORT_DESCRIPTOR);
         assert_eq!(unsorted, sorted);
         assert_eq!(
-            effect_descriptor_identity_v1(&unsorted, 1 << 20),
-            effect_descriptor_identity_v1(&sorted, 1 << 20)
+            effect_descriptor_identity(&unsorted, 1 << 20),
+            effect_descriptor_identity(&sorted, 1 << 20)
         );
         let mut changed = unsorted.clone();
         write_u16(&mut changed, 22, 9);
-        assert!(verify_effect_descriptor_wire_v1(&changed, 1 << 20).is_ok());
+        assert!(verify_effect_descriptor_wire(&changed, 1 << 20).is_ok());
         assert_ne!(
-            effect_descriptor_identity_v1(&unsorted, 1 << 20),
-            effect_descriptor_identity_v1(&changed, 1 << 20)
+            effect_descriptor_identity(&unsorted, 1 << 20),
+            effect_descriptor_identity(&changed, 1 << 20)
         );
     }
 
@@ -2536,7 +2536,7 @@ mod tests {
         bytes[0] ^= 1;
         bytes[88] = 1;
         assert_eq!(
-            verify_effect_descriptor_wire_v1(&bytes, 1 << 20)
+            verify_effect_descriptor_wire(&bytes, 1 << 20)
                 .unwrap_err()
                 .code,
             Code::Header
@@ -2549,7 +2549,7 @@ mod tests {
         bytes[92] = 1;
         write_u32(&mut bytes, 28, 0);
         assert_eq!(
-            verify_effect_descriptor_wire_v1(&bytes, 1 << 20)
+            verify_effect_descriptor_wire(&bytes, 1 << 20)
                 .unwrap_err()
                 .code,
             Code::Reserved
@@ -2557,7 +2557,7 @@ mod tests {
         let mut bytes = original.clone();
         bytes[88] = 1;
         assert_eq!(
-            verify_effect_descriptor_wire_v1(&bytes, 1 << 20)
+            verify_effect_descriptor_wire(&bytes, 1 << 20)
                 .unwrap_err()
                 .code,
             Code::Length
@@ -2566,7 +2566,7 @@ mod tests {
         write_u32(&mut bytes, 52, 104);
         write_u32(&mut bytes, 28, 0);
         assert_eq!(
-            verify_effect_descriptor_wire_v1(&bytes, 1 << 20)
+            verify_effect_descriptor_wire(&bytes, 1 << 20)
                 .unwrap_err()
                 .code,
             Code::Offset
@@ -2574,14 +2574,14 @@ mod tests {
         let mut trailing = original.clone();
         trailing.push(0);
         assert_eq!(
-            verify_effect_descriptor_wire_v1(&trailing, 1 << 20)
+            verify_effect_descriptor_wire(&trailing, 1 << 20)
                 .unwrap_err()
                 .code,
             Code::Length
         );
         let mut negative_zero = original;
         write_u32(&mut negative_zero, HEADER_BYTES + 44, (-0.0f32).to_bits());
-        let error = verify_effect_descriptor_wire_v1(&negative_zero, 1 << 20).unwrap_err();
+        let error = verify_effect_descriptor_wire(&negative_zero, 1 << 20).unwrap_err();
         assert_eq!((error.code, error.byte_offset), (Code::Float, 96 + 44));
     }
 
@@ -2599,13 +2599,13 @@ mod tests {
             write_u32(&mut bytes, 76, HEADER_BYTES as u32);
             write_u32(&mut bytes, 84, HEADER_BYTES as u32);
             write_u32(&mut bytes, field, u32::MAX);
-            let error = verify_effect_descriptor_wire_v1(&bytes, u32::MAX).unwrap_err();
+            let error = verify_effect_descriptor_wire(&bytes, u32::MAX).unwrap_err();
             assert_eq!(
                 (error.code, error.byte_offset, error.record_index),
                 (
                     Code::Overflow,
                     expected_offset,
-                    EFFECT_DESCRIPTOR_WIRE_V1_UNAVAILABLE
+                    EFFECT_DESCRIPTOR_WIRE_UNAVAILABLE
                 )
             );
         }
@@ -2614,7 +2614,7 @@ mod tests {
         let mut flags_before_reserved = original.clone();
         write_u32(&mut flags_before_reserved, HEADER_BYTES + 32, 16);
         write_u32(&mut flags_before_reserved, HEADER_BYTES + 72, 1);
-        let error = verify_effect_descriptor_wire_v1(&flags_before_reserved, 1 << 20).unwrap_err();
+        let error = verify_effect_descriptor_wire(&flags_before_reserved, 1 << 20).unwrap_err();
         assert_eq!(
             (error.code, error.byte_offset),
             (Code::Flags, (HEADER_BYTES + 32) as u32)
@@ -2631,7 +2631,7 @@ mod tests {
             52,
             HEADER_BYTES as u32 + 4,
         );
-        let error = verify_effect_descriptor_wire_v1(&header_text_before_table_offset, 1 << 20)
+        let error = verify_effect_descriptor_wire(&header_text_before_table_offset, 1 << 20)
             .unwrap_err();
         assert_eq!((error.code, error.byte_offset), (Code::Offset, 32));
 
@@ -2643,7 +2643,7 @@ mod tests {
         let choice_text = read_u32(&port_text_before_choice_text, first_choice + 4) as usize;
         port_text_before_choice_text[choice_text] = b'\n';
         let error =
-            verify_effect_descriptor_wire_v1(&port_text_before_choice_text, 1 << 20).unwrap_err();
+            verify_effect_descriptor_wire(&port_text_before_choice_text, 1 << 20).unwrap_err();
         assert_eq!(
             (error.code, error.byte_offset, error.record_index),
             (Code::Text, first_port as u32, 0)
@@ -2888,17 +2888,17 @@ mod tests {
             }
             let mut bytes = encode(&DESCRIPTOR);
             write_u32(&mut bytes, 28, value);
-            let error = verify_effect_descriptor_wire_v1(&bytes, 1 << 20).unwrap_err();
+            let error = verify_effect_descriptor_wire(&bytes, 1 << 20).unwrap_err();
             assert_eq!(
                 (error.code, error.byte_offset, error.record_index),
-                (Code::Enum, 28, EFFECT_DESCRIPTOR_WIRE_V1_UNAVAILABLE)
+                (Code::Enum, 28, EFFECT_DESCRIPTOR_WIRE_UNAVAILABLE)
             );
         }
         let mut effect_id = encode(&DESCRIPTOR);
         let offset = read_u32(&effect_id, 32) as usize;
         effect_id[offset] = b'A';
         assert_eq!(
-            verify_effect_descriptor_wire_v1(&effect_id, 1 << 20)
+            verify_effect_descriptor_wire(&effect_id, 1 << 20)
                 .unwrap_err()
                 .code,
             Code::Text
@@ -2906,17 +2906,17 @@ mod tests {
         let mut effect_id_rest = encode(&DESCRIPTOR);
         let offset = read_u32(&effect_id_rest, 32) as usize;
         effect_id_rest[offset + 4] = b'/';
-        let error = verify_effect_descriptor_wire_v1(&effect_id_rest, 1 << 20).unwrap_err();
+        let error = verify_effect_descriptor_wire(&effect_id_rest, 1 << 20).unwrap_err();
         assert_eq!(
             (error.code, error.byte_offset, error.record_index),
-            (Code::Text, 32, EFFECT_DESCRIPTOR_WIRE_V1_UNAVAILABLE)
+            (Code::Text, 32, EFFECT_DESCRIPTOR_WIRE_UNAVAILABLE)
         );
         let mut port_id = encode(&DESCRIPTOR);
         let port = read_u32(&port_id, 60) as usize;
         let offset = read_u32(&port_id, port) as usize;
         port_id[offset] = b'A';
         assert_eq!(
-            verify_effect_descriptor_wire_v1(&port_id, 1 << 20)
+            verify_effect_descriptor_wire(&port_id, 1 << 20)
                 .unwrap_err()
                 .code,
             Code::Text
@@ -2925,7 +2925,7 @@ mod tests {
         let port = read_u32(&port_id_rest, 60) as usize;
         let offset = read_u32(&port_id_rest, port) as usize;
         port_id_rest[offset + 4] = b'/';
-        let error = verify_effect_descriptor_wire_v1(&port_id_rest, 1 << 20).unwrap_err();
+        let error = verify_effect_descriptor_wire(&port_id_rest, 1 << 20).unwrap_err();
         assert_eq!(
             (error.code, error.byte_offset, error.record_index),
             (Code::Text, port as u32, 0)
@@ -2941,9 +2941,9 @@ mod tests {
         assert!(!PARAMETERS[0].readable);
         assert_eq!(QUALITIES[0].maximum_state.common_bytes, u32::MAX);
         assert_eq!(QUALITIES[0].scratch_fixed_bytes, u64::MAX);
-        assert!(validate_descriptor_v1(&EMPTY_PARAMETER_DESCRIPTOR).is_ok());
+        assert!(validate_descriptor(&EMPTY_PARAMETER_DESCRIPTOR).is_ok());
         let bytes = encode(&EMPTY_PARAMETER_DESCRIPTOR);
-        assert!(verify_effect_descriptor_wire_v1(&bytes, 1 << 20).is_ok());
+        assert!(verify_effect_descriptor_wire(&bytes, 1 << 20).is_ok());
         assert_eq!(
             QUALITIES.map(|quality| quality.sample_rate),
             [
@@ -2955,10 +2955,10 @@ mod tests {
     #[test]
     fn bound_descriptor_comparison_reports_earliest_semantic_wire_field() {
         fn assert_mismatch(bytes: &[u8], offset: u32, record_index: u32) {
-            let error = bind_effect_descriptor_wire_v1(&DESCRIPTOR, bytes, 1 << 20).unwrap_err();
+            let error = bind_effect_descriptor_wire(&DESCRIPTOR, bytes, 1 << 20).unwrap_err();
             assert_eq!(
                 error.kind(),
-                EffectDescriptorBindingErrorKindV1::StaticDescriptorMismatch,
+                EffectDescriptorBindingErrorKind::StaticDescriptorMismatch,
                 "expected static mismatch at wire offset {offset}; nested={:?}",
                 error.diagnostic()
             );
@@ -2979,35 +2979,35 @@ mod tests {
             } else {
                 write_u32(&mut bytes, offset, value);
             }
-            assert_mismatch(&bytes, offset as u32, EFFECT_DESCRIPTOR_WIRE_V1_UNAVAILABLE);
+            assert_mismatch(&bytes, offset as u32, EFFECT_DESCRIPTOR_WIRE_UNAVAILABLE);
         }
 
         for field in [32, 40] {
             let mut bytes = encode(&DESCRIPTOR);
             let text = read_u32(&bytes, field) as usize;
             bytes[text] = if field == 32 { b'u' } else { b'R' };
-            assert_mismatch(&bytes, field as u32, EFFECT_DESCRIPTOR_WIRE_V1_UNAVAILABLE);
+            assert_mismatch(&bytes, field as u32, EFFECT_DESCRIPTOR_WIRE_UNAVAILABLE);
         }
 
         assert_mismatch(
             &encode(&EMPTY_PARAMETER_DESCRIPTOR),
             48,
-            EFFECT_DESCRIPTOR_WIRE_V1_UNAVAILABLE,
+            EFFECT_DESCRIPTOR_WIRE_UNAVAILABLE,
         );
         assert_mismatch(
             &encode(&NO_SIDECHAIN_DESCRIPTOR),
             56,
-            EFFECT_DESCRIPTOR_WIRE_V1_UNAVAILABLE,
+            EFFECT_DESCRIPTOR_WIRE_UNAVAILABLE,
         );
         assert_mismatch(
             &encode(&LAUNCH_QUALITY_DESCRIPTOR),
             64,
-            EFFECT_DESCRIPTOR_WIRE_V1_UNAVAILABLE,
+            EFFECT_DESCRIPTOR_WIRE_UNAVAILABLE,
         );
         assert_mismatch(
             &encode(&NO_CHOICE_DESCRIPTOR),
             72,
-            EFFECT_DESCRIPTOR_WIRE_V1_UNAVAILABLE,
+            EFFECT_DESCRIPTOR_WIRE_UNAVAILABLE,
         );
 
         let parameter = HEADER_BYTES;

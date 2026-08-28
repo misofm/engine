@@ -44,8 +44,8 @@ use miso_engine_core::realtime::{ArenaLeaseSetBuilder, ArenaLeaseV1, RenderError
 /// offset by one.
 pub(crate) const ARENA_BASE: u32 = 1;
 use miso_engine_effect_contract::{
-    BypassShunt, ChannelSymmetryWitnessV1, EffectControlLane, EffectProcessBlock,
-    ObservationLaneV1, ObservationSampleV1, PreparedAutomationSpan, PreparedNativeEffect,
+    BypassShunt, ChannelSymmetryWitness, EffectControlLane, EffectProcessBlock,
+    ObservationLane, ObservationSample, PreparedAutomationSpan, PreparedNativeEffect,
 };
 use miso_engine_lane::kernels::{mix2x2_block, pdc_delay_block, sum_into_block, sum2_block};
 use miso_engine_rack::{BankChain, BankMembers};
@@ -323,14 +323,14 @@ pub(crate) struct ConsoleEffect {
     /// Issue #143 D3: this instance's observation taps, or `None` in a plan with no observation
     /// capacity. `None` is one null pointer and one predicted branch per block -- and, crucially,
     /// it is the *only* observation state such a plan holds.
-    observation: Option<Box<ObservationLaneV1>>,
+    observation: Option<Box<ObservationLane>>,
 }
 
 impl ConsoleEffect {
     fn new(
         effect: GraphPreparedEffect,
         control: Box<EffectControlLane>,
-        observation: Option<Box<ObservationLaneV1>>,
+        observation: Option<Box<ObservationLane>>,
         frames: usize,
     ) -> Self {
         let capacity = effect.metadata.automation_capacity as usize;
@@ -376,7 +376,7 @@ impl ConsoleEffect {
 /// is what keeps an armed lane from reading an unarmed sibling tap, and the two gates are a
 /// conjunction, never a replacement.
 fn publish_observations(
-    observation: &mut ObservationLaneV1,
+    observation: &mut ObservationLane,
     processor: &dyn PreparedNativeEffect,
     first_sample: u64,
     frames: u64,
@@ -384,7 +384,7 @@ fn publish_observations(
     if !observation.any_armed() {
         return;
     }
-    let mut sample = ObservationSampleV1 {
+    let mut sample = ObservationSample {
         left: 0.0,
         right: 0.0,
     };
@@ -571,12 +571,12 @@ impl NodeKind {
     /// work at all. Everything else answers for itself, and the two effect variants answer with
     /// the effect's own designed-word comparison -- plus, for a console-driven one, the live terms
     /// its drain maintains.
-    pub(crate) fn channel_symmetry(&self) -> ChannelSymmetryWitnessV1 {
+    pub(crate) fn channel_symmetry(&self) -> ChannelSymmetryWitness {
         let designed = |symmetric: bool| {
             if symmetric {
-                ChannelSymmetryWitnessV1::SYMMETRIC
+                ChannelSymmetryWitness::SYMMETRIC
             } else {
-                ChannelSymmetryWitnessV1::symmetric_except(ChannelSymmetryWitnessV1::DESIGNED)
+                ChannelSymmetryWitness::symmetric_except(ChannelSymmetryWitness::DESIGNED)
             }
         };
         match self {
@@ -593,7 +593,7 @@ impl NodeKind {
             // Not a per-track upstream stage: nothing here can make the two channels disagree,
             // and nothing here is collapsed.
             Self::Identity | Self::SourceInput | Self::Route(_) | Self::BankMember => {
-                ChannelSymmetryWitnessV1::SYMMETRIC
+                ChannelSymmetryWitness::SYMMETRIC
             }
         }
     }
@@ -618,7 +618,7 @@ impl NodeKind {
             Self::ConsoleEffect(console) => console
                 .observation
                 .as_deref()
-                .map_or(0, ObservationLaneV1::retained_bytes),
+                .map_or(0, ObservationLane::retained_bytes),
             _ => 0,
         }
     }
@@ -715,7 +715,7 @@ pub(crate) struct UnitIdentityV1 {
 
 /// Which side of the fader/matrix seam one graph node's stage sits on.
 ///
-/// The seam is `miso_engine_effect_contract::SeamSideV1`'s: the 2x2 matrix is the earliest
+/// The seam is `miso_engine_effect_contract::SeamSide`'s: the 2x2 matrix is the earliest
 /// genuinely cross-channel operation in the strip and the fader is immediately before it, so
 /// everything from `PostFader` on reads the plane a collapsed track duplicated and may legitimately
 /// differ between the channels. It is read off `TrackStage` rather than off the processor, because
@@ -1246,10 +1246,10 @@ impl BankStage for BuiltinStage {
     fn qualification_counters(&self) -> [u64; 2] {
         self.0.qualification_counters()
     }
-    fn lane_symmetry(&self, lane: usize) -> ChannelSymmetryWitnessV1 {
+    fn lane_symmetry(&self, lane: usize) -> ChannelSymmetryWitness {
         self.0.lane_symmetry(lane)
     }
-    fn seam_side(&self) -> miso_engine_effect_contract::SeamSideV1 {
+    fn seam_side(&self) -> miso_engine_effect_contract::SeamSide {
         self.0.seam_side()
     }
     fn supports_mono_collapse(&self) -> bool {
@@ -1347,7 +1347,7 @@ pub(crate) struct RuntimeParts {
     effect_controls: BTreeMap<crate::EffectNodeId, Box<EffectControlLane>>,
     /// Issue #143 D3: observation lanes by effect node, taken by whichever owner renders that
     /// node. Empty for a plan with no observation capacity, so `node_kind` hands out `None`.
-    effect_observations: BTreeMap<crate::EffectNodeId, Box<ObservationLaneV1>>,
+    effect_observations: BTreeMap<crate::EffectNodeId, Box<ObservationLane>>,
     pub(crate) bindings: BTreeMap<GraphNodeId, Option<Box<dyn GraphRuntimeProcessor>>>,
     pub(crate) observers: BTreeMap<GraphNodeId, Vec<GraphNodeObserverBinding>>,
     pub(crate) source_inputs: std::collections::BTreeSet<GraphNodeId>,
@@ -1528,7 +1528,7 @@ impl RuntimeParts {
                     .collect();
                 // Issue #143: one observation lane per bank lane, moved out in the same lane order
                 // so a slot has exactly one owner per lane and a lane nobody observes stays `None`.
-                let observations: Vec<Option<ObservationLaneV1>> = (0..width.lanes() as usize)
+                let observations: Vec<Option<ObservationLane>> = (0..width.lanes() as usize)
                     .map(|lane| {
                         bank.members
                             .get(lane)
@@ -2682,7 +2682,7 @@ fn op_dataflow(program: &ExecutionProgram) -> (Vec<Vec<usize>>, Vec<Option<usize
 /// the meter must see post-compressor audio, and a merged chain would hand it the chain's input --
 /// and `a_leased_stage_meter_declines_the_merge_and_still_meters` pins both halves of it.
 ///
-/// Effect observation (`ObservationLaneV1`) is *not* such an observer and must not be confused
+/// Effect observation (`ObservationLane`) is *not* such an observer and must not be confused
 /// with one: it reads the effect's own resident state through `observe_resident`, never a planar
 /// stage buffer, so an armed console lane neither declines the merge nor is disturbed by one.
 fn chains_into(

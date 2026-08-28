@@ -13,7 +13,7 @@ use miso_engine_conformance::SplitMix64;
 use miso_engine_effect_contract::{
     BankWidth, EffectBankProcessBlock, EffectProcessBlock, EffectQuality, InitialParameterValue,
     LinkMode, NativeEffectFactory, ParameterChannel, PortId, PrepareEffectBankRequest,
-    PrepareEffectLimits, PrepareEffectRequest, PreparedPortsV1, PreparedSidechainPort,
+    PrepareEffectLimits, PrepareEffectRequest, PreparedPorts, PreparedSidechainPort,
 };
 use miso_engine_lane::Backend;
 
@@ -41,7 +41,7 @@ fn request<'a>(values: &'a [InitialParameterValue]) -> PrepareEffectRequest<'a> 
         quality: EffectQuality::Normal,
         bypass: false,
         link_mode: LinkMode::DualMono,
-        ports: PreparedPortsV1 {
+        ports: PreparedPorts {
             sidechain: PreparedSidechainPort::Unconnected {
                 id: PortId::new("sidechain-in").expect("port id"),
                 required: false,

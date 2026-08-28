@@ -22,7 +22,7 @@
 
 use super::*;
 use miso_engine_effect_contract::{
-    EffectQuality, PrepareEffectLimits, PreparedPortsV1, PreparedSidechainPort,
+    EffectQuality, PrepareEffectLimits, PreparedPorts, PreparedSidechainPort,
 };
 use miso_engine_lane::{Simd4, Simd8};
 
@@ -68,7 +68,7 @@ fn request(
         quality: EffectQuality::Normal,
         bypass,
         link_mode,
-        ports: PreparedPortsV1 {
+        ports: PreparedPorts {
             sidechain: PreparedSidechainPort::None,
         },
         initial_values: values,

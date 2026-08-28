@@ -14,10 +14,10 @@
 //! comment and by the conservative default: an effect that has not derived a witness declines, so
 //! the failure mode of an incomplete derivation is a missed collapse, not a wrong render.
 
-use miso_engine_effect_compiler::launch_native_effect_registry_v1;
+use miso_engine_effect_compiler::launch_native_effect_registry;
 use miso_engine_effect_contract::{
-    EffectDescriptorV1, EffectQuality, InitialParameterValue, LinkMode, ParameterChannel, PortRole,
-    PrepareEffectLimits, PrepareEffectRequest, PreparedPortsV1, PreparedSidechainPort,
+    EffectDescriptor, EffectQuality, InitialParameterValue, LinkMode, ParameterChannel, PortRole,
+    PrepareEffectLimits, PrepareEffectRequest, PreparedPorts, PreparedSidechainPort,
     default_initial_values,
 };
 
@@ -27,7 +27,7 @@ use miso_engine_effect_contract::{
 /// entries; it starts from the defaults and moves exactly one word, which is also what makes the
 /// symmetric and asymmetric arms differ in exactly one place.
 fn initial_values(
-    descriptor: &'static EffectDescriptorV1,
+    descriptor: &'static EffectDescriptor,
     prelude: &[(u32, f32)],
     parameter_index: u32,
     left: f32,
@@ -76,7 +76,7 @@ const QUANTUM: u32 = 128;
 /// Preparation refuses a request that omits a declared port, and it is not this file's business
 /// which effects have one; `Unconnected` is the internal-detector shape every launch effect here
 /// runs in its default session.
-fn ports(descriptor: &'static EffectDescriptorV1) -> PreparedPortsV1 {
+fn ports(descriptor: &'static EffectDescriptor) -> PreparedPorts {
     let sidechain = descriptor
         .ports
         .iter()
@@ -87,11 +87,11 @@ fn ports(descriptor: &'static EffectDescriptorV1) -> PreparedPortsV1 {
                 required: port.required,
             }
         });
-    PreparedPortsV1 { sidechain }
+    PreparedPorts { sidechain }
 }
 
 fn request<'a>(
-    descriptor: &'static EffectDescriptorV1,
+    descriptor: &'static EffectDescriptor,
     initial: &'a [InitialParameterValue],
 ) -> PrepareEffectRequest<'a> {
     PrepareEffectRequest {
@@ -126,7 +126,7 @@ struct Case {
 /// every other row stays green, so the failure names the effect and the word.
 #[test]
 fn each_launch_effect_sees_its_own_designed_words_disagree() {
-    let registry = launch_native_effect_registry_v1().expect("launch registry");
+    let registry = launch_native_effect_registry().expect("launch registry");
     let cases = [
         // `band-1-gain`, parameter id 4 -> index 3. A gain difference redesigns all six SVF words
         // of section 0.
@@ -263,7 +263,7 @@ fn a_bank_declines_exactly_the_asymmetric_lane() {
         return;
     };
     let lanes = width.lanes() as usize;
-    let registry = launch_native_effect_registry_v1().expect("launch registry");
+    let registry = launch_native_effect_registry().expect("launch registry");
     let factory = registry
         .get_ascii("miso.parametric-eq")
         .expect("a launch effect");

@@ -9,7 +9,7 @@ use miso_engine_effect_contract::{
     AutomationSpanKind, BankWidth, EffectPrepareError, EffectQuality, InitialParameterValue,
     LinkMode, NativeEffectFactory, ParameterChannel, PrepareEffectBankRequest, PrepareEffectLimits,
     PrepareEffectRequest, PreparedAutomationSpan, PreparedNativeEffect, PreparedNativeEffectBank,
-    PreparedPortsV1, PreparedSidechainPort, StatePayloadOutput, StatePayloadSizes,
+    PreparedPorts, PreparedSidechainPort, StatePayloadOutput, StatePayloadSizes,
 };
 use miso_engine_effect_runtime::state_payload::{read_f32, read_u32, write_f32, write_u32};
 use miso_engine_lane::Backend;
@@ -82,7 +82,7 @@ pub(crate) fn request_full<'a>(
         quality: EffectQuality::Normal,
         bypass,
         link_mode,
-        ports: PreparedPortsV1 {
+        ports: PreparedPorts {
             sidechain: PreparedSidechainPort::None,
         },
         initial_values: values,

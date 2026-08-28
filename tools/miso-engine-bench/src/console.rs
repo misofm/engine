@@ -80,7 +80,7 @@
 //! `console_observation` measure what those facilities cost, under the same paired-alternation
 //! protocol as the hoist arms, and through the production entry points rather than a hand-built
 //! stand-in: a meter is a `MeterRequest` handed to `prepare_session_builtins`, and observation is
-//! `attach_effect_observation_v1` plus an `EffectControlRecordV1::Observe` pushed through the same
+//! `attach_effect_observation` plus an `EffectControlRecord::Observe` pushed through the same
 //! bounded queue a host pushes it through.
 //!
 //! `console_observation` measures the issue #143 two-level zero rather than restating it: `absent`
@@ -121,11 +121,11 @@ use miso_engine_console_workload::{
     Workload,
 };
 use miso_engine_core::realtime::audit;
-use miso_engine_effect_compiler::launch_native_effect_registry_v1;
+use miso_engine_effect_compiler::launch_native_effect_registry;
 use miso_engine_effect_contract::{
     AutomationSpanKind, BankWidth, EffectBankProcessBlock, EffectQuality, InitialParameterValue,
     LinkMode, NativeEffectFactory, ParameterChannel, PrepareEffectBankRequest, PrepareEffectLimits,
-    PrepareEffectRequest, PreparedAutomationSpan, PreparedNativeEffectBank, PreparedPortsV1,
+    PrepareEffectRequest, PreparedAutomationSpan, PreparedNativeEffectBank, PreparedPorts,
     PreparedSidechainPort,
 };
 use miso_engine_lane::Backend;
@@ -507,7 +507,7 @@ impl HoistArm {
         // The factory comes from the launch registry rather than from a direct dependency on the
         // effect crate: this subject measures what a session would actually instantiate, and the
         // bench crate keeps the dependency boundary it already had.
-        let registry = launch_native_effect_registry_v1().expect("launch effect registry");
+        let registry = launch_native_effect_registry().expect("launch effect registry");
         let eq = registry
             .get_shared_ascii("miso.parametric-eq")
             .expect("the launch registry carries the parametric EQ");
@@ -642,7 +642,7 @@ fn eq_request(values: &[InitialParameterValue]) -> PrepareEffectRequest<'_> {
         quality: EffectQuality::Normal,
         bypass: false,
         link_mode: LinkMode::DualMono,
-        ports: PreparedPortsV1 {
+        ports: PreparedPorts {
             sidechain: PreparedSidechainPort::None,
         },
         initial_values: values,

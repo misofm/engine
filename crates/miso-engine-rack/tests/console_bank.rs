@@ -9,8 +9,8 @@
 use miso_engine_core::realtime::{QueueGeneration, bounded_spsc};
 use miso_engine_effect_contract::{
     AutomationSpanKind, BankProcessReport, BankWidth, EffectBankProcessBlock, EffectControlLane,
-    EffectControlRecordV1, EffectId, EffectProgramKeyV1, EffectQuality, LatencySamples, LinkMode,
-    ParameterChannel, PreparedBankMetadata, PreparedNativeEffectBank, PreparedPortsV1,
+    EffectControlRecord, EffectId, EffectProgramKey, EffectQuality, LatencySamples, LinkMode,
+    ParameterChannel, PreparedBankMetadata, PreparedNativeEffectBank, PreparedPorts,
     PreparedSidechainPort, ResetKind, StatePayloadError, StatePayloadInput, StatePayloadOutput,
     StatePayloadSizes, TailSamples,
 };
@@ -25,8 +25,8 @@ fn depth(value: usize) -> core::num::NonZeroUsize {
     core::num::NonZeroUsize::new(value).expect("nonzero")
 }
 
-fn program_key(latency: u64) -> EffectProgramKeyV1 {
-    EffectProgramKeyV1 {
+fn program_key(latency: u64) -> EffectProgramKey {
+    EffectProgramKey {
         effect_id: EffectId::parse("mock.gain").expect("id"),
         contract_major: 1,
         state_layout_version: 1,
@@ -35,7 +35,7 @@ fn program_key(latency: u64) -> EffectProgramKeyV1 {
         quality: EffectQuality::Normal,
         bypass: false,
         link_mode: LinkMode::DualMono,
-        ports: PreparedPortsV1 {
+        ports: PreparedPorts {
             sidechain: PreparedSidechainPort::None,
         },
         latency: LatencySamples(latency),
@@ -148,7 +148,7 @@ impl BankMembers for Planes {
     }
 }
 
-type Producers = Vec<miso_engine_core::realtime::Producer<EffectControlRecordV1>>;
+type Producers = Vec<miso_engine_core::realtime::Producer<EffectControlRecord>>;
 
 fn console_chain(latency: usize, controlled: [bool; LANES]) -> (BankChain, Producers) {
     let mut producers = Vec::new();
@@ -156,7 +156,7 @@ fn console_chain(latency: usize, controlled: [bool; LANES]) -> (BankChain, Produ
         .iter()
         .map(|wanted| {
             wanted.then(|| {
-                let (producer, consumer) = bounded_spsc::<EffectControlRecordV1>(
+                let (producer, consumer) = bounded_spsc::<EffectControlRecord>(
                     depth(CAPACITY as usize),
                     QueueGeneration(0),
                 )
@@ -195,8 +195,8 @@ fn planes(value: f32) -> Planes {
     }
 }
 
-fn gain(value: f32) -> EffectControlRecordV1 {
-    EffectControlRecordV1::Parameter {
+fn gain(value: f32) -> EffectControlRecord {
+    EffectControlRecord::Parameter {
         parameter_index: 0,
         channel: ParameterChannel::Left,
         value,
@@ -265,7 +265,7 @@ fn bypass_is_per_lane_and_preserves_the_declared_latency() {
     // Lane 0 is bypassed and gained; lane 1 is only gained.
     producers[0].try_push(gain(0.5)).expect("room");
     producers[0]
-        .try_push(EffectControlRecordV1::Bypass(true))
+        .try_push(EffectControlRecord::Bypass(true))
         .expect("room");
     producers[1].try_push(gain(0.5)).expect("room");
 
@@ -321,14 +321,14 @@ fn un_bypassing_returns_the_current_wet_signal() {
     let (mut chain, mut producers) = console_chain(0, [true, false, false, false]);
     producers[0].try_push(gain(0.25)).expect("room");
     producers[0]
-        .try_push(EffectControlRecordV1::Bypass(true))
+        .try_push(EffectControlRecord::Bypass(true))
         .expect("room");
     let mut members = planes(1.0);
     chain.run(&mut members, 8, 0).expect("run");
     assert!(members.left[0].iter().all(|value| *value == 1.0), "dry");
 
     producers[0]
-        .try_push(EffectControlRecordV1::Bypass(false))
+        .try_push(EffectControlRecord::Bypass(false))
         .expect("room");
     let mut members = planes(1.0);
     chain.run(&mut members, 8, 8).expect("run");
@@ -461,11 +461,11 @@ fn stage_construction_rejects_a_lane_count_or_quantum_mismatch() {
 fn an_unobserved_bank_slot_reports_no_observation_state_at_all() {
     use miso_engine_core::realtime::observation_slot;
     use miso_engine_effect_contract::{
-        ObservationCadenceV1, ObservationChannelsV1, ObservationCostV1, ObservationDescriptorV1,
-        ObservationFoldV1, ObservationKindV1, ObservationLaneV1, ObservationTapId, ParameterUnit,
+        ObservationCadenceV1, ObservationChannelsV1, ObservationCostV1, ObservationDescriptor,
+        ObservationFoldV1, ObservationKindV1, ObservationLane, ObservationTapId, ParameterUnit,
     };
 
-    static MENU: [ObservationDescriptorV1; 1] = [ObservationDescriptorV1 {
+    static MENU: [ObservationDescriptor; 1] = [ObservationDescriptor {
         id: ObservationTapId(1),
         display_name: "Gain Reduction",
         display_unit: "dB",
@@ -503,7 +503,7 @@ fn an_unobserved_bank_slot_reports_no_observation_state_at_all() {
         }
         let (publisher, _reader) = observation_slot();
         let mut observation =
-            ObservationLaneV1::new(&MENU, vec![publisher], 4).expect("one per tap");
+            ObservationLane::new(&MENU, vec![publisher], 4).expect("one per tap");
         if lane == 0 {
             observation.arm(0, true, 4, 0);
         }
@@ -569,7 +569,7 @@ fn a_mid_session_bypass_emits_the_delayed_dry_signal_captured_while_wet() {
         // during the wet blocks.
         if block == 2 {
             producers[0]
-                .try_push(EffectControlRecordV1::Bypass(true))
+                .try_push(EffectControlRecord::Bypass(true))
                 .expect("room");
         }
         let mut members = Planes {
@@ -631,7 +631,7 @@ fn a_zero_latency_bypass_emits_the_current_block_dry() {
     );
 
     producers[0]
-        .try_push(EffectControlRecordV1::Bypass(true))
+        .try_push(EffectControlRecord::Bypass(true))
         .expect("room");
     let mut members = planes(5.0);
     chain

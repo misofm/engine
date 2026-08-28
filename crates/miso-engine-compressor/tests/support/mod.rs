@@ -10,7 +10,7 @@ use miso_engine_effect_contract::{
     BankWidth, EffectBankProcessBlock, EffectProcessBlock, EffectQuality, InitialParameterValue,
     LinkMode, NativeEffectFactory, ParameterChannel, PortId, PrepareEffectBankRequest,
     PrepareEffectLimits, PrepareEffectRequest, PreparedAutomationSpan, PreparedNativeEffect,
-    PreparedNativeEffectBank, PreparedPortsV1, PreparedSidechainPort, ProcessReport,
+    PreparedNativeEffectBank, PreparedPorts, PreparedSidechainPort, ProcessReport,
     StatePayloadInput, StatePayloadOutput,
 };
 use miso_engine_lane::Backend;
@@ -60,7 +60,7 @@ pub fn request_with_quantum<'a>(
         quality: EffectQuality::Normal,
         bypass: false,
         link_mode: LinkMode::DualMono,
-        ports: PreparedPortsV1 {
+        ports: PreparedPorts {
             sidechain: PreparedSidechainPort::Unconnected {
                 id: sidechain_port(),
                 required: false,

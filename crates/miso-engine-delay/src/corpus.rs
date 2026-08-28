@@ -27,7 +27,7 @@
 use miso_engine_effect_contract::{
     AutomationSpanKind, EffectProcessBlock, EffectQuality, InitialParameterValue, LinkMode,
     NativeEffectFactory, ParameterChannel, PrepareEffectLimits, PrepareEffectRequest,
-    PreparedAutomationSpan, PreparedPortsV1, PreparedSidechainPort,
+    PreparedAutomationSpan, PreparedPorts, PreparedSidechainPort,
 };
 
 use crate::{DELAY_PARAMETERS_V1, DelayFactory};
@@ -163,7 +163,7 @@ pub fn run_case(case: usize, out: &mut [u32]) {
             quality: EffectQuality::Normal,
             bypass: false,
             link_mode: LinkMode::DualMono,
-            ports: PreparedPortsV1 {
+            ports: PreparedPorts {
                 sidechain: PreparedSidechainPort::None,
             },
             initial_values: &values,

@@ -101,7 +101,7 @@ audio**. Four self-test mutations run against every browser's real result:
 ### And the same mutation against a real engine, in a real browser
 
 The self-test mutates a *result*. To prove the gate catches a mutated *engine*, the
-`ObservationLaneV1::accumulate` armed guard was changed to `return;` — so no armed tap ever
+`ObservationLane::accumulate` armed guard was changed to `return;` — so no armed tap ever
 accumulates — the browser artifact was rebuilt from that tree, and chromium was re-qualified:
 
 ```

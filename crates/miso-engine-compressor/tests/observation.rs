@@ -10,8 +10,8 @@
 mod support;
 
 use miso_engine_effect_contract::{
-    EffectProcessBlock, ObservationSampleV1, PreparedNativeEffect, ResetKind,
-    validate_descriptor_v1,
+    EffectProcessBlock, ObservationSample, PreparedNativeEffect, ResetKind,
+    validate_descriptor,
 };
 
 use support::{initial_values, prepare, request};
@@ -21,8 +21,8 @@ fn prepared() -> Box<dyn PreparedNativeEffect> {
     prepare(request(&values))
 }
 
-fn observe(effect: &dyn PreparedNativeEffect) -> ObservationSampleV1 {
-    let mut sample = ObservationSampleV1::default();
+fn observe(effect: &dyn PreparedNativeEffect) -> ObservationSample {
+    let mut sample = ObservationSample::default();
     assert!(
         effect.observe_resident(0, &mut sample),
         "the compressor implements its one declared tap"
@@ -30,9 +30,9 @@ fn observe(effect: &dyn PreparedNativeEffect) -> ObservationSampleV1 {
     sample
 }
 
-fn render(effect: &mut dyn PreparedNativeEffect, value: f32, blocks: usize) -> ObservationSampleV1 {
+fn render(effect: &mut dyn PreparedNativeEffect, value: f32, blocks: usize) -> ObservationSample {
     let quantum = effect.metadata().quantum;
-    let mut reduction = ObservationSampleV1::default();
+    let mut reduction = ObservationSample::default();
     for block in 0..blocks {
         let mut left = vec![value; quantum as usize];
         let mut right = vec![value; quantum as usize];
@@ -54,7 +54,7 @@ fn the_compressor_declares_one_resident_gain_reduction_tap() {
         ObservationKindV1, ObservationTapId, ParameterUnit,
     };
     let descriptor = miso_engine_compressor::COMPRESSOR_DESCRIPTOR_V1;
-    validate_descriptor_v1(&miso_engine_compressor::COMPRESSOR_DESCRIPTOR_V1).unwrap();
+    validate_descriptor(&miso_engine_compressor::COMPRESSOR_DESCRIPTOR_V1).unwrap();
     assert_eq!(descriptor.observations.len(), 1);
     let tap = descriptor.observations[0];
     assert_eq!(tap.id, ObservationTapId(1));
@@ -71,7 +71,7 @@ fn the_compressor_declares_one_resident_gain_reduction_tap() {
     // The addressing rule: a tap the descriptor does not declare is refused, never answered with
     // a stale or zeroed reading.
     let effect = prepared();
-    let mut sample = ObservationSampleV1 {
+    let mut sample = ObservationSample {
         left: f32::NAN,
         right: f32::NAN,
     };
@@ -219,7 +219,7 @@ fn every_bank_lane_reads_its_own_reduction() {
         &[],
     );
 
-    let mut published = vec![ObservationSampleV1::default(); lanes];
+    let mut published = vec![ObservationSample::default(); lanes];
     assert!(
         bank.observe_resident_bank(0, &mut published),
         "the bank implements its one declared tap"

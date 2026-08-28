@@ -14,8 +14,8 @@ use miso_engine_builtins_compiler::{
 };
 use miso_engine_core::{SampleRateHz, realtime::PreparedRenderPlan};
 use miso_engine_effect_compiler::{
-    EffectCompileCaps, EffectControlProducerV1, EffectObservationHandleV1,
-    attach_effect_console_v1, attach_effect_observation_v1, launch_native_effect_registry_v1,
+    EffectCompileCaps, EffectControlProducer, EffectObservationHandle,
+    attach_effect_console, attach_effect_observation, launch_native_effect_registry,
     prepare_native_session_effects,
 };
 use miso_engine_effect_contract::TailSamples;
@@ -249,7 +249,7 @@ pub struct HostConsoleRequestV1 {
     /// Maximum declared observation taps to bind per effect instance, or `0` for **no observation
     /// capacity at all** (issue #143 D3, level 1).
     ///
-    /// Zero is the honest form of "observation off": `attach_effect_observation_v1` is never
+    /// Zero is the honest form of "observation off": `attach_effect_observation` is never
     /// called, so the compiled plan holds no lane, no accumulator and no conflating cell — not a
     /// disabled one, none — and `observation_retained_bytes` is zero. Nonzero requires a control
     /// channel, because a subscription rides the effect's existing command queue.
@@ -295,7 +295,7 @@ pub struct HostConsoleHandlesV1 {
     /// One control producer per prepared effect instance (#140 A); empty when no channel was
     /// requested. Addressed by `(track_id, rack, effect_index)`, where `effect_index` is the
     /// effect's position within its rack in session declaration order.
-    pub effect_controls: Vec<EffectControlProducerV1>,
+    pub effect_controls: Vec<EffectControlProducer>,
     /// One meter consumer per track, in `tracks` order; empty when no meters were requested.
     pub meters: Vec<MeterConsumer>,
     /// One reader set per prepared effect instance that declares an observation tap (issue #143).
@@ -303,7 +303,7 @@ pub struct HostConsoleHandlesV1 {
     /// Empty when the request named no observation capacity, and empty for every effect whose
     /// descriptor declares no tap. Addressed by `(track_id, rack, effect_index)`, exactly as
     /// [`Self::effect_controls`] is.
-    pub effect_observations: Vec<EffectObservationHandleV1>,
+    pub effect_observations: Vec<EffectObservationHandle>,
     /// The designated master track index, echoed back after validation against `tracks`.
     pub master_track: Option<u32>,
 }
@@ -525,7 +525,7 @@ pub fn prepare_host_runtime_with_console(
         .collect::<Result<Vec<_>, PrepareDiagnostics>>()?;
 
     let registry =
-        launch_native_effect_registry_v1().map_err(|_| effect_failure("host.effect.registry"))?;
+        launch_native_effect_registry().map_err(|_| effect_failure("host.effect.registry"))?;
     let mut effects = prepare_native_session_effects(
         compiled,
         &registry,
@@ -578,9 +578,9 @@ pub fn prepare_host_runtime_with_console(
     // depth the builtin channels use and capped at each effect's own automation capacity. This is
     // the only thing that creates one; a host that asks for no console attaches nothing and the
     // plan renders the byte-identical console-free path.
-    let effect_controls: Vec<EffectControlProducerV1> = match console.control_queue_depth {
+    let effect_controls: Vec<EffectControlProducer> = match console.control_queue_depth {
         None => Vec::new(),
-        Some(depth) => attach_effect_console_v1(&mut effects, depth).map_err(|diagnostics| {
+        Some(depth) => attach_effect_console(&mut effects, depth).map_err(|diagnostics| {
             PrepareDiagnostics::new(
                 PrepareRejection::Effect,
                 diagnostic_lines(
@@ -601,13 +601,13 @@ pub fn prepare_host_runtime_with_console(
         (Some(period), quantum) if quantum > 0 => (period.get() / quantum).max(1),
         _ => 1,
     };
-    let effect_observations: Vec<EffectObservationHandleV1> = match console.observation_taps {
+    let effect_observations: Vec<EffectObservationHandle> = match console.observation_taps {
         0 => Vec::new(),
         taps if console.control_queue_depth.is_none() => {
             let _ = taps;
             return Err(shape("host.observation.console"));
         }
-        taps => attach_effect_observation_v1(&mut effects, taps, observation_window_blocks)
+        taps => attach_effect_observation(&mut effects, taps, observation_window_blocks)
             .map_err(|diagnostics| {
                 PrepareDiagnostics::new(
                     PrepareRejection::Effect,

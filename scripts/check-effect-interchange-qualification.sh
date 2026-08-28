@@ -187,7 +187,7 @@ if find . -path './target' -prune -o -type f \
        -o -name '*.profraw' -o -name '*.jsonl.raw' \) -print | grep -q .; then
     fail 'generated artifact exists under a source path'
 fi
-for api in verify_effect_descriptor_wire_v1 verify_effect_package_v1 inspect_effect_state_selector_v1 resolve_effect_state_migration_v1 restore_scalar_effect_state_with_migration_v1 restore_unpublished_effect_bank_track_state_with_migration_v1; do
+for api in verify_effect_descriptor_wire verify_effect_package inspect_effect_state_selector resolve_effect_state_migration restore_scalar_effect_state_with_migration restore_unpublished_effect_bank_track_state_with_migration; do
     rg -q "$api" crates/miso-engine-effect-{package,compiler}/src || fail "stale API $api"
 done
 printf 'effect interchange qualification policy: ok\n'

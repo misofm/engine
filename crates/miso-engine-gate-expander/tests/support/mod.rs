@@ -6,7 +6,7 @@ use miso_engine_effect_contract::{
     AutomationSpanKind, BankWidth, EffectProcessBlock, EffectQuality, InitialParameterValue,
     LinkMode, NativeEffectFactory, ParameterChannel, PortId, PrepareEffectBankRequest,
     PrepareEffectLimits, PrepareEffectRequest, PreparedAutomationSpan, PreparedNativeEffect,
-    PreparedNativeEffectBank, PreparedPortsV1, PreparedSidechainPort, ProcessReport,
+    PreparedNativeEffectBank, PreparedPorts, PreparedSidechainPort, ProcessReport,
     StatePayloadOutput,
 };
 use miso_engine_gate_expander::{
@@ -121,7 +121,7 @@ pub fn request_at(
         quality: EffectQuality::Normal,
         bypass: false,
         link_mode: LinkMode::DualMono,
-        ports: PreparedPortsV1 {
+        ports: PreparedPorts {
             sidechain: PreparedSidechainPort::Unconnected {
                 id: sidechain_port(),
                 required: false,

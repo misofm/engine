@@ -155,7 +155,7 @@ impl PlanUnitEligibilityV1 {
     /// This unit renders nothing upstream of the seam, so its witness proves nothing.
     ///
     /// A fader or matrix bank is the case: `SEAM_SIDE_WITNESS` is an unconditional
-    /// `ChannelSymmetryWitnessV1::SYMMETRIC`, so such a unit reports every lane eligible on every
+    /// `ChannelSymmetryWitness::SYMMETRIC`, so such a unit reports every lane eligible on every
     /// session, mono or not. That is correct as a statement about the seam and useless as
     /// collapse evidence, and a caller must test this before believing
     /// [`all_lanes_eligible`](Self::all_lanes_eligible).
@@ -224,7 +224,7 @@ pub trait PreparedPlanExecutor: Send {
     /// It is **not usable for pool sizing** -- for "how many lanes would a collapse actually
     /// save?" -- and the reason is in the denominator. A unit that is not per-track upstream work
     /// at all contributes to *both* halves: an `Identity`, a `SourceInput` and a `Route` each
-    /// report `ChannelSymmetryWitnessV1::SYMMETRIC` and count one "lane" apiece, because there is
+    /// report `ChannelSymmetryWitness::SYMMETRIC` and count one "lane" apiece, because there is
     /// nothing about them that could make two channels disagree. So a 64-track plan's totals carry
     /// its 64 source inputs and (when the #218 fold declines) its 64 route ops alongside its 64
     /// bank lanes, and the ratio moves when the *plan shape* moves even though not one track's

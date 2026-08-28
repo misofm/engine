@@ -6,9 +6,9 @@
 
 mod live;
 mod symmetry;
-pub use live::{BypassShunt, EffectControlLane, EffectControlRecordV1, ObservationLaneV1, Staged};
+pub use live::{BypassShunt, EffectControlLane, EffectControlRecord, ObservationLane, Staged};
 pub use symmetry::{
-    ChannelSymmetryWitnessV1, LiveConsoleRecordV1, SeamSideV1, SymmetryEventV1,
+    ChannelSymmetryWitness, LiveConsoleRecord, SeamSide, SymmetryEvent,
     payload_sections_agree,
 };
 
@@ -299,12 +299,12 @@ impl StatePayloadSizes {
     }
 }
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct EnumChoiceV1 {
+pub struct EnumChoice {
     pub value: f32,
     pub label: &'static str,
 }
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct ParameterDescriptorV1 {
+pub struct ParameterDescriptor {
     pub id: ParameterId,
     pub display_name: &'static str,
     pub display_unit: &'static str,
@@ -320,10 +320,10 @@ pub struct ParameterDescriptorV1 {
     pub smoothing_samples: u32,
     pub readable: bool,
     pub automatable: bool,
-    pub enum_choices: &'static [EnumChoiceV1],
+    pub enum_choices: &'static [EnumChoice],
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct PortDescriptorV1 {
+pub struct PortDescriptor {
     pub id: PortId,
     pub role: PortRole,
     pub required: bool,
@@ -341,7 +341,7 @@ pub struct PortDescriptorV1 {
 /// `minimum`/`maximum` are the declared bounds of the **published** value, after the declared
 /// [`fold`](Self::fold). A gain-reduction tap therefore declares `0 .. 100`, not `-100 .. 0`.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct ObservationDescriptorV1 {
+pub struct ObservationDescriptor {
     /// Effect-local tap id: nonzero, unique, and strictly ascending in declaration order.
     pub id: ObservationTapId,
     /// Human-facing name, e.g. `"Gain Reduction"`.
@@ -367,7 +367,7 @@ pub struct ObservationDescriptorV1 {
     pub maximum: f32,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct QualityDescriptorV1 {
+pub struct QualityDescriptor {
     pub quality: EffectQuality,
     pub sample_rate: u32,
     pub latency: LatencySamples,
@@ -377,19 +377,19 @@ pub struct QualityDescriptorV1 {
     pub scratch_bytes_per_frame: u64,
 }
 #[derive(Clone, Copy, Debug)]
-pub struct EffectDescriptorV1 {
+pub struct EffectDescriptor {
     pub id: EffectId,
     pub display_name: &'static str,
     pub contract_major: u16,
     pub contract_minor: u16,
     pub state_layout_version: u32,
     pub supported_link_modes: LinkModeSet,
-    pub parameters: &'static [ParameterDescriptorV1],
-    pub ports: &'static [PortDescriptorV1],
-    pub qualities: &'static [QualityDescriptorV1],
+    pub parameters: &'static [ParameterDescriptor],
+    pub ports: &'static [PortDescriptor],
+    pub qualities: &'static [QualityDescriptor],
     /// The declared observation menu (issue #143 D1). Last, and empty for every effect that
     /// declares no tap, so a zero-tap descriptor encodes byte-identically to the pre-#143 wire.
-    pub observations: &'static [ObservationDescriptorV1],
+    pub observations: &'static [ObservationDescriptor],
 }
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum DescriptorDiagnosticCode {
@@ -472,7 +472,7 @@ pub fn is_negative_zero(v: f32) -> bool {
 /// law over two descriptions and cannot be one function while the contract is `std` and
 /// `effect-runtime` is `no_std` (see `scripts/check-effect-runtime-policy.sh`).
 #[must_use]
-pub fn parameter_value_valid(p: &ParameterDescriptorV1, v: f32) -> bool {
+pub fn parameter_value_valid(p: &ParameterDescriptor, v: f32) -> bool {
     if !v.is_finite() {
         return false;
     }
@@ -490,7 +490,7 @@ pub fn parameter_value_valid(p: &ParameterDescriptorV1, v: f32) -> bool {
             .any(|c| canonical_bits(c.value) == canonical_bits(v)),
     }
 }
-fn parameter_valid(p: &ParameterDescriptorV1) -> bool {
+fn parameter_valid(p: &ParameterDescriptor) -> bool {
     if !valid_text(p.display_name)
         || !valid_text(p.display_unit)
         || !p.default_value.is_finite()
@@ -560,7 +560,7 @@ fn parameter_valid(p: &ParameterDescriptorV1) -> bool {
         }
     }
 }
-/// The three rules an [`ObservationDescriptorV1`] must satisfy beyond text and bounds.
+/// The three rules an [`ObservationDescriptor`] must satisfy beyond text and bounds.
 ///
 /// * **Text and bounds.** Both display strings are non-empty printable text, and the declared
 ///   published range is finite, ordered, and free of `-0.0` -- the same canonicalisation rule
@@ -576,7 +576,7 @@ fn parameter_valid(p: &ParameterDescriptorV1) -> bool {
 /// width is not a descriptor field (it is a *factory* capability, `bind_homogeneous_bank`), so the
 /// checkable statement is the one that actually catches the error -- a per-lane tap on an effect
 /// with no per-lane state.
-fn observation_valid(d: &EffectDescriptorV1, o: &ObservationDescriptorV1) -> bool {
+fn observation_valid(d: &EffectDescriptor, o: &ObservationDescriptor) -> bool {
     valid_text(o.display_name)
         && valid_text(o.display_unit)
         && o.minimum.is_finite()
@@ -589,7 +589,7 @@ fn observation_valid(d: &EffectDescriptorV1, o: &ObservationDescriptorV1) -> boo
         && (!matches!(o.channels, ObservationChannelsV1::PerLane)
             || d.qualities.iter().all(|q| q.maximum_state.left_bytes > 0))
 }
-pub fn validate_descriptor_v1(d: &'static EffectDescriptorV1) -> Result<(), DescriptorErrorSet> {
+pub fn validate_descriptor(d: &'static EffectDescriptor) -> Result<(), DescriptorErrorSet> {
     let mut e = Vec::new();
     if d.contract_major != 1 {
         e.push(DescriptorError {
@@ -816,7 +816,7 @@ pub fn inverse_map_stepped_normalized(choices: &[f32], value: f32) -> Option<f32
         .map(|index| index as f32 / (choices.len() - 1) as f32)
 }
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct PreparedPortsV1 {
+pub struct PreparedPorts {
     pub sidechain: PreparedSidechainPort,
 }
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -844,7 +844,7 @@ pub struct PrepareEffectRequest<'a> {
     pub quality: EffectQuality,
     pub bypass: bool,
     pub link_mode: LinkMode,
-    pub ports: PreparedPortsV1,
+    pub ports: PreparedPorts,
     pub initial_values: &'a [InitialParameterValue],
     pub limits: PrepareEffectLimits,
 }
@@ -896,13 +896,13 @@ pub struct StatePayloadError {
 }
 #[derive(Clone, Copy, Debug)]
 pub struct PreparedEffectMetadata {
-    pub descriptor: &'static EffectDescriptorV1,
+    pub descriptor: &'static EffectDescriptor,
     pub sample_rate: u32,
     pub quantum: u32,
     pub quality: EffectQuality,
     pub bypass: bool,
     pub link_mode: LinkMode,
-    pub ports: PreparedPortsV1,
+    pub ports: PreparedPorts,
     pub latency: LatencySamples,
     pub tail: TailSamples,
     pub state_sizes: StatePayloadSizes,
@@ -943,7 +943,7 @@ pub struct PreparedEffectMetadata {
 /// key that no longer separates bypassed lanes, on kernels that cannot separate them, is a
 /// correctness bug, not a cleanup.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct EffectProgramKeyV1 {
+pub struct EffectProgramKey {
     pub effect_id: EffectId,
     pub contract_major: u16,
     pub state_layout_version: u32,
@@ -952,7 +952,7 @@ pub struct EffectProgramKeyV1 {
     pub quality: EffectQuality,
     pub bypass: bool,
     pub link_mode: LinkMode,
-    pub ports: PreparedPortsV1,
+    pub ports: PreparedPorts,
     pub latency: LatencySamples,
     pub tail: TailSamples,
     pub state_sizes: StatePayloadSizes,
@@ -960,8 +960,8 @@ pub struct EffectProgramKeyV1 {
     pub automation_capacity: u32,
 }
 impl PreparedEffectMetadata {
-    pub fn program_key(self) -> EffectProgramKeyV1 {
-        EffectProgramKeyV1 {
+    pub fn program_key(self) -> EffectProgramKey {
+        EffectProgramKey {
             effect_id: self.descriptor.id,
             contract_major: self.descriptor.contract_major,
             state_layout_version: self.descriptor.state_layout_version,
@@ -982,7 +982,7 @@ impl PreparedEffectMetadata {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PreparedBankMetadata {
     pub width: BankWidth,
-    pub program_key: EffectProgramKeyV1,
+    pub program_key: EffectProgramKey,
 }
 /// What one `process` call observed. Every counter here counts **blocks**, never samples
 /// (decision D7): an effect classifies no individual sample, so a per-sample count would have no
@@ -1407,7 +1407,7 @@ impl<'a> StatePayloadInput<'a> {
     }
 }
 pub trait NativeEffectFactory: Send + Sync {
-    fn descriptor(&self) -> &'static EffectDescriptorV1;
+    fn descriptor(&self) -> &'static EffectDescriptor;
     fn prepare(
         &self,
         request: PrepareEffectRequest<'_>,
@@ -1441,7 +1441,7 @@ pub trait NativeEffectFactory: Send + Sync {
     ///
     /// * a width this build does not execute (decision D4 makes that a compile-time constant, so
     ///   it is a property of the artifact and not of the request);
-    /// * a **heterogeneous cohort** — members that do not all share one `EffectProgramKeyV1`;
+    /// * a **heterogeneous cohort** — members that do not all share one `EffectProgramKey`;
     /// * a port or link configuration this effect has no bank kernel for.
     ///
     /// The heterogeneous case is the one that moved. `graph-compiler` groups candidates by
@@ -1462,7 +1462,7 @@ pub trait NativeEffectFactory: Send + Sync {
         request: PrepareEffectBankRequest<'_>,
     ) -> Result<Option<Box<dyn PreparedNativeEffectBank>>, EffectPrepareError>;
 }
-/// One observation reading, in the tap's declared [`unit`](ObservationDescriptorV1::unit).
+/// One observation reading, in the tap's declared [`unit`](ObservationDescriptor::unit).
 ///
 /// Two lanes always, because a dual-mono effect has two of everything. A tap that declares
 /// [`ObservationChannelsV1::Shared`] writes the same value into both, so a consumer never has to
@@ -1471,10 +1471,10 @@ pub trait NativeEffectFactory: Send + Sync {
 /// The **sign and unit are the effect's own**, not the consumer's: a compressor writes the
 /// negative decibels its smoother holds, a true-peak limiter writes the linear reduction word its
 /// kernel recurses on. Turning that into the non-negative magnitude a meter shows is the declared
-/// [`fold`](ObservationDescriptorV1::fold) plus one control-plane unit conversion -- neither of
+/// [`fold`](ObservationDescriptor::fold) plus one control-plane unit conversion -- neither of
 /// which happens inside an effect, and neither of which puts a `log` on a render thread.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct ObservationSampleV1 {
+pub struct ObservationSample {
     /// Left lane.
     pub left: f32,
     /// Right lane.
@@ -1489,7 +1489,7 @@ pub trait PreparedNativeEffect: Send {
     /// Read one declared [`ObservationCostV1::Resident`] tap into `out` (issue #143 D2).
     ///
     /// `tap_index` is the index into
-    /// [`EffectDescriptorV1::observations`](EffectDescriptorV1::observations), never the wire
+    /// [`EffectDescriptor::observations`](EffectDescriptor::observations), never the wire
     /// `tap_id`: the translation is an admission-time lookup, off the render thread, exactly as
     /// `parameter_index` is for a live parameter.
     ///
@@ -1505,7 +1505,7 @@ pub trait PreparedNativeEffect: Send {
     /// second opinion about what the block did; calling it twice returns identical bits because
     /// there is nothing it could have changed. That is the whole content of "resident" and it is
     /// enforced by the signature rather than asserted in prose (#143 E6).
-    fn observe_resident(&self, tap_index: u32, out: &mut ObservationSampleV1) -> bool {
+    fn observe_resident(&self, tap_index: u32, out: &mut ObservationSample) -> bool {
         let _ = (tap_index, out);
         false
     }
@@ -1598,7 +1598,7 @@ pub trait PreparedNativeEffectBank: Send {
     /// channel, at the tap exactly as at the fader. So an implementation writes the two channels it
     /// has and never tries to guess; a bank that "helpfully" duplicated here would be wrong on
     /// every dual block.
-    fn observe_resident_bank(&self, tap_index: u32, out: &mut [ObservationSampleV1]) -> bool {
+    fn observe_resident_bank(&self, tap_index: u32, out: &mut [ObservationSample]) -> bool {
         let _ = (tap_index, out);
         false
     }
@@ -1610,7 +1610,7 @@ pub trait PreparedNativeEffectBank: Send {
     /// collapse engaged, so a payload taken from it would carry a right section no dual run ever
     /// produced. [`desymmetrize_channels`](Self::desymmetrize_channels) documents the obligation
     /// and why nothing in this tree owes it yet -- the only snapshot entry point in the engine is
-    /// `snapshot_unpublished_effect_bank_track_state_v1`, which names its subject, and a bank bound
+    /// `snapshot_unpublished_effect_bank_track_state`, which names its subject, and a bank bound
     /// into a chain is not unpublished. The note is repeated from here because this is the method a
     /// caller reaches for, and a caller that finds a way to a bound bank must call
     /// `desymmetrize_channels` first.
@@ -1630,7 +1630,7 @@ pub trait PreparedNativeEffectBank: Send {
     /// **bit-equal** between the left and the right channel.
     ///
     /// This is the `DESIGNED` term of
-    /// [`ChannelSymmetryWitnessV1`](crate::ChannelSymmetryWitnessV1), and the only thing an
+    /// [`ChannelSymmetryWitness`](crate::ChannelSymmetryWitness), and the only thing an
     /// implementation may look at is the words its own kernel loads: not the control-plane
     /// parameter table it designed them from, not running filter state, not anything shared
     /// between the channels (which cannot be asymmetric and would only dilute the answer). The
@@ -1719,7 +1719,7 @@ pub trait PreparedNativeEffectBank: Send {
     /// the right channel held when the collapse engaged. Calling this first makes the payload the
     /// one a dual run would have written, and calling it is always sound -- it is the counterfactual
     /// state, not an approximation of it. Nothing in this tree needs to:
-    /// `snapshot_unpublished_effect_bank_track_state_v1` names its subject, and a bank that has been
+    /// `snapshot_unpublished_effect_bank_track_state` names its subject, and a bank that has been
     /// bound into a chain is not unpublished. The obligation is written here so that the first
     /// caller that *does* reach a bound bank finds it stated rather than has to derive it.
     fn desymmetrize_channels(&mut self) {}
@@ -1782,8 +1782,8 @@ pub trait PreparedNativeEffectBank: Send {
     ///
     /// Every launch effect takes the declining default, and that is a decision rather than an
     /// omission. Within one plan the channel-symmetry witness can go from holding to not holding
-    /// and back for exactly one term: [`UNBYPASSED`](crate::ChannelSymmetryWitnessV1::UNBYPASSED),
-    /// which `ChannelSymmetryWitnessV1::admit` restores on `Bypass(false)`. `LIVE` has no restoring
+    /// and back for exactly one term: [`UNBYPASSED`](crate::ChannelSymmetryWitness::UNBYPASSED),
+    /// which `ChannelSymmetryWitness::admit` restores on `Bypass(false)`. `LIVE` has no restoring
     /// arm, `DESIGNED` is cached at bind on a bound bank, and `SOURCE` and `RESTORED` are decided
     /// off the render thread. And a bypass window is precisely the window that does **not** move
     /// the two channels apart, so it never clears the chain's agreement invariant in the first
@@ -1831,7 +1831,7 @@ impl NativeEffectRegistry {
         let mut m = BTreeMap::new();
         for x in f {
             let d = x.descriptor();
-            if validate_descriptor_v1(d).is_err() {
+            if validate_descriptor(d).is_err() {
                 return Err(RegistryError {
                     code: "effect.descriptor.invalid",
                     id: Some(d.id),
@@ -1871,7 +1871,7 @@ impl NativeEffectRegistry {
     /// The parameter-metadata codegen reads the registry through this, so "an effect in the
     /// registry is missing from the emitted metadata" is not a rule anyone has to remember to
     /// check: there is no other list to fall out of step with.
-    pub fn descriptors(&self) -> impl Iterator<Item = &'static EffectDescriptorV1> + '_ {
+    pub fn descriptors(&self) -> impl Iterator<Item = &'static EffectDescriptor> + '_ {
         self.factories.values().map(|factory| factory.descriptor())
     }
 }
@@ -1884,7 +1884,7 @@ impl NativeEffectRegistry {
 /// inside the validator as a freshly allocated `Vec`, which is why the conformance harness had to
 /// hard-code one parameter's L/R pair and could therefore only ever run against its own mock.
 pub fn initial_value_slots(
-    d: &'static EffectDescriptorV1,
+    d: &'static EffectDescriptor,
 ) -> impl Iterator<Item = (u32, ParameterChannel)> + 'static {
     d.parameters
         .iter()
@@ -1908,7 +1908,7 @@ pub fn initial_value_slots(
 /// [`validate_initial_values`]. `-0.0` is normalised: the validator rejects it, and a descriptor
 /// that declares it is already invalid.
 pub fn default_initial_values(
-    d: &'static EffectDescriptorV1,
+    d: &'static EffectDescriptor,
 ) -> impl Iterator<Item = InitialParameterValue> + 'static {
     initial_value_slots(d).map(|(parameter_index, channel)| InitialParameterValue {
         parameter_index,
@@ -1918,7 +1918,7 @@ pub fn default_initial_values(
 }
 
 pub fn validate_initial_values(
-    d: &'static EffectDescriptorV1,
+    d: &'static EffectDescriptor,
     v: &[InitialParameterValue],
 ) -> Result<(), EffectPrepareError> {
     if initial_value_slots(d).count() != v.len() {
@@ -1954,7 +1954,7 @@ pub fn validate_initial_values(
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ValidatedPrepare {
     /// The quality row the request resolved to.
-    pub quality: QualityDescriptorV1,
+    pub quality: QualityDescriptor,
     /// Scratch this preparation is entitled to: `scratch_fixed_bytes + per_frame * quantum`.
     pub scratch_bytes: u64,
 }
@@ -1983,7 +1983,7 @@ pub struct ValidatedPrepare {
 ///
 /// `effect.resource.limit` on overflow.
 const fn scratch_for(
-    quality: QualityDescriptorV1,
+    quality: QualityDescriptor,
     quantum: u32,
 ) -> Result<u64, EffectPrepareError> {
     let limit = EffectPrepareError {
@@ -1999,10 +1999,10 @@ const fn scratch_for(
 }
 
 pub fn validate_prepare_request(
-    d: &'static EffectDescriptorV1,
+    d: &'static EffectDescriptor,
     r: PrepareEffectRequest<'_>,
 ) -> Result<ValidatedPrepare, EffectPrepareError> {
-    validate_descriptor_v1(d).map_err(|_| EffectPrepareError {
+    validate_descriptor(d).map_err(|_| EffectPrepareError {
         code: "effect.descriptor.invalid",
     })?;
     if r.sample_rate == 0
@@ -2083,7 +2083,7 @@ pub fn validate_prepare_request(
 
 /// Derive the sole conforming immutable metadata value for a validated prepare request.
 pub fn expected_prepared_metadata(
-    descriptor: &'static EffectDescriptorV1,
+    descriptor: &'static EffectDescriptor,
     request: PrepareEffectRequest<'_>,
 ) -> Result<PreparedEffectMetadata, EffectPrepareError> {
     let ValidatedPrepare {

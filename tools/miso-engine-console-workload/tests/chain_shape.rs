@@ -22,7 +22,7 @@ use miso_engine_bench_support::digest::Sha256Sink;
 use miso_engine_console_workload::{
     ObservationArm, PlanConfig, SessionRuntime, WORKLOADS, Workload,
 };
-use miso_engine_effect_contract::ChannelSymmetryWitnessV1;
+use miso_engine_effect_contract::ChannelSymmetryWitness;
 
 /// Enough blocks for the limiter's lookahead to clear and every detector to settle.
 const BLOCKS: u64 = 64;
@@ -113,7 +113,7 @@ fn the_intended_strip_is_one_chain_per_cohort() {
 ///   and the engine's `a_leased_stage_meter_declines_the_merge_and_still_meters` pins that; this
 ///   arm pins that the meters a console actually leases do not.
 /// * **The live-console control channel.** Per effect, drained inside the slot's own stage.
-/// * **Armed effect observation.** `ObservationLaneV1` reads the effect's *resident state* through
+/// * **Armed effect observation.** `ObservationLane` reads the effect's *resident state* through
 ///   `observe_resident`; it never reads a planar stage buffer. So it is not a
 ///   `GraphNodeObserverBinding`, `runtime::chains_into` does not see it, and it must neither
 ///   decline the merge nor be disturbed by one -- an armed lane on a fused slot still publishes.
@@ -484,7 +484,7 @@ fn the_half_mono_cohort_banks_like_a_uniform_one() {
     // all. The half-mono row's fold declines (see
     // `every_standing_workload_folds_one_route_per_track` for the association-order derivation),
     // so its 64 route ops *are* dispatched: 193 lanes, not 129. And a `Route` reports
-    // `ChannelSymmetryWitnessV1::SYMMETRIC` -- it is not per-track upstream work, so nothing about
+    // `ChannelSymmetryWitness::SYMMETRIC` -- it is not per-track upstream work, so nothing about
     // it can make two channels disagree -- which adds 64 to the eligible half as well.
     //
     // So the pair moves from `[64, 129]` to `[128, 193]` on a row where **not one track's
@@ -554,14 +554,14 @@ fn the_half_mono_cohort_banks_like_a_uniform_one() {
     // runtime half by anonymous **lanes**; `lane_tracks` is the only relation between the two
     // keys, and a collapse decision is their conjunction. Performing it here is what proves the
     // plumbing M2's dispatch needs is actually connected end to end.
-    let structural: BTreeMap<&str, ChannelSymmetryWitnessV1> = runtime
+    let structural: BTreeMap<&str, ChannelSymmetryWitness> = runtime
         .structural_symmetry()
         .iter()
         .map(|(track, witness)| (track.as_ref(), *witness))
         .collect();
     let mut collapsible = 0_u64;
     for row in &banked {
-        let lanes: Vec<ChannelSymmetryWitnessV1> = row
+        let lanes: Vec<ChannelSymmetryWitness> = row
             .lane_tracks
             .iter()
             .map(|track| {
@@ -606,7 +606,7 @@ fn the_half_mono_cohort_banks_like_a_uniform_one() {
 ///
 /// # The trap this closes
 ///
-/// `SEAM_SIDE_WITNESS` is an unconditional `ChannelSymmetryWitnessV1::SYMMETRIC`: the collapse
+/// `SEAM_SIDE_WITNESS` is an unconditional `ChannelSymmetryWitness::SYMMETRIC`: the collapse
 /// duplicates its one computed plane *into* the fader and the matrix, so their per-channel words
 /// are free to differ and are deliberately never compared. A unit built only from those two stages
 /// therefore reports every lane eligible on **every** session, mono or stereo. A dispatch that
@@ -1182,7 +1182,7 @@ fn a_live_one_channel_retarget_disengages_on_the_block_it_lands() {
 /// does not separate the two channels. A bypassed lane still runs the bank -- the shunt captures
 /// the dry block before the bank touches it and restores it into the bypassed lanes afterwards --
 /// so both channels advance through the same kernel on the same samples and come out holding the
-/// same state, which is exactly why `ChannelSymmetryWitnessV1::AGREEING` leaves the term out of the
+/// same state, which is exactly why `ChannelSymmetryWitness::AGREEING` leaves the term out of the
 /// agreement invariant.
 ///
 /// So this is the cycle M2 could not take and M3 must: a bypass window on a real strip, and a
@@ -1192,7 +1192,7 @@ fn a_live_one_channel_retarget_disengages_on_the_block_it_lands() {
 ///
 /// # Red mutation
 ///
-/// Fold `UNBYPASSED` back into `ChannelSymmetryWitnessV1::AGREEING` -- make it `ALL` -- and the
+/// Fold `UNBYPASSED` back into `ChannelSymmetryWitness::AGREEING` -- make it `ALL` -- and the
 /// bypassed cohort is retired for the rest of the plan: the block count falls by the whole tail
 /// rather than by the four bypassed blocks, and the transition triple loses its re-engage. The
 /// digest stays green, which is the point of asserting the count as well.
@@ -1280,7 +1280,7 @@ fn a_lifted_bypass_re_engages_the_collapse_and_renders_the_dual_bits() {
 /// # Two mechanisms decline, and only one of them is the rule
 ///
 /// The `LIVE` term is cleared by the one-channel write and is never re-set within a plan
-/// (`ChannelSymmetryWitnessV1::admit` has no restoring arm for it, unlike `UNBYPASSED`), so the
+/// (`ChannelSymmetryWitness::admit` has no restoring arm for it, unlike `UNBYPASSED`), so the
 /// witness alone already declines this session forever. That is worth having and it is *not* the
 /// rule: it is a property of today's live-record vocabulary, and
 /// `miso_engine_effect_contract::symmetry`'s module header names two seams -- builtins liveness and
@@ -1293,7 +1293,7 @@ fn a_lifted_bypass_re_engages_the_collapse_and_renders_the_dual_bits() {
 ///
 /// Drop `&& self.collapse_channels_agree` from `BankChain::run`'s dispatch and this stays green --
 /// which is the point: the witness is still declining. Restore `LIVE` in
-/// `ChannelSymmetryWitnessV1::admit` *as well* and the digest comparison fails, because the cohort
+/// `ChannelSymmetryWitness::admit` *as well* and the digest comparison fails, because the cohort
 /// re-engages onto a right channel that is two blocks behind its left.
 /// `miso-engine-rack`'s `mono_reengage::re_equal_words_after_a_desymmetrised_episode_do_not_re_engage`
 /// is the same session with the second mechanism isolated.

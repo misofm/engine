@@ -5,30 +5,30 @@ use miso_engine_effect_contract::{
     StatePayloadOutput,
 };
 use miso_engine_effect_package::{
-    BoundEffectDescriptorWireV1, BoundEffectStateMigrationEdgeV1,
-    EFFECT_STATE_V1_UNAVAILABLE_INDEX, EFFECT_STATE_V1_UNAVAILABLE_OFFSET,
-    EffectStateDescriptorProvenanceV1, EffectStateDiagnosticCodeV1, EffectStateDiagnosticV1,
-    EffectStateLimitsV1, EffectStateMigrationEdgeErrorV1, EffectStateSelectorV1,
-    bind_effect_state_migration_edge_v1, effect_state_bound_selector_v1,
-    effect_state_derived_resources_v1, effect_state_descriptor_provenance_v1,
-    effect_state_expected_metadata_v1, effect_state_replay_view_from_verified_v1,
-    effect_state_v1_requirements, encode_effect_state_v1, inspect_effect_state_selector_v1,
-    validate_effect_state_current_layout_v1, validate_effect_state_replay_configuration_v1,
-    verify_effect_state_v1,
+    BoundEffectDescriptorWire, BoundEffectStateMigrationEdge,
+    EFFECT_STATE_UNAVAILABLE_INDEX, EFFECT_STATE_UNAVAILABLE_OFFSET,
+    EffectStateDescriptorProvenance, EffectStateDiagnosticCode, EffectStateDiagnostic,
+    EffectStateLimits, EffectStateMigrationEdgeError, EffectStateSelector,
+    bind_effect_state_migration_edge, effect_state_bound_selector,
+    effect_state_derived_resources, effect_state_descriptor_provenance,
+    effect_state_expected_metadata, effect_state_replay_view_from_verified,
+    effect_state_requirements, encode_effect_state, inspect_effect_state_selector,
+    validate_effect_state_current_layout, validate_effect_state_replay_configuration,
+    verify_effect_state,
 };
 
 use crate::prepare::admit_restored_state;
 use crate::{
-    EffectBankPreparationV1, EffectStateRestoreAdmissionV1, RestoredScalarEffectStateV1,
-    UnpublishedEffectBankStateV1, WireBoundNativeEffectFactoryV1, restore_scalar_effect_state_v1,
-    restore_unpublished_effect_bank_track_state_v1,
+    EffectBankPreparation, EffectStateRestoreAdmission, RestoredScalarEffectState,
+    UnpublishedEffectBankState, WireBoundNativeEffectFactory, restore_scalar_effect_state,
+    restore_unpublished_effect_bank_track_state,
 };
 
-pub const EFFECT_STATE_MIGRATION_V1_UNAVAILABLE_INDEX: u32 = u32::MAX;
+pub const EFFECT_STATE_MIGRATION_UNAVAILABLE_INDEX: u32 = u32::MAX;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u32)]
-pub enum EffectStateMigrationDiagnosticCodeV1 {
+pub enum EffectStateMigrationDiagnosticCode {
     Ok = 0,
     Limit = 1,
     BufferTooSmall = 2,
@@ -42,21 +42,21 @@ pub enum EffectStateMigrationDiagnosticCodeV1 {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(C)]
-pub struct EffectStateMigrationDiagnosticV1 {
-    pub code: EffectStateMigrationDiagnosticCodeV1,
+pub struct EffectStateMigrationDiagnostic {
+    pub code: EffectStateMigrationDiagnosticCode,
     pub detail: u32,
     pub item_index: u32,
     pub reserved: u32,
     pub required_bytes: u64,
-    pub nested_state: EffectStateDiagnosticV1,
+    pub nested_state: EffectStateDiagnostic,
 }
 
-impl EffectStateMigrationDiagnosticV1 {
+impl EffectStateMigrationDiagnostic {
     pub const fn ok() -> Self {
         Self {
-            code: EffectStateMigrationDiagnosticCodeV1::Ok,
+            code: EffectStateMigrationDiagnosticCode::Ok,
             detail: 0,
-            item_index: EFFECT_STATE_MIGRATION_V1_UNAVAILABLE_INDEX,
+            item_index: EFFECT_STATE_MIGRATION_UNAVAILABLE_INDEX,
             reserved: 0,
             required_bytes: 0,
             nested_state: canonical_nested_ok(),
@@ -64,27 +64,27 @@ impl EffectStateMigrationDiagnosticV1 {
     }
 }
 
-const fn canonical_nested_ok() -> EffectStateDiagnosticV1 {
-    EffectStateDiagnosticV1::new(
-        EffectStateDiagnosticCodeV1::Ok,
+const fn canonical_nested_ok() -> EffectStateDiagnostic {
+    EffectStateDiagnostic::new(
+        EffectStateDiagnosticCode::Ok,
         0,
-        EFFECT_STATE_V1_UNAVAILABLE_INDEX,
-        EFFECT_STATE_V1_UNAVAILABLE_OFFSET,
+        EFFECT_STATE_UNAVAILABLE_INDEX,
+        EFFECT_STATE_UNAVAILABLE_OFFSET,
     )
 }
 
 fn migration_diagnostic(
-    code: EffectStateMigrationDiagnosticCodeV1,
+    code: EffectStateMigrationDiagnosticCode,
     detail: u32,
     item_index: Option<usize>,
     required_bytes: u64,
-) -> EffectStateMigrationDiagnosticV1 {
-    EffectStateMigrationDiagnosticV1 {
+) -> EffectStateMigrationDiagnostic {
+    EffectStateMigrationDiagnostic {
         code,
         detail,
         item_index: item_index
             .and_then(|index| u32::try_from(index).ok())
-            .unwrap_or(EFFECT_STATE_MIGRATION_V1_UNAVAILABLE_INDEX),
+            .unwrap_or(EFFECT_STATE_MIGRATION_UNAVAILABLE_INDEX),
         reserved: 0,
         required_bytes,
         nested_state: canonical_nested_ok(),
@@ -94,25 +94,25 @@ fn migration_diagnostic(
 fn state_diagnostic(
     detail: u32,
     item_index: Option<usize>,
-    nested_state: EffectStateDiagnosticV1,
-) -> EffectStateMigrationDiagnosticV1 {
-    EffectStateMigrationDiagnosticV1 {
-        code: EffectStateMigrationDiagnosticCodeV1::State,
+    nested_state: EffectStateDiagnostic,
+) -> EffectStateMigrationDiagnostic {
+    EffectStateMigrationDiagnostic {
+        code: EffectStateMigrationDiagnosticCode::State,
         detail,
         item_index: item_index
             .and_then(|index| u32::try_from(index).ok())
-            .unwrap_or(EFFECT_STATE_MIGRATION_V1_UNAVAILABLE_INDEX),
+            .unwrap_or(EFFECT_STATE_MIGRATION_UNAVAILABLE_INDEX),
         reserved: 0,
         required_bytes: 0,
         nested_state,
     }
 }
 
-fn state_limit(byte_offset: u64, required_bytes: u64) -> EffectStateDiagnosticV1 {
-    let mut diagnostic = EffectStateDiagnosticV1::new(
-        EffectStateDiagnosticCodeV1::Limit,
+fn state_limit(byte_offset: u64, required_bytes: u64) -> EffectStateDiagnostic {
+    let mut diagnostic = EffectStateDiagnostic::new(
+        EffectStateDiagnosticCode::Limit,
         0,
-        EFFECT_STATE_V1_UNAVAILABLE_INDEX,
+        EFFECT_STATE_UNAVAILABLE_INDEX,
         byte_offset,
     );
     diagnostic.required_bytes = required_bytes;
@@ -127,7 +127,7 @@ fn host_fit(value: u64) -> bool {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(C)]
-pub struct EffectStateMigrationStepReportV1 {
+pub struct EffectStateMigrationStepReport {
     pub common_bytes: u32,
     pub left_bytes: u32,
     pub right_bytes: u32,
@@ -136,11 +136,11 @@ pub struct EffectStateMigrationStepReportV1 {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u32)]
-pub enum EffectStateMigrationStepFailureV1 {
+pub enum EffectStateMigrationStepFailure {
     Rejected = 1,
 }
 
-pub trait EffectStateMigrationStepV1: Send + Sync {
+pub trait EffectStateMigrationStep: Send + Sync {
     fn scratch_bytes(&self) -> u64;
 
     fn migrate(
@@ -150,27 +150,27 @@ pub trait EffectStateMigrationStepV1: Send + Sync {
         source: StatePayloadInput<'_>,
         target: StatePayloadOutput<'_>,
         algorithm_scratch: &mut [u8],
-    ) -> Result<EffectStateMigrationStepReportV1, EffectStateMigrationStepFailureV1>;
+    ) -> Result<EffectStateMigrationStepReport, EffectStateMigrationStepFailure>;
 }
 
-pub struct EffectStateMigrationRegistrationV1<'wire> {
-    edge: Result<BoundEffectStateMigrationEdgeV1<'wire>, EffectStateMigrationEdgeErrorV1>,
-    step: Arc<dyn EffectStateMigrationStepV1>,
+pub struct EffectStateMigrationRegistration<'wire> {
+    edge: Result<BoundEffectStateMigrationEdge<'wire>, EffectStateMigrationEdgeError>,
+    step: Arc<dyn EffectStateMigrationStep>,
 }
 
-impl core::fmt::Debug for EffectStateMigrationRegistrationV1<'_> {
+impl core::fmt::Debug for EffectStateMigrationRegistration<'_> {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         formatter
-            .debug_struct("EffectStateMigrationRegistrationV1")
+            .debug_struct("EffectStateMigrationRegistration")
             .field("edge", &self.edge)
             .finish_non_exhaustive()
     }
 }
 
-impl<'wire> EffectStateMigrationRegistrationV1<'wire> {
+impl<'wire> EffectStateMigrationRegistration<'wire> {
     pub fn new(
-        edge: BoundEffectStateMigrationEdgeV1<'wire>,
-        step: Arc<dyn EffectStateMigrationStepV1>,
+        edge: BoundEffectStateMigrationEdge<'wire>,
+        step: Arc<dyn EffectStateMigrationStep>,
     ) -> Self {
         Self {
             edge: Ok(edge),
@@ -179,49 +179,49 @@ impl<'wire> EffectStateMigrationRegistrationV1<'wire> {
     }
 
     pub fn from_bound_descriptors(
-        source: BoundEffectDescriptorWireV1<'wire>,
-        target: BoundEffectDescriptorWireV1<'wire>,
-        step: Arc<dyn EffectStateMigrationStepV1>,
+        source: BoundEffectDescriptorWire<'wire>,
+        target: BoundEffectDescriptorWire<'wire>,
+        step: Arc<dyn EffectStateMigrationStep>,
     ) -> Self {
-        let edge = bind_effect_state_migration_edge_v1(source, target);
+        let edge = bind_effect_state_migration_edge(source, target);
         Self { edge, step }
     }
 
-    pub fn step(&self) -> &Arc<dyn EffectStateMigrationStepV1> {
+    pub fn step(&self) -> &Arc<dyn EffectStateMigrationStep> {
         &self.step
     }
 }
 
 fn registry_edge_error(
-    error: EffectStateMigrationEdgeErrorV1,
+    error: EffectStateMigrationEdgeError,
     item_index: usize,
-) -> EffectStateMigrationDiagnosticV1 {
+) -> EffectStateMigrationDiagnostic {
     migration_diagnostic(
-        EffectStateMigrationDiagnosticCodeV1::Registry,
+        EffectStateMigrationDiagnosticCode::Registry,
         error as u32,
         Some(item_index),
         0,
     )
 }
 
-pub fn bind_effect_state_migration_registration_v1<'wire>(
-    source: BoundEffectDescriptorWireV1<'wire>,
-    target: BoundEffectDescriptorWireV1<'wire>,
-    step: Arc<dyn EffectStateMigrationStepV1>,
-) -> EffectStateMigrationRegistrationV1<'wire> {
-    EffectStateMigrationRegistrationV1::from_bound_descriptors(source, target, step)
+pub fn bind_effect_state_migration_registration<'wire>(
+    source: BoundEffectDescriptorWire<'wire>,
+    target: BoundEffectDescriptorWire<'wire>,
+    step: Arc<dyn EffectStateMigrationStep>,
+) -> EffectStateMigrationRegistration<'wire> {
+    EffectStateMigrationRegistration::from_bound_descriptors(source, target, step)
 }
 
-struct RegisteredEffectStateMigrationV1<'wire> {
-    edge: BoundEffectStateMigrationEdgeV1<'wire>,
-    step: Arc<dyn EffectStateMigrationStepV1>,
+struct RegisteredEffectStateMigration<'wire> {
+    edge: BoundEffectStateMigrationEdge<'wire>,
+    step: Arc<dyn EffectStateMigrationStep>,
     scratch_bytes: u64,
 }
 
-impl core::fmt::Debug for RegisteredEffectStateMigrationV1<'_> {
+impl core::fmt::Debug for RegisteredEffectStateMigration<'_> {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         formatter
-            .debug_struct("RegisteredEffectStateMigrationV1")
+            .debug_struct("RegisteredEffectStateMigration")
             .field("source", &self.edge.source_selector())
             .field("target", &self.edge.target_selector())
             .field("scratch_bytes", &self.scratch_bytes)
@@ -231,19 +231,19 @@ impl core::fmt::Debug for RegisteredEffectStateMigrationV1<'_> {
 }
 
 #[derive(Debug)]
-pub struct StateMigrationRegistryV1<'wire> {
+pub struct StateMigrationRegistry<'wire> {
     maximum_entries: u32,
-    registrations: Box<[RegisteredEffectStateMigrationV1<'wire>]>,
+    registrations: Box<[RegisteredEffectStateMigration<'wire>]>,
 }
 
-impl<'wire> StateMigrationRegistryV1<'wire> {
+impl<'wire> StateMigrationRegistry<'wire> {
     pub fn new(
         maximum_entries: u32,
-        registrations: Box<[EffectStateMigrationRegistrationV1<'wire>]>,
-    ) -> Result<Self, EffectStateMigrationDiagnosticV1> {
+        registrations: Box<[EffectStateMigrationRegistration<'wire>]>,
+    ) -> Result<Self, EffectStateMigrationDiagnostic> {
         if !host_fit(u64::from(maximum_entries)) {
             return Err(migration_diagnostic(
-                EffectStateMigrationDiagnosticCodeV1::Overflow,
+                EffectStateMigrationDiagnosticCode::Overflow,
                 1,
                 None,
                 u64::from(maximum_entries),
@@ -251,7 +251,7 @@ impl<'wire> StateMigrationRegistryV1<'wire> {
         }
         let maximum_entries_usize = usize::try_from(maximum_entries).map_err(|_| {
             migration_diagnostic(
-                EffectStateMigrationDiagnosticCodeV1::Overflow,
+                EffectStateMigrationDiagnosticCode::Overflow,
                 1,
                 None,
                 u64::from(maximum_entries),
@@ -260,14 +260,14 @@ impl<'wire> StateMigrationRegistryV1<'wire> {
         if registrations.len() > maximum_entries_usize {
             let required_bytes = u64::try_from(registrations.len()).map_err(|_| {
                 migration_diagnostic(
-                    EffectStateMigrationDiagnosticCodeV1::Overflow,
+                    EffectStateMigrationDiagnosticCode::Overflow,
                     1,
                     None,
                     u64::MAX,
                 )
             })?;
             return Err(migration_diagnostic(
-                EffectStateMigrationDiagnosticCodeV1::Limit,
+                EffectStateMigrationDiagnosticCode::Limit,
                 1,
                 None,
                 required_bytes,
@@ -281,7 +281,7 @@ impl<'wire> StateMigrationRegistryV1<'wire> {
             let scratch_bytes = registration.step.scratch_bytes();
             if !host_fit(scratch_bytes) {
                 return Err(migration_diagnostic(
-                    EffectStateMigrationDiagnosticCodeV1::Overflow,
+                    EffectStateMigrationDiagnosticCode::Overflow,
                     1,
                     Some(index),
                     scratch_bytes,
@@ -289,18 +289,18 @@ impl<'wire> StateMigrationRegistryV1<'wire> {
             }
             if accepted
                 .iter()
-                .any(|prior: &RegisteredEffectStateMigrationV1<'wire>| {
+                .any(|prior: &RegisteredEffectStateMigration<'wire>| {
                     prior.edge.source_selector() == edge.source_selector()
                 })
             {
                 return Err(migration_diagnostic(
-                    EffectStateMigrationDiagnosticCodeV1::Registry,
+                    EffectStateMigrationDiagnosticCode::Registry,
                     5,
                     Some(index),
                     0,
                 ));
             }
-            accepted.push(RegisteredEffectStateMigrationV1 {
+            accepted.push(RegisteredEffectStateMigration {
                 edge,
                 step: registration.step,
                 scratch_bytes,
@@ -318,8 +318,8 @@ impl<'wire> StateMigrationRegistryV1<'wire> {
 
     fn find(
         &self,
-        selector: EffectStateSelectorV1,
-    ) -> Option<&RegisteredEffectStateMigrationV1<'wire>> {
+        selector: EffectStateSelector,
+    ) -> Option<&RegisteredEffectStateMigration<'wire>> {
         self.registrations
             .iter()
             .find(|registration| registration.edge.source_selector() == selector)
@@ -327,14 +327,14 @@ impl<'wire> StateMigrationRegistryV1<'wire> {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct EffectStateMigrationAdmissionV1 {
+pub struct EffectStateMigrationAdmission {
     pub maximum_chain_steps: u32,
     pub maximum_intermediate_envelope_bytes: u64,
     pub maximum_migration_scratch_bytes: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct EffectStateMigrationWorkspaceRequirementsV1 {
+pub struct EffectStateMigrationWorkspaceRequirements {
     pub chain_step_count: u32,
     pub first_envelope_bytes: u64,
     pub second_envelope_bytes: u64,
@@ -343,25 +343,25 @@ pub struct EffectStateMigrationWorkspaceRequirementsV1 {
     pub scalar_initial_value_scratch_bytes: u64,
 }
 
-pub struct ResolvedEffectStateMigrationV1<'registry, 'wire, 'factory_wire, 'state> {
-    registrations: Box<[&'registry RegisteredEffectStateMigrationV1<'wire>]>,
+pub struct ResolvedEffectStateMigration<'registry, 'wire, 'factory_wire, 'state> {
+    registrations: Box<[&'registry RegisteredEffectStateMigration<'wire>]>,
     source_envelope: &'state [u8],
-    current_bound: BoundEffectDescriptorWireV1<'factory_wire>,
+    current_bound: BoundEffectDescriptorWire<'factory_wire>,
     current_effect_id: EffectId,
-    current_selector: EffectStateSelectorV1,
-    current_provenance: EffectStateDescriptorProvenanceV1,
+    current_selector: EffectStateSelector,
+    current_provenance: EffectStateDescriptorProvenance,
     factory: Arc<dyn NativeEffectFactory>,
-    replay: EffectBankPreparationV1,
-    requirements: EffectStateMigrationWorkspaceRequirementsV1,
-    state_limits: EffectStateLimitsV1,
-    migration_admission: EffectStateMigrationAdmissionV1,
-    restore_admission: EffectStateRestoreAdmissionV1,
+    replay: EffectBankPreparation,
+    requirements: EffectStateMigrationWorkspaceRequirements,
+    state_limits: EffectStateLimits,
+    migration_admission: EffectStateMigrationAdmission,
+    restore_admission: EffectStateRestoreAdmission,
 }
 
-impl core::fmt::Debug for ResolvedEffectStateMigrationV1<'_, '_, '_, '_> {
+impl core::fmt::Debug for ResolvedEffectStateMigration<'_, '_, '_, '_> {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         formatter
-            .debug_struct("ResolvedEffectStateMigrationV1")
+            .debug_struct("ResolvedEffectStateMigration")
             .field("requirements", &self.requirements)
             .field("replay", &self.replay)
             .field("source_bytes", &self.source_envelope.len())
@@ -369,7 +369,7 @@ impl core::fmt::Debug for ResolvedEffectStateMigrationV1<'_, '_, '_, '_> {
             .field("current_effect_id", &self.current_effect_id)
             .field(
                 "current_bound_selector",
-                &effect_state_bound_selector_v1(self.current_bound),
+                &effect_state_bound_selector(self.current_bound),
             )
             .field("current_provenance", &self.current_provenance)
             .field("factory", &Arc::as_ptr(&self.factory))
@@ -381,13 +381,13 @@ impl core::fmt::Debug for ResolvedEffectStateMigrationV1<'_, '_, '_, '_> {
 }
 
 impl<'registry, 'wire, 'factory_wire, 'state>
-    ResolvedEffectStateMigrationV1<'registry, 'wire, 'factory_wire, 'state>
+    ResolvedEffectStateMigration<'registry, 'wire, 'factory_wire, 'state>
 {
-    pub const fn requirements(&self) -> EffectStateMigrationWorkspaceRequirementsV1 {
+    pub const fn requirements(&self) -> EffectStateMigrationWorkspaceRequirements {
         self.requirements
     }
 
-    pub fn replay(&self) -> &EffectBankPreparationV1 {
+    pub fn replay(&self) -> &EffectBankPreparation {
         &self.replay
     }
 
@@ -396,7 +396,7 @@ impl<'registry, 'wire, 'factory_wire, 'state>
     }
 }
 
-fn replay_is_bit_exact(left: &EffectBankPreparationV1, right: &EffectBankPreparationV1) -> bool {
+fn replay_is_bit_exact(left: &EffectBankPreparation, right: &EffectBankPreparation) -> bool {
     left.sample_rate == right.sample_rate
         && left.quantum == right.quantum
         && left.quality == right.quality
@@ -416,18 +416,18 @@ fn replay_is_bit_exact(left: &EffectBankPreparationV1, right: &EffectBankPrepara
             })
 }
 
-fn buffer_diagnostic(detail: u32, required_bytes: u64) -> EffectStateMigrationDiagnosticV1 {
+fn buffer_diagnostic(detail: u32, required_bytes: u64) -> EffectStateMigrationDiagnostic {
     migration_diagnostic(
-        EffectStateMigrationDiagnosticCodeV1::BufferTooSmall,
+        EffectStateMigrationDiagnosticCode::BufferTooSmall,
         detail,
         None,
         required_bytes,
     )
 }
 
-fn step_diagnostic(detail: u32, index: usize) -> EffectStateMigrationDiagnosticV1 {
+fn step_diagnostic(detail: u32, index: usize) -> EffectStateMigrationDiagnostic {
     migration_diagnostic(
-        EffectStateMigrationDiagnosticCodeV1::Step,
+        EffectStateMigrationDiagnosticCode::Step,
         detail,
         Some(index),
         0,
@@ -436,24 +436,24 @@ fn step_diagnostic(detail: u32, index: usize) -> EffectStateMigrationDiagnosticV
 
 fn restore_diagnostic(
     detail: u32,
-    nested_state: EffectStateDiagnosticV1,
-) -> EffectStateMigrationDiagnosticV1 {
-    EffectStateMigrationDiagnosticV1 {
-        code: EffectStateMigrationDiagnosticCodeV1::Restore,
+    nested_state: EffectStateDiagnostic,
+) -> EffectStateMigrationDiagnostic {
+    EffectStateMigrationDiagnostic {
+        code: EffectStateMigrationDiagnosticCode::Restore,
         detail,
-        item_index: EFFECT_STATE_MIGRATION_V1_UNAVAILABLE_INDEX,
+        item_index: EFFECT_STATE_MIGRATION_UNAVAILABLE_INDEX,
         reserved: 0,
         required_bytes: 0,
         nested_state,
     }
 }
 
-fn nested_restore(detail: u32) -> EffectStateDiagnosticV1 {
-    EffectStateDiagnosticV1::new(
-        EffectStateDiagnosticCodeV1::Restore,
+fn nested_restore(detail: u32) -> EffectStateDiagnostic {
+    EffectStateDiagnostic::new(
+        EffectStateDiagnosticCode::Restore,
         detail,
-        EFFECT_STATE_V1_UNAVAILABLE_INDEX,
-        EFFECT_STATE_V1_UNAVAILABLE_OFFSET,
+        EFFECT_STATE_UNAVAILABLE_INDEX,
+        EFFECT_STATE_UNAVAILABLE_OFFSET,
     )
 }
 
@@ -465,14 +465,14 @@ enum FinalEnvelopeLocation {
 }
 
 fn preflight_workspace(
-    requirements: EffectStateMigrationWorkspaceRequirementsV1,
+    requirements: EffectStateMigrationWorkspaceRequirements,
     first_envelope: &[u8],
     second_envelope: &[u8],
     migration_scratch: &[u8],
-) -> Result<(usize, usize, usize), EffectStateMigrationDiagnosticV1> {
+) -> Result<(usize, usize, usize), EffectStateMigrationDiagnostic> {
     let first = usize::try_from(requirements.first_envelope_bytes).map_err(|_| {
         migration_diagnostic(
-            EffectStateMigrationDiagnosticCodeV1::Overflow,
+            EffectStateMigrationDiagnosticCode::Overflow,
             2,
             None,
             requirements.first_envelope_bytes,
@@ -480,7 +480,7 @@ fn preflight_workspace(
     })?;
     let second = usize::try_from(requirements.second_envelope_bytes).map_err(|_| {
         migration_diagnostic(
-            EffectStateMigrationDiagnosticCodeV1::Overflow,
+            EffectStateMigrationDiagnosticCode::Overflow,
             2,
             None,
             requirements.second_envelope_bytes,
@@ -488,7 +488,7 @@ fn preflight_workspace(
     })?;
     let scratch = usize::try_from(requirements.migration_scratch_bytes).map_err(|_| {
         migration_diagnostic(
-            EffectStateMigrationDiagnosticCodeV1::Overflow,
+            EffectStateMigrationDiagnosticCode::Overflow,
             2,
             None,
             requirements.migration_scratch_bytes,
@@ -507,17 +507,17 @@ fn preflight_workspace(
 }
 
 fn validate_scalar_terminal(
-    resolved: &ResolvedEffectStateMigrationV1<'_, '_, '_, '_>,
-    capability: &WireBoundNativeEffectFactoryV1<'_>,
-) -> Result<(), EffectStateMigrationDiagnosticV1> {
+    resolved: &ResolvedEffectStateMigration<'_, '_, '_, '_>,
+    capability: &WireBoundNativeEffectFactory<'_>,
+) -> Result<(), EffectStateMigrationDiagnostic> {
     let bound = capability.bound_descriptor();
-    if effect_state_bound_selector_v1(bound) != resolved.current_selector
-        || effect_state_descriptor_provenance_v1(bound) != resolved.current_provenance
+    if effect_state_bound_selector(bound) != resolved.current_selector
+        || effect_state_descriptor_provenance(bound) != resolved.current_provenance
         || !Arc::ptr_eq(capability.factory(), &resolved.factory)
         || !core::ptr::eq(capability.factory().descriptor(), capability.descriptor())
     {
         return Err(migration_diagnostic(
-            EffectStateMigrationDiagnosticCodeV1::Chain,
+            EffectStateMigrationDiagnosticCode::Chain,
             3,
             None,
             0,
@@ -527,10 +527,10 @@ fn validate_scalar_terminal(
 }
 
 fn validate_bank_terminal(
-    resolved: &ResolvedEffectStateMigrationV1<'_, '_, '_, '_>,
-    capability: &UnpublishedEffectBankStateV1<'_>,
+    resolved: &ResolvedEffectStateMigration<'_, '_, '_, '_>,
+    capability: &UnpublishedEffectBankState<'_>,
     track_index: u32,
-) -> Result<(), EffectStateMigrationDiagnosticV1> {
+) -> Result<(), EffectStateMigrationDiagnostic> {
     let Some(replay) = capability.replays().get(track_index as usize) else {
         return Err(restore_diagnostic(2, nested_restore(1)));
     };
@@ -543,7 +543,7 @@ fn validate_bank_terminal(
     {
         return Err(restore_diagnostic(2, nested_restore(2)));
     }
-    let expected = effect_state_expected_metadata_v1(
+    let expected = effect_state_expected_metadata(
         resolved.current_bound,
         resolved.replay.state_replay(resolved.current_effect_id),
     )
@@ -554,8 +554,8 @@ fn validate_bank_terminal(
         return Err(restore_diagnostic(2, nested_restore(3)));
     }
     let bound = capability.bound_factory().bound_descriptor();
-    if effect_state_bound_selector_v1(bound) != resolved.current_selector
-        || effect_state_descriptor_provenance_v1(bound) != resolved.current_provenance
+    if effect_state_bound_selector(bound) != resolved.current_selector
+        || effect_state_descriptor_provenance(bound) != resolved.current_provenance
         || !Arc::ptr_eq(capability.bound_factory().factory(), &resolved.factory)
         || !core::ptr::eq(
             capability.bound_factory().factory().descriptor(),
@@ -568,11 +568,11 @@ fn validate_bank_terminal(
 }
 
 fn execute_migration_steps(
-    resolved: &ResolvedEffectStateMigrationV1<'_, '_, '_, '_>,
+    resolved: &ResolvedEffectStateMigration<'_, '_, '_, '_>,
     first_envelope: &mut [u8],
     second_envelope: &mut [u8],
     migration_scratch: &mut [u8],
-) -> Result<FinalEnvelopeLocation, EffectStateMigrationDiagnosticV1> {
+) -> Result<FinalEnvelopeLocation, EffectStateMigrationDiagnostic> {
     let mut location = FinalEnvelopeLocation::Source;
     for (index, registration) in resolved.registrations.iter().enumerate() {
         let source_bytes: &[u8] = match location {
@@ -580,15 +580,15 @@ fn execute_migration_steps(
             FinalEnvelopeLocation::First(bytes) => &first_envelope[..bytes],
             FinalEnvelopeLocation::Second(bytes) => &second_envelope[..bytes],
         };
-        let source = verify_effect_state_v1(
+        let source = verify_effect_state(
             registration.edge.source_bound(),
             source_bytes,
             resolved.state_limits,
         )
         .map_err(|diagnostic| state_diagnostic(1, Some(index), diagnostic))?;
-        validate_effect_state_current_layout_v1(source)
+        validate_effect_state_current_layout(source)
             .map_err(|diagnostic| state_diagnostic(1, Some(index), diagnostic))?;
-        validate_effect_state_replay_configuration_v1(
+        validate_effect_state_replay_configuration(
             source,
             resolved.replay.state_replay(resolved.current_effect_id),
         )
@@ -597,9 +597,9 @@ fn execute_migration_steps(
         let target_bound = registration.edge.target_bound();
         let replay = resolved.replay.state_replay(resolved.current_effect_id);
         let requirements =
-            effect_state_v1_requirements(target_bound, replay, resolved.state_limits)
+            effect_state_requirements(target_bound, replay, resolved.state_limits)
                 .map_err(|diagnostic| state_diagnostic(2, Some(index), diagnostic))?;
-        let metadata = effect_state_expected_metadata_v1(target_bound, replay)
+        let metadata = effect_state_expected_metadata(target_bound, replay)
             .map_err(|diagnostic| state_diagnostic(2, Some(index), diagnostic))?;
         let payload_bytes = usize::try_from(
             metadata
@@ -610,7 +610,7 @@ fn execute_migration_steps(
         .map_err(|_| state_diagnostic(2, Some(index), state_limit(216, u64::MAX)))?;
         let algorithm_bytes = usize::try_from(registration.scratch_bytes).map_err(|_| {
             migration_diagnostic(
-                EffectStateMigrationDiagnosticCodeV1::Overflow,
+                EffectStateMigrationDiagnosticCode::Overflow,
                 2,
                 Some(index),
                 registration.scratch_bytes,
@@ -618,7 +618,7 @@ fn execute_migration_steps(
         })?;
         let used_scratch = payload_bytes.checked_add(algorithm_bytes).ok_or_else(|| {
             migration_diagnostic(
-                EffectStateMigrationDiagnosticCodeV1::Overflow,
+                EffectStateMigrationDiagnosticCode::Overflow,
                 2,
                 Some(index),
                 u64::MAX,
@@ -643,11 +643,11 @@ fn execute_migration_steps(
             state_diagnostic(
                 1,
                 Some(index),
-                EffectStateDiagnosticV1::new(
-                    EffectStateDiagnosticCodeV1::Payload,
+                EffectStateDiagnostic::new(
+                    EffectStateDiagnosticCode::Payload,
                     3,
-                    EFFECT_STATE_V1_UNAVAILABLE_INDEX,
-                    EFFECT_STATE_V1_UNAVAILABLE_OFFSET,
+                    EFFECT_STATE_UNAVAILABLE_INDEX,
+                    EFFECT_STATE_UNAVAILABLE_OFFSET,
                 ),
             )
         })?;
@@ -679,7 +679,7 @@ fn execute_migration_steps(
         } else {
             &mut second_envelope[..target_bytes]
         };
-        encode_effect_state_v1(
+        encode_effect_state(
             target_bound,
             replay,
             common,
@@ -689,11 +689,11 @@ fn execute_migration_steps(
             output,
         )
         .map_err(|diagnostic| state_diagnostic(2, Some(index), diagnostic))?;
-        let target_state = verify_effect_state_v1(target_bound, output, resolved.state_limits)
+        let target_state = verify_effect_state(target_bound, output, resolved.state_limits)
             .map_err(|diagnostic| state_diagnostic(2, Some(index), diagnostic))?;
-        validate_effect_state_current_layout_v1(target_state)
+        validate_effect_state_current_layout(target_state)
             .map_err(|diagnostic| state_diagnostic(2, Some(index), diagnostic))?;
-        validate_effect_state_replay_configuration_v1(target_state, replay)
+        validate_effect_state_replay_configuration(target_state, replay)
             .map_err(|diagnostic| state_diagnostic(2, Some(index), diagnostic))?;
         location = if index % 2 == 0 {
             FinalEnvelopeLocation::First(target_bytes)
@@ -718,29 +718,29 @@ fn final_envelope<'a>(
 }
 
 fn validate_final_envelope(
-    resolved: &ResolvedEffectStateMigrationV1<'_, '_, '_, '_>,
-    bound: BoundEffectDescriptorWireV1<'_>,
+    resolved: &ResolvedEffectStateMigration<'_, '_, '_, '_>,
+    bound: BoundEffectDescriptorWire<'_>,
     envelope: &[u8],
-) -> Result<(), EffectStateMigrationDiagnosticV1> {
-    let state = verify_effect_state_v1(bound, envelope, resolved.state_limits)
+) -> Result<(), EffectStateMigrationDiagnostic> {
+    let state = verify_effect_state(bound, envelope, resolved.state_limits)
         .map_err(|diagnostic| state_diagnostic(3, None, diagnostic))?;
-    validate_effect_state_current_layout_v1(state)
+    validate_effect_state_current_layout(state)
         .map_err(|diagnostic| state_diagnostic(3, None, diagnostic))?;
-    validate_effect_state_replay_configuration_v1(
+    validate_effect_state_replay_configuration(
         state,
         resolved.replay.state_replay(resolved.current_effect_id),
     )
     .map_err(|diagnostic| state_diagnostic(3, None, diagnostic))
 }
 
-pub fn restore_scalar_effect_state_with_migration_v1<'wire>(
-    resolved: ResolvedEffectStateMigrationV1<'_, '_, '_, '_>,
-    capability: WireBoundNativeEffectFactoryV1<'wire>,
+pub fn restore_scalar_effect_state_with_migration<'wire>(
+    resolved: ResolvedEffectStateMigration<'_, '_, '_, '_>,
+    capability: WireBoundNativeEffectFactory<'wire>,
     first_envelope: &mut [u8],
     second_envelope: &mut [u8],
     migration_scratch: &mut [u8],
     initial_value_scratch: &mut [InitialParameterValue],
-) -> Result<RestoredScalarEffectStateV1<'wire>, EffectStateMigrationDiagnosticV1> {
+) -> Result<RestoredScalarEffectState<'wire>, EffectStateMigrationDiagnostic> {
     let requirements = resolved.requirements;
     preflight_workspace(
         requirements,
@@ -751,7 +751,7 @@ pub fn restore_scalar_effect_state_with_migration_v1<'wire>(
     let initial_slots =
         usize::try_from(requirements.scalar_initial_value_scratch_slots).map_err(|_| {
             migration_diagnostic(
-                EffectStateMigrationDiagnosticCodeV1::Overflow,
+                EffectStateMigrationDiagnosticCode::Overflow,
                 3,
                 None,
                 requirements.scalar_initial_value_scratch_bytes,
@@ -777,7 +777,7 @@ pub fn restore_scalar_effect_state_with_migration_v1<'wire>(
         second_envelope,
     );
     validate_final_envelope(&resolved, capability.bound_descriptor(), envelope)?;
-    restore_scalar_effect_state_v1(
+    restore_scalar_effect_state(
         capability,
         envelope,
         resolved.state_limits,
@@ -787,14 +787,14 @@ pub fn restore_scalar_effect_state_with_migration_v1<'wire>(
     .map_err(|diagnostic| restore_diagnostic(1, diagnostic))
 }
 
-pub fn restore_unpublished_effect_bank_track_state_with_migration_v1<'wire>(
-    resolved: ResolvedEffectStateMigrationV1<'_, '_, '_, '_>,
-    capability: UnpublishedEffectBankStateV1<'wire>,
+pub fn restore_unpublished_effect_bank_track_state_with_migration<'wire>(
+    resolved: ResolvedEffectStateMigration<'_, '_, '_, '_>,
+    capability: UnpublishedEffectBankState<'wire>,
     track_index: u32,
     first_envelope: &mut [u8],
     second_envelope: &mut [u8],
     migration_scratch: &mut [u8],
-) -> Result<UnpublishedEffectBankStateV1<'wire>, EffectStateMigrationDiagnosticV1> {
+) -> Result<UnpublishedEffectBankState<'wire>, EffectStateMigrationDiagnostic> {
     preflight_workspace(
         resolved.requirements,
         first_envelope,
@@ -816,7 +816,7 @@ pub fn restore_unpublished_effect_bank_track_state_with_migration_v1<'wire>(
     );
     let bound = capability.bound_factory().bound_descriptor();
     validate_final_envelope(&resolved, bound, envelope)?;
-    restore_unpublished_effect_bank_track_state_v1(
+    restore_unpublished_effect_bank_track_state(
         capability,
         track_index,
         envelope,
@@ -827,8 +827,8 @@ pub fn restore_unpublished_effect_bank_track_state_with_migration_v1<'wire>(
 }
 
 fn owned_replay_from_state(
-    state: miso_engine_effect_package::VerifiedEffectStateV1<'_>,
-) -> Result<EffectBankPreparationV1, EffectStateDiagnosticV1> {
+    state: miso_engine_effect_package::VerifiedEffectState<'_>,
+) -> Result<EffectBankPreparation, EffectStateDiagnostic> {
     let initial_values: Box<[InitialParameterValue]> = state.initial_values().collect();
     let (
         sample_rate,
@@ -841,8 +841,8 @@ fn owned_replay_from_state(
         maximum_scratch_bytes,
         maximum_automation_spans_per_block,
     ) = {
-        let replay = effect_state_replay_view_from_verified_v1(state, &initial_values)?;
-        validate_effect_state_replay_configuration_v1(state, replay)?;
+        let replay = effect_state_replay_view_from_verified(state, &initial_values)?;
+        validate_effect_state_replay_configuration(state, replay)?;
         (
             replay.request.sample_rate,
             replay.request.quantum,
@@ -855,7 +855,7 @@ fn owned_replay_from_state(
             replay.request.limits.maximum_automation_spans_per_block,
         )
     };
-    Ok(EffectBankPreparationV1 {
+    Ok(EffectBankPreparation {
         sample_rate,
         quantum,
         quality,
@@ -872,10 +872,10 @@ fn owned_replay_from_state(
 }
 
 fn admit_current_replay(
-    bound: BoundEffectDescriptorWireV1<'_>,
-    replay: &EffectBankPreparationV1,
-    admission: EffectStateRestoreAdmissionV1,
-) -> Result<(), EffectStateDiagnosticV1> {
+    bound: BoundEffectDescriptorWire<'_>,
+    replay: &EffectBankPreparation,
+    admission: EffectStateRestoreAdmission,
+) -> Result<(), EffectStateDiagnostic> {
     if !miso_engine_core::is_launch_sample_rate(miso_engine_core::SampleRateHz(
         admission.sample_rate,
     )) || replay.sample_rate != admission.sample_rate
@@ -904,12 +904,12 @@ fn admit_current_replay(
             u64::from(replay.limits.maximum_automation_spans_per_block),
         ));
     }
-    let resources = effect_state_derived_resources_v1(bound, replay.request())?;
+    let resources = effect_state_derived_resources(bound, replay.request())?;
     let payload_bytes = resources.state_sizes.total().ok_or_else(|| {
-        EffectStateDiagnosticV1::new(
-            EffectStateDiagnosticCodeV1::Overflow,
+        EffectStateDiagnostic::new(
+            EffectStateDiagnosticCode::Overflow,
             0,
-            EFFECT_STATE_V1_UNAVAILABLE_INDEX,
+            EFFECT_STATE_UNAVAILABLE_INDEX,
             216,
         )
     })?;
@@ -926,8 +926,8 @@ fn admit_current_replay(
 }
 
 fn validate_migration_admission(
-    admission: EffectStateMigrationAdmissionV1,
-) -> Result<(), EffectStateMigrationDiagnosticV1> {
+    admission: EffectStateMigrationAdmission,
+) -> Result<(), EffectStateMigrationDiagnostic> {
     for value in [
         u64::from(admission.maximum_chain_steps),
         admission.maximum_intermediate_envelope_bytes,
@@ -935,7 +935,7 @@ fn validate_migration_admission(
     ] {
         if !host_fit(value) {
             return Err(migration_diagnostic(
-                EffectStateMigrationDiagnosticCodeV1::Overflow,
+                EffectStateMigrationDiagnosticCode::Overflow,
                 2,
                 None,
                 value,
@@ -945,29 +945,29 @@ fn validate_migration_admission(
     Ok(())
 }
 
-pub fn resolve_effect_state_migration_v1<'registry, 'wire, 'factory_wire, 'state>(
-    registry: &'registry StateMigrationRegistryV1<'wire>,
-    current_factory: &WireBoundNativeEffectFactoryV1<'factory_wire>,
+pub fn resolve_effect_state_migration<'registry, 'wire, 'factory_wire, 'state>(
+    registry: &'registry StateMigrationRegistry<'wire>,
+    current_factory: &WireBoundNativeEffectFactory<'factory_wire>,
     envelope: &'state [u8],
-    state_limits: EffectStateLimitsV1,
-    migration_admission: EffectStateMigrationAdmissionV1,
-    restore_admission: EffectStateRestoreAdmissionV1,
+    state_limits: EffectStateLimits,
+    migration_admission: EffectStateMigrationAdmission,
+    restore_admission: EffectStateRestoreAdmission,
 ) -> Result<
-    ResolvedEffectStateMigrationV1<'registry, 'wire, 'factory_wire, 'state>,
-    EffectStateMigrationDiagnosticV1,
+    ResolvedEffectStateMigration<'registry, 'wire, 'factory_wire, 'state>,
+    EffectStateMigrationDiagnostic,
 > {
     validate_migration_admission(migration_admission)?;
-    let source_selector = inspect_effect_state_selector_v1(envelope, state_limits)
+    let source_selector = inspect_effect_state_selector(envelope, state_limits)
         .map_err(|diagnostic| state_diagnostic(1, None, diagnostic))?;
     let current_bound = current_factory.bound_descriptor();
     let current_effect_id = current_factory.descriptor().id;
-    let current_selector = effect_state_bound_selector_v1(current_bound);
+    let current_selector = effect_state_bound_selector(current_bound);
     if source_selector.state_layout_version() > current_selector.state_layout_version()
         || (source_selector.state_layout_version() == current_selector.state_layout_version()
             && source_selector != current_selector)
     {
         return Err(migration_diagnostic(
-            EffectStateMigrationDiagnosticCodeV1::Chain,
+            EffectStateMigrationDiagnosticCode::Chain,
             2,
             None,
             u64::from(source_selector.state_layout_version()),
@@ -979,21 +979,21 @@ pub fn resolve_effect_state_migration_v1<'registry, 'wire, 'factory_wire, 'state
         None
     } else {
         Some(registry.find(source_selector).ok_or_else(|| {
-            migration_diagnostic(EffectStateMigrationDiagnosticCodeV1::Chain, 1, Some(0), 0)
+            migration_diagnostic(EffectStateMigrationDiagnosticCode::Chain, 1, Some(0), 0)
         })?)
     };
     let source_bound = first_registration
         .map(|registration| registration.edge.source_bound())
         .unwrap_or(current_bound);
     let source_index = if zero_step { None } else { Some(0) };
-    let source_state = verify_effect_state_v1(source_bound, envelope, state_limits)
+    let source_state = verify_effect_state(source_bound, envelope, state_limits)
         .map_err(|diagnostic| state_diagnostic(1, source_index, diagnostic))?;
     if zero_step {
         admit_restored_state(source_state, restore_admission)
             .map_err(|diagnostic| state_diagnostic(3, None, diagnostic))?;
     }
     let source_detail = if zero_step { 3 } else { 1 };
-    validate_effect_state_current_layout_v1(source_state)
+    validate_effect_state_current_layout(source_state)
         .map_err(|diagnostic| state_diagnostic(source_detail, source_index, diagnostic))?;
     let replay = owned_replay_from_state(source_state)
         .map_err(|diagnostic| state_diagnostic(source_detail, source_index, diagnostic))?;
@@ -1001,7 +1001,7 @@ pub fn resolve_effect_state_migration_v1<'registry, 'wire, 'factory_wire, 'state
     let maximum_chain_steps =
         usize::try_from(migration_admission.maximum_chain_steps).map_err(|_| {
             migration_diagnostic(
-                EffectStateMigrationDiagnosticCodeV1::Overflow,
+                EffectStateMigrationDiagnosticCode::Overflow,
                 2,
                 None,
                 u64::from(migration_admission.maximum_chain_steps),
@@ -1015,7 +1015,7 @@ pub fn resolve_effect_state_migration_v1<'registry, 'wire, 'factory_wire, 'state
     let mut migration_scratch_bytes = 0u64;
     let mut final_requirements = if zero_step {
         Some(
-            effect_state_v1_requirements(
+            effect_state_requirements(
                 current_bound,
                 replay.state_replay(current_factory.descriptor().id),
                 state_limits,
@@ -1034,14 +1034,14 @@ pub fn resolve_effect_state_migration_v1<'registry, 'wire, 'factory_wire, 'state
                 .and_then(|value| value.checked_add(1))
                 .ok_or_else(|| {
                     migration_diagnostic(
-                        EffectStateMigrationDiagnosticCodeV1::Overflow,
+                        EffectStateMigrationDiagnosticCode::Overflow,
                         2,
                         Some(index),
                         u64::MAX,
                     )
                 })?;
             return Err(migration_diagnostic(
-                EffectStateMigrationDiagnosticCodeV1::Limit,
+                EffectStateMigrationDiagnosticCode::Limit,
                 2,
                 Some(index),
                 required_bytes,
@@ -1052,14 +1052,14 @@ pub fn resolve_effect_state_migration_v1<'registry, 'wire, 'factory_wire, 'state
         } else {
             registry.find(cursor).ok_or_else(|| {
                 migration_diagnostic(
-                    EffectStateMigrationDiagnosticCodeV1::Chain,
+                    EffectStateMigrationDiagnosticCode::Chain,
                     1,
                     Some(index),
                     0,
                 )
             })?
         };
-        let requirements = effect_state_v1_requirements(
+        let requirements = effect_state_requirements(
             registration.edge.target_bound(),
             replay.state_replay(current_factory.descriptor().id),
             state_limits,
@@ -1067,7 +1067,7 @@ pub fn resolve_effect_state_migration_v1<'registry, 'wire, 'factory_wire, 'state
         .map_err(|diagnostic| state_diagnostic(2, Some(index), diagnostic))?;
         if requirements.envelope_bytes > migration_admission.maximum_intermediate_envelope_bytes {
             return Err(migration_diagnostic(
-                EffectStateMigrationDiagnosticCodeV1::Limit,
+                EffectStateMigrationDiagnosticCode::Limit,
                 3,
                 Some(index),
                 requirements.envelope_bytes,
@@ -1078,7 +1078,7 @@ pub fn resolve_effect_state_migration_v1<'registry, 'wire, 'factory_wire, 'state
             .checked_add(registration.scratch_bytes)
             .ok_or_else(|| {
                 migration_diagnostic(
-                    EffectStateMigrationDiagnosticCodeV1::Overflow,
+                    EffectStateMigrationDiagnosticCode::Overflow,
                     2,
                     Some(index),
                     u64::MAX,
@@ -1086,7 +1086,7 @@ pub fn resolve_effect_state_migration_v1<'registry, 'wire, 'factory_wire, 'state
             })?;
         if !host_fit(scratch) {
             return Err(migration_diagnostic(
-                EffectStateMigrationDiagnosticCodeV1::Overflow,
+                EffectStateMigrationDiagnosticCode::Overflow,
                 2,
                 Some(index),
                 scratch,
@@ -1094,7 +1094,7 @@ pub fn resolve_effect_state_migration_v1<'registry, 'wire, 'factory_wire, 'state
         }
         if scratch > migration_admission.maximum_migration_scratch_bytes {
             return Err(migration_diagnostic(
-                EffectStateMigrationDiagnosticCodeV1::Limit,
+                EffectStateMigrationDiagnosticCode::Limit,
                 4,
                 Some(index),
                 scratch,
@@ -1113,7 +1113,7 @@ pub fn resolve_effect_state_migration_v1<'registry, 'wire, 'factory_wire, 'state
             && cursor != current_selector
         {
             return Err(migration_diagnostic(
-                EffectStateMigrationDiagnosticCodeV1::Chain,
+                EffectStateMigrationDiagnosticCode::Chain,
                 3,
                 Some(index),
                 0,
@@ -1121,7 +1121,7 @@ pub fn resolve_effect_state_migration_v1<'registry, 'wire, 'factory_wire, 'state
         }
         if cursor.state_layout_version() > current_selector.state_layout_version() {
             return Err(migration_diagnostic(
-                EffectStateMigrationDiagnosticCodeV1::Chain,
+                EffectStateMigrationDiagnosticCode::Chain,
                 2,
                 Some(index),
                 u64::from(cursor.state_layout_version()),
@@ -1130,11 +1130,11 @@ pub fn resolve_effect_state_migration_v1<'registry, 'wire, 'factory_wire, 'state
     }
 
     if let Some(last) = registrations.last()
-        && effect_state_descriptor_provenance_v1(last.edge.target_bound())
-            != effect_state_descriptor_provenance_v1(current_bound)
+        && effect_state_descriptor_provenance(last.edge.target_bound())
+            != effect_state_descriptor_provenance(current_bound)
     {
         return Err(migration_diagnostic(
-            EffectStateMigrationDiagnosticCodeV1::Chain,
+            EffectStateMigrationDiagnosticCode::Chain,
             3,
             Some(registrations.len() - 1),
             0,
@@ -1148,7 +1148,7 @@ pub fn resolve_effect_state_migration_v1<'registry, 'wire, 'factory_wire, 'state
     let initial_value_bytes = u64::try_from(core::mem::size_of::<InitialParameterValue>())
         .map_err(|_| {
             migration_diagnostic(
-                EffectStateMigrationDiagnosticCodeV1::Overflow,
+                EffectStateMigrationDiagnosticCode::Overflow,
                 3,
                 None,
                 u64::MAX,
@@ -1159,7 +1159,7 @@ pub fn resolve_effect_state_migration_v1<'registry, 'wire, 'factory_wire, 'state
             .checked_mul(initial_value_bytes)
             .ok_or_else(|| {
                 migration_diagnostic(
-                    EffectStateMigrationDiagnosticCodeV1::Overflow,
+                    EffectStateMigrationDiagnosticCode::Overflow,
                     3,
                     None,
                     u64::MAX,
@@ -1167,16 +1167,16 @@ pub fn resolve_effect_state_migration_v1<'registry, 'wire, 'factory_wire, 'state
             })?;
     if !host_fit(scalar_initial_value_scratch_bytes) {
         return Err(migration_diagnostic(
-            EffectStateMigrationDiagnosticCodeV1::Overflow,
+            EffectStateMigrationDiagnosticCode::Overflow,
             3,
             None,
             scalar_initial_value_scratch_bytes,
         ));
     }
-    let requirements = EffectStateMigrationWorkspaceRequirementsV1 {
+    let requirements = EffectStateMigrationWorkspaceRequirements {
         chain_step_count: u32::try_from(registrations.len()).map_err(|_| {
             migration_diagnostic(
-                EffectStateMigrationDiagnosticCodeV1::Overflow,
+                EffectStateMigrationDiagnosticCode::Overflow,
                 2,
                 None,
                 u64::try_from(registrations.len()).unwrap_or(u64::MAX),
@@ -1188,13 +1188,13 @@ pub fn resolve_effect_state_migration_v1<'registry, 'wire, 'factory_wire, 'state
         scalar_initial_value_scratch_slots: final_requirements.initial_value_scratch_slots,
         scalar_initial_value_scratch_bytes,
     };
-    Ok(ResolvedEffectStateMigrationV1 {
+    Ok(ResolvedEffectStateMigration {
         registrations: registrations.into_boxed_slice(),
         source_envelope: envelope,
         current_bound,
         current_effect_id,
         current_selector,
-        current_provenance: effect_state_descriptor_provenance_v1(current_bound),
+        current_provenance: effect_state_descriptor_provenance(current_bound),
         factory: Arc::clone(current_factory.factory()),
         replay,
         requirements,

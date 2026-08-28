@@ -138,7 +138,7 @@ fn moving_the_threshold_moves_rendered_bits_on_every_block() {
 
 /// "One track" is chosen by the stable session identity, not by position.
 ///
-/// `attach_effect_console_v1` returns channels in prepared-entry order, which is sorted by effect
+/// `attach_effect_console` returns channels in prepared-entry order, which is sorted by effect
 /// id and not by track, so taking the first matching channel would silently address a different
 /// track when the entry set changed. The row names the track it automated in its record; this pins
 /// that the name is derived from a key that cannot drift.

@@ -73,8 +73,8 @@ if rg -n '\b(v128|f32x4|i8x16|i16x8|i32x4|i64x2|f64x2)\b' \
     printf 'effect package V1 check failure: SIMD opcode in scalar output\n' >&2
     exit 1
 fi
-for symbol in effect_package_v1_required_size encode_effect_package_v1 \
-    verify_effect_package_v1 select_effect_package_artifact_v1 effect_package_cid_v1; do
+for symbol in effect_package_required_size encode_effect_package \
+    verify_effect_package select_effect_package_artifact effect_package_cid; do
     rg -q "$symbol" "$object_metadata" || {
         printf 'effect package V1 check failure: %s absent from Wasm object\n' "$symbol" >&2
         exit 1

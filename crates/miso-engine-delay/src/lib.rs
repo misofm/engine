@@ -34,10 +34,10 @@
 #![allow(missing_docs)]
 
 use miso_engine_effect_contract::{
-    AutomationRate, AutomationSpanKind, EffectDescriptorV1, EffectPrepareError, EffectProcessBlock,
+    AutomationRate, AutomationSpanKind, EffectDescriptor, EffectPrepareError, EffectProcessBlock,
     EffectQuality, InitialParameterValue, LatencySamples, LinkModeSet, NativeEffectFactory,
-    ParameterChannel, ParameterChannelPolicy, ParameterDescriptorV1, ParameterDomain, ParameterId,
-    ParameterMapping, ParameterUnit, PortDescriptorV1, PortId, PortLayout, PortRole,
+    ParameterChannel, ParameterChannelPolicy, ParameterDescriptor, ParameterDomain, ParameterId,
+    ParameterMapping, ParameterUnit, PortDescriptor, PortId, PortLayout, PortRole,
     PrepareEffectBankRequest, PrepareEffectRequest, PreparedAutomationSpan, PreparedEffectMetadata,
     PreparedNativeEffect, ProcessReport, ResetKind, SmoothingRule, StatePayloadError,
     StatePayloadInput, StatePayloadOutput, StatePayloadSizes, TailSamples,
@@ -128,8 +128,8 @@ const fn parameter(
     maximum: f32,
     default_value: f32,
     smoothing_samples: u32,
-) -> ParameterDescriptorV1 {
-    ParameterDescriptorV1 {
+) -> ParameterDescriptor {
+    ParameterDescriptor {
         id: parameter_id(id),
         display_name,
         display_unit,
@@ -150,7 +150,7 @@ const fn parameter(
 }
 
 /// Frozen V1 delay parameters in descriptor and stable-ID order.
-pub const DELAY_PARAMETERS_V1: [ParameterDescriptorV1; PARAMETER_COUNT] = [
+pub const DELAY_PARAMETERS_V1: [ParameterDescriptor; PARAMETER_COUNT] = [
     parameter(
         1,
         "delay time",
@@ -208,14 +208,14 @@ pub const DELAY_PARAMETERS_V1: [ParameterDescriptorV1; PARAMETER_COUNT] = [
     ),
 ];
 
-const PORTS: [PortDescriptorV1; 2] = [
-    PortDescriptorV1 {
+const PORTS: [PortDescriptor; 2] = [
+    PortDescriptor {
         id: port_id("main-in"),
         role: PortRole::MainInput,
         required: true,
         layout: PortLayout::DualMonoPlanar,
     },
-    PortDescriptorV1 {
+    PortDescriptor {
         id: port_id("main-out"),
         role: PortRole::MainOutput,
         required: true,
@@ -223,10 +223,10 @@ const PORTS: [PortDescriptorV1; 2] = [
     },
 ];
 
-const fn quality(sample_rate: u32) -> miso_engine_effect_contract::QualityDescriptorV1 {
+const fn quality(sample_rate: u32) -> miso_engine_effect_contract::QualityDescriptor {
     let ring_words = sample_rate * 2 + 3;
     let lane_bytes = (ring_words + 16) * 4;
-    miso_engine_effect_contract::QualityDescriptorV1 {
+    miso_engine_effect_contract::QualityDescriptor {
         quality: EffectQuality::Normal,
         sample_rate,
         latency: LatencySamples(0),
@@ -241,7 +241,7 @@ const fn quality(sample_rate: u32) -> miso_engine_effect_contract::QualityDescri
     }
 }
 
-const QUALITIES: [miso_engine_effect_contract::QualityDescriptorV1; 4] = [
+const QUALITIES: [miso_engine_effect_contract::QualityDescriptor; 4] = [
     quality(44_100),
     quality(48_000),
     quality(88_200),
@@ -249,7 +249,7 @@ const QUALITIES: [miso_engine_effect_contract::QualityDescriptorV1; 4] = [
 ];
 
 /// Immutable descriptor for the fixed integer-time delay V1 contract.
-pub const DELAY_DESCRIPTOR_V1: EffectDescriptorV1 = EffectDescriptorV1 {
+pub const DELAY_DESCRIPTOR_V1: EffectDescriptor = EffectDescriptor {
     id: effect_id("miso.delay"),
     display_name: "Dual-Mono / Ping-Pong Delay",
     contract_major: 1,
@@ -293,7 +293,7 @@ fn resources(sample_rate: u32) -> Option<Resources> {
 ///
 /// Derived from [`DELAY_PARAMETERS_V1`] so the descriptor stays the single source of the frozen
 /// domains; `descriptor_and_specs_agree` checks the two never drift.
-const fn spec_of(parameter: &ParameterDescriptorV1) -> ParameterSpec {
+const fn spec_of(parameter: &ParameterDescriptor) -> ParameterSpec {
     let (minimum, maximum) = match (parameter.minimum, parameter.maximum) {
         (Some(minimum), Some(maximum)) => (minimum, maximum),
         _ => panic!("every delay parameter is a bounded continuous domain"),
@@ -559,7 +559,7 @@ pub struct PreparedDelay {
 }
 
 impl NativeEffectFactory for DelayFactory {
-    fn descriptor(&self) -> &'static EffectDescriptorV1 {
+    fn descriptor(&self) -> &'static EffectDescriptor {
         &DELAY_DESCRIPTOR_V1
     }
 
@@ -1625,7 +1625,7 @@ mod tests {
     use miso_engine_dsp_reference::{ReferenceDelayPair, ReferenceDelayParameters};
     use miso_engine_effect_contract::{
         BankWidth, EffectProcessBlock, InitialParameterValue, LinkMode, PrepareEffectBankRequest,
-        PreparedNativeEffect, StatePayloadInput, StatePayloadOutput, validate_descriptor_v1,
+        PreparedNativeEffect, StatePayloadInput, StatePayloadOutput, validate_descriptor,
     };
     use miso_engine_lane::Backend;
 
@@ -1659,7 +1659,7 @@ mod tests {
             quality: EffectQuality::Normal,
             bypass: false,
             link_mode: LinkMode::DualMono,
-            ports: miso_engine_effect_contract::PreparedPortsV1 {
+            ports: miso_engine_effect_contract::PreparedPorts {
                 sidechain: miso_engine_effect_contract::PreparedSidechainPort::None,
             },
             initial_values: values,
@@ -1754,7 +1754,7 @@ mod tests {
     /// E1 — the frozen contract surface: resource table, latency, tail, caps, tap mapping.
     #[test]
     fn descriptor_exact_resources_caps_and_integer_mapping_are_frozen() {
-        validate_descriptor_v1(&DELAY_DESCRIPTOR_V1).expect("descriptor");
+        validate_descriptor(&DELAY_DESCRIPTOR_V1).expect("descriptor");
         assert_eq!(DELAY_DESCRIPTOR_V1.id.as_str(), "miso.delay");
         assert_eq!(DELAY_DESCRIPTOR_V1.state_layout_version, 1);
         assert_eq!(

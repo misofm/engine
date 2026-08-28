@@ -12,7 +12,7 @@ use miso_engine_dsp_reference::{
 use miso_engine_effect_contract::{
     EffectProcessBlock, EffectQuality, InitialParameterValue, LinkMode, NativeEffectFactory,
     ParameterChannel, PrepareEffectLimits, PrepareEffectRequest, PreparedNativeEffect,
-    PreparedPortsV1, PreparedSidechainPort, ProcessReport,
+    PreparedPorts, PreparedSidechainPort, ProcessReport,
 };
 use miso_engine_true_peak_limiter::{
     TRUE_PEAK_LIMITER_DESCRIPTOR_V1, TRUE_PEAK_LIMITER_PARAMETERS_V1, TruePeakLimiterFactory,
@@ -64,7 +64,7 @@ fn request_at_rate(values: &[InitialParameterValue], sample_rate: u32) -> Prepar
         quality: EffectQuality::Normal,
         bypass: false,
         link_mode: LinkMode::DualMono,
-        ports: PreparedPortsV1 {
+        ports: PreparedPorts {
             sidechain: PreparedSidechainPort::None,
         },
         initial_values: values,

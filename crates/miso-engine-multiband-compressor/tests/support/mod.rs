@@ -11,7 +11,7 @@ use miso_engine_effect_contract::{
     AutomationSpanKind, BankWidth, EffectProcessBlock, EffectQuality, InitialParameterValue,
     LinkMode, NativeEffectFactory, ParameterChannel, PrepareEffectBankRequest, PrepareEffectLimits,
     PrepareEffectRequest, PreparedAutomationSpan, PreparedNativeEffect, PreparedNativeEffectBank,
-    PreparedPortsV1, PreparedSidechainPort, StatePayloadInput, StatePayloadOutput,
+    PreparedPorts, PreparedSidechainPort, StatePayloadInput, StatePayloadOutput,
     StatePayloadSizes,
 };
 use miso_engine_multiband_compressor::{
@@ -103,7 +103,7 @@ pub fn request_with(
         quality: EffectQuality::Normal,
         bypass,
         link_mode,
-        ports: PreparedPortsV1 {
+        ports: PreparedPorts {
             sidechain: PreparedSidechainPort::None,
         },
         initial_values: values,

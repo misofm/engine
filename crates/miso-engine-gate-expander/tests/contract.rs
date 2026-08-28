@@ -11,7 +11,7 @@ use miso_engine_dsp_reference::{
 use miso_engine_effect_contract::{
     AutomationSpanKind, BankWidth, EffectProcessBlock, LatencySamples, LinkMode,
     NativeEffectFactory, ParameterChannel, PrepareEffectBankRequest, PreparedAutomationSpan,
-    PreparedSidechainPort, ProcessReport, TailSamples, validate_descriptor_v1,
+    PreparedSidechainPort, ProcessReport, TailSamples, validate_descriptor,
 };
 use miso_engine_gate_expander::{
     GATE_EXPANDER_DESCRIPTOR_V1, GATE_EXPANDER_PARAMETERS_V1, GateExpanderFactory,
@@ -34,7 +34,7 @@ fn float(payload: &[u8], index: usize) -> f32 {
 
 #[test]
 fn descriptor_and_exact_resources_are_frozen() {
-    validate_descriptor_v1(&GATE_EXPANDER_DESCRIPTOR_V1).expect("descriptor");
+    validate_descriptor(&GATE_EXPANDER_DESCRIPTOR_V1).expect("descriptor");
     assert_eq!(
         GATE_EXPANDER_DESCRIPTOR_V1.id.as_str(),
         "miso.gate-expander"

@@ -30,7 +30,7 @@ So the transformation is exactly three edits, and every one of them is upstream 
 ``right_db``, and 50 carry a different pan ``left`` from their pan ``right``. Both stay exactly as
 the standing fixture wrote them. They are the *seam*: the collapse duplicates the single computed
 plane **into** the fader and the matrix, so those two stages' per-channel words are free to differ
-and must not gate anything (``SeamSideV1::SeamSide``). A mono fixture that also symmetrised its
+and must not gate anything (``SeamSide::SeamSide``). A mono fixture that also symmetrised its
 faders would be a fixture on which a collapse that wrongly gated on seam-side words would still
 pass, and the row-pair this fixture exists for would prove nothing.
 

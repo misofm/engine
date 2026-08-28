@@ -12,7 +12,7 @@
 //!
 //! # Completeness is structural
 //!
-//! The effect list comes from `launch_native_effect_registry_v1()` through
+//! The effect list comes from `launch_native_effect_registry()` through
 //! `NativeEffectRegistry::descriptors`, so "an effect in the registry is missing from the output"
 //! is not a rule anybody has to remember: there is no second list to fall out of step with. The
 //! `--check` mode regenerates and compares byte for byte, which is what makes the emitted file a
@@ -53,7 +53,7 @@
 //! # Issue #127 (named nudge sizes)
 //!
 //! Each parameter carries `"nudge": null`. When #127 lands its ladder on
-//! `ParameterDescriptorV1`, that slot becomes an object and nothing else in this schema moves --
+//! `ParameterDescriptor`, that slot becomes an object and nothing else in this schema moves --
 //! which is the whole reason it is a declared null rather than an absent key.
 
 use std::io::Write as _;
@@ -65,11 +65,11 @@ use miso_engine_builtins::{
     BuiltinParameterMapping, BuiltinParameterReset, BuiltinParameterScope,
     BuiltinParameterUpdateRate, BuiltinSmoothingPolicy, builtin_filter_cutoff_maximum_hz_v1,
 };
-use miso_engine_effect_compiler::launch_native_effect_registry_v1;
+use miso_engine_effect_compiler::launch_native_effect_registry;
 use miso_engine_effect_contract::{
-    AutomationRate, EffectDescriptorV1, ObservationCadenceV1, ObservationChannelsV1,
-    ObservationCostV1, ObservationDescriptorV1, ObservationFoldV1, ObservationKindV1,
-    ParameterChannelPolicy, ParameterDescriptorV1, ParameterDomain, ParameterMapping,
+    AutomationRate, EffectDescriptor, ObservationCadenceV1, ObservationChannelsV1,
+    ObservationCostV1, ObservationDescriptor, ObservationFoldV1, ObservationKindV1,
+    ParameterChannelPolicy, ParameterDescriptor, ParameterDomain, ParameterMapping,
     ParameterUnit, SmoothingRule,
 };
 use miso_engine_host_web::{
@@ -117,7 +117,7 @@ fn output_path(directory: &Path) -> PathBuf {
 /// Render the whole document. Deterministic: registry order is `EffectId` order.
 #[must_use]
 pub fn render() -> String {
-    let registry = launch_native_effect_registry_v1().expect("launch effect registry");
+    let registry = launch_native_effect_registry().expect("launch effect registry");
     let mut out = String::with_capacity(1 << 16);
     out.push_str("{\n");
     out.push_str(&format!("  \"schema\": \"{SCHEMA}\",\n"));
@@ -248,7 +248,7 @@ pub fn render() -> String {
     }
     out.push_str("    ]\n  },\n");
     out.push_str("  \"effects\": [\n");
-    let descriptors: Vec<&'static EffectDescriptorV1> = registry.descriptors().collect();
+    let descriptors: Vec<&'static EffectDescriptor> = registry.descriptors().collect();
     assert_eq!(
         descriptors.len(),
         registry.len(),
@@ -267,7 +267,7 @@ fn comma(index: usize, total: usize) -> &'static str {
 }
 
 /// Finite `f32` as JSON. Non-finite values cannot occur: every descriptor field is validated
-/// finite by `validate_descriptor_v1` before a factory may enter the registry.
+/// finite by `validate_descriptor` before a factory may enter the registry.
 fn number(value: f32) -> String {
     assert!(value.is_finite(), "descriptor values are finite");
     let text = format!("{value:?}");
@@ -282,7 +282,7 @@ fn optional_number(value: Option<f32>) -> String {
     value.map_or_else(|| "null".to_owned(), number)
 }
 
-fn effect(descriptor: &EffectDescriptorV1) -> String {
+fn effect(descriptor: &EffectDescriptor) -> String {
     let mut out = String::new();
     out.push_str("    {\n");
     out.push_str(&format!(
@@ -320,7 +320,7 @@ fn effect(descriptor: &EffectDescriptorV1) -> String {
     out
 }
 
-fn effect_observation(observation: &ObservationDescriptorV1) -> String {
+fn effect_observation(observation: &ObservationDescriptor) -> String {
     // `subscribable` is derived from the cost class exactly as `liveUpdatable` is derived from
     // `automatable`: a `Resident` tap is a copy out of state the block already wrote and the
     // subscribe path binds it; a `Computed` tap has no implementation in V1 and the subscribe path
@@ -389,7 +389,7 @@ const fn observation_channels_name(channels: ObservationChannelsV1) -> &'static 
     }
 }
 
-fn effect_parameter(parameter: &ParameterDescriptorV1) -> String {
+fn effect_parameter(parameter: &ParameterDescriptor) -> String {
     let mut out = String::new();
     out.push_str("        {\n");
     out.push_str(&format!("          \"id\": {},\n", parameter.id.0));

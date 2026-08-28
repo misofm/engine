@@ -22,7 +22,7 @@
 #![allow(missing_docs)]
 
 use core::cmp::Ordering;
-use miso_engine_effect_contract::{BankWidth, ChannelSymmetryWitnessV1, EffectProgramKeyV1};
+use miso_engine_effect_contract::{BankWidth, ChannelSymmetryWitness, EffectProgramKey};
 use miso_engine_rack::{BankSlotKey, RackLocationV1, RackProgramV1};
 
 /// Which pool a candidate competes in, beside its dependency level and its rack.
@@ -67,7 +67,7 @@ impl CohortPoolClassV1 {
     /// pretended otherwise would be a different partition on every recompile. They are the
     /// dispatch's business, not the planner's, and the conjunction is taken there.
     pub const PREPARE_TIME_TERMS: u8 =
-        ChannelSymmetryWitnessV1::SOURCE | ChannelSymmetryWitnessV1::DESIGNED;
+        ChannelSymmetryWitness::SOURCE | ChannelSymmetryWitness::DESIGNED;
 
     /// The **single** predicate. Both bank planners must reach a class through this function.
     ///
@@ -80,7 +80,7 @@ impl CohortPoolClassV1 {
     /// cohort. That is why the class is derived once per compile and handed to both planners, and
     /// why this is the only constructor.
     #[must_use]
-    pub const fn of_prepare_witness(witness: ChannelSymmetryWitnessV1) -> Self {
+    pub const fn of_prepare_witness(witness: ChannelSymmetryWitness) -> Self {
         if witness.holds(Self::PREPARE_TIME_TERMS) {
             Self::MonoSymmetricAtPrepare
         } else {
@@ -100,7 +100,7 @@ impl CohortPoolClassV1 {
 
 /// One track's ordered rack program, addressed by a caller-chosen stable id.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CohortCandidate<Id, K = EffectProgramKeyV1> {
+pub struct CohortCandidate<Id, K = EffectProgramKey> {
     pub id: Id,
     pub program: RackProgramV1<K>,
     /// The pool this candidate competes in. See [`CohortPoolClassV1`].
@@ -110,14 +110,14 @@ pub struct CohortCandidate<Id, K = EffectProgramKeyV1> {
 /// Candidates already partitioned by dependency level by the caller: a bank never crosses a level,
 /// because its members must all be ready in the same wave (#96 F12).
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CohortLevel<Id, K = EffectProgramKeyV1> {
+pub struct CohortLevel<Id, K = EffectProgramKey> {
     pub level: u64,
     pub candidates: Vec<CohortCandidate<Id, K>>,
 }
 
 /// One planned bank: a cohort leader's program plus the lanes that run it.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BankGroup<Id, K = EffectProgramKeyV1> {
+pub struct BankGroup<Id, K = EffectProgramKey> {
     pub level: u64,
     pub rack: RackLocationV1,
     /// The pool this group was formed in. Every member carried this class as a candidate, which
@@ -165,7 +165,7 @@ impl<Id, K: BankSlotKey> BankGroup<Id, K> {
 
 /// The planner's whole output: banked groups plus the candidates that never bank.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BankPlan<Id, K = EffectProgramKeyV1> {
+pub struct BankPlan<Id, K = EffectProgramKey> {
     pub groups: Vec<BankGroup<Id, K>>,
     /// Candidates that never bank (empty program, or a connected sidechain), in `id` order.
     pub scalar: Vec<Id>,
@@ -447,16 +447,16 @@ pub fn compare_programs<K: BankSlotKey>(a: &RackProgramV1<K>, b: &RackProgramV1<
 mod tests {
     use super::*;
     use miso_engine_effect_contract::{
-        EffectId, EffectQuality, LatencySamples, LinkMode, PortId, PreparedPortsV1,
+        EffectId, EffectQuality, LatencySamples, LinkMode, PortId, PreparedPorts,
         PreparedSidechainPort, StatePayloadSizes, TailSamples,
     };
     use std::collections::BTreeMap;
 
-    fn key(index: usize) -> EffectProgramKeyV1 {
+    fn key(index: usize) -> EffectProgramKey {
         key_with(index, PreparedSidechainPort::None)
     }
 
-    fn key_with(index: usize, sidechain: PreparedSidechainPort) -> EffectProgramKeyV1 {
+    fn key_with(index: usize, sidechain: PreparedSidechainPort) -> EffectProgramKey {
         let effect_id = match index {
             0 => EffectId::new("fixture.a"),
             1 => EffectId::new("fixture.b"),
@@ -464,7 +464,7 @@ mod tests {
             _ => EffectId::new("fixture.d"),
         }
         .expect("static id");
-        EffectProgramKeyV1 {
+        EffectProgramKey {
             effect_id,
             contract_major: 1,
             state_layout_version: 1,
@@ -473,7 +473,7 @@ mod tests {
             quality: EffectQuality::Normal,
             bypass: false,
             link_mode: LinkMode::DualMono,
-            ports: PreparedPortsV1 { sidechain },
+            ports: PreparedPorts { sidechain },
             latency: LatencySamples(0),
             tail: TailSamples::Finite(0),
             state_sizes: StatePayloadSizes {
@@ -900,7 +900,7 @@ mod tests {
     /// business" row flips and this fails.
     #[test]
     fn the_pool_class_rests_on_the_two_prepare_time_terms() {
-        use ChannelSymmetryWitnessV1 as W;
+        use ChannelSymmetryWitness as W;
         let cases: [(u8, CohortPoolClassV1); 6] = [
             (
                 W::SYMMETRIC.terms(),
@@ -1038,13 +1038,13 @@ mod tests {
                     let Some(id) = member else { continue };
                     // The lane's own program, read off in leader-slot order, is exactly the leader
                     // keys at the positions the lane is active on.
-                    let run: Vec<&EffectProgramKeyV1> = group.active_slots[lane]
+                    let run: Vec<&EffectProgramKey> = group.active_slots[lane]
                         .iter()
                         .enumerate()
                         .filter(|(_, active)| **active)
                         .map(|(slot, _)| &group.program[slot])
                         .collect();
-                    let own: Vec<&EffectProgramKeyV1> = by_id[id].slots.iter().collect();
+                    let own: Vec<&EffectProgramKey> = by_id[id].slots.iter().collect();
                     assert_eq!(run, own, "case={case} lane={lane}");
                 }
                 for slot in 0..group.program.len() {

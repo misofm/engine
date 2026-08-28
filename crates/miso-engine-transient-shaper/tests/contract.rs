@@ -9,7 +9,7 @@ use common::*;
 use miso_engine_effect_contract::{
     BankWidth, EffectPrepareError, LatencySamples, LinkMode, NativeEffectFactory, ParameterChannel,
     PrepareEffectBankRequest, PreparedNativeEffect, ResetKind, StatePayloadError,
-    StatePayloadInput, TailSamples, validate_descriptor_v1,
+    StatePayloadInput, TailSamples, validate_descriptor,
 };
 use miso_engine_effect_runtime::envelope::retention_coefficient;
 use miso_engine_lane::Backend;
@@ -21,7 +21,7 @@ use miso_engine_transient_shaper::{
 /// Red mutation: flip one bit of `TRANSIENT_SHAPER_COEFFICIENT_BITS_V1`.
 #[test]
 fn descriptor_coefficients_resources_and_transactional_caps_are_frozen() {
-    validate_descriptor_v1(&TRANSIENT_SHAPER_DESCRIPTOR_V1).expect("descriptor");
+    validate_descriptor(&TRANSIENT_SHAPER_DESCRIPTOR_V1).expect("descriptor");
     assert_eq!(
         TRANSIENT_SHAPER_DESCRIPTOR_V1.id.as_str(),
         "miso.transient-shaper"

@@ -14,7 +14,7 @@ use miso_engine_compressor::{
 use miso_engine_effect_contract::{
     BankProcessReport, BankWidth, EffectBankProcessBlock, EffectProcessBlock, LatencySamples,
     LinkMode, NativeEffectFactory, PrepareEffectBankRequest, PreparedSidechainPort, ResetKind,
-    StatePayloadOutput, expected_prepared_metadata, validate_descriptor_v1,
+    StatePayloadOutput, expected_prepared_metadata, validate_descriptor,
 };
 use miso_engine_effect_runtime::state_payload::read_f32;
 use miso_engine_lane::Backend;
@@ -30,7 +30,7 @@ use support::{
 /// (83c's two-word header) — RED here, which is the point: neither may be smuggled in by #88.
 #[test]
 fn descriptor_rows_and_resource_envelope_are_frozen() {
-    validate_descriptor_v1(&COMPRESSOR_DESCRIPTOR_V1).expect("descriptor");
+    validate_descriptor(&COMPRESSOR_DESCRIPTOR_V1).expect("descriptor");
     assert_eq!(COMPRESSOR_DESCRIPTOR_V1.id.as_str(), "miso.compressor");
     assert_eq!(COMPRESSOR_DESCRIPTOR_V1.state_layout_version, 1);
     assert_eq!(COMPRESSOR_PARAMETERS_V1.len(), PARAMETER_COUNT);

@@ -7,7 +7,7 @@
 //!
 //! # Why the record type is the right unit to test
 //!
-//! `ChannelSymmetryWitnessV1::admit` is generic over `LiveConsoleRecordV1` and dispatches on the
+//! `ChannelSymmetryWitness::admit` is generic over `LiveConsoleRecord` and dispatches on the
 //! record type's `SEAM` const and its `symmetry_event`. Nothing else decides what a drained record
 //! did. So a test of `admit` over this record type is a test of the drain's whole contribution to
 //! the witness, and it cannot go stale against the drain because the drain has no second opinion
@@ -16,7 +16,7 @@
 use miso_engine_builtins::BuiltinLaneSelector;
 use miso_engine_builtins_compiler::TrackInputRecordV1;
 use miso_engine_effect_contract::{
-    ChannelSymmetryWitnessV1, LiveConsoleRecordV1, SeamSideV1, SymmetryEventV1,
+    ChannelSymmetryWitness, LiveConsoleRecord, SeamSide, SymmetryEvent,
 };
 
 fn trim(lanes: BuiltinLaneSelector) -> TrackInputRecordV1 {
@@ -38,21 +38,21 @@ fn polarity(lanes: BuiltinLaneSelector) -> TrackInputRecordV1 {
 /// The input chain is upstream of the fader/matrix seam, so every record on this queue gates the
 /// collapse.
 ///
-/// Red mutation: set `TrackInputRecordV1::SEAM` to `SeamSideV1::SeamSide` -> `admit` compiles the
+/// Red mutation: set `TrackInputRecordV1::SEAM` to `SeamSide::SeamSide` -> `admit` compiles the
 /// clearing arm away entirely, every assertion below about a declining witness fails, and a
 /// one-lane trim ride would publish on both channels of a collapsed block.
 #[test]
 fn the_input_record_is_upstream_of_the_seam() {
     assert_eq!(
         TrackInputRecordV1::SEAM,
-        SeamSideV1::UpstreamOfSeam,
+        SeamSide::UpstreamOfSeam,
         "the input chain runs once on a collapsed track, so its records gate the collapse"
     );
 }
 
 /// A per-lane retarget de-symmetrizes; a `Both` retarget preserves.
 ///
-/// Red mutation: return `SymmetryEventV1::Preserve` for every selector -> the `Left`/`Right` arms
+/// Red mutation: return `SymmetryEvent::Preserve` for every selector -> the `Left`/`Right` arms
 /// fail. Red mutation: return `Desymmetrize` for every selector -> the `Both` arms fail, and a
 /// symmetric ride would retire a track's collapse for the life of the plan.
 #[test]
@@ -62,9 +62,9 @@ fn a_per_lane_record_desymmetrizes_and_a_both_record_preserves() {
         polarity,
     ] {
         for (lanes, expected) in [
-            (BuiltinLaneSelector::Left, SymmetryEventV1::Desymmetrize),
-            (BuiltinLaneSelector::Right, SymmetryEventV1::Desymmetrize),
-            (BuiltinLaneSelector::Both, SymmetryEventV1::Preserve),
+            (BuiltinLaneSelector::Left, SymmetryEvent::Desymmetrize),
+            (BuiltinLaneSelector::Right, SymmetryEvent::Desymmetrize),
+            (BuiltinLaneSelector::Both, SymmetryEvent::Preserve),
         ] {
             assert_eq!(
                 build(lanes).symmetry_event(),
@@ -83,7 +83,7 @@ fn a_per_lane_record_desymmetrizes_and_a_both_record_preserves() {
 #[test]
 fn the_live_term_survives_a_symmetric_ride_and_not_a_one_lane_one() {
     // A symmetric ride of any length leaves every term standing.
-    let mut witness = ChannelSymmetryWitnessV1::SYMMETRIC;
+    let mut witness = ChannelSymmetryWitness::SYMMETRIC;
     for _ in 0..64 {
         witness.admit(&trim(BuiltinLaneSelector::Both));
         witness.admit(&polarity(BuiltinLaneSelector::Both));
@@ -98,12 +98,12 @@ fn the_live_term_survives_a_symmetric_ride_and_not_a_one_lane_one() {
     );
 
     // One per-lane record clears `LIVE`, and only `LIVE`.
-    let mut witness = ChannelSymmetryWitnessV1::SYMMETRIC;
+    let mut witness = ChannelSymmetryWitness::SYMMETRIC;
     witness.admit(&trim(BuiltinLaneSelector::Left));
-    assert!(!witness.holds(ChannelSymmetryWitnessV1::LIVE));
+    assert!(!witness.holds(ChannelSymmetryWitness::LIVE));
     assert_eq!(
         witness.declined(),
-        ChannelSymmetryWitnessV1::LIVE,
+        ChannelSymmetryWitness::LIVE,
         "an upstream one-channel write clears exactly one term"
     );
     assert!(
@@ -122,17 +122,17 @@ fn the_live_term_survives_a_symmetric_ride_and_not_a_one_lane_one() {
 /// state proof would hold.
 ///
 /// That is **stronger** than M3's rule, which is only that re-equal words must not *by themselves*
-/// re-engage. It is the same law `EffectControlRecordV1` has carried since the witness existed,
+/// re-engage. It is the same law `EffectControlRecord` has carried since the witness existed,
 /// and the phase deliberately does not change the M-series machinery to relax it.
 ///
-/// Red mutation: make `ChannelSymmetryWitnessV1::admit` set `LIVE` on a `Preserve` event instead
+/// Red mutation: make `ChannelSymmetryWitness::admit` set `LIVE` on a `Preserve` event instead
 /// of leaving it -> a symmetric retarget after an asymmetric one silently re-arms the collapse
 /// onto a right channel nothing proved, and this fails.
 #[test]
 fn re_equalising_the_words_does_not_re_arm_the_live_term() {
-    let mut witness = ChannelSymmetryWitnessV1::SYMMETRIC;
+    let mut witness = ChannelSymmetryWitness::SYMMETRIC;
     witness.admit(&trim(BuiltinLaneSelector::Left));
-    assert!(!witness.holds(ChannelSymmetryWitnessV1::LIVE));
+    assert!(!witness.holds(ChannelSymmetryWitness::LIVE));
 
     // Put the other lane where the first one went, then ride both together for a while.
     witness.admit(&trim(BuiltinLaneSelector::Right));
@@ -140,7 +140,7 @@ fn re_equalising_the_words_does_not_re_arm_the_live_term() {
         witness.admit(&trim(BuiltinLaneSelector::Both));
     }
     assert!(
-        !witness.holds(ChannelSymmetryWitnessV1::LIVE),
+        !witness.holds(ChannelSymmetryWitness::LIVE),
         "the `LIVE` term is a latch within a plan; only a rebind restores it"
     );
     assert!(
@@ -149,7 +149,7 @@ fn re_equalising_the_words_does_not_re_arm_the_live_term() {
     );
 
     // A rebind is the way back, and it is the *only* way back.
-    let rebound = ChannelSymmetryWitnessV1::SYMMETRIC;
+    let rebound = ChannelSymmetryWitness::SYMMETRIC;
     assert!(rebound.eligible());
 }
 

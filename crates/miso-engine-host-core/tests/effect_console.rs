@@ -13,7 +13,7 @@ use core::num::{NonZeroU32, NonZeroUsize};
 
 use miso_engine_builtins::MeterTap;
 use miso_engine_core::realtime::{PlanarBufferMut, RenderIo, RenderTime};
-use miso_engine_effect_contract::{EffectControlRecordV1, ParameterChannel};
+use miso_engine_effect_contract::{EffectControlRecord, ParameterChannel};
 use miso_engine_host_core::{
     EffectRack, HostConsoleRequestV1, HostPrepareCaps, HostShapePolicy, PreparedHost,
     SourceSubmission, prepare_host_session_with_console,
@@ -154,7 +154,7 @@ fn command(console: &mut Console, track_id: &str, value: f32) {
     for channel in [ParameterChannel::Left, ParameterChannel::Right] {
         producer
             .producer
-            .try_push(EffectControlRecordV1::Parameter {
+            .try_push(EffectControlRecord::Parameter {
                 parameter_index: BAND_GAIN_INDEX,
                 channel,
                 value,

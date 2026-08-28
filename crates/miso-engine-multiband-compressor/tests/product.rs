@@ -33,7 +33,7 @@ fn rms(values: &[f32]) -> f64 {
 /// on #83 defers the shared codec's versioned header to #95.
 #[test]
 fn descriptor_preparation_and_exact_four_rate_resources_are_frozen() {
-    miso_engine_effect_contract::validate_descriptor_v1(&MULTIBAND_COMPRESSOR_DESCRIPTOR_V1)
+    miso_engine_effect_contract::validate_descriptor(&MULTIBAND_COMPRESSOR_DESCRIPTOR_V1)
         .expect("descriptor");
     assert_eq!(MULTIBAND_COMPRESSOR_DESCRIPTOR_V1.parameters.len(), 12);
     assert_eq!(MULTIBAND_COMPRESSOR_DESCRIPTOR_V1.state_layout_version, 2);

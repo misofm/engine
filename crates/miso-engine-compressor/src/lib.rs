@@ -40,12 +40,12 @@ pub mod corpus;
 
 use miso_engine_effect_contract::{
     AutomationRate, AutomationSpanKind, BankProcessReport, EffectBankProcessBlock,
-    EffectDescriptorV1, EffectPrepareError, EffectProcessBlock, EffectQuality,
+    EffectDescriptor, EffectPrepareError, EffectProcessBlock, EffectQuality,
     InitialParameterValue, LatencySamples, LinkModeSet, NativeEffectFactory, ObservationCadenceV1,
-    ObservationChannelsV1, ObservationCostV1, ObservationDescriptorV1, ObservationFoldV1,
-    ObservationKindV1, ObservationSampleV1, ObservationTapId, ParameterChannel,
-    ParameterChannelPolicy, ParameterDescriptorV1, ParameterDomain, ParameterId, ParameterMapping,
-    ParameterUnit, PortDescriptorV1, PortId, PortLayout, PortRole, PrepareEffectBankRequest,
+    ObservationChannelsV1, ObservationCostV1, ObservationDescriptor, ObservationFoldV1,
+    ObservationKindV1, ObservationSample, ObservationTapId, ParameterChannel,
+    ParameterChannelPolicy, ParameterDescriptor, ParameterDomain, ParameterId, ParameterMapping,
+    ParameterUnit, PortDescriptor, PortId, PortLayout, PortRole, PrepareEffectBankRequest,
     PrepareEffectRequest, PreparedAutomationSpan, PreparedBankMetadata, PreparedEffectMetadata,
     PreparedNativeEffect, PreparedNativeEffectBank, ProcessReport, ResetKind, SmoothingRule,
     StatePayloadError, StatePayloadInput, StatePayloadOutput, StatePayloadSizes, TailSamples,
@@ -100,8 +100,8 @@ const fn parameter(
     automation_rate: AutomationRate,
     smoothing: SmoothingRule,
     smoothing_samples: u32,
-) -> ParameterDescriptorV1 {
-    ParameterDescriptorV1 {
+) -> ParameterDescriptor {
+    ParameterDescriptor {
         id: parameter_id(id),
         display_name,
         display_unit,
@@ -122,7 +122,7 @@ const fn parameter(
 }
 
 /// Frozen V1 parameter descriptors. Parameter positions and stable IDs are identical.
-pub const COMPRESSOR_PARAMETERS_V1: [ParameterDescriptorV1; 8] = [
+pub const COMPRESSOR_PARAMETERS_V1: [ParameterDescriptor; 8] = [
     parameter(
         1,
         "threshold",
@@ -229,20 +229,20 @@ pub const COMPRESSOR_PARAMETERS_V1: [ParameterDescriptorV1; 8] = [
     ),
 ];
 
-const PORTS: [PortDescriptorV1; 3] = [
-    PortDescriptorV1 {
+const PORTS: [PortDescriptor; 3] = [
+    PortDescriptor {
         id: port_id("main-in"),
         role: PortRole::MainInput,
         required: true,
         layout: PortLayout::DualMonoPlanar,
     },
-    PortDescriptorV1 {
+    PortDescriptor {
         id: port_id("main-out"),
         role: PortRole::MainOutput,
         required: true,
         layout: PortLayout::DualMonoPlanar,
     },
-    PortDescriptorV1 {
+    PortDescriptor {
         id: port_id("sidechain-in"),
         role: PortRole::SidechainInput,
         required: false,
@@ -253,10 +253,10 @@ const PORTS: [PortDescriptorV1; 3] = [
 const fn quality(
     sample_rate: u32,
     latency: u64,
-) -> miso_engine_effect_contract::QualityDescriptorV1 {
+) -> miso_engine_effect_contract::QualityDescriptor {
     let ring_length = latency as u32 + 1;
     let per_lane = (24 + 2 * ring_length) * 4;
-    miso_engine_effect_contract::QualityDescriptorV1 {
+    miso_engine_effect_contract::QualityDescriptor {
         quality: EffectQuality::Normal,
         sample_rate,
         latency: LatencySamples(latency),
@@ -271,7 +271,7 @@ const fn quality(
     }
 }
 
-const QUALITIES: [miso_engine_effect_contract::QualityDescriptorV1; 4] = [
+const QUALITIES: [miso_engine_effect_contract::QualityDescriptor; 4] = [
     quality(44_100, 882),
     quality(48_000, 960),
     quality(88_200, 1764),
@@ -284,7 +284,7 @@ const QUALITIES: [miso_engine_effect_contract::QualityDescriptorV1; 4] = [
 /// read back on the next one -- publishing it is a copy out of state the block wrote anyway, and
 /// no lane kernel is touched. `PeakMagnitude` over a window is what makes the published number a
 /// non-negative magnitude even though the smoother's own convention is negative-for-reduction.
-pub const COMPRESSOR_OBSERVATIONS_V1: [ObservationDescriptorV1; 1] = [ObservationDescriptorV1 {
+pub const COMPRESSOR_OBSERVATIONS_V1: [ObservationDescriptor; 1] = [ObservationDescriptor {
     id: ObservationTapId(1),
     display_name: "Gain Reduction",
     display_unit: "dB",
@@ -299,7 +299,7 @@ pub const COMPRESSOR_OBSERVATIONS_V1: [ObservationDescriptorV1; 1] = [Observatio
 }];
 
 /// Immutable launch compressor descriptor.
-pub const COMPRESSOR_DESCRIPTOR_V1: EffectDescriptorV1 = EffectDescriptorV1 {
+pub const COMPRESSOR_DESCRIPTOR_V1: EffectDescriptor = EffectDescriptor {
     id: effect_id("miso.compressor"),
     display_name: "Compressor",
     contract_major: 1,
@@ -786,7 +786,7 @@ struct PreparedCompressorBank<L: Lane> {
 }
 
 impl NativeEffectFactory for CompressorFactory {
-    fn descriptor(&self) -> &'static EffectDescriptorV1 {
+    fn descriptor(&self) -> &'static EffectDescriptor {
         &COMPRESSOR_DESCRIPTOR_V1
     }
 
@@ -927,7 +927,7 @@ impl PreparedNativeEffect for PreparedCompressor {
     /// never a second opinion about what the kernel did. It is `<= 0` by the kernel's own clamp
     /// (`gain_delta_db` is clamped into `[-100, 0]` before it is smoothed), and it is the value at
     /// the end of the last processed block. At `L = f32` the channel's word *is* the lane's word.
-    fn observe_resident(&self, tap_index: u32, out: &mut ObservationSampleV1) -> bool {
+    fn observe_resident(&self, tap_index: u32, out: &mut ObservationSample) -> bool {
         if tap_index != 0 {
             return false;
         }
@@ -962,7 +962,7 @@ impl<L: Lane> PreparedNativeEffectBank for PreparedCompressorBank<L> {
     }
 
     /// One `store` per channel fills every lane: the bank's reduction is one vector.
-    fn observe_resident_bank(&self, tap_index: u32, out: &mut [ObservationSampleV1]) -> bool {
+    fn observe_resident_bank(&self, tap_index: u32, out: &mut [ObservationSample]) -> bool {
         let lanes = L::WIDTH;
         if tap_index != 0 || out.len() != lanes {
             return false;

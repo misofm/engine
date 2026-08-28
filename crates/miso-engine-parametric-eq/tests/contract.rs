@@ -11,7 +11,7 @@ use miso_engine_core::SampleRateHz;
 use miso_engine_effect_contract::{
     AutomationRate, EffectProcessBlock, NativeEffectFactory, ParameterChannel, ParameterDomain,
     ParameterMapping, ResetKind, SmoothingRule, StatePayloadError, StatePayloadInput,
-    StatePayloadOutput, validate_descriptor_v1,
+    StatePayloadOutput, validate_descriptor,
 };
 use miso_engine_parametric_eq::{
     EQ_BAND_DESCRIPTORS_V1, EQ_SECTION_COUNT_V1, EqBandKindV1, EqSvfWordsV1,
@@ -25,7 +25,7 @@ use support::{
 /// The frozen public surface: identifiers, domains, smoothing and the version-2 state size.
 #[test]
 fn descriptor_is_frozen() {
-    validate_descriptor_v1(&PARAMETRIC_EQ_DESCRIPTOR_V1).expect("descriptor");
+    validate_descriptor(&PARAMETRIC_EQ_DESCRIPTOR_V1).expect("descriptor");
     let parameters = PARAMETRIC_EQ_DESCRIPTOR_V1.parameters;
     assert_eq!(parameters.len(), 24);
     assert_eq!(PARAMETRIC_EQ_DESCRIPTOR_V1.state_layout_version, 2);

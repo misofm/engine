@@ -1,13 +1,13 @@
 use crate::{
-    BoundEffectDescriptorWireV1, EFFECT_STATE_V1_UNAVAILABLE_INDEX,
-    EFFECT_STATE_V1_UNAVAILABLE_OFFSET, EffectDescriptorIdentityV1,
-    EffectStateDiagnosticCodeV1 as Code, EffectStateDiagnosticV1 as Diagnostic,
+    BoundEffectDescriptorWire, EFFECT_STATE_UNAVAILABLE_INDEX,
+    EFFECT_STATE_UNAVAILABLE_OFFSET, EffectDescriptorIdentity,
+    EffectStateDiagnosticCode as Code, EffectStateDiagnostic as Diagnostic,
 };
 use miso_engine_core::{SampleRateHz, is_launch_sample_rate};
 use miso_engine_effect_contract::{
-    EffectDescriptorV1, EffectId, EffectQuality, InitialParameterValue, LinkMode, ParameterChannel,
+    EffectDescriptor, EffectId, EffectQuality, InitialParameterValue, LinkMode, ParameterChannel,
     ParameterChannelPolicy, ParameterDomain, PrepareEffectRequest, PreparedEffectMetadata,
-    PreparedPortsV1, PreparedSidechainPort, StatePayloadSizes, TailSamples,
+    PreparedPorts, PreparedSidechainPort, StatePayloadSizes, TailSamples,
 };
 use sha2::{Digest, Sha256};
 
@@ -17,18 +17,18 @@ const HEADER_BYTES: usize = 224;
 const INITIAL_BYTES: usize = 16;
 const DIGEST_DOMAIN: &[u8] = b"miso.engine.effect-state.current-layout.v1\0";
 
-pub const EFFECT_STATE_V1_BUFFER_ENVELOPE_OUTPUT: u32 = 1;
-pub const EFFECT_STATE_V1_BUFFER_PAYLOAD_SCRATCH: u32 = 2;
-pub const EFFECT_STATE_V1_BUFFER_INITIAL_VALUE_SCRATCH: u32 = 3;
+pub const EFFECT_STATE_BUFFER_ENVELOPE_OUTPUT: u32 = 1;
+pub const EFFECT_STATE_BUFFER_PAYLOAD_SCRATCH: u32 = 2;
+pub const EFFECT_STATE_BUFFER_INITIAL_VALUE_SCRATCH: u32 = 3;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct EffectStateSelectorV1 {
-    descriptor_identity: EffectDescriptorIdentityV1,
+pub struct EffectStateSelector {
+    descriptor_identity: EffectDescriptorIdentity,
     state_layout_version: u32,
 }
 
-impl EffectStateSelectorV1 {
-    pub const fn descriptor_identity(self) -> EffectDescriptorIdentityV1 {
+impl EffectStateSelector {
+    pub const fn descriptor_identity(self) -> EffectDescriptorIdentity {
         self.descriptor_identity
     }
 
@@ -39,7 +39,7 @@ impl EffectStateSelectorV1 {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u32)]
-pub enum EffectStateMigrationEdgeErrorV1 {
+pub enum EffectStateMigrationEdgeError {
     NonAdjacentLayout = 1,
     UnchangedIdentity = 2,
     EffectOrContractMismatch = 3,
@@ -47,58 +47,58 @@ pub enum EffectStateMigrationEdgeErrorV1 {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct EffectStateDescriptorProvenanceV1 {
-    descriptor: &'static EffectDescriptorV1,
-    identity: EffectDescriptorIdentityV1,
+pub struct EffectStateDescriptorProvenance {
+    descriptor: &'static EffectDescriptor,
+    identity: EffectDescriptorIdentity,
 }
 
-impl PartialEq for EffectStateDescriptorProvenanceV1 {
+impl PartialEq for EffectStateDescriptorProvenance {
     fn eq(&self, other: &Self) -> bool {
         core::ptr::eq(self.descriptor, other.descriptor) && self.identity == other.identity
     }
 }
 
-impl Eq for EffectStateDescriptorProvenanceV1 {}
+impl Eq for EffectStateDescriptorProvenance {}
 
 /// An adjacent, replay-compatible historical-to-target descriptor edge.
 ///
 /// Private fields ensure identities, layouts, and static descriptor provenance can only originate
 /// from accepted descriptor-wire bindings.
 #[derive(Clone, Copy, Debug)]
-pub struct BoundEffectStateMigrationEdgeV1<'wire> {
-    source: BoundEffectDescriptorWireV1<'wire>,
-    target: BoundEffectDescriptorWireV1<'wire>,
-    source_selector: EffectStateSelectorV1,
-    target_selector: EffectStateSelectorV1,
+pub struct BoundEffectStateMigrationEdge<'wire> {
+    source: BoundEffectDescriptorWire<'wire>,
+    target: BoundEffectDescriptorWire<'wire>,
+    source_selector: EffectStateSelector,
+    target_selector: EffectStateSelector,
 }
 
-impl<'wire> BoundEffectStateMigrationEdgeV1<'wire> {
-    pub const fn source_bound(self) -> BoundEffectDescriptorWireV1<'wire> {
+impl<'wire> BoundEffectStateMigrationEdge<'wire> {
+    pub const fn source_bound(self) -> BoundEffectDescriptorWire<'wire> {
         self.source
     }
 
-    pub const fn target_bound(self) -> BoundEffectDescriptorWireV1<'wire> {
+    pub const fn target_bound(self) -> BoundEffectDescriptorWire<'wire> {
         self.target
     }
 
-    pub const fn source_selector(self) -> EffectStateSelectorV1 {
+    pub const fn source_selector(self) -> EffectStateSelector {
         self.source_selector
     }
 
-    pub const fn target_selector(self) -> EffectStateSelectorV1 {
+    pub const fn target_selector(self) -> EffectStateSelector {
         self.target_selector
     }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct EffectStateLimitsV1 {
+pub struct EffectStateLimits {
     pub maximum_descriptor_bytes: u64,
     pub maximum_envelope_bytes: u64,
     pub maximum_payload_bytes: u64,
     pub maximum_initial_values: u32,
 }
 
-impl Default for EffectStateLimitsV1 {
+impl Default for EffectStateLimits {
     fn default() -> Self {
         Self {
             maximum_descriptor_bytes: 4_194_304,
@@ -111,13 +111,13 @@ impl Default for EffectStateLimitsV1 {
 
 /// Complete borrowed control-plane replay of an accepted prepare request.
 #[derive(Clone, Copy, Debug)]
-pub struct EffectStateReplayViewV1<'a> {
+pub struct EffectStateReplayView<'a> {
     pub effect_id: EffectId,
     pub request: PrepareEffectRequest<'a>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct EffectStateRequirementsV1 {
+pub struct EffectStateRequirements {
     pub envelope_bytes: u64,
     pub payload_snapshot_scratch_bytes: u64,
     pub initial_value_scratch_slots: u32,
@@ -142,8 +142,8 @@ fn diagnostic(code: Code, byte_offset: usize, item_index: Option<usize>) -> Diag
         0,
         item_index
             .and_then(|value| u32::try_from(value).ok())
-            .unwrap_or(EFFECT_STATE_V1_UNAVAILABLE_INDEX),
-        u64::try_from(byte_offset).unwrap_or(EFFECT_STATE_V1_UNAVAILABLE_OFFSET),
+            .unwrap_or(EFFECT_STATE_UNAVAILABLE_INDEX),
+        u64::try_from(byte_offset).unwrap_or(EFFECT_STATE_UNAVAILABLE_OFFSET),
     )
 }
 
@@ -151,8 +151,8 @@ fn unavailable(code: Code, detail: u32) -> Diagnostic {
     Diagnostic::new(
         code,
         detail,
-        EFFECT_STATE_V1_UNAVAILABLE_INDEX,
-        EFFECT_STATE_V1_UNAVAILABLE_OFFSET,
+        EFFECT_STATE_UNAVAILABLE_INDEX,
+        EFFECT_STATE_UNAVAILABLE_OFFSET,
     )
 }
 
@@ -182,7 +182,7 @@ fn checked_usize(value: u64, byte_offset: usize) -> Result<usize, Diagnostic> {
     Ok(value)
 }
 
-fn validate_limits(limits: EffectStateLimitsV1) -> Result<(), Diagnostic> {
+fn validate_limits(limits: EffectStateLimits) -> Result<(), Diagnostic> {
     for value in [
         limits.maximum_descriptor_bytes,
         limits.maximum_envelope_bytes,
@@ -203,7 +203,7 @@ fn metadata_mismatch(detail: u32) -> Diagnostic {
     unavailable(Code::Metadata, detail)
 }
 
-fn sidechain_parts(ports: PreparedPortsV1) -> (u32, &'static str, bool) {
+fn sidechain_parts(ports: PreparedPorts) -> (u32, &'static str, bool) {
     match ports.sidechain {
         PreparedSidechainPort::None => (0, "", false),
         PreparedSidechainPort::Unconnected { id, required } => (1, id.as_str(), required),
@@ -220,8 +220,8 @@ fn optional_float_bits_equal(left: Option<f32>, right: Option<f32>) -> bool {
 }
 
 fn parameters_compatible(
-    left: &'static EffectDescriptorV1,
-    right: &'static EffectDescriptorV1,
+    left: &'static EffectDescriptor,
+    right: &'static EffectDescriptor,
 ) -> bool {
     left.parameters.len() == right.parameters.len()
         && left
@@ -257,8 +257,8 @@ fn parameters_compatible(
 }
 
 fn qualities_compatible(
-    left: &'static EffectDescriptorV1,
-    right: &'static EffectDescriptorV1,
+    left: &'static EffectDescriptor,
+    right: &'static EffectDescriptor,
 ) -> bool {
     left.qualities.len() == right.qualities.len()
         && left
@@ -275,28 +275,28 @@ fn qualities_compatible(
             })
 }
 
-pub fn effect_state_bound_selector_v1(
-    bound: BoundEffectDescriptorWireV1<'_>,
-) -> EffectStateSelectorV1 {
-    EffectStateSelectorV1 {
+pub fn effect_state_bound_selector(
+    bound: BoundEffectDescriptorWire<'_>,
+) -> EffectStateSelector {
+    EffectStateSelector {
         descriptor_identity: bound.identity(),
         state_layout_version: bound.descriptor().state_layout_version,
     }
 }
 
-pub fn effect_state_descriptor_provenance_v1(
-    bound: BoundEffectDescriptorWireV1<'_>,
-) -> EffectStateDescriptorProvenanceV1 {
-    EffectStateDescriptorProvenanceV1 {
+pub fn effect_state_descriptor_provenance(
+    bound: BoundEffectDescriptorWire<'_>,
+) -> EffectStateDescriptorProvenance {
+    EffectStateDescriptorProvenance {
         descriptor: bound.descriptor(),
         identity: bound.identity(),
     }
 }
 
-pub fn bind_effect_state_migration_edge_v1<'wire>(
-    source: BoundEffectDescriptorWireV1<'wire>,
-    target: BoundEffectDescriptorWireV1<'wire>,
-) -> Result<BoundEffectStateMigrationEdgeV1<'wire>, EffectStateMigrationEdgeErrorV1> {
+pub fn bind_effect_state_migration_edge<'wire>(
+    source: BoundEffectDescriptorWire<'wire>,
+    target: BoundEffectDescriptorWire<'wire>,
+) -> Result<BoundEffectStateMigrationEdge<'wire>, EffectStateMigrationEdgeError> {
     let source_descriptor = source.descriptor();
     let target_descriptor = target.descriptor();
     let adjacent = source_descriptor
@@ -304,16 +304,16 @@ pub fn bind_effect_state_migration_edge_v1<'wire>(
         .checked_add(1)
         .is_some_and(|version| version == target_descriptor.state_layout_version);
     if !adjacent {
-        return Err(EffectStateMigrationEdgeErrorV1::NonAdjacentLayout);
+        return Err(EffectStateMigrationEdgeError::NonAdjacentLayout);
     }
     if source.identity() == target.identity() {
-        return Err(EffectStateMigrationEdgeErrorV1::UnchangedIdentity);
+        return Err(EffectStateMigrationEdgeError::UnchangedIdentity);
     }
     if source_descriptor.id != target_descriptor.id
         || source_descriptor.contract_major != target_descriptor.contract_major
         || source_descriptor.contract_minor != target_descriptor.contract_minor
     {
-        return Err(EffectStateMigrationEdgeErrorV1::EffectOrContractMismatch);
+        return Err(EffectStateMigrationEdgeError::EffectOrContractMismatch);
     }
     if source_descriptor.display_name != target_descriptor.display_name
         || source_descriptor.supported_link_modes != target_descriptor.supported_link_modes
@@ -321,18 +321,18 @@ pub fn bind_effect_state_migration_edge_v1<'wire>(
         || source_descriptor.ports != target_descriptor.ports
         || !qualities_compatible(source_descriptor, target_descriptor)
     {
-        return Err(EffectStateMigrationEdgeErrorV1::IncompatibleReplayDescriptor);
+        return Err(EffectStateMigrationEdgeError::IncompatibleReplayDescriptor);
     }
-    Ok(BoundEffectStateMigrationEdgeV1 {
+    Ok(BoundEffectStateMigrationEdge {
         source,
         target,
-        source_selector: effect_state_bound_selector_v1(source),
-        target_selector: effect_state_bound_selector_v1(target),
+        source_selector: effect_state_bound_selector(source),
+        target_selector: effect_state_bound_selector(target),
     })
 }
 
 fn parameter_value_valid(
-    parameter: &miso_engine_effect_contract::ParameterDescriptorV1,
+    parameter: &miso_engine_effect_contract::ParameterDescriptor,
     value: f32,
 ) -> bool {
     if !value.is_finite() || value.to_bits() == (-0.0f32).to_bits() {
@@ -352,7 +352,7 @@ fn parameter_value_valid(
 }
 
 fn validate_initial_values_no_alloc(
-    descriptor: &'static EffectDescriptorV1,
+    descriptor: &'static EffectDescriptor,
     values: &[InitialParameterValue],
 ) -> Result<(), Diagnostic> {
     let mut cursor = 0usize;
@@ -383,7 +383,7 @@ fn validate_initial_values_no_alloc(
 }
 
 fn derive_expected_metadata_without_revalidation(
-    descriptor: &'static EffectDescriptorV1,
+    descriptor: &'static EffectDescriptor,
     request: PrepareEffectRequest<'_>,
 ) -> Result<PreparedEffectMetadata, Diagnostic> {
     if !is_launch_sample_rate(SampleRateHz(request.sample_rate)) {
@@ -474,8 +474,8 @@ fn validate_request_limits(
 }
 
 fn validate_replay(
-    bound: BoundEffectDescriptorWireV1<'_>,
-    replay: EffectStateReplayViewV1<'_>,
+    bound: BoundEffectDescriptorWire<'_>,
+    replay: EffectStateReplayView<'_>,
 ) -> Result<PreparedEffectMetadata, Diagnostic> {
     let descriptor = bound.descriptor();
     if replay.effect_id != descriptor.id {
@@ -487,24 +487,24 @@ fn validate_replay(
     Ok(expected)
 }
 
-pub fn effect_state_expected_metadata_v1(
-    bound: BoundEffectDescriptorWireV1<'_>,
-    replay: EffectStateReplayViewV1<'_>,
+pub fn effect_state_expected_metadata(
+    bound: BoundEffectDescriptorWire<'_>,
+    replay: EffectStateReplayView<'_>,
 ) -> Result<PreparedEffectMetadata, Diagnostic> {
     validate_replay(bound, replay)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct EffectStateDerivedResourcesV1 {
+pub struct EffectStateDerivedResources {
     pub state_sizes: StatePayloadSizes,
     pub scratch_bytes: u64,
     pub automation_capacity: u32,
 }
 
-pub fn effect_state_derived_resources_v1(
-    bound: BoundEffectDescriptorWireV1<'_>,
+pub fn effect_state_derived_resources(
+    bound: BoundEffectDescriptorWire<'_>,
     request: PrepareEffectRequest<'_>,
-) -> Result<EffectStateDerivedResourcesV1, Diagnostic> {
+) -> Result<EffectStateDerivedResources, Diagnostic> {
     if !is_launch_sample_rate(SampleRateHz(request.sample_rate)) {
         return Err(metadata_mismatch(4));
     }
@@ -527,16 +527,16 @@ pub fn effect_state_derived_resources_v1(
         .ok_or_else(|| overflow(176))?;
     checked_usize(state_bytes, 216)?;
     checked_usize(scratch_bytes, 176)?;
-    Ok(EffectStateDerivedResourcesV1 {
+    Ok(EffectStateDerivedResources {
         state_sizes: quality.maximum_state,
         scratch_bytes,
         automation_capacity: request.limits.maximum_automation_spans_per_block,
     })
 }
 
-pub fn validate_effect_state_metadata_v1(
-    bound: BoundEffectDescriptorWireV1<'_>,
-    replay: EffectStateReplayViewV1<'_>,
+pub fn validate_effect_state_metadata(
+    bound: BoundEffectDescriptorWire<'_>,
+    replay: EffectStateReplayView<'_>,
     actual: PreparedEffectMetadata,
 ) -> Result<(), Diagnostic> {
     let descriptor = bound.descriptor();
@@ -580,9 +580,9 @@ pub fn validate_effect_state_metadata_v1(
 }
 
 fn authoring_layout(
-    bound: BoundEffectDescriptorWireV1<'_>,
-    replay: EffectStateReplayViewV1<'_>,
-    limits: EffectStateLimitsV1,
+    bound: BoundEffectDescriptorWire<'_>,
+    replay: EffectStateReplayView<'_>,
+    limits: EffectStateLimits,
 ) -> Result<(Layout, PreparedEffectMetadata), Diagnostic> {
     validate_limits(limits)?;
     let descriptor_bytes = u64::try_from(bound.wire().len()).map_err(|_| overflow(0))?;
@@ -637,13 +637,13 @@ fn authoring_layout(
     ))
 }
 
-pub fn effect_state_v1_requirements(
-    bound: BoundEffectDescriptorWireV1<'_>,
-    replay: EffectStateReplayViewV1<'_>,
-    limits: EffectStateLimitsV1,
-) -> Result<EffectStateRequirementsV1, Diagnostic> {
+pub fn effect_state_requirements(
+    bound: BoundEffectDescriptorWire<'_>,
+    replay: EffectStateReplayView<'_>,
+    limits: EffectStateLimits,
+) -> Result<EffectStateRequirements, Diagnostic> {
     let (layout, metadata) = authoring_layout(bound, replay, limits)?;
-    Ok(EffectStateRequirementsV1 {
+    Ok(EffectStateRequirements {
         envelope_bytes: u64::try_from(layout.total).map_err(|_| overflow(16))?,
         payload_snapshot_scratch_bytes: metadata
             .state_sizes
@@ -676,13 +676,13 @@ fn state_digest(bytes: &[u8]) -> [u8; 32] {
     hasher.finalize().into()
 }
 
-pub fn encode_effect_state_v1(
-    bound: BoundEffectDescriptorWireV1<'_>,
-    replay: EffectStateReplayViewV1<'_>,
+pub fn encode_effect_state(
+    bound: BoundEffectDescriptorWire<'_>,
+    replay: EffectStateReplayView<'_>,
     common: &[u8],
     left: &[u8],
     right: &[u8],
-    limits: EffectStateLimitsV1,
+    limits: EffectStateLimits,
     output: &mut [u8],
 ) -> Result<u64, Diagnostic> {
     let (layout, metadata) = authoring_layout(bound, replay, limits)?;
@@ -695,7 +695,7 @@ pub fn encode_effect_state_v1(
     }
     if output.len() < layout.total {
         return Err(Diagnostic::buffer_too_small(
-            EFFECT_STATE_V1_BUFFER_ENVELOPE_OUTPUT,
+            EFFECT_STATE_BUFFER_ENVELOPE_OUTPUT,
             layout.total as u64,
         ));
     }
@@ -789,9 +789,9 @@ fn valid_id(value: &str) -> bool {
 }
 
 #[derive(Clone, Copy, Debug)]
-struct ParsedEffectStateV1<'a> {
+struct ParsedEffectState<'a> {
     bytes: &'a [u8],
-    descriptor_identity: EffectDescriptorIdentityV1,
+    descriptor_identity: EffectDescriptorIdentity,
     effect_id: &'a str,
     sidechain_id: &'a str,
     contract_major: u16,
@@ -820,9 +820,9 @@ struct ParsedEffectStateV1<'a> {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct VerifiedEffectStateV1<'a> {
+pub struct VerifiedEffectState<'a> {
     bytes: &'a [u8],
-    descriptor_identity: EffectDescriptorIdentityV1,
+    descriptor_identity: EffectDescriptorIdentity,
     effect_id: &'a str,
     sidechain_id: &'a str,
     contract_major: u16,
@@ -848,14 +848,14 @@ pub struct VerifiedEffectStateV1<'a> {
     common_start: usize,
     left_start: usize,
     right_start: usize,
-    bound_descriptor: &'static EffectDescriptorV1,
+    bound_descriptor: &'static EffectDescriptor,
 }
 
-impl<'a> VerifiedEffectStateV1<'a> {
+impl<'a> VerifiedEffectState<'a> {
     pub const fn as_bytes(self) -> &'a [u8] {
         self.bytes
     }
-    pub const fn descriptor_identity(self) -> EffectDescriptorIdentityV1 {
+    pub const fn descriptor_identity(self) -> EffectDescriptorIdentity {
         self.descriptor_identity
     }
     pub const fn effect_id(self) -> &'a str {
@@ -911,8 +911,8 @@ impl<'a> VerifiedEffectStateV1<'a> {
             self.request_maximum_automation_spans_per_block,
         )
     }
-    pub fn initial_values(self) -> EffectStateInitialValuesV1<'a> {
-        EffectStateInitialValuesV1 {
+    pub fn initial_values(self) -> EffectStateInitialValues<'a> {
+        EffectStateInitialValues {
             bytes: self.bytes,
             cursor: 0,
             start: self.initial_start,
@@ -929,14 +929,14 @@ impl<'a> VerifiedEffectStateV1<'a> {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct EffectStateInitialValuesV1<'a> {
+pub struct EffectStateInitialValues<'a> {
     bytes: &'a [u8],
     start: usize,
     cursor: usize,
     count: usize,
 }
 
-impl Iterator for EffectStateInitialValuesV1<'_> {
+impl Iterator for EffectStateInitialValues<'_> {
     type Item = InitialParameterValue;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -959,12 +959,12 @@ impl Iterator for EffectStateInitialValuesV1<'_> {
     }
 }
 
-impl ExactSizeIterator for EffectStateInitialValuesV1<'_> {}
+impl ExactSizeIterator for EffectStateInitialValues<'_> {}
 
-fn parse_effect_state_structure_v1<'a>(
+fn parse_effect_state_structure<'a>(
     bytes: &'a [u8],
-    limits: EffectStateLimitsV1,
-) -> Result<ParsedEffectStateV1<'a>, Diagnostic> {
+    limits: EffectStateLimits,
+) -> Result<ParsedEffectState<'a>, Diagnostic> {
     let byte_length = u64::try_from(bytes.len()).map_err(|_| overflow(16))?;
     if byte_length > limits.maximum_envelope_bytes {
         return Err(limit(byte_length));
@@ -1132,8 +1132,8 @@ fn parse_effect_state_structure_v1<'a>(
 
     let mut identity = [0; 32];
     identity.copy_from_slice(&bytes[24..56]);
-    let descriptor_identity = EffectDescriptorIdentityV1::from_bytes(identity);
-    Ok(ParsedEffectStateV1 {
+    let descriptor_identity = EffectDescriptorIdentity::from_bytes(identity);
+    Ok(ParsedEffectState {
         bytes,
         descriptor_identity,
         effect_id,
@@ -1168,14 +1168,14 @@ fn parse_effect_state_structure_v1<'a>(
     })
 }
 
-fn bind_parsed_effect_state_v1<'a>(
-    parsed: ParsedEffectStateV1<'a>,
-    bound: BoundEffectDescriptorWireV1<'_>,
-) -> Result<VerifiedEffectStateV1<'a>, Diagnostic> {
+fn bind_parsed_effect_state<'a>(
+    parsed: ParsedEffectState<'a>,
+    bound: BoundEffectDescriptorWire<'_>,
+) -> Result<VerifiedEffectState<'a>, Diagnostic> {
     if parsed.descriptor_identity != bound.identity() {
         return Err(unavailable(Code::Descriptor, 3 << 16));
     }
-    Ok(VerifiedEffectStateV1 {
+    Ok(VerifiedEffectState {
         bytes: parsed.bytes,
         descriptor_identity: parsed.descriptor_identity,
         effect_id: parsed.effect_id,
@@ -1209,8 +1209,8 @@ fn bind_parsed_effect_state_v1<'a>(
 }
 
 fn validate_verified_initial_values(
-    state: VerifiedEffectStateV1<'_>,
-    descriptor: &'static EffectDescriptorV1,
+    state: VerifiedEffectState<'_>,
+    descriptor: &'static EffectDescriptor,
 ) -> Result<(), Diagnostic> {
     let mut values = state.initial_values();
     let mut item_index = 0usize;
@@ -1260,8 +1260,8 @@ fn validate_verified_initial_values(
     Ok(())
 }
 
-pub fn validate_effect_state_current_layout_v1(
-    state: VerifiedEffectStateV1<'_>,
+pub fn validate_effect_state_current_layout(
+    state: VerifiedEffectState<'_>,
 ) -> Result<(), Diagnostic> {
     let descriptor = state.bound_descriptor;
     if state.effect_id != descriptor.id.as_str() {
@@ -1346,9 +1346,9 @@ pub fn validate_effect_state_current_layout_v1(
     validate_verified_initial_values(state, descriptor)
 }
 
-pub fn validate_effect_state_replay_v1(
-    state: VerifiedEffectStateV1<'_>,
-    replay: EffectStateReplayViewV1<'_>,
+pub fn validate_effect_state_replay(
+    state: VerifiedEffectState<'_>,
+    replay: EffectStateReplayView<'_>,
 ) -> Result<(), Diagnostic> {
     let descriptor = state.bound_descriptor;
     if replay.effect_id != descriptor.id || state.effect_id != descriptor.id.as_str() {
@@ -1429,9 +1429,9 @@ pub fn validate_effect_state_replay_v1(
     validate_verified_initial_values(state, descriptor)
 }
 
-pub fn validate_effect_state_replay_configuration_v1(
-    state: VerifiedEffectStateV1<'_>,
-    replay: EffectStateReplayViewV1<'_>,
+pub fn validate_effect_state_replay_configuration(
+    state: VerifiedEffectState<'_>,
+    replay: EffectStateReplayView<'_>,
 ) -> Result<(), Diagnostic> {
     let descriptor = state.bound_descriptor;
     if replay.effect_id != descriptor.id || state.effect_id != descriptor.id.as_str() {
@@ -1491,10 +1491,10 @@ pub fn validate_effect_state_replay_configuration_v1(
     Ok(())
 }
 
-pub fn effect_state_replay_view_from_verified_v1<'initial>(
-    state: VerifiedEffectStateV1<'_>,
+pub fn effect_state_replay_view_from_verified<'initial>(
+    state: VerifiedEffectState<'_>,
     initial_values: &'initial [InitialParameterValue],
-) -> Result<EffectStateReplayViewV1<'initial>, Diagnostic> {
+) -> Result<EffectStateReplayView<'initial>, Diagnostic> {
     let descriptor = state.bound_descriptor;
     let (kind, id, required) = state.sidechain();
     let sidechain = match kind {
@@ -1525,7 +1525,7 @@ pub fn effect_state_replay_view_from_verified_v1<'initial>(
     };
     let (maximum_total_state_bytes, maximum_scratch_bytes, maximum_automation_spans_per_block) =
         state.request_limits();
-    let replay = EffectStateReplayViewV1 {
+    let replay = EffectStateReplayView {
         effect_id: descriptor.id,
         request: PrepareEffectRequest {
             sample_rate: state.sample_rate,
@@ -1533,7 +1533,7 @@ pub fn effect_state_replay_view_from_verified_v1<'initial>(
             quality: state.quality,
             bypass: state.bypass,
             link_mode: state.link_mode,
-            ports: PreparedPortsV1 { sidechain },
+            ports: PreparedPorts { sidechain },
             initial_values,
             limits: miso_engine_effect_contract::PrepareEffectLimits {
                 maximum_total_state_bytes,
@@ -1542,31 +1542,31 @@ pub fn effect_state_replay_view_from_verified_v1<'initial>(
             },
         },
     };
-    validate_effect_state_replay_configuration_v1(state, replay)?;
+    validate_effect_state_replay_configuration(state, replay)?;
     Ok(replay)
 }
 
-pub fn inspect_effect_state_selector_v1(
+pub fn inspect_effect_state_selector(
     bytes: &[u8],
-    limits: EffectStateLimitsV1,
-) -> Result<EffectStateSelectorV1, Diagnostic> {
+    limits: EffectStateLimits,
+) -> Result<EffectStateSelector, Diagnostic> {
     validate_limits(limits)?;
-    let parsed = parse_effect_state_structure_v1(bytes, limits)?;
-    Ok(EffectStateSelectorV1 {
+    let parsed = parse_effect_state_structure(bytes, limits)?;
+    Ok(EffectStateSelector {
         descriptor_identity: parsed.descriptor_identity,
         state_layout_version: parsed.state_layout_version,
     })
 }
 
-pub fn verify_effect_state_v1<'a>(
-    bound: BoundEffectDescriptorWireV1<'_>,
+pub fn verify_effect_state<'a>(
+    bound: BoundEffectDescriptorWire<'_>,
     bytes: &'a [u8],
-    limits: EffectStateLimitsV1,
-) -> Result<VerifiedEffectStateV1<'a>, Diagnostic> {
+    limits: EffectStateLimits,
+) -> Result<VerifiedEffectState<'a>, Diagnostic> {
     validate_limits(limits)?;
     let descriptor_bytes = u64::try_from(bound.wire().len()).map_err(|_| overflow(0))?;
     if descriptor_bytes > limits.maximum_descriptor_bytes {
         return Err(limit(descriptor_bytes));
     }
-    bind_parsed_effect_state_v1(parse_effect_state_structure_v1(bytes, limits)?, bound)
+    bind_parsed_effect_state(parse_effect_state_structure(bytes, limits)?, bound)
 }

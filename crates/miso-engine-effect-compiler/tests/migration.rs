@@ -23,7 +23,7 @@ const fn port_id(value: &'static str) -> PortId {
     }
 }
 
-static PARAMETERS: [ParameterDescriptorV1; 1] = [ParameterDescriptorV1 {
+static PARAMETERS: [ParameterDescriptor; 1] = [ParameterDescriptor {
     id: ParameterId(1),
     display_name: "Value",
     display_unit: "linear",
@@ -42,14 +42,14 @@ static PARAMETERS: [ParameterDescriptorV1; 1] = [ParameterDescriptorV1 {
     enum_choices: &[],
 }];
 
-static PORTS: [PortDescriptorV1; 2] = [
-    PortDescriptorV1 {
+static PORTS: [PortDescriptor; 2] = [
+    PortDescriptor {
         id: port_id("main-in"),
         role: PortRole::MainInput,
         required: true,
         layout: PortLayout::DualMonoPlanar,
     },
-    PortDescriptorV1 {
+    PortDescriptor {
         id: port_id("main-out"),
         role: PortRole::MainOutput,
         required: true,
@@ -65,8 +65,8 @@ const fn sizes(common: u32, lane: u32) -> StatePayloadSizes {
     }
 }
 
-const fn quality(sample_rate: u32, maximum_state: StatePayloadSizes) -> QualityDescriptorV1 {
-    QualityDescriptorV1 {
+const fn quality(sample_rate: u32, maximum_state: StatePayloadSizes) -> QualityDescriptor {
+    QualityDescriptor {
         quality: EffectQuality::Normal,
         sample_rate,
         latency: LatencySamples(0),
@@ -77,32 +77,32 @@ const fn quality(sample_rate: u32, maximum_state: StatePayloadSizes) -> QualityD
     }
 }
 
-static QUALITIES_V1: [QualityDescriptorV1; 4] = [
+static QUALITIES_V1: [QualityDescriptor; 4] = [
     quality(44_100, sizes(1, 2)),
     quality(48_000, sizes(1, 2)),
     quality(88_200, sizes(1, 2)),
     quality(96_000, sizes(1, 2)),
 ];
-static QUALITIES_V2: [QualityDescriptorV1; 4] = [
+static QUALITIES_V2: [QualityDescriptor; 4] = [
     quality(44_100, sizes(2, 3)),
     quality(48_000, sizes(2, 3)),
     quality(88_200, sizes(2, 3)),
     quality(96_000, sizes(2, 3)),
 ];
-static QUALITIES_V3: [QualityDescriptorV1; 4] = [
+static QUALITIES_V3: [QualityDescriptor; 4] = [
     quality(44_100, sizes(3, 4)),
     quality(48_000, sizes(3, 4)),
     quality(88_200, sizes(3, 4)),
     quality(96_000, sizes(3, 4)),
 ];
-static QUALITIES_ALT_V3: [QualityDescriptorV1; 4] = [
+static QUALITIES_ALT_V3: [QualityDescriptor; 4] = [
     quality(44_100, sizes(4, 5)),
     quality(48_000, sizes(4, 5)),
     quality(88_200, sizes(4, 5)),
     quality(96_000, sizes(4, 5)),
 ];
 
-static DESCRIPTOR_V1: EffectDescriptorV1 = EffectDescriptorV1 {
+static DESCRIPTOR_V1: EffectDescriptor = EffectDescriptor {
     id: effect_id("test.migration"),
     display_name: "Migration",
     contract_major: 1,
@@ -114,22 +114,22 @@ static DESCRIPTOR_V1: EffectDescriptorV1 = EffectDescriptorV1 {
     qualities: &QUALITIES_V1,
     observations: &[],
 };
-static DESCRIPTOR_V2: EffectDescriptorV1 = EffectDescriptorV1 {
+static DESCRIPTOR_V2: EffectDescriptor = EffectDescriptor {
     state_layout_version: 2,
     qualities: &QUALITIES_V2,
     ..DESCRIPTOR_V1
 };
-static DESCRIPTOR_V3: EffectDescriptorV1 = EffectDescriptorV1 {
+static DESCRIPTOR_V3: EffectDescriptor = EffectDescriptor {
     state_layout_version: 3,
     qualities: &QUALITIES_V3,
     ..DESCRIPTOR_V1
 };
-static DESCRIPTOR_V3_CLONE: EffectDescriptorV1 = EffectDescriptorV1 {
+static DESCRIPTOR_V3_CLONE: EffectDescriptor = EffectDescriptor {
     state_layout_version: 3,
     qualities: &QUALITIES_V3,
     ..DESCRIPTOR_V1
 };
-static DESCRIPTOR_ALT_V3: EffectDescriptorV1 = EffectDescriptorV1 {
+static DESCRIPTOR_ALT_V3: EffectDescriptor = EffectDescriptor {
     state_layout_version: 3,
     qualities: &QUALITIES_ALT_V3,
     ..DESCRIPTOR_V1
@@ -141,8 +141,8 @@ static INITIAL: [InitialParameterValue; 1] = [InitialParameterValue {
     value: 0.25,
 }];
 
-fn replay() -> EffectStateReplayViewV1<'static> {
-    EffectStateReplayViewV1 {
+fn replay() -> EffectStateReplayView<'static> {
+    EffectStateReplayView {
         effect_id: DESCRIPTOR_V1.id,
         request: PrepareEffectRequest {
             sample_rate: 48_000,
@@ -150,7 +150,7 @@ fn replay() -> EffectStateReplayViewV1<'static> {
             quality: EffectQuality::Normal,
             bypass: true,
             link_mode: LinkMode::DualMono,
-            ports: PreparedPortsV1 {
+            ports: PreparedPorts {
                 sidechain: PreparedSidechainPort::None,
             },
             initial_values: &INITIAL,
@@ -163,22 +163,22 @@ fn replay() -> EffectStateReplayViewV1<'static> {
     }
 }
 
-fn descriptor_wire(descriptor: &'static EffectDescriptorV1) -> &'static [u8] {
-    let required = effect_descriptor_wire_v1_required_size(descriptor, 1 << 20).unwrap();
+fn descriptor_wire(descriptor: &'static EffectDescriptor) -> &'static [u8] {
+    let required = effect_descriptor_wire_required_size(descriptor, 1 << 20).unwrap();
     let mut wire = vec![0; required as usize];
-    encode_effect_descriptor_wire_v1(descriptor, 1 << 20, &mut wire).unwrap();
+    encode_effect_descriptor_wire(descriptor, 1 << 20, &mut wire).unwrap();
     Box::leak(wire.into_boxed_slice())
 }
 
-fn bound(descriptor: &'static EffectDescriptorV1) -> BoundEffectDescriptorWireV1<'static> {
+fn bound(descriptor: &'static EffectDescriptor) -> BoundEffectDescriptorWire<'static> {
     let wire = descriptor_wire(descriptor);
-    bind_effect_descriptor_wire_v1(descriptor, wire, 1 << 20).unwrap()
+    bind_effect_descriptor_wire(descriptor, wire, 1 << 20).unwrap()
 }
 
-fn envelope(bound: BoundEffectDescriptorWireV1<'_>) -> Vec<u8> {
+fn envelope(bound: BoundEffectDescriptorWire<'_>) -> Vec<u8> {
     let requirements =
-        effect_state_v1_requirements(bound, replay(), EffectStateLimitsV1::default()).unwrap();
-    let metadata = effect_state_expected_metadata_v1(bound, replay()).unwrap();
+        effect_state_requirements(bound, replay(), EffectStateLimits::default()).unwrap();
+    let metadata = effect_state_expected_metadata(bound, replay()).unwrap();
     let mut common = vec![0x11; metadata.state_sizes.common_bytes as usize];
     let mut left = vec![0x22; metadata.state_sizes.left_bytes as usize];
     let mut right = vec![0x33; metadata.state_sizes.right_bytes as usize];
@@ -192,13 +192,13 @@ fn envelope(bound: BoundEffectDescriptorWireV1<'_>) -> Vec<u8> {
         *first = 0x61;
     }
     let mut output = vec![0; requirements.envelope_bytes as usize];
-    encode_effect_state_v1(
+    encode_effect_state(
         bound,
         replay(),
         &common,
         &left,
         &right,
-        EffectStateLimitsV1::default(),
+        EffectStateLimits::default(),
         &mut output,
     )
     .unwrap();
@@ -212,12 +212,12 @@ struct FactoryCalls {
 }
 
 struct MockFactory {
-    descriptor: &'static EffectDescriptorV1,
+    descriptor: &'static EffectDescriptor,
     calls: Arc<FactoryCalls>,
 }
 
 impl NativeEffectFactory for MockFactory {
-    fn descriptor(&self) -> &'static EffectDescriptorV1 {
+    fn descriptor(&self) -> &'static EffectDescriptor {
         self.descriptor
     }
 
@@ -243,11 +243,11 @@ impl NativeEffectFactory for MockFactory {
 }
 
 fn factory_capability(
-    descriptor: &'static EffectDescriptorV1,
+    descriptor: &'static EffectDescriptor,
     calls: Arc<FactoryCalls>,
-) -> WireBoundNativeEffectFactoryV1<'static> {
+) -> WireBoundNativeEffectFactory<'static> {
     let wire = descriptor_wire(descriptor);
-    bind_native_effect_factory_state_v1(Arc::new(MockFactory { descriptor, calls }), wire, 1 << 20)
+    bind_native_effect_factory_state(Arc::new(MockFactory { descriptor, calls }), wire, 1 << 20)
         .unwrap()
 }
 
@@ -262,7 +262,7 @@ struct MockStep {
     calls: Arc<StepCalls>,
 }
 
-impl EffectStateMigrationStepV1 for MockStep {
+impl EffectStateMigrationStep for MockStep {
     fn scratch_bytes(&self) -> u64 {
         self.calls.scratch.fetch_add(1, Ordering::SeqCst);
         self.scratch_bytes
@@ -275,19 +275,19 @@ impl EffectStateMigrationStepV1 for MockStep {
         _: StatePayloadInput<'_>,
         _: StatePayloadOutput<'_>,
         _: &mut [u8],
-    ) -> Result<EffectStateMigrationStepReportV1, EffectStateMigrationStepFailureV1> {
+    ) -> Result<EffectStateMigrationStepReport, EffectStateMigrationStepFailure> {
         self.calls.migrate.fetch_add(1, Ordering::SeqCst);
-        Err(EffectStateMigrationStepFailureV1::Rejected)
+        Err(EffectStateMigrationStepFailure::Rejected)
     }
 }
 
 fn registration(
-    source: BoundEffectDescriptorWireV1<'static>,
-    target: BoundEffectDescriptorWireV1<'static>,
+    source: BoundEffectDescriptorWire<'static>,
+    target: BoundEffectDescriptorWire<'static>,
     scratch_bytes: u64,
     calls: Arc<StepCalls>,
-) -> EffectStateMigrationRegistrationV1<'static> {
-    bind_effect_state_migration_registration_v1(
+) -> EffectStateMigrationRegistration<'static> {
+    bind_effect_state_migration_registration(
         source,
         target,
         Arc::new(MockStep {
@@ -297,16 +297,16 @@ fn registration(
     )
 }
 
-const fn migration_admission() -> EffectStateMigrationAdmissionV1 {
-    EffectStateMigrationAdmissionV1 {
+const fn migration_admission() -> EffectStateMigrationAdmission {
+    EffectStateMigrationAdmission {
         maximum_chain_steps: 8,
         maximum_intermediate_envelope_bytes: 1 << 20,
         maximum_migration_scratch_bytes: 1 << 20,
     }
 }
 
-const fn restore_admission() -> EffectStateRestoreAdmissionV1 {
-    EffectStateRestoreAdmissionV1 {
+const fn restore_admission() -> EffectStateRestoreAdmission {
+    EffectStateRestoreAdmission {
         sample_rate: 48_000,
         quantum: 32,
         maximum_total_state_bytes: 64,
@@ -317,42 +317,42 @@ const fn restore_admission() -> EffectStateRestoreAdmissionV1 {
 
 #[test]
 fn diagnostics_and_step_report_layouts_are_exact() {
-    assert_eq!(core::mem::size_of::<EffectStateMigrationDiagnosticV1>(), 56);
-    assert_eq!(core::mem::align_of::<EffectStateMigrationDiagnosticV1>(), 8);
+    assert_eq!(core::mem::size_of::<EffectStateMigrationDiagnostic>(), 56);
+    assert_eq!(core::mem::align_of::<EffectStateMigrationDiagnostic>(), 8);
     assert_eq!(
-        core::mem::offset_of!(EffectStateMigrationDiagnosticV1, code),
+        core::mem::offset_of!(EffectStateMigrationDiagnostic, code),
         0
     );
     assert_eq!(
-        core::mem::offset_of!(EffectStateMigrationDiagnosticV1, detail),
+        core::mem::offset_of!(EffectStateMigrationDiagnostic, detail),
         4
     );
     assert_eq!(
-        core::mem::offset_of!(EffectStateMigrationDiagnosticV1, item_index),
+        core::mem::offset_of!(EffectStateMigrationDiagnostic, item_index),
         8
     );
     assert_eq!(
-        core::mem::offset_of!(EffectStateMigrationDiagnosticV1, reserved),
+        core::mem::offset_of!(EffectStateMigrationDiagnostic, reserved),
         12
     );
     assert_eq!(
-        core::mem::offset_of!(EffectStateMigrationDiagnosticV1, required_bytes),
+        core::mem::offset_of!(EffectStateMigrationDiagnostic, required_bytes),
         16
     );
     assert_eq!(
-        core::mem::offset_of!(EffectStateMigrationDiagnosticV1, nested_state),
+        core::mem::offset_of!(EffectStateMigrationDiagnostic, nested_state),
         24
     );
-    assert_eq!(core::mem::size_of::<EffectStateMigrationStepReportV1>(), 16);
-    let ok = EffectStateMigrationDiagnosticV1::ok();
-    assert_eq!(ok.nested_state.code, EffectStateDiagnosticCodeV1::Ok);
+    assert_eq!(core::mem::size_of::<EffectStateMigrationStepReport>(), 16);
+    let ok = EffectStateMigrationDiagnostic::ok();
+    assert_eq!(ok.nested_state.code, EffectStateDiagnosticCode::Ok);
     assert_eq!(
         ok.nested_state.item_index,
-        EFFECT_STATE_V1_UNAVAILABLE_INDEX
+        EFFECT_STATE_UNAVAILABLE_INDEX
     );
     assert_eq!(
         ok.nested_state.byte_offset,
-        EFFECT_STATE_V1_UNAVAILABLE_OFFSET
+        EFFECT_STATE_UNAVAILABLE_OFFSET
     );
     assert_eq!(ok.reserved, 0);
 }
@@ -368,13 +368,13 @@ fn zero_one_and_two_step_resolution_have_exact_workspace_and_zero_hooks() {
     let factory_calls = Arc::new(FactoryCalls::default());
     let current = factory_capability(&DESCRIPTOR_V3, Arc::clone(&factory_calls));
 
-    let empty = StateMigrationRegistryV1::new(0, Box::new([])).unwrap();
-    let zero = resolve_effect_state_migration_v1(
+    let empty = StateMigrationRegistry::new(0, Box::new([])).unwrap();
+    let zero = resolve_effect_state_migration(
         &empty,
         &current,
         &current_envelope,
-        EffectStateLimitsV1::default(),
-        EffectStateMigrationAdmissionV1 {
+        EffectStateLimits::default(),
+        EffectStateMigrationAdmission {
             maximum_chain_steps: 0,
             maximum_intermediate_envelope_bytes: 0,
             maximum_migration_scratch_bytes: 0,
@@ -384,7 +384,7 @@ fn zero_one_and_two_step_resolution_have_exact_workspace_and_zero_hooks() {
     .unwrap();
     assert_eq!(
         zero.requirements(),
-        EffectStateMigrationWorkspaceRequirementsV1 {
+        EffectStateMigrationWorkspaceRequirements {
             chain_step_count: 0,
             first_envelope_bytes: 0,
             second_envelope_bytes: 0,
@@ -396,22 +396,22 @@ fn zero_one_and_two_step_resolution_have_exact_workspace_and_zero_hooks() {
     );
 
     let one_calls = Arc::new(StepCalls::default());
-    let one_registry = StateMigrationRegistryV1::new(
+    let one_registry = StateMigrationRegistry::new(
         1,
         vec![registration(v2, v3, 7, Arc::clone(&one_calls))].into_boxed_slice(),
     )
     .unwrap();
-    let one = resolve_effect_state_migration_v1(
+    let one = resolve_effect_state_migration(
         &one_registry,
         &current,
         &v2_envelope,
-        EffectStateLimitsV1::default(),
+        EffectStateLimits::default(),
         migration_admission(),
         restore_admission(),
     )
     .unwrap();
     let v3_requirements =
-        effect_state_v1_requirements(v3, replay(), EffectStateLimitsV1::default()).unwrap();
+        effect_state_requirements(v3, replay(), EffectStateLimits::default()).unwrap();
     assert_eq!(one.chain_step_count(), 1);
     assert_eq!(
         one.requirements().first_envelope_bytes,
@@ -425,7 +425,7 @@ fn zero_one_and_two_step_resolution_have_exact_workspace_and_zero_hooks() {
 
     let first_calls = Arc::new(StepCalls::default());
     let second_calls = Arc::new(StepCalls::default());
-    let two_registry = StateMigrationRegistryV1::new(
+    let two_registry = StateMigrationRegistry::new(
         2,
         vec![
             registration(v1, v2, 5, Arc::clone(&first_calls)),
@@ -434,17 +434,17 @@ fn zero_one_and_two_step_resolution_have_exact_workspace_and_zero_hooks() {
         .into_boxed_slice(),
     )
     .unwrap();
-    let two = resolve_effect_state_migration_v1(
+    let two = resolve_effect_state_migration(
         &two_registry,
         &current,
         &v1_envelope,
-        EffectStateLimitsV1::default(),
+        EffectStateLimits::default(),
         migration_admission(),
         restore_admission(),
     )
     .unwrap();
     let v2_requirements =
-        effect_state_v1_requirements(v2, replay(), EffectStateLimitsV1::default()).unwrap();
+        effect_state_requirements(v2, replay(), EffectStateLimits::default()).unwrap();
     assert_eq!(two.chain_step_count(), 2);
     assert_eq!(
         two.requirements().first_envelope_bytes,
@@ -469,8 +469,8 @@ fn zero_one_and_two_step_resolution_have_exact_workspace_and_zero_hooks() {
 }
 
 fn assert_outer(
-    diagnostic: EffectStateMigrationDiagnosticV1,
-    code: EffectStateMigrationDiagnosticCodeV1,
+    diagnostic: EffectStateMigrationDiagnostic,
+    code: EffectStateMigrationDiagnosticCode,
     detail: u32,
     item_index: u32,
     required_bytes: u64,
@@ -487,11 +487,11 @@ fn assert_outer(
     );
     if !matches!(
         code,
-        EffectStateMigrationDiagnosticCodeV1::State | EffectStateMigrationDiagnosticCodeV1::Restore
+        EffectStateMigrationDiagnosticCode::State | EffectStateMigrationDiagnosticCode::Restore
     ) {
         assert_eq!(
             diagnostic.nested_state,
-            EffectStateMigrationDiagnosticV1::ok().nested_state
+            EffectStateMigrationDiagnostic::ok().nested_state
         );
     }
 }
@@ -502,9 +502,9 @@ fn registry_rejects_edges_duplicates_caps_and_host_overflow_in_order() {
     let v2 = bound(&DESCRIPTOR_V2);
     let v3 = bound(&DESCRIPTOR_V3);
     let calls = Arc::new(StepCalls::default());
-    let error = StateMigrationRegistryV1::new(
+    let error = StateMigrationRegistry::new(
         1,
-        vec![bind_effect_state_migration_registration_v1(
+        vec![bind_effect_state_migration_registration(
             v1,
             v3,
             Arc::new(MockStep {
@@ -517,14 +517,14 @@ fn registry_rejects_edges_duplicates_caps_and_host_overflow_in_order() {
     .unwrap_err();
     assert_outer(
         error,
-        EffectStateMigrationDiagnosticCodeV1::Registry,
+        EffectStateMigrationDiagnosticCode::Registry,
         1,
         0,
         0,
     );
     assert_eq!(calls.scratch.load(Ordering::SeqCst), 0);
 
-    let malformed_later = bind_effect_state_migration_registration_v1(
+    let malformed_later = bind_effect_state_migration_registration(
         v1,
         v3,
         Arc::new(MockStep {
@@ -532,7 +532,7 @@ fn registry_rejects_edges_duplicates_caps_and_host_overflow_in_order() {
             calls: Arc::new(StepCalls::default()),
         }),
     );
-    let error = StateMigrationRegistryV1::new(
+    let error = StateMigrationRegistry::new(
         2,
         vec![
             registration(v1, v2, 0, Arc::new(StepCalls::default())),
@@ -543,17 +543,17 @@ fn registry_rejects_edges_duplicates_caps_and_host_overflow_in_order() {
     .unwrap_err();
     assert_outer(
         error,
-        EffectStateMigrationDiagnosticCodeV1::Registry,
+        EffectStateMigrationDiagnosticCode::Registry,
         1,
         1,
         0,
     );
 
-    let error = StateMigrationRegistryV1::new(
+    let error = StateMigrationRegistry::new(
         1,
         vec![
             registration(v1, v2, 0, Arc::new(StepCalls::default())),
-            bind_effect_state_migration_registration_v1(
+            bind_effect_state_migration_registration(
                 v1,
                 v3,
                 Arc::new(MockStep {
@@ -567,27 +567,27 @@ fn registry_rejects_edges_duplicates_caps_and_host_overflow_in_order() {
     .unwrap_err();
     assert_outer(
         error,
-        EffectStateMigrationDiagnosticCodeV1::Limit,
+        EffectStateMigrationDiagnosticCode::Limit,
         1,
-        EFFECT_STATE_MIGRATION_V1_UNAVAILABLE_INDEX,
+        EFFECT_STATE_MIGRATION_UNAVAILABLE_INDEX,
         2,
     );
 
     let entry_calls = Arc::new(StepCalls::default());
-    let error = StateMigrationRegistryV1::new(
+    let error = StateMigrationRegistry::new(
         0,
         vec![registration(v1, v2, 0, Arc::clone(&entry_calls))].into_boxed_slice(),
     )
     .unwrap_err();
     assert_outer(
         error,
-        EffectStateMigrationDiagnosticCodeV1::Limit,
+        EffectStateMigrationDiagnosticCode::Limit,
         1,
-        EFFECT_STATE_MIGRATION_V1_UNAVAILABLE_INDEX,
+        EFFECT_STATE_MIGRATION_UNAVAILABLE_INDEX,
         1,
     );
 
-    let error = StateMigrationRegistryV1::new(
+    let error = StateMigrationRegistry::new(
         2,
         vec![
             registration(v1, v2, 0, Arc::new(StepCalls::default())),
@@ -598,13 +598,13 @@ fn registry_rejects_edges_duplicates_caps_and_host_overflow_in_order() {
     .unwrap_err();
     assert_outer(
         error,
-        EffectStateMigrationDiagnosticCodeV1::Registry,
+        EffectStateMigrationDiagnosticCode::Registry,
         5,
         1,
         0,
     );
 
-    let error = StateMigrationRegistryV1::new(
+    let error = StateMigrationRegistry::new(
         1,
         vec![registration(
             v2,
@@ -617,7 +617,7 @@ fn registry_rejects_edges_duplicates_caps_and_host_overflow_in_order() {
     .unwrap_err();
     assert_outer(
         error,
-        EffectStateMigrationDiagnosticCodeV1::Overflow,
+        EffectStateMigrationDiagnosticCode::Overflow,
         1,
         0,
         u64::MAX,
@@ -634,103 +634,103 @@ fn resolution_rejects_missing_downgrade_terminal_caps_and_overflow_exactly() {
     let v3_envelope = envelope(v3);
     let current_calls = Arc::new(FactoryCalls::default());
     let current = factory_capability(&DESCRIPTOR_V3, Arc::clone(&current_calls));
-    let empty = StateMigrationRegistryV1::new(0, Box::new([])).unwrap();
-    let error = resolve_effect_state_migration_v1(
+    let empty = StateMigrationRegistry::new(0, Box::new([])).unwrap();
+    let error = resolve_effect_state_migration(
         &empty,
         &current,
         &v1_envelope,
-        EffectStateLimitsV1::default(),
+        EffectStateLimits::default(),
         migration_admission(),
         restore_admission(),
     )
     .unwrap_err();
-    assert_outer(error, EffectStateMigrationDiagnosticCodeV1::Chain, 1, 0, 0);
+    assert_outer(error, EffectStateMigrationDiagnosticCode::Chain, 1, 0, 0);
 
-    let only_first = StateMigrationRegistryV1::new(
+    let only_first = StateMigrationRegistry::new(
         1,
         vec![registration(v1, v2, 0, Arc::new(StepCalls::default()))].into_boxed_slice(),
     )
     .unwrap();
-    let error = resolve_effect_state_migration_v1(
+    let error = resolve_effect_state_migration(
         &only_first,
         &current,
         &v1_envelope,
-        EffectStateLimitsV1::default(),
+        EffectStateLimits::default(),
         migration_admission(),
         restore_admission(),
     )
     .unwrap_err();
-    assert_outer(error, EffectStateMigrationDiagnosticCodeV1::Chain, 1, 1, 0);
+    assert_outer(error, EffectStateMigrationDiagnosticCode::Chain, 1, 1, 0);
 
-    let error = resolve_effect_state_migration_v1(
+    let error = resolve_effect_state_migration(
         &only_first,
         &current,
         &v1_envelope,
-        EffectStateLimitsV1::default(),
-        EffectStateMigrationAdmissionV1 {
+        EffectStateLimits::default(),
+        EffectStateMigrationAdmission {
             maximum_chain_steps: 1,
             ..migration_admission()
         },
         restore_admission(),
     )
     .unwrap_err();
-    assert_outer(error, EffectStateMigrationDiagnosticCodeV1::Limit, 2, 1, 2);
+    assert_outer(error, EffectStateMigrationDiagnosticCode::Limit, 2, 1, 2);
 
     let old_current = factory_capability(&DESCRIPTOR_V1, Arc::new(FactoryCalls::default()));
-    let error = resolve_effect_state_migration_v1(
+    let error = resolve_effect_state_migration(
         &empty,
         &old_current,
         &v3_envelope,
-        EffectStateLimitsV1::default(),
+        EffectStateLimits::default(),
         migration_admission(),
         restore_admission(),
     )
     .unwrap_err();
     assert_outer(
         error,
-        EffectStateMigrationDiagnosticCodeV1::Chain,
+        EffectStateMigrationDiagnosticCode::Chain,
         2,
-        EFFECT_STATE_MIGRATION_V1_UNAVAILABLE_INDEX,
+        EFFECT_STATE_MIGRATION_UNAVAILABLE_INDEX,
         3,
     );
 
     let alt_v3_envelope = envelope(bound(&DESCRIPTOR_ALT_V3));
-    let error = resolve_effect_state_migration_v1(
+    let error = resolve_effect_state_migration(
         &empty,
         &current,
         &alt_v3_envelope,
-        EffectStateLimitsV1::default(),
+        EffectStateLimits::default(),
         migration_admission(),
         restore_admission(),
     )
     .unwrap_err();
     assert_outer(
         error,
-        EffectStateMigrationDiagnosticCodeV1::Chain,
+        EffectStateMigrationDiagnosticCode::Chain,
         2,
-        EFFECT_STATE_MIGRATION_V1_UNAVAILABLE_INDEX,
+        EFFECT_STATE_MIGRATION_UNAVAILABLE_INDEX,
         3,
     );
 
     let alt_v3 = bound(&DESCRIPTOR_ALT_V3);
-    let wrong_terminal = StateMigrationRegistryV1::new(
+    let wrong_terminal = StateMigrationRegistry::new(
         1,
         vec![registration(v2, alt_v3, 0, Arc::new(StepCalls::default()))].into_boxed_slice(),
     )
     .unwrap();
-    let error = resolve_effect_state_migration_v1(
+    let error = resolve_effect_state_migration(
         &wrong_terminal,
         &current,
         &v2_envelope,
-        EffectStateLimitsV1::default(),
+        EffectStateLimits::default(),
         migration_admission(),
         restore_admission(),
     )
     .unwrap_err();
-    assert_outer(error, EffectStateMigrationDiagnosticCodeV1::Chain, 3, 0, 0);
+    assert_outer(error, EffectStateMigrationDiagnosticCode::Chain, 3, 0, 0);
 
     let clone_v3 = bound(&DESCRIPTOR_V3_CLONE);
-    let wrong_provenance = StateMigrationRegistryV1::new(
+    let wrong_provenance = StateMigrationRegistry::new(
         1,
         vec![registration(
             v2,
@@ -741,18 +741,18 @@ fn resolution_rejects_missing_downgrade_terminal_caps_and_overflow_exactly() {
         .into_boxed_slice(),
     )
     .unwrap();
-    let error = resolve_effect_state_migration_v1(
+    let error = resolve_effect_state_migration(
         &wrong_provenance,
         &current,
         &v2_envelope,
-        EffectStateLimitsV1::default(),
+        EffectStateLimits::default(),
         migration_admission(),
         restore_admission(),
     )
     .unwrap_err();
-    assert_outer(error, EffectStateMigrationDiagnosticCodeV1::Chain, 3, 0, 0);
+    assert_outer(error, EffectStateMigrationDiagnosticCode::Chain, 3, 0, 0);
 
-    let two = StateMigrationRegistryV1::new(
+    let two = StateMigrationRegistry::new(
         2,
         vec![
             registration(v1, v2, 0, Arc::new(StepCalls::default())),
@@ -761,28 +761,28 @@ fn resolution_rejects_missing_downgrade_terminal_caps_and_overflow_exactly() {
         .into_boxed_slice(),
     )
     .unwrap();
-    let error = resolve_effect_state_migration_v1(
+    let error = resolve_effect_state_migration(
         &two,
         &current,
         &v1_envelope,
-        EffectStateLimitsV1::default(),
-        EffectStateMigrationAdmissionV1 {
+        EffectStateLimits::default(),
+        EffectStateMigrationAdmission {
             maximum_chain_steps: 1,
             ..migration_admission()
         },
         restore_admission(),
     )
     .unwrap_err();
-    assert_outer(error, EffectStateMigrationDiagnosticCodeV1::Limit, 2, 1, 2);
+    assert_outer(error, EffectStateMigrationDiagnosticCode::Limit, 2, 1, 2);
 
     let v2_requirements =
-        effect_state_v1_requirements(v2, replay(), EffectStateLimitsV1::default()).unwrap();
-    let error = resolve_effect_state_migration_v1(
+        effect_state_requirements(v2, replay(), EffectStateLimits::default()).unwrap();
+    let error = resolve_effect_state_migration(
         &two,
         &current,
         &v1_envelope,
-        EffectStateLimitsV1::default(),
-        EffectStateMigrationAdmissionV1 {
+        EffectStateLimits::default(),
+        EffectStateMigrationAdmission {
             maximum_intermediate_envelope_bytes: v2_requirements.envelope_bytes - 1,
             ..migration_admission()
         },
@@ -791,18 +791,18 @@ fn resolution_rejects_missing_downgrade_terminal_caps_and_overflow_exactly() {
     .unwrap_err();
     assert_outer(
         error,
-        EffectStateMigrationDiagnosticCodeV1::Limit,
+        EffectStateMigrationDiagnosticCode::Limit,
         3,
         0,
         v2_requirements.envelope_bytes,
     );
 
-    let error = resolve_effect_state_migration_v1(
+    let error = resolve_effect_state_migration(
         &two,
         &current,
         &v1_envelope,
-        EffectStateLimitsV1::default(),
-        EffectStateMigrationAdmissionV1 {
+        EffectStateLimits::default(),
+        EffectStateMigrationAdmission {
             maximum_intermediate_envelope_bytes: v2_requirements.envelope_bytes - 1,
             maximum_migration_scratch_bytes: 0,
             ..migration_admission()
@@ -812,19 +812,19 @@ fn resolution_rejects_missing_downgrade_terminal_caps_and_overflow_exactly() {
     .unwrap_err();
     assert_outer(
         error,
-        EffectStateMigrationDiagnosticCodeV1::Limit,
+        EffectStateMigrationDiagnosticCode::Limit,
         3,
         0,
         v2_requirements.envelope_bytes,
     );
 
     let first_scratch = v2_requirements.payload_snapshot_scratch_bytes;
-    let error = resolve_effect_state_migration_v1(
+    let error = resolve_effect_state_migration(
         &two,
         &current,
         &v1_envelope,
-        EffectStateLimitsV1::default(),
-        EffectStateMigrationAdmissionV1 {
+        EffectStateLimits::default(),
+        EffectStateMigrationAdmission {
             maximum_migration_scratch_bytes: first_scratch - 1,
             ..migration_admission()
         },
@@ -833,13 +833,13 @@ fn resolution_rejects_missing_downgrade_terminal_caps_and_overflow_exactly() {
     .unwrap_err();
     assert_outer(
         error,
-        EffectStateMigrationDiagnosticCodeV1::Limit,
+        EffectStateMigrationDiagnosticCode::Limit,
         4,
         0,
         first_scratch,
     );
 
-    let huge = StateMigrationRegistryV1::new(
+    let huge = StateMigrationRegistry::new(
         1,
         vec![registration(
             v2,
@@ -850,12 +850,12 @@ fn resolution_rejects_missing_downgrade_terminal_caps_and_overflow_exactly() {
         .into_boxed_slice(),
     )
     .unwrap();
-    let error = resolve_effect_state_migration_v1(
+    let error = resolve_effect_state_migration(
         &huge,
         &current,
         &v2_envelope,
-        EffectStateLimitsV1::default(),
-        EffectStateMigrationAdmissionV1 {
+        EffectStateLimits::default(),
+        EffectStateMigrationAdmission {
             maximum_migration_scratch_bytes: isize::MAX as u64,
             ..migration_admission()
         },
@@ -864,7 +864,7 @@ fn resolution_rejects_missing_downgrade_terminal_caps_and_overflow_exactly() {
     .unwrap_err();
     assert_outer(
         error,
-        EffectStateMigrationDiagnosticCodeV1::Overflow,
+        EffectStateMigrationDiagnosticCode::Overflow,
         2,
         0,
         isize::MAX as u64 + sizes(3, 4).total().unwrap(),
@@ -882,7 +882,7 @@ fn nested_state_diagnostics_and_current_admission_are_preserved_without_hooks() 
     malformed[56] ^= 1;
     let current_calls = Arc::new(FactoryCalls::default());
     let current = factory_capability(&DESCRIPTOR_V3, Arc::clone(&current_calls));
-    let registry = StateMigrationRegistryV1::new(
+    let registry = StateMigrationRegistry::new(
         2,
         vec![
             registration(v1, v2, 0, Arc::new(StepCalls::default())),
@@ -892,13 +892,13 @@ fn nested_state_diagnostics_and_current_admission_are_preserved_without_hooks() 
     )
     .unwrap();
     let current_envelope = envelope(v3);
-    let error = resolve_effect_state_migration_v1(
+    let error = resolve_effect_state_migration(
         &registry,
         &current,
         &current_envelope,
-        EffectStateLimitsV1 {
+        EffectStateLimits {
             maximum_descriptor_bytes: descriptor_wire(&DESCRIPTOR_V3).len() as u64 - 1,
-            ..EffectStateLimitsV1::default()
+            ..EffectStateLimits::default()
         },
         migration_admission(),
         restore_admission(),
@@ -906,38 +906,38 @@ fn nested_state_diagnostics_and_current_admission_are_preserved_without_hooks() 
     .unwrap_err();
     assert_outer(
         error,
-        EffectStateMigrationDiagnosticCodeV1::State,
+        EffectStateMigrationDiagnosticCode::State,
         1,
-        EFFECT_STATE_MIGRATION_V1_UNAVAILABLE_INDEX,
+        EFFECT_STATE_MIGRATION_UNAVAILABLE_INDEX,
         0,
     );
-    assert_eq!(error.nested_state.code, EffectStateDiagnosticCodeV1::Limit);
+    assert_eq!(error.nested_state.code, EffectStateDiagnosticCode::Limit);
 
-    let error = resolve_effect_state_migration_v1(
+    let error = resolve_effect_state_migration(
         &registry,
         &current,
         &malformed,
-        EffectStateLimitsV1::default(),
+        EffectStateLimits::default(),
         migration_admission(),
         restore_admission(),
     )
     .unwrap_err();
     assert_outer(
         error,
-        EffectStateMigrationDiagnosticCodeV1::State,
+        EffectStateMigrationDiagnosticCode::State,
         1,
-        EFFECT_STATE_MIGRATION_V1_UNAVAILABLE_INDEX,
+        EFFECT_STATE_MIGRATION_UNAVAILABLE_INDEX,
         0,
     );
-    assert_eq!(error.nested_state.code, EffectStateDiagnosticCodeV1::Digest);
+    assert_eq!(error.nested_state.code, EffectStateDiagnosticCode::Digest);
     assert_eq!(error.nested_state.byte_offset, 56);
 
-    let error = resolve_effect_state_migration_v1(
+    let error = resolve_effect_state_migration(
         &registry,
         &current,
         &malformed,
-        EffectStateLimitsV1::default(),
-        EffectStateMigrationAdmissionV1 {
+        EffectStateLimits::default(),
+        EffectStateMigrationAdmission {
             maximum_intermediate_envelope_bytes: u64::MAX,
             ..migration_admission()
         },
@@ -946,16 +946,16 @@ fn nested_state_diagnostics_and_current_admission_are_preserved_without_hooks() 
     .unwrap_err();
     assert_outer(
         error,
-        EffectStateMigrationDiagnosticCodeV1::Overflow,
+        EffectStateMigrationDiagnosticCode::Overflow,
         2,
-        EFFECT_STATE_MIGRATION_V1_UNAVAILABLE_INDEX,
+        EFFECT_STATE_MIGRATION_UNAVAILABLE_INDEX,
         u64::MAX,
     );
 
     let v1_envelope = envelope(v1);
     for (admission, offset, required) in [
         (
-            EffectStateRestoreAdmissionV1 {
+            EffectStateRestoreAdmission {
                 sample_rate: 44_100,
                 ..restore_admission()
             },
@@ -963,7 +963,7 @@ fn nested_state_diagnostics_and_current_admission_are_preserved_without_hooks() 
             48_000,
         ),
         (
-            EffectStateRestoreAdmissionV1 {
+            EffectStateRestoreAdmission {
                 quantum: 31,
                 ..restore_admission()
             },
@@ -971,7 +971,7 @@ fn nested_state_diagnostics_and_current_admission_are_preserved_without_hooks() 
             32,
         ),
         (
-            EffectStateRestoreAdmissionV1 {
+            EffectStateRestoreAdmission {
                 maximum_total_state_bytes: 63,
                 ..restore_admission()
             },
@@ -979,7 +979,7 @@ fn nested_state_diagnostics_and_current_admission_are_preserved_without_hooks() 
             64,
         ),
         (
-            EffectStateRestoreAdmissionV1 {
+            EffectStateRestoreAdmission {
                 maximum_scratch_bytes: 63,
                 ..restore_admission()
             },
@@ -987,7 +987,7 @@ fn nested_state_diagnostics_and_current_admission_are_preserved_without_hooks() 
             64,
         ),
         (
-            EffectStateRestoreAdmissionV1 {
+            EffectStateRestoreAdmission {
                 maximum_automation_spans_per_block: 7,
                 ..restore_admission()
             },
@@ -995,23 +995,23 @@ fn nested_state_diagnostics_and_current_admission_are_preserved_without_hooks() 
             8,
         ),
     ] {
-        let error = resolve_effect_state_migration_v1(
+        let error = resolve_effect_state_migration(
             &registry,
             &current,
             &v1_envelope,
-            EffectStateLimitsV1::default(),
+            EffectStateLimits::default(),
             migration_admission(),
             admission,
         )
         .unwrap_err();
         assert_outer(
             error,
-            EffectStateMigrationDiagnosticCodeV1::State,
+            EffectStateMigrationDiagnosticCode::State,
             3,
-            EFFECT_STATE_MIGRATION_V1_UNAVAILABLE_INDEX,
+            EFFECT_STATE_MIGRATION_UNAVAILABLE_INDEX,
             0,
         );
-        assert_eq!(error.nested_state.code, EffectStateDiagnosticCodeV1::Limit);
+        assert_eq!(error.nested_state.code, EffectStateDiagnosticCode::Limit);
         assert_eq!(error.nested_state.byte_offset, offset);
         assert_eq!(error.nested_state.required_bytes, required);
     }
@@ -1019,7 +1019,7 @@ fn nested_state_diagnostics_and_current_admission_are_preserved_without_hooks() 
     // Once target requirements prove derived resources fit the saved caps and the five raw
     // admission rows above prove those caps fit the current policy, derived 216/176/184 rejects
     // are algebraically unreachable during resolution.
-    let derived = effect_state_derived_resources_v1(v3, replay().request).unwrap();
+    let derived = effect_state_derived_resources(v3, replay().request).unwrap();
     assert!(
         derived.state_sizes.total().unwrap() <= replay().request.limits.maximum_total_state_bytes
     );
@@ -1042,9 +1042,9 @@ fn dependency_and_render_boundaries_remain_one_way() {
     assert!(!package_manifest.contains("miso-engine-effect-compiler"));
     assert!(compiler_manifest.contains("miso-engine-effect-package.workspace = true"));
     for forbidden in [
-        "validate_descriptor_v1",
-        "effect_descriptor_identity_v1",
-        "bind_effect_descriptor_wire_v1",
+        "validate_descriptor",
+        "effect_descriptor_identity",
+        "bind_effect_descriptor_wire",
     ] {
         assert!(!migration_source.contains(forbidden));
     }

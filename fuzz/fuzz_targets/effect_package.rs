@@ -1,7 +1,7 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
-use miso_engine_effect_package::{EffectPackageLimitsV1, verify_effect_package_v1};
+use miso_engine_effect_package::{EffectPackageLimits, verify_effect_package};
 
 fuzz_target!(|data: &[u8]| {
-    let _ = verify_effect_package_v1(data, EffectPackageLimitsV1::default());
+    let _ = verify_effect_package(data, EffectPackageLimits::default());
 });

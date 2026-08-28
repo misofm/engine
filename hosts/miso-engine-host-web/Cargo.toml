@@ -17,9 +17,9 @@ crate-type = ["rlib", "cdylib"]
 # console's record types (`Matrix2x2`, `TrackControlRecordV1`, `MeterSnapshot`) are named by this
 # crate's own ABI, exactly as the render types are. The compile pipeline still lives entirely in
 # `miso-engine-host-core`.
-# `-effect-contract` joins them for the same reason with issue #140: `EffectControlRecordV1` and
+# `-effect-contract` joins them for the same reason with issue #140: `EffectControlRecord` and
 # the parameter descriptors an effect-addressed command is validated against are named by this
-# crate's ABI. It is the *contract* crate, not the effect compiler -- `EffectControlProducerV1` is
+# crate's ABI. It is the *contract* crate, not the effect compiler -- `EffectControlProducer` is
 # re-exported by `miso-engine-host-core`, so the compile pipeline stays where #106 F1 put it.
 [dependencies]
 miso-engine-builtins.workspace = true

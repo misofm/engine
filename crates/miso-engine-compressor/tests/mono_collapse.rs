@@ -24,7 +24,7 @@ mod support;
 use miso_engine_effect_contract::{
     AutomationSpanKind, BankWidth, EffectBankProcessBlock, EffectQuality, InitialParameterValue,
     LinkMode, ParameterChannel, PrepareEffectLimits, PrepareEffectRequest, PreparedAutomationSpan,
-    PreparedNativeEffectBank, PreparedPortsV1, PreparedSidechainPort,
+    PreparedNativeEffectBank, PreparedPorts, PreparedSidechainPort,
 };
 
 /// Blocks per arm: enough that the detector ring and the lookahead delay are full of collapsed-run
@@ -53,7 +53,7 @@ fn request_configured<'a>(
         quality: EffectQuality::Normal,
         bypass,
         link_mode,
-        ports: PreparedPortsV1 {
+        ports: PreparedPorts {
             sidechain: PreparedSidechainPort::Unconnected {
                 id: support::sidechain_port(),
                 required: false,

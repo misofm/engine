@@ -7,7 +7,7 @@
 
 use miso_engine_core::realtime::{QueueGeneration, bounded_spsc};
 use miso_engine_effect_contract::{
-    AutomationSpanKind, BypassShunt, EffectControlLane, EffectControlRecordV1, ParameterChannel,
+    AutomationSpanKind, BypassShunt, EffectControlLane, EffectControlRecord, ParameterChannel,
     PreparedAutomationSpan,
 };
 
@@ -27,8 +27,8 @@ fn idle() -> PreparedAutomationSpan {
     }
 }
 
-fn parameter(index: u32, channel: ParameterChannel, value: f32) -> EffectControlRecordV1 {
-    EffectControlRecordV1::Parameter {
+fn parameter(index: u32, channel: ParameterChannel, value: f32) -> EffectControlRecord {
+    EffectControlRecord::Parameter {
         parameter_index: index,
         channel,
         value,
@@ -41,7 +41,7 @@ fn parameter(index: u32, channel: ParameterChannel, value: f32) -> EffectControl
 #[test]
 fn a_drain_emits_the_contract_canonical_span_order() {
     let (mut producer, consumer) =
-        bounded_spsc::<EffectControlRecordV1>(depth(8), QueueGeneration(0)).expect("queue");
+        bounded_spsc::<EffectControlRecord>(depth(8), QueueGeneration(0)).expect("queue");
     let mut lane = EffectControlLane::new(consumer, false);
     // Deliberately reverse-ordered arrival.
     for record in [
@@ -85,7 +85,7 @@ fn a_drain_emits_the_contract_canonical_span_order() {
 #[test]
 fn a_repeated_target_collapses_last_wins() {
     let (mut producer, consumer) =
-        bounded_spsc::<EffectControlRecordV1>(depth(8), QueueGeneration(0)).expect("queue");
+        bounded_spsc::<EffectControlRecord>(depth(8), QueueGeneration(0)).expect("queue");
     let mut lane = EffectControlLane::new(consumer, false);
     for record in [
         parameter(2, ParameterChannel::Left, 1.0),
@@ -107,7 +107,7 @@ fn a_repeated_target_collapses_last_wins() {
 #[test]
 fn a_drained_queue_stages_nothing_on_the_next_block() {
     let (mut producer, consumer) =
-        bounded_spsc::<EffectControlRecordV1>(depth(4), QueueGeneration(0)).expect("queue");
+        bounded_spsc::<EffectControlRecord>(depth(4), QueueGeneration(0)).expect("queue");
     let mut lane = EffectControlLane::new(consumer, false);
     producer
         .try_push(parameter(1, ParameterChannel::Left, 0.5))
@@ -121,11 +121,11 @@ fn a_drained_queue_stages_nothing_on_the_next_block() {
 #[test]
 fn bypass_is_retained_state_and_produces_no_span() {
     let (mut producer, consumer) =
-        bounded_spsc::<EffectControlRecordV1>(depth(4), QueueGeneration(0)).expect("queue");
+        bounded_spsc::<EffectControlRecord>(depth(4), QueueGeneration(0)).expect("queue");
     let mut lane = EffectControlLane::new(consumer, false);
     assert!(!lane.bypassed());
     producer
-        .try_push(EffectControlRecordV1::Bypass(true))
+        .try_push(EffectControlRecord::Bypass(true))
         .expect("room");
     let mut staging = [idle(); 4];
     assert_eq!(
@@ -202,7 +202,7 @@ fn the_shunt_preserves_signed_zero() {
 #[test]
 fn a_full_window_counts_the_overflow_instead_of_overrunning() {
     let (mut producer, consumer) =
-        bounded_spsc::<EffectControlRecordV1>(depth(8), QueueGeneration(0)).expect("queue");
+        bounded_spsc::<EffectControlRecord>(depth(8), QueueGeneration(0)).expect("queue");
     let mut lane = EffectControlLane::new(consumer, false);
     for index in 0..5_u32 {
         producer

@@ -27,7 +27,7 @@ use miso_engine_core::{
 };
 pub mod corpus;
 
-use miso_engine_effect_contract::{BankWidth, ChannelSymmetryWitnessV1};
+use miso_engine_effect_contract::{BankWidth, ChannelSymmetryWitness};
 use miso_engine_lane::{
     Backend, Lane, Simd4, Simd8,
     kernels::{
@@ -2134,18 +2134,18 @@ impl InputBuiltins {
     ///   behaviour must not move a sealed byte count to carry a bit nothing rendered reads.
     /// * The two live terms stay set because this object has no queue: a per-node scalar input
     ///   section is reached by the console through `ConsoleInputProcessor`, which owns the
-    ///   consumer, folds `ChannelSymmetryWitnessV1::admit` per record and conjoins the result with
+    ///   consumer, folds `ChannelSymmetryWitness::admit` per record and conjoins the result with
     ///   this value -- exactly as `BuiltinBankProcessor` does for the banked form. The seam the
     ///   builtins liveness work was to land on is closed (#210 phase 3): `TrackInputRecordV1`
-    ///   implements `LiveConsoleRecordV1` with `SEAM = UpstreamOfSeam`, so an asymmetric
+    ///   implements `LiveConsoleRecord` with `SEAM = UpstreamOfSeam`, so an asymmetric
     ///   `trim_db` or `polarity_invert` retarget clears `LIVE` at the drain, before the collapse
     ///   dispatch reads the witness. `hpf_hz` and `lpf_hz` remain `PreparedOnly` and have no
     ///   write path at all.
     #[must_use]
-    pub fn channel_symmetry(&self) -> ChannelSymmetryWitnessV1 {
-        let mut witness = ChannelSymmetryWitnessV1::SYMMETRIC;
+    pub fn channel_symmetry(&self) -> ChannelSymmetryWitness {
+        let mut witness = ChannelSymmetryWitness::SYMMETRIC;
         witness.set(
-            ChannelSymmetryWitnessV1::DESIGNED,
+            ChannelSymmetryWitness::DESIGNED,
             self.stage.lane_channel_symmetry(0),
         );
         witness
@@ -2261,13 +2261,13 @@ impl BuiltinInputBankV1 {
     /// The banked form of [`InputBuiltins::channel_symmetry`]; a padding lane, which no track
     /// owns, declines.
     #[must_use]
-    pub fn lane_symmetry(&self, lane: usize) -> ChannelSymmetryWitnessV1 {
+    pub fn lane_symmetry(&self, lane: usize) -> ChannelSymmetryWitness {
         let designed = match &self.stage {
             InputStageKernel::Simd4(stage) => stage.lane_channel_symmetry(lane),
             InputStageKernel::Simd8(stage) => stage.lane_channel_symmetry(lane),
         };
-        let mut witness = ChannelSymmetryWitnessV1::SYMMETRIC;
-        witness.set(ChannelSymmetryWitnessV1::DESIGNED, designed);
+        let mut witness = ChannelSymmetryWitness::SYMMETRIC;
+        witness.set(ChannelSymmetryWitness::DESIGNED, designed);
         witness
     }
 

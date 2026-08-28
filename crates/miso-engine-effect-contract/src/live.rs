@@ -38,8 +38,8 @@ use miso_engine_core::realtime::{
 use miso_engine_lane::kernels::pdc_delay_block;
 
 use crate::{
-    AutomationSpanKind, ChannelSymmetryWitnessV1, ObservationDescriptorV1, ObservationFoldV1,
-    ObservationSampleV1, ParameterChannel, PreparedAutomationSpan,
+    AutomationSpanKind, ChannelSymmetryWitness, ObservationDescriptor, ObservationFoldV1,
+    ObservationSample, ParameterChannel, PreparedAutomationSpan,
 };
 
 /// One admitted, still-unapplied live control event for one prepared effect instance.
@@ -49,10 +49,10 @@ use crate::{
 /// nothing. Addressing is *not* carried: a channel belongs to exactly one effect instance (or, in
 /// a bank, to exactly one lane of one slot), so the record only says what to change.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub enum EffectControlRecordV1 {
+pub enum EffectControlRecord {
     /// Retarget one declared parameter of one channel.
     ///
-    /// `parameter_index` is the index into `EffectDescriptorV1::parameters`, never the wire
+    /// `parameter_index` is the index into `EffectDescriptor::parameters`, never the wire
     /// `parameter_id`: the translation is an admission-time lookup, off the render thread.
     /// `channel` already obeys the parameter's
     /// [`ParameterChannelPolicy`](crate::ParameterChannelPolicy) -- a `Shared` parameter arrives as
@@ -107,7 +107,7 @@ const fn order_key(parameter_index: u32, channel: ParameterChannel) -> (u32, u32
 /// The consumer half of a [`bounded_spsc`](miso_engine_core::realtime::bounded_spsc); the producer
 /// stays with the host's control plane. A producer must be dropped before the plan that owns this.
 pub struct EffectControlLane {
-    control: Consumer<EffectControlRecordV1>,
+    control: Consumer<EffectControlRecord>,
     /// Live bypass state, retained across blocks so a rendered block always knows it.
     bypass: bool,
     /// This instance's live channel-symmetry terms, retained across blocks exactly as `bypass`
@@ -126,15 +126,15 @@ pub struct EffectControlLane {
     ///
     /// Only the two live terms move here. `SOURCE`, `DESIGNED` and `RESTORED` are decided off
     /// render, at preparation and at restore, and are conjoined by the stage that owns this lane.
-    symmetry: ChannelSymmetryWitnessV1,
+    symmetry: ChannelSymmetryWitness,
 }
 
 impl EffectControlLane {
     /// Binds the consumer half of one prepared channel.
     #[must_use]
-    pub fn new(control: Consumer<EffectControlRecordV1>, bypass: bool) -> Self {
-        let mut symmetry = ChannelSymmetryWitnessV1::SYMMETRIC;
-        symmetry.set(ChannelSymmetryWitnessV1::UNBYPASSED, !bypass);
+    pub fn new(control: Consumer<EffectControlRecord>, bypass: bool) -> Self {
+        let mut symmetry = ChannelSymmetryWitness::SYMMETRIC;
+        symmetry.set(ChannelSymmetryWitness::UNBYPASSED, !bypass);
         Self {
             control,
             bypass,
@@ -148,7 +148,7 @@ impl EffectControlLane {
     /// so conjoining it with the stage's prepared witness gives the whole answer and never
     /// over-claims.
     #[must_use]
-    pub const fn symmetry(&self) -> ChannelSymmetryWitnessV1 {
+    pub const fn symmetry(&self) -> ChannelSymmetryWitness {
         self.symmetry
     }
 
@@ -167,7 +167,7 @@ impl EffectControlLane {
     /// Drain every queued record into `staging`, in canonical span order, and return the count.
     ///
     /// `observation` is this instance's tap state when the plan is observation-capable and `None`
-    /// otherwise. An [`EffectControlRecordV1::Observe`] emits **no span**: it changes what is read
+    /// otherwise. An [`EffectControlRecord::Observe`] emits **no span**: it changes what is read
     /// after the block, never what the block renders, so it does not touch the staging window and
     /// cannot make it overflow. A plan with no observation capacity applies nothing and reports the
     /// record as refused, which is what the control plane turns into `ObservationUnbound`.
@@ -185,7 +185,7 @@ impl EffectControlLane {
         &mut self,
         staging: &mut [PreparedAutomationSpan],
         first_sample: u64,
-        observation: Option<&mut ObservationLaneV1>,
+        observation: Option<&mut ObservationLane>,
     ) -> Staged {
         let mut staged = 0_usize;
         let mut dropped = 0_u32;
@@ -194,14 +194,14 @@ impl EffectControlLane {
         while let Ok(record) = self.control.try_pop() {
             // The one hook. `admit` takes the record by trait, not by kind, so a record type
             // added to this queue later cannot reach the render state without declaring what it
-            // does to the witness (`symmetry::LiveConsoleRecordV1`).
+            // does to the witness (`symmetry::LiveConsoleRecord`).
             self.symmetry.admit(&record);
             let (parameter_index, channel, value) = match record {
-                EffectControlRecordV1::Bypass(value) => {
+                EffectControlRecord::Bypass(value) => {
                     self.bypass = value;
                     continue;
                 }
-                EffectControlRecordV1::Observe {
+                EffectControlRecord::Observe {
                     tap_index,
                     armed,
                     window_blocks,
@@ -214,7 +214,7 @@ impl EffectControlLane {
                     }
                     continue;
                 }
-                EffectControlRecordV1::Parameter {
+                EffectControlRecord::Parameter {
                     parameter_index,
                     channel,
                     value,
@@ -273,7 +273,7 @@ pub struct Staged {
     pub staged: usize,
     /// Records refused because the window was full of distinct targets. Zero by construction.
     pub dropped: u32,
-    /// [`EffectControlRecordV1::Observe`] records this plan had no capacity to apply. Zero by
+    /// [`EffectControlRecord::Observe`] records this plan had no capacity to apply. Zero by
     /// construction: the control plane refuses them before they reach a queue.
     pub unbound: u32,
 }
@@ -284,7 +284,7 @@ pub struct Staged {
 /// window's own bookkeeping. All of it is allocated at preparation from the **declared menu**, so
 /// arming allocates nothing and disarming frees nothing: subscribe is a flag, not a resource.
 #[derive(Debug)]
-struct ObservationTapV1 {
+struct ObservationTap {
     publisher: ObservationPublisherV1,
     /// The declared fold, copied once at bind so the render path never walks the descriptor.
     fold: ObservationFoldV1,
@@ -305,12 +305,12 @@ struct ObservationTapV1 {
 ///
 /// Level 1 is that this type does not exist in a plan whose console request named no observation
 /// capacity: there is no lane, no slot and no vector, and the render path is the byte-identical one
-/// it always was. Level 2 is `ObservationTapV1::armed`: inside a capable plan, an unarmed tap's
+/// it always was. Level 2 is `ObservationTap::armed`: inside a capable plan, an unarmed tap's
 /// effect state is never read, never folded and never stored, and the honest cost is one predicted
 /// branch per driven effect per block.
 #[derive(Debug)]
-pub struct ObservationLaneV1 {
-    taps: Box<[ObservationTapV1]>,
+pub struct ObservationLane {
+    taps: Box<[ObservationTap]>,
     default_window_blocks: u32,
     /// How many taps of this lane are armed, maintained by [`arm`](Self::arm) and
     /// [`disarm_all`](Self::disarm_all) (issue #163 phase 4 item 6).
@@ -325,13 +325,13 @@ pub struct ObservationLaneV1 {
     armed_count: u32,
 }
 
-impl ObservationLaneV1 {
+impl ObservationLane {
     /// Bind one publisher per declared tap. Off the render thread, once, at preparation.
     ///
     /// `publishers` must be one per entry of `observations`, in declaration order.
     #[must_use]
     pub fn new(
-        observations: &'static [ObservationDescriptorV1],
+        observations: &'static [ObservationDescriptor],
         publishers: Vec<ObservationPublisherV1>,
         default_window_blocks: u32,
     ) -> Option<Self> {
@@ -339,10 +339,10 @@ impl ObservationLaneV1 {
             return None;
         }
         let default_window_blocks = default_window_blocks.max(1);
-        let taps: Vec<ObservationTapV1> = observations
+        let taps: Vec<ObservationTap> = observations
             .iter()
             .zip(publishers)
-            .map(|(descriptor, publisher)| ObservationTapV1 {
+            .map(|(descriptor, publisher)| ObservationTap {
                 publisher,
                 fold: descriptor.fold,
                 armed: false,
@@ -382,7 +382,7 @@ impl ObservationLaneV1 {
     #[must_use]
     pub fn retained_bytes(&self) -> usize {
         self.taps.len()
-            * (core::mem::size_of::<ObservationTapV1>() + observation_slot_retained_bytes())
+            * (core::mem::size_of::<ObservationTap>() + observation_slot_retained_bytes())
     }
 
     /// Whether `tap_index` is armed right now. Off-thread introspection for the structural gates.
@@ -397,7 +397,7 @@ impl ObservationLaneV1 {
         self.default_window_blocks
     }
 
-    /// Apply one drained [`EffectControlRecordV1::Observe`]; `false` for an index this lane has
+    /// Apply one drained [`EffectControlRecord::Observe`]; `false` for an index this lane has
     /// no tap for.
     ///
     /// Arming opens a fresh window at `first_sample`, which is the first sample of the block that
@@ -456,7 +456,7 @@ impl ObservationLaneV1 {
 }
 
 // REALTIME_POLICY_BEGIN
-impl ObservationLaneV1 {
+impl ObservationLane {
     /// Whether any tap is armed, which is the one branch the block-top publish step takes.
     ///
     /// One load and one compare, from the count [`arm`](Self::arm) and
@@ -488,7 +488,7 @@ impl ObservationLaneV1 {
     pub fn accumulate(
         &mut self,
         tap_index: usize,
-        sample: ObservationSampleV1,
+        sample: ObservationSample,
         first_sample: u64,
         frames: u64,
     ) {
@@ -548,12 +548,12 @@ impl ObservationLaneV1 {
 /// # Why outside
 ///
 /// `PreparedEffectMetadata::bypass` is a *prepared* configuration: it is part of
-/// [`EffectProgramKeyV1`](crate::EffectProgramKeyV1), it is byte 108 of the persisted state
+/// [`EffectProgramKey`](crate::EffectProgramKey), it is byte 108 of the persisted state
 /// envelope, and every effect's bank reads one flag for the whole bank. Moving it after
 /// preparation would change a program key at render time -- which would re-cohort a bank -- and a
 /// bank's lanes could not disagree about it anyway.
 ///
-/// The shunt is the design the contract already documents on `EffectProgramKeyV1`, minus the parts
+/// The shunt is the design the contract already documents on `EffectProgramKey`, minus the parts
 /// that only a per-lane kernel needs:
 ///
 /// * **The wet path always runs.** A bypassed instance still processes, so its state stays

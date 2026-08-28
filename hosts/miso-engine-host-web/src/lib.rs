@@ -25,10 +25,10 @@ use miso_engine_builtins_compiler::{
 };
 use miso_engine_core::realtime::{PlanarBufferMut, RenderIo, RenderTime};
 use miso_engine_effect_contract::{
-    EffectControlRecordV1, ParameterChannel, ParameterChannelPolicy, parameter_value_valid,
+    EffectControlRecord, ParameterChannel, ParameterChannelPolicy, parameter_value_valid,
 };
 use miso_engine_host_core::{
-    CompiledSession, ConsoleSoloState, EffectControlProducerV1, EffectObservationHandleV1,
+    CompiledSession, ConsoleSoloState, EffectControlProducer, EffectObservationHandle,
     EffectRack, HostConsoleRequestV1, HostPrepareCaps, HostShapePolicy, PreparedHost,
     SourceControlError, SourceSubmission, control_table_bytes, prepare_host_session_with_console,
     source_id_arena_bytes,
@@ -613,7 +613,7 @@ struct ReadyOwnership {
     /// Issue #140 A: one control-side producer per prepared effect instance, in the dense
     /// `queue_slot` order [`ReadyOwnership::effect_slot`] computes, so an addressed command
     /// reaches its queue with one index and no search.
-    effect_controls: Box<[Option<EffectControlProducerV1>]>,
+    effect_controls: Box<[Option<EffectControlProducer>]>,
     /// Per-track prefix sum of effect instances, so `effect_slot` is arithmetic, not a lookup.
     effect_base: Box<[u32]>,
     /// Room needed per destination queue by the submission being validated. Allocated at
@@ -646,7 +646,7 @@ struct ReadyOwnership {
     /// Issue #143: one reader set per observed effect instance, in the same dense `effect_slot`
     /// order the command producers use, so an addressed subscription reaches its lane with one
     /// index and no search. Empty when the configuration named no observation capacity.
-    effect_observations: Box<[Option<EffectObservationHandleV1>]>,
+    effect_observations: Box<[Option<EffectObservationHandle>]>,
     /// Track index of each observed effect slot, or `u32::MAX` for a slot with no taps. Built once
     /// at compilation, so the poll's fold is arithmetic rather than a search.
     observation_tracks: Box<[u32]>,
@@ -758,7 +758,7 @@ impl ReadyOwnership {
                 let effect = slot - tracks * 3;
                 // Issue #143: the armed set is control-plane state and is updated here, where the
                 // record is admitted, so it can never disagree with what the render side was told.
-                if let EffectControlRecordV1::Observe {
+                if let EffectControlRecord::Observe {
                     tap_index, armed, ..
                 } = record
                     && let Some(mask) = self.observation_armed.get_mut(effect)
@@ -789,7 +789,7 @@ enum AdmittedCommand {
     /// The input trim/polarity channel (#210 phase 3).
     Input(TrackInputRecordV1),
     /// One effect instance's channel (#140 A).
-    Effect(EffectControlRecordV1),
+    Effect(EffectControlRecord),
 }
 
 /// One compiled source's declared shape, in canonical normalized source order (issue #207).
@@ -1843,7 +1843,7 @@ impl CommandRecord {
     /// caller that confuses them learns which one it got wrong.
     fn into_observe_record(
         self,
-        descriptor: &'static miso_engine_effect_contract::EffectDescriptorV1,
+        descriptor: &'static miso_engine_effect_contract::EffectDescriptor,
         observed: bool,
     ) -> Result<AdmittedCommand, u32> {
         if self.channel != 255 || self.values.iter().any(|value| *value != 0.0) {
@@ -1873,7 +1873,7 @@ impl CommandRecord {
             return Err(COMMAND_REASON_OBSERVATION_UNBOUND);
         }
         let tap_index = u32::try_from(tap_index).map_err(|_| COMMAND_REASON_MALFORMED)?;
-        Ok(AdmittedCommand::Effect(EffectControlRecordV1::Observe {
+        Ok(AdmittedCommand::Effect(EffectControlRecord::Observe {
             tap_index,
             armed: self.kind == COMMAND_OBSERVE_SUBSCRIBE,
             window_blocks: self.smoothing_samples,
@@ -1882,7 +1882,7 @@ impl CommandRecord {
 
     fn into_effect_records(
         self,
-        descriptor: &'static miso_engine_effect_contract::EffectDescriptorV1,
+        descriptor: &'static miso_engine_effect_contract::EffectDescriptor,
         out: &mut [AdmittedCommand; 2],
     ) -> Result<usize, u32> {
         if self.kind == COMMAND_EFFECT_BYPASS {
@@ -1896,7 +1896,7 @@ impl CommandRecord {
             if self.values[0] != 0.0 && self.values[0] != 1.0 {
                 return Err(COMMAND_REASON_DOMAIN);
             }
-            out[0] = AdmittedCommand::Effect(EffectControlRecordV1::Bypass(self.values[0] == 1.0));
+            out[0] = AdmittedCommand::Effect(EffectControlRecord::Bypass(self.values[0] == 1.0));
             return Ok(1);
         }
         if self.channel > 2 || self.values[1..].iter().any(|value| *value != 0.0) {
@@ -1926,7 +1926,7 @@ impl CommandRecord {
         let parameter_index =
             u32::try_from(parameter_index).map_err(|_| COMMAND_REASON_MALFORMED)?;
         let record = |channel: ParameterChannel| {
-            AdmittedCommand::Effect(EffectControlRecordV1::Parameter {
+            AdmittedCommand::Effect(EffectControlRecord::Parameter {
                 parameter_index,
                 channel,
                 value: self.values[0],
@@ -2039,7 +2039,7 @@ fn admit_commands_staged(
         if track >= track_count {
             return Err(refuse(COMMAND_REASON_UNKNOWN_TRACK, index));
         }
-        let mut staged = [AdmittedCommand::Effect(EffectControlRecordV1::Bypass(false)); 2];
+        let mut staged = [AdmittedCommand::Effect(EffectControlRecord::Bypass(false)); 2];
         let (slot, produced) = match command.kind {
             // The three kinds that lower to one record on one of the three per-track bands. The
             // band is read off the lowered variant rather than off the kind, so a kind added to
@@ -2238,7 +2238,7 @@ fn admit_commands_staged(
 /// The result is clamped into the tap's own declared range, so a consumer never has to guess what
 /// a number outside it would have meant.
 fn observed_decibels(
-    tap: miso_engine_effect_contract::ObservationDescriptorV1,
+    tap: miso_engine_effect_contract::ObservationDescriptor,
     magnitude: f32,
 ) -> f32 {
     use miso_engine_effect_contract::ParameterUnit;
@@ -2626,7 +2626,7 @@ fn compile_ready(
         .enumerate()
         .map(|(index, id)| (id.as_ref(), index))
         .collect();
-    let mut effect_controls: Vec<Option<EffectControlProducerV1>> = Vec::new();
+    let mut effect_controls: Vec<Option<EffectControlProducer>> = Vec::new();
     effect_controls
         .try_reserve_exact(total_effects as usize)
         .map_err(|_| fixed_diagnostic("web.resource.allocation"))?;
@@ -2658,7 +2658,7 @@ fn compile_ready(
         .ok_or_else(|| fixed_diagnostic("web.console.effects"))?;
     // Issue #143: the observation handles are permuted into the same dense `effect_slot` order
     // the command producers use, so one index serves both the subscribe path and the poll.
-    let mut effect_observations: Vec<Option<EffectObservationHandleV1>> = Vec::new();
+    let mut effect_observations: Vec<Option<EffectObservationHandle>> = Vec::new();
     effect_observations
         .try_reserve_exact(total_effects as usize)
         .map_err(|_| fixed_diagnostic("web.resource.allocation"))?;
@@ -2795,7 +2795,7 @@ fn boxed_command_staging(track_count: usize) -> Result<Box<[(u32, AdmittedComman
         .ok_or_else(arithmetic)?;
     let empty = (
         0_u32,
-        AdmittedCommand::Effect(EffectControlRecordV1::Bypass(false)),
+        AdmittedCommand::Effect(EffectControlRecord::Bypass(false)),
     );
     let mut value = Vec::new();
     value

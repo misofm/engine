@@ -11,7 +11,7 @@ use miso_engine_dsp_reference::{
 };
 use miso_engine_effect_contract::{
     BankWidth, EffectPrepareError, LatencySamples, LinkModeSet, NativeEffectFactory,
-    ParameterChannel, PrepareEffectBankRequest, ProcessReport, TailSamples, validate_descriptor_v1,
+    ParameterChannel, PrepareEffectBankRequest, ProcessReport, TailSamples, validate_descriptor,
 };
 use miso_engine_lane::kernels::halfband::{HALFBAND63_CENTER, HALFBAND63_EVEN};
 use miso_engine_soft_clip::{SOFT_CLIP_DESCRIPTOR_V1, SoftClipFactory};
@@ -20,7 +20,7 @@ use support::{PARAMETERS, bank_available, initial_values, prepare, process, requ
 /// E11 — resources, latency, tail and the tap table against the independent `f64` design.
 #[test]
 fn descriptor_resources_and_independent_fir_design_are_frozen() {
-    validate_descriptor_v1(&SOFT_CLIP_DESCRIPTOR_V1).expect("descriptor");
+    validate_descriptor(&SOFT_CLIP_DESCRIPTOR_V1).expect("descriptor");
     assert_eq!(
         SOFT_CLIP_DESCRIPTOR_V1.supported_link_modes,
         LinkModeSet::DUAL_MONO

@@ -11,7 +11,7 @@ use miso_engine_builtins_compiler::{
 };
 use miso_engine_core::realtime::RenderEnvelope;
 use miso_engine_effect_compiler::{EffectPreparedEntry, EffectPreparedSession, EffectRack};
-use miso_engine_effect_contract::{BankWidth, ChannelSymmetryWitnessV1};
+use miso_engine_effect_contract::{BankWidth, ChannelSymmetryWitness};
 use miso_engine_effect_contract::{
     LatencySamples, PrepareEffectBankRequest, PreparedSidechainPort, TailSamples,
 };
@@ -318,7 +318,7 @@ mod tests {
     use miso_engine_conformance::DualAccumulatorDelayFactory;
     use miso_engine_core::realtime::{PlanarBufferMut, RenderIo, RenderTime, audit};
     use miso_engine_effect_compiler::{
-        EffectCompileCaps, EffectPreparedSession, launch_native_effect_registry_v1,
+        EffectCompileCaps, EffectPreparedSession, launch_native_effect_registry,
         prepare_native_session_effects,
     };
     use miso_engine_effect_contract::{
@@ -752,7 +752,7 @@ mod tests {
             },
         )
         .expect("accepted fixture");
-        let registry = launch_native_effect_registry_v1().expect("launch registry");
+        let registry = launch_native_effect_registry().expect("launch registry");
         let scalar_registry = NativeEffectRegistry::new([Box::new(ScalarOnlyDelegateFactory {
             delegate: registry
                 .get_shared_ascii(effect_id)
@@ -804,7 +804,7 @@ mod tests {
             },
         )
         .expect("accepted fixture");
-        let registry = launch_native_effect_registry_v1().expect("launch registry");
+        let registry = launch_native_effect_registry().expect("launch registry");
         let effects = prepare_native_session_effects(
             &session,
             &registry,
@@ -1080,7 +1080,7 @@ mod tests {
     /// scalar ownership intact for the caller's transactional failure path.
     struct BankBindErrorFactory;
     impl NativeEffectFactory for BankBindErrorFactory {
-        fn descriptor(&self) -> &'static miso_engine_effect_contract::EffectDescriptorV1 {
+        fn descriptor(&self) -> &'static miso_engine_effect_contract::EffectDescriptor {
             DualAccumulatorDelayFactory::correct().descriptor()
         }
         fn prepare(
@@ -1101,7 +1101,7 @@ mod tests {
 
     struct ScalarOnlyFactory;
     impl NativeEffectFactory for ScalarOnlyFactory {
-        fn descriptor(&self) -> &'static miso_engine_effect_contract::EffectDescriptorV1 {
+        fn descriptor(&self) -> &'static miso_engine_effect_contract::EffectDescriptor {
             DualAccumulatorDelayFactory::correct().descriptor()
         }
         fn prepare(
@@ -1124,7 +1124,7 @@ mod tests {
         delegate: Arc<dyn NativeEffectFactory>,
     }
     impl NativeEffectFactory for ScalarOnlyDelegateFactory {
-        fn descriptor(&self) -> &'static miso_engine_effect_contract::EffectDescriptorV1 {
+        fn descriptor(&self) -> &'static miso_engine_effect_contract::EffectDescriptor {
             self.delegate.descriptor()
         }
         fn prepare(
@@ -3255,7 +3255,7 @@ mod tests {
                 },
             )
             .expect("compiled cohort-boundary fixture");
-            let registry = launch_native_effect_registry_v1().expect("launch registry");
+            let registry = launch_native_effect_registry().expect("launch registry");
             let effects = prepare_native_session_effects(
                 &session,
                 &registry,
@@ -3409,7 +3409,7 @@ mod tests {
             },
         )
         .expect("compiled parametric-EQ fixture");
-        let registry = launch_native_effect_registry_v1().expect("launch registry");
+        let registry = launch_native_effect_registry().expect("launch registry");
         let scalar_registry = NativeEffectRegistry::new([Box::new(ScalarOnlyDelegateFactory {
             delegate: registry
                 .get_shared_ascii("miso.parametric-eq")
@@ -3702,7 +3702,7 @@ mod tests {
             },
         )
         .expect("accepted compressor fixture");
-        let registry = launch_native_effect_registry_v1().expect("launch registry");
+        let registry = launch_native_effect_registry().expect("launch registry");
         let compressor = registry
             .get_shared_ascii("miso.compressor")
             .expect("registered compressor");
@@ -4089,7 +4089,7 @@ mod tests {
 
     /// A dynamic slot that differs from its bank-mates' falls back exactly as a SIMD slot does.
     ///
-    /// One track's compressor becomes a gate/expander: a different `EffectProgramKeyV1`, so a
+    /// One track's compressor becomes a gate/expander: a different `EffectProgramKey`, so a
     /// different cohort, so a pool of one that can never fill a group. It renders per node while
     /// its eight bank-mates bank -- the same subsequence/leader mechanism that already governs
     /// SIMD-rack heterogeneity, reached through the same code path. Nothing rack-specific decides
@@ -4279,7 +4279,7 @@ mod tests {
             },
         )
         .expect("a third-party CID is an accepted session, not a malformed one");
-        let registry = launch_native_effect_registry_v1().expect("launch registry");
+        let registry = launch_native_effect_registry().expect("launch registry");
         let Err(failure) = prepare_native_session_effects(
             &session,
             &registry,
@@ -4351,7 +4351,7 @@ mod tests {
             },
         )
         .expect("compiled console fixture");
-        let registry = launch_native_effect_registry_v1().expect("launch registry");
+        let registry = launch_native_effect_registry().expect("launch registry");
         let per_node_registry =
             NativeEffectRegistry::new(["miso.parametric-eq", "miso.compressor"].map(|id| {
                 Box::new(ScalarOnlyDelegateFactory {
@@ -4434,7 +4434,7 @@ mod tests {
             },
         )
         .expect("compiled console fixture");
-        let registry = launch_native_effect_registry_v1().expect("launch registry");
+        let registry = launch_native_effect_registry().expect("launch registry");
         let per_node_registry =
             NativeEffectRegistry::new(["miso.parametric-eq", "miso.compressor"].map(|id| {
                 Box::new(ScalarOnlyDelegateFactory {
@@ -4815,7 +4815,7 @@ mod tests {
                 reset_generation: 0,
             },
         }];
-        let registry = launch_native_effect_registry_v1().expect("launch registry");
+        let registry = launch_native_effect_registry().expect("launch registry");
         let artifact = compile_console_model_with_builtins(&intended, 2_030, &meters, &registry);
         let (pcm, transposes, chains, slots, frames, redirects, _) =
             render_console_builtins_blocks(artifact, BLOCKS, Vec::new());
@@ -4919,7 +4919,7 @@ mod tests {
         sent.routes.push(route);
         sent.routes.sort_by(|left, right| left.id.cmp(&right.id));
 
-        let registry = launch_native_effect_registry_v1().expect("launch registry");
+        let registry = launch_native_effect_registry().expect("launch registry");
         let artifact = compile_console_model_with_builtins(&sent, 2_040, &[], &registry);
         let (pcm, transposes, chains, slots, _, redirects, _) =
             render_console_builtins_blocks(artifact, BLOCKS, Vec::new());
@@ -4989,7 +4989,7 @@ mod tests {
                 track.right_source_channel = 1;
             }
         }
-        let registry = launch_native_effect_registry_v1().expect("launch registry");
+        let registry = launch_native_effect_registry().expect("launch registry");
         let artifact = compile_console_model_with_builtins(&model, 2_070, &[], &registry);
 
         // Every builtin bank is class-homogeneous, which is the strip-stage planner's half.
@@ -5089,7 +5089,7 @@ mod tests {
             return;
         };
         let lanes = width.lanes() as usize;
-        let registry = launch_native_effect_registry_v1().expect("launch registry");
+        let registry = launch_native_effect_registry().expect("launch registry");
 
         let uniform =
             parse_session_toml(CONSOLE_SIXTY_FOUR_TRACK_MONO_FIXTURE).expect("mono fixture");
@@ -5163,7 +5163,7 @@ mod tests {
             return;
         };
         let lanes = width.lanes() as u64;
-        let registry = launch_native_effect_registry_v1().expect("launch registry");
+        let registry = launch_native_effect_registry().expect("launch registry");
         let mut folds = Vec::new();
         for (name, plan_id, stereo_at) in [
             (
@@ -5241,7 +5241,7 @@ mod tests {
         model.tracks[0].simd1.effects.remove(leader_slots - 1);
         assert_eq!(model.tracks[0].simd1.effects.len(), leader_slots - 1);
 
-        let registry = launch_native_effect_registry_v1().expect("launch registry");
+        let registry = launch_native_effect_registry().expect("launch registry");
         let artifact = compile_console_model_with_builtins(&model, 2_060, &[], &registry);
         // Every bank the plan retained is ascending; the graph would have refused the bind
         // otherwise, and this says so in the planner's own terms rather than as a panic message.
@@ -5301,7 +5301,7 @@ mod tests {
             track.simd1.effects.clear();
             track.simd2.effects.clear();
         }
-        let registry = launch_native_effect_registry_v1().expect("launch registry");
+        let registry = launch_native_effect_registry().expect("launch registry");
         let artifact = compile_console_model_with_builtins(&ragged, 2_050, &[], &registry);
         let effect_slots = artifact.graph().prepared_bank_count() as u64;
         let builtin_slots = artifact.graph().prepared_builtin_bank_count() as u64;
@@ -5485,7 +5485,7 @@ mod tests {
                 reset_generation: 0,
             },
         }];
-        let registry = launch_native_effect_registry_v1().expect("launch registry");
+        let registry = launch_native_effect_registry().expect("launch registry");
         let artifact = compile_console_model_with_builtins(&intended, 2_060, &meters, &registry);
         let (pcm, transposes, chains, slots, frames, redirects, _) =
             render_console_builtins_blocks(artifact, BLOCKS, Vec::new());
@@ -5572,7 +5572,7 @@ mod tests {
         sent.routes.push(route);
         sent.routes.sort_by(|left, right| left.id.cmp(&right.id));
 
-        let registry = launch_native_effect_registry_v1().expect("launch registry");
+        let registry = launch_native_effect_registry().expect("launch registry");
         let artifact = compile_console_model_with_builtins(&sent, 2_070, &[], &registry);
         let (pcm, transposes, chains, slots, _, redirects, _) =
             render_console_builtins_blocks(artifact, BLOCKS, Vec::new());
@@ -5632,7 +5632,7 @@ mod tests {
         let cohorts = 64 / width.lanes() as u64;
         let intended = parse_session_toml(CONSOLE_SIXTY_FOUR_TRACK_INTENDED_FIXTURE)
             .expect("intended fixture");
-        let registry = launch_native_effect_registry_v1().expect("launch registry");
+        let registry = launch_native_effect_registry().expect("launch registry");
         let artifact = compile_console_model_with_builtins(&intended, 2_180, &[], &registry);
         let (pcm, transposes, chains, slots, _, _, folds) =
             render_console_builtins_blocks(artifact, BLOCKS, Vec::new());
@@ -5715,7 +5715,7 @@ mod tests {
         doubled.routes.push(route);
         doubled.routes.sort_by(|left, right| left.id.cmp(&right.id));
 
-        let registry = launch_native_effect_registry_v1().expect("launch registry");
+        let registry = launch_native_effect_registry().expect("launch registry");
         let artifact = compile_console_model_with_builtins(&doubled, 2_182, &[], &registry);
         let (pcm, _, _, _, _, _, folds) =
             render_console_builtins_blocks(artifact, BLOCKS, Vec::new());
@@ -5764,7 +5764,7 @@ mod tests {
                 reset_generation: 0,
             },
         }];
-        let registry = launch_native_effect_registry_v1().expect("launch registry");
+        let registry = launch_native_effect_registry().expect("launch registry");
         let artifact = compile_console_model_with_builtins(&intended, 2_184, &meters, &registry);
         let (pcm, _, _, _, frames, _, folds) =
             render_console_builtins_blocks(artifact, BLOCKS, Vec::new());
@@ -5837,7 +5837,7 @@ mod tests {
             .routes
             .sort_by(|left, right| left.id.cmp(&right.id));
 
-        let registry = launch_native_effect_registry_v1().expect("launch registry");
+        let registry = launch_native_effect_registry().expect("launch registry");
         let artifact = compile_console_model_with_builtins(&reversed, 2_186, &[], &registry);
         let (pcm, _, _, _, _, _, folds) =
             render_console_builtins_blocks(artifact, BLOCKS, Vec::new());
@@ -6027,7 +6027,7 @@ mod tests {
                 reset_generation: 0,
             },
         }];
-        let registry = launch_native_effect_registry_v1().expect("launch registry");
+        let registry = launch_native_effect_registry().expect("launch registry");
         let artifact = compile_console_model_with_builtins(&intended, 2_120, &meters, &registry);
         let (pcm, transposes, chains, slots, frames, _, _) =
             render_console_builtins_blocks(artifact, BLOCKS, Vec::new());
@@ -6130,7 +6130,7 @@ mod tests {
             },
         )
         .expect("prepared console builtins");
-        let registry = launch_native_effect_registry_v1().expect("launch registry");
+        let registry = launch_native_effect_registry().expect("launch registry");
         let artifact = GraphCompiler::compile_with_builtins(GraphBuiltinsCompileRequest {
             dispatch,
             plan_id,
@@ -6226,7 +6226,7 @@ mod tests {
             },
         )
         .expect("compiled console model");
-        let registry = launch_native_effect_registry_v1().expect("launch registry");
+        let registry = launch_native_effect_registry().expect("launch registry");
         GraphCompiler::compile(GraphCompileRequest {
             dispatch: host_dispatch(),
             plan_id,
@@ -6311,7 +6311,7 @@ mod tests {
     /// all, so no merge is expressible in it and the audio it renders is the strip's arithmetic
     /// with none of this machinery in the way.
     fn scalar_console_registry() -> NativeEffectRegistry {
-        let registry = launch_native_effect_registry_v1().expect("launch registry");
+        let registry = launch_native_effect_registry().expect("launch registry");
         NativeEffectRegistry::new(
             [
                 "miso.parametric-eq",
@@ -6426,7 +6426,7 @@ mod tests {
         let cohorts = 64 / width.lanes() as u64;
         let intended = parse_session_toml(CONSOLE_SIXTY_FOUR_TRACK_INTENDED_FIXTURE)
             .expect("intended fixture");
-        let registry = launch_native_effect_registry_v1().expect("launch registry");
+        let registry = launch_native_effect_registry().expect("launch registry");
         let artifact = compile_console_model_with_builtins(&intended, 2_020, &[], &registry);
         let effect_slots = artifact.graph().prepared_bank_count() as u64;
         let builtin_slots = artifact.graph().prepared_builtin_bank_count() as u64;
@@ -6579,7 +6579,7 @@ mod tests {
             },
         )
         .expect("accepted gate/expander fixture");
-        let registry = launch_native_effect_registry_v1().expect("launch registry");
+        let registry = launch_native_effect_registry().expect("launch registry");
         let gate_expander = registry
             .get_shared_ascii("miso.gate-expander")
             .expect("registered gate/expander");
@@ -6826,7 +6826,7 @@ mod tests {
         assert_eq!(session.sample_rate().0, 48_000);
         assert_eq!(session.quantum().0, 128);
 
-        let registry = launch_native_effect_registry_v1().expect("launch registry");
+        let registry = launch_native_effect_registry().expect("launch registry");
         let limiter = registry
             .get_shared_ascii("miso.true-peak-limiter")
             .expect("registered true-peak limiter");
@@ -7241,7 +7241,7 @@ mod tests {
         assert_eq!(session.sample_rate().0, 48_000);
         assert_eq!(session.quantum().0, 128);
 
-        let registry = launch_native_effect_registry_v1().expect("launch registry");
+        let registry = launch_native_effect_registry().expect("launch registry");
         let multiband = registry
             .get_shared_ascii("miso.multiband-compressor")
             .expect("registered multiband compressor");
@@ -7625,7 +7625,7 @@ mod tests {
         assert_eq!(session.sample_rate().0, 48_000);
         assert_eq!(session.quantum().0, 128);
 
-        let registry = launch_native_effect_registry_v1().expect("launch registry");
+        let registry = launch_native_effect_registry().expect("launch registry");
         let soft_clip = registry
             .get_shared_ascii("miso.soft-clip")
             .expect("registered soft clip");
@@ -8008,7 +8008,7 @@ mod tests {
         assert_eq!(session.sample_rate().0, 48_000);
         assert_eq!(session.quantum().0, 128);
 
-        let registry = launch_native_effect_registry_v1().expect("launch registry");
+        let registry = launch_native_effect_registry().expect("launch registry");
         let transient_shaper = registry
             .get_shared_ascii("miso.transient-shaper")
             .expect("registered transient shaper");
@@ -8367,7 +8367,7 @@ mod tests {
         assert_eq!(session.sample_rate().0, 48_000);
         assert_eq!(session.quantum().0, 128);
 
-        let registry = launch_native_effect_registry_v1().expect("launch registry");
+        let registry = launch_native_effect_registry().expect("launch registry");
         assert!(registry.get_ascii("miso.delay").is_some());
         let effect_caps = EffectCompileCaps {
             maximum_total_state_bytes: 768_168,

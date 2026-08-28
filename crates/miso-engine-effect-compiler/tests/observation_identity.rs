@@ -7,10 +7,10 @@
 
 #![allow(missing_docs)]
 
-use miso_engine_effect_compiler::launch_native_effect_registry_v1;
-use miso_engine_effect_contract::{EffectDescriptorV1, ObservationCostV1, validate_descriptor_v1};
+use miso_engine_effect_compiler::launch_native_effect_registry;
+use miso_engine_effect_contract::{EffectDescriptor, ObservationCostV1, validate_descriptor};
 use miso_engine_effect_package::{
-    effect_descriptor_wire_v1_required_size, encode_effect_descriptor_wire_v1,
+    effect_descriptor_wire_required_size, encode_effect_descriptor_wire,
 };
 
 const LIMIT: u32 = 4 << 20;
@@ -23,11 +23,11 @@ const DYNAMICS: [&str; 4] = [
     "miso.true-peak-limiter",
 ];
 
-fn wire(descriptor: &'static EffectDescriptorV1) -> Vec<u8> {
-    let size = effect_descriptor_wire_v1_required_size(descriptor, LIMIT).unwrap();
+fn wire(descriptor: &'static EffectDescriptor) -> Vec<u8> {
+    let size = effect_descriptor_wire_required_size(descriptor, LIMIT).unwrap();
     let mut bytes = vec![0_u8; size as usize];
     assert_eq!(
-        encode_effect_descriptor_wire_v1(descriptor, LIMIT, &mut bytes),
+        encode_effect_descriptor_wire(descriptor, LIMIT, &mut bytes),
         Ok(size)
     );
     bytes
@@ -38,8 +38,8 @@ fn wire(descriptor: &'static EffectDescriptorV1) -> Vec<u8> {
 /// `observations` is the last field and nothing else in the descriptor changed, so this is not an
 /// approximation of "what it used to be" -- it is the same value the pre-#143 encoder saw, and its
 /// encoding is the identity that was in the tree before this issue.
-fn zero_tap_twin(descriptor: &'static EffectDescriptorV1) -> &'static EffectDescriptorV1 {
-    Box::leak(Box::new(EffectDescriptorV1 {
+fn zero_tap_twin(descriptor: &'static EffectDescriptor) -> &'static EffectDescriptor {
+    Box::leak(Box::new(EffectDescriptor {
         observations: &[],
         ..*descriptor
     }))
@@ -47,10 +47,10 @@ fn zero_tap_twin(descriptor: &'static EffectDescriptorV1) -> &'static EffectDesc
 
 #[test]
 fn every_declared_tap_costs_exactly_its_record_and_its_two_strings() {
-    let registry = launch_native_effect_registry_v1().unwrap();
+    let registry = launch_native_effect_registry().unwrap();
     let mut moved = Vec::new();
     for descriptor in registry.descriptors() {
-        validate_descriptor_v1(descriptor).unwrap();
+        validate_descriptor(descriptor).unwrap();
         let tapped = wire(descriptor);
         let twin = zero_tap_twin(descriptor);
         let untapped = wire(twin);
@@ -85,7 +85,7 @@ fn every_declared_tap_costs_exactly_its_record_and_its_two_strings() {
 
 #[test]
 fn a_declared_tap_moves_contract_minor_and_leaves_the_state_layout_alone() {
-    let registry = launch_native_effect_registry_v1().unwrap();
+    let registry = launch_native_effect_registry().unwrap();
     for descriptor in registry.descriptors() {
         let dynamics = DYNAMICS.contains(&descriptor.id.as_str());
         assert_eq!(
@@ -120,7 +120,7 @@ fn a_declared_tap_moves_contract_minor_and_leaves_the_state_layout_alone() {
 /// bumps one has to argue with this test rather than with a comment.
 #[test]
 fn no_dynamics_state_layout_version_moved() {
-    let registry = launch_native_effect_registry_v1().unwrap();
+    let registry = launch_native_effect_registry().unwrap();
     for descriptor in registry.descriptors() {
         let expected = match descriptor.id.as_str() {
             "miso.compressor" => 1,

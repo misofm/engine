@@ -16,7 +16,7 @@ gone.
 Factories validate static descriptors and allocate/design all processor resources off render.
 Prepared metadata fixes sample rate, quantum, quality, bypass, link mode, ports, exact integer
 latency, tail, state-section sizes, scratch bytes, and automation capacity. The compiler caches
-that metadata; graph/PDC consumers never query a live processor. The semantic `EffectProgramKeyV1`
+that metadata; graph/PDC consumers never query a live processor. The semantic `EffectProgramKey`
 contains these fields directly and is not a digest or persistence identity.
 
 The callback receives disjoint in-place planar L/R slices and optional planar sidechain slices.
@@ -42,7 +42,7 @@ three separate mechanisms, each where its hazard is:
   effect.
 
 Signed finite zero is retained on every non-recursive path. Bypass is an immutable prepared
-configuration, is **not** part of `EffectProgramKeyV1`, and outputs the dry input delayed by
+configuration, is **not** part of `EffectProgramKey`, and outputs the dry input delayed by
 exactly the declared latency.
 
 ## Parameters and automation

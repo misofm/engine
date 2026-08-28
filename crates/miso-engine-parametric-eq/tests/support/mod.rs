@@ -8,7 +8,7 @@
 use miso_engine_effect_contract::{
     AutomationSpanKind, EffectProcessBlock, EffectQuality as Quality, InitialParameterValue,
     LinkMode, NativeEffectFactory, ParameterChannel, PrepareEffectLimits, PrepareEffectRequest,
-    PreparedAutomationSpan, PreparedNativeEffect, PreparedPortsV1, PreparedSidechainPort,
+    PreparedAutomationSpan, PreparedNativeEffect, PreparedPorts, PreparedSidechainPort,
     ProcessReport, StatePayloadOutput,
 };
 use miso_engine_parametric_eq::{
@@ -217,7 +217,7 @@ pub fn request_at_rate<'a>(
         quality: Quality::Normal,
         bypass,
         link_mode: LinkMode::DualMono,
-        ports: PreparedPortsV1 {
+        ports: PreparedPorts {
             sidechain: PreparedSidechainPort::None,
         },
         initial_values: values,

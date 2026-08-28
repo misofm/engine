@@ -1,7 +1,7 @@
 //! Transactional native-session preparation coverage.
 
 use miso_engine_effect_compiler::{
-    EffectCompileCaps, launch_native_effect_registry_v1, prepare_native_session_effects,
+    EffectCompileCaps, launch_native_effect_registry, prepare_native_session_effects,
 };
 use miso_engine_effect_contract::*;
 use miso_engine_session::{CompileCaps, compile_session, parse_session_toml};
@@ -18,7 +18,7 @@ const MAIN_OUT: PortId = match PortId::new("main-out") {
     Ok(v) => v,
     Err(_) => panic!("id"),
 };
-const PARAMETERS: [ParameterDescriptorV1; 1] = [ParameterDescriptorV1 {
+const PARAMETERS: [ParameterDescriptor; 1] = [ParameterDescriptor {
     id: ParameterId(1),
     display_name: "Gain",
     display_unit: "dB",
@@ -36,22 +36,22 @@ const PARAMETERS: [ParameterDescriptorV1; 1] = [ParameterDescriptorV1 {
     automatable: true,
     enum_choices: &[],
 }];
-const PORTS: [PortDescriptorV1; 2] = [
-    PortDescriptorV1 {
+const PORTS: [PortDescriptor; 2] = [
+    PortDescriptor {
         id: MAIN_IN,
         role: PortRole::MainInput,
         required: true,
         layout: PortLayout::DualMonoPlanar,
     },
-    PortDescriptorV1 {
+    PortDescriptor {
         id: MAIN_OUT,
         role: PortRole::MainOutput,
         required: true,
         layout: PortLayout::DualMonoPlanar,
     },
 ];
-const fn quality(sample_rate: u32) -> QualityDescriptorV1 {
-    QualityDescriptorV1 {
+const fn quality(sample_rate: u32) -> QualityDescriptor {
+    QualityDescriptor {
         quality: EffectQuality::Normal,
         sample_rate,
         latency: LatencySamples(7),
@@ -65,7 +65,7 @@ const fn quality(sample_rate: u32) -> QualityDescriptorV1 {
         scratch_bytes_per_frame: 1,
     }
 }
-const QUALITIES: [QualityDescriptorV1; 8] = [
+const QUALITIES: [QualityDescriptor; 8] = [
     quality(44_100),
     quality(48_000),
     quality(88_200),
@@ -75,7 +75,7 @@ const QUALITIES: [QualityDescriptorV1; 8] = [
     quality(352_800),
     quality(384_000),
 ];
-static DESCRIPTOR: EffectDescriptorV1 = EffectDescriptorV1 {
+static DESCRIPTOR: EffectDescriptor = EffectDescriptor {
     id: EFFECT_ID,
     display_name: "Test EQ",
     contract_major: 1,
@@ -90,7 +90,7 @@ static DESCRIPTOR: EffectDescriptorV1 = EffectDescriptorV1 {
 
 struct Factory;
 impl NativeEffectFactory for Factory {
-    fn descriptor(&self) -> &'static EffectDescriptorV1 {
+    fn descriptor(&self) -> &'static EffectDescriptor {
         &DESCRIPTOR
     }
     fn prepare(
@@ -180,7 +180,7 @@ fn launch_registry_prepares_the_accepted_nine_track_parametric_eq_fixture() {
         },
     )
     .expect("compiled fixture");
-    let registry = launch_native_effect_registry_v1().expect("launch registry");
+    let registry = launch_native_effect_registry().expect("launch registry");
     assert_eq!(registry.len(), 8);
     assert!(registry.get_ascii("miso.parametric-eq").is_some());
     assert!(registry.get_ascii("miso.compressor").is_some());

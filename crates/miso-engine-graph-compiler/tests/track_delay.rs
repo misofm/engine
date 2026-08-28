@@ -15,7 +15,7 @@
 //! `miso-engine-host-core`'s `track_delay.rs`.
 
 use miso_engine_effect_compiler::{
-    EffectCompileCaps, launch_native_effect_registry_v1, prepare_native_session_effects,
+    EffectCompileCaps, launch_native_effect_registry, prepare_native_session_effects,
 };
 use miso_engine_graph::{GraphCompileCaps, PreparedGraphPlan};
 use miso_engine_graph_compiler::{Backend, GraphCompileRequest, GraphCompiler};
@@ -135,7 +135,7 @@ struct Compiled {
 }
 
 fn compile(session: CompiledSession, caps: GraphCompileCaps) -> Result<Compiled, String> {
-    let registry = launch_native_effect_registry_v1().expect("launch registry");
+    let registry = launch_native_effect_registry().expect("launch registry");
     let effects = prepare_native_session_effects(
         &session,
         &registry,

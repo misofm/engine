@@ -66,9 +66,9 @@ is never an input and cannot be partially updated.
 
 ## Diagnostics
 
-`EffectStateMigrationDiagnosticV1` is a 56-byte C-layout value: `code: u32` at byte 0, `detail:
+`EffectStateMigrationDiagnostic` is a 56-byte C-layout value: `code: u32` at byte 0, `detail:
 u32` at 4, `item_index: u32` at 8, zero `reserved: u32` at 12, `required_bytes: u64` at 16, and the
-exact 32-byte `EffectStateDiagnosticV1` at 24. Unavailable outer index is `u32::MAX`. Only State
+exact 32-byte `EffectStateDiagnostic` at 24. Unavailable outer index is `u32::MAX`. Only State
 and Restore carry a non-Ok nested diagnostic; all other nested values are canonical Ok with
 unavailable nested index/offset.
 

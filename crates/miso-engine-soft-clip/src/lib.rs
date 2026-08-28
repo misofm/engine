@@ -30,10 +30,10 @@
 
 use miso_engine_effect_contract::{
     AutomationRate, AutomationSpanKind, BankProcessReport, BankWidth, EffectBankProcessBlock,
-    EffectDescriptorV1, EffectPrepareError, EffectProcessBlock, EffectQuality,
+    EffectDescriptor, EffectPrepareError, EffectProcessBlock, EffectQuality,
     InitialParameterValue, LatencySamples, LinkModeSet, NativeEffectFactory, ParameterChannel,
-    ParameterChannelPolicy, ParameterDescriptorV1, ParameterDomain, ParameterId, ParameterMapping,
-    ParameterUnit, PortDescriptorV1, PortId, PortLayout, PortRole, PrepareEffectBankRequest,
+    ParameterChannelPolicy, ParameterDescriptor, ParameterDomain, ParameterId, ParameterMapping,
+    ParameterUnit, PortDescriptor, PortId, PortLayout, PortRole, PrepareEffectBankRequest,
     PrepareEffectRequest, PreparedAutomationSpan, PreparedBankMetadata, PreparedEffectMetadata,
     PreparedNativeEffect, PreparedNativeEffectBank, ProcessReport, ResetKind, SmoothingRule,
     StatePayloadError, StatePayloadInput, StatePayloadOutput, StatePayloadSizes, TailSamples,
@@ -131,8 +131,8 @@ const fn parameter(
     minimum: f32,
     maximum: f32,
     default_value: f32,
-) -> ParameterDescriptorV1 {
-    ParameterDescriptorV1 {
+) -> ParameterDescriptor {
+    ParameterDescriptor {
         id: parameter_id(id),
         display_name,
         display_unit,
@@ -153,20 +153,20 @@ const fn parameter(
 }
 
 /// Frozen scalar soft-clip parameter rows, in stable numeric-ID order.
-pub const SOFT_CLIP_PARAMETERS_V1: [ParameterDescriptorV1; PARAMETER_COUNT] = [
+pub const SOFT_CLIP_PARAMETERS_V1: [ParameterDescriptor; PARAMETER_COUNT] = [
     parameter(1, "drive", "dB", ParameterUnit::Db, -24.0, 36.0, 0.0),
     parameter(2, "output", "dB", ParameterUnit::Db, -24.0, 24.0, 0.0),
     parameter(3, "mix", "linear", ParameterUnit::Linear, 0.0, 1.0, 1.0),
 ];
 
-const PORTS: [PortDescriptorV1; 2] = [
-    PortDescriptorV1 {
+const PORTS: [PortDescriptor; 2] = [
+    PortDescriptor {
         id: port_id("main-in"),
         role: PortRole::MainInput,
         required: true,
         layout: PortLayout::DualMonoPlanar,
     },
-    PortDescriptorV1 {
+    PortDescriptor {
         id: port_id("main-out"),
         role: PortRole::MainOutput,
         required: true,
@@ -174,8 +174,8 @@ const PORTS: [PortDescriptorV1; 2] = [
     },
 ];
 
-const fn quality(rate: u32) -> miso_engine_effect_contract::QualityDescriptorV1 {
-    miso_engine_effect_contract::QualityDescriptorV1 {
+const fn quality(rate: u32) -> miso_engine_effect_contract::QualityDescriptor {
+    miso_engine_effect_contract::QualityDescriptor {
         quality: EffectQuality::Normal,
         sample_rate: rate,
         latency: LatencySamples(31),
@@ -190,7 +190,7 @@ const fn quality(rate: u32) -> miso_engine_effect_contract::QualityDescriptorV1 
     }
 }
 
-const QUALITIES: [miso_engine_effect_contract::QualityDescriptorV1; 4] = [
+const QUALITIES: [miso_engine_effect_contract::QualityDescriptor; 4] = [
     quality(44_100),
     quality(48_000),
     quality(88_200),
@@ -198,7 +198,7 @@ const QUALITIES: [miso_engine_effect_contract::QualityDescriptorV1; 4] = [
 ];
 
 /// Immutable descriptor for the frozen cubic soft-clip contract.
-pub const SOFT_CLIP_DESCRIPTOR_V1: EffectDescriptorV1 = EffectDescriptorV1 {
+pub const SOFT_CLIP_DESCRIPTOR_V1: EffectDescriptor = EffectDescriptor {
     id: effect_id("miso.soft-clip"),
     display_name: "Cubic Soft Clip",
     contract_major: 1,
@@ -854,7 +854,7 @@ struct PreparedSoftClipBank<L: Lane> {
 }
 
 impl NativeEffectFactory for SoftClipFactory {
-    fn descriptor(&self) -> &'static EffectDescriptorV1 {
+    fn descriptor(&self) -> &'static EffectDescriptor {
         &SOFT_CLIP_DESCRIPTOR_V1
     }
 

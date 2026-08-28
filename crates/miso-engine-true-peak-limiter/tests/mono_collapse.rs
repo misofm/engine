@@ -14,7 +14,7 @@
 use miso_engine_effect_contract::{
     AutomationSpanKind, BankWidth, EffectBankProcessBlock, EffectQuality, InitialParameterValue,
     LinkMode, NativeEffectFactory, ParameterChannel, PrepareEffectBankRequest, PrepareEffectLimits,
-    PrepareEffectRequest, PreparedAutomationSpan, PreparedNativeEffectBank, PreparedPortsV1,
+    PrepareEffectRequest, PreparedAutomationSpan, PreparedNativeEffectBank, PreparedPorts,
     PreparedSidechainPort,
 };
 use miso_engine_lane::Backend;
@@ -56,7 +56,7 @@ fn request(values: &[InitialParameterValue]) -> PrepareEffectRequest<'_> {
         quality: EffectQuality::Normal,
         bypass: false,
         link_mode: LinkMode::Maximum,
-        ports: PreparedPortsV1 {
+        ports: PreparedPorts {
             sidechain: PreparedSidechainPort::None,
         },
         initial_values: values,

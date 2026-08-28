@@ -16,7 +16,7 @@ use miso_engine_effect_contract::{
 };
 use miso_engine_effect_contract::{
     EffectProcessBlock, EffectQuality, InitialParameterValue, LinkMode, NativeEffectFactory,
-    ParameterChannel, PrepareEffectLimits, PrepareEffectRequest, PreparedPortsV1,
+    ParameterChannel, PrepareEffectLimits, PrepareEffectRequest, PreparedPorts,
     PreparedSidechainPort,
 };
 
@@ -86,7 +86,7 @@ fn prepared(bypass: bool) -> Box<dyn PreparedNativeEffect> {
             quality: EffectQuality::Normal,
             bypass,
             link_mode: LinkMode::DualMono,
-            ports: PreparedPortsV1 {
+            ports: PreparedPorts {
                 sidechain: PreparedSidechainPort::Unconnected {
                     id: miso_engine_conformance::DUAL_ACCUMULATOR_DELAY_DESCRIPTOR.ports[1].id,
                     required: false,
@@ -267,7 +267,7 @@ fn benchmark() {
                         black_box(bank8.process_bank(block));
                     }
                     "descriptor_validation" => {
-                        black_box(miso_engine_effect_contract::validate_descriptor_v1(
+                        black_box(miso_engine_effect_contract::validate_descriptor(
                             effect.metadata().descriptor,
                         ))
                         .unwrap();

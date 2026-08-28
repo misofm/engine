@@ -64,7 +64,7 @@ recorded per row because the drain's consequences show up in three different cra
 
 | # | mutation | file | test | result |
 |---|---|---|---|---|
-| P3-M18 | `TrackInputRecordV1::SEAM` becomes `SeamSideV1::SeamSide` | `builtins-compiler/src/lib.rs` | `input_drain` (3 tests) | RED — `admit` compiles the clearing arm away and a one-lane ride stops gating the collapse |
+| P3-M18 | `TrackInputRecordV1::SEAM` becomes `SeamSide::SeamSide` | `builtins-compiler/src/lib.rs` | `input_drain` (3 tests) | RED — `admit` compiles the clearing arm away and a one-lane ride stops gating the collapse |
 | P3-M19 | every selector is admitted as `Desymmetrize` | `builtins-compiler/src/lib.rs` | `input_drain` (2 tests) | RED — a symmetric ride would retire a track's collapse for the life of the plan |
 | P3-M20 | every selector is admitted as `Preserve` | `builtins-compiler/src/lib.rs` | `input_drain` (3 tests) | RED |
 | P3-M21 | the bank drain never folds the witness | `builtins-compiler/src/lib.rs` | `host-core::input_liveness_console` (2 tests) | RED — the census does not move on a one-lane command |

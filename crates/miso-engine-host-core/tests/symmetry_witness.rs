@@ -42,9 +42,9 @@
 use core::num::{NonZeroU32, NonZeroUsize};
 
 use miso_engine_builtins::MeterTap;
-use miso_engine_effect_contract::{EffectControlRecordV1, ParameterChannel};
+use miso_engine_effect_contract::{EffectControlRecord, ParameterChannel};
 use miso_engine_host_core::{
-    ChannelSymmetryWitnessV1, EffectRack, HostConsoleHandlesV1, HostConsoleRequestV1,
+    ChannelSymmetryWitness, EffectRack, HostConsoleHandlesV1, HostConsoleRequestV1,
     HostPrepareCaps, HostShapePolicy, PreparedHost, SourceSubmission,
     prepare_host_session_with_console, session_structural_symmetry_v1,
 };
@@ -186,7 +186,7 @@ fn render(console: &mut Console, blocks: usize) {
     console.block += blocks;
 }
 
-fn push(console: &mut Console, track_id: &str, record: EffectControlRecordV1) {
+fn push(console: &mut Console, track_id: &str, record: EffectControlRecord) {
     let producer = console
         .handles
         .effect_controls
@@ -203,8 +203,8 @@ fn push(console: &mut Console, track_id: &str, record: EffectControlRecordV1) {
         .expect("room in the bounded queue");
 }
 
-fn parameter(channel: ParameterChannel, value: f32) -> EffectControlRecordV1 {
-    EffectControlRecordV1::Parameter {
+fn parameter(channel: ParameterChannel, value: f32) -> EffectControlRecord {
+    EffectControlRecord::Parameter {
         parameter_index: BAND_GAIN_INDEX,
         channel,
         value,
@@ -241,7 +241,7 @@ fn the_structural_witness_follows_the_source_mapping() {
         assert_eq!(witnesses.len(), TRACKS, "{name}: one witness per track");
         for (track, witness) in &witnesses {
             assert_eq!(
-                witness.holds(ChannelSymmetryWitnessV1::SOURCE),
+                witness.holds(ChannelSymmetryWitness::SOURCE),
                 expected,
                 "{name}: track {track} SOURCE term"
             );
@@ -253,7 +253,7 @@ fn the_structural_witness_follows_the_source_mapping() {
             if !expected {
                 assert_eq!(
                     witness.declined(),
-                    ChannelSymmetryWitnessV1::SOURCE,
+                    ChannelSymmetryWitness::SOURCE,
                     "{name}: a stereo mapping declines on SOURCE and nothing else"
                 );
             }
@@ -265,7 +265,7 @@ fn the_structural_witness_follows_the_source_mapping() {
 /// agnostic**, and a session that is fully symmetric at runtime can still be structurally
 /// ineligible.
 ///
-/// Red mutation: make `symmetry_counters` fold `ChannelSymmetryWitnessV1::DECLINED` for any node
+/// Red mutation: make `symmetry_counters` fold `ChannelSymmetryWitness::DECLINED` for any node
 /// kind, or make `track_mono_source_v1` constant -> one of the two halves stops discriminating and
 /// this fails.
 #[test]
@@ -303,10 +303,10 @@ fn the_two_halves_of_the_witness_are_decided_independently() {
 
     // The conjunction is what a collapse would ask, and it is nobody's default: an eligible lane
     // and an ineligible track compose to ineligible.
-    let combined = ChannelSymmetryWitnessV1::SYMMETRIC
+    let combined = ChannelSymmetryWitness::SYMMETRIC
         .and(session_structural_symmetry_v1(&stereo_session)[0].1);
     assert!(!combined.eligible());
-    assert_eq!(combined.declined(), ChannelSymmetryWitnessV1::SOURCE);
+    assert_eq!(combined.declined(), ChannelSymmetryWitness::SOURCE);
 }
 
 /// The input builtins' designed-word term, through a real session.
@@ -386,7 +386,7 @@ fn declining_tracks(console: &Console) -> std::collections::BTreeSet<String> {
 /// The mono fixture with per-track edits, addressed by track index.
 ///
 /// The two levers are the two the tests below need, and they are levers on *different* things.
-/// `bypass` sets a track's EQ to prepare-time bypass, which changes its `EffectProgramKeyV1` and so
+/// `bypass` sets a track's EQ to prepare-time bypass, which changes its `EffectProgramKey` and so
 /// its cohort; `invert` flips one channel's polarity, which clears that track's `DESIGNED` term and
 /// so its **pool class** (mono-collapse M1). Two independent two-valued splits give four cohorts
 /// over eight tracks, which is how [`the_scalar_console_effect_arm_maintains_its_own_live_terms`]
@@ -462,7 +462,7 @@ fn a_prepare_time_bypass_seeds_the_unbypassed_term_before_any_render() {
 /// # How the arm is made bank-free at every launch width
 ///
 /// Two independent splits over the eight tracks: a prepare-time bypass (which changes the
-/// `EffectProgramKeyV1`, so bypassed and unbypassed tracks can never share a bank) crossed with a
+/// `EffectProgramKey`, so bypassed and unbypassed tracks can never share a bank) crossed with a
 /// polarity inversion (which clears `DESIGNED`, so mono-collapse M1's pool class separates them).
 /// Four cohorts of two, and the narrowest launch bank is four lanes, so **no** effect bank binds
 /// and every EQ is a per-node `ConsoleEffect`. The assertion on `effect_bank_scratch_bytes` is
@@ -489,7 +489,7 @@ fn the_scalar_console_effect_arm_maintains_its_own_live_terms() {
     );
 
     // Lifting a prepare-time bypass through the scalar drain re-earns the term.
-    push(&mut console, "eq4", EffectControlRecordV1::Bypass(false));
+    push(&mut console, "eq4", EffectControlRecord::Bypass(false));
     render(&mut console, 1);
     assert!(
         !declining_tracks(&console).contains("eq4"),
@@ -637,15 +637,15 @@ fn a_both_channel_command_preserves_every_lane_including_mid_ramp() {
     }
 }
 
-/// Red mutation: change `EffectControlRecordV1::symmetry_event`'s `Bypass` arm to
-/// `SymmetryEventV1::Preserve` -> the bypass half fails while every parameter test stays green.
+/// Red mutation: change `EffectControlRecord::symmetry_event`'s `Bypass` arm to
+/// `SymmetryEvent::Preserve` -> the bypass half fails while every parameter test stays green.
 #[test]
 fn a_live_bypass_declines_its_lane_and_lifting_it_re_earns_the_term() {
     let (_session, mut console) = prepare(&mono_session());
     let [before, lanes] = census(&console);
     assert_eq!(before, lanes, "the mono fixture starts fully eligible");
 
-    push(&mut console, "eq5", EffectControlRecordV1::Bypass(true));
+    push(&mut console, "eq5", EffectControlRecord::Bypass(true));
     render(&mut console, 1);
     assert_eq!(
         census(&console),
@@ -653,7 +653,7 @@ fn a_live_bypass_declines_its_lane_and_lifting_it_re_earns_the_term() {
         "a bypassed lane declines: its dry shunt copies both planes, so the cohort cannot collapse"
     );
 
-    push(&mut console, "eq5", EffectControlRecordV1::Bypass(false));
+    push(&mut console, "eq5", EffectControlRecord::Bypass(false));
     render(&mut console, 1);
     assert_eq!(
         census(&console),
@@ -668,8 +668,8 @@ fn a_live_bypass_declines_its_lane_and_lifting_it_re_earns_the_term() {
         "eq5",
         parameter(ParameterChannel::Right, -3.0),
     );
-    push(&mut console, "eq5", EffectControlRecordV1::Bypass(true));
-    push(&mut console, "eq5", EffectControlRecordV1::Bypass(false));
+    push(&mut console, "eq5", EffectControlRecord::Bypass(true));
+    push(&mut console, "eq5", EffectControlRecord::Bypass(false));
     render(&mut console, 1);
     assert_eq!(
         census(&console),
@@ -687,7 +687,7 @@ fn an_observe_record_never_moves_the_witness() {
     push(
         &mut console,
         "eq1",
-        EffectControlRecordV1::Observe {
+        EffectControlRecord::Observe {
             tap_index: 0,
             armed: true,
             window_blocks: 1,
@@ -706,7 +706,7 @@ fn an_observe_record_never_moves_the_witness() {
 /// drain of theirs can reach a witness.
 ///
 /// Red mutation: change `SEAM_SIDE_WITNESS` to `DECLINED`, or make
-/// `ChannelSymmetryWitnessV1::admit` ignore `R::SEAM` -> this fails.
+/// `ChannelSymmetryWitness::admit` ignore `R::SEAM` -> this fails.
 #[test]
 fn seam_side_console_traffic_leaves_every_lane_eligible() {
     use miso_engine_builtins::BuiltinLaneSelector;

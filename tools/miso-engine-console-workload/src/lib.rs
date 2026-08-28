@@ -47,12 +47,12 @@ use miso_engine_core::realtime::{
     PlanUnitEligibilityV1, PlanarBufferMut, PreparedRenderPlan, RenderIo, RenderTime,
 };
 use miso_engine_effect_compiler::{
-    EffectCompileCaps, EffectControlProducerV1, EffectObservationHandleV1,
-    attach_effect_console_v1, attach_effect_observation_v1, launch_native_effect_registry_v1,
+    EffectCompileCaps, EffectControlProducer, EffectObservationHandle,
+    attach_effect_console, attach_effect_observation, launch_native_effect_registry,
     prepare_native_session_effects,
 };
 use miso_engine_effect_contract::{
-    ChannelSymmetryWitnessV1, EffectControlRecordV1, ParameterChannel,
+    ChannelSymmetryWitness, EffectControlRecord, ParameterChannel,
 };
 use miso_engine_graph::{
     GraphBindingBlock, GraphNodeBinding, GraphNodeId, GraphRuntimeBindings, GraphRuntimeProcessor,
@@ -75,7 +75,7 @@ pub const PLAN_ID: u64 = 149;
 ///
 /// Deliberately one number for both: a gain-reduction value and the peak beside it in one console
 /// frame have to describe the same span of samples, which is the rule
-/// `attach_effect_observation_v1` states and the rule a host follows.
+/// `attach_effect_observation` states and the rule a host follows.
 pub const WINDOW_BLOCKS: u32 = 4;
 /// Bounded depth of each effect's live-console control channel in the observation arms.
 pub const CONTROL_QUEUE_DEPTH: usize = 8;
@@ -105,7 +105,7 @@ const SIXTY_FOUR_TRACK: &str =
 /// source channel 0, `builtins.right` copies `builtins.left`, and every `channel = "right"`
 /// effect parameter takes its `channel = "left"` sibling's value. Those are exactly the two
 /// structural terms of the per-track channel-symmetry witness
-/// (`miso_engine_effect_contract::ChannelSymmetryWitnessV1`: `SOURCE` and `DESIGNED`), so every
+/// (`miso_engine_effect_contract::ChannelSymmetryWitness`: `SOURCE` and `DESIGNED`), so every
 /// track of this fixture is collapse-eligible.
 ///
 /// The fader and pan asymmetry and the limiter's `maximum` link are deliberately *kept*; the
@@ -644,7 +644,7 @@ pub struct PlanConfig {
 /// The three points of the issue #143 two-level zero, as benchmark arms.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ObservationArm {
-    /// Level 1: no lane exists. `attach_effect_observation_v1` is never called.
+    /// Level 1: no lane exists. `attach_effect_observation` is never called.
     Absent,
     /// Level 2: the lane exists and no tap is armed. One predicted branch per effect per block.
     Unarmed,
@@ -747,8 +747,8 @@ pub struct SessionRuntime {
     output: Vec<f32>,
     /// Control-side halves, held for the arms that attached them. Never touched inside the clock.
     meter_consumers: Vec<MeterConsumer>,
-    controls: Vec<EffectControlProducerV1>,
-    observations: Vec<EffectObservationHandleV1>,
+    controls: Vec<EffectControlProducer>,
+    observations: Vec<EffectObservationHandle>,
     /// Every track's *structural* channel-symmetry witness, in normalized track order, taken at
     /// compile time.
     ///
@@ -762,7 +762,7 @@ pub struct SessionRuntime {
     /// keyed by track id and the runtime half ([`SessionRuntime::unit_eligibility`]) by anonymous
     /// lanes, and a collapse decision is their conjunction. `PlanUnitEligibilityV1::lane_tracks`
     /// is the relation between the two keys.
-    structural_symmetry: Vec<(Box<str>, ChannelSymmetryWitnessV1)>,
+    structural_symmetry: Vec<(Box<str>, ChannelSymmetryWitness)>,
 }
 
 impl SessionRuntime {
@@ -841,14 +841,14 @@ impl SessionRuntime {
         } else {
             Vec::new()
         };
-        let registry = launch_native_effect_registry_v1().expect("launch effect registry");
+        let registry = launch_native_effect_registry().expect("launch effect registry");
         let mut effects = prepare_native_session_effects(&session, &registry, effect_caps())
             .expect("prepared console effects");
         // Both attaches are the production entry points, called in the order a host calls them.
         // The control channel is attached for every observation arm including `Absent`, so the
         // paired delta between the arms is the observation lane and not the control queue drain.
         let controls = if config.control {
-            attach_effect_console_v1(
+            attach_effect_console(
                 &mut effects,
                 NonZeroUsize::new(CONTROL_QUEUE_DEPTH).expect("nonzero depth"),
             )
@@ -859,7 +859,7 @@ impl SessionRuntime {
         let observations = if config.observation == ObservationArm::Absent {
             Vec::new()
         } else {
-            attach_effect_observation_v1(&mut effects, MAXIMUM_OBSERVATION_TAPS, WINDOW_BLOCKS)
+            attach_effect_observation(&mut effects, MAXIMUM_OBSERVATION_TAPS, WINDOW_BLOCKS)
                 .expect("effect observation capacity")
         };
         let silent = workload.input_signal() == "silence";
@@ -986,7 +986,7 @@ impl SessionRuntime {
             for tap_index in 0..producer.descriptor.observations.len() as u32 {
                 producer
                     .producer
-                    .try_push(EffectControlRecordV1::Observe {
+                    .try_push(EffectControlRecord::Observe {
                         tap_index,
                         armed: true,
                         window_blocks: WINDOW_BLOCKS,
@@ -999,7 +999,7 @@ impl SessionRuntime {
     /// The live-console control channel of the alphabetically first track carrying `effect_id`.
     ///
     /// "One track" has to be chosen by a stable key rather than by taking the first matching
-    /// channel: [`attach_effect_console_v1`] returns channels in prepared-entry order, which is
+    /// channel: [`attach_effect_console`] returns channels in prepared-entry order, which is
     /// sorted by effect id and not by track, so a positional choice would silently address a
     /// different track when the entry set changes. The track id is the session-stable identity, so
     /// picking its minimum is deterministic across every build of every fixture.
@@ -1042,7 +1042,7 @@ impl SessionRuntime {
     pub fn push_bypass(&mut self, channel: usize, bypassed: bool) -> bool {
         self.controls[channel]
             .producer
-            .try_push(EffectControlRecordV1::Bypass(bypassed))
+            .try_push(EffectControlRecord::Bypass(bypassed))
             .is_ok()
     }
 
@@ -1068,7 +1068,7 @@ impl SessionRuntime {
     ) -> bool {
         self.controls[channel]
             .producer
-            .try_push(EffectControlRecordV1::Parameter {
+            .try_push(EffectControlRecord::Parameter {
                 parameter_index,
                 channel: parameter_channel,
                 value,
@@ -1184,7 +1184,7 @@ impl SessionRuntime {
     /// one of its four terms), so a plan whose every designed word is symmetric reports every
     /// lane eligible whatever its tracks' source mappings are. Neither half is the answer alone.
     #[must_use]
-    pub fn structural_symmetry(&self) -> &[(Box<str>, ChannelSymmetryWitnessV1)] {
+    pub fn structural_symmetry(&self) -> &[(Box<str>, ChannelSymmetryWitness)] {
         &self.structural_symmetry
     }
 

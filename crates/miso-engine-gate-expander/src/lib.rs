@@ -27,12 +27,12 @@ pub mod kernel;
 
 use miso_engine_effect_contract::{
     AutomationRate, AutomationSpanKind, BankProcessReport, BankWidth, EffectBankProcessBlock,
-    EffectDescriptorV1, EffectPrepareError, EffectProcessBlock, EffectQuality,
+    EffectDescriptor, EffectPrepareError, EffectProcessBlock, EffectQuality,
     InitialParameterValue, LatencySamples, LinkMode, LinkModeSet, NativeEffectFactory,
-    ObservationCadenceV1, ObservationChannelsV1, ObservationCostV1, ObservationDescriptorV1,
-    ObservationFoldV1, ObservationKindV1, ObservationSampleV1, ObservationTapId, ParameterChannel,
-    ParameterChannelPolicy, ParameterDescriptorV1, ParameterDomain, ParameterId, ParameterMapping,
-    ParameterUnit, PortDescriptorV1, PortId, PortLayout, PortRole, PrepareEffectBankRequest,
+    ObservationCadenceV1, ObservationChannelsV1, ObservationCostV1, ObservationDescriptor,
+    ObservationFoldV1, ObservationKindV1, ObservationSample, ObservationTapId, ParameterChannel,
+    ParameterChannelPolicy, ParameterDescriptor, ParameterDomain, ParameterId, ParameterMapping,
+    ParameterUnit, PortDescriptor, PortId, PortLayout, PortRole, PrepareEffectBankRequest,
     PrepareEffectRequest, PreparedAutomationSpan, PreparedBankMetadata, PreparedEffectMetadata,
     PreparedNativeEffect, PreparedNativeEffectBank, PreparedSidechainPort, ProcessReport,
     ResetKind, SmoothingRule, StatePayloadError, StatePayloadInput, StatePayloadOutput,
@@ -94,8 +94,8 @@ const fn parameter(
     automation_rate: AutomationRate,
     smoothing: SmoothingRule,
     smoothing_samples: u32,
-) -> ParameterDescriptorV1 {
-    ParameterDescriptorV1 {
+) -> ParameterDescriptor {
+    ParameterDescriptor {
         id: parameter_id(id),
         display_name,
         display_unit,
@@ -116,7 +116,7 @@ const fn parameter(
 }
 
 /// Frozen V1 gate/expander parameters. Descriptor position and stable numeric ID agree.
-pub const GATE_EXPANDER_PARAMETERS_V1: [ParameterDescriptorV1; PARAMETER_COUNT] = [
+pub const GATE_EXPANDER_PARAMETERS_V1: [ParameterDescriptor; PARAMETER_COUNT] = [
     parameter(
         1,
         "threshold",
@@ -223,20 +223,20 @@ pub const GATE_EXPANDER_PARAMETERS_V1: [ParameterDescriptorV1; PARAMETER_COUNT] 
     ),
 ];
 
-const PORTS: [PortDescriptorV1; 3] = [
-    PortDescriptorV1 {
+const PORTS: [PortDescriptor; 3] = [
+    PortDescriptor {
         id: port_id("main-in"),
         role: PortRole::MainInput,
         required: true,
         layout: PortLayout::DualMonoPlanar,
     },
-    PortDescriptorV1 {
+    PortDescriptor {
         id: port_id("main-out"),
         role: PortRole::MainOutput,
         required: true,
         layout: PortLayout::DualMonoPlanar,
     },
-    PortDescriptorV1 {
+    PortDescriptor {
         id: port_id("sidechain-in"),
         role: PortRole::SidechainInput,
         required: false,
@@ -255,10 +255,10 @@ const PORTS: [PortDescriptorV1; 3] = [
 const fn quality(
     sample_rate: u32,
     latency: u64,
-) -> miso_engine_effect_contract::QualityDescriptorV1 {
+) -> miso_engine_effect_contract::QualityDescriptor {
     let per_lane = (STATE_LANE_HEADER_WORDS as u32 + 2 * latency as u32) * 4;
     let common = payload::HEADER_WORDS * payload::WORD_BYTES as u32;
-    miso_engine_effect_contract::QualityDescriptorV1 {
+    miso_engine_effect_contract::QualityDescriptor {
         quality: EffectQuality::Normal,
         sample_rate,
         latency: LatencySamples(latency),
@@ -273,7 +273,7 @@ const fn quality(
     }
 }
 
-const QUALITIES: [miso_engine_effect_contract::QualityDescriptorV1; 4] = [
+const QUALITIES: [miso_engine_effect_contract::QualityDescriptor; 4] = [
     quality(44_100, 441),
     quality(48_000, 480),
     quality(88_200, 882),
@@ -293,7 +293,7 @@ pub const STATE_LAYOUT_VERSION: u32 = 2;
 /// `GateState::gain_db` is what `gate_block` writes every sample and reads back on the next one,
 /// in decibels and negative for reduction -- a closed gate holds a large negative number and an
 /// open one holds `+0.0`. Publishing it is a copy out of state the block wrote anyway.
-pub const GATE_EXPANDER_OBSERVATIONS_V1: [ObservationDescriptorV1; 1] = [ObservationDescriptorV1 {
+pub const GATE_EXPANDER_OBSERVATIONS_V1: [ObservationDescriptor; 1] = [ObservationDescriptor {
     id: ObservationTapId(1),
     display_name: "Gain Reduction",
     display_unit: "dB",
@@ -308,7 +308,7 @@ pub const GATE_EXPANDER_OBSERVATIONS_V1: [ObservationDescriptorV1; 1] = [Observa
 }];
 
 /// Immutable descriptor for the launch gate/expander contract.
-pub const GATE_EXPANDER_DESCRIPTOR_V1: EffectDescriptorV1 = EffectDescriptorV1 {
+pub const GATE_EXPANDER_DESCRIPTOR_V1: EffectDescriptor = EffectDescriptor {
     id: effect_id("miso.gate-expander"),
     display_name: "Gate / Expander",
     contract_major: 1,
@@ -1000,7 +1000,7 @@ impl<const CONNECTED: bool> PreparedNativeEffect for PreparedGate<f32, CONNECTED
     }
 
     /// Issue #143 D2: the branching smoother's own gain word, read for lane 0.
-    fn observe_resident(&self, tap_index: u32, out: &mut ObservationSampleV1) -> bool {
+    fn observe_resident(&self, tap_index: u32, out: &mut ObservationSample) -> bool {
         if tap_index != 0 {
             return false;
         }
@@ -1040,7 +1040,7 @@ macro_rules! bank_impl {
             fn observe_resident_bank(
                 &self,
                 tap_index: u32,
-                out: &mut [ObservationSampleV1],
+                out: &mut [ObservationSample],
             ) -> bool {
                 let lanes = <$lane as Lane>::WIDTH;
                 if tap_index != 0 || out.len() != lanes {
@@ -1154,7 +1154,7 @@ fn initial_defaults(
 }
 
 impl NativeEffectFactory for GateExpanderFactory {
-    fn descriptor(&self) -> &'static EffectDescriptorV1 {
+    fn descriptor(&self) -> &'static EffectDescriptor {
         &GATE_EXPANDER_DESCRIPTOR_V1
     }
 
@@ -1248,7 +1248,7 @@ impl NativeEffectFactory for GateExpanderFactory {
 mod tests {
     use super::*;
     use miso_engine_effect_contract::{
-        PrepareEffectLimits, PreparedPortsV1, validate_descriptor_v1,
+        PrepareEffectLimits, PreparedPorts, validate_descriptor,
     };
     use miso_engine_effect_runtime::params::ParameterKind;
 
@@ -1290,7 +1290,7 @@ mod tests {
                 quality: EffectQuality::Normal,
                 bypass: false,
                 link_mode: LinkMode::DualMono,
-                ports: PreparedPortsV1 {
+                ports: PreparedPorts {
                     sidechain: PreparedSidechainPort::Unconnected {
                         id: port_id("sidechain-in"),
                         required: false,
@@ -1322,7 +1322,7 @@ mod tests {
 
     #[test]
     fn the_runtime_parameter_specs_agree_with_the_frozen_descriptor() {
-        validate_descriptor_v1(&GATE_EXPANDER_DESCRIPTOR_V1).expect("descriptor");
+        validate_descriptor(&GATE_EXPANDER_DESCRIPTOR_V1).expect("descriptor");
         for (index, descriptor) in GATE_EXPANDER_PARAMETERS_V1.iter().enumerate() {
             let spec = GATE_SPECS[index];
             assert_eq!(spec.kind, ParameterKind::Continuous, "parameter {index}");

@@ -35,13 +35,13 @@
 use miso_engine_core::{SampleRateHz, is_launch_sample_rate};
 use miso_engine_effect_contract::{
     AutomationRate, AutomationSpanKind, BankProcessReport, BankWidth, EffectBankProcessBlock,
-    EffectDescriptorV1, EffectPrepareError, EffectProcessBlock, EffectQuality as Quality,
-    EnumChoiceV1, InitialParameterValue, LatencySamples, LinkModeSet, NativeEffectFactory,
-    ParameterChannel, ParameterChannelPolicy, ParameterDescriptorV1, ParameterDomain, ParameterId,
-    ParameterMapping, ParameterUnit, PortDescriptorV1, PortId, PortLayout, PortRole,
+    EffectDescriptor, EffectPrepareError, EffectProcessBlock, EffectQuality as Quality,
+    EnumChoice, InitialParameterValue, LatencySamples, LinkModeSet, NativeEffectFactory,
+    ParameterChannel, ParameterChannelPolicy, ParameterDescriptor, ParameterDomain, ParameterId,
+    ParameterMapping, ParameterUnit, PortDescriptor, PortId, PortLayout, PortRole,
     PrepareEffectBankRequest, PrepareEffectRequest, PreparedAutomationSpan, PreparedBankMetadata,
     PreparedEffectMetadata, PreparedNativeEffect, PreparedNativeEffectBank, ProcessReport,
-    QualityDescriptorV1, ResetKind, SmoothingRule, StatePayloadError, StatePayloadInput,
+    QualityDescriptor, ResetKind, SmoothingRule, StatePayloadError, StatePayloadInput,
     StatePayloadOutput, StatePayloadSizes, TailSamples, expected_prepared_metadata,
 };
 use miso_engine_effect_runtime::bank::{
@@ -204,28 +204,28 @@ pub const EQ_BAND_DESCRIPTORS_V1: [EqBandDescriptorV1; EQ_SECTION_COUNT_V1] = {
     bands
 };
 
-const KIND_CHOICES: [EnumChoiceV1; 6] = [
-    EnumChoiceV1 {
+const KIND_CHOICES: [EnumChoice; 6] = [
+    EnumChoice {
         value: 1.0,
         label: "bell",
     },
-    EnumChoiceV1 {
+    EnumChoice {
         value: 2.0,
         label: "low-shelf",
     },
-    EnumChoiceV1 {
+    EnumChoice {
         value: 3.0,
         label: "high-shelf",
     },
-    EnumChoiceV1 {
+    EnumChoice {
         value: 4.0,
         label: "low-pass",
     },
-    EnumChoiceV1 {
+    EnumChoice {
         value: 5.0,
         label: "high-pass",
     },
-    EnumChoiceV1 {
+    EnumChoice {
         value: 6.0,
         label: "notch",
     },
@@ -312,9 +312,9 @@ const MAPPINGS: [ParameterMapping; 6] = [
 ];
 
 /// One descriptor of one field of one band.
-const fn parameter(band: usize, field: usize) -> ParameterDescriptorV1 {
+const fn parameter(band: usize, field: usize) -> ParameterDescriptor {
     let automatable = field >= 2;
-    ParameterDescriptorV1 {
+    ParameterDescriptor {
         id: parameter_id(band_base(band) + field as u32),
         display_name: PARAMETER_NAMES[band * 6 + field],
         display_unit: DISPLAY_UNITS[field],
@@ -346,7 +346,7 @@ const fn parameter(band: usize, field: usize) -> ParameterDescriptorV1 {
     }
 }
 
-const EQ_PARAMETERS: [ParameterDescriptorV1; EQ_SECTION_COUNT_V1 * 6] = {
+const EQ_PARAMETERS: [ParameterDescriptor; EQ_SECTION_COUNT_V1 * 6] = {
     let mut table = [parameter(0, 0); EQ_SECTION_COUNT_V1 * 6];
     let mut band = 0;
     while band < EQ_SECTION_COUNT_V1 {
@@ -360,14 +360,14 @@ const EQ_PARAMETERS: [ParameterDescriptorV1; EQ_SECTION_COUNT_V1 * 6] = {
     table
 };
 
-const PORTS: [PortDescriptorV1; 2] = [
-    PortDescriptorV1 {
+const PORTS: [PortDescriptor; 2] = [
+    PortDescriptor {
         id: port_id("main-in"),
         role: PortRole::MainInput,
         required: true,
         layout: PortLayout::DualMonoPlanar,
     },
-    PortDescriptorV1 {
+    PortDescriptor {
         id: port_id("main-out"),
         role: PortRole::MainOutput,
         required: true,
@@ -375,15 +375,15 @@ const PORTS: [PortDescriptorV1; 2] = [
     },
 ];
 
-const QUALITIES: [QualityDescriptorV1; 4] = [
+const QUALITIES: [QualityDescriptor; 4] = [
     quality(44_100),
     quality(48_000),
     quality(88_200),
     quality(96_000),
 ];
 
-const fn quality(sample_rate: u32) -> QualityDescriptorV1 {
-    QualityDescriptorV1 {
+const fn quality(sample_rate: u32) -> QualityDescriptor {
+    QualityDescriptor {
         quality: Quality::Normal,
         sample_rate,
         latency: LatencySamples(0),
@@ -399,7 +399,7 @@ const fn quality(sample_rate: u32) -> QualityDescriptorV1 {
 }
 
 /// Authoritative static V1 effect metadata.
-pub static PARAMETRIC_EQ_DESCRIPTOR_V1: EffectDescriptorV1 = EffectDescriptorV1 {
+pub static PARAMETRIC_EQ_DESCRIPTOR_V1: EffectDescriptor = EffectDescriptor {
     id: effect_id("miso.parametric-eq"),
     display_name: "Parametric EQ",
     contract_major: 1,
@@ -2068,7 +2068,7 @@ fn prepare_width<L: Lane, const W: usize>(
 }
 
 impl NativeEffectFactory for ParametricEqFactory {
-    fn descriptor(&self) -> &'static EffectDescriptorV1 {
+    fn descriptor(&self) -> &'static EffectDescriptor {
         &PARAMETRIC_EQ_DESCRIPTOR_V1
     }
 

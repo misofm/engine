@@ -34,7 +34,7 @@ use crate::{
     PARAMETER_COUNT, RAMP_SAMPLES, Shaper, TRANSIENT_SHAPER_DESCRIPTOR_V1, coefficient_row,
 };
 use miso_engine_effect_contract::{
-    EffectQuality, LatencySamples, LinkMode, PreparedEffectMetadata, PreparedPortsV1,
+    EffectQuality, LatencySamples, LinkMode, PreparedEffectMetadata, PreparedPorts,
     PreparedSidechainPort, StatePayloadSizes, TailSamples,
 };
 
@@ -192,7 +192,7 @@ fn metadata(case: usize) -> PreparedEffectMetadata {
             1 => LinkMode::Maximum,
             _ => LinkMode::Average,
         },
-        ports: PreparedPortsV1 {
+        ports: PreparedPorts {
             sidechain: PreparedSidechainPort::None,
         },
         latency: LatencySamples(0),

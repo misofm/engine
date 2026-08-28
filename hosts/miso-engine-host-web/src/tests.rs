@@ -2639,7 +2639,7 @@ fn native_observation_timeline_digest_pins_the_wasm_parity() {
 ///
 /// | field | wasm32 | x86-64 |
 /// |---|---|---|
-/// | `effect_observations: Box<[Option<EffectObservationHandleV1>]>` | 8 | 16 |
+/// | `effect_observations: Box<[Option<EffectObservationHandle>]>` | 8 | 16 |
 /// | `observation_tracks: Box<[u32]>` | 8 | 16 |
 /// | `observation_present: Box<[bool]>` | 8 | 16 |
 /// | `observation_armed: Box<[u32]>` | 8 | 16 |
@@ -2651,7 +2651,7 @@ fn native_observation_timeline_digest_pins_the_wasm_parity() {
 /// alignment. Nothing else in the report moved, which the oracle's `deepStrictEqual` proves.
 #[test]
 fn the_observation_fields_account_for_the_moved_bridge_rows() {
-    let fields = size_of::<Box<[Option<miso_engine_host_core::EffectObservationHandleV1>]>>()
+    let fields = size_of::<Box<[Option<miso_engine_host_core::EffectObservationHandle>]>>()
         + size_of::<Box<[u32]>>()
         + size_of::<Box<[bool]>>()
         + size_of::<Box<[u32]>>()
@@ -2684,8 +2684,8 @@ fn the_observation_fields_account_for_the_moved_bridge_rows() {
 #[test]
 fn a_computed_tap_is_refused_with_unsupported_kind() {
     use miso_engine_effect_contract::{
-        EffectDescriptorV1, EffectId, LinkModeSet, ObservationCadenceV1, ObservationChannelsV1,
-        ObservationCostV1, ObservationDescriptorV1, ObservationFoldV1, ObservationKindV1,
+        EffectDescriptor, EffectId, LinkModeSet, ObservationCadenceV1, ObservationChannelsV1,
+        ObservationCostV1, ObservationDescriptor, ObservationFoldV1, ObservationKindV1,
         ObservationTapId, ParameterUnit,
     };
 
@@ -2693,8 +2693,8 @@ fn a_computed_tap_is_refused_with_unsupported_kind() {
         id: u32,
         cost: ObservationCostV1,
         cadence: ObservationCadenceV1,
-    ) -> ObservationDescriptorV1 {
-        ObservationDescriptorV1 {
+    ) -> ObservationDescriptor {
+        ObservationDescriptor {
             id: ObservationTapId(id),
             display_name: "Gain Reduction",
             display_unit: "dB",
@@ -2708,7 +2708,7 @@ fn a_computed_tap_is_refused_with_unsupported_kind() {
             maximum: 100.0,
         }
     }
-    static MENU: [ObservationDescriptorV1; 2] = [
+    static MENU: [ObservationDescriptor; 2] = [
         tap(
             1,
             ObservationCostV1::Resident,
@@ -2720,7 +2720,7 @@ fn a_computed_tap_is_refused_with_unsupported_kind() {
             ObservationCadenceV1::PerWindow,
         ),
     ];
-    static DESCRIPTOR: EffectDescriptorV1 = EffectDescriptorV1 {
+    static DESCRIPTOR: EffectDescriptor = EffectDescriptor {
         id: match EffectId::new("test.observation") {
             Ok(value) => value,
             Err(_) => panic!("fixture id"),
@@ -2785,11 +2785,11 @@ fn a_computed_tap_is_refused_with_unsupported_kind() {
 #[test]
 fn observation_unit_conversion_is_declared_and_clamped() {
     use miso_engine_effect_contract::{
-        ObservationCadenceV1, ObservationChannelsV1, ObservationCostV1, ObservationDescriptorV1,
+        ObservationCadenceV1, ObservationChannelsV1, ObservationCostV1, ObservationDescriptor,
         ObservationFoldV1, ObservationKindV1, ObservationTapId, ParameterUnit,
     };
-    const fn tap(unit: ParameterUnit) -> ObservationDescriptorV1 {
-        ObservationDescriptorV1 {
+    const fn tap(unit: ParameterUnit) -> ObservationDescriptor {
+        ObservationDescriptor {
             id: ObservationTapId(1),
             display_name: "Gain Reduction",
             display_unit: "dB",

@@ -24,7 +24,7 @@ use std::time::Instant;
 use miso_engine_effect_contract::{
     BankWidth, EffectBankProcessBlock, EffectQuality, InitialParameterValue, LinkMode,
     NativeEffectFactory, ParameterChannel, PrepareEffectBankRequest, PrepareEffectLimits,
-    PrepareEffectRequest, PreparedNativeEffectBank, PreparedPortsV1, PreparedSidechainPort,
+    PrepareEffectRequest, PreparedNativeEffectBank, PreparedPorts, PreparedSidechainPort,
 };
 use miso_engine_lane::Backend;
 use miso_engine_soft_clip::{SOFT_CLIP_PARAMETERS_V1, SoftClipFactory};
@@ -59,7 +59,7 @@ fn request<'a>(values: &'a [InitialParameterValue]) -> PrepareEffectRequest<'a> 
         quality: EffectQuality::Normal,
         bypass: false,
         link_mode: LinkMode::DualMono,
-        ports: PreparedPortsV1 {
+        ports: PreparedPorts {
             sidechain: PreparedSidechainPort::None,
         },
         initial_values: values,

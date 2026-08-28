@@ -20,7 +20,7 @@
 
 use miso_engine_builtins::test_support::{bank_lane_state_words, bank_trim_ramp_words};
 use miso_engine_builtins::*;
-use miso_engine_effect_contract::{BankWidth, ChannelSymmetryWitnessV1};
+use miso_engine_effect_contract::{BankWidth, ChannelSymmetryWitness};
 use miso_engine_lane::Backend;
 
 const BANKS: [(Backend, BankWidth); 2] = [
@@ -121,7 +121,7 @@ fn an_asymmetric_retarget_declines_the_lane_on_the_admitting_block() {
             assert!(
                 !bank
                     .lane_symmetry(0)
-                    .holds(ChannelSymmetryWitnessV1::DESIGNED),
+                    .holds(ChannelSymmetryWitness::DESIGNED),
                 "{command} at {width:?}: an asymmetric retarget declines the lane immediately"
             );
             // And only that lane.

@@ -29,7 +29,7 @@ Delivery host: x86_64 with AVX2+FMA (`x86-64-v3`), rustc 1.97.1, release timings
   smallest caller index that *repeats* an earlier key, exactly as the old prefix scan did.
 
 ### M-03 — emit the canonical index in reverse
-* Mutation: in `encode_effect_package_v1`, `for &slot in &order[..len]` →
+* Mutation: in `encode_effect_package`, `for &slot in &order[..len]` →
   `for &slot in order[..len].iter().rev()`.
 * Command: `cargo test --locked -p miso-engine-effect-package`
 * Red: 9 failures including `round_trip_layout_and_borrows`,
@@ -55,12 +55,12 @@ Delivery host: x86_64 with AVX2+FMA (`x86-64-v3`), rustc 1.97.1, release timings
 ## F4 — the package fuzz target is actually built
 
 ### M-06 — break the package fuzz target's import
-* Mutation: in `fuzz/fuzz_targets/effect_package.rs`, `verify_effect_package_v1` →
-  `verify_canonical_package_v1` (the API the audit found stale).
+* Mutation: in `fuzz/fuzz_targets/effect_package.rs`, `verify_effect_package` →
+  `verify_canonical_package` (the API the audit found stale).
 * Command: `cargo check --locked --manifest-path fuzz/Cargo.toml --bins`, now also invoked from
   `scripts/check-effect-package-v1.sh`
 * Red: `error[E0432]` — the import of
-  `miso_engine_effect_package::verify_canonical_package_v1` does not resolve. (The compiler's own
+  `miso_engine_effect_package::verify_canonical_package` does not resolve. (The compiler's own
   wording is paraphrased here so the #97 placeholder scan over this crate stays clean.)
 
 ## F5 — one descriptor pass in the C inspect entry
@@ -68,7 +68,7 @@ Delivery host: x86_64 with AVX2+FMA (`x86-64-v3`), rustc 1.97.1, release timings
 ### M-07 — restore the second full verification pass
 * Mutation: in `ffi.rs::miso_engine_effect_descriptor_v1_inspect`,
   `let identity = *verified.identity().as_bytes();` →
-  `let identity = *effect_descriptor_identity_v1(wire_bytes, maximum_wire_bytes)...as_bytes();`
+  `let identity = *effect_descriptor_identity(wire_bytes, maximum_wire_bytes)...as_bytes();`
   (the shape the audit found).
 * Command: `cargo test --locked -p miso-engine-effect-package --test package_allocation`
 * Red: `c_inspect_performs_exactly_one_nested_descriptor_pass` —
@@ -93,14 +93,14 @@ only 0/1, and `quality`/`link_mode`/`sidechain_*`/`tail_kind` are range checked.
 change was needed here; the gates below prove it and cover the one property 079 left untested.
 
 ### M-09 — stop comparing the envelope's effect-ID text to the bound descriptor
-* Mutation: in `validate_effect_state_current_layout_v1`, delete
+* Mutation: in `validate_effect_state_current_layout`, delete
   `if state.effect_id != descriptor.id.as_str() { return Err(metadata_mismatch(1)); }`.
 * Command: `cargo test --locked -p miso-engine-effect-package --test state_vectors`
 * Red: `the_state_envelope_binds_the_effect_identity_it_names` — the renamed-`test.stats` envelope
   is accepted instead of yielding `Metadata` detail 1.
 
 ### M-10 — stop comparing the envelope's descriptor identity to the bound token
-* Mutation: in `bind_parsed_effect_state_v1`, delete
+* Mutation: in `bind_parsed_effect_state`, delete
   `if parsed.descriptor_identity != bound.identity() { return Err(unavailable(Code::Descriptor,
   3 << 16)); }`.
 * Command: `cargo test --locked -p miso-engine-effect-package --test state_vectors`

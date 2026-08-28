@@ -18,8 +18,8 @@ const fn port_id(value: &'static str) -> PortId {
     }
 }
 
-static PARAMETERS: [ParameterDescriptorV1; 2] = [
-    ParameterDescriptorV1 {
+static PARAMETERS: [ParameterDescriptor; 2] = [
+    ParameterDescriptor {
         id: ParameterId(1),
         display_name: "Shared",
         display_unit: "linear",
@@ -37,7 +37,7 @@ static PARAMETERS: [ParameterDescriptorV1; 2] = [
         automatable: true,
         enum_choices: &[],
     },
-    ParameterDescriptorV1 {
+    ParameterDescriptor {
         id: ParameterId(2),
         display_name: "Per lane",
         display_unit: "linear",
@@ -57,20 +57,20 @@ static PARAMETERS: [ParameterDescriptorV1; 2] = [
     },
 ];
 
-static PORTS: [PortDescriptorV1; 3] = [
-    PortDescriptorV1 {
+static PORTS: [PortDescriptor; 3] = [
+    PortDescriptor {
         id: port_id("main-in"),
         role: PortRole::MainInput,
         required: true,
         layout: PortLayout::DualMonoPlanar,
     },
-    PortDescriptorV1 {
+    PortDescriptor {
         id: port_id("main-out"),
         role: PortRole::MainOutput,
         required: true,
         layout: PortLayout::DualMonoPlanar,
     },
-    PortDescriptorV1 {
+    PortDescriptor {
         id: port_id("detector"),
         role: PortRole::SidechainInput,
         required: false,
@@ -84,8 +84,8 @@ const STATE_SIZES: StatePayloadSizes = StatePayloadSizes {
     right_bytes: 5,
 };
 
-const fn quality(sample_rate: u32) -> QualityDescriptorV1 {
-    QualityDescriptorV1 {
+const fn quality(sample_rate: u32) -> QualityDescriptor {
+    QualityDescriptor {
         quality: EffectQuality::Normal,
         sample_rate,
         latency: LatencySamples(9),
@@ -96,14 +96,14 @@ const fn quality(sample_rate: u32) -> QualityDescriptorV1 {
     }
 }
 
-static QUALITIES: [QualityDescriptorV1; 4] = [
+static QUALITIES: [QualityDescriptor; 4] = [
     quality(44_100),
     quality(48_000),
     quality(88_200),
     quality(96_000),
 ];
 
-static DESCRIPTOR: EffectDescriptorV1 = EffectDescriptorV1 {
+static DESCRIPTOR: EffectDescriptor = EffectDescriptor {
     id: effect_id("test.state"),
     display_name: "State test",
     contract_major: 1,
@@ -116,13 +116,13 @@ static DESCRIPTOR: EffectDescriptorV1 = EffectDescriptorV1 {
     observations: &[],
 };
 
-static ALTERNATE_DESCRIPTOR: EffectDescriptorV1 = EffectDescriptorV1 {
+static ALTERNATE_DESCRIPTOR: EffectDescriptor = EffectDescriptor {
     display_name: "Other name",
     ..DESCRIPTOR
 };
 
-const fn overflow_quality(sample_rate: u32) -> QualityDescriptorV1 {
-    QualityDescriptorV1 {
+const fn overflow_quality(sample_rate: u32) -> QualityDescriptor {
+    QualityDescriptor {
         quality: EffectQuality::Normal,
         sample_rate,
         latency: LatencySamples(9),
@@ -133,14 +133,14 @@ const fn overflow_quality(sample_rate: u32) -> QualityDescriptorV1 {
     }
 }
 
-static OVERFLOW_QUALITIES: [QualityDescriptorV1; 4] = [
+static OVERFLOW_QUALITIES: [QualityDescriptor; 4] = [
     overflow_quality(44_100),
     overflow_quality(48_000),
     overflow_quality(88_200),
     overflow_quality(96_000),
 ];
 
-static OVERFLOW_DESCRIPTOR: EffectDescriptorV1 = EffectDescriptorV1 {
+static OVERFLOW_DESCRIPTOR: EffectDescriptor = EffectDescriptor {
     id: effect_id("test.state-overflow"),
     display_name: "State overflow test",
     qualities: &OVERFLOW_QUALITIES,
@@ -165,24 +165,24 @@ static INITIAL: [InitialParameterValue; 3] = [
     },
 ];
 
-fn descriptor_wire(descriptor: &'static EffectDescriptorV1) -> Vec<u8> {
-    let required = effect_descriptor_wire_v1_required_size(descriptor, 1 << 20).unwrap();
+fn descriptor_wire(descriptor: &'static EffectDescriptor) -> Vec<u8> {
+    let required = effect_descriptor_wire_required_size(descriptor, 1 << 20).unwrap();
     let mut output = vec![0; required as usize];
     assert_eq!(
-        encode_effect_descriptor_wire_v1(descriptor, 1 << 20, &mut output),
+        encode_effect_descriptor_wire(descriptor, 1 << 20, &mut output),
         Ok(required)
     );
     output
 }
 
-fn replay() -> EffectStateReplayViewV1<'static> {
+fn replay() -> EffectStateReplayView<'static> {
     let request = PrepareEffectRequest {
         sample_rate: 48_000,
         quantum: 8,
         quality: EffectQuality::Normal,
         bypass: true,
         link_mode: LinkMode::Maximum,
-        ports: PreparedPortsV1 {
+        ports: PreparedPorts {
             sidechain: PreparedSidechainPort::Connected {
                 id: port_id("detector"),
                 required: false,
@@ -195,7 +195,7 @@ fn replay() -> EffectStateReplayViewV1<'static> {
             maximum_automation_spans_per_block: 23,
         },
     };
-    EffectStateReplayViewV1 {
+    EffectStateReplayView {
         effect_id: DESCRIPTOR.id,
         request,
     }
@@ -203,18 +203,18 @@ fn replay() -> EffectStateReplayViewV1<'static> {
 
 fn encoded_state() -> (Vec<u8>, Vec<u8>) {
     let wire = descriptor_wire(&DESCRIPTOR);
-    let bound = bind_effect_descriptor_wire_v1(&DESCRIPTOR, &wire, 1 << 20).unwrap();
+    let bound = bind_effect_descriptor_wire(&DESCRIPTOR, &wire, 1 << 20).unwrap();
     let requirements =
-        effect_state_v1_requirements(bound, replay(), EffectStateLimitsV1::default()).unwrap();
+        effect_state_requirements(bound, replay(), EffectStateLimits::default()).unwrap();
     let mut output = vec![0xa5; requirements.envelope_bytes as usize];
     assert_eq!(
-        encode_effect_state_v1(
+        encode_effect_state(
             bound,
             replay(),
             b"com",
             b"left!",
             b"right",
-            EffectStateLimitsV1::default(),
+            EffectStateLimits::default(),
             &mut output
         ),
         Ok(requirements.envelope_bytes)
@@ -274,16 +274,16 @@ fn independent_reference_vector_binds_verifies_and_reencodes_byte_identically() 
     ));
     let rust_wire = descriptor_wire(&DESCRIPTOR);
     assert_eq!(rust_wire, descriptor_fixture);
-    let bound = bind_effect_descriptor_wire_v1(&DESCRIPTOR, &descriptor_fixture, 1 << 20).unwrap();
+    let bound = bind_effect_descriptor_wire(&DESCRIPTOR, &descriptor_fixture, 1 << 20).unwrap();
     assert_eq!(bound.identity().as_bytes(), identity_fixture.as_slice());
     assert_eq!(&state_fixture[24..56], identity_fixture.as_slice());
     assert_eq!(state_fixture.as_slice(), state_hex_fixture);
     assert_eq!(&state_fixture[56..88], digest_fixture);
 
     let verified =
-        verify_effect_state_v1(bound, state_fixture, EffectStateLimitsV1::default()).unwrap();
-    validate_effect_state_current_layout_v1(verified).unwrap();
-    validate_effect_state_replay_v1(verified, replay()).unwrap();
+        verify_effect_state(bound, state_fixture, EffectStateLimits::default()).unwrap();
+    validate_effect_state_current_layout(verified).unwrap();
+    validate_effect_state_replay(verified, replay()).unwrap();
     assert_eq!(
         verified.payloads(),
         (&b"com"[..], &b"left!"[..], &b"right"[..])
@@ -291,16 +291,16 @@ fn independent_reference_vector_binds_verifies_and_reencodes_byte_identically() 
     assert_eq!(verified.initial_values().collect::<Vec<_>>(), INITIAL);
 
     let requirements =
-        effect_state_v1_requirements(bound, replay(), EffectStateLimitsV1::default()).unwrap();
+        effect_state_requirements(bound, replay(), EffectStateLimits::default()).unwrap();
     assert_eq!(requirements.envelope_bytes, state_fixture.len() as u64);
     let mut encoded = vec![0xa5; requirements.envelope_bytes as usize];
-    encode_effect_state_v1(
+    encode_effect_state(
         bound,
         replay(),
         b"com",
         b"left!",
         b"right",
-        EffectStateLimitsV1::default(),
+        EffectStateLimits::default(),
         &mut encoded,
     )
     .unwrap();
@@ -313,16 +313,16 @@ fn independent_reference_malformed_oracle_matches_exact_diagnostics() {
         "../../../fixtures/effect-state/v1/canonical.descriptor.wire.hex"
     ));
     let state = include_bytes!("../../../fixtures/effect-state/v1/canonical.state.bin");
-    let bound = bind_effect_descriptor_wire_v1(&DESCRIPTOR, &descriptor_fixture, 1 << 20).unwrap();
+    let bound = bind_effect_descriptor_wire(&DESCRIPTOR, &descriptor_fixture, 1 << 20).unwrap();
     let initial_start = 248;
-    let mut cases: Vec<(&str, Vec<u8>, EffectStateDiagnosticV1)> = Vec::new();
+    let mut cases: Vec<(&str, Vec<u8>, EffectStateDiagnostic)> = Vec::new();
     cases.push((
         "truncated-header",
         state[..223].to_vec(),
-        EffectStateDiagnosticV1::new(
-            EffectStateDiagnosticCodeV1::Header,
+        EffectStateDiagnostic::new(
+            EffectStateDiagnosticCode::Header,
             0,
-            EFFECT_STATE_V1_UNAVAILABLE_INDEX,
+            EFFECT_STATE_UNAVAILABLE_INDEX,
             223,
         ),
     ));
@@ -331,9 +331,9 @@ fn independent_reference_malformed_oracle_matches_exact_diagnostics() {
             "magic",
             (0_usize, 1_u8),
             (
-                EffectStateDiagnosticCodeV1::Header,
+                EffectStateDiagnosticCode::Header,
                 0,
-                EFFECT_STATE_V1_UNAVAILABLE_INDEX,
+                EFFECT_STATE_UNAVAILABLE_INDEX,
                 0_u64,
             ),
         ),
@@ -341,9 +341,9 @@ fn independent_reference_malformed_oracle_matches_exact_diagnostics() {
             "reserved-flags",
             (12, 1),
             (
-                EffectStateDiagnosticCodeV1::Reserved,
+                EffectStateDiagnosticCode::Reserved,
                 0,
-                EFFECT_STATE_V1_UNAVAILABLE_INDEX,
+                EFFECT_STATE_UNAVAILABLE_INDEX,
                 12,
             ),
         ),
@@ -351,7 +351,7 @@ fn independent_reference_malformed_oracle_matches_exact_diagnostics() {
             "initial-reserved",
             (initial_start + 12, 1),
             (
-                EffectStateDiagnosticCodeV1::Reserved,
+                EffectStateDiagnosticCode::Reserved,
                 0,
                 0,
                 (initial_start + 12) as u64,
@@ -361,9 +361,9 @@ fn independent_reference_malformed_oracle_matches_exact_diagnostics() {
             "digest",
             (56, state[56] ^ 1),
             (
-                EffectStateDiagnosticCodeV1::Digest,
+                EffectStateDiagnosticCode::Digest,
                 0,
-                EFFECT_STATE_V1_UNAVAILABLE_INDEX,
+                EFFECT_STATE_UNAVAILABLE_INDEX,
                 56,
             ),
         ),
@@ -373,7 +373,7 @@ fn independent_reference_malformed_oracle_matches_exact_diagnostics() {
         cases.push((
             name,
             bytes,
-            EffectStateDiagnosticV1::new(expected.0, expected.1, expected.2, expected.3),
+            EffectStateDiagnostic::new(expected.0, expected.1, expected.2, expected.3),
         ));
     }
     let mut length = state.to_vec();
@@ -381,10 +381,10 @@ fn independent_reference_malformed_oracle_matches_exact_diagnostics() {
     cases.push((
         "total-length",
         length,
-        EffectStateDiagnosticV1::new(
-            EffectStateDiagnosticCodeV1::Length,
+        EffectStateDiagnostic::new(
+            EffectStateDiagnosticCode::Length,
             0,
-            EFFECT_STATE_V1_UNAVAILABLE_INDEX,
+            EFFECT_STATE_UNAVAILABLE_INDEX,
             16,
         ),
     ));
@@ -393,10 +393,10 @@ fn independent_reference_malformed_oracle_matches_exact_diagnostics() {
     cases.push((
         "quality-enum",
         quality,
-        EffectStateDiagnosticV1::new(
-            EffectStateDiagnosticCodeV1::Enum,
+        EffectStateDiagnostic::new(
+            EffectStateDiagnosticCode::Enum,
             0,
-            EFFECT_STATE_V1_UNAVAILABLE_INDEX,
+            EFFECT_STATE_UNAVAILABLE_INDEX,
             104,
         ),
     ));
@@ -405,10 +405,10 @@ fn independent_reference_malformed_oracle_matches_exact_diagnostics() {
     cases.push((
         "effect-text",
         text,
-        EffectStateDiagnosticV1::new(
-            EffectStateDiagnosticCodeV1::Text,
+        EffectStateDiagnostic::new(
+            EffectStateDiagnosticCode::Text,
             0,
-            EFFECT_STATE_V1_UNAVAILABLE_INDEX,
+            EFFECT_STATE_UNAVAILABLE_INDEX,
             124,
         ),
     ));
@@ -417,8 +417,8 @@ fn independent_reference_malformed_oracle_matches_exact_diagnostics() {
     cases.push((
         "initial-order",
         order,
-        EffectStateDiagnosticV1::new(
-            EffectStateDiagnosticCodeV1::Order,
+        EffectStateDiagnostic::new(
+            EffectStateDiagnosticCode::Order,
             0,
             2,
             (initial_start + 32) as u64,
@@ -430,43 +430,43 @@ fn independent_reference_malformed_oracle_matches_exact_diagnostics() {
     cases.push((
         "descriptor-identity",
         identity,
-        EffectStateDiagnosticV1::new(
-            EffectStateDiagnosticCodeV1::Descriptor,
+        EffectStateDiagnostic::new(
+            EffectStateDiagnosticCode::Descriptor,
             3 << 16,
-            EFFECT_STATE_V1_UNAVAILABLE_INDEX,
-            EFFECT_STATE_V1_UNAVAILABLE_OFFSET,
+            EFFECT_STATE_UNAVAILABLE_INDEX,
+            EFFECT_STATE_UNAVAILABLE_OFFSET,
         ),
     ));
 
     for (name, bytes, expected) in cases {
         let actual =
-            verify_effect_state_v1(bound, &bytes, EffectStateLimitsV1::default()).unwrap_err();
+            verify_effect_state(bound, &bytes, EffectStateLimits::default()).unwrap_err();
         assert_eq!(actual, expected, "{name}");
     }
 }
 
 #[test]
 fn diagnostic_layout_and_default_limits_are_frozen() {
-    assert_eq!(core::mem::size_of::<EffectStateDiagnosticV1>(), 32);
-    assert_eq!(core::mem::align_of::<EffectStateDiagnosticV1>(), 8);
-    assert_eq!(core::mem::offset_of!(EffectStateDiagnosticV1, code), 0);
-    assert_eq!(core::mem::offset_of!(EffectStateDiagnosticV1, detail), 4);
+    assert_eq!(core::mem::size_of::<EffectStateDiagnostic>(), 32);
+    assert_eq!(core::mem::align_of::<EffectStateDiagnostic>(), 8);
+    assert_eq!(core::mem::offset_of!(EffectStateDiagnostic, code), 0);
+    assert_eq!(core::mem::offset_of!(EffectStateDiagnostic, detail), 4);
     assert_eq!(
-        core::mem::offset_of!(EffectStateDiagnosticV1, item_index),
+        core::mem::offset_of!(EffectStateDiagnostic, item_index),
         8
     );
-    assert_eq!(core::mem::offset_of!(EffectStateDiagnosticV1, reserved), 12);
+    assert_eq!(core::mem::offset_of!(EffectStateDiagnostic, reserved), 12);
     assert_eq!(
-        core::mem::offset_of!(EffectStateDiagnosticV1, byte_offset),
+        core::mem::offset_of!(EffectStateDiagnostic, byte_offset),
         16
     );
     assert_eq!(
-        core::mem::offset_of!(EffectStateDiagnosticV1, required_bytes),
+        core::mem::offset_of!(EffectStateDiagnostic, required_bytes),
         24
     );
     assert_eq!(
-        EffectStateLimitsV1::default(),
-        EffectStateLimitsV1 {
+        EffectStateLimits::default(),
+        EffectStateLimits {
             maximum_descriptor_bytes: 4_194_304,
             maximum_envelope_bytes: 268_435_456,
             maximum_payload_bytes: 134_217_728,
@@ -478,13 +478,13 @@ fn diagnostic_layout_and_default_limits_are_frozen() {
 #[test]
 fn checked_scratch_arithmetic_reports_exact_overflow_before_layout() {
     let wire = descriptor_wire(&OVERFLOW_DESCRIPTOR);
-    let bound = bind_effect_descriptor_wire_v1(&OVERFLOW_DESCRIPTOR, &wire, 1 << 20).unwrap();
-    let replay = EffectStateReplayViewV1 {
+    let bound = bind_effect_descriptor_wire(&OVERFLOW_DESCRIPTOR, &wire, 1 << 20).unwrap();
+    let replay = EffectStateReplayView {
         effect_id: OVERFLOW_DESCRIPTOR.id,
         request: replay().request,
     };
     let error =
-        effect_state_v1_requirements(bound, replay, EffectStateLimitsV1::default()).unwrap_err();
+        effect_state_requirements(bound, replay, EffectStateLimits::default()).unwrap_err();
     assert_eq!(
         (
             error.code,
@@ -494,9 +494,9 @@ fn checked_scratch_arithmetic_reports_exact_overflow_before_layout() {
             error.required_bytes,
         ),
         (
-            EffectStateDiagnosticCodeV1::Overflow,
+            EffectStateDiagnosticCode::Overflow,
             0,
-            EFFECT_STATE_V1_UNAVAILABLE_INDEX,
+            EFFECT_STATE_UNAVAILABLE_INDEX,
             176,
             0,
         )
@@ -507,45 +507,45 @@ fn checked_scratch_arithmetic_reports_exact_overflow_before_layout() {
 fn binding_distinguishes_external_wire_from_static_mismatch() {
     let mut malformed = descriptor_wire(&DESCRIPTOR);
     malformed[12] = 1;
-    let error = bind_effect_descriptor_wire_v1(&DESCRIPTOR, &malformed, 1 << 20).unwrap_err();
+    let error = bind_effect_descriptor_wire(&DESCRIPTOR, &malformed, 1 << 20).unwrap_err();
     assert_eq!(
         error.kind(),
-        EffectDescriptorBindingErrorKindV1::ExternalWire
+        EffectDescriptorBindingErrorKind::ExternalWire
     );
     assert_eq!(
         (error.diagnostic().code, error.diagnostic().byte_offset),
-        (EffectDescriptorWireDiagnosticCodeV1::Reserved, 12)
+        (EffectDescriptorWireDiagnosticCode::Reserved, 12)
     );
 
     let alternate = descriptor_wire(&ALTERNATE_DESCRIPTOR);
-    let error = bind_effect_descriptor_wire_v1(&DESCRIPTOR, &alternate, 1 << 20).unwrap_err();
+    let error = bind_effect_descriptor_wire(&DESCRIPTOR, &alternate, 1 << 20).unwrap_err();
     assert_eq!(
         error.kind(),
-        EffectDescriptorBindingErrorKindV1::StaticDescriptorMismatch
+        EffectDescriptorBindingErrorKind::StaticDescriptorMismatch
     );
     assert_eq!(
         (error.diagnostic().code, error.diagnostic().byte_offset),
-        (EffectDescriptorWireDiagnosticCodeV1::Semantic, 40)
+        (EffectDescriptorWireDiagnosticCode::Semantic, 40)
     );
 }
 
 #[test]
 fn exact_wire_round_trip_preserves_independent_sections_and_suffixes() {
     let wire = descriptor_wire(&DESCRIPTOR);
-    let bound = bind_effect_descriptor_wire_v1(&DESCRIPTOR, &wire, 1 << 20).unwrap();
+    let bound = bind_effect_descriptor_wire(&DESCRIPTOR, &wire, 1 << 20).unwrap();
     let requirements =
-        effect_state_v1_requirements(bound, replay(), EffectStateLimitsV1::default()).unwrap();
+        effect_state_requirements(bound, replay(), EffectStateLimits::default()).unwrap();
     assert_eq!(requirements.payload_snapshot_scratch_bytes, 13);
     assert_eq!(requirements.initial_value_scratch_slots, 3);
     let mut output = vec![0x5a; requirements.envelope_bytes as usize + 19];
     assert_eq!(
-        encode_effect_state_v1(
+        encode_effect_state(
             bound,
             replay(),
             b"com",
             b"left!",
             b"right",
-            EffectStateLimitsV1::default(),
+            EffectStateLimits::default(),
             &mut output
         ),
         Ok(requirements.envelope_bytes)
@@ -561,13 +561,13 @@ fn exact_wire_round_trip_preserves_independent_sections_and_suffixes() {
         ),
         (3, 5, 5)
     );
-    let verified = verify_effect_state_v1(
+    let verified = verify_effect_state(
         bound,
         &output[..requirements.envelope_bytes as usize],
-        EffectStateLimitsV1::default(),
+        EffectStateLimits::default(),
     )
     .unwrap();
-    validate_effect_state_replay_v1(verified, replay()).unwrap();
+    validate_effect_state_replay(verified, replay()).unwrap();
     assert_eq!(verified.effect_id(), "test.state");
     assert_eq!(verified.contract_version(), (1, 7));
     assert_eq!(verified.state_layout_version(), 3);
@@ -582,47 +582,47 @@ fn exact_wire_round_trip_preserves_independent_sections_and_suffixes() {
 #[test]
 fn every_authoring_cap_and_one_short_output_are_atomic() {
     let wire = descriptor_wire(&DESCRIPTOR);
-    let bound = bind_effect_descriptor_wire_v1(&DESCRIPTOR, &wire, 1 << 20).unwrap();
+    let bound = bind_effect_descriptor_wire(&DESCRIPTOR, &wire, 1 << 20).unwrap();
     let requirements =
-        effect_state_v1_requirements(bound, replay(), EffectStateLimitsV1::default()).unwrap();
+        effect_state_requirements(bound, replay(), EffectStateLimits::default()).unwrap();
     let baseline = vec![0x6d; requirements.envelope_bytes as usize + 8];
     let mut one_short = baseline.clone();
     let short_len = requirements.envelope_bytes as usize - 1;
-    let error = encode_effect_state_v1(
+    let error = encode_effect_state(
         bound,
         replay(),
         b"com",
         b"left!",
         b"right",
-        EffectStateLimitsV1::default(),
+        EffectStateLimits::default(),
         &mut one_short[..short_len],
     )
     .unwrap_err();
-    assert_eq!(error.code, EffectStateDiagnosticCodeV1::BufferTooSmall);
-    assert_eq!(error.detail, EFFECT_STATE_V1_BUFFER_ENVELOPE_OUTPUT);
+    assert_eq!(error.code, EffectStateDiagnosticCode::BufferTooSmall);
+    assert_eq!(error.detail, EFFECT_STATE_BUFFER_ENVELOPE_OUTPUT);
     assert_eq!(error.required_bytes, requirements.envelope_bytes);
     assert_eq!(one_short, baseline);
 
     for limits in [
-        EffectStateLimitsV1 {
+        EffectStateLimits {
             maximum_descriptor_bytes: wire.len() as u64 - 1,
-            ..EffectStateLimitsV1::default()
+            ..EffectStateLimits::default()
         },
-        EffectStateLimitsV1 {
+        EffectStateLimits {
             maximum_envelope_bytes: requirements.envelope_bytes - 1,
-            ..EffectStateLimitsV1::default()
+            ..EffectStateLimits::default()
         },
-        EffectStateLimitsV1 {
+        EffectStateLimits {
             maximum_payload_bytes: requirements.payload_snapshot_scratch_bytes - 1,
-            ..EffectStateLimitsV1::default()
+            ..EffectStateLimits::default()
         },
-        EffectStateLimitsV1 {
+        EffectStateLimits {
             maximum_initial_values: requirements.initial_value_scratch_slots - 1,
-            ..EffectStateLimitsV1::default()
+            ..EffectStateLimits::default()
         },
     ] {
         let mut output = baseline.clone();
-        let error = encode_effect_state_v1(
+        let error = encode_effect_state(
             bound,
             replay(),
             b"com",
@@ -632,52 +632,52 @@ fn every_authoring_cap_and_one_short_output_are_atomic() {
             &mut output,
         )
         .unwrap_err();
-        assert_eq!(error.code, EffectStateDiagnosticCodeV1::Limit);
+        assert_eq!(error.code, EffectStateDiagnosticCode::Limit);
         assert_eq!(output, baseline);
     }
 
     let mut wrong_payload = baseline.clone();
-    let error = encode_effect_state_v1(
+    let error = encode_effect_state(
         bound,
         replay(),
         b"co",
         b"left!",
         b"right",
-        EffectStateLimitsV1::default(),
+        EffectStateLimits::default(),
         &mut wrong_payload,
     )
     .unwrap_err();
-    assert_eq!(error.code, EffectStateDiagnosticCodeV1::Payload);
+    assert_eq!(error.code, EffectStateDiagnosticCode::Payload);
     assert_eq!(wrong_payload, baseline);
 }
 
 #[test]
 fn borrowed_verification_enforces_each_caller_cap() {
     let (wire, bytes) = encoded_state();
-    let bound = bind_effect_descriptor_wire_v1(&DESCRIPTOR, &wire, 1 << 20).unwrap();
+    let bound = bind_effect_descriptor_wire(&DESCRIPTOR, &wire, 1 << 20).unwrap();
     for limits in [
-        EffectStateLimitsV1 {
+        EffectStateLimits {
             maximum_descriptor_bytes: wire.len() as u64 - 1,
-            ..EffectStateLimitsV1::default()
+            ..EffectStateLimits::default()
         },
-        EffectStateLimitsV1 {
+        EffectStateLimits {
             maximum_envelope_bytes: bytes.len() as u64 - 1,
-            ..EffectStateLimitsV1::default()
+            ..EffectStateLimits::default()
         },
-        EffectStateLimitsV1 {
+        EffectStateLimits {
             maximum_payload_bytes: 12,
-            ..EffectStateLimitsV1::default()
+            ..EffectStateLimits::default()
         },
-        EffectStateLimitsV1 {
+        EffectStateLimits {
             maximum_initial_values: 2,
-            ..EffectStateLimitsV1::default()
+            ..EffectStateLimits::default()
         },
     ] {
         assert_eq!(
-            verify_effect_state_v1(bound, &bytes, limits)
+            verify_effect_state(bound, &bytes, limits)
                 .unwrap_err()
                 .code,
-            EffectStateDiagnosticCodeV1::Limit
+            EffectStateDiagnosticCode::Limit
         );
     }
 }
@@ -685,33 +685,33 @@ fn borrowed_verification_enforces_each_caller_cap() {
 #[test]
 fn structural_selector_is_diagnostic_equivalent_until_descriptor_binding() {
     let (wire, original) = encoded_state();
-    let bound = bind_effect_descriptor_wire_v1(&DESCRIPTOR, &wire, 1 << 20).unwrap();
-    let limits = EffectStateLimitsV1::default();
+    let bound = bind_effect_descriptor_wire(&DESCRIPTOR, &wire, 1 << 20).unwrap();
+    let limits = EffectStateLimits::default();
     assert_eq!(
-        inspect_effect_state_selector_v1(&original, limits).unwrap(),
-        effect_state_bound_selector_v1(bound)
+        inspect_effect_state_selector(&original, limits).unwrap(),
+        effect_state_bound_selector(bound)
     );
 
     for length in 0..original.len() {
         let bytes = &original[..length];
         assert_eq!(
-            inspect_effect_state_selector_v1(bytes, limits).unwrap_err(),
-            verify_effect_state_v1(bound, bytes, limits).unwrap_err(),
+            inspect_effect_state_selector(bytes, limits).unwrap_err(),
+            verify_effect_state(bound, bytes, limits).unwrap_err(),
             "truncation {length}"
         );
     }
     let mut trailing = original.clone();
     trailing.push(0);
     assert_eq!(
-        inspect_effect_state_selector_v1(&trailing, limits).unwrap_err(),
-        verify_effect_state_v1(bound, &trailing, limits).unwrap_err()
+        inspect_effect_state_selector(&trailing, limits).unwrap_err(),
+        verify_effect_state(bound, &trailing, limits).unwrap_err()
     );
     for offset in 0..original.len() {
         let mut mutated = original.clone();
         mutated[offset] ^= 1;
         assert_eq!(
-            inspect_effect_state_selector_v1(&mutated, limits).unwrap_err(),
-            verify_effect_state_v1(bound, &mutated, limits).unwrap_err(),
+            inspect_effect_state_selector(&mutated, limits).unwrap_err(),
+            verify_effect_state(bound, &mutated, limits).unwrap_err(),
             "single-byte mutation at {offset}"
         );
     }
@@ -719,28 +719,28 @@ fn structural_selector_is_diagnostic_equivalent_until_descriptor_binding() {
     let mut changed_identity = original.clone();
     changed_identity[24] ^= 1;
     refresh_digest(&mut changed_identity);
-    let selector = inspect_effect_state_selector_v1(&changed_identity, limits).unwrap();
+    let selector = inspect_effect_state_selector(&changed_identity, limits).unwrap();
     assert_ne!(selector.descriptor_identity(), bound.identity());
     assert_eq!(selector.state_layout_version(), 3);
     assert_eq!(
-        verify_effect_state_v1(bound, &changed_identity, limits)
+        verify_effect_state(bound, &changed_identity, limits)
             .unwrap_err()
             .code,
-        EffectStateDiagnosticCodeV1::Descriptor
+        EffectStateDiagnosticCode::Descriptor
     );
 }
 
-fn migration_descriptor(layout: u32, sizes: StatePayloadSizes) -> &'static EffectDescriptorV1 {
+fn migration_descriptor(layout: u32, sizes: StatePayloadSizes) -> &'static EffectDescriptor {
     let qualities = QUALITIES
         .iter()
         .copied()
-        .map(|quality| QualityDescriptorV1 {
+        .map(|quality| QualityDescriptor {
             maximum_state: sizes,
             ..quality
         })
         .collect::<Vec<_>>()
         .into_boxed_slice();
-    Box::leak(Box::new(EffectDescriptorV1 {
+    Box::leak(Box::new(EffectDescriptor {
         state_layout_version: layout,
         qualities: Box::leak(qualities),
         ..DESCRIPTOR
@@ -750,24 +750,24 @@ fn migration_descriptor(layout: u32, sizes: StatePayloadSizes) -> &'static Effec
 fn descriptor_with_parameters(
     layout: u32,
     sizes: StatePayloadSizes,
-    parameters: [ParameterDescriptorV1; 2],
-) -> &'static EffectDescriptorV1 {
+    parameters: [ParameterDescriptor; 2],
+) -> &'static EffectDescriptor {
     let descriptor = migration_descriptor(layout, sizes);
-    Box::leak(Box::new(EffectDescriptorV1 {
+    Box::leak(Box::new(EffectDescriptor {
         parameters: Box::leak(Box::new(parameters)),
         ..*descriptor
     }))
 }
 
 fn assert_incompatible_edge(
-    source_bound: BoundEffectDescriptorWireV1<'_>,
-    descriptor: &'static EffectDescriptorV1,
+    source_bound: BoundEffectDescriptorWire<'_>,
+    descriptor: &'static EffectDescriptor,
 ) {
     let wire = descriptor_wire(descriptor);
-    let bound = bind_effect_descriptor_wire_v1(descriptor, &wire, 1 << 20).unwrap();
+    let bound = bind_effect_descriptor_wire(descriptor, &wire, 1 << 20).unwrap();
     assert_eq!(
-        bind_effect_state_migration_edge_v1(source_bound, bound).unwrap_err(),
-        EffectStateMigrationEdgeErrorV1::IncompatibleReplayDescriptor
+        bind_effect_state_migration_edge(source_bound, bound).unwrap_err(),
+        EffectStateMigrationEdgeError::IncompatibleReplayDescriptor
     );
 }
 
@@ -783,62 +783,62 @@ fn migration_edges_are_adjacent_compatible_and_preserve_exact_provenance() {
     );
     let source_wire = descriptor_wire(source);
     let target_wire = descriptor_wire(&DESCRIPTOR);
-    let source_bound = bind_effect_descriptor_wire_v1(source, &source_wire, 1 << 20).unwrap();
-    let target_bound = bind_effect_descriptor_wire_v1(&DESCRIPTOR, &target_wire, 1 << 20).unwrap();
-    let edge = bind_effect_state_migration_edge_v1(source_bound, target_bound).unwrap();
+    let source_bound = bind_effect_descriptor_wire(source, &source_wire, 1 << 20).unwrap();
+    let target_bound = bind_effect_descriptor_wire(&DESCRIPTOR, &target_wire, 1 << 20).unwrap();
+    let edge = bind_effect_state_migration_edge(source_bound, target_bound).unwrap();
     assert_eq!(
         edge.source_selector(),
-        effect_state_bound_selector_v1(source_bound)
+        effect_state_bound_selector(source_bound)
     );
     assert_eq!(
         edge.target_selector(),
-        effect_state_bound_selector_v1(target_bound)
+        effect_state_bound_selector(target_bound)
     );
     assert_ne!(edge.source_selector(), edge.target_selector());
     assert_eq!(edge.source_bound().wire(), source_wire);
     assert_eq!(edge.target_bound().wire(), target_wire);
     assert_eq!(
-        effect_state_descriptor_provenance_v1(target_bound),
-        effect_state_descriptor_provenance_v1(target_bound)
+        effect_state_descriptor_provenance(target_bound),
+        effect_state_descriptor_provenance(target_bound)
     );
 
     let identical_static = Box::leak(Box::new(DESCRIPTOR));
     let identical_bound =
-        bind_effect_descriptor_wire_v1(identical_static, &target_wire, 1 << 20).unwrap();
+        bind_effect_descriptor_wire(identical_static, &target_wire, 1 << 20).unwrap();
     assert_eq!(identical_bound.identity(), target_bound.identity());
     assert_ne!(
-        effect_state_descriptor_provenance_v1(identical_bound),
-        effect_state_descriptor_provenance_v1(target_bound)
+        effect_state_descriptor_provenance(identical_bound),
+        effect_state_descriptor_provenance(target_bound)
     );
 
     let nonadjacent = migration_descriptor(1, STATE_SIZES);
     let nonadjacent_wire = descriptor_wire(nonadjacent);
     let nonadjacent_bound =
-        bind_effect_descriptor_wire_v1(nonadjacent, &nonadjacent_wire, 1 << 20).unwrap();
+        bind_effect_descriptor_wire(nonadjacent, &nonadjacent_wire, 1 << 20).unwrap();
     assert_eq!(
-        bind_effect_state_migration_edge_v1(nonadjacent_bound, target_bound).unwrap_err(),
-        EffectStateMigrationEdgeErrorV1::NonAdjacentLayout
+        bind_effect_state_migration_edge(nonadjacent_bound, target_bound).unwrap_err(),
+        EffectStateMigrationEdgeError::NonAdjacentLayout
     );
     assert_eq!(
-        bind_effect_state_migration_edge_v1(target_bound, target_bound).unwrap_err(),
-        EffectStateMigrationEdgeErrorV1::NonAdjacentLayout
+        bind_effect_state_migration_edge(target_bound, target_bound).unwrap_err(),
+        EffectStateMigrationEdgeError::NonAdjacentLayout
     );
 
     for descriptor in [
-        Box::leak(Box::new(EffectDescriptorV1 {
+        Box::leak(Box::new(EffectDescriptor {
             id: effect_id("test.other-state"),
             ..DESCRIPTOR
-        })) as &'static EffectDescriptorV1,
-        Box::leak(Box::new(EffectDescriptorV1 {
+        })) as &'static EffectDescriptor,
+        Box::leak(Box::new(EffectDescriptor {
             contract_minor: 8,
             ..DESCRIPTOR
         })),
     ] {
         let wire = descriptor_wire(descriptor);
-        let bound = bind_effect_descriptor_wire_v1(descriptor, &wire, 1 << 20).unwrap();
+        let bound = bind_effect_descriptor_wire(descriptor, &wire, 1 << 20).unwrap();
         assert_eq!(
-            bind_effect_state_migration_edge_v1(source_bound, bound).unwrap_err(),
-            EffectStateMigrationEdgeErrorV1::EffectOrContractMismatch
+            bind_effect_state_migration_edge(source_bound, bound).unwrap_err(),
+            EffectStateMigrationEdgeError::EffectOrContractMismatch
         );
     }
 
@@ -849,32 +849,32 @@ fn migration_edges_are_adjacent_compatible_and_preserve_exact_provenance() {
     let mut changed_quality = QUALITIES;
     changed_quality[0].latency = LatencySamples(10);
     for descriptor in [
-        Box::leak(Box::new(EffectDescriptorV1 {
+        Box::leak(Box::new(EffectDescriptor {
             display_name: "Changed",
             ..DESCRIPTOR
-        })) as &'static EffectDescriptorV1,
-        Box::leak(Box::new(EffectDescriptorV1 {
+        })) as &'static EffectDescriptor,
+        Box::leak(Box::new(EffectDescriptor {
             supported_link_modes: LinkModeSet::DUAL_MONO,
             ..DESCRIPTOR
         })),
-        Box::leak(Box::new(EffectDescriptorV1 {
+        Box::leak(Box::new(EffectDescriptor {
             parameters: Box::leak(Box::new(changed_parameter)),
             ..DESCRIPTOR
         })),
-        Box::leak(Box::new(EffectDescriptorV1 {
+        Box::leak(Box::new(EffectDescriptor {
             ports: Box::leak(Box::new(changed_port)),
             ..DESCRIPTOR
         })),
-        Box::leak(Box::new(EffectDescriptorV1 {
+        Box::leak(Box::new(EffectDescriptor {
             qualities: Box::leak(Box::new(changed_quality)),
             ..DESCRIPTOR
         })),
     ] {
         let wire = descriptor_wire(descriptor);
-        let bound = bind_effect_descriptor_wire_v1(descriptor, &wire, 1 << 20).unwrap();
+        let bound = bind_effect_descriptor_wire(descriptor, &wire, 1 << 20).unwrap();
         assert_eq!(
-            bind_effect_state_migration_edge_v1(source_bound, bound).unwrap_err(),
-            EffectStateMigrationEdgeErrorV1::IncompatibleReplayDescriptor
+            bind_effect_state_migration_edge(source_bound, bound).unwrap_err(),
+            EffectStateMigrationEdgeError::IncompatibleReplayDescriptor
         );
     }
 
@@ -882,61 +882,61 @@ fn migration_edges_are_adjacent_compatible_and_preserve_exact_provenance() {
     // validity (domain/minimum/maximum/mapping and automation/smoothing) use a valid bundle while
     // the equality implementation compares every member separately with f32 `to_bits()`.
     let parameter_mutations = [
-        ParameterDescriptorV1 {
+        ParameterDescriptor {
             id: ParameterId(3),
             ..PARAMETERS[1]
         },
-        ParameterDescriptorV1 {
+        ParameterDescriptor {
             display_name: "Renamed",
             ..PARAMETERS[1]
         },
-        ParameterDescriptorV1 {
+        ParameterDescriptor {
             display_unit: "ratio",
             ..PARAMETERS[1]
         },
-        ParameterDescriptorV1 {
+        ParameterDescriptor {
             unit: ParameterUnit::Ratio,
             ..PARAMETERS[1]
         },
-        ParameterDescriptorV1 {
+        ParameterDescriptor {
             minimum: Some(-3.0),
             ..PARAMETERS[1]
         },
-        ParameterDescriptorV1 {
+        ParameterDescriptor {
             maximum: Some(3.0),
             ..PARAMETERS[1]
         },
-        ParameterDescriptorV1 {
+        ParameterDescriptor {
             default_value: 0.25,
             ..PARAMETERS[1]
         },
-        ParameterDescriptorV1 {
+        ParameterDescriptor {
             mapping: ParameterMapping::Exponential,
             ..PARAMETERS[1]
         },
-        ParameterDescriptorV1 {
+        ParameterDescriptor {
             automation_rate: AutomationRate::Sample,
             ..PARAMETERS[1]
         },
-        ParameterDescriptorV1 {
+        ParameterDescriptor {
             channel_policy: ParameterChannelPolicy::Shared,
             ..PARAMETERS[1]
         },
-        ParameterDescriptorV1 {
+        ParameterDescriptor {
             smoothing: SmoothingRule::Linear,
             smoothing_samples: 1,
             ..PARAMETERS[1]
         },
-        ParameterDescriptorV1 {
+        ParameterDescriptor {
             readable: false,
             ..PARAMETERS[1]
         },
-        ParameterDescriptorV1 {
+        ParameterDescriptor {
             automation_rate: AutomationRate::None,
             automatable: false,
             ..PARAMETERS[1]
         },
-        ParameterDescriptorV1 {
+        ParameterDescriptor {
             domain: ParameterDomain::Boolean,
             minimum: None,
             maximum: None,
@@ -952,27 +952,27 @@ fn migration_edges_are_adjacent_compatible_and_preserve_exact_provenance() {
         );
     }
 
-    static ENUM_CHOICES: [EnumChoiceV1; 2] = [
-        EnumChoiceV1 {
+    static ENUM_CHOICES: [EnumChoice; 2] = [
+        EnumChoice {
             value: 0.0,
             label: "zero",
         },
-        EnumChoiceV1 {
+        EnumChoice {
             value: 1.0,
             label: "one",
         },
     ];
-    static CHANGED_ENUM_CHOICES: [EnumChoiceV1; 2] = [
-        EnumChoiceV1 {
+    static CHANGED_ENUM_CHOICES: [EnumChoice; 2] = [
+        EnumChoice {
             value: 0.0,
             label: "none",
         },
-        EnumChoiceV1 {
+        EnumChoice {
             value: 1.0,
             label: "one",
         },
     ];
-    let enum_parameter = ParameterDescriptorV1 {
+    let enum_parameter = ParameterDescriptor {
         domain: ParameterDomain::Enumeration,
         minimum: None,
         maximum: None,
@@ -992,7 +992,7 @@ fn migration_edges_are_adjacent_compatible_and_preserve_exact_provenance() {
     );
     let enum_source_wire = descriptor_wire(enum_source);
     let enum_source_bound =
-        bind_effect_descriptor_wire_v1(enum_source, &enum_source_wire, 1 << 20).unwrap();
+        bind_effect_descriptor_wire(enum_source, &enum_source_wire, 1 << 20).unwrap();
     assert_incompatible_edge(
         enum_source_bound,
         descriptor_with_parameters(
@@ -1000,7 +1000,7 @@ fn migration_edges_are_adjacent_compatible_and_preserve_exact_provenance() {
             STATE_SIZES,
             [
                 PARAMETERS[0],
-                ParameterDescriptorV1 {
+                ParameterDescriptor {
                     enum_choices: &CHANGED_ENUM_CHOICES,
                     ..enum_parameter
                 },
@@ -1015,7 +1015,7 @@ fn migration_edges_are_adjacent_compatible_and_preserve_exact_provenance() {
     for ports in [changed_port_id, changed_port_required] {
         assert_incompatible_edge(
             source_bound,
-            Box::leak(Box::new(EffectDescriptorV1 {
+            Box::leak(Box::new(EffectDescriptor {
                 ports: Box::leak(Box::new(ports)),
                 ..DESCRIPTOR
             })),
@@ -1023,19 +1023,19 @@ fn migration_edges_are_adjacent_compatible_and_preserve_exact_provenance() {
     }
 
     for mutation in [
-        QualityDescriptorV1 {
+        QualityDescriptor {
             latency: LatencySamples(10),
             ..QUALITIES[0]
         },
-        QualityDescriptorV1 {
+        QualityDescriptor {
             tail: TailSamples::Infinite,
             ..QUALITIES[0]
         },
-        QualityDescriptorV1 {
+        QualityDescriptor {
             scratch_fixed_bytes: 12,
             ..QUALITIES[0]
         },
-        QualityDescriptorV1 {
+        QualityDescriptor {
             scratch_bytes_per_frame: 3,
             ..QUALITIES[0]
         },
@@ -1044,7 +1044,7 @@ fn migration_edges_are_adjacent_compatible_and_preserve_exact_provenance() {
         qualities[0] = mutation;
         assert_incompatible_edge(
             source_bound,
-            Box::leak(Box::new(EffectDescriptorV1 {
+            Box::leak(Box::new(EffectDescriptor {
                 qualities: Box::leak(Box::new(qualities)),
                 ..DESCRIPTOR
             })),
@@ -1059,32 +1059,32 @@ fn migration_edges_are_adjacent_compatible_and_preserve_exact_provenance() {
     let mut source_rates = QUALITIES
         .iter()
         .copied()
-        .map(|row| QualityDescriptorV1 {
+        .map(|row| QualityDescriptor {
             maximum_state: source_sizes,
             ..row
         })
         .collect::<Vec<_>>();
-    source_rates.push(QualityDescriptorV1 {
+    source_rates.push(QualityDescriptor {
         sample_rate: 176_400,
         maximum_state: source_sizes,
         ..QUALITIES[0]
     });
     let mut target_rates = QUALITIES.to_vec();
-    target_rates.push(QualityDescriptorV1 {
+    target_rates.push(QualityDescriptor {
         sample_rate: 192_000,
         ..QUALITIES[0]
     });
-    let rate_source = Box::leak(Box::new(EffectDescriptorV1 {
+    let rate_source = Box::leak(Box::new(EffectDescriptor {
         state_layout_version: 2,
         qualities: Box::leak(source_rates.into_boxed_slice()),
         ..DESCRIPTOR
     }));
     let rate_source_wire = descriptor_wire(rate_source);
     let rate_source_bound =
-        bind_effect_descriptor_wire_v1(rate_source, &rate_source_wire, 1 << 20).unwrap();
+        bind_effect_descriptor_wire(rate_source, &rate_source_wire, 1 << 20).unwrap();
     assert_incompatible_edge(
         rate_source_bound,
-        Box::leak(Box::new(EffectDescriptorV1 {
+        Box::leak(Box::new(EffectDescriptor {
             qualities: Box::leak(target_rates.into_boxed_slice()),
             ..DESCRIPTOR
         })),
@@ -1093,12 +1093,12 @@ fn migration_edges_are_adjacent_compatible_and_preserve_exact_provenance() {
     let draft_source = QUALITIES
         .iter()
         .copied()
-        .map(|row| QualityDescriptorV1 {
+        .map(|row| QualityDescriptor {
             quality: EffectQuality::Draft,
             maximum_state: source_sizes,
             ..row
         })
-        .chain(QUALITIES.iter().copied().map(|row| QualityDescriptorV1 {
+        .chain(QUALITIES.iter().copied().map(|row| QualityDescriptor {
             maximum_state: source_sizes,
             ..row
         }))
@@ -1106,22 +1106,22 @@ fn migration_edges_are_adjacent_compatible_and_preserve_exact_provenance() {
     let normal_high_target = QUALITIES
         .iter()
         .copied()
-        .chain(QUALITIES.iter().copied().map(|row| QualityDescriptorV1 {
+        .chain(QUALITIES.iter().copied().map(|row| QualityDescriptor {
             quality: EffectQuality::High,
             ..row
         }))
         .collect::<Vec<_>>();
-    let quality_source = Box::leak(Box::new(EffectDescriptorV1 {
+    let quality_source = Box::leak(Box::new(EffectDescriptor {
         state_layout_version: 2,
         qualities: Box::leak(draft_source.into_boxed_slice()),
         ..DESCRIPTOR
     }));
     let quality_source_wire = descriptor_wire(quality_source);
     let quality_source_bound =
-        bind_effect_descriptor_wire_v1(quality_source, &quality_source_wire, 1 << 20).unwrap();
+        bind_effect_descriptor_wire(quality_source, &quality_source_wire, 1 << 20).unwrap();
     assert_incompatible_edge(
         quality_source_bound,
-        Box::leak(Box::new(EffectDescriptorV1 {
+        Box::leak(Box::new(EffectDescriptor {
             qualities: Box::leak(normal_high_target.into_boxed_slice()),
             ..DESCRIPTOR
         })),
@@ -1139,28 +1139,28 @@ fn replay_configuration_is_independent_of_layout_and_prepared_resources() {
         },
     );
     let wire = descriptor_wire(historical);
-    let bound = bind_effect_descriptor_wire_v1(historical, &wire, 1 << 20).unwrap();
-    let historical_replay = EffectStateReplayViewV1 {
+    let bound = bind_effect_descriptor_wire(historical, &wire, 1 << 20).unwrap();
+    let historical_replay = EffectStateReplayView {
         effect_id: historical.id,
         request: replay().request,
     };
     let requirements =
-        effect_state_v1_requirements(bound, historical_replay, EffectStateLimitsV1::default())
+        effect_state_requirements(bound, historical_replay, EffectStateLimits::default())
             .unwrap();
     let mut bytes = vec![0; requirements.envelope_bytes as usize];
-    encode_effect_state_v1(
+    encode_effect_state(
         bound,
         historical_replay,
         b"c",
         b"left",
         b"rght",
-        EffectStateLimitsV1::default(),
+        EffectStateLimits::default(),
         &mut bytes,
     )
     .unwrap();
-    let state = verify_effect_state_v1(bound, &bytes, EffectStateLimitsV1::default()).unwrap();
-    validate_effect_state_current_layout_v1(state).unwrap();
-    validate_effect_state_replay_configuration_v1(state, historical_replay).unwrap();
+    let state = verify_effect_state(bound, &bytes, EffectStateLimits::default()).unwrap();
+    validate_effect_state_current_layout(state).unwrap();
+    validate_effect_state_replay_configuration(state, historical_replay).unwrap();
     assert_eq!(state.state_layout_version(), 2);
     assert_ne!(state.state_sizes(), DESCRIPTOR.qualities[1].maximum_state);
 
@@ -1169,34 +1169,34 @@ fn replay_configuration_is_independent_of_layout_and_prepared_resources() {
         changed_contract[offset] ^= 1;
         refresh_digest(&mut changed_contract);
         let changed_state =
-            verify_effect_state_v1(bound, &changed_contract, EffectStateLimitsV1::default())
+            verify_effect_state(bound, &changed_contract, EffectStateLimits::default())
                 .unwrap();
-        let error = validate_effect_state_replay_configuration_v1(changed_state, historical_replay)
+        let error = validate_effect_state_replay_configuration(changed_state, historical_replay)
             .unwrap_err();
-        assert_eq!(error.code, EffectStateDiagnosticCodeV1::Metadata);
+        assert_eq!(error.code, EffectStateDiagnosticCode::Metadata);
         assert_eq!(error.detail, 2);
     }
 
     let mut changed = INITIAL;
     changed[2].value = 1.25;
-    let changed_replay = EffectStateReplayViewV1 {
+    let changed_replay = EffectStateReplayView {
         effect_id: historical.id,
         request: PrepareEffectRequest {
             initial_values: &changed,
             ..historical_replay.request
         },
     };
-    let error = validate_effect_state_replay_configuration_v1(state, changed_replay).unwrap_err();
-    assert_eq!(error.code, EffectStateDiagnosticCodeV1::InitialValues);
+    let error = validate_effect_state_replay_configuration(state, changed_replay).unwrap_err();
+    assert_eq!(error.code, EffectStateDiagnosticCode::InitialValues);
     assert_eq!(error.item_index, 2);
 
-    let assert_metadata = |candidate: EffectStateReplayViewV1<'_>, detail| {
-        let error = validate_effect_state_replay_configuration_v1(state, candidate).unwrap_err();
-        assert_eq!(error.code, EffectStateDiagnosticCodeV1::Metadata);
+    let assert_metadata = |candidate: EffectStateReplayView<'_>, detail| {
+        let error = validate_effect_state_replay_configuration(state, candidate).unwrap_err();
+        assert_eq!(error.code, EffectStateDiagnosticCode::Metadata);
         assert_eq!(error.detail, detail);
     };
     assert_metadata(
-        EffectStateReplayViewV1 {
+        EffectStateReplayView {
             effect_id: effect_id("test.other-state"),
             ..historical_replay
         },
@@ -1240,7 +1240,7 @@ fn replay_configuration_is_independent_of_layout_and_prepared_resources() {
         ),
         (
             PrepareEffectRequest {
-                ports: PreparedPortsV1 {
+                ports: PreparedPorts {
                     sidechain: PreparedSidechainPort::Unconnected {
                         id: port_id("detector"),
                         required: false,
@@ -1252,7 +1252,7 @@ fn replay_configuration_is_independent_of_layout_and_prepared_resources() {
         ),
         (
             PrepareEffectRequest {
-                ports: PreparedPortsV1 {
+                ports: PreparedPorts {
                     sidechain: PreparedSidechainPort::Connected {
                         id: port_id("other-detector"),
                         required: false,
@@ -1264,7 +1264,7 @@ fn replay_configuration_is_independent_of_layout_and_prepared_resources() {
         ),
         (
             PrepareEffectRequest {
-                ports: PreparedPortsV1 {
+                ports: PreparedPorts {
                     sidechain: PreparedSidechainPort::Connected {
                         id: port_id("detector"),
                         required: true,
@@ -1306,7 +1306,7 @@ fn replay_configuration_is_independent_of_layout_and_prepared_resources() {
         ),
     ] {
         assert_metadata(
-            EffectStateReplayViewV1 {
+            EffectStateReplayView {
                 request,
                 ..historical_replay
             },
@@ -1328,14 +1328,14 @@ fn replay_configuration_is_independent_of_layout_and_prepared_resources() {
         (&wrong_bits[..], 2, (initial_offset + 40) as u64),
         (
             &INITIAL[..2],
-            EFFECT_STATE_V1_UNAVAILABLE_INDEX,
-            EFFECT_STATE_V1_UNAVAILABLE_OFFSET,
+            EFFECT_STATE_UNAVAILABLE_INDEX,
+            EFFECT_STATE_UNAVAILABLE_OFFSET,
         ),
         (&too_many[..], 3, (initial_offset + 48) as u64),
     ] {
-        let error = validate_effect_state_replay_configuration_v1(
+        let error = validate_effect_state_replay_configuration(
             state,
-            EffectStateReplayViewV1 {
+            EffectStateReplayView {
                 request: PrepareEffectRequest {
                     initial_values: values,
                     ..historical_replay.request
@@ -1344,7 +1344,7 @@ fn replay_configuration_is_independent_of_layout_and_prepared_resources() {
             },
         )
         .unwrap_err();
-        assert_eq!(error.code, EffectStateDiagnosticCodeV1::InitialValues);
+        assert_eq!(error.code, EffectStateDiagnosticCode::InitialValues);
         assert_eq!(error.item_index, item);
         assert_eq!(error.byte_offset, offset);
     }
@@ -1354,31 +1354,31 @@ fn replay_configuration_is_independent_of_layout_and_prepared_resources() {
 fn selector_and_registry_paths_perform_no_descriptor_validation_pass() {
     let state_source = include_str!("../src/state.rs");
     let selector = state_source
-        .split("pub fn inspect_effect_state_selector_v1")
+        .split("pub fn inspect_effect_state_selector")
         .nth(1)
         .unwrap()
-        .split("pub fn verify_effect_state_v1")
+        .split("pub fn verify_effect_state")
         .next()
         .unwrap();
-    assert!(!selector.contains("validate_descriptor_v1"));
-    assert!(!selector.contains("effect_descriptor_identity_v1"));
-    assert!(!selector.contains("bind_effect_descriptor_wire_v1"));
+    assert!(!selector.contains("validate_descriptor"));
+    assert!(!selector.contains("effect_descriptor_identity"));
+    assert!(!selector.contains("bind_effect_descriptor_wire"));
 
     let wire_source = include_str!("../src/wire.rs");
     let binder = wire_source
-        .split("pub fn bind_effect_descriptor_wire_v1")
+        .split("pub fn bind_effect_descriptor_wire")
         .nth(1)
         .unwrap()
         .split("#[cfg(test)]")
         .next()
         .unwrap();
-    assert_eq!(binder.matches("validate_descriptor_v1").count(), 1);
+    assert_eq!(binder.matches("validate_descriptor").count(), 1);
 
     let compatibility = state_source
         .split("fn parameters_compatible")
         .nth(1)
         .unwrap()
-        .split("pub fn effect_state_bound_selector_v1")
+        .split("pub fn effect_state_bound_selector")
         .next()
         .unwrap();
     for field in [
@@ -1416,15 +1416,15 @@ fn selector_and_registry_paths_perform_no_descriptor_validation_pass() {
 #[allow(clippy::too_many_arguments)]
 fn assert_verify_diagnostic(
     name: &str,
-    bound: BoundEffectDescriptorWireV1<'_>,
+    bound: BoundEffectDescriptorWire<'_>,
     bytes: &[u8],
-    code: EffectStateDiagnosticCodeV1,
+    code: EffectStateDiagnosticCode,
     detail: u32,
     item_index: u32,
     byte_offset: u64,
     required_bytes: u64,
 ) {
-    let actual = verify_effect_state_v1(bound, bytes, EffectStateLimitsV1::default()).unwrap_err();
+    let actual = verify_effect_state(bound, bytes, EffectStateLimits::default()).unwrap_err();
     assert_eq!(
         (
             actual.code,
@@ -1440,13 +1440,13 @@ fn assert_verify_diagnostic(
 
 fn assert_replay_metadata(
     name: &str,
-    bound: BoundEffectDescriptorWireV1<'_>,
+    bound: BoundEffectDescriptorWire<'_>,
     bytes: &mut [u8],
     detail: u32,
 ) {
     refresh_digest(bytes);
-    let verified = verify_effect_state_v1(bound, bytes, EffectStateLimitsV1::default()).unwrap();
-    let actual = validate_effect_state_replay_v1(verified, replay()).unwrap_err();
+    let verified = verify_effect_state(bound, bytes, EffectStateLimits::default()).unwrap();
+    let actual = validate_effect_state_replay(verified, replay()).unwrap_err();
     assert_eq!(
         (
             actual.code,
@@ -1456,10 +1456,10 @@ fn assert_replay_metadata(
             actual.required_bytes,
         ),
         (
-            EffectStateDiagnosticCodeV1::Metadata,
+            EffectStateDiagnosticCode::Metadata,
             detail,
-            EFFECT_STATE_V1_UNAVAILABLE_INDEX,
-            EFFECT_STATE_V1_UNAVAILABLE_OFFSET,
+            EFFECT_STATE_UNAVAILABLE_INDEX,
+            EFFECT_STATE_UNAVAILABLE_OFFSET,
             0,
         ),
         "{name}"
@@ -1469,8 +1469,8 @@ fn assert_replay_metadata(
 #[test]
 fn every_state_header_field_and_payload_class_has_an_exact_diagnostic() {
     let (wire, original) = encoded_state();
-    let bound = bind_effect_descriptor_wire_v1(&DESCRIPTOR, &wire, 1 << 20).unwrap();
-    let unavailable = EFFECT_STATE_V1_UNAVAILABLE_INDEX;
+    let bound = bind_effect_descriptor_wire(&DESCRIPTOR, &wire, 1 << 20).unwrap();
+    let unavailable = EFFECT_STATE_UNAVAILABLE_INDEX;
 
     for (name, offset, size, value, code, diagnostic_offset) in [
         (
@@ -1478,7 +1478,7 @@ fn every_state_header_field_and_payload_class_has_an_exact_diagnostic() {
             8,
             2,
             2_u64,
-            EffectStateDiagnosticCodeV1::Header,
+            EffectStateDiagnosticCode::Header,
             8,
         ),
         (
@@ -1486,16 +1486,16 @@ fn every_state_header_field_and_payload_class_has_an_exact_diagnostic() {
             10,
             2,
             223,
-            EffectStateDiagnosticCodeV1::Header,
+            EffectStateDiagnosticCode::Header,
             10,
         ),
-        ("flags", 12, 4, 1, EffectStateDiagnosticCodeV1::Reserved, 12),
+        ("flags", 12, 4, 1, EffectStateDiagnosticCode::Reserved, 12),
         (
             "total",
             16,
             8,
             original.len() as u64 + 1,
-            EffectStateDiagnosticCodeV1::Length,
+            EffectStateDiagnosticCode::Length,
             16,
         ),
         (
@@ -1503,7 +1503,7 @@ fn every_state_header_field_and_payload_class_has_an_exact_diagnostic() {
             92,
             4,
             0,
-            EffectStateDiagnosticCodeV1::Header,
+            EffectStateDiagnosticCode::Header,
             92,
         ),
         (
@@ -1511,7 +1511,7 @@ fn every_state_header_field_and_payload_class_has_an_exact_diagnostic() {
             148,
             4,
             1,
-            EffectStateDiagnosticCodeV1::Reserved,
+            EffectStateDiagnosticCode::Reserved,
             148,
         ),
         (
@@ -1519,7 +1519,7 @@ fn every_state_header_field_and_payload_class_has_an_exact_diagnostic() {
             172,
             4,
             1,
-            EffectStateDiagnosticCodeV1::Reserved,
+            EffectStateDiagnosticCode::Reserved,
             172,
         ),
         (
@@ -1527,7 +1527,7 @@ fn every_state_header_field_and_payload_class_has_an_exact_diagnostic() {
             212,
             4,
             1,
-            EffectStateDiagnosticCodeV1::Reserved,
+            EffectStateDiagnosticCode::Reserved,
             212,
         ),
         (
@@ -1535,7 +1535,7 @@ fn every_state_header_field_and_payload_class_has_an_exact_diagnostic() {
             188,
             4,
             47,
-            EffectStateDiagnosticCodeV1::Length,
+            EffectStateDiagnosticCode::Length,
             188,
         ),
         (
@@ -1543,7 +1543,7 @@ fn every_state_header_field_and_payload_class_has_an_exact_diagnostic() {
             216,
             8,
             12,
-            EffectStateDiagnosticCodeV1::Length,
+            EffectStateDiagnosticCode::Length,
             216,
         ),
     ] {
@@ -1580,7 +1580,7 @@ fn every_state_header_field_and_payload_class_has_an_exact_diagnostic() {
             name,
             bound,
             &bytes,
-            EffectStateDiagnosticCodeV1::Enum,
+            EffectStateDiagnosticCode::Enum,
             0,
             unavailable,
             diagnostic_offset,
@@ -1624,10 +1624,10 @@ fn every_state_header_field_and_payload_class_has_an_exact_diagnostic() {
         "descriptor-identity",
         bound,
         &descriptor_identity,
-        EffectStateDiagnosticCodeV1::Descriptor,
+        EffectStateDiagnosticCode::Descriptor,
         3 << 16,
         unavailable,
-        EFFECT_STATE_V1_UNAVAILABLE_OFFSET,
+        EFFECT_STATE_UNAVAILABLE_OFFSET,
         0,
     );
     let mut digest = original.clone();
@@ -1636,7 +1636,7 @@ fn every_state_header_field_and_payload_class_has_an_exact_diagnostic() {
         "digest",
         bound,
         &digest,
-        EffectStateDiagnosticCodeV1::Digest,
+        EffectStateDiagnosticCode::Digest,
         0,
         unavailable,
         56,
@@ -1649,7 +1649,7 @@ fn every_state_header_field_and_payload_class_has_an_exact_diagnostic() {
         "effect-id-bytes",
         bound,
         &effect_length,
-        EffectStateDiagnosticCodeV1::Text,
+        EffectStateDiagnosticCode::Text,
         0,
         unavailable,
         128,
@@ -1665,7 +1665,7 @@ fn every_state_header_field_and_payload_class_has_an_exact_diagnostic() {
         "initial-count",
         bound,
         &initial_count,
-        EffectStateDiagnosticCodeV1::Length,
+        EffectStateDiagnosticCode::Length,
         0,
         unavailable,
         188,
@@ -1684,7 +1684,7 @@ fn every_state_header_field_and_payload_class_has_an_exact_diagnostic() {
             name,
             bound,
             &bytes,
-            EffectStateDiagnosticCodeV1::Length,
+            EffectStateDiagnosticCode::Length,
             0,
             unavailable,
             216,
@@ -1702,7 +1702,7 @@ fn every_state_header_field_and_payload_class_has_an_exact_diagnostic() {
         "padding",
         bound,
         &padding,
-        EffectStateDiagnosticCodeV1::Length,
+        EffectStateDiagnosticCode::Length,
         0,
         unavailable,
         242,
@@ -1715,7 +1715,7 @@ fn every_state_header_field_and_payload_class_has_an_exact_diagnostic() {
             name,
             bound,
             &bytes,
-            EffectStateDiagnosticCodeV1::Text,
+            EffectStateDiagnosticCode::Text,
             0,
             unavailable,
             expected_offset,
@@ -1728,7 +1728,7 @@ fn every_state_header_field_and_payload_class_has_an_exact_diagnostic() {
         "initial-order",
         bound,
         &order,
-        EffectStateDiagnosticCodeV1::Order,
+        EffectStateDiagnosticCode::Order,
         0,
         2,
         280,
@@ -1740,7 +1740,7 @@ fn every_state_header_field_and_payload_class_has_an_exact_diagnostic() {
         "initial-channel",
         bound,
         &initial_enum,
-        EffectStateDiagnosticCodeV1::Enum,
+        EffectStateDiagnosticCode::Enum,
         0,
         0,
         252,
@@ -1752,7 +1752,7 @@ fn every_state_header_field_and_payload_class_has_an_exact_diagnostic() {
         "initial-value",
         bound,
         &initial_value,
-        EffectStateDiagnosticCodeV1::InitialValues,
+        EffectStateDiagnosticCode::InitialValues,
         0,
         0,
         256,
@@ -1764,7 +1764,7 @@ fn every_state_header_field_and_payload_class_has_an_exact_diagnostic() {
         "payload-digest",
         bound,
         &payload,
-        EffectStateDiagnosticCodeV1::Digest,
+        EffectStateDiagnosticCode::Digest,
         0,
         unavailable,
         56,
@@ -1774,7 +1774,7 @@ fn every_state_header_field_and_payload_class_has_an_exact_diagnostic() {
         "truncation",
         bound,
         &original[..original.len() - 1],
-        EffectStateDiagnosticCodeV1::Length,
+        EffectStateDiagnosticCode::Length,
         0,
         unavailable,
         16,
@@ -1786,7 +1786,7 @@ fn every_state_header_field_and_payload_class_has_an_exact_diagnostic() {
         "trailing",
         bound,
         &trailing,
-        EffectStateDiagnosticCodeV1::Length,
+        EffectStateDiagnosticCode::Length,
         0,
         unavailable,
         16,
@@ -1797,116 +1797,116 @@ fn every_state_header_field_and_payload_class_has_an_exact_diagnostic() {
 #[test]
 fn representative_mutations_have_exact_phase_order_and_diagnostics() {
     let (wire, original) = encoded_state();
-    let bound = bind_effect_descriptor_wire_v1(&DESCRIPTOR, &wire, 1 << 20).unwrap();
+    let bound = bind_effect_descriptor_wire(&DESCRIPTOR, &wire, 1 << 20).unwrap();
     let mut bytes = original.clone();
     bytes[0] ^= 1;
-    let error = verify_effect_state_v1(bound, &bytes, EffectStateLimitsV1::default()).unwrap_err();
+    let error = verify_effect_state(bound, &bytes, EffectStateLimits::default()).unwrap_err();
     assert_eq!(
         (error.code, error.byte_offset),
-        (EffectStateDiagnosticCodeV1::Header, 0)
+        (EffectStateDiagnosticCode::Header, 0)
     );
 
     let mut bytes = original.clone();
     bytes[12] = 1;
     bytes.truncate(bytes.len() - 1);
-    let error = verify_effect_state_v1(bound, &bytes, EffectStateLimitsV1::default()).unwrap_err();
+    let error = verify_effect_state(bound, &bytes, EffectStateLimits::default()).unwrap_err();
     assert_eq!(
         (error.code, error.byte_offset),
-        (EffectStateDiagnosticCodeV1::Reserved, 12)
+        (EffectStateDiagnosticCode::Reserved, 12)
     );
 
     let mut bytes = original.clone();
     put_u32(&mut bytes, 104, 0);
     refresh_digest(&mut bytes);
-    let error = verify_effect_state_v1(bound, &bytes, EffectStateLimitsV1::default()).unwrap_err();
+    let error = verify_effect_state(bound, &bytes, EffectStateLimits::default()).unwrap_err();
     assert_eq!(
         (error.code, error.byte_offset),
-        (EffectStateDiagnosticCodeV1::Enum, 104)
+        (EffectStateDiagnosticCode::Enum, 104)
     );
 
     let mut bytes = original.clone();
     put_u32(&mut bytes, 160, 4);
     put_u32(&mut bytes, 188, 49);
-    let error = verify_effect_state_v1(bound, &bytes, EffectStateLimitsV1::default()).unwrap_err();
+    let error = verify_effect_state(bound, &bytes, EffectStateLimits::default()).unwrap_err();
     assert_eq!(
         (error.code, error.byte_offset),
-        (EffectStateDiagnosticCodeV1::Length, 188)
+        (EffectStateDiagnosticCode::Length, 188)
     );
 
     let mut bytes = original.clone();
     bytes[224] = b'u';
     refresh_digest(&mut bytes);
-    let verified = verify_effect_state_v1(bound, &bytes, EffectStateLimitsV1::default()).unwrap();
-    let error = validate_effect_state_replay_v1(verified, replay()).unwrap_err();
+    let verified = verify_effect_state(bound, &bytes, EffectStateLimits::default()).unwrap();
+    let error = validate_effect_state_replay(verified, replay()).unwrap_err();
     assert_eq!(
         (error.code, error.detail),
-        (EffectStateDiagnosticCodeV1::Metadata, 1)
+        (EffectStateDiagnosticCode::Metadata, 1)
     );
 
     let mut bytes = original.clone();
     bytes[56] ^= 1;
-    let error = verify_effect_state_v1(bound, &bytes, EffectStateLimitsV1::default()).unwrap_err();
+    let error = verify_effect_state(bound, &bytes, EffectStateLimits::default()).unwrap_err();
     assert_eq!(
         (error.code, error.byte_offset),
-        (EffectStateDiagnosticCodeV1::Digest, 56)
+        (EffectStateDiagnosticCode::Digest, 56)
     );
 
     let mut bytes = original.clone();
     bytes[24] ^= 1;
     refresh_digest(&mut bytes);
-    let error = verify_effect_state_v1(bound, &bytes, EffectStateLimitsV1::default()).unwrap_err();
+    let error = verify_effect_state(bound, &bytes, EffectStateLimits::default()).unwrap_err();
     assert_eq!(
         (error.code, error.detail),
-        (EffectStateDiagnosticCodeV1::Descriptor, 3 << 16)
+        (EffectStateDiagnosticCode::Descriptor, 3 << 16)
     );
 
     let mut bytes = original.clone();
     put_u32(&mut bytes, 248 + 4, ParameterChannel::Left as u32);
     refresh_digest(&mut bytes);
-    let verified = verify_effect_state_v1(bound, &bytes, EffectStateLimitsV1::default()).unwrap();
-    let error = validate_effect_state_replay_v1(verified, replay()).unwrap_err();
-    assert_eq!(error.code, EffectStateDiagnosticCodeV1::InitialValues);
+    let verified = verify_effect_state(bound, &bytes, EffectStateLimits::default()).unwrap();
+    let error = validate_effect_state_replay(verified, replay()).unwrap_err();
+    assert_eq!(error.code, EffectStateDiagnosticCode::InitialValues);
 
     let mut bytes = original.clone();
     put_u32(&mut bytes, 96, 47_999);
     refresh_digest(&mut bytes);
-    let verified = verify_effect_state_v1(bound, &bytes, EffectStateLimitsV1::default()).unwrap();
+    let verified = verify_effect_state(bound, &bytes, EffectStateLimits::default()).unwrap();
     assert_eq!(verified.sample_rate(), 47_999);
     assert_eq!(
-        validate_effect_state_replay_v1(verified, replay())
+        validate_effect_state_replay(verified, replay())
             .unwrap_err()
             .code,
-        EffectStateDiagnosticCodeV1::Metadata
+        EffectStateDiagnosticCode::Metadata
     );
 
     let mut bytes = original.clone();
     bytes[152..160].copy_from_slice(&18_u64.to_le_bytes());
     bytes[192..200].copy_from_slice(&63_u64.to_le_bytes());
     refresh_digest(&mut bytes);
-    let verified = verify_effect_state_v1(bound, &bytes, EffectStateLimitsV1::default()).unwrap();
-    let error = validate_effect_state_replay_v1(verified, replay()).unwrap_err();
+    let verified = verify_effect_state(bound, &bytes, EffectStateLimits::default()).unwrap();
+    let error = validate_effect_state_replay(verified, replay()).unwrap_err();
     assert_eq!(
         (error.code, error.detail),
-        (EffectStateDiagnosticCodeV1::Metadata, 11)
+        (EffectStateDiagnosticCode::Metadata, 11)
     );
 
-    let error = verify_effect_state_v1(
+    let error = verify_effect_state(
         bound,
         &original[..original.len() - 1],
-        EffectStateLimitsV1::default(),
+        EffectStateLimits::default(),
     )
     .unwrap_err();
     assert_eq!(
         (error.code, error.byte_offset),
-        (EffectStateDiagnosticCodeV1::Length, 16)
+        (EffectStateDiagnosticCode::Length, 16)
     );
     let mut trailing = original.clone();
     trailing.push(0);
     let error =
-        verify_effect_state_v1(bound, &trailing, EffectStateLimitsV1::default()).unwrap_err();
+        verify_effect_state(bound, &trailing, EffectStateLimits::default()).unwrap_err();
     assert_eq!(
         (error.code, error.byte_offset),
-        (EffectStateDiagnosticCodeV1::Length, 16)
+        (EffectStateDiagnosticCode::Length, 16)
     );
 }
 
@@ -1917,13 +1917,13 @@ fn representative_mutations_have_exact_phase_order_and_diagnostics() {
 #[test]
 fn the_state_envelope_binds_the_effect_identity_it_names() {
     let (wire, original) = encoded_state();
-    let bound = bind_effect_descriptor_wire_v1(&DESCRIPTOR, &wire, 1 << 20).unwrap();
+    let bound = bind_effect_descriptor_wire(&DESCRIPTOR, &wire, 1 << 20).unwrap();
 
     let verified =
-        verify_effect_state_v1(bound, &original, EffectStateLimitsV1::default()).unwrap();
+        verify_effect_state(bound, &original, EffectStateLimits::default()).unwrap();
     assert_eq!(verified.effect_id(), DESCRIPTOR.id.as_str());
     assert_eq!(verified.descriptor_identity(), bound.identity());
-    assert_eq!(validate_effect_state_current_layout_v1(verified), Ok(()));
+    assert_eq!(validate_effect_state_current_layout(verified), Ok(()));
 
     // A different, individually valid effect ID of the same length, with the digest recomputed so
     // the envelope is internally consistent: verification accepts the bytes, and the identity
@@ -1934,11 +1934,11 @@ fn the_state_envelope_binds_the_effect_identity_it_names() {
     renamed[224..224 + effect_id_length].copy_from_slice(b"test.stats");
     refresh_digest(&mut renamed);
     let renamed_view =
-        verify_effect_state_v1(bound, &renamed, EffectStateLimitsV1::default()).unwrap();
+        verify_effect_state(bound, &renamed, EffectStateLimits::default()).unwrap();
     assert_eq!(renamed_view.effect_id(), "test.stats");
     for actual in [
-        validate_effect_state_current_layout_v1(renamed_view).unwrap_err(),
-        validate_effect_state_replay_v1(renamed_view, replay()).unwrap_err(),
+        validate_effect_state_current_layout(renamed_view).unwrap_err(),
+        validate_effect_state_replay(renamed_view, replay()).unwrap_err(),
     ] {
         assert_eq!(
             (
@@ -1949,10 +1949,10 @@ fn the_state_envelope_binds_the_effect_identity_it_names() {
                 actual.required_bytes,
             ),
             (
-                EffectStateDiagnosticCodeV1::Metadata,
+                EffectStateDiagnosticCode::Metadata,
                 1,
-                EFFECT_STATE_V1_UNAVAILABLE_INDEX,
-                EFFECT_STATE_V1_UNAVAILABLE_OFFSET,
+                EFFECT_STATE_UNAVAILABLE_INDEX,
+                EFFECT_STATE_UNAVAILABLE_OFFSET,
                 0,
             )
         );
@@ -1966,9 +1966,9 @@ fn the_state_envelope_binds_the_effect_identity_it_names() {
         "identity-flip-stale-digest",
         bound,
         &stale,
-        EffectStateDiagnosticCodeV1::Digest,
+        EffectStateDiagnosticCode::Digest,
         0,
-        EFFECT_STATE_V1_UNAVAILABLE_INDEX,
+        EFFECT_STATE_UNAVAILABLE_INDEX,
         56,
         0,
     );
@@ -1977,10 +1977,10 @@ fn the_state_envelope_binds_the_effect_identity_it_names() {
         "identity-flip-fresh-digest",
         bound,
         &stale,
-        EffectStateDiagnosticCodeV1::Descriptor,
+        EffectStateDiagnosticCode::Descriptor,
         3 << 16,
-        EFFECT_STATE_V1_UNAVAILABLE_INDEX,
-        EFFECT_STATE_V1_UNAVAILABLE_OFFSET,
+        EFFECT_STATE_UNAVAILABLE_INDEX,
+        EFFECT_STATE_UNAVAILABLE_OFFSET,
         0,
     );
 

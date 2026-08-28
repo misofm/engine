@@ -13,16 +13,16 @@ use miso_engine_core::{
     is_extended_compatibility_sample_rate, is_launch_sample_rate, realtime::audit,
 };
 use miso_engine_effect_contract::{
-    AutomationSpanKind, BankProcessReport, EffectDescriptorV1, EffectId, EffectPrepareError,
+    AutomationSpanKind, BankProcessReport, EffectDescriptor, EffectId, EffectPrepareError,
     EffectProcessBlock, EffectQuality, LatencySamples, LinkMode, LinkModeSet, NativeEffectFactory,
-    ParameterChannel, ParameterChannelPolicy, ParameterDescriptorV1, ParameterDomain, ParameterId,
-    ParameterMapping, ParameterUnit, PortDescriptorV1, PortId, PortLayout, PortRole,
+    ParameterChannel, ParameterChannelPolicy, ParameterDescriptor, ParameterDomain, ParameterId,
+    ParameterMapping, ParameterUnit, PortDescriptor, PortId, PortLayout, PortRole,
     PrepareEffectBankRequest, PrepareEffectLimits, PrepareEffectRequest, PreparedAutomationSpan,
     PreparedBankMetadata, PreparedEffectMetadata, PreparedNativeEffect, PreparedNativeEffectBank,
-    PreparedPortsV1, PreparedSidechainPort, ProcessReport, QualityDescriptorV1, ResetKind,
+    PreparedPorts, PreparedSidechainPort, ProcessReport, QualityDescriptor, ResetKind,
     SmoothingRule, StatePayloadError, StatePayloadInput, StatePayloadOutput, StatePayloadSizes,
     TailSamples, default_initial_values, expected_prepared_metadata, valid_runtime_span,
-    validate_descriptor_v1,
+    validate_descriptor,
 };
 
 const MOCK_ID: EffectId = match EffectId::new("conformance.delay") {
@@ -41,7 +41,7 @@ const SIDECHAIN_IN: PortId = match PortId::new("sidechain-in") {
     Ok(value) => value,
     Err(_) => panic!("valid static port ID"),
 };
-const PARAMETERS: [ParameterDescriptorV1; 1] = [ParameterDescriptorV1 {
+const PARAMETERS: [ParameterDescriptor; 1] = [ParameterDescriptor {
     id: ParameterId(1),
     display_name: "Gain",
     display_unit: "linear",
@@ -59,20 +59,20 @@ const PARAMETERS: [ParameterDescriptorV1; 1] = [ParameterDescriptorV1 {
     automatable: true,
     enum_choices: &[],
 }];
-const PORTS: [PortDescriptorV1; 3] = [
-    PortDescriptorV1 {
+const PORTS: [PortDescriptor; 3] = [
+    PortDescriptor {
         id: MAIN_IN,
         role: PortRole::MainInput,
         required: true,
         layout: PortLayout::DualMonoPlanar,
     },
-    PortDescriptorV1 {
+    PortDescriptor {
         id: SIDECHAIN_IN,
         role: PortRole::SidechainInput,
         required: false,
         layout: PortLayout::DualMonoPlanar,
     },
-    PortDescriptorV1 {
+    PortDescriptor {
         id: MAIN_OUT,
         role: PortRole::MainOutput,
         required: true,
@@ -84,8 +84,8 @@ const STATE_SIZES: StatePayloadSizes = StatePayloadSizes {
     left_bytes: 56,
     right_bytes: 56,
 };
-const fn quality(sample_rate: u32) -> QualityDescriptorV1 {
-    QualityDescriptorV1 {
+const fn quality(sample_rate: u32) -> QualityDescriptor {
+    QualityDescriptor {
         quality: EffectQuality::Normal,
         sample_rate,
         latency: LatencySamples(3),
@@ -95,7 +95,7 @@ const fn quality(sample_rate: u32) -> QualityDescriptorV1 {
         scratch_bytes_per_frame: 0,
     }
 }
-const QUALITIES: [QualityDescriptorV1; 8] = [
+const QUALITIES: [QualityDescriptor; 8] = [
     quality(LAUNCH_SAMPLE_RATES[0].0),
     quality(LAUNCH_SAMPLE_RATES[1].0),
     quality(LAUNCH_SAMPLE_RATES[2].0),
@@ -105,7 +105,7 @@ const QUALITIES: [QualityDescriptorV1; 8] = [
     quality(EXTENDED_COMPATIBILITY_SAMPLE_RATES[2].0),
     quality(EXTENDED_COMPATIBILITY_SAMPLE_RATES[3].0),
 ];
-pub static DUAL_ACCUMULATOR_DELAY_DESCRIPTOR: EffectDescriptorV1 = EffectDescriptorV1 {
+pub static DUAL_ACCUMULATOR_DELAY_DESCRIPTOR: EffectDescriptor = EffectDescriptor {
     id: MOCK_ID,
     display_name: "Conformance dual accumulator delay",
     contract_major: 1,
@@ -170,7 +170,7 @@ impl DualAccumulatorDelayFactory {
     }
 }
 impl NativeEffectFactory for DualAccumulatorDelayFactory {
-    fn descriptor(&self) -> &'static EffectDescriptorV1 {
+    fn descriptor(&self) -> &'static EffectDescriptor {
         &DUAL_ACCUMULATOR_DELAY_DESCRIPTOR
     }
     fn prepare(
@@ -777,7 +777,7 @@ fn armed_process(
 /// request and every launch gate above 48 kHz reported `prepare.request` for a conforming effect.
 /// Deriving the limits from the quality row is both correct and strictly stronger than a constant:
 /// it gates that the effect fits inside exactly what it advertises, not inside a megabyte.
-fn declared_limits(quality: &QualityDescriptorV1, quantum: u32) -> PrepareEffectLimits {
+fn declared_limits(quality: &QualityDescriptor, quantum: u32) -> PrepareEffectLimits {
     let scratch = quality
         .scratch_bytes_per_frame
         .saturating_mul(u64::from(quantum))
@@ -1065,7 +1065,7 @@ pub fn run_effect_conformance(
         extended_compatibility_probes: EffectConformanceTierReport::new(),
     };
     let descriptor = factory.descriptor();
-    if validate_descriptor_v1(descriptor).is_err() {
+    if validate_descriptor(descriptor).is_err() {
         report.launch_gates.failures.push("descriptor.validation");
         return report;
     }
@@ -1235,7 +1235,7 @@ pub fn run_effect_conformance(
 /// parametric EQ) or names its port differently. `PreparedSidechainPort::None` and
 /// `Unconnected { id, required }` are not interchangeable — the contract checks each against the
 /// descriptor — so the request has to be built from the descriptor.
-fn unconnected_ports(descriptor: &'static EffectDescriptorV1) -> PreparedPortsV1 {
+fn unconnected_ports(descriptor: &'static EffectDescriptor) -> PreparedPorts {
     let sidechain = descriptor
         .ports
         .iter()
@@ -1246,7 +1246,7 @@ fn unconnected_ports(descriptor: &'static EffectDescriptorV1) -> PreparedPortsV1
                 required: port.required,
             }
         });
-    PreparedPortsV1 { sidechain }
+    PreparedPorts { sidechain }
 }
 
 /// The mock's own per-value canonical-finite predicate.
@@ -1329,7 +1329,7 @@ fn sidechain_probe(
         return true;
     };
     request.bypass = false;
-    request.ports = PreparedPortsV1 {
+    request.ports = PreparedPorts {
         sidechain: PreparedSidechainPort::Connected {
             id: port.id,
             required: port.required,

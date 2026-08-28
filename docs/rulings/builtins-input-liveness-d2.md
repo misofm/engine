@@ -71,12 +71,12 @@ collapse machinery had to be taught about them in three places:
   `lane_channel_symmetry` compares it -- plus `target`, `step` and the countdown, because at the
   block an asymmetric retarget is admitted `current` has not moved yet and a witness that compared
   only `current` would let that block collapse;
-* the drain folds `ChannelSymmetryWitnessV1::admit`, so a per-lane retarget clears `LIVE` before
+* the drain folds `ChannelSymmetryWitness::admit`, so a per-lane retarget clears `LIVE` before
   the collapse dispatch reads the witness. That ordering is why the drain is `begin_block` and not
   the first paragraph of `process`, and it is the difference between correct bits and a left-lane
   retarget published on both channels of the admitting block;
 * a `channel = both` command is **one** record carrying `BuiltinLaneSelector::Both` and is admitted
-  as `SymmetryEventV1::Preserve`, so a symmetric ride keeps the collapse bit-identically. This is a
+  as `SymmetryEvent::Preserve`, so a symmetric ride keeps the collapse bit-identically. This is a
   deliberate departure from the effect-parameter lowering, where `both` on a `PerLane` parameter
   becomes two records and therefore two `Desymmetrize` events; `TrackInputRecordV1` carries the
   argument.
@@ -102,7 +102,7 @@ bit-equal -- is now asserted where it holds, at the top of `process_mono`, rathe
 does not.
 
 **Re-engage.** `LIVE` is a latch -- cleared by the drain, never set again within a plan -- exactly
-as it is for `EffectControlRecordV1`. So a track whose channels were driven apart by a per-lane
+as it is for `EffectControlRecord`. So a track whose channels were driven apart by a per-lane
 trim ride does not re-engage its collapse even after the two words are made equal again. That is
 **stronger** than M3's rule, which is that re-equal parameter words alone must not re-engage; here
 they cannot re-engage at all, and the M3 proof path (`channels_agree`, implemented for the input

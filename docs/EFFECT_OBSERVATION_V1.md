@@ -7,7 +7,7 @@ transport**. Gain reduction is the first resident tap; it is not the design.
 ## The declared menu
 
 An effect declares what may be observed, in the same descriptor that declares its parameters and
-never anywhere else. `EffectDescriptorV1::observations` is a `&'static [ObservationDescriptorV1]`
+never anywhere else. `EffectDescriptor::observations` is a `&'static [ObservationDescriptor]`
 and each entry states an effect-local nonzero ascending `id`, a display name and unit, a `kind`, a
 transport `unit`, a `cost`, a `cadence`, a `fold`, a `channels` policy, and the declared bounds of
 the value a consumer reads.
@@ -16,7 +16,7 @@ The effect is the only thing that knows which of its internal values exist, what
 whether reading one is a copy or a second computation. A host-side table would be a second source
 of truth that goes stale the moment a kernel changes.
 
-`validate_descriptor_v1` enforces three rules beyond text and bounds:
+`validate_descriptor` enforces three rules beyond text and bounds:
 
 * a `Computed` tap may not claim `PerBlock` cadence — that would put an analysis pass on the render
   thread, which is exactly what the cost split exists to prevent;
@@ -47,12 +47,12 @@ zero with no way for the caller to learn why.
 
 **Level 1 — structural.** A session whose console request names no observation capacity
 (`observation_taps == 0`) has no observation state in the compiled plan *at all*: no lane, no
-accumulator, no conflating cell. Not a disabled one — none. `attach_effect_observation_v1` is the
+accumulator, no conflating cell. Not a disabled one — none. `attach_effect_observation` is the
 only thing that creates one and it is never called. `observation_retained_bytes` is `0`, and that
 zero is **walked over the built runtime** rather than computed from the request.
 
 **Level 2 — arm/disarm.** Inside a capable plan, subscribe and unsubscribe ride the effect's
-existing bounded control channel as `EffectControlRecordV1::Observe`, applied at the block
+existing bounded control channel as `EffectControlRecord::Observe`, applied at the block
 boundary and acknowledged with the exact `applied_at_sample`. Slots are preallocated from the
 declared menu, so subscribe allocates nothing and disarm frees nothing: `retained_bytes` is
 unchanged across both. An unarmed tap's state is never read, transformed or stored; the honest cost
