@@ -41,24 +41,27 @@
 //!
 //! The rule is *"every record admitted onto a live-console queue declares what it does to an
 //! upstream per-lane word"*, and it is carried by [`LiveConsoleRecordV1`] rather than by an
-//! `if` over today's record kinds. A new live-console record type -- the builtins trim/polarity
-//! liveness drain, an automation span, anything a later issue adds -- cannot be drained into a
-//! witness-carrying stage without implementing that trait, and the trait's two obligations are
-//! exactly the two facts the witness needs: which side of the seam the record's stage sits on,
-//! and what the record does to the two channels. Enumerating kinds would have made every future
-//! kind a silent hole; this makes it a compile error.
+//! `if` over today's record kinds. A new live-console record type -- an automation span, anything
+//! a later issue adds -- cannot be drained into a witness-carrying stage without implementing that
+//! trait, and the trait's two obligations are exactly the two facts the witness needs: which side
+//! of the seam the record's stage sits on, and what the record does to the two channels.
+//! Enumerating kinds would have made every future kind a silent hole; this makes it a compile
+//! error. The builtins trim/polarity drain (#210 phase 3) is the first type the rule caught that
+//! did not exist when it was written.
 //!
-//! # The two seams this phase deliberately leaves open
+//! # The seams: one closed, one still open
 //!
-//! Both are marked here rather than in the crates that will grow them, because the obligation is
-//! this module's to state:
+//! Both are marked here rather than in the crates that grow them, because the obligation is this
+//! module's to state:
 //!
-//! 1. **Builtins liveness.** `polarity_invert`, `trim_db`, `hpf_hz` and `lpf_hz` are `PreparedOnly`
-//!    today, so the input-builtins stage has no queue and no drain, and its witness is decided
-//!    once at preparation. When a live trim/polarity record type arrives it must implement
-//!    [`LiveConsoleRecordV1`] with `SEAM = UpstreamOfSeam`, and its drain must call
-//!    [`ChannelSymmetryWitnessV1::admit`] exactly as `EffectControlLane::stage` does. The trait
-//!    bound is what makes that an obligation rather than a reminder.
+//! 1. **Builtins liveness -- CLOSED by #210 phase 3.** `trim_db` and `polarity_invert` are live:
+//!    the input-builtins stage has a queue, and `miso_engine_builtins_compiler::TrackInputRecordV1`
+//!    implements [`LiveConsoleRecordV1`] with `SEAM = UpstreamOfSeam` and is folded through
+//!    [`ChannelSymmetryWitnessV1::admit`] by its drain, exactly as `EffectControlLane::stage` folds
+//!    an effect record. The trait bound is what made that an obligation rather than a reminder,
+//!    and it is what a *third* builtin record type would meet next. `hpf_hz` and `lpf_hz` are
+//!    still `PreparedOnly`; their liveness carries a separate obligation, recorded in
+//!    `docs/rulings/builtins-input-liveness-d2.md`, that has nothing to do with this module.
 //! 2. **Session automation spans.** A prepared automation span carries a
 //!    [`ParameterChannel`](crate::ParameterChannel) exactly as a live record does, so the rule is
 //!    already written: [`ParameterChannel::writes_one_channel`]. What does not exist yet is the

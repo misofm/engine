@@ -1238,6 +1238,11 @@ impl BankStage for BuiltinStage {
         self.0
             .process(block.left, block.right, block.frames, block.first_sample)
     }
+    /// The drain, forwarded. `BankChain::run` calls this on every slot before it reads the
+    /// collapse witness, which is the ordering the input bank's trim/polarity drain depends on.
+    fn begin_block(&mut self, first_sample: u64) -> Result<(), RenderError> {
+        self.0.begin_block(first_sample)
+    }
     fn qualification_counters(&self) -> [u64; 2] {
         self.0.qualification_counters()
     }

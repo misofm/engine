@@ -31,12 +31,12 @@ SMOOTHINGS = {1: "none", 2: "linear", 3: "onePole99"}
 
 COMMAND_KINDS = [
     "pan", "matrix", "faderDb", "mute", "effectParam", "effectBypass",
-    "observeSubscribe", "observeUnsubscribe", "solo",
+    "observeSubscribe", "observeUnsubscribe", "solo", "trimDb", "polarityInvert",
 ]
 # The two host-level transaction kinds. They are applied -- `admit_commands` binds or unbinds the
 # tap and acknowledges `none` -- but what they apply to is the `miso.observe.v1` subscription map,
-# not anything the render thread reads. The vocabulary is complete at eight; `plane` is what tells
-# the six DSP kinds apart from these two. Spelled here rather than imported on purpose, and
+# not anything the render thread reads. `plane` is what tells the render kinds apart from these
+# two. Spelled here rather than imported on purpose, and
 # `scripts/check-command-kind-vocabulary.py` is what proves this list, the Rust constants, the
 # decode whitelist, the host JS set, the `.d.ts` enum and the generator are one vocabulary.
 OBSERVE_COMMAND_KINDS = ["observeSubscribe", "observeUnsubscribe"]
@@ -202,9 +202,25 @@ def validate(document: dict) -> None:
                 finite(value, "builtin rate table value")
             finite(parameter["disabledValue"], "builtin disabled value")
         require(parameter["nudge"] is None, "builtin nudge slot")
+    # The live set is pinned by name, not merely counted: a row that silently flipped its
+    # `updateRate` would otherwise pass every other rule in this function. Issue #210 phase 3 added
+    # `trim_db` and `polarity_invert` -- one coefficient, one ramp, two parameters -- and the two
+    # are named here in the same change that flipped their descriptor rows. `hpf_hz`, `lpf_hz` and
+    # `delay_samples` are deliberately absent and must stay absent until the ruling that defers
+    # them is reopened.
     require(
-        live_names == {"fader_db", "mute", "matrix_ll", "matrix_lr", "matrix_rl", "matrix_rr"},
-        "exactly the fader, mute and matrix parameters are live",
+        live_names
+        == {
+            "trim_db",
+            "polarity_invert",
+            "fader_db",
+            "mute",
+            "matrix_ll",
+            "matrix_lr",
+            "matrix_rl",
+            "matrix_rr",
+        },
+        "exactly the trim, polarity, fader, mute and matrix parameters are live",
     )
 
     require(document["effects"], "at least one effect")
@@ -443,8 +459,32 @@ def self_test() -> int:
             lambda d: d["builtins"]["parameters"][6].update(liveUpdatable=False),
         ),
         (
+            # Row index 2 is `hpf_hz`. It was index 1 (`trim_db`) until #210 phase 3 made that row
+            # genuinely live; the mutation has to name a row that is still prepared-only or it
+            # stops being a mutation.
             "a prepared-only builtin claims to be live",
-            lambda d: d["builtins"]["parameters"][1].update(liveUpdatable=True),
+            lambda d: d["builtins"]["parameters"][2].update(liveUpdatable=True),
+        ),
+        # The two red mutations on the **live-set literal** itself (#210 phase 3). Both are
+        # internally consistent -- `liveUpdatable` still follows `updateRate`, the smoothing
+        # policy still matches -- so every other rule in `validate` passes them, and only the
+        # `live_names == {...}` pin refuses them. That is what makes the literal load-bearing
+        # rather than decorative: without it, a row could be promoted or demoted silently.
+        (
+            "a deferred builtin is promoted into the live set",
+            lambda d: d["builtins"]["parameters"][2].update(
+                updateRate="blockTarget",
+                smoothing="linearNUpdates",
+                liveUpdatable=True,
+            ),
+        ),
+        (
+            "the live trim row is demoted out of the live set",
+            lambda d: d["builtins"]["parameters"][1].update(
+                updateRate="preparedOnly",
+                smoothing="none",
+                liveUpdatable=False,
+            ),
         ),
         ("builtin nudge is an object", lambda d: d["builtins"]["parameters"][0].update(nudge={})),
         ("effect order", lambda d: d["effects"].reverse()),

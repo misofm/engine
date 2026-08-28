@@ -33,9 +33,10 @@ use miso_engine_lane::{
     kernels::{
         SvfCoef,
         builtins::{
-            GainMuteRamp, InputChainCoef, InputChainPlan, InputChainState, Matrix2x2Coef,
-            Matrix2x2Ramp, gain_mute_block, gain_mute_ramp_block, input_chain_block_elided,
-            input_chain_block_mono_elided, input_chain_plan, lanes_below, mask_from_flags,
+            GainMuteRamp, InputChainCoef, InputChainPlan, InputChainState, InputTrimRamp,
+            Matrix2x2Coef, Matrix2x2Ramp, gain_mute_block, gain_mute_ramp_block,
+            input_chain_block_elided, input_chain_block_mono_elided, input_chain_plan,
+            input_chain_ramp_block, input_chain_ramp_block_mono, lanes_below, mask_from_flags,
             matrix2x2_block, matrix2x2_ramp_block, no_lanes, plan_is_channel_symmetric,
             zero_lanes_block,
         },
@@ -352,8 +353,13 @@ pub const BUILTIN_PARAMETER_DESCRIPTORS_V1: [BuiltinParameterDescriptorV1; 11] =
         mapping: BuiltinParameterMapping::Boolean,
         domain: BuiltinParameterDomain::BooleanExact,
         default: 0.0,
-        update_rate: BuiltinParameterUpdateRate::PreparedOnly,
-        smoothing: BuiltinSmoothingPolicy::None,
+        // Live since #210 phase 3 (command kind 11). A flip is a retarget of the **trim**
+        // coefficient to its own negation, so the declick is the trim ramp's and the row's
+        // smoothing policy is the trim's: `LinearNUpdates`, the linear-N law, carrying the
+        // coefficient through zero. The row is `BlockTarget` because a flip lands at a block
+        // boundary like every other live builtin move.
+        update_rate: BuiltinParameterUpdateRate::BlockTarget,
+        smoothing: BuiltinSmoothingPolicy::LinearNUpdates,
         reset: BuiltinParameterReset::RestorePreparedValue,
         disabled_value: None,
     },
@@ -367,8 +373,12 @@ pub const BUILTIN_PARAMETER_DESCRIPTORS_V1: [BuiltinParameterDescriptorV1; 11] =
             maximum: 24.0,
         },
         default: 0.0,
-        update_rate: BuiltinParameterUpdateRate::PreparedOnly,
-        smoothing: BuiltinSmoothingPolicy::None,
+        // Live since #210 phase 3 (command kind 10): the input chain's trim coefficient steps per
+        // sample under the linear-N law, in `input_chain_ramp_block`, exactly as `fader_db` does
+        // in `gain_mute_ramp_block`. Gain-riding trim ahead of the compressor is the workflow the
+        // D2 ruling adopted this for.
+        update_rate: BuiltinParameterUpdateRate::BlockTarget,
+        smoothing: BuiltinSmoothingPolicy::LinearNUpdates,
         reset: BuiltinParameterReset::RestorePreparedValue,
         disabled_value: None,
     },
@@ -713,9 +723,27 @@ pub(crate) struct InputStage<L: Lane> {
     /// Which sections the render path may skip, decided from the words in [`InputStage::coef`]
     /// and [`InputStage::state`] and re-decided by every write to either.
     ///
-    /// The coefficients are written once, here, because `hpf_hz`, `lpf_hz`, `trim_db` and
-    /// `polarity_invert` are all `PreparedOnly` in `BUILTIN_PARAMETER_DESCRIPTORS_V1`; the state
-    /// words are written by [`InputStage::reset`] and by the evidence-only
+    /// # Why a live trim cannot make this stale (issue #210 phase 3)
+    ///
+    /// The plan is a pure function of the **six SVF coefficient words per section and the two
+    /// integrators per section** -- [`section_is_identity`] reads those eight and nothing else.
+    /// `trim` is not among them. `hpf_hz` and `lpf_hz`, which are the only parameters that design
+    /// those six words, remain `PreparedOnly` in `BUILTIN_PARAMETER_DESCRIPTORS_V1`, so the
+    /// coefficients are still written exactly once, here.
+    ///
+    /// `trim_db` and `polarity_invert` are live since phase 3 and write [`InputStage::coef`]'s
+    /// `trim` word after preparation -- but a section's elidability does not depend on the value
+    /// the chain multiplies its input by, only on whether the section is the arithmetic identity,
+    /// so that write cannot flip a `true` to a `false` or the reverse. The decision is therefore
+    /// still taken once, at the point the section words are written, and cannot go stale.
+    ///
+    /// **The proviso this leaves for a later phase**: if `hpf_hz` or `lpf_hz` ever become live,
+    /// the premise above fails at exactly the word list this comment names, and that liveness
+    /// requires a command-driven invalidation -- the retarget must recompute the plan the way
+    /// [`InputStage::set_lane_state_words`] and [`InputStage::reset`] already do. See
+    /// `docs/rulings/builtins-input-liveness-d2.md`.
+    ///
+    /// The state words are written by [`InputStage::reset`] and by the evidence-only
     /// [`InputStage::set_lane_state_words`], and both re-decide the plan.
     ///
     /// The render path writes `state` in exactly one place -- the boundary-check recovery in
@@ -725,6 +753,27 @@ pub(crate) struct InputStage<L: Lane> {
     /// bit-for-bit as it was rather than made to re-decide the plan. A section it happens to make
     /// newly elidable simply stays unelided until the next reset, which costs correctness nothing.
     plan: InputChainPlan,
+    /// The live trim ramp (#210 phase 3). `ramp.current[c]` is the same value as `coef.trim[c]`
+    /// between events -- there is no second copy of the coefficient -- and `ramp.target[c]` is the
+    /// per-lane target, whose sign **is** the lane's polarity and whose magnitude is its trim
+    /// gain. Neither is stored a second time, for the reason [`InputStage::lane_track`] gives: the
+    /// words are the only copy of the design.
+    ramp: InputTrimRamp<L>,
+    /// Per-lane frames left in the current trim ramp, `[channel][lane]`.
+    ///
+    /// The authoritative countdown, in the same relationship to the kernel's `f32` word that
+    /// [`FaderRampStage::remaining`] has to [`GainMuteRamp::remaining`]: the kernel's word is
+    /// recomputed from this at the top of every ramping block and never carried across one.
+    remaining: [[u32; MAX_BANK_LANES]; 2],
+    /// Whether any lane of either channel is mid-ramp.
+    ///
+    /// **This is the feature's off gate.** A session that has never had a trim or polarity command
+    /// admitted for this bank leaves it `false` for the life of the plan, and
+    /// [`InputStage::process`] then dispatches the untouched [`input_chain_block_elided`] over the
+    /// prepared coefficients -- the same call, on the same words, in the same order, as before the
+    /// feature existed. The cost of the feature to such a session is this one `bool` test per bank
+    /// per block, and the `false` arm is byte-identical work.
+    ramping: bool,
     /// Lifetime boundary-check recoveries per channel.
     lifetime_recovered: [u64; 2],
 }
@@ -757,14 +806,183 @@ impl<L: Lane> InputStage<L> {
         // disabled is decided elidable here and stays so: nothing after preparation writes an
         // elided section's coefficients or its state.
         let plan = input_chain_plan::<L>(&coef, &state);
+        // The settled ramp: `current` and `target` are the prepared `trim_signed` words, the step
+        // is zero and nothing is counting down. This is the initialisation the class-A OFF claim
+        // rests on -- a lane that is never retargeted renders through `coef.trim`, which is these
+        // words, which are `InputLane::trim_signed` unchanged.
+        let ramp = InputTrimRamp {
+            current: coef.trim,
+            target: coef.trim,
+            step: [L::zero(); 2],
+            remaining: [L::zero(); 2],
+        };
         Self {
             members,
             active: lanes_below::<L>(members),
             coef,
             state,
             plan,
+            ramp,
+            remaining: [[0; MAX_BANK_LANES]; 2],
+            ramping: false,
             lifetime_recovered: [0; 2],
         }
+    }
+
+    /// Largest ramp countdown that is exact in `f32`.
+    ///
+    /// The same clamp, for the same reason, as [`FADER_RAMP_COUNTDOWN_MAXIMUM`] and
+    /// [`MATRIX_RAMP_COUNTDOWN_MAXIMUM`].
+    const RAMP_COUNTDOWN_MAXIMUM: u32 = 1 << 24;
+
+    /// Retargets one lane's trim on the addressed channels, over an explicit ramp window.
+    ///
+    /// `signed` is the whole coefficient: its magnitude is the trim gain and its sign is the
+    /// polarity. A polarity flip is therefore this call with the same magnitude and the opposite
+    /// sign, and the linear ramp carries the coefficient **through zero** -- which is the whole
+    /// declick story for a live polarity invert, and why it needs no DSP of its own.
+    ///
+    /// D11: one division per channel per event, never per sample. A window of `0` is an immediate
+    /// assignment, exactly as it is for the fader and the matrix.
+    fn set_trim_signed(
+        &mut self,
+        lane: usize,
+        channels: BuiltinLaneSelector,
+        signed: impl Fn(f32) -> f32,
+        smoothing_samples: u32,
+    ) {
+        debug_assert!(lane < L::WIDTH);
+        for channel in 0..2 {
+            if !channels.covers(channel) {
+                continue;
+            }
+            let mut current = lane_read::<L>(self.ramp.current[channel]);
+            let mut target = lane_read::<L>(self.ramp.target[channel]);
+            let mut step = lane_read::<L>(self.ramp.step[channel]);
+            let value = signed(target[lane]);
+            target[lane] = value;
+            step[lane] = if smoothing_samples == 0 {
+                0.0
+            } else {
+                (value - current[lane]) / smoothing_samples as f32
+            };
+            if smoothing_samples == 0 {
+                current[lane] = value;
+            }
+            self.ramp.target[channel] = lane_words::<L>(&target);
+            self.ramp.step[channel] = lane_words::<L>(&step);
+            self.ramp.current[channel] = lane_words::<L>(&current);
+            self.coef.trim[channel] = self.ramp.current[channel];
+            self.remaining[channel][lane] = smoothing_samples;
+            if smoothing_samples > 0 {
+                self.ramping = true;
+            }
+        }
+    }
+
+    /// Retargets one lane's trim in decibels, keeping its polarity.
+    fn set_trim_db(
+        &mut self,
+        lane: usize,
+        channels: BuiltinLaneSelector,
+        gain: f32,
+        smoothing_samples: u32,
+    ) {
+        self.set_trim_signed(
+            lane,
+            channels,
+            |previous| {
+                if previous.is_sign_negative() {
+                    -gain
+                } else {
+                    gain
+                }
+            },
+            smoothing_samples,
+        );
+    }
+
+    /// Sets or clears one lane's polarity inversion, keeping its trim magnitude.
+    fn set_polarity_invert(
+        &mut self,
+        lane: usize,
+        channels: BuiltinLaneSelector,
+        inverted: bool,
+        smoothing_samples: u32,
+    ) {
+        self.set_trim_signed(
+            lane,
+            channels,
+            move |previous| {
+                let magnitude = previous.abs();
+                if inverted { -magnitude } else { magnitude }
+            },
+            smoothing_samples,
+        );
+    }
+
+    /// One lane and channel's current trim coefficient, for tests and control-plane readback.
+    fn trim_signed(&self, lane: usize, channel: usize) -> f32 {
+        lane_read::<L>(self.coef.trim[channel % 2])[lane]
+    }
+
+    /// One lane and channel's trim target, for tests and control-plane readback.
+    fn trim_target(&self, lane: usize, channel: usize) -> f32 {
+        lane_read::<L>(self.ramp.target[channel % 2])[lane]
+    }
+
+    /// Loads the kernel's `f32` countdown words from the authoritative `u32` counters.
+    fn load_countdown(&mut self) {
+        for channel in 0..2 {
+            let mut words = [0.0_f32; MAX_BANK_LANES];
+            for (lane, word) in words.iter_mut().enumerate() {
+                *word = self.remaining[channel][lane].min(Self::RAMP_COUNTDOWN_MAXIMUM) as f32;
+            }
+            self.ramp.remaining[channel] = lane_words::<L>(&words);
+        }
+    }
+
+    /// Advances the authoritative countdowns by `frames`, snaps the lanes that settled, and
+    /// republishes `coef.trim` from the ramp's current words.
+    ///
+    /// The snap is an **assignment** to the exact target (D11), not the last accumulated sum: a
+    /// lane whose countdown reached zero inside the block holds a value the kernel already
+    /// assigned, and this restates it so that a lane whose countdown reached zero exactly at the
+    /// block edge is assigned too.
+    fn settle(&mut self, frames: usize, channels: core::ops::Range<usize>) {
+        let frames = u32::try_from(frames).unwrap_or(u32::MAX);
+        let mut ramping = false;
+        for channel in channels {
+            let mut current = lane_read::<L>(self.ramp.current[channel]);
+            let target = lane_read::<L>(self.ramp.target[channel]);
+            for lane in 0..L::WIDTH {
+                let remaining = self.remaining[channel][lane].saturating_sub(frames);
+                self.remaining[channel][lane] = remaining;
+                if remaining == 0 {
+                    current[lane] = target[lane];
+                } else {
+                    ramping = true;
+                }
+            }
+            self.ramp.current[channel] = lane_words::<L>(&current);
+            self.coef.trim[channel] = self.ramp.current[channel];
+        }
+        self.ramping = ramping;
+    }
+
+    /// Duplicates the left channel's whole trim-ramp record onto the right channel.
+    ///
+    /// The collapsed block's accounting rule, applied to the ramp: a collapsed track's right
+    /// channel *is* its left channel, so the right channel's ramp advances exactly as the left
+    /// one's did rather than freezing. See [`InputStage::process_mono`] for why the report is
+    /// duplicated for the same reason.
+    fn mirror_trim_ramp(&mut self) {
+        self.ramp.current[1] = self.ramp.current[0];
+        self.ramp.target[1] = self.ramp.target[0];
+        self.ramp.step[1] = self.ramp.step[0];
+        self.ramp.remaining[1] = self.ramp.remaining[0];
+        self.remaining[1] = self.remaining[0];
+        self.coef.trim[1] = self.coef.trim[0];
     }
 
     /// Sums the populated lanes of an exact-integer lane word.
@@ -789,14 +1007,31 @@ impl<L: Lane> InputStage<L> {
         right: &mut [f32],
         frames: usize,
     ) -> BuiltinProcessReport {
-        let report = input_chain_block_elided::<L>(
-            left,
-            right,
-            frames,
-            &self.coef,
-            &mut self.state,
-            &self.plan,
-        );
+        // The feature's off gate, and the whole of its steady-state cost: one `bool`. The `false`
+        // arm is the call this function has always made, on the prepared coefficient words, with
+        // the elision plan Job 1 decided -- byte-identical work.
+        let report = if self.ramping {
+            self.load_countdown();
+            let report = input_chain_ramp_block::<L>(
+                left,
+                right,
+                frames,
+                &self.coef,
+                &mut self.state,
+                &mut self.ramp,
+            );
+            self.settle(frames, 0..2);
+            report
+        } else {
+            input_chain_block_elided::<L>(
+                left,
+                right,
+                frames,
+                &self.coef,
+                &mut self.state,
+                &self.plan,
+            )
+        };
         let mut recovered = [0_u64; 2];
         for (channel, recovered) in recovered.iter_mut().enumerate() {
             let bad = L::mask_and(report.nonfinite[channel], self.active);
@@ -841,13 +1076,33 @@ impl<L: Lane> InputStage<L> {
     /// seam is about to write carries exactly the left plane's recovered samples.
     fn process_mono(&mut self, left: &mut [f32], frames: usize) -> BuiltinProcessReport {
         debug_assert!(plan_is_channel_symmetric(&self.plan));
-        let report = input_chain_block_mono_elided::<L>(
-            left,
-            frames,
-            &self.coef,
-            &mut self.state,
-            &self.plan,
-        );
+        let report = if self.ramping {
+            self.load_countdown();
+            let report = input_chain_ramp_block_mono::<L>(
+                left,
+                frames,
+                &self.coef,
+                &mut self.state,
+                &mut self.ramp,
+            );
+            // Channel `0` only: the right channel's ramp is not advanced by the one-plane kernel,
+            // so it is settled from the left channel's countdown and then duplicated, exactly as
+            // the report below is. A collapsed track's right channel *is* its left channel here
+            // too, and freezing the right ramp instead would leave the disengage boundary with a
+            // per-channel word to repair that no `desymmetrize` copy can reconstruct once the two
+            // countdowns have diverged.
+            self.settle(frames, 0..1);
+            self.mirror_trim_ramp();
+            report
+        } else {
+            input_chain_block_mono_elided::<L>(
+                left,
+                frames,
+                &self.coef,
+                &mut self.state,
+                &self.plan,
+            )
+        };
         let mut recovered = 0_u64;
         let bad = L::mask_and(report.nonfinite[0], self.active);
         if L::mask_any(bad) {
@@ -872,16 +1127,75 @@ impl<L: Lane> InputStage<L> {
         }
     }
 
-    /// Copies the left channel's retained integrators onto the right channel.
+    /// Copies the left channel's whole per-channel state onto the right channel.
     ///
-    /// The collapse's disengage boundary for this stage. The **whole** per-channel state of this
-    /// kernel is `InputChainState::section[channel]` -- two `SvfState` words per section, two
-    /// sections -- and nothing else: `coef` is designed and compares bit-equal between the
-    /// channels for every lane of a collapse-eligible bank (which is what `DESIGNED` *is*), and
-    /// `plan`, `members`, `active` and the counters are cohort-wide. Copying the integrators is
-    /// therefore the whole of it.
+    /// The collapse's disengage boundary for this stage. The per-channel state of this kernel is
+    /// `InputChainState::section[channel]` -- two `SvfState` words per section, two sections --
+    /// **and, since #210 phase 3, the trim ramp record**: `current`, `target`, `step` and both
+    /// countdowns are per-channel words the ramping kernel reads and writes. `plan`, `members`,
+    /// `active` and the counters are cohort-wide, and `coef.section` is designed and compares
+    /// bit-equal between the channels for every lane of a collapse-eligible bank (which is what
+    /// `DESIGNED` *is*).
+    ///
+    /// The ramp half is **redundant today and is kept anyway**, which is worth being explicit
+    /// about rather than quietly relying on: [`InputStage::process_mono`] already mirrors the left
+    /// channel's ramp onto the right one at the bottom of every collapsed block, so the two are
+    /// equal when this is reached. What the copy states is the *law* -- the whole per-channel
+    /// state is restored at the disengage boundary -- and it is the line a future one-plane path
+    /// that stopped mirroring per block would otherwise have to remember to add. The debug
+    /// assertion is what keeps the redundancy honest.
     fn desymmetrize(&mut self) {
+        debug_assert!(
+            self.trim_ramp_channels_agree(),
+            "a collapsed block mirrors the trim ramp, so a disengage cannot find the two apart"
+        );
         self.state.section[1] = self.state.section[0];
+        self.mirror_trim_ramp();
+    }
+
+    /// Whether every per-channel trim-ramp word compares bit-equal between the two channels.
+    fn trim_ramp_channels_agree(&self) -> bool {
+        for words in [
+            (self.ramp.current[0], self.ramp.current[1]),
+            (self.ramp.target[0], self.ramp.target[1]),
+            (self.ramp.step[0], self.ramp.step[1]),
+            (self.coef.trim[0], self.coef.trim[1]),
+        ] {
+            let left = lane_read::<L>(words.0);
+            let right = lane_read::<L>(words.1);
+            for lane in 0..L::WIDTH {
+                if left[lane].to_bits() != right[lane].to_bits() {
+                    return false;
+                }
+            }
+        }
+        self.remaining[0][..L::WIDTH] == self.remaining[1][..L::WIDTH]
+    }
+
+    /// Whether this stage can **prove**, right now, that its two channels' state is bit-equal.
+    ///
+    /// The mono collapse's way back (M3). The proof is a walk over exactly the words
+    /// [`InputStage::desymmetrize`] copies -- the four integrators per channel and the trim ramp
+    /// record -- because those are the whole of this kernel's per-channel state, and a `true` that
+    /// covered less would re-engage a collapse onto a right channel that is not the left one.
+    ///
+    /// It is asked only inside a recovery window (`miso_engine_rack::BankChain::run`), so a
+    /// session that never drives its channels apart never pays for it.
+    fn channels_agree(&self) -> bool {
+        for section in 0..2 {
+            let left = &self.state.section[0][section];
+            let right = &self.state.section[1][section];
+            for (left_word, right_word) in [(left.ic1, right.ic1), (left.ic2, right.ic2)] {
+                let left_words = lane_read::<L>(left_word);
+                let right_words = lane_read::<L>(right_word);
+                for lane in 0..L::WIDTH {
+                    if left_words[lane].to_bits() != right_words[lane].to_bits() {
+                        return false;
+                    }
+                }
+            }
+        }
+        self.trim_ramp_channels_agree()
     }
 
     /// Whether this chain may be collapsed at all: the two channels must elide the same sections.
@@ -901,6 +1215,18 @@ impl<L: Lane> InputStage<L> {
     /// re-decides `plan`.
     fn reset(&mut self) {
         self.state = InputChainState::default();
+        // Snap every lane to its target and cancel any ramp in flight, exactly as
+        // `FaderRampStage::reset` and `MatrixStage::reset` do: a reset is a state reset, and a
+        // half-finished ramp is state. The *target* is kept, because `trim_db` and
+        // `polarity_invert` declare `BuiltinParameterReset::RestorePreparedValue` for the
+        // **prepared** value and the live target is what the console last asked for -- the same
+        // reading `fader_db` has had since #140 B.
+        self.ramp.current = self.ramp.target;
+        self.ramp.step = [L::zero(); 2];
+        self.ramp.remaining = [L::zero(); 2];
+        self.remaining = [[0; MAX_BANK_LANES]; 2];
+        self.ramping = false;
+        self.coef.trim = self.ramp.current;
         self.plan = input_chain_plan::<L>(&self.coef, &self.state);
     }
 
@@ -956,7 +1282,19 @@ impl<L: Lane> InputStage<L> {
     ///
     /// * `trim[channel]` -- one word, with the polarity inversion already folded in
     ///   (`InputLane::trim_signed`), so its sign bit *is* the polarity flag and comparing the word
-    ///   compares `trim_db` and `polarity_invert` together;
+    ///   compares `trim_db` and `polarity_invert` together. Since #210 phase 3 it is the **live**
+    ///   word, not the prepared one: `coef.trim` is republished from the ramp's `current` after
+    ///   every retarget and after every ramping block, so this comparison is on what the kernel
+    ///   will load for the block being dispatched, which is the only reading that can gate a
+    ///   collapse;
+    /// * the rest of the trim ramp record -- `target`, `step` and the countdown -- three more
+    ///   words per channel, read by `input_chain_ramp_block` exactly as `trim` is. They are here
+    ///   for a reason a settled bank cannot show: at the block an **asymmetric** retarget is
+    ///   admitted, `current` has not moved yet, so a witness that compared only `trim` would still
+    ///   call the two channels equal and let that block collapse -- publishing the left channel's
+    ///   new ramp on the right one. The `LIVE` term the drain clears is the primary guard against
+    ///   that (`BuiltinBankProcessor`); this is the same fact restated in the words themselves, so
+    ///   the two have to agree for a wrong collapse to happen;
     /// * `section[channel][s].{c1, a2, a3, m0, m1, m2}` -- six words per section, two sections
     ///   (`0` high-pass, `1` low-pass).
     ///
@@ -985,9 +1323,18 @@ impl<L: Lane> InputStage<L> {
         if lane >= self.members || lane >= L::WIDTH {
             return false;
         }
-        if lane_read::<L>(self.coef.trim[0])[lane].to_bits()
-            != lane_read::<L>(self.coef.trim[1])[lane].to_bits()
-        {
+        for (left_word, right_word) in [
+            (self.coef.trim[0], self.coef.trim[1]),
+            (self.ramp.target[0], self.ramp.target[1]),
+            (self.ramp.step[0], self.ramp.step[1]),
+        ] {
+            if lane_read::<L>(left_word)[lane].to_bits()
+                != lane_read::<L>(right_word)[lane].to_bits()
+            {
+                return false;
+            }
+        }
+        if self.remaining[0][lane] != self.remaining[1][lane] {
             return false;
         }
         for section in 0..2 {
@@ -1717,12 +2064,15 @@ impl InputBuiltins {
     ///   there. It is not stamped into this object because the prepared size of this type is a
     ///   sealed fixture-ABI accounting (the builtin-compiler mutation-matrix transcript), and a phase that changes no
     ///   behaviour must not move a sealed byte count to carry a bit nothing rendered reads.
-    /// * The two live terms stay set because `polarity_invert`, `trim_db`, `hpf_hz` and `lpf_hz`
-    ///   are all `PreparedOnly` in `BUILTIN_PARAMETER_DESCRIPTORS_V1`: there is no
-    ///   post-preparation write path to this stage and so no drain to hook. **That is the seam the
-    ///   builtins liveness work will land on** -- when a trim/polarity record queue arrives here,
-    ///   its drain folds `ChannelSymmetryWitnessV1::admit` in exactly as the effect drain does,
-    ///   and the record type must implement `LiveConsoleRecordV1` to get there at all.
+    /// * The two live terms stay set because this object has no queue: a per-node scalar input
+    ///   section is reached by the console through `ConsoleInputProcessor`, which owns the
+    ///   consumer, folds `ChannelSymmetryWitnessV1::admit` per record and conjoins the result with
+    ///   this value -- exactly as `BuiltinBankProcessor` does for the banked form. The seam the
+    ///   builtins liveness work was to land on is closed (#210 phase 3): `TrackInputRecordV1`
+    ///   implements `LiveConsoleRecordV1` with `SEAM = UpstreamOfSeam`, so an asymmetric
+    ///   `trim_db` or `polarity_invert` retarget clears `LIVE` at the drain, before the collapse
+    ///   dispatch reads the witness. `hpf_hz` and `lpf_hz` remain `PreparedOnly` and have no
+    ///   write path at all.
     #[must_use]
     pub fn channel_symmetry(&self) -> ChannelSymmetryWitnessV1 {
         let mut witness = ChannelSymmetryWitnessV1::SYMMETRIC;
@@ -1737,6 +2087,47 @@ impl InputBuiltins {
     pub fn process(&mut self, block: DualMonoBlock<'_>) -> BuiltinProcessReport {
         let frames = block.left.len();
         self.stage.process(block.left, block.right, frames)
+    }
+    /// Retargets this track's `trim_db` on the addressed channels, over an explicit window.
+    ///
+    /// The scalar sibling of [`BuiltinInputBankV1::set_trim_db`]: one body, one width, so a
+    /// per-node console track and a bank lane cannot drift.
+    ///
+    /// # Errors
+    ///
+    /// [`BuiltinParameterError::GainDomain`] when `db` is outside `trim_db`'s declared domain.
+    pub fn set_trim_db(
+        &mut self,
+        channels: BuiltinLaneSelector,
+        db: f32,
+        smoothing_samples: u32,
+    ) -> Result<(), BuiltinParameterError> {
+        let gain = checked_trim_gain(db)?;
+        self.stage.set_trim_db(0, channels, gain, smoothing_samples);
+        Ok(())
+    }
+
+    /// Sets or clears this track's polarity inversion on the addressed channels.
+    pub fn set_polarity_invert(
+        &mut self,
+        channels: BuiltinLaneSelector,
+        inverted: bool,
+        smoothing_samples: u32,
+    ) {
+        self.stage
+            .set_polarity_invert(0, channels, inverted, smoothing_samples);
+    }
+
+    /// The trim coefficient one channel applies to the next frame. Readback only.
+    #[must_use]
+    pub fn trim_signed(&self, channel: usize) -> f32 {
+        self.stage.trim_signed(0, channel)
+    }
+
+    /// The trim coefficient one channel is ramping toward. Readback only.
+    #[must_use]
+    pub fn trim_target(&self, channel: usize) -> f32 {
+        self.stage.trim_target(0, channel)
     }
     pub fn reset(&mut self) {
         self.stage.reset();
@@ -1904,11 +2295,102 @@ impl BuiltinInputBankV1 {
         }
     }
 
-    /// Copies every lane's left-channel integrators onto the right channel (the disengage copy).
+    /// Copies every lane's left-channel per-channel state onto the right channel (the disengage
+    /// copy): the integrators and the trim ramp record.
     pub fn desymmetrize(&mut self) {
         match &mut self.stage {
             InputStageKernel::Simd4(stage) => stage.desymmetrize(),
             InputStageKernel::Simd8(stage) => stage.desymmetrize(),
+        }
+    }
+
+    /// Whether this bank can prove, right now, that its two channels' state is bit-equal (M3).
+    #[must_use]
+    pub fn channels_agree(&self) -> bool {
+        match &self.stage {
+            InputStageKernel::Simd4(stage) => stage.channels_agree(),
+            InputStageKernel::Simd8(stage) => stage.channels_agree(),
+        }
+    }
+
+    /// Retargets one member lane's `trim_db` on the addressed channels, over an explicit window.
+    ///
+    /// The lane's polarity is preserved: the magnitude changes and the sign does not, because
+    /// `trim_db` and `polarity_invert` are two parameters that share one coefficient, not one
+    /// parameter with two spellings.
+    ///
+    /// # Errors
+    ///
+    /// [`BuiltinParameterError::LaneLength`] when `lane` is not a populated member, and
+    /// [`BuiltinParameterError::GainDomain`] when `db` is outside the declared `[-144, 24]`
+    /// domain of `trim_db`.
+    pub fn set_trim_db(
+        &mut self,
+        lane: usize,
+        channels: BuiltinLaneSelector,
+        db: f32,
+        smoothing_samples: u32,
+    ) -> Result<(), BuiltinParameterError> {
+        if lane >= self.members {
+            return Err(BuiltinParameterError::LaneLength);
+        }
+        let gain = checked_trim_gain(db)?;
+        match &mut self.stage {
+            InputStageKernel::Simd4(stage) => {
+                stage.set_trim_db(lane, channels, gain, smoothing_samples);
+            }
+            InputStageKernel::Simd8(stage) => {
+                stage.set_trim_db(lane, channels, gain, smoothing_samples);
+            }
+        }
+        Ok(())
+    }
+
+    /// Sets or clears one member lane's polarity inversion on the addressed channels.
+    ///
+    /// A retarget of the **same** coefficient to `-trim_signed`, so the declick is the trim ramp's:
+    /// the linear ramp carries the coefficient through zero over the requested window. There is no
+    /// second DSP path and no crossfade.
+    ///
+    /// # Errors
+    ///
+    /// [`BuiltinParameterError::LaneLength`] when `lane` is not a populated member.
+    pub fn set_polarity_invert(
+        &mut self,
+        lane: usize,
+        channels: BuiltinLaneSelector,
+        inverted: bool,
+        smoothing_samples: u32,
+    ) -> Result<(), BuiltinParameterError> {
+        if lane >= self.members {
+            return Err(BuiltinParameterError::LaneLength);
+        }
+        match &mut self.stage {
+            InputStageKernel::Simd4(stage) => {
+                stage.set_polarity_invert(lane, channels, inverted, smoothing_samples);
+            }
+            InputStageKernel::Simd8(stage) => {
+                stage.set_polarity_invert(lane, channels, inverted, smoothing_samples);
+            }
+        }
+        Ok(())
+    }
+
+    /// The trim coefficient one lane and channel applies to the next frame. Readback only.
+    #[must_use]
+    pub fn trim_signed(&self, lane: usize, channel: usize) -> f32 {
+        match &self.stage {
+            InputStageKernel::Simd4(stage) => stage.trim_signed(lane, channel),
+            InputStageKernel::Simd8(stage) => stage.trim_signed(lane, channel),
+        }
+    }
+
+    /// The trim coefficient one lane and channel is ramping toward. Readback only.
+    #[must_use]
+    pub fn trim_target(&self, lane: usize, channel: usize) -> f32 {
+        match &self.stage {
+            InputStageKernel::Simd4(stage) => stage.trim_target(lane, channel),
+            InputStageKernel::Simd8(stage) => stage.trim_target(lane, channel),
         }
     }
 
@@ -2387,6 +2869,24 @@ impl FaderMuteRampBuiltinsV1 {
 /// The domain is `fader_db`'s own, so a live move is admitted on exactly the terms a declared one
 /// is; sharing this with preparation is what keeps the two from drifting.
 fn checked_fader_gain(db: f32) -> Result<f32, BuiltinParameterError> {
+    if !db.is_finite() || !(-144.0..=24.0).contains(&db) {
+        return Err(BuiltinParameterError::GainDomain);
+    }
+    db_gain(db)
+}
+
+/// Validates one live `trim_db` against the declared domain and converts it to a coefficient.
+///
+/// The domain is `trim_db`'s own in `BUILTIN_PARAMETER_DESCRIPTORS_V1` -- the same `[-144, 24]`
+/// `fader_db` carries, and the same range `prepare_sections` checks a declared value against -- so
+/// a live move is admitted on exactly the terms a declared one is. Sharing this with preparation
+/// is what keeps the two from drifting, which is the argument [`checked_fader_gain`] makes for the
+/// fader.
+///
+/// The result is a **magnitude**: the polarity sign is applied by the caller, because
+/// `polarity_invert` is its own parameter with its own command kind and a trim move must not
+/// silently clear it.
+fn checked_trim_gain(db: f32) -> Result<f32, BuiltinParameterError> {
     if !db.is_finite() || !(-144.0..=24.0).contains(&db) {
         return Err(BuiltinParameterError::GainDomain);
     }

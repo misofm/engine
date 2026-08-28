@@ -384,14 +384,15 @@ def self_test() -> int:
     mutations: list[tuple[str, object]] = [
         # The brief's named red mutation: a kind added to the Rust authority alone. It names the
         # next unclaimed value, so this stays the "added and not threaded" shape rather than a
-        # duplicate of a kind that already ships -- issue #210 phase 1 spent kind 9 on `solo`.
+        # duplicate of a kind that already ships -- issue #210 phase 1 spent kind 9 on `solo`, and
+        # phase 3 spent 10 and 11 on `trimDb` and `polarityInvert`, so the next free value is 12.
         (
             "a Rust kind is added without the other spellings",
             mutate(
                 RUST_CONSTANTS,
-                "pub const COMMAND_SOLO: u32 = 9;",
-                "pub const COMMAND_SOLO: u32 = 9;\n"
-                "pub const COMMAND_SOLO_MODE: u32 = 10;",
+                "pub const COMMAND_POLARITY_INVERT: u32 = 11;",
+                "pub const COMMAND_POLARITY_INVERT: u32 = 11;\n"
+                "pub const COMMAND_SOLO_MODE: u32 = 12;",
             ),
         ),
         (
@@ -428,7 +429,7 @@ def self_test() -> int:
             "the host JS set stops at effectBypass",
             mutate(
                 HOST_JS,
-                "const COMMAND_KINDS = new Set([1, 2, 3, 4, 5, 6, 7, 8, 9]);",
+                "const COMMAND_KINDS = new Set([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);",
                 "const COMMAND_KINDS = new Set([1, 2, 3, 4, 5, 6]);",
             ),
         ),
@@ -436,16 +437,16 @@ def self_test() -> int:
             "the host JS set stops one kind short of the wire",
             mutate(
                 HOST_JS,
-                "const COMMAND_KINDS = new Set([1, 2, 3, 4, 5, 6, 7, 8, 9]);",
-                "const COMMAND_KINDS = new Set([1, 2, 3, 4, 5, 6, 7, 8]);",
+                "const COMMAND_KINDS = new Set([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);",
+                "const COMMAND_KINDS = new Set([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);",
             ),
         ),
         (
             "the host JS set gains a kind the wire does not decode",
             mutate(
                 HOST_JS,
-                "const COMMAND_KINDS = new Set([1, 2, 3, 4, 5, 6, 7, 8, 9]);",
-                "const COMMAND_KINDS = new Set([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);",
+                "const COMMAND_KINDS = new Set([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);",
+                "const COMMAND_KINDS = new Set([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);",
             ),
         ),
         (
@@ -453,7 +454,7 @@ def self_test() -> int:
             mutate(
                 HOST_JS,
                 "COMMAND_KINDS.has(command.kind)",
-                "command.kind >= 1 && command.kind <= 9",
+                "command.kind >= 1 && command.kind <= 11",
             ),
         ),
         (
@@ -538,7 +539,8 @@ def self_test() -> int:
             "the schema gate's list stops at effectBypass",
             mutate(
                 SCHEMA_GATE,
-                '    "observeSubscribe", "observeUnsubscribe", "solo",\n',
+                '    "observeSubscribe", "observeUnsubscribe", "solo", "trimDb", "polarityInvert",'
+                "\n",
                 "",
             ),
         ),
@@ -546,13 +548,17 @@ def self_test() -> int:
             "the schema gate's list drops the render kind added last",
             mutate(
                 SCHEMA_GATE,
-                '"observeSubscribe", "observeUnsubscribe", "solo",',
-                '"observeSubscribe", "observeUnsubscribe",',
+                '"observeSubscribe", "observeUnsubscribe", "solo", "trimDb", "polarityInvert",',
+                '"observeSubscribe", "observeUnsubscribe", "solo", "trimDb",',
             ),
         ),
         (
             "the .d.ts enum drops the render kind added last",
-            mutate(HOST_DTS, "  Solo = 9,\n", ""),
+            mutate(HOST_DTS, "  PolarityInvert = 11,\n", ""),
+        ),
+        (
+            "the .d.ts enum drops the first of the two phase-3 kinds",
+            mutate(HOST_DTS, "  TrimDb = 10,\n", ""),
         ),
         (
             "the metadata generator puts solo on the observation plane",
@@ -563,8 +569,42 @@ def self_test() -> int:
             ),
         ),
         (
+            "the metadata generator puts trimDb on the observation plane",
+            mutate(
+                METADATA_GENERATOR,
+                '(COMMAND_TRIM_DB, "trimDb", true, PLANE_RENDER)',
+                '(COMMAND_TRIM_DB, "trimDb", true, PLANE_OBSERVATION)',
+            ),
+        ),
+        (
+            "the metadata generator emits the wrong name for the polarity constant",
+            mutate(
+                METADATA_GENERATOR,
+                '            "polarityInvert",\n',
+                '            "polarity",\n',
+            ),
+        ),
+        (
             "the decode whitelist drops solo",
             mutate(RUST_CONSTANTS, "                | COMMAND_SOLO\n", ""),
+        ),
+        (
+            "the decode whitelist drops trimDb",
+            mutate(RUST_CONSTANTS, "                | COMMAND_TRIM_DB\n", ""),
+        ),
+        (
+            "the decode whitelist drops polarityInvert",
+            mutate(RUST_CONSTANTS, "                | COMMAND_POLARITY_INVERT\n", ""),
+        ),
+        (
+            "the .d.ts marks the live polarity kind as observation-plane",
+            mutate(
+                HOST_DTS,
+                "  /// Set or clear a lane's input polarity inversion. Applied (issue 210 "
+                "phase 3).",
+                "  /// Set or clear a lane's input polarity inversion. Applied on the "
+                "`miso.observe.v1` plane.",
+            ),
         ),
         (
             "the schema gate reinstates the literal range(1, 7)",

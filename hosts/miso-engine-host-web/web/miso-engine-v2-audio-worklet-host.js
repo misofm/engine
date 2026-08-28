@@ -123,12 +123,13 @@ const COMMAND_FIELDS = [
   "values",
 ];
 // Issue #143 added kinds 7 and 8, the two observation subscribe/unsubscribe records. Issue #210
-// phase 1 added kind 9, solo-in-place.
+// phase 1 added kind 9, solo-in-place; phase 3 added kinds 10 and 11, the live input trim and
+// polarity invert.
 //
-// This set is the bound: `validCommand` asks it, never a hand-written `kind <= 9`. It is one of
+// This set is the bound: `validCommand` asks it, never a hand-written `kind <= 11`. It is one of
 // the spellings `scripts/check-command-kind-vocabulary.py` holds to the Rust `COMMAND_*`
 // constants, so a kind that exists on the wire and not here is red before it ships.
-const COMMAND_KINDS = new Set([1, 2, 3, 4, 5, 6, 7, 8, 9]);
+const COMMAND_KINDS = new Set([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
 const NOT_APPLICABLE = 255;
 
 /// Encode one live-console submission into a single transferable byte block.

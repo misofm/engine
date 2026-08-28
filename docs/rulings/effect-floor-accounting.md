@@ -946,9 +946,29 @@ footing as a member.
 
 The plan is decided at bank construction and can never go stale in the unsafe direction:
 
-* the six coefficient words are written once, at preparation. `hpf_hz`, `lpf_hz`, `trim_db` and
-  `polarity_invert` all declare `BuiltinParameterUpdateRate::PreparedOnly` in
-  `BUILTIN_PARAMETER_DESCRIPTORS_V1`, so no live surface can move them;
+* the six coefficient words are written once, at preparation. The predicate reads **exactly those
+  six words and the section's two integrators** and nothing else (`section_is_identity`), so the
+  only parameters that can invalidate a decision are the ones that design them: `hpf_hz` and
+  `lpf_hz`, both of which declare `BuiltinParameterUpdateRate::PreparedOnly` in
+  `BUILTIN_PARAMETER_DESCRIPTORS_V1`. No live surface can move them.
+
+  **Amended by #210 phase 3.** This clause used to read "`hpf_hz`, `lpf_hz`, `trim_db` and
+  `polarity_invert` all declare `PreparedOnly` … so no live surface can move them", and that
+  premise is now false: `trim_db` (command kind 10) and `polarity_invert` (kind 11) are live and
+  retarget `InputChainCoef::trim` after preparation. The **decision is unchanged**, and the reason
+  is the word list above rather than a re-derivation: `trim` is consumed one step earlier, at
+  `input_chain_block`'s step 3, and is not among the eight words the predicate loads. A section is
+  the arithmetic identity or it is not, whatever the chain multiplies its input by. The ramping
+  kernel `input_chain_ramp_block` therefore leaves `plan` untouched, and the settled path a
+  never-retargeted lane dispatches is the **elision-planned** kernel variant this section
+  describes — `input_chain_block_elided` over the prepared words — which is what the phase's
+  class-A OFF claim is about.
+
+  **The proviso this leaves.** If `hpf_hz` or `lpf_hz` ever become live (the deferred tier of the
+  D2 ruling), the premise fails at exactly the word list above, and that liveness *requires* a
+  command-driven elision-plan invalidation: the retarget must recompute the plan, the way the two
+  state writes below already do. Recorded as a binding obligation in
+  `docs/rulings/builtins-input-liveness-d2.md`;
 * an elided section's integrators are never written by the render path — the section that would
   have written them is gone. The render path's one write to the retained state anywhere is the
   boundary-check recovery, `state.andnot(bad)`, and that write is **monotone toward the identity**:

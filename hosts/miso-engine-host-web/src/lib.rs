@@ -21,6 +21,7 @@ use std::collections::BTreeMap;
 use miso_engine_builtins::{BuiltinLaneSelector, Matrix2x2, MeterSnapshot, MeterTap, pan_matrix};
 use miso_engine_builtins_compiler::{
     MeterConsumer, TrackControlProducer, TrackControlRecordV1, TrackFaderRecordV1,
+    TrackInputRecordV1,
 };
 use miso_engine_core::realtime::{PlanarBufferMut, RenderIo, RenderTime};
 use miso_engine_effect_contract::{
@@ -146,6 +147,28 @@ pub const COMMAND_OBSERVE_UNSUBSCRIBE: u32 = 8;
 /// record, `domain` for a `values[0]` outside `{0.0, 1.0}` (exactly as `mute` does),
 /// `unknownTrack`, `backpressure` and `wrongState`.
 pub const COMMAND_SOLO: u32 = 9;
+/// Retarget a lane's input trim in decibels over an explicit ramp window (#210 phase 3).
+///
+/// `channel` is `0` left, `1` right or `2` both; `values[0]` is the new `trim_db` and must lie in
+/// `trim_db`'s own declared domain, `[-144, 24]`; `values[1..]` must be `0.0`; `rack` is `255`.
+/// `smoothing_samples` is the ramp window, in sample updates, exactly as it is for `faderDb`.
+///
+/// A `channel = 2` command is **one** record carrying `BuiltinLaneSelector::Both`, not two
+/// per-lane records: the input stage is upstream of the fader/matrix seam, and a both-channel
+/// retarget must be admitted as one symmetry-preserving event or it would retire the track's mono
+/// collapse. `miso_engine_builtins_compiler::TrackInputRecordV1` carries the argument in full.
+///
+/// The lane's polarity is preserved: a trim ride does not clear a flip.
+pub const COMMAND_TRIM_DB: u32 = 10;
+/// Set or clear a lane's input polarity inversion (#210 phase 3).
+///
+/// `channel` is `0` left, `1` right or `2` both; `values[0]` must be exactly `0.0` or `1.0`;
+/// `values[1..]` must be `0.0`; `rack` is `255`. `smoothing_samples` is the ramp window.
+///
+/// A flip is a retarget of the **same** coefficient the trim rides to its own negation, so it
+/// declicks through the trim ramp -- the linear ramp carries the coefficient through zero -- and
+/// costs no DSP of its own. The lane's trim magnitude is preserved.
+pub const COMMAND_POLARITY_INVERT: u32 = 11;
 // Issue #210's design proposed *reserving* kind 12 for `soloMode` (0 = SIP, 1 = PFL) here, so
 // phase 5 would not have to renumber. It cannot be done, and the reason is a gate rather than a
 // preference: `scripts/check-command-kind-vocabulary.py` requires the Rust constants to be
@@ -668,10 +691,17 @@ impl ReadyOwnership {
     /// |---|---|
     /// | `0 .. tracks` | track `t`'s matrix/pan queue |
     /// | `tracks .. 2 * tracks` | track `t`'s fader/mute queue |
-    /// | `2 * tracks ..` | effect instances, in `(track, simd1, dynamic, simd2, position)` order |
+    /// | `2 * tracks .. 3 * tracks` | track `t`'s input trim/polarity queue (#210 phase 3) |
+    /// | `3 * tracks ..` | effect instances, in `(track, simd1, dynamic, simd2, position)` order |
     ///
     /// One index therefore serves both the free-room pre-check and the push, and neither pass has
     /// to search. `None` means the address names no channel this session prepared.
+    ///
+    /// The input band was **appended** to the per-track prefix rather than inserted, so the two
+    /// existing bands keep their indices and the only arithmetic that moved is the effect base's
+    /// `2 * tracks` -> `3 * tracks`. Every site that spells that constant is below and in
+    /// [`Self::queue_capacity`], [`Self::push`] and the `queue_count` allocation; there is no
+    /// fourth spelling.
     fn effect_slot(&self, track: usize, rack: u8, effect_index: u32) -> Option<usize> {
         let base = *self.effect_base.get(track)? as usize;
         let counts = self.rack_effects.get(track)?;
@@ -699,7 +729,11 @@ impl ReadyOwnership {
             let producer = self.controls.get(slot - tracks)?;
             return u32::try_from(producer.fader.capacity()).ok();
         }
-        let producer = self.effect_controls.get(slot - tracks * 2)?.as_ref()?;
+        if slot < tracks * 3 {
+            let producer = self.controls.get(slot - tracks * 2)?;
+            return u32::try_from(producer.input.capacity()).ok();
+        }
+        let producer = self.effect_controls.get(slot - tracks * 3)?.as_ref()?;
         u32::try_from(producer.producer.capacity()).ok()
     }
 
@@ -716,8 +750,12 @@ impl ReadyOwnership {
                 let producer = self.controls.get_mut(slot - tracks).ok_or(())?;
                 producer.fader.try_push(record).map_err(|_| ())
             }
+            AdmittedCommand::Input(record) => {
+                let producer = self.controls.get_mut(slot - tracks * 2).ok_or(())?;
+                producer.input.try_push(record).map_err(|_| ())
+            }
             AdmittedCommand::Effect(record) => {
-                let effect = slot - tracks * 2;
+                let effect = slot - tracks * 3;
                 // Issue #143: the armed set is control-plane state and is updated here, where the
                 // record is admitted, so it can never disagree with what the render side was told.
                 if let EffectControlRecordV1::Observe {
@@ -748,6 +786,8 @@ enum AdmittedCommand {
     Matrix(TrackControlRecordV1),
     /// The fader/mute channel (#140 B).
     Fader(TrackFaderRecordV1),
+    /// The input trim/polarity channel (#210 phase 3).
+    Input(TrackInputRecordV1),
     /// One effect instance's channel (#140 A).
     Effect(EffectControlRecordV1),
 }
@@ -1628,6 +1668,8 @@ impl CommandRecord {
                 | COMMAND_OBSERVE_SUBSCRIBE
                 | COMMAND_OBSERVE_UNSUBSCRIBE
                 | COMMAND_SOLO
+                | COMMAND_TRIM_DB
+                | COMMAND_POLARITY_INVERT
         ) {
             return Err(COMMAND_REASON_MALFORMED);
         }
@@ -1722,6 +1764,42 @@ impl CommandRecord {
                 Ok(AdmittedCommand::Fader(TrackFaderRecordV1::Mute {
                     lanes,
                     muted: self.values[0] == 1.0,
+                    smoothing_samples: self.smoothing_samples,
+                }))
+            }
+            // #210 phase 3. The shape rules are `faderDb`'s, because the two parameters share a
+            // domain and a smoothing law; the destination is the input queue rather than the
+            // fader one, which `admit_commands_staged` decides from the lowered variant exactly as
+            // it already decides between the matrix and fader bands.
+            COMMAND_TRIM_DB => {
+                if self.rack != 255 || self.values[1..].iter().any(|value| *value != 0.0) {
+                    return Err(COMMAND_REASON_MALFORMED);
+                }
+                let lanes = lane_selector(self.channel).ok_or(COMMAND_REASON_MALFORMED)?;
+                // The declared domain of `trim_db` in `BUILTIN_PARAMETER_DESCRIPTORS_V1`. It is
+                // the same range `fader_db` carries and is spelled again rather than shared, which
+                // is this file's convention: the comment names the authority.
+                if !(-144.0..=24.0).contains(&self.values[0]) {
+                    return Err(COMMAND_REASON_DOMAIN);
+                }
+                Ok(AdmittedCommand::Input(TrackInputRecordV1::TrimDb {
+                    lanes,
+                    db: self.values[0],
+                    smoothing_samples: self.smoothing_samples,
+                }))
+            }
+            // The shape rules are `mute`'s: a boolean-exact domain on `values[0]`.
+            COMMAND_POLARITY_INVERT => {
+                if self.rack != 255 || self.values[1..].iter().any(|value| *value != 0.0) {
+                    return Err(COMMAND_REASON_MALFORMED);
+                }
+                let lanes = lane_selector(self.channel).ok_or(COMMAND_REASON_MALFORMED)?;
+                if self.values[0] != 0.0 && self.values[0] != 1.0 {
+                    return Err(COMMAND_REASON_DOMAIN);
+                }
+                Ok(AdmittedCommand::Input(TrackInputRecordV1::PolarityInvert {
+                    lanes,
+                    inverted: self.values[0] == 1.0,
                     smoothing_samples: self.smoothing_samples,
                 }))
             }
@@ -1963,12 +2041,20 @@ fn admit_commands_staged(
         }
         let mut staged = [AdmittedCommand::Effect(EffectControlRecordV1::Bypass(false)); 2];
         let (slot, produced) = match command.kind {
-            COMMAND_PAN | COMMAND_MATRIX | COMMAND_FADER_DB => {
+            // The three kinds that lower to one record on one of the three per-track bands. The
+            // band is read off the lowered variant rather than off the kind, so a kind added to
+            // this arm cannot land in the wrong queue by forgetting a second table.
+            COMMAND_PAN
+            | COMMAND_MATRIX
+            | COMMAND_FADER_DB
+            | COMMAND_TRIM_DB
+            | COMMAND_POLARITY_INVERT => {
                 staged[0] = command
                     .into_track_record()
                     .map_err(|reason| refuse(reason, index))?;
                 let slot = match staged[0] {
                     AdmittedCommand::Fader(_) => track_count + track,
+                    AdmittedCommand::Input(_) => track_count * 2 + track,
                     _ => track,
                 };
                 if ready.controls.get(track).is_none() {
@@ -2062,7 +2148,7 @@ fn admit_commands_staged(
                         .into_effect_records(producer.descriptor, &mut staged)
                         .map_err(|reason| refuse(reason, index))?
                 };
-                (track_count * 2 + effect, produced)
+                (track_count * 3 + effect, produced)
             }
             _ => return Err(refuse(COMMAND_REASON_MALFORMED, index)),
         };
@@ -2565,8 +2651,9 @@ fn compile_ready(
         }
         *entry = Some(producer);
     }
+    // Three per-track bands since #210 phase 3: matrix/pan, fader/mute, input trim/polarity.
     let queue_count = track_count
-        .checked_mul(2)
+        .checked_mul(3)
         .and_then(|value| value.checked_add(total_effects as usize))
         .ok_or_else(|| fixed_diagnostic("web.console.effects"))?;
     // Issue #143: the observation handles are permuted into the same dense `effect_slot` order
