@@ -823,6 +823,10 @@ fn schema_owned_reference_category_has_20_distinct_cases() {
                             effects: vec![effect],
                         }
                     }
+                    // The strip carries no effects; the case table above never names it.
+                    RackName::Builtins => {
+                        unreachable!("the builtins token addresses no effect rack")
+                    }
                 }
             },
             DiagnosticCode::MissingEntityReference,

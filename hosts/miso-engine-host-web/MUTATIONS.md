@@ -177,3 +177,29 @@ was performed on the working tree, run, and reverted; every one was observed red
 `miso_engine_host_core::solo`'s own unit tests carry the state machine's algebra — the complement
 composition, the per-lane restore, the two-record delta shape, `solo_count`'s incremental
 maintenance, and the shadow/rollback — independently of any host.
+
+## Issue #210 phase 3 — command kinds 10 (`trimDb`) and 11 (`polarityInvert`)
+
+Driver: one mutation at a time on the committed tree, `cargo test -p miso-engine-host-web`, tree
+restored between rows.
+
+| # | mutation | test | result |
+|---|---|---|---|
+| P3-M31 | the decode whitelist drops `COMMAND_TRIM_DB` | `trim_and_polarity_are_admitted_on_every_lane_selector` (+5) | RED — every arm refuses `malformed` |
+| P3-M32 | the admission dispatch drops the two kinds, so they fall to the `_ =>` arm | same (+5) | RED. This is the drift the kind-vocabulary gate **cannot** see: the constant still exists, the decode still admits it, and only the dispatch forgot it |
+| P3-M33 | an input record is routed to the fader band | (5 tests) | RED |
+| P3-M34 | the effect band is not moved past the new per-track band | (7 tests) | RED |
+| P3-M35 | `queue_count` is not widened for the third band | (13 tests) | RED |
+| P3-M36 | `queue_capacity` reports the fader depth for an input slot | — | **EQUIVALENT, and argued in the test**: a console leases all three of a track's queues at one depth (`TrackControlRequest::queue_capacity` is a single field), so the wrong queue's capacity is the right number. It becomes observable the day the three depths can differ, and the line is written per band so that day is a one-line change |
+| P3-M37 | the `trim_db` domain check is dropped | `trim_and_polarity_refuse_on_the_declared_terms` | RED |
+| P3-M38 | the `polarity_invert` boolean-exact check is dropped | same | RED |
+| P3-M39 | a trim record accepts a rack byte | same | RED |
+| P3-M40 | `channel = 255` is admitted as `Both` | same (+1) | RED |
+| P3-M41 | `channel = both` lowers to a single-lane record | `a_both_lane_trim_command_is_one_record_and_one_queue_slot` | RED — the `both` arm renders the `left` arm's bits. The queue-slot half of that test does **not** catch this, and the two halves are asserted together for exactly that reason |
+| P3-M42 | a refused submission commits the solo transaction instead of rolling it back | `trim_and_polarity_leave_the_solo_transaction_closed` (+1) | RED — a solo bit survives a batch its *trim* record refused |
+| P3-M43 | the admission couples a trim record to the solo composition | `a_trim_is_not_a_mute_and_solo_does_not_move_it` | RED — a trim ride sets the strip's user mute, and clearing a solo no longer restores what the caller set |
+
+The three lane-index defects the banked drain can have -- a missed member queue, an off-by-one
+lane, a constant lane -- are **not** reachable from this file: the web host's fixtures are one and
+four tracks and the mix cannot tell identical tracks apart. They are gated end to end, per track,
+through the post-matrix meters, in `crates/miso-engine-host-core/tests/input_liveness_console.rs`.

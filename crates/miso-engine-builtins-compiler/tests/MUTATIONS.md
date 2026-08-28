@@ -56,3 +56,24 @@ pin `-C target-feature=+avx2,+fma`, debug profile. Sweep driver: one mutation at
 | # | mutation | file | test | result |
 |---|---|---|---|---|
 | 140-10 | `ConsoleFaderProcessor::process` drains its queue *after* `self.fader.process(block)`, so an admitted fader move lands one block late | `builtins-compiler/src/lib.rs` | `miso-engine-host-web` `tests::a_fader_command_names_the_exact_application_sample` | RED (`a zero-window move is settled for every sample of the block, both lanes`) |
+
+## Issue #210 phase 3 — the third drain
+
+Driver: one mutation at a time on the committed tree, tree restored between rows. The command is
+recorded per row because the drain's consequences show up in three different crates.
+
+| # | mutation | file | test | result |
+|---|---|---|---|---|
+| P3-M18 | `TrackInputRecordV1::SEAM` becomes `SeamSideV1::SeamSide` | `builtins-compiler/src/lib.rs` | `input_drain` (3 tests) | RED — `admit` compiles the clearing arm away and a one-lane ride stops gating the collapse |
+| P3-M19 | every selector is admitted as `Desymmetrize` | `builtins-compiler/src/lib.rs` | `input_drain` (2 tests) | RED — a symmetric ride would retire a track's collapse for the life of the plan |
+| P3-M20 | every selector is admitted as `Preserve` | `builtins-compiler/src/lib.rs` | `input_drain` (3 tests) | RED |
+| P3-M21 | the bank drain never folds the witness | `builtins-compiler/src/lib.rs` | `host-core::input_liveness_console` (2 tests) | RED — the census does not move on a one-lane command |
+| P3-M22 | the bank drains in `process` instead of `begin_block` | `builtins-compiler/src/lib.rs` | `host-core::input_liveness_console` (5 tests) | RED — `BankChain::run` reads the witness before the drain, so a `Left` retarget admitted at block `N` takes effect on block `N` while block `N` still runs collapsed |
+| P3-M23 | the bank misses its last member's queue | `builtins-compiler/src/lib.rs` | `host-core::input_liveness_console` (3 tests) | RED — the last track's command never lands. **The mix cannot see this**: the fixture's eight tracks are identical and sum into one output, which is why that test reads per-track meters |
+| P3-M24 | every drained record is applied to the bank's first member | `builtins-compiler/src/lib.rs` | `host-core::input_liveness_console` (3 tests) | RED |
+| P3-M26 | the drain is off by one lane | `builtins-compiler/src/lib.rs` | `host-core::input_liveness_console` (3 tests) | RED |
+| P3-M27 | the per-node console input processor never applies a record | `builtins-compiler/src/lib.rs` | `lib::the_per_node_console_input_processor_drains_and_folds_its_witness` | RED |
+| P3-M28 | the per-node processor never folds its witness | `builtins-compiler/src/lib.rs` | same | RED |
+| P3-M29 | the per-node arm does not conjoin its live terms into the scalar witness | `builtins-compiler/src/lib.rs` | same | RED |
+| P3-M30 | a lowering binds both a bank lane and a per-node processor for one track | `builtins-compiler/src/lib.rs` | — | **EQUIVALENT on the shipped planner**: `planned_strip_banks` plans all three stages over one track list, so the three claimed sets are the same set and the weakened predicate decides identically. It is now a `debug_assert_eq!` rather than an assumption, so a planner that stopped claiming stages together is caught at the point the invariant is relied on |
+| P3-M25 | the graph adapter does not forward `begin_block` to the builtin bank | `graph/src/runtime.rs` | `host-core::input_liveness_console` (5 tests) | RED — the drain exists and is never called |

@@ -17,15 +17,18 @@
 //
 // **This is the most important thing to know before writing an app against it.** Issue #140 made
 // every declared kind live, so the honest summary is now short: `MisoCommandKindV1.Pan`,
-// `.Matrix`, `.FaderDb`, `.Mute`, `.EffectParam` and `.EffectBypass` are all **applied**. So are
-// `.ObserveSubscribe` and `.ObserveUnsubscribe` (issue 143), on the observation plane rather than
-// the render one -- they move the `miso.observe.v1` subscription map, not anything rendered. All
-// eight are in the metadata JSON's `commandKinds`, each with the `plane` it applies on.
+// `.Matrix`, `.FaderDb`, `.Mute`, `.EffectParam`, `.EffectBypass`, `.Solo`, `.TrimDb` and
+// `.PolarityInvert` are all **applied**. So are `.ObserveSubscribe` and `.ObserveUnsubscribe`
+// (issue 143), on the observation plane rather than the render one -- they move the
+// `miso.observe.v1` subscription map, not anything rendered. All eleven are in the metadata JSON's
+// `commandKinds`, each with the `plane` it applies on.
 //
-// * `matrix_ll/lr/rl/rr`, `fader_db` and `mute` declare `BuiltinParameterUpdateRate::BlockTarget`
-//   with a linear smoothing policy. `polarity_invert`, `trim_db`, `hpf_hz`, `lpf_hz` and
-//   `delay_samples` (issue #210 phase 2, the track's input-side time alignment) all still declare
-//   `PreparedOnly` and have no command kind at all: they change through a session edit.
+// * `matrix_ll/lr/rl/rr`, `fader_db`, `mute` and -- since issue 210 phase 3 -- `trim_db` and
+//   `polarity_invert` declare `BuiltinParameterUpdateRate::BlockTarget` with a linear smoothing
+//   policy. `hpf_hz`, `lpf_hz` and `delay_samples` (issue #210 phase 2, the track's input-side
+//   time alignment) still declare `PreparedOnly` and have no command kind at all: they change
+//   through a session edit. Live filter moves are deferred, at the price of the parametric EQ's
+//   coefficient-ramp machinery; the ruling is recorded and is not an oversight.
 // * An effect parameter is delivered to the running plan as a `PreparedAutomationSpan` -- the
 //   route the effect contract always had and that #137 found nothing was feeding. A parameter is
 //   movable exactly when its own descriptor declares it automatable; the build-time
@@ -173,11 +176,11 @@ export interface MisoUnsupportedBrowserV1 {
 
 /// Frozen live-console command kinds (issue 137 D1).
 ///
-/// All nine are one vocabulary, proved across every file that spells it -- this enum, the Rust
+/// All eleven are one vocabulary, proved across every file that spells it -- this enum, the Rust
 /// `COMMAND_*` constants, the wire's decode whitelist, the host JS `COMMAND_KINDS` set, the
 /// metadata generator and the shipped `commandKinds` rows -- by
 /// `scripts/check-command-kind-vocabulary.py`. Every one of them is *applied*: nothing here is
-/// declared and refused (issue 140). Seven of them move state the render thread reads; the two
+/// declared and refused (issue 140). Nine of them move state the render thread reads; the two
 /// observation kinds move the `miso.observe.v1` subscription map and nothing rendered, which is
 /// what the metadata JSON's per-kind `plane` field reports.
 export const enum MisoCommandKindV1 {
@@ -234,6 +237,36 @@ export const enum MisoCommandKindV1 {
   /// has silenced falls toward zero reduction, because that is the true state of its signal path
   /// and not an artifact.
   Solo = 9,
+  /// Retarget a lane's input trim in decibels over an explicit ramp window. Applied (issue 210
+  /// phase 3).
+  ///
+  /// The gain-riding control a fader cannot substitute for: trim sits at the head of the strip,
+  /// **before** the racks, so riding it changes what the compressor hears. `rack` is `255`;
+  /// `channel` is `0` left, `1` right or `2` both; `values[0]` is the new `trim_db` and must lie
+  /// in `[-144, 24]`, the domain the metadata JSON's `builtins` row declares; `smoothingSamples`
+  /// is the ramp window in sample updates, read under the same linear-N law `FaderDb` uses.
+  ///
+  /// A `channel: 2` command is one record and moves both lanes together, over one window, at one
+  /// block boundary. That is not only an economy: the engine collapses a mono-sourced strip to one
+  /// plane when its two channels are doing identical work, and a both-channel trim ride keeps that
+  /// true, while a single-lane ride correctly ends it for the life of the plan.
+  ///
+  /// A trim ride does **not** clear a polarity flip: the two are separate parameters that share
+  /// one coefficient.
+  TrimDb = 10,
+  /// Set or clear a lane's input polarity inversion. Applied (issue 210 phase 3).
+  ///
+  /// `rack` is `255`; `channel` is `0` left, `1` right or `2` both; `values[0]` is exactly `0` or
+  /// `1`; `smoothingSamples` is the flip's declick window.
+  ///
+  /// The flip is declicked, and it costs nothing to be: polarity is folded into the sign of the
+  /// same trim coefficient `TrimDb` rides, so a flip is a retarget of that coefficient to its own
+  /// negation and the linear ramp carries it through zero. Send a `smoothingSamples` you would be
+  /// happy with on a fader move -- a few milliseconds -- and the flip is inaudible; send `0` and
+  /// it is a hard switch, which is occasionally what a phase-alignment check wants.
+  ///
+  /// A flip does **not** change the lane's trim magnitude.
+  PolarityInvert = 11,
 }
 
 /// Frozen typed reasons a live-console submission was refused (issue 137 D1).
@@ -281,11 +314,12 @@ export interface MisoCommandV1 {
   trackIndex: number;
   effectIndex: number;
   parameterId: number;
-  /// Ramp window in sample updates for `Pan`, `Matrix`, `FaderDb`, `Mute` and `Solo`; the
-  /// observation kinds read it as a window length in render blocks, and it is ignored by the rest.
+  /// Ramp window in sample updates for `Pan`, `Matrix`, `FaderDb`, `Mute`, `Solo`, `TrimDb` and
+  /// `PolarityInvert`; the observation kinds read it as a window length in render blocks, and it
+  /// is ignored by the rest.
   smoothingSamples: number;
-  /// `Pan`: `[left, right, 0, 0]`. `Matrix`: `[ll, lr, rl, rr]`. `Mute` and `Solo`: `[0|1, 0, 0, 0]`
-  /// exactly. Everything else: `[value, 0, 0, 0]`.
+  /// `Pan`: `[left, right, 0, 0]`. `Matrix`: `[ll, lr, rl, rr]`. `Mute`, `Solo` and
+  /// `PolarityInvert`: `[0|1, 0, 0, 0]` exactly. Everything else: `[value, 0, 0, 0]`.
   values: [number, number, number, number];
 }
 

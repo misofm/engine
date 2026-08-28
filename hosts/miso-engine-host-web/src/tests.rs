@@ -3897,3 +3897,605 @@ fn the_decode_staging_holds_a_full_batch_plus_a_solo_transition() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// Issue #210 phase 3: command kinds 10 (`trimDb`) and 11 (`polarityInvert`).
+// ---------------------------------------------------------------------------------------------
+
+/// One row of the trim/polarity refusal matrix:
+/// `(kind, rack, channel, track, values, expected result, expected reason)`.
+type TrimRefusalCase = (u32, u8, u8, u32, [f32; 4], u32, u32);
+
+/// Stage one `trimDb` record. `rack` is `255`, the dB rides `values[0]`, the lane is `channel`.
+fn stage_trim(
+    host: &mut AudioWorkletEngineHost,
+    index: usize,
+    track: u32,
+    channel: u8,
+    db: f32,
+    smoothing: u32,
+) {
+    stage_command(
+        host,
+        index,
+        COMMAND_TRIM_DB,
+        255,
+        channel,
+        track,
+        0,
+        0,
+        smoothing,
+        [db, 0.0, 0.0, 0.0],
+    );
+}
+
+/// Stage one `polarityInvert` record. `rack` is `255`, the bit rides `values[0]`.
+fn stage_polarity(
+    host: &mut AudioWorkletEngineHost,
+    index: usize,
+    track: u32,
+    channel: u8,
+    inverted: bool,
+    smoothing: u32,
+) {
+    let value = if inverted { 1.0 } else { 0.0 };
+    stage_command(
+        host,
+        index,
+        COMMAND_POLARITY_INVERT,
+        255,
+        channel,
+        track,
+        0,
+        0,
+        smoothing,
+        [value, 0.0, 0.0, 0.0],
+    );
+}
+
+/// The two kinds are admitted, on every lane selector, at every window the fader accepts.
+///
+/// Red mutation: drop `COMMAND_TRIM_DB` from `CommandRecord::decode`'s whitelist -> every arm
+/// refuses `malformed`. Red mutation: drop the two kinds from `admit_commands_staged`'s per-track
+/// arm -> they fall to the `_ =>` arm and refuse `malformed` with a *decoded* record, which is the
+/// drift the kind-vocabulary gate cannot see because the constant still exists.
+#[test]
+fn trim_and_polarity_are_admitted_on_every_lane_selector() {
+    const QUANTUM: u32 = 128;
+    const TRACKS: usize = 4;
+    for channel in [0_u8, 1, 2] {
+        for smoothing in [0_u32, 1, QUANTUM, u32::MAX] {
+            let mut host = solo_host(QUANTUM, TRACKS, &[]);
+            stage_trim(&mut host, 0, 2, channel, -18.0, smoothing);
+            stage_polarity(&mut host, 1, 2, channel, true, smoothing);
+            assert_eq!(
+                host.submit_commands(2),
+                RESULT_OK,
+                "channel={channel} smoothing={smoothing} reason={}",
+                host.command_report().reason
+            );
+            assert_eq!(host.command_report().admitted, 2);
+            assert_eq!(host.command_report().reason, COMMAND_REASON_NONE);
+        }
+    }
+}
+
+/// The refusal matrix: shape, domain and address, each with the reason the ABI declares.
+///
+/// The ordering rule is the one every kind follows and the one a new kind is most likely to get
+/// wrong: **track bound first** (`unknownTrack`), **then shape and domain** (`malformed`,
+/// `domain`), **then "this session has no such queue"** (`unsupportedKind`). A record that is both
+/// badly shaped and addressed at a console-less session reports `malformed`, not `unsupported`.
+#[test]
+fn trim_and_polarity_refuse_on_the_declared_terms() {
+    const QUANTUM: u32 = 128;
+    const TRACKS: usize = 4;
+    let cases: [TrimRefusalCase; 14] = [
+        // A rack byte on a builtin-addressed kind is a shape error.
+        (
+            COMMAND_TRIM_DB,
+            0,
+            2,
+            0,
+            [0.0, 0.0, 0.0, 0.0],
+            RESULT_INVALID_ARGUMENT,
+            COMMAND_REASON_MALFORMED,
+        ),
+        (
+            COMMAND_POLARITY_INVERT,
+            2,
+            2,
+            0,
+            [0.0, 0.0, 0.0, 0.0],
+            RESULT_INVALID_ARGUMENT,
+            COMMAND_REASON_MALFORMED,
+        ),
+        // `255` is not a lane: these kinds address a lane, unlike `solo`.
+        (
+            COMMAND_TRIM_DB,
+            255,
+            255,
+            0,
+            [0.0, 0.0, 0.0, 0.0],
+            RESULT_INVALID_ARGUMENT,
+            COMMAND_REASON_MALFORMED,
+        ),
+        (
+            COMMAND_POLARITY_INVERT,
+            255,
+            3,
+            0,
+            [0.0, 0.0, 0.0, 0.0],
+            RESULT_INVALID_ARGUMENT,
+            COMMAND_REASON_MALFORMED,
+        ),
+        // Every value word past the first must be zero.
+        (
+            COMMAND_TRIM_DB,
+            255,
+            2,
+            0,
+            [0.0, 1.0, 0.0, 0.0],
+            RESULT_INVALID_ARGUMENT,
+            COMMAND_REASON_MALFORMED,
+        ),
+        (
+            COMMAND_POLARITY_INVERT,
+            255,
+            2,
+            0,
+            [0.0, 0.0, 0.0, 1.0],
+            RESULT_INVALID_ARGUMENT,
+            COMMAND_REASON_MALFORMED,
+        ),
+        // `trim_db`'s declared domain is `[-144, 24]`, exactly `fader_db`'s.
+        (
+            COMMAND_TRIM_DB,
+            255,
+            2,
+            0,
+            [-144.001, 0.0, 0.0, 0.0],
+            RESULT_INVALID_ARGUMENT,
+            COMMAND_REASON_DOMAIN,
+        ),
+        (
+            COMMAND_TRIM_DB,
+            255,
+            2,
+            0,
+            [24.001, 0.0, 0.0, 0.0],
+            RESULT_INVALID_ARGUMENT,
+            COMMAND_REASON_DOMAIN,
+        ),
+        // The endpoints themselves are inside it.
+        (
+            COMMAND_TRIM_DB,
+            255,
+            2,
+            0,
+            [-144.0, 0.0, 0.0, 0.0],
+            RESULT_OK,
+            COMMAND_REASON_NONE,
+        ),
+        (
+            COMMAND_TRIM_DB,
+            255,
+            2,
+            0,
+            [24.0, 0.0, 0.0, 0.0],
+            RESULT_OK,
+            COMMAND_REASON_NONE,
+        ),
+        // `polarity_invert` is boolean-exact.
+        (
+            COMMAND_POLARITY_INVERT,
+            255,
+            2,
+            0,
+            [0.5, 0.0, 0.0, 0.0],
+            RESULT_INVALID_ARGUMENT,
+            COMMAND_REASON_DOMAIN,
+        ),
+        (
+            COMMAND_POLARITY_INVERT,
+            255,
+            2,
+            0,
+            [-1.0, 0.0, 0.0, 0.0],
+            RESULT_INVALID_ARGUMENT,
+            COMMAND_REASON_DOMAIN,
+        ),
+        // The track bound is checked before anything else about the record.
+        (
+            COMMAND_TRIM_DB,
+            255,
+            2,
+            TRACKS as u32,
+            [0.0, 0.0, 0.0, 0.0],
+            RESULT_INVALID_ARGUMENT,
+            COMMAND_REASON_UNKNOWN_TRACK,
+        ),
+        (
+            COMMAND_POLARITY_INVERT,
+            0,
+            2,
+            TRACKS as u32,
+            [0.0, 0.0, 0.0, 0.0],
+            RESULT_INVALID_ARGUMENT,
+            COMMAND_REASON_UNKNOWN_TRACK,
+        ),
+    ];
+    for (kind, rack, channel, track, values, result, reason) in cases {
+        let mut host = solo_host(QUANTUM, TRACKS, &[]);
+        stage_command(
+            &mut host, 0, kind, rack, channel, track, 0, 0, QUANTUM, values,
+        );
+        assert_eq!(
+            host.submit_commands(1),
+            result,
+            "kind={kind} rack={rack} channel={channel} track={track} values={values:?}"
+        );
+        assert_eq!(
+            host.command_report().reason,
+            reason,
+            "kind={kind} rack={rack} channel={channel} track={track} values={values:?}"
+        );
+    }
+}
+
+/// A `channel = both` command is **one** record and takes **one** queue slot.
+///
+/// The departure from the effect-parameter lowering, asserted where it is observable: an
+/// `effectParam` on a `PerLane` parameter lowers to two records and takes two slots, while a
+/// `trimDb` addressed at both lanes lowers to one carrying `BuiltinLaneSelector::Both`. The reason
+/// is the channel-symmetry witness -- two per-lane records present as two `Desymmetrize` events and
+/// would retire the track's mono collapse on a command that moves both channels identically -- and
+/// the queue arithmetic is where the control plane shows which one it did.
+///
+/// The queue depth is the console default; filling it with `depth` both-commands must be admitted,
+/// and one more must be `backpressure`. A two-record lowering would refuse at half that count.
+///
+/// Red mutation: lower `channel = 2` to two per-lane records the way `into_effect_records` does ->
+/// the queue fills at half the depth and the `admitted` count below doubles.
+#[test]
+fn a_both_lane_trim_command_is_one_record_and_one_queue_slot() {
+    const QUANTUM: u32 = 128;
+    const TRACKS: usize = 2;
+    // The console default queue depth, which is the bound the room pre-check enforces.
+    let depth = DEFAULT_COMMAND_QUEUE_RECORDS as usize;
+    assert!(depth >= 2, "the console default depth is meaningful");
+
+    // Exactly `depth` both-lane commands fit.
+    let mut host = solo_host(QUANTUM, TRACKS, &[]);
+    for index in 0..depth {
+        stage_trim(&mut host, index, 0, 2, -6.0, QUANTUM);
+    }
+    assert_eq!(
+        host.submit_commands(depth as u32),
+        RESULT_OK,
+        "reason {}",
+        host.command_report().reason
+    );
+    assert_eq!(
+        host.command_report().admitted,
+        depth as u32,
+        "one wire record lowered to one queue record"
+    );
+
+    // And one more does not, because the queue is full rather than because the batch is.
+    let mut host = solo_host(QUANTUM, TRACKS, &[]);
+    for index in 0..depth + 1 {
+        stage_trim(&mut host, index, 0, 2, -6.0, QUANTUM);
+    }
+    assert_eq!(host.submit_commands(depth as u32 + 1), RESULT_BACKPRESSURE);
+    assert_eq!(host.command_report().reason, COMMAND_REASON_BACKPRESSURE);
+
+    // The other half of "one record": that record addresses **both** lanes. A lowering that
+    // emitted one record carrying a single lane would satisfy the arithmetic above and render the
+    // wrong audio, so the two halves are asserted together.
+    //
+    // Red mutation: lower `channel = 2` as `BuiltinLaneSelector::Left` -> the `both` arm renders
+    // the `left` arm's bits and this fails.
+    let mut both = solo_host(QUANTUM, TRACKS, &[]);
+    let mut left_only = solo_host(QUANTUM, TRACKS, &[]);
+    let mut right_only = solo_host(QUANTUM, TRACKS, &[]);
+    for (host, channel) in [(&mut both, 2_u8), (&mut left_only, 0), (&mut right_only, 1)] {
+        stage_trim(host, 0, 0, channel, -144.0, 0);
+        assert_eq!(host.submit_commands(1), RESULT_OK);
+        feed_and_render(host, 1, 0, -0.25);
+    }
+    let both_bits: Vec<u32> = both
+        .output_pcm()
+        .expect("output")
+        .iter()
+        .map(|value| value.to_bits())
+        .collect();
+    let left_bits: Vec<u32> = left_only
+        .output_pcm()
+        .expect("output")
+        .iter()
+        .map(|value| value.to_bits())
+        .collect();
+    let right_bits: Vec<u32> = right_only
+        .output_pcm()
+        .expect("output")
+        .iter()
+        .map(|value| value.to_bits())
+        .collect();
+    assert_ne!(
+        both_bits, left_bits,
+        "a `channel = both` trim is not a left-lane trim"
+    );
+    assert_ne!(
+        both_bits, right_bits,
+        "a `channel = both` trim is not a right-lane trim"
+    );
+    assert_ne!(left_bits, right_bits, "the two lanes are distinguishable");
+}
+
+/// The input queue is its own destination: filling it does not refuse a fader or matrix command,
+/// and filling the fader queue does not refuse a trim command.
+///
+/// The band the phase added to the frozen slot layout, asserted as a band rather than as
+/// arithmetic. A slot collision -- an input command counted against the fader queue's room -- would
+/// show here as a `backpressure` on a queue with room.
+///
+/// **One mutation is deliberately not red here**, and it is worth naming rather than leaving for a
+/// reader to find: making `ReadyOwnership::queue_capacity` return `producer.fader.capacity()` for
+/// an input slot changes nothing observable, because a console leases all three of a track's
+/// queues at **one** depth -- `TrackControlRequest::queue_capacity` is a single field, and
+/// `prepare_session_builtins_with_console` builds the three rings from it. The wrong queue's
+/// capacity is the right number. It becomes observable the day the three depths can differ, and
+/// the line is written per band anyway so that day is a one-line change rather than a bug.
+#[test]
+fn the_input_queue_is_a_destination_of_its_own() {
+    const QUANTUM: u32 = 128;
+    const TRACKS: usize = 2;
+    let depth = DEFAULT_COMMAND_QUEUE_RECORDS as usize;
+
+    // Fill the input queue, then move the fader on the same track.
+    let mut host = solo_host(QUANTUM, TRACKS, &[]);
+    for index in 0..depth {
+        stage_trim(&mut host, index, 1, 2, -6.0, QUANTUM);
+    }
+    assert_eq!(host.submit_commands(depth as u32), RESULT_OK);
+    stage_command(
+        &mut host,
+        0,
+        COMMAND_FADER_DB,
+        255,
+        2,
+        1,
+        0,
+        0,
+        QUANTUM,
+        [-3.0, 0.0, 0.0, 0.0],
+    );
+    assert_eq!(
+        host.submit_commands(1),
+        RESULT_OK,
+        "a full input queue must not refuse a fader command: reason {}",
+        host.command_report().reason
+    );
+
+    // And the reverse.
+    let mut host = solo_host(QUANTUM, TRACKS, &[]);
+    for index in 0..depth {
+        stage_command(
+            &mut host,
+            index,
+            COMMAND_FADER_DB,
+            255,
+            2,
+            1,
+            0,
+            0,
+            QUANTUM,
+            [-3.0, 0.0, 0.0, 0.0],
+        );
+    }
+    assert_eq!(host.submit_commands(depth as u32), RESULT_OK);
+    stage_trim(&mut host, 0, 1, 2, -6.0, QUANTUM);
+    assert_eq!(
+        host.submit_commands(1),
+        RESULT_OK,
+        "a full fader queue must not refuse a trim command: reason {}",
+        host.command_report().reason
+    );
+}
+
+/// A submission is all-or-nothing across the new band too: a batch whose last record is refused
+/// pushes none of the earlier ones.
+///
+/// The three-pass contract, applied to the kind that added a queue. Red mutation: push the input
+/// band inside pass one rather than pass three -> the trim below lands and the render moves.
+#[test]
+fn a_refused_batch_pushes_no_trim_record() {
+    const QUANTUM: u32 = 128;
+    const TRACKS: usize = 2;
+    let mut refused = solo_host(QUANTUM, TRACKS, &[]);
+    let mut untouched = solo_host(QUANTUM, TRACKS, &[]);
+    render_pair_and_compare(
+        &mut refused,
+        &mut untouched,
+        1,
+        0,
+        -0.25,
+        "before any command",
+    );
+
+    stage_trim(&mut refused, 0, 0, 2, -144.0, 0);
+    // A second record the ABI refuses: a polarity value that is neither `0.0` nor `1.0`.
+    stage_polarity(&mut refused, 1, 0, 2, false, 0);
+    stage_command(
+        &mut refused,
+        1,
+        COMMAND_POLARITY_INVERT,
+        255,
+        2,
+        0,
+        0,
+        0,
+        0,
+        [0.25, 0.0, 0.0, 0.0],
+    );
+    assert_eq!(refused.submit_commands(2), RESULT_INVALID_ARGUMENT);
+    assert_eq!(refused.command_report().reason, COMMAND_REASON_DOMAIN);
+    assert_eq!(refused.command_report().rejected_index, 1);
+    render_pair_and_compare(
+        &mut refused,
+        &mut untouched,
+        2,
+        1,
+        -0.25,
+        "a refused batch pushed the trim record anyway",
+    );
+}
+
+/// A trim command reaches the render plane and silences the track it names, at the block the
+/// acknowledgement names.
+///
+/// The end-to-end wire-to-plane assertion for the new band. `-144 dB` is a factor of `6.3e-8`, so
+/// the addressed track's contribution is below any nonzero threshold while the untouched arm's is
+/// not.
+#[test]
+fn a_trim_command_reaches_the_render_plane() {
+    const QUANTUM: u32 = 128;
+    const TRACKS: usize = 2;
+    let mut trimmed = solo_host(QUANTUM, TRACKS, &[]);
+    let mut untouched = solo_host(QUANTUM, TRACKS, &[]);
+    render_pair_and_compare(
+        &mut trimmed,
+        &mut untouched,
+        1,
+        0,
+        -0.25,
+        "before any command",
+    );
+
+    stage_trim(&mut trimmed, 0, 0, 2, -144.0, 0);
+    assert_eq!(trimmed.submit_commands(1), RESULT_OK);
+
+    feed_and_render(&mut trimmed, 1, 1, -0.25);
+    feed_and_render(&mut untouched, 1, 1, -0.25);
+    let moved = trimmed.output_pcm().expect("output").to_vec();
+    let still = untouched.output_pcm().expect("output").to_vec();
+    assert!(
+        moved
+            .iter()
+            .zip(still.iter())
+            .any(|(a, b)| a.to_bits() != b.to_bits()),
+        "a -144 dB trim on one of two tracks must move the mix"
+    );
+
+    // And a polarity flip on the same track moves it again, in the opposite direction.
+    stage_polarity(&mut trimmed, 0, 1, 2, true, 0);
+    assert_eq!(trimmed.submit_commands(1), RESULT_OK);
+    feed_and_render(&mut trimmed, 1, 2, -0.25);
+    feed_and_render(&mut untouched, 1, 2, -0.25);
+    let flipped = trimmed.output_pcm().expect("output").to_vec();
+    let reference = untouched.output_pcm().expect("output").to_vec();
+    assert!(
+        flipped
+            .iter()
+            .zip(reference.iter())
+            .any(|(a, b)| a.to_bits() != b.to_bits()),
+        "a polarity flip on the untrimmed track must move the mix"
+    );
+}
+
+/// Kinds 10/11 share the transactional admission with kind 9 and must not disturb it.
+///
+/// The solo state is mutated inside pass one, before the submission is known to be admissible, and
+/// the wrapper closes it: `commit` once pass three has pushed, `rollback` on every refusal. Two
+/// kinds that reach the same batch cannot be allowed to leave that half-open.
+///
+/// Red mutation: refuse a trim record with an early `return Err(...)` from
+/// `admit_commands_staged` *after* it has staged, bypassing the `rollback` in `admit_commands` ->
+/// the solo bit survives a refused batch and the last assertion fails.
+#[test]
+fn trim_and_polarity_leave_the_solo_transaction_closed() {
+    const QUANTUM: u32 = 128;
+    const TRACKS: usize = 4;
+
+    // A batch that mixes solo with the two new kinds is admitted whole and closes clean.
+    let mut host = solo_host(QUANTUM, TRACKS, &[]);
+    stage_trim(&mut host, 0, 1, 2, -9.0, QUANTUM);
+    stage_solo(&mut host, 1, 2, true, QUANTUM);
+    stage_polarity(&mut host, 2, 3, 0, true, QUANTUM);
+    assert_eq!(
+        host.submit_commands(3),
+        RESULT_OK,
+        "reason {}",
+        host.command_report().reason
+    );
+    let state = host.console_solo().expect("solo state");
+    assert!(state.solo(2), "the solo bit moved");
+    assert!(!state.transaction_open(), "and the transaction closed");
+    // `emitted >= user_mute` is the standing invariant: every track the gate silenced was told so,
+    // and no track was told it is muted while its user mute says otherwise for a lane the gate
+    // does not cover.
+    for track in 0..TRACKS {
+        for lane in 0..2 {
+            assert!(
+                state.emitted_mute(track, lane) >= state.user_mute(track, lane),
+                "track {track} lane {lane}: emitted must dominate the user mute"
+            );
+        }
+    }
+
+    // And a batch whose *trim* record is refused rolls the solo bit back with everything else.
+    let mut host = solo_host(QUANTUM, TRACKS, &[]);
+    stage_solo(&mut host, 0, 1, true, QUANTUM);
+    stage_trim(&mut host, 1, 1, 2, 99.0, QUANTUM);
+    assert_eq!(host.submit_commands(2), RESULT_INVALID_ARGUMENT);
+    assert_eq!(host.command_report().reason, COMMAND_REASON_DOMAIN);
+    let state = host.console_solo().expect("solo state");
+    assert!(
+        !state.any_solo(),
+        "a batch refused by a trim record left a solo bit engaged"
+    );
+    assert!(!state.transaction_open());
+}
+
+/// A trim command is not a mute: it does not touch the solo composition, and solo does not touch
+/// the trim.
+///
+/// The two live on different queues and different stages -- the input chain is the head of the
+/// strip, the gate is at the fader -- and the phase must not have coupled them. A trim to `-144 dB`
+/// silences a track without setting its user mute, so clearing a solo restores exactly the mutes
+/// the caller set and leaves the trim where it was.
+#[test]
+fn a_trim_is_not_a_mute_and_solo_does_not_move_it() {
+    const QUANTUM: u32 = 128;
+    const TRACKS: usize = 4;
+    let mut host = solo_host(QUANTUM, TRACKS, &[]);
+    stage_trim(&mut host, 0, 0, 2, -144.0, 0);
+    assert_eq!(host.submit_commands(1), RESULT_OK);
+    let state = host.console_solo().expect("solo state");
+    assert!(
+        !state.user_mute(0, 0) && !state.user_mute(0, 1),
+        "a trim ride is not a mute: the strip's user-mute state is untouched"
+    );
+    assert!(!state.any_solo());
+
+    // Engage and clear a solo over the top: the mute mirror returns to where it was, and the trim
+    // record was never a mute record so nothing about it is restored or re-emitted.
+    stage_solo(&mut host, 0, 1, true, QUANTUM);
+    assert_eq!(host.submit_commands(1), RESULT_OK);
+    let state = host.console_solo().expect("solo state");
+    assert!(state.emitted_mute(0, 0), "track 0 is outside the solo set");
+    assert!(!state.user_mute(0, 0), "and its user mute is still clear");
+
+    stage_solo(&mut host, 0, 1, false, QUANTUM);
+    assert_eq!(host.submit_commands(1), RESULT_OK);
+    let state = host.console_solo().expect("solo state");
+    for track in 0..TRACKS {
+        for lane in 0..2 {
+            assert!(
+                !state.emitted_mute(track, lane),
+                "clearing the solo restored exactly the mutes the caller set, which is none"
+            );
+        }
+    }
+}

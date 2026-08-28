@@ -274,6 +274,38 @@ the graph's routing in `crates/miso-engine-graph/src/runtime.rs`. Per lane-sampl
 Polarity inversion is **0**: it is folded into the trim coefficient at prepare time
 (`trim_signed: if params.polarity_invert { -trim } else { trim }`).
 
+**Live trim and polarity (issue #210 phase 3) are 0 too**, and this is a named gap term rather
+than a floor row: *live input trim ramp -- 3 lane-ops per lane-sample while a retarget is in
+flight, floor 0*.
+
+`trim_db` and `polarity_invert` are `BlockTarget` since phase 3, and while a retarget is ramping
+the input chain runs `input_chain_ramp_block`, whose frame body is the row above with step 3's
+constant trim replaced by three more lane-ops: `sub` (the countdown), `le` (the done compare) and a
+`select`-plus-`add` pair collapsing to the D11 update. Three lane-ops, per channel, **only on the
+blocks a ramp is in flight**, which is at most one smoothing window per admitted command.
+
+It is not a floor row for the reason the delay term is not one: the floor states what the frozen
+spec requires of **every** block, and this is required of none. A lane no command has ever
+retargeted takes the settled arm -- `input_chain_block_elided` over the prepared coefficients,
+behind one `bool` -- and executes the 7-lane-op row above unchanged. The overwhelming majority of
+blocks, on the overwhelming majority of tracks, are that arm by construction rather than by
+rounding.
+
+`BUILTINS_LANE_OPS = 69.0` (`tools/miso-engine-bench/src/floor.rs`) is therefore unchanged and this
+feature is **not** a recount trigger. Neither is it a `KERNEL_ROSTER` change
+(`scripts/check-web-audioworklet-callgraph.py`): the roster names the *effect* kernels the shipped
+wasm artifact must carry, and no builtin kernel has a row in it -- the two new bodies join
+`input_chain_block`'s five siblings, none of which the roster sees.
+
+One thing the ramping arm does **not** do, and the reason it is one body rather than four: it does
+not consult the elision plan. Over a decided-elidable section the unelided body computes the same
+`v |-> v + 0.0` map and writes back the same `+0.0` integrators, which is the appendix below's own
+proof, so the ramping arm renders the elision-planned bits without a second three-shape dispatch to
+keep bit-identical to the first. What it costs is `24 x sections` lane-ops that the settled arm
+would have elided, on the blocks a ramp is in flight and on those only. Charged honestly: *ramping
+input chain does not elide -- up to 48 lane-ops per lane-sample while a retarget is in flight,
+floor 0*.
+
 Input time alignment (`builtins.*.delay_samples`, issue #210 phase 2) is **0** as well, and it is a
 named gap term rather than a floor row: *input delay — 1 load + 1 store per lane-sample when
 engaged, floor 0*. It falls under the standing rule that loads and stores are outside the floor
@@ -946,9 +978,29 @@ footing as a member.
 
 The plan is decided at bank construction and can never go stale in the unsafe direction:
 
-* the six coefficient words are written once, at preparation. `hpf_hz`, `lpf_hz`, `trim_db` and
-  `polarity_invert` all declare `BuiltinParameterUpdateRate::PreparedOnly` in
-  `BUILTIN_PARAMETER_DESCRIPTORS_V1`, so no live surface can move them;
+* the six coefficient words are written once, at preparation. The predicate reads **exactly those
+  six words and the section's two integrators** and nothing else (`section_is_identity`), so the
+  only parameters that can invalidate a decision are the ones that design them: `hpf_hz` and
+  `lpf_hz`, both of which declare `BuiltinParameterUpdateRate::PreparedOnly` in
+  `BUILTIN_PARAMETER_DESCRIPTORS_V1`. No live surface can move them.
+
+  **Amended by #210 phase 3.** This clause used to read "`hpf_hz`, `lpf_hz`, `trim_db` and
+  `polarity_invert` all declare `PreparedOnly` … so no live surface can move them", and that
+  premise is now false: `trim_db` (command kind 10) and `polarity_invert` (kind 11) are live and
+  retarget `InputChainCoef::trim` after preparation. The **decision is unchanged**, and the reason
+  is the word list above rather than a re-derivation: `trim` is consumed one step earlier, at
+  `input_chain_block`'s step 3, and is not among the eight words the predicate loads. A section is
+  the arithmetic identity or it is not, whatever the chain multiplies its input by. The ramping
+  kernel `input_chain_ramp_block` therefore leaves `plan` untouched, and the settled path a
+  never-retargeted lane dispatches is the **elision-planned** kernel variant this section
+  describes — `input_chain_block_elided` over the prepared words — which is what the phase's
+  class-A OFF claim is about.
+
+  **The proviso this leaves.** If `hpf_hz` or `lpf_hz` ever become live (the deferred tier of the
+  D2 ruling), the premise fails at exactly the word list above, and that liveness *requires* a
+  command-driven elision-plan invalidation: the retarget must recompute the plan, the way the two
+  state writes below already do. Recorded as a binding obligation in
+  `docs/rulings/builtins-input-liveness-d2.md`;
 * an elided section's integrators are never written by the render path — the section that would
   have written them is gone. The render path's one write to the retained state anywhere is the
   boundary-check recovery, `state.andnot(bad)`, and that write is **monotone toward the identity**:

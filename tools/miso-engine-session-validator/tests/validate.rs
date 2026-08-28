@@ -222,6 +222,46 @@ const MUTATIONS: &[(&str, &str, &str, usize, &str)] = &[
         1,
         "automation.invalid_range",
     ),
+    // Issue #178, ruled by #210's D2: the `rack = "builtins"` automation-target arm. All four are
+    // stage-2 refusals, and each names one clause of the arm.
+    //
+    // `effect_id` carries a fixed validated literal because Session V1 has no optional keys, so
+    // the wrong literal has to be a typed diagnostic rather than an ignored field.
+    (
+        "builtins-automation.toml",
+        "effect_id = \"strip\", parameter_id = 5",
+        "effect_id = \"channel-strip\", parameter_id = 5",
+        1,
+        "reference.missing_entity",
+    ),
+    // A `MatrixShared` parameter is one 2x2 for the track; addressing one of its lanes is a
+    // category error, not a narrower request.
+    (
+        "builtins-automation.toml",
+        "parameter_id = 7, channel = \"both\"",
+        "parameter_id = 7, channel = \"left\"",
+        1,
+        "schema.invalid_enum",
+    ),
+    // `hpf_hz` (id 3) is `PreparedOnly`: there is no post-preparation write path, so an automation
+    // span addressed at it could only ever be inert. The deferred filter tier is reopened by
+    // changing the ABI, not by writing a session that quietly does nothing.
+    (
+        "builtins-automation.toml",
+        "parameter_id = 2, channel = \"left\"",
+        "parameter_id = 3, channel = \"left\"",
+        1,
+        "reference.missing_entity",
+    ),
+    // `delay_samples` (id 11) is the same case, and is named separately because its ruling is its
+    // own: a delay change re-times the ring.
+    (
+        "builtins-automation.toml",
+        "parameter_id = 1, channel = \"right\"",
+        "parameter_id = 11, channel = \"right\"",
+        1,
+        "reference.missing_entity",
+    ),
     // Stage 3: the checked resource preflight against the session's own declared limits.
     (
         "canonical.toml",

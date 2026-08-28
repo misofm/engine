@@ -520,7 +520,7 @@ pub fn apply_session_edit(
             rack_name,
             rack,
         } => {
-            *rack_mut(track_mut(session, track_id)?, *rack_name) = rack.clone();
+            *rack_mut(track_mut(session, track_id)?, *rack_name)? = rack.clone();
         }
         SessionEditV1::PutTrackEffect {
             track_id,
@@ -528,7 +528,7 @@ pub fn apply_session_edit(
             final_position,
             effect,
         } => {
-            let effects = &mut rack_mut(track_mut(session, track_id)?, *rack_name).effects;
+            let effects = &mut rack_mut(track_mut(session, track_id)?, *rack_name)?.effects;
             if let Some(index) = effects.iter().position(|item| item.id == effect.id) {
                 effects.remove(index);
             }
@@ -544,7 +544,7 @@ pub fn apply_session_edit(
             rack_name,
             effect_id,
         } => {
-            let effects = &mut rack_mut(track_mut(session, track_id)?, *rack_name).effects;
+            let effects = &mut rack_mut(track_mut(session, track_id)?, *rack_name)?.effects;
             let index = effects
                 .iter()
                 .position(|item| &item.id == effect_id)
@@ -556,7 +556,7 @@ pub fn apply_session_edit(
             rack_name,
             effect_ids,
         } => {
-            let effects = &mut rack_mut(track_mut(session, track_id)?, *rack_name).effects;
+            let effects = &mut rack_mut(track_mut(session, track_id)?, *rack_name)?.effects;
             if effect_ids.len() != effects.len()
                 || effect_ids
                     .iter()
@@ -965,11 +965,27 @@ fn automation_mut<'a>(
         .ok_or(SessionEditError::NotFound)
 }
 
-fn rack_mut(track: &mut miso_engine_session::Track, rack_name: RackName) -> &mut Rack {
+/// The `Rack` a `SessionEditV1` rack-addressed edit names.
+///
+/// `RackName::Builtins` (#178, ruled by #210's D2) is not one: it is the strip's own builtin
+/// section, which is a `DualMonoBuiltins` and holds no `effects` vector at all, so every edit that
+/// reaches here -- `SetTrackRack`, `PutTrackEffect`, `RemoveTrackEffect`, `SetEffectQuality` and
+/// their siblings -- is addressing something that does not exist. It is refused with
+/// [`SessionEditError::NotFound`], the same answer a named-but-absent effect gets, rather than
+/// given a panicking arm or a silent no-op.
+///
+/// The strip **is** editable, through `SetTrackBuiltins` (`:516`), which is the edit that owns it
+/// and is unaffected by the new token. The token exists for the automation-target vocabulary and
+/// for nothing else.
+fn rack_mut(
+    track: &mut miso_engine_session::Track,
+    rack_name: RackName,
+) -> Result<&mut Rack, SessionEditError> {
     match rack_name {
-        RackName::Simd1 => &mut track.simd1,
-        RackName::Dynamic => &mut track.dynamic,
-        RackName::Simd2 => &mut track.simd2,
+        RackName::Simd1 => Ok(&mut track.simd1),
+        RackName::Dynamic => Ok(&mut track.dynamic),
+        RackName::Simd2 => Ok(&mut track.simd2),
+        RackName::Builtins => Err(SessionEditError::NotFound),
     }
 }
 
@@ -979,7 +995,7 @@ fn effect_mut<'a>(
     rack_name: RackName,
     effect_id: &StableId,
 ) -> Result<&'a mut Effect, SessionEditError> {
-    rack_mut(track_mut(session, track_id)?, rack_name)
+    rack_mut(track_mut(session, track_id)?, rack_name)?
         .effects
         .iter_mut()
         .find(|effect| &effect.id == effect_id)

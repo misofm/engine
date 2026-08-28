@@ -317,3 +317,42 @@ that the digest comparison discriminates.
   load-bearing for exactly one of the session's two claims, and the doctest that proves the other
   is proving the plan's property rather than the session's. Both are asserted, and neither is
   assumed.
+
+## Issue #210 phase 3 — the live input trim and polarity, end to end
+
+Driver: `cargo test -p miso-engine-host-core --test input_liveness_console`, one mutation at a
+time, tree restored between rows. The mutated code lives in `miso-engine-builtins-compiler` and
+`miso-engine-graph`; the rows are logged there as P3-M21 through P3-M26. What this file records is
+why the *end-to-end* form is the one that catches them.
+
+Three of the four drain defects -- a missed member queue, an off-by-one lane, a constant lane --
+are **invisible to the mix**. The fixture's eight tracks are identical and sum into one output, so
+silencing any one of them produces the same sum, and a command that landed on the wrong track
+renders bit-identically to one that landed on the right one. The per-track post-matrix meter is
+what makes the bank lane index observable at all, and it is why
+`a_command_moves_exactly_the_addressed_track` reads meters rather than samples.
+
+The fourth -- draining in `process` rather than `begin_block` -- is invisible to *any* single-block
+observation: the record still reaches the right lane, one block late relative to the collapse
+dispatch. It shows only in the census, and only because `BankChain::run` reads the witness between
+the drain and the gather.
+
+### The disengage-under-drain window
+
+One more defect class this file gates, and the only one the phase actually shipped and had to fix:
+a per-lane record drained on the block a collapsed chain disengages. `BankChain::run` drains every
+slot's `begin_block` before it reads the collapse witness and runs `disengage_collapse` after, so
+the boundary is reached with the two channels' trim-ramp records legitimately apart — and a stage
+that copies the whole per-channel state there clones the just-drained record onto the channel the
+console did not address.
+
+It is unreachable from every other test in these suites, because they all push their commands
+before block 0 and the chain has therefore never collapsed when the record arrives. The gate is
+`a_per_lane_record_drained_on_the_disengaging_block_reaches_one_channel`, which renders first and
+pushes second, and it is red under `P3-M17` (`crates/miso-engine-builtins/tests/MUTATIONS.md`).
+
+The oracle it uses is worth reading before trusting it: the **stereo-mapped** fixture never
+collapses (its two lanes read different source channels) while carrying identical content on both,
+so it is a genuine never-collapsed run of the same audio rather than a second run of the same path.
+`the_stereo_arm_is_a_never_collapsed_oracle` asserts both halves of that — the mono arm collapses,
+the stereo arm does not, and uncommanded they agree.

@@ -319,13 +319,22 @@ struct ReferenceMeterV1 {
 // These are layout facts, not observed aggregate rows; `verify_pinned_native_resource_abi_v1`
 // checks every public type and the queue payload boundary that can be named outside production.
 const GRAPH_NODE_BINDING_BYTES_V1: u64 = 72;
-const BOXED_INPUT_ENTRY_BYTES_V1: u64 = 184;
+const BOXED_INPUT_ENTRY_BYTES_V1: u64 = 288;
 const BOXED_TAIL_ENTRY_BYTES_V1: u64 = 24;
 const BOXED_STR_BYTES_V1: u64 = 16;
 const BOXED_STAGE_ENTRY_BYTES_V1: u64 = 24;
-const INPUT_PROCESSOR_BYTES_V1: u64 = 168;
-/// One `StripPreparation`: the fader and matrix section of a track, held inline in the strip
-/// vector until issue #212's lowering decides whether they bind per node or as bank lanes.
+/// One `InputBuiltins`, 168 -> 272 at #210 phase 3: `InputStage<f32>` gained the live trim ramp
+/// (four `f32` words per channel), its `[[u32; 8]; 2]` countdown and the `ramping` off gate.
+///
+/// It is no longer *boxed* at preparation -- the section rides `STRIP_PREPARATION_BYTES_V1` -- but
+/// the size is still pinned here because the bank-input table below is an entry of it.
+const INPUT_PROCESSOR_BYTES_V1: u64 = 272;
+/// One `StripPreparation`: the whole strip of a track -- input, fader and matrix section -- held
+/// inline in the strip vector until lowering decides whether they bind per node or as bank lanes
+/// (issue #212 for the fader and the matrix, #210 phase 3 for the input).
+///
+/// 344 -> 656 at phase 3: the 272-byte input section moved in, and `StripControlConsumers` gained
+/// a third 40-byte `Option<Consumer<_>>` for the input trim/polarity channel.
 ///
 /// The one size here that `verify_pinned_native_resource_abi_v1` cannot cross-check, because the
 /// type is private to the builtins compiler and so cannot be named outside production. It is
@@ -333,7 +342,7 @@ const INPUT_PROCESSOR_BYTES_V1: u64 = 168;
 /// which observes every phase-two allocation through a global allocator and requires the reported
 /// grid to match it exactly -- so a drift here shows up there, on the same three track counts this
 /// projection uses.
-const STRIP_PREPARATION_BYTES_V1: u64 = 344;
+const STRIP_PREPARATION_BYTES_V1: u64 = 656;
 const FADER_PROCESSOR_BYTES_V1: u64 = 16;
 const MATRIX_PROCESSOR_BYTES_V1: u64 = 136;
 const GRAPH_OBSERVER_BINDING_BYTES_V1: u64 = 80;
@@ -3296,10 +3305,11 @@ fn expected_resource_records_v1() -> Result<Vec<ResourceRecordV1>, String> {
 
 fn derive_resource_record_v1(tracks: u64, meters: u64) -> Result<ResourceRecordV1, String> {
     let processor_count = resource_product_v1(tracks, 3)?;
-    // One binding per track since #212, not three: the fader and matrix stages ride the strip
-    // vector instead, and are boxed only if lowering keeps them as per-node processors.
+    // **No** binding per track since #210 phase 3: all three stages ride the strip vector, and are
+    // boxed only if lowering keeps them as per-node processors. The binding vector is empty at
+    // preparation and so allocates nothing -- `GRAPH_NODE_BINDING_BYTES_V1` stays pinned above,
+    // because the *lowering* still builds that vector and the ABI check still names the type.
     let processor_vectors = resource_sum_v1(&[
-        resource_product_v1(tracks, GRAPH_NODE_BINDING_BYTES_V1)?,
         resource_product_v1(tracks, STRIP_PREPARATION_BYTES_V1)?,
         resource_product_v1(tracks, BOXED_INPUT_ENTRY_BYTES_V1)?,
         resource_product_v1(tracks, BOXED_TAIL_ENTRY_BYTES_V1)?,
@@ -3307,32 +3317,28 @@ fn derive_resource_record_v1(tracks: u64, meters: u64) -> Result<ResourceRecordV
         resource_product_v1(processor_count, BOXED_STAGE_ENTRY_BYTES_V1)?,
         resource_product_v1(tracks, BOXED_TAIL_ENTRY_BYTES_V1)?,
     ])?;
-    // Only the post-input processor is boxed at preparation. The fader and matrix sections are
-    // still exactly `FaderMuteBuiltins` and `MatrixBuiltins`, but they now sit inline inside
-    // `STRIP_PREPARATION_BYTES_V1` above rather than behind a `Box` of their own.
-    let processor_objects = resource_product_v1(tracks, INPUT_PROCESSOR_BYTES_V1)?;
+    // Nothing is boxed at preparation. The input, fader and matrix sections are still exactly
+    // `InputBuiltins`, `FaderMuteBuiltins` and `MatrixBuiltins`, but all three now sit inline
+    // inside `STRIP_PREPARATION_BYTES_V1` above rather than behind a `Box` of their own.
     let track_identity_bytes = resource_track_identity_bytes_v1(tracks)?;
     let processor_bytes = resource_sum_v1(&[
         processor_vectors,
-        processor_objects,
-        resource_product_v1(track_identity_bytes, 10)?,
+        resource_product_v1(track_identity_bytes, 9)?,
     ])?;
     let processor_maximum = [
-        resource_product_v1(tracks, GRAPH_NODE_BINDING_BYTES_V1)?,
         resource_product_v1(tracks, STRIP_PREPARATION_BYTES_V1)?,
         resource_product_v1(tracks, BOXED_INPUT_ENTRY_BYTES_V1)?,
         resource_product_v1(tracks, BOXED_TAIL_ENTRY_BYTES_V1)?,
         resource_product_v1(tracks, BOXED_STR_BYTES_V1)?,
         resource_product_v1(processor_count, BOXED_STAGE_ENTRY_BYTES_V1)?,
-        INPUT_PROCESSOR_BYTES_V1,
         resource_maximum_track_identity_bytes_v1(tracks),
     ]
     .into_iter()
     .max()
     .ok_or_else(|| "empty processor resource projection".to_owned())?;
-    // Seven vectors (the strip vector joined them), and eleven allocations per track: the one
-    // boxed post-input processor plus the ten independently retained copies of the track's ID.
-    let processor_allocations = resource_sum_v1(&[7, resource_product_v1(tracks, 11)?])?;
+    // Six vectors (the binding vector left), and nine allocations per track: the nine
+    // independently retained copies of the track's ID, and no boxed processor at all.
+    let processor_allocations = resource_sum_v1(&[6, resource_product_v1(tracks, 9)?])?;
 
     let queue_capacity = if meters == 7 { 4 } else { 1 };
     let slot_count = queue_capacity + 1;
@@ -5230,7 +5236,14 @@ mod tests {
             // Re-pinned by issue #210 phase 2: the two `prepare_256_tracks` workload fixtures name
             // `fixtures/session/v1/canonical.toml` by digest, and that session grew a required
             // `builtins.*.delay_samples` key. The payload count is unchanged.
-            "ad034b8880acd13e6144fd00c515dc5fa83ca3b044c2a2472453cc6cad9934d1",
+            //
+            // Re-pinned again by issue #210 phase 3: `resources.jsonl` alone moved -- the strip's
+            // input section is deferred to lowering with the fader and the matrix, so preparation
+            // retains no binding vector and boxes no processor, and `InputStage` carries the live
+            // trim ramp. No PCM, meter, response or benchmark fixture moved, which is what a
+            // control-plane-and-transient-path phase should look like from here: the render bits
+            // of every checked case are the bits they were.
+            "1d2f8ffe8f56d08314e480f0aba7ee5068ae8448721504ae7f64db11a33f06c8",
             "accepted joined-corpus manifest identity"
         );
 

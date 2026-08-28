@@ -546,6 +546,21 @@ pub trait GraphPreparedBuiltinBankProcessor: Send {
         [0, 0]
     }
 
+    /// Drain this bank's live-console queues, before any lane of the block is dispatched.
+    ///
+    /// Forwarded from `miso_engine_rack::BankStage::begin_block`, and it carries that method's
+    /// whole contract: an admitted record takes effect on the first sample of the block that
+    /// drains it, and a record that writes one channel's upstream word clears the
+    /// channel-symmetry witness' `LIVE` term *before* the collapse dispatch reads it. A bank
+    /// upstream of the fader/matrix seam that drained inside `process` instead would publish a
+    /// one-channel retarget onto both channels of the block that admitted it.
+    ///
+    /// The default is a no-op, which is what a console-free plan pays.
+    fn begin_block(&mut self, first_sample: u64) -> Result<(), RenderError> {
+        let _ = first_sample;
+        Ok(())
+    }
+
     /// This builtin bank's channel-symmetry witness for one lane of the cohort.
     ///
     /// The default declines, for the reason `miso_engine_rack::BankStage::lane_symmetry` gives:

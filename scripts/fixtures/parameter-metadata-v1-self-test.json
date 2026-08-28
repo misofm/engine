@@ -12,7 +12,9 @@
     { "value": 6, "name": "effectBypass", "applied": true, "plane": "render" },
     { "value": 7, "name": "observeSubscribe", "applied": true, "plane": "observation" },
     { "value": 8, "name": "observeUnsubscribe", "applied": true, "plane": "observation" },
-    { "value": 9, "name": "solo", "applied": true, "plane": "render" }
+    { "value": 9, "name": "solo", "applied": true, "plane": "render" },
+    { "value": 10, "name": "trimDb", "applied": true, "plane": "render" },
+    { "value": 11, "name": "polarityInvert", "applied": true, "plane": "render" }
   ],
   "commandReasons": [
     { "value": 0, "name": "none" },
@@ -37,8 +39,8 @@
   },
   "builtins": {
     "parameters": [
-      { "id": 1, "name": "polarity_invert", "scope": "perLane", "mapping": "boolean", "domain": "booleanExact", "minimum": null, "maximum": null, "maximumByRate": null, "default": 0.0, "updateRate": "preparedOnly", "smoothing": "none", "reset": "restorePreparedValue", "disabledValue": null, "liveUpdatable": false, "nudge": null },
-      { "id": 2, "name": "trim_db", "scope": "perLane", "mapping": "decibelAmplitude", "domain": "finiteInclusive", "minimum": -144.0, "maximum": 24.0, "maximumByRate": null, "default": 0.0, "updateRate": "preparedOnly", "smoothing": "none", "reset": "restorePreparedValue", "disabledValue": null, "liveUpdatable": false, "nudge": null },
+      { "id": 1, "name": "polarity_invert", "scope": "perLane", "mapping": "boolean", "domain": "booleanExact", "minimum": null, "maximum": null, "maximumByRate": null, "default": 0.0, "updateRate": "blockTarget", "smoothing": "linearNUpdates", "reset": "restorePreparedValue", "disabledValue": null, "liveUpdatable": true, "nudge": null },
+      { "id": 2, "name": "trim_db", "scope": "perLane", "mapping": "decibelAmplitude", "domain": "finiteInclusive", "minimum": -144.0, "maximum": 24.0, "maximumByRate": null, "default": 0.0, "updateRate": "blockTarget", "smoothing": "linearNUpdates", "reset": "restorePreparedValue", "disabledValue": null, "liveUpdatable": true, "nudge": null },
       { "id": 3, "name": "hpf_hz", "scope": "perLane", "mapping": "hertz", "domain": "disabledOrRateKeyedHertz", "minimum": 10.0, "maximum": null, "maximumByRate": { "44100": 22049.482, "48000": 23999.434, "88200": 44098.965, "96000": 47998.867 }, "default": 0.0, "updateRate": "preparedOnly", "smoothing": "none", "reset": "restorePreparedValue", "disabledValue": 0.0, "liveUpdatable": false, "nudge": null },
       { "id": 4, "name": "lpf_hz", "scope": "perLane", "mapping": "hertz", "domain": "disabledOrRateKeyedHertz", "minimum": 10.0, "maximum": null, "maximumByRate": { "44100": 22049.482, "48000": 23999.434, "88200": 44098.965, "96000": 47998.867 }, "default": 0.0, "updateRate": "preparedOnly", "smoothing": "none", "reset": "restorePreparedValue", "disabledValue": 0.0, "liveUpdatable": false, "nudge": null },
       { "id": 5, "name": "fader_db", "scope": "perLane", "mapping": "decibelAmplitude", "domain": "finiteInclusive", "minimum": -144.0, "maximum": 24.0, "maximumByRate": null, "default": 0.0, "updateRate": "blockTarget", "smoothing": "linearNUpdates", "reset": "restorePreparedValue", "disabledValue": null, "liveUpdatable": true, "nudge": null },

@@ -466,6 +466,201 @@ pub fn input_chain_block<L: Lane>(
     }
 }
 
+/// State of a ramping input trim, one set per lane and channel (#210 phase 3).
+///
+/// Every array is `[channel]`, and each element carries one lane word: `current[0]` is the left
+/// channel's per-lane trim applied to the frame being rendered. The shape is
+/// [`GainMuteRamp`]'s, minus the mute mask -- the trim has no mute endpoint -- and the arithmetic
+/// is the same D11 form, which is what makes a trim ramp obey the same smoother law the fader and
+/// the matrix already obey.
+#[derive(Clone, Copy)]
+pub struct InputTrimRamp<L: Lane> {
+    /// The trim applied to the current frame, `[channel]`.
+    pub current: [L; 2],
+    /// The trim assigned exactly on the last ramping frame (D11: the snap is an assignment).
+    pub target: [L; 2],
+    /// Per-sample increment, `(target - start) / n`, computed once per event.
+    pub step: [L; 2],
+    /// Frames left in this lane's ramp, as an exact `f32` integer (the caller clamps to `2^24`).
+    pub remaining: [L; 2],
+}
+
+/// [`input_chain_block`] with the trim stepping per sample under the D11 linear law.
+///
+/// # Why the ramping body ignores the elision plan, and why that is class A
+///
+/// This is [`input_chain_block`] -- the *unelided* body -- with step 3's constant trim replaced by
+/// a ramp word. It is deliberately not given the three-shape dispatch
+/// [`input_chain_block_elided`] has, and the reason is [`section_is_identity`]'s own derivation:
+/// an elided section is elided exactly when its six coefficient words are the identity and both
+/// its integrators are `+0.0`, and over such a section the unelided body computes `v |-> v + 0.0`
+/// and writes `+0.0` back into both integrators. That is the same map, the same output bits and
+/// the same retained words the elided form produces, which is what
+/// `crates/miso-engine-lane/tests/input_chain_elision.rs` proves at every width and every section
+/// pattern. So a ramping block renders the elision-planned bits whether or not it takes the
+/// elision-planned *path*, and the plan it would have consulted is left untouched and still valid
+/// for the settled blocks on either side of the ramp.
+///
+/// The cost of not eliding is paid only while a ramp is in flight -- a transient of at most one
+/// smoothing window per admitted command -- and it buys three fewer kernel bodies to keep
+/// bit-identical to three others.
+///
+/// Frozen operation order, per frame and per channel `ch`:
+/// 1. `remaining[ch] = remaining[ch] - 1`
+/// 2. `done = remaining[ch] <= 0`
+/// 3. `trim = select(done, target[ch], current[ch] + step[ch])`; `current[ch] = trim`
+/// 4. `x = load(frame)`
+/// 5. `bad = !(|x| < NONFINITE_LIMIT)`; `sanitized[ch] = sanitized[ch] + (1.0 & bad)`
+/// 6. `v = andnot(x, bad) * trim`
+/// 7. `v = svf_step(v, section[ch][0])`, then `v = svf_step(v, section[ch][1])`
+/// 8. `nonfinite[ch] = nonfinite[ch] | !(|v| < NONFINITE_LIMIT)`
+/// 9. `store(frame, v)`
+///
+/// Steps 4-9 are [`input_chain_block`]'s steps 1-6 character for character, with its `c.trim[ch]`
+/// replaced by the ramp word step 3 produced. Steps 1-3 are [`gain_mute_ramp_block`]'s steps 1-3.
+/// `remaining` and `current` are advanced in place, so a lane's ramp evolves by its own additions
+/// regardless of block size or of its neighbours: partition and cohort invariance hold by
+/// construction, exactly as they do for [`matrix2x2_ramp_block`].
+///
+/// The left channel's frame is evaluated before the right channel's, as in [`input_chain_block`].
+#[inline(always)]
+pub fn input_chain_ramp_block<L: Lane>(
+    left: &mut [f32],
+    right: &mut [f32],
+    frames: usize,
+    c: &InputChainCoef<L>,
+    s: &mut InputChainState<L>,
+    r: &mut InputTrimRamp<L>,
+) -> InputChainReport<L> {
+    debug_assert_eq!(left.len(), frames * L::WIDTH);
+    debug_assert_eq!(right.len(), frames * L::WIDTH);
+    let limit = L::splat(NONFINITE_LIMIT);
+    let one = L::splat(1.0);
+    let zero = L::zero();
+
+    let mut count = [zero; 2];
+    let mut nonfinite = [no_lanes::<L>(); 2];
+    let mut state = s.section;
+    let mut remaining = r.remaining;
+    let mut current = r.current;
+    let mut nc1 = [[zero; 2]; 2];
+    for (channel, coefficients) in c.section.iter().enumerate() {
+        for (section, coefficient) in coefficients.iter().enumerate() {
+            nc1[channel][section] = coefficient.c1.neg();
+        }
+    }
+
+    for (left_frame, right_frame) in left
+        .chunks_exact_mut(L::WIDTH)
+        .zip(right.chunks_exact_mut(L::WIDTH))
+    {
+        for (channel, frame) in [left_frame, right_frame].into_iter().enumerate() {
+            remaining[channel] = remaining[channel].sub(one);
+            let done = remaining[channel].le(zero);
+            let trim = L::select(
+                done,
+                r.target[channel],
+                current[channel].add(r.step[channel]),
+            );
+            current[channel] = trim;
+            let x = L::load(frame);
+            let bad = L::mask_not(x.abs().lt(limit));
+            count[channel] = count[channel].add(one.andnot(L::mask_not(bad)));
+            let mut v = x.andnot(bad).mul(trim);
+            for section in 0..2 {
+                let coefficient = &c.section[channel][section];
+                let v0 = v;
+                let (v1, v2) = svf_step(
+                    v0,
+                    nc1[channel][section],
+                    coefficient.a2,
+                    coefficient.a3,
+                    &mut state[channel][section],
+                );
+                v = coefficient
+                    .m2
+                    .fma(v2, coefficient.m1.fma(v1, coefficient.m0.mul(v0)));
+            }
+            nonfinite[channel] = L::mask_or(nonfinite[channel], L::mask_not(v.abs().lt(limit)));
+            v.store(frame);
+        }
+    }
+
+    s.section = state;
+    r.remaining = remaining;
+    r.current = current;
+    InputChainReport {
+        sanitized: count,
+        nonfinite,
+    }
+}
+
+/// [`input_chain_ramp_block`] over one plane: the collapsed track's live channel.
+///
+/// The dual body's channel-`0` arm, character for character, with the channel index frozen at `0`
+/// and the `1` arm deleted -- the rule stated above the one-plane settled variants, applied to the
+/// ramping one. The right channel's ramp words are not advanced here and are not read: the caller
+/// duplicates the left channel's whole per-channel state onto them after the block, exactly as it
+/// duplicates the report.
+#[inline(always)]
+pub fn input_chain_ramp_block_mono<L: Lane>(
+    io: &mut [f32],
+    frames: usize,
+    c: &InputChainCoef<L>,
+    s: &mut InputChainState<L>,
+    r: &mut InputTrimRamp<L>,
+) -> InputChainReport<L> {
+    debug_assert_eq!(io.len(), frames * L::WIDTH);
+    let limit = L::splat(NONFINITE_LIMIT);
+    let one = L::splat(1.0);
+    let zero = L::zero();
+
+    let mut count = zero;
+    let mut nonfinite = no_lanes::<L>();
+    let mut state = s.section[0];
+    let mut remaining = r.remaining[0];
+    let mut current = r.current[0];
+    let mut nc1 = [zero; 2];
+    for (section, coefficient) in c.section[0].iter().enumerate() {
+        nc1[section] = coefficient.c1.neg();
+    }
+
+    for frame in io.chunks_exact_mut(L::WIDTH) {
+        remaining = remaining.sub(one);
+        let done = remaining.le(zero);
+        let trim = L::select(done, r.target[0], current.add(r.step[0]));
+        current = trim;
+        let x = L::load(frame);
+        let bad = L::mask_not(x.abs().lt(limit));
+        count = count.add(one.andnot(L::mask_not(bad)));
+        let mut v = x.andnot(bad).mul(trim);
+        for section in 0..2 {
+            let coefficient = &c.section[0][section];
+            let v0 = v;
+            let (v1, v2) = svf_step(
+                v0,
+                nc1[section],
+                coefficient.a2,
+                coefficient.a3,
+                &mut state[section],
+            );
+            v = coefficient
+                .m2
+                .fma(v2, coefficient.m1.fma(v1, coefficient.m0.mul(v0)));
+        }
+        nonfinite = L::mask_or(nonfinite, L::mask_not(v.abs().lt(limit)));
+        v.store(frame);
+    }
+
+    s.section[0] = state;
+    r.remaining[0] = remaining;
+    r.current[0] = current;
+    InputChainReport {
+        sanitized: [count; 2],
+        nonfinite: [nonfinite; 2],
+    }
+}
+
 /// The bit pattern of `+1.0`, the direct-mix word of a disabled builtin section.
 const IDENTITY_M0_BITS: u32 = 0x3F80_0000;
 /// The bit pattern of `+0.0`, which every other identity word and both identity state words carry.
@@ -521,10 +716,31 @@ pub fn section_is_identity<L: Lane>(c: &SvfCoef<L>, s: &SvfState<L>) -> bool {
 /// Which sections of a prepared input chain [`input_chain_block_elided`] may skip.
 ///
 /// Decided once, by [`input_chain_plan`], at the point the coefficient and state words are written
-/// — never per call. A `true` entry can never go stale: the six coefficient words are
-/// `PreparedOnly` in the builtin parameter ABI, and an elided section's integrators are never
-/// written by the render path, so the only way out of the identity is an explicit state write,
-/// which recomputes the plan.
+/// — never per call.
+///
+/// # Why a `true` entry cannot go stale
+///
+/// The predicate reads **exactly eight words per section**: the six `SvfCoef` words and the two
+/// `SvfState` integrators ([`section_is_identity`]). Nothing else. So the only parameters that can
+/// invalidate a decision are the ones that design those eight, and those are `hpf_hz` and
+/// `lpf_hz`, which are `PreparedOnly` in the builtin parameter ABI: the coefficients are written
+/// once, at preparation. An elided section's integrators are never written by the render path, so
+/// the only way out of the identity is an explicit state write, and both of those
+/// (`InputStage::reset`, `InputStage::set_lane_state_words`) recompute the plan.
+///
+/// `trim` is deliberately **not** in that list, and since #210 phase 3 it is a live word --
+/// `trim_db` and `polarity_invert` retarget it after preparation. The decision is unaffected,
+/// because a section is the arithmetic identity or it is not regardless of what the chain
+/// multiplies its input by: the trim word is consumed one step earlier, at
+/// [`input_chain_block`]'s step 3, and is not one of the eight this predicate loads. The elision
+/// plan and the live trim are orthogonal, and the ramping kernel
+/// [`input_chain_ramp_block`] leaves the plan untouched for exactly that reason.
+///
+/// **The proviso.** If `hpf_hz` or `lpf_hz` ever become live, the premise above fails at the word
+/// list this comment names, and that liveness *requires* a command-driven invalidation: the
+/// retarget must recompute the plan, the way the two state writes already do. That is the
+/// obligation the D2 ruling records
+/// (`docs/rulings/builtins-input-liveness-d2.md`), and it is a hook, not a comment.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct InputChainPlan {
     /// `[channel][section]`, indexed like [`InputChainCoef::section`]; `true` means elided.

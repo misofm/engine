@@ -91,8 +91,12 @@ fn parameter_descriptors_have_complete_stable_contracts() {
     assert_eq!(
         descriptors.map(|descriptor| descriptor.update_rate),
         [
-            BuiltinParameterUpdateRate::PreparedOnly,
-            BuiltinParameterUpdateRate::PreparedOnly,
+            // Issue #210 phase 3: `polarity_invert` and `trim_db` are block targets now. They
+            // share one coefficient and one ramp, so they flip together or not at all.
+            BuiltinParameterUpdateRate::BlockTarget,
+            BuiltinParameterUpdateRate::BlockTarget,
+            // `hpf_hz` and `lpf_hz` stay prepared-only: a live filter move needs the parametric
+            // EQ's per-word coefficient-ramp machinery, which the D2 ruling deferred.
             BuiltinParameterUpdateRate::PreparedOnly,
             BuiltinParameterUpdateRate::PreparedOnly,
             // Issue #140 B: `fader_db` and `mute` are block targets now.
@@ -109,8 +113,10 @@ fn parameter_descriptors_have_complete_stable_contracts() {
     assert_eq!(
         descriptors.map(|descriptor| descriptor.smoothing),
         [
-            BuiltinSmoothingPolicy::None,
-            BuiltinSmoothingPolicy::None,
+            // Phase 3: the polarity flip declicks through the trim's own linear ramp, so the two
+            // rows carry the same policy for the same reason -- one coefficient, one law.
+            BuiltinSmoothingPolicy::LinearNUpdates,
+            BuiltinSmoothingPolicy::LinearNUpdates,
             BuiltinSmoothingPolicy::None,
             BuiltinSmoothingPolicy::None,
             BuiltinSmoothingPolicy::LinearNUpdates,
