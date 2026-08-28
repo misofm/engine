@@ -66,14 +66,21 @@ pub struct MeterRequest {
 
 /// One live-console control record for a track's smoothed 2x2 matrix/pan stage (issue #137 D1).
 ///
-/// # Why the matrix stage and nothing else
+/// # Why the matrix stage, and what the sentence here used to say
 ///
 /// `BUILTIN_PARAMETER_DESCRIPTORS_V1` is the builtin parameter ABI, and it is explicit about which
-/// builtin parameters may move after preparation: `matrix_ll/lr/rl/rr` declare
-/// `BuiltinParameterUpdateRate::BlockTarget` with `BuiltinSmoothingPolicy::LinearNUpdates`, and
-/// every other builtin row -- `polarity_invert`, `trim_db`, `hpf_hz`, `lpf_hz`, `fader_db`, `mute`
-/// -- declares `PreparedOnly`. This channel therefore carries exactly the one live-updatable
-/// builtin surface the contract already admits, and it changes no declared update rate.
+/// builtin parameters may move after preparation. When #137 D1 wrote this channel, the four
+/// `matrix_ll/lr/rl/rr` rows were the **only** ones declaring
+/// `BuiltinParameterUpdateRate::BlockTarget` and this comment said so, listing every other row as
+/// `PreparedOnly`. That list has been overtaken twice and is not maintained here any more: #140 B
+/// made `fader_db` and `mute` live ([`TrackFaderRecordV1`]), and #210 phase 3 made `trim_db` and
+/// `polarity_invert` live ([`TrackInputRecordV1`]). The rows that remain `PreparedOnly` are
+/// `hpf_hz`, `lpf_hz` and `delay_samples`, and the descriptor table is the authority rather than
+/// this paragraph.
+///
+/// What is still true of *this* record, and is the reason it is its own type: it addresses the
+/// matrix stage and nothing else, because a bounded SPSC queue has exactly one consumer and the
+/// matrix stage is a different graph node from the fader and the input chain.
 ///
 /// The record is `Copy` and fixed-size, so the queue is a plain `bounded_spsc` and the render-side
 /// drain allocates nothing.
@@ -94,11 +101,12 @@ pub struct TrackControlRecordV1 {
 /// node. `TrackControlRecordV1` therefore stays exactly the 20-byte matrix record #137 froze, and
 /// this rides its own bounded queue to `TrackStage::PostFader`.
 ///
-/// `fader_db` and `mute` still declare `BuiltinParameterUpdateRate::PreparedOnly` in
-/// `BUILTIN_PARAMETER_DESCRIPTORS_V1`, because that row describes the *prepared* fader section --
-/// `FaderMuteBuiltins`, which genuinely has no post-preparation write path and is unchanged. What
-/// #140 adds is a distinct live section, `FaderMuteRampBuiltinsV1`, bound only where a console
-/// asked for one; the parameter-metadata `liveUpdatable` flag is what tells a caller which of the
+/// `fader_db` and `mute` declare `BuiltinParameterUpdateRate::BlockTarget` in
+/// `BUILTIN_PARAMETER_DESCRIPTORS_V1`. (This paragraph read "still declare `PreparedOnly`" until
+/// the rows were flipped; the ABI table is the authority.) The *prepared* fader section,
+/// `FaderMuteBuiltins`, genuinely has no post-preparation write path and is unchanged; what #140
+/// adds is a distinct live section, `FaderMuteRampBuiltinsV1`, bound only where a console asked
+/// for one, and the parameter-metadata `liveUpdatable` flag is what tells a caller which of the
 /// two a session is running.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum TrackFaderRecordV1 {

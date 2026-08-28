@@ -2796,9 +2796,11 @@ impl BuiltinLaneSelector {
 ///
 /// # The ramped-fader decision, and why it is a separate type
 ///
-/// `fader_db` and `mute` declare `BuiltinParameterUpdateRate::PreparedOnly` with
-/// `BuiltinSmoothingPolicy::None`, and [`FaderMuteBuiltins`] is exactly that: one multiply and one
-/// `andnot` per frame, with no ramp state at all. Making *that* type ramp would change the fixed
+/// [`FaderMuteBuiltins`] is the *prepared-only* fader: one multiply and one `andnot` per frame,
+/// with no ramp state at all. (This paragraph read "`fader_db` and `mute` declare
+/// `BuiltinParameterUpdateRate::PreparedOnly`" when it was written; those rows are `BlockTarget`
+/// since #140 B flipped them, and the ABI table is the authority. What the sentence was about is
+/// the *type*, and that is unchanged.) Making that type ramp would change the fixed
 /// input/fader/matrix section layout, the builtin resource report, and the frozen
 /// builtins-compiler transcript for **every** session, console or not.
 ///
