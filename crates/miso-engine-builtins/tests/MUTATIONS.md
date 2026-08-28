@@ -186,3 +186,22 @@ at the ones that write it *between* the two sites in question.
 
 Twenty-three rows in this section: twenty-one red, two argued-equivalent (P3-M17b, P3-M48), each
 with a premise that is asserted in code rather than only in prose.
+
+## Issue #235 — the input bank's held channel-symmetry flags
+
+`InputStage::lane_channel_symmetry` is now a read of `InputStage::symmetry`, a one-byte per-lane
+mask refreshed by the five writers of a compared word. The soundness argument is not prose: the
+reader carries a `debug_assert_eq!` against `compute_lane_channel_symmetry`, so every debug-built
+test in the tree re-derives the walk and compares on every pull. A dropped refresh is therefore a
+panic naming the stale lane, wherever any suite happens to render that interleaving -- which is
+what the rows below record.
+
+| # | mutation | site | suite | verdict |
+|---|---|---|---|---|
+| C-1 | the retarget writer `set_trim_signed` drops its refresh | `builtins/src/lib.rs` | `input_liveness_mono` (3 tests) | RED — `the cached channel-symmetry flag is stale for lane 0`, on `an_asymmetric_retarget_declines_the_lane_on_the_admitting_block`, `re_equalising_the_words_restores_the_designed_term_and_nothing_more` and `a_retarget_between_a_collapsed_block_and_the_disengage_survives_the_copy`. This is the drain's own invalidation, and it is the one a live-words cache exists to have |
+| C-2 | the **dual** ramping arm of `process` drops its refresh | `builtins/src/lib.rs` | `host-core::input_liveness_console` (2 tests) | RED — `stale for lane 2`, on `re_equalising_after_a_disengaging_drain_holds_the_never_collapsed_bits` and `the_collapse_census_follows_the_commands`. A ramp advances the compared words on every block it runs, with no record drained: a drain-only invalidation is **not** sufficient, and this row is the proof |
+| C-3 | the **collapsed** ramping arm of `process_mono` drops its refresh (after `mirror_trim_ramp`) | `builtins/src/lib.rs` | — (green across `builtins`, `rack`, `host-core`, `console-workload`, `parametric-eq`, `builtins-compiler`, `graph`) | **EQUIVALENT, and kept anyway.** `mirror_trim_ramp` assigns channel `1`'s whole record from channel `0`'s, so every compared ramp word is equal when it returns -- and it was equal on entry too, which `debug_assert!(self.trim_ramp_channels_agree())` at the top of `process_mono` states. The comparison therefore lands where it already was. The refresh is kept because the equivalence rests on the mirror being *total*: a mirror that ever became partial or conditional would make this row red, and the cost is one walk on a ramping collapsed block |
+
+### Row count
+
+Three rows: two red, one argued-equivalent with its premise asserted in code (C-3).

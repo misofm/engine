@@ -1416,6 +1416,13 @@ impl BankChain {
     /// they are the ones a drain moves. So the per-block cost of the whole witness is an `and` over
     /// `slots * lanes` cached flags plus one stored byte per console-driven lane.
     ///
+    /// The **input** bank is the third holder of that cache and the only one whose words move
+    /// within a plan, because #210 phase 3 made its trim and polarity words live. It keeps the
+    /// same shape anyway -- the builtins crate's `InputStage::symmetry` -- maintained by the five
+    /// writers of a compared word rather than fixed at bind. Until #235 it alone re-derived its
+    /// walk on every pull, which is what made this paragraph a description of two thirds of the
+    /// tree rather than of all of it.
+    ///
     /// An inactive lane declines: it renders no track, so there is nothing to collapse.
     #[must_use]
     pub fn lane_symmetry(&self, lane: usize) -> ChannelSymmetryWitness {
@@ -1569,8 +1576,35 @@ impl BankChain {
         //
         // M3 adds one term to the M2 dispatch and no work to it: `collapse_channels_agree` is the
         // premise the witness does not supply, maintained at the bottom of this section.
-        let witness = self.all_lanes_symmetric();
+        //
+        // That sentence was **false as shipped** and is true again (#235). M3 hoisted the witness
+        // out of the M2 conjunction's short-circuit into an unconditional per-block pull, which
+        // reached an input-bank walk nothing cached: +39-42% on the dispatch-dominated rows and
+        // +4.5% on the forced-off arm, on chains that could never collapse at all. Both halves
+        // are repaired here -- `armed &&` below restores the short-circuit, and
+        // `InputStage::symmetry` gives the input bank the caching the first paragraph above always
+        // claimed for it -- and the second half also retires ~2 us the *eligible* arm had been
+        // paying since M2, which no short-circuit can reach because that arm's walk is the one the
+        // dispatch genuinely needs.
         let armed = self.collapse_prefix > 0 && self.collapse_source && !self.collapse_forced_off;
+        // `armed &&` is M2's short-circuit, restored (#235). The walk runs only where its answer
+        // can change something, and the `false` it substitutes elsewhere is not an approximation:
+        //
+        // * the recovery-window proof and the collapse decision below are both
+        //   `armed && witness && ..`, so an unarmed chain's witness cannot reach either;
+        // * the invariant's maintenance step is `.. && self.can_collapse()
+        //   && self.collapse_channels_agree && !witness && !self.all_lanes_preserve_agreement()`.
+        //   An unarmed chain that can collapse at all is the forced-off arm, and there the
+        //   substituted `false` opens the `!witness` clause and hands the question to
+        //   `all_lanes_preserve_agreement`. That is the *same verdict*, because `AGREEING` is a
+        //   subset of `ALL`: eligible implies preserving, so `!eligible && !preserving` and
+        //   `!preserving` clear the flag on exactly the same blocks. The arm pays one walk either
+        //   way, and the invariant is maintained on it exactly as M3 wrote it.
+        //
+        // So a chain with no collapsible prefix and a stereo-source chain -- every session M2 left
+        // alone -- take no walk at all, which is what the guard chain below claims and what the
+        // hoist had stopped being true.
+        let witness = armed && self.all_lanes_symmetric();
         // The way back for a chain the invariant has declined. Asked at most once per block per
         // prefix slot, and only inside a *recovery window* -- the chain is otherwise ready to
         // collapse and this is the only thing refusing it -- so a session that never disagrees
@@ -1609,8 +1643,11 @@ impl BankChain {
         //   and the proof is above;
         // * a block whose witness was **eligible** is skipped, because eligible implies preserving
         //   -- `AGREEING` is a subset of `ALL` -- so the second walk would be asking a question the
-        //   first already answered. That is what leaves the forced-off arm, which is eligible on
-        //   every block of its window, paying one already-computed `bool`.
+        //   first already answered. Since #235 restored M2's short-circuit this clause is the one
+        //   the *armed* arm takes; the forced-off arm reaches here with `witness == false` because
+        //   the eligible walk was never taken, and answers the same question once through
+        //   `all_lanes_preserve_agreement` instead. Same verdict, same one walk -- see the
+        //   short-circuit's own note above.
         //
         // What is left is the case the walk is for: a collapsible chain rendering dual under a
         // witness that is not eligible, with agreement still to lose. That is a bypass window, or

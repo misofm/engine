@@ -772,6 +772,57 @@ pub(crate) struct InputStage<L: Lane> {
     /// feature existed. The cost of the feature to such a session is this one `bool` test per bank
     /// per block, and the `false` arm is byte-identical work.
     ramping: bool,
+    /// One flag per lane: [`InputStage::compute_lane_channel_symmetry`]'s verdict, held rather
+    /// than re-derived.
+    ///
+    /// # Why this is cached, and why the cache cannot go stale
+    ///
+    /// The comparison is thirty words per lane and every one of them is a `lane_read` -- a whole
+    /// SIMD register spilled to the stack so one lane can be indexed out of it. The collapse
+    /// dispatch pulls the witness once per lane per slot per block
+    /// (`miso_engine_rack::BankChain::run`), so deriving it there costs more per block than the
+    /// collapse it gates can save. Every effect bank already holds this same comparison from bind
+    /// (`miso_engine_rack::EffectBankStage::designed`); this is the input bank's form of it, and
+    /// the reason it needs maintenance where theirs does not is that #210 phase 3 made the trim
+    /// and polarity words **live**.
+    ///
+    /// The words this compares move in exactly five places, and every one of them refreshes:
+    ///
+    /// * [`InputStage::new`], which seeds it;
+    /// * [`InputStage::set_trim_signed`] -- the only writer a drained `TrimDb` or
+    ///   `PolarityInvert` record reaches, whichever channel selector it carries;
+    /// * [`InputStage::settle`], which republishes `coef.trim` and decrements the countdowns on
+    ///   every ramping block;
+    /// * [`InputStage::mirror_trim_ramp`], which duplicates the whole record onto channel `1` at
+    ///   the bottom of every ramping *collapsed* block;
+    /// * [`InputStage::reset`].
+    ///
+    /// The ramp kernel itself (`input_chain_ramp_block` and its mono twin) also advances
+    /// `ramp.current` in place, and it is covered by the same refresh: `settle` republishes
+    /// `coef.trim` from those words immediately after the kernel returns, and the refresh follows
+    /// `settle`.
+    ///
+    /// The last three are reachable only through [`InputStage::process`] and
+    /// [`InputStage::process_mono`], which refresh once at the bottom of their ramping arm rather
+    /// than once per writer. Nothing else in this type writes a compared word:
+    /// [`InputStage::desymmetrize`] copies integrators, [`InputStage::set_lane_state_words`] and
+    /// the render path's boundary recovery write state, and `load_countdown` writes the kernel's
+    /// `f32` countdown residue, which is not among the compared words -- the authoritative `u32`
+    /// in [`InputStage::remaining`] is.
+    ///
+    /// So the cache is exact at **every** point a reader can observe it, which is what
+    /// [`InputStage::lane_channel_symmetry`]'s debug assertion states: a stale flag is not a
+    /// window that has to be argued closed, it is a failure every debug-built test in the tree
+    /// re-proves absent on every block it renders.
+    ///
+    /// # Why a bitmask and not `[bool; MAX_BANK_LANES]`
+    ///
+    /// Because this type's `size_of` is sealed accounting -- it is a term in the builtin-compiler
+    /// mutation-matrix transcript's `engine_owned_processor_payload_bytes`, and a change that
+    /// moves no rendered bit must not move a sealed byte count. One byte beside `ramping` lands
+    /// in padding the struct already had; eight would not. `MAX_BANK_LANES` is eight, so bit
+    /// `lane` is lane `lane` and the mask needs no widening rule.
+    symmetry: u8,
     /// Lifetime boundary-check recoveries per channel.
     lifetime_recovered: [u64; 2],
 }
@@ -814,7 +865,7 @@ impl<L: Lane> InputStage<L> {
             step: [L::zero(); 2],
             remaining: [L::zero(); 2],
         };
-        Self {
+        let mut stage = Self {
             members,
             active: lanes_below::<L>(members),
             coef,
@@ -823,8 +874,26 @@ impl<L: Lane> InputStage<L> {
             ramp,
             remaining: [[0; MAX_BANK_LANES]; 2],
             ramping: false,
+            symmetry: 0,
             lifetime_recovered: [0; 2],
+        };
+        stage.refresh_channel_symmetry();
+        stage
+    }
+
+    /// Retakes every lane's channel-symmetry comparison into [`InputStage::symmetry`].
+    ///
+    /// Called from each of the five writers of a compared word, never from the dispatch: this is
+    /// the walk the cache exists to keep off the per-block path, so it runs on a retarget, on a
+    /// ramping block, and on a reset, and on no other block at all.
+    fn refresh_channel_symmetry(&mut self) {
+        let mut symmetry = 0_u8;
+        for lane in 0..MAX_BANK_LANES {
+            if self.compute_lane_channel_symmetry(lane) {
+                symmetry |= 1 << lane;
+            }
         }
+        self.symmetry = symmetry;
     }
 
     /// Largest ramp countdown that is exact in `f32`.
@@ -876,6 +945,7 @@ impl<L: Lane> InputStage<L> {
                 self.ramping = true;
             }
         }
+        self.refresh_channel_symmetry();
     }
 
     /// Retargets one lane's trim in decibels, keeping its polarity.
@@ -1036,6 +1106,7 @@ impl<L: Lane> InputStage<L> {
                 &mut self.ramp,
             );
             self.settle(frames, 0..2);
+            self.refresh_channel_symmetry();
             report
         } else {
             input_chain_block_elided::<L>(
@@ -1116,6 +1187,7 @@ impl<L: Lane> InputStage<L> {
             // countdowns have diverged.
             self.settle(frames, 0..1);
             self.mirror_trim_ramp();
+            self.refresh_channel_symmetry();
             report
         } else {
             input_chain_block_mono_elided::<L>(
@@ -1294,6 +1366,7 @@ impl<L: Lane> InputStage<L> {
         self.ramping = false;
         self.coef.trim = self.ramp.current;
         self.plan = input_chain_plan::<L>(&self.coef, &self.state);
+        self.refresh_channel_symmetry();
     }
 
     /// Recovers the prepared record of one lane from the coefficient words.
@@ -1336,6 +1409,27 @@ impl<L: Lane> InputStage<L> {
                 lpf: section(1, 1),
             },
         }
+    }
+
+    /// Whether every designed word the input chain's kernel reads for `lane` compares
+    /// **bit-equal** between the two channels, as
+    /// [`compute_lane_channel_symmetry`](Self::compute_lane_channel_symmetry) defines it.
+    ///
+    /// The held answer. See [`InputStage::symmetry`] for the five writers that maintain it.
+    ///
+    /// The debug assertion is the whole soundness argument, executable: it re-derives the walk and
+    /// compares, so every debug-built test in the tree -- every drain, every ramping block, every
+    /// collapse engage, disengage and re-engage, in whatever order a test interleaves them --
+    /// checks the cache against its own definition on each block it renders. A stale flag is
+    /// therefore a test failure and not a silent wrong collapse.
+    fn lane_channel_symmetry(&self, lane: usize) -> bool {
+        let cached = lane < MAX_BANK_LANES && self.symmetry & (1 << lane) != 0;
+        debug_assert_eq!(
+            cached,
+            self.compute_lane_channel_symmetry(lane),
+            "the cached channel-symmetry flag is stale for lane {lane}"
+        );
+        cached
     }
 
     /// Whether every designed word the input chain's kernel reads for `lane` compares
@@ -1385,7 +1479,10 @@ impl<L: Lane> InputStage<L> {
     ///   load that does not happen.
     /// * `members`, `active`, `lifetime_recovered` -- cohort shape and counters, not track
     ///   parameters. A lane's witness must not change because the cohort grew.
-    fn lane_channel_symmetry(&self, lane: usize) -> bool {
+    ///
+    /// Taken only by [`InputStage::refresh_channel_symmetry`] and by the reader's assertion:
+    /// it is the definition, not the per-block path.
+    fn compute_lane_channel_symmetry(&self, lane: usize) -> bool {
         if lane >= self.members || lane >= L::WIDTH {
             return false;
         }
