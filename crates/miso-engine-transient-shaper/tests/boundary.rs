@@ -102,7 +102,7 @@ fn a_nonfinite_bank_block_is_rejected_as_a_unit() {
             .all(|x| x.to_bits() == 0.0_f32.to_bits())
     );
     let sizes =
-        miso_engine_transient_shaper::TRANSIENT_SHAPER_DESCRIPTOR_V1.qualities[1].maximum_state;
+        miso_engine_transient_shaper::TRANSIENT_SHAPER_DESCRIPTOR.qualities[1].maximum_state;
     for track in 0..lanes {
         let state = bank_snapshot(bank.as_ref(), track as u32, sizes);
         assert_eq!(state_f32(&state.0, 0).to_bits(), 0.0_f32.to_bits());

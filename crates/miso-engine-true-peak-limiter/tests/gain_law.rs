@@ -15,7 +15,7 @@ use miso_engine_effect_contract::{
     PreparedPorts, PreparedSidechainPort, ProcessReport,
 };
 use miso_engine_true_peak_limiter::{
-    TRUE_PEAK_LIMITER_DESCRIPTOR_V1, TRUE_PEAK_LIMITER_PARAMETERS_V1, TruePeakLimiterFactory,
+    TRUE_PEAK_LIMITER_DESCRIPTOR, TRUE_PEAK_LIMITER_PARAMETERS, TruePeakLimiterFactory,
 };
 
 /// Deterministic SplitMix64 noise, so a corpus is a seed and never a file.
@@ -41,7 +41,7 @@ fn values_with(ceiling: f32, release: f32, lookahead: f32) -> [InitialParameterV
             } else {
                 ParameterChannel::Right
             },
-            value: TRUE_PEAK_LIMITER_PARAMETERS_V1[index / 2].default_value,
+            value: TRUE_PEAK_LIMITER_PARAMETERS[index / 2].default_value,
         });
     for (index, value) in [ceiling, ceiling, release, release, lookahead, lookahead]
         .into_iter()
@@ -53,7 +53,7 @@ fn values_with(ceiling: f32, release: f32, lookahead: f32) -> [InitialParameterV
 }
 
 fn request_at_rate(values: &[InitialParameterValue], sample_rate: u32) -> PrepareEffectRequest<'_> {
-    let quality = TRUE_PEAK_LIMITER_DESCRIPTOR_V1
+    let quality = TRUE_PEAK_LIMITER_DESCRIPTOR
         .qualities
         .iter()
         .find(|quality| quality.sample_rate == sample_rate)

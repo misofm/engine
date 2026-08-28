@@ -159,7 +159,7 @@ const fn parameter(
 }
 
 /// Frozen descriptor rows. Descriptor position and stable numeric ID agree.
-pub const TRUE_PEAK_LIMITER_PARAMETERS_V1: [ParameterDescriptor; PARAMETER_COUNT] = [
+pub const TRUE_PEAK_LIMITER_PARAMETERS: [ParameterDescriptor; PARAMETER_COUNT] = [
     parameter(
         1,
         "ceiling",
@@ -260,7 +260,7 @@ const QUALITIES: [miso_engine_effect_contract::QualityDescriptor; 4] = [
 /// declared fold and after that one unit conversion -- decibels of reduction, `0 .. 100`. `unit`
 /// describes what crosses the transport. They differ here and only here, and the difference is the
 /// whole point of declaring the transport unit separately.
-pub const TRUE_PEAK_LIMITER_OBSERVATIONS_V1: [ObservationDescriptor; 1] =
+pub const TRUE_PEAK_LIMITER_OBSERVATIONS: [ObservationDescriptor; 1] =
     [ObservationDescriptor {
         id: ObservationTapId(1),
         display_name: "Gain Reduction",
@@ -276,7 +276,7 @@ pub const TRUE_PEAK_LIMITER_OBSERVATIONS_V1: [ObservationDescriptor; 1] =
     }];
 
 /// Immutable launch true-peak limiter descriptor.
-pub const TRUE_PEAK_LIMITER_DESCRIPTOR_V1: EffectDescriptor = EffectDescriptor {
+pub const TRUE_PEAK_LIMITER_DESCRIPTOR: EffectDescriptor = EffectDescriptor {
     id: effect_id("miso.true-peak-limiter"),
     display_name: "True-Peak Limiter",
     contract_major: 1,
@@ -289,10 +289,10 @@ pub const TRUE_PEAK_LIMITER_DESCRIPTOR_V1: EffectDescriptor = EffectDescriptor {
         Some(value) => value,
         None => panic!("frozen link bits"),
     },
-    parameters: &TRUE_PEAK_LIMITER_PARAMETERS_V1,
+    parameters: &TRUE_PEAK_LIMITER_PARAMETERS,
     ports: &PORTS,
     qualities: &QUALITIES,
-    observations: &TRUE_PEAK_LIMITER_OBSERVATIONS_V1,
+    observations: &TRUE_PEAK_LIMITER_OBSERVATIONS,
 };
 
 /// The state layout this crate reads and writes.
@@ -1965,7 +1965,7 @@ fn limiter_block_uniform<L: Lane>(
 
 /// The parameter domains, in descriptor order, for the runtime validator.
 ///
-/// The same three rows as [`TRUE_PEAK_LIMITER_PARAMETERS_V1`]; the descriptor keeps the identity,
+/// The same three rows as [`TRUE_PEAK_LIMITER_PARAMETERS`]; the descriptor keeps the identity,
 /// unit, automation rate and smoothing rule, and `miso-engine-effect-runtime` owns the validation
 /// so this crate no longer carries its own copy of `parameter_value_valid` (#90 F9).
 const PARAMETER_SPECS: [ParameterSpec; PARAMETER_COUNT] = [
@@ -2687,7 +2687,7 @@ struct PreparedTruePeakLimiterBank<L: Lane> {
 
 impl NativeEffectFactory for TruePeakLimiterFactory {
     fn descriptor(&self) -> &'static EffectDescriptor {
-        &TRUE_PEAK_LIMITER_DESCRIPTOR_V1
+        &TRUE_PEAK_LIMITER_DESCRIPTOR
     }
 
     fn prepare(
@@ -3267,7 +3267,7 @@ mod tests {
             } else {
                 ParameterChannel::Right
             },
-            value: TRUE_PEAK_LIMITER_PARAMETERS_V1[index / 2].default_value,
+            value: TRUE_PEAK_LIMITER_PARAMETERS[index / 2].default_value,
         })
     }
 
@@ -3444,16 +3444,16 @@ mod tests {
 
     #[test]
     fn descriptor_metadata_and_exact_resource_rows_are_frozen() {
-        validate_descriptor(&TRUE_PEAK_LIMITER_DESCRIPTOR_V1).expect("descriptor");
+        validate_descriptor(&TRUE_PEAK_LIMITER_DESCRIPTOR).expect("descriptor");
         assert_eq!(
-            TRUE_PEAK_LIMITER_DESCRIPTOR_V1.id.as_str(),
+            TRUE_PEAK_LIMITER_DESCRIPTOR.id.as_str(),
             "miso.true-peak-limiter"
         );
         assert_eq!(
-            TRUE_PEAK_LIMITER_DESCRIPTOR_V1.supported_link_modes.bits(),
+            TRUE_PEAK_LIMITER_DESCRIPTOR.supported_link_modes.bits(),
             3
         );
-        assert_eq!(TRUE_PEAK_LIMITER_DESCRIPTOR_V1.state_layout_version, 2);
+        assert_eq!(TRUE_PEAK_LIMITER_DESCRIPTOR.state_layout_version, 2);
         // Latency is a contract fixture and does not move; the state rows are the #90 re-pin
         // (3N + 35 lane words, plus the runtime's two-word common header).
         for (quality, expected) in QUALITIES.iter().zip([
@@ -4460,7 +4460,7 @@ mod tests {
         let values = values_with(ceiling, release, lookahead);
         let mut preparation = request(&values);
         preparation.link_mode = LinkMode::DualMono;
-        let metadata = expected_prepared_metadata(&TRUE_PEAK_LIMITER_DESCRIPTOR_V1, preparation)
+        let metadata = expected_prepared_metadata(&TRUE_PEAK_LIMITER_DESCRIPTOR, preparation)
             .expect("metadata");
         let (left, right) = initial_defaults(&values).expect("defaults");
         LimiterCore::<L>::new(
@@ -4747,7 +4747,7 @@ mod tests {
         let values = values_with(-6.0, 100.0, 5.0);
         let mut preparation = request(&values);
         preparation.link_mode = LinkMode::DualMono;
-        let metadata = expected_prepared_metadata(&TRUE_PEAK_LIMITER_DESCRIPTOR_V1, preparation)
+        let metadata = expected_prepared_metadata(&TRUE_PEAK_LIMITER_DESCRIPTOR, preparation)
             .expect("metadata");
         let (left_defaults, right_defaults) = initial_defaults(&values).expect("defaults");
         let mut effect = PreparedTruePeakLimiter {
@@ -4912,7 +4912,7 @@ mod tests {
             let mut preparation = request(&values);
             preparation.link_mode = LinkMode::DualMono;
             let metadata =
-                expected_prepared_metadata(&TRUE_PEAK_LIMITER_DESCRIPTOR_V1, preparation)
+                expected_prepared_metadata(&TRUE_PEAK_LIMITER_DESCRIPTOR, preparation)
                     .expect("metadata");
             let (left_defaults, right_defaults) = initial_defaults(&values).expect("defaults");
             let mut effect = PreparedTruePeakLimiter {
@@ -5101,7 +5101,7 @@ mod tests {
         let values = values_with(-6.0, 100.0, 5.0);
         let mut preparation = request(&values);
         preparation.link_mode = LinkMode::DualMono;
-        let metadata = expected_prepared_metadata(&TRUE_PEAK_LIMITER_DESCRIPTOR_V1, preparation)
+        let metadata = expected_prepared_metadata(&TRUE_PEAK_LIMITER_DESCRIPTOR, preparation)
             .expect("metadata");
         let mut bank = PreparedTruePeakLimiterBank::<Simd8> {
             metadata: PreparedBankMetadata {
@@ -5230,7 +5230,7 @@ mod tests {
         let values = values_with(-6.0, 100.0, 5.0);
         let mut preparation = request(&values);
         preparation.link_mode = LinkMode::DualMono;
-        let metadata = expected_prepared_metadata(&TRUE_PEAK_LIMITER_DESCRIPTOR_V1, preparation)
+        let metadata = expected_prepared_metadata(&TRUE_PEAK_LIMITER_DESCRIPTOR, preparation)
             .expect("metadata");
         let (left_defaults, right_defaults) = initial_defaults(&values).expect("defaults");
         let mut core = LimiterCore::<f32>::new(

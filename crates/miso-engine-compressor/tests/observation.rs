@@ -53,8 +53,8 @@ fn the_compressor_declares_one_resident_gain_reduction_tap() {
         ObservationCadence, ObservationChannels, ObservationCost, ObservationFold,
         ObservationKind, ObservationTapId, ParameterUnit,
     };
-    let descriptor = miso_engine_compressor::COMPRESSOR_DESCRIPTOR_V1;
-    validate_descriptor(&miso_engine_compressor::COMPRESSOR_DESCRIPTOR_V1).unwrap();
+    let descriptor = miso_engine_compressor::COMPRESSOR_DESCRIPTOR;
+    validate_descriptor(&miso_engine_compressor::COMPRESSOR_DESCRIPTOR).unwrap();
     assert_eq!(descriptor.observations.len(), 1);
     let tap = descriptor.observations[0];
     assert_eq!(tap.id, ObservationTapId(1));

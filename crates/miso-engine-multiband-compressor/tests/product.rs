@@ -9,7 +9,7 @@ use miso_engine_effect_contract::{
     ParameterChannel, PrepareEffectBankRequest, ResetKind,
 };
 use miso_engine_multiband_compressor::{
-    MULTIBAND_COMPRESSOR_DESCRIPTOR_V1, MultibandCompressorFactory,
+    MULTIBAND_COMPRESSOR_DESCRIPTOR, MultibandCompressorFactory,
 };
 use support::{
     backend_for, new_sections, point, process, request, request_with, restore, snapshot, values,
@@ -33,10 +33,10 @@ fn rms(values: &[f32]) -> f64 {
 /// on #83 defers the shared codec's versioned header to #95.
 #[test]
 fn descriptor_preparation_and_exact_four_rate_resources_are_frozen() {
-    miso_engine_effect_contract::validate_descriptor(&MULTIBAND_COMPRESSOR_DESCRIPTOR_V1)
+    miso_engine_effect_contract::validate_descriptor(&MULTIBAND_COMPRESSOR_DESCRIPTOR)
         .expect("descriptor");
-    assert_eq!(MULTIBAND_COMPRESSOR_DESCRIPTOR_V1.parameters.len(), 12);
-    assert_eq!(MULTIBAND_COMPRESSOR_DESCRIPTOR_V1.state_layout_version, 2);
+    assert_eq!(MULTIBAND_COMPRESSOR_DESCRIPTOR.parameters.len(), 12);
+    assert_eq!(MULTIBAND_COMPRESSOR_DESCRIPTOR.state_layout_version, 2);
     for (rate, bytes) in [
         (44_100u32, 7_256u32),
         (48_000, 7_880),
@@ -423,7 +423,7 @@ fn bank_requests_are_validated_before_any_fallback() {
         bank.reset(ResetKind::DiscontinuityKeepParameters);
     }
 
-    let quality = MULTIBAND_COMPRESSOR_DESCRIPTOR_V1
+    let quality = MULTIBAND_COMPRESSOR_DESCRIPTOR
         .qualities
         .iter()
         .find(|quality| quality.sample_rate == 48_000)

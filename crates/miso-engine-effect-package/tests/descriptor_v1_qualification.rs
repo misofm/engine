@@ -566,14 +566,14 @@ fn checked_vectors_match_independent_wire_identity_and_port_permutation() {
 #[test]
 fn every_current_production_descriptor_encodes_and_verifies() {
     let descriptors = [
-        &miso_engine_compressor::COMPRESSOR_DESCRIPTOR_V1,
-        &miso_engine_delay::DELAY_DESCRIPTOR_V1,
-        &miso_engine_gate_expander::GATE_EXPANDER_DESCRIPTOR_V1,
-        &miso_engine_multiband_compressor::MULTIBAND_COMPRESSOR_DESCRIPTOR_V1,
+        &miso_engine_compressor::COMPRESSOR_DESCRIPTOR,
+        &miso_engine_delay::DELAY_DESCRIPTOR,
+        &miso_engine_gate_expander::GATE_EXPANDER_DESCRIPTOR,
+        &miso_engine_multiband_compressor::MULTIBAND_COMPRESSOR_DESCRIPTOR,
         &miso_engine_parametric_eq::PARAMETRIC_EQ_DESCRIPTOR,
-        &miso_engine_soft_clip::SOFT_CLIP_DESCRIPTOR_V1,
-        &miso_engine_transient_shaper::TRANSIENT_SHAPER_DESCRIPTOR_V1,
-        &miso_engine_true_peak_limiter::TRUE_PEAK_LIMITER_DESCRIPTOR_V1,
+        &miso_engine_soft_clip::SOFT_CLIP_DESCRIPTOR,
+        &miso_engine_transient_shaper::TRANSIENT_SHAPER_DESCRIPTOR,
+        &miso_engine_true_peak_limiter::TRUE_PEAK_LIMITER_DESCRIPTOR,
     ];
     for descriptor in descriptors {
         let wire = encoded(descriptor);

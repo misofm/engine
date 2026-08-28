@@ -913,7 +913,7 @@ fn production_soft_clip_w8_member_restores_and_isolates_siblings() {
     if backend != Backend::Simd8 {
         return;
     }
-    let descriptor = &miso_engine_soft_clip::SOFT_CLIP_DESCRIPTOR_V1;
+    let descriptor = &miso_engine_soft_clip::SOFT_CLIP_DESCRIPTOR;
     let descriptor_wire = wire(descriptor);
     let factory: Arc<dyn NativeEffectFactory> = Arc::new(miso_engine_soft_clip::SoftClipFactory);
     let replay = production_replay(descriptor);

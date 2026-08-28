@@ -201,7 +201,7 @@ fn reader(
 /// An independently prepared scalar compressor at `threshold`, fed the same constant.
 fn scalar_reference(threshold: f32, blocks: usize) -> ObservationSample {
     let mut values: Vec<InitialParameterValue> = Vec::new();
-    for (index, parameter) in miso_engine_compressor::COMPRESSOR_PARAMETERS_V1
+    for (index, parameter) in miso_engine_compressor::COMPRESSOR_PARAMETERS
         .iter()
         .enumerate()
     {
@@ -552,7 +552,7 @@ fn scalar_reference_windows(
     blocks: usize,
 ) -> Vec<ObservationSample> {
     let mut values: Vec<InitialParameterValue> = Vec::new();
-    for (index, parameter) in miso_engine_compressor::COMPRESSOR_PARAMETERS_V1
+    for (index, parameter) in miso_engine_compressor::COMPRESSOR_PARAMETERS
         .iter()
         .enumerate()
     {

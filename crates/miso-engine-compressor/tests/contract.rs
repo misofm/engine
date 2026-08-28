@@ -9,7 +9,7 @@
 mod support;
 
 use miso_engine_compressor::{
-    COMPRESSOR_DESCRIPTOR_V1, COMPRESSOR_PARAMETERS_V1, CompressorFactory,
+    COMPRESSOR_DESCRIPTOR, COMPRESSOR_PARAMETERS, CompressorFactory,
 };
 use miso_engine_effect_contract::{
     BankProcessReport, BankWidth, EffectBankProcessBlock, EffectProcessBlock, LatencySamples,
@@ -30,12 +30,12 @@ use support::{
 /// (83c's two-word header) — RED here, which is the point: neither may be smuggled in by #88.
 #[test]
 fn descriptor_rows_and_resource_envelope_are_frozen() {
-    validate_descriptor(&COMPRESSOR_DESCRIPTOR_V1).expect("descriptor");
-    assert_eq!(COMPRESSOR_DESCRIPTOR_V1.id.as_str(), "miso.compressor");
-    assert_eq!(COMPRESSOR_DESCRIPTOR_V1.state_layout_version, 1);
-    assert_eq!(COMPRESSOR_PARAMETERS_V1.len(), PARAMETER_COUNT);
+    validate_descriptor(&COMPRESSOR_DESCRIPTOR).expect("descriptor");
+    assert_eq!(COMPRESSOR_DESCRIPTOR.id.as_str(), "miso.compressor");
+    assert_eq!(COMPRESSOR_DESCRIPTOR.state_layout_version, 1);
+    assert_eq!(COMPRESSOR_PARAMETERS.len(), PARAMETER_COUNT);
     for (quality, (rate, latency, lane_bytes, total_bytes)) in
-        COMPRESSOR_DESCRIPTOR_V1.qualities.iter().zip([
+        COMPRESSOR_DESCRIPTOR.qualities.iter().zip([
             (44_100_u32, 882_u64, 7_160_u32, 14_320_u64),
             (48_000, 960, 7_784, 15_568),
             (88_200, 1_764, 14_216, 28_432),
@@ -68,7 +68,7 @@ fn descriptor_rows_and_resource_envelope_are_frozen() {
 #[test]
 fn every_descriptor_row_admits_exactly_its_own_domain() {
     let factory = CompressorFactory;
-    for (index, parameter) in COMPRESSOR_PARAMETERS_V1.iter().enumerate() {
+    for (index, parameter) in COMPRESSOR_PARAMETERS.iter().enumerate() {
         let minimum = parameter.minimum.expect("continuous minimum");
         let maximum = parameter.maximum.expect("continuous maximum");
         assert!(minimum <= parameter.default_value && parameter.default_value <= maximum);
@@ -108,7 +108,7 @@ fn preparation_has_expected_metadata_and_one_byte_below_rejects() {
     let effect = factory.prepare(request(&values)).expect("prepare");
     assert_eq!(
         effect.metadata().latency,
-        expected_prepared_metadata(&COMPRESSOR_DESCRIPTOR_V1, request(&values))
+        expected_prepared_metadata(&COMPRESSOR_DESCRIPTOR, request(&values))
             .expect("metadata")
             .latency
     );

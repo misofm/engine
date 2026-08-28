@@ -14,20 +14,20 @@ use miso_engine_effect_contract::{
     ParameterChannel, PrepareEffectBankRequest, ProcessReport, TailSamples, validate_descriptor,
 };
 use miso_engine_lane::kernels::halfband::{HALFBAND63_CENTER, HALFBAND63_EVEN};
-use miso_engine_soft_clip::{SOFT_CLIP_DESCRIPTOR_V1, SoftClipFactory};
+use miso_engine_soft_clip::{SOFT_CLIP_DESCRIPTOR, SoftClipFactory};
 use support::{PARAMETERS, bank_available, initial_values, prepare, process, request, values_from};
 
 /// E11 — resources, latency, tail and the tap table against the independent `f64` design.
 #[test]
 fn descriptor_resources_and_independent_fir_design_are_frozen() {
-    validate_descriptor(&SOFT_CLIP_DESCRIPTOR_V1).expect("descriptor");
+    validate_descriptor(&SOFT_CLIP_DESCRIPTOR).expect("descriptor");
     assert_eq!(
-        SOFT_CLIP_DESCRIPTOR_V1.supported_link_modes,
+        SOFT_CLIP_DESCRIPTOR.supported_link_modes,
         LinkModeSet::DUAL_MONO
     );
-    assert_eq!(SOFT_CLIP_DESCRIPTOR_V1.parameters.len(), PARAMETERS);
-    assert_eq!(SOFT_CLIP_DESCRIPTOR_V1.state_layout_version, 2);
-    for quality in SOFT_CLIP_DESCRIPTOR_V1.qualities {
+    assert_eq!(SOFT_CLIP_DESCRIPTOR.parameters.len(), PARAMETERS);
+    assert_eq!(SOFT_CLIP_DESCRIPTOR.state_layout_version, 2);
+    for quality in SOFT_CLIP_DESCRIPTOR.qualities {
         assert_eq!(quality.latency, LatencySamples(31));
         assert_eq!(quality.tail, TailSamples::Finite(29));
         // Layout 2: 104 effect words per channel, plus the shared codec's two header words.

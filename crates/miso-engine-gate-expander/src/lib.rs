@@ -116,7 +116,7 @@ const fn parameter(
 }
 
 /// Frozen V1 gate/expander parameters. Descriptor position and stable numeric ID agree.
-pub const GATE_EXPANDER_PARAMETERS_V1: [ParameterDescriptor; PARAMETER_COUNT] = [
+pub const GATE_EXPANDER_PARAMETERS: [ParameterDescriptor; PARAMETER_COUNT] = [
     parameter(
         1,
         "threshold",
@@ -293,7 +293,7 @@ pub const STATE_LAYOUT_VERSION: u32 = 2;
 /// `GateState::gain_db` is what `gate_block` writes every sample and reads back on the next one,
 /// in decibels and negative for reduction -- a closed gate holds a large negative number and an
 /// open one holds `+0.0`. Publishing it is a copy out of state the block wrote anyway.
-pub const GATE_EXPANDER_OBSERVATIONS_V1: [ObservationDescriptor; 1] = [ObservationDescriptor {
+pub const GATE_EXPANDER_OBSERVATIONS: [ObservationDescriptor; 1] = [ObservationDescriptor {
     id: ObservationTapId(1),
     display_name: "Gain Reduction",
     display_unit: "dB",
@@ -308,7 +308,7 @@ pub const GATE_EXPANDER_OBSERVATIONS_V1: [ObservationDescriptor; 1] = [Observati
 }];
 
 /// Immutable descriptor for the launch gate/expander contract.
-pub const GATE_EXPANDER_DESCRIPTOR_V1: EffectDescriptor = EffectDescriptor {
+pub const GATE_EXPANDER_DESCRIPTOR: EffectDescriptor = EffectDescriptor {
     id: effect_id("miso.gate-expander"),
     display_name: "Gate / Expander",
     contract_major: 1,
@@ -318,10 +318,10 @@ pub const GATE_EXPANDER_DESCRIPTOR_V1: EffectDescriptor = EffectDescriptor {
     contract_minor: 1,
     state_layout_version: STATE_LAYOUT_VERSION,
     supported_link_modes: LinkModeSet::ALL,
-    parameters: &GATE_EXPANDER_PARAMETERS_V1,
+    parameters: &GATE_EXPANDER_PARAMETERS,
     ports: &PORTS,
     qualities: &QUALITIES,
-    observations: &GATE_EXPANDER_OBSERVATIONS_V1,
+    observations: &GATE_EXPANDER_OBSERVATIONS,
 };
 
 /// The parameter domains, in the runtime's vocabulary.
@@ -1155,7 +1155,7 @@ fn initial_defaults(
 
 impl NativeEffectFactory for GateExpanderFactory {
     fn descriptor(&self) -> &'static EffectDescriptor {
-        &GATE_EXPANDER_DESCRIPTOR_V1
+        &GATE_EXPANDER_DESCRIPTOR
     }
 
     fn prepare(
@@ -1277,13 +1277,13 @@ mod tests {
     }
 
     fn metadata(values: &[InitialParameterValue]) -> PreparedEffectMetadata {
-        let quality = GATE_EXPANDER_DESCRIPTOR_V1
+        let quality = GATE_EXPANDER_DESCRIPTOR
             .qualities
             .iter()
             .find(|quality| quality.sample_rate == 48_000)
             .expect("launch rate");
         expected_prepared_metadata(
-            &GATE_EXPANDER_DESCRIPTOR_V1,
+            &GATE_EXPANDER_DESCRIPTOR,
             PrepareEffectRequest {
                 sample_rate: 48_000,
                 quantum: 128,
@@ -1322,8 +1322,8 @@ mod tests {
 
     #[test]
     fn the_runtime_parameter_specs_agree_with_the_frozen_descriptor() {
-        validate_descriptor(&GATE_EXPANDER_DESCRIPTOR_V1).expect("descriptor");
-        for (index, descriptor) in GATE_EXPANDER_PARAMETERS_V1.iter().enumerate() {
+        validate_descriptor(&GATE_EXPANDER_DESCRIPTOR).expect("descriptor");
+        for (index, descriptor) in GATE_EXPANDER_PARAMETERS.iter().enumerate() {
             let spec = GATE_SPECS[index];
             assert_eq!(spec.kind, ParameterKind::Continuous, "parameter {index}");
             assert_eq!(Some(spec.minimum), descriptor.minimum, "min {index}");
@@ -1340,7 +1340,7 @@ mod tests {
             };
             assert_eq!(spec.mapping, expected, "mapping {index}");
         }
-        for (index, descriptor) in GATE_EXPANDER_PARAMETERS_V1.iter().enumerate() {
+        for (index, descriptor) in GATE_EXPANDER_PARAMETERS.iter().enumerate() {
             assert_eq!(
                 descriptor.smoothing_samples,
                 if index < RAMP_COUNT { RAMP_SAMPLES } else { 0 },

@@ -31,7 +31,7 @@
 use miso_engine_effect_runtime::dynamics::GainComputerCoef;
 use miso_engine_effect_runtime::params::{ParameterKind, ParameterMapping, ParameterSpec};
 
-use crate::COMPRESSOR_PARAMETERS_V1;
+use crate::COMPRESSOR_PARAMETERS;
 
 /// Parameters in the descriptor table.
 pub(crate) const PARAMETER_COUNT: usize = 8;
@@ -86,7 +86,7 @@ pub(crate) type CoefWords = [[f32; MAX_WIDTH]; COEF_COUNT];
 /// away from the descriptor it is derived from. (#95 makes the contract's own predicate public
 /// and this table goes away with it.)
 const fn spec(index: usize) -> ParameterSpec {
-    let row = &COMPRESSOR_PARAMETERS_V1[index];
+    let row = &COMPRESSOR_PARAMETERS[index];
     ParameterSpec {
         kind: ParameterKind::Continuous,
         minimum: match row.minimum {

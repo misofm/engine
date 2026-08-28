@@ -163,7 +163,7 @@ const fn parameter(
 }
 
 /// Frozen parameter order and stable numeric IDs for the V1 two-band product.
-pub const MULTIBAND_COMPRESSOR_PARAMETERS_V1: [ParameterDescriptor; PARAMETER_COUNT] = [
+pub const MULTIBAND_COMPRESSOR_PARAMETERS: [ParameterDescriptor; PARAMETER_COUNT] = [
     parameter(
         1,
         "crossover",
@@ -385,7 +385,7 @@ const QUALITIES: [miso_engine_effect_contract::QualityDescriptor; 4] = [
 /// minimum of the two is the largest reduction the channel is applying. One aggregate tap ships in
 /// V1 because the meter frame carries one slot per track; per-band taps are an additive follow-up
 /// once per-tap frame slots exist, and they need no wire, contract or transport change to arrive.
-pub const MULTIBAND_COMPRESSOR_OBSERVATIONS_V1: [ObservationDescriptor; 1] =
+pub const MULTIBAND_COMPRESSOR_OBSERVATIONS: [ObservationDescriptor; 1] =
     [ObservationDescriptor {
         id: ObservationTapId(1),
         display_name: "Gain Reduction",
@@ -401,7 +401,7 @@ pub const MULTIBAND_COMPRESSOR_OBSERVATIONS_V1: [ObservationDescriptor; 1] =
     }];
 
 /// Immutable descriptor for the launch two-band multiband compressor.
-pub const MULTIBAND_COMPRESSOR_DESCRIPTOR_V1: EffectDescriptor = EffectDescriptor {
+pub const MULTIBAND_COMPRESSOR_DESCRIPTOR: EffectDescriptor = EffectDescriptor {
     id: effect_id("miso.multiband-compressor"),
     display_name: "Multiband Compressor",
     contract_major: 1,
@@ -411,10 +411,10 @@ pub const MULTIBAND_COMPRESSOR_DESCRIPTOR_V1: EffectDescriptor = EffectDescripto
     contract_minor: 1,
     state_layout_version: STATE_LAYOUT_VERSION,
     supported_link_modes: LinkModeSet::ALL,
-    parameters: &MULTIBAND_COMPRESSOR_PARAMETERS_V1,
+    parameters: &MULTIBAND_COMPRESSOR_PARAMETERS,
     ports: &PORTS,
     qualities: &QUALITIES,
-    observations: &MULTIBAND_COMPRESSOR_OBSERVATIONS_V1,
+    observations: &MULTIBAND_COMPRESSOR_OBSERVATIONS,
 };
 
 /// The domain of one parameter, in the shared runtime's vocabulary.
@@ -423,7 +423,7 @@ pub const MULTIBAND_COMPRESSOR_DESCRIPTOR_V1: EffectDescriptor = EffectDescripto
 /// control-surface concern and is not used here, so every spec is built as continuous over the
 /// descriptor's own bounds.
 const fn spec(index: usize) -> ParameterSpec {
-    let descriptor = &MULTIBAND_COMPRESSOR_PARAMETERS_V1[index];
+    let descriptor = &MULTIBAND_COMPRESSOR_PARAMETERS[index];
     let minimum = match descriptor.minimum {
         Some(value) => value,
         None => 0.0,
@@ -1754,7 +1754,7 @@ fn prepare_bank<L: Lane, const W: usize>(
 
 impl NativeEffectFactory for MultibandCompressorFactory {
     fn descriptor(&self) -> &'static EffectDescriptor {
-        &MULTIBAND_COMPRESSOR_DESCRIPTOR_V1
+        &MULTIBAND_COMPRESSOR_DESCRIPTOR
     }
 
     fn prepare(

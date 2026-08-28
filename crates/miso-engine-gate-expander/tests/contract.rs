@@ -14,7 +14,7 @@ use miso_engine_effect_contract::{
     PreparedSidechainPort, ProcessReport, TailSamples, validate_descriptor,
 };
 use miso_engine_gate_expander::{
-    GATE_EXPANDER_DESCRIPTOR_V1, GATE_EXPANDER_PARAMETERS_V1, GateExpanderFactory,
+    GATE_EXPANDER_DESCRIPTOR, GATE_EXPANDER_PARAMETERS, GateExpanderFactory,
     STATE_LAYOUT_VERSION,
 };
 use support::{
@@ -34,16 +34,16 @@ fn float(payload: &[u8], index: usize) -> f32 {
 
 #[test]
 fn descriptor_and_exact_resources_are_frozen() {
-    validate_descriptor(&GATE_EXPANDER_DESCRIPTOR_V1).expect("descriptor");
+    validate_descriptor(&GATE_EXPANDER_DESCRIPTOR).expect("descriptor");
     assert_eq!(
-        GATE_EXPANDER_DESCRIPTOR_V1.id.as_str(),
+        GATE_EXPANDER_DESCRIPTOR.id.as_str(),
         "miso.gate-expander"
     );
-    assert_eq!(GATE_EXPANDER_DESCRIPTOR_V1.state_layout_version, 2);
+    assert_eq!(GATE_EXPANDER_DESCRIPTOR.state_layout_version, 2);
     assert_eq!(STATE_LAYOUT_VERSION, 2);
     // Layout 2: per lane `(23 + 2N) * 4` bytes, plus the runtime codec's two-word common header.
     for (quality, (rate, latency, lane_bytes, total)) in
-        GATE_EXPANDER_DESCRIPTOR_V1.qualities.iter().zip([
+        GATE_EXPANDER_DESCRIPTOR.qualities.iter().zip([
             (44_100_u32, 441_u64, 3_620_u32, 7_248_u64),
             (48_000, 480, 3_932, 7_872),
             (88_200, 882, 7_148, 14_304),
@@ -84,7 +84,7 @@ fn the_payload_header_names_the_layout() {
 #[test]
 fn all_rate_caps_lookahead_and_fixed_latency_are_exact() {
     let factory = GateExpanderFactory;
-    for quality in GATE_EXPANDER_DESCRIPTOR_V1.qualities {
+    for quality in GATE_EXPANDER_DESCRIPTOR.qualities {
         let rate = quality.sample_rate;
         let latency = quality.latency.0 as usize;
         for lookahead in [0.0, 2.0, 10.0] {
@@ -232,21 +232,21 @@ fn independent_curve_and_exact_hold_transitions_agree() {
     let reference_left: Vec<f64> = source.iter().map(|&x| f64::from(x)).collect();
     let timing = ReferenceGateTiming {
         sample_rate: 48_000,
-        attack_ms: f64::from(GATE_EXPANDER_PARAMETERS_V1[4].default_value),
+        attack_ms: f64::from(GATE_EXPANDER_PARAMETERS[4].default_value),
         hold_ms: f64::from(values[10].value),
-        release_ms: f64::from(GATE_EXPANDER_PARAMETERS_V1[6].default_value),
+        release_ms: f64::from(GATE_EXPANDER_PARAMETERS[6].default_value),
         lookahead_ms: 10.0,
     };
     let trace = reference_gate_expander_process(
         ReferenceGateExpanderParameters {
             threshold_db: -40.0,
-            ratio: f64::from(GATE_EXPANDER_PARAMETERS_V1[1].default_value),
-            range_db: f64::from(GATE_EXPANDER_PARAMETERS_V1[2].default_value),
+            ratio: f64::from(GATE_EXPANDER_PARAMETERS[1].default_value),
+            range_db: f64::from(GATE_EXPANDER_PARAMETERS[2].default_value),
         },
         ReferenceGateExpanderParameters {
             threshold_db: -40.0,
-            ratio: f64::from(GATE_EXPANDER_PARAMETERS_V1[1].default_value),
-            range_db: f64::from(GATE_EXPANDER_PARAMETERS_V1[2].default_value),
+            ratio: f64::from(GATE_EXPANDER_PARAMETERS[1].default_value),
+            range_db: f64::from(GATE_EXPANDER_PARAMETERS[2].default_value),
         },
         (6.0, 6.0),
         (timing, timing),

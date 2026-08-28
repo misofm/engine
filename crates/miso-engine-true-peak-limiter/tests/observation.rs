@@ -20,7 +20,7 @@ use miso_engine_effect_contract::{
     PreparedNativeEffect, PreparedPorts, PreparedSidechainPort, StatePayloadOutput,
 };
 use miso_engine_true_peak_limiter::{
-    TRUE_PEAK_LIMITER_DESCRIPTOR_V1, TRUE_PEAK_LIMITER_PARAMETERS_V1, TruePeakLimiterFactory,
+    TRUE_PEAK_LIMITER_DESCRIPTOR, TRUE_PEAK_LIMITER_PARAMETERS, TruePeakLimiterFactory,
 };
 
 /// `words::REDUCTION` in the crate's own per-lane payload layout.
@@ -34,12 +34,12 @@ fn values() -> [InitialParameterValue; 6] {
         } else {
             ParameterChannel::Right
         },
-        value: TRUE_PEAK_LIMITER_PARAMETERS_V1[index / 2].default_value,
+        value: TRUE_PEAK_LIMITER_PARAMETERS[index / 2].default_value,
     })
 }
 
 fn quality() -> &'static miso_engine_effect_contract::QualityDescriptor {
-    TRUE_PEAK_LIMITER_DESCRIPTOR_V1
+    TRUE_PEAK_LIMITER_DESCRIPTOR
         .qualities
         .iter()
         .find(|quality| quality.sample_rate == 48_000)

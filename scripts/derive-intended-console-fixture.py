@@ -43,7 +43,7 @@ Every value below is inside the domain the contract publishes. Generate the auth
 not inert, and independent per-lane gain reduction shifts the stereo image of a track that is
 being limited -- so a console strip links the two lane detectors by their peak. The limiter
 declares support for exactly ``dual_mono`` and ``maximum``
-(``TRUE_PEAK_LIMITER_DESCRIPTOR_V1.supported_link_modes``), and homogeneous banking requires one
+(``TRUE_PEAK_LIMITER_DESCRIPTOR.supported_link_modes``), and homogeneous banking requires one
 link mode across the cohort, so ``maximum`` is applied uniformly to all sixty-four tracks.
 
 **ceiling** and **release** vary per track, because the standing fixture's whole premise is that no

@@ -15,7 +15,7 @@ use miso_engine_effect_contract::{
     StatePayloadSizes,
 };
 use miso_engine_multiband_compressor::{
-    MULTIBAND_COMPRESSOR_DESCRIPTOR_V1, MultibandCompressorFactory,
+    MULTIBAND_COMPRESSOR_DESCRIPTOR, MultibandCompressorFactory,
 };
 
 /// Parameters in the frozen order.
@@ -30,7 +30,7 @@ pub fn values() -> [InitialParameterValue; PARAMETER_COUNT * 2] {
         } else {
             ParameterChannel::Right
         },
-        value: MULTIBAND_COMPRESSOR_DESCRIPTOR_V1.parameters[index / 2].default_value,
+        value: MULTIBAND_COMPRESSOR_DESCRIPTOR.parameters[index / 2].default_value,
     })
 }
 

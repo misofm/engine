@@ -19,7 +19,7 @@
 //! | `sanitize` / `recover` / `flushed` per value | `lane::flush` on `g`, one block-boundary check (D7) |
 //! | `write_*` / `read_*` byte helpers | `effect_runtime::state_payload` |
 //! | `parameter_value_valid` | `effect_runtime::params` |
-//! | `PreparedCompressorGainMixKernelV1` | the `gain_mix_block` form inside the kernel (D10) |
+//! | `PreparedCompressorGainMixKernel` | the `gain_mix_block` form inside the kernel (D10) |
 //! | four integer modulos with a runtime divisor | integer compare-select wraps |
 //!
 //! # What is frozen
@@ -122,7 +122,7 @@ const fn parameter(
 }
 
 /// Frozen V1 parameter descriptors. Parameter positions and stable IDs are identical.
-pub const COMPRESSOR_PARAMETERS_V1: [ParameterDescriptor; 8] = [
+pub const COMPRESSOR_PARAMETERS: [ParameterDescriptor; 8] = [
     parameter(
         1,
         "threshold",
@@ -284,7 +284,7 @@ const QUALITIES: [miso_engine_effect_contract::QualityDescriptor; 4] = [
 /// read back on the next one -- publishing it is a copy out of state the block wrote anyway, and
 /// no lane kernel is touched. `PeakMagnitude` over a window is what makes the published number a
 /// non-negative magnitude even though the smoother's own convention is negative-for-reduction.
-pub const COMPRESSOR_OBSERVATIONS_V1: [ObservationDescriptor; 1] = [ObservationDescriptor {
+pub const COMPRESSOR_OBSERVATIONS: [ObservationDescriptor; 1] = [ObservationDescriptor {
     id: ObservationTapId(1),
     display_name: "Gain Reduction",
     display_unit: "dB",
@@ -299,7 +299,7 @@ pub const COMPRESSOR_OBSERVATIONS_V1: [ObservationDescriptor; 1] = [ObservationD
 }];
 
 /// Immutable launch compressor descriptor.
-pub const COMPRESSOR_DESCRIPTOR_V1: EffectDescriptor = EffectDescriptor {
+pub const COMPRESSOR_DESCRIPTOR: EffectDescriptor = EffectDescriptor {
     id: effect_id("miso.compressor"),
     display_name: "Compressor",
     contract_major: 1,
@@ -310,10 +310,10 @@ pub const COMPRESSOR_DESCRIPTOR_V1: EffectDescriptor = EffectDescriptor {
     contract_minor: 1,
     state_layout_version: 1,
     supported_link_modes: LinkModeSet::ALL,
-    parameters: &COMPRESSOR_PARAMETERS_V1,
+    parameters: &COMPRESSOR_PARAMETERS,
     ports: &PORTS,
     qualities: &QUALITIES,
-    observations: &COMPRESSOR_OBSERVATIONS_V1,
+    observations: &COMPRESSOR_OBSERVATIONS,
 };
 
 /// Factory entry point for the V1 compressor implementation.
@@ -692,7 +692,7 @@ impl<L: Lane> Instance<L> {
         // from a payload this instance never rendered, so any standing claim is void. Withdrawn
         // before the version check so a rejected restore cannot leave a half-trusted claim either.
         self.silent_fixed_point = false;
-        if state_layout_version != COMPRESSOR_DESCRIPTOR_V1.state_layout_version {
+        if state_layout_version != COMPRESSOR_DESCRIPTOR.state_layout_version {
             return Err(StatePayloadError {
                 code: "effect.state.version",
             });
@@ -787,7 +787,7 @@ struct PreparedCompressorBank<L: Lane> {
 
 impl NativeEffectFactory for CompressorFactory {
     fn descriptor(&self) -> &'static EffectDescriptor {
-        &COMPRESSOR_DESCRIPTOR_V1
+        &COMPRESSOR_DESCRIPTOR
     }
 
     fn prepare(

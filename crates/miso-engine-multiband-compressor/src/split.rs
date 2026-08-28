@@ -89,7 +89,7 @@ fn defaults() -> [InitialParameterValue; PARAMETER_COUNT * 2] {
         } else {
             ParameterChannel::Right
         },
-        value: MULTIBAND_COMPRESSOR_DESCRIPTOR_V1.parameters[index / 2].default_value,
+        value: MULTIBAND_COMPRESSOR_DESCRIPTOR.parameters[index / 2].default_value,
     })
 }
 
@@ -127,7 +127,7 @@ fn instance<L: Lane, const W: usize>(link_mode: LinkMode, bypass: bool) -> Insta
     for (track, (left_track, right_track)) in left.iter_mut().zip(right.iter_mut()).enumerate() {
         let values = varied(track);
         let request = request(&values, link_mode, 128, bypass);
-        let prepared = expected_prepared_metadata(&MULTIBAND_COMPRESSOR_DESCRIPTOR_V1, request)
+        let prepared = expected_prepared_metadata(&MULTIBAND_COMPRESSOR_DESCRIPTOR, request)
             .expect("the descriptor accepts its own defaults");
         let (track_left, track_right) =
             initial_defaults(&values).expect("the defaults are in domain");

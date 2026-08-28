@@ -5,7 +5,7 @@
 //! crate's internals, so a test that passes is a statement about the shipped path.
 #![allow(dead_code, unreachable_pub)]
 
-use miso_engine_compressor::{COMPRESSOR_PARAMETERS_V1, CompressorFactory};
+use miso_engine_compressor::{COMPRESSOR_PARAMETERS, CompressorFactory};
 use miso_engine_effect_contract::{
     BankWidth, EffectBankProcessBlock, EffectProcessBlock, EffectQuality, InitialParameterValue,
     LinkMode, NativeEffectFactory, ParameterChannel, PortId, PrepareEffectBankRequest,
@@ -35,7 +35,7 @@ pub fn initial_values() -> [InitialParameterValue; PARAMETER_COUNT * 2] {
         } else {
             ParameterChannel::Right
         },
-        value: COMPRESSOR_PARAMETERS_V1[index / 2].default_value,
+        value: COMPRESSOR_PARAMETERS[index / 2].default_value,
     })
 }
 

@@ -112,7 +112,7 @@ const fn parameter(
 }
 
 /// Frozen V1 parameter rows in stable numeric-ID order.
-pub const TRANSIENT_SHAPER_PARAMETERS_V1: [ParameterDescriptor; PARAMETER_COUNT] = [
+pub const TRANSIENT_SHAPER_PARAMETERS: [ParameterDescriptor; PARAMETER_COUNT] = [
     parameter(1, "attack amount", "%", -1.0, 1.0, 0.0),
     parameter(2, "sustain amount", "%", -1.0, 1.0, 0.0),
     parameter(3, "mix", "linear", 0.0, 1.0, 1.0),
@@ -160,14 +160,14 @@ const QUALITIES: [miso_engine_effect_contract::QualityDescriptor; 4] = [
 ];
 
 /// Immutable descriptor for the frozen causal transient-shaper V1 contract.
-pub const TRANSIENT_SHAPER_DESCRIPTOR_V1: EffectDescriptor = EffectDescriptor {
+pub const TRANSIENT_SHAPER_DESCRIPTOR: EffectDescriptor = EffectDescriptor {
     id: effect_id("miso.transient-shaper"),
     display_name: "Transient Shaper",
     contract_major: 1,
     contract_minor: 0,
     state_layout_version: 1,
     supported_link_modes: LinkModeSet::ALL,
-    parameters: &TRANSIENT_SHAPER_PARAMETERS_V1,
+    parameters: &TRANSIENT_SHAPER_PARAMETERS,
     ports: &PORTS,
     qualities: &QUALITIES,
     observations: &[],
@@ -180,7 +180,7 @@ pub const TRANSIENT_SHAPER_DESCRIPTOR_V1: EffectDescriptor = EffectDescriptor {
 /// frozen time constants 0.5 ms, 20 ms, 10 ms and 100 ms. Freezing the bits rather than designing
 /// them at prepare is what keeps the coefficient off every transcendental path; the tests check
 /// each of the sixteen against both the `f64` oracle and the runtime's coefficient design.
-pub const TRANSIENT_SHAPER_COEFFICIENT_BITS_V1: [[u32; 4]; 4] = [
+pub const TRANSIENT_SHAPER_COEFFICIENT_BITS: [[u32; 4]; 4] = [
     [0x3f74_a63c, 0x3f7f_b5bd, 0x3f7f_6b90, 0x3f7f_f124],
     [0x3f75_8d71, 0x3f7f_bbc5, 0x3f7f_779c, 0x3f7f_f259],
     [0x3f7a_42a5, 0x3f7f_dadc, 0x3f7f_b5bd, 0x3f7f_f892],
@@ -227,10 +227,10 @@ struct Coef<L: Lane> {
 
 fn coefficient_row(sample_rate: u32) -> Option<[f32; 4]> {
     let row = match sample_rate {
-        44_100 => TRANSIENT_SHAPER_COEFFICIENT_BITS_V1[0],
-        48_000 => TRANSIENT_SHAPER_COEFFICIENT_BITS_V1[1],
-        88_200 => TRANSIENT_SHAPER_COEFFICIENT_BITS_V1[2],
-        96_000 => TRANSIENT_SHAPER_COEFFICIENT_BITS_V1[3],
+        44_100 => TRANSIENT_SHAPER_COEFFICIENT_BITS[0],
+        48_000 => TRANSIENT_SHAPER_COEFFICIENT_BITS[1],
+        88_200 => TRANSIENT_SHAPER_COEFFICIENT_BITS[2],
+        96_000 => TRANSIENT_SHAPER_COEFFICIENT_BITS[3],
         _ => return None,
     };
     Some(row.map(f32::from_bits))
@@ -547,7 +547,7 @@ impl<L: Lane, const W: usize> Shaper<L, W> {
         state_layout_version: u32,
         input: StatePayloadInput<'_>,
     ) -> Result<(), StatePayloadError> {
-        if state_layout_version != TRANSIENT_SHAPER_DESCRIPTOR_V1.state_layout_version {
+        if state_layout_version != TRANSIENT_SHAPER_DESCRIPTOR.state_layout_version {
             return Err(state_error("effect.state.version"));
         }
         validate_state_lengths(
@@ -613,7 +613,7 @@ fn read_lane(bytes: &[u8]) -> Result<LaneWords, StatePayloadError> {
         let current = read_f32(bytes, word);
         let target = read_f32(bytes, word + 1);
         let remaining = read_u32(bytes, word + 2);
-        let parameter = &TRANSIENT_SHAPER_PARAMETERS_V1[index];
+        let parameter = &TRANSIENT_SHAPER_PARAMETERS[index];
         if !value_valid(parameter, current)
             || !value_valid(parameter, target)
             || remaining > RAMP_SAMPLES
@@ -718,7 +718,7 @@ fn apply_automation<const W: usize>(
             && span.end_sample == first_sample
             && span.start_value.to_bits() == span.end_value.to_bits()
             && value_valid(
-                &TRANSIENT_SHAPER_PARAMETERS_V1[parameter_index],
+                &TRANSIENT_SHAPER_PARAMETERS[parameter_index],
                 span.start_value,
             )
             && last_order.is_none_or(|previous| order > previous)
@@ -784,7 +784,7 @@ struct PreparedTransientShaperBank<L: Lane, const W: usize> {
 
 impl NativeEffectFactory for TransientShaperFactory {
     fn descriptor(&self) -> &'static EffectDescriptor {
-        &TRANSIENT_SHAPER_DESCRIPTOR_V1
+        &TRANSIENT_SHAPER_DESCRIPTOR
     }
 
     fn prepare(

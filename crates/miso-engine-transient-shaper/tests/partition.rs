@@ -183,7 +183,7 @@ fn the_bank_is_partition_invariant() {
             start = end;
         }
         let sizes =
-            miso_engine_transient_shaper::TRANSIENT_SHAPER_DESCRIPTOR_V1.qualities[1].maximum_state;
+            miso_engine_transient_shaper::TRANSIENT_SHAPER_DESCRIPTOR.qualities[1].maximum_state;
         let states = (0..lanes)
             .map(|track| bank_snapshot(bank.as_ref(), track as u32, sizes))
             .collect();

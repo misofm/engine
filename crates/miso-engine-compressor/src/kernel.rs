@@ -15,7 +15,7 @@
 //! * No per-value finiteness check, no `sanitize`, no `recover`. `flush` is applied to `g`, the
 //!   one recursive word, and the block boundary is checked once by
 //!   `miso_engine_effect_runtime::bank` (D7, master plan §4.4).
-//! * No `PreparedCompressorGainMixKernelV1`. The gain/mix step is the `gain_mix_block` form
+//! * No `PreparedCompressorGainMixKernel`. The gain/mix step is the `gain_mix_block` form
 //!   `mix.fma(wet - dry, dry)` written inline, because the compressor's `wet` comes from its own
 //!   delayed ring rather than from the block being multiplied in place (D10).
 //! * No data-dependent branch per sample: the five-way gain computer is

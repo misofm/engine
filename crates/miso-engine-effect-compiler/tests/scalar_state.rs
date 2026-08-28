@@ -738,7 +738,7 @@ fn malformed_replay_is_rejected_before_initial_scratch() {
 }
 
 fn delay_preparation(sample_rate: u32) -> EffectBankPreparation {
-    let descriptor = &miso_engine_delay::DELAY_DESCRIPTOR_V1;
+    let descriptor = &miso_engine_delay::DELAY_DESCRIPTOR;
     let values: Vec<_> = descriptor
         .parameters
         .iter()
@@ -840,7 +840,7 @@ fn snapshot_processor(
 
 #[test]
 fn production_delay_active_common_and_lane_state_continues_exactly() {
-    let descriptor_wire = wire(&miso_engine_delay::DELAY_DESCRIPTOR_V1);
+    let descriptor_wire = wire(&miso_engine_delay::DELAY_DESCRIPTOR);
     let replay = delay_preparation(48_000);
     let factory: Arc<dyn NativeEffectFactory> = Arc::new(miso_engine_delay::DelayFactory);
     let capability =
@@ -888,7 +888,7 @@ fn production_delay_active_common_and_lane_state_continues_exactly() {
 
 #[test]
 fn production_delay_state_round_trips_at_every_launch_rate() {
-    let descriptor_wire = wire(&miso_engine_delay::DELAY_DESCRIPTOR_V1);
+    let descriptor_wire = wire(&miso_engine_delay::DELAY_DESCRIPTOR);
     let factory: Arc<dyn NativeEffectFactory> = Arc::new(miso_engine_delay::DelayFactory);
     for sample_rate in [44_100, 48_000, 88_200, 96_000] {
         let replay = delay_preparation(sample_rate);
