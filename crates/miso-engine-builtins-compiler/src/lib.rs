@@ -2827,9 +2827,9 @@ pub fn track_mono_source(session: &CompiledSession, track: &Track) -> bool {
 /// it. Adding it to that list would be claiming the kernel reads a word it does not read. It is a
 /// prepared-only session word, so the honest owner of the verdict is the prepare-time structural
 /// witness -- here -- which is also the only one that runs before the chain is armed at all.
-/// Named without a `_v1` suffix on purpose, unlike its two neighbours: issue #215's owner ruling
-/// is that pre-launch internal implementation names are born unversioned, and the neighbours are
-/// on that issue's own rename list.
+/// Named without a `_v1` suffix on purpose, ahead of its two neighbours: issue #215's owner ruling
+/// is that pre-launch internal implementation names are born unversioned, and that issue has since
+/// taken the suffix off the neighbours too.
 #[must_use]
 pub fn track_input_delay_symmetric(track: &Track) -> bool {
     track.builtins.left.delay_samples == track.builtins.right.delay_samples

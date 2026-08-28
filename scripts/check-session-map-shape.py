@@ -311,11 +311,11 @@ def check(texts: dict[pathlib.Path, str]) -> None:
             f"{expected!r} in JavaScript",
         )
 
-    # Issue #215 removes all version scoping at this sprint's close. Nothing new may arrive already
-    # carrying the suffix the sweep exists to delete.
+    # Issue #215 removed version scoping from internal names, this `.d.ts` included. Nothing new
+    # may arrive already carrying the suffix that sweep deleted.
     require(
         not element_name.endswith("V1"),
-        f"{element_name} mints a new V1 name; issue #215 removes version scoping, so a type "
+        f"{element_name} mints a new V1 name; issue #215 removed version scoping, so a type "
         "introduced now must not carry the suffix",
     )
 
