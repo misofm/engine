@@ -83,11 +83,7 @@ pub fn frozen_grid() -> Vec<GridRow> {
                         slope: 1.0,
                     });
                 }
-                for kind in [
-                    EqBandKind::LowPass,
-                    EqBandKind::HighPass,
-                    EqBandKind::Notch,
-                ] {
+                for kind in [EqBandKind::LowPass, EqBandKind::HighPass, EqBandKind::Notch] {
                     rows.push(GridRow {
                         kind,
                         rate,

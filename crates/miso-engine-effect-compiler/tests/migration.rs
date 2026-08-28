@@ -346,14 +346,8 @@ fn diagnostics_and_step_report_layouts_are_exact() {
     assert_eq!(core::mem::size_of::<EffectStateMigrationStepReport>(), 16);
     let ok = EffectStateMigrationDiagnostic::ok();
     assert_eq!(ok.nested_state.code, EffectStateDiagnosticCode::Ok);
-    assert_eq!(
-        ok.nested_state.item_index,
-        EFFECT_STATE_UNAVAILABLE_INDEX
-    );
-    assert_eq!(
-        ok.nested_state.byte_offset,
-        EFFECT_STATE_UNAVAILABLE_OFFSET
-    );
+    assert_eq!(ok.nested_state.item_index, EFFECT_STATE_UNAVAILABLE_INDEX);
+    assert_eq!(ok.nested_state.byte_offset, EFFECT_STATE_UNAVAILABLE_OFFSET);
     assert_eq!(ok.reserved, 0);
 }
 
@@ -515,13 +509,7 @@ fn registry_rejects_edges_duplicates_caps_and_host_overflow_in_order() {
         .into_boxed_slice(),
     )
     .unwrap_err();
-    assert_outer(
-        error,
-        EffectStateMigrationDiagnosticCode::Registry,
-        1,
-        0,
-        0,
-    );
+    assert_outer(error, EffectStateMigrationDiagnosticCode::Registry, 1, 0, 0);
     assert_eq!(calls.scratch.load(Ordering::SeqCst), 0);
 
     let malformed_later = bind_effect_state_migration_registration(
@@ -541,13 +529,7 @@ fn registry_rejects_edges_duplicates_caps_and_host_overflow_in_order() {
         .into_boxed_slice(),
     )
     .unwrap_err();
-    assert_outer(
-        error,
-        EffectStateMigrationDiagnosticCode::Registry,
-        1,
-        1,
-        0,
-    );
+    assert_outer(error, EffectStateMigrationDiagnosticCode::Registry, 1, 1, 0);
 
     let error = StateMigrationRegistry::new(
         1,
@@ -596,13 +578,7 @@ fn registry_rejects_edges_duplicates_caps_and_host_overflow_in_order() {
         .into_boxed_slice(),
     )
     .unwrap_err();
-    assert_outer(
-        error,
-        EffectStateMigrationDiagnosticCode::Registry,
-        5,
-        1,
-        0,
-    );
+    assert_outer(error, EffectStateMigrationDiagnosticCode::Registry, 5, 1, 0);
 
     let error = StateMigrationRegistry::new(
         1,

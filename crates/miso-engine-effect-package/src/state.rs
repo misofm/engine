@@ -1,7 +1,7 @@
 use crate::{
-    BoundEffectDescriptorWire, EFFECT_STATE_UNAVAILABLE_INDEX,
-    EFFECT_STATE_UNAVAILABLE_OFFSET, EffectDescriptorIdentity,
-    EffectStateDiagnosticCode as Code, EffectStateDiagnostic as Diagnostic,
+    BoundEffectDescriptorWire, EFFECT_STATE_UNAVAILABLE_INDEX, EFFECT_STATE_UNAVAILABLE_OFFSET,
+    EffectDescriptorIdentity, EffectStateDiagnostic as Diagnostic,
+    EffectStateDiagnosticCode as Code,
 };
 use miso_engine_core::{SampleRateHz, is_launch_sample_rate};
 use miso_engine_effect_contract::{
@@ -256,10 +256,7 @@ fn parameters_compatible(
             })
 }
 
-fn qualities_compatible(
-    left: &'static EffectDescriptor,
-    right: &'static EffectDescriptor,
-) -> bool {
+fn qualities_compatible(left: &'static EffectDescriptor, right: &'static EffectDescriptor) -> bool {
     left.qualities.len() == right.qualities.len()
         && left
             .qualities
@@ -275,9 +272,7 @@ fn qualities_compatible(
             })
 }
 
-pub fn effect_state_bound_selector(
-    bound: BoundEffectDescriptorWire<'_>,
-) -> EffectStateSelector {
+pub fn effect_state_bound_selector(bound: BoundEffectDescriptorWire<'_>) -> EffectStateSelector {
     EffectStateSelector {
         descriptor_identity: bound.identity(),
         state_layout_version: bound.descriptor().state_layout_version,

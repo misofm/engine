@@ -20,17 +20,16 @@ use std::collections::BTreeMap;
 
 use miso_engine_builtins::{BuiltinLaneSelector, Matrix2x2, MeterSnapshot, MeterTap, pan_matrix};
 use miso_engine_builtins_compiler::{
-    MeterConsumer, TrackControlProducer, TrackControlRecord, TrackFaderRecord,
-    TrackInputRecord,
+    MeterConsumer, TrackControlProducer, TrackControlRecord, TrackFaderRecord, TrackInputRecord,
 };
 use miso_engine_core::realtime::{PlanarBufferMut, RenderIo, RenderTime};
 use miso_engine_effect_contract::{
     EffectControlRecord, ParameterChannel, ParameterChannelPolicy, parameter_value_valid,
 };
 use miso_engine_host_core::{
-    CompiledSession, ConsoleSoloState, EffectControlProducer, EffectObservationHandle,
-    EffectRack, HostConsoleRequest, HostPrepareCaps, HostShapePolicy, PreparedHost,
-    SourceControlError, SourceSubmission, control_table_bytes, prepare_host_session_with_console,
+    CompiledSession, ConsoleSoloState, EffectControlProducer, EffectObservationHandle, EffectRack,
+    HostConsoleRequest, HostPrepareCaps, HostShapePolicy, PreparedHost, SourceControlError,
+    SourceSubmission, control_table_bytes, prepare_host_session_with_console,
     source_id_arena_bytes,
 };
 
@@ -2323,9 +2322,7 @@ const fn empty_resource_report(backend: u32) -> WebResourceReport {
     }
 }
 
-fn prepare_buffers(
-    config: WebPrepareConfig,
-) -> Result<(PreparedBuffers, WebResourceReport), u32> {
+fn prepare_buffers(config: WebPrepareConfig) -> Result<(PreparedBuffers, WebResourceReport), u32> {
     validate_config(config)?;
     let source_samples = checked_product([
         u64::from(config.maximum_source_channels),

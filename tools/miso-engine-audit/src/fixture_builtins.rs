@@ -2014,9 +2014,7 @@ fn verify_cases(root: &Path) -> Result<VerifiedCases, String> {
     })
 }
 
-fn verify_response_cases(
-    response_cases: &BTreeMap<String, ResponseCase>,
-) -> Result<(), String> {
+fn verify_response_cases(response_cases: &BTreeMap<String, ResponseCase>) -> Result<(), String> {
     if *response_cases == expected_response_cases() {
         Ok(())
     } else {
@@ -2335,11 +2333,7 @@ fn verify_filter_pcm_semantics(root: &Path) -> Result<(), String> {
     // independently checks the resulting three fresh impulse responses.
     reset_left.extend_from_slice(&reset_segment);
     reset_left.extend_from_slice(&reset_segment);
-    verify_pcm_words(
-        root,
-        "pcm/reset.f32le",
-        &pcm_words(&reset_left, &[0.0; 12]),
-    )?;
+    verify_pcm_words(root, "pcm/reset.f32le", &pcm_words(&reset_left, &[0.0; 12]))?;
 
     let isolation_left = identity_input_stage(&retained_tpt_outputs(
         &[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
@@ -2431,11 +2425,7 @@ fn verify_matrix_pcm_semantics(root: &Path) -> Result<(), String> {
     }
 
     let (left, right) = matrix_retarget_outputs();
-    verify_pcm_words(
-        root,
-        "pcm/matrix-retarget.f32le",
-        &pcm_words(&left, &right),
-    )
+    verify_pcm_words(root, "pcm/matrix-retarget.f32le", &pcm_words(&left, &right))
 }
 
 fn matrix_pcm_words(matrix: [f32; 4], left: &[f32], right: &[f32]) -> Vec<u32> {
@@ -2964,9 +2954,7 @@ fn parse_meter_record(record: &str) -> Result<MeterRecord, String> {
     } else {
         (None, &object)
     };
-    Ok(MeterRecord::Snapshot(parse_meter_snapshot(
-        snapshot, tap,
-    )?))
+    Ok(MeterRecord::Snapshot(parse_meter_snapshot(snapshot, tap)?))
 }
 
 fn parse_meter_snapshot(
@@ -4131,10 +4119,7 @@ fn verify_reference_oracle(
     Ok(())
 }
 
-fn parse_response_csv_row(
-    fields: Vec<&str>,
-    line_number: usize,
-) -> Result<ResponseCsvRow, String> {
+fn parse_response_csv_row(fields: Vec<&str>, line_number: usize) -> Result<ResponseCsvRow, String> {
     let rate_hz = parse_canonical_response_u32(fields[1], "rate_hz", line_number)?;
     let section = parse_response_section(fields[2]).ok_or_else(|| {
         format!("reference/filter-response.csv section is invalid at row {line_number}")
@@ -4286,10 +4271,8 @@ fn response_measurement_words(row: &ResponseCsvRow) -> ResponseMeasurementWords 
 }
 
 fn verify_response_partition_equality(rows: &[ResponseCsvRow]) -> Result<(), String> {
-    let mut partitions = BTreeMap::<
-        ResponseInvariantCoordinate,
-        (ResponseMeasurementWords, BTreeSet<u32>),
-    >::new();
+    let mut partitions =
+        BTreeMap::<ResponseInvariantCoordinate, (ResponseMeasurementWords, BTreeSet<u32>)>::new();
     for row in rows {
         let coordinate = response_invariant_coordinate(row);
         let measurements = response_measurement_words(row);
@@ -4396,8 +4379,7 @@ fn expected_response_cases() -> BTreeMap<String, ResponseCase> {
                     }
                 }
             }
-            for (probe_index, probe_hz) in frozen_cascade_probes(rate_hz).into_iter().enumerate()
-            {
+            for (probe_index, probe_hz) in frozen_cascade_probes(rate_hz).into_iter().enumerate() {
                 let id = format!("response-cascade-{rate_hz}-{quantum_frames}-fixed-{probe_index}");
                 expected.insert(
                     id.clone(),
@@ -4478,10 +4460,7 @@ fn verify_response_oracle_tolerances(rows: &[ResponseCsvRow]) -> Result<(), Stri
         }
         let coordinate = response_invariant_coordinate(row);
         if !independent.contains_key(&coordinate) {
-            independent.insert(
-                coordinate.clone(),
-                independent_response_measurement(row)?,
-            );
+            independent.insert(coordinate.clone(), independent_response_measurement(row)?);
         }
         let measurement = independent
             .get(&coordinate)
@@ -4730,11 +4709,9 @@ fn independent_sustained_metrics(row: &ResponseCsvRow) -> Result<(f64, f64, f64)
 
 fn is_coherent_measurement_probe(row: &ResponseCsvRow) -> bool {
     match row.section {
-        ResponseSection::HighPass | ResponseSection::LowPass => {
-            probes(row.rate_hz, row.cutoff_hz)
-                .into_iter()
-                .any(|probe_hz| probe_hz.to_bits() == row.probe_hz.to_bits())
-        }
+        ResponseSection::HighPass | ResponseSection::LowPass => probes(row.rate_hz, row.cutoff_hz)
+            .into_iter()
+            .any(|probe_hz| probe_hz.to_bits() == row.probe_hz.to_bits()),
         ResponseSection::Cascade => frozen_cascade_probes(row.rate_hz)
             .into_iter()
             .any(|probe_hz| probe_hz.to_bits() == row.probe_hz.to_bits()),
@@ -4912,8 +4889,8 @@ fn verify_benchmark_inputs(root: &Path, manifest: &FixtureManifest) -> Result<()
 }
 
 fn parse_benchmark_input(root: &Path, path: &str) -> Result<BenchmarkInput, String> {
-    let (_, path_rate_hz) = benchmark_path(path)
-        .ok_or_else(|| format!("benchmark input path is invalid: {path}"))?;
+    let (_, path_rate_hz) =
+        benchmark_path(path).ok_or_else(|| format!("benchmark input path is invalid: {path}"))?;
     let bytes = read_regular_file(&root.join(path), path)?;
     let text =
         std::str::from_utf8(&bytes).map_err(|_| format!("benchmark input is not UTF-8: {path}"))?;
@@ -5254,11 +5231,8 @@ mod tests {
             ),
             "--check dispatch must remain the read-only checker entry"
         );
-        let checker_region = source_segment(
-            source,
-            "fn check_fixture_root",
-            "#[cfg(test)]\nmod tests",
-        );
+        let checker_region =
+            source_segment(source, "fn check_fixture_root", "#[cfg(test)]\nmod tests");
         for forbidden in [
             "generated(",
             "write_and_verify(",
@@ -5445,11 +5419,7 @@ mod tests {
             .into_iter()
             .find_map(|(id, bytes)| (id == "matrix-ramp").then_some(bytes))
             .expect("unsuffixed matrix ramp");
-        let (left, right) = matrix_outputs(
-            [0.0, 1.0, 1.0, 0.0],
-            &PCM_INPUT_LEFT,
-            &PCM_INPUT_RIGHT,
-        );
+        let (left, right) = matrix_outputs([0.0, 1.0, 1.0, 0.0], &PCM_INPUT_LEFT, &PCM_INPUT_RIGHT);
         assert_eq!(ramp, pack_pcm(&left, &right));
         let reset = render_reset_fixture();
         assert_eq!(

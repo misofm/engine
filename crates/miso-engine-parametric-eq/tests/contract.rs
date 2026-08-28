@@ -14,8 +14,8 @@ use miso_engine_effect_contract::{
     StatePayloadOutput, validate_descriptor,
 };
 use miso_engine_parametric_eq::{
-    EQ_BAND_DESCRIPTORS, EQ_SECTION_COUNT, EqBandKind, EqSvfWords,
-    PARAMETRIC_EQ_DESCRIPTOR, ParametricEqFactory, design_svf,
+    EQ_BAND_DESCRIPTORS, EQ_SECTION_COUNT, EqBandKind, EqSvfWords, PARAMETRIC_EQ_DESCRIPTOR,
+    ParametricEqFactory, design_svf,
 };
 use support::{
     COMMON_BYTES, LANE_BYTES, SECTIONS, WORDS_PER_BAND, band_word, point, process_zeros, request,

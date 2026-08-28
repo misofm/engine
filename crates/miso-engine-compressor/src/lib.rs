@@ -40,16 +40,15 @@ pub mod corpus;
 
 use miso_engine_effect_contract::{
     AutomationRate, AutomationSpanKind, BankProcessReport, EffectBankProcessBlock,
-    EffectDescriptor, EffectPrepareError, EffectProcessBlock, EffectQuality,
-    InitialParameterValue, LatencySamples, LinkModeSet, NativeEffectFactory, ObservationCadence,
-    ObservationChannels, ObservationCost, ObservationDescriptor, ObservationFold,
-    ObservationKind, ObservationSample, ObservationTapId, ParameterChannel,
-    ParameterChannelPolicy, ParameterDescriptor, ParameterDomain, ParameterId, ParameterMapping,
-    ParameterUnit, PortDescriptor, PortId, PortLayout, PortRole, PrepareEffectBankRequest,
-    PrepareEffectRequest, PreparedAutomationSpan, PreparedBankMetadata, PreparedEffectMetadata,
-    PreparedNativeEffect, PreparedNativeEffectBank, ProcessReport, ResetKind, SmoothingRule,
-    StatePayloadError, StatePayloadInput, StatePayloadOutput, StatePayloadSizes, TailSamples,
-    expected_prepared_metadata,
+    EffectDescriptor, EffectPrepareError, EffectProcessBlock, EffectQuality, InitialParameterValue,
+    LatencySamples, LinkModeSet, NativeEffectFactory, ObservationCadence, ObservationChannels,
+    ObservationCost, ObservationDescriptor, ObservationFold, ObservationKind, ObservationSample,
+    ObservationTapId, ParameterChannel, ParameterChannelPolicy, ParameterDescriptor,
+    ParameterDomain, ParameterId, ParameterMapping, ParameterUnit, PortDescriptor, PortId,
+    PortLayout, PortRole, PrepareEffectBankRequest, PrepareEffectRequest, PreparedAutomationSpan,
+    PreparedBankMetadata, PreparedEffectMetadata, PreparedNativeEffect, PreparedNativeEffectBank,
+    ProcessReport, ResetKind, SmoothingRule, StatePayloadError, StatePayloadInput,
+    StatePayloadOutput, StatePayloadSizes, TailSamples, expected_prepared_metadata,
 };
 use miso_engine_effect_runtime::bank::block_is_positive_zero;
 use miso_engine_effect_runtime::params::{is_negative_zero, normalize_zero, parameter_value_valid};
@@ -250,10 +249,7 @@ const PORTS: [PortDescriptor; 3] = [
     },
 ];
 
-const fn quality(
-    sample_rate: u32,
-    latency: u64,
-) -> miso_engine_effect_contract::QualityDescriptor {
+const fn quality(sample_rate: u32, latency: u64) -> miso_engine_effect_contract::QualityDescriptor {
     let ring_length = latency as u32 + 1;
     let per_lane = (24 + 2 * ring_length) * 4;
     miso_engine_effect_contract::QualityDescriptor {

@@ -99,10 +99,7 @@ fn render_unguarded(plan: &mut PreparedRenderPlan, sources: &mut SourceControlSe
 }
 
 /// Renders `BLOCKS` quanta through the started-session render entry, which pins the environment.
-fn render_guarded(
-    session: &mut StartedRenderSession,
-    sources: &mut SourceControlSet,
-) -> Vec<u32> {
+fn render_guarded(session: &mut StartedRenderSession, sources: &mut SourceControlSet) -> Vec<u32> {
     let mut rendered = Vec::with_capacity(BLOCKS * QUANTUM * 2);
     for block in 0..BLOCKS {
         submit(sources, block);

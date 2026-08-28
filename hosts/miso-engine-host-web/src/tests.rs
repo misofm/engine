@@ -32,8 +32,7 @@ fn identity_session(quantum: u32, ring_frames: u32, length_samples: u64) -> Stri
 }
 
 fn prepared_host(quantum: u32) -> AudioWorkletEngineHost {
-    let mut host =
-        AudioWorkletEngineHost::new(WebPrepareConfig::launch_defaults(48_000, quantum));
+    let mut host = AudioWorkletEngineHost::new(WebPrepareConfig::launch_defaults(48_000, quantum));
     assert_eq!(host.prepare(), RESULT_OK);
     host
 }
@@ -147,10 +146,7 @@ fn frozen_layouts_and_values_are_exact() {
     // Issue #143 D3/D6: the configuration's remaining two reserved words, carved exactly as #137
     // carved the first two. The structure is still 192 bytes and every existing offset is where it
     // was, so a V1 writer that zeroes them gets "no observation capacity, no master designation".
-    assert_eq!(
-        offset_of!(WebPrepareConfig, console_observation_taps),
-        176
-    );
+    assert_eq!(offset_of!(WebPrepareConfig, console_observation_taps), 176);
     assert_eq!(
         offset_of!(WebPrepareConfig, console_master_track_plus_one),
         184
@@ -2685,8 +2681,8 @@ fn the_observation_fields_account_for_the_moved_bridge_rows() {
 fn a_computed_tap_is_refused_with_unsupported_kind() {
     use miso_engine_effect_contract::{
         EffectDescriptor, EffectId, LinkModeSet, ObservationCadence, ObservationChannels,
-        ObservationCost, ObservationDescriptor, ObservationFold, ObservationKind,
-        ObservationTapId, ParameterUnit,
+        ObservationCost, ObservationDescriptor, ObservationFold, ObservationKind, ObservationTapId,
+        ParameterUnit,
     };
 
     const fn tap(
@@ -2709,16 +2705,8 @@ fn a_computed_tap_is_refused_with_unsupported_kind() {
         }
     }
     static MENU: [ObservationDescriptor; 2] = [
-        tap(
-            1,
-            ObservationCost::Resident,
-            ObservationCadence::PerBlock,
-        ),
-        tap(
-            2,
-            ObservationCost::Computed,
-            ObservationCadence::PerWindow,
-        ),
+        tap(1, ObservationCost::Resident, ObservationCadence::PerBlock),
+        tap(2, ObservationCost::Computed, ObservationCadence::PerWindow),
     ];
     static DESCRIPTOR: EffectDescriptor = EffectDescriptor {
         id: match EffectId::new("test.observation") {

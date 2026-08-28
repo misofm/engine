@@ -256,12 +256,9 @@ fn snapshot(
 ) -> Vec<u8> {
     let capability = bound(controls, descriptor_wire);
     let processor = capability.factory().prepare(preparation.request()).unwrap();
-    let requirements = scalar_effect_state_requirements(
-        &capability,
-        preparation,
-        EffectStateLimits::default(),
-    )
-    .unwrap();
+    let requirements =
+        scalar_effect_state_requirements(&capability, preparation, EffectStateLimits::default())
+            .unwrap();
     let mut scratch = vec![0xa5; requirements.payload_snapshot_scratch_bytes as usize + 3];
     let mut output = vec![0x5a; requirements.envelope_bytes as usize + 5];
     snapshot_scalar_effect_state(
@@ -494,12 +491,9 @@ fn snapshot_and_restore_failures_publish_nothing() {
     let preparation = preparation(48_000);
     let capability = bound(&controls, &descriptor_wire);
     let processor = capability.factory().prepare(preparation.request()).unwrap();
-    let requirements = scalar_effect_state_requirements(
-        &capability,
-        &preparation,
-        EffectStateLimits::default(),
-    )
-    .unwrap();
+    let requirements =
+        scalar_effect_state_requirements(&capability, &preparation, EffectStateLimits::default())
+            .unwrap();
     let snapshot_calls = controls.snapshot_calls.load(Ordering::SeqCst);
     let mut exact_scratch = vec![0x22; requirements.payload_snapshot_scratch_bytes as usize];
     let mut short_output = vec![0x23; requirements.envelope_bytes as usize + 3];
@@ -657,12 +651,9 @@ fn binding_and_snapshot_metadata_failures_are_exact_and_atomic() {
     let capability = bound(&controls, &descriptor_wire);
     let preparation = preparation(48_000);
     let processor = capability.factory().prepare(preparation.request()).unwrap();
-    let requirements = scalar_effect_state_requirements(
-        &capability,
-        &preparation,
-        EffectStateLimits::default(),
-    )
-    .unwrap();
+    let requirements =
+        scalar_effect_state_requirements(&capability, &preparation, EffectStateLimits::default())
+            .unwrap();
     let mut scratch = vec![0x33; requirements.payload_snapshot_scratch_bytes as usize];
     let mut output = vec![0x55; requirements.envelope_bytes as usize];
     let baseline = output.clone();
@@ -822,8 +813,7 @@ fn snapshot_processor(
     processor: &dyn PreparedNativeEffect,
 ) -> Vec<u8> {
     let requirements =
-        scalar_effect_state_requirements(capability, replay, EffectStateLimits::default())
-            .unwrap();
+        scalar_effect_state_requirements(capability, replay, EffectStateLimits::default()).unwrap();
     let mut scratch = vec![0; requirements.payload_snapshot_scratch_bytes as usize];
     let mut output = vec![0; requirements.envelope_bytes as usize];
     snapshot_scalar_effect_state(
@@ -844,8 +834,7 @@ fn production_delay_active_common_and_lane_state_continues_exactly() {
     let replay = delay_preparation(48_000);
     let factory: Arc<dyn NativeEffectFactory> = Arc::new(miso_engine_delay::DelayFactory);
     let capability =
-        bind_native_effect_factory_state(Arc::clone(&factory), &descriptor_wire, 1 << 20)
-            .unwrap();
+        bind_native_effect_factory_state(Arc::clone(&factory), &descriptor_wire, 1 << 20).unwrap();
     let mut original = factory.prepare(replay.request()).unwrap();
     let mut cursor = 0_u64;
     for frames in [73, 41, 89, 54] {
@@ -854,8 +843,7 @@ fn production_delay_active_common_and_lane_state_continues_exactly() {
     }
     let envelope = snapshot_processor(&capability, &replay, original.as_ref());
     let restore_capability =
-        bind_native_effect_factory_state(Arc::clone(&factory), &descriptor_wire, 1 << 20)
-            .unwrap();
+        bind_native_effect_factory_state(Arc::clone(&factory), &descriptor_wire, 1 << 20).unwrap();
     let mut initial_scratch = vec![replay.initial_values[0]; replay.initial_values.len() + 2];
     initial_scratch[replay.initial_values.len()].parameter_index = 77;
     let mut restored = restore_scalar_effect_state(

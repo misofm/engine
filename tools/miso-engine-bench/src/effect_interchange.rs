@@ -475,8 +475,7 @@ fn descriptor_wire(descriptor: &'static EffectDescriptor) -> &'static [u8] {
             let required = effect_descriptor_wire_required_size(value, 1 << 20)
                 .expect("descriptor requirements");
             let mut wire = vec![0; required as usize];
-            encode_effect_descriptor_wire(value, 1 << 20, &mut wire)
-                .expect("descriptor encoding");
+            encode_effect_descriptor_wire(value, 1 << 20, &mut wire).expect("descriptor encoding");
             wire
         })
     });
@@ -488,9 +487,7 @@ fn descriptor_wire(descriptor: &'static EffectDescriptor) -> &'static [u8] {
     }
 }
 
-fn bound_descriptor(
-    descriptor: &'static EffectDescriptor,
-) -> BoundEffectDescriptorWire<'static> {
+fn bound_descriptor(descriptor: &'static EffectDescriptor) -> BoundEffectDescriptorWire<'static> {
     bind_effect_descriptor_wire(descriptor, descriptor_wire(descriptor), 1 << 20)
         .expect("bound descriptor")
 }
@@ -776,8 +773,7 @@ fn descriptor_workload(wire: &[u8]) -> (u64, Vec<u8>) {
     let start = Instant::now();
     let verified =
         verify_effect_descriptor_wire(wire, 1 << 22).expect("accepted descriptor fixture");
-    let identity =
-        effect_descriptor_identity(wire, 1 << 22).expect("accepted descriptor identity");
+    let identity = effect_descriptor_identity(wire, 1 << 22).expect("accepted descriptor identity");
     let elapsed = u64::try_from(start.elapsed().as_nanos().max(1)).expect("nanoseconds fit u64");
     assert_eq!(verified.as_bytes(), wire);
     let output = identity.as_bytes().to_vec();
@@ -788,8 +784,8 @@ fn package_workload(package: &[u8]) -> (u64, Vec<u8>) {
     let start = Instant::now();
     let verified = verify_effect_package(package, EffectPackageLimits::default())
         .expect("accepted package fixture");
-    let cid = effect_package_cid(package, EffectPackageLimits::default())
-        .expect("accepted package CID");
+    let cid =
+        effect_package_cid(package, EffectPackageLimits::default()).expect("accepted package CID");
     let selected = select_effect_package_artifact(
         &verified,
         ArtifactSelectionRequest {

@@ -8,9 +8,7 @@
 
 mod support;
 
-use miso_engine_compressor::{
-    COMPRESSOR_DESCRIPTOR, COMPRESSOR_PARAMETERS, CompressorFactory,
-};
+use miso_engine_compressor::{COMPRESSOR_DESCRIPTOR, COMPRESSOR_PARAMETERS, CompressorFactory};
 use miso_engine_effect_contract::{
     BankProcessReport, BankWidth, EffectBankProcessBlock, EffectProcessBlock, LatencySamples,
     LinkMode, NativeEffectFactory, PrepareEffectBankRequest, PreparedSidechainPort, ResetKind,

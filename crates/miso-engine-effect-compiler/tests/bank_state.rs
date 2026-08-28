@@ -398,8 +398,7 @@ fn scalar_snapshot(
     processor: &dyn PreparedNativeEffect,
 ) -> Vec<u8> {
     let requirements =
-        scalar_effect_state_requirements(capability, replay, EffectStateLimits::default())
-            .unwrap();
+        scalar_effect_state_requirements(capability, replay, EffectStateLimits::default()).unwrap();
     let mut scratch = vec![0; requirements.payload_snapshot_scratch_bytes as usize];
     let mut output = vec![0; requirements.envelope_bytes as usize];
     snapshot_scalar_effect_state(

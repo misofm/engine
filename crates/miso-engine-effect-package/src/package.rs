@@ -1,7 +1,7 @@
 use crate::{
     EFFECT_DESCRIPTOR_WIRE_UNAVAILABLE, EFFECT_PACKAGE_UNAVAILABLE_INDEX,
-    EFFECT_PACKAGE_UNAVAILABLE_OFFSET, EffectPackageDiagnosticCode as Code,
-    EffectPackageDiagnostic as Diagnostic, effect_descriptor_identity,
+    EFFECT_PACKAGE_UNAVAILABLE_OFFSET, EffectPackageDiagnostic as Diagnostic,
+    EffectPackageDiagnosticCode as Code, effect_descriptor_identity,
 };
 use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
@@ -851,10 +851,7 @@ fn feature_count(features: &str) -> usize {
     }
 }
 
-fn preferred_candidate(
-    candidate: VerifiedArtifact<'_>,
-    selected: VerifiedArtifact<'_>,
-) -> bool {
+fn preferred_candidate(candidate: VerifiedArtifact<'_>, selected: VerifiedArtifact<'_>) -> bool {
     let candidate_count = feature_count(candidate.features());
     let selected_count = feature_count(selected.features());
     candidate_count > selected_count
@@ -1128,8 +1125,7 @@ mod tests {
             descriptor: &d,
             artifacts: &y,
         };
-        let n = effect_package_required_size(&px, EffectPackageLimits::default()).unwrap()
-            as usize;
+        let n = effect_package_required_size(&px, EffectPackageLimits::default()).unwrap() as usize;
         let (mut ox, mut oy) = (vec![0; n], vec![0; n]);
         encode_effect_package(&px, EffectPackageLimits::default(), &mut ox).unwrap();
         encode_effect_package(&py, EffectPackageLimits::default(), &mut oy).unwrap();
@@ -1200,10 +1196,7 @@ mod tests {
                 EffectArtifactAuthoring { features: "x", ..a },
                 Code::Features,
             ),
-            (
-                EffectArtifactAuthoring { content: b"", ..a },
-                Code::Length,
-            ),
+            (EffectArtifactAuthoring { content: b"", ..a }, Code::Length),
         ] {
             let aa = [bad];
             let p = EffectPackageAuthoring {
@@ -1351,8 +1344,8 @@ mod tests {
         };
         let mut order_bad = vec![
             0;
-            effect_package_required_size(&ordered_package, EffectPackageLimits::default())
-                .unwrap() as usize
+            effect_package_required_size(&ordered_package, EffectPackageLimits::default()).unwrap()
+                as usize
         ];
         encode_effect_package(
             &ordered_package,
@@ -1658,8 +1651,8 @@ mod tests {
             descriptor: &descriptor,
             artifacts: &duplicates,
         };
-        let error = effect_package_required_size(&package, EffectPackageLimits::default())
-            .unwrap_err();
+        let error =
+            effect_package_required_size(&package, EffectPackageLimits::default()).unwrap_err();
         assert_eq!((error.code, error.artifact_index), (Code::Order, 1));
 
         let no_source = [EffectArtifactAuthoring {
@@ -1948,8 +1941,7 @@ mod tests {
             capabilities: &["simd128"],
         };
         let (selected_index, content_offset) = {
-            let package =
-                verify_effect_package(&bytes, EffectPackageLimits::default()).unwrap();
+            let package = verify_effect_package(&bytes, EffectPackageLimits::default()).unwrap();
             let selected = select_effect_package_artifact(&package, request).unwrap();
             (
                 selected.artifact_index(),

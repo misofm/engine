@@ -5,11 +5,10 @@ use miso_engine_effect_contract::{
     StatePayloadOutput,
 };
 use miso_engine_effect_package::{
-    BoundEffectDescriptorWire, BoundEffectStateMigrationEdge,
-    EFFECT_STATE_UNAVAILABLE_INDEX, EFFECT_STATE_UNAVAILABLE_OFFSET,
-    EffectStateDescriptorProvenance, EffectStateDiagnosticCode, EffectStateDiagnostic,
-    EffectStateLimits, EffectStateMigrationEdgeError, EffectStateSelector,
-    bind_effect_state_migration_edge, effect_state_bound_selector,
+    BoundEffectDescriptorWire, BoundEffectStateMigrationEdge, EFFECT_STATE_UNAVAILABLE_INDEX,
+    EFFECT_STATE_UNAVAILABLE_OFFSET, EffectStateDescriptorProvenance, EffectStateDiagnostic,
+    EffectStateDiagnosticCode, EffectStateLimits, EffectStateMigrationEdgeError,
+    EffectStateSelector, bind_effect_state_migration_edge, effect_state_bound_selector,
     effect_state_derived_resources, effect_state_descriptor_provenance,
     effect_state_expected_metadata, effect_state_replay_view_from_verified,
     effect_state_requirements, encode_effect_state, inspect_effect_state_selector,
@@ -596,9 +595,8 @@ fn execute_migration_steps(
 
         let target_bound = registration.edge.target_bound();
         let replay = resolved.replay.state_replay(resolved.current_effect_id);
-        let requirements =
-            effect_state_requirements(target_bound, replay, resolved.state_limits)
-                .map_err(|diagnostic| state_diagnostic(2, Some(index), diagnostic))?;
+        let requirements = effect_state_requirements(target_bound, replay, resolved.state_limits)
+            .map_err(|diagnostic| state_diagnostic(2, Some(index), diagnostic))?;
         let metadata = effect_state_expected_metadata(target_bound, replay)
             .map_err(|diagnostic| state_diagnostic(2, Some(index), diagnostic))?;
         let payload_bytes = usize::try_from(
@@ -1051,12 +1049,7 @@ pub fn resolve_effect_state_migration<'registry, 'wire, 'factory_wire, 'state>(
             first_registration.expect("nonzero chain has first registration")
         } else {
             registry.find(cursor).ok_or_else(|| {
-                migration_diagnostic(
-                    EffectStateMigrationDiagnosticCode::Chain,
-                    1,
-                    Some(index),
-                    0,
-                )
+                migration_diagnostic(EffectStateMigrationDiagnosticCode::Chain, 1, Some(index), 0)
             })?
         };
         let requirements = effect_state_requirements(

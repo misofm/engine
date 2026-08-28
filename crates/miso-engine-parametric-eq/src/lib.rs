@@ -35,14 +35,14 @@
 use miso_engine_core::{SampleRateHz, is_launch_sample_rate};
 use miso_engine_effect_contract::{
     AutomationRate, AutomationSpanKind, BankProcessReport, BankWidth, EffectBankProcessBlock,
-    EffectDescriptor, EffectPrepareError, EffectProcessBlock, EffectQuality as Quality,
-    EnumChoice, InitialParameterValue, LatencySamples, LinkModeSet, NativeEffectFactory,
-    ParameterChannel, ParameterChannelPolicy, ParameterDescriptor, ParameterDomain, ParameterId,
-    ParameterMapping, ParameterUnit, PortDescriptor, PortId, PortLayout, PortRole,
-    PrepareEffectBankRequest, PrepareEffectRequest, PreparedAutomationSpan, PreparedBankMetadata,
-    PreparedEffectMetadata, PreparedNativeEffect, PreparedNativeEffectBank, ProcessReport,
-    QualityDescriptor, ResetKind, SmoothingRule, StatePayloadError, StatePayloadInput,
-    StatePayloadOutput, StatePayloadSizes, TailSamples, expected_prepared_metadata,
+    EffectDescriptor, EffectPrepareError, EffectProcessBlock, EffectQuality as Quality, EnumChoice,
+    InitialParameterValue, LatencySamples, LinkModeSet, NativeEffectFactory, ParameterChannel,
+    ParameterChannelPolicy, ParameterDescriptor, ParameterDomain, ParameterId, ParameterMapping,
+    ParameterUnit, PortDescriptor, PortId, PortLayout, PortRole, PrepareEffectBankRequest,
+    PrepareEffectRequest, PreparedAutomationSpan, PreparedBankMetadata, PreparedEffectMetadata,
+    PreparedNativeEffect, PreparedNativeEffectBank, ProcessReport, QualityDescriptor, ResetKind,
+    SmoothingRule, StatePayloadError, StatePayloadInput, StatePayloadOutput, StatePayloadSizes,
+    TailSamples, expected_prepared_metadata,
 };
 use miso_engine_effect_runtime::bank::{
     BLOCK_LIMIT, block_is_positive_zero, check_block, lane_is_positive_zero, nonfinite_lane_mask,
@@ -2902,8 +2902,7 @@ mod elision {
     /// A section that is identity on some lanes and live on others is not elidable.
     #[test]
     fn a_section_live_on_one_lane_is_not_elided() {
-        let mut targets: [[BandTarget; EQ_SECTION_COUNT]; 8] =
-            core::array::from_fn(corpus::bands);
+        let mut targets: [[BandTarget; EQ_SECTION_COUNT]; 8] = core::array::from_fn(corpus::bands);
         for bands in &mut targets {
             for band in bands.iter_mut() {
                 band.enabled = false;

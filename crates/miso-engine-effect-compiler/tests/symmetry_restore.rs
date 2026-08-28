@@ -301,12 +301,9 @@ fn envelope(asymmetric: bool) -> Vec<u8> {
     let capability = bound(&controls, &descriptor_wire);
     let preparation = preparation(48_000);
     let processor = capability.factory().prepare(preparation.request()).unwrap();
-    let requirements = scalar_effect_state_requirements(
-        &capability,
-        &preparation,
-        EffectStateLimits::default(),
-    )
-    .unwrap();
+    let requirements =
+        scalar_effect_state_requirements(&capability, &preparation, EffectStateLimits::default())
+            .unwrap();
     let mut scratch = vec![0; requirements.payload_snapshot_scratch_bytes as usize];
     let mut output = vec![0; requirements.envelope_bytes as usize];
     snapshot_scalar_effect_state(

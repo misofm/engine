@@ -44,15 +44,15 @@ pub mod corpus;
 
 use miso_engine_effect_contract::{
     AutomationRate, AutomationSpanKind, BankProcessReport, BankWidth, EffectBankProcessBlock,
-    EffectDescriptor, EffectPrepareError, EffectProcessBlock, EffectQuality,
-    InitialParameterValue, LatencySamples, LinkMode, LinkModeSet, NativeEffectFactory,
-    ObservationCadence, ObservationChannels, ObservationCost, ObservationDescriptor,
-    ObservationFold, ObservationKind, ObservationSample, ObservationTapId, ParameterChannel,
-    ParameterChannelPolicy, ParameterDescriptor, ParameterDomain, ParameterId, ParameterMapping,
-    ParameterUnit, PortDescriptor, PortId, PortLayout, PortRole, PrepareEffectBankRequest,
-    PrepareEffectRequest, PreparedAutomationSpan, PreparedBankMetadata, PreparedEffectMetadata,
-    PreparedNativeEffect, PreparedNativeEffectBank, ProcessReport, ResetKind, SmoothingRule,
-    StatePayloadError, StatePayloadInput, StatePayloadOutput, StatePayloadSizes, TailSamples,
+    EffectDescriptor, EffectPrepareError, EffectProcessBlock, EffectQuality, InitialParameterValue,
+    LatencySamples, LinkMode, LinkModeSet, NativeEffectFactory, ObservationCadence,
+    ObservationChannels, ObservationCost, ObservationDescriptor, ObservationFold, ObservationKind,
+    ObservationSample, ObservationTapId, ParameterChannel, ParameterChannelPolicy,
+    ParameterDescriptor, ParameterDomain, ParameterId, ParameterMapping, ParameterUnit,
+    PortDescriptor, PortId, PortLayout, PortRole, PrepareEffectBankRequest, PrepareEffectRequest,
+    PreparedAutomationSpan, PreparedBankMetadata, PreparedEffectMetadata, PreparedNativeEffect,
+    PreparedNativeEffectBank, ProcessReport, ResetKind, SmoothingRule, StatePayloadError,
+    StatePayloadInput, StatePayloadOutput, StatePayloadSizes, TailSamples,
     expected_prepared_metadata,
 };
 use miso_engine_effect_runtime::bank::{
@@ -260,20 +260,19 @@ const QUALITIES: [miso_engine_effect_contract::QualityDescriptor; 4] = [
 /// declared fold and after that one unit conversion -- decibels of reduction, `0 .. 100`. `unit`
 /// describes what crosses the transport. They differ here and only here, and the difference is the
 /// whole point of declaring the transport unit separately.
-pub const TRUE_PEAK_LIMITER_OBSERVATIONS: [ObservationDescriptor; 1] =
-    [ObservationDescriptor {
-        id: ObservationTapId(1),
-        display_name: "Gain Reduction",
-        display_unit: "dB",
-        kind: ObservationKind::GainReductionDb,
-        unit: ParameterUnit::Linear,
-        cost: ObservationCost::Resident,
-        cadence: ObservationCadence::PerBlock,
-        fold: ObservationFold::PeakMagnitude,
-        channels: ObservationChannels::PerLane,
-        minimum: 0.0,
-        maximum: 100.0,
-    }];
+pub const TRUE_PEAK_LIMITER_OBSERVATIONS: [ObservationDescriptor; 1] = [ObservationDescriptor {
+    id: ObservationTapId(1),
+    display_name: "Gain Reduction",
+    display_unit: "dB",
+    kind: ObservationKind::GainReductionDb,
+    unit: ParameterUnit::Linear,
+    cost: ObservationCost::Resident,
+    cadence: ObservationCadence::PerBlock,
+    fold: ObservationFold::PeakMagnitude,
+    channels: ObservationChannels::PerLane,
+    minimum: 0.0,
+    maximum: 100.0,
+}];
 
 /// Immutable launch true-peak limiter descriptor.
 pub const TRUE_PEAK_LIMITER_DESCRIPTOR: EffectDescriptor = EffectDescriptor {
@@ -3449,10 +3448,7 @@ mod tests {
             TRUE_PEAK_LIMITER_DESCRIPTOR.id.as_str(),
             "miso.true-peak-limiter"
         );
-        assert_eq!(
-            TRUE_PEAK_LIMITER_DESCRIPTOR.supported_link_modes.bits(),
-            3
-        );
+        assert_eq!(TRUE_PEAK_LIMITER_DESCRIPTOR.supported_link_modes.bits(), 3);
         assert_eq!(TRUE_PEAK_LIMITER_DESCRIPTOR.state_layout_version, 2);
         // Latency is a contract fixture and does not move; the state rows are the #90 re-pin
         // (3N + 35 lane words, plus the runtime's two-word common header).
@@ -4911,9 +4907,8 @@ mod tests {
             let values = values_with(-6.0, 100.0, 5.0);
             let mut preparation = request(&values);
             preparation.link_mode = LinkMode::DualMono;
-            let metadata =
-                expected_prepared_metadata(&TRUE_PEAK_LIMITER_DESCRIPTOR, preparation)
-                    .expect("metadata");
+            let metadata = expected_prepared_metadata(&TRUE_PEAK_LIMITER_DESCRIPTOR, preparation)
+                .expect("metadata");
             let (left_defaults, right_defaults) = initial_defaults(&values).expect("defaults");
             let mut effect = PreparedTruePeakLimiter {
                 core: LimiterCore::<f32>::new(

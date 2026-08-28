@@ -228,10 +228,7 @@ impl GraphRackBankReport {
             .map(|(_, group)| group)
     }
     /// Banks bound in one rack, in bind order.
-    pub fn bound_slots_in(
-        &self,
-        rack: RackLocation,
-    ) -> impl Iterator<Item = &GraphRackBoundSlot> {
+    pub fn bound_slots_in(&self, rack: RackLocation) -> impl Iterator<Item = &GraphRackBoundSlot> {
         self.bound_slots
             .iter()
             .filter(move |bound| self.plan.groups[bound.group].rack == rack)
@@ -4618,9 +4615,7 @@ mod tests {
             cohorts_per_rack
         );
         assert_eq!(
-            split_cohorts
-                .bound_slots_in(RackLocation::Dynamic)
-                .count(),
+            split_cohorts.bound_slots_in(RackLocation::Dynamic).count(),
             cohorts_per_rack
         );
         assert_eq!(
@@ -4636,9 +4631,7 @@ mod tests {
             "both slots of the two-slot chain must bind"
         );
         assert_eq!(
-            merged_cohorts
-                .bound_slots_in(RackLocation::Dynamic)
-                .count(),
+            merged_cohorts.bound_slots_in(RackLocation::Dynamic).count(),
             0
         );
         assert!(merged_cohorts.scalar_in(RackLocation::Simd1).is_empty());

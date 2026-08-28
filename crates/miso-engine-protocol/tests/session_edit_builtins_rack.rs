@@ -17,7 +17,7 @@
 //! Red mutation: give `rack_mut`'s `RackName::Builtins` arm `Ok(&mut track.simd1)` -> the four
 //! refusal arms below start reporting `Ok` and the effect lands in `simd1`.
 
-use miso_engine_protocol::{SessionEditError, SessionEdit, apply_session_edit};
+use miso_engine_protocol::{SessionEdit, SessionEditError, apply_session_edit};
 use miso_engine_session::{RackName, SessionToml, parse_session_toml};
 
 const SESSION: &str = include_str!("../../../fixtures/session/v1/canonical.toml");

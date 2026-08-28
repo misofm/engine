@@ -8,11 +8,10 @@ use std::alloc::{GlobalAlloc, System};
 use miso_engine_effect_contract::*;
 use miso_engine_effect_package::{
     ArtifactSelectionRequest, EffectArtifactAuthoring, EffectArtifactKind, EffectCid,
-    EffectDescriptorEnumChoiceRecord, EffectDescriptorParameterRecord,
-    EffectDescriptorPortRecord, EffectDescriptorQualityRecord, EffectDescriptorSummary,
-    EffectDescriptorWireDiagnosticCode, EffectDescriptorWireDiagnostic,
-    EffectPackageAuthoring, EffectPackageDiagnosticCode, EffectPackageLimits,
-    EffectStateLimits, EffectStateReplayView, bind_effect_descriptor_wire,
+    EffectDescriptorEnumChoiceRecord, EffectDescriptorParameterRecord, EffectDescriptorPortRecord,
+    EffectDescriptorQualityRecord, EffectDescriptorSummary, EffectDescriptorWireDiagnostic,
+    EffectDescriptorWireDiagnosticCode, EffectPackageAuthoring, EffectPackageDiagnosticCode,
+    EffectPackageLimits, EffectStateLimits, EffectStateReplayView, bind_effect_descriptor_wire,
     effect_descriptor_identity, effect_package_cid, effect_package_required_size,
     effect_state_requirements, encode_effect_package, encode_effect_state,
     inspect_effect_state_selector, miso_engine_effect_descriptor_v1_inspect,
@@ -373,9 +372,8 @@ fn each_package_publication_has_one_nested_descriptor_pass_and_no_native_allocat
     assert_eq!(required.unwrap(), bytes.len() as u64);
     assert_eq!(required_snapshot, descriptor_pass);
 
-    let (encoded, encode_snapshot) = measure(|| {
-        encode_effect_package(&authoring, EffectPackageLimits::default(), &mut output)
-    });
+    let (encoded, encode_snapshot) =
+        measure(|| encode_effect_package(&authoring, EffectPackageLimits::default(), &mut output));
     assert_eq!(encoded.unwrap(), bytes.len());
     assert_eq!(encode_snapshot, descriptor_pass);
 
@@ -474,9 +472,8 @@ fn encode_at_the_frozen_artifact_cap_has_one_nested_descriptor_pass_and_no_nativ
         measure(|| effect_package_required_size(&authoring, EffectPackageLimits::default()));
     let required = required.unwrap() as usize;
     let mut output = vec![0; required];
-    let (encoded, encode_snapshot) = measure(|| {
-        encode_effect_package(&authoring, EffectPackageLimits::default(), &mut output)
-    });
+    let (encoded, encode_snapshot) =
+        measure(|| encode_effect_package(&authoring, EffectPackageLimits::default(), &mut output));
     let elapsed = started.elapsed();
     assert_eq!(encoded.unwrap(), required);
     assert_eq!(required_snapshot, descriptor_pass);
@@ -527,8 +524,7 @@ fn c_inspect_performs_exactly_one_nested_descriptor_pass() {
     let bytes = fixture();
     let descriptor_len = u64::from_le_bytes(bytes[24..32].try_into().unwrap()) as usize;
     let descriptor = &bytes[96..96 + descriptor_len];
-    let (identity, descriptor_pass) =
-        measure(|| effect_descriptor_identity(descriptor, 4_194_304));
+    let (identity, descriptor_pass) = measure(|| effect_descriptor_identity(descriptor, 4_194_304));
     let identity = identity.unwrap();
     assert!(descriptor_pass.allocations > 0);
 
@@ -676,9 +672,8 @@ fn prebound_state_selection_verification_replay_requirements_and_encode_allocate
     let (_, replay_allocations) =
         measure(|| validate_effect_state_replay(verified, state_replay()));
     assert_eq!(replay_allocations, ZERO_ALLOCATION);
-    let (requirements, requirement_allocations) = measure(|| {
-        effect_state_requirements(bound, state_replay(), EffectStateLimits::default())
-    });
+    let (requirements, requirement_allocations) =
+        measure(|| effect_state_requirements(bound, state_replay(), EffectStateLimits::default()));
     let requirements = requirements.unwrap();
     assert_eq!(requirement_allocations, ZERO_ALLOCATION);
 

@@ -11,8 +11,7 @@ use miso_engine_effect_contract::{
     AutomationSpanKind, BankWidth, EffectProcessBlock, EffectQuality, InitialParameterValue,
     LinkMode, NativeEffectFactory, ParameterChannel, PrepareEffectBankRequest, PrepareEffectLimits,
     PrepareEffectRequest, PreparedAutomationSpan, PreparedNativeEffect, PreparedNativeEffectBank,
-    PreparedPorts, PreparedSidechainPort, StatePayloadInput, StatePayloadOutput,
-    StatePayloadSizes,
+    PreparedPorts, PreparedSidechainPort, StatePayloadInput, StatePayloadOutput, StatePayloadSizes,
 };
 use miso_engine_multiband_compressor::{
     MULTIBAND_COMPRESSOR_DESCRIPTOR, MultibandCompressorFactory,

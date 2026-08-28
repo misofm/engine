@@ -47,13 +47,10 @@ use miso_engine_core::realtime::{
     PlanUnitEligibility, PlanarBufferMut, PreparedRenderPlan, RenderIo, RenderTime,
 };
 use miso_engine_effect_compiler::{
-    EffectCompileCaps, EffectControlProducer, EffectObservationHandle,
-    attach_effect_console, attach_effect_observation, launch_native_effect_registry,
-    prepare_native_session_effects,
+    EffectCompileCaps, EffectControlProducer, EffectObservationHandle, attach_effect_console,
+    attach_effect_observation, launch_native_effect_registry, prepare_native_session_effects,
 };
-use miso_engine_effect_contract::{
-    ChannelSymmetryWitness, EffectControlRecord, ParameterChannel,
-};
+use miso_engine_effect_contract::{ChannelSymmetryWitness, EffectControlRecord, ParameterChannel};
 use miso_engine_graph::{
     GraphBindingBlock, GraphNodeBinding, GraphNodeId, GraphRuntimeBindings, GraphRuntimeProcessor,
     TrackStage,

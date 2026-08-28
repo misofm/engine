@@ -67,10 +67,9 @@ use miso_engine_builtins::{
 };
 use miso_engine_effect_compiler::launch_native_effect_registry;
 use miso_engine_effect_contract::{
-    AutomationRate, EffectDescriptor, ObservationCadence, ObservationChannels,
-    ObservationCost, ObservationDescriptor, ObservationFold, ObservationKind,
-    ParameterChannelPolicy, ParameterDescriptor, ParameterDomain, ParameterMapping,
-    ParameterUnit, SmoothingRule,
+    AutomationRate, EffectDescriptor, ObservationCadence, ObservationChannels, ObservationCost,
+    ObservationDescriptor, ObservationFold, ObservationKind, ParameterChannelPolicy,
+    ParameterDescriptor, ParameterDomain, ParameterMapping, ParameterUnit, SmoothingRule,
 };
 use miso_engine_host_web::{
     ABI_VERSION, COMMAND_EFFECT_BYPASS, COMMAND_EFFECT_PARAM, COMMAND_FADER_DB, COMMAND_MATRIX,

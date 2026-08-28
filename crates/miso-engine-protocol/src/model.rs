@@ -466,9 +466,7 @@ pub fn apply_session_edit(
 ) -> Result<(), SessionEditError> {
     match edit {
         SessionEdit::SetSessionId { session_id } => session.session_id = session_id.clone(),
-        SessionEdit::SetSampleRateHz { sample_rate_hz } => {
-            session.sample_rate_hz = *sample_rate_hz
-        }
+        SessionEdit::SetSampleRateHz { sample_rate_hz } => session.sample_rate_hz = *sample_rate_hz,
         SessionEdit::SetQuantumFrames { quantum_frames } => {
             session.quantum_frames = *quantum_frames
         }

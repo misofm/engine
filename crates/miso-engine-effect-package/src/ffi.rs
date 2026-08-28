@@ -620,10 +620,7 @@ mod tests {
         );
         assert_eq!(offset_of!(EffectDescriptorParameterRecord, reserved1), 76);
         assert_eq!(offset_of!(EffectDescriptorPortRecord, reserved), 20);
-        assert_eq!(
-            offset_of!(EffectDescriptorQualityRecord, tail_samples),
-            24
-        );
+        assert_eq!(offset_of!(EffectDescriptorQualityRecord, tail_samples), 24);
         assert_eq!(
             offset_of!(EffectDescriptorQualityRecord, scratch_bytes_per_frame),
             56

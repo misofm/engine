@@ -3,24 +3,24 @@ use miso_engine_core::realtime::{
     ObservationReader, Producer, QueueGeneration, bounded_spsc, observation_slot,
 };
 use miso_engine_effect_contract::{
-    BankWidth, ChannelSymmetryWitness, EffectControlLane, EffectControlRecord,
-    EffectDescriptor, EffectProgramKey, EffectQuality, InitialParameterValue, LinkMode,
-    NativeEffectFactory, NativeEffectRegistry, ObservationLane, ParameterChannel,
-    ParameterChannelPolicy, ParameterUnit, PrepareEffectBankRequest, PrepareEffectLimits,
-    PrepareEffectRequest, PreparedBankMetadata, PreparedEffectMetadata, PreparedNativeEffect,
-    PreparedNativeEffectBank, PreparedPorts, PreparedSidechainPort, RegistryError,
-    StatePayloadInput, StatePayloadOutput, expected_prepared_metadata, payload_sections_agree,
+    BankWidth, ChannelSymmetryWitness, EffectControlLane, EffectControlRecord, EffectDescriptor,
+    EffectProgramKey, EffectQuality, InitialParameterValue, LinkMode, NativeEffectFactory,
+    NativeEffectRegistry, ObservationLane, ParameterChannel, ParameterChannelPolicy, ParameterUnit,
+    PrepareEffectBankRequest, PrepareEffectLimits, PrepareEffectRequest, PreparedBankMetadata,
+    PreparedEffectMetadata, PreparedNativeEffect, PreparedNativeEffectBank, PreparedPorts,
+    PreparedSidechainPort, RegistryError, StatePayloadInput, StatePayloadOutput,
+    expected_prepared_metadata, payload_sections_agree,
 };
 use miso_engine_effect_package::{
     BoundEffectDescriptorWire, EFFECT_STATE_BUFFER_ENVELOPE_OUTPUT,
     EFFECT_STATE_BUFFER_INITIAL_VALUE_SCRATCH, EFFECT_STATE_BUFFER_PAYLOAD_SCRATCH,
     EFFECT_STATE_UNAVAILABLE_INDEX, EFFECT_STATE_UNAVAILABLE_OFFSET,
-    EffectDescriptorBindingErrorKind, EffectStateDerivedResources, EffectStateDiagnosticCode,
-    EffectStateDiagnostic, EffectStateLimits, EffectStateReplayView,
-    EffectStateRequirements, VerifiedEffectState, bind_effect_descriptor_wire,
-    effect_state_derived_resources, effect_state_expected_metadata,
-    effect_state_requirements, encode_effect_state, validate_effect_state_current_layout,
-    validate_effect_state_metadata, validate_effect_state_replay, verify_effect_state,
+    EffectDescriptorBindingErrorKind, EffectStateDerivedResources, EffectStateDiagnostic,
+    EffectStateDiagnosticCode, EffectStateLimits, EffectStateReplayView, EffectStateRequirements,
+    VerifiedEffectState, bind_effect_descriptor_wire, effect_state_derived_resources,
+    effect_state_expected_metadata, effect_state_requirements, encode_effect_state,
+    validate_effect_state_current_layout, validate_effect_state_metadata,
+    validate_effect_state_replay, verify_effect_state,
 };
 use miso_engine_session::{
     CompiledSession, EffectIdentity, LinkMode as SessionLinkMode,
@@ -145,13 +145,12 @@ fn descriptor_binding_diagnostic(
         EffectDescriptorBindingErrorKind::ExternalWire => 1,
         EffectDescriptorBindingErrorKind::StaticDescriptorMismatch => 2,
     };
-    let byte_offset = if nested.byte_offset
-        == miso_engine_effect_package::EFFECT_DESCRIPTOR_WIRE_UNAVAILABLE
-    {
-        EFFECT_STATE_UNAVAILABLE_OFFSET
-    } else {
-        u64::from(nested.byte_offset)
-    };
+    let byte_offset =
+        if nested.byte_offset == miso_engine_effect_package::EFFECT_DESCRIPTOR_WIRE_UNAVAILABLE {
+            EFFECT_STATE_UNAVAILABLE_OFFSET
+        } else {
+            u64::from(nested.byte_offset)
+        };
     let mut diagnostic = EffectStateDiagnostic::new(
         EffectStateDiagnosticCode::Descriptor,
         (kind << 16) | nested.code as u32,
@@ -432,9 +431,8 @@ fn expected_bank_program_key(
             diagnostic.item_index = track_index as u32;
             diagnostic
         })?;
-        let metadata =
-            effect_state_expected_metadata(bound_factory.bound_descriptor, replay_view)
-                .map_err(|_| state_unavailable(EffectStateDiagnosticCode::Factory, 2))?;
+        let metadata = effect_state_expected_metadata(bound_factory.bound_descriptor, replay_view)
+            .map_err(|_| state_unavailable(EffectStateDiagnosticCode::Factory, 2))?;
         let candidate = metadata.program_key();
         if program_key
             .as_ref()
@@ -456,10 +454,7 @@ pub fn prepare_unpublished_effect_bank_state<'wire>(
 ) -> Result<UnpublishedEffectBankState<'wire>, EffectStateDiagnostic> {
     let program_key =
         expected_bank_program_key(&bound_factory, backend, width, replays.as_ref(), admission)?;
-    let requests: Vec<_> = replays
-        .iter()
-        .map(EffectBankPreparation::request)
-        .collect();
+    let requests: Vec<_> = replays.iter().map(EffectBankPreparation::request).collect();
     let bank = bound_factory
         .factory
         .bind_homogeneous_bank(PrepareEffectBankRequest {
@@ -597,8 +592,7 @@ pub fn restore_unpublished_effect_bank_track_state<'wire>(
     limits: EffectStateLimits,
     admission: EffectStateRestoreAdmission,
 ) -> Result<UnpublishedEffectBankState<'wire>, EffectStateDiagnostic> {
-    let state =
-        verify_effect_state(capability.bound_factory.bound_descriptor, envelope, limits)?;
+    let state = verify_effect_state(capability.bound_factory.bound_descriptor, envelope, limits)?;
     admit_restored_state(state, admission)?;
     let replay = unpublished_bank_track_replay(&capability, track_index)?;
     validate_effect_state_current_layout(state)?;

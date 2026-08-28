@@ -34,8 +34,7 @@ fn accepted_descriptor_package_round_trip_and_raw_cid_mutation() {
         descriptor: &descriptor,
         artifacts: &artifacts,
     };
-    let required =
-        effect_package_required_size(&package, EffectPackageLimits::default()).unwrap();
+    let required = effect_package_required_size(&package, EffectPackageLimits::default()).unwrap();
     let mut bytes = vec![0; required as usize];
     encode_effect_package(&package, EffectPackageLimits::default(), &mut bytes).unwrap();
     let cid = effect_package_cid(&bytes, EffectPackageLimits::default()).unwrap();

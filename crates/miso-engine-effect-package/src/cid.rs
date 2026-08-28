@@ -1,7 +1,6 @@
 use crate::{
-    EFFECT_PACKAGE_UNAVAILABLE_INDEX, EFFECT_PACKAGE_UNAVAILABLE_OFFSET,
-    EffectPackageDiagnosticCode, EffectPackageDiagnostic, EffectPackageLimits,
-    VerifiedEffectPackage, verify_effect_package,
+    EFFECT_PACKAGE_UNAVAILABLE_INDEX, EFFECT_PACKAGE_UNAVAILABLE_OFFSET, EffectPackageDiagnostic,
+    EffectPackageDiagnosticCode, EffectPackageLimits, VerifiedEffectPackage, verify_effect_package,
 };
 use core::{fmt, str::FromStr};
 use sha2::{Digest, Sha256};
@@ -351,8 +350,8 @@ mod tests {
         cid.verify_package(&bytes, EffectPackageLimits::default())
             .unwrap();
         let wrong = EffectCid::from_raw_bytes(b"wrong");
-        let error = verify_effect_package_cid(&bytes, EffectPackageLimits::default(), &wrong)
-            .unwrap_err();
+        let error =
+            verify_effect_package_cid(&bytes, EffectPackageLimits::default(), &wrong).unwrap_err();
         assert_eq!(error.code, EffectPackageDiagnosticCode::Cid);
         assert_eq!(error.artifact_index, u32::MAX);
         assert_eq!(error.byte_offset, u64::MAX);

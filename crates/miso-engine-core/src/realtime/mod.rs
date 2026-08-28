@@ -16,12 +16,12 @@ pub use buffer::{
     BufferArena, BufferArenaError, BufferIndex, PlanarBufferMut, PlanarBufferRef, PlanarBufferSpec,
 };
 pub use disjoint::{
-    ARENA_SILENCE_BUFFER, ArenaLeaseSetBuilder, ArenaLease, ArenaStereoPair, DisjointArena,
+    ARENA_SILENCE_BUFFER, ArenaLease, ArenaLeaseSetBuilder, ArenaStereoPair, DisjointArena,
     DisjointArenaError,
 };
 pub use observe::{
-    ObservationPublisher, ObservationReader, ObservationSlot, ObservationWindow,
-    observation_slot, observation_slot_retained_bytes,
+    ObservationPublisher, ObservationReader, ObservationSlot, ObservationWindow, observation_slot,
+    observation_slot_retained_bytes,
 };
 pub use plan::{
     ExecutorHandover, PlanUnitEligibility, PrepareRenderPlan, PreparedPlanExecutor,

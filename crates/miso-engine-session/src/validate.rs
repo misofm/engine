@@ -178,11 +178,7 @@ fn duplicate(diagnostics: &mut Vec<Diagnostic>, path: &PathRef<'_>) {
     );
 }
 
-fn validate_sources(
-    session: &SessionToml,
-    root: &PathRef<'_>,
-    diagnostics: &mut Vec<Diagnostic>,
-) {
+fn validate_sources(session: &SessionToml, root: &PathRef<'_>, diagnostics: &mut Vec<Diagnostic>) {
     let sources_path = root.key("sources");
     for (position, source) in session.sources.iter().enumerate() {
         let path = sources_path.index(position);

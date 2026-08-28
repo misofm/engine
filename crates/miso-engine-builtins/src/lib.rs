@@ -270,9 +270,7 @@ impl BuiltinParameterDomain {
             Self::DisabledOrRateKeyedHertz {
                 disabled,
                 minimum_hz,
-            } => {
-                validate_builtin_filter_cutoff(value, sample_rate, disabled, minimum_hz).is_ok()
-            }
+            } => validate_builtin_filter_cutoff(value, sample_rate, disabled, minimum_hz).is_ok(),
         }
     }
 }

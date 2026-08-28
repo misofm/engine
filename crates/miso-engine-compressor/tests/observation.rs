@@ -10,8 +10,7 @@
 mod support;
 
 use miso_engine_effect_contract::{
-    EffectProcessBlock, ObservationSample, PreparedNativeEffect, ResetKind,
-    validate_descriptor,
+    EffectProcessBlock, ObservationSample, PreparedNativeEffect, ResetKind, validate_descriptor,
 };
 
 use support::{initial_values, prepare, request};
@@ -50,8 +49,8 @@ fn render(effect: &mut dyn PreparedNativeEffect, value: f32, blocks: usize) -> O
 #[test]
 fn the_compressor_declares_one_resident_gain_reduction_tap() {
     use miso_engine_effect_contract::{
-        ObservationCadence, ObservationChannels, ObservationCost, ObservationFold,
-        ObservationKind, ObservationTapId, ParameterUnit,
+        ObservationCadence, ObservationChannels, ObservationCost, ObservationFold, ObservationKind,
+        ObservationTapId, ParameterUnit,
     };
     let descriptor = miso_engine_compressor::COMPRESSOR_DESCRIPTOR;
     validate_descriptor(&miso_engine_compressor::COMPRESSOR_DESCRIPTOR).unwrap();

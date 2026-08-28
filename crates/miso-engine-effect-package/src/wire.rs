@@ -1,6 +1,6 @@
 use crate::{
-    EFFECT_DESCRIPTOR_WIRE_UNAVAILABLE, EffectDescriptorWireDiagnosticCode as Code,
-    EffectDescriptorWireDiagnostic as Diagnostic,
+    EFFECT_DESCRIPTOR_WIRE_UNAVAILABLE, EffectDescriptorWireDiagnostic as Diagnostic,
+    EffectDescriptorWireDiagnosticCode as Code,
 };
 use miso_engine_core::{
     LAUNCH_SAMPLE_RATES, SampleRateHz, is_extended_compatibility_sample_rate, is_launch_sample_rate,
@@ -236,10 +236,7 @@ fn port_key(port: &PortDescriptor) -> (u32, &[u8]) {
     (port.role as u32, port.id.as_str().as_bytes())
 }
 
-fn canonical_port_at(
-    ports: &'static [PortDescriptor],
-    index: usize,
-) -> &'static PortDescriptor {
+fn canonical_port_at(ports: &'static [PortDescriptor], index: usize) -> &'static PortDescriptor {
     ports
         .iter()
         .find(|candidate| {
@@ -1265,9 +1262,7 @@ fn parameter_semantics_valid(
     }
 }
 
-fn borrowed_semantic_errors(
-    view: BorrowedEffectDescriptorView<'_>,
-) -> Vec<BorrowedSemanticError> {
+fn borrowed_semantic_errors(view: BorrowedEffectDescriptorView<'_>) -> Vec<BorrowedSemanticError> {
     let mut errors = Vec::new();
     let mut push = |path, code, byte_offset, record_index| {
         errors.push(BorrowedSemanticError {
@@ -1772,8 +1767,8 @@ pub fn effect_descriptor_identity(
 mod tests {
     use super::*;
     use miso_engine_effect_contract::{
-        DescriptorError, EffectId, EnumChoice, LatencySamples, ParameterDescriptor,
-        ParameterId, PortDescriptor, PortId, QualityDescriptor, StatePayloadSizes,
+        DescriptorError, EffectId, EnumChoice, LatencySamples, ParameterDescriptor, ParameterId,
+        PortDescriptor, PortId, QualityDescriptor, StatePayloadSizes,
     };
 
     const fn effect_id(value: &'static str) -> EffectId {
@@ -2631,8 +2626,8 @@ mod tests {
             52,
             HEADER_BYTES as u32 + 4,
         );
-        let error = verify_effect_descriptor_wire(&header_text_before_table_offset, 1 << 20)
-            .unwrap_err();
+        let error =
+            verify_effect_descriptor_wire(&header_text_before_table_offset, 1 << 20).unwrap_err();
         assert_eq!((error.code, error.byte_offset), (Code::Offset, 32));
 
         let mut port_text_before_choice_text = original;

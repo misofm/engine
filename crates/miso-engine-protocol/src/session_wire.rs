@@ -545,9 +545,7 @@ fn tx_edit_payload(sink: &mut dyn Sink, edit: &SessionEdit) -> Result<(), Encode
     tx_start_message(sink, count)?;
     match edit {
         SessionEdit::SetSessionId { session_id } => tx_id(sink, fields[0], session_id),
-        SessionEdit::SetSampleRateHz { sample_rate_hz } => {
-            tx_u32(sink, fields[0], *sample_rate_hz)
-        }
+        SessionEdit::SetSampleRateHz { sample_rate_hz } => tx_u32(sink, fields[0], *sample_rate_hz),
         SessionEdit::SetQuantumFrames { quantum_frames } => {
             tx_u32(sink, fields[0], *quantum_frames)
         }
@@ -557,9 +555,7 @@ fn tx_edit_payload(sink: &mut dyn Sink, edit: &SessionEdit) -> Result<(), Encode
         SessionEdit::SetOutputProfile { output_profile } => {
             tx_message(sink, fields[0], |v| tx_output_profile(v, output_profile))
         }
-        SessionEdit::SetLimits { limits } => {
-            tx_message(sink, fields[0], |v| tx_limits(v, limits))
-        }
+        SessionEdit::SetLimits { limits } => tx_message(sink, fields[0], |v| tx_limits(v, limits)),
         SessionEdit::UpsertSource { source } => {
             tx_message(sink, fields[0], |v| tx_source(v, source))
         }
@@ -1329,12 +1325,10 @@ fn parse_edit(message: Message<'_>) -> Result<SessionEdit, DecodeError> {
         crate::SessionEditOpcode::RemoveSource => Ok(SessionEdit::RemoveSource {
             source_id: stable_id(one_spec!(payload, fields[0])?)?,
         }),
-        crate::SessionEditOpcode::SetSourceSampleRateHz => {
-            Ok(SessionEdit::SetSourceSampleRateHz {
-                source_id: stable_id(one_spec!(payload, fields[0])?)?,
-                sample_rate_hz: read_u32_exact(one_spec!(payload, fields[1])?)?,
-            })
-        }
+        crate::SessionEditOpcode::SetSourceSampleRateHz => Ok(SessionEdit::SetSourceSampleRateHz {
+            source_id: stable_id(one_spec!(payload, fields[0])?)?,
+            sample_rate_hz: read_u32_exact(one_spec!(payload, fields[1])?)?,
+        }),
         crate::SessionEditOpcode::SetSourceContent => Ok(SessionEdit::SetSourceContent {
             source_id: stable_id(one_spec!(payload, fields[0])?)?,
             content: parse_content(payload.nested_value(one_spec!(payload, fields[1])?)?)?,
@@ -1496,14 +1490,12 @@ fn parse_edit(message: Message<'_>) -> Result<SessionEdit, DecodeError> {
                 payload.nested_value(one_spec!(payload, fields[1])?)?,
             )?,
         }),
-        crate::SessionEditOpcode::SetRouteChannelMatrix => {
-            Ok(SessionEdit::SetRouteChannelMatrix {
-                route_id: stable_id(one_spec!(payload, fields[0])?)?,
-                channel_matrix: parse_channel_matrix(
-                    payload.nested_value(one_spec!(payload, fields[1])?)?,
-                )?,
-            })
-        }
+        crate::SessionEditOpcode::SetRouteChannelMatrix => Ok(SessionEdit::SetRouteChannelMatrix {
+            route_id: stable_id(one_spec!(payload, fields[0])?)?,
+            channel_matrix: parse_channel_matrix(
+                payload.nested_value(one_spec!(payload, fields[1])?)?,
+            )?,
+        }),
         crate::SessionEditOpcode::SetRouteGainDb => Ok(SessionEdit::SetRouteGainDb {
             route_id: stable_id(one_spec!(payload, fields[0])?)?,
             gain_db: read_f32_exact(one_spec!(payload, fields[1])?)?,
@@ -1518,14 +1510,12 @@ fn parse_edit(message: Message<'_>) -> Result<SessionEdit, DecodeError> {
             automation_id: stable_id(one_spec!(payload, fields[0])?)?,
             target: parse_automation_target(payload.nested_value(one_spec!(payload, fields[1])?)?)?,
         }),
-        crate::SessionEditOpcode::SetAutomationSegments => {
-            Ok(SessionEdit::SetAutomationSegments {
-                automation_id: stable_id(one_spec!(payload, fields[0])?)?,
-                segments: values_spec!(payload, fields[1])?
-                    .map(|value| parse_automation_segment(payload.nested_value(value)?))
-                    .collect::<Result<Vec<_>, _>>()?,
-            })
-        }
+        crate::SessionEditOpcode::SetAutomationSegments => Ok(SessionEdit::SetAutomationSegments {
+            automation_id: stable_id(one_spec!(payload, fields[0])?)?,
+            segments: values_spec!(payload, fields[1])?
+                .map(|value| parse_automation_segment(payload.nested_value(value)?))
+                .collect::<Result<Vec<_>, _>>()?,
+        }),
     }
 }
 

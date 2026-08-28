@@ -3,9 +3,9 @@
 use core::str::FromStr;
 use miso_engine_effect_package::{
     ArtifactSelectionRequest, EffectArtifactAuthoring, EffectArtifactKind, EffectCid,
-    EffectPackageAuthoring, EffectPackageLimits, effect_descriptor_identity,
-    effect_package_cid, effect_package_required_size, encode_effect_package,
-    select_effect_package_artifact, verify_effect_package,
+    EffectPackageAuthoring, EffectPackageLimits, effect_descriptor_identity, effect_package_cid,
+    effect_package_required_size, encode_effect_package, select_effect_package_artifact,
+    verify_effect_package,
 };
 use sha2::{Digest, Sha256};
 
@@ -128,8 +128,7 @@ fn check_vector(vector: &Vector<'_>) -> Vec<u8> {
         descriptor: verified.descriptor(),
         artifacts: &authoring,
     };
-    let required =
-        effect_package_required_size(&model, EffectPackageLimits::default()).unwrap();
+    let required = effect_package_required_size(&model, EffectPackageLimits::default()).unwrap();
     assert_eq!(required, bytes.len() as u64);
     let mut output = vec![0xa5; bytes.len() + 8];
     assert_eq!(

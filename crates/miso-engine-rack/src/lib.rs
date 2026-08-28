@@ -13,8 +13,7 @@ use miso_engine_core::realtime::RenderError;
 use miso_engine_effect_contract::{
     BankWidth, BypassShunt, ChannelSymmetryWitness, EffectBankProcessBlock, EffectControlLane,
     EffectProgramKey, ObservationLane, ObservationSample, PreparedAutomationSpan,
-    PreparedNativeEffectBank, PreparedSidechainPort, SeamSide, transpose_tile_4,
-    transpose_tile_8,
+    PreparedNativeEffectBank, PreparedSidechainPort, SeamSide, transpose_tile_4, transpose_tile_8,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

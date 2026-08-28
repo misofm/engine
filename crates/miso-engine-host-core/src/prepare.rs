@@ -14,9 +14,8 @@ use miso_engine_builtins_compiler::{
 };
 use miso_engine_core::{SampleRateHz, realtime::PreparedRenderPlan};
 use miso_engine_effect_compiler::{
-    EffectCompileCaps, EffectControlProducer, EffectObservationHandle,
-    attach_effect_console, attach_effect_observation, launch_native_effect_registry,
-    prepare_native_session_effects,
+    EffectCompileCaps, EffectControlProducer, EffectObservationHandle, attach_effect_console,
+    attach_effect_observation, launch_native_effect_registry, prepare_native_session_effects,
 };
 use miso_engine_effect_contract::TailSamples;
 use miso_engine_graph::{
@@ -607,8 +606,8 @@ pub fn prepare_host_runtime_with_console(
             let _ = taps;
             return Err(shape("host.observation.console"));
         }
-        taps => attach_effect_observation(&mut effects, taps, observation_window_blocks)
-            .map_err(|diagnostics| {
+        taps => attach_effect_observation(&mut effects, taps, observation_window_blocks).map_err(
+            |diagnostics| {
                 PrepareDiagnostics::new(
                     PrepareRejection::Effect,
                     diagnostic_lines(
@@ -618,7 +617,8 @@ pub fn prepare_host_runtime_with_console(
                             .map(|diagnostic| (diagnostic.code, &diagnostic.path)),
                     ),
                 )
-            })?,
+            },
+        )?,
     };
 
     // Issue #137 D1/D2: the console requests are derived here, once, from the canonical track

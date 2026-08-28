@@ -280,8 +280,7 @@ fn independent_reference_vector_binds_verifies_and_reencodes_byte_identically() 
     assert_eq!(state_fixture.as_slice(), state_hex_fixture);
     assert_eq!(&state_fixture[56..88], digest_fixture);
 
-    let verified =
-        verify_effect_state(bound, state_fixture, EffectStateLimits::default()).unwrap();
+    let verified = verify_effect_state(bound, state_fixture, EffectStateLimits::default()).unwrap();
     validate_effect_state_current_layout(verified).unwrap();
     validate_effect_state_replay(verified, replay()).unwrap();
     assert_eq!(
@@ -439,8 +438,7 @@ fn independent_reference_malformed_oracle_matches_exact_diagnostics() {
     ));
 
     for (name, bytes, expected) in cases {
-        let actual =
-            verify_effect_state(bound, &bytes, EffectStateLimits::default()).unwrap_err();
+        let actual = verify_effect_state(bound, &bytes, EffectStateLimits::default()).unwrap_err();
         assert_eq!(actual, expected, "{name}");
     }
 }
@@ -451,10 +449,7 @@ fn diagnostic_layout_and_default_limits_are_frozen() {
     assert_eq!(core::mem::align_of::<EffectStateDiagnostic>(), 8);
     assert_eq!(core::mem::offset_of!(EffectStateDiagnostic, code), 0);
     assert_eq!(core::mem::offset_of!(EffectStateDiagnostic, detail), 4);
-    assert_eq!(
-        core::mem::offset_of!(EffectStateDiagnostic, item_index),
-        8
-    );
+    assert_eq!(core::mem::offset_of!(EffectStateDiagnostic, item_index), 8);
     assert_eq!(core::mem::offset_of!(EffectStateDiagnostic, reserved), 12);
     assert_eq!(
         core::mem::offset_of!(EffectStateDiagnostic, byte_offset),
@@ -483,8 +478,7 @@ fn checked_scratch_arithmetic_reports_exact_overflow_before_layout() {
         effect_id: OVERFLOW_DESCRIPTOR.id,
         request: replay().request,
     };
-    let error =
-        effect_state_requirements(bound, replay, EffectStateLimits::default()).unwrap_err();
+    let error = effect_state_requirements(bound, replay, EffectStateLimits::default()).unwrap_err();
     assert_eq!(
         (
             error.code,
@@ -508,10 +502,7 @@ fn binding_distinguishes_external_wire_from_static_mismatch() {
     let mut malformed = descriptor_wire(&DESCRIPTOR);
     malformed[12] = 1;
     let error = bind_effect_descriptor_wire(&DESCRIPTOR, &malformed, 1 << 20).unwrap_err();
-    assert_eq!(
-        error.kind(),
-        EffectDescriptorBindingErrorKind::ExternalWire
-    );
+    assert_eq!(error.kind(), EffectDescriptorBindingErrorKind::ExternalWire);
     assert_eq!(
         (error.diagnostic().code, error.diagnostic().byte_offset),
         (EffectDescriptorWireDiagnosticCode::Reserved, 12)
@@ -674,9 +665,7 @@ fn borrowed_verification_enforces_each_caller_cap() {
         },
     ] {
         assert_eq!(
-            verify_effect_state(bound, &bytes, limits)
-                .unwrap_err()
-                .code,
+            verify_effect_state(bound, &bytes, limits).unwrap_err().code,
             EffectStateDiagnosticCode::Limit
         );
     }
@@ -1145,8 +1134,7 @@ fn replay_configuration_is_independent_of_layout_and_prepared_resources() {
         request: replay().request,
     };
     let requirements =
-        effect_state_requirements(bound, historical_replay, EffectStateLimits::default())
-            .unwrap();
+        effect_state_requirements(bound, historical_replay, EffectStateLimits::default()).unwrap();
     let mut bytes = vec![0; requirements.envelope_bytes as usize];
     encode_effect_state(
         bound,
@@ -1169,8 +1157,7 @@ fn replay_configuration_is_independent_of_layout_and_prepared_resources() {
         changed_contract[offset] ^= 1;
         refresh_digest(&mut changed_contract);
         let changed_state =
-            verify_effect_state(bound, &changed_contract, EffectStateLimits::default())
-                .unwrap();
+            verify_effect_state(bound, &changed_contract, EffectStateLimits::default()).unwrap();
         let error = validate_effect_state_replay_configuration(changed_state, historical_replay)
             .unwrap_err();
         assert_eq!(error.code, EffectStateDiagnosticCode::Metadata);
@@ -1473,14 +1460,7 @@ fn every_state_header_field_and_payload_class_has_an_exact_diagnostic() {
     let unavailable = EFFECT_STATE_UNAVAILABLE_INDEX;
 
     for (name, offset, size, value, code, diagnostic_offset) in [
-        (
-            "version",
-            8,
-            2,
-            2_u64,
-            EffectStateDiagnosticCode::Header,
-            8,
-        ),
+        ("version", 8, 2, 2_u64, EffectStateDiagnosticCode::Header, 8),
         (
             "header-bytes",
             10,
@@ -1902,8 +1882,7 @@ fn representative_mutations_have_exact_phase_order_and_diagnostics() {
     );
     let mut trailing = original.clone();
     trailing.push(0);
-    let error =
-        verify_effect_state(bound, &trailing, EffectStateLimits::default()).unwrap_err();
+    let error = verify_effect_state(bound, &trailing, EffectStateLimits::default()).unwrap_err();
     assert_eq!(
         (error.code, error.byte_offset),
         (EffectStateDiagnosticCode::Length, 16)
@@ -1919,8 +1898,7 @@ fn the_state_envelope_binds_the_effect_identity_it_names() {
     let (wire, original) = encoded_state();
     let bound = bind_effect_descriptor_wire(&DESCRIPTOR, &wire, 1 << 20).unwrap();
 
-    let verified =
-        verify_effect_state(bound, &original, EffectStateLimits::default()).unwrap();
+    let verified = verify_effect_state(bound, &original, EffectStateLimits::default()).unwrap();
     assert_eq!(verified.effect_id(), DESCRIPTOR.id.as_str());
     assert_eq!(verified.descriptor_identity(), bound.identity());
     assert_eq!(validate_effect_state_current_layout(verified), Ok(()));
@@ -1933,8 +1911,7 @@ fn the_state_envelope_binds_the_effect_identity_it_names() {
     let mut renamed = original.clone();
     renamed[224..224 + effect_id_length].copy_from_slice(b"test.stats");
     refresh_digest(&mut renamed);
-    let renamed_view =
-        verify_effect_state(bound, &renamed, EffectStateLimits::default()).unwrap();
+    let renamed_view = verify_effect_state(bound, &renamed, EffectStateLimits::default()).unwrap();
     assert_eq!(renamed_view.effect_id(), "test.stats");
     for actual in [
         validate_effect_state_current_layout(renamed_view).unwrap_err(),

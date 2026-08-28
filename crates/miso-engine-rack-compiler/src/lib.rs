@@ -987,9 +987,7 @@ mod tests {
                 for later in plan.groups.iter().skip(index + 1) {
                     for member in later.members.iter().flatten() {
                         assert!(
-                            by_id[member]
-                                .subsequence_mask(&group.program())
-                                .is_none(),
+                            by_id[member].subsequence_mask(&group.program()).is_none(),
                             "case={case}: id {member} could have filled a free lane in group {index}"
                         );
                     }

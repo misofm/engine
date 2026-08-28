@@ -21,8 +21,8 @@ use miso_engine_effect_contract::{
     AutomationSpanKind, BankWidth, EffectDescriptor, EffectQuality, InitialParameterValue,
     LinkMode, NativeEffectFactory, ParameterChannel, ParameterId, ParameterMapping,
     ParameterSmoother, PrepareEffectBankRequest, PrepareEffectLimits, PrepareEffectRequest,
-    PreparedAutomationSpan, PreparedPorts, PreparedSidechainPort, QualityDescriptor,
-    SmoothingRule, automation_segment_value, expected_prepared_metadata, inverse_map_normalized,
+    PreparedAutomationSpan, PreparedPorts, PreparedSidechainPort, QualityDescriptor, SmoothingRule,
+    automation_segment_value, expected_prepared_metadata, inverse_map_normalized,
     inverse_map_stepped_normalized, map_normalized, map_stepped_normalized,
     validate_automation_block, validate_descriptor,
 };
@@ -380,12 +380,10 @@ fn descriptor_requires_launch_rows_and_accepts_optional_extended_rows() {
         assert!(validate_descriptor(descriptor).is_ok());
     }
 
-    let draft_launch = original.qualities[..4]
-        .iter()
-        .map(|row| QualityDescriptor {
-            quality: EffectQuality::Draft,
-            ..*row
-        });
+    let draft_launch = original.qualities[..4].iter().map(|row| QualityDescriptor {
+        quality: EffectQuality::Draft,
+        ..*row
+    });
     let multiple_qualities = draft_launch
         .chain(original.qualities[..4].iter().copied())
         .collect::<Vec<_>>();

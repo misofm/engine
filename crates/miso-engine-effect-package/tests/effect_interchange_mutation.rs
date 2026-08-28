@@ -71,10 +71,7 @@ fn absorb(summary: &mut Summary, parser: &[u8], trial: usize, outcome: &[u8], ac
     summary.normalized.update(outcome);
 }
 
-fn assert_descriptor_diagnostic_shape(
-    error: EffectDescriptorWireDiagnostic,
-    candidate_len: usize,
-) {
+fn assert_descriptor_diagnostic_shape(error: EffectDescriptorWireDiagnostic, candidate_len: usize) {
     assert_eq!(error.required_bytes, 0);
     assert!(
         error.byte_offset == EFFECT_DESCRIPTOR_WIRE_UNAVAILABLE
@@ -181,16 +178,12 @@ fn package_outcome(candidate: &[u8]) -> Vec<u8> {
                 artifacts: &artifacts,
             };
             let required =
-                effect_package_required_size(&authoring, EffectPackageLimits::default())
-                    .unwrap();
+                effect_package_required_size(&authoring, EffectPackageLimits::default()).unwrap();
             assert_eq!(required, candidate.len() as u64);
             let mut encoded = vec![0xa5; candidate.len()];
-            let written = encode_effect_package(
-                &authoring,
-                EffectPackageLimits::default(),
-                &mut encoded,
-            )
-            .unwrap();
+            let written =
+                encode_effect_package(&authoring, EffectPackageLimits::default(), &mut encoded)
+                    .unwrap();
             assert_eq!(written, candidate.len());
             assert_eq!(encoded, candidate);
             let mut row = vec![1];

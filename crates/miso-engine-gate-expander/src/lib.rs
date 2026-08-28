@@ -27,16 +27,16 @@ pub mod kernel;
 
 use miso_engine_effect_contract::{
     AutomationRate, AutomationSpanKind, BankProcessReport, BankWidth, EffectBankProcessBlock,
-    EffectDescriptor, EffectPrepareError, EffectProcessBlock, EffectQuality,
-    InitialParameterValue, LatencySamples, LinkMode, LinkModeSet, NativeEffectFactory,
-    ObservationCadence, ObservationChannels, ObservationCost, ObservationDescriptor,
-    ObservationFold, ObservationKind, ObservationSample, ObservationTapId, ParameterChannel,
-    ParameterChannelPolicy, ParameterDescriptor, ParameterDomain, ParameterId, ParameterMapping,
-    ParameterUnit, PortDescriptor, PortId, PortLayout, PortRole, PrepareEffectBankRequest,
-    PrepareEffectRequest, PreparedAutomationSpan, PreparedBankMetadata, PreparedEffectMetadata,
-    PreparedNativeEffect, PreparedNativeEffectBank, PreparedSidechainPort, ProcessReport,
-    ResetKind, SmoothingRule, StatePayloadError, StatePayloadInput, StatePayloadOutput,
-    StatePayloadSizes, TailSamples, expected_prepared_metadata,
+    EffectDescriptor, EffectPrepareError, EffectProcessBlock, EffectQuality, InitialParameterValue,
+    LatencySamples, LinkMode, LinkModeSet, NativeEffectFactory, ObservationCadence,
+    ObservationChannels, ObservationCost, ObservationDescriptor, ObservationFold, ObservationKind,
+    ObservationSample, ObservationTapId, ParameterChannel, ParameterChannelPolicy,
+    ParameterDescriptor, ParameterDomain, ParameterId, ParameterMapping, ParameterUnit,
+    PortDescriptor, PortId, PortLayout, PortRole, PrepareEffectBankRequest, PrepareEffectRequest,
+    PreparedAutomationSpan, PreparedBankMetadata, PreparedEffectMetadata, PreparedNativeEffect,
+    PreparedNativeEffectBank, PreparedSidechainPort, ProcessReport, ResetKind, SmoothingRule,
+    StatePayloadError, StatePayloadInput, StatePayloadOutput, StatePayloadSizes, TailSamples,
+    expected_prepared_metadata,
 };
 use miso_engine_effect_runtime::bank::{check_block, nonfinite_lane_mask};
 use miso_engine_effect_runtime::envelope::attack_release_coefficient;
@@ -252,10 +252,7 @@ const PORTS: [PortDescriptor; 3] = [
 /// restored into a bank whose shared cursor is somewhere else), carries the open flag and the hold
 /// countdown as the `f32` lane words the kernel actually holds, gives each ramp its precomputed
 /// step (D11), and adopts the runtime codec's two-word common header.
-const fn quality(
-    sample_rate: u32,
-    latency: u64,
-) -> miso_engine_effect_contract::QualityDescriptor {
+const fn quality(sample_rate: u32, latency: u64) -> miso_engine_effect_contract::QualityDescriptor {
     let per_lane = (STATE_LANE_HEADER_WORDS as u32 + 2 * latency as u32) * 4;
     let common = payload::HEADER_WORDS * payload::WORD_BYTES as u32;
     miso_engine_effect_contract::QualityDescriptor {
@@ -1037,11 +1034,7 @@ fn checked_track(track_index: u32, width: usize) -> Result<usize, StatePayloadEr
 macro_rules! bank_impl {
     ($lane:ty) => {
         impl PreparedNativeEffectBank for PreparedGate<$lane, false> {
-            fn observe_resident_bank(
-                &self,
-                tap_index: u32,
-                out: &mut [ObservationSample],
-            ) -> bool {
+            fn observe_resident_bank(&self, tap_index: u32, out: &mut [ObservationSample]) -> bool {
                 let lanes = <$lane as Lane>::WIDTH;
                 if tap_index != 0 || out.len() != lanes {
                     return false;
@@ -1247,9 +1240,7 @@ impl NativeEffectFactory for GateExpanderFactory {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use miso_engine_effect_contract::{
-        PrepareEffectLimits, PreparedPorts, validate_descriptor,
-    };
+    use miso_engine_effect_contract::{PrepareEffectLimits, PreparedPorts, validate_descriptor};
     use miso_engine_effect_runtime::params::ParameterKind;
 
     impl<L: Lane, const CONNECTED: bool> PreparedGate<L, CONNECTED> {

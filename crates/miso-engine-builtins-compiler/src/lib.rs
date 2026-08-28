@@ -38,9 +38,7 @@ use miso_engine_graph::{
 };
 use miso_engine_lane::Backend;
 use miso_engine_rack::{AoSoaScratch, BankSlotKey, RackLocation, RackProgram};
-use miso_engine_rack_compiler::{
-    CohortCandidate, CohortLevel, CohortPoolClass, plan_bank_groups,
-};
+use miso_engine_rack_compiler::{CohortCandidate, CohortLevel, CohortPoolClass, plan_bank_groups};
 use miso_engine_session::{CompiledSession, MatrixOrPan, Track};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1259,8 +1257,7 @@ impl Default for BuiltinResourceEstimate {
             maximum_single_allocation_bytes: 0,
             retained_allocation_count: 0,
             retained_layout_class_count: 0,
-            retained_layouts: [BuiltinRetainedLayout::ZERO;
-                BUILTIN_RETAINED_LAYOUT_CLASS_CAPACITY],
+            retained_layouts: [BuiltinRetainedLayout::ZERO; BUILTIN_RETAINED_LAYOUT_CLASS_CAPACITY],
         }
     }
 }
@@ -2641,24 +2638,20 @@ fn resource_plan(
                 &control_path(control),
             )
         })?;
-        let fader_queue = bounded_spsc_retained_payload::<TrackFaderRecord>(
-            control.queue_capacity,
-        )
-        .map_err(|_| {
-            diag(
-                "builtin.resource.arithmetic_overflow",
-                &control_path(control),
-            )
-        })?;
-        let input_queue = bounded_spsc_retained_payload::<TrackInputRecord>(
-            control.queue_capacity,
-        )
-        .map_err(|_| {
-            diag(
-                "builtin.resource.arithmetic_overflow",
-                &control_path(control),
-            )
-        })?;
+        let fader_queue = bounded_spsc_retained_payload::<TrackFaderRecord>(control.queue_capacity)
+            .map_err(|_| {
+                diag(
+                    "builtin.resource.arithmetic_overflow",
+                    &control_path(control),
+                )
+            })?;
+        let input_queue = bounded_spsc_retained_payload::<TrackInputRecord>(control.queue_capacity)
+            .map_err(|_| {
+                diag(
+                    "builtin.resource.arithmetic_overflow",
+                    &control_path(control),
+                )
+            })?;
         for queue in [matrix_queue, fader_queue, input_queue] {
             processor
                 .add_layout(
@@ -2926,9 +2919,7 @@ impl SessionPoolClasses {
     #[must_use]
     pub fn from_session(session: &CompiledSession) -> Self {
         Self {
-            by_track: session_structural_symmetry(session)
-                .into_iter()
-                .collect(),
+            by_track: session_structural_symmetry(session).into_iter().collect(),
         }
     }
 

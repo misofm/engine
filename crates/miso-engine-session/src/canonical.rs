@@ -3,8 +3,8 @@
 use core::{convert::Infallible, fmt::Write as _};
 
 use crate::{
-    FieldKey, ModelVisitor, SessionToml, Token, VisitModel, WalkOrder,
-    validate::validate_session, value::write_f32,
+    FieldKey, ModelVisitor, SessionToml, Token, VisitModel, WalkOrder, validate::validate_session,
+    value::write_f32,
 };
 
 /// Produce canonical V1 TOML bytes as UTF-8 text with LF line endings and one final newline.

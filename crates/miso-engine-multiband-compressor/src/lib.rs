@@ -40,15 +40,15 @@
 
 use miso_engine_effect_contract::{
     AutomationRate, AutomationSpanKind, BankProcessReport, BankWidth, EffectBankProcessBlock,
-    EffectDescriptor, EffectPrepareError, EffectProcessBlock, EffectQuality,
-    InitialParameterValue, LatencySamples, LinkMode, LinkModeSet, NativeEffectFactory,
-    ObservationCadence, ObservationChannels, ObservationCost, ObservationDescriptor,
-    ObservationFold, ObservationKind, ObservationSample, ObservationTapId, ParameterChannel,
-    ParameterChannelPolicy, ParameterDescriptor, ParameterDomain, ParameterId, ParameterMapping,
-    ParameterUnit, PortDescriptor, PortId, PortLayout, PortRole, PrepareEffectBankRequest,
-    PrepareEffectRequest, PreparedAutomationSpan, PreparedBankMetadata, PreparedEffectMetadata,
-    PreparedNativeEffect, PreparedNativeEffectBank, ProcessReport, ResetKind, SmoothingRule,
-    StatePayloadError, StatePayloadInput, StatePayloadOutput, StatePayloadSizes, TailSamples,
+    EffectDescriptor, EffectPrepareError, EffectProcessBlock, EffectQuality, InitialParameterValue,
+    LatencySamples, LinkMode, LinkModeSet, NativeEffectFactory, ObservationCadence,
+    ObservationChannels, ObservationCost, ObservationDescriptor, ObservationFold, ObservationKind,
+    ObservationSample, ObservationTapId, ParameterChannel, ParameterChannelPolicy,
+    ParameterDescriptor, ParameterDomain, ParameterId, ParameterMapping, ParameterUnit,
+    PortDescriptor, PortId, PortLayout, PortRole, PrepareEffectBankRequest, PrepareEffectRequest,
+    PreparedAutomationSpan, PreparedBankMetadata, PreparedEffectMetadata, PreparedNativeEffect,
+    PreparedNativeEffectBank, ProcessReport, ResetKind, SmoothingRule, StatePayloadError,
+    StatePayloadInput, StatePayloadOutput, StatePayloadSizes, TailSamples,
     expected_prepared_metadata,
 };
 use miso_engine_effect_runtime::bank::{self, NonFiniteReport};
@@ -385,20 +385,19 @@ const QUALITIES: [miso_engine_effect_contract::QualityDescriptor; 4] = [
 /// minimum of the two is the largest reduction the channel is applying. One aggregate tap ships in
 /// V1 because the meter frame carries one slot per track; per-band taps are an additive follow-up
 /// once per-tap frame slots exist, and they need no wire, contract or transport change to arrive.
-pub const MULTIBAND_COMPRESSOR_OBSERVATIONS: [ObservationDescriptor; 1] =
-    [ObservationDescriptor {
-        id: ObservationTapId(1),
-        display_name: "Gain Reduction",
-        display_unit: "dB",
-        kind: ObservationKind::GainReductionDb,
-        unit: ParameterUnit::Db,
-        cost: ObservationCost::Resident,
-        cadence: ObservationCadence::PerBlock,
-        fold: ObservationFold::PeakMagnitude,
-        channels: ObservationChannels::PerLane,
-        minimum: 0.0,
-        maximum: 100.0,
-    }];
+pub const MULTIBAND_COMPRESSOR_OBSERVATIONS: [ObservationDescriptor; 1] = [ObservationDescriptor {
+    id: ObservationTapId(1),
+    display_name: "Gain Reduction",
+    display_unit: "dB",
+    kind: ObservationKind::GainReductionDb,
+    unit: ParameterUnit::Db,
+    cost: ObservationCost::Resident,
+    cadence: ObservationCadence::PerBlock,
+    fold: ObservationFold::PeakMagnitude,
+    channels: ObservationChannels::PerLane,
+    minimum: 0.0,
+    maximum: 100.0,
+}];
 
 /// Immutable descriptor for the launch two-band multiband compressor.
 pub const MULTIBAND_COMPRESSOR_DESCRIPTOR: EffectDescriptor = EffectDescriptor {

@@ -97,10 +97,10 @@ pub use diagnostics::{
     PrepareDiagnostics, PrepareRejection, diagnostic_lines, fixed_diagnostic_line,
 };
 pub use prepare::{
-    HostConsoleHandles, HostConsoleRequest, HostPrepareCaps, HostPrepareReport,
-    HostShapePolicy, LAUNCH_SAMPLE_RATES_HZ, PreparedHost, compile_host_session, count_effects,
-    parse_host_session, prepare_host_runtime, prepare_host_runtime_with_console,
-    prepare_host_session, prepare_host_session_with_console,
+    HostConsoleHandles, HostConsoleRequest, HostPrepareCaps, HostPrepareReport, HostShapePolicy,
+    LAUNCH_SAMPLE_RATES_HZ, PreparedHost, compile_host_session, count_effects, parse_host_session,
+    prepare_host_runtime, prepare_host_runtime_with_console, prepare_host_session,
+    prepare_host_session_with_console,
 };
 pub use render_session::StartedRenderSession;
 pub use solo::{ConsoleMuteDelta, ConsoleSoloState};
@@ -113,9 +113,7 @@ pub use source::{
 ///
 /// Re-exported here so a host does not have to depend on `miso-engine-effect-compiler` -- the
 /// compile pipeline stays in this crate (#106 F1) and a host names only what its own ABI names.
-pub use miso_engine_effect_compiler::{
-    EffectControlProducer, EffectObservationHandle, EffectRack,
-};
+pub use miso_engine_effect_compiler::{EffectControlProducer, EffectObservationHandle, EffectRack};
 
 /// The channel-symmetry witness vocabulary, re-exported for hosts and planners.
 ///

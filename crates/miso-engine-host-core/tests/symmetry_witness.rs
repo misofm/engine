@@ -44,9 +44,9 @@ use core::num::{NonZeroU32, NonZeroUsize};
 use miso_engine_builtins::MeterTap;
 use miso_engine_effect_contract::{EffectControlRecord, ParameterChannel};
 use miso_engine_host_core::{
-    ChannelSymmetryWitness, EffectRack, HostConsoleHandles, HostConsoleRequest,
-    HostPrepareCaps, HostShapePolicy, PreparedHost, SourceSubmission,
-    prepare_host_session_with_console, session_structural_symmetry,
+    ChannelSymmetryWitness, EffectRack, HostConsoleHandles, HostConsoleRequest, HostPrepareCaps,
+    HostShapePolicy, PreparedHost, SourceSubmission, prepare_host_session_with_console,
+    session_structural_symmetry,
 };
 use miso_engine_session::CompiledSession;
 
@@ -303,8 +303,8 @@ fn the_two_halves_of_the_witness_are_decided_independently() {
 
     // The conjunction is what a collapse would ask, and it is nobody's default: an eligible lane
     // and an ineligible track compose to ineligible.
-    let combined = ChannelSymmetryWitness::SYMMETRIC
-        .and(session_structural_symmetry(&stereo_session)[0].1);
+    let combined =
+        ChannelSymmetryWitness::SYMMETRIC.and(session_structural_symmetry(&stereo_session)[0].1);
     assert!(!combined.eligible());
     assert_eq!(combined.declined(), ChannelSymmetryWitness::SOURCE);
 }

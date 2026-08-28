@@ -12,9 +12,9 @@ use miso_engine_core::realtime::{
 };
 use miso_engine_effect_contract::{
     AutomationSpanKind, EffectControlLane, EffectControlRecord, ObservationCadence,
-    ObservationChannels, ObservationCost, ObservationDescriptor, ObservationFold,
-    ObservationKind, ObservationLane, ObservationSample, ObservationTapId, ParameterChannel,
-    ParameterUnit, PreparedAutomationSpan,
+    ObservationChannels, ObservationCost, ObservationDescriptor, ObservationFold, ObservationKind,
+    ObservationLane, ObservationSample, ObservationTapId, ParameterChannel, ParameterUnit,
+    PreparedAutomationSpan,
 };
 
 const fn tap(id: u32, fold: ObservationFold) -> ObservationDescriptor {

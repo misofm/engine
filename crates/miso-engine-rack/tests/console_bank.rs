@@ -502,8 +502,7 @@ fn an_unobserved_bank_slot_reports_no_observation_state_at_all() {
             continue;
         }
         let (publisher, _reader) = observation_slot();
-        let mut observation =
-            ObservationLane::new(&MENU, vec![publisher], 4).expect("one per tap");
+        let mut observation = ObservationLane::new(&MENU, vec![publisher], 4).expect("one per tap");
         if lane == 0 {
             observation.arm(0, true, 4, 0);
         }

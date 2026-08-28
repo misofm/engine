@@ -14,8 +14,7 @@ use miso_engine_effect_contract::{
     PreparedSidechainPort, ProcessReport, TailSamples, validate_descriptor,
 };
 use miso_engine_gate_expander::{
-    GATE_EXPANDER_DESCRIPTOR, GATE_EXPANDER_PARAMETERS, GateExpanderFactory,
-    STATE_LAYOUT_VERSION,
+    GATE_EXPANDER_DESCRIPTOR, GATE_EXPANDER_PARAMETERS, GateExpanderFactory, STATE_LAYOUT_VERSION,
 };
 use support::{
     Values, initial_values, prepare, render_scalar_sidechain, request, request_at_rate,
@@ -35,10 +34,7 @@ fn float(payload: &[u8], index: usize) -> f32 {
 #[test]
 fn descriptor_and_exact_resources_are_frozen() {
     validate_descriptor(&GATE_EXPANDER_DESCRIPTOR).expect("descriptor");
-    assert_eq!(
-        GATE_EXPANDER_DESCRIPTOR.id.as_str(),
-        "miso.gate-expander"
-    );
+    assert_eq!(GATE_EXPANDER_DESCRIPTOR.id.as_str(), "miso.gate-expander");
     assert_eq!(GATE_EXPANDER_DESCRIPTOR.state_layout_version, 2);
     assert_eq!(STATE_LAYOUT_VERSION, 2);
     // Layout 2: per lane `(23 + 2N) * 4` bytes, plus the runtime codec's two-word common header.

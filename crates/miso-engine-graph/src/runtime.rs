@@ -38,14 +38,14 @@ use std::collections::BTreeMap;
 
 use core::num::NonZeroUsize;
 
-use miso_engine_core::realtime::{ArenaLeaseSetBuilder, ArenaLease, RenderError};
+use miso_engine_core::realtime::{ArenaLease, ArenaLeaseSetBuilder, RenderError};
 
 /// The arena reserves buffer zero as the always-zero silence slot, so every executor buffer is
 /// offset by one.
 pub(crate) const ARENA_BASE: u32 = 1;
 use miso_engine_effect_contract::{
-    BypassShunt, ChannelSymmetryWitness, EffectControlLane, EffectProcessBlock,
-    ObservationLane, ObservationSample, PreparedAutomationSpan, PreparedNativeEffect,
+    BypassShunt, ChannelSymmetryWitness, EffectControlLane, EffectProcessBlock, ObservationLane,
+    ObservationSample, PreparedAutomationSpan, PreparedNativeEffect,
 };
 use miso_engine_lane::kernels::{mix2x2_block, pdc_delay_block, sum_into_block, sum2_block};
 use miso_engine_rack::{BankChain, BankMembers};

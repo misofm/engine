@@ -8,8 +8,7 @@ mod live;
 mod symmetry;
 pub use live::{BypassShunt, EffectControlLane, EffectControlRecord, ObservationLane, Staged};
 pub use symmetry::{
-    ChannelSymmetryWitness, LiveConsoleRecord, SeamSide, SymmetryEvent,
-    payload_sections_agree,
+    ChannelSymmetryWitness, LiveConsoleRecord, SeamSide, SymmetryEvent, payload_sections_agree,
 };
 
 use core::{fmt, hash::Hash};
@@ -1982,10 +1981,7 @@ pub struct ValidatedPrepare {
 /// # Errors
 ///
 /// `effect.resource.limit` on overflow.
-const fn scratch_for(
-    quality: QualityDescriptor,
-    quantum: u32,
-) -> Result<u64, EffectPrepareError> {
+const fn scratch_for(quality: QualityDescriptor, quantum: u32) -> Result<u64, EffectPrepareError> {
     let limit = EffectPrepareError {
         code: "effect.resource.limit",
     };

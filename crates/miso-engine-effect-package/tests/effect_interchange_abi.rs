@@ -3,9 +3,9 @@
 use core::mem::{align_of, offset_of, size_of};
 
 use miso_engine_effect_package::{
-    EffectDescriptorEnumChoiceRecord, EffectDescriptorParameterRecord,
-    EffectDescriptorPortRecord, EffectDescriptorQualityRecord, EffectDescriptorSummary,
-    EffectDescriptorWireDiagnostic, EffectPackageDiagnostic, EffectStateDiagnostic,
+    EffectDescriptorEnumChoiceRecord, EffectDescriptorParameterRecord, EffectDescriptorPortRecord,
+    EffectDescriptorQualityRecord, EffectDescriptorSummary, EffectDescriptorWireDiagnostic,
+    EffectPackageDiagnostic, EffectStateDiagnostic,
 };
 
 fn assert_offsets<T>(actual: &[usize], expected: &[usize]) {

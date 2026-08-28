@@ -3,8 +3,8 @@
 use core::mem::size_of;
 
 use crate::{
-    Diagnostic, DiagnosticCode, DiagnosticPath, DiagnosticSet, FieldKey, ModelVisitor,
-    SessionToml, StableId, Token, VisitModel, WalkOrder,
+    Diagnostic, DiagnosticCode, DiagnosticPath, DiagnosticSet, FieldKey, ModelVisitor, SessionToml,
+    StableId, Token, VisitModel, WalkOrder,
 };
 
 /// Resource requirements of a normalized session declaration.

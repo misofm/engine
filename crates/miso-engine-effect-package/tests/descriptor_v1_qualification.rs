@@ -2,11 +2,11 @@
 
 use miso_engine_effect_contract::{
     AutomationRate, EffectDescriptor, EffectId, EffectQuality, EnumChoice, LatencySamples,
-    LinkModeSet, ObservationCadence, ObservationChannels, ObservationCost,
-    ObservationDescriptor, ObservationFold, ObservationKind, ObservationTapId,
-    ParameterChannelPolicy, ParameterDescriptor, ParameterDomain, ParameterId, ParameterMapping,
-    ParameterUnit, PortDescriptor, PortId, PortLayout, PortRole, QualityDescriptor,
-    SmoothingRule, StatePayloadSizes, TailSamples, validate_descriptor,
+    LinkModeSet, ObservationCadence, ObservationChannels, ObservationCost, ObservationDescriptor,
+    ObservationFold, ObservationKind, ObservationTapId, ParameterChannelPolicy,
+    ParameterDescriptor, ParameterDomain, ParameterId, ParameterMapping, ParameterUnit,
+    PortDescriptor, PortId, PortLayout, PortRole, QualityDescriptor, SmoothingRule,
+    StatePayloadSizes, TailSamples, validate_descriptor,
 };
 use miso_engine_effect_package::{
     EFFECT_DESCRIPTOR_WIRE_UNAVAILABLE, EffectArtifactAuthoring, EffectArtifactKind,
@@ -595,8 +595,7 @@ fn every_current_production_descriptor_encodes_and_verifies() {
             effect_package_required_size(&authoring, EffectPackageLimits::default()).unwrap()
                 as usize
         ];
-        encode_effect_package(&authoring, EffectPackageLimits::default(), &mut package)
-            .unwrap();
+        encode_effect_package(&authoring, EffectPackageLimits::default(), &mut package).unwrap();
         verify_effect_package(&package, EffectPackageLimits::default()).unwrap();
         effect_package_cid(&package, EffectPackageLimits::default()).unwrap();
     }

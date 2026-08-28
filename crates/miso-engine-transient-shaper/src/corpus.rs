@@ -30,9 +30,7 @@
 
 use miso_engine_lane::{Lane, Simd4, Simd8};
 
-use crate::{
-    PARAMETER_COUNT, RAMP_SAMPLES, Shaper, TRANSIENT_SHAPER_DESCRIPTOR, coefficient_row,
-};
+use crate::{PARAMETER_COUNT, RAMP_SAMPLES, Shaper, TRANSIENT_SHAPER_DESCRIPTOR, coefficient_row};
 use miso_engine_effect_contract::{
     EffectQuality, LatencySamples, LinkMode, PreparedEffectMetadata, PreparedPorts,
     PreparedSidechainPort, StatePayloadSizes, TailSamples,

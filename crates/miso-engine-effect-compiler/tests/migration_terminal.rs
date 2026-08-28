@@ -534,8 +534,7 @@ fn shared_capabilities(
         calls: Arc::clone(calls),
     });
     (
-        bind_native_effect_factory_state(Arc::clone(&factory), wire(descriptor), 1 << 20)
-            .unwrap(),
+        bind_native_effect_factory_state(Arc::clone(&factory), wire(descriptor), 1 << 20).unwrap(),
         bind_native_effect_factory_state(factory, wire(descriptor), 1 << 20).unwrap(),
     )
 }
@@ -548,10 +547,8 @@ fn shared_capabilities_three(
         calls: Arc::clone(calls),
     });
     [
-        bind_native_effect_factory_state(Arc::clone(&factory), wire(descriptor), 1 << 20)
-            .unwrap(),
-        bind_native_effect_factory_state(Arc::clone(&factory), wire(descriptor), 1 << 20)
-            .unwrap(),
+        bind_native_effect_factory_state(Arc::clone(&factory), wire(descriptor), 1 << 20).unwrap(),
+        bind_native_effect_factory_state(Arc::clone(&factory), wire(descriptor), 1 << 20).unwrap(),
         bind_native_effect_factory_state(factory, wire(descriptor), 1 << 20).unwrap(),
     ]
 }
@@ -619,8 +616,7 @@ fn snapshot_scalar(
     replay: &EffectBankPreparation,
     processor: &dyn PreparedNativeEffect,
 ) -> Vec<u8> {
-    let req =
-        scalar_effect_state_requirements(cap, replay, EffectStateLimits::default()).unwrap();
+    let req = scalar_effect_state_requirements(cap, replay, EffectStateLimits::default()).unwrap();
     let mut scratch = vec![0; req.payload_snapshot_scratch_bytes as usize];
     let mut out = vec![0; req.envelope_bytes as usize];
     snapshot_scalar_effect_state(
@@ -1724,12 +1720,9 @@ fn qualification_envelope(
 ) -> Vec<u8> {
     let descriptor_bound = bound(descriptor);
     let state_replay = replay.state_replay(descriptor.id);
-    let requirements = effect_state_requirements(
-        descriptor_bound,
-        state_replay,
-        EffectStateLimits::default(),
-    )
-    .unwrap();
+    let requirements =
+        effect_state_requirements(descriptor_bound, state_replay, EffectStateLimits::default())
+            .unwrap();
     let payload_sizes = sizes(descriptor.state_layout_version);
     let common = payload_sizes.common_bytes as usize;
     let left = payload_sizes.left_bytes as usize;
