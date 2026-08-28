@@ -51,9 +51,24 @@ fn boot_options(quantum: u32) -> WebBootOptions {
 
 #[test]
 fn frozen_layouts_and_values_are_exact() {
+    assert_eq!(ABI_VERSION, 0x0002_0000);
     assert_eq!(size_of::<WebBootOptions>(), 64);
     assert_eq!(size_of::<WebStatus>(), 80);
     assert_eq!(size_of::<WebResourceReport>(), 224);
+    assert_eq!(MAXIMUM_DOCUMENT_BYTES, 1 << 20);
+    assert_eq!(PARSE_TRANSIENT_MULTIPLIER, 80);
+    assert_eq!(DEFAULT_MAXIMUM_MEMORY_BYTES, 512 << 20);
+    assert_eq!(DIAGNOSTIC_BYTES, 1 << 14);
+    assert_eq!(
+        [
+            RESULT_REFUSED_DOCUMENT,
+            RESULT_REFUSED_OPTIONS,
+            RESULT_REFUSED_BUDGET,
+            RESULT_REFUSED_LIFECYCLE,
+            RESULT_REPREPARE_REQUIRED,
+        ],
+        [1, 2, 5, 3, 9]
+    );
     assert_eq!(
         [
             RESULT_OK,
@@ -61,7 +76,7 @@ fn frozen_layouts_and_values_are_exact() {
             RESULT_ABI_MISMATCH,
             RESULT_WRONG_STATE,
             RESULT_BUFFER_TOO_SMALL,
-            RESULT_PREPARE_REJECTED,
+            RESULT_REFUSED_BUDGET,
             RESULT_BACKPRESSURE,
             RESULT_UNSUPPORTED,
             RESULT_RENDER_REJECTED,
@@ -195,7 +210,22 @@ fn raw_ffi_validates_handle_layout_overflow_and_transactional_failure() {
     crate::ffi::test_stage_document(b"no=");
     assert_eq!(miso_engine_web_v1_boot(3), 0);
     assert_eq!(miso_engine_web_v1_boot_result(), RESULT_REFUSED_DOCUMENT);
-    assert!(miso_engine_web_v1_boot_diagnostic_bytes() > 0);
+    assert_eq!(
+        miso_engine_web_v1_boot_diagnostic_bytes(),
+        3,
+        "diagnostic replacement is truncated to the staged document capacity"
+    );
+    assert_ne!(crate::ffi::test_staged_document(), b"no=");
+    assert_eq!(miso_engine_web_v1_status_ptr(0), 0);
+    assert_eq!(miso_engine_web_v1_resource_ptr(0), 0);
+    assert_eq!(miso_engine_web_v1_buffer_ptr(0, BUFFER_DIAGNOSTIC), 0);
+    assert_eq!(miso_engine_web_v1_boot(3), 0, "refusal invalidates staging");
+    assert_eq!(miso_engine_web_v1_boot_diagnostic_bytes(), 0);
+    assert_eq!(
+        miso_engine_web_v1_document_ptr(MAXIMUM_DOCUMENT_BYTES + 1),
+        0
+    );
+    assert_eq!(miso_engine_web_v1_boot_result(), RESULT_REFUSED_DOCUMENT);
 
     let toml = one_track_session(128);
     let handle = crate::ffi::test_boot(toml.as_bytes(), boot_options(128));
@@ -274,6 +304,19 @@ fn raw_ffi_uses_stable_staging_and_exact_output_quantum_without_growth() {
     let replacement = crate::ffi::test_boot(toml.as_bytes(), options);
     assert_ne!(replacement, 0);
     assert_ne!(replacement, handle);
+    assert_eq!(
+        crate::ffi::test_copy_staging(replacement, BUFFER_SOURCE_ID, b"fixture-source"),
+        RESULT_OK
+    );
+    assert_eq!(
+        crate::ffi::test_fill_source_pcm(replacement, 0.5),
+        RESULT_OK
+    );
+    assert_eq!(
+        miso_engine_web_v1_source_submit(replacement, 14, 1, 0, 2, quantum, 0),
+        RESULT_OK
+    );
+    assert_eq!(miso_engine_web_v1_render(replacement, quantum), RESULT_OK);
     assert_eq!(miso_engine_web_v1_dispose(replacement), RESULT_OK);
 }
 
@@ -337,6 +380,131 @@ fn compile_resource_caps_are_inclusive_and_one_below_rejects() {
         failure
             .diagnostic()
             .starts_with(b"host.budget.parse_projection\t")
+    );
+}
+
+#[test]
+fn quoted_root_shape_keys_self_configure_without_a_second_parser() {
+    for (sample_rate_hz, quantum_frames) in [(48_000, 128), (96_000, 127)] {
+        let mut model = parse_session_toml(include_str!(
+            "../../../fixtures/session/v1/parametric-eq-nine-track.toml"
+        ))
+        .expect("accepted fixture");
+        model.sample_rate_hz = sample_rate_hz;
+        model.quantum_frames = quantum_frames;
+        model.limits.pcm_ring_frames = u64::from(quantum_frames);
+        model.sources[0].sample_rate_hz = sample_rate_hz;
+        model.sources[0].mapping.region.length_samples = u64::from(quantum_frames) * 2;
+        model.tracks.truncate(1);
+        model.routes.truncate(1);
+        let document = canonical_session_toml(&model)
+            .expect("canonical shape fixture")
+            .replacen("sample_rate_hz =", "\"sample_rate_hz\" =", 1)
+            .replacen("quantum_frames =", "\"quantum_frames\" =", 1);
+        let host = AudioWorkletEngineHost::boot(&document.into_bytes(), WebBootOptions::default())
+            .expect("quoted-key document self-configures");
+        assert_eq!(host.status().sample_rate_hz, sample_rate_hz);
+        assert_eq!(host.status().quantum_frames, quantum_frames);
+        assert_eq!(
+            host.options().source_ring_frames,
+            0,
+            "the document-derived ring remains an internal boot choice"
+        );
+    }
+}
+
+#[test]
+fn source_rate_mismatch_is_the_session_validators_typed_refusal() {
+    let mut model = parse_session_toml(include_str!(
+        "../../../fixtures/session/v1/parametric-eq-nine-track.toml"
+    ))
+    .expect("accepted fixture");
+    model.sources[0].sample_rate_hz = 44_100;
+    let document = canonical_session_toml(&model).expect("mismatch canonicalizes");
+    let failure = AudioWorkletEngineHost::boot(document.as_bytes(), WebBootOptions::default())
+        .err()
+        .expect("source mismatch must refuse");
+    assert_eq!(failure.result(), RESULT_REFUSED_DOCUMENT);
+    assert_eq!(failure.diagnostic(), b"host.source.rate.mismatch\t$\n");
+}
+
+#[test]
+fn each_boot_option_rule_has_its_own_typed_refusal() {
+    let document = one_track_session(128);
+    for (options, diagnostic) in [
+        (
+            WebBootOptions {
+                struct_size: BOOT_OPTIONS_BYTES - 1,
+                ..boot_options(128)
+            },
+            b"web.options.struct_size\t$\n".as_slice(),
+        ),
+        (
+            WebBootOptions {
+                abi_version: ABI_VERSION - 1,
+                ..boot_options(128)
+            },
+            b"web.options.abi_version\t$\n".as_slice(),
+        ),
+        (
+            WebBootOptions {
+                reserved0: 1,
+                ..boot_options(128)
+            },
+            b"web.options.reserved0\t$\n".as_slice(),
+        ),
+        (
+            WebBootOptions {
+                source_ring_frames: 129,
+                ..boot_options(128)
+            },
+            b"web.options.source_ring_frames\t$\n".as_slice(),
+        ),
+    ] {
+        let failure = AudioWorkletEngineHost::boot(document.as_bytes(), options)
+            .err()
+            .expect("invalid option must refuse");
+        assert_eq!(failure.result(), RESULT_REFUSED_OPTIONS);
+        assert_eq!(failure.diagnostic(), diagnostic);
+    }
+    AudioWorkletEngineHost::boot(document.as_bytes(), WebBootOptions::default())
+        .expect("all-zero options select defaults");
+}
+
+#[test]
+fn exact_retained_total_is_checked_as_one_budget_not_independent_caps() {
+    let document = one_track_session(128);
+    let source_ring_frames = 1 << 20;
+    let baseline = AudioWorkletEngineHost::boot(
+        document.as_bytes(),
+        WebBootOptions {
+            source_ring_frames,
+            ..boot_options(128)
+        },
+    )
+    .expect("baseline boot");
+    let resources = baseline.resources();
+    let exact = resources
+        .bridge_retained_bytes
+        .checked_add(resources.graph_session_plus_plan_bytes)
+        .and_then(|total| total.checked_add(resources.source_total_bytes))
+        .expect("independent exact retained sum");
+    drop(baseline);
+    let failure = AudioWorkletEngineHost::boot(
+        document.as_bytes(),
+        WebBootOptions {
+            source_ring_frames,
+            maximum_memory_bytes: exact - 1,
+            ..boot_options(128)
+        },
+    )
+    .err()
+    .expect("one byte below exact aggregate must refuse");
+    assert_eq!(failure.result(), RESULT_REFUSED_BUDGET);
+    assert!(
+        failure
+            .diagnostic()
+            .starts_with(b"host.budget.retained_exact\t")
     );
 }
 

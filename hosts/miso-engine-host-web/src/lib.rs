@@ -28,10 +28,10 @@ use miso_engine_effect_contract::{
 };
 use miso_engine_host_core::{
     CompiledSession, ConsoleSoloState, EffectControlProducer, EffectObservationHandle, EffectRack,
-    HostConsoleRequest, HostPrepareCaps, HostShapePolicy, PreparedHost, SourceControlError,
-    SourceSubmission, compile_host_model, compiled_session_shape, control_table_bytes,
-    parse_host_session, prepare_host_runtime_with_console, source_id_arena_bytes,
-    validate_source_rates,
+    HostConsoleRequest, HostPrepareCaps, HostShapePolicy, PrepareDiagnostics, PrepareRejection,
+    PreparedHost, SourceControlError, SourceSubmission, compile_host_model, compiled_session_shape,
+    control_table_bytes, parse_host_session, prepare_host_runtime_with_console,
+    source_id_arena_bytes, validate_source_rates,
 };
 use miso_engine_session::CompileCaps;
 
@@ -74,8 +74,8 @@ pub const RESULT_ABI_MISMATCH: u32 = 2;
 pub const RESULT_WRONG_STATE: u32 = 3;
 /// A supplied buffer is too small.
 pub const RESULT_BUFFER_TOO_SMALL: u32 = 4;
-/// Preparation or compilation was rejected.
-pub const RESULT_PREPARE_REJECTED: u32 = 5;
+/// Boot refused the effective memory budget.
+pub const RESULT_REFUSED_BUDGET: u32 = 5;
 /// A bounded source queue is full.
 pub const RESULT_BACKPRESSURE: u32 = 6;
 /// Requested capability is unsupported.
@@ -95,8 +95,6 @@ pub const RESULT_INTERNAL: u32 = 255;
 pub const RESULT_REFUSED_DOCUMENT: u32 = RESULT_INVALID_ARGUMENT;
 /// Boot refused the options structure.
 pub const RESULT_REFUSED_OPTIONS: u32 = RESULT_ABI_MISMATCH;
-/// Boot refused the effective memory budget.
-pub const RESULT_REFUSED_BUDGET: u32 = RESULT_PREPARE_REJECTED;
 /// Boot was attempted while a live handle already existed.
 pub const RESULT_REFUSED_LIFECYCLE: u32 = RESULT_WRONG_STATE;
 
@@ -860,8 +858,15 @@ impl AudioWorkletEngineHost {
             ));
         }
         let caps = prepare_caps(&session, options, source_ring_frames, memory_budget);
-        let (ready, resources) = compile_ready(session, &caps, options, projection.report)
-            .map_err(BootFailure::document)?;
+        let (ready, resources) = compile_ready(session, &caps, options, projection.report)?;
+        let exact_retained = exact_retained_bytes(&resources)?;
+        if exact_retained > memory_budget {
+            return Err(BootFailure::budget(
+                "host.budget.retained_exact",
+                exact_retained,
+                memory_budget,
+            ));
+        }
         let buffers = allocate_buffers(projection)?;
         let backend = selected_backend();
         Ok(Self {
@@ -2332,6 +2337,21 @@ impl BootFailure {
         }
     }
 
+    fn preparation(failure: PrepareDiagnostics) -> Self {
+        let result = match failure.kind() {
+            PrepareRejection::Resource | PrepareRejection::Platform => RESULT_REFUSED_BUDGET,
+            PrepareRejection::Session
+            | PrepareRejection::Shape
+            | PrepareRejection::Effect
+            | PrepareRejection::Builtin
+            | PrepareRejection::Graph => RESULT_REFUSED_DOCUMENT,
+        };
+        Self {
+            result,
+            diagnostic: failure.into_bytes(),
+        }
+    }
+
     fn budget(code: &str, projected: u64, budget: u64) -> Self {
         Self {
             result: RESULT_REFUSED_BUDGET,
@@ -2340,6 +2360,12 @@ impl BootFailure {
             )
             .into_bytes(),
         }
+    }
+}
+
+impl From<Vec<u8>> for BootFailure {
+    fn from(diagnostic: Vec<u8>) -> Self {
+        Self::document(diagnostic)
     }
 }
 
@@ -2522,6 +2548,19 @@ fn projected_retained_bytes(
     })
 }
 
+/// Exact aggregate retained bytes reported by the fully prepared engine plus the browser bridge.
+///
+/// `source_total_bytes` owns the source-ring PCM charge plus source overhead. The graph row does
+/// not repeat it, and `bridge_retained_bytes` already includes the compiled model and the facade's
+/// control table/ID arena. These three disjoint rows are therefore the complete retained set.
+fn exact_retained_bytes(report: &WebResourceReport) -> Result<u64, BootFailure> {
+    report
+        .bridge_retained_bytes
+        .checked_add(report.graph_session_plus_plan_bytes)
+        .and_then(|total| total.checked_add(report.source_total_bytes))
+        .ok_or_else(|| BootFailure::fixed(RESULT_REFUSED_BUDGET, "host.budget.arithmetic"))
+}
+
 /// Map the facade's one typed source rejection onto the frozen browser result codes.
 ///
 /// The facade owns the vocabulary and the diagnostic strings; the browser ABI owns the numbers.
@@ -2604,11 +2643,11 @@ fn compile_ready(
     caps: &HostPrepareCaps,
     options: WebBootOptions,
     mut report: WebResourceReport,
-) -> Result<(ReadyOwnership, WebResourceReport), Vec<u8>> {
+) -> Result<(ReadyOwnership, WebResourceReport), BootFailure> {
     let console = console_request(options, session.quantum().0)
         .ok_or_else(|| fixed_diagnostic("web.console.config"))?;
     let (host, handles) = prepare_host_runtime_with_console(&session, caps, &console)
-        .map_err(|value| value.into_bytes())?;
+        .map_err(BootFailure::preparation)?;
     let engine = host.report;
 
     let control_table = control_table_bytes(engine.source_count as usize)
@@ -2702,7 +2741,7 @@ fn compile_ready(
     effect_controls.resize_with(total_effects as usize, || None);
     for producer in handles.effect_controls {
         let Some(track) = track_index.get(producer.track_id.as_ref()).copied() else {
-            return Err(fixed_diagnostic("web.console.effects"));
+            return Err(fixed_diagnostic("web.console.effects").into());
         };
         let rack = match producer.rack {
             EffectRack::Simd1 => 0_usize,
@@ -2713,10 +2752,10 @@ fn compile_ready(
         let offset: u32 = counts[..rack].iter().sum();
         let slot = (effect_base[track] + offset + producer.effect_index) as usize;
         let Some(entry) = effect_controls.get_mut(slot) else {
-            return Err(fixed_diagnostic("web.console.effects"));
+            return Err(fixed_diagnostic("web.console.effects").into());
         };
         if entry.is_some() {
-            return Err(fixed_diagnostic("web.console.effects"));
+            return Err(fixed_diagnostic("web.console.effects").into());
         }
         *entry = Some(producer);
     }
@@ -2738,7 +2777,7 @@ fn compile_ready(
     let observation_present = vec![false; track_count];
     for handle in handles.effect_observations {
         let Some(track) = track_index.get(handle.track_id.as_ref()).copied() else {
-            return Err(fixed_diagnostic("web.console.observation"));
+            return Err(fixed_diagnostic("web.console.observation").into());
         };
         let rack = match handle.rack {
             EffectRack::Simd1 => 0_usize,
@@ -2749,10 +2788,10 @@ fn compile_ready(
         let offset: u32 = counts[..rack].iter().sum();
         let slot = (effect_base[track] + offset + handle.effect_index) as usize;
         let Some(entry) = effect_observations.get_mut(slot) else {
-            return Err(fixed_diagnostic("web.console.observation"));
+            return Err(fixed_diagnostic("web.console.observation").into());
         };
         if entry.is_some() {
-            return Err(fixed_diagnostic("web.console.observation"));
+            return Err(fixed_diagnostic("web.console.observation").into());
         }
         // The frame carries one gain-reduction slot per track, so every observed effect of a track
         // points at that track and the poll folds them max-magnitude into the one slot.
@@ -2892,31 +2931,31 @@ fn checked_sum_prepare(values: impl IntoIterator<Item = u64>) -> Result<u64, Vec
 }
 
 fn boxed_zero_u8(bytes: u32) -> Result<Box<[u8]>, u32> {
-    let count = usize::try_from(bytes).map_err(|_| RESULT_PREPARE_REJECTED)?;
+    let count = usize::try_from(bytes).map_err(|_| RESULT_REFUSED_BUDGET)?;
     let mut value = Vec::new();
     value
         .try_reserve_exact(count)
-        .map_err(|_| RESULT_PREPARE_REJECTED)?;
+        .map_err(|_| RESULT_REFUSED_BUDGET)?;
     value.resize(count, 0);
     Ok(value.into_boxed_slice())
 }
 
 fn boxed_zero_f32(samples: u64) -> Result<Box<[f32]>, u32> {
-    let count = usize::try_from(samples).map_err(|_| RESULT_PREPARE_REJECTED)?;
+    let count = usize::try_from(samples).map_err(|_| RESULT_REFUSED_BUDGET)?;
     let mut value = Vec::new();
     value
         .try_reserve_exact(count)
-        .map_err(|_| RESULT_PREPARE_REJECTED)?;
+        .map_err(|_| RESULT_REFUSED_BUDGET)?;
     value.resize(count, 0.0);
     Ok(value.into_boxed_slice())
 }
 
 fn boxed_uninit_planes(channels: u32) -> Result<Box<[MaybeUninit<&'static [f32]>]>, u32> {
-    let count = usize::try_from(channels).map_err(|_| RESULT_PREPARE_REJECTED)?;
+    let count = usize::try_from(channels).map_err(|_| RESULT_REFUSED_BUDGET)?;
     let mut value = Vec::new();
     value
         .try_reserve_exact(count)
-        .map_err(|_| RESULT_PREPARE_REJECTED)?;
+        .map_err(|_| RESULT_REFUSED_BUDGET)?;
     value.resize_with(count, MaybeUninit::uninit);
     Ok(value.into_boxed_slice())
 }

@@ -203,3 +203,26 @@ The three lane-index defects the banked drain can have -- a missed member queue,
 lane, a constant lane -- are **not** reachable from this file: the web host's fixtures are one and
 four tracks and the mix cannot tell identical tracks apart. They are gated end to end, per track,
 through the post-matrix meters, in `crates/miso-engine-host-core/tests/input_liveness_console.rs`.
+
+## Issue #240 — atomic document-owned boot
+
+Every product mutation below was applied to the working tree on 2026-08-28, the named gate was
+run, RED was observed, and the mutation was reverted before the next row. The browser resource
+gate also runs its own copied-fixture mutation suite, so those self-tests never alter this tree.
+
+| gate | mutation | observed red |
+|---|---|---|
+| `quoted_root_shape_keys_self_configure_without_a_second_parser` | report `compiled.quantum() + 1` from the shared document-shape helper | the raw quoted-key 48k/128 and 96k/127 boot fixture refuses `host.source.ring_frames` instead of self-configuring |
+| `test-web-audioworklet.mjs` one-module-lifetime assertion | fetch and compile the selected wasm module a second time before `addModule` | the exact event sequence is `compile, compile` instead of `compile, addModule` |
+| `boot_transient_budget::pinned_multiplier_bounds_the_worst_accepted_parse_and_model_build_peak` | disable the pre-parse projection refusal | the one-byte-under-budget leg reaches parsing and fails `one byte below the pre-parse projection refuses` |
+| same native peak fixture | stale the pinned multiplier from `80` to `1` | measured peak `34,875,248` exceeds `1 × 1,048,576` |
+| `check-web-boot-budget.mjs` (run by `check-web-audioworklet.sh`) | disable the pre-parse projection refusal in the wasm artifact | the refused leg returns live handle `1` where zero is required, before it can report typed `refusedBudget`; the unmutated accepted leg independently pins the wasm high-water mark |
+| `dense_refusal_diagnostics_are_count_bounded_and_finish_under_one_second` | remove the encoder's 64-item `take` | the exact line-count pin sees `16,384` lines instead of `64` (the real tree also keeps the adversarial population below the one-second wall bound) |
+| `raw_ffi_validates_handle_layout_overflow_and_transactional_failure` (F2/F4) | return address `1` instead of zero for an invalid handle's status answer | whole-structure emptiness fails: `left: 1, right: 0` |
+| same raw lifecycle fixture | skip the live-host check in `boot` | boot-while-live reports `0` instead of typed lifecycle result `3` |
+| `each_boot_option_rule_has_its_own_typed_refusal` | skip the nonzero-`reserved0` check | the invalid option boots and the fixture fails `invalid option must refuse`; the same table independently pins struct size, ABI version, and ring divisibility diagnostics |
+| `session_validation_owns_the_launch_rate_set` (F3) | make `is_launch_sample_rate` accept every rate | `44,099` compiles where the exact launch-tier pin requires `sample_rate.unsupported_at_launch` |
+| `ring_zero_derives_from_the_document_and_matches_the_explicit_value` (capi) | bypass the zero-ring derivation before shared preparation | zero refuses `resource.limit_exceeded` instead of matching the explicit derived ring |
+| `exact_retained_total_is_checked_as_one_budget_not_independent_caps` | omit `graph_session_plus_plan_bytes` from the independent retained aggregate | one byte below the true aggregate boots; the fixture fails `one byte below exact aggregate must refuse` |
+| `check-web-audioworklet.sh` frozen export set | delete `miso_engine_web_v1_boot_result` from the expected list | the artifact reports it as an unexpected wasm export and the exact diff is printed |
+| `check-browser-expected-resources.py --self-test` plus direct/browser oracle | copied-fixture mutations perturb every resource row and each of the three frozen PCM digests | all 26 mutations are refused; identity, command, and observation PCM digest movement is never admitted as a re-pin |

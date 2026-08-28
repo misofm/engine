@@ -642,6 +642,11 @@ pub(crate) fn test_boot(bytes: &[u8], options: WebBootOptions) -> u32 {
 }
 
 #[cfg(test)]
+pub(crate) fn test_staged_document() -> Vec<u8> {
+    BOOT_STAGING.with(|staging| staging.borrow().document.clone())
+}
+
+#[cfg(test)]
 pub(crate) fn test_copy_staging(handle: u32, kind: u32, bytes: &[u8]) -> u32 {
     with_host_mut(handle, RESULT_INVALID_ARGUMENT, |host| {
         let target = match kind {

@@ -7,8 +7,8 @@
 use miso_engine_host_core::{
     HostPrepareCaps, HostPrepareReport, HostShapePolicy, LAUNCH_SAMPLE_RATES_HZ, PrepareRejection,
     SOURCE_STALL_TOLERANCE_MS, SourceControlError, SourceSubmission, compile_host_session,
-    control_table_bytes, default_source_ring_frames, prepare_host_runtime, prepare_host_session,
-    source_id_arena_bytes,
+    control_table_bytes, default_source_ring_frames, diagnostic_lines, prepare_host_runtime,
+    prepare_host_session, source_id_arena_bytes,
 };
 use miso_engine_source::{HostChunkError, SourceSeekError};
 
@@ -555,4 +555,28 @@ fn no_console_request_attaches_nothing_and_charges_nothing() {
         "an unattached console changes no processor byte"
     );
     assert_eq!(plain.report, baseline);
+}
+
+/// The measured pre-#240 refusal regression accumulated all 16k bad automation rows and took
+/// seconds. The encoder is the shared choke point for those rows: it must stop pulling the lazy
+/// iterator at 64, and the full adversarial population must remain comfortably inside the 1 s CI
+/// wall budget.
+#[test]
+fn dense_refusal_diagnostics_are_count_bounded_and_finish_under_one_second() {
+    use std::time::{Duration, Instant};
+
+    const INVALID_ROWS: usize = 16_384;
+    let started = Instant::now();
+    let bytes = diagnostic_lines(
+        (0..INVALID_ROWS).map(|index| ("automation.invalid", format!("$.automation[{index}]"))),
+    );
+    let elapsed = started.elapsed();
+    assert_eq!(
+        bytes.iter().filter(|byte| **byte == b'\n').count(),
+        miso_engine_host_core::diagnostics::MAXIMUM_PREPARE_DIAGNOSTIC_LINES
+    );
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "bounded dense refusal took {elapsed:?}"
+    );
 }
