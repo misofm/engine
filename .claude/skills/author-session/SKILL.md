@@ -116,7 +116,7 @@ appear in the parameter metadata — this list is the authority.
 | param / automation `channel` | `left`, `right`, `both` |
 | param / automation `unit` | `db`, `hz`, `milliseconds`, `samples`, `linear`, `ratio` |
 | automation `shape` | `step`, `linear`, `exponential` |
-| automation `target.rack` | `simd1`, `dynamic`, `simd2` |
+| automation `target.rack` | `simd1`, `dynamic`, `simd2`, `builtins` (the strip itself -- see below) |
 | route source `tap` | `input`, `post_input_builtins`, `post_simd1`, `post_dynamic`, `post_simd2_pre_fader`, `post_fader`, `post_matrix` |
 
 `link_mode` is the detector link, not a channel mode. `dual_mono` keeps the two lanes fully
@@ -147,21 +147,47 @@ lane detectors (the usual "stereo-linked" behaviour); `average` links by their m
   offline or stem render — which runs with no command stream at all — can never come out
   soloed. If you want a strip silent *in the document*, set its `left_mute`/`right_mute`.
 
-### Automation reaches rack effect parameters only
+### Automation targets: rack effects, and now the strip
 
 An `automation` target is `{ entity_id, rack, effect_id, parameter_id, channel }`, all five
-required, `rack` being `simd1`/`dynamic`/`simd2`. **The only thing a session file can automate is a
-parameter of an effect in a rack**, on a track (submixes and outputs carry no racks). The builtin
-strip — `trim_db`, `hpf_hz`, `lpf_hz`, `delay_samples`, `fader_db`, `mute`, the matrix/pan
-coefficients — has **no session automation path at all**.
+required, on a track (submixes and outputs carry no racks). `rack` is one of four tokens.
 
-The metadata marks `fader_db`, `mute` and `matrix_*` `"liveUpdatable": true` with smoothing, and
-the metadata's `commandKinds` additionally carries `solo` (9), which has no builtin row at all
-because it is console state rather than a strip parameter. That is all the *command plane*, a host
-driving the engine over the control protocol, not this surface — do not read it as permission to
-automate any of it here. Issue **#178** owns whether the schema should grow one.
-To ride level meanwhile, automate a dB parameter on a rack effect (a compressor's `makeup`) and
-declare it in `params` even at its default so the target resolves.
+**The three effect racks.** `simd1`/`dynamic`/`simd2` name a rack, `effect_id` names an effect in
+it, and `parameter_id`/`channel` must match a `(parameter_id, channel)` pair the effect actually
+declares in its `params` — so declare anything you intend to automate even at its default, or the
+target does not resolve.
+
+**`rack = "builtins"`** (issue **#178**, ruled by #210's D2) names the strip itself. The strip is a
+chassis, not a rack of instances, so there is nothing to identify — but V1 has no optional keys, so
+`effect_id` is still required and carries the fixed literal `"strip"`. Anything else is
+`reference.missing_entity` at `$.automation[N].target.effect_id`.
+
+`parameter_id` is a builtin parameter ABI id, and only the ones the render plane can be *told* to
+change are accepted:
+
+| id | parameter | `channel` |
+| --- | --- | --- |
+| 1 | `polarity_invert` | `left`, `right` or `both` |
+| 2 | `trim_db` | `left`, `right` or `both` |
+| 5 | `fader_db` | `left`, `right` or `both` |
+| 6 | `mute` | `left`, `right` or `both` |
+| 7-10 | `matrix_ll`, `matrix_lr`, `matrix_rl`, `matrix_rr` | `both` only |
+
+`hpf_hz` (3), `lpf_hz` (4) and `delay_samples` (11) are **refused** —
+`reference.missing_entity` at `$.automation[N].target.parameter_id`. They are prepared-only: there
+is no post-preparation write path, so a span addressed at one could only ever be inert, and the
+schema says so rather than accepting it and doing nothing. A matrix coefficient addressed
+`left` or `right` is `schema.invalid_enum` at `…target.channel`: the 2x2 is one shared object.
+
+**What a valid target does today: nothing.** The automation table is consumed by nothing — for the
+strip *or* for the three effect racks. No lowering reads it. A target authors, round-trips, and
+renders nothing; builtin automation *rendering* is gated on issue #140's span feed. So write these
+if you are authoring a document for a future feed or for the SDK's builder, and do not expect a
+render to change.
+
+The *command plane* is a different surface and is genuinely live: a host driving the engine over
+the control protocol can move `trim_db` (kind 10), `polarity_invert` (11), `fader_db` (3), `mute`
+(4), pan/matrix (1/2) and `solo` (9) on a running plan. That is not this file.
 
 ## Values a PASS does not vouch for
 
@@ -194,10 +220,12 @@ ones that pass while meaning something other than what you assumed.
 - **`boolean` and `enumeration` parameters are not free scalars.** Check the metadata's
   `domainName`: `boolean` takes exactly `0.0` or `1.0`, and `enumeration` takes a value listed in
   that parameter's `enumChoices`. Both carry `unitName: "linear"`, which is a carrier, not a licence.
-- **An automation `target.entity_id` must name a track**, and the target must be a rack effect
-  parameter. There is no session path to the builtin strip — a fader or trim ride you "wrote" as
-  automation is silently not expressible, not merely unvalidated. See "Automation reaches rack
-  effect parameters only" above, and issue #178.
+- **An automation `target.entity_id` must name a track**, and the target must resolve — either to
+  a `(parameter_id, channel)` pair a rack effect declares in `params`, or to one of the strip's
+  eight automatable builtin ids under `rack = "builtins"`. Both resolve at validation and **neither
+  renders**: the automation table is consumed by nothing today, so a fader or trim ride you "wrote"
+  as automation is valid, canonical, and inert. See "Automation targets: rack effects, and now the
+  strip" above, and `docs/rulings/builtins-input-liveness-d2.md`.
 
 ## The validation loop
 

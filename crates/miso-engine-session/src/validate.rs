@@ -1,8 +1,8 @@
 //! Semantic validation owned by issue 004, deliberately before graph/DSP/effect resolution.
 use crate::{
-    AutomationShape, Diagnostic, DiagnosticCode, DiagnosticSet, Effect, MatrixOrPan, ParameterUnit,
-    Rack, RackName, RenderMode, RouteDestination, RouteSource, SESSION_SCHEMA_VERSION_V1,
-    SessionTomlV1, Source, Track, diagnostic::PathRef,
+    AutomationShape, AutomationTarget, Diagnostic, DiagnosticCode, DiagnosticSet, Effect,
+    MatrixOrPan, ParameterChannel, ParameterUnit, Rack, RackName, RenderMode, RouteDestination,
+    RouteSource, SESSION_SCHEMA_VERSION_V1, SessionTomlV1, Source, Track, diagnostic::PathRef,
 };
 use miso_engine_core::{SampleRateHz, is_launch_sample_rate};
 use std::collections::{HashMap, HashSet};
@@ -507,6 +507,101 @@ fn validate_route_destination(
     }
 }
 
+/// The one `effect_id` a `rack = "builtins"` automation target may name.
+///
+/// The strip is a single fixed object, not a rack of instances, so there is nothing to identify --
+/// but Session V1 has no optional keys (`docs/SESSION_SCHEMA_V1.md`), so the field cannot simply be
+/// omitted. It carries a fixed, validated literal instead, which is the C2 rule applied to a key
+/// whose value is determined: the document still declares five target fields and the reader still
+/// reads five, and a target that names anything else is refused rather than silently ignored.
+pub const BUILTIN_AUTOMATION_EFFECT_ID_V1: &str = "strip";
+
+/// The builtin parameters a session may name as an automation target, `(id, per_lane)`.
+///
+/// # Why this table is spelled here
+///
+/// `miso-engine-session` depends on `miso-engine-core` and nothing else -- that is a policy
+/// (`scripts/check-session-policy.sh`), not an accident -- so this crate cannot read
+/// `BUILTIN_PARAMETER_DESCRIPTORS_V1` and this is a deliberate second spelling of it, exactly as
+/// `scripts/check-parameter-metadata-v1.py` is a second spelling of the command-kind list. The two
+/// are held together by `miso_engine_builtins_compiler`'s
+/// `builtin_automation_targets_match_the_parameter_abi`, which can see both crates and compares
+/// them row by row: a descriptor whose `update_rate` moves without this table moving is red there.
+///
+/// # Why the list is exactly the block-target rows
+///
+/// A target names something the render plane can be *told* to change. The rows that declare
+/// `BuiltinParameterUpdateRate::PreparedOnly` -- `hpf_hz` (3), `lpf_hz` (4) and `delay_samples`
+/// (11) -- have no post-preparation write path at all, so an automation span addressed at one of
+/// them could only ever be inert syntax. They are refused, and the refusal is the ruling: the
+/// deferred filter tier and the delay ruling are reopened by adding a row here, not by writing a
+/// session that quietly does nothing.
+///
+/// `per_lane` is the descriptor's `BuiltinParameterScope`: a `PerLane` parameter may be addressed
+/// `left`, `right` or `both`, while the four matrix coefficients are one shared 2x2 and can only
+/// be addressed `both`.
+pub const BUILTIN_AUTOMATION_TARGETS_V1: [(u32, bool); 8] = [
+    // `polarity_invert` and `trim_db`: live since #210 phase 3.
+    (1, true),
+    (2, true),
+    // `fader_db` and `mute`: live since #140 B.
+    (5, true),
+    (6, true),
+    // `matrix_ll/lr/rl/rr`: live since #137 D1, and `MatrixShared`.
+    (7, false),
+    (8, false),
+    (9, false),
+    (10, false),
+];
+
+/// Validate one `rack = "builtins"` automation target against the builtin parameter ABI.
+///
+/// # What this does and does not unblock (#178, ruled by #210's D2)
+///
+/// It extends the target **vocabulary** and nothing else. No lowering reads the session's
+/// automation table -- for this rack or for any of the other three -- so a valid `builtins` target
+/// is valid-and-inert syntax today: it authors, it round-trips, it survives the canonical writer,
+/// and it renders nothing. Builtin automation *rendering* is gated on issue #140's span feed,
+/// whose natural destination is the very drains #210 phases 1 and 3 built
+/// (`TrackInputRecordV1`, `TrackFaderRecordV1`, `TrackControlRecordV1`), because a span's
+/// block-first-sample semantics already match the drain contract. Nothing here builds that feed
+/// and nothing here should be read as having built it.
+fn validate_builtin_automation_target(
+    target: &AutomationTarget,
+    path: &PathRef<'_>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let target_path = path.key("target");
+    if target.effect_id.as_str() != BUILTIN_AUTOMATION_EFFECT_ID_V1 {
+        error(
+            diagnostics,
+            DiagnosticCode::MissingEntityReference,
+            &target_path.key("effect_id"),
+            "builtins automation must name the strip",
+        );
+    }
+    let Some((_, per_lane)) = BUILTIN_AUTOMATION_TARGETS_V1
+        .iter()
+        .find(|(id, _)| *id == target.parameter_id)
+    else {
+        error(
+            diagnostics,
+            DiagnosticCode::MissingEntityReference,
+            &target_path.key("parameter_id"),
+            "parameter ID is not an automatable builtin parameter",
+        );
+        return;
+    };
+    if !*per_lane && target.channel != ParameterChannel::Both {
+        error(
+            diagnostics,
+            DiagnosticCode::InvalidEnum,
+            &target_path.key("channel"),
+            "shared builtin parameters are addressed as both",
+        );
+    }
+}
+
 fn validate_automation(
     session: &SessionTomlV1,
     index: &Index<'_>,
@@ -539,35 +634,42 @@ fn validate_automation(
         };
         if let Some(track) = track {
             let rack = match automation.target.rack {
-                RackName::Simd1 => &track.simd1,
-                RackName::Dynamic => &track.dynamic,
-                RackName::Simd2 => &track.simd2,
+                RackName::Simd1 => Some(&track.simd1),
+                RackName::Dynamic => Some(&track.dynamic),
+                RackName::Simd2 => Some(&track.simd2),
+                // The strip is not a rack of effects, so there is nothing to search; the arm
+                // below validates the target against the builtin parameter ABI instead.
+                RackName::Builtins => None,
             };
-            // Rack size is resource-bounded; this is one of two intentional local searches.
-            let effect = rack
-                .effects
-                .iter()
-                .find(|effect| effect.id == automation.target.effect_id);
-            if let Some(effect) = effect {
-                // Parameter count is resource-bounded; keep the local `(id, channel)` search.
-                if !effect.params.iter().any(|parameter| {
-                    parameter.parameter_id == automation.target.parameter_id
-                        && parameter.channel == automation.target.channel
-                }) {
+            if let Some(rack) = rack {
+                // Rack size is resource-bounded; this is one of two intentional local searches.
+                let effect = rack
+                    .effects
+                    .iter()
+                    .find(|effect| effect.id == automation.target.effect_id);
+                if let Some(effect) = effect {
+                    // Parameter count is resource-bounded; keep the local `(id, channel)` search.
+                    if !effect.params.iter().any(|parameter| {
+                        parameter.parameter_id == automation.target.parameter_id
+                            && parameter.channel == automation.target.channel
+                    }) {
+                        error(
+                            diagnostics,
+                            DiagnosticCode::MissingEntityReference,
+                            &path.key("target").key("parameter_id"),
+                            "parameter/channel is absent from selected effect",
+                        );
+                    }
+                } else {
                     error(
                         diagnostics,
                         DiagnosticCode::MissingEntityReference,
-                        &path.key("target").key("parameter_id"),
-                        "parameter/channel is absent from selected effect",
+                        &path.key("target").key("effect_id"),
+                        "effect ID is absent from selected rack",
                     );
                 }
             } else {
-                error(
-                    diagnostics,
-                    DiagnosticCode::MissingEntityReference,
-                    &path.key("target").key("effect_id"),
-                    "effect ID is absent from selected rack",
-                );
+                validate_builtin_automation_target(&automation.target, &path, diagnostics);
             }
         }
 

@@ -2389,6 +2389,20 @@ mod tests {
                 automation_id: automation.id.clone(),
                 segments: automation.segments.clone(),
             },
+            // Issue #178, ruled by #210's D2: the strip's own automation target. It is in the
+            // round-trip corpus rather than in a test of its own because the fourth `RackName`
+            // token changes no message shape -- `RACK` was already a `Wire::U8` -- so the thing
+            // worth proving is that the byte still survives encode/decode with the new value.
+            SessionEditV1::SetAutomationTarget {
+                automation_id: automation.id.clone(),
+                target: AutomationTarget {
+                    entity_id: automation.target.entity_id.clone(),
+                    rack: RackName::Builtins,
+                    effect_id: id("strip"),
+                    parameter_id: 2,
+                    channel: ParameterChannel::Left,
+                },
+            },
         ];
         while edits.len() < 64 {
             edits.push(SessionEditV1::SetSessionId {

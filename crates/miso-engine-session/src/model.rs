@@ -539,6 +539,19 @@ closed_tokens! {
         Dynamic => "dynamic",
         /// Second homogeneous rack.
         Simd2 => "simd2",
+        /// The strip's own builtin section: trim, polarity, filters, fader, mute and the
+        /// matrix/pan pair (issue #178, ruled by #210's D2).
+        ///
+        /// Not a rack of swappable modules -- it is the chassis. The token joins `RackName`
+        /// anyway, and does not get a vocabulary of its own, because an automation target's
+        /// shape is `{ entity_id, rack, effect_id, parameter_id, channel }` and the strip is
+        /// addressed through exactly that shape: `effect_id` carries the fixed validated literal
+        /// `"strip"` (the schema has no optional keys, so the field must carry a value rather
+        /// than be omitted) and `parameter_id` carries a builtin descriptor id.
+        ///
+        /// **Appended, never inserted.** The wire code is the declaration index plus one, so
+        /// `builtins` is `4` and no existing rack renumbers.
+        Builtins => "builtins",
     }
 }
 

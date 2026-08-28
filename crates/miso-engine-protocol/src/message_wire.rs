@@ -202,6 +202,11 @@ pub enum ParameterRack {
     Simd1 = 1,
     Dynamic = 2,
     Simd2 = 3,
+    /// The strip's own builtin section (#178, ruled by #210's D2). Appended, so no existing wire
+    /// code moves; `RackName::wire()` derives the same `4` from the declaration order of the
+    /// session enum, and `parameter_enum_wire_mappings_are_exhaustive_and_roundtrip` is what holds
+    /// the two hand-written tables to each other.
+    Builtins = 4,
 }
 /// Fixed B2a parameter channel registry.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -250,6 +255,7 @@ impl ParameterRack {
             miso_engine_session::RackName::Simd1 => Self::Simd1,
             miso_engine_session::RackName::Dynamic => Self::Dynamic,
             miso_engine_session::RackName::Simd2 => Self::Simd2,
+            miso_engine_session::RackName::Builtins => Self::Builtins,
         }
     }
 
@@ -258,6 +264,7 @@ impl ParameterRack {
             Self::Simd1 => miso_engine_session::RackName::Simd1,
             Self::Dynamic => miso_engine_session::RackName::Dynamic,
             Self::Simd2 => miso_engine_session::RackName::Simd2,
+            Self::Builtins => miso_engine_session::RackName::Builtins,
         }
     }
 }

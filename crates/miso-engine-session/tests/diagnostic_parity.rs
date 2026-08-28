@@ -59,6 +59,8 @@ fn set_sidechain(model: &mut SessionTomlV1, rack: RackName, source: RouteSource)
                 effects: vec![effect],
             }
         }
+        // The strip carries no effects and so no sidechain; the cases below never name it.
+        RackName::Builtins => unreachable!("the builtins token addresses no effect rack"),
     }
 }
 macro_rules! case {

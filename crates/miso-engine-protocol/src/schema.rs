@@ -10,6 +10,7 @@ pub(crate) const fn parameter_rack_wire(value: ParameterRack) -> u8 {
         ParameterRack::Simd1 => 1,
         ParameterRack::Dynamic => 2,
         ParameterRack::Simd2 => 3,
+        ParameterRack::Builtins => 4,
     }
 }
 
@@ -20,6 +21,7 @@ pub(crate) const fn parameter_rack_from_wire(
         1 => Ok(ParameterRack::Simd1),
         2 => Ok(ParameterRack::Dynamic),
         3 => Ok(ParameterRack::Simd2),
+        4 => Ok(ParameterRack::Builtins),
         _ => Err(crate::DecodeError::InvalidTlv),
     }
 }
@@ -1618,6 +1620,9 @@ mod tests {
             (ParameterRack::Simd1, 1),
             (ParameterRack::Dynamic, 2),
             (ParameterRack::Simd2, 3),
+            // #178, ruled by #210's D2: the strip's own builtin section. Appended, so the three
+            // existing codes are untouched.
+            (ParameterRack::Builtins, 4),
         ] {
             assert_eq!(value as u64, u64::from(wire));
             assert_eq!(parameter_rack_wire(value), wire);

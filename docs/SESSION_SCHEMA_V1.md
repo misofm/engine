@@ -41,6 +41,22 @@ canonical serialization never turn such a model into an engine session. A source
 V1 output is exactly two planar `f32` channels, matching its explicit 2x2 matrices. A track maps
 independent left and right source channels and declares independent builtins, fader/mute values,
 ordered `simd1`/`dynamic`/`simd2` racks, and either a smoothed pan pair or smoothed 2x2 matrix.
+
+An automation target's `rack` is one of four tokens: the three effect racks `simd1`, `dynamic`,
+`simd2`, and -- since issue #178, ruled by #210's D2 -- `builtins`, the strip's own fixed section.
+The strip is a chassis rather than a rack of instances, so it has no `effect_id` to identify; the
+key is required all the same (V1 has no optional fields) and carries the fixed validated literal
+`"strip"`. Its `parameter_id` is a builtin parameter ABI id, restricted to the rows that declare
+`blockTarget`: `polarity_invert` (1), `trim_db` (2), `fader_db` (5), `mute` (6) and the four
+`matrix_*` coefficients (7-10). The prepared-only rows -- `hpf_hz` (3), `lpf_hz` (4),
+`delay_samples` (11) -- are **refused**, because a span addressed at a parameter with no
+post-preparation write path could only ever be inert. `channel` follows the row's scope: the
+per-lane rows accept `left`, `right` or `both`, the four shared matrix coefficients only `both`.
+
+**The automation table is consumed by nothing today.** No lowering reads it, for the strip or for
+any of the three effect racks: a valid target is valid-and-inert syntax that authors, round-trips
+and renders nothing. Extending the vocabulary unblocks authoring and the SDK's builder; builtin
+automation *rendering* is gated on issue #140's span feed.
 Builtin cutoffs are finite nonnegative hertz values, but their DSP/Nyquist relationships are not
 issue-004 validation.
 
@@ -58,7 +74,10 @@ asymmetric upstream of the mono-collapse seam, so it declines that track's colla
 shift the session asked for, so it contributes zero to any node's declared latency and does not
 appear in the compiled plan's route timings or inserted delays. Its rings are charged to the
 plan's existing `graph_delay_bytes` row. It is prepared-only, changed through the ordinary
-transactional session edit, exactly as `trim_db` and the cutoffs are. Effect identity is tagged `native` with a stable `effect_id`, or `cid` with
+transactional session edit, as the cutoffs are -- but **no longer as `trim_db` is**: issue #210
+phase 3 made `trim_db` and `polarity_invert` live (command kinds 10 and 11) and automatable, under
+the ruling in `docs/rulings/builtins-input-liveness-d2.md`. `hpf_hz`, `lpf_hz` and `delay_samples`
+are the three lane keys that remain prepared-only. Effect identity is tagged `native` with a stable `effect_id`, or `cid` with
 opaque nonempty text. Native availability/descriptor domains/latency/tail are downstream issue-011
 work; CID/package validity is downstream issue-029 work.
 

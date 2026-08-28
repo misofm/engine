@@ -16,7 +16,19 @@ zero on both lanes -- almost every track -- is not lowered to a delay node at al
 program is the one it had before the feature existed.
 
 Each input lane applies polarity, trim, an optional RBJ-second-order-Butterworth-response HPF,
-then an optional LPF. The production realization is the topology-preserving two-integrator
+then an optional LPF.
+
+**Polarity and trim are live since issue #210 phase 3** (command kinds 11 and 10, builtin
+parameter rows 1 and 2, both `BlockTarget` with `LinearNUpdates`). They are one coefficient:
+`InputLane::trim_signed` carries the trim magnitude in its value and the polarity in its sign, so a
+trim ride retargets the magnitude, a polarity flip retargets the sign, and both declick through the
+same linear ramp -- a flip is the ramp passing through zero, which is why it costs no DSP of its
+own. The ramping kernel is `input_chain_ramp_block`; the settled path, which is what a lane no
+command has ever addressed runs, is the untouched `input_chain_block_elided` behind one `bool`.
+`hpf_hz` and `lpf_hz` remain prepared-only at the price recorded in
+`docs/rulings/builtins-input-liveness-d2.md`, and that ruling also carries the obligation any
+future filter liveness inherits: it must invalidate the prepared-identity elision plan, which
+trim liveness does not touch because the plan reads only the SVF section words. The production realization is the topology-preserving two-integrator
 state-variable recurrence of master plan #83 §4.2, and there is exactly **one** of it: the block
 kernel `miso_engine_lane::kernels::svf_block`, generic over `Lane` and instantiated at `f32`,
 `Simd4` and `Simd8` from one source. A scalar track is that body at `WIDTH = 1` over planar
