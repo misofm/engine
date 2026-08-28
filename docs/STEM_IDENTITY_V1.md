@@ -57,10 +57,10 @@ pin so each answer is independently hand-derivable.
 
 | Vector | Depth | Channels x frames | Samples by frame | Canonical bytes (hex) | Identity |
 | --- | ---: | ---: | --- | --- | --- |
-| `pcm16-mono-boundaries` | 16 | 1 x 5 | `0 | 32767 | -32768 | 1 | -1` | `0000ff7f00800100ffff` | `sha256:342f56e6d16f7cbcd69bbc003e4e16d0fa45335f3756701db3a6649f19d6042c` |
-| `pcm16-stereo-boundaries` | 16 | 2 x 3 | `(0,32767) | (-32768,1) | (-1,0)` | `0000ff7f00800100ffff0000` | `sha256:0320b11905302eb840cd06ab90b0549114e6ee1c89233e928ebe21b8c4964ef2` |
-| `pcm24-mono-boundaries` | 24 | 1 x 5 | `0 | 8388607 | -8388608 | 1 | -1` | `000000ffff7f000080010000ffffff` | `sha256:de48b490bab45d06c72b240d7e46efa95d07deb216eb7f1f2afc7a7e14a4b832` |
-| `pcm24-stereo-boundaries` | 24 | 2 x 3 | `(0,8388607) | (-8388608,1) | (-1,0)` | `000000ffff7f000080010000ffffff000000` | `sha256:f014aa907c6c9894ab1a1d3b05a82f31b6ddb82f5cbc1e61fdc2d7c35245e4c6` |
+| `pcm16-mono-boundaries` | 16 | 1 x 5 | `0 \| 32767 \| -32768 \| 1 \| -1` | `0000ff7f00800100ffff` | `sha256:342f56e6d16f7cbcd69bbc003e4e16d0fa45335f3756701db3a6649f19d6042c` |
+| `pcm16-stereo-boundaries` | 16 | 2 x 3 | `(0,32767) \| (-32768,1) \| (-1,0)` | `0000ff7f00800100ffff0000` | `sha256:0320b11905302eb840cd06ab90b0549114e6ee1c89233e928ebe21b8c4964ef2` |
+| `pcm24-mono-boundaries` | 24 | 1 x 5 | `0 \| 8388607 \| -8388608 \| 1 \| -1` | `000000ffff7f000080010000ffffff` | `sha256:de48b490bab45d06c72b240d7e46efa95d07deb216eb7f1f2afc7a7e14a4b832` |
+| `pcm24-stereo-boundaries` | 24 | 2 x 3 | `(0,8388607) \| (-8388608,1) \| (-1,0)` | `000000ffff7f000080010000ffffff000000` | `sha256:f014aa907c6c9894ab1a1d3b05a82f31b6ddb82f5cbc1e61fdc2d7c35245e4c6` |
 
 All four rows have committed headerless `.pcm` files. The stereo row at each depth also has a
 committed `.wav` fixture. The reference WAVE path MUST strip the two different wrappers and
