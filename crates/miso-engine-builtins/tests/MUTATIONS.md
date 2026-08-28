@@ -125,3 +125,30 @@ The rule these gate is stated on `miso_engine_rack::BankStage::process_mono` and
 the half it computed. `sanitized_input` sums both channels, so the collapsed answer is twice the
 left count rather than equal to it — a body that duplicated the mask but summed one channel passes a
 duplication check and fails this one.
+
+## Issue #210 phase 3 — the live input trim and polarity
+
+Driver: one mutation at a time on the committed tree, `cargo test -p miso-engine-builtins --test
+input_liveness` / `--test input_liveness_mono`, tree restored between rows. Rows M18-M30 live in
+the crates that own the mutated code and are logged in their own `MUTATIONS.md`.
+
+| # | mutation | file | test | result |
+|---|---|---|---|---|
+| P3-M1 | `InputStage::new` seeds the ramp from `L::splat(1.0)` instead of `coef.trim` | `builtins/src/lib.rs` | `input_liveness` (6 tests) | RED — the settled words are no longer the prepared words, so class-A OFF fails at its premise |
+| P3-M2 | the dispatch is always-ramping (`if self.ramping` → `if true`) | `builtins/src/lib.rs` | `input_liveness::the_settled_arm_leaves_the_ramp_words_untouched` | RED — the countdown words come back as `-frames`. **No digest can see this**: the two arms are bit-identical in the plane, which is the elision proof's whole content, so the ramp state is the only observable and this row is why the test exists |
+| P3-M3 | the D11 snap accumulates (`select(done, target, current + step)` → `current + step`) | `lane/src/kernels/builtins.rs` | `input_liveness::the_trim_ramp_is_bit_identical_to_the_parameter_smoother` (5 tests) | RED — the final update is one ulp from the oracle's exact assignment |
+| P3-M4 | the countdown is decremented after the `done` compare | `lane/src/kernels/builtins.rs` | same (3 tests) | RED — the ramp runs one frame long. This row is why the oracle reads the coefficient out of **one block's rendered plane** rather than a block per frame: `settle` restates the snap, so a per-frame partition repairs the off-by-one between frames and the test would measure `settle` |
+| P3-M5 | the kernel countdown is never loaded from the authoritative `u32` | `builtins/src/lib.rs` | same | RED — the first ramping block sees a zero countdown and snaps immediately |
+| P3-M6 | a trim ride clears an existing polarity flip (drop the sign-preserving branch) | `builtins/src/lib.rs` | `input_liveness::trim_and_polarity_do_not_overwrite_each_other` | RED |
+| P3-M7 | the flip negates the current word rather than the target's magnitude | `builtins/src/lib.rs` | `input_liveness::a_polarity_flip_crosses_zero_and_settles_at_the_reprepared_coefficient` | RED — a flip issued mid-ramp settles somewhere that is not `-trim_signed` |
+| P3-M8 | the lane selector is ignored and every command writes both lanes | `builtins/src/lib.rs` | `input_liveness::a_lane_selector_addresses_exactly_the_lanes_it_names` | RED |
+| P3-M9 | `coef.trim` is not republished from the ramp at a retarget | `builtins/src/lib.rs` | `input_liveness` (2 tests) | RED — a zero-window retarget renders the old coefficient |
+| P3-M10 | `coef.trim` is not republished after a ramping block | `builtins/src/lib.rs` | `input_liveness` (2 tests) | RED |
+| P3-M11 | the bank bounds the lane by `MAX_BANK_LANES` rather than by its members | `builtins/src/lib.rs` | `input_liveness::a_bank_refuses_a_retarget_addressed_past_its_members` | RED — a command lands in a padding lane no track owns |
+| P3-M12 | the live trim domain is widened past `trim_db`'s declared one | `builtins/src/lib.rs` | `input_liveness::the_live_trim_domain_is_the_declared_one` | RED |
+| P3-M13 | the ramping body gains the elision dispatch, reading channel 0's plan for both | `builtins/src/lib.rs` | `input_liveness` (3 tests) | RED — the arms disagree on an asymmetric-plan bank. The row exists because "the ramping path ignores the plan" is a *decision*, and this is the shape of getting it wrong by trying to be clever |
+| P3-M14 | the witness compares the applied coefficient only, not the whole ramp record | `builtins/src/lib.rs` | `input_liveness_mono::an_asymmetric_retarget_declines_the_lane_on_the_admitting_block` | RED — at the retarget block `current` has not moved, so the lane is still called symmetric and that block collapses, publishing the left channel's new ramp on the right one |
+| P3-M15 | the collapsed body does not mirror the trim ramp onto the right channel | `builtins/src/lib.rs` | `input_liveness_mono` (2 tests) | RED — the right channel's ramp freezes and the first dual block after the disengage renders the wrong right plane |
+| P3-M16 | `channels_agree` covers the integrators only | `builtins/src/lib.rs` | `input_liveness_mono` (2 tests) | RED — an asymmetrically-ridden bank claims the M3 proof |
+| P3-M17 | `desymmetrize` drops the trim-ramp half of the copy | `builtins/src/lib.rs` | — | **EQUIVALENT, and deliberately so.** `process_mono` mirrors the record at the bottom of every collapsed block, so the two are already equal when the disengage boundary is reached. The copy is kept as a restatement of the whole-per-channel-state law -- the line a future one-plane path that stopped mirroring would otherwise have to remember -- exactly as `BankChain::disengage_collapse` keeps its redundant `collapse_channels_agree = true`. P3-M15, which removes the mirroring instead, is the red row for the same property |
+| P3-M17b | `settle` drops the D11 restatement `current[lane] = target[lane]` | `builtins/src/lib.rs` | — | **EQUIVALENT**: the kernel's step 3 already assigned that exact word on the frame the countdown reached zero, and a `debug_assert_eq!` in `settle` now states so. P3-M3 and P3-M4, which break the kernel's assignment, are the red rows |

@@ -317,3 +317,22 @@ that the digest comparison discriminates.
   load-bearing for exactly one of the session's two claims, and the doctest that proves the other
   is proving the plan's property rather than the session's. Both are asserted, and neither is
   assumed.
+
+## Issue #210 phase 3 — the live input trim and polarity, end to end
+
+Driver: `cargo test -p miso-engine-host-core --test input_liveness_console`, one mutation at a
+time, tree restored between rows. The mutated code lives in `miso-engine-builtins-compiler` and
+`miso-engine-graph`; the rows are logged there as P3-M21 through P3-M26. What this file records is
+why the *end-to-end* form is the one that catches them.
+
+Three of the four drain defects -- a missed member queue, an off-by-one lane, a constant lane --
+are **invisible to the mix**. The fixture's eight tracks are identical and sum into one output, so
+silencing any one of them produces the same sum, and a command that landed on the wrong track
+renders bit-identically to one that landed on the right one. The per-track post-matrix meter is
+what makes the bank lane index observable at all, and it is why
+`a_command_moves_exactly_the_addressed_track` reads meters rather than samples.
+
+The fourth -- draining in `process` rather than `begin_block` -- is invisible to *any* single-block
+observation: the record still reaches the right lane, one block late relative to the collapse
+dispatch. It shows only in the census, and only because `BankChain::run` reads the witness between
+the drain and the gather.
