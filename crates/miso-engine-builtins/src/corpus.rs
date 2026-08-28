@@ -25,8 +25,8 @@
 use miso_engine_lane::Lane;
 
 use crate::{
-    BuiltinChain, BuiltinParameters, ChannelParameters, FaderStage, InputStage, Matrix2x2,
-    MatrixStage, PreparedInputTrack,
+    BuiltinChain, BuiltinLaneSelector, BuiltinParameters, ChannelParameters, FaderStage,
+    InputStage, Matrix2x2, MatrixStage, PreparedInputTrack,
 };
 
 /// Independent tracks in every case; a multiple of the widest backend.
@@ -36,7 +36,7 @@ pub const LANES: usize = 8;
 pub const FRAMES: usize = 256;
 
 /// Number of corpus cases.
-pub const CASE_COUNT: usize = 6;
+pub const CASE_COUNT: usize = 8;
 
 /// Human-readable name of each case, indexed by case number.
 pub const CASE_NAMES: [&str; CASE_COUNT] = [
@@ -46,6 +46,12 @@ pub const CASE_NAMES: [&str; CASE_COUNT] = [
     "input_stage/nonfinite",
     "fader_mute",
     "matrix_ramp",
+    // Issue #210 phase 3. The two ramping input bodies had no cross-target coverage at all until
+    // these landed: every case above renders the *settled* chain, and `input_chain_ramp_block`
+    // and `input_chain_ramp_block_mono` are the only kernels in this crate a wasm build could
+    // have got wrong without moving a single pin.
+    "input_stage/trim_ramp",
+    "input_stage/trim_ramp_mono",
 ];
 
 /// `xorshift64*`. Integer-only, so every target builds the same input sequence.
@@ -100,12 +106,36 @@ fn lane_parameters(lane: usize) -> BuiltinParameters {
     }
 }
 
+/// The prepared parameters of one lane with the two channels **designed identically**.
+///
+/// The collapse-eligible shape, and the one case 7 needs: `lane_channel_symmetry` is a bitwise
+/// comparison of every designed word, so a bank built from [`lane_parameters`] -- whose whole point
+/// is that the two channels differ -- can never be dispatched one-plane. Every lane still differs
+/// from every other lane, which is what keeps a cross-lane leak visible.
+fn symmetric_lane_parameters(lane: usize) -> BuiltinParameters {
+    let index = lane as f32;
+    let channel = ChannelParameters {
+        polarity_invert: lane % 2 == 1,
+        trim_db: index - 3.0,
+        hpf_hz: 60.0 + index * 17.0,
+        lpf_hz: 1_500.0 + index * 211.0,
+        fader_db: 2.0 - index,
+        muted: lane % 5 == 3,
+    };
+    BuiltinParameters {
+        left: channel,
+        right: channel,
+        matrix: Matrix2x2::IDENTITY,
+        smoothing_samples: 129,
+    }
+}
+
 /// The per-lane input signal of one case.
 fn lane_signal(case: usize, lane: usize, channel: usize) -> Vec<f32> {
     let mut rng = Rng::new(0x8500_0000 ^ (case as u64) << 16 ^ (lane as u64) << 8 ^ channel as u64);
     (0..FRAMES)
         .map(|frame| match case {
-            0 | 4 | 5 => rng.next_sample(),
+            0 | 4 | 5 | 6 | 7 => rng.next_sample(),
             1 => f32::from(u8::from(frame == lane + channel)),
             2 => f32::from_bits(1 + (rng.next_u32() & 0x007F_FFFF)),
             _ => match (frame + lane) % 8 {
@@ -200,6 +230,95 @@ pub fn case_values<L: Lane>(case: usize) -> Vec<f32> {
                 let mut stage = FaderStage::<L>::new(&faders);
                 stage.process(&mut left_block, &mut right_block, FRAMES);
             }
+            6 | 7 => {
+                // Issue #210 phase 3: the ramping input chain, dual (case 6) and collapsed
+                // (case 7).
+                //
+                // Every value is keyed by the *global* lane, so a group's contents do not depend
+                // on the width. The windows are per lane and coprime with the split below, so each
+                // lane's ramp settles on a different frame and some settle *inside* the second
+                // block -- which is what puts the D11 snap, the countdown reload and the tail on
+                // both sides of a block boundary and inside the digest.
+                // Case 7's tracks are **symmetric**: a collapsed body is dispatched only under a
+                // witness that compares every designed word between the two channels, so a
+                // one-plane case built on this corpus's deliberately asymmetric `lane_parameters`
+                // would be describing a dispatch the engine cannot make. Case 6 keeps the
+                // asymmetric set, which is what a dual block is for.
+                let tracks: Vec<PreparedInputTrack> = (first..first + L::WIDTH)
+                    .map(|lane| {
+                        if case == 6 {
+                            prepared[lane].input.stage.lane_track(0)
+                        } else {
+                            BuiltinChain::new(48_000, symmetric_lane_parameters(lane))
+                                .expect("corpus parameters prepare")
+                                .input
+                                .stage
+                                .lane_track(0)
+                        }
+                    })
+                    .collect();
+                let mut stage = InputStage::<L>::new(&tracks);
+                for slot in 0..L::WIDTH {
+                    let lane = first + slot;
+                    let window = 37_u32 + 11 * lane as u32;
+                    // Case 7 is the collapsed body, which is only ever dispatched under a witness
+                    // that requires the two channels' ramp records to agree -- so its retargets
+                    // are `Both`, exactly as a real collapsed chain's must be. Case 6 rides the
+                    // two lanes apart, which is what a dual block is for.
+                    let (trim_channels, flip_channels) = if case == 6 {
+                        (BuiltinLaneSelector::Left, BuiltinLaneSelector::Right)
+                    } else {
+                        (BuiltinLaneSelector::Both, BuiltinLaneSelector::Both)
+                    };
+                    let gain = crate::db_gain(6.0 - 2.5 * lane as f32).expect("corpus trim gain");
+                    stage.set_trim_db(slot, trim_channels, gain, window);
+                    // A polarity flip on some lanes: the same coefficient, retargeted through
+                    // zero, which is the phase's whole declick story and is arithmetic no other
+                    // case reaches.
+                    if lane % 3 != 2 {
+                        stage.set_polarity_invert(slot, flip_channels, lane % 2 == 0, window + 5);
+                    }
+                }
+                // Three blocks, so a ramp crosses two boundaries and the countdown is reloaded
+                // from the authoritative `u32` twice.
+                let first_split = (FRAMES / 4) * L::WIDTH;
+                let second_split = (FRAMES / 2) * L::WIDTH;
+                if case == 6 {
+                    let report = stage.process(
+                        &mut left_block[..first_split],
+                        &mut right_block[..first_split],
+                        FRAMES / 4,
+                    );
+                    counters[0] += report.sanitized_input as f32;
+                    let report = stage.process(
+                        &mut left_block[first_split..second_split],
+                        &mut right_block[first_split..second_split],
+                        FRAMES / 4,
+                    );
+                    counters[0] += report.sanitized_input as f32;
+                    let report = stage.process(
+                        &mut left_block[second_split..],
+                        &mut right_block[second_split..],
+                        FRAMES - FRAMES / 2,
+                    );
+                    counters[0] += report.sanitized_input as f32;
+                } else {
+                    for (offset, end, frames) in [
+                        (0, first_split, FRAMES / 4),
+                        (first_split, second_split, FRAMES / 4),
+                        (second_split, left_block.len(), FRAMES - FRAMES / 2),
+                    ] {
+                        let report = stage.process_mono(&mut left_block[offset..end], frames);
+                        counters[0] += report.sanitized_input as f32;
+                        counters[1] += report.recovered_left_state as f32;
+                        counters[2] += report.recovered_right_state as f32;
+                    }
+                    // The seam. A collapsed chain duplicates its one plane before anything
+                    // downstream reads the other, so the case publishes what the strip publishes
+                    // rather than the ungathered scratch.
+                    right_block.copy_from_slice(&left_block);
+                }
+            }
             _ => {
                 // Every value is keyed by the *global* lane, so a group's contents do not depend
                 // on the width -- which is the whole point of the corpus.
@@ -285,5 +404,17 @@ pub const BUILTINS_DIGESTS: [[u8; 32]; CASE_COUNT] = [
         0x8b, 0x41, 0x66, 0x6e, 0xbe, 0xcf, 0x76, 0x06, 0x1e, 0x91, 0x27, 0x88, 0xa2, 0x1c, 0x0a,
         0xcf, 0x87, 0x1f, 0xe0, 0x68, 0x5b, 0xdf, 0x62, 0x66, 0x3b, 0x8c, 0x11, 0x30, 0x87, 0xeb,
         0x2a, 0xee,
+    ],
+    // input_stage/trim_ramp (#210 phase 3), pinned from the scalar `Lane` instantiation
+    [
+        0x02, 0x37, 0xec, 0xaf, 0x96, 0x40, 0x27, 0xaa, 0x10, 0xb9, 0x74, 0xe6, 0xf3, 0xb6, 0x9a,
+        0x8e, 0x8c, 0x15, 0x8e, 0x51, 0x2b, 0xed, 0xe7, 0xd9, 0x28, 0x5d, 0xf7, 0x55, 0xc9, 0x04,
+        0x27, 0xbe,
+    ],
+    // input_stage/trim_ramp_mono (#210 phase 3), pinned from the scalar `Lane` instantiation
+    [
+        0x5d, 0xe8, 0xcd, 0xe7, 0x32, 0x31, 0x77, 0xdc, 0x04, 0xb5, 0xbf, 0x6c, 0x76, 0xf5, 0xd7,
+        0x76, 0x44, 0x18, 0x92, 0x02, 0xf3, 0x4d, 0x16, 0xce, 0x9a, 0xe2, 0xaa, 0xc8, 0x9b, 0x56,
+        0xff, 0xaa,
     ],
 ];

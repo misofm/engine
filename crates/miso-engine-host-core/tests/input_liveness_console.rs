@@ -16,6 +16,23 @@
 //! 3. **The collapse census follows the commands.** An asymmetric ride declines the ridden track
 //!    and nothing else; a symmetric ride declines nothing; and putting the ridden track back does
 //!    not restore it.
+//! 4. **The disengage-under-drain window.** A per-lane record drained on the block a collapsed
+//!    chain disengages must reach one channel and not the other, and the block that publishes it
+//!    must render the never-collapsed bits. This is the window the phase's first cut got wrong --
+//!    see `a_per_lane_record_drained_on_the_disengaging_block_reaches_one_channel` -- and it is
+//!    unreachable from any test that pushes its commands before block 0, because the chain has to
+//!    already be collapsed when the record arrives.
+//!
+//! # The never-collapsed oracle
+//!
+//! The last two groups compare the **mono-mapped** fixture against the **stereo-mapped** one. The
+//! stereo arm reads source channels 0 and 1, so `SOURCE` never holds and it never collapses; the
+//! fixture's source carries identical content on both channels, so the two arms are rendering the
+//! same audio through the same coefficients. It is therefore a real never-collapsed oracle for the
+//! collapsing arm rather than a second run of the same path, and
+//! `the_stereo_arm_is_a_never_collapsed_oracle` is what keeps it honest: it asserts the mono arm
+//! actually collapses, the stereo arm actually does not, and that they agree with no commands at
+//! all.
 //!
 //! The fixture is `parametric-eq-bank-console`, the same eight-track banked console
 //! `symmetry_witness.rs` uses, with its right source channel remapped so the structural `SOURCE`
@@ -31,6 +48,11 @@ use miso_engine_host_core::{
     HostConsoleHandlesV1, HostConsoleRequestV1, HostPrepareCaps, HostShapePolicy, PreparedHost,
     SourceSubmission, prepare_host_session, prepare_host_session_with_console,
 };
+
+/// `[collapsed blocks, dual blocks]` over every bank chain. Read only after render is disarmed.
+fn collapses(host: &Host) -> [u64; 2] {
+    host.prepared.plan.bank_collapse_counters()
+}
 
 const SESSION: &str = include_str!("../../../fixtures/session/v1/parametric-eq-bank-console.toml");
 const QUANTUM: usize = 128;
@@ -559,5 +581,237 @@ fn a_symmetric_ride_renders_the_same_bits_collapsed_or_not() {
     assert_eq!(
         collapsed_bits, dual_bits,
         "a collapsed run through a symmetric ride renders the never-collapsed bits"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// 4. The disengage-under-drain window.
+// ---------------------------------------------------------------------------------------------
+
+/// The oracle this group rests on: the stereo arm never collapses, the mono arm does, and with no
+/// commands at all they render the same bytes and the same meters.
+///
+/// Without this every assertion below could be satisfied by two arms that both fail to collapse.
+#[test]
+fn the_stereo_arm_is_a_never_collapsed_oracle() {
+    let mut mono = prepare_with_console(&mono_session());
+    let mut stereo = prepare_with_console(SESSION);
+    let mono_bits = render(&mut mono, 6);
+    let stereo_bits = render(&mut stereo, 6);
+    assert!(
+        collapses(&mono)[0] > 0,
+        "the mono arm must actually collapse: {:?}",
+        collapses(&mono)
+    );
+    assert_eq!(
+        collapses(&stereo)[0],
+        0,
+        "the stereo arm must never collapse: {:?}",
+        collapses(&stereo)
+    );
+    assert_eq!(mono_bits, stereo_bits, "uncommanded arms must agree");
+    assert_eq!(peaks(&mono), peaks(&stereo), "and so must their meters");
+}
+
+/// **The regression this group exists for.** A per-lane record drained on the block a collapsed
+/// chain disengages reaches one channel and not the other.
+///
+/// # The window, and why nothing else in the tree reaches it
+///
+/// Every other asymmetric command in these suites is pushed before block 0, so the chain has never
+/// collapsed when the record arrives and the disengage boundary is never crossed with a drained
+/// record behind it. This test renders first, *then* pushes, which puts the record in the one
+/// place it can do damage:
+///
+/// 1. block `N-1` renders collapsed; `InputStage::process_mono` mirrors the trim-ramp record onto
+///    the right channel;
+/// 2. block `N`'s `begin_block` drains the `Left`-only record and applies it -- the two channels'
+///    records now legitimately differ, which is *why* the witness declines;
+/// 3. `BankChain::run` reads the declining witness and calls `disengage_collapse` ->
+///    `InputStage::desymmetrize`.
+///
+/// The phase's first cut copied the whole per-channel state at step 3, including the ramp, so the
+/// post-drain left record was cloned onto the right channel: a one-lane retarget ramped both
+/// lanes, and because `LIVE` is a latch the chain never collapsed again and the right channel
+/// never recovered. In debug it tripped a `debug_assert` on the render thread; in release it was
+/// wrong bits from the drain block onward, never re-converging.
+///
+/// Red mutation: restore `self.mirror_trim_ramp()` in `InputStage::desymmetrize` -> every arm
+/// below fails from the drain block on, and the debug assertion in `process_mono` does not fire
+/// because the record is equal *there*.
+#[test]
+fn a_per_lane_record_drained_on_the_disengaging_block_reaches_one_channel() {
+    for (label, record) in [
+        (
+            "a mid-window Left trim ride",
+            TrackInputRecordV1::TrimDb {
+                lanes: BuiltinLaneSelector::Left,
+                db: -12.0,
+                smoothing_samples: 256,
+            },
+        ),
+        (
+            "a Left trim snap",
+            TrackInputRecordV1::TrimDb {
+                lanes: BuiltinLaneSelector::Left,
+                db: -30.0,
+                smoothing_samples: 0,
+            },
+        ),
+        (
+            "a mid-window Right polarity flip",
+            TrackInputRecordV1::PolarityInvert {
+                lanes: BuiltinLaneSelector::Right,
+                inverted: true,
+                smoothing_samples: 128,
+            },
+        ),
+        (
+            "a Right polarity snap",
+            TrackInputRecordV1::PolarityInvert {
+                lanes: BuiltinLaneSelector::Right,
+                inverted: true,
+                smoothing_samples: 0,
+            },
+        ),
+    ] {
+        for track in [0_usize, 2, 7] {
+            let mut mono = prepare_with_console(&mono_session());
+            let mut stereo = prepare_with_console(SESSION);
+
+            // Engage the collapse for real before the record exists.
+            assert_eq!(
+                render(&mut mono, 2),
+                render(&mut stereo, 2),
+                "{label} on track {track}: the arms diverged before any command"
+            );
+            assert!(
+                collapses(&mono)[0] > 0,
+                "{label} on track {track}: the chain must be collapsed when the record arrives"
+            );
+
+            push(&mut mono, track, record);
+            push(&mut stereo, track, record);
+
+            assert_eq!(
+                render(&mut mono, 6),
+                render(&mut stereo, 6),
+                "{label} on track {track}: the record leaked into the other channel at the \
+                 disengage boundary"
+            );
+            assert_eq!(
+                peaks(&mono),
+                peaks(&stereo),
+                "{label} on track {track}: per-track meters diverged"
+            );
+            assert!(
+                collapses(&mono)[1] > 0,
+                "{label} on track {track}: the chain must have rendered dual after the command"
+            );
+        }
+    }
+}
+
+/// The same window, then put back: re-equalising the two channels neither re-engages the collapse
+/// nor moves the bits away from the never-collapsed oracle.
+///
+/// The `LIVE` latch and the disengage window interact here, and the interaction is the one that
+/// makes the fix's narrower restore rule safe: after the disengage the right channel's ramp record
+/// is whatever the console addressed to it, which is *nothing yet*, and the second record is what
+/// puts it where the first put the left one. A copy at the boundary would have made the second
+/// record a no-op and hidden the whole episode.
+#[test]
+fn re_equalising_after_a_disengaging_drain_holds_the_never_collapsed_bits() {
+    let mut mono = prepare_with_console(&mono_session());
+    let mut stereo = prepare_with_console(SESSION);
+    let _ = render(&mut mono, 2);
+    let _ = render(&mut stereo, 2);
+    let engaged = collapses(&mono)[0];
+    assert!(engaged > 0);
+
+    for host in [&mut mono, &mut stereo] {
+        push(
+            host,
+            2,
+            TrackInputRecordV1::TrimDb {
+                lanes: BuiltinLaneSelector::Left,
+                db: -12.0,
+                smoothing_samples: 64,
+            },
+        );
+    }
+    assert_eq!(
+        render(&mut mono, 2),
+        render(&mut stereo, 2),
+        "the asymmetric episode diverged"
+    );
+
+    for host in [&mut mono, &mut stereo] {
+        push(
+            host,
+            2,
+            TrackInputRecordV1::TrimDb {
+                lanes: BuiltinLaneSelector::Right,
+                db: -12.0,
+                smoothing_samples: 64,
+            },
+        );
+    }
+    assert_eq!(
+        render(&mut mono, 6),
+        render(&mut stereo, 6),
+        "the re-equalised episode diverged"
+    );
+    assert_eq!(peaks(&mono), peaks(&stereo), "per-track meters diverged");
+    assert_eq!(
+        collapses(&mono)[0],
+        engaged,
+        "the ridden chain must not have collapsed again: `LIVE` is a latch, and re-equal words \
+         alone do not re-arm it"
+    );
+}
+
+/// A **symmetric** record drained on a collapsed block does not disengage, and still renders the
+/// never-collapsed bits.
+///
+/// The positive control for the window: without it, a fix that simply declined every collapse the
+/// moment any record was drained would pass everything above.
+#[test]
+fn a_both_lane_record_drained_while_collapsed_keeps_the_collapse() {
+    let mut mono = prepare_with_console(&mono_session());
+    let mut stereo = prepare_with_console(SESSION);
+    let _ = render(&mut mono, 2);
+    let _ = render(&mut stereo, 2);
+    let engaged = collapses(&mono)[0];
+    assert!(engaged > 0);
+    let dual_before = collapses(&mono)[1];
+
+    for host in [&mut mono, &mut stereo] {
+        for track in 0..TRACKS {
+            push(
+                host,
+                track,
+                TrackInputRecordV1::TrimDb {
+                    lanes: BuiltinLaneSelector::Both,
+                    db: -9.0,
+                    smoothing_samples: 192,
+                },
+            );
+        }
+    }
+    assert_eq!(
+        render(&mut mono, 6),
+        render(&mut stereo, 6),
+        "a `Both` ride drained while collapsed must render the never-collapsed bits"
+    );
+    assert_eq!(peaks(&mono), peaks(&stereo), "per-track meters diverged");
+    assert!(
+        collapses(&mono)[0] > engaged,
+        "the chain kept collapsing through the symmetric ride"
+    );
+    assert_eq!(
+        collapses(&mono)[1],
+        dual_before,
+        "and rendered no dual block on account of it"
     );
 }

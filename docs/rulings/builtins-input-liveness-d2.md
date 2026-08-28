@@ -81,6 +81,26 @@ collapse machinery had to be taught about them in three places:
   becomes two records and therefore two `Desymmetrize` events; `TrackInputRecordV1` carries the
   argument.
 
+**The disengage boundary, and the correction it took.** The first cut of this phase copied the
+input stage's *whole* per-channel state at `desymmetrize` -- integrators and trim ramp -- on the
+"whole per-channel state is restored at the disengage boundary" reading. That reading is wrong for
+the ramp, and adversarial verification found the window: `BankChain::run` drains every slot's
+`begin_block` **before** it reads the collapse witness and runs `disengage_collapse` **after**, so
+on the block a per-lane record ends a collapse the order is *mirror (block N-1) → drain and apply
+(block N) → witness declines → boundary copy*. The two channels are apart at that boundary
+legitimately, and the copy cloned the just-drained left record onto the right channel: a one-lane
+retarget ramped both lanes, and because `LIVE` is a latch the chain never collapsed again and the
+right channel never recovered.
+
+The rule that replaced it is narrower and is the true one: **a stage restores at the disengage
+boundary exactly the per-channel state its one-plane body froze.** `InputStage::process_mono`
+freezes the integrators -- it advances channel `0`'s and leaves channel `1`'s -- so those need the
+boundary. It does not freeze the ramp; it *mirrors* it, at the bottom of every collapsed block, so
+the ramp's restore path is per block and the boundary must leave it alone. The collapse gate's own
+premise -- that a one-plane block is dispatched only when the two channels' ramp records compare
+bit-equal -- is now asserted where it holds, at the top of `process_mono`, rather than where it
+does not.
+
 **Re-engage.** `LIVE` is a latch -- cleared by the drain, never set again within a plan -- exactly
 as it is for `EffectControlRecordV1`. So a track whose channels were driven apart by a per-lane
 trim ride does not re-engage its collapse even after the two words are made equal again. That is

@@ -25,6 +25,8 @@ trim ride retargets the magnitude, a polarity flip retargets the sign, and both 
 same linear ramp -- a flip is the ramp passing through zero, which is why it costs no DSP of its
 own. The ramping kernel is `input_chain_ramp_block`; the settled path, which is what a lane no
 command has ever addressed runs, is the untouched `input_chain_block_elided` behind one `bool`.
+Both ramping bodies -- dual and collapsed -- carry cross-target determinism pins of their own, as
+corpus cases `input_stage/trim_ramp` and `input_stage/trim_ramp_mono`.
 `hpf_hz` and `lpf_hz` remain prepared-only at the price recorded in
 `docs/rulings/builtins-input-liveness-d2.md`, and that ruling also carries the obligation any
 future filter liveness inherits: it must invalidate the prepared-identity elision plan, which

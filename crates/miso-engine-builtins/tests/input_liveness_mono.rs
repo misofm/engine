@@ -370,3 +370,156 @@ fn re_equalising_the_words_restores_the_designed_term_and_nothing_more() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// 4. The disengage-under-drain window, crate-local.
+// ---------------------------------------------------------------------------------------------
+
+/// A retarget applied between a collapsed block and the disengage copy survives the copy.
+///
+/// The crate-local form of `miso-engine-host-core`'s
+/// `a_per_lane_record_drained_on_the_disengaging_block_reaches_one_channel`, and it is here as well
+/// as there for the reason `a_desymmetrized_bank_is_a_never_collapsed_bank` gives: the end-to-end
+/// oracle proves the *strip* agrees, and this proves the input chain's own contribution, so a
+/// regression names the crate rather than the session.
+///
+/// The ordering below is `BankChain::run`'s, in miniature and in its exact order: every slot's
+/// `begin_block` drains **first**, the collapse dispatch reads the witness **second**, and
+/// `disengage_collapse` runs **third**. A retarget applied at step 1 is therefore already in the
+/// stage when `desymmetrize` is reached, and it is the one thing the boundary must not clobber.
+///
+/// Red mutation: restore `self.mirror_trim_ramp()` in `InputStage::desymmetrize` -> the ridden
+/// channel's record is cloned onto the other one and every dual block after the boundary renders
+/// the wrong plane.
+#[test]
+fn a_retarget_between_a_collapsed_block_and_the_disengage_survives_the_copy() {
+    const FRAMES: usize = 32;
+    const BLOCKS: usize = 8;
+    const COLLAPSED: usize = 3;
+    for (backend, width) in BANKS {
+        for lanes_addressed in [BuiltinLaneSelector::Left, BuiltinLaneSelector::Right] {
+            for snap in [0_u32, 96] {
+                let lane_count = width.lanes() as usize;
+                let mut collapsing = bank(backend, width);
+                let mut never = bank(backend, width);
+
+                for block in 0..BLOCKS {
+                    let source = source_block(FRAMES, lane_count, block);
+
+                    // Step 1, on both arms: the drain. It happens at the top of every block, and
+                    // on block `COLLAPSED` it is the drain that makes the two channels differ.
+                    if block == COLLAPSED {
+                        for arm in [&mut collapsing, &mut never] {
+                            arm.set_trim_db(0, lanes_addressed, -21.0, snap)
+                                .expect("trim domain");
+                            arm.set_polarity_invert(1, lanes_addressed, true, snap)
+                                .expect("lane");
+                        }
+                        // Step 2: the witness now declines, which is what ends the collapse.
+                        assert!(
+                            !collapsing.lane_symmetry(0).eligible(),
+                            "{lanes_addressed:?} snap={snap} at {width:?}: the drain must decline \
+                             the lane, or this test is not in the window it claims"
+                        );
+                    }
+
+                    let mut never_left = source.clone();
+                    let mut never_right = source.clone();
+                    never.process(&mut never_left, &mut never_right, FRAMES as u32);
+
+                    if block < COLLAPSED {
+                        let mut plane = source.clone();
+                        collapsing.process_mono(&mut plane, FRAMES as u32);
+                        assert_eq!(bits(&plane), bits(&never_left), "block {block}");
+                        if block + 1 == COLLAPSED {
+                            // Step 3, but *before* the drain: this is the ordinary disengage, and
+                            // it is not the one the regression was about.
+                        }
+                    } else {
+                        if block == COLLAPSED {
+                            // Step 3, after the drain: the boundary the regression was about.
+                            collapsing.desymmetrize();
+                        }
+                        let mut left = source.clone();
+                        let mut right = source.clone();
+                        collapsing.process(&mut left, &mut right, FRAMES as u32);
+                        assert_eq!(
+                            bits(&left),
+                            bits(&never_left),
+                            "{lanes_addressed:?} snap={snap} at {width:?}, block {block}: left"
+                        );
+                        assert_eq!(
+                            bits(&right),
+                            bits(&never_right),
+                            "{lanes_addressed:?} snap={snap} at {width:?}, block {block}: right -- \
+                             a retarget addressed to one lane reached the other at the disengage \
+                             boundary"
+                        );
+                    }
+                }
+
+                for lane in 0..lane_count {
+                    assert_eq!(
+                        bank_trim_ramp_words(&collapsing, lane),
+                        bank_trim_ramp_words(&never, lane),
+                        "lane {lane} at {width:?}: the retained trim-ramp record"
+                    );
+                    assert_eq!(
+                        bank_lane_state_words(&collapsing, lane),
+                        bank_lane_state_words(&never, lane),
+                        "lane {lane} at {width:?}: the retained integrators"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// The disengage copy still restores the **integrators**, which is the half a collapsed block does
+/// freeze.
+///
+/// The complement of the test above, and the reason the fix narrowed the copy rather than deleting
+/// it: `process_mono` advances channel `0`'s integrators and leaves channel `1`'s alone, so those
+/// words genuinely need the boundary. Dropping that half is `a_desymmetrized_bank_is_a_never_-
+/// collapsed_bank`'s standing red mutation (M2-B1); this states the same requirement in the
+/// vocabulary of the narrowed rule.
+///
+/// Red mutation: make `InputStage::desymmetrize` a no-op -> the first dual block's right plane is
+/// wrong for every lane whose high-pass is retaining anything.
+#[test]
+fn the_disengage_copy_still_restores_the_integrators() {
+    const FRAMES: usize = 32;
+    for (backend, width) in BANKS {
+        let lane_count = width.lanes() as usize;
+        let mut collapsing = bank(backend, width);
+        let mut never = bank(backend, width);
+        for block in 0..4 {
+            let source = source_block(FRAMES, lane_count, block);
+            let mut never_left = source.clone();
+            let mut never_right = source.clone();
+            never.process(&mut never_left, &mut never_right, FRAMES as u32);
+            let mut plane = source.clone();
+            collapsing.process_mono(&mut plane, FRAMES as u32);
+        }
+        // Frozen, and therefore different, before the boundary runs.
+        let frozen: Vec<[u32; 8]> = (0..lane_count)
+            .map(|lane| bank_lane_state_words(&collapsing, lane))
+            .collect();
+        let expected: Vec<[u32; 8]> = (0..lane_count)
+            .map(|lane| bank_lane_state_words(&never, lane))
+            .collect();
+        assert_ne!(
+            frozen, expected,
+            "at {width:?} the collapsed arm's right integrators must actually be frozen, or the \
+             assertion below is vacuous"
+        );
+        collapsing.desymmetrize();
+        for (lane, expected) in expected.iter().enumerate() {
+            assert_eq!(
+                &bank_lane_state_words(&collapsing, lane),
+                expected,
+                "lane {lane} at {width:?}: the boundary restores the integrators"
+            );
+        }
+    }
+}

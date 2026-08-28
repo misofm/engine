@@ -336,3 +336,23 @@ The fourth -- draining in `process` rather than `begin_block` -- is invisible to
 observation: the record still reaches the right lane, one block late relative to the collapse
 dispatch. It shows only in the census, and only because `BankChain::run` reads the witness between
 the drain and the gather.
+
+### The disengage-under-drain window
+
+One more defect class this file gates, and the only one the phase actually shipped and had to fix:
+a per-lane record drained on the block a collapsed chain disengages. `BankChain::run` drains every
+slot's `begin_block` before it reads the collapse witness and runs `disengage_collapse` after, so
+the boundary is reached with the two channels' trim-ramp records legitimately apart — and a stage
+that copies the whole per-channel state there clones the just-drained record onto the channel the
+console did not address.
+
+It is unreachable from every other test in these suites, because they all push their commands
+before block 0 and the chain has therefore never collapsed when the record arrives. The gate is
+`a_per_lane_record_drained_on_the_disengaging_block_reaches_one_channel`, which renders first and
+pushes second, and it is red under `P3-M17` (`crates/miso-engine-builtins/tests/MUTATIONS.md`).
+
+The oracle it uses is worth reading before trusting it: the **stereo-mapped** fixture never
+collapses (its two lanes read different source channels) while carrying identical content on both,
+so it is a genuine never-collapsed run of the same audio rather than a second run of the same path.
+`the_stereo_arm_is_a_never_collapsed_oracle` asserts both halves of that — the mono arm collapses,
+the stereo arm does not, and uncommanded they agree.

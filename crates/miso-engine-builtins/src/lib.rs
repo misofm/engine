@@ -988,6 +988,11 @@ impl<L: Lane> InputStage<L> {
     /// channel *is* its left channel, so the right channel's ramp advances exactly as the left
     /// one's did rather than freezing. See [`InputStage::process_mono`] for why the report is
     /// duplicated for the same reason.
+    ///
+    /// **This is the ramp's only restore path, and it runs per block rather than at the disengage
+    /// boundary.** [`InputStage::desymmetrize`] carries the argument for why the boundary is the
+    /// wrong place for it: the drain of the disengaging block sits between the two, and a copy
+    /// there would clobber exactly the record that drain just wrote.
     fn mirror_trim_ramp(&mut self) {
         self.ramp.current[1] = self.ramp.current[0];
         self.ramp.target[1] = self.ramp.target[0];
@@ -1088,6 +1093,14 @@ impl<L: Lane> InputStage<L> {
     /// seam is about to write carries exactly the left plane's recovered samples.
     fn process_mono(&mut self, left: &mut [f32], frames: usize) -> BuiltinProcessReport {
         debug_assert!(plan_is_channel_symmetric(&self.plan));
+        // The collapse gate's own premise, restated where the one-plane body relies on it. A
+        // collapsed block is dispatched only under `all_lanes_symmetric`, which compares the whole
+        // trim-ramp record (`lane_channel_symmetry`), so the record this body is about to advance
+        // for channel `0` and mirror onto channel `1` is a record the two channels already share.
+        // It is asserted here rather than at the disengage boundary because *here* is where it
+        // holds: by the time `desymmetrize` runs, this block's drain may legitimately have moved
+        // one channel's words and not the other's.
+        debug_assert!(self.trim_ramp_channels_agree());
         let report = if self.ramping {
             self.load_countdown();
             let report = input_chain_ramp_block_mono::<L>(
@@ -1139,33 +1152,61 @@ impl<L: Lane> InputStage<L> {
         }
     }
 
-    /// Copies the left channel's whole per-channel state onto the right channel.
+    /// Copies the left channel's **retained integrators** onto the right channel.
     ///
-    /// The collapse's disengage boundary for this stage. The per-channel state of this kernel is
-    /// `InputChainState::section[channel]` -- two `SvfState` words per section, two sections --
-    /// **and, since #210 phase 3, the trim ramp record**: `current`, `target`, `step` and both
-    /// countdowns are per-channel words the ramping kernel reads and writes. `plan`, `members`,
-    /// `active` and the counters are cohort-wide, and `coef.section` is designed and compares
-    /// bit-equal between the channels for every lane of a collapse-eligible bank (which is what
-    /// `DESIGNED` *is*).
+    /// The collapse's disengage boundary for this stage. The integrators are exactly what a
+    /// collapsed run left behind: [`InputStage::process_mono`] advances channel `0`'s and freezes
+    /// channel `1`'s, and by the induction the witness maintains the counterfactual dual run's
+    /// right state *is* the left one, so copying them is not an approximation of that run -- it is
+    /// that run's state. `plan`, `members`, `active` and the counters are cohort-wide, and
+    /// `coef.section` is designed and compares bit-equal between the channels for every lane of a
+    /// collapse-eligible bank (which is what `DESIGNED` *is*).
     ///
-    /// The ramp half is **redundant today and is kept anyway**, which is worth being explicit
-    /// about rather than quietly relying on: [`InputStage::process_mono`] already mirrors the left
-    /// channel's ramp onto the right one at the bottom of every collapsed block, so the two are
-    /// equal when this is reached. What the copy states is the *law* -- the whole per-channel
-    /// state is restored at the disengage boundary -- and it is the line a future one-plane path
-    /// that stopped mirroring per block would otherwise have to remember to add. The debug
-    /// assertion is what keeps the redundancy honest.
+    /// # Why the trim ramp is deliberately **not** copied here
+    ///
+    /// It was, until the disengage-under-drain window was probed. The reasoning that put it here
+    /// -- "the whole per-channel state is restored at the disengage boundary" -- reads well and is
+    /// wrong for this one word set, because the trim ramp has a *second* maintainer that the
+    /// integrators do not: `process_mono` mirrors the whole record onto the right channel at the
+    /// bottom of every collapsed block. So the two channels' records are already equal at the
+    /// **start** of every block, and the only thing that can make them differ before this is
+    /// reached is the one event that must survive:
+    ///
+    /// 1. block `N-1` renders collapsed; `process_mono` mirrors the record;
+    /// 2. block `N`'s `begin_block` drains a `Left`-only trim or polarity record and applies it,
+    ///    which is what makes the two channels differ -- and is why the witness declines;
+    /// 3. `BankChain::run` reads the declining witness and calls `disengage_collapse`, which calls
+    ///    this.
+    ///
+    /// A copy at step 3 clones the *post-drain* left record onto the right channel, so a retarget
+    /// the console addressed to one lane ramps both -- and, because `LIVE` is a latch, the chain
+    /// never collapses again and the right channel never recovers. The integrators have no such
+    /// window: nothing in the drain writes them.
+    ///
+    /// The rule this leaves is narrower than the one it replaces and is the true one: **a stage
+    /// restores at the disengage boundary exactly the per-channel state its one-plane body
+    /// froze.** `process_mono` froze the integrators. It did not freeze the ramp; it mirrored it.
     fn desymmetrize(&mut self) {
-        debug_assert!(
-            self.trim_ramp_channels_agree(),
-            "a collapsed block mirrors the trim ramp, so a disengage cannot find the two apart"
-        );
         self.state.section[1] = self.state.section[0];
-        self.mirror_trim_ramp();
     }
 
     /// The eight live trim-ramp words of one lane. Evidence only.
+    ///
+    /// # What words `6..8` are, and what a test may conclude from them
+    ///
+    /// The first six -- `current`, `target` and `step` per channel -- are the retained ramp and
+    /// mean the same thing at every block boundary. The last two are the **kernel's** countdown
+    /// words, and they are residue: `InputStage::load_countdown` overwrites them from the
+    /// authoritative `[[u32; 8]; 2]` at the top of every ramping block, so what they hold between
+    /// blocks is whatever the last kernel run counted down to, which is `-frames` for a settled
+    /// lane and depends on how the caller partitioned its blocks.
+    ///
+    /// Two consequences, both relied on in the suites: comparing them across two arms is sound
+    /// **only when the arms rendered the same block sizes** (which is what
+    /// `a_symmetric_ride_through_a_collapse_renders_never_collapsed_bits` and its siblings do), and
+    /// asserting they are exactly `+0.0` is exactly the assertion that no ramping block ran, which
+    /// is `the_settled_arm_leaves_the_ramp_words_untouched`'s whole content. Neither is a claim
+    /// about the ramp's *value*; for that, read `current` and `target`.
     fn trim_ramp_words(&self, lane: usize) -> [u32; 8] {
         let read = |value: L| lane_read::<L>(value)[lane].to_bits();
         [

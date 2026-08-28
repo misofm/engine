@@ -150,5 +150,39 @@ the crates that own the mutated code and are logged in their own `MUTATIONS.md`.
 | P3-M14 | the witness compares the applied coefficient only, not the whole ramp record | `builtins/src/lib.rs` | `input_liveness_mono::an_asymmetric_retarget_declines_the_lane_on_the_admitting_block` | RED — at the retarget block `current` has not moved, so the lane is still called symmetric and that block collapses, publishing the left channel's new ramp on the right one |
 | P3-M15 | the collapsed body does not mirror the trim ramp onto the right channel | `builtins/src/lib.rs` | `input_liveness_mono` (2 tests) | RED — the right channel's ramp freezes and the first dual block after the disengage renders the wrong right plane |
 | P3-M16 | `channels_agree` covers the integrators only | `builtins/src/lib.rs` | `input_liveness_mono` (2 tests) | RED — an asymmetrically-ridden bank claims the M3 proof |
-| P3-M17 | `desymmetrize` drops the trim-ramp half of the copy | `builtins/src/lib.rs` | — | **EQUIVALENT, and deliberately so.** `process_mono` mirrors the record at the bottom of every collapsed block, so the two are already equal when the disengage boundary is reached. The copy is kept as a restatement of the whole-per-channel-state law -- the line a future one-plane path that stopped mirroring would otherwise have to remember -- exactly as `BankChain::disengage_collapse` keeps its redundant `collapse_channels_agree = true`. P3-M15, which removes the mirroring instead, is the red row for the same property |
-| P3-M17b | `settle` drops the D11 restatement `current[lane] = target[lane]` | `builtins/src/lib.rs` | — | **EQUIVALENT**: the kernel's step 3 already assigned that exact word on the frame the countdown reached zero, and a `debug_assert_eq!` in `settle` now states so. P3-M3 and P3-M4, which break the kernel's assignment, are the red rows |
+| P3-M17 | `desymmetrize` copies the trim ramp **as well as** the integrators | `builtins/src/lib.rs` | `input_liveness_mono::a_retarget_between_a_collapsed_block_and_the_disengage_survives_the_copy`; `host-core::input_liveness_console` (2 tests) | RED — **see the correction below; this row's polarity is inverted from what it first said** |
+| P3-M17r | `desymmetrize` drops the integrator copy too | `builtins/src/lib.rs` | `input_liveness_mono::the_disengage_copy_still_restores_the_integrators`, `mono_collapse::a_desymmetrized_bank_is_a_never_collapsed_bank` | RED — the integrators are the half a one-plane block genuinely freezes, and they do need the boundary |
+| P3-M44 | `process_mono` stops mirroring the trim ramp | `builtins/src/lib.rs` | `input_liveness_mono` (2 tests) | RED — the per-block mirror is the ramp's **only** restore path once the boundary copy is gone |
+| P3-M46 | the dual ramping body's D11 snap accumulates | `lane/src/kernels/builtins.rs` | `determinism` (both tests, via `input_stage/trim_ramp`) | RED — and therefore red on all three wasm-gate legs |
+| P3-M47 | the one-plane ramping body's D11 snap accumulates | `lane/src/kernels/builtins.rs` | `determinism` (both tests, via `input_stage/trim_ramp_mono`) | RED |
+| P3-M48 | the one-plane ramping body reads the **right** channel's ramp words | `lane/src/kernels/builtins.rs` | — | **EQUIVALENT under the collapse gate, and that is the point.** A one-plane block is dispatched only when `lane_channel_symmetry` says the two channels' whole ramp records compare bit-equal, so `r.target[1]` *is* `r.target[0]` wherever this body runs. The premise is asserted where it holds -- `debug_assert!(self.trim_ramp_channels_agree())` at the top of `InputStage::process_mono` -- which is what makes the equivalence a checked property rather than a hope. It is the same argument `input_chain_block_mono_elided` already makes for reading `plan.elided[0]` |
+
+### Correction: P3-M17's first classification was wrong, and its premise was false
+
+This row originally read *"`desymmetrize` drops the trim-ramp half of the copy — EQUIVALENT"*, on the
+argument that `process_mono` mirrors the record at the bottom of every collapsed block, so the two
+channels are already equal when the disengage boundary is reached.
+
+**The premise is false in one window, and the window is reachable from a legal command stream.**
+`BankChain::run` drains every slot's `begin_block` *before* it reads the collapse witness, and the
+disengage runs *after*. So on the block a per-lane trim or polarity record ends a collapse, the
+order is: mirror (block `N-1`) → drain and apply the record (block `N`) → witness declines →
+`desymmetrize`. The two channels are apart at that boundary, legitimately, and the copy clones the
+just-drained left record onto the right channel: a one-lane retarget ramps both lanes, and because
+`LIVE` is a latch the chain never collapses again and the right channel never recovers. In debug it
+tripped this file's own `debug_assert`; in release it was wrong bits from the drain block onward.
+
+The fix removed the ramp half of the copy, so the row above is now the **mutation** rather than the
+code, and it is red in two crates. The rule that replaced the old one is narrower and true: *a stage
+restores at the disengage boundary exactly the per-channel state its one-plane body froze* --
+`process_mono` freezes the integrators, and it does not freeze the ramp, it mirrors it.
+
+The general lesson for a reader of this file: "equivalent" is a claim about **every reachable
+state**, and a redundancy argument that names only the code paths that write a word has not looked
+at the ones that write it *between* the two sites in question.
+| P3-M17b | `settle` drops the D11 restatement `current[lane] = target[lane]` | `builtins/src/lib.rs` | — | **EQUIVALENT**: the kernel's step 3 already assigned that exact word on the frame the countdown reached zero, and a `debug_assert_eq!` in `settle` states so — which is the difference between this row's argument and P3-M17's original one: the premise here is *checked at run time on every settle*, not asserted in prose. P3-M3 and P3-M4, which break the kernel's assignment, are the red rows |
+
+### Row count
+
+Twenty-three rows in this section: twenty-one red, two argued-equivalent (P3-M17b, P3-M48), each
+with a premise that is asserted in code rather than only in prose.

@@ -1558,12 +1558,14 @@ fn graph_owners() -> Vec<PrimitiveOwner> {
     // silently absorbed.
     //
     // Issue #210 phase 3 moved it 1_216 -> 1_568, and every one of the 352 bytes is a restated
-    // field: `InputStage<Simd8>` gained the trim ramp (four `[f32; 8]` words per channel, 256),
-    // the authoritative `[[u32; 8]; 2]` countdown (64) and the `ramping` flag; the processor
-    // itself gained the third drain's `Box<[Option<Consumer<_>>]>` (16) and the eight-byte
-    // per-lane live-witness array. The consumer array's *heap* is charged separately below, by
-    // `strip_control_array`, which the input row now takes exactly as the fader and matrix rows
-    // already did.
+    // field. `InputStageKernel` is an enum sized by its **larger** variant, so the growth is
+    // `InputStage<Simd8>`'s whether or not the host selects eight lanes: the trim ramp is four
+    // `[f32; 8]` words per channel (256) and the authoritative countdown is `[[u32; 8]; 2]` (64).
+    // The processor itself gained the third drain's `Box<[Option<Consumer<_>>]>` (16), the
+    // eight-byte per-lane live-witness array and the `ramping` flag, and eight bytes of tail
+    // padding: 256 + 64 + 16 + 8 + 8 = 352. The consumer array's *heap* is charged separately
+    // below, by `strip_control_array`, which the input row now takes exactly as the fader and
+    // matrix rows already did.
     assert_eq!(
         builtin_bank_processor, 1_568,
         "primitive builtin bank processor"
