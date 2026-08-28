@@ -17,15 +17,23 @@ about the **name's** visibility, not the payload's.
 
 The inventory is mechanical, not sampled. `git ls-files` was tokenised with
 `\b[A-Za-z_][A-Za-z0-9_]*\b` over every tracked text file (51 binary files skipped), and every token
-matching `V1`/`_V1`/`_v1` was collected: **589 distinct spellings over 7 514 hit lines**. Each was
-classified; the two proof greps at the bottom re-derive the same partition from the post-rename
-tree.
+containing `v1` or `V1` **in any position** was collected -- not only the trailing-suffix shape, so
+that `v1_`-prefixed test names and infix spellings were caught too. That is **604 distinct
+spellings over 11 827 lines** on `origin/main`. Each was classified; the two proof greps at the
+bottom re-derive the same partition from the post-rename tree.
 
 | | count |
 |---|---|
-| distinct spellings found | 589 |
-| **class 1** -- renamed | **420** |
+| distinct spellings found | 604 |
+| **class 1** -- renamed | **425** |
 | **class 2** -- kept | **169** |
+| not a version at all | **10** |
+
+The last row is the tokenizer's own noise, listed once so no line is unaccounted for: `fnv1a64`
+(the FNV-1a hash), `v128` and `v128_bitselect` (the Wasm SIMD vector type), `inv10i`, `inv10r`,
+`inv11i`, `inv11r` and `v1a` (SVF state-variable names, where the `1` is a section index), `v19` (a
+legacy-research heading), and `v1_envelope` (the local holding the *first* of the migration test's
+two descriptors -- the same `DESCRIPTOR_V1`/`DESCRIPTOR_V2` datum, ruled class 2 below).
 
 ## Scope: which trees were rewritten
 
@@ -653,6 +661,35 @@ in this PR.
 | `verify_response_oracle_tolerances_v1` | `verify_response_oracle_tolerances` | `tools/miso-engine-audit/src/fixture_builtins.rs` |
 | `verify_response_partition_equality_v1` | `verify_response_partition_equality` | `tools/miso-engine-audit/src/fixture_builtins.rs` |
 
+#### `tools/miso-engine-audit`, the prefix shape — 5
+
+Five spellings carry the version as a **prefix**, which a trailing-suffix scan misses. They are
+test names in `tools/miso-engine-audit/src/fixture_builtins.rs`.
+
+| old | new | declared in |
+|---|---|---|
+| `v1_check_rejects_all_twenty_four_format_mutations` | `check_rejects_all_twenty_four_format_mutations` | `tools/miso-engine-audit/src/fixture_builtins.rs` |
+| `v1_check_rejects_benchmark_identity_parameter_and_pcm_hash_mutations` | `check_rejects_benchmark_identity_parameter_and_pcm_hash_mutations` | `tools/miso-engine-audit/src/fixture_builtins.rs` |
+| `v1_check_rejects_manifest_grammar` | `check_rejects_manifest_grammar` | `tools/miso-engine-audit/src/fixture_builtins.rs` |
+| `v1_check_rejects_owned_jsonl_tuple_mutations` | `check_rejects_owned_jsonl_tuple_mutations` | `tools/miso-engine-audit/src/fixture_builtins.rs` |
+| `v1_owned_jsonl_parsers_reject_duplicate_extra_reordered_and_wrong_variants` | `owned_jsonl_parsers_reject_duplicate_extra_reordered_and_wrong_variants` | `tools/miso-engine-audit/src/fixture_builtins.rs` |
+
+## The one logic change, and why a renames-only PR has one
+
+`fixture_builtins.rs`'s `--check` reachability self-test forbids the **authoring** functions from
+being reachable through the read-only checker, by scanning the checker's source for their call
+spellings with a bare `contains`. Two of those spellings are `cases()` and `diagnostics()`.
+
+Before this PR, `expected_response_cases_v1()` and `expected_diagnostics_v1()` did not contain
+them: the `_v1` supplied an identifier boundary by accident. De-versioned, they do, and the gate
+went red on two functions it never meant to forbid.
+
+The fix states the boundary the list always meant. `calls_authoring` matches only where the
+character before the match is not part of an identifier, so the list forbids the authoring
+function rather than every name whose tail happens to spell it. The gate is strictly no weaker --
+every call it caught before, it still catches -- and it no longer depends on a suffix that no
+longer exists. This is the only non-rename edit in the PR.
+
 ## Pinned artifacts that embed a class-1 name
 
 Nothing here is a pin **move**: each row is a spelling that a gate, oracle or mutation row asserts
@@ -682,27 +719,64 @@ expected value are untouched.
 
 ## The two proof greps
 
-Completeness -- **no class-1 spelling survives in the live tree** (frozen trees excluded by the
-scope ruling above):
+Both are exhaustive, not illustrative. The first names **all 425** class-1 spellings; the second
+holds **all 179** class-2 and not-a-version spellings to their exact `origin/main` occurrence
+counts. The pathspec excludes this file, which necessarily quotes both sides.
 
-```
-git grep -nI -E '\b(MisoCommandKindV1|WebPrepareConfigV1|SessionEditV1|EffectDescriptorV1|ChannelSymmetryWitnessV1|TrackInputRecordV1|SymmetryEventV1|session_structural_symmetry_v1|BUILTIN_PARAMETER_DESCRIPTORS_V1|BuiltinInputBankV1|FaderMuteRampBuiltinsV1)\b' \
-  -- crates tools hosts scripts docs fuzz AGENTS.md
-```
+### 1. Completeness -- no class-1 spelling survives
 
-...and its exhaustive form, which is what the verifier should actually run: every one of the 420
-class-1 spellings, alternated, over the same paths. Both must print **nothing**.
-
-Non-regression -- **every class-2 spelling is still there, at its original count**:
-
-```
-git grep -cI -E 'miso\.(command|observe|ack|error|meter|meters|status|sessionmap|source|seek|ready|dispose|telemetry|unsupported)\.v1' -- crates tools hosts scripts docs
-git grep -nI -E '\b(miso_engine_web_v1_[a-z_]+|MISO_ENGINE_EFFECT_[A-Z0-9_]+_V1|SESSION_SCHEMA_VERSION_V1|PROTOCOL_MAJOR_V1|PROTOCOL_MINOR_V1|miso_engine_graph_v1|MisoSessionSourceV1|KernelBackendV1|PreparedDeltaBankKernelV1)\b' \
-  -- crates tools hosts scripts docs | wc -l
+```sh
+git grep -nI -E '\b(<every one of the 425 old spellings, alternated>)\b' \
+  -- crates tools hosts scripts docs fuzz AGENTS.md \
+     ':(exclude)docs/rulings/de-versioning-inventory.md'
 ```
 
-Digest identity end to end: `git diff --stat` names no file under `fixtures/` or `artifacts/`, and
-the derive-and-compare gates (`check-intended-console-fixture.sh`, `check-mono-console-fixture.sh`,
-`check-builtins-fixtures.sh`, `check-effect-descriptor-v1.sh`, `check-effect-package-v1.sh`,
-`check-effect-state-migration-v1.sh`) re-derive their fixtures from the renamed source and compare
-byte-for-byte against the unmoved checked-in bytes.
+The alternation is mechanically reconstructible from the class-1 tables above -- the `old` column,
+in order. Run on this branch it prints **nothing** and exits 1.
+
+The illustrative short form, for a reader who wants one line to paste:
+
+```sh
+git grep -nI -E '\b(MisoCommandKindV1|MisoSessionMapV1|WebPrepareConfigV1|SessionEditV1|SessionTomlV1|EffectDescriptorV1|ChannelSymmetryWitnessV1|TrackInputRecordV1|SymmetryEventV1|SeamSideV1|session_structural_symmetry_v1|BUILTIN_PARAMETER_DESCRIPTORS_V1|BuiltinInputBankV1|FaderMuteRampBuiltinsV1|v1_check_rejects_manifest_grammar)\b' \
+  -- crates tools hosts scripts docs fuzz AGENTS.md \
+     ':(exclude)docs/rulings/de-versioning-inventory.md'
+```
+
+### 2. Non-regression -- every class-2 spelling is exactly where it was
+
+Tokenise every tracked file at `origin/main` and at `HEAD` (excluding this document) and compare
+per-spelling counts for the 179 kept spellings. The result is **two differences, both new prose**:
+
+| spelling | origin/main | HEAD | why |
+|---|---|---|---|
+| `V1` | 404 | 405 | the new AGENTS.md convention bullet uses the word once |
+| `_v1` | 1 | 3 | the same bullet, plus the `calls_authoring` doc comment |
+
+Every other class-2 spelling -- all 28 `miso_engine_web_v1_*` exports, all 80 C-ABI header
+spellings, `SESSION_SCHEMA_VERSION_V1`, `PROTOCOL_MAJOR_V1`, `PROTOCOL_MINOR_V1`,
+`miso_engine_graph_v1`, `MisoSessionSourceV1`, `KernelBackendV1`, `PreparedDeltaBankKernelV1`, the
+twelve sealed doc names, `DESCRIPTOR_V1`/`QUALITIES_V1` -- is unchanged, occurrence for occurrence.
+
+The class-2 wire **strings** (which are not identifiers and so are not in the token counts) hold
+the same way:
+
+```sh
+git grep -oI -E 'miso\.[a-z-]+(\.[a-z-]+)*\.v1' -- crates tools hosts scripts docs | sort | uniq -c
+```
+
+### 3. Digest identity, end to end
+
+```sh
+git diff --name-only origin/main -- fixtures artifacts dsp-research .github | wc -l   # -> 0
+```
+
+Not one byte under `fixtures/`, `artifacts/`, `dsp-research/` or `.github/` changed, so nothing
+that is *itself* a digest could have moved. That the renamed **producers** still emit those bytes
+is proved live, not by inspection, by the derive-and-compare rows that re-run the renamed code and
+diff against the unmoved fixtures: `check-builtins-fixtures.sh`,
+`check-intended-console-fixture.sh`, `check-mono-console-fixture.sh`,
+`check-console-benchmark-fixture.sh`, `check-rack-benchmark-fixture.sh`,
+`check-graph-determinism.sh`, `check-effect-descriptor-v1.sh`, `check-effect-package-v1.sh`,
+`check-effect-state-migration-v1.sh`, `check-capi-qualification-v1.sh`,
+`check-native-pcm-runner-v1.sh` and `check-browser-expected-resources.py` -- all green in the
+93/93 sweep.
