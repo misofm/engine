@@ -274,6 +274,38 @@ the graph's routing in `crates/miso-engine-graph/src/runtime.rs`. Per lane-sampl
 Polarity inversion is **0**: it is folded into the trim coefficient at prepare time
 (`trim_signed: if params.polarity_invert { -trim } else { trim }`).
 
+**Live trim and polarity (issue #210 phase 3) are 0 too**, and this is a named gap term rather
+than a floor row: *live input trim ramp -- 3 lane-ops per lane-sample while a retarget is in
+flight, floor 0*.
+
+`trim_db` and `polarity_invert` are `BlockTarget` since phase 3, and while a retarget is ramping
+the input chain runs `input_chain_ramp_block`, whose frame body is the row above with step 3's
+constant trim replaced by three more lane-ops: `sub` (the countdown), `le` (the done compare) and a
+`select`-plus-`add` pair collapsing to the D11 update. Three lane-ops, per channel, **only on the
+blocks a ramp is in flight**, which is at most one smoothing window per admitted command.
+
+It is not a floor row for the reason the delay term is not one: the floor states what the frozen
+spec requires of **every** block, and this is required of none. A lane no command has ever
+retargeted takes the settled arm -- `input_chain_block_elided` over the prepared coefficients,
+behind one `bool` -- and executes the 7-lane-op row above unchanged. The overwhelming majority of
+blocks, on the overwhelming majority of tracks, are that arm by construction rather than by
+rounding.
+
+`BUILTINS_LANE_OPS = 69.0` (`tools/miso-engine-bench/src/floor.rs`) is therefore unchanged and this
+feature is **not** a recount trigger. Neither is it a `KERNEL_ROSTER` change
+(`scripts/check-web-audioworklet-callgraph.py`): the roster names the *effect* kernels the shipped
+wasm artifact must carry, and no builtin kernel has a row in it -- the two new bodies join
+`input_chain_block`'s five siblings, none of which the roster sees.
+
+One thing the ramping arm does **not** do, and the reason it is one body rather than four: it does
+not consult the elision plan. Over a decided-elidable section the unelided body computes the same
+`v |-> v + 0.0` map and writes back the same `+0.0` integrators, which is the appendix below's own
+proof, so the ramping arm renders the elision-planned bits without a second three-shape dispatch to
+keep bit-identical to the first. What it costs is `24 x sections` lane-ops that the settled arm
+would have elided, on the blocks a ramp is in flight and on those only. Charged honestly: *ramping
+input chain does not elide -- up to 48 lane-ops per lane-sample while a retarget is in flight,
+floor 0*.
+
 Input time alignment (`builtins.*.delay_samples`, issue #210 phase 2) is **0** as well, and it is a
 named gap term rather than a floor row: *input delay — 1 load + 1 store per lane-sample when
 engaged, floor 0*. It falls under the standing rule that loads and stores are outside the floor

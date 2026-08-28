@@ -3,6 +3,12 @@
 **Issue**: #210 (owner ruling, adopted by the coordinator 2026-08-27), implementing #178's schema
 half. **Landed**: phase 3.
 
+**Class**: a *design* ruling -- what is live, at what price, and what the decision drags with it --
+rather than the null optimization measurement this directory's README describes. It is filed here
+for the same reason `fast-db-tier-boundaries.md` and `multiband-ramping-split-boundary.md` are: it
+records a boundary and the exact evidence that would reopen it, and a later phase that wants to
+move the boundary should have to argue with a file rather than with a memory.
+
 ## The unified principle the ruling rests on
 
 *A strip parameter is live iff its declick story is the existing linear-gain law or cheaper; it is

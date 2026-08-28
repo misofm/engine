@@ -4403,3 +4403,99 @@ fn a_trim_command_reaches_the_render_plane() {
         "a polarity flip on the untrimmed track must move the mix"
     );
 }
+
+/// Kinds 10/11 share the transactional admission with kind 9 and must not disturb it.
+///
+/// The solo state is mutated inside pass one, before the submission is known to be admissible, and
+/// the wrapper closes it: `commit` once pass three has pushed, `rollback` on every refusal. Two
+/// kinds that reach the same batch cannot be allowed to leave that half-open.
+///
+/// Red mutation: refuse a trim record with an early `return Err(...)` from
+/// `admit_commands_staged` *after* it has staged, bypassing the `rollback` in `admit_commands` ->
+/// the solo bit survives a refused batch and the last assertion fails.
+#[test]
+fn trim_and_polarity_leave_the_solo_transaction_closed() {
+    const QUANTUM: u32 = 128;
+    const TRACKS: usize = 4;
+
+    // A batch that mixes solo with the two new kinds is admitted whole and closes clean.
+    let mut host = solo_host(QUANTUM, TRACKS, &[]);
+    stage_trim(&mut host, 0, 1, 2, -9.0, QUANTUM);
+    stage_solo(&mut host, 1, 2, true, QUANTUM);
+    stage_polarity(&mut host, 2, 3, 0, true, QUANTUM);
+    assert_eq!(
+        host.submit_commands(3),
+        RESULT_OK,
+        "reason {}",
+        host.command_report().reason
+    );
+    let state = host.console_solo().expect("solo state");
+    assert!(state.solo(2), "the solo bit moved");
+    assert!(!state.transaction_open(), "and the transaction closed");
+    // `emitted >= user_mute` is the standing invariant: every track the gate silenced was told so,
+    // and no track was told it is muted while its user mute says otherwise for a lane the gate
+    // does not cover.
+    for track in 0..TRACKS {
+        for lane in 0..2 {
+            assert!(
+                state.emitted_mute(track, lane) >= state.user_mute(track, lane),
+                "track {track} lane {lane}: emitted must dominate the user mute"
+            );
+        }
+    }
+
+    // And a batch whose *trim* record is refused rolls the solo bit back with everything else.
+    let mut host = solo_host(QUANTUM, TRACKS, &[]);
+    stage_solo(&mut host, 0, 1, true, QUANTUM);
+    stage_trim(&mut host, 1, 1, 2, 99.0, QUANTUM);
+    assert_eq!(host.submit_commands(2), RESULT_INVALID_ARGUMENT);
+    assert_eq!(host.command_report().reason, COMMAND_REASON_DOMAIN);
+    let state = host.console_solo().expect("solo state");
+    assert!(
+        !state.any_solo(),
+        "a batch refused by a trim record left a solo bit engaged"
+    );
+    assert!(!state.transaction_open());
+}
+
+/// A trim command is not a mute: it does not touch the solo composition, and solo does not touch
+/// the trim.
+///
+/// The two live on different queues and different stages -- the input chain is the head of the
+/// strip, the gate is at the fader -- and the phase must not have coupled them. A trim to `-144 dB`
+/// silences a track without setting its user mute, so clearing a solo restores exactly the mutes
+/// the caller set and leaves the trim where it was.
+#[test]
+fn a_trim_is_not_a_mute_and_solo_does_not_move_it() {
+    const QUANTUM: u32 = 128;
+    const TRACKS: usize = 4;
+    let mut host = solo_host(QUANTUM, TRACKS, &[]);
+    stage_trim(&mut host, 0, 0, 2, -144.0, 0);
+    assert_eq!(host.submit_commands(1), RESULT_OK);
+    let state = host.console_solo().expect("solo state");
+    assert!(
+        !state.user_mute(0, 0) && !state.user_mute(0, 1),
+        "a trim ride is not a mute: the strip's user-mute state is untouched"
+    );
+    assert!(!state.any_solo());
+
+    // Engage and clear a solo over the top: the mute mirror returns to where it was, and the trim
+    // record was never a mute record so nothing about it is restored or re-emitted.
+    stage_solo(&mut host, 0, 1, true, QUANTUM);
+    assert_eq!(host.submit_commands(1), RESULT_OK);
+    let state = host.console_solo().expect("solo state");
+    assert!(state.emitted_mute(0, 0), "track 0 is outside the solo set");
+    assert!(!state.user_mute(0, 0), "and its user mute is still clear");
+
+    stage_solo(&mut host, 0, 1, false, QUANTUM);
+    assert_eq!(host.submit_commands(1), RESULT_OK);
+    let state = host.console_solo().expect("solo state");
+    for track in 0..TRACKS {
+        for lane in 0..2 {
+            assert!(
+                !state.emitted_mute(track, lane),
+                "clearing the solo restored exactly the mutes the caller set, which is none"
+            );
+        }
+    }
+}
