@@ -5261,7 +5261,7 @@ mod tests {
             "fs::remove",
         ] {
             assert!(
-                !checker_region.contains(forbidden),
+                !calls_authoring(checker_region, forbidden),
                 "--check reachability must exclude {forbidden}"
             );
         }
@@ -5454,7 +5454,7 @@ mod tests {
     }
 
     #[test]
-    fn v1_check_rejects_all_twenty_four_format_mutations() {
+    fn check_rejects_all_twenty_four_format_mutations() {
         let files = complete_files();
         let targets = [
             ("toml", "cases.toml"),
@@ -5512,7 +5512,7 @@ mod tests {
     }
 
     #[test]
-    fn v1_check_rejects_owned_jsonl_tuple_mutations() {
+    fn check_rejects_owned_jsonl_tuple_mutations() {
         let files = complete_files();
         reject_owned_jsonl_mutation(
             &files,
@@ -5545,7 +5545,7 @@ mod tests {
     }
 
     #[test]
-    fn v1_owned_jsonl_parsers_reject_duplicate_extra_reordered_and_wrong_variants() {
+    fn owned_jsonl_parsers_reject_duplicate_extra_reordered_and_wrong_variants() {
         assert!(JsonParser::object(r#"{"case":"one","case":"two"}"#).is_err());
         assert!(parse_meter_record(
             r#"{"case":"partial","snapshot":null,"observed_frames":2,"period_frames":4,"start":"0000000000000003","extra":0}"#,
@@ -5570,7 +5570,7 @@ mod tests {
     }
 
     #[test]
-    fn v1_check_rejects_manifest_grammar() {
+    fn check_rejects_manifest_grammar() {
         let root = temporary_root("manifest");
         let files = complete_files();
         write_fixture(&root, &files);
@@ -5605,7 +5605,7 @@ mod tests {
     }
 
     #[test]
-    fn v1_check_rejects_benchmark_identity_parameter_and_pcm_hash_mutations() {
+    fn check_rejects_benchmark_identity_parameter_and_pcm_hash_mutations() {
         let files = complete_files();
         for (name, mutate) in [
             (
@@ -5993,6 +5993,22 @@ mod tests {
                 expected
             }
         }
+    }
+
+    /// Does `region` *call* `callee`, rather than merely end some longer name with it?
+    ///
+    /// A bare `contains` would say yes to `expected_response_cases()` for the forbidden
+    /// spelling `cases()`, and to `expected_diagnostics()` for `diagnostics()`. Until issue
+    /// #215 the `_v1` suffix supplied that boundary by accident; the boundary is now stated,
+    /// which is what the list always meant: forbid the authoring function, not every
+    /// identifier whose tail happens to spell it.
+    fn calls_authoring(region: &str, callee: &str) -> bool {
+        region.match_indices(callee).any(|(index, _)| {
+            !region[..index]
+                .chars()
+                .next_back()
+                .is_some_and(|character| character.is_ascii_alphanumeric() || character == '_')
+        })
     }
 
     fn source_segment<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
