@@ -264,3 +264,24 @@ collapsible chain rendering dual under a witness that is not eligible with agree
 -- a bypass window, or the episode after which the chain must not come back. So M3 adds one already
 computed `bool` to the M2 dispatch on every session M2 measured, and a short-circuiting walk over
 cached lane flags on the two transitions this milestone is about.
+
+**That last sentence was false as shipped, and issue #235 is why.** The guard chain above is
+correct, but M3 also hoisted `all_lanes_symmetric()` out of the M2 conjunction's short-circuit and
+took it *before* the guards, on every chain of every session -- so the sessions the guards excuse
+paid the walk anyway, and the walk reached an input bank that cached nothing. The sealed `--mono3`
+pair measured it at +39-42% on the dispatch-dominated rows and +4.5% on the forced-off arm. The
+guards were never the problem; the line above them was.
+
+## Issue #235 — the short-circuit restored
+
+| # | mutation | site | suite | verdict |
+|---|---|---|---|---|
+| M3-6 | the witness is pulled unconditionally again (`let witness = self.all_lanes_symmetric();`, M3 as shipped) | `rack/src/lib.rs` `run` | — | **EQUIVALENT, and that is the whole finding.** Every reader of `witness` is already guarded by a premise that implies `armed`, or -- on the forced-off arm -- reaches the same verdict through `all_lanes_preserve_agreement`. It is green on every suite in the tree and it costs 39-42% of two rows: a cost defect no digest and no assertion can see, which is why the sealed paired arm is the only instrument that found it |
+| M3-7 | the short-circuit is widened to `(armed \|\| (self.can_collapse() && self.collapse_channels_agree)) && ..`, so the forced-off arm takes the *eligible* walk rather than the *preserving* one | `rack/src/lib.rs` `run` | — | **EQUIVALENT.** `AGREEING` is a subset of `ALL`, so eligible implies preserving and `!eligible && !preserving` clears the flag on exactly the blocks `!preserving` does. Recorded because it was the shape written first, and a reader who reaches for it deserves the argument for why the narrower `armed &&` -- which is M2's own line, unchanged -- maintains the invariant just as completely and takes one walk instead of two |
+
+### Row count
+
+Two rows, both argued-equivalent, and both deliberately so: a cost regression has no red mutation,
+because "red" is a statement about rendered bits and a cost defect moves none. The instrument that
+holds these two rows honest is the sealed paired benchmark arm, not this file. The input bank's
+half of the same fix does have red rows, in `miso-engine-builtins/tests/MUTATIONS.md` (C-1, C-2).
