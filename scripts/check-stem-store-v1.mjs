@@ -281,6 +281,15 @@ async function runMutationLedger() {
       expectedFailure: "verify-on-open must demote a lying declaration to a miss",
     },
     {
+      name: "fill staging to the stream end before refusing an over-length delivery",
+      file: "web/stem-store/opfs-store.js",
+      search: "          if (bytes > stem.bytes) {",
+      replace: "          if (false) {",
+      test: "stem-store-core-v1.mjs",
+      expectedFailure:
+        "over-length delivery is refused before staging fills past the declaration",
+    },
+    {
       name: "drop every open-time byte-length check",
       file: "web/stem-store/opfs-store.js",
       edits: [streamedArm, reopenArm, fallbackFinalArm, verifyOnOpenArm],

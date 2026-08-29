@@ -378,6 +378,22 @@ export class OpfsStemStore {
               { identity: stem.identity }
             )
           }
+          bytes += result.value.byteLength
+          if (bytes > stem.bytes) {
+            // The declaration is already contradicted: refuse at the chunk
+            // that proves it rather than filling staging to the stream's
+            // end, where the excess only charges the origin's quota.
+            throw new StemStoreError(
+              "stem.ingest.integrity",
+              `Decoded PCM overran the declared length for ${stem.identity}`,
+              {
+                identity: stem.identity,
+                expectedBytes: stem.bytes,
+                observedBytes: bytes,
+                expectedSha256: digest,
+              }
+            )
+          }
           hash.update(result.value)
           await withDeadline(
             writable.write(result.value),
@@ -386,7 +402,6 @@ export class OpfsStemStore {
             `Writing staging for ${stem.identity} made no progress`,
             options.signal
           )
-          bytes += result.value.byteLength
           options.onProgress?.({
             stage: "hashed",
             identity: stem.identity,

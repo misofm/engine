@@ -840,6 +840,44 @@ async function lyingDeclarationIsRefused() {
   assert.equal(warmBackend.has(finalPath), false, "the demoted final is removed")
   assert.deepEqual(indexStems(warmBackend), {})
   await gate.close()
+
+  // The mirror lie: a declaration shorter than the digest-named content is
+  // contradicted mid-stream, so staging must never fill to the stream's end
+  // before the same typed refusal.
+  const short = { identity: stem.identity, bytes: stem.bytes - 64 }
+  const overBackend = new FakeOpfsBackend()
+  const overResolver = new MemoryStemResolver(stemMap([stem]), { chunkBytes: 1024 })
+  const over = store(overBackend, new FakeLockManager(), { tabId: "lying-over" })
+  const overProgress = []
+  await assert.rejects(
+    over.openSession({
+      sessionId: "lying-over",
+      stems: [short],
+      resolver: overResolver,
+      onProgress(event) {
+        overProgress.push(event)
+      },
+    }),
+    (error) => {
+      assert.equal(error.code, "stem.ingest.integrity")
+      assert.equal(error.details.identity, stem.identity)
+      assert.equal(error.details.expectedBytes, short.bytes)
+      assert.ok(error.details.observedBytes > short.bytes)
+      return true
+    },
+    "an over-length delivery must never be promoted"
+  )
+  const staged = overProgress
+    .filter((event) => event.stage === "hashed")
+    .map((event) => event.bytes)
+  assert.ok(staged.length > 0, "the over-length ingest must report chunk progress")
+  assert.ok(
+    Math.max(...staged) <= short.bytes,
+    "over-length delivery is refused before staging fills past the declaration"
+  )
+  assert.equal(overBackend.has(finalPath), false)
+  assert.deepEqual(overBackend.names("miso-stems-v1/staging"), [])
+  assert.deepEqual(indexStems(overBackend), {})
 }
 
 async function storageUnavailable() {
