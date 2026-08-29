@@ -95,6 +95,43 @@ fn exact_retained_report_total(resources: &WebResourceReport) -> u64 {
         .expect("independent exact retained sum")
 }
 
+fn maximum_document_with_dense_invalid_automation() -> Vec<u8> {
+    const BASE: &str = include_str!("../tests/browser-v1/session.toml");
+    const EMPTY_AUTOMATION: &str = "automation = []";
+    const HEADER: &str = r#"automation = [
+  { id = "dense-invalid", target = { entity_id = "track", rack = "builtins", effect_id = "strip", parameter_id = 5, channel = "both" }, segments = [
+"#;
+    const INVALID_SEGMENT: &str = "    {shape=\"step\",start_sample=0,end_sample=0,start_value=0.0,end_value=0.0,unit=\"db\"},\n";
+    const FOOTER: &str = "  ] },\n]";
+
+    let (before, after) = BASE
+        .split_once(EMPTY_AUTOMATION)
+        .expect("browser fixture has the automation replacement seam");
+    let maximum = MAXIMUM_DOCUMENT_BYTES as usize;
+    let fixed_bytes = before.len() + HEADER.len() + FOOTER.len() + after.len();
+    let segment_count = (maximum - fixed_bytes - 2) / INVALID_SEGMENT.len();
+    assert!(
+        segment_count > 10_000,
+        "fixture remains densely adversarial"
+    );
+
+    let mut document = String::with_capacity(maximum);
+    document.push_str(before);
+    document.push_str(HEADER);
+    for _ in 0..segment_count {
+        document.push_str(INVALID_SEGMENT);
+    }
+    document.push_str(FOOTER);
+    document.push_str(after);
+    let padding = maximum - document.len();
+    assert!(padding >= 2, "room for a final TOML comment");
+    document.push('\n');
+    document.push('#');
+    document.extend(core::iter::repeat_n('x', padding - 2));
+    assert_eq!(document.len(), maximum);
+    document.into_bytes()
+}
+
 #[test]
 fn frozen_layouts_and_values_are_exact() {
     assert_eq!(ABI_VERSION, 0x0002_0000);
@@ -429,6 +466,45 @@ fn compile_resource_caps_are_inclusive_and_one_below_rejects() {
             parse_projection - 1
         )
         .as_bytes()
+    );
+}
+
+/// Issue #240 built-in eval 4: time the complete production refusal, not the diagnostic encoder.
+///
+/// The 234 ms worst-accepted Wasm boot measured for the brief leaves a 4.27x margin under this
+/// fixed one-second CI wall. Every invalid segment reaches the session parser and semantic
+/// validator; retaining all of their source spans makes this exact 1 MiB shape take seconds.
+#[test]
+fn maximum_document_dense_invalid_boot_is_typed_and_finishes_under_one_second() {
+    use std::time::{Duration, Instant};
+
+    let document = maximum_document_with_dense_invalid_automation();
+    assert_eq!(document.len(), MAXIMUM_DOCUMENT_BYTES as usize);
+    let started = Instant::now();
+    let failure = AudioWorkletEngineHost::boot(&document, WebBootOptions::default())
+        .err()
+        .expect("dense invalid automation must refuse");
+    let elapsed = started.elapsed();
+    assert_eq!(failure.result(), RESULT_REFUSED_DOCUMENT);
+    assert!(
+        failure
+            .diagnostic()
+            .starts_with(b"automation.invalid_range\t$.automation[0].segments[0].end_sample\n"),
+        "typed automation refusal: {}",
+        String::from_utf8_lossy(failure.diagnostic())
+    );
+    assert_eq!(
+        failure
+            .diagnostic()
+            .iter()
+            .filter(|byte| **byte == b'\n')
+            .count(),
+        miso_engine_host_core::diagnostics::MAXIMUM_PREPARE_DIAGNOSTIC_LINES,
+        "the full boot returns the fixed diagnostic count"
+    );
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "exact-1-MiB dense invalid full boot took {elapsed:?}"
     );
 }
 

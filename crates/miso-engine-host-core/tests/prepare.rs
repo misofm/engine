@@ -557,10 +557,10 @@ fn no_console_request_attaches_nothing_and_charges_nothing() {
     assert_eq!(plain.report, baseline);
 }
 
-/// The measured pre-#240 refusal regression accumulated all 16k bad automation rows and took
-/// seconds. The encoder is the shared choke point for those rows: it must stop pulling the lazy
-/// iterator at 64, and the full adversarial population must remain comfortably inside the 1 s CI
-/// wall budget.
+/// Unit-level pin for the shared encoder's independent 64-line defense.
+///
+/// This is deliberately not #240's full refusal-time eval: the exact-1-MiB production-boot fixture
+/// in `miso-engine-host-web` owns parser, validation, span-materialization and wall-time coverage.
 #[test]
 fn dense_refusal_diagnostics_are_count_bounded_and_finish_under_one_second() {
     use std::time::{Duration, Instant};

@@ -6,7 +6,7 @@ use crate::{
     RenderProfile, Route, RouteDestination, RouteSource, SESSION_SCHEMA_VERSION_V1, SessionLimits,
     SessionToml, Sidechain, SidechainDeclaration, Source, SourceContent, SourceMapping,
     SourceRegion, SourceSpan, StableId, Submix, Track,
-    diagnostic::{PathRef as DiagnosticPath, PathSegment},
+    diagnostic::{MAXIMUM_SESSION_DIAGNOSTICS, PathRef as DiagnosticPath, PathSegment},
     model::ClosedToken,
     validate::validate_session,
     value::{F32Token, parse_f32_token, parse_i64_token},
@@ -49,6 +49,9 @@ impl<'i> Parser<'i> {
         span: (usize, usize),
         message: impl Into<String>,
     ) {
+        if self.diagnostics.len() >= MAXIMUM_SESSION_DIAGNOSTICS {
+            return;
+        }
         self.diagnostics.push(Diagnostic::at(
             code,
             &path,
