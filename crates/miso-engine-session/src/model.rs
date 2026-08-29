@@ -64,8 +64,6 @@ pub struct SessionToml {
     pub render_profile: RenderProfile,
     /// Explicit PCM output shape.
     pub output_profile: OutputProfile,
-    /// Session-declared runtime resource limits.
-    pub limits: SessionLimits,
     /// Sources, order-insensitive by stable ID.
     pub sources: Vec<Source>,
     /// Tracks, order-insensitive by stable ID.
@@ -120,55 +118,63 @@ closed_tokens! {
     }
 }
 
-/// Explicit session resource declarations with unit-bearing field names.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SessionLimits {
-    /// PCM ring capacity in sample frames.
-    pub pcm_ring_frames: u64,
-    /// Control queue capacity in messages.
-    pub control_queue_messages: u64,
-    /// Declared memory budget in bytes.
-    pub memory_bytes: u64,
-}
-
 /// A just-in-time source declaration; resolution is deferred to issue 010.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Source {
     /// Stable source identity.
     pub id: StableId,
-    /// Declared native source sample rate in hertz; resolution and rate matching are deferred.
-    pub sample_rate_hz: u32,
-    /// Content identity and a host-resolved locator string.
-    pub content: SourceContent,
-    /// Explicit channel and region mapping.
-    pub mapping: SourceMapping,
-}
-
-/// Source identity data without resolver behavior.
-#[derive(Clone, Debug, PartialEq)]
-pub struct SourceContent {
-    /// Opaque deterministic content identity text.
-    pub identity: String,
-    /// Opaque resolver locator text.
-    pub locator: String,
-}
-
-/// Mapping from source content to a session source.
-#[derive(Clone, Debug, PartialEq)]
-pub struct SourceMapping {
+    /// Canonical-PCM content identity.
+    pub content: String,
     /// Declared source channels.
-    pub channel_count: u8,
-    /// Region in source sample frames.
-    pub region: SourceRegion,
+    pub channels: u8,
+    /// Exact canonical sample-depth token.
+    pub bit_depth: SourceBitDepth,
+    /// Exact source length in sample frames.
+    pub frames: u64,
 }
 
-/// Inclusive start plus exact length in source sample frames.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SourceRegion {
-    /// First source sample frame.
-    pub start_sample: u64,
-    /// Number of source sample frames.
-    pub length_samples: u64,
+/// Canonical source sample-depth token.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SourceBitDepth {
+    /// Signed little-endian 16-bit integer PCM.
+    Pcm16,
+    /// Signed little-endian packed 24-bit integer PCM.
+    Pcm24,
+    /// Raw IEEE-754 little-endian 32-bit float bits.
+    Float32,
+}
+
+impl SourceBitDepth {
+    /// Stable nonzero BTLV token code.
+    #[must_use]
+    pub const fn wire(self) -> u8 {
+        match self {
+            Self::Pcm16 => 1,
+            Self::Pcm24 => 2,
+            Self::Float32 => 3,
+        }
+    }
+
+    /// Parse one stable nonzero BTLV token code.
+    #[must_use]
+    pub const fn from_wire(wire: u8) -> Option<Self> {
+        match wire {
+            1 => Some(Self::Pcm16),
+            2 => Some(Self::Pcm24),
+            3 => Some(Self::Float32),
+            _ => None,
+        }
+    }
+
+    /// Exact canonical declaration token.
+    #[must_use]
+    pub const fn token(self) -> &'static str {
+        match self {
+            Self::Pcm16 => "16",
+            Self::Pcm24 => "24",
+            Self::Float32 => "32f",
+        }
+    }
 }
 
 /// A dual-mono track declaration.

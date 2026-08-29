@@ -132,8 +132,8 @@ async function testMainRealm() {
             result: 0,
             tracks: ["kick", "snare"],
             sources: [
-              { id: "bass", channels: 1, sampleRateHz: 48000, startFrame: 0n, frames: 96000n },
-              { id: "drums", channels: 2, sampleRateHz: 48000, startFrame: 4096n, frames: 2048n },
+              { id: "bass", channels: 1, frames: 96000n },
+              { id: "drums", channels: 2, frames: 2048n },
             ],
             metersAttached: true,
           };
@@ -423,12 +423,12 @@ async function testMainRealm() {
     });
     const map = await consoleHost.sessionMap();
     assert.deepEqual(map.tracks, ["kick", "snare"], "the canonical track order is the ABI");
-    // Issue #207: the source list crosses the port with its `bigint` region intact, and the host's
+    // Issue #241: the source list crosses the port with its `bigint` frame count intact, and the host's
     // acknowledgement validator accepted it -- a malformed row fails the whole host with 255, so
     // reaching this line is itself the assertion that the shape is the declared one.
     assert.deepEqual(map.sources, [
-      { id: "bass", channels: 1, sampleRateHz: 48000, startFrame: 0n, frames: 96000n },
-      { id: "drums", channels: 2, sampleRateHz: 48000, startFrame: 4096n, frames: 2048n },
+      { id: "bass", channels: 1, frames: 96000n },
+      { id: "drums", channels: 2, frames: 2048n },
     ], "the canonical source order and shape are the ABI");
     assert.equal(map.metersAttached, true);
 
@@ -848,14 +848,11 @@ function createFakeExports(quantum, backend = 1) {
   const reportPointer = 41000;
   const meterHeaderPointer = 41100;
   const trackIds = ["kick", "snare"];
-  // Issue #207: the compiled session's sources, in canonical (stable-ID sorted) order. Every field
-  // differs between the two rows -- channel count, region start, region length -- so a worklet that
-  // read the wrong source's row, or read one query where it meant another, is visible here rather
-  // than masked by a uniform fixture. `startFrame` is deliberately nonzero on the second row: it is
-  // the field with no out-of-range sentinel and the one a driver would silently get wrong.
+  // Issue #241: the compiled session's sources, in canonical (stable-ID sorted) order. Channel and
+  // frame count differ between rows, so a worklet that reads the wrong row/query is visible here.
   const sourceRows = [
-    { id: "bass", channels: 1, sampleRateHz: 48000, startFrame: 0n, frames: 96000n },
-    { id: "drums", channels: 2, sampleRateHz: 48000, startFrame: 4096n, frames: 2048n },
+    { id: "bass", channels: 1, frames: 96000n },
+    { id: "drums", channels: 2, frames: 2048n },
   ];
   // Issue #143 D5: `3T + 3` -- the frozen `2T + 2` peak section, then one gain-reduction magnitude
   // per track and the master's.
@@ -965,9 +962,7 @@ function createFakeExports(quantum, backend = 1) {
       return id.length;
     },
     miso_engine_web_v1_source_channels: (_handle, index) => sourceRows[index]?.channels ?? 0,
-    miso_engine_web_v1_source_sample_rate: (_handle, index) => sourceRows[index]?.sampleRateHz ?? 0,
     miso_engine_web_v1_source_frames: (_handle, index) => sourceRows[index]?.frames ?? 0n,
-    miso_engine_web_v1_source_start_frame: (_handle, index) => sourceRows[index]?.startFrame ?? 0n,
     miso_engine_web_v1_dispose: () => {
       calls.dispose += 1;
       return 0;
@@ -1386,16 +1381,14 @@ async function testProcessor() {
     }
 
     {
-      // Issue #207: every source read is checked against something compilation already guarantees,
+      // Issue #241: every source read is checked against something compilation already guarantees,
       // so a mis-wired export fails initialization instead of reaching a consumer as a plausible
       // number. Each mutation below is a different export lying, and each must be caught.
       for (const [what, mutate] of [
         ["a zero channel count", (e) => { e.miso_engine_web_v1_source_channels = () => 0; }],
         ["a channel count past the configured maximum",
           (e) => { e.miso_engine_web_v1_source_channels = () => 3; }],
-        ["a rate that is not the session rate",
-          (e) => { e.miso_engine_web_v1_source_sample_rate = () => 44100; }],
-        ["a zero region length", (e) => { e.miso_engine_web_v1_source_frames = () => 0n; }],
+        ["a zero frame count", (e) => { e.miso_engine_web_v1_source_frames = () => 0n; }],
         ["an empty source ID", (e) => { e.miso_engine_web_v1_source_id = () => 0; }],
         ["a source ID longer than staging",
           (e) => { e.miso_engine_web_v1_source_id = () => 65; }],

@@ -54,7 +54,7 @@ pub fn compiled_session_shape(
         maximum_source_channels: model
             .sources
             .iter()
-            .map(|source| u32::from(source.mapping.channel_count))
+            .map(|source| u32::from(source.channels))
             .max()
             .unwrap_or(0),
         longest_source_id_bytes: count(

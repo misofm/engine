@@ -165,9 +165,7 @@ expected_exports=$(printf '%s\n' \
   miso_engine_web_v1_source_count \
   miso_engine_web_v1_source_frames \
   miso_engine_web_v1_source_id \
-  miso_engine_web_v1_source_sample_rate \
   miso_engine_web_v1_source_seek \
-  miso_engine_web_v1_source_start_frame \
   miso_engine_web_v1_source_submit \
   miso_engine_web_v1_status_ptr | sort)
 

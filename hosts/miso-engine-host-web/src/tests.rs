@@ -10,8 +10,7 @@ fn one_track_session(quantum: u32) -> String {
     ))
     .expect("accepted fixture");
     model.quantum_frames = quantum;
-    model.limits.pcm_ring_frames = u64::from(quantum);
-    model.sources[0].mapping.region.length_samples = u64::from(quantum) * 2;
+    model.sources[0].frames = u64::from(quantum) * 2;
     model.tracks.truncate(1);
     model.routes.truncate(1);
     canonical_session_toml(&model).expect("canonical one-track session")
@@ -22,12 +21,11 @@ fn one_track_session(quantum: u32) -> String {
 /// Identity end to end: no polarity, trim, HPF or LPF, no effects in any rack, unity fader, and a
 /// hard-left/hard-right pan whose 2x2 matrix is the identity. The output is therefore the submitted
 /// source frames, which is what makes the submitted ramp its own oracle.
-fn identity_session(quantum: u32, ring_frames: u32, length_samples: u64) -> String {
+fn identity_session(quantum: u32, _ring_frames: u32, length_samples: u64) -> String {
     let mut model = parse_session_toml(include_str!("../tests/browser-v1/session.toml"))
         .expect("accepted identity fixture");
     model.quantum_frames = quantum;
-    model.limits.pcm_ring_frames = u64::from(ring_frames);
-    model.sources[0].mapping.region.length_samples = length_samples;
+    model.sources[0].frames = length_samples;
     canonical_session_toml(&model).expect("canonical identity session")
 }
 
@@ -517,9 +515,7 @@ fn quoted_root_shape_keys_self_configure_without_a_second_parser() {
         .expect("accepted fixture");
         model.sample_rate_hz = sample_rate_hz;
         model.quantum_frames = quantum_frames;
-        model.limits.pcm_ring_frames = u64::from(quantum_frames);
-        model.sources[0].sample_rate_hz = sample_rate_hz;
-        model.sources[0].mapping.region.length_samples = u64::from(quantum_frames) * 2;
+        model.sources[0].frames = u64::from(quantum_frames) * 2;
         model.tracks.truncate(1);
         model.routes.truncate(1);
         let document = canonical_session_toml(&model)
@@ -536,21 +532,6 @@ fn quoted_root_shape_keys_self_configure_without_a_second_parser() {
             "the document-derived ring remains an internal boot choice"
         );
     }
-}
-
-#[test]
-fn source_rate_mismatch_is_the_session_validators_typed_refusal() {
-    let mut model = parse_session_toml(include_str!(
-        "../../../fixtures/session/v1/parametric-eq-nine-track.toml"
-    ))
-    .expect("accepted fixture");
-    model.sources[0].sample_rate_hz = 44_100;
-    let document = canonical_session_toml(&model).expect("mismatch canonicalizes");
-    let failure = AudioWorkletEngineHost::boot(document.as_bytes(), WebBootOptions::default())
-        .err()
-        .expect("source mismatch must refuse");
-    assert_eq!(failure.result(), RESULT_REFUSED_DOCUMENT);
-    assert_eq!(failure.diagnostic(), b"host.source.rate.mismatch\t$\n");
 }
 
 #[test]
@@ -3059,27 +3040,25 @@ fn observation_unit_conversion_is_declared_and_clamped() {
 ///
 /// `zeta` is declared first and `alpha` last, so a query that reported *declaration* order rather
 /// than the normalized order would be visible here rather than hidden by an already-sorted
-/// fixture. The shapes are all distinct -- different channel counts, different region starts,
-/// different lengths -- so a query that read the wrong row is visible too. The one track points at
-/// `mid`, which is neither the first nor the last of the three by either ordering.
+/// fixture. The shapes are all distinct -- different channel counts and lengths -- so a query that
+/// read the wrong row is visible too. The one track points at `mid`, which is neither the first nor
+/// the last of the three by either ordering.
 fn three_source_session(quantum: u32) -> String {
     let mut model = parse_session_toml(include_str!("../tests/browser-v1/session.toml"))
         .expect("accepted identity fixture");
     model.quantum_frames = quantum;
-    model.limits.pcm_ring_frames = u64::from(quantum);
     let template = model.sources[0].clone();
-    let source = |id: &str, channels: u8, start: u64, length: u64| {
+    let source = |id: &str, channels: u8, frames: u64| {
         let mut value = template.clone();
         value.id = miso_engine_session::StableId::parse(id).expect("stable id");
-        value.mapping.channel_count = channels;
-        value.mapping.region.start_sample = start;
-        value.mapping.region.length_samples = length;
+        value.channels = channels;
+        value.frames = frames;
         value
     };
     model.sources = vec![
-        source("zeta", 1, 0, u64::from(quantum) * 3),
-        source("mid", 2, u64::from(quantum) * 7, u64::from(quantum) * 5),
-        source("alpha", 4, 9, u64::from(quantum) * 2),
+        source("zeta", 1, u64::from(quantum) * 3),
+        source("mid", 2, u64::from(quantum) * 5),
+        source("alpha", 4, u64::from(quantum) * 2),
     ];
     model.tracks[0].source_id = miso_engine_session::StableId::parse("mid").expect("stable id");
     canonical_session_toml(&model).expect("canonical three-source session")
@@ -3089,9 +3068,9 @@ fn three_source_session(quantum: u32) -> String {
 /// shape a headless driver needs to feed them.
 ///
 /// Red mutation: report declaration order instead of the normalized order -> the assertion below
-/// reads `["zeta", "mid", "alpha"]`. Red mutation: report `region.length_samples` as the region
-/// *end* -> `mid` reads 1536 frames instead of 640. Neither survives a fixture whose sources are
-/// deliberately unsorted and whose regions deliberately do not start at zero.
+/// reads `["zeta", "mid", "alpha"]`. Red mutation: report the source ring length instead of the
+/// declared full-source frame count -> each row reads 128. Neither survives a fixture whose
+/// sources are deliberately unsorted and whose frame counts are distinct.
 #[test]
 fn session_source_introspection_is_canonical_ordered_shaped_and_bounded() {
     const QUANTUM: u32 = 128;
@@ -3115,27 +3094,21 @@ fn session_source_introspection_is_canonical_ordered_shaped_and_bounded() {
         host.session_source_shape(0).expect("alpha"),
         SessionSourceShape {
             channel_count: 4,
-            sample_rate_hz: 48_000,
-            region_start_frame: 9,
-            region_frames: u64::from(QUANTUM) * 2,
+            frames: u64::from(QUANTUM) * 2,
         }
     );
     assert_eq!(
         host.session_source_shape(1).expect("mid"),
         SessionSourceShape {
             channel_count: 2,
-            sample_rate_hz: 48_000,
-            region_start_frame: u64::from(QUANTUM) * 7,
-            region_frames: u64::from(QUANTUM) * 5,
+            frames: u64::from(QUANTUM) * 5,
         }
     );
     assert_eq!(
         host.session_source_shape(2).expect("zeta"),
         SessionSourceShape {
             channel_count: 1,
-            sample_rate_hz: 48_000,
-            region_start_frame: 0,
-            region_frames: u64::from(QUANTUM) * 3,
+            frames: u64::from(QUANTUM) * 3,
         }
     );
 
@@ -3155,10 +3128,7 @@ fn session_source_introspection_is_canonical_ordered_shaped_and_bounded() {
 /// Issue #207 D1: the raw exports, held to the track queries' conventions exactly.
 ///
 /// The shape queries answer zero out of range because zero is impossible for a compiled source --
-/// the session validator refuses `channel_count == 0`, `length_samples == 0` and
-/// `sample_rate_hz == 0` -- while `source_start_frame` has no spare value and leans on
-/// `source_count` as the bounds authority. That asymmetry is asserted here so it cannot be
-/// "tidied" into a sentinel that collides with a real region start.
+/// the session validator refuses `channels == 0` and `frames == 0`.
 #[test]
 fn raw_ffi_source_introspection_mirrors_the_track_queries() {
     const QUANTUM: u32 = 128;
@@ -3176,8 +3146,6 @@ fn raw_ffi_source_introspection_mirrors_the_track_queries() {
         assert_eq!(miso_engine_web_v1_source_id(probe, 0), 0);
         assert_eq!(miso_engine_web_v1_source_channels(probe, 0), 0);
         assert_eq!(miso_engine_web_v1_source_frames(probe, 0), 0);
-        assert_eq!(miso_engine_web_v1_source_start_frame(probe, 0), 0);
-        assert_eq!(miso_engine_web_v1_source_sample_rate(probe, 0), 0);
     }
 
     assert_eq!(miso_engine_web_v1_source_count(handle), 3);
@@ -3207,26 +3175,10 @@ fn raw_ffi_source_introspection_mirrors_the_track_queries() {
             u64::from(QUANTUM) * 3
         ]
     );
-    assert_eq!(
-        [
-            miso_engine_web_v1_source_start_frame(handle, 0),
-            miso_engine_web_v1_source_start_frame(handle, 1),
-            miso_engine_web_v1_source_start_frame(handle, 2),
-        ],
-        [9, u64::from(QUANTUM) * 7, 0]
-    );
-    for index in 0..3 {
-        assert_eq!(miso_engine_web_v1_source_sample_rate(handle, index), 48_000);
-    }
-
-    // Out of range: zero everywhere it can be said, and `source_count` is what a caller checked
-    // before asking, because `source_start_frame`'s zero is `zeta`'s real answer.
+    // Out of range: zero everywhere it can be said.
     assert_eq!(miso_engine_web_v1_source_id(handle, 3), 0);
     assert_eq!(miso_engine_web_v1_source_channels(handle, 3), 0);
     assert_eq!(miso_engine_web_v1_source_frames(handle, 3), 0);
-    assert_eq!(miso_engine_web_v1_source_sample_rate(handle, 3), 0);
-    assert_eq!(miso_engine_web_v1_source_start_frame(handle, 3), 0);
-    assert_eq!(miso_engine_web_v1_source_start_frame(handle, 2), 0);
     assert_eq!(miso_engine_web_v1_source_id(handle, u32::MAX), 0);
 
     // The queries survive a sticky failure, exactly as the track queries do: nothing here is
@@ -3269,10 +3221,7 @@ fn solo_session(quantum: u32, tracks: usize, mutes: &[[bool; 2]]) -> String {
     let mut model = parse_session_toml(include_str!("../tests/browser-v1/session.toml"))
         .expect("accepted identity fixture");
     model.quantum_frames = quantum;
-    model.limits.pcm_ring_frames = u64::from(quantum) * 4;
-    model.limits.control_queue_messages = 256;
-    model.limits.memory_bytes = 1 << 26;
-    model.sources[0].mapping.region.length_samples = u64::from(quantum) * 64;
+    model.sources[0].frames = u64::from(quantum) * 64;
     let track = model.tracks[0].clone();
     let route = model.routes[0].clone();
     model.tracks.clear();
@@ -3984,10 +3933,7 @@ fn effect_solo_host(quantum: u32, tracks: usize, depth: u64) -> AudioWorkletEngi
     let mut model = parse_session_toml(include_str!("../tests/browser-v1/command-session.toml"))
         .expect("accepted command fixture");
     model.quantum_frames = quantum;
-    model.limits.pcm_ring_frames = u64::from(quantum) * 4;
-    model.limits.control_queue_messages = 1024;
-    model.limits.memory_bytes = 1 << 26;
-    model.sources[0].mapping.region.length_samples = u64::from(quantum) * 64;
+    model.sources[0].frames = u64::from(quantum) * 64;
     let track = model.tracks[0].clone();
     let route = model.routes[0].clone();
     model.tracks.clear();

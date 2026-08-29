@@ -41,14 +41,13 @@ compatible with collapse rather than an obstacle to it -- and that is precisely 
 keeping. A mono fixture whose only stereo-linked effect had been quietly unlinked would be a
 fixture on which "collapse and link mode interact" could never be observed.
 
-**``channel_count = 2`` on the source, and the source identity.** The witness admits *either* "two
+**``channels = 2`` on the source, and the source identity.** The witness admits *either* "two
 channels read one source channel" *or* "a one-channel source"; this fixture is the first form. That
 is the form the ``sixty_four_track_console_half_mono`` bench row needs, because that row is derived
 **in code** from this fixture by putting ``right_source_channel = 1`` back on the odd tracks, and a
 one-channel source would make that derivation illegal rather than merely asymmetric. The source's
-content identity and locator are left byte-identical to the standing fixture's for the reason the
-standing fixture left them identical to the retired one's: the two sessions are fed the same input,
-which is half of what makes their numbers comparable.
+content identity is left byte-identical to the standing fixture's: the two sessions are fed the
+same input, which is half of what makes their numbers comparable.
 
 **Both ``channel = "left"`` and ``channel = "right"`` parameter entries.** The symmetrised pairs are
 kept as *pairs* carrying equal values rather than collapsed into a single ``channel = "both"``
@@ -128,7 +127,7 @@ HEADER = """\
 #     the linked maximum is each lane's own peak, so a stereo link and a collapse are compatible --
 #     and a mono fixture that had quietly unlinked its one stereo-linked effect could never show
 #     that.
-#   * **`channel_count = 2` on the source.** The witness admits "two channels read one source
+#   * **`channels = 2` on the source.** The witness admits "two channels read one source
 #     channel" as well as "a one-channel source"; this is the first form, and it is the form the
 #     `sixty_four_track_console_half_mono` bench row needs, because that row is derived in code
 #     from this fixture by putting `right_source_channel = 1` back on the odd tracks.
@@ -137,8 +136,8 @@ HEADER = """\
 #     designed per-lane *words*, not declaration shapes, and a collapsed pair could not tell the
 #     two apart.
 #
-# The source's content identity and locator are byte-identical to the standing fixture's: the two
-# sessions are fed the same input, which is half of what makes their numbers comparable. Everything
+# The source's content identity is byte-identical to the standing fixture's: the two sessions are
+# fed the same input, which is half of what makes their numbers comparable. Everything
 # else -- 64 tracks, eight full eight-lane banks and no scalar tail, EQ and compressor as one
 # two-slot `simd1` chain, a true-peak limiter alone on `simd2`, no automation -- is the standing
 # fixture's, unchanged.

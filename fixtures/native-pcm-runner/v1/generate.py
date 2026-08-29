@@ -42,8 +42,13 @@ def samples(frame_count: int) -> list[tuple[float, float]]:
     return [seed[index % len(seed)] for index in range(frame_count)]
 
 
-def wave(rate: int, rf64: bool, frame_count: int) -> bytes:
-    pcm = b"".join(struct.pack("<ff", left, right) for left, right in samples(frame_count))
+def canonical_f32(frame_count: int, start: int = 0) -> bytes:
+    selected = samples(frame_count + start)[start : start + frame_count]
+    return b"".join(struct.pack("<ff", left, right) for left, right in selected)
+
+
+def wave(rate: int, rf64: bool, frame_count: int, start: int = 0) -> bytes:
+    pcm = canonical_f32(frame_count, start)
     fmt = struct.pack("<HHIIHH", 3, 2, rate, rate * 8, 8, 32)
     if not rf64:
         body = b"WAVE" + b"fmt " + struct.pack("<I", len(fmt)) + fmt
@@ -65,16 +70,15 @@ def wave(rate: int, rf64: bool, frame_count: int) -> bytes:
     )
 
 
-def session(rate: int, name: str, digest: str, start: int, length: int) -> bytes:
+def session(rate: int, digest: str, frames: int) -> bytes:
     template = (ROOT / "../../session/v1/parametric-eq-nine-track.toml").resolve().read_text()
     text = template.replace("sample_rate_hz = 48000", f"sample_rate_hz = {rate}")
     text = text.replace(
-        'identity = "sha256:parametric-eq-nine-track"', f'identity = "sha256:{digest}"'
+        "sha256:7e945c107a97cd24135e85dc2f407c5ecd39663a8737bf5b92114ccce38f1ab8",
+        f"sha256:{digest}",
     ).replace(
-        'locator = "host:parametric-eq-nine-track"', f'locator = "file:{name}.wav"'
-    ).replace(
-        "start_sample = 0, length_samples = 48000",
-        f"start_sample = {start}, length_samples = {length}",
+        'bit_depth = "32f", frames = 48000',
+        f'bit_depth = "32f", frames = {frames}',
     )
     return text.encode()
 
@@ -85,21 +89,23 @@ def main() -> None:
         name = f"riff-{rate}"
         payload = wave(rate, False, 1_024)
         publish(ROOT / f"{name}.wav", payload)
-        digest = hashlib.sha256(payload).hexdigest()
-        session_bytes = session(rate, name, digest, 0, 1_024)
+        content_digest = hashlib.sha256(canonical_f32(1_024)).hexdigest()
+        session_bytes = session(rate, content_digest, 1_024)
         publish(ROOT / f"{name}.toml", session_bytes)
         entries.extend(
-            ((f"{name}.wav", len(payload), digest),
+            ((f"{name}.wav", len(payload), hashlib.sha256(payload).hexdigest()),
              (f"{name}.toml", len(session_bytes), hashlib.sha256(session_bytes).hexdigest()))
         )
     name = "rf64-48000"
-    payload = wave(48000, True, 516)
+    # The old session selected frames [1, 515) from a 516-frame asset. Region selection is gone;
+    # pre-slicing retains those exact 514 decoded float bit patterns and therefore the render.
+    payload = wave(48000, True, 514, start=1)
     publish(ROOT / f"{name}.wav", payload)
-    digest = hashlib.sha256(payload).hexdigest()
-    session_bytes = session(48000, name, digest, 1, 514)
+    content_digest = hashlib.sha256(canonical_f32(514, start=1)).hexdigest()
+    session_bytes = session(48000, content_digest, 514)
     publish(ROOT / f"{name}.toml", session_bytes)
     entries.extend(
-        ((f"{name}.wav", len(payload), digest),
+        ((f"{name}.wav", len(payload), hashlib.sha256(payload).hexdigest()),
          (f"{name}.toml", len(session_bytes), hashlib.sha256(session_bytes).hexdigest()))
     )
     entries.extend((f"output:{name}", 8192, digest) for name, digest in OUTPUTS.items())

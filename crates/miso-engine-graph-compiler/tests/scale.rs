@@ -34,7 +34,6 @@ fn compiles_65_537_tracks_or_rejects_only_a_configured_resource() {
     template.dynamic.effects.clear();
     template.simd2.effects.clear();
     model.automation.clear();
-    model.limits.memory_bytes = i64::MAX as u64;
     model.tracks.clear();
     model.tracks.reserve(65_537);
     for index in 0..65_537_u32 {

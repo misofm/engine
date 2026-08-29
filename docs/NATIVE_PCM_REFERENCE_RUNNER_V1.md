@@ -28,24 +28,22 @@ installed C ABI V1 entry points.
 
 ## Local file adapter
 
-This tool alone interprets two otherwise opaque session strings:
+The session carries no locator. The runner canonicalizes the source root, enumerates its bounded
+set of `.wav` entries in sorted order, and considers only regular nonsymlink files whose canonical
+paths remain under that root. For each declaration it parses RIFF/WAVE or RF64/WAVE, hashes the raw
+canonical sample bytes (never the wrapper), and selects the file whose digest matches the exact
+`sha256:<64 lowercase hexadecimal digits>` content identity. No session string becomes a path.
 
-- a locator is `file:<relative-path>` using `/` separators. The suffix is nonempty UTF-8 and may
-  contain only normal, nonempty components: no `.`, `..`, backslash, NUL, root, prefix, or absolute
-  path is accepted;
-- an identity is `sha256:<64 lowercase hexadecimal digits>` and must equal SHA-256 of the complete
-  resolved file.
-
-The source root is canonicalized. Each requested source must itself be a regular, nonsymlink file,
-and its canonical path must remain under that root. Aliased canonical files are legal only with the
-same digest. All locators, identities, WAVE/RF64 structures, declared rates/channels, and finite
-regions are checked before C compilation or output creation.
+The selected file must exactly match the session root rate and the declaration's channels, bit
+depth, and full frame count. All identities, WAVE/RF64 structures, and declared shapes are checked
+before C compilation or output creation.
 
 ## Streaming and PCM bytes
 
 For each output quantum, sources are visited in source-ID byte order. Each source contributes at
 most one decoder chunk bounded by the quantum: a full chunk, short final chunk, or no chunk after
-its region ends. The chunk carries generation 1 and its exact absolute source frame. Any C ABI
+the full source ends. The chunk carries generation 1 and its exact absolute source frame beginning
+at zero. Any C ABI
 backpressure or non-OK submission/render result is terminal and is never retried.
 
 One render call produces one stereo quantum. The file record is left-plane samples followed by
@@ -96,9 +94,11 @@ audio data, or unbounded product diagnostics.
 
 [`fixtures/native-pcm-runner/v1/MANIFEST.tsv`](../fixtures/native-pcm-runner/v1/MANIFEST.tsv)
 freezes RIFF files at all four launch rates, an RF64 `ds64` file, their strict sessions, sizes,
-SHA-256 identities, and exact 8,192-byte output digests. The RF64 row has source-region origin 1
-and a two-frame final chunk. Source values include positive and negative zero, a NaN, a subnormal,
-and finite nonzero witnesses; the public decoder sanitizes the nonfinite/subnormal witnesses. Rust
+canonical-content SHA-256 identities, and exact 8,192-byte output digests. The RF64 source asset is
+pre-sliced to the 514 decoded frames that the former region selected, so its full-source stream
+starts at zero and still has a two-frame final chunk. Source values include positive and negative
+zero, a NaN, a subnormal, and finite nonzero witnesses; the public decoder sanitizes the
+nonfinite/subnormal witnesses. Rust
 tests independently split accepted output into little-endian words, verify exact length/finiteness,
 and compare the whole-file digest rather than reusing the production encoder as an oracle.
 

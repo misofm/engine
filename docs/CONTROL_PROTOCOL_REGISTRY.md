@@ -53,9 +53,10 @@ An automation record is exactly 32 bytes: `kind:u8, flags:u8=0, reserved:u16=0, 
 | `0001` | set session ID | session ID |
 | `0002` | set sample rate | sample rate Hz |
 | `0003` | set quantum | quantum frames |
-| `0004`–`0006` | set render profile, output profile, limits | one complete respective value |
+| `0004`–`0005` | set render profile, output profile | one complete respective value |
 | `0100` | upsert source | source |
-| `0101`–`0104` | remove source; set source rate, content, mapping | source ID; then source ID plus replacement value |
+| `0101` | remove source | source ID |
+| `0103` | set source content and complete shape | source ID, content, channels, bit depth, frames |
 | `0200` | upsert track | track |
 | `0201` | remove track | track ID |
 | `0202` | set source assignment | track ID, source ID, left/right source channel |
@@ -68,6 +69,6 @@ An automation record is exactly 32 bytes: `kind:u8, flags:u8=0, reserved:u16=0, 
 | `0500`–`0505` | upsert/remove route; set source/destination/matrix/gain | route or route ID plus the respective replacement |
 | `0600`–`0603` | upsert/remove automation; set target/segments | automation or automation ID plus target; ordered repeated segment |
 
-There are exactly 42 allocated opcodes. A successful atomic transaction replaces the typed `SessionToml`, immutable control-plane `CompiledSession`, and revision together; its canonical snapshot is the committed `SessionToml`, never a compiled/render-plan serialization.
+There are exactly 39 allocated opcodes. Issue #241 retired three: `0006` (set limits), `0102` (set source sample rate) and `0104` (set source mapping), whose subjects left the schema with the `limits` table and the nested source mapping/region. Retired codes are **never reallocated** -- a v1 peer that spells one must be refused, not reinterpreted, which is why `SessionEditOpcode::from_raw` returns `None` for them and a conformance row pins that. A successful atomic transaction replaces the typed `SessionToml`, immutable control-plane `CompiledSession`, and revision together; its canonical snapshot is the committed `SessionToml`, never a compiled/render-plan serialization.
 
-The nested model registry is: render/output profile `1:id,2:mode/channels,3:sample-format`; limits `1:PCM-ring-frames,2:control-queue-messages,3:memory-bytes`; source `1:id,2:rate,3:content,4:mapping`; track `1:id,2:source,3/4:channels,5:builtins,6/7/8:racks,9:fader,10:matrix/pan`; effect `1:id,2:identity,3:quality,4:bypass,5:link-mode,6*:parameter,7:sidechain`; route `1:id,2:source,3:destination,4:matrix,5:gain`; automation `1:id,2:target,3*:segment`. Tagged nested values use field `1:kind`; unknown enum/tag values reject and allocated codes never renumber within v1.
+The nested model registry is: render/output profile `1:id,2:mode/channels,3:sample-format`; source `1:id,2:content,3:channels,4:bit-depth,5:frames`; track `1:id,2:source,3/4:channels,5:builtins,6/7/8:racks,9:fader,10:matrix/pan`; effect `1:id,2:identity,3:quality,4:bypass,5:link-mode,6*:parameter,7:sidechain`; route `1:id,2:source,3:destination,4:matrix,5:gain`; automation `1:id,2:target,3*:segment`. Tagged nested values use field `1:kind`; unknown enum/tag values reject and allocated codes never renumber within v1.

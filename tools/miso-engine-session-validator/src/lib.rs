@@ -35,9 +35,9 @@
 //! # Caps
 //!
 //! Both cap structures are set to their maxima. A validator that imposed a host's budget would
-//! reject documents that are perfectly legal sessions, so the only limits that bind here are the
-//! ones the session declares itself in `limits` -- which is what the author controls and what
-//! `compile_session` checks against its own estimate.
+//! reject documents that are perfectly legal sessions. Queue, ring, and aggregate memory budgets
+//! are host policy rather than session-document fields, so this authoring tool validates the model
+//! and its checked arithmetic without choosing a deployment budget.
 
 use std::{fmt::Write as _, process::ExitCode};
 
@@ -234,7 +234,7 @@ fn session_diagnostics(set: &DiagnosticSet) -> Vec<StageDiagnostic> {
         .collect()
 }
 
-/// Cap structures wide open: only the session's own declared `limits` bind. See the module docs.
+/// Cap structures wide open: deployment limits are host policy. See the module docs.
 fn compile_caps() -> CompileCaps {
     CompileCaps {
         max_compiled_model_bytes: u64::MAX,

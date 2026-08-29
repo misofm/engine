@@ -1047,6 +1047,7 @@ name = "miso-engine-session-validator"
 version = "0.1.0"
 dependencies = [
  "miso-engine-builtins-compiler",
+ "miso-engine-host-web",
  "miso-engine-session",
 ]
 

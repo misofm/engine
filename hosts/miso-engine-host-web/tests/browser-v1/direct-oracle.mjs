@@ -241,15 +241,11 @@ async function runBackend(modulePath, expectedBackend, sessionToml, source) {
   assert.equal(exports.miso_engine_web_v1_source_count(handle), 1);
   assert.equal(readSourceId(exports, handle, 0), source.sourceId);
   assert.equal(exports.miso_engine_web_v1_source_channels(handle, 0), 2);
-  assert.equal(exports.miso_engine_web_v1_source_sample_rate(handle, 0), source.sampleRateHz);
   assert.equal(exports.miso_engine_web_v1_source_frames(handle, 0), 256n);
-  assert.equal(exports.miso_engine_web_v1_source_start_frame(handle, 0), 0n);
-  // Out of range answers the sentinel everywhere it has one; `source_count` is the bounds
-  // authority for `source_start_frame`, whose zero is source 0's real answer.
+  // Out of range answers the zero sentinel everywhere.
   assert.equal(exports.miso_engine_web_v1_source_id(handle, 1), 0);
   assert.equal(exports.miso_engine_web_v1_source_channels(handle, 1), 0);
   assert.equal(exports.miso_engine_web_v1_source_frames(handle, 1), 0n);
-  assert.equal(exports.miso_engine_web_v1_source_sample_rate(handle, 1), 0);
 
   const first = { ...source.blocks[0], generation: 1 };
   const second = { ...source.blocks[1], generation: 1 };

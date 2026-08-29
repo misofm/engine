@@ -41,11 +41,11 @@ fn parametric_eq_session_fixture_bytes_are_immutable() {
         .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
             (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
         });
-    // Re-pinned by issue #210 phase 2: `builtins.{left,right}.delay_samples` is a new required
-    // key, so every session document in the tree grew, this one by 342 bytes (9 tracks x 2 lanes
-    // x 19 bytes of ", delay_samples = 0").
-    assert_eq!(PARAMETRIC_EQ.len(), 9_817);
-    assert_eq!(hash, 0xa7e3_594d_10fa_c382);
+    // #241 re-pin: deleting the limits record plus rate/locator/mapping/region and replacing the
+    // nested source declaration with content/channels/bit_depth/frames removes exactly 171 bytes
+    // from the prior 9,817-byte canonical document.
+    assert_eq!(PARAMETRIC_EQ.len(), 9_817 - 171);
+    assert_eq!(hash, 0x7bee_179a_a903_f382);
 }
 
 #[test]

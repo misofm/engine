@@ -19,7 +19,7 @@ use miso_engine_core::{
     },
 };
 use miso_engine_graph::{GraphNodeId, StableGraphId, TrackStage};
-use miso_engine_session::CompiledSession;
+use miso_engine_session::{CompiledSession, SourceBitDepth};
 
 use crate::native_wave::{validate_region, validate_seek_frame};
 use crate::{
@@ -71,6 +71,8 @@ pub struct NativeSourcePrepareRequest {
     pub engine_sample_rate_hz: SampleRateHz,
     /// Declared source channel count.
     pub declared_channel_count: u16,
+    /// Declared canonical sample-depth token.
+    pub declared_bit_depth: SourceBitDepth,
     /// Exact finite decoded source region.
     pub region: NativeWaveRegion,
     /// Exact prepared ring storage shape.
@@ -308,6 +310,8 @@ pub fn native_source_allocation_layout(
 pub struct NativeSessionSourcePrepareCaps {
     /// Per-source parser, ring, worker, and decoder caps.
     pub source: NativeSourcePrepareCaps,
+    /// Exact host-chosen source-ring capacity in sample frames.
+    pub source_ring_frames: u64,
     /// Maximum checked session-runtime plus source-overhead bytes after deduplicating ring PCM.
     pub max_combined_runtime_bytes: u64,
     /// Maximum checked allocation request across session, source, and graph source-set storage.
@@ -968,6 +972,23 @@ fn prepare_native_source_job<S: NativeSourceResolver>(
     {
         return Err(NativeSourcePrepareError::ChannelMismatch);
     }
+    let observed_bit_depth = match metadata.encoding {
+        crate::NativeWaveEncoding::SignedPcm16 => SourceBitDepth::Pcm16,
+        crate::NativeWaveEncoding::SignedPcm24 => SourceBitDepth::Pcm24,
+        crate::NativeWaveEncoding::Float32 => SourceBitDepth::Float32,
+        crate::NativeWaveEncoding::UnsignedPcm8
+        | crate::NativeWaveEncoding::SignedPcm32
+        | crate::NativeWaveEncoding::Float64 => {
+            return Err(NativeSourcePrepareError::Wave(
+                NativeWaveError::FormatUnsupported,
+            ));
+        }
+    };
+    if observed_bit_depth != request.declared_bit_depth {
+        return Err(NativeSourcePrepareError::Wave(
+            NativeWaveError::FormatUnsupported,
+        ));
+    }
     validate_region(metadata, request.region)
         .map_err(|_| NativeSourcePrepareError::RegionOutOfBounds)?;
     let report = source_resource_report(metadata, request.ring_config, caps)?;
@@ -1173,19 +1194,22 @@ pub fn prepare_native_session_sources<S: NativeSourceResolver>(
 
     for source in &model.sources {
         let request = NativeSourcePrepareRequest {
-            locator: source.content.locator.clone(),
-            declared_identity: source.content.identity.as_bytes().to_vec(),
-            declared_sample_rate_hz: SampleRateHz(source.sample_rate_hz),
+            // The resolver maps the content identity to its adapter-owned location; the locator
+            // is resolver-internal and never appears in the document.
+            locator: source.content.clone(),
+            declared_identity: source.content.as_bytes().to_vec(),
+            declared_sample_rate_hz: session.sample_rate(),
             engine_sample_rate_hz: session.sample_rate(),
-            declared_channel_count: u16::from(source.mapping.channel_count),
+            declared_channel_count: u16::from(source.channels),
+            declared_bit_depth: source.bit_depth,
             region: NativeWaveRegion {
-                start_frame: SourceFrame(source.mapping.region.start_sample),
-                length_frames: source.mapping.region.length_samples,
+                start_frame: SourceFrame(0),
+                length_frames: source.frames,
             },
             ring_config: PcmSourceRingConfig {
-                channel_count: u32::from(source.mapping.channel_count),
+                channel_count: u32::from(source.channels),
                 quantum_frames: session.quantum(),
-                frame_capacity: model.limits.pcm_ring_frames,
+                frame_capacity: caps.source_ring_frames,
                 initial_generation: SourceGeneration(1),
             },
         };
@@ -1313,7 +1337,7 @@ pub fn prepare_native_session_sources<S: NativeSourceResolver>(
     let controller_records_bytes =
         retained_array_bytes::<NativeSourceController>(controllers.len())
             .ok_or_else(|| resource_failure(first_source_id))?;
-    let session_runtime_bytes = session.resource_estimate().requested_runtime_bytes;
+    let session_runtime_bytes = graph_resources.pcm_payload_already_charged_bytes;
     let worker_bytes = worker_resources
         .total_engine_owned_bytes()
         .ok_or_else(|| resource_failure(first_source_id))?;
@@ -1333,10 +1357,7 @@ pub fn prepare_native_session_sources<S: NativeSourceResolver>(
         .max(graph_resources.largest_allocation_bytes)
         .max(controller_records_bytes)
         .max(worker_resources.largest_allocation_bytes());
-    if graph_resources.pcm_payload_already_charged_bytes
-        != session.resource_estimate().source_ring_bytes
-        || combined_runtime_bytes > model.limits.memory_bytes
-        || combined_runtime_bytes > caps.max_combined_runtime_bytes
+    if combined_runtime_bytes > caps.max_combined_runtime_bytes
         || largest_allocation_bytes > caps.max_largest_allocation_bytes
     {
         return Err(resource_failure(first_source_id));
@@ -1762,6 +1783,9 @@ mod tests {
     use crate::{HostPlanarChunk, PcmSourceRing, QuantumFrames, SourceReadReport};
     use miso_engine_session::{CompileCaps, StableId, compile_session, parse_session_toml};
 
+    const SESSION_CONTENT: &[u8] =
+        b"sha256:2a97516c354b68848cdbd8f54a226a0a55b21ed138e207ad6c5cbb9c00aa5aea";
+
     #[test]
     fn native_worker_idle_paths_do_not_use_active_spin_primitives() {
         let source = include_str!("native_source.rs");
@@ -1857,6 +1881,7 @@ mod tests {
             declared_sample_rate_hz: SampleRateHz(48_000),
             engine_sample_rate_hz: SampleRateHz(48_000),
             declared_channel_count: 1,
+            declared_bit_depth: SourceBitDepth::Float32,
             region,
             ring_config: PcmSourceRingConfig {
                 channel_count: 1,
@@ -1892,6 +1917,7 @@ mod tests {
                 max_largest_allocation_bytes: u64::MAX,
                 control_queue_items: NonZeroUsize::new(2).expect("two"),
             },
+            source_ring_frames: 1_024,
             max_combined_runtime_bytes: u64::MAX,
             max_largest_allocation_bytes: u64::MAX,
         }
@@ -1901,7 +1927,7 @@ mod tests {
         let mut session =
             parse_session_toml(include_str!("../../../fixtures/session/v1/canonical.toml"))
                 .expect("session");
-        session.sources[0].mapping.region.length_samples = 4;
+        session.sources[0].frames = 4;
         compile_session(
             &session,
             CompileCaps {
@@ -2947,16 +2973,19 @@ mod tests {
     #[test]
     fn compiled_session_sources_prepare_once_and_publish_one_graph_source_set() {
         let session = compiled_source_session();
-        let mut resolver = session_resolver(b"sha256:demo");
+        let mut resolver = session_resolver(SESSION_CONTENT);
         let prepared = prepare_native_session_sources(&session, &mut resolver, session_caps())
             .expect("session source preparation");
         assert_eq!(resolver.calls, 1);
         assert_eq!(prepared.resources.source_count, 1);
         assert_eq!(prepared.source_set.claims().len(), 1);
+        // #241: the document no longer owns ring policy. The host-chosen 1,024-frame stereo f32
+        // ring is charged here exactly: 1,024 frames * 2 channels * 4 bytes = 8,192 bytes.
         assert_eq!(
             prepared.resources.source_pcm_already_charged_bytes,
-            session.resource_estimate().source_ring_bytes
+            1_024 * 2 * u64::try_from(size_of::<f32>()).expect("f32 size fits u64")
         );
+        assert_eq!(session.resource_estimate().source_ring_bytes, 0);
         let (source_set, _controllers, _resources) = prepared.into_parts();
         drop(source_set);
     }
@@ -2966,10 +2995,9 @@ mod tests {
         let mut session_toml =
             parse_session_toml(include_str!("../../../fixtures/session/v1/canonical.toml"))
                 .expect("session");
-        session_toml.sources[0].mapping.region.length_samples = 4;
+        session_toml.sources[0].frames = 4;
         let mut second = session_toml.sources[0].clone();
         second.id = StableId::parse("voice2").expect("second source ID");
-        second.content.locator = "host:voice2".to_owned();
         session_toml.sources.push(second);
         let session = compile_session(
             &session_toml,
@@ -2984,7 +3012,7 @@ mod tests {
         )
         .expect("compiled two-source session");
         let asset = || NativeResolvedAsset {
-            observed_identity: b"sha256:demo".to_vec(),
+            observed_identity: SESSION_CONTENT.to_vec(),
             reader: Cursor::new(stereo_float32_wave(&[0.0; 8])),
         };
         let mut resolver = SessionResolver {
@@ -3074,14 +3102,12 @@ mod tests {
         let mut session_toml =
             parse_session_toml(include_str!("../../../fixtures/session/v1/canonical.toml"))
                 .expect("session");
-        session_toml.limits.memory_bytes = 64 * 1024 * 1024;
-        session_toml.sources[0].mapping.region.length_samples = REGION_FRAMES;
+        session_toml.sources[0].frames = REGION_FRAMES;
         let source_template = session_toml.sources[0].clone();
         let track_template = session_toml.tracks[0].clone();
         for index in 1..SOURCE_COUNT {
             let mut source = source_template.clone();
             source.id = StableId::parse(&format!("voice{index}")).expect("unique source stable ID");
-            source.content.locator = format!("host:voice{index}");
             let mut track = track_template.clone();
             track.id = StableId::parse(&format!("vocal{index}")).expect("unique track stable ID");
             track.source_id = source.id.clone();
@@ -3104,7 +3130,7 @@ mod tests {
         let mut resolver = SessionResolver {
             assets: (0..SOURCE_COUNT)
                 .map(|_| NativeResolvedAsset {
-                    observed_identity: b"sha256:demo".to_vec(),
+                    observed_identity: SESSION_CONTENT.to_vec(),
                     reader: Cursor::new(wave.clone()),
                 })
                 .collect(),
@@ -3773,7 +3799,7 @@ mod tests {
             SourceDiagnosticCode::ContentIdentityMismatch
         );
 
-        let mut capped_resolver = session_resolver(b"sha256:demo");
+        let mut capped_resolver = session_resolver(SESSION_CONTENT);
         let mut caps = session_caps();
         caps.max_combined_runtime_bytes = 0;
         let capped = match prepare_native_session_sources(&session, &mut capped_resolver, caps) {
@@ -3789,7 +3815,7 @@ mod tests {
     #[test]
     fn combined_retained_cap_accepts_exactly_and_rejects_one_byte_short() {
         let session = compiled_source_session();
-        let mut initial_resolver = session_resolver(b"sha256:demo");
+        let mut initial_resolver = session_resolver(SESSION_CONTENT);
         let initial =
             prepare_native_session_sources(&session, &mut initial_resolver, session_caps())
                 .expect("uncapped preparation");
@@ -3799,7 +3825,7 @@ mod tests {
 
         let mut exact_caps = session_caps();
         exact_caps.max_combined_runtime_bytes = exact_total;
-        let mut exact_resolver = session_resolver(b"sha256:demo");
+        let mut exact_resolver = session_resolver(SESSION_CONTENT);
         let exact = prepare_native_session_sources(&session, &mut exact_resolver, exact_caps)
             .expect("exact retained cap");
         assert_eq!(exact.resources.combined_runtime_bytes, exact_total);
@@ -3807,7 +3833,7 @@ mod tests {
 
         let mut short_caps = session_caps();
         short_caps.max_combined_runtime_bytes = exact_total.checked_sub(1).expect("nonzero total");
-        let mut short_resolver = session_resolver(b"sha256:demo");
+        let mut short_resolver = session_resolver(SESSION_CONTENT);
         let short = match prepare_native_session_sources(&session, &mut short_resolver, short_caps)
         {
             Ok(_) => panic!("one byte short cap unexpectedly prepared"),
@@ -3846,6 +3872,65 @@ mod tests {
             Err(error) => error,
         };
         assert_eq!(mismatch, NativeSourcePrepareError::RateMismatch);
+    }
+
+    /// The engine-side depth refusal, in both directions, at the resolver boundary itself.
+    ///
+    /// The runner's `resolver_rejects_integer_and_float_depth_mismatches_both_directions_precompile`
+    /// exercises the *CLI's* own pre-compile comparison, so disabling this check outright (`&&
+    /// false` on the `observed_bit_depth != declared` arm) left every suite green: the runner
+    /// refused first and the engine boundary was never asked. This row asks it directly.
+    ///
+    /// Both directions matter and neither implies the other: an integer asset declared `32f`
+    /// would be reinterpreted as float bits, and a float asset declared `16` would be
+    /// reinterpreted as integer samples. Both are silent corruption of the render, not an error
+    /// the host could notice downstream, which is why the refusal lives before any decode.
+    #[test]
+    fn engine_boundary_refuses_declared_versus_decoded_depth_in_both_directions() {
+        let region = NativeWaveRegion {
+            start_frame: SourceFrame(0),
+            length_frames: 4,
+        };
+
+        let refusal = |resolver: &mut Resolver, request| match prepare_native_source(
+            resolver,
+            request,
+            caps(),
+        ) {
+            Ok(_) => panic!("a depth mismatch must never reach a prepared source"),
+            Err(error) => error,
+        };
+
+        // float32 asset, declared as an integer depth.
+        for declared in [SourceBitDepth::Pcm16, SourceBitDepth::Pcm24] {
+            let mut float_resolver = resolver(&[0.0; 4], b"exact-identity");
+            let mut float_request = request(region);
+            float_request.declared_bit_depth = declared;
+            assert_eq!(
+                refusal(&mut float_resolver, float_request),
+                NativeSourcePrepareError::Wave(NativeWaveError::FormatUnsupported),
+                "float32 asset declared {declared:?} must refuse before decode"
+            );
+        }
+
+        // integer asset, declared f32.
+        let mut integer_resolver = resolver_wave(pcm16_wave(&[0; 4]), b"exact-identity");
+        let integer_request = request(region);
+        assert_eq!(integer_request.declared_bit_depth, SourceBitDepth::Float32);
+        assert_eq!(
+            refusal(&mut integer_resolver, integer_request),
+            NativeSourcePrepareError::Wave(NativeWaveError::FormatUnsupported),
+            "pcm16 asset declared 32f must refuse before decode"
+        );
+
+        // The same asset with a truthful declaration prepares, so the two refusals above are the
+        // depth comparison and not some unrelated rejection of a 16-bit asset.
+        let mut truthful_resolver = resolver_wave(pcm16_wave(&[0; 4]), b"exact-identity");
+        let mut truthful_request = request(region);
+        truthful_request.declared_bit_depth = SourceBitDepth::Pcm16;
+        let prepared = prepare_native_source(&mut truthful_resolver, truthful_request, caps())
+            .expect("pcm16 asset declared 16 prepares");
+        drop(prepared);
     }
 
     #[test]
@@ -3893,7 +3978,7 @@ mod tests {
             },
         )
         .expect("compiled sourceless session");
-        let mut resolver = session_resolver(b"sha256:demo");
+        let mut resolver = session_resolver(SESSION_CONTENT);
 
         let failure = match prepare_native_session_sources(&session, &mut resolver, session_caps())
         {
@@ -3919,13 +4004,11 @@ mod tests {
         let mut session_toml =
             parse_session_toml(include_str!("../../../fixtures/session/v1/canonical.toml"))
                 .expect("session");
-        session_toml.sources[0].mapping.region.length_samples = 4;
+        session_toml.sources[0].frames = 4;
         let mut second = session_toml.sources[0].clone();
         second.id = StableId::parse("voice2").expect("ID");
-        second.content.locator = "host:voice2".to_owned();
         let mut third = second.clone();
         third.id = StableId::parse("alpha").expect("ID");
-        third.content.locator = "host:alpha".to_owned();
         session_toml.sources.push(second);
         session_toml.sources.push(third);
         let session = compile_session(
@@ -3940,7 +4023,7 @@ mod tests {
             },
         )
         .expect("compiled");
-        let mut resolver = session_resolver(b"sha256:demo");
+        let mut resolver = session_resolver(SESSION_CONTENT);
         let failure = match prepare_native_session_sources(&session, &mut resolver, session_caps())
         {
             Ok(_) => panic!("second resolver call unexpectedly prepared"),
@@ -4125,6 +4208,29 @@ mod tests {
         );
         format.extend_from_slice(&4_u16.to_le_bytes());
         format.extend_from_slice(&32_u16.to_le_bytes());
+        let mut data = Vec::new();
+        for sample in samples {
+            data.extend_from_slice(&sample.to_le_bytes());
+        }
+        let mut wave = Vec::new();
+        wave.extend_from_slice(b"RIFF");
+        wave.extend_from_slice(&0_u32.to_le_bytes());
+        wave.extend_from_slice(b"WAVE");
+        append_chunk(&mut wave, b"fmt ", &format);
+        append_chunk(&mut wave, b"data", &data);
+        let riff_size = u32::try_from(wave.len() - 8).expect("len");
+        wave[4..8].copy_from_slice(&riff_size.to_le_bytes());
+        wave
+    }
+
+    fn pcm16_wave(samples: &[i16]) -> Vec<u8> {
+        let mut format = Vec::new();
+        format.extend_from_slice(&1_u16.to_le_bytes());
+        format.extend_from_slice(&1_u16.to_le_bytes());
+        format.extend_from_slice(&48_000_u32.to_le_bytes());
+        format.extend_from_slice(&96_000_u32.to_le_bytes());
+        format.extend_from_slice(&2_u16.to_le_bytes());
+        format.extend_from_slice(&16_u16.to_le_bytes());
         let mut data = Vec::new();
         for sample in samples {
             data.extend_from_slice(&sample.to_le_bytes());

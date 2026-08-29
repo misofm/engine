@@ -127,7 +127,6 @@ pub(crate) fn main() {
 
 fn representative_fixture() -> Fixture {
     let mut model = parse_session_toml(SEED).expect("seed session");
-    model.limits.memory_bytes = i64::MAX as u64;
     let track_template = model.tracks.pop().expect("seed track");
     let route_template = model.routes.pop().expect("seed route");
     model.automation.clear();
@@ -215,7 +214,6 @@ fn representative_fixture() -> Fixture {
 
 fn scale_fixture() -> Fixture {
     let mut model = parse_session_toml(SEED).expect("seed session");
-    model.limits.memory_bytes = i64::MAX as u64;
     let mut template = model.tracks[0].clone();
     template.simd1.effects.clear();
     template.dynamic.effects.clear();

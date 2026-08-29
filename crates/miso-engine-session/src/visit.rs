@@ -52,6 +52,12 @@ pub trait ModelVisitor {
     fn u32(&mut self, key: FieldKey, value: u32) -> Result<(), Self::Error>;
     /// Emit an unsigned 64-bit field.
     fn u64(&mut self, key: FieldKey, value: u64) -> Result<(), Self::Error>;
+    /// Emit the mixed TOML integer/string source bit-depth token.
+    fn source_bit_depth(
+        &mut self,
+        key: FieldKey,
+        value: crate::SourceBitDepth,
+    ) -> Result<(), Self::Error>;
     /// Emit a finite 32-bit float field.
     fn f32(&mut self, key: FieldKey, value: f32) -> Result<(), Self::Error>;
     /// Emit a stable-ID field.
@@ -76,14 +82,10 @@ macro_rules! key_module { ($name:ident,$doc:literal;$($field:tt)*) => {#[doc=$do
 #[rustfmt::skip]
 pub mod keys {
  use super::FieldKey;
- key_module!(session,"Session root fields.";SCHEMA_VERSION="schema_version":1,SESSION_ID="session_id":2,REVISION="revision":3,SAMPLE_RATE_HZ="sample_rate_hz":4,QUANTUM_FRAMES="quantum_frames":5,RENDER_PROFILE="render_profile":6,OUTPUT_PROFILE="output_profile":7,LIMITS="limits":8,SOURCES="sources":9,TRACKS="tracks":10,SUBMIXES="submixes":11,OUTPUTS="outputs":12,ROUTES="routes":13,AUTOMATION="automation":14);
+ key_module!(session,"Session root fields.";SCHEMA_VERSION="schema_version":1,SESSION_ID="session_id":2,REVISION="revision":3,SAMPLE_RATE_HZ="sample_rate_hz":4,QUANTUM_FRAMES="quantum_frames":5,RENDER_PROFILE="render_profile":6,OUTPUT_PROFILE="output_profile":7,SOURCES="sources":9,TRACKS="tracks":10,SUBMIXES="submixes":11,OUTPUTS="outputs":12,ROUTES="routes":13,AUTOMATION="automation":14);
  key_module!(render_profile,"Render-profile fields.";ID="id":1,MODE="mode":2);
  key_module!(output_profile,"Output-profile fields.";ID="id":1,CHANNELS="channels":2,SAMPLE_FORMAT="sample_format":3);
- key_module!(limits,"Session-limit fields.";PCM_RING_FRAMES="pcm_ring_frames":1,CONTROL_QUEUE_MESSAGES="control_queue_messages":2,MEMORY_BYTES="memory_bytes":3);
- key_module!(source,"Source fields.";ID="id":1,SAMPLE_RATE_HZ="sample_rate_hz":2,CONTENT="content":3,MAPPING="mapping":4);
- key_module!(content,"Source-content fields.";IDENTITY="identity":1,LOCATOR="locator":2);
- key_module!(mapping,"Source-mapping fields.";CHANNEL_COUNT="channel_count":1,REGION="region":2);
- key_module!(region,"Source-region fields.";START_SAMPLE="start_sample":1,LENGTH_SAMPLES="length_samples":2);
+ key_module!(source,"Source fields.";ID="id":1,CONTENT="content":2,CHANNELS="channels":3,BIT_DEPTH="bit_depth":4,FRAMES="frames":5);
  key_module!(track,"Track fields.";ID="id":1,SOURCE_ID="source_id":2,LEFT_SOURCE_CHANNEL="left_source_channel":3,RIGHT_SOURCE_CHANNEL="right_source_channel":4,BUILTINS="builtins":5,SIMD1="simd1":6,DYNAMIC="dynamic":7,SIMD2="simd2":8,FADER="fader":9,PAN="pan":10,MATRIX="matrix":10);
  key_module!(builtins,"Dual-mono builtins fields.";LEFT="left":1,RIGHT="right":2);
  key_module!(channel_builtins,"Channel-builtin fields.";POLARITY_INVERT="polarity_invert":1,TRIM_DB="trim_db":2,HPF_HZ="hpf_hz":3,LPF_HZ="lpf_hz":4,DELAY_SAMPLES="delay_samples":5);
@@ -183,19 +185,15 @@ mod walk {
     }
 
     records! {
-        SessionToml=>session |s,v,o,f| [(8+s.sources.len()+s.tracks.len()+s.submixes.len()+s.outputs.len()+s.routes.len()+s.automation.len()) as u32] {
+        SessionToml=>session |s,v,o,f| [(7+s.sources.len()+s.tracks.len()+s.submixes.len()+s.outputs.len()+s.routes.len()+s.automation.len()) as u32] {
           v.u32(f::SCHEMA_VERSION,s.schema_version),v.id(f::SESSION_ID,&s.session_id),v.u64(f::REVISION,s.revision),v.u32(f::SAMPLE_RATE_HZ,s.sample_rate_hz),v.u32(f::QUANTUM_FRAMES,s.quantum_frames),
-          s.render_profile.record(Some(f::RENDER_PROFILE),o,v),s.output_profile.record(Some(f::OUTPUT_PROFILE),o,v),s.limits.record(Some(f::LIMITS),o,v),
+          s.render_profile.record(Some(f::RENDER_PROFILE),o,v),s.output_profile.record(Some(f::OUTPUT_PROFILE),o,v),
           sorted_array(f::SOURCES,&s.sources,o,v),sorted_array(f::TRACKS,&s.tracks,o,v),sorted_array(f::SUBMIXES,&s.submixes,o,v),
           sorted_array(f::OUTPUTS,&s.outputs,o,v),sorted_array(f::ROUTES,&s.routes,o,v),sorted_array(f::AUTOMATION,&s.automation,o,v)
         }
         RenderProfile=>render_profile |s,v,_o,f| [2] {v.id(f::ID,&s.id),v.token(f::MODE,token(s.mode.token(),s.mode.wire()))}
         OutputProfile=>output_profile |s,v,_o,f| [3] {v.id(f::ID,&s.id),v.u8(f::CHANNELS,s.channels),v.token(f::SAMPLE_FORMAT,token(s.sample_format.token(),s.sample_format.wire()))}
-        SessionLimits=>limits |s,v,_o,f| [3] {v.u64(f::PCM_RING_FRAMES,s.pcm_ring_frames),v.u64(f::CONTROL_QUEUE_MESSAGES,s.control_queue_messages),v.u64(f::MEMORY_BYTES,s.memory_bytes)}
-        Source=>source |s,v,o,f| [4] {v.id(f::ID,&s.id),v.u32(f::SAMPLE_RATE_HZ,s.sample_rate_hz),s.content.record(Some(f::CONTENT),o,v),s.mapping.record(Some(f::MAPPING),o,v)}
-        SourceContent=>content |s,v,_o,f| [2] {v.text(f::IDENTITY,&s.identity),v.text(f::LOCATOR,&s.locator)}
-        SourceMapping=>mapping |s,v,o,f| [2] {v.u8(f::CHANNEL_COUNT,s.channel_count),s.region.record(Some(f::REGION),o,v)}
-        SourceRegion=>region |s,v,_o,f| [2] {v.u64(f::START_SAMPLE,s.start_sample),v.u64(f::LENGTH_SAMPLES,s.length_samples)}
+        Source=>source |s,v,_o,f| [5] {v.id(f::ID,&s.id),v.text(f::CONTENT,&s.content),v.u8(f::CHANNELS,s.channels),v.source_bit_depth(f::BIT_DEPTH,s.bit_depth),v.u64(f::FRAMES,s.frames)}
         Track=>track |s,v,o,f| [10] {
           v.id(f::ID,&s.id),v.id(f::SOURCE_ID,&s.source_id),v.u8(f::LEFT_SOURCE_CHANNEL,s.left_source_channel),v.u8(f::RIGHT_SOURCE_CHANNEL,s.right_source_channel),
           s.builtins.record(Some(f::BUILTINS),o,v),s.simd1.record(Some(f::SIMD1),o,v),s.dynamic.record(Some(f::DYNAMIC),o,v),s.simd2.record(Some(f::SIMD2),o,v),s.fader.record(Some(f::FADER),o,v),

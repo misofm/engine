@@ -116,7 +116,6 @@ fn worst_accepted_document() -> Vec<u8> {
         "../../../fixtures/session/v1/parametric-eq-nine-track.toml"
     ))
     .expect("seed fixture parses");
-    model.limits.memory_bytes = 512 << 20;
     let mut track = model.tracks[1].clone();
     let effect = track.simd1.effects[0].clone();
     track.simd1.effects.clear();

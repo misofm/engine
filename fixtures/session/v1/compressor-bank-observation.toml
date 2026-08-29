@@ -19,9 +19,8 @@ sample_rate_hz = 48000
 quantum_frames = 128
 render_profile = { id = "native", mode = "single_thread" }
 output_profile = { id = "main", channels = 2, sample_format = "f32_planar" }
-limits = { pcm_ring_frames = 1024, control_queue_messages = 64, memory_bytes = 16777216 }
 sources = [
-  { id = "fixture-source", sample_rate_hz = 48000, content = { identity = "sha256:compressor-bank-observation", locator = "host:compressor-bank-observation" }, mapping = { channel_count = 2, region = { start_sample = 0, length_samples = 48000 } } },
+  { id = "fixture-source", content = "sha256:d3a5da8b0084029f88673f12d89eb492037bd9cf1f157c42dc3c25563aa7497f", channels = 2, bit_depth = "32f", frames = 48000 },
 ]
 submixes = []
 outputs = [{ id = "main-out" }]

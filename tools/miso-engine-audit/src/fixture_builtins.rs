@@ -5060,7 +5060,7 @@ fn expected_benchmark_fields(kind: BenchmarkKind, rate_hz: u32) -> Vec<(String, 
             benchmark_field_pair("meter_queue_capacity", "4"),
             benchmark_field_pair("state_mode", "\"new_per_prepare\""),
             benchmark_field_pair("session_template_path", "\"fixtures/session/v1/canonical.toml\""),
-            benchmark_field_pair("session_template_sha256", "\"323768dd664277651ad79b6c5bae97eab0a4458cc533bd3e9267c41c24111999\""),
+            benchmark_field_pair("session_template_sha256", "\"36232a437c0280ad1166aeed4cc6a3c95d1260d088664757e776c2b3a065aa80\""),
             benchmark_field_pair("track_id_prefix", "\"benchmark-track-\""),
             benchmark_field_pair("track_id_count", "256"),
             benchmark_field_pair("empty_effect_racks", "true"),
@@ -5220,7 +5220,11 @@ mod tests {
             // trim ramp. No PCM, meter, response or benchmark fixture moved, which is what a
             // control-plane-and-transient-path phase should look like from here: the render bits
             // of every checked case are the bits they were.
-            "1d2f8ffe8f56d08314e480f0aba7ee5068ae8448721504ae7f64db11a33f06c8",
+            //
+            // Re-pinned by issue #241: the same two preparation workloads now name the canonical
+            // session by its source-content identity after the source-schema migration. Their
+            // payload lengths and every render-bearing fixture remain unchanged.
+            "4b7b6ac1f1c2f16aecebb003c62b37420a96ca6f0bc1b75fa471654dcbc38ba5",
             "accepted joined-corpus manifest identity"
         );
 

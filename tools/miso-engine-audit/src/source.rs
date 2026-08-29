@@ -39,6 +39,7 @@ pub(crate) fn main() {
         declared_sample_rate_hz: SampleRateHz(48_000),
         engine_sample_rate_hz: SampleRateHz(48_000),
         declared_channel_count: 1,
+        declared_bit_depth: miso_engine_session::SourceBitDepth::Float32,
         region: NativeWaveRegion {
             start_frame: SourceFrame(0),
             length_frames: u64::from(QUANTUM) * 4,
