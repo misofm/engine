@@ -450,3 +450,45 @@ fn every_ladder_size_lands_on_a_lattice_point_and_clamps_at_the_ends() {
         Some(points.len() as u32 - 1)
     );
 }
+
+#[test]
+fn a_negative_zero_spelling_names_the_zero_lattice_point() {
+    // A document may spell zero with a sign. `-0.0` and `0.0` are the same NUMBER, and the
+    // lattice is a set of numbers, so both name the one zero point and both prepare the one
+    // word. The descriptor surface has no signed zero at all -- `canonical_descriptor_decimal`
+    // refuses `-0.0` -- so there is no second point for a signed spelling to land on, and the
+    // matcher must not invent one. Pinned because a normalizer that let the sign survive would
+    // sort `-0.0` below every negative point and silently refuse a lawful document.
+    let points = parameter_lattice_points(&descriptor(
+        ParameterUnit::Db,
+        ParameterDomain::Continuous,
+        ParameterMapping::Linear,
+        Some(-24.0),
+        Some(24.0),
+        0.0,
+        ParameterLattice::arithmetic(0.1, 1),
+    ))
+    .expect("decibel lattice");
+
+    let zero = lattice_index_for_decimal(&points, "0.0").expect("the zero point");
+    assert_eq!(points[zero as usize].canonical, "0.0");
+    for spelling in ["-0.0", "-0", "0", "+0.0", "-0.00", "0.000"] {
+        assert_eq!(
+            lattice_index_for_decimal(&points, spelling),
+            Ok(zero),
+            "{spelling} names the zero lattice point"
+        );
+    }
+    // And the prepared word carries no sign either: every spelling reaches positive zero through
+    // the one blessed conversion.
+    let prepared = decimal_to_f32(&points[zero as usize].canonical).expect("conversion");
+    assert_eq!(prepared.to_bits(), 0.0_f32.to_bits());
+    assert!(!prepared.is_sign_negative());
+
+    // A signed zero is still a distinct value from its neighbours, so the rule is about the sign
+    // of zero and not about collapsing small magnitudes.
+    assert_ne!(lattice_index_for_decimal(&points, "-0.1"), Ok(zero));
+    assert_ne!(lattice_index_for_decimal(&points, "0.1"), Ok(zero));
+    // The descriptor surface refuses to render a signed zero in the first place.
+    assert_eq!(canonical_descriptor_decimal(-0.0, 1), None);
+}
