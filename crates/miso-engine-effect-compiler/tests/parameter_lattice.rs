@@ -137,6 +137,41 @@ fn the_prepared_word_of_a_default_is_bit_identical_to_the_descriptor() {
 }
 
 #[test]
+fn every_lattice_point_reaches_the_engine_through_the_one_blessed_conversion() {
+    // #242 eval 2. For every shipped row, both endpoints and an interior point are matched from
+    // their own canonical text and converted once. The conversion is a pure function of that
+    // text, so re-running it must be bit-identical -- there is no second decimal path that could
+    // disagree, and re-spelling a point cannot move a prepared word.
+    let mut checked = 0_usize;
+    for (effect, parameter) in rows() {
+        let where_ = format!("{effect}#{}", parameter.id.0);
+        let points = parameter_lattice_points(parameter).expect("lattice");
+        let interior = points.len() / 2;
+        for position in [0, interior, points.len() - 1] {
+            let point = &points[position];
+            let index = lattice_index_for_decimal(&points, &point.canonical)
+                .unwrap_or_else(|_| panic!("{where_}: {} is not its own point", point.canonical));
+            assert_eq!(index as usize, position, "{where_}: matched a different point");
+            let once = decimal_to_f32(&point.canonical).expect("conversion");
+            let twice = decimal_to_f32(&points[index as usize].canonical).expect("conversion");
+            assert_eq!(once.to_bits(), twice.to_bits(), "{where_}: conversion is not a function");
+            assert!(once.is_finite(), "{where_}: {} converts to a non-finite word", point.canonical);
+            // Trailing zeros are a different spelling of the same value and must not move it.
+            let padded = if point.canonical.contains('.') {
+                format!("{}0", point.canonical)
+            } else {
+                format!("{}.0", point.canonical)
+            };
+            let padded_index = lattice_index_for_decimal(&points, &padded)
+                .unwrap_or_else(|_| panic!("{where_}: {padded} is the same value"));
+            assert_eq!(padded_index, index, "{where_}: spelling changed the point");
+            checked += 1;
+        }
+    }
+    assert!(checked >= 198, "three points on each of 66 rows: {checked}");
+}
+
+#[test]
 fn every_log_row_steps_geometrically_and_every_linear_row_arithmetically() {
     // A12: equal-unit stepping of a logarithmic parameter is rejected on the record. The
     // declared step unit and the mapping are one statement, so they are checked as one.

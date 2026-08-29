@@ -55,7 +55,33 @@ is what the persist plane carries. The DOCUMENT spells the choice value. The par
 decimals would have refused `notch` (`6.0`) outright and matched every other spelling to the wrong
 choice. Canonical renderings are now the choice values; `LatticePoint::index` remains the ordinal.
 
-## 7. Fixture migration ledger — NOT APPLIED, ruling required
+## 7. Descriptor-wire encoding is canonical, and no sealed identity moved
+
+The decoder reads an all-zero window at parameter offsets 72/76 as
+`default_parameter_lattice(unit, domain, mapping)`. An encoder that also wrote that same derived
+lattice explicitly would give one lattice two byte spellings; in a format whose bytes are its
+identity that is an aliasing bug. The encoder therefore emits the words only when the row's
+declaration differs from its derived class default.
+
+Consequence, and the reason it was found: `miso-engine-bench`'s three interchange descriptors are
+`Linear`/`Continuous`/`Linear`, whose class default IS `arithmetic(0.01, 2)` -- exactly what they
+declare. Writing that explicitly moved the `migration_two_step_bank_restore` envelope digest from
+the value sealed by issue #108's authorized one-shot run,
+`5f23e630182137426fdfe01b74861bdff779b6738bfae8f670359ad0e9ea2777`, to
+`ce6060818a06a265e5e1637aa53d008b92a827605445fdece1f352182b44cc65`. That digest is pinned in five
+places (the bench itself, `scripts/check-effect-interchange-benchmark-108.sh`,
+`scripts/test-effect-interchange-benchmark-108-policy.sh`,
+`scripts/effect-interchange-benchmark-108-validator.py`, and #108's own spec and brief), and
+re-pinning it would have invalidated recorded one-shot benchmark evidence. Under the canonical
+rule those descriptors encode zeros again and the sealed digest is restored exactly; nothing was
+re-pinned.
+
+The only shipped effect row whose descriptor bytes move under #242 is `miso.delay` `damping`,
+because it is the only row that genuinely overrides its class default (section 4). Per #127's
+recorded position, a descriptor that declares its own ladder changing bytes is correct and
+intended.
+
+## 8. Fixture migration ledger — NOT APPLIED, ruling required
 
 Enforcing the lattice at validation/preparation refuses **2320 persisted values across 8 of the 14
 shipped session fixtures**. These edits are deliberately NOT made: they would move render digests,
