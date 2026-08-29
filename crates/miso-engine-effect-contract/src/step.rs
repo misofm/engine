@@ -834,8 +834,16 @@ mod tests {
         assert_eq!(points.last().unwrap().canonical, "18.00000000");
     }
 
+    /// An enumeration is INDEXED by ordinal but SPELLED by choice value.
+    ///
+    /// The persist plane carries the ordinal, which is what makes the step identically one over
+    /// a closed set. The document, however, states the declared choice value, so those values
+    /// are the canonical decimal renderings a persisted word is matched against. An earlier
+    /// revision rendered the ordinals here; against the shipped parametric EQ, whose six `kind`
+    /// choices are valued `1.0 .. 6.0`, that refused `notch` outright and matched every other
+    /// spelling to the wrong choice.
     #[test]
-    fn index_lattice_uses_choice_indices_not_choice_values() {
+    fn an_index_lattice_is_ordinal_indexed_and_choice_value_spelled() {
         static CHOICES: [EnumChoice; 3] = [
             EnumChoice {
                 value: 1.0,
@@ -864,7 +872,19 @@ mod tests {
                 .iter()
                 .map(|point| point.canonical.as_str())
                 .collect::<Vec<_>>(),
-            ["0", "1", "2"]
+            ["1", "4", "9"]
         );
+        assert_eq!(
+            points.iter().map(|point| point.index).collect::<Vec<_>>(),
+            [0, 1, 2],
+            "the persisted index stays the choice ordinal"
+        );
+        assert!(points.iter().all(|point| point.intrinsic));
+        // Every declared choice is reachable, and nothing between them is.
+        assert_eq!(lattice_index_for_decimal(&points, "9.0"), Ok(2));
+        assert_eq!(lattice_index_for_decimal(&points, "1"), Ok(0));
+        let refusal = lattice_index_for_decimal(&points, "2").expect_err("not a choice");
+        assert_eq!(refusal.lower.as_deref(), Some("1"));
+        assert_eq!(refusal.upper.as_deref(), Some("4"));
     }
 }
