@@ -30,6 +30,12 @@ function requirements(stems) {
   return stems.map(({ identity, bytes }) => ({ identity, bytes }))
 }
 
+function indexStems(backend) {
+  return JSON.parse(
+    new TextDecoder().decode(backend.bytes("miso-stems-v1/index.json"))
+  ).stems
+}
+
 function store(backend, locks, options = {}) {
   return new OpfsStemStore({
     storage: backend.storage(),
@@ -710,6 +716,132 @@ async function wedgedDecoderObeysAbortAndDeadline() {
   assert.deepEqual(deadlineBackend.names("miso-stems-v1/staging"), [])
 }
 
+// STEM_IDENTITY_V1 §4: the preimage length is shape-derived and never enters
+// the hash, so a declaration that lies about `bytes` is the one corruption a
+// digest match cannot catch. Every arm that compares an observed length with
+// the declaration is load-bearing; these narratives reach them in store order,
+// fallback-final first, so that each arm is the only one left holding.
+async function lyingDeclarationIsRefused() {
+  const stem = fixture("lying-declaration", 8192)
+  const finalPath = `miso-stems-v1/sha256-${stem.identity.slice(7)}`
+  const lied = { identity: stem.identity, bytes: stem.bytes + 64 }
+
+  const fallbackBackend = new FakeOpfsBackend({ moveSupported: false })
+  const fallbackResolver = new MemoryStemResolver(stemMap([stem]), {
+    chunkBytes: 1024,
+  })
+  const fallback = store(fallbackBackend, new FakeLockManager(), {
+    tabId: "lying-fallback",
+  })
+  await assert.rejects(
+    fallback.openSession({
+      sessionId: "lying-fallback",
+      stems: [lied],
+      resolver: fallbackResolver,
+    }),
+    (error) => {
+      assert.equal(error.code, "stem.ingest.integrity")
+      assert.equal(error.details.identity, stem.identity)
+      return true
+    },
+    "a lying declaration must never survive fallback promotion"
+  )
+  assert.equal(fallbackBackend.has(finalPath), false, "no final may be adopted")
+  assert.deepEqual(fallbackBackend.names("miso-stems-v1/staging"), [])
+  assert.deepEqual(indexStems(fallbackBackend), {})
+
+  const backend = new FakeOpfsBackend()
+  const resolver = new MemoryStemResolver(stemMap([stem]), { chunkBytes: 1024 })
+  const opfs = store(backend, new FakeLockManager(), { tabId: "lying-fresh" })
+  const progress = []
+  await assert.rejects(
+    opfs.openSession({
+      sessionId: "lying-fresh",
+      stems: [lied],
+      resolver,
+      onProgress(event) {
+        progress.push(event)
+      },
+    }),
+    (error) => {
+      assert.equal(error.code, "stem.ingest.integrity")
+      assert.equal(error.details.identity, stem.identity)
+      assert.equal(error.details.expectedBytes, lied.bytes)
+      assert.equal(error.details.observedBytes, stem.bytes)
+      assert.equal(error.details.expectedSha256, stem.identity.slice(7))
+      return true
+    },
+    "a lying declaration must never be promoted"
+  )
+  assert.deepEqual(
+    progress.filter((event) => event.stage === "verified"),
+    [],
+    "a lying declaration is refused before the pre-promote reopen"
+  )
+  assert.deepEqual(
+    progress.filter((event) => event.stage === "promoted"),
+    []
+  )
+  assert.equal(backend.has(finalPath), false, "a refused ingest indexes nothing")
+  assert.deepEqual(backend.names("miso-stems-v1/staging"), [])
+  assert.deepEqual(indexStems(backend), {})
+  assert.equal(resolver.requests.length, 2, "the typed integrity refusal retries once")
+
+  const warmBackend = new FakeOpfsBackend()
+  const warmLocks = new FakeLockManager()
+  const seeded = store(warmBackend, warmLocks, { tabId: "lying-seed" })
+  const seedLease = await seeded.openSession({
+    sessionId: "seed",
+    stems: requirements([stem]),
+    resolver: new MemoryStemResolver(stemMap([stem])),
+  })
+  await seedLease.close()
+  assert.equal(warmBackend.has(finalPath), true)
+  assert.equal(indexStems(warmBackend)[stem.identity].bytes, stem.bytes)
+
+  const reopenResolver = new MemoryStemResolver(stemMap([stem]))
+  const gate = new StemSessionGate(
+    store(warmBackend, warmLocks, { tabId: "lying-reopen" }),
+    reopenResolver
+  )
+  const reopenProgress = []
+  await assert.rejects(
+    gate.open({
+      sessionId: "lying-reopen",
+      stems: [lied],
+      resume() {},
+      onProgress(event) {
+        reopenProgress.push(event)
+      },
+    }),
+    (error) => {
+      assert.equal(error.code, "stem.ingest.integrity")
+      return true
+    },
+    "verify-on-open must demote a lying declaration to a miss"
+  )
+  assert.equal(gate.state, "refused")
+  assert.deepEqual(
+    reopenProgress.filter((event) => event.stage === "interactive"),
+    [],
+    "a lying declaration never opens the interaction gate"
+  )
+  assert.ok(
+    reopenProgress.some(
+      (event) =>
+        event.stage === "corrupt" &&
+        event.identity === stem.identity &&
+        event.expectedBytes === lied.bytes &&
+        event.observedBytes === stem.bytes
+    ),
+    "verify-on-open must report the byte-length mismatch as corruption"
+  )
+  assert.equal(reopenResolver.requests.length, 2, "the demoted stem re-ingests and is refused")
+  assert.equal(warmBackend.has(finalPath), false, "the demoted final is removed")
+  assert.deepEqual(indexStems(warmBackend), {})
+  await gate.close()
+}
+
 async function storageUnavailable() {
   const opfs = new OpfsStemStore({ storage: {}, locks: new FakeLockManager() })
   await assert.rejects(opfs.open(), (error) => {
@@ -799,6 +931,7 @@ await lruEvictsOnlyUnpinned()
 await tabCloseMidStaging()
 await abortCleansStaging()
 await wedgedDecoderObeysAbortAndDeadline()
+await lyingDeclarationIsRefused()
 await storageUnavailable()
 await latencyRows()
 await modeDetection()
