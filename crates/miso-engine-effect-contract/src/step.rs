@@ -273,19 +273,28 @@ fn insert_decimal(
     Ok(())
 }
 
-/// Render one intrinsic point and prove the rendering is lossless.
+/// Render one intrinsic point and prove the rendering names it exactly.
 ///
-/// An intrinsic point is a value the descriptor declares outright -- a bound,
-/// a default, an enumeration choice. Its canonical rendering is the only text
-/// that ever reaches [`decimal_to_f32`], so a rendering that does not convert
-/// back to the declared `f32` would silently move the declared value. The
-/// launch case this catches is a bound with more decimals than the row's
-/// pinned precision: `0.995` at two decimals renders `1.00`, which is outside
-/// its own domain.
+/// An intrinsic point is a value the descriptor declares outright -- a bound, a
+/// default, an enumeration choice. Its canonical rendering is the only text
+/// that ever reaches [`decimal_to_f32`], so a rendering that names a DIFFERENT
+/// number would silently move the declared value. The launch case this catches
+/// is a bound carrying more decimals than the row's pinned precision: `0.995`
+/// at two decimals renders `1.00`, which is outside its own domain.
+///
+/// The proof is decimal, not a `f32` round trip. `f32`'s shortest round-tripping
+/// spelling is the value's decimal NAME, and both it and the fixed-precision
+/// rendering are produced by the software float formatter, so this comparison is
+/// exact and identical in every floating-point environment. Converting the
+/// rendering back and comparing words would not be: decimal-to-`f32` parsing has
+/// a hardware fast path, and under a caller's round-toward-zero word it can land
+/// one unit in the last place away from the correctly rounded result.
 fn intrinsic_decimal(value: f32, precision: u8) -> Result<String, LatticeError> {
     let text = canonical_descriptor_decimal(value, precision).ok_or(LatticeError::Declaration)?;
-    let restored = decimal_to_f32(&text).ok_or(LatticeError::Rendering)?;
-    if canonical_bits(restored) != canonical_bits(value) {
+    let rendered = ExactDecimal::parse(&text).ok_or(LatticeError::Rendering)?;
+    // Trailing fraction zeros normalize away, so `10.000` and `10` are one value.
+    let named = ExactDecimal::parse(&format!("{value}")).ok_or(LatticeError::Rendering)?;
+    if rendered != named {
         return Err(LatticeError::Rendering);
     }
     Ok(text)

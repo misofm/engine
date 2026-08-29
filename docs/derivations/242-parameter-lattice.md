@@ -81,7 +81,35 @@ because it is the only row that genuinely overrides its class default (section 4
 recorded position, a descriptor that declares its own ladder changing bytes is correct and
 intended.
 
-## 8. Fixture migration ledger — NOT APPLIED, ruling required
+## 8. The blessed conversion is not rounding-mode independent — OPEN
+
+Found while making section 4's rule hold under issue #146's floating-point arms. Descriptor
+validation runs inside `prepare_host_session`, and `crates/miso-engine-host-core/tests/fp_environment.rs`
+calls it with the caller's MXCSR set to flush-to-zero, denormals-are-zero AND **round-toward-zero**.
+A first attempt at section 4 proved the rendering by converting it back with `decimal_to_f32` and
+comparing words; under that caller's word the whole parametric-EQ descriptor became invalid.
+
+The cause is not the check: `str::parse::<f32>()` has a hardware fast path that multiplies or
+divides by a power of ten in `f64`, so under a non-default rounding mode it can land one unit in
+the last place away from the correctly rounded result. `decimal_to_f32` is that parse, and it is
+the site #242 calls the SINGLE conversion authority whose whole purpose is that there be no float
+drift. Today that guarantee holds only in a default rounding environment.
+
+Section 4's rule was restated in the decimal domain instead -- a rendering must equal the value's
+shortest round-tripping spelling, both produced by the software float formatter -- so descriptor
+validation is now environment-independent and the #146 arms pass. **The underlying hazard is not
+fixed and is not #242's to rule on.** When S2 enforcement lands, preparation will convert
+persisted text through `decimal_to_f32`, and a host whose caller word differs will then prepare
+different words from the same document. Two candidate fixes, both outside this brief:
+
+1. Convert in exact integer arithmetic. Every lattice rendering is `units / 10^precision` with at
+   most eight fraction digits, so the correctly rounded `f32` is computable with `i128` and an
+   explicit round-half-even, with no hardware float and no environment dependence at all.
+2. Enter the canonical floating-point environment around preparation, the way
+   `StartedRenderSession` already does around render (#146). This is the larger change and is
+   #146's architecture to extend.
+
+## 9. Fixture migration ledger — NOT APPLIED, ruling required
 
 Enforcing the lattice at validation/preparation refuses **2320 persisted values across 8 of the 14
 shipped session fixtures**. These edits are deliberately NOT made: they would move render digests,
