@@ -476,12 +476,23 @@ pub fn encode_effect_descriptor_wire(
         let (offset, length) = write_text(output, &mut string_cursor, parameter.display_unit);
         write_u32(output, record + 64, offset);
         write_u32(output, record + 68, length);
-        write_u32(output, record + 72, parameter.lattice.step.to_bits());
-        write_u32(
-            output,
-            record + 76,
-            pack_lattice_spec(parameter.lattice).expect("validated parameter lattice is encodable"),
-        );
+        // ONE encoding per meaning. The decoder reads an all-zero window as the derived
+        // unit-class lattice, so a row that declares exactly that default must encode zeros --
+        // otherwise the same lattice would have two byte spellings, and this format's bytes are
+        // its identity. Writing the derived case explicitly would also have moved every
+        // descriptor identity sealed before #242 for no change in meaning.
+        let derived = default_parameter_lattice(parameter.unit, parameter.domain, parameter.mapping);
+        let (step_bits, lattice_spec) = if parameter.lattice == derived {
+            (0, 0)
+        } else {
+            (
+                parameter.lattice.step.to_bits(),
+                pack_lattice_spec(parameter.lattice)
+                    .expect("validated parameter lattice is encodable"),
+            )
+        };
+        write_u32(output, record + 72, step_bits);
+        write_u32(output, record + 76, lattice_spec);
         for choice in parameter.enum_choices {
             let choice_record =
                 layout.choice_offset as usize + choice_index as usize * ENUM_CHOICE_BYTES;
