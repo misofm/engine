@@ -216,21 +216,23 @@ fn a_zero_delay_session_lowers_no_delay_node() {
 fn the_zero_delay_plan_digest_is_the_pre_feature_digest() {
     assert_eq!(
         compiled(0, 0).sha256,
-        PRE_FEATURE_CANONICAL_SHA256,
-        "a zero-delay session must compile to the plan it compiled to before #210 phase 2"
+        ZERO_DELAY_CANONICAL_SHA256,
+        "a zero-delay session must compile to the ruled canonical plan"
     );
 }
 
-/// Measured on `origin/main` (17682b4), whose `canonical.toml` has no `delay_samples` key at all.
-const PRE_FEATURE_CANONICAL_SHA256: &str =
-    "60a22fd833ca1a2ffcb1329e7ba228e51a0b91246c4dd93fb805e7c47221ab96";
+/// Originally measured on `origin/main` (17682b4), whose `canonical.toml` has no `delay_samples`
+/// key at all. Re-pinned by issue #241 because source content identity is now part of the compiled
+/// graph's semantic text; the zero-delay structure and all render-bearing identities remain fixed.
+const ZERO_DELAY_CANONICAL_SHA256: &str =
+    "213617ba7e5774e831785e725f8cb70bdd0f043cba9ae071e139888935acf4b0";
 
 /// ...and a delayed one is a genuinely different plan, so the digest above is not inert.
 #[test]
 fn a_delayed_session_is_a_different_plan() {
     assert_ne!(
         compiled(480, 480).sha256,
-        PRE_FEATURE_CANONICAL_SHA256,
+        ZERO_DELAY_CANONICAL_SHA256,
         "a delay that changes the estimate must change the plan digest"
     );
 }
