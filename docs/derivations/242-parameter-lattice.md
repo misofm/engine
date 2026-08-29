@@ -81,6 +81,16 @@ because it is the only row that genuinely overrides its class default (section 4
 recorded position, a descriptor that declares its own ladder changing bytes is correct and
 intended.
 
+**The byte-equality seals are restored.** Checkpoint `9f2a8ec8` relaxed
+`state_vectors.rs::independent_reference_vector_binds_verifies_and_reencodes_byte_identically`
+from `assert_eq!(rust_wire, descriptor_fixture)` to a verify-only call, and
+`descriptor_v1_qualification.rs::checked_vectors_match_independent_wire_identity_and_port_permutation`
+from comparing the encoder's output against the sealed vector to comparing the sealed vector
+against itself. Both relaxations were residue of the pre-canonical encoder, and while they stood
+no effect-package gate could see an encoder that moved these bytes -- the regression surfaced only
+in the #108 bench digest, three crates away. Restored, they kill that mutation directly: removing
+the canonical-zeros rule fails `descriptor_v1_qualification.rs:578` and `state_vectors.rs:283`.
+
 ## 8. The blessed conversion is not rounding-mode independent — OPEN
 
 Found while making section 4's rule hold under issue #146's floating-point arms. Descriptor

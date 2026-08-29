@@ -275,8 +275,12 @@ fn independent_reference_vector_binds_verifies_and_reencodes_byte_identically() 
         "../../../fixtures/effect-state/v1/canonical.state.digest.hex"
     ));
     let rust_wire = descriptor_wire(&DESCRIPTOR);
-    // The sealed descriptor/state pair keeps its pre-#242 zero lattice window and class-A
-    // identity. Current authoring writes explicit lattice words, so exercise it separately.
+    // The byte-equality seal. #242 consumed the two reserved parameter words, but the encoder is
+    // canonical -- a row whose declaration IS its derived class default encodes the historical
+    // all-zero window -- so this descriptor's bytes did not move and the seal still holds. It is
+    // restored here deliberately: while it was relaxed to a verify-only call, an encoder that
+    // wrote the derived default explicitly changed these bytes and no effect-package gate noticed.
+    assert_eq!(rust_wire, descriptor_fixture);
     verify_effect_descriptor_wire(&rust_wire, 1 << 20).unwrap();
     let bound = bind_effect_descriptor_wire(&DESCRIPTOR, &descriptor_fixture, 1 << 20).unwrap();
     assert_eq!(bound.identity().as_bytes(), identity_fixture.as_slice());

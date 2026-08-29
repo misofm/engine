@@ -567,29 +567,26 @@ fn checked_vectors_match_independent_wire_identity_and_port_permutation() {
             "comprehensive-c.identity.hex",
         ),
     ] {
-        // The sealed V1 vectors retain the pre-#242 zero window and therefore their exact
-        // class-A identities. The current encoder consumes that window for explicit lattice
-        // authority; the verifier deliberately continues to decode the historical zero spelling
-        // as the #127 default declaration.
-        let legacy_wire = hex_bytes(wire_name);
-        assert_eq!(
-            verify_effect_descriptor_wire(&legacy_wire, 1 << 20)
-                .unwrap()
-                .as_bytes(),
-            legacy_wire
-        );
-        assert_eq!(
-            effect_descriptor_identity(&legacy_wire, 1 << 20)
-                .unwrap()
-                .as_bytes(),
-            hex_bytes(identity_name).as_slice()
-        );
+        // The byte-equality seal against the sealed V1 vector. #242 consumed the two reserved
+        // parameter words, but the encoder is canonical -- a row whose declaration IS its derived
+        // class default encodes the historical all-zero window -- so these bytes and their
+        // class-A identities did not move. The seal is restored deliberately: while it was
+        // relaxed to compare the legacy vector against itself, an encoder that wrote the derived
+        // default explicitly moved every one of these vectors and no gate here noticed.
         let wire = encoded(descriptor);
+        let legacy_wire = hex_bytes(wire_name);
+        assert_eq!(wire, legacy_wire);
         assert_eq!(
             verify_effect_descriptor_wire(&wire, 1 << 20)
                 .unwrap()
                 .as_bytes(),
             wire
+        );
+        assert_eq!(
+            effect_descriptor_identity(&wire, 1 << 20)
+                .unwrap()
+                .as_bytes(),
+            hex_bytes(identity_name).as_slice()
         );
         let mut short = vec![0xa5; wire.len() - 1];
         let before = short.clone();
@@ -871,3 +868,4 @@ fn observation_section_is_additive_and_stale_readers_refuse_it() {
     assert_eq!(error.code, Code::Reserved);
     assert_eq!(error.byte_offset, 92);
 }
+
