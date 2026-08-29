@@ -116,6 +116,7 @@ fn capture(path: &Path, frames: u64) -> Result<Capture, String> {
             declared_sample_rate_hz: SampleRateHz(RATE),
             engine_sample_rate_hz: SampleRateHz(RATE),
             declared_channel_count: 1,
+            declared_bit_depth: miso_engine_session::SourceBitDepth::Float32,
             region: NativeWaveRegion {
                 start_frame: SourceFrame(0),
                 length_frames: frames,

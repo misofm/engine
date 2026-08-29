@@ -506,7 +506,7 @@ pub extern "C" fn miso_engine_web_v1_console_track_id(handle: u32, index: u32) -
 /// The browser ABI has exposed track discovery since #137 and nothing at all about sources, so a
 /// headless driver compiling raw session TOML could not learn which sources exist, how many
 /// channels they carry, or how many frames to feed them -- it could not drive the render loop it
-/// had just compiled. These six queries close that, additively, in the shape the track queries
+/// had just compiled. These four queries close that, additively, in the shape the track queries
 /// already established: a count, an ID copied through the staging buffer, and scalar shape reads.
 ///
 /// **Canonical source order** is the normalized model's `sources` order -- `compile_session` sorts
@@ -515,10 +515,8 @@ pub extern "C" fn miso_engine_web_v1_console_track_id(handle: u32, index: u32) -
 /// session, so every query reports zero/absent until `boot` succeeds, and keeps answering
 /// afterwards for as long as the handle holds a compiled session, sticky failure included.
 ///
-/// **This export is the bounds authority.** `source_channels`, `source_frames` and
-/// `source_sample_rate` return zero for an out-of-range index because zero is impossible for a
-/// compiled source, but `source_start_frame` has no spare value -- zero is an ordinary region
-/// start -- so a caller establishes the range here and then indexes inside it.
+/// **This export is the bounds authority.** `source_channels` and `source_frames` return zero for
+/// an out-of-range index because zero is impossible for a compiled source.
 ///
 /// These queries survived issue #240's ABI-v2 boot recut unchanged. What pins the complete surface
 /// is the frozen export set in `scripts/check-web-audioworklet.sh`, which is exact rather than a
@@ -549,42 +547,12 @@ pub extern "C" fn miso_engine_web_v1_source_channels(handle: u32, index: u32) ->
     })
 }
 
-/// Return one source's declared region length in source sample frames, or zero out of range.
+/// Return one source's exact length in source sample frames, or zero out of range.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_source_frames(handle: u32, index: u32) -> u64 {
     with_host(handle, 0, |host| {
         host.session_source_shape(index)
-            .map_or(0, |shape| shape.region_frames)
-    })
-}
-
-/// Return one source's declared region start in source sample frames.
-///
-/// Zero is an ordinary answer -- most sessions start their regions there -- so this export carries
-/// no out-of-range sentinel; [`miso_engine_web_v1_source_count`] is the bounds authority. It is
-/// load-bearing rather than decorative: preparation builds the source ring *at* this frame, so a
-/// driver that submitted from zero into a session with a nonzero region start would be feeding the
-/// ring frames it is not waiting for.
-#[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_web_v1_source_start_frame(handle: u32, index: u32) -> u64 {
-    with_host(handle, 0, |host| {
-        host.session_source_shape(index)
-            .map_or(0, |shape| shape.region_start_frame)
-    })
-}
-
-/// Return one source's declared native sample rate in hertz, or zero for an out-of-range index.
-///
-/// A compiled session's per-source rate necessarily equals the session rate -- preparation refuses
-/// `host.source.rate.mismatch` because V1 has no sample-rate conversion -- so this reports the
-/// declaration rather than new information. It is exposed because the session model carries the
-/// field per source, and a consumer should read what the session says instead of re-deriving it
-/// from an invariant it cannot see.
-#[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_web_v1_source_sample_rate(handle: u32, index: u32) -> u32 {
-    with_host(handle, 0, |host| {
-        host.session_source_shape(index)
-            .map_or(0, |shape| shape.sample_rate_hz)
+            .map_or(0, |shape| shape.frames)
     })
 }
 

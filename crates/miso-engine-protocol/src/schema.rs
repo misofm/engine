@@ -782,52 +782,16 @@ pub(crate) mod session {
             fields: &[ID, CHANNELS, LAYOUT],
         };
     }
-    pub(crate) mod limits {
-        use super::*;
-        pub(crate) const PCM_RING_FRAMES: FieldSpec = FieldSpec::req(1, Wire::U64);
-        pub(crate) const CONTROL_QUEUE_MESSAGES: FieldSpec = FieldSpec::req(2, Wire::U64);
-        pub(crate) const MEMORY_BYTES: FieldSpec = FieldSpec::req(3, Wire::U64);
-        pub(crate) static SPEC: MessageSpec = MessageSpec {
-            name: "SessionLimits",
-            fields: &[PCM_RING_FRAMES, CONTROL_QUEUE_MESSAGES, MEMORY_BYTES],
-        };
-    }
-    pub(crate) mod content {
-        use super::*;
-        pub(crate) const IDENTITY: FieldSpec = FieldSpec::req(1, Wire::Utf8);
-        pub(crate) const LOCATOR: FieldSpec = FieldSpec::req(2, Wire::Utf8);
-        pub(crate) static SPEC: MessageSpec = MessageSpec {
-            name: "SourceContent",
-            fields: &[IDENTITY, LOCATOR],
-        };
-    }
-    pub(crate) mod region {
-        use super::*;
-        pub(crate) const START_SAMPLE: FieldSpec = FieldSpec::req(1, Wire::U64);
-        pub(crate) const LENGTH_SAMPLES: FieldSpec = FieldSpec::req(2, Wire::U64);
-        pub(crate) static SPEC: MessageSpec = MessageSpec {
-            name: "SourceRegion",
-            fields: &[START_SAMPLE, LENGTH_SAMPLES],
-        };
-    }
-    pub(crate) mod mapping {
-        use super::*;
-        pub(crate) const CHANNEL_COUNT: FieldSpec = FieldSpec::req(1, Wire::U8);
-        pub(crate) const REGION: FieldSpec = FieldSpec::msg(2, true, false, &region::SPEC);
-        pub(crate) static SPEC: MessageSpec = MessageSpec {
-            name: "SourceMapping",
-            fields: &[CHANNEL_COUNT, REGION],
-        };
-    }
     pub(crate) mod source {
         use super::*;
         pub(crate) const ID: FieldSpec = FieldSpec::req(1, Wire::Utf8);
-        pub(crate) const SAMPLE_RATE_HZ: FieldSpec = FieldSpec::req(2, Wire::U32);
-        pub(crate) const CONTENT: FieldSpec = FieldSpec::msg(3, true, false, &content::SPEC);
-        pub(crate) const MAPPING: FieldSpec = FieldSpec::msg(4, true, false, &mapping::SPEC);
+        pub(crate) const CONTENT: FieldSpec = FieldSpec::req(2, Wire::Utf8);
+        pub(crate) const CHANNELS: FieldSpec = FieldSpec::req(3, Wire::U8);
+        pub(crate) const BIT_DEPTH: FieldSpec = FieldSpec::req(4, Wire::U8);
+        pub(crate) const FRAMES: FieldSpec = FieldSpec::req(5, Wire::U64);
         pub(crate) static SPEC: MessageSpec = MessageSpec {
             name: "Source",
-            fields: &[ID, SAMPLE_RATE_HZ, CONTENT, MAPPING],
+            fields: &[ID, CONTENT, CHANNELS, BIT_DEPTH, FRAMES],
         };
     }
     pub(crate) mod channel_builtins {
@@ -1128,14 +1092,6 @@ pub(crate) mod session {
             fields: &[VALUE],
         };
     }
-    pub(crate) mod set_limits {
-        use super::*;
-        pub(crate) const VALUE: FieldSpec = FieldSpec::msg(1, true, false, &limits::SPEC);
-        pub(crate) static SPEC: MessageSpec = MessageSpec {
-            name: "SetLimits",
-            fields: &[VALUE],
-        };
-    }
     pub(crate) mod upsert_source {
         use super::*;
         pub(crate) const VALUE: FieldSpec = FieldSpec::msg(1, true, false, &source::SPEC);
@@ -1152,31 +1108,16 @@ pub(crate) mod session {
             fields: &[SOURCE_ID],
         };
     }
-    pub(crate) mod set_source_rate {
-        use super::*;
-        pub(crate) const SOURCE_ID: FieldSpec = FieldSpec::req(1, Wire::Utf8);
-        pub(crate) const SAMPLE_RATE_HZ: FieldSpec = FieldSpec::req(2, Wire::U32);
-        pub(crate) static SPEC: MessageSpec = MessageSpec {
-            name: "SetSourceSampleRateHz",
-            fields: &[SOURCE_ID, SAMPLE_RATE_HZ],
-        };
-    }
     pub(crate) mod set_source_content {
         use super::*;
         pub(crate) const SOURCE_ID: FieldSpec = FieldSpec::req(1, Wire::Utf8);
-        pub(crate) const CONTENT: FieldSpec = FieldSpec::msg(2, true, false, &content::SPEC);
+        pub(crate) const CONTENT: FieldSpec = FieldSpec::req(2, Wire::Utf8);
+        pub(crate) const CHANNELS: FieldSpec = FieldSpec::req(3, Wire::U8);
+        pub(crate) const BIT_DEPTH: FieldSpec = FieldSpec::req(4, Wire::U8);
+        pub(crate) const FRAMES: FieldSpec = FieldSpec::req(5, Wire::U64);
         pub(crate) static SPEC: MessageSpec = MessageSpec {
             name: "SetSourceContent",
-            fields: &[SOURCE_ID, CONTENT],
-        };
-    }
-    pub(crate) mod set_source_mapping {
-        use super::*;
-        pub(crate) const SOURCE_ID: FieldSpec = FieldSpec::req(1, Wire::Utf8);
-        pub(crate) const MAPPING: FieldSpec = FieldSpec::msg(2, true, false, &mapping::SPEC);
-        pub(crate) static SPEC: MessageSpec = MessageSpec {
-            name: "SetSourceMapping",
-            fields: &[SOURCE_ID, MAPPING],
+            fields: &[SOURCE_ID, CONTENT, CHANNELS, BIT_DEPTH, FRAMES],
         };
     }
     pub(crate) mod upsert_track {
@@ -1488,12 +1429,9 @@ pub(crate) mod session {
             SetQuantumFrames => &set_quantum::SPEC,
             SetRenderProfile => &set_render_profile::SPEC,
             SetOutputProfile => &set_output_profile::SPEC,
-            SetLimits => &set_limits::SPEC,
             UpsertSource => &upsert_source::SPEC,
             RemoveSource => &remove_source::SPEC,
-            SetSourceSampleRateHz => &set_source_rate::SPEC,
             SetSourceContent => &set_source_content::SPEC,
-            SetSourceMapping => &set_source_mapping::SPEC,
             UpsertTrack => &upsert_track::SPEC,
             RemoveTrack => &remove_track::SPEC,
             SetTrackSourceAssignment => &set_track_source::SPEC,

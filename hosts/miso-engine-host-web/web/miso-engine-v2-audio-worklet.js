@@ -319,8 +319,8 @@ class MisoEngineV2AudioWorkletProcessor extends AudioWorkletProcessor {
     //
     // Every read is checked against something the engine already guarantees, so a mis-wired export
     // fails initialization here rather than surfacing as a plausible-looking wrong number:
-    // compilation refuses a zero channel count, a zero region length and a source rate that is not
-    // the session rate, and preparation refuses a channel count above `maximumSourceChannels`.
+    // compilation refuses a zero channel count or full-source frame count, and preparation refuses
+    // a channel count above `maximumSourceChannels`.
     this.sourceCount = this.exports.miso_engine_web_v1_source_count(this.handle);
     if (!u32(this.sourceCount)) return false;
     this.sources = [];
@@ -334,13 +334,10 @@ class MisoEngineV2AudioWorkletProcessor extends AudioWorkletProcessor {
         id += String.fromCharCode(bytes[byte]);
       }
       const channels = this.exports.miso_engine_web_v1_source_channels(this.handle, index);
-      const sampleRateHz = this.exports.miso_engine_web_v1_source_sample_rate(this.handle, index);
       const frames = this.exports.miso_engine_web_v1_source_frames(this.handle, index);
-      const startFrame = this.exports.miso_engine_web_v1_source_start_frame(this.handle, index);
       if (!u32(channels) || channels === 0 || channels > this.maximumSourceChannels
-          || sampleRateHz !== this.sampleRateHz
-          || !u64(frames) || frames === 0n || !u64(startFrame)) return false;
-      this.sources.push({ id, channels, sampleRateHz, startFrame, frames });
+          || !u64(frames) || frames === 0n) return false;
+      this.sources.push({ id, channels, frames });
     }
 
     const framePointer = this.exports.miso_engine_web_v1_buffer_ptr(
@@ -579,8 +576,6 @@ class MisoEngineV2AudioWorkletProcessor extends AudioWorkletProcessor {
         sources: this.sources.map((source) => ({
           id: source.id,
           channels: source.channels,
-          sampleRateHz: source.sampleRateHz,
-          startFrame: source.startFrame,
           frames: source.frames,
         })),
         metersAttached: this.metersAttached === true,

@@ -37,9 +37,8 @@ sample_rate_hz = 48000
 quantum_frames = 128
 render_profile = {{ id = "native", mode = "single_thread" }}
 output_profile = {{ id = "main", channels = 2, sample_format = "f32_planar" }}
-limits = {{ pcm_ring_frames = 128, control_queue_messages = 8, memory_bytes = 16777216 }}
 sources = [
-  {{ id = "s", sample_rate_hz = 48000, content = {{ identity = "sha256:metadata-round-trip", locator = "host:metadata-round-trip" }}, mapping = {{ channel_count = 2, region = {{ start_sample = 0, length_samples = 256 }} }} }},
+  {{ id = "s", content = "sha256:0000000000000000000000000000000000000000000000000000000000000000", channels = 2, bit_depth = "32f", frames = 256 }},
 ]
 submixes = []
 outputs = [{{ id = "out" }}]

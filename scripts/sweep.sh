@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# scripts/sweep.sh -- the hermetic check/test sweep. 94 explicit rows.
+# scripts/sweep.sh -- the hermetic check/test sweep. 96 explicit rows.
 #
 # Why this exists: the repo has 96 check-*/test-* scripts and ci.yml names 37 of them, so most
 # gates had no committed runner at all -- they were reachable only by knowing they existed. Every
@@ -106,6 +106,9 @@ row scripts/check-capi-qualification-v1.sh
 row scripts/check-dsp-research.sh
 row scripts/check-graph-determinism.sh
 row scripts/check-graph-policy.sh
+# #241/Fable F2: the canonical PCM vectors and manifest are generated contract bytes, so their
+# generator check is an accounted sweep row rather than an implicit prerequisite of a Rust test.
+row fixtures/stem-identity/v1/generate.py --check
 # Argument-taking validators whose self-test is the standalone entry point. Their real runs are
 # driven by the parent gates below; the self-test row keeps each one individually accounted for.
 row scripts/check-builtins-listening-033.py --self-test
@@ -174,6 +177,7 @@ row scripts/check-builtins-targets.sh
 row scripts/check-effect-interchange-targets.sh
 row scripts/test-native-vectorization-report.sh
 row scripts/check-effect-contract.sh
+row scripts/check-flac-decoder.sh
 row scripts/check-web-audioworklet.sh
 
 # ---- deliberately not swept ----------------------------------------------------------------

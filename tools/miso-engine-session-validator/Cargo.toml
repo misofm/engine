@@ -17,5 +17,8 @@ path = "src/main.rs"
 miso-engine-builtins-compiler.workspace = true
 miso-engine-session.workspace = true
 
+[dev-dependencies]
+miso-engine-host-web.workspace = true
+
 [lints]
 workspace = true

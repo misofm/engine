@@ -10,26 +10,25 @@
 use std::os::unix::fs::MetadataExt;
 #[cfg(windows)]
 use std::os::windows::{ffi::OsStrExt, fs::OpenOptionsExt, io::AsRawHandle};
-use std::{
-    collections::BTreeMap,
-    ffi::OsString,
-    fs::{self, File, OpenOptions},
-    io::{Read, Seek, SeekFrom, Write},
-    num::NonZeroUsize,
-    path::{Component, Path, PathBuf},
-    ptr,
-};
 #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
 use std::{
     ffi::CString,
     os::unix::{ffi::OsStrExt, fs::OpenOptionsExt},
 };
+use std::{
+    ffi::OsString,
+    fs::{self, File, OpenOptions},
+    io::{Read, Seek, SeekFrom, Write},
+    num::NonZeroUsize,
+    path::{Path, PathBuf},
+    ptr,
+};
 
 use miso_engine_capi as capi;
-use miso_engine_session::{SessionToml, parse_session_toml};
+use miso_engine_session::{SessionToml, Source, SourceBitDepth, parse_session_toml};
 use miso_engine_source::{
-    NativeWaveDecoder, NativeWaveError, NativeWaveParseCaps, NativeWaveRegion, SourceFrame,
-    parse_native_wave,
+    NativeWaveDecoder, NativeWaveEncoding, NativeWaveError, NativeWaveMetadata,
+    NativeWaveParseCaps, NativeWaveRegion, SourceFrame, parse_native_wave,
 };
 use sha2::{Digest, Sha256};
 
@@ -37,6 +36,7 @@ const DIAGNOSTIC_CAPACITY: usize = 65_536;
 const MAX_SESSION_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_SOURCES: u64 = 4_096;
 const MAX_FRAMES: u64 = u64::MAX / 8;
+const SOURCE_RING_FRAMES: u32 = 1_024;
 
 /// Stable runner failure phase.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -244,8 +244,7 @@ fn run_with_platform(
     let model = parse_session_toml(session_text)
         .map_err(|_| RunnerError::new(FailurePhase::Preflight, "session.invalid"))?;
     validate_scalar_contract(arguments, &model)?;
-    let ring_frames = u32::try_from(model.limits.pcm_ring_frames)
-        .map_err(|_| RunnerError::new(FailurePhase::Preflight, "ring.overflow"))?;
+    let ring_frames = SOURCE_RING_FRAMES;
     if !supported_platform {
         return Err(RunnerError::new(
             FailurePhase::Preflight,
@@ -366,27 +365,6 @@ fn preflight_output(output: &Path) -> Result<(), RunnerError> {
     Ok(())
 }
 
-fn safe_locator(locator: &str) -> Result<&str, RunnerError> {
-    let suffix = locator
-        .strip_prefix("file:")
-        .ok_or_else(|| RunnerError::new(FailurePhase::Resolve, "locator.scheme"))?;
-    if suffix.is_empty() || suffix.contains(['\\', '\0']) {
-        return Err(RunnerError::new(FailurePhase::Resolve, "locator.syntax"));
-    }
-    let path = Path::new(suffix);
-    if path.is_absolute()
-        || path.components().any(|component| {
-            !matches!(component, Component::Normal(_)) || component.as_os_str().is_empty()
-        })
-        || suffix
-            .split('/')
-            .any(|component| component.is_empty() || matches!(component, "." | ".."))
-    {
-        return Err(RunnerError::new(FailurePhase::Resolve, "locator.syntax"));
-    }
-    Ok(suffix)
-}
-
 fn identity_digest(identity: &str) -> Result<[u8; 32], RunnerError> {
     let value = identity
         .strip_prefix("sha256:")
@@ -413,26 +391,125 @@ const fn hex_nibble(byte: u8) -> u8 {
     }
 }
 
-fn hash_reader(reader: &mut File) -> Result<[u8; 32], RunnerError> {
-    use std::io::Seek;
+fn hash_canonical_wave(
+    reader: &mut File,
+    metadata: NativeWaveMetadata,
+) -> Result<[u8; 32], RunnerError> {
     reader
-        .rewind()
+        .seek(SeekFrom::Start(metadata.data_offset_bytes))
         .map_err(|_| RunnerError::new(FailurePhase::Resolve, "source.seek"))?;
     let mut hasher = Sha256::new();
     let mut buffer = [0_u8; 16 * 1024];
-    loop {
+    let mut remaining = metadata.data_length_bytes;
+    while remaining != 0 {
+        let requested = usize::try_from(remaining.min(buffer.len() as u64))
+            .map_err(|_| RunnerError::new(FailurePhase::Resolve, "source.read"))?;
         let read = reader
-            .read(&mut buffer)
+            .read(&mut buffer[..requested])
             .map_err(|_| RunnerError::new(FailurePhase::Resolve, "source.read"))?;
         if read == 0 {
-            break;
+            return Err(RunnerError::new(FailurePhase::Resolve, "source.read"));
         }
         hasher.update(&buffer[..read]);
+        remaining -= u64::try_from(read).expect("bounded read fits u64");
     }
     reader
         .rewind()
         .map_err(|_| RunnerError::new(FailurePhase::Resolve, "source.seek"))?;
     Ok(hasher.finalize().into())
+}
+
+fn wave_bit_depth(encoding: NativeWaveEncoding) -> Option<SourceBitDepth> {
+    match encoding {
+        NativeWaveEncoding::SignedPcm16 => Some(SourceBitDepth::Pcm16),
+        NativeWaveEncoding::SignedPcm24 => Some(SourceBitDepth::Pcm24),
+        NativeWaveEncoding::Float32 => Some(SourceBitDepth::Float32),
+        NativeWaveEncoding::UnsignedPcm8
+        | NativeWaveEncoding::SignedPcm32
+        | NativeWaveEncoding::Float64 => None,
+    }
+}
+
+fn wave_paths(root: &Path) -> Result<Vec<PathBuf>, RunnerError> {
+    let mut paths = Vec::new();
+    for entry in
+        fs::read_dir(root).map_err(|_| RunnerError::new(FailurePhase::Resolve, "root.read"))?
+    {
+        if paths.len() >= MAX_SOURCES as usize {
+            return Err(RunnerError::new(FailurePhase::Resolve, "sources.limit"));
+        }
+        let entry = entry.map_err(|_| RunnerError::new(FailurePhase::Resolve, "root.read"))?;
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("wav") {
+            continue;
+        }
+        let metadata = fs::symlink_metadata(&path)
+            .map_err(|_| RunnerError::new(FailurePhase::Resolve, "source.open"))?;
+        if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+            return Err(RunnerError::new(FailurePhase::Resolve, "source.type"));
+        }
+        let canonical = fs::canonicalize(path)
+            .map_err(|_| RunnerError::new(FailurePhase::Resolve, "source.canonical"))?;
+        if !canonical.starts_with(root) {
+            return Err(RunnerError::new(FailurePhase::Resolve, "source.escape"));
+        }
+        paths.push(canonical);
+    }
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
+}
+
+fn open_declared_source(
+    root: &Path,
+    declaration: &Source,
+    session_rate: u32,
+) -> Result<(File, NativeWaveMetadata), RunnerError> {
+    let expected = identity_digest(&declaration.content)?;
+    let paths = wave_paths(root)?;
+    if paths.is_empty() {
+        return Err(RunnerError::new(FailurePhase::Resolve, "source.missing"));
+    }
+    let only = paths.len() == 1;
+    let mut identity_shape_mismatch = None;
+    for path in paths {
+        let mut file = File::open(&path)
+            .map_err(|_| RunnerError::new(FailurePhase::Resolve, "source.open"))?;
+        let wave = match parse_native_wave(
+            &mut file,
+            NativeWaveParseCaps {
+                max_chunk_count: 4_096,
+                max_skipped_metadata_bytes: 16 * 1024 * 1024,
+            },
+        ) {
+            Ok(wave) => wave,
+            Err(error) if only => return Err(map_wave_prepare(error)),
+            Err(_) => continue,
+        };
+        if hash_canonical_wave(&mut file, wave)? != expected {
+            continue;
+        }
+        let mismatch = if wave.sample_rate_hz.0 != session_rate {
+            Some("source.rate")
+        } else if wave.channel_count != u16::from(declaration.channels) {
+            Some("source.channels")
+        } else if wave_bit_depth(wave.encoding) != Some(declaration.bit_depth) {
+            Some("source.depth")
+        } else if wave.total_frames != declaration.frames {
+            Some("source.frames")
+        } else {
+            None
+        };
+        if let Some(code) = mismatch {
+            identity_shape_mismatch.get_or_insert(code);
+            continue;
+        }
+        return Ok((file, wave));
+    }
+    Err(RunnerError::new(
+        FailurePhase::Resolve,
+        identity_shape_mismatch.unwrap_or("identity.mismatch"),
+    ))
 }
 
 fn resolve_sources(model: &SessionToml, root: &Path) -> Result<Vec<PreparedSource>, RunnerError> {
@@ -447,56 +524,15 @@ fn resolve_sources(model: &SessionToml, root: &Path) -> Result<Vec<PreparedSourc
         .ok()
         .and_then(NonZeroUsize::new)
         .ok_or_else(|| RunnerError::new(FailurePhase::Resolve, "quantum.invalid"))?;
-    let mut identities = BTreeMap::<PathBuf, [u8; 32]>::new();
     let mut sources = Vec::new();
     sources
         .try_reserve_exact(model.sources.len())
         .map_err(|_| RunnerError::new(FailurePhase::Resolve, "sources.resource"))?;
     for declaration in &model.sources {
-        let suffix = safe_locator(&declaration.content.locator)?;
-        let requested = root.join(suffix);
-        let metadata = fs::symlink_metadata(&requested)
-            .map_err(|_| RunnerError::new(FailurePhase::Resolve, "source.missing"))?;
-        if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
-            return Err(RunnerError::new(FailurePhase::Resolve, "source.type"));
-        }
-        let canonical = fs::canonicalize(&requested)
-            .map_err(|_| RunnerError::new(FailurePhase::Resolve, "source.canonical"))?;
-        if !canonical.starts_with(&root) {
-            return Err(RunnerError::new(FailurePhase::Resolve, "source.escape"));
-        }
-        let expected = identity_digest(&declaration.content.identity)?;
-        if let Some(prior) = identities.get(&canonical) {
-            if prior != &expected {
-                return Err(RunnerError::new(FailurePhase::Resolve, "source.alias"));
-            }
-        } else {
-            identities.insert(canonical.clone(), expected);
-        }
-        let mut file = File::open(&canonical)
-            .map_err(|_| RunnerError::new(FailurePhase::Resolve, "source.open"))?;
-        if hash_reader(&mut file)? != expected {
-            return Err(RunnerError::new(FailurePhase::Resolve, "identity.mismatch"));
-        }
-        let wave = parse_native_wave(
-            &mut file,
-            NativeWaveParseCaps {
-                max_chunk_count: 4_096,
-                max_skipped_metadata_bytes: 16 * 1024 * 1024,
-            },
-        )
-        .map_err(map_wave_prepare)?;
-        if wave.sample_rate_hz.0 != declaration.sample_rate_hz
-            || declaration.sample_rate_hz != model.sample_rate_hz
-        {
-            return Err(RunnerError::new(FailurePhase::Resolve, "source.rate"));
-        }
-        if wave.channel_count != u16::from(declaration.mapping.channel_count) {
-            return Err(RunnerError::new(FailurePhase::Resolve, "source.channels"));
-        }
+        let (file, wave) = open_declared_source(&root, declaration, model.sample_rate_hz)?;
         let region = NativeWaveRegion {
-            start_frame: SourceFrame(declaration.mapping.region.start_sample),
-            length_frames: declaration.mapping.region.length_samples,
+            start_frame: SourceFrame(0),
+            length_frames: declaration.frames,
         };
         let decoder =
             NativeWaveDecoder::prepare(file, wave, region, quantum).map_err(map_wave_prepare)?;
@@ -511,7 +547,7 @@ fn resolve_sources(model: &SessionToml, root: &Path) -> Result<Vec<PreparedSourc
         planar.resize(samples, 0.0);
         sources.push(PreparedSource {
             id: declaration.id.as_str().as_bytes().to_vec(),
-            rate: declaration.sample_rate_hz,
+            rate: model.sample_rate_hz,
             region_start: region.start_frame.0,
             consumed: 0,
             decoder,
@@ -1352,6 +1388,10 @@ mod tests {
         env!("CARGO_MANIFEST_DIR"),
         "/../../fixtures/native-pcm-runner/v1"
     );
+    const STEM_IDENTITY_FIXTURES: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../fixtures/stem-identity/v1"
+    );
     static TEMP_ID: AtomicU64 = AtomicU64::new(0);
 
     fn temp_dir(label: &str) -> PathBuf {
@@ -1442,22 +1482,7 @@ mod tests {
     }
 
     #[test]
-    fn locator_and_identity_grammars_are_closed() {
-        assert_eq!(safe_locator("file:a/b.wav"), Ok("a/b.wav"));
-        for value in [
-            "host:a",
-            "file:",
-            "file:/a",
-            "file:a//b",
-            "file:a/./b",
-            "file:a/../b",
-            "file:a\\b",
-        ] {
-            assert_eq!(
-                safe_locator(value).expect_err(value).phase,
-                FailurePhase::Resolve
-            );
-        }
+    fn identity_grammar_is_closed() {
         assert!(identity_digest(&format!("sha256:{}", "a".repeat(64))).is_ok());
         for value in [
             format!("sha256:{}", "A".repeat(64)),
@@ -1688,11 +1713,11 @@ mod tests {
         assert_eq!(
             engine.submissions,
             [
-                (b"fixture-source".to_vec(), 1, 128, false),
-                (b"fixture-source".to_vec(), 129, 128, false),
-                (b"fixture-source".to_vec(), 257, 128, false),
-                (b"fixture-source".to_vec(), 385, 128, false),
-                (b"fixture-source".to_vec(), 513, 2, true),
+                (b"fixture-source".to_vec(), 0, 128, false),
+                (b"fixture-source".to_vec(), 128, 128, false),
+                (b"fixture-source".to_vec(), 256, 128, false),
+                (b"fixture-source".to_vec(), 384, 128, false),
+                (b"fixture-source".to_vec(), 512, 2, true),
             ]
         );
         assert_eq!(output.bytes.lock().expect("bytes").len(), 8_192);
@@ -1815,7 +1840,7 @@ mod tests {
     #[test]
     fn resolver_rejects_identity_shape_file_shape_and_declaration_mismatches_precompile() {
         for (label, replace_from, replace_to, expected) in [
-            ("uppercase", "sha256:", "sha256:A", "identity.syntax"),
+            ("uppercase", "sha256:", "sha256:A", "session.invalid"),
             (
                 "wrong-rate",
                 "sample_rate_hz = 48000",
@@ -1827,15 +1852,15 @@ mod tests {
             // which would fail in preflight and never reach the resolver check under test.
             (
                 "wrong-channels",
-                "channel_count = 2",
-                "channel_count = 4",
+                "channels = 2, bit_depth",
+                "channels = 4, bit_depth",
                 "source.channels",
             ),
             (
-                "wrong-region",
-                "length_samples = 514",
-                "length_samples = 9999",
-                "wave.region",
+                "wrong-frames",
+                "frames = 514",
+                "frames = 9999",
+                "source.frames",
             ),
         ] {
             let temp = temp_dir(label);
@@ -1895,6 +1920,60 @@ mod tests {
         );
         assert_eq!(engine.compile_calls, 0);
         fs::remove_dir_all(temp).expect("remove temp");
+    }
+
+    #[test]
+    fn resolver_rejects_integer_and_float_depth_mismatches_both_directions_precompile() {
+        let base =
+            fs::read_to_string(Path::new(FIXTURES).join("rf64-48000.toml")).expect("f32 session");
+        let pcm16_identity =
+            "sha256:0320b11905302eb840cd06ab90b0549114e6ee1c89233e928ebe21b8c4964ef2";
+        for (label, source, session, expected_declared_depth) in [
+            (
+                "f32-declared-integer",
+                Path::new(FIXTURES).join("rf64-48000.wav"),
+                base.replacen("bit_depth = \"32f\"", "bit_depth = 16", 1),
+                "16",
+            ),
+            (
+                "integer-declared-f32",
+                Path::new(STEM_IDENTITY_FIXTURES).join("pcm16-stereo-boundaries.wav"),
+                base.replacen(
+                    base.lines()
+                        .find(|line| line.contains("content = \"sha256:"))
+                        .and_then(|line| line.split("content = \"").nth(1))
+                        .and_then(|tail| tail.split('"').next())
+                        .expect("base content identity"),
+                    pcm16_identity,
+                    1,
+                )
+                .replacen("frames = 514", "frames = 3", 1),
+                "32f",
+            ),
+        ] {
+            let temp = temp_dir(label);
+            fs::copy(source, temp.join("source.wav")).expect("copy source");
+            fs::write(temp.join("session.toml"), session).expect("write session");
+            let arguments = RunnerArgs {
+                session: temp.join("session.toml"),
+                source_root: temp.clone(),
+                frames: 1_024,
+                output: temp.join("out"),
+            };
+            let mut engine = MockEngine::default();
+            let output = MemoryOutput::default();
+            let failure = run_with(&arguments, &mut engine, &output).expect_err(label);
+            assert_eq!(
+                failure.code, "source.depth",
+                "declared {expected_declared_depth}"
+            );
+            assert_eq!(
+                engine.compile_calls, 0,
+                "declared {expected_declared_depth}"
+            );
+            assert_eq!(output.begin_calls.load(Ordering::Relaxed), 0);
+            fs::remove_dir_all(temp).expect("remove temp");
+        }
     }
 
     #[test]
@@ -1987,25 +2066,10 @@ mod tests {
         let temp = temp_dir("scalar-caps");
         let base =
             fs::read_to_string(Path::new(FIXTURES).join("riff-48000.toml")).expect("base session");
-        let ring_overflow = base.replace("pcm_ring_frames = 1024", "pcm_ring_frames = 4294967296");
-        fs::write(temp.join("ring.toml"), ring_overflow).expect("ring session");
         let mut engine = MockEngine::default();
         let output = MemoryOutput::default();
-        let arguments = RunnerArgs {
-            session: temp.join("ring.toml"),
-            source_root: temp.join("missing-root"),
-            frames: 1_024,
-            output: temp.join("out"),
-        };
-        assert_eq!(
-            run_with(&arguments, &mut engine, &output)
-                .expect_err("ring overflow")
-                .code,
-            "ring.overflow"
-        );
-        assert_eq!(engine.compile_calls, 0);
-
         let mut overflow = fixture_args("riff-48000", temp.join("overflow"));
+        overflow.source_root = temp.join("missing-root");
         overflow.frames = MAX_FRAMES + 1;
         assert_eq!(
             run_with(&overflow, &mut engine, &output)
@@ -2036,16 +2100,18 @@ mod tests {
     fn missing_mismatched_and_truncated_riff_sources_are_exact_precompile_failures() {
         let base =
             fs::read_to_string(Path::new(FIXTURES).join("riff-48000.toml")).expect("base session");
+        let replace_identity = |session: &str, digest: &str| {
+            let start = session.find("sha256:").expect("identity") + 7;
+            let mut changed = session.to_owned();
+            changed.replace_range(start..start + 64, digest);
+            changed
+        };
         for (label, source, session, code) in [
             ("missing", None, base.clone(), "source.missing"),
             (
                 "identity",
                 Some(fs::read(Path::new(FIXTURES).join("riff-48000.wav")).expect("wave")),
-                base.replacen(
-                    "sha256:01113503536aed2ab96afd970f8f0bf2ddeb3a7115ae8c3663fd6ff9a345d085",
-                    &format!("sha256:{}", "0".repeat(64)),
-                    1,
-                ),
+                replace_identity(&base, &"0".repeat(64)),
                 "identity.mismatch",
             ),
             (
@@ -2053,11 +2119,7 @@ mod tests {
                 Some(b"RIFF".to_vec()),
                 {
                     let digest = hex_digest(Sha256::digest(b"RIFF").into());
-                    base.replacen(
-                        "sha256:01113503536aed2ab96afd970f8f0bf2ddeb3a7115ae8c3663fd6ff9a345d085",
-                        &format!("sha256:{digest}"),
-                        1,
-                    )
+                    replace_identity(&base, &digest)
                 },
                 "wave.container",
             ),

@@ -26,13 +26,13 @@ pub struct ResourceEstimate {
     pub retained_string_bytes: u64,
     /// Effect parameter declaration count.
     pub parameter_count: u64,
-    /// Declared control queue items.
+    /// Session-declared queue items; zero because queues are host policy.
     pub queue_items: u64,
-    /// Estimated control queue storage in bytes.
+    /// Session-declared queue storage; zero because queues are host policy.
     pub queue_bytes: u64,
-    /// Total source-ring frames across sources.
+    /// Session-declared source-ring frames; zero because the host chooses the ring.
     pub source_ring_frames: u64,
-    /// Total source-ring PCM storage in bytes.
+    /// Session-declared source-ring bytes; zero because the host chooses the ring.
     pub source_ring_bytes: u64,
     /// Conservative canonical-writer allocation bound used before writing.
     pub canonical_upper_bound_bytes: u64,
@@ -40,7 +40,7 @@ pub struct ResourceEstimate {
     pub canonical_bytes: u64,
     /// Model, retained strings, indexes, and canonical snapshot bytes.
     pub compiled_model_bytes: u64,
-    /// Requested runtime storage bytes.
+    /// Session-declared runtime storage; zero because runtime storage is host policy.
     pub requested_runtime_bytes: u64,
     /// Largest individual model/runtime allocation request.
     pub single_allocation_bytes: u64,
@@ -180,37 +180,13 @@ pub fn estimate_session_resources(
     );
     largest_model_allocation = largest_model_allocation.max(canonical_upper_bound_bytes);
 
-    let queue_bytes = checked_mul(
-        session.limits.control_queue_messages,
-        64,
-        "$.limits.control_queue_messages",
-        &mut errors,
-    );
-    let source_ring_frames = checked_mul(
-        source_count,
-        session.limits.pcm_ring_frames,
-        "$.limits.pcm_ring_frames",
-        &mut errors,
-    );
-    let mut source_ring_bytes = 0_u64;
-    let mut largest_source_ring = 0_u64;
-    for (index, source) in session.sources.iter().enumerate() {
-        let bytes = checked_mul_source_channel(
-            checked_mul_source_channel(
-                session.limits.pcm_ring_frames,
-                u64::from(source.mapping.channel_count),
-                index,
-                &mut errors,
-            ),
-            size::<f32>(),
-            index,
-            &mut errors,
-        );
-        source_ring_bytes = checked_add(source_ring_bytes, bytes, "$.sources", &mut errors);
-        largest_source_ring = largest_source_ring.max(bytes);
-    }
-    let requested_runtime_bytes =
-        checked_add(queue_bytes, source_ring_bytes, "$.runtime", &mut errors);
+    // Queue depths and the actual chosen ring are host policy. #240 re-derives the exact retained
+    // ring bytes after that choice, so the session compiler contributes no declarative runtime
+    // projection here.
+    let queue_bytes = 0;
+    let source_ring_frames = 0;
+    let source_ring_bytes = 0;
+    let requested_runtime_bytes = 0;
     let compiled_model_upper_bound = checked_add(
         checked_add(
             model_vector_bytes,
@@ -227,9 +203,7 @@ pub fn estimate_session_resources(
         "$.compiled_model",
         &mut errors,
     );
-    let single_allocation_bytes = largest_model_allocation
-        .max(queue_bytes)
-        .max(largest_source_ring);
+    let single_allocation_bytes = largest_model_allocation;
     let platform_allocation_limit_bytes = u64::try_from(isize::MAX).unwrap_or(u64::MAX);
     for (path, bytes) in [
         ("$.compiled_model", compiled_model_upper_bound),
@@ -263,7 +237,7 @@ pub fn estimate_session_resources(
         automation_segment_count,
         retained_string_bytes,
         parameter_count,
-        queue_items: session.limits.control_queue_messages,
+        queue_items: 0,
         queue_bytes,
         source_ring_frames,
         source_ring_bytes,
@@ -354,6 +328,7 @@ impl ModelVisitor for StringBytes<'_> {
         fn u8(_key:FieldKey, _value:u8);
         fn u32(_key:FieldKey, _value:u32);
         fn u64(_key:FieldKey, _value:u64);
+        fn source_bit_depth(_key:FieldKey, _value:crate::SourceBitDepth);
         fn f32(_key:FieldKey, _value:f32);
         fn token(_key:FieldKey, _value:Token);
     }
@@ -399,27 +374,6 @@ fn checked_add(left: u64, right: u64, path: &str, errors: &mut Vec<Diagnostic>) 
 fn checked_mul(left: u64, right: u64, path: &str, errors: &mut Vec<Diagnostic>) -> u64 {
     left.checked_mul(right).unwrap_or_else(|| {
         overflow(errors, path, "resource multiplication overflows u64");
-        0
-    })
-}
-
-fn checked_mul_source_channel(
-    left: u64,
-    right: u64,
-    source_index: usize,
-    errors: &mut Vec<Diagnostic>,
-) -> u64 {
-    left.checked_mul(right).unwrap_or_else(|| {
-        errors.push(Diagnostic::new(
-            DiagnosticCode::CapacityArithmeticOverflow,
-            DiagnosticPath::root()
-                .key("sources")
-                .index(source_index)
-                .key("mapping")
-                .key("channel_count"),
-            None,
-            "resource multiplication overflows u64",
-        ));
         0
     })
 }

@@ -67,27 +67,6 @@ pub(crate) fn validate_session(session: &SessionToml) -> Result<(), DiagnosticSe
     }
 
     validate_u64(&mut diagnostics, session.revision, &root.key("revision"));
-    let limits_path = root.key("limits");
-    for (field, value) in [
-        ("pcm_ring_frames", session.limits.pcm_ring_frames),
-        (
-            "control_queue_messages",
-            session.limits.control_queue_messages,
-        ),
-        ("memory_bytes", session.limits.memory_bytes),
-    ] {
-        let path = limits_path.key(field);
-        if value == 0 {
-            error(
-                &mut diagnostics,
-                DiagnosticCode::CapacityZero,
-                &path,
-                "declared capacity must be nonzero",
-            );
-        }
-        validate_u64(&mut diagnostics, value, &path);
-    }
-
     // One pass establishes uniqueness and builds every global cross-reference index.
     let sources_path = root.key("sources");
     let mut sources = HashMap::with_capacity(session.sources.len());
@@ -183,70 +162,41 @@ fn validate_sources(session: &SessionToml, root: &PathRef<'_>, diagnostics: &mut
     let sources_path = root.key("sources");
     for (position, source) in session.sources.iter().enumerate() {
         let path = sources_path.index(position);
-        for (leaf, invalid) in [
-            ("identity", source.content.identity.is_empty()),
-            ("locator", source.content.locator.is_empty()),
-        ] {
-            if invalid {
-                error(
-                    diagnostics,
-                    DiagnosticCode::NumericOutOfSchemaRange,
-                    &path.key("content").key(leaf),
-                    "source field must be nonempty",
-                );
-            }
-        }
-        if source.mapping.channel_count == 0 {
+        if !valid_source_content_identity(&source.content) {
             error(
                 diagnostics,
-                DiagnosticCode::NumericOutOfSchemaRange,
-                &path.key("mapping").key("channel_count"),
-                "source channel_count must be nonzero",
+                DiagnosticCode::SourceContentIdentityFormat,
+                &path.key("content"),
+                "source content must match sha256:[0-9a-f]{64}",
             );
         }
-        if source.mapping.region.length_samples == 0 {
+        if source.channels == 0 {
             error(
                 diagnostics,
-                DiagnosticCode::NumericOutOfSchemaRange,
-                &path.key("mapping").key("region").key("length_samples"),
-                "source region length must be nonzero",
+                DiagnosticCode::CapacityZero,
+                &path.key("channels"),
+                "source channels must be nonzero",
             );
         }
-        if source.sample_rate_hz == 0 {
+        if source.frames == 0 {
             error(
                 diagnostics,
-                DiagnosticCode::NumericOutOfSchemaRange,
-                &path.key("sample_rate_hz"),
-                "declared source rate must be nonzero",
+                DiagnosticCode::CapacityZero,
+                &path.key("frames"),
+                "source frames must be nonzero",
             );
         }
-        let mapping_path = path.key("mapping");
-        let region_path = mapping_path.key("region");
-        validate_u64(
-            diagnostics,
-            source.mapping.region.start_sample,
-            &region_path.key("start_sample"),
-        );
-        validate_u64(
-            diagnostics,
-            source.mapping.region.length_samples,
-            &region_path.key("length_samples"),
-        );
-        if source
-            .mapping
-            .region
-            .start_sample
-            .checked_add(source.mapping.region.length_samples)
-            .is_none()
-        {
-            error(
-                diagnostics,
-                DiagnosticCode::SourceRegionOverflow,
-                &region_path,
-                "source region endpoint overflows u64",
-            );
-        }
+        validate_u64(diagnostics, source.frames, &path.key("frames"));
     }
+}
+
+fn valid_source_content_identity(value: &str) -> bool {
+    value.strip_prefix("sha256:").is_some_and(|digest| {
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    })
 }
 
 fn validate_tracks<'a>(
@@ -273,12 +223,12 @@ fn validate_tracks<'a>(
                 ("left_source_channel", track.left_source_channel),
                 ("right_source_channel", track.right_source_channel),
             ] {
-                if channel >= source.mapping.channel_count {
+                if channel >= source.channels {
                     error(
                         diagnostics,
                         DiagnosticCode::SourceChannelIndexOutOfRange,
                         &path.key(field),
-                        "track source channel index exceeds declared source channel_count",
+                        "track source channel index exceeds declared source channels",
                     );
                 }
             }

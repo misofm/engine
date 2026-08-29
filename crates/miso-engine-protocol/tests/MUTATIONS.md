@@ -17,3 +17,15 @@ A third shape is worth naming and is **not** a mutation, because it is what the 
 avoid: an `unreachable!()` there would abort the control thread on a well-formed wire message. The
 wire decodes `RACK = 4` into `RackName::Builtins` by construction (`schema.rs`), so a rack-addressed
 edit carrying it is a message a peer can legally send.
+
+## Issue #241 — deleted session-edit opcodes
+
+Applied on 2026-08-29, run, observed RED, and reverted.
+
+| gate | mutation | observed red |
+|---|---|---|
+| `session_wire::tests::deleted_source_and_limits_opcodes_are_typed_refusals` | alias deleted `0x0006` (`SetLimits`) to the live `SetSourceContent` decoder in `SessionEditOpcode::from_raw` | decode returns `Ok(SetSourceContent { … })` where `Err(InvalidTlv)` is required; the assertion names deleted opcode `0x0006` before payload dispatch |
+
+The same gate independently mutates the opcode TLV to deleted per-source-rate `0x0102` and source
+mapping `0x0104`. Its positive neighbor round-trips the new `{content,channels,bit_depth,frames}`
+payload canonically, so the refusal cannot pass by disabling source-edit decoding wholesale.

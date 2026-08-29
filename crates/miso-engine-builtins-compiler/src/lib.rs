@@ -4012,7 +4012,6 @@ mod tests {
         template.dynamic.effects.clear();
         template.simd2.effects.clear();
         model.automation.clear();
-        model.limits.memory_bytes = i64::MAX as u64;
         model.tracks.clear();
         for index in 0..n {
             let mut track = template.clone();
@@ -4572,7 +4571,6 @@ mod tests {
                 let prepare = |cutoff: f32| {
                     let mut model = base_model.clone();
                     model.sample_rate_hz = rate;
-                    model.sources[0].sample_rate_hz = rate;
                     for track in &mut model.tracks {
                         track.builtins.left.hpf_hz = 0.0;
                         track.builtins.left.lpf_hz = 0.0;
@@ -4627,7 +4625,6 @@ mod tests {
                 .expect("parse baseline mutation session");
         base_model.tracks[0].dynamic.effects.clear();
         base_model.automation.clear();
-        base_model.limits.memory_bytes = i64::MAX as u64;
         let base_config = MeterConfig {
             period_frames: NonZeroU32::new(16).expect("constant"),
             peak_hold_frames: 0,
@@ -4729,7 +4726,6 @@ mod tests {
 
             let mut model = base_model.clone();
             model.sample_rate_hz = rate;
-            model.sources[0].sample_rate_hz = rate;
             model.quantum_frames = quantum;
             model.tracks[0].matrix_or_pan = MatrixOrPan::Matrix {
                 ll: 1.0,

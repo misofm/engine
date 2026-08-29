@@ -27,6 +27,7 @@ members = [
     "crates/miso-engine-protocol",
     "crates/miso-engine-capi",
     "crates/miso-engine-target-smoke",
+    "crates/miso-engine-flac-decoder",
     "crates/miso-engine-dsp-reference",
     "crates/miso-engine-conformance",
     "hosts/miso-engine-host-native",
@@ -38,6 +39,8 @@ members = [
     "tools/miso-engine-audit",
     "tools/miso-engine-native-pcm-runner",
     "tools/miso-engine-stem-hasher",
+    "tools/miso-engine-stem-publisher",
+    "tools/miso-engine-catalog-migrate",
     "tools/miso-engine-wasm-gate-corpus",
     "tools/miso-engine-wasm-gate-guest",
     "tools/miso-engine-wasm-console-guest",
@@ -61,6 +64,7 @@ miso-engine-math = { path = "crates/miso-engine-math", version = "0.1.0" }
 miso-engine-target-smoke = { path = "crates/miso-engine-target-smoke", version = "0.1.0" }
 miso-engine-dsp-reference = { path = "crates/miso-engine-dsp-reference", version = "0.1.0" }
 miso-engine-conformance = { path = "crates/miso-engine-conformance", version = "0.1.0" }
+miso-engine-flac-decoder = { path = "crates/miso-engine-flac-decoder", version = "0.1.0" }
 miso-engine-session = { path = "crates/miso-engine-session", version = "0.1.0" }
 miso-engine-source = { path = "crates/miso-engine-source", version = "0.1.0" }
 miso-engine-protocol = { path = "crates/miso-engine-protocol", version = "0.1.0" }
@@ -89,7 +93,10 @@ miso-engine-bench-support = { path = "tools/miso-engine-bench-support", version 
 miso-engine-console-workload = { path = "tools/miso-engine-console-workload", version = "0.1.0" }
 miso-engine-wasm-gate-corpus = { path = "tools/miso-engine-wasm-gate-corpus", version = "0.1.0" }
 miso-engine-wasm-gate-guest = { path = "tools/miso-engine-wasm-gate-guest", version = "0.1.0" }
+miso-engine-stem-hasher = { path = "tools/miso-engine-stem-hasher", version = "0.1.0" }
+flacenc = { version = "=0.5.1", default-features = false }
 sha2 = { version = "=0.11.0", default-features = false }
+symphonia = { version = "=0.6.1", default-features = false, features = ["flac"] }
 wide = { version = "=1.6.1", default-features = false }
 
 [workspace.lints.rust]

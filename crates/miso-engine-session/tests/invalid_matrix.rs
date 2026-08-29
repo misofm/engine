@@ -62,24 +62,8 @@ fn u64_model_fields_are_bounded_to_toml_i64_at_leaf_paths() {
             "$.revision",
         ),
         (
-            |session| session.limits.pcm_ring_frames = i64::MAX as u64 + 1,
-            "$.limits.pcm_ring_frames",
-        ),
-        (
-            |session| session.limits.control_queue_messages = i64::MAX as u64 + 1,
-            "$.limits.control_queue_messages",
-        ),
-        (
-            |session| session.limits.memory_bytes = i64::MAX as u64 + 1,
-            "$.limits.memory_bytes",
-        ),
-        (
-            |session| session.sources[0].mapping.region.start_sample = i64::MAX as u64 + 1,
-            "$.sources[0].mapping.region.start_sample",
-        ),
-        (
-            |session| session.sources[0].mapping.region.length_samples = i64::MAX as u64 + 1,
-            "$.sources[0].mapping.region.length_samples",
+            |session| session.sources[0].frames = i64::MAX as u64 + 1,
+            "$.sources[0].frames",
         ),
         (
             |session| session.automation[0].segments[0].start_sample = i64::MAX as u64 + 1,
@@ -202,8 +186,8 @@ fn schema_version_and_type_category_has_16_distinct_cases() {
     parse_case(
         &mut count,
         &replaced(
-            "content = { identity",
-            "content = \"opaque\", old_content = { identity",
+            "content = \"sha256:",
+            "content = false, old_content = \"sha256:",
         ),
         DiagnosticCode::WrongType,
         "$.sources[0].content",
@@ -261,8 +245,8 @@ fn stable_id_category_has_20_distinct_cases() {
             "$.output_profile.id",
         ),
         (
-            "{ id = \"voice\", sample_rate_hz",
-            "{ id = \"Bad\", sample_rate_hz",
+            "{ id = \"voice\", content",
+            "{ id = \"Bad\", content",
             "$.sources[0].id",
         ),
         (
@@ -532,46 +516,51 @@ fn finite_unit_and_local_range_category_has_24_distinct_cases() {
 }
 
 #[test]
-fn source_and_region_category_has_16_distinct_cases() {
+fn source_identity_and_shape_category_has_20_distinct_cases() {
     let mut count = 0;
     model_case(
         &mut count,
-        |s| s.sources[0].content.identity.clear(),
-        DiagnosticCode::NumericOutOfSchemaRange,
-        "$.sources[0].content.identity",
+        |s| s.sources[0].content.clear(),
+        DiagnosticCode::SourceContentIdentityFormat,
+        "$.sources[0].content",
     );
     model_case(
         &mut count,
-        |s| s.sources[0].content.locator.clear(),
-        DiagnosticCode::NumericOutOfSchemaRange,
-        "$.sources[0].content.locator",
-    );
-    model_case(
-        &mut count,
-        |s| s.sources[0].mapping.channel_count = 0,
-        DiagnosticCode::NumericOutOfSchemaRange,
-        "$.sources[0].mapping.channel_count",
-    );
-    model_case(
-        &mut count,
-        |s| s.sources[0].mapping.region.length_samples = 0,
-        DiagnosticCode::NumericOutOfSchemaRange,
-        "$.sources[0].mapping.region.length_samples",
-    );
-    model_case(
-        &mut count,
-        |s| s.sources[0].sample_rate_hz = 0,
-        DiagnosticCode::NumericOutOfSchemaRange,
-        "$.sources[0].sample_rate_hz",
+        |s| s.sources[0].content = "sha256:abc".to_owned(),
+        DiagnosticCode::SourceContentIdentityFormat,
+        "$.sources[0].content",
     );
     model_case(
         &mut count,
         |s| {
-            s.sources[0].mapping.region.start_sample = u64::MAX;
-            s.sources[0].mapping.region.length_samples = 1;
+            s.sources[0].content[7..].make_ascii_uppercase();
         },
-        DiagnosticCode::SourceRegionOverflow,
-        "$.sources[0].mapping.region",
+        DiagnosticCode::SourceContentIdentityFormat,
+        "$.sources[0].content",
+    );
+    model_case(
+        &mut count,
+        |s| s.sources[0].content = s.sources[0].content.replacen("sha256:", "sha512:", 1),
+        DiagnosticCode::SourceContentIdentityFormat,
+        "$.sources[0].content",
+    );
+    model_case(
+        &mut count,
+        |s| s.sources[0].content.replace_range(7..8, "g"),
+        DiagnosticCode::SourceContentIdentityFormat,
+        "$.sources[0].content",
+    );
+    model_case(
+        &mut count,
+        |s| s.sources[0].channels = 0,
+        DiagnosticCode::CapacityZero,
+        "$.sources[0].channels",
+    );
+    model_case(
+        &mut count,
+        |s| s.sources[0].frames = 0,
+        DiagnosticCode::CapacityZero,
+        "$.sources[0].frames",
     );
     model_case(
         &mut count,
@@ -587,30 +576,16 @@ fn source_and_region_category_has_16_distinct_cases() {
     );
     for (needle, replacement, path) in [
         (
-            "sample_rate_hz = 48000, content",
-            "sample_rate_hz = -1, content",
-            "$.sources[0].sample_rate_hz",
+            "channels = 2, bit_depth",
+            "channels = -1, bit_depth",
+            "$.sources[0].channels",
         ),
         (
-            "channel_count = 2",
-            "channel_count = -1",
-            "$.sources[0].mapping.channel_count",
+            "channels = 2, bit_depth",
+            "channels = 256, bit_depth",
+            "$.sources[0].channels",
         ),
-        (
-            "channel_count = 2",
-            "channel_count = 256",
-            "$.sources[0].mapping.channel_count",
-        ),
-        (
-            "start_sample = 0",
-            "start_sample = -1",
-            "$.sources[0].mapping.region.start_sample",
-        ),
-        (
-            "length_samples = 48000",
-            "length_samples = -1",
-            "$.sources[0].mapping.region.length_samples",
-        ),
+        ("frames = 48000", "frames = -1", "$.sources[0].frames"),
         (
             "left_source_channel = 0",
             "left_source_channel = 256",
@@ -634,7 +609,26 @@ fn source_and_region_category_has_16_distinct_cases() {
             path,
         );
     }
-    assert_eq!(count, 16);
+    // The closed depth set is {16, 24, "32f"} and each token has exactly one legal spelling.
+    // Integer 32 is the trap: it is the obvious "f32" spelling, it is not in the set, and nothing
+    // pinned its refusal until this row -- widening the integer arm to map 32 onto `Float32`
+    // passed the whole suite. The string spelling of an integer depth and a zero depth close the
+    // two remaining spelling holes on the same axis.
+    for replacement in [
+        "bit_depth = \"20f\"",
+        "bit_depth = 32",
+        "bit_depth = \"16\"",
+        "bit_depth = \"24\"",
+        "bit_depth = 0",
+    ] {
+        parse_case(
+            &mut count,
+            &replaced("bit_depth = \"32f\"", replacement),
+            DiagnosticCode::SourceBitDepthUnsupported,
+            "$.sources[0].bit_depth",
+        );
+    }
+    assert_eq!(count, 20);
 }
 
 fn routed_effect(template: &Effect, source: RouteSource) -> Effect {
@@ -1014,112 +1008,26 @@ fn automation_category_has_20_distinct_cases() {
     assert_eq!(count, 20);
 }
 
-fn overflow_session(source_count: usize, channel_count: u8, ring_frames: u64) -> SessionToml {
-    let mut session = parse_session_toml(EXAMPLE).expect("fixture parses");
-    let template = session.sources[0].clone();
-    session.sources.clear();
-    for index in 0..source_count {
-        let mut source = template.clone();
-        source.id = id(&format!("source-{index}"));
-        source.mapping.channel_count = channel_count;
-        session.sources.push(source);
-    }
-    session.limits.pcm_ring_frames = ring_frames;
-    session
-}
-
 #[test]
-fn checked_arithmetic_category_has_20_distinct_cases() {
-    let mut count = 0;
-    let mut queue = parse_session_toml(EXAMPLE).expect("fixture parses");
-    queue.limits.control_queue_messages = u64::MAX;
-    let error = estimate_session_resources(&queue).expect_err("queue multiplication overflow");
-    assert_diagnostic(
-        &error,
-        DiagnosticCode::CapacityArithmeticOverflow,
-        "$.limits.control_queue_messages",
-    );
-    count += 1;
-
-    let frames = overflow_session(2, 1, u64::MAX);
-    let error =
-        estimate_session_resources(&frames).expect_err("ring frame multiplication overflow");
-    assert_diagnostic(
-        &error,
-        DiagnosticCode::CapacityArithmeticOverflow,
-        "$.limits.pcm_ring_frames",
-    );
-    count += 1;
-
-    for target_index in 0..16 {
-        let mut session = overflow_session(16, 0, u64::MAX);
-        session.sources[target_index].mapping.channel_count = 2;
-        let error = estimate_session_resources(&session)
-            .expect_err("per-source byte multiplication overflow");
-        assert_diagnostic(
-            &error,
-            DiagnosticCode::CapacityArithmeticOverflow,
-            &format!("$.sources[{target_index}].mapping.channel_count"),
-        );
-        count += 1;
-    }
-
-    let mut runtime = overflow_session(2, 1, (u64::MAX / 16) + 1);
-    runtime.limits.control_queue_messages = (u64::MAX / 128) + 1;
-    let error = estimate_session_resources(&runtime).expect_err("runtime byte sum overflow");
-    assert_diagnostic(
-        &error,
-        DiagnosticCode::CapacityArithmeticOverflow,
-        "$.runtime",
-    );
-    count += 1;
-
-    let mut platform = parse_session_toml(EXAMPLE).expect("fixture parses");
-    platform.limits.control_queue_messages =
-        (u64::try_from(isize::MAX).expect("isize fits u64") / 64) + 1;
-    let error =
-        estimate_session_resources(&platform).expect_err("platform allocation ceiling rejects");
-    assert_diagnostic(
-        &error,
-        DiagnosticCode::CapacityArithmeticOverflow,
-        "$.single_allocation",
-    );
-    count += 1;
-    assert_eq!(count, 20);
-}
-
-#[test]
-fn configured_resource_category_has_16_distinct_cases() {
+fn configured_resource_category_has_4_distinct_cases() {
     let mut count = 0;
     let base = parse_session_toml(EXAMPLE).expect("fixture parses");
     let estimate = estimate_session_resources(&base).expect("fixture estimates");
     for zero in [true, false] {
         for (field, path) in [
             ("compiled", "$.compile_caps.max_compiled_model_bytes"),
-            ("runtime", "$.compile_caps.max_requested_runtime_bytes"),
             ("single", "$.compile_caps.max_single_allocation_bytes"),
-            ("queue", "$.compile_caps.max_queue_items"),
-            ("frames", "$.compile_caps.max_source_ring_frames"),
-            ("ring-bytes", "$.compile_caps.max_source_ring_bytes"),
         ] {
             let mut caps = unlimited_caps();
             let limit = match field {
                 "compiled" => estimate.compiled_model_bytes,
-                "runtime" => estimate.requested_runtime_bytes,
                 "single" => estimate.single_allocation_bytes,
-                "queue" => estimate.queue_items,
-                "frames" => estimate.source_ring_frames,
-                "ring-bytes" => estimate.source_ring_bytes,
                 _ => unreachable!(),
             };
             let rejected = if zero { 0 } else { limit - 1 };
             match field {
                 "compiled" => caps.max_compiled_model_bytes = rejected,
-                "runtime" => caps.max_requested_runtime_bytes = rejected,
                 "single" => caps.max_single_allocation_bytes = rejected,
-                "queue" => caps.max_queue_items = rejected,
-                "frames" => caps.max_source_ring_frames = rejected,
-                "ring-bytes" => caps.max_source_ring_bytes = rejected,
                 _ => unreachable!(),
             }
             let error = compile_session(&base, caps).expect_err("configured cap rejects");
@@ -1127,37 +1035,54 @@ fn configured_resource_category_has_16_distinct_cases() {
             count += 1;
         }
     }
-    for memory_bytes in [0, estimate.requested_runtime_bytes - 1] {
-        let mut session = base.clone();
-        session.limits.memory_bytes = memory_bytes;
-        let error = compile_session(&session, unlimited_caps())
-            .expect_err("session memory declaration rejects");
-        assert_diagnostic(
-            &error,
-            DiagnosticCode::ResourceLimitExceeded,
-            "$.limits.memory_bytes",
+    assert_eq!(count, 4);
+}
+
+/// The four resource caps #241 made inert cannot refuse any session, in either direction.
+///
+/// `configured_resource_category` dropped from 16 rows to 4 because these four stopped being
+/// reachable refusal channels; nothing then stated *that* as a fact, so the shrink read as lost
+/// coverage rather than as a deliberate hand-off. This row states it.
+///
+/// Set all four to zero -- the most hostile budget expressible -- against a session that really
+/// does declare sources and effects, and compilation must still succeed. The two live caps are
+/// left unlimited so the only thing under test is the inertness of the other four.
+///
+/// If a future issue re-populates the estimate (#240 S3.7 recomputing ring bytes after the host's
+/// choice is the obvious candidate), this row goes red and forces the question rather than
+/// letting a budget quietly start or stop biting.
+#[test]
+fn dead_resource_caps_cannot_refuse_any_session() {
+    let session = parse_session_toml(EXAMPLE).expect("fixture parses");
+    let estimate = estimate_session_resources(&session).expect("fixture estimates");
+    for (label, value) in [
+        ("requested_runtime_bytes", estimate.requested_runtime_bytes),
+        ("queue_items", estimate.queue_items),
+        ("queue_bytes", estimate.queue_bytes),
+        ("source_ring_frames", estimate.source_ring_frames),
+        ("source_ring_bytes", estimate.source_ring_bytes),
+    ] {
+        assert_eq!(
+            value, 0,
+            "{label} must be the host's business, not the document's"
         );
-        count += 1;
     }
-    model_case(
-        &mut count,
-        |s| s.limits.pcm_ring_frames = 0,
-        DiagnosticCode::CapacityZero,
-        "$.limits.pcm_ring_frames",
-    );
-    model_case(
-        &mut count,
-        |s| s.limits.control_queue_messages = 0,
-        DiagnosticCode::CapacityZero,
-        "$.limits.control_queue_messages",
-    );
-    assert_eq!(count, 16);
+    let caps = CompileCaps {
+        max_compiled_model_bytes: u64::MAX,
+        max_single_allocation_bytes: u64::MAX,
+        max_requested_runtime_bytes: 0,
+        max_queue_items: 0,
+        max_source_ring_frames: 0,
+        max_source_ring_bytes: 0,
+    };
+    compile_session(&session, caps)
+        .expect("caps whose subjects are host policy cannot refuse a session");
 }
 
 #[test]
-fn corpus_distribution_totals_152_cases() {
-    const DISTRIBUTION: [usize; 8] = [16, 20, 24, 16, 20, 20, 20, 16];
-    assert_eq!(DISTRIBUTION.iter().sum::<usize>(), 152);
+fn corpus_distribution_totals_124_cases() {
+    const DISTRIBUTION: [usize; 7] = [16, 20, 24, 20, 20, 20, 4];
+    assert_eq!(DISTRIBUTION.iter().sum::<usize>(), 124);
 }
 
 #[test]

@@ -63,7 +63,7 @@ const SUBSCRIPTION_FIELDS = [
 // Issue #207: one entry of the session map's source list. The names are the `.d.ts`'s and the
 // worklet's, spelled once here so the acknowledgement validator and the type declaration cannot
 // drift apart without `scripts/check-session-map-shape.py` seeing it.
-const SESSION_SOURCE_FIELDS = ["id", "channels", "sampleRateHz", "startFrame", "frames"];
+const SESSION_SOURCE_FIELDS = ["id", "channels", "frames"];
 
 function validSubscription(subscription) {
   return hasExactFields(subscription, SUBSCRIPTION_FIELDS)
@@ -491,14 +491,13 @@ class MisoAudioWorkletHost {
       message.result === RESULT_OK && Array.isArray(message.tracks)
       && message.tracks.every((value) => typeof value === "string" && value.length > 0)
       // Issue #207: the source list is held to what a *compiled* session can produce -- a nonzero
-      // channel count, a nonzero region length, a rate that is the session's -- so a malformed
-      // list fails the host loudly instead of reaching a consumer as plausible numbers.
+      // channel count and a nonzero full-source frame count -- so a malformed list fails the host
+      // loudly instead of reaching a consumer as plausible numbers.
       && Array.isArray(message.sources)
       && message.sources.every((source) => hasExactFields(source, SESSION_SOURCE_FIELDS)
         && typeof source.id === "string" && source.id.length > 0
         && validU32(source.channels) && source.channels > 0
-        && source.sampleRateHz === this.#sampleRateHz
-        && validU64(source.frames, true) && validU64(source.startFrame))
+        && validU64(source.frames, true))
       && typeof message.metersAttached === "boolean"
     );
     const validStatus = pending.response !== "status" || (

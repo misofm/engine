@@ -32,10 +32,9 @@ fn frozen_corpus_bytes_and_typed_decoders_are_unchanged() {
         };
         assert!(decoded.is_ok(), "{} must decode", frame.name);
     }
-    // Re-pinned by issue #210 phase 2: the frozen session frames carry `ChannelBuiltins`, which
-    // gained a required `delay_samples` field, so their encoded bytes moved. The frame *count* did
-    // not: no message was added, one existing message grew a field.
-    assert_eq!(hash, 0xeb7a_a549_b666_77a8);
+    // #241 re-pin: the frame count remains 46, while the transaction corpus deletes opcodes
+    // 0x0006/0x0102/0x0104 and replaces 0x0103's nested content with its five-field source shape.
+    assert_eq!(hash, 0xbdeb_b0f8_1c38_ec42);
 }
 
 #[test]
