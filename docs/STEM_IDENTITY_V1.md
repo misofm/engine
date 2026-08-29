@@ -8,15 +8,15 @@ the same identity. `MUST`, `MUST NOT`, and `SHOULD` are normative requirements.
 
 The source declaration established with this contract supplies `content`, `channels`, `bit_depth`,
 and `frames`. The session root supplies the only `sample_rate_hz`; there is no per-source rate and
-no implicit sample-rate conversion. Launch `bit_depth` is the closed integer set `{16, 24}`. A
-future 32-bit float token would be an additive schema change, not an interpretation of either
-launch token.
+no implicit sample-rate conversion. `bit_depth` is the closed token set `{16, 24, 32f}`. The
+integer tokens retain source-native signed integers; `32f` is IEEE-754 binary32.
 
 Shape is deliberately not part of the hash preimage. A hash alone therefore underdetermines the
 sound: the `(declaration, hash)` pair determines it. Reusing the same canonical bytes under a
 different declaration in another document is a coherent, harmless reinterpretation, not an
 identity collision. Within one declaration, every resolver and decoder MUST reproduce the exact
-declared integer samples or refuse before the stem is admitted.
+declared integer samples or float bit patterns, as applicable, or refuse before the stem is
+admitted.
 
 ## Canonical serialization
 
@@ -26,13 +26,16 @@ For `frames` frames, `channels` channels, and `bit_depth`:
    channel-count word, padding, metadata, checksum, or container data.
 2. Samples are interleaved in frame-major order: frame 0 channel 0, frame 0 channel 1, ..., then
    frame 1 channel 0, and so on. Channel indices are zero-based.
-3. Each sample is a signed two's-complement integer at the source-native declared depth.
-   `bit_depth = 16` uses exactly two little-endian bytes. `bit_depth = 24` uses exactly three
-   little-endian bytes, packed with no sign-extension or pad byte.
+3. For `bit_depth = 16` and `bit_depth = 24`, each sample is a signed two's-complement integer at
+   the source-native declared depth. `16` uses exactly two little-endian bytes. `24` uses exactly
+   three little-endian bytes, packed with no sign-extension or pad byte. For `bit_depth = 32f`,
+   each sample is its raw four-byte IEEE-754 binary32 bit pattern in little-endian order. Every NaN
+   payload and sign bit is identity-bearing: implementations MUST NOT canonicalize NaNs or
+   negative zero.
 4. The exact preimage length is
-   `frames * channels * (bit_depth / 8)` bytes. Implementations MUST use checked arithmetic and
-   MUST reject a byte-length mismatch. This is also the stem store's mandatory open-time length
-   check.
+   `frames * channels * bytes_per_sample(bit_depth)` bytes, where the widths for `16`, `24`, and
+   `32f` are 2, 3, and 4 respectively. Implementations MUST use checked arithmetic and MUST reject
+   a byte-length mismatch. This is also the stem store's mandatory open-time length check.
 5. Hash the complete serialization with SHA-256. The identity string is `sha256:` followed by the
    64 lowercase hexadecimal digest characters. The exact grammar is
    `^sha256:[0-9a-f]{64}$`.
@@ -57,12 +60,17 @@ pin so each answer is independently hand-derivable.
 
 | Vector | Depth | Channels x frames | Samples by frame | Canonical bytes (hex) | Identity |
 | --- | ---: | ---: | --- | --- | --- |
-| `pcm16-mono-boundaries` | 16 | 1 x 5 | `0 | 32767 | -32768 | 1 | -1` | `0000ff7f00800100ffff` | `sha256:342f56e6d16f7cbcd69bbc003e4e16d0fa45335f3756701db3a6649f19d6042c` |
-| `pcm16-stereo-boundaries` | 16 | 2 x 3 | `(0,32767) | (-32768,1) | (-1,0)` | `0000ff7f00800100ffff0000` | `sha256:0320b11905302eb840cd06ab90b0549114e6ee1c89233e928ebe21b8c4964ef2` |
-| `pcm24-mono-boundaries` | 24 | 1 x 5 | `0 | 8388607 | -8388608 | 1 | -1` | `000000ffff7f000080010000ffffff` | `sha256:de48b490bab45d06c72b240d7e46efa95d07deb216eb7f1f2afc7a7e14a4b832` |
-| `pcm24-stereo-boundaries` | 24 | 2 x 3 | `(0,8388607) | (-8388608,1) | (-1,0)` | `000000ffff7f000080010000ffffff000000` | `sha256:f014aa907c6c9894ab1a1d3b05a82f31b6ddb82f5cbc1e61fdc2d7c35245e4c6` |
+| `f32-mono-edge-bits` | 32f | 1 x 3 | `0x7fc00001 \| 0x00000001 \| 0x80000000` | `0100c07f0100000000000080` | `sha256:cdd5a52d167bad118aada8a9227170aea6cd41228916db521f575918fee38343` |
+| `f32-stereo-edge-bits` | 32f | 2 x 2 | `(0x7fc00001,0x80000000) \| (0x00000001,0xffc12345)` | `0100c07f00000080010000004523c1ff` | `sha256:55c2062d8bac6bc12052ccf49656482c92e3f4095392d69a3350aca6f88088b6` |
+| `pcm16-mono-boundaries` | 16 | 1 x 5 | `0 \| 32767 \| -32768 \| 1 \| -1` | `0000ff7f00800100ffff` | `sha256:342f56e6d16f7cbcd69bbc003e4e16d0fa45335f3756701db3a6649f19d6042c` |
+| `pcm16-stereo-boundaries` | 16 | 2 x 3 | `(0,32767) \| (-32768,1) \| (-1,0)` | `0000ff7f00800100ffff0000` | `sha256:0320b11905302eb840cd06ab90b0549114e6ee1c89233e928ebe21b8c4964ef2` |
+| `pcm24-mono-boundaries` | 24 | 1 x 5 | `0 \| 8388607 \| -8388608 \| 1 \| -1` | `000000ffff7f000080010000ffffff` | `sha256:de48b490bab45d06c72b240d7e46efa95d07deb216eb7f1f2afc7a7e14a4b832` |
+| `pcm24-stereo-boundaries` | 24 | 2 x 3 | `(0,8388607) \| (-8388608,1) \| (-1,0)` | `000000ffff7f000080010000ffffff000000` | `sha256:f014aa907c6c9894ab1a1d3b05a82f31b6ddb82f5cbc1e61fdc2d7c35245e4c6` |
 
-All four rows have committed headerless `.pcm` files. The stereo row at each depth also has a
+The `32f` sample text is exact hexadecimal IEEE-754 bits. Those rows cover NaN payloads, the least
+positive subnormal, and negative zero without relying on host-language float formatting.
+
+All six rows have committed headerless `.pcm` files. The stereo row at each depth also has a
 committed `.wav` fixture. The reference WAVE path MUST strip the two different wrappers and
 produce bytes and identity equal to the corresponding `.pcm` row.
 
@@ -73,15 +81,16 @@ RIFF/WAVE and RF64/WAVE through the engine's own `miso-engine-source` parser, se
 sample through the rules above, optionally emits the canonical preimage, and prints the identity.
 It never retains a complete stem.
 
-Raw input is signed, little-endian PCM at the explicitly supplied shape:
+Raw input is little-endian canonical PCM at the explicitly supplied shape: signed two's-complement
+for depths 16/24, or raw IEEE-754 bit patterns for `32f`:
 
 ```sh
 cargo run --locked -p miso-engine-stem-hasher -- raw \
   --input stem.pcm --channels 2 --bit-depth 24 --frames 10617984
 ```
 
-WAVE supplies its shape through the engine parser and is accepted only for signed PCM16 or packed
-PCM24:
+WAVE supplies its shape through the engine parser and is accepted only for signed PCM16, packed
+PCM24, or IEEE float32:
 
 ```sh
 cargo run --locked -p miso-engine-stem-hasher -- wave --input stem.wav

@@ -3,35 +3,16 @@ const QUANTUM = 128;
 const TOTAL_FRAMES = QUANTUM * 4;
 const PROCESSOR_NAME = "miso-engine-v2-audio-worklet";
 
-function limits() {
+function bootOptions() {
   return {
-    sessionTomlBytes: 1 << 20,
-    diagnosticBytes: 1 << 14,
-    sourceIdBytes: 1 << 10,
-    maximumSourceChannels: 8,
     sourceRingFrames: QUANTUM,
-    maximumAutomationSpansPerBlock: 256,
-    maximumTracks: 1024n,
-    maximumSources: 1024n,
-    maximumRoutes: 4096n,
-    maximumEffects: 8192n,
-    maximumGraphSessionPlusPlanBytes: 64n << 20n,
-    maximumSourceTotalBytes: 64n << 20n,
-    maximumSourceOverheadBytes: 16n << 20n,
-    maximumEffectStateBytes: 16n << 20n,
-    maximumEffectScratchBytes: 16n << 20n,
-    maximumBuiltinRetainedBytes: 64n << 20n,
-    maximumHostRetainedBytes: 16n << 20n,
-    maximumNamedAllocationBytes: 64n << 20n,
-    maximumMeterStreams: 1024n,
-    maximumMeterItems: 1n << 20n,
-    maximumMeterBytes: 16n << 20n,
+    maximumMemoryBytes: 0n,
     // Issue #137: zero in both console words is the frozen pre-console shape -- no control
     // channel, no meter observers -- which is what this fixture's digest was pinned against.
     consoleCommandQueueRecords: 0n,
     consoleMeterBlocks: 0n,
-    // Issue #143 D3/D6: the remaining two reserved words. The worklet's `LIMIT_FIELDS` guard is
-    // `exactFields`, so these are not optional -- a `limits` object missing them is refused with
+    // Issue #143 D3/D6: the remaining two policy words. The worklet's exact-field guard means
+    // these are not optional -- an `options` object missing them is refused with
     // `RESULT_INVALID_ARGUMENT` before the module is instantiated. Zero in both is the same
     // "no observation capacity, no master designation" every pre-#143 writer already meant, and
     // is what this fixture's digests were pinned against.
@@ -102,9 +83,8 @@ async function runContext(createHost, source, sessionToml) {
   }
   const host = await createHost({
     context,
-    quantumFrames: QUANTUM,
-    sessionToml,
-    limits: limits(),
+    document: sessionToml,
+    options: bootOptions(),
     simd128ModuleUrl: ARTIFACT_URL,
     workletModuleUrl: "/artifacts/miso-engine-v2-audio-worklet.js",
   });
@@ -172,7 +152,7 @@ async function runContext(createHost, source, sessionToml) {
 }
 
 async function runFailureContext(sessionToml) {
-  const context = new OfflineAudioContext(2, QUANTUM, SAMPLE_RATE);
+  const context = new OfflineAudioContext(2, QUANTUM, 44100);
   const exposedMainQuantum = Number(context.renderQuantumSize || 0);
   if (exposedMainQuantum !== 0 && exposedMainQuantum !== QUANTUM) {
     throw new Error("failure-context main quantum mismatch");
@@ -186,13 +166,9 @@ async function runFailureContext(sessionToml) {
     numberOfOutputs: 1,
     outputChannelCount: [2],
     processorOptions: {
-      requestId: 0,
       module,
-      backend: BACKEND,
-      sampleRateHz: 44100,
-      quantumFrames: QUANTUM,
-      sessionToml: new Uint8Array(sessionToml),
-      limits: limits(),
+      document: new Uint8Array(sessionToml),
+      options: bootOptions(),
     },
   });
   const failure = new Promise((resolve, reject) => {

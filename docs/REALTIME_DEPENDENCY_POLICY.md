@@ -124,10 +124,12 @@ Reconciling the two belongs to the #104 evidence triage. Two categories have bee
 the C-ABI boundary files (`crates/miso-engine-capi/src/ffi.rs`,
 `crates/miso-engine-effect-package/src/ffi.rs`, `hosts/miso-engine-host-web/src/ffi.rs` and their
 tests), and **test-only counting global allocators** — `miso-engine-builtins-compiler`,
-`miso-engine-effect-package` and, from audit #92, `miso-engine-transient-shaper`. The last category
-is `unsafe impl GlobalAlloc` that forwards every request to `System` unchanged and adds two relaxed
-atomic counters, in a `tests/` file that no production target links; it exists to *prove* the render
-path allocates nothing, which is the policy this document states.
+`miso-engine-effect-package`, from audit #92 `miso-engine-transient-shaper`, and from issue #240
+`hosts/miso-engine-host-web/tests/boot_transient_budget.rs`. The last category is
+`unsafe impl GlobalAlloc` that forwards every request to `System` unchanged and adds only audit
+counters, in a `tests/` file that no production target links. The earlier fixtures prove render
+paths allocate nothing; #240's thread-local fixture measures the parse/model-build high-water mark
+against its pinned conservative multiplier.
 
 `scripts/check-realtime-policy.sh` extracts explicitly marked render-reachable regions and rejects
 allocation/growth, locks, waits, I/O, logging, networking, process/thread APIs, and async surfaces.

@@ -8,6 +8,7 @@
 
 use std::path::{Path, PathBuf};
 
+use miso_engine_host_web::{AudioWorkletEngineHost, RESULT_REFUSED_DOCUMENT, WebBootOptions};
 use miso_engine_session_validator::{StageStatus, validate_session_document};
 
 fn repository_root() -> PathBuf {
@@ -34,6 +35,46 @@ fn session_fixture_names() -> Vec<String> {
         .collect();
     names.sort();
     names
+}
+
+#[test]
+fn source_identity_format_diagnostics_are_byte_identical_at_validator_and_web_boot() {
+    let base = fixture("canonical.toml");
+    let identity = base
+        .lines()
+        .find(|line| line.contains("content = \"sha256:"))
+        .and_then(|line| line.split("content = \"").nth(1))
+        .and_then(|tail| tail.split('"').next())
+        .expect("canonical source identity");
+    let mut non_hex = identity.to_owned();
+    non_hex.replace_range(7..8, "g");
+    let uppercase = format!("sha256:{}", identity[7..].to_ascii_uppercase());
+    for (label, replacement) in [
+        ("wrong-prefix", identity.replacen("sha256:", "sha512:", 1)),
+        ("wrong-length", "sha256:abc".to_owned()),
+        ("uppercase", uppercase),
+        ("non-hex", non_hex),
+    ] {
+        let document = base.replacen(identity, &replacement, 1);
+        let report = validate_session_document(&document);
+        assert_eq!(report.failed_stage(), Some(1), "{label}");
+        let diagnostics = &report.stages()[1].diagnostics;
+        assert_eq!(diagnostics.len(), 1, "{label}");
+        let diagnostic = &diagnostics[0];
+        assert_eq!(diagnostic.code, "source.content.identity_format", "{label}");
+        assert_eq!(diagnostic.path, "$.sources[0].content", "{label}");
+
+        let boot =
+            AudioWorkletEngineHost::boot(document.as_bytes(), WebBootOptions::explicit_defaults())
+                .err()
+                .unwrap_or_else(|| panic!("{label}: web boot accepted invalid identity"));
+        assert_eq!(boot.result(), RESULT_REFUSED_DOCUMENT, "{label}");
+        assert_eq!(
+            boot.diagnostic(),
+            format!("{}\t{}\n", diagnostic.code, diagnostic.path).as_bytes(),
+            "{label}"
+        );
+    }
 }
 
 #[test]
@@ -138,13 +179,6 @@ const MUTATIONS: &[(&str, &str, &str, usize, &str)] = &[
         "canonical-minimal.toml",
         "quantum_frames = 128",
         "quantum_frames = 0",
-        1,
-        "capacity.zero",
-    ),
-    (
-        "canonical-minimal.toml",
-        "memory_bytes = 4096",
-        "memory_bytes = 0",
         1,
         "capacity.zero",
     ),
@@ -262,13 +296,13 @@ const MUTATIONS: &[(&str, &str, &str, usize, &str)] = &[
         1,
         "reference.missing_entity",
     ),
-    // Stage 3: the checked resource preflight against the session's own declared limits.
+    // The removed document limits are strict unknowns rather than silently ignored host policy.
     (
         "canonical.toml",
-        "memory_bytes = 1048576",
-        "memory_bytes = 1",
-        2,
-        "resource.limit_exceeded",
+        "sources = [",
+        "limits = { memory_bytes = 1 }\nsources = [",
+        1,
+        "schema.unknown_field",
     ),
     // Stage 4: off-render builtins preparation, past everything the schema owns.
     (
@@ -331,7 +365,7 @@ fn each_mutation_is_attributed_to_the_stage_that_rejects_it() {
 }
 
 #[test]
-fn parse_stage_diagnostics_carry_a_source_location_and_later_stages_do_not() {
+fn parse_stage_diagnostics_carry_a_source_location_and_preparation_diagnostics_do_not() {
     let schema = validate_session_document(&fixture("canonical.toml").replacen(
         "left_db = 0.0",
         "left_gain = 0.0",
@@ -343,15 +377,15 @@ fn parse_stage_diagnostics_carry_a_source_location_and_later_stages_do_not() {
             "parse diagnostics carry a span: {diagnostic:?}"
         );
     }
-    let compile = validate_session_document(&fixture("canonical.toml").replacen(
-        "memory_bytes = 1048576",
-        "memory_bytes = 1",
+    let preparation = validate_session_document(&fixture("canonical.toml").replacen(
+        "hpf_hz = 20.0",
+        "hpf_hz = 900000.0",
         1,
     ));
-    for diagnostic in &compile.stages()[2].diagnostics {
+    for diagnostic in &preparation.stages()[3].diagnostics {
         assert!(
             diagnostic.line.is_none() && diagnostic.column.is_none(),
-            "typed compilation has no source text: {diagnostic:?}"
+            "typed preparation has no source text: {diagnostic:?}"
         );
     }
 }

@@ -19,7 +19,7 @@ const BINARY: &str = env!("CARGO_BIN_EXE_miso-engine-stem-hasher");
 
 struct Vector<'a> {
     name: &'a str,
-    bit_depth: u16,
+    bit_depth: &'a str,
     channels: u16,
     frames: u64,
     canonical_hex: &'a str,
@@ -29,18 +29,35 @@ struct Vector<'a> {
 }
 
 #[test]
-fn vector_matrix_is_exactly_16_24_by_mono_stereo() {
+fn vector_matrix_covers_integer_boundaries_and_float_edge_bits() {
     let manifest =
         fs::read_to_string(Path::new(FIXTURES).join("VECTORS.tsv")).expect("read vector manifest");
     let vectors = parse_vectors(&manifest);
-    assert_eq!(vectors.len(), 4);
+    assert_eq!(vectors.len(), 6);
     assert_eq!(
         vectors
             .iter()
             .map(|vector| (vector.bit_depth, vector.channels))
             .collect::<Vec<_>>(),
-        [(16, 1), (16, 2), (24, 1), (24, 2)]
+        [
+            ("32f", 1),
+            ("32f", 2),
+            ("16", 1),
+            ("16", 2),
+            ("24", 1),
+            ("24", 2),
+        ]
     );
+}
+
+#[test]
+fn f32_mono_edge_bit_pin_matches_library_and_cli() {
+    assert_vector("f32-mono-edge-bits");
+}
+
+#[test]
+fn f32_stereo_edge_bit_pin_matches_library_cli_and_engine_wave_parser() {
+    assert_vector("f32-stereo-edge-bits");
 }
 
 #[test]
@@ -102,17 +119,15 @@ fn assert_vector(name: &str) {
     assert_eq!(lowercase_hex(&pcm), vector.canonical_hex, "{}", vector.name);
     assert_eq!(
         u64::try_from(pcm.len()).expect("fixture length"),
-        vector.frames * u64::from(vector.channels) * u64::from(vector.bit_depth / 8),
+        vector.frames
+            * u64::from(vector.channels)
+            * u64::from(bit_depth(vector.bit_depth).bytes_per_sample()),
         "{}",
         vector.name
     );
 
-    let shape = CanonicalPcmShape::new(
-        vector.channels,
-        CanonicalBitDepth::try_from(vector.bit_depth).expect("bit depth"),
-        vector.frames,
-    )
-    .expect("shape");
+    let shape = CanonicalPcmShape::new(vector.channels, bit_depth(vector.bit_depth), vector.frames)
+        .expect("shape");
     let mut canonical = Vec::new();
     let report = canonicalize_raw_pcm(&mut &pcm[..], shape, &mut canonical).expect("raw hash");
     assert_eq!(canonical, pcm, "{}", vector.name);
@@ -178,7 +193,7 @@ fn parse_vectors(manifest: &str) -> Vec<Vector<'_>> {
             assert_eq!(fields.len(), 9, "{line}");
             Vector {
                 name: fields[0],
-                bit_depth: fields[1].parse().expect("bit depth"),
+                bit_depth: fields[1],
                 channels: fields[2].parse().expect("channels"),
                 frames: fields[3].parse().expect("frames"),
                 canonical_hex: fields[5],
@@ -198,7 +213,7 @@ fn raw_arguments(vector: &Vector<'_>, input: &Path, output: Option<&Path>) -> Ve
         OsString::from("--channels"),
         OsString::from(vector.channels.to_string()),
         OsString::from("--bit-depth"),
-        OsString::from(vector.bit_depth.to_string()),
+        OsString::from(vector.bit_depth),
         OsString::from("--frames"),
         OsString::from(vector.frames.to_string()),
     ];
@@ -207,6 +222,10 @@ fn raw_arguments(vector: &Vector<'_>, input: &Path, output: Option<&Path>) -> Ve
         arguments.push(output.as_os_str().to_owned());
     }
     arguments
+}
+
+fn bit_depth(token: &str) -> CanonicalBitDepth {
+    CanonicalBitDepth::from_token(token).expect("bit depth")
 }
 
 fn lowercase_hex(bytes: &[u8]) -> String {

@@ -11,27 +11,8 @@ const workletUrl = process.env.MISO_ENGINE_WEB_WORKLET_TEST_MODULE === undefined
   : pathToFileURL(process.env.MISO_ENGINE_WEB_WORKLET_TEST_MODULE);
 
 const limits = Object.freeze({
-  sessionTomlBytes: 4096,
-  diagnosticBytes: 512,
-  sourceIdBytes: 64,
-  maximumSourceChannels: 2,
   sourceRingFrames: 256,
-  maximumAutomationSpansPerBlock: 8,
-  maximumTracks: 8n,
-  maximumSources: 4n,
-  maximumRoutes: 8n,
-  maximumEffects: 8n,
-  maximumGraphSessionPlusPlanBytes: 1_000_000n,
-  maximumSourceTotalBytes: 1_000_000n,
-  maximumSourceOverheadBytes: 1_000_000n,
-  maximumEffectStateBytes: 1_000_000n,
-  maximumEffectScratchBytes: 1_000_000n,
-  maximumBuiltinRetainedBytes: 1_000_000n,
-  maximumHostRetainedBytes: 2_000_000n,
-  maximumNamedAllocationBytes: 1_000_000n,
-  maximumMeterStreams: 8n,
-  maximumMeterItems: 16n,
-  maximumMeterBytes: 4096n,
+  maximumMemoryBytes: 0n,
   // Issue #137 D1/D2 and #143 D3/D6: the four console words. All zero is "default command-queue
   // depth, no meter observers, no observation capacity, no master designation"; the console tests
   // below override them.
@@ -46,7 +27,7 @@ function resourceReport(backend, quantumFrames) {
     sampleRateHz: 48000,
     quantumFrames,
     backend,
-    configBytes: 1n,
+    optionsBytes: 1n,
     statusBytes: 1n,
     sessionTomlBytes: 1n,
     diagnosticBytes: 1n,
@@ -151,8 +132,8 @@ async function testMainRealm() {
             result: 0,
             tracks: ["kick", "snare"],
             sources: [
-              { id: "bass", channels: 1, sampleRateHz: 48000, startFrame: 0n, frames: 96000n },
-              { id: "drums", channels: 2, sampleRateHz: 48000, startFrame: 4096n, frames: 2048n },
+              { id: "bass", channels: 1, frames: 96000n },
+              { id: "drums", channels: 2, frames: 2048n },
             ],
             metersAttached: true,
           };
@@ -184,8 +165,8 @@ async function testMainRealm() {
       queueMicrotask(() => {
         let data = {
           tag: "miso.ready.v1", requestId: 0, result: 0,
-          backend: options.processorOptions.backend,
-          resources: resourceReport(options.processorOptions.backend === "scalar" ? 0 : 1, 64),
+          backend: "simd128",
+          resources: resourceReport(1, 64),
           memoryBytes: 65536,
         };
         if (readyMutation !== null) data = readyMutation(data);
@@ -219,9 +200,8 @@ async function testMainRealm() {
     const { createMisoAudioWorkletHost } = await import(`${hostUrl.href}?main-test`);
     const host = await createMisoAudioWorkletHost({
       context,
-      quantumFrames: 64,
-      sessionToml: new TextEncoder().encode("format_version = 2"),
-      limits,
+      document: new TextEncoder().encode("format_version = 2"),
+      options: limits,
       simd128ModuleUrl: "simd.wasm",
       workletModuleUrl: "processor.js",
     });
@@ -295,9 +275,8 @@ async function testMainRealm() {
     });
     await errorResult(createMisoAudioWorkletHost({
       context,
-      quantumFrames: 64,
-      sessionToml: new Uint8Array(),
-      limits,
+      document: new Uint8Array(),
+      options: limits,
       simd128ModuleUrl: "simd.wasm",
       workletModuleUrl: "processor.js",
     }), 255);
@@ -307,9 +286,8 @@ async function testMainRealm() {
 
     const schemaHost = await createMisoAudioWorkletHost({
       context,
-      quantumFrames: 64,
-      sessionToml: new Uint8Array(),
-      limits,
+      document: new Uint8Array(),
+      options: limits,
       simd128ModuleUrl: "simd.wasm",
       workletModuleUrl: "processor.js",
     });
@@ -320,9 +298,8 @@ async function testMainRealm() {
 
     const planeHost = await createMisoAudioWorkletHost({
       context,
-      quantumFrames: 64,
-      sessionToml: new Uint8Array(),
-      limits,
+      document: new Uint8Array(),
+      options: limits,
       simd128ModuleUrl: "simd.wasm",
       workletModuleUrl: "processor.js",
     });
@@ -345,9 +322,8 @@ async function testMainRealm() {
     // `#saturated` once one source request is unsettled -> the second request rejects with 6.
     const pipelineHost = await createMisoAudioWorkletHost({
       context,
-      quantumFrames: 64,
-      sessionToml: new Uint8Array(),
-      limits,
+      document: new Uint8Array(),
+      options: limits,
       simd128ModuleUrl: "simd.wasm",
       workletModuleUrl: "processor.js",
     });
@@ -416,9 +392,8 @@ async function testMainRealm() {
     WebAssembly.validate = () => false;
     const refusal = await createMisoAudioWorkletHost({
       context,
-      quantumFrames: 64,
-      sessionToml: new Uint8Array(),
-      limits,
+      document: new Uint8Array(),
+      options: limits,
       simd128ModuleUrl: "simd.wasm",
       workletModuleUrl: "processor.js",
     }).then(() => assert.fail("expected unsupported-browser refusal"), (error) => error);
@@ -441,20 +416,19 @@ async function testMainRealm() {
     // Issue #137 D1/D2/D3: the live console's main-realm half.
     const consoleHost = await createMisoAudioWorkletHost({
       context,
-      quantumFrames: 64,
-      sessionToml: new TextEncoder().encode("format_version = 2"),
-      limits,
+      document: new TextEncoder().encode("format_version = 2"),
+      options: limits,
       simd128ModuleUrl: "simd.wasm",
       workletModuleUrl: "processor.js",
     });
     const map = await consoleHost.sessionMap();
     assert.deepEqual(map.tracks, ["kick", "snare"], "the canonical track order is the ABI");
-    // Issue #207: the source list crosses the port with its `bigint` region intact, and the host's
+    // Issue #241: the source list crosses the port with its `bigint` frame count intact, and the host's
     // acknowledgement validator accepted it -- a malformed row fails the whole host with 255, so
     // reaching this line is itself the assertion that the shape is the declared one.
     assert.deepEqual(map.sources, [
-      { id: "bass", channels: 1, sampleRateHz: 48000, startFrame: 0n, frames: 96000n },
-      { id: "drums", channels: 2, sampleRateHz: 48000, startFrame: 4096n, frames: 2048n },
+      { id: "bass", channels: 1, frames: 96000n },
+      { id: "drums", channels: 2, frames: 2048n },
     ], "the canonical source order and shape are the ABI");
     assert.equal(map.metersAttached, true);
 
@@ -579,9 +553,8 @@ async function testMainRealm() {
     ]) {
       const rejecting = await createMisoAudioWorkletHost({
         context,
-        quantumFrames: 64,
-        sessionToml: new TextEncoder().encode("format_version = 2"),
-        limits,
+        document: new TextEncoder().encode("format_version = 2"),
+        options: limits,
         simd128ModuleUrl: "simd.wasm",
         workletModuleUrl: "processor.js",
       });
@@ -773,9 +746,8 @@ async function testMainRealm() {
     // first gesture.
     const prepare = (sessionToml) => createMisoAudioWorkletHost({
       context,
-      quantumFrames: 64,
-      sessionToml: new TextEncoder().encode(sessionToml),
-      limits,
+      document: new TextEncoder().encode(sessionToml),
+      options: limits,
       simd128ModuleUrl: "simd.wasm",
       workletModuleUrl: "processor.js",
     });
@@ -846,20 +818,20 @@ async function testMainRealm() {
   }
 }
 
-function createFakeExports(quantum, backend = 0) {
+function createFakeExports(quantum, backend = 1) {
   const memory = { buffer: new ArrayBuffer(65536) };
   const statusPointer = 16384;
   const resourcePointer = 17000;
   const status = new DataView(memory.buffer, statusPointer, 80);
   status.setUint32(0, 80, true);
-  status.setUint32(4, 0x00010000, true);
+  status.setUint32(4, 0x00020000, true);
   status.setUint32(8, 2, true);
   status.setUint32(16, backend, true);
   status.setUint32(20, 48000, true);
   status.setUint32(24, quantum, true);
   const resources = new DataView(memory.buffer, resourcePointer, 224);
   resources.setUint32(0, 224, true);
-  resources.setUint32(4, 0x00010000, true);
+  resources.setUint32(4, 0x00020000, true);
   resources.setUint32(8, 48000, true);
   resources.setUint32(12, quantum, true);
   resources.setUint32(16, backend, true);
@@ -868,7 +840,7 @@ function createFakeExports(quantum, backend = 0) {
   for (let index = 0; index < 21; index += 1) resources.setBigUint64(32 + index * 8, 1n, true);
   const calls = {
     render: [], source: [], sourceIdBytes: [], seek: [], seekIdBytes: [], dispose: 0,
-    sourceResult: 0,
+    sourceResult: 0, bootResult: 0,
   };
   // Issue #137: command staging (kind 6), the meter frame (kind 7) and the command report.
   const commandPointer = 24000;
@@ -876,21 +848,18 @@ function createFakeExports(quantum, backend = 0) {
   const reportPointer = 41000;
   const meterHeaderPointer = 41100;
   const trackIds = ["kick", "snare"];
-  // Issue #207: the compiled session's sources, in canonical (stable-ID sorted) order. Every field
-  // differs between the two rows -- channel count, region start, region length -- so a worklet that
-  // read the wrong source's row, or read one query where it meant another, is visible here rather
-  // than masked by a uniform fixture. `startFrame` is deliberately nonzero on the second row: it is
-  // the field with no out-of-range sentinel and the one a driver would silently get wrong.
+  // Issue #241: the compiled session's sources, in canonical (stable-ID sorted) order. Channel and
+  // frame count differ between rows, so a worklet that reads the wrong row/query is visible here.
   const sourceRows = [
-    { id: "bass", channels: 1, sampleRateHz: 48000, startFrame: 0n, frames: 96000n },
-    { id: "drums", channels: 2, sampleRateHz: 48000, startFrame: 4096n, frames: 2048n },
+    { id: "bass", channels: 1, frames: 96000n },
+    { id: "drums", channels: 2, frames: 2048n },
   ];
   // Issue #143 D5: `3T + 3` -- the frozen `2T + 2` peak section, then one gain-reduction magnitude
   // per track and the master's.
   const meterFrameFloats = trackIds.length * 3 + 3;
   const meterHeader = new DataView(memory.buffer, meterHeaderPointer, 64);
   meterHeader.setUint32(0, 64, true);
-  meterHeader.setUint32(4, 0x00010000, true);
+  meterHeader.setUint32(4, 0x00020000, true);
   meterHeader.setUint32(8, trackIds.length, true);
   meterHeader.setUint32(40, 1, true);
   meterHeader.setUint32(44, 1, true);
@@ -898,12 +867,12 @@ function createFakeExports(quantum, backend = 0) {
   meterHeader.setBigUint64(24, 768n, true);
   const report = new DataView(memory.buffer, reportPointer, 48);
   report.setUint32(0, 48, true);
-  report.setUint32(4, 0x00010000, true);
+  report.setUint32(4, 0x00020000, true);
   const pointers = {
-    1: 2048, 2: 4096, 3: 5000, 5: 8192, 6: commandPointer, 7: meterFramePointer,
+    2: 4096, 3: 5000, 5: 8192, 6: commandPointer, 7: meterFramePointer,
   };
   const capacities = {
-    1: 4096, 2: 64, 3: 2 * quantum * 4, 5: 2 * quantum * 4, 6: 256 * 48,
+    2: 64, 3: 2 * quantum * 4, 5: 2 * quantum * 4, 6: 256 * 48,
     7: meterFrameFloats * 4,
   };
   calls.commands = [];
@@ -912,12 +881,21 @@ function createFakeExports(quantum, backend = 0) {
   calls.meterWindows = 0;
   const exports = {
     memory,
-    miso_engine_web_v1_abi_version: () => 0x00010000,
-    miso_engine_web_v1_config_bytes: () => 192,
-    miso_engine_web_v1_config_new: () => 1,
-    miso_engine_web_v1_config_ptr: () => 512,
-    miso_engine_web_v1_prepare: () => 0,
-    miso_engine_web_v1_compile: () => 0,
+    miso_engine_web_v1_abi_version: () => 0x00020000,
+    miso_engine_web_v1_boot_options_ptr: () => 512,
+    miso_engine_web_v1_document_ptr: () => 2048,
+    miso_engine_web_v1_boot: () => {
+      const options = new DataView(memory.buffer, 512, 64);
+      if (options.getUint32(8, true) !== status.getUint32(20, true)
+          || options.getUint32(12, true) !== status.getUint32(24, true)) {
+        calls.bootResult = 9;
+        return 0;
+      }
+      calls.bootResult = 0;
+      return 1;
+    },
+    miso_engine_web_v1_boot_result: () => calls.bootResult,
+    miso_engine_web_v1_boot_diagnostic_bytes: () => 0,
     miso_engine_web_v1_buffer_ptr: (_handle, kind) => pointers[kind] ?? 0,
     miso_engine_web_v1_buffer_capacity: (_handle, kind) => capacities[kind] ?? 0,
     miso_engine_web_v1_status_ptr: () => statusPointer,
@@ -984,9 +962,7 @@ function createFakeExports(quantum, backend = 0) {
       return id.length;
     },
     miso_engine_web_v1_source_channels: (_handle, index) => sourceRows[index]?.channels ?? 0,
-    miso_engine_web_v1_source_sample_rate: (_handle, index) => sourceRows[index]?.sampleRateHz ?? 0,
     miso_engine_web_v1_source_frames: (_handle, index) => sourceRows[index]?.frames ?? 0n,
-    miso_engine_web_v1_source_start_frame: (_handle, index) => sourceRows[index]?.startFrame ?? 0n,
     miso_engine_web_v1_dispose: () => {
       calls.dispose += 1;
       return 0;
@@ -1000,6 +976,7 @@ async function testProcessor() {
   const originalRegister = globalThis.registerProcessor;
   const originalInstance = WebAssembly.Instance;
   const originalSampleRate = globalThis.sampleRate;
+  const originalRenderQuantumSize = globalThis.renderQuantumSize;
   const originalTextEncoder = globalThis.TextEncoder;
   const processorSessionToml = new originalTextEncoder().encode("format_version = 2");
   const nonAsciiSourceId = "caf\u00e9-\u96ea-\ud83d\ude00";
@@ -1028,6 +1005,7 @@ async function testProcessor() {
   globalThis.AudioWorkletProcessor = FakeProcessor;
   globalThis.registerProcessor = (_name, implementation) => { registered = implementation; };
   globalThis.sampleRate = 48000;
+  globalThis.renderQuantumSize = 64;
   globalThis.TextEncoder = undefined;
   WebAssembly.Instance = class {
     constructor() {
@@ -1039,17 +1017,13 @@ async function testProcessor() {
   try {
     await import(`${workletUrl.href}?processor-test`);
     assert.equal(typeof registered, "function");
-    const construct = (fake, backend = "scalar") => {
+    const construct = (fake) => {
       nextFake = fake;
       return new registered({
         processorOptions: {
-          requestId: 0,
           module: {},
-          backend,
-          sampleRateHz: 48000,
-          quantumFrames: 64,
-          sessionToml: processorSessionToml,
-          limits,
+          document: processorSessionToml,
+          options: limits,
         },
       });
     };
@@ -1057,7 +1031,7 @@ async function testProcessor() {
       const fake = createFakeExports(64);
       const processor = construct(fake);
       assert.deepEqual(processor.port.posts[0].message, {
-        tag: "miso.ready.v1", requestId: 0, result: 0, backend: "scalar",
+        tag: "miso.ready.v1", requestId: 0, result: 0, backend: "simd128",
         resources: processor.resources, memoryBytes: 65536,
       });
       return { processor, fake };
@@ -1069,7 +1043,7 @@ async function testProcessor() {
       const fake = createFakeExports(64);
       const processor = construct(fake);
       globalThis.sampleRate = 48000;
-      assert.equal(instanceCount, before, "sample-rate mismatch precedes instantiation");
+      assert.equal(instanceCount, before + 1, "physical mismatch is answered by atomic boot");
       assert.equal(fake.calls.dispose, 0);
       assert.equal(processor.port.posts[0].message.result, 9);
       assert.equal(processor.process([], [[new Float32Array(64), new Float32Array(64)]]), false);
@@ -1080,8 +1054,8 @@ async function testProcessor() {
       globalThis.renderQuantumSize = 128;
       const fake = createFakeExports(64);
       const processor = construct(fake);
-      delete globalThis.renderQuantumSize;
-      assert.equal(instanceCount, before, "quantum mismatch precedes instantiation");
+      globalThis.renderQuantumSize = 64;
+      assert.equal(instanceCount, before + 1, "physical mismatch is answered by atomic boot");
       assert.equal(fake.calls.dispose, 0);
       assert.equal(processor.port.posts[0].message.result, 9);
     }
@@ -1096,12 +1070,27 @@ async function testProcessor() {
       assert.equal(processor.disposed, true);
     }
 
+    for (const [result, mutate] of [
+      [255, (fake) => { fake.exports.miso_engine_web_v1_boot_options_ptr = () => 0; }],
+      [5, (fake) => {
+        fake.calls.bootResult = 5;
+        fake.exports.miso_engine_web_v1_document_ptr = () => 0;
+      }],
+      [1, (fake) => {
+        fake.exports.miso_engine_web_v1_boot = () => 0;
+        fake.exports.miso_engine_web_v1_boot_result = () => 1;
+      }],
+    ]) {
+      const fake = createFakeExports(64);
+      mutate(fake);
+      const processor = construct(fake);
+      assert.equal(fake.calls.dispose, 0, "a refused boot publishes no handle to dispose");
+      assert.equal(processor.port.posts[0].message.result, result);
+      assert.equal(processor.disposed, true);
+    }
+
     const failureMutations = [
-      (fake) => { fake.exports.miso_engine_web_v1_config_ptr = () => 0; },
-      (fake) => { fake.exports.miso_engine_web_v1_config_ptr = () => 65500; },
-      (fake) => { fake.exports.miso_engine_web_v1_prepare = () => 5; },
       (fake) => { fake.exports.miso_engine_web_v1_buffer_capacity = () => 0; },
-      (fake) => { fake.exports.miso_engine_web_v1_compile = () => 5; },
       (fake) => { fake.exports.miso_engine_web_v1_status_ptr = () => 65500; },
       (fake) => { new DataView(fake.exports.memory.buffer, 17000).setUint32(20, 1, true); },
     ];
@@ -1117,8 +1106,8 @@ async function testProcessor() {
     }
 
     {
-      const fake = createFakeExports(64, 1);
-      const processor = construct(fake, "scalar");
+      const fake = createFakeExports(64, 0);
+      const processor = construct(fake);
       assert.equal(fake.calls.dispose, 1, "swapped backend artifact is transactionally disposed");
       assert.equal(processor.port.posts[0].message.result, 1);
       assert.equal(processor.process([], [[new Float32Array(64), new Float32Array(64)]]), false);
@@ -1126,8 +1115,8 @@ async function testProcessor() {
 
     for (const offset of [16384 + 16, 17000 + 16]) {
       const fake = createFakeExports(64);
-      new DataView(fake.exports.memory.buffer).setUint32(offset, 1, true);
-      const processor = construct(fake, "scalar");
+      new DataView(fake.exports.memory.buffer).setUint32(offset, 0, true);
+      const processor = construct(fake);
       assert.equal(fake.calls.dispose, 1, "each Rust backend row is independently authoritative");
       assert.equal(processor.port.posts[0].message.result, 1);
     }
@@ -1392,16 +1381,14 @@ async function testProcessor() {
     }
 
     {
-      // Issue #207: every source read is checked against something compilation already guarantees,
+      // Issue #241: every source read is checked against something compilation already guarantees,
       // so a mis-wired export fails initialization instead of reaching a consumer as a plausible
       // number. Each mutation below is a different export lying, and each must be caught.
       for (const [what, mutate] of [
         ["a zero channel count", (e) => { e.miso_engine_web_v1_source_channels = () => 0; }],
         ["a channel count past the configured maximum",
           (e) => { e.miso_engine_web_v1_source_channels = () => 3; }],
-        ["a rate that is not the session rate",
-          (e) => { e.miso_engine_web_v1_source_sample_rate = () => 44100; }],
-        ["a zero region length", (e) => { e.miso_engine_web_v1_source_frames = () => 0n; }],
+        ["a zero frame count", (e) => { e.miso_engine_web_v1_source_frames = () => 0n; }],
         ["an empty source ID", (e) => { e.miso_engine_web_v1_source_id = () => 0; }],
         ["a source ID longer than staging",
           (e) => { e.miso_engine_web_v1_source_id = () => 65; }],
@@ -1420,6 +1407,8 @@ async function testProcessor() {
     globalThis.AudioWorkletProcessor = originalProcessor;
     globalThis.registerProcessor = originalRegister;
     globalThis.sampleRate = originalSampleRate;
+    if (originalRenderQuantumSize === undefined) delete globalThis.renderQuantumSize;
+    else globalThis.renderQuantumSize = originalRenderQuantumSize;
     globalThis.TextEncoder = originalTextEncoder;
     WebAssembly.Instance = originalInstance;
   }

@@ -85,7 +85,8 @@ fn pinned_hex(value: &str) -> Vec<u8> {
 
 const ALL_COMMAND_RESPONSE_VECTORS: [&str; 11] = [
     "4d49534f43544c00010000003000020001000000c801000001000000000000002a000000000000001b000000000000000100020102000000010000000000000002000201020000000000000000000000030002010200000001000000000000000400020102000000000000000000000005000401080000000010000000000000060003010400000000080000000000000700040108000000001000000000000008000101010000000400000000000000090002010200000000010000000000000a0004010800000001000000000000000b0004010800000000100000000000000c0004010800000001000000000000000d0004010800000001000000000000000e0004010800000002000000000000000f00040108000000010000000000000010000401080000001000000000000000110004010800000000200000000000001200040108000000001000000000000013000401080000008000000000000000140004010800000080000000000000001500020102000000000100000000000016000201020000000001000000000000170002010200000000010000000000001800030104000000000800000000000019000c01160000000100020003000400050006000700080009000a000b0000001a000c010c000000018002801080208021803080000000001b00040108000000ff3f000000000000",
-    "4d49534f43544c000100000030000200020000004000000002000000000000002a000000000000000400000000000000010004010800000091260000000000000200040108000000000000000000000003000a0101000000730000000000000004000801010000000000000000000000",
+    // #241 re-pin: canonical session snapshot bytes are 9,873 - 171 = 9,702 (0x25e6).
+    "4d49534f43544c000100000030000200020000004000000002000000000000002a0000000000000004000000000000000100040108000000e6250000000000000200040108000000000000000000000003000a0101000000730000000000000004000801010000000000000000000000",
     "4d49534f43544c000100000030000200040000002000000003000000000000002a0000000000000002000000000000000100030104000000000000000000000002000801010000000100000000000000",
     "4d49534f43544c00010000003000020005000d004800000004000000000000002a00000000000000020000000000000001000b01300000000200000000000000010009011000000070726f746f636f6c2e6661696c7572650200010101000000030000000000000002000301040000000000000000000000",
     "4d49534f43544c00010000003000020006000d004800000005000000000000002a00000000000000020000000000000001000b01300000000200000000000000010009011000000070726f746f636f6c2e6661696c7572650200010101000000030000000000000002000301040000000000000000000000",
@@ -100,8 +101,7 @@ const ALL_COMMAND_RESPONSE_VECTORS: [&str; 11] = [
 fn generated_parity_session(track_count: usize, sample_rate_hz: u32) -> String {
     let mut model = parse_session_toml(SESSION).expect("accepted parity base");
     model.sample_rate_hz = sample_rate_hz;
-    model.sources[0].sample_rate_hz = sample_rate_hz;
-    model.sources[0].mapping.region.length_samples = 192;
+    model.sources[0].frames = 192;
     if track_count == 1 {
         model.tracks.truncate(1);
         model.routes.truncate(1);
@@ -440,6 +440,30 @@ fn generated_session_prepares_independent_source_and_plan_ownership() {
 }
 
 #[test]
+fn ring_zero_derives_from_the_document_and_matches_the_explicit_value() {
+    let model = parse_session_toml(SESSION).expect("session");
+    let derived = miso_engine_host_core::default_source_ring_frames(
+        model.sample_rate_hz,
+        model.quantum_frames,
+    );
+    assert_eq!(derived, 5_120);
+
+    let mut zero = limits();
+    zero.source_ring_frames = 0;
+    let zero = compile_children(SESSION, zero).expect("zero derives");
+
+    let mut explicit = limits();
+    explicit.source_ring_frames = derived;
+    let explicit = compile_children(SESSION, explicit).expect("explicit derived value");
+
+    assert_eq!(zero.plan.resources(), explicit.plan.resources());
+    assert_eq!(
+        zero.session.providers.sources.retained_bytes(),
+        explicit.session.providers.sources.retained_bytes()
+    );
+}
+
+#[test]
 fn structural_command_keeps_protocol_plan_provider_and_event_epochs_atomic() {
     let mut children = compile_children(SESSION, limits()).expect("children");
     let left = [0.25_f32; 128];
@@ -543,11 +567,13 @@ fn structural_command_keeps_protocol_plan_provider_and_event_epochs_atomic() {
     );
 
     let model = parse_session_toml(SESSION).expect("source-changing model");
-    let mut mapping = model.sources[0].mapping.clone();
-    mapping.region.length_samples = 512;
-    let second_edit = miso_engine_protocol::SessionEdit::SetSourceMapping {
+    let source = &model.sources[0];
+    let second_edit = miso_engine_protocol::SessionEdit::SetSourceContent {
         source_id: model.sources[0].id.clone(),
-        mapping,
+        content: source.content.clone(),
+        channels: source.channels,
+        bit_depth: source.bit_depth,
+        frames: 512,
     };
     let second_request = command_bytes_at_revision(
         2,
@@ -1528,7 +1554,7 @@ fn direct_and_c_render_match_one_and_ten_tracks_across_launch_rates() {
 fn barrier_schedule_separates_one_source_producer_from_exclusive_render() {
     let mut model =
         parse_session_toml(&generated_parity_session(1, 48_000)).expect("concurrency session");
-    model.sources[0].mapping.region.length_samples = 1_024;
+    model.sources[0].frames = 1_024;
     let session = miso_engine_session::canonical_session_toml(&model).expect("canonical");
     let children = compile_children(&session, limits()).expect("concurrent children");
     let session = Box::into_raw(Box::new(crate::Session::new(

@@ -144,30 +144,28 @@ worklet_js="$artifact_dir/miso-engine-v2-audio-worklet.js"
 expected_exports=$(printf '%s\n' \
   memory \
   miso_engine_web_v1_abi_version \
+  miso_engine_web_v1_boot \
+  miso_engine_web_v1_boot_diagnostic_bytes \
+  miso_engine_web_v1_boot_options_ptr \
+  miso_engine_web_v1_boot_result \
   miso_engine_web_v1_buffer_capacity \
   miso_engine_web_v1_buffer_ptr \
   miso_engine_web_v1_command_report_ptr \
   miso_engine_web_v1_command_submit \
-  miso_engine_web_v1_compile \
-  miso_engine_web_v1_config_bytes \
-  miso_engine_web_v1_config_new \
-  miso_engine_web_v1_config_ptr \
   miso_engine_web_v1_console_track_count \
   miso_engine_web_v1_console_track_id \
+  miso_engine_web_v1_document_ptr \
   miso_engine_web_v1_dispose \
   miso_engine_web_v1_meter_header_ptr \
   miso_engine_web_v1_meter_lease \
   miso_engine_web_v1_meter_poll \
-  miso_engine_web_v1_prepare \
   miso_engine_web_v1_render \
   miso_engine_web_v1_resource_ptr \
   miso_engine_web_v1_source_channels \
   miso_engine_web_v1_source_count \
   miso_engine_web_v1_source_frames \
   miso_engine_web_v1_source_id \
-  miso_engine_web_v1_source_sample_rate \
   miso_engine_web_v1_source_seek \
-  miso_engine_web_v1_source_start_frame \
   miso_engine_web_v1_source_submit \
   miso_engine_web_v1_status_ptr | sort)
 
@@ -385,5 +383,10 @@ python3 -B "$(dirname "${BASH_SOURCE[0]}")/check-command-kind-vocabulary.py" \
 # stale artifact fails here as it does for the two vocabulary gates.
 python3 -B "$(dirname "${BASH_SOURCE[0]}")/check-session-map-shape.py" \
   --artifacts "$artifact_dir" || exit 1
+
+# Issue #240 A9 ruling 5458432482: the 80x parse-transient pin is re-measured against the exact
+# 1 MiB, 512-track x 4-effect accepted shape on the shipped wasm artifact. The refusal leg proves
+# a one-byte-under budget dies before parsing without unbounded memory growth.
+node "$(dirname "${BASH_SOURCE[0]}")/check-web-boot-budget.mjs" "$simd" || exit 1
 
 echo "web AudioWorklet static/object checks passed"

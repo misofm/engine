@@ -12,7 +12,7 @@ use miso_engine_builtins_compiler::{
     BuiltinCompileCaps, MeterConsumer, MeterRequest, TrackControlProducer, TrackControlRequest,
     prepare_session_builtins_with_console, session_structural_symmetry,
 };
-use miso_engine_core::{SampleRateHz, realtime::PreparedRenderPlan};
+use miso_engine_core::realtime::PreparedRenderPlan;
 use miso_engine_effect_compiler::{
     EffectCompileCaps, EffectControlProducer, EffectObservationHandle, attach_effect_console,
     attach_effect_observation, launch_native_effect_registry, prepare_native_session_effects,
@@ -36,6 +36,29 @@ use crate::source::{ControlSourceBuilder, SourceControlSet};
 
 /// The launch sample-rate set (issue 032). A host that does not pin one rate accepts these four.
 pub const LAUNCH_SAMPLE_RATES_HZ: [u32; 4] = [44_100, 48_000, 88_200, 96_000];
+
+/// The longest producer-thread stall the default source ring hides without an underrun.
+pub const SOURCE_STALL_TOLERANCE_MS: u32 = 100;
+
+/// Derive the default per-source ring capacity from the document's rate and quantum.
+///
+/// The ring covers `ceil(100 ms * fs / quantum)` quanta plus one quantum held by the consumer and
+/// one in the recycle path. The result is therefore always a whole number of quanta. A zero
+/// quantum returns zero; callers validate the document before using the answer.
+#[must_use]
+pub const fn default_source_ring_frames(sample_rate_hz: u32, quantum_frames: u32) -> u32 {
+    if quantum_frames == 0 {
+        return 0;
+    }
+    let stall_frames = (sample_rate_hz as u64 * SOURCE_STALL_TOLERANCE_MS as u64) / 1_000;
+    let quanta = stall_frames.div_ceil(quantum_frames as u64) + 2;
+    let frames = quanta * quantum_frames as u64;
+    if frames > u32::MAX as u64 {
+        0
+    } else {
+        frames as u32
+    }
+}
 
 /// How strictly a host constrains the session's external render shape.
 ///
@@ -134,6 +157,12 @@ impl HostPrepareCaps {
     ///
     /// `source_count` is the parsed model's source count: the aggregate source-ring frame cap is
     /// per-session, not per-source.
+    ///
+    /// Since #241 only `max_compiled_model_bytes` and `max_single_allocation_bytes` can actually
+    /// refuse here: the session estimate reports zero for the runtime/queue/ring terms, so the
+    /// other four rows are inert (see `CompileCaps`). The host's real ring and source budgets are
+    /// enforced below against the resources the chosen ring actually retains, which is the #240
+    /// S3.7 ordering -- check the budget after the choice, not against a document word.
     pub fn compile_caps(&self, source_count: usize) -> Result<CompileCaps, PrepareDiagnostics> {
         let source_count = u64::try_from(source_count).map_err(|_| platform("host.count"))?;
         let aggregate_ring_frames = source_count
@@ -376,7 +405,19 @@ pub fn compile_host_session(
 ) -> Result<CompiledSession, PrepareDiagnostics> {
     let model = parse_host_session(toml)?;
     let compile_caps = caps.compile_caps(model.sources.len())?;
-    compile_session(&model, compile_caps).map_err(|value| {
+    compile_host_model(&model, compile_caps)
+}
+
+/// Compile an already parsed session model under explicit compiler caps.
+///
+/// Boot v2 parses once, derives the physical host shape from that model, and then compiles the
+/// same model. Keeping the diagnostic mapping here prevents that path from growing a second
+/// session-compiler adapter.
+pub fn compile_host_model(
+    model: &SessionToml,
+    caps: CompileCaps,
+) -> Result<CompiledSession, PrepareDiagnostics> {
+    compile_session(model, caps).map_err(|value| {
         PrepareDiagnostics::new(
             PrepareRejection::Session,
             diagnostic_lines(
@@ -465,38 +506,29 @@ pub fn prepare_host_runtime_with_console(
     let mut builder = ControlSourceBuilder::with_capacity(source_id_bytes, compiled.source_count())
         .map_err(|()| resource("host.resource.allocation"))?;
     for source in &model.sources {
-        if source.sample_rate_hz != compiled.sample_rate().0 {
-            return Err(shape("host.source.rate.mismatch"));
-        }
         if caps
             .maximum_source_channels
-            .is_some_and(|maximum| u32::from(source.mapping.channel_count) > maximum)
+            .is_some_and(|maximum| u32::from(source.channels) > maximum)
         {
             return Err(shape("host.source.channels"));
         }
-        let region_end = source
-            .mapping
-            .region
-            .start_sample
-            .checked_add(source.mapping.region.length_samples)
-            .ok_or_else(|| resource("host.source.region.overflow"))?;
         let (producer, consumer, resources) = PcmSourceRing::prepare_host_region(
             PcmSourceRingConfig {
-                channel_count: u32::from(source.mapping.channel_count),
+                channel_count: u32::from(source.channels),
                 quantum_frames: compiled.quantum(),
                 frame_capacity: u64::from(caps.source_ring_frames),
                 initial_generation: SourceGeneration(1),
             },
-            SourceFrame(source.mapping.region.start_sample),
+            SourceFrame(0),
         )
         .map_err(|_| resource("host.source.prepare"))?;
         builder.push(
             source.id.as_str(),
-            source.sample_rate_hz,
-            u32::from(source.mapping.channel_count),
-            source.mapping.region.start_sample,
-            region_end,
-            producer.into_host_chunk_provider(SampleRateHz(source.sample_rate_hz)),
+            compiled.sample_rate().0,
+            u32::from(source.channels),
+            0,
+            source.frames,
+            producer.into_host_chunk_provider(compiled.sample_rate()),
         );
         graph_sources.push(SourceGraphSource::new(consumer, resources, 0, 0));
     }

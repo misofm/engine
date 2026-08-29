@@ -12,7 +12,7 @@ use miso_engine_effect_compiler::launch_native_effect_registry;
 use miso_engine_host_web::{
     AudioWorkletEngineHost, COMMAND_EFFECT_BYPASS, COMMAND_EFFECT_PARAM, COMMAND_MATRIX,
     COMMAND_REASON_NONE, COMMAND_REASON_UNSUPPORTED_KIND, COMMAND_RECORD_BYTES, RESULT_OK,
-    RESULT_UNSUPPORTED, WebPrepareConfig,
+    RESULT_UNSUPPORTED, WebBootOptions,
 };
 
 /// A one-track session whose dynamic rack holds every launch effect at its declared defaults.
@@ -37,9 +37,8 @@ sample_rate_hz = 48000
 quantum_frames = 128
 render_profile = {{ id = "native", mode = "single_thread" }}
 output_profile = {{ id = "main", channels = 2, sample_format = "f32_planar" }}
-limits = {{ pcm_ring_frames = 128, control_queue_messages = 8, memory_bytes = 16777216 }}
 sources = [
-  {{ id = "s", sample_rate_hz = 48000, content = {{ identity = "sha256:metadata-round-trip", locator = "host:metadata-round-trip" }}, mapping = {{ channel_count = 2, region = {{ start_sample = 0, length_samples = 256 }} }} }},
+  {{ id = "s", content = "sha256:0000000000000000000000000000000000000000000000000000000000000000", channels = 2, bit_depth = "32f", frames = 256 }},
 ]
 submixes = []
 outputs = [{{ id = "out" }}]
@@ -106,18 +105,14 @@ fn every_metadata_id_resolves_through_a_command_acknowledgement() {
     }
 
     let toml = session_with_every_effect(&ids);
-    let mut config = WebPrepareConfig::console_defaults(48_000, 128);
-    config.source_ring_frames = 128;
-    config.console_meter_blocks = 0;
-    let mut host = AudioWorkletEngineHost::new(config);
-    assert_eq!(host.prepare(), RESULT_OK);
-    host.session_toml_mut().expect("TOML")[..toml.len()].copy_from_slice(toml.as_bytes());
-    assert_eq!(
-        host.compile(toml.len()),
-        RESULT_OK,
-        "{:?}",
-        core::str::from_utf8(host.diagnostic())
-    );
+    let options = WebBootOptions {
+        require_sample_rate_hz: 48_000,
+        require_quantum_frames: 128,
+        source_ring_frames: 128,
+        console_command_queue_records: 64,
+        ..WebBootOptions::explicit_defaults()
+    };
+    let mut host = AudioWorkletEngineHost::boot(toml.as_bytes(), options).expect("boot");
 
     // Issue #140 A: every declared effect parameter resolves *and applies*, except the ones whose
     // own descriptor says they cannot be automated -- which are exactly the ones the metadata
@@ -253,19 +248,16 @@ fn every_metadata_observation_tap_resolves_through_a_command_acknowledgement() {
     );
 
     let toml = session_with_every_effect(&ids);
-    let mut config = WebPrepareConfig::console_defaults(48_000, 128);
-    config.source_ring_frames = 128;
-    config.console_meter_blocks = 4;
-    config.console_observation_taps = 4;
-    let mut host = AudioWorkletEngineHost::new(config);
-    assert_eq!(host.prepare(), RESULT_OK);
-    host.session_toml_mut().expect("TOML")[..toml.len()].copy_from_slice(toml.as_bytes());
-    assert_eq!(
-        host.compile(toml.len()),
-        RESULT_OK,
-        "{:?}",
-        core::str::from_utf8(host.diagnostic())
-    );
+    let options = WebBootOptions {
+        require_sample_rate_hz: 48_000,
+        require_quantum_frames: 128,
+        source_ring_frames: 128,
+        console_command_queue_records: 64,
+        console_meter_blocks: 4,
+        console_observation_taps: 4,
+        ..WebBootOptions::explicit_defaults()
+    };
+    let mut host = AudioWorkletEngineHost::boot(toml.as_bytes(), options).expect("boot");
 
     for (effect_index, descriptor) in registry.descriptors().enumerate() {
         let index = u32::try_from(effect_index).expect("effect index");

@@ -58,7 +58,6 @@ fn compile_caps() -> CompileCaps {
 /// The fixture with the one track's two lanes delayed by `left` and `right` samples.
 fn model_with_delay(left: u32, right: u32) -> SessionToml {
     let mut model = parse_session_toml(SESSION).expect("fixture parses");
-    model.limits.memory_bytes = i64::MAX as u64;
     // One delayed track among nine. The other eight are the control: whatever PDC does to them
     // must be what it does to them when track zero is undelayed.
     model.tracks[0].builtins.left.delay_samples = left;
@@ -217,21 +216,35 @@ fn a_zero_delay_session_lowers_no_delay_node() {
 fn the_zero_delay_plan_digest_is_the_pre_feature_digest() {
     assert_eq!(
         compiled(0, 0).sha256,
-        PRE_FEATURE_CANONICAL_SHA256,
-        "a zero-delay session must compile to the plan it compiled to before #210 phase 2"
+        ZERO_DELAY_CANONICAL_SHA256,
+        "a zero-delay session must compile to the ruled canonical plan"
     );
 }
 
-/// Measured on `origin/main` (17682b4), whose `canonical.toml` has no `delay_samples` key at all.
-const PRE_FEATURE_CANONICAL_SHA256: &str =
-    "60a22fd833ca1a2ffcb1329e7ba228e51a0b91246c4dd93fb805e7c47221ab96";
+/// Originally measured on `origin/main` (17682b4), whose `canonical.toml` has no `delay_samples`
+/// key at all. Re-pinned by issue #241.
+///
+/// The reason recorded when it was re-pinned -- that source content identity had entered the
+/// compiled graph's semantic text -- is wrong, and is corrected here rather than left to mislead
+/// the next reader: `node_text`/`edge_text` carry no source identity and `write_canonical` emits
+/// no source row at all. Dumping the canonical text either side of the change shows it is
+/// **34,051 bytes in both arms with exactly one of 685 lines different**, in one of the twenty
+/// fields of the trailing `estimate` row: `session_plus_plan_bytes` 159,967 -> 147,679, now equal
+/// to `incremental_plan_bytes`. The mover is the deleted `limits` table, whose words the estimate
+/// used to project runtime storage from -- `control_queue_messages * 64 + pcm_ring_frames *
+/// channels * 4` = `64 * 64 + 1024 * 2 * 4` = 12,288, now zero. Every structural term is
+/// identical, including the 0 total delay samples and 0 delay bytes this row exists to hold.
+///
+/// Full derivation: `docs/derivations/241-schema-repins.md`.
+const ZERO_DELAY_CANONICAL_SHA256: &str =
+    "213617ba7e5774e831785e725f8cb70bdd0f043cba9ae071e139888935acf4b0";
 
 /// ...and a delayed one is a genuinely different plan, so the digest above is not inert.
 #[test]
 fn a_delayed_session_is_a_different_plan() {
     assert_ne!(
         compiled(480, 480).sha256,
-        PRE_FEATURE_CANONICAL_SHA256,
+        ZERO_DELAY_CANONICAL_SHA256,
         "a delay that changes the estimate must change the plan digest"
     );
 }

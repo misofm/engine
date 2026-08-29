@@ -5,9 +5,8 @@ sample_rate_hz = 48000
 quantum_frames = 128
 render_profile = { id = "native", mode = "single_thread" }
 output_profile = { id = "main", channels = 2, sample_format = "f32_planar" }
-limits = { pcm_ring_frames = 128, control_queue_messages = 8, memory_bytes = 16777216 }
 sources = [
-  { id = "fixture-source", sample_rate_hz = 48000, content = { identity = "sha256:web-browser-one-track", locator = "host:web-browser-one-track" }, mapping = { channel_count = 2, region = { start_sample = 0, length_samples = 256 } } },
+  { id = "fixture-source", content = "sha256:923b494c3d6848e23652bdf070873f59f5731e80206f2d80c15bc47f759fcfdf", channels = 2, bit_depth = "32f", frames = 256 },
 ]
 submixes = []
 outputs = [{ id = "main-out" }]

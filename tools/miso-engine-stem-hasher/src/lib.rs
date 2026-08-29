@@ -19,13 +19,15 @@ const STREAM_BYTES: usize = 48 * 1024;
 const WAVE_MAXIMUM_CHUNKS: u32 = 4_096;
 const WAVE_MAXIMUM_SKIPPED_METADATA_BYTES: u64 = 16 * 1024 * 1024;
 
-/// Launch canonical-PCM sample depths.
+/// Canonical-PCM sample-depth tokens.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CanonicalBitDepth {
     /// Signed 16-bit integer PCM.
     Pcm16,
     /// Signed packed 24-bit integer PCM.
     Pcm24,
+    /// Raw IEEE-754 little-endian 32-bit float bits.
+    Float32,
 }
 
 impl CanonicalBitDepth {
@@ -35,6 +37,28 @@ impl CanonicalBitDepth {
         match self {
             Self::Pcm16 => 16,
             Self::Pcm24 => 24,
+            Self::Float32 => 32,
+        }
+    }
+
+    /// Exact declaration/CLI token.
+    #[must_use]
+    pub const fn token(self) -> &'static str {
+        match self {
+            Self::Pcm16 => "16",
+            Self::Pcm24 => "24",
+            Self::Float32 => "32f",
+        }
+    }
+
+    /// Parse one exact declaration/CLI token.
+    #[must_use]
+    pub fn from_token(token: &str) -> Option<Self> {
+        match token {
+            "16" => Some(Self::Pcm16),
+            "24" => Some(Self::Pcm24),
+            "32f" => Some(Self::Float32),
+            _ => None,
         }
     }
 
@@ -62,7 +86,7 @@ impl TryFrom<u16> for CanonicalBitDepth {
 pub struct CanonicalPcmShape {
     /// Interleaved channel count.
     pub channels: u16,
-    /// Signed integer sample depth.
+    /// Exact canonical sample-depth token.
     pub bit_depth: CanonicalBitDepth,
     /// Exact interleaved frame count.
     pub frames: u64,
@@ -144,7 +168,7 @@ impl std::fmt::Display for StemHasherError {
 
 impl std::error::Error for StemHasherError {}
 
-/// Canonicalize and hash signed little-endian raw PCM of the declared shape.
+/// Canonicalize and hash little-endian raw samples of the declared shape.
 ///
 /// The input must contain exactly the declared number of bytes. `canonical_output` receives the
 /// same samples in the normative serialization while SHA-256 is computed incrementally.
@@ -156,10 +180,10 @@ pub fn canonicalize_raw_pcm<R: Read, W: Write>(
     canonicalize_stream(input, shape, canonical_output, true)
 }
 
-/// Canonicalize and hash one signed-integer RIFF/WAVE or RF64/WAVE input.
+/// Canonicalize and hash one RIFF/WAVE or RF64/WAVE input.
 ///
 /// Container metadata is parsed through the engine's native source parser and excluded from the
-/// preimage. Launch depths are exactly signed PCM16 and packed signed PCM24.
+/// preimage. Accepted depths are signed PCM16, packed signed PCM24, and raw-bit IEEE float32.
 pub fn canonicalize_wave<R: Read + Seek, W: Write>(
     input: &mut R,
     canonical_output: &mut W,
@@ -175,9 +199,9 @@ pub fn canonicalize_wave<R: Read + Seek, W: Write>(
     let bit_depth = match metadata.encoding {
         NativeWaveEncoding::SignedPcm16 => CanonicalBitDepth::Pcm16,
         NativeWaveEncoding::SignedPcm24 => CanonicalBitDepth::Pcm24,
+        NativeWaveEncoding::Float32 => CanonicalBitDepth::Float32,
         NativeWaveEncoding::UnsignedPcm8
         | NativeWaveEncoding::SignedPcm32
-        | NativeWaveEncoding::Float32
         | NativeWaveEncoding::Float64 => {
             return Err(StemHasherError::new("wave.bit_depth.unsupported"));
         }
@@ -252,6 +276,10 @@ fn serialize_sample(bit_depth: CanonicalBitDepth, source: &[u8], output: &mut Ve
             let sign = if source[2] & 0x80 == 0 { 0x00 } else { 0xff };
             let value = i32::from_le_bytes([source[0], source[1], source[2], sign]);
             output.extend_from_slice(&value.to_le_bytes()[..3]);
+        }
+        CanonicalBitDepth::Float32 => {
+            let bits = u32::from_le_bytes(source.try_into().expect("f32 sample width"));
+            output.extend_from_slice(&bits.to_le_bytes());
         }
     }
 }
@@ -351,7 +379,9 @@ pub fn parse_cli(
                 });
             }
             Some("--channels") if channels.is_none() => channels = Some(parse_u16(&value)?),
-            Some("--bit-depth") if bit_depth.is_none() => bit_depth = Some(parse_u16(&value)?),
+            Some("--bit-depth") if bit_depth.is_none() => {
+                bit_depth = Some(parse_bit_depth(&value)?)
+            }
             Some("--frames") if frames.is_none() => frames = Some(parse_u64(&value)?),
             Some("--input" | "--output" | "--channels" | "--bit-depth" | "--frames") => {
                 return Err(StemHasherError::new("cli.option.duplicate"));
@@ -368,9 +398,7 @@ pub fn parse_cli(
         }
         CliInput::Raw(_) => CliInput::Raw(CanonicalPcmShape::new(
             channels.ok_or_else(|| StemHasherError::new("cli.channels.missing"))?,
-            CanonicalBitDepth::try_from(
-                bit_depth.ok_or_else(|| StemHasherError::new("cli.bit_depth.missing"))?,
-            )?,
+            bit_depth.ok_or_else(|| StemHasherError::new("cli.bit_depth.missing"))?,
             frames.ok_or_else(|| StemHasherError::new("cli.frames.missing"))?,
         )?),
     };
@@ -387,6 +415,16 @@ fn parse_u16(value: &OsStr) -> Result<u16, StemHasherError> {
         .ok_or_else(|| StemHasherError::new("cli.scalar.utf8"))?
         .parse()
         .map_err(|_| StemHasherError::new("cli.scalar.invalid"))
+}
+
+fn parse_bit_depth(value: &OsStr) -> Result<CanonicalBitDepth, StemHasherError> {
+    value
+        .to_str()
+        .ok_or_else(|| StemHasherError::new("cli.scalar.utf8"))
+        .and_then(|value| {
+            CanonicalBitDepth::from_token(value)
+                .ok_or_else(|| StemHasherError::new("shape.bit_depth.unsupported"))
+        })
 }
 
 fn parse_u64(value: &OsStr) -> Result<u64, StemHasherError> {
@@ -540,7 +578,7 @@ mod tests {
     }
 
     #[test]
-    fn wave_depth_set_is_exactly_signed_pcm16_or_pcm24() {
+    fn wave_depth_set_rejects_integer_pcm32_but_accepts_float32() {
         let format = [
             1, 0, // integer PCM
             1, 0, // one channel
@@ -565,5 +603,25 @@ mod tests {
                 .code(),
             "wave.bit_depth.unsupported"
         );
+
+        let mut float_wave = Vec::new();
+        float_wave.extend_from_slice(b"RIFF");
+        float_wave.extend_from_slice(&40_u32.to_le_bytes());
+        float_wave.extend_from_slice(b"WAVEfmt ");
+        float_wave.extend_from_slice(&16_u32.to_le_bytes());
+        float_wave.extend_from_slice(&[
+            3, 0, // IEEE float
+            1, 0, // one channel
+            0x80, 0xbb, 0, 0, // 48 kHz
+            0, 0xee, 2, 0, // 192,000 bytes/s
+            4, 0, // four-byte frame
+            32, 0, // 32-bit float
+        ]);
+        float_wave.extend_from_slice(b"data");
+        float_wave.extend_from_slice(&4_u32.to_le_bytes());
+        float_wave.extend_from_slice(&0x8000_0000_u32.to_le_bytes());
+        let report = canonicalize_wave(&mut io::Cursor::new(float_wave), &mut io::sink())
+            .expect("float32 is a canonical identity depth");
+        assert_eq!(report.shape.bit_depth, CanonicalBitDepth::Float32);
     }
 }
