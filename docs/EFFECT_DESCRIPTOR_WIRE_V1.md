@@ -22,11 +22,20 @@ are now the persisted-value lattice authority:
 | 76 bits 30..31 | 2 | step unit minus one: absolute, cents, ratio, index |
 
 The multipliers are positive and strictly ascending; `xs..lg <= 31`, `xl <= 63`, precision is
-`0..=8`, and the step/unit must match the parameter domain and mapping. A current encoder always
-writes both words. Both words zero are accepted only as the historical pre-#242 spelling and
-decode to the deterministic #127 default declaration; exactly one zero word rejects. This retains
-the checked V1 fixture bytes and their identities. A stale verifier rejects an explicit lattice at
-offset 72 under its old reserved-zero rule, so it cannot silently ignore the new authority.
+`0..=8`, and the step/unit must match the parameter domain and mapping.
+
+**One lattice has exactly one spelling.** Both words zero decode to the row's derived unit-class
+lattice, `default_parameter_lattice(unit, domain, mapping)`. A row whose declaration IS that
+derived lattice therefore encodes zeros, and a row that overrides its class encodes the words
+explicitly; there is no third case. A verifier **refuses** a non-zero window whose unpacked
+lattice equals the derived default -- that would be a second byte sequence for one meaning, and
+in a format whose bytes are its identity that is an aliasing bug. The refusal is typed
+`Reserved` at offset 72 of the offending record. Exactly one zero word rejects as `Flags`, also
+at offset 72.
+
+Because the derived case is spelled as zeros, every descriptor sealed before #242 keeps its exact
+bytes and its exact identity. A stale verifier rejects an explicit lattice at offset 72 under its
+old reserved-zero rule, so it cannot silently ignore the new authority.
 
 The public C projection names these words `step_bits` and `step_spec` at the same offsets. The
 `MISO_ENGINE_EFFECT_PARAMETER_STEP_*_MASK_V1` constants pin the packed derivation.
