@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# scripts/sweep.sh -- the hermetic check/test sweep. 94 explicit rows.
+# scripts/sweep.sh -- the hermetic check/test sweep. 95 explicit rows.
 #
 # Why this exists: the repo has 96 check-*/test-* scripts and ci.yml names 37 of them, so most
 # gates had no committed runner at all -- they were reachable only by knowing they existed. Every
