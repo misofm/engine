@@ -174,3 +174,87 @@ The difference `105 − 100 = 5` is unchanged in kind from §2: five scripts car
 `check-flac-decoder.mjs`, `check-web-boot-budget.mjs`, `test-web-audioworklet.mjs`),
 `check-sdk-types.sh` is a sixth that is deliberately unswept because `tsc` needs the network to
 install, and one rowed script contributes two rows: `5 + 1 − 1 = 5`.
+
+## 8. The writer contract's numbers: 17 flushes, and 32 both-lane records
+
+Adopted ruling 5462139867 finding 5 states the writer repro as "queue 64, 4 lane-records/flush"
+surfacing "typed reason-8", and separately as "a single >32 both-lane-param batch from idle". Both
+numbers are re-derived here from the engine's own constants, and both are then *measured* against a
+live paused session rather than asserted at it.
+
+**The 17th flush.** `DEFAULT_COMMAND_QUEUE_RECORDS = 64`
+(`hosts/miso-engine-host-web/src/lib.rs:134`) is the per-track control-queue depth, and it is
+published as `constants.defaultCommandQueueRecords` in the generated layout. A paused transport
+drains nothing — the matrix stage drains its queue at the top of every *rendered* block, so with no
+render there is no drain. Four single-lane records per flush therefore accumulate:
+
+```
+64 / 4 = 16 flushes fit
+16 + 1 = 17 is the first flush with nowhere to go
+```
+
+Measured: 16 flushes admitted, the 17th refused with `COMMAND_REASON_BACKPRESSURE`
+(`lib.rs:241`), which is value **8** — the ruling's "reason-8". The test asserts the measurement
+*and* `16 × 4 = 64` alongside it, so the engine and the arithmetic must agree; a lowering rule that
+changed would break their agreement rather than silently re-pinning the count.
+
+**32 both-lane records.** A wire record addressed `channel = both` lowers to **two** lane records,
+which is the fact `2 × MAXIMUM_COMMAND_RECORDS` encodes at
+`hosts/miso-engine-host-web/src/tests.rs:3966`. Hence:
+
+```
+64 / 2 = 32 both-lane records fill one destination queue
+32 + 1 = 33 is the first that does not
+```
+
+Measured directly against the engine with raw records aimed at a single effect instance: 32
+admitted, 33 refused with `backpressure`. The test pins `32 × 2 = 64` beside the measurement.
+
+**Why the split contract is proved on a 16-record queue instead.** The bound is per DESTINATION
+QUEUE — one per addressed effect instance — and the largest launch effect, `miso.parametric-eq`,
+publishes 16 live per-lane rows. So thirty-two *distinct* both-lane addresses aimed at one instance
+do not exist:
+
+```
+16 rows × 1 instance = 16 addresses, costing 16 × 2 = 32 lane slots  -> fits in 64
+16 rows × 4 instances = 64 addresses, spread over 4 queues, 16 slots each -> fits again
+```
+
+The writer coalesces by address, so repeating an address cannot manufacture a larger gesture
+either. The number is not the contract; being oversized is. `commandQueueRecords` is a boot option
+the caller chooses, so the split contract is proved at queue 16, where one instance's sixteen
+both-lane rows cost `16 × 2 = 32` lane slots — exactly twice the queue — and the refuse/split/land
+sequence has something real to do. Recorded as a finding on the ruling's wording, not on its intent.
+
+## 9. The lattice: 49 of 66 → 66 of 66
+
+`sdk/src/core/lattice.ts` is a second implementation of `parameter_lattice_points`, and
+`tools/miso-engine-parameter-metadata --bin lattice_oracle` is what holds it to the first. The
+count that matters is how many of the shipped catalog's parameter rows reproduce the engine's
+digest exactly — points, ranks, intrinsic flags, six step resolutions and three decimal lookups
+per row.
+
+The first complete run matched **49 of 66**. Every mismatch was a `ratio`-unit row, and every one
+of them agreed on `count`, `first` and `last` while disagreeing in the interior — which located the
+fault precisely, because a wrong *rule* would have moved the endpoints too.
+
+The cause was not rounding. `ParameterLattice::step` is an `f32`, and the engine widens it to `f64`
+before it computes anything; the shipped metadata prints it as its shortest round-tripping
+spelling, and JSON has only doubles, so `"1.02"` parses to the exact decimal `1.02` rather than to
+`1.02f32 = 1.0199999809265137`. On a geometric lattice that difference compounds with every power:
+
+```
+engine, k=1:  1 × 1.0199999809265137     -> "1.01999998"
+SDK,    k=1:  1 × 1.02                   -> "1.02000000"
+```
+
+Narrowing every catalog number through `Math.fround` before use — which is exactly what the engine
+does — took the count to **66 of 66**. `49 + 17 = 66`, and the 17 were precisely the `ratio` rows.
+
+A second, independent correction was needed for the same file to be right at all: Rust's
+`format!("{:.*}", precision, value)` rounds the exact binary value HALF-TO-EVEN, while JavaScript's
+`toFixed` rounds half away from zero. They disagree on every exact tie (`0.5` → `0` versus `1`;
+`0.125` → `0.12` versus `0.13`), and a lattice whose step is a negative power of two produces ties
+by construction. One differing point would offset the SDK's entire rank numbering from that point
+upward. `sdk/src/core/decimal.ts` therefore renders exactly, in `BigInt` integer arithmetic over
+the double's dyadic-rational expansion, with no floating point in the rounding decision.
