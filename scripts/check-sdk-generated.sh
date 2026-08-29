@@ -35,4 +35,22 @@ for module in src/generated/*.ts; do
   }
 done
 
+# Issue #243 eval 6: the vendored host declaration is a MIRROR, not a fork.
+#
+# `sdk/src/browser/shipped-host.d.ts` exists so `tsc --noEmit` can hold the SDK's
+# `toWebBootOptions` adapter to the artifact it adapts (see `sdk/test/host-mirror.ts`). A type
+# import from the artifact directory could not do that job -- the artifact is a build output that
+# does not exist in a source checkout. So the declaration is copied, and the copy is checked here
+# rather than trusted: a shipped `.d.ts` that gains, loses or retypes a field and a stale mirror
+# that did not follow it is exactly the drift the mirror exists to catch.
+if ! cmp -s "$repo_root/hosts/miso-engine-host-web/web/miso-engine-v2-audio-worklet-host.d.ts" \
+            "$repo_root/sdk/src/browser/shipped-host.d.ts"; then
+  echo "sdk/src/browser/shipped-host.d.ts is not the shipped declaration; refresh it with:" >&2
+  echo "  cp hosts/miso-engine-host-web/web/miso-engine-v2-audio-worklet-host.d.ts \\" >&2
+  echo "     sdk/src/browser/shipped-host.d.ts" >&2
+  diff -u "$repo_root/hosts/miso-engine-host-web/web/miso-engine-v2-audio-worklet-host.d.ts" \
+          "$repo_root/sdk/src/browser/shipped-host.d.ts" >&2 || true
+  exit 1
+fi
+
 echo "sdk generated surface is the engine's current output"

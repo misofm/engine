@@ -4,6 +4,11 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
+# The crate gained a second binary (`lattice_oracle`) with issue #243, which makes a bare
+# `cargo run -p miso-engine-parameter-metadata` ambiguous. Every existing call site --
+# `scripts/build-web-audioworklet.sh`, `check-web-audioworklet.sh`, `test-web-audioworklet.sh` --
+# means the metadata generator, so it stays the default and the oracle is opt-in by `--bin`.
+default-run = "miso_engine_parameter_metadata"
 
 [lib]
 name = "miso_engine_parameter_metadata"
