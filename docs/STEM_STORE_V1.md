@@ -53,7 +53,9 @@ The final owner ruling on #244 overrides N-14:
 
 Every indexed hit is streamed through incremental SHA-256 inside the loading
 gate. The same pass counts bytes, so it also validates the document-derived
-`frames × channels × bit_depth / 8` requirement. A truncation, same-length
+`frames × channels × bytes_per_sample(bit_depth)` requirement, where
+`bytes_per_sample` is STEM_IDENTITY_V1's closed table: 2 for `16`, 3 for `24`,
+and 4 for `32f`. A truncation, same-length
 bit flip, missing file, read failure, or shape-length mismatch demotes the row
 to a miss and automatically invokes the resolver. The session refuses only if
 self-healing cannot re-ingest (offline, decoder, integrity, or quota failure).
@@ -146,6 +148,28 @@ reads bounded Blob slices, de-interleaves interleaved int16/int24 little-endian
 PCM, converts by exact powers of two (`2^15`, `2^23`), and writes the unchanged
 MSB1 layout. The pump module contains no network API and its runtime eval runs
 with a throwing network tripwire.
+
+### Documented future arm: `bit_depth = 32f` (not implemented)
+
+STEM_IDENTITY_V1 admits the closed token set `{16, 24, 32f}`. The web launch
+scope is deliberately integer-only: the pump validator types `bitDepth` as
+`16 | 24` and refuses everything else, and the ingest/verify length checks
+exercise only the 2- and 3-byte widths today. When the `32f` arm is built, it
+changes no invariant in this document -- only the two tables below gain their
+already-specified third row:
+
+| `bit_depth` | bytes/sample | pump transform to planar f32 |
+| ----------- | ------------ | ---------------------------- |
+| `16` | 2 | signed int ÷ `2^15` |
+| `24` | 3 | signed int ÷ `2^23` |
+| `32f` (future) | 4 | identity bit-pattern copy: each little-endian 4-byte IEEE-754 binary32 pattern is reproduced exactly; NaN payloads and `-0.0` are preserved, never canonicalized |
+
+Every length formula in this document already means
+`frames × channels × bytes_per_sample(bit_depth)` with the 4-byte `32f` row
+included; there is no formula for which `32f` needs a special case. Adding the
+arm means widening the pump's `bitDepth` type and adding the copy branch --
+nothing about hashing, verify-on-open, the ingest gate, or promotion changes,
+because canonical bytes are canonical bytes at every depth.
 
 ## Latency evidence contract
 
