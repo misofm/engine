@@ -178,7 +178,7 @@ describe("the writer contract -- paused", () => {
         for (const parameterId of GAIN_IDS) {
           writer.stage(gainEdit(parameterId, 0, -0.1 * flush));
         }
-        const outcome = writer.flush();
+        const outcome = await writer.flush();
         if (outcome.refused) { refusal = { flush, outcome }; break; }
         admittedFlushes += 1;
       }
@@ -214,7 +214,7 @@ describe("the writer contract -- paused", () => {
         for (const parameterId of GAIN_IDS) {
           writer.stage(gainEdit(parameterId, 0, -0.1 * flush));
         }
-        writer.flush();
+        await writer.flush();
       }
       assert.ok(writer.stats.refusals > 0, "the queue filled");
       assert.equal(writer.stats.escalations, 0);
@@ -231,7 +231,7 @@ describe("the writer contract -- paused", () => {
       // The transport moves: one render drains every control queue.
       feedAndRender(engine);
 
-      const outcome = writer.drain();
+      const outcome = await writer.drain();
       assert.equal(outcome.refused, false, "after a drain the pending records fit");
       assert.equal(writer.pending, 0, "the final ramps landed");
       assert.equal(writer.stats.escalations, 0, "nothing escalated across the whole episode");
@@ -320,7 +320,7 @@ describe("the writer contract -- paused", () => {
       for (const edit of addresses) writer.stage(edit);
       assert.equal(writer.pending, 16, "sixteen distinct addresses do not coalesce");
 
-      const first = writer.flush();
+      const first = await writer.flush();
       assert.equal(first.refused, true, "an oversized gesture does not fit from idle");
       assert.equal(first.reason, "backpressure");
       assert.equal(first.pending, 16, "a refusal admits nothing and drops nothing");
@@ -328,7 +328,7 @@ describe("the writer contract -- paused", () => {
 
       // It splits: the following attempts admit what fits. The writer was never told the
       // boundary; it halved until the engine said yes.
-      writer.drain();
+      await writer.drain();
       assert.ok(writer.stats.admitted > 0, "the split admitted part of the gesture");
       assert.ok(writer.stats.refusals >= 1);
       assert.equal(writer.stats.escalations, 0, "flow control never escalates");
@@ -338,7 +338,7 @@ describe("the writer contract -- paused", () => {
       // And the rest lands once the transport moves; each render drains every control queue.
       for (let block = 0; block < 8 && writer.pending > 0; block += 1) {
         feedAndRender(engine);
-        writer.drain();
+        await writer.drain();
       }
       assert.equal(writer.pending, 0, `${stillPending} pending records landed after the drain`);
       assert.equal(writer.stats.escalations, 0);
@@ -361,7 +361,7 @@ describe("the writer contract -- playing", () => {
       for (let block = 0; block < 64; block += 1) {
         writer.stage(gainEdit(GAIN_IDS[0], 2, -0.05 * block));
         writer.stage(faderEdit(2, -0.1 * block));
-        const outcome = writer.flush();
+        const outcome = await writer.flush();
         assert.equal(outcome.refused, false, `block ${block} refused under a playing cadence`);
         feedAndRender(engine);
       }
@@ -412,9 +412,338 @@ describe("the writer contract -- coalescing and escalation", () => {
         maximumBatch: 4,
       });
       writer.stage({ ...gainEdit(GAIN_IDS[0], 2, -1), trackIndex: 99 });
-      assert.throws(() => writer.flush(), MisoUsageError);
+      await assert.rejects(() => writer.flush(), MisoUsageError);
       assert.equal(writer.stats.escalations, 1);
       assert.equal(writer.stats.refusals, 0, "an unknown track is not flow control");
+    } finally {
+      engine.dispose();
+    }
+  });
+});
+
+describe("the writer contract -- the async submit boundary", () => {
+  /**
+   * The same episode, recorded flush by flush.
+   *
+   * `wrap` is the only thing that varies: it is what turns the engine's synchronous
+   * `submitCommands` into the shape a caller actually has. The app reaches the engine over a
+   * worklet port, so its report is a promise by construction (issue #246); the writer's contract
+   * is supposed to be identical either way, and "identical" is only a claim until the two
+   * transcripts are compared element for element.
+   *
+   * The episode deliberately covers all three paths: admitted flushes, the refusal that fills a
+   * paused queue, and the drain that lands the rest once the transport moves.
+   */
+  async function episode(wrap) {
+    const engine = await pausedEngine();
+    try {
+      const writer = new ConsoleWriter({
+        submit: wrap((records, count) => engine.submitCommands(records, count)),
+        maximumBatch: 4,
+      });
+      const outcomes = [];
+      const stats = [];
+      for (let flush = 1; flush <= 20; flush += 1) {
+        for (const parameterId of GAIN_IDS) {
+          writer.stage(gainEdit(parameterId, 0, -0.1 * flush));
+        }
+        outcomes.push(await writer.flush());
+        stats.push(writer.stats);
+      }
+      feedAndRender(engine);
+      outcomes.push(await writer.drain());
+      stats.push(writer.stats);
+      return { outcomes, stats, pending: writer.pending };
+    } finally {
+      engine.dispose();
+    }
+  }
+
+  /** The report as the engine hands it back, in-process. */
+  const immediately = (submit) => submit;
+
+  /** The report one microtask later, which is the cheapest honest stand-in for a port hop. */
+  const nextMicrotask = (submit) => async (records, count) => {
+    await Promise.resolve();
+    return submit(records, count);
+  };
+
+  test("an async submit produces the same outcomes and the same stats as a sync one", async () => {
+    const sync = await episode(immediately);
+    const async_ = await episode(nextMicrotask);
+
+    // Guard the fixture itself: a transcript that never refused and never admitted would compare
+    // equal for the wrong reason.
+    assert.ok(sync.outcomes.some((outcome) => outcome.refused), "the episode reached backpressure");
+    assert.ok(sync.stats.at(-1).admitted > 0, "the episode admitted records");
+    assert.equal(sync.stats.at(-1).escalations, 0);
+
+    assert.deepEqual(async_.outcomes, sync.outcomes, "outcome sequences must not differ by timing");
+    assert.deepEqual(async_.stats, sync.stats, "stat sequences must not differ by timing");
+    assert.equal(async_.pending, sync.pending);
+  });
+
+  test("two flushes entered without awaiting the first serialize into two disjoint batches", async () => {
+    // The failure this guards is a torn batch: the second flush picking its keys out of the
+    // pending map while the first is still awaiting its report, so both submit the SAME edits --
+    // admitted twice in the stats, and still pending afterwards.
+    const at = (name) => ABI_LAYOUT.commandRecord.fields.find((row) => row.name === name).offset;
+    const decode = (records, count) => {
+      const view = new DataView(records.buffer, records.byteOffset, records.byteLength);
+      return Array.from({ length: count }, (_unused, index) => {
+        const base = index * ABI_LAYOUT.commandRecord.bytes;
+        return `${view.getUint8(base + at("channel"))}/${view.getUint32(base + at("parameterId"), true)}`;
+      });
+    };
+
+    const engine = await pausedEngine();
+    try {
+      const submitted = [];
+      let inFlight = 0;
+      let concurrent = 0;
+      const writer = new ConsoleWriter({
+        submit: async (records, count) => {
+          inFlight += 1;
+          concurrent = Math.max(concurrent, inFlight);
+          submitted.push(decode(records, count));
+          // Two hops, so a second flush entered synchronously after the first has ample room to
+          // race in if nothing is serializing them.
+          await Promise.resolve();
+          await Promise.resolve();
+          const report = engine.submitCommands(records, count);
+          inFlight -= 1;
+          return report;
+        },
+        maximumBatch: 4,
+      });
+
+      // Eight distinct addresses -- four bands on each of two lanes -- so two batches of four.
+      for (const channel of [0, 1]) {
+        for (const parameterId of GAIN_IDS) writer.stage(gainEdit(parameterId, channel, -1));
+      }
+      assert.equal(writer.pending, 8, "eight distinct addresses do not coalesce");
+
+      const first = writer.flush();
+      const second = writer.flush();
+      const [a, b] = await Promise.all([first, second]);
+
+      assert.equal(concurrent, 1, "a flush must not start while a prior submit is outstanding");
+      assert.equal(submitted.length, 2, "two calls are two attempts; the chain orders, never merges");
+      assert.deepEqual(
+        [...submitted[0], ...submitted[1]].sort(),
+        [...new Set([...submitted[0], ...submitted[1]])].sort(),
+        "the two batches are disjoint: no edit was submitted twice",
+      );
+      assert.equal(submitted[0].length + submitted[1].length, 8, "between them they cover the eight");
+
+      assert.equal(a.admitted, 4);
+      assert.equal(a.pending, 4, "the first flush leaves the other four staged");
+      assert.equal(b.admitted, 4);
+      assert.equal(b.pending, 0, "the second flush takes the four the first did not");
+      assert.equal(writer.pending, 0, "a torn batch would leave the duplicated edits pending");
+
+      const stats = writer.stats;
+      assert.equal(stats.flushes, 2);
+      assert.equal(stats.admitted, 8, "admitted counts records, and no record was counted twice");
+      assert.equal(stats.refusals, 0);
+      assert.equal(stats.escalations, 0);
+      assert.equal(stats.coalesced, 0);
+    } finally {
+      engine.dispose();
+    }
+  });
+});
+
+/**
+ * The windows an async submit opens that a synchronous one could not.
+ *
+ * A synchronous submit is atomic against the writer's own state: nothing can be staged, and no
+ * second flush can be entered, between picking a batch and applying its report. Over a port that
+ * gap is a round trip, and each of these probes lives inside it.
+ */
+describe("the writer contract -- races the async boundary opens", () => {
+  const at = (name) => ABI_LAYOUT.commandRecord.fields.find((row) => row.name === name).offset;
+
+  /** The addressed control and its first value, read back out of the bytes actually submitted. */
+  const decode = (records, count) => {
+    const view = new DataView(records.buffer, records.byteOffset, records.byteLength);
+    return Array.from({ length: count }, (_unused, index) => {
+      const base = index * ABI_LAYOUT.commandRecord.bytes;
+      return {
+        address: `${view.getUint8(base + at("channel"))}/${view.getUint32(base + at("parameterId"), true)}`,
+        value: view.getFloat32(base + at("values"), true),
+      };
+    });
+  };
+
+  test("an edit staged while its own batch is in flight is not deleted by that batch's success", async () => {
+    // The drag-during-round-trip case, which is the case the widening exists for. The hand does
+    // not stop moving while a batch crosses the port: a newer value for an address already in
+    // flight is staged before the report comes back.
+    //
+    // Clearing the batch by ADDRESS would delete that newer edit -- `pending` would read zero
+    // while only the stale value ever reached the engine, which is the stale-landing bug
+    // latest-wins exists to prevent, reintroduced by the async boundary. The batch is cleared by
+    // edit identity instead, so the superseding edit survives and goes out next.
+    const engine = await pausedEngine();
+    try {
+      const submissions = [];
+      let openGate;
+      let announceEntry;
+      const gate = new Promise((resolve) => { openGate = resolve; });
+      const entered = new Promise((resolve) => { announceEntry = resolve; });
+      let held = false;
+
+      const writer = new ConsoleWriter({
+        submit: async (records, count) => {
+          submissions.push(decode(records, count));
+          if (!held) {
+            // Hold the FIRST submit open, so the stage below lands strictly inside the round trip.
+            held = true;
+            announceEntry();
+            await gate;
+          }
+          return engine.submitCommands(records, count);
+        },
+        maximumBatch: 4,
+      });
+
+      const address = GAIN_IDS[0];
+      writer.stage(gainEdit(address, 0, -1));
+      const inFlight = writer.flush();
+      await entered;
+
+      // The hand keeps moving while the batch is out.
+      writer.stage(gainEdit(address, 0, -9.9));
+      openGate();
+
+      const first = await inFlight;
+      assert.equal(first.admitted, 1, "the batch that was submitted was admitted");
+      assert.deepEqual(submissions[0], [{ address: `0/${address}`, value: -1 }]);
+      assert.equal(
+        first.pending,
+        1,
+        "the newer value is still staged: a success clears the edits it SUBMITTED, not the address",
+      );
+      assert.equal(writer.pending, 1);
+
+      const second = await writer.flush();
+      assert.deepEqual(
+        submissions[1],
+        [{ address: `0/${address}`, value: Math.fround(-9.9) }],
+        "the value the hand actually reached goes out on the next flush",
+      );
+      assert.equal(second.admitted, 1);
+      assert.equal(second.pending, 0);
+      assert.equal(writer.pending, 0);
+
+      const stats = writer.stats;
+      assert.equal(stats.flushes, 2);
+      assert.equal(stats.admitted, 2);
+      assert.equal(stats.refusals, 0);
+      assert.equal(stats.escalations, 0);
+      // The in-flight edit was in the pending map when the newer one arrived, and by the map's own
+      // rule it was superseded there. It was also submitted -- both are true of the same edit, and
+      // the counter reports the map's view.
+      assert.equal(stats.coalesced, 1);
+    } finally {
+      engine.dispose();
+    }
+  });
+
+  test("an escalation rejects its own caller and does not poison later flushes", async () => {
+    // The chain that serializes flushes is a promise, and a promise that is left rejected
+    // propagates to everything chained behind it. An escalation must reject the call that caused
+    // it and nothing else: the writer is as usable afterwards as a synchronous one, which throws
+    // to one caller and leaves the next alone.
+    //
+    // The escalation is real rather than stubbed: the stub corrupts the bytes on the way past, so
+    // the ENGINE refuses an unknown track, while the writer's staged edit stays lawful and can be
+    // resubmitted unmodified.
+    const engine = await pausedEngine();
+    try {
+      let calls = 0;
+      const corrupt = new Set([1, 3]);
+      const writer = new ConsoleWriter({
+        submit: async (records, count) => {
+          await Promise.resolve();
+          calls += 1;
+          if (corrupt.has(calls)) {
+            new DataView(records.buffer, records.byteOffset, records.byteLength)
+              .setUint32(at("trackIndex"), 99, true);
+          }
+          return engine.submitCommands(records, count);
+        },
+        maximumBatch: 1,
+      });
+
+      writer.stage(gainEdit(GAIN_IDS[0], 0, -1));
+      await assert.rejects(() => writer.flush(), MisoUsageError);
+      assert.equal(writer.stats.escalations, 1);
+      assert.equal(writer.pending, 1, "an escalated batch admits nothing and drops nothing");
+
+      const recovered = await writer.flush();
+      assert.equal(recovered.refused, false, "the next flush is a fresh attempt, not an inheritance");
+      assert.equal(recovered.admitted, 1);
+      assert.equal(writer.stats.escalations, 1, "the second flush did not escalate");
+
+      // And the same when the second flush is entered before the first has rejected, which is when
+      // it is actually chained behind it.
+      writer.stage(gainEdit(GAIN_IDS[1], 0, -2));
+      writer.stage(gainEdit(GAIN_IDS[2], 0, -3));
+      const escalating = writer.flush();
+      const behind = writer.flush();
+      await assert.rejects(() => escalating, MisoUsageError);
+      const survived = await behind;
+      assert.equal(survived.refused, false, "a flush chained behind a rejected one must still run");
+      assert.equal(survived.admitted, 1);
+      assert.equal(writer.stats.escalations, 2);
+    } finally {
+      engine.dispose();
+    }
+  });
+
+  test("a refusal halves the count that was submitted, not the ceiling", async () => {
+    // `take` is min(batch, pending), and it is captured before the submit. Halving the CEILING
+    // instead would leave the next attempt larger than the batch that was just refused -- the
+    // opposite of narrowing -- and the gap is only visible when fewer edits are pending than the
+    // ceiling allows, which the synchronous writer's tests never staged.
+    const engine = await pausedEngine();
+    try {
+      // Fill the queue through a writer of its own, so the probe writer's batch is still its
+      // untouched ceiling of eight when it makes its one attempt.
+      const filler = new ConsoleWriter({
+        submit: (records, count) => engine.submitCommands(records, count),
+        maximumBatch: 4,
+      });
+      for (let flush = 0; flush < QUEUE_RECORDS / 4; flush += 1) {
+        for (const parameterId of GAIN_IDS) filler.stage(gainEdit(parameterId, 0, -0.1 * flush));
+        const outcome = await filler.flush();
+        assert.equal(outcome.refused, false, `filler flush ${flush} should still fit`);
+      }
+      assert.equal(filler.stats.admitted, QUEUE_RECORDS, "the queue is full to the record");
+
+      const writer = new ConsoleWriter({
+        submit: async (records, count) => {
+          await Promise.resolve();
+          return engine.submitCommands(records, count);
+        },
+        maximumBatch: 8,
+      });
+      for (const parameterId of GAIN_IDS.slice(0, 3)) writer.stage(gainEdit(parameterId, 1, -1));
+      assert.equal(writer.pending, 3, "three staged against a ceiling of eight");
+
+      const outcome = await writer.flush();
+      assert.equal(outcome.refused, true, "the filled queue has no room");
+      assert.equal(outcome.reason, "backpressure");
+      assert.equal(
+        outcome.nextBatch,
+        1,
+        "the three that were submitted halve to one; the ceiling of eight would halve to four",
+      );
+      assert.equal(outcome.pending, 3, "a refusal drops nothing");
+      assert.equal(writer.stats.refusals, 1);
+      assert.equal(writer.stats.escalations, 0);
     } finally {
       engine.dispose();
     }

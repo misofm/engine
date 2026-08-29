@@ -82,8 +82,15 @@ export interface WriterStats {
 }
 
 export interface WriterOptions {
-  /** Submit one staged batch. Normally `engine.submitCommands` bound to a live engine. */
-  readonly submit: (records: Uint8Array, count: number) => CommandReport;
+  /**
+   * Submit one staged batch. Normally `engine.submitCommands` bound to a live engine.
+   *
+   * May answer asynchronously. In-process the engine answers immediately, but the browser host
+   * reaches it over a worklet port, where the answer is a `Promise` by construction; the writer's
+   * contract is identical either way, so the signature admits both rather than forcing a caller
+   * across that boundary to fake a synchronous report.
+   */
+  readonly submit: (records: Uint8Array, count: number) => CommandReport | Promise<CommandReport>;
   /**
    * The largest batch to attempt. Defaults to the engine's default queue depth, which is the
    * largest a single-lane batch can be from idle.
@@ -154,6 +161,19 @@ export class ConsoleWriter {
   /** Insertion-ordered by key, which is what makes coalescing a map update rather than a scan. */
   readonly #pending = new Map<string, LaneEdit>();
   #batch: number;
+  /**
+   * The tail of the flush chain, which is what serializes flushes.
+   *
+   * A flush picks its batch out of the pending map and only applies the result once the submit has
+   * answered. When the answer is a promise, a second flush entered before the first resolves would
+   * pick the SAME keys -- a torn batch: the same edits submitted twice, admitted twice in the
+   * stats, and still pending afterwards. So each call appends its work here instead of starting
+   * against the writer's state directly, and the batch is chosen after the previous flush applied.
+   *
+   * The chain orders flushes; it never merges them. One call is still one attempt, so `flushes`
+   * counts what a synchronous writer would have counted.
+   */
+  #tail: Promise<unknown> = Promise.resolve();
   #flushes = 0;
   #admitted = 0;
   #refusals = 0;
@@ -209,8 +229,20 @@ export class ConsoleWriter {
    * A refusal that is *not* flow control throws. Backpressure will succeed on retry once the
    * render thread drains; a malformed record or an unknown address never will, so retrying it
    * silently would be an infinite loop wearing the costume of resilience.
+   *
+   * Flushes are serialized: a call entered while a prior submit is still outstanding waits for it
+   * rather than picking its batch out of a map the earlier flush has not yet applied to. See
+   * `#tail`.
    */
-  flush(): FlushOutcome {
+  flush(): Promise<FlushOutcome> {
+    const attempt = this.#tail.then(() => this.#flushOnce());
+    // The chain absorbs the rejection an escalation throws to ITS caller, so a later flush is
+    // ordered behind that attempt rather than inheriting its failure.
+    this.#tail = attempt.catch(() => undefined);
+    return attempt;
+  }
+
+  async #flushOnce(): Promise<FlushOutcome> {
     if (this.#pending.size === 0) {
       return Object.freeze({
         admitted: 0,
@@ -221,14 +253,28 @@ export class ConsoleWriter {
       });
     }
     const take = Math.min(this.#batch, this.#pending.size);
-    const keys = [...this.#pending.keys()].slice(0, take);
-    const edits = keys.map((key) => this.#pending.get(key)!);
+    // Keyed pairs rather than bare keys: what is cleared after a success is identified by the
+    // EDIT, not by its address. See the delete below.
+    const staged = [...this.#pending.entries()].slice(0, take);
+    const edits = staged.map(([, edit]) => edit);
 
     this.#flushes += 1;
-    const report = this.#submit(encode(edits), edits.length);
+    const report = await this.#submit(encode(edits), edits.length);
 
     if (report.ok) {
-      for (const key of keys) this.#pending.delete(key);
+      for (const [key, edit] of staged) {
+        // Identity, not presence. The hand does not stop moving while a batch is in flight, and
+        // over a port that flight is a round trip: a newer value for an address in this batch can
+        // be staged between the submit and its report. Deleting by key alone would drop that newer
+        // edit -- `pending` would read zero while only the stale value ever reached the engine,
+        // which is precisely the stale-landing bug latest-wins exists to prevent. So a key is
+        // cleared only while the map still holds the exact edit that was submitted; a superseded
+        // one stays staged and goes out on the next flush.
+        //
+        // The refusal path below needs no such guard: it admits nothing and therefore deletes
+        // nothing, so it has no window to leave open.
+        if (this.#pending.get(key) === edit) this.#pending.delete(key);
+      }
       this.#admitted += report.admitted;
       // Grow back toward the caller's ceiling, so a transient full queue does not permanently
       // shrink throughput.
@@ -270,10 +316,10 @@ export class ConsoleWriter {
    * nothing is rendering" is a legitimate steady state -- a paused transport -- and a writer that
    * spun there would be a busy loop rather than a retry.
    */
-  drain(attempts = 8): FlushOutcome {
-    let outcome = this.flush();
+  async drain(attempts = 8): Promise<FlushOutcome> {
+    let outcome = await this.flush();
     for (let attempt = 1; attempt < attempts && this.#pending.size > 0; attempt += 1) {
-      const next = this.flush();
+      const next = await this.flush();
       if (next.admitted === 0 && next.refused) return next;
       outcome = next;
     }

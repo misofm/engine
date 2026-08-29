@@ -132,6 +132,13 @@ A refusal that is *not* flow control throws instead: backpressure succeeds on re
 thread drains, an unknown address never will, and retrying it silently would be an infinite loop
 wearing the costume of resilience.
 
+`submit` may answer synchronously or with a `Promise` — in-process the engine answers immediately,
+but a browser host reaches it over a worklet port, where the answer is a promise by construction —
+so `flush()` and `drain()` are async. Flushes serialize: a call entered while a prior submit is
+still outstanding waits for it rather than picking its batch out of a map the earlier flush has not
+yet applied to. The contract is otherwise identical on both paths, which the evals hold by running
+one episode through a sync and an async submit and comparing the transcripts element for element.
+
 ## Tests
 
 The eval suites run under Node's native type stripping, so `sdk/src/**/*.ts` is imported directly
