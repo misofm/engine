@@ -1838,6 +1838,11 @@ mod tests {
             readable: false,
             automatable: true,
             enum_choices: &[],
+            lattice: miso_engine_effect_contract::default_parameter_lattice(
+                ParameterUnit::Db,
+                ParameterDomain::Continuous,
+                ParameterMapping::Linear,
+            ),
         },
         ParameterDescriptor {
             id: ParameterId(2),
@@ -1856,6 +1861,11 @@ mod tests {
             readable: true,
             automatable: true,
             enum_choices: &[],
+            lattice: miso_engine_effect_contract::default_parameter_lattice(
+                ParameterUnit::Samples,
+                ParameterDomain::Boolean,
+                ParameterMapping::Stepped,
+            ),
         },
         ParameterDescriptor {
             id: ParameterId(3),
@@ -1874,6 +1884,11 @@ mod tests {
             readable: true,
             automatable: false,
             enum_choices: &CHOICES,
+            lattice: miso_engine_effect_contract::default_parameter_lattice(
+                ParameterUnit::Linear,
+                ParameterDomain::Enumeration,
+                ParameterMapping::Stepped,
+            ),
         },
     ];
     static ZERO_ID_PARAMETERS: [ParameterDescriptor; 3] = [

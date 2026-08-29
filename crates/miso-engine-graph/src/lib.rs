@@ -3674,6 +3674,7 @@ mod tests {
             readable: true,
             automatable: true,
             enum_choices: &[],
+            lattice: miso_engine_effect_contract::ParameterLattice::arithmetic(0.01, 2),
         }];
     static GAIN_DESCRIPTOR: EffectDescriptor = EffectDescriptor {
         id: GAIN_ID,

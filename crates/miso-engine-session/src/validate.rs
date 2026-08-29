@@ -537,7 +537,7 @@ pub const BUILTIN_AUTOMATION_EFFECT_ID: &str = "strip";
 /// `per_lane` is the descriptor's `BuiltinParameterScope`: a `PerLane` parameter may be addressed
 /// `left`, `right` or `both`, while the four matrix coefficients are one shared 2x2 and can only
 /// be addressed `both`.
-pub const BUILTIN_AUTOMATION_TARGETS: [(u32, bool); 8] = [
+pub const BUILTIN_AUTOMATION_TARGETS: [(u32, bool); 9] = [
     // `polarity_invert` and `trim_db`: live since #210 phase 3.
     (1, true),
     (2, true),
@@ -549,6 +549,8 @@ pub const BUILTIN_AUTOMATION_TARGETS: [(u32, bool); 8] = [
     (8, false),
     (9, false),
     (10, false),
+    // #239 ruling 5461507633 B4: persisted pan intent is a per-lane builtin row.
+    (12, true),
 ];
 
 /// Validate one `rack = "builtins"` automation target against the builtin parameter ABI.

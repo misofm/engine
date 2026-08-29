@@ -6,7 +6,7 @@ use miso_engine_effect_contract::{
     ObservationFold, ObservationKind, ObservationTapId, ParameterChannelPolicy,
     ParameterDescriptor, ParameterDomain, ParameterId, ParameterMapping, ParameterUnit,
     PortDescriptor, PortId, PortLayout, PortRole, QualityDescriptor, SmoothingRule,
-    StatePayloadSizes, TailSamples, validate_descriptor,
+    StatePayloadSizes, TailSamples, default_parameter_lattice, validate_descriptor,
 };
 use miso_engine_effect_package::{
     EFFECT_DESCRIPTOR_WIRE_UNAVAILABLE, EffectArtifactAuthoring, EffectArtifactKind,
@@ -64,6 +64,11 @@ static PARAMETERS: [ParameterDescriptor; 6] = [
         readable: false,
         automatable: true,
         enum_choices: &[],
+        lattice: default_parameter_lattice(
+            ParameterUnit::Db,
+            ParameterDomain::Continuous,
+            ParameterMapping::Linear,
+        ),
     },
     ParameterDescriptor {
         id: ParameterId(2),
@@ -82,6 +87,11 @@ static PARAMETERS: [ParameterDescriptor; 6] = [
         readable: true,
         automatable: true,
         enum_choices: &[],
+        lattice: default_parameter_lattice(
+            ParameterUnit::Hz,
+            ParameterDomain::Continuous,
+            ParameterMapping::Logarithmic,
+        ),
     },
     ParameterDescriptor {
         id: ParameterId(3),
@@ -100,6 +110,11 @@ static PARAMETERS: [ParameterDescriptor; 6] = [
         readable: true,
         automatable: true,
         enum_choices: &[],
+        lattice: default_parameter_lattice(
+            ParameterUnit::Milliseconds,
+            ParameterDomain::Continuous,
+            ParameterMapping::Exponential,
+        ),
     },
     ParameterDescriptor {
         id: ParameterId(4),
@@ -118,6 +133,11 @@ static PARAMETERS: [ParameterDescriptor; 6] = [
         readable: true,
         automatable: true,
         enum_choices: &[],
+        lattice: default_parameter_lattice(
+            ParameterUnit::Samples,
+            ParameterDomain::Boolean,
+            ParameterMapping::Stepped,
+        ),
     },
     ParameterDescriptor {
         id: ParameterId(5),
@@ -136,6 +156,11 @@ static PARAMETERS: [ParameterDescriptor; 6] = [
         readable: true,
         automatable: false,
         enum_choices: &CHOICES,
+        lattice: default_parameter_lattice(
+            ParameterUnit::Linear,
+            ParameterDomain::Enumeration,
+            ParameterMapping::Stepped,
+        ),
     },
     ParameterDescriptor {
         id: ParameterId(6),
@@ -154,6 +179,11 @@ static PARAMETERS: [ParameterDescriptor; 6] = [
         readable: true,
         automatable: true,
         enum_choices: &[],
+        lattice: default_parameter_lattice(
+            ParameterUnit::Ratio,
+            ParameterDomain::Continuous,
+            ParameterMapping::Exponential,
+        ),
     },
 ];
 

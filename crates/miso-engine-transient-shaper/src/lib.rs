@@ -108,6 +108,11 @@ const fn parameter(
         readable: true,
         automatable: true,
         enum_choices: &[],
+        lattice: miso_engine_effect_contract::default_parameter_lattice(
+            ParameterUnit::Linear,
+            ParameterDomain::Continuous,
+            ParameterMapping::Linear,
+        ),
     }
 }
 

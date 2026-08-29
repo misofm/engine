@@ -36,6 +36,7 @@ static PARAMETERS: [ParameterDescriptor; 2] = [
         readable: true,
         automatable: true,
         enum_choices: &[],
+        lattice: ParameterLattice::arithmetic(0.01, 2),
     },
     ParameterDescriptor {
         id: ParameterId(2),
@@ -54,6 +55,7 @@ static PARAMETERS: [ParameterDescriptor; 2] = [
         readable: true,
         automatable: true,
         enum_choices: &[],
+        lattice: ParameterLattice::arithmetic(0.01, 2),
     },
 ];
 

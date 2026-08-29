@@ -343,6 +343,11 @@ const fn parameter(band: usize, field: usize) -> ParameterDescriptor {
         readable: true,
         automatable,
         enum_choices: if field == 1 { &KIND_CHOICES } else { &[] },
+        lattice: miso_engine_effect_contract::default_parameter_lattice(
+            UNITS[field],
+            DOMAINS[field],
+            MAPPINGS[field],
+        ),
     }
 }
 
