@@ -68,3 +68,7 @@ fixed algorithms, exact source/effect identity and runtime remain the authoritat
 DAWproject deliberately optimizes interchange breadth, not deterministic execution. That is not a
 defect in its mission, and it is why it should remain outside V2's runtime contract.
 
+## Closure
+
+Closed as completed research and superseded by final synthesis #268. A hostile-input adapter waits
+for #246 plus demonstrated import/export demand.

@@ -68,3 +68,7 @@ Strong-time syntax may improve agent authoring ergonomics, but V2 already has th
 sample-time representation. Without validated user demand, a language front end adds complexity with
 no core-engine gain.
 
+## Closure
+
+Closed as completed research and superseded by final synthesis #268. No engine VM/language work is
+authorized; an external compiler remains demand-gated.

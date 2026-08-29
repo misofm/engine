@@ -65,3 +65,7 @@ boundaries.
 An importer improves authoring interchange only if musicians actually need Csound-compatible input.
 It does not by itself improve mixing performance, simplify the V2 runtime or prove bit identity.
 
+## Closure
+
+Closed as completed research and superseded by final synthesis #268. An importer remains conditional
+on demonstrated authoring demand.

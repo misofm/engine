@@ -76,3 +76,7 @@ Faust's many target architectures are strengths for its ecosystem, not evidence 
 outputs meet V2's exact cross-target arithmetic contract. A generated-effect path is worthwhile only
 for a real effect-authoring need.
 
+## Closure
+
+Closed as completed research and superseded by final synthesis #268. Faust integration remains
+demand-gated; only the independent FMA documentation correction is immediate.

@@ -77,3 +77,8 @@ qualification for V2 artifacts, not a claim about RNBO internals.
 
 Only public adapters, examples and official documentation were inspectable. RNBO's proprietary core
 may have stronger private contracts; the honest conclusion is “not established,” not “absent.”
+
+## Closure
+
+Closed as completed research and superseded by final synthesis #268. Any export profile remains
+inside a future demand-gated programmable-effect scope.

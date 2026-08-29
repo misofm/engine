@@ -80,3 +80,7 @@ The strongest evidence is limited to an experimental library boundary which its 
 from the shipping app. Its source/CI does not establish whole-application realtime correctness or
 universal bit identity.
 
+## Closure
+
+Closed as completed research and superseded by final synthesis #268. A protocol-stable physical
+compile snapshot was rejected; existing canonical graph evidence remains authoritative.

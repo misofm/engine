@@ -76,3 +76,7 @@ would make this property visible.
 The parity test is a clarity/evidence improvement, not evidence of a different DSP implementation or
 a performance gain. Cross-target identity remains governed by V2's stronger numeric corpus.
 
+## Closure
+
+Closed as completed research and superseded by final synthesis #268. The proposed standalone loop
+parity issue was rejected because both paths already use the same quantum C render entry.

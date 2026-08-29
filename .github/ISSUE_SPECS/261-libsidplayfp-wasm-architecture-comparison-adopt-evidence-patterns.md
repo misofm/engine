@@ -75,3 +75,7 @@ This is an emulator/player for executable SID programs, not a general production
 contribution is evidence discipline; its headline wording must be interpreted through the actual
 gate strength.
 
+## Closure
+
+Closed as completed research and superseded by final synthesis #268. Existing claim-specific V2
+evidence absorbs the lesson; no emulator/cache or generic framework work survives.

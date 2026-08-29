@@ -68,3 +68,8 @@ render prohibition an engine invariant
 This audit covers the public Cmajor toolkit, not every commercial embedding. Private parity or
 packaging mechanisms may exist. They cannot be credited without evidence, just as absent public
 fixtures cannot be treated as proof of a defect.
+
+## Closure
+
+Closed as completed research and superseded by final synthesis #268. No independent Cmajor-derived
+work survives.

@@ -68,3 +68,7 @@ content-addressed stems and native/browser digest gates are the appropriate port
 Official documentation supports workflow conclusions only. It does not reveal Logic's graph,
 serialization or numeric implementation and cannot establish exact cross-platform replay.
 
+## Closure
+
+Closed as completed research and superseded by final synthesis #268. Hard closure/flattening remains
+owned by #244/#246; no platform package survives.

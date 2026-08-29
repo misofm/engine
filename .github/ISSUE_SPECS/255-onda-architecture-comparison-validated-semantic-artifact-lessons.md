@@ -100,3 +100,8 @@ Onda supplies strong source architecture and internal tests, not independent pro
 evidence or a comparable V2 performance workload. A general IR adds validator, compiler, evolution
 and security surface. Without an actual programmable-effect requirement, the simpler and more
 correct decision is to build nothing.
+
+## Closure
+
+Closed as completed research and superseded by final synthesis #268. The semantic-artifact lesson is
+demand-gated; this issue records no implementation PASS.

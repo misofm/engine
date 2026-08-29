@@ -63,3 +63,7 @@ portability by sacrificing editability.
 Official behavior establishes user workflow and portability constraints, not Ableton's private
 serializer, DSP graph or numeric semantics. The lesson is UX over already-owned V2 primitives.
 
+## Closure
+
+Closed as completed research and superseded by final synthesis #268. Sharing closure remains owned
+by #244/#246; no project-folder/package issue survives.

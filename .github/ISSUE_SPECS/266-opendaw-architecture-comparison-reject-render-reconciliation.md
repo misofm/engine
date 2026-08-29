@@ -73,3 +73,7 @@ That measure-first method reinforces V2's existing performance-pass rules; it do
 Useful local tests do not appear as required public CI at the inspected pin. The modular-Wasm design
 fits one integrated app and does not establish portable plugin isolation or lower cost than V2.
 
+## Closure
+
+Closed as completed research and superseded by final synthesis #268. State continuity stays #252 and
+measured specialization stays with existing performance owners.
