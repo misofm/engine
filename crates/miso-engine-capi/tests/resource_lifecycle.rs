@@ -490,7 +490,10 @@ fn frozen_scratch_report(capi_retained_bytes: u64) -> PlanResourceReport {
         //   `builtin_owners` for the five-term restatement that sums to 173.
         // * The two `graph_*` figures carry the same +1_344 the banks moved by, which is what it
         //   means for the growth to be entirely plan-side.
-        graph_session_plus_plan_bytes: 238_324,
+        // #241 deletes 64 x 64 = 4_096 control-queue bytes and 1_024 x 2 x 4 = 8_192
+        // declarative source-ring bytes from the session compiler's runtime projection. The host
+        // still reports the chosen ring exactly in the source rows below.
+        graph_session_plus_plan_bytes: 238_324 - 4_096 - 8_192,
         graph_incremental_plan_bytes: 226_036,
         graph_metadata_bytes: 50_295,
         graph_delay_bytes: 0,
@@ -578,19 +581,6 @@ struct RenderDiagnosticSlotMirror {
 #[allow(dead_code)]
 struct CompiledIndexNodeMirror {
     entries: [(StableId, u64); 4],
-}
-
-#[allow(dead_code)]
-#[repr(C)]
-struct CompiledControlQueueItemMirror {
-    request_id: RequestId,
-    revision: SessionRevision,
-    command_sequence: u64,
-    absolute_sample: u64,
-    payload_offset: usize,
-    payload_bytes: usize,
-    admitted_bytes: u64,
-    provider_sequence: u64,
 }
 
 #[allow(dead_code)]
@@ -1322,7 +1312,10 @@ fn complete_capi_owners(
     //
     // #210 phase 2 re-pin (+342): the active session's canonical TOML row is the fixture's own
     // byte count, and every one of its nine tracks gained `", delay_samples = 0"` on both lanes.
-    assert_effective_owner_mutations(&active, 142_127, "active CAPI");
+    // #241 re-pin (-195): the canonical session is 171 bytes shorter and the session handle's
+    // protocol controller shrinks by 24 bytes after its deleted edit variants leave, so
+    // 142_127 - 171 - 24 = 141_932.
+    assert_effective_owner_mutations(&active, 141_932, "active CAPI");
 
     let candidate_epoch_rows = [
         PrimitiveOwner {
@@ -1361,8 +1354,10 @@ fn complete_capi_owners(
     // #84 phase B re-pin (+24): `ControlSourceMirror` carries three spsc endpoints, each +8 for
     // its cached peer cursor.
     // #210 phase 2 re-pin (+342): the candidate's canonical TOML row, same key on the same tracks.
-    assert_effective_owner_mutations(&candidate_epoch_rows, 10_795, "candidate CAPI epoch");
-    assert_effective_owner_mutations(&prepared_rows, 13_960, "prepared protocol");
+    // #241 applies the -171 canonical delta to the candidate epoch; it has no controller owner.
+    assert_effective_owner_mutations(&candidate_epoch_rows, 10_624, "candidate CAPI epoch");
+    // #241: `PreparedStructuralCommand` loses the same deleted edit payload (-24).
+    assert_effective_owner_mutations(&prepared_rows, 13_936, "prepared protocol");
     let largest = active
         .iter()
         .chain(candidate_epoch_rows.iter())
@@ -1422,11 +1417,8 @@ fn compiled_model_owners(session_id: &str, canonical: &str) -> Vec<PrimitiveOwne
         },
         PrimitiveOwner {
             name: "source content identity",
-            bytes: "sha256:parametric-eq-nine-track".len() as u64,
-        },
-        PrimitiveOwner {
-            name: "source locator",
-            bytes: "host:parametric-eq-nine-track".len() as u64,
+            bytes: "sha256:7e945c107a97cd24135e85dc2f407c5ecd39663a8737bf5b92114ccce38f1ab8".len()
+                as u64,
         },
         PrimitiveOwner {
             name: "track IDs",
@@ -1484,8 +1476,6 @@ fn graph_owners() -> Vec<PrimitiveOwner> {
     let buffers = nodes;
     let route_timings = 9_u64;
     let quantum = fixture_usize("quantum_frames") as u64;
-    let control_queue_items = fixture_usize("control_queue_messages");
-    let source_ring_frames = fixture_usize("pcm_ring_frames") as u64;
     let colored_outputs = 10_u64;
     let maximum_inputs = 9_u64;
     let bank_lanes = 8_u64;
@@ -1584,14 +1574,9 @@ fn graph_owners() -> Vec<PrimitiveOwner> {
     // record types are all 12 bytes, so one term serves all three rows.
     let strip_control_array = bytes::<Option<ConsumerMirror>>(bank_lanes as usize);
     vec![
-        PrimitiveOwner {
-            name: "control queue typed item storage",
-            bytes: bytes::<CompiledControlQueueItemMirror>(control_queue_items),
-        },
-        PrimitiveOwner {
-            name: "session source PCM runtime envelope",
-            bytes: source_ring_frames * 2 * size_of::<f32>() as u64,
-        },
+        // #241 deletes the session control queue and declarative source-ring projection. Their
+        // absence is the assertion here: the chosen ring is charged exactly by `source_owners`,
+        // outside the graph/model cap. Zero-byte rows would defeat the effective-owner check.
         PrimitiveOwner {
             name: "graph planar audio buffers",
             bytes: audio_samples * size_of::<f32>() as u64,
@@ -1802,7 +1787,8 @@ fn canonical_writer_owners(session_id: &str) -> Vec<PrimitiveOwner> {
     for owner in compiled_model_owners(session_id, "")
         .into_iter()
         .skip(6)
-        .take(14)
+        // #241 leaves thirteen retained-string rows after deleting `source.locator`.
+        .take(13)
     {
         owners.push(PrimitiveOwner {
             name: owner.name,
@@ -1877,7 +1863,9 @@ fn primitive_replacement_oracle(current: &str, prospective: &str) -> PrimitiveRe
     // 2 x 2 x 672 = 2_688, which is exactly twice the `9_209 - 7_865` this phase records for
     // `builtin_bank_bytes` in `frozen_scratch_report`. The session model does not move: this
     // phase adds no schema key.
-    assert_effective_owner_mutations(&graph, 510_720, "double-live graph/model");
+    // #241: the two plans lose 4_096 queue + 8_192 ring projection each (-24_576), and the two
+    // compiled models each shrink by 200 bytes (-400): 510_720 - 24_576 - 400 = 485_744.
+    assert_effective_owner_mutations(&graph, 485_744, "double-live graph/model");
 
     let source = source_owners();
     assert_eq!(owner_total(&source), 11_054, "primitive source total");
@@ -1970,10 +1958,13 @@ fn primitive_replacement_oracle(current: &str, prospective: &str) -> PrimitiveRe
             bytes: prepared_protocol,
         },
     ];
-    assert_effective_owner_mutations(&capi_rows, 166_882, "double-live CAPI");
+    // #241: 166_882 - (2 x 171 canonical) - 24 controller - 24 prepared edit = 166_492.
+    assert_effective_owner_mutations(&capi_rows, 166_492, "double-live CAPI");
 
     let graph_rows = graph_owners();
-    let graph_largest = owner_total(&graph_rows[7..15]);
+    // The eight graph-metadata rows begin after the five audio/effect rows. #241 removed the
+    // declarative control-queue and source-ring owners which formerly occupied indices zero/one.
+    let graph_largest = owner_total(&graph_rows[5..13]);
     assert_eq!(graph_largest, 49_167, "primitive graph metadata allocation");
     let source_largest = source
         .iter()
@@ -1994,7 +1985,9 @@ fn primitive_replacement_oracle(current: &str, prospective: &str) -> PrimitiveRe
         prospective_canonical_maximum,
     ];
     let largest = largest_candidates.into_iter().max().expect("largest owner");
-    assert_eq!(largest, 58_694, "primitive maximum-single authority");
+    // #241 canonical scratch: remove 29 locator bytes x 10, add 40 content-identity bytes x 10.
+    // 58_694 - 290 + 400 = 58_804.
+    assert_eq!(largest, 58_804, "primitive maximum-single authority");
     assert_effective_owner_mutations(
         &current_canonical_writer,
         largest,
@@ -2256,11 +2249,16 @@ fn external_primitive_double_live_oracle_drives_exact_and_one_below_c_caps() {
         "session_id = \"double-live-cap\"",
         1,
     );
-    // Re-pinned by issue #210 phase 2 (+342 = 9 tracks x 2 lanes x ", delay_samples = 0").
-    assert_eq!(session_toml.len(), 10_542, "current canonical fixture");
+    // #241 re-pin: deleting limits/rate/locator/mapping/region and flattening the source removes
+    // exactly 171 bytes from both documents; the session-ID replacement still removes 9 more.
+    assert_eq!(
+        session_toml.len(),
+        10_542 - 171,
+        "current canonical fixture"
+    );
     assert_eq!(
         prospective_toml.len(),
-        10_533,
+        10_533 - 171,
         "prospective canonical fixture"
     );
     let oracle = primitive_replacement_oracle(&session_toml, &prospective_toml);
@@ -2270,15 +2268,18 @@ fn external_primitive_double_live_oracle_drives_exact_and_one_below_c_caps() {
     // exists to check: a struct that grew is reported by both or by neither.
     // #210 phase 3: +2_688, the two input banks' growth over two live plans. See
     // `primitive_replacement_oracle` for the per-bank arithmetic.
-    assert_eq!(oracle.graph, 510_720);
+    // #241: 510_720 - 2 x (4_096 queue + 8_192 ring) - 2 x 200 = 485_744.
+    assert_eq!(oracle.graph, 485_744);
     assert_eq!(oracle.source_total, 22_108);
     assert_eq!(oracle.source_overhead, 5_724);
     assert_eq!(oracle.effect_state, 15_120);
     assert_eq!(oracle.effect_scratch, 432);
     // #210 phase 3: 2 x 9_963 (see `builtin_owners`).
     assert_eq!(oracle.builtin, 19_926);
-    assert_eq!(oracle.capi, 166_882);
-    assert_eq!(oracle.largest, 58_694);
+    // #241: 166_882 - (2 x 171 canonical) - 24 controller - 24 prepared edit = 166_492.
+    assert_eq!(oracle.capi, 166_492);
+    // #241: 58_694 - (29 x 10 locator) + (40 x 10 content identity) = 58_804.
+    assert_eq!(oracle.largest, 58_804);
 
     let rows = [
         ("graph", oracle.graph),
@@ -2308,7 +2309,7 @@ fn external_primitive_double_live_oracle_drives_exact_and_one_below_c_caps() {
         // SAFETY: These handles are uniquely owned until their matching destroy calls.
         unsafe {
             let (session, plan) = compile_c(&session_toml, &exact_limits);
-            assert_eq!(resources_c(plan), frozen_scratch_report(142_127));
+            assert_eq!(resources_c(plan), frozen_scratch_report(141_932));
             let request = command(1, 42, "double-live-cap");
             let mut response = [0xa5_u8; 4_096];
             assert_eq!(submit(session, &request, &mut response), RESULT_OK, "{row}");
@@ -2326,7 +2327,8 @@ fn external_primitive_double_live_oracle_drives_exact_and_one_below_c_caps() {
                 miso_engine_v2_render_f32_planar(plan, 0, &output),
                 RESULT_OK
             );
-            assert_eq!(resources_c(plan), frozen_scratch_report(142_118));
+            // The prospective session ID is nine bytes shorter than the current one.
+            assert_eq!(resources_c(plan), frozen_scratch_report(141_932 - 9));
             miso_engine_v2_session_destroy(session);
             miso_engine_v2_plan_destroy(plan);
         }

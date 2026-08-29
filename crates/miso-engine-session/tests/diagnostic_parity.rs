@@ -326,7 +326,9 @@ fn parse_canonical_and_compile_diagnostics_have_code_path_and_span_parity() {
             "source-content-uppercase",
             SourceContentIdentityFormat,
             "$.sources[0].content",
-            |s| s.sources[0].content.make_ascii_uppercase()
+            |s| {
+                s.sources[0].content[7..].make_ascii_uppercase();
+            }
         ),
         case!(
             "source-content-nonhex",

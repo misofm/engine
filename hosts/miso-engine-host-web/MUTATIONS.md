@@ -132,30 +132,23 @@ Every row below was applied, the named gate run, the red observed, and the tree 
 | `check-command-reason-vocabulary.py --self-test` (#151's typing half) | drop `observe()` from `MisoAudioWorkletHost`; drop `windowBlocks` from the declared subscription; add a `channel?` the implementation refuses; drop `frameSlot` from the declared binding; drop `reason` from the declared ack; add a binding field to the implementation the `.d.ts` does not declare | every one refused — the declaration is held to the shipped implementation's actual field sets, not to the issue's sketch |
 | `check-parameter-metadata-v1.py --self-test` | truncate `commandReasons` at `wrongState`; rename reason 10; renumber reason 11 to `12` | `command reasons` / `command reason values` — the exact shape of the shipped vocabulary drift |
 
-## Issue #207 — source introspection and the session map's shape
+## Issue #241 — source introspection follows the declaration
 
-The blocker: the browser ABI exposed track discovery (`console_track_count`/`console_track_id`,
-#137 D1) and **nothing at all** about sources. A headless consumer that compiled raw session TOML
-could not learn which sources the session declares, how many channels each carries, where its
-region starts or how long it is — so it could not feed the render loop it had just compiled, and
-rendering a session authored outside a typed builder was impossible. Six additive queries close
-that, and closing it means the session map's shape is now written out in five places: the Rust
-exports (which decide each field's width), the frozen export list, the worklet, the main-realm
-host's acknowledgement validator, and the `.d.ts` an SDK generates against.
+Issue #241 deletes the per-source rate and start frame, leaving exactly four queries:
+`source_count`, `source_id`, `source_channels`, and `source_frames`. The session-map row is exactly
+`{ id, channels, frames }`; the root session status remains the sole sample-rate authority.
 
-Every row below was applied, the named gate run, the red observed, and the tree restored. Host:
-`x86_64`, `-C target-feature=+avx2,+fma`, toolchain 1.97.1.
+Every product mutation below was applied to the working tree on 2026-08-29, the named gate was
+run, RED was observed, and the mutation was reverted.
 
 | gate | mutation | observed red |
 |---|---|---|
-| `check-session-map-shape.py --self-test` (the drift class) | ten in-memory mutations across all five spellings: an export added to the crate but missing from the shipped-export list; the worklet no longer calling one query; the worklet recording a field it does not post; a posted row losing a field; the host's `expectedFields` losing `sources`; `SESSION_SOURCE_FIELDS` going stale; the `.d.ts` map not declaring the list; the `.d.ts` narrowing a `u64` region to `number`; the `.d.ts` widening the ID off `string`; a new type minted as `…V1` against the #215 ruling | every one refused |
-| `check-session-map-shape.py` on a copied file tree (the #151 failure shape) | drop `"sources"` from the host's `sessionMap` `expectedFields` | `the host's session-map acknowledgement validator expects […] but the worklet posts […] — a mismatch fails the whole host with a sticky 255`. This is not a degraded map: an unexpected field fails **every** unsettled request, exactly as the `<= 9` reason cap did. `test-web-audioworklet.sh` performs it on disk, not only in memory |
-| `check-session-map-shape.py` on a copied file tree (the codegen drift) | `readonly frames: bigint;` → `readonly frames: number;` in the `.d.ts` | `MisoSessionSource.frames is declared 'number' but miso_engine_web_v1_source_frames returns u64, which is 'bigint' in JavaScript` — the width is derived from the Rust return type, so the declaration cannot drift from the export it describes |
-| `test-web-audioworklet.mjs` worklet source-binding tests | six mis-wired exports, one per run: a zero channel count; a channel count past `maximumSourceChannels`; a rate that is not the session rate; a zero region length; an empty source ID; an ID longer than staging | each fails initialization with `255` instead of reaching a consumer as a plausible number. Every read is checked against something compilation already guarantees, which is what makes a mis-wired export loud |
-| `test-web-audioworklet.mjs` (worklet, on disk) | delete the `sampleRateHz !== this.sampleRateHz` leg from the worklet's source binding | the mis-wired-rate case is admitted and the suite fails its `255` assertion; run as `MISO_ENGINE_WEB_WORKLET_TEST_MODULE=<mutated>` against the shipped suite |
-| `tests::session_source_introspection_is_canonical_ordered_shaped_and_bounded` | index the normalized source list in reverse — `sources.get(index)` → `sources.iter().rev().nth(index)` in both `session_source_id` and `session_source_shape` | `["zeta", "mid", "alpha"]` where `["alpha", "mid", "zeta"]` is required. The fixture declares its three sources deliberately unsorted, and for it the reversed order *is* the declaration order, so this is the "reports the order the file happened to use" defect exactly |
-| `tests::raw_ffi_source_introspection_mirrors_the_track_queries` | give `source_start_frame` an out-of-range sentinel of its own: `map_or(0, …)` → `map_or(u64::MAX, …)` | `assertion left == right failed: left: 18446744073709551615, right: 0`. Source `zeta` declares `start_sample = 0`, so any sentinel this export invents collides with a real answer; the test asserts the zero at index 2 *and* at index 3, which is what makes `source_count` the bounds authority rather than a convenience |
-| `direct-oracle.mjs` (real module, real compiled session) | copy the canonical *track* ID out of `copy_session_source_id` instead of the source ID | `Expected values to be strictly equal: 'track' !== 'fixture-source'` — the oracle addresses the source by the ID the engine reports, so a query that reports the wrong list is caught against the real module. This is the leg the JavaScript suite's fake exports structurally cannot prove |
+| `check-session-map-shape.py --self-test` | fifteen in-memory mutations across the Rust exports, exact export list, worklet reads/posts, main-realm field sets, and `.d.ts` types | all 15 refused; the normal gate then reported one shape across all spellings |
+| `check-web-audioworklet.sh` frozen export set | restore `miso_engine_web_v1_source_sample_rate(handle,index)->u32` in the Rust FFI | RED with an exact export diff naming `+miso_engine_web_v1_source_sample_rate`; a deleted query cannot remain as an unused compatibility export |
+| `test-web-audioworklet.mjs` source-binding tests | five mis-wired surviving reads: zero channels, channels past the configured maximum, zero frames, empty ID, and ID longer than staging | each fails initialization with sticky `255`; the unmutated suite reports `web AudioWorklet hermetic tests passed` |
+| `check-session-map-shape.py` copied-tree width mutation | `readonly frames: bigint` → `number` | the gate derives JavaScript `bigint` from the Rust `u64` export and refuses the declaration drift |
+| `tests::session_source_introspection_is_canonical_ordered_shaped_and_bounded` | reverse the normalized source list | declaration order leaks as `["zeta", "mid", "alpha"]` where canonical `["alpha", "mid", "zeta"]` is required |
+| `direct-oracle.mjs` (real module/session) | copy the canonical track ID instead of the source ID | `track` differs from `fixture-source`; the real-module oracle addresses the source by the ID introspection reports |
 
 ## Issue #210 phase 1 — solo in place
 

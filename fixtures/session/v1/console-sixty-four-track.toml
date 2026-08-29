@@ -11,8 +11,7 @@
 # post-matrix route to the main output. No two tracks share a coefficient set -- identical strips
 # would let the measurement collapse work a real console cannot collapse.
 #
-# `limits.memory_bytes` is raised from the nine-track fixture's 16 MiB because sixty-four prepared
-# strips with two effects each do not fit inside it.
+# Deployment memory budgets are host policy; this shared document carries no device-tuning table.
 schema_version = 1
 session_id = "console-sixty-four-track"
 revision = 1

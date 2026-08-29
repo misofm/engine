@@ -1223,5 +1223,12 @@ mod tests {
             3
         );
         assert_eq!(SessionEditOpcode::SetAutomationSegments as u16, 0x0603);
+        for deleted in [0x0006, 0x0102, 0x0104] {
+            assert_eq!(
+                SessionEditOpcode::from_raw(deleted),
+                None,
+                "deleted #241 opcode 0x{deleted:04x} must remain unallocated"
+            );
+        }
     }
 }

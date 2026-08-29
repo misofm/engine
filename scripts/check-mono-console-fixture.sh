@@ -63,7 +63,8 @@ mono_sources=$(count 'left_source_channel = 0, right_source_channel = 0')
 [[ "$(count 'right_source_channel = 1')" == 0 ]] || fail 'a stereo source mapping survived'
 # ...and the source still declares two channels, which is what lets the half-mono bench row put
 # `right_source_channel = 1` back on its odd tracks in code.
-grep -Fq 'mapping = { channel_count = 2,' "$fixture" || fail 'the source must still declare two channels'
+grep -Fq 'channels = 2, bit_depth = "32f"' "$fixture" ||
+    fail 'the source must still declare two float channels'
 
 # 3. The DESIGNED term, both halves.
 symmetric_builtins=$(printf '%s\n' "$tracks_only" |
@@ -115,7 +116,7 @@ done
 grep -Fqx 'sample_rate_hz = 48000' "$fixture" || fail 'sample rate is not the launch rate'
 grep -Fqx 'quantum_frames = 128' "$fixture" || fail 'quantum is not the launch quantum'
 grep -Fqx 'session_id = "console-sixty-four-track-mono"' "$fixture" || fail 'session id changed'
-grep -Fq 'identity = "sha256:console-sixty-four-track"' "$fixture" ||
+grep -Fq 'content = "sha256:aa28dfa39be77bff07309fb8d60983556232291660332ecb949dc3082a971f75"' "$fixture" ||
     fail 'the mono session must be fed the standing fixture source'
 cmp -s <(grep -F 'sources = [' -A1 "$fixture") <(grep -F 'sources = [' -A1 "$standing") ||
     fail 'the source declaration drifted from the standing fixture'

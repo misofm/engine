@@ -349,23 +349,14 @@ export interface MisoCommandAck {
 /// sprint's close, and a type minted now has nothing pinned against it to break.
 ///
 /// This is what the *compiled* session knows about a source -- not what a decoder will eventually
-/// find in a file. `frames` and `startFrame` are the declared region, and preparation positioned
-/// the source's ring at `startFrame`: a driver that submitted from `0` into a session whose region
-/// starts later would be feeding frames the ring is not waiting for.
+/// find in a file. Every source is declared at the session rate and spans its full content from
+/// frame zero, so only its channel count and total frame count belong in the per-source map.
 export interface MisoSessionSource {
   /// Stable source ID -- the string `submitSource`/`seekSource` address the source by.
   readonly id: string;
   /// Declared source channels. Always at least one, and never above `maximumSourceChannels`.
   readonly channels: number;
-  /// Declared native source rate in hertz.
-  ///
-  /// Always the session rate for a compiled session: V1 has no sample-rate conversion, so
-  /// preparation refuses a source that declares anything else. It is reported because the session
-  /// declares it per source, so a consumer reads the declaration rather than assuming the rule.
-  readonly sampleRateHz: number;
-  /// First source sample frame of the declared region. Zero is an ordinary value.
-  readonly startFrame: bigint;
-  /// Length of the declared region in source sample frames. Always at least one.
+  /// Full content length in source sample frames. Always at least one.
   readonly frames: bigint;
 }
 

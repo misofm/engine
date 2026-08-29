@@ -1388,6 +1388,10 @@ mod tests {
         env!("CARGO_MANIFEST_DIR"),
         "/../../fixtures/native-pcm-runner/v1"
     );
+    const STEM_IDENTITY_FIXTURES: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../fixtures/stem-identity/v1"
+    );
     static TEMP_ID: AtomicU64 = AtomicU64::new(0);
 
     fn temp_dir(label: &str) -> PathBuf {
@@ -1916,6 +1920,60 @@ mod tests {
         );
         assert_eq!(engine.compile_calls, 0);
         fs::remove_dir_all(temp).expect("remove temp");
+    }
+
+    #[test]
+    fn resolver_rejects_integer_and_float_depth_mismatches_both_directions_precompile() {
+        let base =
+            fs::read_to_string(Path::new(FIXTURES).join("rf64-48000.toml")).expect("f32 session");
+        let pcm16_identity =
+            "sha256:0320b11905302eb840cd06ab90b0549114e6ee1c89233e928ebe21b8c4964ef2";
+        for (label, source, session, expected_declared_depth) in [
+            (
+                "f32-declared-integer",
+                Path::new(FIXTURES).join("rf64-48000.wav"),
+                base.replacen("bit_depth = \"32f\"", "bit_depth = 16", 1),
+                "16",
+            ),
+            (
+                "integer-declared-f32",
+                Path::new(STEM_IDENTITY_FIXTURES).join("pcm16-stereo-boundaries.wav"),
+                base.replacen(
+                    base.lines()
+                        .find(|line| line.contains("content = \"sha256:"))
+                        .and_then(|line| line.split("content = \"").nth(1))
+                        .and_then(|tail| tail.split('"').next())
+                        .expect("base content identity"),
+                    pcm16_identity,
+                    1,
+                )
+                .replacen("frames = 514", "frames = 3", 1),
+                "32f",
+            ),
+        ] {
+            let temp = temp_dir(label);
+            fs::copy(source, temp.join("source.wav")).expect("copy source");
+            fs::write(temp.join("session.toml"), session).expect("write session");
+            let arguments = RunnerArgs {
+                session: temp.join("session.toml"),
+                source_root: temp.clone(),
+                frames: 1_024,
+                output: temp.join("out"),
+            };
+            let mut engine = MockEngine::default();
+            let output = MemoryOutput::default();
+            let failure = run_with(&arguments, &mut engine, &output).expect_err(label);
+            assert_eq!(
+                failure.code, "source.depth",
+                "declared {expected_declared_depth}"
+            );
+            assert_eq!(
+                engine.compile_calls, 0,
+                "declared {expected_declared_depth}"
+            );
+            assert_eq!(output.begin_calls.load(Ordering::Relaxed), 0);
+            fs::remove_dir_all(temp).expect("remove temp");
+        }
     }
 
     #[test]

@@ -532,7 +532,9 @@ fn source_identity_and_shape_category_has_16_distinct_cases() {
     );
     model_case(
         &mut count,
-        |s| s.sources[0].content.make_ascii_uppercase(),
+        |s| {
+            s.sources[0].content[7..].make_ascii_uppercase();
+        },
         DiagnosticCode::SourceContentIdentityFormat,
         "$.sources[0].content",
     );

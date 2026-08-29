@@ -81,7 +81,8 @@ RIFF/WAVE and RF64/WAVE through the engine's own `miso-engine-source` parser, se
 sample through the rules above, optionally emits the canonical preimage, and prints the identity.
 It never retains a complete stem.
 
-Raw input is signed, little-endian PCM at the explicitly supplied shape:
+Raw input is little-endian canonical PCM at the explicitly supplied shape: signed two's-complement
+for depths 16/24, or raw IEEE-754 bit patterns for `32f`:
 
 ```sh
 cargo run --locked -p miso-engine-stem-hasher -- raw \

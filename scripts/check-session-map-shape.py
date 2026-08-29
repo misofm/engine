@@ -392,27 +392,23 @@ def self_test() -> None:
     mutations = [
         (
             "an export is added to the crate without reaching the shipped-export gate",
-            mutate(
-                EXPORT_GATE,
-                "  miso_engine_web_v1_source_start_frame \\\n",
-                "",
-            ),
+            mutate(EXPORT_GATE, "  miso_engine_web_v1_source_frames \\\n", ""),
         ),
         (
             "the worklet stops reading one query",
             mutate(
                 WORKLET_JS,
-                "      const startFrame = this.exports."
-                "miso_engine_web_v1_source_start_frame(this.handle, index);\n",
-                "      const startFrame = 0n;\n",
+                "      const frames = this.exports."
+                "miso_engine_web_v1_source_frames(this.handle, index);\n",
+                "      const frames = 0n;\n",
             ),
         ),
         (
             "the worklet records a field it does not post",
             mutate(
                 WORKLET_JS,
-                "this.sources.push({ id, channels, sampleRateHz, startFrame, frames });",
-                "this.sources.push({ id, channels, sampleRateHz, startFrame });",
+                "this.sources.push({ id, channels, frames });",
+                "this.sources.push({ id, channels });",
             ),
         ),
         (
@@ -431,9 +427,8 @@ def self_test() -> None:
             "the host validates a stale per-source field set",
             mutate(
                 HOST_JS,
-                'const SESSION_SOURCE_FIELDS = ["id", "channels", "sampleRateHz", '
-                '"startFrame", "frames"];',
-                'const SESSION_SOURCE_FIELDS = ["id", "channels", "startFrame", "frames"];',
+                'const SESSION_SOURCE_FIELDS = ["id", "channels", "frames"];',
+                'const SESSION_SOURCE_FIELDS = ["id", "channels"];',
             ),
         ),
         (
@@ -445,7 +440,7 @@ def self_test() -> None:
             ),
         ),
         (
-            "the .d.ts narrows a u64 region to a JavaScript number",
+            "the .d.ts narrows a u64 frame count to a JavaScript number",
             mutate(HOST_DTS, "  readonly frames: bigint;", "  readonly frames: number;"),
         ),
         (

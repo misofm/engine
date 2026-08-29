@@ -2578,6 +2578,39 @@ mod tests {
     }
 
     #[test]
+    fn deleted_source_and_limits_opcodes_are_typed_refusals() {
+        let source = source();
+        let edit = SessionEdit::SetSourceContent {
+            source_id: source.id,
+            content: source.content,
+            channels: source.channels,
+            bit_depth: source.bit_depth,
+            frames: source.frames,
+        };
+        let canonical = encode(core::slice::from_ref(&edit));
+        const OPCODE_TLV_PREFIX: [u8; 8] = [1, 0, 2, 1, 2, 0, 0, 0];
+        let opcode_at = canonical
+            .windows(OPCODE_TLV_PREFIX.len() + 2)
+            .position(|window| {
+                window[..OPCODE_TLV_PREFIX.len()] == OPCODE_TLV_PREFIX
+                    && window[OPCODE_TLV_PREFIX.len()..] == 0x0103_u16.to_le_bytes()
+            })
+            .expect("canonical source-content opcode TLV")
+            + OPCODE_TLV_PREFIX.len();
+        let codec = ProtocolCodec::default();
+        for deleted in [0x0006_u16, 0x0102, 0x0104] {
+            let mut bytes = canonical.clone();
+            bytes[opcode_at..opcode_at + 2].copy_from_slice(&deleted.to_le_bytes());
+            assert_eq!(
+                codec
+                    .decode_session_transaction(&bytes, &mut DecodeScratch::new(&mut [0_u16; 16]),),
+                Err(DecodeError::InvalidTlv),
+                "deleted opcode 0x{deleted:04x} must refuse before payload dispatch"
+            );
+        }
+    }
+
+    #[test]
     fn every_track_effect_opcode_and_nested_variant_round_trips_canonically() {
         let mut full_track = track();
         let parameters = vec![
