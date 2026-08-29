@@ -94,6 +94,40 @@ pub const SOURCE_RING_RESERVE_QUANTA: u32 = 2;
 /// output PCM buffer, and `lifecycle` dispose and the boot-while-live refusal.
 pub const ERROR_PHASES: [&str; 6] = ["asset", "boot", "source", "render", "output", "lifecycle"];
 
+/// Every function the module exports, sorted, exactly as `scripts/check-web-audioworklet.sh`
+/// freezes the set.
+///
+/// Publishing the whole surface -- not just the four boot calls -- is what lets a JavaScript
+/// consumer name an export without typing a string. `memory` is deliberately absent: it is the
+/// module's linear memory, not a call, and a consumer reaches it as `instance.exports.memory`.
+pub const EXPORTS: [&str; 25] = [
+    "miso_engine_web_v1_abi_version",
+    "miso_engine_web_v1_boot",
+    "miso_engine_web_v1_boot_diagnostic_bytes",
+    "miso_engine_web_v1_boot_options_ptr",
+    "miso_engine_web_v1_boot_result",
+    "miso_engine_web_v1_buffer_capacity",
+    "miso_engine_web_v1_buffer_ptr",
+    "miso_engine_web_v1_command_report_ptr",
+    "miso_engine_web_v1_command_submit",
+    "miso_engine_web_v1_console_track_count",
+    "miso_engine_web_v1_console_track_id",
+    "miso_engine_web_v1_dispose",
+    "miso_engine_web_v1_document_ptr",
+    "miso_engine_web_v1_meter_header_ptr",
+    "miso_engine_web_v1_meter_lease",
+    "miso_engine_web_v1_meter_poll",
+    "miso_engine_web_v1_render",
+    "miso_engine_web_v1_resource_ptr",
+    "miso_engine_web_v1_source_channels",
+    "miso_engine_web_v1_source_count",
+    "miso_engine_web_v1_source_frames",
+    "miso_engine_web_v1_source_id",
+    "miso_engine_web_v1_source_seek",
+    "miso_engine_web_v1_source_submit",
+    "miso_engine_web_v1_status_ptr",
+];
+
 /// The boot staging sequence, by export name, in call order.
 pub const STAGING_SEQUENCE: [&str; 4] = [
     "miso_engine_web_v1_abi_version",
@@ -493,6 +527,14 @@ pub fn render() -> String {
         ));
     }
     out.push_str("],\n");
+    out.push_str("  \"exports\": [\n");
+    for (index, export) in EXPORTS.iter().enumerate() {
+        out.push_str(&format!(
+            "    \"{export}\"{}\n",
+            comma(index, EXPORTS.len())
+        ));
+    }
+    out.push_str("  ],\n");
     out.push_str("  \"structures\": {\n");
     render_structure(
         &mut out,

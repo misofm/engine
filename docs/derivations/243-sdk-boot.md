@@ -22,20 +22,36 @@ sorted literal list, so the two spellings of "six" (the list and the error messa
 against the filesystem on every run, and the prose in `DEPLOYMENT.md` is the only copy that a gate
 does not read — it is updated in the same commit and named here so the pair is auditable.
 
-## 2. `scripts/sweep.sh`: 96 rows → 97
+## 2. `scripts/sweep.sh`: 96 rows → 99
 
-One row added: `row scripts/check-abi-layout-v1.py --self-test`, placed immediately after the
-parameter-metadata row because the two gates validate the two documents the same generator emits.
+Three rows added, each next to the gate it belongs beside:
 
-`96 + 1 = 97`, and `grep -c '^row ' scripts/sweep.sh` reports 97 on the resulting tree.
+| row | placed after | why there |
+|---|---|---|
+| `check-abi-layout-v1.py --self-test` | `check-parameter-metadata-v1.py` | the two gates validate the two documents one generator emits |
+| `check-sdk-generated.sh` | `check-abi-layout-v1.py` | it re-derives the same two documents, one layer further down the chain |
+| `check-sdk-headless.sh` | `check-web-audioworklet.sh` | both build the release artifact and check something against it, so they sit in the build-bound tail |
 
-The header's second sentence also moved, from "the repo has 96 check-*/test-* scripts" to 101. The
+`96 + 3 = 99`, and `grep -c '^row ' scripts/sweep.sh` reports 99 on the resulting tree.
+
+The header's second sentence also moved, from "the repo has 96 check-*/test-* scripts" to 103. The
 old sentence was already inaccurate — it conflated the row count with the script count — and the
-new number is the direct count `ls scripts/ | grep -E '^(check|test)-' | wc -l` = 101. The
-difference `101 − 97 = 4` is not a coverage gap: five scripts carry no row of their own
-(`check-capi-object-symbols-v1.py`, `check-capi-qualification-evidence-v1.py`,
-`check-flac-decoder.mjs`, `check-web-boot-budget.mjs`, `test-web-audioworklet.mjs`), each driven by
-a rowed entry point, and one rowed script contributes two rows.
+new number is the direct count `ls scripts/ | grep -E '^(check|test)-' | wc -l` = 103 (100 before
+this change, plus the three new gates). The difference `103 − 99 = 4` is not a coverage gap: five
+scripts carry no row of their own (`check-capi-object-symbols-v1.py`,
+`check-capi-qualification-evidence-v1.py`, `check-flac-decoder.mjs`, `check-web-boot-budget.mjs`,
+`test-web-audioworklet.mjs`), each driven by a rowed entry point, and one rowed script contributes
+two rows.
+
+## 2a. The export set: 25 functions
+
+`miso-engine-v2-abi-layout.json` publishes the whole export surface so no SDK call site types a
+symbol name as a string literal. The count is not chosen: it is
+`scripts/check-web-audioworklet.sh`'s own `expected_exports` list — which that gate proves against
+the disassembled module — minus `memory`, which is linear memory rather than a call.
+`26 − 1 = 25`. `tools/miso-engine-parameter-metadata/tests/abi_layout.rs` reads that list out of
+the gate script itself and requires the two to be one list, so the number cannot drift on either
+side without a red.
 
 ## 3. `SOURCE_RING_RESERVE_QUANTA = 2`, and eval 2's `9906 = 78 × 127`
 

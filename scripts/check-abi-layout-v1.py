@@ -185,7 +185,7 @@ def validate(document: object) -> None:
     require(isinstance(document, dict), "the document is a JSON object")
     assert isinstance(document, dict)
     require(set(document) == {"schema", "abiVersion", "stagingSequence", "errorPhases",
-                              "structures", "commandRecord", "constants"},
+                              "exports", "structures", "commandRecord", "constants"},
             f"top-level keys are exact: {sorted(document)}")
     require(document["schema"] == SCHEMA, f"schema is {SCHEMA}")
     require(document["abiVersion"] == ABI_VERSION,
@@ -197,6 +197,17 @@ def validate(document: object) -> None:
     require(phases == ERROR_PHASES, f"errorPhases is {ERROR_PHASES}")
     require(not RETIRED_PHASES.intersection(phases),
             "errorPhases carries a retired two-phase-lifecycle spelling")
+
+    exports = document["exports"]
+    require(isinstance(exports, list) and len(exports) == 25,
+            f"exports names the 25 module functions, not {len(exports)}")
+    require(exports == sorted(exports), "exports is sorted")
+    require(len(set(exports)) == len(exports), "exports has no duplicate")
+    require("memory" not in exports, "memory is linear memory, not an exported call")
+    require(all(name.startswith("miso_engine_web_v1_") for name in exports),
+            "every export carries the frozen prefix")
+    for step in STAGING_SEQUENCE:
+        require(step in exports, f"the staging sequence's {step} is an export")
 
     structures = document["structures"]
     require(isinstance(structures, dict), "structures is an object")
@@ -303,6 +314,12 @@ def self_test() -> int:
     def hole_in_layout(document: dict) -> None:
         document["structures"]["commandReport"]["fields"][3]["offset"] = 16
 
+    def drop_export(document: dict) -> None:
+        document["exports"].pop()
+
+    def unsorted_exports(document: dict) -> None:
+        document["exports"].reverse()
+
     def three_call_boot(document: dict) -> None:
         document["stagingSequence"].remove("miso_engine_web_v1_boot_options_ptr")
 
@@ -335,6 +352,8 @@ def self_test() -> int:
         ("a boot option is dropped", drop_field),
         ("a status word is widened", widen_field),
         ("a structure gains a hole", hole_in_layout),
+        ("an export is dropped", drop_export),
+        ("the export set is unsorted", unsorted_exports),
         ("the staging sequence drops back to three calls", three_call_boot),
         ("a retired lifecycle phase returns", retired_phase),
         ("a command-record field moves", move_record_field),
