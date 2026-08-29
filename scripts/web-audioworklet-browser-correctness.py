@@ -29,6 +29,9 @@ EXPECTED_ARTIFACTS = (
     "miso-engine-v2-audio-worklet-host.d.ts",
     # Issue #137 D4: the parameter metadata ships with the module and is sealed with it.
     "miso-engine-v2-parameter-metadata.json",
+    # Issue #243: so does the ABI layout. Both are emitted by one generator from the same engine,
+    # so a seal that covered one and not the other would attest to half a release.
+    "miso-engine-v2-abi-layout.json",
 )
 SOURCE_SEAL_PATHS = (
     "Cargo.toml",
@@ -561,7 +564,10 @@ def validate_result(result: dict, source: dict, expected: dict) -> None:
 
 def check_oracle(artifacts: pathlib.Path) -> None:
     if sorted(path.name for path in artifacts.iterdir()) != sorted(EXPECTED_ARTIFACTS):
-        raise ValueError("artifact directory is not the exact frozen four-file set")
+        raise ValueError(
+            f"artifact directory is not the exact frozen "
+            f"{len(EXPECTED_ARTIFACTS)}-file set"
+        )
     runtime = shutil.which("node") or shutil.which("bun")
     if runtime is None:
         raise RuntimeError("Node.js-compatible runtime required for raw-Wasm oracle")
@@ -580,7 +586,10 @@ def check_oracle(artifacts: pathlib.Path) -> None:
 def run(args: argparse.Namespace, source: dict, expected: dict) -> None:
     artifacts = args.artifacts.resolve()
     if sorted(path.name for path in artifacts.iterdir()) != sorted(EXPECTED_ARTIFACTS):
-        raise ValueError("artifact directory is not the exact frozen four-file set")
+        raise ValueError(
+            f"artifact directory is not the exact frozen "
+            f"{len(EXPECTED_ARTIFACTS)}-file set"
+        )
     if args.output.exists() or args.output.with_suffix(args.output.suffix + ".sha256").exists():
         raise FileExistsError("refusing to overwrite browser evidence")
     require_clean_candidate()
