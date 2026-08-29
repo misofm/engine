@@ -49,6 +49,52 @@ fn boot_options(quantum: u32) -> WebBootOptions {
     }
 }
 
+fn retained_projection(document: &[u8], options: WebBootOptions) -> u64 {
+    let model = parse_host_session(core::str::from_utf8(document).expect("UTF-8 session"))
+        .expect("accepted host session");
+    let compiled = compile_host_model(
+        &model,
+        CompileCaps {
+            max_compiled_model_bytes: u64::MAX,
+            max_requested_runtime_bytes: u64::MAX,
+            max_single_allocation_bytes: u64::MAX,
+            max_queue_items: u64::MAX,
+            max_source_ring_frames: u64::MAX,
+            max_source_ring_bytes: u64::MAX,
+        },
+    )
+    .expect("compiled host session");
+    let shape = compiled_session_shape(&compiled).expect("compiled session shape");
+    let source_ring_frames = if options.source_ring_frames == 0 {
+        default_source_ring_frames(shape.sample_rate_hz, shape.quantum_frames)
+    } else {
+        options.source_ring_frames
+    };
+    let projection = project_buffers(
+        u32::try_from(document.len()).expect("bounded fixture document"),
+        shape.sample_rate_hz,
+        shape.quantum_frames,
+        shape.maximum_source_channels,
+        shape.longest_source_id_bytes,
+        options,
+    )
+    .expect("bridge projection");
+    projected_retained_bytes(
+        &compiled,
+        source_ring_frames,
+        projection.report.bridge_retained_bytes,
+    )
+    .expect("retained projection")
+}
+
+fn exact_retained_report_total(resources: &WebResourceReport) -> u64 {
+    resources
+        .bridge_retained_bytes
+        .checked_add(resources.graph_session_plus_plan_bytes)
+        .and_then(|total| total.checked_add(resources.source_total_bytes))
+        .expect("independent exact retained sum")
+}
+
 #[test]
 fn frozen_layouts_and_values_are_exact() {
     assert_eq!(ABI_VERSION, 0x0002_0000);
@@ -376,10 +422,13 @@ fn compile_resource_caps_are_inclusive_and_one_below_rejects() {
         .err()
         .expect("one byte below parse projection");
     assert_eq!(failure.result(), RESULT_REFUSED_BUDGET);
-    assert!(
-        failure
-            .diagnostic()
-            .starts_with(b"host.budget.parse_projection\t")
+    assert_eq!(
+        failure.diagnostic(),
+        format!(
+            "host.budget.parse_projection\t$.maximum_memory_bytes[projected_bytes={parse_projection},budget_bytes={}]\n",
+            parse_projection - 1
+        )
+        .as_bytes()
     );
 }
 
@@ -484,11 +533,7 @@ fn exact_retained_total_is_checked_as_one_budget_not_independent_caps() {
     )
     .expect("baseline boot");
     let resources = baseline.resources();
-    let exact = resources
-        .bridge_retained_bytes
-        .checked_add(resources.graph_session_plus_plan_bytes)
-        .and_then(|total| total.checked_add(resources.source_total_bytes))
-        .expect("independent exact retained sum");
+    let exact = exact_retained_report_total(resources);
     drop(baseline);
     let failure = AudioWorkletEngineHost::boot(
         document.as_bytes(),
@@ -501,11 +546,101 @@ fn exact_retained_total_is_checked_as_one_budget_not_independent_caps() {
     .err()
     .expect("one byte below exact aggregate must refuse");
     assert_eq!(failure.result(), RESULT_REFUSED_BUDGET);
-    assert!(
-        failure
-            .diagnostic()
-            .starts_with(b"host.budget.retained_exact\t")
+    assert_eq!(
+        failure.diagnostic(),
+        format!(
+            "host.budget.retained_exact\t$.maximum_memory_bytes[exact_bytes={exact},budget_bytes={}]\n",
+            exact - 1
+        )
+        .as_bytes()
     );
+}
+
+#[test]
+fn retained_projection_budget_diagnostic_names_projected_bytes() {
+    let document = one_track_session(128);
+    let options = WebBootOptions {
+        source_ring_frames: 1 << 20,
+        ..boot_options(128)
+    };
+    let projection = retained_projection(document.as_bytes(), options);
+    let budget = projection - 1;
+    let failure = AudioWorkletEngineHost::boot(
+        document.as_bytes(),
+        WebBootOptions {
+            maximum_memory_bytes: budget,
+            ..options
+        },
+    )
+    .err()
+    .expect("one byte below retained projection must refuse before preparation");
+    assert_eq!(failure.result(), RESULT_REFUSED_BUDGET);
+    assert_eq!(
+        failure.diagnostic(),
+        format!(
+            "host.budget.retained_projection\t$.maximum_memory_bytes[projected_bytes={projection},budget_bytes={budget}]\n"
+        )
+        .as_bytes()
+    );
+}
+
+#[test]
+fn representative_retained_projection_tracks_the_post_prepare_exact_aggregate() {
+    // #239 ruling 5459221452 authorizes an A5 boundary that deliberately leaves the
+    // transactionally rolled-back preparation delta out of the pre-prepare projection. These
+    // three shipped shapes pin that drift: the largest measured `gap / projection` is the
+    // console's 2,679,317 / 409,396 = 6.545. Seven leaves 6.9% headroom for harmless
+    // allocator/layout movement while still making any material projector drift an explicit
+    // review and re-pin. In particular, dropping a projected retained row cannot hide behind the
+    // deliberately broad rollback allowance.
+    const MAXIMUM_PREPARATION_GAP_MULTIPLIER: u64 = 7;
+    let representatives = [
+        (
+            "identity-one-track",
+            one_track_session(128),
+            WebBootOptions {
+                source_ring_frames: 128,
+                ..boot_options(128)
+            },
+        ),
+        (
+            "parametric-eq-nine-track",
+            include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.toml").to_owned(),
+            WebBootOptions {
+                source_ring_frames: 512,
+                ..boot_options(128)
+            },
+        ),
+        (
+            "console-sixty-four-track",
+            include_str!("../../../fixtures/session/v1/console-sixty-four-track.toml").to_owned(),
+            WebBootOptions {
+                source_ring_frames: 512,
+                console_command_queue_records: u64::from(DEFAULT_COMMAND_QUEUE_RECORDS),
+                console_meter_blocks: u64::from(DEFAULT_METER_BLOCKS),
+                ..boot_options(128)
+            },
+        ),
+    ];
+
+    for (name, document, options) in representatives {
+        let projection = retained_projection(document.as_bytes(), options);
+        let host =
+            AudioWorkletEngineHost::boot(document.as_bytes(), options).unwrap_or_else(|failure| {
+                panic!("{name}: {}", String::from_utf8_lossy(failure.diagnostic()))
+            });
+        let exact = exact_retained_report_total(host.resources());
+        let gap = exact.checked_sub(projection).unwrap_or_else(|| {
+            panic!("{name}: projection {projection} exceeds exact retained aggregate {exact}")
+        });
+        let maximum_gap = projection
+            .checked_mul(MAXIMUM_PREPARATION_GAP_MULTIPLIER)
+            .expect("bounded representative projection");
+        assert!(
+            gap <= maximum_gap,
+            "{name}: exact/projection drift gap {gap} exceeds documented bound {maximum_gap} (projection {projection}, exact {exact})"
+        );
+    }
 }
 
 #[test]

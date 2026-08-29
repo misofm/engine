@@ -790,7 +790,7 @@ impl AudioWorkletEngineHost {
             .checked_mul(PARSE_TRANSIENT_MULTIPLIER)
             .ok_or_else(|| BootFailure::fixed(RESULT_REFUSED_BUDGET, "host.budget.arithmetic"))?;
         if parse_projection > memory_budget {
-            return Err(BootFailure::budget(
+            return Err(BootFailure::projected_budget(
                 "host.budget.parse_projection",
                 parse_projection,
                 memory_budget,
@@ -851,7 +851,7 @@ impl AudioWorkletEngineHost {
             projection.report.bridge_retained_bytes,
         )?;
         if retained_projection > memory_budget {
-            return Err(BootFailure::budget(
+            return Err(BootFailure::projected_budget(
                 "host.budget.retained_projection",
                 retained_projection,
                 memory_budget,
@@ -861,7 +861,7 @@ impl AudioWorkletEngineHost {
         let (ready, resources) = compile_ready(session, &caps, options, projection.report)?;
         let exact_retained = exact_retained_bytes(&resources)?;
         if exact_retained > memory_budget {
-            return Err(BootFailure::budget(
+            return Err(BootFailure::exact_budget(
                 "host.budget.retained_exact",
                 exact_retained,
                 memory_budget,
@@ -2352,11 +2352,21 @@ impl BootFailure {
         }
     }
 
-    fn budget(code: &str, projected: u64, budget: u64) -> Self {
+    fn projected_budget(code: &str, projected: u64, budget: u64) -> Self {
         Self {
             result: RESULT_REFUSED_BUDGET,
             diagnostic: format!(
                 "{code}\t$.maximum_memory_bytes[projected_bytes={projected},budget_bytes={budget}]\n"
+            )
+            .into_bytes(),
+        }
+    }
+
+    fn exact_budget(code: &str, exact: u64, budget: u64) -> Self {
+        Self {
+            result: RESULT_REFUSED_BUDGET,
+            diagnostic: format!(
+                "{code}\t$.maximum_memory_bytes[exact_bytes={exact},budget_bytes={budget}]\n"
             )
             .into_bytes(),
         }
