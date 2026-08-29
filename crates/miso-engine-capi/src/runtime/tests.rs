@@ -100,8 +100,7 @@ const ALL_COMMAND_RESPONSE_VECTORS: [&str; 11] = [
 fn generated_parity_session(track_count: usize, sample_rate_hz: u32) -> String {
     let mut model = parse_session_toml(SESSION).expect("accepted parity base");
     model.sample_rate_hz = sample_rate_hz;
-    model.sources[0].sample_rate_hz = sample_rate_hz;
-    model.sources[0].mapping.region.length_samples = 192;
+    model.sources[0].frames = 192;
     if track_count == 1 {
         model.tracks.truncate(1);
         model.routes.truncate(1);
@@ -567,11 +566,13 @@ fn structural_command_keeps_protocol_plan_provider_and_event_epochs_atomic() {
     );
 
     let model = parse_session_toml(SESSION).expect("source-changing model");
-    let mut mapping = model.sources[0].mapping.clone();
-    mapping.region.length_samples = 512;
-    let second_edit = miso_engine_protocol::SessionEdit::SetSourceMapping {
+    let source = &model.sources[0];
+    let second_edit = miso_engine_protocol::SessionEdit::SetSourceContent {
         source_id: model.sources[0].id.clone(),
-        mapping,
+        content: source.content.clone(),
+        channels: source.channels,
+        bit_depth: source.bit_depth,
+        frames: 512,
     };
     let second_request = command_bytes_at_revision(
         2,
@@ -1552,7 +1553,7 @@ fn direct_and_c_render_match_one_and_ten_tracks_across_launch_rates() {
 fn barrier_schedule_separates_one_source_producer_from_exclusive_render() {
     let mut model =
         parse_session_toml(&generated_parity_session(1, 48_000)).expect("concurrency session");
-    model.sources[0].mapping.region.length_samples = 1_024;
+    model.sources[0].frames = 1_024;
     let session = miso_engine_session::canonical_session_toml(&model).expect("canonical");
     let children = compile_children(&session, limits()).expect("concurrent children");
     let session = Box::into_raw(Box::new(crate::Session::new(

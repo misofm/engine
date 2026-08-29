@@ -31,7 +31,7 @@ use miso_engine_host_core::{
     HostConsoleRequest, HostPrepareCaps, HostShapePolicy, PrepareDiagnostics, PrepareRejection,
     PreparedHost, SourceControlError, SourceSubmission, compile_host_model, compiled_session_shape,
     control_table_bytes, parse_host_session, prepare_host_runtime_with_console,
-    source_id_arena_bytes, validate_source_rates,
+    source_id_arena_bytes,
 };
 use miso_engine_session::CompileCaps;
 
@@ -730,26 +730,14 @@ enum AdmittedCommand {
 
 /// One compiled source's declared shape, in canonical normalized source order (issue #207).
 ///
-/// This is exactly what the *compiled session* knows about a source and nothing more: the strict
-/// TOML declares a native rate, a channel count and an inclusive region, `compile_session`
-/// normalizes it, and preparation builds the source ring at `region_start_frame` with a region
-/// ending at `region_start_frame + region_frames`. A headless driver that must feed the render
-/// loop needs precisely these four numbers, because the ring it is feeding was positioned by them.
-///
-/// `sample_rate_hz` is declared per source and is therefore reported per source, but a *compiled*
-/// session's per-source rate necessarily equals the session rate: `prepare_host_session` refuses
-/// `host.source.rate.mismatch` before a plan exists, because V1 has no sample-rate conversion. It
-/// is reported so a consumer reads the declaration rather than inferring it from that invariant.
+/// The strict TOML declares one channel count and full-source frame count; sample rate is solely a
+/// session-root fact and every prepared source begins at frame zero.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SessionSourceShape {
     /// Declared source channels; nonzero for every source a compiled session holds.
     pub channel_count: u32,
-    /// Declared native source sample rate in hertz; equal to the session rate once compiled.
-    pub sample_rate_hz: u32,
-    /// First source sample frame of the declared region. Zero is an ordinary value.
-    pub region_start_frame: u64,
-    /// Length of the declared region in source sample frames; nonzero for every compiled source.
-    pub region_frames: u64,
+    /// Exact source length in sample frames; nonzero for every compiled source.
+    pub frames: u64,
 }
 
 /// Safe ownership object backing one future AudioWorklet Wasm handle.
@@ -809,8 +797,6 @@ impl AudioWorkletEngineHost {
             max_source_ring_bytes: u64::MAX,
         };
         let session = compile_host_model(&model, compile_caps)
-            .map_err(|failure| BootFailure::document(failure.into_bytes()))?;
-        validate_source_rates(&session)
             .map_err(|failure| BootFailure::document(failure.into_bytes()))?;
         let shape = compiled_session_shape(&session)
             .map_err(|failure| BootFailure::document(failure.into_bytes()))?;
@@ -927,8 +913,7 @@ impl AudioWorkletEngineHost {
     ///
     /// This is the bounds authority for every other source query, exactly as
     /// [`AudioWorkletEngineHost::console_tracks`] is for `track_index`: the shape queries report a
-    /// sentinel for an out-of-range index where they can, but `region_start_frame` has no spare
-    /// value, so a caller establishes the range here and then indexes inside it.
+    /// sentinel for an out-of-range index.
     #[must_use]
     pub fn session_source_count(&self) -> usize {
         self.ready
@@ -962,10 +947,8 @@ impl AudioWorkletEngineHost {
             .sources
             .get(index as usize)?;
         Some(SessionSourceShape {
-            channel_count: u32::from(source.mapping.channel_count),
-            sample_rate_hz: source.sample_rate_hz,
-            region_start_frame: source.mapping.region.start_sample,
-            region_frames: source.mapping.region.length_samples,
+            channel_count: u32::from(source.channels),
+            frames: source.frames,
         })
     }
 
@@ -2540,7 +2523,7 @@ fn projected_retained_bytes(
         .iter()
         .try_fold(0_u64, |total, source| {
             let bytes = u64::from(source_ring_frames)
-                .checked_mul(u64::from(source.mapping.channel_count))?
+                .checked_mul(u64::from(source.channels))?
                 .checked_mul(size_of::<f32>() as u64)?;
             total.checked_add(bytes)
         })

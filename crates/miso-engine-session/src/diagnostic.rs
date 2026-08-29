@@ -35,6 +35,10 @@ pub enum DiagnosticCode {
     MissingEntityReference,
     /// A string enum token is outside its closed schema set.
     InvalidEnum,
+    /// A source content identity does not match the canonical SHA-256 grammar.
+    SourceContentIdentityFormat,
+    /// A source bit-depth declaration is outside the closed token set.
+    SourceBitDepthUnsupported,
     /// A numeric token is NaN or infinity.
     NumericNonFinite,
     /// An engine session rate is outside the launch-supported tier.
@@ -80,6 +84,8 @@ impl DiagnosticCode {
             Self::DuplicateId => "id.duplicate",
             Self::MissingEntityReference => "reference.missing_entity",
             Self::InvalidEnum => "schema.invalid_enum",
+            Self::SourceContentIdentityFormat => "source.content.identity_format",
+            Self::SourceBitDepthUnsupported => "source.bit_depth.unsupported",
             Self::NumericNonFinite => "numeric.non_finite",
             Self::SampleRateUnsupportedAtLaunch => "sample_rate.unsupported_at_launch",
             Self::NumericNotF32Representable => "numeric.not_f32_representable",

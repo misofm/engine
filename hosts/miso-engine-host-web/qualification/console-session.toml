@@ -5,9 +5,8 @@ sample_rate_hz = 48000
 quantum_frames = 128
 render_profile = { id = "native", mode = "single_thread" }
 output_profile = { id = "main", channels = 2, sample_format = "f32_planar" }
-limits = { pcm_ring_frames = 16640, control_queue_messages = 64, memory_bytes = 16777216 }
 sources = [
-  { id = "console-source", sample_rate_hz = 48000, content = { identity = "sha256:web-browser-console", locator = "host:web-browser-console" }, mapping = { channel_count = 2, region = { start_sample = 0, length_samples = 16640 } } },
+  { id = "console-source", content = "sha256:4ce4a7a733ad9d0364bcf73764417d51d2e0f4a046e87c4b109b5c45fb4e5a9a", channels = 2, bit_depth = "32f", frames = 16640 },
 ]
 submixes = []
 outputs = [{ id = "main-out" }]

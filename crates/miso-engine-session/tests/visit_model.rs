@@ -48,6 +48,13 @@ impl ModelVisitor for Trace {
     fn u64(&mut self, _: FieldKey, _: u64) -> Result<(), Self::Error> {
         Ok(())
     }
+    fn source_bit_depth(
+        &mut self,
+        _: FieldKey,
+        _: miso_engine_session::SourceBitDepth,
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
     fn f32(&mut self, _: FieldKey, _: f32) -> Result<(), Self::Error> {
         Ok(())
     }
@@ -73,7 +80,7 @@ fn visitor_counts_keys_tags_and_conditional_canonical_order_are_exact() {
     let mut second = model.sources[0].clone();
     second.id = miso_engine_session::StableId::parse("alpha-source").expect("id");
     model.sources.insert(0, second);
-    let expected_root = 8
+    let expected_root = 7
         + model.sources.len()
         + model.tracks.len()
         + model.submixes.len()

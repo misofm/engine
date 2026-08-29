@@ -7,8 +7,7 @@ use miso_engine_session::{
     Automation, AutomationSegment, AutomationShape, AutomationTarget, ChannelBuiltins,
     ChannelMatrix, DualMonoBuiltins, DualMonoFader, Effect, EffectIdentity, EffectParam,
     EffectQuality, MatrixOrPan, Output, OutputProfile, Rack, RackName, RenderProfile, Route,
-    RouteDestination, RouteSource, SessionLimits, SidechainDeclaration, Source, SourceContent,
-    SourceMapping, SourceRegion, StableId, Submix,
+    RouteDestination, RouteSource, SidechainDeclaration, Source, SourceBitDepth, StableId, Submix,
 };
 
 /// Build the checked-in canonical fixture transaction that contains every V1 edit opcode.
@@ -46,26 +45,18 @@ pub fn complete_all_opcode_fixture() -> Vec<SessionEdit> {
         SessionEdit::SetOutputProfile {
             output_profile: session.output_profile.clone(),
         },
-        SessionEdit::SetLimits {
-            limits: session.limits.clone(),
-        },
         SessionEdit::UpsertSource {
             source: source.clone(),
         },
         SessionEdit::RemoveSource {
             source_id: source.id.clone(),
         },
-        SessionEdit::SetSourceSampleRateHz {
-            source_id: source.id.clone(),
-            sample_rate_hz: 48_000,
-        },
         SessionEdit::SetSourceContent {
             source_id: source.id.clone(),
             content: source.content.clone(),
-        },
-        SessionEdit::SetSourceMapping {
-            source_id: source.id.clone(),
-            mapping: source.mapping.clone(),
+            channels: source.channels,
+            bit_depth: source.bit_depth,
+            frames: source.frames,
         },
         SessionEdit::UpsertTrack {
             track: track.clone(),
@@ -555,25 +546,22 @@ fn tx_edit_payload(sink: &mut dyn Sink, edit: &SessionEdit) -> Result<(), Encode
         SessionEdit::SetOutputProfile { output_profile } => {
             tx_message(sink, fields[0], |v| tx_output_profile(v, output_profile))
         }
-        SessionEdit::SetLimits { limits } => tx_message(sink, fields[0], |v| tx_limits(v, limits)),
         SessionEdit::UpsertSource { source } => {
             tx_message(sink, fields[0], |v| tx_source(v, source))
         }
         SessionEdit::RemoveSource { source_id } => tx_id(sink, fields[0], source_id),
-        SessionEdit::SetSourceSampleRateHz {
+        SessionEdit::SetSourceContent {
             source_id,
-            sample_rate_hz,
+            content,
+            channels,
+            bit_depth,
+            frames,
         } => {
             tx_id(sink, fields[0], source_id)?;
-            tx_u32(sink, fields[1], *sample_rate_hz)
-        }
-        SessionEdit::SetSourceContent { source_id, content } => {
-            tx_id(sink, fields[0], source_id)?;
-            tx_message(sink, fields[1], |v| tx_content(v, content))
-        }
-        SessionEdit::SetSourceMapping { source_id, mapping } => {
-            tx_id(sink, fields[0], source_id)?;
-            tx_message(sink, fields[1], |v| tx_mapping(v, mapping))
+            tx_text(sink, fields[1], content)?;
+            tx_u8(sink, fields[2], *channels)?;
+            tx_u8(sink, fields[3], bit_depth.wire())?;
+            tx_u64(sink, fields[4], *frames)
         }
         SessionEdit::UpsertTrack { track } => tx_message(sink, fields[0], |v| tx_track(v, track)),
         SessionEdit::RemoveTrack { track_id } => tx_id(sink, fields[0], track_id),
@@ -856,67 +844,17 @@ fn tx_output_profile(sink: &mut dyn Sink, value: &OutputProfile) -> Result<(), E
     )?;
     tx_u8(sink, schema::session::output_profile::LAYOUT, 1)
 }
-fn tx_limits(sink: &mut dyn Sink, value: &SessionLimits) -> Result<(), EncodeError> {
-    tx_start_message(sink, schema::session::limits::SPEC.field_count(&[])?)?;
-    tx_u64(
-        sink,
-        schema::session::limits::PCM_RING_FRAMES,
-        value.pcm_ring_frames,
-    )?;
-    tx_u64(
-        sink,
-        schema::session::limits::CONTROL_QUEUE_MESSAGES,
-        value.control_queue_messages,
-    )?;
-    tx_u64(
-        sink,
-        schema::session::limits::MEMORY_BYTES,
-        value.memory_bytes,
-    )
-}
-fn tx_content(sink: &mut dyn Sink, value: &SourceContent) -> Result<(), EncodeError> {
-    tx_start_message(sink, schema::session::content::SPEC.field_count(&[])?)?;
-    tx_text(sink, schema::session::content::IDENTITY, &value.identity)?;
-    tx_text(sink, schema::session::content::LOCATOR, &value.locator)
-}
-fn tx_region(sink: &mut dyn Sink, value: &SourceRegion) -> Result<(), EncodeError> {
-    tx_start_message(sink, schema::session::region::SPEC.field_count(&[])?)?;
-    tx_u64(
-        sink,
-        schema::session::region::START_SAMPLE,
-        value.start_sample,
-    )?;
-    tx_u64(
-        sink,
-        schema::session::region::LENGTH_SAMPLES,
-        value.length_samples,
-    )
-}
-fn tx_mapping(sink: &mut dyn Sink, value: &SourceMapping) -> Result<(), EncodeError> {
-    tx_start_message(sink, schema::session::mapping::SPEC.field_count(&[])?)?;
-    tx_u8(
-        sink,
-        schema::session::mapping::CHANNEL_COUNT,
-        value.channel_count,
-    )?;
-    tx_message(sink, schema::session::mapping::REGION, |v| {
-        tx_region(v, &value.region)
-    })
-}
 fn tx_source(sink: &mut dyn Sink, value: &Source) -> Result<(), EncodeError> {
     tx_start_message(sink, schema::session::source::SPEC.field_count(&[])?)?;
     tx_id(sink, schema::session::source::ID, &value.id)?;
-    tx_u32(
+    tx_text(sink, schema::session::source::CONTENT, &value.content)?;
+    tx_u8(sink, schema::session::source::CHANNELS, value.channels)?;
+    tx_u8(
         sink,
-        schema::session::source::SAMPLE_RATE_HZ,
-        value.sample_rate_hz,
+        schema::session::source::BIT_DEPTH,
+        value.bit_depth.wire(),
     )?;
-    tx_message(sink, schema::session::source::CONTENT, |v| {
-        tx_content(v, &value.content)
-    })?;
-    tx_message(sink, schema::session::source::MAPPING, |v| {
-        tx_mapping(v, &value.mapping)
-    })
+    tx_u64(sink, schema::session::source::FRAMES, value.frames)
 }
 fn tx_builtins(sink: &mut dyn Sink, value: &DualMonoBuiltins) -> Result<(), EncodeError> {
     tx_start_message(sink, schema::session::builtins::SPEC.field_count(&[])?)?;
@@ -1316,26 +1254,18 @@ fn parse_edit(message: Message<'_>) -> Result<SessionEdit, DecodeError> {
                 payload.nested_value(one_spec!(payload, fields[0])?)?,
             )?,
         }),
-        crate::SessionEditOpcode::SetLimits => Ok(SessionEdit::SetLimits {
-            limits: parse_limits(payload.nested_value(one_spec!(payload, fields[0])?)?)?,
-        }),
         crate::SessionEditOpcode::UpsertSource => Ok(SessionEdit::UpsertSource {
             source: parse_source(payload.nested_value(one_spec!(payload, fields[0])?)?)?,
         }),
         crate::SessionEditOpcode::RemoveSource => Ok(SessionEdit::RemoveSource {
             source_id: stable_id(one_spec!(payload, fields[0])?)?,
         }),
-        crate::SessionEditOpcode::SetSourceSampleRateHz => Ok(SessionEdit::SetSourceSampleRateHz {
-            source_id: stable_id(one_spec!(payload, fields[0])?)?,
-            sample_rate_hz: read_u32_exact(one_spec!(payload, fields[1])?)?,
-        }),
         crate::SessionEditOpcode::SetSourceContent => Ok(SessionEdit::SetSourceContent {
             source_id: stable_id(one_spec!(payload, fields[0])?)?,
-            content: parse_content(payload.nested_value(one_spec!(payload, fields[1])?)?)?,
-        }),
-        crate::SessionEditOpcode::SetSourceMapping => Ok(SessionEdit::SetSourceMapping {
-            source_id: stable_id(one_spec!(payload, fields[0])?)?,
-            mapping: parse_mapping(payload.nested_value(one_spec!(payload, fields[1])?)?)?,
+            content: utf8(one_spec!(payload, fields[1])?)?,
+            channels: read_u8_exact(one_spec!(payload, fields[2])?)?,
+            bit_depth: parse_source_bit_depth(read_u8_exact(one_spec!(payload, fields[3])?)?)?,
+            frames: read_u64_exact(one_spec!(payload, fields[4])?)?,
         }),
         crate::SessionEditOpcode::UpsertTrack => Ok(SessionEdit::UpsertTrack {
             track: parse_track(payload.nested_value(one_spec!(payload, fields[0])?)?)?,
@@ -1547,65 +1477,22 @@ fn parse_output_profile(message: Message<'_>) -> Result<OutputProfile, DecodeErr
     })
 }
 
-fn parse_limits(message: Message<'_>) -> Result<SessionLimits, DecodeError> {
-    let message = message.schema_spec(&schema::session::limits::SPEC)?;
-    Ok(SessionLimits {
-        pcm_ring_frames: read_u64_exact(one_spec!(
-            message,
-            schema::session::limits::PCM_RING_FRAMES
-        )?)?,
-        control_queue_messages: read_u64_exact(one_spec!(
-            message,
-            schema::session::limits::CONTROL_QUEUE_MESSAGES
-        )?)?,
-        memory_bytes: read_u64_exact(one_spec!(message, schema::session::limits::MEMORY_BYTES)?)?,
-    })
-}
-
-fn parse_content(message: Message<'_>) -> Result<SourceContent, DecodeError> {
-    let message = message.schema_spec(&schema::session::content::SPEC)?;
-    Ok(SourceContent {
-        identity: utf8(one_spec!(message, schema::session::content::IDENTITY)?)?,
-        locator: utf8(one_spec!(message, schema::session::content::LOCATOR)?)?,
-    })
-}
-
-fn parse_region(message: Message<'_>) -> Result<SourceRegion, DecodeError> {
-    let message = message.schema_spec(&schema::session::region::SPEC)?;
-    Ok(SourceRegion {
-        start_sample: read_u64_exact(one_spec!(message, schema::session::region::START_SAMPLE)?)?,
-        length_samples: read_u64_exact(one_spec!(
-            message,
-            schema::session::region::LENGTH_SAMPLES
-        )?)?,
-    })
-}
-
-fn parse_mapping(message: Message<'_>) -> Result<SourceMapping, DecodeError> {
-    let message = message.schema_spec(&schema::session::mapping::SPEC)?;
-    Ok(SourceMapping {
-        channel_count: read_u8_exact(one_spec!(message, schema::session::mapping::CHANNEL_COUNT)?)?,
-        region: parse_region(
-            message.nested_value(one_spec!(message, schema::session::mapping::REGION)?)?,
-        )?,
-    })
-}
-
 fn parse_source(message: Message<'_>) -> Result<Source, DecodeError> {
     let message = message.schema_spec(&schema::session::source::SPEC)?;
     Ok(Source {
         id: stable_id(one_spec!(message, schema::session::source::ID)?)?,
-        sample_rate_hz: read_u32_exact(one_spec!(
+        content: utf8(one_spec!(message, schema::session::source::CONTENT)?)?,
+        channels: read_u8_exact(one_spec!(message, schema::session::source::CHANNELS)?)?,
+        bit_depth: parse_source_bit_depth(read_u8_exact(one_spec!(
             message,
-            schema::session::source::SAMPLE_RATE_HZ
-        )?)?,
-        content: parse_content(
-            message.nested_value(one_spec!(message, schema::session::source::CONTENT)?)?,
-        )?,
-        mapping: parse_mapping(
-            message.nested_value(one_spec!(message, schema::session::source::MAPPING)?)?,
-        )?,
+            schema::session::source::BIT_DEPTH
+        )?)?)?,
+        frames: read_u64_exact(one_spec!(message, schema::session::source::FRAMES)?)?,
     })
+}
+
+fn parse_source_bit_depth(value: u8) -> Result<SourceBitDepth, DecodeError> {
+    SourceBitDepth::from_wire(value).ok_or(DecodeError::InvalidTlv)
 }
 
 fn parse_builtins(message: Message<'_>) -> Result<DualMonoBuiltins, DecodeError> {
@@ -2085,7 +1972,7 @@ mod tests {
     }
 
     #[test]
-    fn six_session_edit_encoders_are_canonical_and_ordered() {
+    fn five_session_edit_encoders_are_canonical_and_ordered() {
         let edits = [
             SessionEdit::SetSessionId {
                 session_id: id("next"),
@@ -2109,13 +1996,6 @@ mod tests {
                     sample_format: SampleFormat::F32Planar,
                 },
             },
-            SessionEdit::SetLimits {
-                limits: SessionLimits {
-                    pcm_ring_frames: 64,
-                    control_queue_messages: 8,
-                    memory_bytes: 1024,
-                },
-            },
         ];
         let transaction = SessionTransactionFrame {
             request_id: RequestId::new(2).expect("request"),
@@ -2133,12 +2013,7 @@ mod tests {
         );
         assert_eq!(
             u32::from_le_bytes(output[40..44].try_into().expect("count")),
-            6
-        );
-        assert!(
-            output
-                .windows(2)
-                .any(|window| window == 0x0006_u16.to_le_bytes())
+            5
         );
     }
 
@@ -2180,18 +2055,11 @@ mod tests {
     fn source() -> Source {
         Source {
             id: id("voice"),
-            sample_rate_hz: 48_000,
-            content: SourceContent {
-                identity: "content-voice".to_owned(),
-                locator: "host://voice".to_owned(),
-            },
-            mapping: SourceMapping {
-                channel_count: 2,
-                region: SourceRegion {
-                    start_sample: 4,
-                    length_samples: 48_000,
-                },
-            },
+            content: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .to_owned(),
+            channels: 2,
+            bit_depth: SourceBitDepth::Float32,
+            frames: 48_000,
         }
     }
 
@@ -2222,26 +2090,18 @@ mod tests {
             SessionEdit::SetOutputProfile {
                 output_profile: session.output_profile.clone(),
             },
-            SessionEdit::SetLimits {
-                limits: session.limits.clone(),
-            },
             SessionEdit::UpsertSource {
                 source: source.clone(),
             },
             SessionEdit::RemoveSource {
                 source_id: source.id.clone(),
             },
-            SessionEdit::SetSourceSampleRateHz {
-                source_id: source.id.clone(),
-                sample_rate_hz: 48_000,
-            },
             SessionEdit::SetSourceContent {
                 source_id: source.id.clone(),
                 content: source.content.clone(),
-            },
-            SessionEdit::SetSourceMapping {
-                source_id: source.id.clone(),
-                mapping: source.mapping.clone(),
+                channels: source.channels,
+                bit_depth: source.bit_depth,
+                frames: source.frames,
             },
             SessionEdit::UpsertTrack {
                 track: track.clone(),
@@ -2699,17 +2559,12 @@ mod tests {
             SessionEdit::RemoveSource {
                 source_id: source.id.clone(),
             },
-            SessionEdit::SetSourceSampleRateHz {
-                source_id: source.id.clone(),
-                sample_rate_hz: 44_100,
-            },
             SessionEdit::SetSourceContent {
                 source_id: source.id.clone(),
                 content: source.content.clone(),
-            },
-            SessionEdit::SetSourceMapping {
-                source_id: source.id.clone(),
-                mapping: source.mapping.clone(),
+                channels: source.channels,
+                bit_depth: source.bit_depth,
+                frames: source.frames,
             },
         ];
         let bytes = encode(&edits);

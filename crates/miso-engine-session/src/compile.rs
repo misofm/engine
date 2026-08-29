@@ -172,7 +172,7 @@ pub fn compile_session(
     })
 }
 fn check_caps(
-    session: &SessionToml,
+    _session: &SessionToml,
     estimate: ResourceEstimate,
     caps: CompileCaps,
 ) -> Result<(), DiagnosticSet> {
@@ -184,13 +184,6 @@ fn check_caps(
             "compile_caps",
             "max_compiled_model_bytes",
             "compiled-model byte budget exceeded",
-        ),
-        (
-            estimate.requested_runtime_bytes,
-            session.limits.memory_bytes,
-            "limits",
-            "memory_bytes",
-            "session memory declaration is insufficient",
         ),
         (
             estimate.requested_runtime_bytes,

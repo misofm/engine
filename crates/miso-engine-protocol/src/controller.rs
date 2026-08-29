@@ -3854,13 +3854,13 @@ mod tests {
     fn replay_layout_stays_within_the_capi_resource_oracle() {
         assert_eq!(core::mem::size_of::<ReplayEntry>(), 56);
         assert_eq!(core::mem::size_of::<ReplayCache>(), 88);
-        // #84 phase B re-pin (+96): the controller embeds twelve spsc endpoints across its
-        // queues, each +8 for the cached peer cursor.
+        // #241 re-pin (-24): deleting three source/limit edit variants narrows the embedded
+        // prepared-command enum by 24 bytes; all twelve queue endpoints are otherwise unchanged.
         assert_eq!(
             core::mem::size_of::<ProtocolController<MockProvider>>(),
-            6_088
+            6_064
         );
-        assert_eq!(core::mem::size_of::<PreparedStructuralCommand>(), 776);
+        assert_eq!(core::mem::size_of::<PreparedStructuralCommand>(), 752);
     }
 
     #[test]
@@ -4158,7 +4158,7 @@ mod tests {
             .find(|frame| frame.name == "command.session_transaction_apply")
             .expect("frozen transaction frame");
         let mut limited = controller(8, 1);
-        limited.config.maximum_transaction_edits = 41;
+        limited.config.maximum_transaction_edits = 1;
         assert_eq!(
             limited.process_b1b_btlv(
                 &transaction.bytes,

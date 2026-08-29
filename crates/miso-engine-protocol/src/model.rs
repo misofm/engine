@@ -10,8 +10,8 @@ use miso_engine_session::{
     Automation, AutomationSegment, AutomationTarget, ChannelMatrix, CompileCaps, CompiledSession,
     DualMonoBuiltins, DualMonoFader, Effect, EffectIdentity, EffectParam, EffectQuality,
     MatrixOrPan, Output, OutputProfile, Rack, RackName, RenderProfile, Route, RouteDestination,
-    RouteSource, SessionLimits, SessionToml, SidechainDeclaration, Source, SourceContent,
-    SourceMapping, StableId, Submix, compile_session,
+    RouteSource, SessionToml, SidechainDeclaration, Source, SourceBitDepth, StableId, Submix,
+    compile_session,
 };
 
 use crate::{ExpectedRevision, SessionRevision};
@@ -30,18 +30,12 @@ pub enum SessionEditOpcode {
     SetRenderProfile = 0x0004,
     /// `SetOutputProfile`.
     SetOutputProfile = 0x0005,
-    /// `SetLimits`.
-    SetLimits = 0x0006,
     /// `UpsertSource`.
     UpsertSource = 0x0100,
     /// `RemoveSource`.
     RemoveSource = 0x0101,
-    /// `SetSourceSampleRateHz`.
-    SetSourceSampleRateHz = 0x0102,
     /// `SetSourceContent`.
     SetSourceContent = 0x0103,
-    /// `SetSourceMapping`.
-    SetSourceMapping = 0x0104,
     /// `UpsertTrack`.
     UpsertTrack = 0x0200,
     /// `RemoveTrack`.
@@ -122,12 +116,9 @@ impl SessionEditOpcode {
             0x0003 => Some(Self::SetQuantumFrames),
             0x0004 => Some(Self::SetRenderProfile),
             0x0005 => Some(Self::SetOutputProfile),
-            0x0006 => Some(Self::SetLimits),
             0x0100 => Some(Self::UpsertSource),
             0x0101 => Some(Self::RemoveSource),
-            0x0102 => Some(Self::SetSourceSampleRateHz),
             0x0103 => Some(Self::SetSourceContent),
-            0x0104 => Some(Self::SetSourceMapping),
             0x0200 => Some(Self::UpsertTrack),
             0x0201 => Some(Self::RemoveTrack),
             0x0202 => Some(Self::SetTrackSourceAssignment),
@@ -179,26 +170,17 @@ pub enum SessionEdit {
     SetRenderProfile { render_profile: RenderProfile },
     /// Replace the V1 output declaration.
     SetOutputProfile { output_profile: OutputProfile },
-    /// Replace declarative session resource limits only.
-    SetLimits { limits: SessionLimits },
     /// Insert or replace one source by stable ID.
     UpsertSource { source: Source },
     /// Remove one source without cascading references.
     RemoveSource { source_id: StableId },
-    /// Set a source's declared native rate.
-    SetSourceSampleRateHz {
-        source_id: StableId,
-        sample_rate_hz: u32,
-    },
-    /// Set a source's opaque content declaration.
+    /// Set a source's complete content-addressed shape.
     SetSourceContent {
         source_id: StableId,
-        content: SourceContent,
-    },
-    /// Set a source's channel/region mapping.
-    SetSourceMapping {
-        source_id: StableId,
-        mapping: SourceMapping,
+        content: String,
+        channels: u8,
+        bit_depth: SourceBitDepth,
+        frames: u64,
     },
     /// Insert or replace one track by stable ID.
     UpsertTrack { track: miso_engine_session::Track },
@@ -396,12 +378,9 @@ impl SessionEdit {
             Self::SetQuantumFrames { .. } => SessionEditOpcode::SetQuantumFrames,
             Self::SetRenderProfile { .. } => SessionEditOpcode::SetRenderProfile,
             Self::SetOutputProfile { .. } => SessionEditOpcode::SetOutputProfile,
-            Self::SetLimits { .. } => SessionEditOpcode::SetLimits,
             Self::UpsertSource { .. } => SessionEditOpcode::UpsertSource,
             Self::RemoveSource { .. } => SessionEditOpcode::RemoveSource,
-            Self::SetSourceSampleRateHz { .. } => SessionEditOpcode::SetSourceSampleRateHz,
             Self::SetSourceContent { .. } => SessionEditOpcode::SetSourceContent,
-            Self::SetSourceMapping { .. } => SessionEditOpcode::SetSourceMapping,
             Self::UpsertTrack { .. } => SessionEditOpcode::UpsertTrack,
             Self::RemoveTrack { .. } => SessionEditOpcode::RemoveTrack,
             Self::SetTrackSourceAssignment { .. } => SessionEditOpcode::SetTrackSourceAssignment,
@@ -476,24 +455,24 @@ pub fn apply_session_edit(
         SessionEdit::SetOutputProfile { output_profile } => {
             session.output_profile = output_profile.clone()
         }
-        SessionEdit::SetLimits { limits } => session.limits = limits.clone(),
         SessionEdit::UpsertSource { source } => {
             upsert(&mut session.sources, source, |item| &item.id)
         }
         SessionEdit::RemoveSource { source_id } => {
             remove(&mut session.sources, source_id, |item| &item.id)?
         }
-        SessionEdit::SetSourceSampleRateHz {
+        SessionEdit::SetSourceContent {
             source_id,
-            sample_rate_hz,
+            content,
+            channels,
+            bit_depth,
+            frames,
         } => {
-            source_mut(session, source_id)?.sample_rate_hz = *sample_rate_hz;
-        }
-        SessionEdit::SetSourceContent { source_id, content } => {
-            source_mut(session, source_id)?.content = content.clone();
-        }
-        SessionEdit::SetSourceMapping { source_id, mapping } => {
-            source_mut(session, source_id)?.mapping = mapping.clone();
+            let source = source_mut(session, source_id)?;
+            source.content = content.clone();
+            source.channels = *channels;
+            source.bit_depth = *bit_depth;
+            source.frames = *frames;
         }
         SessionEdit::UpsertTrack { track } => upsert(&mut session.tracks, track, |item| &item.id),
         SessionEdit::RemoveTrack { track_id } => {

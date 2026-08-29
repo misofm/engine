@@ -58,7 +58,6 @@ fn compile_caps() -> CompileCaps {
 /// The fixture with the one track's two lanes delayed by `left` and `right` samples.
 fn model_with_delay(left: u32, right: u32) -> SessionToml {
     let mut model = parse_session_toml(SESSION).expect("fixture parses");
-    model.limits.memory_bytes = i64::MAX as u64;
     // One delayed track among nine. The other eight are the control: whatever PDC does to them
     // must be what it does to them when track zero is undelayed.
     model.tracks[0].builtins.left.delay_samples = left;

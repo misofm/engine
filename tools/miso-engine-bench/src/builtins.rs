@@ -442,7 +442,6 @@ fn prepare_real_meter_tap_artifact(
 ) -> PreparedGraphBuiltinsArtifact {
     let mut model = parse_session_toml(SESSION).expect("frozen benchmark session");
     model.sample_rate_hz = rate_hz;
-    model.sources[0].sample_rate_hz = rate_hz;
     model.automation.clear();
     let mut delay = model.tracks[0].dynamic.effects[0].clone();
     delay.identity = EffectIdentity::Native {
@@ -1079,7 +1078,6 @@ fn prepare_256_tracks(rate_hz: u32) -> miso_engine_builtins_compiler::PreparedBu
     template.dynamic.effects.clear();
     template.simd2.effects.clear();
     model.automation.clear();
-    model.limits.memory_bytes = i64::MAX as u64;
     model.tracks.clear();
     model.tracks.reserve(track_count);
     for index in 0..track_count {

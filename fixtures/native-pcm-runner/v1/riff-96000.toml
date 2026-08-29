@@ -5,9 +5,8 @@ sample_rate_hz = 96000
 quantum_frames = 128
 render_profile = { id = "native", mode = "single_thread" }
 output_profile = { id = "main", channels = 2, sample_format = "f32_planar" }
-limits = { pcm_ring_frames = 1024, control_queue_messages = 64, memory_bytes = 16777216 }
 sources = [
-  { id = "fixture-source", sample_rate_hz = 96000, content = { identity = "sha256:2bbcb0c68ee9c9079ba170d3eb478f3f7f326cd9e9f64b72f76d561ecb6f5347", locator = "file:riff-96000.wav" }, mapping = { channel_count = 2, region = { start_sample = 0, length_samples = 1024 } } },
+  { id = "fixture-source", content = "sha256:738956f9eb5f301b4b52d081518562a8f535b12f04919d23494afacfb9d5df14", channels = 2, bit_depth = "32f", frames = 1024 },
 ]
 submixes = []
 outputs = [{ id = "main-out" }]

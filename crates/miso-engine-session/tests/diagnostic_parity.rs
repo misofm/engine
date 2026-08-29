@@ -98,25 +98,11 @@ fn parse_canonical_and_compile_diagnostics_have_code_path_and_span_parity() {
         case!("revision-i64", NumericOutOfSchemaRange, "$.revision", |s| {
             s.revision = i64::MAX as u64 + 1
         }),
-        // pcm_ring_frames/control_queue_messages above i64::MAX overflow compile's mandated
-        // estimate-first arithmetic; invalid_matrix owns their parse/canonical leaf checks.
         case!(
-            "memory-i64",
+            "source-frames-i64",
             NumericOutOfSchemaRange,
-            "$.limits.memory_bytes",
-            |s| s.limits.memory_bytes = i64::MAX as u64 + 1
-        ),
-        case!(
-            "region-start-i64",
-            NumericOutOfSchemaRange,
-            "$.sources[0].mapping.region.start_sample",
-            |s| s.sources[0].mapping.region.start_sample = i64::MAX as u64 + 1
-        ),
-        case!(
-            "region-length-i64",
-            NumericOutOfSchemaRange,
-            "$.sources[0].mapping.region.length_samples",
-            |s| s.sources[0].mapping.region.length_samples = i64::MAX as u64 + 1
+            "$.sources[0].frames",
+            |s| s.sources[0].frames = i64::MAX as u64 + 1
         ),
         case!(
             "automation-start-i64",
@@ -325,35 +311,38 @@ fn parse_canonical_and_compile_diagnostics_have_code_path_and_span_parity() {
             }
         ),
         case!(
-            "source-identity",
-            NumericOutOfSchemaRange,
-            "$.sources[0].content.identity",
-            |s| s.sources[0].content.identity.clear()
+            "source-content-empty",
+            SourceContentIdentityFormat,
+            "$.sources[0].content",
+            |s| s.sources[0].content.clear()
         ),
         case!(
-            "source-locator",
-            NumericOutOfSchemaRange,
-            "$.sources[0].content.locator",
-            |s| s.sources[0].content.locator.clear()
+            "source-content-short",
+            SourceContentIdentityFormat,
+            "$.sources[0].content",
+            |s| s.sources[0].content = "sha256:abc".to_owned()
+        ),
+        case!(
+            "source-content-uppercase",
+            SourceContentIdentityFormat,
+            "$.sources[0].content",
+            |s| s.sources[0].content.make_ascii_uppercase()
+        ),
+        case!(
+            "source-content-nonhex",
+            SourceContentIdentityFormat,
+            "$.sources[0].content",
+            |s| s.sources[0].content.replace_range(7..8, "g")
         ),
         case!(
             "source-channels",
-            NumericOutOfSchemaRange,
-            "$.sources[0].mapping.channel_count",
-            |s| s.sources[0].mapping.channel_count = 0
+            CapacityZero,
+            "$.sources[0].channels",
+            |s| s.sources[0].channels = 0
         ),
-        case!(
-            "source-length",
-            NumericOutOfSchemaRange,
-            "$.sources[0].mapping.region.length_samples",
-            |s| s.sources[0].mapping.region.length_samples = 0
-        ),
-        case!(
-            "source-rate",
-            NumericOutOfSchemaRange,
-            "$.sources[0].sample_rate_hz",
-            |s| s.sources[0].sample_rate_hz = 0
-        ),
+        case!("source-frames", CapacityZero, "$.sources[0].frames", |s| {
+            s.sources[0].frames = 0
+        }),
         case!(
             "left-source-channel",
             SourceChannelIndexOutOfRange,
@@ -703,18 +692,9 @@ fn parse_canonical_and_compile_diagnostics_have_code_path_and_span_parity() {
                 p.end_value = 2.5
             }
         ),
-        case!("ring-zero", CapacityZero, "$.limits.pcm_ring_frames", |s| {
-            s.limits.pcm_ring_frames = 0
-        }),
-        case!(
-            "queue-zero",
-            CapacityZero,
-            "$.limits.control_queue_messages",
-            |s| s.limits.control_queue_messages = 0
-        ),
     ];
     assert!(
-        cases.len() >= 80,
+        cases.len() >= 75,
         "complete compile-expressible mutation inventory"
     );
     for case in &cases {
@@ -851,6 +831,22 @@ impl ModelVisitor for Writer {
     fn u64(&mut self, key: FieldKey, value: u64) -> Result<(), Self::Error> {
         self.field(key);
         let _ = write!(self.output, "{value}");
+        self.scalar_end();
+        Ok(())
+    }
+    fn source_bit_depth(
+        &mut self,
+        key: FieldKey,
+        value: miso_engine_session::SourceBitDepth,
+    ) -> Result<(), Self::Error> {
+        self.field(key);
+        match value {
+            miso_engine_session::SourceBitDepth::Pcm16 => self.output.push_str("16"),
+            miso_engine_session::SourceBitDepth::Pcm24 => self.output.push_str("24"),
+            miso_engine_session::SourceBitDepth::Float32 => {
+                write_quoted(&mut self.output, "32f");
+            }
+        }
         self.scalar_end();
         Ok(())
     }

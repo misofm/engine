@@ -3,9 +3,8 @@ use crate::{
     Automation, AutomationSegment, AutomationTarget, ChannelBuiltins, ChannelMatrix, Diagnostic,
     DiagnosticCode, DiagnosticPath as OwnedDiagnosticPath, DiagnosticSet, DualMonoBuiltins,
     DualMonoFader, Effect, EffectIdentity, EffectParam, MatrixOrPan, Output, OutputProfile, Rack,
-    RenderProfile, Route, RouteDestination, RouteSource, SESSION_SCHEMA_VERSION_V1, SessionLimits,
-    SessionToml, Sidechain, SidechainDeclaration, Source, SourceContent, SourceMapping,
-    SourceRegion, SourceSpan, StableId, Submix, Track,
+    RenderProfile, Route, RouteDestination, RouteSource, SESSION_SCHEMA_VERSION_V1, SessionToml,
+    Sidechain, SidechainDeclaration, Source, SourceBitDepth, SourceSpan, StableId, Submix, Track,
     diagnostic::{MAXIMUM_SESSION_DIAGNOSTICS, PathRef as DiagnosticPath, PathSegment},
     model::ClosedToken,
     validate::validate_session,
@@ -326,6 +325,35 @@ impl<'i> Parser<'i> {
         })
     }
 
+    fn source_bit_depth(
+        &mut self,
+        table: TableRef<'_, '_>,
+        key: &'static str,
+        path: &DiagnosticPath<'_>,
+    ) -> Option<SourceBitDepth> {
+        let Some(value) = table.table.get(key) else {
+            return self.missing(table, key, path);
+        };
+        let parsed = match value.get_ref() {
+            DeValue::Integer(integer) => match parse_i64_token(integer.as_str(), integer.radix()) {
+                Some(16) => Some(SourceBitDepth::Pcm16),
+                Some(24) => Some(SourceBitDepth::Pcm24),
+                _ => None,
+            },
+            DeValue::String(token) if token.as_ref() == "32f" => Some(SourceBitDepth::Float32),
+            _ => None,
+        };
+        if parsed.is_none() {
+            self.error_at(
+                DiagnosticCode::SourceBitDepthUnsupported,
+                path.key(key),
+                value_span(value),
+                "source bit_depth must be 16, 24, or \"32f\"",
+            );
+        }
+        parsed
+    }
+
     fn f32(
         &mut self,
         table: TableRef<'_, '_>,
@@ -605,7 +633,6 @@ fn parse_root(
             "quantum_frames",
             "render_profile",
             "output_profile",
-            "limits",
             "sources",
             "tracks",
             "submixes",
@@ -622,7 +649,6 @@ fn parse_root(
     let quantum_frames = parser.u32(table, "quantum_frames", &path);
     let render_profile = parse_record(parser, table, "render_profile", &path, parse_render_profile);
     let output_profile = parse_record(parser, table, "output_profile", &path, parse_output_profile);
-    let limits = parse_record(parser, table, "limits", &path, parse_limits);
     let sources = parse_list(parser, table, "sources", &path, parse_source);
     let tracks = parse_list(parser, table, "tracks", &path, parse_track);
     let submixes = parse_list(parser, table, "submixes", &path, parse_submix);
@@ -637,7 +663,6 @@ fn parse_root(
         quantum_frames,
         render_profile,
         output_profile,
-        limits,
         sources,
         tracks,
         submixes,
@@ -653,7 +678,6 @@ fn parse_root(
             Some(quantum_frames),
             Some(render_profile),
             Some(output_profile),
-            Some(limits),
             Some(sources),
             Some(tracks),
             Some(submixes),
@@ -668,7 +692,6 @@ fn parse_root(
             quantum_frames,
             render_profile,
             output_profile,
-            limits,
             sources,
             tracks,
             submixes,
@@ -708,26 +731,6 @@ fn parse_output_profile(
         id: id?,
         channels: channels?,
         sample_format: sample_format?,
-    })
-}
-
-fn parse_limits(
-    parser: &mut Parser,
-    table: TableRef<'_, '_>,
-    path: DiagnosticPath,
-) -> Option<SessionLimits> {
-    parser.keys(
-        table,
-        &["pcm_ring_frames", "control_queue_messages", "memory_bytes"],
-        &path,
-    );
-    let pcm_ring_frames = parser.u64(table, "pcm_ring_frames", &path);
-    let control_queue_messages = parser.u64(table, "control_queue_messages", &path);
-    let memory_bytes = parser.u64(table, "memory_bytes", &path);
-    Some(SessionLimits {
-        pcm_ring_frames: pcm_ring_frames?,
-        control_queue_messages: control_queue_messages?,
-        memory_bytes: memory_bytes?,
     })
 }
 
@@ -772,60 +775,20 @@ fn parse_source(
 ) -> Option<Source> {
     parser.keys(
         table,
-        &["id", "sample_rate_hz", "content", "mapping"],
+        &["id", "content", "channels", "bit_depth", "frames"],
         &path,
     );
     let id = parser.id(table, "id", &path);
-    let sample_rate_hz = parser.u32(table, "sample_rate_hz", &path);
-    let content = parse_record(parser, table, "content", &path, parse_source_content);
-    let mapping = parse_record(parser, table, "mapping", &path, parse_source_mapping);
+    let content = parser.string(table, "content", &path);
+    let channels = parser.u8(table, "channels", &path);
+    let bit_depth = parser.source_bit_depth(table, "bit_depth", &path);
+    let frames = parser.u64(table, "frames", &path);
     Some(Source {
         id: id?,
-        sample_rate_hz: sample_rate_hz?,
         content: content?,
-        mapping: mapping?,
-    })
-}
-
-fn parse_source_content(
-    parser: &mut Parser,
-    table: TableRef<'_, '_>,
-    path: DiagnosticPath,
-) -> Option<SourceContent> {
-    parser.keys(table, &["identity", "locator"], &path);
-    let identity = parser.string(table, "identity", &path);
-    let locator = parser.string(table, "locator", &path);
-    Some(SourceContent {
-        identity: identity?,
-        locator: locator?,
-    })
-}
-
-fn parse_source_mapping(
-    parser: &mut Parser,
-    table: TableRef<'_, '_>,
-    path: DiagnosticPath,
-) -> Option<SourceMapping> {
-    parser.keys(table, &["channel_count", "region"], &path);
-    let channel_count = parser.u8(table, "channel_count", &path);
-    let region = parse_record(parser, table, "region", &path, parse_region);
-    Some(SourceMapping {
-        channel_count: channel_count?,
-        region: region?,
-    })
-}
-
-fn parse_region(
-    parser: &mut Parser,
-    table: TableRef<'_, '_>,
-    path: DiagnosticPath,
-) -> Option<SourceRegion> {
-    parser.keys(table, &["start_sample", "length_samples"], &path);
-    let start_sample = parser.u64(table, "start_sample", &path);
-    let length_samples = parser.u64(table, "length_samples", &path);
-    Some(SourceRegion {
-        start_sample: start_sample?,
-        length_samples: length_samples?,
+        channels: channels?,
+        bit_depth: bit_depth?,
+        frames: frames?,
     })
 }
 
