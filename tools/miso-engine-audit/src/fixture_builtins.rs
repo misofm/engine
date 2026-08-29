@@ -5220,7 +5220,11 @@ mod tests {
             // trim ramp. No PCM, meter, response or benchmark fixture moved, which is what a
             // control-plane-and-transient-path phase should look like from here: the render bits
             // of every checked case are the bits they were.
-            "1d2f8ffe8f56d08314e480f0aba7ee5068ae8448721504ae7f64db11a33f06c8",
+            //
+            // Re-pinned by issue #241: the same two preparation workloads now name the canonical
+            // session by its source-content identity after the source-schema migration. Their
+            // payload lengths and every render-bearing fixture remain unchanged.
+            "4b7b6ac1f1c2f16aecebb003c62b37420a96ca6f0bc1b75fa471654dcbc38ba5",
             "accepted joined-corpus manifest identity"
         );
 
