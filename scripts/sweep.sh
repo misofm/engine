@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# scripts/sweep.sh -- the hermetic check/test sweep. 94 explicit rows.
+# scripts/sweep.sh -- the hermetic check/test sweep. 101 explicit rows.
 #
-# Why this exists: the repo has 96 check-*/test-* scripts and ci.yml names 37 of them, so most
+# Why this exists: the repo has 106 check-*/test-* scripts and ci.yml names 37 of them, so most
 # gates had no committed runner at all -- they were reachable only by knowing they existed. Every
 # row below is written out by name. There are deliberately no globs: a glob silently absorbs a new
 # script (and silently drops a renamed one), which is how the coverage gap got here in the first
@@ -13,7 +13,7 @@
 # fetch, a browser, or an audio device, and no row dirties the working tree (every mutation suite
 # copies into its own mktemp -d first), so this script contains no restore or cleanup logic.
 #
-# Three check-*/test-* scripts are excluded; each is named at the bottom of this file with its
+# Four check-*/test-* scripts are excluded; each is named at the bottom of this file with its
 # reason. They are helpers, not entry points, and every one is already driven by an included row.
 #
 # Rows run cheapest-first so a policy break fails in seconds rather than after the build-bound
@@ -107,12 +107,19 @@ row scripts/check-capi-qualification-v1.sh
 row scripts/check-dsp-research.sh
 row scripts/check-graph-determinism.sh
 row scripts/check-graph-policy.sh
+# #241/Fable F2: the canonical PCM vectors and manifest are generated contract bytes, so their
+# generator check is an accounted sweep row rather than an implicit prerequisite of a Rust test.
+row fixtures/stem-identity/v1/generate.py --check
 # Argument-taking validators whose self-test is the standalone entry point. Their real runs are
 # driven by the parent gates below; the self-test row keeps each one individually accounted for.
 row scripts/check-builtins-listening-033.py --self-test
 row scripts/check-builtins-listening-111.py --self-test
 row scripts/check-parameter-metadata-v1.py --self-test
+row scripts/check-abi-layout-v1.py --self-test
+row scripts/check-sdk-generated.sh
+row scripts/check-sdk-deletions.py --self-test
 row scripts/check-session-map-shape.py --self-test
+row scripts/check-step-vocabulary.py --self-test
 row scripts/check-web-audioworklet-callgraph.py --self-test
 row scripts/test-artifact-evidence-leak.sh
 row scripts/test-bench-policy.sh
@@ -174,7 +181,9 @@ row scripts/check-builtins-targets.sh
 row scripts/check-effect-interchange-targets.sh
 row scripts/test-native-vectorization-report.sh
 row scripts/check-effect-contract.sh
+row scripts/check-flac-decoder.sh
 row scripts/check-web-audioworklet.sh
+row scripts/check-sdk-headless.sh
 
 # ---- deliberately not swept ----------------------------------------------------------------
 # run-wasm-kernel-timing.sh, run-console-benchmark.sh, run-wasm-console-benchmark.sh and the other
@@ -195,6 +204,11 @@ row scripts/check-web-audioworklet.sh
 #   root plus committed|preserved. Exercised by check-capi-qualification-v1.sh, a row above.
 # test-web-audioworklet.mjs -- a real standalone runner, but test-web-audioworklet.sh (a row
 #   above) already executes it; a row here would double-run the same assertions.
+# check-sdk-types.sh -- needs `sdk/node_modules` (TypeScript), and installing it needs the network.
+#   Every row here is hermetic by construction, which is the one property the sweep exists to have,
+#   so the SDK's static half sits beside the qualification suite as a runnable-but-unswept gate.
+#   The SDK's BEHAVIOURAL evals need no node_modules at all -- they run under Node's native type
+#   stripping -- and are swept as check-sdk-headless.sh.
 
 finished=$(date +%s)
 printf '\n\n'

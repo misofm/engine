@@ -1216,8 +1216,8 @@ mod tests {
     /// variant and on ids of every length.
     ///
     /// `graph_metadata_bytes` feeds `incremental_plan_bytes` and `session_plus_plan_bytes`, both
-    /// of which are checked against caps and against `limits.memory_bytes` -- so a wrong length is
-    /// a wrong admission decision, not a cosmetic drift. The two functions are separate code paths
+    /// of which are checked against the host's graph budget -- so a wrong length is a wrong
+    /// admission decision, not a cosmetic drift. The two functions are separate code paths
     /// by design (one allocates, one does not), so they need a gate that keeps them in step.
     #[test]
     fn node_text_len_matches_node_text_for_every_variant() {
@@ -1725,6 +1725,8 @@ mod tests {
             "route:z-downstream",
             "output:main-out",
         ];
+        // #241 re-pin: this graph identity commits the canonical session source shape; its
+        // schedule, dependency levels, and rendered PCM remain independently fixed below.
         reverse_fixture_identity_contract(
             &baseline.graph,
             &baseline.report,
@@ -1732,7 +1734,7 @@ mod tests {
             &baseline.graph.dependency_levels,
             &GraphCompiler::evidence(&baseline.graph, &baseline.report).canonical_bytes,
             &expected_schedule,
-            "464022a08d25cab733387983fc6c3d78da0fee1c3427698949dc8209339fe1c5",
+            "14d73acde3dfc2a57a7a3c797151d675440b7c987aed85b2911ca94e5fac07c3",
         )
         .expect("sorted production identity");
         let level_transcript: Vec<_> = baseline
@@ -1819,7 +1821,7 @@ mod tests {
         assert_ne!(legacy_canonical, baseline_canonical);
         assert_eq!(
             GraphCompiler::sha256(&baseline.graph, &baseline.report),
-            "464022a08d25cab733387983fc6c3d78da0fee1c3427698949dc8209339fe1c5"
+            "14d73acde3dfc2a57a7a3c797151d675440b7c987aed85b2911ca94e5fac07c3"
         );
         let mut reversed = baseline.graph.dependency_levels.clone();
         reversed[9].nodes.reverse();
@@ -1860,7 +1862,7 @@ mod tests {
                 &baseline.graph.dependency_levels,
                 &baseline_canonical,
                 &expected_schedule,
-                "464022a08d25cab733387983fc6c3d78da0fee1c3427698949dc8209339fe1c5",
+                "14d73acde3dfc2a57a7a3c797151d675440b7c987aed85b2911ca94e5fac07c3",
             ),
             Err("schedule level order")
         );
@@ -1874,7 +1876,7 @@ mod tests {
                 &baseline.graph.dependency_levels,
                 &canonical_corruption,
                 &expected_schedule,
-                "464022a08d25cab733387983fc6c3d78da0fee1c3427698949dc8209339fe1c5",
+                "14d73acde3dfc2a57a7a3c797151d675440b7c987aed85b2911ca94e5fac07c3",
             ),
             Err("canonical identity")
         );

@@ -120,6 +120,20 @@ impl ModelVisitor for TomlWriter {
         self.scalar_end();
         Ok(())
     }
+    fn source_bit_depth(
+        &mut self,
+        key: FieldKey,
+        value: crate::SourceBitDepth,
+    ) -> Result<(), Self::Error> {
+        self.field(key);
+        match value {
+            crate::SourceBitDepth::Pcm16 => self.output.push_str("16"),
+            crate::SourceBitDepth::Pcm24 => self.output.push_str("24"),
+            crate::SourceBitDepth::Float32 => write_quoted(&mut self.output, "32f"),
+        }
+        self.scalar_end();
+        Ok(())
+    }
     fn f32(&mut self, key: FieldKey, value: f32) -> Result<(), Self::Error> {
         self.field(key);
         let _ = write_f32(&mut self.output, value);

@@ -27,11 +27,11 @@ miso-engine-builtins-compiler.workspace = true
 miso-engine-core.workspace = true
 miso-engine-effect-contract.workspace = true
 miso-engine-host-core.workspace = true
+miso-engine-session.workspace = true
 # Issue #143 R4: the one linear-to-decibel conversion the design permits, on the control plane.
 miso-engine-math.workspace = true
 
 [dev-dependencies]
-miso-engine-session.workspace = true
 # Dev-only: the native leg of the #106 F4 native<->simd128 session parity gate digests its rendered
 # PCM the same way the raw-Wasm oracle does. Never linked into the browser artifact.
 sha2.workspace = true

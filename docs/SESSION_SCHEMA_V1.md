@@ -6,11 +6,10 @@ Its canonical writer deliberately emits a TOML 1.0 subset: bare keys, basic stri
 integers, decimal floats without exponents, booleans, inline tables, and arrays. The schema
 requires the root keys, in canonical order,
 `schema_version`, `session_id`, `revision`, `sample_rate_hz`, `quantum_frames`, `render_profile`,
-`output_profile`, `limits`, `sources`, `tracks`, `submixes`, `outputs`, `routes`, and `automation`.
-Every table rejects unknown keys and every field is explicit, including empty arrays and
-`sidechain = { kind = "none" }`. `limits` carries exactly `pcm_ring_frames`,
-`control_queue_messages`, and `memory_bytes`; each of those three and `quantum_frames` must be
-nonzero, and a zero rejects with `capacity.zero` at its own leaf.
+`output_profile`, `sources`, `tracks`, `submixes`, `outputs`, `routes`, and `automation`. Every
+table rejects unknown keys and every field is explicit, including empty arrays and
+`sidechain = { kind = "none" }`. `quantum_frames` must be nonzero. Queue depth, source-ring size,
+and memory budget are host policy and are not session-document fields.
 
 Stable IDs use `[a-z][a-z0-9._-]{0,126}`. Sources have their own unique ID namespace. Tracks,
 submixes, and outputs share the graph-entity namespace; routes, automations, rack-local effects,
@@ -35,8 +34,16 @@ would let a session claim parallelism it never had.
 `sample_rate_hz` is a launch engine setting and is exactly one of 44100, 48000, 88200, or
 96000 Hz. Other values, including extended compatibility corpus rates, reject with
 `sample_rate.unsupported_at_launch` at `$.sample_rate_hz`; parsing, typed compilation, and
-canonical serialization never turn such a model into an engine session. A source's nonzero
-`sample_rate_hz` remains lossless asset metadata and does not itself claim engine support.
+canonical serialization never turn such a model into an engine session. It is the only sample
+rate in a document; V1 has no per-source rate and no implicit sample-rate conversion.
+
+Each source is exactly `{ id, content, channels, bit_depth, frames }`. `content` must match
+`sha256:[0-9a-f]{64}` exactly. `channels` and `frames` are nonzero; `frames` is the full canonical
+content length beginning at frame zero. `bit_depth` is integer `16`, integer `24`, or the string
+`"32f"`; the canonical writer preserves those spellings. Locator, mapping, region, and per-source
+rate are not part of the schema. Host resolver policy maps the content identity to bytes, then
+must prove rate/channels/depth/frames against the declaration before publication. The canonical
+PCM preimage and content identity contract is [STEM_IDENTITY_V1.md](STEM_IDENTITY_V1.md).
 
 V1 output is exactly two planar `f32` channels, matching its explicit 2x2 matrices. A track maps
 independent left and right source channels and declares independent builtins, fader/mute values,
@@ -90,8 +97,8 @@ only track taps are `input`, `post_input_builtins`, `post_simd1`, `post_dynamic`
 `post_simd2_pre_fader`, `post_fader`, and `post_matrix`.
 
 Issue 004 owns structural validity, ID syntax/uniqueness, references whose declaration role is
-already represented by this schema, finite/`f32`/unit-local ranges, source channel and region
-bounds, ordered automation representation, and checked resource estimates. Ownership continues as
+already represented by this schema, finite/`f32`/unit-local ranges, source identity/shape bounds,
+ordered automation representation, and checked resource estimates. Ownership continues as
 follows:
 
 | Deferred validation | Owning issue |
@@ -99,20 +106,20 @@ follows:
 | Graph cycles, scheduling, port existence, PDC | 006 |
 | Builtin/effect DSP domains and Nyquist relationships | 007 |
 | SIMD-bank/cohort compatibility | 008 |
-| Source asset resolution and declared-rate matching | 010 |
+| Source asset resolution and declared-shape matching | 010 |
 | Native descriptor/effect validity | 011 |
 | Third-party CID/package validity | 029 |
 
-Consequently, a declared source rate may differ from the engine rate in this IR; there is still no
-implicit SRC, and issue 010 must resolve or reject it before plan publication. Issue 004 does not
-claim cycle freedom, valid downstream ports, effect availability, or a publishable render plan.
+Issue 010 must resolve content and reject any decoded rate/channels/depth/frames mismatch before
+plan publication. Issue 004 does not claim cycle freedom, valid downstream ports, effect
+availability, or a publishable render plan.
 
 `compile_session` first computes checked retained-string, vector/index, canonical upper-bound,
-queue, source-ring, largest-allocation, `usize`/`isize`, and total byte estimates. `CompileCaps`
-then bounds compiled model bytes, requested runtime bytes, the largest single allocation, queue
-items, source-ring frames, and source-ring bytes before canonical allocation, cloning, sorting, or
-index construction. The session's own `limits.memory_bytes` independently bounds requested runtime
-bytes. There is no track-count cap.
+largest-allocation, `usize`/`isize`, and total model-byte estimates. `CompileCaps` bounds compiled
+model bytes and the largest single allocation before canonical allocation, cloning, sorting, or
+index construction. Its legacy queue/runtime/ring fields report zero for a session because those
+allocations are host policy; host preparation applies the chosen queue, ring, and aggregate memory
+caps separately. There is no track-count cap.
 
 Diagnostics use one stable dotted code registry and a structured `DiagnosticPath` of field, index,
 or stable-ID segments. A rejected parse or compile returns a nonempty `DiagnosticSet` and no partial

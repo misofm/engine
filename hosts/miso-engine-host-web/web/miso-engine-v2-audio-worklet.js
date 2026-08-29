@@ -1,5 +1,5 @@
-const ABI_VERSION = 0x00010000;
-const CONFIG_BYTES = 192;
+const ABI_VERSION = 0x00020000;
+const BOOT_OPTIONS_BYTES = 64;
 // Issue #143 D5: the fixed structure carrying the sample window an `f32` frame cannot hold.
 const METER_HEADER_BYTES = 64;
 const RESULT_OK = 0;
@@ -8,7 +8,6 @@ const RESULT_UNSUPPORTED = 7;
 const RESULT_REPREPARE_REQUIRED = 9;
 const COMMAND_REASON_UNSUPPORTED_KIND = 7;
 const RESULT_INTERNAL = 255;
-const BUFFER_SESSION_TOML = 1;
 const BUFFER_SOURCE_ID = 2;
 const BUFFER_SOURCE_PCM = 3;
 const BUFFER_OUTPUT_PCM = 5;
@@ -25,20 +24,9 @@ const COMMAND_REPORT_BYTES = 48;
 // a millisecond-resolution clock to accumulate a usable ratio and short enough to be a live meter.
 const TELEMETRY_WINDOW_BLOCKS = 128;
 
-const INIT_FIELDS = [
-  "requestId", "module", "backend", "sampleRateHz", "quantumFrames", "sessionToml", "limits",
-];
-const LIMIT_FIELDS = [
-  "sessionTomlBytes", "diagnosticBytes", "sourceIdBytes", "maximumSourceChannels",
-  "sourceRingFrames", "maximumAutomationSpansPerBlock", "maximumTracks", "maximumSources",
-  "maximumRoutes", "maximumEffects", "maximumGraphSessionPlusPlanBytes",
-  "maximumSourceTotalBytes", "maximumSourceOverheadBytes", "maximumEffectStateBytes",
-  "maximumEffectScratchBytes", "maximumBuiltinRetainedBytes", "maximumHostRetainedBytes",
-  "maximumNamedAllocationBytes", "maximumMeterStreams", "maximumMeterItems", "maximumMeterBytes",
-  "consoleCommandQueueRecords", "consoleMeterBlocks",
-  // Issue #143 D3/D6: the frozen configuration's remaining two reserved words, carved exactly as
-  // #137 carved the first two. Zero in both is what every pre-#143 writer already sends and means
-  // "no observation capacity, no master designation".
+const INIT_FIELDS = ["module", "document", "options"];
+const OPTION_FIELDS = [
+  "sourceRingFrames", "maximumMemoryBytes", "consoleCommandQueueRecords", "consoleMeterBlocks",
   "consoleObservationTaps", "consoleMasterTrackPlusOne",
 ];
 const SOURCE_FIELDS = [
@@ -73,10 +61,6 @@ function exactFields(value, fields) {
 
 function u32(value) {
   return Number.isInteger(value) && value >= 0 && value <= 0xffffffff;
-}
-
-function positiveU64(value) {
-  return typeof value === "bigint" && value > 0n && value <= 0xffffffffn;
 }
 
 function validU64(value) {
@@ -186,53 +170,35 @@ class MisoEngineV2AudioWorkletProcessor extends AudioWorkletProcessor {
   }
 
   initialize(init) {
-    if (!exactFields(init, INIT_FIELDS) || init.requestId !== 0
-        || (init.backend !== "scalar" && init.backend !== "simd128")
-        || !u32(init.sampleRateHz) || !u32(init.quantumFrames) || init.quantumFrames === 0
-        || !(init.sessionToml instanceof Uint8Array) || !exactFields(init.limits, LIMIT_FIELDS)) {
+    if (!exactFields(init, INIT_FIELDS) || !(init.document instanceof Uint8Array)
+        || !exactFields(init.options, OPTION_FIELDS)) {
       return RESULT_INVALID_ARGUMENT;
-    }
-    if (globalThis.sampleRate !== init.sampleRateHz) return RESULT_REPREPARE_REQUIRED;
-    const exposedQuantum = globalThis.renderQuantumSize;
-    if (typeof exposedQuantum === "number" && exposedQuantum !== 0
-        && exposedQuantum !== init.quantumFrames) {
-      return RESULT_REPREPARE_REQUIRED;
     }
     this.instance = new WebAssembly.Instance(init.module, {});
     this.exports = this.instance.exports;
-    if (this.exports.miso_engine_web_v1_abi_version() !== ABI_VERSION
-        || this.exports.miso_engine_web_v1_config_bytes() !== CONFIG_BYTES) {
+    if (this.exports.miso_engine_web_v1_abi_version() !== ABI_VERSION) {
       return 2;
     }
-    this.handle = this.exports.miso_engine_web_v1_config_new();
-    const configPointer = this.exports.miso_engine_web_v1_config_ptr(this.handle);
-    if (this.handle === 0 || configPointer === 0) {
+    const optionsPointer = this.exports.miso_engine_web_v1_boot_options_ptr();
+    if (!u32(optionsPointer) || optionsPointer === 0) {
       return RESULT_INTERNAL;
     }
     try {
-      this.writeConfig(configPointer, init);
+      this.writeBootOptions(optionsPointer, init.options);
     } catch (_) {
       return RESULT_INVALID_ARGUMENT;
     }
-    let result = this.exports.miso_engine_web_v1_prepare(this.handle);
-    if (result !== RESULT_OK) {
-      return result;
+    const documentPointer = this.exports.miso_engine_web_v1_document_ptr(init.document.byteLength);
+    if (!u32(documentPointer) || documentPointer === 0) {
+      return this.exports.miso_engine_web_v1_boot_result();
     }
-    const tomlPointer = this.exports.miso_engine_web_v1_buffer_ptr(this.handle, BUFFER_SESSION_TOML);
-    const tomlCapacity = this.exports.miso_engine_web_v1_buffer_capacity(this.handle, BUFFER_SESSION_TOML);
-    if (!u32(tomlPointer) || tomlPointer === 0 || !u32(tomlCapacity)
-        || init.sessionToml.byteLength > tomlCapacity) {
-      return 4;
+    new Uint8Array(this.exports.memory.buffer, documentPointer, init.document.byteLength)
+      .set(init.document);
+    this.handle = this.exports.miso_engine_web_v1_boot(init.document.byteLength);
+    if (this.handle === 0) {
+      return this.exports.miso_engine_web_v1_boot_result();
     }
-    new Uint8Array(this.exports.memory.buffer, tomlPointer, init.sessionToml.byteLength).set(init.sessionToml);
-    result = this.exports.miso_engine_web_v1_compile(this.handle, init.sessionToml.byteLength);
-    if (result !== RESULT_OK) {
-      return result;
-    }
-    this.backend = init.backend;
-    this.sampleRateHz = init.sampleRateHz;
-    this.quantumFrames = init.quantumFrames;
-    this.maximumSourceChannels = init.limits.maximumSourceChannels;
+    this.backend = "simd128";
     this.memoryBuffer = this.exports.memory.buffer;
     this.sourceIdPointer = this.exports.miso_engine_web_v1_buffer_ptr(this.handle, BUFFER_SOURCE_ID);
     this.sourceIdCapacity = this.exports.miso_engine_web_v1_buffer_capacity(this.handle, BUFFER_SOURCE_ID);
@@ -251,11 +217,21 @@ class MisoEngineV2AudioWorkletProcessor extends AudioWorkletProcessor {
     if (!u32(this.sourceIdPointer) || this.sourceIdPointer === 0 || !u32(this.sourceIdCapacity)
         || !u32(this.sourcePcmPointer) || this.sourcePcmPointer === 0
         || !u32(sourcePcmCapacity) || sourcePcmCapacity % 4 !== 0
-        || sourcePcmCapacity < this.maximumSourceChannels * this.quantumFrames * 4
         || !u32(outputPointer) || outputPointer === 0
-        || outputCapacity !== this.quantumFrames * 2 * 4
         || !u32(statusPointer) || statusPointer === 0
         || !u32(resourcePointer) || resourcePointer === 0) return RESULT_INTERNAL;
+    this.statusView = new DataView(this.memoryBuffer, statusPointer, 80);
+    this.resourceView = new DataView(this.memoryBuffer, resourcePointer, 224);
+    const status = this.readStatus();
+    this.sampleRateHz = status.sampleRateHz;
+    this.quantumFrames = status.quantumFrames;
+    if (this.sampleRateHz !== globalThis.sampleRate
+        || this.quantumFrames !== (globalThis.renderQuantumSize ?? 128)
+        || this.quantumFrames === 0 || sourcePcmCapacity % (this.quantumFrames * 4) !== 0
+        || outputCapacity !== this.quantumFrames * 2 * 4) {
+      return RESULT_REPREPARE_REQUIRED;
+    }
+    this.maximumSourceChannels = sourcePcmCapacity / (this.quantumFrames * 4);
     this.sourcePcm = new Float32Array(
       this.memoryBuffer,
       this.sourcePcmPointer,
@@ -267,24 +243,11 @@ class MisoEngineV2AudioWorkletProcessor extends AudioWorkletProcessor {
       outputPointer + this.quantumFrames * 4,
       this.quantumFrames,
     );
-    this.statusView = new DataView(
-      this.memoryBuffer,
-      statusPointer,
-      80,
-    );
-    this.resourceView = new DataView(
-      this.memoryBuffer,
-      resourcePointer,
-      224,
-    );
     this.resources = this.readResources();
-    const status = this.readStatus();
-    const expectedBackend = init.backend === "scalar" ? 0 : 1;
+    const expectedBackend = 1;
     if (this.resources.backend !== expectedBackend || status.backend !== expectedBackend
-        || this.resources.sampleRateHz !== init.sampleRateHz
-        || status.sampleRateHz !== init.sampleRateHz
-        || this.resources.quantumFrames !== init.quantumFrames
-        || status.quantumFrames !== init.quantumFrames
+        || this.resources.sampleRateHz !== this.sampleRateHz
+        || this.resources.quantumFrames !== this.quantumFrames
         || status.state !== STATE_READY || status.lastResult !== RESULT_OK
         || status.nextAbsoluteSample !== 0n || status.renderedQuanta !== 0n) {
       return RESULT_INVALID_ARGUMENT;
@@ -293,7 +256,7 @@ class MisoEngineV2AudioWorkletProcessor extends AudioWorkletProcessor {
     this.memoryBytes = this.memoryBuffer.byteLength;
     this.port.postMessage({
       tag: "miso.ready.v1",
-      requestId: init.requestId,
+      requestId: 0,
       result: RESULT_OK,
       backend: this.backend,
       resources: this.resources,
@@ -311,7 +274,7 @@ class MisoEngineV2AudioWorkletProcessor extends AudioWorkletProcessor {
   /// clone `postMessage` performs is the only allocation left, and it is the one the ABI cannot
   /// avoid.
   bindConsole(init) {
-    this.consoleAttached = init.limits.consoleCommandQueueRecords !== 0n;
+    this.consoleAttached = init.options.consoleCommandQueueRecords !== 0n;
     const commandPointer = this.exports.miso_engine_web_v1_buffer_ptr(this.handle, BUFFER_COMMAND);
     const commandCapacity = this.exports.miso_engine_web_v1_buffer_capacity(
       this.handle,
@@ -356,8 +319,8 @@ class MisoEngineV2AudioWorkletProcessor extends AudioWorkletProcessor {
     //
     // Every read is checked against something the engine already guarantees, so a mis-wired export
     // fails initialization here rather than surfacing as a plausible-looking wrong number:
-    // compilation refuses a zero channel count, a zero region length and a source rate that is not
-    // the session rate, and preparation refuses a channel count above `maximumSourceChannels`.
+    // compilation refuses a zero channel count or full-source frame count, and preparation refuses
+    // a channel count above `maximumSourceChannels`.
     this.sourceCount = this.exports.miso_engine_web_v1_source_count(this.handle);
     if (!u32(this.sourceCount)) return false;
     this.sources = [];
@@ -371,13 +334,10 @@ class MisoEngineV2AudioWorkletProcessor extends AudioWorkletProcessor {
         id += String.fromCharCode(bytes[byte]);
       }
       const channels = this.exports.miso_engine_web_v1_source_channels(this.handle, index);
-      const sampleRateHz = this.exports.miso_engine_web_v1_source_sample_rate(this.handle, index);
       const frames = this.exports.miso_engine_web_v1_source_frames(this.handle, index);
-      const startFrame = this.exports.miso_engine_web_v1_source_start_frame(this.handle, index);
       if (!u32(channels) || channels === 0 || channels > this.maximumSourceChannels
-          || sampleRateHz !== this.sampleRateHz
-          || !u64(frames) || frames === 0n || !u64(startFrame)) return false;
-      this.sources.push({ id, channels, sampleRateHz, startFrame, frames });
+          || !u64(frames) || frames === 0n) return false;
+      this.sources.push({ id, channels, frames });
     }
 
     const framePointer = this.exports.miso_engine_web_v1_buffer_ptr(
@@ -388,8 +348,8 @@ class MisoEngineV2AudioWorkletProcessor extends AudioWorkletProcessor {
       this.handle,
       BUFFER_METER_FRAME,
     );
-    this.metersAttached = init.limits.consoleMeterBlocks !== 0n;
-    this.observationAttached = init.limits.consoleObservationTaps !== 0n;
+    this.metersAttached = init.options.consoleMeterBlocks !== 0n;
+    this.observationAttached = init.options.consoleObservationTaps !== 0n;
     if (this.metersAttached) {
       // Issue #143 D5: the frame is `3T + 3` words -- the peak section exactly where it was, then
       // one non-negative gain-reduction magnitude per track and the master's.
@@ -472,48 +432,33 @@ class MisoEngineV2AudioWorkletProcessor extends AudioWorkletProcessor {
     }
   }
 
-  writeConfig(pointer, init) {
-    const limits = init.limits;
-    const values32 = [
-      CONFIG_BYTES, ABI_VERSION, init.sampleRateHz, init.quantumFrames, limits.sessionTomlBytes,
-      limits.diagnosticBytes, limits.sourceIdBytes, limits.maximumSourceChannels,
-      limits.sourceRingFrames, limits.maximumAutomationSpansPerBlock,
-    ];
-    if (values32.some((value) => !u32(value))
-        || init.sessionToml.byteLength > limits.sessionTomlBytes) {
-      throw new RangeError("Invalid u32 preparation limit");
+  writeBootOptions(pointer, options) {
+    if (!u32(options.sourceRingFrames) || !validU64(options.maximumMemoryBytes)) {
+      throw new RangeError("Invalid boot option");
     }
-    const values64 = [
-      limits.maximumTracks, limits.maximumSources, limits.maximumRoutes, limits.maximumEffects,
-      limits.maximumGraphSessionPlusPlanBytes, limits.maximumSourceTotalBytes,
-      limits.maximumSourceOverheadBytes, limits.maximumEffectStateBytes,
-      limits.maximumEffectScratchBytes, limits.maximumBuiltinRetainedBytes,
-      limits.maximumHostRetainedBytes, limits.maximumNamedAllocationBytes,
-      limits.maximumMeterStreams, limits.maximumMeterItems, limits.maximumMeterBytes,
-    ];
-    if (values64.some((value) => !positiveU64(value))) {
-      throw new RangeError("Invalid u64 preparation limit");
-    }
-    // Issue #137 D1/D2 and #143 D3/D6: the four console words *are* the frozen configuration's
-    // four reserved words. All zero is exactly what every pre-#137 writer wrote and means "default
-    // command-queue depth, no meter observers, no observation capacity, no master designation".
     const consoleWords = [
-      limits.consoleCommandQueueRecords, limits.consoleMeterBlocks,
-      limits.consoleObservationTaps, limits.consoleMasterTrackPlusOne,
+      options.consoleCommandQueueRecords, options.consoleMeterBlocks,
+      options.consoleObservationTaps, options.consoleMasterTrackPlusOne,
     ];
     if (consoleWords.some((value) => !validU64(value))) {
-      throw new RangeError("Invalid u64 console configuration word");
+      throw new RangeError("Invalid console boot option");
     }
     // A subscription rides the effect's own command queue, so capacity without one has no delivery
     // path; a master designation with no capacity would report a number nothing produces.
-    if ((limits.consoleObservationTaps !== 0n && limits.consoleCommandQueueRecords === 0n)
-        || (limits.consoleMasterTrackPlusOne !== 0n && limits.consoleObservationTaps === 0n)) {
-      throw new RangeError("Invalid observation configuration word");
+    if ((options.consoleObservationTaps !== 0n && options.consoleCommandQueueRecords === 0n)
+        || (options.consoleMasterTrackPlusOne !== 0n
+          && options.consoleObservationTaps === 0n)) {
+      throw new RangeError("Invalid observation boot option");
     }
-    const view = new DataView(this.exports.memory.buffer, pointer, CONFIG_BYTES);
-    values32.forEach((value, index) => view.setUint32(index * 4, value, true));
-    values64.forEach((value, index) => view.setBigUint64(40 + index * 8, value, true));
-    consoleWords.forEach((value, index) => view.setBigUint64(160 + index * 8, value, true));
+    const view = new DataView(this.exports.memory.buffer, pointer, BOOT_OPTIONS_BYTES);
+    view.setUint32(0, BOOT_OPTIONS_BYTES, true);
+    view.setUint32(4, ABI_VERSION, true);
+    view.setUint32(8, globalThis.sampleRate, true);
+    view.setUint32(12, globalThis.renderQuantumSize ?? 128, true);
+    view.setUint32(16, options.sourceRingFrames, true);
+    view.setUint32(20, 0, true);
+    view.setBigUint64(24, options.maximumMemoryBytes, true);
+    consoleWords.forEach((value, index) => view.setBigUint64(32 + index * 8, value, true));
   }
 
   readResources() {
@@ -527,7 +472,7 @@ class MisoEngineV2AudioWorkletProcessor extends AudioWorkletProcessor {
       throw new RangeError("Invalid resource report");
     }
     const names = [
-      "configBytes", "statusBytes", "sessionTomlBytes", "diagnosticBytes", "sourceIdBytes",
+      "optionsBytes", "statusBytes", "sessionTomlBytes", "diagnosticBytes", "sourceIdBytes",
       "sourcePcmStagingBytes", "outputPcmBytes", "bridgeMetadataBytes", "bridgeRetainedBytes",
       "largestBridgeAllocationBytes", "sourceTotalBytes", "sourceOverheadBytes",
       "effectScalarStateBytes", "effectScalarScratchBytes", "builtinRetainedBytes",
@@ -631,8 +576,6 @@ class MisoEngineV2AudioWorkletProcessor extends AudioWorkletProcessor {
         sources: this.sources.map((source) => ({
           id: source.id,
           channels: source.channels,
-          sampleRateHz: source.sampleRateHz,
-          startFrame: source.startFrame,
           frames: source.frames,
         })),
         metersAttached: this.metersAttached === true,

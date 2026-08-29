@@ -1,0 +1,19 @@
+[package]
+name = "miso-engine-flac-decoder"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+name = "miso_engine_flac_decoder"
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+symphonia.workspace = true
+
+[dev-dependencies]
+miso-engine-stem-hasher.workspace = true
+
+[lints]
+workspace = true

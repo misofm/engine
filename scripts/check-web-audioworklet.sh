@@ -124,7 +124,12 @@ command -v wasm-objdump >/dev/null || {
   exit 2
 }
 
+# Issue #243: the set is six files. `miso-engine-v2-abi-layout.json` joined it because the boot
+# ABI's bytes -- options offsets, result codes, the staging sequence -- were hand-written on the
+# JavaScript side five times over and drifted; it is emitted by the same generator, from the same
+# `offset_of!`s, and travels with the module it describes.
 expected=$(printf '%s\n' \
+  miso-engine-v2-abi-layout.json \
   miso-engine-v2-audio-worklet-host.d.ts \
   miso-engine-v2-audio-worklet-host.js \
   miso-engine-v2-audio-worklet.js \
@@ -132,7 +137,7 @@ expected=$(printf '%s\n' \
   miso-engine-v2-parameter-metadata.json)
 actual=$(find "$artifact_dir" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort)
 [[ "$actual" == "$expected" ]] || {
-  echo "artifact directory does not contain the exact five frozen outputs" >&2
+  echo "artifact directory does not contain the exact six frozen outputs" >&2
   diff -u <(printf '%s\n' "$expected") <(printf '%s\n' "$actual") >&2 || true
   exit 1
 }
@@ -144,30 +149,28 @@ worklet_js="$artifact_dir/miso-engine-v2-audio-worklet.js"
 expected_exports=$(printf '%s\n' \
   memory \
   miso_engine_web_v1_abi_version \
+  miso_engine_web_v1_boot \
+  miso_engine_web_v1_boot_diagnostic_bytes \
+  miso_engine_web_v1_boot_options_ptr \
+  miso_engine_web_v1_boot_result \
   miso_engine_web_v1_buffer_capacity \
   miso_engine_web_v1_buffer_ptr \
   miso_engine_web_v1_command_report_ptr \
   miso_engine_web_v1_command_submit \
-  miso_engine_web_v1_compile \
-  miso_engine_web_v1_config_bytes \
-  miso_engine_web_v1_config_new \
-  miso_engine_web_v1_config_ptr \
   miso_engine_web_v1_console_track_count \
   miso_engine_web_v1_console_track_id \
+  miso_engine_web_v1_document_ptr \
   miso_engine_web_v1_dispose \
   miso_engine_web_v1_meter_header_ptr \
   miso_engine_web_v1_meter_lease \
   miso_engine_web_v1_meter_poll \
-  miso_engine_web_v1_prepare \
   miso_engine_web_v1_render \
   miso_engine_web_v1_resource_ptr \
   miso_engine_web_v1_source_channels \
   miso_engine_web_v1_source_count \
   miso_engine_web_v1_source_frames \
   miso_engine_web_v1_source_id \
-  miso_engine_web_v1_source_sample_rate \
   miso_engine_web_v1_source_seek \
-  miso_engine_web_v1_source_start_frame \
   miso_engine_web_v1_source_submit \
   miso_engine_web_v1_status_ptr | sort)
 
@@ -363,6 +366,12 @@ grep -q 'output\[1\]\.set(this.outputRight)' <<<"$process_body"
 python3 -B "$(dirname "${BASH_SOURCE[0]}")/check-parameter-metadata-v1.py" \
   "$artifact_dir/miso-engine-v2-parameter-metadata.json" || exit 1
 
+# Issue #243: the same `--check` above covers the ABI layout document (one generator, one
+# transcription discipline, so an artifact directory can never hold a current metadata beside a
+# stale layout). This is its independent schema gate.
+python3 -B "$(dirname "${BASH_SOURCE[0]}")/check-abi-layout-v1.py" \
+  "$artifact_dir/miso-engine-v2-abi-layout.json" || exit 1
+
 # Issues #143/#151: the command-reason vocabulary is written out five times -- Rust constants, the
 # host JS acknowledgement table, the `.d.ts` enum, the metadata generator's rows and the schema
 # gate's own list -- and the app's dead GR meters were what a two-reason drift between them cost.
@@ -385,5 +394,10 @@ python3 -B "$(dirname "${BASH_SOURCE[0]}")/check-command-kind-vocabulary.py" \
 # stale artifact fails here as it does for the two vocabulary gates.
 python3 -B "$(dirname "${BASH_SOURCE[0]}")/check-session-map-shape.py" \
   --artifacts "$artifact_dir" || exit 1
+
+# Issue #240 A9 ruling 5458432482: the 80x parse-transient pin is re-measured against the exact
+# 1 MiB, 512-track x 4-effect accepted shape on the shipped wasm artifact. The refusal leg proves
+# a one-byte-under budget dies before parsing without unbounded memory growth.
+node "$(dirname "${BASH_SOURCE[0]}")/check-web-boot-budget.mjs" "$simd" || exit 1
 
 echo "web AudioWorklet static/object checks passed"

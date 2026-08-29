@@ -17,10 +17,12 @@ import copy
 import json
 import math
 import pathlib
+import re
 import sys
+from decimal import Decimal
 
 SCHEMA = "miso.web.parameter-metadata.v1"
-ABI_VERSION = 0x0001_0000
+ABI_VERSION = 0x0002_0000
 
 UNITS = {1: "db", 2: "hz", 3: "milliseconds", 4: "samples", 5: "linear", 6: "ratio"}
 DOMAINS = {1: "continuous", 2: "boolean", 3: "enumeration"}
@@ -63,7 +65,7 @@ EFFECT_PARAMETER_KEYS = {
     "id", "name", "displayUnit", "unit", "unitName", "domain", "domainName", "minimum", "maximum",
     "default", "mapping", "mappingName", "automationRate", "automationRateName", "channelPolicy",
     "channelPolicyName", "smoothing", "smoothingName", "smoothingSamples", "readable",
-    "automatable", "liveUpdatable", "enumChoices", "nudge",
+    "automatable", "liveUpdatable", "enumChoices", "step",
 }
 EFFECT_OBSERVATION_KEYS = {
     "id", "name", "displayUnit", "kind", "kindName", "unit", "unitName", "cost", "costName",
@@ -85,8 +87,66 @@ OBSERVATION_VOCABULARIES = {
 
 BUILTIN_PARAMETER_KEYS = {
     "id", "name", "scope", "mapping", "domain", "minimum", "maximum", "maximumByRate", "default",
-    "updateRate", "smoothing", "reset", "disabledValue", "liveUpdatable", "nudge",
+    "updateRate", "smoothing", "reset", "disabledValue", "liveUpdatable", "step",
 }
+
+# Issue #242: the populated lattice declaration that replaced #127's `"nudge": null` slot.
+STEP_KEYS = {"unit", "size", "precision", "ladder"}
+STEP_UNITS = {"absolute", "cents", "ratio", "index"}
+LADDER_SIZES = ["xs", "sm", "md", "lg", "xl"]
+
+
+def decimal_string(text, what):
+    """Return `text` as a Decimal, proving it is an exact decimal literal.
+
+    The step contract crosses the agent boundary as decimal text precisely so no reader has to
+    round-trip it through a float; a float here would defeat the point of the slot.
+    """
+    require(isinstance(text, str) and text != "", f"{what} is a decimal string")
+    require(
+        re.fullmatch(r"-?(0|[1-9][0-9]*)(\.[0-9]+)?", text) is not None,
+        f"{what} is an exact decimal literal",
+    )
+    return Decimal(text)
+
+
+def validate_step(step, what):
+    """Validate one parameter's `step` object against the #242 lattice contract."""
+    require(isinstance(step, dict), f"{what} step is an object")
+    require(set(step) == STEP_KEYS, f"{what} step keys")
+    require(step["unit"] in STEP_UNITS, f"{what} step unit vocabulary")
+    size = decimal_string(step["size"], f"{what} step size")
+    require(size > 0, f"{what} step size is positive")
+    precision = step["precision"]
+    require(
+        isinstance(precision, int) and not isinstance(precision, bool) and 0 <= precision <= 8,
+        f"{what} step precision",
+    )
+    if step["unit"] == "ratio":
+        # A geometric row's step IS the ratio; at or below 1 it would never advance.
+        require(size > 1, f"{what} geometric step ratio exceeds one")
+    if step["unit"] == "index":
+        require(size == 1 and precision == 0, f"{what} index step is a unit ordinal")
+    ladder = step["ladder"]
+    require(isinstance(ladder, dict), f"{what} ladder is an object")
+    require(list(ladder) == LADDER_SIZES, f"{what} ladder sizes in order")
+    multiples = [ladder[size_name] for size_name in LADDER_SIZES]
+    require(
+        all(
+            isinstance(multiple, int) and not isinstance(multiple, bool)
+            for multiple in multiples
+        ),
+        f"{what} ladder multiples are integers",
+    )
+    # The ladder is defined as INTEGER MULTIPLES of the step, so it can never leave the lattice.
+    require(multiples[0] >= 1, f"{what} smallest ladder multiple is at least one step")
+    require(
+        all(low < high for low, high in zip(multiples, multiples[1:])),
+        f"{what} ladder multiples ascend",
+    )
+    # The frozen descriptor record packs xs..lg in five bits and xl in six.
+    require(all(multiple <= 31 for multiple in multiples[:4]), f"{what} ladder wire width")
+    require(multiples[4] <= 63, f"{what} extra-large ladder wire width")
 
 
 class Invalid(Exception):
@@ -201,13 +261,15 @@ def validate(document: dict) -> None:
             for value in parameter["maximumByRate"].values():
                 finite(value, "builtin rate table value")
             finite(parameter["disabledValue"], "builtin disabled value")
-        require(parameter["nudge"] is None, "builtin nudge slot")
+        validate_step(parameter["step"], "builtin")
     # The live set is pinned by name, not merely counted: a row that silently flipped its
     # `updateRate` would otherwise pass every other rule in this function. Issue #210 phase 3 added
     # `trim_db` and `polarity_invert` -- one coefficient, one ramp, two parameters -- and the two
     # are named here in the same change that flipped their descriptor rows. `hpf_hz`, `lpf_hz` and
     # `delay_samples` are deliberately absent and must stay absent until the ruling that defers
-    # them is reopened.
+    # them is reopened. #239 ruling 5461507633 B4 appended `pan` as an authoritative persisted
+    # descriptor row; it is a block target like the matrix rows it derives coefficients for, so it
+    # joins the live set in the same change that added it.
     require(
         live_names
         == {
@@ -219,8 +281,9 @@ def validate(document: dict) -> None:
             "matrix_lr",
             "matrix_rl",
             "matrix_rr",
+            "pan",
         },
-        "exactly the trim, polarity, fader, mute and matrix parameters are live",
+        "exactly the trim, polarity, fader, mute, matrix and pan parameters are live",
     )
 
     require(document["effects"], "at least one effect")
@@ -330,7 +393,7 @@ def validate_effect_parameter(parameter: dict) -> None:
         parameter["liveUpdatable"] == parameter["automatable"],
         "effect liveUpdatable follows automatable",
     )
-    require(parameter["nudge"] is None, "effect nudge slot")
+    validate_step(parameter["step"], "effect")
     default = finite(parameter["default"], "parameter default")
     if parameter["domainName"] == "continuous":
         low = finite(parameter["minimum"], "parameter minimum")
@@ -356,6 +419,15 @@ def validate_effect_parameter(parameter: dict) -> None:
         labels = [choice["label"] for choice in choices]
         require(len(set(labels)) == len(labels), "choice labels are unique")
         require(default in values, "enumeration default is a choice")
+
+
+def _first_step(document, unit):
+    """Return the first effect parameter step declaring `unit`, for a targeted mutation."""
+    for effect in document["effects"]:
+        for parameter in effect["parameters"]:
+            if parameter["step"]["unit"] == unit:
+                return parameter["step"]
+    raise AssertionError(f"no {unit} step row to mutate")
 
 
 def self_test() -> int:
@@ -486,7 +558,66 @@ def self_test() -> int:
                 liveUpdatable=False,
             ),
         ),
-        ("builtin nudge is an object", lambda d: d["builtins"]["parameters"][0].update(nudge={})),
+        # Issue #242 replaced #127's null slot with a populated lattice declaration. Each
+        # mutation below breaks exactly one sentence of that contract.
+        ("builtin step slot is null", lambda d: d["builtins"]["parameters"][0].update(step=None)),
+        ("effect step slot is null", lambda d: d["effects"][0]["parameters"][0].update(step=None)),
+        (
+            "step size is a float rather than decimal text",
+            lambda d: d["effects"][0]["parameters"][0]["step"].update(size=0.1),
+        ),
+        (
+            "step size carries an exponent spelling",
+            lambda d: d["effects"][0]["parameters"][0]["step"].update(size="1e-1"),
+        ),
+        (
+            "step unit leaves the vocabulary",
+            lambda d: d["effects"][0]["parameters"][0]["step"].update(unit="decibels"),
+        ),
+        (
+            "step precision exceeds the pinned range",
+            lambda d: d["effects"][0]["parameters"][0]["step"].update(precision=9),
+        ),
+        (
+            "a geometric row declares a ratio of one",
+            lambda d: _first_step(d, "ratio").update(size="1"),
+        ),
+        (
+            "an index row declares a step other than one",
+            lambda d: _first_step(d, "index").update(size="2"),
+        ),
+        (
+            "the smallest ladder multiple is zero",
+            lambda d: d["effects"][0]["parameters"][0]["step"]["ladder"].update(xs=0),
+        ),
+        (
+            "ladder multiples stop ascending",
+            lambda d: d["effects"][0]["parameters"][0]["step"]["ladder"].update(md=3),
+        ),
+        (
+            "a ladder multiple is a float",
+            lambda d: d["effects"][0]["parameters"][0]["step"]["ladder"].update(lg=10.0),
+        ),
+        (
+            "the extra-large ladder multiple exceeds its wire width",
+            lambda d: d["effects"][0]["parameters"][0]["step"]["ladder"].update(xl=64),
+        ),
+        (
+            "a ladder size is renamed",
+            lambda d: d["effects"][0]["parameters"][0]["step"].update(
+                ladder={"xs": 1, "sm": 3, "md": 5, "lg": 10, "xxl": 30}
+            ),
+        ),
+        (
+            "the step slot keeps its retired nudge spelling",
+            lambda d: d["builtins"]["parameters"][0].update(
+                nudge=d["builtins"]["parameters"][0].pop("step")
+            ),
+        ),
+        (
+            "the appended pan row is dropped from the live set",
+            lambda d: d["builtins"]["parameters"][11].update(updateRate="preparedOnly"),
+        ),
         ("effect order", lambda d: d["effects"].reverse()),
         (
             "parameter ids descend",

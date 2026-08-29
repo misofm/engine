@@ -32,9 +32,14 @@ fn trailing_comma_and_newline_in_inline_table_parse() {
 
 #[test]
 fn escape_and_hex_byte_basic_string_escapes_parse() {
-    let source = CANONICAL.replace("sha256:demo", r"sha256:\e\x41");
-    let model = parse_session_toml(&source).expect("TOML 1.1 basic-string escapes parse");
-    assert_eq!(model.sources[0].content.identity, "sha256:\u{1b}A");
+    let content = &parse_session_toml(CANONICAL).expect("fixture").sources[0].content;
+    let source = CANONICAL.replace(content, r"sha256:\e\x41");
+    let error = parse_session_toml(&source).expect_err("decoded identity is not canonical SHA-256");
+    only_diagnostic(
+        &error,
+        DiagnosticCode::SourceContentIdentityFormat,
+        "$.sources[0].content",
+    );
 }
 
 #[test]

@@ -29,6 +29,9 @@ EXPECTED_ARTIFACTS = (
     "miso-engine-v2-audio-worklet-host.d.ts",
     # Issue #137 D4: the parameter metadata ships with the module and is sealed with it.
     "miso-engine-v2-parameter-metadata.json",
+    # Issue #243: so does the ABI layout. Both are emitted by one generator from the same engine,
+    # so a seal that covered one and not the other would attest to half a release.
+    "miso-engine-v2-abi-layout.json",
 )
 SOURCE_SEAL_PATHS = (
     "Cargo.toml",
@@ -224,8 +227,22 @@ def load_inputs() -> tuple[dict, dict]:
             raise ValueError(f"{name} admitted records")
     if direct.get("schema") != "miso.web.browser.direct-oracle.v2":
         raise ValueError("direct oracle schema")
+    # Issue #241 reshaped the source declaration: the session-level `limits` table and the nested
+    # `mapping`/`region` are gone, so a source's length is the row's own `frames` and its content is
+    # a canonical-PCM identity (docs/STEM_IDENTITY_V1.md) rather than a locator name. The pins below
+    # are the post-#241 spelling of the same frozen facts, plus the identity itself. Shape and
+    # identity are separate pins so each can go red alone: the shape states the preimage's length,
+    # the identity states which bytes filled it.
     session = (FIXTURE / "session.toml").read_text()
-    for frozen in ("sample_rate_hz = 48000", "quantum_frames = 128", "length_samples = 256"):
+    for frozen in (
+        "sample_rate_hz = 48000",
+        "quantum_frames = 128",
+        'channels = 2, bit_depth = "32f", frames = 256',
+        # SHA-256 over 256 frames x 2 channels x 4 bytes, interleaved little-endian f32 bits, of
+        # the `source.json` ramp the fixture feeds: per 128-frame block, left[i] = leftBase +
+        # leftStep * i and right[i] = 0.
+        'content = "sha256:a7d052a7f6b3b881f4bde6090d87c4226d39e62010e9b6038088bb28b8742949"',
+    ):
         if frozen not in session:
             raise ValueError(f"session lacks {frozen}")
     # Issue #137 E2, extended by #140 C: the command timeline runs the identity session plus one
@@ -238,7 +255,10 @@ def load_inputs() -> tuple[dict, dict]:
     for frozen in (
         "sample_rate_hz = 48000",
         "quantum_frames = 128",
-        "length_samples = 2048",
+        'channels = 2, bit_depth = "32f", frames = 2048',
+        # SHA-256 over 2048 frames x 2 channels x 4 bytes of constant 0.5 -- the level
+        # `direct-oracle.mjs` fills into every observation-timeline block.
+        'content = "sha256:66e39e41bccc0a57ae90a77b426f4075e81ba877b0653c3aabe0a9e00762769c"',
         'effect_id = "miso.compressor"',
     ):
         if frozen not in observation_session:
@@ -247,7 +267,12 @@ def load_inputs() -> tuple[dict, dict]:
     for frozen in (
         "sample_rate_hz = 48000",
         "quantum_frames = 128",
-        "length_samples = 2048",
+        'channels = 2, bit_depth = "32f", frames = 2048',
+        # SHA-256 over 2048 frames x 2 channels x 4 bytes of constant 0.25 -- the level
+        # `direct-oracle.mjs` fills into every command-timeline block. It is deliberately not the
+        # identity session's digest: the same content string under two different `frames` would be
+        # two different preimage lengths, which STEM_IDENTITY_V1 forbids.
+        'content = "sha256:680aca77ba6b819a4489730f3e42f69ba9f6d7a5921e748a8a46eb1974d0867c"',
         'effect_id = "miso.parametric-eq"',
     ):
         if frozen not in command_session:
@@ -539,7 +564,10 @@ def validate_result(result: dict, source: dict, expected: dict) -> None:
 
 def check_oracle(artifacts: pathlib.Path) -> None:
     if sorted(path.name for path in artifacts.iterdir()) != sorted(EXPECTED_ARTIFACTS):
-        raise ValueError("artifact directory is not the exact frozen four-file set")
+        raise ValueError(
+            f"artifact directory is not the exact frozen "
+            f"{len(EXPECTED_ARTIFACTS)}-file set"
+        )
     runtime = shutil.which("node") or shutil.which("bun")
     if runtime is None:
         raise RuntimeError("Node.js-compatible runtime required for raw-Wasm oracle")
@@ -558,7 +586,10 @@ def check_oracle(artifacts: pathlib.Path) -> None:
 def run(args: argparse.Namespace, source: dict, expected: dict) -> None:
     artifacts = args.artifacts.resolve()
     if sorted(path.name for path in artifacts.iterdir()) != sorted(EXPECTED_ARTIFACTS):
-        raise ValueError("artifact directory is not the exact frozen four-file set")
+        raise ValueError(
+            f"artifact directory is not the exact frozen "
+            f"{len(EXPECTED_ARTIFACTS)}-file set"
+        )
     if args.output.exists() or args.output.with_suffix(args.output.suffix + ".sha256").exists():
         raise FileExistsError("refusing to overwrite browser evidence")
     require_clean_candidate()

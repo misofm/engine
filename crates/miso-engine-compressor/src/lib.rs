@@ -117,6 +117,11 @@ const fn parameter(
         readable: true,
         automatable: !matches!(automation_rate, AutomationRate::None),
         enum_choices: &[],
+        lattice: miso_engine_effect_contract::default_parameter_lattice(
+            unit,
+            ParameterDomain::Continuous,
+            mapping,
+        ),
     }
 }
 

@@ -1,10 +1,44 @@
 # Effect descriptor wire V1
 
-Descriptor records use little-endian fixed-width fields. The public C records have sizes 80, 16,
-32, and 48 bytes for parameters, enum choices, ports, and qualities respectively. Unknown enum
-values, non-finite numbers, negative zero, nonzero reserved bytes, and noncanonical text reject.
+Descriptor records use little-endian fixed-width fields. Unknown enum values, non-finite numbers,
+negative zero, nonzero reserved bytes, and noncanonical text reject.
 
 `ParameterId` is a nonzero stable `u32`; a changed meaning, unit, or domain gets a new ID.
+
+## Parameter lattice fields (issue #242)
+
+The 80-byte parameter record does not grow. The two words formerly reserved at offsets 72 and 76
+are now the persisted-value lattice authority:
+
+| offset | width | field |
+|---|---|---|
+| 72 | u32 | exact `f32` bits of the positive decimal `step` |
+| 76 bits 0..4 | 5 | `xs` integer multiplier |
+| 76 bits 5..9 | 5 | `sm` integer multiplier |
+| 76 bits 10..14 | 5 | `md` integer multiplier |
+| 76 bits 15..19 | 5 | `lg` integer multiplier |
+| 76 bits 20..25 | 6 | `xl` integer multiplier |
+| 76 bits 26..29 | 4 | canonical decimal precision |
+| 76 bits 30..31 | 2 | step unit minus one: absolute, cents, ratio, index |
+
+The multipliers are positive and strictly ascending; `xs..lg <= 31`, `xl <= 63`, precision is
+`0..=8`, and the step/unit must match the parameter domain and mapping.
+
+**One lattice has exactly one spelling.** Both words zero decode to the row's derived unit-class
+lattice, `default_parameter_lattice(unit, domain, mapping)`. A row whose declaration IS that
+derived lattice therefore encodes zeros, and a row that overrides its class encodes the words
+explicitly; there is no third case. A verifier **refuses** a non-zero window whose unpacked
+lattice equals the derived default -- that would be a second byte sequence for one meaning, and
+in a format whose bytes are its identity that is an aliasing bug. The refusal is typed
+`Reserved` at offset 72 of the offending record. Exactly one zero word rejects as `Flags`, also
+at offset 72.
+
+Because the derived case is spelled as zeros, every descriptor sealed before #242 keeps its exact
+bytes and its exact identity. A stale verifier rejects an explicit lattice at offset 72 under its
+old reserved-zero rule, so it cannot silently ignore the new authority.
+
+The public C projection names these words `step_bits` and `step_spec` at the same offsets. The
+`MISO_ENGINE_EFFECT_PARAMETER_STEP_*_MASK_V1` constants pin the packed derivation.
 
 ## Observation section (issue #143)
 

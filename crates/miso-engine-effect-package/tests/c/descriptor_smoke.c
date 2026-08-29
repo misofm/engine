@@ -191,7 +191,7 @@ static void require_exact_projection(
             row->channel_policy, row->smoothing, row->smoothing_samples, row->flags,
             row->minimum_bits, row->maximum_bits, row->default_bits, row->enum_start,
             row->enum_count, row->display_name_offset, row->display_name_length,
-            row->display_unit_offset, row->display_unit_length, row->reserved0, row->reserved1};
+            row->display_unit_offset, row->display_unit_length, row->step_bits, row->step_spec};
         for (size_t field = 0; field < 20; ++field) {
             require(actual[field] == get_u32(wire, record + field * 4),
                     "complete parameter projection");
@@ -488,7 +488,7 @@ static void comprehensive_smoke(const char *fixture_path) {
          (uint32_t)parameter_offset + 32, 0},
         {parameter_offset + 3 * 80 + 36, 1, MISO_ENGINE_EFFECT_DESCRIPTOR_FLAGS_V1,
          (uint32_t)parameter_offset + 3 * 80 + 36, 3},
-        {parameter_offset + 72, 1, MISO_ENGINE_EFFECT_DESCRIPTOR_RESERVED_V1,
+        {parameter_offset + 72, 1, MISO_ENGINE_EFFECT_DESCRIPTOR_FLAGS_V1,
          (uint32_t)parameter_offset + 72, 0},
         {port_offset + 20, 1, MISO_ENGINE_EFFECT_DESCRIPTOR_RESERVED_V1,
          (uint32_t)port_offset + 20, 0},
@@ -654,7 +654,7 @@ static void comprehensive_smoke(const char *fixture_path) {
                                    12, &choices, 3, required, &diagnostic);
     require(result == MISO_ENGINE_EFFECT_DESCRIPTOR_FLAGS_V1 &&
                 diagnostic.byte_offset == parameter_offset + 32,
-            "flags precede later reserved field");
+            "record flags precede later incomplete lattice field");
     put_u32(wire, parameter_offset + 32, saved_flags);
     put_u32(wire, parameter_offset + 72, saved_reserved);
 

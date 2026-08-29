@@ -27,3 +27,7 @@
 /x86_64-apple-darwin/
 /x86_64-pc-windows-gnu/
 /x86_64-unknown-linux-gnu/
+
+# The SDK typecheck gate installs TypeScript here; the eval suites need no node_modules at all
+# because they run under Node native type stripping.
+sdk/node_modules/

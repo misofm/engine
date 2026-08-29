@@ -24,6 +24,9 @@ miso-engine-transient-shaper.workspace = true
 miso-engine-delay.workspace = true
 
 [dev-dependencies]
+# The catalog lattice sweep checks the builtin strip rows alongside the effect rows: they are
+# one shipped controllable surface even though they are two descriptor tables.
+miso-engine-builtins.workspace = true
 sha2.workspace = true
 
 [lints]

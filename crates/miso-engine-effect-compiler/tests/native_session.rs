@@ -35,6 +35,7 @@ const PARAMETERS: [ParameterDescriptor; 1] = [ParameterDescriptor {
     readable: true,
     automatable: true,
     enum_choices: &[],
+    lattice: miso_engine_effect_contract::ParameterLattice::arithmetic(0.1, 1),
 }];
 const PORTS: [PortDescriptor; 2] = [
     PortDescriptor {

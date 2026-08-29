@@ -4,11 +4,10 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 
-const ABI_VERSION = 0x00010000;
-const CONFIG_BYTES = 192;
+const ABI_VERSION = 0x00020000;
+const BOOT_OPTIONS_BYTES = 64;
 const QUANTUM = 128;
 const SAMPLE_RATE = 48000;
-const BUFFER_SESSION_TOML = 1;
 const BUFFER_SOURCE_ID = 2;
 const BUFFER_SOURCE_PCM = 3;
 const BUFFER_OUTPUT_PCM = 5;
@@ -30,7 +29,7 @@ const BUFFER_METER_FRAME = 7;
 const METER_HEADER_BYTES = 64;
 const OBSERVATION_WINDOW_BLOCKS = 2;
 const RESOURCE_NAMES = [
-  "configBytes", "statusBytes", "sessionTomlBytes", "diagnosticBytes", "sourceIdBytes",
+  "optionsBytes", "statusBytes", "sessionTomlBytes", "diagnosticBytes", "sourceIdBytes",
   "sourcePcmStagingBytes", "outputPcmBytes", "bridgeMetadataBytes", "bridgeRetainedBytes",
   "largestBridgeAllocationBytes", "sourceTotalBytes", "sourceOverheadBytes",
   "effectScalarStateBytes", "effectScalarScratchBytes", "builtinRetainedBytes",
@@ -40,15 +39,6 @@ const RESOURCE_NAMES = [
   // asks for no observation capacity at all.
   "observationRetainedBytes",
 ];
-const LIMITS32 = [
-  CONFIG_BYTES, ABI_VERSION, SAMPLE_RATE, QUANTUM, 1 << 20, 1 << 14, 1 << 10, 8, QUANTUM, 256,
-];
-const LIMITS64 = [
-  1024n, 1024n, 4096n, 8192n, 64n << 20n, 64n << 20n, 16n << 20n,
-  16n << 20n, 16n << 20n, 64n << 20n, 16n << 20n, 64n << 20n,
-  1024n, 1n << 20n, 16n << 20n,
-];
-
 function exactKeys(value, keys, label) {
   assert.deepEqual(Object.keys(value).sort(), [...keys].sort(), label);
 }
@@ -92,16 +82,26 @@ function resources(exports, handle) {
   return report;
 }
 
-function writeConfig(exports, handle, consoleWords = [0n, 0n, 0n, 0n]) {
-  const pointer = exports.miso_engine_web_v1_config_ptr(handle);
+function boot(exports, document, consoleWords = [0n, 0n, 0n, 0n]) {
+  const pointer = exports.miso_engine_web_v1_boot_options_ptr();
   assert.notEqual(pointer, 0);
-  const view = new DataView(exports.memory.buffer, pointer, CONFIG_BYTES);
-  LIMITS32.forEach((value, index) => view.setUint32(index * 4, value, true));
-  LIMITS64.forEach((value, index) => view.setBigUint64(40 + index * 8, value, true));
-  // Issue #137 and #143: the four console words *are* the four reserved words. The frozen
-  // transcript above keeps writing zeros, which is exactly "no control channel, no meters, no
-  // observation capacity, no master designation", and its digest is unchanged by either ABI.
-  consoleWords.forEach((value, index) => view.setBigUint64(160 + index * 8, value, true));
+  const view = new DataView(exports.memory.buffer, pointer, BOOT_OPTIONS_BYTES);
+  view.setUint32(0, BOOT_OPTIONS_BYTES, true);
+  view.setUint32(4, ABI_VERSION, true);
+  view.setUint32(8, SAMPLE_RATE, true);
+  view.setUint32(12, QUANTUM, true);
+  // The direct oracle deliberately pins one quantum so its backpressure transcript remains the
+  // byte-identical boot-equivalence instrument specified by #240 S6.
+  view.setUint32(16, QUANTUM, true);
+  view.setUint32(20, 0, true);
+  view.setBigUint64(24, 0n, true);
+  consoleWords.forEach((value, index) => view.setBigUint64(32 + index * 8, value, true));
+  const documentPointer = exports.miso_engine_web_v1_document_ptr(document.byteLength);
+  assert.notEqual(documentPointer, 0);
+  new Uint8Array(exports.memory.buffer, documentPointer, document.byteLength).set(document);
+  const handle = exports.miso_engine_web_v1_boot(document.byteLength);
+  assert.notEqual(handle, 0, `boot refused with ${exports.miso_engine_web_v1_boot_result()}`);
+  return handle;
 }
 
 /// Stage one 48-byte command record and submit the batch, returning the typed report.
@@ -227,16 +227,7 @@ async function runBackend(modulePath, expectedBackend, sessionToml, source) {
   const { instance } = await WebAssembly.instantiate(await readFile(modulePath), {});
   const exports = instance.exports;
   assert.equal(exports.miso_engine_web_v1_abi_version(), ABI_VERSION);
-  assert.equal(exports.miso_engine_web_v1_config_bytes(), CONFIG_BYTES);
-  const handle = exports.miso_engine_web_v1_config_new();
-  assert.notEqual(handle, 0);
-  writeConfig(exports, handle);
-  assert.equal(exports.miso_engine_web_v1_prepare(handle), 0);
-  const tomlPointer = exports.miso_engine_web_v1_buffer_ptr(handle, BUFFER_SESSION_TOML);
-  const tomlCapacity = exports.miso_engine_web_v1_buffer_capacity(handle, BUFFER_SESSION_TOML);
-  assert.ok(sessionToml.byteLength <= tomlCapacity);
-  new Uint8Array(exports.memory.buffer, tomlPointer, sessionToml.byteLength).set(sessionToml);
-  assert.equal(exports.miso_engine_web_v1_compile(handle, sessionToml.byteLength), 0);
+  const handle = boot(exports, sessionToml);
   const memoryBuffer = exports.memory.buffer;
   const initialStatus = status(exports, handle);
   const resourceReport = resources(exports, handle);
@@ -250,15 +241,11 @@ async function runBackend(modulePath, expectedBackend, sessionToml, source) {
   assert.equal(exports.miso_engine_web_v1_source_count(handle), 1);
   assert.equal(readSourceId(exports, handle, 0), source.sourceId);
   assert.equal(exports.miso_engine_web_v1_source_channels(handle, 0), 2);
-  assert.equal(exports.miso_engine_web_v1_source_sample_rate(handle, 0), source.sampleRateHz);
   assert.equal(exports.miso_engine_web_v1_source_frames(handle, 0), 256n);
-  assert.equal(exports.miso_engine_web_v1_source_start_frame(handle, 0), 0n);
-  // Out of range answers the sentinel everywhere it has one; `source_count` is the bounds
-  // authority for `source_start_frame`, whose zero is source 0's real answer.
+  // Out of range answers the zero sentinel everywhere.
   assert.equal(exports.miso_engine_web_v1_source_id(handle, 1), 0);
   assert.equal(exports.miso_engine_web_v1_source_channels(handle, 1), 0);
   assert.equal(exports.miso_engine_web_v1_source_frames(handle, 1), 0n);
-  assert.equal(exports.miso_engine_web_v1_source_sample_rate(handle, 1), 0);
 
   const first = { ...source.blocks[0], generation: 1 };
   const second = { ...source.blocks[1], generation: 1 };
@@ -305,13 +292,11 @@ async function runBackend(modulePath, expectedBackend, sessionToml, source) {
 async function runCommandTimeline(modulePath, sessionToml, sourceId) {
   const { instance } = await WebAssembly.instantiate(await readFile(modulePath), {});
   const exports = instance.exports;
-  const handle = exports.miso_engine_web_v1_config_new();
-  assert.notEqual(handle, 0);
-  writeConfig(exports, handle, [BigInt(COMMAND_QUEUE_RECORDS), 0n, 0n, 0n]);
-  assert.equal(exports.miso_engine_web_v1_prepare(handle), 0);
-  const tomlPointer = exports.miso_engine_web_v1_buffer_ptr(handle, BUFFER_SESSION_TOML);
-  new Uint8Array(exports.memory.buffer, tomlPointer, sessionToml.byteLength).set(sessionToml);
-  assert.equal(exports.miso_engine_web_v1_compile(handle, sessionToml.byteLength), 0);
+  const handle = boot(
+    exports,
+    sessionToml,
+    [BigInt(COMMAND_QUEUE_RECORDS), 0n, 0n, 0n],
+  );
   assert.equal(exports.miso_engine_web_v1_console_track_count(handle), 1);
 
   const memoryBuffer = exports.memory.buffer;
@@ -399,15 +384,9 @@ async function runCommandTimeline(modulePath, sessionToml, sourceId) {
 async function runObservationTimeline(modulePath, sessionToml, sourceId, taps) {
   const { instance } = await WebAssembly.instantiate(await readFile(modulePath), {});
   const exports = instance.exports;
-  const handle = exports.miso_engine_web_v1_config_new();
-  assert.notEqual(handle, 0);
-  writeConfig(exports, handle, [
+  const handle = boot(exports, sessionToml, [
     BigInt(COMMAND_QUEUE_RECORDS), BigInt(OBSERVATION_WINDOW_BLOCKS), taps, taps === 0n ? 0n : 1n,
   ]);
-  assert.equal(exports.miso_engine_web_v1_prepare(handle), 0);
-  const tomlPointer = exports.miso_engine_web_v1_buffer_ptr(handle, BUFFER_SESSION_TOML);
-  new Uint8Array(exports.memory.buffer, tomlPointer, sessionToml.byteLength).set(sessionToml);
-  assert.equal(exports.miso_engine_web_v1_compile(handle, sessionToml.byteLength), 0);
   assert.equal(exports.miso_engine_web_v1_console_track_count(handle), 1);
   const resourceReport = resources(exports, handle);
   assert.equal(

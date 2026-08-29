@@ -50,14 +50,19 @@
 //! which is what makes their `liveUpdatable` flag `true` here. A reader that trusted the old
 //! `false` would have concluded there was no write path; there now is.
 //!
-//! # Issue #127 (named nudge sizes)
+//! # Issue #242 (parameter lattice and named step sizes)
 //!
-//! Each parameter carries `"nudge": null`. When #127 lands its ladder on
-//! `ParameterDescriptor`, that slot becomes an object and nothing else in this schema moves --
-//! which is the whole reason it is a declared null rather than an absent key.
+//! Each parameter carries a populated `"step"` object: the row's decimal step, the unit that
+//! decimal is read in, the pinned rendering precision, and #127's five named ladder multiples.
+//! Together with the row's `minimum`/`maximum` this is the parameter's LATTICE -- the finite set
+//! of legal persisted values -- so the slot is the descriptor's declaration, never a restatement.
+//! It occupies the slot that shipped as `"nudge": null` before #242 renamed the vocabulary
+//! (#239 Amendment 2); the rename is total, and `nudge` is retired.
+
+pub mod abi_layout;
 
 use std::io::Write as _;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use miso_engine_bench_support::json::escape;
 use miso_engine_builtins::{
@@ -69,7 +74,8 @@ use miso_engine_effect_compiler::launch_native_effect_registry;
 use miso_engine_effect_contract::{
     AutomationRate, EffectDescriptor, ObservationCadence, ObservationChannels, ObservationCost,
     ObservationDescriptor, ObservationFold, ObservationKind, ParameterChannelPolicy,
-    ParameterDescriptor, ParameterDomain, ParameterMapping, ParameterUnit, SmoothingRule,
+    ParameterDescriptor, ParameterDomain, ParameterLattice, ParameterMapping, ParameterUnit,
+    SmoothingRule, StepSize, StepUnit,
 };
 use miso_engine_host_web::{
     ABI_VERSION, COMMAND_EFFECT_BYPASS, COMMAND_EFFECT_PARAM, COMMAND_FADER_DB, COMMAND_MATRIX,
@@ -100,17 +106,10 @@ pub const PLANE_OBSERVATION: &str = "observation";
 
 fn usage() -> ! {
     eprintln!(
-        "usage: miso_engine_parameter_metadata --write DIRECTORY | --check DIRECTORY | --print"
+        "usage: miso_engine_parameter_metadata --write DIRECTORY | --check DIRECTORY \
+| --print | --print-abi-layout"
     );
     std::process::exit(2)
-}
-
-fn output_path(directory: &Path) -> PathBuf {
-    if !directory.is_dir() {
-        eprintln!("{} is not a directory", directory.display());
-        std::process::exit(2);
-    }
-    directory.join(OUTPUT_NAME)
 }
 
 /// Render the whole document. Deterministic: registry order is `EffectId` order.
@@ -388,6 +387,36 @@ const fn observation_channels_name(channels: ObservationChannels) -> &'static st
     }
 }
 
+/// Emit one parameter's `step` declaration.
+///
+/// This is the #242 lattice authority as it crosses the agent/SDK boundary: a decimal string, not
+/// a float, so a catalog round-trip is lossless. `size` is the shortest spelling that names the
+/// declared `f32` exactly -- a ratio row's authority really is the decimal `1.02`, and rendering
+/// it at the row's own eight-decimal value precision would spell it `1.01999998`.
+fn step_object(lattice: ParameterLattice) -> String {
+    format!(
+        "{{ \"unit\": \"{}\", \"size\": \"{}\", \"precision\": {}, \"ladder\": \
+{{ \"xs\": {}, \"sm\": {}, \"md\": {}, \"lg\": {}, \"xl\": {} }} }}",
+        step_unit_name(lattice.step_unit),
+        lattice.step,
+        lattice.precision,
+        lattice.ladder.multiple(StepSize::Xs),
+        lattice.ladder.multiple(StepSize::Sm),
+        lattice.ladder.multiple(StepSize::Md),
+        lattice.ladder.multiple(StepSize::Lg),
+        lattice.ladder.multiple(StepSize::Xl),
+    )
+}
+
+const fn step_unit_name(unit: StepUnit) -> &'static str {
+    match unit {
+        StepUnit::Absolute => "absolute",
+        StepUnit::Cents => "cents",
+        StepUnit::Ratio => "ratio",
+        StepUnit::Index => "index",
+    }
+}
+
 fn effect_parameter(parameter: &ParameterDescriptor) -> String {
     let mut out = String::new();
     out.push_str("        {\n");
@@ -464,8 +493,11 @@ fn effect_parameter(parameter: &ParameterDescriptor) -> String {
         ));
     }
     out.push_str("],\n");
-    // Issue #127 slot. A declared null, not an absent key, so adding the ladder is additive.
-    out.push_str("          \"nudge\": null\n        }");
+    // Issue #242: the lattice declaration this row's legal persisted values are generated from.
+    out.push_str(&format!(
+        "          \"step\": {}\n        }}",
+        step_object(parameter.lattice)
+    ));
     out
 }
 
@@ -505,7 +537,7 @@ fn builtin_parameter(parameter: &BuiltinParameterDescriptor) -> String {
         "      {{ \"id\": {}, \"name\": \"{}\", \"scope\": \"{}\", \"mapping\": \"{}\", \
 \"domain\": \"{}\", \"minimum\": {}, \"maximum\": {}, \"maximumByRate\": {}, \"default\": {}, \
 \"updateRate\": \"{}\", \"smoothing\": \"{}\", \"reset\": \"{}\", \"disabledValue\": {}, \
-\"liveUpdatable\": {}, \"nudge\": null }}",
+\"liveUpdatable\": {}, \"step\": {} }}",
         parameter.id,
         escape(parameter.name),
         match parameter.scope {
@@ -537,6 +569,7 @@ fn builtin_parameter(parameter: &BuiltinParameterDescriptor) -> String {
         },
         optional_number(parameter.disabled_value),
         live,
+        step_object(parameter.lattice),
     )
 }
 
@@ -591,41 +624,62 @@ const fn smoothing_name(rule: SmoothingRule) -> &'static str {
     }
 }
 
-/// Command-line entry point: `--write DIR`, `--check DIR` or `--print`.
+/// Command-line entry point: `--write DIR`, `--check DIR`, `--print` or `--print-abi-layout`.
+///
+/// `--write`/`--check` cover **both** emitted documents. They are one tool because they are one
+/// transcription discipline over one engine: splitting them into two binaries would let an
+/// artifact directory hold a current parameter metadata beside a stale ABI layout, which is the
+/// drift this tool exists to make impossible. `--print` keeps naming the parameter metadata alone
+/// so every existing caller reads what it always read; the layout has its own print mode.
 pub fn run() {
     let mut arguments = std::env::args().skip(1);
     let mode = arguments.next().unwrap_or_else(|| usage());
-    let document = render();
     match mode.as_str() {
         "--print" => {
             if arguments.next().is_some() {
                 usage();
             }
-            print!("{document}");
+            print!("{}", render());
+        }
+        "--print-abi-layout" => {
+            if arguments.next().is_some() {
+                usage();
+            }
+            print!("{}", abi_layout::render());
         }
         "--write" | "--check" => {
             let directory = PathBuf::from(arguments.next().unwrap_or_else(|| usage()));
             if arguments.next().is_some() {
                 usage();
             }
-            let path = output_path(&directory);
-            if mode == "--write" {
-                let mut file = std::fs::File::create(&path).unwrap_or_else(|error| {
-                    eprintln!("cannot create {}: {error}", path.display());
-                    std::process::exit(2)
-                });
-                file.write_all(document.as_bytes()).expect("write metadata");
-                println!("wrote {}", path.display());
-            } else {
-                let existing = std::fs::read_to_string(&path).unwrap_or_else(|error| {
-                    eprintln!("cannot read {}: {error}", path.display());
-                    std::process::exit(1)
-                });
-                if existing != document {
-                    eprintln!("{} is stale; regenerate with --write", path.display());
-                    std::process::exit(1);
+            if !directory.is_dir() {
+                eprintln!("{} is not a directory", directory.display());
+                std::process::exit(2);
+            }
+            let documents = [
+                (OUTPUT_NAME, render()),
+                (abi_layout::OUTPUT_NAME, abi_layout::render()),
+            ];
+            for (name, document) in documents {
+                let path = directory.join(name);
+                if mode == "--write" {
+                    let mut file = std::fs::File::create(&path).unwrap_or_else(|error| {
+                        eprintln!("cannot create {}: {error}", path.display());
+                        std::process::exit(2)
+                    });
+                    file.write_all(document.as_bytes()).expect("write document");
+                    println!("wrote {}", path.display());
+                } else {
+                    let existing = std::fs::read_to_string(&path).unwrap_or_else(|error| {
+                        eprintln!("cannot read {}: {error}", path.display());
+                        std::process::exit(1)
+                    });
+                    if existing != document {
+                        eprintln!("{} is stale; regenerate with --write", path.display());
+                        std::process::exit(1);
+                    }
+                    println!("{} is current", path.display());
                 }
-                println!("{} is current", path.display());
             }
         }
         _ => usage(),

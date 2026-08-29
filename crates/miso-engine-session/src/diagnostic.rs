@@ -2,6 +2,15 @@
 
 use core::fmt;
 
+/// Maximum number of independent diagnostics retained while parsing or validating one document.
+///
+/// Issue #240 eval 4 exercises this at the exact 1 MiB document boundary. The cap must apply
+/// before source spans are materialized: computing line/column coordinates scans the source prefix,
+/// so retaining every error in a dense invalid document turns otherwise linear refusal into a
+/// quadratic walk. The host encoder independently keeps the same 64-line defense for diagnostics
+/// produced by later compilers.
+pub(crate) const MAXIMUM_SESSION_DIAGNOSTICS: usize = 64;
+
 /// A stable machine-readable reason for a rejected session.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 #[non_exhaustive]
@@ -26,6 +35,10 @@ pub enum DiagnosticCode {
     MissingEntityReference,
     /// A string enum token is outside its closed schema set.
     InvalidEnum,
+    /// A source content identity does not match the canonical SHA-256 grammar.
+    SourceContentIdentityFormat,
+    /// A source bit-depth declaration is outside the closed token set.
+    SourceBitDepthUnsupported,
     /// A numeric token is NaN or infinity.
     NumericNonFinite,
     /// An engine session rate is outside the launch-supported tier.
@@ -71,6 +84,8 @@ impl DiagnosticCode {
             Self::DuplicateId => "id.duplicate",
             Self::MissingEntityReference => "reference.missing_entity",
             Self::InvalidEnum => "schema.invalid_enum",
+            Self::SourceContentIdentityFormat => "source.content.identity_format",
+            Self::SourceBitDepthUnsupported => "source.bit_depth.unsupported",
             Self::NumericNonFinite => "numeric.non_finite",
             Self::SampleRateUnsupportedAtLaunch => "sample_rate.unsupported_at_launch",
             Self::NumericNotF32Representable => "numeric.not_f32_representable",

@@ -615,12 +615,6 @@ impl GraphCompiler {
                 vec![diag("graph.resource.limit", "$.graph_compile_caps")],
             ));
         }
-        if capped_estimate.session_plus_plan_bytes > model.limits.memory_bytes {
-            return Err(failure(
-                effects,
-                vec![diag("graph.resource.limit", "$.limits.memory_bytes")],
-            ));
-        }
         // No canonical text, no SHA-256 and no Graphviz here: they are evidence, not plan, and
         // `GraphCompiler::evidence` produces them from the finished plan when something asks
         // (#99 F5). Nothing on the structural-mutation path pays for them any more.

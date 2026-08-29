@@ -5,8 +5,16 @@
 #![allow(missing_docs)]
 
 mod live;
+mod step;
 mod symmetry;
 pub use live::{BypassShunt, EffectControlLane, EffectControlRecord, ObservationLane, Staged};
+pub use step::{
+    DEFAULT_STEP_LADDER, ExactDecimal, FADER_STEP_LADDER, LatticeError, LatticePoint,
+    NearestLatticeValues, ParameterLattice, StepLadder, canonical_descriptor_decimal,
+    decimal_to_f32, default_parameter_lattice, lattice_index_for_decimal, parameter_lattice_points,
+    parameter_lattice_points_parts, resolve_parameter_step, validate_parameter_lattice,
+    validate_parameter_lattice_parts,
+};
 pub use symmetry::{
     ChannelSymmetryWitness, LiveConsoleRecord, SeamSide, SymmetryEvent, payload_sections_agree,
 };
@@ -134,6 +142,8 @@ scalar_enum!(ResetKind {FullToDefaults=1,DiscontinuityKeepParameters=2});
 scalar_enum!(AutomationSpanKind {Point=1,Step=2,Linear=3,Exponential=4});
 pub type AutomationKind = AutomationSpanKind;
 scalar_enum!(ParameterChannelPolicy {Shared=1,PerLane=2});
+scalar_enum!(StepSize {Xs=1,Sm=2,Md=3,Lg=4,Xl=5});
+scalar_enum!(StepUnit {Absolute=1,Cents=2,Ratio=3,Index=4});
 // Issue #143 D1: the declared observation menu. Each vocabulary is a `scalar_enum!` for the same
 // reason the parameter vocabularies are -- the descriptor wire, the C inspect surface and the
 // browser metadata all carry the raw `u32`, and `from_raw` is the single place a foreign value is
@@ -320,6 +330,12 @@ pub struct ParameterDescriptor {
     pub readable: bool,
     pub automatable: bool,
     pub enum_choices: &'static [EnumChoice],
+    /// Exact-decimal persisted-value lattice and named step ladder (issue #242).
+    ///
+    /// `minimum`, `maximum`, and `default_value` are rendered at this declaration's pinned
+    /// precision before lattice construction. Persisted document text is compared with those
+    /// decimal renderings and the generated interior points without passing through `f32`.
+    pub lattice: ParameterLattice,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PortDescriptor {
@@ -406,6 +422,7 @@ pub enum DescriptorDiagnosticCode {
     ObservationId,
     ObservationOrder,
     Observation,
+    Lattice,
 }
 impl DescriptorDiagnosticCode {
     pub const fn as_str(self) -> &'static str {
@@ -424,6 +441,7 @@ impl DescriptorDiagnosticCode {
             Self::ObservationId => "effect.descriptor.observation_id",
             Self::ObservationOrder => "effect.descriptor.observation_order",
             Self::Observation => "effect.descriptor.observation",
+            Self::Lattice => "effect.descriptor.lattice",
         }
     }
 }
@@ -633,6 +651,12 @@ pub fn validate_descriptor(d: &'static EffectDescriptor) -> Result<(), Descripto
             e.push(DescriptorError {
                 path: "parameters",
                 code: DescriptorDiagnosticCode::Parameter,
+            })
+        }
+        if validate_parameter_lattice(p).is_err() {
+            e.push(DescriptorError {
+                path: "parameters",
+                code: DescriptorDiagnosticCode::Lattice,
             })
         }
     }

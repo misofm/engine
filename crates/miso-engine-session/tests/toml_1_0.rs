@@ -9,8 +9,10 @@ const DUPLICATE_KEY: &str =
 #[test]
 fn toml_1_0_basic_unicode_escape_and_literal_string_parse() {
     let model = parse_session_toml(ESCAPES).expect("TOML 1.0 strings parse");
-    assert_eq!(model.sources[0].content.identity, "sha256:α");
-    assert_eq!(model.sources[0].content.locator, r"host:C:\audio");
+    assert_eq!(
+        model.sources[0].content,
+        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    );
     let canonical = canonical_session_toml(&model).expect("parsed model canonicalizes");
     let reparsed = parse_session_toml(&canonical).expect("canonical TOML reparses");
     assert_eq!(reparsed, model);

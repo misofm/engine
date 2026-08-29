@@ -10,10 +10,10 @@ artifact, and renders no audio — canonical output goes to stdout and you redir
 
 ## What you are producing
 
-One strict, versioned TOML document. `schema_version = 1`, fourteen root keys in canonical order:
+One strict, versioned TOML document. `schema_version = 1`, thirteen root keys in canonical order:
 
 `schema_version`, `session_id`, `revision`, `sample_rate_hz`, `quantum_frames`, `render_profile`,
-`output_profile`, `limits`, `sources`, `tracks`, `submixes`, `outputs`, `routes`, `automation`.
+`output_profile`, `sources`, `tracks`, `submixes`, `outputs`, `routes`, `automation`.
 
 Every field is explicit, empty arrays included. Every effect declares `sidechain` even when it has
 none (`sidechain = { kind = "none" }`). There is no "extra keys are ignored": an unknown key is a
@@ -27,7 +27,7 @@ rejection.
    the shape from memory.** You will still write your own document, but every table in it should
    have a fixture table as its model.
    `canonical.toml` is the usual starting point and a complete instance of every table you will
-   need — `sources`, `builtins`, `fader`, `render_profile`, `limits`, `routes`, `automation`. Read
+   need — `sources`, `builtins`, `fader`, `render_profile`, `routes`, `automation`. Read
    it field by field rather than reconstructing a table from this document. Also useful:
    `canonical-minimal.toml` (smallest legal session), `observation-frame-shape.toml` (three tracks,
    three effects, fully declared parameter sets), `console-sixty-four-track.toml` (64 tracks), and
@@ -49,7 +49,7 @@ rejection.
 
    Unit-in-name (#147, still open): builtin fields already carry the unit (`trim_db`, `hpf_hz`),
    effect parameter *names* do not yet (`threshold`, `attack`). Until they do, `unitName` is the
-   authority, not the name. Named nudge sizes (#127) are a control-plane concept and never appear
+   authority, not the name. Named step sizes (#242) are a control-plane concept and never appear
    in a session file.
 
 ### Effect ids
@@ -128,6 +128,11 @@ lane detectors (the usual "stereo-linked" behaviour); `average` links by their m
 
 - A submix and an output are each nothing but an ID: `{ id = "buss" }`, `{ id = "main-out" }`.
   They carry no fader, matrix, or racks — a submix is a named mix point the graph compiler owns.
+- A source is exactly `{ id, content, channels, bit_depth, frames }`. `content` is
+  `"sha256:<64 lowercase hex>"` over canonical PCM, `channels` and `frames` are nonzero, and
+  `bit_depth` is integer `16`, integer `24`, or string `"32f"`. The session root supplies the only
+  sample rate. Locators, regions, per-source rates, rings, queues, and memory budgets are host or
+  resolver policy and never appear in the document.
 - A track declares **either** `pan = { left, right, smoothing_samples }` **or**
   `matrix = { ll, lr, rl, rr, smoothing_samples }`, never both.
 - A route's `channel_matrix = { ll, lr, rl, rr }` has no `smoothing_samples`; a track's `matrix`
@@ -136,9 +141,6 @@ lane detectors (the usual "stereo-linked" behaviour); `average` links by their m
   the rest take their contract defaults. But an automation target can only name a
   `(parameter_id, channel)` pair that is present in `params`, so declare anything you intend to
   automate even if you set it to its default.
-- `limits.memory_bytes` is a declared budget, not a measurement. Start at 67108864 (64 MiB) and
-  raise it if stage 3 returns `resource.limit_exceeded`; the fixtures run 16 MiB for three tracks
-  to 256 MiB for sixty-four.
 - `fader = { left_db, right_db, left_mute, right_mute }` — decibels and mutes, per lane.
 - **There is no `solo` key, and asking for one is the wrong question.** Solo is monitoring
   state, not mix state (issue #210 ruling D1): the engine composes it live from the command
@@ -252,7 +254,7 @@ The failing stage names the kind of repair:
 | --- | --- | --- |
 | 1 `toml-grammar` | `toml.syntax` | a TOML typo: unbalanced brace, duplicate key |
 | 2 `typed-model` | `schema.*`, `id.*`, `reference.*`, `numeric.*`, `unit.*`, `source.*`, `automation.*`, `capacity.zero`, `sample_rate.*`, `render_mode.*` | the document contradicts the schema |
-| 3 `compile-session` (resource preflight, caps, canonical normalization) | `resource.limit_exceeded`, `capacity.*` | your `limits` are too small for what you declared |
+| 3 `compile-session` (resource preflight, caps, canonical normalization) | `resource.*`, `capacity.*` | the declared shape overflows a checked compiler bound |
 | 4 `prepare-builtins` (off-render builtins preparation) | `builtin.*` | a builtin value outside its DSP domain (e.g. a cutoff above the rate-keyed maximum) |
 
 Read `code`, then the `$.json.path` — it points at the exact leaf. Stage 1 and 2 diagnostics also
@@ -278,7 +280,8 @@ key order, or float spellings — regenerate instead.
 - `sample_rate_hz` is exactly one of `44100`, `48000`, `88200`, `96000`; IDs match
   `[a-z][a-z0-9._-]{0,126}` (lowercase, leading letter); `output_profile` is exactly
   `{ id, channels = 2, sample_format = "f32_planar" }`.
-- `quantum_frames` and all three `limits` fields must be nonzero (`capacity.zero` otherwise).
+- `quantum_frames`, every source's `channels`, and every source's `frames` must be nonzero
+  (`capacity.zero` otherwise).
 - Namespaces are dual: sources have their own; tracks, submixes and outputs share the graph-entity
   namespace. Route ids, automation ids, rack-local effect ids and `(parameter_id, channel)` pairs
   are unique in their own scopes.
@@ -302,7 +305,7 @@ key order, or float spellings — regenerate instead.
   positive (`automation.invalid_range`, "exponential values must be positive") — which rules it out
   for the common case of a `db` ramp through zero or into negative gain. Use `linear` there.
 - **Source channels.** `left_source_channel` and `right_source_channel` must be less than that
-  source's `mapping.channel_count`.
+  source's `channels`.
 - **A PASS is not a renderable graph.** V1 owns structure, ids, references, domains and resources.
   Graph cycles and ports (issue 006), Nyquist relationships (007), effect availability (011) and
   CID/package validity (029) are all checked elsewhere.

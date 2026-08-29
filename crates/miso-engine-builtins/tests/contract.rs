@@ -22,7 +22,7 @@ fn parameter_descriptors_have_complete_stable_contracts() {
     let descriptors = BUILTIN_PARAMETER_DESCRIPTORS;
     assert_eq!(
         descriptors.map(|descriptor| descriptor.id),
-        [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+        [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
     );
     assert_eq!(
         descriptors.map(|descriptor| descriptor.name),
@@ -38,6 +38,7 @@ fn parameter_descriptors_have_complete_stable_contracts() {
             "matrix_rl",
             "matrix_rr",
             "delay_samples",
+            "pan",
         ]
     );
     assert_eq!(
@@ -54,6 +55,7 @@ fn parameter_descriptors_have_complete_stable_contracts() {
             BuiltinParameterScope::MatrixShared,
             BuiltinParameterScope::MatrixShared,
             BuiltinParameterScope::PerLane,
+            BuiltinParameterScope::PerLane,
         ]
     );
     assert_eq!(
@@ -65,6 +67,7 @@ fn parameter_descriptors_have_complete_stable_contracts() {
             BuiltinParameterMapping::Hertz,
             BuiltinParameterMapping::DecibelAmplitude,
             BuiltinParameterMapping::Boolean,
+            BuiltinParameterMapping::Linear,
             BuiltinParameterMapping::Linear,
             BuiltinParameterMapping::Linear,
             BuiltinParameterMapping::Linear,
@@ -85,7 +88,8 @@ fn parameter_descriptors_have_complete_stable_contracts() {
             0,
             0,
             1.0_f32.to_bits(),
-            0
+            0,
+            0,
         ]
     );
     assert_eq!(
@@ -108,6 +112,8 @@ fn parameter_descriptors_have_complete_stable_contracts() {
             BuiltinParameterUpdateRate::BlockTarget,
             // Issue #210 phase 2: a delay length change re-times the ring, so it is a session edit.
             BuiltinParameterUpdateRate::PreparedOnly,
+            // #239 ruling 5461507633 B4: pan intent is a live per-lane parameter.
+            BuiltinParameterUpdateRate::BlockTarget,
         ]
     );
     assert_eq!(
@@ -126,6 +132,7 @@ fn parameter_descriptors_have_complete_stable_contracts() {
             BuiltinSmoothingPolicy::LinearNUpdates,
             BuiltinSmoothingPolicy::LinearNUpdates,
             BuiltinSmoothingPolicy::None,
+            BuiltinSmoothingPolicy::LinearNUpdates,
         ]
     );
     assert_eq!(
@@ -142,6 +149,7 @@ fn parameter_descriptors_have_complete_stable_contracts() {
             BuiltinParameterReset::KeepTargetResetCurrent,
             BuiltinParameterReset::KeepTargetResetCurrent,
             BuiltinParameterReset::RestorePreparedValue,
+            BuiltinParameterReset::KeepTargetResetCurrent,
         ]
     );
     assert_eq!(
@@ -151,6 +159,7 @@ fn parameter_descriptors_have_complete_stable_contracts() {
             None,
             Some(0.0),
             Some(0.0),
+            None,
             None,
             None,
             None,
@@ -200,6 +209,10 @@ fn parameter_descriptors_have_complete_stable_contracts() {
             BuiltinParameterDomain::FiniteInclusive {
                 minimum: 0.0,
                 maximum: 48_000.0,
+            },
+            BuiltinParameterDomain::FiniteInclusive {
+                minimum: -1.0,
+                maximum: 1.0,
             },
         ]
     );
@@ -271,6 +284,11 @@ fn descriptor_domains_are_exhaustive_at_launch_rates() {
         assert!(!delay.domain.contains(f32::NAN, rate));
         assert!(!delay.domain.contains(f32::INFINITY, rate));
     }
+    let pan = BUILTIN_PARAMETER_DESCRIPTORS[11];
+    assert_eq!(pan.name, "pan");
+    assert!(pan.domain.contains(-1.0, 48_000));
+    assert!(pan.domain.contains(1.0, 48_000));
+    assert!(!pan.domain.contains(1.01, 48_000));
     // The descriptor maximum and the session schema maximum being *one* number rather than two
     // that agree today is gated in `miso-engine-builtins-compiler`, which is the crate that can see
     // both without this one taking a session dependency it has no other reason to have.

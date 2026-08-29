@@ -11,8 +11,7 @@
 # post-matrix route to the main output. No two tracks share a coefficient set -- identical strips
 # would let the measurement collapse work a real console cannot collapse.
 #
-# `limits.memory_bytes` is raised from the nine-track fixture's 16 MiB because sixty-four prepared
-# strips with two effects each do not fit inside it.
+# Deployment memory budgets are host policy; this shared document carries no device-tuning table.
 schema_version = 1
 session_id = "console-sixty-four-track"
 revision = 1
@@ -20,9 +19,8 @@ sample_rate_hz = 48000
 quantum_frames = 128
 render_profile = { id = "native", mode = "single_thread" }
 output_profile = { id = "main", channels = 2, sample_format = "f32_planar" }
-limits = { pcm_ring_frames = 1024, control_queue_messages = 256, memory_bytes = 268435456 }
 sources = [
-  { id = "fixture-source", sample_rate_hz = 48000, content = { identity = "sha256:console-sixty-four-track", locator = "host:console-sixty-four-track" }, mapping = { channel_count = 2, region = { start_sample = 0, length_samples = 48000 } } },
+  { id = "fixture-source", content = "sha256:aa28dfa39be77bff07309fb8d60983556232291660332ecb949dc3082a971f75", channels = 2, bit_depth = "32f", frames = 48000 },
 ]
 submixes = []
 outputs = [{ id = "main-out" }]

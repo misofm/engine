@@ -36,6 +36,7 @@ static PARAMETERS: [ParameterDescriptor; 2] = [
         readable: true,
         automatable: true,
         enum_choices: &[],
+        lattice: ParameterLattice::arithmetic(0.01, 2),
     },
     ParameterDescriptor {
         id: ParameterId(2),
@@ -54,6 +55,7 @@ static PARAMETERS: [ParameterDescriptor; 2] = [
         readable: true,
         automatable: true,
         enum_choices: &[],
+        lattice: ParameterLattice::arithmetic(0.01, 2),
     },
 ];
 
@@ -273,7 +275,13 @@ fn independent_reference_vector_binds_verifies_and_reencodes_byte_identically() 
         "../../../fixtures/effect-state/v1/canonical.state.digest.hex"
     ));
     let rust_wire = descriptor_wire(&DESCRIPTOR);
+    // The byte-equality seal. #242 consumed the two reserved parameter words, but the encoder is
+    // canonical -- a row whose declaration IS its derived class default encodes the historical
+    // all-zero window -- so this descriptor's bytes did not move and the seal still holds. It is
+    // restored here deliberately: while it was relaxed to a verify-only call, an encoder that
+    // wrote the derived default explicitly changed these bytes and no effect-package gate noticed.
     assert_eq!(rust_wire, descriptor_fixture);
+    verify_effect_descriptor_wire(&rust_wire, 1 << 20).unwrap();
     let bound = bind_effect_descriptor_wire(&DESCRIPTOR, &descriptor_fixture, 1 << 20).unwrap();
     assert_eq!(bound.identity().as_bytes(), identity_fixture.as_slice());
     assert_eq!(&state_fixture[24..56], identity_fixture.as_slice());
@@ -931,6 +939,7 @@ fn migration_edges_are_adjacent_compatible_and_preserve_exact_provenance() {
             maximum: None,
             default_value: 1.0,
             mapping: ParameterMapping::Stepped,
+            lattice: ParameterLattice::indices(),
             ..PARAMETERS[1]
         },
     ];
@@ -968,6 +977,7 @@ fn migration_edges_are_adjacent_compatible_and_preserve_exact_provenance() {
         default_value: 0.0,
         mapping: ParameterMapping::Stepped,
         enum_choices: &ENUM_CHOICES,
+        lattice: ParameterLattice::indices(),
         ..PARAMETERS[1]
     };
     let enum_source = descriptor_with_parameters(

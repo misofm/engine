@@ -99,6 +99,7 @@ static STATE_PARAMETERS: [ParameterDescriptor; 2] = [
         readable: true,
         automatable: true,
         enum_choices: &[],
+        lattice: miso_engine_effect_contract::ParameterLattice::arithmetic(0.01, 2),
     },
     ParameterDescriptor {
         id: ParameterId(2),
@@ -117,6 +118,7 @@ static STATE_PARAMETERS: [ParameterDescriptor; 2] = [
         readable: true,
         automatable: true,
         enum_choices: &[],
+        lattice: miso_engine_effect_contract::ParameterLattice::arithmetic(0.01, 2),
     },
 ];
 static STATE_PORTS: [PortDescriptor; 3] = [
@@ -232,6 +234,7 @@ static MIGRATION_PARAMETERS: [ParameterDescriptor; 1] = [ParameterDescriptor {
     readable: true,
     automatable: true,
     enum_choices: &[],
+    lattice: miso_engine_effect_contract::ParameterLattice::arithmetic(0.01, 2),
 }];
 static MIGRATION_PORTS: [PortDescriptor; 2] = [
     PortDescriptor {

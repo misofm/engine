@@ -1,0 +1,33 @@
+{
+  "name": "@misofm/engine",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./headless": {
+      "types": "./dist/headless/index.d.ts",
+      "import": "./dist/headless/index.js"
+    },
+    "./browser": {
+      "types": "./dist/browser/index.d.ts",
+      "import": "./dist/browser/index.js"
+    }
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3"
+  },
+  "scripts": {
+    "assets": "node ./codegen/assets.mjs",
+    "codegen": "node ./codegen/generate.mjs",
+    "check:assets": "node ./codegen/assets.mjs --check",
+    "check:generated": "node ./codegen/generate.mjs --check"
+  }
+}

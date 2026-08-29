@@ -6,6 +6,14 @@
 
 use core::fmt::Display;
 
+/// Maximum number of diagnostic lines one preparation refusal retains.
+///
+/// A session may contain many independently invalid declarations. Retaining every diagnostic made
+/// refusal time superlinear for dense automation documents and let an invalid document consume
+/// memory after the parser had already decided to refuse it. Sixty-four lines preserve useful
+/// field-local context while putting a fixed ceiling on accumulation for every host.
+pub const MAXIMUM_PREPARE_DIAGNOSTIC_LINES: usize = 64;
+
 /// Which stage of host preparation rejected the session.
 ///
 /// Hosts map this onto their own result codes; the facade never defines result codes because the
@@ -85,7 +93,7 @@ pub fn diagnostic_lines<C: AsRef<str>, P: Display>(
 
     let mut bytes = Vec::new();
     let mut path = String::new();
-    for (code, item) in items {
+    for (code, item) in items.into_iter().take(MAXIMUM_PREPARE_DIAGNOSTIC_LINES) {
         bytes.extend_from_slice(code.as_ref().as_bytes());
         bytes.push(b'\t');
         path.clear();

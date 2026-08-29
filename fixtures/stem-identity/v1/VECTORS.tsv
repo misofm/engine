@@ -1,0 +1,8 @@
+schema_version	1
+name	bit_depth	channels	frames	samples_by_frame	canonical_hex	identity	pcm_file	wave_file
+f32-mono-edge-bits	32f	1	3	0x7fc00001|0x00000001|0x80000000	0100c07f0100000000000080	sha256:cdd5a52d167bad118aada8a9227170aea6cd41228916db521f575918fee38343	f32-mono-edge-bits.pcm	-
+f32-stereo-edge-bits	32f	2	2	0x7fc00001,0x80000000|0x00000001,0xffc12345	0100c07f00000080010000004523c1ff	sha256:55c2062d8bac6bc12052ccf49656482c92e3f4095392d69a3350aca6f88088b6	f32-stereo-edge-bits.pcm	f32-stereo-edge-bits.wav
+pcm16-mono-boundaries	16	1	5	0|32767|-32768|1|-1	0000ff7f00800100ffff	sha256:342f56e6d16f7cbcd69bbc003e4e16d0fa45335f3756701db3a6649f19d6042c	pcm16-mono-boundaries.pcm	-
+pcm16-stereo-boundaries	16	2	3	0,32767|-32768,1|-1,0	0000ff7f00800100ffff0000	sha256:0320b11905302eb840cd06ab90b0549114e6ee1c89233e928ebe21b8c4964ef2	pcm16-stereo-boundaries.pcm	pcm16-stereo-boundaries.wav
+pcm24-mono-boundaries	24	1	5	0|8388607|-8388608|1|-1	000000ffff7f000080010000ffffff	sha256:de48b490bab45d06c72b240d7e46efa95d07deb216eb7f1f2afc7a7e14a4b832	pcm24-mono-boundaries.pcm	-
+pcm24-stereo-boundaries	24	2	3	0,8388607|-8388608,1|-1,0	000000ffff7f000080010000ffffff000000	sha256:f014aa907c6c9894ab1a1d3b05a82f31b6ddb82f5cbc1e61fdc2d7c35245e4c6	pcm24-stereo-boundaries.pcm	pcm24-stereo-boundaries.wav
