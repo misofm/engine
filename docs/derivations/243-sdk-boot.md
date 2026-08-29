@@ -140,3 +140,37 @@ The totals themselves are the engine's `size_of::<T>()` values, emitted through 
 `*_BYTES` constants, and are independently pinned in `hosts/miso-engine-host-web/src/tests.rs`.
 Restating them in the Python gate is deliberate duplication: the gate is a second implementation,
 and a total that agrees with a tiling it did not compute is worth more than an imported constant.
+
+## 7. `scripts/sweep.sh`: 99 rows → 100
+
+One row added, next to the gate it belongs beside:
+
+| row | placed after | why there |
+|---|---|---|
+| `check-sdk-deletions.py --self-test` | `check-sdk-generated.sh` | the generated gate proves the SDK's ABI surface is *derived*; this one proves the surface it replaced is *gone*. Neither claim follows from the other, and the second is the one no eval can make, because every eval exercises code that exists |
+
+`99 + 1 = 100`, and `grep -c '^row ' scripts/sweep.sh` reports 100 on the resulting tree.
+
+The header's script-count sentence is reconciled in the same change, from "the repo has 103
+check-*/test-* scripts" to 105, which is the direct count
+`ls scripts/ | grep -E '^(check|test)-' | wc -l` on the resulting tree. Two scripts are owed to it,
+one from each of two commits in this branch:
+
+```
+103  the count as §2 left it
+  +1  scripts/check-sdk-types.sh      (added by dd17ddd, header not moved with it)
+  +1  scripts/check-sdk-deletions.py  (this change)
+= 105
+```
+
+`dd17ddd` added `check-sdk-types.sh` and its exclusion note at the bottom of the file but left the
+header sentence at 103, so the header was one behind before this change touched it. Both are
+settled here rather than one being absorbed silently into the other, and the "Three check-*/test-*
+scripts are excluded" sentence becomes "Four" for the same reason — `check-sdk-types.sh` is the
+fourth exclusion note, and `grep -cE '^# (check|test)-[a-z0-9.-]+\.(sh|py|mjs) --'` reports 4.
+
+The difference `105 − 100 = 5` is unchanged in kind from §2: five scripts carry no row of their own
+(`check-capi-object-symbols-v1.py`, `check-capi-qualification-evidence-v1.py`,
+`check-flac-decoder.mjs`, `check-web-boot-budget.mjs`, `test-web-audioworklet.mjs`),
+`check-sdk-types.sh` is a sixth that is deliberately unswept because `tsc` needs the network to
+install, and one rowed script contributes two rows: `5 + 1 − 1 = 5`.
