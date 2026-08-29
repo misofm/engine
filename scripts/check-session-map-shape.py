@@ -26,6 +26,14 @@ The drift class this gate makes red: a source field added, removed, renamed or r
 those five without the other four. `--self-test` mutates in-memory copies and requires each
 mutation to be caught, so the gate is proved to discriminate before it is trusted.
 
+Issue #240 replaced the rejected pre-prepare shape-query ABI with one atomic boot family. Its
+built-in eval 11 keeps the old statelessness probe, re-pointed at all five boot exports: the three
+answer/staging-address exports take no arguments, while document staging and boot take exactly one
+document-length `u32`. JavaScript silently supplies zero when it omits a new Wasm `u32` argument,
+so call success cannot prove this contract; the Rust FFI signature is the authority and is checked
+directly here. A handle added to any member therefore fails for ABI-signature drift even if the
+handle is unused and the JavaScript call still happens to work.
+
 Extending it: the introspection family is derived from the Rust FFI by *signature* -- a handle and
 at most an index -- but the name pattern is `source_`, because that is the only family the map
 carries today. When the output-bus and route lists arrive on this same mechanism (#210 phase 4),
@@ -59,6 +67,17 @@ SOURCES = (RUST_FFI, EXPORT_GATE, WORKLET_JS, HOST_JS, HOST_DTS)
 ID_FIELD = "id"
 ID_EXPORT = "miso_engine_web_v1_source_id"
 WIDTH_TO_TS = {"u32": "number", "u64": "bigint"}
+
+# Issue #240 S2, in brief order. These are the complete atomic-boot exports, not a name-prefix
+# guess: `document_ptr` belongs to the family despite not starting with `boot`, and unrelated
+# handle-bearing runtime exports must remain outside it.
+BOOT_EXPORT_SIGNATURES = {
+    "miso_engine_web_v1_boot_options_ptr": ((), "u32"),
+    "miso_engine_web_v1_document_ptr": (("len: u32",), "u32"),
+    "miso_engine_web_v1_boot": (("len: u32",), "u32"),
+    "miso_engine_web_v1_boot_result": ((), "u32"),
+    "miso_engine_web_v1_boot_diagnostic_bytes": ((), "u32"),
+}
 
 
 class Invalid(Exception):
@@ -139,6 +158,26 @@ def gate_export_list(text: str) -> set[str]:
     listed = re.findall(r"\bmiso_engine_web_v1_[a-z_]+\b", text[at:end])
     require(listed, "the shipped-export gate list is empty")
     return set(listed)
+
+
+def check_boot_export_signatures(text: str, shipped: set[str]) -> None:
+    """Hold the complete issue #240 boot family to its exact handle-free Rust ABI."""
+    ffi_exports = {
+        name: (tuple(part.strip() for part in params.split(",") if part.strip()), result)
+        for name, params, result in re.findall(
+            r'pub extern "C" fn (miso_engine_web_v1_[a-z_]+)\(([^)]*)\) -> ([A-Za-z0-9_]+)',
+            text,
+        )
+    }
+    for name, expected in BOOT_EXPORT_SIGNATURES.items():
+        require(name in ffi_exports, f"the Rust FFI is missing boot export {name}")
+        require(name in shipped, f"boot export {name} is missing from the frozen shipped set")
+        actual = ffi_exports[name]
+        require(
+            actual == expected,
+            f"{name} has ABI signature {actual[0]} -> {actual[1]}; expected "
+            f"{expected[0]} -> {expected[1]} (the boot family takes no handle)",
+        )
 
 
 def worklet_called_exports(text: str) -> set[str]:
@@ -232,6 +271,7 @@ def check(texts: dict[pathlib.Path, str]) -> None:
     exports = rust_introspection_exports(texts[RUST_FFI])
 
     shipped = gate_export_list(texts[EXPORT_GATE])
+    check_boot_export_signatures(texts[RUST_FFI], shipped)
     missing = sorted(set(exports) - shipped)
     require(
         not missing,
@@ -417,6 +457,16 @@ def self_test() -> None:
             mutate(HOST_DTS, "MisoSessionSource", "MisoSessionSourceV1"),
         ),
     ]
+    for name, (params, _) in BOOT_EXPORT_SIGNATURES.items():
+        before = f'pub extern "C" fn {name}({", ".join(params)})'
+        with_handle = ("handle: u32", *params)
+        after = f'pub extern "C" fn {name}({", ".join(with_handle)})'
+        mutations.append(
+            (
+                f"boot export {name} grows a handle parameter",
+                mutate(RUST_FFI, before, after),
+            )
+        )
     for what, mutated in mutations:
         try:
             check(mutated)

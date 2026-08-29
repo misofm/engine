@@ -2,7 +2,8 @@
 use crate::{
     AutomationShape, AutomationTarget, Diagnostic, DiagnosticCode, DiagnosticSet, Effect,
     MatrixOrPan, ParameterChannel, ParameterUnit, Rack, RackName, RenderMode, RouteDestination,
-    RouteSource, SESSION_SCHEMA_VERSION_V1, SessionToml, Source, Track, diagnostic::PathRef,
+    RouteSource, SESSION_SCHEMA_VERSION_V1, SessionToml, Source, Track,
+    diagnostic::{MAXIMUM_SESSION_DIAGNOSTICS, PathRef},
 };
 use miso_engine_core::{SampleRateHz, is_launch_sample_rate};
 use std::collections::{HashMap, HashSet};
@@ -834,5 +835,8 @@ fn error(
     path: &PathRef<'_>,
     message: &str,
 ) {
+    if diagnostics.len() >= MAXIMUM_SESSION_DIAGNOSTICS {
+        return;
+    }
     diagnostics.push(Diagnostic::at(code, path, None, message));
 }

@@ -25,11 +25,14 @@ const SHIPPING_BACKEND = "simd128";
 
 const OPTION_FIELDS = [
   "context",
-  "quantumFrames",
-  "sessionToml",
-  "limits",
+  "document",
+  "options",
   "simd128ModuleUrl",
   "workletModuleUrl",
+];
+const BOOT_OPTION_FIELDS = [
+  "sourceRingFrames", "maximumMemoryBytes", "consoleCommandQueueRecords", "consoleMeterBlocks",
+  "consoleObservationTaps", "consoleMasterTrackPlusOne",
 ];
 
 const SOURCE_FIELDS = [
@@ -44,20 +47,6 @@ const SOURCE_FIELDS = [
 ];
 
 const SEEK_FIELDS = ["requestId", "sourceId", "generation", "sourceFrame"];
-const LIMIT_FIELDS = [
-  "sessionTomlBytes", "diagnosticBytes", "sourceIdBytes", "maximumSourceChannels",
-  "sourceRingFrames", "maximumAutomationSpansPerBlock", "maximumTracks", "maximumSources",
-  "maximumRoutes", "maximumEffects", "maximumGraphSessionPlusPlanBytes",
-  "maximumSourceTotalBytes", "maximumSourceOverheadBytes", "maximumEffectStateBytes",
-  "maximumEffectScratchBytes", "maximumBuiltinRetainedBytes", "maximumHostRetainedBytes",
-  "maximumNamedAllocationBytes", "maximumMeterStreams", "maximumMeterItems", "maximumMeterBytes",
-  "consoleCommandQueueRecords", "consoleMeterBlocks",
-  // Issue #143 D3/D6: the frozen configuration's remaining two reserved words, carved exactly as
-  // #137 carved the first two. Zero in both is what every pre-#143 writer already sends and means
-  // "no observation capacity, no master designation".
-  "consoleObservationTaps", "consoleMasterTrackPlusOne",
-];
-
 // Issue #137 D1: the frozen 48-byte little-endian command record.
 const COMMAND_RECORD_BYTES = 48;
 const MAXIMUM_COMMAND_RECORDS = 256;
@@ -167,7 +156,7 @@ function validCommand(command) {
     && command.values.every((value) => typeof value === "number" && Number.isFinite(value));
 }
 const RESOURCE_FIELDS = [
-  "sampleRateHz", "quantumFrames", "backend", "configBytes", "statusBytes", "sessionTomlBytes",
+  "sampleRateHz", "quantumFrames", "backend", "optionsBytes", "statusBytes", "sessionTomlBytes",
   "diagnosticBytes", "sourceIdBytes", "sourcePcmStagingBytes", "outputPcmBytes",
   "bridgeMetadataBytes", "bridgeRetainedBytes", "largestBridgeAllocationBytes",
   "sourceTotalBytes", "sourceOverheadBytes", "effectScalarStateBytes", "effectScalarScratchBytes",
@@ -212,24 +201,20 @@ function numericBackend(backend) {
   return backend === "scalar" ? 0 : 1;
 }
 
-function validLimits(limits) {
-  if (!hasExactFields(limits, LIMIT_FIELDS)) return false;
-  // The two console words are the only u64 limits that may legally be zero: zero means "default
-  // command-queue depth" and "attach no meter observers at all".
-  return LIMIT_FIELDS.slice(0, 6).every((field) => validU32(limits[field]))
-    && limits.sessionTomlBytes > 0 && limits.diagnosticBytes > 0 && limits.sourceIdBytes > 0
-    && limits.maximumSourceChannels > 0 && limits.sourceRingFrames > 0
-    && LIMIT_FIELDS.slice(6, 21).every((field) => validU64(limits[field], true))
-    && validU64(limits.consoleCommandQueueRecords)
-    && limits.consoleCommandQueueRecords <= BigInt(MAXIMUM_COMMAND_RECORDS)
-    && validU64(limits.consoleMeterBlocks)
-    // Issue #143 D3/D6: capacity requires a queue to carry the subscription, and a designation
-    // requires capacity to produce a reading.
-    && validU64(limits.consoleObservationTaps)
-    && limits.consoleObservationTaps <= BigInt(MAXIMUM_OBSERVATION_TAPS)
-    && (limits.consoleObservationTaps === 0n || limits.consoleCommandQueueRecords !== 0n)
-    && validU64(limits.consoleMasterTrackPlusOne)
-    && (limits.consoleMasterTrackPlusOne === 0n || limits.consoleObservationTaps !== 0n);
+function validBootOptions(options) {
+  if (!hasExactFields(options, BOOT_OPTION_FIELDS)) return false;
+  return validU32(options.sourceRingFrames)
+    && validU64(options.maximumMemoryBytes)
+    && validU64(options.consoleCommandQueueRecords)
+    && options.consoleCommandQueueRecords <= BigInt(MAXIMUM_COMMAND_RECORDS)
+    && validU64(options.consoleMeterBlocks)
+    && options.consoleMeterBlocks <= 0xffffffffn
+    && validU64(options.consoleObservationTaps)
+    && options.consoleObservationTaps <= BigInt(MAXIMUM_OBSERVATION_TAPS)
+    && (options.consoleObservationTaps === 0n || options.consoleCommandQueueRecords !== 0n)
+    && validU64(options.consoleMasterTrackPlusOne)
+    && options.consoleMasterTrackPlusOne <= 0xffffffffn
+    && (options.consoleMasterTrackPlusOne === 0n || options.consoleObservationTaps !== 0n);
 }
 
 function validResources(resources, backend, sampleRateHz, quantumFrames) {
@@ -841,21 +826,16 @@ class MisoAudioWorkletHost {
 }
 
 export async function createMisoAudioWorkletHost(options) {
+  const quantumFrames = options?.context?.renderQuantumSize ?? 128;
   if (!hasExactFields(options, OPTION_FIELDS)
       || options.context?.state !== "suspended"
-      || !validU32(options.quantumFrames) || options.quantumFrames === 0
+      || !validU32(quantumFrames) || quantumFrames === 0
       || !validU32(options.context?.sampleRate) || options.context.sampleRate === 0
-      || !(options.sessionToml instanceof Uint8Array)
-      || !validLimits(options.limits)
-      || options.sessionToml.byteLength > options.limits.sessionTomlBytes
+      || !(options.document instanceof Uint8Array)
+      || !validBootOptions(options.options)
       || typeof options.simd128ModuleUrl !== "string"
       || typeof options.workletModuleUrl !== "string") {
     throw webError(1);
-  }
-  const exposedQuantum = options.context.renderQuantumSize;
-  if (typeof exposedQuantum === "number" && exposedQuantum !== 0
-      && exposedQuantum !== options.quantumFrames) {
-    throw webError(9);
   }
   // W4-D1: attest before allocating anything. Thrown outside the `try` below so it reaches the
   // caller as itself rather than being folded into the generic 255 rejection.
@@ -872,13 +852,9 @@ export async function createMisoAudioWorkletHost(options) {
       numberOfOutputs: 1,
       outputChannelCount: [2],
       processorOptions: {
-        requestId: 0,
         module: selected.module,
-        backend: selected.backend,
-        sampleRateHz: options.context.sampleRate,
-        quantumFrames: options.quantumFrames,
-        sessionToml: new Uint8Array(options.sessionToml),
-        limits: { ...options.limits },
+        document: new Uint8Array(options.document),
+        options: { ...options.options },
       },
     });
     const ready = await new Promise((resolve, reject) => {
@@ -904,7 +880,7 @@ export async function createMisoAudioWorkletHost(options) {
               message.resources,
               selected.backend,
               options.context.sampleRate,
-              options.quantumFrames,
+              quantumFrames,
             )) {
           finish(resolve, {
             ...message,
@@ -925,18 +901,18 @@ export async function createMisoAudioWorkletHost(options) {
       node,
       selected.backend,
       options.context.sampleRate,
-      options.quantumFrames,
+      quantumFrames,
       ready.resources,
       ready.memoryBytes,
-      // The per-source in-flight bound is the ring depth in quanta. `validLimits` has already
-      // established that both are nonzero u32s, and `validate_config` in Rust rejects a ring that
-      // is not a whole number of quanta, so this division is exact for any session that prepares.
-      Math.floor(options.limits.sourceRingFrames / options.quantumFrames) || 1,
-      // Issue #137 D1: zero means the engine's own default command-queue depth.
-      Number(options.limits.consoleCommandQueueRecords) || 64,
+      // The per-source in-flight bound is the ring depth in quanta. A zero override selects the
+      // engine's 100 ms plus two-quanta derivation; this arithmetic mirrors that public rule.
+      (options.options.sourceRingFrames === 0
+        ? Math.ceil(options.context.sampleRate / 10 / quantumFrames) + 2
+        : options.options.sourceRingFrames / quantumFrames),
+      Number(options.options.consoleCommandQueueRecords) || 1,
       // Issue #143: the plan's default observation window is the meter window; a subscription that
       // names `windowBlocks: 0` gets it, and the returned map says which one it got.
-      Number(options.limits.consoleMeterBlocks),
+      Number(options.options.consoleMeterBlocks),
     );
   } catch (error) {
     cleanupNode(node);

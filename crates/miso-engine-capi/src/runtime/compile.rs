@@ -303,8 +303,7 @@ pub(crate) fn validate_replacement_peak(
 }
 
 pub(crate) fn all_limits_nonzero(limits: CompileLimits) -> bool {
-    limits.source_ring_frames != 0
-        && limits.maximum_automation_spans_per_block != 0
+    limits.maximum_automation_spans_per_block != 0
         && [
             limits.maximum_toml_bytes,
             limits.maximum_diagnostic_bytes,
@@ -436,11 +435,20 @@ pub(crate) fn prepare_runtime(
 
 pub(crate) fn compile_children(
     toml: &str,
-    limits: CompileLimits,
+    mut limits: CompileLimits,
 ) -> Result<CompiledChildren, CompileFailure> {
     // The C ABI needs the transactional `SessionStore` for the control protocol, so it parses and
     // caps through the facade and builds the store itself; the facade never sees the protocol.
     let model = parse_host_session(toml).map_err(prepare_failure)?;
+    if limits.source_ring_frames == 0 {
+        limits.source_ring_frames = miso_engine_host_core::default_source_ring_frames(
+            model.sample_rate_hz,
+            model.quantum_frames,
+        );
+        if limits.source_ring_frames == 0 {
+            return Err(failure("capi.resource.arithmetic"));
+        }
+    }
     let compile_caps = prepare_caps(limits)
         .compile_caps(model.sources.len())
         .map_err(prepare_failure)?;
