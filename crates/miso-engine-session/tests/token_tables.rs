@@ -48,12 +48,20 @@ fn source_bit_depth_wire_table_is_closed_at_both_edges() {
     ];
     for (value, wire, token) in ALL {
         assert_eq!(value.wire(), wire, "{token} wire code");
-        assert_eq!(SourceBitDepth::from_wire(wire), Some(value), "{token} decode");
+        assert_eq!(
+            SourceBitDepth::from_wire(wire),
+            Some(value),
+            "{token} decode"
+        );
         assert_eq!(value.token(), token);
     }
     // Zero is never a legal token code, and 4..=255 is the unallocated tail. Exhaustive rather
     // than sampled: a widened fallthrough is exactly the mutation that hides in an untested gap.
-    assert_eq!(SourceBitDepth::from_wire(0), None, "zero is not a token code");
+    assert_eq!(
+        SourceBitDepth::from_wire(0),
+        None,
+        "zero is not a token code"
+    );
     for wire in 4_u8..=u8::MAX {
         assert_eq!(
             SourceBitDepth::from_wire(wire),

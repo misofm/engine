@@ -1060,7 +1060,10 @@ fn dead_resource_caps_cannot_refuse_any_session() {
         ("source_ring_frames", estimate.source_ring_frames),
         ("source_ring_bytes", estimate.source_ring_bytes),
     ] {
-        assert_eq!(value, 0, "{label} must be the host's business, not the document's");
+        assert_eq!(
+            value, 0,
+            "{label} must be the host's business, not the document's"
+        );
     }
     let caps = CompileCaps {
         max_compiled_model_bytes: u64::MAX,

@@ -3892,11 +3892,13 @@ mod tests {
             length_frames: 4,
         };
 
-        let refusal = |resolver: &mut Resolver, request| {
-            match prepare_native_source(resolver, request, caps()) {
-                Ok(_) => panic!("a depth mismatch must never reach a prepared source"),
-                Err(error) => error,
-            }
+        let refusal = |resolver: &mut Resolver, request| match prepare_native_source(
+            resolver,
+            request,
+            caps(),
+        ) {
+            Ok(_) => panic!("a depth mismatch must never reach a prepared source"),
+            Err(error) => error,
         };
 
         // float32 asset, declared as an integer depth.
