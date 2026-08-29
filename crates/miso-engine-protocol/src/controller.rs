@@ -4158,7 +4158,11 @@ mod tests {
             .find(|frame| frame.name == "command.session_transaction_apply")
             .expect("frozen transaction frame");
         let mut limited = controller(8, 1);
-        limited.config.maximum_transaction_edits = 1;
+        // One below the fixture's own edit count: #241 took the corpus from 42 edits to 39 by
+        // deleting opcodes 0x0006/0x0102/0x0104, so the boundary this row exists to probe moved
+        // 41 -> 38. A smaller number still refuses, but it stops being a boundary.
+        assert_eq!(crate::complete_all_opcode_fixture().len(), 39);
+        limited.config.maximum_transaction_edits = 38;
         assert_eq!(
             limited.process_b1b_btlv(
                 &transaction.bytes,
