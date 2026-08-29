@@ -227,6 +227,8 @@ pub struct BuiltinParameterDescriptor {
     pub smoothing: BuiltinSmoothingPolicy,
     pub reset: BuiltinParameterReset,
     pub disabled_value: Option<f32>,
+    /// Exact-decimal persisted-value lattice and named step ladder.
+    pub lattice: miso_engine_effect_contract::ParameterLattice,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -343,7 +345,121 @@ pub enum BuiltinParameterReset {
     KeepTargetResetCurrent,
 }
 
-pub const BUILTIN_PARAMETER_DESCRIPTORS: [BuiltinParameterDescriptor; 11] = [
+/// Reserved persisted-wire index for a descriptor's out-of-range disabled sentinel.
+pub const DISABLED_LATTICE_INDEX: u32 = u32::MAX;
+
+/// One builtin lattice at a prepared sample rate.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BuiltinLatticePoints {
+    /// Sorted in-domain values. Their `index` is the persisted step index.
+    pub points: Vec<miso_engine_effect_contract::LatticePoint>,
+    /// Canonical disabled sentinel carried by [`DISABLED_LATTICE_INDEX`], when declared.
+    pub disabled: Option<String>,
+}
+
+/// Resolve a builtin descriptor into the shared lattice machinery.
+///
+/// The builtin vocabulary has a rate-keyed cutoff domain that effect descriptors do not. This
+/// adapter supplies the selected rate's declared maximum, then delegates all arithmetic,
+/// geometric rendering, intrinsic endpoints/defaults and index ordering to effect-contract's one
+/// authority. The disabled sentinel stays outside the ordered domain under its reserved index.
+pub fn builtin_parameter_lattice_points(
+    descriptor: &BuiltinParameterDescriptor,
+    sample_rate: u32,
+) -> Result<BuiltinLatticePoints, miso_engine_effect_contract::LatticeError> {
+    use miso_engine_effect_contract::{
+        AutomationRate, ParameterChannelPolicy, ParameterDescriptor, ParameterDomain,
+        ParameterMapping, ParameterUnit, SmoothingRule, canonical_descriptor_decimal,
+        parameter_lattice_points_parts,
+    };
+
+    // `maximum_is_member` distinguishes a DECLARED bound, which #239 ruling
+    // 5461507633 B2 makes a lattice member outright, from S1's rate-keyed
+    // CLAMP, which is a physical ceiling the descriptor never declared and
+    // whose top point is therefore the greatest generated value at or below it.
+    let (domain, minimum, maximum, default_value, maximum_is_member) = match descriptor.domain {
+        BuiltinParameterDomain::BooleanExact => (ParameterDomain::Boolean, None, None, 0.0, true),
+        BuiltinParameterDomain::FiniteInclusive { minimum, maximum } => (
+            ParameterDomain::Continuous,
+            Some(minimum),
+            Some(maximum),
+            descriptor.default,
+            true,
+        ),
+        BuiltinParameterDomain::DisabledOrRateKeyedHertz { minimum_hz, .. } => (
+            ParameterDomain::Continuous,
+            Some(minimum_hz),
+            Some(
+                builtin_filter_cutoff_maximum_hz(sample_rate)
+                    .ok_or(miso_engine_effect_contract::LatticeError::Declaration)?,
+            ),
+            // The actual default is the disabled sentinel and stays outside this ordered set.
+            minimum_hz,
+            false,
+        ),
+    };
+    let unit = match descriptor.mapping {
+        BuiltinParameterMapping::DecibelAmplitude => ParameterUnit::Db,
+        BuiltinParameterMapping::Hertz => ParameterUnit::Hz,
+        BuiltinParameterMapping::Boolean | BuiltinParameterMapping::Linear => {
+            if descriptor.name == "delay_samples" {
+                ParameterUnit::Samples
+            } else {
+                ParameterUnit::Linear
+            }
+        }
+    };
+    let mapping = match descriptor.mapping {
+        BuiltinParameterMapping::Boolean => ParameterMapping::Stepped,
+        BuiltinParameterMapping::Hertz => ParameterMapping::Logarithmic,
+        BuiltinParameterMapping::DecibelAmplitude | BuiltinParameterMapping::Linear => {
+            ParameterMapping::Linear
+        }
+    };
+    let parameter = ParameterDescriptor {
+        id: miso_engine_effect_contract::ParameterId(descriptor.id),
+        display_name: descriptor.name,
+        display_unit: "builtin",
+        unit,
+        domain,
+        minimum,
+        maximum,
+        default_value,
+        mapping,
+        automation_rate: AutomationRate::None,
+        channel_policy: match descriptor.scope {
+            BuiltinParameterScope::PerLane => ParameterChannelPolicy::PerLane,
+            BuiltinParameterScope::MatrixShared => ParameterChannelPolicy::Shared,
+        },
+        smoothing: SmoothingRule::None,
+        smoothing_samples: 0,
+        readable: true,
+        automatable: false,
+        enum_choices: &[],
+        lattice: descriptor.lattice,
+    };
+    let points = parameter_lattice_points_parts(
+        parameter.unit,
+        parameter.domain,
+        parameter.mapping,
+        parameter.minimum,
+        parameter.maximum,
+        parameter.default_value,
+        &[],
+        parameter.lattice,
+        maximum_is_member,
+    )?;
+    let disabled = descriptor
+        .disabled_value
+        .map(|value| {
+            canonical_descriptor_decimal(value, descriptor.lattice.precision)
+                .ok_or(miso_engine_effect_contract::LatticeError::Declaration)
+        })
+        .transpose()?;
+    Ok(BuiltinLatticePoints { points, disabled })
+}
+
+pub const BUILTIN_PARAMETER_DESCRIPTORS: [BuiltinParameterDescriptor; 12] = [
     BuiltinParameterDescriptor {
         id: 1,
         name: "polarity_invert",
@@ -360,6 +476,7 @@ pub const BUILTIN_PARAMETER_DESCRIPTORS: [BuiltinParameterDescriptor; 11] = [
         smoothing: BuiltinSmoothingPolicy::LinearNUpdates,
         reset: BuiltinParameterReset::RestorePreparedValue,
         disabled_value: None,
+        lattice: miso_engine_effect_contract::ParameterLattice::indices(),
     },
     BuiltinParameterDescriptor {
         id: 2,
@@ -379,6 +496,7 @@ pub const BUILTIN_PARAMETER_DESCRIPTORS: [BuiltinParameterDescriptor; 11] = [
         smoothing: BuiltinSmoothingPolicy::LinearNUpdates,
         reset: BuiltinParameterReset::RestorePreparedValue,
         disabled_value: None,
+        lattice: miso_engine_effect_contract::ParameterLattice::arithmetic(0.1, 1),
     },
     BuiltinParameterDescriptor {
         id: 3,
@@ -394,6 +512,7 @@ pub const BUILTIN_PARAMETER_DESCRIPTORS: [BuiltinParameterDescriptor; 11] = [
         smoothing: BuiltinSmoothingPolicy::None,
         reset: BuiltinParameterReset::RestorePreparedValue,
         disabled_value: Some(0.0),
+        lattice: miso_engine_effect_contract::ParameterLattice::cents(20.0, 3),
     },
     BuiltinParameterDescriptor {
         id: 4,
@@ -409,6 +528,7 @@ pub const BUILTIN_PARAMETER_DESCRIPTORS: [BuiltinParameterDescriptor; 11] = [
         smoothing: BuiltinSmoothingPolicy::None,
         reset: BuiltinParameterReset::RestorePreparedValue,
         disabled_value: Some(0.0),
+        lattice: miso_engine_effect_contract::ParameterLattice::cents(20.0, 3),
     },
     // Issue #140 B: `fader_db` and `mute` become block targets with linear-N smoothing, because
     // the engine now has a post-preparation write path for them -- `FaderMuteRampBuiltins`,
@@ -431,6 +551,8 @@ pub const BUILTIN_PARAMETER_DESCRIPTORS: [BuiltinParameterDescriptor; 11] = [
         smoothing: BuiltinSmoothingPolicy::LinearNUpdates,
         reset: BuiltinParameterReset::RestorePreparedValue,
         disabled_value: None,
+        lattice: miso_engine_effect_contract::ParameterLattice::arithmetic(0.1, 1)
+            .with_ladder(miso_engine_effect_contract::FADER_STEP_LADDER),
     },
     BuiltinParameterDescriptor {
         id: 6,
@@ -443,6 +565,7 @@ pub const BUILTIN_PARAMETER_DESCRIPTORS: [BuiltinParameterDescriptor; 11] = [
         smoothing: BuiltinSmoothingPolicy::LinearNUpdates,
         reset: BuiltinParameterReset::RestorePreparedValue,
         disabled_value: None,
+        lattice: miso_engine_effect_contract::ParameterLattice::indices(),
     },
     BuiltinParameterDescriptor {
         id: 7,
@@ -458,6 +581,7 @@ pub const BUILTIN_PARAMETER_DESCRIPTORS: [BuiltinParameterDescriptor; 11] = [
         smoothing: BuiltinSmoothingPolicy::LinearNUpdates,
         reset: BuiltinParameterReset::KeepTargetResetCurrent,
         disabled_value: None,
+        lattice: miso_engine_effect_contract::ParameterLattice::arithmetic(0.01, 2),
     },
     BuiltinParameterDescriptor {
         id: 8,
@@ -473,6 +597,7 @@ pub const BUILTIN_PARAMETER_DESCRIPTORS: [BuiltinParameterDescriptor; 11] = [
         smoothing: BuiltinSmoothingPolicy::LinearNUpdates,
         reset: BuiltinParameterReset::KeepTargetResetCurrent,
         disabled_value: None,
+        lattice: miso_engine_effect_contract::ParameterLattice::arithmetic(0.01, 2),
     },
     BuiltinParameterDescriptor {
         id: 9,
@@ -488,6 +613,7 @@ pub const BUILTIN_PARAMETER_DESCRIPTORS: [BuiltinParameterDescriptor; 11] = [
         smoothing: BuiltinSmoothingPolicy::LinearNUpdates,
         reset: BuiltinParameterReset::KeepTargetResetCurrent,
         disabled_value: None,
+        lattice: miso_engine_effect_contract::ParameterLattice::arithmetic(0.01, 2),
     },
     BuiltinParameterDescriptor {
         id: 10,
@@ -503,6 +629,7 @@ pub const BUILTIN_PARAMETER_DESCRIPTORS: [BuiltinParameterDescriptor; 11] = [
         smoothing: BuiltinSmoothingPolicy::LinearNUpdates,
         reset: BuiltinParameterReset::KeepTargetResetCurrent,
         disabled_value: None,
+        lattice: miso_engine_effect_contract::ParameterLattice::arithmetic(0.01, 2),
     },
     // Issue #210 phase 2. Appended rather than inserted: the contract's self-test compares whole
     // positional arrays, and appending shifts no existing row's index.
@@ -529,6 +656,26 @@ pub const BUILTIN_PARAMETER_DESCRIPTORS: [BuiltinParameterDescriptor; 11] = [
         // all). Zero samples is an ordinary, in-domain point of a flat integer range, so this row
         // has no disabled value in that sense.
         disabled_value: None,
+        lattice: miso_engine_effect_contract::ParameterLattice::arithmetic(1.0, 0),
+    },
+    // #239 ruling 5461507633 B4: pan remains persisted intent and therefore owns a descriptor
+    // row rather than being canonicalized into matrix coefficients. One row is per-lane: session
+    // `left` and `right` pan words address the same stable parameter ID on different lanes.
+    BuiltinParameterDescriptor {
+        id: 12,
+        name: "pan",
+        scope: BuiltinParameterScope::PerLane,
+        mapping: BuiltinParameterMapping::Linear,
+        domain: BuiltinParameterDomain::FiniteInclusive {
+            minimum: -1.0,
+            maximum: 1.0,
+        },
+        default: 0.0,
+        update_rate: BuiltinParameterUpdateRate::BlockTarget,
+        smoothing: BuiltinSmoothingPolicy::LinearNUpdates,
+        reset: BuiltinParameterReset::KeepTargetResetCurrent,
+        disabled_value: None,
+        lattice: miso_engine_effect_contract::ParameterLattice::arithmetic(0.01, 2),
     },
 ];
 

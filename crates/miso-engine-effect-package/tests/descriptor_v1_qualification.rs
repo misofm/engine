@@ -6,7 +6,7 @@ use miso_engine_effect_contract::{
     ObservationFold, ObservationKind, ObservationTapId, ParameterChannelPolicy,
     ParameterDescriptor, ParameterDomain, ParameterId, ParameterMapping, ParameterUnit,
     PortDescriptor, PortId, PortLayout, PortRole, QualityDescriptor, SmoothingRule,
-    StatePayloadSizes, TailSamples, validate_descriptor,
+    StatePayloadSizes, TailSamples, default_parameter_lattice, validate_descriptor,
 };
 use miso_engine_effect_package::{
     EFFECT_DESCRIPTOR_WIRE_UNAVAILABLE, EffectArtifactAuthoring, EffectArtifactKind,
@@ -64,6 +64,11 @@ static PARAMETERS: [ParameterDescriptor; 6] = [
         readable: false,
         automatable: true,
         enum_choices: &[],
+        lattice: default_parameter_lattice(
+            ParameterUnit::Db,
+            ParameterDomain::Continuous,
+            ParameterMapping::Linear,
+        ),
     },
     ParameterDescriptor {
         id: ParameterId(2),
@@ -82,6 +87,11 @@ static PARAMETERS: [ParameterDescriptor; 6] = [
         readable: true,
         automatable: true,
         enum_choices: &[],
+        lattice: default_parameter_lattice(
+            ParameterUnit::Hz,
+            ParameterDomain::Continuous,
+            ParameterMapping::Logarithmic,
+        ),
     },
     ParameterDescriptor {
         id: ParameterId(3),
@@ -100,6 +110,11 @@ static PARAMETERS: [ParameterDescriptor; 6] = [
         readable: true,
         automatable: true,
         enum_choices: &[],
+        lattice: default_parameter_lattice(
+            ParameterUnit::Milliseconds,
+            ParameterDomain::Continuous,
+            ParameterMapping::Exponential,
+        ),
     },
     ParameterDescriptor {
         id: ParameterId(4),
@@ -118,6 +133,11 @@ static PARAMETERS: [ParameterDescriptor; 6] = [
         readable: true,
         automatable: true,
         enum_choices: &[],
+        lattice: default_parameter_lattice(
+            ParameterUnit::Samples,
+            ParameterDomain::Boolean,
+            ParameterMapping::Stepped,
+        ),
     },
     ParameterDescriptor {
         id: ParameterId(5),
@@ -136,6 +156,11 @@ static PARAMETERS: [ParameterDescriptor; 6] = [
         readable: true,
         automatable: false,
         enum_choices: &CHOICES,
+        lattice: default_parameter_lattice(
+            ParameterUnit::Linear,
+            ParameterDomain::Enumeration,
+            ParameterMapping::Stepped,
+        ),
     },
     ParameterDescriptor {
         id: ParameterId(6),
@@ -154,6 +179,11 @@ static PARAMETERS: [ParameterDescriptor; 6] = [
         readable: true,
         automatable: true,
         enum_choices: &[],
+        lattice: default_parameter_lattice(
+            ParameterUnit::Ratio,
+            ParameterDomain::Continuous,
+            ParameterMapping::Exponential,
+        ),
     },
 ];
 
@@ -537,8 +567,15 @@ fn checked_vectors_match_independent_wire_identity_and_port_permutation() {
             "comprehensive-c.identity.hex",
         ),
     ] {
+        // The byte-equality seal against the sealed V1 vector. #242 consumed the two reserved
+        // parameter words, but the encoder is canonical -- a row whose declaration IS its derived
+        // class default encodes the historical all-zero window -- so these bytes and their
+        // class-A identities did not move. The seal is restored deliberately: while it was
+        // relaxed to compare the legacy vector against itself, an encoder that wrote the derived
+        // default explicitly moved every one of these vectors and no gate here noticed.
         let wire = encoded(descriptor);
-        assert_eq!(wire, hex_bytes(wire_name));
+        let legacy_wire = hex_bytes(wire_name);
+        assert_eq!(wire, legacy_wire);
         assert_eq!(
             verify_effect_descriptor_wire(&wire, 1 << 20)
                 .unwrap()
@@ -657,6 +694,8 @@ fn every_legally_mutable_semantic_field_class_changes_identity() {
         put_u32(bytes, record + 32, 15);
         put_u32(bytes, record + 36, 0.0f32.to_bits());
         put_u32(bytes, record + 40, 1.0f32.to_bits());
+        let index_spec = u32::from_le_bytes(bytes[record + 76..record + 80].try_into().unwrap());
+        put_u32(bytes, record + 76, index_spec & 0x3fff_ffff);
     });
     assert_valid_identity_change(&original, "parameter mapping", |bytes| {
         put_u32(bytes, parameter + 12, ParameterMapping::Exponential as u32);
@@ -828,4 +867,70 @@ fn observation_section_is_additive_and_stale_readers_refuse_it() {
     let error = verify_effect_descriptor_wire(&mutated, 1 << 20).unwrap_err();
     assert_eq!(error.code, Code::Reserved);
     assert_eq!(error.byte_offset, 92);
+}
+
+/// One lattice has exactly one byte spelling (#242, coordinator ruling on the wire alias).
+///
+/// The all-zero window at parameter offsets 72/76 decodes as the row's derived unit-class
+/// lattice. A row that declares exactly that default must therefore spell it as zeros: writing
+/// the same meaning explicitly would give one lattice two byte sequences, and in a format whose
+/// bytes are its identity that is an aliasing bug, not a cosmetic one. It is also what keeps
+/// every descriptor sealed before #242 at its exact identity.
+#[test]
+fn an_explicitly_spelled_derived_lattice_is_refused_as_a_second_spelling() {
+    /// Pack a lattice the way the wire does: xs/sm/md/lg in five bits each, xl in six, then a
+    /// four-bit precision and a two-bit step unit.
+    fn pack(lattice: miso_engine_effect_contract::ParameterLattice) -> u32 {
+        let [xs, sm, md, lg, xl] = lattice.ladder.multiples.map(u32::from);
+        xs | (sm << 5)
+            | (md << 10)
+            | (lg << 15)
+            | (xl << 20)
+            | (u32::from(lattice.precision) << 26)
+            | ((lattice.step_unit as u32 - 1) << 30)
+    }
+    fn get_u32(bytes: &[u8], offset: usize) -> u32 {
+        u32::from_le_bytes(bytes[offset..offset + 4].try_into().expect("four bytes"))
+    }
+
+    let mut checked = 0_usize;
+    for descriptor in [&DESCRIPTOR_A, &DESCRIPTOR_B, &DESCRIPTOR_C] {
+        let wire = encoded(descriptor);
+        // The canonical encoding leaves the window zeroed for every derived row, which is what
+        // makes the alias constructible only by hand.
+        verify_effect_descriptor_wire(&wire, 1 << 20).expect("canonical spelling verifies");
+
+        let parameter_offset = get_u32(&wire, 52) as usize;
+        for index in 0..get_u32(&wire, 48) as usize {
+            let record = parameter_offset + index * 80;
+            if get_u32(&wire, record + 72) != 0 {
+                // This row overrides its class, so its explicit words are the canonical ones.
+                continue;
+            }
+            let unit = ParameterUnit::from_raw(get_u32(&wire, record + 4)).expect("unit");
+            let domain = ParameterDomain::from_raw(get_u32(&wire, record + 8)).expect("domain");
+            let mapping = ParameterMapping::from_raw(get_u32(&wire, record + 12)).expect("mapping");
+            let derived = default_parameter_lattice(unit, domain, mapping);
+
+            let mut aliased = wire.clone();
+            put_u32(&mut aliased, record + 72, derived.step.to_bits());
+            put_u32(&mut aliased, record + 76, pack(derived));
+            // The alias really does mean the same thing: only these eight bytes differ.
+            assert_eq!(aliased.len(), wire.len());
+            assert_ne!(aliased, wire, "the alias must be a different byte sequence");
+
+            let error = verify_effect_descriptor_wire(&aliased, 1 << 20)
+                .expect_err("a second spelling of one lattice must be refused");
+            assert_eq!(
+                (error.code, error.byte_offset, error.record_index),
+                (Code::Reserved, (record + 72) as u32, index as u32),
+                "refusal names the aliased window"
+            );
+            checked += 1;
+        }
+    }
+    assert!(
+        checked >= 2,
+        "at least two derived rows across the corpus must be proven, not {checked}"
+    );
 }

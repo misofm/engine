@@ -42,8 +42,8 @@ fn six_descriptor_c_records_have_exact_rust_layouts_and_offsets() {
             offset_of!(EffectDescriptorParameterRecord, display_name_length),
             offset_of!(EffectDescriptorParameterRecord, display_unit_offset),
             offset_of!(EffectDescriptorParameterRecord, display_unit_length),
-            offset_of!(EffectDescriptorParameterRecord, reserved0),
-            offset_of!(EffectDescriptorParameterRecord, reserved1),
+            offset_of!(EffectDescriptorParameterRecord, step_bits),
+            offset_of!(EffectDescriptorParameterRecord, step_spec),
         ],
         &(0..20).map(|index| index * 4).collect::<Vec<_>>(),
     );

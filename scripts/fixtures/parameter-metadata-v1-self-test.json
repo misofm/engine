@@ -39,17 +39,18 @@
   },
   "builtins": {
     "parameters": [
-      { "id": 1, "name": "polarity_invert", "scope": "perLane", "mapping": "boolean", "domain": "booleanExact", "minimum": null, "maximum": null, "maximumByRate": null, "default": 0.0, "updateRate": "blockTarget", "smoothing": "linearNUpdates", "reset": "restorePreparedValue", "disabledValue": null, "liveUpdatable": true, "nudge": null },
-      { "id": 2, "name": "trim_db", "scope": "perLane", "mapping": "decibelAmplitude", "domain": "finiteInclusive", "minimum": -144.0, "maximum": 24.0, "maximumByRate": null, "default": 0.0, "updateRate": "blockTarget", "smoothing": "linearNUpdates", "reset": "restorePreparedValue", "disabledValue": null, "liveUpdatable": true, "nudge": null },
-      { "id": 3, "name": "hpf_hz", "scope": "perLane", "mapping": "hertz", "domain": "disabledOrRateKeyedHertz", "minimum": 10.0, "maximum": null, "maximumByRate": { "44100": 22049.482, "48000": 23999.434, "88200": 44098.965, "96000": 47998.867 }, "default": 0.0, "updateRate": "preparedOnly", "smoothing": "none", "reset": "restorePreparedValue", "disabledValue": 0.0, "liveUpdatable": false, "nudge": null },
-      { "id": 4, "name": "lpf_hz", "scope": "perLane", "mapping": "hertz", "domain": "disabledOrRateKeyedHertz", "minimum": 10.0, "maximum": null, "maximumByRate": { "44100": 22049.482, "48000": 23999.434, "88200": 44098.965, "96000": 47998.867 }, "default": 0.0, "updateRate": "preparedOnly", "smoothing": "none", "reset": "restorePreparedValue", "disabledValue": 0.0, "liveUpdatable": false, "nudge": null },
-      { "id": 5, "name": "fader_db", "scope": "perLane", "mapping": "decibelAmplitude", "domain": "finiteInclusive", "minimum": -144.0, "maximum": 24.0, "maximumByRate": null, "default": 0.0, "updateRate": "blockTarget", "smoothing": "linearNUpdates", "reset": "restorePreparedValue", "disabledValue": null, "liveUpdatable": true, "nudge": null },
-      { "id": 6, "name": "mute", "scope": "perLane", "mapping": "boolean", "domain": "booleanExact", "minimum": null, "maximum": null, "maximumByRate": null, "default": 0.0, "updateRate": "blockTarget", "smoothing": "linearNUpdates", "reset": "restorePreparedValue", "disabledValue": null, "liveUpdatable": true, "nudge": null },
-      { "id": 7, "name": "matrix_ll", "scope": "matrixShared", "mapping": "linear", "domain": "finiteInclusive", "minimum": -1.0, "maximum": 1.0, "maximumByRate": null, "default": 1.0, "updateRate": "blockTarget", "smoothing": "linearNUpdates", "reset": "keepTargetResetCurrent", "disabledValue": null, "liveUpdatable": true, "nudge": null },
-      { "id": 8, "name": "matrix_lr", "scope": "matrixShared", "mapping": "linear", "domain": "finiteInclusive", "minimum": -1.0, "maximum": 1.0, "maximumByRate": null, "default": 0.0, "updateRate": "blockTarget", "smoothing": "linearNUpdates", "reset": "keepTargetResetCurrent", "disabledValue": null, "liveUpdatable": true, "nudge": null },
-      { "id": 9, "name": "matrix_rl", "scope": "matrixShared", "mapping": "linear", "domain": "finiteInclusive", "minimum": -1.0, "maximum": 1.0, "maximumByRate": null, "default": 0.0, "updateRate": "blockTarget", "smoothing": "linearNUpdates", "reset": "keepTargetResetCurrent", "disabledValue": null, "liveUpdatable": true, "nudge": null },
-      { "id": 10, "name": "matrix_rr", "scope": "matrixShared", "mapping": "linear", "domain": "finiteInclusive", "minimum": -1.0, "maximum": 1.0, "maximumByRate": null, "default": 1.0, "updateRate": "blockTarget", "smoothing": "linearNUpdates", "reset": "keepTargetResetCurrent", "disabledValue": null, "liveUpdatable": true, "nudge": null },
-      { "id": 11, "name": "delay_samples", "scope": "perLane", "mapping": "linear", "domain": "finiteInclusive", "minimum": 0.0, "maximum": 48000.0, "maximumByRate": null, "default": 0.0, "updateRate": "preparedOnly", "smoothing": "none", "reset": "restorePreparedValue", "disabledValue": null, "liveUpdatable": false, "nudge": null }
+      { "id": 1, "name": "polarity_invert", "scope": "perLane", "mapping": "boolean", "domain": "booleanExact", "minimum": null, "maximum": null, "maximumByRate": null, "default": 0.0, "updateRate": "blockTarget", "smoothing": "linearNUpdates", "reset": "restorePreparedValue", "disabledValue": null, "liveUpdatable": true, "step": { "unit": "index", "size": "1", "precision": 0, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } } },
+      { "id": 2, "name": "trim_db", "scope": "perLane", "mapping": "decibelAmplitude", "domain": "finiteInclusive", "minimum": -144.0, "maximum": 24.0, "maximumByRate": null, "default": 0.0, "updateRate": "blockTarget", "smoothing": "linearNUpdates", "reset": "restorePreparedValue", "disabledValue": null, "liveUpdatable": true, "step": { "unit": "absolute", "size": "0.1", "precision": 1, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } } },
+      { "id": 3, "name": "hpf_hz", "scope": "perLane", "mapping": "hertz", "domain": "disabledOrRateKeyedHertz", "minimum": 10.0, "maximum": null, "maximumByRate": { "44100": 22049.482, "48000": 23999.434, "88200": 44098.965, "96000": 47998.867 }, "default": 0.0, "updateRate": "preparedOnly", "smoothing": "none", "reset": "restorePreparedValue", "disabledValue": 0.0, "liveUpdatable": false, "step": { "unit": "cents", "size": "20", "precision": 3, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } } },
+      { "id": 4, "name": "lpf_hz", "scope": "perLane", "mapping": "hertz", "domain": "disabledOrRateKeyedHertz", "minimum": 10.0, "maximum": null, "maximumByRate": { "44100": 22049.482, "48000": 23999.434, "88200": 44098.965, "96000": 47998.867 }, "default": 0.0, "updateRate": "preparedOnly", "smoothing": "none", "reset": "restorePreparedValue", "disabledValue": 0.0, "liveUpdatable": false, "step": { "unit": "cents", "size": "20", "precision": 3, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } } },
+      { "id": 5, "name": "fader_db", "scope": "perLane", "mapping": "decibelAmplitude", "domain": "finiteInclusive", "minimum": -144.0, "maximum": 24.0, "maximumByRate": null, "default": 0.0, "updateRate": "blockTarget", "smoothing": "linearNUpdates", "reset": "restorePreparedValue", "disabledValue": null, "liveUpdatable": true, "step": { "unit": "absolute", "size": "0.1", "precision": 1, "ladder": { "xs": 1, "sm": 5, "md": 10, "lg": 30, "xl": 60 } } },
+      { "id": 6, "name": "mute", "scope": "perLane", "mapping": "boolean", "domain": "booleanExact", "minimum": null, "maximum": null, "maximumByRate": null, "default": 0.0, "updateRate": "blockTarget", "smoothing": "linearNUpdates", "reset": "restorePreparedValue", "disabledValue": null, "liveUpdatable": true, "step": { "unit": "index", "size": "1", "precision": 0, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } } },
+      { "id": 7, "name": "matrix_ll", "scope": "matrixShared", "mapping": "linear", "domain": "finiteInclusive", "minimum": -1.0, "maximum": 1.0, "maximumByRate": null, "default": 1.0, "updateRate": "blockTarget", "smoothing": "linearNUpdates", "reset": "keepTargetResetCurrent", "disabledValue": null, "liveUpdatable": true, "step": { "unit": "absolute", "size": "0.01", "precision": 2, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } } },
+      { "id": 8, "name": "matrix_lr", "scope": "matrixShared", "mapping": "linear", "domain": "finiteInclusive", "minimum": -1.0, "maximum": 1.0, "maximumByRate": null, "default": 0.0, "updateRate": "blockTarget", "smoothing": "linearNUpdates", "reset": "keepTargetResetCurrent", "disabledValue": null, "liveUpdatable": true, "step": { "unit": "absolute", "size": "0.01", "precision": 2, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } } },
+      { "id": 9, "name": "matrix_rl", "scope": "matrixShared", "mapping": "linear", "domain": "finiteInclusive", "minimum": -1.0, "maximum": 1.0, "maximumByRate": null, "default": 0.0, "updateRate": "blockTarget", "smoothing": "linearNUpdates", "reset": "keepTargetResetCurrent", "disabledValue": null, "liveUpdatable": true, "step": { "unit": "absolute", "size": "0.01", "precision": 2, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } } },
+      { "id": 10, "name": "matrix_rr", "scope": "matrixShared", "mapping": "linear", "domain": "finiteInclusive", "minimum": -1.0, "maximum": 1.0, "maximumByRate": null, "default": 1.0, "updateRate": "blockTarget", "smoothing": "linearNUpdates", "reset": "keepTargetResetCurrent", "disabledValue": null, "liveUpdatable": true, "step": { "unit": "absolute", "size": "0.01", "precision": 2, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } } },
+      { "id": 11, "name": "delay_samples", "scope": "perLane", "mapping": "linear", "domain": "finiteInclusive", "minimum": 0.0, "maximum": 48000.0, "maximumByRate": null, "default": 0.0, "updateRate": "preparedOnly", "smoothing": "none", "reset": "restorePreparedValue", "disabledValue": null, "liveUpdatable": false, "step": { "unit": "absolute", "size": "1", "precision": 0, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } } },
+      { "id": 12, "name": "pan", "scope": "perLane", "mapping": "linear", "domain": "finiteInclusive", "minimum": -1.0, "maximum": 1.0, "maximumByRate": null, "default": 0.0, "updateRate": "blockTarget", "smoothing": "linearNUpdates", "reset": "keepTargetResetCurrent", "disabledValue": null, "liveUpdatable": true, "step": { "unit": "absolute", "size": "0.01", "precision": 2, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } } }
     ]
   },
   "effects": [
@@ -72,7 +73,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "step": { "unit": "absolute", "size": "0.1", "precision": 1, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
         },
         {
           "id": 2,
@@ -88,7 +89,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "step": { "unit": "ratio", "size": "1.02", "precision": 8, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
         },
         {
           "id": 3,
@@ -104,7 +105,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "step": { "unit": "absolute", "size": "0.1", "precision": 1, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
         },
         {
           "id": 4,
@@ -120,7 +121,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "step": { "unit": "ratio", "size": "1.02", "precision": 3, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
         },
         {
           "id": 5,
@@ -136,7 +137,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "step": { "unit": "ratio", "size": "1.02", "precision": 3, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
         },
         {
           "id": 6,
@@ -152,7 +153,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "step": { "unit": "absolute", "size": "0.1", "precision": 1, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
         },
         {
           "id": 7,
@@ -168,7 +169,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "step": { "unit": "absolute", "size": "0.01", "precision": 2, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
         },
         {
           "id": 8,
@@ -184,7 +185,7 @@
           "readable": true, "automatable": false,
           "liveUpdatable": false,
           "enumChoices": [],
-          "nudge": null
+          "step": { "unit": "absolute", "size": "0.1", "precision": 1, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
         }
       ],
       "observations": [
@@ -210,7 +211,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "step": { "unit": "absolute", "size": "0.1", "precision": 1, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
         },
         {
           "id": 2,
@@ -226,7 +227,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "step": { "unit": "absolute", "size": "0.01", "precision": 2, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
         },
         {
           "id": 3,
@@ -242,7 +243,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "step": { "unit": "absolute", "size": "0.01", "precision": 3, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
         },
         {
           "id": 4,
@@ -258,7 +259,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "step": { "unit": "absolute", "size": "0.01", "precision": 2, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
         },
         {
           "id": 5,
@@ -274,7 +275,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "step": { "unit": "absolute", "size": "0.01", "precision": 2, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
         }
       ],
       "observations": []
@@ -298,7 +299,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "step": { "unit": "absolute", "size": "0.1", "precision": 1, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
         },
         {
           "id": 2,
@@ -314,7 +315,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "step": { "unit": "ratio", "size": "1.02", "precision": 8, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
         },
         {
           "id": 3,
@@ -330,7 +331,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "step": { "unit": "absolute", "size": "0.1", "precision": 1, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
         },
         {
           "id": 4,
@@ -346,7 +347,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "step": { "unit": "absolute", "size": "0.1", "precision": 1, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
         },
         {
           "id": 5,
@@ -362,7 +363,7 @@
           "readable": true, "automatable": false,
           "liveUpdatable": false,
           "enumChoices": [],
-          "nudge": null
+          "step": { "unit": "ratio", "size": "1.02", "precision": 3, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
         },
         {
           "id": 6,
@@ -378,7 +379,7 @@
           "readable": true, "automatable": false,
           "liveUpdatable": false,
           "enumChoices": [],
-          "nudge": null
+          "step": { "unit": "absolute", "size": "0.1", "precision": 1, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
         },
         {
           "id": 7,
@@ -394,7 +395,7 @@
           "readable": true, "automatable": false,
           "liveUpdatable": false,
           "enumChoices": [],
-          "nudge": null
+          "step": { "unit": "ratio", "size": "1.02", "precision": 3, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
         },
         {
           "id": 8,
@@ -410,7 +411,7 @@
           "readable": true, "automatable": false,
           "liveUpdatable": false,
           "enumChoices": [],
-          "nudge": null
+          "step": { "unit": "absolute", "size": "0.1", "precision": 1, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
         }
       ],
       "observations": [
@@ -436,7 +437,7 @@
           "readable": true, "automatable": false,
           "liveUpdatable": false,
           "enumChoices": [],
-          "nudge": null
+          "step": { "unit": "cents", "size": "20", "precision": 3, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
         },
         {
           "id": 2,
@@ -452,7 +453,7 @@
           "readable": true, "automatable": false,
           "liveUpdatable": false,
           "enumChoices": [],
-          "nudge": null
+          "step": { "unit": "absolute", "size": "0.1", "precision": 1, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
         },
         {
           "id": 3,
@@ -468,7 +469,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "step": { "unit": "absolute", "size": "0.1", "precision": 1, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
         },
         {
           "id": 4,
@@ -484,7 +485,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "step": { "unit": "ratio", "size": "1.02", "precision": 8, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
         },
         {
           "id": 5,
@@ -500,7 +501,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "step": { "unit": "ratio", "size": "1.02", "precision": 3, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
         },
         {
           "id": 6,
@@ -516,7 +517,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "step": { "unit": "ratio", "size": "1.02", "precision": 3, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
         },
         {
           "id": 7,
@@ -532,7 +533,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "step": { "unit": "absolute", "size": "0.1", "precision": 1, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
         },
         {
           "id": 8,
@@ -548,7 +549,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "step": { "unit": "absolute", "size": "0.1", "precision": 1, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
         },
         {
           "id": 9,
@@ -564,7 +565,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "step": { "unit": "ratio", "size": "1.02", "precision": 8, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
         },
         {
           "id": 10,
@@ -580,7 +581,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "step": { "unit": "ratio", "size": "1.02", "precision": 3, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
         },
         {
           "id": 11,
@@ -596,7 +597,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "step": { "unit": "ratio", "size": "1.02", "precision": 3, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
         },
         {
           "id": 12,
@@ -612,7 +613,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "step": { "unit": "absolute", "size": "0.1", "precision": 1, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
         }
       ],
       "observations": [
@@ -638,7 +639,7 @@
           "readable": true, "automatable": false,
           "liveUpdatable": false,
           "enumChoices": [],
-          "nudge": null
+          "step": { "unit": "index", "size": "1", "precision": 0, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
         },
         {
           "id": 2,
@@ -654,7 +655,7 @@
           "readable": true, "automatable": false,
           "liveUpdatable": false,
           "enumChoices": [{ "value": 1.0, "label": "bell" }, { "value": 2.0, "label": "low-shelf" }, { "value": 3.0, "label": "high-shelf" }, { "value": 4.0, "label": "low-pass" }, { "value": 5.0, "label": "high-pass" }, { "value": 6.0, "label": "notch" }],
-          "nudge": null
+          "step": { "unit": "index", "size": "1", "precision": 0, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
         },
         {
           "id": 3,
@@ -670,7 +671,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "step": { "unit": "cents", "size": "20", "precision": 3, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
         },
         {
           "id": 4,
@@ -686,7 +687,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "step": { "unit": "absolute", "size": "0.1", "precision": 1, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
         },
         {
           "id": 5,
@@ -702,7 +703,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "step": { "unit": "ratio", "size": "1.02", "precision": 8, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
         },
         {
           "id": 6,
@@ -718,7 +719,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "step": { "unit": "absolute", "size": "0.1", "precision": 1, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
         },
         {
           "id": 17,
@@ -734,7 +735,7 @@
           "readable": true, "automatable": false,
           "liveUpdatable": false,
           "enumChoices": [],
-          "nudge": null
+          "step": { "unit": "index", "size": "1", "precision": 0, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
         },
         {
           "id": 18,
@@ -750,7 +751,7 @@
           "readable": true, "automatable": false,
           "liveUpdatable": false,
           "enumChoices": [{ "value": 1.0, "label": "bell" }, { "value": 2.0, "label": "low-shelf" }, { "value": 3.0, "label": "high-shelf" }, { "value": 4.0, "label": "low-pass" }, { "value": 5.0, "label": "high-pass" }, { "value": 6.0, "label": "notch" }],
-          "nudge": null
+          "step": { "unit": "index", "size": "1", "precision": 0, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
         },
         {
           "id": 19,
@@ -766,7 +767,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "step": { "unit": "cents", "size": "20", "precision": 3, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
         },
         {
           "id": 20,
@@ -782,7 +783,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "step": { "unit": "absolute", "size": "0.1", "precision": 1, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
         },
         {
           "id": 21,
@@ -798,7 +799,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "step": { "unit": "ratio", "size": "1.02", "precision": 8, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
         },
         {
           "id": 22,
@@ -814,7 +815,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "step": { "unit": "absolute", "size": "0.1", "precision": 1, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
         },
         {
           "id": 33,
@@ -830,7 +831,7 @@
           "readable": true, "automatable": false,
           "liveUpdatable": false,
           "enumChoices": [],
-          "nudge": null
+          "step": { "unit": "index", "size": "1", "precision": 0, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
         },
         {
           "id": 34,
@@ -846,7 +847,7 @@
           "readable": true, "automatable": false,
           "liveUpdatable": false,
           "enumChoices": [{ "value": 1.0, "label": "bell" }, { "value": 2.0, "label": "low-shelf" }, { "value": 3.0, "label": "high-shelf" }, { "value": 4.0, "label": "low-pass" }, { "value": 5.0, "label": "high-pass" }, { "value": 6.0, "label": "notch" }],
-          "nudge": null
+          "step": { "unit": "index", "size": "1", "precision": 0, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
         },
         {
           "id": 35,
@@ -862,7 +863,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "step": { "unit": "cents", "size": "20", "precision": 3, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
         },
         {
           "id": 36,
@@ -878,7 +879,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "step": { "unit": "absolute", "size": "0.1", "precision": 1, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
         },
         {
           "id": 37,
@@ -894,7 +895,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "step": { "unit": "ratio", "size": "1.02", "precision": 8, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
         },
         {
           "id": 38,
@@ -910,7 +911,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "step": { "unit": "absolute", "size": "0.1", "precision": 1, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
         },
         {
           "id": 49,
@@ -926,7 +927,7 @@
           "readable": true, "automatable": false,
           "liveUpdatable": false,
           "enumChoices": [],
-          "nudge": null
+          "step": { "unit": "index", "size": "1", "precision": 0, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
         },
         {
           "id": 50,
@@ -942,7 +943,7 @@
           "readable": true, "automatable": false,
           "liveUpdatable": false,
           "enumChoices": [{ "value": 1.0, "label": "bell" }, { "value": 2.0, "label": "low-shelf" }, { "value": 3.0, "label": "high-shelf" }, { "value": 4.0, "label": "low-pass" }, { "value": 5.0, "label": "high-pass" }, { "value": 6.0, "label": "notch" }],
-          "nudge": null
+          "step": { "unit": "index", "size": "1", "precision": 0, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
         },
         {
           "id": 51,
@@ -958,7 +959,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "step": { "unit": "cents", "size": "20", "precision": 3, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
         },
         {
           "id": 52,
@@ -974,7 +975,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "step": { "unit": "absolute", "size": "0.1", "precision": 1, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
         },
         {
           "id": 53,
@@ -990,7 +991,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "step": { "unit": "ratio", "size": "1.02", "precision": 8, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
         },
         {
           "id": 54,
@@ -1006,7 +1007,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "step": { "unit": "absolute", "size": "0.1", "precision": 1, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
         }
       ],
       "observations": []
@@ -1030,7 +1031,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "step": { "unit": "absolute", "size": "0.1", "precision": 1, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
         },
         {
           "id": 2,
@@ -1046,7 +1047,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "step": { "unit": "absolute", "size": "0.1", "precision": 1, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
         },
         {
           "id": 3,
@@ -1062,7 +1063,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "step": { "unit": "absolute", "size": "0.01", "precision": 2, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
         }
       ],
       "observations": []
@@ -1086,7 +1087,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "step": { "unit": "absolute", "size": "0.01", "precision": 2, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
         },
         {
           "id": 2,
@@ -1102,7 +1103,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "step": { "unit": "absolute", "size": "0.01", "precision": 2, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
         },
         {
           "id": 3,
@@ -1118,7 +1119,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "step": { "unit": "absolute", "size": "0.01", "precision": 2, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
         }
       ],
       "observations": []
@@ -1142,7 +1143,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "step": { "unit": "absolute", "size": "0.1", "precision": 1, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
         },
         {
           "id": 2,
@@ -1158,7 +1159,7 @@
           "readable": true, "automatable": true,
           "liveUpdatable": true,
           "enumChoices": [],
-          "nudge": null
+          "step": { "unit": "ratio", "size": "1.02", "precision": 3, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
         },
         {
           "id": 3,
@@ -1174,7 +1175,7 @@
           "readable": true, "automatable": false,
           "liveUpdatable": false,
           "enumChoices": [],
-          "nudge": null
+          "step": { "unit": "absolute", "size": "0.1", "precision": 1, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
         }
       ],
       "observations": [

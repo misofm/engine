@@ -146,7 +146,25 @@ const fn parameter(
         readable: true,
         automatable: true,
         enum_choices: &[],
+        lattice: miso_engine_effect_contract::default_parameter_lattice(
+            unit,
+            ParameterDomain::Continuous,
+            ParameterMapping::Linear,
+        ),
     }
+}
+
+/// Override one row's unit-class lattice with a per-parameter declaration.
+///
+/// #242 S1 gives the per-parameter declaration precedence over the unit-class
+/// default. `damping`'s maximum `0.995` carries three decimals, so the class
+/// default's two-decimal rendering could not spell its own bound.
+const fn with_lattice(
+    mut parameter: ParameterDescriptor,
+    lattice: miso_engine_effect_contract::ParameterLattice,
+) -> ParameterDescriptor {
+    parameter.lattice = lattice;
+    parameter
 }
 
 /// Frozen V1 delay parameters in descriptor and stable-ID order.
@@ -173,16 +191,19 @@ pub const DELAY_PARAMETERS: [ParameterDescriptor; PARAMETER_COUNT] = [
         0.35,
         RAMP_SAMPLES,
     ),
-    parameter(
-        3,
-        "damping",
-        "linear",
-        ParameterUnit::Linear,
-        ParameterChannelPolicy::PerLane,
-        0.0,
-        0.995,
-        0.25,
-        RAMP_SAMPLES,
+    with_lattice(
+        parameter(
+            3,
+            "damping",
+            "linear",
+            ParameterUnit::Linear,
+            ParameterChannelPolicy::PerLane,
+            0.0,
+            0.995,
+            0.25,
+            RAMP_SAMPLES,
+        ),
+        miso_engine_effect_contract::ParameterLattice::arithmetic(0.01, 3),
     ),
     parameter(
         4,

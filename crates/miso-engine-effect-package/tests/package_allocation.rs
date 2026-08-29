@@ -52,6 +52,11 @@ static STATE_PARAMETERS: [ParameterDescriptor; 2] = [
         readable: true,
         automatable: true,
         enum_choices: &[],
+        lattice: default_parameter_lattice(
+            ParameterUnit::Linear,
+            ParameterDomain::Continuous,
+            ParameterMapping::Linear,
+        ),
     },
     ParameterDescriptor {
         id: ParameterId(2),
@@ -70,6 +75,11 @@ static STATE_PARAMETERS: [ParameterDescriptor; 2] = [
         readable: true,
         automatable: true,
         enum_choices: &[],
+        lattice: default_parameter_lattice(
+            ParameterUnit::Linear,
+            ParameterDomain::Continuous,
+            ParameterMapping::Linear,
+        ),
     },
 ];
 static STATE_PORTS: [PortDescriptor; 3] = [

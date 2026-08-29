@@ -44,6 +44,14 @@ static PARAMETERS: [ParameterDescriptor; 1] = [ParameterDescriptor {
     readable: true,
     automatable: true,
     enum_choices: &[],
+    // Issue #242: the row's persisted-value lattice. This target's descriptor is a linear
+    // `Linear` row, so its class default is the declaration -- stating it here keeps the
+    // descriptor byte-identical to what the canonical encoder emits.
+    lattice: miso_engine_effect_contract::default_parameter_lattice(
+        ParameterUnit::Linear,
+        ParameterDomain::Continuous,
+        ParameterMapping::Linear,
+    ),
 }];
 static PORTS: [PortDescriptor; 2] = [
     PortDescriptor {

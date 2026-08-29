@@ -49,7 +49,7 @@ rejection.
 
    Unit-in-name (#147, still open): builtin fields already carry the unit (`trim_db`, `hpf_hz`),
    effect parameter *names* do not yet (`threshold`, `attack`). Until they do, `unitName` is the
-   authority, not the name. Named nudge sizes (#127) are a control-plane concept and never appear
+   authority, not the name. Named step sizes (#242) are a control-plane concept and never appear
    in a session file.
 
 ### Effect ids
