@@ -516,7 +516,7 @@ fn finite_unit_and_local_range_category_has_24_distinct_cases() {
 }
 
 #[test]
-fn source_identity_and_shape_category_has_16_distinct_cases() {
+fn source_identity_and_shape_category_has_19_distinct_cases() {
     let mut count = 0;
     model_case(
         &mut count,
@@ -609,13 +609,25 @@ fn source_identity_and_shape_category_has_16_distinct_cases() {
             path,
         );
     }
-    parse_case(
-        &mut count,
-        &replaced("bit_depth = \"32f\"", "bit_depth = \"20f\""),
-        DiagnosticCode::SourceBitDepthUnsupported,
-        "$.sources[0].bit_depth",
-    );
-    assert_eq!(count, 16);
+    // The closed depth set is {16, 24, "32f"} and each token has exactly one legal spelling.
+    // Integer 32 is the trap: it is the obvious "f32" spelling, it is not in the set, and nothing
+    // pinned its refusal until this row -- widening the integer arm to map 32 onto `Float32`
+    // passed the whole suite. The string spelling of an integer depth and a zero depth close the
+    // two remaining spelling holes on the same axis.
+    for replacement in [
+        "bit_depth = \"20f\"",
+        "bit_depth = 32",
+        "bit_depth = \"16\"",
+        "bit_depth = 0",
+    ] {
+        parse_case(
+            &mut count,
+            &replaced("bit_depth = \"32f\"", replacement),
+            DiagnosticCode::SourceBitDepthUnsupported,
+            "$.sources[0].bit_depth",
+        );
+    }
+    assert_eq!(count, 19);
 }
 
 fn routed_effect(template: &Effect, source: RouteSource) -> Effect {
@@ -1026,9 +1038,9 @@ fn configured_resource_category_has_4_distinct_cases() {
 }
 
 #[test]
-fn corpus_distribution_totals_120_cases() {
-    const DISTRIBUTION: [usize; 7] = [16, 20, 24, 16, 20, 20, 4];
-    assert_eq!(DISTRIBUTION.iter().sum::<usize>(), 120);
+fn corpus_distribution_totals_123_cases() {
+    const DISTRIBUTION: [usize; 7] = [16, 20, 24, 19, 20, 20, 4];
+    assert_eq!(DISTRIBUTION.iter().sum::<usize>(), 123);
 }
 
 #[test]
