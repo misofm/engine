@@ -98,6 +98,34 @@ function assertPumpHasNoNetwork(text) {
 }
 
 async function runMutationLedger() {
+  // STEM_IDENTITY_V1 §4's mandatory open-time length check has four arms.
+  // `bytes` is shape-derived and never enters the hash preimage, so these
+  // comparisons are all that stand between a lying declaration and a promoted
+  // stem. The reopen and fallback-final arms are defense in depth behind the
+  // streamed arm: while an earlier arm is intact they never see the lie, so
+  // they are pinned cumulatively -- each mutation must trip a strictly later
+  // gate than the one before it.
+  const streamedArm = {
+    search: "      if (bytes !== stem.bytes || streamedHex !== digest) {",
+    replace: "      if (streamedHex !== digest) {",
+  }
+  const reopenArm = {
+    search:
+      "      if (reopened.bytes !== stem.bytes || reopened.hex !== digest) {",
+    replace: "      if (reopened.hex !== digest) {",
+  }
+  const fallbackFinalArm = {
+    search:
+      "    if (\n      observed.bytes !== stem.bytes ||\n      observed.hex !== stemDigest(stem.identity)\n    ) {\n      await removeEntry(this.#directory, finalName)",
+    replace:
+      "    if (observed.hex !== stemDigest(stem.identity)) {\n      await removeEntry(this.#directory, finalName)",
+  }
+  const verifyOnOpenArm = {
+    search:
+      "      if (\n        observed.bytes !== stem.bytes ||\n        observed.hex !== stemDigest(stem.identity)\n      ) {\n        await this.#demote(stem.identity)",
+    replace:
+      "      if (observed.hex !== stemDigest(stem.identity)) {\n        await this.#demote(stem.identity)",
+  }
   const mutations = [
     {
       name: "content-key -> per-session store directory",
@@ -224,6 +252,41 @@ async function runMutationLedger() {
       test: "stem-store-core-v1.mjs",
       expectedFailure: "fallback final write ignored mix-switch abort",
     },
+    {
+      name: "drop the streamed-ingest byte-length check",
+      file: "web/stem-store/opfs-store.js",
+      edits: [streamedArm],
+      test: "stem-store-core-v1.mjs",
+      expectedFailure: "a lying declaration is refused before the pre-promote reopen",
+    },
+    {
+      name: "drop the streamed and pre-promote byte-length checks",
+      file: "web/stem-store/opfs-store.js",
+      edits: [streamedArm, reopenArm],
+      test: "stem-store-core-v1.mjs",
+      expectedFailure: "a lying declaration must never be promoted",
+    },
+    {
+      name: "drop the streamed, pre-promote, and fallback-final byte-length checks",
+      file: "web/stem-store/opfs-store.js",
+      edits: [streamedArm, reopenArm, fallbackFinalArm],
+      test: "stem-store-core-v1.mjs",
+      expectedFailure: "a lying declaration must never survive fallback promotion",
+    },
+    {
+      name: "drop the verify-on-open byte-length check",
+      file: "web/stem-store/opfs-store.js",
+      edits: [verifyOnOpenArm],
+      test: "stem-store-core-v1.mjs",
+      expectedFailure: "verify-on-open must demote a lying declaration to a miss",
+    },
+    {
+      name: "drop every open-time byte-length check",
+      file: "web/stem-store/opfs-store.js",
+      edits: [streamedArm, reopenArm, fallbackFinalArm, verifyOnOpenArm],
+      test: "stem-store-core-v1.mjs",
+      expectedFailure: "a lying declaration must never survive fallback promotion",
+    },
   ]
 
   for (const mutation of mutations) {
@@ -233,7 +296,13 @@ async function runMutationLedger() {
       await cp(host, mutatedHost, { recursive: true })
       const target = join(mutatedHost, mutation.file)
       const source = await readFile(target, "utf8")
-      const mutated = replaceExactlyOnce(source, mutation.search, mutation.replace)
+      const edits = mutation.edits ?? [
+        { search: mutation.search, replace: mutation.replace },
+      ]
+      let mutated = source
+      for (const edit of edits) {
+        mutated = replaceExactlyOnce(mutated, edit.search, edit.replace)
+      }
       await writeFile(target, mutated)
       runNode(target, true)
       const result = spawnSync(
