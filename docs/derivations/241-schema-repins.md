@@ -154,6 +154,37 @@ The invalid-matrix corpus shrinks accordingly:
 * corpus distribution `[16, 20, 24, 16, 20, 20, 20, 16]` (sum 152) becomes
   `[16, 20, 24, 16, 20, 20, 4]` (sum 120): 152 - 20 - 12 = **120**.
 
+Verification follow-up (Fable REVISE round): three `bit_depth` refusal rows were added to the
+source-identity category, taking it 16 -> 19 and the distribution to
+`[16, 20, 24, 19, 20, 20, 4]` = **123**.
+
+### 6. The four caps this made inert, and why they were kept
+
+Setting the four runtime terms to literal `0` makes four `CompileCaps` rows unable to refuse
+anything: `check_caps` tests `value > limit`, and `0 > limit` is false for every `u64`. The
+affected rows are `max_requested_runtime_bytes`, `max_queue_items`, `max_source_ring_frames` and
+`max_source_ring_bytes` — exactly the four whose case count fell from 16 to 4 above.
+
+Ruled choice (verifier fix 6): **pin, do not delete.** The two options and their arithmetic:
+
+| option | diff | behavioural change |
+| --- | ---: | --- |
+| delete the fields, their `check_caps` rows and every construction site | 4 fields x 89 `max_queue_items`-class lines across **38 files**, plus a public-API break to `CompileCaps` | none |
+| pin the inertness with one test and field docs | **1 test + 3 doc blocks** | none |
+
+Neither option changes behaviour, because the caps already cannot refuse; the only question is
+whether the dead-ness is stated or silent. The deletion is the larger diff by two orders of
+magnitude, breaks a public struct that #240, #242 and #244 are constructing on three in-flight
+branches, and buys nothing a test does not. The hand-off is real and already enforced elsewhere:
+`miso-engine-host-core`'s prepare checks `total_engine_owned_bytes > maximum_source_total_bytes`
+against the ring the host actually chose, and the C ABI compile path does the same — which is the
+#240 S3.7 ordering, budget checked after the choice rather than against a document word.
+
+`dead_resource_caps_cannot_refuse_any_session` therefore asserts both halves: that the estimate
+reports zero for all four terms, and that a session compiles with all four caps set to `0`. If a
+later issue re-populates the estimate, that row goes red and forces the decision instead of
+letting a budget silently start biting.
+
 ---
 
 ## c78de14a — `test(audit): repin migrated builtins manifest`
@@ -227,8 +258,9 @@ That is the whole cause. The digest therefore moves
 (both re-measured; the old value reproduces the constant the test carried before, and the new
 value reproduces the constant it carries now).
 
-Note for the record: this commit's body attributes the move to source content identity entering
-the compiled graph's semantic text. That is not what happened — `node_text`/`edge_text` never
+Note for the record: this commit's body — and, until the Fable REVISE round, the in-tree comment
+at `track_delay.rs:225` — attributes the move to source content identity entering the compiled
+graph's semantic text. That is not what happened — `node_text`/`edge_text` never
 carried a source identity, and `write_canonical` emits no source row at all. The mover is the
 `limits`-derived runtime projection in the estimate row, as derived above. The pin is correct; the
 prose reason recorded in the commit was not, and this document supersedes it.

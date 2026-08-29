@@ -1037,6 +1037,43 @@ fn configured_resource_category_has_4_distinct_cases() {
     assert_eq!(count, 4);
 }
 
+/// The four resource caps #241 made inert cannot refuse any session, in either direction.
+///
+/// `configured_resource_category` dropped from 16 rows to 4 because these four stopped being
+/// reachable refusal channels; nothing then stated *that* as a fact, so the shrink read as lost
+/// coverage rather than as a deliberate hand-off. This row states it.
+///
+/// Set all four to zero -- the most hostile budget expressible -- against a session that really
+/// does declare sources and effects, and compilation must still succeed. The two live caps are
+/// left unlimited so the only thing under test is the inertness of the other four.
+///
+/// If a future issue re-populates the estimate (#240 S3.7 recomputing ring bytes after the host's
+/// choice is the obvious candidate), this row goes red and forces the question rather than
+/// letting a budget quietly start or stop biting.
+#[test]
+fn dead_resource_caps_cannot_refuse_any_session() {
+    let session = parse_session_toml(EXAMPLE).expect("fixture parses");
+    let estimate = estimate_session_resources(&session).expect("fixture estimates");
+    for (label, value) in [
+        ("requested_runtime_bytes", estimate.requested_runtime_bytes),
+        ("queue_items", estimate.queue_items),
+        ("source_ring_frames", estimate.source_ring_frames),
+        ("source_ring_bytes", estimate.source_ring_bytes),
+    ] {
+        assert_eq!(value, 0, "{label} must be the host's business, not the document's");
+    }
+    let caps = CompileCaps {
+        max_compiled_model_bytes: u64::MAX,
+        max_single_allocation_bytes: u64::MAX,
+        max_requested_runtime_bytes: 0,
+        max_queue_items: 0,
+        max_source_ring_frames: 0,
+        max_source_ring_bytes: 0,
+    };
+    compile_session(&session, caps)
+        .expect("caps whose subjects are host policy cannot refuse a session");
+}
+
 #[test]
 fn corpus_distribution_totals_123_cases() {
     const DISTRIBUTION: [usize; 7] = [16, 20, 24, 19, 20, 20, 4];

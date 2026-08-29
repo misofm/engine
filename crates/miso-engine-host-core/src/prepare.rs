@@ -157,6 +157,12 @@ impl HostPrepareCaps {
     ///
     /// `source_count` is the parsed model's source count: the aggregate source-ring frame cap is
     /// per-session, not per-source.
+    ///
+    /// Since #241 only `max_compiled_model_bytes` and `max_single_allocation_bytes` can actually
+    /// refuse here: the session estimate reports zero for the runtime/queue/ring terms, so the
+    /// other four rows are inert (see `CompileCaps`). The host's real ring and source budgets are
+    /// enforced below against the resources the chosen ring actually retains, which is the #240
+    /// S3.7 ordering -- check the budget after the choice, not against a document word.
     pub fn compile_caps(&self, source_count: usize) -> Result<CompileCaps, PrepareDiagnostics> {
         let source_count = u64::try_from(source_count).map_err(|_| platform("host.count"))?;
         let aggregate_ring_frames = source_count

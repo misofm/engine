@@ -13,19 +13,32 @@ use crate::{
 };
 
 /// Explicit compiler resource budgets. There is deliberately no default and no track-count cap.
+///
+/// Four of these six are **inert since issue #241** and are retained, not enforced. Deleting the
+/// `limits` table (A10) removed the document words the session compiler used to project runtime
+/// storage from, so `estimate_session_resources` now reports a literal zero for `queue_items`,
+/// `queue_bytes`, `source_ring_frames`, `source_ring_bytes` and `requested_runtime_bytes`. A cap
+/// compared against a constant zero can never refuse.
+///
+/// This is the intended hand-off, not an oversight: under #240 S3.7 the ring is the host's choice
+/// and the budget is checked against the ring **actually chosen**, after the choice, by
+/// `miso-engine-host-core`'s `prepare` (`total_engine_owned_bytes > maximum_source_total_bytes`)
+/// and by the C ABI's own compile path. The fields survive because `CompileCaps` is public and
+/// three in-flight workstreams construct it; `dead_resource_caps_cannot_refuse_any_session` pins
+/// the inertness, so if a future issue re-populates the estimate this stops being silent.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CompileCaps {
     /// Maximum retained model, indexes, and canonical snapshot bytes.
     pub max_compiled_model_bytes: u64,
-    /// Maximum total declarative runtime bytes.
+    /// Inert since #241: the runtime projection it bounded is now host policy. See the type docs.
     pub max_requested_runtime_bytes: u64,
     /// Maximum individual model/runtime allocation.
     pub max_single_allocation_bytes: u64,
-    /// Maximum declarative control queue items.
+    /// Inert since #241: queue depth is host policy. See the type docs.
     pub max_queue_items: u64,
-    /// Maximum total source-ring frames.
+    /// Inert since #241: the ring is chosen by the host. See the type docs.
     pub max_source_ring_frames: u64,
-    /// Maximum total source-ring bytes.
+    /// Inert since #241: the ring is chosen by the host. See the type docs.
     pub max_source_ring_bytes: u64,
 }
 
