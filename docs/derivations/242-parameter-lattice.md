@@ -126,7 +126,32 @@ generation remains available for the control plane, where a registry can cache i
 the change: **15 allocations per prepare**, inside the bound. Both the static-descriptor validator
 and the descriptor-wire binder call the one shared implementation.
 
-## 10. Fixture migration ledger — NOT APPLIED, ruling required
+## 10. Two surfaces the inherited tranche did not reach
+
+**`fuzz/fuzz_targets/effect_state.rs`** declares a `ParameterDescriptor` literal and lives outside
+the workspace, so `cargo build --workspace` never compiled it and adding the `lattice` field broke
+`scripts/check-effect-package-v1.sh`. Its row is linear/`Linear`, so it now states its class
+default and its descriptor bytes are unchanged.
+
+**`scripts/effect-descriptor-v1-reference.py` is SEALED and was left alone — OPEN.** It is a row of
+`fixtures/effect-interchange/v1/ACCEPTED.sha256`, whose own identity
+`e3896726979aa746cfda50fc10c1985c0ecef117f87b39e692f18226b7b4fa14` is pinned in three scripts. That
+file still requires parameter offsets 72/76 to be zero, so as an independent model of the wire it
+no longer describes the format the encoder emits: it would refuse the `miso.delay` descriptor. No
+gate is red, because the reference builds and mutates its own corpus rather than reading the
+encoder's output, so the divergence is latent.
+
+Teaching it the packing was implemented and works -- the torn-declaration rule, the re-pack rule,
+a decoder that round-trips the words, and a mutation matrix gaining three proven-red rows plus one
+proven-ACCEPTED row -- and was then REVERTED, because editing a sealed reference is exactly what
+the seal exists to prevent. Landing it is the effect-interchange re-seal ceremony: re-run
+`scripts/run-effect-interchange-reference-processes.sh`, re-pin the manifest identity in
+`check-effect-interchange-qualification.sh`, `preflight-effect-interchange-benchmark.sh` and
+`run-effect-interchange-benchmark.sh` together (a partial re-seal is caught by
+`scripts/test-effect-interchange-benchmark.sh`), and record the derivation. That is an authorized
+ceremony, not a side effect of this brief.
+
+## 11. Fixture migration ledger — NOT APPLIED, ruling required
 
 Enforcing the lattice at validation/preparation refuses **2320 persisted values across 8 of the 14
 shipped session fixtures**. These edits are deliberately NOT made: they would move render digests,

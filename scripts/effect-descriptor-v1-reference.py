@@ -210,34 +210,6 @@ def validate_source(source: dict) -> None:
         fail(observation["channels"] == 2 and not per_lane_state, 13, record + 4, index)
 
 
-def pack_lattice_spec(multiples: tuple[int, int, int, int, int], precision: int,
-                      step_unit: int) -> int | None:
-    """Pack issue #242's lattice declaration into the word at parameter offset 76.
-
-    xs/sm/md/lg are five-bit multipliers, xl is six bits, then a four-bit rendering precision and
-    a two-bit step unit. The multipliers must ascend from a nonzero xs, which is what makes the
-    named ladder incapable of leaving the lattice.
-    """
-    xs, sm, md, lg, xl = multiples
-    if xs == 0 or xs > 31 or sm > 31 or md > 31 or lg > 31 or xl > 63:
-        return None
-    if not (xs < sm < md < lg < xl) or precision > 8 or not 1 <= step_unit <= 4:
-        return None
-    return (xs | (sm << 5) | (md << 10) | (lg << 15) | (xl << 20)
-            | (precision << 26) | ((step_unit - 1) << 30))
-
-
-def unpack_lattice_spec(spec: int) -> tuple[tuple[int, ...], int, int] | None:
-    """Invert `pack_lattice_spec`, refusing any word that does not re-pack to itself."""
-    multiples = (spec & 0x1f, (spec >> 5) & 0x1f, (spec >> 10) & 0x1f,
-                 (spec >> 15) & 0x1f, (spec >> 20) & 0x3f)
-    precision = (spec >> 26) & 0xf
-    step_unit = (spec >> 30) + 1
-    if pack_lattice_spec(multiples, precision, step_unit) != spec:
-        return None
-    return multiples, precision, step_unit
-
-
 def encode(source: dict) -> bytes:
     validate_source(source)
     parameters = source["parameters"]
@@ -314,16 +286,6 @@ def encode(source: dict) -> bytes:
             offset, length = text(value)
             put32(output, record + field, offset)
             put32(output, record + field + 4, length)
-        # The encoder is canonical: a row whose declaration IS the derived unit-class default
-        # encodes the all-zero window, so one lattice never has two byte spellings. Only a row
-        # that overrides its class states the words explicitly.
-        lattice = parameter.get("lattice")
-        if lattice is not None:
-            spec = pack_lattice_spec(tuple(lattice["ladder"]), lattice["precision"],
-                                     lattice["step_unit"])
-            fail(spec is None, 7, record + 76, index)
-            put32(output, record + 72, int(lattice["step_bits"], 16))
-            put32(output, record + 76, spec)
         for choice in parameter["enum_choices"]:
             choice_record = choice_offset + choice_index * CHOICE
             put32(output, choice_record, int(choice["value_bits"], 16))
@@ -403,14 +365,8 @@ def verify(data: bytes, maximum: int = LIMIT) -> tuple[int, ...]:
         fail(flags & ~15 != 0, 8, record + 32, index)
         fail(flags & 4 == 0 and u32(data, record + 36) != 0, 8, record + 36, index)
         fail(flags & 8 == 0 and u32(data, record + 40) != 0, 8, record + 40, index)
-        # Issue #242 consumed the two reserved parameter words for the lattice declaration.
-        # Both zero is still lawful and is the pre-#242 window: it reads as the unit-class
-        # default. Exactly one zero is a torn declaration, and a spec that does not re-pack to
-        # itself carries a ladder or precision the format cannot express.
-        step_bits = u32(data, record + 72)
-        lattice_spec = u32(data, record + 76)
-        fail((step_bits == 0) != (lattice_spec == 0), 8, record + 72, index)
-        fail(step_bits != 0 and unpack_lattice_spec(lattice_spec) is None, 7, record + 76, index)
+        for field in (72, 76):
+            fail(u32(data, record + field) != 0, 6, record + field, index)
     for index in range(counts[1]):
         fail(u32(data, port_offset + index * PORT + 20) != 0, 6, port_offset + index * PORT + 20, index)
     for index in range(counts[2]):
@@ -562,22 +518,6 @@ def verify(data: bytes, maximum: int = LIMIT) -> tuple[int, ...]:
         offset, length = u32(data, field), u32(data, field + 4)
         return data[offset:offset + length].decode("utf-8")
 
-    def decoded_lattice(record: int) -> dict | None:
-        """Recover a parameter's #242 lattice declaration, or `None` for the derived default."""
-        step_bits = u32(data, record + 72)
-        spec = u32(data, record + 76)
-        if step_bits == 0 and spec == 0:
-            return None
-        unpacked = unpack_lattice_spec(spec)
-        assert unpacked is not None, "verified descriptor carries an encodable lattice"
-        multiples, precision, step_unit = unpacked
-        return {
-            "step_bits": f"{step_bits:08x}",
-            "ladder": list(multiples),
-            "precision": precision,
-            "step_unit": step_unit,
-        }
-
     parameters = []
     for index in range(counts[0]):
         record = parameter_offset + index * PARAMETER
@@ -607,9 +547,6 @@ def verify(data: bytes, maximum: int = LIMIT) -> tuple[int, ...]:
             "maximum_bits": f"{u32(data, record + 40):08x}" if flags & 8 else None,
             "default_bits": f"{u32(data, record + 44):08x}",
             "enum_choices": choices,
-            # Absent when the record carries the all-zero window, which is the derived
-            # unit-class lattice and re-encodes to those same zeros.
-            "lattice": decoded_lattice(record),
         })
     ports = []
     for index in range(counts[1]):
@@ -689,22 +626,8 @@ def mutation_matrix(data: bytes) -> None:
         ("flags", parameter_offset + 32, struct.pack("<I", 16), (8, parameter_offset + 32, 0, 0)),
         ("absent-minimum-bits", parameter_offset + 3 * PARAMETER + 36,
          struct.pack("<I", 1), (8, parameter_offset + 3 * PARAMETER + 36, 3, 0)),
-        # Issue #242: the two words at parameter offsets 72/76 are the lattice declaration.
-        # A lone step with no specification, or a specification with no step, is a torn
-        # declaration and is diagnosed as flags rather than as a reserved-byte violation.
-        ("parameter-lattice-step-without-spec", parameter_offset + 72, struct.pack("<I", 1),
-         (8, parameter_offset + 72, 0, 0)),
-        ("parameter-lattice-spec-without-step", parameter_offset + 76, struct.pack("<I", 1),
-         (8, parameter_offset + 72, 0, 0)),
-        # A specification that does not re-pack to itself carries a ladder the format cannot
-        # express: here the smallest multiple is zero, so the ladder would not advance at all.
-        ("parameter-lattice-zero-smallest-multiple",
-         parameter_offset + 72, struct.pack("<II", 0x3c23d70a, 0x09e51460),
-         (7, parameter_offset + 76, 0, 0)),
-        # And one that does re-pack is accepted, which is what makes the rule discriminate: the
-        # #127 ladder 1/3/5/10/30 at two decimals in absolute units.
-        ("parameter-lattice-valid-declaration",
-         parameter_offset + 72, struct.pack("<II", 0x3c23d70a, 0x09e51461), None),
+        ("parameter-reserved", parameter_offset + 72, struct.pack("<I", 1),
+         (6, parameter_offset + 72, 0, 0)),
         ("port-reserved", port_offset + 20, struct.pack("<I", 1),
          (6, port_offset + 20, 0, 0)),
         ("quality-reserved", quality_offset + 20, struct.pack("<I", 1),
@@ -766,15 +689,10 @@ def mutation_matrix(data: bytes) -> None:
         try:
             verify(bytes(mutated))
         except WireError as error:
-            if expected is None:
-                raise AssertionError(f"{name}: lawful edit refused as {error.diagnostic}") from error
             if error.diagnostic != expected:
                 raise AssertionError(f"{name}: {error.diagnostic} != {expected}") from error
         else:
-            # `expected is None` marks an edit that MUST be accepted, so the rule around it is
-            # shown to discriminate rather than to refuse everything it touches.
-            if expected is not None:
-                raise AssertionError(f"{name}: mutation accepted")
+            raise AssertionError(f"{name}: mutation accepted")
 
     port_order = bytearray(data)
     put32(port_order, port_offset + PORT + 8, 1)
@@ -885,15 +803,10 @@ def observation_mutation_matrix(data: bytes) -> None:
         try:
             verify(bytes(mutated))
         except WireError as error:
-            if expected is None:
-                raise AssertionError(f"{name}: lawful edit refused as {error.diagnostic}") from error
             if error.diagnostic != expected:
                 raise AssertionError(f"{name}: {error.diagnostic} != {expected}") from error
         else:
-            # `expected is None` marks an edit that MUST be accepted, so the rule around it is
-            # shown to discriminate rather than to refuse everything it touches.
-            if expected is not None:
-                raise AssertionError(f"{name}: mutation accepted")
+            raise AssertionError(f"{name}: mutation accepted")
 
 
 def read_hex(path: pathlib.Path) -> bytes:
