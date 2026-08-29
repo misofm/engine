@@ -553,3 +553,199 @@ describe("the writer contract -- the async submit boundary", () => {
     }
   });
 });
+
+/**
+ * The windows an async submit opens that a synchronous one could not.
+ *
+ * A synchronous submit is atomic against the writer's own state: nothing can be staged, and no
+ * second flush can be entered, between picking a batch and applying its report. Over a port that
+ * gap is a round trip, and each of these probes lives inside it.
+ */
+describe("the writer contract -- races the async boundary opens", () => {
+  const at = (name) => ABI_LAYOUT.commandRecord.fields.find((row) => row.name === name).offset;
+
+  /** The addressed control and its first value, read back out of the bytes actually submitted. */
+  const decode = (records, count) => {
+    const view = new DataView(records.buffer, records.byteOffset, records.byteLength);
+    return Array.from({ length: count }, (_unused, index) => {
+      const base = index * ABI_LAYOUT.commandRecord.bytes;
+      return {
+        address: `${view.getUint8(base + at("channel"))}/${view.getUint32(base + at("parameterId"), true)}`,
+        value: view.getFloat32(base + at("values"), true),
+      };
+    });
+  };
+
+  test("an edit staged while its own batch is in flight is not deleted by that batch's success", async () => {
+    // The drag-during-round-trip case, which is the case the widening exists for. The hand does
+    // not stop moving while a batch crosses the port: a newer value for an address already in
+    // flight is staged before the report comes back.
+    //
+    // Clearing the batch by ADDRESS would delete that newer edit -- `pending` would read zero
+    // while only the stale value ever reached the engine, which is the stale-landing bug
+    // latest-wins exists to prevent, reintroduced by the async boundary. The batch is cleared by
+    // edit identity instead, so the superseding edit survives and goes out next.
+    const engine = await pausedEngine();
+    try {
+      const submissions = [];
+      let openGate;
+      let announceEntry;
+      const gate = new Promise((resolve) => { openGate = resolve; });
+      const entered = new Promise((resolve) => { announceEntry = resolve; });
+      let held = false;
+
+      const writer = new ConsoleWriter({
+        submit: async (records, count) => {
+          submissions.push(decode(records, count));
+          if (!held) {
+            // Hold the FIRST submit open, so the stage below lands strictly inside the round trip.
+            held = true;
+            announceEntry();
+            await gate;
+          }
+          return engine.submitCommands(records, count);
+        },
+        maximumBatch: 4,
+      });
+
+      const address = GAIN_IDS[0];
+      writer.stage(gainEdit(address, 0, -1));
+      const inFlight = writer.flush();
+      await entered;
+
+      // The hand keeps moving while the batch is out.
+      writer.stage(gainEdit(address, 0, -9.9));
+      openGate();
+
+      const first = await inFlight;
+      assert.equal(first.admitted, 1, "the batch that was submitted was admitted");
+      assert.deepEqual(submissions[0], [{ address: `0/${address}`, value: -1 }]);
+      assert.equal(
+        first.pending,
+        1,
+        "the newer value is still staged: a success clears the edits it SUBMITTED, not the address",
+      );
+      assert.equal(writer.pending, 1);
+
+      const second = await writer.flush();
+      assert.deepEqual(
+        submissions[1],
+        [{ address: `0/${address}`, value: Math.fround(-9.9) }],
+        "the value the hand actually reached goes out on the next flush",
+      );
+      assert.equal(second.admitted, 1);
+      assert.equal(second.pending, 0);
+      assert.equal(writer.pending, 0);
+
+      const stats = writer.stats;
+      assert.equal(stats.flushes, 2);
+      assert.equal(stats.admitted, 2);
+      assert.equal(stats.refusals, 0);
+      assert.equal(stats.escalations, 0);
+      // The in-flight edit was in the pending map when the newer one arrived, and by the map's own
+      // rule it was superseded there. It was also submitted -- both are true of the same edit, and
+      // the counter reports the map's view.
+      assert.equal(stats.coalesced, 1);
+    } finally {
+      engine.dispose();
+    }
+  });
+
+  test("an escalation rejects its own caller and does not poison later flushes", async () => {
+    // The chain that serializes flushes is a promise, and a promise that is left rejected
+    // propagates to everything chained behind it. An escalation must reject the call that caused
+    // it and nothing else: the writer is as usable afterwards as a synchronous one, which throws
+    // to one caller and leaves the next alone.
+    //
+    // The escalation is real rather than stubbed: the stub corrupts the bytes on the way past, so
+    // the ENGINE refuses an unknown track, while the writer's staged edit stays lawful and can be
+    // resubmitted unmodified.
+    const engine = await pausedEngine();
+    try {
+      let calls = 0;
+      const corrupt = new Set([1, 3]);
+      const writer = new ConsoleWriter({
+        submit: async (records, count) => {
+          await Promise.resolve();
+          calls += 1;
+          if (corrupt.has(calls)) {
+            new DataView(records.buffer, records.byteOffset, records.byteLength)
+              .setUint32(at("trackIndex"), 99, true);
+          }
+          return engine.submitCommands(records, count);
+        },
+        maximumBatch: 1,
+      });
+
+      writer.stage(gainEdit(GAIN_IDS[0], 0, -1));
+      await assert.rejects(() => writer.flush(), MisoUsageError);
+      assert.equal(writer.stats.escalations, 1);
+      assert.equal(writer.pending, 1, "an escalated batch admits nothing and drops nothing");
+
+      const recovered = await writer.flush();
+      assert.equal(recovered.refused, false, "the next flush is a fresh attempt, not an inheritance");
+      assert.equal(recovered.admitted, 1);
+      assert.equal(writer.stats.escalations, 1, "the second flush did not escalate");
+
+      // And the same when the second flush is entered before the first has rejected, which is when
+      // it is actually chained behind it.
+      writer.stage(gainEdit(GAIN_IDS[1], 0, -2));
+      writer.stage(gainEdit(GAIN_IDS[2], 0, -3));
+      const escalating = writer.flush();
+      const behind = writer.flush();
+      await assert.rejects(() => escalating, MisoUsageError);
+      const survived = await behind;
+      assert.equal(survived.refused, false, "a flush chained behind a rejected one must still run");
+      assert.equal(survived.admitted, 1);
+      assert.equal(writer.stats.escalations, 2);
+    } finally {
+      engine.dispose();
+    }
+  });
+
+  test("a refusal halves the count that was submitted, not the ceiling", async () => {
+    // `take` is min(batch, pending), and it is captured before the submit. Halving the CEILING
+    // instead would leave the next attempt larger than the batch that was just refused -- the
+    // opposite of narrowing -- and the gap is only visible when fewer edits are pending than the
+    // ceiling allows, which the synchronous writer's tests never staged.
+    const engine = await pausedEngine();
+    try {
+      // Fill the queue through a writer of its own, so the probe writer's batch is still its
+      // untouched ceiling of eight when it makes its one attempt.
+      const filler = new ConsoleWriter({
+        submit: (records, count) => engine.submitCommands(records, count),
+        maximumBatch: 4,
+      });
+      for (let flush = 0; flush < QUEUE_RECORDS / 4; flush += 1) {
+        for (const parameterId of GAIN_IDS) filler.stage(gainEdit(parameterId, 0, -0.1 * flush));
+        const outcome = await filler.flush();
+        assert.equal(outcome.refused, false, `filler flush ${flush} should still fit`);
+      }
+      assert.equal(filler.stats.admitted, QUEUE_RECORDS, "the queue is full to the record");
+
+      const writer = new ConsoleWriter({
+        submit: async (records, count) => {
+          await Promise.resolve();
+          return engine.submitCommands(records, count);
+        },
+        maximumBatch: 8,
+      });
+      for (const parameterId of GAIN_IDS.slice(0, 3)) writer.stage(gainEdit(parameterId, 1, -1));
+      assert.equal(writer.pending, 3, "three staged against a ceiling of eight");
+
+      const outcome = await writer.flush();
+      assert.equal(outcome.refused, true, "the filled queue has no room");
+      assert.equal(outcome.reason, "backpressure");
+      assert.equal(
+        outcome.nextBatch,
+        1,
+        "the three that were submitted halve to one; the ceiling of eight would halve to four",
+      );
+      assert.equal(outcome.pending, 3, "a refusal drops nothing");
+      assert.equal(writer.stats.refusals, 1);
+      assert.equal(writer.stats.escalations, 0);
+    } finally {
+      engine.dispose();
+    }
+  });
+});

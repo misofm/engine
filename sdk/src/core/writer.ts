@@ -253,14 +253,28 @@ export class ConsoleWriter {
       });
     }
     const take = Math.min(this.#batch, this.#pending.size);
-    const keys = [...this.#pending.keys()].slice(0, take);
-    const edits = keys.map((key) => this.#pending.get(key)!);
+    // Keyed pairs rather than bare keys: what is cleared after a success is identified by the
+    // EDIT, not by its address. See the delete below.
+    const staged = [...this.#pending.entries()].slice(0, take);
+    const edits = staged.map(([, edit]) => edit);
 
     this.#flushes += 1;
     const report = await this.#submit(encode(edits), edits.length);
 
     if (report.ok) {
-      for (const key of keys) this.#pending.delete(key);
+      for (const [key, edit] of staged) {
+        // Identity, not presence. The hand does not stop moving while a batch is in flight, and
+        // over a port that flight is a round trip: a newer value for an address in this batch can
+        // be staged between the submit and its report. Deleting by key alone would drop that newer
+        // edit -- `pending` would read zero while only the stale value ever reached the engine,
+        // which is precisely the stale-landing bug latest-wins exists to prevent. So a key is
+        // cleared only while the map still holds the exact edit that was submitted; a superseded
+        // one stays staged and goes out on the next flush.
+        //
+        // The refusal path below needs no such guard: it admits nothing and therefore deletes
+        // nothing, so it has no window to leave open.
+        if (this.#pending.get(key) === edit) this.#pending.delete(key);
+      }
       this.#admitted += report.admitted;
       // Grow back toward the caller's ceiling, so a transient full queue does not permanently
       // shrink throughput.
