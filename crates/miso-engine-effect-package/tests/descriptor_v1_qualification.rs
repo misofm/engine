@@ -869,3 +869,68 @@ fn observation_section_is_additive_and_stale_readers_refuse_it() {
     assert_eq!(error.byte_offset, 92);
 }
 
+/// One lattice has exactly one byte spelling (#242, coordinator ruling on the wire alias).
+///
+/// The all-zero window at parameter offsets 72/76 decodes as the row's derived unit-class
+/// lattice. A row that declares exactly that default must therefore spell it as zeros: writing
+/// the same meaning explicitly would give one lattice two byte sequences, and in a format whose
+/// bytes are its identity that is an aliasing bug, not a cosmetic one. It is also what keeps
+/// every descriptor sealed before #242 at its exact identity.
+#[test]
+fn an_explicitly_spelled_derived_lattice_is_refused_as_a_second_spelling() {
+    /// Pack a lattice the way the wire does: xs/sm/md/lg in five bits each, xl in six, then a
+    /// four-bit precision and a two-bit step unit.
+    fn pack(lattice: miso_engine_effect_contract::ParameterLattice) -> u32 {
+        let [xs, sm, md, lg, xl] = lattice.ladder.multiples.map(u32::from);
+        xs | (sm << 5)
+            | (md << 10)
+            | (lg << 15)
+            | (xl << 20)
+            | (u32::from(lattice.precision) << 26)
+            | ((lattice.step_unit as u32 - 1) << 30)
+    }
+    fn get_u32(bytes: &[u8], offset: usize) -> u32 {
+        u32::from_le_bytes(bytes[offset..offset + 4].try_into().expect("four bytes"))
+    }
+
+    let mut checked = 0_usize;
+    for descriptor in [&DESCRIPTOR_A, &DESCRIPTOR_B, &DESCRIPTOR_C] {
+        let wire = encoded(descriptor);
+        // The canonical encoding leaves the window zeroed for every derived row, which is what
+        // makes the alias constructible only by hand.
+        verify_effect_descriptor_wire(&wire, 1 << 20).expect("canonical spelling verifies");
+
+        let parameter_offset = get_u32(&wire, 52) as usize;
+        for index in 0..get_u32(&wire, 48) as usize {
+            let record = parameter_offset + index * 80;
+            if get_u32(&wire, record + 72) != 0 {
+                // This row overrides its class, so its explicit words are the canonical ones.
+                continue;
+            }
+            let unit = ParameterUnit::from_raw(get_u32(&wire, record + 4)).expect("unit");
+            let domain = ParameterDomain::from_raw(get_u32(&wire, record + 8)).expect("domain");
+            let mapping = ParameterMapping::from_raw(get_u32(&wire, record + 12)).expect("mapping");
+            let derived = default_parameter_lattice(unit, domain, mapping);
+
+            let mut aliased = wire.clone();
+            put_u32(&mut aliased, record + 72, derived.step.to_bits());
+            put_u32(&mut aliased, record + 76, pack(derived));
+            // The alias really does mean the same thing: only these eight bytes differ.
+            assert_eq!(aliased.len(), wire.len());
+            assert_ne!(aliased, wire, "the alias must be a different byte sequence");
+
+            let error = verify_effect_descriptor_wire(&aliased, 1 << 20)
+                .expect_err("a second spelling of one lattice must be refused");
+            assert_eq!(
+                (error.code, error.byte_offset, error.record_index),
+                (Code::Reserved, (record + 72) as u32, index as u32),
+                "refusal names the aliased window"
+            );
+            checked += 1;
+        }
+    }
+    assert!(
+        checked >= 2,
+        "at least two derived rows across the corpus must be proven, not {checked}"
+    );
+}

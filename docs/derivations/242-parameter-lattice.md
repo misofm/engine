@@ -81,6 +81,20 @@ because it is the only row that genuinely overrides its class default (section 4
 recorded position, a descriptor that declares its own ladder changing bytes is correct and
 intended.
 
+**Coordinator ruling: the alias is rejected, not merely unused.** A canonical encoder is not
+enough on its own -- the verifier accepted 8 of 8 hand-built explicit-default windows, so a
+non-conforming or older encoder could still mint a second identity for a descriptor that means
+exactly the same thing. `verify_effect_descriptor_wire` now refuses a non-zero window whose
+unpacked lattice equals `default_parameter_lattice(unit, domain, mapping)`, typed `Reserved` at
+offset 72 of the offending record. The historical zero spelling is the sole canonical spelling of
+a derived lattice, so the encoder's rule and the format's rule are one sentence rather than a
+convention the verifier declines to enforce.
+
+Proven by `an_explicitly_spelled_derived_lattice_is_refused_as_a_second_spelling` in
+`crates/miso-engine-effect-package/tests/descriptor_v1_qualification.rs`, which rebuilds the alias
+by hand for every derived row of all three comprehensive descriptors and asserts the refusal names
+the aliased window. Deleting the rule turns it red.
+
 **The byte-equality seals are restored.** Checkpoint `9f2a8ec8` relaxed
 `state_vectors.rs::independent_reference_vector_binds_verifies_and_reencodes_byte_identically`
 from `assert_eq!(rust_wire, descriptor_fixture)` to a verify-only call, and

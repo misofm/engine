@@ -1085,9 +1085,25 @@ fn parse_borrowed_wire(
         }
         let step_bits = read_u32(bytes, record + 72);
         let lattice_spec = read_u32(bytes, record + 76);
-        if step_bits != 0 && unpack_lattice_spec(f32::from_bits(step_bits), lattice_spec).is_none()
-        {
-            return Err(diagnostic(Code::Enum, record + 76, Some(index)));
+        if step_bits != 0 {
+            let Some(lattice) = unpack_lattice_spec(f32::from_bits(step_bits), lattice_spec) else {
+                return Err(diagnostic(Code::Enum, record + 76, Some(index)));
+            };
+            // ONE spelling per lattice. The all-zero window decodes as the row's derived
+            // unit-class lattice, so a row that declares exactly that default must spell it as
+            // zeros; writing the same meaning explicitly would give one lattice two byte
+            // sequences, and this format's bytes are its identity. The historical zero spelling
+            // stays the sole canonical one, which is also why every descriptor sealed before
+            // #242 keeps its exact identity.
+            // The vocabulary check above already proved these three decode.
+            if let (Some(unit), Some(domain), Some(mapping)) = (
+                ParameterUnit::from_raw(read_u32(bytes, record + 4)),
+                ParameterDomain::from_raw(read_u32(bytes, record + 8)),
+                ParameterMapping::from_raw(read_u32(bytes, record + 12)),
+            ) && lattice == default_parameter_lattice(unit, domain, mapping)
+            {
+                return Err(diagnostic(Code::Reserved, record + 72, Some(index)));
+            }
         }
     }
     for index in 0..ports as usize {
