@@ -370,16 +370,21 @@ pub fn builtin_parameter_lattice_points(
     use miso_engine_effect_contract::{
         AutomationRate, ParameterChannelPolicy, ParameterDescriptor, ParameterDomain,
         ParameterMapping, ParameterUnit, SmoothingRule, canonical_descriptor_decimal,
-        parameter_lattice_points,
+        parameter_lattice_points_parts,
     };
 
-    let (domain, minimum, maximum, default_value) = match descriptor.domain {
-        BuiltinParameterDomain::BooleanExact => (ParameterDomain::Boolean, None, None, 0.0),
+    // `maximum_is_member` distinguishes a DECLARED bound, which #239 ruling
+    // 5461507633 B2 makes a lattice member outright, from S1's rate-keyed
+    // CLAMP, which is a physical ceiling the descriptor never declared and
+    // whose top point is therefore the greatest generated value at or below it.
+    let (domain, minimum, maximum, default_value, maximum_is_member) = match descriptor.domain {
+        BuiltinParameterDomain::BooleanExact => (ParameterDomain::Boolean, None, None, 0.0, true),
         BuiltinParameterDomain::FiniteInclusive { minimum, maximum } => (
             ParameterDomain::Continuous,
             Some(minimum),
             Some(maximum),
             descriptor.default,
+            true,
         ),
         BuiltinParameterDomain::DisabledOrRateKeyedHertz { minimum_hz, .. } => (
             ParameterDomain::Continuous,
@@ -390,6 +395,7 @@ pub fn builtin_parameter_lattice_points(
             ),
             // The actual default is the disabled sentinel and stays outside this ordered set.
             minimum_hz,
+            false,
         ),
     };
     let unit = match descriptor.mapping {
@@ -432,7 +438,17 @@ pub fn builtin_parameter_lattice_points(
         enum_choices: &[],
         lattice: descriptor.lattice,
     };
-    let points = parameter_lattice_points(&parameter)?;
+    let points = parameter_lattice_points_parts(
+        parameter.unit,
+        parameter.domain,
+        parameter.mapping,
+        parameter.minimum,
+        parameter.maximum,
+        parameter.default_value,
+        &[],
+        parameter.lattice,
+        maximum_is_member,
+    )?;
     let disabled = descriptor
         .disabled_value
         .map(|value| {

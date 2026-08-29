@@ -798,6 +798,7 @@ version = "0.1.0"
 name = "miso-engine-effect-compiler"
 version = "0.1.0"
 dependencies = [
+ "miso-engine-builtins",
  "miso-engine-compressor",
  "miso-engine-core",
  "miso-engine-delay",

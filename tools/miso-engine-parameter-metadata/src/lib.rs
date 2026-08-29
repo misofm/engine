@@ -50,11 +50,14 @@
 //! which is what makes their `liveUpdatable` flag `true` here. A reader that trusted the old
 //! `false` would have concluded there was no write path; there now is.
 //!
-//! # Issue #127 (named nudge sizes)
+//! # Issue #242 (parameter lattice and named step sizes)
 //!
-//! Each parameter carries `"nudge": null`. When #127 lands its ladder on
-//! `ParameterDescriptor`, that slot becomes an object and nothing else in this schema moves --
-//! which is the whole reason it is a declared null rather than an absent key.
+//! Each parameter carries a populated `"step"` object: the row's decimal step, the unit that
+//! decimal is read in, the pinned rendering precision, and #127's five named ladder multiples.
+//! Together with the row's `minimum`/`maximum` this is the parameter's LATTICE -- the finite set
+//! of legal persisted values -- so the slot is the descriptor's declaration, never a restatement.
+//! It occupies the slot that shipped as `"nudge": null` before #242 renamed the vocabulary
+//! (#239 Amendment 2); the rename is total, and `nudge` is retired.
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -69,7 +72,8 @@ use miso_engine_effect_compiler::launch_native_effect_registry;
 use miso_engine_effect_contract::{
     AutomationRate, EffectDescriptor, ObservationCadence, ObservationChannels, ObservationCost,
     ObservationDescriptor, ObservationFold, ObservationKind, ParameterChannelPolicy,
-    ParameterDescriptor, ParameterDomain, ParameterMapping, ParameterUnit, SmoothingRule,
+    ParameterDescriptor, ParameterDomain, ParameterLattice, ParameterMapping, ParameterUnit,
+    SmoothingRule, StepSize, StepUnit,
 };
 use miso_engine_host_web::{
     ABI_VERSION, COMMAND_EFFECT_BYPASS, COMMAND_EFFECT_PARAM, COMMAND_FADER_DB, COMMAND_MATRIX,
@@ -388,6 +392,36 @@ const fn observation_channels_name(channels: ObservationChannels) -> &'static st
     }
 }
 
+/// Emit one parameter's `step` declaration.
+///
+/// This is the #242 lattice authority as it crosses the agent/SDK boundary: a decimal string, not
+/// a float, so a catalog round-trip is lossless. `size` is the shortest spelling that names the
+/// declared `f32` exactly -- a ratio row's authority really is the decimal `1.02`, and rendering
+/// it at the row's own eight-decimal value precision would spell it `1.01999998`.
+fn step_object(lattice: ParameterLattice) -> String {
+    format!(
+        "{{ \"unit\": \"{}\", \"size\": \"{}\", \"precision\": {}, \"ladder\": \
+{{ \"xs\": {}, \"sm\": {}, \"md\": {}, \"lg\": {}, \"xl\": {} }} }}",
+        step_unit_name(lattice.step_unit),
+        lattice.step,
+        lattice.precision,
+        lattice.ladder.multiple(StepSize::Xs),
+        lattice.ladder.multiple(StepSize::Sm),
+        lattice.ladder.multiple(StepSize::Md),
+        lattice.ladder.multiple(StepSize::Lg),
+        lattice.ladder.multiple(StepSize::Xl),
+    )
+}
+
+const fn step_unit_name(unit: StepUnit) -> &'static str {
+    match unit {
+        StepUnit::Absolute => "absolute",
+        StepUnit::Cents => "cents",
+        StepUnit::Ratio => "ratio",
+        StepUnit::Index => "index",
+    }
+}
+
 fn effect_parameter(parameter: &ParameterDescriptor) -> String {
     let mut out = String::new();
     out.push_str("        {\n");
@@ -464,8 +498,11 @@ fn effect_parameter(parameter: &ParameterDescriptor) -> String {
         ));
     }
     out.push_str("],\n");
-    // Issue #127 slot. A declared null, not an absent key, so adding the ladder is additive.
-    out.push_str("          \"nudge\": null\n        }");
+    // Issue #242: the lattice declaration this row's legal persisted values are generated from.
+    out.push_str(&format!(
+        "          \"step\": {}\n        }}",
+        step_object(parameter.lattice)
+    ));
     out
 }
 
@@ -505,7 +542,7 @@ fn builtin_parameter(parameter: &BuiltinParameterDescriptor) -> String {
         "      {{ \"id\": {}, \"name\": \"{}\", \"scope\": \"{}\", \"mapping\": \"{}\", \
 \"domain\": \"{}\", \"minimum\": {}, \"maximum\": {}, \"maximumByRate\": {}, \"default\": {}, \
 \"updateRate\": \"{}\", \"smoothing\": \"{}\", \"reset\": \"{}\", \"disabledValue\": {}, \
-\"liveUpdatable\": {}, \"nudge\": null }}",
+\"liveUpdatable\": {}, \"step\": {} }}",
         parameter.id,
         escape(parameter.name),
         match parameter.scope {
@@ -537,6 +574,7 @@ fn builtin_parameter(parameter: &BuiltinParameterDescriptor) -> String {
         },
         optional_number(parameter.disabled_value),
         live,
+        step_object(parameter.lattice),
     )
 }
 

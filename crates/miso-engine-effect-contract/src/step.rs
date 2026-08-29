@@ -273,24 +273,50 @@ fn insert_decimal(
     Ok(())
 }
 
+/// Render one intrinsic point and prove the rendering is lossless.
+///
+/// An intrinsic point is a value the descriptor declares outright -- a bound,
+/// a default, an enumeration choice. Its canonical rendering is the only text
+/// that ever reaches [`decimal_to_f32`], so a rendering that does not convert
+/// back to the declared `f32` would silently move the declared value. The
+/// launch case this catches is a bound with more decimals than the row's
+/// pinned precision: `0.995` at two decimals renders `1.00`, which is outside
+/// its own domain.
+fn intrinsic_decimal(value: f32, precision: u8) -> Result<String, LatticeError> {
+    let text = canonical_descriptor_decimal(value, precision).ok_or(LatticeError::Declaration)?;
+    let restored = decimal_to_f32(&text).ok_or(LatticeError::Rendering)?;
+    if canonical_bits(restored) != canonical_bits(value) {
+        return Err(LatticeError::Rendering);
+    }
+    Ok(text)
+}
+
 fn intrinsic_values(
     domain: ParameterDomain,
     minimum: Option<f32>,
     maximum: Option<f32>,
     default_value: f32,
-    choice_count: usize,
+    enum_choice_values: &[f32],
     lattice: ParameterLattice,
+    maximum_is_member: bool,
 ) -> Result<Vec<(i128, String, bool)>, LatticeError> {
     let precision = lattice.precision;
     let mut values = Vec::with_capacity(4);
     match domain {
         ParameterDomain::Continuous => {
             let (minimum, maximum) = minimum.zip(maximum).ok_or(LatticeError::Declaration)?;
-            for value in [minimum, default_value, maximum] {
+            // #239 ruling 5461507633 B2/B3: both declared bounds and the
+            // declared default are lattice members by declaration. A rate-keyed
+            // maximum is not a declared bound -- it is S1's clamp -- so that
+            // one shape asks for the top point to be generated, not admitted.
+            let mut intrinsic = vec![minimum, default_value];
+            if maximum_is_member {
+                intrinsic.push(maximum);
+            }
+            for value in intrinsic {
                 insert_decimal(
                     &mut values,
-                    canonical_descriptor_decimal(value, precision)
-                        .ok_or(LatticeError::Declaration)?,
+                    intrinsic_decimal(value, precision)?,
                     precision,
                     true,
                 )?;
@@ -301,8 +327,17 @@ fn intrinsic_values(
             insert_decimal(&mut values, "1".to_owned(), 0, true)?;
         }
         ParameterDomain::Enumeration => {
-            for index in 0..choice_count {
-                insert_decimal(&mut values, index.to_string(), 0, true)?;
+            // The persisted document spells an enumeration as its CHOICE VALUE,
+            // so the choice values are the lattice's canonical renderings. The
+            // point's `index` remains the choice index, which is what the
+            // persist plane carries.
+            for value in enum_choice_values {
+                insert_decimal(
+                    &mut values,
+                    intrinsic_decimal(*value, precision)?,
+                    precision,
+                    true,
+                )?;
             }
         }
     }
@@ -316,6 +351,11 @@ fn intrinsic_values(
 pub fn parameter_lattice_points(
     parameter: &ParameterDescriptor,
 ) -> Result<Vec<LatticePoint>, LatticeError> {
+    let choices: Vec<f32> = parameter
+        .enum_choices
+        .iter()
+        .map(|choice| choice.value)
+        .collect();
     parameter_lattice_points_parts(
         parameter.unit,
         parameter.domain,
@@ -323,8 +363,9 @@ pub fn parameter_lattice_points(
         parameter.minimum,
         parameter.maximum,
         parameter.default_value,
-        parameter.enum_choices.len(),
+        &choices,
         parameter.lattice,
+        true,
     )
 }
 
@@ -340,8 +381,9 @@ pub fn parameter_lattice_points_parts(
     minimum: Option<f32>,
     maximum: Option<f32>,
     default_value: f32,
-    choice_count: usize,
+    enum_choice_values: &[f32],
     declaration: ParameterLattice,
+    maximum_is_member: bool,
 ) -> Result<Vec<LatticePoint>, LatticeError> {
     if !(declaration.step.is_finite()
         && declaration.step > 0.0
@@ -381,8 +423,9 @@ pub fn parameter_lattice_points_parts(
         minimum,
         maximum,
         default_value,
-        choice_count,
+        enum_choice_values,
         declaration,
+        maximum_is_member,
     )?;
     if domain == ParameterDomain::Continuous {
         let minimum = minimum.ok_or(LatticeError::Declaration)?;
@@ -407,7 +450,11 @@ pub fn parameter_lattice_points_parts(
                 let mut value = min_scaled
                     .checked_add(step_scaled)
                     .ok_or(LatticeError::TooManyPoints)?;
-                while value < max_scaled {
+                while if maximum_is_member {
+                    value < max_scaled
+                } else {
+                    value <= max_scaled
+                } {
                     if values.len() >= MAXIMUM_LATTICE_POINTS {
                         return Err(LatticeError::TooManyPoints);
                     }
@@ -451,12 +498,22 @@ pub fn parameter_lattice_points_parts(
                         return Err(LatticeError::TooManyPoints);
                     }
                     let value = minimum * miso_engine_math::pow(ratio, f64::from(k));
-                    if !(value.is_finite() && value < maximum) {
+                    if !(value.is_finite()
+                        && if maximum_is_member {
+                            value < maximum
+                        } else {
+                            value <= maximum
+                        })
+                    {
                         break;
                     }
                     let text = format!("{:.*}", usize::from(precision), value);
                     let rendered = scaled(&text, precision).ok_or(LatticeError::Rendering)?;
-                    if rendered >= max_scaled {
+                    if if maximum_is_member {
+                        rendered >= max_scaled
+                    } else {
+                        rendered > max_scaled
+                    } {
                         break;
                     }
                     insert_decimal(&mut values, text, precision, false)?;
@@ -497,6 +554,223 @@ pub fn resolve_parameter_step(
         .saturating_add(delta)
         .clamp(0, i64::try_from(points.len() - 1).ok()?);
     u32::try_from(target).ok()
+}
+
+// ---------------------------------------------------------------------------
+// Exact-decimal document matching (#242 S2, as amended by #239 ruling
+// 5462028562 section B).
+//
+// Lattice membership of a persisted value is decided on the DOCUMENT'S decimal
+// text in exact decimal arithmetic. It is never decided by comparing `f32`
+// words: two different decimals routinely round to one `f32`, so an `f32`
+// comparison silently admits off-lattice text (the `0.3`-with-step-`0.1`
+// class). Equivalent spellings of one number (`0.3`, `0.30`, `3e-1`) are the
+// same decimal and are all accepted; the accepted spelling is preserved in the
+// document, and only the matched point's canonical rendering ever reaches
+// [`decimal_to_f32`].
+// ---------------------------------------------------------------------------
+
+/// A decimal literal normalized to sign, integer digits and fraction digits.
+///
+/// Leading integer zeros and trailing fraction zeros are removed, so two
+/// spellings of one number normalize to one value and compare equal without
+/// any scaling arithmetic that could overflow.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExactDecimal {
+    negative: bool,
+    integer: String,
+    fraction: String,
+}
+
+/// Longest decimal literal admitted, in significant characters.
+///
+/// Persisted parameter text far past this cannot be a lattice rendering, and
+/// the bound keeps the normalizer's working strings small.
+const MAXIMUM_DECIMAL_CHARACTERS: usize = 512;
+
+impl ExactDecimal {
+    /// Parse one decimal literal exactly, or report that it is not one.
+    ///
+    /// Accepts an optional sign, digits with optional `_` separators, an
+    /// optional fraction, and an optional decimal exponent. Hexadecimal,
+    /// infinite and NaN spellings are rejected: they are not lattice
+    /// renderings.
+    #[must_use]
+    pub fn parse(text: &str) -> Option<Self> {
+        if text.is_empty() || text.len() > MAXIMUM_DECIMAL_CHARACTERS {
+            return None;
+        }
+        let (negative, rest) = match text.as_bytes()[0] {
+            b'-' => (true, &text[1..]),
+            b'+' => (false, &text[1..]),
+            _ => (false, text),
+        };
+        let (mantissa, exponent) = match rest.find(['e', 'E']) {
+            Some(split) => {
+                let raw = &rest[split + 1..];
+                let (negative_exponent, digits) = match raw.as_bytes().first() {
+                    Some(b'-') => (true, &raw[1..]),
+                    Some(b'+') => (false, &raw[1..]),
+                    _ => (false, raw),
+                };
+                if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+                    return None;
+                }
+                // A wilder exponent than this cannot name a lattice point.
+                let magnitude = digits.parse::<i32>().ok()?;
+                (
+                    &rest[..split],
+                    if negative_exponent {
+                        -magnitude
+                    } else {
+                        magnitude
+                    },
+                )
+            }
+            None => (rest, 0),
+        };
+        let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+        let whole: String = whole
+            .chars()
+            .filter(|character| *character != '_')
+            .collect();
+        let fraction: String = fraction
+            .chars()
+            .filter(|character| *character != '_')
+            .collect();
+        if whole.is_empty()
+            || !whole.bytes().all(|byte| byte.is_ascii_digit())
+            || !fraction.bytes().all(|byte| byte.is_ascii_digit())
+            || (mantissa.contains('.') && fraction.is_empty())
+        {
+            return None;
+        }
+        let mut digits = whole;
+        let mut point = digits.len();
+        digits.push_str(&fraction);
+        // Shift the decimal point by the exponent, padding with zeros on
+        // whichever side the shift runs off.
+        let shifted = i64::try_from(point).ok()? + i64::from(exponent);
+        if shifted < 0 {
+            let pad = usize::try_from(-shifted).ok()?;
+            if digits.len() + pad > MAXIMUM_DECIMAL_CHARACTERS {
+                return None;
+            }
+            let mut padded = "0".repeat(pad);
+            padded.push_str(&digits);
+            digits = padded;
+            point = 0;
+        } else {
+            point = usize::try_from(shifted).ok()?;
+            if point > digits.len() {
+                let pad = point - digits.len();
+                if digits.len() + pad > MAXIMUM_DECIMAL_CHARACTERS {
+                    return None;
+                }
+                digits.push_str(&"0".repeat(pad));
+            }
+        }
+        let (integer, fraction) = digits.split_at(point);
+        let integer = integer.trim_start_matches('0');
+        let fraction = fraction.trim_end_matches('0');
+        Some(Self {
+            // `-0` and `0` are one lattice value; the descriptor surface has no
+            // signed zero (`canonical_descriptor_decimal` refuses `-0.0`).
+            negative: negative && !(integer.is_empty() && fraction.is_empty()),
+            integer: integer.to_owned(),
+            fraction: fraction.to_owned(),
+        })
+    }
+}
+
+impl Ord for ExactDecimal {
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
+        use core::cmp::Ordering;
+        match (self.negative, other.negative) {
+            (false, true) => return Ordering::Greater,
+            (true, false) => return Ordering::Less,
+            _ => {}
+        }
+        let magnitude = self
+            .integer
+            .len()
+            .cmp(&other.integer.len())
+            .then_with(|| self.integer.cmp(&other.integer))
+            .then_with(|| {
+                let width = self.fraction.len().max(other.fraction.len());
+                let left = self.fraction.bytes().chain(core::iter::repeat(b'0'));
+                let right = other.fraction.bytes().chain(core::iter::repeat(b'0'));
+                left.take(width).cmp(right.take(width))
+            });
+        if self.negative {
+            magnitude.reverse()
+        } else {
+            magnitude
+        }
+    }
+}
+
+impl PartialOrd for ExactDecimal {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// The two legal values a refused persisted value falls between.
+///
+/// A bound is absent only when the refused value lies outside the lattice on
+/// that side, which is the out-of-domain case rather than the off-lattice one.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NearestLatticeValues {
+    /// Greatest legal value below the refused one, in canonical rendering.
+    pub lower: Option<String>,
+    /// Least legal value above the refused one, in canonical rendering.
+    pub upper: Option<String>,
+}
+
+/// Match one persisted decimal against a lattice in exact decimal arithmetic.
+///
+/// On success the returned index selects the lattice point whose canonical
+/// rendering is the sole input to [`decimal_to_f32`]. On failure the two
+/// nearest legal values are named so the refusal can quote them.
+///
+/// # Errors
+///
+/// Returns the neighbouring legal values when `text` is not a decimal literal
+/// or is not one of `points`.
+pub fn lattice_index_for_decimal(
+    points: &[LatticePoint],
+    text: &str,
+) -> Result<u32, NearestLatticeValues> {
+    let bracket = |lower: Option<usize>, upper: Option<usize>| NearestLatticeValues {
+        lower: lower.map(|index| points[index].canonical.clone()),
+        upper: upper.map(|index| points[index].canonical.clone()),
+    };
+    let Some(value) = ExactDecimal::parse(text) else {
+        // Not a decimal literal at all: no side of the lattice brackets it.
+        return Err(NearestLatticeValues {
+            lower: None,
+            upper: None,
+        });
+    };
+    // `points` is ascending by construction, so this is a plain binary search
+    // whose comparisons are exact decimal comparisons.
+    let mut low = 0_usize;
+    let mut high = points.len();
+    while low < high {
+        let middle = low + (high - low) / 2;
+        let candidate = ExactDecimal::parse(&points[middle].canonical)
+            .expect("descriptor renderings are decimal literals");
+        match candidate.cmp(&value) {
+            core::cmp::Ordering::Equal => return Ok(points[middle].index),
+            core::cmp::Ordering::Less => low = middle + 1,
+            core::cmp::Ordering::Greater => high = middle,
+        }
+    }
+    Err(bracket(
+        low.checked_sub(1),
+        (low < points.len()).then_some(low),
+    ))
 }
 
 #[cfg(test)]

@@ -1342,7 +1342,17 @@ fn parameter_semantics_valid(
     }
 }
 
-fn parameter_lattice_valid(parameter: BorrowedParameter<'_>) -> bool {
+fn parameter_lattice_valid(
+    view: BorrowedEffectDescriptorView<'_>,
+    parameter: BorrowedParameter<'_>,
+) -> bool {
+    // The enumeration lattice is spelled in the document as the choice value,
+    // so the borrowed choices -- not their ordinals -- are what the shared
+    // authority needs to render this row's canonical decimals.
+    let choices: Vec<f32> = (parameter.choice_start
+        ..parameter.choice_start + parameter.choice_count)
+        .map(|index| view.choice(index as usize).0)
+        .collect();
     parameter_lattice_points_parts(
         parameter.unit,
         parameter.domain,
@@ -1350,8 +1360,9 @@ fn parameter_lattice_valid(parameter: BorrowedParameter<'_>) -> bool {
         parameter.minimum,
         parameter.maximum,
         parameter.default_value,
-        parameter.choice_count as usize,
+        &choices,
         parameter.lattice,
+        true,
     )
     .is_ok()
 }
@@ -1424,7 +1435,7 @@ fn borrowed_semantic_errors(view: BorrowedEffectDescriptorView<'_>) -> Vec<Borro
                 Some(index),
             );
         }
-        if !parameter_lattice_valid(parameter) {
+        if !parameter_lattice_valid(view, parameter) {
             push(
                 "parameters",
                 DescriptorDiagnosticCode::Lattice,

@@ -54,8 +54,22 @@ arithmetic rows contain `min + k*step` interiors; logarithmic hertz rows use
 exact-decimal ratio. Every continuous lattice additionally contains the declared minimum,
 maximum, and default as intrinsic exact members. Thus a round maximum and the declared
 `0.70710677` Butterworth-Q default are never made unreachable by a regular geometric interior.
-Boolean and enumeration values use indices; enum choice payload `f32` values are not persisted
-lattice coordinates.
+Boolean and enumeration rows are index lattices: the step is identically one over the ordinals,
+which are what the persist plane carries. The DOCUMENT, however, spells an enumeration as its
+declared choice value, so the choice values -- not the ordinals -- are the canonical decimal
+renderings a persisted value is matched against. Conflating the two would refuse the last choice
+of every enumeration and silently relabel the rest.
+
+A declared bound is a member because it was declared. A rate-keyed cutoff ceiling is not
+declared -- it is the representable clamp for the prepared rate -- so `disabledOrRateKeyedHertz`
+keeps S1's original semantics: the top of its lattice is the greatest generated point at or below
+that rate's clamp, and the clamp itself need not be a legal value.
+
+Because a bound is a member outright, the row's pinned precision must be able to spell it. A
+declaration whose minimum, maximum or default does not survive its own canonical rendering
+bit-for-bit is refused at descriptor validation rather than silently rounded: the shipped delay
+`damping` row declares a maximum of `0.995`, which is why that row overrides the linear class
+default to three decimals.
 
 The complete default domain table is:
 
@@ -75,7 +89,8 @@ The complete default domain table is:
 Every descriptor carries its own declaration and may override the table. The shipped fader is
 the current override: base `0.1 dB`, precision 1, ladder `1/5/10/30/60`. Builtin rows are fully
 declared as follows; rate-keyed cutoff maximum is the selected launch-rate representable clamp,
-and disabled zero has the reserved `u32::MAX` index outside the enabled hertz lattice.
+and disabled zero has the reserved `u32::MAX` index outside the enabled hertz lattice. `pan`
+is a block target like the matrix rows whose coefficients it derives, so it joins the live set.
 
 | stable ID | builtin | scope | domain | default | step / precision | ladder |
 |---:|---|---|---|---:|---|---|
