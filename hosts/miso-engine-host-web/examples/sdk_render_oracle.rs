@@ -37,9 +37,7 @@ fn ramp(frames: usize, seed: u32) -> Vec<f32> {
     let mut state = seed;
     (0..frames)
         .map(|_| {
-            state = state
-                .wrapping_mul(1_664_525)
-                .wrapping_add(1_013_904_223);
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
             ((f64::from(state) / 4_294_967_296.0) * 2.0 - 1.0) as f32
         })
         .collect()
@@ -118,7 +116,11 @@ fn main() {
             );
             assert_eq!(submitted, RESULT_OK, "source {id} refused block {block}");
         }
-        assert_eq!(host.render_next(), RESULT_OK, "render refused block {block}");
+        assert_eq!(
+            host.render_next(),
+            RESULT_OK,
+            "render refused block {block}"
+        );
         let output = host.output_pcm().expect("a rendered quantum has output");
         for sample in output {
             digest.update(sample.to_le_bytes());
