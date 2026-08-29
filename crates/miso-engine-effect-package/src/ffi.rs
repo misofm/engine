@@ -34,8 +34,8 @@ pub struct EffectDescriptorParameterRecord {
     pub display_name_length: u32,
     pub display_unit_offset: u32,
     pub display_unit_length: u32,
-    pub reserved0: u32,
-    pub reserved1: u32,
+    pub step_bits: u32,
+    pub step_spec: u32,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -185,8 +185,8 @@ fn parameter_record(bytes: &[u8], offset: usize) -> EffectDescriptorParameterRec
         display_name_length: read_u32(bytes, offset + 60),
         display_unit_offset: read_u32(bytes, offset + 64),
         display_unit_length: read_u32(bytes, offset + 68),
-        reserved0: read_u32(bytes, offset + 72),
-        reserved1: read_u32(bytes, offset + 76),
+        step_bits: read_u32(bytes, offset + 72),
+        step_spec: read_u32(bytes, offset + 76),
     }
 }
 
@@ -618,7 +618,7 @@ mod tests {
             offset_of!(EffectDescriptorParameterRecord, default_bits),
             44
         );
-        assert_eq!(offset_of!(EffectDescriptorParameterRecord, reserved1), 76);
+        assert_eq!(offset_of!(EffectDescriptorParameterRecord, step_spec), 76);
         assert_eq!(offset_of!(EffectDescriptorPortRecord, reserved), 20);
         assert_eq!(offset_of!(EffectDescriptorQualityRecord, tail_samples), 24);
         assert_eq!(

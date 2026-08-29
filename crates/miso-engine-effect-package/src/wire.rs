@@ -8,8 +8,9 @@ use miso_engine_core::{
 use miso_engine_effect_contract::{
     AutomationRate, DescriptorDiagnosticCode, EffectDescriptor, EffectQuality, LinkMode,
     LinkModeSet, ObservationCadence, ObservationChannels, ObservationCost, ObservationFold,
-    ObservationKind, ParameterChannelPolicy, ParameterDomain, ParameterMapping, ParameterUnit,
-    PortDescriptor, PortLayout, PortRole, SmoothingRule, TailSamples, validate_descriptor,
+    ObservationKind, ParameterChannelPolicy, ParameterDomain, ParameterLattice, ParameterMapping,
+    ParameterUnit, PortDescriptor, PortLayout, PortRole, SmoothingRule, StepLadder, StepUnit,
+    TailSamples, default_parameter_lattice, parameter_lattice_points_parts, validate_descriptor,
 };
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -45,6 +46,54 @@ const ENUM_CHOICE_BYTES: usize = 16;
 /// capped at 255 bytes by `valid_text`, so the two lengths fit a byte for the same reason.
 const OBSERVATION_BYTES: usize = 32;
 const IDENTITY_DOMAIN: &[u8] = b"miso.engine.effect-descriptor.identity.v1\0";
+
+/// Issue #242 parameter-lattice packing in the two words reserved by the frozen 80-byte record.
+///
+/// Offset 72 is the exact `f32` bit pattern of the descriptor's decimal step. Offset 76 packs:
+/// xs/sm/md/lg as five-bit unsigned multipliers, xl as a six-bit unsigned multiplier, precision
+/// as four bits, and `StepUnit - 1` as two bits. The widths total 32 exactly. Both words zero are
+/// accepted only as the historical pre-#242 spelling and decode to the #127 default declaration;
+/// one zero word is never canonical.
+fn pack_lattice_spec(lattice: ParameterLattice) -> Option<u32> {
+    let [xs, sm, md, lg, xl] = lattice.ladder.multiples.map(u32::from);
+    if xs == 0
+        || xs > 31
+        || sm > 31
+        || md > 31
+        || lg > 31
+        || xl > 63
+        || !(xs < sm && sm < md && md < lg && lg < xl)
+        || lattice.precision > 8
+    {
+        return None;
+    }
+    let step_unit = (lattice.step_unit as u32).checked_sub(1)?;
+    (step_unit <= 3).then_some(
+        xs | (sm << 5)
+            | (md << 10)
+            | (lg << 15)
+            | (xl << 20)
+            | (u32::from(lattice.precision) << 26)
+            | (step_unit << 30),
+    )
+}
+
+fn unpack_lattice_spec(step: f32, spec: u32) -> Option<ParameterLattice> {
+    let ladder = StepLadder::new([
+        (spec & 0x1f) as u8,
+        ((spec >> 5) & 0x1f) as u8,
+        ((spec >> 10) & 0x1f) as u8,
+        ((spec >> 15) & 0x1f) as u8,
+        ((spec >> 20) & 0x3f) as u8,
+    ]);
+    let lattice = ParameterLattice {
+        step,
+        step_unit: StepUnit::from_raw((spec >> 30) + 1)?,
+        precision: ((spec >> 26) & 0xf) as u8,
+        ladder,
+    };
+    (pack_lattice_spec(lattice) == Some(spec)).then_some(lattice)
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct EffectDescriptorIdentity([u8; 32]);
@@ -427,6 +476,12 @@ pub fn encode_effect_descriptor_wire(
         let (offset, length) = write_text(output, &mut string_cursor, parameter.display_unit);
         write_u32(output, record + 64, offset);
         write_u32(output, record + 68, length);
+        write_u32(output, record + 72, parameter.lattice.step.to_bits());
+        write_u32(
+            output,
+            record + 76,
+            pack_lattice_spec(parameter.lattice).expect("validated parameter lattice is encodable"),
+        );
         for choice in parameter.enum_choices {
             let choice_record =
                 layout.choice_offset as usize + choice_index as usize * ENUM_CHOICE_BYTES;
@@ -514,6 +569,7 @@ struct BorrowedEffectDescriptorView<'a> {
 #[derive(Clone, Copy)]
 struct BorrowedParameter<'a> {
     id: u32,
+    unit: ParameterUnit,
     domain: ParameterDomain,
     mapping: ParameterMapping,
     automation_rate: AutomationRate,
@@ -527,6 +583,7 @@ struct BorrowedParameter<'a> {
     choice_count: u32,
     display_name: &'a str,
     display_unit: &'a str,
+    lattice: ParameterLattice,
 }
 
 #[derive(Clone, Copy)]
@@ -569,10 +626,21 @@ impl<'a> BorrowedEffectDescriptorView<'a> {
         let name_length = read_u32(self.bytes, record + 60) as usize;
         let unit_offset = read_u32(self.bytes, record + 64) as usize;
         let unit_length = read_u32(self.bytes, record + 68) as usize;
+        let unit = ParameterUnit::from_raw(read_u32(self.bytes, record + 4)).unwrap();
+        let domain = ParameterDomain::from_raw(read_u32(self.bytes, record + 8)).unwrap();
+        let mapping = ParameterMapping::from_raw(read_u32(self.bytes, record + 12)).unwrap();
+        let step_bits = read_u32(self.bytes, record + 72);
+        let lattice_spec = read_u32(self.bytes, record + 76);
+        let lattice = if step_bits == 0 && lattice_spec == 0 {
+            default_parameter_lattice(unit, domain, mapping)
+        } else {
+            unpack_lattice_spec(f32::from_bits(step_bits), lattice_spec).unwrap()
+        };
         BorrowedParameter {
             id: read_u32(self.bytes, record),
-            domain: ParameterDomain::from_raw(read_u32(self.bytes, record + 8)).unwrap(),
-            mapping: ParameterMapping::from_raw(read_u32(self.bytes, record + 12)).unwrap(),
+            unit,
+            domain,
+            mapping,
             automation_rate: AutomationRate::from_raw(read_u32(self.bytes, record + 16)).unwrap(),
             smoothing: SmoothingRule::from_raw(read_u32(self.bytes, record + 24)).unwrap(),
             smoothing_samples: read_u32(self.bytes, record + 28),
@@ -584,6 +652,7 @@ impl<'a> BorrowedEffectDescriptorView<'a> {
             choice_count: read_u32(self.bytes, record + 52),
             display_name: self.text(name_offset, name_length),
             display_unit: self.text(unit_offset, unit_length),
+            lattice,
         }
     }
 
@@ -791,10 +860,10 @@ fn parse_borrowed_wire(
         if flags & 8 == 0 && read_u32(bytes, record + 40) != 0 {
             return Err(diagnostic(Code::Flags, record + 40, Some(index)));
         }
-        for field in [72, 76] {
-            if read_u32(bytes, record + field) != 0 {
-                return Err(diagnostic(Code::Reserved, record + field, Some(index)));
-            }
+        let step_bits = read_u32(bytes, record + 72);
+        let lattice_spec = read_u32(bytes, record + 76);
+        if (step_bits == 0) != (lattice_spec == 0) {
+            return Err(diagnostic(Code::Flags, record + 72, Some(index)));
         }
     }
     for index in 0..ports as usize {
@@ -1002,6 +1071,12 @@ fn parse_borrowed_wire(
         if let Some((field, _)) = fields.into_iter().find(|(_, valid)| !valid) {
             return Err(diagnostic(Code::Enum, record + field, Some(index)));
         }
+        let step_bits = read_u32(bytes, record + 72);
+        let lattice_spec = read_u32(bytes, record + 76);
+        if step_bits != 0 && unpack_lattice_spec(f32::from_bits(step_bits), lattice_spec).is_none()
+        {
+            return Err(diagnostic(Code::Enum, record + 76, Some(index)));
+        }
     }
     for index in 0..ports as usize {
         let record = port_offset as usize + index * PORT_BYTES;
@@ -1131,7 +1206,12 @@ fn parse_borrowed_wire(
     for index in 0..parameters as usize {
         let record = parameter_offset as usize + index * PARAMETER_BYTES;
         let flags = read_u32(bytes, record + 32);
-        for (field, present) in [(36, flags & 4 != 0), (40, flags & 8 != 0), (44, true)] {
+        for (field, present) in [
+            (36, flags & 4 != 0),
+            (40, flags & 8 != 0),
+            (44, true),
+            (72, read_u32(bytes, record + 72) != 0),
+        ] {
             if present && !canonical_float(f32::from_bits(read_u32(bytes, record + field))) {
                 return Err(diagnostic(Code::Float, record + field, Some(index)));
             }
@@ -1262,6 +1342,20 @@ fn parameter_semantics_valid(
     }
 }
 
+fn parameter_lattice_valid(parameter: BorrowedParameter<'_>) -> bool {
+    parameter_lattice_points_parts(
+        parameter.unit,
+        parameter.domain,
+        parameter.mapping,
+        parameter.minimum,
+        parameter.maximum,
+        parameter.default_value,
+        parameter.choice_count as usize,
+        parameter.lattice,
+    )
+    .is_ok()
+}
+
 fn borrowed_semantic_errors(view: BorrowedEffectDescriptorView<'_>) -> Vec<BorrowedSemanticError> {
     let mut errors = Vec::new();
     let mut push = |path, code, byte_offset, record_index| {
@@ -1327,6 +1421,14 @@ fn borrowed_semantic_errors(view: BorrowedEffectDescriptorView<'_>) -> Vec<Borro
                 "parameters",
                 DescriptorDiagnosticCode::Parameter,
                 record + 4,
+                Some(index),
+            );
+        }
+        if !parameter_lattice_valid(parameter) {
+            push(
+                "parameters",
+                DescriptorDiagnosticCode::Lattice,
+                record + 72,
                 Some(index),
             );
         }
@@ -1574,6 +1676,19 @@ fn compare_static_descriptor(
         }
         if borrowed.display_unit != parameter.display_unit {
             return Err(semantic_mismatch(record + 64, Some(index)));
+        }
+        let step_bits = read_u32(view.bytes, record + 72);
+        let lattice_spec = read_u32(view.bytes, record + 76);
+        if step_bits == 0 && lattice_spec == 0 {
+            if parameter.lattice
+                != default_parameter_lattice(parameter.unit, parameter.domain, parameter.mapping)
+            {
+                return Err(semantic_mismatch(record + 72, Some(index)));
+            }
+        } else if step_bits != parameter.lattice.step.to_bits()
+            || pack_lattice_spec(parameter.lattice) != Some(lattice_spec)
+        {
+            return Err(semantic_mismatch(record + 72, Some(index)));
         }
         choice_index += parameter.enum_choices.len();
     }

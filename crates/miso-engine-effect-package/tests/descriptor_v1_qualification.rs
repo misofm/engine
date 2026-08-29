@@ -567,19 +567,29 @@ fn checked_vectors_match_independent_wire_identity_and_port_permutation() {
             "comprehensive-c.identity.hex",
         ),
     ] {
+        // The sealed V1 vectors retain the pre-#242 zero window and therefore their exact
+        // class-A identities. The current encoder consumes that window for explicit lattice
+        // authority; the verifier deliberately continues to decode the historical zero spelling
+        // as the #127 default declaration.
+        let legacy_wire = hex_bytes(wire_name);
+        assert_eq!(
+            verify_effect_descriptor_wire(&legacy_wire, 1 << 20)
+                .unwrap()
+                .as_bytes(),
+            legacy_wire
+        );
+        assert_eq!(
+            effect_descriptor_identity(&legacy_wire, 1 << 20)
+                .unwrap()
+                .as_bytes(),
+            hex_bytes(identity_name).as_slice()
+        );
         let wire = encoded(descriptor);
-        assert_eq!(wire, hex_bytes(wire_name));
         assert_eq!(
             verify_effect_descriptor_wire(&wire, 1 << 20)
                 .unwrap()
                 .as_bytes(),
             wire
-        );
-        assert_eq!(
-            effect_descriptor_identity(&wire, 1 << 20)
-                .unwrap()
-                .as_bytes(),
-            hex_bytes(identity_name).as_slice()
         );
         let mut short = vec![0xa5; wire.len() - 1];
         let before = short.clone();
@@ -687,6 +697,8 @@ fn every_legally_mutable_semantic_field_class_changes_identity() {
         put_u32(bytes, record + 32, 15);
         put_u32(bytes, record + 36, 0.0f32.to_bits());
         put_u32(bytes, record + 40, 1.0f32.to_bits());
+        let index_spec = u32::from_le_bytes(bytes[record + 76..record + 80].try_into().unwrap());
+        put_u32(bytes, record + 76, index_spec & 0x3fff_ffff);
     });
     assert_valid_identity_change(&original, "parameter mapping", |bytes| {
         put_u32(bytes, parameter + 12, ParameterMapping::Exponential as u32);

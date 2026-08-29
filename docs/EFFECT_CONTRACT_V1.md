@@ -47,6 +47,54 @@ exactly the declared latency.
 
 ## Parameters and automation
 
+Persisted parameter values use descriptor-declared exact-decimal lattices. This follows the
+binding [#239 section B ruling](https://github.com/misofm/engine-v2/issues/239#issuecomment-5461507633):
+arithmetic rows contain `min + k*step` interiors; logarithmic hertz rows use
+`min * 2^(k*cents/1200)`; every other logarithmic row uses `min * r^k`, where `r` is that row's
+exact-decimal ratio. Every continuous lattice additionally contains the declared minimum,
+maximum, and default as intrinsic exact members. Thus a round maximum and the declared
+`0.70710677` Butterworth-Q default are never made unreachable by a regular geometric interior.
+Boolean and enumeration values use indices; enum choice payload `f32` values are not persisted
+lattice coordinates.
+
+The complete default domain table is:
+
+| domain / mapping | unit | base step | precision | ladder `xs/sm/md/lg/xl` |
+|---|---|---:|---:|---|
+| boolean or enumeration / stepped | any | 1 index | 0 | 1/3/5/10/30 |
+| continuous / linear or exponential | dB | 0.1 | 1 | 1/3/5/10/30 |
+| continuous / linear or exponential | Hz | 0.001 | 3 | 1/3/5/10/30 |
+| continuous / linear or exponential | ms | 0.1 | 1 | 1/3/5/10/30 |
+| continuous / linear or exponential | samples | 1 | 0 | 1/3/5/10/30 |
+| continuous / linear or exponential | linear | 0.01 | 2 | 1/3/5/10/30 |
+| continuous / linear or exponential | ratio/Q | 0.1 | 1 | 1/3/5/10/30 |
+| continuous / logarithmic | Hz | 20 cents | 3 | 1/3/5/10/30 |
+| continuous / logarithmic | ms | ratio 1.02 | 3 | 1/3/5/10/30 |
+| continuous / logarithmic | ratio/Q | ratio 1.02 | 8 | 1/3/5/10/30 |
+
+Every descriptor carries its own declaration and may override the table. The shipped fader is
+the current override: base `0.1 dB`, precision 1, ladder `1/5/10/30/60`. Builtin rows are fully
+declared as follows; rate-keyed cutoff maximum is the selected launch-rate representable clamp,
+and disabled zero has the reserved `u32::MAX` index outside the enabled hertz lattice.
+
+| stable ID | builtin | scope | domain | default | step / precision | ladder |
+|---:|---|---|---|---:|---|---|
+| 1 | polarity_invert | per lane | bool index 0..1 | 0 | 1 index / 0 | 1/3/5/10/30 |
+| 2 | trim_db | per lane | -144..24 dB | 0 | 0.1 / 1 | 1/3/5/10/30 |
+| 3 | hpf_hz | per lane | disabled 0 or 10..rate clamp | 0 | 20 cents / 3 | 1/3/5/10/30 |
+| 4 | lpf_hz | per lane | disabled 0 or 10..rate clamp | 0 | 20 cents / 3 | 1/3/5/10/30 |
+| 5 | fader_db | per lane | -144..24 dB | 0 | 0.1 / 1 | 1/5/10/30/60 |
+| 6 | mute | per lane | bool index 0..1 | 0 | 1 index / 0 | 1/3/5/10/30 |
+| 7 | matrix_ll | matrix shared | -1..1 linear | 1 | 0.01 / 2 | 1/3/5/10/30 |
+| 8 | matrix_lr | matrix shared | -1..1 linear | 0 | 0.01 / 2 | 1/3/5/10/30 |
+| 9 | matrix_rl | matrix shared | -1..1 linear | 0 | 0.01 / 2 | 1/3/5/10/30 |
+| 10 | matrix_rr | matrix shared | -1..1 linear | 1 | 0.01 / 2 | 1/3/5/10/30 |
+| 11 | delay_samples | per lane | 0..48000 samples | 0 | 1 / 0 | 1/3/5/10/30 |
+| 12 | pan | per lane | -1..1 linear | 0 | 0.01 / 2 | 1/3/5/10/30 |
+
+`pan` remains persisted pan intent. Matrix descriptors remain the authority only for documents
+that explicitly store matrix coefficients.
+
 Linear mapping is `min + x(max-min)`, logarithmic mapping is `min(max/min)^x`, and exponential
 mapping is `min + (max-min)x^2`; exact endpoints are assigned explicitly. Stepped mapping selects
 the closest legal value and resolves ties toward the lower value. Inputs outside finite `[0,1]`

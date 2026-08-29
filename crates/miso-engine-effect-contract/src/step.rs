@@ -55,9 +55,13 @@ impl StepLadder {
         self.multiples[size.offset()]
     }
 
-    fn valid(self) -> bool {
+    pub(crate) fn valid(self) -> bool {
         self.multiples[0] != 0
-            && self.multiples.iter().all(|multiple| *multiple <= 63)
+            // The frozen descriptor record packs xs..lg in five bits and xl in six. Keeping
+            // that representability rule in the contract validator prevents a static descriptor
+            // which its canonical wire cannot carry.
+            && self.multiples[..4].iter().all(|multiple| *multiple <= 31)
+            && self.multiples[4] <= 63
             && self.multiples.windows(2).all(|pair| pair[0] < pair[1])
     }
 }
@@ -270,17 +274,19 @@ fn insert_decimal(
 }
 
 fn intrinsic_values(
-    parameter: &ParameterDescriptor,
+    domain: ParameterDomain,
+    minimum: Option<f32>,
+    maximum: Option<f32>,
+    default_value: f32,
+    choice_count: usize,
+    lattice: ParameterLattice,
 ) -> Result<Vec<(i128, String, bool)>, LatticeError> {
-    let precision = parameter.lattice.precision;
+    let precision = lattice.precision;
     let mut values = Vec::with_capacity(4);
-    match parameter.domain {
+    match domain {
         ParameterDomain::Continuous => {
-            let (minimum, maximum) = parameter
-                .minimum
-                .zip(parameter.maximum)
-                .ok_or(LatticeError::Declaration)?;
-            for value in [minimum, parameter.default_value, maximum] {
+            let (minimum, maximum) = minimum.zip(maximum).ok_or(LatticeError::Declaration)?;
+            for value in [minimum, default_value, maximum] {
                 insert_decimal(
                     &mut values,
                     canonical_descriptor_decimal(value, precision)
@@ -295,7 +301,7 @@ fn intrinsic_values(
             insert_decimal(&mut values, "1".to_owned(), 0, true)?;
         }
         ParameterDomain::Enumeration => {
-            for (index, _) in parameter.enum_choices.iter().enumerate() {
+            for index in 0..choice_count {
                 insert_decimal(&mut values, index.to_string(), 0, true)?;
             }
         }
@@ -310,7 +316,33 @@ fn intrinsic_values(
 pub fn parameter_lattice_points(
     parameter: &ParameterDescriptor,
 ) -> Result<Vec<LatticePoint>, LatticeError> {
-    let declaration = parameter.lattice;
+    parameter_lattice_points_parts(
+        parameter.unit,
+        parameter.domain,
+        parameter.mapping,
+        parameter.minimum,
+        parameter.maximum,
+        parameter.default_value,
+        parameter.enum_choices.len(),
+        parameter.lattice,
+    )
+}
+
+/// Build a lattice from decoded descriptor parts.
+///
+/// Canonical descriptor-wire verification uses this entry point so the wire and static-contract
+/// paths execute one implementation of the endpoint/default and geometric-spacing laws.
+#[allow(clippy::too_many_arguments)]
+pub fn parameter_lattice_points_parts(
+    unit: crate::ParameterUnit,
+    domain: ParameterDomain,
+    mapping: crate::ParameterMapping,
+    minimum: Option<f32>,
+    maximum: Option<f32>,
+    default_value: f32,
+    choice_count: usize,
+    declaration: ParameterLattice,
+) -> Result<Vec<LatticePoint>, LatticeError> {
     if !(declaration.step.is_finite()
         && declaration.step > 0.0
         && !is_negative_zero(declaration.step)
@@ -319,13 +351,13 @@ pub fn parameter_lattice_points(
     {
         return Err(LatticeError::Declaration);
     }
-    let expected_unit = match parameter.domain {
+    let expected_unit = match domain {
         ParameterDomain::Boolean | ParameterDomain::Enumeration => super::StepUnit::Index,
-        ParameterDomain::Continuous => match parameter.mapping {
+        ParameterDomain::Continuous => match mapping {
             crate::ParameterMapping::Linear | crate::ParameterMapping::Exponential => {
                 super::StepUnit::Absolute
             }
-            crate::ParameterMapping::Logarithmic if parameter.unit == crate::ParameterUnit::Hz => {
+            crate::ParameterMapping::Logarithmic if unit == crate::ParameterUnit::Hz => {
                 super::StepUnit::Cents
             }
             crate::ParameterMapping::Logarithmic => super::StepUnit::Ratio,
@@ -344,10 +376,17 @@ pub fn parameter_lattice_points(
     }
 
     let precision = declaration.precision;
-    let mut values = intrinsic_values(parameter)?;
-    if parameter.domain == ParameterDomain::Continuous {
-        let minimum = parameter.minimum.ok_or(LatticeError::Declaration)?;
-        let maximum = parameter.maximum.ok_or(LatticeError::Declaration)?;
+    let mut values = intrinsic_values(
+        domain,
+        minimum,
+        maximum,
+        default_value,
+        choice_count,
+        declaration,
+    )?;
+    if domain == ParameterDomain::Continuous {
+        let minimum = minimum.ok_or(LatticeError::Declaration)?;
+        let maximum = maximum.ok_or(LatticeError::Declaration)?;
         let min_text =
             canonical_descriptor_decimal(minimum, precision).ok_or(LatticeError::Declaration)?;
         let max_text =

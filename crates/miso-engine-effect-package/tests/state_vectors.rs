@@ -275,7 +275,9 @@ fn independent_reference_vector_binds_verifies_and_reencodes_byte_identically() 
         "../../../fixtures/effect-state/v1/canonical.state.digest.hex"
     ));
     let rust_wire = descriptor_wire(&DESCRIPTOR);
-    assert_eq!(rust_wire, descriptor_fixture);
+    // The sealed descriptor/state pair keeps its pre-#242 zero lattice window and class-A
+    // identity. Current authoring writes explicit lattice words, so exercise it separately.
+    verify_effect_descriptor_wire(&rust_wire, 1 << 20).unwrap();
     let bound = bind_effect_descriptor_wire(&DESCRIPTOR, &descriptor_fixture, 1 << 20).unwrap();
     assert_eq!(bound.identity().as_bytes(), identity_fixture.as_slice());
     assert_eq!(&state_fixture[24..56], identity_fixture.as_slice());
@@ -933,6 +935,7 @@ fn migration_edges_are_adjacent_compatible_and_preserve_exact_provenance() {
             maximum: None,
             default_value: 1.0,
             mapping: ParameterMapping::Stepped,
+            lattice: ParameterLattice::indices(),
             ..PARAMETERS[1]
         },
     ];
@@ -970,6 +973,7 @@ fn migration_edges_are_adjacent_compatible_and_preserve_exact_provenance() {
         default_value: 0.0,
         mapping: ParameterMapping::Stepped,
         enum_choices: &ENUM_CHOICES,
+        lattice: ParameterLattice::indices(),
         ..PARAMETERS[1]
     };
     let enum_source = descriptor_with_parameters(

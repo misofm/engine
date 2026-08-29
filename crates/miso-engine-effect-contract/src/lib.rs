@@ -11,7 +11,7 @@ pub use live::{BypassShunt, EffectControlLane, EffectControlRecord, ObservationL
 pub use step::{
     DEFAULT_STEP_LADDER, FADER_STEP_LADDER, LatticeError, LatticePoint, ParameterLattice,
     StepLadder, canonical_descriptor_decimal, decimal_to_f32, default_parameter_lattice,
-    parameter_lattice_points, resolve_parameter_step,
+    parameter_lattice_points, parameter_lattice_points_parts, resolve_parameter_step,
 };
 pub use symmetry::{
     ChannelSymmetryWitness, LiveConsoleRecord, SeamSide, SymmetryEvent, payload_sections_agree,

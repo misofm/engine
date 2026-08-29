@@ -73,6 +73,22 @@ enum miso_engine_effect_smoothing_rule_v1 {
     MISO_ENGINE_EFFECT_SMOOTHING_ONE_POLE_99_V1 = 3
 };
 
+enum miso_engine_effect_parameter_step_unit_v1 {
+    MISO_ENGINE_EFFECT_PARAMETER_STEP_ABSOLUTE_V1 = 1,
+    MISO_ENGINE_EFFECT_PARAMETER_STEP_CENTS_V1 = 2,
+    MISO_ENGINE_EFFECT_PARAMETER_STEP_RATIO_V1 = 3,
+    MISO_ENGINE_EFFECT_PARAMETER_STEP_INDEX_V1 = 4
+};
+
+/* Packed step_spec fields. The step-unit field stores enum value minus one. */
+#define MISO_ENGINE_EFFECT_PARAMETER_STEP_XS_MASK_V1 UINT32_C(0x0000001f)
+#define MISO_ENGINE_EFFECT_PARAMETER_STEP_SM_MASK_V1 UINT32_C(0x000003e0)
+#define MISO_ENGINE_EFFECT_PARAMETER_STEP_MD_MASK_V1 UINT32_C(0x00007c00)
+#define MISO_ENGINE_EFFECT_PARAMETER_STEP_LG_MASK_V1 UINT32_C(0x000f8000)
+#define MISO_ENGINE_EFFECT_PARAMETER_STEP_XL_MASK_V1 UINT32_C(0x03f00000)
+#define MISO_ENGINE_EFFECT_PARAMETER_STEP_PRECISION_MASK_V1 UINT32_C(0x3c000000)
+#define MISO_ENGINE_EFFECT_PARAMETER_STEP_UNIT_MASK_V1 UINT32_C(0xc0000000)
+
 enum miso_engine_effect_port_role_v1 {
     MISO_ENGINE_EFFECT_PORT_MAIN_INPUT_V1 = 1,
     MISO_ENGINE_EFFECT_PORT_MAIN_OUTPUT_V1 = 2,
@@ -126,8 +142,8 @@ typedef struct miso_engine_effect_parameter_record_v1 {
     uint32_t display_name_length;
     uint32_t display_unit_offset;
     uint32_t display_unit_length;
-    uint32_t reserved0;
-    uint32_t reserved1;
+    uint32_t step_bits;
+    uint32_t step_spec;
 } miso_engine_effect_parameter_record_v1;
 
 typedef struct miso_engine_effect_port_record_v1 {
@@ -231,8 +247,8 @@ MISO_ENGINE_EFFECT_DESCRIPTOR_ASSERT_FIELD(miso_engine_effect_parameter_record_v
 MISO_ENGINE_EFFECT_DESCRIPTOR_ASSERT_FIELD(miso_engine_effect_parameter_record_v1, display_name_length, 60);
 MISO_ENGINE_EFFECT_DESCRIPTOR_ASSERT_FIELD(miso_engine_effect_parameter_record_v1, display_unit_offset, 64);
 MISO_ENGINE_EFFECT_DESCRIPTOR_ASSERT_FIELD(miso_engine_effect_parameter_record_v1, display_unit_length, 68);
-MISO_ENGINE_EFFECT_DESCRIPTOR_ASSERT_FIELD(miso_engine_effect_parameter_record_v1, reserved0, 72);
-MISO_ENGINE_EFFECT_DESCRIPTOR_ASSERT_FIELD(miso_engine_effect_parameter_record_v1, reserved1, 76);
+MISO_ENGINE_EFFECT_DESCRIPTOR_ASSERT_FIELD(miso_engine_effect_parameter_record_v1, step_bits, 72);
+MISO_ENGINE_EFFECT_DESCRIPTOR_ASSERT_FIELD(miso_engine_effect_parameter_record_v1, step_spec, 76);
 
 MISO_ENGINE_EFFECT_DESCRIPTOR_STATIC_ASSERT(sizeof(miso_engine_effect_port_record_v1) == 24,
                                             "port record size");
