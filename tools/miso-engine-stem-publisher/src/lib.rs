@@ -28,6 +28,8 @@ pub const DECODER_NAME: &str = "symphonia";
 /// Exact pinned shipped decoder version.
 pub const DECODER_VERSION: &str = "0.6.1";
 
+/// FLAC is integer PCM: a `32f` master is refused typed and never encoded.
+const REFUSAL_32F: &str = "master.bit_depth.32f.refused";
 const WAVE_MAXIMUM_CHUNKS: u32 = 4_096;
 const WAVE_MAXIMUM_SKIPPED_METADATA_BYTES: u64 = 16 * 1024 * 1024;
 const DECODER_ARTIFACT_SHA256: &str = include_str!(concat!(
@@ -144,7 +146,7 @@ pub fn encode_canonical_pcm(
     if canonical_pcm.len() != expected_bytes {
         return Err(PublisherError::new("pcm.length.mismatch"));
     }
-    let samples = pcm_samples(canonical_pcm, shape.bit_depth);
+    let samples = pcm_samples(canonical_pcm, shape.bit_depth)?;
     let mut config = Encoder::default();
     config.block_size = block_frames;
     config.multithread = false;
@@ -252,22 +254,27 @@ fn read_wave_master(input: &Path) -> Result<(StemIdentityReport, u32, Vec<u8>), 
         },
     )
     .map_err(|_| PublisherError::new("wave.parse.refused"))?;
+    if identity_report.shape.bit_depth == CanonicalBitDepth::Float32 {
+        return Err(PublisherError::new(REFUSAL_32F));
+    }
     Ok((identity_report, metadata.sample_rate_hz.0, canonical_pcm))
 }
 
-fn pcm_samples(bytes: &[u8], bit_depth: CanonicalBitDepth) -> Vec<i32> {
+fn pcm_samples(bytes: &[u8], bit_depth: CanonicalBitDepth) -> Result<Vec<i32>, PublisherError> {
     match bit_depth {
-        CanonicalBitDepth::Pcm16 => bytes
+        CanonicalBitDepth::Pcm16 => Ok(bytes
             .chunks_exact(2)
             .map(|sample| i32::from(i16::from_le_bytes([sample[0], sample[1]])))
-            .collect(),
-        CanonicalBitDepth::Pcm24 => bytes
+            .collect()),
+        CanonicalBitDepth::Pcm24 => Ok(bytes
             .chunks_exact(3)
             .map(|sample| {
                 let sign = if sample[2] & 0x80 == 0 { 0 } else { 0xff };
                 i32::from_le_bytes([sample[0], sample[1], sample[2], sign])
             })
-            .collect(),
+            .collect()),
+        // FLAC is integer PCM; a `32f` preimage is never encodable transport.
+        CanonicalBitDepth::Float32 => Err(PublisherError::new(REFUSAL_32F)),
     }
 }
 

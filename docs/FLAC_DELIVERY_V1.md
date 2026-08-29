@@ -40,7 +40,9 @@ is bit-exact. Identity is established over the integer bytes before this convers
 
 ## Publisher
 
-`miso-engine-stem-publisher` accepts a signed PCM16 or packed PCM24 WAVE master. It asks the shared
+`miso-engine-stem-publisher` accepts a signed PCM16 or packed PCM24 WAVE master. FLAC is integer
+PCM: a `32f` master is refused typed (`master.bit_depth.32f.refused`) and is never encoded,
+hashed into a delivery row, or partially published. It asks the shared
 `miso-engine-stem-hasher` library for the canonical identity, encodes with the exact pinned
 `flacenc 0.5.1` single-thread configuration recorded in the emitted JSON row, decodes the result
 through the same `miso-engine-flac-decoder` core shipped to clients, and asks the shared hasher to

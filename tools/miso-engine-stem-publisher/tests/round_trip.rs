@@ -2,11 +2,16 @@
 
 use std::{fs, path::Path};
 
-use miso_engine_stem_publisher::{publish_wave, run_cli};
+use miso_engine_stem_hasher::{CanonicalBitDepth, CanonicalPcmShape};
+use miso_engine_stem_publisher::{encode_canonical_pcm, publish_wave, run_cli};
 
 const FIXTURES: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../fixtures/flac-delivery/v1"
+);
+const STEM_IDENTITY_FIXTURES: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../fixtures/stem-identity/v1"
 );
 
 #[test]
@@ -90,6 +95,31 @@ fn catalog_row_carries_shape_and_provenance_but_not_transport_identity() {
     assert!(!row.contains("flac_identity"));
     assert!(!row.contains("flac_sha256"));
     fs::remove_dir_all(temporary).expect("remove test directory");
+}
+
+#[test]
+fn float32_master_is_refused_typed_before_any_encode() {
+    let temporary = create_temp_dir();
+    let master = Path::new(STEM_IDENTITY_FIXTURES).join("f32-stereo-edge-bits.wav");
+    let error = publish_wave(&master, &temporary.join("published"), 4096)
+        .expect_err("FLAC is integer PCM: a 32f master must refuse");
+    assert_eq!(error.code(), "master.bit_depth.32f.refused");
+    assert!(
+        !temporary.join("published").exists(),
+        "a refused 32f master must not leave a delivery directory"
+    );
+    fs::remove_dir_all(temporary).expect("remove test directory");
+}
+
+#[test]
+fn float32_preimage_is_refused_typed_by_the_encoder_entry() {
+    let pcm = fs::read(Path::new(STEM_IDENTITY_FIXTURES).join("f32-stereo-edge-bits.pcm"))
+        .expect("32f canonical fixture");
+    let frames = u64::try_from(pcm.len() / 8).expect("frame count");
+    let shape = CanonicalPcmShape::new(2, CanonicalBitDepth::Float32, frames).expect("shape");
+    let error = encode_canonical_pcm(&pcm, shape, 48_000, 4096)
+        .expect_err("FLAC is integer PCM: a 32f preimage must refuse");
+    assert_eq!(error.code(), "master.bit_depth.32f.refused");
 }
 
 fn create_temp_dir() -> std::path::PathBuf {
