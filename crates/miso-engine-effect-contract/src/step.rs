@@ -273,31 +273,75 @@ fn insert_decimal(
     Ok(())
 }
 
-/// Render one intrinsic point and prove the rendering names it exactly.
+/// Count a value's fraction digits without allocating.
+///
+/// `f32`'s `Display` is the shortest decimal that round-trips, produced by the
+/// software float formatter, so it is the value's decimal NAME and it is
+/// identical in every floating-point environment. It never uses exponent
+/// notation, so the digits after the point are exactly the precision the value
+/// needs to be spelled without loss.
+fn fraction_digits(value: f32) -> Option<u8> {
+    use core::fmt::Write as _;
+
+    // Longer than the longest `f32` Display spelling, which is a subnormal at 45 characters.
+    struct Buffer {
+        bytes: [u8; 64],
+        len: usize,
+    }
+    impl core::fmt::Write for Buffer {
+        fn write_str(&mut self, text: &str) -> core::fmt::Result {
+            let end = self.len.checked_add(text.len()).ok_or(core::fmt::Error)?;
+            let room = self.bytes.get_mut(self.len..end).ok_or(core::fmt::Error)?;
+            room.copy_from_slice(text.as_bytes());
+            self.len = end;
+            Ok(())
+        }
+    }
+
+    let mut buffer = Buffer {
+        bytes: [0; 64],
+        len: 0,
+    };
+    write!(&mut buffer, "{value}").ok()?;
+    let text = &buffer.bytes[..buffer.len];
+    // Defensive: an exponent spelling would make the digit count meaningless.
+    if text.contains(&b'e') || text.contains(&b'E') {
+        return None;
+    }
+    let digits = match text.iter().position(|byte| *byte == b'.') {
+        Some(point) => text.len() - point - 1,
+        None => 0,
+    };
+    u8::try_from(digits).ok()
+}
+
+/// Prove one intrinsic point is spellable at the row's pinned precision.
 ///
 /// An intrinsic point is a value the descriptor declares outright -- a bound, a
 /// default, an enumeration choice. Its canonical rendering is the only text
-/// that ever reaches [`decimal_to_f32`], so a rendering that names a DIFFERENT
+/// that ever reaches [`decimal_to_f32`], so a rendering that named a DIFFERENT
 /// number would silently move the declared value. The launch case this catches
-/// is a bound carrying more decimals than the row's pinned precision: `0.995`
-/// at two decimals renders `1.00`, which is outside its own domain.
+/// is a bound carrying more decimals than its row's precision: `0.995` at two
+/// decimals renders `1.00`, which is outside its own domain.
 ///
-/// The proof is decimal, not a `f32` round trip. `f32`'s shortest round-tripping
-/// spelling is the value's decimal NAME, and both it and the fixed-precision
-/// rendering are produced by the software float formatter, so this comparison is
-/// exact and identical in every floating-point environment. Converting the
-/// rendering back and comparing words would not be: decimal-to-`f32` parsing has
-/// a hardware fast path, and under a caller's round-toward-zero word it can land
-/// one unit in the last place away from the correctly rounded result.
-fn intrinsic_decimal(value: f32, precision: u8) -> Result<String, LatticeError> {
-    let text = canonical_descriptor_decimal(value, precision).ok_or(LatticeError::Declaration)?;
-    let rendered = ExactDecimal::parse(&text).ok_or(LatticeError::Rendering)?;
-    // Trailing fraction zeros normalize away, so `10.000` and `10` are one value.
-    let named = ExactDecimal::parse(&format!("{value}")).ok_or(LatticeError::Rendering)?;
-    if rendered != named {
+/// The proof is decimal and allocation-free. Converting the rendering back and
+/// comparing `f32` words would be neither: descriptor validation runs on the
+/// preparation path, and decimal-to-`f32` parsing has a hardware fast path that
+/// lands one unit in the last place away from the correctly rounded result
+/// under a caller's round-toward-zero word.
+fn intrinsic_spellable(value: f32, precision: u8) -> Result<(), LatticeError> {
+    if !value.is_finite() || is_negative_zero(value) || precision > 8 {
+        return Err(LatticeError::Declaration);
+    }
+    if fraction_digits(value).ok_or(LatticeError::Rendering)? > precision {
         return Err(LatticeError::Rendering);
     }
-    Ok(text)
+    Ok(())
+}
+
+fn intrinsic_decimal(value: f32, precision: u8) -> Result<String, LatticeError> {
+    intrinsic_spellable(value, precision)?;
+    canonical_descriptor_decimal(value, precision).ok_or(LatticeError::Declaration)
 }
 
 fn intrinsic_values(
@@ -353,6 +397,120 @@ fn intrinsic_values(
     Ok(values)
 }
 
+/// Validate a parameter's lattice DECLARATION without generating its points.
+///
+/// Descriptor validation runs on the preparation path, and a shipped row's lattice can hold
+/// hundreds of points -- soft clip's drive row alone has 601. Materializing them to answer "is
+/// this declaration lawful?" would put a per-point allocation into every prepare, which is
+/// exactly the un-memoized derivation #127 recorded as a real defect found in audit. Lawfulness
+/// is a property of the declaration and its intrinsic points, so it is decided in constant time
+/// and without allocating; point generation stays a control-plane operation whose result a
+/// registry can cache.
+///
+/// # Errors
+///
+/// Returns the reason the declaration cannot define a finite unambiguous lattice.
+pub fn validate_parameter_lattice(parameter: &ParameterDescriptor) -> Result<(), LatticeError> {
+    let choices: Vec<f32> = parameter
+        .enum_choices
+        .iter()
+        .map(|choice| choice.value)
+        .collect();
+    validate_parameter_lattice_parts(
+        parameter.unit,
+        parameter.domain,
+        parameter.mapping,
+        parameter.minimum,
+        parameter.maximum,
+        parameter.default_value,
+        &choices,
+        parameter.lattice,
+    )
+}
+
+/// Validate a lattice declaration from decoded parts.
+///
+/// Canonical descriptor-wire verification uses this entry point so the wire and static-contract
+/// paths execute one implementation of the declaration law.
+///
+/// # Errors
+///
+/// Returns the reason the declaration cannot define a finite unambiguous lattice.
+#[allow(clippy::too_many_arguments)]
+pub fn validate_parameter_lattice_parts(
+    unit: crate::ParameterUnit,
+    domain: ParameterDomain,
+    mapping: crate::ParameterMapping,
+    minimum: Option<f32>,
+    maximum: Option<f32>,
+    default_value: f32,
+    enum_choice_values: &[f32],
+    declaration: ParameterLattice,
+) -> Result<(), LatticeError> {
+    let expected = expected_step_unit(unit, domain, mapping)?;
+    if !(declaration.step.is_finite()
+        && declaration.step > 0.0
+        && !is_negative_zero(declaration.step)
+        && declaration.precision <= 8
+        && declaration.ladder.valid())
+        || declaration.step_unit != expected
+        || (expected == super::StepUnit::Index
+            && (canonical_bits(declaration.step) != canonical_bits(1.0)
+                || declaration.precision != 0))
+        || (expected == super::StepUnit::Ratio && declaration.step <= 1.0)
+    {
+        return Err(LatticeError::Declaration);
+    }
+    let precision = declaration.precision;
+    match domain {
+        ParameterDomain::Continuous => {
+            let (minimum, maximum) = minimum.zip(maximum).ok_or(LatticeError::Declaration)?;
+            if minimum >= maximum {
+                return Err(LatticeError::Rendering);
+            }
+            if matches!(expected, super::StepUnit::Cents | super::StepUnit::Ratio) && minimum <= 0.0
+            {
+                return Err(LatticeError::Declaration);
+            }
+            // An arithmetic row's step is itself spelled at the row's precision, so a step the
+            // precision cannot name would generate a grid the row cannot render.
+            if expected == super::StepUnit::Absolute {
+                intrinsic_spellable(declaration.step, precision)?;
+            }
+            for value in [minimum, maximum, default_value] {
+                intrinsic_spellable(value, precision)?;
+            }
+        }
+        ParameterDomain::Boolean => {}
+        ParameterDomain::Enumeration => {
+            for value in enum_choice_values {
+                intrinsic_spellable(*value, precision)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn expected_step_unit(
+    unit: crate::ParameterUnit,
+    domain: ParameterDomain,
+    mapping: crate::ParameterMapping,
+) -> Result<super::StepUnit, LatticeError> {
+    Ok(match domain {
+        ParameterDomain::Boolean | ParameterDomain::Enumeration => super::StepUnit::Index,
+        ParameterDomain::Continuous => match mapping {
+            crate::ParameterMapping::Linear | crate::ParameterMapping::Exponential => {
+                super::StepUnit::Absolute
+            }
+            crate::ParameterMapping::Logarithmic if unit == crate::ParameterUnit::Hz => {
+                super::StepUnit::Cents
+            }
+            crate::ParameterMapping::Logarithmic => super::StepUnit::Ratio,
+            crate::ParameterMapping::Stepped => return Err(LatticeError::Declaration),
+        },
+    })
+}
+
 /// Build every legal persisted value for an effect parameter in ascending order.
 ///
 /// This is deliberately an off-render/control-plane operation. Registry construction can cache
@@ -402,21 +560,7 @@ pub fn parameter_lattice_points_parts(
     {
         return Err(LatticeError::Declaration);
     }
-    let expected_unit = match domain {
-        ParameterDomain::Boolean | ParameterDomain::Enumeration => super::StepUnit::Index,
-        ParameterDomain::Continuous => match mapping {
-            crate::ParameterMapping::Linear | crate::ParameterMapping::Exponential => {
-                super::StepUnit::Absolute
-            }
-            crate::ParameterMapping::Logarithmic if unit == crate::ParameterUnit::Hz => {
-                super::StepUnit::Cents
-            }
-            crate::ParameterMapping::Logarithmic => super::StepUnit::Ratio,
-            crate::ParameterMapping::Stepped => {
-                return Err(LatticeError::Declaration);
-            }
-        },
-    };
+    let expected_unit = expected_step_unit(unit, domain, mapping)?;
     if declaration.step_unit != expected_unit
         || (expected_unit == super::StepUnit::Index
             && (canonical_bits(declaration.step) != canonical_bits(1.0)

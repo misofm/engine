@@ -109,7 +109,24 @@ different words from the same document. Two candidate fixes, both outside this b
    `StartedRenderSession` already does around render (#146). This is the larger change and is
    #146's architecture to extend.
 
-## 9. Fixture migration ledger — NOT APPLIED, ruling required
+## 9. Descriptor validation is declaration-only, not point generation
+
+The inherited tranche answered "is this lattice lawful?" by generating every point. Descriptor
+validation runs on the preparation path, and soft clip's three rows alone hold `601 + 481 + 101 =
+1183` points, each rendered to its own `String`: `crates/miso-engine-soft-clip/tests/allocation.rs`
+measured **1290 allocations per prepare against its pinned bound of 32**. This is precisely the
+defect #127 recorded from the v1 audit -- an un-memoized per-call derivation on a hot descriptor
+path -- arriving in v2 by a different route.
+
+Lawfulness is a property of the DECLARATION and its intrinsic points, not of the interior, so
+`validate_parameter_lattice_parts` decides it in constant time with no allocation: the step, unit,
+precision and ladder are checked directly, and each intrinsic point is proved spellable by
+counting the fraction digits of its shortest round-trip spelling in a stack buffer. Point
+generation remains available for the control plane, where a registry can cache it. Measured after
+the change: **15 allocations per prepare**, inside the bound. Both the static-descriptor validator
+and the descriptor-wire binder call the one shared implementation.
+
+## 10. Fixture migration ledger — NOT APPLIED, ruling required
 
 Enforcing the lattice at validation/preparation refuses **2320 persisted values across 8 of the 14
 shipped session fixtures**. These edits are deliberately NOT made: they would move render digests,

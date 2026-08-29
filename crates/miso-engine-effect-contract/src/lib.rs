@@ -12,7 +12,8 @@ pub use step::{
     DEFAULT_STEP_LADDER, ExactDecimal, FADER_STEP_LADDER, LatticeError, LatticePoint,
     NearestLatticeValues, ParameterLattice, StepLadder, canonical_descriptor_decimal,
     decimal_to_f32, default_parameter_lattice, lattice_index_for_decimal, parameter_lattice_points,
-    parameter_lattice_points_parts, resolve_parameter_step,
+    parameter_lattice_points_parts, resolve_parameter_step, validate_parameter_lattice,
+    validate_parameter_lattice_parts,
 };
 pub use symmetry::{
     ChannelSymmetryWitness, LiveConsoleRecord, SeamSide, SymmetryEvent, payload_sections_agree,
@@ -652,7 +653,7 @@ pub fn validate_descriptor(d: &'static EffectDescriptor) -> Result<(), Descripto
                 code: DescriptorDiagnosticCode::Parameter,
             })
         }
-        if parameter_lattice_points(p).is_err() {
+        if validate_parameter_lattice(p).is_err() {
             e.push(DescriptorError {
                 path: "parameters",
                 code: DescriptorDiagnosticCode::Lattice,

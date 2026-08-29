@@ -10,7 +10,7 @@ use miso_engine_effect_contract::{
     LinkModeSet, ObservationCadence, ObservationChannels, ObservationCost, ObservationFold,
     ObservationKind, ParameterChannelPolicy, ParameterDomain, ParameterLattice, ParameterMapping,
     ParameterUnit, PortDescriptor, PortLayout, PortRole, SmoothingRule, StepLadder, StepUnit,
-    TailSamples, default_parameter_lattice, parameter_lattice_points_parts, validate_descriptor,
+    TailSamples, default_parameter_lattice, validate_descriptor, validate_parameter_lattice_parts,
 };
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -481,7 +481,8 @@ pub fn encode_effect_descriptor_wire(
         // otherwise the same lattice would have two byte spellings, and this format's bytes are
         // its identity. Writing the derived case explicitly would also have moved every
         // descriptor identity sealed before #242 for no change in meaning.
-        let derived = default_parameter_lattice(parameter.unit, parameter.domain, parameter.mapping);
+        let derived =
+            default_parameter_lattice(parameter.unit, parameter.domain, parameter.mapping);
         let (step_bits, lattice_spec) = if parameter.lattice == derived {
             (0, 0)
         } else {
@@ -1357,14 +1358,16 @@ fn parameter_lattice_valid(
     view: BorrowedEffectDescriptorView<'_>,
     parameter: BorrowedParameter<'_>,
 ) -> bool {
-    // The enumeration lattice is spelled in the document as the choice value,
-    // so the borrowed choices -- not their ordinals -- are what the shared
-    // authority needs to render this row's canonical decimals.
+    // Declaration-only, like the static-descriptor validator it shares an implementation with:
+    // binding a descriptor happens on the preparation path, and generating a row's hundreds of
+    // points to answer a yes/no question would put that cost into every prepare. The enumeration
+    // lattice is spelled in choice values, so the borrowed choices -- not their ordinals -- are
+    // what the shared authority needs.
     let choices: Vec<f32> = (parameter.choice_start
         ..parameter.choice_start + parameter.choice_count)
         .map(|index| view.choice(index as usize).0)
         .collect();
-    parameter_lattice_points_parts(
+    validate_parameter_lattice_parts(
         parameter.unit,
         parameter.domain,
         parameter.mapping,
@@ -1373,7 +1376,6 @@ fn parameter_lattice_valid(
         parameter.default_value,
         &choices,
         parameter.lattice,
-        true,
     )
     .is_ok()
 }

@@ -151,11 +151,22 @@ fn every_lattice_point_reaches_the_engine_through_the_one_blessed_conversion() {
             let point = &points[position];
             let index = lattice_index_for_decimal(&points, &point.canonical)
                 .unwrap_or_else(|_| panic!("{where_}: {} is not its own point", point.canonical));
-            assert_eq!(index as usize, position, "{where_}: matched a different point");
+            assert_eq!(
+                index as usize, position,
+                "{where_}: matched a different point"
+            );
             let once = decimal_to_f32(&point.canonical).expect("conversion");
             let twice = decimal_to_f32(&points[index as usize].canonical).expect("conversion");
-            assert_eq!(once.to_bits(), twice.to_bits(), "{where_}: conversion is not a function");
-            assert!(once.is_finite(), "{where_}: {} converts to a non-finite word", point.canonical);
+            assert_eq!(
+                once.to_bits(),
+                twice.to_bits(),
+                "{where_}: conversion is not a function"
+            );
+            assert!(
+                once.is_finite(),
+                "{where_}: {} converts to a non-finite word",
+                point.canonical
+            );
             // Trailing zeros are a different spelling of the same value and must not move it.
             let padded = if point.canonical.contains('.') {
                 format!("{}0", point.canonical)
