@@ -20,10 +20,10 @@ import process from "node:process";
  * would make the SDK's provenance story a copy rather than a derivation.
  */
 export function artifactDir() {
-  const dir = process.env.MISO_ENGINE_ARTIFACTS;
+  const dir = process.env.MISO_ENGINE_SDK_ARTIFACTS;
   if (!dir) {
     throw new Error(
-      "MISO_ENGINE_ARTIFACTS must name a directory built by scripts/build-web-audioworklet.sh",
+      "MISO_ENGINE_SDK_ARTIFACTS must name a directory built by scripts/build-web-audioworklet.sh",
     );
   }
   return dir;

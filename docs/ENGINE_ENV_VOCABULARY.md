@@ -154,6 +154,7 @@ Read by one subject each.
 | `MISO_ENGINE_CHROMEDRIVER_BINARY` | browser gate: chromedriver path. |
 | `MISO_ENGINE_FLAC_DECODER_SHA256` | exported decoder-loader constant holding the exact shipped Wasm artifact pin. Not an environment variable. |
 | `MISO_ENGINE_WEB_ORACLE_PRINT` | `tests/browser-v1/direct-oracle.mjs`: set to `1` to print the derived oracle document instead of asserting it against the pin. The house instrument a browser re-pin is read off, and how `check-browser-expected-resources.py` reads the module's resource rows (#217). |
+| `MISO_ENGINE_SDK_ARTIFACTS` | SDK evals: the release artifact directory the suites boot the engine from. `scripts/check-sdk-headless.sh` builds one and passes it; there is no checked-in wasm, because the module is a build output and vendoring one would make the SDK's provenance story a copy rather than a derivation (#243). |
 | `MISO_ENGINE_WEB_STRIP` | AudioWorklet build: the `wasm-strip` binary. |
 | `MISO_ENGINE_WEB_WORKLET_TEST_MODULE` | Hermetic worklet test: override module path for the bootstrap-under-test (#132). |
 | `MISO_ENGINE_WEB_HOST_TEST_MODULE` | Hermetic worklet test: override module path for the main-realm host under test, so a red mutation of the host runs the same suite (#151). |

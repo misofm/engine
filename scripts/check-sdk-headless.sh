@@ -39,4 +39,4 @@ cd "$repo_root/sdk"
 # The glob names the eval suites explicitly. Passing the directory would also run support.mjs,
 # which carries fixtures rather than tests, and Node reports a bare directory argument as a
 # failing test of its own.
-MISO_ENGINE_ARTIFACTS="$artifact_dir" node --test 'test/*-evals.mjs'
+MISO_ENGINE_SDK_ARTIFACTS="$artifact_dir" node --test 'test/*-evals.mjs'

@@ -41,7 +41,7 @@ const REPO_ROOT = resolve(import.meta.dirname, "..", "..");
 function engineLattices() {
   const text = execFileSync(
     "cargo",
-    ["run", "--locked", "-q", "-p", "miso-engine-parameter-metadata", "--bin", "lattice_oracle"],
+    ["run", "--locked", "-q", "-p", "miso-engine-parameter-metadata", "--bin", "miso_engine_parameter_metadata_lattice_oracle"],
     { cwd: REPO_ROOT, encoding: "utf8", maxBuffer: 1 << 26 },
   );
   return text.trim().split("\n").slice(1).map((line) => {
