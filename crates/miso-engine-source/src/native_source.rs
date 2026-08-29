@@ -3874,6 +3874,63 @@ mod tests {
         assert_eq!(mismatch, NativeSourcePrepareError::RateMismatch);
     }
 
+    /// The engine-side depth refusal, in both directions, at the resolver boundary itself.
+    ///
+    /// The runner's `resolver_rejects_integer_and_float_depth_mismatches_both_directions_precompile`
+    /// exercises the *CLI's* own pre-compile comparison, so disabling this check outright (`&&
+    /// false` on the `observed_bit_depth != declared` arm) left every suite green: the runner
+    /// refused first and the engine boundary was never asked. This row asks it directly.
+    ///
+    /// Both directions matter and neither implies the other: an integer asset declared `32f`
+    /// would be reinterpreted as float bits, and a float asset declared `16` would be
+    /// reinterpreted as integer samples. Both are silent corruption of the render, not an error
+    /// the host could notice downstream, which is why the refusal lives before any decode.
+    #[test]
+    fn engine_boundary_refuses_declared_versus_decoded_depth_in_both_directions() {
+        let region = NativeWaveRegion {
+            start_frame: SourceFrame(0),
+            length_frames: 4,
+        };
+
+        let refusal = |resolver: &mut Resolver, request| {
+            match prepare_native_source(resolver, request, caps()) {
+                Ok(_) => panic!("a depth mismatch must never reach a prepared source"),
+                Err(error) => error,
+            }
+        };
+
+        // float32 asset, declared as an integer depth.
+        for declared in [SourceBitDepth::Pcm16, SourceBitDepth::Pcm24] {
+            let mut float_resolver = resolver(&[0.0; 4], b"exact-identity");
+            let mut float_request = request(region);
+            float_request.declared_bit_depth = declared;
+            assert_eq!(
+                refusal(&mut float_resolver, float_request),
+                NativeSourcePrepareError::Wave(NativeWaveError::FormatUnsupported),
+                "float32 asset declared {declared:?} must refuse before decode"
+            );
+        }
+
+        // integer asset, declared f32.
+        let mut integer_resolver = resolver_wave(pcm16_wave(&[0; 4]), b"exact-identity");
+        let integer_request = request(region);
+        assert_eq!(integer_request.declared_bit_depth, SourceBitDepth::Float32);
+        assert_eq!(
+            refusal(&mut integer_resolver, integer_request),
+            NativeSourcePrepareError::Wave(NativeWaveError::FormatUnsupported),
+            "pcm16 asset declared 32f must refuse before decode"
+        );
+
+        // The same asset with a truthful declaration prepares, so the two refusals above are the
+        // depth comparison and not some unrelated rejection of a 16-bit asset.
+        let mut truthful_resolver = resolver_wave(pcm16_wave(&[0; 4]), b"exact-identity");
+        let mut truthful_request = request(region);
+        truthful_request.declared_bit_depth = SourceBitDepth::Pcm16;
+        let prepared = prepare_native_source(&mut truthful_resolver, truthful_request, caps())
+            .expect("pcm16 asset declared 16 prepares");
+        drop(prepared);
+    }
+
     #[test]
     fn retained_layout_grid_is_checked_without_source_duration_storage() {
         for count in [1_usize, 4, 65_537] {
@@ -4149,6 +4206,29 @@ mod tests {
         );
         format.extend_from_slice(&4_u16.to_le_bytes());
         format.extend_from_slice(&32_u16.to_le_bytes());
+        let mut data = Vec::new();
+        for sample in samples {
+            data.extend_from_slice(&sample.to_le_bytes());
+        }
+        let mut wave = Vec::new();
+        wave.extend_from_slice(b"RIFF");
+        wave.extend_from_slice(&0_u32.to_le_bytes());
+        wave.extend_from_slice(b"WAVE");
+        append_chunk(&mut wave, b"fmt ", &format);
+        append_chunk(&mut wave, b"data", &data);
+        let riff_size = u32::try_from(wave.len() - 8).expect("len");
+        wave[4..8].copy_from_slice(&riff_size.to_le_bytes());
+        wave
+    }
+
+    fn pcm16_wave(samples: &[i16]) -> Vec<u8> {
+        let mut format = Vec::new();
+        format.extend_from_slice(&1_u16.to_le_bytes());
+        format.extend_from_slice(&1_u16.to_le_bytes());
+        format.extend_from_slice(&48_000_u32.to_le_bytes());
+        format.extend_from_slice(&96_000_u32.to_le_bytes());
+        format.extend_from_slice(&2_u16.to_le_bytes());
+        format.extend_from_slice(&16_u16.to_le_bytes());
         let mut data = Vec::new();
         for sample in samples {
             data.extend_from_slice(&sample.to_le_bytes());
