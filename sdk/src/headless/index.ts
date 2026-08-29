@@ -11,3 +11,5 @@ export {
   parseDiagnostics,
 } from "../core/errors.ts";
 export type { ErrorPhase, MisoDiagnostic, MisoErrorCode } from "../core/errors.ts";
+export { assertSameSession, effect, session, SessionBuilder } from "../core/session.ts";
+export type { SessionLike, SessionModel, SessionOptions } from "../core/session.ts";
