@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# scripts/sweep.sh -- the hermetic check/test sweep. 96 explicit rows.
+# scripts/sweep.sh -- the hermetic check/test sweep. 97 explicit rows.
 #
-# Why this exists: the repo has 96 check-*/test-* scripts and ci.yml names 37 of them, so most
+# Why this exists: the repo has 101 check-*/test-* scripts and ci.yml names 37 of them, so most
 # gates had no committed runner at all -- they were reachable only by knowing they existed. Every
 # row below is written out by name. There are deliberately no globs: a glob silently absorbs a new
 # script (and silently drops a renamed one), which is how the coverage gap got here in the first
@@ -114,6 +114,7 @@ row fixtures/stem-identity/v1/generate.py --check
 row scripts/check-builtins-listening-033.py --self-test
 row scripts/check-builtins-listening-111.py --self-test
 row scripts/check-parameter-metadata-v1.py --self-test
+row scripts/check-abi-layout-v1.py --self-test
 row scripts/check-session-map-shape.py --self-test
 row scripts/check-step-vocabulary.py --self-test
 row scripts/check-web-audioworklet-callgraph.py --self-test

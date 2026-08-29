@@ -1085,6 +1085,7 @@ dependencies = [
  "miso-engine-builtins",
  "miso-engine-effect-compiler",
  "miso-engine-effect-contract",
+ "miso-engine-host-core",
  "miso-engine-host-web",
 ]
 

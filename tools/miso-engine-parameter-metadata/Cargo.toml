@@ -20,5 +20,8 @@ miso-engine-effect-compiler.workspace = true
 miso-engine-effect-contract.workspace = true
 miso-engine-host-web.workspace = true
 
+[dev-dependencies]
+miso-engine-host-core.workspace = true
+
 [lints]
 workspace = true
