@@ -1,0 +1,162 @@
+{
+  "schema": "miso.web.abi-layout.v1",
+  "abiVersion": 131072,
+  "stagingSequence": ["miso_engine_web_v1_abi_version", "miso_engine_web_v1_boot_options_ptr", "miso_engine_web_v1_document_ptr", "miso_engine_web_v1_boot"],
+  "errorPhases": ["asset", "boot", "source", "render", "output", "lifecycle"],
+  "exports": [
+    "miso_engine_web_v1_abi_version",
+    "miso_engine_web_v1_boot",
+    "miso_engine_web_v1_boot_diagnostic_bytes",
+    "miso_engine_web_v1_boot_options_ptr",
+    "miso_engine_web_v1_boot_result",
+    "miso_engine_web_v1_buffer_capacity",
+    "miso_engine_web_v1_buffer_ptr",
+    "miso_engine_web_v1_command_report_ptr",
+    "miso_engine_web_v1_command_submit",
+    "miso_engine_web_v1_console_track_count",
+    "miso_engine_web_v1_console_track_id",
+    "miso_engine_web_v1_dispose",
+    "miso_engine_web_v1_document_ptr",
+    "miso_engine_web_v1_meter_header_ptr",
+    "miso_engine_web_v1_meter_lease",
+    "miso_engine_web_v1_meter_poll",
+    "miso_engine_web_v1_render",
+    "miso_engine_web_v1_resource_ptr",
+    "miso_engine_web_v1_source_channels",
+    "miso_engine_web_v1_source_count",
+    "miso_engine_web_v1_source_frames",
+    "miso_engine_web_v1_source_id",
+    "miso_engine_web_v1_source_seek",
+    "miso_engine_web_v1_source_submit",
+    "miso_engine_web_v1_status_ptr"
+  ],
+  "structures": {
+    "bootOptions": {
+      "bytes": 64,
+      "fields": [
+        { "name": "structSize", "offset": 0, "type": "u32" },
+        { "name": "abiVersion", "offset": 4, "type": "u32" },
+        { "name": "requireSampleRateHz", "offset": 8, "type": "u32" },
+        { "name": "requireQuantumFrames", "offset": 12, "type": "u32" },
+        { "name": "sourceRingFrames", "offset": 16, "type": "u32" },
+        { "name": "reserved0", "offset": 20, "type": "u32" },
+        { "name": "maximumMemoryBytes", "offset": 24, "type": "u64" },
+        { "name": "consoleCommandQueueRecords", "offset": 32, "type": "u64" },
+        { "name": "consoleMeterBlocks", "offset": 40, "type": "u64" },
+        { "name": "consoleObservationTaps", "offset": 48, "type": "u64" },
+        { "name": "consoleMasterTrackPlusOne", "offset": 56, "type": "u64" }
+      ]
+    },
+    "status": {
+      "bytes": 80,
+      "fields": [
+        { "name": "structSize", "offset": 0, "type": "u32" },
+        { "name": "abiVersion", "offset": 4, "type": "u32" },
+        { "name": "state", "offset": 8, "type": "u32" },
+        { "name": "lastResult", "offset": 12, "type": "u32" },
+        { "name": "backend", "offset": 16, "type": "u32" },
+        { "name": "sampleRateHz", "offset": 20, "type": "u32" },
+        { "name": "quantumFrames", "offset": 24, "type": "u32" },
+        { "name": "reserved0", "offset": 28, "type": "u32" },
+        { "name": "nextAbsoluteSample", "offset": 32, "type": "u64" },
+        { "name": "renderedQuanta", "offset": 40, "type": "u64" },
+        { "name": "reserved", "offset": 48, "type": "u64[4]" }
+      ]
+    },
+    "resourceReport": {
+      "bytes": 224,
+      "fields": [
+        { "name": "structSize", "offset": 0, "type": "u32" },
+        { "name": "abiVersion", "offset": 4, "type": "u32" },
+        { "name": "sampleRateHz", "offset": 8, "type": "u32" },
+        { "name": "quantumFrames", "offset": 12, "type": "u32" },
+        { "name": "backend", "offset": 16, "type": "u32" },
+        { "name": "reserved0", "offset": 20, "type": "u32[3]" },
+        { "name": "optionsBytes", "offset": 32, "type": "u64" },
+        { "name": "statusBytes", "offset": 40, "type": "u64" },
+        { "name": "sessionTomlBytes", "offset": 48, "type": "u64" },
+        { "name": "diagnosticBytes", "offset": 56, "type": "u64" },
+        { "name": "sourceIdBytes", "offset": 64, "type": "u64" },
+        { "name": "sourcePcmStagingBytes", "offset": 72, "type": "u64" },
+        { "name": "outputPcmBytes", "offset": 80, "type": "u64" },
+        { "name": "bridgeMetadataBytes", "offset": 88, "type": "u64" },
+        { "name": "bridgeRetainedBytes", "offset": 96, "type": "u64" },
+        { "name": "largestBridgeAllocationBytes", "offset": 104, "type": "u64" },
+        { "name": "sourceTotalBytes", "offset": 112, "type": "u64" },
+        { "name": "sourceOverheadBytes", "offset": 120, "type": "u64" },
+        { "name": "effectScalarStateBytes", "offset": 128, "type": "u64" },
+        { "name": "effectScalarScratchBytes", "offset": 136, "type": "u64" },
+        { "name": "builtinRetainedBytes", "offset": 144, "type": "u64" },
+        { "name": "graphSessionPlusPlanBytes", "offset": 152, "type": "u64" },
+        { "name": "graphIncrementalPlanBytes", "offset": 160, "type": "u64" },
+        { "name": "graphMetadataBytes", "offset": 168, "type": "u64" },
+        { "name": "graphDelayBytes", "offset": 176, "type": "u64" },
+        { "name": "largestNamedAllocationBytes", "offset": 184, "type": "u64" },
+        { "name": "observationRetainedBytes", "offset": 192, "type": "u64" },
+        { "name": "reserved", "offset": 200, "type": "u64[3]" }
+      ]
+    },
+    "meterHeader": {
+      "bytes": 64,
+      "fields": [
+        { "name": "structSize", "offset": 0, "type": "u32" },
+        { "name": "abiVersion", "offset": 4, "type": "u32" },
+        { "name": "trackCount", "offset": 8, "type": "u32" },
+        { "name": "windows", "offset": 12, "type": "u32" },
+        { "name": "firstSample", "offset": 16, "type": "u64" },
+        { "name": "endSample", "offset": 24, "type": "u64" },
+        { "name": "sequence", "offset": 32, "type": "u64" },
+        { "name": "masterTrackPlusOne", "offset": 40, "type": "u32" },
+        { "name": "masterGrPresent", "offset": 44, "type": "u32" },
+        { "name": "reserved", "offset": 48, "type": "u64[2]" }
+      ]
+    },
+    "commandReport": {
+      "bytes": 48,
+      "fields": [
+        { "name": "structSize", "offset": 0, "type": "u32" },
+        { "name": "abiVersion", "offset": 4, "type": "u32" },
+        { "name": "result", "offset": 8, "type": "u32" },
+        { "name": "reason", "offset": 12, "type": "u32" },
+        { "name": "rejectedIndex", "offset": 16, "type": "u32" },
+        { "name": "admitted", "offset": 20, "type": "u32" },
+        { "name": "appliedAtSample", "offset": 24, "type": "u64" },
+        { "name": "reserved", "offset": 32, "type": "u64[2]" }
+      ]
+    }
+  },
+  "commandRecord": {
+    "bytes": 48,
+    "endianness": "little",
+    "fields": [
+      { "name": "kind", "offset": 0, "type": "u8" },
+      { "name": "rack", "offset": 1, "type": "u8" },
+      { "name": "channel", "offset": 2, "type": "u8" },
+      { "name": "reserved0", "offset": 3, "type": "u8" },
+      { "name": "trackIndex", "offset": 4, "type": "u32" },
+      { "name": "effectIndex", "offset": 8, "type": "u32" },
+      { "name": "parameterId", "offset": 12, "type": "u32" },
+      { "name": "smoothingSamples", "offset": 16, "type": "u32" },
+      { "name": "reserved1", "offset": 20, "type": "u32" },
+      { "name": "values", "offset": 24, "type": "f32[4]" },
+      { "name": "reserved2", "offset": 40, "type": "u8[8]" }
+    ]
+  },
+  "constants": {
+    "resultCodes": [{ "value": 0, "name": "ok" }, { "value": 1, "name": "invalidArgument" }, { "value": 2, "name": "abiMismatch" }, { "value": 3, "name": "wrongState" }, { "value": 4, "name": "bufferTooSmall" }, { "value": 5, "name": "refusedBudget" }, { "value": 6, "name": "backpressure" }, { "value": 7, "name": "unsupported" }, { "value": 8, "name": "renderRejected" }, { "value": 9, "name": "reprepareRequired" }, { "value": 255, "name": "internal" }],
+    "bootResultAliases": [{ "value": 1, "name": "refusedDocument" }, { "value": 2, "name": "refusedOptions" }, { "value": 3, "name": "refusedLifecycle" }],
+    "states": [{ "value": 2, "name": "ready" }, { "value": 3, "name": "failed" }, { "value": 4, "name": "disposed" }],
+    "backends": [{ "value": 0, "name": "scalar" }, { "value": 1, "name": "simd128" }],
+    "bufferKinds": [{ "value": 2, "name": "sourceId" }, { "value": 3, "name": "sourcePcm" }, { "value": 4, "name": "diagnostic" }, { "value": 5, "name": "outputPcm" }, { "value": 6, "name": "command" }, { "value": 7, "name": "meterFrame" }],
+    "wireCommandKinds": [{ "value": 1, "name": "pan" }, { "value": 2, "name": "matrix" }, { "value": 3, "name": "faderDb" }, { "value": 4, "name": "mute" }, { "value": 5, "name": "effectParam" }, { "value": 6, "name": "effectBypass" }, { "value": 7, "name": "observeSubscribe" }, { "value": 8, "name": "observeUnsubscribe" }, { "value": 9, "name": "solo" }, { "value": 10, "name": "trimDb" }, { "value": 11, "name": "polarityInvert" }],
+    "commandReasons": [{ "value": 0, "name": "none" }, { "value": 1, "name": "malformed" }, { "value": 2, "name": "unknownTrack" }, { "value": 3, "name": "unknownRack" }, { "value": 4, "name": "unknownEffect" }, { "value": 5, "name": "unknownParameter" }, { "value": 6, "name": "domain" }, { "value": 7, "name": "unsupportedKind" }, { "value": 8, "name": "backpressure" }, { "value": 9, "name": "wrongState" }, { "value": 10, "name": "unknownTap" }, { "value": 11, "name": "observationUnbound" }],
+    "maximumCommandRecords": 256,
+    "maximumDocumentBytes": 1048576,
+    "diagnosticBytes": 16384,
+    "defaultCommandQueueRecords": 64,
+    "defaultMeterBlocks": 12,
+    "maximumObservationTaps": 16,
+    "defaultMaximumMemoryBytes": 536870912,
+    "sourceRing": { "stallToleranceMs": 100, "reserveQuanta": 2 }
+  }
+}

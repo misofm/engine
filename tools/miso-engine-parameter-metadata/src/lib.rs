@@ -59,8 +59,10 @@
 //! It occupies the slot that shipped as `"nudge": null` before #242 renamed the vocabulary
 //! (#239 Amendment 2); the rename is total, and `nudge` is retired.
 
+pub mod abi_layout;
+
 use std::io::Write as _;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use miso_engine_bench_support::json::escape;
 use miso_engine_builtins::{
@@ -104,17 +106,10 @@ pub const PLANE_OBSERVATION: &str = "observation";
 
 fn usage() -> ! {
     eprintln!(
-        "usage: miso_engine_parameter_metadata --write DIRECTORY | --check DIRECTORY | --print"
+        "usage: miso_engine_parameter_metadata --write DIRECTORY | --check DIRECTORY \
+| --print | --print-abi-layout"
     );
     std::process::exit(2)
-}
-
-fn output_path(directory: &Path) -> PathBuf {
-    if !directory.is_dir() {
-        eprintln!("{} is not a directory", directory.display());
-        std::process::exit(2);
-    }
-    directory.join(OUTPUT_NAME)
 }
 
 /// Render the whole document. Deterministic: registry order is `EffectId` order.
@@ -629,41 +624,62 @@ const fn smoothing_name(rule: SmoothingRule) -> &'static str {
     }
 }
 
-/// Command-line entry point: `--write DIR`, `--check DIR` or `--print`.
+/// Command-line entry point: `--write DIR`, `--check DIR`, `--print` or `--print-abi-layout`.
+///
+/// `--write`/`--check` cover **both** emitted documents. They are one tool because they are one
+/// transcription discipline over one engine: splitting them into two binaries would let an
+/// artifact directory hold a current parameter metadata beside a stale ABI layout, which is the
+/// drift this tool exists to make impossible. `--print` keeps naming the parameter metadata alone
+/// so every existing caller reads what it always read; the layout has its own print mode.
 pub fn run() {
     let mut arguments = std::env::args().skip(1);
     let mode = arguments.next().unwrap_or_else(|| usage());
-    let document = render();
     match mode.as_str() {
         "--print" => {
             if arguments.next().is_some() {
                 usage();
             }
-            print!("{document}");
+            print!("{}", render());
+        }
+        "--print-abi-layout" => {
+            if arguments.next().is_some() {
+                usage();
+            }
+            print!("{}", abi_layout::render());
         }
         "--write" | "--check" => {
             let directory = PathBuf::from(arguments.next().unwrap_or_else(|| usage()));
             if arguments.next().is_some() {
                 usage();
             }
-            let path = output_path(&directory);
-            if mode == "--write" {
-                let mut file = std::fs::File::create(&path).unwrap_or_else(|error| {
-                    eprintln!("cannot create {}: {error}", path.display());
-                    std::process::exit(2)
-                });
-                file.write_all(document.as_bytes()).expect("write metadata");
-                println!("wrote {}", path.display());
-            } else {
-                let existing = std::fs::read_to_string(&path).unwrap_or_else(|error| {
-                    eprintln!("cannot read {}: {error}", path.display());
-                    std::process::exit(1)
-                });
-                if existing != document {
-                    eprintln!("{} is stale; regenerate with --write", path.display());
-                    std::process::exit(1);
+            if !directory.is_dir() {
+                eprintln!("{} is not a directory", directory.display());
+                std::process::exit(2);
+            }
+            let documents = [
+                (OUTPUT_NAME, render()),
+                (abi_layout::OUTPUT_NAME, abi_layout::render()),
+            ];
+            for (name, document) in documents {
+                let path = directory.join(name);
+                if mode == "--write" {
+                    let mut file = std::fs::File::create(&path).unwrap_or_else(|error| {
+                        eprintln!("cannot create {}: {error}", path.display());
+                        std::process::exit(2)
+                    });
+                    file.write_all(document.as_bytes()).expect("write document");
+                    println!("wrote {}", path.display());
+                } else {
+                    let existing = std::fs::read_to_string(&path).unwrap_or_else(|error| {
+                        eprintln!("cannot read {}: {error}", path.display());
+                        std::process::exit(1)
+                    });
+                    if existing != document {
+                        eprintln!("{} is stale; regenerate with --write", path.display());
+                        std::process::exit(1);
+                    }
+                    println!("{} is current", path.display());
                 }
-                println!("{} is current", path.display());
             }
         }
         _ => usage(),
