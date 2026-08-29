@@ -303,3 +303,79 @@ fn the_appended_pan_row_is_the_persisted_pan_authority() {
     assert_eq!(refusal.lower.as_deref(), Some("0.00"));
     assert_eq!(refusal.upper.as_deref(), Some("0.01"));
 }
+
+#[test]
+fn a_rate_keyed_cutoff_ceiling_is_a_clamp_and_never_a_lattice_member() {
+    // #239 ruling 5461507633 B2 makes both DECLARED bounds lattice members. A rate-keyed cutoff
+    // declares only a minimum: `BuiltinParameterDomain::DisabledOrRateKeyedHertz { disabled,
+    // minimum_hz }` has no maximum field, and the ceiling comes from the prepared rate through
+    // `builtin_filter_cutoff_maximum_hz`. S1's original sentence therefore stands for this one
+    // shape -- the top of the lattice is the greatest generated point at or below that ceiling,
+    // and the ceiling itself need not be legal. Admitting it as a declared bound would let a
+    // document name a value the row's own domain contract never offered.
+    let cutoffs: Vec<_> = miso_engine_builtins::BUILTIN_PARAMETER_DESCRIPTORS
+        .iter()
+        .filter(|descriptor| {
+            matches!(
+                descriptor.domain,
+                miso_engine_builtins::BuiltinParameterDomain::DisabledOrRateKeyedHertz { .. }
+            )
+        })
+        .collect();
+    assert_eq!(cutoffs.len(), 2, "hpf_hz and lpf_hz");
+
+    for descriptor in cutoffs {
+        let where_ = descriptor.name;
+        // 48 kHz: the clamp is 23999.43359375 and the greatest 20-cent point at or below it,
+        // generated from the declared 10 Hz minimum, is 23798.694.
+        let lattice = miso_engine_builtins::builtin_parameter_lattice_points(descriptor, 48_000)
+            .expect("cutoff lattice");
+        let top = lattice.points.last().expect("a top point");
+        assert_eq!(top.canonical, "23798.694", "{where_}: top point at 48 kHz");
+        assert!(
+            !top.intrinsic,
+            "{where_}: a generated top point is not a declared bound"
+        );
+        // The declared minimum still is one, which is what distinguishes the two ends.
+        let bottom = lattice.points.first().expect("a bottom point");
+        assert_eq!(bottom.canonical, "10.000");
+        assert!(bottom.intrinsic, "{where_}: the minimum IS declared");
+
+        // The clamp is refused, and the refusal brackets it with the top point below and nothing
+        // above -- the out-of-domain diagnosis, not the off-lattice one.
+        let refusal = lattice_index_for_decimal(&lattice.points, "23999.434")
+            .expect_err("{where_}: the rate ceiling is not a legal value");
+        assert_eq!(refusal.lower.as_deref(), Some("23798.694"));
+        assert_eq!(refusal.upper, None);
+
+        // The same holds at every other launch rate; 44.1 kHz is the tightest ceiling.
+        let at_44_1 = miso_engine_builtins::builtin_parameter_lattice_points(descriptor, 44_100)
+            .expect("cutoff lattice");
+        let top_44_1 = at_44_1.points.last().expect("a top point");
+        assert!(
+            !top_44_1.intrinsic,
+            "{where_}: the 44.1 kHz top point is generated too"
+        );
+        let refusal = lattice_index_for_decimal(&at_44_1.points, "22049.482")
+            .expect_err("{where_}: the 44.1 kHz ceiling is not a legal value");
+        assert_eq!(refusal.lower.as_deref(), Some(top_44_1.canonical.as_str()));
+        assert_eq!(refusal.upper, None);
+        assert!(
+            top_44_1.canonical.parse::<f64>().expect("decimal") < 22_049.482,
+            "{where_}: the top point sits below the ceiling"
+        );
+
+        // A row with a genuinely declared maximum keeps the opposite behaviour, so this test is
+        // about the domain shape rather than about builtins in general.
+        let fader = miso_engine_builtins::BUILTIN_PARAMETER_DESCRIPTORS
+            .iter()
+            .find(|row| row.name == "fader_db")
+            .expect("fader row");
+        let fader_lattice =
+            miso_engine_builtins::builtin_parameter_lattice_points(fader, 48_000).expect("fader");
+        assert!(
+            fader_lattice.points.last().expect("top").intrinsic,
+            "a declared maximum IS a member"
+        );
+    }
+}
