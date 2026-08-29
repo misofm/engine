@@ -516,7 +516,7 @@ fn finite_unit_and_local_range_category_has_24_distinct_cases() {
 }
 
 #[test]
-fn source_identity_and_shape_category_has_19_distinct_cases() {
+fn source_identity_and_shape_category_has_20_distinct_cases() {
     let mut count = 0;
     model_case(
         &mut count,
@@ -618,6 +618,7 @@ fn source_identity_and_shape_category_has_19_distinct_cases() {
         "bit_depth = \"20f\"",
         "bit_depth = 32",
         "bit_depth = \"16\"",
+        "bit_depth = \"24\"",
         "bit_depth = 0",
     ] {
         parse_case(
@@ -627,7 +628,7 @@ fn source_identity_and_shape_category_has_19_distinct_cases() {
             "$.sources[0].bit_depth",
         );
     }
-    assert_eq!(count, 19);
+    assert_eq!(count, 20);
 }
 
 fn routed_effect(template: &Effect, source: RouteSource) -> Effect {
@@ -1057,6 +1058,7 @@ fn dead_resource_caps_cannot_refuse_any_session() {
     for (label, value) in [
         ("requested_runtime_bytes", estimate.requested_runtime_bytes),
         ("queue_items", estimate.queue_items),
+        ("queue_bytes", estimate.queue_bytes),
         ("source_ring_frames", estimate.source_ring_frames),
         ("source_ring_bytes", estimate.source_ring_bytes),
     ] {
@@ -1078,9 +1080,9 @@ fn dead_resource_caps_cannot_refuse_any_session() {
 }
 
 #[test]
-fn corpus_distribution_totals_123_cases() {
-    const DISTRIBUTION: [usize; 7] = [16, 20, 24, 19, 20, 20, 4];
-    assert_eq!(DISTRIBUTION.iter().sum::<usize>(), 123);
+fn corpus_distribution_totals_124_cases() {
+    const DISTRIBUTION: [usize; 7] = [16, 20, 24, 20, 20, 20, 4];
+    assert_eq!(DISTRIBUTION.iter().sum::<usize>(), 124);
 }
 
 #[test]
