@@ -422,8 +422,7 @@ fn the_published_export_set_is_the_frozen_artifact_set() {
         .collect();
 
     assert_eq!(
-        published,
-        frozen,
+        published, frozen,
         "the published export set and the artifact gate's frozen set are one list"
     );
 }

@@ -13,12 +13,21 @@ path = "src/lib.rs"
 name = "miso_engine_parameter_metadata"
 path = "src/main.rs"
 
+# The SDK's agent-ops cross-check driver. It is a bin rather than an example because it is a tool
+# a person runs to answer a question, not a demonstration of the library.
+[[bin]]
+name = "lattice_oracle"
+path = "src/bin/lattice_oracle.rs"
+
 [dependencies]
 miso-engine-bench-support.workspace = true
 miso-engine-builtins.workspace = true
 miso-engine-effect-compiler.workspace = true
 miso-engine-effect-contract.workspace = true
 miso-engine-host-web.workspace = true
+
+[dependencies.sha2]
+workspace = true
 
 [dev-dependencies]
 miso-engine-host-core.workspace = true
