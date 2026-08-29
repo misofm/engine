@@ -1,0 +1,8 @@
+{
+  "schema": 1,
+  "artifact": "incremental-sha256.js",
+  "sha256": "f53dbc35f891c6f1215397614b3588601bb85895d461a24ac266e93c799626d0",
+  "algorithmAuthority": "NIST FIPS 180-4, SHA-256",
+  "implementation": "repository-owned independent JavaScript implementation",
+  "reason": "Canonical-PCM stems exceed one-shot digest RAM budgets; SHA-256 remains the schema vocabulary and is verifiable by Sui std::hash::sha2_256. No zero-shipped-code claim is made."
+}
