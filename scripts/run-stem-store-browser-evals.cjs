@@ -14,6 +14,12 @@
 //
 // Legs default to all three. A leg whose browser lacks OPFS reports `available: false` with a
 // reason rather than failing: WebKit does that today for `navigator.storage.getDirectory`.
+//
+// Remove that `node_modules` again before running `scripts/sweep.sh`. `playwright-core` ships
+// `lib/webp_codec.wasm`, and `check-effect-interchange-qualification.sh`'s "generated artifact
+// exists under a source path" scan prunes only `./target`, so an installed qualification tree
+// turns an unrelated policy row red. That is a defect in the scan's prune list rather than in this
+// runner, and widening a policy gate is its own issue, so it is recorded here rather than fixed.
 
 const { createHash } = require("node:crypto")
 const { readFile, stat } = require("node:fs/promises")
