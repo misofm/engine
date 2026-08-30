@@ -1,9 +1,10 @@
 //! Frozen complete-schema byte and decoder conformance.
 
 use miso_engine_protocol::{
-    ConformanceDecoder, DecodeScratch, ParameterAutomationRate, ParameterChannel,
-    ParameterDescriptor, ParameterDomain, ParameterMapping, ParameterMetadataPage, ParameterRack,
-    ParameterUnit, ParameterValueKind, ProtocolCodec, complete_schema_corpus,
+    COMPLETE_SCHEMA_HASH, ConformanceDecoder, DecodeScratch, ParameterAutomationRate,
+    ParameterChannel, ParameterDescriptor, ParameterDomain, ParameterMapping,
+    ParameterMetadataPage, ParameterRack, ParameterUnit, ParameterValueKind, ProtocolCodec,
+    complete_schema_corpus,
 };
 
 #[test]
@@ -34,7 +35,9 @@ fn frozen_corpus_bytes_and_typed_decoders_are_unchanged() {
     }
     // #241 re-pin: the frame count remains 46, while the transaction corpus deletes opcodes
     // 0x0006/0x0102/0x0104 and replaces 0x0103's nested content with its five-field source shape.
-    assert_eq!(hash, 0xbdeb_b0f8_1c38_ec42);
+    // #274: the literal moved into `COMPLETE_SCHEMA_HASH` so the Wasm golden runner asserts the
+    // same pin instead of carrying its own copy, which is how it fell two re-pins behind.
+    assert_eq!(hash, COMPLETE_SCHEMA_HASH);
 }
 
 #[test]
