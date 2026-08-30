@@ -173,7 +173,7 @@ row scripts/check-parametric-eq-targets.sh
 row scripts/check-builtins-fixtures.sh
 row scripts/check-protocol-benchmark-wasm-parity.sh
 row scripts/check-effect-package-v1.sh
-row scripts/check-protocol-wasm-parity.sh
+row scripts/check-protocol-wasm-parity.sh --self-test
 row scripts/check-browser-expected-resources.py
 row scripts/check-builtins-targets.sh
 

@@ -68,7 +68,9 @@ pub const TLV_PREFIX_BYTES: usize = 8;
 pub const AUTOMATION_BATCH_RECORDS: usize = 256;
 /// Exact byte width of a transient automation record.
 pub const AUTOMATION_RECORD_BYTES: usize = 32;
-pub use conformance::{ConformanceDecoder, ConformanceFrame, complete_schema_corpus};
+pub use conformance::{
+    COMPLETE_SCHEMA_HASH, ConformanceDecoder, ConformanceFrame, complete_schema_corpus,
+};
 pub use controller::{
     CommandFrameProcessError, CommittedCommandFrame, ControlCommand, ControlProvider,
     ControllerRequest, ControllerResourceAllocationError, ControllerResponse,
