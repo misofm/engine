@@ -1,6 +1,20 @@
 #!/usr/bin/env node
 "use strict"
 
+// The stem store's browser legs: incremental SHA-256 throughput, the cold/warm OPFS ingest
+// budgets, and (issue #278) the pump Worker's opt-in `selfDriving` cadence in a real Worker.
+//
+// Not a sweep row: it needs playwright and downloaded browsers, and every sweep row is hermetic.
+// `playwright` lives in `hosts/miso-engine-host-web/qualification/node_modules` rather than beside
+// this script, and Node resolves a CommonJS `require` from the SCRIPT's directory, not the working
+// directory -- so an invocation from the qualification directory alone is not enough:
+//
+//   cd hosts/miso-engine-host-web/qualification && npm ci
+//   NODE_PATH=$PWD/node_modules node ../../../scripts/run-stem-store-browser-evals.cjs [leg...]
+//
+// Legs default to all three. A leg whose browser lacks OPFS reports `available: false` with a
+// reason rather than failing: WebKit does that today for `navigator.storage.getDirectory`.
+
 const { createHash } = require("node:crypto")
 const { readFile, stat } = require("node:fs/promises")
 const http = require("node:http")
