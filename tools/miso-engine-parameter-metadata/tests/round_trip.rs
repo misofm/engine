@@ -296,3 +296,139 @@ fn every_metadata_observation_tap_resolves_through_a_command_acknowledgement() {
     );
     assert_eq!(host.command_report().reason, COMMAND_REASON_UNKNOWN_TAP);
 }
+
+/// Issue #278: every port the document publishes is a port the engine actually accepts.
+///
+/// The port table is a *promise* in exactly the sense the observation menu is: it says a session
+/// may name that `port_id` in a routed sidechain. Publishing it is what lets an authoring layer
+/// refuse a misspelling before boot, so the table being wrong would be worse than its being
+/// absent -- a builder would confidently refuse a legal port, or confidently accept an illegal
+/// one. This walks the published sidechain rows through a real preparation and requires each to
+/// prepare, and requires a `port_id` the table does NOT publish to be refused.
+///
+/// The completeness half is structural: the rows come from `NativeEffectRegistry::descriptors`,
+/// the same list the generator walks, so an effect whose ports are missing cannot exist.
+///
+/// Red mutation: rename a port in the generator's output (or in the descriptor) without renaming
+/// the other -> the published id stops preparing and the first assertion fires. Delete the
+/// `effect.sidechain.unknown_port` leg in `prepare_native_session_effects` -> the negative case
+/// prepares and the last assertion fires.
+#[test]
+fn every_published_sidechain_port_prepares_and_an_unpublished_one_does_not() {
+    use miso_engine_effect_contract::{PortLayout, PortRole};
+
+    let document = miso_engine_parameter_metadata::render();
+    let registry = launch_native_effect_registry().expect("launch registry");
+
+    // Every declared port is in the document, and every effect has the key.
+    let mut rows = 0_usize;
+    let mut sidechains: Vec<(&'static str, &'static str)> = Vec::new();
+    for descriptor in registry.descriptors() {
+        assert!(
+            document.contains("\"ports\": ["),
+            "the ports key is never absent"
+        );
+        for port in descriptor.ports {
+            let role = match port.role {
+                PortRole::MainInput => "mainInput",
+                PortRole::MainOutput => "mainOutput",
+                PortRole::SidechainInput => "sidechainInput",
+            };
+            assert_eq!(port.layout, PortLayout::DualMonoPlanar);
+            assert!(
+                document.contains(&format!(
+                    "{{ \"id\": \"{}\", \"role\": {}, \"roleName\": \"{role}\", \
+\"required\": {}, \"layout\": 1, \"layoutName\": \"dualMonoPlanar\" }}",
+                    port.id.as_str(),
+                    port.role as u32,
+                    port.required
+                )),
+                "{} port {} is in the metadata",
+                descriptor.id.as_str(),
+                port.id.as_str()
+            );
+            if port.role == PortRole::SidechainInput {
+                assert!(!port.required, "a launch sidechain input is never required");
+                sidechains.push((descriptor.id.as_str(), port.id.as_str()));
+            }
+            rows += 1;
+        }
+    }
+    assert_eq!(rows, 18, "eight effects, two of which declare a sidechain");
+    assert_eq!(
+        sidechains,
+        vec![
+            ("miso.compressor", "sidechain-in"),
+            ("miso.gate-expander", "sidechain-in"),
+        ]
+    );
+
+    for (effect_id, port_id) in sidechains {
+        assert!(
+            prepares(effect_id, port_id),
+            "{effect_id} publishes '{port_id}' and it must prepare"
+        );
+        // The negative case, on the same effect: a port the table does not publish is refused.
+        assert!(
+            !prepares(effect_id, "not-a-port"),
+            "{effect_id} accepted a port it never published"
+        );
+    }
+}
+
+/// Boot a two-track session whose second track's compressor-class effect routes a sidechain from
+/// the first, and report whether preparation accepted it.
+#[cfg(test)]
+fn prepares(effect_id: &str, port_id: &str) -> bool {
+    let toml = format!(
+        r#"schema_version = 1
+session_id = "port-table-round-trip"
+revision = 1
+sample_rate_hz = 48000
+quantum_frames = 128
+render_profile = {{ id = "native", mode = "single_thread" }}
+output_profile = {{ id = "main", channels = 2, sample_format = "f32_planar" }}
+sources = [
+  {{ id = "s", content = "sha256:0000000000000000000000000000000000000000000000000000000000000000", channels = 2, bit_depth = "32f", frames = 256 }},
+]
+submixes = []
+outputs = [{{ id = "out" }}]
+routes = [
+  {{ id = "r", source = {{ kind = "track", track_id = "b", tap = "post_matrix" }}, destination = {{ kind = "output_input", output_id = "out" }}, channel_matrix = {{ ll = 1.0, lr = 0.0, rl = 0.0, rr = 1.0 }}, gain_db = 0.0 }},
+]
+automation = []
+
+[[tracks]]
+id = "a"
+source_id = "s"
+left_source_channel = 0
+right_source_channel = 1
+builtins = {{ left = {{ polarity_invert = false, trim_db = 0.0, hpf_hz = 0.0, lpf_hz = 0.0, delay_samples = 0 }}, right = {{ polarity_invert = false, trim_db = 0.0, hpf_hz = 0.0, lpf_hz = 0.0, delay_samples = 0 }} }}
+simd1 = {{ effects = [] }}
+dynamic = {{ effects = [] }}
+simd2 = {{ effects = [] }}
+fader = {{ left_db = 0.0, right_db = 0.0, left_mute = false, right_mute = false }}
+pan = {{ left = -1.0, right = 1.0, smoothing_samples = 0 }}
+
+[[tracks]]
+id = "b"
+source_id = "s"
+left_source_channel = 0
+right_source_channel = 1
+builtins = {{ left = {{ polarity_invert = false, trim_db = 0.0, hpf_hz = 0.0, lpf_hz = 0.0, delay_samples = 0 }}, right = {{ polarity_invert = false, trim_db = 0.0, hpf_hz = 0.0, lpf_hz = 0.0, delay_samples = 0 }} }}
+simd1 = {{ effects = [] }}
+dynamic = {{ effects = [{{ id = "e0", identity = {{ kind = "native", effect_id = "{effect_id}" }}, quality = "normal", bypass = false, link_mode = "dual_mono", params = [], sidechain = {{ kind = "routed", source = {{ kind = "track", track_id = "a", tap = "post_fader" }}, port_id = "{port_id}" }} }}] }}
+simd2 = {{ effects = [] }}
+fader = {{ left_db = 0.0, right_db = 0.0, left_mute = false, right_mute = false }}
+pan = {{ left = -1.0, right = 1.0, smoothing_samples = 0 }}
+"#
+    );
+    let options = WebBootOptions {
+        require_sample_rate_hz: 48_000,
+        require_quantum_frames: 128,
+        source_ring_frames: 128,
+        console_command_queue_records: 64,
+        ..WebBootOptions::explicit_defaults()
+    };
+    AudioWorkletEngineHost::boot(toml.as_bytes(), options).is_ok()
+}
