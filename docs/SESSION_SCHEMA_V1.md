@@ -54,11 +54,14 @@ An automation target's `rack` is one of four tokens: the three effect racks `sim
 The strip is a chassis rather than a rack of instances, so it has no `effect_id` to identify; the
 key is required all the same (V1 has no optional fields) and carries the fixed validated literal
 `"strip"`. Its `parameter_id` is a builtin parameter ABI id, restricted to the rows that declare
-`blockTarget`: `polarity_invert` (1), `trim_db` (2), `fader_db` (5), `mute` (6) and the four
-`matrix_*` coefficients (7-10). The prepared-only rows -- `hpf_hz` (3), `lpf_hz` (4),
-`delay_samples` (11) -- are **refused**, because a span addressed at a parameter with no
-post-preparation write path could only ever be inert. `channel` follows the row's scope: the
-per-lane rows accept `left`, `right` or `both`, the four shared matrix coefficients only `both`.
+`blockTarget`: `polarity_invert` (1), `trim_db` (2), `fader_db` (5), `mute` (6), the four
+`matrix_*` coefficients (7-10) and -- since #242, under #239 ruling 5461507633 B4 -- `pan` (12).
+That is **nine** rows, and `BUILTIN_AUTOMATION_TARGETS` in
+`crates/miso-engine-session/src/validate.rs` is the list. The prepared-only rows -- `hpf_hz` (3),
+`lpf_hz` (4), `delay_samples` (11) -- are **refused**, because a span addressed at a parameter with
+no post-preparation write path could only ever be inert. `channel` follows the row's scope: the
+five per-lane rows accept `left`, `right` or `both`, the four shared matrix coefficients only
+`both`.
 
 **The automation table is consumed by nothing today.** No lowering reads it, for the strip or for
 any of the three effect racks: a valid target is valid-and-inert syntax that authors, round-trips
