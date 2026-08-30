@@ -296,6 +296,30 @@ async function runMutationLedger() {
       test: "stem-store-core-v1.mjs",
       expectedFailure: "a lying declaration must never survive fallback promotion",
     },
+    // Issue #278's opt-in Worker cadence. Two mutations, because "off by default" and "stop
+    // interrupts" are two claims and one of them staying green would hide the other. The first is
+    // the compatibility claim in particular: nothing about the shipped worker changed for a host
+    // that never sends `selfDriving`, and the way to hold that is to make the loop start unasked
+    // and require a gate to notice.
+    {
+      name: "drive the pump loop by default",
+      file: "web/stem-store/pcm-pump-worker.js",
+      search: "  if (requested === undefined || requested === false) return undefined",
+      replace:
+        "  if (requested === undefined) return DEFAULT_IDLE_MS\n  if (requested === false) return undefined",
+      test: "stem-pump-v1.mjs",
+      expectedFailure: "an un-driven worker writes nothing on its own",
+    },
+    {
+      name: "let stop leave the idle sleep pending",
+      file: "web/stem-store/pcm-pump-worker.js",
+      search:
+        "function stopDriving() {\n  selfDrivingIdleMs = undefined\n  driveToken = undefined\n  wakeIdle()\n}",
+      replace:
+        "function stopDriving() {\n  selfDrivingIdleMs = undefined\n  driveToken = undefined\n}",
+      test: "stem-pump-v1.mjs",
+      expectedFailure: "stop cancelled the idle timer rather than waiting it out",
+    },
   ]
 
   for (const mutation of mutations) {

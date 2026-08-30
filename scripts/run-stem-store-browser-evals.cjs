@@ -67,6 +67,8 @@ async function probe(browserType) {
           IncrementalSha256,
           MemoryStemResolver,
           OpfsStemStore,
+          createFixtureMsb1Ring,
+          createStemPumpWorker,
         } = await import(
           "/hosts/miso-engine-host-web/web/stem-store/index.js"
         )
@@ -125,6 +127,117 @@ async function probe(browserType) {
         await Promise.all([cold.close(), warm.close()])
         const root = await navigator.storage.getDirectory()
         await root.removeEntry(folderName, { recursive: true })
+
+        // Issue #278: the opt-in Worker cadence, in a real Worker over real OPFS.
+        //
+        // `hosts/miso-engine-host-web/tests/stem-pump-v1.mjs` already drives the shipped worker
+        // module end to end, but it does so in Node behind a `self` shim and a fake OPFS. The two
+        // things it cannot exercise are the two this leg exists for: that the file loads as a
+        // module Worker at all, and that the loop's `SharedArrayBuffer` writes are visible to the
+        // main realm without a message telling it to look. A cadence that only worked under the
+        // shim would pass every gate and stall in a browser tab.
+        const selfDriving = await (async () => {
+          if (typeof SharedArrayBuffer !== "function") {
+            return { available: false, reason: "SharedArrayBuffer absent (COOP/COEP?)" }
+          }
+          const cadenceFolder = `miso-stem-cadence-${crypto.randomUUID()}`
+          // 384 stereo 16-bit frames: three 128-frame chunks, which the four-slot ring holds
+          // whole. Nothing drains the ring here, so a source larger than the ring would idle at
+          // capacity forever and the fill assertion below would be asserting the wrong thing.
+          const pcmBytes = 384 * 2 * 2
+          const stem = new Uint8Array(pcmBytes)
+          for (let index = 0; index < stem.length; index += 1) {
+            stem[index] = (index * 17) & 0xff
+          }
+          const stemDigest = new IncrementalSha256()
+          stemDigest.update(stem)
+          const stemIdentity = `sha256:${stemDigest.digestHex()}`
+          const frames = pcmBytes / (2 * 2)
+          const store = new OpfsStemStore({ folderName: cadenceFolder })
+          const lease = await store.openSession({
+            sessionId: "cadence",
+            stems: [{ identity: stemIdentity, bytes: pcmBytes }],
+            resolver: new MemoryStemResolver({ [stemIdentity]: stem }),
+          })
+          const capacity = 4
+          const frameCapacity = 128
+          const shared = createFixtureMsb1Ring({ channels: 2, frameCapacity, capacity })
+          const control = new Int32Array(shared, 0, 128 / 4)
+          const WROTE = 14
+          const worker = createStemPumpWorker()
+          const received = []
+          worker.onmessage = (event) => received.push(event.data)
+          const settle = (type, timeoutMs) =>
+            new Promise((resolveSettle, rejectSettle) => {
+              const deadline = performance.now() + timeoutMs
+              const poll = () => {
+                if (received.some((message) => message.type === type)) return resolveSettle()
+                if (performance.now() > deadline) {
+                  return rejectSettle(new Error(`self-driving: no ${type} in ${timeoutMs}ms`))
+                }
+                setTimeout(poll, 5)
+              }
+              poll()
+            })
+          const drivenStarted = performance.now()
+          try {
+            worker.postMessage({
+              type: "initialize",
+              requestId: "init",
+              folderName: cadenceFolder,
+              windowFrames: frameCapacity,
+              generation: 1,
+              selfDriving: { idleMs: 2 },
+              sources: [
+                {
+                  sourceId: "source",
+                  identity: stemIdentity,
+                  channels: 2,
+                  bitDepth: 16,
+                  frames,
+                  ring: shared,
+                },
+              ],
+            })
+            await settle("initialized", 5_000)
+            const expectedChunks = Math.ceil(frames / frameCapacity)
+            const fillDeadline = performance.now() + 5_000
+            while (control[WROTE] < expectedChunks) {
+              if (performance.now() > fillDeadline) {
+                throw new Error(
+                  `self-driving wrote ${control[WROTE]} of ${expectedChunks} chunks unprompted`
+                )
+              }
+              await new Promise((tick) => setTimeout(tick, 5))
+            }
+            const filledMs = performance.now() - drivenStarted
+            if (received.some((message) => message.type === "pumped")) {
+              throw new Error("the self-driven loop broadcast a `pumped` reply")
+            }
+            const stopStarted = performance.now()
+            worker.postMessage({ type: "stop", requestId: "stop" })
+            await settle("stopped", 2_000)
+            const stopMs = performance.now() - stopStarted
+            const settled = control[WROTE]
+            await new Promise((tick) => setTimeout(tick, 50))
+            if (control[WROTE] !== settled) {
+              throw new Error("a tick ran after `stopped`")
+            }
+            return {
+              available: true,
+              chunks: control[WROTE],
+              expectedChunks,
+              filledMs,
+              stopMs,
+              messageTypes: received.map((message) => message.type),
+            }
+          } finally {
+            worker.terminate()
+            await lease.close()
+            await root.removeEntry(cadenceFolder, { recursive: true }).catch(() => {})
+          }
+        })()
+
         const mebibytes = bytes / (1024 * 1024)
         return {
           available: true,
@@ -138,6 +251,7 @@ async function probe(browserType) {
             mebibytes / ((finalHashedAt - firstHashedAt) / 1000),
           resolverRequests: resolver.requests.length,
           budgetsMs,
+          selfDriving,
         }
       },
       { fixtureBytes, digest }

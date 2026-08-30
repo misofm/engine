@@ -149,6 +149,36 @@ PCM, converts by exact powers of two (`2^15`, `2^23`), and writes the unchanged
 MSB1 layout. The pump module contains no network API and its runtime eval runs
 with a throwing network tripwire.
 
+### Cadence: `selfDriving` (issue #278, opt-in)
+
+The Worker is pull-driven by default and nothing in it schedules the next
+`pump`, so a consumer that mounted the shipped module also had to re-implement a
+cadence over its message vocabulary. `initialize` therefore accepts one optional
+field, `selfDriving`: `true` for the default backoff, `{ idleMs }` for an
+explicit one, absent or `false` for the unchanged pull-driven Worker. It adds no
+message type and changes no reply.
+
+While driving, the Worker calls `pumpUntilFull()` in a loop, sleeps `idleMs`
+when a pass writes zero chunks (every ring is full, so only the render thread
+consuming a slot can change the answer), and breaks when a pass reports
+`finished`. A `seek` re-arms a loop that broke, because a seek moves the cursor
+off end-of-region. The loop **posts nothing on the happy path**: a self-driven
+pass answers no request, and a bare `pumped` notification would make one word
+mean both a reply and a broadcast. The ring's own `endOfRegion` flag already
+tells the reader where the region ends. A failure still reports on
+`session-error`.
+
+Each tick is enqueued onto the Worker's existing message tail rather than run
+beside it. `pumpUntilFull()` and `seek()` both mutate the pump's per-source
+cursor, window and generation, so a loop running concurrently with message
+handling would interleave those mutations and commit PCM under the pre-seek
+generation into a ring the reader has already re-tagged -- a race that reads as
+a glitch rather than as an error. Borrowing the tail means a `seek` or `stop`
+lands strictly between two ticks, and no second lock is needed. For the same
+reason `stop` does not await the loop -- it runs *as* a link in that tail, so
+awaiting would deadlock. It clears the loop's token and cancels the idle timer,
+and the next tick sees the cleared token and exits.
+
 ### Documented future arm: `bit_depth = 32f` (not implemented)
 
 STEM_IDENTITY_V1 admits the closed token set `{16, 24, 32f}`. The web launch
