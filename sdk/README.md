@@ -3,6 +3,55 @@
 The TypeScript SDK for Engine V2: a Session V1 builder, a boot-v2 host for Node and the browser,
 and an agent-facing parameter surface that speaks decimals and ranks rather than floats.
 
+## Consuming this package: vendored source, not a build
+
+**There is no `dist/`, and there is not going to be one.** `tsconfig.json` is `noEmit`, the package
+is `private`, and the contract is that a consuming app **vendors `sdk/src/**` as bundled source**.
+Issue #278 recorded the drift this created: the `exports` map pointed at `./dist/index.js` and two
+siblings that no script produced, so all three public specifiers resolved to nothing while every
+eval in `sdk/test/` kept passing, because they deep-import `../src/**` by relative path. The map
+now names the three files that actually exist, and `sdk/test/package-evals.mjs` resolves each one
+through Node's resolver so a subpath pointing at an unbuilt artifact fails a gate instead of a
+consumer.
+
+Vendoring rather than building is the smaller correct answer here, not a concession. The SDK is
+source with no runtime dependencies and `erasableSyntaxOnly` set, so it type-strips under Node and
+compiles under any bundler as-is; a build step would add an emitted `.d.ts` surface to keep in sync
+with the transcription chain below, a second `tsconfig`, and a check proving the output still
+matches the source -- machinery whose entire benefit is saving a consumer one directory copy.
+
+The three entry points are the only supported import sites:
+
+| specifier | file | for |
+| --- | --- | --- |
+| `@misofm/engine` | `src/index.ts` | catalog, Session V1 builder, agent surface, `ConsoleWriter` |
+| `@misofm/engine/headless` | `src/headless/index.ts` | the Node/Bun offline engine |
+| `@misofm/engine/browser` | `src/browser/index.ts` | the Worker scratch boot, policy, host mirror |
+
+Import through those barrels; do not deep-import `src/core/*`. Every symbol that previously had to
+be reached by a deep path is on a barrel as of #278, and `sdk/test/barrel-surface.ts` fails
+compilation if one stops being reachable or starts resolving to a different declaration.
+
+### Pinning a vendored copy
+
+A vendored tree is a copy that can silently fall behind the engine it was transcribed from, so pin
+it at both ends:
+
+- **Source provenance.** Record the engine commit the copy came from, and re-run
+  `scripts/check-sdk-generated.sh` at that commit before vendoring: it re-derives
+  `sdk/assets/*.json` from the Rust and `sdk/src/generated/*.ts` from those assets, and compares
+  byte for byte. A copy taken from a tree where that gate is red is a copy of a lie, and it will
+  read consistent to itself while disagreeing with the engine. `PROVENANCE` (from the root barrel)
+  carries what is source-derived -- the ABI version word, the schema ids, the artifact set -- so an
+  app can assert `PROVENANCE.abiVersion` against the release it ships beside.
+- **Artifact provenance.** `PROVENANCE` deliberately carries **no** content hash for the Wasm,
+  because a checked-in digest would pin one machine's build. The caller supplies its own:
+  `MisoEngineAsset.load(bytes, sha256)` verifies the module against the digest from *your* release
+  manifest and refuses with `sdk.asset.digest` on a mismatch, before compiling anything.
+
+That is the whole pattern: the generated modules are pinned to the engine by a gate you run, and
+the binary is pinned to your release by a digest you pass.
+
 ## What this package is not
 
 It is not a second implementation of anything the engine already decides.
@@ -119,6 +168,10 @@ has about twelve thousand — and is held to the engine's own resolver point for
 
 ## The writer
 
+```ts
+import { ConsoleWriter } from "@misofm/engine";
+```
+
 `ConsoleWriter` batches live-console edits against the engine's bounded per-track queue. Its
 contract is two sentences:
 
@@ -150,5 +203,9 @@ bash scripts/check-sdk-generated.sh             # the transcription chain, both 
 bash scripts/check-sdk-types.sh                 # needs `npm ci` in sdk/ once
 ```
 
-`sdk/test/host-mirror.ts` runs no assertions: it is checked by `tsc` and its job is to fail
-*compilation* if the shipped `.d.ts` and the SDK's adapter ever disagree.
+Two files under `sdk/test/` run no assertions: they are checked by `tsc`, and their job is to fail
+*compilation*. `host-mirror.ts` fails when the shipped `.d.ts` and the SDK's adapter disagree.
+`barrel-surface.ts` fails when a symbol stops being barrel-reachable, or when a barrel starts
+re-exporting a different declaration than the module it names -- including the one collision the
+root barrel has to resolve by hand, where `generated/catalog.ts` and `core/lattice.ts` both spell
+`StepDeclaration` and `StepSizeName` and mean two different types.
