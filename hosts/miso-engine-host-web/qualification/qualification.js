@@ -37,7 +37,15 @@ const SIMD128_PROBE = new Uint8Array([
 // Issue #137 D1/D2: the two console words. Zero in both is the frozen pre-#137 shape -- no control
 // channel, no meter observers -- which is what the corpus and attestation gates keep using so
 // their digests and resource rows are untouched by the console's existence.
-function limits(
+//
+// Issue #281: this is the post-#240 atomic-boot shape. `createMisoAudioWorkletHost` takes exactly
+// `{ context, document, options, simd128ModuleUrl, workletModuleUrl }`, and `options` is exactly
+// the six boot words below -- both guards are `hasExactFields`, so the pre-#240 spelling
+// (`quantumFrames`/`sessionToml`/`limits`, with the twenty-one capacity ceilings #240 deleted)
+// is refused as `miso.error.v1` requestId 0 result 1 before a module is even fetched. The quantum
+// now comes from the context's own `renderQuantumSize`, and the ceilings are the engine's, not the
+// caller's; `sourceRingFrames` is the one word that survived the change and it keeps its meaning.
+function bootOptions(
   sourceRingFrames,
   consoleCommandQueueRecords = 0n,
   consoleMeterBlocks = 0n,
@@ -45,33 +53,16 @@ function limits(
   consoleMasterTrackPlusOne = 0n,
 ) {
   return {
+    sourceRingFrames,
+    // Zero is "no caller-imposed memory ceiling", the same word `tests/browser-v1` sends and the
+    // same one the direct oracle writes at boot-options offset 24.
+    maximumMemoryBytes: 0n,
     consoleCommandQueueRecords,
     consoleMeterBlocks,
     // Issue #143 D3/D6: the frozen configuration's remaining two reserved words. Zero in both is
     // the pre-#143 shape, which is what every row but the observation one keeps using.
     consoleObservationTaps,
     consoleMasterTrackPlusOne,
-    sessionTomlBytes: 1 << 20,
-    diagnosticBytes: 1 << 14,
-    sourceIdBytes: 1 << 10,
-    maximumSourceChannels: 8,
-    sourceRingFrames,
-    maximumAutomationSpansPerBlock: 256,
-    maximumTracks: 1024n,
-    maximumSources: 1024n,
-    maximumRoutes: 4096n,
-    maximumEffects: 8192n,
-    maximumGraphSessionPlusPlanBytes: 64n << 20n,
-    maximumSourceTotalBytes: 64n << 20n,
-    maximumSourceOverheadBytes: 16n << 20n,
-    maximumEffectStateBytes: 16n << 20n,
-    maximumEffectScratchBytes: 16n << 20n,
-    maximumBuiltinRetainedBytes: 64n << 20n,
-    maximumHostRetainedBytes: 16n << 20n,
-    maximumNamedAllocationBytes: 64n << 20n,
-    maximumMeterStreams: 1024n,
-    maximumMeterItems: 1n << 20n,
-    maximumMeterBytes: 16n << 20n,
   };
 }
 
@@ -154,14 +145,13 @@ function corpusRequest(requestId, description) {
   };
 }
 
-async function renderCorpusSegment(createHost, sessionToml, descriptions) {
+async function renderCorpusSegment(createHost, sessionDocument, descriptions) {
   const frames = descriptions.length * QUANTUM_FRAMES;
   const context = new OfflineAudioContext(2, frames, SAMPLE_RATE);
   const host = await createHost({
     context,
-    quantumFrames: QUANTUM_FRAMES,
-    sessionToml,
-    limits: limits(frames),
+    document: sessionDocument,
+    options: bootOptions(frames),
     simd128ModuleUrl: ARTIFACT_URL,
     workletModuleUrl: WORKLET_URL,
   });
@@ -179,7 +169,7 @@ async function renderCorpusSegment(createHost, sessionToml, descriptions) {
   ];
 }
 
-async function runCorpusQualification(createHost, sessionToml, source) {
+async function runCorpusQualification(createHost, sessionDocument, source) {
   if (source?.sourceId !== "fixture-source" || source?.sampleRateHz !== SAMPLE_RATE
       || source?.quantumFrames !== QUANTUM_FRAMES || source?.blocks?.length !== 2) {
     throw new Error("corpus fixture shape mismatch");
@@ -188,8 +178,8 @@ async function runCorpusQualification(createHost, sessionToml, source) {
   // concatenate the oracle's exact [block 0, block 0, block 1] timeline instead of coordinating
   // submissions with a main-realm-only API. The resulting 384 frames must still match the one
   // frozen native digest bit for bit.
-  const first = await renderCorpusSegment(createHost, sessionToml, [source.blocks[0]]);
-  const rest = await renderCorpusSegment(createHost, sessionToml, source.blocks);
+  const first = await renderCorpusSegment(createHost, sessionDocument, [source.blocks[0]]);
+  const rest = await renderCorpusSegment(createHost, sessionDocument, source.blocks);
   const pcm = [new Float32Array(CORPUS_FRAMES), new Float32Array(CORPUS_FRAMES)];
   for (let channel = 0; channel < 2; channel += 1) {
     pcm[channel].set(first[channel], 0);
@@ -205,14 +195,13 @@ function diagnosticJson(value) {
   );
 }
 
-async function typedUnsupportedAttestation(createHost, sessionToml) {
+async function typedUnsupportedAttestation(createHost, sessionDocument) {
   const context = new OfflineAudioContext(2, QUANTUM_FRAMES, SAMPLE_RATE);
   try {
     await createHost({
       context,
-      quantumFrames: QUANTUM_FRAMES,
-      sessionToml,
-      limits: limits(DEFAULT_RING_FRAMES),
+      document: sessionDocument,
+      options: bootOptions(DEFAULT_RING_FRAMES),
       simd128ModuleUrl: ARTIFACT_URL,
       workletModuleUrl: WORKLET_URL,
     });
@@ -241,7 +230,7 @@ async function preflightArtifact() {
   await context.audioWorklet.addModule(WORKLET_URL);
 }
 
-async function diagnoseReady(sessionToml) {
+async function diagnoseReady(sessionDocument) {
   try {
     const context = new OfflineAudioContext(2, QUANTUM_FRAMES, SAMPLE_RATE);
     await context.audioWorklet.addModule(WORKLET_URL);
@@ -252,13 +241,9 @@ async function diagnoseReady(sessionToml) {
       numberOfOutputs: 1,
       outputChannelCount: [2],
       processorOptions: {
-        requestId: 0,
         module,
-        backend: "simd128",
-        sampleRateHz: SAMPLE_RATE,
-        quantumFrames: QUANTUM_FRAMES,
-        sessionToml: new Uint8Array(sessionToml),
-        limits: limits(QUANTUM_FRAMES),
+        document: new Uint8Array(sessionDocument),
+        options: bootOptions(QUANTUM_FRAMES),
       },
     });
     return await new Promise((resolve) => {
@@ -288,13 +273,12 @@ async function diagnoseGlobals() {
 /// raw-Wasm command-timeline oracles. The retarget halves the left matrix coefficient, so the
 /// expected output is the submitted left plane at half gain and the right plane untouched --
 /// computed here, not read back, so a console that quietly did nothing cannot pass.
-async function runConsoleQualification(createHost, sessionToml) {
+async function runConsoleQualification(createHost, sessionDocument) {
   const context = new OfflineAudioContext(2, CONSOLE_FRAMES, SAMPLE_RATE);
   const host = await createHost({
     context,
-    quantumFrames: QUANTUM_FRAMES,
-    sessionToml,
-    limits: limits(CONSOLE_FRAMES, CONSOLE_COMMAND_QUEUE_RECORDS, CONSOLE_METER_BLOCKS),
+    document: sessionDocument,
+    options: bootOptions(CONSOLE_FRAMES, CONSOLE_COMMAND_QUEUE_RECORDS, CONSOLE_METER_BLOCKS),
     simd128ModuleUrl: ARTIFACT_URL,
     workletModuleUrl: WORKLET_URL,
   });
@@ -401,13 +385,12 @@ async function runConsoleQualification(createHost, sessionToml) {
 /// `armed` is `true` for the first run and `false` for the second, which subscribes and then
 /// immediately unsubscribes -- so the second run proves that an unsubscribe actually stops the
 /// traffic rather than merely being accepted.
-async function runObservationRun(createHost, sessionToml, armed) {
+async function runObservationRun(createHost, sessionDocument, armed) {
   const context = new OfflineAudioContext(2, OBSERVATION_FRAMES, SAMPLE_RATE);
   const host = await createHost({
     context,
-    quantumFrames: QUANTUM_FRAMES,
-    sessionToml,
-    limits: limits(
+    document: sessionDocument,
+    options: bootOptions(
       OBSERVATION_FRAMES,
       CONSOLE_COMMAND_QUEUE_RECORDS,
       CONSOLE_METER_BLOCKS,
@@ -503,22 +486,21 @@ async function runObservationRun(createHost, sessionToml, armed) {
 }
 
 /// Issue #143 E12: the observation row, both runs.
-async function runObservationQualification(createHost, sessionToml) {
-  const armed = await runObservationRun(createHost, sessionToml, true);
-  const disarmed = await runObservationRun(createHost, sessionToml, false);
+async function runObservationQualification(createHost, sessionDocument) {
+  const armed = await runObservationRun(createHost, sessionDocument, true);
+  const disarmed = await runObservationRun(createHost, sessionDocument, false);
   return { armed, disarmed, identicalAudio: armed.renderedDigest === disarmed.renderedDigest };
 }
 
-async function runStallQualification(createHost, sessionToml) {
+async function runStallQualification(createHost, sessionDocument) {
   const context = new OfflineAudioContext(2, STALL_RENDER_FRAMES, SAMPLE_RATE);
   const host = await createHost({
     context,
-    quantumFrames: QUANTUM_FRAMES,
-    sessionToml,
+    document: sessionDocument,
     // #137 E6: the stall runs with a live console attached and its meter lease held, so the
     // 100 ms fault is survived under exactly the command and metering load a mixing console
     // imposes -- and the frozen exact-output requirement is unchanged.
-    limits: limits(DEFAULT_RING_FRAMES, CONSOLE_COMMAND_QUEUE_RECORDS, CONSOLE_METER_BLOCKS),
+    options: bootOptions(DEFAULT_RING_FRAMES, CONSOLE_COMMAND_QUEUE_RECORDS, CONSOLE_METER_BLOCKS),
     simd128ModuleUrl: ARTIFACT_URL,
     workletModuleUrl: WORKLET_URL,
   });
@@ -625,14 +607,14 @@ export async function runQualification() {
     throw new Error("qualification fixture fetch failed");
   }
   const expected = await expectedResponse.json();
-  const sessionToml = new TextEncoder().encode(await sessionResponse.text());
+  const corpusDocument = new TextEncoder().encode(await sessionResponse.text());
   const source = await sourceResponse.json();
-  const stallSessionToml = new TextEncoder().encode(await stallResponse.text());
+  const stallDocument = new TextEncoder().encode(await stallResponse.text());
   // Issue #137 E8: the console row needs a region long enough for one full 128-block telemetry
   // window, which the 40-block stall region is not.
-  const consoleSessionToml = new TextEncoder().encode(await consoleResponse.text());
+  const consoleDocument = new TextEncoder().encode(await consoleResponse.text());
   // Issue #143 E12: the console session plus one compressor, so an armed tap has a real reduction.
-  const observationSessionToml = new TextEncoder().encode(await observationResponse.text());
+  const observationDocument = new TextEncoder().encode(await observationResponse.text());
   const simd128 = WebAssembly.validate(SIMD128_PROBE);
 
   if (!simd128) {
@@ -644,7 +626,7 @@ export async function runQualification() {
         outcome: "miso.unsupported.v1",
         typedRefusal: await typedUnsupportedAttestation(
           createMisoAudioWorkletHost,
-          stallSessionToml,
+          stallDocument,
         ),
       },
       boot: { ready: false, backend: null },
@@ -664,13 +646,13 @@ export async function runQualification() {
   try {
     correctness = {
       runs: [
-        await runCorpusQualification(createMisoAudioWorkletHost, sessionToml, source),
-        await runCorpusQualification(createMisoAudioWorkletHost, sessionToml, source),
+        await runCorpusQualification(createMisoAudioWorkletHost, corpusDocument, source),
+        await runCorpusQualification(createMisoAudioWorkletHost, corpusDocument, source),
       ],
     };
   } catch (error) {
     const [diagnostic, globals] = await Promise.all([
-      diagnoseReady(sessionToml),
+      diagnoseReady(corpusDocument),
       diagnoseGlobals(),
     ]);
     throw new Error(`corpus qualification failed: ${diagnosticJson({
@@ -682,9 +664,9 @@ export async function runQualification() {
   );
   let live;
   try {
-    live = await runConsoleQualification(createMisoAudioWorkletHost, consoleSessionToml);
+    live = await runConsoleQualification(createMisoAudioWorkletHost, consoleDocument);
   } catch (error) {
-    const diagnostic = await diagnoseReady(consoleSessionToml);
+    const diagnostic = await diagnoseReady(consoleDocument);
     throw new Error(`console qualification failed: ${diagnosticJson({
       name: error?.name, message: error?.message, ...error, diagnostic,
     })}`);
@@ -693,17 +675,17 @@ export async function runQualification() {
   try {
     observation = await runObservationQualification(
       createMisoAudioWorkletHost,
-      observationSessionToml,
+      observationDocument,
     );
   } catch (error) {
-    const diagnostic = await diagnoseReady(observationSessionToml);
+    const diagnostic = await diagnoseReady(observationDocument);
     throw new Error(`observation qualification failed: ${diagnosticJson({
       name: error?.name, message: error?.message, ...error, diagnostic,
     })}`);
   }
   let stall;
   try {
-    stall = await runStallQualification(createMisoAudioWorkletHost, stallSessionToml);
+    stall = await runStallQualification(createMisoAudioWorkletHost, stallDocument);
   } catch (error) {
     throw new Error(`stall qualification failed: ${JSON.stringify({ ...error })}`);
   }

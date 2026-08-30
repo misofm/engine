@@ -263,3 +263,15 @@ through `miso_engine_web_v1_source_submit`. Every digest the qualification gates
 none of them can see this edit. Each fix also substitutes 64 hex characters for 64, so
 `console-session.toml` stays 1,265 bytes, `stall-session.toml` 1,263, and
 `observation-session.toml` 2,402 — no resource estimate or byte pin moves either.
+
+## Not this class — the qualification harness's boot refusal (#281)
+
+While #272 was in flight the qualification harness was found to fail at boot with `miso.error.v1`,
+`requestId 0`, `result 1` (issue #281), and the natural reading was that it was the last member of
+this class: a stale document the six repairs above had missed. It is not. All four documents the
+harness boots — the three above plus `tests/browser-v1/session.toml` — already carry the post-#241
+flat source row, and their identities are the derived ones recorded here. The refusal came from the
+*caller*: `qualification/qualification.js` still passed `createMisoAudioWorkletHost` the pre-#240
+`{ quantumFrames, sessionToml, limits }` shape. See
+`docs/derivations/281-qualification-harness-boot.md` for the audit that cleared the documents and
+the derivation of the real cause. The #241 fallout class is closed at six documents.
