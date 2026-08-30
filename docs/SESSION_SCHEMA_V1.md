@@ -91,6 +91,22 @@ are the three lane keys that remain prepared-only. Effect identity is tagged `na
 opaque nonempty text. Native availability/descriptor domains/latency/tail are downstream issue-011
 work; CID/package validity is downstream issue-029 work.
 
+A `native` `effect_id` is therefore a *stable ID*, not a registry lookup: this schema checks its
+syntax and never its membership. `fixtures/session/v1/canonical.toml` exercises exactly that
+boundary. It names `effect_id = "parametric-eq"` without the `miso.` prefix the launch registry
+carries, and it is accepted, compiled and round-tripped all the same; the launch registry would
+refuse it at preparation, which is the point. That spelling is load-bearing rather than a typo.
+The prepare-side tests that consume the fixture
+(`crates/miso-engine-effect-compiler/tests/native_session.rs`) inject a test-local factory whose
+descriptor id is the same unprefixed `parametric-eq`, and the fixture's SHA-256 is pinned three
+levels deep: `fixtures/builtins/v1/benchmark/prepare_256_tracks-{48000,96000}.toml` carry it as
+`session_template_sha256` and `tools/miso-engine-bench` re-derives and compares it at benchmark
+time; `fixtures/builtins/v1/MANIFEST.tsv` digests those two documents; and
+`tools/miso-engine-audit/src/fixture_builtins.rs` pins both the field literal and the manifest's
+own digest. Re-spelling the fixture would move all of them for no behavioural gain. Author new
+sessions from the metadata's registry ids -- `miso.parametric-eq` and the rest -- and do not copy
+this fixture's `effect_id`.
+
 Routes use a tagged source and destination port shape. A source is either
 `{ kind = "track", track_id, tap }` or `{ kind = "submix_output", submix_id }`; a destination is
 either `{ kind = "submix_input", submix_id }` or `{ kind = "output_input", output_id }`. This
