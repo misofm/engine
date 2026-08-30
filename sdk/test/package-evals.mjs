@@ -71,6 +71,28 @@ describe("package entry points", () => {
     }
   });
 
+  test("every import example in the README resolves", async () => {
+    // The example that motivated #278 -- `import { catalog, parameter } from "@misofm/engine"` --
+    // had been wrong since it was written, and stayed wrong because nothing read it. Reading it
+    // here is cheap, and it turns the README's four code blocks into gated claims.
+    const readme = await readFile(resolve(SDK_ROOT, "README.md"), "utf8");
+    const manifest = JSON.parse(await readFile(resolve(SDK_ROOT, "package.json"), "utf8"));
+    const examples = [
+      ...readme.matchAll(/^import \{([^}]+)\} from "(@misofm\/engine[^"]*)";$/gm),
+    ];
+    assert.ok(examples.length >= 4, "the README still carries its import examples");
+    for (const [, bindings, specifier] of examples) {
+      const subpath = specifier.replace("@misofm/engine", ".").replace("./", "./");
+      const target = manifest.exports[subpath === "." ? "." : subpath];
+      assert.ok(target !== undefined, `README imports an undeclared subpath: ${specifier}`);
+      const module = await import(pathToFileURL(resolve(SDK_ROOT, target)).href);
+      for (const binding of bindings.split(",").map((name) => name.trim())) {
+        if (binding.length === 0) continue;
+        assert.ok(binding in module, `${specifier} does not export ${binding}`);
+      }
+    }
+  });
+
   test("the root entry is the module the evals deep-import", async () => {
     const manifest = JSON.parse(await readFile(resolve(SDK_ROOT, "package.json"), "utf8"));
     const root = await import(pathToFileURL(resolve(SDK_ROOT, manifest.exports["."])).href);
