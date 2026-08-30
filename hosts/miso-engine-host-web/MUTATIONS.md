@@ -224,3 +224,25 @@ gate also runs its own copied-fixture mutation suite, so those self-tests never 
 | `check-web-audioworklet.sh` frozen export set | delete `miso_engine_web_v1_boot_result` from the expected list | the artifact reports it as an unexpected wasm export and the exact diff is printed |
 | `check-session-map-shape.py --self-test` via `check-web-audioworklet.sh` | add an unused `handle: u32` parameter to `miso_engine_web_v1_boot_options_ptr`; the same derived probe covers all five S2 boot signatures | RED before any JS/runtime assertion: `miso_engine_web_v1_boot_options_ptr has ABI signature ('handle: u32',) -> u32; expected () -> u32 (the boot family takes no handle)` |
 | `check-browser-expected-resources.py --self-test` plus direct/browser oracle | copied-fixture mutations perturb every resource row and each of the three frozen PCM digests | all 26 mutations are refused; identity, command, and observation PCM digest movement is never admitted as a re-pin |
+
+## Issue #272 — the qualification session identities
+
+The three `qualification/*.toml` documents declared `content` values minted from the old #241
+locator names, not from canonical PCM, and nothing read them. `qualification/session-identities.mjs`
+now re-derives each identity from the harness's own exported generator and `run.mjs::main` calls it
+before a browser launches. Every row below was applied to the working tree, then `node
+./session-identities.mjs` (or `node ./run.mjs`) was run from the qualification directory, the
+failure was observed, and the mutation was reverted in the same session.
+
+| Target | Mutation | Observed failure |
+|---|---|---|
+| `session-identities.mjs` console row | flip one hex digit of `console-session.toml`'s declared `content` | `session-identity: console-session.toml: declared source row is not the fed PCM's canonical identity` |
+| `session-identities.mjs` stall row | flip one hex digit of `stall-session.toml`'s declared `content` | same refusal, naming `stall-session.toml` |
+| `session-identities.mjs` observation row | flip one hex digit of `observation-session.toml`'s declared `content` | same refusal, naming `observation-session.toml` |
+| the #272 defect itself | restore the pre-#272 name-minted `sha256("web-browser-console")` on `console-session.toml` | refused; the check states the derived identity the document must carry |
+| cross-document reuse | declare the stall document's identity on the console document | refused; one digest cannot stand for two different fed regions |
+| shape drift | `frames = 5120` -> `5121` on `stall-session.toml` | refused; shape and identity are one pinned row, because the preimage length is `frames * channels * 4` |
+| generator drift | `OBSERVATION_LEVEL` `0.5` -> `0.25` in `qualification.js` | the derived identity moves to `680aca77…` and the unchanged document is refused — a pinned hex string would have stayed green |
+| generator drift | flip the sign of `sourcePlanes`'s right plane | the console identity moves to `7499a91c…` and the unchanged document is refused |
+| stale row beside a truthful one | add a second `content = "sha256:…"` source row to `stall-session.toml` | `expected exactly one source content identity, found 2` |
+| the check's own comparison | the flipped-digit self-proof inside `checkSessionIdentities` | asserts a one-digit-off identity never matches, so the comparison cannot be loosened into a vacuous pass |

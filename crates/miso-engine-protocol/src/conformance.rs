@@ -25,6 +25,19 @@ pub enum ConformanceDecoder {
     Transaction,
 }
 
+/// The frozen FNV-1a-64 roll of `complete_schema_corpus()` over each frame's `(name, bytes)`,
+/// seeded with the 64-bit offset basis `0xcbf2_9ce4_8422_2325` and multiplied by the prime
+/// `0x0000_0100_0000_01b3`.
+///
+/// This is the ONE pin. Before #274 the value was written out twice -- in
+/// `tests/conformance_corpus.rs` and again in `src/bin/miso_engine_protocol_wasm_golden.rs` --
+/// and the Wasm copy silently fell two re-pins behind (`b454b230`, then #241's `04d291dd`)
+/// because the gate that should have caught it could not fail. Both runners now read this
+/// constant, so a re-pin is one edit and the two arms cannot disagree by omission; if the Wasm
+/// arm ever computes something else, that is a real target divergence and the parity gate says so.
+/// The arithmetic behind the current value is in `docs/derivations/274-parity-repin.md`.
+pub const COMPLETE_SCHEMA_HASH: u64 = 0xbdeb_b0f8_1c38_ec42;
+
 /// Build every command, successful response, registered non-OK status, event, and all-opcode
 /// session transaction using only public typed encoder entry points.
 #[must_use]
