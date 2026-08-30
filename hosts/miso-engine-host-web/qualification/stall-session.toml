@@ -6,7 +6,7 @@ quantum_frames = 128
 render_profile = { id = "native", mode = "single_thread" }
 output_profile = { id = "main", channels = 2, sample_format = "f32_planar" }
 sources = [
-  { id = "stall-source", content = "sha256:1e28ad43a89d6d07535a24c5e6ee11c42d2227bcd75a8238fb891bab713b907d", channels = 2, bit_depth = "32f", frames = 5120 },
+  { id = "stall-source", content = "sha256:938d3a47555b54df6321fc9e1b40c9581d316870f70fa17be8ea40cc154436d7", channels = 2, bit_depth = "32f", frames = 5120 },
 ]
 submixes = []
 outputs = [{ id = "main-out" }]
