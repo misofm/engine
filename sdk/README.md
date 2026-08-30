@@ -6,7 +6,7 @@ and an agent-facing parameter surface that speaks decimals and ranks rather than
 ## Consuming this package: vendored source, not a build
 
 **There is no `dist/`, and there is not going to be one.** `tsconfig.json` is `noEmit`, the package
-is `private`, and the contract is that a consuming app **vendors `sdk/src/**` as bundled source**.
+is `private`, and the contract is that a consuming app vendors `sdk/src/**` as bundled source.
 Issue #278 recorded the drift this created: the `exports` map pointed at `./dist/index.js` and two
 siblings that no script produced, so all three public specifiers resolved to nothing while every
 eval in `sdk/test/` kept passing, because they deep-import `../src/**` by relative path. The map
