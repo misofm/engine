@@ -92,9 +92,18 @@ Routes use a tagged source and destination port shape. A source is either
 `{ kind = "track", track_id, tap }` or `{ kind = "submix_output", submix_id }`; a destination is
 either `{ kind = "submix_input", submix_id }` or `{ kind = "output_input", output_id }`. This
 makes output sources and track destinations unrepresentable. Routed sidechains reuse the tagged
-source shape and require a nonempty stable `port_id`; port existence remains downstream work. The
-only track taps are `input`, `post_input_builtins`, `post_simd1`, `post_dynamic`,
-`post_simd2_pre_fader`, `post_fader`, and `post_matrix`.
+source shape and require a nonempty stable `port_id`. Port *existence* is still not an issue-004
+concern -- the schema layer never sees a descriptor -- but it is no longer downstream work either:
+`prepare_native_session_effects` refuses an unknown port at boot with
+`effect.sidechain.unknown_port` (`crates/miso-engine-effect-compiler/src/prepare.rs:1113`), beside
+`effect.sidechain.missing` for a required declared port the session left unconnected and
+`effect.sidechain.unexpected` for a routed sidechain the descriptor does not declare at all. A
+session naming a port no descriptor declares therefore parses, validates and compiles, and then
+fails preparation. The generated SDK catalog publishes each effect's parameters and observations
+but no port table, so `portId` is the one session field an SDK builder cannot check before boot;
+issue #275 records that gap rather than closing it. The only track taps are `input`,
+`post_input_builtins`, `post_simd1`, `post_dynamic`, `post_simd2_pre_fader`, `post_fader`, and
+`post_matrix`.
 
 Issue 004 owns structural validity, ID syntax/uniqueness, references whose declaration role is
 already represented by this schema, finite/`f32`/unit-local ranges, source identity/shape bounds,
