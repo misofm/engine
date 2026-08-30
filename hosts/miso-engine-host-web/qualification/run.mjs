@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
-import { readFile, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 import { chromium, firefox, webkit } from "playwright";
 import { renderMatrix } from "./generate-matrix.mjs";
 import { checkSessionIdentities } from "./session-identities.mjs";
-import { startQualificationServer } from "./server.mjs";
+import { ARTIFACT_NAMES, exactArtifacts, startQualificationServer } from "./server.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const HOST_WEB = path.dirname(HERE);
@@ -153,6 +154,71 @@ function mutationProofs(browserName, result) {
   }
 }
 
+// Issue #280: the served artifact set is *exact*, and both halves of that are proved here.
+//
+// The set drifted to five names when #243 added `miso-engine-v2-abi-layout.json`, so
+// `npm run qualify` refused the very directory `scripts/build-web-audioworklet.sh` produces --
+// before any browser started. Widening a pin can silently become loosening it, so this walks the
+// real built directory: the shipped six are accepted, removing *any one* of them is refused
+// (including the sixth, which is what proves the widening is not a five-name pin with a hole in
+// it), one stray file is refused, and a directory wearing an artifact's name is refused as not a
+// regular file. Every mutation is made on a copy under a temporary root; the built artifacts are
+// never touched.
+async function artifactSetProofs(artifacts) {
+  const root = await mkdtemp(path.join(os.tmpdir(), "miso-qualification-artifact-set-"));
+  const refusesSet = (directory, mutation) => assert.rejects(
+    () => exactArtifacts(directory),
+    (error) => error instanceof Error
+      && error.message === "artifact directory must contain the exact shipped six-file set",
+    `artifact-set: ${mutation}: red mutation escaped the artifact pin`,
+  );
+  try {
+    const shipped = path.join(root, "shipped");
+    await cp(artifacts, shipped, { recursive: true });
+    const names = (await readdir(shipped)).sort();
+    assert.deepEqual(names, [...ARTIFACT_NAMES].sort(),
+      "artifact-set: the built directory is not the exact shipped set");
+    // Green on the unmutated build, so the refusals below are refusals of the mutation and not of
+    // something the directory was already failing.
+    await exactArtifacts(shipped);
+    for (const name of names) {
+      const missing = path.join(root, `missing-${name}`);
+      await cp(shipped, missing, { recursive: true });
+      await rm(path.join(missing, name));
+      await refusesSet(missing, `${name} removed`);
+    }
+    // The W4-D1 artifact this project deliberately stopped shipping: the exact spelling of a stray
+    // file a stale build tree would leave behind.
+    const STRAY = "miso-engine-v2-audio-worklet.scalar.wasm";
+    const stray = path.join(root, "stray");
+    await cp(shipped, stray, { recursive: true });
+    await writeFile(path.join(stray, STRAY), "");
+    await refusesSet(stray, "one stray file added");
+    // Substitution keeps the *count* at six, so only the name test can catch it. Without this row
+    // the name test could be deleted and every other row would stay green.
+    for (const name of names) {
+      const substituted = path.join(root, `substituted-${name}`);
+      await cp(shipped, substituted, { recursive: true });
+      await rm(path.join(substituted, name));
+      await writeFile(path.join(substituted, STRAY), "");
+      await refusesSet(substituted, `${name} replaced by a stray of the same count`);
+    }
+    const directoryNamedLikeAnArtifact = path.join(root, "not-a-regular-file");
+    await cp(shipped, directoryNamedLikeAnArtifact, { recursive: true });
+    await rm(path.join(directoryNamedLikeAnArtifact, "miso-engine-v2-abi-layout.json"));
+    await mkdir(path.join(directoryNamedLikeAnArtifact, "miso-engine-v2-abi-layout.json"));
+    await assert.rejects(
+      () => exactArtifacts(directoryNamedLikeAnArtifact),
+      (error) => error instanceof Error
+        && error.message === "artifact is not a regular file: miso-engine-v2-abi-layout.json",
+      "artifact-set: directory named like an artifact: red mutation escaped the artifact pin",
+    );
+    return names.length;
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
 function normalizedRow(browserName, browserVersion, outcome) {
   const passed = outcome === "simd128 supported";
   return {
@@ -252,6 +318,11 @@ async function main() {
   const proveMutations = process.argv.includes("--self-test-mutations");
   if (recordMatrix && browserOption !== "all") {
     throw new Error("--record-matrix requires --browser all");
+  }
+
+  if (proveMutations) {
+    const served = await artifactSetProofs(artifacts);
+    process.stdout.write(`artifact set: the exact ${served}-file shipped set is pinned\n`);
   }
 
   const checked = checkMatrix

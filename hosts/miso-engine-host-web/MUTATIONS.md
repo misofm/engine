@@ -246,3 +246,48 @@ failure was observed, and the mutation was reverted in the same session.
 | generator drift | flip the sign of `sourcePlanes`'s right plane | the console identity moves to `7499a91c…` and the unchanged document is refused |
 | stale row beside a truthful one | add a second `content = "sha256:…"` source row to `stall-session.toml` | `expected exactly one source content identity, found 2` |
 | the check's own comparison | the flipped-digit self-proof inside `checkSessionIdentities` | asserts a one-digit-off identity never matches, so the comparison cannot be loosened into a vacuous pass |
+
+## Issues #280 and #281 — the qualification harness's artifact pin and its boot options
+
+Two defects that together kept `npm run qualify` — the step
+`.github/workflows/browser-qualification.yml` runs — from reaching a browser at all on `main`.
+Derivations, the document audit that cleared the #241-fallout hypothesis, and the
+digest-immobility argument are in `docs/derivations/281-qualification-harness-boot.md`.
+
+### #280 — the served artifact set, five names to six
+
+`server.mjs::exactArtifacts` still required #139's five-file set; `build-web-audioworklet.sh` has
+emitted six since #243. Every row below was applied to the working tree, then
+`node ./run.mjs --artifacts <build> --browser chromium --self-test-mutations` was run from the
+qualification directory (the artifact proofs run before the server starts, so each failure lands in
+seconds), the failure was observed, and the mutation was reverted in the same session.
+`run.mjs::artifactSetProofs` mutates *copies* of the real built directory under a temporary root,
+so the built artifacts are never touched.
+
+| Target | Mutation | Observed failure |
+|---|---|---|
+| the #280 defect itself | restore the pre-#280 five-name `ARTIFACT_NAMES` | `artifact-set: the built directory is not the exact shipped set` — the shipped six-file build is refused, which is the workflow-blocking behaviour |
+| `exactArtifacts` count clause | delete `names.length !== ARTIFACT_NAMES.size` (a subset would pass) | `Missing expected rejection: artifact-set: miso-engine-v2-abi-layout.json removed: red mutation escaped the artifact pin` |
+| `exactArtifacts` name clause | delete `names.some((name) => !ARTIFACT_NAMES.has(name))` (a substitution keeping the count at six would pass) | `Missing expected rejection: artifact-set: miso-engine-v2-abi-layout.json replaced by a stray of the same count: red mutation escaped the artifact pin` |
+| `exactArtifacts` regular-file clause | delete the `stat(...).isFile()` loop | `Missing expected rejection: artifact-set: directory named like an artifact: red mutation escaped the artifact pin` |
+| the whole set check | delete the `throw` and its condition outright | `Missing expected rejection: artifact-set: miso-engine-v2-abi-layout.json removed: …` |
+
+The proof set covers all six names in both directions: each one removed (which no minimum-style
+pin survives) and each one replaced by a stray of the same count (which no count-only pin
+survives), plus one stray added and one directory wearing an artifact's name. That is what keeps
+"widen the pin" from becoming "loosen the pin".
+
+### #281 — the pre-#240 caller shape
+
+`qualification.js` still called `createMisoAudioWorkletHost` with
+`{ quantumFrames, sessionToml, limits }`; #240 replaced that with `{ document, options }` and cut
+`limits`'s 21 capacity ceilings down to six boot words. Both guards are `hasExactFields`, so the
+harness was refused with `miso.error.v1` requestId 0 result 1 before the module was fetched. Each
+row was applied to `qualification.js`, `node ./run.mjs --artifacts <build> --browser chromium` was
+run, the failure was observed, and the mutation was reverted in the same session.
+
+| Target | Mutation | Observed failure |
+|---|---|---|
+| the #281 defect itself | restore `quantumFrames`/`sessionToml`/`limits` on the corpus row | `chromium: browser-execution: corpus qualification failed: {"error":{"tag":"miso.error.v1","requestId":0,"result":1}, …}` — the exact transcript #281 reported. The `diagnostic` leg now answers `miso.ready.v1` result 0 with a full resource report, so the refusal is localized to the caller rather than echoing itself |
+| `bootOptions` completeness | delete `maximumMemoryBytes: 0n` | same typed refusal; the six boot words are not optional |
+| `bootOptions` exactness | leave one #240-deleted ceiling (`sessionTomlBytes: 1 << 20`) in the returned object | same typed refusal; a superset is as invalid as a subset |

@@ -8,13 +8,20 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const HOST_WEB = path.dirname(HERE);
 const FIXTURE = path.join(HOST_WEB, "tests", "browser-v1");
 const DEMO = path.join(HOST_WEB, "demo");
-const ARTIFACT_NAMES = new Set([
+// Issue #280: the set is six files, and it is exact -- a missing file and a stray file are both
+// refusals, because the qualification leg must serve the shipped release directory and nothing
+// else. `scripts/check-web-audioworklet.sh` and
+// `scripts/web-audioworklet-browser-correctness.py` enumerate the same six; this list drifted to
+// five when #243 added the ABI layout.
+export const ARTIFACT_NAMES = new Set([
   "miso-engine-v2-audio-worklet.simd128.wasm",
   "miso-engine-v2-audio-worklet.js",
   "miso-engine-v2-audio-worklet-host.js",
   "miso-engine-v2-audio-worklet-host.d.ts",
   // Issue #137 D4: the parameter metadata ships with the module and is served with it.
   "miso-engine-v2-parameter-metadata.json",
+  // Issue #243: so does the ABI layout, emitted by the same generator from the same engine.
+  "miso-engine-v2-abi-layout.json",
 ]);
 const CONTENT_TYPES = new Map([
   [".d.ts", "text/plain; charset=utf-8"],
@@ -30,10 +37,10 @@ function contentType(file) {
   return CONTENT_TYPES.get(path.extname(file)) ?? "application/octet-stream";
 }
 
-async function exactArtifacts(directory) {
+export async function exactArtifacts(directory) {
   const names = await readdir(directory);
   if (names.length !== ARTIFACT_NAMES.size || names.some((name) => !ARTIFACT_NAMES.has(name))) {
-    throw new Error("artifact directory must contain the exact shipped five-file set");
+    throw new Error("artifact directory must contain the exact shipped six-file set");
   }
   for (const name of names) {
     if (!(await stat(path.join(directory, name))).isFile()) {
