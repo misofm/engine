@@ -54,11 +54,14 @@ An automation target's `rack` is one of four tokens: the three effect racks `sim
 The strip is a chassis rather than a rack of instances, so it has no `effect_id` to identify; the
 key is required all the same (V1 has no optional fields) and carries the fixed validated literal
 `"strip"`. Its `parameter_id` is a builtin parameter ABI id, restricted to the rows that declare
-`blockTarget`: `polarity_invert` (1), `trim_db` (2), `fader_db` (5), `mute` (6) and the four
-`matrix_*` coefficients (7-10). The prepared-only rows -- `hpf_hz` (3), `lpf_hz` (4),
-`delay_samples` (11) -- are **refused**, because a span addressed at a parameter with no
-post-preparation write path could only ever be inert. `channel` follows the row's scope: the
-per-lane rows accept `left`, `right` or `both`, the four shared matrix coefficients only `both`.
+`blockTarget`: `polarity_invert` (1), `trim_db` (2), `fader_db` (5), `mute` (6), the four
+`matrix_*` coefficients (7-10) and -- since #242, under #239 ruling 5461507633 B4 -- `pan` (12).
+That is **nine** rows, and `BUILTIN_AUTOMATION_TARGETS` in
+`crates/miso-engine-session/src/validate.rs` is the list. The prepared-only rows -- `hpf_hz` (3),
+`lpf_hz` (4), `delay_samples` (11) -- are **refused**, because a span addressed at a parameter with
+no post-preparation write path could only ever be inert. `channel` follows the row's scope: the
+five per-lane rows accept `left`, `right` or `both`, the four shared matrix coefficients only
+`both`.
 
 **The automation table is consumed by nothing today.** No lowering reads it, for the strip or for
 any of the three effect racks: a valid target is valid-and-inert syntax that authors, round-trips
@@ -88,13 +91,38 @@ are the three lane keys that remain prepared-only. Effect identity is tagged `na
 opaque nonempty text. Native availability/descriptor domains/latency/tail are downstream issue-011
 work; CID/package validity is downstream issue-029 work.
 
+A `native` `effect_id` is therefore a *stable ID*, not a registry lookup: this schema checks its
+syntax and never its membership. `fixtures/session/v1/canonical.toml` exercises exactly that
+boundary. It names `effect_id = "parametric-eq"` without the `miso.` prefix the launch registry
+carries, and it is accepted, compiled and round-tripped all the same; the launch registry would
+refuse it at preparation, which is the point. That spelling is load-bearing rather than a typo.
+The prepare-side tests that consume the fixture
+(`crates/miso-engine-effect-compiler/tests/native_session.rs`) inject a test-local factory whose
+descriptor id is the same unprefixed `parametric-eq`, and the fixture's SHA-256 is pinned three
+levels deep: `fixtures/builtins/v1/benchmark/prepare_256_tracks-{48000,96000}.toml` carry it as
+`session_template_sha256` and `tools/miso-engine-bench` re-derives and compares it at benchmark
+time; `fixtures/builtins/v1/MANIFEST.tsv` digests those two documents; and
+`tools/miso-engine-audit/src/fixture_builtins.rs` pins both the field literal and the manifest's
+own digest. Re-spelling the fixture would move all of them for no behavioural gain. Author new
+sessions from the metadata's registry ids -- `miso.parametric-eq` and the rest -- and do not copy
+this fixture's `effect_id`.
+
 Routes use a tagged source and destination port shape. A source is either
 `{ kind = "track", track_id, tap }` or `{ kind = "submix_output", submix_id }`; a destination is
 either `{ kind = "submix_input", submix_id }` or `{ kind = "output_input", output_id }`. This
 makes output sources and track destinations unrepresentable. Routed sidechains reuse the tagged
-source shape and require a nonempty stable `port_id`; port existence remains downstream work. The
-only track taps are `input`, `post_input_builtins`, `post_simd1`, `post_dynamic`,
-`post_simd2_pre_fader`, `post_fader`, and `post_matrix`.
+source shape and require a nonempty stable `port_id`. Port *existence* is still not an issue-004
+concern -- the schema layer never sees a descriptor -- but it is no longer downstream work either:
+`prepare_native_session_effects` refuses an unknown port at boot with
+`effect.sidechain.unknown_port` (`crates/miso-engine-effect-compiler/src/prepare.rs:1113`), beside
+`effect.sidechain.missing` for a required declared port the session left unconnected and
+`effect.sidechain.unexpected` for a routed sidechain the descriptor does not declare at all. A
+session naming a port no descriptor declares therefore parses, validates and compiles, and then
+fails preparation. The generated SDK catalog publishes each effect's parameters and observations
+but no port table, so `portId` is the one session field an SDK builder cannot check before boot;
+issue #275 records that gap rather than closing it. The only track taps are `input`,
+`post_input_builtins`, `post_simd1`, `post_dynamic`, `post_simd2_pre_fader`, `post_fader`, and
+`post_matrix`.
 
 Issue 004 owns structural validity, ID syntax/uniqueness, references whose declaration role is
 already represented by this schema, finite/`f32`/unit-local ranges, source identity/shape bounds,

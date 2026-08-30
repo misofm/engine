@@ -5,18 +5,9 @@
   "type": "module",
   "sideEffects": false,
   "exports": {
-    ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
-    },
-    "./headless": {
-      "types": "./dist/headless/index.d.ts",
-      "import": "./dist/headless/index.js"
-    },
-    "./browser": {
-      "types": "./dist/browser/index.d.ts",
-      "import": "./dist/browser/index.js"
-    }
+    ".": "./src/index.ts",
+    "./headless": "./src/headless/index.ts",
+    "./browser": "./src/browser/index.ts"
   },
   "engines": {
     "node": ">=20"
