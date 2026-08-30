@@ -109,6 +109,23 @@ function sourcePlanes(blockIndex) {
   return [left, right];
 }
 
+// The observation row's fed block: a constant level on both channels, high enough above the
+// compressor's -30 dBFS threshold that an armed tap has a real reduction to publish. Every block is
+// identical, so `blockIndex` is unused -- it is taken anyway to keep the one shape every fed-PCM
+// generator in this harness has, which is what `session-identities.mjs` walks.
+function observationPlanes(_blockIndex) {
+  const storage = new ArrayBuffer(QUANTUM_FRAMES * 2 * Float32Array.BYTES_PER_ELEMENT);
+  const left = new Float32Array(storage, 0, QUANTUM_FRAMES);
+  const right = new Float32Array(
+    storage,
+    QUANTUM_FRAMES * Float32Array.BYTES_PER_ELEMENT,
+    QUANTUM_FRAMES,
+  );
+  left.fill(OBSERVATION_LEVEL);
+  right.fill(OBSERVATION_LEVEL);
+  return [left, right];
+}
+
 function corpusPlanes(description) {
   const storage = new ArrayBuffer(QUANTUM_FRAMES * 2 * Float32Array.BYTES_PER_ELEMENT);
   const left = new Float32Array(storage, 0, QUANTUM_FRAMES);
@@ -403,18 +420,6 @@ async function runObservationRun(createHost, sessionToml, armed) {
   host.node.connect(context.destination);
 
   const frames = [];
-  const planes = () => {
-    const storage = new ArrayBuffer(QUANTUM_FRAMES * 2 * Float32Array.BYTES_PER_ELEMENT);
-    const left = new Float32Array(storage, 0, QUANTUM_FRAMES);
-    const right = new Float32Array(
-      storage,
-      QUANTUM_FRAMES * Float32Array.BYTES_PER_ELEMENT,
-      QUANTUM_FRAMES,
-    );
-    left.fill(OBSERVATION_LEVEL);
-    right.fill(OBSERVATION_LEVEL);
-    return [left, right];
-  };
   for (let block = 0; block < OBSERVATION_BLOCKS; block += 1) {
     const acknowledgement = await host.submitSource({
       requestId: block + 1,
@@ -422,7 +427,7 @@ async function runObservationRun(createHost, sessionToml, armed) {
       generation: 1n,
       startFrame: BigInt(block * QUANTUM_FRAMES),
       sampleRateHz: SAMPLE_RATE,
-      planes: planes(),
+      planes: observationPlanes(block),
       frames: QUANTUM_FRAMES,
       endOfRegion: block === OBSERVATION_BLOCKS - 1,
     });
@@ -727,4 +732,35 @@ export const qualificationConstants = Object.freeze({
   defaultRingFrames: DEFAULT_RING_FRAMES,
   minimumStallMs: MINIMUM_STALL_MS,
   processorName: PROCESSOR_NAME,
+  quantumFrames: QUANTUM_FRAMES,
+  sourceChannels: 2,
+  sourceBitDepth: "32f",
 });
+
+// Issue #272: the fed-PCM generator behind each qualification session document, exported so the
+// harness runner can re-derive that document's declared `content` identity from the exact same
+// code the browser feeds. Every row states the generator, the block count fed, and the source row
+// the document must declare; the identity itself is derived, never written down here, so a
+// generator change and a stale document cannot agree. `startFrame` is always `block *
+// quantumFrames` and `endOfRegion` lands on the last block, so the fed region is exactly
+// `blocks * quantumFrames` frames -- the declared `frames`.
+export const qualificationSessionSources = Object.freeze([
+  Object.freeze({
+    document: "console-session.toml",
+    sourceId: "console-source",
+    blocks: CONSOLE_BLOCKS,
+    planes: sourcePlanes,
+  }),
+  Object.freeze({
+    document: "observation-session.toml",
+    sourceId: "console-source",
+    blocks: OBSERVATION_BLOCKS,
+    planes: observationPlanes,
+  }),
+  Object.freeze({
+    document: "stall-session.toml",
+    sourceId: "stall-source",
+    blocks: STALL_FRAMES / QUANTUM_FRAMES,
+    planes: sourcePlanes,
+  }),
+]);

@@ -11,7 +11,8 @@
     "flac-decoder": "node ./run-flac-decoder.mjs",
     "flac-throughput": "node ./run-flac-decoder-throughput.mjs",
     "matrix": "node ./generate-matrix.mjs",
-    "qualify": "node ./run.mjs"
+    "qualify": "node ./run.mjs",
+    "session-identities": "node ./session-identities.mjs"
   },
   "devDependencies": {
     "playwright": "1.62.1"

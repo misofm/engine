@@ -5,6 +5,7 @@ import process from "node:process";
 import { fileURLToPath } from "node:url";
 import { chromium, firefox, webkit } from "playwright";
 import { renderMatrix } from "./generate-matrix.mjs";
+import { checkSessionIdentities } from "./session-identities.mjs";
 import { startQualificationServer } from "./server.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -229,6 +230,14 @@ function validateCheckedRow(browserName, actual, checked) {
 }
 
 async function main() {
+  // Issue #272: before a browser is launched, prove every qualification session document declares
+  // the canonical-PCM identity of the audio this harness actually feeds it. It is a static check --
+  // no artifacts, no browser -- and it runs first so a false identity can never be sealed by a
+  // green matrix run. See `docs/derivations/241-browser-source-identities.md`.
+  const identities = await checkSessionIdentities();
+  process.stdout.write(
+    `session identities: ${identities.length} qualification documents declare their fed PCM\n`,
+  );
   const artifacts = option("--artifacts");
   if (artifacts === null) {
     throw new Error("usage: npm run qualify -- --artifacts DIR [--browser NAME] [--check-matrix|--record-matrix] [--self-test-mutations]");
