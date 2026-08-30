@@ -85,6 +85,24 @@ OBSERVATION_VOCABULARIES = {
     "channels": OBSERVATION_CHANNELS,
 }
 
+EFFECT_PORT_KEYS = {"id", "role", "roleName", "required", "layout", "layoutName"}
+# Issue #278: the two closed port vocabularies. Three roles and one lane layout is the whole of
+# `PortRole`/`PortLayout`, so a document that names a fourth role or a second layout is describing
+# an engine this validator was not written against and must be refused rather than skimmed.
+PORT_ROLES = {1: "mainInput", 2: "mainOutput", 3: "sidechainInput"}
+PORT_LAYOUTS = {1: "dualMonoPlanar"}
+# The launch port table, spelled here rather than imported for exactly the reason `COMMAND_KINDS`
+# is: the generator walks the Rust registry and this walks the emitted JSON, so the two agreeing is
+# evidence rather than a tautology. Each role has one launch id and one launch `required` answer --
+# the main pair is mandatory, a sidechain input never is -- and the SDK's derived port-name type is
+# built from these strings, so a row that disagrees with the registry would retype an authoring
+# surface silently.
+LAUNCH_PORT_IDS = {"mainInput": "main-in", "mainOutput": "main-out", "sidechainInput": "sidechain-in"}
+LAUNCH_PORT_REQUIRED = {"mainInput": True, "mainOutput": True, "sidechainInput": False}
+# Exactly two launch effects declare a sidechain input. An effect that gained or lost one without
+# this list moving is drift between the engine and every consumer that authors against the table.
+SIDECHAIN_EFFECTS = {"miso.compressor", "miso.gate-expander"}
+
 BUILTIN_PARAMETER_KEYS = {
     "id", "name", "scope", "mapping", "domain", "minimum", "maximum", "maximumByRate", "default",
     "updateRate", "smoothing", "reset", "disabledValue", "liveUpdatable", "step",
@@ -293,7 +311,7 @@ def validate(document: dict) -> None:
     for effect in document["effects"]:
         require(set(effect) == {
             "id", "displayName", "contractMajor", "contractMinor", "stateLayoutVersion",
-            "parameters", "observations",
+            "parameters", "ports", "observations",
         }, "effect keys")
         require(isinstance(effect["id"], str) and effect["id"], "effect id")
         require(effect["contractMajor"] == 1, "effect contract major")
@@ -305,6 +323,26 @@ def validate(document: dict) -> None:
         require(all(value >= 1 for value in ids), "parameter ids are nonzero")
         for parameter in effect["parameters"]:
             validate_effect_parameter(parameter)
+        # Issue #278: never absent. The port table is the authority a session's
+        # `sidechain.port_id` is checked against, so its shape is a rule rather than a convention:
+        # the descriptor's own order is role-ascending, an effect has exactly one main input and
+        # one main output, and it has a sidechain input exactly when the registry says it does.
+        ports = effect["ports"]
+        require(isinstance(ports, list), "effect ports is a list")
+        for port in ports:
+            validate_effect_port(port)
+        roles = [port["role"] for port in ports]
+        require(roles == sorted(roles), "port roles ascend")
+        port_ids = [port["id"] for port in ports]
+        require(len(set(port_ids)) == len(port_ids), "port id uniqueness")
+        names = [port["roleName"] for port in ports]
+        require(names.count("mainInput") == 1, "exactly one main input port")
+        require(names.count("mainOutput") == 1, "exactly one main output port")
+        require(names.count("sidechainInput") <= 1, "at most one sidechain input port")
+        require(
+            ("sidechainInput" in names) == (effect["id"] in SIDECHAIN_EFFECTS),
+            f"{effect['id']} declares a sidechain input exactly when the registry does",
+        )
         # Issue #143: never absent, and possibly empty. A tap menu is ascending and nonzero for the
         # same reason a parameter table is: the id is the addressing authority.
         observations = effect["observations"]
@@ -315,6 +353,29 @@ def validate(document: dict) -> None:
         require(all(value >= 1 for value in tap_ids), "observation ids are nonzero")
         for observation in observations:
             validate_effect_observation(observation)
+
+
+def validate_effect_port(port: dict) -> None:
+    require(set(port) == EFFECT_PORT_KEYS, "effect port keys")
+    require(
+        PORT_ROLES.get(port["role"]) == port["roleName"], "port role name agrees with value"
+    )
+    require(
+        PORT_LAYOUTS.get(port["layout"]) == port["layoutName"],
+        "port layout name agrees with value",
+    )
+    require(isinstance(port["id"], str) and port["id"], "port id")
+    require(isinstance(port["required"], bool), "port required is a boolean")
+    # The registry agreement: this role's launch id and its launch `required` answer. A renamed
+    # port or a sidechain that claims to be mandatory both land here.
+    require(
+        port["id"] == LAUNCH_PORT_IDS[port["roleName"]],
+        f"the {port['roleName']} port is '{LAUNCH_PORT_IDS[port['roleName']]}'",
+    )
+    require(
+        port["required"] == LAUNCH_PORT_REQUIRED[port["roleName"]],
+        f"the {port['roleName']} port's required flag agrees with the registry",
+    )
 
 
 def validate_effect_observation(observation: dict) -> None:
@@ -636,6 +697,58 @@ def self_test() -> int:
         (
             "a block-target builtin denies being live",
             lambda d: d["builtins"]["parameters"][4].update(liveUpdatable=False),
+        ),
+        # Issue #278. `effects[0]` is `miso.compressor` -- main-in, main-out and the optional
+        # `sidechain-in` -- and `effects[1]` is `miso.delay`, which declares only the main pair.
+        # Between them every way the port table can lie is red: the key gone, a role or layout
+        # outside the closed vocabulary, and a row that disagrees with the registry it was
+        # transcribed from.
+        (
+            "the ports key is removed",
+            lambda d: d["effects"][0].pop("ports"),
+        ),
+        # Only the scalar moves in the two vocabulary mutations, so the name stays legal and the
+        # per-role registry rules below still resolve: the ONLY rule left to catch them is the
+        # closed vocabulary itself. A mutation that broke three rules at once would prove nothing
+        # about which of the three is load-bearing.
+        (
+            "a port row invents a role",
+            lambda d: d["effects"][0]["ports"][2].update(role=4),
+        ),
+        (
+            "a port role name disagrees with its value",
+            lambda d: d["effects"][0]["ports"][0].update(roleName="mainOutput"),
+        ),
+        (
+            "a port row invents a lane layout",
+            lambda d: d["effects"][0]["ports"][0].update(layout=2),
+        ),
+        (
+            "a port row is renamed away from the registry",
+            lambda d: d["effects"][0]["ports"][2].update(id="sidechain"),
+        ),
+        (
+            "the sidechain port claims to be required",
+            lambda d: d["effects"][0]["ports"][2].update(required=True),
+        ),
+        (
+            "an effect loses its declared sidechain port",
+            lambda d: d["effects"][0]["ports"].pop(),
+        ),
+        (
+            "a sidechain-free effect invents one",
+            lambda d: d["effects"][1]["ports"].append({
+                "id": "sidechain-in", "role": 3, "roleName": "sidechainInput",
+                "required": False, "layout": 1, "layoutName": "dualMonoPlanar",
+            }),
+        ),
+        (
+            "an effect loses its main output port",
+            lambda d: d["effects"][1]["ports"].pop(),
+        ),
+        (
+            "port roles are emitted out of order",
+            lambda d: d["effects"][0]["ports"].reverse(),
         ),
         (
             "unit name disagrees with unit value",

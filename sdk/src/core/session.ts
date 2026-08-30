@@ -237,6 +237,53 @@ function effectDescriptor(effectId: string, path: string): EffectDescriptor {
   return found;
 }
 
+/** `'a', 'b' and 'c'` -- the candidate list a refusal quotes back. */
+function nameList(names: readonly string[]): string {
+  const quoted = names.map((name) => `'${name}'`);
+  if (quoted.length <= 1) return quoted.join("");
+  return `${quoted.slice(0, -1).join(", ")} and ${quoted[quoted.length - 1]}`;
+}
+
+/**
+ * Resolve a routed sidechain's port against the effect's own declared port table (issue #278).
+ *
+ * Until the catalog published `ports`, this was the one session field a builder could not check:
+ * a misspelled `portId` parsed, validated, compiled, and only then failed preparation with
+ * `effect.sidechain.unknown_port` -- a refusal that names the code but not the line that wrote it.
+ * The engine's three refusals are unmoved and remain the authority. What this adds is that the
+ * same three become authoring-time refusals that name the legal ports while the offending
+ * `effect()` call is still on the stack:
+ *
+ * - a port no descriptor declares                  -> `effect.sidechain.unknown_port`
+ * - a port that exists but is not a sidechain input -> `effect.sidechain.unknown_port`
+ * - a routed sidechain on an effect with none      -> `effect.sidechain.unexpected`
+ */
+function sidechainPort(descriptor: EffectDescriptor, portId: string, path: string): void {
+  // Widened deliberately: `portId` arrives as `string` on this path precisely because the caller
+  // may not have typechecked, so a narrow literal array could not be asked about it.
+  const inputs: readonly string[] = descriptor.ports
+    .filter((port) => port.roleName === "sidechainInput")
+    .map((port) => port.id);
+  if (inputs.length === 0) {
+    fail(
+      path,
+      `${descriptor.id} declares no sidechain input port -- its ports are `
+        + `${nameList(descriptor.ports.map((port) => port.id))} -- so it cannot take a routed `
+        + `sidechain`,
+    );
+  }
+  if (!inputs.includes(portId)) {
+    const declared = descriptor.ports.find((port) => port.id === portId);
+    fail(
+      path,
+      declared === undefined
+        ? `${descriptor.id} has no port '${portId}'; its sidechain inputs are ${nameList(inputs)}`
+        : `'${portId}' is ${descriptor.id}'s ${declared.roleName} port, not a sidechain input; `
+          + `its sidechain inputs are ${nameList(inputs)}`,
+    );
+  }
+}
+
 /** A builtin whose catalog domain is a plain inclusive range: `trim_db`, `fader_db`, `pan`, ... */
 function builtinNumber(name: string, value: unknown, path: string): number {
   const row = builtin(name);
@@ -364,7 +411,7 @@ function parameterScalar(row: EffectParameterRow, value: unknown, path: string):
 export function effect<E extends EffectId>(
   effectId: E,
   parameters: EffectParamValues<E> = {},
-  options: EffectOptions = {},
+  options: EffectOptions<E> = {},
 ): EffectDecl<E> {
   const descriptor = effectDescriptor(effectId, "effect().effectId");
   const path = `effect("${effectId}")`;
@@ -383,9 +430,15 @@ export function effect<E extends EffectId>(
   }
   if (options.sidechain !== undefined) {
     validateRouteSource(options.sidechain.source, `${path}.sidechain.source`);
-    if (typeof options.sidechain.portId !== "string" || options.sidechain.portId.length === 0) {
+    // `portId` is typed to the descriptor's own sidechain inputs, so a caller who typechecks
+    // cannot reach the refusals below. They are here for the caller who does not -- plain
+    // JavaScript, a JSON round-trip, a value that arrived as `string` -- which is every caller
+    // whose port the engine used to be the first thing to look at.
+    const portId: unknown = options.sidechain.portId;
+    if (typeof portId !== "string" || portId.length === 0) {
       fail(`${path}.sidechain.portId`, "a routed sidechain requires a nonempty port ID");
     }
+    sidechainPort(descriptor, portId, `${path}.sidechain.portId`);
   }
   for (const [name, value] of Object.entries(parameters)) {
     parameterRows(descriptor, name, value, channel, `${path}.parameters.${name}`);

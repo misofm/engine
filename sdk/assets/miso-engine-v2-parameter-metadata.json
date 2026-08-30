@@ -188,6 +188,11 @@
           "step": { "unit": "absolute", "size": "0.1", "precision": 1, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
         }
       ],
+      "ports": [
+        { "id": "main-in", "role": 1, "roleName": "mainInput", "required": true, "layout": 1, "layoutName": "dualMonoPlanar" },
+        { "id": "main-out", "role": 2, "roleName": "mainOutput", "required": true, "layout": 1, "layoutName": "dualMonoPlanar" },
+        { "id": "sidechain-in", "role": 3, "roleName": "sidechainInput", "required": false, "layout": 1, "layoutName": "dualMonoPlanar" }
+      ],
       "observations": [
         { "id": 1, "name": "Gain Reduction", "displayUnit": "dB", "kind": 1, "kindName": "gainReductionDb", "unit": 1, "unitName": "db", "cost": 1, "costName": "resident", "cadence": 1, "cadenceName": "perBlock", "fold": 2, "foldName": "peakMagnitude", "channels": 2, "channelsName": "perLane", "minimum": 0.0, "maximum": 100.0, "subscribable": true }
       ]
@@ -277,6 +282,10 @@
           "enumChoices": [],
           "step": { "unit": "absolute", "size": "0.01", "precision": 2, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
         }
+      ],
+      "ports": [
+        { "id": "main-in", "role": 1, "roleName": "mainInput", "required": true, "layout": 1, "layoutName": "dualMonoPlanar" },
+        { "id": "main-out", "role": 2, "roleName": "mainOutput", "required": true, "layout": 1, "layoutName": "dualMonoPlanar" }
       ],
       "observations": []
     },
@@ -413,6 +422,11 @@
           "enumChoices": [],
           "step": { "unit": "absolute", "size": "0.1", "precision": 1, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
         }
+      ],
+      "ports": [
+        { "id": "main-in", "role": 1, "roleName": "mainInput", "required": true, "layout": 1, "layoutName": "dualMonoPlanar" },
+        { "id": "main-out", "role": 2, "roleName": "mainOutput", "required": true, "layout": 1, "layoutName": "dualMonoPlanar" },
+        { "id": "sidechain-in", "role": 3, "roleName": "sidechainInput", "required": false, "layout": 1, "layoutName": "dualMonoPlanar" }
       ],
       "observations": [
         { "id": 1, "name": "Gain Reduction", "displayUnit": "dB", "kind": 1, "kindName": "gainReductionDb", "unit": 1, "unitName": "db", "cost": 1, "costName": "resident", "cadence": 1, "cadenceName": "perBlock", "fold": 2, "foldName": "peakMagnitude", "channels": 2, "channelsName": "perLane", "minimum": 0.0, "maximum": 100.0, "subscribable": true }
@@ -615,6 +629,10 @@
           "enumChoices": [],
           "step": { "unit": "absolute", "size": "0.1", "precision": 1, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
         }
+      ],
+      "ports": [
+        { "id": "main-in", "role": 1, "roleName": "mainInput", "required": true, "layout": 1, "layoutName": "dualMonoPlanar" },
+        { "id": "main-out", "role": 2, "roleName": "mainOutput", "required": true, "layout": 1, "layoutName": "dualMonoPlanar" }
       ],
       "observations": [
         { "id": 1, "name": "Gain Reduction", "displayUnit": "dB", "kind": 1, "kindName": "gainReductionDb", "unit": 1, "unitName": "db", "cost": 1, "costName": "resident", "cadence": 1, "cadenceName": "perBlock", "fold": 2, "foldName": "peakMagnitude", "channels": 2, "channelsName": "perLane", "minimum": 0.0, "maximum": 100.0, "subscribable": true }
@@ -1010,6 +1028,10 @@
           "step": { "unit": "absolute", "size": "0.1", "precision": 1, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
         }
       ],
+      "ports": [
+        { "id": "main-in", "role": 1, "roleName": "mainInput", "required": true, "layout": 1, "layoutName": "dualMonoPlanar" },
+        { "id": "main-out", "role": 2, "roleName": "mainOutput", "required": true, "layout": 1, "layoutName": "dualMonoPlanar" }
+      ],
       "observations": []
     },
     {
@@ -1065,6 +1087,10 @@
           "enumChoices": [],
           "step": { "unit": "absolute", "size": "0.01", "precision": 2, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
         }
+      ],
+      "ports": [
+        { "id": "main-in", "role": 1, "roleName": "mainInput", "required": true, "layout": 1, "layoutName": "dualMonoPlanar" },
+        { "id": "main-out", "role": 2, "roleName": "mainOutput", "required": true, "layout": 1, "layoutName": "dualMonoPlanar" }
       ],
       "observations": []
     },
@@ -1122,6 +1148,10 @@
           "step": { "unit": "absolute", "size": "0.01", "precision": 2, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
         }
       ],
+      "ports": [
+        { "id": "main-in", "role": 1, "roleName": "mainInput", "required": true, "layout": 1, "layoutName": "dualMonoPlanar" },
+        { "id": "main-out", "role": 2, "roleName": "mainOutput", "required": true, "layout": 1, "layoutName": "dualMonoPlanar" }
+      ],
       "observations": []
     },
     {
@@ -1177,6 +1207,10 @@
           "enumChoices": [],
           "step": { "unit": "absolute", "size": "0.1", "precision": 1, "ladder": { "xs": 1, "sm": 3, "md": 5, "lg": 10, "xl": 30 } }
         }
+      ],
+      "ports": [
+        { "id": "main-in", "role": 1, "roleName": "mainInput", "required": true, "layout": 1, "layoutName": "dualMonoPlanar" },
+        { "id": "main-out", "role": 2, "roleName": "mainOutput", "required": true, "layout": 1, "layoutName": "dualMonoPlanar" }
       ],
       "observations": [
         { "id": 1, "name": "Gain Reduction", "displayUnit": "dB", "kind": 1, "kindName": "gainReductionDb", "unit": 5, "unitName": "linear", "cost": 1, "costName": "resident", "cadence": 1, "cadenceName": "perBlock", "fold": 2, "foldName": "peakMagnitude", "channels": 2, "channelsName": "perLane", "minimum": 0.0, "maximum": 100.0, "subscribable": true }

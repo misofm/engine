@@ -118,9 +118,15 @@ concern -- the schema layer never sees a descriptor -- but it is no longer downs
 `effect.sidechain.missing` for a required declared port the session left unconnected and
 `effect.sidechain.unexpected` for a routed sidechain the descriptor does not declare at all. A
 session naming a port no descriptor declares therefore parses, validates and compiles, and then
-fails preparation. The generated SDK catalog publishes each effect's parameters and observations
-but no port table, so `portId` is the one session field an SDK builder cannot check before boot;
-issue #275 records that gap rather than closing it. The only track taps are `input`,
+fails preparation. Those three refusals are the authority and are unmoved. What changed is what
+stands in front of them: issue #275 recorded that the generated SDK catalog published each
+effect's parameters and observations but no port table, so `portId` was the one session field an
+SDK builder could not check before boot. Issue #278 closed that gap by publishing the declared
+`ports` per effect -- id, role, `required` and lane layout, for all eight launch effects, of which
+exactly `miso.compressor` and `miso.gate-expander` declare an optional `sidechain-in`. `effect()`
+now resolves `portId` against that table and refuses a misspelling, a non-sidechain port and a
+sidechain on an effect that declares none, each naming the legal ports, while the boot-time
+refusal remains what a hand-written document meets. The only track taps are `input`,
 `post_input_builtins`, `post_simd1`, `post_dynamic`, `post_simd2_pre_fader`, `post_fader`, and
 `post_matrix`.
 

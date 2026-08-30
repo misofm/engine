@@ -2,6 +2,7 @@ import type {
   EffectId,
   EffectParameter,
   EffectParameterName,
+  SidechainPortName,
 } from "../generated/catalog.ts";
 
 /**
@@ -129,10 +130,19 @@ export type RouteDestination =
   | Readonly<{ kind: "submix_input"; submixId: string }>
   | Readonly<{ kind: "output_input"; outputId: string }>;
 
-/** A routed sidechain: the same tagged source a route uses, plus a nonempty port. */
-export interface SidechainSpec {
+/**
+ * A routed sidechain: the same tagged source a route uses, plus the port it feeds.
+ *
+ * `portId` is the effect's own declared sidechain-input name, taken from the generated catalog's
+ * port table (issue #278). Two consequences follow from the type alone, before `effect()` runs a
+ * single check: a misspelling is a compile error naming the legal ports, and an effect that
+ * declares no sidechain input gives `never` here, so a routed sidechain on it is unconstructible
+ * rather than merely refused. The engine's boot-time refusals -- `effect.sidechain.unknown_port`,
+ * `.missing`, `.unexpected` -- are unmoved and remain the authority; this stands in front of them.
+ */
+export interface SidechainSpec<E extends EffectId = EffectId> {
   readonly source: RouteSource;
-  readonly portId: string;
+  readonly portId: SidechainPortName<E>;
 }
 
 export interface RouteSpec {
@@ -166,7 +176,7 @@ export type EffectParamValues<E extends EffectId> = Partial<{
   >;
 }>;
 
-export interface EffectOptions {
+export interface EffectOptions<E extends EffectId = EffectId> {
   /** Session V1 rack-local identity. Deliberately separate from the native `effectId`. */
   readonly slotId?: string;
   readonly bypass?: boolean;
@@ -175,7 +185,7 @@ export interface EffectOptions {
   readonly linkMode?: "dual_mono" | "maximum" | "average";
   /** The channel a scalar parameter value addresses. Per-lane pairs override it. */
   readonly channel?: Channel;
-  readonly sidechain?: SidechainSpec;
+  readonly sidechain?: SidechainSpec<E>;
 }
 
 export interface EffectDecl<E extends EffectId = EffectId> {
@@ -187,8 +197,9 @@ export interface EffectDecl<E extends EffectId = EffectId> {
    */
   readonly slotId?: string;
   readonly parameters: EffectParamValues<E>;
-  readonly options: Required<Pick<EffectOptions, "bypass" | "quality" | "linkMode" | "channel">>
-    & Pick<EffectOptions, "sidechain">;
+  readonly options:
+    Required<Pick<EffectOptions<E>, "bypass" | "quality" | "linkMode" | "channel">>
+      & Pick<EffectOptions<E>, "sidechain">;
 }
 
 export type AutomationShape = "step" | "linear" | "exponential";

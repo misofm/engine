@@ -839,6 +839,32 @@ export const CATALOG = deepFreeze(
           }
         }
       ],
+      "ports": [
+        {
+          "id": "main-in",
+          "role": 1,
+          "roleName": "mainInput",
+          "required": true,
+          "layout": 1,
+          "layoutName": "dualMonoPlanar"
+        },
+        {
+          "id": "main-out",
+          "role": 2,
+          "roleName": "mainOutput",
+          "required": true,
+          "layout": 1,
+          "layoutName": "dualMonoPlanar"
+        },
+        {
+          "id": "sidechain-in",
+          "role": 3,
+          "roleName": "sidechainInput",
+          "required": false,
+          "layout": 1,
+          "layoutName": "dualMonoPlanar"
+        }
+      ],
       "observations": [
         {
           "id": 1,
@@ -1053,6 +1079,24 @@ export const CATALOG = deepFreeze(
               "xl": 30
             }
           }
+        }
+      ],
+      "ports": [
+        {
+          "id": "main-in",
+          "role": 1,
+          "roleName": "mainInput",
+          "required": true,
+          "layout": 1,
+          "layoutName": "dualMonoPlanar"
+        },
+        {
+          "id": "main-out",
+          "role": 2,
+          "roleName": "mainOutput",
+          "required": true,
+          "layout": 1,
+          "layoutName": "dualMonoPlanar"
         }
       ],
       "observations": []
@@ -1359,6 +1403,32 @@ export const CATALOG = deepFreeze(
               "xl": 30
             }
           }
+        }
+      ],
+      "ports": [
+        {
+          "id": "main-in",
+          "role": 1,
+          "roleName": "mainInput",
+          "required": true,
+          "layout": 1,
+          "layoutName": "dualMonoPlanar"
+        },
+        {
+          "id": "main-out",
+          "role": 2,
+          "roleName": "mainOutput",
+          "required": true,
+          "layout": 1,
+          "layoutName": "dualMonoPlanar"
+        },
+        {
+          "id": "sidechain-in",
+          "role": 3,
+          "roleName": "sidechainInput",
+          "required": false,
+          "layout": 1,
+          "layoutName": "dualMonoPlanar"
         }
       ],
       "observations": [
@@ -1834,6 +1904,24 @@ export const CATALOG = deepFreeze(
               "xl": 30
             }
           }
+        }
+      ],
+      "ports": [
+        {
+          "id": "main-in",
+          "role": 1,
+          "roleName": "mainInput",
+          "required": true,
+          "layout": 1,
+          "layoutName": "dualMonoPlanar"
+        },
+        {
+          "id": "main-out",
+          "role": 2,
+          "roleName": "mainOutput",
+          "required": true,
+          "layout": 1,
+          "layoutName": "dualMonoPlanar"
         }
       ],
       "observations": [
@@ -2855,6 +2943,24 @@ export const CATALOG = deepFreeze(
           }
         }
       ],
+      "ports": [
+        {
+          "id": "main-in",
+          "role": 1,
+          "roleName": "mainInput",
+          "required": true,
+          "layout": 1,
+          "layoutName": "dualMonoPlanar"
+        },
+        {
+          "id": "main-out",
+          "role": 2,
+          "roleName": "mainOutput",
+          "required": true,
+          "layout": 1,
+          "layoutName": "dualMonoPlanar"
+        }
+      ],
       "observations": []
     },
     {
@@ -2974,6 +3080,24 @@ export const CATALOG = deepFreeze(
               "xl": 30
             }
           }
+        }
+      ],
+      "ports": [
+        {
+          "id": "main-in",
+          "role": 1,
+          "roleName": "mainInput",
+          "required": true,
+          "layout": 1,
+          "layoutName": "dualMonoPlanar"
+        },
+        {
+          "id": "main-out",
+          "role": 2,
+          "roleName": "mainOutput",
+          "required": true,
+          "layout": 1,
+          "layoutName": "dualMonoPlanar"
         }
       ],
       "observations": []
@@ -3097,6 +3221,24 @@ export const CATALOG = deepFreeze(
           }
         }
       ],
+      "ports": [
+        {
+          "id": "main-in",
+          "role": 1,
+          "roleName": "mainInput",
+          "required": true,
+          "layout": 1,
+          "layoutName": "dualMonoPlanar"
+        },
+        {
+          "id": "main-out",
+          "role": 2,
+          "roleName": "mainOutput",
+          "required": true,
+          "layout": 1,
+          "layoutName": "dualMonoPlanar"
+        }
+      ],
       "observations": []
     },
     {
@@ -3218,6 +3360,24 @@ export const CATALOG = deepFreeze(
           }
         }
       ],
+      "ports": [
+        {
+          "id": "main-in",
+          "role": 1,
+          "roleName": "mainInput",
+          "required": true,
+          "layout": 1,
+          "layoutName": "dualMonoPlanar"
+        },
+        {
+          "id": "main-out",
+          "role": 2,
+          "roleName": "mainOutput",
+          "required": true,
+          "layout": 1,
+          "layoutName": "dualMonoPlanar"
+        }
+      ],
       "observations": [
         {
           "id": 1,
@@ -3253,6 +3413,18 @@ export type EffectId = EffectDescriptor["id"];
 export type EffectParameter<E extends EffectId> =
   Extract<EffectDescriptor, { readonly id: E }>["parameters"][number];
 export type EffectParameterName<E extends EffectId> = EffectParameter<E>["name"];
+/** One declared port row: its id, role, `required` flag and lane layout (issue #278). */
+export type EffectPort<E extends EffectId> =
+  Extract<EffectDescriptor, { readonly id: E }>["ports"][number];
+export type PortName<E extends EffectId> = EffectPort<E>["id"];
+/**
+ * The ports a routed sidechain may name.
+ *
+ * `never` for an effect that declares no sidechain input, which is what makes a routed
+ * sidechain on such an effect unconstructible rather than merely refused at runtime.
+ */
+export type SidechainPortName<E extends EffectId> =
+  Extract<EffectPort<E>, { readonly roleName: "sidechainInput" }>["id"];
 export type EffectObservation<E extends EffectId> =
   Extract<EffectDescriptor, { readonly id: E }>["observations"][number];
 export type TapName<E extends EffectId> = EffectObservation<E>["name"];

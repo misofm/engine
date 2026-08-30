@@ -59,6 +59,18 @@
 //! It occupies the slot that shipped as `"nudge": null` before #242 renamed the vocabulary
 //! (#239 Amendment 2); the rename is total, and `nudge` is retired.
 
+//! # Issue #278 (the port table)
+//!
+//! Each effect carries its declared `"ports"` -- id, role, `required` and lane layout -- for the
+//! same reason it carries its parameters: the descriptor is the only thing that knows them, and a
+//! consumer that kept its own table would go stale. Exactly two launch effects declare a
+//! `sidechainInput` (`miso.compressor` and `miso.gate-expander`, both `"sidechain-in"`, both
+//! optional); the other six declare only their main pair, and every effect gets the key.
+//!
+//! This is an ADDITIVE extension of the v1 surface, handled exactly as #143's `observations` was:
+//! the schema tag and `abiVersion` are unmoved, and the new key is *never absent*, so there is no
+//! "document predates ports" state for a reader to have to distinguish.
+
 pub mod abi_layout;
 
 use std::io::Write as _;
@@ -75,7 +87,7 @@ use miso_engine_effect_contract::{
     AutomationRate, EffectDescriptor, ObservationCadence, ObservationChannels, ObservationCost,
     ObservationDescriptor, ObservationFold, ObservationKind, ParameterChannelPolicy,
     ParameterDescriptor, ParameterDomain, ParameterLattice, ParameterMapping, ParameterUnit,
-    SmoothingRule, StepSize, StepUnit,
+    PortDescriptor, PortLayout, PortRole, SmoothingRule, StepSize, StepUnit,
 };
 use miso_engine_host_web::{
     ABI_VERSION, COMMAND_EFFECT_BYPASS, COMMAND_EFFECT_PARAM, COMMAND_FADER_DB, COMMAND_MATRIX,
@@ -301,6 +313,24 @@ fn effect(descriptor: &EffectDescriptor) -> String {
         out.push_str(&format!("{}\n", comma(index, descriptor.parameters.len())));
     }
     out.push_str("      ],\n");
+    // Issue #278: the declared port table, in the descriptor's own order (role ascending), and
+    // never absent -- `[]` for an effect that declares no port at all, for the same reason
+    // `observations` is never absent. Until this shipped, the document published every effect's
+    // parameters and taps but nothing about its ports, so `sidechain.port_id` was the one session
+    // field an SDK builder could not check before boot: a misspelling parsed, validated, compiled
+    // and then failed preparation with `effect.sidechain.unknown_port`. The engine's refusal is
+    // unmoved; this is what lets an authoring layer refuse the same thing first, by name.
+    out.push_str("      \"ports\": [");
+    for (index, port) in descriptor.ports.iter().enumerate() {
+        out.push('\n');
+        out.push_str(&effect_port(port));
+        out.push_str(comma(index, descriptor.ports.len()));
+    }
+    if descriptor.ports.is_empty() {
+        out.push_str("],\n");
+    } else {
+        out.push_str("\n      ],\n");
+    }
     // Issue #143: never absent. An effect that declares no tap emits `[]`, so a consumer reads one
     // shape for every effect and "this build has no menu for that effect" is impossible to
     // confuse with "this document predates observation".
@@ -316,6 +346,38 @@ fn effect(descriptor: &EffectDescriptor) -> String {
         out.push_str("\n      ]\n    }");
     }
     out
+}
+
+/// Emit one declared port row.
+///
+/// Both the raw scalar and its name ride, exactly as they do on a parameter's `unit` and an
+/// observation's `kind`: the descriptor wire and the C inspect record carry the `u32`, and a
+/// consumer that resolves it from this document never keeps a second table of its own.
+fn effect_port(port: &PortDescriptor) -> String {
+    format!(
+        "        {{ \"id\": \"{}\", \"role\": {}, \"roleName\": \"{}\", \
+\"required\": {}, \"layout\": {}, \"layoutName\": \"{}\" }}",
+        escape(port.id.as_str()),
+        port.role as u32,
+        port_role_name(port.role),
+        port.required,
+        port.layout as u32,
+        port_layout_name(port.layout),
+    )
+}
+
+const fn port_role_name(role: PortRole) -> &'static str {
+    match role {
+        PortRole::MainInput => "mainInput",
+        PortRole::MainOutput => "mainOutput",
+        PortRole::SidechainInput => "sidechainInput",
+    }
+}
+
+const fn port_layout_name(layout: PortLayout) -> &'static str {
+    match layout {
+        PortLayout::DualMonoPlanar => "dualMonoPlanar",
+    }
 }
 
 fn effect_observation(observation: &ObservationDescriptor) -> String {

@@ -74,6 +74,18 @@ function moduleTypes(kind, symbol) {
       + `export type EffectParameter<E extends EffectId> =\n`
       + `  Extract<EffectDescriptor, { readonly id: E }>["parameters"][number];\n`
       + `export type EffectParameterName<E extends EffectId> = EffectParameter<E>["name"];\n`
+      + `/** One declared port row: its id, role, \`required\` flag and lane layout (issue #278). */\n`
+      + `export type EffectPort<E extends EffectId> =\n`
+      + `  Extract<EffectDescriptor, { readonly id: E }>["ports"][number];\n`
+      + `export type PortName<E extends EffectId> = EffectPort<E>["id"];\n`
+      + `/**\n`
+      + ` * The ports a routed sidechain may name.\n`
+      + ` *\n`
+      + ` * \`never\` for an effect that declares no sidechain input, which is what makes a routed\n`
+      + ` * sidechain on such an effect unconstructible rather than merely refused at runtime.\n`
+      + ` */\n`
+      + `export type SidechainPortName<E extends EffectId> =\n`
+      + `  Extract<EffectPort<E>, { readonly roleName: "sidechainInput" }>["id"];\n`
       + `export type EffectObservation<E extends EffectId> =\n`
       + `  Extract<EffectDescriptor, { readonly id: E }>["observations"][number];\n`
       + `export type TapName<E extends EffectId> = EffectObservation<E>["name"];\n`
