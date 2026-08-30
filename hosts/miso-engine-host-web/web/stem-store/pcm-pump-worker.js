@@ -155,7 +155,13 @@ async function drive(token) {
       return
     }
     if (driveToken !== token || outcome === undefined) return
-    if (outcome.finished) return
+    if (outcome.finished) {
+      // Clear the token here rather than leaving it to the `finally`, which is a
+      // microtask: a `seek` arriving before that microtask ran would see a token
+      // that still looks live, decline to re-arm, and stall the session.
+      driveToken = undefined
+      return
+    }
     if (outcome.chunks === 0) await sleep(selfDrivingIdleMs ?? DEFAULT_IDLE_MS)
   }
 }
