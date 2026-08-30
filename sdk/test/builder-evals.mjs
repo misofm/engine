@@ -15,6 +15,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { before, describe, test } from "node:test";
 
+import { CATALOG } from "../src/generated/catalog.ts";
 import { MisoEngineAsset } from "../src/core/asset.ts";
 import { MisoUsageError } from "../src/core/errors.ts";
 import { assertSameSession, effect, session } from "../src/core/session.ts";
@@ -474,6 +475,130 @@ describe("validation refusals name the offending path", () => {
   });
 });
 
+describe("issue #278 -- the port table is enforced, not documented", () => {
+  // Before the catalog carried `ports`, `portId` was the one session field a builder could not
+  // check: a misspelling parsed, validated, compiled, and failed at PREPARATION with
+  // `effect.sidechain.unknown_port`. The engine's refusal has not moved -- the last test in this
+  // block proves it still fires on a document that never went through `effect()` -- and what
+  // follows it is the authoring-time half that now stands in front of it.
+
+  const source = { kind: "track", trackId: "bass", tap: "post_fader" };
+
+  test("the declared sidechain port is accepted, and it is the descriptor's own", () => {
+    for (const id of ["miso.compressor", "miso.gate-expander"]) {
+      const decl = effect(id, {}, { sidechain: { source, portId: "sidechain-in" } });
+      assert.equal(decl.options.sidechain.portId, "sidechain-in");
+      // The name came from the catalog, not from this file: the row it matches is right there.
+      const descriptor = CATALOG.effects.find((candidate) => candidate.id === id);
+      assert.deepEqual(
+        descriptor.ports.filter((port) => port.roleName === "sidechainInput"),
+        [{
+          id: "sidechain-in",
+          role: 3,
+          roleName: "sidechainInput",
+          required: false,
+          layout: 1,
+          layoutName: "dualMonoPlanar",
+        }],
+      );
+    }
+  });
+
+  test("a misspelled port is refused at authoring time, naming the candidates", () => {
+    // Red mutation: delete the `sidechainPort()` call in `effect()` -> this throws nothing, the
+    // misspelling survives to `toToml()`, and the session only fails at boot.
+    assert.throws(
+      () => effect("miso.compressor", {}, { sidechain: { source, portId: "sidechan-in" } }),
+      (error) => {
+        assert.ok(error instanceof MisoUsageError);
+        assert.match(error.message, /effect\("miso\.compressor"\)\.sidechain\.portId/);
+        assert.match(error.message, /has no port 'sidechan-in'/);
+        assert.match(error.message, /sidechain inputs are 'sidechain-in'/);
+        return true;
+      },
+    );
+  });
+
+  test("a port that exists but is not a sidechain input is refused as what it is", () => {
+    assert.throws(
+      () => effect("miso.compressor", {}, { sidechain: { source, portId: "main-in" } }),
+      (error) => {
+        assert.ok(error instanceof MisoUsageError);
+        assert.match(error.message, /'main-in' is miso\.compressor's mainInput port/);
+        assert.match(error.message, /not a sidechain input/);
+        return true;
+      },
+    );
+  });
+
+  test("an effect that declares no sidechain input refuses every port", () => {
+    // Six of the eight launch effects are in this class. The type says `never` for `portId`, so a
+    // caller who typechecks cannot write this at all; the runtime refusal is for the caller who
+    // does not -- plain JS, or a `portId` that arrived as a `string` from JSON.
+    const portless = CATALOG.effects
+      .filter((entry) => !entry.ports.some((port) => port.roleName === "sidechainInput"))
+      .map((entry) => entry.id);
+    assert.deepEqual(portless, [
+      "miso.delay",
+      "miso.multiband-compressor",
+      "miso.parametric-eq",
+      "miso.soft-clip",
+      "miso.transient-shaper",
+      "miso.true-peak-limiter",
+    ]);
+    for (const id of portless) {
+      for (const portId of ["sidechain-in", "main-in", "anything"]) {
+        assert.throws(
+          () => effect(id, {}, { sidechain: { source, portId } }),
+          (error) => {
+            assert.ok(error instanceof MisoUsageError);
+            assert.match(error.message, /declares no sidechain input port/);
+            assert.match(error.message, /'main-in' and 'main-out'/);
+            return true;
+          },
+          `${id} accepted a sidechain on '${portId}'`,
+        );
+      }
+    }
+  });
+
+  test("every catalog port row is a launch descriptor row, and there are eighteen", () => {
+    // The catalog is the SDK's only authority on ports, so the shape it publishes is worth
+    // stating once here: eight effects, each with exactly one main input and one main output,
+    // and exactly two of them with an optional `sidechain-in`.
+    const rows = CATALOG.effects.flatMap((entry) => entry.ports);
+    assert.equal(rows.length, 18);
+    assert.equal(rows.filter((port) => port.roleName === "mainInput").length, 8);
+    assert.equal(rows.filter((port) => port.roleName === "mainOutput").length, 8);
+    assert.equal(rows.filter((port) => port.roleName === "sidechainInput").length, 2);
+    assert.ok(rows.every((port) => port.layoutName === "dualMonoPlanar"));
+    assert.ok(rows.every((port) => port.required === (port.roleName !== "sidechainInput")));
+  });
+
+  test("the engine still refuses an unknown port at boot -- this replaced nothing", async () => {
+    // The authoring check is added IN FRONT OF the engine's, never instead of it. This document is
+    // hand-written precisely so it never passes through `effect()`, which is the only way to prove
+    // the boot-time refusal is still there.
+    //
+    // Red mutation: delete the `effect.sidechain.unknown_port` leg in
+    // `crates/miso-engine-effect-compiler/src/prepare.rs` -> this boots and the test fails.
+    const document = oneTrack({
+      racks: { dynamic: [effect("miso.compressor", { threshold: -18 })] },
+    }).toToml().replace(
+      'sidechain = { kind = "none" }',
+      'sidechain = { kind = "routed", source = { kind = "track", track_id = "t", '
+        + 'tap = "post_fader" }, port_id = "not-a-port" }',
+    );
+    assert.match(document, /port_id = "not-a-port"/);
+    const outcome = await validate(document, { asset });
+    assert.equal(outcome.ok, false);
+    assert.ok(
+      outcome.diagnostics.some((row) => row.code === "effect.sidechain.unknown_port"),
+      `expected effect.sidechain.unknown_port, got ${JSON.stringify(outcome.diagnostics)}`,
+    );
+  });
+});
+
 describe("canonical float spellings", () => {
   test("integral values gain .0 so they stay TOML floats", () => {
     // Red mutation: emit `String(value)`. `trim_db = 0` is an integer to TOML and the engine
@@ -631,11 +756,13 @@ function richSession() {
     {
       slotId: "comp",
       linkMode: "maximum",
-      // A routed sidechain reuses the tagged route-source shape. Neither its referent nor its
-      // port is checked by `effect()`: the referent cannot be, because `effect()` runs before any
-      // track exists, and the port cannot be, because the generated catalog publishes parameters
-      // and observations but no port table. The engine checks both -- a wrong `portId` is
-      // `effect.sidechain.unknown_port` -- which is why this rides in a session that must boot.
+      // A routed sidechain reuses the tagged route-source shape. Its REFERENT still cannot be
+      // checked here -- `effect()` runs before any track exists -- which is why this rides in a
+      // session that must boot. Its PORT now is: issue #278 published the port table, so
+      // `effect()` resolves `portId` against `miso.compressor`'s own declared sidechain inputs
+      // and the type only admits those names. See "the port table is enforced, not documented"
+      // below for the enforcing half; the engine's `effect.sidechain.unknown_port` is unmoved and
+      // is still what this session's boot proves.
       sidechain: {
         source: { kind: "track", trackId: "bass", tap: "post_fader" },
         portId: "sidechain-in",
