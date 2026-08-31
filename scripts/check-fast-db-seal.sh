@@ -104,7 +104,7 @@ done
 # ---------------------------------------------------------------------------------------------
 registered_files=$( { crossing_registry; restatement_registry; } | awk '{ print $1 }' | sort)
 
-mentions=$(rg -l -e "$vocabulary_pattern" crates hosts tools --glob '*.rs' 2>/dev/null | sort || true)
+mentions=$(rg -l -e "$vocabulary_pattern" crates hosts tools sidecars --glob '*.rs' 2>/dev/null | sort || true)
 while IFS= read -r file; do
     [[ -n "$file" ]] || continue
     [[ "$file" == "$sealed_module" || "$file" == "$sealed_gate" || "$file" == "$sealed_owner" ]] &&
@@ -188,8 +188,13 @@ declared=$(crossing_registry | awk '{ total += $2 } END { print total }')
 [[ "$declared" == "$expected_crossing_count" ]] ||
     fail "the registry declares $declared crossings, the container claims $expected_crossing_count"
 
-markers=$(rg -c -e 'FAST-DB-CROSSING' crates hosts tools --glob '*.rs' 2>/dev/null |
-    awk -F: '{ total += $2 } END { print total + 0 }')
+# The `rg` is wrapped in its own `|| true`: without it, `rg` exiting 2 on a missing search root
+# (e.g. a hermetic test fixture with no sidecars/) would make the whole `markers=$(rg | awk)`
+# pipeline exit non-zero under `pipefail`, which -- unlike an `if rg; then` guard -- aborts the
+# script outright under `set -e` on an otherwise-clean tree.
+markers=$({
+    rg -c -e 'FAST-DB-CROSSING' crates hosts tools sidecars --glob '*.rs' 2>/dev/null || true
+} | awk -F: '{ total += $2 } END { print total + 0 }')
 [[ "$markers" == "$expected_crossing_count" ]] ||
     fail "found $markers FAST-DB-CROSSING markers in the tree, expected $expected_crossing_count"
 

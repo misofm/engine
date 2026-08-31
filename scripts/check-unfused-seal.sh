@@ -130,7 +130,7 @@ done
 # ---------------------------------------------------------------------------------------------
 registered_files=$(exemption_registry | awk '{ print $1 }' | sort)
 
-candidates=$(rg -l -e "$call_pattern" crates hosts tools --glob '*.rs' 2>/dev/null | sort || true)
+candidates=$(rg -l -e "$call_pattern" crates hosts tools sidecars --glob '*.rs' 2>/dev/null | sort || true)
 while IFS= read -r file; do
     [[ -n "$file" ]] || continue
     # Re-test against comment-stripped source: `rg -l` above matched prose too.
@@ -192,7 +192,7 @@ while IFS= read -r file; do
     [[ -n "$file" ]] || continue
     calls=$(count_calls "$file")
     counted=$((counted + calls))
-done < <(rg -l -e "$call_pattern" crates hosts tools --glob '*.rs' 2>/dev/null || true)
+done < <(rg -l -e "$call_pattern" crates hosts tools sidecars --glob '*.rs' 2>/dev/null || true)
 [[ "$counted" == "$expected_fused_call_count" ]] ||
     fail "found $counted fused calls in the tree, expected $expected_fused_call_count"
 

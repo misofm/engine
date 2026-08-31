@@ -363,7 +363,8 @@ necessary because the other two do not imply it:
    ["miso-engine-core/realtime-audit"]`) instead of hard-enabling it, so a regular dependent never
    receives the instrumentation unless it asks. `scripts/check-realtime-audit-leak.sh` checks both
    the manifest sections and the resolved graph (`cargo tree -e features,no-dev --target all`) of
-   every package under `crates/` and `hosts/`.
+   every package under `crates/`, `hosts/`, and `sidecars/` (a sidecar ships, so its production
+   graph must resolve without the feature too).
 2. **Invocations.** Cargo unifies features across the packages selected by *one* invocation, so a
    clean per-package graph does not make a multi-package build clean. CI builds host artifacts in
    an invocation that lists no evidence crate; the evidence crates keep their cross-target compile

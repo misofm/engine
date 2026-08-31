@@ -82,6 +82,11 @@ expect_failure allowlisted-file-deleted \
     'rm "$root/crates/miso-engine-conformance/src/compare.rs"'
 expect_failure powi-in-a-clean-crate \
     'printf "%s\n" "pub fn bad(x: f64) -> f64 { x.powi(3) }" >>"$root/crates/miso-engine-clean-effect/src/lib.rs"'
+# The sidecars/ tree ships as its own delivery artifact (issue: FLAC decoder sidecar move) and
+# is scanned the same as crates/ and hosts/ (scripts/check-math-policy.sh:63) -- a platform
+# transcendental in a sidecar is exactly the same cross-target bit-identity hole.
+expect_failure sin-in-a-sidecar \
+    'mkdir -p "$root/sidecars/probe-decoder/src"; printf "%s\n" "pub fn bad(x: f64) -> f64 { x.sin() }" >"$root/sidecars/probe-decoder/src/lib.rs"'
 
 # The structural exemptions must keep working, or the script would be unusable.
 expect_pass() {

@@ -47,9 +47,9 @@ remap="--remap-path-prefix=$cargo_home=/cargo --remap-path-prefix=$repo_root=/re
 
 artifact="$build_target/wasm32-unknown-unknown/release/miso_engine_flac_decoder.wasm"
 observed=$(sha256sum "$artifact" | awk '{print $1}')
-pin_file="$repo_root/hosts/miso-engine-flac-decoder/decoder-artifact.sha256"
+pin_file="$repo_root/sidecars/flac-decoder/decoder-artifact.sha256"
 expected=$(tr -d '\n' <"$pin_file")
-loader="$repo_root/hosts/miso-engine-flac-decoder/miso-engine-flac-decoder.js"
+loader="$repo_root/sidecars/flac-decoder/miso-engine-flac-decoder.js"
 
 if [[ "${MISO_ENGINE_FLAC_DECODER_REPIN:-0}" == 1 ]]; then
   printf '%s\n' "$observed"
@@ -68,5 +68,5 @@ grep -qF "\"$expected\"" "$loader" || {
 cp --update=none "$artifact" "$output_dir/miso-engine-flac-decoder.wasm"
 cp --update=none "$loader" "$output_dir/miso-engine-flac-decoder.js"
 cp --update=none \
-  "$repo_root/hosts/miso-engine-flac-decoder/miso-engine-flac-decoder.d.ts" "$output_dir/"
+  "$repo_root/sidecars/flac-decoder/miso-engine-flac-decoder.d.ts" "$output_dir/"
 cp --update=none "$pin_file" "$output_dir/"

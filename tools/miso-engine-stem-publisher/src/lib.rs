@@ -34,7 +34,7 @@ const WAVE_MAXIMUM_CHUNKS: u32 = 4_096;
 const WAVE_MAXIMUM_SKIPPED_METADATA_BYTES: u64 = 16 * 1024 * 1024;
 const DECODER_ARTIFACT_SHA256: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../hosts/miso-engine-flac-decoder/decoder-artifact.sha256"
+    "/../../sidecars/flac-decoder/decoder-artifact.sha256"
 ));
 
 /// Stable publisher refusal.

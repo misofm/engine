@@ -12,7 +12,7 @@ expected_compiler=$'miso-engine-compressor\nmiso-engine-core\nmiso-engine-delay\
 [[ "$(dependencies crates/miso-engine-effect-compiler/Cargo.toml)" == "$expected_compiler" ]] || fail 'effect-compiler dependency boundary changed'
 if rg -n 'miso-engine-effect-(contract|compiler)' crates/miso-engine-{core,session}/Cargo.toml; then fail 'core/session reverse dependency'; fi
 package_references="$(
-    rg -n 'miso_engine_effect_package|miso-engine-effect-package' crates hosts tools fuzz 2>/dev/null |
+    rg -n 'miso_engine_effect_package|miso-engine-effect-package' crates hosts tools fuzz sidecars 2>/dev/null |
         rg -v '^crates/miso-engine-effect-package/' |
         rg -v '^crates/miso-engine-effect-compiler/(Cargo.toml|src/(prepare|migration)[.]rs|tests/(scalar_state|bank_state|migration|migration_terminal|observation_identity|symmetry_restore)[.]rs):' || true
 )"

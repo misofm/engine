@@ -58,9 +58,11 @@ fail() {
 pattern='\.(exp|exp2|ln|log2|log10|powf|powi|sin|cos|tan|atan|atan2|sinh|cosh|tanh|exp_m1|ln_1p)\('
 
 # Scanned by design; `tools/` is not (fixture generators use the platform libm deliberately, and
-# #104 decides their fate).
+# #104 decides their fate). `sidecars/` is scanned: a sidecar ships in the delivery pipeline and
+# its transcendentals are as much a cross-target bit-identity hole as anything under crates/ or
+# hosts/.
 roots=()
-for candidate in crates hosts; do
+for candidate in crates hosts sidecars; do
     [[ -d "$candidate" ]] && roots+=("$candidate")
 done
 [[ "${#roots[@]}" -gt 0 ]] || fail "neither crates/ nor hosts/ exists at $workspace_root"

@@ -48,9 +48,18 @@ done
 
 # The native decoder is cfg-excluded on Wasm, so no crate may make this tool a dependency. The
 # workspace membership row is intentionally the sole reference outside the package and lockfile.
-if rg -n 'miso-engine-native-pcm-runner|miso_engine_native_pcm_runner' crates hosts tools \
-    --glob Cargo.toml --glob '*.rs' | rg -v '^tools/miso-engine-native-pcm-runner/'; then
+#
+# The inner `rg` is wrapped in its own `|| true`: without it, `rg` exiting 2 on a missing search
+# root (e.g. a hermetic test fixture with no sidecars/) would make the whole `if rg | rg; then`
+# pipeline read as "no violation" under `pipefail`, even when a real match was printed to stdout
+# by the roots that do exist.
+reachable="$({
+    rg -n 'miso-engine-native-pcm-runner|miso_engine_native_pcm_runner' crates hosts tools sidecars \
+        --glob Cargo.toml --glob '*.rs' || true
+} | rg -v '^tools/miso-engine-native-pcm-runner/' || true)"
+[[ -z "$reachable" ]] || {
+    printf '%s\n' "$reachable" >&2
     fail 'native-only runner is reachable from another package or Wasm surface'
-fi
+}
 
 printf 'native PCM runner V1 check: ok\n'
