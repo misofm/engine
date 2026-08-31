@@ -33,11 +33,12 @@ sed -i 's|-p miso-engine-host-web -p miso-engine-lane|-p miso-engine-host-web -p
     "$case_root/.github/workflows/ci.yml"
 expect_failure conformance-back-in-the-scalar-wasm-artifact
 
-# 2. The f64 oracle back in the mobile check.
-new_case dsp-reference-back-in-the-android-check
-sed -i 's|-p miso-engine-host-mobile -p miso-engine-lane|-p miso-engine-host-mobile -p miso-engine-dsp-reference -p miso-engine-lane|' \
-    "$case_root/.github/workflows/ci.yml"
-expect_failure dsp-reference-back-in-the-android-check
+# 2. RETIRED by #66, which removed the android and ios compile-only jobs. The mutation this case
+#    applied — the f64 oracle back in the mobile check — has no surface left to land on: its `sed`
+#    matches nothing, so the gate stayed green and the case reported "mutation escaped" rather than
+#    catching anything. Retired rather than repaired because the coverage it guarded was itself
+#    deliberately dropped by #66 (browser Wasm is now the mobile portability target). If a mobile
+#    compile job ever returns, this case must return with it.
 
 # 3. Removing the evidence crates from an artifact list without keeping their cross-target compile
 #    coverage is the other way to break this: the gate would go green while the wasm32 build of the
@@ -46,14 +47,10 @@ new_case wasm-compile-coverage-deleted
 sed -i '/Evidence crates compile for Wasm/,+3d' "$case_root/.github/workflows/ci.yml"
 expect_failure wasm-compile-coverage-deleted
 
-new_case ios-compile-coverage-deleted
-sed -i '/Evidence crates compile for iOS/,+1d' "$case_root/.github/workflows/ci.yml"
-expect_failure ios-compile-coverage-deleted
+# (The iOS counterpart of case 3 retired with #66 for the same reason; the Wasm case below is what
+#  still pins this half of the gate.)
 
-# 4. A coverage invocation that quietly drops one of the two evidence crates no longer counts.
-new_case coverage-invocation-loses-the-oracle
-sed -i 's|--target aarch64-linux-android -p miso-engine-dsp-reference -p miso-engine-conformance|--target aarch64-linux-android -p miso-engine-conformance|' \
-    "$case_root/.github/workflows/ci.yml"
-expect_failure coverage-invocation-loses-the-oracle
+# 4. RETIRED by #66 for the same reason as case 2: this mutated the android coverage invocation,
+#    which no longer exists in ci.yml.
 
 printf 'artifact evidence gate mutations: ok\n'
