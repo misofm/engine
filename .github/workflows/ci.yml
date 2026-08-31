@@ -80,6 +80,10 @@ jobs:
         with:
           prefix-key: v1-registry
           cache-targets: false
+          # A failed job's registry is still a valid registry: the only thing in it is
+          # checksum-verified source. Without this the `host` job, which is red on main today,
+          # would never write a cache at all.
+          cache-on-failure: true
       - name: Format
         run: cargo fmt --all -- --check
       - name: Clippy
@@ -237,6 +241,10 @@ jobs:
         with:
           prefix-key: v1-registry
           cache-targets: false
+          # A failed job's registry is still a valid registry: the only thing in it is
+          # checksum-verified source. Without this the `host` job, which is red on main today,
+          # would never write a cache at all.
+          cache-on-failure: true
       # #84 phase A made core (and so every production crate) depend on miso-engine-lane, whose
       # master-plan D4 guard refuses any build below x86-64-v3 — there is no scalar fallback to
       # compile-probe any more (W2-D1 retired the sub-v3 legs). These steps now assert the guard
@@ -275,6 +283,10 @@ jobs:
         with:
           prefix-key: v1-registry
           cache-targets: false
+          # A failed job's registry is still a valid registry: the only thing in it is
+          # checksum-verified source. Without this the `host` job, which is red on main today,
+          # would never write a cache at all.
+          cache-on-failure: true
       # Issue #144 item 3 starts as evidence, not a merge gate. Both the live report and its red
       # mutations are allowed to fail this step while the uploaded receipt remains inspectable.
       - name: Generate report and run red mutations
@@ -307,6 +319,10 @@ jobs:
         with:
           prefix-key: v1-registry
           cache-targets: false
+          # A failed job's registry is still a valid registry: the only thing in it is
+          # checksum-verified source. Without this the `host` job, which is red on main today,
+          # would never write a cache at all.
+          cache-on-failure: true
       - name: Browser-local realtime path has no atomic opcodes
         run: bash scripts/check-wasm-realtime-atomics.sh
       # #105 phase 2 C2: an artifact invocation names no evidence crate. Cargo unifies features
@@ -375,6 +391,10 @@ jobs:
         with:
           prefix-key: v1-registry
           cache-targets: false
+          # A failed job's registry is still a valid registry: the only thing in it is
+          # checksum-verified source. Without this the `host` job, which is red on main today,
+          # would never write a cache at all.
+          cache-on-failure: true
       # Gate G5 (master plan #83 section 3.6) and the wasm replay of gates M3 and D1: the frozen
       # corpus of tools/miso-engine-wasm-gate-corpus is run natively at Scalar/Simd4/Simd8 and
       # inside both browser artifacts (with and without simd128) under wasmtime 47.0.3, and every
@@ -415,6 +435,10 @@ jobs:
         with:
           prefix-key: v1-registry
           cache-targets: false
+          # A failed job's registry is still a valid registry: the only thing in it is
+          # checksum-verified source. Without this the `host` job, which is red on main today,
+          # would never write a cache at all.
+          cache-on-failure: true
       - name: Install the pinned cargo-fuzz
         run: cargo +1.97.1 install cargo-fuzz --locked --version 0.13.2
       - name: Build both fuzz targets
@@ -450,6 +474,10 @@ jobs:
         with:
           prefix-key: v1-registry
           cache-targets: false
+          # A failed job's registry is still a valid registry: the only thing in it is
+          # checksum-verified source. Without this the `host` job, which is red on main today,
+          # would never write a cache at all.
+          cache-on-failure: true
       - name: Install the pinned cargo-fuzz
         run: cargo +1.97.1 install cargo-fuzz --locked --version 0.13.2
       - name: Build bounded protocol fuzz targets
@@ -475,6 +503,10 @@ jobs:
         with:
           prefix-key: v1-registry
           cache-targets: false
+          # A failed job's registry is still a valid registry: the only thing in it is
+          # checksum-verified source. Without this the `host` job, which is red on main today,
+          # would never write a cache at all.
+          cache-on-failure: true
       - name: Run one descriptive two-round benchmark
         run: |
           set -o pipefail
