@@ -39,7 +39,7 @@ jq -e '
   .network_io == 0 and .syscalls == 0 and .panic_unwinds == 0 and
   .total_violations == 0
 ' "$trace_root/audit.json" >/dev/null
-expected_audit_hash=54103c89b557a72da9c79cd00a636ea64933240a4dcb27c27647fb960b013db4
+expected_audit_hash=7a960a01270a67a430ee2db03d189f71b36f762f6b30ea555e16afbb42c917b0
 audit_hash=$(sha256sum "$trace_root/audit.json" | cut -d' ' -f1)
 [[ "$audit_hash" == "$expected_audit_hash" ]] || {
   printf 'graph audit record hash differs: expected=%s actual=%s\n' \
