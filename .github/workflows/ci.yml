@@ -150,7 +150,7 @@ jobs:
           cargo check --locked -p miso-engine-bench --all-targets
           bash scripts/test-protocol-benchmark.sh
       - name: Realtime race model
-        run: RUSTFLAGS='--cfg loom --check-cfg=cfg(loom)' cargo test --locked --release -p miso-engine-core spsc_loom
+        run: RUSTFLAGS='--cfg loom --check-cfg=cfg(loom)' cargo test --locked --release -p miso-engine-core --lib spsc_loom
       - name: Realtime audit hooks and syscall trace
         run: |
           cargo build --locked --release -p miso-engine-audit
