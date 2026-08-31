@@ -60,6 +60,31 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.97.1 --profile minimal
+      # TIER 2 of the caching policy documented at the top of ci.yml, and the only place in the
+      # repository that restores a compiled artifact of any kind.
+      #
+      # This job is the one job that can take it. It asserts no digest, renders no audio, times
+      # nothing and produces no shipped artifact -- the comment above already records that "it
+      # builds no shipped artifact, so no artifact digest depends on it". `--no-run` asks exactly
+      # one question, whether the release profile still compiles, and the answer is a build
+      # outcome rather than a byte comparison. Nothing here can be quietly wrong: a stale
+      # dependency either compiles or it does not.
+      #
+      # Two independent properties keep it honest anyway. The action deletes every
+      # workspace-member artifact from `target/` before saving, so all 48 `miso-engine-*` crates
+      # -- the ones whose source actually changes commit to commit -- are compiled from the
+      # checked-out tree on every single run, and only the 158 external packages are restored.
+      # Those are immutable for a given name, version and `Cargo.lock` checksum, and cargo
+      # re-fingerprints each of them against the current rustc version, profile and flags before
+      # reusing it. A restore-key fallback from an older lockfile can therefore leave unused
+      # rlibs on the disk; it cannot link one.
+      #
+      # Measured on run 33381962189: the external half of this build is about 33 s of its 5 min 01 s.
+      - name: Cache the cargo registry and compiled dependencies
+        uses: useblacksmith/rust-cache@v3
+        with:
+          prefix-key: v1-deps
+          cache-targets: true
       # D12 puts `panic = "abort"` on `[profile.release]`, so ONE workspace-wide release
       # invocation builds both panic variants of every crate, and the three packages whose lib
       # units carry a cdylib/staticlib crate-type emit un-hashed filenames the two variants
