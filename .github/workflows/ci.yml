@@ -333,10 +333,17 @@ jobs:
     runs-on: blacksmith-8vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v4
-      - name: Install pinned Rust toolchain and Wasm standard library
+      # wabt is not optional here. #198 gave `run-wasm-gates.sh` the detector-residency pin, which
+      # disassembles both guest modules with `wasm-objdump`, and the script hard-exits when the
+      # binary is absent -- so from 12ae81f7 onwards this job died after the native leg printed and
+      # before either wasm leg ran. The `wasm` job already installs the same package for
+      # `check-wasm-realtime-atomics.sh`; this job needs it for the same reason.
+      - name: Install pinned Rust toolchain, Wasm standard library and wabt
         run: |
           rustup toolchain install 1.97.1 --profile minimal
           rustup target add --toolchain 1.97.1 wasm32-unknown-unknown
+          sudo apt-get update
+          sudo apt-get install -y wabt
       # Gate G5 (master plan #83 section 3.6) and the wasm replay of gates M3 and D1: the frozen
       # corpus of tools/miso-engine-wasm-gate-corpus is run natively at Scalar/Simd4/Simd8 and
       # inside both browser artifacts (with and without simd128) under wasmtime 47.0.3, and every
