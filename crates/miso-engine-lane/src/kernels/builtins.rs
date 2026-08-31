@@ -92,7 +92,7 @@ pub fn mask_from_flags<L: Lane>(flags: &[f32]) -> L::Mask {
 /// is exactly `m & a`. So the and-form is a spelling of step 3, not a rounding of it.
 ///
 /// It is used at **every** copy of this frame body: here, in [`input_chain_block`], and in the two
-/// elision variants [`identity_chain_block`] and [`mixed_chain_block`], which duplicate the
+/// elision variants `identity_chain_block` and `mixed_chain_block`, which duplicate the
 /// sanitise prologue. A copy left on the select-form would still be correct — that is the point of
 /// the equivalence — but the four are kept identical so the frozen order above has one reading.
 ///

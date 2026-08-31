@@ -2731,7 +2731,7 @@ enum FaderStageKernel {
 ///
 /// # What banking does and does not change
 ///
-/// Nothing numeric. The bank is [`FaderRampStage`] at `Simd4` or `Simd8`, and a per-track fader is
+/// Nothing numeric. The bank is `FaderRampStage` at `Simd4` or `Simd8`, and a per-track fader is
 /// the same type at `f32`, so a member lane's output bits are the bits that track produced as its
 /// own dispatched op -- settled or mid-ramp, muted or not. What banking removes is one graph op,
 /// one arena buffer and one `dyn` dispatch per track per block, and -- because the fader now sits
@@ -2925,7 +2925,7 @@ enum MatrixStageKernel {
 
 /// A homogeneous 2x2 pan/matrix bank over one AoSoA cohort (issue #212, the banked strip).
 ///
-/// [`MatrixStage`] has been per-lane and width-generic since it was written -- a per-track matrix
+/// `MatrixStage` has been per-lane and width-generic since it was written -- a per-track matrix
 /// is that type at `f32` -- so this bank introduces no arithmetic at all. It is the same
 /// settled/ramping kernel choice, made per bank instead of per track, over the same per-lane ramp
 /// state. Padding lanes carry [`Matrix2x2::IDENTITY`] with a zero window, so they settle

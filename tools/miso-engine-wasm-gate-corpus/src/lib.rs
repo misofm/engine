@@ -536,7 +536,7 @@ const MINMAX_LOWERING_POOL: [u32; 10] = [
 ];
 
 /// Lanes on which this target's `Lane::max`/`Lane::min` disagree with the scalar oracle, over
-/// every ordered pair of [`MINMAX_LOWERING_POOL`]. Zero is the only admissible answer.
+/// every ordered pair of `MINMAX_LOWERING_POOL`. Zero is the only admissible answer.
 ///
 /// This is not a digest and has no pin. It exists because `crates/miso-engine-lane` lowers
 /// `Lane::max`/`Lane::min` to one instruction where the target has one with the D8 rule --
