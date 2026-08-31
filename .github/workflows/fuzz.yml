@@ -1,0 +1,137 @@
+name: fuzz
+
+# The two bounded fuzz jobs used to sit on `ci`, which runs unconditionally on every push to main
+# and every pull request against it. Between them they cost 19.9 job-minutes per 25 runs while
+# gating almost nothing: 10,000 libFuzzer executions per target is a smoke test that the decoder
+# still refuses garbage the same way twice, and the libFuzzer execution itself is under a second
+# per target -- the whole cost is toolchain install and sanitizer builds, paid on every run
+# regardless of whether the diff could possibly change a fuzz outcome.
+#
+# They are split into their own workflow for the reason `release-build.yml` was: `paths:` is a
+# workflow-level filter, so a filter on `ci.yml` would gate all of its jobs.
+#
+# The policy this file implements:
+#
+#   push to main   -- filtered, same list as the pull-request leg.
+#   pull request   -- filtered.
+#   dispatch       -- `gh workflow run fuzz.yml --ref <branch>`.
+#   nightly        -- `nightly.yml` runs every target with a far larger budget, unfiltered, on the
+#                     default branch. That is the backstop for anything this filter skips.
+#
+# WHY BOTH LEGS ARE FILTERED, unlike `release-build.yml`. That file leaves its push leg unfiltered
+# because its filter is a heuristic -- a source-only `cfg(debug_assertions)` edit can break a
+# release build without touching any path it lists, so main needs an unfiltered backstop. This
+# filter is not a heuristic. It is the transitive workspace-dependency closure of the fuzz crate,
+# computed from `cargo metadata`, and the fuzz binaries link nothing outside it. `fuzz/Cargo.toml`
+# depends on exactly four workspace crates:
+#
+#   miso-engine-session          -> miso-engine-core
+#   miso-engine-protocol         -> miso-engine-core, miso-engine-session
+#   miso-engine-effect-contract  -> miso-engine-core, miso-engine-lane, miso-engine-math
+#   miso-engine-effect-package   -> miso-engine-core, miso-engine-effect-contract
+#
+# which closes over seven crates: core, effect-contract, effect-package, lane, math, protocol,
+# session. All four roots are listed, not just the three the per-PR targets execute, because both
+# jobs run `cargo check --manifest-path fuzz/Cargo.toml --bins`, which builds all eight fuzz
+# binaries including `effect_package` and `effect_state`. Nothing outside that closure can change
+# what these binaries do, so a change outside it has nothing to catch -- and if a new dependency
+# edge is ever added without extending this list, the unfiltered nightly finds it within a day.
+#
+# The remaining entries are the other real inputs: the fuzz crate and its own lockfile and seed
+# corpus (`fuzz/**`), the seed input the session targets are handed
+# (`fixtures/session/v1/canonical.toml`), the runner that drives the protocol targets
+# (`scripts/run-protocol-fuzz.sh`), the workspace root manifest (the `crates/*` manifests inherit
+# `[workspace.dependencies]` and profiles from it even when built from the `fuzz/` workspace), the
+# toolchain pin, and this file.
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'crates/miso-engine-core/**'
+      - 'crates/miso-engine-effect-contract/**'
+      - 'crates/miso-engine-effect-package/**'
+      - 'crates/miso-engine-lane/**'
+      - 'crates/miso-engine-math/**'
+      - 'crates/miso-engine-protocol/**'
+      - 'crates/miso-engine-session/**'
+      - 'fuzz/**'
+      - 'fixtures/session/v1/canonical.toml'
+      - 'scripts/run-protocol-fuzz.sh'
+      - 'Cargo.toml'
+      - 'rust-toolchain.toml'
+      - '.github/workflows/fuzz.yml'
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'crates/miso-engine-core/**'
+      - 'crates/miso-engine-effect-contract/**'
+      - 'crates/miso-engine-effect-package/**'
+      - 'crates/miso-engine-lane/**'
+      - 'crates/miso-engine-math/**'
+      - 'crates/miso-engine-protocol/**'
+      - 'crates/miso-engine-session/**'
+      - 'fuzz/**'
+      - 'fixtures/session/v1/canonical.toml'
+      - 'scripts/run-protocol-fuzz.sh'
+      - 'Cargo.toml'
+      - 'rust-toolchain.toml'
+      - '.github/workflows/fuzz.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: fuzz-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTUP_TOOLCHAIN: 1.97.1
+
+jobs:
+  session-fuzz:
+    name: bounded session parser and compiler fuzzing
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned Rust toolchain
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal
+          rustup toolchain install nightly-2026-08-20 --profile minimal
+          cargo +1.97.1 install cargo-fuzz --locked --version 0.13.2
+      - name: Build both fuzz targets
+        run: cargo check --locked --manifest-path fuzz/Cargo.toml --bins
+      - name: Run bounded parser fuzz target
+        run: |
+          mkdir -p target/ci/session-fuzz/parse
+          export RUSTFLAGS='-C target-feature=+avx2,+fma'  # lane D4 guard; cargo-fuzz prepends this to its sanitizer flags
+          cargo +nightly-2026-08-20 fuzz run session_parse target/ci/session-fuzz/parse -- -runs=10000 -seed=557074001 -seed_inputs=fixtures/session/v1/canonical.toml
+      - name: Run bounded compiler fuzz target
+        run: |
+          mkdir -p target/ci/session-fuzz/compile
+          export RUSTFLAGS='-C target-feature=+avx2,+fma'
+          cargo +nightly-2026-08-20 fuzz run session_compile target/ci/session-fuzz/compile -- -runs=10000 -seed=557074002 -seed_inputs=fixtures/session/v1/canonical.toml
+
+  protocol-fuzz:
+    name: bounded issue-005 protocol decoder fuzzing
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned Rust and cargo-fuzz toolchains
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal
+          rustup toolchain install nightly-2026-08-20 --profile minimal
+          cargo +1.97.1 install cargo-fuzz --locked --version 0.13.2
+      - name: Build bounded protocol fuzz targets
+        run: cargo check --locked --manifest-path fuzz/Cargo.toml --bins
+      - name: Run fixed-count native sanitizer fuzzing
+        run: bash scripts/run-protocol-fuzz.sh
+      - name: Upload protocol fuzz evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: protocol-fuzz-evidence
+          path: target/ci/protocol-fuzz/evidence.json
