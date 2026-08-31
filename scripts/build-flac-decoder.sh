@@ -23,9 +23,24 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# The artifact is content-addressed, so every path rustc embeds in it must be a
+# function of the SOURCE and nothing else. It is not by default: dependency
+# sources live under CARGO_HOME, whose absolute path differs between a
+# developer's machine and CI (`/root/.cargo` vs `/home/runner/.cargo`), and
+# rustc bakes those paths into panic locations. That made the digest a function
+# of WHERE cargo's registry sits — the pin could only ever match on a machine
+# whose CARGO_HOME matched whoever generated it, and CI's browser-qualification
+# job had been red on exactly that difference, skipping every browser gate
+# behind it.
+#
+# Remapping both roots to fixed labels makes the digest reproducible anywhere.
+# Verified: with these flags the digest is identical under CARGO_HOME=/root/.cargo
+# and CARGO_HOME=/home/runner/.cargo, which previously produced two different ones.
+cargo_home=${CARGO_HOME:-$HOME/.cargo}
+remap="--remap-path-prefix=$cargo_home=/cargo --remap-path-prefix=$repo_root=/repo"
 (
   cd "$repo_root"
-  CARGO_TARGET_DIR="$build_target" RUSTFLAGS='-C strip=debuginfo' \
+  CARGO_TARGET_DIR="$build_target" RUSTFLAGS="-C strip=debuginfo $remap" \
     cargo build --locked --release --target wasm32-unknown-unknown \
       -p miso-engine-flac-decoder
 )
