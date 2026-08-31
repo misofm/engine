@@ -10,35 +10,35 @@ trap 'rm -rf -- "$scratch_root"' EXIT
 create_valid_fixture() {
     local fixture_root="$1"
     mkdir -p \
-        "$fixture_root/crates/miso-engine-library with spaces/src" \
-        "$fixture_root/hosts/miso-engine-binary/src" \
+        "$fixture_root/crates/library/src" \
+        "$fixture_root/hosts/binary/src" \
         "$fixture_root/tools" \
         "$fixture_root/sidecars"
 
     printf '%s\n' \
         '[package]' \
-        'name = "miso-engine-library"' \
+        'name = "library"' \
         '' \
         '[lib]' \
-        'name = "miso_engine_library"' \
+        'name = "library"' \
         '' \
         '[features]' \
         'default = []' \
-        >"$fixture_root/crates/miso-engine-library with spaces/Cargo.toml"
-    printf '//! fixture\n' >"$fixture_root/crates/miso-engine-library with spaces/src/lib.rs"
+        >"$fixture_root/crates/library/Cargo.toml"
+    printf '//! fixture\n' >"$fixture_root/crates/library/src/lib.rs"
 
     printf '%s\n' \
         '[package]' \
-        'name = "miso-engine-binary"' \
+        'name = "binary"' \
         '' \
         '[[bin]]' \
-        'name = "miso_engine_binary"' \
+        'name = "binary"' \
         'path = "src/main.rs"' \
         '' \
         '[features]' \
         'default = []' \
-        >"$fixture_root/hosts/miso-engine-binary/Cargo.toml"
-    printf 'fn main() {}\n' >"$fixture_root/hosts/miso-engine-binary/src/main.rs"
+        >"$fixture_root/hosts/binary/Cargo.toml"
+    printf 'fn main() {}\n' >"$fixture_root/hosts/binary/src/main.rs"
 }
 
 expect_failure() {
@@ -54,41 +54,65 @@ expect_failure() {
     fi
 }
 
+# The miso-engine- prefix convention was retired by the prefix-strip rename
+# (docs/rulings/prefix-strip-inventory.md). A package that reintroduces it must still fail --
+# this is the regression the gate exists to catch now that the prefix is no longer required.
 mutate_package_prefix() {
     local root="$1"
-    sed -i 's/name = "miso-engine-library"/name = "engine-library"/' \
-        "$root/crates/miso-engine-library with spaces/Cargo.toml"
+    # `0,/pat/{s/pat/x/}` limits the substitution to the first match in the file (the
+    # [package] name line), so it does not also clobber the [lib] name line below it, which
+    # is textually identical for a single-word crate name.
+    sed -i '0,/name = "library"/{s/name = "library"/name = "miso-engine-library"/}' \
+        "$root/crates/library/Cargo.toml"
+}
+
+# Same regression, spelled with the underscore form, which the check also forbids explicitly
+# (a partially-reverted rename could leave the package name underscored instead of hyphenated).
+mutate_package_prefix_underscore_form() {
+    local root="$1"
+    sed -i '0,/name = "library"/{s/name = "library"/name = "miso_engine_library"/}' \
+        "$root/crates/library/Cargo.toml"
+}
+
+# The directory basename must equal the package name exactly now that there is no prefix left to
+# distinguish "close enough" from correct.
+mutate_directory_mismatch() {
+    local root="$1"
+    sed -i '0,/name = "library"/{s/name = "library"/name = "elsewhere"/}' \
+        "$root/crates/library/Cargo.toml"
 }
 
 mutate_lib_identifier() {
     local root="$1"
-    sed -i 's/name = "miso_engine_library"/name = "miso_engine_wrong"/' \
-        "$root/crates/miso-engine-library with spaces/Cargo.toml"
+    # Scoped to the [lib] section onward so this does not also clobber the [package] name
+    # line above it, which is textually identical for a single-word crate name.
+    sed -i '/^\[lib\]$/,$ s/name = "library"/name = "wrong"/' \
+        "$root/crates/library/Cargo.toml"
 }
 
 mutate_bin_identifier() {
     local root="$1"
-    sed -i 's/name = "miso_engine_binary"/name = "miso_engine_wrong"/' \
-        "$root/hosts/miso-engine-binary/Cargo.toml"
+    sed -i '/^\[\[bin\]\]$/,$ s/name = "binary"/name = "wrong"/' \
+        "$root/hosts/binary/Cargo.toml"
 }
 
 allow_secondary_tool_bin() {
     local root="$1"
     create_valid_fixture "$root"
-    sed -i 's/name = "miso_engine_binary"/name = "miso_engine_binary_probe"/' \
-        "$root/hosts/miso-engine-binary/Cargo.toml"
+    sed -i '/^\[\[bin\]\]$/,$ s/name = "binary"/name = "binary_probe"/' \
+        "$root/hosts/binary/Cargo.toml"
     bash "$policy_script" "$root" >/dev/null
 }
 
 mutate_hardware_feature() {
     local root="$1"
-    printf 'avx2 = []\n' >>"$root/crates/miso-engine-library with spaces/Cargo.toml"
+    printf 'avx2 = []\n' >>"$root/crates/library/Cargo.toml"
 }
 
 mutate_track_limit() {
     local root="$1"
     printf 'const MAX_TRACKS: usize = 64;\n' \
-        >>"$root/crates/miso-engine-library with spaces/src/lib.rs"
+        >>"$root/crates/library/src/lib.rs"
 }
 
 mutate_global_isa() {
@@ -125,19 +149,18 @@ allow_approved_isa_pin() {
     bash "$policy_script" "$root" >/dev/null
 }
 
-# sidecars/<short-name> is exempt from the directory-prefix rule (a sidecar's directory
-# is named by its short sidecar identity, e.g. sidecars/flac-decoder), but the package
-# name and lib name rules are unchanged.
-allow_sidecar_short_directory() {
+# sidecars/<name> is no longer special-cased: it is subject to exactly the same bare-name,
+# directory-equals-package-name and sysroot-collision rules as crates/hosts/tools.
+allow_sidecar_valid() {
     local root="$1"
     create_valid_fixture "$root"
     mkdir -p "$root/sidecars/flac-decoder/src"
     printf '%s\n' \
         '[package]' \
-        'name = "miso-engine-flac-decoder"' \
+        'name = "flac-decoder"' \
         '' \
         '[lib]' \
-        'name = "miso_engine_flac_decoder"' \
+        'name = "flac_decoder"' \
         '' \
         '[features]' \
         'default = []' \
@@ -151,10 +174,10 @@ mutate_sidecar_package_prefix() {
     mkdir -p "$root/sidecars/flac-decoder/src"
     printf '%s\n' \
         '[package]' \
-        'name = "flac-decoder"' \
+        'name = "miso-engine-flac-decoder"' \
         '' \
         '[lib]' \
-        'name = "flac_decoder"' \
+        'name = "miso_engine_flac_decoder"' \
         '' \
         '[features]' \
         'default = []' \
@@ -162,20 +185,18 @@ mutate_sidecar_package_prefix() {
     printf '//! fixture\n' >"$root/sidecars/flac-decoder/src/lib.rs"
 }
 
-# `*` in a bash `[[ ]]` pattern spans `/`, so a naive `sidecars/*/Cargo.toml` exemption test
-# would also exempt a package two directories deep, e.g. `sidecars/vendor/anything/Cargo.toml`.
-# The exemption is exactly one path segment under sidecars/; a directory that is neither
-# miso-engine-prefixed nor a direct sidecars/<name> child must still fail the directory-prefix
-# rule.
-mutate_sidecar_nested_directory() {
+# The directory-equals-package-name rule applies regardless of nesting depth: a manifest two
+# directories under sidecars/ whose package name does not match its own directory basename must
+# still fail, exactly as it would under crates/hosts/tools.
+mutate_sidecar_nested_directory_mismatch() {
     local root="$1"
     mkdir -p "$root/sidecars/vendor/anything/src"
     printf '%s\n' \
         '[package]' \
-        'name = "miso-engine-vendored-thing"' \
+        'name = "vendored-thing"' \
         '' \
         '[lib]' \
-        'name = "miso_engine_vendored_thing"' \
+        'name = "vendored_thing"' \
         '' \
         '[features]' \
         'default = []' \
@@ -183,7 +204,41 @@ mutate_sidecar_nested_directory() {
     printf '//! fixture\n' >"$root/sidecars/vendor/anything/src/lib.rs"
 }
 
-valid_root="$scratch_root/valid root"
+# `core`, and the rest of the Rust sysroot/prelude names, must never be a package name: `core`
+# silently shadows the sysroot `core` crate for every dependent (docs/rulings/prefix-strip-inventory.md).
+mutate_sysroot_collision() {
+    local root="$1"
+    mkdir -p "$root/crates/core/src"
+    printf '%s\n' \
+        '[package]' \
+        'name = "core"' \
+        '' \
+        '[lib]' \
+        'name = "core"' \
+        '' \
+        '[features]' \
+        'default = []' \
+        >"$root/crates/core/Cargo.toml"
+    printf '//! fixture\n' >"$root/crates/core/src/lib.rs"
+}
+
+mutate_prelude_collision() {
+    local root="$1"
+    mkdir -p "$root/crates/std/src"
+    printf '%s\n' \
+        '[package]' \
+        'name = "std"' \
+        '' \
+        '[lib]' \
+        'name = "std"' \
+        '' \
+        '[features]' \
+        'default = []' \
+        >"$root/crates/std/Cargo.toml"
+    printf '//! fixture\n' >"$root/crates/std/src/lib.rs"
+}
+
+valid_root="$scratch_root/valid_root"
 create_valid_fixture "$valid_root"
 bash "$policy_script" "$valid_root" >/dev/null
 
@@ -205,6 +260,8 @@ mutate_root_cachedir_tag() {
 }
 
 expect_failure package-prefix mutate_package_prefix
+expect_failure package-prefix-underscore-form mutate_package_prefix_underscore_form
+expect_failure directory-mismatch mutate_directory_mismatch
 expect_failure lib-identifier mutate_lib_identifier
 expect_failure bin-identifier mutate_bin_identifier
 expect_failure hardware-feature mutate_hardware_feature
@@ -216,6 +273,9 @@ expect_failure root-target-spill mutate_root_target_spill
 expect_failure root-rustc-info mutate_root_rustc_info
 expect_failure root-cachedir-tag mutate_root_cachedir_tag
 expect_failure sidecar-package-prefix mutate_sidecar_package_prefix
+expect_failure sidecar-nested-directory-mismatch mutate_sidecar_nested_directory_mismatch
+expect_failure sysroot-collision mutate_sysroot_collision
+expect_failure prelude-collision mutate_prelude_collision
 
 # `rg` exits 2 (not 1) when a search root does not exist, and `if rg ...; then fail; fi` reads
 # both 1 and 2 as "no violation". A fixture whose sidecars/ directory is removed after creation
@@ -225,10 +285,9 @@ mutate_missing_sidecars_root() {
     rm -rf -- "$root/sidecars"
 }
 
-expect_failure sidecar-nested-directory-prefix mutate_sidecar_nested_directory
 expect_failure missing-sidecars-root mutate_missing_sidecars_root
 allow_secondary_tool_bin "$scratch_root/secondary-tool-bin"
 allow_approved_isa_pin "$scratch_root/approved-isa-pin"
-allow_sidecar_short_directory "$scratch_root/sidecar-short-directory"
+allow_sidecar_valid "$scratch_root/sidecar-valid"
 
 printf 'workspace policy mutation tests: ok\n'
