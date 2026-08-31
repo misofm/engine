@@ -1,7 +1,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use miso_engine_session::{CompileCaps, compile_session, parse_session_toml};
+use session::{CompileCaps, compile_session, parse_session_toml};
 
 fuzz_target!(|bytes: &[u8]| {
     let Ok(source) = core::str::from_utf8(bytes) else {

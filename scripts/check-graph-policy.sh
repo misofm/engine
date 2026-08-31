@@ -9,8 +9,8 @@ fail() {
   exit 1
 }
 
-graph_manifest="crates/miso-engine-graph/Cargo.toml"
-compiler_manifest="crates/miso-engine-graph-compiler/Cargo.toml"
+graph_manifest="crates/graph/Cargo.toml"
+compiler_manifest="crates/graph-compiler/Cargo.toml"
 [[ -f "$graph_manifest" && -f "$compiler_manifest" ]] || fail 'missing graph manifests'
 
 production_graph_dependencies=$(awk '
@@ -18,30 +18,30 @@ production_graph_dependencies=$(awk '
   /^\[/ { in_dependencies = 0 }
   in_dependencies && /^[a-zA-Z0-9_-]+[.]workspace/ { print $1 }
 ' "$graph_manifest" | sort)
-[[ "$production_graph_dependencies" == $'miso-engine-core.workspace\nmiso-engine-effect-contract.workspace\nmiso-engine-lane.workspace\nmiso-engine-rack.workspace' ]] ||
+[[ "$production_graph_dependencies" == $'effect-contract.workspace\nengine.workspace\nlane.workspace\nrack.workspace' ]] ||
   fail 'render graph dependency boundary changed'
 
 rg -q '^sha2[.]workspace = true$' "$compiler_manifest" ||
   fail 'control-plane compiler must own SHA-256 dependency'
-if rg -n 'sha2|miso_engine_session|miso_engine_effect_compiler' \
-  crates/miso-engine-graph/src crates/miso-engine-graph/Cargo.toml; then
+if rg -n 'sha2|\b(session|effect_compiler)::' \
+  crates/graph/src crates/graph/Cargo.toml; then
   fail 'control-plane dependency leaked into render graph'
 fi
 production_sources=$(mktemp)
 trap 'rm -f -- "$production_sources"' EXIT
 while IFS= read -r source; do
   sed '/^#\[cfg(test)\]/,$d' "$source" >>"$production_sources"
-done < <(find crates/miso-engine-graph/src crates/miso-engine-graph-compiler/src -name '*.rs' -type f | sort)
+done < <(find crates/graph/src crates/graph-compiler/src -name '*.rs' -type f | sort)
 if rg -n 'PlanPublisher|plan_exchange|std::fs|std::net|std::thread|std::sync::(Mutex|RwLock|Condvar|mpsc)|log::|tracing::' \
   "$production_sources"; then
   fail 'publication, I/O, threading, synchronization, or logging leaked into graph path'
 fi
 if rg -n '\b(MAX_TRACKS|MAX_TRACK_COUNT|DEFAULT_MAX_TRACKS|TRACK_LIMIT)\b' \
-  crates/miso-engine-graph crates/miso-engine-graph-compiler; then
+  crates/graph crates/graph-compiler; then
   fail 'compiled track ceiling is forbidden'
 fi
 # Production code only: a `#[cfg(test)]` module may implement the seam to exercise it (issue 100
-# tests the block-boundary hand-over inside `miso-engine-core`), but nothing that ships may.
+# tests the block-boundary hand-over inside `engine`), but nothing that ships may.
 implementations=$(
   while IFS= read -r source; do
     # No pipeline here: `rg -q` exits on its first match, and under `pipefail` sed's SIGPIPE
@@ -52,7 +52,7 @@ implementations=$(
     fi
   done < <(find crates -name '*.rs' -type f | sort) | sort
 )
-[[ "$implementations" == 'crates/miso-engine-graph/src/lib.rs' ]] ||
+[[ "$implementations" == 'crates/graph/src/lib.rs' ]] ||
   fail 'production prepared-plan executor must remain graph-owned'
 
 printf 'graph policy: PASS\n'

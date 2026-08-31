@@ -4,39 +4,39 @@
 #
 # `f32`/`f64` transcendental methods are not specified to agree between targets, toolchains or
 # optimisation levels, so every one of them on a render path is a hole in the cross-target
-# bit-identity claim (D5). `crates/miso-engine-math` owns the vendored implementations; this guard
+# bit-identity claim (D5). `crates/math` owns the vendored implementations; this guard
 # keeps everything else pointed at it. `sqrt` stays legal: IEEE 754 specifies it exactly.
 #
 # The allowlist below is the pre-migration state, dated and owned. It shrinks to empty during wave
-# 2, when each effect crate moves to `miso-engine-math`; it must never grow. Counts are a ratchet:
+# 2, when each effect crate moves to `math`; it must never grow. Counts are a ratchet:
 # exceeding one fails, and an entry that reaches zero must be deleted in the same change.
 set -euo pipefail
 
 # Files that still call the platform libm, with the maximum number of call sites permitted and the
 # issue that removes them. Enumerated 2026-08-23 by running this script's own pattern.
 #
-# Issue #91 removed two lines: `miso-engine-soft-clip` moved to `miso_engine_math::db_to_gain_f32`
-# and its tests out of `src/`, and `miso-engine-core/src/arch/mod.rs`'s single site was inside the
+# Issue #91 removed two lines: `soft-clip` moved to `math::db_to_gain_f32`
+# and its tests out of `src/`, and `engine/src/arch/mod.rs`'s single site was inside the
 # soft-clip kernel test that #91 deleted (the kernel's last consumer had moved).
 #
-# Issue #95 removed the four `miso-engine-effect-contract` sites and deleted its row: the
+# Issue #95 removed the four `effect-contract` sites and deleted its row: the
 # logarithmic parameter mapping and its inverse, the `OnePole99` coefficient, and the exponential
-# automation segment now call `miso_engine_math::{powf, logf, expf}`. The contract took a
-# `miso-engine-math` dependency in the same commit, which
+# automation segment now call `math::{powf, logf, expf}`. The contract took a
+# `math` dependency in the same commit, which
 # `scripts/check-effect-runtime-policy.sh` pins.
 #
-# Issue #99 removed the single `miso-engine-graph-compiler` site and deleted its row: the route
-# gain coefficient (`route_transform`) now calls `miso_engine_math::db_to_gain_f32`. Those bits
+# Issue #99 removed the single `graph-compiler` site and deleted its row: the route
+# gain coefficient (`route_transform`) now calls `math::db_to_gain_f32`. Those bits
 # feed both the render multiply and the semantic SHA-256, so they were the last place in that
 # crate where a host libm could break cross-target bit identity (D5). The f64 oracle that
-# compares the two lives in `crates/miso-engine-graph-compiler/tests/route_gain.rs`, which this
+# compares the two lives in `crates/graph-compiler/tests/route_gain.rs`, which this
 # script exempts structurally.
 #
 #   path                                                  max  owner
 math_policy_allowlist() {
     cat <<'ALLOWLIST'
-crates/miso-engine-graph/src/lib.rs                         2  98
-crates/miso-engine-conformance/src/compare.rs               1 105
+crates/graph/src/lib.rs                         2  98
+crates/conformance/src/compare.rs               1 105
 ALLOWLIST
 }
 
@@ -54,7 +54,7 @@ fail() {
 }
 
 # Method-call form only: `x.exp()`, `x.powf(y)`, ... A free function named `exp` is the engine's
-# own, and `miso_engine_math::exp(x)` must keep working.
+# own, and `math::exp(x)` must keep working.
 pattern='\.(exp|exp2|ln|log2|log10|powf|powi|sin|cos|tan|atan|atan2|sinh|cosh|tanh|exp_m1|ln_1p)\('
 
 # Scanned by design; `tools/` is not (fixture generators use the platform libm deliberately, and
@@ -68,10 +68,10 @@ done
 [[ "${#roots[@]}" -gt 0 ]] || fail "neither crates/ nor hosts/ exists at $workspace_root"
 
 # Structural exemptions, as opposed to migration debt:
-#   miso-engine-math          owns the implementations
-#   miso-engine-dsp-reference is the independent f64 oracle; using the platform libm is the point
+#   math          owns the implementations
+#   dsp-reference is the independent f64 oracle; using the platform libm is the point
 #   tests/ examples/ src/bin/ are not production code and legitimately compare against the platform
-structural_exempt='^crates/miso-engine-math/|^crates/miso-engine-dsp-reference/|/tests/|/examples/|/src/bin/'
+structural_exempt='^crates/math/|^crates/dsp-reference/|/tests/|/examples/|/src/bin/'
 
 hits="$({ rg -n "$pattern" "${roots[@]}" --glob '*.rs' || true; } | rg -v "$structural_exempt" || true)"
 
@@ -89,7 +89,7 @@ done <<<"$hits"
 
 if [[ -n "$unexpected" ]]; then
     printf '%s' "$unexpected" >&2
-    fail "platform transcendental calls outside crates/miso-engine-math; call miso_engine_math instead (D6)"
+    fail "platform transcendental calls outside crates/math; call math instead (D6)"
 fi
 
 # 2. Allowlisted files may not gain call sites, and an entry that reaches zero must be removed.

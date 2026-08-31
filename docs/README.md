@@ -22,4 +22,4 @@ The issue bodies in [`.github/ISSUE_SPECS`](../.github/ISSUE_SPECS/README.md) re
 | Provisional issue-029 package identity and artifact hashes | [Effect package V1](EFFECT_PACKAGE_V1.md) |
 | Provisional issue-029 prepared-state envelope | [Effect state V1](EFFECT_STATE_V1.md) |
 
-`miso-engine-protocol` is control-plane-only. It has no renderer, `PreparedRenderPlan`, PCM payload, transport framing, or exported C ABI.
+`protocol` is control-plane-only. It has no renderer, `PreparedRenderPlan`, PCM payload, transport framing, or exported C ABI.

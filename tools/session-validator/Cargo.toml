@@ -1,0 +1,24 @@
+[package]
+name = "session-validator"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+name = "session_validator"
+path = "src/lib.rs"
+
+[[bin]]
+name = "session_validator"
+path = "src/main.rs"
+
+[dependencies]
+builtins-compiler.workspace = true
+session.workspace = true
+
+[dev-dependencies]
+host-web.workspace = true
+
+[lints]
+workspace = true

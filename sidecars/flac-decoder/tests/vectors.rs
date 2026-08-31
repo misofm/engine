@@ -2,11 +2,11 @@
 
 use std::{fs, path::Path};
 
-use miso_engine_flac_decoder::{
+use flac_decoder::{
     FlacBlockDecoder, RESULT_DECODE_REFUSED, RESULT_RESOURCE_LIMIT, RESULT_SHAPE_MISMATCH,
     decode_flac_to_writer,
 };
-use miso_engine_stem_hasher::{CanonicalBitDepth, CanonicalPcmShape, canonicalize_raw_pcm};
+use stem_hasher::{CanonicalBitDepth, CanonicalPcmShape, canonicalize_raw_pcm};
 
 const FIXTURES: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),

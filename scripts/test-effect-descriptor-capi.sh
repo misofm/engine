@@ -8,15 +8,15 @@ scratch_directory="$(mktemp -d)"
 trap 'rm -rf -- "$scratch_directory"' EXIT
 
 cargo build --locked --manifest-path "$workspace_root/Cargo.toml" \
-    -p miso-engine-effect-package --features c-abi --lib
+    -p effect-package --features c-abi --lib
 
 case "$(uname -s)" in
     Darwin)
-        library_file="$target_directory/debug/libmiso_engine_effect_package.dylib"
+        library_file="$target_directory/debug/libeffect_package.dylib"
         dynamic_symbols=(nm -gU)
         ;;
     Linux)
-        library_file="$target_directory/debug/libmiso_engine_effect_package.so"
+        library_file="$target_directory/debug/libeffect_package.so"
         dynamic_symbols=(nm -D --defined-only)
         ;;
     *)
@@ -44,9 +44,9 @@ expected_symbols=$'miso_engine_effect_descriptor_v1_inspect\nmiso_engine_effect_
 }
 
 cc -std=c11 -pedantic -Wall -Wextra -Werror \
-    -I"$workspace_root/crates/miso-engine-effect-package/include" \
-    "$workspace_root/crates/miso-engine-effect-package/tests/c/descriptor_smoke.c" \
-    -L"$(dirname "$library_file")" -lmiso_engine_effect_package \
+    -I"$workspace_root/crates/effect-package/include" \
+    "$workspace_root/crates/effect-package/tests/c/descriptor_smoke.c" \
+    -L"$(dirname "$library_file")" -leffect_package \
     -Wl,-rpath,"$(dirname "$library_file")" \
     -o "$scratch_directory/descriptor-smoke"
 

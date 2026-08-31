@@ -15,12 +15,12 @@ The session model and its semantics do not vary by Cargo feature or target capab
 ## Dispatch contract
 
 **Superseded by #83 D4 (revision 4) via #84 phase A.** There is no runtime SIMD dispatch and no
-capability struct: `miso_engine_core::target_capabilities()`, `TargetCapabilities` and
-`KernelBackendV1` were deleted together with `crates/miso-engine-core/src/arch`.
-`miso_engine_lane::Backend::current()` is a compile-time constant (`Simd8` on `x86-64-v3`, `Simd4`
+capability struct: `engine::target_capabilities()`, `TargetCapabilities` and
+`KernelBackendV1` were deleted together with `crates/engine/src/arch`.
+`lane::Backend::current()` is a compile-time constant (`Simd8` on `x86-64-v3`, `Simd4`
 on AArch64 and on a wasm artifact built with `simd128`, `Scalar` otherwise), and
-`miso_engine_lane::attest_host()` refuses at boot on an x86 CPU that lacks the pinned AVX2/FMA
-rather than degrading silently. `miso_engine_effect_contract::BankWidth::for_backend` is the
+`lane::attest_host()` refuses at boot on an x86 CPU that lacks the pinned AVX2/FMA
+rather than degrading silently. `effect_contract::BankWidth::for_backend` is the
 workspace's single backend-to-width law.
 
 No Cargo feature is named `simd128`, `neon`, `avx2`, or `fma`. CPU ISA flags must never be made
@@ -37,20 +37,20 @@ are:
 ```bash
 cargo check --locked --workspace --all-targets
 cargo check --locked --target aarch64-linux-android \
-  -p miso-engine-core -p miso-engine-session -p miso-engine-protocol \
-  -p miso-engine-capi -p miso-engine-target-smoke -p miso-engine-host-mobile
+  -p engine -p session -p protocol \
+  -p capi -p target-smoke -p host-mobile
 cargo check --locked --target aarch64-apple-ios \
-  -p miso-engine-core -p miso-engine-session -p miso-engine-protocol \
-  -p miso-engine-capi -p miso-engine-target-smoke -p miso-engine-host-mobile
+  -p engine -p session -p protocol \
+  -p capi -p target-smoke -p host-mobile
 
 CARGO_TARGET_DIR=target/ci/wasm-scalar RUSTFLAGS="-C target-feature=-simd128" \
   cargo build --locked --release --target wasm32-unknown-unknown \
-  -p miso-engine-core -p miso-engine-session -p miso-engine-protocol \
-  -p miso-engine-target-smoke -p miso-engine-host-web
+  -p engine -p session -p protocol \
+  -p target-smoke -p host-web
 CARGO_TARGET_DIR=target/ci/wasm-simd RUSTFLAGS="-C target-feature=+simd128" \
   cargo build --locked --release --target wasm32-unknown-unknown \
-  -p miso-engine-core -p miso-engine-session -p miso-engine-protocol \
-  -p miso-engine-target-smoke -p miso-engine-host-web
+  -p engine -p session -p protocol \
+  -p target-smoke -p host-web
 ```
 
 `cargo check` verifies Rust compilation only. iOS linking/device execution needs Xcode and an iOS

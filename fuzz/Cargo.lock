@@ -70,6 +70,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "effect-contract"
+version = "0.1.0"
+dependencies = [
+ "engine",
+ "lane",
+ "math",
+]
+
+[[package]]
+name = "effect-package"
+version = "0.1.0"
+dependencies = [
+ "effect-contract",
+ "engine",
+ "sha2",
+]
+
+[[package]]
+name = "engine"
+version = "0.1.0"
+
+[[package]]
 name = "find-msvc-tools"
 version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -106,6 +128,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "lane"
+version = "0.1.0"
+dependencies = [
+ "wide",
+]
+
+[[package]]
 name = "libc"
 version = "0.2.189"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -122,65 +151,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "miso-engine-core"
+name = "math"
 version = "0.1.0"
-
-[[package]]
-name = "miso-engine-effect-contract"
-version = "0.1.0"
-dependencies = [
- "miso-engine-core",
- "miso-engine-lane",
- "miso-engine-math",
-]
-
-[[package]]
-name = "miso-engine-effect-package"
-version = "0.1.0"
-dependencies = [
- "miso-engine-core",
- "miso-engine-effect-contract",
- "sha2",
-]
-
-[[package]]
-name = "miso-engine-lane"
-version = "0.1.0"
-dependencies = [
- "wide",
-]
-
-[[package]]
-name = "miso-engine-math"
-version = "0.1.0"
-
-[[package]]
-name = "miso-engine-protocol"
-version = "0.1.0"
-dependencies = [
- "miso-engine-core",
- "miso-engine-session",
-]
-
-[[package]]
-name = "miso-engine-session"
-version = "0.1.0"
-dependencies = [
- "miso-engine-core",
- "serde",
- "toml",
-]
-
-[[package]]
-name = "miso-engine-session-fuzz"
-version = "0.0.0"
-dependencies = [
- "libfuzzer-sys",
- "miso-engine-effect-contract",
- "miso-engine-effect-package",
- "miso-engine-protocol",
- "miso-engine-session",
-]
 
 [[package]]
 name = "proc-macro2"
@@ -189,6 +161,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "985e7ec9bb745e6ce6535b544d84d6cd6f7ad8bd711c398938ae983b91a766d9"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "protocol"
+version = "0.1.0"
+dependencies = [
+ "engine",
+ "session",
 ]
 
 [[package]]
@@ -252,6 +232,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6662b5879511e06e8999a8a235d848113e942c9124f211511b16466ee2995f26"
 dependencies = [
  "serde_core",
+]
+
+[[package]]
+name = "session"
+version = "0.1.0"
+dependencies = [
+ "engine",
+ "serde",
+ "toml",
+]
+
+[[package]]
+name = "session-fuzz"
+version = "0.0.0"
+dependencies = [
+ "effect-contract",
+ "effect-package",
+ "libfuzzer-sys",
+ "protocol",
+ "session",
 ]
 
 [[package]]

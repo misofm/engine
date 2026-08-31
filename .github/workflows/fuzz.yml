@@ -25,10 +25,10 @@ name: fuzz
 # computed from `cargo metadata`, and the fuzz binaries link nothing outside it. `fuzz/Cargo.toml`
 # depends on exactly four workspace crates:
 #
-#   miso-engine-session          -> miso-engine-core
-#   miso-engine-protocol         -> miso-engine-core, miso-engine-session
-#   miso-engine-effect-contract  -> miso-engine-core, miso-engine-lane, miso-engine-math
-#   miso-engine-effect-package   -> miso-engine-core, miso-engine-effect-contract
+#   session          -> engine
+#   protocol         -> engine, session
+#   effect-contract  -> engine, lane, math
+#   effect-package   -> engine, effect-contract
 #
 # which closes over seven crates: core, effect-contract, effect-package, lane, math, protocol,
 # session. All four roots are listed, not just the three the per-PR targets execute, because both
@@ -49,13 +49,13 @@ on:
     branches:
       - main
     paths:
-      - 'crates/miso-engine-core/**'
-      - 'crates/miso-engine-effect-contract/**'
-      - 'crates/miso-engine-effect-package/**'
-      - 'crates/miso-engine-lane/**'
-      - 'crates/miso-engine-math/**'
-      - 'crates/miso-engine-protocol/**'
-      - 'crates/miso-engine-session/**'
+      - 'crates/engine/**'
+      - 'crates/effect-contract/**'
+      - 'crates/effect-package/**'
+      - 'crates/lane/**'
+      - 'crates/math/**'
+      - 'crates/protocol/**'
+      - 'crates/session/**'
       - 'fuzz/**'
       - 'fixtures/session/v1/canonical.toml'
       - 'scripts/run-protocol-fuzz.sh'
@@ -66,13 +66,13 @@ on:
     branches:
       - main
     paths:
-      - 'crates/miso-engine-core/**'
-      - 'crates/miso-engine-effect-contract/**'
-      - 'crates/miso-engine-effect-package/**'
-      - 'crates/miso-engine-lane/**'
-      - 'crates/miso-engine-math/**'
-      - 'crates/miso-engine-protocol/**'
-      - 'crates/miso-engine-session/**'
+      - 'crates/engine/**'
+      - 'crates/effect-contract/**'
+      - 'crates/effect-package/**'
+      - 'crates/lane/**'
+      - 'crates/math/**'
+      - 'crates/protocol/**'
+      - 'crates/session/**'
       - 'fuzz/**'
       - 'fixtures/session/v1/canonical.toml'
       - 'scripts/run-protocol-fuzz.sh'

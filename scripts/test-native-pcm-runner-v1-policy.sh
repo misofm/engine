@@ -11,7 +11,7 @@ copy_case() {
     mkdir -p "$case_root/tools" "$case_root/fixtures/native-pcm-runner" \
         "$case_root/fixtures/session/v1" "$case_root/scripts" "$case_root/crates/fake/src" \
         "$case_root/hosts"
-    cp -R "$root/tools/miso-engine-native-pcm-runner" "$case_root/tools/"
+    cp -R "$root/tools/native-pcm-runner" "$case_root/tools/"
     cp -R "$root/fixtures/native-pcm-runner/v1" "$case_root/fixtures/native-pcm-runner/"
     cp "$root/fixtures/session/v1/parametric-eq-nine-track.toml" "$case_root/fixtures/session/v1/"
     cp "$root/scripts/check-native-pcm-runner-v1.sh" "$case_root/scripts/"
@@ -28,7 +28,7 @@ if "$case_root/scripts/check-native-pcm-runner-v1.sh" "$case_root" >/dev/null 2>
 fi
 
 copy_case bypass
-printf '\nmiso-engine-graph.workspace = true\n' >>"$case_root/tools/miso-engine-native-pcm-runner/Cargo.toml"
+printf '\ngraph.workspace = true\n' >>"$case_root/tools/native-pcm-runner/Cargo.toml"
 if "$case_root/scripts/check-native-pcm-runner-v1.sh" "$case_root" >/dev/null 2>&1; then
     printf 'native PCM runner mutation escaped: graph bypass\n' >&2
     exit 1
@@ -40,7 +40,7 @@ cat >"$case_root/crates/fake/Cargo.toml" <<'EOF'
 name = "miso-engine-fake"
 version = "0.0.0"
 [dependencies]
-miso-engine-native-pcm-runner = { path = "../../tools/miso-engine-native-pcm-runner" }
+native-pcm-runner = { path = "../../tools/native-pcm-runner" }
 EOF
 if "$case_root/scripts/check-native-pcm-runner-v1.sh" "$case_root" >/dev/null 2>&1; then
     printf 'native PCM runner mutation escaped: reverse dependency\n' >&2

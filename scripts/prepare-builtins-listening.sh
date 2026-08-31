@@ -41,9 +41,9 @@ umask 077
 python3 -I -B scripts/check-builtins-listening-033.py --source \
     "$inbox/source.mepcm" "$inbox/provenance.json" || fail 'source or provenance'
 
-cargo build --locked --release --bin miso_engine_audit \
-    --manifest-path tools/miso-engine-audit/Cargo.toml >&2
-binary=target/release/miso_engine_audit
+cargo build --locked --release --bin audit \
+    --manifest-path tools/audit/Cargo.toml >&2
+binary=target/release/audit
 [[ -x "$binary" ]] || fail 'renderer binary'
 
 commit="$(git rev-parse --verify HEAD)"

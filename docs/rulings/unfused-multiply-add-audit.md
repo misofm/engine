@@ -173,7 +173,7 @@ back finite would be relying on a property the engine no longer has.
 
 ## Boundary 5 — three corpora that did not move are part of the evidence
 
-`miso_engine_math`'s Horner chains have been deliberately unfused since they were written
+`math`'s Horner chains have been deliberately unfused since they were written
 (`lane_math.rs`: "an `fma` Horner improves `exp2_lane` from 1.462 to 1.191 ulp and leaves
 `log2_lane` unchanged, against a gate of 2 ulp"). The crate reached this ruling's conclusion first,
 on the same reasoning, for one module. Soft clip has no `fma` at all — "the frozen graph has none,
@@ -186,7 +186,7 @@ check than any of the digests that *do* move, because it cannot be satisfied by 
 
 ## Per-family bounds and their red mutations
 
-Every bound is measured on a model of the site written out in `tools/miso-engine-audit`, because the
+Every bound is measured on a model of the site written out in `tools/audit`, because the
 fused arm no longer exists in the tree to measure. A model is only evidence if it is the thing it
 models: the `conformance` pass runs the production kernels at `Scalar` width over the same input
 and compares `to_bits`, and reports **0 mismatching words** for `svf_block`, `one_pole_block`,
@@ -231,7 +231,7 @@ and what keeps those tests out of that band is the D7 flush law, not the oracle.
   intermediate — carries an error that matters at its audible level. Boundary 1 rules out the
   stability argument permanently; a reopening has to be an audibility argument with a measurement
   behind it. The emulation and its round-to-odd proof are recoverable from history
-  (`crates/miso-engine-lane/src/softfma.rs` before this change) and would return as a separately
+  (`crates/lane/src/softfma.rs` before this change) and would return as a separately
   named operation with a registry-style seal, not by un-retiring `Lane::fma`.
 * **The finiteness boundary** (boundary 4): if a future kernel is written whose product can
   legitimately overflow while its sum cannot, that kernel needs either a domain argument or an
@@ -247,14 +247,14 @@ and what keeps those tests out of that band is the D7 flush law, not the oracle.
 
 * Ruling: issue #163 phase 2, owner GO 2026-08-26 and the confirmation of the same date; the
   wasm baseline it rests on, `artifacts/issue163-phase2-wasm-baseline/`.
-* Audit instrument: `tools/miso-engine-audit/src/unfused_fma.rs` (subject `unfused-fma`, modes
+* Audit instrument: `tools/audit/src/unfused_fma.rs` (subject `unfused-fma`, modes
   `dense`, `exhaustive`, `mutations`, `conformance`, `all`).
-* Contract: `crates/miso-engine-lane/src/wide_impl.rs` and `crates/miso-engine-lane/src/scalar.rs`
-  (the two dispatch points), `crates/miso-engine-lane/src/lib.rs` (`Lane::fma`),
-  `crates/miso-engine-lane/src/softfma.rs` (what survives, and why it kept its name).
-* Independent restatement: `crates/miso-engine-dsp-reference/src/tpt.rs`
+* Contract: `crates/lane/src/wide_impl.rs` and `crates/lane/src/scalar.rs`
+  (the two dispatch points), `crates/lane/src/lib.rs` (`Lane::fma`),
+  `crates/lane/src/softfma.rs` (what survives, and why it kept its name).
+* Independent restatement: `crates/dsp-reference/src/tpt.rs`
   (`ReferenceRetainedTptF32`), moved in lockstep; `softfma::unfused_mul_add_via_f64`.
 * Seal: `scripts/check-unfused-seal.sh` and `scripts/test-unfused-seal.sh`.
 * Measurements: `artifacts/issue163-phase2/`.
-* Precedent: `crates/miso-engine-math/src/lane_math.rs` (unfused Horner, with its measurement);
+* Precedent: `crates/math/src/lane_math.rs` (unfused Horner, with its measurement);
   ceremony modelled on `docs/rulings/fast-db-tier-boundaries.md`.

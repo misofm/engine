@@ -24,13 +24,13 @@ The output is a *draft*. Canonical spelling, key order and float formatting come
 validator, which is also what proves the result is a legal session:
 
     python3 scripts/derive-intended-console-fixture.py > /tmp/draft.toml
-    cargo run -q -p miso-engine-session-validator -- validate --canonical /tmp/draft.toml \
+    cargo run -q -p session-validator -- validate --canonical /tmp/draft.toml \
         > fixtures/session/v1/console-sixty-four-track-intended.toml
 
 # The limiter's parameters, and where they come from
 
 Every value below is inside the domain the contract publishes. Generate the authority with
-``cargo run -q -p miso-engine-parameter-metadata -- --print`` and read
+``cargo run -q -p parameter-metadata -- --print`` and read
 ``effects[] | select(.id == "miso.true-peak-limiter")``; at the time of writing it declares:
 
   | id | name      | unit         | domain        | default |
@@ -223,7 +223,7 @@ def canonicalise(draft: str) -> str:
         path.write_text(draft)
         result = subprocess.run(
             [
-                "cargo", "run", "-q", "-p", "miso-engine-session-validator", "--",
+                "cargo", "run", "-q", "-p", "session-validator", "--",
                 "validate", "--canonical", str(path),
             ],
             cwd=ROOT,

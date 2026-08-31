@@ -72,7 +72,7 @@ change was already complete and gated without them.
 ## Evidence
 
 * `artifacts/compressor-round1/README.md` — the round's record.
-* `crates/miso-engine-compressor/tests/ramps.rs` — the bit-identity properties the guard rests on,
+* `crates/compressor/tests/ramps.rs` — the bit-identity properties the guard rests on,
   including an idle lane dragged through the ramping body by a neighbour's window.
 * Red-mutation evidence: a guard that treats a single-parameter window as idle is red on
   `an_idle_lane_is_untouched_by_a_neighbours_ramp` and on four pre-existing ramp tests.

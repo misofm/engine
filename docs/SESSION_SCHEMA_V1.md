@@ -1,6 +1,6 @@
 # Session schema V1
 
-`miso-engine-session` accepts the grammar implemented by `toml_parser 1.1.3+spec-1.1.0`,
+`session` accepts the grammar implemented by `toml_parser 1.1.3+spec-1.1.0`,
 including trailing commas/newlines in inline tables and the `\e` and `\xHH` basic-string escapes.
 Its canonical writer deliberately emits a TOML 1.0 subset: bare keys, basic strings, decimal
 integers, decimal floats without exponents, booleans, inline tables, and arrays. The schema
@@ -57,7 +57,7 @@ key is required all the same (V1 has no optional fields) and carries the fixed v
 `blockTarget`: `polarity_invert` (1), `trim_db` (2), `fader_db` (5), `mute` (6), the four
 `matrix_*` coefficients (7-10) and -- since #242, under #239 ruling 5461507633 B4 -- `pan` (12).
 That is **nine** rows, and `BUILTIN_AUTOMATION_TARGETS` in
-`crates/miso-engine-session/src/validate.rs` is the list. The prepared-only rows -- `hpf_hz` (3),
+`crates/session/src/validate.rs` is the list. The prepared-only rows -- `hpf_hz` (3),
 `lpf_hz` (4), `delay_samples` (11) -- are **refused**, because a span addressed at a parameter with
 no post-preparation write path could only ever be inert. `channel` follows the row's scope: the
 five per-lane rows accept `left`, `right` or `both`, the four shared matrix coefficients only
@@ -97,12 +97,12 @@ boundary. It names `effect_id = "parametric-eq"` without the `miso.` prefix the 
 carries, and it is accepted, compiled and round-tripped all the same; the launch registry would
 refuse it at preparation, which is the point. That spelling is load-bearing rather than a typo.
 The prepare-side tests that consume the fixture
-(`crates/miso-engine-effect-compiler/tests/native_session.rs`) inject a test-local factory whose
+(`crates/effect-compiler/tests/native_session.rs`) inject a test-local factory whose
 descriptor id is the same unprefixed `parametric-eq`, and the fixture's SHA-256 is pinned three
 levels deep: `fixtures/builtins/v1/benchmark/prepare_256_tracks-{48000,96000}.toml` carry it as
-`session_template_sha256` and `tools/miso-engine-bench` re-derives and compares it at benchmark
+`session_template_sha256` and `tools/bench` re-derives and compares it at benchmark
 time; `fixtures/builtins/v1/MANIFEST.tsv` digests those two documents; and
-`tools/miso-engine-audit/src/fixture_builtins.rs` pins both the field literal and the manifest's
+`tools/audit/src/fixture_builtins.rs` pins both the field literal and the manifest's
 own digest. Re-spelling the fixture would move all of them for no behavioural gain. Author new
 sessions from the metadata's registry ids -- `miso.parametric-eq` and the rest -- and do not copy
 this fixture's `effect_id`.
@@ -114,7 +114,7 @@ makes output sources and track destinations unrepresentable. Routed sidechains r
 source shape and require a nonempty stable `port_id`. Port *existence* is still not an issue-004
 concern -- the schema layer never sees a descriptor -- but it is no longer downstream work either:
 `prepare_native_session_effects` refuses an unknown port at boot with
-`effect.sidechain.unknown_port` (`crates/miso-engine-effect-compiler/src/prepare.rs:1113`), beside
+`effect.sidechain.unknown_port` (`crates/effect-compiler/src/prepare.rs:1113`), beside
 `effect.sidechain.missing` for a required declared port the session left unconnected and
 `effect.sidechain.unexpected` for a routed sidechain the descriptor does not declare at all. A
 session naming a port no descriptor declares therefore parses, validates and compiles, and then

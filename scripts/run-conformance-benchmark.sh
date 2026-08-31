@@ -12,7 +12,7 @@ output="$(
     MISO_ENGINE_BENCH_TARGET_CPU=baseline \
     MISO_ENGINE_BENCH_TARGET_FEATURES=runtime-dispatch-baseline \
     MISO_ENGINE_BENCH_BACKGROUND_LOAD_NOTE="not measured; descriptive baseline" \
-    cargo run --locked --release -q -p miso-engine-bench -- conformance --rounds "$rounds"
+    cargo run --locked --release -q -p bench -- conformance --rounds "$rounds"
 )"
 [[ "$(printf '%s\n' "$output" | wc -l | tr -d ' ')" == "$((rounds * 2))" ]] || { printf 'benchmark record count mismatch\n' >&2; exit 1; }
 command -v jq >/dev/null || { printf 'jq is required for JSONL verification\n' >&2; exit 1; }

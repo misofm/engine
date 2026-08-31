@@ -21,7 +21,7 @@
 # exits nonzero if any row failed.
 #
 # Requires: bash, jq, rg, python3, node, cargo/rustc. On x86_64 the toolchain is pinned to
-# +avx2,+fma (.cargo/config.toml) and miso-engine-lane will not build without it.
+# +avx2,+fma (.cargo/config.toml) and lane will not build without it.
 set -uo pipefail
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)

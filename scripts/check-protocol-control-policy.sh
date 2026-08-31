@@ -6,7 +6,7 @@ set -euo pipefail
 workspace_root="${1:-.}"
 cd "$workspace_root"
 
-source_file="crates/miso-engine-protocol/src/controller.rs"
+source_file="crates/protocol/src/controller.rs"
 
 fail() {
     printf 'protocol control policy failure: %s\n' "$1" >&2
@@ -47,8 +47,8 @@ fi
 # ownership/validation contracts.
 message_sources=("$source_file")
 for optional_source in \
-    crates/miso-engine-protocol/src/message_wire.rs \
-    crates/miso-engine-protocol/src/session_wire.rs; do
+    crates/protocol/src/message_wire.rs \
+    crates/protocol/src/session_wire.rs; do
     [[ -f "$optional_source" ]] && message_sources+=("$optional_source")
 done
 if rg -n \

@@ -1,0 +1,29 @@
+[package]
+name = "true-peak-limiter"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+name = "true_peak_limiter"
+
+[dependencies]
+effect-contract.workspace = true
+effect-runtime.workspace = true
+lane.workspace = true
+math.workspace = true
+
+[dev-dependencies]
+# Issue #105 phase 2: the workspace's one audited global allocator (#104 phase B). It is what
+# makes the conformance harness's `process.allocation` gate a real measurement; the harness
+# refuses to run without it.
+bench-support.workspace = true
+# Issue #105 phase 2: effect-contract conformance harness against the production factory.
+conformance = { workspace = true, features = ["realtime-audit"] }
+engine.workspace = true
+dsp-reference.workspace = true
+sha2.workspace = true
+
+[lints]
+workspace = true

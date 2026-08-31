@@ -8,7 +8,7 @@ set -euo pipefail
 
 script_directory="$(cd "$(dirname "$0")/.." && pwd)"
 policy_script="$script_directory/scripts/check-flac-decoder.sh"
-loader="$script_directory/sidecars/flac-decoder/miso-engine-flac-decoder.js"
+loader="$script_directory/sidecars/flac-decoder/flac-decoder.js"
 
 [[ -f "$loader" ]] || {
     printf 'test-flac-decoder: missing sidecar loader: %s\n' "$loader" >&2

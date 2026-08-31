@@ -21,7 +21,7 @@ expect_failure() {
 mutate_source() {
     local name=$1 from=$2 to=$3
     local candidate="$scratch/$name.rs"
-    cp "$root/tools/miso-engine-bench/src/effect_interchange.rs" "$candidate"
+    cp "$root/tools/bench/src/effect_interchange.rs" "$candidate"
     python3 -I -B - "$candidate" "$from" "$to" <<'PY'
 import pathlib, sys
 path = pathlib.Path(sys.argv[1])

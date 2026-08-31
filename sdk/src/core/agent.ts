@@ -264,7 +264,7 @@ export function parameter(effectId: EffectId, name: string): ParameterHandle {
 /**
  * The SDK's single canonical-decimal-to-`f32` site.
  *
- * Its Rust counterpart is `miso_engine_effect_contract::decimal_to_f32`, and the two carry the
+ * Its Rust counterpart is `effect_contract::decimal_to_f32`, and the two carry the
  * same precondition: the caller must first have proved the text is a descriptor-generated lattice
  * rendering. Keeping the parse here rather than at each call site makes a repo-wide audit of the
  * persisted-value precision boundary one grep, which is the whole reason the Rust side is written

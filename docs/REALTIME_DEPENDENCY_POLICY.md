@@ -33,7 +33,7 @@ can be reintroduced by accident; a future multicore render must re-argue this ex
 scratch, and the burden is the same one #100 carried.
 
 What survives, because the *sequential* executor depends on it: the plan-owned disjoint audio
-arena in `crates/miso-engine-core/src/realtime/disjoint.rs` and its lease API. Invariants I1 and
+arena in `crates/engine/src/realtime/disjoint.rs` and its lease API. Invariants I1 and
 I2 are still proved at bind by `ArenaLeaseSetBuilder::finish`, and they are still what makes node
 semantics have exactly one implementation of *where the audio is*. I3 and I4 described a
 multi-wave issue discipline and a coordinator that could decline to own a parcel; with one
@@ -43,18 +43,18 @@ enforced.
 ## Unsafe-code ownership
 
 The workspace denies unsafe code. If a later approved issue needs a narrow exception, it is limited
-to `crates/miso-engine-core/src/realtime/spsc.rs` for the issue-003 SPSC slot protocol or
-`crates/miso-engine-capi/src/ffi` for ABI boundaries. (`crates/miso-engine-core/src/arch` was a
+to `crates/engine/src/realtime/spsc.rs` for the issue-003 SPSC slot protocol or
+`crates/capi/src/ffi` for ABI boundaries. (`crates/engine/src/arch` was a
 third such owner until #84 phase A deleted it: the per-target kernels moved to
-`crates/miso-engine-lane`, and the exemption was removed from
+`crates/lane`, and the exemption was removed from
 `scripts/check-realtime-policy.sh` in the same change.) Issue 083 adds
-`crates/miso-engine-lane/src/softfma.rs`, the first file of the lane crate that carries unsafe: the
+`crates/lane/src/softfma.rs`, the first file of the lane crate that carries unsafe: the
 wasm `simd128` promote/demote intrinsics of the software FMA, and the `x86` MXCSR read/write that
 gate G6 uses to prove hardware flush-to-zero is inert under the D7 flush law (`_mm_getcsr`/
 `_mm_setcsr` are used rather than the inline assembly their deprecation note recommends). No `Lane`
 value or vector type escapes the crate as unsafe.
 
-Issue 146 adds the second: `crates/miso-engine-lane/src/fpenv.rs`, the canonical floating-point
+Issue 146 adds the second: `crates/lane/src/fpenv.rs`, the canonical floating-point
 environment that every native render entry pins. It is the one place in the workspace that **is**
 reachable from a render path, deliberately -- pinning the environment is the render entry's first
 act and unpinning it is its last -- and it is three register accesses and two empty assembly blocks,
@@ -74,7 +74,7 @@ touching only its own argument's memory -- so without a barrier nothing stops a 
 scheduled outside the region it was meant to run in. The empty block is deliberately **not**
 `nomem`: being a memory clobber is its entire purpose, and it emits no instructions. It anchors
 every memory-dependent computation, which is every render; it does not anchor a value held entirely
-in registers, and `crates/miso-engine-lane/tests/fp_env.rs` proves that limit rather than assuming
+in registers, and `crates/lane/tests/fp_env.rs` proves that limit rather than assuming
 it, with a register-only product that a release build really does schedule outside the guard until
 the test anchors it itself.
 
@@ -86,25 +86,25 @@ add tests; and obtain explicit review. Unsafe code must not leak through a publi
 exception owns fixed `UnsafeCell<MaybeUninit<T>>` storage and its local `SAFETY` assertions
 require one producer, one consumer, release publication after writes, acquire before reads, and
 shared `Arc` storage outliving both non-cloneable endpoints. `Arc` creation/destruction stays
-outside push, pop, and render. Issue 100 added `crates/miso-engine-core/src/realtime/disjoint.rs`, the plan-owned disjoint audio
+outside push, pop, and render. Issue 100 added `crates/engine/src/realtime/disjoint.rs`, the plan-owned disjoint audio
 arena, which the sequential executor still renders through. Its `unsafe impl Sync` and its raw
 slice construction are justified by invariants stated in the module documentation and proved once
 at bind by `ArenaLeaseSetBuilder::finish`: **I1** every buffer is writable by at most one lease for
 the life of the plan (buffers are never recycled) and **I2** a lease reads only buffers produced
 strictly earlier or by itself. I3 and I4 constrained the removed multi-wave scheduler and are now
-trivially satisfied: there is one executor holding one lease. `crates/miso-engine-graph` remains
+trivially satisfied: there is one executor holding one lease. `crates/graph` remains
 entirely free of unsafe code. A second test-only exception is
-`tools/miso-engine-audit/src/realtime.rs`, whose audited global allocator forwards unchanged
+`tools/audit/src/realtime.rs`, whose audited global allocator forwards unchanged
 layouts to `System` and terminates without unwinding if allocation/free is attempted in render.
 Loom `=0.7.2` is MIT licensed and test/model-only; it is not a production, Wasm, or
 render-reachable dependency. Issue 005 additionally permits only
-`tools/miso-engine-audit/src/protocol.rs` to locally allow unsafe code for its audit-only
+`tools/audit/src/protocol.rs` to locally allow unsafe code for its audit-only
 global allocator. That allocator forwards original pointer/layout contracts unchanged to `System`
 and counts only allocations while the audit thread is armed; its prepared corpus, queues, and
 output/scratch buffers exist before arming. It is not linked into a production crate and does not
 change protocol allocation behavior.
 
-Issue 005 also permits `tools/miso-engine-bench/src/protocol.rs` to locally allow unsafe
+Issue 005 also permits `tools/bench/src/protocol.rs` to locally allow unsafe
 code for its comparison-only allocation counter. It forwards original allocator contracts to
 `System` and records requested allocation count/bytes only while a native host-harness interval is
 armed. The preallocated BTLV output, decode scratch, and official FlatBuffers builder are prepared
@@ -112,20 +112,20 @@ before that interval. `flatbuffers = 25.12.19` is an Apache-2.0, tool-only depen
 engine, protocol, browser-host, or render-reachable target impact.
 
 The source-policy checker currently accepts unsafe syntax in exactly four source files:
-`crates/miso-engine-core/src/realtime/spsc.rs`,
-`tools/miso-engine-audit/src/realtime.rs`, and
-`tools/miso-engine-audit/src/protocol.rs`, and
-`tools/miso-engine-bench/src/protocol.rs`. The latter two are the only Issue-005
+`crates/engine/src/realtime/spsc.rs`,
+`tools/audit/src/realtime.rs`, and
+`tools/audit/src/protocol.rs`, and
+`tools/bench/src/protocol.rs`. The latter two are the only Issue-005
 audit/benchmark exceptions; no sibling source file in either tool is permitted to use unsafe code.
 
 That sentence has fallen behind `scripts/check-realtime-policy.sh`, whose exemption list has grown
 with each approved issue and is the authority; the script, not this paragraph, is what CI runs.
 Reconciling the two belongs to the #104 evidence triage. Two categories have been added since:
-the C-ABI boundary files (`crates/miso-engine-capi/src/ffi.rs`,
-`crates/miso-engine-effect-package/src/ffi.rs`, `hosts/miso-engine-host-web/src/ffi.rs` and their
-tests), and **test-only counting global allocators** — `miso-engine-builtins-compiler`,
-`miso-engine-effect-package`, from audit #92 `miso-engine-transient-shaper`, and from issue #240
-`hosts/miso-engine-host-web/tests/boot_transient_budget.rs`. The last category is
+the C-ABI boundary files (`crates/capi/src/ffi.rs`,
+`crates/effect-package/src/ffi.rs`, `hosts/host-web/src/ffi.rs` and their
+tests), and **test-only counting global allocators** — `builtins-compiler`,
+`effect-package`, from audit #92 `transient-shaper`, and from issue #240
+`hosts/host-web/tests/boot_transient_budget.rs`. The last category is
 `unsafe impl GlobalAlloc` that forwards every request to `System` unchanged and adds only audit
 counters, in a `tests/` file that no production target links. The earlier fixtures prove render
 paths allocate nothing; #240's thread-local fixture measures the parse/model-build high-water mark
@@ -141,16 +141,16 @@ probes separately prove the realtime allocator/deallocator and forbidden-operati
 
 CPU ISA selection is not a Cargo feature. Issue 083 (master plan D4) replaces the earlier runtime
 capability model on x86: native `x86_64` builds are pinned to `x86-64-v3` by the workspace
-`.cargo/config.toml` (`-C target-feature=+avx2,+fma`), `crates/miso-engine-lane` refuses to compile
+`.cargo/config.toml` (`-C target-feature=+avx2,+fma`), `crates/lane` refuses to compile
 without both features, and every host and C-ABI entry attests the CPU once at boot through
-`miso_engine_lane::attest_host`, refusing to start rather than falling back silently. That pin is
+`lane::attest_host`, refusing to start rather than falling back silently. That pin is
 the only approved global ISA configuration and `scripts/check-workspace-policy.sh` admits exactly
 it; `-C target-cpu`, a global `[build]` rustflags table and any other feature set stay forbidden.
 NEON is baseline on AArch64. Browser Wasm baseline and `simd128` are separate artifacts; relaxed
 SIMD is forbidden and correctness cannot depend on it (`scripts/check-lane-policy.sh`). Fusion
 exists only where `Lane::fma` is written (D3): hardware FMA on x86 and NEON, and an exact software
 FMA on wasm that gate G3 proves bit-identical to the hardware instruction. Intrinsics live only in
-`crates/miso-engine-lane`; the session's semantics stay target-independent, and cross-backend and
+`crates/lane`; the session's semantics stay target-independent, and cross-backend and
 cross-target equality is `to_bits` identity, not a tolerance (D5).
 
 Issue 003 concurrent queues use only pointer-width atomic loads/stores. Rust guarantees every
@@ -164,7 +164,7 @@ baseline Wasm object contains no atomic opcode and makes no cross-agent shared-m
 Issue 083 (master plan D12) gives the workspace one release profile: `lto = "fat"`,
 `codegen-units = 1`, `panic = "abort"`, `debug = 1`, with `[profile.bench]` inheriting it so a
 benchmark measures the shipped code. Fat LTO and a single codegen unit are what let a consumer's
-instantiation of the `#[inline(always)]` generic kernel bodies in `crates/miso-engine-lane` collapse
+instantiation of the `#[inline(always)]` generic kernel bodies in `crates/lane` collapse
 into the intended straight-line loop; `debug = 1` keeps line tables so a profile or a core dump
 names a kernel, and costs build time and artifact size, never speed.
 
@@ -172,14 +172,14 @@ names a kernel, and costs build time and artifact size, never speed.
 
 - A release build has **no unwinding**. `std::panic::catch_unwind` still compiles and still returns
   `Ok` on the normal path, but it can no longer contain a panic: the process aborts instead. The
-  affected boundaries are `crates/miso-engine-capi/src/ffi.rs` (`catch_result`, `catch_destroy`,
-  which map a contained panic to `RESULT_INTERNAL`), `hosts/miso-engine-host-web/src/ffi.rs`, the
-  `catch_unwind` probes inside `crates/miso-engine-conformance`, and the `panic_unwinds` counter in
-  `tools/miso-engine-bench`. In a release artifact each of those is a diagnostic that no longer
+  affected boundaries are `crates/capi/src/ffi.rs` (`catch_result`, `catch_destroy`,
+  which map a contained panic to `RESULT_INTERNAL`), `hosts/host-web/src/ffi.rs`, the
+  `catch_unwind` probes inside `crates/conformance`, and the `panic_unwinds` counter in
+  `tools/bench`. In a release artifact each of those is a diagnostic that no longer
   fires; none of them is load-bearing for a call that does not panic, so behaviour on a passing host
   is unchanged.
 - Embedders must read this as: **the C ABI does not convert a panic into `RESULT_INTERNAL` in a
-  release build of `libmiso_engine_capi`.** A panic is an engine defect, and unwinding across a C or
+  release build of `libcapi`.** A panic is an engine defect, and unwinding across a C or
   Wasm frame is undefined by either ABI, so aborting is the honest contract. `RESULT_INTERNAL` stays
   in the ABI for the internal failures that are returned, not thrown.
 - The browser artifacts built by `scripts/build-web-audioworklet.sh` are `--release` builds and
@@ -205,9 +205,9 @@ unit that also carries a `cdylib` or `staticlib` crate-type, because those emit 
 
 | package | crate-types |
 |---|---|
-| `crates/miso-engine-capi` | `rlib`, `staticlib`, `cdylib` |
-| `crates/miso-engine-effect-package` | `rlib`, `cdylib` |
-| `hosts/miso-engine-host-web` | `rlib`, `cdylib` |
+| `crates/capi` | `rlib`, `staticlib`, `cdylib` |
+| `crates/effect-package` | `rlib`, `cdylib` |
+| `hosts/host-web` | `rlib`, `cdylib` |
 
 The two variants write to the same paths, the second clobbers the first, and a downstream unit
 links whichever landed last and hits a metadata mismatch. Which unit reports it depends on build
@@ -238,12 +238,12 @@ ever run these tests in release, and the workspace release build did not compile
 have run them. Both fail on `main`, with and without the panic override, and both pass in debug:
 
 - `observation_cost_classes_are_what_they_claim (#159)` (#143, in
-  `crates/miso-engine-host-core/tests/effect_observation.rs`) fails deterministically. The
+  `crates/host-core/tests/effect_observation.rs`) fails deterministically. The
   measurement says arming costs nothing — `AllArmed` sits at or below `ConsoleNoCapacity` — while
   the assertion subtracts the `NoConsole` baseline and so charges observation for the cost of a
   console *existing*.
 - `a_million_windows_are_read_whole_and_in_order (#160)` (#143, in
-  `crates/miso-engine-core/tests/observation_transport.rs`) fails intermittently: three of five
+  `crates/engine/tests/observation_transport.rs`) fails intermittently: three of five
   full-workspace release runs, against 20 of 20 passing standalone release reruns. It is
   timing-dependent rather than a plain red, and the reader's spin loop is far faster in an
   optimized build than in the debug build the assertion has only ever been exercised under.
@@ -272,23 +272,23 @@ strategy the artifact ships. That trade is not made here.
 
 **Boot attestation.** Master plan D4 removes runtime SIMD dispatch: the instruction set is chosen
 at compile time and there is no scalar fallback to fall back *to*. Every entry point that can start
-an engine therefore calls `miso_engine_lane::attest_host` once, on the control plane, before any
+an engine therefore calls `lane::attest_host` once, on the control plane, before any
 render state exists, and refuses to start on an error:
 
 | entry point | on failure |
 |---|---|
-| `hosts/miso-engine-host-native` `main` | diagnostic on stderr, `ExitCode::FAILURE` |
-| `hosts/miso-engine-host-mobile` `mobile_target_smoke` | `Err(HostAttestation)` |
-| `crates/miso-engine-capi` `miso_engine_v2_engine_create` | `MISO_ENGINE_V2_UNSUPPORTED` (7) |
+| `hosts/host-native` `main` | diagnostic on stderr, `ExitCode::FAILURE` |
+| `hosts/host-mobile` `mobile_target_smoke` | `Err(HostAttestation)` |
+| `crates/capi` `miso_engine_v2_engine_create` | `MISO_ENGINE_V2_UNSUPPORTED` (7) |
 
 The C header previously said `MISO_ENGINE_V2_UNSUPPORTED` was reserved and never returned; it is
 now returned by that one entry point and the header says so. An embedder that receives it must not
 retry: the library and the CPU do not match. On every supported host the attestation succeeds and
-nothing about these calls changes. `hosts/miso-engine-host-web` is `wasm32`, where the pinned
+nothing about these calls changes. `hosts/host-web` is `wasm32`, where the pinned
 instruction set is a whole-artifact build flag rather than a CPU property, so the attestation is a
 compile-time no-operation there and no call is added.
 
-**The gate runtime.** `tools/miso-engine-wasm-gates` depends on `wasmtime = "=47.0.3"`
+**The gate runtime.** `tools/wasm-gates` depends on `wasmtime = "=47.0.3"`
 (Apache-2.0 WITH LLVM-exception, `default-features = false`, features `runtime`, `cranelift`,
 `std`). It is dev/tooling: it links into no shipped artifact, and no engine crate, host or fixture
 may reach a WebAssembly runtime — AGENTS.md is explicit that a render callback never invokes one.
@@ -302,7 +302,7 @@ the program, which is why D3 forbids the opcode rather than testing its result.
 
 ## Issue 004 control-plane parser dependencies
 
-`miso-engine-session` is not render-reachable. It depends one way on `miso-engine-core` only for
+`session` is not render-reachable. It depends one way on `engine` only for
 the checked `SampleRateHz` and `QuantumFrames` value carriers; core does not depend on session.
 Parsing, canonicalization, validation, model cloning, sorting, indexes, and all failure allocation
 remain on the control plane.
@@ -329,38 +329,38 @@ were 302,440 and 302,436 bytes respectively. Dependency feature-tree evidence co
 
 ## Audit #103 shared host preparation
 
-`miso-engine-host-core` is control-plane only, like `miso-engine-session`: it parses, compiles,
+`host-core` is control-plane only, like `session`: it parses, compiles,
 allocates the prepared plan and the source rings, and is never reachable from render. It contains
 no `unsafe` code and exports no C symbol -- it is a plain `rlib`, because a `cdylib` re-exports
 every `no_mangle` symbol it links, and a facade carrying them would push the C ABI's fifteen
-exports into the browser artifact. It deliberately does not depend on `miso-engine-protocol`: the
+exports into the browser artifact. It deliberately does not depend on `protocol`: the
 control protocol is a host-specific transport, and a host that does not speak it does not pay for
 it. `scripts/check-host-core-policy.sh` enforces all of this, with mutation coverage in
 `scripts/test-host-core-policy.sh`.
 
 ## Issue 011 runtime boundary and issue 029 package hashing dependency
 
-`miso-engine-effect-contract` is render-reachable and depends only on `miso-engine-core`; it has no
+`effect-contract` is render-reachable and depends only on `engine`; it has no
 parser, hashing, package, filesystem, network, logging, or synchronization dependency.
-`miso-engine-effect-package` is control-plane-only and uses `sha2 = 0.11.0` with default features
+`effect-package` is control-plane-only and uses `sha2 = 0.11.0` with default features
 disabled for deterministic SHA-256 package/artifact/state identity. `sha2` is dual MIT/Apache-2.0,
 pure Rust for these targets, and failure yields typed package/state rejection before any prepared
 processor can be published. The package crate and hashing evidence are provisional issue-029 work,
-not issue-011 acceptance evidence. Issue 011's new `miso-engine-effect-compiler` is control-plane
+not issue-011 acceptance evidence. Issue 011's new `effect-compiler` is control-plane
 only and depends on core, session and the render-reachable contract; neither compiler nor package
 crate is reachable from process. The resolved `sha2` feature tree and archive-size delta must be
 re-reviewed by issue 029; no package claim applies to the render dependency graph.
 
 ## Audit #84 phase D / #105 phase 2: the render-audit instrumentation never ships
 
-`miso-engine-core`'s `realtime-audit` feature compiles the thread-local depth guard that
+`engine`'s `realtime-audit` feature compiles the thread-local depth guard that
 `in_render_scope` arms and that the counting allocators report to. It is evidence machinery, and it
 must not reach a shippable artifact. Three independent statements enforce that, and each one is
 necessary because the other two do not imply it:
 
 1. **Manifests.** Only `tools/*` binaries and `[dev-dependencies]` may enable the feature.
-   `miso-engine-conformance` *forwards* it (`[features] realtime-audit =
-   ["miso-engine-core/realtime-audit"]`) instead of hard-enabling it, so a regular dependent never
+   `conformance` *forwards* it (`[features] realtime-audit =
+   ["engine/realtime-audit"]`) instead of hard-enabling it, so a regular dependent never
    receives the instrumentation unless it asks. `scripts/check-realtime-audit-leak.sh` checks both
    the manifest sections and the resolved graph (`cargo tree -e features,no-dev --target all`) of
    every package under `crates/`, `hosts/`, and `sidecars/` (a sidecar ships, so its production
@@ -372,9 +372,9 @@ necessary because the other two do not imply it:
    This is what makes the artifact independent of rule 1 continuing to hold: with the feature
    temporarily restored under conformance's `[dependencies]`, the pre-#105 combined wasm list
    resolves the feature and the host-only list does not.
-3. **Consumers.** A test binary that runs `miso_engine_conformance::run_effect_conformance` must
+3. **Consumers.** A test binary that runs `conformance::run_effect_conformance` must
    arm the scope *and* install the workspace's one audited `GlobalAlloc`
-   (`miso_engine_bench_support::alloc`, #104 phase B) in count-and-continue mode. The harness
+   (`bench_support::alloc`, #104 phase B) in count-and-continue mode. The harness
    proves both before it judges any effect and reports `harness.audit_unarmed` or
    `harness.allocator_not_installed` rather than a vacuous pass, so the allocation gate cannot
    silently become decorative. `scripts/check-bench-policy.sh` allows that dev edge from `crates/`

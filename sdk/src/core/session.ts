@@ -26,7 +26,7 @@ import type {
  * `docs/SESSION_SCHEMA_V1.md` is the authority and this is a producer for it, not a second opinion
  * about it. The root keys, their order, the per-record key order, the canonical sort keys and the
  * canonical text layout are all transcribed from the engine's own emit-side walk
- * (`crates/miso-engine-session/src/visit.rs`) and canonical writer
+ * (`crates/session/src/visit.rs`) and canonical writer
  * (`.../canonical.rs`), so a document this builder emits is byte-identical to what the engine
  * would write back for the same model. There is no TOML *parser* here and there never will be
  * (ruling 5438024085); reading a document is the engine's job, and `validate()` asks it.
@@ -1294,7 +1294,7 @@ const DOUBLE_ROUNDING_SPELLINGS: ReadonlyMap<number, string> = new Map([
 ]);
 
 /**
- * One canonical finite `f32` spelling, mirroring `crates/miso-engine-session/src/value.rs`.
+ * One canonical finite `f32` spelling, mirroring `crates/session/src/value.rs`.
  *
  * Shortest `f32` `Display`, no exponent, integral values gaining `.0` so they stay TOML floats,
  * and negative zero preserved exactly as `-0.0` -- which is why the sign is tested before the

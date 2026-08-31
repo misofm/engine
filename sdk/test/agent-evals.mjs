@@ -15,7 +15,7 @@
  * The SDK generates lattice points rather than reading them, because shipping the catalog's points
  * would cost megabytes. A second implementation of a rule is only worth having if it is *held to*
  * the first, so the first test below reproduces, for every parameter in the shipped catalog, the
- * digest that `tools/miso-engine-parameter-metadata/src/bin/lattice_oracle` computes from the
+ * digest that `tools/parameter-metadata/src/bin/lattice_oracle` computes from the
  * engine's own `parameter_lattice_points`. Points, ranks, intrinsic flags, step resolutions and
  * decimal lookups are all inside that comparison.
  */
@@ -41,7 +41,7 @@ const REPO_ROOT = resolve(import.meta.dirname, "..", "..");
 function engineLattices() {
   const text = execFileSync(
     "cargo",
-    ["run", "--locked", "-q", "-p", "miso-engine-parameter-metadata", "--bin", "miso_engine_parameter_metadata_lattice_oracle"],
+    ["run", "--locked", "-q", "-p", "parameter-metadata", "--bin", "parameter_metadata_lattice_oracle"],
     { cwd: REPO_ROOT, encoding: "utf8", maxBuffer: 1 << 26 },
   );
   return text.trim().split("\n").slice(1).map((line) => {

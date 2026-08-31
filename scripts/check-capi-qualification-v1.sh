@@ -28,7 +28,7 @@ rg -Fq 'UNDEFINED_TYPES' "$object_checker" || fail 'object parser lacks import c
     fail "unknown checker mode $mode"
 
 LC_ALL=C sort -c -k2,2 "$authorities" || fail 'authority manifest is not path-sorted'
-# 26, not 21: audit #103 split `crates/miso-engine-capi/src/runtime.rs` into six modules.
+# 26, not 21: audit #103 split `crates/capi/src/runtime.rs` into six modules.
 #
 # #104 phase A / #83 wave-4 decision W4-D2. `sha256sum --check --strict "$authorities"` used to run
 # here and asserted that the working tree still is the tree the accepted V1 qualification was taken

@@ -1,0 +1,38 @@
+[package]
+name = "audit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "audit"
+path = "src/main.rs"
+
+[dependencies]
+bench-support.workspace = true
+builtins.workspace = true
+builtins-compiler.workspace = true
+capi.workspace = true
+compressor.workspace = true
+conformance.workspace = true
+engine = { workspace = true, features = ["realtime-audit"] }
+delay.workspace = true
+dsp-reference.workspace = true
+effect-compiler.workspace = true
+effect-contract.workspace = true
+gate-expander.workspace = true
+graph = { workspace = true, features = ["test-support"] }
+graph-compiler.workspace = true
+lane.workspace = true
+parametric-eq.workspace = true
+protocol.workspace = true
+session.workspace = true
+source = { workspace = true, features = ["test-support"] }
+sha2.workspace = true
+
+[features]
+default = []
+
+[lints]
+workspace = true

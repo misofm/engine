@@ -34,9 +34,9 @@ root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$root"
 bash scripts/check-effect-interchange-qualification.sh . >/dev/null
 packages=(
-    -p miso-engine-effect-package
-    -p miso-engine-effect-compiler
-    -p miso-engine-conformance
+    -p effect-package
+    -p effect-compiler
+    -p conformance
 )
 for tool in awk cargo rustc rustup wasm-objdump rg uname; do
     command -v "$tool" >/dev/null 2>&1 || {
@@ -78,7 +78,7 @@ for mode in scalar simd; do
     CARGO_TARGET_DIR="$target_dir" RUSTFLAGS="-C target-feature=$feature" \
         cargo check --locked --all-targets --target wasm32-unknown-unknown "${packages[@]}"
     CARGO_TARGET_DIR="$target_dir" RUSTFLAGS="-C target-feature=$feature" \
-        cargo rustc --locked -p miso-engine-effect-package --features c-abi \
+        cargo rustc --locked -p effect-package --features c-abi \
         --target wasm32-unknown-unknown --lib -- --crate-type=cdylib
     wasm="$(find "$target_dir/wasm32-unknown-unknown/debug" -maxdepth 1 -name '*.wasm' -type f -print -quit)"
     [[ -n "$wasm" ]] || { printf 'effect interchange target matrix: missing Wasm object\n' >&2; exit 1; }

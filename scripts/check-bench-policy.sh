@@ -26,7 +26,7 @@ sole_owner() {
     }
 }
 
-support=tools/miso-engine-bench-support
+support=tools/bench-support
 [[ -d "$support" ]] || fail "missing the shared harness: $support"
 
 sole_owner 'the audited allocator has more than one implementation' \
@@ -48,8 +48,8 @@ sole_owner 'the counted SHA-256 sink has more than one implementation' \
 #
 # The list is the conversion ratchet. It grows as the remaining benchmark subjects move onto the
 # shared harness; it never shrinks.
-timed_subjects=(tools/miso-engine-bench/src/rack.rs tools/miso-engine-audit/src/fp_env.rs
-    tools/miso-engine-wasm-console/src/main.rs)
+timed_subjects=(tools/bench/src/rack.rs tools/audit/src/fp_env.rs
+    tools/wasm-console/src/main.rs)
 for subject in "${timed_subjects[@]}"; do
     [[ -f "$subject" ]] || fail "converted subject is missing: $subject"
     grep -q 'timing::timed' "$subject" ||
@@ -63,8 +63,8 @@ done
 # `tools/`, and `scripts/check-realtime-policy.sh` holds the matching list for `crates/` and
 # `hosts/`. A seventh file is a new unsafe ownership boundary and needs a decision, not a grep.
 #
-# The decision for the sixth, `miso-engine-wasm-console-guest` (#163 phase 2 step 1): it is the
-# *same* boundary this list already grants `miso-engine-wasm-gate-guest`, for the same reason and
+# The decision for the sixth, `wasm-console-guest` (#163 phase 2 step 1): it is the
+# *same* boundary this list already grants `wasm-gate-guest`, for the same reason and
 # with the same shape. Exporting a function from a `cdylib` requires `#[unsafe(no_mangle)]` under
 # edition 2024 and there is no safe spelling of it. Both guests are `u32`-in/`u32`-out, neither
 # dereferences a pointer, neither declares a memory contract with its host, and no engine crate
@@ -72,12 +72,12 @@ done
 # approved, and it is named here rather than absorbed by a pattern so that a genuinely new
 # boundary still has to come back for a decision.
 expected_unsafe="$(printf '%s\n' \
-    tools/miso-engine-bench-support/src/alloc.rs \
-    tools/miso-engine-audit/src/capi.rs \
-    tools/miso-engine-native-pcm-runner/src/lib.rs \
-    tools/miso-engine-bench/src/protocol.rs \
-    tools/miso-engine-wasm-gate-guest/src/lib.rs \
-    tools/miso-engine-wasm-console-guest/src/lib.rs | LC_ALL=C sort)"
+    tools/bench-support/src/alloc.rs \
+    tools/audit/src/capi.rs \
+    tools/native-pcm-runner/src/lib.rs \
+    tools/bench/src/protocol.rs \
+    tools/wasm-gate-guest/src/lib.rs \
+    tools/wasm-console-guest/src/lib.rs | LC_ALL=C sort)"
 actual_unsafe="$(grep -rlE '^#!\[allow\(unsafe_code\)\]' tools --include='*.rs' 2>/dev/null | LC_ALL=C sort || true)"
 [[ "$actual_unsafe" == "$expected_unsafe" ]] || {
     diff -u <(printf '%s\n' "$expected_unsafe") <(printf '%s\n' "$actual_unsafe") >&2 || true
@@ -87,9 +87,9 @@ actual_unsafe="$(grep -rlE '^#!\[allow\(unsafe_code\)\]' tools --include='*.rs' 
 # F2's metadata boundary: only the two dispatchers may inspect their private re-exec selector.
 # Every subject reads runner metadata from one memoized in-process `Metadata::gather()` snapshot.
 expected_environment_readers="$(printf '%s\n' \
-    tools/miso-engine-audit/src/main.rs \
-    tools/miso-engine-bench/src/main.rs | LC_ALL=C sort)"
-actual_environment_readers="$(grep -rlE '(std::)?env::var\(' tools/miso-engine-{audit,bench,bench-support}/src \
+    tools/audit/src/main.rs \
+    tools/bench/src/main.rs | LC_ALL=C sort)"
+actual_environment_readers="$(grep -rlE '(std::)?env::var\(' tools/{audit,bench,bench-support}/src \
     --include='*.rs' 2>/dev/null | LC_ALL=C sort || true)"
 [[ "$actual_environment_readers" == "$expected_environment_readers" ]] || {
     diff -u <(printf '%s\n' "$expected_environment_readers") \
@@ -112,7 +112,7 @@ actual_environment_readers="$(grep -rlE '(std::)?env::var\(' tools/miso-engine-{
 while IFS= read -r manifest; do
     violation="$(awk -v file="$manifest" '
         /^\[/ { section = $0 }
-        /miso-engine-bench-support/ {
+        /bench-support/ {
             dev = section ~ /dev-dependencies/ && file ~ /^crates\//
             if (!dev) { print file ": " $0; exit }
         }

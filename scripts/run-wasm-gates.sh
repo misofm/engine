@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Gate G5 (master plan #83 §3.6): the frozen cross-target corpus produces the same digests on this
-# host and inside a WebAssembly module, and the `miso-engine-math` M3 and `miso-engine-effect-
-# runtime` D1 pins replay under wasm.
+# host and inside a WebAssembly module, and the `math` M3 and `effect-runtime` D1 pins replay
+# under wasm.
 #
-# Three legs, one corpus (tools/miso-engine-wasm-gate-corpus):
+# Three legs, one corpus (tools/wasm-gate-corpus):
 #   native   -- run in this process at Scalar, Simd4 and Simd8.
 #   wasm     -- the same crate built for wasm32-unknown-unknown without simd128 (backend scalar).
 #   wasm+simd128 -- and with it (backend simd4), which is the only place the v128 software FMA of
@@ -17,7 +17,7 @@ set -euo pipefail
 script_directory="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repository_root="$(cd "$script_directory/.." && pwd)"
 readonly TARGET="wasm32-unknown-unknown"
-readonly GUEST="miso_engine_wasm_gate_guest.wasm"
+readonly GUEST="wasm_gate_guest.wasm"
 
 cd "$repository_root"
 
@@ -28,7 +28,7 @@ evidence="$output_dir/wasm-gates.jsonl"
 
 # The host runner and the native leg. `--locked` everywhere: the pinned wasmtime is part of the
 # gate, and a resolver that quietly moved it would change which modules validate.
-cargo run --locked --release -q -p miso-engine-wasm-gates -- --native | tee -a "$evidence"
+cargo run --locked --release -q -p wasm-gates -- --native | tee -a "$evidence"
 
 run_guest() {
     local name="$1"
@@ -37,8 +37,8 @@ run_guest() {
     local target_directory="target/ci/wasm-gates-$name"
 
     CARGO_TARGET_DIR="$target_directory" RUSTFLAGS="-C target-feature=$feature" \
-        cargo build --locked --release --target "$TARGET" -p miso-engine-wasm-gate-guest
-    cargo run --locked --release -q -p miso-engine-wasm-gates -- \
+        cargo build --locked --release --target "$TARGET" -p wasm-gate-guest
+    cargo run --locked --release -q -p wasm-gates -- \
         "$target_directory/$TARGET/release/$GUEST" --expect-backend "$expected" | tee -a "$evidence"
 }
 
@@ -68,7 +68,7 @@ check_detector_residency() {
     found="$(wasm-objdump -d "$module" | awk -v sizes="$HISTORY_SHIFT_SIZES" '
         BEGIN { split(sizes, list, " "); for (i in list) forbidden[list[i]] = 1 }
         /^[0-9a-f]+ func\[[0-9]+\] </ {
-            subject = /miso_engine_true_peak_limiter/ && !/10HotChannel/ && !/7History/
+            subject = /true_peak_limiter/ && !/10HotChannel/ && !/7History/
             fn = $0
             size = ""
         }

@@ -37,15 +37,15 @@ run_gate || { echo "test-realtime-audit-leak: baseline gate is red" >&2; exit 1;
 
 # 1. Conformance silently hard-enables the instrumentation for every dependent again.
 expect_failure conformance-regular-enable \
-    "sed -i 's|^miso-engine-core.workspace = true$|miso-engine-core = { workspace = true, features = [\"realtime-audit\"] }|' \
-        \"$copy/crates/miso-engine-conformance/Cargo.toml\""
-restore crates/miso-engine-conformance/Cargo.toml
+    "sed -i 's|^engine.workspace = true$|engine = { workspace = true, features = [\"realtime-audit\"] }|' \
+        \"$copy/crates/conformance/Cargo.toml\""
+restore crates/conformance/Cargo.toml
 
 # 2. The C ABI artifact itself asks for the instrumentation.
 expect_failure capi-direct-enable \
-    "sed -i 's|^miso-engine-core.workspace = true$|miso-engine-core = { workspace = true, features = [\"realtime-audit\"] }|' \
-        \"$copy/crates/miso-engine-capi/Cargo.toml\""
-restore crates/miso-engine-capi/Cargo.toml
+    "sed -i 's|^engine.workspace = true$|engine = { workspace = true, features = [\"realtime-audit\"] }|' \
+        \"$copy/crates/capi/Cargo.toml\""
+restore crates/capi/Cargo.toml
 
 # 3. Guard against an over-broad gate: dev-edge enables are the supported test path and must pass.
 if ! run_gate; then

@@ -10,13 +10,13 @@ if (process.argv.length !== 3) {
 }
 assert.deepEqual((await readdir(artifactDirectory)).sort(), [
   "decoder-artifact.sha256",
-  "miso-engine-flac-decoder.d.ts",
-  "miso-engine-flac-decoder.js",
-  "miso-engine-flac-decoder.wasm",
+  "flac-decoder.d.ts",
+  "flac-decoder.js",
+  "flac-decoder.wasm",
 ]);
 
 const artifact = new Uint8Array(await readFile(
-  path.join(artifactDirectory, "miso-engine-flac-decoder.wasm"),
+  path.join(artifactDirectory, "flac-decoder.wasm"),
 ));
 const expected = (await readFile(
   path.join(artifactDirectory, "decoder-artifact.sha256"),
@@ -28,7 +28,7 @@ const module = await WebAssembly.compile(artifact);
 assert.deepEqual(WebAssembly.Module.imports(module), []);
 
 const loaderUrl = pathToFileURL(
-  path.join(artifactDirectory, "miso-engine-flac-decoder.js"),
+  path.join(artifactDirectory, "flac-decoder.js"),
 );
 const loader = await import(`${loaderUrl.href}?artifact-check`);
 assert.equal(loader.MISO_ENGINE_FLAC_DECODER_SHA256, expected);

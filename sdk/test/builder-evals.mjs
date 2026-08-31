@@ -581,7 +581,7 @@ describe("issue #278 -- the port table is enforced, not documented", () => {
     // the boot-time refusal is still there.
     //
     // Red mutation: delete the `effect.sidechain.unknown_port` leg in
-    // `crates/miso-engine-effect-compiler/src/prepare.rs` -> this boots and the test fails.
+    // `crates/effect-compiler/src/prepare.rs` -> this boots and the test fails.
     const document = oneTrack({
       racks: { dynamic: [effect("miso.compressor", { threshold: -18 })] },
     }).toToml().replace(

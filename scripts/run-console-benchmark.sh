@@ -154,7 +154,7 @@
 # `--round2-lane` and `--round2-lane-baseline` are the paired arms of round 2's lane lowerings:
 # `Lane::select` emitted as `blendv` instead of the three-instruction `bitselect`, and
 # `Lane::max`/`Lane::min` emitted as the one instruction x86 and wasm each have with the D8 rule
-# (`crates/miso-engine-lane/src/wide_impl.rs`). Both are **class A** and both are class A for a
+# (`crates/lane/src/wide_impl.rs`). Both are **class A** and both are class A for a
 # stronger reason than usual: they change emitted instructions only, so every workload's
 # `output_sha256` must equal the baseline arm's on every row and every leg, and a single digit of
 # difference is a defect rather than a re-pin. The two arms are one tree apart -- the baseline arm
@@ -356,8 +356,8 @@ export CARGO_PROFILE_RELEASE_OPT_LEVEL=3
 export CARGO_PROFILE_RELEASE_LTO=false
 export CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16
 failure_reason=build_failed
-cargo build --locked --release --quiet -p miso-engine-bench 2>>"$stderr_log"
-binary="$root/target/release/miso_engine_bench"
+cargo build --locked --release --quiet -p bench 2>>"$stderr_log"
+binary="$root/target/release/bench"
 [[ -x "$binary" ]] || { failure_reason=missing_binary; exit 1; }
 failure_reason=binary_identity_failed
 binary_sha256=$(sha256sum "$binary" | awk '{print $1}')

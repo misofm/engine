@@ -27,7 +27,7 @@ fail() { printf 'intended console fixture failure: %s\n' "$1" >&2; exit 1; }
 
 # 1. The fixture is its generator's output. This also re-proves, on every run, that the derivation
 #    still passes all four stages of the real session pipeline: the generator takes its canonical
-#    spelling from `miso-engine-session-validator --canonical`, which writes nothing when a stage
+#    spelling from `session-validator --canonical`, which writes nothing when a stage
 #    fails.
 regenerated=$(mktemp)
 trap 'rm -f "$regenerated"' EXIT

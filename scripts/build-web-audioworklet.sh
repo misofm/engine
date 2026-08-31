@@ -27,7 +27,7 @@ trap cleanup EXIT
 # one artifact ships. The scalar worklet build and the dual-artifact selection in `host.js` are
 # gone; `host.js` probes `simd128` at init and fails with a typed `miso.unsupported.v1` error when
 # the probe fails -- the browser twin of D4's native boot attestation. The scalar *cargo check*
-# stays in CI: `miso-engine-lane`'s wasm-scalar path is still gated, it just is not shipped.
+# stays in CI: `lane`'s wasm-scalar path is still gated, it just is not shipped.
 #
 # The browser artifact is the one place the workspace's `debug = 1` (issue 083 D12) is pure cost.
 # It exists so a native profile or core dump names a kernel; a downloaded AudioWorklet module pays
@@ -44,19 +44,19 @@ strip_flag="-C strip=${MISO_ENGINE_WEB_STRIP:-debuginfo}"
 (
   cd "$repo_root"
   CARGO_TARGET_DIR="$simd_target" RUSTFLAGS="-C target-feature=+simd128 $strip_flag" \
-    cargo build --locked --release --target wasm32-unknown-unknown -p miso-engine-host-web
+    cargo build --locked --release --target wasm32-unknown-unknown -p host-web
 )
 
-cp --update=none "$simd_target/wasm32-unknown-unknown/release/miso_engine_host_web.wasm" \
+cp --update=none "$simd_target/wasm32-unknown-unknown/release/host_web.wasm" \
   "$output_dir/miso-engine-v2-audio-worklet.simd128.wasm"
-cp --update=none "$repo_root/hosts/miso-engine-host-web/web/miso-engine-v2-audio-worklet.js" "$output_dir/"
-cp --update=none "$repo_root/hosts/miso-engine-host-web/web/miso-engine-v2-audio-worklet-host.js" "$output_dir/"
-cp --update=none "$repo_root/hosts/miso-engine-host-web/web/miso-engine-v2-audio-worklet-host.d.ts" "$output_dir/"
+cp --update=none "$repo_root/hosts/host-web/web/miso-engine-v2-audio-worklet.js" "$output_dir/"
+cp --update=none "$repo_root/hosts/host-web/web/miso-engine-v2-audio-worklet-host.js" "$output_dir/"
+cp --update=none "$repo_root/hosts/host-web/web/miso-engine-v2-audio-worklet-host.d.ts" "$output_dir/"
 
 # Issue #137 D4: the parameter metadata ships beside the module, so the app never introspects the
 # Wasm for names, units, ranges, defaults or enumerations. The effect list is read from
 # `launch_native_effect_registry()`, so an effect cannot be in the engine and missing here.
 (
   cd "$repo_root"
-  cargo run --locked --release -q -p miso-engine-parameter-metadata -- --write "$output_dir"
+  cargo run --locked --release -q -p parameter-metadata -- --write "$output_dir"
 ) >/dev/null

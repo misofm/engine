@@ -14,8 +14,8 @@ accepted="$scratch/accepted.txt"
 # Issue #143 added exactly one additive export, so the accepted synthetic module carries two and
 # the rejection cases below still reject a third.
 printf '%s\n' \
-    'miso_engine_effect_package.wasm: file format wasm 0x1' \
-    'Module name: <miso_engine_effect_package.wasm>' \
+    'effect_package.wasm: file format wasm 0x1' \
+    'Module name: <effect_package.wasm>' \
     'Function[3]:' \
     ' - func[0] sig=0 <miso_engine_internal_call>' \
     'Export[3]:' \

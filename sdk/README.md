@@ -78,7 +78,7 @@ need for all of it: hand the engine bytes, and ask it what it compiled.
 
 ```
 Rust structures and frozen constants
-  └─ miso-engine-parameter-metadata          offset_of!, registry walk
+  └─ parameter-metadata          offset_of!, registry walk
        └─ sdk/assets/*.json                   checked in
             └─ sdk/src/generated/*.ts         checked in
                  └─ the SDK's public types
@@ -161,10 +161,10 @@ index is an address rather than a gesture.
 
 The SDK generates lattice points rather than shipping them — a one-cent lattice from 20 Hz to 20 kHz
 has about twelve thousand — and is held to the engine's own resolver point for point by
-`miso_engine_parameter_metadata_lattice_oracle` over the entire shipped catalog.
+`parameter_metadata_lattice_oracle` over the entire shipped catalog.
 
 `decimalToFloat32` is the single site where a lattice value stops being a decimal, mirroring
-`miso_engine_effect_contract::decimal_to_f32`. Auditing that boundary is one grep.
+`effect_contract::decimal_to_f32`. Auditing that boundary is one grep.
 
 ## The writer
 

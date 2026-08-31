@@ -18,7 +18,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 -I -B \
 
 CARGO_TARGET_DIR="$scratch_directory/native-target" \
     cargo test --quiet --locked --manifest-path "$workspace_root/Cargo.toml" \
-        -p miso-engine-effect-package --lib --tests -- --test-threads=1
+        -p effect-package --lib --tests -- --test-threads=1
 
 CARGO_TARGET_DIR="$scratch_directory/fuzz-target" \
     cargo check --quiet --locked --manifest-path "$workspace_root/fuzz/Cargo.toml" --bins
@@ -26,15 +26,15 @@ CARGO_TARGET_DIR="$scratch_directory/fuzz-target" \
 wasm_target="$scratch_directory/wasm-target"
 RUSTFLAGS='-C target-feature=-simd128' CARGO_TARGET_DIR="$wasm_target" \
     cargo rustc --quiet --locked --manifest-path "$workspace_root/Cargo.toml" \
-        -p miso-engine-effect-package --features c-abi --lib --release --target wasm32-unknown-unknown -- \
+        -p effect-package --features c-abi --lib --release --target wasm32-unknown-unknown -- \
         --emit=obj
-wasm_module="$wasm_target/wasm32-unknown-unknown/release/miso_engine_effect_package.wasm"
+wasm_module="$wasm_target/wasm32-unknown-unknown/release/effect_package.wasm"
 [[ -f "$wasm_module" ]] || {
     printf 'effect package V1 check failure: missing Wasm module\n' >&2
     exit 1
 }
 wasm_object="$(find "$wasm_target/wasm32-unknown-unknown/release/deps" -maxdepth 1 \
-    -type f -name 'miso_engine_effect_package.o' -print)"
+    -type f -name 'effect_package.o' -print)"
 [[ -n "$wasm_object" && "$wasm_object" != *$'\n'* ]] || {
     printf 'effect package V1 check failure: expected one exact Wasm object\n' >&2
     exit 1
@@ -84,16 +84,16 @@ done
 native_source="$scratch_directory/package-native.rs"
 cid_source="$scratch_directory/package-cid.rs"
 awk '/^#\[cfg\(test\)\]/{exit} {print}' \
-    "$workspace_root/crates/miso-engine-effect-package/src/package.rs" >"$native_source"
+    "$workspace_root/crates/effect-package/src/package.rs" >"$native_source"
 awk '/^#\[cfg\(test\)\]/{exit} {print}' \
-    "$workspace_root/crates/miso-engine-effect-package/src/cid.rs" >"$cid_source"
+    "$workspace_root/crates/effect-package/src/cid.rs" >"$cid_source"
 if rg -n 'Vec[<:]|String[<:]|vec!\[|\.to_vec\(|\.collect\(|\bunsafe\b|\.sort\(|\.sort_by\(|\.sort_by_key\(|\.sort_by_cached_key\(' \
     "$native_source" "$cid_source"; then
     printf 'effect package V1 check failure: allocation/unsafe package-native surface\n' >&2
     exit 1
 fi
-if rg -n 'miso_engine_effect_package|miso-engine-effect-package' \
-    "$workspace_root/crates/miso-engine-core/src/realtime"; then
+if rg -n 'effect_package|effect-package' \
+    "$workspace_root/crates/engine/src/realtime"; then
     printf 'effect package V1 check failure: package is render reachable\n' >&2
     exit 1
 fi

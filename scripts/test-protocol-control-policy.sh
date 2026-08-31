@@ -9,7 +9,7 @@ trap 'rm -rf -- "$scratch_root"' EXIT
 
 create_fixture() {
     local root="$1"
-    mkdir -p "$root/crates/miso-engine-protocol/src"
+    mkdir -p "$root/crates/protocol/src"
     printf '%s\n' \
         'pub trait ControlProvider {' \
         '    fn typed(&mut self, value: TypedValue) -> Result<TypedValue, ProviderError>;' \
@@ -24,7 +24,7 @@ create_fixture() {
         '}' \
         '' \
         'pub fn caller_buffer(output: &mut [u8]) {}' \
-        >"$root/crates/miso-engine-protocol/src/controller.rs"
+        >"$root/crates/protocol/src/controller.rs"
 }
 
 expect_failure() {
@@ -42,13 +42,13 @@ expect_failure() {
 mutate_provider_raw_bytes() {
     local root="$1"
     sed -i '/fn typed/a\    fn raw(&mut self, payload: &[u8]);' \
-        "$root/crates/miso-engine-protocol/src/controller.rs"
+        "$root/crates/protocol/src/controller.rs"
 }
 
 mutate_mock_public_vector() {
     local root="$1"
     sed -i '/replay_bytes/a\    pub diagnostics: Vec<TypedValue>,' \
-        "$root/crates/miso-engine-protocol/src/controller.rs"
+        "$root/crates/protocol/src/controller.rs"
 }
 
 mutate_public_payload() {
@@ -57,7 +57,7 @@ mutate_public_payload() {
         'pub struct ArbitraryMessage {' \
         '    pub payload: Vec<u8>,' \
         '}' \
-        >>"$root/crates/miso-engine-protocol/src/controller.rs"
+        >>"$root/crates/protocol/src/controller.rs"
 }
 
 valid_root="$scratch_root/valid"

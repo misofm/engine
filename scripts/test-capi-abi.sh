@@ -8,12 +8,12 @@ checker="$script_directory/check-capi-abi.sh"
 scratch_root="$(mktemp -d)"
 trap 'rm -rf -- "$scratch_root"' EXIT
 
-cargo build --locked -p miso-engine-capi --manifest-path "$workspace_root/Cargo.toml" >/dev/null
+cargo build --locked -p capi --manifest-path "$workspace_root/Cargo.toml" >/dev/null
 
 host_triple="$(rustc -vV | sed -n 's/^host: //p')"
 case "$host_triple" in
-    *-linux-*) library="$workspace_root/target/debug/libmiso_engine_capi.so" ;;
-    *-apple-*) library="$workspace_root/target/debug/libmiso_engine_capi.dylib" ;;
+    *-linux-*) library="$workspace_root/target/debug/libcapi.so" ;;
+    *-apple-*) library="$workspace_root/target/debug/libcapi.dylib" ;;
     *) printf 'unsupported pinned native host: %s\n' "$host_triple" >&2; exit 1 ;;
 esac
 
@@ -31,19 +31,19 @@ expect_failure missing-c-compiler \
     "${common_env[@]}" CC="$scratch_root/no-such-cc" bash "$checker" "$workspace_root"
 
 abi_header="$scratch_root/abi-version.h"
-cp "$workspace_root/crates/miso-engine-capi/include/miso_engine_v2.h" "$abi_header"
+cp "$workspace_root/crates/capi/include/miso_engine_v2.h" "$abi_header"
 sed -i 's/UINT32_C(0x00010000)/UINT32_C(0x00010001)/' "$abi_header"
 expect_failure header-constant-drift \
     "${common_env[@]}" MISO_ENGINE_CAPI_HEADER="$abi_header" bash "$checker" "$workspace_root"
 
 layout_header="$scratch_root/layout.h"
-cp "$workspace_root/crates/miso-engine-capi/include/miso_engine_v2.h" "$layout_header"
+cp "$workspace_root/crates/capi/include/miso_engine_v2.h" "$layout_header"
 sed -i '0,/uint64_t reserved\[4\];/s//uint64_t reserved[3];/' "$layout_header"
 expect_failure header-layout-drift \
     "${common_env[@]}" MISO_ENGINE_CAPI_HEADER="$layout_header" bash "$checker" "$workspace_root"
 
 signature_header="$scratch_root/signature.h"
-cp "$workspace_root/crates/miso-engine-capi/include/miso_engine_v2.h" "$signature_header"
+cp "$workspace_root/crates/capi/include/miso_engine_v2.h" "$signature_header"
 sed -i 's/miso_engine_v2_abi_version(void)/miso_engine_v2_abi_version(uint32_t reserved)/' \
     "$signature_header"
 expect_failure header-signature-drift \

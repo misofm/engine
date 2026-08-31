@@ -17,7 +17,7 @@ trusted.
 The candidate cites #88 and #89, which measured the compressor at ~120 cycles per lane-sample and
 found four libm calls (`log10f`, two `expf`, `powf`) on every one of them. That is not the engine
 this tier landed in. Those findings were acted on before this sprint: the dynamics gain path
-already ran `miso_engine_math::exp2_lane`/`log2_lane` — Cephes polynomials in `Lane` basic
+already ran `math::exp2_lane`/`log2_lane` — Cephes polynomials in `Lane` basic
 operations, no libm, qualified at 2 ulp by gate M1 — through
 `effect_runtime::dynamics::level_db`/`gain_from_db`.
 
@@ -61,7 +61,7 @@ effect families re-pinned, for no measured gain, because none of them is a dynam
 It would also have put the fast tier behind an exact-tier spelling, where the seal could not see
 it: a future caller of `dynamics::level_db` would silently get the cheaper conversion.
 
-Instead the crossings call `miso_engine_math::fast_db` directly and the shared helpers stay exact.
+Instead the crossings call `math::fast_db` directly and the shared helpers stay exact.
 The evidence that this was the right cut is in the multiband corpus: five of its six cases —
 `lr4_step/low`, `lr4_step/high`, `branching_smooth`, `link_levels/maximum`,
 `link_levels/average` — are **byte-for-byte unmoved**, and only `band_amplitude` changed.
@@ -96,7 +96,7 @@ would have been written up as a null and closed.
 ## What was adopted, and what it measures
 
 Six named crossings — compressor (X1, X2), gate/expander (X3, X4), multiband compressor (X5, X6) —
-onto `miso_engine_math::fast_db`, whose two polynomials are fresh minimax fits of degree 4 (`exp2`)
+onto `math::fast_db`, whose two polynomials are fresh minimax fits of degree 4 (`exp2`)
 and 5 (`log2`) with no range-reduction fold, replacing Cephes degree 6 and 9 with folds.
 
 | workload | exact tier | fast tier | delta |
@@ -139,13 +139,13 @@ path can reach.
 
 * Optimisation: issue #144 item 5, issue #149 workplan item 2; the folded-in cost-centre findings
   #88 F1 and #89 F1.
-* Implementation: `crates/miso-engine-math/src/fast_db.rs` (the sealed tier),
-  `crates/miso-engine-math/tests/f1_fast_db_bounds.rs` (gate F1, exhaustive),
+* Implementation: `crates/math/src/fast_db.rs` (the sealed tier),
+  `crates/math/tests/f1_fast_db_bounds.rs` (gate F1, exhaustive),
   `scripts/check-fast-db-seal.sh` and `scripts/test-fast-db-seal.sh` (the container and its 18 red
   mutations).
-* Crossings: `miso-engine-compressor/src/kernel.rs`, `miso-engine-gate-expander/src/kernel.rs`,
-  `miso-engine-multiband-compressor/src/lib.rs`.
+* Crossings: `compressor/src/kernel.rs`, `gate-expander/src/kernel.rs`,
+  `multiband-compressor/src/lib.rs`.
 * Gates: `scripts/run-wasm-gates.sh` (133 cases, 331 comparisons, 0 mismatches on all three legs).
 * Bench protocol: `AGENTS.md` "Benchmarks are descriptive during feature development"; issue #104;
-  `tools/miso-engine-bench/src/console.rs` "Paired alternation".
+  `tools/bench/src/console.rs` "Paired alternation".
 * Prior ruling in this sprint: `docs/rulings/stationary-smoother-hoist-boundary.md`.

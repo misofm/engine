@@ -20,7 +20,7 @@ import urllib.request
 
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-FIXTURE = ROOT / "hosts/miso-engine-host-web/tests/browser-v1"
+FIXTURE = ROOT / "hosts/host-web/tests/browser-v1"
 # W4-D1: the scalar worklet artifact is no longer built or shipped.
 EXPECTED_ARTIFACTS = (
     "miso-engine-v2-audio-worklet.simd128.wasm",
@@ -36,10 +36,10 @@ EXPECTED_ARTIFACTS = (
 SOURCE_SEAL_PATHS = (
     "Cargo.toml",
     "Cargo.lock",
-    "hosts/miso-engine-host-web/Cargo.toml",
-    "hosts/miso-engine-host-web/web/miso-engine-v2-audio-worklet.js",
-    "hosts/miso-engine-host-web/web/miso-engine-v2-audio-worklet-host.js",
-    "hosts/miso-engine-host-web/web/miso-engine-v2-audio-worklet-host.d.ts",
+    "hosts/host-web/Cargo.toml",
+    "hosts/host-web/web/miso-engine-v2-audio-worklet.js",
+    "hosts/host-web/web/miso-engine-v2-audio-worklet-host.js",
+    "hosts/host-web/web/miso-engine-v2-audio-worklet-host.d.ts",
     "scripts/build-web-audioworklet.sh",
     "scripts/check-web-audioworklet.sh",
 )

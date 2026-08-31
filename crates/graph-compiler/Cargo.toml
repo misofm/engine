@@ -1,0 +1,34 @@
+[package]
+name = "graph-compiler"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+name = "graph_compiler"
+
+[dependencies]
+# `Backend` is this crate's compile input and is re-exported (#84 phase A).
+lane.workspace = true
+engine.workspace = true
+session.workspace = true
+effect-contract.workspace = true
+effect-compiler.workspace = true
+graph.workspace = true
+math.workspace = true
+builtins.workspace = true
+builtins-compiler.workspace = true
+rack.workspace = true
+rack-compiler.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+builtins-compiler = { workspace = true, features = ["test-support"] }
+conformance = { workspace = true, features = ["realtime-audit"] }
+# Test-only: `softfma::fma_f32_via_f64` is the independent oracle for the graph's folded route
+# (master plan #83 D3/G3). The compiler itself never fuses.
+lane.workspace = true
+
+[lints]
+workspace = true

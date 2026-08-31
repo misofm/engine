@@ -86,7 +86,7 @@ one, so the row is reported and not explained.
 
 Every rendered sample is byte-identical split on versus split off. The unsplit form was not deleted
 to make that checkable: it is `FORCE_RAMPING`, `false` on every production path, and
-`crates/miso-engine-multiband-compressor/src/split.rs` runs both arms over each boundary — a window
+`crates/multiband-compressor/src/split.rs` runs both arms over each boundary — a window
 in flight when a block opens, one arriving mid-block, one arriving exactly on a block boundary,
 overlapping windows on different tracks, a parameter restated at the value it already holds, a
 restatement delivered mid-flight, and no traffic at all — at all three widths, under all three link
@@ -147,12 +147,12 @@ the ramping flag pinned false; the segment bound off by one.
 ## Links
 
 * Optimisation: issue #149 phase 3, opened by phase 1's investigation.
-* Implementation: `crates/miso-engine-multiband-compressor/src/lib.rs` — `Instance::plan_segment`,
+* Implementation: `crates/multiband-compressor/src/lib.rs` — `Instance::plan_segment`,
   `SegmentPlan`, `run_segment`'s `RAMPING`, `process_block`'s `FORCE_RAMPING`,
   `Instance::flat_path_is_identity`.
-* Gates: `crates/miso-engine-multiband-compressor/src/split.rs` (bit-identity, the two closed gaps,
+* Gates: `crates/multiband-compressor/src/split.rs` (bit-identity, the two closed gaps,
   and the descriptive paired-alternation measurement, `--ignored`).
 * Bench protocol: `AGENTS.md` "Benchmarks are descriptive during feature development"; issue #104;
-  `tools/miso-engine-bench/src/console.rs` "Paired alternation".
+  `tools/bench/src/console.rs` "Paired alternation".
 * Prior rulings in this sprint: `docs/rulings/stationary-smoother-hoist-boundary.md` (phase 1),
   `docs/rulings/fast-db-tier-boundaries.md` (phase 2).

@@ -15,7 +15,7 @@ if (process.argv.length !== 3) {
 
 const document = execFileSync(
   "cargo",
-  ["run", "--locked", "-q", "-p", "miso-engine-host-web", "--example", "worst_boot_document"],
+  ["run", "--locked", "-q", "-p", "host-web", "--example", "worst_boot_document"],
   { cwd: new URL("../", import.meta.url), maxBuffer: MAXIMUM_DOCUMENT_BYTES + WASM_PAGE_BYTES },
 );
 assert.equal(document.byteLength, MAXIMUM_DOCUMENT_BYTES);

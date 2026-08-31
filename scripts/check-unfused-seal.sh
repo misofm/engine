@@ -32,8 +32,8 @@ fail() {
 }
 
 # The two dispatch points. These define the contract and must state it in the unfused form.
-dispatch_wide=crates/miso-engine-lane/src/wide_impl.rs
-dispatch_scalar=crates/miso-engine-lane/src/scalar.rs
+dispatch_wide=crates/lane/src/wide_impl.rs
+dispatch_scalar=crates/lane/src/scalar.rs
 
 # The exemption registry: source file, and the exact number of fused calls it may make.
 #
@@ -57,8 +57,8 @@ dispatch_scalar=crates/miso-engine-lane/src/scalar.rs
 # decision (the last one moved every pinned bit in the tree).
 exemption_registry() {
     cat <<'EOF'
-tools/miso-engine-audit/src/unfused_fma.rs 7
-tools/miso-engine-wasm-gates/tests/g5_native_corpus.rs 1
+tools/audit/src/unfused_fma.rs 7
+tools/wasm-gates/tests/g5_native_corpus.rs 1
 EOF
 }
 
@@ -203,7 +203,7 @@ done < <(rg -l -e "$call_pattern" crates hosts tools sidecars --glob '*.rs' 2>/d
 # because three policy files name that path. Keeping the name means the file could quietly regrow
 # the thing it was named for, so the definition is refused explicitly rather than left to rule 3.
 # ---------------------------------------------------------------------------------------------
-if rg -qn 'fn\s+fma_f32_via_f64\b|fn\s+fma_f32x[48]_soft\b' crates/miso-engine-lane/src/softfma.rs; then
+if rg -qn 'fn\s+fma_f32_via_f64\b|fn\s+fma_f32x[48]_soft\b' crates/lane/src/softfma.rs; then
     fail 'the software FMA is retired (#163 phase 2) -- restoring it needs a ruling, not a commit'
 fi
 

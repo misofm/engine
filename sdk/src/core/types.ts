@@ -10,7 +10,7 @@ import type {
  *
  * Nothing here restates the engine's parameter tables. Every effect and every parameter name a
  * caller can write is *derived* from `../generated/catalog.ts`, which is itself generated from the
- * engine's own `miso-engine-parameter-metadata` output. A hand-written union would be a sixth copy
+ * engine's own `parameter-metadata` output. A hand-written union would be a sixth copy
  * of a table that has already drifted five times (issue #207's N-13(d)), so there is none.
  */
 

@@ -1,0 +1,20 @@
+[package]
+name = "engine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+name = "engine"
+
+[features]
+default = []
+realtime-audit = []
+
+[dev-dependencies]
+# MIT licensed; test/model-checking only. It is not reachable from production, Wasm, or render.
+loom = "=0.7.2"
+
+[lints]
+workspace = true

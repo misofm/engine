@@ -25,8 +25,8 @@ jq -e -L "$script_directory" \
 }
 
 cd "$repository_root"
-scalar_artifact="target/ci/issue005-protocol-bench-wasm-scalar/wasm32-unknown-unknown/release/miso_engine_bench.wasm"
-simd_artifact="target/ci/issue005-protocol-bench-wasm-simd128/wasm32-unknown-unknown/release/miso_engine_bench.wasm"
+scalar_artifact="target/ci/issue005-protocol-bench-wasm-scalar/wasm32-unknown-unknown/release/bench.wasm"
+simd_artifact="target/ci/issue005-protocol-bench-wasm-simd128/wasm32-unknown-unknown/release/bench.wasm"
 [[ -f "$scalar_artifact" && -f "$simd_artifact" ]] || {
     printf 'build Wasm parity artifacts with scripts/check-protocol-benchmark-wasm-parity.sh before benchmarking\n' >&2
     exit 1
@@ -46,7 +46,7 @@ if !
     MISO_ENGINE_BENCH_WASM_HOST_VERSION="${MISO_ENGINE_BENCH_WASM_HOST_VERSION:-$(wasm-interp --version 2>/dev/null || printf unknown)}" \
     MISO_ENGINE_BENCH_WASM_SCALAR_BYTES="$(wc -c < "$scalar_artifact" | tr -d ' ')" \
     MISO_ENGINE_BENCH_WASM_SIMD_BYTES="$(wc -c < "$simd_artifact" | tr -d ' ')" \
-    cargo run --locked --release -q -p miso-engine-bench -- protocol --rounds 2 >"$raw_output"
+    cargo run --locked --release -q -p bench -- protocol --rounds 2 >"$raw_output"
 then
     printf 'benchmark workload failed; partial raw output preserved at %s\n' "$raw_output" >&2
     exit 1

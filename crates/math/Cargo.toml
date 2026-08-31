@@ -1,0 +1,37 @@
+[package]
+name = "math"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+name = "math"
+
+[features]
+default = []
+# Lane-wide `exp2`/`log2` built on `lane`. Gated so the scalar layer stays buildable
+# and usable on its own -- including on an x86 host without AVX2+FMA, which the lane crate refuses
+# to compile for at all. Wave 2 turns this on for every engine consumer.
+lane = ["dep:lane"]
+
+[dependencies]
+lane = { workspace = true, optional = true }
+
+[dev-dependencies]
+sha2 = { workspace = true }
+
+[[test]]
+name = "m1_exhaustive"
+required-features = ["lane"]
+
+[[test]]
+name = "m2_lane_identity"
+required-features = ["lane"]
+
+[[test]]
+name = "f1_fast_db_bounds"
+required-features = ["lane"]
+
+[lints]
+workspace = true

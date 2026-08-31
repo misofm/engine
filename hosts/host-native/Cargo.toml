@@ -1,0 +1,20 @@
+[package]
+name = "host-native"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+lane.workspace = true
+target-smoke.workspace = true
+
+[[bin]]
+name = "host_native"
+path = "src/main.rs"
+
+[features]
+default = []
+
+[lints]
+workspace = true

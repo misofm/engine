@@ -3,9 +3,9 @@ set -euo pipefail
 
 workspace_dir=$(cd "$(dirname "$0")/.." && pwd)
 cd "$workspace_dir"
-packages=(-p miso-engine-builtins -p miso-engine-builtins-compiler)
+packages=(-p builtins -p builtins-compiler)
 
-# Master plan #83 D4 (verifier decision W2-D1): these crates reach `miso-engine-lane`, which
+# Master plan #83 D4 (verifier decision W2-D1): these crates reach `lane`, which
 # refuses to compile on x86 without AVX2+FMA -- that guard is the point, not a regression, and it
 # is never weakened to keep a script green. The native leg therefore builds the pinned
 # `x86-64-v3` target instead of the retired scalar one. Scalar semantics stay proven three ways:

@@ -71,7 +71,7 @@ if ! (
     MISO_ENGINE_BENCH_LTO="${MISO_ENGINE_BENCH_LTO:-off}" \
     MISO_ENGINE_BENCH_CODEGEN_UNITS="${MISO_ENGINE_BENCH_CODEGEN_UNITS:-default}" \
     MISO_ENGINE_BENCH_BACKGROUND_LOAD_NOTE="${MISO_ENGINE_BENCH_BACKGROUND_LOAD_NOTE:-not measured}" \
-    cargo run --locked --release --quiet -p miso-engine-bench -- graph >"$raw_output"
+    cargo run --locked --release --quiet -p bench -- graph >"$raw_output"
     status=$?
     printf '%s\n' "$status" >"$status_file"
     exit "$status"

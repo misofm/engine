@@ -16,7 +16,7 @@ import { spawnSync } from "node:child_process"
 import { fileURLToPath } from "node:url"
 
 const root = resolve(fileURLToPath(new URL("..", import.meta.url)))
-const host = join(root, "hosts/miso-engine-host-web")
+const host = join(root, "hosts/host-web")
 const runtime = join(host, "web/stem-store")
 const tests = [
   "stem-store-hash-v1.mjs",
@@ -82,8 +82,8 @@ async function staticChecks(repository) {
 
   const engineRoots = [
     "crates",
-    "hosts/miso-engine-host-native",
-    "hosts/miso-engine-host-mobile",
+    "hosts/host-native",
+    "hosts/host-mobile",
     "sidecars",
   ]
   for (const relative of engineRoots) {
@@ -330,7 +330,7 @@ async function runMutationLedger() {
   for (const mutation of mutations) {
     const temporary = await mkdtemp(join(tmpdir(), "miso-stem-store-mutation-"))
     try {
-      const mutatedHost = join(temporary, "miso-engine-host-web")
+      const mutatedHost = join(temporary, "host-web")
       await cp(host, mutatedHost, { recursive: true })
       const target = join(mutatedHost, mutation.file)
       const source = await readFile(target, "utf8")

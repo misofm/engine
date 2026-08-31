@@ -69,7 +69,7 @@ jobs:
         run: |
           bash scripts/run-native-vectorization-report.sh
           bash scripts/test-native-vectorization-report.sh \
-            target/release/miso_engine_audit
+            target/release/audit
       - name: Upload native vectorization evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -92,7 +92,7 @@ jobs:
           bash scripts/run-conformance-benchmark.sh 2 | tee target/conformance-benchmark.jsonl
           test -f target/conformance-benchmark.jsonl && test -s target/conformance-benchmark.jsonl
       - name: Build issue-003 audit harness
-        run: cargo build --locked --release -p miso-engine-audit
+        run: cargo build --locked --release -p audit
       - name: Run one descriptive two-round realtime benchmark
         run: |
           set -o pipefail

@@ -15,7 +15,7 @@ for tool in awk git ln mkdir mktemp python3 rm rustc sha256sum wc; do
 done
 artifact_dir="$root/target/issue081"
 seal="$artifact_dir/benchmark-preflight.seal.json"
-binary="$artifact_dir/miso_engine_bench"
+binary="$artifact_dir/bench"
 raw="$artifact_dir/benchmark.raw.jsonl"
 accepted="$artifact_dir/benchmark.accepted.jsonl"
 disposition="$artifact_dir/benchmark.disposition.json"
@@ -128,8 +128,8 @@ commit="$(git rev-parse --verify HEAD)"
 tree="$(git rev-parse HEAD^{tree})"
 binary_sha="$(sha256sum "$binary" | awk '{print $1}')"
 seal_sha="$(sha256sum "$seal" | awk '{print $1}')"
-source_sha="$(sha256sum tools/miso-engine-bench/src/effect_interchange.rs | awk '{print $1}')"
-tool_manifest_sha="$(sha256sum tools/miso-engine-bench/Cargo.toml | awk '{print $1}')"
+source_sha="$(sha256sum tools/bench/src/effect_interchange.rs | awk '{print $1}')"
+tool_manifest_sha="$(sha256sum tools/bench/Cargo.toml | awk '{print $1}')"
 fixture_sha="$(sha256sum fixtures/effect-interchange/v1/ACCEPTED.sha256 | awk '{print $1}')"
 [[ "$fixture_sha" == e3896726979aa746cfda50fc10c1985c0ecef117f87b39e692f18226b7b4fa14 ]] || {
     failure_reason=fixture_manifest_changed

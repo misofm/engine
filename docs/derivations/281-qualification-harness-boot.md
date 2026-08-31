@@ -1,6 +1,6 @@
 # Issue #281 — the qualification harness's boot refusal, and the corpus-document audit that cleared
 
-`hosts/miso-engine-host-web/qualification` failed at boot on unmodified `main` with
+`hosts/host-web/qualification` failed at boot on unmodified `main` with
 `miso.error.v1`, `requestId 0`, `result 1` — the corpus row, before any audio was rendered. #281
 opened with the leading hypothesis that this was the last member of the #241-fallout class: stale
 session documents carrying the pre-#241 source shape. **It is not.** Every document the harness
@@ -53,10 +53,10 @@ transcript. So the boot surface is those four files and nothing else.
 
 The post-#241 schema, read from the engine rather than from memory:
 
-* root keys — `crates/miso-engine-session/src/visit.rs:85`: `schema_version`, `session_id`,
+* root keys — `crates/session/src/visit.rs:85`: `schema_version`, `session_id`,
   `revision`, `sample_rate_hz`, `quantum_frames`, `render_profile`, `output_profile`, `sources`,
   `tracks`, `submixes`, `outputs`, `routes`, `automation`. **There is no `limits` key.**
-* source row — `visit.rs:88` and `crates/miso-engine-session/src/model.rs:123`: exactly
+* source row — `visit.rs:88` and `crates/session/src/model.rs:123`: exactly
   `{ id, content, channels, bit_depth, frames }`. **No per-source `sample_rate_hz`, no
   `start_frame`.**
 * `bit_depth` tokens — `model.rs:138`: `Pcm16` / `Pcm24` / `F32` for `16` / `24` / `"32f"`.
@@ -224,4 +224,4 @@ correct.) The `.d.ts`-wide sweep found no fourth enumeration.
 
 The pin stays **exact**, not a minimum, and `run.mjs::artifactSetProofs` proves both halves of that
 against the real built directory under `--self-test-mutations` — the same flag CI already passes.
-Red proofs are recorded in `hosts/miso-engine-host-web/MUTATIONS.md`.
+Red proofs are recorded in `hosts/host-web/MUTATIONS.md`.

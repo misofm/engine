@@ -205,7 +205,7 @@ mono=$(jq -cn --arg a "$digest_a" --argjson m "$metadata" '$m + {
 #
 # The derived columns are computed here the way the subject computes them, through the validator
 # library's own inventories rather than a third copy of the numbers -- the suite's job is to mutate
-# a correct record, not to restate the derivation. `tools/miso-engine-bench/src/floor.rs` is the
+# a correct record, not to restate the derivation. `tools/bench/src/floor.rs` is the
 # authority; the end-to-end agreement between it and the library is what a real run proves.
 core_clock_source='perf stat cycles/task-clock over the warmup launch, cpu 15'
 add_floor='

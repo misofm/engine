@@ -1,6 +1,6 @@
 # MISO Control BTLV v1
 
-This is the normative byte contract for `miso-engine-protocol` major version 1. It is transport-neutral: an adapter supplies exactly one complete frame and may add stream framing outside these bytes. It never transports PCM, media, a render plan, or an opaque provider blob. Message-specific fields are in the [registry](CONTROL_PROTOCOL_REGISTRY.md); endpoint behavior is in [semantics](CONTROL_PROTOCOL_SEMANTICS.md).
+This is the normative byte contract for `protocol` major version 1. It is transport-neutral: an adapter supplies exactly one complete frame and may add stream framing outside these bytes. It never transports PCM, media, a render plan, or an opaque provider blob. Message-specific fields are in the [registry](CONTROL_PROTOCOL_REGISTRY.md); endpoint behavior is in [semantics](CONTROL_PROTOCOL_SEMANTICS.md).
 
 ## Outer frame
 

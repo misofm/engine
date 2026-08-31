@@ -89,54 +89,54 @@ jobs:
           bash scripts/check-lane-policy.sh
           bash scripts/test-lane-policy.sh
       - name: Lane gates G1-G4, G6, P1 and the issue-146 FP-environment guard on the AVX2+FMA runner
-        run: cargo test --locked --release -p miso-engine-lane
+        run: cargo test --locked --release -p lane
       - name: Deterministic math policy and mutation tests
         run: |
           bash scripts/check-math-policy.sh
           bash scripts/test-math-policy.sh
       - name: Math gates M1, M2 and M3 in release
-        run: cargo test --locked --release -p miso-engine-math --features lane
+        run: cargo test --locked --release -p math --features lane
       - name: Math M3 digests on an FMA-enabled build
-        run: RUSTFLAGS='-C target-feature=+fma' cargo test --locked --release -p miso-engine-math --test m3_determinism
+        run: RUSTFLAGS='-C target-feature=+fma' cargo test --locked --release -p math --test m3_determinism
       - name: Math M1 exhaustive sweep
-        run: cargo test --locked --release -p miso-engine-math --features lane --test m1_exhaustive -- --ignored
+        run: cargo test --locked --release -p math --features lane --test m1_exhaustive -- --ignored
       - name: Fast dB tier seal and mutation tests
         run: |
           bash scripts/check-fast-db-seal.sh
           bash scripts/test-fast-db-seal.sh
       - name: Fast dB tier gate F1, exhaustive over both operating domains
-        run: cargo test --locked --release -p miso-engine-math --features lane --test f1_fast_db_bounds -- --ignored
+        run: cargo test --locked --release -p math --features lane --test f1_fast_db_bounds -- --ignored
       - name: Effect runtime gates (lane identity, partition invariance, D1 digests) in release
-        run: cargo test --locked --release -p miso-engine-effect-runtime
+        run: cargo test --locked --release -p effect-runtime
       - name: Delay gates (partition invariance, oracle bound, G5 digests) in release
-        run: cargo test --locked --release -p miso-engine-delay --all-targets
+        run: cargo test --locked --release -p delay --all-targets
       - name: Delay realtime allocation and syscall audit
         run: |
-          cargo build --locked --release -p miso-engine-audit --bin miso_engine_audit
-          ./target/release/miso_engine_audit delay --blocks 100000
+          cargo build --locked --release -p audit --bin audit
+          ./target/release/audit delay --blocks 100000
       - name: Multiband compressor gates in release (audit #94)
-        run: cargo test --locked --release -p miso-engine-multiband-compressor
+        run: cargo test --locked --release -p multiband-compressor
       - name: Soft-clip gates (polyphase identity, lane identity, partitions, digests) in release
-        run: cargo test --locked --release -p miso-engine-soft-clip
+        run: cargo test --locked --release -p soft-clip
       - name: Parametric EQ gates (oracle grid, impulses, lane identity, partitions, digests) in release
-        run: cargo test --locked --release -p miso-engine-parametric-eq
+        run: cargo test --locked --release -p parametric-eq
       - name: Parametric EQ target and render-contract seal
         run: |
           rustup target add --toolchain 1.97.1 wasm32-unknown-unknown aarch64-linux-android aarch64-apple-ios
           bash scripts/check-parametric-eq-targets.sh
       - name: Parametric EQ realtime allocation and syscall audit
         run: |
-          cargo build --locked --release -p miso-engine-audit --bin miso_engine_audit
-          ./target/release/miso_engine_audit parametric-eq --blocks 100000
+          cargo build --locked --release -p audit --bin audit
+          ./target/release/audit parametric-eq --blocks 100000
       - name: Gate/expander gates (oracle bound, lane identity, partition, state, digests) in release
-        run: cargo test --locked --release -p miso-engine-gate-expander
+        run: cargo test --locked --release -p gate-expander
       - name: Gate/expander realtime audit (100,000 blocks, W8 bank and connected scalar)
         run: |
-          cargo build --locked --release -p miso-engine-audit --bin miso_engine_audit
-          ./target/release/miso_engine_audit gate-expander | tee target/gate-expander-audit.json
+          cargo build --locked --release -p audit --bin audit
+          ./target/release/audit gate-expander | tee target/gate-expander-audit.json
           grep -q '"total_violations":0' target/gate-expander-audit.json
       - name: Builtins gates (reference recurrence, lane identity, partitions, digests) in release
-        run: cargo test --locked --release -p miso-engine-builtins
+        run: cargo test --locked --release -p builtins
       - name: Builtins realtime audit (1,000,000 blocks, direct chain and graph)
         run: |
           bash scripts/trace-builtins-audit.sh
@@ -147,30 +147,30 @@ jobs:
         run: bash scripts/run-protocol-allocation-audit.sh
       - name: Protocol benchmark runner build and negative argument checks (no benchmark)
         run: |
-          cargo check --locked -p miso-engine-bench --all-targets
+          cargo check --locked -p bench --all-targets
           bash scripts/test-protocol-benchmark.sh
       - name: Realtime race model
-        run: RUSTFLAGS='--cfg loom --check-cfg=cfg(loom)' cargo test --locked --release -p miso-engine-core --lib spsc_loom
+        run: RUSTFLAGS='--cfg loom --check-cfg=cfg(loom)' cargo test --locked --release -p engine --lib spsc_loom
       - name: Realtime audit hooks and syscall trace
         run: |
-          cargo build --locked --release -p miso-engine-audit
-          bash scripts/test-realtime-audit-hooks.sh target/release/miso_engine_audit
-          timeout 120s bash scripts/trace-realtime-audit.sh target/release/miso_engine_audit 1000000
+          cargo build --locked --release -p audit
+          bash scripts/test-realtime-audit-hooks.sh target/release/audit
+          timeout 120s bash scripts/trace-realtime-audit.sh target/release/audit 1000000
       - name: Native effect one-million-call allocation and syscall audit
         run: |
-          cargo build --locked --release -p miso-engine-bench
-          timeout 180s bash scripts/trace-effect-contract-audit.sh target/release/miso_engine_bench 1000000
+          cargo build --locked --release -p bench
+          timeout 180s bash scripts/trace-effect-contract-audit.sh target/release/bench 1000000
       - name: Conformance boundaries and research corpus
         run: |
           bash scripts/check-conformance-boundaries.sh
           bash scripts/check-dsp-research.sh
-          cargo run --locked -p miso-engine-conformance --example miso_engine_conformance_fixtures -- --check
+          cargo run --locked -p conformance --example conformance_fixtures -- --check
       - name: Feature-resolution tree
         run: cargo tree --locked --workspace -e features
       - name: Metadata report
         run: cargo metadata --locked --format-version 1 --no-deps
       - name: Native host smoke
-        run: cargo run --locked -p miso-engine-host-native
+        run: cargo run --locked -p host-native
 
   x86-probes:
     name: x86 scalar and SIMD compile probes
@@ -179,25 +179,25 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.97.1 --profile minimal
-      # #84 phase A made core (and so every production crate) depend on miso-engine-lane, whose
+      # #84 phase A made core (and so every production crate) depend on lane, whose
       # master-plan D4 guard refuses any build below x86-64-v3 — there is no scalar fallback to
       # compile-probe any more (W2-D1 retired the sub-v3 legs). These steps now assert the guard
       # DISCRIMINATES: a sub-v3 build must fail with the pinned message, at both feature levels.
       - name: Sub-v3 builds are refused by the lane guard (scalar)
         run: |
-          ! CARGO_TARGET_DIR=target/ci/x86-scalar RUSTFLAGS='-C target-cpu=x86-64 -C target-feature=-avx2,-fma' cargo check --locked -p miso-engine-core -p miso-engine-target-smoke -p miso-engine-math 2>/tmp/ci-scalar-probe.log
+          ! CARGO_TARGET_DIR=target/ci/x86-scalar RUSTFLAGS='-C target-cpu=x86-64 -C target-feature=-avx2,-fma' cargo check --locked -p engine -p target-smoke -p math 2>/tmp/ci-scalar-probe.log
           grep -q 'requires x86-64-v3' /tmp/ci-scalar-probe.log
           ! rustc --print cfg -C target-cpu=x86-64 -C target-feature=-avx2,-fma | grep -qx 'target_feature="avx2"'
           ! rustc --print cfg -C target-cpu=x86-64 -C target-feature=-avx2,-fma | grep -qx 'target_feature="fma"'
       - name: Sub-v3 builds are refused by the lane guard (AVX2 without FMA)
         run: |
-          ! CARGO_TARGET_DIR=target/ci/x86-avx2 RUSTFLAGS='-C target-cpu=x86-64 -C target-feature=+avx2,-fma' cargo check --locked -p miso-engine-core -p miso-engine-target-smoke -p miso-engine-math 2>/tmp/ci-avx2-probe.log
+          ! CARGO_TARGET_DIR=target/ci/x86-avx2 RUSTFLAGS='-C target-cpu=x86-64 -C target-feature=+avx2,-fma' cargo check --locked -p engine -p target-smoke -p math 2>/tmp/ci-avx2-probe.log
           grep -q 'requires x86-64-v3' /tmp/ci-avx2-probe.log
           rustc --print cfg -C target-cpu=x86-64 -C target-feature=+avx2,-fma | grep -qx 'target_feature="avx2"'
           ! rustc --print cfg -C target-cpu=x86-64 -C target-feature=+avx2,-fma | grep -qx 'target_feature="fma"'
       - name: AVX2 with FMA compile probe and cfg assertion
         run: |
-          CARGO_TARGET_DIR=target/ci/x86-avx2fma RUSTFLAGS='-C target-cpu=x86-64 -C target-feature=+avx2,+fma' cargo check --locked -p miso-engine-core -p miso-engine-target-smoke -p miso-engine-math -p miso-engine-builtins -p miso-engine-builtins-compiler -p miso-engine-effect-runtime -p miso-engine-gate-expander -p miso-engine-multiband-compressor -p miso-engine-parametric-eq -p miso-engine-soft-clip
+          CARGO_TARGET_DIR=target/ci/x86-avx2fma RUSTFLAGS='-C target-cpu=x86-64 -C target-feature=+avx2,+fma' cargo check --locked -p engine -p target-smoke -p math -p builtins -p builtins-compiler -p effect-runtime -p gate-expander -p multiband-compressor -p parametric-eq -p soft-clip
           rustc --print cfg -C target-cpu=x86-64 -C target-feature=+avx2,+fma | grep -qx 'target_feature="avx2"'
           rustc --print cfg -C target-cpu=x86-64 -C target-feature=+avx2,+fma | grep -qx 'target_feature="fma"'
 
@@ -215,17 +215,17 @@ jobs:
       - name: Browser-local realtime path has no atomic opcodes
         run: bash scripts/check-wasm-realtime-atomics.sh
       # #105 phase 2 C2: an artifact invocation names no evidence crate. Cargo unifies features
-      # across the packages selected by ONE invocation, so building `miso-engine-conformance`
-      # alongside `miso-engine-host-web` put core's `realtime-audit` instrumentation into the wasm
+      # across the packages selected by ONE invocation, so building `conformance`
+      # alongside `host-web` put core's `realtime-audit` instrumentation into the wasm
       # module that ships. The evidence crates keep their cross-target compile coverage in the
       # separate step below. `scripts/check-artifact-evidence-leak.sh` gates both halves.
       - name: Scalar Wasm release artifact
         run: |
-          CARGO_TARGET_DIR=target/ci/wasm-scalar RUSTFLAGS='-C target-feature=-simd128' cargo build --locked --release --target wasm32-unknown-unknown -p miso-engine-core -p miso-engine-session -p miso-engine-effect-contract -p miso-engine-effect-compiler -p miso-engine-protocol -p miso-engine-target-smoke -p miso-engine-host-core -p miso-engine-host-web -p miso-engine-lane -p miso-engine-math -p miso-engine-builtins -p miso-engine-builtins-compiler -p miso-engine-effect-runtime -p miso-engine-gate-expander -p miso-engine-delay -p miso-engine-multiband-compressor -p miso-engine-parametric-eq -p miso-engine-soft-clip
+          CARGO_TARGET_DIR=target/ci/wasm-scalar RUSTFLAGS='-C target-feature=-simd128' cargo build --locked --release --target wasm32-unknown-unknown -p engine -p session -p effect-contract -p effect-compiler -p protocol -p target-smoke -p host-core -p host-web -p lane -p math -p builtins -p builtins-compiler -p effect-runtime -p gate-expander -p delay -p multiband-compressor -p parametric-eq -p soft-clip
           ! rustc --print cfg --target wasm32-unknown-unknown -C target-feature=-simd128 | grep -qx 'target_feature="simd128"'
       - name: SIMD128 Wasm release artifact
         run: |
-          CARGO_TARGET_DIR=target/ci/wasm-simd RUSTFLAGS='-C target-feature=+simd128' cargo build --locked --release --target wasm32-unknown-unknown -p miso-engine-core -p miso-engine-session -p miso-engine-effect-contract -p miso-engine-effect-compiler -p miso-engine-protocol -p miso-engine-target-smoke -p miso-engine-host-core -p miso-engine-host-web -p miso-engine-lane -p miso-engine-math -p miso-engine-builtins -p miso-engine-builtins-compiler -p miso-engine-effect-runtime -p miso-engine-gate-expander -p miso-engine-delay -p miso-engine-multiband-compressor -p miso-engine-parametric-eq -p miso-engine-soft-clip
+          CARGO_TARGET_DIR=target/ci/wasm-simd RUSTFLAGS='-C target-feature=+simd128' cargo build --locked --release --target wasm32-unknown-unknown -p engine -p session -p effect-contract -p effect-compiler -p protocol -p target-smoke -p host-core -p host-web -p lane -p math -p builtins -p builtins-compiler -p effect-runtime -p gate-expander -p delay -p multiband-compressor -p parametric-eq -p soft-clip
           rustc --print cfg --target wasm32-unknown-unknown -C target-feature=+simd128 | grep -qx 'target_feature="simd128"'
       # The #163 phase 2 console guest. It is dev/tooling and never ships, but it is the subject of
       # a recorded measurement family, and a guest that stopped building for wasm32 would not
@@ -233,11 +233,11 @@ jobs:
       # broken input.
       - name: Wasm console benchmark guest compiles for Wasm (not an artifact)
         run: |
-          CARGO_TARGET_DIR=target/ci/wasm-console RUSTFLAGS='-C target-feature=+simd128' cargo build --locked --release --target wasm32-unknown-unknown -p miso-engine-wasm-console-guest -p miso-engine-console-workload
+          CARGO_TARGET_DIR=target/ci/wasm-console RUSTFLAGS='-C target-feature=+simd128' cargo build --locked --release --target wasm32-unknown-unknown -p wasm-console-guest -p console-workload
       - name: Evidence crates compile for Wasm (not an artifact)
         run: |
-          CARGO_TARGET_DIR=target/ci/wasm-scalar RUSTFLAGS='-C target-feature=-simd128' cargo build --locked --release --target wasm32-unknown-unknown -p miso-engine-dsp-reference -p miso-engine-conformance
-          CARGO_TARGET_DIR=target/ci/wasm-simd RUSTFLAGS='-C target-feature=+simd128' cargo build --locked --release --target wasm32-unknown-unknown -p miso-engine-dsp-reference -p miso-engine-conformance
+          CARGO_TARGET_DIR=target/ci/wasm-scalar RUSTFLAGS='-C target-feature=-simd128' cargo build --locked --release --target wasm32-unknown-unknown -p dsp-reference -p conformance
+          CARGO_TARGET_DIR=target/ci/wasm-simd RUSTFLAGS='-C target-feature=+simd128' cargo build --locked --release --target wasm32-unknown-unknown -p dsp-reference -p conformance
       # #106 E1/E2/E5/E7 and the F4 native<->simd128 session parity, over the artifact that ships.
       # `build-web-audioworklet.sh` produces the one stripped simd128 module (#083 W4-D1);
       # `check-web-audioworklet.sh` asserts the frozen 28-export set, no imports, no shared memory,
@@ -275,7 +275,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y wabt
       # Gate G5 (master plan #83 section 3.6) and the wasm replay of gates M3 and D1: the frozen
-      # corpus of tools/miso-engine-wasm-gate-corpus is run natively at Scalar/Simd4/Simd8 and
+      # corpus of tools/wasm-gate-corpus is run natively at Scalar/Simd4/Simd8 and
       # inside both browser artifacts (with and without simd128) under wasmtime 47.0.3, and every
       # digest is compared against pins the owning crate generated from the scalar Lane oracle.
       # A mismatch is never fixed by re-pinning: it means a target stopped agreeing with the oracle.
@@ -287,7 +287,7 @@ jobs:
       # shows the 70 diverging rows #144 measured. Run in release, because that is the profile the
       # divergence was measured in and the one a host ships.
       - name: Gate G6 over the full corpus in release
-        run: cargo test --locked --release -p miso-engine-wasm-gates
+        run: cargo test --locked --release -p wasm-gates
       - name: Upload cross-target gate evidence
         uses: actions/upload-artifact@v4
         with:

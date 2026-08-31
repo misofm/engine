@@ -217,8 +217,8 @@ def check_stage(root: pathlib.Path, expected_symbols: set[str]) -> None:
             raise ValueError(f"preserved raw evidence drifted: {relative}")
     artifact_paths = {
         "header": stage / "installed/include/miso_engine_v2.h",
-        "linux-x86_64-static-library": stage / "installed/lib/libmiso_engine_capi.a",
-        "linux-x86_64-shared-library": stage / "installed/lib/libmiso_engine_capi.so",
+        "linux-x86_64-static-library": stage / "installed/lib/libcapi.a",
+        "linux-x86_64-shared-library": stage / "installed/lib/libcapi.so",
         "linux-c11-static-consumer": stage / "bin/c11-static",
         "linux-c11-shared-consumer": stage / "bin/c11-shared",
         "linux-cpp17-static-consumer": stage / "bin/cpp17-static",

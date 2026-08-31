@@ -1,6 +1,6 @@
 # MISO control provider and adapter boundary
 
-`miso-engine-protocol` is the controller and codec boundary, not a host adapter. A provider offers typed bounded capabilities, parameter pages/state/descriptor lookup, counters, diagnostics, absolute transport get/set, endpoint-local telemetry configuration, and endpoint current sample. It never accepts or returns a raw BTLV body, arbitrary bytes, PCM, a renderer, or a plan.
+`protocol` is the controller and codec boundary, not a host adapter. A provider offers typed bounded capabilities, parameter pages/state/descriptor lookup, counters, diagnostics, absolute transport get/set, endpoint-local telemetry configuration, and endpoint current sample. It never accepts or returns a raw BTLV body, arbitrary bytes, PCM, a renderer, or a plan.
 
 Providers cap fixture/catalog/page storage at construction and return typed `not found`, `unavailable`, or limit errors. The controller constructs capabilities from effective limits and provider feature flags; it owns canonical encoding and any replay-response bytes. Parameter metadata, state, counters, and diagnostics honor their typed cursor/ID/limit requests. Transport uses an absolute state/position/effective-sample triple only; seek execution and sources remain outside this issue.
 

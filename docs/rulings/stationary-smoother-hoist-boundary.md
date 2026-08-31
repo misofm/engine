@@ -98,11 +98,11 @@ case: it had no ramping split at all, so its hoist is a pure removal with no `se
 ## Links
 
 - Optimisation: issue #144 item 6, issue #149 workplan item 1.
-- Implementation: `crates/miso-engine-effect-runtime/src/ramp.rs`
-  (`LinearRamp::stationary_at`), `crates/miso-engine-parametric-eq/src/lib.rs`
+- Implementation: `crates/effect-runtime/src/ramp.rs`
+  (`LinearRamp::stationary_at`), `crates/parametric-eq/src/lib.rs`
   (`Channel::start_ramp`, `Channel::target_words`, `BandTarget::same_bits`),
-  `crates/miso-engine-true-peak-limiter/src/lib.rs` (`ramps_are_stationary`),
-  `crates/miso-engine-effect-contract/src/lib.rs` (`ParameterSmoother::set_target`).
-- Gates: `crates/miso-engine-effect-runtime/tests/stationary_hoist.rs`,
-  `crates/miso-engine-parametric-eq/tests/stationary_hoist.rs`.
+  `crates/true-peak-limiter/src/lib.rs` (`ramps_are_stationary`),
+  `crates/effect-contract/src/lib.rs` (`ParameterSmoother::set_target`).
+- Gates: `crates/effect-runtime/tests/stationary_hoist.rs`,
+  `crates/parametric-eq/tests/stationary_hoist.rs`.
 - Bench protocol: `scripts/{preflight,run,test}-console-benchmark.sh`.

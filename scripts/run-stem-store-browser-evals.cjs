@@ -5,11 +5,11 @@
 // budgets, and (issue #278) the pump Worker's opt-in `selfDriving` cadence in a real Worker.
 //
 // Not a sweep row: it needs playwright and downloaded browsers, and every sweep row is hermetic.
-// `playwright` lives in `hosts/miso-engine-host-web/qualification/node_modules` rather than beside
+// `playwright` lives in `hosts/host-web/qualification/node_modules` rather than beside
 // this script, and Node resolves a CommonJS `require` from the SCRIPT's directory, not the working
 // directory -- so an invocation from the qualification directory alone is not enough:
 //
-//   cd hosts/miso-engine-host-web/qualification && npm ci
+//   cd hosts/host-web/qualification && npm ci
 //   NODE_PATH=$PWD/node_modules node ../../../scripts/run-stem-store-browser-evals.cjs [leg...]
 //
 // Legs default to all three. A leg whose browser lacks OPFS reports `available: false` with a
@@ -90,7 +90,7 @@ async function probe(browserType) {
           createFixtureMsb1Ring,
           createStemPumpWorker,
         } = await import(
-          "/hosts/miso-engine-host-web/web/stem-store/index.js"
+          "/hosts/host-web/web/stem-store/index.js"
         )
         const pcm = new Uint8Array(bytes)
         for (let index = 0; index < pcm.length; index += 1) {
@@ -150,7 +150,7 @@ async function probe(browserType) {
 
         // Issue #278: the opt-in Worker cadence, in a real Worker over real OPFS.
         //
-        // `hosts/miso-engine-host-web/tests/stem-pump-v1.mjs` already drives the shipped worker
+        // `hosts/host-web/tests/stem-pump-v1.mjs` already drives the shipped worker
         // module end to end, but it does so in Node behind a `self` shim and a fake OPFS. The two
         // things it cannot exercise are the two this leg exists for: that the file loads as a
         // module Worker at all, and that the loop's `SharedArrayBuffer` writes are visible to the

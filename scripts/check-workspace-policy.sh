@@ -137,7 +137,7 @@ scan_forbidden "compiled track-capacity identifiers are forbidden" \
 
 # Master plan #83 D4 (revision 4): exactly one global ISA configuration is approved, the
 # x86-64-v3 pin that lets `wide` lower `Lane` to AVX2 and `Lane::fma` to `vfmadd` with no runtime
-# dispatch (crates/miso-engine-lane refuses to compile without it, and every host attests the CPU
+# dispatch (crates/lane refuses to compile without it, and every host attests the CPU
 # at boot). Anything else -- `target-cpu`, a global `[build]` table, another feature set -- stays
 # forbidden: it would make the shipped ISA implicit again.
 approved_isa_pin='^\.cargo/config\.toml:[0-9]+:rustflags = \["-C", "target-feature=\+avx2,\+fma"\]$'

@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Prove the parametric EQ builds for every launch target and keeps the issue-087 render contract.
 #
-# What this replaces: until #87 the EQ ran through `miso_engine_core::arch`'s per-sample
+# What this replaces: until #87 the EQ ran through `engine::arch`'s per-sample
 # `process_delta_*` kernels, and this script disassembled those five symbols to confirm which
 # instructions each target selected. The EQ no longer has a kernel of its own -- it composes
-# `miso_engine_lane::kernels::svf_block`, one generic body per width -- so the instruction
+# `lane::kernels::svf_block`, one generic body per width -- so the instruction
 # assertions now belong to `scripts/check-lane-policy.sh`, which owns that crate. What is left here
 # is what is still this crate's: it builds everywhere, and its render path contains none of the
 # constructs the audit found (issue #87 F1/F3/F4/F5/F10).
@@ -20,15 +20,15 @@ fail() {
     exit 1
 }
 
-package=miso-engine-parametric-eq
-source=crates/miso-engine-parametric-eq/src
+package=parametric-eq
+source=crates/parametric-eq/src
 
 [[ -f "$source/lib.rs" ]] || fail 'crate source is missing'
 
 scratch=$(mktemp -d)
 trap 'rm -rf -- "$scratch"' EXIT
 
-# Cross-target builds. `miso-engine-lane` refuses to compile on x86 without AVX2+FMA (master plan
+# Cross-target builds. `lane` refuses to compile on x86 without AVX2+FMA (master plan
 # D4), so the old `-avx2,-fma` probe is gone with the runtime dispatch it protected; the x86 leg is
 # the workspace's own x86-64-v3 pin.
 cargo check --quiet --locked --release -p "$package"
@@ -66,7 +66,7 @@ for pattern in "${forbidden[@]}"; do
         || fail "render path still references $pattern"
 done
 
-# D6: transcendentals come from `miso-engine-math`, never the platform libm. `sqrt` stays legal.
+# D6: transcendentals come from `math`, never the platform libm. `sqrt` stays legal.
 ! rg -n '\.(exp|exp2|ln|log2|log10|powf|powi|sin|cos|tan|atan|atan2|sinh|cosh|tanh)\(' "$source" \
     || fail 'render path calls a platform transcendental'
 
@@ -86,7 +86,7 @@ declare -A gates=(
     ['ONE_SECOND_DFT_TOLERANCE_DB: f64 = 0.05']='the 0.05 dB impulse tolerance'
 )
 for gate in "${!gates[@]}"; do
-    rg -q --fixed-strings "$gate" crates/miso-engine-parametric-eq/tests \
+    rg -q --fixed-strings "$gate" crates/parametric-eq/tests \
         || fail "${gates[$gate]} is no longer asserted"
 done
 

@@ -2,7 +2,7 @@
 # Prove the reference render thread makes no syscall between explicit outer-loop markers.
 set -euo pipefail
 
-binary="${1:-target/release/miso_engine_audit}"
+binary="${1:-target/release/audit}"
 blocks="${2:-1000000}"
 trace_root="target/realtime-strace"
 

@@ -7,14 +7,14 @@ cp -R "$root/crates" "$root/tools" "$root/docs" "$root/scripts" "$temp/"
 mkdir "$temp/fuzz"
 cp "$root/fuzz/Cargo.toml" "$root/fuzz/Cargo.lock" "$temp/fuzz/"
 cp -R "$root/fuzz/fuzz_targets" "$temp/fuzz/"
-compiler_manifest="$temp/crates/miso-engine-effect-compiler/Cargo.toml"
-contract_manifest="$temp/crates/miso-engine-effect-contract/Cargo.toml"
+compiler_manifest="$temp/crates/effect-compiler/Cargo.toml"
+contract_manifest="$temp/crates/effect-contract/Cargo.toml"
 
 bash "$temp/scripts/check-effect-runtime-policy.sh" "$temp" >/dev/null
 bash "$temp/scripts/check-effect-state-migration-v1.sh" "$temp" >/dev/null
 
 restore_compiler_manifest() {
-    cp "$root/crates/miso-engine-effect-compiler/Cargo.toml" "$compiler_manifest"
+    cp "$root/crates/effect-compiler/Cargo.toml" "$compiler_manifest"
 }
 
 expect_dependency_failure() {
@@ -26,45 +26,45 @@ expect_dependency_failure() {
     restore_compiler_manifest
 }
 
-sed -i '/^\[dependencies\]$/a miso-engine-graph.workspace = true' "$compiler_manifest"
+sed -i '/^\[dependencies\]$/a graph.workspace = true' "$compiler_manifest"
 expect_dependency_failure arbitrary-extra
 
-sed -i '/^miso-engine-parametric-eq[.]workspace = true$/d' "$compiler_manifest"
+sed -i '/^parametric-eq[.]workspace = true$/d' "$compiler_manifest"
 expect_dependency_failure missing-parametric-eq
-sed -i 's/^miso-engine-parametric-eq[.]workspace = true$/miso-engine-effect-package.workspace = true/' "$compiler_manifest"
+sed -i 's/^parametric-eq[.]workspace = true$/effect-package.workspace = true/' "$compiler_manifest"
 expect_dependency_failure substituted-parametric-eq
-sed -i '/^miso-engine-compressor[.]workspace = true$/d' "$compiler_manifest"
+sed -i '/^compressor[.]workspace = true$/d' "$compiler_manifest"
 expect_dependency_failure missing-compressor
-sed -i 's/^miso-engine-compressor[.]workspace = true$/miso-engine-effect-package.workspace = true/' "$compiler_manifest"
+sed -i 's/^compressor[.]workspace = true$/effect-package.workspace = true/' "$compiler_manifest"
 expect_dependency_failure substituted-compressor
-sed -i '/^miso-engine-gate-expander[.]workspace = true$/d' "$compiler_manifest"
+sed -i '/^gate-expander[.]workspace = true$/d' "$compiler_manifest"
 expect_dependency_failure missing-gate-expander
-sed -i 's/^miso-engine-gate-expander[.]workspace = true$/miso-engine-effect-package.workspace = true/' "$compiler_manifest"
+sed -i 's/^gate-expander[.]workspace = true$/effect-package.workspace = true/' "$compiler_manifest"
 expect_dependency_failure substituted-gate-expander
-sed -i '/^miso-engine-multiband-compressor[.]workspace = true$/d' "$compiler_manifest"
+sed -i '/^multiband-compressor[.]workspace = true$/d' "$compiler_manifest"
 expect_dependency_failure missing-multiband-compressor
-sed -i 's/^miso-engine-multiband-compressor[.]workspace = true$/miso-engine-effect-package.workspace = true/' "$compiler_manifest"
+sed -i 's/^multiband-compressor[.]workspace = true$/effect-package.workspace = true/' "$compiler_manifest"
 expect_dependency_failure substituted-multiband-compressor
-sed -i '/^miso-engine-true-peak-limiter[.]workspace = true$/d' "$compiler_manifest"
+sed -i '/^true-peak-limiter[.]workspace = true$/d' "$compiler_manifest"
 expect_dependency_failure missing-true-peak-limiter
-sed -i 's/^miso-engine-true-peak-limiter[.]workspace = true$/miso-engine-effect-package.workspace = true/' "$compiler_manifest"
+sed -i 's/^true-peak-limiter[.]workspace = true$/effect-package.workspace = true/' "$compiler_manifest"
 expect_dependency_failure substituted-true-peak-limiter
-sed -i '/^miso-engine-soft-clip[.]workspace = true$/d' "$compiler_manifest"
+sed -i '/^soft-clip[.]workspace = true$/d' "$compiler_manifest"
 expect_dependency_failure missing-soft-clip
-sed -i 's/^miso-engine-soft-clip[.]workspace = true$/miso-engine-effect-package.workspace = true/' "$compiler_manifest"
+sed -i 's/^soft-clip[.]workspace = true$/effect-package.workspace = true/' "$compiler_manifest"
 expect_dependency_failure substituted-soft-clip
-sed -i '/^miso-engine-transient-shaper[.]workspace = true$/d' "$compiler_manifest"
+sed -i '/^transient-shaper[.]workspace = true$/d' "$compiler_manifest"
 expect_dependency_failure missing-transient-shaper
-sed -i 's/^miso-engine-transient-shaper[.]workspace = true$/miso-engine-effect-package.workspace = true/' "$compiler_manifest"
+sed -i 's/^transient-shaper[.]workspace = true$/effect-package.workspace = true/' "$compiler_manifest"
 expect_dependency_failure substituted-transient-shaper
-sed -i '/^miso-engine-delay[.]workspace = true$/d' "$compiler_manifest"
+sed -i '/^delay[.]workspace = true$/d' "$compiler_manifest"
 expect_dependency_failure missing-delay
-sed -i 's/^miso-engine-delay[.]workspace = true$/miso-engine-effect-package.workspace = true/' "$compiler_manifest"
+sed -i 's/^delay[.]workspace = true$/effect-package.workspace = true/' "$compiler_manifest"
 expect_dependency_failure substituted-delay
 
-for reverse_dependency in miso-engine-core miso-engine-session; do
+for reverse_dependency in engine session; do
     reverse_manifest="$temp/crates/$reverse_dependency/Cargo.toml"
-    printf '\nmiso-engine-effect-package.workspace = true\n' >>"$reverse_manifest"
+    printf '\neffect-package.workspace = true\n' >>"$reverse_manifest"
     if bash "$temp/scripts/check-effect-runtime-policy.sh" "$temp" >/dev/null 2>&1; then
         printf 'effect runtime package reverse-dependency mutation escaped: %s\n' \
             "$reverse_dependency" >&2
@@ -73,7 +73,7 @@ for reverse_dependency in miso-engine-core miso-engine-session; do
     cp "$root/crates/$reverse_dependency/Cargo.toml" "$reverse_manifest"
 done
 
-printf '\nuse miso_engine_effect_package as leaked_state_package;\n' \
+printf '\nuse effect_package as leaked_state_package;\n' \
     >>"$temp/fuzz/fuzz_targets/session_parse.rs"
 if bash "$temp/scripts/check-effect-runtime-policy.sh" "$temp" >/dev/null 2>&1; then
     printf 'effect runtime package fuzz-target mutation escaped\n' >&2
@@ -81,17 +81,17 @@ if bash "$temp/scripts/check-effect-runtime-policy.sh" "$temp" >/dev/null 2>&1; 
 fi
 cp "$root/fuzz/fuzz_targets/session_parse.rs" "$temp/fuzz/fuzz_targets/session_parse.rs"
 
-printf '\nuse miso_engine_effect_package as leaked_state_package;\n' \
-    >>"$temp/tools/miso-engine-bench/src/rack.rs"
+printf '\nuse effect_package as leaked_state_package;\n' \
+    >>"$temp/tools/bench/src/rack.rs"
 if bash "$temp/scripts/check-effect-runtime-policy.sh" "$temp" >/dev/null 2>&1; then
     printf 'effect runtime package unrelated-tool mutation escaped\n' >&2
     exit 1
 fi
-cp "$root/tools/miso-engine-bench/src/rack.rs" \
-    "$temp/tools/miso-engine-bench/src/rack.rs"
+cp "$root/tools/bench/src/rack.rs" \
+    "$temp/tools/bench/src/rack.rs"
 
 printf '\npub fn effect_state_migration_render_leak() {}\n' \
-    >>"$temp/crates/miso-engine-core/src/realtime/plan.rs"
+    >>"$temp/crates/engine/src/realtime/plan.rs"
 if bash "$temp/scripts/check-effect-runtime-policy.sh" "$temp" >/dev/null 2>&1; then
     printf 'effect runtime migration render mutation escaped\n' >&2
     exit 1
@@ -100,15 +100,15 @@ if bash "$temp/scripts/check-effect-state-migration-v1.sh" "$temp" >/dev/null 2>
     printf 'effect state migration render mutation escaped narrow checker\n' >&2
     exit 1
 fi
-cp "$root/crates/miso-engine-core/src/realtime/plan.rs" \
-    "$temp/crates/miso-engine-core/src/realtime/plan.rs"
+cp "$root/crates/engine/src/realtime/plan.rs" \
+    "$temp/crates/engine/src/realtime/plan.rs"
 
-# Issue #95: the contract's dependency boundary is `miso-engine-core` plus `miso-engine-math` and
-# nothing else. `miso-engine-math` is there because decision D6 forbids the platform libm, and it
-# must stay; `miso-engine-lane` must never appear, because it would pin every control-plane
+# Issue #95: the contract's dependency boundary is `engine` plus `math` and
+# nothing else. `math` is there because decision D6 forbids the platform libm, and it
+# must stay; `lane` must never appear, because it would pin every control-plane
 # consumer of the contract to an AVX2+FMA build.
 restore_contract_manifest() {
-    cp "$root/crates/miso-engine-effect-contract/Cargo.toml" "$contract_manifest"
+    cp "$root/crates/effect-contract/Cargo.toml" "$contract_manifest"
 }
 
 expect_contract_dependency_failure() {
@@ -120,10 +120,10 @@ expect_contract_dependency_failure() {
     restore_contract_manifest
 }
 
-sed -i '/^\[dependencies\]$/a miso-engine-lane.workspace = true' "$contract_manifest"
+sed -i '/^\[dependencies\]$/a lane.workspace = true' "$contract_manifest"
 expect_contract_dependency_failure contract-gains-lane
 
-sed -i '/^miso-engine-math[.]workspace = true$/d' "$contract_manifest"
+sed -i '/^math[.]workspace = true$/d' "$contract_manifest"
 expect_contract_dependency_failure contract-loses-math
 
 # Issue #95 F6: the orphan root header must not come back, and the contract must stay non-`repr(C)`.
@@ -135,12 +135,12 @@ if bash "$temp/scripts/check-effect-runtime-policy.sh" "$temp" >/dev/null 2>&1; 
 fi
 rm -rf "$temp/include"
 
-printf '\n#[repr(C)]\npub struct LeakedAbiRecord {\n    pub a: u32,\n}\n' >>"$temp/crates/miso-engine-effect-contract/src/lib.rs"
+printf '\n#[repr(C)]\npub struct LeakedAbiRecord {\n    pub a: u32,\n}\n' >>"$temp/crates/effect-contract/src/lib.rs"
 if bash "$temp/scripts/check-effect-runtime-policy.sh" "$temp" >/dev/null 2>&1; then
     printf 'contract repr(C) mutation escaped\n' >&2
     exit 1
 fi
-cp "$root/crates/miso-engine-effect-contract/src/lib.rs" "$temp/crates/miso-engine-effect-contract/src/lib.rs"
+cp "$root/crates/effect-contract/src/lib.rs" "$temp/crates/effect-contract/src/lib.rs"
 
 # Issue #95 eval E4: the duplicated-helper manifest is a ratchet in both directions.
 helper_mutation() {
@@ -156,30 +156,30 @@ helper_mutation() {
 }
 
 helper_mutation normalize_zero-copy-in-an-effect \
-    crates/miso-engine-delay/src/lib.rs \
+    crates/delay/src/lib.rs \
     'fn normalize_zero(v: f32) -> f32 { v }'
 helper_mutation sanitize-comes-back \
-    crates/miso-engine-delay/src/lib.rs \
+    crates/delay/src/lib.rs \
     'fn sanitize(v: f32, c: &mut u64) -> f32 { *c += 1; v }'
 helper_mutation private-ramp-struct-comes-back \
-    crates/miso-engine-compressor/src/lib.rs \
+    crates/compressor/src/lib.rs \
     'struct Ramp { current: f32, target: f32, remaining: u32 }'
 helper_mutation second-linear-ramp \
-    crates/miso-engine-effect-runtime/src/ramp.rs \
+    crates/effect-runtime/src/ramp.rs \
     'pub struct LinearRamp2 { pub current: f32 }
 pub struct LinearRamp { pub current: f32 }'
 
 # Down is a failure too: a row that reaches its target must be updated, not silently satisfied.
 sed -i 's/^fn advance_ramps(\&mut self, sample_rate: u32) {/fn advance_ramps_renamed(\&mut self, sample_rate: u32) {/' \
-    "$temp/crates/miso-engine-compressor/src/kernel.rs" 2>/dev/null || true
-sed -i 's/fn advance_ramps(/fn advance_ramps_renamed(/' "$temp/crates/miso-engine-compressor/src/kernel.rs"
+    "$temp/crates/compressor/src/kernel.rs" 2>/dev/null || true
+sed -i 's/fn advance_ramps(/fn advance_ramps_renamed(/' "$temp/crates/compressor/src/kernel.rs"
 if bash "$temp/scripts/check-effect-runtime-policy.sh" "$temp" >/dev/null 2>&1; then
     printf 'duplicated-helper manifest accepted a stale row (count went down)\n' >&2
     exit 1
 fi
-cp "$root/crates/miso-engine-compressor/src/kernel.rs" "$temp/crates/miso-engine-compressor/src/kernel.rs"
+cp "$root/crates/compressor/src/kernel.rs" "$temp/crates/compressor/src/kernel.rs"
 
-printf '\npub struct EffectProgramSignature(pub [u8; 32]);\n' >>"$temp/crates/miso-engine-effect-contract/src/lib.rs"
+printf '\npub struct EffectProgramSignature(pub [u8; 32]);\n' >>"$temp/crates/effect-contract/src/lib.rs"
 if bash "$temp/scripts/check-effect-runtime-policy.sh" "$temp" >/dev/null 2>&1; then
     printf 'effect runtime identity mutation escaped\n' >&2
     exit 1

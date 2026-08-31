@@ -184,5 +184,108 @@ is a separate follow-up after this merges, per the task's scope boundary -- this
 
 ## Proof greps
 
-_(filled in after the rewrite lands; re-derives the partition above from the post-rename tree, on
-the same model as the de-versioning ruling's own proof-grep section)_
+### 1. Frozen trees did not move
+
+```sh
+git diff --name-only origin/main -- fixtures artifacts dsp-research .github/ISSUE_SPECS \
+    docs/rulings/de-versioning-inventory.md | wc -l   # -> 0
+```
+
+`.github/workflows/**` is *not* in that list -- it is live configuration, not a frozen record (see
+Scope above) -- and did change, in exactly the files that gate the rename's own correctness:
+
+```sh
+git diff --name-only origin/main -- .github/workflows
+#   .github/workflows/browser-qualification.yml
+#   .github/workflows/ci.yml
+#   .github/workflows/fuzz.yml
+#   .github/workflows/nightly.yml
+#   .github/workflows/release-build.yml
+```
+
+### 2. No required-check name moved
+
+```sh
+for f in .github/workflows/*.yml; do
+  diff <(git show origin/main:"$f" | grep -E '^\s*name:') <(grep -E '^\s*name:' "$f")
+done   # -> no output: every job/step `name:` line is byte-identical to origin/main
+```
+
+### 3. No old spelling survives outside a frozen tree or a deliberately protected one
+
+```sh
+git grep -nIE '<the 48-name alternation, longest-first>' -- \
+    crates hosts tools sidecars scripts docs sdk fuzz AGENTS.md .github/workflows \
+    ':(exclude)docs/rulings/de-versioning-inventory.md' \
+    ':(exclude)docs/rulings/prefix-strip-inventory.md'
+```
+
+Every line this still returns is one of the documented, deliberate exceptions: the two frozen-ABI
+collisions (`miso_engine_effect_contract_v1`, `miso_engine_graph_v1`), the three
+digest-mirroring literals pinned to pre-rename bytes (`tools/audit/src/fixture_builtins.rs`'s
+`METADATA` constant, `scripts/derive-mono-console-fixture.py`'s `HEADER` constant, and
+`scripts/check-builtins-listening-033.py`, whose own successor validator hashes it and calls it
+"frozen Issue-033 validator identity"), and this ruling's and the naming gate's own prose citing
+the retired spelling by name. Nothing else.
+
+### 4. The C ABI did not move
+
+```sh
+diff <(git show origin/main:fixtures/capi-qualification/v1/EXPECTED_SYMBOLS.txt) \
+     fixtures/capi-qualification/v1/EXPECTED_SYMBOLS.txt   # -> no output
+bash scripts/check-capi-abi.sh && bash scripts/test-capi-abi.sh   # -> both green
+```
+
+### 5. Digests that moved (measured, engine repo only)
+
+| artifact | before | after |
+|---|---|---|
+| `sidecars/flac-decoder` wasm (package-name-only rename; directory already moved by #305) | `bfa40aa07fb714e9e508ea9142e44f3c176f1c6fbeea6506942ec93c2b0225c3` | `a9fc3301cb6f290909e165fd5d21d7ded5fb3535d8c41472c93beed66173b65e` |
+| `hosts/host-web` AudioWorklet wasm | (not in-repo pinned) | not byte-identical (every dependency renamed); only the app's `miso-engine-v2.provenance.json` pins it, cross-repo |
+
+The FLAC digest was reproduced twice (`MISO_ENGINE_FLAC_DECODER_REPIN=1 bash
+scripts/build-flac-decoder.sh $(mktemp -d)`, run twice) before being written into
+`sidecars/flac-decoder/decoder-artifact.sha256` and `sidecars/flac-decoder/flac-decoder.js`
+(itself renamed from `miso-engine-flac-decoder.js`, alongside `flac-decoder.d.ts`, to match the
+package rename -- PR1/#305 kept those filenames on the directory move alone; this PR renames the
+package, so the shipped filenames follow it too). Both re-vendoring the wasm/js/d.ts into
+`misofm/app` and updating its `miso-engine-v2.provenance.json` are the explicit follow-up noted
+above, out of scope for this PR.
+
+### 6. Gates rewritten, each with before/after mutation evidence
+
+Verified individually by hand per the process below, not by a blind rewrite:
+
+| gate | what was stale | fix |
+|---|---|---|
+| `check-workspace-policy.sh` + `test-workspace-policy.sh` | enforced the retired prefix | rewritten first, in its own commit, before any manifest renamed |
+| `check-conformance-boundaries.sh` | hardcoded `crates/miso-engine-$x` paths (silent skip), `^use\s+miso_engine_` pattern (silent pass -- proven), stale-ordered exact dependency lists | paths/patterns derived from the workspace's own manifests; dependency lists re-sorted |
+| `check-effect-runtime-policy.sh` | hardcoded brace-expanded stale paths, a doc-prose false positive from the newly-bare `effect-package` colliding with informal MUTATIONS.md shorthand | paths fixed; `tests/MUTATIONS.md` excluded from the reachability scan |
+| `check-effect-state-migration-v1.sh` | hardcoded brace-expanded stale paths | fixed; verified via manual violation injection (no dedicated harness) |
+| `check-native-pcm-runner-v1.sh` | a doc-comment false positive from `native-pcm-runner` colliding with pre-existing informal prose | doc-comment lines excluded from the reachability scan |
+| `check-effect-interchange-qualification.sh` | hardcoded brace-expanded stale paths | fixed; verified via manual violation injection |
+| `check-builtins-policy.sh` | stale-ordered exact dependency strings, hardcoded stale paths | re-sorted; paths fixed |
+| `check-rack-policy.sh`, `check-graph-policy.sh` | stale-ordered dependency strings; control-plane leak detectors whose patterns, once bare, matched ordinary prose (`session`, `effect_compiler`) instead of only crate paths -- proven live | re-sorted; patterns anchored to `::` |
+| `check-lane-policy.sh` | a `wide \| miso-engine-*` case arm that could no longer distinguish "workspace crate" from "external crate" by naming convention (the convention it relied on is retired); a `find … \| while` pipeline that reported `find`'s own missing-root exit code as the whole pipeline's status under `pipefail` | replaced with a lookup against the workspace's real crate list, built via process substitution instead of a pipe |
+| `check-host-core-policy.sh`, `check-protocol-control-policy.sh` | already correctly rewritten by the mechanical pass (no hand fix needed) | verified via manual violation injection |
+| `check-builtins-fixtures.sh` | already correctly rewritten (its guarded directory now exists) | verified live |
+| `check-web-audioworklet-callgraph.py`'s `KERNEL_ROSTER` | eleven mangled-symbol regexes; already correct because they substring-match without anchoring to a crate-name prefix | verified live (all eleven `roster ok`) |
+| `check-artifact-evidence-leak.sh` + `test-artifact-evidence-leak.sh` | already correctly rewritten by the mechanical pass | verified live and via its mutation harness |
+| `test-graph-benchmark.sh` | a `cargo run\|bench` token scan that, once `miso-engine-bench` became bare `bench`, matched the unrelated word "benchmark" in filenames | anchored to `\bbench\b` |
+| `test-capi-qualification-v1-policy.sh` | its fixture builder copied every path the frozen `AUTHORITIES.sha256` ledger names from the live tree, which fails outright once 17 of those paths no longer exist (the ledger's drift, already accepted as permanent, per `check-capi-qualification-v1.sh`'s own comment) | copy is now best-effort per row; the checker never reads these files' content, only the ledger's own shape |
+| `check-mono-console-fixture.sh`, `check-builtins-policy.sh`'s fixture mirror in `tools/audit/src/fixture_builtins.rs` | live generators/mirrors whose literal output must byte-match a frozen fixture; the mechanical pass correctly rewrote the *generator's* other identifiers but also rewrote the one string that has to stay pinned to the old spelling | the frozen-mirroring literal reverted by hand in each; both generators re-verified to reproduce the frozen fixture byte-for-byte |
+| `check-builtins-listening.sh` (via `check-builtins-listening-111.py`'s frozen predecessor hash) | the mechanical pass rewrote one byte of `scripts/check-builtins-listening-033.py`, a file whose own bytes are pinned by a sha256 in its successor validator | reverted to byte-identical with the committed file (hash now matches the pin exactly) |
+| naming-gate collision guard for `hosts/host-web/src/lib.rs` | not a gate bug -- an operator error recovered mid-task: a `git checkout --` used to reset a mutation-test scratch edit reverted this file to its pre-rename (uncommitted) content, since the real rename had not landed in any commit yet | re-derived by re-running the mapping substitution against this one file; full workspace rebuild confirmed clean afterward |
+| `crates/source/src/native_source.rs`'s Linux thread-identity test | not a gate but a real `cargo test` failure: `/proc/self/task/*/comm` is truncated to 15 bytes by the kernel, so the source-decode worker thread used to be named the truncated `"miso-engine-sou"` and the test asserted that exact truncated fragment (not matched by the 48-name substitution, since it is not one of the 48 spellings, only a prefix of one, truncated by an OS constraint the rename had no way to know about) | the thread is now named `"source"` (well under the 15-byte limit, so untruncated); the test's expected string updated to match |
+| auto-discovered `src/bin/*.rs` and `examples/*.rs` targets | cargo names these targets from their *filename*, not a manifest field, so the initial mapping (built only from `[lib]`/`[[bin]]` manifest sections) missed `crates/protocol/src/bin/miso_engine_protocol_wasm_golden.rs`, `crates/graph-compiler/src/bin/{miso_engine_graph_fixture,miso_engine_rack_fixture}.rs` and `crates/conformance/examples/miso_engine_conformance_fixtures.rs` -- caught by the actual build/gate failures they caused (`check-protocol-wasm-parity.sh`, `check-graph-determinism.sh`), not predicted in advance | all four `git mv`'d to their stripped names; a repo-wide `git ls-files \| grep miso[_-]engine` swept for any other stale filename afterward (none found outside the frozen/ABI set) |
+| clippy `single_component_path_imports` in `tools/native-pcm-runner/src/lib.rs` | `use miso_engine_capi as capi;` was a real alias before the rename; once the crate itself became bare `capi`, the alias was a no-op and `cargo fmt` collapsed it to `use capi;`, which is then genuinely redundant (2018+ editions put extern crates in scope by name automatically) | the now-pointless `use capi;` line removed; the only such instance workspace-wide under `-D warnings` |
+
+### 7. Full gate suite
+
+```sh
+bash scripts/sweep.sh                                            # 102/102 rows PASS
+cargo fmt --all -- --check                                       # clean
+cargo clippy --locked --workspace --all-targets -- -D warnings   # clean
+cargo test --locked --workspace                                  # green
+cargo build --locked --workspace                                 # green
+```

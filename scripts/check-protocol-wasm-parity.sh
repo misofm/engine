@@ -28,7 +28,7 @@ set -euo pipefail
 script_directory="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repository_root="$(cd "$script_directory/.." && pwd)"
 readonly TARGET="wasm32-unknown-unknown"
-readonly BINARY="miso_engine_protocol_wasm_golden"
+readonly BINARY="protocol_wasm_golden"
 # The one accepted interpreter result: `main` invoked with an empty argv, returning success.
 readonly EXPECTED_RESULT="main(i32:0, i32:0) => i32:0"
 
@@ -83,7 +83,7 @@ run_variant() {
     CARGO_TARGET_DIR="$target_directory" \
         RUSTFLAGS="-C target-feature=$feature -C link-arg=--export=main" \
         cargo build --locked --release --target "$TARGET" \
-            -p miso-engine-protocol --bin "$BINARY"
+            -p protocol --bin "$BINARY"
   wasm-objdump -x "$artifact" | rg -- '-> "main"'
     verify_artifact "issue-005 Wasm golden parity ($name)" "$artifact"
 }
@@ -92,8 +92,8 @@ run_variant() {
 # Each row rebuilds the guest from a scratch copy of the tree with one edit applied, and requires
 # the verdict to be RED. A mutation whose search text matches nothing is itself a failure: that is
 # how a renamed constant would otherwise quietly retire a row.
-PIN_FILE="crates/miso-engine-protocol/src/conformance.rs"
-GUEST_FILE="crates/miso-engine-protocol/src/bin/$BINARY.rs"
+PIN_FILE="crates/protocol/src/conformance.rs"
+GUEST_FILE="crates/protocol/src/bin/$BINARY.rs"
 
 self_test_run() {
     local scratch failures=0 output status
@@ -109,7 +109,7 @@ self_test_run() {
         CARGO_TARGET_DIR="$selftest_target" \
             RUSTFLAGS="-C target-feature=-simd128 -C link-arg=--export=main" \
             cargo build --locked --release --target "$TARGET" \
-                --manifest-path "$scratch/Cargo.toml" -p miso-engine-protocol --bin "$BINARY" \
+                --manifest-path "$scratch/Cargo.toml" -p protocol --bin "$BINARY" \
                 >/dev/null
     }
 

@@ -9,33 +9,33 @@ trap 'rm -rf -- "$scratch_root"' EXIT
 
 create_fixture() {
     local root="$1"
-    mkdir -p "$root/crates/miso-engine-host-core/src" \
-        "$root/crates/miso-engine-capi/src" \
-        "$root/hosts/miso-engine-host-web/src" \
-        "$root/hosts/miso-engine-host-native/src"
+    mkdir -p "$root/crates/host-core/src" \
+        "$root/crates/capi/src" \
+        "$root/hosts/host-web/src" \
+        "$root/hosts/host-native/src"
     printf '%s\n' \
         '[package]' \
-        'name = "miso-engine-host-core"' \
+        'name = "host-core"' \
         '' \
         '[lib]' \
         'crate-type = ["rlib"]' \
         '' \
         '[dependencies]' \
-        'miso-engine-graph.workspace = true' \
-        >"$root/crates/miso-engine-host-core/Cargo.toml"
+        'graph.workspace = true' \
+        >"$root/crates/host-core/Cargo.toml"
     printf '%s\n' \
         'pub fn prepare_host_runtime() {}' \
-        >"$root/crates/miso-engine-host-core/src/lib.rs"
+        >"$root/crates/host-core/src/lib.rs"
     printf '%s\n' \
-        'fn compile_children() { miso_engine_host_core::prepare_host_runtime(); }' \
-        >"$root/crates/miso-engine-capi/src/runtime.rs"
+        'fn compile_children() { host_core::prepare_host_runtime(); }' \
+        >"$root/crates/capi/src/runtime.rs"
     # host-web is the one host still exempt (issue #106); it may still carry the pipeline.
     printf '%s\n' \
         'fn compile() { let _ = compile_session(&model, caps); }' \
-        >"$root/hosts/miso-engine-host-web/src/lib.rs"
+        >"$root/hosts/host-web/src/lib.rs"
     printf '%s\n' \
-        'fn compile() { miso_engine_host_core::prepare_host_runtime(); }' \
-        >"$root/hosts/miso-engine-host-native/src/main.rs"
+        'fn compile() { host_core::prepare_host_runtime(); }' \
+        >"$root/hosts/host-native/src/main.rs"
 }
 
 expect_failure() {
@@ -55,24 +55,24 @@ create_fixture "$valid"
 bash "$policy_script" "$valid" >/dev/null
 
 expect_failure capi-recompiles-the-pipeline \
-    'printf "%s\n" "fn x() { let _ = compile_session(&model, caps); }" >>"$root/crates/miso-engine-capi/src/runtime.rs"'
+    'printf "%s\n" "fn x() { let _ = compile_session(&model, caps); }" >>"$root/crates/capi/src/runtime.rs"'
 expect_failure host-recompiles-the-pipeline \
-    'printf "%s\n" "fn x() { let _ = prepare_session_builtins(&compiled, &[], caps); }" >>"$root/hosts/miso-engine-host-native/src/main.rs"'
+    'printf "%s\n" "fn x() { let _ = prepare_session_builtins(&compiled, &[], caps); }" >>"$root/hosts/host-native/src/main.rs"'
 expect_failure host-binds-its-own-source-set \
-    'printf "%s\n" "fn x() { let _ = artifact.into_bound_with_source_set(bindings, set); }" >>"$root/hosts/miso-engine-host-native/src/main.rs"'
+    'printf "%s\n" "fn x() { let _ = artifact.into_bound_with_source_set(bindings, set); }" >>"$root/hosts/host-native/src/main.rs"'
 expect_failure capi-reinvents-the-identity-processor \
-    'printf "%s\n" "struct IdentityProcessor;" >>"$root/crates/miso-engine-capi/src/runtime.rs"'
+    'printf "%s\n" "struct IdentityProcessor;" >>"$root/crates/capi/src/runtime.rs"'
 expect_failure host-reinvents-the-identity-processor \
-    'printf "%s\n" "impl GraphRuntimeProcessor for Passthrough {}" >>"$root/hosts/miso-engine-host-native/src/main.rs"'
+    'printf "%s\n" "impl GraphRuntimeProcessor for Passthrough {}" >>"$root/hosts/host-native/src/main.rs"'
 expect_failure capi-hand-decodes-the-control-wire \
-    'printf "%s\n" "const MAGIC: &[u8] = b\"MISOCTL\";" >>"$root/crates/miso-engine-capi/src/runtime.rs"'
+    'printf "%s\n" "const MAGIC: &[u8] = b\"MISOCTL\";" >>"$root/crates/capi/src/runtime.rs"'
 expect_failure capi-reimplements-the-replay-cache \
-    'printf "%s\n" "struct ReplayEntryRecord { id: u64 }" >>"$root/crates/miso-engine-capi/src/runtime.rs"'
+    'printf "%s\n" "struct ReplayEntryRecord { id: u64 }" >>"$root/crates/capi/src/runtime.rs"'
 expect_failure facade-depends-on-the-protocol \
-    'printf "%s\n" "miso-engine-protocol.workspace = true" >>"$root/crates/miso-engine-host-core/Cargo.toml"'
+    'printf "%s\n" "protocol.workspace = true" >>"$root/crates/host-core/Cargo.toml"'
 expect_failure facade-exports-a-c-symbol \
-    'printf "%s\n" "#[unsafe(no_mangle)] pub extern \"C\" fn miso_engine_v2_prepare() {}" >>"$root/crates/miso-engine-host-core/src/lib.rs"'
+    'printf "%s\n" "#[unsafe(no_mangle)] pub extern \"C\" fn miso_engine_v2_prepare() {}" >>"$root/crates/host-core/src/lib.rs"'
 expect_failure facade-becomes-a-cdylib \
-    'sed -i "s/crate-type = \[\"rlib\"\]/crate-type = [\"rlib\", \"cdylib\"]/" "$root/crates/miso-engine-host-core/Cargo.toml"'
+    'sed -i "s/crate-type = \[\"rlib\"\]/crate-type = [\"rlib\", \"cdylib\"]/" "$root/crates/host-core/Cargo.toml"'
 
 printf 'host-core policy mutation tests: ok\n'

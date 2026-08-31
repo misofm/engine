@@ -38,7 +38,7 @@ rejection.
    are under "Table shapes" below — that is the only place to get them.
 3. **The parameter metadata** — generate it; never guess a parameter id, unit, domain, or default:
    ```
-   cargo run -q -p miso-engine-parameter-metadata -- --print
+   cargo run -q -p parameter-metadata -- --print
    ```
    `effects[].id` is the string for `effect_id`. `effects[].parameters[]` gives `id`, `name`,
    `unitName`, `domainName`, `minimum`, `maximum`, `default`, and `enumChoices` where the domain is
@@ -232,7 +232,7 @@ ones that pass while meaning something other than what you assumed.
 ## The validation loop
 
 ```
-cargo run -q -p miso-engine-session-validator -- validate path/to/session.toml
+cargo run -q -p session-validator -- validate path/to/session.toml
 ```
 
 Four stages, the real pipeline in the real order, each `PASS` / `FAIL` / `SKIP`. Exit 0 all passed,
@@ -264,7 +264,7 @@ until `result: PASS`.
 Then normalize and ship the canonical form:
 
 ```
-cargo run -q -p miso-engine-session-validator -- validate --canonical draft.toml > session.toml
+cargo run -q -p session-validator -- validate --canonical draft.toml > session.toml
 ```
 
 Canonical TOML goes to stdout, the stage report to stderr, and nothing is written when a stage

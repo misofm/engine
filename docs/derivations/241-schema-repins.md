@@ -54,7 +54,7 @@ section `c78de14a` below.
 
 -90 + (163 - 244) = **-171**, so 9,817 - 171 = **9,646** bytes. This is exactly the pin spelled
 `assert_eq!(PARAMETRIC_EQ.len(), 9_817 - 171)` in
-`crates/miso-engine-session/tests/canonical_schema.rs`, whose FNV-1a-64 companion moves
+`crates/session/tests/canonical_schema.rs`, whose FNV-1a-64 companion moves
 `0xa7e3_594d_10fa_c382` -> `0x7bee_179a_a903_f382`.
 
 The five `fixtures/native-pcm-runner/v1/*.toml` documents are generated from that same template,
@@ -81,7 +81,7 @@ range the deleted `start_sample = 1, length_samples = 514` selected. The headers
 their size words. No sample was re-encoded, re-rounded or re-ordered; the file simply starts where
 the region used to.
 
-### 3. Protocol conformance corpus (`crates/miso-engine-protocol/tests/conformance_corpus.rs`)
+### 3. Protocol conformance corpus (`crates/protocol/tests/conformance_corpus.rs`)
 
 Frame count is unchanged at **46**; exactly one frame's bytes move, so the FNV-1a-64 roll over
 `(name, bytes)` moves `0xeb7a_a549_b666_77a8` -> `0xbdeb_b0f8_1c38_ec42`.
@@ -176,7 +176,7 @@ Neither option changes behaviour, because the caps already cannot refuse; the on
 whether the dead-ness is stated or silent. The deletion is the larger diff by two orders of
 magnitude, breaks a public struct that #240, #242 and #244 are constructing on three in-flight
 branches, and buys nothing a test does not. The hand-off is real and already enforced elsewhere:
-`miso-engine-host-core`'s prepare checks `total_engine_owned_bytes > maximum_source_total_bytes`
+`host-core`'s prepare checks `total_engine_owned_bytes > maximum_source_total_bytes`
 against the ring the host actually chose, and the C ABI compile path does the same — which is the
 #240 S3.7 ordering, budget checked after the choice rather than against a document word.
 
@@ -221,7 +221,7 @@ and not a render move: `cases.toml` stays 391,992 bytes, `diagnostics.jsonl` 1,3
 ## 097da5c2 — `test(graph): repin zero-delay semantic identity`
 
 Re-pins `the_zero_delay_plan_digest_is_the_pre_feature_digest` in
-`crates/miso-engine-graph-compiler/tests/track_delay.rs`.
+`crates/graph-compiler/tests/track_delay.rs`.
 
 The graph's canonical text was dumped for the nine-track fixture at both revisions
 (`GraphCompiler::evidence(...).canonical_bytes`) and diffed. The full text is **34,051 bytes in

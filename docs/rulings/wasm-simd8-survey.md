@@ -13,22 +13,22 @@ measurement of step 2, recorded in `artifacts/issue183/` and read in the last se
 **Scope.** Every `bind_homogeneous_bank` in the workspace, the builtins bank width, the
 `Lane::SVF_CASCADE_DEPTH` tuning at the new width, and register-pressure exposure under Cranelift's
 sixteen host `xmm` registers. Nothing here changes a shipped artifact: the only production edit in
-this branch is one build-time `cfg` in `crates/miso-engine-lane/src/backend.rs`, and the default
+this branch is one build-time `cfg` in `crates/lane/src/backend.rs`, and the default
 `wasm32` guest module is byte-identical with and without it (evidence below).
 
 ---
 
 ## The switch, stated precisely
 
-`Backend::current()` (`crates/miso-engine-lane/src/backend.rs`) is a compile-time constant with one
+`Backend::current()` (`crates/lane/src/backend.rs`) is a compile-time constant with one
 arm per target. The wasm arm returns `Simd4`. Changing it to `Simd8` changes exactly one thing
 directly — `Backend::current().width()` becomes 8 — and everything else follows from two rules
 already in the tree:
 
-* `BankWidth::for_backend` (`crates/miso-engine-effect-contract/src/lib.rs`) maps `Simd8` to
+* `BankWidth::for_backend` (`crates/effect-contract/src/lib.rs`) maps `Simd8` to
   `BankWidth::Eight`. It is the workspace's single backend-to-width law (#84 phase A), so every
   planner that groups tracks into cohorts starts asking for eight-lane banks;
-* `impl Lane for wide::f32x8` (`crates/miso-engine-lane/src/simd8.rs`) is **not** `cfg`-gated. It
+* `impl Lane for wide::f32x8` (`crates/lane/src/simd8.rs`) is **not** `cfg`-gated. It
   is compiled on every target, and its own module comment already says what happens off `x86`:
   "`wide` lowers `f32x8` to two four-lane values; that is correct but is not a production width".
 
@@ -67,7 +67,7 @@ builtins' `lib.rs:641`), so no effect would index out of bounds at the new width
 ### Blocker 1 — soft clip's target table, not its backend
 
 ```rust
-// crates/miso-engine-soft-clip/src/lib.rs
+// crates/soft-clip/src/lib.rs
 const fn width_is_native(width: BankWidth) -> bool {
     match width {
         BankWidth::Four => cfg!(any(
@@ -95,17 +95,17 @@ other eight factories already ask — and it belongs in step 3, with a bank-memb
 
 ### Blocker 2 — the harnesses assert the wasm backend by name, and would refuse the switch
 
-`tools/miso-engine-wasm-gate-guest/src/lib.rs:81` exports the guest's backend as `0`/`1`/`2`, and
-`tools/miso-engine-wasm-gates/src/lib.rs:183` computes the same code for the native process. Both
+`tools/wasm-gate-guest/src/lib.rs:81` exports the guest's backend as `0`/`1`/`2`, and
+`tools/wasm-gates/src/lib.rs:183` computes the same code for the native process. Both
 sides derive it from `Backend::current()`, so G5's own comparison moves with the switch and is
 safe. What does **not** move is every place that has written the expectation down:
 
 * `scripts/run-wasm-gates.sh:46` — `run_guest simd128 +simd128 simd4`. The third argument is
-  `--expect-backend`, and `miso-engine-wasm-gates` exits with "the artifact was built with the
+  `--expect-backend`, and `wasm-gates` exits with "the artifact was built with the
   wrong feature set" (`src/lib.rs:300`) when the guest disagrees. **The G5 wasm gate fails on the
   first build after the switch**, and the fix is `simd4 -> simd8` on that line;
 * `scripts/run-wasm-kernel-timing.sh:183-184` — both wasm legs pass `--expect-backend simd4`;
-* `tools/miso-engine-wasm-console/src/main.rs` refused any guest whose backend code was not `1`
+* `tools/wasm-console/src/main.rs` refused any guest whose backend code was not `1`
   until this branch made the expectation a parameter of the leg being timed;
 * `scripts/wasm-console-benchmark-validator.jq:81` pins the `wasm_simd128` leg's `backend` field to
   the string `"Simd4"`, and every sealed record in `artifacts/` carries that string. A switch turns
@@ -121,8 +121,8 @@ named gate rather than a warning.
 ## `SVF_CASCADE_DEPTH` at the new width
 
 `Lane::SVF_CASCADE_DEPTH` is `4` for the scalar oracle and **`2` for both `Simd4` and `Simd8`**
-(`crates/miso-engine-lane/src/wide_impl.rs:32`, the fourth macro argument, instantiated in
-`simd4.rs` and `simd8.rs`). It was fixed by the B2 sweep (`crates/miso-engine-lane/tests/
+(`crates/lane/src/wide_impl.rs:32`, the fourth macro argument, instantiated in
+`simd4.rs` and `simd8.rs`). It was fixed by the B2 sweep (`crates/lane/tests/
 b2_interleave.rs`) on the native host, and it is a constant of the **vector type**, not of the
 target.
 
@@ -141,7 +141,7 @@ before the twenty coefficient vectors the frame body reads. If the depth wants t
 eight lanes, the constant cannot express that today without becoming per-target, and a second
 `DEPTH` instantiation in the wasm artifact is itself a reportable change: the elision gate's own
 comment says a second arithmetic-carrying EQ kernel "reads to `KERNEL_ROSTER` as a kernel that
-moved" (`crates/miso-engine-parametric-eq/src/lib.rs`, `cascade_sections`).
+moved" (`crates/parametric-eq/src/lib.rs`, `cascade_sections`).
 
 **The survey's finding is therefore: the depth is `2` at W8 on wasm, unchanged and untuned, and
 nothing in the tree can tell you whether that is the right number.** The step-2 measurement can:
@@ -172,7 +172,7 @@ target that has the *narrower* pressure of the two.
 The limiter's own source states the rule this table is measuring against: "Both channels' twelve
 history words together are twenty-four vector registers, which is more than any of the three
 backends has; splitting the detector into two passes over a short chunk ... removes the spill from
-the inner loop" (`crates/miso-engine-true-peak-limiter/src/lib.rs`, `DETECTOR_CHUNK = 32`). At W8
+the inner loop" (`crates/true-peak-limiter/src/lib.rs`, `DETECTOR_CHUNK = 32`). At W8
 on wasm **one** channel's history is twenty-four `v128`, so the mitigation that made the W4 inner
 loop spill-free is no longer sufficient at W8 — the chunk split would have to become a second split
 along the FIR, or the spill returns.
@@ -191,7 +191,7 @@ hold (compressor, EQ), the less of the 2x it should keep.
 
 Step 2 needs two `wasm32` guests that differ in the backend constant and in nothing else. The
 override is one build-time `cfg`, `miso_wasm_simd8`, read in exactly one place
-(`crates/miso-engine-lane/src/backend.rs`) and set only by
+(`crates/lane/src/backend.rs`) and set only by
 `scripts/run-wasm-console-benchmark.sh --issue183` through
 `RUSTFLAGS="-C target-feature=+simd128 --cfg miso_wasm_simd8"`.
 
@@ -353,7 +353,7 @@ corrected**, in this order:
    nothing and the builtins gain nothing. The compressor itself gains 5 %. Whatever is decided
    next should be decided about the limiter, which is where the 29.6 us lives.
 2. **Clear the two blockers before the one-line change**, or the switch lands red: soft clip's
-   `width_is_native` table (`crates/miso-engine-soft-clip/src/lib.rs:900`) would silently drop
+   `width_is_native` table (`crates/soft-clip/src/lib.rs:900`) would silently drop
    every soft-clip cohort to scalar, and `scripts/run-wasm-gates.sh:46` fails G5 on the first
    build. Neither is deep; both are invisible to the arm that was just run.
 3. **Then the switch is defensible on the standing strip**: the composed wasm console becomes
@@ -370,7 +370,7 @@ corrected**, in this order:
    per-target value today (see the depth section above). A W8 wasm EQ at depth 1 is untested and
    is the cheapest remaining hypothesis in this phase.
 
-**Revert remains one line** (`crates/miso-engine-lane/src/backend.rs`), and nothing in this branch
+**Revert remains one line** (`crates/lane/src/backend.rs`), and nothing in this branch
 has switched anything: the default `wasm32` guest module is byte-identical to `origin/main`'s.
 
 ## What an adversarial verifier should probe

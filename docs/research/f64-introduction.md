@@ -272,7 +272,7 @@ it to ADAA is outside this issue and is not recommended by this report.
 Dynamic EQ combines a time-varying filter with a detector/envelope, while a split-band de-esser
 combines a filter or crossover with attenuation. Those are two precision decisions, not one:
 
-1. Design pole/topology coefficients with deterministic `miso-engine-math` `f64` arithmetic off
+1. Design pole/topology coefficients with deterministic `math` `f64` arithmetic off
    the steady-state render path, then round once to the accepted `f32` coefficient words.
 2. Interpolate the accepted SVF coefficient representation in `f32`, preserving the current snap
    and partition law. Wishnick's result supports this representation for time variation [3].
@@ -371,4 +371,4 @@ No candidate should be introduced from this report alone.
 8. Stefan Bilbao, Fabián Esqueda, Julian D. Parker and Vesa Välimäki, [*Antiderivative Antialiasing for Memoryless Nonlinearities*](https://research.aalto.fi/files/27135145/ELEC_bilbao_et_al_antiderivative_antialiasing_IEEESPL.pdf), IEEE Signal Processing Letters 24(7), 2017, doi:10.1109/LSP.2017.2675541.
 9. Andrew Simper, [*Linear Trapezoidal Integrated State Variable Filter*](https://www.cytomic.com/files/dsp/SvfLinearTrapOptimised2.pdf), Cytomic, 2013/2016.
 10. Vadim Zavalishin, [*The Art of VA Filter Design*](https://www.native-instruments.com/fileadmin/ni_media/downloads/pdf/VAFilterDesign_2.1.2.pdf), revision 2.1.2, Native Instruments.
-11. Engine V2 issue #87, [parametric-EQ TPT SVF audit evidence](../../.github/ISSUE_SPECS/087-audit-miso-engine-parametric-eq.md) and its authoritative GitHub issue record.
+11. Engine V2 issue #87, [parametric-EQ TPT SVF audit evidence](../../.github/ISSUE_SPECS/087-audit-parametric-eq.md) and its authoritative GitHub issue record.

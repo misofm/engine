@@ -32,9 +32,9 @@ while IFS=$'\t' read -r path length hash; do
 done <"$manifest"
 find "$root" -type f ! -name MANIFEST.tsv -printf '%P\n' | sort >"$actual"
 cmp -s "$listed" "$actual" || { printf 'builtins fixture missing/unlisted file\n' >&2; exit 1; }
-if [[ -d "$workspace_root/tools/miso-engine-audit" ]]; then
-    cargo run --quiet --bin miso_engine_audit \
-        --manifest-path "$workspace_root/tools/miso-engine-audit/Cargo.toml" \
+if [[ -d "$workspace_root/tools/audit" ]]; then
+    cargo run --quiet --bin audit \
+        --manifest-path "$workspace_root/tools/audit/Cargo.toml" \
         -- fixture-builtins --check "$(pwd)/$root" || {
         printf 'builtins fixture expected-output check failed\n' >&2
         exit 1

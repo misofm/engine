@@ -151,7 +151,7 @@ SCALAR_SLACK = 8
 # The collapse gave the compressor, the true-peak limiter and the parametric EQ a **second** block
 # body each: a one-plane variant a bank chain runs when every lane of its cohort is
 # collapse-eligible. All three survive monomorphisation as their own symbols, so
-# `miso_engine_compressor.*4wide6f32x4` went from one match to two and the roster failed exactly as
+# `compressor.*4wide6f32x4` went from one match to two and the roster failed exactly as
 # it is designed to -- "two matches is a failure" is not a nuisance here, it is the rule noticing
 # that the artifact grew a kernel.
 #
@@ -174,38 +174,38 @@ SCALAR_SLACK = 8
 # 224 against 448, 84 against 168) and zero scalar arithmetic, which is what a correct one-plane
 # variant looks like from here.
 KERNEL_ROSTER: tuple[tuple[str, str, float], ...] = (
-    ("multiband-compressor f32x8", r"miso_engine_multiband_compressor.*4wide6f32x8", 0.10),
-    ("multiband-compressor f32x4", r"miso_engine_multiband_compressor.*4wide6f32x4", 0.10),
-    ("transient-shaper f32x4", r"miso_engine_transient_shaper.*4wide6f32x4", 0.38),
-    ("gate-expander f32x4", r"miso_engine_gate_expander.*4wide6f32x4", 0.19),
-    ("compressor f32x4 dual", r"miso_engine_compressor6kernel13process_block.*4wide6f32x4", 0.10),
+    ("multiband-compressor f32x8", r"multiband_compressor.*4wide6f32x8", 0.10),
+    ("multiband-compressor f32x4", r"multiband_compressor.*4wide6f32x4", 0.10),
+    ("transient-shaper f32x4", r"transient_shaper.*4wide6f32x4", 0.38),
+    ("gate-expander f32x4", r"gate_expander.*4wide6f32x4", 0.19),
+    ("compressor f32x4 dual", r"compressor6kernel13process_block.*4wide6f32x4", 0.10),
     (
         "compressor f32x4 collapsed",
-        r"miso_engine_compressor6kernel18process_block_mono.*4wide6f32x4",
+        r"compressor6kernel18process_block_mono.*4wide6f32x4",
         0.10,
     ),
     (
         "true-peak-limiter f32x4 dual",
-        r"miso_engine_true_peak_limiter.*11LimiterCore.*4wide6f32x4.*13process_block",
+        r"true_peak_limiter.*11LimiterCore.*4wide6f32x4.*13process_block",
         0.10,
     ),
     (
         "true-peak-limiter f32x4 collapsed",
-        r"miso_engine_true_peak_limiter.*27PreparedTruePeakLimiterBank.*4wide6f32x4"
+        r"true_peak_limiter.*27PreparedTruePeakLimiterBank.*4wide6f32x4"
         r".*17process_bank_mono",
         0.10,
     ),
     (
         "parametric-eq f32x4 dual",
-        r"miso_engine_parametric_eq.*4wide6f32x4.*12process_bank",
+        r"parametric_eq.*4wide6f32x4.*12process_bank",
         0.10,
     ),
     (
         "parametric-eq f32x4 collapsed",
-        r"miso_engine_parametric_eq.*4wide6f32x4.*17process_bank_mono",
+        r"parametric_eq.*4wide6f32x4.*17process_bank_mono",
         0.10,
     ),
-    ("soft-clip f32x4", r"miso_engine_soft_clip.*4wide6f32x4", 0.10),
+    ("soft-clip f32x4", r"soft_clip.*4wide6f32x4", 0.10),
 )
 
 

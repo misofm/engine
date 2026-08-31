@@ -1,0 +1,37 @@
+[package]
+name = "host-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+name = "host_core"
+crate-type = ["rlib"]
+
+[dependencies]
+builtins.workspace = true
+builtins-compiler.workspace = true
+engine.workspace = true
+effect-compiler.workspace = true
+effect-contract.workspace = true
+graph.workspace = true
+graph-compiler.workspace = true
+# Issue #146: the canonical floating-point environment guard and the render-thread attestation.
+# The lane crate is already in every host's link graph; naming it here is what lets the facade own
+# the one started-session handle instead of each host re-deriving the pin.
+lane.workspace = true
+session.workspace = true
+source.workspace = true
+
+[dev-dependencies]
+builtins.workspace = true
+builtins-compiler.workspace = true
+# Issue #143 E2: the observation eval compares a bank lane's published reduction against an
+# independently prepared scalar instance of the same effect. A dev-dependency only: nothing in the
+# facade's own source knows a concrete effect crate.
+compressor.workspace = true
+source.workspace = true
+
+[lints]
+workspace = true

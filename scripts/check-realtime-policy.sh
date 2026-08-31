@@ -10,10 +10,10 @@ fail() {
     exit 1
 }
 
-realtime_root="crates/miso-engine-core/src/realtime"
+realtime_root="crates/engine/src/realtime"
 [[ -d "$realtime_root" ]] || fail "missing realtime module"
 
-# Issue #146 adds `crates/miso-engine-lane/src/fpenv.rs`, the canonical floating-point environment
+# Issue #146 adds `crates/lane/src/fpenv.rs`, the canonical floating-point environment
 # pinned at every native render entry. On `x86` it carries no `unsafe` of its own -- it reuses the
 # already-listed `_mm_getcsr`/`_mm_setcsr` helpers of `softfma.rs` -- and its one unsafe site is the
 # AArch64 `mrs`/`msr FPCR` pair, for which the standard library exposes no `core::arch` intrinsic
@@ -25,7 +25,7 @@ realtime_root="crates/miso-engine-core/src/realtime"
 unsafe_matches="$({
     rg -n 'unsafe[[:space:]]+(impl|fn|extern)|unsafe[[:space:]]*\{' \
         crates hosts tools sidecars --glob '*.rs' || true
-} | rg -v '^crates/miso-engine-core/src/realtime/spsc.rs:|^crates/miso-engine-core/src/realtime/disjoint.rs:|^crates/miso-engine-lane/src/softfma.rs:|^crates/miso-engine-lane/src/fpenv.rs:|^crates/miso-engine-builtins-compiler/tests/allocation_tracker.rs:|^crates/miso-engine-session/tests/allocation_budget.rs:|^crates/miso-engine-soft-clip/tests/allocation.rs:|^crates/miso-engine-transient-shaper/tests/allocation.rs:|^crates/miso-engine-capi/src/ffi.rs:|^crates/miso-engine-capi/tests/resource_lifecycle.rs:|^crates/miso-engine-effect-package/src/ffi.rs:|^crates/miso-engine-effect-package/tests/package_allocation.rs:|^crates/miso-engine-true-peak-limiter/tests/allocation.rs:|^crates/miso-engine-multiband-compressor/tests/no_alloc_render.rs:|^crates/miso-engine-effect-compiler/tests/migration_terminal.rs:|^hosts/miso-engine-host-web/src/ffi.rs:|^hosts/miso-engine-host-web/tests/boot_transient_budget.rs:|^tools/miso-engine-bench-support/src/alloc.rs:|^tools/miso-engine-audit/src/capi.rs:|^tools/miso-engine-native-pcm-runner/src/lib.rs:|^tools/miso-engine-bench/src/protocol.rs:|^tools/miso-engine-wasm-gate-guest/src/lib.rs:|^tools/miso-engine-wasm-console-guest/src/lib.rs:' || true)"
+} | rg -v '^crates/engine/src/realtime/spsc.rs:|^crates/engine/src/realtime/disjoint.rs:|^crates/lane/src/softfma.rs:|^crates/lane/src/fpenv.rs:|^crates/builtins-compiler/tests/allocation_tracker.rs:|^crates/session/tests/allocation_budget.rs:|^crates/soft-clip/tests/allocation.rs:|^crates/transient-shaper/tests/allocation.rs:|^crates/capi/src/ffi.rs:|^crates/capi/tests/resource_lifecycle.rs:|^crates/effect-package/src/ffi.rs:|^crates/effect-package/tests/package_allocation.rs:|^crates/true-peak-limiter/tests/allocation.rs:|^crates/multiband-compressor/tests/no_alloc_render.rs:|^crates/effect-compiler/tests/migration_terminal.rs:|^hosts/host-web/src/ffi.rs:|^hosts/host-web/tests/boot_transient_budget.rs:|^tools/bench-support/src/alloc.rs:|^tools/audit/src/capi.rs:|^tools/native-pcm-runner/src/lib.rs:|^tools/bench/src/protocol.rs:|^tools/wasm-gate-guest/src/lib.rs:|^tools/wasm-console-guest/src/lib.rs:' || true)"
 [[ -z "$unsafe_matches" ]] || {
     printf '%s\n' "$unsafe_matches" >&2
     fail "unsafe code exists outside the issue-approved ownership/audit files"

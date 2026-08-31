@@ -28,9 +28,9 @@ create_fixture() {
     local tree
     tree="$(mktemp -d "$scratch_root/fixture-XXXXXX")"
 
-    mkdir -p "$tree/crates/miso-engine-lane/src" "$tree/tools/miso-engine-audit/src" "$tree/hosts"
+    mkdir -p "$tree/crates/lane/src" "$tree/tools/audit/src" "$tree/hosts"
 
-    cat >"$tree/crates/miso-engine-lane/src/wide_impl.rs" <<'EOF'
+    cat >"$tree/crates/lane/src/wide_impl.rs" <<'EOF'
 //! One `Lane` body for both `wide` widths. `mul_add` is never forwarded.
 macro_rules! impl_lane_for_wide {
     ($simd:ty, $uint:ty, $width:literal, $cascade_depth:literal) => {
@@ -45,7 +45,7 @@ macro_rules! impl_lane_for_wide {
 }
 EOF
 
-    cat >"$tree/crates/miso-engine-lane/src/scalar.rs" <<'EOF'
+    cat >"$tree/crates/lane/src/scalar.rs" <<'EOF'
 //! The scalar oracle. `f32::mul_add` is deliberately not called.
 impl Lane for f32 {
     #[inline(always)]
@@ -55,13 +55,13 @@ impl Lane for f32 {
 }
 EOF
 
-    cat >"$tree/crates/miso-engine-lane/src/softfma.rs" <<'EOF'
+    cat >"$tree/crates/lane/src/softfma.rs" <<'EOF'
 //! The MXCSR helpers gate G6 needs. The software FMA was retired in #163 phase 2.
 pub const MXCSR_FTZ: u32 = 0x8000;
 EOF
 
     # Seven fused calls, two of them on one line, each within six lines of a marker.
-    cat >"$tree/tools/miso-engine-audit/src/unfused_fma.rs" <<'EOF'
+    cat >"$tree/tools/audit/src/unfused_fma.rs" <<'EOF'
 //! The audit. Keeps the retired fused arm so the unfused contract can be measured against it.
 fn step_fused(a: f32, b: f32, c: f32) -> f32 {
     // UNFUSED-SEAL-EXEMPT
@@ -85,8 +85,8 @@ fn matrix_fused(a: f32, b: f32, c: f32) -> f32 {
     a.mul_add(b, c)
 }
 EOF
-    mkdir -p "$tree/tools/miso-engine-wasm-gates/tests"
-    cat >"$tree/tools/miso-engine-wasm-gates/tests/g5_native_corpus.rs" <<'EOF'
+    mkdir -p "$tree/tools/wasm-gates/tests"
+    cat >"$tree/tools/wasm-gates/tests/g5_native_corpus.rs" <<'EOF'
 //! Gate G5's native leg. Keeps a fused reference so the `lane_fma` case cannot pass vacuously.
 fn fused_reference(a: f32, b: f32, c: f32) -> f32 {
     // UNFUSED-SEAL-EXEMPT
@@ -127,7 +127,7 @@ expect_success baseline-real-tree "$root"
 
 # Green: prose may name the vocabulary freely. This is the case the seal must not regress on.
 tree=$(create_fixture)
-cat >>"$tree/crates/miso-engine-lane/src/lib.rs" <<'EOF'
+cat >>"$tree/crates/lane/src/lib.rs" <<'EOF'
 //! Fusion exists nowhere. `mul_add(` is not called; `f32::mul_add(a, b, c)` would be a call, and
 //! `_mm256_fmadd_ps(x, y, z)` would be another. Writing about them is not calling them.
 EOF
@@ -137,11 +137,11 @@ expect_success prose-may-name-the-vocabulary "$tree"
 # Red: rule 1 -- a dispatch point that stops stating the unfused contract.
 # -------------------------------------------------------------------------------------------
 tree=$(create_fixture)
-sed -i 's/(self \* b) + c/self.something(b, c)/' "$tree/crates/miso-engine-lane/src/scalar.rs"
+sed -i 's/(self \* b) + c/self.something(b, c)/' "$tree/crates/lane/src/scalar.rs"
 expect_failure scalar-dispatch-no-longer-unfused "$tree"
 
 tree=$(create_fixture)
-sed -i 's/(self \* b) + c/self * b + c/' "$tree/crates/miso-engine-lane/src/wide_impl.rs"
+sed -i 's/(self \* b) + c/self * b + c/' "$tree/crates/lane/src/wide_impl.rs"
 expect_failure wide-dispatch-loses-its-parentheses "$tree"
 
 # -------------------------------------------------------------------------------------------
@@ -151,7 +151,7 @@ expect_failure wide-dispatch-loses-its-parentheses "$tree"
 tree=$(create_fixture)
 python3 - "$tree" <<'PY'
 import sys, pathlib
-p = pathlib.Path(sys.argv[1]) / "crates/miso-engine-lane/src/wide_impl.rs"
+p = pathlib.Path(sys.argv[1]) / "crates/lane/src/wide_impl.rs"
 s = p.read_text().replace(
     "                (self * b) + c\n",
     '                #[cfg(target_arch = "x86_64")]\n'
@@ -168,24 +168,24 @@ expect_failure contract-split-by-target "$tree"
 # Red: rule 3 -- a fused call in an unregistered file.
 # -------------------------------------------------------------------------------------------
 tree=$(create_fixture)
-mkdir -p "$tree/crates/miso-engine-compressor/src"
-cat >"$tree/crates/miso-engine-compressor/src/kernel.rs" <<'EOF'
+mkdir -p "$tree/crates/compressor/src"
+cat >"$tree/crates/compressor/src/kernel.rs" <<'EOF'
 fn detector(a: f32, b: f32, c: f32) -> f32 { a.mul_add(b, c) }
 EOF
 expect_failure unregistered-fused-call "$tree"
 
 # The same, through a raw intrinsic rather than the method.
 tree=$(create_fixture)
-mkdir -p "$tree/crates/miso-engine-compressor/src"
-cat >"$tree/crates/miso-engine-compressor/src/kernel.rs" <<'EOF'
+mkdir -p "$tree/crates/compressor/src"
+cat >"$tree/crates/compressor/src/kernel.rs" <<'EOF'
 unsafe fn detector(a: __m256, b: __m256, c: __m256) -> __m256 { _mm256_fmadd_ps(a, b, c) }
 EOF
 expect_failure unregistered-fused-intrinsic "$tree"
 
 # And through wasm relaxed SIMD, which may fuse at the engine's discretion.
 tree=$(create_fixture)
-mkdir -p "$tree/crates/miso-engine-compressor/src"
-cat >"$tree/crates/miso-engine-compressor/src/kernel.rs" <<'EOF'
+mkdir -p "$tree/crates/compressor/src"
+cat >"$tree/crates/compressor/src/kernel.rs" <<'EOF'
 fn detector(a: v128, b: v128, c: v128) -> v128 { f32x4_relaxed_madd(a, b, c) }
 EOF
 expect_failure unregistered-relaxed-madd "$tree"
@@ -194,11 +194,11 @@ expect_failure unregistered-relaxed-madd "$tree"
 # Red: rule 4 -- registry rot, wrong count, missing marker.
 # -------------------------------------------------------------------------------------------
 tree=$(create_fixture)
-rm "$tree/tools/miso-engine-audit/src/unfused_fma.rs"
+rm "$tree/tools/audit/src/unfused_fma.rs"
 expect_failure registered-exemption-deleted "$tree"
 
 tree=$(create_fixture)
-cat >>"$tree/tools/miso-engine-audit/src/unfused_fma.rs" <<'EOF'
+cat >>"$tree/tools/audit/src/unfused_fma.rs" <<'EOF'
 fn extra(a: f32, b: f32, c: f32) -> f32 {
     // UNFUSED-SEAL-EXEMPT
     a.mul_add(b, c)
@@ -208,14 +208,14 @@ expect_failure exemption-call-count-grew "$tree"
 
 tree=$(create_fixture)
 sed -i '0,/    \/\/ UNFUSED-SEAL-EXEMPT$/{/    \/\/ UNFUSED-SEAL-EXEMPT$/d}' \
-    "$tree/tools/miso-engine-audit/src/unfused_fma.rs"
+    "$tree/tools/audit/src/unfused_fma.rs"
 expect_failure exemption-call-without-marker "$tree"
 
 # -------------------------------------------------------------------------------------------
 # Red: rule 6 -- the retired emulation regrows in the file that kept its name.
 # -------------------------------------------------------------------------------------------
 tree=$(create_fixture)
-cat >>"$tree/crates/miso-engine-lane/src/softfma.rs" <<'EOF'
+cat >>"$tree/crates/lane/src/softfma.rs" <<'EOF'
 pub fn fma_f32_via_f64(a: f32, b: f32, c: f32) -> f32 {
     ((f64::from(a) * f64::from(b)) + f64::from(c)) as f32
 }

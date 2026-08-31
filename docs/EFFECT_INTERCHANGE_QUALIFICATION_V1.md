@@ -87,7 +87,7 @@ mandatory.
 ## Lifecycle barrier and counters
 
 Checkpoint 1 builds and fake-tests qualification infrastructure only. Checkpoint 2 adds the
-consolidated `miso-engine-bench` package and its one validator, zero-launch
+consolidated `bench` package and its one validator, zero-launch
 preflight, public runner, and hermetic lifecycle. The no-argument binary owns exactly four workloads:
 descriptor verify/identity, package verify/CID/AVX2+FMA selection, current state verify/re-encode,
 and two-step width-four bank-member migration/restore. It freezes each output digest untimed,

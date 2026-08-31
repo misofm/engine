@@ -1,0 +1,17 @@
+[package]
+name = "bench-support"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+version.workspace = true
+
+[lib]
+name = "bench_support"
+path = "src/lib.rs"
+
+[dependencies]
+engine = { workspace = true, features = ["realtime-audit"] }
+sha2.workspace = true
+
+[lints]
+workspace = true
