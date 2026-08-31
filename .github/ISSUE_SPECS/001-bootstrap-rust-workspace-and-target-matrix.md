@@ -2,7 +2,7 @@
 
 ## Outcome
 
-Create the greenfield Cargo workspace and explicit feature/target policy for core DSP, native C ABI, iOS, Android, and browser Wasm. No V1 or legacy repository may be read.
+Create the greenfield Cargo workspace and explicit feature/target policy for core DSP, native C ABI, and browser Wasm. No V1 or legacy repository may be read.
 
 ## Context
 
@@ -12,7 +12,7 @@ This issue is independently implementable only after its exact dependencies are 
 
 ## Scope
 
-Create packages `miso-engine-core`, `miso-engine-session`, `miso-engine-protocol`, `miso-engine-capi`, and `miso-engine-*` host/example shells; pin MSRV/toolchain; define scalar, Wasm `simd128`, AArch64 NEON, AVX2, and FMA build/runtime policy. Cargo package and directory names must use the `miso-engine-` prefix; Rust crate identifiers use the matching `miso_engine_` form. Document CI target checks, unsafe-code ownership, benchmark metadata, and forbidden realtime dependencies.
+Create packages `miso-engine-core`, `miso-engine-session`, `miso-engine-protocol`, `miso-engine-capi`, and `miso-engine-*` host/example shells; pin MSRV/toolchain; define scalar, Wasm `simd128`, AVX2, and FMA build/runtime policy. Cargo package and directory names must use the `miso-engine-` prefix; Rust crate identifiers use the matching `miso_engine_` form. Document CI target checks, unsafe-code ownership, benchmark metadata, and forbidden realtime dependencies.
 
 ## Required public interfaces/contracts
 
@@ -36,11 +36,11 @@ Do not compile AVX2/FMA globally: native code must dispatch after separate featu
 
 ## Acceptance gates with objective measurements
 
-`cargo check` succeeds for host and `wasm32-unknown-unknown`; cross-checks cover AArch64 iOS/Android; scalar and SIMD artifacts are built separately where runtime selection requires it; AVX2 without FMA is a tested capability; no public/session capacity imposes a track ceiling; benchmark output records CPU, OS, power/governor mode, compiler, target features, runtime/browser, rate, quantum, fixture, warm-up, duration, and statistical method.
+`cargo check` succeeds for host and `wasm32-unknown-unknown`; scalar and SIMD artifacts are built separately where runtime selection requires it; AVX2 without FMA is a tested capability; no public/session capacity imposes a track ceiling; benchmark output records CPU, OS, power/governor mode, compiler, target features, runtime/browser, rate, quantum, fixture, warm-up, duration, and statistical method.
 
 ## Target matrix
 
-Native x86_64 scalar/AVX2/FMA, ARM64 iOS/Android NEON, wasm32 browser scalar/SIMD128.
+Native x86_64 scalar/AVX2/FMA and wasm32 browser scalar/SIMD128. Mobile support is browser-based; native iOS and Android embedding targets are deferred.
 
 ## Required evidence
 
@@ -50,9 +50,15 @@ CI logs, locked toolchain version, feature-resolution report, and lint output.
 
 ### Decision record (Terra attempt 1)
 
+- **Scope correction (2026-08-22):** Mobile support is browser-based. Native iOS and Android apps are not in the current product scope, so the Android and iOS compile-only CI jobs are removed. The browser Wasm scalar/SIMD128 checks remain the mobile-browser portability gate. GitHub issue #23 is closed as out of current scope and may be reopened only if native app embedding is planned.
+
+- **CI prerequisite correction (2026-08-22):** The current Ubuntu image does not provide `rg`, which the host-policy and Wasm checks require. Those jobs install `ripgrep` explicitly; the benchmark job creates its artifact directory before piping output to `tee`; and the nested fuzz lockfile is refreshed so its `--locked` checks can resolve the current fuzz-target dependencies.
+
+- **Runner decision (2026-08-22):** Linux CI uses Blacksmith Ubuntu 24.04 runners. The parallel workspace host gate and dual release-Wasm artifacts use eight vCPUs; x86 probes, bounded fuzzers, and descriptive benchmarks use four. This preserves a fixed benchmark runner class while allocating larger compilation capacity only to the jobs that can use it.
+
 - Rust is pinned to 1.97.1 in both the workspace MSRV declaration and `rust-toolchain.toml`.
-  The lock requests only clippy, rustfmt, browser Wasm, Android ARM64, and iOS ARM64; simulator,
-  SDK, NDK, and browser tooling are deliberately not implied.
+  The lock requests only clippy, rustfmt, and browser Wasm; simulator, SDK, NDK, and browser
+  tooling are deliberately not implied.
 - CPU ISA is not represented by a Cargo feature. The bootstrap exposes only control-plane
   capability discovery: scalar is always available; Wasm reports a compilation artifact setting;
   AArch64 reports NEON; and x86 AVX2/FMA are separately runtime detected. The internal assembler

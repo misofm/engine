@@ -24,7 +24,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install pinned Rust toolchain
-        run: rustup toolchain install 1.97.1 --profile minimal --component clippy --component rustfmt
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal --component clippy --component rustfmt
+          sudo apt-get update
+          sudo apt-get install -y ripgrep
       - name: Format
         run: cargo fmt --all -- --check
       - name: Clippy
@@ -278,7 +281,7 @@ jobs:
           rustup toolchain install 1.97.1 --profile minimal
           rustup target add --toolchain 1.97.1 wasm32-unknown-unknown
           sudo apt-get update
-          sudo apt-get install -y wabt
+          sudo apt-get install -y ripgrep wabt
       - name: Browser-local realtime path has no atomic opcodes
         run: bash scripts/check-wasm-realtime-atomics.sh
       # #105 phase 2 C2: an artifact invocation names no evidence crate. Cargo unifies features
@@ -353,36 +356,6 @@ jobs:
         with:
           name: wasm-gates
           path: target/ci/wasm-gates/wasm-gates.jsonl
-
-  android-check:
-    name: Android pure-Rust compile check
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install pinned Rust toolchain and Android target standard library
-        run: |
-          rustup toolchain install 1.97.1 --profile minimal
-          rustup target add --toolchain 1.97.1 aarch64-linux-android
-      # #105 phase 2 C2: the shipped-shape invocation names no evidence crate; see the Wasm job.
-      - name: Check mobile host without linking
-        run: cargo check --locked --target aarch64-linux-android -p miso-engine-core -p miso-engine-session -p miso-engine-effect-contract -p miso-engine-effect-compiler -p miso-engine-protocol -p miso-engine-capi -p miso-engine-target-smoke -p miso-engine-host-mobile -p miso-engine-lane -p miso-engine-math -p miso-engine-builtins -p miso-engine-builtins-compiler -p miso-engine-effect-runtime -p miso-engine-gate-expander -p miso-engine-delay -p miso-engine-multiband-compressor -p miso-engine-parametric-eq -p miso-engine-soft-clip
-      - name: Evidence crates compile for Android (not an artifact)
-        run: cargo check --locked --target aarch64-linux-android -p miso-engine-dsp-reference -p miso-engine-conformance
-
-  ios-check:
-    name: iOS pure-Rust compile check
-    runs-on: blacksmith-6vcpu-macos-15
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install pinned Rust toolchain and iOS target standard library
-        run: |
-          rustup toolchain install 1.97.1 --profile minimal
-          rustup target add --toolchain 1.97.1 aarch64-apple-ios
-      # #105 phase 2 C2: the shipped-shape invocation names no evidence crate; see the Wasm job.
-      - name: Check mobile host without linking
-        run: cargo check --locked --target aarch64-apple-ios -p miso-engine-core -p miso-engine-session -p miso-engine-effect-contract -p miso-engine-effect-compiler -p miso-engine-protocol -p miso-engine-capi -p miso-engine-target-smoke -p miso-engine-host-mobile -p miso-engine-lane -p miso-engine-math -p miso-engine-builtins -p miso-engine-builtins-compiler -p miso-engine-effect-runtime -p miso-engine-gate-expander -p miso-engine-delay -p miso-engine-multiband-compressor -p miso-engine-parametric-eq -p miso-engine-soft-clip
-      - name: Evidence crates compile for iOS (not an artifact)
-        run: cargo check --locked --target aarch64-apple-ios -p miso-engine-dsp-reference -p miso-engine-conformance
 
   session-fuzz:
     name: bounded session parser and compiler fuzzing
