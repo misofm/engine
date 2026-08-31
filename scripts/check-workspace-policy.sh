@@ -11,6 +11,44 @@ fail() {
     exit 1
 }
 
+# `rg` exits 0 on a match, 1 when the pattern is clean, and 2 (or higher) on a search error --
+# most commonly a search root that does not exist. `if rg ...; then fail; fi` reads both 1 and 2
+# as "no violation", so a scan root that silently stops existing (a directory rename, a fixture
+# missing a mkdir) reads as a clean pass instead of the scan never having run. This wrapper keeps
+# the three outcomes distinct: 0 is a real violation, 1 is genuinely clean, and >=2 is a scan
+# failure that must be loud, naming whichever of the given roots is actually missing.
+scan_forbidden() {
+    local description="$1" pattern="$2" glob="$3"
+    shift 3
+    local roots=("$@")
+    local output rc
+    if output="$(rg -n "$pattern" --glob "$glob" "${roots[@]}" 2>&1)"; then
+        rc=0
+    else
+        rc=$?
+    fi
+    case "$rc" in
+        0)
+            printf '%s\n' "$output" >&2
+            fail "$description"
+            ;;
+        1)
+            ;;
+        *)
+            local missing=() root
+            for root in "${roots[@]}"; do
+                [[ -e "$root" ]] || missing+=("$root")
+            done
+            printf '%s\n' "$output" >&2
+            if [[ "${#missing[@]}" -gt 0 ]]; then
+                fail "$description scan could not run (rg exit $rc): missing search path(s): ${missing[*]}"
+            else
+                fail "$description scan errored (rg exit $rc)"
+            fi
+            ;;
+    esac
+}
+
 toml_name() {
     local section="$1"
     local manifest="$2"
@@ -45,14 +83,22 @@ toml_array_names() {
 
 while IFS= read -r manifest; do
     package_directory="$(basename "$(dirname "$manifest")")"
-    # sidecars/<name> is a deliberate exception to the directory-prefix rule: a sidecar
-    # ships as its own artifact with its own ABI and is disjoint from the render engine's
-    # dependency graph (AGENTS.md: "delivery codecs are external sidecars"). Its directory
-    # is named by its short sidecar identity (e.g. sidecars/flac-decoder) rather than
-    # repeating the miso-engine- prefix. The package name, [lib] name, and [[bin]] name
-    # rules below are unchanged for sidecars -- only the directory prefix is relaxed for
-    # this one tree.
-    if [[ "$manifest" != sidecars/*/Cargo.toml ]]; then
+    # sidecars/<name> is a deliberate exception to the directory-prefix rule, stated exactly
+    # in AGENTS.md's package-naming bullet: a sidecar ships as its own artifact with its own
+    # ABI and is disjoint from the render engine's dependency graph (AGENTS.md line 5:
+    # "delivery codecs are external sidecars" -- the architectural reason -- restated as the
+    # directory-naming carve-out in the same file's package-naming rule). Its directory is
+    # named by its short sidecar identity (e.g. sidecars/flac-decoder) rather than repeating
+    # the miso-engine- prefix. The package name, [lib] name, and [[bin]] name rules below are
+    # unchanged for sidecars -- only the directory prefix is relaxed for this one tree.
+    # `*` in a bash `[[ ]]` pattern spans `/`, so a bare `sidecars/*/Cargo.toml` test would
+    # exempt `sidecars/vendor/anything/Cargo.toml` at arbitrary depth. The exemption is exactly
+    # one path segment under sidecars/, so the relative path (with the `sidecars/` prefix
+    # stripped) is checked separately for a second `/` before `Cargo.toml`.
+    sidecar_relative="${manifest#sidecars/}"
+    if [[ "$manifest" == sidecars/*/Cargo.toml && "$sidecar_relative" != */*/Cargo.toml ]]; then
+        : # sidecars/<one-segment>/Cargo.toml is exempt from the directory-prefix rule.
+    else
         [[ "$package_directory" == miso-engine-* ]] || {
             fail "$manifest directory must start miso-engine-"
         }
@@ -76,15 +122,13 @@ while IFS= read -r manifest; do
     done < <(toml_array_names bin "$manifest")
 done < <(find crates hosts tools sidecars -name Cargo.toml -type f | sort)
 
-if rg -n '^[[:space:]]*(simd128|neon|avx2|fma)[[:space:]]*=' \
-    --glob Cargo.toml crates hosts tools sidecars; then
-    fail "hardware ISA Cargo features are forbidden"
-fi
+scan_forbidden "hardware ISA Cargo features are forbidden" \
+    '^[[:space:]]*(simd128|neon|avx2|fma)[[:space:]]*=' Cargo.toml \
+    crates hosts tools sidecars
 
-if rg -n '\b(MAX_TRACKS|MAX_TRACK_COUNT|DEFAULT_MAX_TRACKS|TRACK_LIMIT)\b' \
-    --glob '*.rs' crates hosts tools sidecars; then
-    fail "compiled track-capacity identifiers are forbidden"
-fi
+scan_forbidden "compiled track-capacity identifiers are forbidden" \
+    '\b(MAX_TRACKS|MAX_TRACK_COUNT|DEFAULT_MAX_TRACKS|TRACK_LIMIT)\b' '*.rs' \
+    crates hosts tools sidecars
 
 # Master plan #83 D4 (revision 4): exactly one global ISA configuration is approved, the
 # x86-64-v3 pin that lets `wide` lower `Lane` to AVX2 and `Lane::fma` to `vfmadd` with no runtime

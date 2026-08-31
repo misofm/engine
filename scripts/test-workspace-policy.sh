@@ -162,6 +162,27 @@ mutate_sidecar_package_prefix() {
     printf '//! fixture\n' >"$root/sidecars/flac-decoder/src/lib.rs"
 }
 
+# `*` in a bash `[[ ]]` pattern spans `/`, so a naive `sidecars/*/Cargo.toml` exemption test
+# would also exempt a package two directories deep, e.g. `sidecars/vendor/anything/Cargo.toml`.
+# The exemption is exactly one path segment under sidecars/; a directory that is neither
+# miso-engine-prefixed nor a direct sidecars/<name> child must still fail the directory-prefix
+# rule.
+mutate_sidecar_nested_directory() {
+    local root="$1"
+    mkdir -p "$root/sidecars/vendor/anything/src"
+    printf '%s\n' \
+        '[package]' \
+        'name = "miso-engine-vendored-thing"' \
+        '' \
+        '[lib]' \
+        'name = "miso_engine_vendored_thing"' \
+        '' \
+        '[features]' \
+        'default = []' \
+        >"$root/sidecars/vendor/anything/Cargo.toml"
+    printf '//! fixture\n' >"$root/sidecars/vendor/anything/src/lib.rs"
+}
+
 valid_root="$scratch_root/valid root"
 create_valid_fixture "$valid_root"
 bash "$policy_script" "$valid_root" >/dev/null
@@ -195,6 +216,17 @@ expect_failure root-target-spill mutate_root_target_spill
 expect_failure root-rustc-info mutate_root_rustc_info
 expect_failure root-cachedir-tag mutate_root_cachedir_tag
 expect_failure sidecar-package-prefix mutate_sidecar_package_prefix
+
+# `rg` exits 2 (not 1) when a search root does not exist, and `if rg ...; then fail; fi` reads
+# both 1 and 2 as "no violation". A fixture whose sidecars/ directory is removed after creation
+# must still fail loudly (naming the missing root), not pass as if the scan had run clean.
+mutate_missing_sidecars_root() {
+    local root="$1"
+    rm -rf -- "$root/sidecars"
+}
+
+expect_failure sidecar-nested-directory-prefix mutate_sidecar_nested_directory
+expect_failure missing-sidecars-root mutate_missing_sidecars_root
 allow_secondary_tool_bin "$scratch_root/secondary-tool-bin"
 allow_approved_isa_pin "$scratch_root/approved-isa-pin"
 allow_sidecar_short_directory "$scratch_root/sidecar-short-directory"
