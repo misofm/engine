@@ -1,0 +1,246 @@
+name: nightly
+
+# Everything here used to be a job on `ci`, running on every push to main and every pull request.
+# None of it gates a merge:
+#
+#   * `native production-kernel release-probe report (non-blocking)` carries
+#     `continue-on-error: true` on its only assertive step and is not a required check -- it cannot
+#     fail a build by construction. It produces a report.
+#   * `bounded descriptive benchmarks` is descriptive by its own documentation: every runner it
+#     invokes records timings and asserts no threshold, so a pull request cannot fail it by getting
+#     slower. It produces evidence.
+#   * the two bounded fuzz jobs stayed per-PR, behind a `paths:` filter, in `fuzz.yml`. What moved
+#     here is DEPTH: 10,000 executions per target is a smoke test, and running it on every pull
+#     request buys breadth over diffs that mostly cannot affect a decoder. This job trades that for
+#     a budget three to four orders of magnitude larger, once a day, over every target.
+#
+# ONE FILE, THREE JOBS -- and why that is not a shared failure mode. The concern with putting three
+# unrelated things in one workflow is that one failure hides another. That happens when they are
+# steps in one job; it does not happen here, because these are three independent jobs with no
+# `needs:` edge between them. They start together, run to completion independently, and each
+# reports its own conclusion. `failure-notice` then reports ALL of their results in one place. The
+# alternative -- three files, three schedules, three notification streams -- gives a solo
+# maintainer three things to notice instead of one, which is the failure mode that actually matters
+# for a nightly.
+#
+# NOTIFICATION. GitHub's own notification for a failed scheduled run is weak: it is an Actions
+# notification addressed to "the user who created the workflow", which in practice means whoever
+# last touched the cron expression -- so it can silently re-point at whoever edited this file last,
+# it is off unless that user has Actions notifications enabled, and it lands in a stream most
+# people already filter. A nightly nobody sees is a deleted nightly. So failure is reported as a
+# GitHub issue in this repository instead: `failure-notice` opens one, or comments on the open one
+# if a previous night already did, naming which jobs failed and linking the run. That lands in the
+# same issue list this repository is already driven from, and it does not depend on any per-user
+# notification setting being right.
+
+on:
+  schedule:
+    # 03:17 UTC. Off the hour, because the top of the hour is when GitHub's scheduler is most
+    # loaded and `schedule` events are most likely to be delayed or dropped.
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+
+concurrency:
+  # No `cancel-in-progress`: a nightly that is cancelled by the next nightly has produced nothing.
+  group: nightly-${{ github.workflow }}-${{ github.ref }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTUP_TOOLCHAIN: 1.97.1
+
+jobs:
+  native-vectorization-report:
+    name: native production-kernel release-probe report (non-blocking)
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned Rust toolchain and disassembler
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal
+          sudo apt-get update
+          sudo apt-get install -y llvm
+      # Issue #144 item 3 starts as evidence, not a merge gate. Both the live report and its red
+      # mutations are allowed to fail this step while the uploaded receipt remains inspectable.
+      - name: Generate report and run red mutations
+        continue-on-error: true
+        run: |
+          bash scripts/run-native-vectorization-report.sh
+          bash scripts/test-native-vectorization-report.sh \
+            target/release/miso_engine_audit
+      - name: Upload native vectorization evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-vectorization-report
+          path: target/ci/native-vectorization/report.json
+
+
+  benchmark:
+    name: bounded descriptive benchmarks
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.97.1 --profile minimal
+      - name: Run one descriptive two-round benchmark
+        run: |
+          set -o pipefail
+          mkdir -p target
+          bash scripts/run-conformance-benchmark.sh 2 | tee target/conformance-benchmark.jsonl
+          test -f target/conformance-benchmark.jsonl && test -s target/conformance-benchmark.jsonl
+      - name: Build issue-003 audit harness
+        run: cargo build --locked --release -p miso-engine-audit
+      - name: Run one descriptive two-round realtime benchmark
+        run: |
+          set -o pipefail
+          mkdir -p target
+          bash scripts/run-realtime-benchmark.sh 2 1000000 | tee target/realtime-benchmark.jsonl
+          test -f target/realtime-benchmark.jsonl && test -s target/realtime-benchmark.jsonl
+      - name: Run session benchmark once with two internal rounds
+        run: |
+          set -o pipefail
+          mkdir -p target
+          bash scripts/run-session-benchmark.sh | tee target/session-benchmark.jsonl
+          test -f target/session-benchmark.jsonl && test -s target/session-benchmark.jsonl
+      - name: Run native effect benchmark once with two internal rounds
+        run: bash scripts/run-effect-contract-benchmark.sh
+      # Issue #146 E5: what pinning the floating-point environment costs a 128-frame block.
+      # Descriptive only -- the record carries no threshold and nothing gates on it.
+      - name: Run one descriptive two-round FP-environment guard benchmark
+        run: |
+          set -o pipefail
+          mkdir -p target
+          bash scripts/run-fp-environment-benchmark.sh 2 1000000 | tee target/fp-environment-benchmark.jsonl
+          test -s target/fp-environment-benchmark.jsonl
+      - name: Upload benchmark evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: conformance-benchmark
+          path: |
+            target/conformance-benchmark.jsonl
+            target/realtime-benchmark.jsonl
+            target/session-benchmark.jsonl
+            target/fp-environment-benchmark.jsonl
+            target/issue11/effect-contract-benchmark.jsonl
+
+  deep-fuzz:
+    name: deep fuzzing over every target
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned Rust and cargo-fuzz toolchains
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal
+          rustup toolchain install nightly-2026-08-20 --profile minimal
+          cargo +1.97.1 install cargo-fuzz --locked --version 0.13.2
+      - name: Build every fuzz target
+        run: cargo check --locked --manifest-path fuzz/Cargo.toml --bins
+      # THE BUDGET, and why it is this number.
+      #
+      # Per PR each target gets `-runs=10000`. Measured on the runner this replaces, that entire
+      # execution finishes in well under a second per target -- the 16-18 second CI steps were
+      # sanitizer builds, not fuzzing. 180 seconds of wall clock per target is therefore on the
+      # order of 10^6-10^7 executions, three to four orders of magnitude deeper than the per-PR
+      # count, which is the point of trading breadth-on-every-PR for depth-once-a-day.
+      #
+      # `-max_total_time` rather than a bigger `-runs`: the budget is then bounded in the unit the
+      # bill is denominated in, and does not drift with runner speed.
+      #
+      # Eight targets x 180 s = 24 minutes of fuzzing, ~26 job-minutes with setup, once a night.
+      # The move that created this file removes ~58 job-minutes per 25 pull-request and push runs,
+      # so this stays well inside what it saves.
+      #
+      # Eight, not six: `effect_package` and `effect_state` are declared in `fuzz/Cargo.toml` and
+      # were COMPILED by CI (`cargo check --bins`) but never executed by any job. They are executed
+      # here.
+      #
+      # No fixed `-seed`. The per-PR jobs pin seeds so a red is reproducible from the log; a
+      # nightly wants a different walk each night, and any crash it finds is reproducible from the
+      # uploaded artifact instead.
+      #
+      # Every target runs even after one fails, and the job fails at the end, so one crashing
+      # target does not hide the other seven.
+      - name: Deep fuzz every target
+        env:
+          # lane's D4 guard requires x86-64-v3; cargo-fuzz rebuilds RUSTFLAGS and would drop the
+          # workspace pin, so thread it through explicitly (#84).
+          RUSTFLAGS: '-C target-feature=+avx2,+fma'
+          BUDGET_SECONDS: '180'
+        run: |
+          set -uo pipefail
+          root="$PWD/target/ci/nightly-fuzz"
+          status=0
+          for target in session_parse session_compile \
+                        protocol_command protocol_session_transaction protocol_event protocol_response \
+                        effect_package effect_state; do
+            corpus="$root/corpus/$target"
+            mkdir -p "$corpus" "$root/artifacts/$target"
+            if compgen -G "fuzz/corpus/$target/*" > /dev/null; then
+              cp "fuzz/corpus/$target"/* "$corpus/"
+            fi
+            seed_arguments=()
+            case "$target" in
+              session_*) seed_arguments=(-seed_inputs=fixtures/session/v1/canonical.toml) ;;
+            esac
+            echo "::group::$target"
+            cargo "+nightly-2026-08-20" fuzz run "$target" "$corpus" -- \
+              "-max_total_time=$BUDGET_SECONDS" \
+              "-artifact_prefix=$root/artifacts/$target/" \
+              ${seed_arguments[@]+"${seed_arguments[@]}"} || status=1
+            echo "::endgroup::"
+          done
+          exit "$status"
+      - name: Upload crash reproducers and the accumulated corpus
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-fuzz
+          path: target/ci/nightly-fuzz
+          if-no-files-found: ignore
+
+  failure-notice:
+    name: report nightly failure as an issue
+    needs: [native-vectorization-report, benchmark, deep-fuzz]
+    if: ${{ always() && contains(needs.*.result, 'failure') }}
+    runs-on: ubuntu-24.04
+    permissions:
+      issues: write
+    steps:
+      # GitHub's scheduled-run notification goes to whoever last touched the cron expression and is
+      # off by default unless that user has Actions notifications enabled, so it is not a reliable
+      # signal for a solo maintainer. An open issue in this repository is: it appears in the issue
+      # list the project is already run from, and it survives an unread email.
+      #
+      # One issue, not one per night: if the previous night already opened one and it is still
+      # open, this comments on it instead. Closing the issue is the acknowledgement -- the next
+      # failure after that opens a fresh one.
+      - name: Open or update the nightly failure issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          # Set the `NIGHTLY_ASSIGNEE` repository variable to route the issue at someone other than
+          # the default. An unset or wrong value must not fail the notice, so assignment is a
+          # best-effort second step.
+          ASSIGNEE: ${{ vars.NIGHTLY_ASSIGNEE || 'tamashi095' }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          REPORT_RESULT: ${{ needs.native-vectorization-report.result }}
+          BENCHMARK_RESULT: ${{ needs.benchmark.result }}
+          DEEP_FUZZ_RESULT: ${{ needs.deep-fuzz.result }}
+        run: |
+          set -euo pipefail
+          title='nightly workflow is failing'
+          body=$(printf 'The scheduled nightly workflow failed.\n\n| job | result |\n| --- | --- |\n| native production-kernel release-probe report | %s |\n| bounded descriptive benchmarks | %s |\n| deep fuzzing over every target | %s |\n\nRun: %s\n\nClose this issue once the failure is dealt with. The next failing night after that opens a fresh one; while it is open, further failures are added as comments.\n' \
+            "$REPORT_RESULT" "$BENCHMARK_RESULT" "$DEEP_FUZZ_RESULT" "$RUN_URL")
+          existing=$(gh issue list --state open --search "$title in:title" --json number,title \
+            --jq "[.[] | select(.title == \"$title\") | .number] | first // empty")
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "$body"
+          else
+            number=$(gh issue create --title "$title" --body "$body" | sed 's#.*/##')
+            gh issue edit "$number" --add-assignee "$ASSIGNEE" || \
+              echo "could not assign issue $number to $ASSIGNEE; leaving it unassigned"
+          fi

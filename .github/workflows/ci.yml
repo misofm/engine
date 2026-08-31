@@ -201,31 +201,6 @@ jobs:
           rustc --print cfg -C target-cpu=x86-64 -C target-feature=+avx2,+fma | grep -qx 'target_feature="avx2"'
           rustc --print cfg -C target-cpu=x86-64 -C target-feature=+avx2,+fma | grep -qx 'target_feature="fma"'
 
-  native-vectorization-report:
-    name: native production-kernel release-probe report (non-blocking)
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install pinned Rust toolchain and disassembler
-        run: |
-          rustup toolchain install 1.97.1 --profile minimal
-          sudo apt-get update
-          sudo apt-get install -y llvm
-      # Issue #144 item 3 starts as evidence, not a merge gate. Both the live report and its red
-      # mutations are allowed to fail this step while the uploaded receipt remains inspectable.
-      - name: Generate report and run red mutations
-        continue-on-error: true
-        run: |
-          bash scripts/run-native-vectorization-report.sh
-          bash scripts/test-native-vectorization-report.sh \
-            target/release/miso_engine_audit
-      - name: Upload native vectorization evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: native-vectorization-report
-          path: target/ci/native-vectorization/report.json
-
   wasm:
     name: browser Wasm artifact probes
     runs-on: blacksmith-8vcpu-ubuntu-2404
@@ -319,50 +294,3 @@ jobs:
           name: wasm-gates
           path: target/ci/wasm-gates/wasm-gates.jsonl
 
-  benchmark:
-    name: bounded descriptive benchmarks
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install pinned Rust toolchain
-        run: rustup toolchain install 1.97.1 --profile minimal
-      - name: Run one descriptive two-round benchmark
-        run: |
-          set -o pipefail
-          mkdir -p target
-          bash scripts/run-conformance-benchmark.sh 2 | tee target/conformance-benchmark.jsonl
-          test -f target/conformance-benchmark.jsonl && test -s target/conformance-benchmark.jsonl
-      - name: Build issue-003 audit harness
-        run: cargo build --locked --release -p miso-engine-audit
-      - name: Run one descriptive two-round realtime benchmark
-        run: |
-          set -o pipefail
-          mkdir -p target
-          bash scripts/run-realtime-benchmark.sh 2 1000000 | tee target/realtime-benchmark.jsonl
-          test -f target/realtime-benchmark.jsonl && test -s target/realtime-benchmark.jsonl
-      - name: Run session benchmark once with two internal rounds
-        run: |
-          set -o pipefail
-          mkdir -p target
-          bash scripts/run-session-benchmark.sh | tee target/session-benchmark.jsonl
-          test -f target/session-benchmark.jsonl && test -s target/session-benchmark.jsonl
-      - name: Run native effect benchmark once with two internal rounds
-        run: bash scripts/run-effect-contract-benchmark.sh
-      # Issue #146 E5: what pinning the floating-point environment costs a 128-frame block.
-      # Descriptive only -- the record carries no threshold and nothing gates on it.
-      - name: Run one descriptive two-round FP-environment guard benchmark
-        run: |
-          set -o pipefail
-          mkdir -p target
-          bash scripts/run-fp-environment-benchmark.sh 2 1000000 | tee target/fp-environment-benchmark.jsonl
-          test -s target/fp-environment-benchmark.jsonl
-      - name: Upload benchmark evidence
-        uses: actions/upload-artifact@v4
-        with:
-          name: conformance-benchmark
-          path: |
-            target/conformance-benchmark.jsonl
-            target/realtime-benchmark.jsonl
-            target/session-benchmark.jsonl
-            target/fp-environment-benchmark.jsonl
-            target/issue11/effect-contract-benchmark.jsonl
