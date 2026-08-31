@@ -132,6 +132,13 @@ When the user requests fewer CI/CD invocations, use this delivery mode until the
   all completed issue bodies/states immediately after the single batch push.
 - `.github/workflows/ci.yml` should ignore ordinary feature-branch pushes, run for `main` pushes
   and pull requests targeting `main`, and cancel superseded runs for the same ref.
+- A job that cannot fail a merge does not belong on `ci.yml`.  `paths:` is a workflow-level
+  filter, so narrowing one job's trigger means moving it to its own file: `release-build.yml`
+  and `fuzz.yml` are paths-filtered per-PR workflows, and `nightly.yml` carries the jobs that
+  gate nothing at all (the non-blocking vectorization report, the descriptive benchmarks) plus
+  the deep fuzzing the per-PR budget cannot afford.  A check that stops reporting on some pull
+  requests must be removed from `main`'s required status checks first, or every pull request
+  that skips it stays permanently pending.
 
 Keep feature issues small enough to ship.  A feature issue owns the minimum implementation and
 evidence needed to prove its product contract; generic harness hardening, artifact promotion,
