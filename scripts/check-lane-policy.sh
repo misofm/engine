@@ -49,7 +49,7 @@ fused_evidence='^tools/miso-engine-audit/src/unfused_fma\.rs:|^tools/miso-engine
 
 fusion_matches="$({
     rg -n 'mul_add|_mm256_fmadd|_mm256_fmsub|_mm256_fnmadd|_mm_fmadd|vfmaq|vfmsq|wide::' \
-        crates hosts tools --glob '*.rs' || true
+        crates hosts tools sidecars --glob '*.rs' || true
 } | rg -v "$lane_source|$lane_tests|$oracle_crate|$fused_evidence" || true)"
 [[ -z "$fusion_matches" ]] || {
     printf '%s\n' "$fusion_matches" >&2
@@ -62,7 +62,7 @@ fusion_matches="$({
 # string* describing what a third-party Wasm package declares, which is data, not engine code.
 relaxed_matches="$({
     rg -n 'f32x4_relaxed|f64x2_relaxed|relaxed_madd|relaxed_nmadd|relaxed_dot|i8x16_relaxed' \
-        crates hosts tools --glob '*.rs' || true
+        crates hosts tools sidecars --glob '*.rs' || true
 } || true)"
 [[ -z "$relaxed_matches" ]] || {
     printf '%s\n' "$relaxed_matches" >&2
@@ -70,7 +70,7 @@ relaxed_matches="$({
 }
 
 architecture_matches="$({
-    rg -n '(core|std)::arch::' crates hosts tools --glob '*.rs' || true
+    rg -n '(core|std)::arch::' crates hosts tools sidecars --glob '*.rs' || true
 } | rg -v "$lane_softfma|$lane_fpenv" || true)"
 [[ -z "$architecture_matches" ]] || {
     printf '%s\n' "$architecture_matches" >&2
@@ -80,7 +80,7 @@ architecture_matches="$({
 # Runtime SIMD dispatch is gone (D4, revision 4): the ISA is pinned at compile time and attested
 # once at boot. `Backend::current()` is a constant, so a new detection site is a regression.
 detection_matches="$({
-    rg -n 'is_x86_feature_detected|is_aarch64_feature_detected' crates hosts tools --glob '*.rs' || true
+    rg -n 'is_x86_feature_detected|is_aarch64_feature_detected' crates hosts tools sidecars --glob '*.rs' || true
 } | rg -v '^crates/miso-engine-lane/src/backend\.rs:|^crates/miso-engine-lane/src/lib\.rs:' || true)"
 [[ -z "$detection_matches" ]] || {
     printf '%s\n' "$detection_matches" >&2

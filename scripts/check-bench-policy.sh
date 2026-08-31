@@ -107,8 +107,8 @@ actual_environment_readers="$(grep -rlE '(std::)?env::var\(' tools/miso-engine-{
 # allocation gate real. `run_effect_conformance` can only observe an allocation inside an armed
 # render scope if the *test binary* that calls it installs the audited counting allocator; the
 # harness refuses to run with `harness.allocator_not_installed` when it is missing, so the edge is
-# load-bearing rather than convenient. `hosts/` keeps the absolute ban in both sections: a host
-# adapter is the artifact.
+# load-bearing rather than convenient. `hosts/` and `sidecars/` keep the absolute ban in both
+# sections: a host adapter and a sidecar are each the artifact that ships.
 while IFS= read -r manifest; do
     violation="$(awk -v file="$manifest" '
         /^\[/ { section = $0 }
@@ -118,7 +118,7 @@ while IFS= read -r manifest; do
         }
     ' "$manifest")"
     [[ -z "$violation" ]] || fail "a production package depends on the bench support crate: $violation"
-done < <(find crates hosts -mindepth 2 -maxdepth 2 -name Cargo.toml 2>/dev/null | sort)
+done < <(find crates hosts sidecars -mindepth 2 -maxdepth 2 -name Cargo.toml 2>/dev/null | sort)
 
 printf 'bench policy: ok (1 allocator, 1 escaper, 1 percentile, 1 digest sink, %s unsafe owners, %s subjects on the shared timer)\n' \
     "$(printf '%s\n' "$expected_unsafe" | wc -l | tr -d ' ')" "${#timed_subjects[@]}"

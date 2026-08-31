@@ -80,7 +80,12 @@ async function staticChecks(repository) {
   const worker = await readFile(join(runtime, "pcm-pump-worker.js"), "utf8")
   assert.match(worker, /type: "session-error"/)
 
-  const engineRoots = ["crates", "hosts/miso-engine-host-native", "hosts/miso-engine-host-mobile"]
+  const engineRoots = [
+    "crates",
+    "hosts/miso-engine-host-native",
+    "hosts/miso-engine-host-mobile",
+    "sidecars",
+  ]
   for (const relative of engineRoots) {
     for (const file of await sourceFiles(join(repository, relative), [".rs"])) {
       const text = await readFile(file, "utf8")

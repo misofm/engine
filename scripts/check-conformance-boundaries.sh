@@ -31,8 +31,13 @@ for production in "${production_crates[@]}"; do
         exit 1
     fi
 done
-if rg -n 'miso-engine-(dsp-reference|conformance)|miso_engine_(dsp_reference|conformance)' hosts; then
-    printf 'conformance boundary failure: hosts must not depend on harness crates\n' >&2
+# Captured rather than gated directly on rg's own exit code: `rg` exits 2 (not just the usual
+# 0/1) when a search root does not exist, e.g. a hermetic fixture with no sidecars/, and a bare
+# `if rg ...; then` reads that the same as "no match" instead of "the scan could not run".
+harness_matches="$(rg -n 'miso-engine-(dsp-reference|conformance)|miso_engine_(dsp_reference|conformance)' hosts sidecars || true)"
+if [[ -n "$harness_matches" ]]; then
+    printf '%s\n' "$harness_matches" >&2
+    printf 'conformance boundary failure: hosts/sidecars must not depend on harness crates\n' >&2
     exit 1
 fi
 
