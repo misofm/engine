@@ -27,7 +27,6 @@ members = [
     "crates/miso-engine-protocol",
     "crates/miso-engine-capi",
     "crates/miso-engine-target-smoke",
-    "crates/miso-engine-flac-decoder",
     "crates/miso-engine-dsp-reference",
     "crates/miso-engine-conformance",
     "hosts/miso-engine-host-native",
@@ -48,6 +47,7 @@ members = [
     "tools/miso-engine-parameter-metadata",
     "tools/miso-engine-session-validator",
     "tools/miso-engine-wasm-gates",
+    "sidecars/flac-decoder",
 ]
 resolver = "3"
 
@@ -64,7 +64,7 @@ miso-engine-math = { path = "crates/miso-engine-math", version = "0.1.0" }
 miso-engine-target-smoke = { path = "crates/miso-engine-target-smoke", version = "0.1.0" }
 miso-engine-dsp-reference = { path = "crates/miso-engine-dsp-reference", version = "0.1.0" }
 miso-engine-conformance = { path = "crates/miso-engine-conformance", version = "0.1.0" }
-miso-engine-flac-decoder = { path = "crates/miso-engine-flac-decoder", version = "0.1.0" }
+miso-engine-flac-decoder = { path = "sidecars/flac-decoder", version = "0.1.0" }
 miso-engine-session = { path = "crates/miso-engine-session", version = "0.1.0" }
 miso-engine-source = { path = "crates/miso-engine-source", version = "0.1.0" }
 miso-engine-protocol = { path = "crates/miso-engine-protocol", version = "0.1.0" }

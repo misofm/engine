@@ -13,7 +13,7 @@ miso-engine-stem-hasher.workspace = true
 sha2.workspace = true
 
 [dev-dependencies]
-miso-engine-flac-decoder = { path = "../../crates/miso-engine-flac-decoder" }
+miso-engine-flac-decoder = { path = "../../sidecars/flac-decoder" }
 
 [lints]
 workspace = true

@@ -45,9 +45,18 @@ toml_array_names() {
 
 while IFS= read -r manifest; do
     package_directory="$(basename "$(dirname "$manifest")")"
-    [[ "$package_directory" == miso-engine-* ]] || {
-        fail "$manifest directory must start miso-engine-"
-    }
+    # sidecars/<name> is a deliberate exception to the directory-prefix rule: a sidecar
+    # ships as its own artifact with its own ABI and is disjoint from the render engine's
+    # dependency graph (AGENTS.md: "delivery codecs are external sidecars"). Its directory
+    # is named by its short sidecar identity (e.g. sidecars/flac-decoder) rather than
+    # repeating the miso-engine- prefix. The package name, [lib] name, and [[bin]] name
+    # rules below are unchanged for sidecars -- only the directory prefix is relaxed for
+    # this one tree.
+    if [[ "$manifest" != sidecars/*/Cargo.toml ]]; then
+        [[ "$package_directory" == miso-engine-* ]] || {
+            fail "$manifest directory must start miso-engine-"
+        }
+    fi
 
     package_name="$(toml_name package "$manifest")"
     [[ "$package_name" == miso-engine-* ]] || fail "$manifest package name must start miso-engine-"
@@ -65,15 +74,15 @@ while IFS= read -r manifest; do
             fail "$manifest bin name must be $expected_crate_name or its underscored audit/tool suffix"
         }
     done < <(toml_array_names bin "$manifest")
-done < <(find crates hosts tools -name Cargo.toml -type f | sort)
+done < <(find crates hosts tools sidecars -name Cargo.toml -type f | sort)
 
 if rg -n '^[[:space:]]*(simd128|neon|avx2|fma)[[:space:]]*=' \
-    --glob Cargo.toml crates hosts tools; then
+    --glob Cargo.toml crates hosts tools sidecars; then
     fail "hardware ISA Cargo features are forbidden"
 fi
 
 if rg -n '\b(MAX_TRACKS|MAX_TRACK_COUNT|DEFAULT_MAX_TRACKS|TRACK_LIMIT)\b' \
-    --glob '*.rs' crates hosts tools; then
+    --glob '*.rs' crates hosts tools sidecars; then
     fail "compiled track-capacity identifiers are forbidden"
 fi
 

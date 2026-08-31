@@ -12,7 +12,8 @@ create_valid_fixture() {
     mkdir -p \
         "$fixture_root/crates/miso-engine-library with spaces/src" \
         "$fixture_root/hosts/miso-engine-binary/src" \
-        "$fixture_root/tools"
+        "$fixture_root/tools" \
+        "$fixture_root/sidecars"
 
     printf '%s\n' \
         '[package]' \
@@ -124,6 +125,43 @@ allow_approved_isa_pin() {
     bash "$policy_script" "$root" >/dev/null
 }
 
+# sidecars/<short-name> is exempt from the directory-prefix rule (a sidecar's directory
+# is named by its short sidecar identity, e.g. sidecars/flac-decoder), but the package
+# name and lib name rules are unchanged.
+allow_sidecar_short_directory() {
+    local root="$1"
+    create_valid_fixture "$root"
+    mkdir -p "$root/sidecars/flac-decoder/src"
+    printf '%s\n' \
+        '[package]' \
+        'name = "miso-engine-flac-decoder"' \
+        '' \
+        '[lib]' \
+        'name = "miso_engine_flac_decoder"' \
+        '' \
+        '[features]' \
+        'default = []' \
+        >"$root/sidecars/flac-decoder/Cargo.toml"
+    printf '//! fixture\n' >"$root/sidecars/flac-decoder/src/lib.rs"
+    bash "$policy_script" "$root" >/dev/null
+}
+
+mutate_sidecar_package_prefix() {
+    local root="$1"
+    mkdir -p "$root/sidecars/flac-decoder/src"
+    printf '%s\n' \
+        '[package]' \
+        'name = "flac-decoder"' \
+        '' \
+        '[lib]' \
+        'name = "flac_decoder"' \
+        '' \
+        '[features]' \
+        'default = []' \
+        >"$root/sidecars/flac-decoder/Cargo.toml"
+    printf '//! fixture\n' >"$root/sidecars/flac-decoder/src/lib.rs"
+}
+
 valid_root="$scratch_root/valid root"
 create_valid_fixture "$valid_root"
 bash "$policy_script" "$valid_root" >/dev/null
@@ -156,7 +194,9 @@ expect_failure extra-isa-feature mutate_extra_isa_feature
 expect_failure root-target-spill mutate_root_target_spill
 expect_failure root-rustc-info mutate_root_rustc_info
 expect_failure root-cachedir-tag mutate_root_cachedir_tag
+expect_failure sidecar-package-prefix mutate_sidecar_package_prefix
 allow_secondary_tool_bin "$scratch_root/secondary-tool-bin"
 allow_approved_isa_pin "$scratch_root/approved-isa-pin"
+allow_sidecar_short_directory "$scratch_root/sidecar-short-directory"
 
 printf 'workspace policy mutation tests: ok\n'
