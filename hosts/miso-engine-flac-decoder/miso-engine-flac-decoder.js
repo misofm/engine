@@ -1,7 +1,7 @@
 // Provenance-pinned FLAC delivery adapter. This module is Worker-safe and never touches audio APIs.
 
 export const MISO_ENGINE_FLAC_DECODER_SHA256 =
-  "fe3f4ddd2490c17dbf28e6f7c1b95f62e3e9de7c57f5a0fd417cf8d07c6f782d";
+  "7c6ef5c612e5f68ccf485c38456ebbd70b7440a02d1b42ffdf6f6359b4691eec";
 
 const ABI_VERSION = 0x0001_0000;
 const RESULT_OK = 0;
