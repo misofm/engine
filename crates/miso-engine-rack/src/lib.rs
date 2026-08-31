@@ -1138,7 +1138,7 @@ pub trait BankMembers {
 /// its **upstream** slots over one plane and duplicates that plane into its seam-side slots. The
 /// whole mechanism is four decisions and one copy:
 ///
-/// 1. **Bind time.** [`collapse_prefix_of`](BankChain::collapse_prefix_of) works out how many
+/// 1. **Bind time.** `BankChain::collapse_prefix_of` works out how many
 ///    leading slots a collapsed block would run one-plane, and answers `0` -- never collapse --
 ///    unless the seam-side slots are a suffix, the prefix is non-empty, every prefix slot has
 ///    written a one-plane body, and every slot runs on exactly this chain's lanes.
@@ -1172,7 +1172,7 @@ pub trait BankMembers {
 ///   built them with, and every difference between them is a designed word the witness sees;
 /// * it is **re-established by the disengage copy**, which is not an approximation of the
 ///   counterfactual dual run's right state but literally that state
-///   ([`disengage_collapse`](Self::disengage_collapse));
+///   (`Self::disengage_collapse`);
 /// * it is **preserved by any dual block whose witness preserves agreement**
 ///   ([`ChannelSymmetryWitness::AGREEING`]) -- equal inputs over equal state with equal words
 ///   leave equal state, which is the same induction the engage direction has always rested on;
@@ -1818,7 +1818,7 @@ impl BankChain {
     ///
     /// `structural` is "every active lane of this chain renders a track whose two channels read
     /// one source channel". Passing `false`, or never calling this at all, makes the chain decline
-    /// forever. See [`BankChain::collapse_source`] for why the chain cannot derive this itself.
+    /// forever. See the `collapse_source` field for why the chain cannot derive this itself.
     ///
     /// # The obligation, which M3's invariant rests on
     ///

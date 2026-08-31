@@ -444,7 +444,7 @@ struct Lifetime {
 /// recycled inside it -- and it is simply held over a longer range, which costs arena buffers and
 /// buys the round-trips.
 ///
-/// [`chainable_bank_groups`] is what makes the window the merged one. It is handed one entry per
+/// `chainable_bank_groups` is what makes the window the merged one. It is handed one entry per
 /// bound bank and unions the pairs that could fuse, using the same lane-wise producer/consumer
 /// relation `chains_into` proves, so the span this function holds is a superset of the span the
 /// runtime actually permutes. A window wider than the permutation is always safe; one narrower is

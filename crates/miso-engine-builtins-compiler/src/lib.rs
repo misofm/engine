@@ -1369,7 +1369,7 @@ impl PreparedBuiltinsSession {
     /// Number of sealed builtin processor bindings.
     ///
     /// Three per track, as it has always been -- but all three are now held as a
-    /// [`StripPreparation`] until their binding form is chosen (issue #212 for the fader and the
+    /// `StripPreparation` until their binding form is chosen (issue #212 for the fader and the
     /// matrix, #210 phase 3 for the input) and are counted here in the shape they will take. The
     /// `processors` term is what a lowering has already built, and is zero for a session
     /// preparation has only just returned.
@@ -1591,7 +1591,7 @@ impl PreparedBuiltinsSession {
     ///
     /// The upstream-of-seam half of this crate's contribution to a track's pool class: the input
     /// section is the one stage here that a collapse would run once, so its designed-word
-    /// comparison gates the class. The fader and the matrix are seam-side ([`SEAM_SIDE_WITNESS`])
+    /// comparison gates the class. The fader and the matrix are seam-side (`SEAM_SIDE_WITNESS`)
     /// and are deliberately absent -- a collapsed track duplicates its plane *into* them, so
     /// folding their vacuously-symmetric witness in here would add a term that can never be false
     /// and read, to a later caller, as if the seam had been checked.

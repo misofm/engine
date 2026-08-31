@@ -1653,7 +1653,7 @@ pub trait PreparedNativeEffectBank: Send {
     /// **bit-equal** between the left and the right channel.
     ///
     /// This is the `DESIGNED` term of
-    /// [`ChannelSymmetryWitness`](crate::ChannelSymmetryWitness), and the only thing an
+    /// [`ChannelSymmetryWitness`], and the only thing an
     /// implementation may look at is the words its own kernel loads: not the control-plane
     /// parameter table it designed them from, not running filter state, not anything shared
     /// between the channels (which cannot be asymmetric and would only dilute the answer). The
