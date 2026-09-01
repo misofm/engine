@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_methods)] // D6 oracle/measurement exemption: compares against the platform deliberately (formerly check-math-policy.sh structural_exempt)
 //! Consolidated audit and fixture subjects.
 
 use std::ffi::OsString;

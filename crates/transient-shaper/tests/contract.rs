@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_methods)] // D6 oracle/measurement exemption: compares against the platform deliberately (formerly check-math-policy.sh structural_exempt)
 //! Contract fixtures: descriptor, coefficients, resources, ramp law, resets and identity rules.
 //!
 //! Master plan §8: these are **contract** fixtures, not implementation bits. None of their expected

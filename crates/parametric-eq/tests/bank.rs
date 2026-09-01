@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_methods)] // D6 oracle/measurement exemption: compares against the platform deliberately (formerly check-math-policy.sh structural_exempt)
 //! Width and bank gates: the same body at `WIDTH` 1, 4 and 8, proven by `to_bits` identity.
 //!
 //! Decision D5 replaces the old tolerance-based cross-backend comparison with bit identity. That is

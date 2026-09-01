@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_methods)] // D6 oracle/measurement exemption: compares against the platform deliberately (formerly check-math-policy.sh structural_exempt)
 //! Phase 0 of audit #94 wave 2: the LR4 sign and phase convention, proved in `f64` before any
 //! production line moves.
 //!

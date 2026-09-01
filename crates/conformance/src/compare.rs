@@ -160,6 +160,14 @@ pub fn compare_f32_to_f64(
     } else if reference_rms == 0.0 {
         SnrDb::NegativeInfinity
     } else {
+        // Issue #105: the allowlist entry this `#[expect]` replaces
+        // (`scripts/check-math-policy.sh`, retired in favour of `clippy.toml`'s
+        // `disallowed-methods`). This SNR figure is offline comparison-report output, not a
+        // render-path value.
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "issue #105: offline SNR report conversion, not a render-path value"
+        )]
         let value = 20.0 * (reference_rms / rms_error).log10();
         if !value.is_finite() {
             return Err(ComparisonError::NonFiniteComputation);

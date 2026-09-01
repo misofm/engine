@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_methods)] // D6 oracle/measurement exemption: compares against the platform deliberately (formerly check-math-policy.sh structural_exempt)
 //! The frozen product contract: descriptor, latency, tail, alias claim and the f64 oracle bound.
 //!
 //! These are the assertions the launch briefs (`019`, `053`) own. None of them was allowed to move

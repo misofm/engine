@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_methods)] // D6 oracle/measurement exemption: compares against the platform deliberately (formerly check-math-policy.sh structural_exempt)
 //! The product-level gates: descriptor and resources, the unity-gain path, bypass, band
 //! isolation, automation and the transactional restore.
 

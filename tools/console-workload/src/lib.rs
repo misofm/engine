@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_methods)] // D6 oracle/measurement exemption: compares against the platform deliberately (formerly check-math-policy.sh structural_exempt)
 //! The console benchmark's *subject*, shared by the native bench and the wasm guest.
 //!
 //! # Why this crate exists
