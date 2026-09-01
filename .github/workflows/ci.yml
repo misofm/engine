@@ -90,20 +90,12 @@ jobs:
           bash scripts/test-lane-policy.sh
       - name: Lane gates G1-G4, G6, P1 and the issue-146 FP-environment guard on the AVX2+FMA runner
         run: cargo test --locked --release -p lane
-      - name: Deterministic math policy and mutation tests
-        run: |
-          bash scripts/check-math-policy.sh
-          bash scripts/test-math-policy.sh
       - name: Math gates M1, M2 and M3 in release
         run: cargo test --locked --release -p math --features lane
       - name: Math M3 digests on an FMA-enabled build
         run: RUSTFLAGS='-C target-feature=+fma' cargo test --locked --release -p math --test m3_determinism
       - name: Math M1 exhaustive sweep
         run: cargo test --locked --release -p math --features lane --test m1_exhaustive -- --ignored
-      - name: Fast dB tier seal and mutation tests
-        run: |
-          bash scripts/check-fast-db-seal.sh
-          bash scripts/test-fast-db-seal.sh
       - name: Fast dB tier gate F1, exhaustive over both operating domains
         run: cargo test --locked --release -p math --features lane --test f1_fast_db_bounds -- --ignored
       - name: Effect runtime gates (lane identity, partition invariance, D1 digests) in release

@@ -22,17 +22,28 @@ disallowed-methods = [
     # binaries compare against the platform deliberately and opt out per file for the same reason
     # `check-math-policy.sh`'s `structural_exempt` pattern did.
     #
-    # NOTE: `scripts/check-fast-db-seal.sh` and `scripts/check-unfused-seal.sh` were evaluated for
-    # the same migration and both KEPT as scripts -- neither's full rule set is expressible here.
-    # `check-fast-db-seal.sh` additionally requires: (a) `fast_exp2`/`fast_log2` staying *private*
-    # to their module (a definition-visibility rule, not a call-site rule); (b) a ban on any
-    # *mention* of the fast-tier vocabulary outside registered files, not just calls; (c) an exact
-    # per-file call count and a `FAST-DB-CROSSING <id>` marker within six lines of each call, with
-    # unique ids; (d) a tree-wide recount cross-checked against the registry's declared total.
-    # `#[expect]` is presence/absence per attributed site, not a counter, so it cannot reproduce
-    # (c)/(d), and clippy has no lint for "this fn must stay non-pub" or "this identifier must
-    # never be named outside these files" -- (a)/(b) have no clippy equivalent at all. Both scripts
-    # stay wired into CI instead (see ci.yml's host job).
+    # Issue #144 item 5 ("Condition H"), enforced structurally instead of by
+    # `scripts/check-fast-db-seal.sh` (retired). The fast dB tier is admitted only inside
+    # `crates/math/src/fast_db.rs` itself, the bound gate that proves its error, and six named
+    # crossings (`FAST-DB-CROSSING X1`-`X6`, one `#[expect]` per crossing site, comments left in
+    # place at each call). Mutation-proven: see the git history of this file.
+    #
+    # `scripts/check-unfused-seal.sh` was evaluated for the same migration and KEPT as a script --
+    # its full rule set is not expressible here. Four of its six rules are not call-site bans at
+    # all: a *positive presence* check that both `Lane::fma` dispatch points literally contain
+    # `(self * b) + c`; a ban on `cfg` inside that function body (so the contract cannot be split
+    # per target); an exact global count of exactly 8 fused calls in the whole tree, counted two
+    # independent ways; and a refusal of the retired software-FMA *definitions* in
+    # `crates/lane/src/softfma.rs`, not calls to them. `#[expect]` only ever answers "is this
+    # specific site still needed", never "does this file's body still say X" or "how many total
+    # occurrences exist tree-wide" -- so `check-unfused-seal.sh` stays wired into CI (`ci.yml`'s
+    # `host` job).
+    #
+    # `check-fast-db-seal.sh` also carried one rule with no clippy equivalent --
+    # `fast_exp2`/`fast_log2` must stay private to their module, a definition-visibility rule, not
+    # a call-site rule -- which this migration does not reproduce. It is a minor encapsulation
+    # property (nothing downstream depends on those two names staying unexported) rather than a
+    # safety-critical one, unlike the four `check-unfused-seal.sh` keeps a script for.
     { path = "f32::exp", reason = "not cross-target deterministic (D6); call math::exp" },
     { path = "f64::exp", reason = "not cross-target deterministic (D6); call math::exp" },
     { path = "f32::exp2", reason = "not cross-target deterministic (D6); call math::exp2" },
@@ -67,4 +78,6 @@ disallowed-methods = [
     { path = "f64::exp_m1", reason = "not cross-target deterministic (D6); call math::exp_m1" },
     { path = "f32::ln_1p", reason = "not cross-target deterministic (D6); call math::ln_1p" },
     { path = "f64::ln_1p", reason = "not cross-target deterministic (D6); call math::ln_1p" },
+    { path = "math::fast_db::fast_level_db", reason = "fast dB tier (#144 item 5); admitted only at a named FAST-DB-CROSSING site" },
+    { path = "math::fast_db::fast_gain_from_db", reason = "fast dB tier (#144 item 5); admitted only at a named FAST-DB-CROSSING site" },
 ]

@@ -6,8 +6,9 @@
 //! independent implementation of the same specifications, and check the two functions written here
 //! rather than vendored (`floor`, `sqrt`) exhaustively where that is possible.
 //!
-//! `std` transcendental calls are legal here: `scripts/check-math-policy.sh` scans `src`, not
-//! `tests` — a test comparing against the platform libm is the point.
+//! `std` transcendental calls are legal here: `clippy.toml`'s `disallowed-methods` (formerly
+//! `scripts/check-math-policy.sh`) exempts this file per its top-of-file `#![allow]` -- a test
+//! comparing against the platform libm is the point.
 
 use math as m;
 

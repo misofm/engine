@@ -2,7 +2,8 @@
 //! #99 F4: the route gain coefficient is the workspace's deterministic dB->linear conversion.
 //!
 //! This file lives in `tests/` deliberately: it is the *oracle* side of the comparison and calls
-//! the platform `f64::powf`, which `scripts/check-math-policy.sh` structurally exempts here and
+//! the platform `f64::powf`, which `clippy.toml`'s `disallowed-methods` (formerly
+//! `scripts/check-math-policy.sh`) exempts here per this file's top-of-file `#![allow]` and
 //! forbids in `src/`.
 //!
 //! What the oracle proves and what it does not: agreement with the host's `powf` is a sanity

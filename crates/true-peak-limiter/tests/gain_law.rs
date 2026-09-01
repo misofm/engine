@@ -5,7 +5,8 @@
 //! `dsp-reference`, which owns its own `f64` Annex-2 table, its own rings and a
 //! brute-force minimum and box sum. They live outside `src` so that production stays lean and so
 //! that the `f64` measurement arithmetic — the one place a `powf` and a `log10` are the right
-//! tool — is nowhere near a render path (`scripts/check-math-policy.sh`).
+//! tool — is nowhere near a render path (`clippy.toml`'s `disallowed-methods`, formerly
+//! `scripts/check-math-policy.sh`).
 
 use dsp_reference::{
     ReferenceTruePeakLimiter, ReferenceTruePeakLimiterParameters, reference_true_peak_estimate,

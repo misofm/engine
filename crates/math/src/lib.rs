@@ -5,7 +5,8 @@
 //! reason this crate exists: the platform `f32`/`f64` transcendental methods are *not* specified
 //! to agree across targets, and the render path's determinism claim (master plan D5) does not
 //! survive them. Master plan decision D6 therefore bans them in production crates outside this
-//! one; `scripts/check-math-policy.sh` enforces the ban.
+//! one; `clippy.toml`'s `disallowed-methods` enforces the ban (formerly
+//! `scripts/check-math-policy.sh`, retired once the migration was mutation-proven).
 //!
 //! Two layers:
 //!

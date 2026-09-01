@@ -27,7 +27,9 @@ Delivery host: x86_64 with AVX2+FMA (`x86-64-v3`), rustc 1.97.1.
 
 ### M-03 — re-add a platform transcendental to the crate
 * Mutation: same source edit as M-01.
-* Command: `bash scripts/check-math-policy.sh .`
+* Command (historical): `bash scripts/check-math-policy.sh .`, retired in favour of
+  `clippy.toml`'s `disallowed-methods` -- `cargo clippy -p graph-compiler` now catches the same
+  mutation as a compile error, `use of a disallowed method`.
 * Red: exit 1 —
   `math policy failure: platform transcendental calls outside crates/math; call math instead (D6)`.
 

@@ -300,6 +300,12 @@ pub fn gate_block<L: Lane, const CONNECTED: bool, const RAMPING: bool>(args: Gat
 /// One sample of one channel: the detector, the transition, the curve, the one-pole and the
 /// identity select. Both channels run this body, so neither can drift from the other.
 #[inline(always)]
+// FAST-DB-CROSSING X3 and X4's `#[expect]`: the crossing registry entries this replaces lived in
+// `scripts/check-fast-db-seal.sh`, retired in favour of `clippy.toml`'s `disallowed-methods`.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "FAST-DB-CROSSING X3/X4: gate detector level and applied gain, never pinned coefficients"
+)]
 fn channel_step<L: Lane, const RAMPING: bool>(
     coef: &GateCoef<L>,
     state: &mut GateState<L>,
