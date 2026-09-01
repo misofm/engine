@@ -1,5 +1,7 @@
 # Prelaunch state reset: make current effect layouts V1
 
+**Status: SOL PASS.**
+
 ## Owner ruling
 
 The engine is prelaunch. A production effect state layout that currently identifies itself as
@@ -65,3 +67,7 @@ containment before PASS.
 - The updated parametric-EQ header mutation was executed: forcing the current layout to stamp
   invalid version 0 makes `a_payload_with_a_stale_header_is_rejected_on_its_own_evidence` fail 0
   versus 1. Restoring the implementation makes all 16 contract tests pass.
+- Sol adversarial review PASS: all launch-native descriptors are gated at state layout V1; payload
+  sizes and state semantics are unchanged; each stale-version test rejects 0 rather than the now
+  current 1; the only changed serialized word is the intended self-describing version header.
+  Generic migration/package fixtures and tooling record schemas remain successor inventory.
