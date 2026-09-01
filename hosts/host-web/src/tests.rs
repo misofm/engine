@@ -132,7 +132,7 @@ fn maximum_document_with_dense_invalid_automation() -> Vec<u8> {
 
 #[test]
 fn frozen_layouts_and_values_are_exact() {
-    assert_eq!(ABI_VERSION, 0x0002_0000);
+    assert_eq!(ABI_VERSION, 0x0001_0000);
     assert_eq!(size_of::<WebBootOptions>(), 64);
     assert_eq!(size_of::<WebStatus>(), 80);
     assert_eq!(size_of::<WebResourceReport>(), 224);

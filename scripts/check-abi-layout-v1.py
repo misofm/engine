@@ -46,7 +46,7 @@ import pathlib
 import sys
 
 SCHEMA = "miso.web.abi-layout.v1"
-ABI_VERSION = 0x0002_0000
+ABI_VERSION = 0x0001_0000
 
 # Spelled out here rather than imported, on purpose: this file is the second implementation.
 # `hosts/host-web/src/tests.rs` is what proves the Rust constants themselves.
@@ -339,7 +339,7 @@ def self_test() -> int:
         document["structures"]["prepareConfig"] = {"bytes": 192, "fields": []}
 
     def stale_abi_version(document: dict) -> None:
-        document["abiVersion"] = 0x0001_0000
+        document["abiVersion"] = 0
 
     def duplicate_result_name(document: dict) -> None:
         document["constants"]["resultCodes"][5]["name"] = "prepareRejected"

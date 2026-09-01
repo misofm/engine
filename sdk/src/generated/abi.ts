@@ -15,7 +15,7 @@ function deepFreeze<T>(value: T): T {
 export const ABI_LAYOUT = deepFreeze(
 {
   "schema": "miso.web.abi-layout.v1",
-  "abiVersion": 131072,
+  "abiVersion": 65536,
   "stagingSequence": [
     "miso_engine_web_v1_abi_version",
     "miso_engine_web_v1_boot_options_ptr",

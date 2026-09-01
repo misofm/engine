@@ -4,7 +4,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 
-const ABI_VERSION = 0x00020000;
+const ABI_VERSION = 0x00010000;
 const BOOT_OPTIONS_BYTES = 64;
 const QUANTUM = 128;
 const SAMPLE_RATE = 48000;

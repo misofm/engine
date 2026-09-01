@@ -36,3 +36,12 @@ adversarially reviews generated-artifact provenance and all ABI call paths befor
 ## Evidence record
 
 - Sol brief approved; GitHub issue #316 matches this stateless local spec.
+- Terra attempt 1 resets the Rust ABI authority, all options/report pins, the worklet and independent
+  direct oracle, schema validators and self-test fixtures, generated SDK assets/modules/provenance,
+  shipped declaration mirrors, and SDK skew tests to `0x0001_0000` / 65536.
+- The deterministic Wasm build moved only as expected and its canonical SHA-256 pin was refreshed
+  to `e3a8ba3130dc33823146a90804ef0245a66602586dca7cf9295f33d384d9686d`.
+- All 58 host-web unit tests and the boot transient test pass. The complete static/object Wasm gate,
+  boot high-water gate, hermetic worklet and mutation suite, ABI/metadata self-tests, independent
+  raw-Wasm oracle, browser expected-resource/digest gate with 26 red mutations, SDK asset/codegen
+  equality, package tests, 14 browser SDK tests, and 16 boot/skew/lifecycle tests pass.

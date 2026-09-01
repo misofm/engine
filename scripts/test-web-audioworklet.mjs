@@ -824,14 +824,14 @@ function createFakeExports(quantum, backend = 1) {
   const resourcePointer = 17000;
   const status = new DataView(memory.buffer, statusPointer, 80);
   status.setUint32(0, 80, true);
-  status.setUint32(4, 0x00020000, true);
+  status.setUint32(4, 0x00010000, true);
   status.setUint32(8, 2, true);
   status.setUint32(16, backend, true);
   status.setUint32(20, 48000, true);
   status.setUint32(24, quantum, true);
   const resources = new DataView(memory.buffer, resourcePointer, 224);
   resources.setUint32(0, 224, true);
-  resources.setUint32(4, 0x00020000, true);
+  resources.setUint32(4, 0x00010000, true);
   resources.setUint32(8, 48000, true);
   resources.setUint32(12, quantum, true);
   resources.setUint32(16, backend, true);
@@ -859,7 +859,7 @@ function createFakeExports(quantum, backend = 1) {
   const meterFrameFloats = trackIds.length * 3 + 3;
   const meterHeader = new DataView(memory.buffer, meterHeaderPointer, 64);
   meterHeader.setUint32(0, 64, true);
-  meterHeader.setUint32(4, 0x00020000, true);
+  meterHeader.setUint32(4, 0x00010000, true);
   meterHeader.setUint32(8, trackIds.length, true);
   meterHeader.setUint32(40, 1, true);
   meterHeader.setUint32(44, 1, true);
@@ -867,7 +867,7 @@ function createFakeExports(quantum, backend = 1) {
   meterHeader.setBigUint64(24, 768n, true);
   const report = new DataView(memory.buffer, reportPointer, 48);
   report.setUint32(0, 48, true);
-  report.setUint32(4, 0x00020000, true);
+  report.setUint32(4, 0x00010000, true);
   const pointers = {
     2: 4096, 3: 5000, 5: 8192, 6: commandPointer, 7: meterFramePointer,
   };
@@ -881,7 +881,7 @@ function createFakeExports(quantum, backend = 1) {
   calls.meterWindows = 0;
   const exports = {
     memory,
-    miso_engine_web_v1_abi_version: () => 0x00020000,
+    miso_engine_web_v1_abi_version: () => 0x00010000,
     miso_engine_web_v1_boot_options_ptr: () => 512,
     miso_engine_web_v1_document_ptr: () => 2048,
     miso_engine_web_v1_boot: () => {

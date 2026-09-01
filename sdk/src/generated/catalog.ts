@@ -15,7 +15,7 @@ function deepFreeze<T>(value: T): T {
 export const CATALOG = deepFreeze(
 {
   "schema": "miso.web.parameter-metadata.v1",
-  "abiVersion": 131072,
+  "abiVersion": 65536,
   "commandRecordBytes": 48,
   "maximumCommandRecords": 256,
   "commandKinds": [
@@ -1106,7 +1106,7 @@ export const CATALOG = deepFreeze(
       "displayName": "Gate / Expander",
       "contractMajor": 1,
       "contractMinor": 1,
-      "stateLayoutVersion": 2,
+      "stateLayoutVersion": 1,
       "parameters": [
         {
           "id": 1,
@@ -1459,7 +1459,7 @@ export const CATALOG = deepFreeze(
       "displayName": "Multiband Compressor",
       "contractMajor": 1,
       "contractMinor": 1,
-      "stateLayoutVersion": 2,
+      "stateLayoutVersion": 1,
       "parameters": [
         {
           "id": 1,
@@ -1952,7 +1952,7 @@ export const CATALOG = deepFreeze(
       "displayName": "Parametric EQ",
       "contractMajor": 1,
       "contractMinor": 0,
-      "stateLayoutVersion": 2,
+      "stateLayoutVersion": 1,
       "parameters": [
         {
           "id": 1,
@@ -2968,7 +2968,7 @@ export const CATALOG = deepFreeze(
       "displayName": "Cubic Soft Clip",
       "contractMajor": 1,
       "contractMinor": 0,
-      "stateLayoutVersion": 2,
+      "stateLayoutVersion": 1,
       "parameters": [
         {
           "id": 1,
@@ -3246,7 +3246,7 @@ export const CATALOG = deepFreeze(
       "displayName": "True-Peak Limiter",
       "contractMajor": 1,
       "contractMinor": 1,
-      "stateLayoutVersion": 2,
+      "stateLayoutVersion": 1,
       "parameters": [
         {
           "id": 1,

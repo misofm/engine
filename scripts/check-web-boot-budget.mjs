@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import process from "node:process";
 
-const ABI_VERSION = 0x00020000;
+const ABI_VERSION = 0x00010000;
 const BOOT_OPTIONS_BYTES = 64;
 const MAXIMUM_DOCUMENT_BYTES = 1 << 20;
 const PARSE_TRANSIENT_MULTIPLIER = 80n;

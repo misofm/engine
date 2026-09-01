@@ -17,7 +17,7 @@ import { MisoEngineError, MisoUsageError } from "./errors.ts";
  *
  * # Skew is a double exact pin plus provenance
  *
- * `0x0002_0000` is a deliberate hard break, not a negotiated range: there is no feature detection
+ * `0x0001_0000` is an exact identity, not a negotiated range: there is no feature detection
  * beyond the version word before launch, by design. Three independent detectors compose, and all
  * three refuse typed at `phase: "asset"` rather than booting garbage:
  *

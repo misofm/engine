@@ -1,4 +1,4 @@
-const ABI_VERSION = 0x00020000;
+const ABI_VERSION = 0x00010000;
 const BOOT_OPTIONS_BYTES = 64;
 // Issue #143 D5: the fixed structure carrying the sample window an `f32` frame cannot hold.
 const METER_HEADER_BYTES = 64;

@@ -1,4 +1,4 @@
-// Browser AudioWorklet host, ABI version 2 (issue 240).
+// Browser AudioWorklet host, ABI version 1.
 //
 // # The live console (issue 137)
 //

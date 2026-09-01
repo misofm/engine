@@ -257,11 +257,11 @@ describe("eval 7 -- skew", () => {
     assert.equal(verified.sha256, digest);
   });
 
-  test("an old-ABI artifact is a typed abiMismatch, never a partial boot", async () => {
-    // A hand-built module that exports exactly the version word, reporting ABI 1.0. Synthesised
+  test("a zero-ABI artifact is a typed abiMismatch, never a partial boot", async () => {
+    // A hand-built module that exports exactly an invalid version word. Synthesised
     // rather than vendored: a checked-in stale binary would rot, and the only fact this fixture
     // needs to carry is one wrong `u32`.
-    const stale = await MisoEngineAsset.load(oldAbiModule(0x0001_0000));
+    const stale = await MisoEngineAsset.load(versionOnlyModule(0));
     await assert.rejects(
       () => stale.instantiate(),
       (error) => {
@@ -269,20 +269,20 @@ describe("eval 7 -- skew", () => {
         assert.equal(error.phase, "asset");
         assert.equal(error.code, "abiMismatch");
         assert.equal(error.diagnosticCode, "sdk.asset.abi_version");
-        assert.equal(error.diagnosticPath, String(0x0001_0000));
+        assert.equal(error.diagnosticPath, "0");
         return true;
       },
     );
   });
 
-  test("a newer-ABI artifact is refused the same way, in the same direction-free wording", async () => {
-    const future = await MisoEngineAsset.load(oldAbiModule(0x0003_0000));
+  test("a mismatched ABI artifact is refused with direction-free wording", async () => {
+    const future = await MisoEngineAsset.load(versionOnlyModule(0xffff_ffff));
     await assert.rejects(() => future.instantiate(), MisoEngineError);
   });
 
   test("the SDK's provenance names the ABI it was generated against", () => {
     assert.equal(asset.provenance.abiVersion, ABI_LAYOUT.abiVersion);
-    assert.equal(asset.provenance.abiVersion, 0x0002_0000);
+    assert.equal(asset.provenance.abiVersion, 0x0001_0000);
     assert.deepEqual(asset.provenance.stagingSequence, ABI_LAYOUT.stagingSequence);
     assert.equal(asset.provenance.artifacts.length, 6);
   });
@@ -367,7 +367,7 @@ after(() => {
  * Hand-encoded rather than assembled from a toolchain so the fixture has no build step and no
  * checked-in binary. It is exactly: one type `() -> i32`, one function, one export.
  */
-function oldAbiModule(version) {
+function versionOnlyModule(version) {
   const name = "miso_engine_web_v1_abi_version";
   const nameBytes = [...new TextEncoder().encode(name)];
   const leb = (value) => {

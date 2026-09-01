@@ -37,8 +37,8 @@ use session::CompileCaps;
 
 pub use host_core::{SOURCE_STALL_TOLERANCE_MS, default_source_ring_frames};
 
-/// Browser host ABI version 2.0. Export names retain their de-versioned `v1` spelling.
-pub const ABI_VERSION: u32 = 0x0002_0000;
+/// Browser host ABI version 1.0.
+pub const ABI_VERSION: u32 = 0x0001_0000;
 
 /// Maximum exact staged document length. Dense automation belongs in future content-addressed
 /// binary blobs rather than unbounded TOML.

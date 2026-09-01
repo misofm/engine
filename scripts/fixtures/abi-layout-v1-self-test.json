@@ -1,6 +1,6 @@
 {
   "schema": "miso.web.abi-layout.v1",
-  "abiVersion": 131072,
+  "abiVersion": 65536,
   "stagingSequence": ["miso_engine_web_v1_abi_version", "miso_engine_web_v1_boot_options_ptr", "miso_engine_web_v1_document_ptr", "miso_engine_web_v1_boot"],
   "errorPhases": ["asset", "boot", "source", "render", "output", "lifecycle"],
   "exports": [

@@ -17,7 +17,7 @@ function deepFreeze<T>(value: T): T {
 
 export const PROVENANCE = deepFreeze(
 {
-  "abiVersion": 131072,
+  "abiVersion": 65536,
   "schemas": {
     "catalog": "miso.web.parameter-metadata.v1",
     "abiLayout": "miso.web.abi-layout.v1"

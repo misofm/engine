@@ -312,7 +312,7 @@ style pin (`hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256`) wi
 `MISO_ENGINE_WEB_AUDIOWORKLET_REPIN=1` escape hatch. Verified reproducible across three independent
 combinations of repo path and `CARGO_HOME` (`/root/.cargo`, `/home/runner/.cargo`,
 `/opt/alt/.cargo` from a second worktree), all producing
-`14328e23a1fe655d304bf646f7a7d18cb5686141cc9aa0a004a6d8e3cdceed31`, which is the new pin.
+`e3a8ba3130dc33823146a90804ef0245a66602586dca7cf9295f33d384d9686d`, which is the new pin.
 
 The pin gate itself was proven to go red: with the pin file hand-edited to
 `deadbeef…deadbeef`, `scripts/build-web-audioworklet.sh` exited 1 with `AudioWorklet artifact pin
@@ -321,4 +321,4 @@ the correct pin made it pass again.
 
 | Target | Mutation | Observed failure |
 |---|---|---|
-| the digest pin | hand-edit `miso-engine-v1-audio-worklet-artifact.sha256` to `deadbeef…` | `AudioWorklet artifact pin mismatch: expected=deadbeef… observed=14328e23…`; exit 1, output directory left empty |
+| the digest pin | hand-edit `miso-engine-v1-audio-worklet-artifact.sha256` to `deadbeef…` | `AudioWorklet artifact pin mismatch: expected=deadbeef… observed=e3a8ba31…`; exit 1, output directory left empty |
