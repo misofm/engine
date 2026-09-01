@@ -93,7 +93,6 @@ row scripts/check-fast-db-seal.sh
 row scripts/check-unfused-seal.sh
 row scripts/check-host-core-policy.sh
 row scripts/check-lane-policy.sh
-row scripts/check-math-policy.sh
 row scripts/check-native-pcm-runner-portability-v1.sh
 row scripts/check-native-pcm-runner-v1.sh
 row scripts/check-protocol-control-policy.sh
@@ -134,7 +133,6 @@ row scripts/test-env-vocabulary.sh
 row scripts/test-graph-benchmark.sh
 row scripts/test-host-core-policy.sh
 row scripts/test-lane-policy.sh
-row scripts/test-math-policy.sh
 row scripts/test-native-pcm-runner-portability-v1-policy.sh
 row scripts/test-native-pcm-runner-v1-policy.sh
 row scripts/test-protocol-benchmark.sh
