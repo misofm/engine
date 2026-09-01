@@ -985,12 +985,6 @@ fn one_frame<L: Lane>(
 /// Frame independent — this is the pass A half of the staged body, and the expensive half: two
 /// polynomial evaluations whose chains are what stall behind step 6 when the body is per frame.
 #[inline(always)]
-// FAST-DB-CROSSING X1's `#[expect]`: the crossing registry entry this replaces lived in
-// `scripts/check-fast-db-seal.sh`, retired in favour of `clippy.toml`'s `disallowed-methods`.
-#[expect(
-    clippy::disallowed_methods,
-    reason = "FAST-DB-CROSSING X1: dynamics detector reading, never a pinned coefficient"
-)]
 fn curve_target<L: Lane>(detected: L, coef: &Coef<L>, invariants: &Invariants<L>) -> L {
     // 4. amplitude to level, floored and clamped into the curve's domain.
     //
@@ -1037,12 +1031,6 @@ fn ballistic<L: Lane>(target: L, gain_reduction_db: &mut L, coef: &Coef<L>) -> L
 ///
 /// Frame independent again — the pass C half of the staged body.
 #[inline(always)]
-// FAST-DB-CROSSING X2's `#[expect]`: the crossing registry entry this replaces lived in
-// `scripts/check-fast-db-seal.sh`, retired in favour of `clippy.toml`'s `disallowed-methods`.
-#[expect(
-    clippy::disallowed_methods,
-    reason = "FAST-DB-CROSSING X2: applied gain from a smoothed reduction, never a pinned coefficient"
-)]
 fn gain_mix<L: Lane>(delayed: L, smoothed: L, coef: &Coef<L>, invariants: &Invariants<L>) -> L {
     // 7. level to amplitude.
     //
