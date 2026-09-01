@@ -84,6 +84,12 @@ capi_abi_self_test() {
         env MISO_ENGINE_CAPI_SKIP_BUILD=1 MISO_ENGINE_CAPI_LIBRARY="$bad_library" \
         bash "$0" "$workspace_root"
 
+    bad_static_library="$scratch_root/not-a-library.a"
+    printf '%s\n' 'not a static archive' >"$bad_static_library"
+    expect_failure static-link-failure \
+        "${common_env[@]}" MISO_ENGINE_CAPI_STATIC_LIBRARY="$bad_static_library" \
+        bash "$0" "$workspace_root"
+
     printf 'C ABI mutation tests: ok\n'
 }
 
@@ -126,6 +132,12 @@ case "$host_triple" in
 esac
 library="${MISO_ENGINE_CAPI_LIBRARY:-$default_library}"
 [[ -f "$library" ]] || fail "missing native library: $library"
+# The staticlib leg (issue #114's toolchain matrix named both static and shared linkage, but
+# never automated either -- it only grepped its own now-deleted runner script's source for the
+# words "static"/"shared"). `crates/capi`'s crate-type list includes `staticlib`, so this actually
+# links and runs, rather than asserting a string appears in a script nobody ran.
+static_library="${MISO_ENGINE_CAPI_STATIC_LIBRARY:-target/debug/libcapi.a}"
+[[ -f "$static_library" ]] || fail "missing native static library: $static_library"
 
 scratch_root="$(mktemp -d)"
 trap 'rm -rf -- "$scratch_root"' EXIT
@@ -168,4 +180,20 @@ diff -u "$expected_symbols" "$actual_symbols" \
     || fail "exported symbol set differs from frozen ABI V1"
 
 "$scratch_root/abi-smoke"
-printf 'C ABI check: ok (%s)\n' "$host_triple"
+
+# Static linkage: the same C11 fixture, against the .a instead of the .so. Rust staticlibs pull in
+# libc's own pthread/dl/m on this pinned toolchain; linked explicitly rather than relying on a
+# default that can vary by distro.
+static_library_path="$(cd "$(dirname "$static_library")" && pwd)/$(basename "$static_library")"
+if [[ "$host_triple" == *-apple-* ]]; then
+    "$cc_tool" -std=c11 -Wall -Wextra -Werror -pedantic \
+        -I"$include_directory" "$c_fixture" "$static_library_path" \
+        -o "$scratch_root/abi-smoke-static"
+else
+    "$cc_tool" -std=c11 -Wall -Wextra -Werror -pedantic \
+        -I"$include_directory" "$c_fixture" "$static_library_path" \
+        -lpthread -ldl -lm -o "$scratch_root/abi-smoke-static"
+fi
+"$scratch_root/abi-smoke-static"
+
+printf 'C ABI check: ok (%s, shared and static linkage)\n' "$host_triple"
