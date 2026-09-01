@@ -194,4 +194,5 @@ runs, so re-pin mode cannot turn a backend disagreement into a new pin (master p
 | name | meaning |
 |---|---|
 | `MISO_ENGINE_FLAC_DECODER_REPIN` | `build-flac-decoder.sh`: print the reproducibly built decoder artifact digest instead of comparing it to the committed pin. |
+| `MISO_ENGINE_WEB_AUDIOWORKLET_REPIN` | `build-web-audioworklet.sh`: print the reproducibly built AudioWorklet artifact digest instead of comparing it to the committed pin. |
 | `MISO_ENGINE_REPIN_NATIVE_PCM_RUNNER` | print the five native PCM runner output digests instead of asserting them. |

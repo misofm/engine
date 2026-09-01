@@ -41,14 +41,43 @@ trap cleanup EXIT
 # `MISO_ENGINE_WEB_STRIP=none`.
 strip_flag="-C strip=${MISO_ENGINE_WEB_STRIP:-debuginfo}"
 
+# The artifact is content-addressed, so every path rustc embeds in it must be a
+# function of the SOURCE and nothing else. It is not by default: dependency
+# sources live under CARGO_HOME, whose absolute path differs between a
+# developer's machine and CI (`/root/.cargo` vs `/home/runner/.cargo`), and
+# rustc bakes those paths into panic locations. That made the digest a function
+# of WHERE cargo's registry sits, exactly as it did for the FLAC decoder artifact
+# (see scripts/build-flac-decoder.sh and #300) before its own remap fix.
+#
+# Remapping both roots to fixed labels makes the digest reproducible anywhere.
+# Verified: with these flags the digest is identical under CARGO_HOME=/root/.cargo
+# and CARGO_HOME=/home/runner/.cargo, which previously produced two different ones,
+# and also under a third repo-path/CARGO_HOME combination.
+cargo_home=${CARGO_HOME:-$HOME/.cargo}
+remap="--remap-path-prefix=$cargo_home=/cargo --remap-path-prefix=$repo_root=/repo"
+
 (
   cd "$repo_root"
-  CARGO_TARGET_DIR="$simd_target" RUSTFLAGS="-C target-feature=+simd128 $strip_flag" \
+  CARGO_TARGET_DIR="$simd_target" RUSTFLAGS="-C target-feature=+simd128 $strip_flag $remap" \
     cargo build --locked --release --target wasm32-unknown-unknown -p host-web
 )
 
-cp --update=none "$simd_target/wasm32-unknown-unknown/release/host_web.wasm" \
-  "$output_dir/miso-engine-v2-audio-worklet.simd128.wasm"
+artifact="$simd_target/wasm32-unknown-unknown/release/host_web.wasm"
+observed=$(sha256sum "$artifact" | awk '{print $1}')
+pin_file="$repo_root/hosts/host-web/web/miso-engine-v2-audio-worklet-artifact.sha256"
+expected=$(tr -d '\n' <"$pin_file")
+
+if [[ "${MISO_ENGINE_WEB_AUDIOWORKLET_REPIN:-0}" == 1 ]]; then
+  printf '%s\n' "$observed"
+  exit 0
+fi
+[[ "$observed" == "$expected" ]] || {
+  printf 'AudioWorklet artifact pin mismatch: expected=%s observed=%s\n' \
+    "$expected" "$observed" >&2
+  exit 1
+}
+
+cp --update=none "$artifact" "$output_dir/miso-engine-v2-audio-worklet.simd128.wasm"
 cp --update=none "$repo_root/hosts/host-web/web/miso-engine-v2-audio-worklet.js" "$output_dir/"
 cp --update=none "$repo_root/hosts/host-web/web/miso-engine-v2-audio-worklet-host.js" "$output_dir/"
 cp --update=none "$repo_root/hosts/host-web/web/miso-engine-v2-audio-worklet-host.d.ts" "$output_dir/"
