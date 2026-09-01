@@ -249,6 +249,15 @@ jobs:
         run: |
           bash scripts/check-builtins-fixtures.sh
           bash scripts/test-builtins-fixtures.sh
+      # Issue #243 eval 6/S1: the SDK's generated TypeScript surface is a byte-for-byte
+      # re-derivation from the Rust parameter-metadata registry (codegen drift is structurally
+      # impossible), and the pre-boot-v2 SDK's retired spellings stay deleted rather than
+      # relocated. Both are hermetic (no `npm`/network); the typecheck half that does need `tsc`
+      # is `check-sdk-types.sh`, in the new `sdk` job below. Previously sweep-only.
+      - name: SDK generated-surface drift and retired-spelling deletion gates
+        run: |
+          bash scripts/check-sdk-generated.sh
+          python3 -B scripts/check-sdk-deletions.py
       - name: Feature-resolution tree
         run: cargo tree --locked --workspace -e features
       - name: Metadata report
@@ -348,6 +357,7 @@ jobs:
           bash scripts/check-web-audioworklet.sh "$artifacts"
           python3 -B scripts/web-audioworklet-browser-correctness.py --check --artifacts "$artifacts"
           python3 -B scripts/check-browser-expected-resources.py --artifacts "$artifacts"
+          bash scripts/check-sdk-headless.sh "$artifacts"
           ls -l "$artifacts"
       - name: Hermetic browser host and worklet tests
         run: bash scripts/test-web-audioworklet.sh
@@ -391,4 +401,26 @@ jobs:
         with:
           name: wasm-gates
           path: target/ci/wasm-gates/wasm-gates.jsonl
+
+  sdk:
+    name: SDK typecheck and shipped-host mirror pin
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      # Issue #243 eval 6, the static half. The behavioural/generated-surface/deletion evals are
+      # hermetic and already run in the host job (check-sdk-{headless,generated}.sh,
+      # check-sdk-deletions.py); `tsc` needs `npm ci`, which needs the network, which is why this
+      # one alone was excluded from scripts/sweep.sh's hermetic charter and, as a result, never ran
+      # anywhere -- check-sdk-types.sh exits 2 on a clean checkout with no node_modules. This job
+      # gives it the one thing it needs and nothing else.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: sdk/package-lock.json
+      - name: Install SDK dependencies
+        working-directory: sdk
+        run: npm ci
+      - name: SDK typecheck and shipped-host mirror pin
+        run: bash scripts/check-sdk-types.sh
 
