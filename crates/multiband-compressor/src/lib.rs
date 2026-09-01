@@ -893,6 +893,12 @@ fn detector_tap<L: Lane, const W: usize>(
 /// propagating into the smoother; a NaN that matters comes from the filter state and reaches the
 /// output, where the once-per-block boundary check catches it.
 #[inline(always)]
+// FAST-DB-CROSSING X5 and X6's `#[expect]`: the crossing registry entries this replaces lived in
+// `scripts/check-fast-db-seal.sh`, retired in favour of `clippy.toml`'s `disallowed-methods`.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "FAST-DB-CROSSING X5/X6: one band's detector level and applied gain, never pinned coefficients"
+)]
 fn band_amplitude<L: Lane>(
     detector: L,
     threshold: L,

@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_methods)] // D6 oracle/measurement exemption: compares against the platform deliberately (formerly check-math-policy.sh structural_exempt)
 //! E3 / P1 — a block boundary is not observable.
 //!
 //! The same 4,096-frame stream, with automation events inside it, rendered in partitions of

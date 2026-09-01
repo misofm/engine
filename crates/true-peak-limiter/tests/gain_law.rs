@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_methods)] // D6 oracle/measurement exemption: compares against the platform deliberately (formerly check-math-policy.sh structural_exempt)
 //! The gain law's two independent-oracle gates (#90 evals E4 and E5).
 //!
 //! Both drive the crate through its public factory only and measure with

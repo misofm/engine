@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_methods)] // D6 oracle/measurement exemption: compares against the platform deliberately (formerly check-math-policy.sh structural_exempt)
 //! #99 F4: the route gain coefficient is the workspace's deterministic dB->linear conversion.
 //!
 //! This file lives in `tests/` deliberately: it is the *oracle* side of the comparison and calls

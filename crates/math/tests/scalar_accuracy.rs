@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_methods)] // D6 oracle/measurement exemption: compares against the platform deliberately (formerly check-math-policy.sh structural_exempt)
 //! Correctness of the vendored scalar layer.
 //!
 //! The vendoring edits (VENDORED.md) are mechanical, but "mechanical" is not evidence. These tests
