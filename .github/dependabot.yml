@@ -1,0 +1,34 @@
+version: 2
+
+updates:
+  # GitHub Actions versions only (e.g. actions/checkout@v4 -> v5). This is
+  # the same drift class as the app's Node-20-deprecation warnings, and it
+  # carries none of this repo's bit-determinism risk: Actions version pins
+  # never touch Cargo.lock or any digest the workspace ships.
+  #
+  # Deliberately NOT covering the `cargo` ecosystem here. This workspace
+  # builds `--locked` everywhere and enforces a bit-determinism invariant
+  # (see the "cross-target digest gates under wasmtime" required check) --
+  # an automated dependency bump can move a shipped digest, which is a much
+  # bigger deal than in an app repo. See the dependency-drift-detection
+  # writeup for the recommended guardrails before enabling that ecosystem.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      # Monthly, not weekly: every PR here -- even an Actions-only bump --
+      # triggers the full required-check suite (cross-target digest gates,
+      # chromium/firefox/webkit browser qualification, host quality on an
+      # 8-vcpu runner), which is materially more expensive than a typical
+      # app CI run. Actions version bumps are low-urgency, so there's no
+      # reason to pay that cost weekly.
+      interval: "monthly"
+    open-pull-requests-limit: 3
+    labels:
+      - "dependencies"
+      - "github-actions"
+    commit-message:
+      prefix: "chore(ci)"
+    groups:
+      actions:
+        patterns:
+          - "*"
