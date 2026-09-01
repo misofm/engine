@@ -370,6 +370,14 @@ jobs:
     runs-on: blacksmith-8vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v4
+      # `check-sdk-headless.sh` runs `node --test 'test/*-evals.mjs'`, and glob
+      # expansion in `--test` postdates Node 20, which is what this runner
+      # ships by default. Without this the glob reaches Node unexpanded and it
+      # reports `Could not find '.../sdk/test/*-evals.mjs'`. The `sdk` job below
+      # pins the same version for the same reason.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
       - name: Install pinned Rust toolchain and Wasm standard library
         run: |
           rustup toolchain install 1.97.1 --profile minimal

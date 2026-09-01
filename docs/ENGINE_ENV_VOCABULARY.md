@@ -147,6 +147,7 @@ Read by one subject each.
 | `MISO_ENGINE_BUILTINS_SKIP_METADATA` | `check-builtins-policy.sh`: skip the `cargo metadata` smoke. |
 | `MISO_ENGINE_CAPI_HEADER` | C-ABI tests: path of `miso_engine_v1.h`. |
 | `MISO_ENGINE_CAPI_LIBRARY` | C-ABI tests: path of the built library. |
+| `MISO_ENGINE_CAPI_STATIC_LIBRARY` | C-ABI tests: path of the built static archive (`libcapi.a`), whose link is the coverage that `check-capi-qualification-v1.sh` claimed but never automated. |
 | `MISO_ENGINE_CAPI_C_FIXTURE` | C-ABI tests: path of the C consumer. |
 | `MISO_ENGINE_CAPI_CPP_FIXTURE` | C-ABI tests: path of the C++ consumer. |
 | `MISO_ENGINE_CAPI_SKIP_BUILD` | C-ABI tests: use a prebuilt library. |
