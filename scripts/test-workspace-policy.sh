@@ -11,13 +11,30 @@ create_valid_fixture() {
     local fixture_root="$1"
     mkdir -p \
         "$fixture_root/crates/library/src" \
+        "$fixture_root/crates/math" \
+        "$fixture_root/fuzz" \
         "$fixture_root/hosts/binary/src" \
         "$fixture_root/tools" \
         "$fixture_root/sidecars"
 
+    cp "$script_directory/../LICENSE" "$fixture_root/LICENSE"
+    printf '%s\n' 'Miso Engine' >"$fixture_root/NOTICE"
+    printf '%s\n' 'See crates/math/LICENSE-libm.txt.' >"$fixture_root/THIRD_PARTY_LICENSES.md"
+    printf '%s\n' 'fixture third-party license' >"$fixture_root/crates/math/LICENSE-libm.txt"
+    printf '%s\n' \
+        '[workspace.package]' \
+        'license = "Apache-2.0"' \
+        >"$fixture_root/Cargo.toml"
+    printf '%s\n' \
+        '[package]' \
+        'name = "session-fuzz"' \
+        'license = "Apache-2.0"' \
+        >"$fixture_root/fuzz/Cargo.toml"
+
     printf '%s\n' \
         '[package]' \
         'name = "library"' \
+        'license.workspace = true' \
         '' \
         '[lib]' \
         'name = "library"' \
@@ -30,6 +47,7 @@ create_valid_fixture() {
     printf '%s\n' \
         '[package]' \
         'name = "binary"' \
+        'license.workspace = true' \
         '' \
         '[[bin]]' \
         'name = "binary"' \
@@ -117,13 +135,13 @@ mutate_track_limit() {
 
 mutate_prelaunch_abi_generation() {
     local root="$1"
-    printf '%s%s\n' 'pub const MISO_ENGINE_' 'V2_ABI_VERSION: u32 = 2;' \
+    printf '%s%s%s\n' 'pub const MISO_ENGINE_' 'V' '2_ABI_VERSION: u32 = 2;' \
         >>"$root/crates/library/src/lib.rs"
 }
 
 mutate_prelaunch_product_generation() {
     local root="$1"
-    printf '%s%s\n' '//! Engine ' 'V2 public surface' \
+    printf '%s%s%s\n' '//! Engine ' 'V' '2 public surface' \
         >>"$root/crates/library/src/lib.rs"
 }
 
@@ -170,6 +188,7 @@ allow_sidecar_valid() {
     printf '%s\n' \
         '[package]' \
         'name = "flac-decoder"' \
+        'license.workspace = true' \
         '' \
         '[lib]' \
         'name = "flac_decoder"' \
@@ -187,6 +206,7 @@ mutate_sidecar_package_prefix() {
     printf '%s\n' \
         '[package]' \
         'name = "miso-engine-flac-decoder"' \
+        'license.workspace = true' \
         '' \
         '[lib]' \
         'name = "miso_engine_flac_decoder"' \
@@ -206,6 +226,7 @@ mutate_sidecar_nested_directory_mismatch() {
     printf '%s\n' \
         '[package]' \
         'name = "vendored-thing"' \
+        'license.workspace = true' \
         '' \
         '[lib]' \
         'name = "vendored_thing"' \
@@ -224,6 +245,7 @@ mutate_sysroot_collision() {
     printf '%s\n' \
         '[package]' \
         'name = "core"' \
+        'license.workspace = true' \
         '' \
         '[lib]' \
         'name = "core"' \
@@ -240,6 +262,7 @@ mutate_prelude_collision() {
     printf '%s\n' \
         '[package]' \
         'name = "std"' \
+        'license.workspace = true' \
         '' \
         '[lib]' \
         'name = "std"' \
@@ -290,6 +313,32 @@ expect_failure sidecar-package-prefix mutate_sidecar_package_prefix
 expect_failure sidecar-nested-directory-mismatch mutate_sidecar_nested_directory_mismatch
 expect_failure sysroot-collision mutate_sysroot_collision
 expect_failure prelude-collision mutate_prelude_collision
+
+mutate_missing_license() {
+    local root="$1"
+    rm -- "$root/LICENSE"
+}
+
+mutate_workspace_license() {
+    local root="$1"
+    sed -i 's/license = "Apache-2.0"/license = "MIT"/' "$root/Cargo.toml"
+}
+
+mutate_package_license_inheritance() {
+    local root="$1"
+    sed -i '/license\.workspace = true/d' "$root/crates/library/Cargo.toml"
+}
+
+mutate_npm_license() {
+    local root="$1"
+    mkdir -p "$root/sdk"
+    printf '%s\n' '{"name":"fixture","license":"MIT"}' >"$root/sdk/package.json"
+}
+
+expect_failure missing-license mutate_missing_license
+expect_failure workspace-license mutate_workspace_license
+expect_failure package-license-inheritance mutate_package_license_inheritance
+expect_failure npm-license mutate_npm_license
 
 # `rg` exits 2 (not 1) when a search root does not exist, and `if rg ...; then fail; fi` reads
 # both 1 and 2 as "no violation". A fixture whose sidecars/ directory is removed after creation

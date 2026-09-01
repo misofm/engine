@@ -249,7 +249,7 @@ the binary32 noise floor; the same computation in binary32 would have needed the
 `|delta| = 0.05`, effectively selecting the guard on every sample. A perturbation of at most three
 ulps measured **-41.9 dBFS peak and -90.8 dBFS steady-state** through that chain. This is historical
 evidence for the need to retain the binary64 divided difference and an explicit near-equality
-guard, not a threshold pin for a future V2 ADAA topology. Source: `misofm/engine`,
+guard, not a threshold pin for a future ADAA topology. Source: `misofm/engine`,
 `docs/01-V2-LEARNINGS.md` lines 88-92 in the pre-deprecation snapshot read 2026-08-24
 ([source lines](https://github.com/misofm/engine/blob/main/docs/01-V2-LEARNINGS.md#L88-L92)).
 

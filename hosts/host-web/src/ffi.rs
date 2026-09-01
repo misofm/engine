@@ -518,7 +518,7 @@ pub extern "C" fn miso_engine_web_v1_console_track_id(handle: u32, index: u32) -
 /// **This export is the bounds authority.** `source_channels` and `source_frames` return zero for
 /// an out-of-range index because zero is impossible for a compiled source.
 ///
-/// These queries survived issue #240's ABI-v2 boot recut unchanged. What pins the complete surface
+/// These queries survived issue #240's boot ABI recut unchanged. What pins the complete surface
 /// is the frozen export set in `scripts/check-web-audioworklet.sh`, which is exact rather than a
 /// lower bound: an export that appears or disappears fails that gate.
 #[unsafe(no_mangle)]

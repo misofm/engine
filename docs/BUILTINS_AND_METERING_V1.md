@@ -78,7 +78,7 @@ left in the scratch buffer can poison the recurrence, they are excluded from eve
 the boundary check, and their samples are never observed. The caller assigns lanes in sorted member
 order and never gathers into or scatters from a padding lane.
 
-The pan adapter is a V2 product definition using cosine/sine gains over `[-1, 1]`; it is not an
+The pan adapter is the product definition using cosine/sine gains over `[-1, 1]`; it is not an
 implicit stereo mode.
 
 Meters are post-node observers at the seven stable `TrackStage` boundaries. A meter owns its
@@ -161,7 +161,7 @@ snapshot-able" law, because solo deliberately does not mutate the session model 
 fader, pan, mute and effect-parameter moves already do not. Live console state is rebuilt from the
 session on reload and is never written back.
 
-Persisted solo-safe or monitor-scene semantics, if the product ever wants them, are a session-V2
+Persisted solo-safe or monitor-scene semantics, if the product ever wants them, are a future session
 monitor-scene concept and not a V1 key. Nothing here forecloses that.
 
 ### Metering and observation while soloed

@@ -140,7 +140,7 @@ validation runs on the preparation path, and soft clip's three rows alone hold `
 1183` points, each rendered to its own `String`: `crates/soft-clip/tests/allocation.rs`
 measured **1290 allocations per prepare against its pinned bound of 32**. This is precisely the
 defect #127 recorded from the v1 audit -- an un-memoized per-call derivation on a hot descriptor
-path -- arriving in v2 by a different route.
+path -- arriving in the current design by a different route.
 
 Lawfulness is a property of the DECLARATION and its intrinsic points, not of the interior, so
 `validate_parameter_lattice_parts` decides it in constant time with no allocation: the step, unit,

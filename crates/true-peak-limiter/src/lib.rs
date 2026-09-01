@@ -5259,7 +5259,7 @@ mod tests {
 
     /// E11: layout 2 round-trips, and every corruption is rejected without mutating the peer.
     #[test]
-    fn state_v2_round_trips_and_rejects_corruption() {
+    fn state_round_trips_and_rejects_corruption() {
         let values = values_with(-6.0, 100.0, 5.0);
         let mut source = TruePeakLimiterFactory
             .prepare(request(&values))

@@ -80,4 +80,7 @@ would falsify evidence or merely clean stale terminology.
   hermetic worklet tests and mutations, WebDriver response tests, generated SDK asset/surface checks,
   command vocabulary checks, session-map shape checks, and metadata schema checks pass.
 - `cargo fmt --check` and `cargo check --workspace --all-targets` pass on Rust 1.97.1.
-- Remaining work is the broader active-prose/schema inventory and final adversarial review.
+- The follow-up live-tree audit removed the remaining internal `state_v2_*` test spelling, stale
+  product/ABI-generation prose, and the versioned algebraic browser-fixture label. Focused limiter,
+  workspace-policy, metadata-mutation, and rebuilt browser-resource/digest witnesses pass.
+- Remaining work is the persisted-state/schema inventory and final adversarial review.

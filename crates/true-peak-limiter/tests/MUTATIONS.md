@@ -21,11 +21,11 @@ cargo test -p true-peak-limiter --lib phase_outputs
 | 7 | van Herk suffix pass guarded by `complete && width < 2`, so it never runs at W4/W8 | `src/lib.rs` `sliding_minimum` | `lane_identity_holds_across_widths` |
 | 8 | `left.prefix.fill(1.0)` / `right.prefix.fill(1.0)` at block entry (min-filter prefix not carried across blocks) | `src/lib.rs` `limiter_block` | `partition_invariance_holds_over_block_sizes` |
 | 9 | `return;` inserted after `limiter_block` so the §4.4 boundary check never runs | `src/lib.rs` `LimiterCore::process_block` | `a_nonfinite_block_is_zeroed_reset_and_counted` |
-| 10 | the `recomputed == box_sum` check in restore disabled | `src/lib.rs` `read_lane` | `state_v2_round_trips_and_rejects_corruption` |
+| 10 | the `recomputed == box_sum` check in restore disabled | `src/lib.rs` `read_lane` | `state_round_trips_and_rejects_corruption` |
 | 11 | `peak = history[6].abs()` → `peak = L::zero()` (sample term dropped from `P`) | `src/lib.rs` `detector_peak` | `fixed_latency_guarded_ceiling_and_bypass_bits_hold` |
 | 12 | `box_sum.div(window)` → `box_sum.mul(1.0.div(window))` (reciprocal instead of divide) | `src/lib.rs` `channel_frame` | `silence_restores_exact_identity_including_signed_zero` |
 | 13 | `current = select(remaining > 0, current + step, target)` → `current = current + step` (D11 snap removed) | `src/lib.rs` `RampLanes::advance` | `the_lane_ramp_reproduces_the_scalar_ramp_bit_for_bit` |
-| 14 | `write_u32(bytes, MAIN_CURSOR, cursors.main.swap_bytes())` (payload endianness) | `src/lib.rs` `snapshot_lane` | `state_v2_round_trips_and_rejects_corruption` |
+| 14 | `write_u32(bytes, MAIN_CURSOR, cursors.main.swap_bytes())` (payload endianness) | `src/lib.rs` `snapshot_lane` | `state_round_trips_and_rejects_corruption` |
 | 15 | `let leak: Vec<f32> = vec![0.0; 4];` inside the van Herk suffix pass | `src/lib.rs` `sliding_minimum` | `the_render_path_allocates_nothing` |
 | 16 | `crates/true-peak-limiter/src/lib.rs` re-added to the `check-math-policy.sh` allowlist while `limit_coefficient` calls `10.0_f32.powf(..)` | `src/lib.rs` | `scripts/check-math-policy.sh` (allowlist entry with zero call sites fails) |
 

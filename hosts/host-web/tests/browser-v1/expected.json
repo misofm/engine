@@ -5,7 +5,7 @@
   "renderedQuantaBeforeDispose": 3,
   "nextAbsoluteSampleBeforeDispose": "384",
   "oracle": {
-    "kind": "algebraic-direct-v2",
+    "kind": "algebraic-direct",
     "left": "identity(input_builtins)*identity(racks)*identity(fader)*identity_matrix*identity_route",
     "right": "positive-zero source through the same identity path",
     "timeline": "three successful 128-frame direct render transitions",

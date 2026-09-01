@@ -30,7 +30,7 @@
 //! (`docs/research/legacy-v2old/02-numerics-determinism.md`: "At every native render-thread
 //! entry/start, require and attest round-to-nearest-even with FTZ/DAZ disabled ... refuse before
 //! audio with stable `fp_environment_invalid`"). Refusing a DAW's callback thread is not available
-//! to an embedded engine, so V2 pins per block and keeps the attestation as a start-of-session
+//! to an embedded engine, so the current engine pins per block and keeps the attestation as a start-of-session
 //! check that pinning actually takes on this thread -- [`attest_fp_environment`], called from the
 //! host facade's started-session handle.
 //!

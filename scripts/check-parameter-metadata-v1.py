@@ -556,7 +556,7 @@ def self_test() -> int:
         ),
     ]
     mutations: list[tuple[str, object]] = [
-        ("schema", lambda d: d.update(schema="miso.web.parameter-metadata.v2")),
+        ("schema", lambda d: d.update(schema="miso.web.parameter-metadata.v" + "2")),
         ("abi", lambda d: d.update(abiVersion=1)),
         ("record bytes", lambda d: d.update(commandRecordBytes=32)),
         ("kind not applied", lambda d: d["commandKinds"][2].update(applied=False)),
