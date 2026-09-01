@@ -1,5 +1,7 @@
 # Prelaunch identity reset: remove V2 from live product surfaces
 
+**Status: SOL PASS.**
+
 ## Owner ruling
 
 The engine has not launched. No live product identity may claim to be V2. Internal implementation
@@ -84,3 +86,9 @@ would falsify evidence or merely clean stale terminology.
   product/ABI-generation prose, and the versioned algebraic browser-fixture label. Focused limiter,
   workspace-policy, metadata-mutation, and rebuilt browser-resource/digest witnesses pass.
 - Remaining work is the persisted-state/schema inventory and final adversarial review.
+- Sol adversarial review PASS: the live native ABI, browser exports/artifacts, SDK code generation,
+  browser qualification tags, package branding, active documentation, and regression policy all
+  satisfy the V1 ruling. Remaining matches are mathematical DSP variables, external standards/ISA
+  names, deliberately synthetic migration operands, or frozen historical records. Production
+  effect state layouts above one and tooling record schemas are explicitly transferred to a
+  successor issue rather than hidden inside this contract-identity rename.
