@@ -88,6 +88,18 @@ jobs:
         run: |
           bash scripts/check-lane-policy.sh
           bash scripts/test-lane-policy.sh
+      # The unfused multiply-add contract's container (issue #163 phase 2). Four of its six rules
+      # cannot be expressed as a clippy.toml disallowed-methods entry -- a positive-presence check
+      # that both `Lane::fma` dispatch points literally contain `(self * b) + c`, a ban on `cfg`
+      # inside that function body, an exact tree-wide count of 8 fused calls counted two
+      # independent ways, and a refusal of the retired software-FMA *definitions* rather than
+      # calls to them -- so it stays a script. Previously ran only from `scripts/sweep.sh`, which
+      # nobody runs. `--self-test` is the former `scripts/test-unfused-seal.sh`, folded in so the
+      # gate and its own mutation proof cannot drift apart or be wired in separately.
+      - name: Unfused multiply-add seal and self-test
+        run: |
+          bash scripts/check-unfused-seal.sh
+          bash scripts/check-unfused-seal.sh --self-test
       - name: Lane gates G1-G4, G6, P1 and the issue-146 FP-environment guard on the AVX2+FMA runner
         run: cargo test --locked --release -p lane
       - name: Math gates M1, M2 and M3 in release
