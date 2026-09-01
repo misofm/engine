@@ -59,30 +59,9 @@ for subject in "${timed_subjects[@]}"; do
     fi
 done
 
-# `allow(unsafe_code)` is denied workspace-wide; these six files are the approved exceptions under
-# `tools/`, and `scripts/check-realtime-policy.sh` holds the matching list for `crates/` and
-# `hosts/`. A seventh file is a new unsafe ownership boundary and needs a decision, not a grep.
-#
-# The decision for the sixth, `wasm-console-guest` (#163 phase 2 step 1): it is the
-# *same* boundary this list already grants `wasm-gate-guest`, for the same reason and
-# with the same shape. Exporting a function from a `cdylib` requires `#[unsafe(no_mangle)]` under
-# edition 2024 and there is no safe spelling of it. Both guests are `u32`-in/`u32`-out, neither
-# dereferences a pointer, neither declares a memory contract with its host, and no engine crate
-# links either. This is not a new *kind* of exception; it is a second instance of the one already
-# approved, and it is named here rather than absorbed by a pattern so that a genuinely new
-# boundary still has to come back for a decision.
-expected_unsafe="$(printf '%s\n' \
-    tools/bench-support/src/alloc.rs \
-    tools/audit/src/capi.rs \
-    tools/native-pcm-runner/src/lib.rs \
-    tools/bench/src/protocol.rs \
-    tools/wasm-gate-guest/src/lib.rs \
-    tools/wasm-console-guest/src/lib.rs | LC_ALL=C sort)"
-actual_unsafe="$(grep -rlE '^#!\[allow\(unsafe_code\)\]' tools --include='*.rs' 2>/dev/null | LC_ALL=C sort || true)"
-[[ "$actual_unsafe" == "$expected_unsafe" ]] || {
-    diff -u <(printf '%s\n' "$expected_unsafe") <(printf '%s\n' "$actual_unsafe") >&2 || true
-    fail 'the approved unsafe ownership set under tools/ changed'
-}
+# The unsafe-ownership roster under `tools/` used to be duplicated here; it is now
+# `scripts/check-realtime-policy.sh`'s alone, which already scans `crates hosts tools sidecars`
+# for exactly this boundary (one list, one owner).
 
 # F2's metadata boundary: only the two dispatchers may inspect their private re-exec selector.
 # Every subject reads runner metadata from one memoized in-process `Metadata::gather()` snapshot.
@@ -120,5 +99,5 @@ while IFS= read -r manifest; do
     [[ -z "$violation" ]] || fail "a production package depends on the bench support crate: $violation"
 done < <(find crates hosts sidecars -mindepth 2 -maxdepth 2 -name Cargo.toml 2>/dev/null | sort)
 
-printf 'bench policy: ok (1 allocator, 1 escaper, 1 percentile, 1 digest sink, %s unsafe owners, %s subjects on the shared timer)\n' \
-    "$(printf '%s\n' "$expected_unsafe" | wc -l | tr -d ' ')" "${#timed_subjects[@]}"
+printf 'bench policy: ok (1 allocator, 1 escaper, 1 percentile, 1 digest sink, %s subjects on the shared timer)\n' \
+    "${#timed_subjects[@]}"

@@ -56,15 +56,6 @@ new_case removed-escaper
 rm "$case_root/tools/bench-support/src/json.rs"
 expect_failure removed-escaper
 
-new_case new-unsafe-owner
-printf '#![allow(unsafe_code)]\n' \
-    >>"$case_root/tools/audit/src/source.rs"
-expect_failure new-unsafe-owner
-
-new_case retired-unsafe-owner
-sed -i '/^#!\[allow(unsafe_code)\]$/d' "$case_root/tools/audit/src/capi.rs"
-expect_failure retired-unsafe-owner
-
 new_case converted-subject-loses-the-shared-timer
 sed -i 's/timing::timed/inline_timed/' "$case_root/tools/bench/src/rack.rs"
 expect_failure converted-subject-loses-the-shared-timer
