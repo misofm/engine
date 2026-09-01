@@ -114,22 +114,15 @@ fn a_declared_tap_moves_contract_minor_and_leaves_the_state_layout_alone() {
     }
 }
 
-/// The four state layouts have their sole prelaunch V1 identity, stated as their own assertion so
-/// a future edit that bumps one has to argue with this test rather than with a comment.
+/// Every launch-native state layout has its sole prelaunch V1 identity, stated as its own assertion
+/// so a future edit that bumps one has to argue with this test rather than with a comment.
 #[test]
-fn dynamics_state_layouts_are_v1() {
+fn launch_native_state_layouts_are_v1() {
     let registry = launch_native_effect_registry().unwrap();
     for descriptor in registry.descriptors() {
-        let expected = match descriptor.id.as_str() {
-            "miso.compressor"
-            | "miso.gate-expander"
-            | "miso.multiband-compressor"
-            | "miso.true-peak-limiter" => 1,
-            _ => continue,
-        };
         assert_eq!(
-            descriptor.state_layout_version, expected,
-            "{}: #143 declares a tap, it does not change state",
+            descriptor.state_layout_version, 1,
+            "{}: launch-native state layouts are born at V1",
             descriptor.id
         );
     }

@@ -59,3 +59,9 @@ containment before PASS.
   transactional corruption rejection, determinism, conformance, and allocation witnesses.
 - The effect compiler's launch-registry assertion now requires every dynamics state layout to be
   V1 and passes. `cargo check --workspace --all-targets`, formatting, and diff hygiene pass.
+- Sol review found that the first registry assertion covered only four dynamics effects. The
+  corrected gate now traverses every launch-native descriptor and requires state layout V1; it
+  passes, covering parametric EQ and soft clip as well as the dynamics set.
+- The updated parametric-EQ header mutation was executed: forcing the current layout to stamp
+  invalid version 0 makes `a_payload_with_a_stale_header_is_rejected_on_its_own_evidence` fail 0
+  versus 1. Restoring the implementation makes all 16 contract tests pass.
