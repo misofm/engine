@@ -182,6 +182,16 @@ jobs:
         run: |
           cargo build --locked --release -p bench
           timeout 180s bash scripts/trace-effect-contract-audit.sh target/release/bench 1000000
+      # Dependency-boundary and unsafe-code policy for rack, builtins and graph -- distinct from
+      # the MAX_TRACKS ban (which moved to check-workspace-policy.sh above, P12), and previously
+      # reachable only from scripts/sweep.sh, which nobody runs.
+      - name: Rack, builtins and graph dependency-boundary policy and mutation tests
+        run: |
+          bash scripts/check-rack-policy.sh
+          bash scripts/test-rack-policy.sh
+          bash scripts/check-builtins-policy.sh
+          bash scripts/test-builtins-policy.sh
+          bash scripts/check-graph-policy.sh
       - name: Conformance boundaries and research corpus
         run: |
           bash scripts/check-conformance-boundaries.sh
