@@ -196,6 +196,15 @@ jobs:
           bash scripts/trace-builtins-graph-audit.sh
       - name: Native effect runtime policy, fixtures, conformance, and mutations
         run: bash scripts/check-effect-contract.sh
+      # Issue #081/#104/#143: the effect-interchange corpus and reference-script baseline is
+      # exactly what it was qualified as (immutable-baseline seal; still verifies byte-for-byte on
+      # an unchanged tree) and issue-package V1's corpus/native/scalar-Wasm surface. Both call their
+      # own test-effect-interchange-{reference-runner,target-export-parser}.sh internally, which
+      # previously also ran as separate, independently-omittable sweep rows. Previously sweep-only.
+      - name: Effect-interchange qualification baseline and effect-package V1 surface
+        run: |
+          bash scripts/check-effect-interchange-qualification.sh
+          bash scripts/check-effect-package-v1.sh
       - name: Protocol caller-buffer allocation audit
         run: bash scripts/run-protocol-allocation-audit.sh
       - name: Protocol benchmark runner build and negative argument checks (no benchmark)
