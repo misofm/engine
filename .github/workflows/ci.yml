@@ -293,6 +293,20 @@ jobs:
           bash scripts/check-conformance-boundaries.sh
           bash scripts/check-dsp-research.sh
           cargo run --locked -p conformance --example conformance_fixtures -- --check
+      # Not prose scaffolding: this checks the issue-007 preregistration docs cannot fabricate a
+      # trial row, and exercises both issue-033/111 blinded-listening packet validators' own
+      # --self-test (986 and 450 lines of real format/statistics/reveal-commit logic), plus the
+      # facilitator packet's schema canonicality, empty response form, unconfirmed provenance
+      # template and answer-free packet. Previously reachable only from scripts/sweep.sh.
+      - name: Listening-evidence preregistration and packet validator self-tests
+        run: bash scripts/check-builtins-listening.sh
+      # Issue #242/#239 Amendment 2 A7: one step vocabulary ("step", not the retired "nudge") as a
+      # name -- a JSON schema key, a Rust/Python identifier, a TypeScript member -- across the
+      # repository, self-tested. Previously reachable only from scripts/sweep.sh.
+      - name: Step vocabulary uniformity and self-test
+        run: |
+          python3 -B scripts/check-step-vocabulary.py
+          python3 -B scripts/check-step-vocabulary.py --self-test
       - name: Feature-resolution tree
         run: cargo tree --locked --workspace -e features
       - name: Metadata report
