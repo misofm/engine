@@ -7,7 +7,7 @@ script_directory="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repository_root="$(cd "$script_directory/.." && pwd)"
 artifact_directory="$repository_root/target/issue72"
 nonbenchmark_seal="$artifact_directory/nonbenchmark.seal.json"
-sealed_binary="$artifact_directory/miso_engine_bench"
+sealed_binary="$artifact_directory/bench"
 seal="$artifact_directory/builtins-benchmark.preflight.json"
 raw_output="$artifact_directory/builtins-benchmark.raw.jsonl"
 accepted_output="$artifact_directory/builtins-benchmark.jsonl"
@@ -66,7 +66,7 @@ while read -r name bytes digest; do
     require_hash "$path" "$digest"
     [[ "$(wc -c <"$path")" == "$bytes" ]] || fail "Issue-058 artifact size: $name"
 done <<'EOF'
-miso_engine_bench 3191104 242f6789ea994c4147205396bb10c10dbef85a48681160037680bb5b745b8944
+bench 3191104 242f6789ea994c4147205396bb10c10dbef85a48681160037680bb5b745b8944
 builtins-benchmark.preflight.json 2211 85fcfcfb1c72e2dfd1128667c583dfc2aae74b5f183bb4d04dd8604fa07a195d
 builtins-benchmark.raw.jsonl 0 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
 builtins-benchmark.validator.stderr 0 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
@@ -79,7 +79,7 @@ done
 [[ -f "$nonbenchmark_seal" && ! -L "$nonbenchmark_seal" &&
    "$(stat -c %h "$nonbenchmark_seal")" == 1 ]] || fail 'nonbenchmark seal unavailable'
 
-tool_source_sha256="$(hash_file tools/miso-engine-bench/src/builtins.rs)"
+tool_source_sha256="$(hash_file tools/bench/src/builtins.rs)"
 runner_sha256="$(hash_file "$runner")"
 preflight_script_sha256="$(hash_file "$script_directory/preflight-builtins-benchmark.sh")"
 lifecycle_sha256="$(hash_file "$lifecycle")"
@@ -103,7 +103,7 @@ jq -e \
      .fixture_manifest_sha256 == $manifest and .graph_pcm_sha256 == $pcm and
      .graph_meter_sha256 == $meter and .accepted_issue068_source_sha256 == $issue068 and
      .issue035_artifacts == {
-       "miso_engine_bench":"242f6789ea994c4147205396bb10c10dbef85a48681160037680bb5b745b8944",
+       "bench":"242f6789ea994c4147205396bb10c10dbef85a48681160037680bb5b745b8944",
        "builtins-benchmark.preflight.json":"85fcfcfb1c72e2dfd1128667c583dfc2aae74b5f183bb4d04dd8604fa07a195d",
        "builtins-benchmark.raw.jsonl":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
        "builtins-benchmark.validator.stderr":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -119,23 +119,23 @@ trap 'rm -rf -- "$scratch"' EXIT
 # Proportional nonexecuting gates. The benchmark binary is built but never launched.
 bash scripts/check-builtins-fixtures.sh
 bash "$lifecycle"
-cargo test --locked -p miso-engine-bench
-cargo test --locked -p miso-engine-builtins-compiler --features test-support \
+cargo test --locked -p bench
+cargo test --locked -p builtins-compiler --features test-support \
     phase_two_allocator_layouts_match_the_checked_resource_report
-cargo clippy --locked -p miso-engine-bench --all-targets -- -D warnings
-RUSTDOCFLAGS='-D warnings' cargo doc --locked -p miso-engine-bench --no-deps
+cargo clippy --locked -p bench --all-targets -- -D warnings
+RUSTDOCFLAGS='-D warnings' cargo doc --locked -p bench --no-deps
 for policy in workspace realtime builtins graph rack; do bash "scripts/check-${policy}-policy.sh" .; done
 
 build_directory="$scratch/build"
-CARGO_TARGET_DIR="$build_directory" cargo build --locked --release -p miso-engine-bench
-built_binary="$build_directory/release/miso_engine_bench"
+CARGO_TARGET_DIR="$build_directory" cargo build --locked --release -p bench
+built_binary="$build_directory/release/bench"
 [[ -x "$built_binary" && ! -L "$built_binary" ]] || fail 'fresh release binary unavailable'
 [[ "$(git rev-parse --verify HEAD)" == "$candidate_commit" &&
    "$(git rev-parse 'HEAD^{tree}')" == "$candidate_tree" &&
    -z "$(git status --porcelain=v1 --untracked-files=normal)" ]] || fail 'candidate drifted'
 require_hash Cargo.lock "$lock_sha256"
 require_hash "$nonbenchmark_seal" "$nonbenchmark_sha256"
-require_hash tools/miso-engine-bench/src/builtins.rs "$tool_source_sha256"
+require_hash tools/bench/src/builtins.rs "$tool_source_sha256"
 require_hash "$runner" "$runner_sha256"
 require_hash "$script_directory/preflight-builtins-benchmark.sh" "$preflight_script_sha256"
 require_hash "$lifecycle" "$lifecycle_sha256"
@@ -149,7 +149,7 @@ while read -r name bytes digest; do
     require_hash "$path" "$digest"
     [[ "$(wc -c <"$path")" == "$bytes" ]] || fail "Issue-058 artifact size after gates: $name"
 done <<'EOF'
-miso_engine_bench 3191104 242f6789ea994c4147205396bb10c10dbef85a48681160037680bb5b745b8944
+bench 3191104 242f6789ea994c4147205396bb10c10dbef85a48681160037680bb5b745b8944
 builtins-benchmark.preflight.json 2211 85fcfcfb1c72e2dfd1128667c583dfc2aae74b5f183bb4d04dd8604fa07a195d
 builtins-benchmark.raw.jsonl 0 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
 builtins-benchmark.validator.stderr 0 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
@@ -160,7 +160,7 @@ for name in builtins-benchmark.jsonl builtins-benchmark.prelaunch.disposition.js
         fail "forbidden Issue-058 artifact appeared after gates: $name"
 done
 
-temporary_binary="$(mktemp "$artifact_directory/.miso_engine_bench.XXXXXX")"
+temporary_binary="$(mktemp "$artifact_directory/.bench.XXXXXX")"
 cp -- "$built_binary" "$temporary_binary"
 chmod 0755 "$temporary_binary"
 mv -n -- "$temporary_binary" "$sealed_binary"

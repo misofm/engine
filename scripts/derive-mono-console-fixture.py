@@ -3,7 +3,7 @@
 
 The mono-collapse work needs a checked-in session whose tracks are *collapse-eligible*: a track
 whose two channels would compute bit-identical work everywhere upstream of the fader/matrix seam.
-``crates/miso-engine-effect-contract/src/symmetry.rs`` names the two structural terms that decide
+``crates/effect-contract/src/symmetry.rs`` names the two structural terms that decide
 that at preparation, and this script is what makes them true of every track:
 
   * ``SOURCE`` -- "the track's two channels read one source channel, or a one-channel source". The
@@ -100,6 +100,11 @@ PAN = re.compile(
     r"pan = \{ left = (-?[\d.]+), right = (-?[\d.]+), smoothing_samples = (\d+) \}"
 )
 
+# This string is written byte-for-byte into a frozen fixture (fixtures/session/v1/
+# console-sixty-four-track-mono.toml, docs/rulings/prefix-strip-inventory.md): the
+# `crates/miso-engine-effect-contract/...` mention below stays pinned to the pre-rename
+# spelling deliberately -- the fixture was not rewritten, and this generator must keep
+# producing its exact bytes.
 HEADER = """\
 # The mono 64-track console session: the same strip, collapse-eligible upstream of the seam.
 #
@@ -234,7 +239,7 @@ def canonicalise(draft: str) -> str:
         path.write_text(draft)
         result = subprocess.run(
             [
-                "cargo", "run", "-q", "-p", "miso-engine-session-validator", "--",
+                "cargo", "run", "-q", "-p", "session-validator", "--",
                 "validate", "--canonical", str(path),
             ],
             cwd=ROOT,

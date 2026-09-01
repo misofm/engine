@@ -29,7 +29,7 @@ check >/dev/null || { printf 'test-artifact-evidence-leak: baseline is red\n' >&
 
 # 1. The exact regression this gate exists for: conformance back in the shipped wasm invocation.
 new_case conformance-back-in-the-scalar-wasm-artifact
-sed -i 's|-p miso-engine-host-web -p miso-engine-lane|-p miso-engine-host-web -p miso-engine-conformance -p miso-engine-lane|' \
+sed -i 's|-p host-web -p lane|-p host-web -p conformance -p lane|' \
     "$case_root/.github/workflows/ci.yml"
 expect_failure conformance-back-in-the-scalar-wasm-artifact
 

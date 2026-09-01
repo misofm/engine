@@ -1,0 +1,30 @@
+[package]
+name = "transient-shaper"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+name = "transient_shaper"
+
+[dependencies]
+effect-contract.workspace = true
+effect-runtime.workspace = true
+lane.workspace = true
+math = { workspace = true, features = ["lane"] }
+
+[dev-dependencies]
+# Issue #105 phase 2: the workspace's one audited global allocator (#104 phase B). It is what
+# makes the conformance harness's `process.allocation` gate a real measurement; the harness
+# refuses to run without it.
+bench-support.workspace = true
+# Issue #105 phase 2: effect-contract conformance harness against the production factory.
+conformance = { workspace = true, features = ["realtime-audit"] }
+# The f64 oracle is test-only and never reachable from production rendering.
+dsp-reference.workspace = true
+lane.workspace = true
+sha2.workspace = true
+
+[lints]
+workspace = true

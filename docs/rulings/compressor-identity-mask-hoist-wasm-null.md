@@ -1,7 +1,7 @@
 # Hoisting the compressor's step-8 identity masks — a native win and a wasm null
 
 **Candidate.** Compressor effect-optimisation round 1, strategy S2. Three of the mask words step 8
-of `crates/miso-engine-compressor/src/kernel.rs` builds per channel-frame — `mix == 1`,
+of `crates/compressor/src/kernel.rs` builds per channel-frame — `mix == 1`,
 `mix == 0` and `makeup == 0` — are functions of coefficient words alone. A coefficient word cannot
 change inside the idle body, which loads `Coef` once and never redesigns, so the three compares
 were being repeated for every frame of every block to produce the same masks each time.

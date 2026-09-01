@@ -1,13 +1,13 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use miso_engine_effect_contract::{
+use effect_contract::{
     AutomationRate, EffectDescriptor, EffectId, EffectQuality, LatencySamples, LinkModeSet,
     ParameterChannelPolicy, ParameterDescriptor, ParameterDomain, ParameterId, ParameterMapping,
     ParameterUnit, PortDescriptor, PortId, PortLayout, PortRole, QualityDescriptor,
     SmoothingRule, StatePayloadSizes, TailSamples,
 };
-use miso_engine_effect_package::{
+use effect_package::{
     bind_effect_descriptor_wire, effect_descriptor_wire_required_size,
     encode_effect_descriptor_wire, verify_effect_state, EffectStateLimits,
 };
@@ -47,7 +47,7 @@ static PARAMETERS: [ParameterDescriptor; 1] = [ParameterDescriptor {
     // Issue #242: the row's persisted-value lattice. This target's descriptor is a linear
     // `Linear` row, so its class default is the declaration -- stating it here keeps the
     // descriptor byte-identical to what the canonical encoder emits.
-    lattice: miso_engine_effect_contract::default_parameter_lattice(
+    lattice: effect_contract::default_parameter_lattice(
         ParameterUnit::Linear,
         ParameterDomain::Continuous,
         ParameterMapping::Linear,

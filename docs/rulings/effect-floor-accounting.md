@@ -83,7 +83,7 @@ pipes, so a stream of one kind is pipe-limited at two and a stream of both is no
 below is mixed, so:
 
 ```text
-OPS_PER_CYCLE = 3.7      (tools/miso-engine-bench/src/floor.rs)
+OPS_PER_CYCLE = 3.7      (tools/bench/src/floor.rs)
 BANK_WIDTH    = 8        (Simd8, 256-bit)
 lane-ops per cycle = 29.6
 ```
@@ -118,7 +118,7 @@ cooldown), not a nameplate frequency and not `/proc/cpuinfo`.
 ## Counting rules
 
 Applied identically to all four inventories. Each is the `Lane` trait's own definition
-(`crates/miso-engine-lane/src/lib.rs`), not an assumption:
+(`crates/lane/src/lib.rs`), not an assumption:
 
 | construct | lane-ops | why |
 |---|---:|---|
@@ -140,7 +140,7 @@ the spec requires, and the lowering the compiler chose is a gap.
 
 ## Compressor inventory
 
-Source: `crates/miso-engine-compressor/src/kernel.rs`, the frozen nine-step operation order in the
+Source: `crates/compressor/src/kernel.rs`, the frozen nine-step operation order in the
 `frames_loop` doc comment, at the idle body (the standing fixture declares no automation, so the
 ramping body is not entered). Per lane-sample:
 
@@ -169,7 +169,7 @@ compressor.
 
 ### Corroboration from the emitted code
 
-`objdump` of `miso_engine_compressor::kernel::process_block::<f32x8>` in the runner's own release
+`objdump` of `compressor::kernel::process_block::<f32x8>` in the runner's own release
 build finds two loops: 858 instructions (the ramping body, with `advance_ramps` inlined) and **630
 instructions** for the idle body, which is one frame of both channels — 16 lane-samples. Its
 `vmulps` count is 44, or 22 per channel-frame, against the 22 multiplies the inventory above
@@ -190,8 +190,8 @@ They disagree about how much it costs to compute it, and that disagreement is th
 
 ## EQ inventory
 
-Source: `crates/miso-engine-parametric-eq/src/lib.rs` and the shared
-`crates/miso-engine-lane/src/kernels.rs` SVF. The standing fixture declares band 1 only on all 64
+Source: `crates/parametric-eq/src/lib.rs` and the shared
+`crates/lane/src/kernels.rs` SVF. The standing fixture declares band 1 only on all 64
 tracks; the other three of `EQ_SECTION_COUNT = 4` take the descriptor default `enabled = 0.0`
 and design to `EqSvfWords::IDENTITY`. Round 1's elision keeps `live.div_ceil(depth) * depth` = 2
 sections at `SVF_CASCADE_DEPTH = 2`, which is the crate's own pinned case for this fixture. Per
@@ -219,7 +219,7 @@ un-elided at four sections it would be 99.
 
 ## Limiter inventory, re-derived post-round-1
 
-Source: `crates/miso-engine-true-peak-limiter/src/lib.rs` at `98b5706`, which is the round-1 shape
+Source: `crates/true-peak-limiter/src/lib.rs` at `98b5706`, which is the round-1 shape
 (`git diff fce5da2 HEAD` over the crate is empty). The standing fixture takes the **uniform-cohort
 vectorized path**: all 64 tracks declare `lookahead = 5.0 ms`, so every lane's `LaneShape` is
 `window = 241`, every lane's phase advances in lockstep, and `lanes_uniform` admits the whole bank.
@@ -256,8 +256,8 @@ to take.
 
 ## Builtins inventory, and the ruling on "per enabled-section count"
 
-Source: `crates/miso-engine-builtins/src/`, `crates/miso-engine-lane/src/kernels/builtins.rs`, and
-the graph's routing in `crates/miso-engine-graph/src/runtime.rs`. Per lane-sample:
+Source: `crates/builtins/src/`, `crates/lane/src/kernels/builtins.rs`, and
+the graph's routing in `crates/graph/src/runtime.rs`. Per lane-sample:
 
 | stage | lane-ops |
 |---|---:|
@@ -291,7 +291,7 @@ behind one `bool` -- and executes the 7-lane-op row above unchanged. The overwhe
 blocks, on the overwhelming majority of tracks, are that arm by construction rather than by
 rounding.
 
-`BUILTINS_LANE_OPS = 69.0` (`tools/miso-engine-bench/src/floor.rs`) is therefore unchanged and this
+`BUILTINS_LANE_OPS = 69.0` (`tools/bench/src/floor.rs`) is therefore unchanged and this
 feature is **not** a recount trigger. Neither is it a `KERNEL_ROSTER` change
 (`scripts/check-web-audioworklet-callgraph.py`): the roster names the *effect* kernels the shipped
 wasm artifact must carry, and no builtin kernel has a row in it -- the two new bodies join
@@ -315,7 +315,7 @@ ring words — so there is no lane-op to count, and the residual it contributes 
 term of exactly the shape the transpose and dispatch terms already are. The overwhelming majority
 of tracks declare `delay_samples = 0` and are not lowered to a delay node at all, so the term is
 zero for them by construction rather than by rounding. `BUILTINS_LANE_OPS = 69.0`
-(`tools/miso-engine-bench/src/floor.rs`) is therefore unchanged and this feature is **not** a
+(`tools/bench/src/floor.rs`) is therefore unchanged and this feature is **not** a
 recount trigger.
 
 **The ruling.** The directive asks for a floor "per enabled-section count" because the identity
@@ -369,7 +369,7 @@ The `dispatch_only` row, per lane-sample, once both sections are elided:
 > counter as `count + (1.0 & bad)` rather than `count + select(bad, 1.0, 0.0)`, which is the same
 > bits on a canonical mask — `select(m, a, +0.0)` *is* `m & a` when `m` is all-ones or all-zeros —
 > and the same **one** mask-and-value operation. The inventory is unchanged at 7 and no floor row
-> moves; only the instruction the row names does. `crates/miso-engine-lane/tests/sanitise_counter.rs`
+> moves; only the instruction the row names does. `crates/lane/tests/sanitise_counter.rs`
 > holds both halves: the equivalence, and an independent scalar recount of what the D7 boundary
 > should have counted.
 
@@ -510,7 +510,7 @@ today's pricing is unchanged by either.
 
 ## The derived floors, and the standing %-of-floor table
 
-Composed by `tools/miso-engine-bench/src/floor.rs` from the inventories above, restated
+Composed by `tools/bench/src/floor.rs` from the inventories above, restated
 independently by `scripts/console-benchmark-record-lib.jq`, and carried in every
 `console_session` record of a run whose runner could measure the core clock.
 
@@ -827,7 +827,7 @@ question about the effect contract, not an optimisation.
   re-tuned fast-dB polynomial degree, a changed knee law, a different detector length, a change to
   `SVF_CASCADE_DEPTH` or to the elision's `kept` rule each move a numerator and require the
   affected inventory to be recounted here and the constant in
-  `tools/miso-engine-bench/src/floor.rs` and `scripts/console-benchmark-record-lib.jq` to move with
+  `tools/bench/src/floor.rs` and `scripts/console-benchmark-record-lib.jq` to move with
   it.
 * **A backend with more vector registers.** 29 `vbroadcastss` per channel-frame in the compressor
   is a register-pressure artefact of `x86-64-v3`'s sixteen `ymm`. AVX-512's thirty-two would change
@@ -1041,20 +1041,20 @@ untouched by the elision and run bit-identically on every path.
 
 * **Directive:** issue #184, owner 2026-08-26; sequenced after the round-1 merges (#181, #182,
   #186-#188) and before #183's W4/W8 capture.
-* **Floor table (authority):** `tools/miso-engine-bench/src/floor.rs`.
+* **Floor table (authority):** `tools/bench/src/floor.rs`.
 * **Validator (independent restatement):** `scripts/console-benchmark-record-lib.jq`,
   `scripts/console-benchmark-validator.jq`.
 * **Mutation coverage:** `scripts/test-console-benchmark.sh`.
-* **The elision and its gates:** `crates/miso-engine-lane/src/kernels/builtins.rs`
+* **The elision and its gates:** `crates/lane/src/kernels/builtins.rs`
   (`input_chain_plan`, `input_chain_block_elided`),
-  `crates/miso-engine-lane/tests/input_chain_elision.rs`,
-  `crates/miso-engine-builtins/tests/stage.rs` T11.
+  `crates/lane/tests/input_chain_elision.rs`,
+  `crates/builtins/tests/stage.rs` T11.
 * **Runner and its counter:** `scripts/run-console-benchmark.sh`,
   `scripts/check-bench-preconditions.sh`.
-* **Inventoried sources:** `crates/miso-engine-compressor/src/kernel.rs`,
-  `crates/miso-engine-parametric-eq/src/lib.rs`,
-  `crates/miso-engine-true-peak-limiter/src/lib.rs`, `crates/miso-engine-builtins/src/`,
-  `crates/miso-engine-lane/src/kernels.rs`, `crates/miso-engine-math/src/fast_db.rs`.
+* **Inventoried sources:** `crates/compressor/src/kernel.rs`,
+  `crates/parametric-eq/src/lib.rs`,
+  `crates/true-peak-limiter/src/lib.rs`, `crates/builtins/src/`,
+  `crates/lane/src/kernels.rs`, `crates/math/src/fast_db.rs`.
 * **Standing qualification authority:** `artifacts/issue175/` for what the strip renders;
   this document accounts for what it costs. The measurement it quotes is `artifacts/issue184/`.
 * **Precedent for the unit:** `docs/rulings/fast-db-tier-boundaries.md`, and its rule that a

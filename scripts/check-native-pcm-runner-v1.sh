@@ -10,7 +10,7 @@ fail() {
     exit 1
 }
 
-tool=tools/miso-engine-native-pcm-runner
+tool=tools/native-pcm-runner
 fixture=fixtures/native-pcm-runner/v1
 [[ -f "$tool/Cargo.toml" && -f "$tool/src/lib.rs" && -f "$tool/src/main.rs" ]] \
     || fail 'tool surface is incomplete'
@@ -24,12 +24,12 @@ python3 -I -B "$fixture/generate.py" --check \
     || fail 'exact four-rate RIFF corpus missing'
 [[ -f "$fixture/rf64-48000.wav" ]] || fail 'RF64 corpus row missing'
 
-for dependency in miso-engine-capi miso-engine-session miso-engine-source sha2; do
+for dependency in capi session source sha2; do
     rg -q "^$dependency\\.workspace = true$" "$tool/Cargo.toml" \
         || fail "missing exact direct dependency $dependency"
 done
 
-for forbidden in miso-engine-core miso-engine-graph miso-engine-graph-compiler; do
+for forbidden in engine graph graph-compiler; do
     ! rg -q "^$forbidden" "$tool/Cargo.toml" \
         || fail "forbidden product bypass dependency $forbidden"
 done
@@ -53,10 +53,15 @@ done
 # root (e.g. a hermetic test fixture with no sidecars/) would make the whole `if rg | rg; then`
 # pipeline read as "no violation" under `pipefail`, even when a real match was printed to stdout
 # by the roots that do exist.
+# A doc-comment mention of the tool by name (e.g. a fixture crate citing which tool configures
+# its fixtures) is documentation, not reachability -- the same distinction
+# check-conformance-boundaries.sh draws for the f64 oracle. This only started mattering once the
+# rename made the tool's real name (`native-pcm-runner`) the same bare spelling doc prose already
+# used informally.
 reachable="$({
-    rg -n 'miso-engine-native-pcm-runner|miso_engine_native_pcm_runner' crates hosts tools sidecars \
+    rg -n 'native-pcm-runner|native_pcm_runner' crates hosts tools sidecars \
         --glob Cargo.toml --glob '*.rs' || true
-} | rg -v '^tools/miso-engine-native-pcm-runner/' || true)"
+} | rg -v '^tools/native-pcm-runner/' | rg -v ':[0-9]+:[[:space:]]*///?[[:space:]]' || true)"
 [[ -z "$reachable" ]] || {
     printf '%s\n' "$reachable" >&2
     fail 'native-only runner is reachable from another package or Wasm surface'

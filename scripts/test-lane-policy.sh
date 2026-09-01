@@ -10,22 +10,22 @@ trap 'rm -rf -- "$scratch_root"' EXIT
 create_valid_fixture() {
     local root="$1"
     mkdir -p \
-        "$root/crates/miso-engine-lane/src" \
-        "$root/crates/miso-engine-lane/tests" \
-        "$root/crates/miso-engine-core/src" \
-        "$root/crates/miso-engine-compressor/src" \
-        "$root/hosts/miso-engine-host-web/src" \
-        "$root/tools/miso-engine-audit/src"
+        "$root/crates/lane/src" \
+        "$root/crates/lane/tests" \
+        "$root/crates/engine/src" \
+        "$root/crates/compressor/src" \
+        "$root/hosts/host-web/src" \
+        "$root/tools/audit/src"
 
     printf '%s\n' \
         'pub use wide::f32x8 as Simd8;' \
         'pub fn flush(x: f32) -> f32 { x }' \
-        >"$root/crates/miso-engine-lane/src/lib.rs"
+        >"$root/crates/lane/src/lib.rs"
     printf '%s\n' \
         '#![allow(unsafe_code)]' \
         'use core::arch::x86_64::_mm_getcsr;' \
         'pub fn fma_f32_via_f64(a: f32, b: f32, c: f32) -> f32 { a * b + c }' \
-        >"$root/crates/miso-engine-lane/src/softfma.rs"
+        >"$root/crates/lane/src/softfma.rs"
     # Issue #146: the second, and only other, lane file allowed to name a raw architecture
     # intrinsic. AArch64's FPCR has no stable `core::arch` intrinsic, so the canonical render-entry
     # environment reaches it through `core::arch::asm!`.
@@ -33,7 +33,7 @@ create_valid_fixture() {
         '#![allow(unsafe_code)]' \
         'use core::arch::asm;' \
         'pub fn canonical() {}' \
-        >"$root/crates/miso-engine-lane/src/fpenv.rs"
+        >"$root/crates/lane/src/fpenv.rs"
     printf '%s\n' \
         'impl Lane for f32 {' \
         '    fn fma(self, b: Self, c: Self) -> Self {' \
@@ -41,14 +41,14 @@ create_valid_fixture() {
         '        f32::mul_add(self, b, c)' \
         '    }' \
         '}' \
-        >"$root/crates/miso-engine-lane/src/scalar.rs"
+        >"$root/crates/lane/src/scalar.rs"
     printf '%s\n' \
         'fn oracle(a: f32, b: f32, c: f32) -> f32 { f32::mul_add(a, b, c) }' \
-        >"$root/crates/miso-engine-lane/tests/g3_softfma.rs"
-    printf 'pub fn version() {}\n' >"$root/crates/miso-engine-core/src/lib.rs"
-    printf 'pub fn process() {}\n' >"$root/crates/miso-engine-compressor/src/lib.rs"
-    printf 'pub fn render() {}\n' >"$root/hosts/miso-engine-host-web/src/lib.rs"
-    printf 'fn main() {}\n' >"$root/tools/miso-engine-audit/src/realtime.rs"
+        >"$root/crates/lane/tests/g3_softfma.rs"
+    printf 'pub fn version() {}\n' >"$root/crates/engine/src/lib.rs"
+    printf 'pub fn process() {}\n' >"$root/crates/compressor/src/lib.rs"
+    printf 'pub fn render() {}\n' >"$root/hosts/host-web/src/lib.rs"
+    printf 'fn main() {}\n' >"$root/tools/audit/src/realtime.rs"
 
     printf '%s\n' \
         '[workspace.dependencies]' \
@@ -69,7 +69,7 @@ create_valid_fixture() {
         ']' \
         '' \
         '[[package]]' \
-        'name = "miso-engine-lane"' \
+        'name = "lane"' \
         'version = "0.1.0"' \
         'dependencies = [' \
         ' "wide",' \
@@ -105,35 +105,35 @@ create_valid_fixture "$valid_root"
 bash "$policy_script" "$valid_root" >/dev/null
 
 expect_failure fusion-outside-lane \
-    'printf "%s\n" "let y = a.mul_add(b, c);" >>"$root/crates/miso-engine-compressor/src/lib.rs"'
+    'printf "%s\n" "let y = a.mul_add(b, c);" >>"$root/crates/compressor/src/lib.rs"'
 # sidecars/ ships its own delivery artifact (FLAC decoder sidecar move) and is scanned the same
 # as crates/, hosts/ and tools/ (scripts/check-lane-policy.sh:52) -- fused arithmetic there is the
 # same D3 violation as anywhere else.
 expect_failure fusion-in-a-sidecar \
     'mkdir -p "$root/sidecars/probe-decoder/src"; printf "%s\n" "let y = a.mul_add(b, c);" >"$root/sidecars/probe-decoder/src/lib.rs"'
 expect_failure wide-outside-lane \
-    'printf "%s\n" "use wide::f32x4;" >>"$root/hosts/miso-engine-host-web/src/lib.rs"'
+    'printf "%s\n" "use wide::f32x4;" >>"$root/hosts/host-web/src/lib.rs"'
 expect_failure arch-outside-softfma \
-    'printf "%s\n" "use core::arch::x86_64::_mm256_add_ps;" >>"$root/tools/miso-engine-audit/src/realtime.rs"'
+    'printf "%s\n" "use core::arch::x86_64::_mm256_add_ps;" >>"$root/tools/audit/src/realtime.rs"'
 expect_failure arch-in-second-lane-file \
-    'printf "%s\n" "use core::arch::x86_64::_mm256_add_ps;" >>"$root/crates/miso-engine-lane/src/scalar.rs"'
+    'printf "%s\n" "use core::arch::x86_64::_mm256_add_ps;" >>"$root/crates/lane/src/scalar.rs"'
 # The #146 exemption is the file `fpenv.rs`, not the lane crate: a third file does not inherit it.
 expect_failure arch-in-a-third-lane-file \
-    'printf "%s\n" "use core::arch::asm;" >"$root/crates/miso-engine-lane/src/fpenv_extra.rs"'
+    'printf "%s\n" "use core::arch::asm;" >"$root/crates/lane/src/fpenv_extra.rs"'
 # #84 phase A: the legacy `core/arch` exemption is gone entirely, so an intrinsic there -- the
 # very file the exemption used to name -- is now a failure like any other.
 expect_failure deleted-core-arch-has-no-exemption \
-    'mkdir -p "$root/crates/miso-engine-core/src/arch"; printf "%s\n" "use core::arch::x86_64::_mm256_fmadd_ps;" >"$root/crates/miso-engine-core/src/arch/x86.rs"'
+    'mkdir -p "$root/crates/engine/src/arch"; printf "%s\n" "use core::arch::x86_64::_mm256_fmadd_ps;" >"$root/crates/engine/src/arch/x86.rs"'
 expect_failure deleted-core-detection-has-no-exemption \
-    'printf "%s\n" "pub fn detect() { let _ = is_x86_feature_detected!(\"avx2\"); }" >>"$root/crates/miso-engine-core/src/lib.rs"'
+    'printf "%s\n" "pub fn detect() { let _ = is_x86_feature_detected!(\"avx2\"); }" >>"$root/crates/engine/src/lib.rs"'
 expect_failure relaxed-simd-anywhere \
-    'printf "%s\n" "let y = f32x4_relaxed_madd(a, b, c);" >>"$root/crates/miso-engine-lane/src/lib.rs"'
+    'printf "%s\n" "let y = f32x4_relaxed_madd(a, b, c);" >>"$root/crates/lane/src/lib.rs"'
 expect_failure unmarked-wide-max \
-    'printf "%s\n" "fn m(a: f32x8, b: f32x8) -> f32x8 { a.max(b) }" >>"$root/crates/miso-engine-lane/src/lib.rs"'
+    'printf "%s\n" "fn m(a: f32x8, b: f32x8) -> f32x8 { a.max(b) }" >>"$root/crates/lane/src/lib.rs"'
 expect_failure unmarked-std-mul-add \
-    'printf "%s\n" "fn f(a: f32) -> f32 { f32::mul_add(a, a, a) }" >>"$root/crates/miso-engine-lane/src/lib.rs"'
+    'printf "%s\n" "fn f(a: f32) -> f32 { f32::mul_add(a, a, a) }" >>"$root/crates/lane/src/lib.rs"'
 expect_failure new-runtime-detection \
-    'printf "%s\n" "let _ = is_x86_feature_detected!(\"avx2\");" >>"$root/crates/miso-engine-compressor/src/lib.rs"'
+    'printf "%s\n" "let _ = is_x86_feature_detected!(\"avx2\");" >>"$root/crates/compressor/src/lib.rs"'
 expect_failure unpinned-wide-requirement \
     'sed -i "s/=1.6.1/^1.6/" "$root/Cargo.toml"'
 expect_failure unpinned-wide-lock \

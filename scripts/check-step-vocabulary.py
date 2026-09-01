@@ -52,14 +52,14 @@ ALLOWED = {
     ("scripts/check-parameter-metadata-v1.py", "replaced #127's"),
     ("scripts/check-parameter-metadata-v1.py", "retired nudge spelling"),
     ("scripts/check-parameter-metadata-v1.py", "nudge=d[\"builtins\"]"),
-    ("tools/miso-engine-parameter-metadata/src/lib.rs", "before #242 renamed the vocabulary"),
-    ("tools/miso-engine-parameter-metadata/src/lib.rs", "`nudge` is retired"),
+    ("tools/parameter-metadata/src/lib.rs", "before #242 renamed the vocabulary"),
+    ("tools/parameter-metadata/src/lib.rs", "`nudge` is retired"),
     # Ordinary English about moving a test value, unrelated to the parameter ladder.
-    ("crates/miso-engine-gate-expander/tests/contract.rs", "threshold is nudged"),
-    ("crates/miso-engine-gate-expander/tests/MUTATIONS.md", "the test nudges the threshold"),
-    ("crates/miso-engine-parametric-eq/tests/stationary_hoist.rs", "let nudged ="),
-    ("crates/miso-engine-parametric-eq/tests/stationary_hoist.rs", "quiet, nudged,"),
-    ("tools/miso-engine-bench/src/console.rs", "restate or nudge"),
+    ("crates/gate-expander/tests/contract.rs", "threshold is nudged"),
+    ("crates/gate-expander/tests/MUTATIONS.md", "the test nudges the threshold"),
+    ("crates/parametric-eq/tests/stationary_hoist.rs", "let nudged ="),
+    ("crates/parametric-eq/tests/stationary_hoist.rs", "quiet, nudged,"),
+    ("tools/bench/src/console.rs", "restate or nudge"),
     # The derivation record for the rename itself has to name what it renamed.
     ("docs/derivations/242-parameter-lattice.md", "slot became a populated"),
 }

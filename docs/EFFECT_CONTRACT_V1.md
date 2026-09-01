@@ -7,7 +7,7 @@ runtime identities nor issue-011 gates.
 
 The contract crate's Rust types are deliberately **not** `repr(C)` and it publishes no C header.
 The only C ABI for descriptors is
-`crates/miso-engine-effect-package/include/miso_engine_effect_descriptor_v1.h` (80/24/64/16-byte
+`crates/effect-package/include/miso_engine_effect_descriptor_v1.h` (80/24/64/16-byte
 records, asserted in `effect-package`). A second, orphaned header once sat at
 `include/miso_engine_effect_contract_v1.h` describing 32-byte ports and 48-byte quality rows that
 nothing implemented; issue #95 deleted it and `scripts/check-effect-runtime-policy.sh` keeps it
@@ -31,11 +31,11 @@ loop from vectorising, and both production callers discarded the counters. The r
 three separate mechanisms, each where its hazard is:
 
 * **Denormals** — `flush(x) = andnot(|x| < 1e-20, x)`, applied to each recursive state word once
-  per sample *inside* the kernel (`miso_engine_lane::flush`). A subnormal *input* sample is no
+  per sample *inside* the kernel (`lane::flush`). A subnormal *input* sample is no
   longer replaced by zero; it renders, and it cannot reach a recurrence because the flush band
   strictly contains the subnormal band.
 * **Divergence** — output finiteness is checked **once per block per bank** with one vector
-  compare, `x == x` and `|x| < 1e30` (`miso_engine_effect_runtime::bank::check_block`). A failing
+  compare, `x == x` and `|x| < 1e30` (`effect_runtime::bank::check_block`). A failing
   block zeroes its output, resets that effect's state to prepared defaults, and increments a
   **block** counter. The contract's report counts blocks, never samples.
 * **Input sanitisation** — once per track per block at the track input stage, never inside an
@@ -127,9 +127,9 @@ per sample for the whole length of every ramp. One-pole-99 likewise precomputes 
 exp(ln(0.01)/N)` and `1-a` once, then `y = a*y_previous + (1-a)*target`, and assigns the exact
 target on update `N`. `None` assigns immediately. A new target restarts from the current value.
 
-`miso_engine_effect_runtime::ramp::LinearRamp` is the one render-path implementation;
-`miso_engine_effect_contract::ParameterSmoother` states the same law for the control plane, and
-`miso-engine-effect-runtime/tests/contract_ramp_identity.rs` proves the two agree bit for bit.
+`effect_runtime::ramp::LinearRamp` is the one render-path implementation;
+`effect_contract::ParameterSmoother` states the same law for the control plane, and
+`effect-runtime/tests/contract_ramp_identity.rs` proves the two agree bit for bit.
 
 V1 runtime automation is `Point` spans whose `start_sample` equals the block's first sample,
 validated off render by `validate_automation_block`; an effect trusts the slice it is given.
@@ -153,7 +153,7 @@ restore compares the two and rejects on the payload's own evidence; the argument
 the bytes. Where a payload carries none, the argument is checked against the descriptor's
 `state_layout_version` and the prepared sizes. The header is two little-endian words at the front
 of the common section — layout version, then the effect's data word count — implemented once in
-`miso_engine_effect_runtime::state_payload`. Adopting it moves `maximum_state.common_bytes` from 0
+`effect_runtime::state_payload`. Adopting it moves `maximum_state.common_bytes` from 0
 to 8, which is a canonical descriptor byte and an effect CID, so adoption travels with a
 `state_layout_version` bump (decision W2-D2): the crates that had to bump anyway carry a header
 today, the rest adopt one in a coordinated identity change. The **rule** above is frozen now for
@@ -213,8 +213,8 @@ The harness is built from the descriptor, not from the reference mock: the prepa
 `PreparedSidechainPort::None`), the impulse probe renders as many blocks as the declared latency
 needs, and lane isolation is compared against a silence-rendered control instance in dual-mono
 only — a linked detector is exactly what `Maximum` and `Average` declare. Launch effects run it:
-`miso-engine-compressor` (882 samples of lookahead, linked detector, a ring index that advances on
-silence) and `miso-engine-parametric-eq` (zero latency, header-carrying payload) each have a
+`compressor` (882 samples of lookahead, linked detector, a ring index that advances on
+silence) and `parametric-eq` (zero latency, header-carrying payload) each have a
 `tests/conformance.rs` asserting `report.launch_gates.failures.is_empty()`. A contract whose only
 conforming implementation is its own mock is not evidence. Deterministic tests execute at least 10,000
 descriptor, span, and session mutations. The release audit performs 1,000,000 128-frame calls

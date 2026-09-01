@@ -10,7 +10,7 @@
  *
  * The digest is compared against the native engine rendering the same document through
  * `AudioWorkletEngineHost` -- a separate process, a different CPU path, the same bits. See
- * `hosts/miso-engine-host-web/examples/sdk_render_oracle.rs`.
+ * `hosts/host-web/examples/sdk_render_oracle.rs`.
  */
 
 import assert from "node:assert/strict";
@@ -31,7 +31,7 @@ function nativeDigest(document, quanta, seed) {
   return execFileSync(
     "cargo",
     [
-      "run", "--locked", "-q", "-p", "miso-engine-host-web",
+      "run", "--locked", "-q", "-p", "host-web",
       "--example", "sdk_render_oracle", "--", String(quanta), String(seed),
     ],
     { cwd: REPO_ROOT, input: document, encoding: "utf8", maxBuffer: 1 << 24 },

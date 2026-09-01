@@ -4,7 +4,7 @@ set -euo pipefail
 command -v jq >/dev/null 2>&1 || { printf 'jq is required\n' >&2; exit 1; }
 mkdir -p target/issue11
 artifact="target/issue11/effect-contract-benchmark.jsonl"
-cargo run --locked --release -q -p miso-engine-bench -- effect-contract --benchmark-two-rounds >"$artifact"
+cargo run --locked --release -q -p bench -- effect-contract --benchmark-two-rounds >"$artifact"
 [[ "$(wc -l <"$artifact" | tr -d ' ')" == 12 ]] || { printf 'benchmark record count mismatch\n' >&2; exit 1; }
 jq -e -s '
   length == 12 and

@@ -2,22 +2,22 @@
 # Enforces issue-004 dependency direction, compiler boundary, and parser feature policy.
 set -euo pipefail
 
-session_manifest="crates/miso-engine-session/Cargo.toml"
-core_manifest="crates/miso-engine-core/Cargo.toml"
-session_source="crates/miso-engine-session/src"
+session_manifest="crates/session/Cargo.toml"
+core_manifest="crates/engine/Cargo.toml"
+session_source="crates/session/src"
 
-! grep -Fq 'miso-engine-session' "$core_manifest" || {
+! grep -Fq 'session' "$core_manifest" || {
     printf 'core must not depend on session\n' >&2
     exit 1
 }
-grep -Fqx 'miso-engine-core.workspace = true' "$session_manifest"
+grep -Fqx 'engine.workspace = true' "$session_manifest"
 grep -Fqx 'serde = { version = "=1.0.228", features = ["derive"] }' "$session_manifest"
 grep -Fqx 'toml = { version = "=0.9.9", default-features = false, features = ["parse", "serde"] }' "$session_manifest"
 ! grep -Fq 'spec-1.0.0' "$session_manifest" || {
     printf 'spec-1.0.0 is package metadata, not a Cargo feature\n' >&2
     exit 1
 }
-! rg -n 'use miso_engine_core::.*(PreparedRenderPlan|PlanPublisher)|PlanPublisher<' "$session_source" || {
+! rg -n 'use engine::.*(PreparedRenderPlan|PlanPublisher)|PlanPublisher<' "$session_source" || {
     printf 'session may not import plan publication APIs\n' >&2
     exit 1
 }

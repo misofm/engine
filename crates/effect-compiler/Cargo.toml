@@ -1,0 +1,33 @@
+[package]
+name = "effect-compiler"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+name = "effect_compiler"
+
+[dependencies]
+lane.workspace = true
+engine.workspace = true
+session.workspace = true
+effect-contract.workspace = true
+effect-package.workspace = true
+parametric-eq.workspace = true
+compressor.workspace = true
+gate-expander.workspace = true
+multiband-compressor.workspace = true
+true-peak-limiter.workspace = true
+soft-clip.workspace = true
+transient-shaper.workspace = true
+delay.workspace = true
+
+[dev-dependencies]
+# The catalog lattice sweep checks the builtin strip rows alongside the effect rows: they are
+# one shipped controllable surface even though they are two descriptor tables.
+builtins.workspace = true
+sha2.workspace = true
+
+[lints]
+workspace = true

@@ -5,15 +5,15 @@ The sibling gate `check-command-reason-vocabulary.py` proves the *reason* vocabu
 spellings. The *kind* vocabulary had no such proof, and by the time this gate was written it had
 already drifted -- silently, in the shipped artifact:
 
-* `hosts/miso-engine-host-web/src/lib.rs` -- the `COMMAND_*` constants. This is the authority.
+* `hosts/host-web/src/lib.rs` -- the `COMMAND_*` constants. This is the authority.
 * the same file's `CommandRecord::decode` whitelist -- the `matches!` arm that decides what the
   48-byte wire actually accepts. A constant the whitelist does not name is a kind no caller can
   send; a whitelist entry the constants do not name cannot exist.
-* `hosts/miso-engine-host-web/web/miso-engine-v2-audio-worklet-host.js` -- the `COMMAND_KINDS` set
+* `hosts/host-web/web/miso-engine-v2-audio-worklet-host.js` -- the `COMMAND_KINDS` set
   `validCommand` gates every submitted record through.
-* `hosts/miso-engine-host-web/web/miso-engine-v2-audio-worklet-host.d.ts` -- the
+* `hosts/host-web/web/miso-engine-v2-audio-worklet-host.d.ts` -- the
   `MisoCommandKind` enum a typed consumer compiles against.
-* `tools/miso-engine-parameter-metadata/src/lib.rs` -- the `commandKinds` rows of the shipped JSON,
+* `tools/parameter-metadata/src/lib.rs` -- the `commandKinds` rows of the shipped JSON,
   which is where an app reads the vocabulary from.
 * `scripts/check-parameter-metadata-v1.py` -- the schema gate's deliberately independent list.
 * the shipped `miso-engine-v2-parameter-metadata.json` itself, under `--artifacts`.
@@ -60,10 +60,10 @@ import sys
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 
-RUST_CONSTANTS = pathlib.Path("hosts/miso-engine-host-web/src/lib.rs")
-HOST_JS = pathlib.Path("hosts/miso-engine-host-web/web/miso-engine-v2-audio-worklet-host.js")
-HOST_DTS = pathlib.Path("hosts/miso-engine-host-web/web/miso-engine-v2-audio-worklet-host.d.ts")
-METADATA_GENERATOR = pathlib.Path("tools/miso-engine-parameter-metadata/src/lib.rs")
+RUST_CONSTANTS = pathlib.Path("hosts/host-web/src/lib.rs")
+HOST_JS = pathlib.Path("hosts/host-web/web/miso-engine-v2-audio-worklet-host.js")
+HOST_DTS = pathlib.Path("hosts/host-web/web/miso-engine-v2-audio-worklet-host.d.ts")
+METADATA_GENERATOR = pathlib.Path("tools/parameter-metadata/src/lib.rs")
 SCHEMA_GATE = pathlib.Path("scripts/check-parameter-metadata-v1.py")
 
 SOURCES = (RUST_CONSTANTS, HOST_JS, HOST_DTS, METADATA_GENERATOR, SCHEMA_GATE)

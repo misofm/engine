@@ -17,14 +17,14 @@ FMA), and it cites a measured 5.5x on the SVF kernel. Phase 0b exists to replace
 Full 0b is the console workload under a wasm runtime. It is not reachable without porting the
 bench tool, and the reasons are structural rather than a missing flag:
 
-1. `tools/miso-engine-bench/src/console.rs` is `#[cfg(not(target_arch = "wasm32"))]`, and every
+1. `tools/bench/src/console.rs` is `#[cfg(not(target_arch = "wasm32"))]`, and every
    compiler it drives -- session, builtins, effect and graph -- is a
    `[target.'cfg(not(target_arch = "wasm32"))'.dependencies]` entry of the bench manifest. The
    whole subject is absent from a wasm build of the crate.
 2. `wasm32-unknown-unknown` has no clock. `std::time::Instant` cannot be constructed in the guest,
    so `timing::timed` -- the shared timed region every subject measures through -- cannot run
    inside the module at all. Timing has to move to the host, around an exported call.
-3. The guest takes no arguments and reads no environment, by design (`miso-engine-wasm-gate-guest`
+3. The guest takes no arguments and reads no environment, by design (`wasm-gate-guest`
    exports `u32`-in/`u32`-out and imports nothing). The runner's round marker and the eleven host
    metadata names have nowhere to go, so a wasm console record could not carry the provenance the
    validators require of every other console record.
@@ -90,7 +90,7 @@ opposite of what doubling the lane width should do, and it makes the wasm/native
 case (1.86x) meaningless as a software-FMA measurement: if the native `f32x8` path is not reaching
 a hardware FMA either, then neither side of that row is the baseline it looks like.
 
-This is recorded and not diagnosed. Diagnosing it means reading `miso-engine-lane`'s `f32x8`
+This is recorded and not diagnosed. Diagnosing it means reading `lane`'s `f32x8`
 `mul_add` lowering, which is a DSP crate and outside phase 0's surface. It matters directly to
 [#163](https://github.com/misofm/engine-v2/issues/163) phase 2, whose whole subject is the numeric
 contract around fused multiply-add, and phase 2 should re-derive it rather than inherit this row.
@@ -107,7 +107,7 @@ target" -- reads above as structural. It was not. All four compilers build for
 `wasm32-unknown-unknown` today, unchanged; the `cfg(not(target_arch = "wasm32"))` gates were
 entries in the *bench manifest*, expressing that the bench binary is a native tool, and not a
 statement that the subject could not target wasm. No crate needed a change. The subject moved to
-`tools/miso-engine-console-workload`, which the native bench and the wasm guest both link, and the
+`tools/console-workload`, which the native bench and the wasm guest both link, and the
 nine native console digests are byte-identical across the move.
 
 Requirements 2 and 3 held exactly as written and were met as written: the host owns the clock and

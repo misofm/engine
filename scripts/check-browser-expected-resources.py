@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The browser-correctness resource-row staleness tripwire (issue #217).
 
-`hosts/miso-engine-host-web/tests/browser-v1/expected.json` pins the *resource report* of the
+`hosts/host-web/tests/browser-v1/expected.json` pins the *resource report* of the
 shipped `wasm32-unknown-unknown` simd128 worklet module alongside its PCM digests. The digests are
 gated from three directions; the resource rows had exactly one consumer --
 `scripts/web-audioworklet-browser-correctness.py --check` -- and that harness is not a sweep row,
@@ -11,7 +11,7 @@ So the rows went stale, twice, with every gate green:
 
 * d6674ce (#212, Strip Job 1) moved `builtinRetainedBytes` 706 -> 722 and
   `graphSessionPlusPlanBytes` 20524 -> 20492. #212 re-pinned its *native* mirror
-  (`crates/miso-engine-capi/tests/resource_lifecycle.rs`) in the same commit; the browser pin has
+  (`crates/capi/tests/resource_lifecycle.rs`) in the same commit; the browser pin has
   no such mirror and was missed.
 * 0fb9325 (#216, Strip Job 2) moved them again, 722 -> 802 and 20492 -> 30374.
 
@@ -81,11 +81,11 @@ import sys
 import tempfile
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
-FIXTURE = REPO / "hosts/miso-engine-host-web/tests/browser-v1"
+FIXTURE = REPO / "hosts/host-web/tests/browser-v1"
 EXPECTED_JSON = FIXTURE / "expected.json"
 DIRECT_ORACLE = FIXTURE / "direct-oracle.mjs"
 DELIVERY_SCRIPT = REPO / "scripts/build-web-audioworklet.sh"
-WORKLET_JS = REPO / "hosts/miso-engine-host-web/web/miso-engine-v2-audio-worklet.js"
+WORKLET_JS = REPO / "hosts/host-web/web/miso-engine-v2-audio-worklet.js"
 FIXTURE_RUNNER_JS = FIXTURE / "browser-correctness.js"
 
 MODULE_NAME = "miso-engine-v2-audio-worklet.simd128.wasm"
@@ -369,8 +369,8 @@ def build_module(destination: pathlib.Path) -> None:
         "gate's module would not be the shipped one",
     )
     require(
-        "-p miso-engine-host-web" in text and WASM_TARGET in text,
-        f"{DELIVERY_SCRIPT.name} no longer builds miso-engine-host-web for {WASM_TARGET}",
+        "-p host-web" in text and WASM_TARGET in text,
+        f"{DELIVERY_SCRIPT.name} no longer builds host-web for {WASM_TARGET}",
     )
     environment = dict(os.environ)
     environment["CARGO_TARGET_DIR"] = str(WASM_TARGET_DIR)
@@ -378,14 +378,14 @@ def build_module(destination: pathlib.Path) -> None:
     subprocess.run(
         [
             "cargo", "build", "--locked", "--release",
-            "--target", WASM_TARGET, "-p", "miso-engine-host-web",
+            "--target", WASM_TARGET, "-p", "host-web",
         ],
         cwd=REPO,
         env=environment,
         check=True,
     )
     shutil.copyfile(
-        WASM_TARGET_DIR / WASM_TARGET / "release" / "miso_engine_host_web.wasm",
+        WASM_TARGET_DIR / WASM_TARGET / "release" / "host_web.wasm",
         destination / MODULE_NAME,
     )
 
@@ -411,7 +411,7 @@ def native_report() -> dict:
     completed = subprocess.run(
         [
             "cargo", "run", "--locked", "--release", "-q",
-            "-p", "miso-engine-host-web", "--example", "browser_fixture_resources",
+            "-p", "host-web", "--example", "browser_fixture_resources",
         ],
         cwd=REPO,
         check=True,

@@ -1,4 +1,4 @@
-use miso_engine_protocol::{DecodeError, DecodeScratch, ProtocolCodec, ProtocolLimits};
+use protocol::{DecodeError, DecodeScratch, ProtocolCodec, ProtocolLimits};
 
 pub const MAX_FRAME_BYTES: usize = 4096;
 

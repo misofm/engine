@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-binary="${1:-target/release/miso_engine_bench}"
+binary="${1:-target/release/bench}"
 blocks="${2:-1000000}"
 trace_root="target/issue11/strace"
 [[ -x "$binary" ]] || { printf 'missing effect audit binary: %s\n' "$binary" >&2; exit 1; }

@@ -108,15 +108,15 @@ bash scripts/test-console-benchmark.sh >/dev/null || fail 'validator mutation su
 # self-test is red would refuse or admit for the wrong reason, and the run is one-shot.
 bash scripts/check-bench-preconditions.sh >/dev/null || fail 'bench precondition self-test failed'
 
-cargo test --locked -p miso-engine-bench >/dev/null || fail 'bench crate tests failed'
+cargo test --locked -p bench >/dev/null || fail 'bench crate tests failed'
 # The workspace/all-features form is what CI runs, and it is the form that matters: Cargo unifies
 # features across the packages one invocation selects, so a single-package clippy resolves a
 # different feature set and reports lints that the shipped resolution does not have.
 cargo clippy --locked --workspace --all-targets --all-features -- -D warnings >/dev/null 2>&1 ||
     fail 'workspace clippy failed'
-cargo build --locked --release --quiet -p miso-engine-bench || fail 'release build failed'
+cargo build --locked --release --quiet -p bench || fail 'release build failed'
 
-binary="$root/target/release/miso_engine_bench"
+binary="$root/target/release/bench"
 [[ -x "$binary" ]] || fail 'release binary is missing'
 # The subject refuses to run without its runner's round marker. Proving that here means a direct
 # invocation cannot quietly produce an unprovenanced record later.
@@ -132,8 +132,8 @@ jq -n -S \
     --arg commit "$candidate_commit" \
     --arg commit_sha256 "$(printf '%s' "$candidate_commit" | sha256sum | awk '{print $1}')" \
     --arg binary_sha256 "$(sha256sum "$binary" | awk '{print $1}')" \
-    --arg subject_sha256 "$(sha256sum tools/miso-engine-bench/src/console.rs | awk '{print $1}')" \
-    --arg floor_table_sha256 "$(sha256sum tools/miso-engine-bench/src/floor.rs | awk '{print $1}')" \
+    --arg subject_sha256 "$(sha256sum tools/bench/src/console.rs | awk '{print $1}')" \
+    --arg floor_table_sha256 "$(sha256sum tools/bench/src/floor.rs | awk '{print $1}')" \
     --arg fixture_sha256 "$(sha256sum fixtures/session/v1/console-sixty-four-track.toml | awk '{print $1}')" \
     --arg standing_fixture_sha256 "$(sha256sum fixtures/session/v1/console-sixty-four-track-intended.toml | awk '{print $1}')" \
     --arg fixture_generator_sha256 "$(sha256sum scripts/derive-intended-console-fixture.py | awk '{print $1}')" \

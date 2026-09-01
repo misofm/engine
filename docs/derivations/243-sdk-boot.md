@@ -12,7 +12,7 @@ whose findings 1–6 amend the brief directly.
 ## 1. The artifact set: five files → six
 
 `scripts/check-web-audioworklet.sh` pins the release directory's contents exactly, and
-`hosts/miso-engine-host-web/DEPLOYMENT.md` states the same number in prose. Both moved from five
+`hosts/host-web/DEPLOYMENT.md` states the same number in prose. Both moved from five
 to six because `miso-engine-v2-abi-layout.json` joined the set.
 
 The count is a direct enumeration, not an estimate: `.d.ts` + host `.js` + worklet `.js` +
@@ -49,7 +49,7 @@ two rows.
 symbol name as a string literal. The count is not chosen: it is
 `scripts/check-web-audioworklet.sh`'s own `expected_exports` list — which that gate proves against
 the disassembled module — minus `memory`, which is linear memory rather than a call.
-`26 − 1 = 25`. `tools/miso-engine-parameter-metadata/tests/abi_layout.rs` reads that list out of
+`26 − 1 = 25`. `tools/parameter-metadata/tests/abi_layout.rs` reads that list out of
 the gate script itself and requires the two to be one list, so the number cannot drift on either
 side without a red.
 
@@ -61,7 +61,7 @@ input word at boot-options offset 16 and no export reports the effective value. 
 must size its own producer therefore has to apply the rule, and publishing the rule is what keeps
 it from holding a private copy of `100`.
 
-The engine's rule, `miso_engine_host_core::default_source_ring_frames` (`prepare.rs:49-61`):
+The engine's rule, `host_core::default_source_ring_frames` (`prepare.rs:49-61`):
 
 ```
 stall_frames = sample_rate_hz * SOURCE_STALL_TOLERANCE_MS / 1000
@@ -73,7 +73,7 @@ frames       = quanta * quantum_frames
 re-pinned here as `SOURCE_RING_RESERVE_QUANTA`, and it is structural rather than tuned: one quantum
 is held by the consumer while it renders and one is in the recycle path, so a producer that keeps
 the tolerance filled never finds the ring closed. It is proved rather than asserted —
-`tools/miso-engine-parameter-metadata/tests/abi_layout.rs` re-derives the ring from the two
+`tools/parameter-metadata/tests/abi_layout.rs` re-derives the ring from the two
 published inputs and requires equality with `default_source_ring_frames` at all four launch rates
 crossed with ten quanta (40 shapes). Red mutation: publish `reserveQuanta: 1` and every row misses
 by exactly one quantum.
@@ -89,7 +89,7 @@ frames   = 78 * 127 = 9_906
 ```
 
 `78 × 127 = 9906`, matching the brief and the existing pin at
-`crates/miso-engine-host-core/tests/prepare.rs:419`. Both the arithmetic and the equality are
+`crates/host-core/tests/prepare.rs:419`. Both the arithmetic and the equality are
 asserted in `abi_layout.rs`, so the number in the brief has a witness that does not read the brief.
 
 ## 4. `bootResultAliases` is exactly three rows
@@ -99,7 +99,7 @@ Adopted ruling finding 2 fixes the table as `{1: refusedDocument, 2: refusedOpti
 vocabulary", which would read as a fourth alias row. It is not one, and the count is derived from
 the Rust rather than from either sentence:
 
-`hosts/miso-engine-host-web/src/lib.rs:95-99` declares exactly three alias constants —
+`hosts/host-web/src/lib.rs:95-99` declares exactly three alias constants —
 `RESULT_REFUSED_DOCUMENT = RESULT_INVALID_ARGUMENT`, `RESULT_REFUSED_OPTIONS =
 RESULT_ABI_MISMATCH`, `RESULT_REFUSED_LIFECYCLE = RESULT_WRONG_STATE`. `RESULT_REFUSED_BUDGET = 5`
 (`lib.rs:78`) is a **primary** code in the frozen ladder, not an alias of anything: it already
@@ -119,7 +119,7 @@ among its fifteen red mutations.
 The brief and #240 both describe "the 3-call boot". The emitted `stagingSequence` names four
 exports, and the count is read off the shipped call sites rather than off either sentence:
 `scripts/check-web-boot-budget.mjs:25-36` and
-`hosts/miso-engine-host-web/web/miso-engine-v2-audio-worklet.js:172-196` both call
+`hosts/host-web/web/miso-engine-v2-audio-worklet.js:172-196` both call
 `miso_engine_web_v1_abi_version`, then `miso_engine_web_v1_boot_options_ptr`, then
 `miso_engine_web_v1_document_ptr`, then `miso_engine_web_v1_boot`. The options block must be
 addressed before it can be written, so `boot_options_ptr` is a call and not a step of `boot`;
@@ -137,7 +137,7 @@ row's declared width ended, and the final row ends exactly at `bytes`. A renamed
 row, a widened row, or a hole all move the sum.
 
 The totals themselves are the engine's `size_of::<T>()` values, emitted through the
-`*_BYTES` constants, and are independently pinned in `hosts/miso-engine-host-web/src/tests.rs`.
+`*_BYTES` constants, and are independently pinned in `hosts/host-web/src/tests.rs`.
 Restating them in the Python gate is deliberate duplication: the gate is a second implementation,
 and a total that agrees with a tiling it did not compute is worth more than an imported constant.
 
@@ -183,7 +183,7 @@ numbers are re-derived here from the engine's own constants, and both are then *
 live paused session rather than asserted at it.
 
 **The 17th flush.** `DEFAULT_COMMAND_QUEUE_RECORDS = 64`
-(`hosts/miso-engine-host-web/src/lib.rs:134`) is the per-track control-queue depth, and it is
+(`hosts/host-web/src/lib.rs:134`) is the per-track control-queue depth, and it is
 published as `constants.defaultCommandQueueRecords` in the generated layout. A paused transport
 drains nothing — the matrix stage drains its queue at the top of every *rendered* block, so with no
 render there is no drain. Four single-lane records per flush therefore accumulate:
@@ -200,7 +200,7 @@ changed would break their agreement rather than silently re-pinning the count.
 
 **32 both-lane records.** A wire record addressed `channel = both` lowers to **two** lane records,
 which is the fact `2 × MAXIMUM_COMMAND_RECORDS` encodes at
-`hosts/miso-engine-host-web/src/tests.rs:3966`. Hence:
+`hosts/host-web/src/tests.rs:3966`. Hence:
 
 ```
 64 / 2 = 32 both-lane records fill one destination queue
@@ -229,7 +229,7 @@ sequence has something real to do. Recorded as a finding on the ruling's wording
 ## 9. The lattice: 49 of 66 → 66 of 66
 
 `sdk/src/core/lattice.ts` is a second implementation of `parameter_lattice_points`, and
-`tools/miso-engine-parameter-metadata --bin lattice_oracle` is what holds it to the first. The
+`tools/parameter-metadata --bin lattice_oracle` is what holds it to the first. The
 count that matters is how many of the shipped catalog's parameter rows reproduce the engine's
 digest exactly — points, ranks, intrinsic flags, six step resolutions and three decimal lookups
 per row.

@@ -37,7 +37,7 @@ output="$(
     MISO_ENGINE_BENCH_TARGET_TRIPLE="$(rustc -vV | awk '/host/ { print $2; exit }')" \
     MISO_ENGINE_BENCH_TARGET_FEATURES="runtime-dispatch-baseline" \
     MISO_ENGINE_BENCH_RUNTIME_OR_BROWSER="native-cli" \
-    target/release/miso_engine_audit fp-env \
+    target/release/audit fp-env \
         --blocks "$blocks" --benchmark-rounds "$rounds"
 )"
 

@@ -16,7 +16,7 @@
  * by `10^p` and rounding is integer arithmetic on `BigInt` with no floating point anywhere in the
  * rounding decision.
  *
- * `tools/miso-engine-parameter-metadata/src/bin/lattice_oracle` is what proves this claim rather
+ * `tools/parameter-metadata/src/bin/lattice_oracle` is what proves this claim rather
  * than merely stating it: the SDK's points are digested and compared against the engine's own, for
  * every parameter in the shipped catalog.
  */

@@ -5,7 +5,7 @@ bash scripts/check-effect-runtime-policy.sh .
 bash scripts/test-effect-runtime-policy.sh .
 bash scripts/check-effect-runtime-fixtures.sh .
 bash scripts/test-effect-runtime-fixtures.sh .
-cargo test --locked -p miso-engine-effect-contract -p miso-engine-effect-compiler -p miso-engine-conformance
+cargo test --locked -p effect-contract -p effect-compiler -p conformance
 
 # #105 phase 2 F1: the conformance harness runs against EVERY production `NativeEffectFactory`,
 # not just against its own reference mock. This loop is what stops the ninth effect from shipping
@@ -13,14 +13,14 @@ cargo test --locked -p miso-engine-effect-contract -p miso-engine-effect-compile
 # new effect crate is failing until it carries the test.
 #
 # Two directories are deliberately not products:
-#   * `crates/miso-engine-conformance` owns the reference mock the harness validates itself with;
-#   * `crates/miso-engine-graph-compiler`'s factories are `#[cfg(test)]` mocks inside its own unit
+#   * `crates/conformance` owns the reference mock the harness validates itself with;
+#   * `crates/graph-compiler`'s factories are `#[cfg(test)]` mocks inside its own unit
 #     tests (bank-bind failure and scalar-only fallbacks), not effects anybody can instantiate.
 conformance_crates=()
 while IFS= read -r source; do
     crate_dir="${source%%/src/*}"
     case "$crate_dir" in
-        crates/miso-engine-conformance | crates/miso-engine-graph-compiler) continue ;;
+        crates/conformance | crates/graph-compiler) continue ;;
     esac
     conformance_crates+=("$crate_dir")
     if [[ ! -f "$crate_dir/tests/conformance.rs" ]]; then
@@ -45,6 +45,6 @@ for crate_dir in "${conformance_crates[@]}"; do
     packages+=(-p "${crate_dir#crates/}")
 done
 cargo test --locked "${packages[@]}" --test conformance
-cargo run --locked --release -q -p miso-engine-bench -- effect-contract --conformance
+cargo run --locked --release -q -p bench -- effect-contract --conformance
 printf 'effect runtime contract/conformance: ok (%s production factories on the harness)\n' \
     "${#conformance_crates[@]}"

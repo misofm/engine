@@ -63,7 +63,7 @@ lattice explicitly would give one lattice two byte spellings; in a format whose 
 identity that is an aliasing bug. The encoder therefore emits the words only when the row's
 declaration differs from its derived class default.
 
-Consequence, and the reason it was found: `miso-engine-bench`'s three interchange descriptors are
+Consequence, and the reason it was found: `bench`'s three interchange descriptors are
 `Linear`/`Continuous`/`Linear`, whose class default IS `arithmetic(0.01, 2)` -- exactly what they
 declare. Writing that explicitly moved the `migration_two_step_bank_restore` envelope digest from
 the value sealed by issue #108's authorized one-shot run,
@@ -91,7 +91,7 @@ a derived lattice, so the encoder's rule and the format's rule are one sentence 
 convention the verifier declines to enforce.
 
 Proven by `an_explicitly_spelled_derived_lattice_is_refused_as_a_second_spelling` in
-`crates/miso-engine-effect-package/tests/descriptor_v1_qualification.rs`, which rebuilds the alias
+`crates/effect-package/tests/descriptor_v1_qualification.rs`, which rebuilds the alias
 by hand for every derived row of all three comprehensive descriptors and asserts the refusal names
 the aliased window. Deleting the rule turns it red.
 
@@ -108,7 +108,7 @@ the canonical-zeros rule fails `descriptor_v1_qualification.rs:578` and `state_v
 ## 8. The blessed conversion is not rounding-mode independent — OPEN
 
 Found while making section 4's rule hold under issue #146's floating-point arms. Descriptor
-validation runs inside `prepare_host_session`, and `crates/miso-engine-host-core/tests/fp_environment.rs`
+validation runs inside `prepare_host_session`, and `crates/host-core/tests/fp_environment.rs`
 calls it with the caller's MXCSR set to flush-to-zero, denormals-are-zero AND **round-toward-zero**.
 A first attempt at section 4 proved the rendering by converting it back with `decimal_to_f32` and
 comparing words; under that caller's word the whole parametric-EQ descriptor became invalid.
@@ -137,7 +137,7 @@ different words from the same document. Two candidate fixes, both outside this b
 
 The inherited tranche answered "is this lattice lawful?" by generating every point. Descriptor
 validation runs on the preparation path, and soft clip's three rows alone hold `601 + 481 + 101 =
-1183` points, each rendered to its own `String`: `crates/miso-engine-soft-clip/tests/allocation.rs`
+1183` points, each rendered to its own `String`: `crates/soft-clip/tests/allocation.rs`
 measured **1290 allocations per prepare against its pinned bound of 32**. This is precisely the
 defect #127 recorded from the v1 audit -- an un-memoized per-call derivation on a hot descriptor
 path -- arriving in v2 by a different route.

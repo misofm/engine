@@ -5,7 +5,7 @@
 #
 # `tsc` is a dependency, and installing it needs the network. Every row in `scripts/sweep.sh` is
 # hermetic by construction, so a row that ran `npm ci` would break the one property the sweep
-# exists to have. The same reasoning already keeps `hosts/miso-engine-host-web/qualification`'s
+# exists to have. The same reasoning already keeps `hosts/host-web/qualification`'s
 # suite out of the sweep, and this follows it.
 #
 # The SDK's *behavioural* evals need no `node_modules` at all -- they run under Node's native type

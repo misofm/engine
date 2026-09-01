@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # The fast dB tier's container (issue #144 item 5, "Condition H"; #149 workplan item 2).
 #
-# `miso_engine_math::fast_db` is deliberately less accurate than the exact `exp2_lane`/`log2_lane`
+# `math::fast_db` is deliberately less accurate than the exact `exp2_lane`/`log2_lane`
 # tier: about twice the error, for about a fifth of the polynomial. That trade is correct on a
 # dynamics detector, whose result is a level reading multiplied into audio, and wrong on anything
 # whose result becomes a pinned coefficient word -- a filter design, a route gain, a parameter
@@ -28,21 +28,21 @@ fail() {
 
 # The module that defines the tier, and the gate that proves its error bound. Both may use the
 # vocabulary freely; neither is a crossing.
-sealed_module=crates/miso-engine-math/src/fast_db.rs
-sealed_gate=crates/miso-engine-math/tests/f1_fast_db_bounds.rs
+sealed_module=crates/math/src/fast_db.rs
+sealed_gate=crates/math/tests/f1_fast_db_bounds.rs
 # The owning crate's root, which declares the module. It may name it and nothing else: a call
-# inside `miso-engine-math` would put the fast tier behind an exact-tier spelling, which is the
+# inside `math` would put the fast tier behind an exact-tier spelling, which is the
 # one confusion this seal cannot detect anywhere else.
-sealed_owner=crates/miso-engine-math/src/lib.rs
+sealed_owner=crates/math/src/lib.rs
 
 # The named crossings: source file, exact number of fast-tier calls, and the crossing identifiers
 # that must mark them. Every row is a reviewed decision that this call site is a dynamics gain
 # path. Adding a row is the deliberate act the seal exists to require.
 crossing_registry() {
     cat <<'EOF'
-crates/miso-engine-compressor/src/kernel.rs 2 X1 X2
-crates/miso-engine-gate-expander/src/kernel.rs 2 X3 X4
-crates/miso-engine-multiband-compressor/src/lib.rs 2 X5 X6
+crates/compressor/src/kernel.rs 2 X1 X2
+crates/gate-expander/src/kernel.rs 2 X3 X4
+crates/multiband-compressor/src/lib.rs 2 X5 X6
 EOF
 }
 
@@ -52,7 +52,7 @@ EOF
 # test cannot become the route by which the vocabulary spreads.
 restatement_registry() {
     cat <<'EOF'
-crates/miso-engine-gate-expander/tests/contract.rs 1
+crates/gate-expander/tests/contract.rs 1
 EOF
 }
 

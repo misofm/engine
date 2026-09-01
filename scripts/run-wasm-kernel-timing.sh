@@ -84,10 +84,10 @@ failure_reason=build_failed
 guest_target=target/ci/issue163-phase0-guest
 CARGO_TARGET_DIR="$guest_target" RUSTFLAGS="-C target-feature=+simd128" \
     cargo build --locked --release --quiet --target wasm32-unknown-unknown \
-    -p miso-engine-wasm-gate-guest 2>>"$stderr_log"
-cargo build --locked --release --quiet -p miso-engine-wasm-gates 2>>"$stderr_log"
-guest="$guest_target/wasm32-unknown-unknown/release/miso_engine_wasm_gate_guest.wasm"
-host="$root/target/release/miso_engine_wasm_gates"
+    -p wasm-gate-guest 2>>"$stderr_log"
+cargo build --locked --release --quiet -p wasm-gates 2>>"$stderr_log"
+guest="$guest_target/wasm32-unknown-unknown/release/wasm_gate_guest.wasm"
+host="$root/target/release/wasm_gates"
 [[ -f "$guest" && -x "$host" ]] || { failure_reason=missing_artifact; exit 1; }
 
 # ---------------------------------------------------------------------------------------------

@@ -49,7 +49,7 @@ SCHEMA = "miso.web.abi-layout.v1"
 ABI_VERSION = 0x0002_0000
 
 # Spelled out here rather than imported, on purpose: this file is the second implementation.
-# `hosts/miso-engine-host-web/src/tests.rs` is what proves the Rust constants themselves.
+# `hosts/host-web/src/tests.rs` is what proves the Rust constants themselves.
 RESULT_CODES = [
     (0, "ok"),
     (1, "invalidArgument"),

@@ -15,7 +15,14 @@ copy_case() {
     cp "$root/scripts/check-capi-object-symbols-v1.py" "$case_root/scripts/"
     cp "$root/scripts/check-capi-qualification-evidence-v1.py" "$case_root/scripts/"
     cp "$root/scripts/run-capi-qualification-v1.sh" "$case_root/scripts/"
+    # AUTHORITIES.sha256 is a frozen ledger (docs/rulings/prefix-strip-inventory.md): its
+    # content self-seal was already permanently retired before the prefix-strip rename (see
+    # check-capi-qualification-v1.sh's own comment), and the rename made some of its pinned
+    # paths stop existing too. The checker never reads these files' content -- only the
+    # ledger's own shape (line count, sort order, row regex) -- so a row whose path no longer
+    # exists is copied on a best-effort basis rather than failing the whole fixture build.
     while read -r _ path; do
+        [[ -f "$root/$path" ]] || continue
         mkdir -p "$case_root/$(dirname "$path")"
         cp "$root/$path" "$case_root/$path"
     done <"$root/fixtures/capi-qualification/v1/AUTHORITIES.sha256"
@@ -48,7 +55,7 @@ expect_failure authority-order bash "$case_root/scripts/check-capi-qualification
     "$case_root" preflight
 
 copy_case authority_membership
-printf '%064d  crates/miso-engine-capi/src/zzz.rs\n' 0 \
+printf '%064d  crates/capi/src/zzz.rs\n' 0 \
     >>"$case_root/fixtures/capi-qualification/v1/AUTHORITIES.sha256"
 expect_failure authority-membership bash "$case_root/scripts/check-capi-qualification-v1.sh" \
     "$case_root" preflight

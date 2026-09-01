@@ -9,12 +9,12 @@ trap 'rm -rf -- "$scratch"' EXIT
 
 make_fixture() {
     local fixture=$1
-    mkdir -p "$fixture/crates/miso-engine-rack/src" "$fixture/crates/miso-engine-rack-compiler/src"
+    mkdir -p "$fixture/crates/rack/src" "$fixture/crates/rack-compiler/src"
     printf '[workspace]\nmembers = []\n' >"$fixture/Cargo.toml"
-    printf '[package]\nname = "miso-engine-rack"\n[dependencies]\nmiso-engine-core.workspace = true\nmiso-engine-effect-contract.workspace = true\n' >"$fixture/crates/miso-engine-rack/Cargo.toml"
-    printf '[package]\nname = "miso-engine-rack-compiler"\n[dependencies]\nmiso-engine-core.workspace = true\nmiso-engine-effect-contract.workspace = true\nmiso-engine-rack.workspace = true\n' >"$fixture/crates/miso-engine-rack-compiler/Cargo.toml"
-    printf '//! fixture\n' >"$fixture/crates/miso-engine-rack/src/lib.rs"
-    printf '//! fixture\n' >"$fixture/crates/miso-engine-rack-compiler/src/lib.rs"
+    printf '[package]\nname = "rack"\n[dependencies]\nengine.workspace = true\neffect-contract.workspace = true\n' >"$fixture/crates/rack/Cargo.toml"
+    printf '[package]\nname = "rack-compiler"\n[dependencies]\nengine.workspace = true\neffect-contract.workspace = true\nrack.workspace = true\n' >"$fixture/crates/rack-compiler/Cargo.toml"
+    printf '//! fixture\n' >"$fixture/crates/rack/src/lib.rs"
+    printf '//! fixture\n' >"$fixture/crates/rack-compiler/src/lib.rs"
 }
 
 expect_failure() {
@@ -32,7 +32,7 @@ expect_failure() {
 valid="$scratch/valid"
 make_fixture "$valid"
 bash "$policy" "$valid" >/dev/null
-expect_failure unsafe 'printf "unsafe fn bad() {}\n" >>"$fixture/crates/miso-engine-rack/src/lib.rs"'
-expect_failure track-limit 'printf "const MAX_TRACKS: usize = 1;\n" >>"$fixture/crates/miso-engine-rack/src/lib.rs"'
-expect_failure dependency 'printf "miso-engine-session.workspace = true\n" >>"$fixture/crates/miso-engine-rack/Cargo.toml"'
+expect_failure unsafe 'printf "unsafe fn bad() {}\n" >>"$fixture/crates/rack/src/lib.rs"'
+expect_failure track-limit 'printf "const MAX_TRACKS: usize = 1;\n" >>"$fixture/crates/rack/src/lib.rs"'
+expect_failure dependency 'printf "session.workspace = true\n" >>"$fixture/crates/rack/Cargo.toml"'
 printf 'rack policy mutations: ok\n'

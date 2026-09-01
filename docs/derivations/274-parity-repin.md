@@ -61,7 +61,7 @@ involved in any row:
 | `04d291dd` #241 `Implement canonical PCM source schema` | 46 | 10,176 | `0xbdeb_b0f8_1c38_ec42` |
 | `bd260c90` *(`main` today)* | 46 | 10,176 | `0xbdeb_b0f8_1c38_ec42` |
 
-Each recomputed value reproduces the native pin that `crates/miso-engine-protocol/tests/
+Each recomputed value reproduces the native pin that `crates/protocol/tests/
 conformance_corpus.rs` carried at that revision, and the 04d291dd row reproduces
 `docs/derivations/241-schema-repins.md` §3 independently — including its measured corpus total of
 10,176 bytes and its claim that exactly one frame moves.
@@ -107,7 +107,7 @@ success. The native `conformance_corpus` test asserts the same value. Native and
 have agreed throughout; what drifted was a second hand-written copy of the answer.
 
 That copy is now gone. `COMPLETE_SCHEMA_HASH` lives once, in
-`crates/miso-engine-protocol/src/conformance.rs`, next to the corpus it pins. The native test
+`crates/protocol/src/conformance.rs`, next to the corpus it pins. The native test
 asserts it; the Wasm guest computes the digest itself and compares against it. A future re-pin is
 one edit, and the two arms can no longer disagree by omission — only by genuinely computing
 different bytes, which is the divergence this gate exists to catch.

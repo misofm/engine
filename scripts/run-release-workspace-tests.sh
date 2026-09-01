@@ -15,9 +15,9 @@
 # UN-hashed filenames (`libfoo.so`, `libfoo.a`), so the two panic variants write to the same paths
 # and the second clobbers the first. Three packages in this workspace are in that shape:
 #
-#   crates/miso-engine-capi            rlib + staticlib + cdylib
-#   crates/miso-engine-effect-package  rlib + cdylib
-#   hosts/miso-engine-host-web         rlib + cdylib
+#   crates/capi            rlib + staticlib + cdylib
+#   crates/effect-package  rlib + cdylib
+#   hosts/host-web         rlib + cdylib
 #
 # A downstream unit then links whichever variant happened to land last and gets a metadata
 # mismatch. The error face is nondeterministic (it depends on build scheduling) and usually reads

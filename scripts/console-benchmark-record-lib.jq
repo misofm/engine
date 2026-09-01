@@ -46,7 +46,7 @@ def automation_keys: ["arms","automated_channel","automated_effect","automated_e
 def floor_keys: ["core_clock_hz","core_clock_source","cycles_per_block_p50","cycles_per_lane_sample","floor_basis","floor_control_row","floor_cycles_per_lane_sample","isolated_cycles_per_lane_sample","isolated_percent_of_floor","lane_samples_per_block","percent_of_floor"];
 def session_floor_keys: (session_keys + floor_keys) | sort;
 
-# The op inventories, restated. `tools/miso-engine-bench/src/floor.rs` is the authority and
+# The op inventories, restated. `tools/bench/src/floor.rs` is the authority and
 # `docs/rulings/effect-floor-accounting.md` is the derivation; this is the independent copy that
 # makes a subject which quietly re-tuned a floor fail here rather than publish. The same discipline
 # `session_kind_shape` applies to a workload's track count is applied to its floor.
@@ -475,7 +475,7 @@ def observation_record_valid:
 # The second is the transpose count of each arm, which is what makes the measured delta
 # *explicable* rather than merely reported. The G5 shape gate says one planar/AoSoA round-trip per
 # bank chain per block, and #175 opened on the hypothesis that the merged layout would therefore
-# pay one round-trip per cohort where the split layout paid two. It does not: `miso-engine-graph`'s
+# pay one round-trip per cohort where the split layout paid two. It does not: `graph`'s
 # `runtime::bank_chain` materialises every prepared bank as a *single-slot* chain, so the cohort
 # planner's grouping never reaches the counter and both arms transpose the same number of times.
 # The record carries both counts so that finding is a datum in the stream and not a claim in a

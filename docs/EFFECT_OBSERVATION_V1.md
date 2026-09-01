@@ -63,7 +63,7 @@ correlate on one sample timeline **by construction** rather than by two clocks a
 
 ## The transport
 
-`miso_engine_core::realtime::observe` is a conflating single-writer cell, not a queue. An
+`engine::realtime::observe` is a conflating single-writer cell, not a queue. An
 observation is a *level*, not an *event*: a meter that missed three windows wants the newest one,
 not a replay. A queue would make the render thread's cost depend on whether a control thread
 happened to drain it.

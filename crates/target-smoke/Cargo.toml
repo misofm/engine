@@ -1,0 +1,19 @@
+[package]
+name = "target-smoke"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+name = "target_smoke"
+
+[dependencies]
+engine.workspace = true
+lane.workspace = true
+
+[features]
+default = []
+
+[lints]
+workspace = true

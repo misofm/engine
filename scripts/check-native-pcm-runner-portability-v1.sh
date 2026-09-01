@@ -10,7 +10,7 @@ fail() {
     exit 1
 }
 
-source=tools/miso-engine-native-pcm-runner/src/lib.rs
+source=tools/native-pcm-runner/src/lib.rs
 contract=docs/NATIVE_PCM_REFERENCE_RUNNER_V1.md
 [[ -f "$source" && -f "$contract" ]] || fail 'runner library or contract is missing'
 

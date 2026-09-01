@@ -86,8 +86,8 @@ export CARGO_PROFILE_RELEASE_OPT_LEVEL=3
 export CARGO_PROFILE_RELEASE_LTO=false
 export CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16
 failure_reason=build_failed
-cargo build --locked --release --quiet -p miso-engine-bench 2>>"$stderr_log"
-binary="$root/target/release/miso_engine_bench"
+cargo build --locked --release --quiet -p bench 2>>"$stderr_log"
+binary="$root/target/release/bench"
 [[ -x "$binary" ]] || { failure_reason=missing_binary; exit 1; }
 failure_reason=binary_identity_failed
 binary_sha256=$(sha256sum "$binary" | awk '{print $1}')

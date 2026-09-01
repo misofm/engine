@@ -8,7 +8,7 @@ cannot satisfy this class-A contract and are not admitted.
 
 ## Shipped decoder
 
-The client decoder is `miso-engine-flac-decoder`, built as a standalone
+The client decoder is `flac-decoder`, built as a standalone
 `wasm32-unknown-unknown` artifact. It uses Symphonia 0.6.1, pinned exactly in `Cargo.toml` and by the
 registry checksum in `Cargo.lock`. `scripts/build-flac-decoder.sh` uses the repository's pinned
 Rust 1.97.1 release profile, strips only debug information, verifies the committed artifact
@@ -40,12 +40,12 @@ is bit-exact. Identity is established over the integer bytes before this convers
 
 ## Publisher
 
-`miso-engine-stem-publisher` accepts a signed PCM16 or packed PCM24 WAVE master. FLAC is integer
+`stem-publisher` accepts a signed PCM16 or packed PCM24 WAVE master. FLAC is integer
 PCM: a `32f` master is refused typed (`master.bit_depth.32f.refused`) and is never encoded,
 hashed into a delivery row, or partially published. It asks the shared
-`miso-engine-stem-hasher` library for the canonical identity, encodes with the exact pinned
+`stem-hasher` library for the canonical identity, encodes with the exact pinned
 `flacenc 0.5.1` single-thread configuration recorded in the emitted JSON row, decodes the result
-through the same `miso-engine-flac-decoder` core shipped to clients, and asks the shared hasher to
+through the same `flac-decoder` core shipped to clients, and asks the shared hasher to
 recompute the decoded identity. It creates the delivery object only after shape and identity both
 round-trip. A corrupt or shortened encode is therefore not publishable.
 
@@ -55,7 +55,7 @@ FLAC transport bytes while leaving the canonical identity unchanged.
 
 ## One-way catalog migration
 
-`miso-engine-catalog-migrate` consumes an explicit pre-launch catalog of WAVE masters plus a
+`catalog-migrate` consumes an explicit pre-launch catalog of WAVE masters plus a
 complete embedding inventory. It verifies each old `sha256:` value against the old container-byte
 law, computes the new canonical-PCM identity through the shared hasher, and emits:
 
@@ -72,7 +72,7 @@ as an operations step gated on owner-provided storage access and a scheduled mai
 neither gate is satisfied by repository qualification.
 
 The non-gating cold-ingest sanity runner is `npm run flac-throughput` in
-`hosts/miso-engine-host-web/qualification`. It accepts a pinned decoder artifact directory, one
+`hosts/host-web/qualification`. It accepts a pinned decoder artifact directory, one
 FLAC delivery object, its canonical byte count and identity, and a browser name; decode and SHA-256
 both execute in the Worker and the runner logs elapsed time and MiB/s. Its input is deliberately
 temporary and it never writes a sealed benchmark artifact.

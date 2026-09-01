@@ -1,0 +1,170 @@
+//! Gate G5 runner: compare the frozen corpus's digests native versus wasm.
+//!
+//! ```text
+//! wasm_gates --native
+//! wasm_gates <guest.wasm> --expect-backend scalar|simd4|simd8
+//! wasm_gates --print-pins
+//! ```
+//!
+//! Each run prints one JSON evidence line and exits non-zero on the first mismatch.
+//! `scripts/run-wasm-gates.sh` builds both guest artifacts and runs all three legs.
+
+use std::path::PathBuf;
+use std::process::ExitCode;
+
+use wasm_gates::{
+    ExpectedBackend, WASMTIME_LICENCE, WASMTIME_VERSION, native_report, native_timing_report,
+    print_lane_pins, wasm_report, wasm_timing_report,
+};
+
+/// Usage text, printed on an argument error.
+const USAGE: &str = "usage:\n  \
+     wasm_gates --native\n  \
+     wasm_gates <guest.wasm> --expect-backend scalar|simd4|simd8\n  \
+     wasm_gates --native-timing scalar|simd4|simd8 --round warmup|1|2\n  \
+     wasm_gates <guest.wasm> --wasm-timing scalar|simd4|simd8 \
+--expect-backend scalar|simd4|simd8 --round warmup|1|2\n  \
+     wasm_gates --print-pins";
+
+/// Parses the runner-supplied round marker.
+///
+/// There is no default. The timing arm is a one-shot measurement whose provenance is its runner,
+/// exactly as the console benchmark's is, so a direct invocation cannot produce a record that
+/// claims to be one of the two frozen measured rounds.
+fn round_marker(name: &str) -> Option<u32> {
+    match name {
+        "warmup" => Some(0),
+        "1" => Some(1),
+        "2" => Some(2),
+        _ => None,
+    }
+}
+
+/// Parses a width name into the corpus width index the timing arm drives.
+fn width_index(name: &str) -> Option<usize> {
+    match name {
+        "scalar" => Some(0),
+        "simd4" => Some(1),
+        "simd8" => Some(2),
+        _ => None,
+    }
+}
+
+fn main() -> ExitCode {
+    let arguments: Vec<String> = std::env::args().skip(1).collect();
+    match arguments.first().map(String::as_str) {
+        Some("--native") if arguments.len() == 1 => run_native(),
+        // Issue #163 phase 0b. Descriptive only, and a separate record family: a `wasm-simd128`
+        // line is never comparable with a native console record.
+        Some("--native-timing") if arguments.len() == 4 && arguments[2] == "--round" => {
+            match (width_index(&arguments[1]), round_marker(&arguments[3])) {
+                (Some(width), Some(round)) => {
+                    println!("{}", native_timing_report(round, width).json());
+                    ExitCode::SUCCESS
+                }
+                _ => {
+                    eprintln!("{USAGE}");
+                    ExitCode::from(2)
+                }
+            }
+        }
+        Some("--print-pins") if arguments.len() == 1 => {
+            print!("{}", print_lane_pins());
+            ExitCode::SUCCESS
+        }
+        Some("--version") if arguments.len() == 1 => {
+            println!("wasmtime {WASMTIME_VERSION} ({WASMTIME_LICENCE})");
+            ExitCode::SUCCESS
+        }
+        Some(path)
+            if arguments.len() == 7
+                && arguments[1] == "--wasm-timing"
+                && arguments[3] == "--expect-backend"
+                && arguments[5] == "--round" =>
+        {
+            match (
+                width_index(&arguments[2]),
+                ExpectedBackend::parse(&arguments[4]),
+                round_marker(&arguments[6]),
+            ) {
+                (Some(width), Ok(expected), Some(round)) => {
+                    match wasm_timing_report(round, &PathBuf::from(path), expected, width) {
+                        Ok(report) => {
+                            println!("{}", report.json());
+                            ExitCode::SUCCESS
+                        }
+                        Err(error) => {
+                            eprintln!("wasm timing failure: {error:?}");
+                            ExitCode::FAILURE
+                        }
+                    }
+                }
+                _ => {
+                    eprintln!("{USAGE}");
+                    ExitCode::from(2)
+                }
+            }
+        }
+        Some(path) if arguments.len() == 3 && arguments[1] == "--expect-backend" => {
+            match ExpectedBackend::parse(&arguments[2]) {
+                Ok(expected) => run_wasm(PathBuf::from(path), expected),
+                Err(unknown) => {
+                    eprintln!("unknown backend '{unknown}'\n{USAGE}");
+                    ExitCode::from(2)
+                }
+            }
+        }
+        _ => {
+            eprintln!("{USAGE}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+/// The native leg: the corpus run in this process at every width against the pins.
+fn run_native() -> ExitCode {
+    let report = native_report();
+    println!("{}", report.json());
+    if report.mismatches.is_empty() && report.minmax_lowering_mismatches == 0 {
+        ExitCode::SUCCESS
+    } else {
+        for mismatch in &report.mismatches {
+            eprintln!("native mismatch: {mismatch}");
+        }
+        report_minmax_lowering("native", report.minmax_lowering_mismatches);
+        ExitCode::FAILURE
+    }
+}
+
+/// Names a `max`/`min` lowering divergence, which is a lane-crate defect rather than a pin drift.
+fn report_minmax_lowering(leg: &str, mismatches: u32) {
+    if mismatches != 0 {
+        eprintln!(
+            "{leg} max/min lowering: {mismatches} lanes disagree with the scalar oracle; the \
+             single-instruction lowering in crates/lane/src/wide_impl.rs is not D8 on \
+             this target"
+        );
+    }
+}
+
+/// The wasm leg: the same corpus executed under wasmtime against the same pins.
+fn run_wasm(path: PathBuf, expected: ExpectedBackend) -> ExitCode {
+    match wasm_report(&path, expected) {
+        Ok(report) => {
+            println!("{}", report.json());
+            if report.mismatches.is_empty() && report.minmax_lowering_mismatches == 0 {
+                ExitCode::SUCCESS
+            } else {
+                for mismatch in &report.mismatches {
+                    eprintln!("wasm mismatch: {mismatch}");
+                }
+                report_minmax_lowering("wasm", report.minmax_lowering_mismatches);
+                ExitCode::FAILURE
+            }
+        }
+        Err(error) => {
+            eprintln!("wasm gate failure: {error:?}");
+            ExitCode::FAILURE
+        }
+    }
+}

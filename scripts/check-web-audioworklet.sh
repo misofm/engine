@@ -59,7 +59,7 @@ check_clock_policy() {
 # Owner decision W4-D1 (#83): exactly one artifact ships and it is built with `+simd128`. The
 # scalar artifact and the dual-artifact selection are gone, so this file no longer has a
 # "scalar must contain no vector opcode" leg; the wasm-scalar *cargo check* stays in CI because
-# `miso-engine-lane`'s scalar wasm path is still gated, it is just not shipped.
+# `lane`'s scalar wasm path is still gated, it is just not shipped.
 check_opcode_policy() {
   local simd_text=$1
   grep -q 'f32x4.mul' <<<"$simd_text" || return 1
@@ -310,7 +310,7 @@ printf '%s
   python3 -B "$callgraph" --callgraph miso_engine_web_v1_meter_poll \
     --trap-owner 22AudioWorkletEngineHost11poll_meters || exit 1
 # `command_submit` runs in `port.onmessage`, not in `process()`, and its pan-law conversion
-# reaches `miso-engine-math`'s vendored argument reduction, which is full of checked indices. The
+# reaches `math`'s vendored argument reduction, which is full of checked indices. The
 # engine's rule for the control path is "never allocate on the render thread", so the allocation
 # half is what this export is held to -- and it is held to it absolutely.
 printf '%s
@@ -358,7 +358,7 @@ grep -q 'output\[1\]\.set(this.outputRight)' <<<"$process_body"
 # hand edit, or an effect added to the registry without rebuilding all fail here.
 (
   cd "$(dirname "${BASH_SOURCE[0]}")/.."
-  cargo run --locked --release -q -p miso-engine-parameter-metadata -- --check "$artifact_dir"
+  cargo run --locked --release -q -p parameter-metadata -- --check "$artifact_dir"
 ) >/dev/null || {
   echo "shipped parameter metadata is stale" >&2
   exit 1

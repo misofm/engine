@@ -4,9 +4,9 @@ set -euo pipefail
 
 binary="${1:-}"
 if [[ -z "$binary" ]]; then
-    binary=target/release/miso_engine_audit
+    binary=target/release/audit
     [[ -x "$binary" ]] ||
-        cargo build --locked --release -p miso-engine-audit >&2
+        cargo build --locked --release -p audit >&2
 fi
 [[ -x "$binary" ]] || {
     printf 'missing realtime audit binary: %s\n' "$binary" >&2

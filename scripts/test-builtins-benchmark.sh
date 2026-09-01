@@ -175,7 +175,7 @@ trap 'rm -rf -- "$lifecycle_scratch"' EXIT
 lifecycle_template="$lifecycle_scratch/template"
 mkdir -p "$lifecycle_template/scripts" "$lifecycle_template/bin" \
   "$lifecycle_template/target/issue72" "$lifecycle_template/target/issue35" \
-  "$lifecycle_template/tools/miso-engine-bench/src" \
+  "$lifecycle_template/tools/bench/src" \
   "$lifecycle_template/fixtures/builtins/v1/pcm" \
   "$lifecycle_template/fixtures/builtins/v1/meters" \
   "$lifecycle_template/.github/ISSUE_SPECS"
@@ -184,8 +184,8 @@ cp "$lifecycle_runner" "$script_directory/preflight-builtins-benchmark.sh" \
   "$script_directory/builtins-benchmark-record-validator.jq" \
   "$script_directory/builtins-benchmark-validator.jq" "$lifecycle_template/scripts/"
 cp "$repository_root/Cargo.lock" "$lifecycle_template/Cargo.lock"
-cp "$repository_root/tools/miso-engine-bench/src/builtins.rs" \
-  "$lifecycle_template/tools/miso-engine-bench/src/builtins.rs"
+cp "$repository_root/tools/bench/src/builtins.rs" \
+  "$lifecycle_template/tools/bench/src/builtins.rs"
 cp "$repository_root/fixtures/builtins/v1/MANIFEST.tsv" \
   "$lifecycle_template/fixtures/builtins/v1/MANIFEST.tsv"
 cp "$repository_root/fixtures/builtins/v1/pcm/graph-taps.f32le" \
@@ -208,7 +208,7 @@ EOF
 cat >"$lifecycle_template/bin/sha256sum" <<'EOF'
 #!/usr/bin/env bash
 case "$1" in
-  *target/issue35/miso_engine_bench)
+  *target/issue35/bench)
     hash=242f6789ea994c4147205396bb10c10dbef85a48681160037680bb5b745b8944 ;;
   *target/issue35/builtins-benchmark.preflight.json)
     hash=85fcfcfb1c72e2dfd1128667c583dfc2aae74b5f183bb4d04dd8604fa07a195d ;;
@@ -220,12 +220,12 @@ case "$1" in
 esac
 printf '%s  %s\n' "$hash" "$1"
 EOF
-truncate -s 3191104 "$lifecycle_template/target/issue35/miso_engine_bench"
+truncate -s 3191104 "$lifecycle_template/target/issue35/bench"
 truncate -s 2211 "$lifecycle_template/target/issue35/builtins-benchmark.preflight.json"
 : >"$lifecycle_template/target/issue35/builtins-benchmark.raw.jsonl"
 : >"$lifecycle_template/target/issue35/builtins-benchmark.validator.stderr"
 truncate -s 974 "$lifecycle_template/target/issue35/builtins-benchmark.disposition.json"
-cat >"$lifecycle_template/target/issue72/miso_engine_bench" <<'EOF'
+cat >"$lifecycle_template/target/issue72/bench" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 printf 'sealed-binary\n' >>"$MISO_ENGINE_TEST_LAUNCH_LOG"
@@ -249,7 +249,7 @@ case "${MISO_ENGINE_TEST_MODE:?}" in
 esac
 EOF
 chmod 755 "$lifecycle_template/bin/git" "$lifecycle_template/bin/sha256sum" \
-  "$lifecycle_template/target/issue72/miso_engine_bench"
+  "$lifecycle_template/target/issue72/bench"
 
 lifecycle_case=0
 new_lifecycle_case() {
@@ -271,9 +271,9 @@ new_lifecycle_case() {
   lifecycle_sha="$(sha256sum "$case_root/scripts/test-builtins-benchmark.sh" | awk '{print $1}')"
   record_sha="$(sha256sum "$case_root/scripts/builtins-benchmark-record-validator.jq" | awk '{print $1}')"
   aggregate_sha="$(sha256sum "$case_root/scripts/builtins-benchmark-validator.jq" | awk '{print $1}')"
-  binary_sha="$(sha256sum "$case_root/target/issue72/miso_engine_bench" | awk '{print $1}')"
+  binary_sha="$(sha256sum "$case_root/target/issue72/bench" | awk '{print $1}')"
   lock_sha="$(sha256sum "$case_root/Cargo.lock" | awk '{print $1}')"
-  source_sha="$(sha256sum "$case_root/tools/miso-engine-bench/src/builtins.rs" | awk '{print $1}')"
+  source_sha="$(sha256sum "$case_root/tools/bench/src/builtins.rs" | awk '{print $1}')"
   manifest_sha="$(sha256sum "$case_root/fixtures/builtins/v1/MANIFEST.tsv" | awk '{print $1}')"
   pcm_sha="$(sha256sum "$case_root/fixtures/builtins/v1/pcm/graph-taps.f32le" | awk '{print $1}')"
   meter_sha="$(sha256sum "$case_root/fixtures/builtins/v1/meters/graph-taps.jsonl" | awk '{print $1}')"
@@ -290,7 +290,7 @@ new_lifecycle_case() {
       fixture_manifest_sha256:$manifest,graph_pcm_sha256:$pcm,graph_meter_sha256:$meter,
       accepted_issue068_source_sha256:"0c71b71d864fbdd01aa918c6825abea78c38f0486535bc914af92142a5080d19",
       issue035_artifacts:{
-        miso_engine_bench:"242f6789ea994c4147205396bb10c10dbef85a48681160037680bb5b745b8944",
+        bench:"242f6789ea994c4147205396bb10c10dbef85a48681160037680bb5b745b8944",
         "builtins-benchmark.preflight.json":"85fcfcfb1c72e2dfd1128667c583dfc2aae74b5f183bb4d04dd8604fa07a195d",
         "builtins-benchmark.raw.jsonl":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
         "builtins-benchmark.validator.stderr":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -394,9 +394,9 @@ jq -e '.issue == 72 and .kind == "builtins_benchmark_disposition" and
        .raw_bytes == .accepted_bytes and .workload_exit_status == 0' "$disposition" >/dev/null
 
 new_lifecycle_case loader-failure
-printf '#!/missing/issue072-loader\n' >"$case_root/target/issue72/miso_engine_bench"
-chmod 755 "$case_root/target/issue72/miso_engine_bench"
-binary_sha="$(sha256sum "$case_root/target/issue72/miso_engine_bench" | awk '{print $1}')"
+printf '#!/missing/issue072-loader\n' >"$case_root/target/issue72/bench"
+chmod 755 "$case_root/target/issue72/bench"
+binary_sha="$(sha256sum "$case_root/target/issue72/bench" | awk '{print $1}')"
 jq --arg binary "$binary_sha" '.binary_sha256 = $binary' "$seal" >"$case_root/seal-mutated"
 mv "$case_root/seal-mutated" "$seal"
 set +e
@@ -545,7 +545,7 @@ for authority in cargo_lock_sha256 tool_source_sha256 preflight_script_sha256 \
 done
 
 preflight_template="$lifecycle_scratch/preflight-template"
-mkdir -p "$preflight_template"/{scripts,bin,crates,tools/miso-engine-bench/src,fixtures/builtins/v1/{pcm,meters},.github/ISSUE_SPECS,target/issue35,target/issue72}
+mkdir -p "$preflight_template"/{scripts,bin,crates,tools/bench/src,fixtures/builtins/v1/{pcm,meters},.github/ISSUE_SPECS,target/issue35,target/issue72}
 cp "$script_directory/preflight-builtins-benchmark.sh" "$preflight_template/scripts/"
 for script in run-builtins-benchmark.sh builtins-benchmark-record-validator.jq \
   builtins-benchmark-validator.jq; do
@@ -558,10 +558,10 @@ for script in test-builtins-benchmark.sh check-builtins-fixtures.sh \
 done
 printf '[workspace]\n' >"$preflight_template/Cargo.toml"
 printf 'candidate-lock\n' >"$preflight_template/Cargo.lock"
-printf '[package]\nname="bench"\n' >"$preflight_template/tools/miso-engine-bench/Cargo.toml"
-printf 'fn main() {}\n' >"$preflight_template/tools/miso-engine-bench/src/builtins.rs"
-for crate in miso-engine-core miso-engine-builtins miso-engine-builtins-compiler \
-  miso-engine-graph miso-engine-graph-compiler; do
+printf '[package]\nname="bench"\n' >"$preflight_template/tools/bench/Cargo.toml"
+printf 'fn main() {}\n' >"$preflight_template/tools/bench/src/builtins.rs"
+for crate in engine builtins builtins-compiler \
+  graph graph-compiler; do
   mkdir -p "$preflight_template/crates/$crate/src"
   printf '[package]\nname="%s"\n' "$crate" >"$preflight_template/crates/$crate/Cargo.toml"
   printf 'pub fn marker() {}\n' >"$preflight_template/crates/$crate/src/lib.rs"
@@ -569,7 +569,7 @@ done
 printf 'manifest\n' >"$preflight_template/fixtures/builtins/v1/MANIFEST.tsv"
 printf 'pcm\n' >"$preflight_template/fixtures/builtins/v1/pcm/graph-taps.f32le"
 printf 'meter\n' >"$preflight_template/fixtures/builtins/v1/meters/graph-taps.jsonl"
-truncate -s 3191104 "$preflight_template/target/issue35/miso_engine_bench"
+truncate -s 3191104 "$preflight_template/target/issue35/bench"
 truncate -s 2211 "$preflight_template/target/issue35/builtins-benchmark.preflight.json"
 : >"$preflight_template/target/issue35/builtins-benchmark.raw.jsonl"
 : >"$preflight_template/target/issue35/builtins-benchmark.validator.stderr"
@@ -609,7 +609,7 @@ case "$1" in
     hash=45f2e0196b4e457a633980653536bb397af7f8ebc82ea69f49c8812dfa7dd9a6 ;;
   *builtins-benchmark-validator.jq)
     hash=6085e740f15d7902fca4443d761cfb8e29df7168ba12f632c7946db56a3e1b63 ;;
-  *target/issue35/miso_engine_bench)
+  *target/issue35/bench)
     hash=242f6789ea994c4147205396bb10c10dbef85a48681160037680bb5b745b8944 ;;
   *target/issue35/builtins-benchmark.preflight.json)
     hash=85fcfcfb1c72e2dfd1128667c583dfc2aae74b5f183bb4d04dd8604fa07a195d ;;
@@ -626,11 +626,11 @@ cat >"$preflight_template/bin/cargo" <<'EOF'
 printf '%s\n' "$*" >>"$MISO_ENGINE_TEST_PREFLIGHT_CARGO_LOG"
 if [[ " $* " == *' build '* ]]; then
   mkdir -p "$CARGO_TARGET_DIR/release"
-  cat >"$CARGO_TARGET_DIR/release/miso_engine_bench" <<'INNER'
+  cat >"$CARGO_TARGET_DIR/release/bench" <<'INNER'
 #!/usr/bin/env bash
 printf 'launched\n' >>"$MISO_ENGINE_TEST_PREFLIGHT_LAUNCH_LOG"
 INNER
-  chmod 755 "$CARGO_TARGET_DIR/release/miso_engine_bench"
+  chmod 755 "$CARGO_TARGET_DIR/release/bench"
   if [[ "${MISO_ENGINE_TEST_PREFLIGHT_DRIFT:-0}" == 1 ]]; then
     printf 'drift\n' >>"$MISO_ENGINE_TEST_PREFLIGHT_ROOT/Cargo.toml"
   fi
@@ -644,7 +644,7 @@ done
 write_fake_nonbenchmark() {
   local root=$1
   local source_sha runner_sha preflight_sha lifecycle_sha nonbenchmark
-  source_sha="$(sha256sum "$root/tools/miso-engine-bench/src/builtins.rs" | awk '{print $1}')"
+  source_sha="$(sha256sum "$root/tools/bench/src/builtins.rs" | awk '{print $1}')"
   runner_sha="$(sha256sum "$root/scripts/run-builtins-benchmark.sh" | awk '{print $1}')"
   preflight_sha="$(sha256sum "$root/scripts/preflight-builtins-benchmark.sh" | awk '{print $1}')"
   lifecycle_sha="$(sha256sum "$root/scripts/test-builtins-benchmark.sh" | awk '{print $1}')"
@@ -665,7 +665,7 @@ write_fake_nonbenchmark() {
       graph_meter_sha256:"958a702612b76353ae2dbb0f8a03a2e41aafbd90ed72857bc0c39a10b5d1935f",
       accepted_issue068_source_sha256:"0c71b71d864fbdd01aa918c6825abea78c38f0486535bc914af92142a5080d19",
       issue035_artifacts:{
-        "miso_engine_bench":"242f6789ea994c4147205396bb10c10dbef85a48681160037680bb5b745b8944",
+        "bench":"242f6789ea994c4147205396bb10c10dbef85a48681160037680bb5b745b8944",
         "builtins-benchmark.preflight.json":"85fcfcfb1c72e2dfd1128667c583dfc2aae74b5f183bb4d04dd8604fa07a195d",
         "builtins-benchmark.raw.jsonl":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
         "builtins-benchmark.validator.stderr":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -701,7 +701,7 @@ jq -e '.runner_invocations == 0 and .workload_invocations == 0 and
        .warmup_passes == 1 and .measured_rounds == 2' \
   "$lifecycle_scratch/preflight-success/target/issue72/builtins-benchmark.preflight.json" >/dev/null
 for path in \
-  "$lifecycle_scratch/preflight-success/target/issue72/miso_engine_bench" \
+  "$lifecycle_scratch/preflight-success/target/issue72/bench" \
   "$lifecycle_scratch/preflight-success/target/issue72/builtins-benchmark.preflight.json"; do
   [[ -f "$path" && ! -L "$path" && "$(stat -c %h "$path")" == 1 ]]
 done
@@ -712,11 +712,11 @@ status=$?
 set -e
 [[ "$status" == 1 ]]
 grep -Fq 'candidate drifted' "$lifecycle_scratch/preflight-drift.log"
-[[ ! -e "$lifecycle_scratch/preflight-drift/target/issue72/miso_engine_bench" ]]
+[[ ! -e "$lifecycle_scratch/preflight-drift/target/issue72/bench" ]]
 [[ ! -e "$lifecycle_scratch/preflight-drift/target/issue72/builtins-benchmark.preflight.json" ]]
 [[ ! -e "$lifecycle_scratch/preflight-drift/launch.log" ]]
 
-for name in miso_engine_bench builtins-benchmark.preflight.json \
+for name in bench builtins-benchmark.preflight.json \
   builtins-benchmark.raw.jsonl builtins-benchmark.jsonl \
   builtins-benchmark.validator.stderr builtins-benchmark.prelaunch.disposition.json \
   builtins-benchmark.disposition.json; do

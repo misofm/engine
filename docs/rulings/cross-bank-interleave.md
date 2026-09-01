@@ -25,7 +25,7 @@ the executor, the schedule, the bank windows of #169/#170, or the effect contrac
 
 ## Measurement
 
-`crates/miso-engine-lane/tests/b2_interleave.rs`, bench host (Zen 5, `x86-64-v3`), one warmup and
+`crates/lane/tests/b2_interleave.rs`, bench host (Zen 5, `x86-64-v3`), one warmup and
 three measured rounds, minimum reported, round spread under 0.3%. The workload is one EQ bank-block:
 a four-section cascade over two channels of 128 frames, with a **distinct coefficient set in each of
 the eight slots** — sharing one set would let an arm win by holding in registers what the real EQ

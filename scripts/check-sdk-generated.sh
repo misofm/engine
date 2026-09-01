@@ -4,7 +4,7 @@
 # The SDK's type-shaped surface is a transcription chain with one authority at the top:
 #
 #   Rust structures and frozen constants
-#     -> `miso-engine-parameter-metadata` (offset_of!, registry walk)
+#     -> `parameter-metadata` (offset_of!, registry walk)
 #       -> sdk/assets/*.json
 #         -> sdk/src/generated/*.ts
 #
@@ -43,12 +43,12 @@ done
 # does not exist in a source checkout. So the declaration is copied, and the copy is checked here
 # rather than trusted: a shipped `.d.ts` that gains, loses or retypes a field and a stale mirror
 # that did not follow it is exactly the drift the mirror exists to catch.
-if ! cmp -s "$repo_root/hosts/miso-engine-host-web/web/miso-engine-v2-audio-worklet-host.d.ts" \
+if ! cmp -s "$repo_root/hosts/host-web/web/miso-engine-v2-audio-worklet-host.d.ts" \
             "$repo_root/sdk/src/browser/shipped-host.d.ts"; then
   echo "sdk/src/browser/shipped-host.d.ts is not the shipped declaration; refresh it with:" >&2
-  echo "  cp hosts/miso-engine-host-web/web/miso-engine-v2-audio-worklet-host.d.ts \\" >&2
+  echo "  cp hosts/host-web/web/miso-engine-v2-audio-worklet-host.d.ts \\" >&2
   echo "     sdk/src/browser/shipped-host.d.ts" >&2
-  diff -u "$repo_root/hosts/miso-engine-host-web/web/miso-engine-v2-audio-worklet-host.d.ts" \
+  diff -u "$repo_root/hosts/host-web/web/miso-engine-v2-audio-worklet-host.d.ts" \
           "$repo_root/sdk/src/browser/shipped-host.d.ts" >&2 || true
   exit 1
 fi

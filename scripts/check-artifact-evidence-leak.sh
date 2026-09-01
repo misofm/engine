@@ -2,10 +2,10 @@
 # #105 phase 2 C2: a CI invocation that produces a shipped artifact names no evidence crate.
 #
 # Cargo resolves and unifies features across the packages selected by ONE invocation. Before this
-# gate, `.github/workflows/ci.yml` built `miso-engine-host-web` and `miso-engine-conformance` in a
+# gate, `.github/workflows/ci.yml` built `host-web` and `conformance` in a
 # single `cargo build --target wasm32-unknown-unknown`, so conformance's edge to
-# `miso-engine-core/realtime-audit` was unified into the very wasm module the browser ships:
-# `cargo tree` on the CI list showed `realtime-audit`, while `-p miso-engine-host-web` alone did
+# `engine/realtime-audit` was unified into the very wasm module the browser ships:
+# `cargo tree` on the CI list showed `realtime-audit`, while `-p host-web` alone did
 # not. `scripts/check-realtime-audit-leak.sh` (#84 phase D) proves each package's own graph is
 # clean, which is necessary and not sufficient -- the leak lived in the invocation, not in a
 # manifest. This gate owns the invocation.
@@ -27,9 +27,9 @@ workflow=.github/workflows/ci.yml
 
 # The evidence crates: test scaffolding and the f64 oracle. Nothing that ships may resolve with
 # them, because whatever features they turn on are unified into the artifact.
-evidence=(miso-engine-conformance miso-engine-dsp-reference)
+evidence=(conformance dsp-reference)
 # The packages whose cross-target build IS the deliverable.
-shipped=(miso-engine-host-web miso-engine-host-mobile miso-engine-host-core miso-engine-capi)
+shipped=(host-web host-mobile host-core capi)
 
 fail() { printf 'artifact evidence gate failure: %s\n' "$1" >&2; exit 1; }
 

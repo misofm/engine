@@ -173,12 +173,12 @@ cargo clippy --locked --workspace --all-targets --all-features -- -D warnings >/
 guest_target=target/ci/issue163-phase2-guest
 CARGO_TARGET_DIR="$guest_target" RUSTFLAGS="-C target-feature=+simd128" \
     cargo build --locked --release --quiet --target wasm32-unknown-unknown \
-    -p miso-engine-wasm-console-guest || fail 'guest build failed'
-guest="$guest_target/wasm32-unknown-unknown/release/miso_engine_wasm_console_guest.wasm"
+    -p wasm-console-guest || fail 'guest build failed'
+guest="$guest_target/wasm32-unknown-unknown/release/wasm_console_guest.wasm"
 [[ -f "$guest" ]] || fail 'guest module is missing'
 
-cargo build --locked --release --quiet -p miso-engine-wasm-console || fail 'release build failed'
-binary="$root/target/release/miso_engine_wasm_console"
+cargo build --locked --release --quiet -p wasm-console || fail 'release build failed'
+binary="$root/target/release/wasm_console"
 [[ -x "$binary" ]] || fail 'release binary is missing'
 
 # The host refuses to run without its runner's round marker. Proving that here means a direct
@@ -199,9 +199,9 @@ fi
 # number. Built into its own target directory so the measured artifact above is not disturbed.
 scalar_target=target/ci/issue163-phase2-guest-scalar
 CARGO_TARGET_DIR="$scalar_target" cargo build --locked --release --quiet \
-    --target wasm32-unknown-unknown -p miso-engine-wasm-console-guest ||
+    --target wasm32-unknown-unknown -p wasm-console-guest ||
     fail 'scalar guest build failed'
-scalar_guest="$scalar_target/wasm32-unknown-unknown/release/miso_engine_wasm_console_guest.wasm"
+scalar_guest="$scalar_target/wasm32-unknown-unknown/release/wasm_console_guest.wasm"
 if MISO_ENGINE_BENCH_ROUND=1 "$binary" "$scalar_guest" >/dev/null 2>&1; then
     fail 'the wasm console host accepted a guest built without simd128'
 fi
@@ -215,8 +215,8 @@ if [[ "$arm" == issue183 ]]; then
     CARGO_TARGET_DIR="$simd8_target" \
         RUSTFLAGS="-C target-feature=+simd128 --cfg miso_wasm_simd8" \
         cargo build --locked --release --quiet --target wasm32-unknown-unknown \
-        -p miso-engine-wasm-console-guest || fail 'eight-lane guest build failed'
-    guest_simd8="$simd8_target/wasm32-unknown-unknown/release/miso_engine_wasm_console_guest.wasm"
+        -p wasm-console-guest || fail 'eight-lane guest build failed'
+    guest_simd8="$simd8_target/wasm32-unknown-unknown/release/wasm_console_guest.wasm"
     [[ -f "$guest_simd8" ]] || fail 'eight-lane guest module is missing'
     [[ "$(sha256sum "$guest_simd8" | awk '{print $1}')" != \
        "$(sha256sum "$guest" | awk '{print $1}')" ]] ||
@@ -240,9 +240,9 @@ jq -n -S \
     --arg binary_sha256 "$(sha256sum "$binary" | awk '{print $1}')" \
     --arg guest_sha256 "$(sha256sum "$guest" | awk '{print $1}')" \
     --argjson guest_simd8_sha256 "$guest_simd8_sha256" \
-    --arg host_sha256 "$(sha256sum tools/miso-engine-wasm-console/src/main.rs | awk '{print $1}')" \
-    --arg guest_source_sha256 "$(sha256sum tools/miso-engine-wasm-console-guest/src/lib.rs | awk '{print $1}')" \
-    --arg subject_sha256 "$(sha256sum tools/miso-engine-console-workload/src/lib.rs | awk '{print $1}')" \
+    --arg host_sha256 "$(sha256sum tools/wasm-console/src/main.rs | awk '{print $1}')" \
+    --arg guest_source_sha256 "$(sha256sum tools/wasm-console-guest/src/lib.rs | awk '{print $1}')" \
+    --arg subject_sha256 "$(sha256sum tools/console-workload/src/lib.rs | awk '{print $1}')" \
     --arg fixture_sha256 "$(sha256sum fixtures/session/v1/console-sixty-four-track.toml | awk '{print $1}')" \
     --arg standing_fixture_sha256 "$(sha256sum fixtures/session/v1/console-sixty-four-track-intended.toml | awk '{print $1}')" \
     --arg fixture_generator_sha256 "$(sha256sum scripts/derive-intended-console-fixture.py | awk '{print $1}')" \

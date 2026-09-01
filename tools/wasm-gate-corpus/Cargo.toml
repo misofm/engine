@@ -1,0 +1,33 @@
+[package]
+name = "wasm-gate-corpus"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# An `rlib`, deliberately: this crate is linked by both legs of gate G5 -- natively into
+# `wasm-gates`, and through `wasm-gate-guest` into the `wasm32` module.
+# The `cdylib` lives in the guest, because a lib target that emits one is compiled with the
+# release profile's `panic = "abort"` and could then not be linked into an unwinding test harness.
+[lib]
+name = "wasm_gate_corpus"
+
+[dependencies]
+builtins.workspace = true
+compressor.workspace = true
+delay.workspace = true
+effect-runtime.workspace = true
+gate-expander.workspace = true
+lane.workspace = true
+math = { workspace = true, features = ["lane"] }
+# The wave-2 effect crates whose corpora this gate replays; their pins live in those crates,
+# so the wasm leg replays the gate rather than a copy of it.
+multiband-compressor.workspace = true
+parametric-eq.workspace = true
+soft-clip.workspace = true
+transient-shaper.workspace = true
+true-peak-limiter.workspace = true
+sha2.workspace = true
+
+[lints]
+workspace = true

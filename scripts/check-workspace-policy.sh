@@ -83,29 +83,34 @@ toml_array_names() {
 
 while IFS= read -r manifest; do
     package_directory="$(basename "$(dirname "$manifest")")"
-    # sidecars/<name> is a deliberate exception to the directory-prefix rule, stated exactly
-    # in AGENTS.md's package-naming bullet: a sidecar ships as its own artifact with its own
-    # ABI and is disjoint from the render engine's dependency graph (AGENTS.md line 5:
-    # "delivery codecs are external sidecars" -- the architectural reason -- restated as the
-    # directory-naming carve-out in the same file's package-naming rule). Its directory is
-    # named by its short sidecar identity (e.g. sidecars/flac-decoder) rather than repeating
-    # the miso-engine- prefix. The package name, [lib] name, and [[bin]] name rules below are
-    # unchanged for sidecars -- only the directory prefix is relaxed for this one tree.
-    # `*` in a bash `[[ ]]` pattern spans `/`, so a bare `sidecars/*/Cargo.toml` test would
-    # exempt `sidecars/vendor/anything/Cargo.toml` at arbitrary depth. The exemption is exactly
-    # one path segment under sidecars/, so the relative path (with the `sidecars/` prefix
-    # stripped) is checked separately for a second `/` before `Cargo.toml`.
-    sidecar_relative="${manifest#sidecars/}"
-    if [[ "$manifest" == sidecars/*/Cargo.toml && "$sidecar_relative" != */*/Cargo.toml ]]; then
-        : # sidecars/<one-segment>/Cargo.toml is exempt from the directory-prefix rule.
-    else
-        [[ "$package_directory" == miso-engine-* ]] || {
-            fail "$manifest directory must start miso-engine-"
-        }
-    fi
-
     package_name="$(toml_name package "$manifest")"
-    [[ "$package_name" == miso-engine-* ]] || fail "$manifest package name must start miso-engine-"
+
+    # The `miso-engine-` prefix convention was retired by the prefix-strip rename (see
+    # docs/rulings/prefix-strip-inventory.md): every package under crates/, hosts/, tools/ and
+    # sidecars/ now carries a short, unprefixed name, and the directory basename equals the
+    # package name exactly -- there is no longer a sidecars/-only exemption to reason about,
+    # because there is no prefix left for it to be exempt from. This also forbids regressing
+    # back to the old prefix on a new or renamed crate.
+    [[ "$package_name" != miso-engine-* && "$package_name" != miso_engine_* ]] || {
+        fail "$manifest package name must not carry the retired miso-engine- prefix"
+    }
+    [[ "$package_directory" == "$package_name" ]] || {
+        fail "$manifest directory ($package_directory) must equal its package name ($package_name)"
+    }
+
+    # `core` silently shadows Rust's sysroot `core` crate for every dependent: it compiles, then
+    # fails downstream with no diagnostic that explains itself, and collapses the prelude and the
+    # `derive` attribute outright in a `no_std` crate -- proven when this repo chose `engine` over
+    # `core` for its former `miso-engine-core` (docs/rulings/prefix-strip-inventory.md). Neither
+    # `::core::` nor `extern crate core as x` escapes it: cargo's `--extern core=<path>` overrides
+    # the sysroot crate of that name unconditionally. `std`, `alloc`, `proc_macro` and `test` are
+    # the same hazard in kind (sysroot/prelude crate names), so they are forbidden alongside it.
+    case "$package_name" in
+        core | std | alloc | proc_macro | test)
+            fail "$manifest package name '$package_name' collides with a Rust sysroot/prelude crate name"
+            ;;
+    esac
+
     expected_crate_name="${package_name//-/_}"
 
     lib_name="$(toml_name lib "$manifest")"
@@ -132,7 +137,7 @@ scan_forbidden "compiled track-capacity identifiers are forbidden" \
 
 # Master plan #83 D4 (revision 4): exactly one global ISA configuration is approved, the
 # x86-64-v3 pin that lets `wide` lower `Lane` to AVX2 and `Lane::fma` to `vfmadd` with no runtime
-# dispatch (crates/miso-engine-lane refuses to compile without it, and every host attests the CPU
+# dispatch (crates/lane refuses to compile without it, and every host attests the CPU
 # at boot). Anything else -- `target-cpu`, a global `[build]` table, another feature set -- stays
 # forbidden: it would make the shipped ISA implicit again.
 approved_isa_pin='^\.cargo/config\.toml:[0-9]+:rustflags = \["-C", "target-feature=\+avx2,\+fma"\]$'

@@ -23,7 +23,7 @@ name: release build
 # profile-dependent cfg other than `debug_assertions`/`overflow_checks`, so the only OTHER way a
 # source-only change can compile in debug and fail in release is a `cfg(debug_assertions)` item --
 # of which this workspace has eight, one of them a `#[cfg(any(debug_assertions, test))]` fn in
-# crates/miso-engine-multiband-compressor/src/lib.rs. That class is the coverage this trade gives
+# crates/multiband-compressor/src/lib.rs. That class is the coverage this trade gives
 # up pre-merge, and it is the reason the push leg stays unfiltered.
 #
 # Over the 60 most recent non-merge commits on main, 4 touched a Cargo manifest, so the filter is
@@ -86,11 +86,11 @@ jobs:
       # panic override, and both pass in debug:
       #
       #   * `observation_cost_classes_are_what_they_claim (#159)` (#143,
-      #     crates/miso-engine-host-core/tests/effect_observation.rs) -- deterministic. Arming
+      #     crates/host-core/tests/effect_observation.rs) -- deterministic. Arming
       #     costs nothing (AllArmed sits at or below ConsoleNoCapacity), but the assertion
       #     subtracts the NoConsole baseline and so charges observation for a console existing.
       #   * `a_million_windows_are_read_whole_and_in_order (#160)` (#143,
-      #     crates/miso-engine-core/tests/observation_transport.rs) -- intermittent: it failed
+      #     crates/engine/tests/observation_transport.rs) -- intermittent: it failed
       #     three of five full-workspace release runs while passing 20 of 20 standalone release
       #     reruns, so it is timing-dependent rather than a plain red.
       #

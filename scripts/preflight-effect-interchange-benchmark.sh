@@ -16,7 +16,7 @@ done
 
 artifact_dir="$root/target/issue081"
 nonbenchmark_seal="$artifact_dir/nonbenchmark.seal.json"
-binary="$artifact_dir/miso_engine_bench"
+binary="$artifact_dir/bench"
 preflight_seal="$artifact_dir/benchmark-preflight.seal.json"
 raw="$artifact_dir/benchmark.raw.jsonl"
 accepted="$artifact_dir/benchmark.accepted.jsonl"
@@ -90,13 +90,13 @@ fi
 scratch="$(mktemp -d "$artifact_dir/.benchmark-preflight.XXXXXX")"
 trap 'rm -rf -- "$scratch"' EXIT
 CARGO_TARGET_DIR="$scratch/target" RUSTFLAGS='-D warnings' \
-    cargo build --locked --release -p miso-engine-bench
-built="$scratch/target/release/miso_engine_bench"
+    cargo build --locked --release -p bench
+built="$scratch/target/release/bench"
 [[ -f "$built" && -x "$built" && ! -L "$built" ]] || {
     printf 'effect interchange benchmark preflight: missing built binary\n' >&2
     exit 1
 }
-cp_binary="$scratch/miso_engine_bench"
+cp_binary="$scratch/bench"
 cp -- "$built" "$cp_binary"
 chmod 755 "$cp_binary"
 ln "$cp_binary" "$binary" || {
@@ -105,8 +105,8 @@ ln "$cp_binary" "$binary" || {
 }
 
 binary_sha="$(sha256sum "$binary" | awk '{print $1}')"
-source_sha="$(sha256sum tools/miso-engine-bench/src/effect_interchange.rs | awk '{print $1}')"
-tool_manifest_sha="$(sha256sum tools/miso-engine-bench/Cargo.toml | awk '{print $1}')"
+source_sha="$(sha256sum tools/bench/src/effect_interchange.rs | awk '{print $1}')"
+tool_manifest_sha="$(sha256sum tools/bench/Cargo.toml | awk '{print $1}')"
 validator_sha="$(sha256sum scripts/effect-interchange-benchmark-validator.py | awk '{print $1}')"
 preflight_sha="$(sha256sum scripts/preflight-effect-interchange-benchmark.sh | awk '{print $1}')"
 runner_sha="$(sha256sum scripts/run-effect-interchange-benchmark.sh | awk '{print $1}')"

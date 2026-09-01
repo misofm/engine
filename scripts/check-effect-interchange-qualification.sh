@@ -72,12 +72,12 @@ for path in \
     scripts/preflight-effect-interchange-benchmark.sh \
     scripts/run-effect-interchange-benchmark.sh \
     scripts/test-effect-interchange-benchmark.sh \
-    tools/miso-engine-bench/Cargo.toml \
-    tools/miso-engine-bench/src/effect_interchange.rs \
+    tools/bench/Cargo.toml \
+    tools/bench/src/effect_interchange.rs \
     docs/EFFECT_INTERCHANGE_QUALIFICATION_V1.md; do
     [[ -f "$path" ]] || fail "missing qualification path $path"
 done
-benchmark=tools/miso-engine-bench/src/effect_interchange.rs
+benchmark=tools/bench/src/effect_interchange.rs
 rg -q 'const OBSERVATIONS: usize = 256;' "$benchmark" ||
     fail 'benchmark observation count changed'
 for workload in descriptor_verify_identity_a package_verify_cid_select_a state_verify_reencode_current migration_two_step_bank_restore; do
@@ -118,7 +118,7 @@ PY
 fi
 rg -q 'OBSERVATIONS = 256' scripts/effect-interchange-benchmark-validator.py ||
     fail 'validator observation contract changed'
-if rg -n 'serde|criterion|iai|rand' tools/miso-engine-bench/Cargo.toml; then
+if rg -n 'serde|criterion|iai|rand' tools/bench/Cargo.toml; then
     fail 'benchmark gained a new dependency family'
 fi
 
@@ -132,15 +132,15 @@ rg -q '^if __name__ == "__main__":' scripts/effect-interchange-v1-reference.py |
 rg -q 'range\(0, ?100\)|seq 0 99' scripts/run-effect-interchange-reference-processes.sh ||
     fail 'runner does not freeze indexes 0..99'
 rg -q 'TRIALS: usize = 10_000' \
-    crates/miso-engine-effect-package/tests/effect_interchange_mutation.rs ||
+    crates/effect-package/tests/effect_interchange_mutation.rs ||
     fail 'mutation trial count changed'
 for seed in 0001 0002 0003; do
     rg -q "0x081d_e5c0_0000_$seed" \
-        crates/miso-engine-effect-package/tests/effect_interchange_mutation.rs ||
+        crates/effect-package/tests/effect_interchange_mutation.rs ||
         fail "mutation seed $seed changed"
 done
 rg -q 'exact_portable_migration_qualification_matrix' \
-    crates/miso-engine-effect-compiler/tests/migration_terminal.rs ||
+    crates/effect-compiler/tests/migration_terminal.rs ||
     fail 'missing exact migration matrix'
 
 for target in x86_64-unknown-linux-gnu aarch64-linux-android aarch64-apple-ios wasm32-unknown-unknown; do
@@ -156,16 +156,16 @@ rg -Fq '/^Export\[/' scripts/check-effect-interchange-targets.sh ||
 rg -Fq -- '-> "' scripts/check-effect-interchange-targets.sh ||
     fail 'Wasm export parser does not select explicit export arrows'
 
-if rg -n 'miso-engine-effect-interchange|^miso-engine-bench([.]workspace)?[[:space:]]*=|effect_interchange_qualification' \
+if rg -n 'miso-engine-effect-interchange|^bench([.]workspace)?[[:space:]]*=|effect_interchange_qualification' \
     crates/*/Cargo.toml hosts/*/Cargo.toml 2>/dev/null; then
     fail 'qualification dependency reached a production package'
 fi
 if rg -n 'effect_interchange|EffectInterchange|effect_state_migration|EffectStateMigration' \
-    crates/miso-engine-{core,session,graph,rack-compiler,builtins-compiler}/src 2>/dev/null; then
+    crates/{engine,session,graph,rack-compiler,builtins-compiler}/src 2>/dev/null; then
     fail 'interchange qualification or migration reached render-owned source'
 fi
 if rg -n 'Serialize|Deserialize|serde|migration_wire|encode_migration' \
-    crates/miso-engine-effect-compiler/src/migration.rs; then
+    crates/effect-compiler/src/migration.rs; then
     fail 'migration registry serialization appeared'
 fi
 # Anchored at the start of the attribute so the prose in `ffi.rs`'s doc comment, which names the
@@ -174,10 +174,10 @@ fi
 # `..._inspect` signature, its summary struct and its record layouts are untouched. The count is
 # still exact, so a *third* export is still a failure.
 exports="$(rg -n '^[[:space:]]*#\[(unsafe\()?no_mangle' \
-    crates/miso-engine-effect-package/src | wc -l | tr -d ' ')"
+    crates/effect-package/src | wc -l | tr -d ' ')"
 [[ "$exports" -eq 2 ]] || fail 'descriptor package gained a C export'
 rg -q 'fn miso_engine_effect_descriptor_v1_inspect' \
-    crates/miso-engine-effect-package/src/ffi.rs || fail 'sole descriptor export missing'
+    crates/effect-package/src/ffi.rs || fail 'sole descriptor export missing'
 if find fixtures/effect-interchange/v1 -mindepth 1 -maxdepth 1 -type f \
     ! -name ACCEPTED.sha256 -print -quit | grep -q .; then
     fail 'untracked/generated corpus appeared in interchange fixture directory'
@@ -188,6 +188,6 @@ if find . -path './target' -prune -o -type f \
     fail 'generated artifact exists under a source path'
 fi
 for api in verify_effect_descriptor_wire verify_effect_package inspect_effect_state_selector resolve_effect_state_migration restore_scalar_effect_state_with_migration restore_unpublished_effect_bank_track_state_with_migration; do
-    rg -q "$api" crates/miso-engine-effect-{package,compiler}/src || fail "stale API $api"
+    rg -q "$api" crates/effect-{package,compiler}/src || fail "stale API $api"
 done
 printf 'effect interchange qualification policy: ok\n'

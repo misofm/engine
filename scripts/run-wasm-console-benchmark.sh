@@ -13,7 +13,7 @@
 #
 #   1. *`console.rs` and the four compilers are `cfg(not(wasm32))`.* That was bench-tool-level.
 #      Every compiler builds for `wasm32-unknown-unknown` unchanged; the subject moved into
-#      `miso-engine-console-workload`, which the native legs and the guest both link. No crate
+#      `console-workload`, which the native legs and the guest both link. No crate
 #      changed, and the native console record's nine output digests are byte-identical across the
 #      move.
 #   2. *The guest has no clock.* It does not get one. The host times around an exported call that
@@ -310,8 +310,8 @@ failure_reason=guest_build_failed
 guest_target=target/ci/issue163-phase2-guest
 CARGO_TARGET_DIR="$guest_target" RUSTFLAGS="-C target-feature=+simd128" \
     cargo build --locked --release --quiet --target wasm32-unknown-unknown \
-    -p miso-engine-wasm-console-guest 2>>"$stderr_log"
-guest="$guest_target/wasm32-unknown-unknown/release/miso_engine_wasm_console_guest.wasm"
+    -p wasm-console-guest 2>>"$stderr_log"
+guest="$guest_target/wasm32-unknown-unknown/release/wasm_console_guest.wasm"
 [[ -f "$guest" ]] || { failure_reason=missing_guest_module; exit 1; }
 guest_sha256=$(sha256sum "$guest" | awk '{print $1}')
 
@@ -329,8 +329,8 @@ if [[ "$arm" == issue183 ]]; then
     CARGO_TARGET_DIR="$guest_simd8_target" \
         RUSTFLAGS="-C target-feature=+simd128 --cfg miso_wasm_simd8" \
         cargo build --locked --release --quiet --target wasm32-unknown-unknown \
-        -p miso-engine-wasm-console-guest 2>>"$stderr_log"
-    guest_simd8="$guest_simd8_target/wasm32-unknown-unknown/release/miso_engine_wasm_console_guest.wasm"
+        -p wasm-console-guest 2>>"$stderr_log"
+    guest_simd8="$guest_simd8_target/wasm32-unknown-unknown/release/wasm_console_guest.wasm"
     [[ -f "$guest_simd8" ]] || { failure_reason=missing_guest_simd8_module; exit 1; }
     guest_simd8_sha256=$(sha256sum "$guest_simd8" | awk '{print $1}')
     [[ "$guest_simd8_sha256" != "$guest_sha256" ]] || {
@@ -342,8 +342,8 @@ if [[ "$arm" == issue183 ]]; then
 fi
 
 failure_reason=build_failed
-cargo build --locked --release --quiet -p miso-engine-wasm-console 2>>"$stderr_log"
-binary="$root/target/release/miso_engine_wasm_console"
+cargo build --locked --release --quiet -p wasm-console 2>>"$stderr_log"
+binary="$root/target/release/wasm_console"
 [[ -x "$binary" ]] || { failure_reason=missing_binary; exit 1; }
 failure_reason=binary_identity_failed
 binary_sha256=$(sha256sum "$binary" | awk '{print $1}')

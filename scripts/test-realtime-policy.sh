@@ -9,20 +9,20 @@ trap 'rm -rf -- "$scratch_root"' EXIT
 
 create_fixture() {
     local root="$1"
-    mkdir -p "$root/crates/miso-engine-core/src/realtime" \
-        "$root/crates/miso-engine-lane/src" \
-        "$root/crates/miso-engine-capi/src" \
-        "$root/crates/miso-engine-capi/tests" \
-        "$root/crates/miso-engine-effect-compiler/tests" \
-        "$root/crates/miso-engine-effect-package/src" \
-        "$root/crates/miso-engine-effect-package/tests" \
-        "$root/crates/miso-engine-session/tests" \
-        "$root/hosts/miso-engine-host-web/src" \
-        "$root/hosts/miso-engine-host-web/tests" \
-        "$root/tools/miso-engine-bench-support/src" \
-        "$root/tools/miso-engine-audit/src" \
-        "$root/tools/miso-engine-native-pcm-runner/src" \
-        "$root/tools/miso-engine-bench/src"
+    mkdir -p "$root/crates/engine/src/realtime" \
+        "$root/crates/lane/src" \
+        "$root/crates/capi/src" \
+        "$root/crates/capi/tests" \
+        "$root/crates/effect-compiler/tests" \
+        "$root/crates/effect-package/src" \
+        "$root/crates/effect-package/tests" \
+        "$root/crates/session/tests" \
+        "$root/hosts/host-web/src" \
+        "$root/hosts/host-web/tests" \
+        "$root/tools/bench-support/src" \
+        "$root/tools/audit/src" \
+        "$root/tools/native-pcm-runner/src" \
+        "$root/tools/bench/src"
     printf '%s\n' \
         '// REALTIME_POLICY_BEGIN' \
         'fn render() {}' \
@@ -36,73 +36,73 @@ create_fixture() {
         '// REALTIME_POLICY_BEGIN' \
         'fn exchange() {}' \
         '// REALTIME_POLICY_END' \
-        >"$root/crates/miso-engine-core/src/realtime/mod.rs"
+        >"$root/crates/engine/src/realtime/mod.rs"
     printf '%s\n' \
         '#![allow(unsafe_code)]' \
         'unsafe impl Send for Allowed {}' \
         'struct Allowed;' \
-        >"$root/crates/miso-engine-core/src/realtime/spsc.rs"
+        >"$root/crates/engine/src/realtime/spsc.rs"
     printf '%s\n' \
         '#![allow(unsafe_code)]' \
         'unsafe impl Sync for DisjointArena {}' \
         'struct DisjointArena;' \
-        >"$root/crates/miso-engine-core/src/realtime/disjoint.rs"
+        >"$root/crates/engine/src/realtime/disjoint.rs"
     printf '%s\n' \
         '#![allow(unsafe_code)]' \
         'unsafe fn read_mxcsr() {}' \
-        >"$root/crates/miso-engine-lane/src/softfma.rs"
+        >"$root/crates/lane/src/softfma.rs"
     # Issue #146: the AArch64 FPCR pair of the canonical render-entry environment.
     printf '%s\n' \
         '#![allow(unsafe_code)]' \
         'unsafe fn write_fpcr() {}' \
-        >"$root/crates/miso-engine-lane/src/fpenv.rs"
+        >"$root/crates/lane/src/fpenv.rs"
     printf '%s\n' \
         '#![allow(unsafe_code)]' \
         'unsafe fn capi_boundary() {}' \
-        >"$root/crates/miso-engine-capi/src/ffi.rs"
+        >"$root/crates/capi/src/ffi.rs"
     printf '%s\n' \
         '#![allow(unsafe_code)]' \
         'unsafe impl GlobalAlloc for LifecycleAllocator {}' \
         'struct LifecycleAllocator;' \
-        >"$root/crates/miso-engine-capi/tests/resource_lifecycle.rs"
+        >"$root/crates/capi/tests/resource_lifecycle.rs"
     printf '%s\n' \
         '#![allow(unsafe_code)]' \
         'unsafe fn descriptor_capi_boundary() {}' \
-        >"$root/crates/miso-engine-effect-package/src/ffi.rs"
+        >"$root/crates/effect-package/src/ffi.rs"
     printf '%s\n' \
         '#![allow(unsafe_code)]' \
         'unsafe impl Send for PackageAllocationAudit {}' \
         'struct PackageAllocationAudit;' \
-        >"$root/crates/miso-engine-effect-package/tests/package_allocation.rs"
+        >"$root/crates/effect-package/tests/package_allocation.rs"
     printf '%s\n' \
         '#![allow(unsafe_code)]' \
         'unsafe impl Send for MigrationAllocationAudit {}' \
         'struct MigrationAllocationAudit;' \
-        >"$root/crates/miso-engine-effect-compiler/tests/migration_terminal.rs"
+        >"$root/crates/effect-compiler/tests/migration_terminal.rs"
     printf '%s\n' \
         '#![allow(unsafe_code)]' \
         'unsafe impl GlobalAlloc for CountingAllocator {}' \
         'struct CountingAllocator;' \
-        >"$root/crates/miso-engine-session/tests/allocation_budget.rs"
+        >"$root/crates/session/tests/allocation_budget.rs"
     printf '%s\n' \
         '#![allow(unsafe_code)]' \
         'unsafe fn web_boundary() {}' \
-        >"$root/hosts/miso-engine-host-web/src/ffi.rs"
+        >"$root/hosts/host-web/src/ffi.rs"
     # Issue #240: the exact peak fixture's forwarding allocator is a measured audit boundary.
     printf '%s\n' \
         '#![allow(unsafe_code)]' \
         'unsafe impl GlobalAlloc for PeakAllocator {}' \
         'struct PeakAllocator;' \
-        >"$root/hosts/miso-engine-host-web/tests/boot_transient_budget.rs"
+        >"$root/hosts/host-web/tests/boot_transient_budget.rs"
     printf '%s\n' \
         '#![allow(unsafe_code)]' \
         'unsafe impl Send for CapiAudit {}' \
         'struct CapiAudit;' \
-        >"$root/tools/miso-engine-audit/src/capi.rs"
+        >"$root/tools/audit/src/capi.rs"
     printf '%s\n' \
         '#![allow(unsafe_code)]' \
         'unsafe fn frozen_c_abi_adapter() {}' \
-        >"$root/tools/miso-engine-native-pcm-runner/src/lib.rs"
+        >"$root/tools/native-pcm-runner/src/lib.rs"
     # #104 phase B: the fourteen audited `GlobalAlloc` copies became one. `bench-support/src/alloc.rs`
     # is the only file under `tools/` that owns the allocator wrapper, and eleven tool paths left
     # this list because they no longer contain `unsafe` at all.
@@ -110,14 +110,14 @@ create_fixture() {
         '#![allow(unsafe_code)]' \
         'unsafe impl GlobalAlloc for AuditedAllocator {}' \
         'struct AuditedAllocator;' \
-        >"$root/tools/miso-engine-bench-support/src/alloc.rs"
+        >"$root/tools/bench-support/src/alloc.rs"
     printf '%s\n' \
         '#![allow(unsafe_code)]' \
         'unsafe fn follow() {}' \
-        >"$root/tools/miso-engine-bench/src/protocol.rs"
+        >"$root/tools/bench/src/protocol.rs"
     printf '%s\n' \
         'fn measure() {}' \
-        >"$root/tools/miso-engine-bench/src/rack.rs"
+        >"$root/tools/bench/src/rack.rs"
 }
 
 expect_failure() {
@@ -137,59 +137,59 @@ create_fixture "$valid"
 bash "$policy_script" "$valid" >/dev/null
 
 expect_failure allocation \
-    'sed -i "s/fn render() {}/fn render() { let _ = Vec::new(); }/" "$root/crates/miso-engine-core/src/realtime/mod.rs"'
+    'sed -i "s/fn render() {}/fn render() { let _ = Vec::new(); }/" "$root/crates/engine/src/realtime/mod.rs"'
 expect_failure lock \
-    'sed -i "s/fn queue() {}/fn queue() { let _ = Mutex::new(0); }/" "$root/crates/miso-engine-core/src/realtime/mod.rs"'
+    'sed -i "s/fn queue() {}/fn queue() { let _ = Mutex::new(0); }/" "$root/crates/engine/src/realtime/mod.rs"'
 expect_failure log \
-    'sed -i "s/fn buffer() {}/fn buffer() { println!(\"bad\"); }/" "$root/crates/miso-engine-core/src/realtime/mod.rs"'
+    'sed -i "s/fn buffer() {}/fn buffer() { println!(\"bad\"); }/" "$root/crates/engine/src/realtime/mod.rs"'
 # #84 phase B (F12): a panic path is a realtime violation like an allocation is. `LocalRing`'s
 # `.take().expect("prepared local ring slot")` was the only hit inside a marked region; it is gone,
 # and the regex now keeps it gone.
 expect_failure panic-path-expect \
-    'sed -i "s/fn exchange() {}/fn exchange() { None::<u8>.expect(\"x\"); }/" "$root/crates/miso-engine-core/src/realtime/mod.rs"'
+    'sed -i "s/fn exchange() {}/fn exchange() { None::<u8>.expect(\"x\"); }/" "$root/crates/engine/src/realtime/mod.rs"'
 expect_failure panic-path-macro \
-    'sed -i "s/fn exchange() {}/fn exchange() { unreachable!(); }/" "$root/crates/miso-engine-core/src/realtime/mod.rs"'
+    'sed -i "s/fn exchange() {}/fn exchange() { unreachable!(); }/" "$root/crates/engine/src/realtime/mod.rs"'
 expect_failure unsafe-scope \
-    'printf "%s\n" "unsafe fn bad() {}" >>"$root/crates/miso-engine-core/src/realtime/mod.rs"'
+    'printf "%s\n" "unsafe fn bad() {}" >>"$root/crates/engine/src/realtime/mod.rs"'
 expect_failure unsafe-outside-exact-allowlist \
-    'printf "%s\n" "unsafe fn bad() {}" >"$root/tools/miso-engine-bench/src/other.rs"'
+    'printf "%s\n" "unsafe fn bad() {}" >"$root/tools/bench/src/other.rs"'
 expect_failure unsafe-outside-capi-audit-main \
-    'printf "%s\n" "unsafe fn bad() {}" >"$root/tools/miso-engine-audit/src/other.rs"'
+    'printf "%s\n" "unsafe fn bad() {}" >"$root/tools/audit/src/other.rs"'
 expect_failure unsafe-outside-native-pcm-runner-lib \
-    'printf "%s\n" "unsafe fn bad() {}" >"$root/tools/miso-engine-native-pcm-runner/src/other.rs"'
-# #84 phase A deleted `crates/miso-engine-core/src/arch/`; its unsafe exemption went with it, so
+    'printf "%s\n" "unsafe fn bad() {}" >"$root/tools/native-pcm-runner/src/other.rs"'
+# #84 phase A deleted `crates/engine/src/arch/`; its unsafe exemption went with it, so
 # unsafe code re-appearing under that path is now rejected like any other unlisted file.
 expect_failure unsafe-in-deleted-core-arch \
-    'mkdir -p "$root/crates/miso-engine-core/src/arch"; printf "%s\n" "unsafe fn bad() {}" >"$root/crates/miso-engine-core/src/arch/x86.rs"'
+    'mkdir -p "$root/crates/engine/src/arch"; printf "%s\n" "unsafe fn bad() {}" >"$root/crates/engine/src/arch/x86.rs"'
 expect_failure unsafe-outside-rack-benchmark-main \
-    'printf "%s\n" "unsafe fn bad() {}" >"$root/tools/miso-engine-bench/src/other.rs"'
+    'printf "%s\n" "unsafe fn bad() {}" >"$root/tools/bench/src/other.rs"'
 expect_failure unsafe-outside-capi-ffi \
-    'printf "%s\n" "pub unsafe extern \"C\" fn bad() {}" >"$root/crates/miso-engine-capi/src/lib.rs"'
+    'printf "%s\n" "pub unsafe extern \"C\" fn bad() {}" >"$root/crates/capi/src/lib.rs"'
 expect_failure unsafe-in-second-capi-ffi-path \
-    'mkdir -p "$root/crates/miso-engine-capi/src/ffi"; printf "%s\n" "unsafe fn bad() {}" >"$root/crates/miso-engine-capi/src/ffi/other.rs"'
+    'mkdir -p "$root/crates/capi/src/ffi"; printf "%s\n" "unsafe fn bad() {}" >"$root/crates/capi/src/ffi/other.rs"'
 expect_failure unsafe-outside-capi-lifecycle-audit \
-    'printf "%s\n" "unsafe fn bad() {}" >"$root/crates/miso-engine-capi/tests/other.rs"'
+    'printf "%s\n" "unsafe fn bad() {}" >"$root/crates/capi/tests/other.rs"'
 expect_failure unsafe-outside-effect-package-ffi \
-    'printf "%s\n" "pub unsafe extern \"C\" fn bad() {}" >"$root/crates/miso-engine-effect-package/src/lib.rs"'
+    'printf "%s\n" "pub unsafe extern \"C\" fn bad() {}" >"$root/crates/effect-package/src/lib.rs"'
 expect_failure unsafe-in-second-effect-package-ffi-path \
-    'mkdir -p "$root/crates/miso-engine-effect-package/src/ffi"; printf "%s\n" "unsafe fn bad() {}" >"$root/crates/miso-engine-effect-package/src/ffi/other.rs"'
+    'mkdir -p "$root/crates/effect-package/src/ffi"; printf "%s\n" "unsafe fn bad() {}" >"$root/crates/effect-package/src/ffi/other.rs"'
 expect_failure unsafe-outside-package-allocation-audit \
-    'printf "%s\n" "unsafe fn bad() {}" >"$root/crates/miso-engine-effect-package/tests/other.rs"'
+    'printf "%s\n" "unsafe fn bad() {}" >"$root/crates/effect-package/tests/other.rs"'
 expect_failure unsafe-outside-migration-allocation-audit \
-    'printf "%s\n" "unsafe fn bad() {}" >"$root/crates/miso-engine-effect-compiler/tests/other.rs"'
+    'printf "%s\n" "unsafe fn bad() {}" >"$root/crates/effect-compiler/tests/other.rs"'
 expect_failure unsafe-outside-session-allocation-budget \
-    'printf "%s\n" "unsafe fn bad() {}" >"$root/crates/miso-engine-session/tests/other.rs"'
+    'printf "%s\n" "unsafe fn bad() {}" >"$root/crates/session/tests/other.rs"'
 expect_failure unsafe-outside-web-ffi \
-    'printf "%s\n" "pub unsafe extern \"C\" fn bad() {}" >"$root/hosts/miso-engine-host-web/src/lib.rs"'
+    'printf "%s\n" "pub unsafe extern \"C\" fn bad() {}" >"$root/hosts/host-web/src/lib.rs"'
 expect_failure unsafe-in-second-web-ffi-path \
-    'mkdir -p "$root/hosts/miso-engine-host-web/src/ffi"; printf "%s\n" "unsafe fn bad() {}" >"$root/hosts/miso-engine-host-web/src/ffi/other.rs"'
+    'mkdir -p "$root/hosts/host-web/src/ffi"; printf "%s\n" "unsafe fn bad() {}" >"$root/hosts/host-web/src/ffi/other.rs"'
 expect_failure unsafe-outside-web-peak-audit \
-    'printf "%s\n" "unsafe fn bad() {}" >"$root/hosts/miso-engine-host-web/tests/other.rs"'
+    'printf "%s\n" "unsafe fn bad() {}" >"$root/hosts/host-web/tests/other.rs"'
 expect_failure unsafe-outside-disjoint-arena \
-    'printf "%s\n" "unsafe fn bad() {}" >"$root/crates/miso-engine-core/src/realtime/disjoint_extra.rs"'
+    'printf "%s\n" "unsafe fn bad() {}" >"$root/crates/engine/src/realtime/disjoint_extra.rs"'
 expect_failure unsafe-outside-lane-softfma \
-    'printf "%s\n" "unsafe fn bad() {}" >"$root/crates/miso-engine-lane/src/kernels.rs"'
+    'printf "%s\n" "unsafe fn bad() {}" >"$root/crates/lane/src/kernels.rs"'
 expect_failure unsafe-outside-lane-fpenv \
-    'printf "%s\n" "unsafe fn bad() {}" >"$root/crates/miso-engine-lane/src/fpenv_extra.rs"'
+    'printf "%s\n" "unsafe fn bad() {}" >"$root/crates/lane/src/fpenv_extra.rs"'
 
 printf 'realtime policy mutation tests: ok\n'

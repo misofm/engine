@@ -22,12 +22,12 @@ else
 fi
 
 CARGO_TARGET_DIR="$target_directory" cargo build --locked --release \
-    -p miso-engine-audit --bin miso_engine_audit
-binary="$target_directory/release/miso_engine_audit"
+    -p audit --bin audit
+binary="$target_directory/release/audit"
 
 "$binary" vectorization \
     --artifact "$binary" \
-    --allowlist tools/miso-engine-audit/vectorization-allowlist.tsv \
+    --allowlist tools/audit/vectorization-allowlist.tsv \
     --objdump "$objdump" | tee "$report"
 
 printf 'native vectorization report: %s\n' "$report"

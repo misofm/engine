@@ -16,21 +16,21 @@ fail() {
     exit 1
 }
 
-lane_source='^crates/miso-engine-lane/src/'
-lane_tests='^crates/miso-engine-lane/tests/'
-# `crates/miso-engine-dsp-reference` is the workspace's oracle/twin crate: it is a dev dependency
+lane_source='^crates/lane/src/'
+lane_tests='^crates/lane/tests/'
+# `crates/dsp-reference` is the workspace's oracle/twin crate: it is a dev dependency
 # only, never links into an engine, host or artifact, and its whole job is to reproduce a frozen
 # operation order -- including its single roundings -- independently of the lane crate. It is
 # exempt here for the same structural reason `scripts/check-math-policy.sh` exempts it: matching
 # the platform is the point, not a leak of it. The exemption is the crate, not a wildcard: a
 # render path cannot reach it, because nothing in `crates/` or `hosts/` depends on it.
-oracle_crate='^crates/miso-engine-dsp-reference/'
-lane_softfma='^crates/miso-engine-lane/src/softfma\.rs:'
+oracle_crate='^crates/dsp-reference/'
+lane_softfma='^crates/lane/src/softfma\.rs:'
 # Issue #146: the canonical floating-point environment. `core::arch::asm!` is the only way to reach
 # AArch64's FPCR -- there is no stable intrinsic for it -- so this second lane file is named here
 # for the same reason `softfma.rs` is, and for nothing else.
-lane_fpenv='^crates/miso-engine-lane/src/fpenv\.rs:'
-# #84 phase A deleted `crates/miso-engine-core/src/arch/` and its runtime detection, so the two
+lane_fpenv='^crates/lane/src/fpenv\.rs:'
+# #84 phase A deleted `crates/engine/src/arch/` and its runtime detection, so the two
 # temporary exemptions that stood here are gone: there is no legacy kernel file and no second
 # backend enum left to exempt.
 #
@@ -45,7 +45,7 @@ lane_fpenv='^crates/miso-engine-lane/src/fpenv\.rs:'
 # `UNFUSED-SEAL-EXEMPT` marker within six lines of every call. Naming them here keeps this policy's
 # question ("does fused arithmetic live outside the lane crate?") answerable while that seal owns
 # the harder question ("how many fused calls exist at all, and are they the ones we admitted?").
-fused_evidence='^tools/miso-engine-audit/src/unfused_fma\.rs:|^tools/miso-engine-wasm-gates/tests/g5_native_corpus\.rs:'
+fused_evidence='^tools/audit/src/unfused_fma\.rs:|^tools/wasm-gates/tests/g5_native_corpus\.rs:'
 
 fusion_matches="$({
     rg -n 'mul_add|_mm256_fmadd|_mm256_fmsub|_mm256_fnmadd|_mm_fmadd|vfmaq|vfmsq|wide::' \
@@ -53,12 +53,12 @@ fusion_matches="$({
 } | rg -v "$lane_source|$lane_tests|$oracle_crate|$fused_evidence" || true)"
 [[ -z "$fusion_matches" ]] || {
     printf '%s\n' "$fusion_matches" >&2
-    fail "fused multiply-add and the SIMD vocabulary belong to crates/miso-engine-lane (D3, D4)"
+    fail "fused multiply-add and the SIMD vocabulary belong to crates/lane (D3, D4)"
 }
 
 # Relaxed SIMD is forbidden everywhere, the lane crate included: correctness must never depend on
 # an instruction whose rounding the runtime is free to choose (D3). Only instruction and intrinsic
-# names are scanned -- `crates/miso-engine-effect-package` carries `"relaxed-simd"` as a *capability
+# names are scanned -- `crates/effect-package` carries `"relaxed-simd"` as a *capability
 # string* describing what a third-party Wasm package declares, which is data, not engine code.
 relaxed_matches="$({
     rg -n 'f32x4_relaxed|f64x2_relaxed|relaxed_madd|relaxed_nmadd|relaxed_dot|i8x16_relaxed' \
@@ -74,14 +74,14 @@ architecture_matches="$({
 } | rg -v "$lane_softfma|$lane_fpenv" || true)"
 [[ -z "$architecture_matches" ]] || {
     printf '%s\n' "$architecture_matches" >&2
-    fail "raw architecture intrinsics belong to crates/miso-engine-lane/src/{softfma,fpenv}.rs"
+    fail "raw architecture intrinsics belong to crates/lane/src/{softfma,fpenv}.rs"
 }
 
 # Runtime SIMD dispatch is gone (D4, revision 4): the ISA is pinned at compile time and attested
 # once at boot. `Backend::current()` is a constant, so a new detection site is a regression.
 detection_matches="$({
     rg -n 'is_x86_feature_detected|is_aarch64_feature_detected' crates hosts tools sidecars --glob '*.rs' || true
-} | rg -v '^crates/miso-engine-lane/src/backend\.rs:|^crates/miso-engine-lane/src/lib\.rs:' || true)"
+} | rg -v '^crates/lane/src/backend\.rs:|^crates/lane/src/lib\.rs:' || true)"
 [[ -z "$detection_matches" ]] || {
     printf '%s\n' "$detection_matches" >&2
     fail "runtime SIMD detection is forbidden outside the enumerated legacy sites (D4)"
@@ -110,7 +110,7 @@ while IFS= read -r source; do
         }
     ' "$source")"
     [[ -z "$hits" ]] || marker_hits="$marker_hits$hits"$'\n'
-done < <(find crates/miso-engine-lane/src -name '*.rs' -type f 2>/dev/null | sort)
+done < <(find crates/lane/src -name '*.rs' -type f 2>/dev/null | sort)
 marker_hits="$(printf '%s' "$marker_hits")"
 [[ -z "$marker_hits" ]] || {
     printf '%s\n' "$marker_hits" >&2
@@ -152,13 +152,36 @@ for dependency in bytemuck safe_arch; do
     [[ -n "$(locked_version "$dependency")" ]] || fail "$lockfile is missing $dependency, which wide requires"
 done
 
+# The old miso-engine- prefix used to distinguish "a workspace crate" from "an external crate"
+# by naming convention alone (`wide | miso-engine-*`); the prefix-strip rename retired that
+# convention (docs/rulings/prefix-strip-inventory.md), so this now checks against the real list
+# of workspace crate names instead of a pattern that can no longer tell the two apart.
+# Process substitution (`< <(find ...)`), not a plain pipe: under `pipefail`, a plain
+# `find ... | while ...` reports find's own exit status (2 when one of the roots, e.g. a
+# hermetic fixture's absent sidecars/, does not exist) as the whole pipeline's status, which
+# would trip `set -e` even though the while loop itself completed and produced correct output
+# from the roots that do exist.
+workspace_crate_names="$(
+    while IFS= read -r crate_manifest; do
+        awk '
+            /^\[package\]$/ { in_package = 1; next }
+            /^\[/ { in_package = 0 }
+            in_package && /^name[[:space:]]*=/ {
+                value = $0
+                sub(/^name[[:space:]]*=[[:space:]]*"/, "", value)
+                sub(/".*/, "", value)
+                print value
+            }
+        ' "$crate_manifest"
+    done < <(find crates hosts tools sidecars -name Cargo.toml -type f 2>/dev/null)
+)"
 while IFS= read -r dependency; do
     [[ -n "$dependency" ]] || continue
-    case "$dependency" in
-        wide | miso-engine-*) ;;
-        *) fail "crates/miso-engine-lane may depend only on wide and workspace crates, found $dependency" ;;
-    esac
-done < <(locked_dependencies miso-engine-lane)
+    if [[ "$dependency" == wide ]] || rg -qx -- "$dependency" <<<"$workspace_crate_names"; then
+        continue
+    fi
+    fail "crates/lane may depend only on wide and workspace crates, found $dependency"
+done < <(locked_dependencies lane)
 
 while IFS= read -r dependency; do
     [[ -n "$dependency" ]] || continue

@@ -36,7 +36,7 @@ expect_failure stray-prefix
 
 new_case stray-prefix-in-tool
 printf '\n// %sINTERCHANGE_CANDIDATE_COMMIT\n' "$retired_prefix" \
-    >>"$case_root/tools/miso-engine-bench/src/rack.rs"
+    >>"$case_root/tools/bench/src/rack.rs"
 expect_failure stray-prefix-in-tool
 
 # Rule 2, forward: a name used but not documented. This is finding F2 -- the runner and the binary

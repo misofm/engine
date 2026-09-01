@@ -21,7 +21,7 @@ container, not per parameter.*
 |---|---|---|---|
 | `trim_db` (id 2) | `PreparedOnly` | **live** (`BlockTarget` + `LinearNUpdates`), command kind 10 | A banked input drain (`BuiltinBankProcessor::begin_block`) and a ramping variant of the input kernel (`input_chain_ramp_block`) in which the trim coefficient steps per sample under the D11 linear-N law. The settled path dispatches the existing `input_chain_block_elided` bit-identically. |
 | `polarity_invert` (id 1) | `PreparedOnly` | **live** (`BlockTarget` + `LinearNUpdates`), command kind 11 | Zero new DSP. Polarity is the *sign* of the same `trim_signed` coefficient the trim rides, so a flip is a retarget of that coefficient to its own negation and the linear ramp carries it through zero. That is a console-grade declicked flip for the cost of the ramp already built for trim. |
-| `hpf_hz` (id 3), `lpf_hz` (id 4) | `PreparedOnly` | **deferred**, with the slot kept | The honest price, and it is not small: a live filter move needs a control-plane `f64` redesign per event, a per-word coefficient ramp, a ramped/settled block split, and redesign-elision -- the parametric EQ's whole ramp machinery (`crates/miso-engine-parametric-eq/src/lib.rs`), which is ramp state of 6 words x 2 sections x 2 lanes per track plus a second input-chain path. Nothing in this round needs it. Revisit **together** with #191's variable-slope question, because a slope option is a section-count change and a floor recount trigger and the two should be designed once. |
+| `hpf_hz` (id 3), `lpf_hz` (id 4) | `PreparedOnly` | **deferred**, with the slot kept | The honest price, and it is not small: a live filter move needs a control-plane `f64` redesign per event, a per-word coefficient ramp, a ramped/settled block split, and redesign-elision -- the parametric EQ's whole ramp machinery (`crates/parametric-eq/src/lib.rs`), which is ramp state of 6 words x 2 sections x 2 lanes per track plus a second input-chain path. Nothing in this round needs it. Revisit **together** with #191's variable-slope question, because a slope option is a section-count change and a floor recount trigger and the two should be designed once. |
 | `delay_samples` (id 11) | `PreparedOnly` | **stays prepared** | Its own ruling (phase 2): changing a delay length mid-render re-times the ring and glitches unavoidably. |
 | `fader_db` (5), `mute` (6), `matrix_*` (7-10) | live since #140 B / #137 D1 | **now also automatable** | Schema only; see below. |
 
@@ -42,8 +42,8 @@ whatever the chain multiplies its input by. The only parameters that design thos
 exactly once.
 
 The rationale is rewritten to say exactly that in all three places it lives:
-`crates/miso-engine-lane/src/kernels/builtins.rs` (`InputChainPlan`),
-`crates/miso-engine-builtins/src/lib.rs` (`InputStage::plan`) and
+`crates/lane/src/kernels/builtins.rs` (`InputChainPlan`),
+`crates/builtins/src/lib.rs` (`InputStage::plan`) and
 `docs/rulings/effect-floor-accounting.md`.
 
 **The settled path phase 3 dispatches is the elision-planned kernel variant Job 1 introduced** --
@@ -143,7 +143,7 @@ once. **Builtin automation *rendering* is explicitly gated on #140's automation-
 natural destination is the three drains #137, #140 and #210 phase 3 built, because a span's
 block-first-sample semantics already match the drain contract. Phase 3 builds no feed and nothing
 in it should be read as having built one. The gate is restated at the validation arm
-(`crates/miso-engine-session/src/validate.rs`) and in `docs/SESSION_SCHEMA_V1.md`.
+(`crates/session/src/validate.rs`) and in `docs/SESSION_SCHEMA_V1.md`.
 
 ## What would reopen each half
 

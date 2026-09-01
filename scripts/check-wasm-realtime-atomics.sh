@@ -20,14 +20,14 @@ fi
 
 CARGO_TARGET_DIR="$target_directory" RUSTFLAGS='-C target-feature=-simd128' \
     cargo build --locked --release --target wasm32-unknown-unknown \
-    -p miso-engine-core -p miso-engine-source -p miso-engine-target-smoke
+    -p engine -p source -p target-smoke
 
 scratch="$(mktemp -d)"
 trap 'rm -rf -- "$scratch"' EXIT
 for archive in \
-    "$target_directory/wasm32-unknown-unknown/release/deps/"libmiso_engine_core-*.rlib \
-    "$target_directory/wasm32-unknown-unknown/release/deps/"libmiso_engine_source-*.rlib \
-    "$target_directory/wasm32-unknown-unknown/release/deps/"libmiso_engine_target_smoke-*.rlib; do
+    "$target_directory/wasm32-unknown-unknown/release/deps/"libengine-*.rlib \
+    "$target_directory/wasm32-unknown-unknown/release/deps/"libsource-*.rlib \
+    "$target_directory/wasm32-unknown-unknown/release/deps/"libtarget_smoke-*.rlib; do
     [[ -f "$archive" ]] || continue
     archive="$(realpath "$archive")"
     archive_directory="$scratch/$(basename "$archive")"
@@ -43,7 +43,7 @@ done
 # fails this check instead of silently losing its coverage.
 if ! find "$scratch" -type f -name '*.o' -print0 |
     xargs -0 -r rg -l --binary 'observe' >/dev/null 2>&1 &&
-    ! rg -q 'ObservationSlot' crates/miso-engine-core/src/realtime/observe.rs; then
+    ! rg -q 'ObservationSlot' crates/engine/src/realtime/observe.rs; then
     printf 'the observation transport is not in the inspected browser-local set\n' >&2
     exit 1
 fi

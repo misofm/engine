@@ -5,7 +5,7 @@
  * The SDK's type-shaped surface is a transcription chain with exactly one authority at the top:
  *
  *   Rust structures and frozen constants
- *     -> `miso-engine-parameter-metadata` (offset_of!, registry walk)
+ *     -> `parameter-metadata` (offset_of!, registry walk)
  *       -> sdk/assets/*.json            <- this script
  *         -> sdk/src/generated/*.ts     <- codegen/generate.mjs
  *           -> the SDK's public types
@@ -42,7 +42,7 @@ const documents = [
 function render(mode) {
   return execFileSync(
     "cargo",
-    ["run", "--locked", "--release", "-q", "-p", "miso-engine-parameter-metadata", "--", mode],
+    ["run", "--locked", "--release", "-q", "-p", "parameter-metadata", "--", mode],
     { cwd: repoRoot, encoding: "utf8", maxBuffer: 1 << 26 },
   );
 }

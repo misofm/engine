@@ -15,13 +15,13 @@
 set -euo pipefail
 
 root="${1:-.}"
-facade_manifest="$root/crates/miso-engine-host-core/Cargo.toml"
-facade_source="$root/crates/miso-engine-host-core/src"
+facade_manifest="$root/crates/host-core/Cargo.toml"
+facade_source="$root/crates/host-core/src"
 # Hosts still carrying their own copy of the pipeline. Each entry names the issue that removes it;
 # the entry is deleted in the same commit that converts the host, and nothing may be added here.
-pending_conversion=("hosts/miso-engine-host-web") # issue #106
+pending_conversion=("hosts/host-web") # issue #106
 
-host_sources=("$root/crates/miso-engine-capi/src")
+host_sources=("$root/crates/capi/src")
 for host in "$root"/hosts/*/src; do
     [ -d "$host" ] || continue
     relative="${host#"$root"/}"
@@ -34,7 +34,7 @@ done
 
 pipeline_entry_points='(^|[^_[:alnum:]])compile_session\(|prepare_native_session_effects\(|prepare_session_builtins\(|compile_with_builtins\(|prepare_graph_source_set\(|into_bound_with_source_set\(|PcmSourceRing::prepare_host_region\('
 ! rg -n "$pipeline_entry_points" "${host_sources[@]}" || {
-    printf 'a host calls the compile pipeline directly; use miso-engine-host-core\n' >&2
+    printf 'a host calls the compile pipeline directly; use host-core\n' >&2
     exit 1
 }
 
@@ -44,11 +44,11 @@ pipeline_entry_points='(^|[^_[:alnum:]])compile_session\(|prepare_native_session
 }
 
 ! rg -n 'MISOCTL|ReplayEntryRecord|fn +protocol_u(16|32|64)|fn +correlatable_command_header' "${host_sources[@]}" || {
-    printf 'a host hand-decodes the control wire format; use miso-engine-protocol\n' >&2
+    printf 'a host hand-decodes the control wire format; use protocol\n' >&2
     exit 1
 }
 
-! rg -n 'miso-engine-protocol' "$facade_manifest" || {
+! rg -n 'protocol' "$facade_manifest" || {
     printf 'the host facade must not depend on the control protocol\n' >&2
     exit 1
 }

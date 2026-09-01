@@ -35,13 +35,13 @@ synthetic qualification data, not a substitute for the owner-provided catalog sn
 Choose a new, empty output directory. From the repository root, run:
 
 ```sh
-cargo run --locked -p miso-engine-catalog-migrate -- \
+cargo run --locked -p catalog-migrate -- \
   migrate \
   --catalog /owner-approved-staging/catalog.tsv \
   --embeddings /owner-approved-staging/embeddings.tsv \
   --output-dir /owner-approved-staging/rehash-output
 
-cargo run --locked -p miso-engine-catalog-migrate -- \
+cargo run --locked -p catalog-migrate -- \
   check \
   --catalog /owner-approved-staging/catalog.tsv \
   --embeddings /owner-approved-staging/embeddings.tsv \

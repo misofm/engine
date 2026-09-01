@@ -32,7 +32,7 @@ corpus cases `input_stage/trim_ramp` and `input_stage/trim_ramp_mono`.
 future filter liveness inherits: it must invalidate the prepared-identity elision plan, which
 trim liveness does not touch because the plan reads only the SVF section words. The production realization is the topology-preserving two-integrator
 state-variable recurrence of master plan #83 §4.2, and there is exactly **one** of it: the block
-kernel `miso_engine_lane::kernels::svf_block`, generic over `Lane` and instantiated at `f32`,
+kernel `lane::kernels::svf_block`, generic over `Lane` and instantiated at `f32`,
 `Simd4` and `Simd8` from one source. A scalar track is that body at `WIDTH = 1` over planar
 slices; a bank is the same body at four or eight lanes over an AoSoA block. Design is `f64` and
 stores `c1 = t / (1 + t)`, `a2` and `a3` as `f32`, cast once; `c1` is prepared directly rather than
@@ -116,7 +116,7 @@ request.
 Solo is **console state, composed at command admission, with no render-plane code at all**. The
 strip already carries a per-lane declicked gate whose target is `0.0` or the lane's fader gain, fed
 by a bounded per-track queue of mute records. Solo-in-place adds a state machine above that queue —
-`ConsoleSoloState` in `miso-engine-host-core` — which composes
+`ConsoleSoloState` in `host-core` — which composes
 
 ```
 effective_mute(track, lane) = user_mute(track, lane) || (any_solo_engaged && !this_track_soloed)

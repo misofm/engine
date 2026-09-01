@@ -4,10 +4,10 @@ const root = new URL("../", import.meta.url);
 // Issue #151: the host module is overridable for exactly the reason the worklet module already is
 // -- so a red mutation of the shipped host runs this same suite and is required to fail it.
 const hostUrl = process.env.MISO_ENGINE_WEB_HOST_TEST_MODULE === undefined
-  ? new URL("hosts/miso-engine-host-web/web/miso-engine-v2-audio-worklet-host.js", root)
+  ? new URL("hosts/host-web/web/miso-engine-v2-audio-worklet-host.js", root)
   : pathToFileURL(process.env.MISO_ENGINE_WEB_HOST_TEST_MODULE);
 const workletUrl = process.env.MISO_ENGINE_WEB_WORKLET_TEST_MODULE === undefined
-  ? new URL("hosts/miso-engine-host-web/web/miso-engine-v2-audio-worklet.js", root)
+  ? new URL("hosts/host-web/web/miso-engine-v2-audio-worklet.js", root)
   : pathToFileURL(process.env.MISO_ENGINE_WEB_WORKLET_TEST_MODULE);
 
 const limits = Object.freeze({

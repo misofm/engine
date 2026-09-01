@@ -6,7 +6,7 @@
 # both channels read source channel 0, `builtins.right` copies `builtins.left`, and every
 # `channel = "right"` effect parameter takes its `channel = "left"` sibling's value. Every track is
 # therefore collapse-eligible by the two structural terms of the channel-symmetry witness
-# (`crates/miso-engine-effect-contract/src/symmetry.rs`), which is the fixture's whole purpose.
+# (`crates/effect-contract/src/symmetry.rs`), which is the fixture's whole purpose.
 #
 # A hand-edit would break that silently. The `sixty_four_track_console_mono` /
 # `sixty_four_track_console_mono_dual` row-pair would keep running, keep validating and keep
@@ -35,7 +35,7 @@ fail() { printf 'mono console fixture failure: %s\n' "$1" >&2; exit 1; }
 
 # 1. The fixture is its generator's output. This also re-proves, on every run, that the derivation
 #    still passes all four stages of the real session pipeline: the generator takes its canonical
-#    spelling from `miso-engine-session-validator --canonical`, which writes nothing when a stage
+#    spelling from `session-validator --canonical`, which writes nothing when a stage
 #    fails.
 regenerated=$(mktemp)
 trap 'rm -f "$regenerated"' EXIT

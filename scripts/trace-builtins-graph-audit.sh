@@ -2,7 +2,7 @@
 set -euo pipefail
 
 workspace_dir=$(cd "$(dirname "$0")/.." && pwd)
-binary="$workspace_dir/target/release/miso_engine_audit"
+binary="$workspace_dir/target/release/audit"
 trace_root="$workspace_dir/target/issue7/graph-strace"
 validator="$workspace_dir/scripts/validate-realtime-trace.sh"
 [[ "$#" -eq 0 ]] || {
@@ -10,7 +10,7 @@ validator="$workspace_dir/scripts/validate-realtime-trace.sh"
   exit 2
 }
 cargo build --quiet --locked --release --manifest-path "$workspace_dir/Cargo.toml" \
-  -p miso-engine-audit --bin miso_engine_audit
+  -p audit --bin audit
 command -v strace >/dev/null 2>&1 || {
   printf 'strace is required for the issue-007 graph lifecycle syscall gate\n' >&2
   exit 1

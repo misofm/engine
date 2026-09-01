@@ -22,7 +22,7 @@ the contract fixes the preimage length at `frames * channels * bytes_per_sample`
 and 16,384 bytes cannot share a SHA-256 pin.
 
 Sections 1–3 are the `tests/browser-v1` half, repaired in #271. Sections 4–6 are the
-`hosts/miso-engine-host-web/qualification` half, repaired in #272; all six documents now declare
+`hosts/host-web/qualification` half, repaired in #272; all six documents now declare
 the canonical digest of the PCM their harness actually feeds.
 
 ## Canonical serialization used here
@@ -80,12 +80,12 @@ sha256 = 66e39e41bccc0a57ae90a77b426f4075e81ba877b0653c3aabe0a9e00762769c
 
 ## Why no render digest moves, browser-v1 path
 
-`content` is grammar-checked only — `crates/miso-engine-session/src/validate.rs`
+`content` is grammar-checked only — `crates/session/src/validate.rs`
 `valid_source_content_identity` tests `^sha256:[0-9a-f]{64}$` and nothing reads the value
 afterwards. The browser and raw-Wasm legs both push PCM through
 `miso_engine_web_v1_source_submit`; no resolver ever fetches by identity here. Each edit also
 substitutes 64 hex characters for 64 hex characters in place, so
-`hosts/miso-engine-host-web/tests/browser-v1/session.toml` stays exactly **1,265 bytes** and the
+`hosts/host-web/tests/browser-v1/session.toml` stays exactly **1,265 bytes** and the
 `sessionTomlBytes = 1265` row of `expected.json` — the one resource row that is a byte count of
 this document — is unchanged. `direct-oracle.mjs` re-derives and re-asserts all three PCM digests
 (`pcmF32leSha256`, `nativeCommandTimelinePcmF32leSha256`,
@@ -103,7 +103,7 @@ defect — is now refused.
 
 ## The qualification half (#272)
 
-The three `hosts/miso-engine-host-web/qualification/*.toml` documents belong to the browser
+The three `hosts/host-web/qualification/*.toml` documents belong to the browser
 qualification harness, not to `tests/browser-v1`. They are fetched by
 `qualification/qualification.js::runQualification` and handed to the host as session bytes; the PCM
 they describe is submitted block by block through `host.submitSource`, one 128-frame quantum at a
@@ -207,17 +207,17 @@ identity(source_planes(130 * 128)) # 8e7350ab6d22bf4a3e9357474ae4622a55d630dfc02
 identity(source_planes(40 * 128)) # 938d3a47555b54df6321fc9e1b40c9581d316870f70fa17be8ea40cc154436d7
 ```
 
-`hosts/miso-engine-host-web/qualification/session-identities.mjs` reproduces the last two (and the
+`hosts/host-web/qualification/session-identities.mjs` reproduces the last two (and the
 observation row) independently in Node, from the harness's own exported generators, and agrees. So
 does the repository's own reference oracle, on the canonical preimages written out of the Python
 above:
 
 ```sh
-cargo run --locked -p miso-engine-stem-hasher -- raw \
+cargo run --locked -p stem-hasher -- raw \
   --input console.pcm --channels 2 --bit-depth 32f --frames 16640   # 8e7350ab…
-cargo run --locked -p miso-engine-stem-hasher -- raw \
+cargo run --locked -p stem-hasher -- raw \
   --input stall.pcm --channels 2 --bit-depth 32f --frames 5120      # 938d3a47…
-cargo run --locked -p miso-engine-stem-hasher -- raw \
+cargo run --locked -p stem-hasher -- raw \
   --input observation.pcm --channels 2 --bit-depth 32f --frames 2048 # 66e39e41…
 ```
 
@@ -251,10 +251,10 @@ flipped-digit red proof so the comparison cannot be loosened into a vacuous pass
 
 For the qualification leg specifically: `runQualification` fetches the three documents and passes
 their bytes to `createMisoAudioWorkletHost` as `sessionToml`. Nothing in
-`hosts/miso-engine-host-web/web/miso-engine-v2-audio-worklet-host.js` computes or exposes a digest,
+`hosts/host-web/web/miso-engine-v2-audio-worklet-host.js` computes or exposes a digest,
 and `host.sessionMap()` returns track and tap structure only — the harness reads `map.tracks` and
 `map.metersAttached` and nothing else. Engine-side, `content` reaches
-`crates/miso-engine-session/src/validate.rs::valid_source_content_identity`, a
+`crates/session/src/validate.rs::valid_source_content_identity`, a
 `^sha256:[0-9a-f]{64}$` grammar test, and `visit.rs`, which re-serializes it into the canonical
 document form; no resolver ever fetches bytes by identity on this leg, and the PCM arrives instead
 through `miso_engine_web_v1_source_submit`. Every digest the qualification gates compare

@@ -1,0 +1,28 @@
+[package]
+name = "capi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+name = "capi"
+crate-type = ["rlib", "staticlib", "cdylib"]
+
+[features]
+default = []
+
+[dependencies]
+engine.workspace = true
+effect-contract.workspace = true
+host-core.workspace = true
+lane.workspace = true
+protocol.workspace = true
+session.workspace = true
+source.workspace = true
+
+[dev-dependencies]
+graph.workspace = true
+
+[lints]
+workspace = true

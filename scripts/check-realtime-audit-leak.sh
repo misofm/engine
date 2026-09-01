@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # #84 phase D: core's `realtime-audit` feature compiles render-thread instrumentation (a
-# thread-local depth guard consulted by the counting allocator) into `miso-engine-core`. It exists
+# thread-local depth guard consulted by the counting allocator) into `engine`. It exists
 # for the audit tools and for test builds only. This gate proves the feature cannot reach a
 # shippable artifact: the production dependency graph (dev edges excluded, every target) of every
 # crates/, hosts/ and sidecars/ package must resolve without it. tools/ packages are exempt --
@@ -18,14 +18,14 @@ fail() {
 }
 
 # Structural half: inside crates/ and hosts/ manifests, only dev-dependency sections (and the
-# forwarding `[features]` declaration in miso-engine-conformance itself) may mention the feature.
+# forwarding `[features]` declaration in conformance itself) may mention the feature.
 while IFS= read -r manifest; do
     violation="$(awk -v file="$manifest" '
         /^\[/ { section = $0 }
         /realtime-audit/ {
             dev = section ~ /dev-dependencies/
-            forwarding = file ~ /miso-engine-conformance\/Cargo.toml/ && section == "[features]"
-            declaration = file ~ /miso-engine-core\/Cargo.toml/ && section == "[features]"
+            forwarding = file ~ /conformance\/Cargo.toml/ && section == "[features]"
+            declaration = file ~ /engine\/Cargo.toml/ && section == "[features]"
             if (!dev && !forwarding && !declaration) { print file ": " $0; exit }
         }
     ' "$manifest")"

@@ -31,30 +31,30 @@ cp "$root/fixtures/effect-state/v1/canonical.state.hex" \
 cp "$root/fixtures/effect-interchange/v1/ACCEPTED.sha256" \
     "$temp/fixtures/effect-interchange/v1/ACCEPTED.sha256"
 
-printf '\nmiso-engine-bench.workspace = true\n' \
-    >>"$temp/crates/miso-engine-core/Cargo.toml"
+printf '\nbench.workspace = true\n' \
+    >>"$temp/crates/engine/Cargo.toml"
 expect_failure production-dependency
-cp "$root/crates/miso-engine-core/Cargo.toml" "$temp/crates/miso-engine-core/Cargo.toml"
+cp "$root/crates/engine/Cargo.toml" "$temp/crates/engine/Cargo.toml"
 
 printf '\npub fn effect_interchange_qualification_render_leak() {}\n' \
-    >>"$temp/crates/miso-engine-core/src/realtime/plan.rs"
+    >>"$temp/crates/engine/src/realtime/plan.rs"
 expect_failure render-reachability
-cp "$root/crates/miso-engine-core/src/realtime/plan.rs" \
-    "$temp/crates/miso-engine-core/src/realtime/plan.rs"
+cp "$root/crates/engine/src/realtime/plan.rs" \
+    "$temp/crates/engine/src/realtime/plan.rs"
 
 printf '\n#[unsafe(no_mangle)] pub extern "C" fn miso_engine_effect_state_v1_new_export() {}\n' \
-    >>"$temp/crates/miso-engine-effect-package/src/ffi.rs"
+    >>"$temp/crates/effect-package/src/ffi.rs"
 expect_failure new-export
-cp "$root/crates/miso-engine-effect-package/src/ffi.rs" \
-    "$temp/crates/miso-engine-effect-package/src/ffi.rs"
+cp "$root/crates/effect-package/src/ffi.rs" \
+    "$temp/crates/effect-package/src/ffi.rs"
 
 sed -i 's/TRIALS: usize = 10_000/TRIALS: usize = 9_999/' \
-    "$temp/crates/miso-engine-effect-package/tests/effect_interchange_mutation.rs"
+    "$temp/crates/effect-package/tests/effect_interchange_mutation.rs"
 expect_failure mutation-count
-cp "$root/crates/miso-engine-effect-package/tests/effect_interchange_mutation.rs" \
-    "$temp/crates/miso-engine-effect-package/tests/effect_interchange_mutation.rs"
+cp "$root/crates/effect-package/tests/effect_interchange_mutation.rs" \
+    "$temp/crates/effect-package/tests/effect_interchange_mutation.rs"
 
 sed -i 's/const OBSERVATIONS: usize = 256/const OBSERVATIONS: usize = 255/' \
-    "$temp/tools/miso-engine-bench/src/effect_interchange.rs"
+    "$temp/tools/bench/src/effect_interchange.rs"
 expect_failure benchmark-observations
 printf 'effect interchange qualification policy mutations: ok\n'

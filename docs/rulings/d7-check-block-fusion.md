@@ -1,7 +1,7 @@
 # D7 `check_block` fusion into the kernels' final pass — null
 
 **Candidate.** Issue #163 phase 4 item 5. The master-plan §4.4 non-finite boundary scan
-(`miso_engine_effect_runtime::bank::check_block`) runs as a **separate full-block vector pass per
+(`effect_runtime::bank::check_block`) runs as a **separate full-block vector pass per
 channel per effect**, after the kernel has already written that block. D7 requires the *check*, not
 the separate traversal, so the proposal was to fuse the accumulate
 (`ok = mask_and(ok, |x| < BLOCK_LIMIT)`) into each kernel's existing final pass, deleting one whole
@@ -44,12 +44,12 @@ it cannot be resolved by this instrument at all.
 
 Against that, fusion is not free to build or to own:
 
-* `miso-engine-parametric-eq` would have to thread a mask accumulator through `svf_block` and
-  `svf_block_ramped` in `miso-engine-lane`, which are **shared, frozen kernels** used by other
+* `parametric-eq` would have to thread a mask accumulator through `svf_block` and
+  `svf_block_ramped` in `lane`, which are **shared, frozen kernels** used by other
   effects, and through the per-section ramp-segment split that cuts a block at every distinct ramp
   end. That is precisely the "if fusing into a kernel would touch its frozen order, skip that
   kernel and record it" case in the phase-4 brief.
-* `miso-engine-compressor` could fuse inside its own crate, but its final store sits in a
+* `compressor` could fuse inside its own crate, but its final store sits in a
   `RAMPING`-generic per-frame loop whose register pressure is already the thing that makes the bank
   kernel fast. Adding an accumulator there risks a regression larger than the 0.45% it could win.
 
@@ -63,7 +63,7 @@ Rejected: fusing the D7 scan into the existing final pass of the EQ and compress
 the evidence that the traversal it removes is below this instrument's noise floor on the active
 console row. Not ruled on, and not rejected:
 
-* fusing in `miso-engine-delay`, which calls `check_block` **four times** per block (output, two
+* fusing in `delay`, which calls `check_block` **four times** per block (output, two
   ring segments and the damping word) — a different and much larger ratio that was not measured
   here because the console fixture carries no delay;
 * the wasm/`Simd4` case. Every number above is native AVX2. A target where one FMA costs ~54

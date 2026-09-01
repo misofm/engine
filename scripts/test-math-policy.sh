@@ -12,25 +12,25 @@ trap 'rm -rf -- "$scratch_root"' EXIT
 # with its pinned number of platform calls, and nothing else calls the platform libm.
 create_fixture() {
     local root="$1"
-    mkdir -p "$root/crates/miso-engine-math/src" \
-        "$root/crates/miso-engine-dsp-reference/src" \
+    mkdir -p "$root/crates/math/src" \
+        "$root/crates/dsp-reference/src" \
         "$root/crates/miso-engine-clean-effect/src" \
         "$root/crates/miso-engine-clean-effect/tests" \
-        "$root/hosts/miso-engine-host-native/src"
+        "$root/hosts/host-native/src"
 
     printf '%s\n' 'pub fn exp(x: f64) -> f64 { x }' \
-        >"$root/crates/miso-engine-math/src/lib.rs"
+        >"$root/crates/math/src/lib.rs"
     # The oracle is meant to use the platform libm.
     printf '%s\n' 'pub fn oracle(x: f64) -> f64 { x.exp() + x.ln() }' \
-        >"$root/crates/miso-engine-dsp-reference/src/lib.rs"
+        >"$root/crates/dsp-reference/src/lib.rs"
     # Production code that already migrated: free-function calls, not methods.
-    printf '%s\n' 'pub fn gain(db: f32) -> f32 { miso_engine_math::exp2f(db) }' \
+    printf '%s\n' 'pub fn gain(db: f32) -> f32 { math::exp2f(db) }' \
         >"$root/crates/miso-engine-clean-effect/src/lib.rs"
     # Tests are allowed to compare against the platform.
     printf '%s\n' 'fn check(x: f64) -> f64 { x.exp() }' \
         >"$root/crates/miso-engine-clean-effect/tests/accuracy.rs"
     printf '%s\n' 'pub fn boot() {}' \
-        >"$root/hosts/miso-engine-host-native/src/lib.rs"
+        >"$root/hosts/host-native/src/lib.rs"
 
     while read -r file limit _owner; do
         [[ -n "$file" ]] || continue
@@ -65,21 +65,21 @@ bash "$policy_script" "$valid" >/dev/null
 expect_failure powf-in-a-clean-crate \
     'printf "%s\n" "pub fn bad(x: f32) -> f32 { x.powf(2.0) }" >>"$root/crates/miso-engine-clean-effect/src/lib.rs"'
 expect_failure ln-in-the-effect-runtime \
-    'mkdir -p "$root/crates/miso-engine-effect-runtime/src"; printf "%s\n" "pub fn bad(x: f64) -> f64 { x.ln() }" >"$root/crates/miso-engine-effect-runtime/src/x.rs"'
+    'mkdir -p "$root/crates/effect-runtime/src"; printf "%s\n" "pub fn bad(x: f64) -> f64 { x.ln() }" >"$root/crates/effect-runtime/src/x.rs"'
 expect_failure sin-in-a-host \
-    'printf "%s\n" "pub fn bad(x: f64) -> f64 { x.sin() }" >>"$root/hosts/miso-engine-host-native/src/lib.rs"'
+    'printf "%s\n" "pub fn bad(x: f64) -> f64 { x.sin() }" >>"$root/hosts/host-native/src/lib.rs"'
 expect_failure new-file-next-to-an-allowlisted-one \
-    'printf "%s\n" "pub fn bad(x: f64) -> f64 { x.sin() }" >"$root/crates/miso-engine-graph/src/other.rs"'
+    'printf "%s\n" "pub fn bad(x: f64) -> f64 { x.sin() }" >"$root/crates/graph/src/other.rs"'
 expect_failure allowlisted-file-gains-a-call \
-    'printf "%s\n" "pub fn extra(x: f64) -> f64 { x.tanh() }" >>"$root/crates/miso-engine-graph/src/lib.rs"'
-# Issue #95 cleared the `miso-engine-effect-contract` row. A platform call coming back to it must
+    'printf "%s\n" "pub fn extra(x: f64) -> f64 { x.tanh() }" >>"$root/crates/graph/src/lib.rs"'
+# Issue #95 cleared the `effect-contract` row. A platform call coming back to it must
 # now be rejected as an unallowlisted file, not merely ratcheted.
 expect_failure the-cleared-contract-row-cannot-come-back \
-    'mkdir -p "$root/crates/miso-engine-effect-contract/src"; printf "%s\n" "pub fn bad(x: f32) -> f32 { x.powf(2.0) }" >"$root/crates/miso-engine-effect-contract/src/lib.rs"'
+    'mkdir -p "$root/crates/effect-contract/src"; printf "%s\n" "pub fn bad(x: f32) -> f32 { x.powf(2.0) }" >"$root/crates/effect-contract/src/lib.rs"'
 expect_failure allowlist-entry-gone-stale \
-    'mkdir -p "$root/crates/miso-engine-graph-compiler/src"; printf "%s\n" "pub fn bad(x: f32) -> f32 { x.exp() }" >"$root/crates/miso-engine-graph-compiler/src/lib.rs"'
+    'mkdir -p "$root/crates/graph-compiler/src"; printf "%s\n" "pub fn bad(x: f32) -> f32 { x.exp() }" >"$root/crates/graph-compiler/src/lib.rs"'
 expect_failure allowlisted-file-deleted \
-    'rm "$root/crates/miso-engine-conformance/src/compare.rs"'
+    'rm "$root/crates/conformance/src/compare.rs"'
 expect_failure powi-in-a-clean-crate \
     'printf "%s\n" "pub fn bad(x: f64) -> f64 { x.powi(3) }" >>"$root/crates/miso-engine-clean-effect/src/lib.rs"'
 # The sidecars/ tree ships as its own delivery artifact (issue: FLAC decoder sidecar move) and
@@ -103,12 +103,12 @@ expect_pass() {
 }
 
 expect_pass oracle-may-use-the-platform \
-    'printf "%s\n" "pub fn more(x: f64) -> f64 { x.tanh() }" >>"$root/crates/miso-engine-dsp-reference/src/lib.rs"'
+    'printf "%s\n" "pub fn more(x: f64) -> f64 { x.tanh() }" >>"$root/crates/dsp-reference/src/lib.rs"'
 expect_pass tests-may-use-the-platform \
     'printf "%s\n" "fn other(x: f64) -> f64 { x.log10() }" >>"$root/crates/miso-engine-clean-effect/tests/accuracy.rs"'
 expect_pass sqrt-stays-legal \
     'printf "%s\n" "pub fn ok(x: f64) -> f64 { x.sqrt() }" >>"$root/crates/miso-engine-clean-effect/src/lib.rs"'
 expect_pass allowlisted-file-may-shrink \
-    'sed -i "1a // migrated one call site" "$root/crates/miso-engine-graph/src/lib.rs"; sed -i "s/pub fn legacy_0(x: f64) -> f64 { x.exp() }/pub fn legacy_0(x: f64) -> f64 { miso_engine_math::exp(x) }/" "$root/crates/miso-engine-graph/src/lib.rs"'
+    'sed -i "1a // migrated one call site" "$root/crates/graph/src/lib.rs"; sed -i "s/pub fn legacy_0(x: f64) -> f64 { x.exp() }/pub fn legacy_0(x: f64) -> f64 { math::exp(x) }/" "$root/crates/graph/src/lib.rs"'
 
 printf 'math policy mutation tests: ok\n'

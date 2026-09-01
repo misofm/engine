@@ -18,7 +18,7 @@ import { MisoUsageError } from "./errors.ts";
  * catalog's points would cost megabytes to say something derivable.
  *
  * So this module derives them, and the derivation is held to the engine's own by
- * `tools/miso-engine-parameter-metadata/src/bin/lattice_oracle`, which builds every lattice through
+ * `tools/parameter-metadata/src/bin/lattice_oracle`, which builds every lattice through
  * `parameter_lattice_points` -- the engine's resolver, the one the descriptor-wire verifier and the
  * compiler both use -- and digests the result. The SDK's eval reproduces that digest for every
  * parameter in the catalog. This file is therefore a *second implementation held to the first*,
