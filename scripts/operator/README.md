@@ -3,8 +3,9 @@
 These are **not gates**. Nothing in CI runs them, and that is deliberate.
 
 Each produces evidence on demand during work a human initiates: benchmark
-preflights and runners, listening-test preparation, and a browser-correctness
-seal. Their output is the sealed records under `artifacts/`, and the procedures
+preflights and runners, listening-test preparation, a browser-correctness seal,
+and the stem store's browser evals (which need Playwright and downloaded
+browsers, so they cannot be hermetic CI rows). Their output is the sealed records under `artifacts/`, and the procedures
 that invoke them are documented in `docs/`.
 
 They live here, separately from `scripts/`, because of a rule that now holds
