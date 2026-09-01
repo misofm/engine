@@ -195,6 +195,14 @@ jobs:
         run: |
           bash scripts/trace-builtins-audit.sh
           bash scripts/trace-builtins-graph-audit.sh
+      # The other two members of the trace-*-audit family. Four of the six ran
+      # here; these two ran nowhere, so `source`'s and `graph`'s realtime
+      # safety was asserted by scripts nobody invoked. Both pass today
+      # (source: 0 allocations/locks/syscalls; graph: 1,000,000-block trace).
+      - name: Source and graph realtime audits
+        run: |
+          bash scripts/trace-source-audit.sh
+          bash scripts/trace-graph-audit.sh
       # The independent builtins fixture corpus manifest and its expected-output digests.
       # Previously reachable only from scripts/sweep.sh, which nobody runs.
       - name: Builtins fixture corpus integrity and mutation tests
