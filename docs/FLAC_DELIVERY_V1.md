@@ -26,7 +26,7 @@ PCM and never invokes the decoder.
 
 `scripts/check-flac-decoder.sh` rebuilds and checks the exact artifact pin, Node-hosted Wasm ABI,
 all shared conformance vectors, typed artifact/sample mutations, and the `decodeAudioData` ban. It
-is an explicit `scripts/sweep.sh` row. The browser qualification workflow consumes that same
+runs in `ci.yml`'s `host` job. The browser qualification workflow consumes that same
 built artifact and repeats the vectors in a real Worker under Chromium, Firefox, and WebKit. The
 delivery corpus expands each frozen #241 sign-boundary pattern to exactly 4096 canonical frames:
 the `-b32` encoding contains 128 literal 32-sample FLAC frames and the `-b4096` encoding contains
