@@ -107,6 +107,32 @@ def write_mode(path: Path, content: bytes, mode: int) -> None:
     path.chmod(mode)
 
 
+def rewrite(path: Path, content: bytes) -> None:
+    """Overwrite a packet member that the fixture created read-only.
+
+    The self-test mutates files it wrote with mode 0o444, and a bare
+    `write_bytes` on those raises PermissionError for any user that is not
+    root. Root ignores the permission bits, so this ran green for years on a
+    root shell and failed the moment CI executed it as `runner`:
+
+        Issue-111 validation failure: [Errno 13] Permission denied:
+        '/tmp/.../packet/public/preparation.json'
+
+    Restore the original mode afterwards, because several rejection classes
+    assert the packet member is still read-only.
+    """
+    if not path.exists():
+        # Some call sites create the member rather than overwriting it.
+        path.write_bytes(content)
+        return
+    previous = path.stat().st_mode & 0o777
+    path.chmod(0o600)
+    try:
+        path.write_bytes(content)
+    finally:
+        path.chmod(previous)
+
+
 def wave(sample_bits: tuple[int, int]) -> tuple[bytes, float, float]:
     pair = struct.pack("<II", *sample_bits)
     body = pair * 480_000
@@ -362,20 +388,20 @@ def self_test() -> None:
                 value["assignment_key_sha256"] = "0" * 64
             else:
                 value["packet_member_sha256"]["private/assignment-key.json"] = "0" * 64
-            preparation_path.write_bytes(canonical(value))
+            rewrite(preparation_path, canonical(value))
 
         mutate_preparation("assignment")
         expect_invalid(lambda: validate_linked(packet, responses, reveal, qualification), "preparation assignment")
-        preparation_path.write_bytes(original_preparation)
+        rewrite(preparation_path, original_preparation)
         mutate_preparation("member")
         expect_invalid(lambda: validate_linked(packet, responses, reveal, qualification), "packet key member")
-        preparation_path.write_bytes(original_preparation)
+        rewrite(preparation_path, original_preparation)
 
         alternate = json.loads(original_key)
         alternate["seed"] = "43"
-        key_path.write_bytes(canonical(alternate))
+        rewrite(key_path, canonical(alternate))
         expect_invalid(lambda: validate_linked(packet, responses, reveal, qualification), "alternate same-shaped key")
-        key_path.write_bytes(original_key)
+        rewrite(key_path, original_key)
 
         moved = packet / "private/alternate-key.json"
         key_path.rename(moved)
@@ -392,7 +418,7 @@ def self_test() -> None:
         expect_invalid(lambda: validate_linked(packet, responses, reveal, qualification), "key symlink")
         key_path.unlink()
         backup.rename(key_path)
-        backup.write_bytes(original_key)
+        rewrite(backup, original_key)
         key_path.unlink()
         os.link(backup, key_path)
         expect_invalid(lambda: validate_linked(packet, responses, reveal, qualification), "key hardlink")
@@ -403,19 +429,19 @@ def self_test() -> None:
         key_path.chmod(0o600)
 
         packet_input = packet / "public/FACILITATOR.md"
-        packet_input.write_bytes(packet_input.read_bytes() + b"drift")
+        rewrite(packet_input, packet_input.read_bytes() + b"drift")
         expect_invalid(lambda: validate_linked(packet, responses, reveal, qualification), "packet drift")
-        packet_input.write_bytes(b"format-only facilitator\n")
+        rewrite(packet_input, b"format-only facilitator\n")
 
         changed_reveal = json.loads(original_reveal)
         changed_reveal["assignment_key_sha256"] = "0" * 64
-        reveal.write_bytes(canonical(changed_reveal))
+        rewrite(reveal, canonical(changed_reveal))
         expect_invalid(lambda: validate_linked(packet, responses, reveal, qualification), "reveal key")
-        reveal.write_bytes(original_reveal)
+        rewrite(reveal, original_reveal)
         changed_rows = original_responses.replace(b'"answer":"A"', b'"answer":"B"', 1)
-        responses.write_bytes(changed_rows)
+        rewrite(responses, changed_rows)
         expect_invalid(lambda: validate_linked(packet, responses, reveal, qualification), "response drift")
-        responses.write_bytes(original_responses)
+        rewrite(responses, original_responses)
 
         for context, mutation in (
             ("authority", lambda value: value["authorities"].__setitem__("preparation", "0" * 64)),
@@ -424,9 +450,9 @@ def self_test() -> None:
         ):
             value = json.loads(original_qualification)
             mutation(value)
-            qualification.write_bytes(canonical(value))
+            rewrite(qualification, canonical(value))
             expect_invalid(lambda: validate_linked(packet, responses, reveal, qualification), context)
-        qualification.write_bytes(original_qualification)
+        rewrite(qualification, original_qualification)
     print("Issue-111 linked authority self-test: PASS (14 rejection classes; format-only data)")
 
 
