@@ -63,6 +63,24 @@ jobs:
       # gate over a committed fixture, so it belongs with the cheap policy gates.
       - name: Console benchmark fixture integrity
         run: bash scripts/check-console-benchmark-fixture.sh
+      # Issue #175: the derived intended-placement and mono console fixtures are exactly what
+      # their generators produce, regenerated and compared byte for byte -- a hand-edit would
+      # break the fixture pair silently (benchmarks and validators would still pass while
+      # comparing sessions that no longer differ only by the property the pair exists to isolate).
+      # Previously reachable only from the manual bench preflight chain.
+      - name: Intended-placement and mono console fixture integrity
+        run: |
+          bash scripts/check-intended-console-fixture.sh
+          bash scripts/check-mono-console-fixture.sh
+      # Issue-073's native-only C-ABI runner and issue-116's cross-platform atomic-publish
+      # boundary: one tool's contract, static seal plus portability, previously reachable only
+      # from the sweep.
+      - name: Native PCM runner static/fixture seal and portability boundary
+        run: |
+          bash scripts/check-native-pcm-runner-v1.sh
+          bash scripts/test-native-pcm-runner-v1-policy.sh
+          bash scripts/check-native-pcm-runner-portability-v1.sh
+          bash scripts/test-native-pcm-runner-portability-v1-policy.sh
       # The #163 phase 2 wasm console arm's validator, exercised by mutation. Hermetic: it never
       # instantiates a guest, never holds a clock and never touches the one-shot artifacts, so it
       # belongs with the cheap gates rather than behind the runner that consumes the measurement.
