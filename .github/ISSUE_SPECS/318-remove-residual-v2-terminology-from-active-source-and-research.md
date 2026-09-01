@@ -1,0 +1,40 @@
+# Remove residual V2 terminology from active source and research
+
+## Owner ruling
+
+No active prelaunch source, test, or research guidance may call the current engine or a current
+contract V2. Use unversioned wording internally and V1 only where a boundary identity requires it.
+
+## Smallest closable product slice
+
+- remove stale V2 product prose from active DSP research and audit notes;
+- rename generic migration test operands away from V1/V2/V3 decorative identifiers; and
+- change rejected session/format fixtures from 2 to invalid sentinel 0.
+
+Mathematical variables, external standard/product/ISA versions, licenses, URLs, and frozen
+historical issue/evidence records are not product-version matches.
+
+## Decision record
+
+1. Research headings describe adopted engine decisions without a generation label.
+2. Migration tests may exercise multiple abstract numeric revisions, but their internal Rust names
+   describe source/intermediate/current roles rather than product generations.
+3. Rejection tests use 0 or a maximum-value sentinel, never a hypothetical next product version.
+4. Historical records are not rewritten when doing so would falsify their recorded context.
+
+## Objective gates
+
+- The active research checker and research corpus pass with unversioned decision headings.
+- Session, session-validator, web worklet, audit, effect-runtime, and effect-compiler focused tests
+  pass.
+- A live-tree audit finds no V2 product terminology outside explicitly classified
+  external/mathematical/historical records.
+
+## Workflow
+
+Sol briefs and approves this stateless scope. Terra performs the bounded cleanup. Sol reviews each
+remaining match classification before PASS.
+
+## Evidence record
+
+- Sol brief approved; GitHub issue #318 matches this stateless local spec.
