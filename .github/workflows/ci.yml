@@ -236,10 +236,11 @@ jobs:
       # calls as its own precondition). Previously reachable only from scripts/sweep.sh.
       - name: Effect descriptor V1 corpus and inspection surface
         run: bash scripts/check-effect-descriptor-v1.sh
-      # The stem store's cold-open-latency and pump budgets, and its core/pump correctness gates.
+      # The stem store's cold-open-latency and pump budgets (real assert.ok thresholds, not just
+      # printed numbers), its core/pump correctness gates, and --self-test's mutation ledger.
       # Previously reachable only from scripts/sweep.sh, which nobody runs.
-      - name: Stem store V1 gate
-        run: node scripts/check-stem-store-v1.mjs
+      - name: Stem store V1 gate and mutation ledger
+        run: node scripts/check-stem-store-v1.mjs --self-test
       - name: Native effect runtime policy, fixtures, conformance, and mutations
         run: bash scripts/check-effect-contract.sh
       - name: Protocol caller-buffer allocation audit
