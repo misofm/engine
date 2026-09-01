@@ -157,7 +157,7 @@ const MUTATIONS: &[(&str, &str, &str, usize, &str)] = &[
     (
         "canonical-minimal.toml",
         "schema_version = 1",
-        "schema_version = 2",
+        "schema_version = 0",
         1,
         "schema.version_unsupported",
     ),

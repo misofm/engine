@@ -28,7 +28,7 @@ Crossover points are Hz; orders and quality are discrete; band gains/thresholds 
 
 Each L/R path has its own filter histories. A cross-band or detector link is explicit; bands do not silently mix L/R channels or alter route topology.
 
-## Adopted V2 decisions
+## Adopted decisions
 
 All band buffers, delay alignment, polyphase state, and scratch are bounded/preallocated. Render has fixed work for configured bands and no callback allocation or I/O.
 

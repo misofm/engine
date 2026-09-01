@@ -28,7 +28,7 @@ Frequency is Hz, Q is dimensionless, gain is dB, and slope uses the named filter
 
 L/R have separate state and independently automatable coefficients. A linked control is an explicit control-plane convenience, not shared DSP state; filters do not create cross-channel routing.
 
-## Adopted V2 decisions
+## Adopted decisions
 
 Each prepared instance owns fixed coefficient/ramp/state storage. Issue-007 prepares conditioned `c1` directly in `f64`, casts it once, and stores `c1/a2/a3` as `f32`; render never recomputes `1-a1`. Production state, audio, and intermediates are `f32`; its independent oracle is `f64`. Render remains bounded and allocation/lock/I/O/log free.
 

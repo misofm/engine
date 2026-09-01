@@ -22,7 +22,7 @@ This policy keeps design claims traceable and separates DSP evidence from produc
 
 ## Decision traceability
 
-Each adoption must name (a) the observed/source-backed fact, (b) the V2 choice, and (c) a measurable reason or test that can falsify it. “Industry standard” and subjective praise are insufficient reasons.
+Each adoption must name (a) the observed/source-backed fact, (b) the engine choice, and (c) a measurable reason or test that can falsify it. “Industry standard” and subjective praise are insufficient reasons.
 
 ## Citation review gate
 

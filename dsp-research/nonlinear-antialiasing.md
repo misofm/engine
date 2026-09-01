@@ -28,7 +28,7 @@ Drive, output, and bias specify dB or linear units; shape and quality are enums 
 
 Process L/R independently by default. Any linked drive/detector or 2x2 crossfeed is explicit metadata and fixtures must include asymmetric channel inputs.
 
-## Adopted V2 decisions
+## Adopted decisions
 
 All multirate scratch, FIR, and state buffers are prepared. The callback executes fixed bounded work and never invokes an allocator, I/O, logger, or runtime filter designer.
 

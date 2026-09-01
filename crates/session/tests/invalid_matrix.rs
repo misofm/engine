@@ -122,7 +122,7 @@ fn schema_version_and_type_category_has_16_distinct_cases() {
     );
     model_case(
         &mut count,
-        |s| s.schema_version = 2,
+        |s| s.schema_version = 0,
         DiagnosticCode::VersionUnsupported,
         "$.schema_version",
     );

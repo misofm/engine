@@ -78,32 +78,32 @@ const fn quality(sample_rate: u32, maximum_state: StatePayloadSizes) -> QualityD
     }
 }
 
-static QUALITIES_V1: [QualityDescriptor; 4] = [
+static QUALITIES_SOURCE: [QualityDescriptor; 4] = [
     quality(44_100, sizes(1, 2)),
     quality(48_000, sizes(1, 2)),
     quality(88_200, sizes(1, 2)),
     quality(96_000, sizes(1, 2)),
 ];
-static QUALITIES_V2: [QualityDescriptor; 4] = [
+static QUALITIES_INTERMEDIATE: [QualityDescriptor; 4] = [
     quality(44_100, sizes(2, 3)),
     quality(48_000, sizes(2, 3)),
     quality(88_200, sizes(2, 3)),
     quality(96_000, sizes(2, 3)),
 ];
-static QUALITIES_V3: [QualityDescriptor; 4] = [
+static QUALITIES_CURRENT: [QualityDescriptor; 4] = [
     quality(44_100, sizes(3, 4)),
     quality(48_000, sizes(3, 4)),
     quality(88_200, sizes(3, 4)),
     quality(96_000, sizes(3, 4)),
 ];
-static QUALITIES_ALT_V3: [QualityDescriptor; 4] = [
+static QUALITIES_ALTERNATE_CURRENT: [QualityDescriptor; 4] = [
     quality(44_100, sizes(4, 5)),
     quality(48_000, sizes(4, 5)),
     quality(88_200, sizes(4, 5)),
     quality(96_000, sizes(4, 5)),
 ];
 
-static DESCRIPTOR_V1: EffectDescriptor = EffectDescriptor {
+static DESCRIPTOR_SOURCE: EffectDescriptor = EffectDescriptor {
     id: effect_id("test.migration"),
     display_name: "Migration",
     contract_major: 1,
@@ -112,28 +112,28 @@ static DESCRIPTOR_V1: EffectDescriptor = EffectDescriptor {
     supported_link_modes: LinkModeSet::DUAL_MONO,
     parameters: &PARAMETERS,
     ports: &PORTS,
-    qualities: &QUALITIES_V1,
+    qualities: &QUALITIES_SOURCE,
     observations: &[],
 };
-static DESCRIPTOR_V2: EffectDescriptor = EffectDescriptor {
+static DESCRIPTOR_INTERMEDIATE: EffectDescriptor = EffectDescriptor {
     state_layout_version: 2,
-    qualities: &QUALITIES_V2,
-    ..DESCRIPTOR_V1
+    qualities: &QUALITIES_INTERMEDIATE,
+    ..DESCRIPTOR_SOURCE
 };
-static DESCRIPTOR_V3: EffectDescriptor = EffectDescriptor {
+static DESCRIPTOR_CURRENT: EffectDescriptor = EffectDescriptor {
     state_layout_version: 3,
-    qualities: &QUALITIES_V3,
-    ..DESCRIPTOR_V1
+    qualities: &QUALITIES_CURRENT,
+    ..DESCRIPTOR_SOURCE
 };
-static DESCRIPTOR_V3_CLONE: EffectDescriptor = EffectDescriptor {
+static DESCRIPTOR_CURRENT_CLONE: EffectDescriptor = EffectDescriptor {
     state_layout_version: 3,
-    qualities: &QUALITIES_V3,
-    ..DESCRIPTOR_V1
+    qualities: &QUALITIES_CURRENT,
+    ..DESCRIPTOR_SOURCE
 };
-static DESCRIPTOR_ALT_V3: EffectDescriptor = EffectDescriptor {
+static DESCRIPTOR_ALTERNATE_CURRENT: EffectDescriptor = EffectDescriptor {
     state_layout_version: 3,
-    qualities: &QUALITIES_ALT_V3,
-    ..DESCRIPTOR_V1
+    qualities: &QUALITIES_ALTERNATE_CURRENT,
+    ..DESCRIPTOR_SOURCE
 };
 
 static INITIAL: [InitialParameterValue; 1] = [InitialParameterValue {
@@ -144,7 +144,7 @@ static INITIAL: [InitialParameterValue; 1] = [InitialParameterValue {
 
 fn replay() -> EffectStateReplayView<'static> {
     EffectStateReplayView {
-        effect_id: DESCRIPTOR_V1.id,
+        effect_id: DESCRIPTOR_SOURCE.id,
         request: PrepareEffectRequest {
             sample_rate: 48_000,
             quantum: 32,
@@ -354,19 +354,19 @@ fn diagnostics_and_step_report_layouts_are_exact() {
 
 #[test]
 fn zero_one_and_two_step_resolution_have_exact_workspace_and_zero_hooks() {
-    let v1 = bound(&DESCRIPTOR_V1);
-    let v2 = bound(&DESCRIPTOR_V2);
-    let v3 = bound(&DESCRIPTOR_V3);
-    let current_envelope = envelope(v3);
-    let v2_envelope = envelope(v2);
-    let v1_envelope = envelope(v1);
+    let source = bound(&DESCRIPTOR_SOURCE);
+    let intermediate = bound(&DESCRIPTOR_INTERMEDIATE);
+    let current_descriptor = bound(&DESCRIPTOR_CURRENT);
+    let current_envelope = envelope(current_descriptor);
+    let intermediate_envelope = envelope(intermediate);
+    let source_envelope = envelope(source);
     let factory_calls = Arc::new(FactoryCalls::default());
-    let current = factory_capability(&DESCRIPTOR_V3, Arc::clone(&factory_calls));
+    let current_factory = factory_capability(&DESCRIPTOR_CURRENT, Arc::clone(&factory_calls));
 
     let empty = StateMigrationRegistry::new(0, Box::new([])).unwrap();
     let zero = resolve_effect_state_migration(
         &empty,
-        &current,
+        &current_factory,
         &current_envelope,
         EffectStateLimits::default(),
         EffectStateMigrationAdmission {
@@ -393,29 +393,36 @@ fn zero_one_and_two_step_resolution_have_exact_workspace_and_zero_hooks() {
     let one_calls = Arc::new(StepCalls::default());
     let one_registry = StateMigrationRegistry::new(
         1,
-        vec![registration(v2, v3, 7, Arc::clone(&one_calls))].into_boxed_slice(),
+        vec![registration(
+            intermediate,
+            current_descriptor,
+            7,
+            Arc::clone(&one_calls),
+        )]
+        .into_boxed_slice(),
     )
     .unwrap();
     let one = resolve_effect_state_migration(
         &one_registry,
-        &current,
-        &v2_envelope,
+        &current_factory,
+        &intermediate_envelope,
         EffectStateLimits::default(),
         migration_admission(),
         restore_admission(),
     )
     .unwrap();
-    let v3_requirements =
-        effect_state_requirements(v3, replay(), EffectStateLimits::default()).unwrap();
+    let current_requirements =
+        effect_state_requirements(current_descriptor, replay(), EffectStateLimits::default())
+            .unwrap();
     assert_eq!(one.chain_step_count(), 1);
     assert_eq!(
         one.requirements().first_envelope_bytes,
-        v3_requirements.envelope_bytes
+        current_requirements.envelope_bytes
     );
     assert_eq!(one.requirements().second_envelope_bytes, 0);
     assert_eq!(
         one.requirements().migration_scratch_bytes,
-        v3_requirements.payload_snapshot_scratch_bytes + 7
+        current_requirements.payload_snapshot_scratch_bytes + 7
     );
 
     let first_calls = Arc::new(StepCalls::default());
@@ -423,35 +430,40 @@ fn zero_one_and_two_step_resolution_have_exact_workspace_and_zero_hooks() {
     let two_registry = StateMigrationRegistry::new(
         2,
         vec![
-            registration(v1, v2, 5, Arc::clone(&first_calls)),
-            registration(v2, v3, 7, Arc::clone(&second_calls)),
+            registration(source, intermediate, 5, Arc::clone(&first_calls)),
+            registration(
+                intermediate,
+                current_descriptor,
+                7,
+                Arc::clone(&second_calls),
+            ),
         ]
         .into_boxed_slice(),
     )
     .unwrap();
     let two = resolve_effect_state_migration(
         &two_registry,
-        &current,
-        &v1_envelope,
+        &current_factory,
+        &source_envelope,
         EffectStateLimits::default(),
         migration_admission(),
         restore_admission(),
     )
     .unwrap();
-    let v2_requirements =
-        effect_state_requirements(v2, replay(), EffectStateLimits::default()).unwrap();
+    let intermediate_requirements =
+        effect_state_requirements(intermediate, replay(), EffectStateLimits::default()).unwrap();
     assert_eq!(two.chain_step_count(), 2);
     assert_eq!(
         two.requirements().first_envelope_bytes,
-        v2_requirements.envelope_bytes
+        intermediate_requirements.envelope_bytes
     );
     assert_eq!(
         two.requirements().second_envelope_bytes,
-        v3_requirements.envelope_bytes
+        current_requirements.envelope_bytes
     );
     assert_eq!(
         two.requirements().migration_scratch_bytes,
-        v3_requirements.payload_snapshot_scratch_bytes + 7
+        current_requirements.payload_snapshot_scratch_bytes + 7
     );
     assert_eq!(one_calls.scratch.load(Ordering::SeqCst), 1);
     assert_eq!(first_calls.scratch.load(Ordering::SeqCst), 1);
@@ -493,15 +505,15 @@ fn assert_outer(
 
 #[test]
 fn registry_rejects_edges_duplicates_caps_and_host_overflow_in_order() {
-    let v1 = bound(&DESCRIPTOR_V1);
-    let v2 = bound(&DESCRIPTOR_V2);
-    let v3 = bound(&DESCRIPTOR_V3);
+    let source = bound(&DESCRIPTOR_SOURCE);
+    let intermediate = bound(&DESCRIPTOR_INTERMEDIATE);
+    let current_descriptor = bound(&DESCRIPTOR_CURRENT);
     let calls = Arc::new(StepCalls::default());
     let error = StateMigrationRegistry::new(
         1,
         vec![bind_effect_state_migration_registration(
-            v1,
-            v3,
+            source,
+            current_descriptor,
             Arc::new(MockStep {
                 scratch_bytes: 0,
                 calls: Arc::clone(&calls),
@@ -514,8 +526,8 @@ fn registry_rejects_edges_duplicates_caps_and_host_overflow_in_order() {
     assert_eq!(calls.scratch.load(Ordering::SeqCst), 0);
 
     let malformed_later = bind_effect_state_migration_registration(
-        v1,
-        v3,
+        source,
+        current_descriptor,
         Arc::new(MockStep {
             scratch_bytes: 0,
             calls: Arc::new(StepCalls::default()),
@@ -524,7 +536,7 @@ fn registry_rejects_edges_duplicates_caps_and_host_overflow_in_order() {
     let error = StateMigrationRegistry::new(
         2,
         vec![
-            registration(v1, v2, 0, Arc::new(StepCalls::default())),
+            registration(source, intermediate, 0, Arc::new(StepCalls::default())),
             malformed_later,
         ]
         .into_boxed_slice(),
@@ -535,10 +547,10 @@ fn registry_rejects_edges_duplicates_caps_and_host_overflow_in_order() {
     let error = StateMigrationRegistry::new(
         1,
         vec![
-            registration(v1, v2, 0, Arc::new(StepCalls::default())),
+            registration(source, intermediate, 0, Arc::new(StepCalls::default())),
             bind_effect_state_migration_registration(
-                v1,
-                v3,
+                source,
+                current_descriptor,
                 Arc::new(MockStep {
                     scratch_bytes: u64::MAX,
                     calls: Arc::new(StepCalls::default()),
@@ -559,7 +571,13 @@ fn registry_rejects_edges_duplicates_caps_and_host_overflow_in_order() {
     let entry_calls = Arc::new(StepCalls::default());
     let error = StateMigrationRegistry::new(
         0,
-        vec![registration(v1, v2, 0, Arc::clone(&entry_calls))].into_boxed_slice(),
+        vec![registration(
+            source,
+            intermediate,
+            0,
+            Arc::clone(&entry_calls),
+        )]
+        .into_boxed_slice(),
     )
     .unwrap_err();
     assert_outer(
@@ -573,8 +591,8 @@ fn registry_rejects_edges_duplicates_caps_and_host_overflow_in_order() {
     let error = StateMigrationRegistry::new(
         2,
         vec![
-            registration(v1, v2, 0, Arc::new(StepCalls::default())),
-            registration(v1, v2, 0, Arc::new(StepCalls::default())),
+            registration(source, intermediate, 0, Arc::new(StepCalls::default())),
+            registration(source, intermediate, 0, Arc::new(StepCalls::default())),
         ]
         .into_boxed_slice(),
     )
@@ -584,8 +602,8 @@ fn registry_rejects_edges_duplicates_caps_and_host_overflow_in_order() {
     let error = StateMigrationRegistry::new(
         1,
         vec![registration(
-            v2,
-            v3,
+            intermediate,
+            current_descriptor,
             u64::MAX,
             Arc::new(StepCalls::default()),
         )]
@@ -603,19 +621,19 @@ fn registry_rejects_edges_duplicates_caps_and_host_overflow_in_order() {
 
 #[test]
 fn resolution_rejects_missing_downgrade_terminal_caps_and_overflow_exactly() {
-    let v1 = bound(&DESCRIPTOR_V1);
-    let v2 = bound(&DESCRIPTOR_V2);
-    let v3 = bound(&DESCRIPTOR_V3);
-    let v1_envelope = envelope(v1);
-    let v2_envelope = envelope(v2);
-    let v3_envelope = envelope(v3);
+    let source = bound(&DESCRIPTOR_SOURCE);
+    let intermediate = bound(&DESCRIPTOR_INTERMEDIATE);
+    let current_descriptor = bound(&DESCRIPTOR_CURRENT);
+    let source_envelope = envelope(source);
+    let intermediate_envelope = envelope(intermediate);
+    let current_envelope = envelope(current_descriptor);
     let current_calls = Arc::new(FactoryCalls::default());
-    let current = factory_capability(&DESCRIPTOR_V3, Arc::clone(&current_calls));
+    let current_factory = factory_capability(&DESCRIPTOR_CURRENT, Arc::clone(&current_calls));
     let empty = StateMigrationRegistry::new(0, Box::new([])).unwrap();
     let error = resolve_effect_state_migration(
         &empty,
-        &current,
-        &v1_envelope,
+        &current_factory,
+        &source_envelope,
         EffectStateLimits::default(),
         migration_admission(),
         restore_admission(),
@@ -625,13 +643,19 @@ fn resolution_rejects_missing_downgrade_terminal_caps_and_overflow_exactly() {
 
     let only_first = StateMigrationRegistry::new(
         1,
-        vec![registration(v1, v2, 0, Arc::new(StepCalls::default()))].into_boxed_slice(),
+        vec![registration(
+            source,
+            intermediate,
+            0,
+            Arc::new(StepCalls::default()),
+        )]
+        .into_boxed_slice(),
     )
     .unwrap();
     let error = resolve_effect_state_migration(
         &only_first,
-        &current,
-        &v1_envelope,
+        &current_factory,
+        &source_envelope,
         EffectStateLimits::default(),
         migration_admission(),
         restore_admission(),
@@ -641,8 +665,8 @@ fn resolution_rejects_missing_downgrade_terminal_caps_and_overflow_exactly() {
 
     let error = resolve_effect_state_migration(
         &only_first,
-        &current,
-        &v1_envelope,
+        &current_factory,
+        &source_envelope,
         EffectStateLimits::default(),
         EffectStateMigrationAdmission {
             maximum_chain_steps: 1,
@@ -653,11 +677,11 @@ fn resolution_rejects_missing_downgrade_terminal_caps_and_overflow_exactly() {
     .unwrap_err();
     assert_outer(error, EffectStateMigrationDiagnosticCode::Limit, 2, 1, 2);
 
-    let old_current = factory_capability(&DESCRIPTOR_V1, Arc::new(FactoryCalls::default()));
+    let old_current = factory_capability(&DESCRIPTOR_SOURCE, Arc::new(FactoryCalls::default()));
     let error = resolve_effect_state_migration(
         &empty,
         &old_current,
-        &v3_envelope,
+        &current_envelope,
         EffectStateLimits::default(),
         migration_admission(),
         restore_admission(),
@@ -671,11 +695,11 @@ fn resolution_rejects_missing_downgrade_terminal_caps_and_overflow_exactly() {
         3,
     );
 
-    let alt_v3_envelope = envelope(bound(&DESCRIPTOR_ALT_V3));
+    let alternate_current_envelope = envelope(bound(&DESCRIPTOR_ALTERNATE_CURRENT));
     let error = resolve_effect_state_migration(
         &empty,
-        &current,
-        &alt_v3_envelope,
+        &current_factory,
+        &alternate_current_envelope,
         EffectStateLimits::default(),
         migration_admission(),
         restore_admission(),
@@ -689,16 +713,22 @@ fn resolution_rejects_missing_downgrade_terminal_caps_and_overflow_exactly() {
         3,
     );
 
-    let alt_v3 = bound(&DESCRIPTOR_ALT_V3);
+    let alternate_current = bound(&DESCRIPTOR_ALTERNATE_CURRENT);
     let wrong_terminal = StateMigrationRegistry::new(
         1,
-        vec![registration(v2, alt_v3, 0, Arc::new(StepCalls::default()))].into_boxed_slice(),
+        vec![registration(
+            intermediate,
+            alternate_current,
+            0,
+            Arc::new(StepCalls::default()),
+        )]
+        .into_boxed_slice(),
     )
     .unwrap();
     let error = resolve_effect_state_migration(
         &wrong_terminal,
-        &current,
-        &v2_envelope,
+        &current_factory,
+        &intermediate_envelope,
         EffectStateLimits::default(),
         migration_admission(),
         restore_admission(),
@@ -706,12 +736,12 @@ fn resolution_rejects_missing_downgrade_terminal_caps_and_overflow_exactly() {
     .unwrap_err();
     assert_outer(error, EffectStateMigrationDiagnosticCode::Chain, 3, 0, 0);
 
-    let clone_v3 = bound(&DESCRIPTOR_V3_CLONE);
+    let current_clone = bound(&DESCRIPTOR_CURRENT_CLONE);
     let wrong_provenance = StateMigrationRegistry::new(
         1,
         vec![registration(
-            v2,
-            clone_v3,
+            intermediate,
+            current_clone,
             0,
             Arc::new(StepCalls::default()),
         )]
@@ -720,8 +750,8 @@ fn resolution_rejects_missing_downgrade_terminal_caps_and_overflow_exactly() {
     .unwrap();
     let error = resolve_effect_state_migration(
         &wrong_provenance,
-        &current,
-        &v2_envelope,
+        &current_factory,
+        &intermediate_envelope,
         EffectStateLimits::default(),
         migration_admission(),
         restore_admission(),
@@ -732,16 +762,21 @@ fn resolution_rejects_missing_downgrade_terminal_caps_and_overflow_exactly() {
     let two = StateMigrationRegistry::new(
         2,
         vec![
-            registration(v1, v2, 0, Arc::new(StepCalls::default())),
-            registration(v2, v3, 0, Arc::new(StepCalls::default())),
+            registration(source, intermediate, 0, Arc::new(StepCalls::default())),
+            registration(
+                intermediate,
+                current_descriptor,
+                0,
+                Arc::new(StepCalls::default()),
+            ),
         ]
         .into_boxed_slice(),
     )
     .unwrap();
     let error = resolve_effect_state_migration(
         &two,
-        &current,
-        &v1_envelope,
+        &current_factory,
+        &source_envelope,
         EffectStateLimits::default(),
         EffectStateMigrationAdmission {
             maximum_chain_steps: 1,
@@ -752,15 +787,15 @@ fn resolution_rejects_missing_downgrade_terminal_caps_and_overflow_exactly() {
     .unwrap_err();
     assert_outer(error, EffectStateMigrationDiagnosticCode::Limit, 2, 1, 2);
 
-    let v2_requirements =
-        effect_state_requirements(v2, replay(), EffectStateLimits::default()).unwrap();
+    let intermediate_requirements =
+        effect_state_requirements(intermediate, replay(), EffectStateLimits::default()).unwrap();
     let error = resolve_effect_state_migration(
         &two,
-        &current,
-        &v1_envelope,
+        &current_factory,
+        &source_envelope,
         EffectStateLimits::default(),
         EffectStateMigrationAdmission {
-            maximum_intermediate_envelope_bytes: v2_requirements.envelope_bytes - 1,
+            maximum_intermediate_envelope_bytes: intermediate_requirements.envelope_bytes - 1,
             ..migration_admission()
         },
         restore_admission(),
@@ -771,16 +806,16 @@ fn resolution_rejects_missing_downgrade_terminal_caps_and_overflow_exactly() {
         EffectStateMigrationDiagnosticCode::Limit,
         3,
         0,
-        v2_requirements.envelope_bytes,
+        intermediate_requirements.envelope_bytes,
     );
 
     let error = resolve_effect_state_migration(
         &two,
-        &current,
-        &v1_envelope,
+        &current_factory,
+        &source_envelope,
         EffectStateLimits::default(),
         EffectStateMigrationAdmission {
-            maximum_intermediate_envelope_bytes: v2_requirements.envelope_bytes - 1,
+            maximum_intermediate_envelope_bytes: intermediate_requirements.envelope_bytes - 1,
             maximum_migration_scratch_bytes: 0,
             ..migration_admission()
         },
@@ -792,14 +827,14 @@ fn resolution_rejects_missing_downgrade_terminal_caps_and_overflow_exactly() {
         EffectStateMigrationDiagnosticCode::Limit,
         3,
         0,
-        v2_requirements.envelope_bytes,
+        intermediate_requirements.envelope_bytes,
     );
 
-    let first_scratch = v2_requirements.payload_snapshot_scratch_bytes;
+    let first_scratch = intermediate_requirements.payload_snapshot_scratch_bytes;
     let error = resolve_effect_state_migration(
         &two,
-        &current,
-        &v1_envelope,
+        &current_factory,
+        &source_envelope,
         EffectStateLimits::default(),
         EffectStateMigrationAdmission {
             maximum_migration_scratch_bytes: first_scratch - 1,
@@ -819,8 +854,8 @@ fn resolution_rejects_missing_downgrade_terminal_caps_and_overflow_exactly() {
     let huge = StateMigrationRegistry::new(
         1,
         vec![registration(
-            v2,
-            v3,
+            intermediate,
+            current_descriptor,
             isize::MAX as u64,
             Arc::new(StepCalls::default()),
         )]
@@ -829,8 +864,8 @@ fn resolution_rejects_missing_downgrade_terminal_caps_and_overflow_exactly() {
     .unwrap();
     let error = resolve_effect_state_migration(
         &huge,
-        &current,
-        &v2_envelope,
+        &current_factory,
+        &intermediate_envelope,
         EffectStateLimits::default(),
         EffectStateMigrationAdmission {
             maximum_migration_scratch_bytes: isize::MAX as u64,
@@ -852,29 +887,34 @@ fn resolution_rejects_missing_downgrade_terminal_caps_and_overflow_exactly() {
 
 #[test]
 fn nested_state_diagnostics_and_current_admission_are_preserved_without_hooks() {
-    let v1 = bound(&DESCRIPTOR_V1);
-    let v2 = bound(&DESCRIPTOR_V2);
-    let v3 = bound(&DESCRIPTOR_V3);
-    let mut malformed = envelope(v1);
+    let source = bound(&DESCRIPTOR_SOURCE);
+    let intermediate = bound(&DESCRIPTOR_INTERMEDIATE);
+    let current_descriptor = bound(&DESCRIPTOR_CURRENT);
+    let mut malformed = envelope(source);
     malformed[56] ^= 1;
     let current_calls = Arc::new(FactoryCalls::default());
-    let current = factory_capability(&DESCRIPTOR_V3, Arc::clone(&current_calls));
+    let current_factory = factory_capability(&DESCRIPTOR_CURRENT, Arc::clone(&current_calls));
     let registry = StateMigrationRegistry::new(
         2,
         vec![
-            registration(v1, v2, 0, Arc::new(StepCalls::default())),
-            registration(v2, v3, 0, Arc::new(StepCalls::default())),
+            registration(source, intermediate, 0, Arc::new(StepCalls::default())),
+            registration(
+                intermediate,
+                current_descriptor,
+                0,
+                Arc::new(StepCalls::default()),
+            ),
         ]
         .into_boxed_slice(),
     )
     .unwrap();
-    let current_envelope = envelope(v3);
+    let current_envelope = envelope(current_descriptor);
     let error = resolve_effect_state_migration(
         &registry,
-        &current,
+        &current_factory,
         &current_envelope,
         EffectStateLimits {
-            maximum_descriptor_bytes: descriptor_wire(&DESCRIPTOR_V3).len() as u64 - 1,
+            maximum_descriptor_bytes: descriptor_wire(&DESCRIPTOR_CURRENT).len() as u64 - 1,
             ..EffectStateLimits::default()
         },
         migration_admission(),
@@ -892,7 +932,7 @@ fn nested_state_diagnostics_and_current_admission_are_preserved_without_hooks() 
 
     let error = resolve_effect_state_migration(
         &registry,
-        &current,
+        &current_factory,
         &malformed,
         EffectStateLimits::default(),
         migration_admission(),
@@ -911,7 +951,7 @@ fn nested_state_diagnostics_and_current_admission_are_preserved_without_hooks() 
 
     let error = resolve_effect_state_migration(
         &registry,
-        &current,
+        &current_factory,
         &malformed,
         EffectStateLimits::default(),
         EffectStateMigrationAdmission {
@@ -929,7 +969,7 @@ fn nested_state_diagnostics_and_current_admission_are_preserved_without_hooks() 
         u64::MAX,
     );
 
-    let v1_envelope = envelope(v1);
+    let source_envelope = envelope(source);
     for (admission, offset, required) in [
         (
             EffectStateRestoreAdmission {
@@ -974,8 +1014,8 @@ fn nested_state_diagnostics_and_current_admission_are_preserved_without_hooks() 
     ] {
         let error = resolve_effect_state_migration(
             &registry,
-            &current,
-            &v1_envelope,
+            &current_factory,
+            &source_envelope,
             EffectStateLimits::default(),
             migration_admission(),
             admission,
@@ -996,7 +1036,7 @@ fn nested_state_diagnostics_and_current_admission_are_preserved_without_hooks() 
     // Once target requirements prove derived resources fit the saved caps and the five raw
     // admission rows above prove those caps fit the current policy, derived 216/176/184 rejects
     // are algebraically unreachable during resolution.
-    let derived = effect_state_derived_resources(v3, replay().request).unwrap();
+    let derived = effect_state_derived_resources(current_descriptor, replay().request).unwrap();
     assert!(
         derived.state_sizes.total().unwrap() <= replay().request.limits.maximum_total_state_bytes
     );

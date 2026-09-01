@@ -28,7 +28,7 @@ Report LUFS/LKFS and true-peak dBTP where enabled; windows and gates follow the 
 
 Measure a declared graph boundary and channel layout. Track dual-mono meters retain distinct L/R observations; any combined measure names its channel weighting and routing boundary.
 
-## Adopted V2 decisions
+## Adopted decisions
 
 Prepared bounded window/ring state and counters are used. Audio render only updates bounded meter state; report formatting and serialization stay off the callback.
 

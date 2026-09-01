@@ -28,7 +28,7 @@ Threshold/makeup/range use dB, times use ms, ratio is dimensionless, detector mo
 
 L/R detector and gain states are independent by default. Peak, RMS, average, or max detector links must be explicit metadata; sidechain ports and their PDC are explicit graph inputs.
 
-## Adopted V2 decisions
+## Adopted decisions
 
 Prepared fixed-size detector, delay, and filter state only; lookahead rings are allocated before render. The callback has bounded work per frame and performs no allocation or blocking.
 

@@ -173,7 +173,9 @@ fn wrong_version_is_rejected() {
     write_header(&older, &mut common);
     assert_eq!(
         read_header(&LAYOUT, &common)
-            .expect_err("a payload from version 2 must not restore into version 3")
+            .expect_err(
+                "a payload from a different layout must not restore into the current layout"
+            )
             .code,
         STATE_VERSION_CODE
     );

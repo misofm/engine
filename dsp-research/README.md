@@ -1,6 +1,6 @@
 # DSP research corpus
 
-This directory is the implementation evidence base for Engine V2. It documents decisions before production DSP is written; it is not a collection of claims that an algorithm sounds good. Each production effect issue links to the applicable notes and records any implementation-specific deviation in its decision record.
+This directory is the engine's implementation evidence base. It documents decisions before production DSP is written; it is not a collection of claims that an algorithm sounds good. Each production effect issue links to the applicable notes and records any implementation-specific deviation in its decision record.
 
 ## Contents
 

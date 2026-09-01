@@ -38,3 +38,12 @@ remaining match classification before PASS.
 ## Evidence record
 
 - Sol brief approved; GitHub issue #318 matches this stateless local spec.
+- Terra replaces the research corpus/template/checker heading with `Adopted decisions`, removes
+  current-engine generation prose, and renames migration fixtures to source/intermediate/current
+  roles. Session, validator, console, and worklet rejection fixtures now use invalid sentinel 0.
+- The DSP research gate, session suite, eight session-validator tests, nine state-payload tests, six
+  migration tests, 29 audit tests, hermetic worklet/mutation suite, formatting, workspace all-target
+  check, and diff hygiene pass.
+- The migration rename initially collided with the existing current-factory variable; separating
+  `current_descriptor` from `current_factory` restored type clarity and is covered by the compiler
+  and all six migration tests.

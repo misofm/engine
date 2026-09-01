@@ -1,7 +1,7 @@
 //! Prepared parametric-EQ realtime audit.
 //!
 //! Issue #87 replaced the endpoint-conditioned delta recurrence this audit was written for with a
-//! cascade of TPT state-variable sections, and the state payload with it (version 2 is 616 bytes,
+//! cascade of TPT state-variable sections, and the state payload with it (the current layout is 616 bytes,
 //! not 512). Only the admission limit moved here; the JSON `kind` label stays `issue042_...`
 //! because the evidence trail that consumes it is issue #104's to rename.
 
@@ -131,7 +131,7 @@ fn prepare_eq() -> Box<dyn PreparedNativeEffect> {
             },
             initial_values: &initial_values,
             limits: PrepareEffectLimits {
-                // Version-2 state is 616 bytes; production admits 100 MB over the C ABI.
+                // Current state is 616 bytes; production admits 100 MB over the C ABI.
                 maximum_total_state_bytes: 1_024,
                 maximum_scratch_bytes: 1,
                 maximum_automation_spans_per_block: 48,

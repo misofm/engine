@@ -28,7 +28,7 @@ Factor is a discrete quality enum; passband/stopband edges are Hz or normalized 
 
 L/R have independent multirate histories unless a named processor requires a link. Oversampling itself does not route or mix channels.
 
-## Adopted V2 decisions
+## Adopted decisions
 
 All delay lines, polyphase state, scratch, and output capacity are preallocated for quantum and factor. Render has fixed per-block bounds and no allocation/I/O.
 

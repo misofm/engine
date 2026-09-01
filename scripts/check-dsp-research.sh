@@ -4,7 +4,7 @@ set -euo pipefail
 cd "${1:-.}"
 
 required=(filters dynamics loudness oversampling true-peak delay nonlinear-antialiasing multirate-crossovers simd-numerics console-daw-architecture)
-headings=("Scope and engineering question" "Adopted V2 decisions" "Definitions and assumptions" "Algorithm and equations" "Coefficients and update rules" "Numerical and stability limits" "Latency and tail" "Units, mappings, automation and smoothing" "Denormal, signed-zero and NaN policy" "Fixtures" "Objective tests and tolerances" "Benchmark plan" "Listening protocol or evidence" "Primary and official sources" "Rejected alternatives and tradeoffs" "Known gaps and follow-up")
+headings=("Scope and engineering question" "Adopted decisions" "Definitions and assumptions" "Algorithm and equations" "Coefficients and update rules" "Numerical and stability limits" "Latency and tail" "Units, mappings, automation and smoothing" "Denormal, signed-zero and NaN policy" "Fixtures" "Objective tests and tolerances" "Benchmark plan" "Listening protocol or evidence" "Primary and official sources" "Rejected alternatives and tradeoffs" "Known gaps and follow-up")
 for name in "${required[@]}"; do
     file="dsp-research/$name.md"; [[ -s "$file" ]] || { printf 'missing research note: %s\n' "$file" >&2; exit 1; }
     for heading in "${headings[@]}"; do

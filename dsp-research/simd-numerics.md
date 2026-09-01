@@ -28,7 +28,7 @@ SIMD introduces no user-facing units. Effect metadata remains authoritative for 
 
 L and R occupy separate vectors/state. Cross-channel behavior occurs only through declared link mode or smoothed 2x2 matrix; vector adjacency never creates a signal link.
 
-## Adopted V2 decisions
+## Adopted decisions
 
 Prepare cohorts, buffers, and dispatch choice before render. The callback does not feature-probe, allocate, lock, log, or alter structure; its work is bounded by quantum and prepared plan capacity.
 

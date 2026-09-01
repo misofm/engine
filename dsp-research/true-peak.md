@@ -28,7 +28,7 @@ Ceiling and measured output use dBTP; threshold/makeup use dB; attack/release us
 
 Per-channel true-peak detection is default. Any linked detector mode is explicit and declares max/average weighting; it does not imply an unannounced stereo topology.
 
-## Adopted V2 decisions
+## Adopted decisions
 
 Prepared bounded delay, FIR, detector, and gain state only. The render loop has no allocation, I/O, or runtime filter construction.
 

@@ -8,7 +8,7 @@ section may follow the required headings.
 
 Bound the question and identify what this note does not decide.
 
-## Adopted V2 decisions
+## Adopted decisions
 
 Record choices, source-backed facts, and the measurable invariant behind each choice.
 

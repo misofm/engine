@@ -316,7 +316,7 @@ session_mutation() { expect_reject "$(printf '%s' "$session" | jq -c "$1")" "$2"
 hoist_mutation() { expect_reject "$(printf '%s' "$hoist" | jq -c "$1")" "$2"; }
 
 session_mutation '.issue = 38' 'a session record from another issue'
-session_mutation '.schema_version = 2' 'an unfrozen schema version'
+session_mutation '.schema_version = 0' 'an invalid schema version'
 session_mutation '.round = 3' 'a third round'
 session_mutation '.sample_rate_hz = 44100' 'a rate other than the launch rate'
 session_mutation '.quantum_frames = 64' 'a quantum other than the launch quantum'

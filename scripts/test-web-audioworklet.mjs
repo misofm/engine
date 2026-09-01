@@ -200,7 +200,7 @@ async function testMainRealm() {
     const { createMisoAudioWorkletHost } = await import(`${hostUrl.href}?main-test`);
     const host = await createMisoAudioWorkletHost({
       context,
-      document: new TextEncoder().encode("format_version = 2"),
+      document: new TextEncoder().encode("format_version = 0"),
       options: limits,
       simd128ModuleUrl: "simd.wasm",
       workletModuleUrl: "processor.js",
@@ -416,7 +416,7 @@ async function testMainRealm() {
     // Issue #137 D1/D2/D3: the live console's main-realm half.
     const consoleHost = await createMisoAudioWorkletHost({
       context,
-      document: new TextEncoder().encode("format_version = 2"),
+      document: new TextEncoder().encode("format_version = 0"),
       options: limits,
       simd128ModuleUrl: "simd.wasm",
       workletModuleUrl: "processor.js",
@@ -553,7 +553,7 @@ async function testMainRealm() {
     ]) {
       const rejecting = await createMisoAudioWorkletHost({
         context,
-        document: new TextEncoder().encode("format_version = 2"),
+        document: new TextEncoder().encode("format_version = 0"),
         options: limits,
         simd128ModuleUrl: "simd.wasm",
         workletModuleUrl: "processor.js",
@@ -755,7 +755,7 @@ async function testMainRealm() {
       trackIndex, rack: 1, effectIndex, tapId: 1, windowBlocks: 0, armed,
     });
 
-    const beforeEdit = await prepare("format_version = 2");
+    const beforeEdit = await prepare("format_version = 0");
     const armedBefore = await beforeEdit.observe({
       requestId: 1, subscriptions: [tap(0, 0, true), tap(1, 0, true)],
     });
@@ -763,7 +763,7 @@ async function testMainRealm() {
     assert.deepEqual(armedBefore.bindings.map((binding) => binding.trackIndex), [0, 1]);
     await beforeEdit.dispose();
 
-    const afterEdit = await prepare("format_version = 2 # one effect inserted");
+    const afterEdit = await prepare("format_version = 0 # one effect inserted");
     // The replacement's map starts empty: request ids restart at 1 and nothing carried over.
     // The app's first re-arm uses the *old* effect index, which the replacement no longer has.
     commandResult = 1;
@@ -978,7 +978,7 @@ async function testProcessor() {
   const originalSampleRate = globalThis.sampleRate;
   const originalRenderQuantumSize = globalThis.renderQuantumSize;
   const originalTextEncoder = globalThis.TextEncoder;
-  const processorSessionToml = new originalTextEncoder().encode("format_version = 2");
+  const processorSessionToml = new originalTextEncoder().encode("format_version = 0");
   const nonAsciiSourceId = "caf\u00e9-\u96ea-\ud83d\ude00";
   const nonAsciiSourceIdUtf8 = new originalTextEncoder().encode(nonAsciiSourceId);
   let registered;

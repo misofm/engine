@@ -28,7 +28,7 @@ Delay time is samples and/or ms with unambiguous conversion at session rate; fee
 
 Dual-mono means independent rings by default. A stereo/cross-feedback mode explicitly names the 2x2 feedback/routing matrix and any smoothed coefficients.
 
-## Adopted V2 decisions
+## Adopted decisions
 
 Rings, transition heads, and temporary output capacity are allocated during preparation. Render performs bounded index arithmetic and no allocation, locking, I/O, or unbounded work.
 
