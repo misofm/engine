@@ -36,10 +36,6 @@ if rg -n 'PlanPublisher|plan_exchange|std::fs|std::net|std::thread|std::sync::(M
   "$production_sources"; then
   fail 'publication, I/O, threading, synchronization, or logging leaked into graph path'
 fi
-if rg -n '\b(MAX_TRACKS|MAX_TRACK_COUNT|DEFAULT_MAX_TRACKS|TRACK_LIMIT)\b' \
-  crates/graph crates/graph-compiler; then
-  fail 'compiled track ceiling is forbidden'
-fi
 # Production code only: a `#[cfg(test)]` module may implement the seam to exercise it (issue 100
 # tests the block-boundary hand-over inside `engine`), but nothing that ships may.
 implementations=$(

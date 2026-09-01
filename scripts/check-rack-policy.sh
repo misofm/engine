@@ -30,9 +30,8 @@ compiler_manifest=crates/rack-compiler/Cargo.toml
 [[ "$(dependencies "$compiler_manifest")" == $'effect-contract\nengine\nrack' ]] ||
     fail 'rack compiler dependency boundary changed'
 
-if rg -n '\bunsafe\b|\b(MAX_TRACKS|MAX_TRACK_COUNT|DEFAULT_MAX_TRACKS|TRACK_LIMIT)\b' \
-    crates/rack crates/rack-compiler --glob '*.rs'; then
-    fail 'rack source has unsafe code or a compiled track ceiling'
+if rg -n '\bunsafe\b' crates/rack crates/rack-compiler --glob '*.rs'; then
+    fail 'rack source has unsafe code (compiled track ceilings are check-workspace-policy.sh'"'"'s job)'
 fi
 if rg -n '\b(session|effect_compiler|graph|builtins)::|std::(fs|net|thread|sync)|log::|tracing::' \
     crates/rack/src crates/rack/Cargo.toml; then

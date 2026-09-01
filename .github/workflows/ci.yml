@@ -84,10 +84,31 @@ jobs:
           bash scripts/test-realtime-audit-leak.sh
           bash scripts/check-artifact-evidence-leak.sh
           bash scripts/test-artifact-evidence-leak.sh
+      # Dependency and control-plane leak boundaries for the rack, render graph and builtins
+      # umbrella (previously sweep-only, so a boundary break was invisible to every PR). The
+      # MAX_TRACKS clause each used to carry is now check-workspace-policy.sh's alone, above.
+      - name: Rack dependency and safety boundary policy and mutation tests
+        run: |
+          bash scripts/check-rack-policy.sh
+          bash scripts/test-rack-policy.sh
+      - name: Render graph dependency and control-plane-leak policy
+        run: bash scripts/check-graph-policy.sh
+      - name: Builtins dependency boundary policy and mutation tests
+        run: |
+          bash scripts/check-builtins-policy.sh
+          bash scripts/test-builtins-policy.sh
       - name: Lane numeric-boundary policy and mutation tests
         run: |
           bash scripts/check-lane-policy.sh
           bash scripts/test-lane-policy.sh
+      # #163 phase 2: no fused multiply-add anywhere except the two evidence sites
+      # check-lane-policy.sh also names above. Previously ran only from the sweep -- the property
+      # is an absence, the easiest kind of fact to lose by accident, and this is the only gate that
+      # would have caught a fused spelling reappearing anywhere in the workspace.
+      - name: Unfused multiply-add seal and mutation tests
+        run: |
+          bash scripts/check-unfused-seal.sh
+          bash scripts/test-unfused-seal.sh
       - name: Lane gates G1-G4, G6, P1 and the issue-146 FP-environment guard on the AVX2+FMA runner
         run: cargo test --locked --release -p lane
       - name: Math gates M1, M2 and M3 in release

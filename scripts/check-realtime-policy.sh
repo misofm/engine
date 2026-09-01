@@ -55,9 +55,4 @@ if rg -n \
     fail "marked realtime code contains an allocation, lock, I/O, log, wait, syscall or panic surface"
 fi
 
-if rg -n '\b(MAX_TRACKS|MAX_TRACK_COUNT|DEFAULT_MAX_TRACKS|TRACK_LIMIT)\b' \
-    "$realtime_root" --glob '*.rs'; then
-    fail "compiled track capacity is forbidden"
-fi
-
 printf 'realtime policy: ok (%s marked regions)\n' "$marker_count"
