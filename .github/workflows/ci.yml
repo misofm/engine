@@ -74,6 +74,19 @@ jobs:
       # belongs with the cheap gates rather than behind the runner that consumes the measurement.
       - name: Wasm console benchmark validator mutation tests
         run: bash scripts/test-wasm-console-benchmark.sh
+      # The rest of the benchmark-validator family: hermetic self-tests of the one-shot runners'
+      # own preflight/validator/promotion logic. None launches a real workload, a timer or an
+      # audio device -- each proves its validator discriminates, the same shape as the wasm
+      # console row above. All were previously reachable only from scripts/sweep.sh.
+      - name: Benchmark preconditions and validator mutation tests
+        run: |
+          bash scripts/check-bench-preconditions.sh
+          bash scripts/check-rack-benchmark-fixture.sh
+          bash scripts/test-builtins-benchmark.sh
+          bash scripts/test-console-benchmark.sh
+          bash scripts/test-graph-benchmark.sh
+          bash scripts/test-rack-benchmark.sh
+          bash scripts/test-wasm-kernel-timing.sh
       - name: Shared host facade policy and mutation tests
         run: |
           bash scripts/check-host-core-policy.sh
@@ -160,6 +173,11 @@ jobs:
         run: |
           bash scripts/check-builtins-targets.sh
           bash scripts/check-effect-interchange-targets.sh
+      # Mutation suite for check-effect-interchange-qualification.sh, which the target matrix
+      # above already calls as its own precondition -- wired directly so its own row does not
+      # depend on staying a transitive side effect of a different check.
+      - name: Effect interchange qualification mutation tests
+        run: bash scripts/test-effect-interchange-policy.sh
       - name: Parametric EQ realtime allocation and syscall audit
         run: |
           cargo build --locked --release -p audit --bin audit
