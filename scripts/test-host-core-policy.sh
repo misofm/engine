@@ -71,7 +71,7 @@ expect_failure capi-reimplements-the-replay-cache \
 expect_failure facade-depends-on-the-protocol \
     'printf "%s\n" "protocol.workspace = true" >>"$root/crates/host-core/Cargo.toml"'
 expect_failure facade-exports-a-c-symbol \
-    'printf "%s\n" "#[unsafe(no_mangle)] pub extern \"C\" fn miso_engine_v2_prepare() {}" >>"$root/crates/host-core/src/lib.rs"'
+    'printf "%s\n" "#[unsafe(no_mangle)] pub extern \"C\" fn miso_engine_v1_prepare() {}" >>"$root/crates/host-core/src/lib.rs"'
 expect_failure facade-becomes-a-cdylib \
     'sed -i "s/crate-type = \[\"rlib\"\]/crate-type = [\"rlib\", \"cdylib\"]/" "$root/crates/host-core/Cargo.toml"'
 

@@ -1596,7 +1596,7 @@ fn barrier_schedule_separates_one_source_producer_from_exclusive_render() {
 ///   vacuous.
 ///
 /// Red mutation (recorded in `crates/host-core/tests/MUTATIONS.md`, M-146-2): delete the
-/// `CanonicalFpEnv::enter()` line from `miso_engine_v2_render_f32_planar`; the second arm collapses
+/// `CanonicalFpEnv::enter()` line from `miso_engine_v1_render_f32_planar`; the second arm collapses
 /// onto the third.
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 mod fp_environment {

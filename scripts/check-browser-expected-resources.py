@@ -20,7 +20,7 @@ So the rows went stale, twice, with every gate green:
 bridge's retained session model grew by `size_of::<Track>()` (16 -> 20 bytes per lane's
 `ChannelBuiltins`, so +8 per track) plus the fixture's canonical text (one track, two lanes,
 `", delay_samples = 0"`, +38). Issue #240 changes `sessionTomlBytes` to the exact staged document,
-so the boot-v2 re-pin deliberately moves that row.
+so the boot-v1 re-pin deliberately moves that row.
 
 Between them, thirty-three merges moved nothing: this is not accumulated drift, it is two
 un-re-pinned commits, and one gate red at either would have ended it.
@@ -85,10 +85,10 @@ FIXTURE = REPO / "hosts/host-web/tests/browser-v1"
 EXPECTED_JSON = FIXTURE / "expected.json"
 DIRECT_ORACLE = FIXTURE / "direct-oracle.mjs"
 DELIVERY_SCRIPT = REPO / "scripts/build-web-audioworklet.sh"
-WORKLET_JS = REPO / "hosts/host-web/web/miso-engine-v2-audio-worklet.js"
+WORKLET_JS = REPO / "hosts/host-web/web/miso-engine-v1-audio-worklet.js"
 FIXTURE_RUNNER_JS = FIXTURE / "browser-correctness.js"
 
-MODULE_NAME = "miso-engine-v2-audio-worklet.simd128.wasm"
+MODULE_NAME = "miso-engine-v1-audio-worklet.simd128.wasm"
 # Shared with every other `target/ci/*` gate: a persistent directory, so a sweep does not pay a
 # cold Wasm build of the whole workspace on every run.
 WASM_TARGET_DIR = REPO / "target/ci/browser-expected-resources"
@@ -98,7 +98,7 @@ WASM_TARGET = "wasm32-unknown-unknown"
 # gate does not carry it.
 SIMD128_FLAG = "-C target-feature=+simd128"
 
-DIRECT_ORACLE_SCHEMA = "miso.web.browser.direct-oracle.v2"
+DIRECT_ORACLE_SCHEMA = "miso.web.browser.direct-oracle.v1"
 BACKEND_SIMD128 = 1
 BACKEND_SCALAR = 0
 
@@ -322,7 +322,7 @@ def check_limits_vocabulary(worklet: str, fixture: str) -> None:
     fixture's policy object was never extended. The field list is checked with `exactFields`, so the
     browser leg refused the fixture at boot with `RESULT_INVALID_ARGUMENT` from #143 until #217.
     Nothing was red: the `--check` leg drives the module through `direct-oracle.mjs`, which writes
-    the configuration words itself and never crosses `miso-engine-v2-audio-worklet.js`, and the
+    the configuration words itself and never crosses `miso-engine-v1-audio-worklet.js`, and the
     browser leg is not a sweep row because its sibling modes need a browser.
     """
     declared = worklet_limit_fields(worklet)

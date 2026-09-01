@@ -475,9 +475,9 @@ async function main() {
   // below is this exact session rendered through the native `AudioWorkletEngineHost`. Equality is
   // `to_bits` (SHA-256 over little-endian f32 words), never a tolerance.
   const actual = {
-    schema: "miso.web.browser.direct-oracle.v2",
+    schema: "miso.web.browser.direct-oracle.v1",
     simd128: await runBackend(
-      path.join(artifactDirectory, "miso-engine-v2-audio-worklet.simd128.wasm"),
+      path.join(artifactDirectory, "miso-engine-v1-audio-worklet.simd128.wasm"),
       1,
       sessionToml,
       source,
@@ -498,7 +498,7 @@ async function main() {
   );
   // #137 E2: the command-timeline leg, pinned the same way and asserted before any print.
   actual.commandTimeline = await runCommandTimeline(
-    path.join(artifactDirectory, "miso-engine-v2-audio-worklet.simd128.wasm"),
+    path.join(artifactDirectory, "miso-engine-v1-audio-worklet.simd128.wasm"),
     await readFile(path.join(fixtureDirectory, "command-session.toml")),
     source.sourceId,
   );
@@ -521,7 +521,7 @@ async function main() {
   const observationSession = await readFile(
     path.join(fixtureDirectory, "observation-session.toml"),
   );
-  const artifact = path.join(artifactDirectory, "miso-engine-v2-audio-worklet.simd128.wasm");
+  const artifact = path.join(artifactDirectory, "miso-engine-v1-audio-worklet.simd128.wasm");
   const observed = await runObservationTimeline(artifact, observationSession, source.sourceId, 4n);
   const unobserved = await runObservationTimeline(
     artifact, observationSession, source.sourceId, 0n,

@@ -251,7 +251,7 @@ flipped-digit red proof so the comparison cannot be loosened into a vacuous pass
 
 For the qualification leg specifically: `runQualification` fetches the three documents and passes
 their bytes to `createMisoAudioWorkletHost` as `sessionToml`. Nothing in
-`hosts/host-web/web/miso-engine-v2-audio-worklet-host.js` computes or exposes a digest,
+`hosts/host-web/web/miso-engine-v1-audio-worklet-host.js` computes or exposes a digest,
 and `host.sessionMap()` returns track and tap structure only — the harness reads `map.tracks` and
 `map.metersAttached` and nothing else. Engine-side, `content` reaches
 `crates/session/src/validate.rs::valid_source_content_identity`, a

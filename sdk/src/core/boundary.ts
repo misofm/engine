@@ -16,7 +16,7 @@ import { MisoEngineError, MisoUsageError, parseDiagnostics, resultName } from ".
  *
  * # The guess machine is gone
  *
- * The pre-boot-v2 SDK reached this point through nine operations over a bifurcated plan/raw path.
+ * The pre-boot-v1 SDK reached this point through nine operations over a bifurcated plan/raw path.
  * A raw TOML document was funnelled through `sessionHeader`, a regex over the text that could not
  * see a quoted key and would happily match a same-named key in a nested table; whatever it failed
  * to find became `validationFallback`'s silent 48 kHz / 128 frames; a throwaway `SessionPlan` was
@@ -24,7 +24,7 @@ import { MisoEngineError, MisoUsageError, parseDiagnostics, resultName } from ".
  * so a 96 kHz/127 session was structurally unbootable; and a 29-field configuration table was
  * written from all of it.
  *
- * Every one of those steps existed to *guess* facts the engine already knew. Boot v2 hands them
+ * Every one of those steps existed to *guess* facts the engine already knew. Boot v1 hands them
  * back: stage the bytes, boot, and ask. So the two input paths converge on one verb, and the guess
  * machine is deleted rather than relocated -- there is no `sessionHeader`, no fallback rate, no
  * fabricated plan and no `PrepareLimits` anywhere in this SDK.
@@ -118,7 +118,7 @@ export class WasmBoundary {
    * is a *different* operation -- a fresh instance with a fresh linear memory, which pays another
    * instantiation and throws away the module's warmed allocator -- and it is deliberately not
    * dressed up as the mix switch. There is no `reprepare()` and no in-place session replacement:
-   * boot v2 has no verb that mutates a live session's document.
+   * boot v1 has no verb that mutates a live session's document.
    */
   reboot(document: Uint8Array, options: BootOptions = {}): void {
     this.dispose();

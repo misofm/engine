@@ -118,7 +118,7 @@ a wedged reader cancellation, and remove staging before refusing typed. Range
 retries are accepted only when the server proves the requested `206
 Content-Range`, so resumption can never duplicate bytes into the decoder.
 
-The [authorized bounded #244 successor](https://github.com/misofm/engine-v2/issues/244#issuecomment-5458432638)
+The [authorized bounded #244 successor](https://github.com/misofm/engine/issues/244#issuecomment-5458432638)
 applies that same abort/deadline race to fallback-final `createWritable`,
 `write`, and `close`. On interruption, writable abort and final-file removal
 start immediately but are not re-awaited: cleanup cannot turn the original

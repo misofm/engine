@@ -156,7 +156,7 @@ function mutationProofs(browserName, result) {
 
 // Issue #280: the served artifact set is *exact*, and both halves of that are proved here.
 //
-// The set drifted to five names when #243 added `miso-engine-v2-abi-layout.json`, so
+// The set drifted to five names when #243 added `miso-engine-v1-abi-layout.json`, so
 // `npm run qualify` refused the very directory `scripts/build-web-audioworklet.sh` produces --
 // before any browser started. Widening a pin can silently become loosening it, so this walks the
 // real built directory: the shipped six are accepted, removing *any one* of them is refused
@@ -189,7 +189,7 @@ async function artifactSetProofs(artifacts) {
     }
     // The W4-D1 artifact this project deliberately stopped shipping: the exact spelling of a stray
     // file a stale build tree would leave behind.
-    const STRAY = "miso-engine-v2-audio-worklet.scalar.wasm";
+    const STRAY = "miso-engine-v1-audio-worklet.scalar.wasm";
     const stray = path.join(root, "stray");
     await cp(shipped, stray, { recursive: true });
     await writeFile(path.join(stray, STRAY), "");
@@ -205,12 +205,12 @@ async function artifactSetProofs(artifacts) {
     }
     const directoryNamedLikeAnArtifact = path.join(root, "not-a-regular-file");
     await cp(shipped, directoryNamedLikeAnArtifact, { recursive: true });
-    await rm(path.join(directoryNamedLikeAnArtifact, "miso-engine-v2-abi-layout.json"));
-    await mkdir(path.join(directoryNamedLikeAnArtifact, "miso-engine-v2-abi-layout.json"));
+    await rm(path.join(directoryNamedLikeAnArtifact, "miso-engine-v1-abi-layout.json"));
+    await mkdir(path.join(directoryNamedLikeAnArtifact, "miso-engine-v1-abi-layout.json"));
     await assert.rejects(
       () => exactArtifacts(directoryNamedLikeAnArtifact),
       (error) => error instanceof Error
-        && error.message === "artifact is not a regular file: miso-engine-v2-abi-layout.json",
+        && error.message === "artifact is not a regular file: miso-engine-v1-abi-layout.json",
       "artifact-set: directory named like an artifact: red mutation escaped the artifact pin",
     );
     return names.length;

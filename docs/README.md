@@ -1,4 +1,4 @@
-# Engine V2 documentation
+# Engine V1 documentation
 
 The issue bodies in [`.github/ISSUE_SPECS`](../.github/ISSUE_SPECS/README.md) retain scope and acceptance authority. These are checked-in contracts and evidence records.
 

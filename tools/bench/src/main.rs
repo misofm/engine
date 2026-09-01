@@ -26,7 +26,7 @@ mod rack;
 mod session;
 
 #[cfg(not(target_arch = "wasm32"))]
-const INTERNAL_SUBJECT: &str = "ENGINE_V2_INTERNAL_BENCH_SUBJECT";
+const INTERNAL_SUBJECT: &str = "ENGINE_V1_INTERNAL_BENCH_SUBJECT";
 #[cfg(not(target_arch = "wasm32"))]
 const SUBJECTS: &[&str] = &[
     "builtins",

@@ -65,4 +65,19 @@ would falsify evidence or merely clean stale terminology.
 
 ## Evidence record
 
-Pending implementation and Sol review.
+- Owner ruling checkpoint `37ab2d35` is upstream and GitHub issue #313 is open with the matching
+  stateless body.
+- Native C ABI header, macros, types, and fourteen exports are renamed atomically to V1; the C and
+  C++ ABI mutation/check gates pass.
+- The full non-timed Linux C-ABI qualification ran once in fresh staging against the renamed V1
+  surface. Four C/C++ static/shared consumers passed, the exact fourteen-symbol set passed, 29 CAPI
+  unit tests, 3 external lifecycle tests, 123 protocol unit tests, the protocol integration and
+  million-command mutation tests, 19 runner tests, 100,000 exported render calls, and the
+  1,000,000-block armed syscall trace all passed. The refreshed authority ledger resolves and is
+  enforced again.
+- Workspace naming policy and its ABI/textual later-generation mutations pass.
+- Browser and SDK artifacts now ship only as `miso-engine-v1-*`; the static/object worklet gate,
+  hermetic worklet tests and mutations, WebDriver response tests, generated SDK asset/surface checks,
+  command vocabulary checks, session-map shape checks, and metadata schema checks pass.
+- `cargo fmt --check` and `cargo check --workspace --all-targets` pass on Rust 1.97.1.
+- Remaining work is the broader active-prose/schema inventory and final adversarial review.

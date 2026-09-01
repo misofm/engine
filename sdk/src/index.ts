@@ -1,4 +1,4 @@
-/** Zero-runtime-dependency Engine V2 catalog, Session V1, and command-control surface. */
+/** Zero-runtime-dependency Engine V1 catalog, Session V1, and command-control surface. */
 export * from "./generated/catalog.ts";
 export * from "./generated/abi.ts";
 export * from "./generated/provenance.ts";

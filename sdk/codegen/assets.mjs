@@ -35,8 +35,8 @@ const assets = resolve(sdkRoot, "assets");
 
 /** Each asset, and the generator mode that renders it. One generator, two documents. */
 const documents = [
-  ["miso-engine-v2-parameter-metadata.json", "--print"],
-  ["miso-engine-v2-abi-layout.json", "--print-abi-layout"],
+  ["miso-engine-v1-parameter-metadata.json", "--print"],
+  ["miso-engine-v1-abi-layout.json", "--print-abi-layout"],
 ];
 
 function render(mode) {

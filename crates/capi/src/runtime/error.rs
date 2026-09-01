@@ -41,7 +41,7 @@ impl FixedBytes {
 
 /// Fixed render diagnostics for a plan handle.
 ///
-/// The render thread stores one of these codes into `Plan::last_error`; `miso_engine_v2_last_error`
+/// The render thread stores one of these codes into `Plan::last_error`; `miso_engine_v1_last_error`
 /// loads it from any thread and returns the matching `'static` text. A plan diagnostic is therefore
 /// a single relaxed atomic word rather than shared mutable string storage: the render thread never
 /// takes a borrow that a concurrent query could invalidate.

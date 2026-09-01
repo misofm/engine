@@ -24,7 +24,7 @@ mod source_fixture;
 mod unfused_fma;
 mod vectorization;
 
-const INTERNAL_SUBJECT: &str = "ENGINE_V2_INTERNAL_AUDIT_SUBJECT";
+const INTERNAL_SUBJECT: &str = "ENGINE_V1_INTERNAL_AUDIT_SUBJECT";
 const SUBJECTS: &[&str] = &[
     "builtins",
     "builtins-fixture",

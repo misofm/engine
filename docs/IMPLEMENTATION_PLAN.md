@@ -1,8 +1,8 @@
-# Engine V2 implementation plan
+# Engine V1 implementation plan
 
 ## Purpose
 
-This is the concise index for the stateless implementation payloads in [`.github/ISSUE_SPECS`](../.github/ISSUE_SPECS/README.md).  The issue bodies, not this roadmap, are the source of truth.  Engine V2 is greenfield: do not inspect or copy V1/legacy designs.
+This is the concise index for the stateless implementation payloads in [`.github/ISSUE_SPECS`](../.github/ISSUE_SPECS/README.md).  The issue bodies, not this roadmap, are the source of truth.  Engine V1 is greenfield: do not inspect or copy V1/legacy designs.
 
 ## Delivery sequence
 

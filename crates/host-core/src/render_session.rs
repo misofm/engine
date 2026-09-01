@@ -8,7 +8,7 @@
 //! hardware FTZ+DAZ, 69-70 of 331 corpus rows render off-pin, and every DAW audio callback arrives
 //! with FTZ+DAZ set.
 //!
-//! Legacy engine-v2-old solved the same problem with `MountedSession::start`: the mount is one
+//! Legacy engine-the earlier engine solved the same problem with `MountedSession::start`: the mount is one
 //! thing, *starting* it on the render thread is another, and the started object is the only thing
 //! that can render. [`StartedRenderSession`] is that shape.
 //!

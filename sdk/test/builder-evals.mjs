@@ -263,7 +263,7 @@ describe("the most important eval -- what the builder writes, the engine boots",
 
   test("48000/128 and 96000/127 both boot, and the ring follows the published rule", async () => {
     // 96 kHz at a 127-frame quantum is the shape that structurally could not boot under the
-    // pre-boot-v2 SDK's fabricated 1024-frame ring. A builder whose output only ever works at
+    // pre-boot-v1 SDK's fabricated 1024-frame ring. A builder whose output only ever works at
     // 48 kHz/128 would pass every other test in this file.
     await bootAndCompare(oneTrack({ id: "rate.48k" }), {
       sampleRateHz: 48_000,

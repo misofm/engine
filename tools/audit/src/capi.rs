@@ -9,9 +9,9 @@ use capi::{
     ABI_VERSION, BYTES_OUT_SIZE, BytesOut, COMPILE_LIMITS_SIZE, CompileLimits, ENGINE_CONFIG_SIZE,
     Engine, EngineConfig, PLANAR_OUTPUT_SIZE, Plan, PlanarOutput, RESULT_INTERNAL, RESULT_OK,
     SOURCE_CHUNK_SIZE, SUBMIT_REPORT_SIZE, Session, SourceChunk, SubmitReport,
-    miso_engine_v2_compile_session, miso_engine_v2_engine_create, miso_engine_v2_engine_destroy,
-    miso_engine_v2_plan_destroy, miso_engine_v2_render_f32_planar, miso_engine_v2_session_destroy,
-    miso_engine_v2_source_submit_planar_f32,
+    miso_engine_v1_compile_session, miso_engine_v1_engine_create, miso_engine_v1_engine_destroy,
+    miso_engine_v1_plan_destroy, miso_engine_v1_render_f32_planar, miso_engine_v1_session_destroy,
+    miso_engine_v1_source_submit_planar_f32,
 };
 use engine::realtime::audit::{self, AuditSnapshot};
 
@@ -44,7 +44,7 @@ impl AuditHandles {
             reserved: [0; 4],
         };
         // SAFETY: Configuration and output-pointer storage are valid for this complete call.
-        let created = unsafe { miso_engine_v2_engine_create(&config, &mut handles.engine) };
+        let created = unsafe { miso_engine_v1_engine_create(&config, &mut handles.engine) };
         if created != RESULT_OK {
             return Err(created);
         }
@@ -61,7 +61,7 @@ impl AuditHandles {
         // SAFETY: The live engine, immutable TOML, fixed limits, diagnostic storage, and both
         // output locations remain valid throughout transactional compilation.
         let compiled = unsafe {
-            miso_engine_v2_compile_session(
+            miso_engine_v1_compile_session(
                 handles.engine,
                 SESSION_TOML.as_ptr(),
                 SESSION_TOML.len() as u64,
@@ -99,7 +99,7 @@ impl AuditHandles {
         // SAFETY: The session is live and all borrowed source bytes/planes and report storage
         // remain valid until the synchronous copy completes.
         let submitted = unsafe {
-            miso_engine_v2_source_submit_planar_f32(
+            miso_engine_v1_source_submit_planar_f32(
                 handles.session,
                 b"fixture-source".as_ptr(),
                 14,
@@ -123,9 +123,9 @@ impl Drop for AuditHandles {
         // SAFETY: Every nonnull child is the unique quiescent handle published into this owner.
         // Destruction occurs after any render audit scope has ended, plan then session then engine.
         unsafe {
-            miso_engine_v2_plan_destroy(self.plan);
-            miso_engine_v2_session_destroy(self.session);
-            miso_engine_v2_engine_destroy(self.engine);
+            miso_engine_v1_plan_destroy(self.plan);
+            miso_engine_v1_session_destroy(self.session);
+            miso_engine_v1_engine_destroy(self.engine);
         }
         self.plan = ptr::null_mut();
         self.session = ptr::null_mut();
@@ -168,7 +168,7 @@ impl PreparedAudit {
                 // SAFETY: The plan is live and exclusive, the descriptor points to the same
                 // complete writable output for every synchronous call, and exact time is bounded.
                 let result = unsafe {
-                    miso_engine_v2_render_f32_planar(plan, call * QUANTUM_FRAMES as u64, &output)
+                    miso_engine_v1_render_f32_planar(plan, call * QUANTUM_FRAMES as u64, &output)
                 };
                 if result != RESULT_OK {
                     render_errors = render_errors.saturating_add(1);
@@ -328,7 +328,7 @@ mod tests {
     fn audit_plan_is_fixed_non_timed_and_calls_the_c_entrypoint() {
         const SOURCE: &str = include_str!("capi.rs");
         assert_eq!(CALLS, 100_000);
-        assert!(SOURCE.contains("miso_engine_v2_render_f32_planar("));
+        assert!(SOURCE.contains("miso_engine_v1_render_f32_planar("));
         for forbidden in [
             concat!("std", "::time"),
             concat!("Instant", "::"),

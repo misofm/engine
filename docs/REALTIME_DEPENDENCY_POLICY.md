@@ -279,9 +279,9 @@ render state exists, and refuses to start on an error:
 |---|---|
 | `hosts/host-native` `main` | diagnostic on stderr, `ExitCode::FAILURE` |
 | `hosts/host-mobile` `mobile_target_smoke` | `Err(HostAttestation)` |
-| `crates/capi` `miso_engine_v2_engine_create` | `MISO_ENGINE_V2_UNSUPPORTED` (7) |
+| `crates/capi` `miso_engine_v1_engine_create` | `MISO_ENGINE_V1_UNSUPPORTED` (7) |
 
-The C header previously said `MISO_ENGINE_V2_UNSUPPORTED` was reserved and never returned; it is
+The C header previously said `MISO_ENGINE_V1_UNSUPPORTED` was reserved and never returned; it is
 now returned by that one entry point and the header says so. An embedder that receives it must not
 retry: the library and the CPU do not match. On every supported host the attestation succeeds and
 nothing about these calls changes. `hosts/host-web` is `wasm32`, where the pinned

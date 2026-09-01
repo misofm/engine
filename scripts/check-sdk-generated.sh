@@ -14,7 +14,7 @@
 # only the JSON would let a hand-edited constant sit in the modules a consumer actually imports.
 #
 # Red mutation: edit one constant in `sdk/src/generated/abi.ts` -> the second check goes red; edit
-# one row in `sdk/assets/miso-engine-v2-abi-layout.json` -> the first does.
+# one row in `sdk/assets/miso-engine-v1-abi-layout.json` -> the first does.
 set -euo pipefail
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
@@ -43,12 +43,12 @@ done
 # does not exist in a source checkout. So the declaration is copied, and the copy is checked here
 # rather than trusted: a shipped `.d.ts` that gains, loses or retypes a field and a stale mirror
 # that did not follow it is exactly the drift the mirror exists to catch.
-if ! cmp -s "$repo_root/hosts/host-web/web/miso-engine-v2-audio-worklet-host.d.ts" \
+if ! cmp -s "$repo_root/hosts/host-web/web/miso-engine-v1-audio-worklet-host.d.ts" \
             "$repo_root/sdk/src/browser/shipped-host.d.ts"; then
   echo "sdk/src/browser/shipped-host.d.ts is not the shipped declaration; refresh it with:" >&2
-  echo "  cp hosts/host-web/web/miso-engine-v2-audio-worklet-host.d.ts \\" >&2
+  echo "  cp hosts/host-web/web/miso-engine-v1-audio-worklet-host.d.ts \\" >&2
   echo "     sdk/src/browser/shipped-host.d.ts" >&2
-  diff -u "$repo_root/hosts/host-web/web/miso-engine-v2-audio-worklet-host.d.ts" \
+  diff -u "$repo_root/hosts/host-web/web/miso-engine-v1-audio-worklet-host.d.ts" \
           "$repo_root/sdk/src/browser/shipped-host.d.ts" >&2 || true
   exit 1
 fi

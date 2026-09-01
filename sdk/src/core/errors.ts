@@ -81,7 +81,7 @@ export interface MisoEngineErrorInit {
  * when a module's version word did not match and another when `boot()` rejected the options block.
  * The six phases -- `asset`, `boot`, `source`, `render`, `output`, `lifecycle` -- come from the
  * generated layout document and are anchored to the export surface, replacing the dead two-phase
- * `"compile"` spelling of the pre-boot-v2 ABI (issue #243 S2(b)).
+ * `"compile"` spelling of the pre-boot-v1 ABI (issue #243 S2(b)).
  */
 export class MisoEngineError extends Error {
   readonly phase: ErrorPhase;

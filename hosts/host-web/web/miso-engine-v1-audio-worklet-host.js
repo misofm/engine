@@ -1,7 +1,7 @@
 const RESULT_OK = 0;
 const RESULT_BACKPRESSURE = 6;
 const RESULT_UNSUPPORTED = 7;
-const PROCESSOR_NAME = "miso-engine-v2-audio-worklet";
+const PROCESSOR_NAME = "miso-engine-v1-audio-worklet";
 const VALID_RESULTS = new Set([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 255]);
 
 // Canonical minimal module: `() -> v128` implemented by `i32.const 0; i8x16.splat`.

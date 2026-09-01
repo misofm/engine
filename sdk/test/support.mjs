@@ -31,7 +31,7 @@ export function artifactDir() {
 
 export async function moduleBytes() {
   return new Uint8Array(
-    await readFile(resolve(artifactDir(), "miso-engine-v2-audio-worklet.simd128.wasm")),
+    await readFile(resolve(artifactDir(), "miso-engine-v1-audio-worklet.simd128.wasm")),
   );
 }
 
@@ -41,7 +41,7 @@ const ZERO_CONTENT = `sha256:${"0".repeat(64)}`;
  * A one-track Session V1 document.
  *
  * `quoteKeys` is the whole reason this helper takes an option nobody would otherwise want. The
- * pre-boot-v2 SDK sniffed a document's rate and quantum with a regex anchored to bare keys, so a
+ * pre-boot-v1 SDK sniffed a document's rate and quantum with a regex anchored to bare keys, so a
  * perfectly legal TOML 1.0 document that quoted them was invisible to it and silently became
  * 48 kHz / 128 frames. Quoting is legal, the engine's parser accepts it, and the red probes are
  * written against it (issue #243 eval 1).

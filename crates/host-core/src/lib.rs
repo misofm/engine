@@ -79,7 +79,7 @@
 //!   renders, and restores the caller's exact word -- on the success path, on every rejection path
 //!   and while unwinding. A host does not have to configure its thread, and gets its thread back
 //!   unchanged. [`StartedRenderSession`] is that entry for an embedding host;
-//!   `miso_engine_v2_render_f32_planar` is it for the C ABI. Browser Wasm needs neither: the core
+//!   `miso_engine_v1_render_f32_planar` is it for the C ABI. Browser Wasm needs neither: the core
 //!   specification fixes round-to-nearest-even and full subnormal arithmetic, so the guard is a
 //!   zero-sized value there and the shipped artifact is unchanged.
 //! * **A started session is neither `Send` nor `Sync`.** The attestation is a statement about one

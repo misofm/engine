@@ -1,7 +1,7 @@
 # Derivations — #242 parameter lattice
 
 Every re-pin in this change, with the arithmetic that discharges it, per the ceremony amended by
-[#239 ruling 5462028562 A](https://github.com/misofm/engine-v2/issues/239#issuecomment-5462028562):
+[#239 ruling 5462028562 A](https://github.com/misofm/engine/issues/239#issuecomment-5462028562):
 a derivation may live in a linked derivations document naming the commit it discharges.
 
 ## 1. `scripts/fixtures/parameter-metadata-v1-self-test.json` — regenerated

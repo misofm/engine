@@ -19,7 +19,7 @@ Two rules, both mechanical:
    a row: the second copy of a name is what let a runner and its binary disagree (#104 F2).
 
 Names that appear only under `crates/` or `hosts/` -- the C ABI macro families
-`MISO_ENGINE_V2_*` and `MISO_ENGINE_EFFECT_*_V1`, and the crate-local test hooks
+`MISO_ENGINE_V1_*` and `MISO_ENGINE_EFFECT_*_V1`, and the crate-local test hooks
 `MISO_ENGINE_MATH_PIN`, the `MISO_ENGINE_REPIN_*_CORPUS` family, `MISO_ENGINE_TRANSCRIPT_031`,
 `MISO_ENGINE_TRANSCRIPT_045`, `MISO_ENGINE_AUDIT_008`, `MISO_ENGINE_AUDIT_037` -- are bound by
 rule 1 but are not part of the tool/script vocabulary and are not listed here.
@@ -145,7 +145,7 @@ Read by one subject each.
 |---|---|
 | `MISO_ENGINE_BENCH_ALLOW_UNCONTROLLED` | set to `1` to record a run whose admissibility preconditions failed instead of refusing it. For machines where control is genuinely impossible; the resulting records say `uncontrolled` and name every waived precondition. |
 | `MISO_ENGINE_BUILTINS_SKIP_METADATA` | `check-builtins-policy.sh`: skip the `cargo metadata` smoke. |
-| `MISO_ENGINE_CAPI_HEADER` | C-ABI tests: path of `miso_engine_v2.h`. |
+| `MISO_ENGINE_CAPI_HEADER` | C-ABI tests: path of `miso_engine_v1.h`. |
 | `MISO_ENGINE_CAPI_LIBRARY` | C-ABI tests: path of the built library. |
 | `MISO_ENGINE_CAPI_C_FIXTURE` | C-ABI tests: path of the C consumer. |
 | `MISO_ENGINE_CAPI_CPP_FIXTURE` | C-ABI tests: path of the C++ consumer. |

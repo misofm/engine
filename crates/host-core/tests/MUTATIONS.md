@@ -152,7 +152,7 @@ not land (below), and an unused public primitive with a gate attached is worse t
 ## W4-5 — one validation pass at the C boundary
 
 ### M-11 — the platform bound on `sample_capacity` is dropped
-* Mutation: in `miso_engine_v2_render_f32_planar`, `Ok(value) if value <= isize::MAX as usize / 4`
+* Mutation: in `miso_engine_v1_render_f32_planar`, `Ok(value) if value <= isize::MAX as usize / 4`
   → `Ok(value)`.
 * Command: `cargo test -p capi render_rejections`
 * Red: `render_rejections_name_their_single_check` — the `from_raw_parts_mut` debug precondition
@@ -256,7 +256,7 @@ Every mutation below was applied, run, recorded and reverted on the delivery hos
 ### M-146-2 — the guard is removed from the C ABI render entry
 
 * Mutation: delete `let _fp_env = CanonicalFpEnv::enter();` from
-  `miso_engine_v2_render_f32_planar` in `crates/capi/src/ffi.rs`.
+  `miso_engine_v1_render_f32_planar` in `crates/capi/src/ffi.rs`.
 * Command: `cargo test -p capi --lib fp_environment`
 * Result: **RED**, and red at the *earliest* possible point: the plan's first block fails the
   session-start re-attestation and the entry returns `RESULT_RENDER_REJECTED` (8) with

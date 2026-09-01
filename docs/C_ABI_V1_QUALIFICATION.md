@@ -56,7 +56,7 @@ changed or rebuilt. The new consumer was corrected to submit generation 1 first,
 submit generation 2; all four consumer rows passed against the same once-built libraries. This is
 recorded as one consumer-fixture correction in `QUALIFICATION.tsv`.
 
-GNU `nm` found exactly the 14 frozen `miso_engine_v2_*` definitions in both library forms. The
+GNU `nm` found exactly the 14 frozen `miso_engine_v1_*` definitions in both library forms. The
 object parser classifies undefined references separately; a synthetic
 mutation replacing a definition with an identically named undefined reference is rejected.
 

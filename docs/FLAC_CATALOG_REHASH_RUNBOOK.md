@@ -3,7 +3,7 @@
 This is the operations handoff for the pre-launch container-hash to canonical-PCM migration. The
 repository ships the closed migration tool, mapping format, and synthetic end-to-end oracle. The
 real catalog run is an owner-scheduled operations step under the
-[#245 ruling](https://github.com/misofm/engine-v2/issues/245#issuecomment-5458432753); repository
+[#245 ruling](https://github.com/misofm/engine/issues/245#issuecomment-5458432753); repository
 qualification does not require or authorize access to application or production storage.
 
 ## Owner action flags

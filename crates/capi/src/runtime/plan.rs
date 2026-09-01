@@ -65,7 +65,7 @@ impl PlanState {
 /// Any-thread projection of a plan's frozen resource accounting.
 ///
 /// Held in its own [`crate::Plan`] field, disjoint from the render-thread-exclusive
-/// [`PlanState`], so `miso_engine_v2_plan_resources` can run concurrently with a render call.
+/// [`PlanState`], so `miso_engine_v1_plan_resources` can run concurrently with a render call.
 pub(crate) struct PlanQueries {
     pub(crate) shared: Arc<SharedPlanState>,
 }

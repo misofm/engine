@@ -183,11 +183,11 @@ unsafe fn plan_queries(plan: *const Plan) -> *const PlanQueries {
     unsafe { &raw const (*plan).queries }
 }
 
-/// Returns the frozen Engine V2 C ABI version.
+/// Returns the frozen Engine V1 C ABI version.
 ///
 /// Thread: any.
 #[unsafe(no_mangle)]
-pub extern "C" fn miso_engine_v2_abi_version() -> u32 {
+pub extern "C" fn miso_engine_v1_abi_version() -> u32 {
     catch_result(|| ABI_VERSION)
 }
 
@@ -199,7 +199,7 @@ pub extern "C" fn miso_engine_v2_abi_version() -> u32 {
 ///
 /// Thread: any.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn miso_engine_v2_query_capabilities(out: *mut Capabilities) -> u32 {
+pub unsafe extern "C" fn miso_engine_v1_query_capabilities(out: *mut Capabilities) -> u32 {
     catch_result(|| {
         if out.is_null() {
             return RESULT_INVALID_ARGUMENT;
@@ -241,7 +241,7 @@ pub unsafe extern "C" fn miso_engine_v2_query_capabilities(out: *mut Capabilitie
 ///
 /// Thread: control.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn miso_engine_v2_engine_create(
+pub unsafe extern "C" fn miso_engine_v1_engine_create(
     config: *const EngineConfig,
     out_engine: *mut *mut Engine,
 ) -> u32 {
@@ -284,7 +284,7 @@ pub unsafe extern "C" fn miso_engine_v2_engine_create(
 ///
 /// Thread: control, quiescent.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn miso_engine_v2_engine_destroy(engine: *mut Engine) {
+pub unsafe extern "C" fn miso_engine_v1_engine_destroy(engine: *mut Engine) {
     catch_destroy(|| {
         if engine.is_null() {
             return;
@@ -308,7 +308,7 @@ pub unsafe extern "C" fn miso_engine_v2_engine_destroy(engine: *mut Engine) {
 ///
 /// Thread: control.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn miso_engine_v2_compile_session(
+pub unsafe extern "C" fn miso_engine_v1_compile_session(
     engine: *mut Engine,
     toml: *const u8,
     toml_bytes: u64,
@@ -421,7 +421,7 @@ pub unsafe extern "C" fn miso_engine_v2_compile_session(
 ///
 /// Thread: control.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn miso_engine_v2_source_submit_planar_f32(
+pub unsafe extern "C" fn miso_engine_v1_source_submit_planar_f32(
     session: *mut Session,
     source_id: *const u8,
     source_id_bytes: u64,
@@ -517,7 +517,7 @@ pub unsafe extern "C" fn miso_engine_v2_source_submit_planar_f32(
 ///
 /// Thread: control.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn miso_engine_v2_source_seek(
+pub unsafe extern "C" fn miso_engine_v1_source_seek(
     session: *mut Session,
     source_id: *const u8,
     source_id_bytes: u64,
@@ -564,7 +564,7 @@ pub unsafe extern "C" fn miso_engine_v2_source_seek(
 ///
 /// Thread: control.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn miso_engine_v2_submit_command(
+pub unsafe extern "C" fn miso_engine_v1_submit_command(
     session: *mut Session,
     request: *const u8,
     request_bytes: u64,
@@ -647,7 +647,7 @@ pub unsafe extern "C" fn miso_engine_v2_submit_command(
 ///
 /// Thread: control.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn miso_engine_v2_dequeue_event(
+pub unsafe extern "C" fn miso_engine_v1_dequeue_event(
     session: *mut Session,
     lane: u32,
     event: *mut BytesOut,
@@ -729,7 +729,7 @@ pub unsafe extern "C" fn miso_engine_v2_dequeue_event(
 ///
 /// Thread: render only, never concurrently with itself.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn miso_engine_v2_render_f32_planar(
+pub unsafe extern "C" fn miso_engine_v1_render_f32_planar(
     plan: *mut Plan,
     absolute_sample: u64,
     output: *const PlanarOutput,
@@ -854,7 +854,7 @@ pub unsafe extern "C" fn miso_engine_v2_render_f32_planar(
 ///
 /// Thread: any, concurrent with render.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn miso_engine_v2_plan_resources(
+pub unsafe extern "C" fn miso_engine_v1_plan_resources(
     plan: *const Plan,
     out: *mut PlanResourceReport,
 ) -> u32 {
@@ -894,7 +894,7 @@ pub unsafe extern "C" fn miso_engine_v2_plan_resources(
 ///
 /// Thread: any, concurrent with render, for a plan; control for a session or engine.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn miso_engine_v2_last_error(
+pub unsafe extern "C" fn miso_engine_v1_last_error(
     live_handle: *const c_void,
     out: *mut BytesOut,
 ) -> u32 {
@@ -952,7 +952,7 @@ pub unsafe extern "C" fn miso_engine_v2_last_error(
 ///
 /// Thread: control, quiescent.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn miso_engine_v2_session_destroy(session: *mut Session) {
+pub unsafe extern "C" fn miso_engine_v1_session_destroy(session: *mut Session) {
     catch_destroy(|| {
         if session.is_null() {
             return;
@@ -973,7 +973,7 @@ pub unsafe extern "C" fn miso_engine_v2_session_destroy(session: *mut Session) {
 ///
 /// Thread: control, quiescent.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn miso_engine_v2_plan_destroy(plan: *mut Plan) {
+pub unsafe extern "C" fn miso_engine_v1_plan_destroy(plan: *mut Plan) {
     catch_destroy(|| {
         if plan.is_null() {
             return;
@@ -995,7 +995,7 @@ pub(crate) fn test_source_submit(
 ) -> u32 {
     // SAFETY: Test callers retain the live session and all borrowed ABI storage for this call.
     unsafe {
-        miso_engine_v2_source_submit_planar_f32(
+        miso_engine_v1_source_submit_planar_f32(
             session,
             source_id.as_ptr(),
             source_id.len() as u64,
@@ -1013,14 +1013,14 @@ pub(crate) fn test_submit_command(
 ) -> u32 {
     // SAFETY: Test callers retain the live session, request, and ABI output for this call.
     unsafe {
-        miso_engine_v2_submit_command(session, request.as_ptr(), request.len() as u64, output)
+        miso_engine_v1_submit_command(session, request.as_ptr(), request.len() as u64, output)
     }
 }
 
 #[cfg(test)]
 pub(crate) fn test_dequeue_event(session: *mut Session, lane: u32, output: &mut BytesOut) -> u32 {
     // SAFETY: Test callers retain the live session and ABI output for this call.
-    unsafe { miso_engine_v2_dequeue_event(session, lane, output) }
+    unsafe { miso_engine_v1_dequeue_event(session, lane, output) }
 }
 
 #[cfg(test)]
@@ -1086,7 +1086,7 @@ pub(crate) fn test_source_seek(
 ) -> u32 {
     // SAFETY: Test callers retain the live session and borrowed source ID for this call.
     unsafe {
-        miso_engine_v2_source_seek(
+        miso_engine_v1_source_seek(
             session,
             source_id.as_ptr(),
             source_id.len() as u64,
@@ -1099,19 +1099,19 @@ pub(crate) fn test_source_seek(
 #[cfg(test)]
 pub(crate) fn test_render(plan: *mut Plan, absolute_sample: u64, output: &PlanarOutput) -> u32 {
     // SAFETY: Test callers retain the exclusive live plan and writable output for this call.
-    unsafe { miso_engine_v2_render_f32_planar(plan, absolute_sample, output) }
+    unsafe { miso_engine_v1_render_f32_planar(plan, absolute_sample, output) }
 }
 
 #[cfg(test)]
 pub(crate) fn test_session_destroy(session: *mut Session) {
     // SAFETY: Test callers transfer one unique quiescent live session exactly once.
-    unsafe { miso_engine_v2_session_destroy(session) }
+    unsafe { miso_engine_v1_session_destroy(session) }
 }
 
 #[cfg(test)]
 pub(crate) fn test_plan_destroy(plan: *mut Plan) {
     // SAFETY: Test callers transfer one unique quiescent live plan exactly once.
-    unsafe { miso_engine_v2_plan_destroy(plan) }
+    unsafe { miso_engine_v1_plan_destroy(plan) }
 }
 
 #[cfg(test)]
@@ -1125,17 +1125,17 @@ mod tests {
 
     fn query(out: *mut Capabilities) -> u32 {
         // SAFETY: Tests pass null deliberately or storage for one complete Capabilities value.
-        unsafe { miso_engine_v2_query_capabilities(out) }
+        unsafe { miso_engine_v1_query_capabilities(out) }
     }
 
     fn create(config: *const EngineConfig, out: *mut *mut Engine) -> u32 {
         // SAFETY: Tests pass valid local pointer storage, with deliberate null handled by the ABI.
-        unsafe { miso_engine_v2_engine_create(config, out) }
+        unsafe { miso_engine_v1_engine_create(config, out) }
     }
 
     fn destroy(engine: *mut Engine) {
         // SAFETY: Tests pass null or the unique live engine returned by `create` exactly once.
-        unsafe { miso_engine_v2_engine_destroy(engine) }
+        unsafe { miso_engine_v1_engine_destroy(engine) }
     }
 
     fn seek(
@@ -1148,7 +1148,7 @@ mod tests {
         // SAFETY: The wrong-kind test passes a live engine handle cast to the common opaque header;
         // the entrypoint rejects it before inspecting the deliberately null source ID.
         unsafe {
-            miso_engine_v2_source_seek(
+            miso_engine_v1_source_seek(
                 session,
                 source_id,
                 source_id_bytes,
@@ -1160,7 +1160,7 @@ mod tests {
 
     fn last_error(live_handle: *const c_void, out: *mut BytesOut) -> u32 {
         // SAFETY: Tests pass one live engine handle and writable BytesOut storage.
-        unsafe { miso_engine_v2_last_error(live_handle, out) }
+        unsafe { miso_engine_v1_last_error(live_handle, out) }
     }
 
     fn config() -> EngineConfig {
@@ -1218,7 +1218,7 @@ mod tests {
         let mut plan = ptr::dangling_mut::<Plan>();
         // SAFETY: Every pointer names a complete local ABI value or the immutable fixture bytes.
         let result = unsafe {
-            miso_engine_v2_compile_session(
+            miso_engine_v1_compile_session(
                 engine,
                 TOML.as_ptr(),
                 TOML.len() as u64,
@@ -1237,8 +1237,8 @@ mod tests {
     fn destroy_fixture(engine: *mut Engine, session: *mut Session, plan: *mut Plan) {
         // SAFETY: Each handle is the unique live handle of its kind and no call is in flight.
         unsafe {
-            miso_engine_v2_plan_destroy(plan);
-            miso_engine_v2_session_destroy(session);
+            miso_engine_v1_plan_destroy(plan);
+            miso_engine_v1_session_destroy(session);
         }
         destroy(engine);
     }
@@ -1317,7 +1317,7 @@ mod tests {
 
     #[test]
     fn version_and_capabilities_are_exact() {
-        assert_eq!(miso_engine_v2_abi_version(), ABI_VERSION);
+        assert_eq!(miso_engine_v1_abi_version(), ABI_VERSION);
         let mut capabilities = Capabilities {
             struct_size: CAPABILITIES_SIZE,
             abi_version: 0,
@@ -1416,7 +1416,7 @@ mod tests {
         let mut plan = ptr::dangling_mut::<Plan>();
         // SAFETY: Every pointer names a complete local ABI value or the immutable fixture bytes.
         let result = unsafe {
-            miso_engine_v2_compile_session(
+            miso_engine_v1_compile_session(
                 engine,
                 TOML.as_ptr(),
                 TOML.len() as u64,
@@ -1464,7 +1464,7 @@ mod tests {
         };
         assert_eq!(
             // SAFETY: The plan is live and `resources` is writable storage of the exact size.
-            unsafe { miso_engine_v2_plan_resources(plan, &mut resources) },
+            unsafe { miso_engine_v1_plan_resources(plan, &mut resources) },
             RESULT_INVALID_ARGUMENT
         );
         assert_eq!(resources.abi_version, 0);
@@ -1472,7 +1472,7 @@ mod tests {
         resources.reserved = [0; 4];
         assert_eq!(
             // SAFETY: The plan is live and `resources` is writable storage of the exact size.
-            unsafe { miso_engine_v2_plan_resources(plan, &mut resources) },
+            unsafe { miso_engine_v1_plan_resources(plan, &mut resources) },
             RESULT_OK
         );
         assert_eq!(resources.sample_rate_hz, 48_000);
@@ -1505,7 +1505,7 @@ mod tests {
         assert_eq!(
             // SAFETY: All borrowed chunk planes and ABI structs remain live for the complete call.
             unsafe {
-                miso_engine_v2_source_submit_planar_f32(
+                miso_engine_v1_source_submit_planar_f32(
                     session,
                     b"fixture-source".as_ptr(),
                     14,
@@ -1529,32 +1529,32 @@ mod tests {
         };
         assert_eq!(
             // SAFETY: The plan is live and the complete contiguous planar region is writable.
-            unsafe { miso_engine_v2_render_f32_planar(plan, 128, &output) },
+            unsafe { miso_engine_v1_render_f32_planar(plan, 128, &output) },
             RESULT_RENDER_REJECTED
         );
         assert!(pcm.iter().all(|sample| sample.is_nan()));
         output.sample_capacity = 255;
         assert_eq!(
             // SAFETY: The intentionally short declared capacity is rejected before dereference.
-            unsafe { miso_engine_v2_render_f32_planar(plan, 0, &output) },
+            unsafe { miso_engine_v1_render_f32_planar(plan, 0, &output) },
             RESULT_RENDER_REJECTED
         );
         assert!(pcm.iter().all(|sample| sample.is_nan()));
         output.sample_capacity = 256;
         assert_eq!(
             // SAFETY: The output descriptor now satisfies the complete render contract.
-            unsafe { miso_engine_v2_render_f32_planar(plan, 0, &output) },
+            unsafe { miso_engine_v1_render_f32_planar(plan, 0, &output) },
             RESULT_OK
         );
         assert!(pcm.iter().all(|sample| sample.is_finite()));
         assert_eq!(
             // SAFETY: The stale time is rejected before entering the prepared plan.
-            unsafe { miso_engine_v2_render_f32_planar(plan, 0, &output) },
+            unsafe { miso_engine_v1_render_f32_planar(plan, 0, &output) },
             RESULT_RENDER_REJECTED
         );
         assert_eq!(
             // SAFETY: The exact next block time advances the same live exclusive plan.
-            unsafe { miso_engine_v2_render_f32_planar(plan, 128, &output) },
+            unsafe { miso_engine_v1_render_f32_planar(plan, 128, &output) },
             RESULT_OK
         );
         assert_eq!(
@@ -1610,7 +1610,7 @@ mod tests {
         assert_eq!(
             // SAFETY: The complete request and output descriptor remain live for this call.
             unsafe {
-                miso_engine_v2_submit_command(
+                miso_engine_v1_submit_command(
                     session,
                     request.as_ptr(),
                     request.len() as u64,
@@ -1626,7 +1626,7 @@ mod tests {
         assert_eq!(
             // SAFETY: Retry storage satisfies the advertised complete response reservation.
             unsafe {
-                miso_engine_v2_submit_command(
+                miso_engine_v1_submit_command(
                     session,
                     request.as_ptr(),
                     request.len() as u64,
@@ -1658,7 +1658,7 @@ mod tests {
         };
         assert_eq!(
             // SAFETY: The live session and complete output descriptor remain valid.
-            unsafe { miso_engine_v2_dequeue_event(session, 2, &mut event_out) },
+            unsafe { miso_engine_v1_dequeue_event(session, 2, &mut event_out) },
             RESULT_INVALID_ARGUMENT
         );
         assert_eq!(event_out.required_bytes, 77);
@@ -1666,7 +1666,7 @@ mod tests {
         assert_eq!(
             // SAFETY: The reliable lane is valid and currently empty.
             unsafe {
-                miso_engine_v2_dequeue_event(session, crate::EVENT_LANE_RELIABLE, &mut event_out)
+                miso_engine_v1_dequeue_event(session, crate::EVENT_LANE_RELIABLE, &mut event_out)
             },
             RESULT_OK
         );
@@ -1697,7 +1697,7 @@ mod tests {
         assert_eq!(
             // SAFETY: The structural request and admitted response storage are complete.
             unsafe {
-                miso_engine_v2_submit_command(
+                miso_engine_v1_submit_command(
                     session,
                     structural_request.as_ptr(),
                     structural_request.len() as u64,
@@ -1724,7 +1724,7 @@ mod tests {
         assert_eq!(
             // SAFETY: A zero-capacity query is valid and consumes no reliable event.
             unsafe {
-                miso_engine_v2_dequeue_event(session, crate::EVENT_LANE_RELIABLE, &mut event_out)
+                miso_engine_v1_dequeue_event(session, crate::EVENT_LANE_RELIABLE, &mut event_out)
             },
             RESULT_BUFFER_TOO_SMALL
         );
@@ -1736,7 +1736,7 @@ mod tests {
         assert_eq!(
             // SAFETY: The one-short buffer is valid for its declared capacity.
             unsafe {
-                miso_engine_v2_dequeue_event(session, crate::EVENT_LANE_RELIABLE, &mut event_out)
+                miso_engine_v1_dequeue_event(session, crate::EVENT_LANE_RELIABLE, &mut event_out)
             },
             RESULT_BUFFER_TOO_SMALL
         );
@@ -1748,7 +1748,7 @@ mod tests {
         assert_eq!(
             // SAFETY: The exact retry buffer receives the complete pending event.
             unsafe {
-                miso_engine_v2_dequeue_event(session, crate::EVENT_LANE_RELIABLE, &mut event_out)
+                miso_engine_v1_dequeue_event(session, crate::EVENT_LANE_RELIABLE, &mut event_out)
             },
             RESULT_OK
         );
@@ -1768,14 +1768,14 @@ mod tests {
 
         assert_eq!(
             // SAFETY: The next exact boundary applies the matched replacement plan.
-            unsafe { miso_engine_v2_render_f32_planar(plan, 256, &output) },
+            unsafe { miso_engine_v1_render_f32_planar(plan, 256, &output) },
             RESULT_OK
         );
 
         // SAFETY: Each independently owned child and engine is destroyed exactly once, quiescent.
         unsafe {
-            miso_engine_v2_session_destroy(session);
-            miso_engine_v2_plan_destroy(plan);
+            miso_engine_v1_session_destroy(session);
+            miso_engine_v1_plan_destroy(plan);
         }
         destroy(engine);
     }
@@ -1797,7 +1797,7 @@ mod tests {
         assert_eq!(
             // SAFETY: The input byte and all ABI values are valid for the duration of the call.
             unsafe {
-                miso_engine_v2_compile_session(
+                miso_engine_v1_compile_session(
                     engine,
                     invalid_utf8.as_ptr(),
                     1,
@@ -1821,7 +1821,7 @@ mod tests {
         assert_eq!(
             // SAFETY: The intentionally undersized output remains valid for its declared capacity.
             unsafe {
-                miso_engine_v2_compile_session(
+                miso_engine_v1_compile_session(
                     engine,
                     invalid_utf8.as_ptr(),
                     1,
@@ -1845,7 +1845,7 @@ mod tests {
         assert_eq!(
             // SAFETY: The retry output can hold the complete diagnostic and outputs are writable.
             unsafe {
-                miso_engine_v2_compile_session(
+                miso_engine_v1_compile_session(
                     engine,
                     invalid_utf8.as_ptr(),
                     1,
@@ -1963,7 +1963,7 @@ mod tests {
                 // SAFETY: The session is live and every borrowed plane and ABI struct outlives the
                 // call; the submission is rejected before any plane is read.
                 unsafe {
-                    miso_engine_v2_source_submit_planar_f32(
+                    miso_engine_v1_source_submit_planar_f32(
                         session,
                         id.as_ptr(),
                         id.len() as u64,
@@ -1994,7 +1994,7 @@ mod tests {
         assert_eq!(
             // SAFETY: As above; this chunk satisfies every rule.
             unsafe {
-                miso_engine_v2_source_submit_planar_f32(
+                miso_engine_v1_source_submit_planar_f32(
                     session,
                     b"fixture-source".as_ptr(),
                     14,
@@ -2064,7 +2064,7 @@ mod tests {
         for (why, output, time, diagnostic) in cases {
             assert_eq!(
                 // SAFETY: The plan is live and the descriptor is rejected before any write.
-                unsafe { miso_engine_v2_render_f32_planar(plan, time, &output) },
+                unsafe { miso_engine_v1_render_f32_planar(plan, time, &output) },
                 RESULT_RENDER_REJECTED,
                 "{why}"
             );
@@ -2078,7 +2078,7 @@ mod tests {
         // The clock is the plan's, so the first block must start at zero.
         assert_eq!(
             // SAFETY: The plan is live and the descriptor is valid.
-            unsafe { miso_engine_v2_render_f32_planar(plan, 128, &base) },
+            unsafe { miso_engine_v1_render_f32_planar(plan, 128, &base) },
             RESULT_RENDER_REJECTED
         );
         assert_eq!(read_last_error(plan.cast()), b"render.time.discontinuity");
@@ -2089,7 +2089,7 @@ mod tests {
         assert_eq!(
             // SAFETY: The plan is live and the descriptor is rejected by the ABI check.
             unsafe {
-                miso_engine_v2_render_f32_planar(
+                miso_engine_v1_render_f32_planar(
                     plan,
                     0,
                     &PlanarOutput {
@@ -2103,7 +2103,7 @@ mod tests {
 
         assert_eq!(
             // SAFETY: The plan is live and the descriptor is valid.
-            unsafe { miso_engine_v2_render_f32_planar(plan, 0, &base) },
+            unsafe { miso_engine_v1_render_f32_planar(plan, 0, &base) },
             RESULT_OK
         );
         assert!(
@@ -2118,7 +2118,7 @@ mod tests {
         destroy_fixture(engine, session, plan);
     }
 
-    /// F2 (a): `miso_engine_v2_plan_resources` takes a `const` plan and must be pure. Before this
+    /// F2 (a): `miso_engine_v1_plan_resources` takes a `const` plan and must be pure. Before this
     /// fix it cleared the render diagnostic through a `RefCell` the render thread also writes.
     #[test]
     fn plan_resources_does_not_clear_the_render_diagnostic() {
@@ -2135,7 +2135,7 @@ mod tests {
         };
         assert_eq!(
             // SAFETY: The plan is live; the short declared capacity is rejected before any write.
-            unsafe { miso_engine_v2_render_f32_planar(plan, 0, &output) },
+            unsafe { miso_engine_v1_render_f32_planar(plan, 0, &output) },
             RESULT_RENDER_REJECTED
         );
         assert_eq!(
@@ -2145,7 +2145,7 @@ mod tests {
         let mut resources = empty_report();
         assert_eq!(
             // SAFETY: The plan is live and `resources` is writable storage of the exact size.
-            unsafe { miso_engine_v2_plan_resources(plan, &mut resources) },
+            unsafe { miso_engine_v1_plan_resources(plan, &mut resources) },
             RESULT_OK
         );
         assert_eq!(resources.quantum_frames, 128);
@@ -2186,7 +2186,7 @@ mod tests {
                     assert_eq!(
                         // SAFETY: This thread is the exclusive render owner of the live plan and
                         // owns the complete contiguous output region for the call.
-                        unsafe { miso_engine_v2_render_f32_planar(plan, block * 128, &output) },
+                        unsafe { miso_engine_v1_render_f32_planar(plan, block * 128, &output) },
                         RESULT_OK
                     );
                 }
@@ -2201,7 +2201,7 @@ mod tests {
                     assert_eq!(
                         // SAFETY: The plan is live and this any-thread query only reads the
                         // immutable `queries` projection and the atomic diagnostic slot.
-                        unsafe { miso_engine_v2_plan_resources(plan, &mut resources) },
+                        unsafe { miso_engine_v1_plan_resources(plan, &mut resources) },
                         RESULT_OK
                     );
                     assert_eq!(resources.quantum_frames, 128);
@@ -2216,7 +2216,7 @@ mod tests {
                     };
                     assert_eq!(
                         // SAFETY: See above; the diagnostic query loads one atomic word.
-                        unsafe { miso_engine_v2_last_error(plan.cast(), &mut error) },
+                        unsafe { miso_engine_v1_last_error(plan.cast(), &mut error) },
                         RESULT_OK
                     );
                     assert_eq!(error.required_bytes, 0);
@@ -2260,7 +2260,7 @@ mod tests {
             assert_eq!(
                 // SAFETY: The oversized declared length is rejected before `dangling` is read.
                 unsafe {
-                    miso_engine_v2_source_submit_planar_f32(
+                    miso_engine_v1_source_submit_planar_f32(
                         session,
                         dangling,
                         source_id_bytes,
@@ -2286,7 +2286,7 @@ mod tests {
         assert_eq!(
             // SAFETY: The oversized declared frame length is rejected before `dangling` is read.
             unsafe {
-                miso_engine_v2_submit_command(
+                miso_engine_v1_submit_command(
                     session,
                     dangling,
                     MAX_BORROWED_BYTES + 1,
@@ -2311,7 +2311,7 @@ mod tests {
         assert_eq!(
             // SAFETY: The oversized declared TOML length is rejected before `dangling` is read.
             unsafe {
-                miso_engine_v2_compile_session(
+                miso_engine_v1_compile_session(
                     engine,
                     dangling,
                     MAX_BORROWED_BYTES + 1,
@@ -2361,7 +2361,7 @@ mod tests {
         assert_eq!(
             // SAFETY: The misaligned plane is rejected before it becomes a slice.
             unsafe {
-                miso_engine_v2_source_submit_planar_f32(
+                miso_engine_v1_source_submit_planar_f32(
                     session,
                     b"fixture-source".as_ptr(),
                     14,
@@ -2384,7 +2384,7 @@ mod tests {
         assert_eq!(
             // SAFETY: The misaligned plane array is rejected before it becomes a slice.
             unsafe {
-                miso_engine_v2_source_submit_planar_f32(
+                miso_engine_v1_source_submit_planar_f32(
                     session,
                     b"fixture-source".as_ptr(),
                     14,
@@ -2409,7 +2409,7 @@ mod tests {
         assert!(!output.samples.is_aligned());
         assert_eq!(
             // SAFETY: The misaligned output is rejected before it becomes a slice.
-            unsafe { miso_engine_v2_render_f32_planar(plan, 0, &output) },
+            unsafe { miso_engine_v1_render_f32_planar(plan, 0, &output) },
             RESULT_INVALID_ARGUMENT
         );
         assert!(pcm.iter().all(|sample| sample.is_nan()));
@@ -2421,7 +2421,7 @@ mod tests {
         output.samples = pcm.as_mut_ptr();
         assert_eq!(
             // SAFETY: The aligned output now satisfies the complete render contract.
-            unsafe { miso_engine_v2_render_f32_planar(plan, 0, &output) },
+            unsafe { miso_engine_v1_render_f32_planar(plan, 0, &output) },
             RESULT_OK
         );
         assert!(pcm[..256].iter().all(|sample| sample.is_finite()));
@@ -2442,7 +2442,7 @@ mod tests {
             .split("#[cfg(test)]\nmod tests {")
             .next()
             .expect("production region precedes the test module");
-        assert!(production.contains("miso_engine_v2_render_f32_planar"));
+        assert!(production.contains("miso_engine_v1_render_f32_planar"));
         for form in ["&*plan", "&mut *plan", "&(*plan)", "&mut (*plan)"] {
             let mut hits = Vec::new();
             for (index, line) in production.lines().enumerate() {

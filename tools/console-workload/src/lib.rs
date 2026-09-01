@@ -2,7 +2,7 @@
 //!
 //! # Why this crate exists
 //!
-//! Issue [#163](https://github.com/misofm/engine-v2/issues/163) phase 2 opens with the owner
+//! Issue [#163](https://github.com/misofm/engine/issues/163) phase 2 opens with the owner
 //! ruling that the unfused multiply-add contract change must be confirmed **at console level**,
 //! not at kernel level. Confirming it at console level means running the console workloads under
 //! the target the product ships on, and `docs/rulings/wasm-kernel-timing-interim.md` recorded why

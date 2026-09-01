@@ -1,4 +1,4 @@
-//! capi's own resource projection, and the children `miso_engine_v2_compile_session` returns.
+//! capi's own resource projection, and the children `miso_engine_v1_compile_session` returns.
 
 use super::*;
 

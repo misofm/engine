@@ -118,7 +118,7 @@ argument shape:
 issues earlier). The qualification harness has therefore been unbootable since #240 merged.
 
 Both guards are exact-field tests, so the mismatch is refused at the very top of
-`createMisoAudioWorkletHost` (`miso-engine-v2-audio-worklet-host.js:829`):
+`createMisoAudioWorkletHost` (`miso-engine-v1-audio-worklet-host.js:829`):
 
 ```js
 if (!hasExactFields(options, OPTION_FIELDS)         // ["context","document","options",…]
@@ -131,7 +131,7 @@ if (!hasExactFields(options, OPTION_FIELDS)         // ["context","document","op
 
 `webError(1)` *is* the observed diagnostic, and it is thrown before the Wasm module is fetched, so
 nothing downstream — not the artifact, not the document, not the browser — is implicated. The
-worklet repeats the same guard on `processorOptions` (`miso-engine-v2-audio-worklet.js:173`,
+worklet repeats the same guard on `processorOptions` (`miso-engine-v1-audio-worklet.js:173`,
 `INIT_FIELDS = ["module","document","options"]`), which is the leg that refused `diagnoseReady`.
 
 Six call sites carried the stale shape: `renderCorpusSegment`, `typedUnsupportedAttestation`,
@@ -215,7 +215,7 @@ matrix did not need re-recording either.
 
 `server.mjs::exactArtifacts` required the exact five-file set last frozen in #139.
 `scripts/build-web-audioworklet.sh` has emitted six since #243 added
-`miso-engine-v2-abi-layout.json`, so the qualification server refused the very directory the
+`miso-engine-v1-abi-layout.json`, so the qualification server refused the very directory the
 workflow's own build step produces, before any browser started. The two other enumerations of the
 set — `scripts/check-web-audioworklet.sh:131` and
 `scripts/web-audioworklet-browser-correctness.py:25` — were already six; `server.mjs` was the only

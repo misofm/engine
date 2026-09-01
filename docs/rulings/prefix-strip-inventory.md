@@ -26,8 +26,8 @@ that is itself visible across a boundary a consumer outside this crate's own sou
 wire tag, an exported C-ABI/wasm symbol, a gate-pinned or sealed spelling-- is contract identity, not
 a crate name, and this rename does not touch it. Concretely:
 
-- `miso_engine_v2_*` -- 14 exported C-ABI symbols (`fixtures/capi-qualification/v1/EXPECTED_SYMBOLS.txt`,
-  `crates/capi/include/miso_engine_v2.h`). These are explicit `#[no_mangle]` names in source, not
+- `miso_engine_v1_*` -- 14 exported C-ABI symbols (`fixtures/capi-qualification/v1/EXPECTED_SYMBOLS.txt`,
+  `crates/capi/include/miso_engine_v1.h`). These are explicit `#[no_mangle]` names in source, not
   crate-derived -- renaming `miso-engine-capi` to `capi` does not move them, and this was verified
   live (`bash scripts/check-capi-abi.sh` and `bash scripts/test-capi-abi.sh`, both green after the
   rename, and a byte-diff of `EXPECTED_SYMBOLS.txt` against `origin/main` showing no change).
@@ -139,7 +139,7 @@ directory was already short (moved there by #305) and does not move again -- onl
 | 23 | `crates/miso-engine-graph-compiler` | `crates/graph-compiler` | |
 | 24 | `crates/miso-engine-host-core` | `crates/host-core` | |
 | 25 | `crates/miso-engine-protocol` | `crates/protocol` | |
-| 26 | `crates/miso-engine-capi` | `crates/capi` | ships the C ABI -- `miso_engine_v2_*` untouched |
+| 26 | `crates/miso-engine-capi` | `crates/capi` | ships the C ABI -- `miso_engine_v1_*` untouched |
 | 27 | `crates/miso-engine-target-smoke` | `crates/target-smoke` | |
 | 28 | `crates/miso-engine-flac-decoder` (dir: `sidecars/flac-decoder`) | `crates/flac-decoder` (dir unchanged) | sidecar; digest re-pin required |
 | 29 | `crates/miso-engine-dsp-reference` | `crates/dsp-reference` | evidence crate |
@@ -176,7 +176,7 @@ directory renamed re-pins its build output. Within this repo:
 - `hosts/host-web`'s AudioWorklet wasm closure changed (every crate it depends on renamed), so its
   build output is not byte-identical either, though `build-web-audioworklet.sh` does not pin the
   digest in-repo (no `--remap-path-prefix`, no committed `.sha256`) -- only the app's
-  `miso-engine-v2.provenance.json` pins it, cross-repo.
+  `miso-engine-v1.provenance.json` pins it, cross-repo.
 
 **Out of scope for this PR, by design:** the app repo (`misofm/app`) re-vendor of both digests. That
 is a separate follow-up after this merges, per the task's scope boundary -- this PR does not touch
@@ -241,7 +241,7 @@ bash scripts/check-capi-abi.sh && bash scripts/test-capi-abi.sh   # -> both gree
 | artifact | before | after |
 |---|---|---|
 | `sidecars/flac-decoder` wasm (package-name-only rename; directory already moved by #305) | `bfa40aa07fb714e9e508ea9142e44f3c176f1c6fbeea6506942ec93c2b0225c3` | `a9fc3301cb6f290909e165fd5d21d7ded5fb3535d8c41472c93beed66173b65e` |
-| `hosts/host-web` AudioWorklet wasm | (not in-repo pinned) | not byte-identical (every dependency renamed); only the app's `miso-engine-v2.provenance.json` pins it, cross-repo |
+| `hosts/host-web` AudioWorklet wasm | (not in-repo pinned) | not byte-identical (every dependency renamed); only the app's `miso-engine-v1.provenance.json` pins it, cross-repo |
 
 The FLAC digest was reproduced twice (`MISO_ENGINE_FLAC_DECODER_REPIN=1 bash
 scripts/build-flac-decoder.sh $(mktemp -d)`, run twice) before being written into
@@ -249,7 +249,7 @@ scripts/build-flac-decoder.sh $(mktemp -d)`, run twice) before being written int
 (itself renamed from `miso-engine-flac-decoder.js`, alongside `flac-decoder.d.ts`, to match the
 package rename -- PR1/#305 kept those filenames on the directory move alone; this PR renames the
 package, so the shipped filenames follow it too). Both re-vendoring the wasm/js/d.ts into
-`misofm/app` and updating its `miso-engine-v2.provenance.json` are the explicit follow-up noted
+`misofm/app` and updating its `miso-engine-v1.provenance.json` are the explicit follow-up noted
 above, out of scope for this PR.
 
 ### 6. Gates rewritten, each with before/after mutation evidence

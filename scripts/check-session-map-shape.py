@@ -12,13 +12,13 @@ now written out in five places:
   becomes a `bigint`, and the `.d.ts` has to say so or a typed consumer compiles against a lie.
 * `scripts/check-web-audioworklet.sh` -- the shipped module's frozen export set. An export that
   exists in the crate and not in that list is an export nothing proves is shipped.
-* `hosts/host-web/web/miso-engine-v2-audio-worklet.js` -- the worklet, which calls the
+* `hosts/host-web/web/miso-engine-v1-audio-worklet.js` -- the worklet, which calls the
   exports once at construction and posts the map.
-* `hosts/host-web/web/miso-engine-v2-audio-worklet-host.js` -- the main-realm host,
+* `hosts/host-web/web/miso-engine-v1-audio-worklet-host.js` -- the main-realm host,
   whose acknowledgement validator fails the WHOLE host on a field set it does not expect. This is
   the #151 failure shape exactly: a map that grew a field the validator did not know about would
   not degrade, it would take the session down with a sticky 255.
-* `hosts/host-web/web/miso-engine-v2-audio-worklet-host.d.ts` -- the declaration an SDK
+* `hosts/host-web/web/miso-engine-v1-audio-worklet-host.d.ts` -- the declaration an SDK
   generates against. It is the *generated-against* surface, so a drift here is a drift in
   everything downstream of it.
 
@@ -55,9 +55,9 @@ REPO = pathlib.Path(__file__).resolve().parent.parent
 
 RUST_FFI = pathlib.Path("hosts/host-web/src/ffi.rs")
 EXPORT_GATE = pathlib.Path("scripts/check-web-audioworklet.sh")
-WORKLET_JS = pathlib.Path("hosts/host-web/web/miso-engine-v2-audio-worklet.js")
-HOST_JS = pathlib.Path("hosts/host-web/web/miso-engine-v2-audio-worklet-host.js")
-HOST_DTS = pathlib.Path("hosts/host-web/web/miso-engine-v2-audio-worklet-host.d.ts")
+WORKLET_JS = pathlib.Path("hosts/host-web/web/miso-engine-v1-audio-worklet.js")
+HOST_JS = pathlib.Path("hosts/host-web/web/miso-engine-v1-audio-worklet-host.js")
+HOST_DTS = pathlib.Path("hosts/host-web/web/miso-engine-v1-audio-worklet-host.d.ts")
 
 SOURCES = (RUST_FFI, EXPORT_GATE, WORKLET_JS, HOST_JS, HOST_DTS)
 

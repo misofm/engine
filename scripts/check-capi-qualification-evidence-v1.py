@@ -11,13 +11,13 @@ import sys
 
 
 EXPECTED_ARTIFACTS = {
-    "header": (8266, "83880c2fd7b5bc835425a5a64cae19c8a0bba17f49b4802b4033a8e7dfeac37c"),
-    "linux-x86_64-static-library": (33321950, "3f1021ac1f980d821965e5e52aa5b839680f828838c57676e5454f6645955ea7"),
-    "linux-x86_64-shared-library": (4126480, "cbb06cd39b71cdde728b87a839d5f9657ff34b49884c64c4b2e4f8aedb0f2bc2"),
-    "linux-c11-static-consumer": (10410184, "f958f00b7332bfa7ce0c33211d3c07e0049982e9d9257a17ce52b1f1a790e630"),
-    "linux-c11-shared-consumer": (21312, "6fcbecd45e43c435517683606d84329c0ec034f3668865808f1ae4829ffe20ae"),
-    "linux-cpp17-static-consumer": (10410224, "aabf985097ed44ad3dd33bd6dad77918cfd50aacdb047e93a38f40e0e423b854"),
-    "linux-cpp17-shared-consumer": (21344, "f73f6dcb2192f8730f92bffcf5c074df9b5c86e8dba378d276fb252d3099fbb3"),
+    "header": (11743, "8447175b599c265f00ef933fbda95f37886e173fe0842e4bf06ac5a5f9d091f1"),
+    "linux-x86_64-static-library": (105179470, "4ffb9672dde77b6eb358d27b6b4e8937b18dcd74f5034414bf5ad5fabf0ceef2"),
+    "linux-x86_64-shared-library": (29346184, "b43a4bf21c4c537cd22df605221d713a91fbd420f8194a442a2bf8733c299ec0"),
+    "linux-c11-static-consumer": (30822280, "cb4c145c8931b10dc3f5012eb17ae13d53e0e834478e2c0c8c55567de78587e8"),
+    "linux-c11-shared-consumer": (21312, "12055e4498f7eacea415bbb1f936c58c65abb232fae6a16f0ad7c0a8a6a9a87c"),
+    "linux-cpp17-static-consumer": (30822312, "082e5fb85fae3e67a9715d9f9df4c498c6edf0a270ac194ef45bfcc8789a02c4"),
+    "linux-cpp17-shared-consumer": (21344, "a3e8475e64220485c8cd21476d1f5057f2ff5c34a3b422c7c4e8ad134e8158e2"),
 }
 EXPECTED_QUALIFICATION = {
     "product_build_invocations": "1",
@@ -25,16 +25,19 @@ EXPECTED_QUALIFICATION = {
     "initial_c11_static_exit": "13",
     "linux_consumer_passes": "4",
     "capi_protocol_test_invocations": "1",
-    "capi_unit_tests": "18",
+    "capi_unit_tests": "29",
     "capi_external_tests": "3",
-    "protocol_unit_tests": "93",
+    "protocol_unit_tests": "123",
+    "protocol_conformance_tests": "3",
+    "protocol_controller_response_tests": "1",
     "protocol_mutation_tests": "1",
-    "capi_protocol_log_sha256": "626a33486a31f202dccedb20321c5b25a48b2e9a6a6087ee870652bd434b894c",
+    "protocol_session_edit_tests": "3",
+    "capi_protocol_log_sha256": "86ab12f9a04bfbee8189b659a1c468247cfe50b548d46c03483d37f0d2326463",
     "runner_corpus_invocations": "1",
-    "runner_tests": "18",
+    "runner_tests": "19",
     "runner_corpus_rows": "5",
     "runner_output_bytes_per_row": "8192",
-    "runner_log_sha256": "ed2dd1e4d0e5d4ea0143adcc4bae06ce5c5c82155baf05e61eb0e967222aaec9",
+    "runner_log_sha256": "258b9fcdf3bfccb1d0d965207806c912e0e866079cec9290c95f0c273697b712",
     "capi_audit_invocations": "1",
     "capi_audit_calls": "100000",
     "realtime_audit_invocations": "1",
@@ -47,25 +50,25 @@ EXPECTED_QUALIFICATION = {
     "device_invocations": "0",
 }
 EXPECTED_RAW = {
-    "ARTIFACTS.generated.sha256": (837, "243431963beeca54f4a0df6ecebfc367d4d1d245b79a7fb6287b58e4620262bc"),
-    "static-symbols.txt": (425, "4a66dc4f68070198d4547b9e63ed299a01592d48c5c31685f631ebfb216b1dcb"),
-    "shared-symbols.txt": (425, "4a66dc4f68070198d4547b9e63ed299a01592d48c5c31685f631ebfb216b1dcb"),
-    "static-nm.txt": (2336050, "6bb1fd99e48351c821f6aa1454996c7a26ce7be6fd165b6183d8ffce1e2bcfdd"),
-    "shared-nm.txt": (3358, "62dd1cc89e9fe0b9bf1e25f645dedf38319c5a07d0ced4d24ce8281e65b02c48"),
-    "shared-readelf.txt": (6901, "0cf743d7a36e9cb0c95c4e6cb192f2a91ba08ec673aac02b21862351345a726b"),
-    "shared-objdump.txt": (3834, "828b8dc90904573c4a450f2b2355e24f78992871d1ea35cf89fe543c88b830fd"),
-    "logs/capi-build.log": (2876, "51af757d9ba3fea09b5bc8175f1a88413121de0a63a64ed28590982af3198d14"),
-    "logs/capi-regressions.log": (14696, "626a33486a31f202dccedb20321c5b25a48b2e9a6a6087ee870652bd434b894c"),
-    "logs/runner-corpus.log": (2243, "ed2dd1e4d0e5d4ea0143adcc4bae06ce5c5c82155baf05e61eb0e967222aaec9"),
-    "logs/capi-audit.stderr": (2372, "372d1b5b961662f3a1edf39ea2e70f4d7a1b9c5306e52666eb24f8e94e922359"),
-    "logs/realtime-build.log": (160, "74b042bc973ebbccf9813ac98d18239449795c9367df2c8df5a385e789176ca0"),
+    "ARTIFACTS.generated.sha256": (813, "488965a670e84eb30f8965806ab4508ec8fba0eb892a734a29e3915df52e5b74"),
+    "static-symbols.txt": (425, "fc377c133fd8e96b9eb7e8109125d247dc500b520b5460af9ac69fe2141b2f56"),
+    "shared-symbols.txt": (425, "fc377c133fd8e96b9eb7e8109125d247dc500b520b5460af9ac69fe2141b2f56"),
+    "static-nm.txt": (669359, "bd27a50fa9aa40c2e0c6362e3fc72c515b9a274d30eaaf5485ac9b235a89dd92"),
+    "shared-nm.txt": (2985, "6ea2d7956d07ecd7858a91d678ef8d08282a09bd8df7485e3836e7a89b5e4246"),
+    "shared-readelf.txt": (6128, "2105b9dc878c5e0ae1f1d36a82695ea701412e5e5a35b9ca3b2aea1f0ae00019"),
+    "shared-objdump.txt": (3659, "cb220e4377d12252e499d24a6004efcd51e7007734b9ef85258202729bda7cee"),
+    "logs/capi-build.log": (2701, "68fd096dc28d0838fbb80e544b57eeedcbb88b39e33c725244d1c87a24ed1693"),
+    "logs/capi-regressions.log": (19204, "86ab12f9a04bfbee8189b659a1c468247cfe50b548d46c03483d37f0d2326463"),
+    "logs/runner-corpus.log": (2271, "258b9fcdf3bfccb1d0d965207806c912e0e866079cec9290c95f0c273697b712"),
+    "logs/capi-audit.stderr": (2099, "ec9fd85db43c02ac7b236294341ad4508d202753127c1362e22468fe0cdac5ee"),
+    "logs/realtime-build.log": (74, "9d4884817284ccd145bfdfea8a98000309b205484a7b197a65b7ca435d38dc8c"),
     "logs/c11-static.log": (0, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"),
     "logs/c11-shared.log": (0, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"),
     "logs/cpp17-static.log": (0, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"),
     "logs/cpp17-shared.log": (0, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"),
-    "capi-audit.json": (349, "9bc0b8a1b8a032e0a29fef7154141646be65be29cd5c41901ce66d2666f6c408"),
-    "realtime-audit.json": (247, "7d76eb7ce5dea04be6dba308db82cfa9691d18bb520eb499f56475e12e236eb8"),
-    "realtime-trace.1760548": (4970, "918095df4d0a030fdce06aa4b84f5ae4267793113042a0c1d3c49200c389c240"),
+    "capi-audit.json": (349, "6c1be4989a512252706d85ef0e00d3161fb0beddc17004bc3ee2ebba79abc1aa"),
+    "realtime-audit.json": (247, "b3129833ba4a36eb12524914f67ec082d94d92c192f4161411d25a8fe233dec8"),
+    "realtime-trace.74104": (11772, "317913b29fd71c084729ab500cadab36814cf6cf37d014df583d7a2302d9b058"),
 }
 EXPECTED_GATES = {
     "qualification-preflight", "qualification-final", "qualification-preserved",
@@ -121,7 +124,7 @@ def expected_audits() -> list[dict[str, object]]:
     return [
         {"schema_version": 1, "kind": "issue022_capi_render_audit", "calls": 100000,
          "sample_rate_hz": 48000, "quantum_frames": 128, "stable_output_address": True,
-         "pcm_digest": "37380b654988f7cc", "render_errors": 0, "allocations": 0,
+         "pcm_digest": "ff6cdcb96cdcdad5", "render_errors": 0, "allocations": 0,
          "deallocations": 0, "locks": 0, "feature_detection": 0, "logs": 0,
          "file_io": 0, "network_io": 0, "syscalls": 0, "panic_unwinds": 0,
          "total_violations": 0},
@@ -216,7 +219,7 @@ def check_stage(root: pathlib.Path, expected_symbols: set[str]) -> None:
         if not path.is_file() or path.stat().st_size != size or digest(path) != sha:
             raise ValueError(f"preserved raw evidence drifted: {relative}")
     artifact_paths = {
-        "header": stage / "installed/include/miso_engine_v2.h",
+        "header": stage / "installed/include/miso_engine_v1.h",
         "linux-x86_64-static-library": stage / "installed/lib/libcapi.a",
         "linux-x86_64-shared-library": stage / "installed/lib/libcapi.so",
         "linux-c11-static-consumer": stage / "bin/c11-static",
@@ -242,7 +245,7 @@ def check_stage(root: pathlib.Path, expected_symbols: set[str]) -> None:
         imported: set[str] = set()
         for line in (stage / f"{linkage}-nm.txt").read_text().splitlines():
             fields = line.split()
-            if len(fields) < 2 or not fields[-1].startswith("miso_engine_v2_"):
+            if len(fields) < 2 or not fields[-1].startswith("miso_engine_v1_"):
                 continue
             if fields[-2] in {"U", "u", "w", "v"}:
                 imported.add(fields[-1])
@@ -257,7 +260,7 @@ def check_stage(root: pathlib.Path, expected_symbols: set[str]) -> None:
                    if (match := result_pattern.match(line))]
     runner_counts = [int(match.group(1)) for line in (stage / "logs/runner-corpus.log").read_text().splitlines()
                      if (match := result_pattern.match(line))]
-    if capi_counts != [18, 3, 93, 0, 1, 0, 0] or runner_counts != [18, 0, 0]:
+    if capi_counts != [29, 3, 123, 0, 3, 1, 1, 3, 0, 0] or runner_counts != [19, 0, 0]:
         raise ValueError("raw test logs do not prove the exact result counters")
     capi_raw = json.loads((stage / "capi-audit.json").read_text())
     realtime_raw = json.loads((stage / "realtime-audit.json").read_text())
@@ -267,7 +270,7 @@ def check_stage(root: pathlib.Path, expected_symbols: set[str]) -> None:
     realtime_raw["armed_trace_syscalls"] = 0
     if not isinstance(output_address, int) or output_address <= 0 or realtime_raw != expected_audits()[1]:
         raise ValueError("raw realtime audit differs")
-    trace = (stage / "realtime-trace.1760548").read_text().splitlines()
+    trace = (stage / "realtime-trace.74104").read_text().splitlines()
     begin = [index for index, line in enumerate(trace) if "MISO_ENGINE_RT_BEGIN" in line]
     end = [index for index, line in enumerate(trace) if "MISO_ENGINE_RT_END" in line]
     if len(begin) != 1 or len(end) != 1 or end[0] != begin[0] + 1:

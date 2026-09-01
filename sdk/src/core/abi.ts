@@ -97,7 +97,7 @@ export class StructView {
  * The seven boot policy words a caller may set, plus the two handshake words the SDK owns.
  *
  * `PrepareLimits`' 25 public fields are gone with the 192-byte structure they configured. What
- * remains is what boot v2 actually reads, and every one of these is optional: absent means zero,
+ * remains is what boot v1 actually reads, and every one of these is optional: absent means zero,
  * and zero means "the engine's own default", never a number the SDK invented. In particular
  * `maximumMemoryBytes` absent selects `DEFAULT_MAXIMUM_MEMORY_BYTES`, which the SDK names but
  * never restates (issue #243 S2(c)).

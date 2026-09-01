@@ -28,41 +28,29 @@ rg -Fq 'UNDEFINED_TYPES' "$object_checker" || fail 'object parser lacks import c
     fail "unknown checker mode $mode"
 
 LC_ALL=C sort -c -k2,2 "$authorities" || fail 'authority manifest is not path-sorted'
-# 26, not 21: audit #103 split `crates/capi/src/runtime.rs` into six modules.
-#
-# #104 phase A / #83 wave-4 decision W4-D2. `sha256sum --check --strict "$authorities"` used to run
-# here and asserted that the working tree still is the tree the accepted V1 qualification was taken
-# from. Waves 1-4 rewrote eleven of the twenty-six sealed paths, so it went permanently red, and it
-# is not refreshable: re-sealing it without re-running the matrix would claim evidence for sources
-# that never produced it. The seal is retired, `AUTHORITIES.sha256` stays as the record of the
-# subject tree, and the accepted V1 result is superseded until issue #26 re-runs the qualification.
-# The eleven drifted paths are listed in `.github/ISSUE_SPECS/114-*.md`.
-#
-# The `EVIDENCE.sha256` self-seal went with it for the same reason: its one drifted row is
-# `AUTHORITIES.sha256` itself, which #103 edited when it split the runtime module.
-#
-# What still gates: the manifest shape below, the symbol/consumer/toolchain surface, and -- in
-# `final`/`preserved` mode -- `check-capi-qualification-evidence-v1.py` and the MATRIX row/evidence
-# digests, all of which verify on the current tree.
+# #313 rebuilt the complete Linux qualification against the prelaunch V1 ABI and refreshed all 26
+# authority rows after the prefix-strip move. The manifest is live evidence again: every subject
+# path must resolve and match the bytes that produced the accepted artifacts.
 [[ $(wc -l <"$authorities" | tr -d ' ') -eq 26 ]] || fail 'authority membership changed'
 if rg -v '^[0-9a-f]{64}  [^[:space:]]+$' "$authorities"; then
     fail 'authority manifest row shape'
 fi
+sha256sum --check --strict "$authorities" >/dev/null || fail 'qualification authority drift'
 
 LC_ALL=C sort -c "$symbols" || fail 'expected symbols are not sorted'
 [[ $(wc -l <"$symbols" | tr -d ' ') -eq 14 ]] || fail 'expected symbol count is not 14'
 [[ $(sort -u "$symbols" | wc -l | tr -d ' ') -eq 14 ]] || fail 'duplicate expected symbol'
-if rg -v '^miso_engine_v2_[a-z0-9_]+$' "$symbols"; then
+if rg -v '^miso_engine_v1_[a-z0-9_]+$' "$symbols"; then
     fail 'invalid expected symbol spelling'
 fi
 
 for operation in \
-    miso_engine_v2_abi_version miso_engine_v2_query_capabilities \
-    miso_engine_v2_engine_create miso_engine_v2_compile_session \
-    miso_engine_v2_source_seek miso_engine_v2_source_submit_planar_f32 \
-    miso_engine_v2_render_f32_planar miso_engine_v2_plan_resources \
-    miso_engine_v2_submit_command miso_engine_v2_dequeue_event \
-    miso_engine_v2_session_destroy miso_engine_v2_plan_destroy; do
+    miso_engine_v1_abi_version miso_engine_v1_query_capabilities \
+    miso_engine_v1_engine_create miso_engine_v1_compile_session \
+    miso_engine_v1_source_seek miso_engine_v1_source_submit_planar_f32 \
+    miso_engine_v1_render_f32_planar miso_engine_v1_plan_resources \
+    miso_engine_v1_submit_command miso_engine_v1_dequeue_event \
+    miso_engine_v1_session_destroy miso_engine_v1_plan_destroy; do
     rg -q "$operation" "$consumer" || fail "consumer misses $operation"
 done
 for contract in 'std=c11' 'std=c++17' static shared; do

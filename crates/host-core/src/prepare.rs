@@ -408,7 +408,7 @@ pub fn compile_host_session(
 
 /// Compile an already parsed session model under explicit compiler caps.
 ///
-/// Boot v2 parses once, derives the physical host shape from that model, and then compiles the
+/// Boot v1 parses once, derives the physical host shape from that model, and then compiles the
 /// same model. Keeping the diagnostic mapping here prevents that path from growing a second
 /// session-compiler adapter.
 pub fn compile_host_model(

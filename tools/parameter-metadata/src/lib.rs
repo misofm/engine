@@ -101,7 +101,7 @@ use host_web::{
 };
 
 /// The emitted file name, shipped beside the Wasm artifact.
-pub const OUTPUT_NAME: &str = "miso-engine-v2-parameter-metadata.json";
+pub const OUTPUT_NAME: &str = "miso-engine-v1-parameter-metadata.json";
 /// The schema tag every consumer must check before reading a field.
 pub const SCHEMA: &str = "miso.web.parameter-metadata.v1";
 /// The launch sample rates a rate-keyed builtin domain is reported for.

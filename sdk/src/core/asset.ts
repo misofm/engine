@@ -8,9 +8,9 @@ import { MisoEngineError, MisoUsageError } from "./errors.ts";
  * # One compile per SDK lifetime
  *
  * `WebAssembly.compile` is the expensive call -- it is the only place a browser or a Node process
- * pays for code generation over a two-and-a-half megabyte module -- and the pre-boot-v2 SDK paid
+ * pays for code generation over a two-and-a-half megabyte module -- and the pre-boot-v1 SDK paid
  * it again on every `validate()` because validation went through a whole throwaway engine
- * construction. Boot v2 makes that unnecessary: a module compiles once and instantiates many
+ * construction. Boot v1 makes that unnecessary: a module compiles once and instantiates many
  * times, and an instance *is* a session. So the asset is the unit that owns the compile, and
  * `compileCount` is exposed so a test can assert the number rather than trust the sentence
  * (issue #243 eval 1(c)).
@@ -45,7 +45,7 @@ export class MisoEngineAsset {
   /**
    * Verify and compile the module bytes exactly once.
    *
-   * @param bytes  the `miso-engine-v2-audio-worklet.simd128.wasm` release artifact
+   * @param bytes  the `miso-engine-v1-audio-worklet.simd128.wasm` release artifact
    * @param expectedSha256  lowercase hex digest from the caller's release manifest, if it has one
    */
   static async load(
@@ -70,7 +70,7 @@ export class MisoEngineAsset {
             phase: "asset",
             code: "abiMismatch",
             result: constantOf("abiMismatch"),
-            diagnostics: [{ code: "sdk.asset.digest", path: "miso-engine-v2-audio-worklet.simd128.wasm" }],
+            diagnostics: [{ code: "sdk.asset.digest", path: "miso-engine-v1-audio-worklet.simd128.wasm" }],
           },
         );
       }

@@ -30,7 +30,7 @@ artifact_dir=$1
   echo "artifact directory must be a non-symlink directory" >&2
   exit 2
 }
-[[ -f "$artifact_dir/miso-engine-v2-audio-worklet.simd128.wasm" ]] || {
+[[ -f "$artifact_dir/miso-engine-v1-audio-worklet.simd128.wasm" ]] || {
   echo "artifact directory has no wasm module" >&2
   exit 2
 }

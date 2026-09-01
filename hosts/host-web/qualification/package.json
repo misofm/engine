@@ -1,5 +1,5 @@
 {
-  "name": "@miso/engine-v2-browser-qualification",
+  "name": "@miso/engine-v1-browser-qualification",
   "version": "0.0.0",
   "private": true,
   "type": "module",

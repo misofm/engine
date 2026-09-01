@@ -35,15 +35,15 @@ for forbidden in engine graph graph-compiler; do
 done
 
 for operation in \
-    miso_engine_v2_engine_create miso_engine_v2_compile_session \
-    miso_engine_v2_source_submit_planar_f32 miso_engine_v2_render_f32_planar \
-    miso_engine_v2_plan_resources miso_engine_v2_plan_destroy \
-    miso_engine_v2_session_destroy miso_engine_v2_engine_destroy; do
+    miso_engine_v1_engine_create miso_engine_v1_compile_session \
+    miso_engine_v1_source_submit_planar_f32 miso_engine_v1_render_f32_planar \
+    miso_engine_v1_plan_resources miso_engine_v1_plan_destroy \
+    miso_engine_v1_session_destroy miso_engine_v1_engine_destroy; do
     rg -q "$operation" "$tool/src/lib.rs" || fail "missing frozen ABI operation $operation"
 done
 
 ! rg -n 'compile_session\(|GraphCompiler|PcmSourceRing|PreparedRenderPlan' "$tool/src" \
-    | rg -v 'miso_engine_v2_compile_session' \
+    | rg -v 'miso_engine_v1_compile_session' \
     || fail 'Rust product bypass is reachable from the tool'
 
 # The native decoder is cfg-excluded on Wasm, so no crate may make this tool a dependency. The

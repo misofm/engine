@@ -267,10 +267,10 @@ so the built artifacts are never touched.
 | Target | Mutation | Observed failure |
 |---|---|---|
 | the #280 defect itself | restore the pre-#280 five-name `ARTIFACT_NAMES` | `artifact-set: the built directory is not the exact shipped set` — the shipped six-file build is refused, which is the workflow-blocking behaviour |
-| `exactArtifacts` count clause | delete `names.length !== ARTIFACT_NAMES.size` (a subset would pass) | `Missing expected rejection: artifact-set: miso-engine-v2-abi-layout.json removed: red mutation escaped the artifact pin` |
-| `exactArtifacts` name clause | delete `names.some((name) => !ARTIFACT_NAMES.has(name))` (a substitution keeping the count at six would pass) | `Missing expected rejection: artifact-set: miso-engine-v2-abi-layout.json replaced by a stray of the same count: red mutation escaped the artifact pin` |
+| `exactArtifacts` count clause | delete `names.length !== ARTIFACT_NAMES.size` (a subset would pass) | `Missing expected rejection: artifact-set: miso-engine-v1-abi-layout.json removed: red mutation escaped the artifact pin` |
+| `exactArtifacts` name clause | delete `names.some((name) => !ARTIFACT_NAMES.has(name))` (a substitution keeping the count at six would pass) | `Missing expected rejection: artifact-set: miso-engine-v1-abi-layout.json replaced by a stray of the same count: red mutation escaped the artifact pin` |
 | `exactArtifacts` regular-file clause | delete the `stat(...).isFile()` loop | `Missing expected rejection: artifact-set: directory named like an artifact: red mutation escaped the artifact pin` |
-| the whole set check | delete the `throw` and its condition outright | `Missing expected rejection: artifact-set: miso-engine-v2-abi-layout.json removed: …` |
+| the whole set check | delete the `throw` and its condition outright | `Missing expected rejection: artifact-set: miso-engine-v1-abi-layout.json removed: …` |
 
 The proof set covers all six names in both directions: each one removed (which no minimum-style
 pin survives) and each one replaced by a stray of the same count (which no count-only pin
@@ -304,11 +304,11 @@ dependency source paths into panic locations, those sources live under `CARGO_HO
   CARGO_HOME=/home/runner/.cargo  -> 126b5d61b85ceef69f2f9d9653ef37240b5c511488e98e9c34514badf292baa4
 
 The artifact had no pin of its own, so nothing failed in this repo; the app's
-`miso-engine-v2.provenance.json` pins the digest one repo over, and would have moved underneath it
+`miso-engine-v1.provenance.json` pins the digest one repo over, and would have moved underneath it
 silently.
 
 Fixed the same way as #300: `--remap-path-prefix` for both roots, plus a `decoder-artifact.sha256`-
-style pin (`hosts/host-web/web/miso-engine-v2-audio-worklet-artifact.sha256`) with a
+style pin (`hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256`) with a
 `MISO_ENGINE_WEB_AUDIOWORKLET_REPIN=1` escape hatch. Verified reproducible across three independent
 combinations of repo path and `CARGO_HOME` (`/root/.cargo`, `/home/runner/.cargo`,
 `/opt/alt/.cargo` from a second worktree), all producing
@@ -321,4 +321,4 @@ the correct pin made it pass again.
 
 | Target | Mutation | Observed failure |
 |---|---|---|
-| the digest pin | hand-edit `miso-engine-v2-audio-worklet-artifact.sha256` to `deadbeef…` | `AudioWorklet artifact pin mismatch: expected=deadbeef… observed=14328e23…`; exit 1, output directory left empty |
+| the digest pin | hand-edit `miso-engine-v1-audio-worklet-artifact.sha256` to `deadbeef…` | `AudioWorklet artifact pin mismatch: expected=deadbeef… observed=14328e23…`; exit 1, output directory left empty |

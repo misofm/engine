@@ -1,6 +1,6 @@
 # `@misofm/engine`
 
-The TypeScript SDK for Engine V2: a Session V1 builder, a boot-v2 host for Node and the browser,
+The TypeScript SDK for Engine V1: a Session V1 builder, a boot-v1 host for Node and the browser,
 and an agent-facing parameter surface that speaks decimals and ranks rather than floats.
 
 ## Consuming this package: vendored source, not a build
@@ -63,7 +63,7 @@ that disagrees with itself eventually, and the disagreement is always discovered
 
 There is **no hand-written ABI table**. Every structure offset, result code, command reason, buffer
 kind and export name is read by name out of `src/generated/abi.ts`, which is transcribed from
-`miso-engine-v2-abi-layout.json`, which the engine emits from its own Rust `offset_of!`. Issue
+`miso-engine-v1-abi-layout.json`, which the engine emits from its own Rust `offset_of!`. Issue
 #207's review found *five* independent hand-written copies of the boot configuration table in the
 old code; one of them wrote a 192-byte struct's offsets into a 64-byte buffer and produced garbage
 in silence, because a wrong offset is still a valid address.
@@ -71,7 +71,7 @@ in silence, because a wrong offset is still a valid address.
 There is **no guessing**. The predecessor to this package sniffed a document's sample rate with a
 regex over its text, could not see a quoted key, and silently fell back to 48 kHz and 128 frames
 when it failed — then fabricated a source ring of 1024 frames, which is not a multiple of a
-127-frame quantum, so a 96 kHz session was not merely mis-shaped but unbootable. Boot v2 removed the
+127-frame quantum, so a 96 kHz session was not merely mis-shaped but unbootable. Boot v1 removed the
 need for all of it: hand the engine bytes, and ask it what it compiled.
 
 ## The transcription chain
@@ -112,7 +112,7 @@ engine.loadSession(anotherDocument);   // the mix switch: dispose and restage, s
 engine.dispose();
 ```
 
-`shape()` is the whole point of boot v2. Nothing in it was parsed out of the document's text, so a
+`shape()` is the whole point of boot v1. Nothing in it was parsed out of the document's text, so a
 consumer that reads its rate from it cannot be told 48000 by a fallback that never looked.
 
 `BootOptions` is five optional keys over the engine's own 64-byte block. Absent means zero means

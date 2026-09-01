@@ -10,7 +10,7 @@ import type { ErrorPhase, MisoDiagnostic, MisoErrorCode } from "../core/errors.t
  *
  * # One verb, two input paths
  *
- * The pre-boot-v2 SDK had a plan path and a raw-TOML path that reached the engine differently, and
+ * The pre-boot-v1 SDK had a plan path and a raw-TOML path that reached the engine differently, and
  * the raw path is where every one of #207's red probes failed: a regex header sniff that could not
  * read a quoted key, a silent 48 kHz/128 fallback when it failed, and a fabricated ring that was
  * not a multiple of a 127-frame quantum. Both paths now do exactly one thing -- hand the engine
@@ -167,9 +167,9 @@ export type ValidationResult =
  *
  * # The unbounded-admission bug this fixes
  *
- * The pre-boot-v2 `validateSession` sized its staging from the input -- `max(1 MiB, input.length)`
+ * The pre-boot-v1 `validateSession` sized its staging from the input -- `max(1 MiB, input.length)`
  * -- so handing it a 64 MiB document made it allocate 64 MiB to discover the document was too
- * large. Boot v2's `document_ptr` refuses an oversize length *before any allocation*, and this
+ * large. Boot v1's `document_ptr` refuses an oversize length *before any allocation*, and this
  * function is a thin wrapper over that, so admission of an over-maximum document now costs no
  * staging at all (issue #243 eval 3, and S1's "standing unbounded-admission bug").
  *

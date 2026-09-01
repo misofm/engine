@@ -2,7 +2,7 @@
 //!
 //! # Why this exists rather than a bigger metadata document
 //!
-//! `miso-engine-v2-parameter-metadata.json` carries each parameter's lattice *declaration* -- the
+//! `miso-engine-v1-parameter-metadata.json` carries each parameter's lattice *declaration* -- the
 //! step, its unit, the rendering precision, the five ladder multiples -- which is a handful of
 //! bytes. It deliberately does not carry the lattice's *points*, because a one-cent lattice from
 //! 20 Hz to 20 kHz has about twelve thousand of them and the shipped catalog would grow by

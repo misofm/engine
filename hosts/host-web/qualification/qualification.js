@@ -22,9 +22,9 @@ const OBSERVATION_MASTER_TRACK_PLUS_ONE = 1n;
 const OBSERVATION_TAP_ID = 1;
 const OBSERVATION_LEVEL = 0.5;
 const MINIMUM_STALL_MS = 100;
-const PROCESSOR_NAME = "miso-engine-v2-audio-worklet";
-const ARTIFACT_URL = "/artifacts/miso-engine-v2-audio-worklet.simd128.wasm";
-const WORKLET_URL = "/artifacts/miso-engine-v2-audio-worklet.js";
+const PROCESSOR_NAME = "miso-engine-v1-audio-worklet";
+const ARTIFACT_URL = "/artifacts/miso-engine-v1-audio-worklet.simd128.wasm";
+const WORKLET_URL = "/artifacts/miso-engine-v1-audio-worklet.js";
 
 // Canonical `() -> v128` module, identical to the preflight probe in the shipped host module.
 const SIMD128_PROBE = new Uint8Array([
@@ -594,7 +594,7 @@ export async function runQualification() {
     consoleResponse, observationResponse,
   ] =
     await Promise.all([
-      import("/artifacts/miso-engine-v2-audio-worklet-host.js"),
+      import("/artifacts/miso-engine-v1-audio-worklet-host.js"),
       fetch("/fixture/expected.json"),
       fetch("/fixture/session.toml"),
       fetch("/fixture/source.json"),

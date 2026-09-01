@@ -14,14 +14,14 @@ const DEMO = path.join(HOST_WEB, "demo");
 // `scripts/web-audioworklet-browser-correctness.py` enumerate the same six; this list drifted to
 // five when #243 added the ABI layout.
 export const ARTIFACT_NAMES = new Set([
-  "miso-engine-v2-audio-worklet.simd128.wasm",
-  "miso-engine-v2-audio-worklet.js",
-  "miso-engine-v2-audio-worklet-host.js",
-  "miso-engine-v2-audio-worklet-host.d.ts",
+  "miso-engine-v1-audio-worklet.simd128.wasm",
+  "miso-engine-v1-audio-worklet.js",
+  "miso-engine-v1-audio-worklet-host.js",
+  "miso-engine-v1-audio-worklet-host.d.ts",
   // Issue #137 D4: the parameter metadata ships with the module and is served with it.
-  "miso-engine-v2-parameter-metadata.json",
+  "miso-engine-v1-parameter-metadata.json",
   // Issue #243: so does the ABI layout, emitted by the same generator from the same engine.
-  "miso-engine-v2-abi-layout.json",
+  "miso-engine-v1-abi-layout.json",
 ]);
 const CONTENT_TYPES = new Map([
   [".d.ts", "text/plain; charset=utf-8"],

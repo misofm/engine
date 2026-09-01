@@ -222,7 +222,7 @@ unsafe fn submit(session: *mut Session, request: &[u8], response: &mut [u8; 4_09
     };
     // SAFETY: All pointers identify live handles or complete caller-owned buffers for this call.
     unsafe {
-        miso_engine_v2_submit_command(session, request.as_ptr(), request.len() as u64, &mut output)
+        miso_engine_v1_submit_command(session, request.as_ptr(), request.len() as u64, &mut output)
     }
 }
 
@@ -261,8 +261,8 @@ fn lifecycle(plan_first: bool) -> (Snapshot, Snapshot, Snapshot, Snapshot) {
     begin();
     // SAFETY: All ABI arguments remain live and uniquely owned for the complete lifecycle.
     let codes = unsafe {
-        let create = miso_engine_v2_engine_create(&config, &mut engine);
-        let compile = miso_engine_v2_compile_session(
+        let create = miso_engine_v1_engine_create(&config, &mut engine);
+        let compile = miso_engine_v1_compile_session(
             engine,
             SESSION.as_ptr(),
             SESSION.len() as u64,
@@ -280,18 +280,18 @@ fn lifecycle(plan_first: bool) -> (Snapshot, Snapshot, Snapshot, Snapshot) {
         let full = submit(session, &second, &mut response);
         let full_delta = snapshot().delta(before_full);
         let before_render = snapshot();
-        let render = miso_engine_v2_render_f32_planar(plan, 0, &output);
+        let render = miso_engine_v1_render_f32_planar(plan, 0, &output);
         let render_delta = snapshot().delta(before_render);
         let retry = submit(session, &second, &mut response);
-        let second_render = miso_engine_v2_render_f32_planar(plan, 128, &output);
+        let second_render = miso_engine_v1_render_f32_planar(plan, 128, &output);
         if plan_first {
-            miso_engine_v2_plan_destroy(plan);
-            miso_engine_v2_session_destroy(session);
+            miso_engine_v1_plan_destroy(plan);
+            miso_engine_v1_session_destroy(session);
         } else {
-            miso_engine_v2_session_destroy(session);
-            miso_engine_v2_plan_destroy(plan);
+            miso_engine_v1_session_destroy(session);
+            miso_engine_v1_plan_destroy(plan);
         }
-        miso_engine_v2_engine_destroy(engine);
+        miso_engine_v1_engine_destroy(engine);
         (
             [
                 create,
@@ -350,8 +350,8 @@ fn rejected_compile_lifecycle() -> Snapshot {
     begin();
     // SAFETY: All ABI arguments remain live for each call and no rejected child is published.
     let codes = unsafe {
-        let create = miso_engine_v2_engine_create(&config, &mut engine);
-        let compile = miso_engine_v2_compile_session(
+        let create = miso_engine_v1_engine_create(&config, &mut engine);
+        let compile = miso_engine_v1_compile_session(
             engine,
             SESSION.as_ptr(),
             SESSION.len() as u64,
@@ -360,7 +360,7 @@ fn rejected_compile_lifecycle() -> Snapshot {
             &mut session,
             &mut plan,
         );
-        miso_engine_v2_engine_destroy(engine);
+        miso_engine_v1_engine_destroy(engine);
         (create, compile)
     };
     let total = finish();
@@ -2087,11 +2087,11 @@ unsafe fn compile_c(
     // SAFETY: Every descriptor and output location remains live for the complete call.
     unsafe {
         assert_eq!(
-            miso_engine_v2_engine_create(&config, &mut engine),
+            miso_engine_v1_engine_create(&config, &mut engine),
             RESULT_OK
         );
         assert_eq!(
-            miso_engine_v2_compile_session(
+            miso_engine_v1_compile_session(
                 engine,
                 session_toml.as_ptr(),
                 session_toml.len() as u64,
@@ -2104,7 +2104,7 @@ unsafe fn compile_c(
             "{}",
             String::from_utf8_lossy(&diagnostic_storage[..diagnostics.required_bytes as usize])
         );
-        miso_engine_v2_engine_destroy(engine);
+        miso_engine_v1_engine_destroy(engine);
     }
     (session, plan)
 }
@@ -2114,7 +2114,7 @@ unsafe fn resources_c(plan: *const Plan) -> PlanResourceReport {
     unsafe {
         let mut report: PlanResourceReport = core::mem::zeroed();
         report.struct_size = PLAN_RESOURCE_REPORT_SIZE;
-        assert_eq!(miso_engine_v2_plan_resources(plan, &mut report), RESULT_OK);
+        assert_eq!(miso_engine_v1_plan_resources(plan, &mut report), RESULT_OK);
         report
     }
 }
@@ -2139,11 +2139,11 @@ unsafe fn compile_rejected_c(session_toml: &str, compile_limits: &CompileLimits)
     // SAFETY: Every descriptor and output location remains live for the complete call.
     unsafe {
         assert_eq!(
-            miso_engine_v2_engine_create(&config, &mut engine),
+            miso_engine_v1_engine_create(&config, &mut engine),
             RESULT_OK
         );
         assert_eq!(
-            miso_engine_v2_compile_session(
+            miso_engine_v1_compile_session(
                 engine,
                 session_toml.as_ptr(),
                 session_toml.len() as u64,
@@ -2157,7 +2157,7 @@ unsafe fn compile_rejected_c(session_toml: &str, compile_limits: &CompileLimits)
         assert!(session.is_null());
         assert!(plan.is_null());
         assert!(diagnostics.required_bytes > 0);
-        miso_engine_v2_engine_destroy(engine);
+        miso_engine_v1_engine_destroy(engine);
     }
 }
 
@@ -2212,8 +2212,8 @@ fn render_diagnostic_egress_reuses_eager_capi_storage_without_allocation() {
     // SAFETY: Both live handles and caller-owned buffers remain valid for each complete call.
     let (render_result, event_result) = unsafe {
         (
-            miso_engine_v2_render_f32_planar(plan, 0, &output),
-            miso_engine_v2_dequeue_event(session, EVENT_LANE_RELIABLE, &mut event),
+            miso_engine_v1_render_f32_planar(plan, 0, &output),
+            miso_engine_v1_dequeue_event(session, EVENT_LANE_RELIABLE, &mut event),
         )
     };
     let observed = finish();
@@ -2236,8 +2236,8 @@ fn render_diagnostic_egress_reuses_eager_capi_storage_without_allocation() {
 
     // SAFETY: These are the exact live handles returned by `compile_c` and are destroyed once.
     unsafe {
-        miso_engine_v2_session_destroy(session);
-        miso_engine_v2_plan_destroy(plan);
+        miso_engine_v1_session_destroy(session);
+        miso_engine_v1_plan_destroy(plan);
     }
 }
 
@@ -2324,13 +2324,13 @@ fn external_primitive_double_live_oracle_drives_exact_and_one_below_c_caps() {
                 reserved: [0; 2],
             };
             assert_eq!(
-                miso_engine_v2_render_f32_planar(plan, 0, &output),
+                miso_engine_v1_render_f32_planar(plan, 0, &output),
                 RESULT_OK
             );
             // The prospective session ID is nine bytes shorter than the current one.
             assert_eq!(resources_c(plan), frozen_scratch_report(141_932 - 9));
-            miso_engine_v2_session_destroy(session);
-            miso_engine_v2_plan_destroy(plan);
+            miso_engine_v1_session_destroy(session);
+            miso_engine_v1_plan_destroy(plan);
         }
 
         let mut below_limits = limits();
@@ -2355,8 +2355,8 @@ fn external_primitive_double_live_oracle_drives_exact_and_one_below_c_caps() {
             );
             assert!(response.iter().all(|byte| *byte == 0xa5), "{row} canary");
             assert_eq!(resources_c(plan), before, "{row} atomic report");
-            miso_engine_v2_session_destroy(session);
-            miso_engine_v2_plan_destroy(plan);
+            miso_engine_v1_session_destroy(session);
+            miso_engine_v1_plan_destroy(plan);
         }
     }
 }

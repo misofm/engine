@@ -1,4 +1,4 @@
-//! Native WAV/RF64 reference runner over the frozen Engine V2 C ABI.
+//! Native WAV/RF64 reference runner over the frozen Engine V1 C ABI.
 //!
 //! This crate is deliberately native-only tooling. Session compilation, source submission, and
 //! rendering cross the public C ABI; only session declaration inspection and native file decoding
@@ -1180,9 +1180,9 @@ impl Drop for CAbi {
     fn drop(&mut self) {
         // SAFETY: These are the unique live handles returned by the matching frozen C ABI calls.
         unsafe {
-            capi::miso_engine_v2_plan_destroy(self.plan);
-            capi::miso_engine_v2_session_destroy(self.session);
-            capi::miso_engine_v2_engine_destroy(self.engine);
+            capi::miso_engine_v1_plan_destroy(self.plan);
+            capi::miso_engine_v1_session_destroy(self.session);
+            capi::miso_engine_v1_engine_destroy(self.engine);
         }
         self.plan = ptr::null_mut();
         self.session = ptr::null_mut();
@@ -1205,7 +1205,7 @@ impl EngineBoundary for CAbi {
         };
         // SAFETY: All pointers refer to live caller-owned fixed ABI storage for this call.
         let result =
-            unsafe { capi::miso_engine_v2_engine_create(&raw const config, &raw mut self.engine) };
+            unsafe { capi::miso_engine_v1_engine_create(&raw const config, &raw mut self.engine) };
         if result != capi::RESULT_OK {
             return Err(RunnerError::new(FailurePhase::Compile, "engine.create"));
         }
@@ -1246,7 +1246,7 @@ impl EngineBoundary for CAbi {
         };
         // SAFETY: Handles and borrowed buffers satisfy their fixed ABI contracts for this call.
         let result = unsafe {
-            capi::miso_engine_v2_compile_session(
+            capi::miso_engine_v1_compile_session(
                 self.engine,
                 session.as_ptr(),
                 session.len() as u64,
@@ -1291,7 +1291,7 @@ impl EngineBoundary for CAbi {
             reserved: [0; 4],
         };
         // SAFETY: `self.plan` is live and `resources` is writable fixed ABI storage.
-        let result = unsafe { capi::miso_engine_v2_plan_resources(self.plan, &raw mut resources) };
+        let result = unsafe { capi::miso_engine_v1_plan_resources(self.plan, &raw mut resources) };
         if result != capi::RESULT_OK
             || resources.quantum_frames != quantum
             || resources.sample_rate_hz != rate
@@ -1332,7 +1332,7 @@ impl EngineBoundary for CAbi {
         };
         // SAFETY: The session handle is live and all borrowed source storage remains live for call.
         let result = unsafe {
-            capi::miso_engine_v2_source_submit_planar_f32(
+            capi::miso_engine_v1_source_submit_planar_f32(
                 self.session,
                 submitted.id.as_ptr(),
                 submitted.id.len() as u64,
@@ -1366,7 +1366,7 @@ impl EngineBoundary for CAbi {
         };
         // SAFETY: The plan is live and the output descriptor borrows the complete mutable slice.
         let result = unsafe {
-            capi::miso_engine_v2_render_f32_planar(self.plan, absolute, &raw const descriptor)
+            capi::miso_engine_v1_render_f32_planar(self.plan, absolute, &raw const descriptor)
         };
         if result != capi::RESULT_OK {
             return Err(RunnerError::new(FailurePhase::Render, "rejected"));

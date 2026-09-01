@@ -26,7 +26,7 @@
 //! stack value. The engine never asks the host to change its thread; it borrows the environment for
 //! the length of one block and hands it back exactly as it found it.
 //!
-//! This is the *pinned* half of the rule legacy engine-v2-old wrote as attestation
+//! This is the *pinned* half of the rule the legacy predecessor wrote as attestation
 //! (`docs/research/legacy-v2old/02-numerics-determinism.md`: "At every native render-thread
 //! entry/start, require and attest round-to-nearest-even with FTZ/DAZ disabled ... refuse before
 //! audio with stable `fp_environment_invalid`"). Refusing a DAW's callback thread is not available
@@ -393,7 +393,7 @@ impl CanonicalFpEnv {
 
 /// Why a render thread's floating-point environment could not be pinned.
 ///
-/// The stable name legacy engine-v2-old gave this refusal is `fp_environment_invalid`; it is what
+/// The stable name the legacy predecessor gave this refusal is `fp_environment_invalid`; it is what
 /// [`fmt::Display`] prints, so a host that surfaces the rejection surfaces that exact token.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FpEnvironmentRejection {

@@ -23,12 +23,12 @@ export const PROVENANCE = deepFreeze(
     "abiLayout": "miso.web.abi-layout.v1"
   },
   "artifacts": [
-    "miso-engine-v2-abi-layout.json",
-    "miso-engine-v2-audio-worklet-host.d.ts",
-    "miso-engine-v2-audio-worklet-host.js",
-    "miso-engine-v2-audio-worklet.js",
-    "miso-engine-v2-audio-worklet.simd128.wasm",
-    "miso-engine-v2-parameter-metadata.json"
+    "miso-engine-v1-abi-layout.json",
+    "miso-engine-v1-audio-worklet-host.d.ts",
+    "miso-engine-v1-audio-worklet-host.js",
+    "miso-engine-v1-audio-worklet.js",
+    "miso-engine-v1-audio-worklet.simd128.wasm",
+    "miso-engine-v1-parameter-metadata.json"
   ],
   "stagingSequence": [
     "miso_engine_web_v1_abi_version",

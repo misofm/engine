@@ -392,7 +392,7 @@ pub struct WebBootOptions {
     pub console_observation_taps: u64,
     /// The designated master track, **plus one**, or `0` for none (issue #143 D6).
     ///
-    /// Boot v2 has no structural master bus, so `masterGrDb` is a designation rather than a discovery.
+    /// Boot v1 has no structural master bus, so `masterGrDb` is a designation rather than a discovery.
     /// Plus one because zero has to keep meaning "unset" in a word every V1 writer already zeroes.
     pub console_master_track_plus_one: u64,
 }
@@ -2565,7 +2565,7 @@ fn source_result(error: SourceControlError) -> u32 {
 
 /// Translate document-derived shape plus host policy into the shared preparation caps.
 ///
-/// Count ceilings are intentionally unbounded: boot v2 has one physics gate, not structural caps.
+/// Count ceilings are intentionally unbounded: boot v1 has one physics gate, not structural caps.
 /// Byte ceilings are the same effective memory budget, so every subsystem retains its own checked
 /// pre-allocation arithmetic while the aggregate projection is checked before preparation starts.
 fn prepare_caps(

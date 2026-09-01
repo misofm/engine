@@ -1,6 +1,11 @@
 # Issue #215 de-versioning: the classification inventory
 
-**Issue**: [#215](https://github.com/misofm/engine-v2/issues/215) (owner ruling, 2026-08-28) --
+> **Superseded in part by issue #313.** This document records the August 28 classification and
+> remains the evidence for removing internal version suffixes. Its earlier ruling that the native
+> C ABI and shipped artifact names should retain a later-generation identity no longer applies: before
+> launch, every live boundary that needs a generation is V1.
+
+**Issue**: [#215](https://github.com/misofm/engine/issues/215) (owner ruling, 2026-08-28) --
 pre-launch there is no reason to denote *internal* types as `V1`. **Class**: a naming ruling plus
 the line-by-line evidence for it. This file is the audit surface: every `V1`/`_v1` spelling in the
 tree is named below exactly once, in class 1 (renamed) or class 2 (kept), with the reason.
@@ -91,7 +96,7 @@ in this PR.
 | spelling | ruling | reason |
 |---|---|---|
 | `miso.command.v1`, `miso.observe.v1`, `miso.ack.v1`, `miso.error.v1`, `miso.meter.v1`, `miso.meters.v1`, `miso.status.v1`, `miso.sessionmap.v1`, `miso.source.v1`, `miso.seek.v1`, `miso.ready.v1`, `miso.dispose.v1`, `miso.telemetry.v1`, `miso.unsupported.v1`, `miso.web.parameter-metadata.v1`, `miso.web.qualification.*.v1`, `miso.engine.effect-descriptor.identity.v1`, `miso.engine.effect-state.current-layout.v1`, `miso.effect-*.v1` | KEEP | wire tags. They are the *reason* a v2 can coexist. These are string literals, not identifiers, so they do not appear in the token counts above; the second proof grep pins them. |
-| `miso_engine_web_v1_*` (28 exports) | KEEP | `pub extern "C"` Wasm exports. `miso-engine-v2-audio-worklet.js` reads them off the instance **by name**; `check-web-audioworklet.sh` and `test-web-audioworklet.mjs` pin the exact list. |
+| `miso_engine_web_v1_*` (28 exports) | KEEP | `pub extern "C"` Wasm exports. `miso-engine-v1-audio-worklet.js` reads them off the instance **by name**; `check-web-audioworklet.sh` and `test-web-audioworklet.mjs` pin the exact list. |
 | `miso_engine_effect_*_v1`, `MISO_ENGINE_EFFECT_*_V1` (80) | KEEP | the C inspection ABI in `crates/miso-engine-effect-package/include/miso_engine_effect_descriptor_v1.h`, its `_H` guards, and the Rust `EFFECT_DESCRIPTOR_INSPECTION_ABI_VERSION_V1` mirror the ABI gate holds equal to the macro. A third-party compiles against these spellings. |
 | `SESSION_SCHEMA_VERSION_V1`, `PROTOCOL_MAJOR_V1`, `PROTOCOL_MINOR_V1`, `ProtocolVersion::V1` | KEEP | they *are* the version. `schema_version` in every checked-in session document is unmoved data. |
 | `docs/SESSION_SCHEMA_V1.md`, `EFFECT_CONTRACT_V1.md`, `EFFECT_PACKAGE_V1.md`, `EFFECT_STATE_V1.md`, `EFFECT_STATE_MIGRATION_V1.md`, `EFFECT_DESCRIPTOR_WIRE_V1.md`, `EFFECT_OBSERVATION_V1.md`, `EFFECT_INTERCHANGE_QUALIFICATION_V1.md`, `BUILTINS_AND_METERING_V1.md`, `CONTROL_BTLV_V1.md`, `C_ABI_V1_QUALIFICATION.md`, `NATIVE_PCM_REFERENCE_RUNNER_V1.md` | KEEP the file names | each is the normative text *of* a versioned contract and is referenced by path from `ISSUE_SPECS` (some with sha256). Doc **bodies** were rewritten where they name a class-1 type. Judgment call resolved by "when in doubt KEEP". |
@@ -438,29 +443,29 @@ in this PR.
 
 | old | new | declared in |
 |---|---|---|
-| `CreateMisoAudioWorkletHostOptionsV1` | `CreateMisoAudioWorkletHostOptions` | `hosts/miso-engine-host-web/web/miso-engine-v2-audio-worklet-host.d.ts` |
-| `MisoAckV1` | `MisoAck` | `hosts/miso-engine-host-web/web/miso-engine-v2-audio-worklet-host.d.ts` |
-| `MisoAudioWorkletHostV1` | `MisoAudioWorkletHost` | `hosts/miso-engine-host-web/web/miso-engine-v2-audio-worklet-host.js` |
-| `MisoCommandAckV1` | `MisoCommandAck` | `hosts/miso-engine-host-web/web/miso-engine-v2-audio-worklet-host.d.ts` |
-| `MisoCommandKindV1` | `MisoCommandKind` | `hosts/miso-engine-host-web/web/miso-engine-v2-audio-worklet-host.d.ts` |
-| `MisoCommandReasonV1` | `MisoCommandReason` | `hosts/miso-engine-host-web/web/miso-engine-v2-audio-worklet-host.d.ts` |
-| `MisoCommandRequestV1` | `MisoCommandRequest` | `hosts/miso-engine-host-web/web/miso-engine-v2-audio-worklet-host.d.ts` |
-| `MisoCommandV1` | `MisoCommand` | `hosts/miso-engine-host-web/web/miso-engine-v2-audio-worklet-host.d.ts` |
-| `MisoErrorV1` | `MisoError` | `hosts/miso-engine-host-web/web/miso-engine-v2-audio-worklet-host.d.ts` |
-| `MisoMeterFrameV1` | `MisoMeterFrame` | `hosts/miso-engine-host-web/web/miso-engine-v2-audio-worklet-host.d.ts` |
-| `MisoObservationAckV1` | `MisoObservationAck` | `hosts/miso-engine-host-web/web/miso-engine-v2-audio-worklet-host.d.ts` |
-| `MisoObservationBindingV1` | `MisoObservationBinding` | `hosts/miso-engine-host-web/web/miso-engine-v2-audio-worklet-host.d.ts` |
-| `MisoObservationRequestV1` | `MisoObservationRequest` | `hosts/miso-engine-host-web/web/miso-engine-v2-audio-worklet-host.d.ts` |
-| `MisoObservationSubscriptionV1` | `MisoObservationSubscription` | `hosts/miso-engine-host-web/web/miso-engine-v2-audio-worklet-host.d.ts` |
-| `MisoSeekRequestV1` | `MisoSeekRequest` | `hosts/miso-engine-host-web/web/miso-engine-v2-audio-worklet-host.d.ts` |
-| `MisoSessionMapV1` | `MisoSessionMap` | `hosts/miso-engine-host-web/web/miso-engine-v2-audio-worklet-host.d.ts` |
-| `MisoSourceRequestV1` | `MisoSourceRequest` | `hosts/miso-engine-host-web/web/miso-engine-v2-audio-worklet-host.d.ts` |
-| `MisoStatusV1` | `MisoStatus` | `hosts/miso-engine-host-web/web/miso-engine-v2-audio-worklet-host.d.ts` |
-| `MisoTelemetryFrameV1` | `MisoTelemetryFrame` | `hosts/miso-engine-host-web/web/miso-engine-v2-audio-worklet-host.d.ts` |
-| `MisoUnsupportedBrowserV1` | `MisoUnsupportedBrowser` | `hosts/miso-engine-host-web/web/miso-engine-v2-audio-worklet-host.d.ts` |
-| `MisoWebBackendV1` | `MisoWebBackend` | `hosts/miso-engine-host-web/web/miso-engine-v2-audio-worklet-host.d.ts` |
-| `MisoWebPrepareLimitsV1` | `MisoWebPrepareLimits` | `hosts/miso-engine-host-web/web/miso-engine-v2-audio-worklet-host.d.ts` |
-| `MisoWebResourceReportV1` | `MisoWebResourceReport` | `hosts/miso-engine-host-web/web/miso-engine-v2-audio-worklet-host.d.ts` |
+| `CreateMisoAudioWorkletHostOptionsV1` | `CreateMisoAudioWorkletHostOptions` | `hosts/miso-engine-host-web/web/miso-engine-v1-audio-worklet-host.d.ts` |
+| `MisoAckV1` | `MisoAck` | `hosts/miso-engine-host-web/web/miso-engine-v1-audio-worklet-host.d.ts` |
+| `MisoAudioWorkletHostV1` | `MisoAudioWorkletHost` | `hosts/miso-engine-host-web/web/miso-engine-v1-audio-worklet-host.js` |
+| `MisoCommandAckV1` | `MisoCommandAck` | `hosts/miso-engine-host-web/web/miso-engine-v1-audio-worklet-host.d.ts` |
+| `MisoCommandKindV1` | `MisoCommandKind` | `hosts/miso-engine-host-web/web/miso-engine-v1-audio-worklet-host.d.ts` |
+| `MisoCommandReasonV1` | `MisoCommandReason` | `hosts/miso-engine-host-web/web/miso-engine-v1-audio-worklet-host.d.ts` |
+| `MisoCommandRequestV1` | `MisoCommandRequest` | `hosts/miso-engine-host-web/web/miso-engine-v1-audio-worklet-host.d.ts` |
+| `MisoCommandV1` | `MisoCommand` | `hosts/miso-engine-host-web/web/miso-engine-v1-audio-worklet-host.d.ts` |
+| `MisoErrorV1` | `MisoError` | `hosts/miso-engine-host-web/web/miso-engine-v1-audio-worklet-host.d.ts` |
+| `MisoMeterFrameV1` | `MisoMeterFrame` | `hosts/miso-engine-host-web/web/miso-engine-v1-audio-worklet-host.d.ts` |
+| `MisoObservationAckV1` | `MisoObservationAck` | `hosts/miso-engine-host-web/web/miso-engine-v1-audio-worklet-host.d.ts` |
+| `MisoObservationBindingV1` | `MisoObservationBinding` | `hosts/miso-engine-host-web/web/miso-engine-v1-audio-worklet-host.d.ts` |
+| `MisoObservationRequestV1` | `MisoObservationRequest` | `hosts/miso-engine-host-web/web/miso-engine-v1-audio-worklet-host.d.ts` |
+| `MisoObservationSubscriptionV1` | `MisoObservationSubscription` | `hosts/miso-engine-host-web/web/miso-engine-v1-audio-worklet-host.d.ts` |
+| `MisoSeekRequestV1` | `MisoSeekRequest` | `hosts/miso-engine-host-web/web/miso-engine-v1-audio-worklet-host.d.ts` |
+| `MisoSessionMapV1` | `MisoSessionMap` | `hosts/miso-engine-host-web/web/miso-engine-v1-audio-worklet-host.d.ts` |
+| `MisoSourceRequestV1` | `MisoSourceRequest` | `hosts/miso-engine-host-web/web/miso-engine-v1-audio-worklet-host.d.ts` |
+| `MisoStatusV1` | `MisoStatus` | `hosts/miso-engine-host-web/web/miso-engine-v1-audio-worklet-host.d.ts` |
+| `MisoTelemetryFrameV1` | `MisoTelemetryFrame` | `hosts/miso-engine-host-web/web/miso-engine-v1-audio-worklet-host.d.ts` |
+| `MisoUnsupportedBrowserV1` | `MisoUnsupportedBrowser` | `hosts/miso-engine-host-web/web/miso-engine-v1-audio-worklet-host.d.ts` |
+| `MisoWebBackendV1` | `MisoWebBackend` | `hosts/miso-engine-host-web/web/miso-engine-v1-audio-worklet-host.d.ts` |
+| `MisoWebPrepareLimitsV1` | `MisoWebPrepareLimits` | `hosts/miso-engine-host-web/web/miso-engine-v1-audio-worklet-host.d.ts` |
+| `MisoWebResourceReportV1` | `MisoWebResourceReport` | `hosts/miso-engine-host-web/web/miso-engine-v1-audio-worklet-host.d.ts` |
 | `WebCommandReportV1` | `WebCommandReport` | `hosts/miso-engine-host-web/src/lib.rs` |
 | `WebMeterHeaderV1` | `WebMeterHeader` | `hosts/miso-engine-host-web/src/lib.rs` |
 | `WebPrepareConfigV1` | `WebPrepareConfig` | `hosts/miso-engine-host-web/src/lib.rs` |

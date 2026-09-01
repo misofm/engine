@@ -1,5 +1,5 @@
 {
-  "schema": "miso.web.browser.expected.v2",
+  "schema": "miso.web.browser.expected.v1",
   "sampleRateHz": 48000,
   "quantumFrames": 128,
   "renderedQuantaBeforeDispose": 3,
@@ -26,7 +26,7 @@
     ]
   },
   "directOracle": {
-    "schema": "miso.web.browser.direct-oracle.v2",
+    "schema": "miso.web.browser.direct-oracle.v1",
     "simd128": {
       "initialStatus": {
         "state": 2,

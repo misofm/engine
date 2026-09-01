@@ -362,7 +362,7 @@ No candidate should be introduced from this report alone.
 ## References
 
 1. Jon Dattorro, [*Effect Design, Part 1: Reverberator and Other Filters*](https://nagasm.org/ASL/Sketch14/fig5/EffectDesignPart1.pdf), Journal of the Audio Engineering Society 45(9), 1997, especially sections 3.3.2-3.3.5.
-2. Engine V2 issue #31, [portable higher-precision built-in filter decision](../../.github/ISSUE_SPECS/031-portable-higher-precision-builtin-filter-quality-mode.md).
+2. Engine V1 issue #31, [portable higher-precision built-in filter decision](../../.github/ISSUE_SPECS/031-portable-higher-precision-builtin-filter-quality-mode.md).
 3. Aaron Wishnick, [*Time-Varying Filters for Musical Applications*](https://www.dafx14.fau.de/papers/dafx14_aaron_wishnick_time_varying_filters_for_.pdf), DAFx-14, 2014.
 4. ITU-R, [Recommendation BS.1770-5: Algorithms to measure audio programme loudness and true-peak audio level](https://www.itu.int/rec/R-REC-BS.1770-5-202311-I/en), 2023.
 5. EBU, [R 128: Loudness normalisation and permitted maximum level of audio signals](https://tech.ebu.ch/publications/r128), current revision.
@@ -371,4 +371,4 @@ No candidate should be introduced from this report alone.
 8. Stefan Bilbao, Fabián Esqueda, Julian D. Parker and Vesa Välimäki, [*Antiderivative Antialiasing for Memoryless Nonlinearities*](https://research.aalto.fi/files/27135145/ELEC_bilbao_et_al_antiderivative_antialiasing_IEEESPL.pdf), IEEE Signal Processing Letters 24(7), 2017, doi:10.1109/LSP.2017.2675541.
 9. Andrew Simper, [*Linear Trapezoidal Integrated State Variable Filter*](https://www.cytomic.com/files/dsp/SvfLinearTrapOptimised2.pdf), Cytomic, 2013/2016.
 10. Vadim Zavalishin, [*The Art of VA Filter Design*](https://www.native-instruments.com/fileadmin/ni_media/downloads/pdf/VAFilterDesign_2.1.2.pdf), revision 2.1.2, Native Instruments.
-11. Engine V2 issue #87, [parametric-EQ TPT SVF audit evidence](../../.github/ISSUE_SPECS/087-audit-parametric-eq.md) and its authoritative GitHub issue record.
+11. Engine V1 issue #87, [parametric-EQ TPT SVF audit evidence](../../.github/ISSUE_SPECS/087-audit-parametric-eq.md) and its authoritative GitHub issue record.

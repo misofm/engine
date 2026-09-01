@@ -119,7 +119,7 @@ SCALAR_SLACK = 8
 #
 # ## Derivation of the ceilings (issue #163 phase 0e; re-derived at mono-collapse M2)
 #
-# Measured with this analyser on `miso-engine-v2-audio-worklet.simd128.wasm` built from this tree
+# Measured with this analyser on `miso-engine-v1-audio-worklet.simd128.wasm` built from this tree
 # (vector = `f32x4.{mul,add,sub,div}`, scalar = `f32.{mul,add,sub,div}`):
 #
 #   multiband-compressor f32x8   2560 / 20   ratio 0.0078

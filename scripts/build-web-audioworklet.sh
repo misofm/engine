@@ -64,7 +64,7 @@ remap="--remap-path-prefix=$cargo_home=/cargo --remap-path-prefix=$repo_root=/re
 
 artifact="$simd_target/wasm32-unknown-unknown/release/host_web.wasm"
 observed=$(sha256sum "$artifact" | awk '{print $1}')
-pin_file="$repo_root/hosts/host-web/web/miso-engine-v2-audio-worklet-artifact.sha256"
+pin_file="$repo_root/hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256"
 expected=$(tr -d '\n' <"$pin_file")
 
 if [[ "${MISO_ENGINE_WEB_AUDIOWORKLET_REPIN:-0}" == 1 ]]; then
@@ -77,10 +77,10 @@ fi
   exit 1
 }
 
-cp --update=none "$artifact" "$output_dir/miso-engine-v2-audio-worklet.simd128.wasm"
-cp --update=none "$repo_root/hosts/host-web/web/miso-engine-v2-audio-worklet.js" "$output_dir/"
-cp --update=none "$repo_root/hosts/host-web/web/miso-engine-v2-audio-worklet-host.js" "$output_dir/"
-cp --update=none "$repo_root/hosts/host-web/web/miso-engine-v2-audio-worklet-host.d.ts" "$output_dir/"
+cp --update=none "$artifact" "$output_dir/miso-engine-v1-audio-worklet.simd128.wasm"
+cp --update=none "$repo_root/hosts/host-web/web/miso-engine-v1-audio-worklet.js" "$output_dir/"
+cp --update=none "$repo_root/hosts/host-web/web/miso-engine-v1-audio-worklet-host.js" "$output_dir/"
+cp --update=none "$repo_root/hosts/host-web/web/miso-engine-v1-audio-worklet-host.d.ts" "$output_dir/"
 
 # Issue #137 D4: the parameter metadata ships beside the module, so the app never introspects the
 # Wasm for names, units, ranges, defaults or enumerations. The effect list is read from

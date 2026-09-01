@@ -1,7 +1,7 @@
 /**
  * Issue #243 evals 1, 3, 7 and 8: the boot boundary.
  *
- * These are the evals that killed the pre-boot-v2 SDK, written against the shipped module rather
+ * These are the evals that killed the pre-boot-v1 SDK, written against the shipped module rather
  * than a mock. Each test names the red mutation that makes it fail, because a probe nobody has
  * seen fail is a probe nobody should trust.
  */
@@ -96,8 +96,8 @@ describe("eval 1 -- the three red probes at the SDK boundary", () => {
       [["sample_rate.unsupported_at_launch", "$.sample_rate_hz"]],
     );
 
-    // The payload. The pre-boot-v2 `validate` built a whole throwaway engine, compiling the
-    // module again every single time; boot v2 instantiates a compiled module instead.
+    // The payload. The pre-boot-v1 `validate` built a whole throwaway engine, compiling the
+    // module again every single time; boot v1 instantiates a compiled module instead.
     assert.equal(compiles - before, 0, "validate() must not compile the module again");
     assert.equal(asset.compileCount, 1, "one asset, one compile, for the SDK's whole lifetime");
   });
@@ -130,7 +130,7 @@ describe("eval 1 -- the three red probes at the SDK boundary", () => {
     // `host.session.shape` is the *worklet's* answer when a document does not match the
     // AudioContext. A headless boot writes both `require_*` words at zero, so it has no physical
     // shape to mismatch and must never produce that diagnostic. The old SDK's fallback made this
-    // reachable headlessly; boot v2 makes it structurally impossible.
+    // reachable headlessly; boot v1 makes it structurally impossible.
     for (const rate of [44_100, 48_000, 88_200, 96_000]) {
       const result = await validate(
         sessionDocument({ sampleRateHz: rate, quantumFrames: 127, quoteKeys: true }),

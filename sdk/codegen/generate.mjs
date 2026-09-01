@@ -38,18 +38,18 @@ const assets = resolve(sdkRoot, "assets");
 const generated = resolve(sdkRoot, "src", "generated");
 
 const inputs = [
-  ["catalog", "miso-engine-v2-parameter-metadata.json", "CATALOG"],
-  ["abi", "miso-engine-v2-abi-layout.json", "ABI_LAYOUT"],
+  ["catalog", "miso-engine-v1-parameter-metadata.json", "CATALOG"],
+  ["abi", "miso-engine-v1-abi-layout.json", "ABI_LAYOUT"],
 ];
 
 /** The release artifact set, in the order `scripts/check-web-audioworklet.sh` pins it. */
 const ARTIFACT_SET = [
-  "miso-engine-v2-abi-layout.json",
-  "miso-engine-v2-audio-worklet-host.d.ts",
-  "miso-engine-v2-audio-worklet-host.js",
-  "miso-engine-v2-audio-worklet.js",
-  "miso-engine-v2-audio-worklet.simd128.wasm",
-  "miso-engine-v2-parameter-metadata.json",
+  "miso-engine-v1-abi-layout.json",
+  "miso-engine-v1-audio-worklet-host.d.ts",
+  "miso-engine-v1-audio-worklet-host.js",
+  "miso-engine-v1-audio-worklet.js",
+  "miso-engine-v1-audio-worklet.simd128.wasm",
+  "miso-engine-v1-parameter-metadata.json",
 ];
 
 function deepFreezeSource() {

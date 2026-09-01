@@ -25,7 +25,7 @@ import type { MisoWebBootOptions } from "./shipped-host.d.ts";
  * The artifact directory is a build output that does not exist in a source checkout, so a type
  * import from it could not be part of `tsc --noEmit`. `shipped-host.d.ts` is a copy, and
  * `scripts/check-sdk-generated.sh` proves it is byte-identical to
- * `hosts/host-web/web/miso-engine-v2-audio-worklet-host.d.ts` -- so it is a mirror the
+ * `hosts/host-web/web/miso-engine-v1-audio-worklet-host.d.ts` -- so it is a mirror the
  * way the generated modules are mirrors: checked, not trusted.
  */
 export function toWebBootOptions(options: BootOptions): MisoWebBootOptions {

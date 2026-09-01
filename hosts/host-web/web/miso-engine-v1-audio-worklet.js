@@ -14,7 +14,7 @@ const BUFFER_OUTPUT_PCM = 5;
 const BUFFER_COMMAND = 6;
 const BUFFER_METER_FRAME = 7;
 const STATE_READY = 2;
-const PROCESSOR_NAME = "miso-engine-v2-audio-worklet";
+const PROCESSOR_NAME = "miso-engine-v1-audio-worklet";
 
 // Issue #137 D1/D2/D3.
 const COMMAND_RECORD_BYTES = 48;

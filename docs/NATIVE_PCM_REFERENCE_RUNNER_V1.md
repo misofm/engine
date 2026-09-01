@@ -3,7 +3,7 @@
 `native-pcm-runner` is a native, offline reference tool. It resolves strict session
 sources to checked RIFF/WAVE or RF64/WAVE files, decodes bounded chunks with the public native
 decoder, and performs engine preparation, source submission, resource inspection, and rendering
-only through the frozen Engine V2 C ABI V1. It is not a render-thread component, host adapter,
+only through the frozen Engine V1 C ABI V1. It is not a render-thread component, host adapter,
 codec, player, benchmark, or sample-rate converter.
 
 ## Command and launch envelope

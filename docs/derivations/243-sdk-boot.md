@@ -1,23 +1,23 @@
 # Derivations — #243 SDK boot integration
 
 Every re-pinned number in this change, with the arithmetic that discharges it, per the ceremony
-amended by [#239 ruling 5462028562 A](https://github.com/misofm/engine-v2/issues/239#issuecomment-5462028562):
+amended by [#239 ruling 5462028562 A](https://github.com/misofm/engine/issues/239#issuecomment-5462028562):
 a derivation may live in a linked derivations document naming the commit it discharges.
 
 Binding context for the whole issue: the brief (#243), the audit batch
-[5462128475](https://github.com/misofm/engine-v2/issues/239#issuecomment-5462128475) and its
-adoption [5462139867](https://github.com/misofm/engine-v2/issues/239#issuecomment-5462139867),
+[5462128475](https://github.com/misofm/engine/issues/239#issuecomment-5462128475) and its
+adoption [5462139867](https://github.com/misofm/engine/issues/239#issuecomment-5462139867),
 whose findings 1–6 amend the brief directly.
 
 ## 1. The artifact set: five files → six
 
 `scripts/check-web-audioworklet.sh` pins the release directory's contents exactly, and
 `hosts/host-web/DEPLOYMENT.md` states the same number in prose. Both moved from five
-to six because `miso-engine-v2-abi-layout.json` joined the set.
+to six because `miso-engine-v1-abi-layout.json` joined the set.
 
 The count is a direct enumeration, not an estimate: `.d.ts` + host `.js` + worklet `.js` +
-`.simd128.wasm` + `miso-engine-v2-parameter-metadata.json` = 5 before;
-`+ miso-engine-v2-abi-layout.json` = 6. The gate compares a sorted `find -printf '%f\n'` against a
+`.simd128.wasm` + `miso-engine-v1-parameter-metadata.json` = 5 before;
+`+ miso-engine-v1-abi-layout.json` = 6. The gate compares a sorted `find -printf '%f\n'` against a
 sorted literal list, so the two spellings of "six" (the list and the error message) are checked
 against the filesystem on every run, and the prose in `DEPLOYMENT.md` is the only copy that a gate
 does not read — it is updated in the same commit and named here so the pair is auditable.
@@ -45,7 +45,7 @@ two rows.
 
 ## 2a. The export set: 25 functions
 
-`miso-engine-v2-abi-layout.json` publishes the whole export surface so no SDK call site types a
+`miso-engine-v1-abi-layout.json` publishes the whole export surface so no SDK call site types a
 symbol name as a string literal. The count is not chosen: it is
 `scripts/check-web-audioworklet.sh`'s own `expected_exports` list — which that gate proves against
 the disassembled module — minus `memory`, which is linear memory rather than a call.
@@ -55,7 +55,7 @@ side without a red.
 
 ## 3. `SOURCE_RING_RESERVE_QUANTA = 2`, and eval 2's `9906 = 78 × 127`
 
-`miso-engine-v2-abi-layout.json` publishes the default source-ring rule as its two inputs rather
+`miso-engine-v1-abi-layout.json` publishes the default source-ring rule as its two inputs rather
 than as a rate-specific answer, because the ring is **not readable back** across the ABI: it is an
 input word at boot-options offset 16 and no export reports the effective value. A consumer that
 must size its own producer therefore has to apply the rule, and publishing the rule is what keeps
@@ -119,7 +119,7 @@ among its fifteen red mutations.
 The brief and #240 both describe "the 3-call boot". The emitted `stagingSequence` names four
 exports, and the count is read off the shipped call sites rather than off either sentence:
 `scripts/check-web-boot-budget.mjs:25-36` and
-`hosts/host-web/web/miso-engine-v2-audio-worklet.js:172-196` both call
+`hosts/host-web/web/miso-engine-v1-audio-worklet.js:172-196` both call
 `miso_engine_web_v1_abi_version`, then `miso_engine_web_v1_boot_options_ptr`, then
 `miso_engine_web_v1_document_ptr`, then `miso_engine_web_v1_boot`. The options block must be
 addressed before it can be written, so `boot_options_ptr` is a call and not a step of `boot`;

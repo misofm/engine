@@ -2,7 +2,7 @@
 //!
 //! # Why this document exists
 //!
-//! `miso-engine-v2-parameter-metadata.json` describes *effects*: names, units, domains, lattices.
+//! `miso-engine-v1-parameter-metadata.json` describes *effects*: names, units, domains, lattices.
 //! It deliberately says nothing about bytes. But a JavaScript consumer of the browser host has a
 //! second, entirely different thing to know — where `require_quantum_frames` sits inside the boot
 //! options block, which numeric result code means "boot refused your document", what the staging
@@ -34,7 +34,7 @@
 //!
 //! # `stagingSequence`: four calls, named
 //!
-//! Boot v2 was described in prose as "the 3-call boot", which miscounts: the options block must be
+//! Boot v1 was described in prose as "the 3-call boot", which miscounts: the options block must be
 //! addressed before it can be written, so the sequence is `abi_version` → `boot_options_ptr` →
 //! `document_ptr` → `boot`. The sequence is emitted here, in order, by export name, so no consumer
 //! reconstructs it from a sentence.
@@ -70,7 +70,7 @@ use host_web::{
 };
 
 /// The emitted file name, shipped beside the Wasm artifact and the parameter metadata.
-pub const OUTPUT_NAME: &str = "miso-engine-v2-abi-layout.json";
+pub const OUTPUT_NAME: &str = "miso-engine-v1-abi-layout.json";
 /// The schema tag every consumer must check before reading a field.
 pub const SCHEMA: &str = "miso.web.abi-layout.v1";
 
@@ -88,7 +88,7 @@ pub const SOURCE_RING_RESERVE_QUANTA: u32 = 2;
 /// These name *where* a refusal happened, which is the one thing a numeric result code cannot say:
 /// result `1` means one thing when the module hash did not match the provenance record and another
 /// when the document failed to parse. The vocabulary replaces the dead two-phase `"compile"`
-/// spelling of the pre-boot-v2 ABI (issue #243 S2(b)) and is anchored to the export surface:
+/// spelling of the pre-boot-v1 ABI (issue #243 S2(b)) and is anchored to the export surface:
 /// `asset` covers module verification and instantiation, `boot` the four-call staging sequence,
 /// `source` the source submit/seek exports, `render` the render export, `output` reading the
 /// output PCM buffer, and `lifecycle` dispose and the boot-while-live refusal.

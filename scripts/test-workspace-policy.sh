@@ -115,6 +115,18 @@ mutate_track_limit() {
         >>"$root/crates/library/src/lib.rs"
 }
 
+mutate_prelaunch_abi_generation() {
+    local root="$1"
+    printf '%s%s\n' 'pub const MISO_ENGINE_' 'V2_ABI_VERSION: u32 = 2;' \
+        >>"$root/crates/library/src/lib.rs"
+}
+
+mutate_prelaunch_product_generation() {
+    local root="$1"
+    printf '%s%s\n' '//! Engine ' 'V2 public surface' \
+        >>"$root/crates/library/src/lib.rs"
+}
+
 mutate_global_isa() {
     local root="$1"
     mkdir -p "$root/.cargo"
@@ -266,6 +278,8 @@ expect_failure lib-identifier mutate_lib_identifier
 expect_failure bin-identifier mutate_bin_identifier
 expect_failure hardware-feature mutate_hardware_feature
 expect_failure track-limit mutate_track_limit
+expect_failure prelaunch-abi-generation mutate_prelaunch_abi_generation
+expect_failure prelaunch-product-generation mutate_prelaunch_product_generation
 expect_failure global-isa mutate_global_isa
 expect_failure unscoped-isa-pin mutate_unscoped_isa_pin
 expect_failure extra-isa-feature mutate_extra_isa_feature

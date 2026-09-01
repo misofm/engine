@@ -11,7 +11,7 @@ else
   exit 2
 fi
 
-worklet="$repo_root/hosts/host-web/web/miso-engine-v2-audio-worklet.js"
+worklet="$repo_root/hosts/host-web/web/miso-engine-v1-audio-worklet.js"
 "$repo_root/scripts/check-web-audioworklet.sh" "--source-policy=$worklet"
 "$repo_root/scripts/check-web-audioworklet.sh" --self-test-opcodes
 python3 -B "$repo_root/scripts/check-web-audioworklet-callgraph.py" --self-test
@@ -100,13 +100,13 @@ mkdir -p "$mutation_dir/metadata"
 (cd "$repo_root" && cargo run --locked -q -p parameter-metadata -- --write "$mutation_dir/metadata") >/dev/null
 (cd "$repo_root" && cargo run --locked -q -p parameter-metadata -- --check "$mutation_dir/metadata") >/dev/null
 sed -i 's/"liveUpdatable": true/"liveUpdatable": false/' \
-  "$mutation_dir/metadata/miso-engine-v2-parameter-metadata.json"
+  "$mutation_dir/metadata/miso-engine-v1-parameter-metadata.json"
 if (cd "$repo_root" && cargo run --locked -q -p parameter-metadata -- --check "$mutation_dir/metadata") >/dev/null 2>&1; then
   echo "a hand-edited metadata document escaped --check" >&2
   exit 1
 fi
 if python3 -B "$repo_root/scripts/check-parameter-metadata-v1.py" \
-  "$mutation_dir/metadata/miso-engine-v2-parameter-metadata.json" >/dev/null 2>&1; then
+  "$mutation_dir/metadata/miso-engine-v1-parameter-metadata.json" >/dev/null 2>&1; then
   echo "a builtin that denies its own blockTarget update rate escaped the schema gate" >&2
   exit 1
 fi
@@ -125,9 +125,9 @@ mkdir -p "$vocabulary_dir/scripts" "$vocabulary_dir/hosts/host-web/src" \
   "$vocabulary_dir/tools/parameter-metadata/src"
 cp "$repo_root/scripts/check-command-reason-vocabulary.py" \
   "$repo_root/scripts/check-parameter-metadata-v1.py" "$vocabulary_dir/scripts/"
-cp "$repo_root/hosts/host-web/web/miso-engine-v2-audio-worklet-host.js" \
-  "$repo_root/hosts/host-web/web/miso-engine-v2-audio-worklet-host.d.ts" \
-  "$repo_root/hosts/host-web/web/miso-engine-v2-audio-worklet.js" \
+cp "$repo_root/hosts/host-web/web/miso-engine-v1-audio-worklet-host.js" \
+  "$repo_root/hosts/host-web/web/miso-engine-v1-audio-worklet-host.d.ts" \
+  "$repo_root/hosts/host-web/web/miso-engine-v1-audio-worklet.js" \
   "$vocabulary_dir/hosts/host-web/web/"
 cp "$repo_root/tools/parameter-metadata/src/lib.rs" \
   "$vocabulary_dir/tools/parameter-metadata/src/"
@@ -159,15 +159,15 @@ cp "$repo_root/scripts/check-command-kind-vocabulary.py" \
   "$repo_root/scripts/check-parameter-metadata-v1.py" "$kind_dir/scripts/"
 cp "$repo_root/hosts/host-web/src/lib.rs" \
   "$kind_dir/hosts/host-web/src/"
-cp "$repo_root/hosts/host-web/web/miso-engine-v2-audio-worklet-host.d.ts" \
+cp "$repo_root/hosts/host-web/web/miso-engine-v1-audio-worklet-host.d.ts" \
   "$kind_dir/hosts/host-web/web/"
 cp "$repo_root/tools/parameter-metadata/src/lib.rs" \
   "$kind_dir/tools/parameter-metadata/src/"
 sed 's/^const COMMAND_KINDS = new Set(\[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11\]);$/const COMMAND_KINDS = new Set([1, 2, 3, 4, 5, 6]);/' \
-  "$repo_root/hosts/host-web/web/miso-engine-v2-audio-worklet-host.js" \
-  >"$kind_dir/hosts/host-web/web/miso-engine-v2-audio-worklet-host.js"
-if diff -q "$repo_root/hosts/host-web/web/miso-engine-v2-audio-worklet-host.js" \
-  "$kind_dir/hosts/host-web/web/miso-engine-v2-audio-worklet-host.js" >/dev/null; then
+  "$repo_root/hosts/host-web/web/miso-engine-v1-audio-worklet-host.js" \
+  >"$kind_dir/hosts/host-web/web/miso-engine-v1-audio-worklet-host.js"
+if diff -q "$repo_root/hosts/host-web/web/miso-engine-v1-audio-worklet-host.js" \
+  "$kind_dir/hosts/host-web/web/miso-engine-v1-audio-worklet-host.js" >/dev/null; then
   echo "the host JS kind-set mutation matched nothing" >&2
   exit 1
 fi
@@ -179,7 +179,7 @@ fi
 # 9 (`solo`) landed with phase 1; 10 (`trimDb`) and 11 (`polarityInvert`) with phase 3; 12 onward
 # arrive with the soloMode/routeGainDb phases, and each one has to land in all seven spellings or
 # fail here.
-cp "$repo_root/hosts/host-web/web/miso-engine-v2-audio-worklet-host.js" \
+cp "$repo_root/hosts/host-web/web/miso-engine-v1-audio-worklet-host.js" \
   "$kind_dir/hosts/host-web/web/"
 sed 's/^pub const COMMAND_POLARITY_INVERT: u32 = 11;/&\npub const COMMAND_SOLO_MODE: u32 = 12;/' \
   "$repo_root/hosts/host-web/src/lib.rs" \
@@ -208,12 +208,12 @@ mkdir -p "$map_dir/scripts" "$map_dir/hosts/host-web/src" \
 cp "$repo_root/scripts/check-session-map-shape.py" "$repo_root/scripts/check-web-audioworklet.sh" \
   "$map_dir/scripts/"
 cp "$repo_root/hosts/host-web/src/ffi.rs" "$map_dir/hosts/host-web/src/"
-cp "$repo_root/hosts/host-web/web/miso-engine-v2-audio-worklet.js" \
-  "$repo_root/hosts/host-web/web/miso-engine-v2-audio-worklet-host.d.ts" \
+cp "$repo_root/hosts/host-web/web/miso-engine-v1-audio-worklet.js" \
+  "$repo_root/hosts/host-web/web/miso-engine-v1-audio-worklet-host.d.ts" \
   "$map_dir/hosts/host-web/web/"
 session_map_mutations=(
-  'miso-engine-v2-audio-worklet-host.js|s/"result", "tracks", "sources", "metersAttached"/"result", "tracks", "metersAttached"/'
-  'miso-engine-v2-audio-worklet-host.d.ts|s/  readonly frames: bigint;/  readonly frames: number;/'
+  'miso-engine-v1-audio-worklet-host.js|s/"result", "tracks", "sources", "metersAttached"/"result", "tracks", "metersAttached"/'
+  'miso-engine-v1-audio-worklet-host.d.ts|s/  readonly frames: bigint;/  readonly frames: number;/'
 )
 for entry in "${session_map_mutations[@]}"; do
   target=${entry%%|*}
@@ -238,9 +238,9 @@ echo "web AudioWorklet session-map shape gates passed"
 # per-request rejection and becomes the host-wide sticky 255 that kept the app's GR meters dead.
 mutated_host="$mutation_dir/host-reason-cap.js"
 sed 's/validCommandReason(message\.reason)/validU32(message.reason) \&\& message.reason <= 9/' \
-  "$repo_root/hosts/host-web/web/miso-engine-v2-audio-worklet-host.js" \
+  "$repo_root/hosts/host-web/web/miso-engine-v1-audio-worklet-host.js" \
   >"$mutated_host"
-if diff -q "$repo_root/hosts/host-web/web/miso-engine-v2-audio-worklet-host.js" \
+if diff -q "$repo_root/hosts/host-web/web/miso-engine-v1-audio-worklet-host.js" \
   "$mutated_host" >/dev/null; then
   echo "the reason-cap mutation matched nothing" >&2
   exit 1

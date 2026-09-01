@@ -189,7 +189,7 @@ jobs:
         run: cargo metadata --locked --format-version 1 --no-deps
       # G1: the strongest single gate in the repo -- compiles a C++17 header consumer and a C11
       # fixture at -Wall -Wextra -Werror -pedantic, links the real libcapi.so, diffs its exported
-      # miso_engine_v2_* symbols against the frozen 14-name ABI V1 list, and executes the fixture.
+      # miso_engine_v1_* symbols against the frozen 14-name ABI V1 list, and executes the fixture.
       # It previously ran only from `scripts/sweep.sh`, which nobody runs; a header/impl drift or
       # an accidental symbol addition was invisible to every PR until it broke a downstream build.
       - name: C ABI linkage, frozen symbol set and native consumer smoke test

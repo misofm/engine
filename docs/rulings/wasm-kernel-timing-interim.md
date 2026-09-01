@@ -6,7 +6,7 @@ place so nobody quotes it beyond what it measured.
 
 ## The claim it was taken against
 
-Issue [#163](https://github.com/misofm/engine-v2/issues/163) opens with an uncomfortable headline:
+Issue [#163](https://github.com/misofm/engine/issues/163) opens with an uncomfortable headline:
 every recorded number in this repository is native AVX2 while the product ships wasm `simd128`,
 where one fused multiply-add costs roughly fifty-four instructions (master plan §3.5's software
 FMA), and it cites a measured 5.5x on the SVF kernel. Phase 0b exists to replace "plausibly over
@@ -92,7 +92,7 @@ a hardware FMA either, then neither side of that row is the baseline it looks li
 
 This is recorded and not diagnosed. Diagnosing it means reading `lane`'s `f32x8`
 `mul_add` lowering, which is a DSP crate and outside phase 0's surface. It matters directly to
-[#163](https://github.com/misofm/engine-v2/issues/163) phase 2, whose whole subject is the numeric
+[#163](https://github.com/misofm/engine/issues/163) phase 2, whose whole subject is the numeric
 contract around fused multiply-add, and phase 2 should re-derive it rather than inherit this row.
 
 ## Superseded by full 0b (2026-08-26)

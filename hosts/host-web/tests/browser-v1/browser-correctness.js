@@ -1,7 +1,7 @@
 const SAMPLE_RATE = 48000;
 const QUANTUM = 128;
 const TOTAL_FRAMES = QUANTUM * 4;
-const PROCESSOR_NAME = "miso-engine-v2-audio-worklet";
+const PROCESSOR_NAME = "miso-engine-v1-audio-worklet";
 
 function bootOptions() {
   return {
@@ -72,7 +72,7 @@ function plainResources(resources) {
 // W4-D1: exactly one artifact ships, so every context loads the same simd128 module. The
 // backend row is still reported per run and cross-checked against the raw-Wasm oracle, which is
 // what proves the worklet path and the direct path drive the same binary the same way.
-const ARTIFACT_URL = "/artifacts/miso-engine-v2-audio-worklet.simd128.wasm";
+const ARTIFACT_URL = "/artifacts/miso-engine-v1-audio-worklet.simd128.wasm";
 const BACKEND = "simd128";
 
 async function runContext(createHost, source, sessionToml) {
@@ -86,7 +86,7 @@ async function runContext(createHost, source, sessionToml) {
     document: sessionToml,
     options: bootOptions(),
     simd128ModuleUrl: ARTIFACT_URL,
-    workletModuleUrl: "/artifacts/miso-engine-v2-audio-worklet.js",
+    workletModuleUrl: "/artifacts/miso-engine-v1-audio-worklet.js",
   });
   if (host.backend !== BACKEND) throw new Error("selected backend mismatch");
   host.node.connect(context.destination);
@@ -157,7 +157,7 @@ async function runFailureContext(sessionToml) {
   if (exposedMainQuantum !== 0 && exposedMainQuantum !== QUANTUM) {
     throw new Error("failure-context main quantum mismatch");
   }
-  await context.audioWorklet.addModule("/artifacts/miso-engine-v2-audio-worklet.js");
+  await context.audioWorklet.addModule("/artifacts/miso-engine-v1-audio-worklet.js");
   const response = await fetch(ARTIFACT_URL);
   if (!response.ok) throw new Error("failure-context artifact fetch failed");
   const module = await WebAssembly.compile(await response.arrayBuffer());
@@ -198,7 +198,7 @@ async function runFailureContext(sessionToml) {
 
 export async function runMisoBrowserCorrectness() {
   const { createMisoAudioWorkletHost } = await import(
-    "/artifacts/miso-engine-v2-audio-worklet-host.js"
+    "/artifacts/miso-engine-v1-audio-worklet-host.js"
   );
   const [sessionResponse, sourceResponse] = await Promise.all([
     fetch("/fixture/session.toml"),
@@ -214,5 +214,5 @@ export async function runMisoBrowserCorrectness() {
     await runContext(createMisoAudioWorkletHost, source, sessionToml),
   ];
   const failure = await runFailureContext(sessionToml);
-  return { schema: "miso.web.browser.result.v2", runs, failure };
+  return { schema: "miso.web.browser.result.v1", runs, failure };
 }

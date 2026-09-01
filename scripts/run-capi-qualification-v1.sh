@@ -10,7 +10,7 @@ build="$stage/build"
 logs="$stage/logs"
 installed="$stage/installed"
 consumer="$fixture/runtime_consumer.c"
-header=crates/capi/include/miso_engine_v2.h
+header=crates/capi/include/miso_engine_v1.h
 
 fail() {
     printf 'CAPI qualification V1 runner failure: %s\n' "$1" >&2
@@ -48,14 +48,14 @@ shared_library="$build/release/libcapi.so"
 [[ -f "$static_library" && -f "$shared_library" ]] || fail 'staged CAPI libraries are missing'
 cp "$static_library" "$installed/lib/"
 cp "$shared_library" "$installed/lib/"
-sha256sum "$installed/include/miso_engine_v2.h" "$installed/lib/libcapi.a" \
+sha256sum "$installed/include/miso_engine_v1.h" "$installed/lib/libcapi.a" \
     "$installed/lib/libcapi.so" >"$stage/ARTIFACTS.generated.sha256"
 
 nm -g --defined-only "$installed/lib/libcapi.a" \
-    | awk '{print $NF}' | rg '^miso_engine_v2_' | LC_ALL=C sort -u \
+    | awk '{print $NF}' | rg '^miso_engine_v1_' | LC_ALL=C sort -u \
     >"$stage/static-symbols.txt"
 nm -D --defined-only "$installed/lib/libcapi.so" \
-    | awk '{print $NF}' | rg '^miso_engine_v2_' | LC_ALL=C sort -u \
+    | awk '{print $NF}' | rg '^miso_engine_v1_' | LC_ALL=C sort -u \
     >"$stage/shared-symbols.txt"
 nm -g "$installed/lib/libcapi.a" >"$stage/static-nm.txt"
 nm -D "$installed/lib/libcapi.so" >"$stage/shared-nm.txt"

@@ -9,14 +9,14 @@ already drifted -- silently, in the shipped artifact:
 * the same file's `CommandRecord::decode` whitelist -- the `matches!` arm that decides what the
   48-byte wire actually accepts. A constant the whitelist does not name is a kind no caller can
   send; a whitelist entry the constants do not name cannot exist.
-* `hosts/host-web/web/miso-engine-v2-audio-worklet-host.js` -- the `COMMAND_KINDS` set
+* `hosts/host-web/web/miso-engine-v1-audio-worklet-host.js` -- the `COMMAND_KINDS` set
   `validCommand` gates every submitted record through.
-* `hosts/host-web/web/miso-engine-v2-audio-worklet-host.d.ts` -- the
+* `hosts/host-web/web/miso-engine-v1-audio-worklet-host.d.ts` -- the
   `MisoCommandKind` enum a typed consumer compiles against.
 * `tools/parameter-metadata/src/lib.rs` -- the `commandKinds` rows of the shipped JSON,
   which is where an app reads the vocabulary from.
 * `scripts/check-parameter-metadata-v1.py` -- the schema gate's deliberately independent list.
-* the shipped `miso-engine-v2-parameter-metadata.json` itself, under `--artifacts`.
+* the shipped `miso-engine-v1-parameter-metadata.json` itself, under `--artifacts`.
 
 **The drift this gate was written to close**: the Rust constants, the decode whitelist, the host JS
 set and the `.d.ts` enum all carried eight kinds, while the metadata generator's table and the
@@ -61,14 +61,14 @@ import sys
 REPO = pathlib.Path(__file__).resolve().parent.parent
 
 RUST_CONSTANTS = pathlib.Path("hosts/host-web/src/lib.rs")
-HOST_JS = pathlib.Path("hosts/host-web/web/miso-engine-v2-audio-worklet-host.js")
-HOST_DTS = pathlib.Path("hosts/host-web/web/miso-engine-v2-audio-worklet-host.d.ts")
+HOST_JS = pathlib.Path("hosts/host-web/web/miso-engine-v1-audio-worklet-host.js")
+HOST_DTS = pathlib.Path("hosts/host-web/web/miso-engine-v1-audio-worklet-host.d.ts")
 METADATA_GENERATOR = pathlib.Path("tools/parameter-metadata/src/lib.rs")
 SCHEMA_GATE = pathlib.Path("scripts/check-parameter-metadata-v1.py")
 
 SOURCES = (RUST_CONSTANTS, HOST_JS, HOST_DTS, METADATA_GENERATOR, SCHEMA_GATE)
 
-METADATA_DOCUMENT = "miso-engine-v2-parameter-metadata.json"
+METADATA_DOCUMENT = "miso-engine-v1-parameter-metadata.json"
 
 # `pub const COMMAND_*` in the host is three families, not one: the kinds, the reasons (the sibling
 # gate's business) and one size constant. Naming the non-kinds here rather than pattern-matching

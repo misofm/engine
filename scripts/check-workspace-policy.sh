@@ -135,6 +135,13 @@ scan_forbidden "compiled track-capacity identifiers are forbidden" \
     '\b(MAX_TRACKS|MAX_TRACK_COUNT|DEFAULT_MAX_TRACKS|TRACK_LIMIT)\b' '*.rs' \
     crates hosts tools sidecars
 
+# #313 owner ruling: this is the first prelaunch engine identity. Internal names are unversioned,
+# and a boundary that genuinely needs a generation is V1. Build the expression in fragments so
+# this policy file does not contain the forbidden spellings it scans for.
+prelaunch_later_generation_pattern='(miso_engine_'v'2|MISO_ENGINE_'V'2|miso-engine-'v'2|ENGINE_'V'2|Engine 'V'2|boot[- ]'v'2|Boot 'v'2|schema-'v'2|@miso/engine-'v'2)'
+scan_forbidden "prelaunch live-product identities must not claim a later generation" \
+    "$prelaunch_later_generation_pattern" '*' crates hosts tools sidecars
+
 # Master plan #83 D4 (revision 4): exactly one global ISA configuration is approved, the
 # x86-64-v3 pin that lets `wide` lower `Lane` to AVX2 and `Lane::fma` to `vfmadd` with no runtime
 # dispatch (crates/lane refuses to compile without it, and every host attests the CPU

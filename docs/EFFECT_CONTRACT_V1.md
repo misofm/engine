@@ -48,7 +48,7 @@ exactly the declared latency.
 ## Parameters and automation
 
 Persisted parameter values use descriptor-declared exact-decimal lattices. This follows the
-binding [#239 section B ruling](https://github.com/misofm/engine-v2/issues/239#issuecomment-5461507633):
+binding [#239 section B ruling](https://github.com/misofm/engine/issues/239#issuecomment-5461507633):
 arithmetic rows contain `min + k*step` interiors; logarithmic hertz rows use
 `min * 2^(k*cents/1200)`; every other logarithmic row uses `min * r^k`, where `r` is that row's
 exact-decimal ratio. Every continuous lattice additionally contains the declared minimum,

@@ -388,7 +388,7 @@ impl Session {
 
 /// Opaque render-plan handle. C consumers only observe pointers to this type.
 ///
-/// Field ownership matches the "Thread ownership" block of `include/miso_engine_v2.h`:
+/// Field ownership matches the "Thread ownership" block of `include/miso_engine_v1.h`:
 /// `header` and `queries` are immutable after construction, `last_error` is written by the render
 /// thread and read from any thread, and `state` is exclusive to the render thread. `ffi.rs` never
 /// forms a reference to the whole value; it projects the individual fields with `&raw const` and

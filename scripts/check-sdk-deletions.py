@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Deletion gate for the pre-boot-v2 SDK's retired spellings (issue #243 S1, eval 9).
+"""Deletion gate for the pre-boot-v1 SDK's retired spellings (issue #243 S1, eval 9).
 
-Boot v2's whole claim is that the guess machine was **deleted rather than relocated**. That is a
+Boot v1's whole claim is that the guess machine was **deleted rather than relocated**. That is a
 claim about absence, and absence is the one property a test suite structurally cannot demonstrate:
 every eval in `sdk/test/` exercises code that exists, so a `sessionHeader` regex that survived in a
 corner nothing imports, or a second copy of the 29-field configuration writer kept "for the browser

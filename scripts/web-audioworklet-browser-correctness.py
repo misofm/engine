@@ -23,23 +23,23 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 FIXTURE = ROOT / "hosts/host-web/tests/browser-v1"
 # W4-D1: the scalar worklet artifact is no longer built or shipped.
 EXPECTED_ARTIFACTS = (
-    "miso-engine-v2-audio-worklet.simd128.wasm",
-    "miso-engine-v2-audio-worklet.js",
-    "miso-engine-v2-audio-worklet-host.js",
-    "miso-engine-v2-audio-worklet-host.d.ts",
+    "miso-engine-v1-audio-worklet.simd128.wasm",
+    "miso-engine-v1-audio-worklet.js",
+    "miso-engine-v1-audio-worklet-host.js",
+    "miso-engine-v1-audio-worklet-host.d.ts",
     # Issue #137 D4: the parameter metadata ships with the module and is sealed with it.
-    "miso-engine-v2-parameter-metadata.json",
+    "miso-engine-v1-parameter-metadata.json",
     # Issue #243: so does the ABI layout. Both are emitted by one generator from the same engine,
     # so a seal that covered one and not the other would attest to half a release.
-    "miso-engine-v2-abi-layout.json",
+    "miso-engine-v1-abi-layout.json",
 )
 SOURCE_SEAL_PATHS = (
     "Cargo.toml",
     "Cargo.lock",
     "hosts/host-web/Cargo.toml",
-    "hosts/host-web/web/miso-engine-v2-audio-worklet.js",
-    "hosts/host-web/web/miso-engine-v2-audio-worklet-host.js",
-    "hosts/host-web/web/miso-engine-v2-audio-worklet-host.d.ts",
+    "hosts/host-web/web/miso-engine-v1-audio-worklet.js",
+    "hosts/host-web/web/miso-engine-v1-audio-worklet-host.js",
+    "hosts/host-web/web/miso-engine-v1-audio-worklet-host.d.ts",
     "scripts/build-web-audioworklet.sh",
     "scripts/check-web-audioworklet.sh",
 )
@@ -114,7 +114,7 @@ def load_inputs() -> tuple[dict, dict]:
     expected = json.loads((FIXTURE / "expected.json").read_text())
     if source.get("schema") != "miso.web.browser.source.v1":
         raise ValueError("unexpected source fixture schema")
-    if expected.get("schema") != "miso.web.browser.expected.v2":
+    if expected.get("schema") != "miso.web.browser.expected.v1":
         raise ValueError("unexpected expected fixture schema")
     if source.get("sampleRateHz") != 48000 or source.get("quantumFrames") != 128:
         raise ValueError("fixture rate/quantum mismatch")
@@ -225,7 +225,7 @@ def load_inputs() -> tuple[dict, dict]:
             raise ValueError(f"{name} typed refusal")
         if reports[name]["admitted"] != 0:
             raise ValueError(f"{name} admitted records")
-    if direct.get("schema") != "miso.web.browser.direct-oracle.v2":
+    if direct.get("schema") != "miso.web.browser.direct-oracle.v1":
         raise ValueError("direct oracle schema")
     # Issue #241 reshaped the source declaration: the session-level `limits` table and the nested
     # `mapping`/`region` are gone, so a source's length is the row's own `frames` and its content is
@@ -485,7 +485,7 @@ def pcm_f32le_sha256(pcm: list[list[float]]) -> str:
 def validate_result(result: dict, source: dict, expected: dict) -> None:
     if set(result) != {"schema", "runs", "failure"}:
         raise AssertionError("browser result keys")
-    if result.get("schema") != "miso.web.browser.result.v2":
+    if result.get("schema") != "miso.web.browser.result.v1":
         raise AssertionError("browser result schema")
     runs = result.get("runs")
     if not isinstance(runs, list) or len(runs) != 2:

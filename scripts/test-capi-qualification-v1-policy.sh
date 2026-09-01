@@ -15,16 +15,11 @@ copy_case() {
     cp "$root/scripts/check-capi-object-symbols-v1.py" "$case_root/scripts/"
     cp "$root/scripts/check-capi-qualification-evidence-v1.py" "$case_root/scripts/"
     cp "$root/scripts/run-capi-qualification-v1.sh" "$case_root/scripts/"
-    # AUTHORITIES.sha256 is a frozen ledger (docs/rulings/prefix-strip-inventory.md): its
-    # content self-seal was already permanently retired before the prefix-strip rename (see
-    # check-capi-qualification-v1.sh's own comment), and the rename made some of its pinned
-    # paths stop existing too. The checker never reads these files' content -- only the
-    # ledger's own shape (line count, sort order, row regex) -- so a row whose path no longer
-    # exists is copied on a best-effort basis rather than failing the whole fixture build.
-    while read -r _ path; do
-        [[ -f "$root/$path" ]] || continue
-        mkdir -p "$case_root/$(dirname "$path")"
-        cp "$root/$path" "$case_root/$path"
+    # #313 made AUTHORITIES.sha256 live again after a complete qualification rerun. Every subject
+    # path is copied so preflight mutations exercise both manifest shape and byte identity.
+    while read -r _ authority_file; do
+        mkdir -p "$case_root/$(dirname "$authority_file")"
+        cp "$root/$authority_file" "$case_root/$authority_file"
     done <"$root/fixtures/capi-qualification/v1/AUTHORITIES.sha256"
 }
 
@@ -67,12 +62,12 @@ expect_failure authority-shape bash "$case_root/scripts/check-capi-qualification
     "$case_root" preflight
 
 copy_case symbol
-printf '%s\n' miso_engine_v2_extra >>"$case_root/fixtures/capi-qualification/v1/EXPECTED_SYMBOLS.txt"
+printf '%s\n' miso_engine_v1_extra >>"$case_root/fixtures/capi-qualification/v1/EXPECTED_SYMBOLS.txt"
 expect_failure extra-symbol bash "$case_root/scripts/check-capi-qualification-v1.sh" \
     "$case_root" preflight
 
 copy_case missing_symbol
-sed -i '/miso_engine_v2_abi_version/d' \
+sed -i '/miso_engine_v1_abi_version/d' \
     "$case_root/fixtures/capi-qualification/v1/EXPECTED_SYMBOLS.txt"
 expect_failure missing-symbol bash "$case_root/scripts/check-capi-qualification-v1.sh" \
     "$case_root" preflight
@@ -110,7 +105,7 @@ expect_failure generated-source-artifact bash \
     "$case_root/scripts/check-capi-qualification-v1.sh" "$case_root" final
 
 copy_case artifact_evidence
-sed -i 's/linux-x86_64-static-library\t33321950/linux-x86_64-static-library\t33321951/' \
+sed -i 's/linux-x86_64-static-library\t105179470/linux-x86_64-static-library\t105179471/' \
     "$case_root/fixtures/capi-qualification/v1/ARTIFACTS.tsv"
 refresh_evidence "$case_root/fixtures/capi-qualification/v1/ARTIFACTS.tsv"
 expect_failure correlated-artifact-evidence bash \
@@ -131,7 +126,7 @@ expect_failure correlated-audit-evidence bash \
     "$case_root/scripts/check-capi-qualification-v1.sh" "$case_root" final
 
 copy_case count_evidence
-sed -i 's/runner_tests\t18/runner_tests\t17/' \
+sed -i 's/runner_tests\t19/runner_tests\t18/' \
     "$case_root/fixtures/capi-qualification/v1/QUALIFICATION.tsv"
 refresh_evidence "$case_root/fixtures/capi-qualification/v1/QUALIFICATION.tsv"
 expect_failure correlated-count-evidence bash \
@@ -152,7 +147,7 @@ expect_failure correlated-consumer-evidence bash \
     "$case_root/scripts/check-capi-qualification-v1.sh" "$case_root" final
 
 copy_case raw_evidence
-sed -i '/logs\/runner-corpus.log/s/ed2dd1/0d2dd1/' \
+sed -i '/logs\/runner-corpus.log/s/258b9f/358b9f/' \
     "$case_root/fixtures/capi-qualification/v1/RAW_EVIDENCE.tsv"
 refresh_evidence "$case_root/fixtures/capi-qualification/v1/RAW_EVIDENCE.tsv"
 expect_failure correlated-raw-evidence bash \
@@ -180,7 +175,7 @@ cp "$symbol_scratch/static.nm" "$symbol_scratch/shared.nm"
 python3 -I -B "$root/scripts/check-capi-object-symbols-v1.py" \
     "$root/fixtures/capi-qualification/v1/EXPECTED_SYMBOLS.txt" \
     "$symbol_scratch/static.nm" "$symbol_scratch/shared.nm"
-sed -i 's/00000000 T miso_engine_v2_abi_version/         U miso_engine_v2_abi_version/' \
+sed -i 's/00000000 T miso_engine_v1_abi_version/         U miso_engine_v1_abi_version/' \
     "$symbol_scratch/static.nm"
 expect_failure undefined-reference-is-not-export python3 -I -B \
     "$root/scripts/check-capi-object-symbols-v1.py" \
