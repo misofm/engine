@@ -26,12 +26,22 @@ jobs:
         run: |
           rustup toolchain install 1.97.1 --profile minimal
           rustup target add --toolchain 1.97.1 wasm32-unknown-unknown
+          sudo apt-get update
+          sudo apt-get install -y ripgrep
       - name: Build the exact shipped artifact
         run: |
           mkdir -p target/ci/browser-qualification-artifacts
           bash scripts/build-web-audioworklet.sh target/ci/browser-qualification-artifacts
           mkdir -p target/ci/flac-decoder-artifacts
           bash scripts/build-flac-decoder.sh target/ci/flac-decoder-artifacts
+      # Hermetic Node-only artifact-shape/digest check plus a repo-wide ban on decodeAudioData in
+      # the delivery pipeline (FLAC ships raw for bit-exact decode, never through the browser's
+      # own lossy-tolerant decoder). Previously sweep-only; rebuilds its own artifact rather than
+      # reusing the one above, so the two are independent proofs of the same build script.
+      - name: FLAC decoder artifact shape and decodeAudioData ban
+        run: |
+          bash scripts/check-flac-decoder.sh
+          bash scripts/test-flac-decoder.sh
       - name: Upload shipped artifact
         uses: actions/upload-artifact@v4
         with:

@@ -27,7 +27,7 @@ jobs:
         run: |
           rustup toolchain install 1.97.1 --profile minimal --component clippy --component rustfmt
           sudo apt-get update
-          sudo apt-get install -y ripgrep
+          sudo apt-get install -y ripgrep wabt
       - name: Format
         run: cargo fmt --all -- --check
       - name: Clippy
@@ -177,6 +177,18 @@ jobs:
         run: |
           rustup target add --toolchain 1.97.1 wasm32-unknown-unknown aarch64-linux-android aarch64-apple-ios
           bash scripts/check-parametric-eq-targets.sh
+      # The other two of the three per-effect five-target matrices (issue-007, issue-081); the
+      # third crate group, parametric-eq, is directly above. All three previously ran only from
+      # the sweep -- three shipped effects (builtins is the umbrella over the fixed input/output
+      # sections every session uses) had no cross-target proof running anywhere automated.
+      - name: Builtins target matrix (native v3, android, ios, wasm scalar/simd128)
+        run: |
+          rustup target add --toolchain 1.97.1 wasm32-unknown-unknown aarch64-linux-android aarch64-apple-ios
+          bash scripts/check-builtins-targets.sh
+      - name: Effect-interchange five-target matrix (native, android, ios, wasm scalar/simd128)
+        run: |
+          rustup target add --toolchain 1.97.1 wasm32-unknown-unknown aarch64-linux-android aarch64-apple-ios
+          bash scripts/check-effect-interchange-targets.sh
       - name: Parametric EQ realtime allocation and syscall audit
         run: |
           cargo build --locked --release -p audit --bin audit
@@ -229,6 +241,14 @@ jobs:
           bash scripts/check-conformance-boundaries.sh
           bash scripts/check-dsp-research.sh
           cargo run --locked -p conformance --example conformance_fixtures -- --check
+      # Byte-sorted MANIFEST.tsv digest seal over the builtins fixture corpus (P3) and its mutation
+      # suite. Previously sweep-only, and previously lacked a positive control -- the mutation
+      # suite never asserted the unmutated fixture passes -- fixed by running it in the same step
+      # as a green check-builtins-fixtures.sh.
+      - name: Builtins fixture corpus integrity and mutation tests
+        run: |
+          bash scripts/check-builtins-fixtures.sh
+          bash scripts/test-builtins-fixtures.sh
       - name: Feature-resolution tree
         run: cargo tree --locked --workspace -e features
       - name: Metadata report
@@ -327,6 +347,7 @@ jobs:
           bash scripts/build-web-audioworklet.sh "$artifacts"
           bash scripts/check-web-audioworklet.sh "$artifacts"
           python3 -B scripts/web-audioworklet-browser-correctness.py --check --artifacts "$artifacts"
+          python3 -B scripts/check-browser-expected-resources.py --artifacts "$artifacts"
           ls -l "$artifacts"
       - name: Hermetic browser host and worklet tests
         run: bash scripts/test-web-audioworklet.sh
