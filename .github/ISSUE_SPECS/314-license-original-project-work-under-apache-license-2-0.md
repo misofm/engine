@@ -1,6 +1,6 @@
 # Issue 314: License original project work under Apache License 2.0
 
-**Status: SOL BRIEF APPROVED / IMPLEMENTATION AUTHORIZED.**
+**Status: SOL PASS.**
 
 GitHub issue: https://github.com/misofm/engine/issues/314
 
@@ -63,4 +63,9 @@ artifacts except metadata-bearing package outputs.
   cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30`), project notice,
   third-party inventory, Cargo/npm declarations, and workspace-policy enforcement. Focused
   workspace policy plus red mutations pass; `cargo metadata --no-deps` reports Apache-2.0 for
-  every package; both npm roots and locks report Apache-2.0. Adversarial review is pending.
+  every package; both npm roots and locks report Apache-2.0. Adversarial review was pending at this
+  checkpoint.
+- 2026-09-01: Sol adversarial review PASS on checkpoint `9b58a2b6`: canonical license bytes are
+  hash-gated, all 48 workspace and standalone fuzz Cargo packages inherit/report Apache-2.0, both
+  npm roots and locks agree, the vendored libm exception remains explicit, and four focused policy
+  mutations prove missing/conflicting declarations are refused. No runtime or DSP file changed.
