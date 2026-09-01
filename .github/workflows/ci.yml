@@ -116,6 +116,24 @@ jobs:
           ./target/release/audit delay --blocks 100000
       - name: Multiband compressor gates in release (audit #94)
         run: cargo test --locked --release -p multiband-compressor
+      # #163 phase 3: compressor, true-peak-limiter and transient-shaper are three of the ten
+      # shipped native effects (AGENTS.md's initial effect library) but, unlike their siblings
+      # above and below, carried no `-p`-named release-mode step -- their digest/lane-identity/
+      # partition tests only ever ran under the workspace-wide debug `cargo test --workspace`.
+      # Debug and release can disagree exactly where P1/P2 matter (vectorizer codegen), which is
+      # why every sibling effect gets this line. `audit compressor` mirrors delay/parametric-eq's
+      # realtime allocation and syscall audit; true-peak-limiter and transient-shaper have no
+      # `tools/audit` subject of their own (only their own release-mode allocation.rs tests).
+      - name: Compressor gates (oracle bound, lane identity, partitions, digests) in release
+        run: cargo test --locked --release -p compressor
+      - name: Compressor realtime allocation and syscall audit
+        run: |
+          cargo build --locked --release -p audit --bin audit
+          ./target/release/audit compressor --blocks 100000
+      - name: True-peak limiter gates (gain law, mono-collapse, determinism, allocation) in release
+        run: cargo test --locked --release -p true-peak-limiter
+      - name: Transient shaper gates (oracle bound, bank identity, partitions, allocation) in release
+        run: cargo test --locked --release -p transient-shaper
       - name: Soft-clip gates (polyphase identity, lane identity, partitions, digests) in release
         run: cargo test --locked --release -p soft-clip
       - name: Parametric EQ gates (oracle grid, impulses, lane identity, partitions, digests) in release
@@ -169,6 +187,19 @@ jobs:
         run: cargo tree --locked --workspace -e features
       - name: Metadata report
         run: cargo metadata --locked --format-version 1 --no-deps
+      # G1: the strongest single gate in the repo -- compiles a C++17 header consumer and a C11
+      # fixture at -Wall -Wextra -Werror -pedantic, links the real libcapi.so, diffs its exported
+      # miso_engine_v2_* symbols against the frozen 14-name ABI V1 list, and executes the fixture.
+      # It previously ran only from `scripts/sweep.sh`, which nobody runs; a header/impl drift or
+      # an accidental symbol addition was invisible to every PR until it broke a downstream build.
+      - name: C ABI linkage, frozen symbol set and native consumer smoke test
+        run: bash scripts/check-capi-abi.sh
+      # G2: Rust randomises HashMap iteration order per process, so a same-process comparison
+      # cannot catch it. This runs `graph_fixture` fresh 100 times and diffs the output; it caught
+      # an injected HashMap nondeterminism in a prior audit and, like check-capi-abi.sh, previously
+      # ran only from the sweep.
+      - name: Graph fresh-process determinism (100 fresh processes)
+        run: bash scripts/check-graph-determinism.sh
       - name: Native host smoke
         run: cargo run --locked -p host-native
 
