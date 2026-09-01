@@ -71,7 +71,7 @@ rack structure — a two-slot `simd1` chain, `dynamic = { effects = [] }`, and a
 chain — when you need the production layout. It is *generated*, not authored:
 `scripts/derive-intended-console-fixture.py` derives it from the retired
 `console-sixty-four-track.toml` and takes its canonical spelling from this validator, so edit the
-generator and regenerate rather than editing the file (`scripts/check-intended-console-fixture.sh`
+generator and regenerate rather than editing the file (`scripts/check-console-fixtures.sh`
 compares the two byte for byte). Its header documents the limiter's parameter choices and their
 provenance in the metadata, including why `lookahead` is uniform across all sixty-four tracks
 while `ceiling` and `release` vary.

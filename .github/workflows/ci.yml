@@ -63,6 +63,12 @@ jobs:
       # gate over a committed fixture, so it belongs with the cheap policy gates.
       - name: Console benchmark fixture integrity
         run: bash scripts/check-console-benchmark-fixture.sh
+      # Issue #175: the standing 64-track intended-placement and mono-collapse fixtures are
+      # exactly what their generators produce -- a hand-edit would break the chain-shape and
+      # collapse-witness row-pairs that depend on them silently. Previously reachable only from
+      # scripts/sweep.sh, which nobody runs.
+      - name: Standing console fixtures are exactly their generators' output
+        run: bash scripts/check-console-fixtures.sh
       # The #163 phase 2 wasm console arm's validator, exercised by mutation. Hermetic: it never
       # instantiates a guest, never holds a clock and never touches the one-shot artifacts, so it
       # belongs with the cheap gates rather than behind the runner that consumes the measurement.
