@@ -138,20 +138,18 @@ row scripts/test-native-pcm-runner-v1-policy.sh
 row scripts/test-protocol-benchmark.sh
 row scripts/test-protocol-control-policy.sh
 row scripts/test-rack-policy.sh
-row scripts/test-realtime-audit-hooks.sh
+row scripts/test-audit-probes.sh
 row scripts/test-realtime-policy.sh
 row scripts/test-realtime-trace-validator.sh
 row scripts/test-workspace-policy.sh
 
 # ---- tier 2: seconds; mutation suites and audit probes -------------------------------------
-row scripts/test-builtins-graph-audit-probes.sh
 row scripts/test-fast-db-seal.sh
 row scripts/test-unfused-seal.sh
 row scripts/test-console-benchmark.sh
 row scripts/test-capi-abi.sh
 row scripts/test-effect-runtime-policy.sh
 row scripts/test-rack-benchmark.sh
-row scripts/test-builtins-audit-probes.sh
 row scripts/check-realtime-audit-leak.sh
 row scripts/test-capi-qualification-v1-policy.sh
 row scripts/test-effect-interchange-reference-runner.sh

@@ -186,10 +186,12 @@ jobs:
           bash scripts/test-protocol-benchmark.sh
       - name: Realtime race model
         run: RUSTFLAGS='--cfg loom --check-cfg=cfg(loom)' cargo test --locked --release -p engine --lib spsc_loom
-      - name: Realtime audit hooks and syscall trace
+      # Formerly three near-identical scripts (realtime, builtins, builtins-graph); builtins and
+      # builtins-graph previously ran only from the sweep.
+      - name: Realtime/builtins/builtins-graph audit probes and syscall trace
         run: |
           cargo build --locked --release -p audit
-          bash scripts/test-realtime-audit-hooks.sh target/release/audit
+          bash scripts/test-audit-probes.sh target/release/audit
           timeout 120s bash scripts/trace-realtime-audit.sh target/release/audit 1000000
       - name: Native effect one-million-call allocation and syscall audit
         run: |
