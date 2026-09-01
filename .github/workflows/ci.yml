@@ -205,6 +205,23 @@ jobs:
         run: |
           bash scripts/check-flac-decoder.sh
           bash scripts/test-flac-decoder.sh
+      # Issue #097: the independent canonical effect-package V1 corpus plus its native and
+      # scalar-Wasm inspection surfaces. Previously reachable only from scripts/sweep.sh, which
+      # nobody runs. It re-runs check-workspace-policy.sh/check-realtime-policy.sh and their
+      # mutation suites as its own preconditions (already separate steps above); left as-is rather
+      # than edited apart under this change, since the redundant re-run is cheap and correct, just
+      # not maximally efficient.
+      - name: Effect package V1 corpus and inspection surface
+        run: bash scripts/check-effect-package-v1.sh
+      # Issue #082: the independent canonical effect-descriptor V1 corpus plus its native and
+      # scalar-Wasm inspection surfaces (folds in test-effect-descriptor-capi.sh, which it already
+      # calls as its own precondition). Previously reachable only from scripts/sweep.sh.
+      - name: Effect descriptor V1 corpus and inspection surface
+        run: bash scripts/check-effect-descriptor-v1.sh
+      # The stem store's cold-open-latency and pump budgets, and its core/pump correctness gates.
+      # Previously reachable only from scripts/sweep.sh, which nobody runs.
+      - name: Stem store V1 gate
+        run: node scripts/check-stem-store-v1.mjs
       - name: Native effect runtime policy, fixtures, conformance, and mutations
         run: bash scripts/check-effect-contract.sh
       - name: Protocol caller-buffer allocation audit
@@ -220,6 +237,10 @@ jobs:
           cargo build --locked --release -p audit
           bash scripts/test-realtime-audit-probes.sh realtime target/release/audit
           timeout 120s bash scripts/trace-realtime-audit.sh target/release/audit 1000000
+      # Mutation tests for scripts/validate-realtime-trace.sh, the strace-output parser
+      # trace-realtime-audit.sh and its siblings depend on above. Previously sweep-only.
+      - name: Realtime trace validator mutation tests
+        run: bash scripts/test-realtime-trace-validator.sh
       # One harness, three subjects (scripts/test-realtime-audit-probes.sh): the realtime leg
       # above, plus builtins and builtins-graph, whose nine probes each were previously reachable
       # only from scripts/sweep.sh, which nobody runs.
