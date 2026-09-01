@@ -1,5 +1,7 @@
 # Prelaunch benchmark schema reset: make current records V1
 
+**Status: SOL PASS.**
+
 ## Owner ruling
 
 Benchmark and qualification records created before launch do not have a published second schema
@@ -43,3 +45,6 @@ reset. Sol reviews every producer/validator pair and mutation coverage before PA
 - All 29 `bench` tests pass. The builtins benchmark validator/runner/preflight lifecycle passes with
   zero real runner, workload, or timing invocations; the rack validator/lifecycle passes with zero
   audio workload launches. Formatting and diff hygiene pass.
+- `cargo check --workspace --all-targets` passes. Sol adversarial review PASS: each changed
+  producer has its matching validator/preflight/test fixture at V1, schema rejection uses 0, and
+  the audit finds no current benchmark producer or validator that emits or requires schema 2.
