@@ -55,7 +55,7 @@ write_disposition() {
     [[ -n "$candidate_commit" ]] && candidate_json="\"$candidate_commit\""
     [[ -n "$candidate_commit_sha256" ]] && candidate_sha_json="\"$candidate_commit_sha256\""
     [[ -n "$binary_sha256" ]] && binary_sha_json="\"$binary_sha256\""
-    printf '{"schema_version":2,"issue":38,"status":"%s","reason":"%s","runner_invocations":1,"workload_process_launches":%s,"warmup_launches":%s,"measured_rounds_completed":%s,"candidate_commit":%s,"candidate_commit_sha256":%s,"binary_sha256":%s,"raw_sha256":%s,"raw_bytes":%s,"accepted_sha256":%s,"accepted_bytes":%s,"stderr_sha256":%s,"stderr_bytes":%s}\n' \
+    printf '{"schema_version":1,"issue":38,"status":"%s","reason":"%s","runner_invocations":1,"workload_process_launches":%s,"warmup_launches":%s,"measured_rounds_completed":%s,"candidate_commit":%s,"candidate_commit_sha256":%s,"binary_sha256":%s,"raw_sha256":%s,"raw_bytes":%s,"accepted_sha256":%s,"accepted_bytes":%s,"stderr_sha256":%s,"stderr_bytes":%s}\n' \
         "$status" "$reason" "$workload_process_launches" "$warmup_launches" \
         "$measured_rounds_completed" "$candidate_json" "$candidate_sha_json" \
         "$binary_sha_json" "$raw_sha" "$raw_bytes" "$accepted_sha" "$accepted_bytes" \

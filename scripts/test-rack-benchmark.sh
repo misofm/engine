@@ -60,7 +60,7 @@ done < <(jq -r 'keys[]' "$record")
 while IFS= read -r mutation; do
     [[ -n "$mutation" ]] && reject_single "$mutation"
 done <<'MUTATIONS'
-.schema_version=1
+.schema_version=0
 .issue=8
 .workload_kind="bad"
 .workload_id="issue038.bad.48000hz.q128"

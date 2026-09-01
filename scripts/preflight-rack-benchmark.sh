@@ -28,7 +28,7 @@ binary=target/release/bench
 [[ -x "$binary" ]] || { printf 'missing rack benchmark binary\n' >&2; exit 1; }
 candidate_commit=$(git rev-parse --verify HEAD)
 candidate_commit_sha256=$(printf '%s' "$candidate_commit" | sha256sum | awk '{print $1}')
-printf '{"schema_version":2,"issue":38,"kind":"rack_benchmark_preflight","workload_launches":0,"warmup_rounds":1,"measured_rounds":2,"records_required":6,"candidate_commit":"%s","candidate_commit_sha256":"%s","binary_sha256":"%s","benchmark_source_sha256":"%s","runner_sha256":"%s","record_validator_sha256":"%s","aggregate_validator_sha256":"%s","validator_library_sha256":"%s","fixture_manifest_sha256":"%s"}\n' \
+printf '{"schema_version":1,"issue":38,"kind":"rack_benchmark_preflight","workload_launches":0,"warmup_rounds":1,"measured_rounds":2,"records_required":6,"candidate_commit":"%s","candidate_commit_sha256":"%s","binary_sha256":"%s","benchmark_source_sha256":"%s","runner_sha256":"%s","record_validator_sha256":"%s","aggregate_validator_sha256":"%s","validator_library_sha256":"%s","fixture_manifest_sha256":"%s"}\n' \
     "$candidate_commit" "$candidate_commit_sha256" \
     "$(sha256sum "$binary" | awk '{print $1}')" \
     "$(sha256sum tools/bench/src/rack.rs | awk '{print $1}')" \

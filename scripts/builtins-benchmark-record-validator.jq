@@ -111,7 +111,7 @@ def preparation_shape:
   .meter_queue_capacity == 4 and (.retained_payload_bytes | nonnegative) and preparation_audit;
 def builtins_benchmark_record_valid:
   type == "object" and (keys | sort) == (exact_keys | sort) and
-  .schema_version == 2 and .issue == 35 and
+  .schema_version == 1 and .issue == 35 and
   (.workload_kind | render_workload or . == "prepare_256_tracks") and
   (.sample_rate_hz == 48000 or .sample_rate_hz == 96000) and .quantum_frames == 128 and
   (.round == 1 or .round == 2) and input_id and .percentile_method == "nearest_rank" and

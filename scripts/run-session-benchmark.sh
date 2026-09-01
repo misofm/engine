@@ -33,7 +33,7 @@ printf '%s\n' "$output" | jq -s -e '
     ([.[] | .fixture_sha256] | unique | length) == 1 and
     ([.[] | .fixture_size_bytes] | unique | length) == 1 and
     all(
-        .schema_version == 2 and .rounds == 2 and
+        .schema_version == 1 and .rounds == 2 and
         (.round == 1 or .round == 2) and
         (["timestamp_epoch_seconds", "cpu_model", "architecture", "physical_cores",
           "logical_cores", "os", "kernel", "power_source", "governor_or_power_mode",

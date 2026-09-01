@@ -14,7 +14,7 @@ commit40="0123456789abcdef0123456789abcdef01234567"
 
 record="$(jq -cn --arg hash "$hash64" --arg binary "$binary64" --arg output "$output64" --arg manifest "$manifest64" --arg commit "$commit40" '
   {
-    schema_version:2, issue:35, workload_kind:"full_chain_filters",
+    schema_version:1, issue:35, workload_kind:"full_chain_filters",
     workload_id:"issue035.full_chain_filters.48000hz.q128", sample_rate_hz:48000,
     quantum_frames:128, round:1, render_scope:"render", warmup_batches:64,
     measured_batches:512, operations_per_batch:8, total_operations:4096,
@@ -282,7 +282,7 @@ new_lifecycle_case() {
     --arg preflight "$preflight_script_sha" --arg lifecycle "$lifecycle_sha" \
     --arg record "$record_sha" --arg aggregate "$aggregate_sha" \
     --arg manifest "$manifest_sha" --arg pcm "$pcm_sha" --arg meter "$meter_sha" \
-    '{schema_version:2,issue:72,kind:"builtins_benchmark_nonbenchmark",
+    '{schema_version:1,issue:72,kind:"builtins_benchmark_nonbenchmark",
       branch:"codex/batch-benchmark-072",candidate_commit:$candidate,candidate_tree:$tree,
       cargo_lock_sha256:$lock,tool_source_sha256:$source,runner_sha256:$runner,
       preflight_script_sha256:$preflight,lifecycle_sha256:$lifecycle,
@@ -307,7 +307,7 @@ new_lifecycle_case() {
     --arg source "$source_sha" --arg preflight "$preflight_script_sha" \
     --arg lifecycle "$lifecycle_sha" --arg manifest "$manifest_sha" \
     --arg pcm "$pcm_sha" --arg meter "$meter_sha" \
-    '{schema_version:2,issue:72,kind:"builtins_benchmark_preflight",
+    '{schema_version:1,issue:72,kind:"builtins_benchmark_preflight",
       candidate_commit:$candidate,candidate_tree:$tree,cargo_lock_sha256:$lock,
       tool_source_sha256:$source,binary_sha256:$binary,runner_sha256:$runner,
       preflight_script_sha256:$preflight,lifecycle_sha256:$lifecycle,
@@ -651,7 +651,7 @@ write_fake_nonbenchmark() {
   nonbenchmark="$root/target/issue72/nonbenchmark.seal.json"
   jq -cn --arg source "$source_sha" --arg runner "$runner_sha" --arg preflight "$preflight_sha" \
     --arg lifecycle "$lifecycle_sha" \
-    '{schema_version:2,issue:72,kind:"builtins_benchmark_nonbenchmark",
+    '{schema_version:1,issue:72,kind:"builtins_benchmark_nonbenchmark",
       branch:"codex/batch-benchmark-072",
       candidate_commit:"0123456789abcdef0123456789abcdef01234567",
       candidate_tree:"0123456789abcdef0123456789abcdef01234567",

@@ -94,7 +94,7 @@ jq -e \
     --arg issue068 "$issue068_source_sha256" \
     'type == "object" and
      keys == ["accepted_issue068_source_sha256","aggregate_validator_sha256","branch","candidate_commit","candidate_tree","cargo_lock_sha256","fixture_manifest_sha256","focused_regressions","graph_meter_sha256","graph_pcm_sha256","issue","issue035_artifacts","kind","lifecycle_sha256","preflight_invocations","preflight_script_sha256","record_validator_sha256","runner_invocations","runner_sha256","schema_version","timed_benchmark_invocations","tool_source_sha256","workload_invocations"] and
-     .schema_version == 2 and .issue == 72 and
+     .schema_version == 1 and .issue == 72 and
      .kind == "builtins_benchmark_nonbenchmark" and .branch == $branch and
      .candidate_commit == $commit and .candidate_tree == $tree and .cargo_lock_sha256 == $lock and
      .tool_source_sha256 == $source and .runner_sha256 == $runner and
@@ -176,7 +176,7 @@ jq -n -S \
     --arg lifecycle "$lifecycle_sha256" --arg record "$record_validator_sha256" \
     --arg aggregate "$aggregate_validator_sha256" --arg nonbenchmark "$nonbenchmark_sha256" \
     --arg manifest "$manifest_sha256" --arg pcm "$graph_pcm_sha256" --arg meter "$graph_meter_sha256" \
-    '{schema_version:2,issue:72,kind:"builtins_benchmark_preflight",
+    '{schema_version:1,issue:72,kind:"builtins_benchmark_preflight",
       candidate_commit:$commit,candidate_tree:$tree,cargo_lock_sha256:$lock,
       tool_source_sha256:$source,binary_sha256:$binary,runner_sha256:$runner,
       preflight_script_sha256:$preflight,lifecycle_sha256:$lifecycle,

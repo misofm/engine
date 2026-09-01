@@ -37,3 +37,9 @@ reset. Sol reviews every producer/validator pair and mutation coverage before PA
 ## Evidence record
 
 - Sol brief approved; GitHub issue #317 matches this stateless local spec.
+- Terra attempt 1 resets the builtins, rack, and session record producers plus the builtins/rack
+  validators, preflights, lifecycle records, checked fixture, and test data to schema version 1.
+  Invalid-version mutations use 0.
+- All 29 `bench` tests pass. The builtins benchmark validator/runner/preflight lifecycle passes with
+  zero real runner, workload, or timing invocations; the rack validator/lifecycle passes with zero
+  audio workload launches. Formatting and diff hygiene pass.

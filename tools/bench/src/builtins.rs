@@ -1462,7 +1462,7 @@ fn record_json(
             )
         };
     let mut fields = vec![
-        json_number("schema_version", 2),
+        json_number("schema_version", 1),
         json_number("issue", ISSUE),
         json_string_field("workload_kind", workload.kind()),
         json_string_field(

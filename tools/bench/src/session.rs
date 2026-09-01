@@ -212,7 +212,7 @@ fn json_record(
 ) -> String {
     format!(
         concat!(
-            "{{\"schema_version\":2,\"benchmark_id\":\"{}\",\"round\":{},\"rounds\":2,",
+            "{{\"schema_version\":1,\"benchmark_id\":\"{}\",\"round\":{},\"rounds\":2,",
             "\"timestamp_epoch_seconds\":{},\"cpu_model\":\"{}\",",
             "\"architecture\":\"{}\",\"physical_cores\":\"{}\",",
             "\"logical_cores\":\"{}\",\"os\":\"{}\",\"kernel\":\"{}\",",

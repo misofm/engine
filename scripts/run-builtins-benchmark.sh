@@ -98,7 +98,7 @@ publish_disposition() {
     read -r accepted_sha accepted_bytes <<<"$accepted_identity"
     read -r stderr_sha stderr_bytes <<<"$stderr_identity"
     local tmp="$scratch/disposition.json"
-    printf '{"schema_version":2,"issue":72,"kind":"%s","status":"%s","reason":"%s","preflight_invocations":1,"runner_invocations":1,"workload_invocations":%s,"warmup_passes":%s,"measured_rounds_completed":%s,"timed_benchmark_invocations":%s,"candidate_commit":%s,"candidate_tree":%s,"binary_sha256":%s,"runner_sha256":%s,"record_validator_sha256":%s,"aggregate_validator_sha256":%s,"nonbenchmark_seal_sha256":%s,"preflight_sha256":%s,"workload_exit_status":%s,"raw_sha256":%s,"raw_bytes":%s,"accepted_sha256":%s,"accepted_bytes":%s,"stderr_sha256":%s,"stderr_bytes":%s}\n' \
+    printf '{"schema_version":1,"issue":72,"kind":"%s","status":"%s","reason":"%s","preflight_invocations":1,"runner_invocations":1,"workload_invocations":%s,"warmup_passes":%s,"measured_rounds_completed":%s,"timed_benchmark_invocations":%s,"candidate_commit":%s,"candidate_tree":%s,"binary_sha256":%s,"runner_sha256":%s,"record_validator_sha256":%s,"aggregate_validator_sha256":%s,"nonbenchmark_seal_sha256":%s,"preflight_sha256":%s,"workload_exit_status":%s,"raw_sha256":%s,"raw_bytes":%s,"accepted_sha256":%s,"accepted_bytes":%s,"stderr_sha256":%s,"stderr_bytes":%s}\n' \
         "$kind" "$status" "$reason" "$workload_started" "$warmup_passes" \
         "$measured_rounds_completed" "$timed_started" \
         "$(json_identity "$candidate_commit")" "$(json_identity "$candidate_tree")" \
@@ -207,7 +207,7 @@ jq -e \
     --arg issue068 "$issue068_source_sha256" \
     'type == "object" and
      keys == ["accepted_issue068_source_sha256","aggregate_validator_sha256","branch","candidate_commit","candidate_tree","cargo_lock_sha256","fixture_manifest_sha256","focused_regressions","graph_meter_sha256","graph_pcm_sha256","issue","issue035_artifacts","kind","lifecycle_sha256","preflight_invocations","preflight_script_sha256","record_validator_sha256","runner_invocations","runner_sha256","schema_version","timed_benchmark_invocations","tool_source_sha256","workload_invocations"] and
-     .schema_version == 2 and .issue == 72 and
+     .schema_version == 1 and .issue == 72 and
      .kind == "builtins_benchmark_nonbenchmark" and .branch == $branch and
      .candidate_commit == $commit and .candidate_tree == $tree and .cargo_lock_sha256 == $lock and
      .tool_source_sha256 == $source and .runner_sha256 == $runner and
@@ -236,7 +236,7 @@ jq -e \
     --arg pcm "$graph_pcm_sha256" --arg meter "$graph_meter_sha256" \
     'type == "object" and
      keys == ["aggregate_validator_sha256","binary_sha256","candidate_commit","candidate_tree","cargo_lock_sha256","fixture_manifest_sha256","graph_meter_sha256","graph_pcm_sha256","issue","kind","lifecycle_sha256","measured_rounds","nonbenchmark_seal_sha256","preflight_invocations","preflight_script_sha256","record_validator_sha256","records_required","runner_invocations","runner_sha256","schema_version","timed_benchmark_invocations","tool_source_sha256","warmup_passes","workload_invocations"] and
-     .schema_version == 2 and .issue == 72 and .kind == "builtins_benchmark_preflight" and
+     .schema_version == 1 and .issue == 72 and .kind == "builtins_benchmark_preflight" and
      .candidate_commit == $commit and .candidate_tree == $tree and
      .cargo_lock_sha256 == $lock and .tool_source_sha256 == $source and
      .binary_sha256 == $binary and .runner_sha256 == $runner and
