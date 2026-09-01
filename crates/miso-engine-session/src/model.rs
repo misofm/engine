@@ -78,6 +78,84 @@ pub struct SessionToml {
     pub routes: Vec<Route>,
     /// Ordered sample-time automation programs.
     pub automation: Vec<Automation>,
+    /// Exact source spellings for persisted parameter decimals.
+    ///
+    /// This is parser provenance, not another schema field. Programmatically constructed models
+    /// may leave it empty; a typed mutation whose `f32` bits no longer match its provenance is
+    /// treated as a newly authored value.
+    #[doc(hidden)]
+    pub persisted_parameter_decimals: Vec<PersistedParameterDecimal>,
+}
+
+/// Semantic address of one persisted parameter decimal.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PersistedParameterTarget {
+    /// One declared native/third-party effect parameter value.
+    Effect {
+        /// Owning track.
+        track_id: StableId,
+        /// Owning rack.
+        rack: RackName,
+        /// Local effect slot.
+        effect_id: StableId,
+        /// Descriptor parameter ID.
+        parameter_id: u32,
+        /// Declared lane selector.
+        channel: ParameterChannel,
+    },
+    /// One strip builtin value.
+    Builtin {
+        /// Owning track.
+        track_id: StableId,
+        /// Stable builtin descriptor ID.
+        parameter_id: u32,
+        /// Declared lane selector.
+        channel: ParameterChannel,
+    },
+    /// One persisted automation endpoint; its target is read from the named automation record.
+    Automation {
+        /// Automation declaration ID.
+        automation_id: StableId,
+        /// Ordered segment index.
+        segment_index: u32,
+        /// Endpoint within the segment.
+        endpoint: AutomationEndpoint,
+    },
+}
+
+/// Which endpoint of an automation segment carries the decimal.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AutomationEndpoint {
+    /// Segment start value.
+    Start,
+    /// Segment end value.
+    End,
+}
+
+/// Exact TOML provenance for one typed `f32` parameter value.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PersistedParameterDecimal {
+    /// Semantic persisted-value address.
+    pub target: PersistedParameterTarget,
+    /// Exact TOML numeric token.
+    pub source: String,
+    /// Typed value bits at parse time, used to detect later programmatic mutation.
+    pub value_bits: u32,
+}
+
+impl SessionToml {
+    /// Return exact parser provenance while it still describes `value` bit-for-bit.
+    #[must_use]
+    pub fn persisted_parameter_decimal(
+        &self,
+        target: &PersistedParameterTarget,
+        value: f32,
+    ) -> Option<&str> {
+        self.persisted_parameter_decimals
+            .iter()
+            .find(|decimal| decimal.target == *target && decimal.value_bits == value.to_bits())
+            .map(|decimal| decimal.source.as_str())
+    }
 }
 
 /// Renderer selection declaration, not a host capability query.

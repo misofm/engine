@@ -258,7 +258,50 @@ fn ten_thousand_session_parameter_mutations_reject_transactionally_without_panic
         assert!(result.is_ok());
         assert_eq!(
             result.unwrap().err().unwrap().0[0].code,
-            "effect.parameter.domain"
+            "effect.parameter.off_lattice"
         );
     }
+}
+
+#[test]
+fn exact_decimal_off_lattice_refusal_names_both_neighbors_at_the_value_path() {
+    let source = include_str!("../../../fixtures/session/v1/canonical.toml").replace(
+        "unit = \"db\", value = 0.0",
+        "unit = \"db\", value = 0.30000000000000001",
+    );
+    let model = parse_session_toml(&source).expect("schema-valid exact decimal");
+    let session = compile_session(
+        &model,
+        CompileCaps {
+            max_compiled_model_bytes: u64::MAX,
+            max_requested_runtime_bytes: u64::MAX,
+            max_single_allocation_bytes: u64::MAX,
+            max_queue_items: u64::MAX,
+            max_source_ring_frames: u64::MAX,
+            max_source_ring_bytes: u64::MAX,
+        },
+    )
+    .expect("compiled");
+    let registry =
+        NativeEffectRegistry::new([Box::new(Factory) as Box<dyn NativeEffectFactory>]).unwrap();
+    let error = match prepare_native_session_effects(&session, &registry, caps()) {
+        Ok(_) => panic!("off-lattice exact text must refuse"),
+        Err(error) => error,
+    };
+    assert_eq!(error.0.len(), 1);
+    assert_eq!(error.0[0].code, "effect.parameter.off_lattice");
+    assert_eq!(
+        error.0[0].path,
+        "$.tracks[0].dynamic.effects[0].params[0].value"
+    );
+    let nearest = error.0[0].nearest.as_ref().expect("nearest values");
+    assert_eq!(
+        (nearest.lower.as_str(), nearest.upper.as_str()),
+        ("0.3", "0.4")
+    );
+    assert_eq!(
+        "0.30000000000000001".parse::<f32>(),
+        "0.3".parse::<f32>(),
+        "red control: binary f32 comparison would admit this exact off-lattice decimal"
+    );
 }

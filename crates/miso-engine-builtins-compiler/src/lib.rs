@@ -16,18 +16,20 @@ use std::sync::Mutex;
 use sha2::{Digest, Sha256};
 
 use miso_engine_builtins::{
-    BuiltinChain, BuiltinFaderBank, BuiltinInputBank, BuiltinLaneSelector, BuiltinMatrixBank,
-    BuiltinParameterError, BuiltinParameters, BuiltinTail, ChannelParameters, DualMonoBlock,
-    FaderMuteBuiltins, FaderMuteRampBuiltins, InputBuiltins, Matrix2x2, MatrixBuiltins,
-    MeterAccumulator, MeterConfig, MeterConfigError, MeterHandle, MeterSnapshot, MeterTap,
-    PreparedMeter, pan_matrix, validate_builtin_filter_cutoff,
+    BUILTIN_PARAMETER_DESCRIPTORS, BuiltinChain, BuiltinFaderBank, BuiltinInputBank,
+    BuiltinLaneSelector, BuiltinMatrixBank, BuiltinParameterError, BuiltinParameters, BuiltinTail,
+    ChannelParameters, DISABLED_LATTICE_INDEX, DualMonoBlock, FaderMuteBuiltins,
+    FaderMuteRampBuiltins, InputBuiltins, Matrix2x2, MatrixBuiltins, MeterAccumulator, MeterConfig,
+    MeterConfigError, MeterHandle, MeterSnapshot, MeterTap, PreparedMeter,
+    builtin_parameter_lattice_points, pan_matrix, validate_builtin_filter_cutoff,
 };
 use miso_engine_core::realtime::{
     Consumer, PreparedRenderPlan, Producer, QueueGeneration, RenderEnvelope, RenderError,
     bounded_spsc, bounded_spsc_retained_payload,
 };
 use miso_engine_effect_contract::{
-    BankWidth, ChannelSymmetryWitness, LiveConsoleRecord, SeamSide, SymmetryEvent,
+    BankWidth, ChannelSymmetryWitness, LatticePoint, LiveConsoleRecord, SeamSide, SymmetryEvent,
+    decimal_to_f32, exact_decimal_lattice_index,
 };
 use miso_engine_graph::{
     DependencyLevel, GraphBindingBlock, GraphBuiltinBankResourceEstimate, GraphNodeId,
@@ -39,7 +41,10 @@ use miso_engine_graph::{
 use miso_engine_lane::Backend;
 use miso_engine_rack::{AoSoaScratch, BankSlotKey, RackLocation, RackProgram};
 use miso_engine_rack_compiler::{CohortCandidate, CohortLevel, CohortPoolClass, plan_bank_groups};
-use miso_engine_session::{CompiledSession, MatrixOrPan, Track};
+use miso_engine_session::{
+    AutomationEndpoint, CompiledSession, MatrixOrPan, ParameterChannel, PersistedParameterTarget,
+    RackName, Track,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BuiltinCompileCaps {
@@ -235,6 +240,13 @@ pub struct TrackControlProducer {
 pub struct BuiltinDiagnostic {
     pub code: &'static str,
     pub path: String,
+    pub nearest: Option<BuiltinNearestValues>,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct BuiltinNearestValues {
+    pub lower: String,
+    pub upper: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2374,7 +2386,8 @@ pub fn prepare_session_builtins_with_console(
             ));
         }
     }
-    for track in &session.normalized_model().tracks {
+    let resolved_tracks = resolve_persisted_builtin_lattices(session, &mut diagnostics);
+    for track in &resolved_tracks {
         match track_parameters(track, caps.maximum_smoothing_samples)
             .and_then(|parameters| BuiltinChain::new(session.sample_rate().0, parameters))
         {
@@ -2425,8 +2438,13 @@ pub fn prepare_session_builtins_with_console(
     }
     let mut track_controls = Vec::with_capacity(controls.len());
     let mut control_seal: Vec<(Box<str>, usize)> = Vec::with_capacity(controls.len());
-    for track in &session.normalized_model().tracks {
-        let parameters = track_parameters(track, caps.maximum_smoothing_samples)
+    for (track, resolved_track) in session
+        .normalized_model()
+        .tracks
+        .iter()
+        .zip(&resolved_tracks)
+    {
+        let parameters = track_parameters(resolved_track, caps.maximum_smoothing_samples)
             .expect("preflighted parameters");
         let chain = BuiltinChain::new(session.sample_rate().0, parameters)
             .expect("preflighted coefficients");
@@ -3208,7 +3226,227 @@ fn diag(code: &'static str, path: &str) -> BuiltinDiagnostic {
     BuiltinDiagnostic {
         code,
         path: path.to_owned(),
+        nearest: None,
     }
+}
+
+fn exact_builtin_lattice_value(
+    session: &CompiledSession,
+    target: PersistedParameterTarget,
+    parameter_id: u32,
+    value: f32,
+    path: String,
+) -> Result<f32, BuiltinDiagnostic> {
+    let Some(descriptor) = BUILTIN_PARAMETER_DESCRIPTORS
+        .iter()
+        .find(|descriptor| descriptor.id == parameter_id)
+    else {
+        return Err(diag("builtin.parameter.unknown", &path));
+    };
+    let mut lattice = builtin_parameter_lattice_points(descriptor, session.sample_rate().0)
+        .map_err(|_| diag("builtin.parameter.lattice", &path))?;
+    if let Some(disabled) = lattice.disabled.take() {
+        lattice.points.insert(
+            0,
+            LatticePoint {
+                index: DISABLED_LATTICE_INDEX,
+                canonical: disabled,
+                intrinsic: true,
+            },
+        );
+    }
+    let authored = value.to_string();
+    let decimal = session
+        .normalized_model()
+        .persisted_parameter_decimal(&target, value)
+        .unwrap_or(&authored);
+    let index = exact_decimal_lattice_index(&lattice.points, decimal).map_err(|nearest| {
+        BuiltinDiagnostic {
+            code: "builtin.parameter.off_lattice",
+            path: path.clone(),
+            nearest: Some(BuiltinNearestValues {
+                lower: nearest.lower,
+                upper: nearest.upper,
+            }),
+        }
+    })?;
+    let canonical = lattice
+        .points
+        .iter()
+        .find(|point| point.index == index)
+        .map(|point| point.canonical.as_str())
+        .ok_or_else(|| diag("builtin.parameter.lattice", &path))?;
+    decimal_to_f32(canonical).ok_or_else(|| diag("builtin.parameter.lattice", &path))
+}
+
+fn resolve_persisted_builtin_lattices(
+    session: &CompiledSession,
+    diagnostics: &mut Vec<BuiltinDiagnostic>,
+) -> Vec<Track> {
+    let mut resolved_tracks = Vec::with_capacity(session.normalized_model().tracks.len());
+    for (track_position, track) in session.normalized_model().tracks.iter().enumerate() {
+        let mut resolved = track.clone();
+        for (lane, channel, builtins, resolved_builtins) in [
+            (
+                "left",
+                ParameterChannel::Left,
+                &track.builtins.left,
+                &mut resolved.builtins.left,
+            ),
+            (
+                "right",
+                ParameterChannel::Right,
+                &track.builtins.right,
+                &mut resolved.builtins.right,
+            ),
+        ] {
+            for (field, parameter_id, value) in [
+                ("trim_db", 2, builtins.trim_db),
+                ("hpf_hz", 3, builtins.hpf_hz),
+                ("lpf_hz", 4, builtins.lpf_hz),
+            ] {
+                let target = PersistedParameterTarget::Builtin {
+                    track_id: track.id.clone(),
+                    parameter_id,
+                    channel,
+                };
+                match exact_builtin_lattice_value(
+                    session,
+                    target,
+                    parameter_id,
+                    value,
+                    format!("$.tracks[{track_position}].builtins.{lane}.{field}"),
+                ) {
+                    Ok(value) => match parameter_id {
+                        2 => resolved_builtins.trim_db = value,
+                        3 => resolved_builtins.hpf_hz = value,
+                        4 => resolved_builtins.lpf_hz = value,
+                        _ => unreachable!(),
+                    },
+                    Err(error) => diagnostics.push(error),
+                }
+            }
+        }
+        for (field, channel, value) in [
+            ("left_db", ParameterChannel::Left, track.fader.left_db),
+            ("right_db", ParameterChannel::Right, track.fader.right_db),
+        ] {
+            let target = PersistedParameterTarget::Builtin {
+                track_id: track.id.clone(),
+                parameter_id: 5,
+                channel,
+            };
+            match exact_builtin_lattice_value(
+                session,
+                target,
+                5,
+                value,
+                format!("$.tracks[{track_position}].fader.{field}"),
+            ) {
+                Ok(value) if channel == ParameterChannel::Left => resolved.fader.left_db = value,
+                Ok(value) => resolved.fader.right_db = value,
+                Err(error) => diagnostics.push(error),
+            }
+        }
+        match track.matrix_or_pan {
+            MatrixOrPan::Pan { left, right, .. } => {
+                for (field, channel, value) in [
+                    ("left", ParameterChannel::Left, left),
+                    ("right", ParameterChannel::Right, right),
+                ] {
+                    let target = PersistedParameterTarget::Builtin {
+                        track_id: track.id.clone(),
+                        parameter_id: 12,
+                        channel,
+                    };
+                    match exact_builtin_lattice_value(
+                        session,
+                        target,
+                        12,
+                        value,
+                        format!("$.tracks[{track_position}].pan.{field}"),
+                    ) {
+                        Ok(value) => match &mut resolved.matrix_or_pan {
+                            MatrixOrPan::Pan { left, right, .. }
+                                if channel == ParameterChannel::Left =>
+                            {
+                                *left = value;
+                            }
+                            MatrixOrPan::Pan { right, .. } => *right = value,
+                            MatrixOrPan::Matrix { .. } => unreachable!(),
+                        },
+                        Err(error) => diagnostics.push(error),
+                    }
+                }
+            }
+            MatrixOrPan::Matrix { ll, lr, rl, rr, .. } => {
+                for (field, parameter_id, value) in
+                    [("ll", 7, ll), ("lr", 8, lr), ("rl", 9, rl), ("rr", 10, rr)]
+                {
+                    let target = PersistedParameterTarget::Builtin {
+                        track_id: track.id.clone(),
+                        parameter_id,
+                        channel: ParameterChannel::Both,
+                    };
+                    match exact_builtin_lattice_value(
+                        session,
+                        target,
+                        parameter_id,
+                        value,
+                        format!("$.tracks[{track_position}].matrix.{field}"),
+                    ) {
+                        Ok(value) => match &mut resolved.matrix_or_pan {
+                            MatrixOrPan::Matrix { ll, lr, rl, rr, .. } => match parameter_id {
+                                7 => *ll = value,
+                                8 => *lr = value,
+                                9 => *rl = value,
+                                10 => *rr = value,
+                                _ => unreachable!(),
+                            },
+                            MatrixOrPan::Pan { .. } => unreachable!(),
+                        },
+                        Err(error) => diagnostics.push(error),
+                    }
+                }
+            }
+        }
+        resolved_tracks.push(resolved);
+    }
+    for (automation_position, automation) in
+        session.normalized_model().automation.iter().enumerate()
+    {
+        if automation.target.rack != RackName::Builtins {
+            continue;
+        }
+        for (segment_position, segment) in automation.segments.iter().enumerate() {
+            for (field, endpoint, value) in [
+                (
+                    "start_value",
+                    AutomationEndpoint::Start,
+                    segment.start_value,
+                ),
+                ("end_value", AutomationEndpoint::End, segment.end_value),
+            ] {
+                let target = PersistedParameterTarget::Automation {
+                    automation_id: automation.id.clone(),
+                    segment_index: segment_position as u32,
+                    endpoint,
+                };
+                if let Err(error) = exact_builtin_lattice_value(
+                    session,
+                    target,
+                    automation.target.parameter_id,
+                    value,
+                    format!(
+                        "$.automation[{automation_position}].segments[{segment_position}].{field}"
+                    ),
+                ) {
+                    diagnostics.push(error);
+                }
+            }
+        }
+    }
+    resolved_tracks
 }
 fn meter_path(request: &MeterRequest) -> String {
     format!(

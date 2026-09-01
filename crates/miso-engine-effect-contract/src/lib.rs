@@ -9,9 +9,10 @@ mod step;
 mod symmetry;
 pub use live::{BypassShunt, EffectControlLane, EffectControlRecord, ObservationLane, Staged};
 pub use step::{
-    DEFAULT_STEP_LADDER, FADER_STEP_LADDER, LatticeError, LatticePoint, ParameterLattice,
-    StepLadder, canonical_descriptor_decimal, decimal_to_f32, default_parameter_lattice,
-    parameter_lattice_points, parameter_lattice_points_parts, resolve_parameter_step,
+    DEFAULT_STEP_LADDER, FADER_STEP_LADDER, LatticeError, LatticeNeighbors, LatticePoint,
+    ParameterLattice, StepLadder, canonical_descriptor_decimal, decimal_to_f32,
+    default_parameter_lattice, exact_decimal_lattice_index, parameter_lattice_points,
+    parameter_lattice_points_parts, resolve_parameter_step,
 };
 pub use symmetry::{
     ChannelSymmetryWitness, LiveConsoleRecord, SeamSide, SymmetryEvent, payload_sections_agree,

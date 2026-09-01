@@ -9,7 +9,8 @@ use miso_engine_effect_contract::{
     PrepareEffectBankRequest, PrepareEffectLimits, PrepareEffectRequest, PreparedBankMetadata,
     PreparedEffectMetadata, PreparedNativeEffect, PreparedNativeEffectBank, PreparedPorts,
     PreparedSidechainPort, RegistryError, StatePayloadInput, StatePayloadOutput,
-    expected_prepared_metadata, payload_sections_agree,
+    canonical_descriptor_decimal, decimal_to_f32, exact_decimal_lattice_index,
+    expected_prepared_metadata, parameter_lattice_points, payload_sections_agree,
 };
 use miso_engine_effect_package::{
     BoundEffectDescriptorWire, EFFECT_STATE_BUFFER_ENVELOPE_OUTPUT,
@@ -23,8 +24,9 @@ use miso_engine_effect_package::{
     validate_effect_state_replay, verify_effect_state,
 };
 use miso_engine_session::{
-    CompiledSession, EffectIdentity, LinkMode as SessionLinkMode,
-    ParameterChannel as SessionChannel, ParameterUnit as SessionUnit, SidechainDeclaration,
+    CompiledSession, EffectIdentity, EffectParam, LinkMode as SessionLinkMode,
+    ParameterChannel as SessionChannel, ParameterUnit as SessionUnit, PersistedParameterTarget,
+    RackName as SessionRackName, SessionToml, SidechainDeclaration,
 };
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -858,6 +860,145 @@ pub struct EffectPreparedSession {
     pub entries: Vec<EffectPreparedEntry>,
 }
 
+fn session_rack_name(rack: EffectRack) -> SessionRackName {
+    match rack {
+        EffectRack::Simd1 => SessionRackName::Simd1,
+        EffectRack::Dynamic => SessionRackName::Dynamic,
+        EffectRack::Simd2 => SessionRackName::Simd2,
+    }
+}
+
+fn exact_effect_parameter_value(
+    session: &SessionToml,
+    track_id: &miso_engine_session::StableId,
+    rack: EffectRack,
+    effect_id: &miso_engine_session::StableId,
+    parameter: &miso_engine_effect_contract::ParameterDescriptor,
+    requested: Option<&EffectParam>,
+    path: String,
+) -> Result<f32, EffectDiagnostic> {
+    let authored;
+    let decimal = if let Some(requested) = requested {
+        let target = PersistedParameterTarget::Effect {
+            track_id: track_id.clone(),
+            rack: session_rack_name(rack),
+            effect_id: effect_id.clone(),
+            parameter_id: requested.parameter_id,
+            channel: requested.channel,
+        };
+        authored = requested.value.to_string();
+        session
+            .persisted_parameter_decimal(&target, requested.value)
+            .unwrap_or(&authored)
+    } else {
+        authored =
+            canonical_descriptor_decimal(parameter.default_value, parameter.lattice.precision)
+                .ok_or_else(|| EffectDiagnostic::new("effect.descriptor.invalid", path.clone()))?;
+        &authored
+    };
+    exact_parameter_decimal_value(parameter, decimal, path)
+}
+
+fn exact_parameter_decimal_value(
+    parameter: &miso_engine_effect_contract::ParameterDescriptor,
+    decimal: &str,
+    path: String,
+) -> Result<f32, EffectDiagnostic> {
+    let points = parameter_lattice_points(parameter)
+        .map_err(|_| EffectDiagnostic::new("effect.descriptor.invalid", path.clone()))?;
+    let index = exact_decimal_lattice_index(&points, decimal).map_err(|nearest| {
+        EffectDiagnostic::off_lattice(path.clone(), nearest.lower, nearest.upper)
+    })?;
+    if parameter.domain == miso_engine_effect_contract::ParameterDomain::Enumeration {
+        return parameter
+            .enum_choices
+            .get(index as usize)
+            .map(|choice| choice.value)
+            .ok_or_else(|| EffectDiagnostic::new("effect.descriptor.invalid", path));
+    }
+    decimal_to_f32(&points[index as usize].canonical)
+        .ok_or_else(|| EffectDiagnostic::new("effect.descriptor.invalid", path))
+}
+
+fn validate_native_automation_lattices(
+    session: &CompiledSession,
+    registry: &NativeEffectRegistry,
+    diagnostics: &mut Vec<EffectDiagnostic>,
+) {
+    for (automation_position, automation) in
+        session.normalized_model().automation.iter().enumerate()
+    {
+        if automation.target.rack == SessionRackName::Builtins {
+            continue;
+        }
+        let Some(track) = session
+            .normalized_model()
+            .tracks
+            .iter()
+            .find(|track| track.id == automation.target.entity_id)
+        else {
+            continue;
+        };
+        let effects = match automation.target.rack {
+            SessionRackName::Simd1 => &track.simd1.effects,
+            SessionRackName::Dynamic => &track.dynamic.effects,
+            SessionRackName::Simd2 => &track.simd2.effects,
+            SessionRackName::Builtins => unreachable!(),
+        };
+        let Some(effect) = effects
+            .iter()
+            .find(|effect| effect.id == automation.target.effect_id)
+        else {
+            continue;
+        };
+        let EffectIdentity::Native { effect_id } = &effect.identity else {
+            continue;
+        };
+        let Some(factory) = registry.get_shared_ascii(effect_id.as_str()) else {
+            continue;
+        };
+        let Some(parameter) = factory
+            .descriptor()
+            .parameters
+            .iter()
+            .find(|parameter| parameter.id.0 == automation.target.parameter_id)
+        else {
+            continue;
+        };
+        for (segment_position, segment) in automation.segments.iter().enumerate() {
+            for (field, endpoint, value) in [
+                (
+                    "start_value",
+                    miso_engine_session::AutomationEndpoint::Start,
+                    segment.start_value,
+                ),
+                (
+                    "end_value",
+                    miso_engine_session::AutomationEndpoint::End,
+                    segment.end_value,
+                ),
+            ] {
+                let target = PersistedParameterTarget::Automation {
+                    automation_id: automation.id.clone(),
+                    segment_index: segment_position as u32,
+                    endpoint,
+                };
+                let authored = value.to_string();
+                let decimal = session
+                    .normalized_model()
+                    .persisted_parameter_decimal(&target, value)
+                    .unwrap_or(&authored);
+                let path = format!(
+                    "$.automation[{automation_position}].segments[{segment_position}].{field}"
+                );
+                if let Err(error) = exact_parameter_decimal_value(parameter, decimal, path) {
+                    diagnostics.push(error);
+                }
+            }
+        }
+    }
+}
+
 /// Construct the caller-injected native registry for the V1 launch effect set.
 ///
 /// Registry construction is control-plane work. Callers retain and inject the immutable registry
@@ -889,31 +1030,28 @@ pub fn prepare_native_session_effects(
         || caps.maximum_scratch_bytes == 0
         || caps.maximum_automation_spans_per_block == 0
     {
-        return Err(EffectDiagnosticSet::sorted(vec![EffectDiagnostic {
-            code: "effect.resource.limit",
-            path: "$.effect_compile_caps".to_owned(),
-        }]));
+        return Err(EffectDiagnosticSet::sorted(vec![EffectDiagnostic::new(
+            "effect.resource.limit",
+            "$.effect_compile_caps".to_owned(),
+        )]));
     }
-    for track in &session.normalized_model().tracks {
-        for (rack, effects) in [
-            (EffectRack::Simd1, &track.simd1.effects),
-            (EffectRack::Dynamic, &track.dynamic.effects),
-            (EffectRack::Simd2, &track.simd2.effects),
+    for (track_position, track) in session.normalized_model().tracks.iter().enumerate() {
+        for (rack_name, rack, effects) in [
+            ("simd1", EffectRack::Simd1, &track.simd1.effects),
+            ("dynamic", EffectRack::Dynamic, &track.dynamic.effects),
+            ("simd2", EffectRack::Simd2, &track.simd2.effects),
         ] {
-            for effect in effects {
+            for (effect_position, effect) in effects.iter().enumerate() {
                 let path = format!("$.tracks[id={}].effects[id={}]", track.id, effect.id);
                 let EffectIdentity::Native { effect_id } = &effect.identity else {
-                    diagnostics.push(EffectDiagnostic {
-                        code: "effect.third_party.unavailable_at_launch",
+                    diagnostics.push(EffectDiagnostic::new(
+                        "effect.third_party.unavailable_at_launch",
                         path,
-                    });
+                    ));
                     continue;
                 };
                 let Some(factory) = registry.get_shared_ascii(effect_id.as_str()) else {
-                    diagnostics.push(EffectDiagnostic {
-                        code: "effect.native.unavailable",
-                        path,
-                    });
+                    diagnostics.push(EffectDiagnostic::new("effect.native.unavailable", path));
                     continue;
                 };
                 let descriptor = factory.descriptor();
@@ -928,19 +1066,13 @@ pub fn prepare_native_session_effects(
                     SessionLinkMode::Average => LinkMode::Average,
                 };
                 if !descriptor.supported_link_modes.contains(link_mode) {
-                    diagnostics.push(EffectDiagnostic {
-                        code: "effect.link_mode.unsupported",
-                        path,
-                    });
+                    diagnostics.push(EffectDiagnostic::new("effect.link_mode.unsupported", path));
                     continue;
                 }
                 if !descriptor.qualities.iter().any(|item| {
                     item.quality == quality && item.sample_rate == session.sample_rate().0
                 }) {
-                    diagnostics.push(EffectDiagnostic {
-                        code: "effect.quality.unsupported",
-                        path,
-                    });
+                    diagnostics.push(EffectDiagnostic::new("effect.quality.unsupported", path));
                     continue;
                 }
                 let mut initial = Vec::new();
@@ -955,10 +1087,10 @@ pub fn prepare_native_session_effects(
                         .iter()
                         .any(|item| !same_unit(item.unit, parameter.unit))
                     {
-                        diagnostics.push(EffectDiagnostic {
-                            code: "effect.parameter.unit_mismatch",
-                            path: path.clone(),
-                        });
+                        diagnostics.push(EffectDiagnostic::new(
+                            "effect.parameter.unit_mismatch",
+                            path.clone(),
+                        ));
                         invalid = true;
                         break;
                     }
@@ -966,24 +1098,51 @@ pub fn prepare_native_session_effects(
                         ParameterChannelPolicy::Shared => {
                             let values: Vec<_> = matching
                                 .iter()
+                                .copied()
                                 .filter(|item| item.channel == SessionChannel::Both)
                                 .collect();
                             if matching.len() != values.len() || values.len() > 1 {
-                                diagnostics.push(EffectDiagnostic {
-                                    code: "effect.parameter.channel",
-                                    path: path.clone(),
-                                });
+                                diagnostics.push(EffectDiagnostic::new(
+                                    "effect.parameter.channel",
+                                    path.clone(),
+                                ));
                                 invalid = true;
                                 break;
                             }
+                            let requested = values.first().copied();
+                            let value_path = requested.map_or_else(
+                                || path.clone(),
+                                |item| {
+                                    let parameter_position = effect
+                                        .params
+                                        .iter()
+                                        .position(|candidate| core::ptr::eq(candidate, item))
+                                        .expect("borrowed parameter belongs to effect");
+                                    format!(
+                                        "$.tracks[{track_position}].{rack_name}.effects[{effect_position}].params[{parameter_position}].value"
+                                    )
+                                },
+                            );
+                            let value = match exact_effect_parameter_value(
+                                session.normalized_model(),
+                                &track.id,
+                                rack,
+                                &effect.id,
+                                parameter,
+                                requested,
+                                value_path,
+                            ) {
+                                Ok(value) => value,
+                                Err(error) => {
+                                    diagnostics.push(error);
+                                    invalid = true;
+                                    break;
+                                }
+                            };
                             initial.push(InitialParameterValue {
                                 parameter_index: index as u32,
                                 channel: ParameterChannel::Both,
-                                value: miso_engine_effect_contract::normalize_zero(
-                                    values
-                                        .first()
-                                        .map_or(parameter.default_value, |item| item.value),
-                                ),
+                                value: miso_engine_effect_contract::normalize_zero(value),
                             });
                         }
                         ParameterChannelPolicy::PerLane => {
@@ -1004,40 +1163,71 @@ pub fn prepare_native_session_effects(
                                 || right_count > 1
                                 || (both_count == 1 && (left_count != 0 || right_count != 0))
                             {
-                                diagnostics.push(EffectDiagnostic {
-                                    code: "effect.parameter.duplicate_channel",
-                                    path: path.clone(),
-                                });
+                                diagnostics.push(EffectDiagnostic::new(
+                                    "effect.parameter.duplicate_channel",
+                                    path.clone(),
+                                ));
                                 invalid = true;
                                 break;
                             }
                             let both = matching
                                 .iter()
                                 .find(|item| item.channel == SessionChannel::Both)
-                                .map(|item| item.value);
+                                .copied();
                             for (channel, requested) in [
                                 (
                                     ParameterChannel::Left,
                                     matching
                                         .iter()
                                         .find(|item| item.channel == SessionChannel::Left)
-                                        .map(|item| item.value),
+                                        .copied(),
                                 ),
                                 (
                                     ParameterChannel::Right,
                                     matching
                                         .iter()
                                         .find(|item| item.channel == SessionChannel::Right)
-                                        .map(|item| item.value),
+                                        .copied(),
                                 ),
                             ] {
+                                let requested = requested.or(both);
+                                let value_path = requested.map_or_else(
+                                    || path.clone(),
+                                    |item| {
+                                        let parameter_position = effect
+                                            .params
+                                            .iter()
+                                            .position(|candidate| core::ptr::eq(candidate, item))
+                                            .expect("borrowed parameter belongs to effect");
+                                        format!(
+                                            "$.tracks[{track_position}].{rack_name}.effects[{effect_position}].params[{parameter_position}].value"
+                                        )
+                                    },
+                                );
+                                let value = match exact_effect_parameter_value(
+                                    session.normalized_model(),
+                                    &track.id,
+                                    rack,
+                                    &effect.id,
+                                    parameter,
+                                    requested,
+                                    value_path,
+                                ) {
+                                    Ok(value) => value,
+                                    Err(error) => {
+                                        diagnostics.push(error);
+                                        invalid = true;
+                                        break;
+                                    }
+                                };
                                 initial.push(InitialParameterValue {
                                     parameter_index: index as u32,
                                     channel,
-                                    value: miso_engine_effect_contract::normalize_zero(
-                                        requested.or(both).unwrap_or(parameter.default_value),
-                                    ),
+                                    value: miso_engine_effect_contract::normalize_zero(value),
                                 });
+                            }
+                            if invalid {
+                                break;
                             }
                         }
                     }
@@ -1052,10 +1242,7 @@ pub fn prepare_native_session_effects(
                     )
                 }) {
                     let _ = item;
-                    diagnostics.push(EffectDiagnostic {
-                        code: "effect.parameter.domain",
-                        path,
-                    });
+                    diagnostics.push(EffectDiagnostic::new("effect.parameter.domain", path));
                     continue;
                 }
                 if effect.params.iter().any(|item| {
@@ -1064,10 +1251,7 @@ pub fn prepare_native_session_effects(
                         .iter()
                         .any(|parameter| parameter.id.0 == item.parameter_id)
                 }) {
-                    diagnostics.push(EffectDiagnostic {
-                        code: "effect.parameter.unknown",
-                        path,
-                    });
+                    diagnostics.push(EffectDiagnostic::new("effect.parameter.unknown", path));
                     continue;
                 }
                 let declared_sidechain = descriptor.ports.iter().find(|port| {
@@ -1084,17 +1268,12 @@ pub fn prepare_native_session_effects(
                         },
                     },
                     (SidechainDeclaration::None, Some(_)) => {
-                        diagnostics.push(EffectDiagnostic {
-                            code: "effect.sidechain.missing",
-                            path,
-                        });
+                        diagnostics.push(EffectDiagnostic::new("effect.sidechain.missing", path));
                         continue;
                     }
                     (SidechainDeclaration::Routed(_), None) => {
-                        diagnostics.push(EffectDiagnostic {
-                            code: "effect.sidechain.unexpected",
-                            path,
-                        });
+                        diagnostics
+                            .push(EffectDiagnostic::new("effect.sidechain.unexpected", path));
                         continue;
                     }
                     (SidechainDeclaration::Routed(sidechain), Some(_)) => {
@@ -1109,10 +1288,10 @@ pub fn prepare_native_session_effects(
                                 },
                             },
                             None => {
-                                diagnostics.push(EffectDiagnostic {
-                                    code: "effect.sidechain.unknown_port",
+                                diagnostics.push(EffectDiagnostic::new(
+                                    "effect.sidechain.unknown_port",
                                     path,
-                                });
+                                ));
                                 continue;
                             }
                         }
@@ -1136,20 +1315,14 @@ pub fn prepare_native_session_effects(
                 let expected = match expected_prepared_metadata(descriptor, request) {
                     Ok(metadata) => metadata,
                     Err(error) => {
-                        diagnostics.push(EffectDiagnostic {
-                            code: error.code,
-                            path,
-                        });
+                        diagnostics.push(EffectDiagnostic::new(error.code, path));
                         continue;
                     }
                 };
                 let processor = match factory.prepare(request) {
                     Ok(value) => value,
                     Err(error) => {
-                        diagnostics.push(EffectDiagnostic {
-                            code: error.code,
-                            path,
-                        });
+                        diagnostics.push(EffectDiagnostic::new(error.code, path));
                         continue;
                     }
                 };
@@ -1170,10 +1343,7 @@ pub fn prepare_native_session_effects(
                     || metadata.scratch_bytes != expected.scratch_bytes
                     || metadata.automation_capacity != expected.automation_capacity
                 {
-                    diagnostics.push(EffectDiagnostic {
-                        code: "effect.metadata.mismatch",
-                        path,
-                    });
+                    diagnostics.push(EffectDiagnostic::new("effect.metadata.mismatch", path));
                     continue;
                 }
                 entries.push(EffectPreparedEntry {
@@ -1190,6 +1360,7 @@ pub fn prepare_native_session_effects(
             }
         }
     }
+    validate_native_automation_lattices(session, registry, &mut diagnostics);
     if diagnostics.is_empty() {
         entries.sort_by(|a, b| {
             (&a.track_id, a.rack, &a.effect_id).cmp(&(&b.track_id, b.rack, &b.effect_id))
@@ -1258,28 +1429,19 @@ pub fn attach_effect_console(
             entry.track_id, entry.effect_id
         );
         let Some(capacity) = NonZeroUsize::new(entry.metadata.automation_capacity as usize) else {
-            diagnostics.push(EffectDiagnostic {
-                code: "effect.control.capacity",
-                path,
-            });
+            diagnostics.push(EffectDiagnostic::new("effect.control.capacity", path));
             continue;
         };
         let Some(&effect_index) =
             declared.get(&(entry.track_id.clone(), entry.rack, entry.effect_id.clone()))
         else {
-            diagnostics.push(EffectDiagnostic {
-                code: "effect.control.prepare",
-                path,
-            });
+            diagnostics.push(EffectDiagnostic::new("effect.control.prepare", path));
             continue;
         };
         let Ok((producer, consumer)) =
             bounded_spsc::<EffectControlRecord>(depth.min(capacity), QueueGeneration(0))
         else {
-            diagnostics.push(EffectDiagnostic {
-                code: "effect.control.prepare",
-                path,
-            });
+            diagnostics.push(EffectDiagnostic::new("effect.control.prepare", path));
             continue;
         };
         producers.push(EffectControlProducer {
@@ -1362,19 +1524,13 @@ pub fn attach_effect_observation(
             entry.track_id, entry.effect_id
         );
         if descriptor.observations.len() > maximum_taps as usize {
-            diagnostics.push(EffectDiagnostic {
-                code: "effect.observation.taps",
-                path,
-            });
+            diagnostics.push(EffectDiagnostic::new("effect.observation.taps", path));
             continue;
         }
         let Some(&effect_index) =
             declared.get(&(entry.track_id.clone(), entry.rack, entry.effect_id.clone()))
         else {
-            diagnostics.push(EffectDiagnostic {
-                code: "effect.observation.prepare",
-                path,
-            });
+            diagnostics.push(EffectDiagnostic::new("effect.observation.prepare", path));
             continue;
         };
         let mut publishers = Vec::with_capacity(descriptor.observations.len());
@@ -1386,10 +1542,7 @@ pub fn attach_effect_observation(
         }
         let Some(lane) = ObservationLane::new(descriptor.observations, publishers, window_blocks)
         else {
-            diagnostics.push(EffectDiagnostic {
-                code: "effect.observation.prepare",
-                path,
-            });
+            diagnostics.push(EffectDiagnostic::new("effect.observation.prepare", path));
             continue;
         };
         handles.push(EffectObservationHandle {

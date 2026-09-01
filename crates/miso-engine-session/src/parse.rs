@@ -1,11 +1,12 @@
 //! Explicit value-walking parser over `toml::de::DeTable` (borrowed, spanned). Serde is not used.
 use crate::{
-    Automation, AutomationSegment, AutomationTarget, ChannelBuiltins, ChannelMatrix, Diagnostic,
-    DiagnosticCode, DiagnosticPath as OwnedDiagnosticPath, DiagnosticSet, DualMonoBuiltins,
-    DualMonoFader, Effect, EffectIdentity, EffectParam, MatrixOrPan, Output, OutputProfile, Rack,
-    RenderProfile, Route, RouteDestination, RouteSource, SESSION_SCHEMA_VERSION_V1, SessionLimits,
-    SessionToml, Sidechain, SidechainDeclaration, Source, SourceContent, SourceMapping,
-    SourceRegion, SourceSpan, StableId, Submix, Track,
+    Automation, AutomationEndpoint, AutomationSegment, AutomationTarget, ChannelBuiltins,
+    ChannelMatrix, Diagnostic, DiagnosticCode, DiagnosticPath as OwnedDiagnosticPath,
+    DiagnosticSet, DualMonoBuiltins, DualMonoFader, Effect, EffectIdentity, EffectParam,
+    MatrixOrPan, Output, OutputProfile, ParameterChannel, PersistedParameterDecimal,
+    PersistedParameterTarget, Rack, RenderProfile, Route, RouteDestination, RouteSource,
+    SESSION_SCHEMA_VERSION_V1, SessionLimits, SessionToml, Sidechain, SidechainDeclaration, Source,
+    SourceContent, SourceMapping, SourceRegion, SourceSpan, StableId, Submix, Track,
     diagnostic::{MAXIMUM_SESSION_DIAGNOSTICS, PathRef as DiagnosticPath, PathSegment},
     model::ClosedToken,
     validate::validate_session,
@@ -502,8 +503,12 @@ pub fn parse_session_toml(source: &str) -> Result<SessionToml, DiagnosticSet> {
     let model = parse_root(&mut parser, root_table, root_path);
     if parser.diagnostics.is_empty() {
         match model {
-            Some(model) => match validate_session(&model) {
-                Ok(()) => Ok(model),
+            Some(mut model) => match validate_session(&model) {
+                Ok(()) => {
+                    model.persisted_parameter_decimals =
+                        collect_persisted_parameter_decimals(source, &root, &model);
+                    Ok(model)
+                }
                 Err(errors) => Err(DiagnosticSet::from_vec(
                     errors
                         .diagnostics()
@@ -561,6 +566,177 @@ fn span_for_path(root: &Spanned<DeTable<'_>>, path: &OwnedDiagnosticPath) -> Opt
         node = Node::Value(value);
     }
     Some(resolved)
+}
+
+fn collect_persisted_parameter_decimals(
+    source: &str,
+    root: &Spanned<DeTable<'_>>,
+    model: &SessionToml,
+) -> Vec<PersistedParameterDecimal> {
+    fn push(
+        output: &mut Vec<PersistedParameterDecimal>,
+        source: &str,
+        root: &Spanned<DeTable<'_>>,
+        path: OwnedDiagnosticPath,
+        target: PersistedParameterTarget,
+        value: f32,
+    ) {
+        let Some(range) = span_for_path(root, &path) else {
+            return;
+        };
+        output.push(PersistedParameterDecimal {
+            target,
+            source: source[range].trim().to_owned(),
+            value_bits: value.to_bits(),
+        });
+    }
+
+    let mut output = Vec::new();
+    let root_path = OwnedDiagnosticPath::root();
+    for (track_index, track) in model.tracks.iter().enumerate() {
+        let track_path = root_path.key("tracks").index(track_index);
+        for (channel_name, channel, builtins) in [
+            ("left", ParameterChannel::Left, &track.builtins.left),
+            ("right", ParameterChannel::Right, &track.builtins.right),
+        ] {
+            let path = track_path.key("builtins").key(channel_name);
+            for (field, parameter_id, value) in [
+                ("trim_db", 2, builtins.trim_db),
+                ("hpf_hz", 3, builtins.hpf_hz),
+                ("lpf_hz", 4, builtins.lpf_hz),
+            ] {
+                push(
+                    &mut output,
+                    source,
+                    root,
+                    path.key(field),
+                    PersistedParameterTarget::Builtin {
+                        track_id: track.id.clone(),
+                        parameter_id,
+                        channel,
+                    },
+                    value,
+                );
+            }
+        }
+        for (field, channel, value) in [
+            ("left_db", ParameterChannel::Left, track.fader.left_db),
+            ("right_db", ParameterChannel::Right, track.fader.right_db),
+        ] {
+            push(
+                &mut output,
+                source,
+                root,
+                track_path.key("fader").key(field),
+                PersistedParameterTarget::Builtin {
+                    track_id: track.id.clone(),
+                    parameter_id: 5,
+                    channel,
+                },
+                value,
+            );
+        }
+        match track.matrix_or_pan {
+            MatrixOrPan::Pan { left, right, .. } => {
+                for (field, channel, value) in [
+                    ("left", ParameterChannel::Left, left),
+                    ("right", ParameterChannel::Right, right),
+                ] {
+                    push(
+                        &mut output,
+                        source,
+                        root,
+                        track_path.key("pan").key(field),
+                        PersistedParameterTarget::Builtin {
+                            track_id: track.id.clone(),
+                            parameter_id: 12,
+                            channel,
+                        },
+                        value,
+                    );
+                }
+            }
+            MatrixOrPan::Matrix { ll, lr, rl, rr, .. } => {
+                for (field, parameter_id, value) in
+                    [("ll", 7, ll), ("lr", 8, lr), ("rl", 9, rl), ("rr", 10, rr)]
+                {
+                    push(
+                        &mut output,
+                        source,
+                        root,
+                        track_path.key("matrix").key(field),
+                        PersistedParameterTarget::Builtin {
+                            track_id: track.id.clone(),
+                            parameter_id,
+                            channel: ParameterChannel::Both,
+                        },
+                        value,
+                    );
+                }
+            }
+        }
+        for (rack_name, rack, rack_model) in [
+            ("simd1", crate::RackName::Simd1, &track.simd1),
+            ("dynamic", crate::RackName::Dynamic, &track.dynamic),
+            ("simd2", crate::RackName::Simd2, &track.simd2),
+        ] {
+            for (effect_index, effect) in rack_model.effects.iter().enumerate() {
+                for (parameter_index, parameter) in effect.params.iter().enumerate() {
+                    push(
+                        &mut output,
+                        source,
+                        root,
+                        track_path
+                            .key(rack_name)
+                            .key("effects")
+                            .index(effect_index)
+                            .key("params")
+                            .index(parameter_index)
+                            .key("value"),
+                        PersistedParameterTarget::Effect {
+                            track_id: track.id.clone(),
+                            rack,
+                            effect_id: effect.id.clone(),
+                            parameter_id: parameter.parameter_id,
+                            channel: parameter.channel,
+                        },
+                        parameter.value,
+                    );
+                }
+            }
+        }
+    }
+    for (automation_index, automation) in model.automation.iter().enumerate() {
+        for (segment_index, segment) in automation.segments.iter().enumerate() {
+            let segment_path = root_path
+                .key("automation")
+                .index(automation_index)
+                .key("segments")
+                .index(segment_index);
+            for (field, endpoint, value) in [
+                (
+                    "start_value",
+                    AutomationEndpoint::Start,
+                    segment.start_value,
+                ),
+                ("end_value", AutomationEndpoint::End, segment.end_value),
+            ] {
+                push(
+                    &mut output,
+                    source,
+                    root,
+                    segment_path.key(field),
+                    PersistedParameterTarget::Automation {
+                        automation_id: automation.id.clone(),
+                        segment_index: segment_index as u32,
+                        endpoint,
+                    },
+                    value,
+                );
+            }
+        }
+    }
+    output
 }
 
 fn parse_root(
@@ -675,6 +851,7 @@ fn parse_root(
             outputs,
             routes,
             automation,
+            persisted_parameter_decimals: Vec::new(),
         }),
         _ => None,
     }

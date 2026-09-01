@@ -209,6 +209,15 @@ pub enum LatticeError {
     TooManyPoints,
 }
 
+/// The two closest canonical lattice renderings around a refused exact decimal.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LatticeNeighbors {
+    /// Lower of the two nearest values (or the minimum at the low edge).
+    pub lower: String,
+    /// Upper of the two nearest values (or the maximum at the high edge).
+    pub upper: String,
+}
+
 const MAXIMUM_LATTICE_POINTS: usize = 1_000_000;
 
 /// Render a descriptor number with its pinned precision.
@@ -257,6 +266,113 @@ fn scaled(text: &str, precision: u8) -> Option<i128> {
     };
     let magnitude = whole.checked_add(fraction)?;
     Some(if negative { -magnitude } else { magnitude })
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ExactDecimal {
+    coefficient: i128,
+    scale: u32,
+}
+
+impl ExactDecimal {
+    fn parse(text: &str) -> Option<Self> {
+        let compact: String = text.chars().filter(|character| *character != '_').collect();
+        let (negative, unsigned) = compact
+            .strip_prefix('-')
+            .map_or((false, compact.as_str()), |rest| (true, rest));
+        let unsigned = unsigned.strip_prefix('+').unwrap_or(unsigned);
+        let (mantissa, exponent) = match unsigned.split_once(['e', 'E']) {
+            Some((mantissa, exponent)) => (mantissa, exponent.parse::<i32>().ok()?),
+            None => (unsigned, 0_i32),
+        };
+        let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+        if (whole.is_empty() && fraction.is_empty())
+            || !whole.bytes().all(|byte| byte.is_ascii_digit())
+            || !fraction.bytes().all(|byte| byte.is_ascii_digit())
+        {
+            return None;
+        }
+        let digits = format!("{whole}{fraction}");
+        let mut coefficient = digits.parse::<i128>().ok()?;
+        if negative {
+            coefficient = coefficient.checked_neg()?;
+        }
+        let scale = i32::try_from(fraction.len()).ok()?.checked_sub(exponent)?;
+        if scale < 0 {
+            coefficient = coefficient.checked_mul(10_i128.checked_pow(scale.unsigned_abs())?)?;
+            Some(Self {
+                coefficient,
+                scale: 0,
+            })
+        } else {
+            Some(Self {
+                coefficient,
+                scale: scale as u32,
+            })
+        }
+    }
+
+    fn compare(self, other: Self) -> Option<core::cmp::Ordering> {
+        let scale = self.scale.max(other.scale);
+        let left = self
+            .coefficient
+            .checked_mul(10_i128.checked_pow(scale - self.scale)?)?;
+        let right = other
+            .coefficient
+            .checked_mul(10_i128.checked_pow(scale - other.scale)?)?;
+        Some(left.cmp(&right))
+    }
+}
+
+/// Resolve an exact TOML decimal token to its lossless lattice index.
+///
+/// No binary floating-point conversion occurs here. Equivalent decimal spellings such as `0.3`
+/// and `0.30` resolve to the same point; the writer subsequently emits the descriptor's one
+/// canonical spelling. Refusal always returns two neighboring canonical values, including at the
+/// domain edges.
+pub fn exact_decimal_lattice_index(
+    points: &[LatticePoint],
+    text: &str,
+) -> Result<u32, LatticeNeighbors> {
+    let value = ExactDecimal::parse(text);
+    let compared = value.and_then(|value| {
+        points
+            .iter()
+            .map(|point| ExactDecimal::parse(&point.canonical)?.compare(value))
+            .collect::<Option<Vec<_>>>()
+    });
+    if let Some(compared) = compared {
+        if let Some(index) = compared
+            .iter()
+            .position(|ordering| *ordering == core::cmp::Ordering::Equal)
+        {
+            return Ok(points[index].index);
+        }
+        let insertion = compared
+            .iter()
+            .position(|ordering| *ordering == core::cmp::Ordering::Greater)
+            .unwrap_or(points.len());
+        return Err(neighbors(points, insertion));
+    }
+    Err(neighbors(points, 0))
+}
+
+fn neighbors(points: &[LatticePoint], insertion: usize) -> LatticeNeighbors {
+    debug_assert!(
+        points.len() >= 2,
+        "every parameter lattice has at least two points"
+    );
+    let (lower, upper) = if insertion == 0 {
+        (0, 1)
+    } else if insertion >= points.len() {
+        (points.len() - 2, points.len() - 1)
+    } else {
+        (insertion - 1, insertion)
+    };
+    LatticeNeighbors {
+        lower: points[lower].canonical.clone(),
+        upper: points[upper].canonical.clone(),
+    }
 }
 
 fn insert_decimal(
@@ -592,5 +708,28 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["0", "1", "2"]
         );
+    }
+
+    #[test]
+    fn exact_decimal_matching_never_rounds_through_f32() {
+        let parameter = ParameterDescriptor {
+            unit: ParameterUnit::Linear,
+            mapping: ParameterMapping::Linear,
+            minimum: Some(0.0),
+            maximum: Some(1.0),
+            default_value: 0.0,
+            lattice: ParameterLattice::arithmetic(0.1, 1),
+            ..parameter(ParameterLattice::arithmetic(0.1, 1))
+        };
+        let points = parameter_lattice_points(&parameter).expect("decimal lattice");
+        assert_eq!(exact_decimal_lattice_index(&points, "0.30"), Ok(3));
+        assert_eq!(
+            exact_decimal_lattice_index(&points, "0.30000000000000001"),
+            Err(LatticeNeighbors {
+                lower: "0.3".to_owned(),
+                upper: "0.4".to_owned(),
+            })
+        );
+        assert_eq!("0.30000000000000001".parse::<f32>(), "0.3".parse());
     }
 }
