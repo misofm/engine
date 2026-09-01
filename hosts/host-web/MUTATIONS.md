@@ -291,3 +291,34 @@ run, the failure was observed, and the mutation was reverted in the same session
 | the #281 defect itself | restore `quantumFrames`/`sessionToml`/`limits` on the corpus row | `chromium: browser-execution: corpus qualification failed: {"error":{"tag":"miso.error.v1","requestId":0,"result":1}, …}` — the exact transcript #281 reported. The `diagnostic` leg now answers `miso.ready.v1` result 0 with a full resource report, so the refusal is localized to the caller rather than echoing itself |
 | `bootOptions` completeness | delete `maximumMemoryBytes: 0n` | same typed refusal; the six boot words are not optional |
 | `bootOptions` exactness | leave one #240-deleted ceiling (`sessionTomlBytes: 1 << 20`) in the returned object | same typed refusal; a superset is as invalid as a subset |
+
+### The shipped AudioWorklet artifact digest pin (this change)
+
+`scripts/build-web-audioworklet.sh` did not remap `CARGO_HOME` or the repo root into its
+`RUSTFLAGS`, the same defect `scripts/build-flac-decoder.sh` had before #300: rustc bakes
+dependency source paths into panic locations, those sources live under `CARGO_HOME`, and
+`CARGO_HOME` differs between a developer machine and a CI runner. Reproduced by changing only
+`CARGO_HOME` and rebuilding the pre-fix script:
+
+  CARGO_HOME=/root/.cargo         -> 678a9e38d0cbeac982d5852f1a046e22037d58b6d80a97f0a1e3383d496884e7
+  CARGO_HOME=/home/runner/.cargo  -> 126b5d61b85ceef69f2f9d9653ef37240b5c511488e98e9c34514badf292baa4
+
+The artifact had no pin of its own, so nothing failed in this repo; the app's
+`miso-engine-v2.provenance.json` pins the digest one repo over, and would have moved underneath it
+silently.
+
+Fixed the same way as #300: `--remap-path-prefix` for both roots, plus a `decoder-artifact.sha256`-
+style pin (`hosts/host-web/web/miso-engine-v2-audio-worklet-artifact.sha256`) with a
+`MISO_ENGINE_WEB_AUDIOWORKLET_REPIN=1` escape hatch. Verified reproducible across three independent
+combinations of repo path and `CARGO_HOME` (`/root/.cargo`, `/home/runner/.cargo`,
+`/opt/alt/.cargo` from a second worktree), all producing
+`14328e23a1fe655d304bf646f7a7d18cb5686141cc9aa0a004a6d8e3cdceed31`, which is the new pin.
+
+The pin gate itself was proven to go red: with the pin file hand-edited to
+`deadbeef…deadbeef`, `scripts/build-web-audioworklet.sh` exited 1 with `AudioWorklet artifact pin
+mismatch: expected=deadbeef… observed=14328e23…` and wrote nothing to the output directory; restoring
+the correct pin made it pass again.
+
+| Target | Mutation | Observed failure |
+|---|---|---|
+| the digest pin | hand-edit `miso-engine-v2-audio-worklet-artifact.sha256` to `deadbeef…` | `AudioWorklet artifact pin mismatch: expected=deadbeef… observed=14328e23…`; exit 1, output directory left empty |
