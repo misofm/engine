@@ -1,4 +1,5 @@
-#![allow(clippy::disallowed_methods)] // D6 oracle/measurement exemption: compares against the platform deliberately (formerly check-math-policy.sh structural_exempt)
+#![allow(clippy::disallowed_methods)]
+// D6 oracle/measurement exemption: compares against the platform deliberately (formerly check-math-policy.sh structural_exempt)
 //! Issue #163 phase 4 item 1 at the effect boundary: the silent fast path moves no rendered bit.
 //!
 //! The bank may stop running its four sections once it has *observed* that an all-`+0.0` input

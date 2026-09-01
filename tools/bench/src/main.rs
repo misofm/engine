@@ -1,4 +1,5 @@
-#![allow(clippy::disallowed_methods)] // D6 oracle/measurement exemption: compares against the platform deliberately (formerly check-math-policy.sh structural_exempt)
+#![allow(clippy::disallowed_methods)]
+// D6 oracle/measurement exemption: compares against the platform deliberately (formerly check-math-policy.sh structural_exempt)
 //! Consolidated benchmark subjects.
 
 #[cfg(not(target_arch = "wasm32"))]

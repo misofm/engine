@@ -1,4 +1,5 @@
-#![allow(clippy::disallowed_methods)] // D6 oracle/measurement exemption: compares against the platform deliberately (formerly check-math-policy.sh structural_exempt)
+#![allow(clippy::disallowed_methods)]
+// D6 oracle/measurement exemption: compares against the platform deliberately (formerly check-math-policy.sh structural_exempt)
 //! Gate P1 for this crate: a block boundary is not observable.
 //!
 //! A ramp, an envelope follower and the gain computer are composed into one small dynamics

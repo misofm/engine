@@ -1,4 +1,5 @@
-#![allow(clippy::disallowed_methods)] // D6 oracle/measurement exemption: compares against the platform deliberately (formerly check-math-policy.sh structural_exempt)
+#![allow(clippy::disallowed_methods)]
+// D6 oracle/measurement exemption: compares against the platform deliberately (formerly check-math-policy.sh structural_exempt)
 //! Generates or verifies the small checked-in issue-002 fixture corpus.
 
 use std::{

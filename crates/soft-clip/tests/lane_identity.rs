@@ -1,4 +1,5 @@
-#![allow(clippy::disallowed_methods)] // D6 oracle/measurement exemption: compares against the platform deliberately (formerly check-math-policy.sh structural_exempt)
+#![allow(clippy::disallowed_methods)]
+// D6 oracle/measurement exemption: compares against the platform deliberately (formerly check-math-policy.sh structural_exempt)
 //! E2 — the vector widths render the same bits as `WIDTH = 1`, lane for lane.
 //!
 //! One body instantiated at three widths is the whole reason lane identity is claimed as a

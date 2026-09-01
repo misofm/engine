@@ -1,4 +1,5 @@
-#![allow(clippy::disallowed_methods)] // D6 oracle/measurement exemption: compares against the platform deliberately (formerly check-math-policy.sh structural_exempt)
+#![allow(clippy::disallowed_methods)]
+// D6 oracle/measurement exemption: compares against the platform deliberately (formerly check-math-policy.sh structural_exempt)
 //! E14 — descriptive: where an `f32` gain-reduction word stops moving on a long release.
 //!
 //! Not a gate. The one-pole increment is `c * (C - G)`; when that drops below `ulp(G)` the state

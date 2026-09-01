@@ -1,4 +1,5 @@
-#![allow(clippy::disallowed_methods)] // D6 oracle/measurement exemption: compares against the platform deliberately (formerly check-math-policy.sh structural_exempt)
+#![allow(clippy::disallowed_methods)]
+// D6 oracle/measurement exemption: compares against the platform deliberately (formerly check-math-policy.sh structural_exempt)
 //! Response gates: the prepared cascade against the independent `f64` RBJ oracle.
 //!
 //! These are the frozen tolerances of issues 007/031/036 -- 0.005 dB on the cast state-space

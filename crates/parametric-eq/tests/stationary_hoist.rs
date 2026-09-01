@@ -1,4 +1,5 @@
-#![allow(clippy::disallowed_methods)] // D6 oracle/measurement exemption: compares against the platform deliberately (formerly check-math-policy.sh structural_exempt)
+#![allow(clippy::disallowed_methods)]
+// D6 oracle/measurement exemption: compares against the platform deliberately (formerly check-math-policy.sh structural_exempt)
 //! Issue #144 item 6 at the effect boundary: a redundant automation point is a no-op.
 //!
 //! The hoist settles a lane whose six designed words already agree bitwise instead of arming a

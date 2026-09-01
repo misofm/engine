@@ -1,4 +1,5 @@
-#![allow(clippy::disallowed_methods)] // D6 oracle/measurement exemption: compares against the platform deliberately (formerly check-math-policy.sh structural_exempt)
+#![allow(clippy::disallowed_methods)]
+// D6 oracle/measurement exemption: compares against the platform deliberately (formerly check-math-policy.sh structural_exempt)
 //! E7 — D7: no per-value checking, one boundary check per block per bank.
 //!
 //! The audit found 258 per-operation store/`is_finite`/`is_subnormal`/reload wrappers per input

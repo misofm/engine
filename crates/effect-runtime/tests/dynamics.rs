@@ -1,4 +1,5 @@
-#![allow(clippy::disallowed_methods)] // D6 oracle/measurement exemption: compares against the platform deliberately (formerly check-math-policy.sh structural_exempt)
+#![allow(clippy::disallowed_methods)]
+// D6 oracle/measurement exemption: compares against the platform deliberately (formerly check-math-policy.sh structural_exempt)
 //! The gain computer against an independent `f64` transcription of Giannoulis, Massberg and Reiss
 //! (JAES 2012) equation 4, and the knee's continuity at both of its edges.
 

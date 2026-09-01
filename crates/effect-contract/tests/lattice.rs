@@ -1,4 +1,5 @@
-#![allow(clippy::disallowed_methods)] // D6 oracle/measurement exemption: compares against the platform deliberately (formerly check-math-policy.sh structural_exempt)
+#![allow(clippy::disallowed_methods)]
+// D6 oracle/measurement exemption: compares against the platform deliberately (formerly check-math-policy.sh structural_exempt)
 //! Parameter-lattice law (#242 S1/S2, #239 rulings 5461507633 B and 5462028562 B).
 //!
 //! These prove the LAW on synthetic descriptors; the shipped catalog is swept separately in

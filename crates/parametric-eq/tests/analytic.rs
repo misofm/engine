@@ -1,4 +1,5 @@
-#![allow(clippy::disallowed_methods)] // D6 oracle/measurement exemption: compares against the platform deliberately (formerly check-math-policy.sh structural_exempt)
+#![allow(clippy::disallowed_methods)]
+// D6 oracle/measurement exemption: compares against the platform deliberately (formerly check-math-policy.sh structural_exempt)
 //! Analytic acceptance gates: the transfer the kernel actually realises, against the RBJ oracle.
 //!
 //! Every gate here evaluates the **state space of the implemented recurrence** from the words
