@@ -27,7 +27,7 @@ jobs:
         run: |
           rustup toolchain install 1.97.1 --profile minimal --component clippy --component rustfmt
           sudo apt-get update
-          sudo apt-get install -y ripgrep
+          sudo apt-get install -y ripgrep wabt
       - name: Format
         run: cargo fmt --all -- --check
       - name: Clippy
@@ -152,6 +152,14 @@ jobs:
         run: |
           rustup target add --toolchain 1.97.1 wasm32-unknown-unknown aarch64-linux-android aarch64-apple-ios
           bash scripts/check-parametric-eq-targets.sh
+      # Issue-007 and Issue-081's own cross-target matrices, the same shape as the parametric EQ
+      # seal above. Both were previously reachable only from scripts/sweep.sh, which nobody runs
+      # -- meaning builtins and the effect-interchange descriptor had no cross-target proof in CI
+      # at all, only the parametric-eq sibling effect did.
+      - name: Builtins and effect-interchange target matrices
+        run: |
+          bash scripts/check-builtins-targets.sh
+          bash scripts/check-effect-interchange-targets.sh
       - name: Parametric EQ realtime allocation and syscall audit
         run: |
           cargo build --locked --release -p audit --bin audit
@@ -169,6 +177,12 @@ jobs:
         run: |
           bash scripts/trace-builtins-audit.sh
           bash scripts/trace-builtins-graph-audit.sh
+      # The independent builtins fixture corpus manifest and its expected-output digests.
+      # Previously reachable only from scripts/sweep.sh, which nobody runs.
+      - name: Builtins fixture corpus integrity and mutation tests
+        run: |
+          bash scripts/check-builtins-fixtures.sh .
+          bash scripts/test-builtins-fixtures.sh
       - name: Native effect runtime policy, fixtures, conformance, and mutations
         run: bash scripts/check-effect-contract.sh
       - name: Protocol caller-buffer allocation audit
