@@ -4,6 +4,7 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 version.workspace = true
+license.workspace = true
 
 [lib]
 name = "bench_support"

@@ -59,3 +59,8 @@ artifacts except metadata-bearing package outputs.
   spec and filename.
 - 2026-09-01: Sol approved the smallest closable slice and objective gates above. Attempt 1 is
   authorized.
+- 2026-09-01: Attempt 1 adds the canonical Apache-2.0 text (`sha256
+  cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30`), project notice,
+  third-party inventory, Cargo/npm declarations, and workspace-policy enforcement. Focused
+  workspace policy plus red mutations pass; `cargo metadata --no-deps` reports Apache-2.0 for
+  every package; both npm roots and locks report Apache-2.0. Adversarial review is pending.

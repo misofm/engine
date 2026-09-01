@@ -81,9 +81,45 @@ toml_array_names() {
     ' "$manifest"
 }
 
+# Issue #314: Apache-2.0 is the default license for original project work. The digest protects the
+# legal text itself, not a prose claim: a truncated or edited LICENSE grants different rights.
+apache_license_sha256='cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30'
+for required_license_file in LICENSE NOTICE THIRD_PARTY_LICENSES.md crates/math/LICENSE-libm.txt; do
+    [[ -s "$required_license_file" ]] || fail "required license artifact is missing or empty: $required_license_file"
+done
+actual_license_sha256="$(sha256sum LICENSE | awk '{print $1}')"
+[[ "$actual_license_sha256" == "$apache_license_sha256" ]] || {
+    fail "LICENSE is not the canonical Apache License 2.0 text"
+}
+rg -qx 'license = "Apache-2.0"' Cargo.toml || {
+    fail 'Cargo.toml workspace package license must be Apache-2.0'
+}
+rg -qx 'license = "Apache-2.0"' fuzz/Cargo.toml || {
+    fail 'fuzz/Cargo.toml license must be Apache-2.0'
+}
+rg -q 'crates/math/LICENSE-libm\.txt' THIRD_PARTY_LICENSES.md || {
+    fail 'third-party inventory must retain the vendored libm license record'
+}
+
+while IFS= read -r npm_manifest; do
+    jq -e '.license == "Apache-2.0"' "$npm_manifest" >/dev/null || {
+        fail "$npm_manifest license must be Apache-2.0"
+    }
+done < <(find . -name package.json -type f -not -path '*/node_modules/*' | sort)
+
+while IFS= read -r npm_lock; do
+    jq -e '.packages[""].license == "Apache-2.0"' "$npm_lock" >/dev/null || {
+        fail "$npm_lock root package license must be Apache-2.0"
+    }
+done < <(find . -name package-lock.json -type f -not -path '*/node_modules/*' | sort)
+
 while IFS= read -r manifest; do
     package_directory="$(basename "$(dirname "$manifest")")"
     package_name="$(toml_name package "$manifest")"
+
+    rg -qx 'license\.workspace = true' "$manifest" || {
+        fail "$manifest must inherit the Apache-2.0 workspace license"
+    }
 
     # The `miso-engine-` prefix convention was retired by the prefix-strip rename (see
     # docs/rulings/prefix-strip-inventory.md): every package under crates/, hosts/, tools/ and
