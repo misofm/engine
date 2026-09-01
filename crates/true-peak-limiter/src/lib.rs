@@ -4428,8 +4428,9 @@ mod tests {
     /// The signal is [`Noise`], the crate's SplitMix64, seeded from the block index so that two
     /// arms of the same comparison see the same samples and a corpus stays a seed rather than a
     /// file. It is deliberately *not* a sine: `f32::sin` is a platform transcendental, which
-    /// decision D6 and `scripts/check-math-policy.sh` forbid anywhere in `src/` — including in a
-    /// test module, since the policy scans the file and not the `cfg`.
+    /// decision D6 and `clippy.toml`'s `disallowed-methods` (formerly `scripts/check-math-policy.sh`)
+    /// forbid anywhere in `src/` — including in a test module, since the lint scans the file and
+    /// not the `cfg`.
     fn silence_plane(
         block: usize,
         frames: usize,

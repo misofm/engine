@@ -33,6 +33,8 @@ valid="$scratch/valid"
 make_fixture "$valid"
 bash "$policy" "$valid" >/dev/null
 expect_failure unsafe 'printf "unsafe fn bad() {}\n" >>"$fixture/crates/rack/src/lib.rs"'
-expect_failure track-limit 'printf "const MAX_TRACKS: usize = 1;\n" >>"$fixture/crates/rack/src/lib.rs"'
+# The MAX_TRACKS ban itself moved to scripts/check-workspace-policy.sh (P12, one copy instead of
+# five); scripts/test-workspace-policy.sh covers its mutation. This script's job is now only the
+# unsafe ban and the dependency boundary.
 expect_failure dependency 'printf "session.workspace = true\n" >>"$fixture/crates/rack/Cargo.toml"'
 printf 'rack policy mutations: ok\n'

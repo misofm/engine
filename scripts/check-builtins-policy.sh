@@ -23,7 +23,8 @@ fi
 rg --fixed-strings 'unsafe' "${paths[@]}" \
     | rg -v '^crates/builtins-compiler/tests/allocation_tracker.rs:' \
     && exit 1 || true
-rg --fixed-strings 'MAX_TRACKS' "${paths[@]}" && exit 1 || true
+# The MAX_TRACKS ban lives once, in scripts/check-workspace-policy.sh (P12), which scans the
+# whole {crates,hosts,tools,sidecars} tree rather than one of five copies of the same check.
 rg --fixed-strings 'builtins' Cargo.toml crates/builtins/Cargo.toml crates/builtins-compiler/Cargo.toml >/dev/null
 rg --fixed-strings 'builtins' crates/builtins/Cargo.toml crates/builtins-compiler/Cargo.toml >/dev/null
 

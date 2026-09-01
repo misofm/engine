@@ -1,0 +1,83 @@
+disallowed-methods = [
+    # Master plan #83 decision D6, enforced structurally instead of by
+    # `scripts/check-math-policy.sh` (retired; see this repo's history for the mutation proof).
+    #
+    # `disallowed-methods` matches a *resolved path in the AST* -- the workspace member list, not
+    # a directory string -- so it cannot be blinded by a crate move between crates/hosts/sidecars
+    # or by a brand-new top-level directory, the way a grep gate scanning a hardcoded root list
+    # can. A call site this list forbids fails to compile under `ci.yml`'s `host` job
+    # (`cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`) unless it
+    # carries `#[expect(clippy::disallowed_methods, reason = "issue #NNN")]`; rustc's own
+    # unfulfilled-expectation error fires the day that attribute stops being needed. That is the
+    # same bidirectional ratchet `check-math-policy.sh`'s allowlist implemented by hand, at the
+    # cost of a stale shell allowlist nobody re-derives.
+    #
+    # D6: production code calls the engine's own deterministic math in `crates/math`, never the
+    # platform's -- `f32`/`f64` transcendentals are not specified to agree across targets,
+    # toolchains or optimisation levels. `sqrt` is intentionally absent: IEEE 754 specifies it
+    # exactly, so it was never banned. `crates/math` (the owner) and `crates/dsp-reference` (the
+    # independent f64 oracle whose whole job is to reproduce the platform's rounding) opt out at
+    # the crate root with `#![allow(clippy::disallowed_methods)]`; every other production call
+    # site needs a per-site `#[expect]` with an owning issue. Test files, examples and `src/bin/`
+    # binaries compare against the platform deliberately and opt out per file for the same reason
+    # `check-math-policy.sh`'s `structural_exempt` pattern did.
+    #
+    # Issue #144 item 5 ("Condition H"), enforced structurally instead of by
+    # `scripts/check-fast-db-seal.sh` (retired). The fast dB tier is admitted only inside
+    # `crates/math/src/fast_db.rs` itself, the bound gate that proves its error, and six named
+    # crossings (`FAST-DB-CROSSING X1`-`X6`, one `#[expect]` per crossing site, comments left in
+    # place at each call). Mutation-proven: see the git history of this file.
+    #
+    # `scripts/check-unfused-seal.sh` was evaluated for the same migration and KEPT as a script --
+    # its full rule set is not expressible here. Four of its six rules are not call-site bans at
+    # all: a *positive presence* check that both `Lane::fma` dispatch points literally contain
+    # `(self * b) + c`; a ban on `cfg` inside that function body (so the contract cannot be split
+    # per target); an exact global count of exactly 8 fused calls in the whole tree, counted two
+    # independent ways; and a refusal of the retired software-FMA *definitions* in
+    # `crates/lane/src/softfma.rs`, not calls to them. `#[expect]` only ever answers "is this
+    # specific site still needed", never "does this file's body still say X" or "how many total
+    # occurrences exist tree-wide" -- so `check-unfused-seal.sh` stays wired into CI (`ci.yml`'s
+    # `host` job).
+    #
+    # `check-fast-db-seal.sh` also carried one rule with no clippy equivalent --
+    # `fast_exp2`/`fast_log2` must stay private to their module, a definition-visibility rule, not
+    # a call-site rule -- which this migration does not reproduce. It is a minor encapsulation
+    # property (nothing downstream depends on those two names staying unexported) rather than a
+    # safety-critical one, unlike the four `check-unfused-seal.sh` keeps a script for.
+    { path = "f32::exp", reason = "not cross-target deterministic (D6); call math::exp" },
+    { path = "f64::exp", reason = "not cross-target deterministic (D6); call math::exp" },
+    { path = "f32::exp2", reason = "not cross-target deterministic (D6); call math::exp2" },
+    { path = "f64::exp2", reason = "not cross-target deterministic (D6); call math::exp2" },
+    { path = "f32::ln", reason = "not cross-target deterministic (D6); call math::ln" },
+    { path = "f64::ln", reason = "not cross-target deterministic (D6); call math::ln" },
+    { path = "f32::log2", reason = "not cross-target deterministic (D6); call math::log2" },
+    { path = "f64::log2", reason = "not cross-target deterministic (D6); call math::log2" },
+    { path = "f32::log10", reason = "not cross-target deterministic (D6); call math::log10" },
+    { path = "f64::log10", reason = "not cross-target deterministic (D6); call math::log10" },
+    { path = "f32::powf", reason = "not cross-target deterministic (D6); call math::powf" },
+    { path = "f64::powf", reason = "not cross-target deterministic (D6); call math::powf" },
+    { path = "f32::powi", reason = "not cross-target deterministic (D6); call math::powi" },
+    { path = "f64::powi", reason = "not cross-target deterministic (D6); call math::powi" },
+    { path = "f32::sin", reason = "not cross-target deterministic (D6); call math::sin" },
+    { path = "f64::sin", reason = "not cross-target deterministic (D6); call math::sin" },
+    { path = "f32::cos", reason = "not cross-target deterministic (D6); call math::cos" },
+    { path = "f64::cos", reason = "not cross-target deterministic (D6); call math::cos" },
+    { path = "f32::tan", reason = "not cross-target deterministic (D6); call math::tan" },
+    { path = "f64::tan", reason = "not cross-target deterministic (D6); call math::tan" },
+    { path = "f32::atan", reason = "not cross-target deterministic (D6); call math::atan" },
+    { path = "f64::atan", reason = "not cross-target deterministic (D6); call math::atan" },
+    { path = "f32::atan2", reason = "not cross-target deterministic (D6); call math::atan2" },
+    { path = "f64::atan2", reason = "not cross-target deterministic (D6); call math::atan2" },
+    { path = "f32::sinh", reason = "not cross-target deterministic (D6); call math::sinh" },
+    { path = "f64::sinh", reason = "not cross-target deterministic (D6); call math::sinh" },
+    { path = "f32::cosh", reason = "not cross-target deterministic (D6); call math::cosh" },
+    { path = "f64::cosh", reason = "not cross-target deterministic (D6); call math::cosh" },
+    { path = "f32::tanh", reason = "not cross-target deterministic (D6); call math::tanh" },
+    { path = "f64::tanh", reason = "not cross-target deterministic (D6); call math::tanh" },
+    { path = "f32::exp_m1", reason = "not cross-target deterministic (D6); call math::exp_m1" },
+    { path = "f64::exp_m1", reason = "not cross-target deterministic (D6); call math::exp_m1" },
+    { path = "f32::ln_1p", reason = "not cross-target deterministic (D6); call math::ln_1p" },
+    { path = "f64::ln_1p", reason = "not cross-target deterministic (D6); call math::ln_1p" },
+    { path = "math::fast_db::fast_level_db", reason = "fast dB tier (#144 item 5); admitted only at a named FAST-DB-CROSSING site" },
+    { path = "math::fast_db::fast_gain_from_db", reason = "fast dB tier (#144 item 5); admitted only at a named FAST-DB-CROSSING site" },
+]

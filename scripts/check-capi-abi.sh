@@ -2,6 +2,102 @@
 # Check the frozen Issue-022 C header, exact exported symbols, and native consumer linkage.
 set -euo pipefail
 
+
+# ---------------------------------------------------------------------------------------------
+# --self-test: mutation tests for this checker (issue #104-shape: folded in from the former
+# test-capi-abi.sh so the gate and its own mutation proof cannot drift apart or be wired in
+# separately). Adds a positive control the original file never had -- the unmutated checker
+# must pass before any mutation is asked to fail it.
+capi_abi_self_test() {
+    local script_directory workspace_root scratch_root host_triple library
+    script_directory="$(cd "$(dirname "$0")" && pwd)"
+    workspace_root="$(cd "$script_directory/.." && pwd)"
+    scratch_root="$(mktemp -d)"
+    trap 'rm -rf -- "$scratch_root"' RETURN
+    cargo build --locked -p capi --manifest-path "$workspace_root/Cargo.toml" >/dev/null
+
+    host_triple="$(rustc -vV | sed -n 's/^host: //p')"
+    case "$host_triple" in
+        *-linux-*) library="$workspace_root/target/debug/libcapi.so" ;;
+        *-apple-*) library="$workspace_root/target/debug/libcapi.dylib" ;;
+        *) printf 'unsupported pinned native host: %s\n' "$host_triple" >&2; exit 1 ;;
+    esac
+
+    expect_failure() {
+        local name="$1"
+        shift
+        if "$@" >/dev/null 2>&1; then
+            printf 'C ABI mutation unexpectedly passed: %s\n' "$name" >&2
+            return 1
+        fi
+    }
+
+    common_env=(env MISO_ENGINE_CAPI_SKIP_BUILD=1 MISO_ENGINE_CAPI_LIBRARY="$library")
+
+        # Positive control: the unmutated checker must pass against the real header and library
+        # before any mutation is asked to fail it. Without this, a checker "hardened" into
+        # refusing everything would pass every expect_failure case below.
+        "${common_env[@]}" bash "$0" "$workspace_root" >/dev/null ||
+            { printf 'C ABI mutation self-test FAILED: baseline (unmutated) run did not pass\n' >&2; return 1; }
+
+    expect_failure missing-c-compiler \
+        "${common_env[@]}" CC="$scratch_root/no-such-cc" bash "$0" "$workspace_root"
+
+    abi_header="$scratch_root/abi-version.h"
+    cp "$workspace_root/crates/capi/include/miso_engine_v1.h" "$abi_header"
+    sed -i 's/UINT32_C(0x00010000)/UINT32_C(0x00010001)/' "$abi_header"
+    expect_failure header-constant-drift \
+        "${common_env[@]}" MISO_ENGINE_CAPI_HEADER="$abi_header" bash "$0" "$workspace_root"
+
+    layout_header="$scratch_root/layout.h"
+    cp "$workspace_root/crates/capi/include/miso_engine_v1.h" "$layout_header"
+    sed -i '0,/uint64_t reserved\[4\];/s//uint64_t reserved[3];/' "$layout_header"
+    expect_failure header-layout-drift \
+        "${common_env[@]}" MISO_ENGINE_CAPI_HEADER="$layout_header" bash "$0" "$workspace_root"
+
+    signature_header="$scratch_root/signature.h"
+    cp "$workspace_root/crates/capi/include/miso_engine_v1.h" "$signature_header"
+    sed -i 's/miso_engine_v1_abi_version(void)/miso_engine_v1_abi_version(uint32_t reserved)/' \
+        "$signature_header"
+    expect_failure header-signature-drift \
+        "${common_env[@]}" MISO_ENGINE_CAPI_HEADER="$signature_header" bash "$0" "$workspace_root"
+
+    real_nm="$(command -v "${NM:-nm}")"
+    nm_add="$scratch_root/nm-add"
+    printf '%s\n' '#!/usr/bin/env bash' \
+        '"${REAL_NM}" "$@"' \
+        'printf "%s\n" "00000000 T miso_engine_v1_added"' >"$nm_add"
+    chmod +x "$nm_add"
+    expect_failure symbol-addition \
+        "${common_env[@]}" NM="$nm_add" REAL_NM="$real_nm" bash "$0" "$workspace_root"
+
+    nm_remove="$scratch_root/nm-remove"
+    printf '%s\n' '#!/usr/bin/env bash' \
+        '"${REAL_NM}" "$@" | sed "/miso_engine_v1_abi_version/d"' >"$nm_remove"
+    chmod +x "$nm_remove"
+    expect_failure symbol-removal \
+        "${common_env[@]}" NM="$nm_remove" REAL_NM="$real_nm" bash "$0" "$workspace_root"
+
+    bad_library="$scratch_root/not-a-library.so"
+    printf '%s\n' 'not a native library' >"$bad_library"
+    expect_failure link-failure \
+        env MISO_ENGINE_CAPI_SKIP_BUILD=1 MISO_ENGINE_CAPI_LIBRARY="$bad_library" \
+        bash "$0" "$workspace_root"
+
+    bad_static_library="$scratch_root/not-a-library.a"
+    printf '%s\n' 'not a static archive' >"$bad_static_library"
+    expect_failure static-link-failure \
+        "${common_env[@]}" MISO_ENGINE_CAPI_STATIC_LIBRARY="$bad_static_library" \
+        bash "$0" "$workspace_root"
+
+    printf 'C ABI mutation tests: ok\n'
+}
+
+if [[ "${1:-}" == "--self-test" ]]; then
+    capi_abi_self_test
+    exit $?
+fi
+
 workspace_root="${1:-.}"
 cd "$workspace_root"
 
@@ -36,6 +132,12 @@ case "$host_triple" in
 esac
 library="${MISO_ENGINE_CAPI_LIBRARY:-$default_library}"
 [[ -f "$library" ]] || fail "missing native library: $library"
+# The staticlib leg (issue #114's toolchain matrix named both static and shared linkage, but
+# never automated either -- it only grepped its own now-deleted runner script's source for the
+# words "static"/"shared"). `crates/capi`'s crate-type list includes `staticlib`, so this actually
+# links and runs, rather than asserting a string appears in a script nobody ran.
+static_library="${MISO_ENGINE_CAPI_STATIC_LIBRARY:-target/debug/libcapi.a}"
+[[ -f "$static_library" ]] || fail "missing native static library: $static_library"
 
 scratch_root="$(mktemp -d)"
 trap 'rm -rf -- "$scratch_root"' EXIT
@@ -78,4 +180,20 @@ diff -u "$expected_symbols" "$actual_symbols" \
     || fail "exported symbol set differs from frozen ABI V1"
 
 "$scratch_root/abi-smoke"
-printf 'C ABI check: ok (%s)\n' "$host_triple"
+
+# Static linkage: the same C11 fixture, against the .a instead of the .so. Rust staticlibs pull in
+# libc's own pthread/dl/m on this pinned toolchain; linked explicitly rather than relying on a
+# default that can vary by distro.
+static_library_path="$(cd "$(dirname "$static_library")" && pwd)/$(basename "$static_library")"
+if [[ "$host_triple" == *-apple-* ]]; then
+    "$cc_tool" -std=c11 -Wall -Wextra -Werror -pedantic \
+        -I"$include_directory" "$c_fixture" "$static_library_path" \
+        -o "$scratch_root/abi-smoke-static"
+else
+    "$cc_tool" -std=c11 -Wall -Wextra -Werror -pedantic \
+        -I"$include_directory" "$c_fixture" "$static_library_path" \
+        -lpthread -ldl -lm -o "$scratch_root/abi-smoke-static"
+fi
+"$scratch_root/abi-smoke-static"
+
+printf 'C ABI check: ok (%s, shared and static linkage)\n' "$host_triple"

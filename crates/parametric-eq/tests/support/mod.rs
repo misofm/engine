@@ -1,3 +1,5 @@
+#![allow(clippy::disallowed_methods)]
+// D6 oracle/measurement exemption: compares against the platform deliberately (formerly check-math-policy.sh structural_exempt)
 //! Shared fixtures for the parametric-EQ acceptance gates.
 //!
 //! The frozen grids, the block driver and the payload accessors live here so that every gate reads

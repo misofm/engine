@@ -44,7 +44,8 @@ done
 # `sanitize`, `normalize_zero`, `parameter_value_valid`, `validate_state_lengths`, `state_error`,
 # `Ramp`, `apply_automation`, `discontinuity_reset`. Wave 2 moved most of them into
 # `effect-runtime` and wave 3 deleted the contract's dead ones. This manifest is what
-# keeps them collapsed: it is a **ratchet**, exactly like `check-math-policy.sh`'s allowlist. A
+# keeps them collapsed: it is a **ratchet**, exactly like `clippy.toml`'s per-site `#[expect]`
+# (formerly `check-math-policy.sh`'s allowlist). A
 # count that goes up fails, and a count that reaches its target must have its row updated in the
 # same change. A name with no home left is pinned at 0, so a copy cannot come back quietly.
 #

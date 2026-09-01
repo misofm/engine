@@ -12,12 +12,12 @@ copy_case() {
         "$case_root/docs"
     cp "$root/tools/native-pcm-runner/src/lib.rs" \
         "$case_root/tools/native-pcm-runner/src/lib.rs"
-    cp "$root/scripts/check-native-pcm-runner-portability-v1.sh" "$case_root/scripts/"
+    cp "$root/scripts/check-native-pcm-runner.sh" "$case_root/scripts/"
     cp "$root/docs/NATIVE_PCM_REFERENCE_RUNNER_V1.md" "$case_root/docs/"
 }
 
 reject() {
-    if "$case_root/scripts/check-native-pcm-runner-portability-v1.sh" "$case_root" \
+    if "$case_root/scripts/check-native-pcm-runner.sh" "$case_root" portability \
         >/dev/null 2>&1; then
         printf 'native PCM portability mutation escaped: %s\n' "$1" >&2
         exit 1
@@ -25,7 +25,7 @@ reject() {
 }
 
 copy_case baseline
-"$case_root/scripts/check-native-pcm-runner-portability-v1.sh" "$case_root" >/dev/null
+"$case_root/scripts/check-native-pcm-runner.sh" "$case_root" portability >/dev/null
 
 copy_case pathname-fallback
 printf '\n// mutation\nfn escaped_fallback(&self) { fs::hard_link(&self.partial_path, &self.final_path); }\n' \

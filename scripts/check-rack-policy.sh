@@ -30,9 +30,11 @@ compiler_manifest=crates/rack-compiler/Cargo.toml
 [[ "$(dependencies "$compiler_manifest")" == $'effect-contract\nengine\nrack' ]] ||
     fail 'rack compiler dependency boundary changed'
 
-if rg -n '\bunsafe\b|\b(MAX_TRACKS|MAX_TRACK_COUNT|DEFAULT_MAX_TRACKS|TRACK_LIMIT)\b' \
-    crates/rack crates/rack-compiler --glob '*.rs'; then
-    fail 'rack source has unsafe code or a compiled track ceiling'
+# The MAX_TRACKS ban lives once, in scripts/check-workspace-policy.sh, which scans the whole
+# {crates,hosts,tools,sidecars} tree -- rack/rack-compiler included -- rather than five copies
+# of the same regex over five different root lists.
+if rg -n '\bunsafe\b' crates/rack crates/rack-compiler --glob '*.rs'; then
+    fail 'rack source has unsafe code'
 fi
 if rg -n '\b(session|effect_compiler|graph|builtins)::|std::(fs|net|thread|sync)|log::|tracing::' \
     crates/rack/src crates/rack/Cargo.toml; then

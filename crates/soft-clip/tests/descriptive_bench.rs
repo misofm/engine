@@ -1,3 +1,5 @@
+#![allow(clippy::disallowed_methods)]
+// D6 oracle/measurement exemption: compares against the platform deliberately (formerly check-math-policy.sh structural_exempt)
 //! Descriptive throughput of the production `process_bank` shape (issue #91, plan step 6.0).
 //!
 //! Not a gate. One warmup and two measured rounds, per `AGENTS.md`; nothing but the prepared

@@ -1,3 +1,5 @@
+#![allow(clippy::disallowed_methods)]
+// D6 oracle/measurement exemption: compares against the platform deliberately (formerly check-math-policy.sh structural_exempt)
 //! Contract gates: descriptor, automation, state payload, bypass, resets.
 //!
 //! The descriptor, the parameter identifiers, the automation validation rules and the port and

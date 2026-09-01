@@ -1,3 +1,5 @@
+#![allow(clippy::disallowed_methods)]
+// D6 oracle/measurement exemption: compares against the platform deliberately (formerly check-math-policy.sh structural_exempt)
 //! The prepared-identity elision of `input_chain_block`: when a section may be skipped, and that
 //! skipping it moves no bit.
 //!

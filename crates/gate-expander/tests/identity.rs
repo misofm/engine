@@ -1,3 +1,5 @@
+#![allow(clippy::disallowed_methods)]
+// D6 oracle/measurement exemption: compares against the platform deliberately (formerly check-math-policy.sh structural_exempt)
 //! Gates 7.1, 7.2 and 7.4: lane identity, partition invariance and the signed-zero dry path.
 //!
 //! The oracle for lane identity is the scalar `Lane` instantiation (master plan #83 §1.7): the

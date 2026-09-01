@@ -1,3 +1,5 @@
+#![allow(clippy::disallowed_methods)]
+// D6 oracle/measurement exemption: compares against the platform deliberately (formerly check-math-policy.sh structural_exempt)
 //! E8 / A1 — the render path allocates nothing.
 //!
 //! `prepare` and `bind_homogeneous_bank` allocate (three histories, the ramp table, the boxed

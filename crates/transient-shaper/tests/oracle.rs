@@ -1,3 +1,5 @@
+#![allow(clippy::disallowed_methods)]
+// D6 oracle/measurement exemption: compares against the platform deliberately (formerly check-math-policy.sh structural_exempt)
 //! Comparison against the independent `f64` oracle in `dsp-reference`.
 //!
 //! The oracle derives its four coefficients from the frozen time constants with `f64` `exp`, runs

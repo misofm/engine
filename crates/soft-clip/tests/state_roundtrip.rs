@@ -1,3 +1,5 @@
+#![allow(clippy::disallowed_methods)]
+// D6 oracle/measurement exemption: compares against the platform deliberately (formerly check-math-policy.sh structural_exempt)
 //! E10 — state layout 2 round-trips exactly, into a scalar instance and into one lane of a bank.
 //!
 //! The layout lost the per-lane cursor word (D10: one cursor per bank) and gained a `step` word per

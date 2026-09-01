@@ -1,3 +1,5 @@
+#![allow(clippy::disallowed_methods)]
+// D6 oracle/measurement exemption: compares against the platform deliberately (formerly check-math-policy.sh structural_exempt)
 //! Lane identity: a bank of `W` tracks equals `W` scalar products, bit for bit.
 //!
 //! Master plan D5 and §10 G2. One generic `#[inline(always)]` body is instantiated at `f32` and at

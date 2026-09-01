@@ -1,3 +1,5 @@
+#![allow(clippy::disallowed_methods)]
+// D6 oracle/measurement exemption: compares against the platform deliberately (formerly check-math-policy.sh structural_exempt)
 //! E6 — D11: one division at the event, iterated additions, an exact snap on the last sample.
 //!
 //! The ramp state is visible through the payload: word `3 + 3i` is parameter `i`'s `current`,

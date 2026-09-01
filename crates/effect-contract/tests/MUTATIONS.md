@@ -21,7 +21,7 @@ Reproduce one row with:
 | 1 | D11 undone: `ParameterSmoother::next_value`'s `Linear` arm goes back to the audited `self.current + (self.target - self.current) / self.remaining as f32` | `crates/effect-contract/src/lib.rs` | `cargo test -p effect-runtime --test contract_ramp_identity` | RED (`linear_smoother_is_bit_identical_to_the_linear_ramp`) |
 | 2 | the heterogeneous-cohort divergence returns: the limiter's program-key mismatch raises `Err("effect.bank.program")` again instead of setting `same_program = false` | `crates/true-peak-limiter/src/lib.rs` | `cargo test -p true-peak-limiter --lib bank_binding` | RED (`bank_binding_validates_before_fallback_and_retains_exact_width_bytes`) |
 | 3 | the shape divergence returns: the EQ's `request.validate_shape()?` is replaced by the old combined `if !has_matching_backend_width() \|\| len != lanes \|\| lanes != current { return Ok(None) }` | `crates/parametric-eq/src/lib.rs` | `cargo test -p parametric-eq --test bank` | RED (`bank_binding_rejects_malformed_shapes_and_declines_a_foreign_width`) |
-| 4 | a platform transcendental comes back to the contract, whose allowlist row #95 deleted | fixture workspace | `bash scripts/test-math-policy.sh .` | RED (`the-cleared-contract-row-cannot-come-back`) |
+| 4 | a platform transcendental comes back to the contract, whose `#[expect(clippy::disallowed_methods)]` row #95 deleted | `crates/effect-contract/src/lib.rs` | `cargo clippy -p effect-contract` (formerly `bash scripts/test-math-policy.sh .`) | RED (`use of a disallowed method`) |
 | 5 | the contract gains `lane` as a dependency | fixture manifest | `bash scripts/test-effect-runtime-policy.sh .` | RED (`contract-gains-lane`) |
 | 6 | the contract loses its `math` dependency | fixture manifest | `bash scripts/test-effect-runtime-policy.sh .` | RED (`contract-loses-math`) |
 | 7 | the deleted orphan header `include/miso_engine_effect_contract_v1.h` is recreated | fixture workspace | `bash scripts/test-effect-runtime-policy.sh .` | RED (orphan contract header) |
@@ -36,10 +36,11 @@ Reproduce one row with:
 | 16 | E6, the harness fix is load-bearing: the impulse probe goes back to rendering a single block (`blocks_for_latency = 1`) | `crates/conformance/src/effect.rs` | `cargo test -p compressor --test conformance` | RED (`latency.impulse`) |
 | 17 | E6, the harness fix is load-bearing: the lane-isolation control instance stops rendering, so the comparison is against the initial state again | `crates/conformance/src/effect.rs` | `cargo test -p compressor --test conformance` | RED (`state.lane_isolation`) |
 
-Rows 4-13 are mutation *tests*: `scripts/test-math-policy.sh` and
-`scripts/test-effect-runtime-policy.sh` apply each mutation to a scratch copy of the workspace,
-assert the policy script rejects it, and restore. They run in CI, so these rows are re-proven on
-every commit rather than only on the day they were written.
+Rows 5-13 are mutation *tests*: `scripts/test-effect-runtime-policy.sh` applies each mutation to
+a scratch copy of the workspace, asserts the policy script rejects it, and restores. Row 4 is
+now `cargo clippy`'s own `disallowed-methods` lint (formerly `scripts/test-math-policy.sh`,
+retired once that migration was mutation-proven). They run in CI, so these rows are re-proven
+on every commit rather than only on the day they were written.
 
 ## Issue #140 — the automation-span feed, the live fader, and GR observation
 

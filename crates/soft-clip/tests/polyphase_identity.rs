@@ -1,3 +1,5 @@
+#![allow(clippy::disallowed_methods)]
+// D6 oracle/measurement exemption: compares against the platform deliberately (formerly check-math-policy.sh structural_exempt)
 //! E1 — the polyphase kernel is **bit-identical** to the frozen 63-tap graph it replaces.
 //!
 //! The reference below is written from `.github/ISSUE_SPECS/BRIEFS/019` ("Exact 2x pipeline" and

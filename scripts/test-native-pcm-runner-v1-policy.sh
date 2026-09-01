@@ -14,22 +14,22 @@ copy_case() {
     cp -R "$root/tools/native-pcm-runner" "$case_root/tools/"
     cp -R "$root/fixtures/native-pcm-runner/v1" "$case_root/fixtures/native-pcm-runner/"
     cp "$root/fixtures/session/v1/parametric-eq-nine-track.toml" "$case_root/fixtures/session/v1/"
-    cp "$root/scripts/check-native-pcm-runner-v1.sh" "$case_root/scripts/"
+    cp "$root/scripts/check-native-pcm-runner.sh" "$case_root/scripts/"
 }
 
 copy_case baseline
-"$case_root/scripts/check-native-pcm-runner-v1.sh" "$case_root" >/dev/null
+"$case_root/scripts/check-native-pcm-runner.sh" "$case_root" v1 >/dev/null
 
 copy_case fixture-drift
 printf mutation >>"$case_root/fixtures/native-pcm-runner/v1/riff-48000.wav"
-if "$case_root/scripts/check-native-pcm-runner-v1.sh" "$case_root" >/dev/null 2>&1; then
+if "$case_root/scripts/check-native-pcm-runner.sh" "$case_root" v1 >/dev/null 2>&1; then
     printf 'native PCM runner mutation escaped: fixture drift\n' >&2
     exit 1
 fi
 
 copy_case bypass
 printf '\ngraph.workspace = true\n' >>"$case_root/tools/native-pcm-runner/Cargo.toml"
-if "$case_root/scripts/check-native-pcm-runner-v1.sh" "$case_root" >/dev/null 2>&1; then
+if "$case_root/scripts/check-native-pcm-runner.sh" "$case_root" v1 >/dev/null 2>&1; then
     printf 'native PCM runner mutation escaped: graph bypass\n' >&2
     exit 1
 fi
@@ -42,7 +42,7 @@ version = "0.0.0"
 [dependencies]
 native-pcm-runner = { path = "../../tools/native-pcm-runner" }
 EOF
-if "$case_root/scripts/check-native-pcm-runner-v1.sh" "$case_root" >/dev/null 2>&1; then
+if "$case_root/scripts/check-native-pcm-runner.sh" "$case_root" v1 >/dev/null 2>&1; then
     printf 'native PCM runner mutation escaped: reverse dependency\n' >&2
     exit 1
 fi

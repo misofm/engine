@@ -2452,6 +2452,14 @@ mod tests {
     }
 
     #[test]
+    // The classical Higham bound this test states independently is a property of the platform's
+    // own `powi`, not `math`'s -- proving D9's error bound against `math::powf` would be
+    // circular. Issue #98 is the allowlist entry this `#[expect]` replaces
+    // (`scripts/check-math-policy.sh`, retired in favour of `clippy.toml`'s `disallowed-methods`).
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "issue #98: platform powi states the D9 error bound independently of math::powi"
+    )]
     fn left_to_right_reduction_meets_analytic_bound_and_ignores_completion_order() {
         let fixtures = [
             vec![1.0_f32; 257],

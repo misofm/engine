@@ -1,3 +1,5 @@
+#![allow(clippy::disallowed_methods)]
+// D6 oracle/measurement exemption: compares against the platform deliberately (formerly check-math-policy.sh structural_exempt)
 //! Gate 7.3: the rendered gain agrees with an independent `f64` model inside a derived tolerance.
 //!
 //! The pin is `dsp_reference::reference_gate_expander_process`, an `f64` transcription

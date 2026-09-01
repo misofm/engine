@@ -1,3 +1,5 @@
+#![allow(clippy::disallowed_methods)]
+// D6 oracle/measurement exemption: compares against the platform deliberately (formerly check-math-policy.sh structural_exempt)
 //! Independent offline `f64` reference primitives for conformance tests.
 //!
 //! This crate intentionally has no dependency on engine production kernels. It is not realtime

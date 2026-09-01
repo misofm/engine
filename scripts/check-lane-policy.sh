@@ -21,7 +21,7 @@ lane_tests='^crates/lane/tests/'
 # `crates/dsp-reference` is the workspace's oracle/twin crate: it is a dev dependency
 # only, never links into an engine, host or artifact, and its whole job is to reproduce a frozen
 # operation order -- including its single roundings -- independently of the lane crate. It is
-# exempt here for the same structural reason `scripts/check-math-policy.sh` exempts it: matching
+# exempt here for the same structural reason `clippy.toml`'s `disallowed-methods` (formerly `scripts/check-math-policy.sh`) exempts it: matching
 # the platform is the point, not a leak of it. The exemption is the crate, not a wildcard: a
 # render path cannot reach it, because nothing in `crates/` or `hosts/` depends on it.
 oracle_crate='^crates/dsp-reference/'

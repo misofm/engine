@@ -27,7 +27,7 @@ cargo test -p true-peak-limiter --lib phase_outputs
 | 13 | `current = select(remaining > 0, current + step, target)` → `current = current + step` (D11 snap removed) | `src/lib.rs` `RampLanes::advance` | `the_lane_ramp_reproduces_the_scalar_ramp_bit_for_bit` |
 | 14 | `write_u32(bytes, MAIN_CURSOR, cursors.main.swap_bytes())` (payload endianness) | `src/lib.rs` `snapshot_lane` | `state_round_trips_and_rejects_corruption` |
 | 15 | `let leak: Vec<f32> = vec![0.0; 4];` inside the van Herk suffix pass | `src/lib.rs` `sliding_minimum` | `the_render_path_allocates_nothing` |
-| 16 | `crates/true-peak-limiter/src/lib.rs` re-added to the `check-math-policy.sh` allowlist while `limit_coefficient` calls `10.0_f32.powf(..)` | `src/lib.rs` | `scripts/check-math-policy.sh` (allowlist entry with zero call sites fails) |
+| 16 | `crates/true-peak-limiter/src/lib.rs` calls `10.0_f32.powf(..)` in `limit_coefficient` with no `#[expect(clippy::disallowed_methods)]` | `src/lib.rs` | `cargo clippy -p true-peak-limiter` (formerly `scripts/check-math-policy.sh`'s allowlist; `f32::powf` is not on this crate's allowlist so no `#[expect]` exists to add) |
 
 ## Mutations that survived their first target, and what was done about it
 

@@ -62,7 +62,7 @@ what proves the result is a legal session:
 
     python3 scripts/derive-mono-console-fixture.py > fixtures/session/v1/console-sixty-four-track-mono.toml
 
-``scripts/check-mono-console-fixture.sh`` regenerates the committed file and compares it byte for
+``scripts/check-console-fixtures.sh`` regenerates the committed file and compares it byte for
 byte, so a hand-edit is caught rather than silently carried into a measurement.
 """
 

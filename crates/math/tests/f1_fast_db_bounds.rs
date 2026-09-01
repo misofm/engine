@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_methods)] // this is the bound gate the sealed fast tier is proven against
 //! Gate F1 — the sealed fast dB tier's error bounds, exactness anchors and domain behaviour.
 //!
 //! The oracle is the crate's own vendored `f64` `exp2`/`log2`/`pow`: a table-driven musl

@@ -27,7 +27,7 @@ jobs:
         run: |
           rustup toolchain install 1.97.1 --profile minimal --component clippy --component rustfmt
           sudo apt-get update
-          sudo apt-get install -y ripgrep
+          sudo apt-get install -y ripgrep wabt
       - name: Format
         run: cargo fmt --all -- --check
       - name: Clippy
@@ -63,11 +63,30 @@ jobs:
       # gate over a committed fixture, so it belongs with the cheap policy gates.
       - name: Console benchmark fixture integrity
         run: bash scripts/check-console-benchmark-fixture.sh
+      # Issue #175: the standing 64-track intended-placement and mono-collapse fixtures are
+      # exactly what their generators produce -- a hand-edit would break the chain-shape and
+      # collapse-witness row-pairs that depend on them silently. Previously reachable only from
+      # scripts/sweep.sh, which nobody runs.
+      - name: Standing console fixtures are exactly their generators' output
+        run: bash scripts/check-console-fixtures.sh
       # The #163 phase 2 wasm console arm's validator, exercised by mutation. Hermetic: it never
       # instantiates a guest, never holds a clock and never touches the one-shot artifacts, so it
       # belongs with the cheap gates rather than behind the runner that consumes the measurement.
       - name: Wasm console benchmark validator mutation tests
         run: bash scripts/test-wasm-console-benchmark.sh
+      # The rest of the benchmark-validator family: hermetic self-tests of the one-shot runners'
+      # own preflight/validator/promotion logic. None launches a real workload, a timer or an
+      # audio device -- each proves its validator discriminates, the same shape as the wasm
+      # console row above. All were previously reachable only from scripts/sweep.sh.
+      - name: Benchmark preconditions and validator mutation tests
+        run: |
+          bash scripts/check-bench-preconditions.sh
+          bash scripts/check-rack-benchmark-fixture.sh
+          bash scripts/test-builtins-benchmark.sh
+          bash scripts/test-console-benchmark.sh
+          bash scripts/test-graph-benchmark.sh
+          bash scripts/test-rack-benchmark.sh
+          bash scripts/test-wasm-kernel-timing.sh
       - name: Shared host facade policy and mutation tests
         run: |
           bash scripts/check-host-core-policy.sh
@@ -88,22 +107,26 @@ jobs:
         run: |
           bash scripts/check-lane-policy.sh
           bash scripts/test-lane-policy.sh
+      # The unfused multiply-add contract's container (issue #163 phase 2). Four of its six rules
+      # cannot be expressed as a clippy.toml disallowed-methods entry -- a positive-presence check
+      # that both `Lane::fma` dispatch points literally contain `(self * b) + c`, a ban on `cfg`
+      # inside that function body, an exact tree-wide count of 8 fused calls counted two
+      # independent ways, and a refusal of the retired software-FMA *definitions* rather than
+      # calls to them -- so it stays a script. Previously ran only from `scripts/sweep.sh`, which
+      # nobody runs. `--self-test` is the former `scripts/test-unfused-seal.sh`, folded in so the
+      # gate and its own mutation proof cannot drift apart or be wired in separately.
+      - name: Unfused multiply-add seal and self-test
+        run: |
+          bash scripts/check-unfused-seal.sh
+          bash scripts/check-unfused-seal.sh --self-test
       - name: Lane gates G1-G4, G6, P1 and the issue-146 FP-environment guard on the AVX2+FMA runner
         run: cargo test --locked --release -p lane
-      - name: Deterministic math policy and mutation tests
-        run: |
-          bash scripts/check-math-policy.sh
-          bash scripts/test-math-policy.sh
       - name: Math gates M1, M2 and M3 in release
         run: cargo test --locked --release -p math --features lane
       - name: Math M3 digests on an FMA-enabled build
         run: RUSTFLAGS='-C target-feature=+fma' cargo test --locked --release -p math --test m3_determinism
       - name: Math M1 exhaustive sweep
         run: cargo test --locked --release -p math --features lane --test m1_exhaustive -- --ignored
-      - name: Fast dB tier seal and mutation tests
-        run: |
-          bash scripts/check-fast-db-seal.sh
-          bash scripts/test-fast-db-seal.sh
       - name: Fast dB tier gate F1, exhaustive over both operating domains
         run: cargo test --locked --release -p math --features lane --test f1_fast_db_bounds -- --ignored
       - name: Effect runtime gates (lane identity, partition invariance, D1 digests) in release
@@ -142,6 +165,19 @@ jobs:
         run: |
           rustup target add --toolchain 1.97.1 wasm32-unknown-unknown aarch64-linux-android aarch64-apple-ios
           bash scripts/check-parametric-eq-targets.sh
+      # Issue-007 and Issue-081's own cross-target matrices, the same shape as the parametric EQ
+      # seal above. Both were previously reachable only from scripts/sweep.sh, which nobody runs
+      # -- meaning builtins and the effect-interchange descriptor had no cross-target proof in CI
+      # at all, only the parametric-eq sibling effect did.
+      - name: Builtins and effect-interchange target matrices
+        run: |
+          bash scripts/check-builtins-targets.sh
+          bash scripts/check-effect-interchange-targets.sh
+      # Mutation suite for check-effect-interchange-qualification.sh, which the target matrix
+      # above already calls as its own precondition -- wired directly so its own row does not
+      # depend on staying a transitive side effect of a different check.
+      - name: Effect interchange qualification mutation tests
+        run: bash scripts/test-effect-interchange-policy.sh
       - name: Parametric EQ realtime allocation and syscall audit
         run: |
           cargo build --locked --release -p audit --bin audit
@@ -159,6 +195,60 @@ jobs:
         run: |
           bash scripts/trace-builtins-audit.sh
           bash scripts/trace-builtins-graph-audit.sh
+      # The other two members of the trace-*-audit family. Four of the six ran
+      # here; these two ran nowhere, so `source`'s and `graph`'s realtime
+      # safety was asserted by scripts nobody invoked. Both pass today
+      # (source: 0 allocations/locks/syscalls; graph: 1,000,000-block trace).
+      - name: Source and graph realtime audits
+        run: |
+          bash scripts/trace-source-audit.sh
+          bash scripts/trace-graph-audit.sh
+      # The independent builtins fixture corpus manifest and its expected-output digests.
+      # Previously reachable only from scripts/sweep.sh, which nobody runs.
+      - name: Builtins fixture corpus integrity and mutation tests
+        run: |
+          bash scripts/check-builtins-fixtures.sh .
+          bash scripts/test-builtins-fixtures.sh
+      # Issue #243 eval 6: the SDK's generated TypeScript surface is a byte-for-byte re-derivation
+      # from the Rust parameter-metadata registry, and the pre-boot-v2 SDK's retired spellings stay
+      # deleted rather than relocated. Both are hermetic (no npm/network); the typecheck half that
+      # needs `tsc` is check-sdk-types.sh, in the new `sdk` job below, and the behavioural half that
+      # needs the shipped module is check-sdk-headless.sh, in the `wasm` job below. All four SDK
+      # gates were previously reachable only from scripts/sweep.sh, which nobody runs; one of them
+      # (check-sdk-types.sh) could not run there at all -- it exits 2 without `sdk/node_modules`,
+      # which the sweep's hermetic charter cannot provide.
+      - name: SDK generated-surface drift and retired-spelling deletion gates
+        run: |
+          bash scripts/check-sdk-generated.sh
+          python3 -B scripts/check-sdk-deletions.py
+      # The hermetic half of the FLAC delivery pipeline: builds the shipped decoder sidecar,
+      # checks its artifact/provenance/vectors and a red mutation, and bans decodeAudioData from
+      # the delivery pipeline (PCM-only per AGENTS.md). The expensive half -- real browser decode
+      # over Playwright -- is browser-qualification.yml's `npm run flac-decoder`, a different
+      # script entirely; this one needs no browser. Previously reachable only from
+      # scripts/sweep.sh, which nobody runs.
+      - name: FLAC decoder artifact, provenance and delivery-pipeline gates
+        run: |
+          bash scripts/check-flac-decoder.sh
+          bash scripts/test-flac-decoder.sh
+      # Issue #097: the independent canonical effect-package V1 corpus plus its native and
+      # scalar-Wasm inspection surfaces. Previously reachable only from scripts/sweep.sh, which
+      # nobody runs. It re-runs check-workspace-policy.sh/check-realtime-policy.sh and their
+      # mutation suites as its own preconditions (already separate steps above); left as-is rather
+      # than edited apart under this change, since the redundant re-run is cheap and correct, just
+      # not maximally efficient.
+      - name: Effect package V1 corpus and inspection surface
+        run: bash scripts/check-effect-package-v1.sh
+      # Issue #082: the independent canonical effect-descriptor V1 corpus plus its native and
+      # scalar-Wasm inspection surfaces (folds in test-effect-descriptor-capi.sh, which it already
+      # calls as its own precondition). Previously reachable only from scripts/sweep.sh.
+      - name: Effect descriptor V1 corpus and inspection surface
+        run: bash scripts/check-effect-descriptor-v1.sh
+      # The stem store's cold-open-latency and pump budgets (real assert.ok thresholds, not just
+      # printed numbers), its core/pump correctness gates, and --self-test's mutation ledger.
+      # Previously reachable only from scripts/sweep.sh, which nobody runs.
+      - name: Stem store V1 gate and mutation ledger
+        run: node scripts/check-stem-store-v1.mjs --self-test
       - name: Native effect runtime policy, fixtures, conformance, and mutations
         run: bash scripts/check-effect-contract.sh
       - name: Protocol caller-buffer allocation audit
@@ -172,17 +262,60 @@ jobs:
       - name: Realtime audit hooks and syscall trace
         run: |
           cargo build --locked --release -p audit
-          bash scripts/test-realtime-audit-hooks.sh target/release/audit
+          bash scripts/test-realtime-audit-probes.sh realtime target/release/audit
           timeout 120s bash scripts/trace-realtime-audit.sh target/release/audit 1000000
+      # Mutation tests for scripts/validate-realtime-trace.sh, the strace-output parser
+      # trace-realtime-audit.sh and its siblings depend on above. Previously sweep-only.
+      - name: Realtime trace validator mutation tests
+        run: bash scripts/test-realtime-trace-validator.sh
+      # One harness, three subjects (scripts/test-realtime-audit-probes.sh): the realtime leg
+      # above, plus builtins and builtins-graph, whose nine probes each were previously reachable
+      # only from scripts/sweep.sh, which nobody runs.
+      - name: Builtins and builtins-graph audit probe mutation tests
+        run: |
+          bash scripts/test-realtime-audit-probes.sh builtins target/release/audit
+          bash scripts/test-realtime-audit-probes.sh builtins-graph target/release/audit
       - name: Native effect one-million-call allocation and syscall audit
         run: |
           cargo build --locked --release -p bench
           timeout 180s bash scripts/trace-effect-contract-audit.sh target/release/bench 1000000
+      # Dependency-boundary and unsafe-code policy for rack, builtins and graph -- distinct from
+      # the MAX_TRACKS ban (which moved to check-workspace-policy.sh above, P12), and previously
+      # reachable only from scripts/sweep.sh, which nobody runs.
+      - name: Rack, builtins and graph dependency-boundary policy and mutation tests
+        run: |
+          bash scripts/check-rack-policy.sh
+          bash scripts/test-rack-policy.sh
+          bash scripts/check-builtins-policy.sh
+          bash scripts/test-builtins-policy.sh
+          bash scripts/check-graph-policy.sh
+      # The Issue-073/Issue-116 native PCM C-ABI runner's static seal (tool surface, dependency
+      # boundary, and the cross-platform rename-publication contract). Previously reachable only
+      # from scripts/sweep.sh, which nobody runs.
+      - name: Native PCM runner static seal and mutation tests
+        run: |
+          bash scripts/check-native-pcm-runner.sh
+          bash scripts/test-native-pcm-runner-v1-policy.sh
+          bash scripts/test-native-pcm-runner-portability-v1-policy.sh
       - name: Conformance boundaries and research corpus
         run: |
           bash scripts/check-conformance-boundaries.sh
           bash scripts/check-dsp-research.sh
           cargo run --locked -p conformance --example conformance_fixtures -- --check
+      # Not prose scaffolding: this checks the issue-007 preregistration docs cannot fabricate a
+      # trial row, and exercises both issue-033/111 blinded-listening packet validators' own
+      # --self-test (986 and 450 lines of real format/statistics/reveal-commit logic), plus the
+      # facilitator packet's schema canonicality, empty response form, unconfirmed provenance
+      # template and answer-free packet. Previously reachable only from scripts/sweep.sh.
+      - name: Listening-evidence preregistration and packet validator self-tests
+        run: bash scripts/check-builtins-listening.sh
+      # Issue #242/#239 Amendment 2 A7: one step vocabulary ("step", not the retired "nudge") as a
+      # name -- a JSON schema key, a Rust/Python identifier, a TypeScript member -- across the
+      # repository, self-tested. Previously reachable only from scripts/sweep.sh.
+      - name: Step vocabulary uniformity and self-test
+        run: |
+          python3 -B scripts/check-step-vocabulary.py
+          python3 -B scripts/check-step-vocabulary.py --self-test
       - name: Feature-resolution tree
         run: cargo tree --locked --workspace -e features
       - name: Metadata report
@@ -237,6 +370,14 @@ jobs:
     runs-on: blacksmith-8vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v4
+      # `check-sdk-headless.sh` runs `node --test 'test/*-evals.mjs'`, and glob
+      # expansion in `--test` postdates Node 20, which is what this runner
+      # ships by default. Without this the glob reaches Node unexpanded and it
+      # reports `Could not find '.../sdk/test/*-evals.mjs'`. The `sdk` job below
+      # pins the same version for the same reason.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
       - name: Install pinned Rust toolchain and Wasm standard library
         run: |
           rustup toolchain install 1.97.1 --profile minimal
@@ -281,7 +422,15 @@ jobs:
           bash scripts/build-web-audioworklet.sh "$artifacts"
           bash scripts/check-web-audioworklet.sh "$artifacts"
           python3 -B scripts/web-audioworklet-browser-correctness.py --check --artifacts "$artifacts"
+          # Issue #217: the resource-report rows the digest gates above do not cover, pinned
+          # against the same shipped artifact. Issue #243 eval 6: the SDK's behavioural evals
+          # against that same module, under Node's native TS stripping (no node_modules needed).
+          # Both were previously reachable only from scripts/sweep.sh, which nobody runs.
+          python3 -B scripts/check-browser-expected-resources.py --artifacts "$artifacts"
+          bash scripts/check-sdk-headless.sh "$artifacts"
           ls -l "$artifacts"
+      - name: Browser expected-resources tripwire self-test
+        run: python3 -B scripts/check-browser-expected-resources.py --self-test
       - name: Hermetic browser host and worklet tests
         run: bash scripts/test-web-audioworklet.sh
       - name: Issue-005 scalar and SIMD protocol golden parity
@@ -325,3 +474,25 @@ jobs:
           name: wasm-gates
           path: target/ci/wasm-gates/wasm-gates.jsonl
 
+
+  sdk:
+    name: SDK typecheck and shipped-host mirror pin
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      # Issue #243 eval 6, the static half. The behavioural/generated-surface/deletion evals are
+      # hermetic and already run in the host job (check-sdk-{headless,generated}.sh,
+      # check-sdk-deletions.py); `tsc` needs `npm ci`, which needs the network, which is why this
+      # one alone was excluded from scripts/sweep.sh's hermetic charter and, as a result, never ran
+      # anywhere -- check-sdk-types.sh exits 2 on a clean checkout with no node_modules. This job
+      # gives it the one thing it needs and nothing else.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: sdk/package-lock.json
+      - name: Install SDK dependencies
+        working-directory: sdk
+        run: npm ci
+      - name: SDK typecheck and shipped-host mirror pin
+        run: bash scripts/check-sdk-types.sh

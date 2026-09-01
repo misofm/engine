@@ -46,7 +46,7 @@ at 124 vector / 0 scalar across this whole change.
 The transient shaper is a separate case and also takes no crossing, but for a different reason: it
 is outside the brief's named scope. It still runs `exp2_lane`/`log2_lane` per sample and is the
 obvious next candidate. It is left on the exact tier deliberately, and
-`scripts/check-fast-db-seal.sh` is what keeps it there until someone decides otherwise.
+`clippy.toml`'s `disallowed-methods` (formerly `scripts/check-fast-db-seal.sh`, retired once the migration was mutation-proven) is what keeps it there until someone decides otherwise.
 
 ## Boundary 3 — the shared runtime helpers were deliberately not converted
 
@@ -141,8 +141,9 @@ path can reach.
   #88 F1 and #89 F1.
 * Implementation: `crates/math/src/fast_db.rs` (the sealed tier),
   `crates/math/tests/f1_fast_db_bounds.rs` (gate F1, exhaustive),
-  `scripts/check-fast-db-seal.sh` and `scripts/test-fast-db-seal.sh` (the container and its 18 red
-  mutations).
+  `clippy.toml`'s `disallowed-methods` plus a per-crossing `#[expect(clippy::disallowed_methods)]`
+  (the container; formerly `scripts/check-fast-db-seal.sh` and `scripts/test-fast-db-seal.sh`,
+  retired once the migration was mutation-proven).
 * Crossings: `compressor/src/kernel.rs`, `gate-expander/src/kernel.rs`,
   `multiband-compressor/src/lib.rs`.
 * Gates: `scripts/run-wasm-gates.sh` (133 cases, 331 comparisons, 0 mismatches on all three legs).

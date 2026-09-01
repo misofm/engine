@@ -1,3 +1,5 @@
+#![allow(clippy::disallowed_methods)]
+// D6 oracle/measurement exemption: compares against the platform deliberately (formerly check-math-policy.sh structural_exempt)
 //! E2: the `f32` two-stage crossover against the independent `f64` oracle, and its flatness.
 //!
 //! The `f64` mapping is pinned separately, before any production line moved, in
