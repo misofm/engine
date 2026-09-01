@@ -195,6 +195,16 @@ jobs:
         run: |
           bash scripts/check-sdk-generated.sh
           python3 -B scripts/check-sdk-deletions.py
+      # The hermetic half of the FLAC delivery pipeline: builds the shipped decoder sidecar,
+      # checks its artifact/provenance/vectors and a red mutation, and bans decodeAudioData from
+      # the delivery pipeline (PCM-only per AGENTS.md). The expensive half -- real browser decode
+      # over Playwright -- is browser-qualification.yml's `npm run flac-decoder`, a different
+      # script entirely; this one needs no browser. Previously reachable only from
+      # scripts/sweep.sh, which nobody runs.
+      - name: FLAC decoder artifact, provenance and delivery-pipeline gates
+        run: |
+          bash scripts/check-flac-decoder.sh
+          bash scripts/test-flac-decoder.sh
       - name: Native effect runtime policy, fixtures, conformance, and mutations
         run: bash scripts/check-effect-contract.sh
       - name: Protocol caller-buffer allocation audit
