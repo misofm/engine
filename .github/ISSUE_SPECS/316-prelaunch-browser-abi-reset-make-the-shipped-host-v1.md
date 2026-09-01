@@ -1,5 +1,7 @@
 # Prelaunch browser ABI reset: make the shipped host V1
 
+**Status: SOL PASS.**
+
 ## Owner ruling
 
 The shipped browser host is prelaunch. Its V1 export and artifact names must not return or require
@@ -45,3 +47,6 @@ adversarially reviews generated-artifact provenance and all ABI call paths befor
   boot high-water gate, hermetic worklet and mutation suite, ABI/metadata self-tests, independent
   raw-Wasm oracle, browser expected-resource/digest gate with 26 red mutations, SDK asset/codegen
   equality, package tests, 14 browser SDK tests, and 16 boot/skew/lifecycle tests pass.
+- Sol adversarial review PASS: every producer and consumer derives or asserts 65536, explicit and
+  default boot paths agree, the shipped declaration and SDK mirror are byte-equal, the Wasm digest
+  is reproduced, and live browser/SDK trees contain no ABI 2.0 claim or superseded numeric pin.
