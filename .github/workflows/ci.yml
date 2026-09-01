@@ -176,8 +176,15 @@ jobs:
       - name: Realtime audit hooks and syscall trace
         run: |
           cargo build --locked --release -p audit
-          bash scripts/test-realtime-audit-hooks.sh target/release/audit
+          bash scripts/test-realtime-audit-probes.sh realtime target/release/audit
           timeout 120s bash scripts/trace-realtime-audit.sh target/release/audit 1000000
+      # One harness, three subjects (scripts/test-realtime-audit-probes.sh): the realtime leg
+      # above, plus builtins and builtins-graph, whose nine probes each were previously reachable
+      # only from scripts/sweep.sh, which nobody runs.
+      - name: Builtins and builtins-graph audit probe mutation tests
+        run: |
+          bash scripts/test-realtime-audit-probes.sh builtins target/release/audit
+          bash scripts/test-realtime-audit-probes.sh builtins-graph target/release/audit
       - name: Native effect one-million-call allocation and syscall audit
         run: |
           cargo build --locked --release -p bench
