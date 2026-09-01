@@ -21,11 +21,11 @@
 //! Measured on the delivery host, W8 bank, production `process_bank` shape: 246 ns per
 //! track-channel-sample before, 3.0 ns after (`tests/descriptive_bench.rs`).
 //!
-//! # State layout version 2
+//! # State layout version 1
 //!
 //! The shared cursor (D10) removed the per-lane cursor word and the D11 ramp added a `step` word,
-//! so the payload changed shape and the descriptor's `state_layout_version` is 2. Layout-1
-//! payloads are rejected with `effect.state.version`; a converting edge, if one is ever wanted, is
+//! so the payload changed shape during prelaunch development. Stale payloads are rejected with
+//! `effect.state.version`; a converting edge, if one is ever wanted, is
 //! the migration registry of issue #080, not this crate.
 
 use effect_contract::{
@@ -84,7 +84,7 @@ const DRY_HISTORY_AGES: usize = 31;
 
 /// The payload shape, stamped into the common section by the shared codec.
 const STATE_LAYOUT: payload::StateLayout = payload::StateLayout {
-    version: 2,
+    version: 1,
     common_words: 0,
     lane_words: LANE_STATE_WORDS,
 };
@@ -563,10 +563,10 @@ fn apply_automation<L: Lane>(
 }
 
 // ---------------------------------------------------------------------------------------------
-// State payload, layout version 2
+// State payload, layout version 1
 // ---------------------------------------------------------------------------------------------
 
-/// Reads one lane of one channel into the 104 payload words of layout 2.
+/// Reads one lane of one channel into the 104 payload words of layout 1.
 fn write_lane_words<L: Lane>(channel: &Channel<L>, lane: usize, words: &mut [u32]) {
     debug_assert_eq!(words.len(), LANE_STATE_WORDS as usize);
     for parameter in 0..PARAMETER_COUNT {

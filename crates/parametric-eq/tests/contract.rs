@@ -1,8 +1,8 @@
 //! Contract gates: descriptor, automation, state payload, bypass, resets.
 //!
 //! The descriptor, the parameter identifiers, the automation validation rules and the port and
-//! latency contract are unchanged by issue #87. The state layout is not: it moves to version 2,
-//! because the retained words are no longer four direct histories and four parameter ramps but two
+//! latency contract are unchanged by issue #87. The state payload shape changed during prelaunch
+//! development because the retained words are no longer four direct histories and four parameter ramps but two
 //! integrators, six coefficient words, six increments and the four ramp target parameters.
 
 mod support;
@@ -22,13 +22,13 @@ use support::{
     set_initial, single_section_values, snapshot, values, word,
 };
 
-/// The frozen public surface: identifiers, domains, smoothing and the version-2 state size.
+/// The frozen public surface: identifiers, domains, smoothing and the current state size.
 #[test]
 fn descriptor_is_frozen() {
     validate_descriptor(&PARAMETRIC_EQ_DESCRIPTOR).expect("descriptor");
     let parameters = PARAMETRIC_EQ_DESCRIPTOR.parameters;
     assert_eq!(parameters.len(), 24);
-    assert_eq!(PARAMETRIC_EQ_DESCRIPTOR.state_layout_version, 2);
+    assert_eq!(PARAMETRIC_EQ_DESCRIPTOR.state_layout_version, 1);
     for quality in PARAMETRIC_EQ_DESCRIPTOR.qualities {
         assert_eq!(quality.maximum_state.common_bytes, COMMON_BYTES as u32);
         assert_eq!(quality.maximum_state.left_bytes, LANE_BYTES as u32);
@@ -350,7 +350,7 @@ fn state_restore_continues_active_ramp_bit_exactly() {
         .expect("restore prepare");
     restored
         .restore_state_payload(
-            2,
+            1,
             StatePayloadInput::new(
                 &common,
                 &saved_left,
@@ -384,9 +384,9 @@ fn state_restore_continues_active_ramp_bit_exactly() {
     assert_eq!(snapshot(source.as_ref()), snapshot(restored.as_ref()));
 }
 
-/// A version-1 payload is rejected, never silently migrated.
+/// A payload claiming an invalid prelaunch version is rejected, never silently migrated.
 #[test]
-fn a_version_one_payload_is_rejected() {
+fn an_invalid_version_payload_is_rejected() {
     let values = values();
     let mut effect = ParametricEqFactory
         .prepare(request(&values, false))
@@ -394,7 +394,7 @@ fn a_version_one_payload_is_rejected() {
     let (common, left, right) = snapshot(effect.as_ref());
     assert_eq!(
         effect.restore_state_payload(
-            1,
+            0,
             StatePayloadInput::new(&common, &left, &right, effect.metadata().state_sizes)
                 .expect("input"),
         ),
@@ -429,7 +429,7 @@ fn a_payload_of_the_wrong_length_is_rejected() {
         };
         assert_eq!(
             effect.restore_state_payload(
-                2,
+                1,
                 StatePayloadInput {
                     common: &resize(&common, common_len),
                     left: &resize(&left, left_len),
@@ -456,7 +456,7 @@ fn a_payload_with_a_stale_header_is_rejected_on_its_own_evidence() {
         .prepare(request(&values, false))
         .expect("prepare");
     let (common, left, right) = snapshot(effect.as_ref());
-    assert_eq!(word(&common, 0), 2, "the layout version is stamped");
+    assert_eq!(word(&common, 0), 1, "the layout version is stamped");
     assert_eq!(
         word(&common, 1),
         (SECTIONS * WORDS_PER_BAND * 2) as u32,
@@ -464,24 +464,24 @@ fn a_payload_with_a_stale_header_is_rejected_on_its_own_evidence() {
     );
 
     let mut stale = common;
-    stale[0] = 1;
+    stale[0] = 0;
     assert_eq!(
         effect.restore_state_payload(
-            2,
+            1,
             StatePayloadInput::new(&stale, &left, &right, effect.metadata().state_sizes)
                 .expect("input"),
         ),
         Err(StatePayloadError {
             code: "effect.state.version"
         }),
-        "a version-1 payload cannot pass as version 2 even when the caller says it is"
+        "an invalid payload version cannot pass even when the caller claims the current version"
     );
 
     let mut miscounted = common;
     miscounted[4] = 0xff;
     assert_eq!(
         effect.restore_state_payload(
-            2,
+            1,
             StatePayloadInput::new(&miscounted, &left, &right, effect.metadata().state_sizes)
                 .expect("input"),
         ),
@@ -513,7 +513,7 @@ fn a_malformed_payload_is_rejected_without_touching_either_channel() {
         left[word * 4..word * 4 + 4].copy_from_slice(&bits.to_le_bytes());
         assert_eq!(
             effect.restore_state_payload(
-                2,
+                1,
                 StatePayloadInput::new(&common, &left, &right, effect.metadata().state_sizes)
                     .expect("input"),
             ),
@@ -534,7 +534,7 @@ fn a_malformed_payload_is_rejected_without_touching_either_channel() {
     left[8..12].copy_from_slice(&poisoned.to_bits().to_le_bytes());
     assert_eq!(
         effect.restore_state_payload(
-            2,
+            1,
             StatePayloadInput::new(&common, &left, &right, effect.metadata().state_sizes)
                 .expect("input"),
         ),
@@ -714,7 +714,7 @@ fn a_negative_zero_automation_value_is_accepted_as_zero() {
     stored[16 * 4..16 * 4 + 4].copy_from_slice(&(-0.0_f32).to_bits().to_le_bytes());
     effect
         .restore_state_payload(
-            2,
+            1,
             StatePayloadInput::new(&common, &stored, &right, effect.metadata().state_sizes)
                 .expect("input"),
         )

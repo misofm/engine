@@ -112,7 +112,7 @@ fn the_scalar_render_path_allocates_nothing() {
             .expect("snapshot");
         effect
             .restore_state_payload(
-                2,
+                1,
                 StatePayloadInput::new(&sections.0, &sections.1, &sections.2, sizes)
                     .expect("payload"),
             )
@@ -177,7 +177,7 @@ fn the_bank_render_path_allocates_nothing() {
             .expect("snapshot");
             bank.restore_track_state_payload(
                 1,
-                2,
+                1,
                 StatePayloadInput::new(&sections.0, &sections.1, &sections.2, sizes)
                     .expect("payload"),
             )

@@ -288,7 +288,7 @@ const QUALITIES: [effect_contract::QualityDescriptor; 4] = [
 /// `f32` lane words the kernel holds, each ramp carries its precomputed D11 step, and the common
 /// section carries the runtime codec's two-word header. `maximum_state` moves in the same change,
 /// which is why the two are one bump and not two.
-pub const STATE_LAYOUT_VERSION: u32 = 2;
+pub const STATE_LAYOUT_VERSION: u32 = 1;
 
 /// The one declared observation tap: the branching smoother's own gain word.
 ///

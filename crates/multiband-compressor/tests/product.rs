@@ -23,17 +23,17 @@ fn rms(values: &[f32]) -> f64 {
         .sqrt()
 }
 
-/// Version 2's byte rows, the latency and the exact-and-one-below resource caps.
+/// The current byte rows, latency and exact-and-one-below resource caps.
 ///
 /// The rows changed **by decision**, not by drift: F1 removed the dry ring, F4 halved the filter
-/// state and D11 added a step word to every ramp. Version 1 was `lane 4 * (43 + 3 * ring)`;
-/// version 2 is `lane 4 * (48 + 2 * ring)`. The common section stays empty: wave-2 decision W2-D2
+/// state and D11 added a step word to every ramp. The earlier prelaunch implementation used
+/// `lane 4 * (43 + 3 * ring)`; the current shape is `lane 4 * (48 + 2 * ring)`. The common section stays empty: wave-2 decision W2-D2
 /// on #83 defers the shared codec's versioned header to #95.
 #[test]
 fn descriptor_preparation_and_exact_four_rate_resources_are_frozen() {
     effect_contract::validate_descriptor(&MULTIBAND_COMPRESSOR_DESCRIPTOR).expect("descriptor");
     assert_eq!(MULTIBAND_COMPRESSOR_DESCRIPTOR.parameters.len(), 12);
-    assert_eq!(MULTIBAND_COMPRESSOR_DESCRIPTOR.state_layout_version, 2);
+    assert_eq!(MULTIBAND_COMPRESSOR_DESCRIPTOR.state_layout_version, 1);
     for (rate, bytes) in [
         (44_100u32, 7_256u32),
         (48_000, 7_880),
@@ -225,17 +225,17 @@ fn bypass_latency_automation_and_restore_are_transactional() {
     let saved = snapshot(effect.as_ref());
     let mut malformed = saved.clone();
     malformed.2[..4].fill(u8::MAX);
-    assert!(restore(effect.as_mut(), 2, &malformed, sizes).is_err());
+    assert!(restore(effect.as_mut(), 1, &malformed, sizes).is_err());
     assert_eq!(snapshot(effect.as_ref()), saved);
-    // A version-1 payload is rejected on the out-of-band `state_layout_version` argument, which is
+    // An invalid version is rejected on the out-of-band `state_layout_version` argument, which is
     // where the version lives until #95 adopts the shared codec's header (W2-D2).
     assert_eq!(
-        restore(effect.as_mut(), 1, &saved, sizes)
+        restore(effect.as_mut(), 0, &saved, sizes)
             .expect_err("stale version")
             .code,
         "effect.state.version"
     );
-    restore(effect.as_mut(), 2, &saved, sizes).expect("round trip");
+    restore(effect.as_mut(), 1, &saved, sizes).expect("round trip");
     assert_eq!(snapshot(effect.as_ref()), saved);
 }
 
@@ -262,7 +262,7 @@ fn a_rejected_restore_changes_nothing() {
         let mut corrupted = saved.clone();
         corrupted.1[word * 4..word * 4 + 4].copy_from_slice(&f32::NAN.to_bits().to_le_bytes());
         assert_eq!(
-            restore(effect.as_mut(), 2, &corrupted, sizes)
+            restore(effect.as_mut(), 1, &corrupted, sizes)
                 .expect_err("corrupt word")
                 .code,
             code,
@@ -276,7 +276,7 @@ fn a_rejected_restore_changes_nothing() {
     let mut live_step = saved.clone();
     live_step.1[6 * 4..6 * 4 + 4].copy_from_slice(&0.5f32.to_bits().to_le_bytes());
     assert_eq!(
-        restore(effect.as_mut(), 2, &live_step, sizes)
+        restore(effect.as_mut(), 1, &live_step, sizes)
             .expect_err("a resting ramp cannot carry a step")
             .code,
         "effect.state.parameter"

@@ -1,8 +1,8 @@
 //! The frozen product contract: descriptor, latency, tail, alias claim and the f64 oracle bound.
 //!
 //! These are the assertions the launch briefs (`019`, `053`) own. None of them was allowed to move
-//! in the issue-#91 re-landing except the state-payload sizes, which the plan bumps to layout
-//! version 2 through the contract's own mechanism.
+//! in the issue-#91 re-landing except the state-payload sizes, whose shape changed during
+//! prelaunch development through the contract's own mechanism.
 
 mod support;
 
@@ -24,11 +24,11 @@ fn descriptor_resources_and_independent_fir_design_are_frozen() {
         LinkModeSet::DUAL_MONO
     );
     assert_eq!(SOFT_CLIP_DESCRIPTOR.parameters.len(), PARAMETERS);
-    assert_eq!(SOFT_CLIP_DESCRIPTOR.state_layout_version, 2);
+    assert_eq!(SOFT_CLIP_DESCRIPTOR.state_layout_version, 1);
     for quality in SOFT_CLIP_DESCRIPTOR.qualities {
         assert_eq!(quality.latency, LatencySamples(31));
         assert_eq!(quality.tail, TailSamples::Finite(29));
-        // Layout 2: 104 effect words per channel, plus the shared codec's two header words.
+        // Current layout: 104 effect words per channel, plus the shared codec's two header words.
         assert_eq!(quality.maximum_state.common_bytes, 8);
         assert_eq!(quality.maximum_state.left_bytes, 416);
         assert_eq!(quality.maximum_state.right_bytes, 416);

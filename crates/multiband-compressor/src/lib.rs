@@ -82,9 +82,9 @@ const RAMP_WORDS: usize = 4;
 /// Fixed scalar words of one channel's state payload, before the two rings.
 const LANE_HEADER_WORDS: usize = 48;
 
-/// State layout version. Version 1 was the four-section, three-ring, three-word-ramp layout; the
-/// audit's F1, F4 and D11 all change it, and pre-launch there is no persisted version-1 state.
-const STATE_LAYOUT_VERSION: u32 = 2;
+/// State layout version. This is the sole prelaunch layout identity; the payload shape incorporates
+/// the audit's F1, F4 and D11 corrections.
+const STATE_LAYOUT_VERSION: u32 = 1;
 
 /// Index of the low band.
 const LOW_BAND: usize = 0;
@@ -1392,7 +1392,7 @@ impl<L: Lane, const W: usize> Instance<L, W> {
 }
 
 // ---------------------------------------------------------------------------------------------
-// State payload, version 2
+// State payload, current layout
 // ---------------------------------------------------------------------------------------------
 //
 // Per channel: crossover, lookahead, the two smoother words, ten four-word ramps, the four filter

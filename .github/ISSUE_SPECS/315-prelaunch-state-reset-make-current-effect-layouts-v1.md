@@ -51,3 +51,11 @@ containment before PASS.
 ## Evidence record
 
 - Sol brief approved; GitHub issue #315 matches this stateless local spec.
+- Terra attempt 1 resets the five production layout constants/descriptors, in-payload header words,
+  restore call sites, stale-version mutations, and active contract prose to V1 without changing any
+  payload length or state word beyond the header's version word.
+- The complete test targets for parametric EQ, gate/expander, multiband compressor, and soft clip
+  pass; the true-peak limiter's 29 library tests pass. These cover scalar and bank save/restore,
+  transactional corruption rejection, determinism, conformance, and allocation witnesses.
+- The effect compiler's launch-registry assertion now requires every dynamics state layout to be
+  V1 and passes. `cargo check --workspace --all-targets`, formatting, and diff hygiene pass.

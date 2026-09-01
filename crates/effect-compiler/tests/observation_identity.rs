@@ -114,15 +114,17 @@ fn a_declared_tap_moves_contract_minor_and_leaves_the_state_layout_alone() {
     }
 }
 
-/// The four state layout versions are unmoved, stated as their own assertion so a future edit that
-/// bumps one has to argue with this test rather than with a comment.
+/// The four state layouts have their sole prelaunch V1 identity, stated as their own assertion so
+/// a future edit that bumps one has to argue with this test rather than with a comment.
 #[test]
-fn no_dynamics_state_layout_version_moved() {
+fn dynamics_state_layouts_are_v1() {
     let registry = launch_native_effect_registry().unwrap();
     for descriptor in registry.descriptors() {
         let expected = match descriptor.id.as_str() {
-            "miso.compressor" => 1,
-            "miso.gate-expander" | "miso.multiband-compressor" | "miso.true-peak-limiter" => 2,
+            "miso.compressor"
+            | "miso.gate-expander"
+            | "miso.multiband-compressor"
+            | "miso.true-peak-limiter" => 1,
             _ => continue,
         };
         assert_eq!(

@@ -125,7 +125,7 @@ fn the_scalar_render_path_never_allocates() {
             .expect("snapshot");
         effect
             .restore_state_payload(
-                2,
+                1,
                 effect_contract::StatePayloadInput {
                     common: &common,
                     left: &snapshot_left,

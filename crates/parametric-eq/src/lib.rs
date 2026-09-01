@@ -25,11 +25,11 @@
 //!
 //! # State layout
 //!
-//! Version 2. Per lane, per band, 19 little-endian 32-bit words (76 words, 304 bytes per lane); the
+//! Version 1. Per lane, per band, 19 little-endian 32-bit words (76 words, 304 bytes per lane); the
 //! common section is the shared codec's two-word header — the layout version and the data word
 //! count — and nothing else, because the two channels share no state. The header makes a payload
 //! self-describing, so a stale or truncated restore is rejected on the payload's own evidence and
-//! not only on the caller's out-of-band `state_layout_version`. A version-1 payload is rejected with
+//! not only on the caller's out-of-band `state_layout_version`. A stale payload is rejected with
 //! `effect.state.version`; there is no silent migration.
 
 use effect_contract::{
@@ -66,8 +66,8 @@ pub const EQ_SECTION_COUNT: usize = 4;
 /// per-section surface the cascade kernel loads.
 const EQ_COEFFICIENT_WORDS: usize = 6;
 
-/// State payload layout version. Version 1 was the delta-word layout of issue #42.
-const STATE_LAYOUT_VERSION: u32 = 2;
+/// State payload layout version. This is the sole prelaunch layout identity.
+const STATE_LAYOUT_VERSION: u32 = 1;
 /// Words one band occupies in a lane section of the payload.
 const STATE_WORDS_PER_BAND: usize = 19;
 /// Effect-owned words in each channel section.
@@ -1572,7 +1572,7 @@ struct RestoredBand {
 }
 
 impl<L: Lane, const W: usize> Channel<L, W> {
-    /// Writes lane `track`'s state words in the version-2 order.
+    /// Writes lane `track`'s state words in the current order.
     fn snapshot_track(&self, track: usize, out: &mut [u32; STATE_LANE_WORDS]) {
         for section in 0..EQ_SECTION_COUNT {
             let base = section * STATE_WORDS_PER_BAND;

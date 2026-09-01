@@ -306,7 +306,7 @@ pub const TRUE_PEAK_LIMITER_DESCRIPTOR: EffectDescriptor = EffectDescriptor {
 /// gained the runtime's two-word header. This is the one contract fixture the issue authorises
 /// moving; the latency, the parameter table, the port table, the link set, the Annex-2 coefficients
 /// and `scratch_fixed_bytes` are unchanged.
-pub const STATE_LAYOUT_VERSION: u32 = 2;
+pub const STATE_LAYOUT_VERSION: u32 = 1;
 
 /// Factory for the fixed-latency scalar limiter.
 #[derive(Clone, Copy, Debug, Default)]
@@ -3453,7 +3453,7 @@ mod tests {
             "miso.true-peak-limiter"
         );
         assert_eq!(TRUE_PEAK_LIMITER_DESCRIPTOR.supported_link_modes.bits(), 3);
-        assert_eq!(TRUE_PEAK_LIMITER_DESCRIPTOR.state_layout_version, 2);
+        assert_eq!(TRUE_PEAK_LIMITER_DESCRIPTOR.state_layout_version, 1);
         // Latency is a contract fixture and does not move; the state rows are the #90 re-pin
         // (3N + 35 lane words, plus the runtime's two-word common header).
         for (quality, expected) in QUALITIES.iter().zip([
@@ -5257,7 +5257,7 @@ mod tests {
         assert_eq!(core.left.box_sum[0], core.left.lane[0].window as f32);
     }
 
-    /// E11: layout 2 round-trips, and every corruption is rejected without mutating the peer.
+    /// E11: the current layout round-trips, and every corruption is rejected without mutating the peer.
     #[test]
     fn state_round_trips_and_rejects_corruption() {
         let values = values_with(-6.0, 100.0, 5.0);
@@ -5281,7 +5281,7 @@ mod tests {
         let before = snapshot(peer.as_ref());
         assert_eq!(payload, before);
         peer.restore_state_payload(
-            2,
+            1,
             StatePayloadInput::new(
                 &payload.0,
                 &payload.1,
@@ -5299,7 +5299,7 @@ mod tests {
             .expect("prepare");
         fresh
             .restore_state_payload(
-                2,
+                1,
                 StatePayloadInput::new(
                     &payload.0,
                     &payload.1,
@@ -5330,7 +5330,7 @@ mod tests {
         let corruptions: [Corruption; 6] = [
             (
                 "version",
-                Box::new(|bytes: &mut Vec<u8>| write_u32(bytes, 0, 1)),
+                Box::new(|bytes: &mut Vec<u8>| write_u32(bytes, 0, 0)),
             ),
             (
                 "box sum off the grid",
@@ -5384,7 +5384,7 @@ mod tests {
         // The declared version argument is checked before anything else.
         assert!(
             peer.restore_state_payload(
-                1,
+                0,
                 StatePayloadInput::new(&reference.0, &reference.1, &reference.2, sizes)
                     .expect("sizes")
             )
@@ -5406,7 +5406,7 @@ mod tests {
             Backend::Simd8,
         );
         let key = bank.metadata().program_key;
-        assert_eq!(key.state_layout_version, 2);
+        assert_eq!(key.state_layout_version, 1);
         assert_eq!(key.state_sizes.left_bytes, 5_900);
         assert_eq!(key.state_sizes.common_bytes, 8);
         assert_eq!(key.state_sizes.total(), Some(11_808));

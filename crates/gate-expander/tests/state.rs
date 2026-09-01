@@ -202,7 +202,7 @@ fn active_restore_continues_against_uninterrupted() {
         let sizes = restored.metadata().state_sizes;
         restored
             .restore_state_payload(
-                2,
+                1,
                 StatePayloadInput::new(&common, &left_payload, &right_payload, sizes)
                     .expect("sizes"),
             )
@@ -269,7 +269,7 @@ fn a_track_restores_into_a_bank_whose_cursor_is_elsewhere() {
     let sizes = bank.metadata().program_key.state_sizes;
     bank.restore_track_state_payload(
         3,
-        2,
+        1,
         StatePayloadInput::new(&common, &left_payload, &right_payload, sizes).expect("sizes"),
     )
     .expect("restore into a bank");
@@ -314,7 +314,7 @@ fn a_malformed_phase_word_rejects_and_leaves_both_lanes_untouched() {
     let sizes = effect.metadata().state_sizes;
     let error = effect
         .restore_state_payload(
-            2,
+            1,
             StatePayloadInput::new(&common, &left_payload, &right_payload, sizes).expect("sizes"),
         )
         .expect_err("a phase word that is neither +0 nor 1.0 is rejected");
@@ -324,10 +324,10 @@ fn a_malformed_phase_word_rejects_and_leaves_both_lanes_untouched() {
     // The out-of-band version argument is checked before anything is read.
     let stale = effect
         .restore_state_payload(
-            1,
+            0,
             StatePayloadInput::new(&common, &before.1, &before.2, sizes).expect("sizes"),
         )
-        .expect_err("layout 1 no longer restores");
+        .expect_err("an invalid layout version does not restore");
     assert_eq!(stale.code, "effect.state.version");
 }
 

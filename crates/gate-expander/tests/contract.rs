@@ -35,8 +35,8 @@ fn float(payload: &[u8], index: usize) -> f32 {
 fn descriptor_and_exact_resources_are_frozen() {
     validate_descriptor(&GATE_EXPANDER_DESCRIPTOR).expect("descriptor");
     assert_eq!(GATE_EXPANDER_DESCRIPTOR.id.as_str(), "miso.gate-expander");
-    assert_eq!(GATE_EXPANDER_DESCRIPTOR.state_layout_version, 2);
-    assert_eq!(STATE_LAYOUT_VERSION, 2);
+    assert_eq!(GATE_EXPANDER_DESCRIPTOR.state_layout_version, 1);
+    assert_eq!(STATE_LAYOUT_VERSION, 1);
     // Layout 2: per lane `(23 + 2N) * 4` bytes, plus the runtime codec's two-word common header.
     for (quality, (rate, latency, lane_bytes, total)) in
         GATE_EXPANDER_DESCRIPTOR.qualities.iter().zip([
@@ -69,7 +69,7 @@ fn the_payload_header_names_the_layout() {
     let effect = prepare(request(&values));
     let (common, left, right) = snapshot(effect.as_ref());
     assert_eq!(common.len(), 8, "two header words");
-    assert_eq!(word(&common, 0), 2, "the payload states its own version");
+    assert_eq!(word(&common, 0), 1, "the payload states its own version");
     assert_eq!(
         word(&common, 1) as usize,
         (left.len() + right.len()) / 4,

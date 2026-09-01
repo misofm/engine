@@ -240,7 +240,7 @@ fn every_width_matches_the_scalar_instantiation() {
     let sizes = bank.metadata().program_key.state_sizes;
     bank.restore_track_state_payload(
         0,
-        2,
+        1,
         StatePayloadInput::new(&saved.0, &saved.1, &saved.2, sizes).expect("state input"),
     )
     .expect("state restore");

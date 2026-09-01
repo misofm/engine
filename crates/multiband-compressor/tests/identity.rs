@@ -355,7 +355,7 @@ fn resets_agree_across_widths() {
 /// A track snapshotted from one instance and restored into another continues identically, even
 /// though the two rings are at different cursors.
 ///
-/// This is what the time-ordered ring buys. Version 2's payload writes both rings oldest-first and
+/// This is what the time-ordered ring buys. The current payload writes both rings oldest-first and
 /// carries no cursor word, so a restore rotates the history into whatever position the receiving
 /// instance's shared cursor happens to be at. A bank has **one** cursor for eight tracks, so
 /// without the rotation a track could only ever be restored into an instance that had processed
@@ -407,7 +407,7 @@ fn a_restored_track_is_rotated_into_the_receiving_cursor() {
     );
     bank.restore_track_state_payload(
         1,
-        2,
+        1,
         effect_contract::StatePayloadInput::new(&saved.0, &saved.1, &saved.2, sizes)
             .expect("payload"),
     )
