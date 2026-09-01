@@ -1,5 +1,7 @@
 # Remove residual V2 terminology from active source and research
 
+**Status: SOL PASS.**
+
 ## Owner ruling
 
 No active prelaunch source, test, or research guidance may call the current engine or a current
@@ -47,3 +49,7 @@ remaining match classification before PASS.
 - The migration rename initially collided with the existing current-factory variable; separating
   `current_descriptor` from `current_factory` restored type clarity and is covered by the compiler
   and all six migration tests.
+- Sol adversarial review PASS: remaining live-tree textual matches are mathematical SVF tap names,
+  an external x86-64 ISA label, Apache/libm license text, a shell stderr redirection, historical
+  source-path citations, or the frozen issue-215 ruling. No current product identity, schema,
+  state layout, benchmark record, SDK artifact, ABI, or research decision calls itself V2.
