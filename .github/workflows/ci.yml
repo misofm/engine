@@ -205,6 +205,14 @@ jobs:
           bash scripts/check-builtins-policy.sh
           bash scripts/test-builtins-policy.sh
           bash scripts/check-graph-policy.sh
+      # The Issue-073/Issue-116 native PCM C-ABI runner's static seal (tool surface, dependency
+      # boundary, and the cross-platform rename-publication contract). Previously reachable only
+      # from scripts/sweep.sh, which nobody runs.
+      - name: Native PCM runner static seal and mutation tests
+        run: |
+          bash scripts/check-native-pcm-runner.sh
+          bash scripts/test-native-pcm-runner-v1-policy.sh
+          bash scripts/test-native-pcm-runner-portability-v1-policy.sh
       - name: Conformance boundaries and research corpus
         run: |
           bash scripts/check-conformance-boundaries.sh
