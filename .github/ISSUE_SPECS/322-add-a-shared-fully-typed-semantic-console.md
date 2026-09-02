@@ -82,6 +82,10 @@ Local gates on 2026-09-02:
 
 Adversarial review:
 
-- PASS locally on generated metadata use, headless/browser parity, request-ID monotonicity, pure
-  edit construction, whole-batch admission, and the acked-batch question. Final closure requires
-  the implementation commit's upstream workflows.
+- PASS on generated metadata use, headless/browser parity, request-ID monotonicity, pure edit
+  construction, whole-batch admission, and the acked-batch question.
+- Implementation commit `0d9a35cf4888b28660046fc2694e90179e1f2331` passed main CI
+  [33599939469](https://github.com/misofm/engine/actions/runs/33599939469), browser qualification
+  [33599939438](https://github.com/misofm/engine/actions/runs/33599939438), and release build
+  [33599939526](https://github.com/misofm/engine/actions/runs/33599939526).
+- Final verdict: **PASS**. The issue's smallest typed-control slice is complete and upstream.
