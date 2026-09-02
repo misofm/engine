@@ -123,3 +123,13 @@ Adversarial review of attempt 2:
   after dispatch remains pending until transport acknowledgement, then is delivered. An Effect
   fiber can neither invent an ack nor leave a command outstanding while its scope releases.
 - Final closure requires the revision commit's upstream main, browser, and release workflows.
+
+Final upstream evidence on 2026-09-02:
+
+- Revision commit `f54d845fd10aa88d7c739b89e2038e8138ee2f7e` is on `main`.
+- Main CI [33604440678](https://github.com/misofm/engine/actions/runs/33604440678): PASS.
+- Browser qualification [33604440726](https://github.com/misofm/engine/actions/runs/33604440726): PASS.
+- Release build [33604440568](https://github.com/misofm/engine/actions/runs/33604440568): PASS.
+- Final adversarial verdict: **PASS**. The opt-in adapter has typed failure and scoped ownership,
+  does not impose Effect on ordinary SDK consumers, and cannot acknowledge before or detach from
+  an outstanding transport mutation.
