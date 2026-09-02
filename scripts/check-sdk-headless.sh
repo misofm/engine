@@ -30,6 +30,14 @@ artifact_dir=$1
   echo "artifact directory must be a non-symlink directory" >&2
   exit 2
 }
+# Command substitution strips every trailing newline, which is legal pathname data. Append one
+# known non-newline byte to the physical directory, then remove exactly that byte after capture.
+# POSIX paths cannot contain NUL, but every other byte Bash can carry remains untouched.
+if ! artifact_dir_with_sentinel=$(cd -P -- "$artifact_dir" && printf '%sx' "$PWD"); then
+  echo "artifact directory cannot be resolved" >&2
+  exit 2
+fi
+artifact_dir=${artifact_dir_with_sentinel%x}
 [[ -f "$artifact_dir/miso-engine-v1-audio-worklet.simd128.wasm" ]] || {
   echo "artifact directory has no wasm module" >&2
   exit 2

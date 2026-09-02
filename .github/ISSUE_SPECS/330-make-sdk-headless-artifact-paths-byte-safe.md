@@ -158,3 +158,62 @@ package qualification supplies its missing evidence.
 
 Sol/high approved this bounded successor brief on 2026-09-03. Implementation and adversarial
 evidence will be appended without weakening the gates above.
+
+### Attempt 1 — Sol medium implementation
+
+`scripts/check-sdk-headless.sh` retains its argument-count, `-d`, and direct-final-component `! -L`
+checks. It now enters the accepted directory with physical `cd -P`, prints Bash's physical `$PWD`
+plus one known non-newline `x` byte inside command substitution, and removes exactly that final
+byte after capture. Appending data before capture prevents command substitution from consuming any
+terminal newline bytes belonging to the path; removing one final `x` is unambiguous even when the
+pathname itself ends in `x`. A failed physical transition reports validation failure and exits 2.
+The validated absolute path is then checked for the Wasm module and exported unchanged after the
+script enters `sdk/`. Node's status remains the shell's unsuppressed final status.
+
+The new automatically discovered `sdk/test/headless-path-evals.mjs` invokes the production shell
+script rather than reimplementing it. It accepts an alternate exact script path through
+`MISO_ENGINE_HEADLESS_SCRIPT_UNDER_TEST` for immutable-history probes. Its expected physical path
+comes independently from Node/libc `realpath`, never shell `pwd` or production capture. A fake Node
+process verifies exact SDK cwd, environment-string equality, visibility and validity of the
+eight-byte minimal Wasm module, and exact `--test` / `test/*-evals.mjs` arguments.
+
+The executable matrix covers ordinary relative and absolute paths, spaces, tabs and shell
+metacharacters, an embedded newline, one terminal newline, two terminal newlines, a final sentinel-
+like `x`, invalid arity, missing and non-directory inputs, missing module, direct symlink,
+unsearchable directory, and propagation of Node status 37. Results from the same test file:
+
+- exported parent `951a5a3c`: **RED**, 4 passed / 9 failed, including ordinary relative and
+  physical-path invariance failures;
+- exported failed attempt `68eef8d6`: **RED**, 10 passed / 3 failed, specifically one terminal
+  newline, repeated terminal newlines, and unsearchable status 1 instead of 2; and
+- this successor working tree: **GREEN**, 13 passed / 0 failed.
+
+The complete existing headless glob was also run with a separately preserved valid local Wasm
+build: all **124 tests in 28 suites passed**, including this new suite, proving automatic discovery.
+That local Wasm is test evidence only and was not committed. The canonical build gate itself was
+invoked once and stopped before copying output because this macOS host produced digest
+`1fe4b9cec4fb0373067f24f29af0d77eb4e1a3d9d36214dd654aa917c98c7821` rather than pinned
+`6ddf154d02fcb4dfaa1a397280a28ab9f38b0cd6dff466a316f120266ce2223f`; no digest was changed,
+repinned, or treated as PASS.
+
+Focused local evidence on 2026-09-03:
+
+- `bash -n scripts/check-sdk-headless.sh` and `shellcheck scripts/check-sdk-headless.sh`;
+- `node --test sdk/test/headless-path-evals.mjs`;
+- the same test with alternate exact script paths in isolated `git archive` exports of
+  `951a5a3c` and `68eef8d6`;
+- the full `bash scripts/check-sdk-headless.sh <valid-local-artifact>` invocation (124/124);
+- unchanged `python3 -B scripts/check-ci-path-routing.py` and
+  `python3 -B scripts/test-ci-path-routing.py`;
+- `bash scripts/check-sdk-types.sh`, `bash scripts/check-sdk-generated.sh`, and
+  `python3 -B scripts/check-sdk-deletions.py`;
+- unchanged workflow YAML parsing and exact `git diff --check`; and
+- the exact proposed paths classify `sdk` through the production router.
+
+`scripts/sdk-package.sh` is byte-unchanged from brief commit `6cc75062`. Static inspection confirms
+its artifact argument is consumed by `stage-package.mjs` before the later SDK-directory transition,
+which is confined to the npm-pack subshell; no executable evidence contradicted the brief's ruling.
+Only `scripts/check-sdk-headless.sh`, `sdk/test/headless-path-evals.mjs`, and this issue evidence are
+changed. No commit, push, workflow, router, checker, ignore list, digest, package, GitHub,
+branch-protection, or active-run mutation occurred. Fresh Sol/high review is still required; this
+attempt does not claim PASS.
