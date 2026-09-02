@@ -106,5 +106,8 @@ benchmark, generated file, SDK file, digest, or branch-protection change belongs
 ## Evidence
 
 Drafted on 2026-09-03 from the failed and passing remote runs plus direct harness inspection.
-Sol/high brief approval, Sol-medium implementation, red mutation, adversarial verdict, and remote
-qualification will be appended without weakening the gates above.
+Sol/high approved the brief at `df96edf1`: remote binary/source identity corroborates the harness
+race; const thread-local `Cell` state and teardown-safe hooks are appropriate; the positive and
+foreign-thread controls are discriminating; the exact workload and red mutation are frozen; and
+the scope/rollout are the smallest closable slice. Sol-medium implementation, red mutation,
+adversarial verdict, and remote qualification will be appended without weakening the gates above.
