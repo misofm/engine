@@ -48,7 +48,8 @@ enginectl session build --stems ./song-stems --output song.session.toml
 `--stems` examines only the directory's directly owned regular `.flac` files and refuses nested
 directories, symlinks, non-FLAC entries, empty leaves, and mixed or unsupported sample rates. It
 does not recurse: a parent containing several song directories is a collection, and its typed
-`stems.collection` refusal reports the sorted leaf names so an agent can issue one call per song.
+`stems.collection` refusal reports sorted child-directory names so an agent can issue one call per
+child. The report does not assert that any reported child is itself a valid stems leaf.
 Each FLAC becomes one source and one unity-routed track feeding the single `main` output. Mono is
 duplicated across the track's two lanes; stereo maps channels 0 and 1. Filenames determine stable
 IDs only—they never imply gain, pan, effects, categories, or any other audio decision.
@@ -66,11 +67,61 @@ rack entries are `{ effectId, parameters?, options? }`. Automation sample positi
 unsigned decimal strings such as `"480"`, never JSON numbers. Unknown structural keys are refused.
 The complete input is limited to 4 MiB and must be valid UTF-8 JSON.
 
-`--output -` writes exactly the canonical TOML, including its final LF. A path writes a
-same-directory temporary file and publishes it atomically only after the embedded Wasm engine has
-accepted the document; stdout then receives one compact JSON receipt with the caller's path, byte
-count, and SHA-256. Existing files, directories, and symlinks are preserved by default.
-`--overwrite` authorizes replacement of one filesystem destination and is invalid with stdout.
+`--output -` writes exactly the canonical TOML, including its final LF, and successful stderr is
+empty. No receipt shares stdout in this mode. A path writes a same-directory temporary file and
+publishes it atomically only after the embedded Wasm engine has accepted the document; stdout then
+receives one compact JSON receipt plus LF. Existing files, directories, and symlinks are preserved
+by default. `--overwrite` authorizes replacement of one filesystem destination and is invalid with
+stdout. In stems mode the output is refused if its parent is physically the stems directory,
+including when a symlink or case alias makes differently spelled paths refer to that same directory.
+
+A successful stems file receipt has this exact shape (values shown are illustrative):
+
+```json
+{
+  "schemaVersion": 1,
+  "command": "session.build",
+  "output": {
+    "path": "../sessions/song.session.toml",
+    "resolvedPath": "/work/sessions/song.session.toml",
+    "bytes": 7642,
+    "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+  },
+  "input": {
+    "kind": "stems",
+    "path": "./song-stems",
+    "resolvedPath": "/work/project/song-stems"
+  },
+  "session": {
+    "id": "song-stems",
+    "revision": 0,
+    "sampleRateHz": 44100,
+    "quantumFrames": 128,
+    "sources": 1,
+    "tracks": 1
+  },
+  "stems": [
+    {
+      "filename": "Lead Vocal.flac",
+      "sourceId": "lead-vocal",
+      "trackId": "lead-vocal",
+      "content": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "channels": 2,
+      "bitDepth": 24,
+      "frames": 4096
+    }
+  ]
+}
+```
+
+`path` preserves the exact argument string. `resolvedPath` is Node's host-native lexical
+`path.resolve()` result against the invocation working directory: it removes lexical `.` and `..`
+components but does not resolve symlinks, case aliases, Unicode aliases, or filesystem identity.
+It is useful after changing local working directories, but is not a physical canonical identity or
+a portable cross-machine locator. Request-mode file receipts retain only `output.path`, `bytes`, and
+`sha256`; neither request-mode receipts nor raw-output mode adds a `resolvedPath`. `stems` follows
+the importer's stable direct-child filename byte ordering, and each `filename` is relative to
+`input.resolvedPath`.
 
 The executable is always non-interactive: it never prompts, pages, opens another program, reads
 configuration or credentials, loads plugins, invokes media subprocesses, emits telemetry, or uses

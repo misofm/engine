@@ -346,3 +346,44 @@ reach verified EOF, all canonical identities are complete, the builder and embed
 and the file is atomically published. The black-box structural gate separately proves one process,
 one decoder and engine compile/instance, and exactly one file-handle read per stem. These numbers
 are descriptive; no release budget was invented and no optimization was performed from them.
+
+## Remote rollout and real four-song dogfood
+
+The CI-conscious feature branch was pushed once at exact head `b89a7fb2`; the ordinary branch push
+created zero workflow runs. Pull request #334 targeted exact main base `db56d1b1`. Its SDK
+qualification run <https://github.com/misofm/engine/actions/runs/33675688367> passed the substantive
+package/generated/headless job in 2m53s and the required `SDK qualification` aggregate. The engine
+run <https://github.com/misofm/engine/actions/runs/33675688483> and browser run
+<https://github.com/misofm/engine/actions/runs/33675688390> reported their stable required
+aggregates while every heavy engine and browser job was skipped. All three required contexts were
+green, and PR #334 merged once as `49c153f7` without another feature-branch update. The merge push
+created only SDK run <https://github.com/misofm/engine/actions/runs/33676075580>, whose substantive
+job and aggregate passed in 2m54s without retry.
+
+The reviewed extracted 69-file package then built all four supplied song leaves with an empty
+child `PATH`, absolute input/output arguments, no repository discovery, and a sibling output
+directory at `/Users/bl/Desktop/between-the-doors/between-the-doors-sessions`:
+
+| session | sources/tracks/routes | frames per stem | TOML bytes | TOML SHA-256 |
+| --- | ---: | ---: | ---: | --- |
+| `ghost` | 8/8/8 | 6,207,923 | 7,638 | `695ae935659cab266c6dd35b8212243d09832565992978c7683c1c25821ec589` |
+| `play-me` | 6/6/6 | 7,717,500 | 5,800 | `90c3094bff4c93f914330c62402cf01696496a1d08a971f96b51ac70c92e4ab3` |
+| `war` | 8/8/8 | 6,761,475 | 7,656 | `b49020b5c671215bd70917fbee77fd3d4403bf748666027895bdb51a2691bdad` |
+| `wide-open` | 8/8/8 | 8,499,092 | 7,642 | `a6884dc3dedbfbbe4ae1b034a71a565fedcaf379af241ea85922e653a5c1b92c` |
+
+Every file is 44.1 kHz/stereo PCM24, has one `main` output, matching source/track identities, and
+one unity `post_matrix` route per track. The native `session_validator` independently passed all
+four real stages—TOML grammar, typed model, session compilation, and builtins preparation—for each
+document. Fresh Sol-high dogfood review also booted every byte stream through public
+`createOfflineEngine()` and observed `ready` with matching rate, quantum, source count, and track
+count.
+
+The supplied collection root independently refused before decode with exit 3, empty stdout,
+`effect: "not_applied"`, code `stems.collection`, and exactly
+`["ghost","play-me","war","wide-open"]`. Before/after SHA-256 manifests for all 30 source FLACs
+matched exactly; no `.enginectl-*` or session file appeared in a source leaf. This proves the real
+dogfood portion of gates 5 and 10 without inferring playback/source resolution from session
+authoring. Sol-high found no correctness or measured-performance reason to add recursive batching
+or a cache. Its three bounded receipt/help durability findings became successor issue #335 rather
+than reopening this accepted importer. Issue #333 is complete once this evidence is upstream and
+the remote body/state are synchronized.
