@@ -173,3 +173,24 @@ Focused local evidence on 2026-09-03:
 No workflow, SDK package, workspace-policy, package-staging, user dependency, GitHub, protection,
 or rollout state changes in this correction. A fresh Sol/high verdict remains required; this
 evidence does not claim PASS.
+
+### Attempt 2 adversarial verdict — Sol high: PASS
+
+Fresh Sol/high review approved exact commit `d85b5870d53979db4787307ea3bf7546388e02d6`
+for rollout. In an isolated export of the tracked commit, a real repository with 2,143 tracked
+files and approximately 308 MiB of content reported an unchanged root-license copy as only
+`A sdk/LICENSE-copy` under ordinary copy discovery and as exact
+`C100 LICENSE sdk/LICENSE-copy` under the production harder discovery. Production classified both
+the linear two-dot push and divergent-main three-dot pull-request histories as full; ordinary SDK
+changes remained SDK-only. A restrictive `diff.renameLimit=1` did not hide the exact copy.
+
+The reviewer independently confirmed that production consumes the statically pinned option tuple,
+the unused-correct-tuple bypass is rejected, all inherited workflow trigger/aggregate/failure
+contracts remain sealed, and the routing, mutation, YAML, generated/deletion, canonical-license,
+one-byte-license-red, and exact-diff gates pass. Measured production routing was approximately
+0.04 seconds for an SDK change and 0.04–0.07 seconds for the unchanged-license-copy cases on the
+exported repository. Conservative additional copy matches only broaden qualification.
+
+This is the required pre-rollout PASS. Networked qualification, observation of the three new
+aggregate contexts, branch-protection replacement and re-read, and post-rollout route evidence are
+still pending and remain mandatory before issue closure.
