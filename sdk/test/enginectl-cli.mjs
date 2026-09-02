@@ -176,23 +176,46 @@ describe("enginectl session build", () => {
     const directory = await mkdtemp(resolve(tmpdir(), "enginectl-stems-eval-"));
     const outputPath = resolve(directory, "song.session.toml");
     const stems = resolve(directory, "Song Stems");
+    const audit = resolve(directory, "hash-audit.json");
+    const preload = resolve(directory, "hash-audit.mjs");
     await mkdir(stems);
     await copyFile(resolve(flacFixtures, "pcm16-mono-boundaries-b32.flac"), resolve(stems, "1 Mono.flac"));
     await copyFile(resolve(flacFixtures, "pcm24-stereo-boundaries-b32.flac"), resolve(stems, "Lead Vocal.FLAC"));
+    await writeFile(preload, `
+import crypto from "node:crypto";
+import { writeFileSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
+const originalCreateHash = crypto.createHash;
+const canonicalPrefix = Buffer.from("schema_version = 1\\n");
+let tomlHashes = 0;
+crypto.createHash = function (algorithm, ...options) {
+  const hash = originalCreateHash.call(this, algorithm, ...options);
+  const originalUpdate = hash.update;
+  hash.update = function (data, ...encoding) {
+    const bytes = typeof data === "string" ? Buffer.from(data, encoding[0]) : Buffer.from(data);
+    if (algorithm === "sha256" && bytes.subarray(0, canonicalPrefix.length).equals(canonicalPrefix)) {
+      tomlHashes += 1;
+    }
+    return originalUpdate.call(this, data, ...encoding);
+  };
+  return hash;
+};
+syncBuiltinESMExports();
+process.on("exit", () => writeFileSync(process.env.ENGINECTL_HASH_AUDIT, JSON.stringify({ tomlHashes })));
+`);
     const built = await run([
       "session", "build", "--stems", stems, "--output", outputPath,
       "--session-id", "dogfood", "--quantum-frames", "256",
-    ]);
+    ], undefined, {
+      nodeArgs: ["--import", preload],
+      env: { ENGINECTL_HASH_AUDIT: audit },
+    });
     assert.equal(built.status, 0, built.stderr.toString("utf8"));
     assert.equal(built.stderr.byteLength, 0);
     const receipt = JSON.parse(built.stdout.toString("utf8"));
     assert.deepEqual(receipt.input, { kind: "stems", path: stems, resolvedPath: resolve(stems) });
     assert.deepEqual(Object.keys(receipt.output), ["path", "resolvedPath", "bytes", "sha256"]);
-    const enginectlSource = await readFile(resolve(repoRoot, "sdk/src/enginectl.ts"), "utf8");
-    assert.equal(enginectlSource.match(/createHash\("sha256"\)\.update\(bytes\)/g)?.length, 1);
-    assert.match(enginectlSource, /bytes: requestReceipt\.output\.bytes/);
-    assert.match(enginectlSource, /sha256: requestReceipt\.output\.sha256/);
-    assert.match(enginectlSource, /resolvedPath: stemsBuild\.directory/);
+    assert.deepEqual(JSON.parse(await readFile(audit, "utf8")), { tomlHashes: 1 });
     assert.equal(receipt.output.resolvedPath, resolve(outputPath));
     assert.deepEqual(receipt.session, {
       id: "dogfood", revision: 0, sampleRateHz: 48_000, quantumFrames: 256, sources: 2, tracks: 2,

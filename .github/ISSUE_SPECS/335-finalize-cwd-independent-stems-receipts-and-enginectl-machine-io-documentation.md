@@ -246,8 +246,8 @@ Attempt 2 on 2026-09-03 makes only the correction named by the HOLD. Stems mode 
 already-computed `requestReceipt`, preserves the documented output key order (`path`,
 `resolvedPath`, `bytes`, `sha256`), reuses its byte count and SHA-256, and takes
 `input.resolvedPath` from the importer's established `stemsBuild.directory`. The focused test pins
-that key order and narrowly proves that the source contains one TOML digest expression, both common
-output-field reuses, and the importer-directory reuse.
+that key order. Attempt 2 also added source-reading regex assertions intended to prove digest and
+field reuse; the subsequent HOLD showed that those assertions were not discriminating evidence.
 
 Focused qualification is green:
 
@@ -256,8 +256,8 @@ Focused qualification is green:
 - request-mode comparison against the isolated parent `57e43da3` executable: exact receipt bytes
   match (168 bytes) and exact canonical TOML bytes match (1,247 bytes); the isolated source was
   SHA-256-identical to `git show 57e43da3:sdk/src/enginectl.ts` before comparison;
-- standalone static proof: exactly one `createHash("sha256").update(bytes)` expression, common
-  bytes/digest reused, `stemsBuild.directory` reused, and no stems-argument `resolve()` remains;
+- a standalone source-regex check reported one chained digest expression and the expected field
+  spellings, but it did not prove the one-hash invariant and is superseded by the HOLD below;
 - `git diff --check`: PASS.
 
 No package-wide gate, benchmark, dependency, filesystem probe, or behavior outside the bounded
@@ -288,3 +288,27 @@ receipt, alternate-cwd reopening/hostile framing, lexical symlink alias, physica
 publication order, and post-publication `effect: "applied"` were green. The exact three-file scope,
 worktree, diff check, and commit validation were clean. Attempt 2 remains **HOLD** on the ceremony
 boundary; attempt 3 is the final permitted implementation attempt.
+
+### Attempt 3 — runtime one-hash evidence
+
+Attempt 3 on 2026-09-03 leaves the accepted production correction unchanged. It removes the four
+source-reading/regex assertions while retaining the observable output-key-order assertion. The
+same stems file-build test now preloads a child-only `node:crypto` wrapper, calls
+`syncBuiltinESMExports()`, and counts SHA-256 `update()` payloads beginning with canonical
+`schema_version = 1\n`. The child writes `{ "tomlHashes": 1 }` only into its test temporary
+directory, and the parent asserts that exact record.
+
+Focused qualification is green:
+
+- strict TypeScript build followed by
+  `ENGINECTL=sdk/dist/enginectl.js node --test sdk/test/enginectl-cli.mjs`: PASS, 21/21;
+- an isolated stems-only second full-payload hash mutation made the targeted built-executable test
+  fail with `tomlHashes: 2` versus expected `1`; production was then restored and the complete
+  focused suite passed again, 21/21;
+- request-mode comparison against the source-verified isolated parent `57e43da3` executable:
+  exact receipt bytes match (168 bytes) and exact canonical TOML bytes match (1,247 bytes);
+- `git diff --check`: PASS.
+
+No production file, package-wide gate, benchmark, dependency, or persistent/global test hook was
+added in attempt 3. This is the final permitted implementation attempt and awaits fresh
+adversarial review; this evidence does not claim PASS.
