@@ -20,7 +20,7 @@ env:
 jobs:
   host:
     name: host quality and native shell
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - name: Install pinned Rust toolchain
@@ -338,7 +338,7 @@ jobs:
 
   x86-probes:
     name: x86 scalar and SIMD compile probes
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - name: Install pinned Rust toolchain
@@ -367,7 +367,7 @@ jobs:
 
   wasm:
     name: browser Wasm artifact probes
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       # `check-sdk-headless.sh` runs `node --test 'test/*-evals.mjs'`, and glob
@@ -446,7 +446,7 @@ jobs:
 
   wasm-gates:
     name: cross-target digest gates under wasmtime
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       # wabt is not optional here. #198 gave `run-wasm-gates.sh` the detector-residency pin, which
