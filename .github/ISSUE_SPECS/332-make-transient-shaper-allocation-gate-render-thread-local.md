@@ -250,3 +250,27 @@ row already freezes this exact optimized mutation and result.
 
 Only `crates/transient-shaper/tests/allocation.rs` and this specification changed. Attempt 3 does
 not claim fresh Sol/high PASS, remote qualification, GitHub synchronization, or issue closure.
+
+### Attempt 3 — Sol/high adversarial PASS
+
+Fresh Sol/high review returned **PASS** on exact checkpoint `432c0216`. Independent mutations
+injected worker panics after guard construction/before readiness, immediately after readiness,
+after start, inside the worker measurement, and immediately before normal completion. Every case
+terminated with status 101 under timeout through the appropriate `worker.join().expect(...)`; none
+hung or passed falsely. A forced impossible normal pre-ready return likewise exited 101 through the
+explicit protocol panic.
+
+The reviewer independently confirmed genuine normal overlap, foreign `(1, 1)` activity, and caller
+`(0, 0)` isolation. The exact release mutation
+`std::hint::black_box(Vec::<u8>::with_capacity(1));` failed with 2,000 allocations while both
+controls passed; removing it restored production byte-for-byte and the same isolated release test
+passed 3/3. Const thread-local state, teardown-safe observation, unchanged allocator forwarding,
+successful-realloc accounting, panic-safe disarming, the exact 1,000-by-128 scalar-plus-bank
+workload, automation cadence, and separate allocation/free assertions all passed review.
+
+Clean focused and complete transient-shaper release tests passed, as did five repetitions each at
+one and eight test threads, Clippy, formatting, realtime/environment/workspace policy, routing
+checker/mutations, and diff checks. All relevant ranges classify `full`; cumulative scope is exactly
+this spec, the allocation test, and its mutation record, with no production, workflow, router, SDK,
+manifest, or lockfile drift. This is the required pre-push PASS. Remote qualification, GitHub
+synchronization, and closure remain pending.
