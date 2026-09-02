@@ -149,3 +149,17 @@ No portability claim is made for those local mutation harnesses. The exact scope
 Only `crates/transient-shaper/tests/allocation.rs`, its allocation row/evidence in
 `tests/MUTATIONS.md`, and this specification changed. This evidence does not claim fresh Sol/high
 review, remote engine qualification, GitHub synchronization, or issue closure.
+
+### Attempt 1 — Sol/high HOLD
+
+Sol/high held checkpoint `86ccb24c` on two reproducible defects. First, the caller spun on the
+worker's `finished` atomic, but the worker stored it only on normal return. An injected panic just
+before that store wedged the test until an external five-second timeout. Completion publication
+must be unwind-safe so the caller always leaves measurement and `join` reports the worker panic.
+
+Second, the recorded bare `Vec::<u8>::with_capacity(1)` release mutation was optimized away: all
+3 allocation tests remained green. Wrapping the allocation in `black_box` made it non-elidable and
+produced the claimed 2,000 allocations with the two harness controls green and the render gate red.
+Attempt 2 must freeze that exact mutation in the spec, test comment, and mutation record and rerun
+it under release optimization. All other allocator, overlap, workload, concurrency, scope, and
+policy checks passed. Attempt 1 remains **HOLD**.
