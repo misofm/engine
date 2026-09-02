@@ -187,6 +187,12 @@ describe("enginectl session build", () => {
     assert.equal(built.stderr.byteLength, 0);
     const receipt = JSON.parse(built.stdout.toString("utf8"));
     assert.deepEqual(receipt.input, { kind: "stems", path: stems, resolvedPath: resolve(stems) });
+    assert.deepEqual(Object.keys(receipt.output), ["path", "resolvedPath", "bytes", "sha256"]);
+    const enginectlSource = await readFile(resolve(repoRoot, "sdk/src/enginectl.ts"), "utf8");
+    assert.equal(enginectlSource.match(/createHash\("sha256"\)\.update\(bytes\)/g)?.length, 1);
+    assert.match(enginectlSource, /bytes: requestReceipt\.output\.bytes/);
+    assert.match(enginectlSource, /sha256: requestReceipt\.output\.sha256/);
+    assert.match(enginectlSource, /resolvedPath: stemsBuild\.directory/);
     assert.equal(receipt.output.resolvedPath, resolve(outputPath));
     assert.deepEqual(receipt.session, {
       id: "dogfood", revision: 0, sampleRateHz: 48_000, quantumFrames: 256, sources: 2, tracks: 2,

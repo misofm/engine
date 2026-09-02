@@ -239,3 +239,27 @@ byte-identical at 1,243 bytes, and request file receipts were byte-identical at 
 types, generated/deletion gates and all 36 deletion mutations, routing gates, SDK classification,
 and extracted 69-file package smoke were green. Attempt 1 remains **HOLD** pending the single-pass
 common-receipt correction and fresh review.
+
+### Attempt 2 — bounded correction evidence
+
+Attempt 2 on 2026-09-03 makes only the correction named by the HOLD. Stems mode now extends the
+already-computed `requestReceipt`, preserves the documented output key order (`path`,
+`resolvedPath`, `bytes`, `sha256`), reuses its byte count and SHA-256, and takes
+`input.resolvedPath` from the importer's established `stemsBuild.directory`. The focused test pins
+that key order and narrowly proves that the source contains one TOML digest expression, both common
+output-field reuses, and the importer-directory reuse.
+
+Focused qualification is green:
+
+- strict TypeScript build followed by
+  `ENGINECTL=sdk/dist/enginectl.js node --test sdk/test/enginectl-cli.mjs`: PASS, 21/21;
+- request-mode comparison against the isolated parent `57e43da3` executable: exact receipt bytes
+  match (168 bytes) and exact canonical TOML bytes match (1,247 bytes); the isolated source was
+  SHA-256-identical to `git show 57e43da3:sdk/src/enginectl.ts` before comparison;
+- standalone static proof: exactly one `createHash("sha256").update(bytes)` expression, common
+  bytes/digest reused, `stemsBuild.directory` reused, and no stems-argument `resolve()` remains;
+- `git diff --check`: PASS.
+
+No package-wide gate, benchmark, dependency, filesystem probe, or behavior outside the bounded
+receipt construction and focused proof was added. Attempt 2 awaits fresh adversarial review; this
+evidence does not claim PASS.

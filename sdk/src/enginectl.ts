@@ -410,18 +410,17 @@ async function build(args: BuildArguments): Promise<void> {
     },
   };
   const receipt = stemsBuild === undefined ? requestReceipt : {
-    schemaVersion: 1,
-    command: "session.build",
+    ...requestReceipt,
     output: {
-      path: args.output,
+      path: requestReceipt.output.path,
       resolvedPath: resolve(args.output),
-      bytes: bytes.byteLength,
-      sha256: createHash("sha256").update(bytes).digest("hex"),
+      bytes: requestReceipt.output.bytes,
+      sha256: requestReceipt.output.sha256,
     },
     input: {
       kind: "stems",
       path: args.stems,
-      resolvedPath: resolve(args.stems as string),
+      resolvedPath: stemsBuild.directory,
     },
     session: {
       id: stemsBuild.sessionId,
