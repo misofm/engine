@@ -201,3 +201,18 @@ portability claim is made.
 Only the allocation test, its row/evidence in `tests/MUTATIONS.md`, and this specification changed.
 Attempt 2 does not claim fresh Sol/high PASS, remote qualification, GitHub synchronization, or
 issue closure.
+
+### Attempt 2 — Sol/high HOLD
+
+Sol/high held checkpoint `4f7a0940`. The completion guard releases the caller after any panic that
+occurs once `ready` is published, but the caller's readiness loop observes only `ready`. An injected
+panic after guard construction and before `ready.store` published `finished`, printed the worker
+panic, and still timed out after three seconds with status 124 because the caller never inspected
+the terminal state. The evidence claim that every injected worker panic releases the caller was
+therefore too broad.
+
+Attempt 3 is final. The readiness phase must observe terminal completion as well as readiness. If
+the worker terminates before readiness, the caller must not enter the measured overlap region; it
+must join promptly and surface the failure. The already qualified post-readiness panic path and
+exact release-mode `black_box` mutation remain mandatory. All other implementation, workload,
+concurrency, red-mutation, scope, and policy checks passed. Attempt 2 remains **HOLD**.
