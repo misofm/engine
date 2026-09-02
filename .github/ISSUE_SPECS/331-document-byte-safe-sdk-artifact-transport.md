@@ -115,5 +115,8 @@ surface, engine, browser, or release file changes are authorized.
 
 ## Evidence
 
-Drafted from issue #330's terminal Sol/high finding on 2026-09-03. Sol/high brief approval,
-implementation, and adversarial evidence will be appended without weakening the gates above.
+Drafted from issue #330's terminal Sol/high finding on 2026-09-03. Sol/high approved the brief at
+commit `1e477e12`: the one-row replacement is the smallest closable successor, both directions of
+the vocabulary contract are explicit, the production implementation is frozen, and the inherited
+Linux, package, routing, aggregate, protection, and remote-synchronization gates remain mandatory.
+Implementation and adversarial evidence will be appended without weakening those gates.
