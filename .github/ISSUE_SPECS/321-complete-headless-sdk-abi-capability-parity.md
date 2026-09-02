@@ -79,6 +79,7 @@ Local gates on 2026-09-02:
 
 Adversarial review:
 
-- PASS locally on ABI coverage, generated-layout use, copied-memory lifetime, refusal semantics, and
-  the acked-batch question. Final issue closure requires the implementation commit's upstream CI,
-  browser qualification, and release-build results.
+- PASS on ABI coverage, generated-layout use, copied-memory lifetime, refusal semantics, and the
+  acked-batch question.
+- Final PASS: implementation commit `cdf26475` passed CI run `33597667707`, browser qualification
+  run `33597667693`, and release-build run `33597667734`.
