@@ -131,3 +131,45 @@ Focused local evidence on 2026-09-03:
 No SDK source/package change, workspace-policy implementation change, package-staging change,
 commit, push, GitHub mutation, branch-protection mutation, benchmark, timing, playback, or rollout
 is part of this attempt. Fresh Sol/high adversarial verification remains required before rollout.
+
+### Attempt 1 adversarial verdict — Sol high: HOLD
+
+The direct and synthetic name-status coverage passed, but production used `git diff
+--find-copies`. Git does not search unchanged files as copy sources under that option. A branch can
+therefore leave root `LICENSE` unchanged, add byte-identical content at an SDK-only path, and be
+reported as a single SDK `A` record rather than `C100 LICENSE sdk/...`; both PR and push routing then
+narrow incorrectly. The synthetic `C` records could not expose this discovery failure. The
+workspace-policy harness's pre-existing GNU-userland portability issue is separate from this
+bounded routing HOLD.
+
+### Attempt 2 — Sol medium HOLD correction
+
+Production now uses the exact literal Git option tuple `--name-status -z --find-renames
+--find-copies-harder`, which includes unchanged files in copy-source discovery. The static checker
+AST-pins both that tuple and the production `subprocess.run` command's exact consumption of it.
+Both the checker mutation suite and the executable router suite reject a downgrade back to
+`--find-copies`; a second checker mutant proves that leaving an unused correct tuple beside a
+downgraded inline command is also rejected.
+
+A real temporary Git repository commits root `LICENSE`, branches, and adds an identical
+`sdk/LICENSE-copy` while leaving the root source unchanged. The fixture proves ordinary copy
+discovery emits only `A sdk/LICENSE-copy`, harder discovery emits the exact
+`C100 LICENSE sdk/LICENSE-copy` record, the linear two-dot push routes full, and a three-dot pull
+request against a subsequently diverged `main` also routes full. This runs the production Git diff
+path rather than injecting a preconstructed status record. All inherited direct, mixed, ordinary
+status, rename/copy-side, malformed-input, trigger, aggregate, ownership, and YAML-seal mutations
+remain active.
+
+Focused local evidence on 2026-09-03:
+
+- `python3 -B scripts/check-ci-path-routing.py`;
+- `python3 -B scripts/test-ci-path-routing.py`, including both real-Git LICENSE-copy histories and
+  the production-option downgrade mutant;
+- `yq eval '.'` over `ci.yml`, `browser-qualification.yml`, `release-build.yml`, and `sdk.yml`;
+- `bash scripts/check-sdk-generated.sh`;
+- `python3 -B scripts/check-sdk-deletions.py`; and
+- exact-scope `git diff --check`.
+
+No workflow, SDK package, workspace-policy, package-staging, user dependency, GitHub, protection,
+or rollout state changes in this correction. A fresh Sol/high verdict remains required; this
+evidence does not claim PASS.

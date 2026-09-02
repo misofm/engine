@@ -24,6 +24,7 @@ SDK_FILES = {
     "scripts/check-sdk-types.sh",
     "scripts/sdk-package.sh",
 }
+GIT_DIFF_OPTIONS = ("--name-status", "-z", "--find-renames", "--find-copies-harder")
 
 
 def path_kind(path: str) -> str | None:
@@ -95,7 +96,7 @@ def diff_paths(event: str, base: str, head: str) -> list[str] | None:
     else:
         return None
     result = subprocess.run(
-        ["git", "diff", "--name-status", "-z", "--find-renames", "--find-copies", *revisions],
+        ["git", "diff", *GIT_DIFF_OPTIONS, *revisions],
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
         check=False,

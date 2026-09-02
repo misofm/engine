@@ -29,6 +29,16 @@ def run_at(root: pathlib.Path, *args: str) -> str:
     return result.stdout.strip()
 
 
+def run_bytes_at(root: pathlib.Path, *args: str) -> bytes:
+    result = subprocess.run(args, cwd=root, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            check=False)
+    if result.returncode:
+        raise AssertionError(
+            f"command failed: {' '.join(args)}\n{result.stderr.decode(errors='replace')}"
+        )
+    return result.stdout
+
+
 def route_with(router: pathlib.Path, *paths: str) -> str:
     args = [sys.executable, str(router), "--event", "pull_request"]
     for path in paths:
@@ -206,6 +216,42 @@ def main() -> int:
     finally:
         shutil.rmtree(repository)
 
+    # Copy discovery must include an unchanged source. Root LICENSE exists at the common ancestor;
+    # the feature adds identical bytes only beneath sdk/, while main diverges independently. Plain
+    # --find-copies reports A and would narrow both the real PR and linear push to SDK. Production's
+    # --find-copies-harder reports both LICENSE and the SDK destination, preserving the full route.
+    repository = pathlib.Path(tempfile.mkdtemp(prefix="ci-license-copy-git-"))
+    try:
+        git(repository, "init", "-q", "-b", "main")
+        git(repository, "config", "user.name", "CI path routing test")
+        git(repository, "config", "user.email", "ci-path-routing@example.invalid")
+        ancestor = commit_file(repository, "LICENSE", "shared license fixture\n", "license")
+        git(repository, "checkout", "-q", "-b", "feature", ancestor)
+        destination = repository / "sdk/LICENSE-copy"
+        destination.parent.mkdir(parents=True)
+        shutil.copy2(repository / "LICENSE", destination)
+        git(repository, "add", "sdk/LICENSE-copy")
+        git(repository, "commit", "-m", "copy license into sdk")
+        head = git(repository, "rev-parse", "HEAD")
+        hard_copy = run_bytes_at(
+            repository, "git", "diff", "--name-status", "-z", "--find-renames",
+            "--find-copies-harder", f"{ancestor}...{head}",
+        )
+        assert hard_copy == b"C100\0LICENSE\0sdk/LICENSE-copy\0"
+        ordinary_copy = run_bytes_at(
+            repository, "git", "diff", "--name-status", "-z", "--find-renames",
+            "--find-copies", f"{ancestor}...{head}",
+        )
+        assert ordinary_copy == b"A\0sdk/LICENSE-copy\0"
+        assert run_at(repository, sys.executable, str(ROUTER), "--event", "push",
+                      "--base", ancestor, "--head", head) == "full"
+        git(repository, "checkout", "-q", "main")
+        base = commit_file(repository, "README.md", "main diverged\n", "diverge main")
+        assert run_at(repository, sys.executable, str(ROUTER), "--event", "pull_request",
+                      "--base", base, "--head", head) == "full"
+    finally:
+        shutil.rmtree(repository)
+
     root = workspace()
     try:
         mutate(root / "scripts/ci-path-router.py", "    return None\n\n\ndef classify_paths",
@@ -232,6 +278,21 @@ def main() -> int:
         "        for value in fields[index:index + count]:\n",
         "        for value in fields[index:index + 1]:\n",
     )  # dropping a LICENSE rename/copy destination would narrow to SDK
+    router_mutation_fails('"--find-copies-harder"', '"--find-copies"')
+    root = workspace()
+    try:
+        mutate(root / "scripts/ci-path-router.py", '"--find-copies-harder"', '"--find-copies"')
+        checker_fails(root)  # static policy also rejects unchanged-source copy discovery downgrade
+    finally:
+        shutil.rmtree(root)
+    root = workspace()
+    try:
+        mutate(root / "scripts/ci-path-router.py",
+               '["git", "diff", *GIT_DIFF_OPTIONS, *revisions]',
+               '["git", "diff", "--name-status", "-z", "--find-renames", "--find-copies", *revisions]')
+        checker_fails(root)  # leaving a correct unused constant cannot disguise production downgrade
+    finally:
+        shutil.rmtree(root)
     with tempfile.NamedTemporaryFile() as status:
         status.write(b"R100\0sdk/src/index.ts\0")  # a missing rename side is malformed/full
         status.flush()

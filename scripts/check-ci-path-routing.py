@@ -24,6 +24,7 @@ SDK_FILES = [
     "scripts/sdk-package.sh",
 ]
 SDK = ["sdk/**", *SDK_FILES]
+GIT_DIFF_OPTIONS = ("--name-status", "-z", "--find-renames", "--find-copies-harder")
 RELEASE_PR_INPUTS = [
     "**/Cargo.toml",
     "Cargo.lock",
@@ -293,6 +294,41 @@ def check_classifier_contract(root: pathlib.Path) -> None:
     expected = set(SDK_FILES)
     require(len(values) == len(sdk_files.elts) and values == expected,
             "ci-path-router.py: exact SDK file taxonomy drifted (LICENSE is full-route owned)")
+    git_options = next((
+        node.value for node in tree.body
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "GIT_DIFF_OPTIONS"
+                for target in node.targets)
+    ), None)
+    require(isinstance(git_options, ast.Tuple),
+            "ci-path-router.py: GIT_DIFF_OPTIONS must be a literal tuple")
+    options = tuple(
+        element.value for element in git_options.elts
+        if isinstance(element, ast.Constant) and isinstance(element.value, str)
+    )
+    require(len(options) == len(git_options.elts) and options == GIT_DIFF_OPTIONS,
+            "ci-path-router.py: Git diff must discover copies from unchanged full-route sources")
+    diff_function = next((
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "diff_paths"
+    ), None)
+    run_calls = [
+        node for node in ast.walk(diff_function) if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute) and node.func.attr == "run"
+        and isinstance(node.func.value, ast.Name) and node.func.value.id == "subprocess"
+    ] if diff_function is not None else []
+    command = run_calls[0].args[0] if len(run_calls) == 1 and run_calls[0].args else None
+    require(isinstance(command, ast.List) and len(command.elts) == 4
+            and all(isinstance(command.elts[index], ast.Constant)
+                    and command.elts[index].value == value
+                    for index, value in enumerate(("git", "diff")))
+            and isinstance(command.elts[2], ast.Starred)
+            and isinstance(command.elts[2].value, ast.Name)
+            and command.elts[2].value.id == "GIT_DIFF_OPTIONS"
+            and isinstance(command.elts[3], ast.Starred)
+            and isinstance(command.elts[3].value, ast.Name)
+            and command.elts[3].value.id == "revisions",
+            "ci-path-router.py: production Git diff must consume the pinned option tuple exactly")
 
 
 def check_shared_license_ownership(ci: str, sdk: str) -> None:
