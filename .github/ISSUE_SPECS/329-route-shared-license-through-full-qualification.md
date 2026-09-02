@@ -92,4 +92,42 @@ unperformed rollout and branch-protection migration.
 
 ## Evidence
 
-Implementation and adversarial evidence will be recorded before rollout and closure.
+### Attempt 1 — Sol medium
+
+The root `LICENSE` was removed from the router's exact SDK-file set and from the canonical SDK
+push-ignore set, which removes it from `ci.yml`, `browser-qualification.yml`, and
+`release-build.yml` without changing `sdk.yml`. It now reaches the existing unknown/shared-input
+fallback and selects `full`; SDK and evidence-only inputs retain their inherited narrow routes.
+
+The classifier suite proves direct `LICENSE`, `LICENSE` mixed with evidence and/or SDK paths, all
+ordinary `A`/`D`/`M`/`T` records, and `R`/`C` records with either source or destination equal to
+`LICENSE` all route full. Mutants that re-add it to the SDK set or retain only one rename/copy side
+are killed by the same suite. The static checker independently AST-pins the exact SDK file set and
+byte-pins the inherited canonical trigger blocks, so re-adding `LICENSE` to any full-workflow
+ignore list is rejected for unquoted, single-quoted, double-quoted, and explicitly tagged YAML
+spellings.
+
+Ownership remains deliberately split without duplicating the digest: the checker pins the full
+host job's exact full-route header and unsuppressed `Workspace policy` step, and pins the unchanged
+SDK job's SDK-or-full selection plus its complete one-artifact package qualification step. Red
+mutations reject workspace-policy removal, step/job `continue-on-error`, `if: false`, shell
+suppression, SDK full-route removal, and SDK package-command removal.
+
+Focused local evidence on 2026-09-03:
+
+- `python3 -B scripts/check-ci-path-routing.py`;
+- `python3 -B scripts/test-ci-path-routing.py`;
+- `bash scripts/check-workspace-policy.sh`;
+- `bash scripts/test-workspace-policy.sh` under temporary GNU-compatible `find`/`sed` wrappers,
+  because the unchanged harness uses GNU-only `find -printf` and `sed -i` syntax on this macOS
+  host; all mutations passed under that compatibility environment;
+- a clean tracked-file temporary copy passed workspace policy, while changing one byte only in its
+  copied `LICENSE` failed with `LICENSE is not the canonical Apache License 2.0 text`;
+- `yq eval '.'` over all four affected/inherited workflows;
+- `bash scripts/check-sdk-generated.sh`;
+- `python3 -B scripts/check-sdk-deletions.py`; and
+- exact-scope `git diff --check`.
+
+No SDK source/package change, workspace-policy implementation change, package-staging change,
+commit, push, GitHub mutation, branch-protection mutation, benchmark, timing, playback, or rollout
+is part of this attempt. Fresh Sol/high adversarial verification remains required before rollout.

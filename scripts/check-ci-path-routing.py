@@ -16,15 +16,14 @@ import re
 import sys
 
 EVIDENCE = [".github/ISSUE_SPECS/**", "docs/**", "README.md"]
-SDK = [
-    "sdk/**",
+SDK_FILES = [
     "scripts/check-sdk-deletions.py",
     "scripts/check-sdk-generated.sh",
     "scripts/check-sdk-headless.sh",
     "scripts/check-sdk-types.sh",
     "scripts/sdk-package.sh",
-    "LICENSE",
 ]
+SDK = ["sdk/**", *SDK_FILES]
 RELEASE_PR_INPUTS = [
     "**/Cargo.toml",
     "Cargo.lock",
@@ -85,6 +84,23 @@ def job(text: str, name: str) -> str:
     tail = jobs[match.end():]
     next_job = re.search(r"^  [A-Za-z0-9_-]+:\n", tail, re.MULTILINE)
     return tail[:next_job.start() if next_job else len(tail)]
+
+
+def named_step(job_block: str, name: str) -> str:
+    marker = f"      - name: {name}\n"
+    require(job_block.count(marker) == 1, f"step {name!r} must exist exactly once")
+    start = job_block.index(marker)
+    tail = job_block[start + len(marker):]
+    next_step = re.search(r"^      - ", tail, re.MULTILINE)
+    return marker + tail[:next_step.start() if next_step else len(tail)]
+
+
+def require_job_header(job_block: str, expected: list[str], message: str) -> None:
+    header = [
+        line for line in job_block.splitlines()
+        if line.startswith("    ") and not line.startswith("      ") and line.strip()
+    ]
+    require(header == expected, message)
 
 
 def canonical_trigger(push_ignores: list[str], pull_paths: list[str] | None) -> str:
@@ -251,7 +267,7 @@ def check_sdk_closure(text: str) -> None:
         require(required in heavy, f"sdk.yml: SDK closure is missing {required!r}")
 
 
-def check_classifier_fallback(root: pathlib.Path) -> None:
+def check_classifier_contract(root: pathlib.Path) -> None:
     """Make the unknown-path fail-safe a checked policy, not an implied convention."""
     source = (root / "scripts/ci-path-router.py").read_text(encoding="utf-8")
     try:
@@ -264,6 +280,59 @@ def check_classifier_fallback(root: pathlib.Path) -> None:
             and isinstance(function.body[-1].value, ast.Constant)
             and function.body[-1].value.value is None,
             "ci-path-router.py: unknown paths must fall through to full qualification")
+    sdk_files = next((
+        node.value for node in tree.body
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "SDK_FILES" for target in node.targets)
+    ), None)
+    require(isinstance(sdk_files, ast.Set), "ci-path-router.py: SDK_FILES must be a literal set")
+    values = {
+        element.value for element in sdk_files.elts
+        if isinstance(element, ast.Constant) and isinstance(element.value, str)
+    }
+    expected = set(SDK_FILES)
+    require(len(values) == len(sdk_files.elts) and values == expected,
+            "ci-path-router.py: exact SDK file taxonomy drifted (LICENSE is full-route owned)")
+
+
+def check_shared_license_ownership(ci: str, sdk: str) -> None:
+    host = job(ci, "host")
+    require_job_header(host, [
+        "    name: host quality and native shell",
+        "    needs: route",
+        "    if: needs.route.outputs.route == 'full'",
+        "    runs-on: ubuntu-24.04",
+        "    steps:",
+    ], "ci.yml: full-route host job ownership or failure semantics drifted")
+    require(named_step(host, "Workspace policy") == (
+        "      - name: Workspace policy\n"
+        "        run: bash scripts/check-workspace-policy.sh\n"
+    ), "ci.yml: host must run the unsuppressed canonical workspace-policy step")
+
+    sdk_job = job(sdk, "sdk")
+    require_job_header(sdk_job, [
+        "    name: SDK package, generated surface, and headless qualification",
+        "    needs: route",
+        "    if: needs.route.outputs.route == 'sdk' || needs.route.outputs.route == 'full'",
+        "    runs-on: ubuntu-24.04",
+        "    steps:",
+    ], "sdk.yml: SDK/full package job ownership or failure semantics drifted")
+    require(re.search(
+        r"^    if: needs\.route\.outputs\.route == 'sdk' \|\| needs\.route\.outputs\.route == 'full'$",
+        sdk_job, re.MULTILINE,
+    ) is not None, "sdk.yml: package qualification must be selected on SDK and full routes")
+    require(named_step(sdk_job, "Build one pinned AudioWorklet closure and qualify the SDK package") == (
+        "      - name: Build one pinned AudioWorklet closure and qualify the SDK package\n"
+        "        run: |\n"
+        "          mkdir -p target/ci/sdk-artifacts\n"
+        "          bash scripts/build-web-audioworklet.sh target/ci/sdk-artifacts\n"
+        "          bash scripts/check-sdk-generated.sh\n"
+        "          python3 -B scripts/check-sdk-deletions.py\n"
+        "          bash scripts/check-sdk-types.sh\n"
+        "          bash scripts/check-sdk-headless.sh target/ci/sdk-artifacts\n"
+        "          bash scripts/sdk-package.sh check target/ci/sdk-artifacts\n"
+        "\n"
+    ), "sdk.yml: full-route SDK package qualification step drifted or was suppressed")
 
 
 def check(root: pathlib.Path) -> None:
@@ -337,7 +406,8 @@ def check(root: pathlib.Path) -> None:
                         '[[ "$SDK_RESULT" == "$expected" ]] || { echo "expected $expected SDK result, got $SDK_RESULT" >&2; exit 1; }',
                     ))
     check_sdk_closure(sdk)
-    check_classifier_fallback(root)
+    check_classifier_contract(root)
+    check_shared_license_ownership(ci, sdk)
     require("check-sdk-generated" not in job(ci, "host"),
             "ci.yml: generated SDK ownership must be in sdk.yml")
     require("check-sdk-headless" not in job(ci, "wasm") and "sdk-package.sh" not in job(ci, "wasm"),

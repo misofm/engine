@@ -11,6 +11,7 @@ import tempfile
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 ROUTER = ROOT / "scripts/ci-path-router.py"
 CHECKER = ROOT / "scripts/check-ci-path-routing.py"
+TEST = ROOT / "scripts/test-ci-path-routing.py"
 
 
 def run(*args: str) -> str:
@@ -53,6 +54,8 @@ def workspace() -> pathlib.Path:
     for name in ("ci.yml", "browser-qualification.yml", "release-build.yml", "sdk.yml"):
         shutil.copy2(ROOT / ".github/workflows" / name, root / ".github/workflows" / name)
     shutil.copy2(ROUTER, root / "scripts/ci-path-router.py")
+    shutil.copy2(CHECKER, root / "scripts/check-ci-path-routing.py")
+    shutil.copy2(TEST, root / "scripts/test-ci-path-routing.py")
     return root
 
 
@@ -68,6 +71,19 @@ def workflow_mutation_fails(workflow: str, old: str, new: str) -> None:
     try:
         mutate(root / ".github/workflows" / workflow, old, new)
         checker_fails(root)
+    finally:
+        shutil.rmtree(root)
+
+
+def router_mutation_fails(old: str, new: str) -> None:
+    root = workspace()
+    try:
+        mutate(root / "scripts/ci-path-router.py", old, new)
+        result = subprocess.run([sys.executable, str(root / "scripts/test-ci-path-routing.py")],
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                check=False)
+        if result.returncode == 0:
+            raise AssertionError("router mutation survived the classifier regression suite")
     finally:
         shutil.rmtree(root)
 
@@ -93,11 +109,14 @@ def main() -> int:
         "scripts/check-sdk-headless.sh",
         "scripts/check-sdk-types.sh",
         "scripts/sdk-package.sh",
-        "LICENSE",
     ):
         assert route(owned) == "sdk"
     assert route("docs/routing.md", "README.md") == "evidence"
     assert route("sdk/src/index.ts", "docs/routing.md") == "sdk"
+    assert route("LICENSE") == "full"
+    assert route("LICENSE", "docs/routing.md") == "full"
+    assert route("LICENSE", "sdk/src/index.ts") == "full"
+    assert route("LICENSE", "docs/routing.md", "sdk/src/index.ts") == "full"
     assert route("crates/engine/src/lib.rs") == "full"  # engine path cannot become SDK-only
     assert route("sdk/src/index.ts", "crates/engine/src/lib.rs") == "full"
     for full_input in (
@@ -106,6 +125,7 @@ def main() -> int:
         "hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256",
         ".github/workflows/ci.yml",
         "scripts/ci-path-router.py",
+        "LICENSE",
         "future/unclassified-input",
     ):
         assert route(full_input) == "full"
@@ -124,6 +144,20 @@ def main() -> int:
         status.flush()
         assert run(sys.executable, str(ROUTER), "--event", "pull_request",
                    "--name-status-file", status.name) == "full"
+    for ordinary in b"ADMT":
+        with tempfile.NamedTemporaryFile() as status:
+            status.write(bytes([ordinary]) + b"\0LICENSE\0")
+            status.flush()
+            assert run(sys.executable, str(ROUTER), "--event", "pull_request",
+                       "--name-status-file", status.name) == "full"
+    for operation in (b"R100", b"C075"):
+        for old, new in ((b"LICENSE", b"sdk/new-license"),
+                         (b"sdk/old-license", b"LICENSE")):
+            with tempfile.NamedTemporaryFile() as status:
+                status.write(operation + b"\0" + old + b"\0" + new + b"\0")
+                status.flush()
+                assert run(sys.executable, str(ROUTER), "--event", "pull_request",
+                           "--name-status-file", status.name) == "full"
     for record in (
         b"U\0sdk/src/index.ts\0",
         b"X\0sdk/src/index.ts\0",
@@ -179,6 +213,25 @@ def main() -> int:
         checker_fails(root)  # a dangerous engine/unknown-as-SDK fallback is rejected
     finally:
         shutil.rmtree(root)
+    router_mutation_fails(
+        '    "scripts/sdk-package.sh",\n',
+        '    "scripts/sdk-package.sh",\n    "LICENSE",\n',
+    )
+    root = workspace()
+    try:
+        mutate(root / "scripts/ci-path-router.py", '    "scripts/sdk-package.sh",\n',
+               '    "scripts/sdk-package.sh",\n    "LICENSE",\n')
+        checker_fails(root)  # the static taxonomy contract independently rejects reintroduction
+    finally:
+        shutil.rmtree(root)
+    router_mutation_fails(
+        "        for value in fields[index:index + count]:\n",
+        "        for value in fields[index + count - 1:index + count]:\n",
+    )  # dropping a LICENSE rename/copy source would narrow to SDK
+    router_mutation_fails(
+        "        for value in fields[index:index + count]:\n",
+        "        for value in fields[index:index + 1]:\n",
+    )  # dropping a LICENSE rename/copy destination would narrow to SDK
     with tempfile.NamedTemporaryFile() as status:
         status.write(b"R100\0sdk/src/index.ts\0")  # a missing rename side is malformed/full
         status.flush()
@@ -199,8 +252,47 @@ def main() -> int:
     # the checker merely because it is not a single-quoted scalar.
     for extra in ("      - crates/**\n", '      - "crates/**"\n', "      - !!str crates/**\n"):
         workflow_mutation_fails(
-            "ci.yml", "      - 'LICENSE'\n", "      - 'LICENSE'\n" + extra,
+            "ci.yml", "      - 'scripts/sdk-package.sh'\n",
+            "      - 'scripts/sdk-package.sh'\n" + extra,
         )
+    for workflow in ("ci.yml", "browser-qualification.yml", "release-build.yml"):
+        for license_entry in (
+            "      - LICENSE\n", "      - 'LICENSE'\n", '      - "LICENSE"\n',
+            "      - !!str LICENSE\n",
+        ):
+            workflow_mutation_fails(
+                workflow, "      - 'scripts/sdk-package.sh'\n",
+                "      - 'scripts/sdk-package.sh'\n" + license_entry,
+            )
+
+    workspace_step = "      - name: Workspace policy\n"
+    workflow_mutation_fails(
+        "ci.yml", workspace_step + "        run: bash scripts/check-workspace-policy.sh\n", "",
+    )
+    for inserted in (
+        "        if: ${{ false }}\n",
+        "        continue-on-error: true\n",
+        '        "continue-on-error": true\n',
+        "        'continue-on-error': true\n",
+    ):
+        workflow_mutation_fails("ci.yml", workspace_step, workspace_step + inserted)
+    workflow_mutation_fails(
+        "ci.yml", "        run: bash scripts/check-workspace-policy.sh\n",
+        "        run: bash scripts/check-workspace-policy.sh || true\n",
+    )
+    host_header = "    name: host quality and native shell\n"
+    for inserted in (
+        "    continue-on-error: true\n",
+        '    "continue-on-error": true\n',
+    ):
+        workflow_mutation_fails("ci.yml", host_header, host_header + inserted)
+    workflow_mutation_fails(
+        "sdk.yml", "          bash scripts/sdk-package.sh check target/ci/sdk-artifacts\n", "",
+    )
+    workflow_mutation_fails(
+        "sdk.yml", "    if: needs.route.outputs.route == 'sdk' || needs.route.outputs.route == 'full'\n",
+        "    if: needs.route.outputs.route == 'sdk'\n",
+    )
 
     policy_step = "      - name: Validate path-routing policy and mutations\n"
     for inserted in (

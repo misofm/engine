@@ -23,7 +23,6 @@ SDK_FILES = {
     "scripts/check-sdk-headless.sh",
     "scripts/check-sdk-types.sh",
     "scripts/sdk-package.sh",
-    "LICENSE",
 }
 
 
