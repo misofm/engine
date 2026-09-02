@@ -8,8 +8,10 @@
  */
 
 import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
 import process from "node:process";
+
+const ARTIFACT_DIRECTORY_ENV = "MISO_ENGINE_SDK_ARTIFACTS_HEX";
+const WASM_BASENAME = Buffer.from("/miso-engine-v1-audio-worklet.simd128.wasm", "ascii");
 
 /**
  * The release artifact directory.
@@ -19,20 +21,22 @@ import process from "node:process";
  * module is a build output, and vendoring a two-and-a-half megabyte binary into the source tree
  * would make the SDK's provenance story a copy rather than a derivation.
  */
-export function artifactDir() {
-  const dir = process.env.MISO_ENGINE_SDK_ARTIFACTS;
-  if (!dir) {
+export function artifactDirBytes() {
+  const encoded = process.env[ARTIFACT_DIRECTORY_ENV];
+  if (!encoded) {
     throw new Error(
-      "MISO_ENGINE_SDK_ARTIFACTS must name a directory built by scripts/build-web-audioworklet.sh",
+      `${ARTIFACT_DIRECTORY_ENV} must encode a directory built by scripts/build-web-audioworklet.sh`,
     );
   }
-  return dir;
+  if (!/^(?:[0-9a-f]{2})+$/.test(encoded)) {
+    throw new Error(`${ARTIFACT_DIRECTORY_ENV} must be canonical lowercase, even-length hex`);
+  }
+  return Buffer.from(encoded, "hex");
 }
 
 export async function moduleBytes() {
-  return new Uint8Array(
-    await readFile(resolve(artifactDir(), "miso-engine-v1-audio-worklet.simd128.wasm")),
-  );
+  const modulePath = Buffer.concat([artifactDirBytes(), WASM_BASENAME]);
+  return new Uint8Array(await readFile(modulePath));
 }
 
 const ZERO_CONTENT = `sha256:${"0".repeat(64)}`;

@@ -71,9 +71,21 @@ artifact_dir=${artifact_dir_with_sentinel%x}
   echo "artifact directory has no wasm module" >&2
   exit 2
 }
+if ! artifact_dir_hex=$(
+  printf '%s' "$artifact_dir" \
+    | LC_ALL=C od -An -v -tx1 \
+    | LC_ALL=C tr -d '[:space:]'
+); then
+  echo "artifact directory cannot be encoded" >&2
+  exit 2
+fi
+[[ "$artifact_dir_hex" =~ ^([0-9a-f]{2})+$ ]] || {
+  echo "artifact directory encoding is invalid" >&2
+  exit 2
+}
 
 cd "$repo_root/sdk"
 # The glob names the eval suites explicitly. Passing the directory would also run support.mjs,
 # which carries fixtures rather than tests, and Node reports a bare directory argument as a
 # failing test of its own.
-MISO_ENGINE_SDK_ARTIFACTS="$artifact_dir" node --test 'test/*-evals.mjs'
+MISO_ENGINE_SDK_ARTIFACTS_HEX="$artifact_dir_hex" node --test 'test/*-evals.mjs'

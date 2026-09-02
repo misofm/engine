@@ -61,6 +61,12 @@ Preserve these outcomes:
 - Node's nonzero status after successful validation remains unsuppressed; and
 - this issue does not claim race-free descriptor traversal against a hostile concurrent replacer.
 
+The shell-to-Node boundary must not place raw pathname bytes in a JavaScript string environment
+value. After physical resolution, encode the canonical bytes as deterministic lowercase ASCII hex.
+Node validates that representation, decodes it to a `Buffer`, appends the fixed ASCII Wasm basename
+as bytes, and passes the resulting `Buffer` directly to `fs`; it never calls `path.resolve` on the
+artifact directory. Missing or malformed encoding is a clear typed test-helper failure.
+
 Put the executable regression under `sdk/test/` so it is already SDK-owned. It must invoke the
 production shell script, accept an alternate exact script path for parent/attempt-3 probes, derive
 expected paths independently, and use a valid minimal Wasm fixture plus a fake Node only to observe
@@ -87,8 +93,9 @@ router, checker, ignore-list, or standalone `scripts/test-sdk-headless-path.sh` 
 
 1. Accepted relative input becomes an absolute physical path before entering `sdk/`, without losing
    or adding bytes, including one or more terminal newlines.
-2. The child runs from exact SDK root, receives the invariant artifact path, sees valid Wasm, and
-   receives exactly `--test 'test/*-evals.mjs'`.
+2. The child runs from exact SDK root, receives a deterministic ASCII encoding of the invariant
+   artifact-path bytes, sees valid Wasm through a `Buffer` path, and receives exactly
+   `--test 'test/*-evals.mjs'`.
 3. Usage, nonexistent/non-directory, direct-symlink, unsearchable, and missing-module cases return
    exactly 2; Node failures after validation remain unsuppressed.
 4. The same executable regression is parent-red, attempt-3-red, and successor-green, with an oracle
@@ -294,3 +301,65 @@ the disposable fixture with `-C target-feature=+simd128` produced the 128/128 re
 artifact is tracked, and this setup correction is not presented as a retry of a production gate.
 Fresh Sol/high review is still pending, so attempt 2 remains implementation evidence rather than a
 PASS verdict.
+
+### Attempt 2 — Sol/high HOLD
+
+Sol/high held attempt 2 because its claim stopped at Bash. POSIX pathname components may contain
+any non-NUL byte, but the script placed the raw canonical pathname in
+`MISO_ENGINE_SDK_ARTIFACTS`. Node exposes environment values as JavaScript strings, so an invalid
+UTF-8 byte is decoded lossily rather than preserved. `support.mjs` then passed that string through
+`path.resolve`; neither the fake child nor the oracle exercised a non-UTF-8 filename. Therefore the
+attempt-2 evidence proved newline-safe strings, not the issue's all-accepted-bytes objective.
+
+This is a production boundary defect rather than an evidence-only omission: a Linux directory with
+component byte `0xff` can pass Bash validation and physical resolution, then become a replacement
+character before Node opens the Wasm. Attempt 2 remains **HOLD**.
+
+### Attempt 3 — Sol medium final correction
+
+All attempt-2 physical resolution, `CDPATH`, exit-status, symlink-spelling, and ancestor-symlink
+behavior remains intact. After validating the physical directory and Wasm, the production script
+now streams the raw Bash pathname bytes through `od -tx1` and removes only ASCII whitespace from
+that tool's output. It validates canonical lowercase, even-length hex and exports only
+`MISO_ENGINE_SDK_ARTIFACTS_HEX`; encoding failure maps to validation status 2. No raw pathname byte
+crosses the environment boundary.
+
+`sdk/test/support.mjs`, the single narrow helper allowed by the brief, validates the hex contract,
+decodes it with `Buffer.from(encoded, "hex")`, appends the fixed ASCII Wasm basename with
+`Buffer.concat`, and gives that `Buffer` directly to `readFile`. It no longer converts the artifact
+directory through a JavaScript path string or `path.resolve`. Missing, odd-length, non-hex, and
+non-canonical uppercase encodings produce explicit errors naming
+`MISO_ENGINE_SDK_ARTIFACTS_HEX`.
+
+The fake child likewise validates exact encoded bytes, independently decodes a `Buffer` path,
+opens valid minimal Wasm, and checks the exact test arguments. The regression adds a real raw-byte
+fixture: Node Buffer filesystem APIs create a directory whose final component is byte `0xff`, a
+small ASCII-only Bash launcher constructs the same argument with `printf '\377'`, and Node/libc
+`realpath(..., { encoding: "buffer" })` supplies the independent expected hex. The launcher never
+passes the raw pathname through a JavaScript argument or environment string. The same test calls
+production `support.mjs` with only the ASCII encoding and verifies valid Wasm. A filesystem skip is
+permitted only when creation returns a platform unsupported-encoding error; Linux treats `EPERM`
+as a failure, so CI must execute rather than skip the case. This macOS APFS fixture returned
+`EPERM` and was recorded as the permitted platform skip.
+
+Focused results from the exact 19-test file on macOS are 18 passed, 0 failed, 1 unsupported-
+filesystem skip. Historical alternate-script probes remain red:
+
+- parent `951a5a3c`: 4 passed / 14 failed / 1 skipped;
+- failed attempt `68eef8d6`: 3 passed / 15 failed / 1 skipped; and
+- attempt-2 checkpoint `62a0b0f1`: 5 passed / 13 failed / 1 skipped, with accepted paths failing
+  because the old script supplies no encoded-byte environment value.
+
+A locally compiled SIMD Wasm drove the real production headless glob: 129 passed, 0 failed, and the
+same one APFS-only skip across 130 tests in 28 suites. The automatically discovered regression and
+all existing consumers of `moduleBytes` therefore exercised the new helper contract. An unchanged
+`scripts/sdk-package.sh build` again accepted a caller-relative artifact directory ending in a
+newline and passed staging plus all 9 enginectl tests.
+
+Final proportional gates passed: Bash syntax and ShellCheck; the path-routing checker and mutation
+suite unchanged; SDK types, generated surface, and deletion policy; all workflow YAML through
+`yq`; and `git diff --check`. The exact range from `origin/main` contains only this spec, the
+headless script, the headless-path eval, and `sdk/test/support.mjs`; production classification
+returns `sdk` for pull-request and push inputs. Workflow, router, package script, package dependency,
+and checker diffs from attempt-2 checkpoint `62a0b0f1` are empty. Fresh Sol/high review is required;
+this final implementation attempt does **not** claim PASS.
