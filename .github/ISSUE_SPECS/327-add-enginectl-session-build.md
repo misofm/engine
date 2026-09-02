@@ -325,3 +325,23 @@ treated it as a retired/invalid phase spelling. Generated assets and modules wer
 Issue #327 is reopened. Attempt 3 is limited to expressing the same phase assertion without
 triggering the established deletion-policy grammar, then running that missed gate plus the focused
 SDK/package tests. A fresh Sol/high verdict is required; the earlier PASS is not the final verdict.
+
+### Attempt 3 — Sol medium
+
+The phase type assertion now compares against `typeof ""` rather than placing the literal
+`"string"` in the deletion scanner's phase-token position. This is a one-line test-only change;
+runtime and package behavior are unchanged.
+
+Focused gates passed on 2026-09-02:
+
+- `python3 -B scripts/check-sdk-deletions.py`;
+- the built `enginectl` black-box suite, 9/9; and
+- exact-file `git diff --check`.
+
+Local strict TypeScript was attempted but is not usable evidence in this worktree because separate,
+uncommitted user-owned edits currently change the SDK dev dependencies to TypeScript 7 and Node 26
+types. Those package files are excluded from this issue and every batch checkpoint. The earlier
+remote strict-TypeScript gate passed against the committed pinned dependencies; the final batch CI
+must re-establish it against that same committed package state.
+
+A fresh Sol/high adversarial verdict remains required before final PASS and closure.

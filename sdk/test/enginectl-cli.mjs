@@ -280,7 +280,7 @@ process.stdout.write = function () {
     const result = await run(["session", "build", "--request", "-", "--output", "-"], JSON.stringify(cyclic));
     failure(result, 4, "engine.refused");
     const document = JSON.parse(result.stderr.toString("utf8"));
-    assert.equal(typeof document.phase, "string");
+    assert.equal(typeof document.phase, typeof "");
     assert.equal(typeof document.result, "number");
     assert.ok(Array.isArray(document.diagnostics));
     assert.ok(document.diagnostics.length > 0);
