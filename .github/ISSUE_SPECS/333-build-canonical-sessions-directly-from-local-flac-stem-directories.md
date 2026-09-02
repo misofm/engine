@@ -305,3 +305,44 @@ generated/deletion checks, FLAC provenance/vectors, routing checker/mutations, a
 the cumulative range classifies `sdk`, and the shared worktree remained clean. The frozen
 performance measurement, real four-leaf dogfood, and remote SDK-only PR rollout remain rollout
 steps, not review findings.
+
+## Frozen performance record
+
+The benchmark ran exactly once after Sol-high PASS, with one warmup and two measured rounds and no
+retry or tuning. The subject was the extracted 69-file `@misofm/engine@0.1.0` package built from
+checkpoint `86ae00c0`: tarball SHA-256
+`c6febfa65a4383c8d98c3cea4421cea14713dae11684dd1f2829c05fac39b467`, enginectl SHA-256
+`2fc19994f2bf3bdfa179770114c9167dc7718a4d3d8c2f551dc0a06fba19ba39`, pinned decoder
+`a9fc3301cb6f290909e165fd5d21d7ded5fb3535d8c41472c93beed66173b65e`, and local qualified engine
+asset `7a6f3d544dc9a65e5a89ea92833e2f6d62b22b44c33df09c14348cb13ee1950f`.
+
+The host was a 32 GB Apple M5 MacBook Pro (`Mac17,2`), Darwin arm64, APFS, Node v26.8.1. Child
+`PATH` was empty. The `wide-open` corpus was exactly 8 FLACs, 160,668,363 compressed bytes and
+407,956,416 canonical bytes. Its raw transport manifest, sorted by filename bytes, was:
+
+| file | bytes | container SHA-256 |
+| --- | ---: | --- |
+| `BASS.flac` | 19,381,374 | `b26c9ef76ad937aa778253cdf07e08dbfb0a5338ea8a88382c78c79fcd26b108` |
+| `BV_S.flac` | 22,194,776 | `118fd5d82d0610a1be518ba08dc68ddb95e12601635ec7313b64e023745d35fb` |
+| `DRUMS.flac` | 25,085,323 | `c808d71fecb540581d610f094229c99631b4eb6a886f2fc02ea2455802f70594` |
+| `FX.flac` | 11,626,669 | `85f1011553ec01f4c938a244f67dd63105e038c7742b149ff07057f60445cccb` |
+| `LEAD VOX.flac` | 26,749,440 | `f619570ffe223969d621e31ed7d0170a568baa1ea01fc475dd082adb5028f587` |
+| `OUTRO FX.flac` | 7,103,280 | `8b392f1355a8815a376108dc14f595d0cfb073c421b381dadb448553b4a784b2` |
+| `SYNTH.flac` | 26,580,304 | `d381e6518e95c2662986101ce11dfbba1edca24bb1d35251e85b67049380c96a` |
+| `VOCAL FX.flac` | 21,947,197 | `ef74035c58dd50c76857568358b97b26c74358ad5145650b85712c52e4b7a0e6` |
+
+| invocation | wall ms | first useful output ms | maximum RSS bytes |
+| --- | ---: | ---: | ---: |
+| help | 31.794 | 30.043 stdout | 46,841,856 |
+| collection preflight refusal | 30.339 | 28.665 stderr | 48,103,424 |
+| warmup | 1,663.489 | 1,657.981 stdout | 334,577,664 |
+| measured 1 | 1,600.794 | 1,596.088 stdout | 305,643,520 |
+| measured 2 | 1,601.134 | 1,596.448 stdout | 305,610,752 |
+
+All three workload runs produced byte-identical 7,642-byte canonical TOML with SHA-256
+`a6884dc3dedbfbbe4ae1b034a71a565fedcaf379af241ea85922e653a5c1b92c` and eight source mappings.
+First stdout intentionally coincides with completion: the CLI does not acknowledge until all FLACs
+reach verified EOF, all canonical identities are complete, the builder and embedded engine accept,
+and the file is atomically published. The black-box structural gate separately proves one process,
+one decoder and engine compile/instance, and exactly one file-handle read per stem. These numbers
+are descriptive; no release budget was invented and no optimization was performed from them.
