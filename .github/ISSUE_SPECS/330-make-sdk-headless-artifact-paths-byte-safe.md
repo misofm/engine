@@ -363,3 +363,17 @@ headless script, the headless-path eval, and `sdk/test/support.mjs`; production 
 returns `sdk` for pull-request and push inputs. Workflow, router, package script, package dependency,
 and checker diffs from attempt-2 checkpoint `62a0b0f1` are empty. Fresh Sol/high review is required;
 this final implementation attempt does **not** claim PASS.
+
+### Attempt 3 — Sol/high terminal HOLD
+
+Sol/high held the final attempt because the repository's bidirectional environment-vocabulary gate
+was not included in the proportional evidence. `scripts/check-env-vocabulary.sh` reports
+`MISO_ENGINE_SDK_ARTIFACTS_HEX` as used under `scripts/` but absent from
+`docs/ENGINE_ENV_VOCABULARY.md`; the document still lists the retired raw-path
+`MISO_ENGINE_SDK_ARTIFACTS` spelling. The byte-safe transport implementation and focused tests may
+be carried into a successor, but this attempt cannot pass while the canonical contract and its
+mechanical gate disagree.
+
+This is attempt three, so issue #330 ends in terminal **HOLD**. No fourth correction is made under
+this issue. Issue #331 is the bounded successor for synchronizing the environment contract,
+re-running the complete proportional gate set, and completing the inherited CI rollout.
