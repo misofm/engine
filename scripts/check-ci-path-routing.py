@@ -33,6 +33,29 @@ RELEASE_PR_INPUTS = [
     ".github/workflows/release-build.yml",
 ]
 
+CANONICAL_ROUTE_JOB = """    name: classify qualification paths
+    runs-on: ubuntu-24.04
+    outputs:
+      route: ${{ steps.classify.outputs.route }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Validate path-routing policy and mutations
+        run: |
+          python3 -B scripts/check-ci-path-routing.py
+          python3 -B scripts/test-ci-path-routing.py
+      - id: classify
+        name: Select fail-safe qualification route
+        run: |
+          route=$(python3 -B scripts/ci-path-router.py \\
+            --event "${{ github.event_name }}" \\
+            --base "${{ github.event.pull_request.base.sha || github.event.before }}" \\
+            --head "${{ github.event.pull_request.head.sha || github.sha }}")
+          printf 'route=%s\\n' "$route" >> "$GITHUB_OUTPUT"
+
+"""
+
 
 class Invalid(RuntimeError):
     pass
@@ -64,23 +87,46 @@ def job(text: str, name: str) -> str:
     return tail[:next_job.start() if next_job else len(tail)]
 
 
-def path_values(block: str) -> list[str]:
-    return re.findall(r"^      - '([^']+)'$", block, re.MULTILINE)
+def canonical_trigger(push_ignores: list[str], pull_paths: list[str] | None) -> str:
+    """Render the only accepted spelling of a security-critical Actions trigger."""
+    ignored = "".join(f"      - '{path}'\n" for path in push_ignores)
+    pull = "  pull_request:\n    branches:\n      - main\n"
+    if pull_paths is not None:
+        pull += "    paths:\n" + "".join(f"      - '{path}'\n" for path in pull_paths)
+    return (
+        "  push:\n"
+        "    branches:\n"
+        "      - main\n"
+        "    paths-ignore:\n"
+        f"{ignored}"
+        f"{pull}"
+        "  workflow_dispatch:\n\n"
+    )
 
 
 def check_trigger(text: str, workflow: str, push_ignores: list[str]) -> None:
-    push = section(text, "  push:", ("  pull_request:", "  workflow_dispatch:"))
-    require("branches:\n      - main" in push, f"{workflow}: push must target main")
-    require(path_values(push) == push_ignores, f"{workflow}: push paths-ignore set drifted")
-    pull_request = section(text, "  pull_request:", ("  workflow_dispatch:",))
-    require("branches:\n      - main" in pull_request, f"{workflow}: pull requests must target main")
-    if workflow != "release-build.yml":
-        require("paths:" not in pull_request and "paths-ignore:" not in pull_request,
-                f"{workflow}: required pull-request workflow cannot be path-filtered")
-    else:
-        require(path_values(pull_request) == RELEASE_PR_INPUTS,
-                "release-build.yml: pull-request release-input filter drifted")
-    require("  workflow_dispatch:\n" in text, f"{workflow}: missing manual dispatch")
+    actual = section(text, "on:", ("concurrency:",))
+    pull_paths = RELEASE_PR_INPUTS if workflow == "release-build.yml" else None
+    require(actual == canonical_trigger(push_ignores, pull_paths),
+            f"{workflow}: trigger block must match the exact canonical path contract")
+
+
+def check_mapping_structure(text: str, workflow: str, title: str, jobs: list[str]) -> None:
+    """Exclude duplicate or quoted override keys around the canonically pinned regions."""
+    top_level = [
+        line for line in text.splitlines()
+        if line and not line[0].isspace() and not line.startswith("#")
+    ]
+    require(top_level == [f"name: {title}", "on:", "concurrency:", "env:", "jobs:"],
+            f"{workflow}: top-level mapping structure must be exact and unique")
+    jobs_block = section(text, "jobs:", ())
+    job_headers = [
+        line for line in jobs_block.splitlines()
+        if line.startswith("  ") and not line.startswith("    ") and line.strip()
+        and not line.lstrip().startswith("#")
+    ]
+    require(job_headers == [f"  {name}:" for name in jobs],
+            f"{workflow}: job mapping structure must be exact and unique")
 
 
 def check_common(text: str, workflow: str, domain: str) -> None:
@@ -91,6 +137,8 @@ def check_common(text: str, workflow: str, domain: str) -> None:
 
 def check_router(text: str, workflow: str) -> None:
     route = job(text, "route")
+    require(route == CANONICAL_ROUTE_JOB,
+            f"{workflow}: route job must match the exact unconditional, failure-propagating contract")
     require("route: ${{ steps.classify.outputs.route }}" in route,
             f"{workflow}: router must expose route output")
     require("fetch-depth: 0" in route, f"{workflow}: router needs complete history")
@@ -107,6 +155,28 @@ def result_variable(job_name: str) -> str:
     return job_name.replace("-", "_").upper() + "_RESULT"
 
 
+def canonical_aggregate(title: str, heavy: list[str], evaluator: tuple[str, ...]) -> str:
+    """Render the only accepted aggregate job, including its failure semantics."""
+    results = "".join(
+        f"      {result_variable(name)}: ${{{{ needs.{name}.result }}}}\n" for name in heavy
+    )
+    script = "".join(f"          {line}\n" for line in evaluator)
+    return (
+        f"    name: {title}\n"
+        "    if: always()\n"
+        f"    needs: [route, {', '.join(heavy)}]\n"
+        "    runs-on: ubuntu-24.04\n"
+        "    env:\n"
+        "      ROUTE_RESULT: ${{ needs.route.result }}\n"
+        "      ROUTE: ${{ needs.route.outputs.route }}\n"
+        f"{results}"
+        "    steps:\n"
+        f"      - name: Enforce {title} route\n"
+        "        run: |\n"
+        f"{script}"
+    )
+
+
 def check_aggregate(
     text: str,
     workflow: str,
@@ -115,8 +185,11 @@ def check_aggregate(
     selected: str,
     selected_routes: tuple[str, ...],
     skipped_routes: tuple[str, ...],
+    evaluator: tuple[str, ...],
 ) -> None:
     aggregate = job(text, "qualification")
+    require(aggregate == canonical_aggregate(title, heavy, evaluator),
+            f"{workflow}: aggregate must match the exact always-failing-on-error contract")
     job_name_count = len(re.findall(rf"^    name: {re.escape(title)}$", text, re.MULTILINE))
     require(job_name_count == 1 and f"name: {title}" in aggregate,
             f"{workflow}: aggregate name must be exactly once as {title!r}")
@@ -200,6 +273,14 @@ def check(root: pathlib.Path) -> None:
     sdk = (workflows / "sdk.yml").read_text(encoding="utf-8")
     release = (workflows / "release-build.yml").read_text(encoding="utf-8")
 
+    check_mapping_structure(ci, "ci.yml", "ci",
+                            ["route", "host", "x86-probes", "wasm", "wasm-gates", "qualification"])
+    check_mapping_structure(browser, "browser-qualification.yml", "browser qualification",
+                            ["route", "artifact", "browser", "qualification"])
+    check_mapping_structure(sdk, "sdk.yml", "SDK qualification",
+                            ["route", "sdk", "qualification"])
+    check_mapping_structure(release, "release-build.yml", "release build", ["release-workspace"])
+
     for text, name, ignored in (
         (ci, "ci.yml", EVIDENCE + SDK),
         (browser, "browser-qualification.yml", EVIDENCE + SDK),
@@ -217,13 +298,44 @@ def check(root: pathlib.Path) -> None:
     check_router(sdk, "sdk.yml")
     check_aggregate(ci, "ci.yml", "engine qualification",
                     ["host", "x86-probes", "wasm", "wasm-gates"],
-                    "needs.route.outputs.route == 'full'", ("full",), ("sdk|evidence",))
+                    "needs.route.outputs.route == 'full'", ("full",), ("sdk|evidence",), (
+                        "set -euo pipefail",
+                        '[[ "$ROUTE_RESULT" == success ]] || { echo "router result: $ROUTE_RESULT" >&2; exit 1; }',
+                        'case "$ROUTE" in',
+                        "  full) expected=success ;;",
+                        "  sdk|evidence) expected=skipped ;;",
+                        '  *) echo "unknown route: $ROUTE" >&2; exit 1 ;;',
+                        "esac",
+                        'for result in "$HOST_RESULT" "$X86_PROBES_RESULT" "$WASM_RESULT" "$WASM_GATES_RESULT"; do',
+                        '  [[ "$result" == "$expected" ]] || { echo "expected $expected heavy result, got $result" >&2; exit 1; }',
+                        "done",
+                    ))
     check_aggregate(browser, "browser-qualification.yml", "browser qualification",
                     ["artifact", "browser"], "needs.route.outputs.route == 'full'",
-                    ("full",), ("sdk|evidence",))
+                    ("full",), ("sdk|evidence",), (
+                        "set -euo pipefail",
+                        '[[ "$ROUTE_RESULT" == success ]] || { echo "router result: $ROUTE_RESULT" >&2; exit 1; }',
+                        'case "$ROUTE" in',
+                        "  full) expected=success ;;",
+                        "  sdk|evidence) expected=skipped ;;",
+                        '  *) echo "unknown route: $ROUTE" >&2; exit 1 ;;',
+                        "esac",
+                        'for result in "$ARTIFACT_RESULT" "$BROWSER_RESULT"; do',
+                        '  [[ "$result" == "$expected" ]] || { echo "expected $expected heavy result, got $result" >&2; exit 1; }',
+                        "done",
+                    ))
     check_aggregate(sdk, "sdk.yml", "SDK qualification", ["sdk"],
                     "needs.route.outputs.route == 'sdk' || needs.route.outputs.route == 'full'",
-                    ("full|sdk",), ("evidence",))
+                    ("full|sdk",), ("evidence",), (
+                        "set -euo pipefail",
+                        '[[ "$ROUTE_RESULT" == success ]] || { echo "router result: $ROUTE_RESULT" >&2; exit 1; }',
+                        'case "$ROUTE" in',
+                        "  full|sdk) expected=success ;;",
+                        "  evidence) expected=skipped ;;",
+                        '  *) echo "unknown route: $ROUTE" >&2; exit 1 ;;',
+                        "esac",
+                        '[[ "$SDK_RESULT" == "$expected" ]] || { echo "expected $expected SDK result, got $SDK_RESULT" >&2; exit 1; }',
+                    ))
     check_sdk_closure(sdk)
     check_classifier_fallback(root)
     require("check-sdk-generated" not in job(ci, "host"),

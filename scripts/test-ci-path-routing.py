@@ -63,6 +63,15 @@ def mutate(path: pathlib.Path, old: str, new: str) -> None:
     path.write_text(text.replace(old, new, 1), encoding="utf-8")
 
 
+def workflow_mutation_fails(workflow: str, old: str, new: str) -> None:
+    root = workspace()
+    try:
+        mutate(root / ".github/workflows" / workflow, old, new)
+        checker_fails(root)
+    finally:
+        shutil.rmtree(root)
+
+
 def git(root: pathlib.Path, *args: str) -> str:
     return run("git", "-C", str(root), *args)
 
@@ -184,6 +193,35 @@ def main() -> int:
         checker_fails(root)  # an SDK-only route cannot consume unchecked workflow/router code
     finally:
         shutil.rmtree(root)
+
+    # Exact canonical trigger ownership rejects YAML-equivalent entries regardless of quoting or
+    # tags. These all parse as an extra ignored engine path, which must never become invisible to
+    # the checker merely because it is not a single-quoted scalar.
+    for extra in ("      - crates/**\n", '      - "crates/**"\n', "      - !!str crates/**\n"):
+        workflow_mutation_fails(
+            "ci.yml", "      - 'LICENSE'\n", "      - 'LICENSE'\n" + extra,
+        )
+
+    policy_step = "      - name: Validate path-routing policy and mutations\n"
+    for inserted in (
+        "        if: ${{ false }}\n",
+        "        continue-on-error: true\n",
+        '        "continue-on-error": true\n',
+        "        'continue-on-error': true\n",
+    ):
+        workflow_mutation_fails("sdk.yml", policy_step, policy_step + inserted)
+    workflow_mutation_fails(
+        "ci.yml", "          python3 -B scripts/check-ci-path-routing.py\n",
+        "          python3 -B scripts/check-ci-path-routing.py || true\n",
+    )  # shell-level suppression cannot falsify a successful policy step
+    route_runner = "    runs-on: ubuntu-24.04\n"
+    for inserted in (
+        "    continue-on-error: true\n",
+        '    "continue-on-error": true\n',
+        "    'continue-on-error': true\n",
+    ):
+        workflow_mutation_fails("browser-qualification.yml", route_runner,
+                                route_runner + inserted)
     root = workspace()
     try:
         mutate(root / ".github/workflows/ci.yml",
@@ -215,6 +253,11 @@ def main() -> int:
         checker_fails(root)  # aggregate job failure suppression is forbidden
     finally:
         shutil.rmtree(root)
+    for key in ('"continue-on-error"', "'continue-on-error'"):
+        workflow_mutation_fails(
+            "sdk.yml", "    if: always()\n",
+            f"    if: always()\n    {key}: true\n",
+        )  # quoted aggregate-job failure suppression is forbidden
     root = workspace()
     try:
         mutate(root / ".github/workflows/sdk.yml", "      - name: Enforce SDK qualification route",
@@ -222,6 +265,11 @@ def main() -> int:
         checker_fails(root)  # enforcement-step failure suppression is forbidden
     finally:
         shutil.rmtree(root)
+    for key in ('"continue-on-error"', "'continue-on-error'"):
+        workflow_mutation_fails(
+            "sdk.yml", "      - name: Enforce SDK qualification route\n",
+            f"      - name: Enforce SDK qualification route\n        {key}: true\n",
+        )  # quoted aggregate enforcement suppression is equally forbidden
     root = workspace()
     try:
         mutate(root / ".github/workflows/browser-qualification.yml",

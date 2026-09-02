@@ -293,3 +293,38 @@ YAML variants:
 Attempt 3 is the final allowed attempt. It must pin the security-critical trigger, policy-step, and
 aggregate blocks against semantic-equivalent YAML spellings and add each bypass as a red mutation.
 No rollout or protection mutation has occurred; the old eight required contexts remain intact.
+
+### Attempt 3 — Sol medium final HOLD correction
+
+The final bounded correction replaces the vulnerable scalar extractors with dependency-free,
+byte-exact canonical contracts for the complete trigger block, complete route job, and complete
+aggregate job. It additionally pins the unique top-level mapping sequence and each workflow's exact
+job-key sequence, so a quoted or duplicate `on`, `route`, or `qualification` key cannot override a
+canonical block outside the region the checker inspected. The remaining lexical assertions are
+secondary diagnostics; they are no longer the authority for these YAML semantics.
+
+The mutation suite now rejects all of the attempt-2 HOLD reproductions and equivalent spellings:
+
+- extra engine push-ignore entries expressed as unquoted, double-quoted, or explicitly tagged YAML
+  scalars;
+- route-policy `if: ${{ false }}`;
+- route-job and route-policy-step `continue-on-error` using ordinary, double-quoted, or
+  single-quoted keys, plus shell-level `|| true` suppression; and
+- aggregate-job and enforcement-step `continue-on-error` using ordinary, double-quoted, or
+  single-quoted keys.
+
+The two live adversarial reproductions left in `ci.yml` were removed. No runtime route, path
+taxonomy, trigger, concurrency, heavy-job, aggregate truth-table, or rollout behavior changed.
+
+Focused local evidence on 2026-09-03:
+
+- `python3 -B scripts/check-ci-path-routing.py`;
+- `python3 -B scripts/test-ci-path-routing.py`;
+- `yq eval '.'` over `ci.yml`, `browser-qualification.yml`, `release-build.yml`, and `sdk.yml`;
+- `bash scripts/check-sdk-generated.sh`;
+- `python3 -B scripts/check-sdk-deletions.py`; and
+- exact-scope `git diff --check`.
+
+All passed locally. No networked rollout, branch-protection mutation, commit, push, benchmark,
+timing, playback, or unrelated SDK dependency edit is part of this final correction. A final
+Sol/high adversarial verdict remains required; any further HOLD is the issue's terminal stop.
