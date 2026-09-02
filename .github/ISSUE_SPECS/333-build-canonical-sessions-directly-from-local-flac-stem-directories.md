@@ -152,7 +152,7 @@ Each mutation must make its named gate red; production is restored byte-for-byte
 
 ## Performance evidence
 
-Freeze the extracted built executable and real `wide-open` leaf: 8 files, 107,668,363 compressed
+Freeze the extracted built executable and real `wide-open` leaf: 8 files, 160,668,363 compressed
 bytes, 407,956,416 canonical PCM bytes, plus exact sorted filename/container-digest manifest,
 commit, macOS/Apple-Silicon host, Node version, and filesystem. Run exactly one warmup and two
 measured rounds without retry or tuning. Record wall time, time to first useful stdout byte, peak
@@ -189,3 +189,31 @@ produce four sessions rather than one simultaneous mix, froze machine I/O/resour
 performance gates, and separated batch mode, manifests, caching, WAVE import, scaffolding, and live
 control as potential successors. Implementation and adversarial evidence will be appended without
 weakening these gates.
+
+Sol-medium attempt 1 on 2026-09-03 implemented the additive `--stems` path, raw-byte-sorted leaf
+discovery, deterministic collision/truncation IDs, single-instance packaged decoding, incremental
+canonical-PCM hashing, source-change detection, public-builder construction, embedded-engine
+acceptance, and stems-only receipts. Package staging now carries the four pinned decoder files and
+accepts an explicit already-qualified decoder artifact directory so repeated local/CI packaging can
+avoid another Rust build. The request parser and stems importer are loaded only on their selected
+paths; help/version do not initialize either workload. The independently frozen `wide-open`
+compressed-byte total was corrected from `107,668,363` to `160,668,363`; its canonical-byte total
+remains `407,956,416`.
+
+Focused attempt-1 evidence against browser-run `33666706481` decoder artifact `9860928419`
+(`a9fc3301cb6f290909e165fd5d21d7ded5fb3535d8c41472c93beed66173b65e`): strict SDK types PASS;
+decoder provenance/vectors/red mutation/pump PASS; enginectl built-executable suite 18/18 PASS;
+complete headless SDK suite 129 PASS, 0 FAIL, 1 filesystem-capability skip; SDK deletion, generated,
+workspace, and CI-routing checks PASS; extracted npm tarball smoke PASS with an empty `PATH`, one
+real FLAC import, and no runtime dependencies. The CLI suite proves public-builder TOML identity,
+engine acceptance, PCM identity across two FLAC block layouts, mono/stereo and PCM16/PCM24,
+byte-sorted hostile/colliding/long filenames, collection preflight without decoder loading,
+empty/non-FLAC/symlink/truncated refusals, no-clobber preflight, packaged decoder mutations,
+one stem read each, exactly two Wasm compiles (one decoder plus one engine), and changed-source
+non-publication. Existing request-mode and publication tests remain green.
+
+Fresh Sol-high adversarial review, the real 44.1 kHz four-leaf dogfood, named red mutations, and the
+frozen one-warmup/two-measurement performance record remain pending. A Darwin arm64 rebuild with the
+pinned Rust 1.97.1 produced byte-identical-size but digest-different decoder and AudioWorklet Wasm;
+no pin was changed, and all attempt evidence used the qualified CI bytes. Cross-host artifact
+reproducibility is a separate delivery-tooling risk for review rather than evidence for this slice.

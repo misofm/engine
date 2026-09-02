@@ -9,6 +9,10 @@ export const BUNDLED_ENGINE_FILES = Object.freeze({
   hostDeclaration: "miso-engine-v1-audio-worklet-host.d.ts",
   parameterMetadata: "miso-engine-v1-parameter-metadata.json",
   abiLayout: "miso-engine-v1-abi-layout.json",
+  flacDecoderWasm: "flac-decoder.wasm",
+  flacDecoderModule: "flac-decoder.js",
+  flacDecoderDeclaration: "flac-decoder.d.ts",
+  flacDecoderDigest: "decoder-artifact.sha256",
   manifest: "miso-engine-v1-sdk-manifest.json",
 } as const);
 
@@ -27,6 +31,10 @@ export const BUNDLED_ENGINE_ASSETS = Object.freeze({
   hostDeclaration: new URL("./assets/miso-engine-v1-audio-worklet-host.d.ts", import.meta.url),
   parameterMetadata: new URL("./assets/miso-engine-v1-parameter-metadata.json", import.meta.url),
   abiLayout: new URL("./assets/miso-engine-v1-abi-layout.json", import.meta.url),
+  flacDecoderWasm: new URL("./assets/flac-decoder.wasm", import.meta.url),
+  flacDecoderModule: new URL("./assets/flac-decoder.js", import.meta.url),
+  flacDecoderDeclaration: new URL("./assets/flac-decoder.d.ts", import.meta.url),
+  flacDecoderDigest: new URL("./assets/decoder-artifact.sha256", import.meta.url),
   manifest: new URL("./assets/miso-engine-v1-sdk-manifest.json", import.meta.url),
 });
 
