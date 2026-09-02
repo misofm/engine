@@ -61,8 +61,12 @@ function request(overrides = {}) {
   };
 }
 
-async function run(args, input) {
-  const child = spawn(process.execPath, [executable, ...args], { stdio: ["pipe", "pipe", "pipe"] });
+async function run(args, input, options = {}) {
+  const child = spawn(
+    process.execPath,
+    [...(options.nodeArgs ?? []), executable, ...args],
+    { stdio: ["pipe", "pipe", "pipe"] },
+  );
   const stdout = [];
   const stderr = [];
   child.stdout.on("data", (chunk) => stdout.push(chunk));
@@ -101,6 +105,19 @@ describe("enginectl session build", () => {
     } finally {
       await rename(unavailable, wasm);
     }
+  });
+
+  test("an early-closing stdout consumer is clean cancellation", async () => {
+    const child = spawn(process.execPath, [executable, "--help"], { stdio: ["ignore", "pipe", "pipe"] });
+    const stderr = [];
+    child.stderr.on("data", (chunk) => stderr.push(chunk));
+    child.stdout.destroy();
+    const status = await new Promise((accept, reject) => {
+      child.once("error", reject);
+      child.once("close", accept);
+    });
+    assert.equal(status, 0);
+    assert.equal(Buffer.concat(stderr).byteLength, 0);
   });
 
   test("stdin to stdout is raw canonical TOML", async () => {
@@ -182,6 +199,35 @@ describe("enginectl session build", () => {
     assert.match(await readFile(outputPath, "utf8"), /^schema_version = 1\n/);
   });
 
+  test("a post-publication stdout failure reports effect applied exactly once", async () => {
+    const directory = await mkdtemp(resolve(tmpdir(), "enginectl-report-eval-"));
+    const requestPath = resolve(directory, "request.json");
+    const outputPath = resolve(directory, "session.toml");
+    const preloadPath = resolve(directory, "fail-stdout.mjs");
+    await writeFile(requestPath, JSON.stringify(request()));
+    await writeFile(preloadPath, `
+process.stdout.write = function () {
+  const error = Object.assign(new Error("forced stdout stream failure"), { code: "EIO" });
+  queueMicrotask(() => process.stdout.emit("error", error));
+  return false;
+};
+`);
+    const result = await run(
+      ["session", "build", "--request", requestPath, "--output", outputPath],
+      undefined,
+      { nodeArgs: ["--import", preloadPath] },
+    );
+    assert.equal(result.status, 70);
+    assert.equal(result.stdout.byteLength, 0);
+    assert.match(await readFile(outputPath, "utf8"), /^schema_version = 1\n/);
+    const lines = result.stderr.toString("utf8").trimEnd().split("\n");
+    assert.equal(lines.length, 1);
+    const document = JSON.parse(lines[0]);
+    assert.equal(document.error.code, "output.report");
+    assert.equal(document.effect, "applied");
+    assert.doesNotMatch(result.stderr.toString("utf8"), /node:events|Unhandled|\x1b\[/);
+  });
+
   test("usage and request refusals are structured and create no output", async () => {
     failure(await run(["session", "build", "--request", "-", "--request", "-", "--output", "-"]), 2, "cli.usage");
     failure(await run(["session", "build", "--request", "-", "--output", "-"], "{"), 3, "request.json");
@@ -193,7 +239,32 @@ describe("enginectl session build", () => {
     const badEffect = request();
     badEffect.tracks[0].spec.dynamic[0].effectId = "miso.nope";
     failure(await run(["session", "build", "--request", "-", "--output", "-"], JSON.stringify(badEffect)), 3, "request.shape");
+    const magicParameter = JSON.stringify(request()).replace(
+      '"parameters":{"threshold":-18',
+      '"parameters":{"__proto__":0,"threshold":-18',
+    );
+    const magicResult = await run(["session", "build", "--request", "-", "--output", "-"], magicParameter);
+    failure(magicResult, 3, "request.shape");
+    assert.match(JSON.parse(magicResult.stderr.toString("utf8")).error.message, /has no parameter '__proto__'/);
     failure(await run(["session", "build", "--request", "-", "--output", "-"], Buffer.alloc(4 * 1024 * 1024 + 1, 0x20)), 3, "request.too_large");
+  });
+
+  test("a missing packaged Wasm asset is internal, not a session refusal", async () => {
+    const wasm = resolve(dirname(executable), "assets", "miso-engine-v1-audio-worklet.simd128.wasm");
+    const unavailable = `${wasm}.unavailable`;
+    await rename(wasm, unavailable);
+    try {
+      const result = await run(
+        ["session", "build", "--request", "-", "--output", "-"],
+        JSON.stringify(request()),
+      );
+      failure(result, 70, "internal.packaged_asset");
+      const document = JSON.parse(result.stderr.toString("utf8"));
+      assert.equal(document.phase, "asset");
+      assert.ok(document.diagnostics.length > 0);
+    } finally {
+      await rename(unavailable, wasm);
+    }
   });
 
   test("an engine graph refusal preserves its ordered diagnostics", async () => {

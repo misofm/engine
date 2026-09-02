@@ -23,13 +23,21 @@ class CliFailure extends Error {
   readonly exitCode: ExitCode;
   readonly code: string;
   readonly extra: ErrorExtra;
+  readonly effect: "not_applied" | "applied";
 
-  constructor(exitCode: ExitCode, code: string, message: string, extra: ErrorExtra = {}) {
+  constructor(
+    exitCode: ExitCode,
+    code: string,
+    message: string,
+    extra: ErrorExtra = {},
+    effect: "not_applied" | "applied" = "not_applied",
+  ) {
     super(message);
     this.name = "CliFailure";
     this.exitCode = exitCode;
     this.code = code;
     this.extra = extra;
+    this.effect = effect;
   }
 }
 
@@ -147,10 +155,47 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-async function writeStdout(value: string | Uint8Array): Promise<void> {
+async function writeStream(
+  stream: NodeJS.WritableStream,
+  value: string | Uint8Array,
+): Promise<void> {
   await new Promise<void>((accept, reject) => {
-    process.stdout.write(value, (error) => error === null || error === undefined ? accept() : reject(error));
+    let settled = false;
+    const onError = (error: Error): void => {
+      if (settled) return;
+      settled = true;
+      reject(error);
+    };
+    stream.once("error", onError);
+    try {
+      stream.write(value, (error) => {
+        if (error !== null && error !== undefined) {
+          if (!settled) {
+            settled = true;
+            reject(error);
+          }
+          // A Node Writable reports a write failure through its callback and may emit the same
+          // error immediately afterward. Keep the one-shot listener through that turn so the
+          // second notification is consumed rather than becoming an unhandled traceback.
+          setImmediate(() => stream.off("error", onError));
+          return;
+        }
+        stream.off("error", onError);
+        if (!settled) {
+          settled = true;
+          accept();
+        }
+      });
+    } catch (error) {
+      stream.off("error", onError);
+      settled = true;
+      reject(error);
+    }
   });
+}
+
+function writeStdout(value: string | Uint8Array): Promise<void> {
+  return writeStream(process.stdout, value);
 }
 
 function isBrokenPipe(error: unknown): boolean {
@@ -221,17 +266,24 @@ async function build(args: BuildArguments): Promise<void> {
     throw error;
   }
   if (!result.ok) {
-    throw new CliFailure(4, "engine.refused", "embedded engine refused the generated session", {
-      phase: result.phase,
-      result: result.result,
-      diagnostics: result.diagnostics,
-    });
+    const packagedAsset = result.phase === "asset";
+    throw new CliFailure(
+      packagedAsset ? 70 : 4,
+      packagedAsset ? "internal.packaged_asset" : "engine.refused",
+      packagedAsset
+        ? "embedded engine asset could not be loaded"
+        : "embedded engine refused the generated session",
+      {
+        phase: result.phase,
+        result: result.result,
+        diagnostics: result.diagnostics,
+      },
+    );
   }
   if (args.output === "-") {
     await writeStdout(bytes);
     return;
   }
-  await publish(args.output, bytes, args.overwrite);
   const receipt = {
     schemaVersion: 1,
     command: "session.build",
@@ -241,7 +293,20 @@ async function build(args: BuildArguments): Promise<void> {
       sha256: createHash("sha256").update(bytes).digest("hex"),
     },
   };
-  await writeStdout(`${JSON.stringify(receipt)}\n`);
+  const receiptText = `${JSON.stringify(receipt)}\n`;
+  await publish(args.output, bytes, args.overwrite);
+  try {
+    await writeStdout(receiptText);
+  } catch (error) {
+    if (isBrokenPipe(error)) throw error;
+    throw new CliFailure(
+      70,
+      "output.report",
+      `output was published but its receipt could not be written: ${errorMessage(error)}`,
+      {},
+      "applied",
+    );
+  }
 }
 
 async function version(): Promise<string> {
@@ -267,7 +332,7 @@ function errorDocument(error: CliFailure): string {
   return `${JSON.stringify({
     schemaVersion: 1,
     error: { code: error.code, message: error.message },
-    effect: "not_applied",
+    effect: error.effect,
     ...error.extra,
   })}\n`;
 }
@@ -280,7 +345,12 @@ try {
     const failure = error instanceof CliFailure
       ? error
       : new CliFailure(70, "internal", errorMessage(error));
-    process.stderr.write(errorDocument(failure));
     process.exitCode = failure.exitCode;
+    try {
+      await writeStream(process.stderr, errorDocument(failure));
+    } catch {
+      // Stderr itself is unavailable. There is no second channel to report that failure on, and
+      // recursively writing another diagnostic would risk duplicate documents or a traceback.
+    }
   }
 }

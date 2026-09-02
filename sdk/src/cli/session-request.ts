@@ -153,7 +153,11 @@ function effectDecl(value: unknown, path: string): ReturnType<typeof effect> {
   const raw = record(value, path);
   keys(raw, ["effectId", "parameters", "options"], ["effectId"], path);
   const effectId = string(raw.effectId, `${path}.effectId`) as EffectId;
-  const parameters: Record<string, unknown> = {};
+  // JSON.parse creates `__proto__` as an own data property. Assigning that member into `{}` would
+  // invoke Object.prototype's legacy setter and silently remove the parameter before effect()
+  // can issue its normal unknown-parameter refusal. A null-prototype record preserves every JSON
+  // member, including all names inherited by ordinary objects.
+  const parameters: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
   if (raw.parameters !== undefined) {
     const supplied = record(raw.parameters, `${path}.parameters`);
     for (const [name, value] of Object.entries(supplied)) {

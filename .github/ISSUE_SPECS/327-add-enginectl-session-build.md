@@ -272,3 +272,22 @@ normal help/version paths green. It found three release blockers:
 
 Attempt 2 must correct these paths and add direct regression coverage before another Sol/high
 adversarial verdict.
+
+### Attempt 2 — Sol medium
+
+The bounded correction adds listener-aware stdout/stderr writes, clean EPIPE cancellation, and
+explicit `applied` mutation state for a non-EPIPE receipt failure after publication. It prepares
+the receipt before mutation, classifies `ok: false` asset-phase results as packaged-asset failures,
+and copies parameter members through a null-prototype record so `__proto__` reaches the existing
+effect validator rather than disappearing.
+
+Focused gates passed on 2026-09-02:
+
+- strict TypeScript compilation;
+- the expanded black-box `enginectl` suite, 9/9, including early pipe closure, deterministic
+  post-publication stdout failure, missing packaged Wasm, and `__proto__` refusal;
+- `scripts/sdk-package.sh check`, including the extracted-tarball smoke test;
+- the established headless SDK suite, 111/111; and
+- `git diff --check`.
+
+A fresh Sol/high adversarial verdict remains required before PASS and closure.
