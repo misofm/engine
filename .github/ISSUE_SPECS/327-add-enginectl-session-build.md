@@ -314,3 +314,14 @@ publication precedes its receipt, and a reporting failure after publication trut
 
 PASS. The documented hard-link portability refusal and lack of crash-durable directory syncing are
 accepted V1 limits; live engine control remains a separate product slice.
+
+### Post-PASS CI correction — attempt 3 required
+
+The final `main` run invalidated the closure: release build and browser qualification passed, but
+CI failed `scripts/check-sdk-deletions.py`. The new assertion at `sdk/test/enginectl-cli.mjs:283`
+placed the literal `"string"` in the deletion scanner's error-phase position, so the static gate
+treated it as a retired/invalid phase spelling. Generated assets and modules were current.
+
+Issue #327 is reopened. Attempt 3 is limited to expressing the same phase assertion without
+triggering the established deletion-policy grammar, then running that missed gate plus the focused
+SDK/package tests. A fresh Sol/high verdict is required; the earlier PASS is not the final verdict.
