@@ -39,11 +39,14 @@ Add discriminating harness tests:
   contribute zero to the caller's counts.
 
 Coordinate the foreign-thread test with preallocated atomic state and a prestarted thread; perform
-thread creation/join and other setup outside the measured region. Preserve the production gate's
+thread creation/join and other setup outside the measured region. Publish worker completion from
+an unwind-safe guard so an injected worker panic always releases the caller's spin and is reported
+by `join`. Preserve the production gate's
 1,000 blocks at quantum 128, per-block automation schedule, scalar effect, available native bank,
-and separate zero-allocation and zero-deallocation assertions. Re-run the recorded
-`Vec::with_capacity(1)` production mutation in an isolated copy and update its evidence, but do not
-change production code in the committed result.
+and separate zero-allocation and zero-deallocation assertions. Re-run the recorded exact,
+non-elidable `std::hint::black_box(Vec::<u8>::with_capacity(1));` production mutation under release
+optimization in an isolated copy and update its evidence, but do not change production code in the
+committed result.
 
 ## Scope
 
@@ -65,10 +68,13 @@ benchmark, generated file, SDK file, digest, or branch-protection change belongs
    disarmed or vacuous harness cannot pass.
 4. A prestarted foreign thread allocates and frees while the caller is armed, and the caller's
    result remains exactly `(0, 0)`; the test proves overlap rather than merely running sequentially.
+   Completion publication is unwind-safe: an injected worker panic terminates nonzero rather than
+   hanging, and `join` observes the panic.
 5. The production gate preserves the exact 1,000-by-128 scalar and native-bank workload,
    automation cadence, and independent zero-allocation/zero-free assertions.
-6. The existing `Vec::with_capacity(1)` inside `Shaper::process_block` mutation is red under the
-   revised harness and the clean tree is green.
+6. The exact `std::hint::black_box(Vec::<u8>::with_capacity(1));` inside
+   `Shaper::process_block` mutation is red under release optimization with 2,000 allocations, and
+   the clean release tree is green.
 7. The focused allocation binary passes repeatedly under ordinary parallel libtest execution and
    under explicit test-thread concurrency; the complete transient-shaper test target passes.
 8. The exact scope passes Rust formatting, Clippy/compile policy relevant to the test, workspace
@@ -133,10 +139,11 @@ assertions. Clean focused runs passed with default libtest scheduling, `--test-t
 successive `--test-threads=8` runs. The complete transient-shaper target and
 `cargo clippy --locked -p transient-shaper --tests -- -D warnings` passed.
 
-The frozen `Vec::<u8>::with_capacity(1)` mutation was applied only in an isolated source-tree copy
-carrying the revised test. It failed the render gate with 2,000 observed allocations versus zero
-while both harness controls passed (2 passed / 1 failed). Removing it restored the isolated
-production file byte-for-byte and returned the allocation binary to 3/3 green. Production code in
+The attempt-1 `Vec::<u8>::with_capacity(1)` mutation was applied only in an isolated source-tree
+copy carrying the revised test. It failed the debug render gate with 2,000 observed allocations
+versus zero while both harness controls passed (2 passed / 1 failed). Sol/high subsequently proved
+that bare mutation elidable under release optimization; attempt 2 therefore freezes and qualifies
+the exact `std::hint::black_box(Vec::<u8>::with_capacity(1));` spelling instead. Production code in
 this worktree was never modified.
 
 Formatting, realtime policy, environment vocabulary, path-routing checker/mutations, and
@@ -163,3 +170,34 @@ produced the claimed 2,000 allocations with the two harness controls green and t
 Attempt 2 must freeze that exact mutation in the spec, test comment, and mutation record and rerun
 it under release optimization. All other allocator, overlap, workload, concurrency, scope, and
 policy checks passed. Attempt 1 remains **HOLD**.
+
+### Attempt 2 — Sol-medium correction and evidence
+
+The foreign worker now constructs a `PublishCompletion` guard before announcing readiness. Its
+`Drop` publishes `finished` with release ordering on both normal return and unwind; the caller's
+acquire loop therefore always ends, disarms its thread-local measurement, and reaches `join`, which
+remains the authority for worker failure. No timeout, retry, channel, allocation, or test
+serialization was added.
+
+An isolated copy injected a worker panic immediately before normal completion publication. Under
+`timeout 10`, the caller left its spin, `worker.join().expect(...)` reported the panic, and Cargo
+terminated with status 101 rather than timeout status 124. This directly reproduces attempt 1's
+wedging location and proves the completion guard's unwind path.
+
+The test comment, decision, objective gate, and mutation record now freeze one spelling:
+`std::hint::black_box(Vec::<u8>::with_capacity(1));` inside `Shaper::process_block`. In an isolated
+copy, that exact mutation under `cargo test --release` left both harness controls green and failed
+the render assertion with 2,000 allocations versus zero. Removing it restored production
+byte-for-byte; the same release allocation binary then passed 3/3. Production in this worktree was
+not edited.
+
+Clean focused execution passed under default scheduling, `--test-threads=1`, and two successive
+`--test-threads=8` runs. The complete transient-shaper target, Rustfmt, and Clippy with warnings
+denied passed. Realtime policy, environment vocabulary, path-routing checker/mutations, exact
+`full` classification, and `git diff --check` passed. Workspace policy returned success while
+again printing its existing unsupported macOS/BSD `find -printf` diagnostic; no stronger local
+portability claim is made.
+
+Only the allocation test, its row/evidence in `tests/MUTATIONS.md`, and this specification changed.
+Attempt 2 does not claim fresh Sol/high PASS, remote qualification, GitHub synchronization, or
+issue closure.

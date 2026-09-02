@@ -27,7 +27,7 @@ cargo test --locked -p transient-shaper --test <test binary>
 | 8 | the ramp prefix is capped at one frame, so parameters become block rate | `src/lib.rs` | `partition` | RED (both tests) |
 | 9 | `DB_PER_OCTAVE` perturbed by one ulp (`0x40c0a8c2`) | `src/lib.rs` | `cross_target` | RED |
 | 10 | `Ramps::advance` packs lanes in reverse (`packed[index][W - 1 - lane]`) | `src/lib.rs` | `cross_target` | RED |
-| 11 | `Vec::with_capacity(1)` inside `Shaper::process_block` | `src/lib.rs` | `allocation` | RED (2,000 allocations) |
+| 11 | `std::hint::black_box(Vec::<u8>::with_capacity(1));` inside `Shaper::process_block` | `src/lib.rs` | `allocation` (release) | RED (2,000 allocations) |
 | 12 | the scalar side of the bank comparison is rendered with `bypass = true` | `tests/bank.rs` | `bank` | RED |
 
 Rows 13–15 are the three mutations that prove `effect_runtime::envelope::ar_one_pole_step`
@@ -137,11 +137,14 @@ the_render_path_allocates_nothing --- FAILED (left: 2000, right: 0)
 test result: FAILED. 2 passed; 1 failed
 ```
 
-Refreshed for issue #332 on 2026-09-03 in an isolated copy carrying the revised thread-local
-harness. The mutation allocates once in each scalar and native-bank `process_block` call across the
-1,000-block workload, so the allocation assertion observed 2,000 rather than 0. Both harness
-controls passed. Removing the mutation restored the isolated production file byte-for-byte to the
-clean tree, and the same allocation binary then passed 3/3.
+Refreshed for issue #332 attempt 2 on 2026-09-03 in an isolated copy carrying the revised
+thread-local harness. The exact release mutation was
+`std::hint::black_box(Vec::<u8>::with_capacity(1));`; `black_box` makes the allocation
+non-elidable. It allocates once in each scalar and native-bank `process_block` call across the
+1,000-block workload, so the allocation assertion observed 2,000 rather than 0 under
+`cargo test --release`. Both harness controls passed. Removing the mutation restored the isolated
+production file byte-for-byte to the clean tree, and the same release allocation binary then
+passed 3/3.
 
 ### 12 — the bank comparison is live
 

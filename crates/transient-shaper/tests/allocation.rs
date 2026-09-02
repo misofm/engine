@@ -115,6 +115,14 @@ fn the_counter_observes_same_thread_allocation_and_free() {
 
 #[test]
 fn foreign_thread_allocations_do_not_enter_the_callers_counts() {
+    struct PublishCompletion<'a>(&'a AtomicBool);
+
+    impl Drop for PublishCompletion<'_> {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+
     let ready = AtomicBool::new(false);
     let start = AtomicBool::new(false);
     let caller_is_measuring = AtomicBool::new(false);
@@ -126,6 +134,7 @@ fn foreign_thread_allocations_do_not_enter_the_callers_counts() {
 
     std::thread::scope(|scope| {
         let worker = scope.spawn(|| {
+            let completion = PublishCompletion(&finished);
             ready.store(true, Ordering::Release);
             while !start.load(Ordering::Acquire) {
                 core::hint::spin_loop();
@@ -141,7 +150,7 @@ fn foreign_thread_allocations_do_not_enter_the_callers_counts() {
             );
             foreign_allocations.store(allocations, Ordering::Release);
             foreign_deallocations.store(deallocations, Ordering::Release);
-            finished.store(true, Ordering::Release);
+            drop(completion);
         });
 
         while !ready.load(Ordering::Acquire) {
@@ -183,7 +192,8 @@ fn foreign_thread_allocations_do_not_enter_the_callers_counts() {
     });
 }
 
-/// Red mutation: a `Vec::with_capacity(1)` anywhere inside `Shaper::process_block`.
+/// Red mutation: `std::hint::black_box(Vec::<u8>::with_capacity(1));` inside
+/// `Shaper::process_block`.
 #[test]
 fn the_render_path_allocates_nothing() {
     let blocks = 1_000;
