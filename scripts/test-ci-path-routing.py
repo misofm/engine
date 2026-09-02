@@ -20,6 +20,14 @@ def run(*args: str) -> str:
     return result.stdout.strip()
 
 
+def run_at(root: pathlib.Path, *args: str) -> str:
+    result = subprocess.run(args, cwd=root, text=True, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, check=False)
+    if result.returncode:
+        raise AssertionError(f"command failed: {' '.join(args)}\n{result.stderr}")
+    return result.stdout.strip()
+
+
 def route_with(router: pathlib.Path, *paths: str) -> str:
     args = [sys.executable, str(router), "--event", "pull_request"]
     for path in paths:
@@ -53,6 +61,19 @@ def mutate(path: pathlib.Path, old: str, new: str) -> None:
     if old not in text:
         raise AssertionError(f"mutation anchor absent: {old!r}")
     path.write_text(text.replace(old, new, 1), encoding="utf-8")
+
+
+def git(root: pathlib.Path, *args: str) -> str:
+    return run("git", "-C", str(root), *args)
+
+
+def commit_file(root: pathlib.Path, path: str, contents: str, message: str) -> str:
+    destination = root / path
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(contents, encoding="utf-8")
+    git(root, "add", path)
+    git(root, "commit", "-m", message)
+    return git(root, "rev-parse", "HEAD")
 
 
 def main() -> int:
@@ -94,6 +115,53 @@ def main() -> int:
         status.flush()
         assert run(sys.executable, str(ROUTER), "--event", "pull_request",
                    "--name-status-file", status.name) == "full"
+    for record in (
+        b"U\0sdk/src/index.ts\0",
+        b"X\0sdk/src/index.ts\0",
+        b"B\0sdk/src/index.ts\0",
+        b"M100\0sdk/src/index.ts\0",
+        b"R\0sdk/old.ts\0sdk/new.ts\0",
+        b"R10\0sdk/old.ts\0sdk/new.ts\0",
+        b"R101\0sdk/old.ts\0sdk/new.ts\0",
+    ):
+        with tempfile.NamedTemporaryFile() as status:
+            status.write(record)
+            status.flush()
+            assert run(sys.executable, str(ROUTER), "--event", "pull_request",
+                       "--name-status-file", status.name) == "full"
+    for record in (
+        b"A\0sdk/src/index.ts\0",
+        b"D\0sdk/src/index.ts\0",
+        b"M\0sdk/src/index.ts\0",
+        b"T\0sdk/src/index.ts\0",
+        b"R100\0sdk/old.ts\0sdk/new.ts\0",
+        b"C075\0sdk/old.ts\0sdk/new.ts\0",
+    ):
+        with tempfile.NamedTemporaryFile() as status:
+            status.write(record)
+            status.flush()
+            assert run(sys.executable, str(ROUTER), "--event", "pull_request",
+                       "--name-status-file", status.name) == "sdk"
+
+    # A feature branch made from the common ancestor is SDK-only even when main later diverges
+    # with an engine commit. GitHub's PR file set is a three-dot diff; push routing remains the
+    # two-dot before/after transition and therefore sees both sides of this artificial divergence.
+    repository = pathlib.Path(tempfile.mkdtemp(prefix="ci-path-routing-git-"))
+    try:
+        git(repository, "init", "-q", "-b", "main")
+        git(repository, "config", "user.name", "CI path routing test")
+        git(repository, "config", "user.email", "ci-path-routing@example.invalid")
+        ancestor = commit_file(repository, "README.md", "base\n", "base")
+        git(repository, "checkout", "-q", "-b", "feature", ancestor)
+        head = commit_file(repository, "sdk/src/index.ts", "export {};\n", "sdk")
+        git(repository, "checkout", "-q", "main")
+        base = commit_file(repository, "crates/engine/src/lib.rs", "// diverged\n", "engine")
+        assert run_at(repository, sys.executable, str(ROUTER), "--event", "pull_request",
+                      "--base", base, "--head", head) == "sdk"
+        assert run_at(repository, sys.executable, str(ROUTER), "--event", "push",
+                      "--base", base, "--head", head) == "full"
+    finally:
+        shutil.rmtree(repository)
 
     root = workspace()
     try:
@@ -111,6 +179,24 @@ def main() -> int:
     root = workspace()
     try:
         run(sys.executable, str(CHECKER), "--root", str(root))
+        mutate(root / ".github/workflows/sdk.yml",
+               "          python3 -B scripts/test-ci-path-routing.py\n", "")
+        checker_fails(root)  # an SDK-only route cannot consume unchecked workflow/router code
+    finally:
+        shutil.rmtree(root)
+    root = workspace()
+    try:
+        mutate(root / ".github/workflows/ci.yml",
+               "      - name: Validate path-routing policy and mutations\n        run: |\n"
+               "          python3 -B scripts/check-ci-path-routing.py\n"
+               "          python3 -B scripts/test-ci-path-routing.py\n"
+               "      - id: classify",
+               "      - id: classify")
+        checker_fails(root)  # every independent route owns its cheap pre-classification policy
+    finally:
+        shutil.rmtree(root)
+    root = workspace()
+    try:
         mutate(root / ".github/workflows/ci.yml", "needs: [route, host, x86-probes, wasm, wasm-gates]",
                "needs: [route, host, x86-probes, wasm]")
         checker_fails(root)  # selected heavy job escaped aggregate dependencies
@@ -120,6 +206,20 @@ def main() -> int:
     try:
         mutate(root / ".github/workflows/sdk.yml", "    if: always()", "    if: success()")
         checker_fails(root)  # a required aggregate became conditional
+    finally:
+        shutil.rmtree(root)
+    root = workspace()
+    try:
+        mutate(root / ".github/workflows/sdk.yml", "    if: always()",
+               "    if: always()\n    continue-on-error: true")
+        checker_fails(root)  # aggregate job failure suppression is forbidden
+    finally:
+        shutil.rmtree(root)
+    root = workspace()
+    try:
+        mutate(root / ".github/workflows/sdk.yml", "      - name: Enforce SDK qualification route",
+               "      - name: Enforce SDK qualification route\n        continue-on-error: true")
+        checker_fails(root)  # enforcement-step failure suppression is forbidden
     finally:
         shutil.rmtree(root)
     root = workspace()

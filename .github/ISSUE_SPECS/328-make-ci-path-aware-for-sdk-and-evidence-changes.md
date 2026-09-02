@@ -236,3 +236,44 @@ release filtering passed review. Four blockers remain:
 
 Attempt 2 must correct these four paths and add discriminating regressions before another Sol/high
 verdict. Live protection remains the old eight Actions contexts; no rollout mutation has occurred.
+
+### Attempt 2 — Sol medium HOLD correction
+
+The bounded correction addresses exactly the four HOLD findings. Pull-request routing now diffs
+`base...head`, matching GitHub's merge-base file set, while push routing retains the exact
+`before head` two-endpoint transition. A real temporary Git repository regression creates an SDK
+feature commit and a later, divergent engine commit on `main`; the same pair must classify `sdk`
+for `pull_request` and `full` for `push`.
+
+Name-status parsing now accepts only exact ordinary `A`, `D`, `M`, and `T` records, or `R`/`C`
+followed by a three-digit score from 000 through 100 with both paths present. `U`, `X`, `B`, scored
+ordinary statuses, absent/misshapen rename scores, out-of-range scores, incomplete records, and
+invalid bytes all fail safe to full qualification. The regression corpus includes accepted
+ordinary/rename/copy records and rejected `U`/`X`/`B`/`M100`/`R`/`R10`/`R101` records.
+
+Each of the three independently triggered required-context workflows runs the static checker and
+mutation suite in its always-scheduled `route` job before classification. This deliberately repeats
+only the cheap hermetic policy checks: a single authoritative workflow cannot impose ordering on
+another workflow, so it cannot prevent an SDK-only PR's SDK route from consuming unchecked router
+or workflow code. Long engine, SDK artifact, and browser qualification remain unduplicated and
+route-gated. Red mutations prove that removing either policy ownership or the mutation-suite call
+is rejected.
+
+Finally, the checker rejects any `continue-on-error` key in an aggregate job block, covering both
+job-level and enforcement-step suppression. Separate red mutations prove both placements fail.
+Aggregate truth tables, exact taxonomy, independent concurrency, and the old required-context
+rollout order are unchanged.
+
+Focused local evidence on 2026-09-02:
+
+- `python3 -B scripts/check-ci-path-routing.py`;
+- `python3 -B scripts/test-ci-path-routing.py`;
+- `yq eval '.'` over `ci.yml`, `browser-qualification.yml`, `release-build.yml`, and `sdk.yml`;
+- Python syntax compilation for the router, checker, and mutation suite;
+- `bash scripts/check-sdk-generated.sh`;
+- `python3 -B scripts/check-sdk-deletions.py`; and
+- exact-scope `git diff --check`.
+
+All passed locally. No networked rollout, branch-protection mutation, commit, push, benchmark,
+timing, playback, or unrelated SDK dependency edit is part of this correction. A fresh Sol/high
+adversarial verdict remains required.

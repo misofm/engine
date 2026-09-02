@@ -94,6 +94,11 @@ def check_router(text: str, workflow: str) -> None:
     require("route: ${{ steps.classify.outputs.route }}" in route,
             f"{workflow}: router must expose route output")
     require("fetch-depth: 0" in route, f"{workflow}: router needs complete history")
+    policy = "python3 -B scripts/check-ci-path-routing.py\n          python3 -B scripts/test-ci-path-routing.py"
+    require(policy in route,
+            f"{workflow}: route must validate path policy and mutations before classification")
+    require(route.index(policy) < route.index("scripts/ci-path-router.py"),
+            f"{workflow}: route must validate checked-out workflow code before classification")
     require("scripts/ci-path-router.py" in route and "--event \"${{ github.event_name }}\"" in route,
             f"{workflow}: router must route dispatch through the fail-safe classifier")
 
@@ -117,6 +122,8 @@ def check_aggregate(
             f"{workflow}: aggregate name must be exactly once as {title!r}")
     require(re.search(r"^    if: always\(\)$", aggregate, re.MULTILINE) is not None,
             f"{workflow}: aggregate job itself must always run")
+    require("continue-on-error:" not in aggregate,
+            f"{workflow}: aggregate job and enforcement step must not suppress failures")
     require(f"needs: [route, {', '.join(heavy)}]" in aggregate,
             f"{workflow}: aggregate dependencies must include every heavy job exactly once")
     require("ROUTE_RESULT: ${{ needs.route.result }}" in aggregate

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import pathlib
+import re
 import subprocess
 import sys
 
@@ -65,9 +66,12 @@ def parse_name_status(raw: bytes) -> list[str] | None:
         except UnicodeDecodeError:
             return None
         index += 1
-        if not status or status[0] not in "ACDMRTUXB":
+        if status in {"A", "D", "M", "T"}:
+            count = 1
+        elif re.fullmatch(r"[RC][0-9]{3}", status) and int(status[1:]) <= 100:
+            count = 2
+        else:
             return None
-        count = 2 if status[0] in "RC" else 1
         if index + count > len(fields):
             return None
         for value in fields[index:index + count]:
@@ -82,11 +86,17 @@ def parse_name_status(raw: bytes) -> list[str] | None:
     return paths
 
 
-def diff_paths(base: str, head: str) -> list[str] | None:
+def diff_paths(event: str, base: str, head: str) -> list[str] | None:
     if not base or not head or set(base) == {"0"} or set(head) == {"0"}:
         return None
+    if event == "pull_request":
+        revisions = [f"{base}...{head}"]
+    elif event == "push":
+        revisions = [base, head]
+    else:
+        return None
     result = subprocess.run(
-        ["git", "diff", "--name-status", "-z", "--find-renames", "--find-copies", base, head],
+        ["git", "diff", "--name-status", "-z", "--find-renames", "--find-copies", *revisions],
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
         check=False,
@@ -116,7 +126,7 @@ def main() -> int:
     elif args.path:
         paths = args.path
     else:
-        paths = diff_paths(args.base or "", args.head or "")
+        paths = diff_paths(args.event, args.base or "", args.head or "")
     print(classify_paths(paths) if paths is not None else "full")
     return 0
 
