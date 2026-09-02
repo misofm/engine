@@ -2,7 +2,15 @@
 export * from "./engine.ts";
 export * from "./assets.ts";
 export { MisoEngineAsset, sha256Hex } from "../core/asset.ts";
-export type { SessionShape, SourceShape, CommandReport } from "../core/boundary.ts";
+export type {
+  CommandReport,
+  EngineCallResult,
+  EngineStatus,
+  MeterFrame,
+  SessionMap,
+  SessionShape,
+  SourceShape,
+} from "../core/boundary.ts";
 export type { BootOptions } from "../core/abi.ts";
 export { defaultSourceRingFrames } from "../core/abi.ts";
 export {

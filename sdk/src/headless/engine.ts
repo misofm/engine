@@ -1,7 +1,14 @@
 import type { BootOptions } from "../core/abi.ts";
 import { MisoEngineAsset } from "../core/asset.ts";
 import { MAXIMUM_DOCUMENT_BYTES, WasmBoundary } from "../core/boundary.ts";
-import type { CommandReport, SessionShape } from "../core/boundary.ts";
+import type {
+  CommandReport,
+  EngineCallResult,
+  EngineStatus,
+  MeterFrame,
+  SessionMap,
+  SessionShape,
+} from "../core/boundary.ts";
 import { MisoEngineError, MisoUsageError } from "../core/errors.ts";
 import type { ErrorPhase, MisoDiagnostic, MisoErrorCode } from "../core/errors.ts";
 import { loadBundledEngineAsset } from "./assets.ts";
@@ -102,6 +109,14 @@ export class OfflineEngine {
     return this.#boundary.state();
   }
 
+  status(): EngineStatus {
+    return this.#boundary.status();
+  }
+
+  sessionMap(): SessionMap {
+    return this.#boundary.sessionMap();
+  }
+
   nextAbsoluteSample(): bigint {
     return this.#boundary.nextAbsoluteSample();
   }
@@ -125,8 +140,26 @@ export class OfflineEngine {
     readonly startFrame: bigint;
     readonly planes: readonly Float32Array[];
     readonly endOfRegion: boolean;
-  }): { readonly ok: boolean; readonly result: number; readonly code: string } {
+  }): EngineCallResult {
     return this.#boundary.submitSource(request);
+  }
+
+  seekSource(request: {
+    readonly sourceId: string;
+    readonly generation: bigint;
+    readonly sourceFrame: bigint;
+  }): EngineCallResult {
+    return this.#boundary.seekSource(request);
+  }
+
+  /** Take or release the decimated meter lease. */
+  meters(enabled: boolean): EngineCallResult {
+    return this.#boundary.meterLease(enabled);
+  }
+
+  /** Drain one completed meter frame, if a full window is ready. */
+  pollMeters(): MeterFrame | undefined {
+    return this.#boundary.pollMeters();
   }
 
   render(actualFrames?: number): { readonly left: Float32Array; readonly right: Float32Array } {

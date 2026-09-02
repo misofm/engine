@@ -1,5 +1,5 @@
 import { ABI_LAYOUT } from "../generated/abi.ts";
-import type { BufferKindName, ExportName } from "../generated/abi.ts";
+import type { BufferKindName, ExportName, ResultCodeName } from "../generated/abi.ts";
 import {
   StructView,
   constantValue,
@@ -80,16 +80,66 @@ export interface SourceShape {
   readonly frames: bigint;
 }
 
+/** One non-throwing engine call result. Refusals are answers, not exceptions. */
+export interface EngineCallResult {
+  readonly ok: boolean;
+  readonly result: number;
+  readonly code: ResultCodeName;
+}
+
+/** The compiled addressing map shared by the direct and MessagePort hosts. */
+export interface SessionMap {
+  readonly tracks: readonly string[];
+  readonly sources: readonly SourceShape[];
+  readonly metersAttached: boolean;
+}
+
+/** A direct snapshot of the frozen status structure. */
+export interface EngineStatus {
+  readonly state: number;
+  readonly stateName: "ready" | "failed" | "disposed";
+  readonly lastResult: number;
+  readonly lastResultName: ResultCodeName;
+  readonly backend: number;
+  readonly backendName: "scalar" | "simd128";
+  readonly sampleRateHz: number;
+  readonly quantumFrames: number;
+  readonly nextAbsoluteSample: bigint;
+  readonly renderedQuanta: bigint;
+  readonly memoryBytes: number;
+}
+
+/** One copied decimated meter window. No field retains a view onto mutable Wasm memory. */
+export interface MeterFrame {
+  readonly tag: "miso.meter.v1";
+  readonly sequence: bigint;
+  readonly windows: number;
+  readonly trackCount: number;
+  /** `[track0 L, track0 R, .., master L, master R]`. */
+  readonly peaks: Float32Array;
+  readonly trackGrDb: Float32Array;
+  readonly masterGrDb: number | null;
+  readonly firstSample: bigint;
+  readonly endSample: bigint;
+}
+
 /** A staged-and-booted engine instance. */
 export class WasmBoundary {
   readonly #exports: ExportTable;
   #handle: number;
   #optionBytes: Uint8Array;
+  #metersAttached: boolean;
 
-  private constructor(exports: ExportTable, handle: number, optionBytes: Uint8Array) {
+  private constructor(
+    exports: ExportTable,
+    handle: number,
+    optionBytes: Uint8Array,
+    metersAttached: boolean,
+  ) {
     this.#exports = exports;
     this.#handle = handle;
     this.#optionBytes = optionBytes;
+    this.#metersAttached = metersAttached;
   }
 
   /**
@@ -106,7 +156,12 @@ export class WasmBoundary {
   ): Promise<WasmBoundary> {
     const exports = exportsOf(await asset.instantiate());
     const staged = stage(exports, document, options);
-    return new WasmBoundary(exports, staged.handle, staged.optionBytes);
+    return new WasmBoundary(
+      exports,
+      staged.handle,
+      staged.optionBytes,
+      (options.console?.meterBlocks ?? 0) > 0,
+    );
   }
 
   /**
@@ -125,6 +180,7 @@ export class WasmBoundary {
     const staged = stage(this.#exports, document, options);
     this.#handle = staged.handle;
     this.#optionBytes = staged.optionBytes;
+    this.#metersAttached = (options.console?.meterBlocks ?? 0) > 0;
   }
 
   /** The exact bytes written to the options block, for the scratch/worklet equality rule. */
@@ -149,6 +205,35 @@ export class WasmBoundary {
       "status",
       Number(this.#exports.miso_engine_web_v1_status_ptr(this.#live())),
     );
+  }
+
+  /** The whole status structure, with numeric ABI words and their generated names together. */
+  status(): EngineStatus {
+    const status = this.#status();
+    const state = status.u32("state");
+    const backend = status.u32("backend");
+    const stateName = ABI_LAYOUT.constants.states.find((row) => row.value === state)?.name;
+    if (stateName === undefined) {
+      throw new MisoUsageError(`the engine reported an unknown state word ${state}`);
+    }
+    const backendName = ABI_LAYOUT.constants.backends.find((row) => row.value === backend)?.name;
+    if (backendName === undefined) {
+      throw new MisoUsageError(`the engine reported an unknown backend word ${backend}`);
+    }
+    const lastResult = status.u32("lastResult");
+    return Object.freeze({
+      state,
+      stateName,
+      lastResult,
+      lastResultName: resultName(lastResult, "call"),
+      backend,
+      backendName,
+      sampleRateHz: status.u32("sampleRateHz"),
+      quantumFrames: status.u32("quantumFrames"),
+      nextAbsoluteSample: status.u64("nextAbsoluteSample"),
+      renderedQuanta: status.u64("renderedQuanta"),
+      memoryBytes: this.#exports.memory.buffer.byteLength,
+    });
   }
 
   /** The engine's own answer about what it compiled. No number here came from the document text. */
@@ -188,11 +273,7 @@ export class WasmBoundary {
 
   /** The engine's state word, named through the generated vocabulary. */
   state(): "ready" | "failed" | "disposed" {
-    const value = this.#status().u32("state");
-    for (const row of ABI_LAYOUT.constants.states) {
-      if (row.value === value) return row.name;
-    }
-    throw new MisoUsageError(`the engine reported an unknown state word ${value}`);
+    return this.status().stateName;
   }
 
   /** Absolute sample the next render begins at. */
@@ -227,6 +308,31 @@ export class WasmBoundary {
     return new TextDecoder().decode(new Uint8Array(this.#exports.memory.buffer, pointer, length));
   }
 
+  #stageSourceId(sourceId: string): number {
+    if (typeof sourceId !== "string" || sourceId.length === 0) {
+      throw new MisoUsageError("sourceId must be a nonempty string");
+    }
+    const id = new TextEncoder().encode(sourceId);
+    const buffer = this.#buffer("sourceId");
+    if (id.byteLength > buffer.capacity) {
+      throw new MisoUsageError(
+        `source id ${sourceId} is ${id.byteLength} bytes; staging holds ${buffer.capacity}`,
+      );
+    }
+    new Uint8Array(this.#exports.memory.buffer, buffer.pointer, id.byteLength).set(id);
+    return id.byteLength;
+  }
+
+  /** The canonical track/source order plus whether meter observers were prepared. */
+  sessionMap(): SessionMap {
+    const shape = this.shape();
+    return Object.freeze({
+      tracks: shape.tracks,
+      sources: shape.sources,
+      metersAttached: this.#metersAttached,
+    });
+  }
+
   /**
    * Submit one quantum-sized block of planar source PCM.
    *
@@ -238,16 +344,9 @@ export class WasmBoundary {
     readonly startFrame: bigint;
     readonly planes: readonly Float32Array[];
     readonly endOfRegion: boolean;
-  }): { readonly ok: boolean; readonly result: number; readonly code: string } {
+  }): EngineCallResult {
     const handle = this.#live();
-    const id = new TextEncoder().encode(request.sourceId);
-    const idBuffer = this.#buffer("sourceId");
-    if (id.byteLength > idBuffer.capacity) {
-      throw new MisoUsageError(
-        `source id ${request.sourceId} is ${id.byteLength} bytes; staging holds ${idBuffer.capacity}`,
-      );
-    }
-    new Uint8Array(this.#exports.memory.buffer, idBuffer.pointer, id.byteLength).set(id);
+    const idBytes = this.#stageSourceId(request.sourceId);
 
     const frames = request.planes[0]?.length ?? 0;
     for (const plane of request.planes) {
@@ -270,7 +369,7 @@ export class WasmBoundary {
 
     const result = Number(this.#exports.miso_engine_web_v1_source_submit(
       handle,
-      id.byteLength,
+      idBytes,
       request.generation,
       request.startFrame,
       request.planes.length,
@@ -281,6 +380,101 @@ export class WasmBoundary {
       ok: result === constantValue("resultCodes", "ok"),
       result,
       code: resultName(result, "call"),
+    });
+  }
+
+  /** Seek one streamed source. The new generation invalidates every earlier queued chunk. */
+  seekSource(request: {
+    readonly sourceId: string;
+    readonly generation: bigint;
+    readonly sourceFrame: bigint;
+  }): EngineCallResult {
+    const handle = this.#live();
+    if (typeof request.generation !== "bigint" || request.generation <= 0n) {
+      throw new MisoUsageError("source seek generation must be a positive bigint");
+    }
+    if (typeof request.sourceFrame !== "bigint" || request.sourceFrame < 0n) {
+      throw new MisoUsageError("sourceFrame must be a non-negative bigint");
+    }
+    const idBytes = this.#stageSourceId(request.sourceId);
+    const result = Number(this.#exports.miso_engine_web_v1_source_seek(
+      handle,
+      idBytes,
+      request.generation,
+      request.sourceFrame,
+    ));
+    return Object.freeze({
+      ok: result === constantValue("resultCodes", "ok"),
+      result,
+      code: resultName(result, "call"),
+    });
+  }
+
+  /** Take or release the decimated meter lease. */
+  meterLease(enabled: boolean): EngineCallResult {
+    if (typeof enabled !== "boolean") {
+      throw new MisoUsageError("meter lease enabled must be boolean");
+    }
+    const result = Number(this.#exports.miso_engine_web_v1_meter_lease(
+      this.#live(),
+      enabled ? 1 : 0,
+    ));
+    return Object.freeze({
+      ok: result === constantValue("resultCodes", "ok"),
+      result,
+      code: resultName(result, "call"),
+    });
+  }
+
+  /** Drain completed meter windows, copying their values out of mutable Wasm memory. */
+  pollMeters(): MeterFrame | undefined {
+    const handle = this.#live();
+    const windows = Number(this.#exports.miso_engine_web_v1_meter_poll(handle));
+    if (windows === 0) return undefined;
+
+    const header = new StructView(
+      this.#exports.memory,
+      "meterHeader",
+      Number(this.#exports.miso_engine_web_v1_meter_header_ptr(handle)),
+    );
+    const trackCount = this.shape().tracks.length;
+    const reportedWindows = header.u32("windows");
+    const masterGrPresent = header.u32("masterGrPresent");
+    if (header.u32("structSize") !== structBytes("meterHeader")
+      || header.u32("abiVersion") !== ABI_LAYOUT.abiVersion
+      || header.u32("trackCount") !== trackCount
+      || reportedWindows !== windows
+      || masterGrPresent > 1) {
+      throw new MisoEngineError("the engine returned a malformed meter frame header", {
+        phase: "output",
+        code: "abiMismatch",
+        result: constantValue("resultCodes", "abiMismatch"),
+        diagnostics: [{ code: "sdk.meter.header", path: "meterHeader" }],
+      });
+    }
+
+    const buffer = this.#buffer("meterFrame");
+    const words = trackCount * 3 + 3;
+    if (buffer.pointer === 0 || buffer.capacity !== words * Float32Array.BYTES_PER_ELEMENT) {
+      throw new MisoEngineError("the engine returned a malformed meter frame buffer", {
+        phase: "output",
+        code: "abiMismatch",
+        result: constantValue("resultCodes", "abiMismatch"),
+        diagnostics: [{ code: "sdk.meter.frame", path: "meterFrame" }],
+      });
+    }
+    const frame = new Float32Array(this.#exports.memory.buffer, buffer.pointer, words);
+    const peakWords = trackCount * 2 + 2;
+    return Object.freeze({
+      tag: "miso.meter.v1" as const,
+      sequence: header.u64("sequence"),
+      windows,
+      trackCount,
+      peaks: frame.slice(0, peakWords),
+      trackGrDb: frame.slice(peakWords, peakWords + trackCount),
+      masterGrDb: masterGrPresent === 1 ? frame[words - 1]! : null,
+      firstSample: header.u64("firstSample"),
+      endSample: header.u64("endSample"),
     });
   }
 

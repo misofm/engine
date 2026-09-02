@@ -29,6 +29,8 @@ const BOOT_ALIASES: ReadonlyMap<number, BootResultAliasName> = new Map(
  * acknowledgement, and one that named it `abiMismatch` everywhere would leave boot's vocabulary
  * unrepresentable.
  */
+export function resultName(value: number, context: "call"): ResultCodeName;
+export function resultName(value: number, context: "boot"): MisoErrorCode;
 export function resultName(value: number, context: "boot" | "call"): MisoErrorCode {
   if (context === "boot") {
     const alias = BOOT_ALIASES.get(value);

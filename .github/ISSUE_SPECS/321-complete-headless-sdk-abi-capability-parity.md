@@ -59,4 +59,26 @@ Effect dependency, or registry publication is in scope.
 
 ## Evidence
 
-Pending implementation attempt 1.
+Implementation attempt 1:
+
+- The direct Wasm boundary now exposes typed status/session-map snapshots, source seek, meter lease,
+  and copied meter polling; `OfflineEngine` and the headless barrel carry the complete surface.
+- Meter frames validate the generated structure size, ABI version, track count, completed-window
+  count, master-presence flag, and exact generated `3T + 3` buffer shape before exposing values.
+- Source IDs share one bounded staging path between submit and seek. Invalid generations and frames
+  refuse locally; engine refusals return the generated result-name union.
+
+Local gates on 2026-09-02:
+
+- `check-sdk-headless.sh`: PASS, 105 tests / 26 suites against live Wasm.
+- `check-sdk-types.sh`: PASS, including shipped-host mirror and new declarations.
+- `check-sdk-deletions.py`: PASS over 36 SDK source files.
+- `sdk-package.sh check`: PASS; clean tarball import/type/embedded-boot smoke remains green.
+- Focused capability eval: PASS for status/map, seek generation/frame, a two-block observed meter
+  window at exact samples `[0, 256)`, historical-frame detachment, release, and unsupported lease.
+
+Adversarial review:
+
+- PASS locally on ABI coverage, generated-layout use, copied-memory lifetime, refusal semantics, and
+  the acked-batch question. Final issue closure requires the implementation commit's upstream CI,
+  browser qualification, and release-build results.
