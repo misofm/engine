@@ -1,7 +1,7 @@
 /** Issue #330: the shell gate preserves every accepted artifact-path byte across its sdk/ cd. */
 
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, copyFile, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -14,6 +14,8 @@ const repoRoot = resolve(sdkRoot, "..");
 const defaultScript = join(repoRoot, "scripts", "check-sdk-headless.sh");
 const scriptUnderTest = process.env.MISO_ENGINE_HEADLESS_SCRIPT_UNDER_TEST ?? defaultScript;
 const scriptAbsolute = isAbsolute(scriptUnderTest) ? scriptUnderTest : resolve(repoRoot, scriptUnderTest);
+const scriptRepoRoot = resolve(dirname(scriptAbsolute), "..");
+const workflowScript = relative(scriptRepoRoot, scriptAbsolute);
 const expectedSdkRoot = resolve(dirname(scriptAbsolute), "..", "sdk");
 const wasmName = "miso-engine-v1-audio-worklet.simd128.wasm";
 const minimalWasm = Uint8Array.from([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]);
@@ -24,6 +26,7 @@ const fakeNodeModule = join(scratchRoot, "fake-node.mjs");
 const fakeNode = join(fakeBin, "node");
 let unsearchableDirectory;
 
+await chmod(scratchRoot, 0o755);
 await mkdir(fakeBin);
 await writeFile(fakeNodeModule, `
 import assert from "node:assert/strict";
@@ -56,24 +59,38 @@ async function makeArtifacts(name) {
   return directory;
 }
 
-function invoke(args, { expectedArtifacts, nodeStatus } = {}) {
+function invoke(args, {
+  cdpath,
+  cwd = repoRoot,
+  expectedArtifacts,
+  expectedCwd = expectedSdkRoot,
+  gid,
+  nodeStatus,
+  script = scriptUnderTest,
+  uid,
+} = {}) {
   const env = {
     ...process.env,
     PATH: `${fakeBin}:${process.env.PATH ?? ""}`,
     SDK_PATH_REAL_NODE: process.execPath,
     SDK_PATH_FAKE_NODE: fakeNodeModule,
-    SDK_PATH_EXPECTED_CWD: expectedSdkRoot,
+    SDK_PATH_EXPECTED_CWD: expectedCwd,
   };
+  if (cdpath !== undefined) {
+    env.CDPATH = cdpath;
+  }
   if (expectedArtifacts !== undefined) {
     env.SDK_PATH_EXPECTED_ARTIFACTS = expectedArtifacts;
   }
   if (nodeStatus !== undefined) {
     env.SDK_PATH_NODE_STATUS = String(nodeStatus);
   }
-  const result = spawnSync("bash", [scriptUnderTest, ...args], {
-    cwd: repoRoot,
+  const result = spawnSync("bash", [script, ...args], {
+    cwd,
     env,
     encoding: "utf8",
+    gid,
+    uid,
   });
   assert.equal(result.signal, null, `script was signalled: ${result.signal}`);
   return result;
@@ -111,6 +128,75 @@ describe("check-sdk-headless artifact path bytes", { concurrency: false }, () =>
     assert.equal(isAbsolute(defaultScript), true);
   });
 
+  test("workflow-relative invocation ignores CDPATH output and shadow selection", async () => {
+    const directory = await makeArtifacts("workflow-relative");
+    const oracle = await realpath(directory);
+    const shadowRoot = join(scratchRoot, "repo-root-shadow");
+    await mkdir(join(shadowRoot, "scripts"), { recursive: true });
+    await mkdir(join(shadowRoot, "sdk"));
+
+    for (const cdpath of [".", shadowRoot]) {
+      const result = invoke([directory], {
+        cdpath,
+        cwd: scriptRepoRoot,
+        expectedArtifacts: oracle,
+        script: workflowScript,
+      });
+      assert.equal(result.status, 0, `${cdpath}: ${diagnostic(result)}`);
+    }
+  });
+
+  test("repository-root capture preserves repeated terminal newlines", async () => {
+    const copiedRepo = join(scratchRoot, "copied-repo\n\n");
+    const copiedScript = join(copiedRepo, "scripts", "check-sdk-headless.sh");
+    const copiedSdk = join(copiedRepo, "sdk");
+    await mkdir(dirname(copiedScript), { recursive: true });
+    await mkdir(copiedSdk);
+    await copyFile(scriptAbsolute, copiedScript);
+    const directory = await makeArtifacts("repo-root-newlines");
+    const oracle = await realpath(directory);
+    const result = invoke([directory], {
+      cdpath: ".",
+      expectedArtifacts: oracle,
+      expectedCwd: await realpath(copiedSdk),
+      script: copiedScript,
+    });
+    assert.equal(result.status, 0, diagnostic(result));
+  });
+
+  test("artifact resolution ignores CDPATH for relative and absolute forms", async () => {
+    const caller = join(scratchRoot, "artifact-caller");
+    const shadowRoot = join(scratchRoot, "artifact-shadow");
+    const local = join(caller, "chosen-artifact");
+    const shadow = join(shadowRoot, "chosen-artifact");
+    await mkdir(local, { recursive: true });
+    await mkdir(shadow, { recursive: true });
+    await writeFile(join(local, wasmName), minimalWasm);
+    await writeFile(join(shadow, wasmName), minimalWasm);
+    const oracle = await realpath(local);
+
+    for (const argument of ["chosen-artifact", local]) {
+      const result = invoke([argument], {
+        cdpath: shadowRoot,
+        cwd: caller,
+        expectedArtifacts: oracle,
+      });
+      assert.equal(result.status, 0, `${argument}: ${diagnostic(result)}`);
+    }
+  });
+
+  test("an ancestor symlink is accepted and physically resolved", async () => {
+    const realAncestor = join(scratchRoot, "real-ancestor");
+    const directory = join(realAncestor, "artifacts");
+    const ancestorLink = join(scratchRoot, "ancestor-link");
+    await mkdir(directory, { recursive: true });
+    await writeFile(join(directory, wasmName), minimalWasm);
+    await symlink(realAncestor, ancestorLink, "dir");
+    const argument = join(ancestorLink, "artifacts");
+    const result = invoke([argument], { expectedArtifacts: await realpath(directory) });
+    assert.equal(result.status, 0, diagnostic(result));
+  });
+
   test("usage and missing or non-directory inputs return 2", async () => {
     const nonDirectory = join(scratchRoot, "ordinary-file");
     await writeFile(nonDirectory, "not a directory", "utf8");
@@ -120,22 +206,23 @@ describe("check-sdk-headless artifact path bytes", { concurrency: false }, () =>
     }
   });
 
-  test("missing module and direct symlink return 2", async () => {
+  test("missing module and every direct-symlink directory spelling return 2", async () => {
     const missingModule = join(scratchRoot, "missing-module");
     await mkdir(missingModule);
     const valid = await makeArtifacts("symlink-target");
     const link = join(scratchRoot, "artifact-link");
     await symlink(valid, link, "dir");
-    for (const argument of [missingModule, link]) {
+    for (const argument of [missingModule, link, `${link}/`, `${link}/.`, `${link}//./`]) {
       const result = invoke([argument]);
       assert.equal(result.status, 2, diagnostic(result));
     }
   });
 
-  test("unsearchable directory returns 2", async () => {
+  test("unsearchable directory returns 2, including under a root test runner", async () => {
     unsearchableDirectory = await makeArtifacts("unsearchable");
     await chmod(unsearchableDirectory, 0o000);
-    const result = invoke([unsearchableDirectory]);
+    const rootRunner = typeof process.getuid === "function" && process.getuid() === 0;
+    const result = invoke([unsearchableDirectory], rootRunner ? { gid: 65534, uid: 65534 } : {});
     await chmod(unsearchableDirectory, 0o700);
     unsearchableDirectory = undefined;
     assert.equal(result.status, 2, diagnostic(result));

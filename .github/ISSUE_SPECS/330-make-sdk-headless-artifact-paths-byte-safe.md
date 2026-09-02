@@ -217,3 +217,80 @@ Only `scripts/check-sdk-headless.sh`, `sdk/test/headless-path-evals.mjs`, and th
 changed. No commit, push, workflow, router, checker, ignore list, digest, package, GitHub,
 branch-protection, or active-run mutation occurred. Fresh Sol/high review is still required; this
 attempt does not claim PASS.
+
+### Attempt 1 — Sol/high HOLD
+
+Sol/high held attempt 1. The sentinel protected only the artifact-path capture. Repository-root
+discovery still used nested bare command substitutions (`dirname` and `pwd -P`), so a repository
+path ending in newline bytes was not preserved. Both physical transitions also inherited caller
+`CDPATH`: `CDPATH=.` could add `cd` output to the captured value, while a hostile search entry could
+select an existing shadow directory. Redirecting `cd` output would not correct the shadow-selection
+semantics.
+
+The direct-final-symlink check was lexical only for the exact argument. Appending `/`, `/.`, or the
+equivalent repeated spelling made `-L` inspect the resolved target and allowed a direct
+caller-supplied symlink directory through. The unsearchable fixture also needed to retain its
+non-root assertion when the test runner itself is root rather than silently accepting root's
+ability to traverse mode `000`. These are contract findings, so attempt 1 remains **HOLD**.
+
+### Attempt 2 — Sol medium correction
+
+The production script now uses one sentinel-bearing `capture_physical_directory` helper for both
+repository-root and artifact resolution. Each transition executes `cd -P` with `CDPATH=''`, so no
+caller search path can select or print a different directory. Repository-root discovery uses Bash
+parameter expansion rather than capturing `dirname`; both captures append one `x` after physical
+`$PWD` and remove exactly that byte. Either failed transition reports a diagnostic and exits 2.
+
+Before artifact resolution, a separate link probe removes only equivalent trailing directory
+syntax (`/` and `/.`, including repetitions). Thus `link`, `link/`, `link/.`, and `link//./` all
+retain the direct-final-symlink rejection. A symlink in an ancestor component remains accepted and
+`cd -P` resolves it to the independent physical-path oracle, preserving the intended policy rather
+than rejecting every path containing a symlink.
+
+The same automatically discovered eval file now additionally covers:
+
+- workflow-form `scripts/check-sdk-headless.sh` invocation with `CDPATH=.` and with an existing
+  repository-root shadow;
+- artifact selection under an existing `CDPATH` shadow in both relative and absolute forms;
+- a copied repository root ending in two newline bytes;
+- direct symlink spellings with `/`, `/.`, and repeated slash/dot syntax, plus an accepted ancestor
+  symlink; and
+- unsearchable status under both an ordinary runner and a root runner, where the latter drops the
+  child to numeric uid/gid 65534 before making the assertion.
+
+Node/libc `realpath` remains the independent oracle. The fake child still checks exact SDK cwd,
+artifact environment bytes, valid minimal Wasm, exact glob arguments, and status propagation.
+Focused executable results from the expanded 17-test file are:
+
+- exported parent `951a5a3c`: **RED**, 3 passed / 14 failed;
+- exported failed attempt `68eef8d6`: **RED**, 10 passed / 7 failed, including terminal-newline,
+  `CDPATH`, repository-root-byte, direct-symlink-spelling, and unsearchable-status failures; and
+- this attempt-2 working tree: **GREEN**, 17 passed / 0 failed.
+
+No workflow, router, checker, ignore list, package script, digest, or package dependency file was
+changed. Additional proportional gates and fresh Sol/high review remain required; this correction
+records implementation evidence and does **not** claim PASS.
+
+Attempt-2 proportional evidence on 2026-09-03:
+
+- `bash -n` and `shellcheck` passed for `scripts/check-sdk-headless.sh`;
+- the focused eval passed 17/17, and the exact same file produced the historical red results above
+  through alternate script paths in isolated `git archive` exports;
+- `python3 -B scripts/check-ci-path-routing.py` and
+  `python3 -B scripts/test-ci-path-routing.py` passed unchanged;
+- SDK types, generated surface, and deletion gates passed; all workflow files parsed with `yq`;
+- the exact three-path range from `origin/main` is this spec, the headless script, and the SDK eval,
+  and production path classification returned `sdk` for both pull-request and push inputs;
+- an executable `scripts/sdk-package.sh build` used a caller-relative six-artifact directory whose
+  final byte was a newline; staging, all 9 enginectl tests, and package-tree preparation passed.
+  `scripts/sdk-package.sh` remained byte-unchanged;
+- a locally compiled `simd128` Wasm drove the production headless script and its existing glob:
+  all 128 tests in 28 suites passed, including automatic discovery of the 17-test regression; and
+- `git diff --check` passed and status contains exactly the three scoped files.
+
+A preliminary full-glob setup accidentally supplied a scalar Wasm under the SIMD artifact name;
+127/128 tests passed and the capability eval correctly rejected `scalar` versus `simd128`. Rebuilding
+the disposable fixture with `-C target-feature=+simd128` produced the 128/128 result above. Neither
+artifact is tracked, and this setup correction is not presented as a retry of a production gate.
+Fresh Sol/high review is still pending, so attempt 2 remains implementation evidence rather than a
+PASS verdict.

@@ -9,7 +9,19 @@
 # `npm install` would need the network, and a gate that needed the network could not be a sweep row.
 set -euo pipefail
 
-repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
+capture_physical_directory() {
+  CDPATH='' cd -P -- "$1" && printf '%sx' "$PWD"
+}
+
+script_directory=${BASH_SOURCE[0]%/*}
+if [[ "$script_directory" == "${BASH_SOURCE[0]}" ]]; then
+  script_directory=.
+fi
+if ! repo_root_with_sentinel=$(capture_physical_directory "$script_directory/.."); then
+  echo "repository root cannot be resolved" >&2
+  exit 2
+fi
+repo_root=${repo_root_with_sentinel%x}
 
 command -v node >/dev/null || { echo "node is required" >&2; exit 2; }
 
@@ -26,14 +38,31 @@ if (($# != 1)); then
 fi
 
 artifact_dir=$1
-[[ -d "$artifact_dir" && ! -L "$artifact_dir" ]] || {
+artifact_link_probe=$artifact_dir
+while :; do
+  case "$artifact_link_probe" in
+    /)
+      break
+      ;;
+    */)
+      artifact_link_probe=${artifact_link_probe%/}
+      ;;
+    */.)
+      artifact_link_probe=${artifact_link_probe%/.}
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+[[ -d "$artifact_dir" && ! -L "$artifact_link_probe" ]] || {
   echo "artifact directory must be a non-symlink directory" >&2
   exit 2
 }
 # Command substitution strips every trailing newline, which is legal pathname data. Append one
 # known non-newline byte to the physical directory, then remove exactly that byte after capture.
 # POSIX paths cannot contain NUL, but every other byte Bash can carry remains untouched.
-if ! artifact_dir_with_sentinel=$(cd -P -- "$artifact_dir" && printf '%sx' "$PWD"); then
+if ! artifact_dir_with_sentinel=$(capture_physical_directory "$artifact_dir"); then
   echo "artifact directory cannot be resolved" >&2
   exit 2
 fi
