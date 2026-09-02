@@ -312,3 +312,26 @@ Focused qualification is green:
 No production file, package-wide gate, benchmark, dependency, or persistent/global test hook was
 added in attempt 3. This is the final permitted implementation attempt and awaits fresh
 adversarial review; this evidence does not claim PASS.
+
+### Attempt 3 — Sol-high adversarial PASS
+
+Fresh Sol-high review returned **PASS** on exact checkpoint `f4dc721c`. The worktree was clean and
+production `sdk/src/enginectl.ts` was byte-identical to accepted attempt 2 at SHA-256
+`b1a419cda401e057b9f1a781e4b9eb19ab009616897c24e68703759dbe22a0ab`; the final attempt changed
+only the issue record and black-box test. The cumulative issue stayed within its four authorized
+files and added no dependency, asset, workflow, script, runtime probe, subprocess, or network path.
+
+The reviewer independently qualified the child-only instrumentation: its preload and audit live in
+one unique test directory, `syncBuiltinESMExports()` reaches the executable's named `createHash`
+binding, the wrapper forwards all relevant arguments, receivers, and return values, it counts only
+SHA-256 updates beginning with canonical `schema_version = 1\n`, and the hook ends with the child.
+Production observed exactly one TOML hash. An isolated second full-payload hash made the named gate
+fail at `tomlHashes: 2` versus `1`, after which production was restored.
+
+Strict TypeScript and the complete built-executable suite passed 21/21 with the qualified engine
+and FLAC artifacts. Request-mode canonical TOML and the file receipt remained byte-identical to the
+source-verified parent `57e43da3`; the request receipt still contains only `path`, `bytes`, and
+`sha256`. All earlier path, framing, raw-output, publication-order, physical-alias, hostile-input,
+and help mutations remain discriminating through the complete suite. Diff and commit validation
+passed. No benchmark was run because the final production work is two lexical path resolutions
+with one pre-existing TOML digest. Issue #335 is approved for upstream delivery.

@@ -231,3 +231,22 @@ other workflow was created. The checkpoint synchronized issues #331 and #332 bef
 completed. This supplies gate 14's evidence-only-main observation; the real SDK-only PR,
 evidence-only PR, `LICENSE` full-route observation, and unknown/malformed fail-safe observations
 remain open.
+
+### Post-rollout SDK-only pull-request observation
+
+Issue #333 supplied the required real SDK-only pull request. The feature branch at `b89a7fb2`
+classified `sdk`, and its ordinary branch push created zero workflows. Pull request #334 produced
+all three stable required contexts: `engine qualification`, `SDK qualification`, and
+`browser qualification` completed successfully. Only SDK run
+<https://github.com/misofm/engine/actions/runs/33675688367> executed a substantive qualification
+job; its package/generated/headless closure passed in 2m53s. Engine run
+<https://github.com/misofm/engine/actions/runs/33675688483> and browser run
+<https://github.com/misofm/engine/actions/runs/33675688390> ran their classifiers and stable
+aggregate jobs while all heavy engine/browser work skipped. The PR was mergeable under the exact
+three-context protection set and merged once as `49c153f7`.
+
+The resulting main push created only SDK qualification run
+<https://github.com/misofm/engine/actions/runs/33676075580>; it passed its substantive job and
+aggregate in 2m54s without retry. No engine, browser, or release run was created for that SDK-only
+main commit. This completes gate 14's actual SDK-only PR observation. The evidence-only PR and
+explicit `LICENSE`/unknown/malformed post-rollout observations remain before issue closure.
