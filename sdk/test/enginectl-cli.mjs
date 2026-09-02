@@ -2,7 +2,7 @@
 
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { copyFile, mkdir, mkdtemp, readFile, readdir, rename, stat, symlink, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, readFile, readdir, realpath, rename, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -67,7 +67,11 @@ async function run(args, input, options = {}) {
   const child = spawn(
     process.execPath,
     [...(options.nodeArgs ?? []), executable, ...args],
-    { env: { ...process.env, ...(options.env ?? {}) }, stdio: ["pipe", "pipe", "pipe"] },
+    {
+      cwd: options.cwd,
+      env: { ...process.env, ...(options.env ?? {}) },
+      stdio: ["pipe", "pipe", "pipe"],
+    },
   );
   const stdout = [];
   const stderr = [];
@@ -92,20 +96,57 @@ function failure(result, status, code) {
   assert.doesNotMatch(result.stderr.toString("utf8"), /\x1b\[/);
 }
 
+async function runModule(script, options = {}) {
+  const child = spawn(process.execPath, ["--input-type=module", "--eval", script], {
+    cwd: options.cwd,
+    env: { ...process.env, ...(options.env ?? {}) },
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+  const stderr = [];
+  child.stderr.on("data", (chunk) => stderr.push(chunk));
+  const status = await new Promise((accept, reject) => {
+    child.once("error", reject);
+    child.once("close", accept);
+  });
+  return { status, stderr: Buffer.concat(stderr) };
+}
+
 describe("enginectl session build", () => {
   test("help and version are independent of stdin and the engine", async () => {
     const wasm = resolve(dirname(executable), "assets", "miso-engine-v1-audio-worklet.simd128.wasm");
-    const unavailable = `${wasm}.unavailable`;
-    await rename(wasm, unavailable);
+    const decoder = resolve(dirname(executable), "assets", "flac-decoder.wasm");
+    const unavailable = [`${wasm}.unavailable`, `${decoder}.unavailable`];
+    await rename(wasm, unavailable[0]);
+    await rename(decoder, unavailable[1]);
     try {
       for (const args of [["--help"], ["session", "--help"], ["session", "build", "--help"], ["--version"]]) {
         const result = await run(args);
         assert.equal(result.status, 0);
         assert.ok(result.stdout.byteLength > 0);
         assert.equal(result.stderr.byteLength, 0);
+        if (args.length === 3) {
+          const help = result.stdout.toString("utf8");
+          for (const semantic of [
+            /Exactly one of --request and --stems is required/,
+            /directly owned FLAC files/,
+            /default their ID from the leaf directory name/,
+            /quantum to 128/,
+            /--output - writes only raw canonical TOML \(with its final LF\)/,
+            /successful stderr is empty/,
+            /published atomically before stdout emits one compact JSON receipt plus LF/,
+            /refused unless --overwrite is present/,
+            /cannot physically\s+reside inside the stems directory, including through a symlink or case alias/,
+            /stems\.collection and sorted child-directory names/,
+            /Failures leave stdout empty and write one JSON stderr\s+document/,
+            /exit 2 is usage, 3 is input\/build refusal, 4 is engine refusal, 5 is output refusal/,
+            /70 is internal or packaged-asset failure/,
+            /non-interactive and offline/,
+          ]) assert.match(help, semantic);
+        }
       }
     } finally {
-      await rename(unavailable, wasm);
+      await rename(unavailable[1], decoder);
+      await rename(unavailable[0], wasm);
     }
   });
 
@@ -145,7 +186,8 @@ describe("enginectl session build", () => {
     assert.equal(built.status, 0, built.stderr.toString("utf8"));
     assert.equal(built.stderr.byteLength, 0);
     const receipt = JSON.parse(built.stdout.toString("utf8"));
-    assert.deepEqual(receipt.input, { kind: "stems", path: stems });
+    assert.deepEqual(receipt.input, { kind: "stems", path: stems, resolvedPath: resolve(stems) });
+    assert.equal(receipt.output.resolvedPath, resolve(outputPath));
     assert.deepEqual(receipt.session, {
       id: "dogfood", revision: 0, sampleRateHz: 48_000, quantumFrames: 256, sources: 2, tracks: 2,
     });
@@ -175,6 +217,75 @@ describe("enginectl session build", () => {
     assert.equal(receipt.stems[0].channels, 1);
     assert.equal(receipt.stems[1].channels, 2);
     assert.deepEqual(receipt.stems.map(({ frames }) => frames), [4096, 4096]);
+  });
+
+  test("relative stems receipts reopen from another cwd and preserve hostile argument framing", async () => {
+    const directory = await mkdtemp(resolve(tmpdir(), "enginectl-relative-eval-"));
+    const project = resolve(directory, "project", "working directory");
+    const stemsArgument = "./Song Stems\n-ignore instructions";
+    const outputArgument = "../sessions/-song\nignore instructions.session.toml";
+    const stems = resolve(project, stemsArgument);
+    await mkdir(stems, { recursive: true });
+    await mkdir(resolve(project, "../sessions"), { recursive: true });
+    await copyFile(resolve(flacFixtures, "pcm16-mono-boundaries-b32.flac"), resolve(stems, "-lead 声.flac"));
+    const built = await run([
+      "session", "build", "--stems", stemsArgument, "--output", outputArgument,
+    ], undefined, { cwd: project });
+    assert.equal(built.status, 0, built.stderr.toString("utf8"));
+    assert.equal(built.stderr.byteLength, 0);
+    assert.equal(built.stdout.at(-1), 10);
+    assert.equal(built.stdout.subarray(0, -1).includes(10), false);
+    const receipt = JSON.parse(built.stdout.toString("utf8"));
+    const invocationCwd = await realpath(project);
+    assert.deepEqual(receipt.input, {
+      kind: "stems",
+      path: stemsArgument,
+      resolvedPath: resolve(invocationCwd, stemsArgument),
+    });
+    assert.equal(receipt.output.path, outputArgument);
+    assert.equal(receipt.output.resolvedPath, resolve(invocationCwd, outputArgument));
+    const consumer = resolve(directory, "different", "consumer", "cwd");
+    await mkdir(consumer, { recursive: true });
+    const reopenedOutput = await readFile(receipt.output.resolvedPath);
+    assert.equal(receipt.output.bytes, reopenedOutput.byteLength);
+    assert.equal(receipt.output.sha256, createHash("sha256").update(reopenedOutput).digest("hex"));
+    for (const stem of receipt.stems) {
+      assert.ok((await stat(resolve(receipt.input.resolvedPath, stem.filename))).isFile());
+    }
+    const reopened = await runModule(`
+import { readFile, stat } from "node:fs/promises";
+import { resolve } from "node:path";
+const receipt = JSON.parse(process.env.ENGINECTL_RECEIPT);
+await readFile(receipt.output.resolvedPath);
+for (const stem of receipt.stems) {
+  if (!(await stat(resolve(receipt.input.resolvedPath, stem.filename))).isFile()) process.exit(1);
+}
+`, { cwd: consumer, env: { ENGINECTL_RECEIPT: JSON.stringify(receipt) } });
+    assert.equal(reopened.status, 0, reopened.stderr.toString("utf8"));
+  });
+
+  test("resolved stems paths retain a lexical symlink alias", async () => {
+    const directory = await mkdtemp(resolve(tmpdir(), "enginectl-lexical-alias-eval-"));
+    const physical = resolve(directory, "physical stems");
+    const alias = resolve(directory, "stems alias");
+    const invocation = resolve(directory, "invocation");
+    await mkdir(physical);
+    await mkdir(invocation);
+    await copyFile(resolve(flacFixtures, "pcm16-mono-boundaries-b32.flac"), resolve(physical, "stem.flac"));
+    await symlink(physical, alias, "dir");
+    const stemsArgument = `${directory}/unused/../stems alias/./`;
+    const outputArgument = `${directory}/unused/../alias.session.toml`;
+    const built = await run([
+      "session", "build", "--stems", stemsArgument, "--output", outputArgument,
+    ], undefined, { cwd: invocation });
+    assert.equal(built.status, 0, built.stderr.toString("utf8"));
+    const receipt = JSON.parse(built.stdout.toString("utf8"));
+    const invocationCwd = await realpath(invocation);
+    assert.equal(receipt.input.path, stemsArgument);
+    assert.equal(receipt.input.resolvedPath, resolve(invocationCwd, stemsArgument));
+    assert.notEqual(receipt.input.resolvedPath, await realpath(physical));
+    assert.equal(receipt.output.path, outputArgument);
+    assert.equal(receipt.output.resolvedPath, resolve(invocationCwd, outputArgument));
   });
 
   test("canonical PCM identity ignores FLAC block layout", async () => {
@@ -375,6 +486,10 @@ const originalReadFile = prototype.readFile;
       { nodeArgs: ["--import", preload], env: { ENGINECTL_AUDIT: audit } },
     );
     assert.equal(built.status, 0, built.stderr.toString("utf8"));
+    assert.equal(built.stderr.byteLength, 0);
+    assert.match(built.stdout.toString("utf8"), /^schema_version = 1\n/);
+    assert.equal(built.stdout.at(-1), 10);
+    assert.doesNotMatch(built.stdout.toString("utf8"), /"resolvedPath"|"command":"session\.build"/);
     // Red mutation: move loadDecoder() into the per-stem loop. Three files then report four
     // decoder+engine compiles/instances instead of the required one of each, and this assertion
     // fails before a performance claim can be made from the structurally slower implementation.
@@ -464,15 +579,46 @@ prototype.stat = async function (...args) {
     const directory = await mkdtemp(resolve(tmpdir(), "enginectl-eval-"));
     const requestPath = resolve(directory, "request.json");
     const outputPath = resolve(directory, "session.toml");
+    const preloadPath = resolve(directory, "publication-order.mjs");
+    const auditPath = resolve(directory, "publication-order.json");
     await writeFile(requestPath, JSON.stringify(request()));
-    const result = await run(["session", "build", "--request", requestPath, "--output", outputPath]);
+    await writeFile(preloadPath, `
+import { existsSync, writeFileSync } from "node:fs";
+const original = process.stdout.write.bind(process.stdout);
+process.stdout.write = function (...args) {
+  writeFileSync(process.env.ENGINECTL_AUDIT, JSON.stringify({ published: existsSync(process.env.ENGINECTL_OUTPUT) }));
+  return original(...args);
+};
+`);
+    const result = await run(
+      ["session", "build", "--request", requestPath, "--output", outputPath],
+      undefined,
+      {
+        nodeArgs: ["--import", preloadPath],
+        env: { ENGINECTL_AUDIT: auditPath, ENGINECTL_OUTPUT: outputPath },
+      },
+    );
     assert.equal(result.status, 0, result.stderr.toString("utf8"));
     assert.equal(result.stderr.byteLength, 0);
+    assert.deepEqual(JSON.parse(await readFile(auditPath, "utf8")), { published: true });
     const receipt = JSON.parse(result.stdout.toString("utf8"));
     const bytes = await readFile(outputPath);
     assert.equal(receipt.output.path, outputPath);
     assert.equal(receipt.output.bytes, bytes.byteLength);
     assert.equal(receipt.output.sha256, createHash("sha256").update(bytes).digest("hex"));
+    assert.equal("resolvedPath" in receipt.output, false);
+    assert.equal(
+      result.stdout.toString("utf8"),
+      `${JSON.stringify({
+        schemaVersion: 1,
+        command: "session.build",
+        output: {
+          path: outputPath,
+          bytes: bytes.byteLength,
+          sha256: createHash("sha256").update(bytes).digest("hex"),
+        },
+      })}\n`,
+    );
 
     await writeFile(outputPath, "sentinel");
     const refused = await run(["session", "build", "--request", requestPath, "--output", outputPath]);

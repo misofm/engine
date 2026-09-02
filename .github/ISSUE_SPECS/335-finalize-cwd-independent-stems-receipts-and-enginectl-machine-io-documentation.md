@@ -183,3 +183,37 @@ ruled that additive lexical `resolvedPath` fields plus complete public machine-I
 are the smallest closable correction. It explicitly excluded collection batching, caches,
 resolver/playback work, receipt-file output, physical canonicalization, and benchmarking because
 the observed importer already meets its correctness and performance contract.
+
+Attempt 1 implementation evidence on 2026-09-03, based exactly on checkpoint `57e43da3`, adds
+`resolvedPath: path.resolve(argument)` only to stems-mode file receipts while leaving the existing
+request receipt object and raw-output branch unchanged. The built-executable suite now supplies an
+explicit child cwd and discriminates raw versus resolved argument spelling, reopening the output
+and mapped stems from another cwd, absolute lexical normalization, preservation of a symlink alias,
+hostile Unicode/space/newline/leading-dash/instruction-looking JSON framing, exact request-mode
+receipt bytes, stems raw TOML, physical in-leaf protection, help without either Wasm asset, and
+publication existing at the instant the receipt write begins. The README publishes the complete
+stems receipt shape and corrects collection recovery to sorted child-directory names without
+claiming that those children are valid leaves.
+
+Focused qualification results:
+
+- `ENGINECTL=sdk/dist/enginectl.js node --test sdk/test/enginectl-cli.mjs`: PASS, 21/21 after the
+  final test hardening.
+- `bash scripts/sdk-package.sh check /private/tmp/engine333-artifacts
+  /private/tmp/engine-flac-decoder-33666706481`: PASS, 21/21 built-executable tests and extracted
+  69-file package/tarball smoke using the existing qualified artifacts.
+- `bash scripts/check-sdk-types.sh`: PASS (strict types and shipped-host declaration pin).
+- `python3 -B scripts/check-sdk-deletions.py` and the `--self-test` form: PASS; 45 source files
+  clean and all 36 mutations caught.
+- `python3 -B scripts/check-ci-path-routing.py`, `python3 -B scripts/test-ci-path-routing.py`, and
+  `python3 -B scripts/ci-path-router.py --event pull_request` over the issue/spec/SDK paths: PASS;
+  the route is `sdk`.
+- Generated/assets checks run inside `sdk-package.sh check`: PASS.
+
+A default `npm run build` was also attempted first and stopped before SDK staging because a fresh
+local AudioWorklet build produced SHA-256 `1fe4b9ce...` rather than the gate-pinned
+`6ddf154d...`. This is the known qualified-artifact reproducibility boundary, not a source/test
+failure; the proportional package gate above therefore used the already-qualified artifact
+directories as the script explicitly supports. No benchmark was run, and no dependency, flag,
+runtime filesystem probe, subprocess, network path, batch/cache/resolver/playback behavior, or
+receipt-file behavior was added.

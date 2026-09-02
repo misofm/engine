@@ -59,11 +59,20 @@ Commands:
 
 const BUILD_HELP = `Usage: enginectl session build (--request PATH|- | --stems DIRECTORY) --output PATH|- [options]
 
-Builds canonical Session V1 TOML from either one strict JSON request or one leaf directory of
-FLAC stems, then validates it with the embedded engine. PATH is resolved from the current
-directory; '-' selects stdin or raw stdout. Stem sessions default their ID from the leaf directory
-and their quantum to 128; override with --session-id and --quantum-frames. Existing output is
-refused unless --overwrite is present. The command is always non-interactive.
+Exactly one of --request and --stems is required. --request reads one strict JSON request from PATH
+or stdin with '-'. --stems reads one leaf directory of directly owned FLAC files. Stem sessions
+default their ID from the leaf directory name and their quantum to 128; override those defaults
+with --session-id and --quantum-frames.
+
+--output - writes only raw canonical TOML (with its final LF); successful stderr is empty. A file
+output is published atomically before stdout emits one compact JSON receipt plus LF. Existing
+destinations are refused unless --overwrite is present. In stems mode, the output cannot physically
+reside inside the stems directory, including through a symlink or case alias.
+
+A stems collection is refused with code stems.collection and sorted child-directory names; those
+children are not asserted to be valid leaves. Failures leave stdout empty and write one JSON stderr
+document: exit 2 is usage, 3 is input/build refusal, 4 is engine refusal, 5 is output refusal, and
+70 is internal or packaged-asset failure. The command is non-interactive and offline.
 `;
 
 function usage(message: string): never {
@@ -401,8 +410,19 @@ async function build(args: BuildArguments): Promise<void> {
     },
   };
   const receipt = stemsBuild === undefined ? requestReceipt : {
-    ...requestReceipt,
-    input: { kind: "stems", path: args.stems },
+    schemaVersion: 1,
+    command: "session.build",
+    output: {
+      path: args.output,
+      resolvedPath: resolve(args.output),
+      bytes: bytes.byteLength,
+      sha256: createHash("sha256").update(bytes).digest("hex"),
+    },
+    input: {
+      kind: "stems",
+      path: args.stems,
+      resolvedPath: resolve(args.stems as string),
+    },
     session: {
       id: stemsBuild.sessionId,
       revision: 0,
