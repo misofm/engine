@@ -365,3 +365,9 @@ record. After overwrite, the native validator again passed TOML grammar, typed m
 compilation, and builtins preparation for every document. This closes the real relative-path DX
 loop without a recursive batch mode, cache, or locator/playback claim. Issue #335 is complete once
 this evidence is upstream and its remote body/state are synchronized.
+
+The delivery evidence above was itself shipped by evidence-only PR #337. All three protected
+aggregate contexts reported success while every substantive SDK, engine, and browser job skipped;
+the PR merged as `d4a07cf6`, and that evidence-only main commit created zero workflows. Issue #335
+is therefore complete once this final synchronization sentence is upstream and GitHub is closed as
+completed.

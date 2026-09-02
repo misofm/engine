@@ -267,3 +267,25 @@ before the #336 push. These observations prove that shared license ownership and
 malformed, or unknown inputs cannot silently select SDK/evidence qualification. The final local
 closeout changes only numbered issue specifications and classifies `evidence`; its pull request is
 the remaining live evidence-only PR observation required by gate 14.
+
+### Evidence-only pull request and final rollout verdict
+
+Exact evidence checkpoint `a420abe9` changed only the #331 and #335 numbered issue specifications
+and classified `evidence`. Its ordinary branch push created zero workflows. Pull request #337,
+based on exact main `97ffd966`, then produced the three protected aggregate contexts:
+
+- SDK run <https://github.com/misofm/engine/actions/runs/33681478115> classified the range, skipped
+  the complete package/generated/headless job, and passed `SDK qualification` in 3s;
+- engine run <https://github.com/misofm/engine/actions/runs/33681478110> classified the range,
+  skipped host, x86, browser-Wasm, and cross-target jobs, and passed `engine qualification` in 2s;
+  and
+- browser run <https://github.com/misofm/engine/actions/runs/33681478156> classified the range,
+  skipped the artifact and browser matrix jobs, and passed `browser qualification` in 3s.
+
+PR #337 was mergeable under the exact three-context protection set and merged once as
+`d4a07cf6`. An authoritative run query for that evidence-only main commit returned an empty set:
+the merge created no engine, SDK, browser, release, or other workflow. This completes gate 14's
+evidence-only PR observation alongside the earlier evidence-only main, SDK-only PR,
+`LICENSE`/unknown/malformed fail-safe, and protection observations. Local specs and GitHub issues
+#327–#335 now have the intended terminal/open dispositions; #331 is complete once this final
+evidence commit is upstream and its remote body/state are synchronized.
