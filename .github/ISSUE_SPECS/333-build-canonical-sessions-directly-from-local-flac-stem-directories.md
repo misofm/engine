@@ -67,7 +67,10 @@ enginectl session build \
 
 For `--output -`, stdout remains exactly canonical TOML and successful stderr is empty. File output
 keeps the existing atomic no-clobber/overwrite contract and emits one compact JSON receipt after
-publication. Stems-mode receipts add input kind/path, derived session facts, and a sorted mapping
+publication. A file output whose physical parent is the physical stems leaf is refused before
+decoder loading, including paths reached through symlink or filesystem case aliases: an output may
+neither overwrite a source nor pollute the leaf and make the next build reject its own output.
+Stems-mode receipts add input kind/path, derived session facts, and a sorted mapping
 of each filename to source ID, track ID, identity, channels, depth, and frames. Request-mode
 receipts gain no field. JSON escaping keeps hostile names data-only.
 
@@ -189,6 +192,49 @@ produce four sessions rather than one simultaneous mix, froze machine I/O/resour
 performance gates, and separated batch mode, manifests, caching, WAVE import, scaffolding, and live
 control as potential successors. Implementation and adversarial evidence will be appended without
 weakening these gates.
+
+### Attempt 1 — Sol-medium implementation evidence
+
+Checkpoint `ad240967` added the exclusive `--stems` path, raw-byte-sorted nonrecursive discovery,
+deterministic digest-suffixed IDs, packaged pinned decoder loading, single-pass canonical PCM
+hashing, public-builder construction, embedded-engine validation, stems receipts, and decoder
+artifact staging. Focused qualification passed: the built enginectl suite was 18/18, full SDK
+headless was 129 pass / 0 fail / one platform capability skip, strict types and deletion policy
+passed, the FLAC artifact/provenance/vector gate passed against CI artifact 9860928419 from browser
+run 33666706481, and the extracted 69-file npm tarball imported a FLAC fixture with an empty
+`PATH` and no repository discovery. Exact scope classified `sdk`.
+
+The implementation corrected the frozen `wide-open` compressed corpus total from a briefing typo
+to 160,668,363 bytes; the canonical total remains 407,956,416 bytes. A local Darwin arm64/Rust
+1.97.1 rebuild produced digest-different decoder and AudioWorklet Wasm from the Linux-qualified
+pins. No repin occurred: local qualification used the exact non-expired CI artifact. Cross-host
+artifact reproducibility is recorded as a tooling successor rather than weakening this product
+slice.
+
+### Attempt 1 — Sol-high adversarial HOLD
+
+Fresh Sol-high review held exact checkpoint `ad240967` on one destructive output conflict and one
+non-discriminating structural assertion. In an isolated extracted package, a valid source at
+`stems/session.flac` was passed as both the discovered input and `--output` with `--overwrite`.
+The command exited 0, emitted a success receipt, and replaced the FLAC with 1,255 bytes of TOML.
+A previously absent output directly inside the leaf also succeeded once, then caused the next run
+to reject the CLI's own non-FLAC output. Attempt 2 must refuse any file output whose physical parent
+is the physical stems leaf, including symlink/case aliases, before decoder compilation or a source
+read. Regression cases must cover both existing-source overwrite and a new in-leaf output with the
+decoder made unavailable to prove ordering.
+
+The structure test counted two `WebAssembly.compile` calls but did not count instances, while gate
+11 requires exactly one decoder and one engine compilation/instance. Attempt 2 must count
+`WebAssembly.instantiate` as well and prove a per-file-instantiation mutation makes the assertion
+red.
+
+All other adversarial work passed: exact request-mode bytes matched the base across valid and
+invalid cases; actual collection refusal reported the four song groups; generated unsupported
+rates, channels, depth, and mixed-rate inputs refused typed; and isolated mutations for container
+hashing, one PCM LSB, early EOF, per-file decoder compilation, recursion, wrong route tap, and
+removed decoder verification all turned their named gates red. Raw-byte/O_NOFOLLOW/read-once/u32,
+publication, package isolation, and no-network review found no second implementation defect.
+Attempt 1 remains **HOLD**.
 
 Sol-medium attempt 1 on 2026-09-03 implemented the additive `--stems` path, raw-byte-sorted leaf
 discovery, deterministic collision/truncation IDs, single-instance packaged decoding, incremental
