@@ -57,4 +57,48 @@ behavior, or package version change is in scope.
 
 ## Evidence
 
-Implementation and adversarial evidence will be recorded here before closure.
+Implementation attempt 1:
+
+- Commit `34be6130f3f32d2cc984c841ad967801fc5525c0` removes the `./effect` export, Effect
+  source and tests, README guidance,
+  development/peer dependency metadata and transitive lockfile graph, and the Effect-only package
+  gate invocation.
+- The packed-artifact and hermetic package evals now pin exactly four code entries, no runtime or
+  peer dependencies, no Effect development dependency, and no emitted `dist/effect.js` or
+  `dist/effect.d.ts`.
+- `BrowserEngine.close()` and disposed-handle state were not reverted. Their direct Promise tests
+  remain in the standard Wasm-backed suite.
+
+Local evidence on 2026-09-02:
+
+- `npm ci --ignore-scripts`: PASS with three development packages; `npm ls effect --all` is empty.
+- `check-sdk-types.sh`: PASS.
+- `check-sdk-deletions.py`: PASS over 40 SDK source files.
+- `check-sdk-generated.sh`: PASS.
+- `check-sdk-headless.sh` against the exact pinned browser artifact: PASS, 111 tests / 27 suites.
+  This includes browser close order/idempotency/failure cleanup, disposed headless state, all eleven
+  console commands, torn-ack refusal, and async writer serialization.
+- `sdk-package.sh check`: PASS, 59 files / 937.4 kB packed / 3.5 MB unpacked.
+- `npm publish --dry-run --ignore-scripts`: PASS using a task-owned npm cache.
+- A source/package search finds no Effect-library import, package specifier, dependency, entry,
+  integration test, or package-gate invocation. Audio-processor uses of “effect” are unchanged.
+- The no-argument headless gate first stopped before tests on the already-recorded macOS/Linux
+  AudioWorklet digest difference. The successful run used the exact artifact from upstream browser
+  qualification, without changing its pin.
+
+Upstream evidence:
+
+- Browser qualification [33621484909](https://github.com/misofm/engine/actions/runs/33621484909):
+  PASS, including Chromium, Firefox, WebKit, and the shipped artifact.
+- Release build [33621484916](https://github.com/misofm/engine/actions/runs/33621484916): PASS.
+- Main CI [33621484972](https://github.com/misofm/engine/actions/runs/33621484972): the SDK
+  typecheck, browser artifact/package, cross-target digest, and x86 jobs PASS. The aggregate run
+  failed only in the pre-existing #159 wall-clock observation-cost test on unchanged Rust after
+  its neighboring tests passed. Its raw timing evidence is attached to #159; the workload was not
+  retried, and the repository's descriptive-benchmark rule keeps it from blocking unrelated SDK
+  publication.
+
+Adversarial verdict: **PASS**. No supported import or realtime-control capability was removed.
+The package has one Promise-based ownership/control model, no Effect maintenance obligation, and
+the acked-batch question remains answered by the direct console tests: no acknowledgement can be
+returned before transport settlement or after a dropped command.
