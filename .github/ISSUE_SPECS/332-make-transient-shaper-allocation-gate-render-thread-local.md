@@ -274,3 +274,25 @@ checker/mutations, and diff checks. All relevant ranges classify `full`; cumulat
 this spec, the allocation test, and its mutation record, with no production, workflow, router, SDK,
 manifest, or lockfile drift. This is the required pre-push PASS. Remote qualification, GitHub
 synchronization, and closure remain pending.
+
+### Remote acceptance
+
+The reviewed cumulative batch was pushed once to remote `main` as exact commit
+`0b1b8f2db759da7653fc97427e44b5ba2949c600`. The full-route engine workflow
+<https://github.com/misofm/engine/actions/runs/33666706501> completed successfully without retry in
+35m50s. Its Ubuntu host job passed the repaired
+`Transient shaper gates (oracle bound, bank identity, partitions, allocation) in release` step and
+every later audit through native host smoke; x86, cross-target Wasm, and browser-Wasm support jobs
+also passed. The dependent `engine qualification` aggregate passed at
+<https://github.com/misofm/engine/actions/runs/33666706501/job/100382369382>.
+
+The same exact commit also produced successful `SDK qualification`, `browser qualification`, and
+selected workspace release-build results in runs 33666706581, 33666706481, and 33666706600. Before
+the protection migration, the remote commit API reported all four checks completed with conclusion
+`success`. This completes gates 10 and 11 without weakening, cancelling, or retrying a gate.
+
+Issue #331 then atomically replaced the verified old eight required contexts with exactly
+`engine qualification`, `SDK qualification`, and `browser qualification`. A post-write read
+confirmed `strict: false`, Actions app ID `15368` on all three checks, no additional contexts, no
+repository rulesets, and remote `main` still at the accepted commit. This evidence commit will be
+synchronized to GitHub before issue #332 is closed, completing gate 12.

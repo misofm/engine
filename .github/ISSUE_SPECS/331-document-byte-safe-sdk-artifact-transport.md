@@ -198,3 +198,29 @@ The Ubuntu 24.04 SDK job passed in 2m42s from one pinned AudioWorklet build. Its
 This completes gates 5, 6, 10, and 11. The aggregate/protection migration remains correctly held
 until the separately scoped engine allocation-harness correction produces a trustworthy passing
 engine aggregate. This issue does not yet claim closure or remote body synchronization.
+
+### Aggregate qualification and protection migration
+
+Issue #332's reviewed allocation-harness correction reached remote `main` at exact commit
+`0b1b8f2db759da7653fc97427e44b5ba2949c600`. Without retry, engine run
+<https://github.com/misofm/engine/actions/runs/33666706501> passed its full 35m50s host job,
+including the transient-shaper allocation gate, plus x86, cross-target, and browser-Wasm support
+jobs; its final `engine qualification` aggregate passed. The same commit's SDK run
+<https://github.com/misofm/engine/actions/runs/33666706581>, browser run
+<https://github.com/misofm/engine/actions/runs/33666706481>, and release run
+<https://github.com/misofm/engine/actions/runs/33666706600> all completed successfully. The commit
+API independently reported `engine qualification`, `SDK qualification`,
+`browser qualification`, and `workspace release build` as completed successes.
+
+Immediately before migration, remote `main` was still that exact commit, required-status checks
+were the expected old eight contexts with `strict: false` and Actions app ID `15368`, and the
+repository had no rulesets. The required-status endpoint was then updated once with the complete
+replacement set. Its response and a separate post-write read both reported exactly:
+
+- `engine qualification` with app ID `15368`;
+- `SDK qualification` with app ID `15368`; and
+- `browser qualification` with app ID `15368`.
+
+The re-read preserved `strict: false`, contained no old or extra context, found no ruleset, and
+confirmed remote `main` had not moved. This completes gates 12 and 13. Gate 14's actual SDK-only PR,
+evidence-only PR, and remaining post-rollout routing observations still precede issue closure.
