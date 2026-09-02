@@ -224,3 +224,10 @@ replacement set. Its response and a separate post-write read both reported exact
 The re-read preserved `strict: false`, contained no old or extra context, found no ruleset, and
 confirmed remote `main` had not moved. This completes gates 12 and 13. Gate 14's actual SDK-only PR,
 evidence-only PR, and remaining post-rollout routing observations still precede issue closure.
+
+After migration, evidence-only checkpoint `cb5f2542` was pushed to `main`. An authoritative
+`gh run list --commit cb5f2542` returned an empty run set: no engine, SDK, browser, release, or
+other workflow was created. The checkpoint synchronized issues #331 and #332 before #332 closed as
+completed. This supplies gate 14's evidence-only-main observation; the real SDK-only PR,
+evidence-only PR, `LICENSE` full-route observation, and unknown/malformed fail-safe observations
+remain open.

@@ -296,3 +296,8 @@ Issue #331 then atomically replaced the verified old eight required contexts wit
 confirmed `strict: false`, Actions app ID `15368` on all three checks, no additional contexts, no
 repository rulesets, and remote `main` still at the accepted commit. This evidence commit will be
 synchronized to GitHub before issue #332 is closed, completing gate 12.
+
+The evidence-only checkpoint `cb5f2542` was then pushed to `main`; GitHub reported no workflow run
+for that commit, as required by the new router. Both GitHub issue bodies were refreshed from their
+upstream local specifications, issue #332 was closed with reason `completed`, and a live re-read
+verified the terminal state. This final note keeps the closed local and remote records identical.
