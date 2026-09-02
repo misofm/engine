@@ -111,3 +111,41 @@ race; const thread-local `Cell` state and teardown-safe hooks are appropriate; t
 foreign-thread controls are discriminating; the exact workload and red mutation are frozen; and
 the scope/rollout are the smallest closable slice. Sol-medium implementation, red mutation,
 adversarial verdict, and remote qualification will be appended without weakening the gates above.
+
+### Sol-medium implementation evidence
+
+From clean checkpoint `8b9ed955`, the allocation harness now uses const-initialized thread-local
+`Cell` state for its armed flag and separate allocation/deallocation counters. Every allocator hook
+uses teardown-safe `try_with` observation and forwards the original allocation arguments unchanged
+to `System`; successful reallocations count both the replacement allocation and release of the old
+allocation. A shared measurement helper resets both counters, arms only its caller, runs the body,
+disarms, and returns both values.
+
+The same-thread positive control performs one explicit non-zero allocation and matching free and
+observes exactly `(1, 1)`. The foreign-thread control preallocates all coordination atomics and
+starts its scoped worker before measurement. Release/acquire handshakes prove that the worker's own
+measured `(1, 1)` allocation/free occurs while the caller remains armed; the caller observes
+exactly `(0, 0)`. Thread creation and join remain outside the caller's measured region.
+
+The production gate retains its exact 1,000 blocks at quantum 128, every-fourth-block automation,
+scalar processor, available native bank, and separate zero-allocation and zero-deallocation
+assertions. Clean focused runs passed with default libtest scheduling, `--test-threads=1`, and two
+successive `--test-threads=8` runs. The complete transient-shaper target and
+`cargo clippy --locked -p transient-shaper --tests -- -D warnings` passed.
+
+The frozen `Vec::<u8>::with_capacity(1)` mutation was applied only in an isolated source-tree copy
+carrying the revised test. It failed the render gate with 2,000 observed allocations versus zero
+while both harness controls passed (2 passed / 1 failed). Removing it restored the isolated
+production file byte-for-byte and returned the allocation binary to 3/3 green. Production code in
+this worktree was never modified.
+
+Formatting, realtime policy, environment vocabulary, path-routing checker/mutations, and
+`git diff --check` passed. The workspace-policy checker returned success on macOS but emitted its
+existing unsupported BSD `find -printf` diagnostic; its mutation script also cannot complete under
+native BSD `sed` (and a narrow `-i` compatibility shim does not cover its GNU `0,addr` extension).
+No portability claim is made for those local mutation harnesses. The exact scoped paths classify
+`full`, as required for a crate test change.
+
+Only `crates/transient-shaper/tests/allocation.rs`, its allocation row/evidence in
+`tests/MUTATIONS.md`, and this specification changed. This evidence does not claim fresh Sol/high
+review, remote engine qualification, GitHub synchronization, or issue closure.
