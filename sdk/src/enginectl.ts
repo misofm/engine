@@ -279,12 +279,33 @@ async function publish(
 async function preflightStemOutput(args: BuildArguments): Promise<void> {
   if (args.request !== undefined || args.output === "-") return;
   const destination = resolve(args.output);
+  const parentPath = dirname(destination);
+  let parent: Awaited<ReturnType<typeof stat>>;
   try {
-    if (!(await stat(dirname(destination))).isDirectory()) {
+    parent = await stat(parentPath, { bigint: true });
+    if (!parent.isDirectory()) {
       throw new Error("parent is not a directory");
     }
   } catch (error) {
     throw new CliFailure(5, "output.publish", `could not inspect '${args.output}': ${errorMessage(error)}`);
+  }
+  // Compare physical directory identities, not path spellings. `stat` follows a symlink parent,
+  // and `(dev, ino)` also collapses case aliases on a case-insensitive filesystem. This runs
+  // before discovery imports or loads the decoder, so an in-leaf destination cannot overwrite a
+  // source or make the next invocation reject the session file the previous invocation created.
+  try {
+    const stems = await stat(resolve(args.stems as string), { bigint: true });
+    if (stems.isDirectory() && stems.dev === parent.dev && stems.ino === parent.ino) {
+      throw new CliFailure(
+        5,
+        "output.publish",
+        `could not publish '${args.output}': output parent is the stems directory`,
+      );
+    }
+  } catch (error) {
+    if (error instanceof CliFailure) throw error;
+    // A missing/unreadable stems path is an input refusal, not an output refusal. Discovery below
+    // reports it through the established exit-3 `stems.read` contract.
   }
   try {
     const existing = await lstat(destination);

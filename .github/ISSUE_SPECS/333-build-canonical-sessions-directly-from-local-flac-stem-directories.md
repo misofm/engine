@@ -236,6 +236,29 @@ removed decoder verification all turned their named gates red. Raw-byte/O_NOFOLL
 publication, package isolation, and no-network review found no second implementation defect.
 Attempt 1 remains **HOLD**.
 
+### Attempt 2 — Sol-medium correction evidence
+
+Attempt 2 compares the file output's physical parent with the physical stems leaf by filesystem
+`(device, inode)` identity before importing discovery or loading the decoder. It therefore refuses
+an existing source selected with `--overwrite`, a new destination in the leaf, a symlink spelling
+of that parent, and—where the filesystem exposes one—a differently cased alias with exit 5 and
+`effect: "not_applied"`. The regression makes the packaged decoder unavailable during all cases;
+they still report `output.publish`, the source digest is unchanged, and neither new destination
+exists afterward. A missing or unreadable stems path remains the established exit-3 input refusal
+rather than being misclassified by this preflight. Request mode returns before the new comparison
+and is unchanged.
+
+The structural black-box probe now wraps both `WebAssembly.compile` and
+`WebAssembly.instantiate`. Three stems report exactly three file-handle reads, two compiles, and two
+instances: one decoder plus one embedded engine. In isolated mutation evidence, moving decoder
+loading into the stem loop made the same probe fail with `compiles: 4, instantiates: 4` against the
+required `2, 2`; production was restored before qualification. Final focused qualification is
+green: the built-executable suite is 19/19 PASS; the extracted 69-file tarball imports a real FLAC
+with an empty `PATH`; strict SDK types and deletion policy pass; generated assets/modules are
+current; and the static CI routing contract passes. The exact attempt-2 scope is this evidence
+record, `sdk/src/enginectl.ts`, and `sdk/test/enginectl-cli.mjs`; fresh Sol-high review remains
+required.
+
 Sol-medium attempt 1 on 2026-09-03 implemented the additive `--stems` path, raw-byte-sorted leaf
 discovery, deterministic collision/truncation IDs, single-instance packaged decoding, incremental
 canonical-PCM hashing, source-change detection, public-builder construction, embedded-engine

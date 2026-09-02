@@ -2,7 +2,7 @@
 
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { copyFile, mkdir, mkdtemp, readFile, readdir, rename, symlink, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, readFile, readdir, rename, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -255,10 +255,12 @@ describe("enginectl session build", () => {
 
   test("a truncated FLAC refuses typed and publishes nothing", async () => {
     const directory = await mkdtemp(resolve(tmpdir(), "enginectl-corrupt-eval-"));
+    const stems = resolve(directory, "stems");
+    await mkdir(stems);
     const original = await readFile(resolve(flacFixtures, "pcm24-stereo-boundaries-b32.flac"));
-    await writeFile(resolve(directory, "truncated.flac"), original.subarray(0, original.byteLength - 1));
+    await writeFile(resolve(stems, "truncated.flac"), original.subarray(0, original.byteLength - 1));
     const output = resolve(directory, "must-not-exist.toml");
-    failure(await run(["session", "build", "--stems", directory, "--output", output]), 3, "flac.refused");
+    failure(await run(["session", "build", "--stems", stems, "--output", output]), 3, "flac.refused");
     await assert.rejects(readFile(output), (error) => error?.code === "ENOENT");
   });
 
@@ -278,6 +280,50 @@ describe("enginectl session build", () => {
       await rename(unavailable, decoder);
     }
     assert.equal(await readFile(output, "utf8"), "sentinel");
+  });
+
+  test("physical in-leaf outputs refuse before decoder loading, including a symlink alias", async () => {
+    const directory = await mkdtemp(resolve(tmpdir(), "enginectl-in-leaf-output-"));
+    const stems = resolve(directory, "stems");
+    const alias = resolve(directory, "stems-alias");
+    const source = resolve(stems, "session.flac");
+    const fresh = resolve(stems, "new.session.toml");
+    const aliased = resolve(alias, "aliased.session.toml");
+    const caseAlias = resolve(directory, "STEMS", "case-alias.session.toml");
+    await mkdir(stems);
+    await copyFile(resolve(flacFixtures, "pcm16-mono-boundaries-b32.flac"), source);
+    await symlink(stems, alias, "dir");
+    const sourceBefore = createHash("sha256").update(await readFile(source)).digest("hex");
+    const decoder = resolve(dirname(executable), "assets", "flac-decoder.wasm");
+    const unavailable = `${decoder}.unavailable`;
+    await rename(decoder, unavailable);
+    try {
+      failure(await run([
+        "session", "build", "--stems", stems, "--output", source, "--overwrite",
+      ]), 5, "output.publish");
+      failure(await run([
+        "session", "build", "--stems", stems, "--output", fresh,
+      ]), 5, "output.publish");
+      failure(await run([
+        "session", "build", "--stems", stems, "--output", aliased,
+      ]), 5, "output.publish");
+      try {
+        const [actual, differentlyCased] = await Promise.all([stat(stems), stat(resolve(directory, "STEMS"))]);
+        if (actual.dev === differentlyCased.dev && actual.ino === differentlyCased.ino) {
+          failure(await run([
+            "session", "build", "--stems", stems, "--output", caseAlias,
+          ]), 5, "output.publish");
+        }
+      } catch (error) {
+        if (error?.code !== "ENOENT") throw error;
+      }
+    } finally {
+      await rename(unavailable, decoder);
+    }
+    assert.equal(createHash("sha256").update(await readFile(source)).digest("hex"), sourceBefore);
+    await assert.rejects(readFile(fresh), (error) => error?.code === "ENOENT");
+    await assert.rejects(readFile(aliased), (error) => error?.code === "ENOENT");
+    await assert.rejects(readFile(caseAlias), (error) => error?.code === "ENOENT");
   });
 
   test("a missing or mutated packaged decoder is an internal refusal", async () => {
@@ -313,12 +359,15 @@ const probe = await open(new URL(import.meta.url), "r");
 const prototype = Object.getPrototypeOf(probe);
 await probe.close();
 const originalReadFile = prototype.readFile;
-const originalCompile = WebAssembly.compile;
-let stemReads = 0;
-let compiles = 0;
-prototype.readFile = function (...args) { stemReads += 1; return originalReadFile.apply(this, args); };
-WebAssembly.compile = function (...args) { compiles += 1; return originalCompile.apply(this, args); };
-process.on("exit", () => writeFileSync(process.env.ENGINECTL_AUDIT, JSON.stringify({ stemReads, compiles })));
+    const originalCompile = WebAssembly.compile;
+    const originalInstantiate = WebAssembly.instantiate;
+    let stemReads = 0;
+    let compiles = 0;
+    let instantiates = 0;
+    prototype.readFile = function (...args) { stemReads += 1; return originalReadFile.apply(this, args); };
+    WebAssembly.compile = function (...args) { compiles += 1; return originalCompile.apply(this, args); };
+    WebAssembly.instantiate = function (...args) { instantiates += 1; return originalInstantiate.apply(this, args); };
+    process.on("exit", () => writeFileSync(process.env.ENGINECTL_AUDIT, JSON.stringify({ stemReads, compiles, instantiates })));
 `);
     const built = await run(
       ["session", "build", "--stems", stems, "--output", "-"],
@@ -326,7 +375,13 @@ process.on("exit", () => writeFileSync(process.env.ENGINECTL_AUDIT, JSON.stringi
       { nodeArgs: ["--import", preload], env: { ENGINECTL_AUDIT: audit } },
     );
     assert.equal(built.status, 0, built.stderr.toString("utf8"));
-    assert.deepEqual(JSON.parse(await readFile(audit, "utf8")), { stemReads: 3, compiles: 2 });
+    // Red mutation: move loadDecoder() into the per-stem loop. Three files then report four
+    // decoder+engine compiles/instances instead of the required one of each, and this assertion
+    // fails before a performance claim can be made from the structurally slower implementation.
+    assert.deepEqual(
+      JSON.parse(await readFile(audit, "utf8")),
+      { stemReads: 3, compiles: 2, instantiates: 2 },
+    );
   });
 
   test("a source metadata change during its single read refuses publication", async () => {
