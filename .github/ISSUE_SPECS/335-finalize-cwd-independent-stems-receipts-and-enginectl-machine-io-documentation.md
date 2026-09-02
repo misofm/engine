@@ -217,3 +217,25 @@ failure; the proportional package gate above therefore used the already-qualifie
 directories as the script explicitly supports. No benchmark was run, and no dependency, flag,
 runtime filesystem probe, subprocess, network path, batch/cache/resolver/playback behavior, or
 receipt-file behavior was added.
+
+### Attempt 1 — Sol-high adversarial HOLD
+
+Fresh Sol-high review held exact checkpoint `6335ccbf` on one implementation-quality defect. The
+observable contract passed, but stems mode first constructed the complete request receipt and its
+TOML SHA-256, then reconstructed every common field and recomputed the same SHA-256 in the stems
+branch. This contradicts the bounded-performance claim that only two lexical path resolutions were
+added and creates an avoidable drift seam across `schemaVersion`, `command`, output path, byte
+count, and digest. Attempt 2 must extend the already-computed common receipt/digest exactly once,
+preserve request-mode bytes and property order, and take `input.resolvedPath` from the importer's
+already-established `stemsBuild.directory` rather than resolving the argument again.
+
+All named adversarial mutations were independently discriminating before HOLD: raw-relative input
+and output resolved paths, physical `realpath`, request-mode field leakage, raw-output receipt
+contamination, receipt-before-publication, weakened physical in-leaf protection, hostile JSON
+framing, and removal of required help semantics each turned a named gate red. The reviewer also
+built parent `57e43da3` and candidate `6335ccbf` in isolated copies: request raw TOML was
+byte-identical at 1,243 bytes, and request file receipts were byte-identical at 253 bytes with no
+`resolvedPath`. Candidate package/tarball qualification passed 21/21 executable tests; strict
+types, generated/deletion gates and all 36 deletion mutations, routing gates, SDK classification,
+and extracted 69-file package smoke were green. Attempt 1 remains **HOLD** pending the single-pass
+common-receipt correction and fresh review.
