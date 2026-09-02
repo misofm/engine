@@ -4,13 +4,24 @@ on:
   push:
     branches:
       - main
+    paths-ignore:
+      - '.github/ISSUE_SPECS/**'
+      - 'docs/**'
+      - 'README.md'
+      - 'sdk/**'
+      - 'scripts/check-sdk-deletions.py'
+      - 'scripts/check-sdk-generated.sh'
+      - 'scripts/check-sdk-headless.sh'
+      - 'scripts/check-sdk-types.sh'
+      - 'scripts/sdk-package.sh'
+      - 'LICENSE'
   pull_request:
     branches:
       - main
   workflow_dispatch:
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: engine-qualification-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -18,8 +29,28 @@ env:
   RUSTUP_TOOLCHAIN: 1.97.1
 
 jobs:
+  route:
+    name: classify qualification paths
+    runs-on: ubuntu-24.04
+    outputs:
+      route: ${{ steps.classify.outputs.route }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: classify
+        name: Select fail-safe qualification route
+        run: |
+          route=$(python3 -B scripts/ci-path-router.py \
+            --event "${{ github.event_name }}" \
+            --base "${{ github.event.pull_request.base.sha || github.event.before }}" \
+            --head "${{ github.event.pull_request.head.sha || github.sha }}")
+          printf 'route=%s\n' "$route" >> "$GITHUB_OUTPUT"
+
   host:
     name: host quality and native shell
+    needs: route
+    if: needs.route.outputs.route == 'full'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -209,18 +240,6 @@ jobs:
         run: |
           bash scripts/check-builtins-fixtures.sh .
           bash scripts/test-builtins-fixtures.sh
-      # Issue #243 eval 6: the SDK's generated TypeScript surface is a byte-for-byte re-derivation
-      # from the Rust parameter-metadata registry, and the pre-boot-v2 SDK's retired spellings stay
-      # deleted rather than relocated. Both are hermetic (no npm/network); the typecheck half that
-      # needs `tsc` is check-sdk-types.sh, in the new `sdk` job below, and the behavioural half that
-      # needs the shipped module is check-sdk-headless.sh, in the `wasm` job below. All four SDK
-      # gates were previously reachable only from scripts/sweep.sh, which nobody runs; one of them
-      # (check-sdk-types.sh) could not run there at all -- it exits 2 without `sdk/node_modules`,
-      # which the sweep's hermetic charter cannot provide.
-      - name: SDK generated-surface drift and retired-spelling deletion gates
-        run: |
-          bash scripts/check-sdk-generated.sh
-          python3 -B scripts/check-sdk-deletions.py
       # The hermetic half of the FLAC delivery pipeline: builds the shipped decoder sidecar,
       # checks its artifact/provenance/vectors and a red mutation, and bans decodeAudioData from
       # the delivery pipeline (PCM-only per AGENTS.md). The expensive half -- real browser decode
@@ -338,6 +357,8 @@ jobs:
 
   x86-probes:
     name: x86 scalar and SIMD compile probes
+    needs: route
+    if: needs.route.outputs.route == 'full'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -367,17 +388,11 @@ jobs:
 
   wasm:
     name: browser Wasm artifact probes
+    needs: route
+    if: needs.route.outputs.route == 'full'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      # `check-sdk-headless.sh` runs `node --test 'test/*-evals.mjs'`, and glob
-      # expansion in `--test` postdates Node 20, which is what this runner
-      # ships by default. Without this the glob reaches Node unexpanded and it
-      # reports `Could not find '.../sdk/test/*-evals.mjs'`. The `sdk` job below
-      # pins the same version for the same reason.
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
       - name: Install pinned Rust toolchain and Wasm standard library
         run: |
           rustup toolchain install 1.97.1 --profile minimal
@@ -423,17 +438,8 @@ jobs:
           bash scripts/check-web-audioworklet.sh "$artifacts"
           python3 -B scripts/web-audioworklet-browser-correctness.py --check --artifacts "$artifacts"
           # Issue #217: the resource-report rows the digest gates above do not cover, pinned
-          # against the same shipped artifact. Issue #243 eval 6: the SDK's behavioural evals
-          # against that same module, under Node's native TS stripping (no node_modules needed).
-          # Both were previously reachable only from scripts/sweep.sh, which nobody runs.
+          # against the same shipped artifact.
           python3 -B scripts/check-browser-expected-resources.py --artifacts "$artifacts"
-          bash scripts/check-sdk-headless.sh "$artifacts"
-          # Issue #320: build the emitted JS/declarations once, stage this exact already-gated
-          # artifact closure into the package, and prove a fresh tarball boots it. Keeping this in
-          # the artifact step avoids a second Wasm build and makes the bytes qualified above the
-          # bytes the package actually carries.
-          npm ci --prefix sdk
-          bash scripts/sdk-package.sh check "$artifacts"
           ls -l "$artifacts"
       - name: Browser expected-resources tripwire self-test
         run: python3 -B scripts/check-browser-expected-resources.py --self-test
@@ -446,6 +452,8 @@ jobs:
 
   wasm-gates:
     name: cross-target digest gates under wasmtime
+    needs: route
+    if: needs.route.outputs.route == 'full'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -479,26 +487,28 @@ jobs:
         with:
           name: wasm-gates
           path: target/ci/wasm-gates/wasm-gates.jsonl
-
-
-  sdk:
-    name: SDK typecheck and shipped-host mirror pin
+  qualification:
+    name: engine qualification
+    if: always()
+    needs: [route, host, x86-probes, wasm, wasm-gates]
     runs-on: ubuntu-24.04
+    env:
+      ROUTE_RESULT: ${{ needs.route.result }}
+      ROUTE: ${{ needs.route.outputs.route }}
+      HOST_RESULT: ${{ needs.host.result }}
+      X86_PROBES_RESULT: ${{ needs.x86-probes.result }}
+      WASM_RESULT: ${{ needs.wasm.result }}
+      WASM_GATES_RESULT: ${{ needs.wasm-gates.result }}
     steps:
-      - uses: actions/checkout@v4
-      # Issue #243 eval 6, the static half. The behavioural/generated-surface/deletion evals are
-      # hermetic and already run in the host job (check-sdk-{headless,generated}.sh,
-      # check-sdk-deletions.py); `tsc` needs `npm ci`, which needs the network, which is why this
-      # one alone was excluded from scripts/sweep.sh's hermetic charter and, as a result, never ran
-      # anywhere -- check-sdk-types.sh exits 2 on a clean checkout with no node_modules. This job
-      # gives it the one thing it needs and nothing else.
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: sdk/package-lock.json
-      - name: Install SDK dependencies
-        working-directory: sdk
-        run: npm ci
-      - name: SDK typecheck and shipped-host mirror pin
-        run: bash scripts/check-sdk-types.sh
+      - name: Enforce engine qualification route
+        run: |
+          set -euo pipefail
+          [[ "$ROUTE_RESULT" == success ]] || { echo "router result: $ROUTE_RESULT" >&2; exit 1; }
+          case "$ROUTE" in
+            full) expected=success ;;
+            sdk|evidence) expected=skipped ;;
+            *) echo "unknown route: $ROUTE" >&2; exit 1 ;;
+          esac
+          for result in "$HOST_RESULT" "$X86_PROBES_RESULT" "$WASM_RESULT" "$WASM_GATES_RESULT"; do
+            [[ "$result" == "$expected" ]] || { echo "expected $expected heavy result, got $result" >&2; exit 1; }
+          done

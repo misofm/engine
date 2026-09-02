@@ -7,9 +7,9 @@ name: release build
 #
 # The policy this file implements:
 #
-#   push to main   -- ALWAYS. Main is verified in full on every merge, unfiltered, exactly as
-#                     before. A release-only break can therefore reach main, but it is caught by
-#                     the run that the merge itself starts, within about five minutes of landing.
+#   push to main   -- every change except documentation/issue evidence and the SDK's self-contained
+#                     package inputs. Engine and unknown inputs still run this full build. The
+#                     excluded SDK/evidence sets cannot alter a Rust release artifact.
 #   pull request   -- only when the diff touches something that can plausibly break a release
 #                     build in a way `ci`'s debug `cargo test --workspace --all-targets` cannot
 #                     already see. That is the `paths:` list below, and it is deliberately short.
@@ -24,7 +24,8 @@ name: release build
 # source-only change can compile in debug and fail in release is a `cfg(debug_assertions)` item --
 # of which this workspace has eight, one of them a `#[cfg(any(debug_assertions, test))]` fn in
 # crates/multiband-compressor/src/lib.rs. That class is the coverage this trade gives
-# up pre-merge, and it is the reason the push leg stays unfiltered.
+# up pre-merge. The main-push leg remains broad enough for every engine or unknown input; the
+# issue-328 SDK/evidence exclusions are deliberately exact.
 #
 # Over the 60 most recent non-merge commits on main, 4 touched a Cargo manifest, so the filter is
 # expected to skip roughly nine pull requests in ten.
@@ -33,6 +34,17 @@ on:
   push:
     branches:
       - main
+    paths-ignore:
+      - '.github/ISSUE_SPECS/**'
+      - 'docs/**'
+      - 'README.md'
+      - 'sdk/**'
+      - 'scripts/check-sdk-deletions.py'
+      - 'scripts/check-sdk-generated.sh'
+      - 'scripts/check-sdk-headless.sh'
+      - 'scripts/check-sdk-types.sh'
+      - 'scripts/sdk-package.sh'
+      - 'LICENSE'
   pull_request:
     branches:
       - main

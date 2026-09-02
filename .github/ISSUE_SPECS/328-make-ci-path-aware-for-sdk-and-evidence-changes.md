@@ -190,4 +190,32 @@ If protection changed since the brief, stop before mutation and amend the rollou
 
 ## Evidence
 
-Implementation and adversarial evidence will be recorded before rollout and closure.
+### Attempt 1 — Terra
+
+The implementation introduces a fail-safe Git name-status classifier, a static workflow contract
+checker, mutation/self-tests, an independent SDK workflow, route-gated engine/browser heavy jobs,
+and always-scheduled aggregate contexts. SDK ownership moves out of the monolithic native/Wasm jobs
+and into one package qualification job that builds and reuses a single pinned six-file artifact
+closure.
+
+Root pre-checkpoint review found and corrected two gate defects within attempt 1:
+
+1. the first classifier mutant observed an engine-as-SDK misclassification instead of rejecting it;
+   the checker now AST-pins unknown-path fallback to full and the mutant must fail; and
+2. aggregate success truth tables were initially job-level conditions, which could skip a required
+   aggregate after router/heavy failure. Aggregates now use exact `if: always()` and bounded env
+   inputs; their steps fail router errors, unknown routes, selected-heavy non-success, and
+   unselected-heavy non-skips.
+
+Focused gates passed on 2026-09-02:
+
+- `python3 -B scripts/check-ci-path-routing.py`;
+- `python3 -B scripts/test-ci-path-routing.py`, including classifier, rename/copy, missing-base,
+  aggregate-dependency, conditional-aggregate, router-failure, heavy-result, and PR-filter red
+  mutations;
+- YAML parsing of all four changed/new workflows with `yq`;
+- SDK deletion and generated-surface checks; and
+- exact-scope `git diff --check`.
+
+Networked artifact/package qualification and the full engine/browser/release rollout remain for the
+batch boundary. Sol/high adversarial review is required before that push.

@@ -4,6 +4,17 @@ on:
   push:
     branches:
       - main
+    paths-ignore:
+      - '.github/ISSUE_SPECS/**'
+      - 'docs/**'
+      - 'README.md'
+      - 'sdk/**'
+      - 'scripts/check-sdk-deletions.py'
+      - 'scripts/check-sdk-generated.sh'
+      - 'scripts/check-sdk-headless.sh'
+      - 'scripts/check-sdk-types.sh'
+      - 'scripts/sdk-package.sh'
+      - 'LICENSE'
   pull_request:
     branches:
       - main
@@ -17,8 +28,28 @@ env:
   RUSTUP_TOOLCHAIN: 1.97.1
 
 jobs:
+  route:
+    name: classify qualification paths
+    runs-on: ubuntu-24.04
+    outputs:
+      route: ${{ steps.classify.outputs.route }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: classify
+        name: Select fail-safe qualification route
+        run: |
+          route=$(python3 -B scripts/ci-path-router.py \
+            --event "${{ github.event_name }}" \
+            --base "${{ github.event.pull_request.base.sha || github.event.before }}" \
+            --head "${{ github.event.pull_request.head.sha || github.sha }}")
+          printf 'route=%s\n' "$route" >> "$GITHUB_OUTPUT"
+
   artifact:
     name: shipped AudioWorklet artifact
+    needs: route
+    if: needs.route.outputs.route == 'full'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -47,7 +78,8 @@ jobs:
 
   browser:
     name: ${{ matrix.browser }} — browser qualification gates
-    needs: artifact
+    needs: [route, artifact]
+    if: needs.route.outputs.route == 'full'
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
@@ -84,3 +116,27 @@ jobs:
       - name: ${{ matrix.browser }} — bit-exact FLAC Worker and provenance gates
         working-directory: hosts/host-web/qualification
         run: npm run flac-decoder -- --decoder-artifacts "$GITHUB_WORKSPACE/target/ci/flac-decoder-artifacts" --browser "${{ matrix.browser }}"
+
+  qualification:
+    name: browser qualification
+    if: always()
+    needs: [route, artifact, browser]
+    runs-on: ubuntu-24.04
+    env:
+      ROUTE_RESULT: ${{ needs.route.result }}
+      ROUTE: ${{ needs.route.outputs.route }}
+      ARTIFACT_RESULT: ${{ needs.artifact.result }}
+      BROWSER_RESULT: ${{ needs.browser.result }}
+    steps:
+      - name: Enforce browser qualification route
+        run: |
+          set -euo pipefail
+          [[ "$ROUTE_RESULT" == success ]] || { echo "router result: $ROUTE_RESULT" >&2; exit 1; }
+          case "$ROUTE" in
+            full) expected=success ;;
+            sdk|evidence) expected=skipped ;;
+            *) echo "unknown route: $ROUTE" >&2; exit 1 ;;
+          esac
+          for result in "$ARTIFACT_RESULT" "$BROWSER_RESULT"; do
+            [[ "$result" == "$expected" ]] || { echo "expected $expected heavy result, got $result" >&2; exit 1; }
+          done
