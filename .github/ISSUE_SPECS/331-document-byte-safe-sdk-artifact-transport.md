@@ -173,3 +173,28 @@ historical specs is an intentional test-harness deletion that sanitizes ambient 
 
 The reviewer confirmed that Linux CI executing the invalid-UTF-8 fixture without skip and the
 canonical artifact digest remain valid remote acceptance gates, not pre-push blockers.
+
+### SDK-only remote acceptance
+
+After a final drift audit confirmed remote `main` at the reviewed base, the old exact eight
+required checks, no rulesets, and an `sdk` route for both push and pull-request semantics, the
+reviewed range was pushed once to `main` as
+`a03824b1540bc105bd0ef515461cb02f445a7c14`. GitHub created only SDK qualification run
+<https://github.com/misofm/engine/actions/runs/33662462767>; no engine, browser, or release workflow
+was created for the commit, and the already completed rollout runs were not cancelled.
+
+The Ubuntu 24.04 SDK job passed in 2m42s from one pinned AudioWorklet build. Its log proves:
+
+- the invalid-UTF-8 filename test executed as test 15 and passed, with the full headless result
+  **130 passed / 0 failed / 0 cancelled / 0 skipped** across 28 suites;
+- generated assets, modules, and surface matched the engine; deletion policy passed over 44 files;
+  and strict SDK typecheck including the shipped-host mirror pin passed;
+- packaging staged all 6 Engine V1 artifacts, and the extracted package's enginectl suite passed
+  **9/9**;
+- npm packed `@misofm/engine@0.1.0` with the 2.7 MB simd128 Wasm asset among 63 files, and the
+  publishable-tarball gate passed; and
+- the final `SDK qualification` aggregate passed.
+
+This completes gates 5, 6, 10, and 11. The aggregate/protection migration remains correctly held
+until the separately scoped engine allocation-harness correction produces a trustworthy passing
+engine aggregate. This issue does not yet claim closure or remote body synchronization.

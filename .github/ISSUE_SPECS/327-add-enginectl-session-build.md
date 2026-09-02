@@ -356,3 +356,17 @@ remained untouched and excluded. Final remote strict-TypeScript qualification mu
 committed TypeScript 5.9.3 / Node-types 22.20.1 baseline.
 
 PASS. Closure is deferred only until the CI-conscious batch evidence is upstream.
+
+### Remote package qualification and closure
+
+The CI-conscious batch and its path-safe successor evidence are upstream at
+`a03824b1540bc105bd0ef515461cb02f445a7c14`. SDK qualification run
+<https://github.com/misofm/engine/actions/runs/33662462767> passed its single Linux artifact
+closure: generated assets/modules/surface, deletion policy, strict typecheck, 130/130 headless
+tests with zero skips, the extracted package with all 6 Engine V1 artifacts, 9/9 enginectl tests,
+and the publishable-tarball smoke. The tarball is `@misofm/engine@0.1.0`, includes the 2.7 MB
+simd128 Wasm module and executable enginectl distribution, and passed the packaged-asset and
+post-publication receipt cases.
+
+This supplies the deferred remote evidence for the final Sol/high PASS. Issue #327 is complete and
+may close once this evidence commit is upstream and the GitHub body/state have been synchronized.
