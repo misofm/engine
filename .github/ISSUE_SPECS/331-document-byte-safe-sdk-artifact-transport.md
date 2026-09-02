@@ -151,3 +151,25 @@ Proportional local evidence on macOS on 2026-09-03:
 This evidence does not claim the required fresh Sol/high review, Linux remote qualification,
 aggregate-context rollout, branch-protection mutation, post-routing observations, GitHub
 synchronization, or issue closure.
+
+### Sol/high adversarial PASS
+
+Fresh Sol/high review returned **PASS** on exact checkpoint `d50bb939`. The reviewer independently
+proved the worktree clean; the implementation commit limited to this evidence and one vocabulary
+row; the new row's lowercase/even-length/absolute-physical-byte/Buffer semantics exact; the
+bidirectional checker green with 99 names; its unchanged mutation suite green on Linux; and exact
+predecessor `d5a41c0e` red for the undocumented `_HEX` spelling. All issue-#330 production and
+regression files are byte-identical to `d5a41c0e`.
+
+Independent reruns produced 18 pass / 0 fail / one permitted APFS skip for the focused path suite
+and 129 pass / 0 fail / one skip across 130 full headless tests. Isolated package/tarball
+qualification passed with a terminal-newline artifact path and all 9 enginectl tests. SDK type,
+generated, deletion, routing checker/mutations, Bash syntax, workflow YAML, and exact-diff gates
+passed. The complete `origin/main..d50bb939` range is exactly the two successor/history specs, one
+vocabulary row, and inherited three-file SDK correction and classifies `sdk` for both push and pull
+request. Workflows, router/checkers, package scripts/manifests, Cargo files, generated authorities,
+and artifact pin are unchanged. No active raw-path alias remains; the sole old spelling outside
+historical specs is an intentional test-harness deletion that sanitizes ambient legacy state.
+
+The reviewer confirmed that Linux CI executing the invalid-UTF-8 fixture without skip and the
+canonical artifact digest remain valid remote acceptance gates, not pre-push blockers.
