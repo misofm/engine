@@ -54,7 +54,7 @@ env:
 jobs:
   native-vectorization-report:
     name: native production-kernel release-probe report (non-blocking)
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - name: Install pinned Rust toolchain and disassembler
@@ -80,7 +80,7 @@ jobs:
 
   benchmark:
     name: bounded descriptive benchmarks
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - name: Install pinned Rust toolchain
@@ -128,7 +128,7 @@ jobs:
 
   deep-fuzz:
     name: deep fuzzing over every target
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4

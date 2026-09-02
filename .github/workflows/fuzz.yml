@@ -95,7 +95,7 @@ env:
 jobs:
   session-fuzz:
     name: bounded session parser and compiler fuzzing
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - name: Install pinned Rust toolchain
@@ -118,7 +118,7 @@ jobs:
 
   protocol-fuzz:
     name: bounded issue-005 protocol decoder fuzzing
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - name: Install pinned Rust and cargo-fuzz toolchains
