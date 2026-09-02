@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { mkdir, readFile, readdir, symlink, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { pathToFileURL } from "node:url";
 import ts from "typescript";
 
 import { sessionDocument } from "./support.mjs";
@@ -14,11 +14,12 @@ const manifest = JSON.parse(await readFile(resolve(packageRoot, "package.json"),
 assert.equal(manifest.name, "@misofm/engine");
 assert.equal(manifest.private, undefined);
 assert.deepEqual(Object.keys(manifest.exports), [
-  ".", "./headless", "./browser", "./assets", "./effect", "./package.json",
+  ".", "./headless", "./browser", "./assets", "./package.json",
 ]);
 assert.equal(manifest.dependencies, undefined);
-assert.equal(manifest.peerDependencies.effect, "^3.22.1");
-assert.equal(manifest.peerDependenciesMeta.effect.optional, true);
+assert.equal(manifest.peerDependencies, undefined);
+assert.equal(manifest.peerDependenciesMeta, undefined);
+assert.equal(manifest.devDependencies?.effect, undefined);
 
 const imported = {};
 for (const subpath of [".", "./headless", "./browser", "./assets"]) {
@@ -41,21 +42,8 @@ assert.ok(files.includes("dist/assets/miso-engine-v1-audio-worklet.simd128.wasm"
 assert.ok(files.includes("dist/LICENSE"));
 assert.equal(files.some((name) => name.includes("node_modules")), false);
 assert.equal(files.some((name) => name.startsWith("test") || name.includes("/test/")), false);
-
-// Existing entries above imported from a fresh extraction with no Effect installation. Mount the
-// declared optional peer only before exercising the explicit integration entry.
-const packageModules = resolve(packageRoot, "node_modules");
-await mkdir(packageModules, { recursive: true });
-await symlink(
-  fileURLToPath(new URL("../node_modules/effect", import.meta.url)),
-  resolve(packageModules, "effect"),
-  "dir",
-);
-imported["./effect"] = await import(
-  pathToFileURL(resolve(packageRoot, manifest.exports["./effect"].import)).href
-);
-assert.equal(typeof imported["./effect"].scopedOfflineEngine, "function");
-assert.equal(typeof imported["./effect"].EngineEffectError, "function");
+assert.equal(files.includes("dist/effect.js"), false);
+assert.equal(files.includes("dist/effect.d.ts"), false);
 
 // Resolve the declaration surface exactly as a consumer does. Reading `.d.ts` files is not enough:
 // a declaration can exist while importing a sibling TypeScript never emitted (the old failure).
@@ -69,9 +57,8 @@ import { CATALOG, session } from "@misofm/engine";
 import { createOfflineEngine, loadBundledEngineAsset } from "@misofm/engine/headless";
 import { createEngine } from "@misofm/engine/browser";
 import { BUNDLED_ENGINE_ASSETS } from "@misofm/engine/assets";
-import { scopedOfflineEngine, submitConsole } from "@misofm/engine/effect";
 void [CATALOG, session, createOfflineEngine, loadBundledEngineAsset, createEngine,
-  BUNDLED_ENGINE_ASSETS, scopedOfflineEngine, submitConsole];
+  BUNDLED_ENGINE_ASSETS];
 `, "utf8");
 const program = ts.createProgram([consumer], {
   module: ts.ModuleKind.NodeNext,

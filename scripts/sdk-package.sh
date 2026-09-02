@@ -57,5 +57,4 @@ archives=("$pack_dir"/*.tgz)
 }
 tar -xzf "${archives[0]}" -C "$unpack_dir"
 node "$sdk_root/test/package-tarball-smoke.mjs" "$unpack_dir/package"
-MISO_ENGINE_SDK_ARTIFACTS="$artifact_dir" node --test "$sdk_root/test/effect-integration.mjs"
 echo "SDK publishable-tarball gate passed"
