@@ -263,3 +263,28 @@ Focused qualification is green:
 No package-wide gate, benchmark, dependency, filesystem probe, or behavior outside the bounded
 receipt construction and focused proof was added. Attempt 2 awaits fresh adversarial review; this
 evidence does not claim PASS.
+
+### Attempt 2 — Sol-high adversarial HOLD
+
+Fresh Sol-high review held exact checkpoint `98eb8caa` on the new source-regex assertion, not on
+production. The correction computes exactly one TOML SHA-256, reuses the common receipt, uses
+`stemsBuild.directory`, preserves request bytes, and passed seven focused behaviors. Runtime
+instrumentation of the built executable observed `{ "tomlHashes": 1 }`.
+
+The black-box suite nevertheless read `sdk/src/enginectl.ts` and regex-pinned exact variable/property
+spellings. Those assertions false-fail harmless refactors and do not prove the claimed invariant:
+an isolated second full hash expressed as separate `createHash`, `update`, and `digest` statements
+left the chained-expression count at one, so the purported one-hash gate stayed green. Attempt 3
+must remove the four source-regex assertions, retain the observable output-key-order assertion, and
+replace the structural claim with runtime instrumentation of the built executable that counts
+SHA-256 updates whose payload begins with canonical `schema_version = 1\n`. Existing behavioral
+tests remain the authority for common receipt/path reuse. Attempt-2 evidence must stop describing
+the static regex as proof.
+
+Independent attempt-2 evidence otherwise passed: the built executable produced exactly one
+instrumented canonical-TOML hash; request raw TOML matched parent `57e43da3` at 1,243 bytes and its
+file receipt matched at 246 bytes with exact `path`, `bytes`, `sha256` keys; raw output, stems
+receipt, alternate-cwd reopening/hostile framing, lexical symlink alias, physical in-leaf refusal,
+publication order, and post-publication `effect: "applied"` were green. The exact three-file scope,
+worktree, diff check, and commit validation were clean. Attempt 2 remains **HOLD** on the ceremony
+boundary; attempt 3 is the final permitted implementation attempt.
