@@ -277,3 +277,19 @@ Focused local evidence on 2026-09-02:
 All passed locally. No networked rollout, branch-protection mutation, commit, push, benchmark,
 timing, playback, or unrelated SDK dependency edit is part of this correction. A fresh Sol/high
 adversarial verdict remains required.
+
+### Attempt 2 adversarial verdict — Sol high: HOLD
+
+The four attempt-1 runtime findings are resolved, but the lexical checker accepts dangerous valid
+YAML variants:
+
+1. an extra unquoted `- crates/**` in the engine push ignore list is invisible to the single-quote
+   extractor, so crate-only main pushes could skip engine CI while the checker passes;
+2. a quoted `"continue-on-error": true` on aggregate enforcement bypasses the literal rejection;
+   and
+3. `if: ${{ false }}` or `continue-on-error: true` on a route-policy step can prevent/falsify the
+   pre-classification check while the checker sees only the command text and ordering.
+
+Attempt 3 is the final allowed attempt. It must pin the security-critical trigger, policy-step, and
+aggregate blocks against semantic-equivalent YAML spellings and add each bypass as a red mutation.
+No rollout or protection mutation has occurred; the old eight required contexts remain intact.
