@@ -68,4 +68,38 @@ telemetry service, source pump, registry publication, or engine/host byte change
 
 ## Evidence
 
-Pending implementation attempt 1.
+Implementation attempt 1:
+
+- Added the isolated `@misofm/engine/effect` entry over `effect@3.22.1`, declared as an optional
+  peer and exact dev dependency. The existing four code entries import from a clean extraction
+  before the peer is mounted; the Effect entry then imports and resolves declarations with it.
+- Added typed open/scoped programs for headless and browser engines plus semantic submission.
+  Protocol refusals remain successful `CommandReport` values; Promise rejections preserve their
+  original cause in an operation-tagged `EngineEffectError`.
+- Added one idempotent `BrowserEngine.close()` that disposes host then context and uses `finally` so
+  a failed host disposal cannot leak the context.
+- Adversarial lifecycle tests exposed a pre-existing contradiction: `state()` included `disposed`
+  in its return type but queried a status pointer through the cleared handle after disposal. The
+  boundary now answers owned disposal state before its live-handle guard.
+
+Local gates on 2026-09-02:
+
+- `check-sdk-headless.sh`: PASS, 111 tests / 27 suites against live Wasm.
+- `effect-integration.mjs`: PASS, 5 tests covering scoped success/failure/interruption, headless and
+  browser acquisition failures, browser release order, protocol refusal, and no result before a
+  rejecting transport settles.
+- `check-sdk-types.sh`: PASS, including exact Effect success/error/Scope requirement pins.
+- `check-sdk-deletions.py`: PASS over 43 SDK source files.
+- `sdk-package.sh check`: PASS with 61-file clean tarball, optional-peer isolation, declaration
+  resolution, embedded-Wasm boot/digest mutation, and the Effect integration suite.
+- `npm publish --dry-run --ignore-scripts`: PASS; 939.4 kB packed / 3.5 MB unpacked.
+- The checked-in AudioWorklet digest is known not to reproduce on this macOS toolchain environment
+  (recorded during #319); the local package gates therefore used the same source-built artifact
+  without changing its pin. Upstream Linux artifact and release jobs remain authoritative for the
+  pinned digest.
+
+Adversarial review:
+
+- PASS locally on optional-peer isolation, typed failures, scoped release on all exits, browser
+  close idempotence/failure cleanup, and the acked-batch question. Final closure requires the
+  implementation commit's upstream main, browser, and release workflows.

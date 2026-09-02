@@ -36,6 +36,10 @@
       "types": "./dist/assets.d.ts",
       "import": "./dist/assets.js"
     },
+    "./effect": {
+      "types": "./dist/effect.d.ts",
+      "import": "./dist/effect.js"
+    },
     "./package.json": "./package.json"
   },
   "engines": {
@@ -43,7 +47,16 @@
   },
   "devDependencies": {
     "@types/node": "22.20.1",
+    "effect": "3.22.1",
     "typescript": "5.9.3"
+  },
+  "peerDependencies": {
+    "effect": "^3.22.1"
+  },
+  "peerDependenciesMeta": {
+    "effect": {
+      "optional": true
+    }
   },
   "scripts": {
     "assets": "node ./codegen/assets.mjs",

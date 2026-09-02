@@ -333,6 +333,57 @@ describe("the browser open sequence", () => {
     );
   });
 
+  test("close disposes the worklet before its context and is idempotent", async () => {
+    const events = [];
+    const engine = await createEngine({
+      document: sessionDocument(),
+      simd128ModuleUrl: "/wasm",
+      workletModuleUrl: "/worklet",
+      scratchBoot,
+      createContext: (request) => ({
+        sampleRate: request.sampleRate,
+        renderQuantumSize: 128,
+        state: "running",
+        close: async () => { events.push("context"); },
+        audioWorklet: { addModule: async () => {} },
+      }),
+      createHost: async () => ({
+        dispose: async () => { events.push("host"); },
+      }),
+    });
+
+    await Promise.all([engine.close(), engine.close()]);
+    assert.deepEqual(events, ["host", "context"]);
+    await engine.close();
+    assert.deepEqual(events, ["host", "context"], "a settled close stays one operation");
+  });
+
+  test("close still releases the AudioContext when host disposal rejects", async () => {
+    const failure = new Error("port disappeared");
+    let contextCloses = 0;
+    const engine = await createEngine({
+      document: sessionDocument(),
+      simd128ModuleUrl: "/wasm",
+      workletModuleUrl: "/worklet",
+      scratchBoot,
+      createContext: (request) => ({
+        sampleRate: request.sampleRate,
+        renderQuantumSize: 128,
+        state: "running",
+        close: async () => { contextCloses += 1; },
+        audioWorklet: { addModule: async () => {} },
+      }),
+      createHost: async () => ({
+        dispose: async () => { throw failure; },
+      }),
+    });
+
+    await assert.rejects(() => engine.close(), (error) => error === failure);
+    assert.equal(contextCloses, 1);
+    await assert.rejects(() => engine.close(), (error) => error === failure);
+    assert.equal(contextCloses, 1, "a rejected close is still not replayed");
+  });
+
   test("a 32f source refuses before any context is constructed", async () => {
     let constructed = 0;
     await assert.rejects(

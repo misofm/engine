@@ -19,7 +19,7 @@ so the host and Wasm cannot silently come from different releases.
 public entry from a fresh extraction, boots the embedded Wasm, renders one quantum, and proves a
 one-byte Wasm mutation is rejected by the manifest digest before compilation.
 
-The four entry points are the only supported import sites:
+The five entry points are the only supported import sites:
 
 | specifier | file | for |
 | --- | --- | --- |
@@ -27,6 +27,7 @@ The four entry points are the only supported import sites:
 | `@misofm/engine/headless` | `src/headless/index.ts` | the Node/Bun offline engine |
 | `@misofm/engine/browser` | `src/browser/index.ts` | the Worker scratch boot, policy, host mirror |
 | `@misofm/engine/assets` | `src/assets.ts` | URLs and names for the embedded release artifacts |
+| `@misofm/engine/effect` | `src/effect.ts` | opt-in stable Effect lifecycle and async adapters |
 
 Import through those barrels; do not deep-import `src/core/*`. Every symbol that previously had to
 be reached by a deep path is on a barrel as of #278, and `sdk/test/barrel-surface.ts` fails
@@ -147,6 +148,41 @@ It resolves the browser session map once, then submits the same whole-batch edit
 All eleven live command kinds are available without numeric rack, channel, parameter, or tap IDs;
 the browser and headless acknowledgements carry the same generated result/reason names and exact
 `appliedAtSample`.
+
+Call `await engine.close()` when the browser session is finished. It disposes the worklet host
+before closing its `AudioContext`, is safe to call repeatedly, and still closes the context if the
+host's MessagePort has already failed.
+
+## Effect (opt in)
+
+Effect applications can add the optional stable peer and use scoped engine ownership:
+
+```sh
+npm install @misofm/engine effect@^3.22.1
+```
+
+```ts
+import { Effect } from "effect";
+import { scopedOfflineEngine, submitConsole } from "@misofm/engine/effect";
+
+const program = Effect.scoped(Effect.gen(function* () {
+  const engine = yield* scopedOfflineEngine(document);
+  const console = engine.console();
+  return yield* submitConsole(console, console.edit.track("vocal").faderDb(-3));
+}));
+```
+
+The scope disposes a headless engine or closes a browser engine on success, typed failure, and
+interruption. Promise rejections are `EngineEffectError` values whose `operation` identifies the
+failed boundary and whose `cause` retains the original error. An engine refusal remains a
+successful `CommandReport`, because admission decisions are protocol data rather than transport
+failures.
+
+Effect is deliberately absent from render, PCM submission, Wasm calls, wire encoding, and edit
+construction. At this release's qualification, the v4 documentation described the intended
+programming model but npm still tagged v4 as a release candidate; this production entry therefore
+targets stable Effect v3. A future v4 migration belongs in a separate compatibility issue after it
+reaches the stable tag.
 
 ## Agents
 

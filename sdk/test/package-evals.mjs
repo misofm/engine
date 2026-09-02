@@ -45,8 +45,8 @@ describe("package entry points", () => {
     const subpaths = Object.entries(manifest.exports);
     assert.deepEqual(
       subpaths.map(([subpath]) => subpath),
-      [".", "./headless", "./browser", "./assets", "./package.json"],
-      "the four code entries plus package metadata are the public package surface",
+      [".", "./headless", "./browser", "./assets", "./effect", "./package.json"],
+      "the five code entries plus package metadata are the public package surface",
     );
     for (const [subpath, target] of subpaths) {
       if (subpath === "./package.json") {
@@ -80,6 +80,21 @@ describe("package entry points", () => {
       const subpath = specifier.replace("@misofm/engine", ".").replace("./", "./");
       assert.ok(manifest.exports[subpath === "." ? "." : subpath] !== undefined,
         `README imports an undeclared subpath: ${specifier}`);
+      if (subpath === "./effect") {
+        // This suite is deliberately runnable without node_modules, which is also the property
+        // the optional entry exists to preserve. The built-tarball smoke imports these bindings
+        // with the peer mounted; here the source declaration is the hermetic half of that gate.
+        const source = await readFile(resolve(SDK_ROOT, "src/effect.ts"), "utf8");
+        for (const binding of bindings.split(",").map((name) => name.trim())) {
+          if (binding.length === 0) continue;
+          assert.match(
+            source,
+            new RegExp(`export (?:function|class|type) ${binding}\\b`),
+            `${specifier} declares ${binding}`,
+          );
+        }
+        continue;
+      }
       const module = subpath === "." ? rootBarrel
         : subpath === "./headless" ? headlessBarrel
           : subpath === "./browser" ? browserBarrel

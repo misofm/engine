@@ -99,6 +99,8 @@ export interface BrowserEngine {
   readonly host: MisoAudioWorkletHost;
   /** Resolve the compiled session map once and bind the shared semantic console. */
   console(): Promise<EngineConsole>;
+  /** Dispose the worklet host, then close its context. Safe to call more than once. */
+  close(): Promise<void>;
 }
 
 function documentBytes(document: CreateEngineOptions["document"]): Uint8Array<ArrayBuffer> {
@@ -196,6 +198,7 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
       workletModuleUrl,
     });
     let semanticConsole: Promise<EngineConsole> | undefined;
+    let closePromise: Promise<void> | undefined;
     return Object.freeze({
       shape,
       context,
@@ -203,6 +206,17 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
       console: () => {
         semanticConsole ??= createBrowserConsole(host);
         return semanticConsole;
+      },
+      close: () => {
+        closePromise ??= (async () => {
+          try {
+            await host.dispose();
+          } finally {
+            // A failed MessagePort disposal must not leak the much larger AudioContext.
+            await context.close();
+          }
+        })();
+        return closePromise;
       },
     });
   } catch (error) {

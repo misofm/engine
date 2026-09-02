@@ -274,6 +274,10 @@ export class WasmBoundary {
 
   /** The engine's state word, named through the generated vocabulary. */
   state(): "ready" | "failed" | "disposed" {
+    // Disposal clears the handle, so there is deliberately no engine status pointer left to ask.
+    // The public union has always included `disposed`; answer it from boundary ownership before
+    // applying the live-handle guard used by every operation that actually reaches Wasm.
+    if (this.disposed) return "disposed";
     return this.status().stateName;
   }
 
