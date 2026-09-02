@@ -19,7 +19,7 @@ so the host and Wasm cannot silently come from different releases.
 public entry from a fresh extraction, boots the embedded Wasm, renders one quantum, and proves a
 one-byte Wasm mutation is rejected by the manifest digest before compilation.
 
-The three entry points are the only supported import sites:
+The four entry points are the only supported import sites:
 
 | specifier | file | for |
 | --- | --- | --- |
@@ -97,6 +97,15 @@ const engine = await createOfflineEngine(document);
 const asset = await loadBundledEngineAsset();
 const another = await createOfflineEngine(anotherDocument, { asset });
 const shape = engine.shape();   // the ENGINE's answer: rate, quantum, ring, sources, tracks
+const console = engine.console();
+
+// Names and values are catalog-derived; the SDK resolves track/parameter IDs.
+const vocal = console.edit.track("vocal");
+await console.submit(
+  vocal.faderDb(-3, { channel: "both" }),
+  vocal.effect("simd1", 0, "miso.compressor")
+    .parameter("threshold", -24, { channel: "both" }),
+);
 
 for (let block = 0; block < blocks; block += 1) {
   for (const source of shape.sources) {
@@ -132,6 +141,12 @@ are identical by construction; the two `require_*` words are role-defined (zero 
 physical in the worklet). Source plumbing is bring-your-own: SDK core has no opinions about audio
 plumbing — no OPFS, no fetch, no Workers — so the Worker boot and the context constructor are
 injected rather than reached for.
+
+`await engine.console()` binds the same semantic console shown above to the shipped browser host.
+It resolves the browser session map once, then submits the same whole-batch edits over MessagePort.
+All eleven live command kinds are available without numeric rack, channel, parameter, or tap IDs;
+the browser and headless acknowledgements carry the same generated result/reason names and exact
+`appliedAtSample`.
 
 ## Agents
 
@@ -188,6 +203,12 @@ so `flush()` and `drain()` are async. Flushes serialize: a call entered while a 
 still outstanding waits for it rather than picking its batch out of a map the earlier flush has not
 yet applied to. The contract is otherwise identical on both paths, which the evals hold by running
 one episode through a sync and an async submit and comparing the transcripts element for element.
+
+`ConsoleWriter` is the expert-level, coalescing seam over already addressed wire edits. New code
+should normally start with `engine.console()`: its `edit.track(id)` builder provides typed strip,
+effect, and observation operations, locally checks generated domains, and makes one
+`console.submit(...edits)` one atomic engine transaction. `ConsoleWriter` remains useful for a
+high-rate gesture loop whose pending values need latest-wins coalescing.
 
 ## Tests
 

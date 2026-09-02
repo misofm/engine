@@ -7,6 +7,7 @@ export * from "./core/abi.ts";
 export * from "./core/agent.ts";
 export * from "./core/asset.ts";
 export * from "./core/boundary.ts";
+export * from "./core/console.ts";
 export * from "./core/errors.ts";
 export * from "./core/session.ts";
 export * from "./core/writer.ts";

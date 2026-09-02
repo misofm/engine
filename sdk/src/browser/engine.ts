@@ -13,6 +13,8 @@ import {
 import type { BrowserBootPolicy } from "./policy.ts";
 import { BUNDLED_ENGINE_ASSETS } from "../assets.ts";
 import type { MisoAudioWorkletHost } from "./shipped-host.d.ts";
+import type { EngineConsole } from "../core/console.ts";
+import { createBrowserConsole } from "./console.ts";
 
 /**
  * The browser entry (issue #243 S3, consuming #240 S5's sealed choreography).
@@ -95,6 +97,8 @@ export interface BrowserEngine {
   readonly shape: SessionShape;
   readonly context: AudioContextLike;
   readonly host: MisoAudioWorkletHost;
+  /** Resolve the compiled session map once and bind the shared semantic console. */
+  console(): Promise<EngineConsole>;
 }
 
 function documentBytes(document: CreateEngineOptions["document"]): Uint8Array<ArrayBuffer> {
@@ -191,7 +195,16 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
       simd128ModuleUrl,
       workletModuleUrl,
     });
-    return Object.freeze({ shape, context, host });
+    let semanticConsole: Promise<EngineConsole> | undefined;
+    return Object.freeze({
+      shape,
+      context,
+      host,
+      console: () => {
+        semanticConsole ??= createBrowserConsole(host);
+        return semanticConsole;
+      },
+    });
   } catch (error) {
     await context.close();
     throw error;

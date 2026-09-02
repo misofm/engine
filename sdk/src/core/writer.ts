@@ -1,4 +1,5 @@
 import { ABI_LAYOUT } from "../generated/abi.ts";
+import type { CommandKindName, CommandReasonName } from "../generated/catalog.ts";
 import type { CommandReport } from "./boundary.ts";
 import { MisoUsageError } from "./errors.ts";
 
@@ -40,7 +41,7 @@ import { MisoUsageError } from "./errors.ts";
 /** One addressed console edit, in the wire's own vocabulary. */
 export interface LaneEdit {
   /** A `wireCommandKinds` name, e.g. `effectParam`, `faderDb`, `mute`. */
-  readonly kind: string;
+  readonly kind: CommandKindName;
   readonly trackIndex: number;
   /** `0` simd1, `1` dynamic, `2` simd2, `255` not applicable. */
   readonly rack: number;
@@ -58,7 +59,7 @@ export interface FlushOutcome {
   /** True when the engine refused for flow control. Never an error. */
   readonly refused: boolean;
   /** The engine's reason name, present only on a refusal. */
-  readonly reason: string | undefined;
+  readonly reason: CommandReasonName | undefined;
   /** Edits still waiting after this flush. */
   readonly pending: number;
   /** The batch size the next flush will attempt. */
@@ -135,7 +136,7 @@ function coalescingKey(edit: LaneEdit): string {
   ].join("/");
 }
 
-function encode(edits: readonly LaneEdit[]): Uint8Array {
+export function encodeLaneEdits(edits: readonly LaneEdit[]): Uint8Array {
   const records = new Uint8Array(edits.length * RECORD_BYTES);
   const view = new DataView(records.buffer);
   edits.forEach((edit, index) => {
@@ -259,7 +260,7 @@ export class ConsoleWriter {
     const edits = staged.map(([, edit]) => edit);
 
     this.#flushes += 1;
-    const report = await this.#submit(encode(edits), edits.length);
+    const report = await this.#submit(encodeLaneEdits(edits), edits.length);
 
     if (report.ok) {
       for (const [key, edit] of staged) {

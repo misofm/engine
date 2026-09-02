@@ -30,6 +30,7 @@ import * as browserBarrel from "../src/browser/index.ts";
 import * as headlessBarrel from "../src/headless/index.ts";
 
 import * as agent from "../src/core/agent.ts";
+import * as consoleSurface from "../src/core/console.ts";
 import * as catalog from "../src/generated/catalog.ts";
 import * as hostMirror from "../src/browser/host-mirror.ts";
 import * as lattice from "../src/core/lattice.ts";
@@ -57,6 +58,13 @@ type WriterLaneEdit = Assert<Exact<barrel.LaneEdit, writer.LaneEdit>>;
 type WriterFlushOutcome = Assert<Exact<barrel.FlushOutcome, writer.FlushOutcome>>;
 type WriterStatsType = Assert<Exact<barrel.WriterStats, writer.WriterStats>>;
 type WriterOptionsType = Assert<Exact<barrel.WriterOptions, writer.WriterOptions>>;
+
+// --- core/console.ts: the semantic path is on the root barrel ---------------------------------
+
+type ConsoleClass = Assert<Exact<typeof barrel.EngineConsole, typeof consoleSurface.EngineConsole>>;
+type ConsoleEditsClass =
+  Assert<Exact<typeof barrel.ConsoleEdits, typeof consoleSurface.ConsoleEdits>>;
+type ConsoleRackType = Assert<Exact<barrel.ConsoleRack, consoleSurface.ConsoleRack>>;
 
 // --- core/lattice.ts: everything but the two collided names, which are renamed ------------------
 
@@ -113,6 +121,9 @@ export type BarrelSurfacePins = [
   WriterFlushOutcome,
   WriterStatsType,
   WriterOptionsType,
+  ConsoleClass,
+  ConsoleEditsClass,
+  ConsoleRackType,
   LatticePointsFn,
   LatticeResolveStepFn,
   LatticeIndexForDecimalFn,

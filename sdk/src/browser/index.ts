@@ -7,6 +7,7 @@
  * rather than reaching for them itself.
  */
 export * from "./engine.ts";
+export * from "./console.ts";
 export * from "./policy.ts";
 // The `BootOptions` -> `MisoWebBootOptions` adapter. It belongs to whoever mounts the shipped
 // worklet host directly instead of going through `createEngine`, which is a browser consumer, so

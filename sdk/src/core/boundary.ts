@@ -1,5 +1,6 @@
 import { ABI_LAYOUT } from "../generated/abi.ts";
 import type { BufferKindName, ExportName, ResultCodeName } from "../generated/abi.ts";
+import type { CommandReasonName } from "../generated/catalog.ts";
 import {
   StructView,
   constantValue,
@@ -531,7 +532,7 @@ export class WasmBoundary {
       result,
       code: resultName(result, "call"),
       reason,
-      reasonName: reasonNameOf(reason),
+      reasonName: commandReasonName(reason),
       rejectedIndex: report.u32("rejectedIndex"),
       admitted: report.u32("admitted"),
       appliedAtSample: report.u64("appliedAtSample"),
@@ -563,16 +564,20 @@ export interface CommandReport {
   /** Whole-batch admission. A refusal admits nothing and names the first offending record. */
   readonly ok: boolean;
   readonly result: number;
-  readonly code: string;
+  readonly code: ResultCodeName;
   readonly reason: number;
-  readonly reasonName: string;
+  readonly reasonName: CommandReasonName;
   readonly rejectedIndex: number;
   readonly admitted: number;
   readonly appliedAtSample: bigint;
 }
 
-function reasonNameOf(value: number): string {
-  return ABI_LAYOUT.constants.commandReasons.find((row) => row.value === value)?.name ?? "unknown";
+export function commandReasonName(value: number): CommandReasonName {
+  const name = ABI_LAYOUT.constants.commandReasons.find((row) => row.value === value)?.name;
+  if (name === undefined) {
+    throw new MisoUsageError(`the engine reported an unknown command reason ${value}`);
+  }
+  return name;
 }
 
 /**

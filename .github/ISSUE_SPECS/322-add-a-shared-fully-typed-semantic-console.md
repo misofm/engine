@@ -58,4 +58,30 @@ pump, browser host byte change, or registry publication is in scope.
 
 ## Evidence
 
-Pending implementation attempt 1.
+Implementation attempt 1:
+
+- `EngineConsole` binds a pure semantic edit builder to either direct Wasm or the shipped browser
+  host. Headless exposes `engine.console()`; browser exposes a lazy, once-bound async equivalent.
+- Strip methods cover pan, matrix, fader, mute, solo, trim, and polarity. Generic effect methods
+  derive live parameter names/value types/lane policy and tap names from the generated catalog.
+- Browser request IDs continue from the session-map acknowledgement; both transports map the same
+  generated result/reason names and enforce whole-batch acknowledgement consistency.
+- The expert `LaneEdit`/`ConsoleWriter` seam remains, but kind and refusal names are now generated
+  unions and its encoder is shared by the semantic headless transport.
+
+Local gates on 2026-09-02:
+
+- `check-sdk-headless.sh`: PASS, 109 tests / 27 suites against live Wasm.
+- `check-sdk-types.sh`: PASS, including wrong option, prepared-only parameter, wrong effect
+  parameter/tap, absent tap, and shared-lane red probes.
+- `check-sdk-deletions.py`: PASS over 40 SDK source files.
+- `sdk-package.sh check`: PASS; 59-file tarball, all entry/declaration/embedded-boot checks green.
+- Focused console eval: PASS for exact eleven-kind coverage, one live ten-edit transaction plus
+  observation unsubscribe, typed engine refusal and recovery, pre-transport domain rejection,
+  browser wire/ack parity, and torn-ack discrimination.
+
+Adversarial review:
+
+- PASS locally on generated metadata use, headless/browser parity, request-ID monotonicity, pure
+  edit construction, whole-batch admission, and the acked-batch question. Final closure requires
+  the implementation commit's upstream workflows.

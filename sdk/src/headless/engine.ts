@@ -9,9 +9,11 @@ import type {
   SessionMap,
   SessionShape,
 } from "../core/boundary.ts";
+import { EngineConsole } from "../core/console.ts";
 import { MisoEngineError, MisoUsageError } from "../core/errors.ts";
 import type { ErrorPhase, MisoDiagnostic, MisoErrorCode } from "../core/errors.ts";
 import { loadBundledEngineAsset } from "./assets.ts";
+import { encodeLaneEdits } from "../core/writer.ts";
 
 let defaultAsset: Promise<MisoEngineAsset> | undefined;
 
@@ -115,6 +117,12 @@ export class OfflineEngine {
 
   sessionMap(): SessionMap {
     return this.#boundary.sessionMap();
+  }
+
+  /** A semantic console bound to the currently loaded session. */
+  console(): EngineConsole {
+    return new EngineConsole(this.sessionMap(), (edits) =>
+      this.submitCommands(encodeLaneEdits(edits), edits.length));
   }
 
   nextAbsoluteSample(): bigint {
