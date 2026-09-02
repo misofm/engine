@@ -219,3 +219,20 @@ Focused gates passed on 2026-09-02:
 
 Networked artifact/package qualification and the full engine/browser/release rollout remain for the
 batch boundary. Sol/high adversarial review is required before that push.
+
+### Attempt 1 adversarial verdict — Sol high: HOLD
+
+The aggregate truth tables, trigger sets, concurrency domains, SDK ownership, browser matrix, and
+release filtering passed review. Four blockers remain:
+
+1. pull requests use a two-dot diff even though GitHub path semantics are three-dot, so an SDK-only
+   feature branch behind `main` can be routed full;
+2. the new static checker and mutation suite are not invoked by any workflow, leaving them dead CI
+   code;
+3. malformed/unknown Git status records such as `M100` and `X` can narrow to SDK instead of failing
+   safe to full; and
+4. the checker accepts an aggregate enforcement step with `continue-on-error: true`, which would
+   suppress the required-context failure.
+
+Attempt 2 must correct these four paths and add discriminating regressions before another Sol/high
+verdict. Live protection remains the old eight Actions contexts; no rollout mutation has occurred.
