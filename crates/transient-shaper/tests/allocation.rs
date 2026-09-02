@@ -154,6 +154,10 @@ fn foreign_thread_allocations_do_not_enter_the_callers_counts() {
         });
 
         while !ready.load(Ordering::Acquire) {
+            if finished.load(Ordering::Acquire) {
+                worker.join().expect("foreign allocation worker");
+                panic!("foreign allocation worker finished before readiness");
+            }
             core::hint::spin_loop();
         }
         let caller_counts = measure(|| {

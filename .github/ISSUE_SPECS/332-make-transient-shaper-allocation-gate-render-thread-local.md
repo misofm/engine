@@ -41,7 +41,8 @@ Add discriminating harness tests:
 Coordinate the foreign-thread test with preallocated atomic state and a prestarted thread; perform
 thread creation/join and other setup outside the measured region. Publish worker completion from
 an unwind-safe guard so an injected worker panic always releases the caller's spin and is reported
-by `join`. Preserve the production gate's
+by `join`. The readiness wait observes both `ready` and terminal completion; if completion wins,
+the caller skips measurement and joins immediately. Preserve the production gate's
 1,000 blocks at quantum 128, per-block automation schedule, scalar effect, available native bank,
 and separate zero-allocation and zero-deallocation assertions. Re-run the recorded exact,
 non-elidable `std::hint::black_box(Vec::<u8>::with_capacity(1));` production mutation under release
@@ -69,7 +70,9 @@ benchmark, generated file, SDK file, digest, or branch-protection change belongs
 4. A prestarted foreign thread allocates and frees while the caller is armed, and the caller's
    result remains exactly `(0, 0)`; the test proves overlap rather than merely running sequentially.
    Completion publication is unwind-safe: an injected worker panic terminates nonzero rather than
-   hanging, and `join` observes the panic.
+   hanging, and `join` observes the panic, including termination after guard construction but
+   before readiness publication. A worker that finishes before readiness never enters the caller's
+   measured overlap region.
 5. The production gate preserves the exact 1,000-by-128 scalar and native-bank workload,
    automation cadence, and independent zero-allocation/zero-free assertions.
 6. The exact `std::hint::black_box(Vec::<u8>::with_capacity(1));` inside
@@ -216,3 +219,34 @@ the worker terminates before readiness, the caller must not enter the measured o
 must join promptly and surface the failure. The already qualified post-readiness panic path and
 exact release-mode `black_box` mutation remain mandatory. All other implementation, workload,
 concurrency, red-mutation, scope, and policy checks passed. Attempt 2 remains **HOLD**.
+
+### Attempt 3 — Sol-medium final correction and evidence
+
+The readiness loop now acquire-loads terminal `finished` while waiting for `ready`. If completion
+wins, it joins the worker immediately and never calls `measure`; a panic is surfaced by the same
+`worker.join().expect(...)` authority as the post-readiness path. If an impossible normal worker
+return occurs before readiness, the explicit protocol panic after a successful join also keeps the
+test red. The attempt-2 completion guard, normal overlap handshake, thread-local allocator state,
+and production workload are otherwise unchanged.
+
+Two isolated mutations exercised the exact liveness boundaries under `timeout 10`:
+
+- a panic immediately after constructing `PublishCompletion` and before `ready.store` exited 101,
+  not 124; the readiness loop observed `finished`, joined promptly, and reported the worker panic;
+- a panic immediately after `ready.store` exited 101, not 124; the caller entered the existing
+  completion-aware measured path, disarmed, joined, and reported the worker panic.
+
+Normal focused execution remains 3/3 green under default scheduling, `--test-threads=1`, and two
+successive `--test-threads=8` runs. The complete transient-shaper target, Rustfmt, and Clippy with
+warnings denied passed. Realtime policy, environment vocabulary, path-routing checker/mutations,
+exact `full` classification, and `git diff --check` passed. Workspace policy returned success with
+the already recorded unsupported macOS/BSD `find -printf` diagnostic.
+
+The exact `std::hint::black_box(Vec::<u8>::with_capacity(1));` production mutation was re-applied
+only in an isolated copy under `cargo test --release`: both controls passed and the render gate
+failed with 2,000 allocations versus zero. Removing it restored production byte-for-byte and the
+same release allocation binary passed 3/3. No mutation-record wording changed because attempt 2's
+row already freezes this exact optimized mutation and result.
+
+Only `crates/transient-shaper/tests/allocation.rs` and this specification changed. Attempt 3 does
+not claim fresh Sol/high PASS, remote qualification, GitHub synchronization, or issue closure.
