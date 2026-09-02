@@ -250,3 +250,20 @@ The resulting main push created only SDK qualification run
 aggregate in 2m54s without retry. No engine, browser, or release run was created for that SDK-only
 main commit. This completes gate 14's actual SDK-only PR observation. The evidence-only PR and
 explicit `LICENSE`/unknown/malformed post-rollout observations remain before issue closure.
+
+### Final fail-safe observations and evidence-only preflight
+
+After PR #336 merged the same frozen router to main at `97ffd966`, five direct post-rollout probes
+all exited 0 and printed `full`:
+
+- pull-request path `LICENSE`;
+- pull-request path `future/unowned.surface`;
+- a pull-request event with missing base/head revisions;
+- a malformed NUL-delimited `R100` rename record with only one path; and
+- an unknown event with otherwise nonempty revisions.
+
+The workflow contract checker and complete classifier/mutation suite remained green immediately
+before the #336 push. These observations prove that shared license ownership and future, missing,
+malformed, or unknown inputs cannot silently select SDK/evidence qualification. The final local
+closeout changes only numbered issue specifications and classifies `evidence`; its pull request is
+the remaining live evidence-only PR observation required by gate 14.

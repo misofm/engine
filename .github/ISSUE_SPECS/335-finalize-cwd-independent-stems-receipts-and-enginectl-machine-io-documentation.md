@@ -335,3 +335,33 @@ source-verified parent `57e43da3`; the request receipt still contains only `path
 and help mutations remain discriminating through the complete suite. Diff and commit validation
 passed. No benchmark was run because the final production work is two lexical path resolutions
 with one pre-existing TOML digest. Issue #335 is approved for upstream delivery.
+
+## Remote delivery and final relative-path dogfood
+
+The CI-conscious branch at exact head `3be9f81b` was pushed once and its ordinary feature-branch
+push created zero workflows. Pull request #336 targeted exact main `49c153f7` and produced all
+three required stable contexts. SDK run
+<https://github.com/misofm/engine/actions/runs/33680447243> passed its substantive package,
+generated-surface, and headless closure in 2m43s; engine run
+<https://github.com/misofm/engine/actions/runs/33680447277> and browser run
+<https://github.com/misofm/engine/actions/runs/33680447251> passed only their classifiers and
+aggregate jobs while every heavy unrelated job skipped. PR #336 merged once as `97ffd966`.
+The resulting main push created only SDK run
+<https://github.com/misofm/engine/actions/runs/33680825154>, which passed its substantive job in
+2m50s and its aggregate without retry.
+
+A fresh 69-file tarball was packed from the exact qualified `dist` closure and extracted outside
+the repository. A plain lifecycle-enabled `npm pack` first reached the already-recorded local
+cross-host AudioWorklet digest mismatch before staging; no pin changed, and the already-qualified
+closure was packed with lifecycle scripts disabled rather than trusting locally different Wasm.
+With child `PATH` empty and the invocation working directory
+`/Users/bl/Desktop/between-the-doors`, that extracted executable rebuilt `ghost`, `play-me`, `war`,
+and `wide-open` using only relative input and output arguments plus `--overwrite` on the files this
+workflow had created. Every receipt preserved those relative arguments and reported the exact
+absolute sibling source/output paths in `resolvedPath`.
+
+All four session byte counts and SHA-256 values remained identical to issue #333's frozen dogfood
+record. After overwrite, the native validator again passed TOML grammar, typed model, session
+compilation, and builtins preparation for every document. This closes the real relative-path DX
+loop without a recursive batch mode, cache, or locator/playback claim. Issue #335 is complete once
+this evidence is upstream and its remote body/state are synchronized.
