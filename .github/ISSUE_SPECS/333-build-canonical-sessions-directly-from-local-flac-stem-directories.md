@@ -281,8 +281,27 @@ empty/non-FLAC/symlink/truncated refusals, no-clobber preflight, packaged decode
 one stem read each, exactly two Wasm compiles (one decoder plus one engine), and changed-source
 non-publication. Existing request-mode and publication tests remain green.
 
-Fresh Sol-high adversarial review, the real 44.1 kHz four-leaf dogfood, named red mutations, and the
-frozen one-warmup/two-measurement performance record remain pending. A Darwin arm64 rebuild with the
-pinned Rust 1.97.1 produced byte-identical-size but digest-different decoder and AudioWorklet Wasm;
-no pin was changed, and all attempt evidence used the qualified CI bytes. Cross-host artifact
-reproducibility is a separate delivery-tooling risk for review rather than evidence for this slice.
+The real 44.1 kHz four-leaf dogfood and frozen one-warmup/two-measurement performance record remain
+pending. A Darwin arm64 rebuild with the pinned Rust 1.97.1 produced byte-identical-size but
+digest-different decoder and AudioWorklet Wasm; no pin was changed, and all attempt evidence used
+the qualified CI bytes. Cross-host artifact reproducibility is a separate delivery-tooling risk
+rather than evidence for this slice.
+
+### Attempt 2 — Sol-high adversarial PASS
+
+Fresh Sol-high review returned **PASS** on exact checkpoint `86ae00c0`. In an independent extracted
+build with the decoder made unavailable, the reviewer reproduced the former existing-source,
+new-in-leaf, and symlink-alias cases; every case refused before decoder work with exit 5, empty
+stdout, `output.publish`, and `effect: "not_applied"`. The source SHA-256 remained unchanged and
+both new destinations remained absent. Physical `(dev, ino)` comparison correctly follows aliases,
+and candidate/base request-mode bytes and statuses matched for valid raw output, invalid JSON,
+invalid UTF-8, an unknown flag, and a refused request shape.
+
+The reviewer independently moved decoder loading into the three-file loop. The structural gate
+failed exactly at `{ compiles: 4, instantiates: 4 }` versus `{ 2, 2 }`, while stem reads remained
+three. The exact package gate passed 19/19 CLI tests and standalone tarball smoke; strict types,
+generated/deletion checks, FLAC provenance/vectors, routing checker/mutations, and full headless
+129 pass / 0 fail / one Darwin capability skip were green. Attempt-2 scope is exactly three files,
+the cumulative range classifies `sdk`, and the shared worktree remained clean. The frozen
+performance measurement, real four-leaf dogfood, and remote SDK-only PR rollout remain rollout
+steps, not review findings.
