@@ -51,8 +51,7 @@ function fromPromise<A>(
   });
 }
 
-/** Open a caller-owned headless engine. Prefer `scopedOfflineEngine` inside an Effect scope. */
-export function openOfflineEngine(
+function acquireOfflineEngine(
   document: SessionDocument,
   options: OfflineEngineOptions = {},
 ): Effect.Effect<OfflineEngine, EngineEffectError> {
@@ -65,13 +64,12 @@ export function scopedOfflineEngine(
   options: OfflineEngineOptions = {},
 ): Effect.Effect<OfflineEngine, EngineEffectError, Scope.Scope> {
   return Effect.acquireRelease(
-    openOfflineEngine(document, options),
+    acquireOfflineEngine(document, options),
     (engine) => Effect.sync(() => engine.dispose()),
   );
 }
 
-/** Open a caller-owned browser engine. Prefer `scopedBrowserEngine` inside an Effect scope. */
-export function openBrowserEngine(
+function acquireBrowserEngine(
   options: CreateEngineOptions,
 ): Effect.Effect<BrowserEngine, EngineEffectError> {
   return fromPromise("openBrowser", () => createEngine(options));
@@ -82,7 +80,7 @@ export function scopedBrowserEngine(
   options: CreateEngineOptions,
 ): Effect.Effect<BrowserEngine, EngineEffectError, Scope.Scope> {
   return Effect.acquireRelease(
-    openBrowserEngine(options),
+    acquireBrowserEngine(options),
     (engine) => Effect.promise(() => engine.close()),
   );
 }
@@ -92,5 +90,10 @@ export function submitConsole(
   console: EngineConsole,
   ...edits: readonly LaneEdit[]
 ): Effect.Effect<CommandReport, EngineEffectError> {
-  return fromPromise("submitConsole", () => console.submit(...edits));
+  // MessagePort and direct-Wasm submissions cannot be cancelled after dispatch. Mask interruption
+  // until the acknowledgement settles so a surrounding scope cannot close the engine with a
+  // mutation still in flight. A pending interrupt is delivered immediately after settlement.
+  return Effect.uninterruptible(
+    fromPromise("submitConsole", () => console.submit(...edits)),
+  );
 }

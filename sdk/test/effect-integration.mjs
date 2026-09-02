@@ -11,8 +11,6 @@ import { MisoEngineError } from "../src/core/errors.ts";
 import { scratchBootInWorker } from "../src/browser/engine.ts";
 import {
   EngineEffectError,
-  openBrowserEngine,
-  openOfflineEngine,
   scopedBrowserEngine,
   scopedOfflineEngine,
   submitConsole,
@@ -61,40 +59,40 @@ describe("issue 323 -- optional Effect lifecycle adapter", () => {
   });
 
   test("acquisition rejection retains its typed operation and original engine cause", async () => {
-    const failure = await Effect.runPromise(Effect.flip(openOfflineEngine("not Session V1", { asset })));
+    const failure = await Effect.runPromise(Effect.flip(Effect.scoped(
+      scopedOfflineEngine("not Session V1", { asset }),
+    )));
     assert.ok(failure instanceof EngineEffectError);
     assert.equal(failure.operation, "openOffline");
     assert.ok(failure.cause instanceof MisoEngineError);
 
     const browserCause = new Error("scratch worker failed");
-    const browserFailure = await Effect.runPromise(Effect.flip(openBrowserEngine({
+    const browserFailure = await Effect.runPromise(Effect.flip(Effect.scoped(scopedBrowserEngine({
       document: sessionDocument(),
       scratchBoot: async () => { throw browserCause; },
       createContext: () => { throw new Error("must not be reached"); },
       createHost: async () => { throw new Error("must not be reached"); },
-    })));
+    }))));
     assert.ok(browserFailure instanceof EngineEffectError);
     assert.equal(browserFailure.operation, "openBrowser");
     assert.equal(browserFailure.cause, browserCause);
   });
 
   test("an engine refusal remains success, while a transport rejection is typed", async () => {
-    const engine = await Effect.runPromise(openOfflineEngine(sessionDocument(), {
-      asset,
-      console: { commandQueueRecords: 8 },
-    }));
-    try {
+    await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
+      const engine = yield* scopedOfflineEngine(sessionDocument(), {
+        asset,
+        console: { commandQueueRecords: 8 },
+      });
       const console = engine.console();
-      const report = await Effect.runPromise(submitConsole(
+      const report = yield* submitConsole(
         console,
         console.edit.track("t").effect("simd1", 99, "miso.compressor").bypass(true),
-      ));
+      );
       assert.equal(report.ok, false);
       assert.equal(report.admitted, 0);
       assert.equal(report.reasonName, "unknownEffect");
-    } finally {
-      engine.dispose();
-    }
+    })));
 
     const cause = new Error("transport never acknowledged");
     let rejectTransport;
@@ -118,6 +116,40 @@ describe("issue 323 -- optional Effect lifecycle adapter", () => {
     assert.ok(failure instanceof EngineEffectError);
     assert.equal(failure.operation, "submitConsole");
     assert.equal(failure.cause, cause);
+
+    let resolveAck;
+    const ack = new Promise((resolve) => { resolveAck = resolve; });
+    const acknowledging = new EngineConsole(
+      { tracks: ["t"], sources: [], metersAttached: false },
+      () => ack,
+    );
+    const fiber = Effect.runFork(submitConsole(
+      acknowledging,
+      acknowledging.edit.track("t").faderDb(-6),
+    ));
+    let interruptCompleted = false;
+    const interrupted = Effect.runPromise(Fiber.interrupt(fiber)).then((exit) => {
+      interruptCompleted = true;
+      return exit;
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(
+      interruptCompleted,
+      false,
+      "interruption cannot detach from an in-flight mutation",
+    );
+    resolveAck({
+      ok: true,
+      result: 0,
+      code: "ok",
+      reason: 0,
+      reasonName: "none",
+      rejectedIndex: 0,
+      admitted: 1,
+      appliedAtSample: 0n,
+    });
+    const interruptedExit = await interrupted;
+    assert.equal(interruptedExit._tag, "Failure", "the pending interrupt is delivered after ack");
   });
 
   test("a scoped browser engine closes host then context", async () => {

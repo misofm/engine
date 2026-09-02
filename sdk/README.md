@@ -178,6 +178,11 @@ failed boundary and whose `cause` retains the original error. An engine refusal 
 successful `CommandReport`, because admission decisions are protocol data rather than transport
 failures.
 
+After a console transaction is dispatched, `submitConsole` masks fiber interruption until the
+transport acknowledgement settles. Neither the direct Wasm ABI nor MessagePort can cancel an
+accepted mutation, so returning a timeout/interruption first would make application state
+ambiguous; any pending interrupt is delivered immediately after the acknowledgement.
+
 Effect is deliberately absent from render, PCM submission, Wasm calls, wire encoding, and edit
 construction. At this release's qualification, the v4 documentation described the intended
 programming model but npm still tagged v4 as a release candidate; this production entry therefore

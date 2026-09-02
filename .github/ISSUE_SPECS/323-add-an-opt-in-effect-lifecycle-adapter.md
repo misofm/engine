@@ -15,9 +15,9 @@ semantic console from #322; it does not replace that console or change its trans
 - `@misofm/engine/effect` is an explicit optional entry point backed by the stable Effect v3 line.
   Effect is an optional peer dependency and an exact development dependency; importing the root,
   headless, browser, or asset entries does not resolve or load it.
-- The entry exposes typed Effect programs for opening headless and browser engines, scoped variants
-  that always release them, and semantic-console submission. Expected Promise rejections enter a
-  named `EngineEffectError` channel carrying the failed operation and original cause.
+- The entry exposes typed scoped acquisition for headless and browser engines plus semantic-console
+  submission. Expected Promise rejections enter a named `EngineEffectError` channel carrying the
+  failed operation and original cause.
 - An engine command refusal remains a successful `CommandReport`, not an Effect failure. The engine
   is the authority on admission, and callers must be able to inspect generated result/reason names,
   rejected index, admitted count, and application sample.
@@ -62,9 +62,9 @@ telemetry service, source pump, registry publication, or engine/host byte change
 - Effect belongs at the ownership and asynchronous-I/O boundary. The engine's synchronous render
   and command encoding are already explicit, bounded operations; wrapping them in a scheduler would
   obscure rather than standardize the real-time contract.
-- Scoped programs are the preferred Effect API. Unscoped open programs remain available because
-  application-owned runtimes sometimes need an engine that outlives one scope, but their returned
-  engine retains the same explicit `dispose()`/`close()` contract as the Promise surface.
+- Effect acquisition is scoped-only. A non-cancellable Promise may finish opening an engine after
+  its fiber is interrupted, losing the only reference before a finalizer is registered. The
+  existing Promise constructors are the explicit caller-owned API for engines that outlive a scope.
 
 ## Evidence
 
@@ -98,8 +98,28 @@ Local gates on 2026-09-02:
   without changing its pin. Upstream Linux artifact and release jobs remain authoritative for the
   pinned digest.
 
-Adversarial review:
+Adversarial review of attempt 1:
 
-- PASS locally on optional-peer isolation, typed failures, scoped release on all exits, browser
-  close idempotence/failure cleanup, and the acked-batch question. Final closure requires the
-  implementation commit's upstream main, browser, and release workflows.
+- HOLD: `Effect.tryPromise` is interruptible while the host Promise is not cancellable. An unscoped
+  open could finish after interruption and leak its engine, and an interrupted command fiber could
+  detach while its mutation remained in flight. Packaging, typing, and lifecycle finalizers passed.
+
+Implementation revision attempt 2:
+
+- Removed unscoped Effect acquisition; the established Promise constructors remain the
+  caller-owned lifecycle. Scoped acquisition cannot lose ownership between open and finalizer
+  registration.
+- Made semantic submission uninterruptible after dispatch. A new deferred-ack probe interrupts its
+  fiber, proves interruption does not complete before the transport acknowledgement, then proves
+  the pending interrupt is delivered after settlement.
+
+Adversarial review of attempt 2:
+
+- PASS locally. Strict types and all 5 lifecycle tests pass after the revision. The package gate
+  passes against the exact pinned artifact uploaded by browser qualification run
+  [33602511772](https://github.com/misofm/engine/actions/runs/33602511772): 61-file tarball,
+  939.6 kB packed / 3.5 MB unpacked.
+- The cancellation probe now establishes the transaction rule directly: interruption requested
+  after dispatch remains pending until transport acknowledgement, then is delivered. An Effect
+  fiber can neither invent an ack nor leave a command outstanding while its scope releases.
+- Final closure requires the revision commit's upstream main, browser, and release workflows.

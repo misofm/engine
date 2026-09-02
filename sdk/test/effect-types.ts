@@ -8,21 +8,15 @@ import { EngineConsole } from "../src/core/console.ts";
 import type { OfflineEngine } from "../src/headless/engine.ts";
 import {
   type EngineEffectError,
-  openBrowserEngine,
-  openOfflineEngine,
   scopedBrowserEngine,
   scopedOfflineEngine,
   submitConsole,
 } from "../src/effect.ts";
 
-declare const browserOptions: Parameters<typeof openBrowserEngine>[0];
+declare const browserOptions: Parameters<typeof scopedBrowserEngine>[0];
 
-const openOffline: Effect.Effect<OfflineEngine, EngineEffectError> =
-  openOfflineEngine("session");
 const scopedOffline: Effect.Effect<OfflineEngine, EngineEffectError, Scope.Scope> =
   scopedOfflineEngine("session");
-const openBrowser: Effect.Effect<BrowserEngine, EngineEffectError> =
-  openBrowserEngine(browserOptions);
 const scopedBrowser: Effect.Effect<BrowserEngine, EngineEffectError, Scope.Scope> =
   scopedBrowserEngine(browserOptions);
 
@@ -44,4 +38,4 @@ const submission: Effect.Effect<CommandReport, EngineEffectError> = submitConsol
   console.edit.track("track").faderDb(-3),
 );
 
-void [openOffline, scopedOffline, openBrowser, scopedBrowser, submission];
+void [scopedOffline, scopedBrowser, submission];
