@@ -120,3 +120,34 @@ commit `1e477e12`: the one-row replacement is the smallest closable successor, b
 the vocabulary contract are explicit, the production implementation is frozen, and the inherited
 Linux, package, routing, aggregate, protection, and remote-synchronization gates remain mandatory.
 Implementation and adversarial evidence will be appended without weakening those gates.
+
+### One-row implementation evidence
+
+From clean checkpoint `fae8169d`, the subject-switch table now contains exactly one row for this
+fact: `MISO_ENGINE_SDK_ARTIFACTS_HEX`. The row specifies canonical lowercase, even-length ASCII
+hex of the absolute physical artifact-directory pathname bytes and states that the SDK helper
+decodes a byte `Buffer` path. The retired raw-path spelling is not retained as an active row. No
+production code, test, workflow, router, manifest, package file, pin, or other issue spec changed.
+
+Proportional local evidence on macOS on 2026-09-03:
+
+- `bash scripts/check-env-vocabulary.sh` passed with 99 documented/used names. An isolated
+  `git archive` of predecessor `d5a41c0e` remained red on the same gate, specifically reporting
+  undocumented `MISO_ENGINE_SDK_ARTIFACTS_HEX`; the current tree is green.
+- `scripts/test-env-vocabulary.sh` reached its existing GNU-only `sed -i` call and aborted under
+  native BSD `sed` (`invalid command code f`). Without changing the repository, the exact suite
+  passed through a disposable shim that maps only GNU `sed -i` syntax to BSD `sed -i ''`, proving
+  its undocumented-use, unused-row, deleted-row, prefix, synonym, and missing-file mutations.
+- `node --test sdk/test/headless-path-evals.mjs` passed 18 tests with zero failures and one allowed
+  APFS invalid-UTF-8 skip (`EPERM`). The Linux no-skip obligation remains for remote qualification.
+- SDK generated-surface, deletion-policy, and strict type/mirror gates passed. The path-routing
+  workflow checker and its mutation suite passed, all workflow YAML parsed with `yq`, and the exact
+  two documentation/evidence paths classify `evidence` for pull-request and push inputs.
+- Bash syntax passed for the headless and vocabulary scripts, and ShellCheck passed the inherited
+  headless script. Whole-set ShellCheck remains nonzero on two pre-existing SC2016 informational
+  findings in the vocabulary scripts; neither diagnostic is introduced by this documentation-only
+  change. `git diff --check` passed.
+
+This evidence does not claim the required fresh Sol/high review, Linux remote qualification,
+aggregate-context rollout, branch-protection mutation, post-routing observations, GitHub
+synchronization, or issue closure.
