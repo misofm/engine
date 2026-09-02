@@ -6,6 +6,9 @@
   "type": "module",
   "types": "./dist/index.d.ts",
   "main": "./dist/index.js",
+  "bin": {
+    "enginectl": "./dist/enginectl.js"
+  },
   "sideEffects": false,
   "repository": {
     "type": "git",

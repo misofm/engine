@@ -1,6 +1,7 @@
 /** Issue #320: prove the packed SDK is self-contained and boots its embedded Wasm. */
 
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { mkdir, readFile, readdir, symlink, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -20,6 +21,7 @@ assert.equal(manifest.dependencies, undefined);
 assert.equal(manifest.peerDependencies, undefined);
 assert.equal(manifest.peerDependenciesMeta, undefined);
 assert.equal(manifest.devDependencies?.effect, undefined);
+assert.deepEqual(manifest.bin, { enginectl: "./dist/enginectl.js" });
 
 const imported = {};
 for (const subpath of [".", "./headless", "./browser", "./assets"]) {
@@ -90,6 +92,40 @@ try {
   engine.dispose();
   sibling.dispose();
 }
+
+// The packed executable uses only this extraction's embedded artifacts and emits raw TOML.
+const cliRequest = JSON.stringify({
+  schemaVersion: 1,
+  session: { id: "tarball.cli", sampleRateHz: 48_000 },
+  sources: [{
+    id: "stem",
+    spec: { channels: 2, bitDepth: "32f", frames: 480, content: `sha256:${"0".repeat(64)}` },
+  }],
+  tracks: [{ id: "track", spec: { source: "stem" } }],
+  outputs: ["main"],
+  routes: [{
+    id: "main",
+    source: { kind: "track", trackId: "track", tap: "post_matrix" },
+    destination: { kind: "output_input", outputId: "main" },
+  }],
+});
+const cli = spawn(
+  process.execPath,
+  [resolve(packageRoot, manifest.bin.enginectl), "session", "build", "--request", "-", "--output", "-"],
+  { stdio: ["pipe", "pipe", "pipe"] },
+);
+const cliStdout = [];
+const cliStderr = [];
+cli.stdout.on("data", (chunk) => cliStdout.push(chunk));
+cli.stderr.on("data", (chunk) => cliStderr.push(chunk));
+cli.stdin.end(cliRequest);
+const cliStatus = await new Promise((accept, reject) => {
+  cli.once("error", reject);
+  cli.once("close", accept);
+});
+assert.equal(cliStatus, 0, Buffer.concat(cliStderr).toString("utf8"));
+assert.equal(Buffer.concat(cliStderr).byteLength, 0);
+assert.match(Buffer.concat(cliStdout).toString("utf8"), /^schema_version = 1\n/);
 
 // Red mutation: the package manifest still names the original digest, so one changed byte must be
 // rejected before WebAssembly.compile can see it.

@@ -232,4 +232,25 @@ Each is an independently useful successor and cannot hold this slice open.
 
 ## Evidence
 
-Implementation and adversarial evidence will be recorded here before closure.
+### Attempt 1 — Sol medium
+
+The implementation adds the `enginectl` package bin, a strict bounded V1 JSON request decoder,
+translation exclusively through `session()` and `effect()`, lazy embedded-Wasm validation,
+structured machine errors, raw-TOML stdout, and same-directory atomic file publication. The
+package gate now exercises the built executable, and the extracted-tarball smoke test proves the
+published CLI boots using only its embedded artifacts.
+
+Focused gates passed on 2026-09-02:
+
+- strict TypeScript compilation;
+- `scripts/sdk-package.sh build`, including 6/6 black-box `enginectl` tests;
+- `scripts/sdk-package.sh check`, including extracted-tarball CLI boot;
+- the established headless SDK suite, 111/111; and
+- `git diff --check`.
+
+The no-clobber publication uses a same-directory hard link to obtain an atomic, race-free create
+on the qualified macOS filesystem. A filesystem that does not support the link operation refuses
+safely with exit 5 and leaves the destination absent; portable fallback behavior remains outside
+this issue's V1 contract.
+
+Sol/high adversarial verification remains required before PASS and closure.

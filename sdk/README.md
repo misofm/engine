@@ -32,6 +32,36 @@ Import through those barrels; do not deep-import `src/core/*`. Every symbol that
 be reached by a deep path is on a barrel as of #278, and `sdk/test/barrel-surface.ts` fails
 compilation if one stops being reachable or starts resolving to a different declaration.
 
+## `enginectl session build`
+
+The package installs `enginectl`, a Node 20+ machine interface for producing one canonical,
+engine-accepted Session V1 file. Nested session structure stays in a bounded JSON request rather
+than in a flag mini-language:
+
+```sh
+enginectl session build --request request.json --output session.toml
+enginectl session build --request - --output - < request.json
+```
+
+The request has `schemaVersion: 1`, a required `session` object, and optional `sources`, `tracks`,
+`submixes`, `outputs`, `routes`, and `automation` arrays. Sources and tracks are `{ id, spec }`;
+rack entries are `{ effectId, parameters?, options? }`. Automation sample positions are canonical
+unsigned decimal strings such as `"480"`, never JSON numbers. Unknown structural keys are refused.
+The complete input is limited to 4 MiB and must be valid UTF-8 JSON.
+
+`--output -` writes exactly the canonical TOML, including its final LF. A path writes a
+same-directory temporary file and publishes it atomically only after the embedded Wasm engine has
+accepted the document; stdout then receives one compact JSON receipt with the caller's path, byte
+count, and SHA-256. Existing files, directories, and symlinks are preserved by default.
+`--overwrite` authorizes replacement of one filesystem destination and is invalid with stdout.
+
+The executable is always non-interactive: it never prompts, pages, opens another program, reads
+configuration or credentials, loads plugins, emits telemetry, or uses the network. Machine
+failures leave stdout empty and write one compact JSON document to stderr. Exit status is `2` for
+command/flag usage, `3` for request or builder refusal, `4` for embedded-engine refusal, `5` for
+output refusal, and `70` for an unexpected internal or packaged-asset failure. Success, help, and
+version use `0`.
+
 ### Pinning the embedded engine
 
 A package release is pinned at both ends:

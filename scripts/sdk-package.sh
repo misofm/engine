@@ -39,7 +39,9 @@ fi
 bash "$repo_root/scripts/check-sdk-generated.sh"
 rm -rf -- "$sdk_root/dist"
 "$sdk_root/node_modules/.bin/tsc" --project "$sdk_root/tsconfig.build.json"
+chmod +x "$sdk_root/dist/enginectl.js"
 node "$sdk_root/codegen/stage-package.mjs" "$artifact_dir"
+ENGINECTL="$sdk_root/dist/enginectl.js" node --test "$sdk_root/test/enginectl-cli.mjs"
 
 if [[ $mode == build ]]; then
   echo "SDK package tree prepared at $sdk_root/dist"
