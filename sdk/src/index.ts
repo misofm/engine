@@ -2,6 +2,7 @@
 export * from "./generated/catalog.ts";
 export * from "./generated/abi.ts";
 export * from "./generated/provenance.ts";
+export * from "./assets.ts";
 export * from "./core/abi.ts";
 export * from "./core/agent.ts";
 export * from "./core/asset.ts";

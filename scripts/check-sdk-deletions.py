@@ -80,7 +80,7 @@ import sys
 SDK = "sdk"
 # Generated, vendored, or shipped-asset trees. `src/generated/` is emitted from the engine's own
 # `offset_of!` output and is the one place a numeric offset belongs; the other two are not ours.
-SKIPPED_PREFIXES = ("sdk/assets/", "sdk/node_modules/", "sdk/src/generated/")
+SKIPPED_PREFIXES = ("sdk/assets/", "sdk/dist/", "sdk/node_modules/", "sdk/src/generated/")
 SCANNED_SUFFIXES = (".ts", ".mjs", ".js")
 
 GENERATED_ABI = "sdk/src/generated/abi.ts"

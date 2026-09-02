@@ -62,4 +62,33 @@ signing, or application migration is in scope.
 
 ## Evidence
 
-Pending implementation and adversarial review.
+Implementation attempt 1:
+
+- `@misofm/engine@0.1.0` now emits ESM and declarations for `.`, `headless`, `browser`, and
+  `assets`; it is public-package shaped and limits the tarball to the prepared `dist/` tree.
+- `scripts/sdk-package.sh` reuses one Engine artifact directory, stages the six provenance-named
+  artifacts, writes their SHA-256/byte manifest, packs, extracts, and runs the consumer smoke.
+- The headless default verifies and compiles the packaged Wasm once per SDK lifetime; two default
+  engines were proven to share the same `MisoEngineAsset`. Explicit asset injection is unchanged.
+- The packed browser engine now defaults both artifact URLs to its own package and exposes the
+  shipped host type instead of `unknown`.
+
+Local gates on 2026-09-02:
+
+- `check-sdk-headless.sh`: PASS, 101 tests / 25 suites against a live locally built Wasm.
+- `check-sdk-types.sh`: PASS, including the shipped-host mirror.
+- `check-sdk-deletions.py`: PASS over 35 source files.
+- `sdk-package.sh check`: PASS; 55-file tarball, 932.4 kB packed / 3.5 MB unpacked, all four ESM
+  entries import, a fresh strict TypeScript consumer resolves every declaration dependency, the
+  embedded engine boots and renders, and a one-byte Wasm mutation refuses as `sdk.asset.digest`
+  before compilation.
+- Default bundled-asset caching: PASS; two sessions share one verified compilation.
+
+Adversarial review:
+
+- PASS on packaging closure, runtime/declaration resolution, asset integrity, failure retry, and
+  explicit-asset compatibility.
+- The repository's pinned AudioWorklet digest does not reproduce in this managed macOS sandbox;
+  commit `f0509c3f` records the same known sandbox limitation. The pin was neither changed nor
+  bypassed in product code. Final PASS and issue closure therefore require the upstream `wasm` CI
+  job, where the package check reuses the exact artifact after its existing pin and ABI gates pass.

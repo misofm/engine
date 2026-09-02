@@ -1,5 +1,5 @@
 /**
- * Issue #278 gaps 1 and 2: the package's entry points are real, and the barrels carry them.
+ * Issues #278 and #320: the package's entry points are built, and the barrels carry them.
  *
  * # What went wrong, and why a grep would not have caught it
  *
@@ -10,11 +10,10 @@
  * relative path and never exercise the package's public specifiers at all. The one consumer-facing
  * example in `sdk/README.md` used the root import and had been broken since it was written.
  *
- * The fix is the vendoring contract (`sdk/README.md`, "Consuming this package"): the three entry
- * points name the three real source barrels, and an app vendors `sdk/src/**` and imports through
- * them. This eval is what makes that a contract rather than a paragraph: it resolves every declared
- * subpath through Node's own resolver, which fails on a missing file, so a future `exports` entry
- * that points at an artifact nobody builds cannot pass.
+ * #320 replaces the temporary vendoring contract with a real build. This hermetic suite does not
+ * have TypeScript installed and therefore checks the export-map SHAPE against the source barrels;
+ * `package-tarball-smoke.mjs` is the independent packed-artifact gate that resolves and imports the
+ * emitted files after `npm ci`.
  *
  * # The barrel half
  *
@@ -28,7 +27,6 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { describe, test } from "node:test";
 import { resolve } from "node:path";
-import { pathToFileURL } from "node:url";
 
 import * as rootBarrel from "../src/index.ts";
 import * as browserBarrel from "../src/browser/index.ts";
@@ -42,33 +40,30 @@ import * as writer from "../src/core/writer.ts";
 const SDK_ROOT = resolve(import.meta.dirname, "..");
 
 describe("package entry points", () => {
-  test("every declared subpath resolves to a file that exists", async () => {
+  test("every declared code subpath names emitted ESM and declarations", async () => {
     const manifest = JSON.parse(await readFile(resolve(SDK_ROOT, "package.json"), "utf8"));
     const subpaths = Object.entries(manifest.exports);
     assert.deepEqual(
       subpaths.map(([subpath]) => subpath),
-      [".", "./headless", "./browser"],
-      "the three entry points are the three barrels",
+      [".", "./headless", "./browser", "./assets", "./package.json"],
+      "the four code entries plus package metadata are the public package surface",
     );
     for (const [subpath, target] of subpaths) {
+      if (subpath === "./package.json") {
+        assert.equal(target, "./package.json");
+        continue;
+      }
       assert.equal(
-        typeof target,
+        typeof target.import,
         "string",
-        `${subpath} is a plain target: there is no build, so there is no condition to branch on`,
+        `${subpath} has an ESM import target`,
       );
-      assert.doesNotMatch(
-        target,
-        /(^|\/)dist(\/|$)/,
-        `${subpath} points at ./dist, which no script in this repo produces`,
-      );
-      // `import()` runs Node's resolver and its loader: a target that does not exist throws
-      // ERR_MODULE_NOT_FOUND here, which is the failure the dist map used to hand a consumer.
-      const module = await import(pathToFileURL(resolve(SDK_ROOT, target)).href);
-      assert.ok(
-        Object.keys(module).length > 0,
-        `${subpath} resolved but exported nothing`,
-      );
+      assert.equal(typeof target.types, "string", `${subpath} has a declaration target`);
+      assert.match(target.import, /^\.\/dist\/.*\.js$/);
+      assert.match(target.types, /^\.\/dist\/.*\.d\.ts$/);
     }
+    assert.equal(manifest.private, undefined, "the SDK is publishable");
+    assert.deepEqual(manifest.files, ["dist"], "only the prepared package tree is published");
   });
 
   test("every import example in the README resolves", async () => {
@@ -83,9 +78,12 @@ describe("package entry points", () => {
     assert.ok(examples.length >= 4, "the README still carries its import examples");
     for (const [, bindings, specifier] of examples) {
       const subpath = specifier.replace("@misofm/engine", ".").replace("./", "./");
-      const target = manifest.exports[subpath === "." ? "." : subpath];
-      assert.ok(target !== undefined, `README imports an undeclared subpath: ${specifier}`);
-      const module = await import(pathToFileURL(resolve(SDK_ROOT, target)).href);
+      assert.ok(manifest.exports[subpath === "." ? "." : subpath] !== undefined,
+        `README imports an undeclared subpath: ${specifier}`);
+      const module = subpath === "." ? rootBarrel
+        : subpath === "./headless" ? headlessBarrel
+          : subpath === "./browser" ? browserBarrel
+            : await import("../src/assets.ts");
       for (const binding of bindings.split(",").map((name) => name.trim())) {
         if (binding.length === 0) continue;
         assert.ok(binding in module, `${specifier} does not export ${binding}`);
@@ -94,9 +92,7 @@ describe("package entry points", () => {
   });
 
   test("the root entry is the module the evals deep-import", async () => {
-    const manifest = JSON.parse(await readFile(resolve(SDK_ROOT, "package.json"), "utf8"));
-    const root = await import(pathToFileURL(resolve(SDK_ROOT, manifest.exports["."])).href);
-    assert.equal(root.parameter, rootBarrel.parameter);
+    assert.equal(rootBarrel.parameter, agent.parameter);
   });
 });
 

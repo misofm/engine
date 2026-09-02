@@ -428,6 +428,12 @@ jobs:
           # Both were previously reachable only from scripts/sweep.sh, which nobody runs.
           python3 -B scripts/check-browser-expected-resources.py --artifacts "$artifacts"
           bash scripts/check-sdk-headless.sh "$artifacts"
+          # Issue #320: build the emitted JS/declarations once, stage this exact already-gated
+          # artifact closure into the package, and prove a fresh tarball boots it. Keeping this in
+          # the artifact step avoids a second Wasm build and makes the bytes qualified above the
+          # bytes the package actually carries.
+          npm ci --prefix sdk
+          bash scripts/sdk-package.sh check "$artifacts"
           ls -l "$artifacts"
       - name: Browser expected-resources tripwire self-test
         run: python3 -B scripts/check-browser-expected-resources.py --self-test

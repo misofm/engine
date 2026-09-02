@@ -11,6 +11,8 @@ import {
   workletBootOptions,
 } from "./policy.ts";
 import type { BrowserBootPolicy } from "./policy.ts";
+import { BUNDLED_ENGINE_ASSETS } from "../assets.ts";
+import type { MisoAudioWorkletHost } from "./shipped-host.d.ts";
 
 /**
  * The browser entry (issue #243 S3, consuming #240 S5's sealed choreography).
@@ -64,8 +66,8 @@ export interface CreateEngineOptions {
    */
   readonly sources?: readonly { readonly id: string; readonly spec: SourceSpec }[];
   /** Release URLs, from the same release as the module bytes. */
-  readonly simd128ModuleUrl: string;
-  readonly workletModuleUrl: string;
+  readonly simd128ModuleUrl?: string;
+  readonly workletModuleUrl?: string;
   /** Constructs an `AudioContext` at the requested rate. Injected so the entry stays testable. */
   readonly createContext: (options: {
     readonly sampleRate: number;
@@ -83,7 +85,7 @@ export interface CreateEngineOptions {
     readonly options: ReturnType<typeof workletBootOptions>;
     readonly simd128ModuleUrl: string;
     readonly workletModuleUrl: string;
-  }) => Promise<unknown>;
+  }) => Promise<MisoAudioWorkletHost>;
   readonly policy?: BrowserBootPolicy;
   /** How many construct-verify-close-retry rounds to allow. */
   readonly contextAttempts?: number;
@@ -92,7 +94,7 @@ export interface CreateEngineOptions {
 export interface BrowserEngine {
   readonly shape: SessionShape;
   readonly context: AudioContextLike;
-  readonly host: unknown;
+  readonly host: MisoAudioWorkletHost;
 }
 
 function documentBytes(document: CreateEngineOptions["document"]): Uint8Array<ArrayBuffer> {
@@ -128,6 +130,8 @@ function documentBytes(document: CreateEngineOptions["document"]): Uint8Array<Ar
 export async function createEngine(options: CreateEngineOptions): Promise<BrowserEngine> {
   const document = documentBytes(options.document);
   const policy = options.policy ?? {};
+  const simd128ModuleUrl = options.simd128ModuleUrl ?? BUNDLED_ENGINE_ASSETS.wasm.href;
+  const workletModuleUrl = options.workletModuleUrl ?? BUNDLED_ENGINE_ASSETS.workletModule.href;
 
   // 1. Web delivery scope.
   if (options.sources !== undefined) assertWebDeliverableSources(options.sources);
@@ -184,8 +188,8 @@ export async function createEngine(options: CreateEngineOptions): Promise<Browse
         sampleRateHz: shape.sampleRateHz,
         quantumFrames: shape.quantumFrames,
       }),
-      simd128ModuleUrl: options.simd128ModuleUrl,
-      workletModuleUrl: options.workletModuleUrl,
+      simd128ModuleUrl,
+      workletModuleUrl,
     });
     return Object.freeze({ shape, context, host });
   } catch (error) {

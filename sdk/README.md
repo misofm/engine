@@ -3,22 +3,21 @@
 The TypeScript SDK for Engine V1: a Session V1 builder, a boot-v1 host for Node and the browser,
 and an agent-facing parameter surface that speaks decimals and ranks rather than floats.
 
-## Consuming this package: vendored source, not a build
+## Installing the package
 
-**There is no `dist/`, and there is not going to be one.** `tsconfig.json` is `noEmit`, the package
-is `private`, and the contract is that a consuming app vendors `sdk/src/**` as bundled source.
-Issue #278 recorded the drift this created: the `exports` map pointed at `./dist/index.js` and two
-siblings that no script produced, so all three public specifiers resolved to nothing while every
-eval in `sdk/test/` kept passing, because they deep-import `../src/**` by relative path. The map
-now names the three files that actually exist, and `sdk/test/package-evals.mjs` resolves each one
-through Node's resolver so a subpath pointing at an unbuilt artifact fails a gate instead of a
-consumer.
+```sh
+npm install @misofm/engine
+```
 
-Vendoring rather than building is the smaller correct answer here, not a concession. The SDK is
-source with no runtime dependencies and `erasableSyntaxOnly` set, so it type-strips under Node and
-compiles under any bundler as-is; a build step would add an emitted `.d.ts` surface to keep in sync
-with the transcription chain below, a second `tsconfig`, and a check proving the output still
-matches the source -- machinery whose entire benefit is saving a consumer one directory copy.
+The published package is a self-contained Engine V1 release: compiled ESM, declarations, the
+simd128 Wasm engine, the AudioWorklet modules, parameter metadata, ABI layout, and a manifest with
+the byte length and SHA-256 of every artifact. A Node or Bun headless consumer needs neither a Rust
+toolchain nor a separate engine download. Browser consumers receive package-relative artifact URLs,
+so the host and Wasm cannot silently come from different releases.
+
+`npm run build` prepares `dist/`; `npm run check:package` additionally packs it, imports every
+public entry from a fresh extraction, boots the embedded Wasm, renders one quantum, and proves a
+one-byte Wasm mutation is rejected by the manifest digest before compilation.
 
 The three entry points are the only supported import sites:
 
@@ -27,30 +26,26 @@ The three entry points are the only supported import sites:
 | `@misofm/engine` | `src/index.ts` | catalog, Session V1 builder, agent surface, `ConsoleWriter` |
 | `@misofm/engine/headless` | `src/headless/index.ts` | the Node/Bun offline engine |
 | `@misofm/engine/browser` | `src/browser/index.ts` | the Worker scratch boot, policy, host mirror |
+| `@misofm/engine/assets` | `src/assets.ts` | URLs and names for the embedded release artifacts |
 
 Import through those barrels; do not deep-import `src/core/*`. Every symbol that previously had to
 be reached by a deep path is on a barrel as of #278, and `sdk/test/barrel-surface.ts` fails
 compilation if one stops being reachable or starts resolving to a different declaration.
 
-### Pinning a vendored copy
+### Pinning the embedded engine
 
-A vendored tree is a copy that can silently fall behind the engine it was transcribed from, so pin
-it at both ends:
+A package release is pinned at both ends:
 
-- **Source provenance.** Record the engine commit the copy came from, and re-run
-  `scripts/check-sdk-generated.sh` at that commit before vendoring: it re-derives
+- **Source provenance.** The package build runs `scripts/check-sdk-generated.sh`: it re-derives
   `sdk/assets/*.json` from the Rust and `sdk/src/generated/*.ts` from those assets, and compares
-  byte for byte. A copy taken from a tree where that gate is red is a copy of a lie, and it will
-  read consistent to itself while disagreeing with the engine. `PROVENANCE` (from the root barrel)
-  carries what is source-derived -- the ABI version word, the schema ids, the artifact set -- so an
-  app can assert `PROVENANCE.abiVersion` against the release it ships beside.
-- **Artifact provenance.** `PROVENANCE` deliberately carries **no** content hash for the Wasm,
-  because a checked-in digest would pin one machine's build. The caller supplies its own:
-  `MisoEngineAsset.load(bytes, sha256)` verifies the module against the digest from *your* release
-  manifest and refuses with `sdk.asset.digest` on a mismatch, before compiling anything.
+  byte for byte. `PROVENANCE` carries the ABI version, schema IDs, and expected artifact set.
+- **Artifact provenance.** The package build copies the artifacts produced by
+  `scripts/build-web-audioworklet.sh` and writes `miso-engine-v1-sdk-manifest.json` beside them.
+  `loadBundledEngineAsset()` checks the Wasm's byte count and SHA-256 against that manifest before
+  compilation, then checks the module's exported ABI word before boot.
 
-That is the whole pattern: the generated modules are pinned to the engine by a gate you run, and
-the binary is pinned to your release by a digest you pass.
+Explicit `MisoEngineAsset.load(bytes, sha256)` remains available for deployments whose release
+manifest or content store is the artifact authority.
 
 ## What this package is not
 
@@ -93,12 +88,14 @@ Refresh with `npm run assets && npm run codegen` (needs `cargo`).
 ## Headless
 
 ```ts
-import { MisoEngineAsset, createOfflineEngine } from "@misofm/engine/headless";
+import { createOfflineEngine, loadBundledEngineAsset } from "@misofm/engine/headless";
 
-// One compile per SDK lifetime. An asset serves any number of engines.
-const asset = await MisoEngineAsset.load(wasmBytes, releaseManifest.sha256);
+// With no asset option, the package's embedded Wasm is verified and loaded automatically.
+const engine = await createOfflineEngine(document);
 
-const engine = await createOfflineEngine(document, { asset });
+// For several sessions, compile once and inject the shared asset:
+const asset = await loadBundledEngineAsset();
+const another = await createOfflineEngine(anotherDocument, { asset });
 const shape = engine.shape();   // the ENGINE's answer: rate, quantum, ring, sources, tracks
 
 for (let block = 0; block < blocks; block += 1) {

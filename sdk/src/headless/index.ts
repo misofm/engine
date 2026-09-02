@@ -1,5 +1,6 @@
 /** Node/Bun zero-import Wasm host for deterministic faster-than-realtime rendering. */
 export * from "./engine.ts";
+export * from "./assets.ts";
 export { MisoEngineAsset, sha256Hex } from "../core/asset.ts";
 export type { SessionShape, SourceShape, CommandReport } from "../core/boundary.ts";
 export type { BootOptions } from "../core/abi.ts";

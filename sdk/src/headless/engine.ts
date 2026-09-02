@@ -4,6 +4,21 @@ import { MAXIMUM_DOCUMENT_BYTES, WasmBoundary } from "../core/boundary.ts";
 import type { CommandReport, SessionShape } from "../core/boundary.ts";
 import { MisoEngineError, MisoUsageError } from "../core/errors.ts";
 import type { ErrorPhase, MisoDiagnostic, MisoErrorCode } from "../core/errors.ts";
+import { loadBundledEngineAsset } from "./assets.ts";
+
+let defaultAsset: Promise<MisoEngineAsset> | undefined;
+
+function defaultBundledAsset(): Promise<MisoEngineAsset> {
+  if (defaultAsset === undefined) {
+    defaultAsset = loadBundledEngineAsset().catch((error: unknown) => {
+      // A transient read failure must not poison the process forever. Successful compilation is
+      // cached for the SDK lifetime; a failed attempt may be retried after the deployment is fixed.
+      defaultAsset = undefined;
+      throw error;
+    });
+  }
+  return defaultAsset;
+}
 
 /**
  * Faster-than-realtime rendering over the browser engine, in Node or Bun.
@@ -44,8 +59,8 @@ function documentBytes(document: SessionDocument): Uint8Array<ArrayBuffer> {
 }
 
 export interface OfflineEngineOptions extends BootOptions {
-  /** The verified, compiled module. One asset serves any number of engines. */
-  readonly asset: MisoEngineAsset;
+  /** The verified, compiled module. Absent loads the engine embedded in this package. */
+  readonly asset?: MisoEngineAsset;
 }
 
 /** A booted headless session. */
@@ -60,9 +75,10 @@ export class OfflineEngine {
 
   static async create(
     document: SessionDocument,
-    options: OfflineEngineOptions,
+    options: OfflineEngineOptions = {},
   ): Promise<OfflineEngine> {
-    const { asset, ...boot } = options;
+    const { asset: suppliedAsset, ...boot } = options;
+    const asset = suppliedAsset ?? await defaultBundledAsset();
     return new OfflineEngine(asset, await WasmBoundary.boot(asset, documentBytes(document), boot));
   }
 
@@ -140,7 +156,7 @@ export class OfflineEngine {
 /** Boot a headless engine. */
 export async function createOfflineEngine(
   document: SessionDocument,
-  options: OfflineEngineOptions,
+  options: OfflineEngineOptions = {},
 ): Promise<OfflineEngine> {
   return OfflineEngine.create(document, options);
 }
@@ -178,7 +194,7 @@ export type ValidationResult =
  */
 export async function validate(
   document: SessionDocument,
-  options: OfflineEngineOptions,
+  options: OfflineEngineOptions = {},
 ): Promise<ValidationResult> {
   let engine: OfflineEngine | undefined;
   try {

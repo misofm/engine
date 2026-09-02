@@ -31,3 +31,4 @@
 # The SDK typecheck gate installs TypeScript here; the eval suites need no node_modules at all
 # because they run under Node native type stripping.
 sdk/node_modules/
+sdk/dist/

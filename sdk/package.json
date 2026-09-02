@@ -1,25 +1,60 @@
 {
   "name": "@misofm/engine",
-  "version": "0.0.0",
+  "version": "0.1.0",
+  "description": "Typed Engine V1 SDK for agentic music production",
   "license": "Apache-2.0",
-  "private": true,
   "type": "module",
+  "types": "./dist/index.d.ts",
+  "main": "./dist/index.js",
   "sideEffects": false,
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/misofm/engine.git",
+    "directory": "sdk"
+  },
+  "bugs": {
+    "url": "https://github.com/misofm/engine/issues"
+  },
+  "homepage": "https://github.com/misofm/engine/tree/main/sdk#readme",
+  "files": [
+    "dist"
+  ],
   "exports": {
-    ".": "./src/index.ts",
-    "./headless": "./src/headless/index.ts",
-    "./browser": "./src/browser/index.ts"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./headless": {
+      "types": "./dist/headless/index.d.ts",
+      "import": "./dist/headless/index.js"
+    },
+    "./browser": {
+      "types": "./dist/browser/index.d.ts",
+      "import": "./dist/browser/index.js"
+    },
+    "./assets": {
+      "types": "./dist/assets.d.ts",
+      "import": "./dist/assets.js"
+    },
+    "./package.json": "./package.json"
   },
   "engines": {
     "node": ">=20"
   },
   "devDependencies": {
+    "@types/node": "22.20.1",
     "typescript": "5.9.3"
   },
   "scripts": {
     "assets": "node ./codegen/assets.mjs",
+    "build": "bash ../scripts/sdk-package.sh build",
+    "check:package": "bash ../scripts/sdk-package.sh check",
     "codegen": "node ./codegen/generate.mjs",
     "check:assets": "node ./codegen/assets.mjs --check",
-    "check:generated": "node ./codegen/generate.mjs --check"
+    "check:generated": "node ./codegen/generate.mjs --check",
+    "prepack": "npm run build"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }
