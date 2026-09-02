@@ -291,3 +291,26 @@ Focused gates passed on 2026-09-02:
 - `git diff --check`.
 
 A fresh Sol/high adversarial verdict remains required before PASS and closure.
+
+### Attempt 2 adversarial verdict — Sol high: PASS
+
+Sol/high independently reviewed checkpoint `6242d7f6589ad9dd8b2e07a51ca90bb8fb5118b3`
+and reported no findings. Verification included:
+
+- strict TypeScript, the 9/9 CLI package/tarball suite, and the 111/111 headless SDK suite;
+- real early-closed stdout, callback-plus-error listener races, post-publication `applied`
+  reporting, and unavailable-stderr behavior without recursion or tracebacks;
+- missing and byte-corrupt Wasm as exit 70 packaged-asset failures, while a graph cycle remained
+  exit 4 with ordered engine diagnostics;
+- `__proto__` parameter refusal and nineteen nested unknown-key probes;
+- preservation of existing directory and symlink targets, explicit overwrite replacing only the
+  symlink entry, and absence of leaked temporary files; and
+- direct execution of the extracted `enginectl` shebang, executable mode, unchanged exports, zero
+  runtime/peer dependencies, and size/SHA-256 agreement for all six embedded artifacts.
+
+The acked-batch question is answered: builder and embedded-engine acceptance precede publication,
+publication precedes its receipt, and a reporting failure after publication truthfully reports
+`effect: "applied"` rather than claiming the mutation was dropped.
+
+PASS. The documented hard-link portability refusal and lack of crash-durable directory syncing are
+accepted V1 limits; live engine control remains a separate product slice.
