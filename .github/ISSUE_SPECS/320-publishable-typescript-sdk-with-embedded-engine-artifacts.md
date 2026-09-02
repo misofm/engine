@@ -90,5 +90,8 @@ Adversarial review:
   explicit-asset compatibility.
 - The repository's pinned AudioWorklet digest does not reproduce in this managed macOS sandbox;
   commit `f0509c3f` records the same known sandbox limitation. The pin was neither changed nor
-  bypassed in product code. Final PASS and issue closure therefore require the upstream `wasm` CI
-  job, where the package check reuses the exact artifact after its existing pin and ABI gates pass.
+  bypassed in product code. The upstream browser-Wasm job reused the exact artifact after its
+  existing pin, ABI, and native-parity gates and passed.
+- Final PASS: implementation commit `e9237134` passed CI run `33596094706`, browser qualification
+  run `33596094657`, and release-build run `33596094709`. The distributable package is therefore
+  self-contained and publishable with respect to this issue's artifact, packaging, and boot gates.
