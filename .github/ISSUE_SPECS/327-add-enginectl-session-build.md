@@ -254,3 +254,21 @@ safely with exit 5 and leaves the destination absent; portable fallback behavior
 this issue's V1 contract.
 
 Sol/high adversarial verification remains required before PASS and closure.
+
+### Attempt 1 adversarial verdict — Sol high: HOLD
+
+Independent verification kept the strict TypeScript gate, 6/6 CLI suite, 111/111 headless suite,
+fresh extracted-tarball smoke test, executable mode, zero-runtime-dependency package shape, rich
+builder equivalence, deterministic entity ordering, receipt digest, publication behavior, and
+normal help/version paths green. It found three release blockers:
+
+1. stdout `error` events can escape the callback-only writer as an unhandled Node traceback. An
+   early-closed help pipe exits 1, and a reporting failure after file publication can leave the
+   file applied without a truthful machine outcome;
+2. `validate()` returns packaged-asset failures as `ok: false`, so the CLI currently assigns exit
+   4 instead of the required exit 70 when embedded Wasm is absent or invalid; and
+3. copying effect parameters into an ordinary object allows the magic `__proto__` key to be
+   swallowed before `effect()` can refuse it.
+
+Attempt 2 must correct these paths and add direct regression coverage before another Sol/high
+adversarial verdict.
