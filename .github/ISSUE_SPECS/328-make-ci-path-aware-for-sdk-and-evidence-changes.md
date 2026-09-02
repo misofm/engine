@@ -328,3 +328,18 @@ Focused local evidence on 2026-09-03:
 All passed locally. No networked rollout, branch-protection mutation, commit, push, benchmark,
 timing, playback, or unrelated SDK dependency edit is part of this final correction. A final
 Sol/high adversarial verdict remains required; any further HOLD is the issue's terminal stop.
+
+### Attempt 3 adversarial verdict — Sol high: TERMINAL HOLD
+
+All routing, aggregate, YAML-seal, mutation, concurrency, and rollout-order gates passed except one
+unsafe path classification. `LICENSE` is treated as SDK-only and copied into the tarball, but the
+SDK lane checks only its presence. The canonical Apache-2.0 SHA-256 invariant remains in
+`scripts/check-workspace-policy.sh`, which belongs to the skipped engine host job. A one-byte
+license mutation therefore routes SDK and can pass the three new aggregates while corrupting the
+published legal artifact.
+
+After three attempts this issue stops without rollout. No branch-protection or upstream workflow
+mutation occurred. A bounded successor must rebrief the shared `LICENSE` ownership; the safe
+smallest ruling is to route it full so both the existing canonical workspace invariant and SDK
+package qualification run. The rest of this implementation is preserved as the successor's base,
+not declared complete here.
