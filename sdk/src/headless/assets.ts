@@ -52,7 +52,8 @@ function parseManifest(text: string): PackageAssetManifest {
     throw assetFailure("the bundled manifest does not match this SDK's generated contract", "");
   }
   const artifacts: Record<string, PackageAssetRecord> = {};
-  for (const name of PROVENANCE.artifacts) {
+  for (const name of Object.values(BUNDLED_ENGINE_FILES)) {
+    if (name === BUNDLED_ENGINE_FILES.manifest) continue;
     artifacts[name] = record((candidate.artifacts as Record<string, unknown>)[name], name);
   }
   return Object.freeze({

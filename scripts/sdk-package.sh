@@ -2,8 +2,8 @@
 # Issue #320: build or qualify the publishable @misofm/engine package.
 set -euo pipefail
 
-if (($# < 1 || $# > 2)) || [[ $1 != build && $1 != check ]]; then
-  echo "usage: $0 build|check [ARTIFACT_DIRECTORY]" >&2
+if (($# < 1 || $# > 3)) || [[ $1 != build && $1 != check ]]; then
+  echo "usage: $0 build|check [ENGINE_ARTIFACT_DIRECTORY [FLAC_ARTIFACT_DIRECTORY]]" >&2
   exit 2
 fi
 
@@ -14,10 +14,12 @@ artifact_dir=${2:-}
 owned_artifacts=""
 pack_dir=""
 unpack_dir=""
+owned_flac_artifacts=""
 cleanup() {
   [[ -z "$owned_artifacts" ]] || rm -rf -- "$owned_artifacts"
   [[ -z "$pack_dir" ]] || rm -rf -- "$pack_dir"
   [[ -z "$unpack_dir" ]] || rm -rf -- "$unpack_dir"
+  [[ -z "$owned_flac_artifacts" ]] || rm -rf -- "$owned_flac_artifacts"
 }
 trap cleanup EXIT
 
@@ -35,12 +37,22 @@ fi
   echo "artifact directory must be a non-symlink directory" >&2
   exit 2
 }
+flac_artifacts=${3:-}
+if [[ -z "$flac_artifacts" ]]; then
+  owned_flac_artifacts=$(mktemp -d)
+  flac_artifacts=$owned_flac_artifacts
+  bash "$repo_root/scripts/build-flac-decoder.sh" "$flac_artifacts"
+fi
+[[ -d "$flac_artifacts" && ! -L "$flac_artifacts" ]] || {
+  echo "FLAC artifact directory must be a non-symlink directory" >&2
+  exit 2
+}
 
 bash "$repo_root/scripts/check-sdk-generated.sh"
 rm -rf -- "$sdk_root/dist"
 "$sdk_root/node_modules/.bin/tsc" --project "$sdk_root/tsconfig.build.json"
 chmod +x "$sdk_root/dist/enginectl.js"
-node "$sdk_root/codegen/stage-package.mjs" "$artifact_dir"
+node "$sdk_root/codegen/stage-package.mjs" "$artifact_dir" "$flac_artifacts"
 ENGINECTL="$sdk_root/dist/enginectl.js" node --test "$sdk_root/test/enginectl-cli.mjs"
 
 if [[ $mode == build ]]; then

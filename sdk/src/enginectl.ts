@@ -2,12 +2,11 @@
 
 import { createHash, randomBytes } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { link, open, readFile, rename, unlink } from "node:fs/promises";
+import { link, lstat, open, readFile, rename, stat, unlink } from "node:fs/promises";
 import { basename, dirname, resolve } from "node:path";
 import process from "node:process";
 
 import { MisoEngineError, MisoUsageError } from "./core/errors.ts";
-import { sessionBuilderFromRequest } from "./cli/session-request.ts";
 
 const MAXIMUM_REQUEST_BYTES = 4 * 1024 * 1024;
 
@@ -17,6 +16,7 @@ interface ErrorExtra {
   readonly phase?: string;
   readonly result?: number;
   readonly diagnostics?: readonly unknown[];
+  readonly groups?: readonly string[];
 }
 
 class CliFailure extends Error {
@@ -57,11 +57,13 @@ Commands:
   build           Build and validate a canonical Session V1 document
 `;
 
-const BUILD_HELP = `Usage: enginectl session build --request PATH|- --output PATH|- [--overwrite]
+const BUILD_HELP = `Usage: enginectl session build (--request PATH|- | --stems DIRECTORY) --output PATH|- [options]
 
-Reads one strict, versioned JSON request and validates the generated canonical TOML with the
-embedded engine. PATH is resolved from the current directory; '-' selects stdin or raw stdout.
-Existing output is refused unless --overwrite is present. The command is always non-interactive.
+Builds canonical Session V1 TOML from either one strict JSON request or one leaf directory of
+FLAC stems, then validates it with the embedded engine. PATH is resolved from the current
+directory; '-' selects stdin or raw stdout. Stem sessions default their ID from the leaf directory
+and their quantum to 128; override with --session-id and --quantum-frames. Existing output is
+refused unless --overwrite is present. The command is always non-interactive.
 `;
 
 function usage(message: string): never {
@@ -69,15 +71,21 @@ function usage(message: string): never {
 }
 
 interface BuildArguments {
-  readonly request: string;
+  readonly request?: string;
+  readonly stems?: string;
   readonly output: string;
   readonly overwrite: boolean;
+  readonly sessionId?: string;
+  readonly quantumFrames?: number;
 }
 
 function parseBuildArguments(args: readonly string[]): BuildArguments | "help" {
   if (args.length === 1 && args[0] === "--help") return "help";
   let request: string | undefined;
+  let stems: string | undefined;
   let output: string | undefined;
+  let sessionId: string | undefined;
+  let quantumFrames: number | undefined;
   let overwrite = false;
   for (let index = 0; index < args.length; index += 1) {
     const flag = args[index];
@@ -86,7 +94,8 @@ function parseBuildArguments(args: readonly string[]): BuildArguments | "help" {
       overwrite = true;
       continue;
     }
-    if (flag !== "--request" && flag !== "--output") {
+    if (flag !== "--request" && flag !== "--stems" && flag !== "--output"
+      && flag !== "--session-id" && flag !== "--quantum-frames") {
       usage(flag?.startsWith("--") ? `unknown flag '${flag}'` : `unexpected operand '${String(flag)}'`);
     }
     const value = args[index + 1];
@@ -95,15 +104,43 @@ function parseBuildArguments(args: readonly string[]): BuildArguments | "help" {
     if (flag === "--request") {
       if (request !== undefined) usage("--request was specified more than once");
       request = value;
-    } else {
+    } else if (flag === "--stems") {
+      if (stems !== undefined) usage("--stems was specified more than once");
+      stems = value;
+    } else if (flag === "--output") {
       if (output !== undefined) usage("--output was specified more than once");
       output = value;
+    } else if (flag === "--session-id") {
+      if (sessionId !== undefined) usage("--session-id was specified more than once");
+      sessionId = value;
+    } else {
+      if (quantumFrames !== undefined) usage("--quantum-frames was specified more than once");
+      if (!/^[1-9][0-9]*$/.test(value)) usage("--quantum-frames requires a positive u32");
+      quantumFrames = Number(value);
+      if (!Number.isSafeInteger(quantumFrames) || quantumFrames > 0xffff_ffff) {
+        usage("--quantum-frames requires a positive u32");
+      }
     }
   }
-  if (request === undefined) usage("--request is required");
+  if ((request === undefined) === (stems === undefined)) {
+    usage("exactly one of --request and --stems is required");
+  }
   if (output === undefined) usage("--output is required");
   if (output === "-" && overwrite) usage("--overwrite cannot be used with --output -");
-  return { request, output, overwrite };
+  if (request !== undefined && (sessionId !== undefined || quantumFrames !== undefined)) {
+    usage("--session-id and --quantum-frames are valid only with --stems");
+  }
+  if (sessionId !== undefined && !/^[a-z][a-z0-9._-]{0,126}$/.test(sessionId)) {
+    usage("--session-id must match [a-z][a-z0-9._-]{0,126}");
+  }
+  return {
+    ...(request === undefined ? {} : { request }),
+    ...(stems === undefined ? {} : { stems }),
+    output,
+    overwrite,
+    ...(sessionId === undefined ? {} : { sessionId }),
+    ...(quantumFrames === undefined ? {} : { quantumFrames }),
+  };
 }
 
 async function boundedBytes(path: string): Promise<Uint8Array> {
@@ -239,16 +276,86 @@ async function publish(
   }
 }
 
-async function build(args: BuildArguments): Promise<void> {
-  const request = decodeRequest(await boundedBytes(args.request));
-  let toml: string;
+async function preflightStemOutput(args: BuildArguments): Promise<void> {
+  if (args.request !== undefined || args.output === "-") return;
+  const destination = resolve(args.output);
+  const parentPath = dirname(destination);
+  let parent: Awaited<ReturnType<typeof stat>>;
   try {
-    toml = sessionBuilderFromRequest(request).toToml();
-  } catch (error) {
-    if (error instanceof MisoUsageError || error instanceof TypeError) {
-      throw new CliFailure(3, "request.shape", error.message);
+    parent = await stat(parentPath, { bigint: true });
+    if (!parent.isDirectory()) {
+      throw new Error("parent is not a directory");
     }
-    throw error;
+  } catch (error) {
+    throw new CliFailure(5, "output.publish", `could not inspect '${args.output}': ${errorMessage(error)}`);
+  }
+  // Compare physical directory identities, not path spellings. `stat` follows a symlink parent,
+  // and `(dev, ino)` also collapses case aliases on a case-insensitive filesystem. This runs
+  // before discovery imports or loads the decoder, so an in-leaf destination cannot overwrite a
+  // source or make the next invocation reject the session file the previous invocation created.
+  try {
+    const stems = await stat(resolve(args.stems as string), { bigint: true });
+    if (stems.isDirectory() && stems.dev === parent.dev && stems.ino === parent.ino) {
+      throw new CliFailure(
+        5,
+        "output.publish",
+        `could not publish '${args.output}': output parent is the stems directory`,
+      );
+    }
+  } catch (error) {
+    if (error instanceof CliFailure) throw error;
+    // A missing/unreadable stems path is an input refusal, not an output refusal. Discovery below
+    // reports it through the established exit-3 `stems.read` contract.
+  }
+  try {
+    const existing = await lstat(destination);
+    if (args.overwrite && !existing.isDirectory()) return;
+  } catch (error) {
+    if (typeof error === "object" && error !== null && "code" in error
+      && (error as { readonly code?: unknown }).code === "ENOENT") return;
+    throw new CliFailure(5, "output.publish", `could not inspect '${args.output}': ${errorMessage(error)}`);
+  }
+  throw new CliFailure(
+    5,
+    "output.publish",
+    `could not publish '${args.output}': destination already exists${args.overwrite ? " as a directory" : ""}`,
+  );
+}
+
+async function build(args: BuildArguments): Promise<void> {
+  await preflightStemOutput(args);
+  let toml: string;
+  let stemsBuild: import("./cli/stems.ts").StemsBuild | undefined;
+  if (args.request !== undefined) {
+    const request = decodeRequest(await boundedBytes(args.request));
+    const { sessionBuilderFromRequest } = await import("./cli/session-request.ts");
+    try {
+      toml = sessionBuilderFromRequest(request).toToml();
+    } catch (error) {
+      if (error instanceof MisoUsageError || error instanceof TypeError) {
+        throw new CliFailure(3, "request.shape", error.message);
+      }
+      throw error;
+    }
+  } else {
+    const directory = args.stems as string;
+    const { buildFromStems, normalizeSessionId, StemsImportError } = await import("./cli/stems.ts");
+    try {
+      stemsBuild = await buildFromStems({
+        directory,
+        sessionId: args.sessionId ?? normalizeSessionId(directory),
+        quantumFrames: args.quantumFrames ?? 128,
+      });
+      toml = stemsBuild.builder.toToml();
+    } catch (error) {
+      if (error instanceof StemsImportError) {
+        throw new CliFailure(error.internal ? 70 : 3, error.code, error.message, error.extra);
+      }
+      if (error instanceof MisoUsageError || error instanceof TypeError) {
+        throw new CliFailure(3, "stems.shape", error.message);
+      }
+      throw error;
+    }
   }
   const bytes = new TextEncoder().encode(toml);
   let result: Awaited<ReturnType<typeof import("./headless/engine.ts")["validate"]>>;
@@ -284,7 +391,7 @@ async function build(args: BuildArguments): Promise<void> {
     await writeStdout(bytes);
     return;
   }
-  const receipt = {
+  const requestReceipt = {
     schemaVersion: 1,
     command: "session.build",
     output: {
@@ -292,6 +399,19 @@ async function build(args: BuildArguments): Promise<void> {
       bytes: bytes.byteLength,
       sha256: createHash("sha256").update(bytes).digest("hex"),
     },
+  };
+  const receipt = stemsBuild === undefined ? requestReceipt : {
+    ...requestReceipt,
+    input: { kind: "stems", path: args.stems },
+    session: {
+      id: stemsBuild.sessionId,
+      revision: 0,
+      sampleRateHz: stemsBuild.sampleRateHz,
+      quantumFrames: stemsBuild.quantumFrames,
+      sources: stemsBuild.mappings.length,
+      tracks: stemsBuild.mappings.length,
+    },
+    stems: stemsBuild.mappings,
   };
   const receiptText = `${JSON.stringify(receipt)}\n`;
   await publish(args.output, bytes, args.overwrite);

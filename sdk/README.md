@@ -10,7 +10,8 @@ npm install @misofm/engine
 ```
 
 The published package is a self-contained Engine V1 release: compiled ESM, declarations, the
-simd128 Wasm engine, the AudioWorklet modules, parameter metadata, ABI layout, and a manifest with
+simd128 Wasm engine, the pinned FLAC decoder Wasm and loader, the AudioWorklet modules, parameter
+metadata, ABI layout, and a manifest with
 the byte length and SHA-256 of every artifact. A Node or Bun headless consumer needs neither a Rust
 toolchain nor a separate engine download. Browser consumers receive package-relative artifact URLs,
 so the host and Wasm cannot silently come from different releases.
@@ -35,13 +36,29 @@ compilation if one stops being reachable or starts resolving to a different decl
 ## `enginectl session build`
 
 The package installs `enginectl`, a Node 20+ machine interface for producing one canonical,
-engine-accepted Session V1 file. Nested session structure stays in a bounded JSON request rather
-than in a flag mini-language:
+engine-accepted Session V1 file. It can consume either a bounded JSON request for fully authored
+sessions or a leaf directory of local FLAC stems:
 
 ```sh
 enginectl session build --request request.json --output session.toml
 enginectl session build --request - --output - < request.json
+enginectl session build --stems ./song-stems --output song.session.toml
 ```
+
+`--stems` examines only the directory's directly owned regular `.flac` files and refuses nested
+directories, symlinks, non-FLAC entries, empty leaves, and mixed or unsupported sample rates. It
+does not recurse: a parent containing several song directories is a collection, and its typed
+`stems.collection` refusal reports the sorted leaf names so an agent can issue one call per song.
+Each FLAC becomes one source and one unity-routed track feeding the single `main` output. Mono is
+duplicated across the track's two lanes; stereo maps channels 0 and 1. Filenames determine stable
+IDs only—they never imply gain, pan, effects, categories, or any other audio decision.
+
+The session ID defaults deterministically from the leaf directory name and the quantum defaults to
+128. `--session-id` and `--quantum-frames` override those values only in stems mode. Metadata and
+canonical PCM identities come from the packaged decoder: identities are SHA-256 over verified,
+source-depth, interleaved PCM rather than over FLAC transport bytes. The command compiles one
+decoder instance, reuses it across the sorted files, reads each FLAC once, and never retains the
+complete decoded PCM.
 
 The request has `schemaVersion: 1`, a required `session` object, and optional `sources`, `tracks`,
 `submixes`, `outputs`, `routes`, and `automation` arrays. Sources and tracks are `{ id, spec }`;
@@ -56,11 +73,12 @@ count, and SHA-256. Existing files, directories, and symlinks are preserved by d
 `--overwrite` authorizes replacement of one filesystem destination and is invalid with stdout.
 
 The executable is always non-interactive: it never prompts, pages, opens another program, reads
-configuration or credentials, loads plugins, emits telemetry, or uses the network. Machine
+configuration or credentials, loads plugins, invokes media subprocesses, emits telemetry, or uses
+the network. Machine
 failures leave stdout empty and write one compact JSON document to stderr. Exit status is `2` for
-command/flag usage, `3` for request or builder refusal, `4` for embedded-engine refusal, `5` for
-output refusal, and `70` for an unexpected internal or packaged-asset failure. Success, help, and
-version use `0`.
+command/flag usage, `3` for request, stem discovery, FLAC, or builder refusal, `4` for
+embedded-engine refusal, `5` for output refusal, and `70` for an unexpected internal or packaged-
+asset failure. Success, help, and version use `0`.
 
 ### Pinning the embedded engine
 
