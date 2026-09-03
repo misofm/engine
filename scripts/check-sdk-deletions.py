@@ -90,6 +90,7 @@ CORE_ASSET = "sdk/src/core/asset.ts"
 CORE_SESSION = "sdk/src/core/session.ts"
 CORE_TYPES = "sdk/src/core/types.ts"
 CORE_BOUNDARY = "sdk/src/core/boundary.ts"
+INTERNAL_SESSION_JSON = "sdk/src/internal/session-json.ts"
 
 ERROR_PHASES = ["asset", "boot", "source", "render", "output", "lifecycle"]
 
@@ -395,8 +396,10 @@ def check_limits(code: dict[str, str], files: dict[str, str]) -> None:
     # The root key list is the canonical document's own table of contents, so a `limits` root key
     # would have to appear in it. Checked separately because it is the one place the word would be
     # a plain quoted string rather than a key or a member.
-    root_keys = re.search(r"\bROOT_KEYS\s*=\s*\[(.*?)\]", code.get(CORE_SESSION, ""), re.DOTALL)
-    require(root_keys is not None, f"{CORE_SESSION} no longer declares ROOT_KEYS")
+    root_keys = re.search(
+        r"\bROOT_KEYS\s*=\s*\[(.*?)\]", code.get(INTERNAL_SESSION_JSON, ""), re.DOTALL
+    )
+    require(root_keys is not None, f"{INTERNAL_SESSION_JSON} no longer declares ROOT_KEYS")
     assert root_keys is not None
     require("limits" not in re.findall(r'"([^"]*)"', root_keys.group(1)),
             "the emitted session document's root keys carry `limits` again")
@@ -544,7 +547,7 @@ def self_test(root: pathlib.Path) -> int:
         ("a limits member access returns",
          append(CORE_BOUNDARY, "\nconst depth = arguments.limits;\n")),
         ("a limits root key returns",
-         insert_after(CORE_SESSION, "const ROOT_KEYS = [\n", '  "limits",\n')),
+         insert_after(INTERNAL_SESSION_JSON, "const ROOT_KEYS = [\n", '  "limits",\n')),
         ("SourceSpec regains a per-source rate",
          insert_after(CORE_TYPES, "export interface SourceSpec {",
                       "\n  readonly sampleRateHz: number;")),
