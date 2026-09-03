@@ -16,7 +16,7 @@ export interface SessionBuildRequestV1 {
   readonly session: {
     readonly id: string;
     readonly sampleRateHz: number;
-    readonly revision?: number;
+    readonly revision?: number | string;
     readonly quantumFrames?: number;
   };
   readonly sources?: readonly unknown[];
@@ -276,11 +276,22 @@ function route(value: unknown, path: string): RouteSpec {
   };
 }
 
-function decimalSample(value: unknown, path: string): bigint {
-  if (typeof value !== "string" || !/^(0|[1-9][0-9]*)$/.test(value)) {
-    fail(path, "expected a canonical unsigned decimal string");
+const U64_MAX = 18_446_744_073_709_551_615n;
+
+function requestU64(value: unknown, path: string): bigint {
+  let parsed: bigint;
+  if (typeof value === "number") {
+    if (!Number.isSafeInteger(value) || value < 0) {
+      fail(path, "expected a nonnegative safe integer number or canonical decimal string");
+    }
+    parsed = BigInt(value);
+  } else if (typeof value === "string" && /^(0|[1-9][0-9]*)$/.test(value)) {
+    parsed = BigInt(value);
+  } else {
+    fail(path, "expected a nonnegative safe integer number or canonical decimal string");
   }
-  return BigInt(value);
+  if (parsed > U64_MAX) fail(path, "value exceeds u64::MAX");
+  return parsed;
 }
 
 function automation(value: unknown, path: string): AutomationSpec {
@@ -294,8 +305,8 @@ function automation(value: unknown, path: string): AutomationSpec {
     keys(segment, ["shape", "startSample", "endSample", "startValue", "endValue"], ["shape", "startSample", "endSample", "startValue", "endValue"], where);
     return {
       shape: string(segment.shape, `${where}.shape`) as "step" | "linear" | "exponential",
-      startSample: decimalSample(segment.startSample, `${where}.startSample`),
-      endSample: decimalSample(segment.endSample, `${where}.endSample`),
+      startSample: requestU64(segment.startSample, `${where}.startSample`),
+      endSample: requestU64(segment.endSample, `${where}.endSample`),
       startValue: number(segment.startValue, `${where}.startValue`),
       endValue: number(segment.endValue, `${where}.endValue`),
     };
@@ -324,7 +335,7 @@ export function sessionBuilderFromRequest(value: unknown): SessionBuilder {
   let builder = session({
     id: string(options.id, "$.session.id"),
     sampleRateHz: number(options.sampleRateHz, "$.session.sampleRateHz") as 48_000,
-    ...(options.revision === undefined ? {} : { revision: number(options.revision, "$.session.revision") }),
+    ...(options.revision === undefined ? {} : { revision: requestU64(options.revision, "$.session.revision") }),
     ...(options.quantumFrames === undefined ? {} : { quantumFrames: number(options.quantumFrames, "$.session.quantumFrames") }),
   });
   for (const [index, value] of optionalArray(root, "sources").entries()) {
@@ -333,7 +344,12 @@ export function sessionBuilderFromRequest(value: unknown): SessionBuilder {
     keys(wrapper, ["id", "spec"], ["id", "spec"], path);
     const spec = record(wrapper.spec, `${path}.spec`);
     keys(spec, ["channels", "bitDepth", "frames", "content"], ["channels", "bitDepth", "frames", "content"], `${path}.spec`);
-    builder = builder.source(string(wrapper.id, `${path}.id`), spec as unknown as SourceSpec);
+    builder = builder.source(string(wrapper.id, `${path}.id`), {
+      channels: number(spec.channels, `${path}.spec.channels`) as 1 | 2,
+      bitDepth: spec.bitDepth as SourceSpec["bitDepth"],
+      frames: requestU64(spec.frames, `${path}.spec.frames`),
+      content: string(spec.content, `${path}.spec.content`),
+    });
   }
   for (const [index, value] of optionalArray(root, "submixes").entries()) {
     builder = builder.submix(string(value, `$.submixes[${index}]`));

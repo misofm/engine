@@ -184,7 +184,7 @@ jobs:
             fi
             seed_arguments=()
             case "$target" in
-              session_*) seed_arguments=(-seed_inputs=fixtures/session/v1/canonical.toml) ;;
+              session_*) seed_arguments=(-seed_inputs=fixtures/session/v1/canonical.json) ;;
             esac
             echo "::group::$target"
             cargo "+nightly-2026-08-20" fuzz run "$target" "$corpus" -- \

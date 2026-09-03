@@ -18,8 +18,8 @@ use engine::realtime::audit::{self, AuditSnapshot};
 const CALLS: u64 = 100_000;
 const SAMPLE_RATE_HZ: u32 = 48_000;
 const QUANTUM_FRAMES: usize = 128;
-const SESSION_TOML: &[u8] =
-    include_bytes!("../../../fixtures/session/v1/parametric-eq-nine-track.toml");
+const SESSION_JSON: &[u8] =
+    include_bytes!("../../../fixtures/session/v1/parametric-eq-nine-track.json");
 
 struct AuditHandles {
     engine: *mut Engine,
@@ -58,13 +58,13 @@ impl AuditHandles {
             capacity_bytes: diagnostic_storage.len() as u64,
             required_bytes: 0,
         };
-        // SAFETY: The live engine, immutable TOML, fixed limits, diagnostic storage, and both
+        // SAFETY: The live engine, immutable JSON, fixed limits, diagnostic storage, and both
         // output locations remain valid throughout transactional compilation.
         let compiled = unsafe {
             miso_engine_v1_compile_session(
                 handles.engine,
-                SESSION_TOML.as_ptr(),
-                SESSION_TOML.len() as u64,
+                SESSION_JSON.as_ptr(),
+                SESSION_JSON.len() as u64,
                 &limits,
                 &mut diagnostics,
                 &mut handles.session,
@@ -241,7 +241,7 @@ const fn audit_limits() -> CompileLimits {
         source_ring_frames: 1_024,
         maximum_automation_spans_per_block: 128,
         reserved0: 0,
-        maximum_toml_bytes: 1_000_000,
+        maximum_document_bytes: 1_000_000,
         maximum_diagnostic_bytes: 4_096,
         maximum_tracks: 100,
         maximum_sources: 100,

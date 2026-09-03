@@ -60,8 +60,8 @@ use graph::{
 use graph_compiler::{GraphBuiltinsCompileRequest, GraphCompileRequest, GraphCompiler};
 use lane::Backend;
 use session::{
-    CompileCaps, DualMonoFader, MatrixOrPan, SessionToml, StableId, compile_session,
-    parse_session_toml,
+    CompileCaps, DualMonoFader, MatrixOrPan, SessionModel, StableId, compile_session,
+    parse_session_json,
 };
 
 /// Sample rate every console workload is prepared and rendered at.
@@ -83,12 +83,12 @@ pub const MAXIMUM_OBSERVATION_TAPS: u32 = 8;
 /// Bounded depth of each meter stream. Drained outside the clock after every observation.
 pub const METER_QUEUE_DEPTH: usize = 8;
 
-const NINE_TRACK: &str = include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.toml");
+const NINE_TRACK: &str = include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json");
 /// The retired 64-track fixture: EQ on `simd1`, compressor in the `dynamic` rack, no limiter.
 ///
 /// Kept, and still rendered, by exactly one row. See [`Workload::SixtyFourTrackConsoleLegacy`].
 const SIXTY_FOUR_TRACK_LEGACY: &str =
-    include_str!("../../../fixtures/session/v1/console-sixty-four-track.toml");
+    include_str!("../../../fixtures/session/v1/console-sixty-four-track.json");
 /// The standing 64-track qualification fixture (#175): the intended production rack layout.
 ///
 /// EQ and compressor share one two-slot chain on `simd1`; a true-peak limiter sits alone on
@@ -96,7 +96,7 @@ const SIXTY_FOUR_TRACK_LEGACY: &str =
 /// which moves the compressor's declaration verbatim, so every EQ and compressor coefficient is
 /// byte-identical between the two files and the only arithmetic that is new is the limiter's.
 const SIXTY_FOUR_TRACK: &str =
-    include_str!("../../../fixtures/session/v1/console-sixty-four-track-intended.toml");
+    include_str!("../../../fixtures/session/v1/console-sixty-four-track-intended.json");
 /// The mono qualification fixture: the standing strip, collapse-eligible upstream of the seam.
 ///
 /// Generated from the standing fixture by `scripts/derive-mono-console-fixture.py`, which makes
@@ -110,7 +110,7 @@ const SIXTY_FOUR_TRACK: &str =
 /// The fader and pan asymmetry and the limiter's `maximum` link are deliberately *kept*; the
 /// generator's header says why, and so does the fixture's own.
 const SIXTY_FOUR_TRACK_MONO: &str =
-    include_str!("../../../fixtures/session/v1/console-sixty-four-track-mono.toml");
+    include_str!("../../../fixtures/session/v1/console-sixty-four-track-mono.json");
 
 /// The standing session workloads, in emission order.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -441,16 +441,16 @@ impl Workload {
     /// The checked-in fixture this workload's model is derived from.
     pub const fn fixture_id(self) -> &'static str {
         match self {
-            Self::NineTrackBaseline => "fixtures/session/v1/parametric-eq-nine-track.toml",
+            Self::NineTrackBaseline => "fixtures/session/v1/parametric-eq-nine-track.json",
             Self::SixtyFourTrackConsoleLegacy => {
-                "fixtures/session/v1/console-sixty-four-track.toml"
+                "fixtures/session/v1/console-sixty-four-track.json"
             }
             Self::SixtyFourTrackConsoleMono
             | Self::SixtyFourTrackConsoleMonoDual
             | Self::SixtyFourTrackConsoleHalfMono => {
-                "fixtures/session/v1/console-sixty-four-track-mono.toml"
+                "fixtures/session/v1/console-sixty-four-track-mono.json"
             }
-            _ => "fixtures/session/v1/console-sixty-four-track-intended.toml",
+            _ => "fixtures/session/v1/console-sixty-four-track-intended.json",
         }
     }
     /// `true` when the rendered model was derived in code from the named fixture.
@@ -562,7 +562,7 @@ impl Workload {
 /// Every edit is a *removal or a neutralisation*, never an addition: a row can only ever measure a
 /// subset of what `sixty_four_track_console` measures, which is what makes the differences between
 /// the rows subtractions rather than comparisons of two different sessions.
-fn apply_strip(model: &mut SessionToml, strip: Strip) {
+fn apply_strip(model: &mut SessionModel, strip: Strip) {
     if strip == Strip::AsWritten {
         return;
     }
@@ -676,7 +676,7 @@ impl PlanConfig {
 /// Split out of `SessionRuntime` so the meter and observation arms build the *same* model the
 /// `sixty_four_track_console` row builds, through the same code, rather than a second transcription
 /// of it.
-fn console_model(workload: Workload) -> SessionToml {
+fn console_model(workload: Workload) -> SessionModel {
     let text = match workload {
         Workload::NineTrackBaseline => NINE_TRACK,
         Workload::SixtyFourTrackConsoleLegacy => SIXTY_FOUR_TRACK_LEGACY,
@@ -685,7 +685,7 @@ fn console_model(workload: Workload) -> SessionToml {
         | Workload::SixtyFourTrackConsoleHalfMono => SIXTY_FOUR_TRACK_MONO,
         _ => SIXTY_FOUR_TRACK,
     };
-    let mut model = parse_session_toml(text).expect("frozen console session fixture");
+    let mut model = parse_session_json(text).expect("frozen console session fixture");
     model.automation.clear();
     if model.tracks.len() != workload.tracks() as usize {
         synthesise_tracks(&mut model, workload.tracks() as usize);
@@ -706,7 +706,7 @@ fn console_model(workload: Workload) -> SessionToml {
 /// `index + 1` so they are nonzero and stable, the tap is the one a console meters by default, and
 /// the window is [`WINDOW_BLOCKS`] blocks. Nothing here is a benchmark convenience -- an arm that
 /// metered a shape no host prepares would report a cost nobody pays.
-fn meter_requests(model: &SessionToml) -> Vec<MeterRequest> {
+fn meter_requests(model: &SessionModel) -> Vec<MeterRequest> {
     let config = MeterConfig {
         period_frames: NonZeroU32::new(WINDOW_BLOCKS * QUANTUM as u32).expect("nonzero period"),
         peak_hold_frames: 0,
@@ -1306,7 +1306,7 @@ impl SessionRuntime {
 /// model rather than a second checked-in session because nothing about 128 tracks is a new
 /// *shape* -- it is sixteen full banks instead of eight -- and a second 288 KiB fixture would be
 /// 128 tracks of duplicated text to review for no additional coverage.
-fn synthesise_tracks(model: &mut session::SessionToml, tracks: usize) {
+fn synthesise_tracks(model: &mut session::SessionModel, tracks: usize) {
     let template: Vec<_> = model.tracks.clone();
     let route = model.routes[0].clone();
     model.tracks.clear();
@@ -1506,7 +1506,7 @@ impl GraphRuntimeProcessor for GraphIdentity {
 /// moves and the field the `half_mono` row moves back on half its tracks. See
 /// [`FrozenGraphSource::from_block`] for why the subject honours it instead of always writing a
 /// stereo pair.
-fn channel_mappings(model: &SessionToml) -> Vec<(usize, usize)> {
+fn channel_mappings(model: &SessionModel) -> Vec<(usize, usize)> {
     model
         .tracks
         .iter()

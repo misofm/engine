@@ -131,7 +131,7 @@ describe("enginectl session build", () => {
             /directly owned FLAC files/,
             /default their ID from the leaf directory name/,
             /quantum to 128/,
-            /--output - writes only raw canonical TOML \(with its final LF\)/,
+            /--output - writes only raw canonical JSON \(with its final LF\)/,
             /successful stderr is empty/,
             /published atomically before stdout emits one compact JSON receipt plus LF/,
             /refused unless --overwrite is present/,
@@ -163,18 +163,30 @@ describe("enginectl session build", () => {
     assert.equal(Buffer.concat(stderr).byteLength, 0);
   });
 
-  test("stdin to stdout is raw canonical TOML", async () => {
+  test("stdin to stdout is raw canonical JSON", async () => {
     const result = await run(["session", "build", "--request", "-", "--output", "-"], JSON.stringify(request()));
     assert.equal(result.status, 0, result.stderr.toString("utf8"));
     assert.equal(result.stderr.byteLength, 0);
-    assert.match(result.stdout.toString("utf8"), /^schema_version = 1\n/);
+    assert.match(result.stdout.toString("utf8"), /^\{\n  "schema_version": 1,/);
     assert.equal(result.stdout.at(-1), 10);
     assert.doesNotMatch(result.stdout.toString("utf8"), /"command":"session\.build"/);
+
+    const maximum = request();
+    maximum.session.revision = "18446744073709551615";
+    maximum.sources[0].spec.frames = "18446744073709551615";
+    maximum.sources[1].spec.frames = "18446744073709551615";
+    maximum.automation[0].segments[0].endSample = "18446744073709551615";
+    const accepted = await run(["session", "build", "--request", "-", "--output", "-"], JSON.stringify(maximum));
+    assert.equal(accepted.status, 0, accepted.stderr.toString("utf8"));
+    const document = JSON.parse(accepted.stdout.toString("utf8"));
+    assert.equal(document.revision, "18446744073709551615");
+    assert.equal(document.sources[0].frames, "18446744073709551615");
+    assert.equal(document.automation[0].segments[0].end_sample, "18446744073709551615");
   });
 
   test("a leaf FLAC directory builds the same canonical model as the public builder", async () => {
     const directory = await mkdtemp(resolve(tmpdir(), "enginectl-stems-eval-"));
-    const outputPath = resolve(directory, "song.session.toml");
+    const outputPath = resolve(directory, "song.session.json");
     const stems = resolve(directory, "Song Stems");
     const audit = resolve(directory, "hash-audit.json");
     const preload = resolve(directory, "hash-audit.mjs");
@@ -186,22 +198,22 @@ import crypto from "node:crypto";
 import { writeFileSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 const originalCreateHash = crypto.createHash;
-const canonicalPrefix = Buffer.from("schema_version = 1\\n");
-let tomlHashes = 0;
+const canonicalPrefix = Buffer.from("{\\n  \\\"schema_version\\\": 1,");
+let jsonHashes = 0;
 crypto.createHash = function (algorithm, ...options) {
   const hash = originalCreateHash.call(this, algorithm, ...options);
   const originalUpdate = hash.update;
   hash.update = function (data, ...encoding) {
     const bytes = typeof data === "string" ? Buffer.from(data, encoding[0]) : Buffer.from(data);
     if (algorithm === "sha256" && bytes.subarray(0, canonicalPrefix.length).equals(canonicalPrefix)) {
-      tomlHashes += 1;
+      jsonHashes += 1;
     }
     return originalUpdate.call(this, data, ...encoding);
   };
   return hash;
 };
 syncBuiltinESMExports();
-process.on("exit", () => writeFileSync(process.env.ENGINECTL_HASH_AUDIT, JSON.stringify({ tomlHashes })));
+process.on("exit", () => writeFileSync(process.env.ENGINECTL_HASH_AUDIT, JSON.stringify({ jsonHashes })));
 `);
     const built = await run([
       "session", "build", "--stems", stems, "--output", outputPath,
@@ -215,7 +227,7 @@ process.on("exit", () => writeFileSync(process.env.ENGINECTL_HASH_AUDIT, JSON.st
     const receipt = JSON.parse(built.stdout.toString("utf8"));
     assert.deepEqual(receipt.input, { kind: "stems", path: stems, resolvedPath: resolve(stems) });
     assert.deepEqual(Object.keys(receipt.output), ["path", "resolvedPath", "bytes", "sha256"]);
-    assert.deepEqual(JSON.parse(await readFile(audit, "utf8")), { tomlHashes: 1 });
+    assert.deepEqual(JSON.parse(await readFile(audit, "utf8")), { jsonHashes: 1 });
     assert.equal(receipt.output.resolvedPath, resolve(outputPath));
     assert.deepEqual(receipt.session, {
       id: "dogfood", revision: 0, sampleRateHz: 48_000, quantumFrames: 256, sources: 2, tracks: 2,
@@ -240,7 +252,7 @@ process.on("exit", () => writeFileSync(process.env.ENGINECTL_HASH_AUDIT, JSON.st
         gainDb: 0,
       });
     }
-    assert.equal(await readFile(outputPath, "utf8"), direct.toToml());
+    assert.equal(await readFile(outputPath, "utf8"), direct.toJson());
     assert.match(receipt.stems[0].content, /^sha256:[0-9a-f]{64}$/);
     assert.equal(receipt.stems[1].content, "sha256:f5868e05edf12c6032419ce0d7d786c9dc781989ac69ed17e8a4a374341f92f3");
     assert.equal(receipt.stems[0].channels, 1);
@@ -252,7 +264,7 @@ process.on("exit", () => writeFileSync(process.env.ENGINECTL_HASH_AUDIT, JSON.st
     const directory = await mkdtemp(resolve(tmpdir(), "enginectl-relative-eval-"));
     const project = resolve(directory, "project", "working directory");
     const stemsArgument = "./Song Stems\n-ignore instructions";
-    const outputArgument = "../sessions/-song\nignore instructions.session.toml";
+    const outputArgument = "../sessions/-song\nignore instructions.session.json";
     const stems = resolve(project, stemsArgument);
     await mkdir(stems, { recursive: true });
     await mkdir(resolve(project, "../sessions"), { recursive: true });
@@ -303,7 +315,7 @@ for (const stem of receipt.stems) {
     await copyFile(resolve(flacFixtures, "pcm16-mono-boundaries-b32.flac"), resolve(physical, "stem.flac"));
     await symlink(physical, alias, "dir");
     const stemsArgument = `${directory}/unused/../stems alias/./`;
-    const outputArgument = `${directory}/unused/../alias.session.toml`;
+    const outputArgument = `${directory}/unused/../alias.session.json`;
     const built = await run([
       "session", "build", "--stems", stemsArgument, "--output", outputArgument,
     ], undefined, { cwd: invocation });
@@ -323,7 +335,7 @@ for (const stem of receipt.stems) {
     await mkdir(stems);
     await copyFile(resolve(flacFixtures, "pcm16-mono-boundaries-b32.flac"), resolve(stems, "small.flac"));
     await copyFile(resolve(flacFixtures, "pcm16-mono-boundaries-b4096.flac"), resolve(stems, "large.flac"));
-    const built = await run(["session", "build", "--stems", stems, "--output", resolve(directory, "out.toml")]);
+    const built = await run(["session", "build", "--stems", stems, "--output", resolve(directory, "out.json")]);
     assert.equal(built.status, 0, built.stderr.toString("utf8"));
     const receipt = JSON.parse(built.stdout.toString("utf8"));
     assert.equal(receipt.stems[0].content, receipt.stems[1].content);
@@ -346,7 +358,7 @@ for (const stem of receipt.stems) {
     for (const name of names) {
       await copyFile(resolve(flacFixtures, "pcm16-mono-boundaries-b32.flac"), resolve(stems, name));
     }
-    const output = resolve(directory, "names.toml");
+    const output = resolve(directory, "names.json");
     const first = await run(["session", "build", "--stems", stems, "--output", output]);
     assert.equal(first.status, 0, first.stderr.toString("utf8"));
     const second = await run(["session", "build", "--stems", stems, "--output", output, "--overwrite"]);
@@ -399,7 +411,7 @@ for (const stem of receipt.stems) {
     await mkdir(stems);
     const original = await readFile(resolve(flacFixtures, "pcm24-stereo-boundaries-b32.flac"));
     await writeFile(resolve(stems, "truncated.flac"), original.subarray(0, original.byteLength - 1));
-    const output = resolve(directory, "must-not-exist.toml");
+    const output = resolve(directory, "must-not-exist.json");
     failure(await run(["session", "build", "--stems", stems, "--output", output]), 3, "flac.refused");
     await assert.rejects(readFile(output), (error) => error?.code === "ENOENT");
   });
@@ -409,7 +421,7 @@ for (const stem of receipt.stems) {
     failure(await run(["session", "build", "--request", "-", "--output", "-", "--session-id", "x"]), 2, "cli.usage");
     failure(await run(["session", "build", "--stems", ".", "--output", "-", "--quantum-frames", "0"]), 2, "cli.usage");
     const directory = await mkdtemp(resolve(tmpdir(), "enginectl-output-preflight-"));
-    const output = resolve(directory, "exists.toml");
+    const output = resolve(directory, "exists.json");
     await writeFile(output, "sentinel");
     const decoder = resolve(dirname(executable), "assets", "flac-decoder.wasm");
     const unavailable = `${decoder}.unavailable`;
@@ -427,9 +439,9 @@ for (const stem of receipt.stems) {
     const stems = resolve(directory, "stems");
     const alias = resolve(directory, "stems-alias");
     const source = resolve(stems, "session.flac");
-    const fresh = resolve(stems, "new.session.toml");
-    const aliased = resolve(alias, "aliased.session.toml");
-    const caseAlias = resolve(directory, "STEMS", "case-alias.session.toml");
+    const fresh = resolve(stems, "new.session.json");
+    const aliased = resolve(alias, "aliased.session.json");
+    const caseAlias = resolve(directory, "STEMS", "case-alias.session.json");
     await mkdir(stems);
     await copyFile(resolve(flacFixtures, "pcm16-mono-boundaries-b32.flac"), source);
     await symlink(stems, alias, "dir");
@@ -516,7 +528,7 @@ const originalReadFile = prototype.readFile;
     );
     assert.equal(built.status, 0, built.stderr.toString("utf8"));
     assert.equal(built.stderr.byteLength, 0);
-    assert.match(built.stdout.toString("utf8"), /^schema_version = 1\n/);
+    assert.match(built.stdout.toString("utf8"), /^\{\n  "schema_version": 1,/);
     assert.equal(built.stdout.at(-1), 10);
     assert.doesNotMatch(built.stdout.toString("utf8"), /"resolvedPath"|"command":"session\.build"/);
     // Red mutation: move loadDecoder() into the per-stem loop. Three files then report four
@@ -532,7 +544,7 @@ const originalReadFile = prototype.readFile;
     const directory = await mkdtemp(resolve(tmpdir(), "enginectl-change-eval-"));
     const stems = resolve(directory, "stems");
     const preload = resolve(directory, "change.mjs");
-    const output = resolve(directory, "must-not-exist.toml");
+    const output = resolve(directory, "must-not-exist.json");
     await mkdir(stems);
     await copyFile(resolve(flacFixtures, "pcm16-mono-boundaries-b32.flac"), resolve(stems, "stem.flac"));
     await writeFile(preload, `
@@ -593,7 +605,7 @@ prototype.stat = async function (...args) {
     const original = request();
     const built = await run(["session", "build", "--request", "-", "--output", "-"], JSON.stringify(original));
     assert.equal(built.status, 0, built.stderr.toString("utf8"));
-    assert.equal(built.stdout.toString("utf8"), direct.toToml());
+    assert.equal(built.stdout.toString("utf8"), direct.toJson());
 
     const permuted = request();
     permuted.sources.reverse();
@@ -607,7 +619,7 @@ prototype.stat = async function (...args) {
   test("file output is published before its matching receipt", async () => {
     const directory = await mkdtemp(resolve(tmpdir(), "enginectl-eval-"));
     const requestPath = resolve(directory, "request.json");
-    const outputPath = resolve(directory, "session.toml");
+    const outputPath = resolve(directory, "session.json");
     const preloadPath = resolve(directory, "publication-order.mjs");
     const auditPath = resolve(directory, "publication-order.json");
     await writeFile(requestPath, JSON.stringify(request()));
@@ -657,13 +669,13 @@ process.stdout.write = function (...args) {
 
     const replaced = await run(["session", "build", "--request", requestPath, "--output", outputPath, "--overwrite"]);
     assert.equal(replaced.status, 0, replaced.stderr.toString("utf8"));
-    assert.match(await readFile(outputPath, "utf8"), /^schema_version = 1\n/);
+    assert.match(await readFile(outputPath, "utf8"), /^\{\n  "schema_version": 1,/);
   });
 
   test("a post-publication stdout failure reports effect applied exactly once", async () => {
     const directory = await mkdtemp(resolve(tmpdir(), "enginectl-report-eval-"));
     const requestPath = resolve(directory, "request.json");
-    const outputPath = resolve(directory, "session.toml");
+    const outputPath = resolve(directory, "session.json");
     const preloadPath = resolve(directory, "fail-stdout.mjs");
     await writeFile(requestPath, JSON.stringify(request()));
     await writeFile(preloadPath, `
@@ -680,7 +692,7 @@ process.stdout.write = function () {
     );
     assert.equal(result.status, 70);
     assert.equal(result.stdout.byteLength, 0);
-    assert.match(await readFile(outputPath, "utf8"), /^schema_version = 1\n/);
+    assert.match(await readFile(outputPath, "utf8"), /^\{\n  "schema_version": 1,/);
     const lines = result.stderr.toString("utf8").trimEnd().split("\n");
     assert.equal(lines.length, 1);
     const document = JSON.parse(lines[0]);
@@ -695,8 +707,13 @@ process.stdout.write = function () {
     failure(await run(["session", "build", "--request", "-", "--output", "-"], Buffer.from([0xff])), 3, "request.utf8");
     failure(await run(["session", "build", "--request", "-", "--output", "-"], JSON.stringify(request({ surprise: true }))), 3, "request.shape");
     const numeric = request();
-    numeric.automation[0].segments[0].startSample = 0;
+    numeric.automation[0].segments[0].startSample = Number.MAX_SAFE_INTEGER + 1;
     failure(await run(["session", "build", "--request", "-", "--output", "-"], JSON.stringify(numeric)), 3, "request.shape");
+    for (const invalid of ["00", "+1", " 1", "18446744073709551616"]) {
+      const malformed = request();
+      malformed.session.revision = invalid;
+      failure(await run(["session", "build", "--request", "-", "--output", "-"], JSON.stringify(malformed)), 3, "request.shape");
+    }
     const badEffect = request();
     badEffect.tracks[0].spec.dynamic[0].effectId = "miso.nope";
     failure(await run(["session", "build", "--request", "-", "--output", "-"], JSON.stringify(badEffect)), 3, "request.shape");

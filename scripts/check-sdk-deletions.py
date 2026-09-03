@@ -116,9 +116,8 @@ LIMITS_PATTERNS = [
     (re.compile(r"""(["'])limits\1"""), "a quoted `limits` key"),
 ]
 
-# `sessionTomlBytes` is a live `status` field name; the retired thing is the buffer kind, so the
-# word boundary is what separates them.
-SESSION_TOML = re.compile(r"\bsessionToml\b")
+# Issue #338 retires every format-bound SDK spelling rather than retaining aliases.
+RETIRED_SESSION_FORMAT = re.compile(r"\b(?:sessionTomlBytes|sessionToml)\b|\btoToml\s*\(")
 
 # The two retired engine states. Banned as bare string literals: the SDK has no configuration file
 # and no prepare step, so these exact tokens have no other reason to be quoted here.
@@ -404,7 +403,7 @@ def check_limits(code: dict[str, str], files: dict[str, str]) -> None:
 
 
 def check_lifecycle_vocabulary(code: dict[str, str]) -> None:
-    refuse(find_all(code, SESSION_TOML), "the retired `sessionToml` buffer kind")
+    refuse(find_all(code, RETIRED_SESSION_FORMAT), "a retired TOML session surface")
     refuse(find_all(code, RETIRED_STATES), "a retired two-phase lifecycle state word")
     for pattern in PHASE_USES:
         for path, text in sorted(code.items()):
@@ -583,8 +582,10 @@ def self_test(root: pathlib.Path) -> int:
          append(CORE_BOUNDARY, '\nconst state: string = "config";\n')),
         ("the prepared state returns",
          append(CORE_BOUNDARY, '\nconst state: string = "prepared";\n')),
-        ("the sessionToml buffer kind returns",
+        ("the retired session buffer kind returns",
          append(CORE_BOUNDARY, '\nconst kind = "sessionToml";\n')),
+        ("the retired canonical writer returns",
+         append(CORE_SESSION, '\nfunction toToml(): string { return ""; }\n')),
         ("the boot options writer stops being exported",
          replace_once(CORE_ABI, "export function writeBootOptions(",
                       "function writeBootOptions(")),

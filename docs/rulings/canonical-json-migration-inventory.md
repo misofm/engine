@@ -13,29 +13,27 @@ source names; protocol snapshot field 3 and `canonical_toml_chunk`; builtins pla
 active architecture/control/session/runner/SDK documentation; policy and packaging scripts; and
 `.claude/skills/author-session/SKILL.md`.
 
-The session-authority tranche migrates `crates/session/**`, `AGENTS.md`,
-`docs/SESSION_SCHEMA_V1.md`, and establishes the three JSON authority fixtures
-`canonical-minimal.json`, `canonical.json`, and `parametric-eq-nine-track.json`. Their retired TOML
-copies remain temporarily because unmigrated host/tool consumers still include them directly;
-they are not inputs accepted by the session crate and are deleted with those consumers in the
-subsequent tranches. Remaining live contract names belong to the host/protocol and SDK/tools
-tranches.
+The session-authority tranche migrated `crates/session/**`, `AGENTS.md`, and
+`docs/SESSION_SCHEMA_V1.md`. The host/protocol tranche migrated the native, browser, C ABI, and
+transactional snapshot surfaces. The SDK/tools tranche migrates the remaining names above and
+deletes every retired live Session V1 TOML after its consumer has moved.
+The first canonical authority fixtures are `canonical-minimal.json`, `canonical.json`, and
+`parametric-eq-nine-track.json`.
 
 ## Current session fixtures
 
-Baseline contains 35 live session-document TOMLs: 14 under `fixtures/session/v1`, ten builtins
-benchmark sessions, five native-runner sessions, and six host-web browser/qualification sessions.
-Each is a migration target. Within `fixtures/session/v1`, the three authority fixtures above gain
-their sole authoritative JSON form in tranche 1 while their old paths remain temporary consumer
-inputs as inventoried above. The remaining observation/console fixtures stay temporarily TOML only
-until their direct consumers migrate in the later fixture tranche; none is accepted by the new
-session authority.
+Baseline contains **25** live session-document TOMLs: 14 under `fixtures/session/v1`, five
+native-runner sessions, and six host-web browser/qualification sessions. Each is a migration
+target and this tranche replaces and deletes all 25. The ten
+`fixtures/builtins/v1/benchmark/*.toml` files are not sessions: they contain `fixture_schema` and
+builtin workload metadata, so they remain generic tooling configuration. This correction is why
+the inventory is semantic rather than a count inferred from suffixes.
 
 ## Generic configuration
 
 Cargo manifests/configuration, rustfmt configuration, workflow configuration and unrelated tool
-inputs written in TOML are not session documents and do not migrate. In particular, `Cargo.toml`
-and dependency references to a file named `Cargo.toml` remain TOML.
+inputs written in TOML are not session documents and do not migrate. In particular, `Cargo.toml`,
+dependency references to it, and the ten builtin benchmark workload configurations remain TOML.
 
 ## Immutable historical evidence
 

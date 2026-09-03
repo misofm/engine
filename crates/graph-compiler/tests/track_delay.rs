@@ -19,12 +19,12 @@ use effect_compiler::{
 };
 use graph::{GraphCompileCaps, PreparedGraphPlan};
 use graph_compiler::{Backend, GraphCompileRequest, GraphCompiler};
-use session::{CompileCaps, CompiledSession, SessionToml, compile_session, parse_session_toml};
+use session::{CompileCaps, CompiledSession, SessionModel, compile_session, parse_session_json};
 
 /// Nine tracks, a real parametric EQ on each, routes into the session output, and a non-zero
 /// compiled `output_latency` -- so the PDC rows this file pins are rows that actually carry
 /// something. A fixture whose PDC report were empty in both arms would make P2-3 vacuous.
-const SESSION: &str = include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.toml");
+const SESSION: &str = include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json");
 
 fn graph_caps() -> GraphCompileCaps {
     GraphCompileCaps {
@@ -54,8 +54,8 @@ fn compile_caps() -> CompileCaps {
 }
 
 /// The fixture with the one track's two lanes delayed by `left` and `right` samples.
-fn model_with_delay(left: u32, right: u32) -> SessionToml {
-    let mut model = parse_session_toml(SESSION).expect("fixture parses");
+fn model_with_delay(left: u32, right: u32) -> SessionModel {
+    let mut model = parse_session_json(SESSION).expect("fixture parses");
     // One delayed track among nine. The other eight are the control: whatever PDC does to them
     // must be what it does to them when track zero is undelayed.
     model.tracks[0].builtins.left.delay_samples = left;
@@ -71,7 +71,7 @@ fn model_with_delay(left: u32, right: u32) -> SessionToml {
 /// -- so asserting "the compensation sets did not move" on it would be asserting that an empty set
 /// stayed empty. One latent effect on one of nine tracks routed to a common output is the smallest
 /// session in which PDC has real work to do, and the delayed track is the one carrying it.
-fn latent_model_with_delay(left: u32, right: u32) -> SessionToml {
+fn latent_model_with_delay(left: u32, right: u32) -> SessionModel {
     use session::{
         Effect, EffectIdentity, EffectParam, EffectQuality, LinkMode, ParameterChannel,
         ParameterUnit, SidechainDeclaration, StableId,
@@ -198,7 +198,7 @@ fn a_zero_delay_session_lowers_no_delay_node() {
 /// The zero-delay plan is byte-for-byte the plan this fixture compiled to before the feature.
 ///
 /// The constant is not a snapshot of this tree: it was measured by running this exact digest on
-/// `origin/main` at 17682b4, against that tree's `canonical.toml` -- the one without the
+/// `origin/main` at 17682b4, against that tree's `canonical.json` -- the one without the
 /// `delay_samples` key. That the two agree is the whole class-A claim, and it holds for a
 /// non-obvious reason worth stating: the session's *text* grew, but the graph's canonical text is
 /// derived from the compiled plan and its estimate, and the estimate's session term is
@@ -219,7 +219,7 @@ fn the_zero_delay_plan_digest_is_the_pre_feature_digest() {
     );
 }
 
-/// Originally measured on `origin/main` (17682b4), whose `canonical.toml` has no `delay_samples`
+/// Originally measured on `origin/main` (17682b4), whose `canonical.json` has no `delay_samples`
 /// key at all. Re-pinned by issue #241.
 ///
 /// The reason recorded when it was re-pinned -- that source content identity had entered the

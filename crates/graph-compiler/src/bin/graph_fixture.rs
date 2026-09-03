@@ -13,10 +13,10 @@ use std::{
 use effect_compiler::EffectPreparedSession;
 use graph::{GraphCompileCaps, PreparedGraphPlan, reduce_left_to_right};
 use graph_compiler::{GraphCompileRequest, GraphCompiler, GraphEvidence, PreparedGraphArtifact};
-use session::{CompileCaps, compile_session, parse_session_toml};
+use session::{CompileCaps, compile_session, parse_session_json};
 use sha2::{Digest, Sha256};
 
-const SESSION: &str = include_str!("../../../../fixtures/session/v1/canonical.toml");
+const SESSION: &str = include_str!("../../../../fixtures/session/v1/canonical.json");
 const MANIFEST_HEADER: &str = "path\tlength\tsha256\n";
 
 fn main() {
@@ -68,7 +68,7 @@ fn default_root() -> PathBuf {
 }
 
 fn compile_fixture() -> PreparedGraphArtifact {
-    let mut model = parse_session_toml(SESSION).unwrap_or_else(|diagnostics| {
+    let mut model = parse_session_json(SESSION).unwrap_or_else(|diagnostics| {
         panic!("session parse diagnostics: {diagnostics:?}");
     });
     model.tracks[0].dynamic.effects.clear();

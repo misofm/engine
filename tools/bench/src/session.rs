@@ -13,11 +13,11 @@ use std::{
 };
 
 use session::{
-    CompileCaps, RouteSource, SessionToml, StableId, canonical_session_toml, compile_session,
-    parse_session_toml,
+    CompileCaps, RouteSource, SessionModel, StableId, canonical_session_json, compile_session,
+    parse_session_json,
 };
 
-const CANONICAL_EXAMPLE: &str = include_str!("../../../fixtures/session/v1/canonical.toml");
+const CANONICAL_EXAMPLE: &str = include_str!("../../../fixtures/session/v1/canonical.json");
 const TRACK_COUNT: usize = 256;
 const ROUNDS: u8 = 2;
 const WARMUP_BATCHES: usize = 64;
@@ -96,7 +96,7 @@ struct FixtureCounts {
 }
 
 impl FixtureCounts {
-    fn from_session(session: &SessionToml) -> Self {
+    fn from_session(session: &SessionModel) -> Self {
         let racks = session
             .tracks
             .iter()
@@ -124,8 +124,8 @@ impl FixtureCounts {
     }
 }
 
-fn representative_fixture() -> (String, SessionToml) {
-    let mut model = parse_session_toml(CANONICAL_EXAMPLE).expect("canonical seed fixture parses");
+fn representative_fixture() -> (String, SessionModel) {
+    let mut model = parse_session_json(CANONICAL_EXAMPLE).expect("canonical seed fixture parses");
     let track_template = model.tracks.pop().expect("seed has one track");
     let route_template = model.routes.pop().expect("seed has one route");
     let automation_template = model
@@ -156,8 +156,8 @@ fn representative_fixture() -> (String, SessionToml) {
         model.automation.push(automation);
     }
 
-    let fixture = canonical_session_toml(&model).expect("representative fixture canonicalizes");
-    let reparsed = parse_session_toml(&fixture).expect("representative fixture reparses");
+    let fixture = canonical_session_json(&model).expect("representative fixture canonicalizes");
+    let reparsed = parse_session_json(&fixture).expect("representative fixture reparses");
     assert_eq!(FixtureCounts::from_session(&reparsed).tracks, TRACK_COUNT);
     (fixture, reparsed)
 }
@@ -166,7 +166,7 @@ fn stable_id(value: &str) -> StableId {
     StableId::parse(value).expect("generated benchmark ID is schema-valid")
 }
 
-fn run_round(method: Method, fixture: &str, model: &SessionToml) -> Round {
+fn run_round(method: Method, fixture: &str, model: &SessionModel) -> Round {
     for _ in 0..WARMUP_BATCHES {
         run_batch(method, fixture, model);
     }
@@ -185,12 +185,12 @@ fn run_round(method: Method, fixture: &str, model: &SessionToml) -> Round {
     }
 }
 
-fn run_batch(method: Method, fixture: &str, model: &SessionToml) {
+fn run_batch(method: Method, fixture: &str, model: &SessionModel) {
     for _ in 0..OPERATIONS_PER_BATCH {
         match method {
             Method::ParseCanonical => {
-                let parsed = parse_session_toml(black_box(fixture)).expect("fixture parses");
-                black_box(canonical_session_toml(&parsed).expect("fixture canonicalizes"));
+                let parsed = parse_session_json(black_box(fixture)).expect("fixture parses");
+                black_box(canonical_session_json(&parsed).expect("fixture canonicalizes"));
             }
             Method::Compile => {
                 black_box(
@@ -600,7 +600,7 @@ mod tests {
     use super::{
         FixtureCounts, TRACK_COUNT, percentile_nearest_rank, representative_fixture, sha256_hex,
     };
-    use session::{canonical_session_toml, parse_session_toml};
+    use session::{canonical_session_json, parse_session_json};
 
     #[test]
     fn representative_fixture_has_the_frozen_workload_and_stable_bytes() {
@@ -621,10 +621,10 @@ mod tests {
                 automation_segments: TRACK_COUNT,
             }
         );
-        let reparsed = parse_session_toml(&fixture).expect("generated fixture reparses");
+        let reparsed = parse_session_json(&fixture).expect("generated fixture reparses");
         assert_eq!(
             fixture,
-            canonical_session_toml(&reparsed).expect("canonical bytes are stable")
+            canonical_session_json(&reparsed).expect("canonical bytes are stable")
         );
     }
 

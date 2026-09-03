@@ -152,7 +152,7 @@
 //
 // # Compilation happens on the rendering thread
 //
-// Session TOML is compiled inside the `AudioWorkletProcessor` constructor, which runs on the
+// Session JSON is compiled inside the `AudioWorkletProcessor` constructor, which runs on the
 // rendering thread before the first `process()` call. This is documented V1 behaviour (issue 024,
 // owner open question 2): construction allocates, later rendering does not.
 //
@@ -371,7 +371,7 @@ export interface MisoSessionMap {
   ///
   /// The engine's own order: session compilation sorts `sources` by stable ID, and the queries
   /// behind this list read that sorted model rather than a copy of it. This is what makes a
-  /// session compiled from raw TOML drivable -- the shapes a render loop must feed are here, and
+  /// session compiled from raw JSON drivable -- the shapes a render loop must feed are here, and
   /// there is nowhere else in the browser ABI to learn them.
   readonly sources: MisoSessionSource[];
   /// Whether preparation bound meter observers at all.

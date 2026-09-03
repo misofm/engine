@@ -191,5 +191,5 @@ text, so their otherwise matching code/path diagnostics have `span = None`. Ever
 field supports the full unsigned domain and serializes as a canonical decimal string.
 
 The runtime manifest exact-pins `jstrict = 0.14.0` without default features and has no runtime
-serde, serde_json or TOML dependency. `serde_json` is dev-only for order and unknown-key
+serde or runtime `serde_json` dependency. `serde_json` is dev-only for order and unknown-key
 mutations; it is neither the acceptance parser nor the canonical writer.

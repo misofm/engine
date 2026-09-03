@@ -4,7 +4,7 @@ use effect_compiler::{
     EffectCompileCaps, launch_native_effect_registry, prepare_native_session_effects,
 };
 use effect_contract::*;
-use session::{CompileCaps, compile_session, parse_session_toml};
+use session::{CompileCaps, compile_session, parse_session_json};
 
 const EFFECT_ID: EffectId = match EffectId::new("parametric-eq") {
     Ok(v) => v,
@@ -140,7 +140,7 @@ impl PreparedNativeEffect for Processor {
 
 fn compiled() -> session::CompiledSession {
     let model =
-        parse_session_toml(include_str!("../../../fixtures/session/v1/canonical.toml")).unwrap();
+        parse_session_json(include_str!("../../../fixtures/session/v1/canonical.json")).unwrap();
     compile_session(
         &model,
         CompileCaps {
@@ -164,8 +164,8 @@ fn caps() -> EffectCompileCaps {
 
 #[test]
 fn launch_registry_prepares_the_accepted_nine_track_parametric_eq_fixture() {
-    let model = parse_session_toml(include_str!(
-        "../../../fixtures/session/v1/parametric-eq-nine-track.toml"
+    let model = parse_session_json(include_str!(
+        "../../../fixtures/session/v1/parametric-eq-nine-track.json"
     ))
     .expect("accepted fixture");
     assert_eq!(model.tracks.len(), 9);
@@ -204,8 +204,8 @@ fn preparation_is_complete_sorted_and_preserves_cached_metadata() {
     assert_eq!(prepared.entries[0].metadata.latency, LatencySamples(7));
     assert_eq!(prepared.entries[0].metadata.scratch_bytes, 144);
     assert_eq!(
-        prepared.session.canonical_toml(),
-        compiled().canonical_toml()
+        prepared.session.canonical_json(),
+        compiled().canonical_json()
     );
 }
 
@@ -236,9 +236,9 @@ fn unavailable_factory_and_resource_caps_return_no_partial_session() {
 fn ten_thousand_session_parameter_mutations_reject_transactionally_without_panic() {
     let registry =
         NativeEffectRegistry::new([Box::new(Factory) as Box<dyn NativeEffectFactory>]).unwrap();
-    let source = include_str!("../../../fixtures/session/v1/canonical.toml");
+    let source = include_str!("../../../fixtures/session/v1/canonical.json");
     for seed in 0..10_000_u32 {
-        let mut model = parse_session_toml(source).unwrap();
+        let mut model = parse_session_json(source).unwrap();
         model.tracks[0].dynamic.effects[0].params[0].value = 25.0 + seed as f32;
         let compiled = compile_session(
             &model,

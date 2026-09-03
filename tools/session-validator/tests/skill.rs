@@ -25,7 +25,7 @@ fn the_shipped_skill_names_the_real_commands() {
         "--canonical",
         "cargo run -q -p parameter-metadata -- --print",
         "docs/SESSION_SCHEMA_V1.md",
-        "fixtures/session/v1/canonical.toml",
+        "fixtures/session/v1/canonical.json",
     ] {
         assert!(
             skill.contains(required),

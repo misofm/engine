@@ -40,9 +40,9 @@ engine-accepted Session V1 file. It can consume either a bounded JSON request fo
 sessions or a leaf directory of local FLAC stems:
 
 ```sh
-enginectl session build --request request.json --output session.toml
+enginectl session build --request request.json --output session.json
 enginectl session build --request - --output - < request.json
-enginectl session build --stems ./song-stems --output song.session.toml
+enginectl session build --stems ./song-stems --output song.session.json
 ```
 
 `--stems` examines only the directory's directly owned regular `.flac` files and refuses nested
@@ -63,11 +63,12 @@ complete decoded PCM.
 
 The request has `schemaVersion: 1`, a required `session` object, and optional `sources`, `tracks`,
 `submixes`, `outputs`, `routes`, and `automation` arrays. Sources and tracks are `{ id, spec }`;
-rack entries are `{ effectId, parameters?, options? }`. Automation sample positions are canonical
-unsigned decimal strings such as `"480"`, never JSON numbers. Unknown structural keys are refused.
+rack entries are `{ effectId, parameters?, options? }`. Every durable u64 accepts either a safe
+nonnegative JSON integer or a canonical unsigned decimal string through `18446744073709551615`;
+the canonical Session V1 document always writes it as a decimal string. Unknown keys are refused.
 The complete input is limited to 4 MiB and must be valid UTF-8 JSON.
 
-`--output -` writes exactly the canonical TOML, including its final LF, and successful stderr is
+`--output -` writes exactly the canonical JSON, including its final LF, and successful stderr is
 empty. No receipt shares stdout in this mode. A path writes a same-directory temporary file and
 publishes it atomically only after the embedded Wasm engine has accepted the document; stdout then
 receives one compact JSON receipt plus LF. Existing files, directories, and symlinks are preserved
@@ -82,8 +83,8 @@ A successful stems file receipt has this exact shape (values shown are illustrat
   "schemaVersion": 1,
   "command": "session.build",
   "output": {
-    "path": "../sessions/song.session.toml",
-    "resolvedPath": "/work/sessions/song.session.toml",
+    "path": "../sessions/song.session.json",
+    "resolvedPath": "/work/sessions/song.session.json",
     "bytes": 7642,
     "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
   },
@@ -150,7 +151,7 @@ manifest or content store is the artifact authority.
 
 It is not a second implementation of anything the engine already decides.
 
-There is **no TOML parser** here and there never will be (ruling 5438024085). `validate()` boots the
+There is **no second session parser** here. `validate()` boots the
 real engine and throws the result away, so its diagnostics *are* the engine's diagnostics and its
 budget checks are the real ones under the real physics gate. A grammar written twice is a grammar
 that disagrees with itself eventually, and the disagreement is always discovered in production.

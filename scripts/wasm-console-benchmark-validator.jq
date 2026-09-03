@@ -43,42 +43,42 @@ def close($a; $b): (($a - $b) | if . < 0 then -. else . end) < 0.002;
 def workload_pins:
   {
     "nine_track_baseline":
-      [9, false, "eq", "simd1:eq", "tone", "fixtures/session/v1/parametric-eq-nine-track.toml"],
+      [9, false, "eq", "simd1:eq", "tone", "fixtures/session/v1/parametric-eq-nine-track.json"],
     "nine_track_ragged_strip":
-      [9, true, "eq+compressor+limiter", "simd1:eq+compressor,simd2:limiter", "tone", "fixtures/session/v1/console-sixty-four-track-intended.toml"],
+      [9, true, "eq+compressor+limiter", "simd1:eq+compressor,simd2:limiter", "tone", "fixtures/session/v1/console-sixty-four-track-intended.json"],
     "sixty_four_track_console":
-      [64, false, "eq+compressor+limiter", "simd1:eq+compressor,simd2:limiter", "tone", "fixtures/session/v1/console-sixty-four-track-intended.toml"],
+      [64, false, "eq+compressor+limiter", "simd1:eq+compressor,simd2:limiter", "tone", "fixtures/session/v1/console-sixty-four-track-intended.json"],
     "one_twenty_eight_track_stretch":
-      [128, true, "eq+compressor+limiter", "simd1:eq+compressor,simd2:limiter", "tone", "fixtures/session/v1/console-sixty-four-track-intended.toml"],
+      [128, true, "eq+compressor+limiter", "simd1:eq+compressor,simd2:limiter", "tone", "fixtures/session/v1/console-sixty-four-track-intended.json"],
     "sixty_four_track_eq_only":
-      [64, true, "eq", "simd1:eq", "tone", "fixtures/session/v1/console-sixty-four-track-intended.toml"],
+      [64, true, "eq", "simd1:eq", "tone", "fixtures/session/v1/console-sixty-four-track-intended.json"],
     "sixty_four_track_compressor_only":
-      [64, true, "compressor", "simd1:compressor", "tone", "fixtures/session/v1/console-sixty-four-track-intended.toml"],
+      [64, true, "compressor", "simd1:compressor", "tone", "fixtures/session/v1/console-sixty-four-track-intended.json"],
     "sixty_four_track_builtins_only":
-      [64, true, "builtins", "builtins", "tone", "fixtures/session/v1/console-sixty-four-track-intended.toml"],
+      [64, true, "builtins", "builtins", "tone", "fixtures/session/v1/console-sixty-four-track-intended.json"],
     "sixty_four_track_dispatch_only":
-      [64, true, "identity", "builtins", "tone", "fixtures/session/v1/console-sixty-four-track-intended.toml"],
+      [64, true, "identity", "builtins", "tone", "fixtures/session/v1/console-sixty-four-track-intended.json"],
     "sixty_four_track_idle":
-      [64, true, "eq+compressor+limiter", "simd1:eq+compressor,simd2:limiter", "silence", "fixtures/session/v1/console-sixty-four-track-intended.toml"],
+      [64, true, "eq+compressor+limiter", "simd1:eq+compressor,simd2:limiter", "silence", "fixtures/session/v1/console-sixty-four-track-intended.json"],
     "sixty_four_track_console_legacy":
-      [64, false, "eq+compressor", "simd1:eq,dynamic:compressor", "tone", "fixtures/session/v1/console-sixty-four-track.toml"],
+      [64, false, "eq+compressor", "simd1:eq,dynamic:compressor", "tone", "fixtures/session/v1/console-sixty-four-track.json"],
     "sixty_four_track_eq_comp_simd1":
-      [64, true, "eq+compressor", "simd1:eq+compressor", "tone", "fixtures/session/v1/console-sixty-four-track-intended.toml"],
+      [64, true, "eq+compressor", "simd1:eq+compressor", "tone", "fixtures/session/v1/console-sixty-four-track-intended.json"],
     # The overhead pair. `plumbing` is a layout word of its own -- no rack effect *and* no builtin
     # binding -- and it is the difference between these two rows that the pair measures, so a row
     # that called itself `builtins` would be naming the thing it is defined by not having.
     "sixty_four_track_plumbing_only":
-      [64, true, "plumbing", "plumbing", "tone", "fixtures/session/v1/console-sixty-four-track-intended.toml"],
+      [64, true, "plumbing", "plumbing", "tone", "fixtures/session/v1/console-sixty-four-track-intended.json"],
     "sixty_four_track_gain_pan_only":
-      [64, true, "gain+pan", "builtins", "tone", "fixtures/session/v1/console-sixty-four-track-intended.toml"],
+      [64, true, "gain+pan", "builtins", "tone", "fixtures/session/v1/console-sixty-four-track-intended.json"],
     # The mono rows. Both arms of the row-pair render the mono fixture exactly as it is checked in;
     # the mixed-cohort row is derived from the same file in code.
     "sixty_four_track_console_mono":
-      [64, false, "eq+compressor+limiter", "simd1:eq+compressor,simd2:limiter", "tone", "fixtures/session/v1/console-sixty-four-track-mono.toml"],
+      [64, false, "eq+compressor+limiter", "simd1:eq+compressor,simd2:limiter", "tone", "fixtures/session/v1/console-sixty-four-track-mono.json"],
     "sixty_four_track_console_mono_dual":
-      [64, false, "eq+compressor+limiter", "simd1:eq+compressor,simd2:limiter", "tone", "fixtures/session/v1/console-sixty-four-track-mono.toml"],
+      [64, false, "eq+compressor+limiter", "simd1:eq+compressor,simd2:limiter", "tone", "fixtures/session/v1/console-sixty-four-track-mono.json"],
     "sixty_four_track_console_half_mono":
-      [64, true, "eq+compressor+limiter", "simd1:eq+compressor,simd2:limiter", "tone", "fixtures/session/v1/console-sixty-four-track-mono.toml"]
+      [64, true, "eq+compressor+limiter", "simd1:eq+compressor,simd2:limiter", "tone", "fixtures/session/v1/console-sixty-four-track-mono.json"]
   };
 
 # The legs, in the fixed order they are rendered and emitted.

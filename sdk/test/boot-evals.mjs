@@ -106,7 +106,7 @@ describe("eval 1 -- the three red probes at the SDK boundary", () => {
     // Pins the #241/A2 deletion itself: a document still carrying `sample_rate_hz` on a source is
     // not quietly tolerated, it is an unknown key at `$.sources[0].sample_rate_hz`.
     const refusal = await validate(
-      sessionDocument({ sourceExtra: ", sample_rate_hz = 48000" }),
+      sessionDocument({ sourceExtra: ',"sample_rate_hz":48000' }),
       { asset },
     );
     assert.equal(refusal.ok, false);
@@ -118,7 +118,7 @@ describe("eval 1 -- the three red probes at the SDK boundary", () => {
   });
 
   test("(c companion) the deleted per-source start_frame refuses the same way", async () => {
-    const refusal = await validate(sessionDocument({ sourceExtra: ", start_frame = 0" }), { asset });
+    const refusal = await validate(sessionDocument({ sourceExtra: ',"start_frame":0' }), { asset });
     assert.equal(refusal.ok, false);
     assert.deepEqual(
       refusal.diagnostics.map((row) => [row.code, row.path]),

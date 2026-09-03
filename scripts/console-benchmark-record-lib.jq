@@ -178,14 +178,14 @@ def session_kinds: ["nine_track_baseline","nine_track_ragged_strip","one_twenty_
 
 # The standing qualification fixture (#175): the intended production layout, EQ and compressor as
 # one two-slot chain on `simd1` and a true-peak limiter on `simd2`.
-def console_fixture: "fixtures/session/v1/console-sixty-four-track-intended.toml";
+def console_fixture: "fixtures/session/v1/console-sixty-four-track-intended.json";
 # The retired fixture, rendered by exactly one row for exactly one transition record.
-def legacy_console_fixture: "fixtures/session/v1/console-sixty-four-track.toml";
+def legacy_console_fixture: "fixtures/session/v1/console-sixty-four-track.json";
 # The mono qualification fixture: the standing strip with its source mapping and every upstream
 # per-channel parameter symmetrised, so every track satisfies the channel-symmetry witness'
 # structural terms. Its fader and pan asymmetry and its limiters' `maximum` link are kept, because
 # they are what document the seam.
-def mono_console_fixture: "fixtures/session/v1/console-sixty-four-track-mono.toml";
+def mono_console_fixture: "fixtures/session/v1/console-sixty-four-track-mono.json";
 
 # Every workload names its track count, whether its model was derived in code, what its strip
 # carries and what its sources feed it. A synthetic row that claimed to be a checked-in fixture,
@@ -202,7 +202,7 @@ def session_kind_shape:
   if .workload_kind == "nine_track_baseline" then
     .tracks == 9 and .synthetic_fixture == false and
     .strip_content == "eq" and .strip_layout == "simd1:eq" and .input_signal == "tone" and
-    .fixture_id == "fixtures/session/v1/parametric-eq-nine-track.toml"
+    .fixture_id == "fixtures/session/v1/parametric-eq-nine-track.json"
   elif .workload_kind == "nine_track_ragged_strip" then
     .tracks == 9 and .synthetic_fixture == true and
     .strip_content == "eq+compressor+limiter" and

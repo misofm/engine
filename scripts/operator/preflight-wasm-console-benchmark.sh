@@ -243,10 +243,10 @@ jq -n -S \
     --arg host_sha256 "$(sha256sum tools/wasm-console/src/main.rs | awk '{print $1}')" \
     --arg guest_source_sha256 "$(sha256sum tools/wasm-console-guest/src/lib.rs | awk '{print $1}')" \
     --arg subject_sha256 "$(sha256sum tools/console-workload/src/lib.rs | awk '{print $1}')" \
-    --arg fixture_sha256 "$(sha256sum fixtures/session/v1/console-sixty-four-track.toml | awk '{print $1}')" \
-    --arg standing_fixture_sha256 "$(sha256sum fixtures/session/v1/console-sixty-four-track-intended.toml | awk '{print $1}')" \
+    --arg fixture_sha256 "$(sha256sum fixtures/session/v1/console-sixty-four-track.json | awk '{print $1}')" \
+    --arg standing_fixture_sha256 "$(sha256sum fixtures/session/v1/console-sixty-four-track-intended.json | awk '{print $1}')" \
     --arg fixture_generator_sha256 "$(sha256sum scripts/derive-intended-console-fixture.py | awk '{print $1}')" \
-    --arg mono_fixture_sha256 "$(sha256sum fixtures/session/v1/console-sixty-four-track-mono.toml | awk '{print $1}')" \
+    --arg mono_fixture_sha256 "$(sha256sum fixtures/session/v1/console-sixty-four-track-mono.json | awk '{print $1}')" \
     --arg mono_fixture_generator_sha256 "$(sha256sum scripts/derive-mono-console-fixture.py | awk '{print $1}')" \
     --arg runner_sha256 "$(sha256sum scripts/run-wasm-console-benchmark.sh | awk '{print $1}')" \
     --arg validator_sha256 "$(sha256sum scripts/wasm-console-benchmark-validator.jq | awk '{print $1}')" \

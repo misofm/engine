@@ -28,7 +28,7 @@ use graph::{
 use graph_compiler::{GraphBuiltinsCompileRequest, GraphCompiler, PreparedGraphBuiltinsArtifact};
 use session::{
     CompileCaps, EffectIdentity, RouteSource, SendTap, StableId, compile_session,
-    parse_session_toml,
+    parse_session_json,
 };
 use sha2::{Digest, Sha256};
 
@@ -53,7 +53,7 @@ const INPUT_MANIFEST: &[u8] = include_bytes!("../../../fixtures/builtins/v1/MANI
 /// execute. That gap is a real finding about the gate, not about this feature.
 const INPUT_MANIFEST_SHA256: &str =
     "ad034b8880acd13e6144fd00c515dc5fa83ca3b044c2a2472453cc6cad9934d1";
-const SESSION: &str = include_str!("../../../fixtures/session/v1/canonical.toml");
+const SESSION: &str = include_str!("../../../fixtures/session/v1/canonical.json");
 
 const WORKLOADS: [Workload; 5] = [
     Workload::FullChainFilters,
@@ -438,7 +438,7 @@ fn prepare_real_meter_tap_artifact(
     rate_hz: u32,
     config: MeterConfig,
 ) -> PreparedGraphBuiltinsArtifact {
-    let mut model = parse_session_toml(SESSION).expect("frozen benchmark session");
+    let mut model = parse_session_json(SESSION).expect("frozen benchmark session");
     model.sample_rate_hz = rate_hz;
     model.automation.clear();
     let mut delay = model.tracks[0].dynamic.effects[0].clone();
@@ -1059,7 +1059,7 @@ fn prepare_256_tracks(rate_hz: u32) -> builtins_compiler::PreparedBuiltinsSessio
     assert_eq!(fixture.text("state_mode"), "new_per_prepare");
     assert_eq!(
         fixture.text("session_template_path"),
-        "fixtures/session/v1/canonical.toml"
+        "fixtures/session/v1/canonical.json"
     );
     assert_eq!(
         sha256(SESSION.as_bytes()),
@@ -1070,7 +1070,7 @@ fn prepare_256_tracks(rate_hz: u32) -> builtins_compiler::PreparedBuiltinsSessio
     assert_eq!(fixture.usize("tracks"), track_count);
     assert_eq!(track_count, PREPARE_TRACKS);
     let track_prefix = fixture.text("track_id_prefix");
-    let mut model = parse_session_toml(SESSION).expect("frozen session");
+    let mut model = parse_session_json(SESSION).expect("frozen session");
     let mut template = model.tracks[0].clone();
     template.simd1.effects.clear();
     template.dynamic.effects.clear();

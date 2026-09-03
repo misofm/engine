@@ -3098,7 +3098,7 @@ impl BuiltinLaneSelector {
 /// muting a live signal fades it rather than clipping it off. Unmuting retargets back to the
 /// lane's current `fader_db`. A **settled** mute is still the exact `+0.0` the prepared path
 /// produces -- `andnot`, not a multiply -- so a muted lane's output bits are identical to a
-/// session that declared the mute in its TOML. During the ramp itself the lane is a plain
+/// session that declared the mute in its JSON. During the ramp itself the lane is a plain
 /// multiply, which is what makes the fade a fade; the final ramp sample multiplies by exactly
 /// `+0.0` and can therefore carry the input's sign, and every sample after it is exactly `+0.0`.
 ///

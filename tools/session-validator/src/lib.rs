@@ -1,10 +1,10 @@
-//! Read-only session authoring gate: run every session pipeline stage over one TOML document and
+//! Read-only session authoring gate: run every session pipeline stage over one JSON document and
 //! report the engine's own typed diagnostics, stage by stage.
 //!
 //! # Why a separate tool
 //!
 //! `docs/SESSION_SCHEMA_V1.md` is normative but dense, and the stage that rejects a hand-authored
-//! session is exactly the information an author needs: a TOML typo, a schema violation, a resource
+//! session is exactly the information an author needs: a JSON typo, a schema violation, a resource
 //! cap and a builtins preparation failure are four different repairs. The engine already produces
 //! stable typed diagnostics for all four; nothing exposed them at a command line. This tool is that
 //! command line and nothing more -- it reads one file, prepares nothing that outlives the process,
@@ -14,10 +14,10 @@
 //!
 //! The stages are the real pipeline in the real order:
 //!
-//! 1. `toml-grammar` -- the TOML grammar accepted by `toml_parser`, the first thing
-//!    [`parse_session_toml`] does. Its only diagnostic code is `toml.syntax`.
+//! 1. `json-grammar` -- the JSON grammar accepted by `jstrict`, the first thing
+//!    [`parse_session_json`] does. Its only diagnostic code is `json.syntax`.
 //! 2. `typed-model` -- the strict V1 schema decode plus the issue-004 validation
-//!    [`parse_session_toml`] runs on the decoded model: unknown keys, ID syntax and uniqueness,
+//!    [`parse_session_json`] runs on the decoded model: unknown keys, ID syntax and uniqueness,
 //!    references, closed enum tokens, finite/`f32`/unit-local domains, source bounds, automation
 //!    ordering.
 //! 3. `compile-session` -- [`compile_session`]: the checked resource preflight, the cap
@@ -27,10 +27,10 @@
 //!    session is preparable and not merely well-formed.
 //!
 //! Stages 1 and 2 are one function call, because the parser validates the model it just decoded.
-//! They are still reported separately, and correctly: `toml.syntax` is produced only by the grammar
+//! They are still reported separately, and correctly: `json.syntax` is produced only by the grammar
 //! and is returned alone, so a document that fails the grammar can never also carry a schema
 //! diagnostic. Attributing by code therefore names the same stage a duplicated grammar parse would,
-//! without pinning a second copy of the TOML dependency in this workspace.
+//! without pinning a second copy of the JSON dependency in this workspace.
 //!
 //! # Caps
 //!
@@ -44,19 +44,19 @@ use std::{fmt::Write as _, process::ExitCode};
 use builtins_compiler::{BuiltinCompileCaps, prepare_session_builtins};
 use session::{
     CompileCaps, CompiledSession, DiagnosticCode, DiagnosticSet, compile_session,
-    parse_session_toml,
+    parse_session_json,
 };
 
 /// The four pipeline stages, in execution order.
 pub const STAGE_NAMES: [&str; 4] = [
-    "toml-grammar",
+    "json-grammar",
     "typed-model",
     "compile-session",
     "prepare-builtins",
 ];
 
 const STAGE_SUMMARIES: [&str; 4] = [
-    "TOML grammar (toml_parser)",
+    "JSON grammar (jstrict)",
     "strict V1 schema decode and validation",
     "resource preflight, caps, canonical normalization",
     "off-render builtins preparation",
@@ -106,7 +106,7 @@ impl StageDiagnostic {
         if let (Some(row), Some(column)) = (self.line, self.column) {
             let _ = write!(line, "  (line {row}, column {column})");
         }
-        // A `toml.syntax` message carries the parser's multi-line source excerpt. Continuation
+        // A `json.syntax` message carries the parser's multi-line source excerpt. Continuation
         // lines are indented rather than flattened, so one diagnostic still reads as one block.
         if self.message.contains('\n') {
             for part in self.message.lines() {
@@ -268,7 +268,7 @@ fn builtin_caps() -> BuiltinCompileCaps {
 pub fn validate_session_document(source: &str) -> ValidationReport {
     let mut stages = Vec::with_capacity(STAGE_NAMES.len());
 
-    let model = match parse_session_toml(source) {
+    let model = match parse_session_json(source) {
         Ok(model) => {
             stages.push(stage(0, StageStatus::Pass, Vec::new()));
             stages.push(stage(1, StageStatus::Pass, Vec::new()));
@@ -276,12 +276,12 @@ pub fn validate_session_document(source: &str) -> ValidationReport {
         }
         Err(set) => {
             let diagnostics = session_diagnostics(&set);
-            // `toml.syntax` is produced only by the grammar parse, and it is returned alone, so a
+            // `json.syntax` is produced only by the grammar parse, and it is returned alone, so a
             // document that fails the grammar can never also carry a schema diagnostic.
             let grammar_failed = set
                 .diagnostics()
                 .iter()
-                .all(|diagnostic| diagnostic.code == DiagnosticCode::TomlSyntax);
+                .all(|diagnostic| diagnostic.code == DiagnosticCode::JsonSyntax);
             if grammar_failed {
                 stages.push(stage(0, StageStatus::Fail, diagnostics));
                 stages.push(stage(1, StageStatus::Skipped, Vec::new()));
@@ -325,7 +325,7 @@ pub fn validate_session_document(source: &str) -> ValidationReport {
     }
     stages.push(stage(3, StageStatus::Pass, Vec::new()));
 
-    let canonical = compiled.canonical_toml().to_owned();
+    let canonical = compiled.canonical_json().to_owned();
     ValidationReport {
         stages,
         canonical: Some(canonical),
@@ -343,7 +343,7 @@ fn skipped_tail(mut stages: Vec<StageOutcome>, from: usize) -> ValidationReport 
 }
 
 const USAGE: &str = "\
-usage: session_validator validate [--canonical] <session.toml>
+usage: session_validator validate [--canonical] <session.json>
 
   validate <path>
       Run every session pipeline stage over <path> and print a PASS/FAIL line per stage
@@ -351,7 +351,7 @@ usage: session_validator validate [--canonical] <session.toml>
 
   validate --canonical <path>
       The same run, but the canonical re-serialization is written to stdout and the stage
-      report to stderr, so `... --canonical draft.toml > session.toml` normalizes a document.
+      report to stderr, so `... --canonical draft.json > session.json` normalizes a document.
       Nothing is written when a stage fails.
 
 Read-only: no file is written, no artifact is produced, no audio is rendered.

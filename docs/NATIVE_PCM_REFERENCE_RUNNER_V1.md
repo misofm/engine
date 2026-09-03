@@ -12,7 +12,7 @@ The complete command shape is:
 
 ```text
 native-pcm-runner \
-  --session SESSION.toml --source-root DIRECTORY \
+  --session SESSION.json --source-root DIRECTORY \
   --frames POSITIVE_U64 --output OUTPUT.f32le
 ```
 

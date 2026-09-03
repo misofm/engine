@@ -61,7 +61,7 @@ fn migration_inventory_keeps_all_four_classifications_and_reproducible_audit() {
             "missing inventory section {heading}"
         );
     }
-    assert!(inventory.contains("Baseline contains 35 live session-document TOMLs"));
+    assert!(inventory.contains("Baseline contains **25** live session-document TOMLs"));
     assert!(inventory.contains("canonical-minimal.json"));
     assert!(inventory.contains("canonical.json"));
     assert!(inventory.contains("parametric-eq-nine-track.json"));

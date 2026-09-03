@@ -97,7 +97,7 @@ try {
   sibling.dispose();
 }
 
-// The packed executable uses only this extraction's embedded artifacts and emits raw TOML.
+// The packed executable uses only this extraction's embedded artifacts and emits raw JSON.
 const cliRequest = JSON.stringify({
   schemaVersion: 1,
   session: { id: "tarball.cli", sampleRateHz: 48_000 },
@@ -140,7 +140,7 @@ await copyFile(
   resolve(import.meta.dirname, "../../fixtures/flac-delivery/v1/flac/pcm24-stereo-boundaries-b32.flac"),
   resolve(stemsRoot, "Packed Stem.flac"),
 );
-const stemsOutput = resolve(packageRoot, "..", "packed.session.toml");
+const stemsOutput = resolve(packageRoot, "..", "packed.session.json");
 const stemsCli = spawn(
   process.execPath,
   [resolve(packageRoot, manifest.bin.enginectl), "session", "build", "--stems", stemsRoot, "--output", stemsOutput],

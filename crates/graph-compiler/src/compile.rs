@@ -157,7 +157,7 @@ impl GraphCompiler {
             diagnostics.push(diag("graph.resource.limit", "$.graph_compile_caps"));
         }
         // NOT YET REMOVED (#99 F5, deliberately; tracked by #162): this clones the whole
-        // `CompiledSession`, canonical TOML included, purely to satisfy the borrow checker --
+        // `CompiledSession`, canonical JSON included, purely to satisfy the borrow checker --
         // `model` borrows the session, and the transactional failure path must hand `effects`
         // back **by value** from inside the loops that read `model`. Removing it means
         // restructuring a 500-line function so every early `failure(effects, ..)` happens after

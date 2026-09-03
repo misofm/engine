@@ -12,7 +12,7 @@ use protocol::{
     StatusCode, SuccessResponsePayload, TelemetryConfiguration, TransactionApplied,
     TypedCommandFrame, TypedEventFrame, TypedNonOkResponseFrame, TypedSuccessResponseFrame,
 };
-use session::{CompileCaps, StableId, parse_session_toml};
+use session::{CompileCaps, StableId, parse_session_json};
 
 fn request_id(value: u64) -> RequestId {
     RequestId::new(value).expect("nonzero request ID")
@@ -266,7 +266,7 @@ fn prepare_corpus() -> Corpus {
 
 fn prepare_egress_corpus() -> EgressCorpus {
     let session = SessionStore::new(
-        parse_session_toml(include_str!("../../../fixtures/session/v1/canonical.toml"))
+        parse_session_json(include_str!("../../../fixtures/session/v1/canonical.json"))
             .expect("prepared session"),
         CompileCaps {
             max_compiled_model_bytes: u64::MAX,

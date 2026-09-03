@@ -27,7 +27,7 @@ use graph::{
 use graph_compiler::{GraphBuiltinsCompileRequest, GraphCompiler};
 use session::{
     ChannelMatrix, CompileCaps, EffectIdentity, RouteSource, SendTap, StableId, compile_session,
-    parse_session_toml,
+    parse_session_json,
 };
 use sha2::{Digest, Sha256};
 
@@ -554,7 +554,7 @@ fn graph_tap_fixtures() -> (Vec<u8>, String) {
 }
 
 fn graph_tap_artifact() -> graph_compiler::PreparedGraphBuiltinsArtifact {
-    let mut model = parse_session_toml(include_str!("../../../fixtures/session/v1/canonical.toml"))
+    let mut model = parse_session_json(include_str!("../../../fixtures/session/v1/canonical.json"))
         .expect("fixture session");
     let mut fixture_effect = model.tracks[0].dynamic.effects[0].clone();
     fixture_effect.identity = EffectIdentity::Native {
@@ -1402,7 +1402,7 @@ fn resources() -> String {
 }
 
 fn fixture_session() -> session::CompiledSession {
-    let mut model = parse_session_toml(include_str!("../../../fixtures/session/v1/canonical.toml"))
+    let mut model = parse_session_json(include_str!("../../../fixtures/session/v1/canonical.json"))
         .expect("fixture session");
     model.tracks[0].simd1.effects.clear();
     model.tracks[0].dynamic.effects.clear();
@@ -1426,7 +1426,7 @@ fn fixture_session_tracks(count: usize) -> session::CompiledSession {
     if count == 1 {
         return fixture_session();
     }
-    let mut model = parse_session_toml(include_str!("../../../fixtures/session/v1/canonical.toml"))
+    let mut model = parse_session_json(include_str!("../../../fixtures/session/v1/canonical.json"))
         .expect("fixture session");
     let mut template = model.tracks[0].clone();
     template.simd1.effects.clear();
@@ -5061,8 +5061,8 @@ fn expected_benchmark_fields(kind: BenchmarkKind, rate_hz: u32) -> Vec<(String, 
             benchmark_field_pair("meter_observers", "56"),
             benchmark_field_pair("meter_queue_capacity", "4"),
             benchmark_field_pair("state_mode", "\"new_per_prepare\""),
-            benchmark_field_pair("session_template_path", "\"fixtures/session/v1/canonical.toml\""),
-            benchmark_field_pair("session_template_sha256", "\"36232a437c0280ad1166aeed4cc6a3c95d1260d088664757e776c2b3a065aa80\""),
+            benchmark_field_pair("session_template_path", "\"fixtures/session/v1/canonical.json\""),
+            benchmark_field_pair("session_template_sha256", "\"a240547d7e57f76a087c7c43cffc2c54944f96e7ac88a1a19158f65a4a0bc77b\""),
             benchmark_field_pair("track_id_prefix", "\"benchmark-track-\""),
             benchmark_field_pair("track_id_count", "256"),
             benchmark_field_pair("empty_effect_racks", "true"),
@@ -5213,7 +5213,7 @@ mod tests {
         assert_eq!(
             sha256(&fs::read(root.join("MANIFEST.tsv")).expect("checked manifest bytes")),
             // Re-pinned by issue #210 phase 2: the two `prepare_256_tracks` workload fixtures name
-            // `fixtures/session/v1/canonical.toml` by digest, and that session grew a required
+            // `fixtures/session/v1/canonical.json` by digest, and that session grew a required
             // `builtins.*.delay_samples` key. The payload count is unchanged.
             //
             // Re-pinned again by issue #210 phase 3: `resources.jsonl` alone moved -- the strip's
@@ -5226,7 +5226,7 @@ mod tests {
             // Re-pinned by issue #241: the same two preparation workloads now name the canonical
             // session by its source-content identity after the source-schema migration. Their
             // payload lengths and every render-bearing fixture remain unchanged.
-            "4b7b6ac1f1c2f16aecebb003c62b37420a96ca6f0bc1b75fa471654dcbc38ba5",
+            "b244da45d88d670951205098b7516af20387a141eccb3bf60edb61e8ba57a919",
             "accepted joined-corpus manifest identity"
         );
 

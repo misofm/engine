@@ -31,7 +31,7 @@ fn session_fixture_names() -> Vec<String> {
         .expect("fixtures/session/v1 exists")
         .map(|entry| entry.expect("dir entry").file_name())
         .filter_map(|name| name.to_str().map(str::to_owned))
-        .filter(|name| name.ends_with(".toml"))
+        .filter(|name| name.ends_with(".json"))
         .collect();
     names.sort();
     names
@@ -39,11 +39,11 @@ fn session_fixture_names() -> Vec<String> {
 
 #[test]
 fn source_identity_format_diagnostics_are_byte_identical_at_validator_and_web_boot() {
-    let base = fixture("canonical.toml");
+    let base = fixture("canonical.json");
     let identity = base
         .lines()
-        .find(|line| line.contains("content = \"sha256:"))
-        .and_then(|line| line.split("content = \"").nth(1))
+        .find(|line| line.contains("\"content\": \"sha256:"))
+        .and_then(|line| line.split("\"content\": \"").nth(1))
         .and_then(|tail| tail.split('"').next())
         .expect("canonical source identity");
     let mut non_hex = identity.to_owned();
@@ -82,14 +82,14 @@ fn every_valid_session_fixture_passes_every_stage() {
     let names = session_fixture_names();
     // A glob that silently matched nothing would make this test vacuous.
     for required in [
-        "canonical.toml",
-        "canonical-minimal.toml",
-        "console-sixty-four-track.toml",
+        "canonical.json",
+        "canonical-minimal.json",
+        "console-sixty-four-track.json",
         // The standing 64-track qualification fixture (#175). It is generated rather than
         // authored, and the generator takes its canonical spelling from this very validator, so
         // requiring it here closes the loop: the tool that produced the fixture is the tool that
         // has to keep accepting it.
-        "console-sixty-four-track-intended.toml",
+        "console-sixty-four-track-intended.json",
     ] {
         assert!(
             names.iter().any(|name| name == required),
@@ -126,14 +126,14 @@ fn every_valid_session_fixture_passes_every_stage() {
 
 #[test]
 fn the_duplicate_key_fixture_fails_the_grammar_stage() {
-    let name = "toml-1.0-invalid-duplicate-key.toml";
+    let name = "json-invalid-duplicate-key.json";
     let report = validate_session_document(&fixture(name));
     assert!(!report.passed());
     assert_eq!(report.failed_stage(), Some(0));
     let stage = &report.stages()[0];
-    assert_eq!(stage.name, "toml-grammar");
+    assert_eq!(stage.name, "json-grammar");
     assert_eq!(stage.diagnostics.len(), 1);
-    assert_eq!(stage.diagnostics[0].code, "toml.syntax");
+    assert_eq!(stage.diagnostics[0].code, "json.syntax");
     for later in &report.stages()[1..] {
         assert_eq!(later.status, StageStatus::Skipped, "{}", later.name);
     }
@@ -147,59 +147,59 @@ fn the_duplicate_key_fixture_fails_the_grammar_stage() {
 const MUTATIONS: &[(&str, &str, &str, usize, &str)] = &[
     // Stage 1: grammar.
     (
-        "canonical-minimal.toml",
-        "revision = 0",
-        "revision = ",
+        "canonical-minimal.json",
+        "\"revision\": \"0\"",
+        "\"revision\": ",
         0,
-        "toml.syntax",
+        "json.syntax",
     ),
     // Stage 2: strict schema decode and issue-004 validation.
     (
-        "canonical-minimal.toml",
-        "schema_version = 1",
-        "schema_version = 0",
+        "canonical-minimal.json",
+        "\"schema_version\": 1",
+        "\"schema_version\": 0",
         1,
         "schema.version_unsupported",
     ),
     (
-        "canonical-minimal.toml",
-        "sample_rate_hz = 48000",
-        "sample_rate_hz = 22050",
+        "canonical-minimal.json",
+        "\"sample_rate_hz\": 48000",
+        "\"sample_rate_hz\": 22050",
         1,
         "sample_rate.unsupported_at_launch",
     ),
     (
-        "canonical-minimal.toml",
-        "session_id = \"minimal.session\"",
-        "session_id = \"Minimal.Session\"",
+        "canonical-minimal.json",
+        "\"session_id\": \"minimal.session\"",
+        "\"session_id\": \"Minimal.Session\"",
         1,
         "id.invalid",
     ),
     (
-        "canonical-minimal.toml",
-        "quantum_frames = 128",
-        "quantum_frames = 0",
+        "canonical-minimal.json",
+        "\"quantum_frames\": 128",
+        "\"quantum_frames\": 0",
         1,
         "capacity.zero",
     ),
     (
-        "canonical-minimal.toml",
-        "mode = \"single_thread\"",
-        "mode = \"turbo\"",
+        "canonical-minimal.json",
+        "\"mode\": \"single_thread\"",
+        "\"mode\": \"turbo\"",
         1,
         "schema.invalid_enum",
     ),
     (
-        "canonical-minimal.toml",
-        "channels = 2",
-        "channels = 6",
+        "canonical-minimal.json",
+        "\"channels\": 2",
+        "\"channels\": 6",
         1,
         "numeric.out_of_schema_range",
     ),
     (
-        "canonical.toml",
-        "left_db = 0.0",
-        "left_gain = 0.0",
+        "canonical.json",
+        "\"left_db\": 0.0",
+        "\"left_gain\": 0.0",
         1,
         "schema.unknown_field",
     ),
@@ -208,51 +208,51 @@ const MUTATIONS: &[(&str, &str, &str, usize, &str)] = &[
     // exceeding its flat 0..=48000 domain is stage-2 schema work rather than stage-4 DSP work.
     // Both are on the *left* lane so the row is unambiguous about which one it removed.
     (
-        "canonical.toml",
-        "lpf_hz = 20000.0, delay_samples = 0 }, right",
-        "lpf_hz = 20000.0 }, right",
+        "canonical.json",
+        "          \"lpf_hz\": 20000.0,\n          \"delay_samples\": 0",
+        "          \"lpf_hz\": 20000.0",
         1,
         "schema.missing_field",
     ),
     (
-        "canonical.toml",
-        "lpf_hz = 20000.0, delay_samples = 0 }, right",
-        "lpf_hz = 20000.0, delay_samples = 48001 }, right",
+        "canonical.json",
+        "\"delay_samples\": 0",
+        "\"delay_samples\": 48001",
         1,
         "numeric.out_of_schema_range",
     ),
     (
-        "canonical.toml",
-        "lpf_hz = 20000.0, delay_samples = 0 }, right",
-        "lpf_hz = 20000.0, delay_samples = -1 }, right",
+        "canonical.json",
+        "\"delay_samples\": 0",
+        "\"delay_samples\": -1",
         1,
         "numeric.out_of_schema_range",
     ),
     (
-        "canonical.toml",
-        "output_id = \"main-out\"",
-        "output_id = \"absent-out\"",
+        "canonical.json",
+        "\"output_id\": \"main-out\"",
+        "\"output_id\": \"absent-out\"",
         1,
         "reference.missing_entity",
     ),
     (
-        "canonical.toml",
-        "unit = \"db\", value = 0.0",
-        "unit = \"hz\", value = -1.0",
+        "canonical.json",
+        "\"unit\": \"db\",\n                \"value\": 0.0",
+        "\"unit\": \"hz\",\n                \"value\": -1.0",
         1,
         "numeric.out_of_schema_range",
     ),
     (
-        "canonical.toml",
-        "sidechain = { kind = \"none\" }",
-        "sidechain = { kind = \"ducking\" }",
+        "canonical.json",
+        "\"sidechain\": {\n              \"kind\": \"none\"",
+        "\"sidechain\": {\n              \"kind\": \"ducking\"",
         1,
         "schema.invalid_enum",
     ),
     (
-        "canonical.toml",
-        "shape = \"linear\"",
-        "shape = \"exponential\"",
+        "canonical.json",
+        "\"shape\": \"linear\"",
+        "\"shape\": \"exponential\"",
         1,
         "automation.invalid_range",
     ),
@@ -262,18 +262,18 @@ const MUTATIONS: &[(&str, &str, &str, usize, &str)] = &[
     // `effect_id` carries a fixed validated literal because Session V1 has no optional keys, so
     // the wrong literal has to be a typed diagnostic rather than an ignored field.
     (
-        "builtins-automation.toml",
-        "effect_id = \"strip\", parameter_id = 5",
-        "effect_id = \"channel-strip\", parameter_id = 5",
+        "builtins-automation.json",
+        "\"effect_id\": \"strip\",\n        \"parameter_id\": 5",
+        "\"effect_id\": \"channel-strip\",\n        \"parameter_id\": 5",
         1,
         "reference.missing_entity",
     ),
     // A `MatrixShared` parameter is one 2x2 for the track; addressing one of its lanes is a
     // category error, not a narrower request.
     (
-        "builtins-automation.toml",
-        "parameter_id = 7, channel = \"both\"",
-        "parameter_id = 7, channel = \"left\"",
+        "builtins-automation.json",
+        "\"parameter_id\": 7,\n        \"channel\": \"both\"",
+        "\"parameter_id\": 7,\n        \"channel\": \"left\"",
         1,
         "schema.invalid_enum",
     ),
@@ -281,34 +281,34 @@ const MUTATIONS: &[(&str, &str, &str, usize, &str)] = &[
     // span addressed at it could only ever be inert. The deferred filter tier is reopened by
     // changing the ABI, not by writing a session that quietly does nothing.
     (
-        "builtins-automation.toml",
-        "parameter_id = 2, channel = \"left\"",
-        "parameter_id = 3, channel = \"left\"",
+        "builtins-automation.json",
+        "\"parameter_id\": 2,\n        \"channel\": \"left\"",
+        "\"parameter_id\": 3,\n        \"channel\": \"left\"",
         1,
         "reference.missing_entity",
     ),
     // `delay_samples` (id 11) is the same case, and is named separately because its ruling is its
     // own: a delay change re-times the ring.
     (
-        "builtins-automation.toml",
-        "parameter_id = 1, channel = \"right\"",
-        "parameter_id = 11, channel = \"right\"",
+        "builtins-automation.json",
+        "\"parameter_id\": 1,\n        \"channel\": \"right\"",
+        "\"parameter_id\": 11,\n        \"channel\": \"right\"",
         1,
         "reference.missing_entity",
     ),
     // The removed document limits are strict unknowns rather than silently ignored host policy.
     (
-        "canonical.toml",
-        "sources = [",
-        "limits = { memory_bytes = 1 }\nsources = [",
+        "canonical.json",
+        "\"sources\": [",
+        "\"limits\": {\"memory_bytes\": 1},\n  \"sources\": [",
         1,
         "schema.unknown_field",
     ),
     // Stage 4: off-render builtins preparation, past everything the schema owns.
     (
-        "canonical.toml",
-        "hpf_hz = 20.0",
-        "hpf_hz = 900000.0",
+        "canonical.json",
+        "\"hpf_hz\": 20.0",
+        "\"hpf_hz\": 900000.0",
         3,
         "builtin.filter.cutoff",
     ),
@@ -366,9 +366,9 @@ fn each_mutation_is_attributed_to_the_stage_that_rejects_it() {
 
 #[test]
 fn parse_stage_diagnostics_carry_a_source_location_and_preparation_diagnostics_do_not() {
-    let schema = validate_session_document(&fixture("canonical.toml").replacen(
-        "left_db = 0.0",
-        "left_gain = 0.0",
+    let schema = validate_session_document(&fixture("canonical.json").replacen(
+        "\"left_db\": 0.0",
+        "\"left_gain\": 0.0",
         1,
     ));
     for diagnostic in &schema.stages()[1].diagnostics {
@@ -377,9 +377,9 @@ fn parse_stage_diagnostics_carry_a_source_location_and_preparation_diagnostics_d
             "parse diagnostics carry a span: {diagnostic:?}"
         );
     }
-    let preparation = validate_session_document(&fixture("canonical.toml").replacen(
-        "hpf_hz = 20.0",
-        "hpf_hz = 900000.0",
+    let preparation = validate_session_document(&fixture("canonical.json").replacen(
+        "\"hpf_hz\": 20.0",
+        "\"hpf_hz\": 900000.0",
         1,
     ));
     for diagnostic in &preparation.stages()[3].diagnostics {
@@ -392,7 +392,7 @@ fn parse_stage_diagnostics_carry_a_source_location_and_preparation_diagnostics_d
 
 #[test]
 fn canonical_output_reproduces_the_checked_in_canonical_fixtures() {
-    for name in ["canonical.toml", "canonical-minimal.toml"] {
+    for name in ["canonical.json", "canonical-minimal.json"] {
         let source = fixture(name);
         let report = validate_session_document(&source);
         assert_eq!(
@@ -405,8 +405,9 @@ fn canonical_output_reproduces_the_checked_in_canonical_fixtures() {
 
 #[test]
 fn canonicalization_normalizes_and_is_a_fixed_point() {
-    // This fixture is deliberately not canonical: it carries comments and a different root order.
-    let source = fixture("observation-frame-shape.toml");
+    let canonical = fixture("observation-frame-shape.json");
+    let value: serde_json::Value = serde_json::from_str(&canonical).expect("fixture JSON");
+    let source = serde_json::to_string(&value).expect("noncanonical JSON");
     let first = validate_session_document(&source)
         .canonical()
         .expect("fixture validates")
@@ -423,8 +424,8 @@ fn canonicalization_normalizes_and_is_a_fixed_point() {
 
 #[test]
 fn the_report_is_deterministic() {
-    let source = fixture("canonical.toml").replacen("left_db = 0.0", "left_gain = 0.0", 1);
-    let first = validate_session_document(&source).render("session.toml");
-    let second = validate_session_document(&source).render("session.toml");
+    let source = fixture("canonical.json").replacen("\"left_db\": 0.0", "\"left_gain\": 0.0", 1);
+    let first = validate_session_document(&source).render("session.json");
+    let second = validate_session_document(&source).render("session.json");
     assert_eq!(first, second);
 }

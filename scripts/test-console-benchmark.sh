@@ -56,7 +56,7 @@ metadata=$(jq -cn '{
 session=$(jq -cn --arg a "$digest_a" --argjson m "$metadata" '$m + {
   schema_version: 1, issue: 149, record: "console_session",
   workload_kind: "sixty_four_track_console", tracks: 64, synthetic_fixture: false,
-  fixture_id: "fixtures/session/v1/console-sixty-four-track-intended.toml",
+  fixture_id: "fixtures/session/v1/console-sixty-four-track-intended.json",
   round: 1, backend: "Simd8", sample_rate_hz: 48000, quantum_frames: 128, observations: 1000,
   units: "us_per_block", percentile_method: "nearest_rank",
   min_us_per_block: 281.9, p50_us_per_block: 283.4, p95_us_per_block: 285.4,
@@ -150,7 +150,7 @@ automation=$(jq -cn --arg a "$digest_a" --arg b "$digest_b" --argjson m "$metada
   schema_version: 1, issue: 149, record: "console_automation",
   workload_kind: "sixty_four_track_compressor_automation", tracks: 64,
   synthetic_fixture: true, strip_content: "compressor", strip_layout: "simd1:compressor",
-  input_signal: "tone", fixture_id: "fixtures/session/v1/console-sixty-four-track-intended.toml",
+  input_signal: "tone", fixture_id: "fixtures/session/v1/console-sixty-four-track-intended.json",
   round: 1, backend: "Simd8", sample_rate_hz: 48000, quantum_frames: 128,
   observations: 1000, pairing: "alternating_per_observation",
   arms: ["quiet","restated","automated"],
@@ -182,7 +182,7 @@ mono=$(jq -cn --arg a "$digest_a" --argjson m "$metadata" '$m + {
   workload_kind: "sixty_four_track_mono_pair", tracks: 64, round: 1, backend: "Simd8",
   observations: 1000, pairing: "alternating_per_observation",
   arms: ["collapse_eligible","collapse_forced_off"],
-  fixture_id: "fixtures/session/v1/console-sixty-four-track-mono.toml",
+  fixture_id: "fixtures/session/v1/console-sixty-four-track-mono.json",
   units: "ns_per_block", percentile_method: "nearest_rank",
   collapse_eligible_p50_ns: 121904, collapse_eligible_p95_ns: 124000,
   collapse_eligible_p99_ns: 126000,
@@ -241,7 +241,7 @@ session_floor=$(printf '%s' "$session" | jq -c -L "$scripts_dir" --arg s "$core_
 session_floor_not_derived=$(printf '%s' "$session" | jq -c -L "$scripts_dir" --arg s "$core_clock_source" \
     "$add_floor"' .workload_kind = "nine_track_baseline" | .tracks = 9
       | .synthetic_fixture = false | .strip_content = "eq" | .strip_layout = "simd1:eq"
-      | .fixture_id = "fixtures/session/v1/parametric-eq-nine-track.toml"
+      | .fixture_id = "fixtures/session/v1/parametric-eq-nine-track.json"
       | with_floor(5480000000; $s)')
 
 expect_accept "$session" 'the base session record'
@@ -331,7 +331,7 @@ session_mutation '.os = ""' 'an empty operating-system field'
 session_mutation '.tracks = 63' 'a console record that is not eight full banks'
 session_mutation '.workload_kind = "nine_track_baseline"' 'a kind that contradicts its track count'
 session_mutation '.synthetic_fixture = true' 'a written fixture reported as synthetic'
-session_mutation '.fixture_id = "fixtures/session/v1/canonical.toml"' 'a record naming another fixture'
+session_mutation '.fixture_id = "fixtures/session/v1/canonical.json"' 'a record naming another fixture'
 session_mutation '.p50_ns_per_block = 999999999' 'percentiles out of order'
 session_mutation '.min_ns_per_block = -1' 'a negative duration'
 session_mutation '.render_errors = 1' 'a run that produced render errors'
@@ -460,8 +460,8 @@ expect_accept "$(printf '%s' "$session" | jq -c '.workload_kind = "sixty_four_tr
 # rather than derived; the half-mono row is the one that is derived, and it is derived from the
 # same file. A mono row pointed at the standing fixture would be the standing console row wearing
 # the name the collapse gate is going to be read off.
-mono_fixture="fixtures/session/v1/console-sixty-four-track-mono.toml"
-session_mutation ".workload_kind = \"sixty_four_track_console_mono\" | .fixture_id = \"fixtures/session/v1/console-sixty-four-track-intended.toml\"" \
+mono_fixture="fixtures/session/v1/console-sixty-four-track-mono.json"
+session_mutation ".workload_kind = \"sixty_four_track_console_mono\" | .fixture_id = \"fixtures/session/v1/console-sixty-four-track-intended.json\"" \
     'a mono row rendered from the standing stereo fixture'
 session_mutation ".workload_kind = \"sixty_four_track_console_mono\" | .fixture_id = \"$mono_fixture\" | .synthetic_fixture = true" \
     'a mono row reported as derived in code'
@@ -500,7 +500,7 @@ session_mutation '.workload_kind = "sixty_four_track_eq_comp_simd1" | .strip_con
     'a chain-shape row claiming the retired layout'
 session_mutation '.workload_kind = "sixty_four_track_eq_comp_simd1" | .strip_content = "eq+compressor" | .strip_layout = "simd1:eq+compressor" | .synthetic_fixture = false' \
     'a derived chain-shape row reported as a checked-in fixture'
-expect_accept "$(printf '%s' "$session" | jq -c --arg f "fixtures/session/v1/console-sixty-four-track.toml" '.workload_kind = "sixty_four_track_console_legacy" | .strip_content = "eq+compressor" | .strip_layout = "simd1:eq,dynamic:compressor" | .fixture_id = $f')" \
+expect_accept "$(printf '%s' "$session" | jq -c --arg f "fixtures/session/v1/console-sixty-four-track.json" '.workload_kind = "sixty_four_track_console_legacy" | .strip_content = "eq+compressor" | .strip_layout = "simd1:eq,dynamic:compressor" | .fixture_id = $f')" \
     'an honest transition row'
 expect_accept "$(printf '%s' "$session" | jq -c '.workload_kind = "sixty_four_track_eq_comp_simd1" | .strip_content = "eq+compressor" | .strip_layout = "simd1:eq+compressor" | .synthetic_fixture = true')" \
     'an honest chain-shape row'
@@ -650,7 +650,7 @@ automation_mutation '.strip_layout = "simd1:eq+compressor,simd2:limiter"' 'an au
 automation_mutation '.synthetic_fixture = false' 'a derived automation row claiming a checked-in fixture'
 automation_mutation '.input_signal = "silence"' 'an automation row claiming silence while rendering a tone'
 automation_mutation '.tracks = 9' 'an automation row that is not eight full banks'
-automation_mutation '.fixture_id = "fixtures/session/v1/console-sixty-four-track.toml"' \
+automation_mutation '.fixture_id = "fixtures/session/v1/console-sixty-four-track.json"' \
     'an automation row claiming the retired fixture'
 # What rides the control channel.
 automation_mutation '.automation_spans_per_block = 64' 'a row claiming one span per block while sending sixty-four'
@@ -701,7 +701,7 @@ mono_mutation '.tracks = 9' 'a mono pair that is not eight full banks'
 mono_mutation '.units = "us_per_block"' 'the wrong mono unit'
 mono_mutation '.statistical_method = "two arms alternated per observation"' \
     'a mono record whose method sentence drifted'
-mono_mutation '.fixture_id = "fixtures/session/v1/console-sixty-four-track-intended.toml"' \
+mono_mutation '.fixture_id = "fixtures/session/v1/console-sixty-four-track-intended.json"' \
     'a mono pair measured on the standing stereo fixture'
 # The class-A statement, which is the whole reason the pair exists. Trivially true today and the
 # gate on the collapse tomorrow, so both the digests and the sentence that reports them are pinned.
@@ -738,13 +738,13 @@ records=$(jq -cn --argjson session "$session" --argjson hoist "$hoist" \
     --argjson placement "$placement" --argjson automation "$automation" \
     --argjson mono "$mono" \
     --arg a "$digest_a" --arg b "$digest_b" '
-  def console_fixture: "fixtures/session/v1/console-sixty-four-track-intended.toml";
-  def legacy_fixture: "fixtures/session/v1/console-sixty-four-track.toml";
-  def mono_fixture: "fixtures/session/v1/console-sixty-four-track-mono.toml";
+  def console_fixture: "fixtures/session/v1/console-sixty-four-track-intended.json";
+  def legacy_fixture: "fixtures/session/v1/console-sixty-four-track.json";
+  def mono_fixture: "fixtures/session/v1/console-sixty-four-track-mono.json";
   def intended_layout: "simd1:eq+compressor,simd2:limiter";
   def sessions: [
     {kind: "nine_track_baseline", tracks: 9, synthetic: false, strip: "eq", layout: "simd1:eq",
-     signal: "tone", fixture: "fixtures/session/v1/parametric-eq-nine-track.toml", digest: "1"},
+     signal: "tone", fixture: "fixtures/session/v1/parametric-eq-nine-track.json", digest: "1"},
     {kind: "nine_track_ragged_strip", tracks: 9, synthetic: true, strip: "eq+compressor+limiter",
      layout: intended_layout, signal: "tone", fixture: console_fixture, digest: "2"},
     {kind: "sixty_four_track_console", tracks: 64, synthetic: false, strip: "eq+compressor+limiter",
@@ -830,7 +830,7 @@ expect_aggregate_reject "$(printf '%s' "$records" | jq -c --arg c "$digest_c" '.
 # exists to prevent, and a run that never stated one at all is not an accepted run.
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '.[0].measurement_control = "uncontrolled" | .[0].cpu_affinity = "uncontrolled" | .[0].background_load_note = "uncontrolled; MISO_ENGINE_BENCH_ALLOW_UNCONTROLLED=1; waived affinity_unavailable" | .[]')" 'a run mixing controlled and uncontrolled records'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | .measurement_control = null | .cpu_affinity = null | .missing_metadata = ["cpu_affinity","measurement_control"]] | .[]')" 'a run that never stated its admissibility'
-expect_aggregate_reject "$(printf '%s' "$records" | jq -c '.[0].workload_kind = "sixty_four_track_console" | .[0].tracks = 64 | .[0].synthetic_fixture = false | .[0].fixture_id = "fixtures/session/v1/console-sixty-four-track-intended.toml" | .[0].strip_content = "eq+compressor+limiter" | .[0].strip_layout = "simd1:eq+compressor,simd2:limiter" | .[]')" 'a set missing a declared workload'
+expect_aggregate_reject "$(printf '%s' "$records" | jq -c '.[0].workload_kind = "sixty_four_track_console" | .[0].tracks = 64 | .[0].synthetic_fixture = false | .[0].fixture_id = "fixtures/session/v1/console-sixty-four-track-intended.json" | .[0].strip_content = "eq+compressor+limiter" | .[0].strip_layout = "simd1:eq+compressor,simd2:limiter" | .[]')" 'a set missing a declared workload'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.workload_kind != "sixty_four_track_eq_only")] | .[]')" 'a set missing the eq-only decomposition row'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.workload_kind != "sixty_four_track_idle")] | .[]')" 'a set missing the idle row'
 expect_aggregate_reject "$(printf '%s' "$records" | jq -c '[.[] | select(.workload_kind != "sixty_four_track_console_legacy")] | .[]')" 'a set missing the transition row'

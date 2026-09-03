@@ -319,9 +319,10 @@ The implementation owner must confirm this inventory against current `main` befo
   benchmark fixture-path validators, and active operator scripts.
 
 The implementation inventory is derived from exact baseline `51468d5d`, not from a filename suffix
-alone. The obvious document roots contain 35 session-document TOMLs: 14 under
-`fixtures/session/v1`, 10 builtins benchmark sessions, five native-runner sessions, and six
-host-web browser/qualification sessions. Additional live format-bound names occur throughout the C
+alone. The corrected inventory contains 25 session-document TOMLs: 14 under
+`fixtures/session/v1`, five native-runner sessions, and six host-web browser/qualification
+sessions. The ten `fixtures/builtins/v1/benchmark/*.toml` inputs are builtin workload configuration,
+not Session V1 documents, and remain generic tooling TOML. Additional live format-bound names occur throughout the C
 ABI, SDK/enginectl, protocol, tools, workflows, policy scripts and the `author-session` skill.
 The checked inventory produced in the first checkpoint is authoritative and must distinguish these
 from Cargo/configuration TOML and immutable historical evidence.
@@ -560,3 +561,38 @@ the source rebuild and stopped only at the intentionally deferred checked-in Was
 expected `6ddf154d02fcb4dfaa1a397280a28ab9f38b0cd6dff466a316f120266ce2223f`, observed
 `6dcd9ced2daeb886843a764bcc6abc0b4f1b2c7a50af1ed91151a5ab366461e5`. Per the tranche boundary,
 the packaged artifact and its digest are not changed here and must be rebuilt/resealed in tranche 4.
+
+## Attempt 1 implementation evidence — tranche 3
+
+The SDK builder now has a dedicated `toJson()` canonical writer whose field order, final newline,
+escaping and finite-f32 spelling are byte-checked against the Rust authority. `toJSON()` remains the
+normalized object surface and represents every durable u64 leaf as a decimal string. Builder inputs
+accept safe nonnegative JavaScript numbers or bigint values through `u64::MAX`; enginectl request
+JSON accepts the same safe-number domain plus canonical decimal strings through `u64::MAX`, and
+passes the resulting session document directly to the engine authority without format sniffing or
+translation. Headless and browser source paths use the same document boundary.
+
+All 25 live Session V1 TOML documents identified by the corrected inventory were replaced or
+deleted: 14 session fixtures, five native-runner sessions and six host-web test/qualification
+sessions. The ten builtins benchmark `.toml` files are workload configuration records, not Session
+V1 documents; their session-template references and digests now identify canonical JSON. Native
+runner generation, console intended/mono derivation and their checkers transform JSON structures
+and delegate canonical byte production to `session-validator`. Rust consumers, fuzz seeds,
+workflows, active operator scripts and documentation were migrated. The author-session skill is a
+canonical-JSON-only workflow. `scripts/check-session-policy.sh` gates the sole runtime format and
+uses an explicit exact-file allowlist for historical evidence that must retain its original text.
+
+Focused evidence is green for native-pcm-runner (19 tests), session-validator (eight validator plus
+one skill test), source (55 tests), parameter-metadata (seven ABI-layout plus three round-trip
+tests), console/native fixture regeneration and mutation checks, SDK strict types/generated/assets,
+the SDK builder/headless/browser source tests, and a source-assembled enginectl package (21 tests,
+including maximum-u64 requests). Workspace all-target checking, changed-package warning-denied
+Clippy, formatting, session policy, deletion-policy mutations, generated checks, fixture checks and
+C ABI checks are green. A source-built Wasm SDK run passed 130 of 131 tests; the remaining harness
+case is environmental under the root test user: it expects a non-executable file to produce the
+tool's exit 2, while the shell refuses execution first with exit 126. No functional session-format
+assertion failed.
+
+Checked-in package Wasm rebuilding, package tarball closure and the intentionally stale packaged
+Wasm digest remain tranche 4 work. No package artifact was rebuilt and the one-shot descriptive
+benchmark was not run in this tranche.
