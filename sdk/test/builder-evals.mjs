@@ -759,7 +759,7 @@ describe("canonical float spellings", () => {
 
   test("the bounded Rust-authority corpus matches the actual SDK writer", async () => {
     const manifest = JSON.parse(await readFile(
-      new URL("../../fixtures/session/v1/canonical-writer-corpus.json", import.meta.url),
+      new URL("../../fixtures/session-canonical/v1/canonical-writer-corpus.json", import.meta.url),
       "utf8",
     ));
     assert.equal(manifest.schema, "miso.session.canonical-writer-corpus.v1");

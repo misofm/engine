@@ -357,7 +357,7 @@ mod tests {
             "{}\n",
             serde_json::to_string_pretty(&artifact).expect("serialize corpus")
         );
-        let path = corpus_path("fixtures/session/v1/canonical-writer-corpus.json");
+        let path = corpus_path("fixtures/session-canonical/v1/canonical-writer-corpus.json");
         if std::env::var_os("MISO_UPDATE_CANONICAL_WRITER_CORPUS").is_some() {
             fs::write(&path, &expected).expect("write canonical writer corpus");
         }
