@@ -13,6 +13,8 @@
 | `qualification/run.mjs --self-test-mutations` native corpus gate (#74) | replace one in-browser PCM digest with 64 zeroes | `<browser>: native-corpus-digest` fails against the frozen native pin |
 | `qualification/run.mjs --self-test-mutations` stall gate (#74) | change the measured injected-stall duration to zero | `<browser>: main-thread-stall` fails before a no-stall run can claim coverage |
 | `qualification/run.mjs --check-matrix` deployment matrix gate (#74) | append `-red-mutation` to the checked version floor in memory | `<browser>: deployment-matrix` fails |
+| `qualification/run.mjs --check-matrix` candidate lineage gate (#338) | replace the recorded commit with 39 hex digits | `matrix: candidate-lineage` fails before browser launch |
+| `qualification/run.mjs --check-matrix` artifact lineage gate (#338) | replace the recorded Wasm SHA-256 with 64 zeroes | `matrix: artifact-lineage` fails before browser launch |
 | `host_core::PreparedHost` `compile_fail` doctest (callback contract) | add `unsafe impl Sync for PreparedHost {}` | the doctest compiles and `cargo test --doc` exits 101 |
 | `tests::command_ack_names_the_exact_application_sample` (#137 E1) | move the `while let Ok(record) = self.control.try_pop()` drain in `ConsoleMatrixProcessor::process` to after `self.matrix.process(block)` | the reported sample is one block early and the block at `applied_at_sample` still renders the pre-command value |
 | `tests::command_flood_is_typed_backpressure_and_leaves_the_render_untouched` (#137 E3) | delete the free-room pre-check loop in `admit_commands` | the flood is admitted record by record until `try_push` fails, the transaction stops being all-or-nothing, and the flooded run's output differs from the clean run's |
@@ -76,7 +78,7 @@ anywhere in it.
 
 ## Issue #143 E12 — the three-browser observation row
 
-`qualification/run.mjs --browser all --self-test-mutations --record-matrix`, Playwright 1.62.1
+`qualification/run.mjs --browser all --self-test-mutations --record-matrix --candidate-commit <40-hex>`, Playwright 1.62.1
 headless Linux, over the shipped `simd128` artifact.
 
 ```

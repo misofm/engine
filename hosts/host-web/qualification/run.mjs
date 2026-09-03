@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { cp, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -13,6 +14,8 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const HOST_WEB = path.dirname(HERE);
 const RESULTS_PATH = path.join(HERE, "results.json");
 const MATRIX_PATH = path.join(HOST_WEB, "BROWSER_DEPLOYMENT_MATRIX.md");
+const WASM_ARTIFACT = "miso-engine-v1-audio-worklet.simd128.wasm";
+const CANONICAL_COMMIT = /^[0-9a-f]{40}$/;
 const PLAYWRIGHT_VERSION = JSON.parse(
   await readFile(path.join(HERE, "node_modules", "playwright", "package.json"), "utf8"),
 ).version;
@@ -34,6 +37,30 @@ function option(name) {
 
 function gate(browserName, name, condition, detail) {
   if (!condition) throw new Error(`${browserName}: ${name}: ${detail}`);
+}
+
+async function sha256(file) {
+  return createHash("sha256").update(await readFile(file)).digest("hex");
+}
+
+function validateLineage(checked, artifactDigest) {
+  gate("matrix", "candidate-lineage", CANONICAL_COMMIT.test(checked.candidateCommit),
+    "checked candidateCommit is not canonical lowercase 40-hex");
+  gate("matrix", "artifact-lineage", checked.wasmSha256 === artifactDigest,
+    "checked wasmSha256 differs from the artifact under qualification");
+}
+
+function lineageMutationProofs(checked, artifactDigest) {
+  assert.throws(
+    () => validateLineage({ ...checked, candidateCommit: "0".repeat(39) }, artifactDigest),
+    /matrix: candidate-lineage:/,
+    "matrix: malformed candidate lineage escaped its gate",
+  );
+  assert.throws(
+    () => validateLineage({ ...checked, wasmSha256: "0".repeat(64) }, artifactDigest),
+    /matrix: artifact-lineage:/,
+    "matrix: mismatched artifact lineage escaped its gate",
+  );
 }
 
 function validate(browserName, result) {
@@ -306,7 +333,7 @@ async function main() {
   );
   const artifacts = option("--artifacts");
   if (artifacts === null) {
-    throw new Error("usage: npm run qualify -- --artifacts DIR [--browser NAME] [--check-matrix|--record-matrix] [--self-test-mutations]");
+    throw new Error("usage: npm run qualify -- --artifacts DIR [--browser NAME] [--check-matrix|--record-matrix --candidate-commit 40_HEX] [--self-test-mutations]");
   }
   const browserOption = option("--browser") ?? "all";
   const browserNames = browserOption === "all" ? Object.keys(ENGINES) : [browserOption];
@@ -319,6 +346,11 @@ async function main() {
   if (recordMatrix && browserOption !== "all") {
     throw new Error("--record-matrix requires --browser all");
   }
+  const candidateCommit = option("--candidate-commit");
+  if (recordMatrix && (candidateCommit === null || !CANONICAL_COMMIT.test(candidateCommit))) {
+    throw new Error("--record-matrix requires --candidate-commit as canonical lowercase 40-hex");
+  }
+  const artifactDigest = await sha256(path.join(path.resolve(artifacts), WASM_ARTIFACT));
 
   if (proveMutations) {
     const served = await artifactSetProofs(artifacts);
@@ -328,6 +360,10 @@ async function main() {
   const checked = checkMatrix
     ? JSON.parse(await readFile(RESULTS_PATH, "utf8"))
     : null;
+  if (checked !== null) {
+    validateLineage(checked, artifactDigest);
+    lineageMutationProofs(checked, artifactDigest);
+  }
   const server = await startQualificationServer({ artifacts });
   try {
     const rows = [];
@@ -345,6 +381,8 @@ async function main() {
     if (recordMatrix) {
       const results = {
         schema: "miso.web.qualification.matrix.v1",
+        candidateCommit,
+        wasmSha256: artifactDigest,
         playwrightVersion: PLAYWRIGHT_VERSION,
         platform: "linux-headless",
         artifact: "single shipped simd128 AudioWorklet artifact",

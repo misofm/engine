@@ -716,3 +716,33 @@ Per checkpoint discipline, no live Chromium, Firefox or WebKit process was launc
 must first commit this coherent correction tranche; live three-browser qualification will be run
 and recorded against that exact candidate commit and artifact hash in a separate evidence
 checkpoint. The descriptive benchmark was not run again.
+
+## Attempt 2 live-browser evidence checkpoint
+
+Root committed the JSON qualification-identity checker repair, producing clean candidate
+`f5701e31447f01b53b1f63a1ca0738fa30c970ec`. A fresh reproducible build from that candidate
+produced the expected six-file browser artifact set; the shipped Wasm SHA-256 was
+`6dcd9ced2daeb886843a764bcc6abc0b4f1b2c7a50af1ed91151a5ab366461e5`. Playwright 1.62.1 and its
+browser binaries were installed into a task-specific temporary cache. The first dependency probe
+identified missing Ubuntu shared libraries, and the single bounded correction installed
+Playwright's declared browser runtime dependencies before any qualification result was recorded.
+
+Real headless Chromium 151.0.7922.34, Firefox 153.0 and WebKit 26.5 each ran the complete
+AudioWorklet qualification against that same artifact. Every engine passed simd128 attestation,
+AudioWorklet boot, both native-corpus digest renders, the live control/meter/telemetry path, the
+observation subscribe/unsubscribe/window/audio-identity path, and the 100-ms main-thread-stall
+path. Each invocation also passed the exact six-file artifact-set mutations and all twelve result
+red mutations, then matched the checked browser row and generated deployment matrix exactly. The
+checked `qualification/results.json` and generated `BROWSER_DEPLOYMENT_MATRIX.md` now retain the
+candidate commit and Wasm hash lineage for those rows. The unrelated FLAC-worker leg was not run;
+this qualification command does not own it. The descriptive benchmark was not run again.
+
+The evidence gate also makes that lineage executable. `--check-matrix` computes SHA-256 from the
+exact Wasm file under qualification, requires it to equal `results.json::wasmSha256`, and requires
+the recorded candidate to be canonical lowercase 40-hex without equating it to CI's possible
+synthetic merge commit. `--record-matrix` now refuses to start unless passed an explicit
+`--candidate-commit <40-hex>` and persists that commit plus the computed artifact digest, so a
+future recording cannot erase either field. A 39-hex record attempt refused before browser launch;
+a one-byte-short artifact copy refused at `matrix: artifact-lineage`; and real Chromium
+151.0.7922.34 reran the complete check-matrix/self-test qualification green with the new lineage
+gate. The matrix generator and checked document remain byte-current.
