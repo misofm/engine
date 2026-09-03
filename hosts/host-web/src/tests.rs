@@ -93,19 +93,24 @@ fn exact_retained_report_total(resources: &WebResourceReport) -> u64 {
         .expect("independent exact retained sum")
 }
 
-fn maximum_document_with_dense_invalid_automation() -> Vec<u8> {
+struct DenseInvalidAutomationDocument {
+    bytes: Vec<u8>,
+    segment_count: usize,
+}
+
+fn maximum_document_with_dense_invalid_automation() -> DenseInvalidAutomationDocument {
     const BASE: &str = include_str!("../tests/browser-v1/session.json");
     const EMPTY_AUTOMATION: &str = "\"automation\": []";
     const HEADER: &str = r#""automation": [{"id":"dense-invalid","target":{"entity_id":"track","rack":"builtins","effect_id":"strip","parameter_id":5,"channel":"both"},"segments":["#;
-    const INVALID_SEGMENT: &str = "{\"shape\":\"step\",\"start_sample\":\"0\",\"end_sample\":\"0\",\"start_value\":0.0,\"end_value\":0.0,\"unit\":\"db\"},";
-    const FOOTER: &str = "{},{},{},{},{},{},{},{},{},{},{}]}]";
+    const INVALID_SEGMENT: &str = "{\"shape\":\"step\",\"start_sample\":\"0\",\"end_sample\":\"0\",\"start_value\":0.0,\"end_value\":0.0,\"unit\":\"db\"}";
+    const FOOTER: &str = "]}]";
 
     let (before, after) = BASE
         .split_once(EMPTY_AUTOMATION)
         .expect("browser fixture has the automation replacement seam");
     let maximum = MAXIMUM_DOCUMENT_BYTES as usize;
     let fixed_bytes = before.len() + HEADER.len() + FOOTER.len() + after.len();
-    let segment_count = (maximum - fixed_bytes - 2) / INVALID_SEGMENT.len();
+    let segment_count = (maximum - fixed_bytes + 1) / (INVALID_SEGMENT.len() + 1);
     assert!(
         segment_count > 10_000,
         "fixture remains densely adversarial"
@@ -114,7 +119,10 @@ fn maximum_document_with_dense_invalid_automation() -> Vec<u8> {
     let mut document = String::with_capacity(maximum);
     document.push_str(before);
     document.push_str(HEADER);
-    for _ in 0..segment_count {
+    for position in 0..segment_count {
+        if position != 0 {
+            document.push(',');
+        }
         document.push_str(INVALID_SEGMENT);
     }
     document.push_str(FOOTER);
@@ -122,7 +130,43 @@ fn maximum_document_with_dense_invalid_automation() -> Vec<u8> {
     let padding = maximum - document.len();
     document.extend(core::iter::repeat_n(' ', padding));
     assert_eq!(document.len(), maximum);
-    document.into_bytes()
+    DenseInvalidAutomationDocument {
+        bytes: document.into_bytes(),
+        segment_count,
+    }
+}
+
+#[test]
+fn maximum_document_dense_invalid_fixture_reaches_bounded_semantic_validation() {
+    let fixture = maximum_document_with_dense_invalid_automation();
+    assert_eq!(fixture.bytes.len(), MAXIMUM_DOCUMENT_BYTES as usize);
+    assert!(fixture.segment_count > 10_000);
+    let source = core::str::from_utf8(&fixture.bytes).expect("fixture is UTF-8 JSON");
+    assert!(
+        !source.contains("{}"),
+        "fixture has no empty sentinel segment"
+    );
+    assert_eq!(
+        source
+            .matches("\"start_sample\":\"0\",\"end_sample\":\"0\"")
+            .count(),
+        fixture.segment_count,
+        "every repeated segment has equal bounds"
+    );
+
+    let failure = parse_session_json(source).expect_err("equal segment bounds must be invalid");
+    let diagnostics = failure.diagnostics();
+    assert_eq!(diagnostics.len(), 64, "semantic diagnostics stay bounded");
+    for (position, diagnostic) in diagnostics.iter().enumerate() {
+        assert_eq!(
+            diagnostic.code,
+            session::DiagnosticCode::AutomationInvalidRange
+        );
+        assert_eq!(
+            diagnostic.path.to_string(),
+            format!("$.automation[0].segments[{position}].end_sample")
+        );
+    }
 }
 
 #[test]
@@ -468,26 +512,27 @@ fn compile_resource_caps_are_inclusive_and_one_below_rejects() {
 /// Issue #240 built-in eval 4: time the complete production refusal, not the diagnostic encoder.
 ///
 /// The 234 ms worst-accepted Wasm boot measured for the brief leaves a 4.27x margin under this
-/// fixed one-second CI wall. Every invalid segment reaches the session parser and semantic
-/// validator; retaining all of their source spans makes this exact 1 MiB shape take seconds.
+/// fixed one-second CI wall. The separate phase oracle proves that the exact 1 MiB typed document
+/// reaches semantic validation and retains only the first 64 invalid-range source spans.
 #[test]
 fn maximum_document_dense_invalid_boot_is_typed_and_finishes_under_one_second() {
     use std::time::{Duration, Instant};
 
-    let document = maximum_document_with_dense_invalid_automation();
-    assert_eq!(document.len(), MAXIMUM_DOCUMENT_BYTES as usize);
+    let fixture = maximum_document_with_dense_invalid_automation();
+    assert_eq!(fixture.bytes.len(), MAXIMUM_DOCUMENT_BYTES as usize);
     let started = Instant::now();
-    let failure = AudioWorkletEngineHost::boot(&document, WebBootOptions::default())
+    let failure = AudioWorkletEngineHost::boot(&fixture.bytes, WebBootOptions::default())
         .err()
         .expect("dense invalid automation must refuse");
     let elapsed = started.elapsed();
     assert_eq!(failure.result(), RESULT_REFUSED_DOCUMENT);
-    assert!(
+    assert_eq!(
         failure
             .diagnostic()
-            .starts_with(b"schema.missing_field\t$.automation[0].segments["),
-        "typed automation refusal: {}",
-        String::from_utf8_lossy(failure.diagnostic())
+            .split(|byte| *byte == b'\n')
+            .next()
+            .expect("first diagnostic"),
+        b"automation.invalid_range\t$.automation[0].segments[0].end_sample"
     );
     assert_eq!(
         failure
@@ -497,6 +542,13 @@ fn maximum_document_dense_invalid_boot_is_typed_and_finishes_under_one_second() 
             .count(),
         host_core::diagnostics::MAXIMUM_PREPARE_DIAGNOSTIC_LINES,
         "the full boot returns the fixed diagnostic count"
+    );
+    assert!(
+        failure
+            .diagnostic()
+            .ends_with(b"automation.invalid_range\t$.automation[0].segments[63].end_sample\n"),
+        "the final retained semantic diagnostic is segment 63: {}",
+        String::from_utf8_lossy(failure.diagnostic())
     );
     assert!(
         elapsed < Duration::from_secs(1),
