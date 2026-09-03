@@ -58,44 +58,58 @@ export function deriveSessionIdentity(row) {
 /// digest under a different `frames` is not a smaller mistake, it is an impossible pair.
 export function expectedSourceRow(derived) {
   const { sourceChannels, sourceBitDepth } = qualificationConstants;
-  return `{ id = "${derived.sourceId}", content = "sha256:${derived.identity}", `
-    + `channels = ${sourceChannels}, bit_depth = "${sourceBitDepth}", `
-    + `frames = ${derived.frames} },`;
+  return {
+    id: derived.sourceId,
+    content: `sha256:${derived.identity}`,
+    channels: sourceChannels,
+    bit_depth: sourceBitDepth,
+    frames: String(derived.frames),
+  };
+}
+
+function checkDocumentSource(document, documentName, expected) {
+  const declared = document?.sources;
+  if (!Array.isArray(declared) || declared.length !== 1) {
+    throw new Error(
+      `session-identity: ${documentName}: expected exactly one source row, found `
+      + `${Array.isArray(declared) ? declared.length : "a non-array"}`,
+    );
+  }
+  try {
+    assert.deepEqual(declared[0], expected);
+  } catch {
+    throw new Error(
+      `session-identity: ${documentName}: declared source row is not the fed PCM's canonical `
+      + `identity and shape; expected ${JSON.stringify(expected)}`,
+    );
+  }
 }
 
 export async function checkSessionIdentities(directory = HERE) {
   const rows = [];
   for (const source of qualificationSessionSources) {
     const derived = deriveSessionIdentity(source);
-    const document = await readFile(path.join(directory, source.document), "utf8");
+    const document = JSON.parse(await readFile(path.join(directory, source.document), "utf8"));
     const expected = expectedSourceRow(derived);
-    if (!document.includes(expected)) {
-      throw new Error(
-        `session-identity: ${source.document}: declared source row is not the fed PCM's canonical `
-        + `identity; expected ${expected}`,
-      );
-    }
-    // One source row per document, so a truthful row cannot sit beside a stale one.
-    const declared = document.match(/content = "sha256:[0-9a-f]{64}"/g) ?? [];
-    if (declared.length !== 1) {
-      throw new Error(
-        `session-identity: ${source.document}: expected exactly one source content identity, `
-        + `found ${declared.length}`,
-      );
-    }
+    checkDocumentSource(document, source.document, expected);
     rows.push(derived);
-  }
-  // Red proof carried with the check: one flipped hex digit in the derived identity must stop
-  // matching the document. Without this the check could pass vacuously if the comparison were ever
-  // loosened, which is the failure mode that let the name-minted values stand.
-  for (const derived of rows) {
+
+    // Red proofs carried with the check: identity, shape, closure and cardinality mutations must
+    // all reach the same strict structural comparison used above.
     const head = derived.identity[0] === "0" ? "1" : "0";
-    const flipped = { ...derived, identity: `${head}${derived.identity.slice(1)}` };
-    const document = await readFile(path.join(directory, derived.document), "utf8");
-    assert.ok(
-      !document.includes(expectedSourceRow(flipped)),
-      `session-identity: ${derived.document}: flipped-digit red proof escaped its gate`,
-    );
+    const mutations = [
+      { ...document, sources: [{ ...document.sources[0], content: `sha256:${head}${derived.identity.slice(1)}` }] },
+      { ...document, sources: [{ ...document.sources[0], frames: String(derived.frames + 1) }] },
+      { ...document, sources: [{ ...document.sources[0], stale: true }] },
+      { ...document, sources: [...document.sources, document.sources[0]] },
+    ];
+    for (const mutation of mutations) {
+      assert.throws(
+        () => checkDocumentSource(mutation, source.document, expected),
+        (error) => error instanceof Error && error.message.startsWith("session-identity:"),
+        `session-identity: ${source.document}: structural red proof escaped its gate`,
+      );
+    }
   }
   return rows;
 }
