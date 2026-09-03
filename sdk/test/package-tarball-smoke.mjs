@@ -48,6 +48,16 @@ assert.equal(files.some((name) => name.includes("node_modules")), false);
 assert.equal(files.some((name) => name.startsWith("test") || name.includes("/test/")), false);
 assert.equal(files.includes("dist/effect.js"), false);
 assert.equal(files.includes("dist/effect.d.ts"), false);
+const shippedWorklet = await readFile(
+  resolve(packageRoot, "dist/assets/miso-engine-v1-audio-worklet.js"),
+  "utf8",
+);
+assert.match(shippedWorklet, /class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor/);
+assert.doesNotMatch(
+  shippedWorklet,
+  /class MisoEngineV[0-9]+AudioWorkletProcessor/,
+  "the shipped implementation class is private and therefore unversioned",
+);
 
 // Resolve the declaration surface exactly as a consumer does. Reading `.d.ts` files is not enough:
 // a declaration can exist while importing a sibling TypeScript never emitted (the old failure).

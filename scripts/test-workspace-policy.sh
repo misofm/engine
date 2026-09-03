@@ -145,6 +145,12 @@ mutate_prelaunch_product_generation() {
         >>"$root/crates/library/src/lib.rs"
 }
 
+mutate_versioned_worklet_implementation() {
+    local root="$1"
+    printf '%s%s%s\n' 'class MisoEngine' 'V2' 'AudioWorkletProcessor {}' \
+        >>"$root/hosts/binary/src/worklet.js"
+}
+
 mutate_global_isa() {
     local root="$1"
     mkdir -p "$root/.cargo"
@@ -303,6 +309,7 @@ expect_failure hardware-feature mutate_hardware_feature
 expect_failure track-limit mutate_track_limit
 expect_failure prelaunch-abi-generation mutate_prelaunch_abi_generation
 expect_failure prelaunch-product-generation mutate_prelaunch_product_generation
+expect_failure versioned-worklet-implementation mutate_versioned_worklet_implementation
 expect_failure global-isa mutate_global_isa
 expect_failure unscoped-isa-pin mutate_unscoped_isa_pin
 expect_failure extra-isa-feature mutate_extra_isa_feature

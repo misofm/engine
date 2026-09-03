@@ -1,0 +1,182 @@
+{
+  "documents": [
+    {
+      "id": "canonical-minimal",
+      "path": "fixtures/session/v1/canonical-minimal.json"
+    },
+    {
+      "canonical": "{\n  \"schema_version\": 1,\n  \"session_id\": \"demo.session\",\n  \"revision\": \"7\",\n  \"sample_rate_hz\": 48000,\n  \"quantum_frames\": 128,\n  \"render_profile\": {\n    \"id\": \"native\",\n    \"mode\": \"single_thread\"\n  },\n  \"output_profile\": {\n    \"id\": \"main\",\n    \"channels\": 2,\n    \"sample_format\": \"f32_planar\"\n  },\n  \"sources\": [\n    {\n      \"id\": \"voice\",\n      \"content\": \"sha256:2a97516c354b68848cdbd8f54a226a0a55b21ed138e207ad6c5cbb9c00aa5aea\",\n      \"channels\": 2,\n      \"bit_depth\": \"32f\",\n      \"frames\": \"48000\"\n    }\n  ],\n  \"tracks\": [\n    {\n      \"id\": \"vocal\",\n      \"source_id\": \"voice\",\n      \"left_source_channel\": 0,\n      \"right_source_channel\": 1,\n      \"builtins\": {\n        \"left\": {\n          \"polarity_invert\": false,\n          \"trim_db\": 0.0,\n          \"hpf_hz\": 20.0,\n          \"lpf_hz\": 20000.0,\n          \"delay_samples\": 0\n        },\n        \"right\": {\n          \"polarity_invert\": false,\n          \"trim_db\": 0.0,\n          \"hpf_hz\": 20.0,\n          \"lpf_hz\": 20000.0,\n          \"delay_samples\": 0\n        }\n      },\n      \"simd1\": {\n        \"effects\": [\n          {\n            \"id\": \"external\",\n            \"identity\": {\n              \"kind\": \"cid\",\n              \"cid\": \"bafyopaque-v1-text\"\n            },\n            \"quality\": \"high\",\n            \"bypass\": true,\n            \"link_mode\": \"maximum\",\n            \"params\": [],\n            \"sidechain\": {\n              \"kind\": \"routed\",\n              \"source\": {\n                \"kind\": \"track\",\n                \"track_id\": \"vocal\",\n                \"tap\": \"post_fader\"\n              },\n              \"port_id\": \"detector-in\"\n            }\n          }\n        ]\n      },\n      \"dynamic\": {\n        \"effects\": [\n          {\n            \"id\": \"eq\",\n            \"identity\": {\n              \"kind\": \"native\",\n              \"effect_id\": \"parametric-eq\"\n            },\n            \"quality\": \"normal\",\n            \"bypass\": false,\n            \"link_mode\": \"dual_mono\",\n            \"params\": [\n              {\n                \"parameter_id\": 1,\n                \"channel\": \"both\",\n                \"unit\": \"db\",\n                \"value\": 0.0\n              }\n            ],\n            \"sidechain\": {\n              \"kind\": \"none\"\n            }\n          }\n        ]\n      },\n      \"simd2\": {\n        \"effects\": []\n      },\n      \"fader\": {\n        \"left_db\": 0.0,\n        \"right_db\": 0.0,\n        \"left_mute\": false,\n        \"right_mute\": false\n      },\n      \"matrix\": {\n        \"ll\": 1.25,\n        \"lr\": -0.25,\n        \"rl\": 0.5,\n        \"rr\": 0.75,\n        \"smoothing_samples\": 32\n      }\n    }\n  ],\n  \"submixes\": [\n    {\n      \"id\": \"mix\"\n    }\n  ],\n  \"outputs\": [\n    {\n      \"id\": \"main-out\"\n    }\n  ],\n  \"routes\": [\n    {\n      \"id\": \"mix-to-main\",\n      \"source\": {\n        \"kind\": \"submix_output\",\n        \"submix_id\": \"mix\"\n      },\n      \"destination\": {\n        \"kind\": \"output_input\",\n        \"output_id\": \"main-out\"\n      },\n      \"channel_matrix\": {\n        \"ll\": 1.0,\n        \"lr\": 0.0,\n        \"rl\": 0.0,\n        \"rr\": 1.0\n      },\n      \"gain_db\": 0.0\n    },\n    {\n      \"id\": \"to-main\",\n      \"source\": {\n        \"kind\": \"track\",\n        \"track_id\": \"vocal\",\n        \"tap\": \"post_matrix\"\n      },\n      \"destination\": {\n        \"kind\": \"submix_input\",\n        \"submix_id\": \"mix\"\n      },\n      \"channel_matrix\": {\n        \"ll\": 1.0,\n        \"lr\": 0.0,\n        \"rl\": 0.0,\n        \"rr\": 1.0\n      },\n      \"gain_db\": 0.0\n    }\n  ],\n  \"automation\": [\n    {\n      \"id\": \"eq-gain\",\n      \"target\": {\n        \"entity_id\": \"vocal\",\n        \"rack\": \"dynamic\",\n        \"effect_id\": \"eq\",\n        \"parameter_id\": 1,\n        \"channel\": \"both\"\n      },\n      \"segments\": [\n        {\n          \"shape\": \"linear\",\n          \"start_sample\": \"0\",\n          \"end_sample\": \"480\",\n          \"start_value\": 0.0,\n          \"end_value\": -3.0,\n          \"unit\": \"db\"\n        }\n      ]\n    }\n  ]\n}\n",
+      "id": "canonical-full-surface"
+    }
+  ],
+  "f32": [
+    {
+      "bits": "00000000",
+      "canonical": "0.0",
+      "id": "positive-zero"
+    },
+    {
+      "bits": "80000000",
+      "canonical": "-0.0",
+      "id": "negative-zero"
+    },
+    {
+      "bits": "3f800000",
+      "canonical": "1.0",
+      "id": "one"
+    },
+    {
+      "bits": "bf800000",
+      "canonical": "-1.0",
+      "id": "negative-one"
+    },
+    {
+      "bits": "3dcccccd",
+      "canonical": "0.1",
+      "id": "ordinary-tenth"
+    },
+    {
+      "bits": "00000001",
+      "canonical": "0.000000000000000000000000000000000000000000001",
+      "id": "minimum-positive-subnormal"
+    },
+    {
+      "bits": "007fffff",
+      "canonical": "0.000000000000000000000000000000000000011754942",
+      "id": "maximum-positive-subnormal"
+    },
+    {
+      "bits": "80000001",
+      "canonical": "-0.000000000000000000000000000000000000000000001",
+      "id": "minimum-negative-subnormal"
+    },
+    {
+      "bits": "00800000",
+      "canonical": "0.000000000000000000000000000000000000011754944",
+      "id": "minimum-positive-normal"
+    },
+    {
+      "bits": "7f7fffff",
+      "canonical": "340282350000000000000000000000000000000.0",
+      "id": "maximum-positive-finite"
+    },
+    {
+      "bits": "ff7fffff",
+      "canonical": "-340282350000000000000000000000000000000.0",
+      "id": "maximum-negative-finite"
+    },
+    {
+      "bits": "15ae43fd",
+      "canonical": "0.00000000000000000000000007038530691851209",
+      "id": "double-rounding-positive"
+    },
+    {
+      "bits": "95ae43fd",
+      "canonical": "-0.00000000000000000000000007038530691851209",
+      "id": "double-rounding-negative"
+    },
+    {
+      "bits": "510b577e",
+      "canonical": "37404270000.0",
+      "id": "generated-01"
+    },
+    {
+      "bits": "f9923f1e",
+      "canonical": "-94919440000000000000000000000000000.0",
+      "id": "generated-02"
+    },
+    {
+      "bits": "e2a7e0cd",
+      "canonical": "-1548402400000000000000.0",
+      "id": "generated-03"
+    },
+    {
+      "bits": "0ea43562",
+      "canonical": "0.0000000000000000000000000000040480527",
+      "id": "generated-04"
+    },
+    {
+      "bits": "984c1639",
+      "canonical": "-0.0000000000000000000000026377602",
+      "id": "generated-05"
+    },
+    {
+      "bits": "a5ef8ed7",
+      "canonical": "-0.00000000000000041556683",
+      "id": "generated-06"
+    },
+    {
+      "bits": "203a8570",
+      "canonical": "0.00000000000000000015798964",
+      "id": "generated-07"
+    },
+    {
+      "bits": "b20302fe",
+      "canonical": "-0.000000007625884",
+      "id": "generated-08"
+    },
+    {
+      "bits": "e52b06b7",
+      "canonical": "-50478033000000000000000.0",
+      "id": "generated-09"
+    },
+    {
+      "bits": "07ed3493",
+      "canonical": "0.00000000000000000000000000000000035690697",
+      "id": "generated-10"
+    },
+    {
+      "bits": "3fcf9f22",
+      "canonical": "1.6220438",
+      "id": "generated-11"
+    },
+    {
+      "bits": "4a5a1d58",
+      "canonical": "3573590.0",
+      "id": "generated-12"
+    },
+    {
+      "bits": "800d94f7",
+      "canonical": "-0.0000000000000000000000000000000000000012473",
+      "id": "generated-13"
+    },
+    {
+      "bits": "111d0e3f",
+      "canonical": "0.00000000000000000000000000012389506",
+      "id": "generated-14"
+    },
+    {
+      "bits": "7666c546",
+      "canonical": "1170145960000000000000000000000000.0",
+      "id": "generated-15"
+    },
+    {
+      "bits": "94ac8021",
+      "canonical": "-0.0000000000000000000000000174181",
+      "id": "generated-16"
+    }
+  ],
+  "schema": "miso.session.canonical-writer-corpus.v1",
+  "strings": [
+    {
+      "canonical": "\"plain/ascii\"",
+      "id": "ascii",
+      "value": "plain/ascii"
+    },
+    {
+      "canonical": "\"\\\"\\\\\\b\\t\\n\\f\\r\\u0000\"",
+      "id": "escapes",
+      "value": "\"\\\b\t\n\f\r\u0000"
+    },
+    {
+      "canonical": "\"\\u007F\\u0080\\u009F\"",
+      "id": "c1-controls",
+      "value": ""
+    },
+    {
+      "canonical": "\"é/中/ / /🙂\"",
+      "id": "unicode",
+      "value": "é/中/ / /🙂"
+    }
+  ]
+}

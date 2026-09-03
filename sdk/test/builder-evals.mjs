@@ -18,7 +18,12 @@ import { before, describe, test } from "node:test";
 import { CATALOG } from "../src/generated/catalog.ts";
 import { MisoEngineAsset } from "../src/core/asset.ts";
 import { MisoUsageError } from "../src/core/errors.ts";
-import { assertSameSession, effect, session } from "../src/core/session.ts";
+import {
+  assertSameSession,
+  canonicalSessionJson,
+  effect,
+  session,
+} from "../src/core/session.ts";
 import { createOfflineEngine, validate } from "../src/headless/engine.ts";
 import { moduleBytes } from "./support.mjs";
 
@@ -65,6 +70,15 @@ function oneTrack(options = {}) {
 /** A JSON-shaped deep copy, so a test can mutate a model the builder froze. */
 function mutableModel(model) {
   return JSON.parse(JSON.stringify(model));
+}
+
+/** Deliberately destroy insertion order without changing any normalized value. */
+function reverseConstructionOrder(value) {
+  if (Array.isArray(value)) return value.map(reverseConstructionOrder);
+  if (value === null || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value).reverse().map(([key, child]) => [key, reverseConstructionOrder(child)]),
+  );
 }
 
 describe("eval 5 -- the plan-equality gate", () => {
@@ -732,6 +746,56 @@ describe("canonical float spellings", () => {
       "utf8",
     );
     assert.equal(builtinsAutomationFixture().toJson(), expected);
+  });
+
+  test("schema key order, never object construction order, controls canonical bytes", async () => {
+    // Red mutation: replace `checkedObjectOrder()` with `Object.entries(record)` in the writer.
+    // Every record below was deliberately constructed backwards, including tagged variants.
+    const built = richSession();
+    const reordered = reverseConstructionOrder(built.toJSON());
+    assert.notDeepEqual(Object.keys(reordered), Object.keys(built.toJSON()));
+    assert.equal(canonicalSessionJson(reordered), built.toJson());
+  });
+
+  test("the bounded Rust-authority corpus matches the actual SDK writer", async () => {
+    const manifest = JSON.parse(await readFile(
+      new URL("../../fixtures/session/v1/canonical-writer-corpus.json", import.meta.url),
+      "utf8",
+    ));
+    assert.equal(manifest.schema, "miso.session.canonical-writer-corpus.v1");
+
+    for (const entry of manifest.documents) {
+      const expected = entry.path === undefined
+        ? entry.canonical
+        : await readFile(new URL(`../../${entry.path}`, import.meta.url), "utf8");
+      assert.equal(canonicalSessionJson(JSON.parse(expected)), expected, entry.id);
+    }
+
+    const full = JSON.parse(await readFile(
+      new URL("../../fixtures/session/v1/canonical.json", import.meta.url),
+      "utf8",
+    ));
+    const view = new DataView(new ArrayBuffer(4));
+    for (const entry of manifest.f32) {
+      view.setUint32(0, Number.parseInt(entry.bits, 16), true);
+      const model = structuredClone(full);
+      model.routes[0].gain_db = view.getFloat32(0, true);
+      const line = canonicalSessionJson(model).split("\n")
+        .find((candidate) => candidate.includes('"gain_db":'));
+      assert.equal(line?.trim(), `"gain_db": ${entry.canonical}`, entry.id);
+    }
+
+    const minimal = JSON.parse(await readFile(
+      new URL("../../fixtures/session/v1/canonical-minimal.json", import.meta.url),
+      "utf8",
+    ));
+    for (const entry of manifest.strings) {
+      const model = structuredClone(minimal);
+      model.session_id = entry.value;
+      const line = canonicalSessionJson(model).split("\n")
+        .find((candidate) => candidate.includes('"session_id":'));
+      assert.equal(line?.trim(), `"session_id": ${entry.canonical},`, entry.id);
+    }
   });
 });
 

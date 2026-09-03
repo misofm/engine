@@ -1210,8 +1210,85 @@ const FLOAT_KEYS: ReadonlySet<string> = new Set([
   "start_value",
   "end_value",
 ]);
-function writeJson(model: SessionModel): string {
+/** Write one normalized model with the engine's schema-owned canonical key order. */
+export function canonicalSessionJson(model: SessionModel): string {
   return `${jsonValue(model, "", 0)}\n`;
+}
+
+function writeJson(model: SessionModel): string {
+  return canonicalSessionJson(model);
+}
+
+const OBJECT_KEY_ORDERS = {
+  render_profile: ["id", "mode"],
+  output_profile: ["id", "channels", "sample_format"],
+  sources: ["id", "content", "channels", "bit_depth", "frames"],
+  builtins: ["left", "right"],
+  channel_builtins: ["polarity_invert", "trim_db", "hpf_hz", "lpf_hz", "delay_samples"],
+  rack: ["effects"],
+  effects: ["id", "identity", "quality", "bypass", "link_mode", "params", "sidechain"],
+  params: ["parameter_id", "channel", "unit", "value"],
+  fader: ["left_db", "right_db", "left_mute", "right_mute"],
+  pan: ["left", "right", "smoothing_samples"],
+  matrix: ["ll", "lr", "rl", "rr", "smoothing_samples"],
+  submixes: ["id"],
+  outputs: ["id"],
+  routes: ["id", "source", "destination", "channel_matrix", "gain_db"],
+  channel_matrix: ["ll", "lr", "rl", "rr"],
+  automation: ["id", "target", "segments"],
+  target: ["entity_id", "rack", "effect_id", "parameter_id", "channel"],
+  segments: ["shape", "start_sample", "end_sample", "start_value", "end_value", "unit"],
+} as const;
+
+function taggedOrder(record: ModelRecord, key: string): readonly string[] {
+  const kind = record.kind;
+  if (key === "identity") {
+    if (kind === "native") return ["kind", "effect_id"];
+    if (kind === "cid") return ["kind", "cid"];
+  }
+  if (key === "sidechain") {
+    if (kind === "none") return ["kind"];
+    if (kind === "routed") return ["kind", "source", "port_id"];
+  }
+  if (key === "source") {
+    if (kind === "track") return ["kind", "track_id", "tap"];
+    if (kind === "submix_output") return ["kind", "submix_id"];
+  }
+  if (key === "destination") {
+    if (kind === "submix_input") return ["kind", "submix_id"];
+    if (kind === "output_input") return ["kind", "output_id"];
+  }
+  throw new MisoUsageError(`the canonical writer has no declared ${key} variant '${String(kind)}'`);
+}
+
+function objectOrder(record: ModelRecord, key: string): readonly string[] {
+  if (key === "") return ROOT_KEYS;
+  if (key === "tracks") {
+    return [
+      "id", "source_id", "left_source_channel", "right_source_channel", "builtins",
+      "simd1", "dynamic", "simd2", "fader", "pan" in record ? "pan" : "matrix",
+    ];
+  }
+  if (key === "left" || key === "right") return OBJECT_KEY_ORDERS.channel_builtins;
+  if (key === "simd1" || key === "dynamic" || key === "simd2") return OBJECT_KEY_ORDERS.rack;
+  if (["identity", "sidechain", "source", "destination"].includes(key)) {
+    return taggedOrder(record, key);
+  }
+  const order = OBJECT_KEY_ORDERS[key as keyof typeof OBJECT_KEY_ORDERS];
+  if (order !== undefined) return order;
+  throw new MisoUsageError(`the canonical writer has no declared object shape for '${key}'`);
+}
+
+function checkedObjectOrder(record: ModelRecord, key: string): readonly string[] {
+  const order = objectOrder(record, key);
+  const actual = Object.keys(record).sort();
+  const expected = [...order].sort();
+  if (actual.length !== expected.length || actual.some((name, index) => name !== expected[index])) {
+    throw new MisoUsageError(
+      `the canonical writer received the wrong keys for '${key || "session"}': ${actual.join(", ")}`,
+    );
+  }
+  return order;
 }
 
 function jsonValue(value: ModelValue, key: string, depth: number): string {
@@ -1231,10 +1308,11 @@ function jsonValue(value: ModelValue, key: string, depth: number): string {
     const indent = "  ".repeat(depth + 1);
     return `[\n${value.map((item) => `${indent}${jsonValue(item, key, depth + 1)}`).join(",\n")}\n${"  ".repeat(depth)}]`;
   }
-  const entries = Object.entries(value as ModelRecord);
-  if (entries.length === 0) return "{}";
+  const record = value as ModelRecord;
+  const keys = checkedObjectOrder(record, key);
+  if (keys.length === 0) return "{}";
   const indent = "  ".repeat(depth + 1);
-  return `{\n${entries.map(([name, child]) => `${indent}${quote(name)}: ${jsonValue(child, name, depth + 1)}`).join(",\n")}\n${"  ".repeat(depth)}}`;
+  return `{\n${keys.map((name) => `${indent}${quote(name)}: ${jsonValue(record[name]!, name, depth + 1)}`).join(",\n")}\n${"  ".repeat(depth)}}`;
 }
 
 /** The canonical writer's escape set, from `canonical.rs`'s `write_quoted`. */
