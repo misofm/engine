@@ -95,4 +95,25 @@ fuzz-delivery blocker but must not claim a fourth attempt or PASS from this issu
 Sol-high briefing classified the failure from PR #339's two fuzz jobs as an independent-workspace
 lock integration omission. The existing locked preflight is sufficient and correctly failed before
 execution; generic lockfile policy machinery would add ceremony without discriminating a new claim.
-No implementation or validation evidence is recorded yet.
+
+## Implementation and Sol-high review evidence
+
+Checkpoint `022c50e3` changes only `fuzz/Cargo.lock`. Cargo generated the new resolution and then
+restored the unrelated floating `cpufeatures` package to its prior `0.3.0` version through
+`cargo +1.97.1 update --manifest-path fuzz/Cargo.toml -p cpufeatures --precise 0.3.0`; comparison
+with parent `6322d222` shows no version change among packages already present in the old lock. The
+diff removes the obsolete TOML/Serde/proc-macro parser closure and adds exact `jstrict 0.14.0` plus
+only its resolver-required closure.
+
+`cargo +1.97.1 check --locked --manifest-path fuzz/Cargo.toml --bins` passes all eight declared
+fuzz binaries. With CI's pinned `cargo-fuzz 0.13.2` and `nightly-2026-08-20`, `session_parse` at
+seed `557074001` and `session_compile` at seed `557074002` each reported `#10000 DONE` and
+`Done 10000 runs` against `fixtures/session/v1/canonical.json`. The unchanged
+`scripts/run-protocol-fuzz.sh` passed all four fixed 10,000-run protocol campaigns; its evidence
+records 40,000 executions with no crash. Session policy, workspace policy and `git diff --check`
+all pass. No benchmark or live-browser qualification was run.
+
+Fresh Sol-high adversarial review returned PASS for `022c50e3`: exact-path scope, lock graph,
+pre-existing package versions, all eight locked bins, supplied fixed-count evidence and protocol
+evidence were independently inspected. Remote closure still requires both existing fuzz jobs to
+pass on the pushed candidate; until then this is local accepted evidence only.
