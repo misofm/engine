@@ -747,3 +747,28 @@ future recording cannot erase either field. A 39-hex record attempt refused befo
 a one-byte-short artifact copy refused at `matrix: artifact-lineage`; and real Chromium
 151.0.7922.34 reran the complete check-matrix/self-test qualification green with the new lineage
 gate. The matrix generator and checked document remain byte-current.
+
+## Attempt 3 final bounded correction evidence
+
+The SDK no longer exports an arbitrary-model canonical serializer. The schema-specific writer now
+lives in the non-package-exported `src/internal/session-json.ts` module; the public
+`SessionBuilder.toJson()` method, the deliberately reverse-constructed model test, and the bounded
+Rust-authority corpus test all call that same internal implementation. `toJSON()` remains the
+public normalized-model view, but no public from-model serialization function was introduced.
+
+Runtime and declaration-negative gates prove that `canonicalSessionJson` and the internal writer
+hook are absent from the root, headless, and browser package entry points. The extracted-tarball
+test repeats the runtime check against every supported code subpath and compiles a strict consumer
+whose expected-error import makes any future public `canonicalSessionJson` declaration fail the
+gate. The internal module remains an implementation dependency of `SessionBuilder`; the package
+export map makes it unreachable as a supported subpath.
+
+The final correction gate set is green: SDK strict types; generated assets/modules/surface;
+reverse-order and Rust-corpus parity (2/2); source package/barrel reachability (9/9);
+`scripts/sdk-package.sh check` including 21/21 enginectl tests and the self-contained extracted
+tarball; full locked workspace all-target tests; locked workspace all-target/all-feature Clippy
+with warnings denied; workspace all-feature rustdoc with warnings denied; formatting; session and
+workspace policies. The rebuilt package tarball contains 71 files and has npm shasum
+`5ae17f3b8d95a66533c12e6f36e8f35ff360cd87`. The engine Wasm is unchanged at SHA-256
+`6dcd9ced2daeb886843a764bcc6abc0b4f1b2c7a50af1ed91151a5ab366461e5`. No benchmark or browser
+qualification was rerun, and no GitHub state was mutated.

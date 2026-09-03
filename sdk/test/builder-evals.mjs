@@ -20,10 +20,10 @@ import { MisoEngineAsset } from "../src/core/asset.ts";
 import { MisoUsageError } from "../src/core/errors.ts";
 import {
   assertSameSession,
-  canonicalSessionJson,
   effect,
   session,
 } from "../src/core/session.ts";
+import { writeCanonicalSessionDocument } from "../src/internal/session-json.ts";
 import { createOfflineEngine, validate } from "../src/headless/engine.ts";
 import { moduleBytes } from "./support.mjs";
 
@@ -754,7 +754,7 @@ describe("canonical float spellings", () => {
     const built = richSession();
     const reordered = reverseConstructionOrder(built.toJSON());
     assert.notDeepEqual(Object.keys(reordered), Object.keys(built.toJSON()));
-    assert.equal(canonicalSessionJson(reordered), built.toJson());
+    assert.equal(writeCanonicalSessionDocument(reordered), built.toJson());
   });
 
   test("the bounded Rust-authority corpus matches the actual SDK writer", async () => {
@@ -768,7 +768,7 @@ describe("canonical float spellings", () => {
       const expected = entry.path === undefined
         ? entry.canonical
         : await readFile(new URL(`../../${entry.path}`, import.meta.url), "utf8");
-      assert.equal(canonicalSessionJson(JSON.parse(expected)), expected, entry.id);
+      assert.equal(writeCanonicalSessionDocument(JSON.parse(expected)), expected, entry.id);
     }
 
     const full = JSON.parse(await readFile(
@@ -780,7 +780,7 @@ describe("canonical float spellings", () => {
       view.setUint32(0, Number.parseInt(entry.bits, 16), true);
       const model = structuredClone(full);
       model.routes[0].gain_db = view.getFloat32(0, true);
-      const line = canonicalSessionJson(model).split("\n")
+      const line = writeCanonicalSessionDocument(model).split("\n")
         .find((candidate) => candidate.includes('"gain_db":'));
       assert.equal(line?.trim(), `"gain_db": ${entry.canonical}`, entry.id);
     }
@@ -792,7 +792,7 @@ describe("canonical float spellings", () => {
     for (const entry of manifest.strings) {
       const model = structuredClone(minimal);
       model.session_id = entry.value;
-      const line = canonicalSessionJson(model).split("\n")
+      const line = writeCanonicalSessionDocument(model).split("\n")
         .find((candidate) => candidate.includes('"session_id":'));
       assert.equal(line?.trim(), `"session_id": ${entry.canonical},`, entry.id);
     }

@@ -33,6 +33,18 @@ assert.equal(typeof imported["."].session, "function");
 assert.equal(typeof imported["./headless"].createOfflineEngine, "function");
 assert.equal(typeof imported["./browser"].createEngine, "function");
 assert.ok(imported["./assets"].BUNDLED_ENGINE_ASSETS.wasm instanceof URL);
+for (const [subpath, module] of Object.entries(imported)) {
+  assert.equal(
+    "canonicalSessionJson" in module,
+    false,
+    `${subpath} must not expose arbitrary-model canonical serialization`,
+  );
+  assert.equal(
+    "writeCanonicalSessionDocument" in module,
+    false,
+    `${subpath} must not expose the internal serializer test hook`,
+  );
+}
 for (const assetUrl of Object.values(imported["./assets"].BUNDLED_ENGINE_ASSETS)) {
   await readFile(assetUrl);
 }
@@ -71,8 +83,10 @@ import { CATALOG, session } from "@misofm/engine";
 import { createOfflineEngine, loadBundledEngineAsset } from "@misofm/engine/headless";
 import { createEngine } from "@misofm/engine/browser";
 import { BUNDLED_ENGINE_ASSETS } from "@misofm/engine/assets";
+// @ts-expect-error arbitrary-model canonical serialization is intentionally not public
+import { canonicalSessionJson } from "@misofm/engine";
 void [CATALOG, session, createOfflineEngine, loadBundledEngineAsset, createEngine,
-  BUNDLED_ENGINE_ASSETS];
+  BUNDLED_ENGINE_ASSETS, canonicalSessionJson];
 `, "utf8");
 const program = ts.createProgram([consumer], {
   module: ts.ModuleKind.NodeNext,
