@@ -100,5 +100,23 @@ SDK-qualification blocker but must not claim a fourth attempt or PASS from this 
 Sol-high briefing reproduced the stale authority assumption at the checker's positive `ROOT_KEYS`
 lookup and at its corresponding mutation anchor. It ruled that retargeting only those two uses is the
 smallest correction and that combining this independently failing SDK gate with #340's fuzz lock
-would violate the repository's split rules. No implementation or validation evidence is recorded
-yet.
+would violate the repository's split rules.
+
+## Implementation and Sol-high review evidence
+
+Checkpoint `d22ed0fa` changes only `scripts/check-sdk-deletions.py` (six insertions and three
+deletions). It adds `INTERNAL_SESSION_JSON` for `sdk/src/internal/session-json.ts`, reads
+`ROOT_KEYS` from that authority with a matching diagnostic, and retargets only the existing
+`a limits root key returns` mutation to the same file. The emitted source-row check and every other
+`CORE_SESSION`, ABI, boundary, type, error and generated-artifact rule or mutation remain attached
+to their prior authorities.
+
+`python3 -B scripts/check-sdk-deletions.py` passes across 46 checked files,
+`python3 -B scripts/check-sdk-deletions.py --self-test` catches all 37 existing mutations, and
+`bash scripts/check-session-policy.sh` plus `git diff --check` pass. No SDK product source,
+workflow, package artifact, fuzz file, benchmark or browser qualification changed or ran.
+
+Fresh Sol-high adversarial review returned PASS for `d22ed0fa`: it independently inspected the
+exact commit scope, both moved authority uses, every retained `CORE_SESSION` use and the full
+mutation result. Remote closure still requires the unchanged SDK qualification workflow to pass on
+the pushed candidate; until then this is local accepted evidence only.
