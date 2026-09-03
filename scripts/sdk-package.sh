@@ -28,6 +28,10 @@ trap cleanup EXIT
   exit 2
 }
 
+if [[ $mode == check ]]; then
+  bash "$repo_root/scripts/test-sdk-artifact-builder-output-contract.sh"
+fi
+
 if [[ -z "$artifact_dir" ]]; then
   owned_artifacts=$(mktemp -d)
   artifact_dir=$owned_artifacts
