@@ -2,12 +2,10 @@
 
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { copyFile, mkdir, readFile, readdir, symlink, writeFile } from "node:fs/promises";
+import { access, copyFile, mkdir, readFile, readdir, symlink, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import ts from "typescript";
-
-import { sessionDocument } from "./support.mjs";
 
 if (process.argv.length !== 3) throw new Error("usage: node package-tarball-smoke.mjs PACKAGE_ROOT");
 const packageRoot = resolve(process.argv[2]);
@@ -35,6 +33,18 @@ assert.equal(typeof imported["."].session, "function");
 assert.equal(typeof imported["./headless"].createOfflineEngine, "function");
 assert.equal(typeof imported["./browser"].createEngine, "function");
 assert.ok(imported["./assets"].BUNDLED_ENGINE_ASSETS.wasm instanceof URL);
+for (const [subpath, module] of Object.entries(imported)) {
+  assert.equal(
+    "canonicalSessionJson" in module,
+    false,
+    `${subpath} must not expose arbitrary-model canonical serialization`,
+  );
+  assert.equal(
+    "writeCanonicalSessionDocument" in module,
+    false,
+    `${subpath} must not expose the internal serializer test hook`,
+  );
+}
 for (const assetUrl of Object.values(imported["./assets"].BUNDLED_ENGINE_ASSETS)) {
   await readFile(assetUrl);
 }
@@ -50,6 +60,16 @@ assert.equal(files.some((name) => name.includes("node_modules")), false);
 assert.equal(files.some((name) => name.startsWith("test") || name.includes("/test/")), false);
 assert.equal(files.includes("dist/effect.js"), false);
 assert.equal(files.includes("dist/effect.d.ts"), false);
+const shippedWorklet = await readFile(
+  resolve(packageRoot, "dist/assets/miso-engine-v1-audio-worklet.js"),
+  "utf8",
+);
+assert.match(shippedWorklet, /class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor/);
+assert.doesNotMatch(
+  shippedWorklet,
+  /class MisoEngineV[0-9]+AudioWorkletProcessor/,
+  "the shipped implementation class is private and therefore unversioned",
+);
 
 // Resolve the declaration surface exactly as a consumer does. Reading `.d.ts` files is not enough:
 // a declaration can exist while importing a sibling TypeScript never emitted (the old failure).
@@ -63,8 +83,10 @@ import { CATALOG, session } from "@misofm/engine";
 import { createOfflineEngine, loadBundledEngineAsset } from "@misofm/engine/headless";
 import { createEngine } from "@misofm/engine/browser";
 import { BUNDLED_ENGINE_ASSETS } from "@misofm/engine/assets";
+// @ts-expect-error arbitrary-model canonical serialization is intentionally not public
+import { canonicalSessionJson } from "@misofm/engine";
 void [CATALOG, session, createOfflineEngine, loadBundledEngineAsset, createEngine,
-  BUNDLED_ENGINE_ASSETS];
+  BUNDLED_ENGINE_ASSETS, canonicalSessionJson];
 `, "utf8");
 const program = ts.createProgram([consumer], {
   module: ts.ModuleKind.NodeNext,
@@ -83,8 +105,22 @@ assert.deepEqual(
   "a fresh strict TypeScript consumer resolves every declaration dependency",
 );
 
-const engine = await imported["./headless"].createOfflineEngine(sessionDocument());
-const sibling = await imported["./headless"].createOfflineEngine(sessionDocument({ sessionId: "sibling" }));
+const builtDocument = imported["."].session({ id: "tarball.boot", sampleRateHz: 48_000 })
+  .source("stem", {
+    channels: 2, bitDepth: "32f", frames: 480, content: `sha256:${"0".repeat(64)}`,
+  })
+  .track("track", { source: "stem" })
+  .output("main")
+  .route({
+    id: "main",
+    source: { kind: "track", trackId: "track", tap: "post_matrix" },
+    destination: { kind: "output_input", outputId: "main" },
+  })
+  .toJson();
+const engine = await imported["./headless"].createOfflineEngine(builtDocument);
+const sibling = await imported["./headless"].createOfflineEngine(
+  builtDocument.replace('"session_id": "tarball.boot"', '"session_id": "tarball.sibling"'),
+);
 try {
   assert.equal(engine.asset.sha256?.length, 64);
   assert.equal(engine.asset, sibling.asset, "default engines share one verified compilation");
@@ -97,7 +133,7 @@ try {
   sibling.dispose();
 }
 
-// The packed executable uses only this extraction's embedded artifacts and emits raw TOML.
+// The packed executable uses only this extraction's embedded artifacts and emits raw JSON.
 const cliRequest = JSON.stringify({
   schemaVersion: 1,
   session: { id: "tarball.cli", sampleRateHz: 48_000 },
@@ -116,7 +152,11 @@ const cliRequest = JSON.stringify({
 const cli = spawn(
   process.execPath,
   [resolve(packageRoot, manifest.bin.enginectl), "session", "build", "--request", "-", "--output", "-"],
-  { stdio: ["pipe", "pipe", "pipe"] },
+  {
+    cwd: packageRoot,
+    env: { PATH: "", HOME: resolve(packageRoot, "..", "no-home") },
+    stdio: ["pipe", "pipe", "pipe"],
+  },
 );
 const cliStdout = [];
 const cliStderr = [];
@@ -129,7 +169,49 @@ const cliStatus = await new Promise((accept, reject) => {
 });
 assert.equal(cliStatus, 0, Buffer.concat(cliStderr).toString("utf8"));
 assert.equal(Buffer.concat(cliStderr).byteLength, 0);
-assert.match(Buffer.concat(cliStdout).toString("utf8"), /^schema_version = 1\n/);
+const cliDocument = Buffer.concat(cliStdout).toString("utf8");
+assert.match(cliDocument, /^\{\n  "schema_version": 1,\n/);
+assert.equal(cliDocument.endsWith("\n"), true, "the request-mode snapshot is canonical JSON");
+const expectedCliDocument = imported["."].session({ id: "tarball.cli", sampleRateHz: 48_000 })
+  .source("stem", {
+    channels: 2, bitDepth: "32f", frames: 480, content: `sha256:${"0".repeat(64)}`,
+  })
+  .track("track", { source: "stem" })
+  .output("main")
+  .route({
+    id: "main",
+    source: { kind: "track", trackId: "track", tap: "post_matrix" },
+    destination: { kind: "output_input", outputId: "main" },
+  })
+  .toJson();
+assert.equal(cliDocument, expectedCliDocument, "request mode publishes the package writer's canonical snapshot");
+
+async function bootSnapshotSubmitRender(document, sourceId, channels) {
+  const snapshot = `${document}`;
+  assert.match(snapshot, /^\{\n  "schema_version": 1,\n/);
+  const offline = await imported["./headless"].createOfflineEngine(snapshot);
+  try {
+    const frames = offline.shape().quantumFrames;
+    const submitted = offline.submitSource({
+      sourceId,
+      generation: 1n,
+      startFrame: 0n,
+      planes: Array.from({ length: channels }, (_unused, channel) =>
+        Float32Array.from({ length: frames }, (_sample, frame) => (frame + channel + 1) / frames)),
+      endOfRegion: false,
+    });
+    assert.equal(submitted.ok, true, `packed snapshot source refused: ${submitted.code}`);
+    const rendered = offline.render();
+    assert.equal(rendered.left.length, frames);
+    assert.equal(rendered.right.length, frames);
+    assert.equal(rendered.left.some((sample) => sample !== 0), true);
+    return snapshot;
+  } finally {
+    offline.dispose();
+  }
+}
+
+await bootSnapshotSubmitRender(cliDocument, "stem", 2);
 
 // The extracted executable imports a FLAC leaf using only this package's decoder closure. The
 // fixture is copied before launch; the command runs with the package as cwd and never discovers
@@ -140,7 +222,7 @@ await copyFile(
   resolve(import.meta.dirname, "../../fixtures/flac-delivery/v1/flac/pcm24-stereo-boundaries-b32.flac"),
   resolve(stemsRoot, "Packed Stem.flac"),
 );
-const stemsOutput = resolve(packageRoot, "..", "packed.session.toml");
+const stemsOutput = resolve(packageRoot, "..", "packed.session.json");
 const stemsCli = spawn(
   process.execPath,
   [resolve(packageRoot, manifest.bin.enginectl), "session", "build", "--stems", stemsRoot, "--output", stemsOutput],
@@ -161,7 +243,9 @@ assert.deepEqual(stemsReceipt.session, {
   id: "packed-stems", revision: 0, sampleRateHz: 48_000, quantumFrames: 128, sources: 1, tracks: 1,
 });
 assert.equal(stemsReceipt.stems[0].content, "sha256:f5868e05edf12c6032419ce0d7d786c9dc781989ac69ed17e8a4a374341f92f3");
-assert.match(await readFile(stemsOutput, "utf8"), /^schema_version = 1\n/);
+const stemsDocument = await readFile(stemsOutput, "utf8");
+assert.match(stemsDocument, /^\{\n  "schema_version": 1,\n/);
+await bootSnapshotSubmitRender(stemsDocument, stemsReceipt.stems[0].sourceId, 2);
 
 // Red mutation: the package manifest still names the original digest, so one changed byte must be
 // rejected before WebAssembly.compile can see it.
@@ -177,4 +261,38 @@ try {
   );
 } finally {
   await writeFile(wasmUrl, original);
+}
+
+// The decoder is independently sealed. Mutation must fail internally before a generated session
+// can be published, with no repository decoder or media subprocess available as a fallback.
+const decoderUrl = imported["./assets"].BUNDLED_ENGINE_ASSETS.flacDecoderWasm;
+const decoderOriginal = await readFile(decoderUrl);
+const decoderChanged = Buffer.from(decoderOriginal);
+decoderChanged[decoderChanged.length - 1] ^= 1;
+await writeFile(decoderUrl, decoderChanged);
+try {
+  const rejectedOutput = resolve(packageRoot, "..", "decoder-mutation.session.json");
+  const rejected = spawn(
+    process.execPath,
+    [resolve(packageRoot, manifest.bin.enginectl), "session", "build", "--stems", stemsRoot, "--output", rejectedOutput],
+    {
+      cwd: packageRoot,
+      env: { PATH: "", HOME: resolve(packageRoot, "..", "no-home") },
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
+  const rejectedStdout = [];
+  const rejectedStderr = [];
+  rejected.stdout.on("data", (chunk) => rejectedStdout.push(chunk));
+  rejected.stderr.on("data", (chunk) => rejectedStderr.push(chunk));
+  const rejectedStatus = await new Promise((accept, reject) => {
+    rejected.once("error", reject);
+    rejected.once("close", accept);
+  });
+  assert.equal(rejectedStatus, 70);
+  assert.equal(Buffer.concat(rejectedStdout).byteLength, 0);
+  assert.match(Buffer.concat(rejectedStderr).toString("utf8"), /internal\.packaged_decoder/);
+  await assert.rejects(access(rejectedOutput), (error) => error?.code === "ENOENT");
+} finally {
+  await writeFile(decoderUrl, decoderOriginal);
 }

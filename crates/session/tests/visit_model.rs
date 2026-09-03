@@ -4,10 +4,10 @@ use std::convert::Infallible;
 
 use session::{
     FieldKey, MatrixOrPan, ModelVisitor, Sidechain, SidechainDeclaration, StableId, Token,
-    VisitModel, WalkOrder, keys, parse_session_toml,
+    VisitModel, WalkOrder, keys, parse_session_json,
 };
 
-const EXAMPLE: &str = include_str!("../../../fixtures/session/v1/canonical.toml");
+const EXAMPLE: &str = include_str!("../../../fixtures/session/v1/canonical.json");
 
 #[derive(Default)]
 struct Trace {
@@ -72,7 +72,7 @@ impl ModelVisitor for Trace {
 
 #[test]
 fn visitor_counts_keys_tags_and_conditional_canonical_order_are_exact() {
-    let mut model = parse_session_toml(EXAMPLE).expect("fixture");
+    let mut model = parse_session_json(EXAMPLE).expect("fixture");
     let mut second = model.sources[0].clone();
     second.id = session::StableId::parse("alpha-source").expect("id");
     model.sources.insert(0, second);

@@ -20,6 +20,7 @@ session.workspace = true
 
 [dev-dependencies]
 host-web.workspace = true
+serde_json = "=1.0.151"
 
 [lints]
 workspace = true

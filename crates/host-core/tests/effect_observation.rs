@@ -21,10 +21,10 @@ use host_core::{
     PreparedHost, SourceSubmission, prepare_host_session_with_console,
 };
 
-const SESSION: &str = include_str!("../../../fixtures/session/v1/compressor-bank-observation.toml");
+const SESSION: &str = include_str!("../../../fixtures/session/v1/compressor-bank-observation.json");
 /// The same fixture with every compressor moved into the dynamic rack (issue #163 phase 1b).
 const DYNAMIC_BANK_SESSION: &str =
-    include_str!("../../../fixtures/session/v1/compressor-dynamic-bank-observation.toml");
+    include_str!("../../../fixtures/session/v1/compressor-dynamic-bank-observation.json");
 const QUANTUM: usize = 128;
 const TRACKS: usize = 8;
 /// Blocks per published observation window, and per meter window: they are the same window.
@@ -101,11 +101,11 @@ fn prepare(leg: Leg) -> Session {
     prepare_from(SESSION, leg)
 }
 
-fn prepare_from(toml: &str, leg: Leg) -> Session {
+fn prepare_from(document: &str, leg: Leg) -> Session {
     let (_session, prepared, handles) =
-        prepare_host_session_with_console(toml, &caps(), &console(leg)).unwrap_or_else(|failure| {
-            panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes()))
-        });
+        prepare_host_session_with_console(document, &caps(), &console(leg)).unwrap_or_else(
+            |failure| panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes())),
+        );
     assert_eq!(handles.tracks.len(), TRACKS);
     assert!(
         prepared.report.effect_bank_scratch_bytes > 0,
@@ -533,7 +533,7 @@ fn a_plan_replacement_drops_every_subscription() {
 }
 
 const DYNAMIC_SESSION: &str =
-    include_str!("../../../fixtures/session/v1/compressor-dynamic-observation.toml");
+    include_str!("../../../fixtures/session/v1/compressor-dynamic-observation.json");
 
 /// A scalar compressor stepped block by block, with one threshold retarget, folded into windows.
 ///

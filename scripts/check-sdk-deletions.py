@@ -90,6 +90,7 @@ CORE_ASSET = "sdk/src/core/asset.ts"
 CORE_SESSION = "sdk/src/core/session.ts"
 CORE_TYPES = "sdk/src/core/types.ts"
 CORE_BOUNDARY = "sdk/src/core/boundary.ts"
+INTERNAL_SESSION_JSON = "sdk/src/internal/session-json.ts"
 
 ERROR_PHASES = ["asset", "boot", "source", "render", "output", "lifecycle"]
 
@@ -116,9 +117,8 @@ LIMITS_PATTERNS = [
     (re.compile(r"""(["'])limits\1"""), "a quoted `limits` key"),
 ]
 
-# `sessionTomlBytes` is a live `status` field name; the retired thing is the buffer kind, so the
-# word boundary is what separates them.
-SESSION_TOML = re.compile(r"\bsessionToml\b")
+# Issue #338 retires every format-bound SDK spelling rather than retaining aliases.
+RETIRED_SESSION_FORMAT = re.compile(r"\b(?:sessionTomlBytes|sessionToml)\b|\btoToml\s*\(")
 
 # The two retired engine states. Banned as bare string literals: the SDK has no configuration file
 # and no prepare step, so these exact tokens have no other reason to be quoted here.
@@ -396,15 +396,17 @@ def check_limits(code: dict[str, str], files: dict[str, str]) -> None:
     # The root key list is the canonical document's own table of contents, so a `limits` root key
     # would have to appear in it. Checked separately because it is the one place the word would be
     # a plain quoted string rather than a key or a member.
-    root_keys = re.search(r"\bROOT_KEYS\s*=\s*\[(.*?)\]", code.get(CORE_SESSION, ""), re.DOTALL)
-    require(root_keys is not None, f"{CORE_SESSION} no longer declares ROOT_KEYS")
+    root_keys = re.search(
+        r"\bROOT_KEYS\s*=\s*\[(.*?)\]", code.get(INTERNAL_SESSION_JSON, ""), re.DOTALL
+    )
+    require(root_keys is not None, f"{INTERNAL_SESSION_JSON} no longer declares ROOT_KEYS")
     assert root_keys is not None
     require("limits" not in re.findall(r'"([^"]*)"', root_keys.group(1)),
             "the emitted session document's root keys carry `limits` again")
 
 
 def check_lifecycle_vocabulary(code: dict[str, str]) -> None:
-    refuse(find_all(code, SESSION_TOML), "the retired `sessionToml` buffer kind")
+    refuse(find_all(code, RETIRED_SESSION_FORMAT), "a retired TOML session surface")
     refuse(find_all(code, RETIRED_STATES), "a retired two-phase lifecycle state word")
     for pattern in PHASE_USES:
         for path, text in sorted(code.items()):
@@ -545,7 +547,7 @@ def self_test(root: pathlib.Path) -> int:
         ("a limits member access returns",
          append(CORE_BOUNDARY, "\nconst depth = arguments.limits;\n")),
         ("a limits root key returns",
-         insert_after(CORE_SESSION, "const ROOT_KEYS = [\n", '  "limits",\n')),
+         insert_after(INTERNAL_SESSION_JSON, "const ROOT_KEYS = [\n", '  "limits",\n')),
         ("SourceSpec regains a per-source rate",
          insert_after(CORE_TYPES, "export interface SourceSpec {",
                       "\n  readonly sampleRateHz: number;")),
@@ -583,8 +585,10 @@ def self_test(root: pathlib.Path) -> int:
          append(CORE_BOUNDARY, '\nconst state: string = "config";\n')),
         ("the prepared state returns",
          append(CORE_BOUNDARY, '\nconst state: string = "prepared";\n')),
-        ("the sessionToml buffer kind returns",
+        ("the retired session buffer kind returns",
          append(CORE_BOUNDARY, '\nconst kind = "sessionToml";\n')),
+        ("the retired canonical writer returns",
+         append(CORE_SESSION, '\nfunction toToml(): string { return ""; }\n')),
         ("the boot options writer stops being exported",
          replace_once(CORE_ABI, "export function writeBootOptions(",
                       "function writeBootOptions(")),

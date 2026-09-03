@@ -199,7 +199,7 @@ pub fn complete_schema_corpus() -> Vec<ConformanceFrame> {
         SuccessResponsePayload::SessionSnapshot(SessionSnapshot {
             total_bytes: 0,
             offset: 0,
-            canonical_toml_chunk: &[],
+            canonical_json_chunk: &[],
             eof: true
         })
     );

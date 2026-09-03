@@ -2,7 +2,7 @@
 use crate::{
     AutomationShape, AutomationTarget, Diagnostic, DiagnosticCode, DiagnosticSet, Effect,
     MatrixOrPan, ParameterChannel, ParameterUnit, Rack, RackName, RenderMode, RouteDestination,
-    RouteSource, SESSION_SCHEMA_VERSION_V1, SessionToml, Source, Track,
+    RouteSource, SESSION_SCHEMA_VERSION_V1, SessionModel, Source, Track,
     diagnostic::{MAXIMUM_SESSION_DIAGNOSTICS, PathRef},
 };
 use engine::{SampleRateHz, is_launch_sample_rate};
@@ -22,7 +22,7 @@ struct LocalUniqueness<'a> {
     effect_ids: HashSet<&'a str>,
     parameters: HashSet<(u32, u8)>,
 }
-pub(crate) fn validate_session(session: &SessionToml) -> Result<(), DiagnosticSet> {
+pub(crate) fn validate_session(session: &SessionModel) -> Result<(), DiagnosticSet> {
     let mut diagnostics = Vec::new();
     let root = PathRef::ROOT;
     if session.schema_version != SESSION_SCHEMA_VERSION_V1 {
@@ -66,7 +66,6 @@ pub(crate) fn validate_session(session: &SessionToml) -> Result<(), DiagnosticSe
         );
     }
 
-    validate_u64(&mut diagnostics, session.revision, &root.key("revision"));
     // One pass establishes uniqueness and builds every global cross-reference index.
     let sources_path = root.key("sources");
     let mut sources = HashMap::with_capacity(session.sources.len());
@@ -158,7 +157,7 @@ fn duplicate(diagnostics: &mut Vec<Diagnostic>, path: &PathRef<'_>) {
     );
 }
 
-fn validate_sources(session: &SessionToml, root: &PathRef<'_>, diagnostics: &mut Vec<Diagnostic>) {
+fn validate_sources(session: &SessionModel, root: &PathRef<'_>, diagnostics: &mut Vec<Diagnostic>) {
     let sources_path = root.key("sources");
     for (position, source) in session.sources.iter().enumerate() {
         let path = sources_path.index(position);
@@ -186,7 +185,6 @@ fn validate_sources(session: &SessionToml, root: &PathRef<'_>, diagnostics: &mut
                 "source frames must be nonzero",
             );
         }
-        validate_u64(diagnostics, source.frames, &path.key("frames"));
     }
 }
 
@@ -200,7 +198,7 @@ fn valid_source_content_identity(value: &str) -> bool {
 }
 
 fn validate_tracks<'a>(
-    session: &'a SessionToml,
+    session: &'a SessionModel,
     index: &Index<'_>,
     root: &PathRef<'_>,
     diagnostics: &mut Vec<Diagnostic>,
@@ -362,7 +360,7 @@ fn validate_effect(
 }
 
 fn validate_routes(
-    session: &SessionToml,
+    session: &SessionModel,
     index: &Index<'_>,
     root: &PathRef<'_>,
     diagnostics: &mut Vec<Diagnostic>,
@@ -552,7 +550,7 @@ fn validate_builtin_automation_target(
 }
 
 fn validate_automation(
-    session: &SessionToml,
+    session: &SessionModel,
     index: &Index<'_>,
     root: &PathRef<'_>,
     diagnostics: &mut Vec<Diagnostic>,
@@ -627,16 +625,6 @@ fn validate_automation(
         let mut previous_end = None;
         for (segment_position, segment) in automation.segments.iter().enumerate() {
             let segment_path = segments_path.index(segment_position);
-            validate_u64(
-                diagnostics,
-                segment.start_sample,
-                &segment_path.key("start_sample"),
-            );
-            validate_u64(
-                diagnostics,
-                segment.end_sample,
-                &segment_path.key("end_sample"),
-            );
             if segment.start_sample >= segment.end_sample {
                 error(
                     diagnostics,
@@ -690,17 +678,6 @@ fn validate_automation(
                 }
             }
         }
-    }
-}
-
-fn validate_u64(diagnostics: &mut Vec<Diagnostic>, value: u64, path: &PathRef<'_>) {
-    if value > i64::MAX as u64 {
-        error(
-            diagnostics,
-            DiagnosticCode::NumericOutOfSchemaRange,
-            path,
-            "integer exceeds the TOML i64 range",
-        );
     }
 }
 

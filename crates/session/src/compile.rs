@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use engine::{QuantumFrames, SampleRateHz};
 
 use crate::{
-    Diagnostic, DiagnosticCode, DiagnosticPath, DiagnosticSet, ResourceEstimate, SessionToml,
+    Diagnostic, DiagnosticCode, DiagnosticPath, DiagnosticSet, ResourceEstimate, SessionModel,
     StableId,
     canonical::write_canonical,
     estimate::{estimate_session, with_canonical_bytes},
@@ -49,7 +49,7 @@ pub struct CompileCaps {
 #[derive(Clone, Debug)]
 pub struct CompiledSession {
     normalized: NormalizedSession,
-    canonical_toml: String,
+    canonical_json: String,
     sample_rate: SampleRateHz,
     quantum: QuantumFrames,
     output_shape: OutputShape,
@@ -58,7 +58,7 @@ pub struct CompiledSession {
     resource_estimate: ResourceEstimate,
 }
 #[derive(Clone, Debug)]
-struct NormalizedSession(SessionToml);
+struct NormalizedSession(SessionModel);
 
 /// Planar PCM output shape retained by a compiled session.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -68,10 +68,10 @@ pub struct OutputShape {
 }
 
 impl CompiledSession {
-    /// Borrow the canonical TOML snapshot.
+    /// Borrow the canonical JSON snapshot.
     #[must_use]
-    pub fn canonical_toml(&self) -> &str {
-        &self.canonical_toml
+    pub fn canonical_json(&self) -> &str {
+        &self.canonical_json
     }
     /// Explicit session sample rate in hertz.
     #[must_use]
@@ -110,7 +110,7 @@ impl CompiledSession {
     }
     /// Read-only normalized declaration retained by this non-publishable artifact.
     #[must_use]
-    pub fn normalized_model(&self) -> &SessionToml {
+    pub fn normalized_model(&self) -> &SessionModel {
         &self.normalized.0
     }
 }
@@ -119,14 +119,14 @@ impl CompiledSession {
 /// The checked preflight and all cap comparisons occur before canonical-string allocation,
 /// model cloning, sorting, or index-map construction. No plan is prepared or published.
 pub fn compile_session(
-    session: &SessionToml,
+    session: &SessionModel,
     caps: CompileCaps,
 ) -> Result<CompiledSession, DiagnosticSet> {
     let estimate = estimate_session(session)?;
     check_caps(session, estimate, caps)?;
     validate_session(session)?;
-    let canonical_toml = write_canonical(session);
-    let estimate = with_canonical_bytes(estimate, canonical_toml.len())?;
+    let canonical_json = write_canonical(session);
+    let estimate = with_canonical_bytes(estimate, canonical_json.len())?;
     debug_assert!(estimate.compiled_model_bytes <= caps.max_compiled_model_bytes);
     let mut normalized = session.clone();
     normalized
@@ -173,7 +173,7 @@ pub fn compile_session(
     )?;
     Ok(CompiledSession {
         normalized: NormalizedSession(normalized),
-        canonical_toml,
+        canonical_json,
         sample_rate: SampleRateHz(session.sample_rate_hz),
         quantum: QuantumFrames(session.quantum_frames),
         output_shape: OutputShape {
@@ -185,7 +185,7 @@ pub fn compile_session(
     })
 }
 fn check_caps(
-    _session: &SessionToml,
+    _session: &SessionModel,
     estimate: ResourceEstimate,
     caps: CompileCaps,
 ) -> Result<(), DiagnosticSet> {

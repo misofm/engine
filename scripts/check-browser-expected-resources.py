@@ -19,7 +19,7 @@ So the rows went stale, twice, with every gate green:
 1075185 -> 1075231, and re-pinned them here in the same commit. Both moved by the same 46: the
 bridge's retained session model grew by `size_of::<Track>()` (16 -> 20 bytes per lane's
 `ChannelBuiltins`, so +8 per track) plus the fixture's canonical text (one track, two lanes,
-`", delay_samples = 0"`, +38). Issue #240 changes `sessionTomlBytes` to the exact staged document,
+`", delay_samples = 0"`, +38). Issue #240 changes `sessionDocumentBytes` to the exact staged document,
 so the boot-v1 re-pin deliberately moves that row.
 
 Between them, thirty-three merges moved nothing: this is not accumulated drift, it is two
@@ -33,7 +33,7 @@ un-re-pinned commits, and one gate red at either would have ended it.
    document to equal `expected.json`'s `directOracle` exactly. Node and a Wasm build, no browser,
    no WebDriver, no audio device.
 2. *The native leg, which keeps the first one honest about what it is proving.* Compile the same
-   `session.toml` through the same `AudioWorkletEngineHost` facade with the same
+   `session.json` through the same `AudioWorkletEngineHost` facade with the same
    `WebBootOptions` the oracle writes -- `examples/browser_fixture_resources.rs` -- and check
    each row against the wasm32 answer according to the class it is declared in.
 
@@ -110,7 +110,7 @@ TARGET_INDEPENDENT = frozenset(
     {
         "optionsBytes",
         "statusBytes",
-        "sessionTomlBytes",
+        "sessionDocumentBytes",
         "diagnosticBytes",
         "sourceIdBytes",
         "sourcePcmStagingBytes",
@@ -625,7 +625,7 @@ def self_test() -> int:
         # The native leg's own rules.
         (
             "a target-independent row disagrees between the two builds",
-            with_native_row("sessionTomlBytes", "2097152"),
+            with_native_row("sessionDocumentBytes", "2097152"),
             None,
         ),
         (

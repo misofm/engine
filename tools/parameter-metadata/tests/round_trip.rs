@@ -23,42 +23,19 @@ fn session_with_every_effect(effects: &[&str]) -> String {
             rack.push_str(", ");
         }
         rack.push_str(&format!(
-            "{{ id = \"e{index}\", identity = {{ kind = \"native\", effect_id = \"{id}\" }}, \
-quality = \"normal\", bypass = false, link_mode = \"dual_mono\", params = [], \
-sidechain = {{ kind = \"none\" }} }}"
+            r#"{{"id":"e{index}","identity":{{"kind":"native","effect_id":"{id}"}},"quality":"normal","bypass":false,"link_mode":"dual_mono","params":[],"sidechain":{{"kind":"none"}}}}"#
         ));
     }
     rack.push(']');
     format!(
-        r#"schema_version = 1
-session_id = "metadata-round-trip"
-revision = 1
-sample_rate_hz = 48000
-quantum_frames = 128
-render_profile = {{ id = "native", mode = "single_thread" }}
-output_profile = {{ id = "main", channels = 2, sample_format = "f32_planar" }}
-sources = [
-  {{ id = "s", content = "sha256:0000000000000000000000000000000000000000000000000000000000000000", channels = 2, bit_depth = "32f", frames = 256 }},
-]
-submixes = []
-outputs = [{{ id = "out" }}]
-routes = [
-  {{ id = "r", source = {{ kind = "track", track_id = "t", tap = "post_matrix" }}, destination = {{ kind = "output_input", output_id = "out" }}, channel_matrix = {{ ll = 1.0, lr = 0.0, rl = 0.0, rr = 1.0 }}, gain_db = 0.0 }},
-]
-automation = []
-
-[[tracks]]
-id = "t"
-source_id = "s"
-left_source_channel = 0
-right_source_channel = 1
-builtins = {{ left = {{ polarity_invert = false, trim_db = 0.0, hpf_hz = 0.0, lpf_hz = 0.0, delay_samples = 0 }}, right = {{ polarity_invert = false, trim_db = 0.0, hpf_hz = 0.0, lpf_hz = 0.0, delay_samples = 0 }} }}
-simd1 = {{ effects = [] }}
-dynamic = {{ effects = {rack} }}
-simd2 = {{ effects = [] }}
-fader = {{ left_db = 0.0, right_db = 0.0, left_mute = false, right_mute = false }}
-pan = {{ left = -1.0, right = 1.0, smoothing_samples = 0 }}
-"#
+        r#"{{"schema_version":1,"session_id":"metadata-round-trip","revision":"1","sample_rate_hz":48000,"quantum_frames":128,
+"render_profile":{{"id":"native","mode":"single_thread"}},"output_profile":{{"id":"main","channels":2,"sample_format":"f32_planar"}},
+"sources":[{{"id":"s","content":"sha256:0000000000000000000000000000000000000000000000000000000000000000","channels":2,"bit_depth":"32f","frames":"256"}}],
+"tracks":[{{"id":"t","source_id":"s","left_source_channel":0,"right_source_channel":1,
+"builtins":{{"left":{{"polarity_invert":false,"trim_db":0.0,"hpf_hz":0.0,"lpf_hz":0.0,"delay_samples":0}},"right":{{"polarity_invert":false,"trim_db":0.0,"hpf_hz":0.0,"lpf_hz":0.0,"delay_samples":0}}}},
+"simd1":{{"effects":[]}},"dynamic":{{"effects":{rack}}},"simd2":{{"effects":[]}},
+"fader":{{"left_db":0.0,"right_db":0.0,"left_mute":false,"right_mute":false}},"pan":{{"left":-1.0,"right":1.0,"smoothing_samples":0}}}}],
+"submixes":[],"outputs":[{{"id":"out"}}],"routes":[{{"id":"r","source":{{"kind":"track","track_id":"t","tap":"post_matrix"}},"destination":{{"kind":"output_input","output_id":"out"}},"channel_matrix":{{"ll":1.0,"lr":0.0,"rl":0.0,"rr":1.0}},"gain_db":0.0}}],"automation":[]}}"#
     )
 }
 
@@ -104,7 +81,7 @@ fn every_metadata_id_resolves_through_a_command_acknowledgement() {
         );
     }
 
-    let toml = session_with_every_effect(&ids);
+    let json = session_with_every_effect(&ids);
     let options = WebBootOptions {
         require_sample_rate_hz: 48_000,
         require_quantum_frames: 128,
@@ -112,7 +89,7 @@ fn every_metadata_id_resolves_through_a_command_acknowledgement() {
         console_command_queue_records: 64,
         ..WebBootOptions::explicit_defaults()
     };
-    let mut host = AudioWorkletEngineHost::boot(toml.as_bytes(), options).expect("boot");
+    let mut host = AudioWorkletEngineHost::boot(json.as_bytes(), options).expect("boot");
 
     // Issue #140 A: every declared effect parameter resolves *and applies*, except the ones whose
     // own descriptor says they cannot be automated -- which are exactly the ones the metadata
@@ -244,7 +221,7 @@ fn every_metadata_observation_tap_resolves_through_a_command_acknowledgement() {
         "the four dynamics effects declare one tap each"
     );
 
-    let toml = session_with_every_effect(&ids);
+    let json = session_with_every_effect(&ids);
     let options = WebBootOptions {
         require_sample_rate_hz: 48_000,
         require_quantum_frames: 128,
@@ -254,7 +231,7 @@ fn every_metadata_observation_tap_resolves_through_a_command_acknowledgement() {
         console_observation_taps: 4,
         ..WebBootOptions::explicit_defaults()
     };
-    let mut host = AudioWorkletEngineHost::boot(toml.as_bytes(), options).expect("boot");
+    let mut host = AudioWorkletEngineHost::boot(json.as_bytes(), options).expect("boot");
 
     for (effect_index, descriptor) in registry.descriptors().enumerate() {
         let index = u32::try_from(effect_index).expect("effect index");
@@ -374,48 +351,14 @@ fn every_published_sidechain_port_prepares_and_an_unpublished_one_does_not() {
 /// the first, and report whether preparation accepted it.
 #[cfg(test)]
 fn prepares(effect_id: &str, port_id: &str) -> bool {
-    let toml = format!(
-        r#"schema_version = 1
-session_id = "port-table-round-trip"
-revision = 1
-sample_rate_hz = 48000
-quantum_frames = 128
-render_profile = {{ id = "native", mode = "single_thread" }}
-output_profile = {{ id = "main", channels = 2, sample_format = "f32_planar" }}
-sources = [
-  {{ id = "s", content = "sha256:0000000000000000000000000000000000000000000000000000000000000000", channels = 2, bit_depth = "32f", frames = 256 }},
-]
-submixes = []
-outputs = [{{ id = "out" }}]
-routes = [
-  {{ id = "r", source = {{ kind = "track", track_id = "b", tap = "post_matrix" }}, destination = {{ kind = "output_input", output_id = "out" }}, channel_matrix = {{ ll = 1.0, lr = 0.0, rl = 0.0, rr = 1.0 }}, gain_db = 0.0 }},
-]
-automation = []
-
-[[tracks]]
-id = "a"
-source_id = "s"
-left_source_channel = 0
-right_source_channel = 1
-builtins = {{ left = {{ polarity_invert = false, trim_db = 0.0, hpf_hz = 0.0, lpf_hz = 0.0, delay_samples = 0 }}, right = {{ polarity_invert = false, trim_db = 0.0, hpf_hz = 0.0, lpf_hz = 0.0, delay_samples = 0 }} }}
-simd1 = {{ effects = [] }}
-dynamic = {{ effects = [] }}
-simd2 = {{ effects = [] }}
-fader = {{ left_db = 0.0, right_db = 0.0, left_mute = false, right_mute = false }}
-pan = {{ left = -1.0, right = 1.0, smoothing_samples = 0 }}
-
-[[tracks]]
-id = "b"
-source_id = "s"
-left_source_channel = 0
-right_source_channel = 1
-builtins = {{ left = {{ polarity_invert = false, trim_db = 0.0, hpf_hz = 0.0, lpf_hz = 0.0, delay_samples = 0 }}, right = {{ polarity_invert = false, trim_db = 0.0, hpf_hz = 0.0, lpf_hz = 0.0, delay_samples = 0 }} }}
-simd1 = {{ effects = [] }}
-dynamic = {{ effects = [{{ id = "e0", identity = {{ kind = "native", effect_id = "{effect_id}" }}, quality = "normal", bypass = false, link_mode = "dual_mono", params = [], sidechain = {{ kind = "routed", source = {{ kind = "track", track_id = "a", tap = "post_fader" }}, port_id = "{port_id}" }} }}] }}
-simd2 = {{ effects = [] }}
-fader = {{ left_db = 0.0, right_db = 0.0, left_mute = false, right_mute = false }}
-pan = {{ left = -1.0, right = 1.0, smoothing_samples = 0 }}
-"#
+    let json = format!(
+        r#"{{"schema_version":1,"session_id":"port-table-round-trip","revision":"1","sample_rate_hz":48000,"quantum_frames":128,
+"render_profile":{{"id":"native","mode":"single_thread"}},"output_profile":{{"id":"main","channels":2,"sample_format":"f32_planar"}},
+"sources":[{{"id":"s","content":"sha256:0000000000000000000000000000000000000000000000000000000000000000","channels":2,"bit_depth":"32f","frames":"256"}}],
+"tracks":[
+{{"id":"a","source_id":"s","left_source_channel":0,"right_source_channel":1,"builtins":{{"left":{{"polarity_invert":false,"trim_db":0.0,"hpf_hz":0.0,"lpf_hz":0.0,"delay_samples":0}},"right":{{"polarity_invert":false,"trim_db":0.0,"hpf_hz":0.0,"lpf_hz":0.0,"delay_samples":0}}}},"simd1":{{"effects":[]}},"dynamic":{{"effects":[]}},"simd2":{{"effects":[]}},"fader":{{"left_db":0.0,"right_db":0.0,"left_mute":false,"right_mute":false}},"pan":{{"left":-1.0,"right":1.0,"smoothing_samples":0}}}},
+{{"id":"b","source_id":"s","left_source_channel":0,"right_source_channel":1,"builtins":{{"left":{{"polarity_invert":false,"trim_db":0.0,"hpf_hz":0.0,"lpf_hz":0.0,"delay_samples":0}},"right":{{"polarity_invert":false,"trim_db":0.0,"hpf_hz":0.0,"lpf_hz":0.0,"delay_samples":0}}}},"simd1":{{"effects":[]}},"dynamic":{{"effects":[{{"id":"e0","identity":{{"kind":"native","effect_id":"{effect_id}"}},"quality":"normal","bypass":false,"link_mode":"dual_mono","params":[],"sidechain":{{"kind":"routed","source":{{"kind":"track","track_id":"a","tap":"post_fader"}},"port_id":"{port_id}"}}}}]}},"simd2":{{"effects":[]}},"fader":{{"left_db":0.0,"right_db":0.0,"left_mute":false,"right_mute":false}},"pan":{{"left":-1.0,"right":1.0,"smoothing_samples":0}}}}],
+"submixes":[],"outputs":[{{"id":"out"}}],"routes":[{{"id":"r","source":{{"kind":"track","track_id":"b","tap":"post_matrix"}},"destination":{{"kind":"output_input","output_id":"out"}},"channel_matrix":{{"ll":1.0,"lr":0.0,"rl":0.0,"rr":1.0}},"gain_db":0.0}}],"automation":[]}}"#
     );
     let options = WebBootOptions {
         require_sample_rate_hz: 48_000,
@@ -424,5 +367,5 @@ pan = {{ left = -1.0, right = 1.0, smoothing_samples = 0 }}
         console_command_queue_records: 64,
         ..WebBootOptions::explicit_defaults()
     };
-    AudioWorkletEngineHost::boot(toml.as_bytes(), options).is_ok()
+    AudioWorkletEngineHost::boot(json.as_bytes(), options).is_ok()
 }

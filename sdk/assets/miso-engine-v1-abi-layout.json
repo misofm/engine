@@ -74,7 +74,7 @@
         { "name": "reserved0", "offset": 20, "type": "u32[3]" },
         { "name": "optionsBytes", "offset": 32, "type": "u64" },
         { "name": "statusBytes", "offset": 40, "type": "u64" },
-        { "name": "sessionTomlBytes", "offset": 48, "type": "u64" },
+        { "name": "sessionDocumentBytes", "offset": 48, "type": "u64" },
         { "name": "diagnosticBytes", "offset": 56, "type": "u64" },
         { "name": "sourceIdBytes", "offset": 64, "type": "u64" },
         { "name": "sourcePcmStagingBytes", "offset": 72, "type": "u64" },

@@ -324,22 +324,22 @@ mod tests {
     use session::{
         CompileCaps, EffectIdentity, EffectParam, ParameterChannel, ParameterUnit,
         RouteDestination, RouteSource, Sidechain, SidechainDeclaration, StableId, Submix,
-        compile_session, parse_session_toml,
+        compile_session, parse_session_json,
     };
     use std::sync::{
         Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
     };
 
-    const SESSION_FIXTURE: &str = include_str!("../../../fixtures/session/v1/canonical.toml");
+    const SESSION_FIXTURE: &str = include_str!("../../../fixtures/session/v1/canonical.json");
     const CONSOLE_SIXTY_FOUR_TRACK_FIXTURE: &str =
-        include_str!("../../../fixtures/session/v1/console-sixty-four-track.toml");
+        include_str!("../../../fixtures/session/v1/console-sixty-four-track.json");
     const CONSOLE_SIXTY_FOUR_TRACK_INTENDED_FIXTURE: &str =
-        include_str!("../../../fixtures/session/v1/console-sixty-four-track-intended.toml");
+        include_str!("../../../fixtures/session/v1/console-sixty-four-track-intended.json");
     const CONSOLE_SIXTY_FOUR_TRACK_MONO_FIXTURE: &str =
-        include_str!("../../../fixtures/session/v1/console-sixty-four-track-mono.toml");
+        include_str!("../../../fixtures/session/v1/console-sixty-four-track-mono.json");
     const PARAMETRIC_EQ_NINE_TRACK_FIXTURE: &str =
-        include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.toml");
+        include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json");
 
     struct IdentityBinding;
     impl GraphRuntimeProcessor for IdentityBinding {
@@ -668,9 +668,9 @@ mod tests {
         })
     }
 
-    fn accepted_compressor_graph_fixture() -> session::SessionToml {
+    fn accepted_compressor_graph_fixture() -> session::SessionModel {
         let mut model =
-            parse_session_toml(PARAMETRIC_EQ_NINE_TRACK_FIXTURE).expect("accepted base fixture");
+            parse_session_json(PARAMETRIC_EQ_NINE_TRACK_FIXTURE).expect("accepted base fixture");
         let mut tail = model.tracks[7].clone();
         tail.id = StableId::parse("eq9").expect("stable tail id");
         model.tracks.push(tail);
@@ -709,7 +709,7 @@ mod tests {
     /// with exactly one non-identity stage in it. That is what lets
     /// `rack_placement_changes_the_bank_but_never_the_samples` be a bit test instead of a
     /// tolerance.
-    fn accepted_dynamic_rack_compressor_fixture() -> session::SessionToml {
+    fn accepted_dynamic_rack_compressor_fixture() -> session::SessionModel {
         let mut model = accepted_compressor_graph_fixture();
         for track in &mut model.tracks {
             assert!(
@@ -727,7 +727,7 @@ mod tests {
     /// path. Same session, same dispatch, same parameters -- the *only* variable is whether the
     /// arithmetic is done a lane at a time or `width` lanes at a time.
     fn compile_bank_and_per_node(
-        model: &session::SessionToml,
+        model: &session::SessionModel,
         effect_id: &str,
         plan_id: u64,
     ) -> (PreparedGraphArtifact, PreparedGraphArtifact) {
@@ -779,7 +779,7 @@ mod tests {
     }
 
     /// Compile one accepted model against the real launch registry.
-    fn compile_bank_only(model: &session::SessionToml, plan_id: u64) -> PreparedGraphArtifact {
+    fn compile_bank_only(model: &session::SessionModel, plan_id: u64) -> PreparedGraphArtifact {
         let session = compile_session(
             model,
             CompileCaps {
@@ -860,7 +860,7 @@ mod tests {
         }
     }
 
-    fn accepted_gate_expander_graph_fixture() -> session::SessionToml {
+    fn accepted_gate_expander_graph_fixture() -> session::SessionModel {
         let mut model = accepted_compressor_graph_fixture();
         for track in &mut model.tracks {
             let effect = &mut track.simd1.effects[0];
@@ -872,7 +872,7 @@ mod tests {
         model
     }
 
-    fn accepted_true_peak_limiter_graph_fixture() -> session::SessionToml {
+    fn accepted_true_peak_limiter_graph_fixture() -> session::SessionModel {
         let mut model = accepted_compressor_graph_fixture();
         for (index, track) in model.tracks.iter_mut().enumerate() {
             let effect = &mut track.simd1.effects[0];
@@ -913,7 +913,7 @@ mod tests {
         model
     }
 
-    fn accepted_multiband_compressor_graph_fixture() -> session::SessionToml {
+    fn accepted_multiband_compressor_graph_fixture() -> session::SessionModel {
         let mut model = accepted_compressor_graph_fixture();
         for track in &mut model.tracks {
             let effect = &mut track.simd1.effects[0];
@@ -928,7 +928,7 @@ mod tests {
         model
     }
 
-    fn accepted_soft_clip_graph_fixture() -> session::SessionToml {
+    fn accepted_soft_clip_graph_fixture() -> session::SessionModel {
         let mut model = accepted_compressor_graph_fixture();
         for (index, track) in model.tracks.iter_mut().enumerate() {
             let effect = &mut track.simd1.effects[0];
@@ -957,7 +957,7 @@ mod tests {
         model
     }
 
-    fn accepted_transient_shaper_graph_fixture() -> session::SessionToml {
+    fn accepted_transient_shaper_graph_fixture() -> session::SessionModel {
         let mut model = accepted_compressor_graph_fixture();
         for (index, track) in model.tracks.iter_mut().enumerate() {
             let effect = &mut track.simd1.effects[0];
@@ -991,7 +991,7 @@ mod tests {
         model
     }
 
-    fn accepted_delay_graph_fixture() -> session::SessionToml {
+    fn accepted_delay_graph_fixture() -> session::SessionModel {
         let mut model = accepted_compressor_graph_fixture();
         for (index, track) in model.tracks.iter_mut().enumerate() {
             let mut effect = track.simd1.effects.remove(0);
@@ -1434,7 +1434,7 @@ mod tests {
     }
 
     fn compile_fixture(plan_id: u64) -> PreparedGraphArtifact {
-        let mut model = parse_session_toml(SESSION_FIXTURE).expect("session fixture");
+        let mut model = parse_session_json(SESSION_FIXTURE).expect("session fixture");
         model.tracks[0].dynamic.effects.clear();
         model.automation.clear();
         let compiled = compile_session(
@@ -1462,7 +1462,7 @@ mod tests {
     }
 
     fn compile_reverse_route_submix_fixture(plan_id: u64) -> PreparedGraphArtifact {
-        let mut model = parse_session_toml(SESSION_FIXTURE).expect("session fixture");
+        let mut model = parse_session_json(SESSION_FIXTURE).expect("session fixture");
         model.tracks[0].dynamic.effects.clear();
         model.automation.clear();
         model.submixes = vec![
@@ -2038,7 +2038,7 @@ mod tests {
         slots: usize,
         depth_of: impl Fn(usize) -> usize,
     ) -> (NativeEffectRegistry, EffectPreparedSession) {
-        let mut model = parse_session_toml(SESSION_FIXTURE).expect("fixture");
+        let mut model = parse_session_json(SESSION_FIXTURE).expect("fixture");
         let base_track = model.tracks[0].clone();
         let base_route = model.routes[0].clone();
         model.automation.clear();
@@ -2385,7 +2385,7 @@ mod tests {
         NativeEffectRegistry,
         EffectPreparedSession,
     ) {
-        let mut model = parse_session_toml(SESSION_FIXTURE).expect("fixture");
+        let mut model = parse_session_json(SESSION_FIXTURE).expect("fixture");
         let base_track = model.tracks[0].clone();
         let base_route = model.routes[0].clone();
         model.automation.clear();
@@ -3220,7 +3220,7 @@ mod tests {
     #[test]
     fn add_a_track_keeps_existing_track_bits_and_one_transpose_per_chain() {
         const BLOCKS: u64 = 32;
-        let nine = parse_session_toml(PARAMETRIC_EQ_NINE_TRACK_FIXTURE)
+        let nine = parse_session_json(PARAMETRIC_EQ_NINE_TRACK_FIXTURE)
             .expect("accepted parametric-EQ fixture");
         let mut eight = nine.clone();
         eight.tracks.retain(|track| track.id.as_str() != "eq8");
@@ -3373,7 +3373,7 @@ mod tests {
 
     #[test]
     fn launch_parametric_eq_fixture_retains_banks_and_matches_scalar_across_blocks() {
-        let model = parse_session_toml(PARAMETRIC_EQ_NINE_TRACK_FIXTURE)
+        let model = parse_session_json(PARAMETRIC_EQ_NINE_TRACK_FIXTURE)
             .expect("accepted parametric-EQ fixture");
         assert_eq!(model.tracks.len(), 9);
         let first_effect = &model.tracks[0].simd1.effects[0];
@@ -4328,7 +4328,7 @@ mod tests {
     /// dynamic members whose consumer could no longer consume it in place.
     #[test]
     fn banking_a_dynamic_rack_costs_no_arena_buffers() {
-        let model = parse_session_toml(CONSOLE_SIXTY_FOUR_TRACK_FIXTURE).expect("console fixture");
+        let model = parse_session_json(CONSOLE_SIXTY_FOUR_TRACK_FIXTURE).expect("console fixture");
         let session = compile_session(
             &model,
             CompileCaps {
@@ -4401,7 +4401,7 @@ mod tests {
         // Past the compressor's 960-sample lookahead (8 blocks of 128), so the comparison is over
         // live compressed audio rather than over a latency pad of zeros.
         const BLOCKS: u64 = 12;
-        let model = parse_session_toml(CONSOLE_SIXTY_FOUR_TRACK_FIXTURE).expect("console fixture");
+        let model = parse_session_json(CONSOLE_SIXTY_FOUR_TRACK_FIXTURE).expect("console fixture");
         assert_eq!(model.tracks.len(), 64);
         assert!(model.tracks.iter().all(|track| {
             track.simd1.effects.len() == 1
@@ -4566,7 +4566,7 @@ mod tests {
     #[test]
     fn intended_placement_merges_two_chains_into_one_bit_identically() {
         const BLOCKS: u64 = 12;
-        let intended = parse_session_toml(CONSOLE_SIXTY_FOUR_TRACK_INTENDED_FIXTURE)
+        let intended = parse_session_json(CONSOLE_SIXTY_FOUR_TRACK_INTENDED_FIXTURE)
             .expect("intended fixture");
         assert_eq!(intended.tracks.len(), 64);
         assert!(
@@ -4585,7 +4585,7 @@ mod tests {
         for track in &mut merged.tracks {
             track.simd2.effects.clear();
         }
-        let split = parse_session_toml(CONSOLE_SIXTY_FOUR_TRACK_FIXTURE).expect("retired fixture");
+        let split = parse_session_json(CONSOLE_SIXTY_FOUR_TRACK_FIXTURE).expect("retired fixture");
 
         let compile = compile_console_model;
 
@@ -4787,7 +4787,7 @@ mod tests {
             return;
         };
         let cohorts = 64 / width.lanes() as u64;
-        let intended = parse_session_toml(CONSOLE_SIXTY_FOUR_TRACK_INTENDED_FIXTURE)
+        let intended = parse_session_json(CONSOLE_SIXTY_FOUR_TRACK_INTENDED_FIXTURE)
             .expect("intended fixture");
         let meters = vec![MeterRequest {
             handle: MeterHandle(NonZeroU64::new(1).expect("constant")),
@@ -4893,7 +4893,7 @@ mod tests {
             return;
         };
         let cohorts = 64 / width.lanes() as u64;
-        let mut sent = parse_session_toml(CONSOLE_SIXTY_FOUR_TRACK_INTENDED_FIXTURE)
+        let mut sent = parse_session_json(CONSOLE_SIXTY_FOUR_TRACK_INTENDED_FIXTURE)
             .expect("intended fixture");
         let template = sent.routes[0].clone();
         let mut route = template.clone();
@@ -4967,7 +4967,7 @@ mod tests {
         };
         let lanes = width.lanes() as usize;
         let mut model =
-            parse_session_toml(CONSOLE_SIXTY_FOUR_TRACK_MONO_FIXTURE).expect("mono fixture");
+            parse_session_json(CONSOLE_SIXTY_FOUR_TRACK_MONO_FIXTURE).expect("mono fixture");
         // The half-mono shape: alternate tracks get the standing fixture's stereo mapping back, so
         // every `lanes`-wide cohort would be half and half without the pool class.
         for (index, track) in model.tracks.iter_mut().enumerate() {
@@ -5078,7 +5078,7 @@ mod tests {
         let registry = launch_native_effect_registry().expect("launch registry");
 
         let uniform =
-            parse_session_toml(CONSOLE_SIXTY_FOUR_TRACK_MONO_FIXTURE).expect("mono fixture");
+            parse_session_json(CONSOLE_SIXTY_FOUR_TRACK_MONO_FIXTURE).expect("mono fixture");
         let mut odd = uniform.clone();
         odd.tracks[7].right_source_channel = 1;
 
@@ -5163,7 +5163,7 @@ mod tests {
             ("contiguous", 2_073, |index: usize| index >= 32),
         ] {
             let mut model =
-                parse_session_toml(CONSOLE_SIXTY_FOUR_TRACK_MONO_FIXTURE).expect("mono fixture");
+                parse_session_json(CONSOLE_SIXTY_FOUR_TRACK_MONO_FIXTURE).expect("mono fixture");
             for (index, track) in model.tracks.iter_mut().enumerate() {
                 if stereo_at(index) {
                     track.right_source_channel = 1;
@@ -5214,7 +5214,7 @@ mod tests {
         let Some(_width) = BankWidth::for_backend(host_dispatch()) else {
             return;
         };
-        let mut model = parse_session_toml(CONSOLE_SIXTY_FOUR_TRACK_INTENDED_FIXTURE)
+        let mut model = parse_session_json(CONSOLE_SIXTY_FOUR_TRACK_INTENDED_FIXTURE)
             .expect("intended fixture");
         // The issue's edit, exactly: one track loses one slot of its `simd1` chain, so its program
         // is a strict subsequence of every other track's and it joins their cohort with an
@@ -5279,7 +5279,7 @@ mod tests {
         };
         let lanes = width.lanes() as u64;
         let cohorts = 64 / lanes;
-        let mut ragged = parse_session_toml(CONSOLE_SIXTY_FOUR_TRACK_INTENDED_FIXTURE)
+        let mut ragged = parse_session_json(CONSOLE_SIXTY_FOUR_TRACK_INTENDED_FIXTURE)
             .expect("intended fixture");
         // Half a bank's worth of tracks lose their whole effect strip, which is what slides every
         // effect cohort out of step with the builtin banks.
@@ -5380,7 +5380,7 @@ mod tests {
         if BankWidth::for_backend(host_dispatch()).is_none() {
             return;
         }
-        let intended = parse_session_toml(CONSOLE_SIXTY_FOUR_TRACK_INTENDED_FIXTURE)
+        let intended = parse_session_json(CONSOLE_SIXTY_FOUR_TRACK_INTENDED_FIXTURE)
             .expect("intended fixture");
         // A late track on purpose: the *first* cohort's chain has every other cohort's ops between
         // its scatter and its consumer, so the in-between clause already declines all eight of its
@@ -5457,7 +5457,7 @@ mod tests {
             return;
         };
         let cohorts = 64 / width.lanes() as u64;
-        let intended = parse_session_toml(CONSOLE_SIXTY_FOUR_TRACK_INTENDED_FIXTURE)
+        let intended = parse_session_json(CONSOLE_SIXTY_FOUR_TRACK_INTENDED_FIXTURE)
             .expect("intended fixture");
         let meters = vec![MeterRequest {
             handle: MeterHandle(NonZeroU64::new(1).expect("constant")),
@@ -5547,7 +5547,7 @@ mod tests {
             return;
         };
         let cohorts = 64 / width.lanes() as u64;
-        let mut sent = parse_session_toml(CONSOLE_SIXTY_FOUR_TRACK_INTENDED_FIXTURE)
+        let mut sent = parse_session_json(CONSOLE_SIXTY_FOUR_TRACK_INTENDED_FIXTURE)
             .expect("intended fixture");
         let mut route = sent.routes[0].clone();
         route.id = StableId::parse("ch00-pre-fader-send").expect("route id");
@@ -5616,7 +5616,7 @@ mod tests {
             return;
         };
         let cohorts = 64 / width.lanes() as u64;
-        let intended = parse_session_toml(CONSOLE_SIXTY_FOUR_TRACK_INTENDED_FIXTURE)
+        let intended = parse_session_json(CONSOLE_SIXTY_FOUR_TRACK_INTENDED_FIXTURE)
             .expect("intended fixture");
         let registry = launch_native_effect_registry().expect("launch registry");
         let artifact = compile_console_model_with_builtins(&intended, 2_180, &[], &registry);
@@ -5694,7 +5694,7 @@ mod tests {
         if BankWidth::for_backend(host_dispatch()).is_none() {
             return;
         }
-        let mut doubled = parse_session_toml(CONSOLE_SIXTY_FOUR_TRACK_INTENDED_FIXTURE)
+        let mut doubled = parse_session_json(CONSOLE_SIXTY_FOUR_TRACK_INTENDED_FIXTURE)
             .expect("intended fixture");
         let mut route = doubled.routes[0].clone();
         route.id = StableId::parse("ch00-second-main").expect("route id");
@@ -5736,7 +5736,7 @@ mod tests {
         if BankWidth::for_backend(host_dispatch()).is_none() {
             return;
         }
-        let intended = parse_session_toml(CONSOLE_SIXTY_FOUR_TRACK_INTENDED_FIXTURE)
+        let intended = parse_session_json(CONSOLE_SIXTY_FOUR_TRACK_INTENDED_FIXTURE)
             .expect("intended fixture");
         let meters = vec![MeterRequest {
             handle: MeterHandle(NonZeroU64::new(1).expect("constant")),
@@ -5812,7 +5812,7 @@ mod tests {
         if BankWidth::for_backend(host_dispatch()).is_none() {
             return;
         }
-        let mut reversed = parse_session_toml(CONSOLE_SIXTY_FOUR_TRACK_INTENDED_FIXTURE)
+        let mut reversed = parse_session_json(CONSOLE_SIXTY_FOUR_TRACK_INTENDED_FIXTURE)
             .expect("intended fixture");
         let count = reversed.routes.len();
         for (index, route) in reversed.routes.iter_mut().enumerate() {
@@ -5999,7 +5999,7 @@ mod tests {
             return;
         };
         let cohorts = 64 / width.lanes() as u64;
-        let intended = parse_session_toml(CONSOLE_SIXTY_FOUR_TRACK_INTENDED_FIXTURE)
+        let intended = parse_session_json(CONSOLE_SIXTY_FOUR_TRACK_INTENDED_FIXTURE)
             .expect("intended fixture");
         let meters = vec![MeterRequest {
             handle: MeterHandle(NonZeroU64::new(1).expect("constant")),
@@ -6070,7 +6070,7 @@ mod tests {
         tracks: usize,
         blocks: u64,
     ) -> (Vec<Vec<f32>>, usize, usize) {
-        let model = parse_session_toml(CONSOLE_SIXTY_FOUR_TRACK_INTENDED_FIXTURE)
+        let model = parse_session_json(CONSOLE_SIXTY_FOUR_TRACK_INTENDED_FIXTURE)
             .expect("intended fixture");
         let session = compile_session(
             &model,
@@ -6196,7 +6196,7 @@ mod tests {
     }
 
     /// Compile one console session model into a prepared graph artifact.
-    fn compile_console_model(model: &session::SessionToml, plan_id: u64) -> PreparedGraphArtifact {
+    fn compile_console_model(model: &session::SessionModel, plan_id: u64) -> PreparedGraphArtifact {
         let session = compile_session(
             model,
             CompileCaps {
@@ -6236,7 +6236,7 @@ mod tests {
     /// across exactly that boundary, so every test that measures it has to compile the production
     /// pair rather than the effect-only one.
     fn compile_console_model_with_builtins(
-        model: &session::SessionToml,
+        model: &session::SessionModel,
         plan_id: u64,
         meters: &[MeterRequest],
         registry: &NativeEffectRegistry,
@@ -6407,7 +6407,7 @@ mod tests {
             return;
         };
         let cohorts = 64 / width.lanes() as u64;
-        let intended = parse_session_toml(CONSOLE_SIXTY_FOUR_TRACK_INTENDED_FIXTURE)
+        let intended = parse_session_json(CONSOLE_SIXTY_FOUR_TRACK_INTENDED_FIXTURE)
             .expect("intended fixture");
         let registry = launch_native_effect_registry().expect("launch registry");
         let artifact = compile_console_model_with_builtins(&intended, 2_020, &[], &registry);
@@ -8651,7 +8651,7 @@ mod tests {
 
     #[test]
     fn builtins_replace_only_the_three_internal_track_bindings() {
-        let mut model = parse_session_toml(SESSION_FIXTURE).expect("session fixture");
+        let mut model = parse_session_json(SESSION_FIXTURE).expect("session fixture");
         model.tracks[0].dynamic.effects.clear();
         model.automation.clear();
         let compiled = compile_session(
@@ -8708,7 +8708,7 @@ mod tests {
 
     #[test]
     fn production_builtin_banks_replace_full_post_input_groups_and_render() {
-        let mut model = parse_session_toml(SESSION_FIXTURE).expect("session fixture");
+        let mut model = parse_session_json(SESSION_FIXTURE).expect("session fixture");
         let base_track = model.tracks[0].clone();
         let base_route = model.routes[0].clone();
         model.automation.clear();
@@ -8928,7 +8928,7 @@ mod tests {
 
     #[test]
     fn post_bank_graph_cap_rejects_transactionally_with_both_prepared_inputs() {
-        let mut model = parse_session_toml(SESSION_FIXTURE).expect("session fixture");
+        let mut model = parse_session_json(SESSION_FIXTURE).expect("session fixture");
         let base_track = model.tracks[0].clone();
         let base_route = model.routes[0].clone();
         model.automation.clear();
@@ -9072,7 +9072,7 @@ mod tests {
             value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
             value ^= value >> 31;
             let count = COUNTS[layout as usize % COUNTS.len()];
-            let mut model = parse_session_toml(SESSION_FIXTURE).expect("fixture");
+            let mut model = parse_session_json(SESSION_FIXTURE).expect("fixture");
             let base_track = model.tracks[0].clone();
             let base_route = model.routes[0].clone();
             model.automation.clear();
@@ -9479,7 +9479,7 @@ mod tests {
         let mut categories = BTreeSet::new();
         for (corruption, expected) in cases {
             categories.insert(corruption.category());
-            let mut model = parse_session_toml(SESSION_FIXTURE).expect("session fixture");
+            let mut model = parse_session_json(SESSION_FIXTURE).expect("session fixture");
             model.tracks[0].dynamic.effects.clear();
             model.automation.clear();
             let compiled = compile_session(
@@ -9998,7 +9998,7 @@ mod tests {
     #[test]
     fn route_transform_bits_participate_in_semantic_hash() {
         let baseline = compile_fixture(1);
-        let mut model = parse_session_toml(SESSION_FIXTURE).expect("session fixture");
+        let mut model = parse_session_json(SESSION_FIXTURE).expect("session fixture");
         model.tracks[0].dynamic.effects.clear();
         model.automation.clear();
         model.routes[0].gain_db = -6.0;
@@ -10042,7 +10042,7 @@ mod tests {
     /// literals against a live `powf` oracle so this witness cannot go stale silently.
     #[test]
     fn route_transform_uses_the_canonical_db_to_gain_conversion() {
-        let mut model = parse_session_toml(SESSION_FIXTURE).expect("session fixture");
+        let mut model = parse_session_json(SESSION_FIXTURE).expect("session fixture");
         model.tracks[0].dynamic.effects.clear();
         model.automation.clear();
         model.routes[0].gain_db = -19.0;

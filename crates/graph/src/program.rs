@@ -472,7 +472,7 @@ struct Lifetime {
 ///   cannot fold into its producer in place, so it allocates, and the slot it allocates may be
 ///   one a hoisted op still needs.
 /// * **It is redundant once windows hold**, and it is not free: on
-///   `fixtures/session/v1/console-sixty-four-track.toml` it costs 64 arena buffers (193 -> 257)
+///   `fixtures/session/v1/console-sixty-four-track.json` it costs 64 arena buffers (193 -> 257)
 ///   and 64 stereo block copies per render block, one per dynamic member whose consumer can no
 ///   longer consume it in place. The window hold costs nothing there --
 ///   `banking_a_dynamic_rack_costs_no_arena_buffers` pins the 193.

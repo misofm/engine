@@ -58,13 +58,13 @@ export interface AudioContextLike {
 
 export interface CreateEngineOptions {
   /** The Session V1 document, or the SDK builder session that produced it. */
-  readonly document: Uint8Array | string | { toToml(): string };
+  readonly document: Uint8Array | string | { toJson(): string };
   /**
    * The sources this session declares, when they were authored through the SDK.
    *
    * Supplied so a `32f` document can be refused before an `AudioContext` is constructed. Absent
    * for a raw document, whose sources the SDK has never seen as values -- that case belongs to the
-   * resolver/ingest boundary (#244), and the SDK has no TOML parser to substitute for one.
+   * resolver/ingest boundary (#244), and the SDK has no JSON parser to substitute for one.
    */
   readonly sources?: readonly { readonly id: string; readonly spec: SourceSpec }[];
   /** Release URLs, from the same release as the module bytes. */
@@ -110,7 +110,7 @@ function documentBytes(document: CreateEngineOptions["document"]): Uint8Array<Ar
       ? (document as Uint8Array<ArrayBuffer>)
       : new Uint8Array(document);
   }
-  return new TextEncoder().encode(document.toToml());
+  return new TextEncoder().encode(document.toJson());
 }
 
 /**

@@ -310,8 +310,8 @@ pub unsafe extern "C" fn miso_engine_v1_engine_destroy(engine: *mut Engine) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn miso_engine_v1_compile_session(
     engine: *mut Engine,
-    toml: *const u8,
-    toml_bytes: u64,
+    document: *const u8,
+    document_bytes: u64,
     limits: *const CompileLimits,
     diagnostics: *mut BytesOut,
     out_session: *mut *mut Session,
@@ -332,7 +332,7 @@ pub unsafe extern "C" fn miso_engine_v1_compile_session(
         if kind != RESULT_OK {
             return kind;
         }
-        if toml.is_null() || limits.is_null() || diagnostics.is_null() {
+        if document.is_null() || limits.is_null() || diagnostics.is_null() {
             return RESULT_INVALID_ARGUMENT;
         }
         // SAFETY: The caller promises `limits` identifies a readable fixed ABI value.
@@ -344,8 +344,8 @@ pub unsafe extern "C" fn miso_engine_v1_compile_session(
         if let Err(code) = unsafe { validate_bytes_out(diagnostics) } {
             return code;
         }
-        if toml_bytes > limits.maximum_toml_bytes {
-            let value = b"capi.toml.limit\t$\n";
+        if document_bytes > limits.maximum_document_bytes {
+            let value = b"capi.document.maximum_bytes\t$\n";
             // SAFETY: `engine` passed the live-kind check and can be borrowed for this call.
             set_engine_error(unsafe { &*engine }, value);
             // SAFETY: The bytes-output contract was validated above.
@@ -356,15 +356,17 @@ pub unsafe extern "C" fn miso_engine_v1_compile_session(
                 written
             };
         }
-        // SAFETY: The caller promises the TOML region is readable for `toml_bytes`.
-        let toml = match unsafe { borrowed_bytes(toml, toml_bytes, limits.maximum_toml_bytes) } {
+        // SAFETY: The caller promises the JSON region is readable for `document_bytes`.
+        let document = match unsafe {
+            borrowed_bytes(document, document_bytes, limits.maximum_document_bytes)
+        } {
             Ok(value) => value,
             Err(code) => return code,
         };
-        let toml = match core::str::from_utf8(toml) {
+        let document = match core::str::from_utf8(document) {
             Ok(value) => value,
             Err(_) => {
-                let value = b"capi.toml.utf8\t$\n";
+                let value = b"capi.document.utf8\t$\n";
                 // SAFETY: `engine` passed the live-kind check and can be borrowed for this call.
                 set_engine_error(unsafe { &*engine }, value);
                 // SAFETY: The bytes-output contract was validated above.
@@ -376,7 +378,7 @@ pub unsafe extern "C" fn miso_engine_v1_compile_session(
                 };
             }
         };
-        let children = match compile_children(toml, limits) {
+        let children = match compile_children(document, limits) {
             Ok(value) => value,
             Err(mut failure) => {
                 let maximum =
@@ -1177,7 +1179,7 @@ mod tests {
             source_ring_frames: 1_024,
             maximum_automation_spans_per_block: 128,
             reserved0: 0,
-            maximum_toml_bytes: 1_000_000,
+            maximum_document_bytes: 1_000_000,
             maximum_diagnostic_bytes: 4_096,
             maximum_tracks: 100,
             maximum_sources: 100,
@@ -1203,8 +1205,8 @@ mod tests {
 
     /// Compiles the pinned nine-track fixture and returns its three live handles.
     fn compiled_fixture() -> (*mut Engine, *mut Session, *mut Plan) {
-        const TOML: &[u8] =
-            include_bytes!("../../../fixtures/session/v1/parametric-eq-nine-track.toml");
+        const JSON: &[u8] =
+            include_bytes!("../../../fixtures/session/v1/parametric-eq-nine-track.json");
         let mut engine = ptr::null_mut();
         assert_eq!(create(&config(), &mut engine), RESULT_OK);
         let mut diagnostics = BytesOut {
@@ -1220,8 +1222,8 @@ mod tests {
         let result = unsafe {
             miso_engine_v1_compile_session(
                 engine,
-                TOML.as_ptr(),
-                TOML.len() as u64,
+                JSON.as_ptr(),
+                JSON.len() as u64,
                 &limits(),
                 &mut diagnostics,
                 &mut session,
@@ -1401,8 +1403,8 @@ mod tests {
 
     #[test]
     fn compile_publishes_both_children_and_source_control_is_region_checked() {
-        const TOML: &[u8] =
-            include_bytes!("../../../fixtures/session/v1/parametric-eq-nine-track.toml");
+        const JSON: &[u8] =
+            include_bytes!("../../../fixtures/session/v1/parametric-eq-nine-track.json");
         let mut engine = ptr::null_mut();
         assert_eq!(create(&config(), &mut engine), RESULT_OK);
         let mut diagnostics = BytesOut {
@@ -1418,8 +1420,8 @@ mod tests {
         let result = unsafe {
             miso_engine_v1_compile_session(
                 engine,
-                TOML.as_ptr(),
-                TOML.len() as u64,
+                JSON.as_ptr(),
+                JSON.len() as u64,
                 &limits(),
                 &mut diagnostics,
                 &mut session,
@@ -1859,7 +1861,7 @@ mod tests {
         );
         assert!(session.is_null());
         assert!(plan.is_null());
-        assert_eq!(&storage, b"capi.toml.utf8\t$\n");
+        assert_eq!(&storage, b"capi.document.utf8\t$\n");
 
         let mut error_query = BytesOut {
             struct_size: BYTES_OUT_SIZE,
@@ -2298,7 +2300,7 @@ mod tests {
         assert_eq!(response.required_bytes, 0);
 
         let mut unbounded = limits();
-        unbounded.maximum_toml_bytes = u64::MAX;
+        unbounded.maximum_document_bytes = u64::MAX;
         let mut diagnostics = BytesOut {
             struct_size: BYTES_OUT_SIZE,
             reserved0: 0,
@@ -2309,7 +2311,7 @@ mod tests {
         let mut oversized_session = ptr::null_mut();
         let mut oversized_plan = ptr::null_mut();
         assert_eq!(
-            // SAFETY: The oversized declared TOML length is rejected before `dangling` is read.
+            // SAFETY: The oversized declared JSON length is rejected before `dangling` is read.
             unsafe {
                 miso_engine_v1_compile_session(
                     engine,

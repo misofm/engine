@@ -1,13 +1,13 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use session::{CompileCaps, compile_session, parse_session_toml};
+use session::{CompileCaps, compile_session, parse_session_json};
 
 fuzz_target!(|bytes: &[u8]| {
     let Ok(source) = core::str::from_utf8(bytes) else {
         return;
     };
-    let Ok(model) = parse_session_toml(source) else {
+    let Ok(model) = parse_session_json(source) else {
         return;
     };
     let caps = CompileCaps {
@@ -20,6 +20,6 @@ fuzz_target!(|bytes: &[u8]| {
     };
     if let Ok(compiled) = compile_session(&model, caps) {
         assert_eq!(compiled.normalized_model().schema_version, 1);
-        assert!(parse_session_toml(compiled.canonical_toml()).is_ok());
+        assert!(parse_session_json(compiled.canonical_json()).is_ok());
     }
 });

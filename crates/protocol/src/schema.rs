@@ -338,11 +338,11 @@ pub(crate) mod snapshot {
     use super::*;
     pub(crate) const TOTAL_BYTES: FieldSpec = FieldSpec::req(1, Wire::U64);
     pub(crate) const OFFSET: FieldSpec = FieldSpec::req(2, Wire::U64);
-    pub(crate) const CANONICAL_TOML_CHUNK: FieldSpec = FieldSpec::req(3, Wire::Bytes);
+    pub(crate) const CANONICAL_JSON_CHUNK: FieldSpec = FieldSpec::req(3, Wire::Bytes);
     pub(crate) const EOF: FieldSpec = FieldSpec::req(4, Wire::Bool);
     pub(crate) static SPEC: MessageSpec = MessageSpec {
         name: "SessionSnapshot",
-        fields: &[TOTAL_BYTES, OFFSET, CANONICAL_TOML_CHUNK, EOF],
+        fields: &[TOTAL_BYTES, OFFSET, CANONICAL_JSON_CHUNK, EOF],
     };
 }
 

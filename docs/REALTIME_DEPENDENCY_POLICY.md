@@ -307,25 +307,21 @@ the checked `SampleRateHz` and `QuantumFrames` value carriers; core does not dep
 Parsing, canonicalization, validation, model cloning, sorting, indexes, and all failure allocation
 remain on the control plane.
 
-The direct parser dependencies are `serde = 1.0.228` with `derive`, and the Cargo requirement
-`toml = 0.9.9`, which resolves in `Cargo.lock` to package version
-`0.9.9+spec-1.0.0`. The latter suffix is package version metadata, not a Cargo feature. TOML default
-features are disabled; only `parse` and `serde` are enabled. In particular `display` is excluded:
-canonical output is produced by the audited schema-specific writer, never by a dependency display
-implementation. Both direct packages are dual MIT/Apache-2.0 licensed, support the workspace's
-native/mobile/browser targets through Rust `std`, and expose no runtime behavior to render.
+The direct parser dependency is exact-pinned `jstrict = 0.14.0` with default features disabled.
+The session crate has no runtime `serde`, `serde_json`, or TOML dependency. A bounded preflight
+rejects excess depth and decoded duplicate keys before the dependency constructs a value tree;
+the typed walk then consumes `jstrict` values and byte spans. Canonical output is produced by the
+audited schema-specific writer, never by a dependency display implementation.
 
 Parser allocation and diagnostic formatting are expected control-plane behavior. Malformed input
 returns typed diagnostics; arithmetic and configured-cap preflight runs before the canonical string,
-model clone, normalized indexes, or downstream plan work. TOML 1.0 string and duplicate-key
+model clone, normalized indexes, or downstream plan work. JSON string and duplicate-key
 fixtures, the strict unknown-key matrix, target compilation, and parser/compiler fuzz targets are
 the compatibility and failure-mode evidence for this dependency choice.
 
-The issue-004 cross-target release build recorded the session crate's Wasm `rlib` at 1,232,588
-bytes for scalar and 1,222,746 bytes for `simd128`; these are descriptive archive sizes, not linked
-host-binary size claims or acceptance thresholds. Android and iOS `cargo check` metadata artifacts
-were 302,440 and 302,436 bytes respectively. Dependency feature-tree evidence confirms TOML
-`parse`/`serde` only and no `display` feature.
+The earlier issue-004 cross-target archive sizes are historical measurements for the retired
+parser stack and are not projected onto the JSON implementation. Current size and allocation
+evidence is recorded by issue #338; it remains descriptive rather than a render-plane allowance.
 
 ## Audit #103 shared host preparation
 

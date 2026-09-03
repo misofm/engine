@@ -29,7 +29,7 @@ const BUFFER_METER_FRAME = 7;
 const METER_HEADER_BYTES = 64;
 const OBSERVATION_WINDOW_BLOCKS = 2;
 const RESOURCE_NAMES = [
-  "optionsBytes", "statusBytes", "sessionTomlBytes", "diagnosticBytes", "sourceIdBytes",
+  "optionsBytes", "statusBytes", "sessionDocumentBytes", "diagnosticBytes", "sourceIdBytes",
   "sourcePcmStagingBytes", "outputPcmBytes", "bridgeMetadataBytes", "bridgeRetainedBytes",
   "largestBridgeAllocationBytes", "sourceTotalBytes", "sourceOverheadBytes",
   "effectScalarStateBytes", "effectScalarScratchBytes", "builtinRetainedBytes",
@@ -223,11 +223,11 @@ function pcmSha256(channels) {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
-async function runBackend(modulePath, expectedBackend, sessionToml, source) {
+async function runBackend(modulePath, expectedBackend, sessionDocument, source) {
   const { instance } = await WebAssembly.instantiate(await readFile(modulePath), {});
   const exports = instance.exports;
   assert.equal(exports.miso_engine_web_v1_abi_version(), ABI_VERSION);
-  const handle = boot(exports, sessionToml);
+  const handle = boot(exports, sessionDocument);
   const memoryBuffer = exports.memory.buffer;
   const initialStatus = status(exports, handle);
   const resourceReport = resources(exports, handle);
@@ -235,7 +235,7 @@ async function runBackend(modulePath, expectedBackend, sessionToml, source) {
   assert.equal(resourceReport.backend, expectedBackend);
 
   // Issue #207: source introspection, against the real module and the real compiled session -- the
-  // leg the JS suite's fake exports cannot supply. `session.toml` declares one source, and the
+  // leg the JS suite's fake exports cannot supply. `session.json` declares one source, and the
   // transcript this oracle replays addresses it by the *same* ID the engine reports here: the
   // assertion is that a driver holding only the compiled session can find the source it must feed.
   assert.equal(exports.miso_engine_web_v1_source_count(handle), 1);
@@ -289,12 +289,12 @@ async function runBackend(modulePath, expectedBackend, sessionToml, source) {
 /// effect parameter on both lanes, a live bypass, and one batch that releases the mute and the
 /// bypass together across two different destination queues. The digest is a statement about
 /// *when* each of those took effect, not merely that they did.
-async function runCommandTimeline(modulePath, sessionToml, sourceId) {
+async function runCommandTimeline(modulePath, sessionDocument, sourceId) {
   const { instance } = await WebAssembly.instantiate(await readFile(modulePath), {});
   const exports = instance.exports;
   const handle = boot(
     exports,
-    sessionToml,
+    sessionDocument,
     [BigInt(COMMAND_QUEUE_RECORDS), 0n, 0n, 0n],
   );
   assert.equal(exports.miso_engine_web_v1_console_track_count(handle), 1);
@@ -381,10 +381,10 @@ async function runCommandTimeline(modulePath, sessionToml, sourceId) {
 /// `taps` of `0n` is the level-1 zero leg: no lane, no accumulator, no conflating cell, and
 /// `observationRetainedBytes` is `0`. The subscription it still sends is refused with the typed
 /// `observationUnbound` reason rather than silently ignored.
-async function runObservationTimeline(modulePath, sessionToml, sourceId, taps) {
+async function runObservationTimeline(modulePath, sessionDocument, sourceId, taps) {
   const { instance } = await WebAssembly.instantiate(await readFile(modulePath), {});
   const exports = instance.exports;
-  const handle = boot(exports, sessionToml, [
+  const handle = boot(exports, sessionDocument, [
     BigInt(COMMAND_QUEUE_RECORDS), BigInt(OBSERVATION_WINDOW_BLOCKS), taps, taps === 0n ? 0n : 1n,
   ]);
   assert.equal(exports.miso_engine_web_v1_console_track_count(handle), 1);
@@ -468,7 +468,7 @@ async function main() {
   const source = JSON.parse(await readFile(path.join(fixtureDirectory, "source.json"), "utf8"));
   const expected = JSON.parse(await readFile(process.argv[3], "utf8"));
   exactKeys(source, ["schema", "sourceId", "sampleRateHz", "quantumFrames", "blocks"], "source");
-  const sessionToml = await readFile(path.join(fixtureDirectory, "session.toml"));
+  const sessionDocument = await readFile(path.join(fixtureDirectory, "session.json"));
   // W4-D1: one shipped artifact, so the direct oracle drives it alone. The cross-backend proof
   // moved to two independent places: #83's G5 corpus runs the same kernels natively at
   // Scalar/Simd4/Simd8 and under wasmtime with and without simd128, and `nativePcmF32leSha256`
@@ -479,7 +479,7 @@ async function main() {
     simd128: await runBackend(
       path.join(artifactDirectory, "miso-engine-v1-audio-worklet.simd128.wasm"),
       1,
-      sessionToml,
+      sessionDocument,
       source,
     ),
   };
@@ -499,7 +499,7 @@ async function main() {
   // #137 E2: the command-timeline leg, pinned the same way and asserted before any print.
   actual.commandTimeline = await runCommandTimeline(
     path.join(artifactDirectory, "miso-engine-v1-audio-worklet.simd128.wasm"),
-    await readFile(path.join(fixtureDirectory, "command-session.toml")),
+    await readFile(path.join(fixtureDirectory, "command-session.json")),
     source.sourceId,
   );
   const nativeTimeline = expected.directOracle?.nativeCommandTimelinePcmF32leSha256;
@@ -519,7 +519,7 @@ async function main() {
   // each other and to the native pin before anything is printed, so the pin can only ever be the
   // value three independent runs already agree on.
   const observationSession = await readFile(
-    path.join(fixtureDirectory, "observation-session.toml"),
+    path.join(fixtureDirectory, "observation-session.json"),
   );
   const artifact = path.join(artifactDirectory, "miso-engine-v1-audio-worklet.simd128.wasm");
   const observed = await runObservationTimeline(artifact, observationSession, source.sourceId, 4n);

@@ -1,12 +1,19 @@
 #!/usr/bin/env python3
-"""Independent stdlib-only Issue 073 fixture generator/checker."""
+"""Issue 073 WAV/session fixture generator and checker.
+
+Session drafts are normalized by the Rust authority; Python never supplies an
+independent canonical JSON implementation.
+"""
 
 from __future__ import annotations
 
 import hashlib
+import json
 import pathlib
 import struct
+import subprocess
 import sys
+import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parent
 RATES = (44100, 48000, 88200, 96000)
@@ -71,16 +78,33 @@ def wave(rate: int, rf64: bool, frame_count: int, start: int = 0) -> bytes:
 
 
 def session(rate: int, digest: str, frames: int) -> bytes:
-    template = (ROOT / "../../session/v1/parametric-eq-nine-track.toml").resolve().read_text()
-    text = template.replace("sample_rate_hz = 48000", f"sample_rate_hz = {rate}")
-    text = text.replace(
-        "sha256:7e945c107a97cd24135e85dc2f407c5ecd39663a8737bf5b92114ccce38f1ab8",
-        f"sha256:{digest}",
-    ).replace(
-        'bit_depth = "32f", frames = 48000',
-        f'bit_depth = "32f", frames = {frames}',
-    )
-    return text.encode()
+    template = (ROOT / "../../session/v1/parametric-eq-nine-track.json").resolve()
+    document = json.loads(template.read_text())
+    document["sample_rate_hz"] = rate
+    document["sources"][0]["content"] = f"sha256:{digest}"
+    document["sources"][0]["frames"] = str(frames)
+    with tempfile.TemporaryDirectory() as directory:
+        draft = pathlib.Path(directory) / "draft.json"
+        draft.write_text(json.dumps(document, ensure_ascii=False))
+        result = subprocess.run(
+            ["cargo", "run", "-q", "-p", "session-validator", "--", "validate", "--canonical", str(draft)],
+            cwd=ROOT.parents[2], capture_output=True, check=False,
+        )
+    if result.returncode != 0:
+        sys.stderr.buffer.write(result.stderr)
+        raise SystemExit(f"session validator refused native runner draft (exit {result.returncode})")
+    return result.stdout
+
+
+def session_payload(path: pathlib.Path, rate: int, digest: str, frames: int) -> bytes:
+    if not CHECK:
+        return session(rate, digest, frames)
+    payload = path.read_bytes()
+    document = json.loads(payload)
+    assert document["sample_rate_hz"] == rate
+    assert document["sources"][0]["content"] == f"sha256:{digest}"
+    assert document["sources"][0]["frames"] == str(frames)
+    return payload
 
 
 def main() -> None:
@@ -90,11 +114,12 @@ def main() -> None:
         payload = wave(rate, False, 1_024)
         publish(ROOT / f"{name}.wav", payload)
         content_digest = hashlib.sha256(canonical_f32(1_024)).hexdigest()
-        session_bytes = session(rate, content_digest, 1_024)
-        publish(ROOT / f"{name}.toml", session_bytes)
+        session_path = ROOT / f"{name}.json"
+        session_bytes = session_payload(session_path, rate, content_digest, 1_024)
+        publish(session_path, session_bytes)
         entries.extend(
             ((f"{name}.wav", len(payload), hashlib.sha256(payload).hexdigest()),
-             (f"{name}.toml", len(session_bytes), hashlib.sha256(session_bytes).hexdigest()))
+             (f"{name}.json", len(session_bytes), hashlib.sha256(session_bytes).hexdigest()))
         )
     name = "rf64-48000"
     # The old session selected frames [1, 515) from a 516-frame asset. Region selection is gone;
@@ -102,11 +127,12 @@ def main() -> None:
     payload = wave(48000, True, 514, start=1)
     publish(ROOT / f"{name}.wav", payload)
     content_digest = hashlib.sha256(canonical_f32(514, start=1)).hexdigest()
-    session_bytes = session(48000, content_digest, 514)
-    publish(ROOT / f"{name}.toml", session_bytes)
+    session_path = ROOT / f"{name}.json"
+    session_bytes = session_payload(session_path, 48000, content_digest, 514)
+    publish(session_path, session_bytes)
     entries.extend(
         ((f"{name}.wav", len(payload), hashlib.sha256(payload).hexdigest()),
-         (f"{name}.toml", len(session_bytes), hashlib.sha256(session_bytes).hexdigest()))
+         (f"{name}.json", len(session_bytes), hashlib.sha256(session_bytes).hexdigest()))
     )
     entries.extend((f"output:{name}", 8192, digest) for name, digest in OUTPUTS.items())
     manifest = "schema_version\t1\n" + "".join(

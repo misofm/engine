@@ -13,7 +13,7 @@ copy_case() {
         "$case_root/hosts"
     cp -R "$root/tools/native-pcm-runner" "$case_root/tools/"
     cp -R "$root/fixtures/native-pcm-runner/v1" "$case_root/fixtures/native-pcm-runner/"
-    cp "$root/fixtures/session/v1/parametric-eq-nine-track.toml" "$case_root/fixtures/session/v1/"
+    cp "$root/fixtures/session/v1/parametric-eq-nine-track.json" "$case_root/fixtures/session/v1/"
     cp "$root/scripts/check-native-pcm-runner.sh" "$case_root/scripts/"
 }
 

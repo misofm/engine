@@ -1,0 +1,178 @@
+{
+  "schema_version": 1,
+  "session_id": "builtins-automation.session",
+  "revision": "1",
+  "sample_rate_hz": 48000,
+  "quantum_frames": 128,
+  "render_profile": {
+    "id": "native",
+    "mode": "single_thread"
+  },
+  "output_profile": {
+    "id": "main",
+    "channels": 2,
+    "sample_format": "f32_planar"
+  },
+  "sources": [
+    {
+      "id": "voice",
+      "content": "sha256:2a97516c354b68848cdbd8f54a226a0a55b21ed138e207ad6c5cbb9c00aa5aea",
+      "channels": 2,
+      "bit_depth": "32f",
+      "frames": "48000"
+    }
+  ],
+  "tracks": [
+    {
+      "id": "vocal",
+      "source_id": "voice",
+      "left_source_channel": 0,
+      "right_source_channel": 1,
+      "builtins": {
+        "left": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 20.0,
+          "lpf_hz": 20000.0,
+          "delay_samples": 0
+        },
+        "right": {
+          "polarity_invert": false,
+          "trim_db": 0.0,
+          "hpf_hz": 20.0,
+          "lpf_hz": 20000.0,
+          "delay_samples": 0
+        }
+      },
+      "simd1": {
+        "effects": []
+      },
+      "dynamic": {
+        "effects": []
+      },
+      "simd2": {
+        "effects": []
+      },
+      "fader": {
+        "left_db": 0.0,
+        "right_db": 0.0,
+        "left_mute": false,
+        "right_mute": false
+      },
+      "pan": {
+        "left": 1.0,
+        "right": 1.0,
+        "smoothing_samples": 16
+      }
+    }
+  ],
+  "submixes": [],
+  "outputs": [
+    {
+      "id": "main-out"
+    }
+  ],
+  "routes": [
+    {
+      "id": "to-main",
+      "source": {
+        "kind": "track",
+        "track_id": "vocal",
+        "tap": "post_matrix"
+      },
+      "destination": {
+        "kind": "output_input",
+        "output_id": "main-out"
+      },
+      "channel_matrix": {
+        "ll": 1.0,
+        "lr": 0.0,
+        "rl": 0.0,
+        "rr": 1.0
+      },
+      "gain_db": 0.0
+    }
+  ],
+  "automation": [
+    {
+      "id": "fader-ride",
+      "target": {
+        "entity_id": "vocal",
+        "rack": "builtins",
+        "effect_id": "strip",
+        "parameter_id": 5,
+        "channel": "both"
+      },
+      "segments": [
+        {
+          "shape": "linear",
+          "start_sample": "0",
+          "end_sample": "960",
+          "start_value": 0.0,
+          "end_value": -3.0,
+          "unit": "db"
+        }
+      ]
+    },
+    {
+      "id": "matrix-ll",
+      "target": {
+        "entity_id": "vocal",
+        "rack": "builtins",
+        "effect_id": "strip",
+        "parameter_id": 7,
+        "channel": "both"
+      },
+      "segments": [
+        {
+          "shape": "linear",
+          "start_sample": "0",
+          "end_sample": "960",
+          "start_value": 1.0,
+          "end_value": 0.5,
+          "unit": "linear"
+        }
+      ]
+    },
+    {
+      "id": "polarity-flip",
+      "target": {
+        "entity_id": "vocal",
+        "rack": "builtins",
+        "effect_id": "strip",
+        "parameter_id": 1,
+        "channel": "right"
+      },
+      "segments": [
+        {
+          "shape": "step",
+          "start_sample": "480",
+          "end_sample": "960",
+          "start_value": 0.0,
+          "end_value": 1.0,
+          "unit": "linear"
+        }
+      ]
+    },
+    {
+      "id": "trim-ride-left",
+      "target": {
+        "entity_id": "vocal",
+        "rack": "builtins",
+        "effect_id": "strip",
+        "parameter_id": 2,
+        "channel": "left"
+      },
+      "segments": [
+        {
+          "shape": "linear",
+          "start_sample": "0",
+          "end_sample": "480",
+          "start_value": 0.0,
+          "end_value": -6.0,
+          "unit": "db"
+        }
+      ]
+    }
+  ]
+}

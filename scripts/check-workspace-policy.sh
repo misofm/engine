@@ -178,6 +178,13 @@ prelaunch_later_generation_pattern='(miso_engine_'v'2|MISO_ENGINE_'V'2|miso-engi
 scan_forbidden "prelaunch live-product identities must not claim a later generation" \
     "$prelaunch_later_generation_pattern" '*' crates hosts tools sidecars
 
+# Implementation class names are private even when their containing script is shipped. Only the
+# registered processor token is boundary identity; an internal JavaScript class is born
+# unversioned under #215's rule.
+versioned_worklet_implementation_pattern='class[[:space:]]+MisoEngine'V'[0-9]+AudioWorkletProcessor'
+scan_forbidden "AudioWorklet processor implementation classes must be unversioned" \
+    "$versioned_worklet_implementation_pattern" '*.js' crates hosts tools sidecars
+
 # Master plan #83 D4 (revision 4): exactly one global ISA configuration is approved, the
 # x86-64-v3 pin that lets `wide` lower `Lane` to AVX2 and `Lane::fma` to `vfmadd` with no runtime
 # dispatch (crates/lane refuses to compile without it, and every host attests the CPU

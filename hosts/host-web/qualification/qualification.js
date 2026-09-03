@@ -41,7 +41,7 @@ const SIMD128_PROBE = new Uint8Array([
 // Issue #281: this is the post-#240 atomic-boot shape. `createMisoAudioWorkletHost` takes exactly
 // `{ context, document, options, simd128ModuleUrl, workletModuleUrl }`, and `options` is exactly
 // the six boot words below -- both guards are `hasExactFields`, so the pre-#240 spelling
-// (`quantumFrames`/`sessionToml`/`limits`, with the twenty-one capacity ceilings #240 deleted)
+// (`quantumFrames`/`sessionDocument`/`limits`, with the twenty-one capacity ceilings #240 deleted)
 // is refused as `miso.error.v1` requestId 0 result 1 before a module is even fetched. The quantum
 // now comes from the context's own `renderQuantumSize`, and the ceilings are the engine's, not the
 // caller's; `sourceRingFrames` is the one word that survived the change and it keeps its meaning.
@@ -596,11 +596,11 @@ export async function runQualification() {
     await Promise.all([
       import("/artifacts/miso-engine-v1-audio-worklet-host.js"),
       fetch("/fixture/expected.json"),
-      fetch("/fixture/session.toml"),
+      fetch("/fixture/session.json"),
       fetch("/fixture/source.json"),
-      fetch("/qualification/stall-session.toml"),
-      fetch("/qualification/console-session.toml"),
-      fetch("/qualification/observation-session.toml"),
+      fetch("/qualification/stall-session.json"),
+      fetch("/qualification/console-session.json"),
+      fetch("/qualification/observation-session.json"),
     ]);
   if (!expectedResponse.ok || !sessionResponse.ok || !sourceResponse.ok || !stallResponse.ok
       || !consoleResponse.ok || !observationResponse.ok) {
@@ -728,19 +728,19 @@ export const qualificationConstants = Object.freeze({
 // `blocks * quantumFrames` frames -- the declared `frames`.
 export const qualificationSessionSources = Object.freeze([
   Object.freeze({
-    document: "console-session.toml",
+    document: "console-session.json",
     sourceId: "console-source",
     blocks: CONSOLE_BLOCKS,
     planes: sourcePlanes,
   }),
   Object.freeze({
-    document: "observation-session.toml",
+    document: "observation-session.json",
     sourceId: "console-source",
     blocks: OBSERVATION_BLOCKS,
     planes: observationPlanes,
   }),
   Object.freeze({
-    document: "stall-session.toml",
+    document: "stall-session.json",
     sourceId: "stall-source",
     blocks: STALL_FRAMES / QUANTUM_FRAMES,
     planes: sourcePlanes,

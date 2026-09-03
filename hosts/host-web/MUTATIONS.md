@@ -1,6 +1,6 @@
 | `test-web-audioworklet.mjs` unsupported-browser test (W4-D1) | delete the `if (!WebAssembly.validate(SIMD128_PROBE)) throw unsupportedBrowser("simd128");` guard in `createMisoAudioWorkletHost` | the refusal becomes a generic `miso.error.v1` 255 and the `compileCount` assertion fails |
 | `test-web-audioworklet.mjs` source-ID UTF-8 parity test (#132) | change the four-byte sequence's `0xf0` lead-byte mask to `0xe0` in `writeBoundedUtf8` | the non-ASCII submit and seek bytes differ from the independent `TextEncoder` oracle |
-| `check-web-audioworklet-callgraph.py --callgraph` on the shipped artifact (E1/E2) | restore `self.ready = None;` in `fail` and rebuild the artifact | closure 6 -> 23, traps 5 -> 16, 13 forbidden names appear (`drop_glue<Option<ReadyOwnership>>`, `drop_glue<PreparedRenderPlan>`, `drop_glue<SessionToml>`, `BTreeMap<StableId,_>` drop glue, `Arc<spsc::Ring<_>>::drop_slow` x2, `__rdl_dealloc`, `__rust_dealloc`, `dlmalloc::free`, `unlink_chunk`, `insert_large_chunk`, ...), and four of them become unexpected trap owners |
+| `check-web-audioworklet-callgraph.py --callgraph` on the shipped artifact (E1/E2) | restore `self.ready = None;` in `fail` and rebuild the artifact | closure 6 -> 23, traps 5 -> 16, 13 forbidden names appear (`drop_glue<Option<ReadyOwnership>>`, `drop_glue<PreparedRenderPlan>`, `drop_glue<SessionModel>`, `BTreeMap<StableId,_>` drop glue, `Arc<spsc::Ring<_>>::drop_slow` x2, `__rdl_dealloc`, `__rust_dealloc`, `dlmalloc::free`, `unlink_chunk`, `insert_large_chunk`, ...), and four of them become unexpected trap owners |
 | `check-web-audioworklet-callgraph.py --self-test` (a)-(f) | synthetic disassembly per case | each case is the red mutation of one rule; the runner fails if any escapes |
 | `test-web-audioworklet.mjs` trap-containment test (F5) | remove the `try` around `miso_engine_web_v1_render` in `process()` | the `process()` call throws instead of returning `true` |
 | `tests::facade_source_rules_reach_the_browser_host` (F1) | delete the `end_of_region != (end == region_end)` check from `host_core::SourceControlSet::submit` | the region-end submission returns `RESULT_BACKPRESSURE` (6) instead of `RESULT_INVALID_ARGUMENT` (1) |
@@ -13,6 +13,8 @@
 | `qualification/run.mjs --self-test-mutations` native corpus gate (#74) | replace one in-browser PCM digest with 64 zeroes | `<browser>: native-corpus-digest` fails against the frozen native pin |
 | `qualification/run.mjs --self-test-mutations` stall gate (#74) | change the measured injected-stall duration to zero | `<browser>: main-thread-stall` fails before a no-stall run can claim coverage |
 | `qualification/run.mjs --check-matrix` deployment matrix gate (#74) | append `-red-mutation` to the checked version floor in memory | `<browser>: deployment-matrix` fails |
+| `qualification/run.mjs --check-matrix` candidate lineage gate (#338) | replace the recorded commit with 39 hex digits | `matrix: candidate-lineage` fails before browser launch |
+| `qualification/run.mjs --check-matrix` artifact lineage gate (#338) | replace the recorded Wasm SHA-256 with 64 zeroes | `matrix: artifact-lineage` fails before browser launch |
 | `host_core::PreparedHost` `compile_fail` doctest (callback contract) | add `unsafe impl Sync for PreparedHost {}` | the doctest compiles and `cargo test --doc` exits 101 |
 | `tests::command_ack_names_the_exact_application_sample` (#137 E1) | move the `while let Ok(record) = self.control.try_pop()` drain in `ConsoleMatrixProcessor::process` to after `self.matrix.process(block)` | the reported sample is one block early and the block at `applied_at_sample` still renders the pre-command value |
 | `tests::command_flood_is_typed_backpressure_and_leaves_the_render_untouched` (#137 E3) | delete the free-room pre-check loop in `admit_commands` | the flood is admitted record by record until `try_push` fails, the transaction stops being all-or-nothing, and the flooded run's output differs from the clean run's |
@@ -76,7 +78,7 @@ anywhere in it.
 
 ## Issue #143 E12 — the three-browser observation row
 
-`qualification/run.mjs --browser all --self-test-mutations --record-matrix`, Playwright 1.62.1
+`qualification/run.mjs --browser all --self-test-mutations --record-matrix --candidate-commit <40-hex>`, Playwright 1.62.1
 headless Linux, over the shipped `simd128` artifact.
 
 ```
@@ -211,7 +213,7 @@ gate also runs its own copied-fixture mutation suite, so those self-tests never 
 | same native peak fixture | stale the pinned multiplier from `80` to `1` | measured peak `34,875,248` exceeds `1 × 1,048,576` |
 | `check-web-boot-budget.mjs` (run by `check-web-audioworklet.sh`) | disable the pre-parse projection refusal in the wasm artifact | the refused leg returns live handle `1` where zero is required, before it can report typed `refusedBudget`; the unmutated accepted leg independently pins the wasm high-water mark |
 | `dense_refusal_diagnostics_are_count_bounded_and_finish_under_one_second` | remove the encoder's 64-item `take` | the exact line-count pin sees `16,384` lines instead of `64` (the real tree also keeps the adversarial population below the one-second wall bound) |
-| `maximum_document_dense_invalid_boot_is_typed_and_finishes_under_one_second` | bypass the semantic validator's 64-diagnostic accumulation guard | the production boot still returns its typed automation refusal, but the exact 1,048,576-byte document spends `36.580209774s` materializing every source span and fails the fixed `<1s` wall |
+| `maximum_document_dense_invalid_fixture_reaches_bounded_semantic_validation` / `maximum_document_dense_invalid_boot_is_typed_and_finishes_under_one_second` | restore the schema-invalid empty-object footer, or bypass the semantic validator's 64-diagnostic accumulation guard | the phase oracle rejects any parser diagnostic and requires exactly 64 ordered `automation.invalid_range` paths through segment 63; the production test independently pins the same bounded semantic refusal at the exact 1,048,576-byte document ceiling |
 | `raw_ffi_validates_handle_layout_overflow_and_transactional_failure` (F2/F4) | return address `1` instead of zero for an invalid handle's status answer | whole-structure emptiness fails: `left: 1, right: 0` |
 | same raw lifecycle fixture | skip the live-host check in `boot` | boot-while-live reports `0` instead of typed lifecycle result `3` |
 | `each_boot_option_rule_has_its_own_typed_refusal` | skip the nonzero-`reserved0` check | the invalid option boots and the fixture fails `invalid option must refuse`; the same table independently pins struct size, ABI version, and ring divisibility diagnostics |
@@ -227,7 +229,7 @@ gate also runs its own copied-fixture mutation suite, so those self-tests never 
 
 ## Issue #272 — the qualification session identities
 
-The three `qualification/*.toml` documents declared `content` values minted from the old #241
+The three `qualification/*.json` documents declared `content` values minted from the old #241
 locator names, not from canonical PCM, and nothing read them. `qualification/session-identities.mjs`
 now re-derives each identity from the harness's own exported generator and `run.mjs::main` calls it
 before a browser launches. Every row below was applied to the working tree, then `node
@@ -236,15 +238,15 @@ failure was observed, and the mutation was reverted in the same session.
 
 | Target | Mutation | Observed failure |
 |---|---|---|
-| `session-identities.mjs` console row | flip one hex digit of `console-session.toml`'s declared `content` | `session-identity: console-session.toml: declared source row is not the fed PCM's canonical identity` |
-| `session-identities.mjs` stall row | flip one hex digit of `stall-session.toml`'s declared `content` | same refusal, naming `stall-session.toml` |
-| `session-identities.mjs` observation row | flip one hex digit of `observation-session.toml`'s declared `content` | same refusal, naming `observation-session.toml` |
-| the #272 defect itself | restore the pre-#272 name-minted `sha256("web-browser-console")` on `console-session.toml` | refused; the check states the derived identity the document must carry |
+| `session-identities.mjs` console row | flip one hex digit of `console-session.json`'s declared `content` | `session-identity: console-session.json: declared source row is not the fed PCM's canonical identity` |
+| `session-identities.mjs` stall row | flip one hex digit of `stall-session.json`'s declared `content` | same refusal, naming `stall-session.json` |
+| `session-identities.mjs` observation row | flip one hex digit of `observation-session.json`'s declared `content` | same refusal, naming `observation-session.json` |
+| the #272 defect itself | restore the pre-#272 name-minted `sha256("web-browser-console")` on `console-session.json` | refused; the check states the derived identity the document must carry |
 | cross-document reuse | declare the stall document's identity on the console document | refused; one digest cannot stand for two different fed regions |
-| shape drift | `frames = 5120` -> `5121` on `stall-session.toml` | refused; shape and identity are one pinned row, because the preimage length is `frames * channels * 4` |
+| shape drift | `"frames": "5120"` -> `"5121"` on `stall-session.json` | refused; shape and identity are one pinned row, because the preimage length is `frames * channels * 4` |
 | generator drift | `OBSERVATION_LEVEL` `0.5` -> `0.25` in `qualification.js` | the derived identity moves to `680aca77…` and the unchanged document is refused — a pinned hex string would have stayed green |
 | generator drift | flip the sign of `sourcePlanes`'s right plane | the console identity moves to `7499a91c…` and the unchanged document is refused |
-| stale row beside a truthful one | add a second `content = "sha256:…"` source row to `stall-session.toml` | `expected exactly one source content identity, found 2` |
+| stale row beside a truthful one | add a second `"content": "sha256:…"` source row to `stall-session.json` | `expected exactly one source content identity, found 2` |
 | the check's own comparison | the flipped-digit self-proof inside `checkSessionIdentities` | asserts a one-digit-off identity never matches, so the comparison cannot be loosened into a vacuous pass |
 
 ## Issues #280 and #281 — the qualification harness's artifact pin and its boot options
@@ -290,7 +292,7 @@ run, the failure was observed, and the mutation was reverted in the same session
 |---|---|---|
 | the #281 defect itself | restore `quantumFrames`/`sessionToml`/`limits` on the corpus row | `chromium: browser-execution: corpus qualification failed: {"error":{"tag":"miso.error.v1","requestId":0,"result":1}, …}` — the exact transcript #281 reported. The `diagnostic` leg now answers `miso.ready.v1` result 0 with a full resource report, so the refusal is localized to the caller rather than echoing itself |
 | `bootOptions` completeness | delete `maximumMemoryBytes: 0n` | same typed refusal; the six boot words are not optional |
-| `bootOptions` exactness | leave one #240-deleted ceiling (`sessionTomlBytes: 1 << 20`) in the returned object | same typed refusal; a superset is as invalid as a subset |
+| `bootOptions` exactness | leave one #240-deleted ceiling (`sessionDocumentBytes: 1 << 20`) in the returned object | same typed refusal; a superset is as invalid as a subset |
 
 ### The shipped AudioWorklet artifact digest pin (this change)
 

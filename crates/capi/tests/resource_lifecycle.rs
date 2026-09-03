@@ -145,7 +145,7 @@ fn finish() -> Snapshot {
     snapshot()
 }
 
-const SESSION: &str = include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.toml");
+const SESSION: &str = include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json");
 
 fn limits() -> CompileLimits {
     CompileLimits {
@@ -153,7 +153,7 @@ fn limits() -> CompileLimits {
         source_ring_frames: 1_024,
         maximum_automation_spans_per_block: 128,
         reserved0: 0,
-        maximum_toml_bytes: 1_000_000,
+        maximum_document_bytes: 1_000_000,
         maximum_diagnostic_bytes: 4_096,
         maximum_tracks: 100,
         maximum_sources: 100,
@@ -406,7 +406,7 @@ fn exported_c_candidates_replay_render_and_both_destroy_orders_balance_exactly()
 }
 
 fn scratch_session() -> String {
-    let mut model = session::parse_session_toml(SESSION).expect("oracle fixture");
+    let mut model = session::parse_session_json(SESSION).expect("oracle fixture");
     for track in &mut model.tracks {
         let effect = &mut track.simd1.effects[0];
         effect.id = StableId::parse("soft-clip").expect("effect slot");
@@ -428,7 +428,7 @@ fn scratch_session() -> String {
             },
         ];
     }
-    session::canonical_session_toml(&model).expect("oracle canonical fixture")
+    session::canonical_session_json(&model).expect("oracle canonical fixture")
 }
 
 /// The single-plan resource report of the scratch fixture.
@@ -1105,19 +1105,11 @@ fn owner_total(rows: &[PrimitiveOwner]) -> u64 {
 }
 
 fn fixture_usize(key: &str) -> usize {
-    SESSION
-        .lines()
-        .flat_map(|line| line.split([',', '{', '}']))
-        .find_map(|field| {
-            let (name, value) = field.split_once('=')?;
-            (name.trim() == key).then(|| {
-                value
-                    .trim()
-                    .parse::<usize>()
-                    .expect("fixture numeric field")
-            })
-        })
-        .unwrap_or_else(|| panic!("missing fixture numeric field {key}"))
+    let model = session::parse_session_json(SESSION).expect("oracle fixture");
+    match key {
+        "quantum_frames" => model.quantum_frames as usize,
+        _ => panic!("missing fixture numeric field {key}"),
+    }
 }
 
 fn assert_effective_owner_mutations(rows: &[PrimitiveOwner], production: u64, group: &str) {
@@ -1286,7 +1278,7 @@ fn complete_capi_owners(
             bytes: bytes::<Plan>(1),
         },
         PrimitiveOwner {
-            name: "current canonical TOML",
+            name: "current canonical JSON",
             bytes: current_canonical as u64,
         },
         PrimitiveOwner {
@@ -1310,16 +1302,16 @@ fn complete_capi_owners(
     // thread, and every block after it reads an already-set flag. Eight bytes per live plan handle,
     // once, and no per-block or per-track cost anywhere.
     //
-    // #210 phase 2 re-pin (+342): the active session's canonical TOML row is the fixture's own
+    // #210 phase 2 re-pin (+342): the active session's canonical JSON row is the fixture's own
     // byte count, and every one of its nine tracks gained `", delay_samples = 0"` on both lanes.
     // #241 re-pin (-195): the canonical session is 171 bytes shorter and the session handle's
     // protocol controller shrinks by 24 bytes after its deleted edit variants leave, so
-    // 142_127 - 171 - 24 = 141_932.
-    assert_effective_owner_mutations(&active, 141_932, "active CAPI");
+    // #338: canonical JSON adds 8,082 retained bytes to the active session model.
+    assert_effective_owner_mutations(&active, 150_014, "active CAPI");
 
     let candidate_epoch_rows = [
         PrimitiveOwner {
-            name: "candidate canonical TOML",
+            name: "candidate canonical JSON",
             bytes: candidate_canonical as u64,
         },
         PrimitiveOwner {
@@ -1353,9 +1345,9 @@ fn complete_capi_owners(
     let prepared = owner_total(&prepared_rows);
     // #84 phase B re-pin (+24): `ControlSourceMirror` carries three spsc endpoints, each +8 for
     // its cached peer cursor.
-    // #210 phase 2 re-pin (+342): the candidate's canonical TOML row, same key on the same tracks.
-    // #241 applies the -171 canonical delta to the candidate epoch; it has no controller owner.
-    assert_effective_owner_mutations(&candidate_epoch_rows, 10_624, "candidate CAPI epoch");
+    // #210 phase 2 re-pin (+342): the candidate's canonical JSON row, same key on the same tracks.
+    // #338: canonical JSON adds 8,082 retained bytes to the candidate session model.
+    assert_effective_owner_mutations(&candidate_epoch_rows, 18_706, "candidate CAPI epoch");
     // #241: `PreparedStructuralCommand` loses the same deleted edit payload (-24).
     assert_effective_owner_mutations(&prepared_rows, 13_936, "prepared protocol");
     let largest = active
@@ -1865,7 +1857,8 @@ fn primitive_replacement_oracle(current: &str, prospective: &str) -> PrimitiveRe
     // phase adds no schema key.
     // #241: the two plans lose 4_096 queue + 8_192 ring projection each (-24_576), and the two
     // compiled models each shrink by 200 bytes (-400): 510_720 - 24_576 - 400 = 485_744.
-    assert_effective_owner_mutations(&graph, 485_744, "double-live graph/model");
+    // #338: canonical JSON adds 8,082 retained bytes to each of the two live models.
+    assert_effective_owner_mutations(&graph, 501_908, "double-live graph/model");
 
     let source = source_owners();
     assert_eq!(owner_total(&source), 11_054, "primitive source total");
@@ -1958,8 +1951,8 @@ fn primitive_replacement_oracle(current: &str, prospective: &str) -> PrimitiveRe
             bytes: prepared_protocol,
         },
     ];
-    // #241: 166_882 - (2 x 171 canonical) - 24 controller - 24 prepared edit = 166_492.
-    assert_effective_owner_mutations(&capi_rows, 166_492, "double-live CAPI");
+    // #338: canonical JSON adds 8,082 retained bytes to each live session model.
+    assert_effective_owner_mutations(&capi_rows, 182_656, "double-live CAPI");
 
     let graph_rows = graph_owners();
     // The eight graph-metadata rows begin after the five audio/effect rows. #241 removed the
@@ -2065,7 +2058,7 @@ fn primitive_replacement_oracle(current: &str, prospective: &str) -> PrimitiveRe
 }
 
 unsafe fn compile_c(
-    session_toml: &str,
+    session_document: &str,
     compile_limits: &CompileLimits,
 ) -> (*mut Session, *mut Plan) {
     let config = EngineConfig {
@@ -2093,8 +2086,8 @@ unsafe fn compile_c(
         assert_eq!(
             miso_engine_v1_compile_session(
                 engine,
-                session_toml.as_ptr(),
-                session_toml.len() as u64,
+                session_document.as_ptr(),
+                session_document.len() as u64,
                 compile_limits,
                 &mut diagnostics,
                 &mut session,
@@ -2119,7 +2112,7 @@ unsafe fn resources_c(plan: *const Plan) -> PlanResourceReport {
     }
 }
 
-unsafe fn compile_rejected_c(session_toml: &str, compile_limits: &CompileLimits) {
+unsafe fn compile_rejected_c(session_document: &str, compile_limits: &CompileLimits) {
     let config = EngineConfig {
         struct_size: ENGINE_CONFIG_SIZE,
         abi_version: ABI_VERSION,
@@ -2145,8 +2138,8 @@ unsafe fn compile_rejected_c(session_toml: &str, compile_limits: &CompileLimits)
         assert_eq!(
             miso_engine_v1_compile_session(
                 engine,
-                session_toml.as_ptr(),
-                session_toml.len() as u64,
+                session_document.as_ptr(),
+                session_document.len() as u64,
                 compile_limits,
                 &mut diagnostics,
                 &mut session,
@@ -2243,25 +2236,20 @@ fn render_diagnostic_egress_reuses_eager_capi_storage_without_allocation() {
 
 #[test]
 fn external_primitive_double_live_oracle_drives_exact_and_one_below_c_caps() {
-    let session_toml = scratch_session();
-    let prospective_toml = session_toml.replacen(
-        "session_id = \"parametric-eq-nine-track\"",
-        "session_id = \"double-live-cap\"",
+    let session_document = scratch_session();
+    let prospective_document = session_document.replacen(
+        "\"session_id\": \"parametric-eq-nine-track\"",
+        "\"session_id\": \"double-live-cap\"",
         1,
     );
-    // #241 re-pin: deleting limits/rate/locator/mapping/region and flattening the source removes
-    // exactly 171 bytes from both documents; the session-ID replacement still removes 9 more.
+    // #338 re-pin: the canonical JSON fixture is exact; the session-ID replacement removes 9.
+    assert_eq!(session_document.len(), 18_453, "current canonical fixture");
     assert_eq!(
-        session_toml.len(),
-        10_542 - 171,
-        "current canonical fixture"
-    );
-    assert_eq!(
-        prospective_toml.len(),
-        10_533 - 171,
+        prospective_document.len(),
+        18_444,
         "prospective canonical fixture"
     );
-    let oracle = primitive_replacement_oracle(&session_toml, &prospective_toml);
+    let oracle = primitive_replacement_oracle(&session_document, &prospective_document);
     // Issue #181: `size_of::<GraphPreparedEffectBank>()` went 88 -> 96, the fixture binds one
     // bank, and this oracle is double-live -- so +16 here and +8 in the single-plan report. The
     // live oracle and the primitive model both move, which is the property this pair of pins
@@ -2269,15 +2257,14 @@ fn external_primitive_double_live_oracle_drives_exact_and_one_below_c_caps() {
     // #210 phase 3: +2_688, the two input banks' growth over two live plans. See
     // `primitive_replacement_oracle` for the per-bank arithmetic.
     // #241: 510_720 - 2 x (4_096 queue + 8_192 ring) - 2 x 200 = 485_744.
-    assert_eq!(oracle.graph, 485_744);
+    assert_eq!(oracle.graph, 501_908);
     assert_eq!(oracle.source_total, 22_108);
     assert_eq!(oracle.source_overhead, 5_724);
     assert_eq!(oracle.effect_state, 15_120);
     assert_eq!(oracle.effect_scratch, 432);
     // #210 phase 3: 2 x 9_963 (see `builtin_owners`).
     assert_eq!(oracle.builtin, 19_926);
-    // #241: 166_882 - (2 x 171 canonical) - 24 controller - 24 prepared edit = 166_492.
-    assert_eq!(oracle.capi, 166_492);
+    assert_eq!(oracle.capi, 182_656);
     // #241: 58_694 - (29 x 10 locator) + (40 x 10 content identity) = 58_804.
     assert_eq!(oracle.largest, 58_804);
 
@@ -2308,8 +2295,8 @@ fn external_primitive_double_live_oracle_drives_exact_and_one_below_c_caps() {
         set_cap(&mut exact_limits, required);
         // SAFETY: These handles are uniquely owned until their matching destroy calls.
         unsafe {
-            let (session, plan) = compile_c(&session_toml, &exact_limits);
-            assert_eq!(resources_c(plan), frozen_scratch_report(141_932));
+            let (session, plan) = compile_c(&session_document, &exact_limits);
+            assert_eq!(resources_c(plan), frozen_scratch_report(150_014));
             let request = command(1, 42, "double-live-cap");
             let mut response = [0xa5_u8; 4_096];
             assert_eq!(submit(session, &request, &mut response), RESULT_OK, "{row}");
@@ -2328,7 +2315,7 @@ fn external_primitive_double_live_oracle_drives_exact_and_one_below_c_caps() {
                 RESULT_OK
             );
             // The prospective session ID is nine bytes shorter than the current one.
-            assert_eq!(resources_c(plan), frozen_scratch_report(141_932 - 9));
+            assert_eq!(resources_c(plan), frozen_scratch_report(150_014 - 9));
             miso_engine_v1_session_destroy(session);
             miso_engine_v1_plan_destroy(plan);
         }
@@ -2339,12 +2326,12 @@ fn external_primitive_double_live_oracle_drives_exact_and_one_below_c_caps() {
             // The same named compiled-model owner is already live during initial construction,
             // so one-below is atomically rejected before either child handle can be published.
             // SAFETY: The helper owns every handle through rejection and destroys the engine.
-            unsafe { compile_rejected_c(&session_toml, &below_limits) };
+            unsafe { compile_rejected_c(&session_document, &below_limits) };
             continue;
         }
         // SAFETY: These handles are uniquely owned until their matching destroy calls.
         unsafe {
-            let (session, plan) = compile_c(&session_toml, &below_limits);
+            let (session, plan) = compile_c(&session_document, &below_limits);
             let before = resources_c(plan);
             let request = command(1, 42, "double-live-cap");
             let mut response = [0xa5_u8; 4_096];

@@ -47,7 +47,7 @@ export type PerLane<T> = T | Readonly<{ left: T; right: T }> | readonly [left: T
 /**
  * The closed source bit-depth token set.
  *
- * Integer `16`, integer `24`, and the *string* `"32f"` -- three tokens, two TOML types. That
+ * Integer `16`, integer `24`, and the *string* `"32f"` -- three tokens, two JSON types. That
  * asymmetry is the schema's (`docs/SESSION_SCHEMA_V1.md`: "the canonical writer preserves those
  * spellings"), and adopted-ruling finding 6 binds the SDK's types, builder and
  * `assertSameSession` to carry the whole set rather than the convenient numeric half.
@@ -70,7 +70,7 @@ export interface SourceSpec {
   readonly channels: 1 | 2;
   readonly bitDepth: BitDepth;
   /** Full canonical content length in frames, beginning at frame zero. Nonzero. */
-  readonly frames: number;
+  readonly frames: number | bigint;
   /** `sha256:` followed by exactly 64 lowercase hex digits. */
   readonly content: string;
 }
@@ -210,8 +210,8 @@ export type AutomationShape = "step" | "linear" | "exponential";
  */
 export interface AutomationSegment {
   readonly shape: AutomationShape;
-  readonly startSample: bigint;
-  readonly endSample: bigint;
+  readonly startSample: number | bigint;
+  readonly endSample: number | bigint;
   readonly startValue: number;
   readonly endValue: number;
 }

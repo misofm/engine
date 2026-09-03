@@ -40,7 +40,7 @@ ABI_ASSERT(_Alignof(miso_engine_v1_planar_output) == 8);
 ABI_ASSERT(_Alignof(miso_engine_v1_capabilities) == 8);
 ABI_ASSERT(_Alignof(miso_engine_v1_plan_resource_report) == 8);
 
-ABI_ASSERT(offsetof(miso_engine_v1_compile_limits, maximum_toml_bytes) == 16);
+ABI_ASSERT(offsetof(miso_engine_v1_compile_limits, maximum_document_bytes) == 16);
 ABI_ASSERT(offsetof(miso_engine_v1_compile_limits, maximum_replay_entries) == 168);
 ABI_ASSERT(offsetof(miso_engine_v1_compile_limits, reserved) == 176);
 ABI_ASSERT(offsetof(miso_engine_v1_bytes_out, data) == 8);

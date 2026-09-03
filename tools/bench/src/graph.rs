@@ -20,13 +20,13 @@ use graph::{GraphCompileCaps, GraphResourceEstimate};
 use graph_compiler::{GraphCompileRequest, GraphCompiler};
 use session::{
     ChannelMatrix, CompileCaps, CompiledSession, EffectIdentity, EffectParam, ParameterChannel,
-    ParameterUnit, Route, RouteDestination, RouteSource, SendTap, SessionToml, Sidechain,
-    SidechainDeclaration, StableId, Submix, canonical_session_toml, compile_session,
-    parse_session_toml,
+    ParameterUnit, Route, RouteDestination, RouteSource, SendTap, SessionModel, Sidechain,
+    SidechainDeclaration, StableId, Submix, canonical_session_json, compile_session,
+    parse_session_json,
 };
 use sha2::{Digest, Sha256};
 
-const SEED: &str = include_str!("../../../fixtures/session/v1/canonical.toml");
+const SEED: &str = include_str!("../../../fixtures/session/v1/canonical.json");
 const ROUNDS: u8 = 2;
 
 #[derive(Clone, Copy)]
@@ -124,7 +124,7 @@ pub(crate) fn main() {
 }
 
 fn representative_fixture() -> Fixture {
-    let mut model = parse_session_toml(SEED).expect("seed session");
+    let mut model = parse_session_json(SEED).expect("seed session");
     let track_template = model.tracks.pop().expect("seed track");
     let route_template = model.routes.pop().expect("seed route");
     model.automation.clear();
@@ -211,7 +211,7 @@ fn representative_fixture() -> Fixture {
 }
 
 fn scale_fixture() -> Fixture {
-    let mut model = parse_session_toml(SEED).expect("seed session");
+    let mut model = parse_session_json(SEED).expect("seed session");
     let mut template = model.tracks[0].clone();
     template.simd1.effects.clear();
     template.dynamic.effects.clear();
@@ -233,7 +233,7 @@ fn scale_fixture() -> Fixture {
     fixture("scale-sparse", model)
 }
 
-fn fixture(label: &'static str, model: SessionToml) -> Fixture {
+fn fixture(label: &'static str, model: SessionModel) -> Fixture {
     let tracks = model.tracks.len();
     let routes = model.routes.len();
     let submixes = model.submixes.len();
@@ -250,7 +250,7 @@ fn fixture(label: &'static str, model: SessionToml) -> Fixture {
         .flat_map(|track| &track.dynamic.effects)
         .filter(|effect| matches!(effect.sidechain, SidechainDeclaration::Routed(_)))
         .count();
-    let canonical = canonical_session_toml(&model).expect("canonical benchmark fixture");
+    let canonical = canonical_session_json(&model).expect("canonical benchmark fixture");
     let session = compile_session(&model, unlimited_session_caps()).expect("benchmark session");
     Fixture {
         label,

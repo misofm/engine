@@ -36,7 +36,7 @@ use graph::{
 use graph_compiler::{GraphBuiltinsCompileRequest, GraphCompiler};
 use session::{
     ChannelMatrix, CompileCaps, EffectIdentity, RouteSource, SendTap, StableId, compile_session,
-    parse_session_toml,
+    parse_session_json,
 };
 
 const BLOCKS: u64 = 1_000_000;
@@ -465,7 +465,7 @@ fn prepare_graph_plan(
     plan_id: u64,
     drops: Option<DropRecords>,
 ) -> (engine::realtime::PreparedRenderPlan, Vec<MeterConsumer>) {
-    let mut model = parse_session_toml(include_str!("../../../fixtures/session/v1/canonical.toml"))
+    let mut model = parse_session_json(include_str!("../../../fixtures/session/v1/canonical.json"))
         .expect("canonical session");
     let mut fixture_effect = model.tracks[0].dynamic.effects[0].clone();
     fixture_effect.identity = EffectIdentity::Native {

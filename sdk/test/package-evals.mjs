@@ -40,6 +40,21 @@ import * as writer from "../src/core/writer.ts";
 const SDK_ROOT = resolve(import.meta.dirname, "..");
 
 describe("package entry points", () => {
+  test("the internal canonical serializer is absent from every public runtime barrel", () => {
+    for (const [name, barrel] of Object.entries({
+      root: rootBarrel,
+      headless: headlessBarrel,
+      browser: browserBarrel,
+    })) {
+      assert.equal("canonicalSessionJson" in barrel, false, `${name} leaked canonicalSessionJson`);
+      assert.equal(
+        "writeCanonicalSessionDocument" in barrel,
+        false,
+        `${name} leaked the internal canonical serializer`,
+      );
+    }
+  });
+
   test("every declared code subpath names emitted ESM and declarations", async () => {
     const manifest = JSON.parse(await readFile(resolve(SDK_ROOT, "package.json"), "utf8"));
     const subpaths = Object.entries(manifest.exports);

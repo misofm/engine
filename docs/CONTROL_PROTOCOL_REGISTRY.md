@@ -23,7 +23,7 @@ Status IDs are: `0` OK, `1` malformed frame, `2` unsupported version, `3` unsupp
 | ID | Command fields | Success response fields |
 | ---: | --- | --- |
 | `0001` | empty, revision-any | v1 min/max, effective frame/TLV/string/depth limits, batch/page/transaction limits, all queue/replay caps, density/quantum, packed command/event IDs, capability flags |
-| `0002` | `1:offset U64 R`, `2:max-bytes U32 R` | `1:total U64 R`, `2:offset U64 R`, `3:canonical-TOML BYTES R`, `4:eof BOOL R` |
+| `0002` | `1:offset U64 R`, `2:max-bytes U32 R` | `1:total U64 R`, `2:offset U64 R`, `3:canonical-JSON BYTES R`, `4:eof BOOL R` |
 | `0003` | `1:SessionEdit MESSAGE R*`; exact revision, nonempty | `1:applied-operations U32 R` |
 | `0004` | `1:after-handle U32 R`, `2:limit U16 R` | `1:last-handle U32 R`, `2:eof BOOL R`, `3:ParameterDescriptor MESSAGE R*` |
 | `0005` | `1:handles PACKED_U32 R` (1–256 sorted unique nonzero) | observed sample `1:U64 R`, count `2:U16 R`, stride `3:U16=16 R`, records `4:BYTES R` |
@@ -69,6 +69,6 @@ An automation record is exactly 32 bytes: `kind:u8, flags:u8=0, reserved:u16=0, 
 | `0500`–`0505` | upsert/remove route; set source/destination/matrix/gain | route or route ID plus the respective replacement |
 | `0600`–`0603` | upsert/remove automation; set target/segments | automation or automation ID plus target; ordered repeated segment |
 
-There are exactly 39 allocated opcodes. Issue #241 retired three: `0006` (set limits), `0102` (set source sample rate) and `0104` (set source mapping), whose subjects left the schema with the `limits` table and the nested source mapping/region. Retired codes are **never reallocated** -- a v1 peer that spells one must be refused, not reinterpreted, which is why `SessionEditOpcode::from_raw` returns `None` for them and a conformance row pins that. A successful atomic transaction replaces the typed `SessionToml`, immutable control-plane `CompiledSession`, and revision together; its canonical snapshot is the committed `SessionToml`, never a compiled/render-plan serialization.
+There are exactly 39 allocated opcodes. Issue #241 retired three: `0006` (set limits), `0102` (set source sample rate) and `0104` (set source mapping), whose subjects left the schema with the `limits` table and the nested source mapping/region. Retired codes are **never reallocated** -- a v1 peer that spells one must be refused, not reinterpreted, which is why `SessionEditOpcode::from_raw` returns `None` for them and a conformance row pins that. A successful atomic transaction replaces the typed `SessionModel`, immutable control-plane `CompiledSession`, and revision together; its canonical snapshot is the committed canonical JSON, never a compiled/render-plan serialization.
 
 The nested model registry is: render/output profile `1:id,2:mode/channels,3:sample-format`; source `1:id,2:content,3:channels,4:bit-depth,5:frames`; track `1:id,2:source,3/4:channels,5:builtins,6/7/8:racks,9:fader,10:matrix/pan`; effect `1:id,2:identity,3:quality,4:bypass,5:link-mode,6*:parameter,7:sidechain`; route `1:id,2:source,3:destination,4:matrix,5:gain`; automation `1:id,2:target,3*:segment`. Tagged nested values use field `1:kind`; unknown enum/tag values reject and allocated codes never renumber within v1.

@@ -20,7 +20,7 @@ const SAMPLE_RATE_HZ: u32 = 48_000;
 const QUANTUM_FRAMES: u32 = 128;
 
 /// The fixture the browser harness compiles, verbatim.
-const SESSION_TOML: &str = include_str!("../tests/browser-v1/session.toml");
+const SESSION_DOCUMENT: &str = include_str!("../tests/browser-v1/session.json");
 
 fn main() {
     let options = WebBootOptions {
@@ -29,10 +29,9 @@ fn main() {
         source_ring_frames: QUANTUM_FRAMES,
         ..WebBootOptions::explicit_defaults()
     };
-    let host =
-        AudioWorkletEngineHost::boot(SESSION_TOML.as_bytes(), options).unwrap_or_else(|failure| {
-            panic!("boot: {}", String::from_utf8_lossy(failure.diagnostic()))
-        });
+    let host = AudioWorkletEngineHost::boot(SESSION_DOCUMENT.as_bytes(), options).unwrap_or_else(
+        |failure| panic!("boot: {}", String::from_utf8_lossy(failure.diagnostic())),
+    );
 
     // Printed in the JSON shape and the key spelling `expected.json` uses, u64 rows as strings,
     // so the gate compares the two documents without a per-row translation table.
@@ -40,7 +39,7 @@ fn main() {
     let rows: [(&str, u64); 21] = [
         ("optionsBytes", report.options_bytes),
         ("statusBytes", report.status_bytes),
-        ("sessionTomlBytes", report.session_toml_bytes),
+        ("sessionDocumentBytes", report.session_document_bytes),
         ("diagnosticBytes", report.diagnostic_bytes),
         ("sourceIdBytes", report.source_id_bytes),
         ("sourcePcmStagingBytes", report.source_pcm_staging_bytes),

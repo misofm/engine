@@ -28,7 +28,7 @@ use lane::Backend;
 use rack::RackLocation;
 use session::{
     CompileCaps, EffectIdentity, EffectParam, ParameterChannel, ParameterUnit, RouteSource,
-    SendTap, Sidechain, SidechainDeclaration, StableId, compile_session, parse_session_toml,
+    SendTap, Sidechain, SidechainDeclaration, StableId, compile_session, parse_session_json,
 };
 
 const SAMPLE_RATE_HZ: u32 = 48_000;
@@ -336,7 +336,7 @@ struct MixedRuntime {
 impl MixedRuntime {
     fn new(backend: Backend) -> Self {
         let mut model =
-            parse_session_toml(include_str!("../../../fixtures/session/v1/canonical.toml"))
+            parse_session_json(include_str!("../../../fixtures/session/v1/canonical.json"))
                 .expect("canonical session");
         let template = model.tracks[0].clone();
         let route = model.routes[0].clone();

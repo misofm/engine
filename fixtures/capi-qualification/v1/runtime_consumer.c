@@ -20,7 +20,7 @@ QUAL_ASSERT(sizeof(miso_engine_v1_plan_resource_report) ==
 QUAL_ASSERT(offsetof(miso_engine_v1_engine_config, struct_size) == 0);
 QUAL_ASSERT(offsetof(miso_engine_v1_engine_config, abi_version) == 4);
 QUAL_ASSERT(offsetof(miso_engine_v1_engine_config, reserved) == 8);
-QUAL_ASSERT(offsetof(miso_engine_v1_compile_limits, maximum_toml_bytes) == 16);
+QUAL_ASSERT(offsetof(miso_engine_v1_compile_limits, maximum_document_bytes) == 16);
 QUAL_ASSERT(offsetof(miso_engine_v1_compile_limits, maximum_capi_retained_bytes) == 112);
 QUAL_ASSERT(offsetof(miso_engine_v1_compile_limits, maximum_replay_entries) == 168);
 QUAL_ASSERT(offsetof(miso_engine_v1_compile_limits, reserved) == 176);
@@ -56,7 +56,7 @@ static miso_engine_v1_compile_limits limits(void) {
     value.struct_size = MISO_ENGINE_V1_COMPILE_LIMITS_SIZE;
     value.source_ring_frames = 1024;
     value.maximum_automation_spans_per_block = 128;
-    value.maximum_toml_bytes = UINT64_C(1000000);
+    value.maximum_document_bytes = UINT64_C(1000000);
     value.maximum_diagnostic_bytes = 4096;
     value.maximum_tracks = 100;
     value.maximum_sources = 100;
@@ -101,7 +101,7 @@ static uint8_t *read_file(const char *path, size_t *size) {
     return bytes;
 }
 
-static int qualify_one(const uint8_t *toml, size_t toml_bytes, int plan_first) {
+static int qualify_one(const uint8_t *document, size_t document_bytes, int plan_first) {
     miso_engine_v1_engine_config config = QUAL_ZERO;
     miso_engine_v1_engine *engine = NULL;
     miso_engine_v1_session *session = NULL;
@@ -142,7 +142,7 @@ static int qualify_one(const uint8_t *toml, size_t toml_bytes, int plan_first) {
     if (miso_engine_v1_engine_create(&config, &engine) != MISO_ENGINE_V1_OK || engine == NULL) {
         return 11;
     }
-    if (miso_engine_v1_compile_session(engine, toml, (uint64_t)toml_bytes, &compile_limits,
+    if (miso_engine_v1_compile_session(engine, document, (uint64_t)document_bytes, &compile_limits,
                                        &diagnostics, &session, &plan) != MISO_ENGINE_V1_OK ||
         session == NULL || plan == NULL) {
         miso_engine_v1_engine_destroy(engine);
@@ -229,8 +229,8 @@ static int qualify_one(const uint8_t *toml, size_t toml_bytes, int plan_first) {
 
 int main(int argc, char **argv) {
     miso_engine_v1_capabilities capabilities = QUAL_ZERO;
-    uint8_t *toml;
-    size_t toml_bytes = 0;
+    uint8_t *document;
+    size_t document_bytes = 0;
     int first;
     int second;
     if (argc != 2 || miso_engine_v1_abi_version() != MISO_ENGINE_V1_ABI_VERSION) {
@@ -243,12 +243,12 @@ int main(int argc, char **argv) {
         capabilities.feature_mask != MISO_ENGINE_V1_FEATURE_MASK) {
         return 2;
     }
-    toml = read_file(argv[1], &toml_bytes);
-    if (toml == NULL) {
+    document = read_file(argv[1], &document_bytes);
+    if (document == NULL) {
         return 3;
     }
-    first = qualify_one(toml, toml_bytes, 1);
-    second = qualify_one(toml, toml_bytes, 0);
-    free(toml);
+    first = qualify_one(document, document_bytes, 1);
+    second = qualify_one(document, document_bytes, 0);
+    free(document);
     return first != 0 ? first : second;
 }

@@ -2,7 +2,7 @@
 """One session-map shape, proved across every file that spells it (issue #207).
 
 Before issue #207 the browser ABI exposed track discovery and nothing at all about sources, so a
-headless consumer compiling raw session TOML could not learn which sources a session declares, how
+headless consumer compiling a raw session document could not learn which sources a session declares, how
 many channels each carries, or which frames it is waiting for -- it could not drive the render loop
 it had just compiled. The introspection queries close that, and closing it means the same shape is
 now written out in five places:

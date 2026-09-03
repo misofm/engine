@@ -1781,7 +1781,7 @@ mod tests {
     use std::io::{self, Cursor, SeekFrom};
 
     use crate::{HostPlanarChunk, PcmSourceRing, QuantumFrames, SourceReadReport};
-    use session::{CompileCaps, StableId, compile_session, parse_session_toml};
+    use session::{CompileCaps, StableId, compile_session, parse_session_json};
 
     const SESSION_CONTENT: &[u8] =
         b"sha256:2a97516c354b68848cdbd8f54a226a0a55b21ed138e207ad6c5cbb9c00aa5aea";
@@ -1925,7 +1925,7 @@ mod tests {
 
     fn compiled_source_session() -> CompiledSession {
         let mut session =
-            parse_session_toml(include_str!("../../../fixtures/session/v1/canonical.toml"))
+            parse_session_json(include_str!("../../../fixtures/session/v1/canonical.json"))
                 .expect("session");
         session.sources[0].frames = 4;
         compile_session(
@@ -2992,15 +2992,15 @@ mod tests {
 
     #[test]
     fn compiled_multi_source_session_uses_one_exact_shared_worker() {
-        let mut session_toml =
-            parse_session_toml(include_str!("../../../fixtures/session/v1/canonical.toml"))
+        let mut session_model =
+            parse_session_json(include_str!("../../../fixtures/session/v1/canonical.json"))
                 .expect("session");
-        session_toml.sources[0].frames = 4;
-        let mut second = session_toml.sources[0].clone();
+        session_model.sources[0].frames = 4;
+        let mut second = session_model.sources[0].clone();
         second.id = StableId::parse("voice2").expect("second source ID");
-        session_toml.sources.push(second);
+        session_model.sources.push(second);
         let session = compile_session(
-            &session_toml,
+            &session_model,
             CompileCaps {
                 max_compiled_model_bytes: u64::MAX,
                 max_requested_runtime_bytes: u64::MAX,
@@ -3099,23 +3099,23 @@ mod tests {
             }
         }
 
-        let mut session_toml =
-            parse_session_toml(include_str!("../../../fixtures/session/v1/canonical.toml"))
+        let mut session_model =
+            parse_session_json(include_str!("../../../fixtures/session/v1/canonical.json"))
                 .expect("session");
-        session_toml.sources[0].frames = REGION_FRAMES;
-        let source_template = session_toml.sources[0].clone();
-        let track_template = session_toml.tracks[0].clone();
+        session_model.sources[0].frames = REGION_FRAMES;
+        let source_template = session_model.sources[0].clone();
+        let track_template = session_model.tracks[0].clone();
         for index in 1..SOURCE_COUNT {
             let mut source = source_template.clone();
             source.id = StableId::parse(&format!("voice{index}")).expect("unique source stable ID");
             let mut track = track_template.clone();
             track.id = StableId::parse(&format!("vocal{index}")).expect("unique track stable ID");
             track.source_id = source.id.clone();
-            session_toml.sources.push(source);
-            session_toml.tracks.push(track);
+            session_model.sources.push(source);
+            session_model.tracks.push(track);
         }
         let session = compile_session(
-            &session_toml,
+            &session_model,
             CompileCaps {
                 max_compiled_model_bytes: u64::MAX,
                 max_requested_runtime_bytes: u64::MAX,
@@ -3952,15 +3952,15 @@ mod tests {
 
     #[test]
     fn compiled_sourceless_session_returns_collection_diagnostic_without_resolving() {
-        let mut session_toml =
-            parse_session_toml(include_str!("../../../fixtures/session/v1/canonical.toml"))
+        let mut session_model =
+            parse_session_json(include_str!("../../../fixtures/session/v1/canonical.json"))
                 .expect("session");
-        session_toml.automation.clear();
-        session_toml.routes.clear();
-        session_toml.tracks.clear();
-        session_toml.sources.clear();
+        session_model.automation.clear();
+        session_model.routes.clear();
+        session_model.tracks.clear();
+        session_model.sources.clear();
         let session = compile_session(
-            &session_toml,
+            &session_model,
             CompileCaps {
                 max_compiled_model_bytes: u64::MAX,
                 max_requested_runtime_bytes: u64::MAX,
@@ -3994,18 +3994,18 @@ mod tests {
 
     #[test]
     fn compiled_session_source_failure_collects_sorted_diagnostics_before_worker_start() {
-        let mut session_toml =
-            parse_session_toml(include_str!("../../../fixtures/session/v1/canonical.toml"))
+        let mut session_model =
+            parse_session_json(include_str!("../../../fixtures/session/v1/canonical.json"))
                 .expect("session");
-        session_toml.sources[0].frames = 4;
-        let mut second = session_toml.sources[0].clone();
+        session_model.sources[0].frames = 4;
+        let mut second = session_model.sources[0].clone();
         second.id = StableId::parse("voice2").expect("ID");
         let mut third = second.clone();
         third.id = StableId::parse("alpha").expect("ID");
-        session_toml.sources.push(second);
-        session_toml.sources.push(third);
+        session_model.sources.push(second);
+        session_model.sources.push(third);
         let session = compile_session(
-            &session_toml,
+            &session_model,
             CompileCaps {
                 max_compiled_model_bytes: u64::MAX,
                 max_requested_runtime_bytes: u64::MAX,

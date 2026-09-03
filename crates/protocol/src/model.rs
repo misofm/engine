@@ -1,6 +1,6 @@
 //! Typed session edits and the transactional control-plane session store.
 //!
-//! These edits operate on the accepted issue-004 `SessionToml` model. They neither prepare nor
+//! These edits operate on the accepted issue-004 `SessionModel` model. They neither prepare nor
 //! publish a render plan; a successful replacement retains only issue-004's immutable,
 //! non-publishable `CompiledSession` control-plane artifact.
 
@@ -10,7 +10,7 @@ use session::{
     Automation, AutomationSegment, AutomationTarget, ChannelMatrix, CompileCaps, CompiledSession,
     DualMonoBuiltins, DualMonoFader, Effect, EffectIdentity, EffectParam, EffectQuality,
     MatrixOrPan, Output, OutputProfile, Rack, RackName, RenderProfile, Route, RouteDestination,
-    RouteSource, SessionToml, SidechainDeclaration, Source, SourceBitDepth, StableId, Submix,
+    RouteSource, SessionModel, SidechainDeclaration, Source, SourceBitDepth, StableId, Submix,
     compile_session,
 };
 
@@ -440,7 +440,7 @@ impl std::error::Error for SessionEditError {}
 /// Apply one edit to a caller-owned candidate model. This does not validate or compile the
 /// candidate: [`SessionStore::apply_transaction`] does both atomically after all edits resolve.
 pub fn apply_session_edit(
-    session: &mut SessionToml,
+    session: &mut SessionModel,
     edit: &SessionEdit,
 ) -> Result<(), SessionEditError> {
     match edit {
@@ -776,7 +776,7 @@ pub struct SessionStore {
 
 impl SessionStore {
     /// Compile the first authoritative typed model under fixed control-plane compiler caps.
-    pub fn new(initial: SessionToml, caps: CompileCaps) -> Result<Self, session::DiagnosticSet> {
+    pub fn new(initial: SessionModel, caps: CompileCaps) -> Result<Self, session::DiagnosticSet> {
         Ok(Self {
             compiled: compile_session(&initial, caps)?,
             caps,
@@ -798,7 +798,7 @@ impl SessionStore {
     /// Borrow the exact canonical snapshot cached by issue-004 compilation.
     #[must_use]
     pub fn canonical_snapshot(&self) -> &str {
-        self.compiled.canonical_toml()
+        self.compiled.canonical_json()
     }
 
     /// Resolve every edit in wire order, compile the final candidate, and atomically retain it.
@@ -829,12 +829,9 @@ impl SessionStore {
         if edits.is_empty() {
             return Err(SessionStoreError::EmptyTransaction);
         }
-        // The session schema bounds every u64 field to `i64::MAX`, so that value -- not
-        // `u64::MAX` -- is the maximum revision a compiled session can hold.
         let next_revision = current
             .0
             .checked_add(1)
-            .filter(|revision| *revision <= i64::MAX as u64)
             .ok_or(SessionStoreError::RevisionExhausted)?;
         let mut candidate = self.compiled.normalized_model().clone();
         for (operation_index, edit) in edits.iter().enumerate() {
@@ -896,7 +893,7 @@ fn remove<T>(
 }
 
 fn source_mut<'a>(
-    session: &'a mut SessionToml,
+    session: &'a mut SessionModel,
     id: &StableId,
 ) -> Result<&'a mut Source, SessionEditError> {
     session
@@ -907,7 +904,7 @@ fn source_mut<'a>(
 }
 
 fn track_mut<'a>(
-    session: &'a mut SessionToml,
+    session: &'a mut SessionModel,
     id: &StableId,
 ) -> Result<&'a mut session::Track, SessionEditError> {
     session
@@ -918,7 +915,7 @@ fn track_mut<'a>(
 }
 
 fn route_mut<'a>(
-    session: &'a mut SessionToml,
+    session: &'a mut SessionModel,
     id: &StableId,
 ) -> Result<&'a mut Route, SessionEditError> {
     session
@@ -929,7 +926,7 @@ fn route_mut<'a>(
 }
 
 fn automation_mut<'a>(
-    session: &'a mut SessionToml,
+    session: &'a mut SessionModel,
     id: &StableId,
 ) -> Result<&'a mut Automation, SessionEditError> {
     session
@@ -964,7 +961,7 @@ fn rack_mut(
 }
 
 fn effect_mut<'a>(
-    session: &'a mut SessionToml,
+    session: &'a mut SessionModel,
     track_id: &StableId,
     rack_name: RackName,
     effect_id: &StableId,
@@ -979,12 +976,12 @@ fn effect_mut<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use session::{ParameterChannel, ParameterUnit, canonical_session_toml, parse_session_toml};
+    use session::{ParameterChannel, ParameterUnit, canonical_session_json, parse_session_json};
 
-    const EXAMPLE: &str = include_str!("../../../fixtures/session/v1/canonical.toml");
+    const EXAMPLE: &str = include_str!("../../../fixtures/session/v1/canonical.json");
 
-    /// Largest revision a session may declare: the schema bounds u64 fields to `i64::MAX`.
-    const MAX_SESSION_REVISION: u64 = i64::MAX as u64;
+    /// Largest revision a session may declare under the canonical decimal-string u64 contract.
+    const MAX_SESSION_REVISION: u64 = u64::MAX;
 
     fn caps() -> CompileCaps {
         CompileCaps {
@@ -998,7 +995,7 @@ mod tests {
     }
 
     fn store() -> SessionStore {
-        SessionStore::new(parse_session_toml(EXAMPLE).expect("fixture"), caps()).expect("compile")
+        SessionStore::new(parse_session_json(EXAMPLE).expect("fixture"), caps()).expect("compile")
     }
 
     fn id(value: &str) -> StableId {
@@ -1023,14 +1020,14 @@ mod tests {
         assert_ne!(store.canonical_snapshot(), expected_snapshot);
         assert_eq!(
             store.canonical_snapshot(),
-            canonical_session_toml(store.compiled().normalized_model()).expect("canonical")
+            canonical_session_json(store.compiled().normalized_model()).expect("canonical")
         );
     }
 
     #[test]
     fn every_launch_rate_initializes_store_and_commits_as_the_final_candidate() {
         for rate in engine::LAUNCH_SAMPLE_RATES {
-            let mut initial = parse_session_toml(EXAMPLE).expect("fixture");
+            let mut initial = parse_session_json(EXAMPLE).expect("fixture");
             initial.sample_rate_hz = rate.0;
             let mut store = SessionStore::new(initial, caps()).expect("launch store");
             let revision = store.revision();
@@ -1181,7 +1178,7 @@ mod tests {
 
     #[test]
     fn any_and_maximum_revision_are_rejected_without_replacement() {
-        let mut model = parse_session_toml(EXAMPLE).expect("fixture");
+        let mut model = parse_session_json(EXAMPLE).expect("fixture");
         model.revision = MAX_SESSION_REVISION;
         let mut store = SessionStore::new(model, caps()).expect("max revision compiles");
         let before = store.canonical_snapshot().to_owned();

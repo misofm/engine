@@ -107,37 +107,49 @@ fn scalar_after(document: &str, after: &str, name: &str) -> u64 {
 /// a real address to resolve against.
 fn one_effect_session(effect_id: &str) -> String {
     format!(
-        "schema_version = 1\n\
-         session_id = \"abi-layout\"\n\
-         revision = 1\n\
-         sample_rate_hz = 48000\n\
-         quantum_frames = 128\n\
-         render_profile = {{ id = \"native\", mode = \"single_thread\" }}\n\
-         output_profile = {{ id = \"main\", channels = 2, sample_format = \"f32_planar\" }}\n\
-         sources = [{{ id = \"s\", content = \"sha256:{}\", channels = 2, bit_depth = 24, \
-         frames = 48000 }}]\n\
-         submixes = []\n\
-         outputs = [{{ id = \"out\" }}]\n\
-         routes = [{{ id = \"r\", source = {{ kind = \"track\", track_id = \"t\", \
-         tap = \"post_matrix\" }}, destination = {{ kind = \"output_input\", output_id = \"out\" }}, \
-         channel_matrix = {{ ll = 1.0, lr = 0.0, rl = 0.0, rr = 1.0 }}, gain_db = 0.0 }}]\n\
-         automation = []\n\
-         \n\
-         [[tracks]]\n\
-         id = \"t\"\n\
-         source_id = \"s\"\n\
-         left_source_channel = 0\n\
-         right_source_channel = 1\n\
-         builtins = {{ left = {{ polarity_invert = false, trim_db = 0.0, hpf_hz = 0.0, \
-         lpf_hz = 0.0, delay_samples = 0 }}, right = {{ polarity_invert = false, trim_db = 0.0, \
-         hpf_hz = 0.0, lpf_hz = 0.0, delay_samples = 0 }} }}\n\
-         simd1 = {{ effects = [] }}\n\
-         dynamic = {{ effects = [{{ id = \"e\", identity = {{ kind = \"native\", \
-         effect_id = \"{effect_id}\" }}, quality = \"normal\", bypass = false, \
-         link_mode = \"dual_mono\", params = [], sidechain = {{ kind = \"none\" }} }}] }}\n\
-         simd2 = {{ effects = [] }}\n\
-         fader = {{ left_db = 0.0, right_db = 0.0, left_mute = false, right_mute = false }}\n\
-         pan = {{ left = -1.0, right = 1.0, smoothing_samples = 0 }}\n",
+        r#"{{
+  "schema_version": 1,
+  "session_id": "abi-layout",
+  "revision": "1",
+  "sample_rate_hz": 48000,
+  "quantum_frames": 128,
+  "render_profile": {{ "id": "native", "mode": "single_thread" }},
+  "output_profile": {{ "id": "main", "channels": 2, "sample_format": "f32_planar" }},
+  "sources": [{{ "id": "s", "content": "sha256:{}", "channels": 2, "bit_depth": 24, "frames": "48000" }}],
+  "tracks": [{{
+    "id": "t",
+    "source_id": "s",
+    "left_source_channel": 0,
+    "right_source_channel": 1,
+    "builtins": {{
+      "left": {{ "polarity_invert": false, "trim_db": 0.0, "hpf_hz": 0.0, "lpf_hz": 0.0, "delay_samples": 0 }},
+      "right": {{ "polarity_invert": false, "trim_db": 0.0, "hpf_hz": 0.0, "lpf_hz": 0.0, "delay_samples": 0 }}
+    }},
+    "simd1": {{ "effects": [] }},
+    "dynamic": {{ "effects": [{{
+      "id": "e",
+      "identity": {{ "kind": "native", "effect_id": "{effect_id}" }},
+      "quality": "normal",
+      "bypass": false,
+      "link_mode": "dual_mono",
+      "params": [],
+      "sidechain": {{ "kind": "none" }}
+    }}] }},
+    "simd2": {{ "effects": [] }},
+    "fader": {{ "left_db": 0.0, "right_db": 0.0, "left_mute": false, "right_mute": false }},
+    "pan": {{ "left": -1.0, "right": 1.0, "smoothing_samples": 0 }}
+  }}],
+  "submixes": [],
+  "outputs": [{{ "id": "out" }}],
+  "routes": [{{
+    "id": "r",
+    "source": {{ "kind": "track", "track_id": "t", "tap": "post_matrix" }},
+    "destination": {{ "kind": "output_input", "output_id": "out" }},
+    "channel_matrix": {{ "ll": 1.0, "lr": 0.0, "rl": 0.0, "rr": 1.0 }},
+    "gain_db": 0.0
+  }}],
+  "automation": []
+}}"#,
         "0".repeat(64)
     )
 }

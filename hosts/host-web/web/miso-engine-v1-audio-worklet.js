@@ -139,7 +139,7 @@ function writeBoundedUtf8(value, memoryBuffer, pointer, capacity) {
   return byteLength;
 }
 
-class MisoEngineV2AudioWorkletProcessor extends AudioWorkletProcessor {
+class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
   constructor(options) {
     super();
     this.ready = false;
@@ -472,7 +472,7 @@ class MisoEngineV2AudioWorkletProcessor extends AudioWorkletProcessor {
       throw new RangeError("Invalid resource report");
     }
     const names = [
-      "optionsBytes", "statusBytes", "sessionTomlBytes", "diagnosticBytes", "sourceIdBytes",
+      "optionsBytes", "statusBytes", "sessionDocumentBytes", "diagnosticBytes", "sourceIdBytes",
       "sourcePcmStagingBytes", "outputPcmBytes", "bridgeMetadataBytes", "bridgeRetainedBytes",
       "largestBridgeAllocationBytes", "sourceTotalBytes", "sourceOverheadBytes",
       "effectScalarStateBytes", "effectScalarScratchBytes", "builtinRetainedBytes",
@@ -861,4 +861,4 @@ class MisoEngineV2AudioWorkletProcessor extends AudioWorkletProcessor {
   // PROCESS_POLICY_END
 }
 
-registerProcessor(PROCESSOR_NAME, MisoEngineV2AudioWorkletProcessor);
+registerProcessor(PROCESSOR_NAME, MisoEngineAudioWorkletProcessor);

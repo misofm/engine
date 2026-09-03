@@ -1,6 +1,7 @@
 import { CATALOG } from "../generated/catalog.ts";
 import type { BuiltinParameter, EffectDescriptor, EffectId } from "../generated/catalog.ts";
 import { MisoUsageError } from "./errors.ts";
+import { writeCanonicalSessionDocument } from "../internal/session-json.ts";
 import type {
   AutomationSpec,
   AutomationTarget,
@@ -28,7 +29,7 @@ import type {
  * canonical text layout are all transcribed from the engine's own emit-side walk
  * (`crates/session/src/visit.rs`) and canonical writer
  * (`.../canonical.rs`), so a document this builder emits is byte-identical to what the engine
- * would write back for the same model. There is no TOML *parser* here and there never will be
+ * would write back for the same model. There is no JSON parser here and there never will be
  * (ruling 5438024085); reading a document is the engine's job, and `validate()` asks it.
  *
  * # What #241 deleted, and why nothing here remembers it
@@ -45,7 +46,7 @@ import type {
  *
  * Every builder verb returns a new builder over a frozen state, so a partially configured session
  * can be shared, forked and reused without a caller having to defensively copy it. Normalization
- * is memoized per builder: `toJSON()` and `toToml()` are pure functions of the state, and running
+ * is memoized per builder: `toJSON()` and `toJson()` are pure functions of the state, and running
  * them twice must cost once.
  *
  * # Declaration order is reference order
@@ -57,25 +58,6 @@ import type {
  * of those refusals names what was missing.
  */
 
-/** The Session V1 root keys, in the canonical order the schema requires. */
-const ROOT_KEYS = [
-  "schema_version",
-  "session_id",
-  "revision",
-  "sample_rate_hz",
-  "quantum_frames",
-  "render_profile",
-  "output_profile",
-  "sources",
-  "tracks",
-  "submixes",
-  "outputs",
-  "routes",
-  "automation",
-] as const;
-
-type RootKey = (typeof ROOT_KEYS)[number];
-
 /** A JSON-shaped normalized value. Floats keep `-0`; u64 sample times are decimal strings. */
 export type ModelValue = string | number | boolean | ModelRecord | readonly ModelValue[];
 export interface ModelRecord {
@@ -85,14 +67,14 @@ export interface ModelRecord {
 /**
  * The normalized Session V1 model: the document as data, one key per schema field.
  *
- * This -- not the TOML text -- is what `assertSameSession` compares, because text equality would
+ * This -- not the JSON text -- is what `assertSameSession` compares, because text equality would
  * also be testing the float speller and the indentation, and a plan-equality gate that goes red
  * when a comment moves is a gate people learn to ignore.
  */
 export interface SessionModel extends ModelRecord {
   readonly schema_version: 1;
   readonly session_id: string;
-  readonly revision: number;
+  readonly revision: string;
   readonly sample_rate_hz: SessionSampleRateHz;
   readonly quantum_frames: number;
   readonly render_profile: ModelRecord;
@@ -110,7 +92,7 @@ export interface SessionOptions {
   readonly id: string;
   /** The one rate in the document. V1 has no per-source rate and no implicit conversion. */
   readonly sampleRateHz: SessionSampleRateHz;
-  readonly revision?: number;
+  readonly revision?: number | bigint;
   /** Nonzero. Defaults to 128, the quantum every launch host actually renders. */
   readonly quantumFrames?: number;
 }
@@ -118,7 +100,7 @@ export interface SessionOptions {
 const STABLE_ID = /^[a-z][a-z0-9._-]{0,126}$/;
 const CONTENT_IDENTITY = /^sha256:[0-9a-f]{64}$/;
 const LAUNCH_RATES: readonly number[] = [44_100, 48_000, 88_200, 96_000];
-const TOML_I64_MAX = 9_223_372_036_854_775_807n;
+const U64_MAX = 18_446_744_073_709_551_615n;
 const SEND_TAPS: ReadonlySet<string> = new Set([
   "input",
   "post_input_builtins",
@@ -144,7 +126,7 @@ const BUILTIN_STRIP_EFFECT_ID = "strip";
  *
  * The builtin rows carry a `mapping` rather than the `unitName` the effect rows carry, so the two
  * vocabularies are joined here. Booleans ride the `linear` token, which is what
- * `fixtures/session/v1/builtins-automation.toml` writes for `polarity_invert`: the schema's unit
+ * `fixtures/session/v1/builtins-automation.json` writes for `polarity_invert`: the schema's unit
  * set has no boolean member and `linear` is the one that imposes no domain of its own.
  */
 const BUILTIN_UNIT_BY_MAPPING: ReadonlyMap<string, string> = new Map([
@@ -213,10 +195,13 @@ function f32(value: unknown, path: string): number {
 }
 
 function u64(value: unknown, path: string): bigint {
-  if (typeof value !== "bigint" || value < 0n || value > TOML_I64_MAX) {
-    fail(path, "expected a bigint sample time within TOML's signed 64-bit integer range");
+  const normalized = typeof value === "number"
+    ? (Number.isSafeInteger(value) && value >= 0 ? BigInt(value) : undefined)
+    : typeof value === "bigint" ? value : undefined;
+  if (normalized === undefined || normalized < 0n || normalized > U64_MAX) {
+    fail(path, "expected a nonnegative safe integer number or bigint through u64::MAX");
   }
-  return value;
+  return normalized;
 }
 
 // -------------------------------------------------------------------------------------------
@@ -508,7 +493,7 @@ function normalizeRouteDestination(value: RouteDestination): ModelRecord {
 
 interface NormalizedOptions {
   readonly sessionId: string;
-  readonly revision: number;
+  readonly revision: bigint;
   readonly sampleRateHz: SessionSampleRateHz;
   readonly quantumFrames: number;
 }
@@ -555,7 +540,7 @@ export class SessionBuilder {
     if (spec.bitDepth !== 16 && spec.bitDepth !== 24 && spec.bitDepth !== "32f") {
       fail(`${path}.bitDepth`, 'expected the token 16, 24 or "32f"');
     }
-    integer(spec.frames, `${path}.frames`, 1, Number.MAX_SAFE_INTEGER);
+    if (u64(spec.frames, `${path}.frames`) === 0n) fail(`${path}.frames`, "expected a nonzero frame count");
     if (typeof spec.content !== "string" || !CONTENT_IDENTITY.test(spec.content)) {
       fail(`${path}.content`, "source content must match sha256:[0-9a-f]{64}");
     }
@@ -657,8 +642,8 @@ export class SessionBuilder {
   }
 
   /** The canonical Session V1 text: LF endings, exactly one final newline. */
-  toToml(): string {
-    return writeToml(this.toJSON());
+  toJson(): string {
+    return writeCanonicalSessionDocument(this.toJSON());
   }
 
   #graphIds(): ReadonlySet<string> {
@@ -735,7 +720,7 @@ export function session(options: SessionOptions): SessionBuilder {
       `${String(options.sampleRateHz)} is not a launch rate; expected one of ${LAUNCH_RATES.join(", ")}`,
     );
   }
-  const revision = integer(options.revision ?? 0, "session().revision", 0, Number.MAX_SAFE_INTEGER);
+  const revision = u64(options.revision ?? 0, "session().revision");
   const quantumFrames = integer(
     options.quantumFrames ?? 128,
     "session().quantumFrames",
@@ -1120,7 +1105,7 @@ function normalize(state: BuilderState): SessionModel {
       content: spec.content,
       channels: spec.channels,
       bit_depth: spec.bitDepth,
-      frames: spec.frames,
+      frames: u64(spec.frames, `source("${id}").frames`).toString(),
     }))
     .sort(byId);
   const tracks = state.tracks
@@ -1143,7 +1128,7 @@ function normalize(state: BuilderState): SessionModel {
   return freeze({
     schema_version: 1,
     session_id: options.sessionId,
-    revision: options.revision,
+    revision: options.revision.toString(),
     sample_rate_hz: options.sampleRateHz,
     quantum_frames: options.quantumFrames,
     render_profile: { id: "native", mode: "single_thread" },
@@ -1164,178 +1149,6 @@ function matrixRecord(matrix: Matrix2x2, path: string): ModelRecord {
     rl: f32(matrix.rl, `${path}.rl`),
     rr: f32(matrix.rr, `${path}.rr`),
   });
-}
-
-// -------------------------------------------------------------------------------------------
-// Canonical TOML.
-// -------------------------------------------------------------------------------------------
-
-/**
- * Every numeric leaf key in the schema, by TOML type.
- *
- * A number in the model does not say whether the schema calls it a `u32` or an `f32`, and the two
- * spell differently: `0` versus `0.0`. Rather than guess from the value -- which would emit
- * `smoothing_samples = 0.0` or `trim_db = 0` depending on nothing more than what a caller passed
- * -- every leaf is listed, transcribed from `visit.rs`'s field walk. A key that reaches the writer
- * without a listing throws, so a schema field added upstream fails loudly here instead of quietly
- * emitting the wrong TOML type.
- */
-const INTEGER_KEYS: ReadonlySet<string> = new Set([
-  "schema_version",
-  "revision",
-  "sample_rate_hz",
-  "quantum_frames",
-  "channels",
-  "bit_depth",
-  "frames",
-  "left_source_channel",
-  "right_source_channel",
-  "delay_samples",
-  "smoothing_samples",
-  "parameter_id",
-]);
-const FLOAT_KEYS: ReadonlySet<string> = new Set([
-  "trim_db",
-  "hpf_hz",
-  "lpf_hz",
-  "left_db",
-  "right_db",
-  "left",
-  "right",
-  "ll",
-  "lr",
-  "rl",
-  "rr",
-  "gain_db",
-  "value",
-  "start_value",
-  "end_value",
-]);
-/** u64 leaves the model carries as decimal strings, emitted bare rather than quoted. */
-const BARE_INTEGER_STRING_KEYS: ReadonlySet<string> = new Set(["start_sample", "end_sample"]);
-
-function writeToml(model: SessionModel): string {
-  let out = "";
-  for (const key of ROOT_KEYS) {
-    const value = model[key as RootKey] as ModelValue;
-    if (Array.isArray(value)) {
-      // The canonical writer breaks the root arrays and nothing else: one entry per line, two
-      // spaces of indent, a trailing comma on every entry including the last, and `[\n]` when the
-      // array is empty.
-      out += `${key} = [\n`;
-      for (const item of value) out += `  ${inlineValue(item, key)},\n`;
-      out += "]\n";
-    } else {
-      out += `${key} = ${inlineValue(value, key)}\n`;
-    }
-  }
-  return out;
-}
-
-function inlineValue(value: ModelValue, key: string): string {
-  if (typeof value === "string") {
-    return BARE_INTEGER_STRING_KEYS.has(key) ? value : quote(value);
-  }
-  if (typeof value === "boolean") return value ? "true" : "false";
-  if (typeof value === "number") {
-    if (INTEGER_KEYS.has(key)) return String(value);
-    if (FLOAT_KEYS.has(key)) return canonicalFloat(value);
-    throw new MisoUsageError(
-      `the canonical writer has no declared TOML type for the numeric key '${key}'`,
-    );
-  }
-  if (Array.isArray(value)) {
-    return `[${value.map((item) => inlineValue(item, key)).join(", ")}]`;
-  }
-  const entries = Object.entries(value as ModelRecord);
-  return `{ ${entries.map(([name, child]) => `${name} = ${inlineValue(child, name)}`).join(", ")} }`;
-}
-
-/** The canonical writer's escape set, from `canonical.rs`'s `write_quoted`. */
-function quote(value: string): string {
-  let out = '"';
-  for (const character of value) {
-    const code = character.codePointAt(0) ?? 0;
-    if (character === '"') out += '\\"';
-    else if (character === "\\") out += "\\\\";
-    else if (character === "\b") out += "\\b";
-    else if (character === "\t") out += "\\t";
-    else if (character === "\n") out += "\\n";
-    else if (character === "\f") out += "\\f";
-    else if (character === "\r") out += "\\r";
-    else if (code <= 0x1f || (code >= 0x7f && code <= 0x9f)) {
-      out += code <= 0xffff
-        ? `\\u${code.toString(16).padStart(4, "0").toUpperCase()}`
-        : `\\U${code.toString(16).padStart(8, "0").toUpperCase()}`;
-    } else out += character;
-  }
-  return `${out}"`;
-}
-
-function f32Bits(value: number): number {
-  const view = new DataView(new ArrayBuffer(4));
-  view.setFloat32(0, value, true);
-  return view.getUint32(0, true);
-}
-
-/**
- * The two `f32` values whose shortest `Display` does not survive an `f64`-then-`f32` read.
- *
- * `write_f32` writes the shortest spelling, checks it round-trips through `f64` as well as
- * directly, and falls back to the exact `f64` `Display` when it does not. The engine's exhaustive
- * sweep over all 2^32 patterns found that fallback fires for exactly two values, and these are
- * their exact spellings. Naming them beats reimplementing the fallback: JavaScript has no direct
- * `f32` parse, so a search here can only ever test the `f64` path -- which is precisely the path
- * these two values fail -- and would silently pick a longer spelling instead.
- */
-const DOUBLE_ROUNDING_SPELLINGS: ReadonlyMap<number, string> = new Map([
-  [0x15ae_43fd, "0.00000000000000000000000007038530691851209"],
-  [0x95ae_43fd, "-0.00000000000000000000000007038530691851209"],
-]);
-
-/**
- * One canonical finite `f32` spelling, mirroring `crates/session/src/value.rs`.
- *
- * Shortest `f32` `Display`, no exponent, integral values gaining `.0` so they stay TOML floats,
- * and negative zero preserved exactly as `-0.0` -- which is why the sign is tested before the
- * digits, since `String(-0)` is `"0"` and every shortest-digit search would agree with it.
- */
-function canonicalFloat(value: number): string {
-  const normalized = Math.fround(value);
-  if (!Number.isFinite(normalized)) {
-    throw new MisoUsageError("the canonical writer cannot spell a non-finite f32");
-  }
-  if (Object.is(normalized, -0)) return "-0.0";
-  const bits = f32Bits(normalized);
-  const exact = DOUBLE_ROUNDING_SPELLINGS.get(bits);
-  if (exact !== undefined) return exact;
-  let text: string | undefined;
-  for (let precision = 1; precision <= 9 && text === undefined; precision += 1) {
-    const candidate = normalized.toPrecision(precision);
-    if (f32Bits(Number(candidate)) === bits) text = candidate;
-  }
-  if (text === undefined) {
-    throw new MisoUsageError(`no canonical f32 spelling round-trips ${normalized}`);
-  }
-  const decimal = /[eE]/.test(text) ? expandExponent(text) : text;
-  return decimal.includes(".") ? decimal : `${decimal}.0`;
-}
-
-/** Rust's float `Display` never uses exponent notation, so neither may the canonical writer. */
-function expandExponent(text: string): string {
-  const [coefficient = "0", exponentText = "0"] = text.toLowerCase().split("e");
-  const exponent = Number(exponentText);
-  const negative = coefficient.startsWith("-");
-  const unsigned = negative ? coefficient.slice(1) : coefficient;
-  const dot = unsigned.indexOf(".");
-  const digits = unsigned.replace(".", "");
-  const point = (dot < 0 ? unsigned.length : dot) + exponent;
-  const body = point <= 0
-    ? `0.${"0".repeat(-point)}${digits}`
-    : point >= digits.length
-      ? `${digits}${"0".repeat(point - digits.length)}`
-      : `${digits.slice(0, point)}.${digits.slice(point)}`;
-  return negative ? `-${body}` : body;
 }
 
 // -------------------------------------------------------------------------------------------
@@ -1363,7 +1176,7 @@ function modelOf(value: SessionLike, side: string): SessionModel {
  *
  * # Why the model rather than the text
  *
- * Comparing `toToml()` output would make every producer of a session also a hostage to the float
+ * Comparing `toJson()` output would make every producer of a session also a hostage to the float
  * speller and the indentation. The model is the thing two producers have to agree on, so that is
  * what is compared -- with `Object.is`, so `-0` and `0` are the different values they are.
  *

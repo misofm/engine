@@ -12,7 +12,7 @@ use host_core::{
 };
 use source::{HostChunkError, SourceSeekError};
 
-const SESSION: &str = include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.toml");
+const SESSION: &str = include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json");
 
 fn caps() -> HostPrepareCaps {
     HostPrepareCaps {
@@ -383,8 +383,8 @@ fn shape_policy_pins_rate_and_quantum() {
 /// diagnostic before applying a host shape policy.
 #[test]
 fn session_validation_owns_the_launch_rate_set() {
-    const RATE: &str = "sample_rate_hz = 48000";
-    let at = |rate: u32| SESSION.replace(RATE, &format!("sample_rate_hz = {rate}"));
+    const RATE: &str = "\"sample_rate_hz\": 48000";
+    let at = |rate: u32| SESSION.replace(RATE, &format!("\"sample_rate_hz\": {rate}"));
     for rate in LAUNCH_SAMPLE_RATES_HZ {
         assert!(compile_host_session(&at(rate), &caps()).is_ok(), "{rate}");
     }

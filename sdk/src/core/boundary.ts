@@ -18,7 +18,7 @@ import { MisoEngineError, MisoUsageError, parseDiagnostics, resultName } from ".
  * # The guess machine is gone
  *
  * The pre-boot-v1 SDK reached this point through nine operations over a bifurcated plan/raw path.
- * A raw TOML document was funnelled through `sessionHeader`, a regex over the text that could not
+ * A raw JSON document was funnelled through `sessionHeader`, a regex over the text that could not
  * see a quoted key and would happily match a same-named key in a nested table; whatever it failed
  * to find became `validationFallback`'s silent 48 kHz / 128 frames; a throwaway `SessionPlan` was
  * fabricated solely to invent a ring, defaulting to 1024 -- not a multiple of a 127-frame quantum,

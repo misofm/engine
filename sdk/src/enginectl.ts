@@ -64,7 +64,7 @@ or stdin with '-'. --stems reads one leaf directory of directly owned FLAC files
 default their ID from the leaf directory name and their quantum to 128; override those defaults
 with --session-id and --quantum-frames.
 
---output - writes only raw canonical TOML (with its final LF); successful stderr is empty. A file
+--output - writes only raw canonical JSON (with its final LF); successful stderr is empty. A file
 output is published atomically before stdout emits one compact JSON receipt plus LF. Existing
 destinations are refused unless --overwrite is present. In stems mode, the output cannot physically
 reside inside the stems directory, including through a symlink or case alias.
@@ -333,13 +333,13 @@ async function preflightStemOutput(args: BuildArguments): Promise<void> {
 
 async function build(args: BuildArguments): Promise<void> {
   await preflightStemOutput(args);
-  let toml: string;
+  let json: string;
   let stemsBuild: import("./cli/stems.ts").StemsBuild | undefined;
   if (args.request !== undefined) {
     const request = decodeRequest(await boundedBytes(args.request));
     const { sessionBuilderFromRequest } = await import("./cli/session-request.ts");
     try {
-      toml = sessionBuilderFromRequest(request).toToml();
+      json = sessionBuilderFromRequest(request).toJson();
     } catch (error) {
       if (error instanceof MisoUsageError || error instanceof TypeError) {
         throw new CliFailure(3, "request.shape", error.message);
@@ -355,7 +355,7 @@ async function build(args: BuildArguments): Promise<void> {
         sessionId: args.sessionId ?? normalizeSessionId(directory),
         quantumFrames: args.quantumFrames ?? 128,
       });
-      toml = stemsBuild.builder.toToml();
+      json = stemsBuild.builder.toJson();
     } catch (error) {
       if (error instanceof StemsImportError) {
         throw new CliFailure(error.internal ? 70 : 3, error.code, error.message, error.extra);
@@ -366,7 +366,7 @@ async function build(args: BuildArguments): Promise<void> {
       throw error;
     }
   }
-  const bytes = new TextEncoder().encode(toml);
+  const bytes = new TextEncoder().encode(json);
   let result: Awaited<ReturnType<typeof import("./headless/engine.ts")["validate"]>>;
   try {
     const { validate } = await import("./headless/engine.ts");

@@ -1,7 +1,7 @@
 /**
  * Shared fixtures for the SDK evals.
  *
- * Every document here is built by string concatenation rather than by the SDK's own builder, on
+ * Every document here is built independently rather than by the SDK's own builder, on
  * purpose: the boot evals are about what the *engine* does with bytes, and a fixture that went
  * through the builder would prove the builder and the engine agree with each other rather than
  * proving either against the schema. The builder gets its own eval.
@@ -44,11 +44,8 @@ const ZERO_CONTENT = `sha256:${"0".repeat(64)}`;
 /**
  * A one-track Session V1 document.
  *
- * `quoteKeys` is the whole reason this helper takes an option nobody would otherwise want. The
- * pre-boot-v1 SDK sniffed a document's rate and quantum with a regex anchored to bare keys, so a
- * perfectly legal TOML 1.0 document that quoted them was invisible to it and silently became
- * 48 kHz / 128 frames. Quoting is legal, the engine's parser accepts it, and the red probes are
- * written against it (issue #243 eval 1).
+ * JSON keys are always quoted. The helper intentionally emits noncanonical-but-valid whitespace
+ * so boot tests continue proving that acceptance belongs to the engine rather than the builder.
  */
 export function sessionDocument(options = {}) {
   const {
@@ -59,52 +56,47 @@ export function sessionDocument(options = {}) {
     bitDepth = 24,
     content = ZERO_CONTENT,
     sessionId = "sdk-eval",
-    quoteKeys = false,
     sourceExtra = "",
     renderMode = "single_thread",
     trackId = "t",
     effects = { simd1: [], dynamic: [], simd2: [] },
     padding = 0,
   } = options;
-  const key = (name) => (quoteKeys ? `"${name}"` : name);
-  const depth = typeof bitDepth === "string" ? `"${bitDepth}"` : String(bitDepth);
-  const rack = (list) => `{ effects = [${list.join(", ")}] }`;
-  const comment = padding > 0 ? `\n# ${"p".repeat(padding)}` : "";
-  return `schema_version = 1
-${key("session_id")} = "${sessionId}"
-revision = 1
-${key("sample_rate_hz")} = ${sampleRateHz}
-${key("quantum_frames")} = ${quantumFrames}
-render_profile = { id = "native", mode = "${renderMode}" }
-output_profile = { id = "main", channels = 2, sample_format = "f32_planar" }
-sources = [{ id = "s", content = "${content}", channels = ${channels}, bit_depth = ${depth}, frames = ${frames}${sourceExtra} }]
-submixes = []
-outputs = [{ id = "out" }]
-routes = [{ id = "main", source = { kind = "track", track_id = "${trackId}", tap = "post_matrix" }, destination = { kind = "output_input", output_id = "out" }, channel_matrix = { ll = 1.0, lr = 0.0, rl = 0.0, rr = 1.0 }, gain_db = 0.0 }]
-automation = []${comment}
-
-[[tracks]]
-id = "${trackId}"
-source_id = "s"
-left_source_channel = 0
-right_source_channel = ${channels === 1 ? 0 : 1}
-builtins = { left = { polarity_invert = false, trim_db = 0.0, hpf_hz = 0.0, lpf_hz = 0.0, delay_samples = 0 }, right = { polarity_invert = false, trim_db = 0.0, hpf_hz = 0.0, lpf_hz = 0.0, delay_samples = 0 } }
-simd1 = ${rack(effects.simd1 ?? [])}
-dynamic = ${rack(effects.dynamic ?? [])}
-simd2 = ${rack(effects.simd2 ?? [])}
-fader = { left_db = 0.0, right_db = 0.0, left_mute = false, right_mute = false }
-pan = { left = -1.0, right = 1.0, smoothing_samples = 0 }
-`;
+  const lane = { polarity_invert: false, trim_db: 0.0, hpf_hz: 0.0, lpf_hz: 0.0, delay_samples: 0 };
+  const document = {
+    schema_version: 1, session_id: sessionId, revision: "1", sample_rate_hz: sampleRateHz,
+    quantum_frames: quantumFrames,
+    render_profile: { id: "native", mode: renderMode },
+    output_profile: { id: "main", channels: 2, sample_format: "f32_planar" },
+    sources: [{ id: "s", content, channels, bit_depth: bitDepth, frames: String(frames) }],
+    tracks: [{
+      id: trackId, source_id: "s", left_source_channel: 0,
+      right_source_channel: channels === 1 ? 0 : 1,
+      builtins: { left: { ...lane }, right: { ...lane } },
+      simd1: { effects: effects.simd1 ?? [] }, dynamic: { effects: effects.dynamic ?? [] },
+      simd2: { effects: effects.simd2 ?? [] },
+      fader: { left_db: 0.0, right_db: 0.0, left_mute: false, right_mute: false },
+      pan: { left: -1.0, right: 1.0, smoothing_samples: 0 },
+    }],
+    submixes: [], outputs: [{ id: "out" }],
+    routes: [{ id: "main", source: { kind: "track", track_id: trackId, tap: "post_matrix" },
+      destination: { kind: "output_input", output_id: "out" },
+      channel_matrix: { ll: 1.0, lr: 0.0, rl: 0.0, rr: 1.0 }, gain_db: 0.0 }],
+    automation: [],
+  };
+  let text = JSON.stringify(document, null, 2);
+  if (sourceExtra) text = text.replace(`"frames": "${frames}"`, `"frames": "${frames}"${sourceExtra}`);
+  return `${text}${" ".repeat(padding)}\n`;
 }
 
 /** One effect entry for a rack, with explicit parameter rows. */
 export function effectEntry(id, effectId, params = []) {
-  const rows = params
-    .map((p) => `{ parameter_id = ${p.id}, channel = "${p.channel ?? "both"}", unit = "${p.unit}", value = ${p.value} }`)
-    .join(", ");
-  return `{ id = "${id}", identity = { kind = "native", effect_id = "${effectId}" }, `
-    + `quality = "normal", bypass = false, link_mode = "dual_mono", params = [${rows}], `
-    + `sidechain = { kind = "none" } }`;
+  return {
+    id, identity: { kind: "native", effect_id: effectId }, quality: "normal", bypass: false,
+    link_mode: "dual_mono",
+    params: params.map((p) => ({ parameter_id: p.id, channel: p.channel ?? "both", unit: p.unit, value: Number(p.value) })),
+    sidechain: { kind: "none" },
+  };
 }
 
 /** Deterministic pseudo-audio: no RNG, so a digest is reproducible across machines. */

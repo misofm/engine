@@ -18,7 +18,12 @@ import { before, describe, test } from "node:test";
 import { CATALOG } from "../src/generated/catalog.ts";
 import { MisoEngineAsset } from "../src/core/asset.ts";
 import { MisoUsageError } from "../src/core/errors.ts";
-import { assertSameSession, effect, session } from "../src/core/session.ts";
+import {
+  assertSameSession,
+  effect,
+  session,
+} from "../src/core/session.ts";
+import { writeCanonicalSessionDocument } from "../src/internal/session-json.ts";
 import { createOfflineEngine, validate } from "../src/headless/engine.ts";
 import { moduleBytes } from "./support.mjs";
 
@@ -28,6 +33,7 @@ const CONTENT_B = `sha256:2a97516c354b68848cdbd8f54a226a0a55b21ed138e207ad6c5cbb
 let asset;
 
 before(async () => {
+  if (process.env.MISO_ENGINE_SDK_SKIP_ASSET === "1") return;
   asset = await MisoEngineAsset.load(await moduleBytes());
 });
 
@@ -64,6 +70,15 @@ function oneTrack(options = {}) {
 /** A JSON-shaped deep copy, so a test can mutate a model the builder froze. */
 function mutableModel(model) {
   return JSON.parse(JSON.stringify(model));
+}
+
+/** Deliberately destroy insertion order without changing any normalized value. */
+function reverseConstructionOrder(value) {
+  if (Array.isArray(value)) return value.map(reverseConstructionOrder);
+  if (value === null || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value).reverse().map(([key, child]) => [key, reverseConstructionOrder(child)]),
+  );
 }
 
 describe("eval 5 -- the plan-equality gate", () => {
@@ -126,7 +141,7 @@ describe("eval 5 -- the plan-equality gate", () => {
         destination: { kind: "output_input", outputId: "o2" },
       });
     assertSameSession(forward, reverse);
-    assert.equal(forward.toToml(), reverse.toToml());
+    assert.equal(forward.toJson(), reverse.toJson());
   });
 
   test("RED MUTATION: one source's wrong bit depth is caught, and the message names the path", () => {
@@ -195,10 +210,10 @@ describe("finding 6 -- the full bit-depth token set", () => {
   test('16 and 24 emit bare integers; "32f" emits a quoted string', () => {
     // Adopted-ruling finding 6 sentence 1, and the schema's "the canonical writer preserves those
     // spellings". Red mutation: normalize the depth to a number, or quote all three.
-    assert.match(oneTrack({ bitDepth: 16 }).toToml(), /bit_depth = 16,/);
-    assert.match(oneTrack({ bitDepth: 24 }).toToml(), /bit_depth = 24,/);
-    assert.match(oneTrack({ bitDepth: "32f" }).toToml(), /bit_depth = "32f",/);
-    assert.doesNotMatch(oneTrack({ bitDepth: 16 }).toToml(), /bit_depth = "16"/);
+    assert.match(oneTrack({ bitDepth: 16 }).toJson(), /"bit_depth": 16,/);
+    assert.match(oneTrack({ bitDepth: 24 }).toJson(), /"bit_depth": 24,/);
+    assert.match(oneTrack({ bitDepth: "32f" }).toJson(), /"bit_depth": "32f",/);
+    assert.doesNotMatch(oneTrack({ bitDepth: 16 }).toJson(), /"bit_depth": "16"/);
   });
 
   test("toJSON round-trips each token exactly, type included", () => {
@@ -301,12 +316,12 @@ describe("the most important eval -- what the builder writes, the engine boots",
     }
   });
 
-  test("the engine accepts the builder's document through the toToml() surface too", async () => {
-    // `createOfflineEngine` takes a builder directly because a builder is a `{ toToml() }`. The
+  test("the engine accepts the builder's document through the toJson() surface too", async () => {
+    // `createOfflineEngine` takes a builder directly because a builder is a `{ toJson() }`. The
     // text path must be the same bytes, not a second encoder.
     const built = oneTrack({ id: "surface" });
     const viaObject = await validate(built, { asset });
-    const viaText = await validate(built.toToml(), { asset });
+    const viaText = await validate(built.toJson(), { asset });
     assert.equal(viaObject.ok, true);
     assert.equal(viaText.ok, true);
     assert.deepEqual(viaText.shape.tracks, viaObject.shape.tracks);
@@ -506,7 +521,7 @@ describe("issue #278 -- the port table is enforced, not documented", () => {
 
   test("a misspelled port is refused at authoring time, naming the candidates", () => {
     // Red mutation: delete the `sidechainPort()` call in `effect()` -> this throws nothing, the
-    // misspelling survives to `toToml()`, and the session only fails at boot.
+    // misspelling survives to `toJson()`, and the session only fails at boot.
     assert.throws(
       () => effect("miso.compressor", {}, { sidechain: { source, portId: "sidechan-in" } }),
       (error) => {
@@ -584,12 +599,12 @@ describe("issue #278 -- the port table is enforced, not documented", () => {
     // `crates/effect-compiler/src/prepare.rs` -> this boots and the test fails.
     const document = oneTrack({
       racks: { dynamic: [effect("miso.compressor", { threshold: -18 })] },
-    }).toToml().replace(
-      'sidechain = { kind = "none" }',
-      'sidechain = { kind = "routed", source = { kind = "track", track_id = "t", '
-        + 'tap = "post_fader" }, port_id = "not-a-port" }',
+    }).toJson().replace(
+      '"sidechain": {\n              "kind": "none"\n            }',
+      '"sidechain": {"kind":"routed","source":{"kind":"track","track_id":"t",'
+        + '"tap":"post_fader"},"port_id":"not-a-port"}',
     );
-    assert.match(document, /port_id = "not-a-port"/);
+    assert.match(document, /"port_id":"not-a-port"/);
     const outcome = await validate(document, { asset });
     assert.equal(outcome.ok, false);
     assert.ok(
@@ -600,34 +615,33 @@ describe("issue #278 -- the port table is enforced, not documented", () => {
 });
 
 describe("canonical float spellings", () => {
-  test("integral values gain .0 so they stay TOML floats", () => {
-    // Red mutation: emit `String(value)`. `trim_db = 0` is an integer to TOML and the engine
+  test("integral values gain .0 so they stay schema floats", () => {
+    // Red mutation: emit `String(value)`. `"trim_db": 0` loses the canonical float spelling.
     // refuses the document at that leaf, so this is a real refusal and not a cosmetic one.
-    const toml = oneTrack({
+    const json = oneTrack({
       builtins: { trimDb: 0, hpfHz: 20, lpfHz: 20_000 },
       fader: { leftDb: -6, rightDb: 12 },
       pan: { left: -1, right: 1, smoothingSamples: 16 },
-    }).toToml();
-    assert.match(toml, /trim_db = 0\.0/);
-    assert.match(toml, /hpf_hz = 20\.0/);
-    assert.match(toml, /lpf_hz = 20000\.0/);
-    assert.match(toml, /left_db = -6\.0/);
-    assert.match(toml, /right_db = 12\.0/);
-    assert.match(toml, /pan = \{ left = -1\.0, right = 1\.0, smoothing_samples = 16 \}/);
+    }).toJson();
+    assert.match(json, /"trim_db": 0\.0/);
+    assert.match(json, /"hpf_hz": 20\.0/);
+    assert.match(json, /"lpf_hz": 20000\.0/);
+    assert.match(json, /"left_db": -6\.0/);
+    assert.match(json, /"right_db": 12\.0/);
+    assert.match(json, /"left": -1\.0,[\s\S]*"right": 1\.0,[\s\S]*"smoothing_samples": 16/);
     // Integers stay integers: the smoothing count above, and these.
-    assert.match(toml, /sample_rate_hz = 48000\n/);
-    assert.match(toml, /delay_samples = 0 \}/);
-    assert.match(toml, /frames = 4800 \}/);
+    assert.match(json, /"sample_rate_hz": 48000/);
+    assert.match(json, /"delay_samples": 0/);
+    assert.match(json, /"frames": "4800"/);
   });
 
   test("negative zero is preserved exactly as -0.0", () => {
     // `String(-0)` is `"0"`, so every shortest-digit search agrees with the wrong answer here.
     // Red mutation: drop the `Object.is(value, -0)` branch in `canonicalFloat`.
-    const toml = oneTrack({ builtins: { trimDb: -0 }, fader: { leftDb: -0 }, gainDb: -0 }).toToml();
-    assert.match(toml, /trim_db = -0\.0/);
-    assert.match(toml, /left_db = -0\.0/);
-    assert.match(toml, /gain_db = -0\.0/);
-    assert.doesNotMatch(toml, /= 0\.0, right_db/);
+    const json = oneTrack({ builtins: { trimDb: -0 }, fader: { leftDb: -0 }, gainDb: -0 }).toJson();
+    assert.match(json, /"trim_db": -0\.0/);
+    assert.match(json, /"left_db": -0\.0/);
+    assert.match(json, /"gain_db": -0\.0/);
     // And the model keeps the sign, which is why the gate can see it.
     const model = oneTrack({ builtins: { trimDb: -0 } }).toJSON();
     assert.ok(Object.is(model.tracks[0].builtins.left.trim_db, -0));
@@ -639,25 +653,51 @@ describe("canonical float spellings", () => {
 
   test("shortest f32 Display, with no exponent anywhere", () => {
     // Rust's float `Display` never uses exponent notation and the canonical writer inherits that,
-    // so a spelling like `1e-10` is not merely unusual -- the schema's TOML subset excludes it.
+    // so a spelling like `1e-10` is not merely unusual -- the schema's JSON subset excludes it.
     // Red mutation: return `toPrecision` output without expanding the exponent.
-    const toml = oneTrack({
+    const json = oneTrack({
       builtins: { trimDb: 1 / 3, hpfHz: 20.5 },
       fader: { leftDb: -3.5, rightDb: 0.1 },
-    }).toToml();
-    assert.doesNotMatch(toml, /[eE][-+]?\d/);
-    assert.match(toml, /trim_db = 0\.33333334/);
-    assert.match(toml, /hpf_hz = 20\.5/);
-    assert.match(toml, /left_db = -3\.5/);
-    assert.match(toml, /right_db = 0\.1/);
+    }).toJson();
+    assert.doesNotMatch(json, /[eE][-+]?\d/);
+    assert.match(json, /"trim_db": 0\.33333334/);
+    assert.match(json, /"hpf_hz": 20\.5/);
+    assert.match(json, /"left_db": -3\.5/);
+    assert.match(json, /"right_db": 0\.1/);
   });
 
   test("a value below the exponent threshold is written out in full", () => {
-    const toml = oneTrack({
+    const json = oneTrack({
       racks: { simd1: [effect("miso.compressor", { mix: 1e-7 })] },
-    }).toToml();
-    assert.doesNotMatch(toml, /[eE][-+]?\d/);
-    assert.match(toml, /value = 0\.0000001/);
+    }).toJson();
+    assert.doesNotMatch(json, /[eE][-+]?\d/);
+    assert.match(json, /"value": 0\.0000001/);
+  });
+
+  test("every durable u64 normalizes to a decimal string through u64::MAX", () => {
+    const maximum = 18_446_744_073_709_551_615n;
+    const built = session({ id: "u64.maximum", sampleRateHz: 48_000, revision: maximum })
+      .source("stem", { channels: 1, bitDepth: 16, frames: maximum, content: CONTENT_A })
+      .track("t", { source: "stem" })
+      .output("out")
+      .route({
+        id: "main",
+        source: { kind: "track", trackId: "t", tap: "post_matrix" },
+        destination: { kind: "output_input", outputId: "out" },
+      })
+      .automation({
+        id: "ride",
+        target: { trackId: "t", rack: "builtins", parameter: "fader_db", channel: "both" },
+        segments: [{ shape: "step", startSample: 0, endSample: maximum, startValue: 0, endValue: 0 }],
+      });
+    const model = built.toJSON();
+    assert.equal(model.revision, maximum.toString());
+    assert.equal(model.sources[0].frames, maximum.toString());
+    assert.equal(model.automation[0].segments[0].start_sample, "0");
+    assert.equal(model.automation[0].segments[0].end_sample, maximum.toString());
+    assert.match(built.toJson(), /"revision": "18446744073709551615"/);
+    assert.throws(() => session({ id: "overflow", sampleRateHz: 48_000, revision: maximum + 1n }), /u64::MAX/);
+    assert.throws(() => session({ id: "unsafe", sampleRateHz: 48_000, revision: Number.MAX_SAFE_INTEGER + 1 }), /safe integer/);
   });
 
   test("every emitted float parses back to the same f32 the model holds", async () => {
@@ -672,7 +712,7 @@ describe("canonical float spellings", () => {
       fader: { leftDb: -3.5, rightDb: 0.1 },
       gainDb: -0.25,
     });
-    const toml = built.toToml();
+    const json = built.toJson();
     const model = built.toJSON();
     const lane = model.tracks[0].builtins.left;
     const pairs = [
@@ -684,7 +724,7 @@ describe("canonical float spellings", () => {
       ["gain_db", model.routes[0].gain_db],
     ];
     for (const [key, value] of pairs) {
-      const spelling = toml.match(new RegExp(`${key} = (-?[0-9.]+)`))?.[1];
+      const spelling = json.match(new RegExp(`"${key}": (-?[0-9.]+)`))?.[1];
       assert.ok(spelling !== undefined, `no spelling emitted for ${key}`);
       assert.ok(
         Object.is(Math.fround(Number(spelling)), value),
@@ -698,18 +738,68 @@ describe("canonical float spellings", () => {
 
   test("the builder reproduces a checked-in canonical fixture byte for byte", async () => {
     // The strongest available statement that the builder's canonical text *is* the engine's:
-    // `fixtures/session/v1/builtins-automation.toml` was written by the engine's own canonical
+    // `fixtures/session/v1/builtins-automation.json` was written by the engine's own canonical
     // writer, and this rebuilds it from the SDK. Red mutation: change the indent, the trailing
     // comma, the empty-array layout, the root key order or any per-record key order.
     const expected = await readFile(
-      new URL("../../fixtures/session/v1/builtins-automation.toml", import.meta.url),
+      new URL("../../fixtures/session/v1/builtins-automation.json", import.meta.url),
       "utf8",
     );
-    assert.equal(builtinsAutomationFixture().toToml(), expected);
+    assert.equal(builtinsAutomationFixture().toJson(), expected);
+  });
+
+  test("schema key order, never object construction order, controls canonical bytes", async () => {
+    // Red mutation: replace `checkedObjectOrder()` with `Object.entries(record)` in the writer.
+    // Every record below was deliberately constructed backwards, including tagged variants.
+    const built = richSession();
+    const reordered = reverseConstructionOrder(built.toJSON());
+    assert.notDeepEqual(Object.keys(reordered), Object.keys(built.toJSON()));
+    assert.equal(writeCanonicalSessionDocument(reordered), built.toJson());
+  });
+
+  test("the bounded Rust-authority corpus matches the actual SDK writer", async () => {
+    const manifest = JSON.parse(await readFile(
+      new URL("../../fixtures/session-canonical/v1/canonical-writer-corpus.json", import.meta.url),
+      "utf8",
+    ));
+    assert.equal(manifest.schema, "miso.session.canonical-writer-corpus.v1");
+
+    for (const entry of manifest.documents) {
+      const expected = entry.path === undefined
+        ? entry.canonical
+        : await readFile(new URL(`../../${entry.path}`, import.meta.url), "utf8");
+      assert.equal(writeCanonicalSessionDocument(JSON.parse(expected)), expected, entry.id);
+    }
+
+    const full = JSON.parse(await readFile(
+      new URL("../../fixtures/session/v1/canonical.json", import.meta.url),
+      "utf8",
+    ));
+    const view = new DataView(new ArrayBuffer(4));
+    for (const entry of manifest.f32) {
+      view.setUint32(0, Number.parseInt(entry.bits, 16), true);
+      const model = structuredClone(full);
+      model.routes[0].gain_db = view.getFloat32(0, true);
+      const line = writeCanonicalSessionDocument(model).split("\n")
+        .find((candidate) => candidate.includes('"gain_db":'));
+      assert.equal(line?.trim(), `"gain_db": ${entry.canonical}`, entry.id);
+    }
+
+    const minimal = JSON.parse(await readFile(
+      new URL("../../fixtures/session/v1/canonical-minimal.json", import.meta.url),
+      "utf8",
+    ));
+    for (const entry of manifest.strings) {
+      const model = structuredClone(minimal);
+      model.session_id = entry.value;
+      const line = writeCanonicalSessionDocument(model).split("\n")
+        .find((candidate) => candidate.includes('"session_id":'));
+      assert.equal(line?.trim(), `"session_id": ${entry.canonical},`, entry.id);
+    }
   });
 });
 
-/** The checked-in `builtins-automation.toml` fixture, rebuilt through the SDK. */
+/** The checked-in `builtins-automation.json` fixture, rebuilt through the SDK. */
 function builtinsAutomationFixture() {
   const span = (shape, startSample, endSample, startValue, endValue) =>
     [{ shape, startSample, endSample, startValue, endValue }];

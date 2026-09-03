@@ -155,7 +155,7 @@ impl FloorRow {
 /// The floor table: what every session workload's strip requires, and what isolates it.
 ///
 /// `nine_track_baseline` is deliberately absent. It is the one row rendered from a different
-/// fixture (`fixtures/session/v1/parametric-eq-nine-track.toml`), whose band count and builtins
+/// fixture (`fixtures/session/v1/parametric-eq-nine-track.json`), whose band count and builtins
 /// were never inventoried, and a floor stated for the wrong fixture would be worse than no floor
 /// at all. The record says so: its `floor_basis` is `not_derived` and its floor columns are null.
 pub(crate) fn floor_row(workload: Workload) -> Option<FloorRow> {

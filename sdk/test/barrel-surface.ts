@@ -108,6 +108,15 @@ type HeadlessAsset =
 type BrowserPolicy =
   Assert<Exact<typeof browserBarrel.scratchBootOptions, typeof browserBarrel.scratchBootOptions>>;
 
+// The sole public authoring path is SessionBuilder.toJson(); arbitrary-model serialization stays
+// behind the internal test hook and must not acquire a declaration on any package barrel.
+// @ts-expect-error canonicalSessionJson is intentionally not a public root declaration
+type NoRootCanonicalSessionJson = typeof barrel.canonicalSessionJson;
+// @ts-expect-error canonicalSessionJson is intentionally not a public headless declaration
+type NoHeadlessCanonicalSessionJson = typeof headlessBarrel.canonicalSessionJson;
+// @ts-expect-error canonicalSessionJson is intentionally not a public browser declaration
+type NoBrowserCanonicalSessionJson = typeof browserBarrel.canonicalSessionJson;
+
 export type BarrelSurfacePins = [
   AgentCatalogFn,
   AgentParameterFn,
@@ -141,4 +150,7 @@ export type BarrelSurfacePins = [
   RootSessionBuilder,
   HeadlessAsset,
   BrowserPolicy,
+  NoRootCanonicalSessionJson,
+  NoHeadlessCanonicalSessionJson,
+  NoBrowserCanonicalSessionJson,
 ];

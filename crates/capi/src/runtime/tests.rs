@@ -2,7 +2,7 @@
 
 use super::*;
 use protocol::{ExpectedRevision, RequestId, SessionRevision, StatusCode};
-use session::parse_session_toml;
+use session::parse_session_json;
 
 /// Region end of the single fixture source, read through the facade's accessor.
 fn source_region_end(sources: &SourceControlSet) -> u64 {
@@ -12,7 +12,7 @@ fn source_region_end(sources: &SourceControlSet) -> u64 {
         .end
 }
 
-const SESSION: &str = include_str!("../../../../fixtures/session/v1/parametric-eq-nine-track.toml");
+const SESSION: &str = include_str!("../../../../fixtures/session/v1/parametric-eq-nine-track.json");
 
 fn limits() -> CompileLimits {
     CompileLimits {
@@ -20,7 +20,7 @@ fn limits() -> CompileLimits {
         source_ring_frames: 1_024,
         maximum_automation_spans_per_block: 128,
         reserved0: 0,
-        maximum_toml_bytes: 1_000_000,
+        maximum_document_bytes: 1_000_000,
         maximum_diagnostic_bytes: 4_096,
         maximum_tracks: 100,
         maximum_sources: 100,
@@ -85,8 +85,8 @@ fn pinned_hex(value: &str) -> Vec<u8> {
 
 const ALL_COMMAND_RESPONSE_VECTORS: [&str; 11] = [
     "4d49534f43544c00010000003000020001000000c801000001000000000000002a000000000000001b000000000000000100020102000000010000000000000002000201020000000000000000000000030002010200000001000000000000000400020102000000000000000000000005000401080000000010000000000000060003010400000000080000000000000700040108000000001000000000000008000101010000000400000000000000090002010200000000010000000000000a0004010800000001000000000000000b0004010800000000100000000000000c0004010800000001000000000000000d0004010800000001000000000000000e0004010800000002000000000000000f00040108000000010000000000000010000401080000001000000000000000110004010800000000200000000000001200040108000000001000000000000013000401080000008000000000000000140004010800000080000000000000001500020102000000000100000000000016000201020000000001000000000000170002010200000000010000000000001800030104000000000800000000000019000c01160000000100020003000400050006000700080009000a000b0000001a000c010c000000018002801080208021803080000000001b00040108000000ff3f000000000000",
-    // #241 re-pin: canonical session snapshot bytes are 9,873 - 171 = 9,702 (0x25e6).
-    "4d49534f43544c000100000030000200020000004000000002000000000000002a0000000000000004000000000000000100040108000000e6250000000000000200040108000000000000000000000003000a0101000000730000000000000004000801010000000000000000000000",
+    // #338 re-pin: canonical JSON snapshot bytes are 16,712 (0x4148), beginning with `{`.
+    "4d49534f43544c000100000030000200020000004000000002000000000000002a000000000000000400000000000000010004010800000048410000000000000200040108000000000000000000000003000a01010000007b0000000000000004000801010000000000000000000000",
     "4d49534f43544c000100000030000200040000002000000003000000000000002a0000000000000002000000000000000100030104000000000000000000000002000801010000000100000000000000",
     "4d49534f43544c00010000003000020005000d004800000004000000000000002a00000000000000020000000000000001000b01300000000200000000000000010009011000000070726f746f636f6c2e6661696c7572650200010101000000030000000000000002000301040000000000000000000000",
     "4d49534f43544c00010000003000020006000d004800000005000000000000002a00000000000000020000000000000001000b01300000000200000000000000010009011000000070726f746f636f6c2e6661696c7572650200010101000000030000000000000002000301040000000000000000000000",
@@ -99,7 +99,7 @@ const ALL_COMMAND_RESPONSE_VECTORS: [&str; 11] = [
 ];
 
 fn generated_parity_session(track_count: usize, sample_rate_hz: u32) -> String {
-    let mut model = parse_session_toml(SESSION).expect("accepted parity base");
+    let mut model = parse_session_json(SESSION).expect("accepted parity base");
     model.sample_rate_hz = sample_rate_hz;
     model.sources[0].frames = 192;
     if track_count == 1 {
@@ -125,7 +125,7 @@ fn generated_parity_session(track_count: usize, sample_rate_hz: u32) -> String {
         model.tracks.push(track);
         model.routes.push(route);
     }
-    session::canonical_session_toml(&model).expect("canonical parity session")
+    session::canonical_session_json(&model).expect("canonical parity session")
 }
 
 fn submit_c(
@@ -440,7 +440,7 @@ fn generated_session_prepares_independent_source_and_plan_ownership() {
 
 #[test]
 fn ring_zero_derives_from_the_document_and_matches_the_explicit_value() {
-    let model = parse_session_toml(SESSION).expect("session");
+    let model = parse_session_json(SESSION).expect("session");
     let derived = host_core::default_source_ring_frames(model.sample_rate_hz, model.quantum_frames);
     assert_eq!(derived, 5_120);
 
@@ -562,7 +562,7 @@ fn structural_command_keeps_protocol_plan_provider_and_event_epochs_atomic() {
         None
     );
 
-    let model = parse_session_toml(SESSION).expect("source-changing model");
+    let model = parse_session_json(SESSION).expect("source-changing model");
     let source = &model.sources[0];
     let second_edit = protocol::SessionEdit::SetSourceContent {
         source_id: model.sources[0].id.clone(),
@@ -1510,9 +1510,9 @@ fn direct_and_c_render_match_one_and_ten_tracks_across_launch_rates() {
 #[test]
 fn barrier_schedule_separates_one_source_producer_from_exclusive_render() {
     let mut model =
-        parse_session_toml(&generated_parity_session(1, 48_000)).expect("concurrency session");
+        parse_session_json(&generated_parity_session(1, 48_000)).expect("concurrency session");
     model.sources[0].frames = 1_024;
-    let session = session::canonical_session_toml(&model).expect("canonical");
+    let session = session::canonical_session_json(&model).expect("canonical");
     let children = compile_children(&session, limits()).expect("concurrent children");
     let session = Box::into_raw(Box::new(crate::Session::new(
         children.session,

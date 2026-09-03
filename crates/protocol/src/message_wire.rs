@@ -157,7 +157,7 @@ pub struct SessionSnapshotRequest {
 pub struct SessionSnapshot<'a> {
     pub total_bytes: u64,
     pub offset: u64,
-    pub canonical_toml_chunk: &'a [u8],
+    pub canonical_json_chunk: &'a [u8],
     pub eof: bool,
 }
 
@@ -1000,7 +1000,7 @@ impl ProtocolCodec {
         checked_sink_len(self, &mut sink)
     }
 
-    /// Encode a typed canonical-TOML snapshot chunk.
+    /// Encode a typed canonical-JSON snapshot chunk.
     pub fn encode_snapshot(
         &self,
         value: SessionSnapshot<'_>,
@@ -1026,17 +1026,17 @@ impl ProtocolCodec {
         let result = SessionSnapshot {
             total_bytes: read_u64(one_spec!(message, schema::snapshot::TOTAL_BYTES)?)?,
             offset: read_u64(one_spec!(message, schema::snapshot::OFFSET)?)?,
-            canonical_toml_chunk: one_spec!(message, schema::snapshot::CANONICAL_TOML_CHUNK)?,
+            canonical_json_chunk: one_spec!(message, schema::snapshot::CANONICAL_JSON_CHUNK)?,
             eof: read_bool(one_spec!(message, schema::snapshot::EOF)?)?,
         };
         if result.offset > result.total_bytes
-            || u64::try_from(result.canonical_toml_chunk.len())
+            || u64::try_from(result.canonical_json_chunk.len())
                 .map_err(|_| DecodeError::LimitExceeded)?
                 > result.total_bytes.saturating_sub(result.offset)
             || result.eof
                 != (result
                     .offset
-                    .saturating_add(result.canonical_toml_chunk.len() as u64)
+                    .saturating_add(result.canonical_json_chunk.len() as u64)
                     == result.total_bytes)
         {
             return Err(DecodeError::InvalidTlv);
@@ -2327,13 +2327,13 @@ pub(crate) fn write_snapshot(
     value: SessionSnapshot<'_>,
 ) -> Result<(), EncodeError> {
     if value.offset > value.total_bytes
-        || u64::try_from(value.canonical_toml_chunk.len())
+        || u64::try_from(value.canonical_json_chunk.len())
             .map_err(|_| EncodeError::LimitExceeded)?
             > value.total_bytes.saturating_sub(value.offset)
         || value.eof
             != (value
                 .offset
-                .saturating_add(value.canonical_toml_chunk.len() as u64)
+                .saturating_add(value.canonical_json_chunk.len() as u64)
                 == value.total_bytes)
     {
         return Err(EncodeError::LimitExceeded);
@@ -2347,8 +2347,8 @@ pub(crate) fn write_snapshot(
     write_spec!(sink, schema::snapshot::OFFSET, &value.offset.to_le_bytes())?;
     write_spec!(
         sink,
-        schema::snapshot::CANONICAL_TOML_CHUNK,
-        value.canonical_toml_chunk
+        schema::snapshot::CANONICAL_JSON_CHUNK,
+        value.canonical_json_chunk
     )?;
     write_spec!(sink, schema::snapshot::EOF, &[u8::from(value.eof)])
 }
@@ -4461,7 +4461,7 @@ mod tests {
         let snapshot = SessionSnapshot {
             total_bytes: 5,
             offset: 2,
-            canonical_toml_chunk: b"cde",
+            canonical_json_chunk: b"cde",
             eof: true,
         };
         let mut snapshot_bytes = vec![0; codec.encoded_snapshot_len(snapshot).expect("length")];
@@ -4521,7 +4521,7 @@ mod tests {
         let snapshot = SessionSnapshot {
             total_bytes: 5,
             offset: 2,
-            canonical_toml_chunk: &[b'a', 0xc3],
+            canonical_json_chunk: &[b'a', 0xc3],
             eof: false,
         };
         let mut snapshot_bytes = [0_u8; 64];

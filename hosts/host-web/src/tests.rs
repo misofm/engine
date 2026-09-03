@@ -1,19 +1,19 @@
 use core::mem::{offset_of, size_of};
 
-use session::{canonical_session_toml, parse_session_toml};
+use session::{canonical_session_json, parse_session_json};
 
 use super::*;
 
 fn one_track_session(quantum: u32) -> String {
-    let mut model = parse_session_toml(include_str!(
-        "../../../fixtures/session/v1/parametric-eq-nine-track.toml"
+    let mut model = parse_session_json(include_str!(
+        "../../../fixtures/session/v1/parametric-eq-nine-track.json"
     ))
     .expect("accepted fixture");
     model.quantum_frames = quantum;
     model.sources[0].frames = u64::from(quantum) * 2;
     model.tracks.truncate(1);
     model.routes.truncate(1);
-    canonical_session_toml(&model).expect("canonical one-track session")
+    canonical_session_json(&model).expect("canonical one-track session")
 }
 
 /// The browser fixture's identity session, re-shaped for one test.
@@ -22,16 +22,16 @@ fn one_track_session(quantum: u32) -> String {
 /// hard-left/hard-right pan whose 2x2 matrix is the identity. The output is therefore the submitted
 /// source frames, which is what makes the submitted ramp its own oracle.
 fn identity_session(quantum: u32, _ring_frames: u32, length_samples: u64) -> String {
-    let mut model = parse_session_toml(include_str!("../tests/browser-v1/session.toml"))
+    let mut model = parse_session_json(include_str!("../tests/browser-v1/session.json"))
         .expect("accepted identity fixture");
     model.quantum_frames = quantum;
     model.sources[0].frames = length_samples;
-    canonical_session_toml(&model).expect("canonical identity session")
+    canonical_session_json(&model).expect("canonical identity session")
 }
 
 fn prepared_host(quantum: u32) -> AudioWorkletEngineHost {
-    let toml = one_track_session(quantum);
-    AudioWorkletEngineHost::boot(toml.as_bytes(), boot_options(quantum))
+    let document = one_track_session(quantum);
+    AudioWorkletEngineHost::boot(document.as_bytes(), boot_options(quantum))
         .unwrap_or_else(|failure| panic!("boot: {}", String::from_utf8_lossy(failure.diagnostic())))
 }
 
@@ -93,21 +93,24 @@ fn exact_retained_report_total(resources: &WebResourceReport) -> u64 {
         .expect("independent exact retained sum")
 }
 
-fn maximum_document_with_dense_invalid_automation() -> Vec<u8> {
-    const BASE: &str = include_str!("../tests/browser-v1/session.toml");
-    const EMPTY_AUTOMATION: &str = "automation = []";
-    const HEADER: &str = r#"automation = [
-  { id = "dense-invalid", target = { entity_id = "track", rack = "builtins", effect_id = "strip", parameter_id = 5, channel = "both" }, segments = [
-"#;
-    const INVALID_SEGMENT: &str = "    {shape=\"step\",start_sample=0,end_sample=0,start_value=0.0,end_value=0.0,unit=\"db\"},\n";
-    const FOOTER: &str = "  ] },\n]";
+struct DenseInvalidAutomationDocument {
+    bytes: Vec<u8>,
+    segment_count: usize,
+}
+
+fn maximum_document_with_dense_invalid_automation() -> DenseInvalidAutomationDocument {
+    const BASE: &str = include_str!("../tests/browser-v1/session.json");
+    const EMPTY_AUTOMATION: &str = "\"automation\": []";
+    const HEADER: &str = r#""automation": [{"id":"dense-invalid","target":{"entity_id":"track","rack":"builtins","effect_id":"strip","parameter_id":5,"channel":"both"},"segments":["#;
+    const INVALID_SEGMENT: &str = "{\"shape\":\"step\",\"start_sample\":\"0\",\"end_sample\":\"0\",\"start_value\":0.0,\"end_value\":0.0,\"unit\":\"db\"}";
+    const FOOTER: &str = "]}]";
 
     let (before, after) = BASE
         .split_once(EMPTY_AUTOMATION)
         .expect("browser fixture has the automation replacement seam");
     let maximum = MAXIMUM_DOCUMENT_BYTES as usize;
     let fixed_bytes = before.len() + HEADER.len() + FOOTER.len() + after.len();
-    let segment_count = (maximum - fixed_bytes - 2) / INVALID_SEGMENT.len();
+    let segment_count = (maximum - fixed_bytes + 1) / (INVALID_SEGMENT.len() + 1);
     assert!(
         segment_count > 10_000,
         "fixture remains densely adversarial"
@@ -116,18 +119,54 @@ fn maximum_document_with_dense_invalid_automation() -> Vec<u8> {
     let mut document = String::with_capacity(maximum);
     document.push_str(before);
     document.push_str(HEADER);
-    for _ in 0..segment_count {
+    for position in 0..segment_count {
+        if position != 0 {
+            document.push(',');
+        }
         document.push_str(INVALID_SEGMENT);
     }
     document.push_str(FOOTER);
     document.push_str(after);
     let padding = maximum - document.len();
-    assert!(padding >= 2, "room for a final TOML comment");
-    document.push('\n');
-    document.push('#');
-    document.extend(core::iter::repeat_n('x', padding - 2));
+    document.extend(core::iter::repeat_n(' ', padding));
     assert_eq!(document.len(), maximum);
-    document.into_bytes()
+    DenseInvalidAutomationDocument {
+        bytes: document.into_bytes(),
+        segment_count,
+    }
+}
+
+#[test]
+fn maximum_document_dense_invalid_fixture_reaches_bounded_semantic_validation() {
+    let fixture = maximum_document_with_dense_invalid_automation();
+    assert_eq!(fixture.bytes.len(), MAXIMUM_DOCUMENT_BYTES as usize);
+    assert!(fixture.segment_count > 10_000);
+    let source = core::str::from_utf8(&fixture.bytes).expect("fixture is UTF-8 JSON");
+    assert!(
+        !source.contains("{}"),
+        "fixture has no empty sentinel segment"
+    );
+    assert_eq!(
+        source
+            .matches("\"start_sample\":\"0\",\"end_sample\":\"0\"")
+            .count(),
+        fixture.segment_count,
+        "every repeated segment has equal bounds"
+    );
+
+    let failure = parse_session_json(source).expect_err("equal segment bounds must be invalid");
+    let diagnostics = failure.diagnostics();
+    assert_eq!(diagnostics.len(), 64, "semantic diagnostics stay bounded");
+    for (position, diagnostic) in diagnostics.iter().enumerate() {
+        assert_eq!(
+            diagnostic.code,
+            session::DiagnosticCode::AutomationInvalidRange
+        );
+        assert_eq!(
+            diagnostic.path.to_string(),
+            format!("$.automation[0].segments[{position}].end_sample")
+        );
+    }
 }
 
 #[test]
@@ -137,7 +176,7 @@ fn frozen_layouts_and_values_are_exact() {
     assert_eq!(size_of::<WebStatus>(), 80);
     assert_eq!(size_of::<WebResourceReport>(), 224);
     assert_eq!(MAXIMUM_DOCUMENT_BYTES, 1 << 20);
-    assert_eq!(PARSE_TRANSIENT_MULTIPLIER, 80);
+    assert_eq!(PARSE_TRANSIENT_MULTIPLIER, 17);
     assert_eq!(DEFAULT_MAXIMUM_MEMORY_BYTES, 512 << 20);
     assert_eq!(DIAGNOSTIC_BYTES, 1 << 14);
     assert_eq!(
@@ -308,11 +347,11 @@ fn raw_ffi_validates_handle_layout_overflow_and_transactional_failure() {
     );
     assert_eq!(miso_engine_web_v1_boot_result(), RESULT_REFUSED_DOCUMENT);
 
-    let toml = one_track_session(128);
-    let handle = crate::ffi::test_boot(toml.as_bytes(), boot_options(128));
+    let document = one_track_session(128);
+    let handle = crate::ffi::test_boot(document.as_bytes(), boot_options(128));
     assert_ne!(handle, 0);
-    crate::ffi::test_stage_document(toml.as_bytes());
-    assert_eq!(miso_engine_web_v1_boot(toml.len() as u32), 0);
+    crate::ffi::test_stage_document(document.as_bytes());
+    assert_eq!(miso_engine_web_v1_boot(document.len() as u32), 0);
     assert_eq!(miso_engine_web_v1_boot_result(), RESULT_REFUSED_LIFECYCLE);
     assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
 }
@@ -320,12 +359,12 @@ fn raw_ffi_validates_handle_layout_overflow_and_transactional_failure() {
 #[test]
 fn raw_ffi_uses_stable_staging_and_exact_output_quantum_without_growth() {
     let quantum = 64_u32;
-    let toml = one_track_session(quantum);
+    let document = one_track_session(quantum);
     let options = WebBootOptions {
         source_ring_frames: quantum,
         ..boot_options(quantum)
     };
-    let handle = crate::ffi::test_boot(toml.as_bytes(), options);
+    let handle = crate::ffi::test_boot(document.as_bytes(), options);
     assert_ne!(handle, 0);
     let status_address = crate::ffi::test_status_address(handle);
     let resource_address = crate::ffi::test_resource_address(handle);
@@ -382,7 +421,7 @@ fn raw_ffi_uses_stable_staging_and_exact_output_quantum_without_growth() {
     assert!(resources.bridge_retained_bytes <= DEFAULT_MAXIMUM_MEMORY_BYTES);
     assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
     assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_INVALID_ARGUMENT);
-    let replacement = crate::ffi::test_boot(toml.as_bytes(), options);
+    let replacement = crate::ffi::test_boot(document.as_bytes(), options);
     assert_ne!(replacement, 0);
     assert_ne!(replacement, handle);
     assert_eq!(
@@ -442,18 +481,21 @@ fn malformed_config_and_atomic_compile_failure_are_sticky() {
 
 #[test]
 fn compile_resource_caps_are_inclusive_and_one_below_rejects() {
-    let toml = one_track_session(128);
-    let parse_projection = toml.len() as u64 * PARSE_TRANSIENT_MULTIPLIER;
+    let mut document = one_track_session(128);
+    // Keep this specifically a parser-projection boundary after JSON's denser model changed the
+    // representative fixture ratio: insignificant trailing whitespace raises only parser input.
+    document.extend(core::iter::repeat_n(' ', 4_096));
+    let parse_projection = document.len() as u64 * PARSE_TRANSIENT_MULTIPLIER;
     let accepted = WebBootOptions {
         maximum_memory_bytes: parse_projection,
         ..boot_options(128)
     };
-    AudioWorkletEngineHost::boot(toml.as_bytes(), accepted).expect("inclusive budget");
+    AudioWorkletEngineHost::boot(document.as_bytes(), accepted).expect("inclusive budget");
     let refused = WebBootOptions {
         maximum_memory_bytes: parse_projection - 1,
         ..boot_options(128)
     };
-    let failure = AudioWorkletEngineHost::boot(toml.as_bytes(), refused)
+    let failure = AudioWorkletEngineHost::boot(document.as_bytes(), refused)
         .err()
         .expect("one byte below parse projection");
     assert_eq!(failure.result(), RESULT_REFUSED_BUDGET);
@@ -470,26 +512,27 @@ fn compile_resource_caps_are_inclusive_and_one_below_rejects() {
 /// Issue #240 built-in eval 4: time the complete production refusal, not the diagnostic encoder.
 ///
 /// The 234 ms worst-accepted Wasm boot measured for the brief leaves a 4.27x margin under this
-/// fixed one-second CI wall. Every invalid segment reaches the session parser and semantic
-/// validator; retaining all of their source spans makes this exact 1 MiB shape take seconds.
+/// fixed one-second CI wall. The separate phase oracle proves that the exact 1 MiB typed document
+/// reaches semantic validation and retains only the first 64 invalid-range source spans.
 #[test]
 fn maximum_document_dense_invalid_boot_is_typed_and_finishes_under_one_second() {
     use std::time::{Duration, Instant};
 
-    let document = maximum_document_with_dense_invalid_automation();
-    assert_eq!(document.len(), MAXIMUM_DOCUMENT_BYTES as usize);
+    let fixture = maximum_document_with_dense_invalid_automation();
+    assert_eq!(fixture.bytes.len(), MAXIMUM_DOCUMENT_BYTES as usize);
     let started = Instant::now();
-    let failure = AudioWorkletEngineHost::boot(&document, WebBootOptions::default())
+    let failure = AudioWorkletEngineHost::boot(&fixture.bytes, WebBootOptions::default())
         .err()
         .expect("dense invalid automation must refuse");
     let elapsed = started.elapsed();
     assert_eq!(failure.result(), RESULT_REFUSED_DOCUMENT);
-    assert!(
+    assert_eq!(
         failure
             .diagnostic()
-            .starts_with(b"automation.invalid_range\t$.automation[0].segments[0].end_sample\n"),
-        "typed automation refusal: {}",
-        String::from_utf8_lossy(failure.diagnostic())
+            .split(|byte| *byte == b'\n')
+            .next()
+            .expect("first diagnostic"),
+        b"automation.invalid_range\t$.automation[0].segments[0].end_sample"
     );
     assert_eq!(
         failure
@@ -501,6 +544,13 @@ fn maximum_document_dense_invalid_boot_is_typed_and_finishes_under_one_second() 
         "the full boot returns the fixed diagnostic count"
     );
     assert!(
+        failure
+            .diagnostic()
+            .ends_with(b"automation.invalid_range\t$.automation[0].segments[63].end_sample\n"),
+        "the final retained semantic diagnostic is segment 63: {}",
+        String::from_utf8_lossy(failure.diagnostic())
+    );
+    assert!(
         elapsed < Duration::from_secs(1),
         "exact-1-MiB dense invalid full boot took {elapsed:?}"
     );
@@ -509,8 +559,8 @@ fn maximum_document_dense_invalid_boot_is_typed_and_finishes_under_one_second() 
 #[test]
 fn quoted_root_shape_keys_self_configure_without_a_second_parser() {
     for (sample_rate_hz, quantum_frames) in [(48_000, 128), (96_000, 127)] {
-        let mut model = parse_session_toml(include_str!(
-            "../../../fixtures/session/v1/parametric-eq-nine-track.toml"
+        let mut model = parse_session_json(include_str!(
+            "../../../fixtures/session/v1/parametric-eq-nine-track.json"
         ))
         .expect("accepted fixture");
         model.sample_rate_hz = sample_rate_hz;
@@ -518,10 +568,7 @@ fn quoted_root_shape_keys_self_configure_without_a_second_parser() {
         model.sources[0].frames = u64::from(quantum_frames) * 2;
         model.tracks.truncate(1);
         model.routes.truncate(1);
-        let document = canonical_session_toml(&model)
-            .expect("canonical shape fixture")
-            .replacen("sample_rate_hz =", "\"sample_rate_hz\" =", 1)
-            .replacen("quantum_frames =", "\"quantum_frames\" =", 1);
+        let document = canonical_session_json(&model).expect("canonical shape fixture");
         let host = AudioWorkletEngineHost::boot(&document.into_bytes(), WebBootOptions::default())
             .expect("quoted-key document self-configures");
         assert_eq!(host.status().sample_rate_hz, sample_rate_hz);
@@ -662,7 +709,7 @@ fn representative_retained_projection_tracks_the_post_prepare_exact_aggregate() 
         ),
         (
             "parametric-eq-nine-track",
-            include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.toml").to_owned(),
+            include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json").to_owned(),
             WebBootOptions {
                 source_ring_frames: 512,
                 ..boot_options(128)
@@ -670,7 +717,7 @@ fn representative_retained_projection_tracks_the_post_prepare_exact_aggregate() 
         ),
         (
             "console-sixty-four-track",
-            include_str!("../../../fixtures/session/v1/console-sixty-four-track.toml").to_owned(),
+            include_str!("../../../fixtures/session/v1/console-sixty-four-track.json").to_owned(),
             WebBootOptions {
                 source_ring_frames: 512,
                 console_command_queue_records: u64::from(DEFAULT_COMMAND_QUEUE_RECORDS),
@@ -703,12 +750,12 @@ fn representative_retained_projection_tracks_the_post_prepare_exact_aggregate() 
 #[test]
 fn source_backpressure_seek_render_and_stable_output_are_bounded() {
     let quantum = 128_usize;
-    let toml = one_track_session(quantum as u32);
+    let document = one_track_session(quantum as u32);
     let options = WebBootOptions {
         source_ring_frames: quantum as u32,
         ..boot_options(quantum as u32)
     };
-    let mut host = AudioWorkletEngineHost::boot(toml.as_bytes(), options).expect("boot");
+    let mut host = AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("boot");
     let source_id_ptr = host.source_id_mut().expect("ID").as_ptr();
     let source_pcm_ptr = host.source_pcm_mut().expect("PCM").as_ptr();
     let output_ptr = host.output_pcm().expect("output").as_ptr();
@@ -845,12 +892,12 @@ fn render_failure_retains_ownership_and_silences() {
 #[test]
 fn facade_source_rules_reach_the_browser_host() {
     let quantum = 128_usize;
-    let toml = one_track_session(quantum as u32);
+    let document = one_track_session(quantum as u32);
     let options = WebBootOptions {
         source_ring_frames: quantum as u32,
         ..boot_options(quantum as u32)
     };
-    let host = AudioWorkletEngineHost::boot(toml.as_bytes(), options).expect("boot");
+    let host = AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("boot");
 
     let left = vec![0.25_f32; quantum];
     let right = vec![-0.5_f32; quantum];
@@ -994,8 +1041,8 @@ fn ring_prefill_survives_stall() {
     assert_eq!(stall_quanta, 38, "100 ms at 48 kHz / 128 is 38 quanta");
 
     let length_samples = u64::from(ring_frames) + 2 * u64::from(QUANTUM);
-    let toml = identity_session(QUANTUM, ring_frames, length_samples);
-    let mut host = AudioWorkletEngineHost::boot(toml.as_bytes(), boot_options(QUANTUM))
+    let document = identity_session(QUANTUM, ring_frames, length_samples);
+    let mut host = AudioWorkletEngineHost::boot(document.as_bytes(), boot_options(QUANTUM))
         .expect("boot with derived ring");
 
     // A distinct value per absolute frame, so a stale or repeated block cannot pass by accident.
@@ -1083,12 +1130,12 @@ fn native_identity_session_digest_pins_the_wasm_parity() {
     let second = block(-0.25, 0.00048828125);
     let silent = vec![0.0_f32; QUANTUM as usize];
 
-    let toml = identity_session(QUANTUM, QUANTUM, 256);
+    let document = identity_session(QUANTUM, QUANTUM, 256);
     let options = WebBootOptions {
         source_ring_frames: QUANTUM,
         ..boot_options(QUANTUM)
     };
-    let mut host = AudioWorkletEngineHost::boot(toml.as_bytes(), options).expect("boot");
+    let mut host = AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("boot");
 
     let submit = |host: &mut AudioWorkletEngineHost, left: &[f32], generation, start, last| {
         let planes: [&[f32]; 2] = [left, &silent];
@@ -1204,13 +1251,13 @@ fn native_command_timeline_digest_pins_the_wasm_parity() {
     // compile byte-identical input. It is the browser identity session plus one dynamic-rack
     // parametric EQ whose band 1 is a low shelf -- a shelf, not a bell, so a DC fixture can
     // actually witness the parameter move.
-    let toml = include_str!("../tests/browser-v1/command-session.toml");
+    let document = include_str!("../tests/browser-v1/command-session.json");
     let options = WebBootOptions {
         source_ring_frames: QUANTUM,
         console_command_queue_records: u64::from(DEPTH),
         ..boot_options(QUANTUM)
     };
-    let mut host = AudioWorkletEngineHost::boot(toml.as_bytes(), options).expect("boot");
+    let mut host = AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("boot");
     assert_eq!(host.console_tracks().len(), 1);
 
     let plane = vec![0.25_f32; QUANTUM as usize];
@@ -1517,7 +1564,7 @@ fn stage_command(
 
 /// A console host over the browser identity fixture: one track, unity everything, one-quantum ring.
 fn console_host(quantum: u32, meter_blocks: u64) -> AudioWorkletEngineHost {
-    let toml = identity_session(quantum, quantum, u64::from(quantum) * 64);
+    let document = identity_session(quantum, quantum, u64::from(quantum) * 64);
     let options = WebBootOptions {
         require_sample_rate_hz: 48_000,
         require_quantum_frames: quantum,
@@ -1526,7 +1573,7 @@ fn console_host(quantum: u32, meter_blocks: u64) -> AudioWorkletEngineHost {
         console_meter_blocks: meter_blocks,
         ..WebBootOptions::explicit_defaults()
     };
-    AudioWorkletEngineHost::boot(toml.as_bytes(), options).expect("console boot")
+    AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("console boot")
 }
 
 /// Feed one full quantum of a constant left plane and render it.
@@ -1646,13 +1693,13 @@ fn command_ack_names_the_exact_application_sample() {
 /// A console host over the *command* fixture: the identity session plus one dynamic-rack
 /// parametric EQ, so an effect-addressed command has something real to address (issue #140 A).
 fn effect_console_host(quantum: u32, depth: u64) -> AudioWorkletEngineHost {
-    let toml = include_str!("../tests/browser-v1/command-session.toml");
+    let document = include_str!("../tests/browser-v1/command-session.json");
     let options = WebBootOptions {
         source_ring_frames: quantum,
         console_command_queue_records: depth,
         ..boot_options(quantum)
     };
-    AudioWorkletEngineHost::boot(toml.as_bytes(), options).expect("effect console boot")
+    AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("effect console boot")
 }
 
 /// #140 B / E1: a fader command's acknowledgement names the exact sample it takes effect at.
@@ -2342,7 +2389,7 @@ fn observation_host(
     meter_blocks: u64,
     master: Option<u32>,
 ) -> AudioWorkletEngineHost {
-    let toml = include_str!("../../../fixtures/session/v1/observation-frame-shape.toml");
+    let document = include_str!("../../../fixtures/session/v1/observation-frame-shape.json");
     let options = WebBootOptions {
         source_ring_frames: quantum * 4,
         console_command_queue_records: DEFAULT_COMMAND_QUEUE_RECORDS as u64,
@@ -2351,7 +2398,7 @@ fn observation_host(
         console_master_track_plus_one: master.map_or(0, |track| u64::from(track) + 1),
         ..boot_options(quantum)
     };
-    AudioWorkletEngineHost::boot(toml.as_bytes(), options).expect("observation boot")
+    AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("observation boot")
 }
 
 /// Feed one quantum of a constant to every track's shared source and render it.
@@ -2631,14 +2678,14 @@ fn observation_misuse_is_typed_and_all_or_nothing() {
 #[test]
 fn a_subscription_without_capacity_is_observation_unbound() {
     const QUANTUM: u32 = 128;
-    let toml = include_str!("../../../fixtures/session/v1/observation-frame-shape.toml");
+    let document = include_str!("../../../fixtures/session/v1/observation-frame-shape.json");
     let options = WebBootOptions {
         source_ring_frames: QUANTUM * 4,
         console_command_queue_records: DEFAULT_COMMAND_QUEUE_RECORDS as u64,
         console_meter_blocks: DEFAULT_METER_BLOCKS as u64,
         ..boot_options(QUANTUM)
     };
-    let mut host = AudioWorkletEngineHost::boot(toml.as_bytes(), options).expect("boot");
+    let mut host = AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("boot");
     assert!(!host.observation_attached());
     assert_eq!(host.resources().observation_retained_bytes, 0);
     assert_eq!(
@@ -2659,7 +2706,7 @@ fn a_subscription_without_capacity_is_observation_unbound() {
 /// Observation capacity is refused at configuration time when nothing can carry the subscription.
 #[test]
 fn observation_configuration_words_are_validated() {
-    let toml = one_track_session(128);
+    let document = one_track_session(128);
     for options in [
         WebBootOptions {
             console_observation_taps: 4,
@@ -2676,12 +2723,12 @@ fn observation_configuration_words_are_validated() {
             ..boot_options(128)
         },
     ] {
-        let failure = AudioWorkletEngineHost::boot(toml.as_bytes(), options)
+        let failure = AudioWorkletEngineHost::boot(document.as_bytes(), options)
             .err()
             .expect("invalid console options");
         assert_eq!(failure.result(), RESULT_REFUSED_OPTIONS);
     }
-    AudioWorkletEngineHost::boot(toml.as_bytes(), WebBootOptions::console_defaults())
+    AudioWorkletEngineHost::boot(document.as_bytes(), WebBootOptions::console_defaults())
         .expect("zero observation words remain valid");
 }
 
@@ -2707,7 +2754,7 @@ fn native_observation_timeline_digest_pins_the_wasm_parity() {
     const WINDOW_BLOCKS: u32 = 2;
     const BLOCKS: u64 = 12;
 
-    let toml = include_str!("../tests/browser-v1/observation-session.toml");
+    let document = include_str!("../tests/browser-v1/observation-session.json");
     let run = |taps: u64| -> (String, f32, Option<f32>, f32, u64, u32, u32) {
         let options = WebBootOptions {
             source_ring_frames: QUANTUM,
@@ -2717,7 +2764,7 @@ fn native_observation_timeline_digest_pins_the_wasm_parity() {
             console_master_track_plus_one: if taps == 0 { 0 } else { 1 },
             ..boot_options(QUANTUM)
         };
-        let mut host = AudioWorkletEngineHost::boot(toml.as_bytes(), options).expect("boot");
+        let mut host = AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("boot");
         assert_eq!(host.console_tracks().len(), 1);
         assert_eq!(
             host.resources().observation_retained_bytes == 0,
@@ -3044,7 +3091,7 @@ fn observation_unit_conversion_is_declared_and_clamped() {
 /// read the wrong row is visible too. The one track points at `mid`, which is neither the first nor
 /// the last of the three by either ordering.
 fn three_source_session(quantum: u32) -> String {
-    let mut model = parse_session_toml(include_str!("../tests/browser-v1/session.toml"))
+    let mut model = parse_session_json(include_str!("../tests/browser-v1/session.json"))
         .expect("accepted identity fixture");
     model.quantum_frames = quantum;
     let template = model.sources[0].clone();
@@ -3061,7 +3108,7 @@ fn three_source_session(quantum: u32) -> String {
         source("alpha", 4, u64::from(quantum) * 2),
     ];
     model.tracks[0].source_id = session::StableId::parse("mid").expect("stable id");
-    canonical_session_toml(&model).expect("canonical three-source session")
+    canonical_session_json(&model).expect("canonical three-source session")
 }
 
 /// Issue #207 D1: the compiled session answers what sources exist, in canonical order, with the
@@ -3074,12 +3121,12 @@ fn three_source_session(quantum: u32) -> String {
 #[test]
 fn session_source_introspection_is_canonical_ordered_shaped_and_bounded() {
     const QUANTUM: u32 = 128;
-    let toml = three_source_session(QUANTUM);
+    let document = three_source_session(QUANTUM);
     let options = WebBootOptions {
         source_ring_frames: QUANTUM,
         ..boot_options(QUANTUM)
     };
-    let host = AudioWorkletEngineHost::boot(toml.as_bytes(), options).expect("boot");
+    let host = AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("boot");
 
     assert_eq!(host.session_source_count(), 3);
     let ids: Vec<&str> = (0..3)
@@ -3132,12 +3179,12 @@ fn session_source_introspection_is_canonical_ordered_shaped_and_bounded() {
 #[test]
 fn raw_ffi_source_introspection_mirrors_the_track_queries() {
     const QUANTUM: u32 = 128;
-    let toml = three_source_session(QUANTUM);
+    let document = three_source_session(QUANTUM);
     let options = WebBootOptions {
         source_ring_frames: QUANTUM,
         ..boot_options(QUANTUM)
     };
-    let handle = crate::ffi::test_boot(toml.as_bytes(), options);
+    let handle = crate::ffi::test_boot(document.as_bytes(), options);
     assert_ne!(handle, 0);
 
     // An invalid handle answers the invalid value on every query, as every other export does.
@@ -3218,7 +3265,7 @@ fn raw_ffi_source_introspection_mirrors_the_track_queries() {
 fn solo_session(quantum: u32, tracks: usize, mutes: &[[bool; 2]]) -> String {
     use session::StableId;
 
-    let mut model = parse_session_toml(include_str!("../tests/browser-v1/session.toml"))
+    let mut model = parse_session_json(include_str!("../tests/browser-v1/session.json"))
         .expect("accepted identity fixture");
     model.quantum_frames = quantum;
     model.sources[0].frames = u64::from(quantum) * 64;
@@ -3247,19 +3294,19 @@ fn solo_session(quantum: u32, tracks: usize, mutes: &[[bool; 2]]) -> String {
         *track_id = StableId::parse(&id).expect("route track id");
         model.routes.push(route);
     }
-    canonical_session_toml(&model).expect("canonical solo session")
+    canonical_session_json(&model).expect("canonical solo session")
 }
 
 /// A console host over [`solo_session`]. No meters and no observation capacity: solo touches
 /// neither, and a test that bound them would be measuring something else.
 fn solo_host(quantum: u32, tracks: usize, mutes: &[[bool; 2]]) -> AudioWorkletEngineHost {
-    let toml = solo_session(quantum, tracks, mutes);
+    let document = solo_session(quantum, tracks, mutes);
     let options = WebBootOptions {
         source_ring_frames: quantum * 4,
         console_command_queue_records: DEFAULT_COMMAND_QUEUE_RECORDS as u64,
         ..boot_options(quantum)
     };
-    AudioWorkletEngineHost::boot(toml.as_bytes(), options).expect("solo boot")
+    AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("solo boot")
 }
 
 /// Stage one `solo` record: `rack`/`channel` are both `255`, the bit rides `values[0]`.
@@ -3930,7 +3977,7 @@ fn a_console_that_never_solos_renders_what_it_always_did() {
 fn effect_solo_host(quantum: u32, tracks: usize, depth: u64) -> AudioWorkletEngineHost {
     use session::StableId;
 
-    let mut model = parse_session_toml(include_str!("../tests/browser-v1/command-session.toml"))
+    let mut model = parse_session_json(include_str!("../tests/browser-v1/command-session.json"))
         .expect("accepted command fixture");
     model.quantum_frames = quantum;
     model.sources[0].frames = u64::from(quantum) * 64;
@@ -3951,13 +3998,13 @@ fn effect_solo_host(quantum: u32, tracks: usize, depth: u64) -> AudioWorkletEngi
         *track_id = StableId::parse(&id).expect("route track id");
         model.routes.push(route);
     }
-    let toml = canonical_session_toml(&model).expect("canonical effect solo session");
+    let document = canonical_session_json(&model).expect("canonical effect solo session");
     let options = WebBootOptions {
         source_ring_frames: quantum * 4,
         console_command_queue_records: depth,
         ..boot_options(quantum)
     };
-    AudioWorkletEngineHost::boot(toml.as_bytes(), options).expect("effect solo boot")
+    AudioWorkletEngineHost::boot(document.as_bytes(), options).expect("effect solo boot")
 }
 
 /// The decode staging is sized for the worst batch the ABI can describe, and that batch is

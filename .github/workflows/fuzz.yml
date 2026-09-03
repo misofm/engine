@@ -39,7 +39,7 @@ name: fuzz
 #
 # The remaining entries are the other real inputs: the fuzz crate and its own lockfile and seed
 # corpus (`fuzz/**`), the seed input the session targets are handed
-# (`fixtures/session/v1/canonical.toml`), the runner that drives the protocol targets
+# (`fixtures/session/v1/canonical.json`), the runner that drives the protocol targets
 # (`scripts/run-protocol-fuzz.sh`), the workspace root manifest (the `crates/*` manifests inherit
 # `[workspace.dependencies]` and profiles from it even when built from the `fuzz/` workspace), the
 # toolchain pin, and this file.
@@ -57,7 +57,7 @@ on:
       - 'crates/protocol/**'
       - 'crates/session/**'
       - 'fuzz/**'
-      - 'fixtures/session/v1/canonical.toml'
+      - 'fixtures/session/v1/canonical.json'
       - 'scripts/run-protocol-fuzz.sh'
       - 'Cargo.toml'
       - 'rust-toolchain.toml'
@@ -74,7 +74,7 @@ on:
       - 'crates/protocol/**'
       - 'crates/session/**'
       - 'fuzz/**'
-      - 'fixtures/session/v1/canonical.toml'
+      - 'fixtures/session/v1/canonical.json'
       - 'scripts/run-protocol-fuzz.sh'
       - 'Cargo.toml'
       - 'rust-toolchain.toml'
@@ -109,12 +109,12 @@ jobs:
         run: |
           mkdir -p target/ci/session-fuzz/parse
           export RUSTFLAGS='-C target-feature=+avx2,+fma'  # lane D4 guard; cargo-fuzz prepends this to its sanitizer flags
-          cargo +nightly-2026-08-20 fuzz run session_parse target/ci/session-fuzz/parse -- -runs=10000 -seed=557074001 -seed_inputs=fixtures/session/v1/canonical.toml
+          cargo +nightly-2026-08-20 fuzz run session_parse target/ci/session-fuzz/parse -- -runs=10000 -seed=557074001 -seed_inputs=fixtures/session/v1/canonical.json
       - name: Run bounded compiler fuzz target
         run: |
           mkdir -p target/ci/session-fuzz/compile
           export RUSTFLAGS='-C target-feature=+avx2,+fma'
-          cargo +nightly-2026-08-20 fuzz run session_compile target/ci/session-fuzz/compile -- -runs=10000 -seed=557074002 -seed_inputs=fixtures/session/v1/canonical.toml
+          cargo +nightly-2026-08-20 fuzz run session_compile target/ci/session-fuzz/compile -- -runs=10000 -seed=557074002 -seed_inputs=fixtures/session/v1/canonical.json
 
   protocol-fuzz:
     name: bounded issue-005 protocol decoder fuzzing

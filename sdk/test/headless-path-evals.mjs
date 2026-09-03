@@ -305,7 +305,20 @@ exec bash "$SDK_PATH_SCRIPT_UNDER_TEST" "$SDK_PATH_INVALID_PARENT/$invalid_compo
     unsearchableDirectory = await makeArtifacts("unsearchable");
     await chmod(unsearchableDirectory, 0o000);
     const rootRunner = typeof process.getuid === "function" && process.getuid() === 0;
-    const result = invoke([unsearchableDirectory], rootRunner ? { gid: 65534, uid: 65534 } : {});
+    let options = {};
+    if (rootRunner) {
+      // `/root` is intentionally not traversable by nobody. Copy the script and its expected SDK
+      // sibling into the already mode-0755 scratch tree so this exercises the artifact-directory
+      // refusal rather than failing to open the test harness itself.
+      const copiedRepo = join(scratchRoot, "root-permission-repo");
+      const copiedScript = join(copiedRepo, "scripts", "check-sdk-headless.sh");
+      const copiedSdk = join(copiedRepo, "sdk");
+      await mkdir(dirname(copiedScript), { recursive: true });
+      await mkdir(copiedSdk);
+      await copyFile(scriptAbsolute, copiedScript);
+      options = { gid: 65534, uid: 65534, script: copiedScript, expectedCwd: copiedSdk };
+    }
+    const result = invoke([unsearchableDirectory], options);
     await chmod(unsearchableDirectory, 0o700);
     unsearchableDirectory = undefined;
     assert.equal(result.status, 2, diagnostic(result));

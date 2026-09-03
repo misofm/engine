@@ -197,8 +197,8 @@ export const WEB_LAUNCH_BIT_DEPTHS: readonly (16 | 24)[] = Object.freeze([16, 24
  *
  * This is the SDK's half: a source declared through the SDK's own typed surface carries its
  * `bitDepth`, so a browser open can refuse it before an `AudioContext` is constructed. The other
- * half -- a raw TOML document whose sources the SDK has never seen as values -- belongs to the
- * resolver/ingest boundary, which is #244's, and is where the ruling puts it. The SDK has no TOML
+ * half -- a raw JSON document whose sources the SDK has never seen as values -- belongs to the
+ * resolver/ingest boundary, which is #244's, and is where the ruling puts it. The SDK has no session
  * parser and will not grow one (ruling 5438024085), so it cannot and must not try to read a bit
  * depth out of a document's text.
  */

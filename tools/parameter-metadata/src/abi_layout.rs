@@ -253,8 +253,8 @@ fn resource_report_fields() -> [Field; 28] {
             "u64",
         ),
         (
-            "sessionTomlBytes",
-            offset_of!(WebResourceReport, session_toml_bytes),
+            "sessionDocumentBytes",
+            offset_of!(WebResourceReport, session_document_bytes),
             "u64",
         ),
         (

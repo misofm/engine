@@ -6,7 +6,7 @@ import process from "node:process";
 const ABI_VERSION = 0x00010000;
 const BOOT_OPTIONS_BYTES = 64;
 const MAXIMUM_DOCUMENT_BYTES = 1 << 20;
-const PARSE_TRANSIENT_MULTIPLIER = 80n;
+const PARSE_TRANSIENT_MULTIPLIER = 17n;
 const WASM_PAGE_BYTES = 1 << 16;
 
 if (process.argv.length !== 3) {

@@ -42,7 +42,7 @@ fn the_descriptor_and_the_schema_publish_the_same_delay_domain() {
 #[test]
 fn a_declared_delay_changes_no_prepared_builtin_byte() {
     use builtins_compiler::{BuiltinCompileCaps, prepare_session_builtins};
-    use session::{CompileCaps, compile_session, parse_session_toml};
+    use session::{CompileCaps, compile_session, parse_session_json};
 
     let caps = || CompileCaps {
         max_compiled_model_bytes: u64::MAX,
@@ -63,9 +63,9 @@ fn a_declared_delay_changes_no_prepared_builtin_byte() {
         maximum_peak_hold_frames: u32::MAX,
         maximum_smoothing_samples: u32::MAX,
     };
-    let source = include_str!("../../../fixtures/session/v1/canonical.toml");
+    let source = include_str!("../../../fixtures/session/v1/canonical.json");
     let prepared_bytes = |delay: u32| {
-        let mut model = parse_session_toml(source).expect("fixture parses");
+        let mut model = parse_session_json(source).expect("fixture parses");
         model.tracks[0].builtins.left.delay_samples = delay;
         model.tracks[0].builtins.right.delay_samples = delay;
         let session = compile_session(&model, caps()).expect("session compiles");

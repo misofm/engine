@@ -29,7 +29,7 @@ function resourceReport(backend, quantumFrames) {
     backend,
     optionsBytes: 1n,
     statusBytes: 1n,
-    sessionTomlBytes: 1n,
+    sessionDocumentBytes: 1n,
     diagnosticBytes: 1n,
     sourceIdBytes: 1n,
     sourcePcmStagingBytes: 1n,
@@ -200,7 +200,7 @@ async function testMainRealm() {
     const { createMisoAudioWorkletHost } = await import(`${hostUrl.href}?main-test`);
     const host = await createMisoAudioWorkletHost({
       context,
-      document: new TextEncoder().encode("format_version = 0"),
+      document: new TextEncoder().encode("{\"schema_version\":0}"),
       options: limits,
       simd128ModuleUrl: "simd.wasm",
       workletModuleUrl: "processor.js",
@@ -416,7 +416,7 @@ async function testMainRealm() {
     // Issue #137 D1/D2/D3: the live console's main-realm half.
     const consoleHost = await createMisoAudioWorkletHost({
       context,
-      document: new TextEncoder().encode("format_version = 0"),
+      document: new TextEncoder().encode("{\"schema_version\":0}"),
       options: limits,
       simd128ModuleUrl: "simd.wasm",
       workletModuleUrl: "processor.js",
@@ -553,7 +553,7 @@ async function testMainRealm() {
     ]) {
       const rejecting = await createMisoAudioWorkletHost({
         context,
-        document: new TextEncoder().encode("format_version = 0"),
+        document: new TextEncoder().encode("{\"schema_version\":0}"),
         options: limits,
         simd128ModuleUrl: "simd.wasm",
         workletModuleUrl: "processor.js",
@@ -738,15 +738,15 @@ async function testMainRealm() {
     // replaced.
     //
     // A structural session edit produces a replacement plan, and in the browser that is a new host
-    // over the new session TOML. Subscriptions belong to the plan they were applied to: the
+    // over the new session JSON. Subscriptions belong to the plan they were applied to: the
     // replacement's lanes exist and are unarmed, nothing carries over, and the app re-arms from
     // scratch against the new addressing. This is also the moment the #151 defect was most likely
     // to fire in the field, because a replacement moves effect indices -- a stale tap address
     // comes back as reason 10, and before the fix that killed the freshly prepared host on its
     // first gesture.
-    const prepare = (sessionToml) => createMisoAudioWorkletHost({
+    const prepare = (sessionDocument) => createMisoAudioWorkletHost({
       context,
-      document: new TextEncoder().encode(sessionToml),
+      document: new TextEncoder().encode(sessionDocument),
       options: limits,
       simd128ModuleUrl: "simd.wasm",
       workletModuleUrl: "processor.js",
@@ -755,7 +755,7 @@ async function testMainRealm() {
       trackIndex, rack: 1, effectIndex, tapId: 1, windowBlocks: 0, armed,
     });
 
-    const beforeEdit = await prepare("format_version = 0");
+    const beforeEdit = await prepare("{\"schema_version\":0}");
     const armedBefore = await beforeEdit.observe({
       requestId: 1, subscriptions: [tap(0, 0, true), tap(1, 0, true)],
     });
@@ -978,7 +978,7 @@ async function testProcessor() {
   const originalSampleRate = globalThis.sampleRate;
   const originalRenderQuantumSize = globalThis.renderQuantumSize;
   const originalTextEncoder = globalThis.TextEncoder;
-  const processorSessionToml = new originalTextEncoder().encode("format_version = 0");
+  const processorSessionDocument = new originalTextEncoder().encode("{\"schema_version\":0}");
   const nonAsciiSourceId = "caf\u00e9-\u96ea-\ud83d\ude00";
   const nonAsciiSourceIdUtf8 = new originalTextEncoder().encode(nonAsciiSourceId);
   let registered;
@@ -1022,7 +1022,7 @@ async function testProcessor() {
       return new registered({
         processorOptions: {
           module: {},
-          document: processorSessionToml,
+          document: processorSessionDocument,
           options: limits,
         },
       });

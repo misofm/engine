@@ -20,7 +20,7 @@
 //! Equality is over `to_bits` — SHA-256 of the little-endian `f32` words — never a tolerance, in
 //! keeping with every other parity gate in this repository.
 //!
-//! Usage: `sdk_render_oracle QUANTA [SEED] < session.toml`, printing one lowercase hex line.
+//! Usage: `sdk_render_oracle QUANTA [SEED] < session.json`, printing one lowercase hex line.
 
 use std::io::{Read as _, Write as _};
 
@@ -48,7 +48,7 @@ fn main() {
     let quanta: usize = arguments
         .next()
         .and_then(|value| value.parse().ok())
-        .expect("usage: sdk_render_oracle QUANTA [SEED] < session.toml");
+        .expect("usage: sdk_render_oracle QUANTA [SEED] < session.json");
     let seed: u32 = arguments
         .next()
         .map_or(1, |value| value.parse().expect("SEED is a u32"));

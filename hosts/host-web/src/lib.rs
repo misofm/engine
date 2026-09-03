@@ -41,18 +41,19 @@ pub use host_core::{SOURCE_STALL_TOLERANCE_MS, default_source_ring_frames};
 pub const ABI_VERSION: u32 = 0x0001_0000;
 
 /// Maximum exact staged document length. Dense automation belongs in future content-addressed
-/// binary blobs rather than unbounded TOML.
+/// binary blobs rather than unbounded JSON.
 pub const MAXIMUM_DOCUMENT_BYTES: u32 = 1 << 20;
 
 /// Conservative transient parse projection in bytes per staged document byte.
 ///
-/// A9 measured the adversarial accepted-document wasm leg at approximately 145 MiB for 2.1 MiB of
-/// TOML, about 69.1 bytes per input byte. The pin rounds upward to 80 (15% headroom). Boot checks
+/// Issue #338 re-measured the pinned `jstrict 0.14.0` JSON frontend plus typed model and compilation
+/// over the minimal document, dense one-, 64-, and 192-track documents, and the exact 1 MiB
+/// admitted ceiling. The largest observed ratio was 14.738 bytes per input byte; 17 leaves 15.3%
+/// headroom. Boot checks
 /// `document_bytes * PARSE_TRANSIENT_MULTIPLIER` against the effective budget before UTF-8 decode
-/// or parsing; the peak-transient fixture re-measures the worst accepted shape so parser growth
-/// cannot silently outrun this constant. This is the conservative pre-parse mechanism authorized
-/// by issue #240 ruling 5458432482; fallible parser allocation is intentionally out of scope.
-pub const PARSE_TRANSIENT_MULTIPLIER: u64 = 80;
+/// or parser allocation, and the peak-transient test keeps every phase visible so frontend growth
+/// cannot silently outrun this projection.
+pub const PARSE_TRANSIENT_MULTIPLIER: u64 = 17;
 
 /// Default host memory ceiling used only when the embedding passes zero.
 ///
@@ -475,8 +476,8 @@ pub struct WebResourceReport {
     pub options_bytes: u64,
     /// Status allocation bytes.
     pub status_bytes: u64,
-    /// Session TOML staging bytes.
-    pub session_toml_bytes: u64,
+    /// Session JSON staging bytes.
+    pub session_document_bytes: u64,
     /// Diagnostic bytes.
     pub diagnostic_bytes: u64,
     /// Source-ID staging bytes.
@@ -730,7 +731,7 @@ enum AdmittedCommand {
 
 /// One compiled source's declared shape, in canonical normalized source order (issue #207).
 ///
-/// The strict TOML declares one channel count and full-source frame count; sample rate is solely a
+/// The strict JSON declares one channel count and full-source frame count; sample rate is solely a
 /// session-root fact and every prepared source begins at frame zero.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SessionSourceShape {
@@ -784,9 +785,9 @@ impl AudioWorkletEngineHost {
                 memory_budget,
             ));
         }
-        let toml = core::str::from_utf8(document)
-            .map_err(|_| BootFailure::fixed(RESULT_REFUSED_DOCUMENT, "web.toml.utf8"))?;
-        let model = parse_host_session(toml)
+        let document = core::str::from_utf8(document)
+            .map_err(|_| BootFailure::fixed(RESULT_REFUSED_DOCUMENT, "web.document.utf8"))?;
+        let model = parse_host_session(document)
             .map_err(|failure| BootFailure::document(failure.into_bytes()))?;
         let compile_caps = CompileCaps {
             max_compiled_model_bytes: u64::MAX,
@@ -2257,7 +2258,7 @@ const fn empty_resource_report(backend: u32) -> WebResourceReport {
         reserved0: [0; 3],
         options_bytes: size_of::<WebBootOptions>() as u64,
         status_bytes: size_of::<WebStatus>() as u64,
-        session_toml_bytes: 0,
+        session_document_bytes: 0,
         diagnostic_bytes: 0,
         source_id_bytes: 0,
         source_pcm_staging_bytes: 0,
@@ -2421,7 +2422,7 @@ fn project_buffers(
     let mut report = empty_resource_report(selected_backend());
     report.sample_rate_hz = sample_rate_hz;
     report.quantum_frames = quantum_frames;
-    report.session_toml_bytes = u64::from(document_bytes);
+    report.session_document_bytes = u64::from(document_bytes);
     report.diagnostic_bytes = u64::from(DIAGNOSTIC_BYTES);
     report.source_id_bytes = longest_source_id_bytes;
     report.source_pcm_staging_bytes = source_pcm_bytes;

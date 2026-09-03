@@ -24,7 +24,7 @@ use std::{
     ptr,
 };
 
-use session::{SessionToml, Source, SourceBitDepth, parse_session_toml};
+use session::{SessionModel, Source, SourceBitDepth, parse_session_json};
 use sha2::{Digest, Sha256};
 use source::{
     NativeWaveDecoder, NativeWaveEncoding, NativeWaveError, NativeWaveMetadata,
@@ -107,7 +107,7 @@ impl std::error::Error for RunnerError {}
 /// Exact validated CLI arguments.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RunnerArgs {
-    /// Strict V1 TOML session path.
+    /// Strict V1 JSON session path.
     pub session: PathBuf,
     /// Canonical root containing native source files.
     pub source_root: PathBuf,
@@ -240,7 +240,7 @@ fn run_with_platform(
     let session_bytes = read_bounded_session(&arguments.session)?;
     let session_text = std::str::from_utf8(&session_bytes)
         .map_err(|_| RunnerError::new(FailurePhase::Preflight, "session.utf8"))?;
-    let model = parse_session_toml(session_text)
+    let model = parse_session_json(session_text)
         .map_err(|_| RunnerError::new(FailurePhase::Preflight, "session.invalid"))?;
     validate_scalar_contract(arguments, &model)?;
     let ring_frames = SOURCE_RING_FRAMES;
@@ -307,7 +307,7 @@ fn read_bounded_session(path: &Path) -> Result<Vec<u8>, RunnerError> {
 
 fn validate_scalar_contract(
     arguments: &RunnerArgs,
-    model: &SessionToml,
+    model: &SessionModel,
 ) -> Result<(), RunnerError> {
     if !matches!(model.sample_rate_hz, 44_100 | 48_000 | 88_200 | 96_000) {
         return Err(RunnerError::new(
@@ -511,7 +511,7 @@ fn open_declared_source(
     ))
 }
 
-fn resolve_sources(model: &SessionToml, root: &Path) -> Result<Vec<PreparedSource>, RunnerError> {
+fn resolve_sources(model: &SessionModel, root: &Path) -> Result<Vec<PreparedSource>, RunnerError> {
     let root_metadata = fs::symlink_metadata(root)
         .map_err(|_| RunnerError::new(FailurePhase::Resolve, "root.open"))?;
     if !root_metadata.file_type().is_dir() || root_metadata.file_type().is_symlink() {
@@ -1214,7 +1214,7 @@ impl EngineBoundary for CAbi {
             source_ring_frames: ring_frames,
             maximum_automation_spans_per_block: 4_096,
             reserved0: 0,
-            maximum_toml_bytes: MAX_SESSION_BYTES,
+            maximum_document_bytes: MAX_SESSION_BYTES,
             maximum_diagnostic_bytes: DIAGNOSTIC_CAPACITY as u64,
             maximum_tracks: MAX_SOURCES,
             maximum_sources: MAX_SOURCES,
@@ -1405,7 +1405,7 @@ mod tests {
 
     fn fixture_args(name: &str, output: PathBuf) -> RunnerArgs {
         RunnerArgs {
-            session: Path::new(FIXTURES).join(format!("{name}.toml")),
+            session: Path::new(FIXTURES).join(format!("{name}.json")),
             source_root: PathBuf::from(FIXTURES),
             frames: 1_024,
             output,
@@ -1842,8 +1842,8 @@ mod tests {
             ("uppercase", "sha256:", "sha256:A", "session.invalid"),
             (
                 "wrong-rate",
-                "sample_rate_hz = 48000",
-                "sample_rate_hz = 44100",
+                "\"sample_rate_hz\": 48000",
+                "\"sample_rate_hz\": 44100",
                 "source.rate",
             ),
             // A declared count above the file's, not below it: the session validator now
@@ -1851,14 +1851,14 @@ mod tests {
             // which would fail in preflight and never reach the resolver check under test.
             (
                 "wrong-channels",
-                "channels = 2, bit_depth",
-                "channels = 4, bit_depth",
+                "\"channels\": 2,\n      \"bit_depth\"",
+                "\"channels\": 4,\n      \"bit_depth\"",
                 "source.channels",
             ),
             (
                 "wrong-frames",
-                "frames = 514",
-                "frames = 9999",
+                "\"frames\": \"514\"",
+                "\"frames\": \"9999\"",
                 "source.frames",
             ),
         ] {
@@ -1869,14 +1869,14 @@ mod tests {
             )
             .expect("copy source");
             let original =
-                fs::read_to_string(Path::new(FIXTURES).join("rf64-48000.toml")).expect("session");
+                fs::read_to_string(Path::new(FIXTURES).join("rf64-48000.json")).expect("session");
             fs::write(
-                temp.join("session.toml"),
+                temp.join("session.json"),
                 original.replacen(replace_from, replace_to, 1),
             )
             .expect("mutated session");
             let arguments = RunnerArgs {
-                session: temp.join("session.toml"),
+                session: temp.join("session.json"),
                 source_root: temp.clone(),
                 frames: 1_024,
                 output: temp.join("out"),
@@ -1897,14 +1897,14 @@ mod tests {
         let temp = temp_dir("truncated");
         fs::write(temp.join("rf64-48000.wav"), b"RF64").expect("truncated");
         let session =
-            fs::read_to_string(Path::new(FIXTURES).join("rf64-48000.toml")).expect("session");
+            fs::read_to_string(Path::new(FIXTURES).join("rf64-48000.json")).expect("session");
         let actual = hex_digest(Sha256::digest(b"RF64").into());
         let start = session.find("sha256:").expect("identity") + 7;
         let mut changed = session;
         changed.replace_range(start..start + 64, &actual);
-        fs::write(temp.join("session.toml"), changed).expect("session");
+        fs::write(temp.join("session.json"), changed).expect("session");
         let arguments = RunnerArgs {
-            session: temp.join("session.toml"),
+            session: temp.join("session.json"),
             source_root: temp.clone(),
             frames: 1_024,
             output: temp.join("out"),
@@ -1924,14 +1924,14 @@ mod tests {
     #[test]
     fn resolver_rejects_integer_and_float_depth_mismatches_both_directions_precompile() {
         let base =
-            fs::read_to_string(Path::new(FIXTURES).join("rf64-48000.toml")).expect("f32 session");
+            fs::read_to_string(Path::new(FIXTURES).join("rf64-48000.json")).expect("f32 session");
         let pcm16_identity =
             "sha256:0320b11905302eb840cd06ab90b0549114e6ee1c89233e928ebe21b8c4964ef2";
         for (label, source, session, expected_declared_depth) in [
             (
                 "f32-declared-integer",
                 Path::new(FIXTURES).join("rf64-48000.wav"),
-                base.replacen("bit_depth = \"32f\"", "bit_depth = 16", 1),
+                base.replacen("\"bit_depth\": \"32f\"", "\"bit_depth\": 16", 1),
                 "16",
             ),
             (
@@ -1939,22 +1939,22 @@ mod tests {
                 Path::new(STEM_IDENTITY_FIXTURES).join("pcm16-stereo-boundaries.wav"),
                 base.replacen(
                     base.lines()
-                        .find(|line| line.contains("content = \"sha256:"))
-                        .and_then(|line| line.split("content = \"").nth(1))
+                        .find(|line| line.contains("\"content\": \"sha256:"))
+                        .and_then(|line| line.split("\"content\": \"").nth(1))
                         .and_then(|tail| tail.split('"').next())
                         .expect("base content identity"),
                     pcm16_identity,
                     1,
                 )
-                .replacen("frames = 514", "frames = 3", 1),
+                .replacen("\"frames\": \"514\"", "\"frames\": \"3\"", 1),
                 "32f",
             ),
         ] {
             let temp = temp_dir(label);
             fs::copy(source, temp.join("source.wav")).expect("copy source");
-            fs::write(temp.join("session.toml"), session).expect("write session");
+            fs::write(temp.join("session.json"), session).expect("write session");
             let arguments = RunnerArgs {
-                session: temp.join("session.toml"),
+                session: temp.join("session.json"),
                 source_root: temp.clone(),
                 frames: 1_024,
                 output: temp.join("out"),
@@ -1981,12 +1981,12 @@ mod tests {
         let target = Path::new(FIXTURES).join("riff-48000.wav");
         std::os::unix::fs::symlink(&target, temp.join("riff-48000.wav")).expect("symlink");
         fs::copy(
-            Path::new(FIXTURES).join("riff-48000.toml"),
-            temp.join("session.toml"),
+            Path::new(FIXTURES).join("riff-48000.json"),
+            temp.join("session.json"),
         )
         .expect("session");
         let arguments = RunnerArgs {
-            session: temp.join("session.toml"),
+            session: temp.join("session.json"),
             source_root: temp.clone(),
             frames: 1_024,
             output: temp.join("out"),
@@ -2064,7 +2064,7 @@ mod tests {
     fn scalar_caps_precede_resolution_and_cover_overflow_and_unsupported_rate() {
         let temp = temp_dir("scalar-caps");
         let base =
-            fs::read_to_string(Path::new(FIXTURES).join("riff-48000.toml")).expect("base session");
+            fs::read_to_string(Path::new(FIXTURES).join("riff-48000.json")).expect("base session");
         let mut engine = MockEngine::default();
         let output = MemoryOutput::default();
         let mut overflow = fixture_args("riff-48000", temp.join("overflow"));
@@ -2077,10 +2077,10 @@ mod tests {
             "frames.overflow"
         );
 
-        let unsupported = base.replace("sample_rate_hz = 48000", "sample_rate_hz = 192000");
-        fs::write(temp.join("unsupported.toml"), unsupported).expect("unsupported session");
+        let unsupported = base.replace("\"sample_rate_hz\": 48000", "\"sample_rate_hz\": 192000");
+        fs::write(temp.join("unsupported.json"), unsupported).expect("unsupported session");
         let unsupported = RunnerArgs {
-            session: temp.join("unsupported.toml"),
+            session: temp.join("unsupported.json"),
             source_root: PathBuf::from(FIXTURES),
             frames: 1_024,
             output: temp.join("unsupported"),
@@ -2098,7 +2098,7 @@ mod tests {
     #[test]
     fn missing_mismatched_and_truncated_riff_sources_are_exact_precompile_failures() {
         let base =
-            fs::read_to_string(Path::new(FIXTURES).join("riff-48000.toml")).expect("base session");
+            fs::read_to_string(Path::new(FIXTURES).join("riff-48000.json")).expect("base session");
         let replace_identity = |session: &str, digest: &str| {
             let start = session.find("sha256:").expect("identity") + 7;
             let mut changed = session.to_owned();
@@ -2127,9 +2127,9 @@ mod tests {
             if let Some(source) = source {
                 fs::write(temp.join("riff-48000.wav"), source).expect("source");
             }
-            fs::write(temp.join("session.toml"), session).expect("session");
+            fs::write(temp.join("session.json"), session).expect("session");
             let arguments = RunnerArgs {
-                session: temp.join("session.toml"),
+                session: temp.join("session.json"),
                 source_root: temp.clone(),
                 frames: 1_024,
                 output: temp.join("out"),
@@ -2155,18 +2155,18 @@ mod tests {
             temp.join("rf64-48000.wav"),
         )
         .expect("source");
-        let base = fs::read_to_string(Path::new(FIXTURES).join("rf64-48000.toml"))
+        let base = fs::read_to_string(Path::new(FIXTURES).join("rf64-48000.json"))
             .expect("session")
             .replace("fixture-source", "z-source");
-        let declaration = base
-            .lines()
-            .find(|line| line.contains("{ id = \"z-source\""))
-            .expect("source declaration");
-        let second = declaration.replace("z-source", "a-source");
-        let session = base.replacen(declaration, &format!("{declaration}\n{second}"), 1);
-        fs::write(temp.join("session.toml"), session).expect("session");
+        let mut document: serde_json::Value = serde_json::from_str(&base).expect("JSON session");
+        let sources = document["sources"].as_array_mut().expect("sources");
+        let mut second = sources[0].clone();
+        second["id"] = serde_json::Value::String("a-source".into());
+        sources.insert(0, second);
+        let session = serde_json::to_string(&document).expect("JSON session");
+        fs::write(temp.join("session.json"), session).expect("session");
         let arguments = RunnerArgs {
-            session: temp.join("session.toml"),
+            session: temp.join("session.json"),
             source_root: temp.clone(),
             frames: 128,
             output: temp.join("out"),

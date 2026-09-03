@@ -1,6 +1,6 @@
 //! Internal self-configuration facts for single-verb boot.
 //!
-//! Every field is read from the compiled session preparation itself consumes. There is no raw-TOML
+//! Every field is read from the compiled session preparation itself consumes. There is no raw-JSON
 //! query entry point and no second parser: hosts call [`compiled_session_shape`] after their one
 //! canonical parse/compile pass.
 

@@ -156,7 +156,7 @@ function validCommand(command) {
     && command.values.every((value) => typeof value === "number" && Number.isFinite(value));
 }
 const RESOURCE_FIELDS = [
-  "sampleRateHz", "quantumFrames", "backend", "optionsBytes", "statusBytes", "sessionTomlBytes",
+  "sampleRateHz", "quantumFrames", "backend", "optionsBytes", "statusBytes", "sessionDocumentBytes",
   "diagnosticBytes", "sourceIdBytes", "sourcePcmStagingBytes", "outputPcmBytes",
   "bridgeMetadataBytes", "bridgeRetainedBytes", "largestBridgeAllocationBytes",
   "sourceTotalBytes", "sourceOverheadBytes", "effectScalarStateBytes", "effectScalarScratchBytes",

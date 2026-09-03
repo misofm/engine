@@ -18,12 +18,12 @@
 //! refusal arms below start reporting `Ok` and the effect lands in `simd1`.
 
 use protocol::{SessionEdit, SessionEditError, apply_session_edit};
-use session::{RackName, SessionToml, parse_session_toml};
+use session::{RackName, SessionModel, parse_session_json};
 
-const SESSION: &str = include_str!("../../../fixtures/session/v1/canonical.toml");
+const SESSION: &str = include_str!("../../../fixtures/session/v1/canonical.json");
 
-fn session() -> SessionToml {
-    parse_session_toml(SESSION).expect("the canonical fixture parses")
+fn session() -> SessionModel {
+    parse_session_json(SESSION).expect("the canonical fixture parses")
 }
 
 fn track_id() -> session::StableId {

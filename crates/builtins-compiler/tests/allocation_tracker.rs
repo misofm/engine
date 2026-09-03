@@ -15,7 +15,7 @@ use builtins_compiler::{
     test_only_phase_two_allocation_snapshot, test_only_record_phase_two_allocation,
     test_only_reset_phase_two_allocation_tracker,
 };
-use session::{CompileCaps, RouteSource, SendTap, StableId, compile_session, parse_session_toml};
+use session::{CompileCaps, RouteSource, SendTap, StableId, compile_session, parse_session_json};
 
 struct TrackingAllocator;
 
@@ -50,7 +50,7 @@ unsafe impl GlobalAlloc for TrackingAllocator {
 }
 
 fn session(track_count: u32) -> session::CompiledSession {
-    let mut model = parse_session_toml(include_str!("../../../fixtures/session/v1/canonical.toml"))
+    let mut model = parse_session_json(include_str!("../../../fixtures/session/v1/canonical.json"))
         .expect("fixture parse");
     let mut template = model.tracks[0].clone();
     template.simd1.effects.clear();

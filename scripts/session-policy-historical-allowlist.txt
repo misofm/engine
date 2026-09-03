@@ -1,0 +1,12 @@
+# Exact files whose retired spelling is immutable history or this migration's audit record.
+.github/ISSUE_SPECS/004-versioned-toml-schema-and-transactional-session-compiler.md
+.github/ISSUE_SPECS/024-wasm-simd-audioworklet-embedding.md
+.github/ISSUE_SPECS/327-add-enginectl-session-build.md
+.github/ISSUE_SPECS/338-make-canonical-json-the-sole-session-v1-document-format.md
+.github/ISSUE_SPECS/BRIEFS/022-stable-c-abi-and-host-fed-planar-pcm-render.md
+docs/derivations/241-browser-source-identities.md
+docs/derivations/241-schema-repins.md
+docs/derivations/281-qualification-harness-boot.md
+docs/rulings/canonical-json-migration-inventory.md
+docs/rulings/de-versioning-inventory.md
+hosts/host-web/MUTATIONS.md

@@ -34,7 +34,7 @@ function defaultBundledAsset(): Promise<MisoEngineAsset> {
  *
  * # One verb, two input paths
  *
- * The pre-boot-v1 SDK had a plan path and a raw-TOML path that reached the engine differently, and
+ * The pre-boot-v1 SDK had a plan path and a raw JSON path that reached the engine differently, and
  * the raw path is where every one of #207's red probes failed: a regex header sniff that could not
  * read a quoted key, a silent 48 kHz/128 fallback when it failed, and a fabricated ring that was
  * not a multiple of a 127-frame quantum. Both paths now do exactly one thing -- hand the engine
@@ -50,7 +50,7 @@ function defaultBundledAsset(): Promise<MisoEngineAsset> {
  */
 
 /** Anything that can be handed to the engine as a Session V1 document. */
-export type SessionDocument = string | Uint8Array | { toToml(): string };
+export type SessionDocument = string | Uint8Array | { toJson(): string };
 
 function documentBytes(document: SessionDocument): Uint8Array<ArrayBuffer> {
   if (typeof document === "string") return new TextEncoder().encode(document);
@@ -59,11 +59,11 @@ function documentBytes(document: SessionDocument): Uint8Array<ArrayBuffer> {
       ? (document as Uint8Array<ArrayBuffer>)
       : new Uint8Array(document);
   }
-  if (typeof document.toToml === "function") {
-    return new TextEncoder().encode(document.toToml());
+  if (typeof document.toJson === "function") {
+    return new TextEncoder().encode(document.toJson());
   }
   throw new MisoUsageError(
-    "a session document must be a string, a Uint8Array, or an object with toToml()",
+    "a session document must be a string, a Uint8Array, or an object with toJson()",
   );
 }
 
@@ -217,7 +217,7 @@ export type ValidationResult =
  *
  * # Why this is the same verb rather than a parser
  *
- * There is no TOML parser in this SDK and there never will be (ruling 5438024085): a second
+ * There is no JSON parser in this SDK and there never will be (ruling 5438024085): a second
  * implementation of the grammar would answer a question the engine did not ask. `validate()` runs
  * the real engine, so its diagnostics *are* the engine's diagnostics and its budget checks are the
  * real ones, under the real physics gate.

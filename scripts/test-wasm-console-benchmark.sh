@@ -47,22 +47,22 @@ records=$(jq -cn '
   # [kind, tracks, synthetic, strip_content, strip_layout, input_signal, fixture_id]
   def pins:
     [
-      ["nine_track_baseline", 9, false, "eq", "simd1:eq", "tone", "fixtures/session/v1/parametric-eq-nine-track.toml"],
-      ["nine_track_ragged_strip", 9, true, "eq+compressor+limiter", "simd1:eq+compressor,simd2:limiter", "tone", "fixtures/session/v1/console-sixty-four-track-intended.toml"],
-      ["sixty_four_track_console", 64, false, "eq+compressor+limiter", "simd1:eq+compressor,simd2:limiter", "tone", "fixtures/session/v1/console-sixty-four-track-intended.toml"],
-      ["one_twenty_eight_track_stretch", 128, true, "eq+compressor+limiter", "simd1:eq+compressor,simd2:limiter", "tone", "fixtures/session/v1/console-sixty-four-track-intended.toml"],
-      ["sixty_four_track_eq_only", 64, true, "eq", "simd1:eq", "tone", "fixtures/session/v1/console-sixty-four-track-intended.toml"],
-      ["sixty_four_track_compressor_only", 64, true, "compressor", "simd1:compressor", "tone", "fixtures/session/v1/console-sixty-four-track-intended.toml"],
-      ["sixty_four_track_builtins_only", 64, true, "builtins", "builtins", "tone", "fixtures/session/v1/console-sixty-four-track-intended.toml"],
-      ["sixty_four_track_dispatch_only", 64, true, "identity", "builtins", "tone", "fixtures/session/v1/console-sixty-four-track-intended.toml"],
-      ["sixty_four_track_idle", 64, true, "eq+compressor+limiter", "simd1:eq+compressor,simd2:limiter", "silence", "fixtures/session/v1/console-sixty-four-track-intended.toml"],
-      ["sixty_four_track_console_legacy", 64, false, "eq+compressor", "simd1:eq,dynamic:compressor", "tone", "fixtures/session/v1/console-sixty-four-track.toml"],
-      ["sixty_four_track_eq_comp_simd1", 64, true, "eq+compressor", "simd1:eq+compressor", "tone", "fixtures/session/v1/console-sixty-four-track-intended.toml"],
-      ["sixty_four_track_plumbing_only", 64, true, "plumbing", "plumbing", "tone", "fixtures/session/v1/console-sixty-four-track-intended.toml"],
-      ["sixty_four_track_gain_pan_only", 64, true, "gain+pan", "builtins", "tone", "fixtures/session/v1/console-sixty-four-track-intended.toml"],
-      ["sixty_four_track_console_mono", 64, false, "eq+compressor+limiter", "simd1:eq+compressor,simd2:limiter", "tone", "fixtures/session/v1/console-sixty-four-track-mono.toml"],
-      ["sixty_four_track_console_mono_dual", 64, false, "eq+compressor+limiter", "simd1:eq+compressor,simd2:limiter", "tone", "fixtures/session/v1/console-sixty-four-track-mono.toml"],
-      ["sixty_four_track_console_half_mono", 64, true, "eq+compressor+limiter", "simd1:eq+compressor,simd2:limiter", "tone", "fixtures/session/v1/console-sixty-four-track-mono.toml"]
+      ["nine_track_baseline", 9, false, "eq", "simd1:eq", "tone", "fixtures/session/v1/parametric-eq-nine-track.json"],
+      ["nine_track_ragged_strip", 9, true, "eq+compressor+limiter", "simd1:eq+compressor,simd2:limiter", "tone", "fixtures/session/v1/console-sixty-four-track-intended.json"],
+      ["sixty_four_track_console", 64, false, "eq+compressor+limiter", "simd1:eq+compressor,simd2:limiter", "tone", "fixtures/session/v1/console-sixty-four-track-intended.json"],
+      ["one_twenty_eight_track_stretch", 128, true, "eq+compressor+limiter", "simd1:eq+compressor,simd2:limiter", "tone", "fixtures/session/v1/console-sixty-four-track-intended.json"],
+      ["sixty_four_track_eq_only", 64, true, "eq", "simd1:eq", "tone", "fixtures/session/v1/console-sixty-four-track-intended.json"],
+      ["sixty_four_track_compressor_only", 64, true, "compressor", "simd1:compressor", "tone", "fixtures/session/v1/console-sixty-four-track-intended.json"],
+      ["sixty_four_track_builtins_only", 64, true, "builtins", "builtins", "tone", "fixtures/session/v1/console-sixty-four-track-intended.json"],
+      ["sixty_four_track_dispatch_only", 64, true, "identity", "builtins", "tone", "fixtures/session/v1/console-sixty-four-track-intended.json"],
+      ["sixty_four_track_idle", 64, true, "eq+compressor+limiter", "simd1:eq+compressor,simd2:limiter", "silence", "fixtures/session/v1/console-sixty-four-track-intended.json"],
+      ["sixty_four_track_console_legacy", 64, false, "eq+compressor", "simd1:eq,dynamic:compressor", "tone", "fixtures/session/v1/console-sixty-four-track.json"],
+      ["sixty_four_track_eq_comp_simd1", 64, true, "eq+compressor", "simd1:eq+compressor", "tone", "fixtures/session/v1/console-sixty-four-track-intended.json"],
+      ["sixty_four_track_plumbing_only", 64, true, "plumbing", "plumbing", "tone", "fixtures/session/v1/console-sixty-four-track-intended.json"],
+      ["sixty_four_track_gain_pan_only", 64, true, "gain+pan", "builtins", "tone", "fixtures/session/v1/console-sixty-four-track-intended.json"],
+      ["sixty_four_track_console_mono", 64, false, "eq+compressor+limiter", "simd1:eq+compressor,simd2:limiter", "tone", "fixtures/session/v1/console-sixty-four-track-mono.json"],
+      ["sixty_four_track_console_mono_dual", 64, false, "eq+compressor+limiter", "simd1:eq+compressor,simd2:limiter", "tone", "fixtures/session/v1/console-sixty-four-track-mono.json"],
+      ["sixty_four_track_console_half_mono", 64, true, "eq+compressor+limiter", "simd1:eq+compressor,simd2:limiter", "tone", "fixtures/session/v1/console-sixty-four-track-mono.json"]
     ];
   [ (1, 2) as $round | pins[] | . as $pin |
     ([ leg("native_simd8"; "native"; "Simd8"; "host_process_heap"; 89000; $pin[0]),
@@ -156,7 +156,7 @@ mutate '.[9].strip_layout = "simd1:eq+compressor"' \
     'the transition row claiming the merged chain shape'
 mutate '.[10].strip_layout = "simd1:eq,dynamic:compressor"' \
     'the chain-shape row claiming the retired layout'
-mutate '.[9].fixture_id = "fixtures/session/v1/console-sixty-four-track-intended.toml"' \
+mutate '.[9].fixture_id = "fixtures/session/v1/console-sixty-four-track-intended.json"' \
     'the transition row rendered from the standing fixture'
 mutate '.[2].strip_layout = "simd1:eq,dynamic:compressor"' \
     'the standing console row claiming the retired layout'
@@ -169,13 +169,13 @@ mutate '.[11].strip_layout = "builtins"' \
     'the overhead floor row claiming the builtins layout it is the floor of'
 mutate '.[12].strip_content = "identity"' \
     'the gain-and-pan row claiming the identity fader and pan'
-mutate '.[13].fixture_id = "fixtures/session/v1/console-sixty-four-track-intended.toml"' \
+mutate '.[13].fixture_id = "fixtures/session/v1/console-sixty-four-track-intended.json"' \
     'a mono row rendered from the standing stereo fixture'
 mutate '.[13].synthetic_fixture = true' \
     'a mono row reported as derived in code'
 mutate '.[15].synthetic_fixture = false' \
     'the mixed-cohort row reported as a checked-in fixture'
-mutate '.[2].fixture_id = "fixtures/session/v1/console-sixty-four-track-mono.toml"' \
+mutate '.[2].fixture_id = "fixtures/session/v1/console-sixty-four-track-mono.json"' \
     'the standing console row rendered from the mono fixture'
 
 # Leg labelling and leg internals.

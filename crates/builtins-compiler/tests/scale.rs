@@ -1,9 +1,9 @@
 //! Builtin preparation scale gate above the former fixed-track ceiling.
 
 use builtins_compiler::{BuiltinCompileCaps, prepare_session_builtins};
-use session::{CompileCaps, RouteSource, SendTap, StableId, compile_session, parse_session_toml};
+use session::{CompileCaps, RouteSource, SendTap, StableId, compile_session, parse_session_json};
 
-const SESSION: &str = include_str!("../../../fixtures/session/v1/canonical.toml");
+const SESSION: &str = include_str!("../../../fixtures/session/v1/canonical.json");
 
 fn session_caps() -> CompileCaps {
     CompileCaps {
@@ -32,7 +32,7 @@ fn builtin_caps() -> BuiltinCompileCaps {
 
 #[test]
 fn prepares_65_537_tracks_or_rejects_only_the_configured_resource() {
-    let mut model = parse_session_toml(SESSION).expect("fixture");
+    let mut model = parse_session_json(SESSION).expect("fixture");
     let mut template = model.tracks[0].clone();
     template.simd1.effects.clear();
     template.dynamic.effects.clear();

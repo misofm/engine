@@ -75,7 +75,7 @@ function plainResources(resources) {
 const ARTIFACT_URL = "/artifacts/miso-engine-v1-audio-worklet.simd128.wasm";
 const BACKEND = "simd128";
 
-async function runContext(createHost, source, sessionToml) {
+async function runContext(createHost, source, sessionDocument) {
   const context = new OfflineAudioContext(2, TOTAL_FRAMES, SAMPLE_RATE);
   const exposedMainQuantum = Number(context.renderQuantumSize || 0);
   if (exposedMainQuantum !== 0 && exposedMainQuantum !== QUANTUM) {
@@ -83,7 +83,7 @@ async function runContext(createHost, source, sessionToml) {
   }
   const host = await createHost({
     context,
-    document: sessionToml,
+    document: sessionDocument,
     options: bootOptions(),
     simd128ModuleUrl: ARTIFACT_URL,
     workletModuleUrl: "/artifacts/miso-engine-v1-audio-worklet.js",
@@ -151,7 +151,7 @@ async function runContext(createHost, source, sessionToml) {
   };
 }
 
-async function runFailureContext(sessionToml) {
+async function runFailureContext(sessionDocument) {
   const context = new OfflineAudioContext(2, QUANTUM, 44100);
   const exposedMainQuantum = Number(context.renderQuantumSize || 0);
   if (exposedMainQuantum !== 0 && exposedMainQuantum !== QUANTUM) {
@@ -167,7 +167,7 @@ async function runFailureContext(sessionToml) {
     outputChannelCount: [2],
     processorOptions: {
       module,
-      document: new Uint8Array(sessionToml),
+      document: new Uint8Array(sessionDocument),
       options: bootOptions(),
     },
   });
@@ -201,18 +201,18 @@ export async function runMisoBrowserCorrectness() {
     "/artifacts/miso-engine-v1-audio-worklet-host.js"
   );
   const [sessionResponse, sourceResponse] = await Promise.all([
-    fetch("/fixture/session.toml"),
+    fetch("/fixture/session.json"),
     fetch("/fixture/source.json"),
   ]);
   if (!sessionResponse.ok || !sourceResponse.ok) throw new Error("fixture fetch failed");
-  const sessionToml = new TextEncoder().encode(await sessionResponse.text());
+  const sessionDocument = new TextEncoder().encode(await sessionResponse.text());
   const source = await sourceResponse.json();
   // Two fresh contexts over the one shipped artifact: the pair proves fresh-context determinism,
   // and each run is compared bit-for-bit against the raw-Wasm oracle's hash.
   const runs = [
-    await runContext(createMisoAudioWorkletHost, source, sessionToml),
-    await runContext(createMisoAudioWorkletHost, source, sessionToml),
+    await runContext(createMisoAudioWorkletHost, source, sessionDocument),
+    await runContext(createMisoAudioWorkletHost, source, sessionDocument),
   ];
-  const failure = await runFailureContext(sessionToml);
+  const failure = await runFailureContext(sessionDocument);
   return { schema: "miso.web.browser.result.v1", runs, failure };
 }

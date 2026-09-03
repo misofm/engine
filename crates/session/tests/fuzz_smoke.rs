@@ -1,8 +1,8 @@
 //! Deterministic mutation smoke coverage that runs without a fuzzing runtime.
 
-use session::{CompileCaps, canonical_session_toml, compile_session, parse_session_toml};
+use session::{CompileCaps, canonical_session_json, compile_session, parse_session_json};
 
-const EXAMPLE: &str = include_str!("../../../fixtures/session/v1/canonical.toml");
+const EXAMPLE: &str = include_str!("../../../fixtures/session/v1/canonical.json");
 
 #[test]
 fn deterministic_parser_compiler_mutation_smoke() {
@@ -19,11 +19,11 @@ fn deterministic_parser_compiler_mutation_smoke() {
         let Ok(source) = core::str::from_utf8(&bytes) else {
             continue;
         };
-        let Ok(model) = parse_session_toml(source) else {
+        let Ok(model) = parse_session_json(source) else {
             continue;
         };
-        if let Ok(canonical) = canonical_session_toml(&model) {
-            assert!(parse_session_toml(&canonical).is_ok());
+        if let Ok(canonical) = canonical_session_json(&model) {
+            assert!(parse_session_json(&canonical).is_ok());
         }
         let caps = CompileCaps {
             max_compiled_model_bytes: u64::MAX,
