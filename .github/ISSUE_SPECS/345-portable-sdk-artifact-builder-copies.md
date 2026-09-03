@@ -31,7 +31,7 @@ path before artifact construction.
 
 ### Allowed paths
 
-- `.github/ISSUE_SPECS/344-portable-sdk-artifact-builder-copies.md`
+- `.github/ISSUE_SPECS/345-portable-sdk-artifact-builder-copies.md`
 - `scripts/build-web-audioworklet.sh`
 - `scripts/build-flac-decoder.sh`
 - one focused regression file under `scripts/`
