@@ -130,3 +130,27 @@ occurrences, the complete environment checker and mutation script, and the autho
 It ruled that the exact `MISO_ENGINE_UPDATE_CANONICAL_WRITER_CORPUS` rename plus crate-local
 documentation is the smallest correction. The existing checker already catches the defect exactly,
 so adding another policy mechanism would add ceremony without discriminating a new claim.
+
+## Implementation and Sol-high review evidence
+
+Checkpoint `a8a3b09f` changes only `crates/session/src/canonical.rs` and
+`docs/ENGINE_ENV_VOCABULARY.md`. The source lookup and operator instruction now use exactly
+`MISO_ENGINE_UPDATE_CANONICAL_WRITER_CORPUS`; the authoritative vocabulary documents its
+crate-local write-before-byte-compare behavior and distinguishes it from the digest-printing
+`MISO_ENGINE_REPIN_*_CORPUS` family without adding a tool/script table row.
+
+The unchanged vocabulary checker passed with 99 documented tool/script names and the sole
+`MISO_ENGINE_` prefix. In a discarded scratch copy, restoring one retired live spelling made the
+same checker exit 1 with `identifier outside the MISO_ENGINE_ prefix`; the complete existing
+vocabulary mutation suite also passed. The focused corpus test passed both without the hook and in
+one invocation with the new hook. The checked corpus remained byte-identical before and after,
+with SHA-256 `5faaf8f3994c1d910115c0a1c5b3b4ea4b583f7e82e3a83ff90434f3c666639d`, and did
+not dirty the worktree. Formatting, session/workspace policies and diff checks passed. No full
+workspace test, benchmark, live-browser run, package qualification or target matrix was run
+locally.
+
+Fresh Sol-high adversarial review returned PASS at `a8a3b09f` with no blocking findings. It
+independently confirmed the exact-path diff, occurrence counts, unchanged hook behavior and corpus
+blob, truthful vocabulary placement, unchanged policy scripts, supplied negative mutation and
+focused test evidence, and forbidden-scope compliance. Remote closure still requires the pushed
+evidence candidate to pass the unchanged engine qualification and environment-vocabulary gate.
