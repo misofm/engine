@@ -15,8 +15,8 @@ pub(crate) const MAXIMUM_SESSION_DIAGNOSTICS: usize = 64;
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 #[non_exhaustive]
 pub enum DiagnosticCode {
-    /// Input was not TOML syntax as accepted by `toml_parser`.
-    TomlSyntax,
+    /// Input was not strict JSON syntax.
+    JsonSyntax,
     /// The schema version key was absent.
     VersionMissing,
     /// The schema version is unsupported.
@@ -25,7 +25,7 @@ pub enum DiagnosticCode {
     MissingField,
     /// A table contains a key outside the schema.
     UnknownField,
-    /// A value has the wrong TOML type.
+    /// A value has the wrong JSON type.
     WrongType,
     /// A string is not a stable identifier.
     InvalidId,
@@ -74,7 +74,7 @@ impl DiagnosticCode {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::TomlSyntax => "toml.syntax",
+            Self::JsonSyntax => "json.syntax",
             Self::VersionMissing => "schema.version_missing",
             Self::VersionUnsupported => "schema.version_unsupported",
             Self::MissingField => "schema.missing_field",
@@ -113,7 +113,7 @@ impl fmt::Display for DiagnosticCode {
 /// One structured component of a diagnostic path.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum PathSegment {
-    /// A TOML table key or typed field.
+    /// A JSON object key or typed field.
     Field(String),
     /// A zero-based array position.
     Index(usize),
@@ -279,7 +279,7 @@ impl fmt::Display for DiagnosticPath {
     }
 }
 
-/// Byte and line/column span in the TOML source.
+/// Byte and line/column span in the JSON source.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SourceSpan {
     /// Inclusive byte offset.

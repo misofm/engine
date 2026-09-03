@@ -5,16 +5,15 @@
 use core::alloc::Layout;
 use core::cell::Cell;
 use core::sync::atomic::{AtomicUsize, Ordering};
+use jstrict::{Parse, Value};
 use std::alloc::{GlobalAlloc, System};
-use toml::de::DeTable;
 
 use session::{
-    CompileCaps, RouteSource, SendTap, StableId, canonical_session_toml, compile_session,
-    estimate_session_resources, parse_session_toml,
+    CompileCaps, RouteSource, SendTap, StableId, canonical_session_json, compile_session,
+    estimate_session_resources, parse_session_json,
 };
 
-const CANONICAL: &str = include_str!("../../../fixtures/session/v1/canonical.toml");
-const N: usize = 4_096;
+const CANONICAL: &str = include_str!("../../../fixtures/session/v1/canonical.json");
 static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
 thread_local! { static ARMED: Cell<bool> = const { Cell::new(false) }; }
 
@@ -71,16 +70,16 @@ fn caps() -> CompileCaps {
     }
 }
 
-fn large_model() -> session::SessionToml {
-    let mut model = parse_session_toml(CANONICAL).expect("fixture parses");
+fn model_at(n: usize) -> session::SessionModel {
+    let mut model = parse_session_json(CANONICAL).expect("fixture parses");
     let track = model.tracks[0].clone();
     let route = model.routes[0].clone();
     model.tracks.clear();
     model.routes.clear();
     model.automation.clear();
-    model.tracks.reserve(N);
-    model.routes.reserve(N);
-    for index in 0..N {
+    model.tracks.reserve(n);
+    model.routes.reserve(n);
+    for index in 0..n {
         let track_id = StableId::parse(&format!("track-{index:04}")).expect("track ID");
         let mut next_track = track.clone();
         next_track.id = track_id.clone();
@@ -98,40 +97,42 @@ fn large_model() -> session::SessionToml {
 
 #[test]
 fn allocation_calls_stay_within_linear_phase_budgets() {
-    let model = large_model();
-    let text = canonical_session_toml(&model).expect("large model canonicalizes");
-    let (raw, raw_parse_allocations) = measured(|| DeTable::parse(&text));
-    assert!(raw.is_ok());
-    let (parsed, parse_allocations) = measured(|| parse_session_toml(&text));
-    assert!(parsed.is_ok());
-    let (canonical, canonical_allocations) = measured(|| canonical_session_toml(&model));
-    assert!(canonical.is_ok());
-    let (compiled, compile_allocations) = measured(|| compile_session(&model, caps()));
-    assert!(compiled.is_ok());
-    let (estimate, estimate_allocations) = measured(|| estimate_session_resources(&model));
-    assert!(estimate.is_ok());
-    let owned_model_allocations = parse_allocations - raw_parse_allocations;
-    println!(
-        "allocation calls: raw_toml={raw_parse_allocations} ({:.3}/track), owned_model={owned_model_allocations} ({:.3}/track), parse={parse_allocations} ({:.3}/track), canonical={canonical_allocations}, compile={compile_allocations} ({:.3}/track), estimate={estimate_allocations}",
-        raw_parse_allocations as f64 / N as f64,
-        owned_model_allocations as f64 / N as f64,
-        parse_allocations as f64 / N as f64,
-        compile_allocations as f64 / N as f64
-    );
-    assert!(
-        parse_allocations <= 32 * N + 512,
-        "parse allocations: {parse_allocations}; intact effect-bearing tracks require the borrowed TOML tree plus owned IDs/effect/parameter vectors"
-    );
-    assert!(
-        canonical_allocations <= 96,
-        "canonical allocations: {canonical_allocations}"
-    );
-    assert!(
-        compile_allocations <= 10 * N + 512,
-        "compile allocations: {compile_allocations}"
-    );
-    assert_eq!(
-        estimate_allocations, 0,
-        "estimate must remain allocation-free"
-    );
+    // Measurements on the pinned jstrict 0.14.0 frontend at 1/256/4096 tracks fit below
+    // `263 * tracks + 192`; this is the smallest integer-slope conservative envelope covering
+    // all three observations with at least 32 calls of fixed headroom. It replaces the TOML-era
+    // projection and keeps the component counts visible so a parser/model regression is local.
+    for n in [1, 256, 4_096] {
+        let model = model_at(n);
+        let text = canonical_session_json(&model).expect("model canonicalizes");
+        let (raw, raw_parse_allocations) = measured(|| Value::parse_str(&text));
+        assert!(raw.is_ok());
+        let (parsed, parse_allocations) = measured(|| parse_session_json(&text));
+        assert!(parsed.is_ok());
+        let (canonical, canonical_allocations) = measured(|| canonical_session_json(&model));
+        assert!(canonical.is_ok());
+        let (compiled, compile_allocations) = measured(|| compile_session(&model, caps()));
+        assert!(compiled.is_ok());
+        let (estimate, estimate_allocations) = measured(|| estimate_session_resources(&model));
+        assert!(estimate.is_ok());
+        let preflight_and_owned_model_allocations = parse_allocations - raw_parse_allocations;
+        println!(
+            "tracks={n}: raw_json={raw_parse_allocations}, preflight_and_owned_model={preflight_and_owned_model_allocations}, parse={parse_allocations}, canonical={canonical_allocations}, compile={compile_allocations}, estimate={estimate_allocations}"
+        );
+        assert!(
+            parse_allocations <= 263 * n + 192,
+            "parse allocation envelope: tracks={n}, calls={parse_allocations}"
+        );
+        assert!(
+            canonical_allocations <= 96,
+            "canonical allocations: {canonical_allocations}"
+        );
+        assert!(
+            compile_allocations <= 10 * n + 512,
+            "compile allocations: {compile_allocations}"
+        );
+        assert_eq!(
+            estimate_allocations, 0,
+            "estimate must remain allocation-free"
+        );
+    }
 }

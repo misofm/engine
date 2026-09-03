@@ -3,8 +3,8 @@
 use core::mem::size_of;
 
 use crate::{
-    Diagnostic, DiagnosticCode, DiagnosticPath, DiagnosticSet, FieldKey, ModelVisitor, SessionToml,
-    StableId, Token, VisitModel, WalkOrder,
+    Diagnostic, DiagnosticCode, DiagnosticPath, DiagnosticSet, FieldKey, ModelVisitor,
+    SessionModel, StableId, Token, VisitModel, WalkOrder,
 };
 
 /// Resource requirements of a normalized session declaration.
@@ -52,7 +52,7 @@ pub struct ResourceEstimate {
 
 /// Estimate issue-004-owned model/runtime resources without cloning or canonicalizing the model.
 pub fn estimate_session_resources(
-    session: &SessionToml,
+    session: &SessionModel,
 ) -> Result<ResourceEstimate, DiagnosticSet> {
     let mut errors = Vec::new();
     let source_count = count(session.sources.len(), "$.sources", &mut errors);
@@ -290,7 +290,7 @@ pub(crate) fn with_canonical_bytes(
     Ok(estimate)
 }
 
-fn retained_strings(session: &SessionToml, errors: &mut Vec<Diagnostic>) -> (u64, u64) {
+fn retained_strings(session: &SessionModel, errors: &mut Vec<Diagnostic>) -> (u64, u64) {
     let mut visitor = StringBytes {
         total: 0,
         largest: 0,

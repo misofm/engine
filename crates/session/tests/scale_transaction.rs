@@ -1,11 +1,11 @@
 //! Large-session estimation and transactional compiler-boundary checks.
 
 use session::{
-    CompileCaps, DiagnosticCode, StableId, canonical_session_toml, compile_session,
-    estimate_session_resources, parse_session_toml,
+    CompileCaps, DiagnosticCode, StableId, canonical_session_json, compile_session,
+    estimate_session_resources, parse_session_json,
 };
 
-const EXAMPLE: &str = include_str!("../../../fixtures/session/v1/canonical.toml");
+const EXAMPLE: &str = include_str!("../../../fixtures/session/v1/canonical.json");
 
 fn caps() -> CompileCaps {
     CompileCaps {
@@ -20,7 +20,7 @@ fn caps() -> CompileCaps {
 
 #[test]
 fn compiles_65_537_tracks_without_a_product_track_limit() {
-    let mut session = parse_session_toml(EXAMPLE).expect("fixture parses");
+    let mut session = parse_session_json(EXAMPLE).expect("fixture parses");
     let template = session.tracks[0].clone();
     session.tracks.clear();
     session.tracks.reserve(65_537);
@@ -58,8 +58,8 @@ fn compiles_65_537_tracks_without_a_product_track_limit() {
 
 #[test]
 fn failed_compile_does_not_mutate_input_or_construct_a_partial_artifact() {
-    let mut session = parse_session_toml(EXAMPLE).expect("fixture parses");
-    let before = canonical_session_toml(&session).expect("valid snapshot");
+    let mut session = parse_session_json(EXAMPLE).expect("fixture parses");
+    let before = canonical_session_json(&session).expect("valid snapshot");
     session.routes[0].destination = session::RouteDestination::OutputInput {
         output_id: StableId::parse("missing-output").expect("stable ID"),
     };
@@ -71,13 +71,13 @@ fn failed_compile_does_not_mutate_input_or_construct_a_partial_artifact() {
     );
     assert_ne!(
         before,
-        canonical_session_toml(&invalid_before).unwrap_or_default()
+        canonical_session_json(&invalid_before).unwrap_or_default()
     );
 }
 
 #[test]
 fn preflight_resource_failure_precedes_clone_and_index_construction() {
-    let mut session = parse_session_toml(EXAMPLE).expect("fixture parses");
+    let mut session = parse_session_json(EXAMPLE).expect("fixture parses");
     session.tracks[0].source_id = StableId::parse("missing-source").expect("stable ID");
     let mut constrained = caps();
     constrained.max_compiled_model_bytes = 0;

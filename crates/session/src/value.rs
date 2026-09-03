@@ -18,10 +18,6 @@ pub(crate) fn parse_f32_token(text: &str) -> F32Token {
     }
 }
 
-pub(crate) fn parse_i64_token(text: &str, radix: u32) -> Option<i64> {
-    i64::from_str_radix(text, radix).ok()
-}
-
 /// Append one canonical finite `f32` spelling and report whether exact-`f64` fallback was needed.
 pub(crate) fn write_f32(output: &mut String, value: f32) -> bool {
     let start = output.len();

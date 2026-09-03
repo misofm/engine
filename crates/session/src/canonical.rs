@@ -1,102 +1,115 @@
-//! Canonical TOML writer over the shared emit-side model walk.
+//! Canonical JSON writer over the shared emit-side model walk.
 
 use core::{convert::Infallible, fmt::Write as _};
 
 use crate::{
-    FieldKey, ModelVisitor, SessionToml, Token, VisitModel, WalkOrder, validate::validate_session,
+    FieldKey, ModelVisitor, SessionModel, Token, VisitModel, WalkOrder, validate::validate_session,
     value::write_f32,
 };
 
-/// Produce canonical V1 TOML bytes as UTF-8 text with LF line endings and one final newline.
-pub fn canonical_session_toml(session: &SessionToml) -> Result<String, crate::DiagnosticSet> {
+/// Produce canonical Session V1 JSON as UTF-8 text with one final newline.
+pub fn canonical_session_json(session: &SessionModel) -> Result<String, crate::DiagnosticSet> {
     validate_session(session)?;
     Ok(write_canonical(session))
 }
 
-pub(crate) fn write_canonical(session: &SessionToml) -> String {
-    let mut writer = TomlWriter {
+pub(crate) fn write_canonical(session: &SessionModel) -> String {
+    let mut writer = JsonWriter {
         output: String::new(),
-        depth: 0,
-        first_field: true,
+        containers: Vec::new(),
     };
     match session.visit(WalkOrder::Canonical, &mut writer) {
-        Ok(()) => writer.output,
+        Ok(()) => {
+            writer.output.push('\n');
+            writer.output
+        }
         Err(error) => match error {},
     }
 }
 
-struct TomlWriter {
-    output: String,
-    depth: usize,
-    first_field: bool,
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Kind {
+    Object,
+    Array,
 }
-impl TomlWriter {
-    fn field(&mut self, key: FieldKey) {
-        if self.depth != 0 && !self.first_field {
-            self.output.push_str(", ");
-        }
-        self.output.push_str(key.name);
-        self.output.push_str(" = ");
-        self.first_field = false;
+#[derive(Clone, Copy)]
+struct Container {
+    kind: Kind,
+    first: bool,
+    empty: bool,
+}
+struct JsonWriter {
+    output: String,
+    containers: Vec<Container>,
+}
+
+impl JsonWriter {
+    fn indent(&mut self, depth: usize) {
+        self.output.extend(core::iter::repeat_n(' ', depth * 2));
     }
-    fn scalar_end(&mut self) {
-        if self.depth == 0 {
-            self.output.push('\n');
+    fn entry_prefix(&mut self) {
+        let depth = self.containers.len();
+        let container = self.containers.last_mut().expect("value has a parent");
+        if !container.first {
+            self.output.push(',');
         }
+        self.output.push('\n');
+        container.first = false;
+        self.indent(depth);
+    }
+    fn field(&mut self, key: FieldKey) {
+        debug_assert_eq!(self.containers.last().map(|c| c.kind), Some(Kind::Object));
+        self.entry_prefix();
+        write_quoted(&mut self.output, key.name);
+        self.output.push_str(": ");
+    }
+    fn array_item(&mut self) {
+        debug_assert_eq!(self.containers.last().map(|c| c.kind), Some(Kind::Array));
+        self.entry_prefix();
+    }
+    fn close(&mut self, expected: Kind, delimiter: char) {
+        let container = self.containers.pop().expect("balanced model walk");
+        debug_assert_eq!(container.kind, expected);
+        if !container.empty {
+            self.output.push('\n');
+            self.indent(self.containers.len());
+        }
+        self.output.push(delimiter);
     }
 }
 
-impl ModelVisitor for TomlWriter {
+impl ModelVisitor for JsonWriter {
     type Error = Infallible;
-    fn record_begin(&mut self, key: Option<FieldKey>, _: u32) -> Result<(), Self::Error> {
-        if let Some(key) = key {
-            self.field(key);
-            self.output.push_str("{ ");
-        } else if self.depth != 0 {
-            if self.depth == 1 {
-                self.output.push_str("  ");
-            } else if !self.first_field {
-                self.output.push_str(", ");
-            }
-            self.output.push_str("{ ");
-        } else {
-            return Ok(());
+    fn record_begin(&mut self, key: Option<FieldKey>, _fields: u32) -> Result<(), Self::Error> {
+        match key {
+            Some(key) => self.field(key),
+            None if !self.containers.is_empty() => self.array_item(),
+            None => {}
         }
-        self.depth += 1;
-        self.first_field = true;
+        self.output.push('{');
+        self.containers.push(Container {
+            kind: Kind::Object,
+            first: true,
+            empty: false,
+        });
         Ok(())
     }
     fn record_end(&mut self) -> Result<(), Self::Error> {
-        if self.depth == 0 {
-            return Ok(());
-        }
-        self.depth -= 1;
-        self.output.push_str(" }");
-        if self.depth == 0 {
-            self.output.push('\n');
-        } else if self.depth == 1 {
-            self.output.push_str(",\n");
-        }
-        self.first_field = false;
+        self.close(Kind::Object, '}');
         Ok(())
     }
-    fn array_begin(&mut self, key: FieldKey, _: usize) -> Result<(), Self::Error> {
+    fn array_begin(&mut self, key: FieldKey, length: usize) -> Result<(), Self::Error> {
         self.field(key);
         self.output.push('[');
-        if self.depth == 0 {
-            self.output.push('\n');
-        }
-        self.depth += 1;
-        self.first_field = true;
+        self.containers.push(Container {
+            kind: Kind::Array,
+            first: true,
+            empty: length == 0,
+        });
         Ok(())
     }
     fn array_end(&mut self) -> Result<(), Self::Error> {
-        self.depth -= 1;
-        self.output.push(']');
-        if self.depth == 0 {
-            self.output.push('\n');
-        }
-        self.first_field = false;
+        self.close(Kind::Array, ']');
         Ok(())
     }
     fn wire_tag(&mut self, _: Token) -> Result<(), Self::Error> {
@@ -105,19 +118,21 @@ impl ModelVisitor for TomlWriter {
     fn bool(&mut self, key: FieldKey, value: bool) -> Result<(), Self::Error> {
         self.field(key);
         self.output.push_str(if value { "true" } else { "false" });
-        self.scalar_end();
         Ok(())
     }
     fn u8(&mut self, key: FieldKey, value: u8) -> Result<(), Self::Error> {
-        self.u64(key, u64::from(value))
+        self.field(key);
+        let _ = write!(self.output, "{value}");
+        Ok(())
     }
     fn u32(&mut self, key: FieldKey, value: u32) -> Result<(), Self::Error> {
-        self.u64(key, u64::from(value))
+        self.field(key);
+        let _ = write!(self.output, "{value}");
+        Ok(())
     }
     fn u64(&mut self, key: FieldKey, value: u64) -> Result<(), Self::Error> {
         self.field(key);
-        let _ = write!(self.output, "{value}");
-        self.scalar_end();
+        write_quoted(&mut self.output, &value.to_string());
         Ok(())
     }
     fn source_bit_depth(
@@ -131,13 +146,11 @@ impl ModelVisitor for TomlWriter {
             crate::SourceBitDepth::Pcm24 => self.output.push_str("24"),
             crate::SourceBitDepth::Float32 => write_quoted(&mut self.output, "32f"),
         }
-        self.scalar_end();
         Ok(())
     }
     fn f32(&mut self, key: FieldKey, value: f32) -> Result<(), Self::Error> {
         self.field(key);
         let _ = write_f32(&mut self.output, value);
-        self.scalar_end();
         Ok(())
     }
     fn id(&mut self, key: FieldKey, value: &crate::StableId) -> Result<(), Self::Error> {
@@ -146,7 +159,6 @@ impl ModelVisitor for TomlWriter {
     fn text(&mut self, key: FieldKey, value: &str) -> Result<(), Self::Error> {
         self.field(key);
         write_quoted(&mut self.output, value);
-        self.scalar_end();
         Ok(())
     }
     fn token(&mut self, key: FieldKey, value: Token) -> Result<(), Self::Error> {
@@ -166,14 +178,27 @@ fn write_quoted(output: &mut String, value: &str) {
             '\u{0C}' => output.push_str("\\f"),
             '\r' => output.push_str("\\r"),
             character if character.is_control() => {
-                let _ = if u32::from(character) <= 0xffff {
-                    write!(output, "\\u{:04X}", u32::from(character))
-                } else {
-                    write!(output, "\\U{:08X}", u32::from(character))
-                };
+                let _ = write!(output, "\\u{:04X}", u32::from(character));
             }
             character => output.push(character),
         }
     }
     output.push('"');
+}
+
+#[cfg(test)]
+mod tests {
+    use super::write_quoted;
+    #[test]
+    fn canonical_string_escaping_is_frozen() {
+        let mut output = String::new();
+        write_quoted(
+            &mut output,
+            "\"\\\u{8}\t\n\u{c}\r\u{0}\u{7f}\u{80}/\u{2028}\u{2029}\u{1f642}",
+        );
+        assert_eq!(
+            output,
+            "\"\\\"\\\\\\b\\t\\n\\f\\r\\u0000\\u007F\\u0080/\u{2028}\u{2029}\u{1f642}\""
+        );
+    }
 }

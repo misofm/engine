@@ -7,10 +7,10 @@
 //! that silently renders single-threaded.
 
 use session::{
-    CompileCaps, DiagnosticCode, canonical_session_toml, compile_session, parse_session_toml,
+    CompileCaps, DiagnosticCode, canonical_session_json, compile_session, parse_session_json,
 };
 
-const SESSION: &str = include_str!("../../../fixtures/session/v1/canonical.toml");
+const SESSION: &str = include_str!("../../../fixtures/session/v1/canonical.json");
 const MESSAGE: &str = "launch render_profile.mode must be single_thread";
 
 fn caps() -> CompileCaps {
@@ -25,7 +25,11 @@ fn caps() -> CompileCaps {
 }
 
 fn source_with_mode(mode: &str) -> String {
-    SESSION.replacen("mode = \"single_thread\"", &format!("mode = \"{mode}\""), 1)
+    SESSION.replacen(
+        "\"mode\": \"single_thread\"",
+        &format!("\"mode\": \"{mode}\""),
+        1,
+    )
 }
 
 fn assert_launch_diagnostic(diagnostics: &session::DiagnosticSet) {
@@ -41,11 +45,11 @@ fn assert_launch_diagnostic(diagnostics: &session::DiagnosticSet) {
 
 #[test]
 fn single_thread_parses_compiles_and_canonicalizes() {
-    let model = parse_session_toml(&source_with_mode("single_thread")).expect("launch parse");
+    let model = parse_session_json(&source_with_mode("single_thread")).expect("launch parse");
     let compiled = compile_session(&model, caps()).expect("launch compile");
     assert_eq!(
-        canonical_session_toml(compiled.normalized_model()).expect("canonical"),
-        compiled.canonical_toml()
+        canonical_session_json(compiled.normalized_model()).expect("canonical"),
+        compiled.canonical_json()
     );
 }
 
@@ -53,27 +57,27 @@ fn single_thread_parses_compiles_and_canonicalizes() {
 /// through a door that forgot to check.
 #[test]
 fn dependency_waves_rejects_with_one_stable_diagnostic_at_every_entry_point() {
-    let parsed = parse_session_toml(&source_with_mode("dependency_waves"));
+    let parsed = parse_session_json(&source_with_mode("dependency_waves"));
     assert_launch_diagnostic(&parsed.expect_err("unsupported at launch"));
 
-    let mut typed = parse_session_toml(SESSION).expect("valid baseline");
+    let mut typed = parse_session_json(SESSION).expect("valid baseline");
     typed.render_profile.mode = session::RenderMode::DependencyWaves;
     assert_launch_diagnostic(&compile_session(&typed, caps()).expect_err("typed rejection"));
-    assert_launch_diagnostic(&canonical_session_toml(&typed).expect_err("canonical rejection"));
+    assert_launch_diagnostic(&canonical_session_json(&typed).expect_err("canonical rejection"));
 }
 
 /// The token is rejected, not deleted: it still parses as a known token rather than an unknown
 /// enum value, which is what keeps the wire and the canonical form lossless.
 #[test]
 fn dependency_waves_is_still_a_known_token_and_not_an_unknown_enum() {
-    let error = parse_session_toml(&source_with_mode("dependency_waves"))
+    let error = parse_session_json(&source_with_mode("dependency_waves"))
         .expect_err("unsupported at launch");
     assert_eq!(
         error.diagnostics()[0].code,
         DiagnosticCode::RenderModeUnsupportedAtLaunch
     );
 
-    let unknown = parse_session_toml(&source_with_mode("wave_farm"))
+    let unknown = parse_session_json(&source_with_mode("wave_farm"))
         .expect_err("unknown token is a different failure");
     assert_eq!(unknown.diagnostics()[0].code, DiagnosticCode::InvalidEnum);
 }

@@ -2,10 +2,10 @@
 
 use crate::StableId;
 
-/// One schema field: canonical TOML key and BTLV field id.
+/// One schema field: canonical JSON key and BTLV field id.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FieldKey {
-    /// Canonical TOML field name.
+    /// Canonical JSON field name.
     pub name: &'static str,
     /// Stable BTLV field identifier.
     pub id: u16,
@@ -14,7 +14,7 @@ pub struct FieldKey {
 /// One closed-set token: canonical text and BTLV `u8`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Token {
-    /// Canonical TOML token.
+    /// Canonical JSON token.
     pub text: &'static str,
     /// Stable nonzero BTLV token.
     pub wire: u8,
@@ -52,7 +52,7 @@ pub trait ModelVisitor {
     fn u32(&mut self, key: FieldKey, value: u32) -> Result<(), Self::Error>;
     /// Emit an unsigned 64-bit field.
     fn u64(&mut self, key: FieldKey, value: u64) -> Result<(), Self::Error>;
-    /// Emit the mixed TOML integer/string source bit-depth token.
+    /// Emit the mixed JSON number/string source bit-depth token.
     fn source_bit_depth(
         &mut self,
         key: FieldKey,
@@ -185,7 +185,7 @@ mod walk {
     }
 
     records! {
-        SessionToml=>session |s,v,o,f| [(7+s.sources.len()+s.tracks.len()+s.submixes.len()+s.outputs.len()+s.routes.len()+s.automation.len()) as u32] {
+        SessionModel=>session |s,v,o,f| [(7+s.sources.len()+s.tracks.len()+s.submixes.len()+s.outputs.len()+s.routes.len()+s.automation.len()) as u32] {
           v.u32(f::SCHEMA_VERSION,s.schema_version),v.id(f::SESSION_ID,&s.session_id),v.u64(f::REVISION,s.revision),v.u32(f::SAMPLE_RATE_HZ,s.sample_rate_hz),v.u32(f::QUANTUM_FRAMES,s.quantum_frames),
           s.render_profile.record(Some(f::RENDER_PROFILE),o,v),s.output_profile.record(Some(f::OUTPUT_PROFILE),o,v),
           sorted_array(f::SOURCES,&s.sources,o,v),sorted_array(f::TRACKS,&s.tracks,o,v),sorted_array(f::SUBMIXES,&s.submixes,o,v),

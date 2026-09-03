@@ -1,14 +1,34 @@
 # Session schema V1
 
-`session` accepts the grammar implemented by `toml_parser 1.1.3+spec-1.1.0`,
-including trailing commas/newlines in inline tables and the `\e` and `\xHH` basic-string escapes.
-Its canonical writer deliberately emits a TOML 1.0 subset: bare keys, basic strings, decimal
-integers, decimal floats without exponents, booleans, inline tables, and arrays. The schema
-requires the root keys, in canonical order,
+`session` accepts strict RFC 8259 JSON through exact-pinned `jstrict 0.14.0`, after a
+contract-owned duplicate-key and nesting-depth preflight. Comments, trailing commas, multiple
+top-level values, BOMs, invalid escapes, unpaired surrogates and non-JSON numeric tokens refuse.
+A duplicate member refuses before its value is parsed or retained, at the decoded member path,
+with a byte span over the second key. The root object is depth one; opening any object or array at
+depth 129 refuses before that subtree is built.
+
+Canonical output is defined by the schema walk, not generic map order, RFC 8785/JCS, or a serde
+serializer. It is UTF-8 without BOM, uses LF and two-space indentation, has no tabs or trailing
+whitespace, and ends in exactly one LF. Object fields use `": "` and schema-declared order.
+Order-insensitive entity arrays sort by stable ID and effect parameters by `(parameter_id,
+channel)`; rack effects and automation segments retain declared order. Strings emit `\"`, `\\`,
+`\b`, `\t`, `\n`, `\f`, and `\r`; other C0/C1 controls use uppercase four-digit `\uXXXX`.
+Solidus and all other Unicode scalars, including U+2028, U+2029 and non-BMP scalars, emit directly.
+
+Booleans and `u8`/`u32` fields are JSON booleans/numbers. Integer-number fields reject fractions,
+exponents and any leading minus, including `-0`. Every typed `u64` leaf (`revision`, source
+`frames`, and automation `start_sample`/`end_sample`) is a canonical unsigned decimal JSON string
+matching `^(0|[1-9][0-9]*)$`, bounded through `18446744073709551615`. Finite `f32` fields accept
+semantically valid integer, fractional and exponent spellings and emit the proven shortest
+non-exponent spelling that round-trips to identical bits through both direct-f32 and
+f64-then-f32 readers. Integral floats retain `.0`; negative zero emits `-0.0`; NaN and infinities
+refuse.
+
+The schema requires the root keys, in canonical order,
 `schema_version`, `session_id`, `revision`, `sample_rate_hz`, `quantum_frames`, `render_profile`,
 `output_profile`, `sources`, `tracks`, `submixes`, `outputs`, `routes`, and `automation`. Every
-table rejects unknown keys and every field is explicit, including empty arrays and
-`sidechain = { kind = "none" }`. `quantum_frames` must be nonzero. Queue depth, source-ring size,
+object rejects unknown keys and every field is explicit, including empty arrays and
+`"sidechain": { "kind": "none" }`. `quantum_frames` must be nonzero. Queue depth, source-ring size,
 and memory budget are host policy and are not session-document fields.
 
 Stable IDs use `[a-z][a-z0-9._-]{0,126}`. Sources have their own unique ID namespace. Tracks,
@@ -19,7 +39,12 @@ automation segments preserve declared order. Canonical text uses LF, exactly one
 canonical string escapes, and finite `f32` spellings that preserve exact bits through both direct
 `f32` parsing and `f64`-then-`f32` conversion by external readers. Normal values use shortest `f32`
 `Display`; the two double-rounding values use exact `f64` `Display`; integral spellings gain `.0`
-to remain TOML floats; and negative zero is preserved exactly as `-0.0`.
+to remain floats; and negative zero is preserved exactly as `-0.0`.
+
+The minimal and full exact-byte examples are
+[`canonical-minimal.json`](../fixtures/session/v1/canonical-minimal.json) and
+[`canonical.json`](../fixtures/session/v1/canonical.json). They freeze indentation, key order,
+numeric/string spelling, and the final newline.
 
 `render_profile.mode` is a launch engine setting. Both V1 tokens still parse -- `single_thread`
 and `dependency_waves` -- because the closed token set, the protocol wire encoding and the
@@ -92,7 +117,7 @@ opaque nonempty text. Native availability/descriptor domains/latency/tail are do
 work; CID/package validity is downstream issue-029 work.
 
 A `native` `effect_id` is therefore a *stable ID*, not a registry lookup: this schema checks its
-syntax and never its membership. `fixtures/session/v1/canonical.toml` exercises exactly that
+syntax and never its membership. `fixtures/session/v1/canonical.json` exercises exactly that
 boundary. It names `effect_id = "parametric-eq"` without the `miso.` prefix the launch registry
 carries, and it is accepted, compiled and round-tripped all the same; the launch registry would
 refuse it at preparation, which is the point. That spelling is load-bearing rather than a typo.
@@ -162,13 +187,9 @@ DSP state, `PlanPublisher`, or `PreparedRenderPlan` capability.
 
 Every diagnostic returned from parsing has a source span, including diagnostics produced by domain
 validation after the model shape has been read. Typed canonicalization and compilation have no source
-text, so their otherwise matching code/path diagnostics have `span = None`. Every model `u64` field is
-bounded to TOML's signed 64-bit integer range: values above `i64::MAX` reject with
-`numeric.out_of_schema_range` at the corresponding leaf instead of being serialized.
+text, so their otherwise matching code/path diagnostics have `span = None`. Every model `u64`
+field supports the full unsigned domain and serializes as a canonical decimal string.
 
-The current manifest retains the separate `serde = 1.0.228` dependency and requests `toml = 0.9.9`
-with both `parse` and `serde` enabled. That package resolves as `0.9.9+spec-1.0.0`, while its parser
-dependency resolves as `toml_parser 1.1.3+spec-1.1.0`; the package suffix is not a Cargo feature.
-Removing the unused serde-facing dependency surface is deferred because that indivisible cleanup also
-requires manifest and lockfile changes outside this checkpoint's boundary. The schema-specific
-canonical writer does not use the dependency's display support.
+The runtime manifest exact-pins `jstrict = 0.14.0` without default features and has no runtime
+serde, serde_json or TOML dependency. `serde_json` is dev-only for order and unknown-key
+mutations; it is neither the acceptance parser nor the canonical writer.

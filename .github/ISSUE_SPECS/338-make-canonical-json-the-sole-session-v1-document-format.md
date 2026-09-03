@@ -489,3 +489,33 @@ canonical writer must remain session-specific because generic JCS/`JSON.stringif
 the repository's exact `f32 -0.0` and cross-language 64-bit requirements without semantic loss.
 No implementation, dependency change, fixture rewrite or performance claim is made by this
 planning checkpoint.
+
+## Attempt 1 implementation evidence — tranche 1
+
+The session-authority checkpoint uses exact-pinned `jstrict 0.14.0` without default features and
+retains a contract-owned preflight for decoded duplicate members and the explicit depth-128 limit.
+The dependency preserves raw numeric source spans through its byte-based `CodeMap`; the typed walk
+therefore applies the existing exact-f32 reader to the original lexeme rather than an intermediate
+`f64`. Direct runtime serde, serde_json and TOML dependencies are absent. `serde_json 1.0.151` is a
+dev-only mutation/artifact-test dependency.
+
+Focused tests cover root and nested duplicate families (including escape-equivalent keys, exact
+second-key byte spans, and malformed/huge values that are never visited), opening-depth-129
+refusal, raw `-0`, exponent and huge-exponent typed diagnostics, all u64 leaves, strict JSON
+syntax/Unicode cases, multibyte/newline byte spans, exact canonical fixtures, preserved semantic
+diagnostics and resource-preflight ordering. The checked Draft 2020-12 schema test recursively
+requires `additionalProperties: false` on every object schema and checks the four-way migration
+inventory.
+
+Allocation-call observations for one, 256 and 4,096 tracks were respectively: raw parser
+`84/13873/221245`; preflight plus owned model beyond that raw parse `305/53600/856160`; complete
+parse `389/67473/1077405`; canonical writer `19/26/30`; compiler `45/2636/41394`; estimator
+`0/0/0`. The smallest documented conservative integer-slope parse envelope covering those points
+with at least 32 fixed calls of headroom is `263 * tracks + 192`. This is allocation projection
+evidence, not the issue's one-shot timing benchmark; that benchmark was not run.
+
+At this checkpoint `cargo test --locked -p session --no-fail-fast`, native and
+`wasm32-unknown-unknown` session checks, formatting, and warning-denied session Clippy are green.
+The two explicitly ignored timing/exhaustive qualification tests were not authorized or run. This
+records tranche-1 evidence only and makes no claim that the later host/protocol/SDK/package
+migration or full issue acceptance is complete.

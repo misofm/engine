@@ -3,11 +3,11 @@
 use std::time::Instant;
 
 use session::{
-    CompileCaps, RouteSource, SendTap, StableId, canonical_session_toml, compile_session,
-    parse_session_toml,
+    CompileCaps, RouteSource, SendTap, StableId, canonical_session_json, compile_session,
+    parse_session_json,
 };
 
-const CANONICAL: &str = include_str!("../../../fixtures/session/v1/canonical.toml");
+const CANONICAL: &str = include_str!("../../../fixtures/session/v1/canonical.json");
 const SCALES: [usize; 2] = [32_768, 65_536];
 
 fn caps() -> CompileCaps {
@@ -21,8 +21,8 @@ fn caps() -> CompileCaps {
     }
 }
 
-fn model_at(scale: usize) -> session::SessionToml {
-    let mut model = parse_session_toml(CANONICAL).expect("fixture parses");
+fn model_at(scale: usize) -> session::SessionModel {
+    let mut model = parse_session_json(CANONICAL).expect("fixture parses");
     let mut track = model.tracks[0].clone();
     track.simd1.effects.clear();
     track.dynamic.effects.clear();
@@ -59,20 +59,20 @@ fn canonical_compile_parse_timings_at_32768_and_65536_tracks() {
         assert_eq!(model.tracks.len(), scale);
         assert_eq!(model.routes.len(), scale);
         assert!(model.tracks.windows(2).all(|w| w[0].id < w[1].id));
-        let warm_text = canonical_session_toml(&model).expect("warmup canonical");
+        let warm_text = canonical_session_json(&model).expect("warmup canonical");
         let warm_compiled = compile_session(&model, caps()).expect("warmup compile");
-        let warm_parsed = parse_session_toml(&warm_text).expect("warmup parse");
+        let warm_parsed = parse_session_json(&warm_text).expect("warmup parse");
         assert_eq!(warm_compiled.normalized_model().tracks.len(), scale);
         assert_eq!(warm_parsed.tracks.len(), scale);
         for round in 1..=2 {
             let started = Instant::now();
-            let text = canonical_session_toml(&model).expect("valid scale model");
+            let text = canonical_session_json(&model).expect("valid scale model");
             let canonical_ms = started.elapsed().as_millis();
             let started = Instant::now();
             let compiled = compile_session(&model, caps()).expect("scale compiles");
             let compile_ms = started.elapsed().as_millis();
             let started = Instant::now();
-            let parsed = parse_session_toml(&text).expect("scale canonical parses");
+            let parsed = parse_session_json(&text).expect("scale canonical parses");
             let parse_ms = started.elapsed().as_millis();
             assert_eq!(compiled.normalized_model().tracks.len(), scale);
             assert_eq!(parsed.tracks.len(), scale);

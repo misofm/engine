@@ -3,11 +3,11 @@
 use session::{
     AutomationShape, CompileCaps, DiagnosticCode, DiagnosticSet, Effect, MatrixOrPan, Output,
     ParameterChannel, ParameterUnit, Rack, RackName, RouteDestination, RouteSource, SendTap,
-    SessionToml, Sidechain, SidechainDeclaration, StableId, canonical_session_toml,
-    compile_session, estimate_session_resources, parse_session_toml,
+    SessionModel, Sidechain, SidechainDeclaration, StableId, canonical_session_json,
+    compile_session, estimate_session_resources, parse_session_json,
 };
 
-const EXAMPLE: &str = include_str!("../../../fixtures/session/v1/canonical.toml");
+const EXAMPLE: &str = include_str!("../../../fixtures/session/v1/canonical.json");
 
 fn id(value: &str) -> StableId {
     StableId::parse(value).expect("valid test ID")
@@ -35,67 +35,56 @@ fn assert_diagnostic(error: &DiagnosticSet, code: DiagnosticCode, path: &str) {
 }
 
 fn parse_case(count: &mut usize, source: &str, code: DiagnosticCode, path: &str) {
-    let error = parse_session_toml(source).expect_err("invalid parse case");
+    let error = parse_session_json(source).expect_err("invalid parse case");
     assert_diagnostic(&error, code, path);
     *count += 1;
 }
 
 fn model_case(
     count: &mut usize,
-    mutate: impl FnOnce(&mut SessionToml),
+    mutate: impl FnOnce(&mut SessionModel),
     code: DiagnosticCode,
     path: &str,
 ) {
-    let mut session = parse_session_toml(EXAMPLE).expect("fixture parses");
+    let mut session = parse_session_json(EXAMPLE).expect("fixture parses");
     mutate(&mut session);
-    let error = canonical_session_toml(&session).expect_err("invalid model case");
+    let error = canonical_session_json(&session).expect_err("invalid model case");
     assert_diagnostic(&error, code, path);
     *count += 1;
 }
 
 #[test]
-fn u64_model_fields_are_bounded_to_toml_i64_at_leaf_paths() {
-    type Mutation = fn(&mut SessionToml);
+fn u64_model_fields_accept_the_full_unsigned_domain() {
+    type Mutation = fn(&mut SessionModel);
     let cases: &[(Mutation, &str)] = &[
+        (|session| session.revision = u64::MAX, "$.revision"),
         (
-            |session| session.revision = i64::MAX as u64 + 1,
-            "$.revision",
-        ),
-        (
-            |session| session.sources[0].frames = i64::MAX as u64 + 1,
+            |session| session.sources[0].frames = u64::MAX,
             "$.sources[0].frames",
         ),
         (
-            |session| session.automation[0].segments[0].start_sample = i64::MAX as u64 + 1,
-            "$.automation[0].segments[0].start_sample",
-        ),
-        (
-            |session| session.automation[0].segments[0].end_sample = i64::MAX as u64 + 1,
+            |session| {
+                session.automation[0].segments[0].start_sample = u64::MAX - 1;
+                session.automation[0].segments[0].end_sample = u64::MAX;
+            },
             "$.automation[0].segments[0].end_sample",
         ),
     ];
 
     for (mutate, path) in cases {
-        let mut session = parse_session_toml(EXAMPLE).expect("fixture parses");
+        let mut session = parse_session_json(EXAMPLE).expect("fixture parses");
         mutate(&mut session);
-        let error = canonical_session_toml(&session).expect_err("large u64 must be rejected");
-        assert!(
-            error.diagnostics().iter().any(|diagnostic| {
-                diagnostic.code == DiagnosticCode::NumericOutOfSchemaRange
-                    && diagnostic.path.to_string() == *path
-                    && diagnostic.message == "integer exceeds the TOML i64 range"
-            }),
-            "missing TOML i64 range diagnostic at {path}: {error}"
-        );
+        let canonical = canonical_session_json(&session).expect("full u64 domain canonicalizes");
+        assert!(canonical.contains(&format!("\"{}\"", u64::MAX)), "{path}");
     }
 }
 
 #[test]
 fn empty_third_party_cid_is_reported_at_the_identity_leaf() {
-    let mut session = parse_session_toml(EXAMPLE).expect("fixture parses");
+    let mut session = parse_session_json(EXAMPLE).expect("fixture parses");
     session.tracks[0].dynamic.effects[0].identity =
         session::EffectIdentity::ThirdPartyCid { cid: String::new() };
-    let error = canonical_session_toml(&session).expect_err("empty CID must be rejected");
+    let error = canonical_session_json(&session).expect_err("empty CID must be rejected");
     assert_diagnostic(
         &error,
         DiagnosticCode::NumericOutOfSchemaRange,
@@ -104,11 +93,92 @@ fn empty_third_party_cid_is_reported_at_the_identity_leaf() {
 }
 
 fn replaced(needle: &str, replacement: &str) -> String {
+    let compact = compact_json(EXAMPLE);
+    let needle = json_fragment(needle);
+    let replacement = json_fragment(replacement);
     assert!(
-        EXAMPLE.contains(needle),
-        "fixture replacement needle is present"
+        compact.contains(&needle),
+        "fixture replacement needle is present: {needle}"
     );
-    EXAMPLE.replacen(needle, replacement, 1)
+    compact
+        .replacen(&needle, &replacement, 1)
+        .replace("{,", "{")
+        .replace(",}", "}")
+}
+
+fn compact_json(input: &str) -> String {
+    let mut output = String::new();
+    let mut quoted = false;
+    let mut escaped = false;
+    for ch in input.chars() {
+        if quoted {
+            output.push(ch);
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                quoted = false;
+            }
+        } else if ch == '"' {
+            quoted = true;
+            output.push(ch);
+        } else if !ch.is_whitespace() {
+            output.push(ch);
+        }
+    }
+    output
+}
+
+fn json_fragment(input: &str) -> String {
+    let mut output = String::new();
+    let mut chars = input.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '"' => {
+                output.push(ch);
+                while let Some(next) = chars.next() {
+                    output.push(next);
+                    if next == '\\' {
+                        if let Some(escaped) = chars.next() {
+                            output.push(escaped);
+                        }
+                    } else if next == '"' {
+                        break;
+                    }
+                }
+            }
+            'a'..='z' | 'A'..='Z' | '_' => {
+                if matches!(ch, 'e' | 'E') && output.ends_with(|c: char| c.is_ascii_digit()) {
+                    output.push(ch);
+                    continue;
+                }
+                let mut word = String::from(ch);
+                while matches!(
+                    chars.peek(),
+                    Some('a'..='z' | 'A'..='Z' | '0'..='9' | '_' | '-')
+                ) {
+                    word.push(chars.next().expect("peeked"));
+                }
+                if matches!(word.as_str(), "true" | "false" | "null") {
+                    output.push_str(&word);
+                } else {
+                    output.push('"');
+                    output.push_str(&word);
+                    output.push('"');
+                }
+            }
+            '=' => output.push(':'),
+            '\n' => {
+                if !output.ends_with([',', '{', '[']) {
+                    output.push(',');
+                }
+            }
+            ' ' | '\t' | '\r' => {}
+            _ => output.push(ch),
+        }
+    }
+    output
 }
 
 #[test]
@@ -129,7 +199,7 @@ fn schema_version_and_type_category_has_16_distinct_cases() {
     parse_case(
         &mut count,
         "schema_version = [",
-        DiagnosticCode::TomlSyntax,
+        DiagnosticCode::JsonSyntax,
         "$",
     );
     parse_case(
@@ -146,7 +216,7 @@ fn schema_version_and_type_category_has_16_distinct_cases() {
     );
     parse_case(
         &mut count,
-        &replaced("revision = 7", "revision = \"7\""),
+        &replaced("revision = \"7\"", "revision = 7"),
         DiagnosticCode::WrongType,
         "$.revision",
     );
@@ -270,8 +340,8 @@ fn stable_id_category_has_20_distinct_cases() {
             "$.tracks[0].dynamic.effects[0].identity.effect_id",
         ),
         (
-            "{ id = \"main-out\" },",
-            "{ id = \"Bad\" },",
+            "{ id = \"main-out\" }",
+            "{ id = \"Bad\" }",
             "$.outputs[0].id",
         ),
         (
@@ -314,7 +384,7 @@ fn stable_id_category_has_20_distinct_cases() {
     }
     parse_case(
         &mut count,
-        &replaced("submixes = [\n", "submixes = [\n  { id = \"Bad\" },\n"),
+        &replaced("submixes = [", "submixes = [{ id = \"Bad\" }"),
         DiagnosticCode::InvalidId,
         "$.submixes[0].id",
     );
@@ -585,7 +655,11 @@ fn source_identity_and_shape_category_has_20_distinct_cases() {
             "channels = 256, bit_depth",
             "$.sources[0].channels",
         ),
-        ("frames = 48000", "frames = -1", "$.sources[0].frames"),
+        (
+            "frames = \"48000\"",
+            "frames = \"-1\"",
+            "$.sources[0].frames",
+        ),
         (
             "left_source_channel = 0",
             "left_source_channel = 256",
@@ -999,9 +1073,10 @@ fn automation_category_has_20_distinct_cases() {
         DiagnosticCode::InvalidEnum,
         "$.automation[0].target.channel",
     );
+    let unit = compact_json(EXAMPLE).replacen("\"unit\":\"db\"", "\"unit\":\"seconds\"", 2);
     parse_case(
         &mut count,
-        &replaced("unit = \"db\" }] },", "unit = \"seconds\" }] },"),
+        &unit,
         DiagnosticCode::UnitInvalid,
         "$.automation[0].segments[0].unit",
     );
@@ -1011,7 +1086,7 @@ fn automation_category_has_20_distinct_cases() {
 #[test]
 fn configured_resource_category_has_4_distinct_cases() {
     let mut count = 0;
-    let base = parse_session_toml(EXAMPLE).expect("fixture parses");
+    let base = parse_session_json(EXAMPLE).expect("fixture parses");
     let estimate = estimate_session_resources(&base).expect("fixture estimates");
     for zero in [true, false] {
         for (field, path) in [
@@ -1053,7 +1128,7 @@ fn configured_resource_category_has_4_distinct_cases() {
 /// letting a budget quietly start or stop biting.
 #[test]
 fn dead_resource_caps_cannot_refuse_any_session() {
-    let session = parse_session_toml(EXAMPLE).expect("fixture parses");
+    let session = parse_session_json(EXAMPLE).expect("fixture parses");
     let estimate = estimate_session_resources(&session).expect("fixture estimates");
     for (label, value) in [
         ("requested_runtime_bytes", estimate.requested_runtime_bytes),
@@ -1092,13 +1167,13 @@ fn parser_registry_covers_right_lane_and_f32_representation() {
         "right = { unknown_right = 0, polarity_invert = false",
     );
     assert_diagnostic(
-        &parse_session_toml(&unknown_right).expect_err("nested unknown"),
+        &parse_session_json(&unknown_right).expect_err("nested unknown"),
         DiagnosticCode::UnknownField,
         "$.tracks[0].builtins.right.unknown_right",
     );
     let too_large = replaced("trim_db = 0.0", "trim_db = 3.5e38");
     assert_diagnostic(
-        &parse_session_toml(&too_large).expect_err("finite f64 does not fit finite f32"),
+        &parse_session_json(&too_large).expect_err("finite f64 does not fit finite f32"),
         DiagnosticCode::NumericNotF32Representable,
         "$.tracks[0].builtins.left.trim_db",
     );
@@ -1106,7 +1181,7 @@ fn parser_registry_covers_right_lane_and_f32_representation() {
 
 #[test]
 fn compile_caps_reject_before_semantic_validation() {
-    let mut session = parse_session_toml(EXAMPLE).expect("fixture parses");
+    let mut session = parse_session_json(EXAMPLE).expect("fixture parses");
     session.tracks[0].source_id = id("missing-source");
     let mut caps = unlimited_caps();
     caps.max_compiled_model_bytes = 1;
@@ -1121,7 +1196,7 @@ fn compile_caps_reject_before_semantic_validation() {
 
 #[test]
 fn tagged_route_roles_are_structurally_closed() {
-    let session = parse_session_toml(EXAMPLE).expect("fixture parses");
+    let session = parse_session_json(EXAMPLE).expect("fixture parses");
     assert!(matches!(
         session.routes[0].source,
         RouteSource::Track { .. } | RouteSource::SubmixOutput { .. }

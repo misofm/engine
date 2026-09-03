@@ -3,13 +3,13 @@
 use session::{
     CompileCaps, Effect, EffectIdentity, EffectQuality, LinkMode, MatrixOrPan, ParameterChannel,
     Rack, Route, RouteDestination, RouteSource, SendTap, Sidechain, SidechainDeclaration, StableId,
-    canonical_session_toml, compile_session, parse_session_toml,
+    canonical_session_json, compile_session, parse_session_json,
 };
 
-const REPRESENTATIVE: &str = include_str!("../../../fixtures/session/v1/canonical.toml");
-const MINIMAL: &str = include_str!("../../../fixtures/session/v1/canonical-minimal.toml");
+const REPRESENTATIVE: &str = include_str!("../../../fixtures/session/v1/canonical.json");
+const MINIMAL: &str = include_str!("../../../fixtures/session/v1/canonical-minimal.json");
 const PARAMETRIC_EQ: &str =
-    include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.toml");
+    include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json");
 
 fn id(value: &str) -> StableId {
     StableId::parse(value).expect("valid test ID")
@@ -29,8 +29,8 @@ fn unlimited_caps() -> CompileCaps {
 #[test]
 fn checked_in_fixtures_are_exact_canonical_bytes() {
     for fixture in [MINIMAL, REPRESENTATIVE] {
-        let model = parse_session_toml(fixture).expect("fixture parses");
-        assert_eq!(canonical_session_toml(&model).expect("canonical"), fixture);
+        let model = parse_session_json(fixture).expect("fixture parses");
+        assert_eq!(canonical_session_json(&model).expect("canonical"), fixture);
     }
 }
 
@@ -41,27 +41,24 @@ fn parametric_eq_session_fixture_bytes_are_immutable() {
         .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
             (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
         });
-    // #241 re-pin: deleting the limits record plus rate/locator/mapping/region and replacing the
-    // nested source declaration with content/channels/bit_depth/frames removes exactly 171 bytes
-    // from the prior 9,817-byte canonical document.
-    assert_eq!(PARAMETRIC_EQ.len(), 9_817 - 171);
-    assert_eq!(hash, 0x7bee_179a_a903_f382);
+    assert_eq!(PARAMETRIC_EQ.len(), 16_712);
+    assert_eq!(hash, 0x8447_0d4a_dee9_8387);
 }
 
 #[test]
 fn signed_zero_and_double_rounding_values_survive_session_compilation() {
     let positive = f32::from_bits(0x15ae_43fd);
     let negative = f32::from_bits(0x95ae_43fd);
-    let mut model = parse_session_toml(REPRESENTATIVE).expect("fixture parses");
+    let mut model = parse_session_json(REPRESENTATIVE).expect("fixture parses");
     model.routes[0].channel_matrix.lr = -0.0;
     model.tracks[0].builtins.left.trim_db = positive;
     model.routes[0].gain_db = negative;
 
-    let canonical = canonical_session_toml(&model).expect("direct canonicalization");
-    assert!(canonical.contains("lr = -0.0"));
-    assert!(canonical.contains(&format!("trim_db = {}", f64::from(positive))));
-    assert!(canonical.contains(&format!("gain_db = {}", f64::from(negative))));
-    let reparsed = parse_session_toml(&canonical).expect("canonical reparses");
+    let canonical = canonical_session_json(&model).expect("direct canonicalization");
+    assert!(canonical.contains("\"lr\": -0.0"));
+    assert!(canonical.contains(&format!("\"trim_db\": {}", f64::from(positive))));
+    assert!(canonical.contains(&format!("\"gain_db\": {}", f64::from(negative))));
+    let reparsed = parse_session_json(&canonical).expect("canonical reparses");
     assert_eq!(reparsed.routes[0].channel_matrix.lr.to_bits(), 0x8000_0000);
     assert_eq!(
         reparsed.tracks[0].builtins.left.trim_db.to_bits(),
@@ -80,9 +77,9 @@ fn signed_zero_and_double_rounding_values_survive_session_compilation() {
         0x15ae_43fd
     );
     assert_eq!(normalized.routes[0].gain_db.to_bits(), 0x95ae_43fd);
-    assert_eq!(compiled.canonical_toml(), canonical);
+    assert_eq!(compiled.canonical_json(), canonical);
     assert_eq!(
-        canonical_session_toml(normalized).expect("normalized recanonicalizes"),
+        canonical_session_json(normalized).expect("normalized recanonicalizes"),
         canonical
     );
 }
@@ -90,7 +87,7 @@ fn signed_zero_and_double_rounding_values_survive_session_compilation() {
 #[test]
 fn maximal_float_spellings_fit_the_canonical_size_estimate() {
     let tiny = f32::from_bits(1);
-    let mut model = parse_session_toml(REPRESENTATIVE).expect("fixture parses");
+    let mut model = parse_session_json(REPRESENTATIVE).expect("fixture parses");
     let track = &mut model.tracks[0];
     for channel in [&mut track.builtins.left, &mut track.builtins.right] {
         channel.trim_db = tiny;
@@ -117,7 +114,7 @@ fn maximal_float_spellings_fit_the_canonical_size_estimate() {
 
 #[test]
 fn full_tagged_surface_round_trips_without_field_loss() {
-    let mut model = parse_session_toml(REPRESENTATIVE).expect("fixture parses");
+    let mut model = parse_session_json(REPRESENTATIVE).expect("fixture parses");
     model.submixes.push(session::Submix { id: id("mix") });
     model.tracks[0].matrix_or_pan = MatrixOrPan::Matrix {
         ll: 1.25,
@@ -166,8 +163,8 @@ fn full_tagged_surface_round_trips_without_field_loss() {
     });
     model.automation[0].target.channel = ParameterChannel::Both;
 
-    let canonical = canonical_session_toml(&model).expect("full surface canonicalizes");
-    let reparsed = parse_session_toml(&canonical).expect("full surface reparses");
+    let canonical = canonical_session_json(&model).expect("full surface canonicalizes");
+    let reparsed = parse_session_json(&canonical).expect("full surface reparses");
     assert!(matches!(
         reparsed.tracks[0].matrix_or_pan,
         MatrixOrPan::Matrix { .. }
@@ -183,7 +180,7 @@ fn full_tagged_surface_round_trips_without_field_loss() {
             .any(|route| matches!(route.source, RouteSource::SubmixOutput { .. }))
     );
     assert_eq!(
-        canonical_session_toml(&reparsed).expect("stable"),
+        canonical_session_json(&reparsed).expect("stable"),
         canonical
     );
 }
