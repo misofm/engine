@@ -83,3 +83,21 @@ Sol reviewed the macOS failure, both scripts' identical output preflight, and th
 ruled that ordinary `cp` after the already-mandatory empty-directory check is the smallest portable
 correction. A broader portability abstraction or package change would not discriminate another
 product claim.
+
+## Implementation and Sol review evidence
+
+Checkpoint `5ea05840` replaces only the eight GNU-only copy invocations with ordinary `cp`, adds a
+mocked output-contract regression, and runs that regression only from SDK package `check` mode.
+The regression proves exact happy-path copies plus refusal-before-build for non-empty, symlink,
+missing and regular-file outputs. Shell syntax, the focused regression, workspace policy and diff
+checks pass on macOS. Sol's first review found no implementation defect but held on an issue-number
+typo in this file; correction checkpoint `9ca8ac20` fixes that one allowed-path digit. Fresh Sol
+review returns PASS for the bounded implementation.
+
+A real macOS package check now passes the former `cp` failure and reaches FLAC artifact
+qualification. It then reports the pre-existing local FLAC reproducibility mismatch (pinned
+`a9fc3301...73b65e`, locally rebuilt `3f4b...df48f8`). This issue does not repin or broaden into
+that independent finding. Remote Linux package qualification and final issue closure remain
+pending. For local app dogfooding, the package gate may take the current host artifact directory
+and the complete already-pinned `a9fc3301...73b65e` FLAC closure as explicit inputs; the resulting
+tarball still has to pass the unchanged package smoke and red-mutation checks.
