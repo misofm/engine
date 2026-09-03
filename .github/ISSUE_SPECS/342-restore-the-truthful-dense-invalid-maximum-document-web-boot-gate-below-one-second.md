@@ -166,3 +166,27 @@ not possible from the failed run. Restoring the truthful fixture and, conditiona
 production optimization needed for the same unchanged wall is one independently closable outcome;
 splitting the evidence correction from the performance qualification would leave each half unable
 to prove the product claim.
+
+## Implementation and Sol-high review evidence
+
+Checkpoint `0a500d6a` changes only `hosts/host-web/src/tests.rs` and
+`hosts/host-web/MUTATIONS.md`. The fixture now joins complete segments with commas, removes every
+empty-object sentinel, and fills its exact 1,048,576-byte size only with legal trailing whitespace.
+A separate untimed oracle proves the population remains above 10,000, every repeated segment has
+equal sample bounds, typed parsing reaches semantic validation, and the result is exactly 64
+ordered `AutomationInvalidRange` diagnostics at segment paths 0 through 63. This deterministic
+phase evidence made a conditional production parser or validator change unnecessary.
+
+Focused host-web tests excluding the timed case passed, as did the complete Session tests,
+warning-denied workspace Clippy and rustdoc, formatting, session/workspace policies and diff
+checks. The one authorized post-change timing invocation was
+`cargo +1.97.1 test --locked --workspace --all-targets`; it passed on its first and only run. The
+named production boot test passed its unchanged strict `<1s` assertion, and the host-web 59-test
+binary completed in 0.17 seconds. No focused timed run or retry occurred, and no benchmark or live
+browser qualification was run locally.
+
+Fresh Sol-high adversarial review returned PASS for `0a500d6a`. It independently inspected the
+exact path scope, strict JSON construction, exact size/population/equal-bound oracles, all 64
+semantic paths, timer placement, unchanged wall and truthful mutation record, then audited the sole
+timing transcript without rerunning it. Remote closure still requires the unchanged required CI to
+pass on the pushed candidate; until then this is local accepted evidence only.
