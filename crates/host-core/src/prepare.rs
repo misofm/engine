@@ -1,4 +1,4 @@
-//! The shared host preparation pipeline: TOML in, a prepared plan and a source control set out.
+//! The shared host preparation pipeline: JSON in, a prepared plan and a source control set out.
 //!
 //! This is the ~300 lines that the C ABI host and the browser host each carried a private copy of.
 //! Everything that differed between the two copies is a field of [`HostPrepareCaps`]; everything
@@ -23,7 +23,7 @@ use graph::{
     TrackStage,
 };
 use graph_compiler::{Backend, GraphBuiltinsCompileRequest, GraphCompiler};
-use session::{CompileCaps, CompiledSession, SessionToml, compile_session, parse_session_toml};
+use session::{CompileCaps, CompiledSession, SessionModel, compile_session, parse_session_json};
 use source::{
     PcmSourceRing, PcmSourceRingConfig, SourceFrame, SourceGeneration, SourceGraphSource,
     SourceGraphTrackMapping, prepare_graph_source_set,
@@ -376,9 +376,9 @@ impl core::fmt::Debug for PreparedHost {
     }
 }
 
-/// Parse one session TOML document.
-pub fn parse_host_session(toml: &str) -> Result<SessionToml, PrepareDiagnostics> {
-    parse_session_toml(toml).map_err(|value| {
+/// Parse one session JSON document.
+pub fn parse_host_session(document: &str) -> Result<SessionModel, PrepareDiagnostics> {
+    parse_session_json(document).map_err(|value| {
         PrepareDiagnostics::new(
             PrepareRejection::Session,
             diagnostic_lines(
@@ -391,17 +391,17 @@ pub fn parse_host_session(toml: &str) -> Result<SessionToml, PrepareDiagnostics>
     })
 }
 
-/// Parse and compile one session TOML document under this host's caps.
+/// Parse and compile one session JSON document under this host's caps.
 ///
 /// A host that also needs the transactional `SessionStore` (from `protocol`) (the C ABI host
 /// does, for the control protocol) calls [`parse_host_session`] and
 /// [`HostPrepareCaps::compile_caps`] instead and builds the store itself: the facade never depends
 /// on the control protocol.
 pub fn compile_host_session(
-    toml: &str,
+    document: &str,
     caps: &HostPrepareCaps,
 ) -> Result<CompiledSession, PrepareDiagnostics> {
-    let model = parse_host_session(toml)?;
+    let model = parse_host_session(document)?;
     let compile_caps = caps.compile_caps(model.sources.len())?;
     compile_host_model(&model, compile_caps)
 }
@@ -412,7 +412,7 @@ pub fn compile_host_session(
 /// same model. Keeping the diagnostic mapping here prevents that path from growing a second
 /// session-compiler adapter.
 pub fn compile_host_model(
-    model: &SessionToml,
+    model: &SessionModel,
     caps: CompileCaps,
 ) -> Result<CompiledSession, PrepareDiagnostics> {
     compile_session(model, caps).map_err(|value| {
@@ -433,21 +433,21 @@ pub fn compile_host_model(
 /// Returns the compiled session alongside the prepared host so a host that wants to answer session
 /// queries later can retain it; a host that does not simply drops it.
 pub fn prepare_host_session(
-    toml: &str,
+    document: &str,
     caps: &HostPrepareCaps,
 ) -> Result<(CompiledSession, PreparedHost), PrepareDiagnostics> {
-    let compiled = compile_host_session(toml, caps)?;
+    let compiled = compile_host_session(document, caps)?;
     let prepared = prepare_host_runtime(&compiled, caps)?;
     Ok((compiled, prepared))
 }
 
 /// Parse, compile and prepare one session with a live console attached (issue #137 D1/D2).
 pub fn prepare_host_session_with_console(
-    toml: &str,
+    document: &str,
     caps: &HostPrepareCaps,
     console: &HostConsoleRequest,
 ) -> Result<(CompiledSession, PreparedHost, HostConsoleHandles), PrepareDiagnostics> {
-    let compiled = compile_host_session(toml, caps)?;
+    let compiled = compile_host_session(document, caps)?;
     let (prepared, handles) = prepare_host_runtime_with_console(&compiled, caps, console)?;
     Ok((compiled, prepared, handles))
 }
@@ -924,7 +924,7 @@ pub fn prepare_host_runtime_with_console(
 }
 
 /// Total effect instances across every rack of every track.
-pub fn count_effects(model: &SessionToml) -> Result<u64, PrepareDiagnostics> {
+pub fn count_effects(model: &SessionModel) -> Result<u64, PrepareDiagnostics> {
     model.tracks.iter().try_fold(0_u64, |total, track| {
         let count = track
             .simd1

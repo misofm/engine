@@ -1,4 +1,4 @@
-//! Shared host preparation: the one pipeline every embedding uses to turn session TOML into a
+//! Shared host preparation: the one pipeline every embedding uses to turn session JSON into a
 //! render plan, a source control set and a resource report.
 //!
 //! # Why this crate exists
@@ -25,7 +25,7 @@
 //!
 //! | call | when |
 //! |---|---|
-//! | [`prepare_host_session`] | the common case: TOML in, [`PreparedHost`] and the compiled session out |
+//! | [`prepare_host_session`] | the common case: JSON in, [`PreparedHost`] and the compiled session out |
 //! | [`compile_host_session`] | a host that wants the [`CompiledSession`] before preparing |
 //! | [`parse_host_session`] + [`HostPrepareCaps::compile_caps`] | a host that builds its own `SessionStore` (the C ABI host does, for the control protocol) and then calls [`prepare_host_runtime`] |
 //! | [`prepare_host_runtime`] | prepare from an already compiled session; also the plan-replacement path |

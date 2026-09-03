@@ -23,7 +23,7 @@ Status IDs are: `0` OK, `1` malformed frame, `2` unsupported version, `3` unsupp
 | ID | Command fields | Success response fields |
 | ---: | --- | --- |
 | `0001` | empty, revision-any | v1 min/max, effective frame/TLV/string/depth limits, batch/page/transaction limits, all queue/replay caps, density/quantum, packed command/event IDs, capability flags |
-| `0002` | `1:offset U64 R`, `2:max-bytes U32 R` | `1:total U64 R`, `2:offset U64 R`, `3:canonical-TOML BYTES R`, `4:eof BOOL R` |
+| `0002` | `1:offset U64 R`, `2:max-bytes U32 R` | `1:total U64 R`, `2:offset U64 R`, `3:canonical-JSON BYTES R`, `4:eof BOOL R` |
 | `0003` | `1:SessionEdit MESSAGE R*`; exact revision, nonempty | `1:applied-operations U32 R` |
 | `0004` | `1:after-handle U32 R`, `2:limit U16 R` | `1:last-handle U32 R`, `2:eof BOOL R`, `3:ParameterDescriptor MESSAGE R*` |
 | `0005` | `1:handles PACKED_U32 R` (1–256 sorted unique nonzero) | observed sample `1:U64 R`, count `2:U16 R`, stride `3:U16=16 R`, records `4:BYTES R` |

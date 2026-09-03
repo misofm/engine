@@ -233,7 +233,7 @@ def load_inputs() -> tuple[dict, dict]:
     # are the post-#241 spelling of the same frozen facts, plus the identity itself. Shape and
     # identity are separate pins so each can go red alone: the shape states the preimage's length,
     # the identity states which bytes filled it.
-    session = (FIXTURE / "session.toml").read_text()
+    session = (FIXTURE / "session.json").read_text()
     for frozen in (
         "sample_rate_hz = 48000",
         "quantum_frames = 128",
@@ -251,7 +251,7 @@ def load_inputs() -> tuple[dict, dict]:
     # a low shelf so a DC fixture can witness the parameter move at all.
     # Issue #143: the observation timeline's own session -- one track, one compressor in the
     # dynamic rack, so the per-node scalar publish path is what the browser exercises.
-    observation_session = (FIXTURE / "observation-session.toml").read_text()
+    observation_session = (FIXTURE / "observation-session.json").read_text()
     for frozen in (
         "sample_rate_hz = 48000",
         "quantum_frames = 128",
@@ -263,7 +263,7 @@ def load_inputs() -> tuple[dict, dict]:
     ):
         if frozen not in observation_session:
             raise ValueError(f"observation session lacks {frozen}")
-    command_session = (FIXTURE / "command-session.toml").read_text()
+    command_session = (FIXTURE / "command-session.json").read_text()
     for frozen in (
         "sample_rate_hz = 48000",
         "quantum_frames = 128",
@@ -307,7 +307,7 @@ def immutable_payloads(artifacts: pathlib.Path) -> dict[str, tuple[str, bytes]]:
         ".js": "text/javascript; charset=utf-8",
         ".mjs": "text/javascript; charset=utf-8",
         ".json": "application/json; charset=utf-8",
-        ".toml": "text/plain; charset=utf-8",
+        ".json": "application/json; charset=utf-8",
         ".html": "text/html; charset=utf-8",
         ".ts": "text/plain; charset=utf-8",
     }

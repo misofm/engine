@@ -504,7 +504,7 @@ pub extern "C" fn miso_engine_web_v1_console_track_id(handle: u32, index: u32) -
 /// # Issue #207: source introspection
 ///
 /// The browser ABI has exposed track discovery since #137 and nothing at all about sources, so a
-/// headless driver compiling raw session TOML could not learn which sources exist, how many
+/// headless driver compiling raw session JSON could not learn which sources exist, how many
 /// channels they carry, or how many frames to feed them -- it could not drive the render loop it
 /// had just compiled. These four queries close that, additively, in the shape the track queries
 /// already established: a count, an ID copied through the staging buffer, and scalar shape reads.

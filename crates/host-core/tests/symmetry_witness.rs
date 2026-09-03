@@ -48,9 +48,9 @@ use host_core::{
     HostShapePolicy, PreparedHost, SourceSubmission, prepare_host_session_with_console,
     session_structural_symmetry,
 };
-use session::CompiledSession;
+use session::{CompiledSession, canonical_session_json, parse_session_json};
 
-const SESSION: &str = include_str!("../../../fixtures/session/v1/parametric-eq-bank-console.toml");
+const SESSION: &str = include_str!("../../../fixtures/session/v1/parametric-eq-bank-console.json");
 const QUANTUM: usize = 128;
 const TRACKS: usize = 8;
 /// `band-1-gain` is parameter id 4 of `miso.parametric-eq`, which is index 3 of its table.
@@ -58,9 +58,11 @@ const BAND_GAIN_INDEX: u32 = 3;
 
 /// The fixture with both dual-mono lanes reading source channel 0: a mono source mapping.
 fn mono_session() -> String {
-    let mutated = SESSION.replace("right_source_channel = 1", "right_source_channel = 0");
-    assert_ne!(mutated, SESSION, "the fixture's stereo mapping moved");
-    mutated
+    let mut model = parse_session_json(SESSION).expect("fixture parses");
+    for track in &mut model.tracks {
+        track.right_source_channel = track.left_source_channel;
+    }
+    canonical_session_json(&model).expect("mutated fixture canonicalizes")
 }
 
 fn caps() -> HostPrepareCaps {
@@ -103,8 +105,8 @@ struct Console {
     block: usize,
 }
 
-fn prepare(toml: &str) -> (CompiledSession, Console) {
-    let (session, console) = prepare_unbanked(toml);
+fn prepare(document: &str) -> (CompiledSession, Console) {
+    let (session, console) = prepare_unbanked(document);
     // The census is a statement about banked lanes, so a plan that never banked would make every
     // assertion below prove nothing.
     assert!(
@@ -120,11 +122,11 @@ fn prepare(toml: &str) -> (CompiledSession, Console) {
 /// track splits the cohort planner's pool by collapse class (mono-collapse M1), and neither half
 /// of an eight-track fixture reaches an eight-lane bank width. That arm is asserted per track
 /// rather than on the census, so the precondition is not one it owes.
-fn prepare_unbanked(toml: &str) -> (CompiledSession, Console) {
-    let (session, prepared, handles) = prepare_host_session_with_console(toml, &caps(), &console())
-        .unwrap_or_else(|failure| {
-            panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes()))
-        });
+fn prepare_unbanked(document: &str) -> (CompiledSession, Console) {
+    let (session, prepared, handles) =
+        prepare_host_session_with_console(document, &caps(), &console()).unwrap_or_else(
+            |failure| panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes())),
+        );
     assert_eq!(handles.tracks.len(), TRACKS);
     (
         session,
@@ -225,18 +227,18 @@ fn the_structural_witness_follows_the_source_mapping() {
     // not a separate case (it can only ever be mapped `0, 0`).
     let cases: [(&str, &str, bool); 3] = [
         // The checked-in fixture: the two lanes read different channels of one stereo source.
-        ("stereo", "right_source_channel = 1", false),
+        ("stereo", "\"right_source_channel\": 1", false),
         // Both lanes on channel 0: the mono mapping a collapse needs.
-        ("mono-left", "right_source_channel = 0", true),
+        ("mono-left", "\"right_source_channel\": 0", true),
         // Both lanes on channel 1: mono too. "Mono" is *same channel*, not *channel zero*.
-        ("mono-right", "right_source_channel = 1", true),
+        ("mono-right", "\"right_source_channel\": 1", true),
     ];
     for (name, right, expected) in cases {
-        let mut toml = SESSION.replace("right_source_channel = 1", right);
+        let mut document = SESSION.replace("\"right_source_channel\": 1", right);
         if name == "mono-right" {
-            toml = toml.replace("left_source_channel = 0", "left_source_channel = 1");
+            document = document.replace("\"left_source_channel\": 0", "\"left_source_channel\": 1");
         }
-        let (session, _console) = prepare(&toml);
+        let (session, _console) = prepare(&document);
         let witnesses = session_structural_symmetry(&session);
         assert_eq!(witnesses.len(), TRACKS, "{name}: one witness per track");
         for (track, witness) in &witnesses {
@@ -337,12 +339,9 @@ fn the_two_halves_of_the_witness_are_decided_independently() {
 #[test]
 fn an_asymmetric_input_builtin_declines_its_own_track_only() {
     let mono = mono_session();
-    let mutated = mono.replacen(
-        "right = { polarity_invert = false, trim_db = 0.0",
-        "right = { polarity_invert = true, trim_db = 0.0",
-        1,
-    );
-    assert_ne!(mutated, mono, "the fixture's builtins block moved");
+    let mut model = parse_session_json(&mono).expect("mono fixture parses");
+    model.tracks[0].builtins.right.polarity_invert = true;
+    let mutated = canonical_session_json(&model).expect("mutated fixture canonicalizes");
 
     let (_session, baseline) = prepare(&mono);
     let (_session, inverted) = prepare_unbanked(&mutated);
@@ -392,31 +391,16 @@ fn declining_tracks(console: &Console) -> std::collections::BTreeSet<String> {
 /// over eight tracks, which is how [`the_scalar_console_effect_arm_maintains_its_own_live_terms`]
 /// reaches a plan with no effect bank at any launch lane width.
 fn edited(bypass: &[usize], invert: &[usize]) -> String {
-    let mut track: Option<usize> = None;
-    let mut out = String::new();
-    for line in mono_session().lines() {
-        let mut line = line.to_owned();
-        if let Some(id) = line
-            .strip_prefix("id = \"eq")
-            .and_then(|rest| rest.strip_suffix('"'))
-        {
-            track = id.parse::<usize>().ok();
+    let mut model = parse_session_json(&mono_session()).expect("mono fixture parses");
+    for (index, track) in model.tracks.iter_mut().enumerate() {
+        if bypass.contains(&index) {
+            track.simd1.effects[0].bypass = true;
         }
-        let index = track.unwrap_or(usize::MAX);
-        if line.starts_with("simd1 = ") && bypass.contains(&index) {
-            line = line.replacen("bypass = false", "bypass = true", 1);
+        if invert.contains(&index) {
+            track.builtins.right.polarity_invert = true;
         }
-        if line.starts_with("builtins = ") && invert.contains(&index) {
-            let (head, tail) = line.split_at(line.find("right = {").expect("a right table"));
-            line = format!(
-                "{head}{}",
-                tail.replacen("polarity_invert = false", "polarity_invert = true", 1)
-            );
-        }
-        out.push_str(&line);
-        out.push('\n');
     }
-    out
+    canonical_session_json(&model).expect("edited fixture canonicalizes")
 }
 
 /// A prepare-time bypass seeds the `UNBYPASSED` term false, before a block is ever rendered.
@@ -472,8 +456,8 @@ fn a_prepare_time_bypass_seeds_the_unbypassed_term_before_any_render() {
 /// `ConsoleEffect` arm -> the parameter half of this test fails and every banked test stays green.
 #[test]
 fn the_scalar_console_effect_arm_maintains_its_own_live_terms() {
-    let toml = edited(&[4, 5, 6, 7], &[2, 3, 6, 7]);
-    let (_session, mut console) = prepare_unbanked(&toml);
+    let document = edited(&[4, 5, 6, 7], &[2, 3, 6, 7]);
+    let (_session, mut console) = prepare_unbanked(&document);
     assert_eq!(
         console.prepared.report.effect_bank_scratch_bytes, 0,
         "four cohorts of two cannot fill a bank at any launch width, so every EQ is per-node"

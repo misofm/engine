@@ -31,7 +31,7 @@ extern "C" {
  *                miso_engine_v1_plan_destroy require quiescence: no other call on that handle is
  *                in flight or will start. A session and its plan may be destroyed in either order.
  *
- * Borrowed pointers (session TOML, source IDs, request frames, chunk planes, output samples, and
+ * Borrowed pointers (session JSON, source IDs, request frames, chunk planes, output samples, and
  * every out pointer) are read or written only for the duration of the call and are never retained.
  * Every float plane pointer (chunk planes and output samples) must be 4-byte aligned, and the chunk
  * plane array must be pointer-aligned; a null or misaligned pointer returns
@@ -109,7 +109,7 @@ typedef struct miso_engine_v1_compile_limits {
     uint32_t source_ring_frames;
     uint32_t maximum_automation_spans_per_block;
     uint32_t reserved0;
-    uint64_t maximum_toml_bytes;
+    uint64_t maximum_document_bytes;
     uint64_t maximum_diagnostic_bytes;
     uint64_t maximum_tracks;
     uint64_t maximum_sources;
@@ -216,8 +216,8 @@ uint32_t miso_engine_v1_engine_create(const miso_engine_v1_engine_config *config
                                       miso_engine_v1_engine **out_engine);
 void miso_engine_v1_engine_destroy(miso_engine_v1_engine *engine);
 uint32_t miso_engine_v1_compile_session(miso_engine_v1_engine *engine,
-                                        const uint8_t *toml,
-                                        uint64_t toml_bytes,
+                                        const uint8_t *document,
+                                        uint64_t document_bytes,
                                         const miso_engine_v1_compile_limits *limits,
                                         miso_engine_v1_bytes_out *diagnostics,
                                         miso_engine_v1_session **out_session,

@@ -19,7 +19,7 @@ use host_core::{
     SourceSubmission, prepare_host_session_with_console,
 };
 
-const SESSION: &str = include_str!("../../../fixtures/session/v1/parametric-eq-bank-console.toml");
+const SESSION: &str = include_str!("../../../fixtures/session/v1/parametric-eq-bank-console.json");
 const QUANTUM: usize = 128;
 const TRACKS: usize = 8;
 /// `band-1-gain` is parameter id 4 of `miso.parametric-eq`, which is index 3 of its table.

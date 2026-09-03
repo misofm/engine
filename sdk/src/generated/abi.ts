@@ -222,7 +222,7 @@ export const ABI_LAYOUT = deepFreeze(
           "type": "u64"
         },
         {
-          "name": "sessionTomlBytes",
+          "name": "sessionDocumentBytes",
           "offset": 48,
           "type": "u64"
         },

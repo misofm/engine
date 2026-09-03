@@ -30,9 +30,10 @@ use host_core::{
     HostConsoleRequest, HostPrepareCaps, HostShapePolicy, SourceSubmission,
     prepare_host_session_with_console, session_structural_symmetry,
 };
+use session::{canonical_session_json, parse_session_json};
 
-const SESSION: &str = include_str!("../../../fixtures/session/v1/canonical.toml");
-const BANK: &str = include_str!("../../../fixtures/session/v1/parametric-eq-bank-console.toml");
+const SESSION: &str = include_str!("../../../fixtures/session/v1/canonical.json");
+const BANK: &str = include_str!("../../../fixtures/session/v1/parametric-eq-bank-console.json");
 const QUANTUM: usize = 128;
 const RATE: u32 = 48_000;
 
@@ -80,55 +81,25 @@ fn session(left: u32, right: u32, filters: bool) -> String {
     // (its effects are `miso.`-prefixed), so a host prepare refuses it. The rack is not the
     // subject here -- the input builtins and the delay are -- so it is emptied rather than
     // renamed, which would also have meant inventing parameter values for a different effect.
-    let racked = SESSION
-        .split_once("dynamic = { effects = [{")
-        .map(|(head, tail)| {
-            let (_, rest) = tail
-                .split_once("sidechain = { kind = \"none\" } }] }")
-                .expect("the fixture's dynamic rack spelling moved");
-            format!("{head}dynamic = {{ effects = [] }}{rest}")
-        })
-        .expect("the fixture declares a dynamic rack");
-    // ...and the automation entry that targets it, which would otherwise dangle.
-    let racked = {
-        let (head, tail) = racked
-            .split_once("automation = [")
-            .expect("the fixture declares automation");
-        let (_, rest) = tail.split_once("\n]").expect("the automation array closes");
-        format!("{head}automation = [\n]{rest}")
-    };
-    let panned = racked.replace(
-        "pan = { left = 1.0, right = 1.0, smoothing_samples = 16 }",
-        "pan = { left = -1.0, right = 1.0, smoothing_samples = 16 }",
-    );
-    assert_ne!(panned, racked, "the fixture's pan spelling moved");
-    let filtered = if filters {
-        panned
+    let mut model = parse_session_json(SESSION).expect("fixture parses");
+    model.tracks[0].dynamic.effects.clear();
+    model.automation.clear();
+    let track = &mut model.tracks[0];
+    if let session::MatrixOrPan::Pan { left, right, .. } = &mut track.matrix_or_pan {
+        *left = -1.0;
+        *right = 1.0;
     } else {
-        // The identity arm: `0.0` disables a builtin cutoff, so the input chain is sanitise and
-        // unit trim only. Used to pin the exact `+0.0` prefix without a filter in the way.
-        panned
-            .replace("hpf_hz = 20.0", "hpf_hz = 0.0")
-            .replace("lpf_hz = 20000.0", "lpf_hz = 0.0")
-    };
-    // Positionally, not by pattern: the two lanes' tables are textually identical apart from the
-    // delay, so a pattern replace would set the left lane twice whenever `left == 0`.
-    let parts: Vec<&str> = filtered.split(", delay_samples = 0 }").collect();
-    assert_eq!(
-        parts.len(),
-        3,
-        "the one-track fixture declares exactly two lane delays"
-    );
-    let delayed = format!(
-        "{}, delay_samples = {left} }}{}, delay_samples = {right} }}{}",
-        parts[0], parts[1], parts[2]
-    );
-    assert_eq!(
-        delayed.matches("delay_samples").count(),
-        2,
-        "both lanes must still declare exactly one delay each"
-    );
-    delayed
+        panic!("fixture declares pan");
+    }
+    if !filters {
+        track.builtins.left.hpf_hz = 0.0;
+        track.builtins.left.lpf_hz = 0.0;
+        track.builtins.right.hpf_hz = 0.0;
+        track.builtins.right.lpf_hz = 0.0;
+    }
+    track.builtins.left.delay_samples = left;
+    track.builtins.right.delay_samples = right;
+    canonical_session_json(&model).expect("mutated fixture canonicalizes")
 }
 
 /// A deterministic, wide-ranging f32 sequence. Not audio-shaped on purpose: the point is to make a
@@ -146,11 +117,11 @@ fn signal(index: usize) -> f32 {
 ///
 /// `pad` frames of exact `+0.0` are fed before the signal, which is how the oracle arm expresses
 /// "the same source, already late".
-fn render(toml: &str, pad: usize, blocks: usize, collapse: Option<bool>) -> [Vec<f32>; 2] {
+fn render(document: &str, pad: usize, blocks: usize, collapse: Option<bool>) -> [Vec<f32>; 2] {
     let (_, mut prepared, mut handles) =
-        prepare_host_session_with_console(toml, &caps(), &console()).unwrap_or_else(|failure| {
-            panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes()))
-        });
+        prepare_host_session_with_console(document, &caps(), &console()).unwrap_or_else(
+            |failure| panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes())),
+        );
     if let Some(forced_off) = collapse {
         prepared.plan.force_mono_collapse_off(forced_off);
     }
@@ -166,7 +137,7 @@ fn render(toml: &str, pad: usize, blocks: usize, collapse: Option<bool>) -> [Vec
         prepared
             .sources
             .submit(
-                source_id(toml),
+                source_id(document),
                 SourceSubmission {
                     generation: 1,
                     start_frame: base as u64,
@@ -201,8 +172,8 @@ fn render(toml: &str, pad: usize, blocks: usize, collapse: Option<bool>) -> [Vec
     out
 }
 
-fn source_id(toml: &str) -> &'static [u8] {
-    if toml.contains("id = \"voice\"") {
+fn source_id(document: &str) -> &'static [u8] {
+    if document.contains("\"id\":\"voice\"") || document.contains("\"id\": \"voice\"") {
         b"voice"
     } else {
         b"fixture-source"
@@ -241,9 +212,9 @@ fn assert_bit_identical(actual: &[Vec<f32>; 2], oracle: &[Vec<f32>; 2], what: &s
 /// broken in the same way.
 #[test]
 fn a_zero_delay_arm_never_lowers_a_delay_node() {
-    let toml = session(0, 0, true);
+    let document = session(0, 0, true);
     assert!(
-        toml.contains("delay_samples = 0 }"),
+        document.contains("\"delay_samples\":0") || document.contains("\"delay_samples\": 0"),
         "the oracle arm is zero"
     );
 }
@@ -329,32 +300,22 @@ fn the_two_lanes_carry_independent_delays() {
 /// The eight-track bank fixture with both lanes reading source channel 0, and `track`'s two lanes
 /// delayed by `left`/`right`.
 fn mono_bank(track: usize, left: u32, right: u32) -> String {
-    let mono = BANK.replace("right_source_channel = 1", "right_source_channel = 0");
-    assert_ne!(mono, BANK, "the fixture's stereo mapping moved");
-    let mut lines: Vec<String> = mono.lines().map(str::to_owned).collect();
-    let mut seen = 0;
-    for line in &mut lines {
-        if !line.contains("delay_samples") {
-            continue;
-        }
-        if seen == track {
-            let mut parts = line.splitn(3, ", delay_samples = 0 }");
-            let head = parts.next().expect("left lane");
-            let middle = parts.next().expect("right lane");
-            let tail = parts.next().expect("rest of the track");
-            *line = format!(
-                "{head}, delay_samples = {left} }}{middle}, delay_samples = {right} }}{tail}"
-            );
-        }
-        seen += 1;
+    let mut model = parse_session_json(BANK).expect("bank fixture parses");
+    for item in &mut model.tracks {
+        item.right_source_channel = item.left_source_channel;
     }
-    assert!(seen >= 8, "the fixture must still declare eight tracks");
-    lines.join("\n") + "\n"
+    let item = model
+        .tracks
+        .get_mut(track)
+        .expect("requested fixture track");
+    item.builtins.left.delay_samples = left;
+    item.builtins.right.delay_samples = right;
+    canonical_session_json(&model).expect("mutated bank fixture canonicalizes")
 }
 
-fn eligible(toml: &str) -> Vec<bool> {
+fn eligible(document: &str) -> Vec<bool> {
     let session = session::compile_session(
-        &session::parse_session_toml(toml).expect("fixture parses"),
+        &session::parse_session_json(document).expect("fixture parses"),
         session::CompileCaps {
             max_compiled_model_bytes: u64::MAX,
             max_requested_runtime_bytes: u64::MAX,
@@ -438,9 +399,9 @@ fn the_delay_survives_the_banked_path() {
 /// keeps its right plane and the armed arm loses it, and this fails on the first delayed sample.
 #[test]
 fn a_symmetric_delay_renders_the_same_bits_collapsed_as_dual() {
-    let toml = mono_bank(3, 480, 480);
-    let armed = render(&toml, 0, 12, Some(false));
-    let dual = render(&toml, 0, 12, Some(true));
+    let document = mono_bank(3, 480, 480);
+    let armed = render(&document, 0, 12, Some(false));
+    let dual = render(&document, 0, 12, Some(true));
     assert_bit_identical(&armed, &dual, "symmetric delay, collapsed vs dual");
     assert!(
         armed[0].iter().any(|value| *value != 0.0),

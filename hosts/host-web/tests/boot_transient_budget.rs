@@ -12,10 +12,8 @@ use host_web::{
     RESULT_REFUSED_BUDGET, WebBootOptions,
 };
 use session::{
-    CompileCaps, RouteSource, SendTap, StableId, canonical_session_toml, parse_session_toml,
+    CompileCaps, RouteSource, SendTap, StableId, canonical_session_json, parse_session_json,
 };
-
-const TRACKS: usize = 512;
 
 thread_local! {
     static ARMED: Cell<bool> = const { Cell::new(false) };
@@ -109,11 +107,11 @@ fn unlimited_caps() -> CompileCaps {
     }
 }
 
-/// The adversarial accepted shape from the A9 ruling: 512 tracks, four effect declarations per
-/// track, then valid TOML comment padding to the exact 1 MiB staging ceiling.
-fn worst_accepted_document() -> Vec<u8> {
-    let mut model = parse_session_toml(include_str!(
-        "../../../fixtures/session/v1/parametric-eq-nine-track.toml"
+/// A dense accepted JSON shape: 192 tracks, four effect declarations per track, followed by JSON
+/// whitespace to the exact 1 MiB staging ceiling.
+fn dense_document(tracks: usize, pad_to_limit: bool) -> Vec<u8> {
+    let mut model = parse_session_json(include_str!(
+        "../../../fixtures/session/v1/parametric-eq-nine-track.json"
     ))
     .expect("seed fixture parses");
     let mut track = model.tracks[1].clone();
@@ -128,9 +126,9 @@ fn worst_accepted_document() -> Vec<u8> {
     model.tracks.clear();
     model.routes.clear();
     model.automation.clear();
-    model.tracks.reserve(TRACKS);
-    model.routes.reserve(TRACKS);
-    for index in 0..TRACKS {
+    model.tracks.reserve(tracks);
+    model.routes.reserve(tracks);
+    for index in 0..tracks {
         let track_id = StableId::parse(&format!("track-{index:03}")).expect("track ID");
         let mut next_track = track.clone();
         next_track.id = track_id.clone();
@@ -144,37 +142,60 @@ fn worst_accepted_document() -> Vec<u8> {
         };
         model.routes.push(next_route);
     }
-    let mut document = canonical_session_toml(&model)
+    let mut document = canonical_session_json(&model)
         .expect("worst accepted shape canonicalizes")
         .into_bytes();
-    let maximum = MAXIMUM_DOCUMENT_BYTES as usize;
-    assert!(
-        document.len() + 2 <= maximum,
-        "512x4 fixture is {} bytes before padding",
-        document.len()
-    );
-    document.extend_from_slice(b"\n#");
-    document.resize(maximum, b'x');
+    if pad_to_limit {
+        let maximum = MAXIMUM_DOCUMENT_BYTES as usize;
+        assert!(
+            document.len() <= maximum,
+            "{tracks}x4 fixture is {} bytes before padding",
+            document.len()
+        );
+        document.resize(maximum, b' ');
+    }
     document
 }
 
 #[test]
 fn pinned_multiplier_bounds_the_worst_accepted_parse_and_model_build_peak() {
-    let document = worst_accepted_document();
-    let (_, peak) = measured_peak(|| {
-        let model = parse_host_session(core::str::from_utf8(&document).expect("UTF-8"))
-            .expect("worst shape parses");
-        let compiled = compile_host_model(&model, unlimited_caps()).expect("worst shape compiles");
-        assert_eq!(compiled.normalized_model().tracks.len(), TRACKS);
-        drop(compiled);
-        drop(model);
-    });
+    let cases = [
+        (
+            0,
+            false,
+            include_bytes!("../../../fixtures/session/v1/canonical-minimal.json").to_vec(),
+        ),
+        (1, false, dense_document(1, false)),
+        (64, false, dense_document(64, false)),
+        (192, false, dense_document(192, false)),
+        (192, true, dense_document(192, true)),
+    ];
+    for (tracks, pad_to_limit, document) in cases {
+        let (_, peak) = measured_peak(|| {
+            let model = parse_host_session(core::str::from_utf8(&document).expect("UTF-8"))
+                .expect("dense shape parses");
+            let compiled =
+                compile_host_model(&model, unlimited_caps()).expect("dense shape compiles");
+            assert_eq!(compiled.normalized_model().tracks.len(), tracks);
+            drop(compiled);
+            drop(model);
+        });
+        let pinned = document.len() as u64 * PARSE_TRANSIENT_MULTIPLIER;
+        println!(
+            "tracks={tracks} padded={pad_to_limit} json_document_bytes={} parse_model_compile_peak={} bytes_per_input={:.3}",
+            document.len(),
+            peak,
+            peak as f64 / document.len() as f64
+        );
+        assert!(
+            peak as u64 <= pinned,
+            "measured peak {peak} exceeds {PARSE_TRANSIENT_MULTIPLIER} × {} = {pinned}",
+            document.len()
+        );
+    }
+
+    let document = dense_document(192, true);
     let pinned = document.len() as u64 * PARSE_TRANSIENT_MULTIPLIER;
-    assert!(
-        peak as u64 <= pinned,
-        "measured peak {peak} exceeds {PARSE_TRANSIENT_MULTIPLIER} × {} = {pinned}",
-        document.len()
-    );
 
     let (failure, refused_peak) = measured_peak(|| {
         AudioWorkletEngineHost::boot(

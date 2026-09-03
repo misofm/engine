@@ -54,14 +54,14 @@ fn collapses(host: &Host) -> [u64; 2] {
     host.prepared.plan.bank_collapse_counters()
 }
 
-const SESSION: &str = include_str!("../../../fixtures/session/v1/parametric-eq-bank-console.toml");
+const SESSION: &str = include_str!("../../../fixtures/session/v1/parametric-eq-bank-console.json");
 const QUANTUM: usize = 128;
 const TRACKS: usize = 8;
 
 /// The fixture with both dual-mono lanes reading source channel 0: a mono source mapping, so the
 /// structural `SOURCE` term holds and the collapse census is about the live terms.
 fn mono_session() -> String {
-    let mutated = SESSION.replace("right_source_channel = 1", "right_source_channel = 0");
+    let mutated = SESSION.replace("\"right_source_channel\": 1", "\"right_source_channel\": 0");
     assert_ne!(mutated, SESSION, "the fixture's stereo mapping moved");
     mutated
 }
@@ -107,8 +107,8 @@ struct Host {
     peaks: BTreeMap<String, Vec<[u32; 2]>>,
 }
 
-fn prepare_with_console(toml: &str) -> Host {
-    let (_, prepared, handles) = prepare_host_session_with_console(toml, &caps(), &console())
+fn prepare_with_console(document: &str) -> Host {
+    let (_, prepared, handles) = prepare_host_session_with_console(document, &caps(), &console())
         .unwrap_or_else(|failure| {
             panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes()))
         });
@@ -122,8 +122,8 @@ fn prepare_with_console(toml: &str) -> Host {
     }
 }
 
-fn prepare_without_console(toml: &str) -> Host {
-    let (_, prepared) = prepare_host_session(toml, &caps()).unwrap_or_else(|failure| {
+fn prepare_without_console(document: &str) -> Host {
+    let (_, prepared) = prepare_host_session(document, &caps()).unwrap_or_else(|failure| {
         panic!("prepare: {}", String::from_utf8_lossy(failure.as_bytes()))
     });
     Host {

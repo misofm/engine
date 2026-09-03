@@ -519,3 +519,44 @@ At this checkpoint `cargo test --locked -p session --no-fail-fast`, native and
 The two explicitly ignored timing/exhaustive qualification tests were not authorized or run. This
 records tranche-1 evidence only and makes no claim that the later host/protocol/SDK/package
 migration or full issue acceptance is complete.
+
+## Attempt 1 implementation evidence — tranche 2
+
+The host/protocol checkpoint routes native host preparation, the C ABI and browser boot directly
+to the single Rust JSON authority. The source-level C limit is now `maximum_document_bytes` and
+compile parameters are `document`/`document_bytes`; the exported symbols, layout offsets, widths
+and calling convention are unchanged. Browser bindings expose `sessionDocumentBytes` (Rust
+`session_document_bytes`) and invalid UTF-8 is `web.document.utf8`. The generated ABI layout and
+declaration mirrors agree with those source names.
+
+The browser cap is checked before UTF-8 decoding or parser construction. Allocation observations
+for representative documents were: 447 input bytes / 6,588 peak bytes (14.738x), 3,438 / 40,551
+(11.795x), 177,885 / 2,172,554 (12.213x), 532,317 / 5,720,586 (10.747x), and a one-MiB whitespace-
+padded maximum document / 5,720,586 (5.456x). The smallest conservative integer multiplier with
+more than ten percent headroom over the observed maximum is therefore 17. The browser tests keep
+raw parse, retained projection, exact retained, compilation and largest-allocation refusals
+distinct; this allocation projection was not the issue's one-shot timing benchmark.
+
+Protocol opcode `0x0002`, field 3 and its framing remain unchanged while the source/API name is
+`canonical_json_chunk`. A focused controller test reconstructs and reparses the initial snapshot,
+commits a Unicode-bearing transaction, then reconstructs the retained post-transaction snapshot
+through one-byte pages that split UTF-8 scalars. The acknowledged revision is observed only after
+the canonical JSON is retained. Existing transactional fault and saturation tests remain green and
+continue to prove that failed preparation/publication preserves the prior model, plan, revision and
+snapshot. Builtin plan seals now hash `CompiledSession::canonical_json()` bytes.
+
+At this checkpoint the combined focused test command
+`cargo test --locked -p protocol -p host-core -p capi -p host-web -p builtins-compiler
+--no-fail-fast` is green. `scripts/check-capi-abi.sh`, the generated ABI-layout checks, the browser
+expected-resource checker and its 26 red-mutation self-test, workspace policy, the scalar plus
+simd128 protocol Wasm parity check, and a `wasm32-unknown-unknown` check of all five changed packages
+are green. The browser simd128 fixture reports 1,919 document bytes, 24,744 bridge-retained bytes
+and the unchanged target-specific graph/effect/source rows; native and target-independent witness
+rows agree. This records tranche-2 evidence only; SDK/tool/package migration and final package
+artifact rebuilding remain explicitly deferred.
+
+The hermetic AudioWorklet JavaScript tests pass. The package-seal wrapper was also exercised after
+the source rebuild and stopped only at the intentionally deferred checked-in Wasm artifact digest:
+expected `6ddf154d02fcb4dfaa1a397280a28ab9f38b0cd6dff466a316f120266ce2223f`, observed
+`6dcd9ced2daeb886843a764bcc6abc0b4f1b2c7a50af1ed91151a5ab366461e5`. Per the tranche boundary,
+the packaged artifact and its digest are not changed here and must be rebuilt/resealed in tranche 4.

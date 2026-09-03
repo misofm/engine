@@ -13,12 +13,12 @@ use session::{
 /// Build the checked-in canonical fixture transaction that contains every V1 edit opcode.
 ///
 /// This is conformance data, not a session-edit convenience API.  It deliberately derives its
-/// nested values from the checked-in strict V1 TOML fixture, so the transaction follows the
+/// nested values from the checked-in strict V1 JSON fixture, so the transaction follows the
 /// accepted typed model rather than maintaining a second shadow session representation.
 #[must_use]
 pub fn complete_all_opcode_fixture() -> Vec<SessionEdit> {
     let session =
-        session::parse_session_toml(include_str!("../../../fixtures/session/v1/canonical.toml"))
+        session::parse_session_json(include_str!("../../../fixtures/session/v1/canonical.json"))
             .expect("checked-in canonical session fixture is valid");
     let source = session.sources[0].clone();
     let track = session.tracks[0].clone();
@@ -1902,7 +1902,7 @@ mod tests {
     use crate::btlv::{WIRE_BOOL, WIRE_F32, WIRE_U8, WIRE_U32, WIRE_UTF8};
     use session::{
         LinkMode, ParameterChannel, ParameterUnit, RenderMode, SampleFormat, SendTap, Sidechain,
-        Track, parse_session_toml,
+        Track, parse_session_json,
     };
 
     fn id(value: &str) -> StableId {
@@ -2061,7 +2061,7 @@ mod tests {
 
     fn all_opcode_edits_64() -> Vec<SessionEdit> {
         let session =
-            parse_session_toml(include_str!("../../../fixtures/session/v1/canonical.toml"))
+            parse_session_json(include_str!("../../../fixtures/session/v1/canonical.json"))
                 .expect("fixture");
         let source = session.sources[0].clone();
         let track = session.tracks[0].clone();
@@ -2259,7 +2259,7 @@ mod tests {
     }
 
     fn track() -> Track {
-        parse_session_toml(include_str!("../../../fixtures/session/v1/canonical.toml"))
+        parse_session_json(include_str!("../../../fixtures/session/v1/canonical.json"))
             .expect("fixture")
             .tracks
             .into_iter()
@@ -2958,7 +2958,7 @@ mod tests {
     #[test]
     fn every_route_and_automation_opcode_round_trips_canonically() {
         let session =
-            parse_session_toml(include_str!("../../../fixtures/session/v1/canonical.toml"))
+            parse_session_json(include_str!("../../../fixtures/session/v1/canonical.json"))
                 .expect("fixture");
         let route = session.routes[0].clone();
         let target = session.automation[0].target.clone();

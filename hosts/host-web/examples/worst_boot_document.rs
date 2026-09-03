@@ -1,15 +1,15 @@
-//! Emit #240's accepted 512-track × 4-effect document at the exact 1 MiB staging ceiling.
+//! Emit the accepted dense 192-track × 4-effect JSON document at the 1 MiB staging ceiling.
 
 use std::io::{self, Write as _};
 
 use host_web::MAXIMUM_DOCUMENT_BYTES;
-use session::{RouteSource, SendTap, StableId, canonical_session_toml, parse_session_toml};
+use session::{RouteSource, SendTap, StableId, canonical_session_json, parse_session_json};
 
-const TRACKS: usize = 512;
+const TRACKS: usize = 192;
 
 fn main() -> io::Result<()> {
-    let mut model = parse_session_toml(include_str!(
-        "../../../fixtures/session/v1/parametric-eq-nine-track.toml"
+    let mut model = parse_session_json(include_str!(
+        "../../../fixtures/session/v1/parametric-eq-nine-track.json"
     ))
     .expect("seed fixture parses");
     let mut track = model.tracks[1].clone();
@@ -40,12 +40,11 @@ fn main() -> io::Result<()> {
         };
         model.routes.push(next_route);
     }
-    let mut document = canonical_session_toml(&model)
+    let mut document = canonical_session_json(&model)
         .expect("worst accepted shape canonicalizes")
         .into_bytes();
     let maximum = MAXIMUM_DOCUMENT_BYTES as usize;
     assert!(document.len() + 2 <= maximum);
-    document.extend_from_slice(b"\n#");
-    document.resize(maximum, b'x');
+    document.resize(maximum, b' ');
     io::stdout().write_all(&document)
 }

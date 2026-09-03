@@ -2187,7 +2187,7 @@ impl<R> PreparedBuiltinsGraphArtifact<R> {
 
 fn session_identity(session: &CompiledSession) -> [u8; 32] {
     let mut hash = Sha256::new();
-    hash.update(session.canonical_toml().as_bytes());
+    hash.update(session.canonical_json().as_bytes());
     hash.update(session.sample_rate().0.to_le_bytes());
     hash.update(session.quantum().0.to_le_bytes());
     hash.finalize().into()
@@ -3324,13 +3324,13 @@ mod tests {
         nodes.sort_by(|left, right| left.id.cmp(&right.id));
         nodes
     }
-    use session::{CompileCaps, compile_session, parse_session_toml};
+    use session::{CompileCaps, compile_session, parse_session_json};
     use std::sync::Arc;
 
     fn session() -> CompiledSession {
-        let document = include_str!("../../../fixtures/session/v1/canonical.toml");
+        let document = include_str!("../../../fixtures/session/v1/canonical.json");
         compile_session(
-            &parse_session_toml(document).expect("parse"),
+            &parse_session_json(document).expect("parse"),
             CompileCaps {
                 max_compiled_model_bytes: u64::MAX,
                 max_requested_runtime_bytes: u64::MAX,
@@ -3996,7 +3996,7 @@ mod tests {
     /// One session of `n` tracks with deliberately distinct per-track builtins.
     fn n_track_session(n: usize) -> CompiledSession {
         let mut model =
-            parse_session_toml(include_str!("../../../fixtures/session/v1/canonical.toml"))
+            parse_session_json(include_str!("../../../fixtures/session/v1/canonical.json"))
                 .expect("fixture parse");
         let mut template = model.tracks[0].clone();
         template.simd1.effects.clear();
@@ -4544,8 +4544,8 @@ mod tests {
 
     #[test]
     fn cutoff_boundaries_match_compiler_diagnostics_at_every_launch_rate_and_section() {
-        let document = include_str!("../../../fixtures/session/v1/canonical.toml");
-        let base_model = parse_session_toml(document).expect("parse boundary session");
+        let document = include_str!("../../../fixtures/session/v1/canonical.json");
+        let base_model = parse_session_json(document).expect("parse boundary session");
         for (rate, maximum_bits) in [
             (44_100, 0x46ac_42f7),
             (48_000, 0x46bb_7ede),
@@ -4609,7 +4609,7 @@ mod tests {
     #[test]
     fn deterministic_builtin_compiler_mutation_matrix_has_exactly_ten_thousand_cases() {
         let mut base_model =
-            parse_session_toml(include_str!("../../../fixtures/session/v1/canonical.toml"))
+            parse_session_json(include_str!("../../../fixtures/session/v1/canonical.json"))
                 .expect("parse baseline mutation session");
         base_model.tracks[0].dynamic.effects.clear();
         base_model.automation.clear();
@@ -4682,12 +4682,12 @@ mod tests {
             seen_smoothing.insert(smoothing);
 
             if class == 0 {
-                let invalid = include_str!("../../../fixtures/session/v1/canonical.toml").replacen(
-                    "polarity_invert = false",
-                    "polarity_invert = 0.5",
+                let invalid = include_str!("../../../fixtures/session/v1/canonical.json").replacen(
+                    "\"polarity_invert\": false",
+                    "\"polarity_invert\": 0.5",
                     1,
                 );
-                let diagnostics = parse_session_toml(&invalid)
+                let diagnostics = parse_session_json(&invalid)
                     .expect_err("numeric boolean encoding must reject before preparation");
                 let observed: Vec<_> = diagnostics
                     .diagnostics()

@@ -20,7 +20,7 @@ pub const MAXIMUM_PREPARE_DIAGNOSTIC_LINES: usize = 64;
 /// C ABI and the browser ABI number them differently (issue 022 vs issue 024).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PrepareRejection {
-    /// The TOML failed to parse, or the session compiler rejected the model.
+    /// The JSON failed to parse, or the session compiler rejected the model.
     Session,
     /// The session shape (sample rate, quantum, source ring or source channel count) is outside
     /// what this host declared it can drive.

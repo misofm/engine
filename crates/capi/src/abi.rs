@@ -90,8 +90,8 @@ pub struct CompileLimits {
     pub maximum_automation_spans_per_block: u32,
     /// Must be zero in ABI V1.
     pub reserved0: u32,
-    /// Maximum borrowed strict-TOML input bytes.
-    pub maximum_toml_bytes: u64,
+    /// Maximum borrowed strict-JSON input bytes.
+    pub maximum_document_bytes: u64,
     /// Maximum retained compile-diagnostic bytes.
     pub maximum_diagnostic_bytes: u64,
     /// Maximum session track count.
@@ -449,7 +449,7 @@ mod tests {
         assert_eq!(align_of::<Capabilities>(), 8);
         assert_eq!(align_of::<PlanResourceReport>(), 8);
 
-        assert_eq!(offset_of!(CompileLimits, maximum_toml_bytes), 16);
+        assert_eq!(offset_of!(CompileLimits, maximum_document_bytes), 16);
         assert_eq!(offset_of!(CompileLimits, maximum_replay_entries), 168);
         assert_eq!(offset_of!(CompileLimits, reserved), 176);
         assert_eq!(offset_of!(BytesOut, data), 8);

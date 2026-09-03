@@ -225,7 +225,7 @@ pub(crate) fn compiled_capi_resources(
     Ok((
         capi_resources(
             limits,
-            compiled.canonical_toml().len(),
+            compiled.canonical_json().len(),
             compiled.source_count(),
             source_id_bytes,
             compiled.quantum().0 as usize,
@@ -305,7 +305,7 @@ pub(crate) fn validate_replacement_peak(
 pub(crate) fn all_limits_nonzero(limits: CompileLimits) -> bool {
     limits.maximum_automation_spans_per_block != 0
         && [
-            limits.maximum_toml_bytes,
+            limits.maximum_document_bytes,
             limits.maximum_diagnostic_bytes,
             limits.maximum_tracks,
             limits.maximum_sources,
@@ -434,12 +434,12 @@ pub(crate) fn prepare_runtime(
 }
 
 pub(crate) fn compile_children(
-    toml: &str,
+    document: &str,
     mut limits: CompileLimits,
 ) -> Result<CompiledChildren, CompileFailure> {
     // The C ABI needs the transactional `SessionStore` for the control protocol, so it parses and
     // caps through the facade and builds the store itself; the facade never sees the protocol.
-    let model = parse_host_session(toml).map_err(prepare_failure)?;
+    let model = parse_host_session(document).map_err(prepare_failure)?;
     if limits.source_ring_frames == 0 {
         limits.source_ring_frames =
             host_core::default_source_ring_frames(model.sample_rate_hz, model.quantum_frames);

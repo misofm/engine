@@ -21,7 +21,7 @@ use host_core::{
     prepare_host_session,
 };
 
-const SESSION: &str = include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.toml");
+const SESSION: &str = include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json");
 const QUANTUM: usize = 128;
 const BLOCKS: usize = 16;
 

@@ -2369,7 +2369,7 @@ impl<P: ControlProvider> ProtocolController<P> {
                 encode_success!(SuccessResponsePayload::SessionSnapshot(SessionSnapshot {
                     total_bytes: total,
                     offset,
-                    canonical_toml_chunk: chunk,
+                    canonical_json_chunk: chunk,
                     eof,
                 }))
             }
@@ -3817,10 +3817,10 @@ fn status_for_parameter(error: ParameterProviderError) -> StatusCode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use session::{CompileCaps, parse_session_toml};
+    use session::{CompileCaps, canonical_session_json, parse_session_json};
     use std::num::NonZeroUsize;
 
-    const EXAMPLE: &str = include_str!("../../../fixtures/session/v1/canonical.toml");
+    const EXAMPLE: &str = include_str!("../../../fixtures/session/v1/canonical.json");
 
     fn id(value: u64) -> RequestId {
         RequestId::new(value).expect("nonzero")
@@ -4032,7 +4032,7 @@ mod tests {
         current_sample: SampleTime,
     ) -> ProtocolController<MockProvider> {
         let session = SessionStore::new(
-            parse_session_toml(EXAMPLE).expect("fixture"),
+            parse_session_json(EXAMPLE).expect("fixture"),
             CompileCaps {
                 max_compiled_model_bytes: u64::MAX,
                 max_requested_runtime_bytes: u64::MAX,
@@ -4177,7 +4177,7 @@ mod tests {
         telemetry_slots: usize,
     ) -> ProtocolController<MockProvider> {
         let session = SessionStore::new(
-            parse_session_toml(EXAMPLE).expect("fixture"),
+            parse_session_json(EXAMPLE).expect("fixture"),
             CompileCaps {
                 max_compiled_model_bytes: u64::MAX,
                 max_requested_runtime_bytes: u64::MAX,
@@ -4958,7 +4958,7 @@ mod tests {
             prepared
                 .prospective_session()
                 .compiled()
-                .canonical_toml()
+                .canonical_json()
                 .contains("prepared-session")
         );
 
@@ -5563,7 +5563,7 @@ mod tests {
             response: &ControllerResponse,
             before_revision: SessionRevision,
             before_snapshot: &str,
-            before_model: &session::SessionToml,
+            before_model: &session::SessionModel,
             before_events: QueueReport,
         ) {
             assert_eq!(response.status, StatusCode::ValidationFailed);
@@ -6668,7 +6668,7 @@ mod tests {
             .decode_snapshot(final_response.payload(), 4)
             .expect("final payload");
         assert!(final_snapshot.eof);
-        assert!(final_snapshot.canonical_toml_chunk.is_empty());
+        assert!(final_snapshot.canonical_json_chunk.is_empty());
 
         let conflict = request(
             3,
@@ -6683,6 +6683,131 @@ mod tests {
                 .status,
             StatusCode::RevisionConflict
         );
+    }
+
+    #[test]
+    fn canonical_json_snapshots_reparse_before_and_after_commit_across_utf8_split_pages() {
+        fn request(
+            codec: &ProtocolCodec,
+            request_id: u64,
+            revision: ExpectedRevision,
+            offset: u64,
+            maximum_bytes: u32,
+        ) -> Vec<u8> {
+            let mut bytes = vec![0_u8; crate::OUTER_HEADER_BYTES + 32];
+            codec
+                .encode(
+                    &crate::Frame::Command(crate::CommandFrame {
+                        request_id: id(request_id),
+                        expected_revision: revision,
+                        message_id: MessageId::SessionSnapshotGet,
+                    }),
+                    &mut bytes[..crate::OUTER_HEADER_BYTES],
+                )
+                .expect("header");
+            bytes[20..24].copy_from_slice(&32_u32.to_le_bytes());
+            bytes[40..44].copy_from_slice(&2_u32.to_le_bytes());
+            codec
+                .encode_snapshot_request(
+                    crate::SessionSnapshotRequest {
+                        offset,
+                        maximum_bytes,
+                    },
+                    &mut bytes[crate::OUTER_HEADER_BYTES..],
+                )
+                .expect("snapshot request");
+            bytes
+        }
+
+        let mut controller = controller(4, 1);
+        let codec = ProtocolCodec::default();
+        let mut initial_bytes = Vec::new();
+        let mut initial_offset = 0_u64;
+        let mut request_id = 1_u64;
+        loop {
+            let encoded = request(
+                &codec,
+                request_id,
+                ExpectedRevision::Exact(SessionRevision(7)),
+                initial_offset,
+                128,
+            );
+            let response = controller
+                .process_b1b_btlv(&encoded, &mut DecodeScratch::new(&mut [0_u16; 2]))
+                .expect("initial snapshot page");
+            assert_eq!(response.status, StatusCode::Ok);
+            let page = codec
+                .decode_snapshot(response.payload(), 4)
+                .expect("initial snapshot payload");
+            initial_bytes.extend_from_slice(page.canonical_json_chunk);
+            initial_offset += page.canonical_json_chunk.len() as u64;
+            request_id += 1;
+            if page.eof {
+                break;
+            }
+        }
+        let initial_text = core::str::from_utf8(&initial_bytes).expect("initial UTF-8");
+        let initial_model = parse_session_json(initial_text).expect("initial snapshot reparses");
+        assert_eq!(
+            canonical_session_json(&initial_model).expect("initial canonical"),
+            initial_text
+        );
+
+        let edits = [SessionEdit::SetEffectIdentity {
+            track_id: session::StableId::parse("vocal").expect("track ID"),
+            rack_name: session::RackName::Dynamic,
+            effect_id: session::StableId::parse("eq").expect("effect ID"),
+            identity: session::EffectIdentity::ThirdPartyCid {
+                cid: "bafy-é-🙂".to_owned(),
+            },
+        }];
+        let applied = controller.process(ControllerRequest {
+            request_id: id(request_id),
+            expected_revision: ExpectedRevision::Exact(SessionRevision(7)),
+            canonical_bytes: b"unicode-commit",
+            command: ControlCommand::SessionTransactionApply { edits: &edits },
+        });
+        assert_eq!(applied.status, StatusCode::Ok);
+        assert_eq!(applied.revision, SessionRevision(8));
+        request_id += 1;
+
+        let mut snapshot = Vec::new();
+        let mut offset = 0_u64;
+        let mut split_utf8 = false;
+        loop {
+            let encoded = request(
+                &codec,
+                request_id,
+                ExpectedRevision::Exact(SessionRevision(8)),
+                offset,
+                1,
+            );
+            let response = controller
+                .process_b1b_btlv(&encoded, &mut DecodeScratch::new(&mut [0_u16; 2]))
+                .expect("one-byte snapshot page");
+            assert_eq!(response.status, StatusCode::Ok);
+            assert_eq!(response.revision, SessionRevision(8));
+            let page = codec
+                .decode_snapshot(response.payload(), 4)
+                .expect("snapshot page");
+            split_utf8 |= !page.canonical_json_chunk.is_empty()
+                && core::str::from_utf8(page.canonical_json_chunk).is_err();
+            snapshot.extend_from_slice(page.canonical_json_chunk);
+            offset += page.canonical_json_chunk.len() as u64;
+            request_id += 1;
+            if page.eof {
+                break;
+            }
+        }
+        assert!(split_utf8, "one-byte paging must split the multibyte CID");
+        let snapshot = String::from_utf8(snapshot).expect("reassembled snapshot UTF-8");
+        assert_eq!(snapshot, controller.session().canonical_snapshot());
+        let model = parse_session_json(&snapshot).expect("committed snapshot reparses");
+        assert_eq!(
+            canonical_session_json(&model).expect("committed canonical"),
+            snapshot
+        );
+        assert_eq!(model.revision, 8);
     }
 
     #[test]
