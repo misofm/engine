@@ -14,7 +14,7 @@ mkdir "$mock_bin"
 cat >"$mock_bin/cargo" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-printf '%s\n' "$*" >>"$MISO_ENGINE_ARTIFACT_TEST_CARGO_LOG"
+printf '%s\n' "$*" >>"$(dirname "$0")/cargo.log"
 if [[ $1 == build ]]; then
   case " $* " in
     *" -p host-web "*) artifact=host_web ;;
@@ -51,8 +51,14 @@ run_builder() {
   local builder=$1
   local output=$2
   local log=$3
-  PATH="$mock_bin:$PATH" MISO_ENGINE_ARTIFACT_TEST_CARGO_LOG="$log" \
-    bash "$repo_root/scripts/$builder" "$output"
+  local mock_log="$mock_bin/cargo.log"
+  rm -f "$mock_log" "$log"
+  local status=0
+  PATH="$mock_bin:$PATH" bash "$repo_root/scripts/$builder" "$output" || status=$?
+  if [[ -e $mock_log ]]; then
+    cp "$mock_log" "$log"
+  fi
+  return "$status"
 }
 
 assert_refuses_without_build() {
