@@ -395,7 +395,7 @@ python3 -B "$(dirname "${BASH_SOURCE[0]}")/check-command-kind-vocabulary.py" \
 python3 -B "$(dirname "${BASH_SOURCE[0]}")/check-session-map-shape.py" \
   --artifacts "$artifact_dir" || exit 1
 
-# Issue #240 A9 ruling 5458432482: the 80x parse-transient pin is re-measured against the exact
+# Issue #338: the 17x JSON parse-transient pin is re-measured against the exact
 # 1 MiB, 512-track x 4-effect accepted shape on the shipped wasm artifact. The refusal leg proves
 # a one-byte-under budget dies before parsing without unbounded memory growth.
 node "$(dirname "${BASH_SOURCE[0]}")/check-web-boot-budget.mjs" "$simd" || exit 1

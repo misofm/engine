@@ -596,3 +596,45 @@ assertion failed.
 Checked-in package Wasm rebuilding, package tarball closure and the intentionally stale packaged
 Wasm digest remain tranche 4 work. No package artifact was rebuilt and the one-shot descriptive
 benchmark was not run in this tranche.
+
+## Attempt 1 implementation evidence — tranche 4
+
+The reproducible Web build now seals the JSON-capable AudioWorklet module at 2,648,237 bytes with
+SHA-256 `6dcd9ced2daeb886843a764bcc6abc0b4f1b2c7a50af1ed91151a5ab366461e5`.
+The six-file Engine artifact closure and four-file FLAC decoder closure regenerate cleanly, and the
+SDK ABI layout, parameter metadata, generated modules, generated surface and package asset manifest
+all agree with their source authorities. The browser boot-budget gate was corrected from the
+retired TOML parser's 80x projection to the measured 17x JSON projection recorded in tranche 2.
+
+`scripts/sdk-package.sh check` produced and extracted a 69-file npm tarball (1.1 MB packed, 3.9 MB
+unpacked) with no runtime dependencies or test/repository files. Its independent smoke gate imports
+every public entry point and resolves every declaration from the extraction, then runs request and
+FLAC-stems session builds with an empty `PATH`, an isolated nonexistent `HOME` and the package as
+its working directory. Both outputs are exact canonical JSON snapshots; both boot through the
+embedded headless Wasm, accept submitted PCM and render non-silence. A one-byte engine-Wasm mutation
+is rejected by the package manifest before compilation, and a one-byte decoder-Wasm mutation exits
+as `internal.packaged_decoder` without publishing a session. Thus neither Cargo, repository
+discovery nor an external media subprocess is available to make the extraction pass.
+
+The source-built SDK gate is green at 131/131 tests. Its formerly failing root-only permission case
+now copies the shell gate and expected `sdk` sibling into the mode-0755 scratch tree before dropping
+to uid/gid 65534, so it reaches the deliberately unsearchable artifact directory and preserves the
+exact exit-2 assertion instead of failing to traverse `/root` with exit 126. The complete shipped-
+artifact static/object gate, JSON 17x boot high-water/refusal gate, formatting, generated checks and
+sole-session-format policy are green. The independent raw-Wasm render oracle, browser fixture/runner
+static check, built-artifact expected-resource agreement, its 26-mutation self-test and the hermetic
+AudioWorklet suite are also green after replacing the last TOML-shaped fixture substrings in that
+checker with structural JSON assertions.
+
+The coherent pre-benchmark qualification is green: `cargo test --locked --workspace --all-targets
+--no-fail-fast`, warning-denied workspace Clippy with all features, warning-denied workspace rustdoc,
+and formatting all pass. The native host runs with the pinned AVX2 backend; host-mobile builds in
+release mode for `aarch64-apple-ios` and `aarch64-linux-android`; and the complete CI package set
+builds in release mode for both scalar (`-simd128`) and SIMD (`+simd128`)
+`wasm32-unknown-unknown`. Workspace, session-format, SDK deletion plus its 37 mutations, generated
+SDK and C ABI policy gates pass.
+
+The four external dogfood source roots (`ghost`, `play-me`, `war` and `wide-open`) were not supplied
+in this workspace, so no outputs were fabricated. Closure still requires an explicit owner decision
+to defer that deployment evidence if the real roots remain unavailable. The one-shot descriptive
+benchmark was not run in this tranche.

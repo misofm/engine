@@ -233,50 +233,64 @@ def load_inputs() -> tuple[dict, dict]:
     # are the post-#241 spelling of the same frozen facts, plus the identity itself. Shape and
     # identity are separate pins so each can go red alone: the shape states the preimage's length,
     # the identity states which bytes filled it.
-    session = (FIXTURE / "session.json").read_text()
-    for frozen in (
-        "sample_rate_hz = 48000",
-        "quantum_frames = 128",
-        'channels = 2, bit_depth = "32f", frames = 256',
-        # SHA-256 over 256 frames x 2 channels x 4 bytes, interleaved little-endian f32 bits, of
-        # the `source.json` ramp the fixture feeds: per 128-frame block, left[i] = leftBase +
-        # leftStep * i and right[i] = 0.
-        'content = "sha256:a7d052a7f6b3b881f4bde6090d87c4226d39e62010e9b6038088bb28b8742949"',
-    ):
-        if frozen not in session:
-            raise ValueError(f"session lacks {frozen}")
+    def check_session_fixture(name: str, frames: str, content: str, effect_id: str | None = None) -> None:
+        session = json.loads((FIXTURE / name).read_text())
+        source = session["sources"][0]
+        expected = {
+            "sample_rate_hz": 48000,
+            "quantum_frames": 128,
+            "channels": 2,
+            "bit_depth": "32f",
+            "frames": frames,
+            "content": content,
+        }
+        actual = {
+            "sample_rate_hz": session.get("sample_rate_hz"),
+            "quantum_frames": session.get("quantum_frames"),
+            "channels": source.get("channels"),
+            "bit_depth": source.get("bit_depth"),
+            "frames": source.get("frames"),
+            "content": source.get("content"),
+        }
+        if actual != expected:
+            raise ValueError(f"{name} frozen session shape or identity changed")
+        if effect_id is not None:
+            effects = session["tracks"][0]["dynamic"]["effects"]
+            if effects[0]["identity"].get("effect_id") != effect_id:
+                raise ValueError(f"{name} effect identity changed")
+
+    # SHA-256 over 256 frames x 2 channels x 4 bytes, interleaved little-endian f32 bits, of
+    # the `source.json` ramp the fixture feeds: per 128-frame block, left[i] = leftBase +
+    # leftStep * i and right[i] = 0.
+    check_session_fixture(
+        "session.json",
+        "256",
+        "sha256:a7d052a7f6b3b881f4bde6090d87c4226d39e62010e9b6038088bb28b8742949",
+    )
     # Issue #137 E2, extended by #140 C: the command timeline runs the identity session plus one
     # dynamic-rack parametric EQ over a longer region, and both legs read this exact file. The EQ
     # is what makes an effect-addressed command have something real to address, and its band 1 is
     # a low shelf so a DC fixture can witness the parameter move at all.
     # Issue #143: the observation timeline's own session -- one track, one compressor in the
     # dynamic rack, so the per-node scalar publish path is what the browser exercises.
-    observation_session = (FIXTURE / "observation-session.json").read_text()
-    for frozen in (
-        "sample_rate_hz = 48000",
-        "quantum_frames = 128",
-        'channels = 2, bit_depth = "32f", frames = 2048',
-        # SHA-256 over 2048 frames x 2 channels x 4 bytes of constant 0.5 -- the level
-        # `direct-oracle.mjs` fills into every observation-timeline block.
-        'content = "sha256:66e39e41bccc0a57ae90a77b426f4075e81ba877b0653c3aabe0a9e00762769c"',
-        'effect_id = "miso.compressor"',
-    ):
-        if frozen not in observation_session:
-            raise ValueError(f"observation session lacks {frozen}")
-    command_session = (FIXTURE / "command-session.json").read_text()
-    for frozen in (
-        "sample_rate_hz = 48000",
-        "quantum_frames = 128",
-        'channels = 2, bit_depth = "32f", frames = 2048',
-        # SHA-256 over 2048 frames x 2 channels x 4 bytes of constant 0.25 -- the level
-        # `direct-oracle.mjs` fills into every command-timeline block. It is deliberately not the
-        # identity session's digest: the same content string under two different `frames` would be
-        # two different preimage lengths, which STEM_IDENTITY_V1 forbids.
-        'content = "sha256:680aca77ba6b819a4489730f3e42f69ba9f6d7a5921e748a8a46eb1974d0867c"',
-        'effect_id = "miso.parametric-eq"',
-    ):
-        if frozen not in command_session:
-            raise ValueError(f"command session lacks {frozen}")
+    # SHA-256 over 2048 frames x 2 channels x 4 bytes of constant 0.5 -- the level
+    # `direct-oracle.mjs` fills into every observation-timeline block.
+    check_session_fixture(
+        "observation-session.json",
+        "2048",
+        "sha256:66e39e41bccc0a57ae90a77b426f4075e81ba877b0653c3aabe0a9e00762769c",
+        "miso.compressor",
+    )
+    # SHA-256 over 2048 frames x 2 channels x 4 bytes of constant 0.25 -- the level
+    # `direct-oracle.mjs` fills into every command-timeline block. It is deliberately not the
+    # identity session's digest: the same content string under two different `frames` would be
+    # two different preimage lengths, which STEM_IDENTITY_V1 forbids.
+    check_session_fixture(
+        "command-session.json",
+        "2048",
+        "sha256:680aca77ba6b819a4489730f3e42f69ba9f6d7a5921e748a8a46eb1974d0867c",
+        "miso.parametric-eq",
+    )
     return source, expected
 
 
