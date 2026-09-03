@@ -772,3 +772,44 @@ workspace policies. The rebuilt package tarball contains 71 files and has npm sh
 `5ae17f3b8d95a66533c12e6f36e8f35ff360cd87`. The engine Wasm is unchanged at SHA-256
 `6dcd9ced2daeb886843a764bcc6abc0b4f1b2c7a50af1ed91151a5ab366461e5`. No benchmark or browser
 qualification was rerun, and no GitHub state was mutated.
+
+## Delivery qualification and closure status
+
+Attempt 3 remained the final #338 implementation attempt. The first pushed candidate exposed two
+independent CI-integration defects after the bounded implementation had reached its hard
+three-attempt stop; they were not treated as a fourth attempt. Issue #340 refreshed the
+independently locked fuzz workspace after the Session dependency change, and issue #341 retargeted
+the SDK deletion gate to the internal Session JSON authority. Their focused implementations and
+fresh Sol-high reviews passed, remote fuzz run `33709604036` and SDK run `33709604027` passed, and
+both successors are closed.
+
+At corrective checkpoint `0256b854`, remote CI measured the existing dense-invalid maximum-document
+Web boot gate at `1.133843116s`, above its strict one-second ceiling. The fixture also contained
+schema-invalid empty segment objects and therefore did not reach its claimed semantic-validation
+path. Per the no-retry and three-attempt rules, issue #342 independently restored a truthful exact
+1 MiB, more-than-10,000-segment semantic-invalid fixture, its deterministic 64-diagnostic oracle,
+and the unchanged strict timing gate. The single authorized local workspace invocation and fresh
+Sol-high review passed. Remote run `33713354715` then passed both named host-web tests and the full
+engine qualification; #342 is closed.
+
+That same qualification sequence exposed the crate-local corpus update hook's retired
+`MISO_UPDATE_CANONICAL_WRITER_CORPUS` spelling. Issue #343 independently renamed the two live
+spellings to `MISO_ENGINE_UPDATE_CANONICAL_WRITER_CORPUS`, documented the hook, proved the old name
+red under the unchanged vocabulary checker, and preserved the corpus bytes exactly. Focused gates
+and fresh Sol-high review passed; remote run `33713354715` passed the checker with 99 names under
+the sole `MISO_ENGINE_` prefix and the complete mutation suite. Issue #343 is closed.
+
+PR #339's accepted candidate `360a8fccfa06117efa55a1a0d76e21a8182ba0e1` passed every required
+engine, browser, SDK, fuzz and release check and merged as
+`352216116fc6265e07c4a8be77be09756d61381e`. The merge commit has exactly the accepted candidate's
+tree. All five main-push workflows passed at that exact merge commit: CI `33715772171`, browser
+qualification `33715772161`, SDK qualification `33715772143`, fuzz `33715772159`, and release build
+`33715772177`. Final Sol-high delivery audit found no remaining implementation, qualification,
+review, successor, GitHub-sync or delivery defect.
+
+Issue closure remains intentionally on HOLD for one owner-controlled deployment-evidence choice.
+The real external `ghost`, `play-me`, `war` and `wide-open` source roots were not supplied and no
+outputs were fabricated. The owner must either supply those roots so their `.session.json` outputs
+can be genuinely regenerated and booted through the extracted package, or explicitly defer that
+deployment evidence into a newly numbered, synchronized stateless successor. After that decision
+and its evidence are recorded, synchronize this body and close #338.
