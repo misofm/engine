@@ -638,3 +638,28 @@ The four external dogfood source roots (`ghost`, `play-me`, `war` and `wide-open
 in this workspace, so no outputs were fabricated. Closure still requires an explicit owner decision
 to defer that deployment evidence if the real roots remain unavailable. The one-shot descriptive
 benchmark was not run in this tranche.
+
+## Attempt 1 one-shot descriptive benchmark
+
+After every runnable functional gate above was green and checkpoint `8c107f2d` was clean,
+`scripts/run-session-benchmark.sh` was invoked exactly once at `2026-09-03T01:30:42Z`. The wrapper
+completed successfully without retry or tuning: one fixed warmup phase and two measured rounds for
+each of parse-plus-canonical and compile. The generated 256-track canonical JSON fixture was
+573,833 bytes with SHA-256
+`1a6357221dd631f5df594b82a1ce3138a9484794271e0423e0bcc85812e1d7af`; it contained one source,
+256 tracks, one output, 256 routes, 256 automation programs, 256 effects, 256 effect parameters and
+256 automation segments.
+
+On the AMD EPYC 9355 x86_64 Linux host with rustc 1.97.1 / LLVM 22.1.6, release opt-level 3, LTO
+off and 16 codegen units, parse-plus-canonical recorded p50 5,529,402 ns and 5,529,948 ns (p95
+5,565,499 ns and 5,558,493 ns). Compile recorded p50 714,381 ns and 704,479 ns (p95 721,494 ns and
+713,153 ns). The only missing environmental metadata was power source; governor was `performance`.
+These are descriptive observations with no decision threshold and miss no named launch ceiling.
+
+The timing runner records fixture bytes/hash/counts and toolchain/target but does not sample peak
+heap bytes. The separately frozen allocation evidence therefore remains the applicable observation:
+at 256 tracks, raw JSON parse made 13,873 allocation calls, preflight plus owned-model construction
+made 53,600, total parse made 67,473, canonicalization made 26, compilation made 2,636 and resource
+estimation made zero. Browser peak-byte/high-water evidence and the 17x bound are recorded in tranche
+2. No retained pre-migration timing record exists in the repository or GitHub issue history, so no
+before/after speed claim is made and a prohibited second invocation was not manufactured.
