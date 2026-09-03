@@ -77,10 +77,10 @@ fi
   exit 1
 }
 
-cp --update=none "$artifact" "$output_dir/miso-engine-v1-audio-worklet.simd128.wasm"
-cp --update=none "$repo_root/hosts/host-web/web/miso-engine-v1-audio-worklet.js" "$output_dir/"
-cp --update=none "$repo_root/hosts/host-web/web/miso-engine-v1-audio-worklet-host.js" "$output_dir/"
-cp --update=none "$repo_root/hosts/host-web/web/miso-engine-v1-audio-worklet-host.d.ts" "$output_dir/"
+cp "$artifact" "$output_dir/miso-engine-v1-audio-worklet.simd128.wasm"
+cp "$repo_root/hosts/host-web/web/miso-engine-v1-audio-worklet.js" "$output_dir/"
+cp "$repo_root/hosts/host-web/web/miso-engine-v1-audio-worklet-host.js" "$output_dir/"
+cp "$repo_root/hosts/host-web/web/miso-engine-v1-audio-worklet-host.d.ts" "$output_dir/"
 
 # Issue #137 D4: the parameter metadata ships beside the module, so the app never introspects the
 # Wasm for names, units, ranges, defaults or enumerations. The effect list is read from

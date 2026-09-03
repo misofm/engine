@@ -65,8 +65,7 @@ grep -qF "\"$expected\"" "$loader" || {
   exit 1
 }
 
-cp --update=none "$artifact" "$output_dir/flac-decoder.wasm"
-cp --update=none "$loader" "$output_dir/flac-decoder.js"
-cp --update=none \
-  "$repo_root/sidecars/flac-decoder/flac-decoder.d.ts" "$output_dir/"
-cp --update=none "$pin_file" "$output_dir/"
+cp "$artifact" "$output_dir/flac-decoder.wasm"
+cp "$loader" "$output_dir/flac-decoder.js"
+cp "$repo_root/sidecars/flac-decoder/flac-decoder.d.ts" "$output_dir/"
+cp "$pin_file" "$output_dir/"
