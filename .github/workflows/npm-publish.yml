@@ -285,6 +285,8 @@ jobs:
 
       - name: Fresh registry install imports all public entries and runs enginectl
         if: inputs.mode != 'qualify'
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
         run: |
           set -euo pipefail
           consumer=$(mktemp -d)
@@ -300,39 +302,26 @@ jobs:
           const local = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
           const report = JSON.parse(fs.readFileSync(process.argv[3], "utf8"));
           const expectedSha = process.env.EXPECTED_SHA;
+          if (!/^[0-9a-f]{40}$/.test(expectedSha ?? "")) throw new Error("expected release SHA was not exported to provenance verification");
           const target = (entry) => entry && entry.name === local.package && entry.version === local.version;
           const verified = Array.isArray(report.verified) ? report.verified.filter(target) : [];
           const rejected = ["invalid", "missing", "unverified"].flatMap((key) => Array.isArray(report[key]) ? report[key].filter(target) : []);
           if (verified.length !== 1 || rejected.length !== 0) throw new Error("npm did not report exactly one cryptographically verified target package");
-          const payloads = [];
-          const visit = (value, context = "") => {
-            if (!value || typeof value !== "object") return;
-            if (typeof value.payload === "string" && /dsse|envelope|attestation/i.test(context)) {
-              try { payloads.push(JSON.parse(Buffer.from(value.payload, "base64").toString("utf8"))); } catch { throw new Error("verified attestation DSSE payload is not valid base64 JSON"); }
-            }
-            for (const [key, child] of Object.entries(value)) visit(child, `${context}/${key}`);
-          };
-          visit(verified[0]);
-          const matches = payloads.filter((statement) => {
-            if (statement?._type !== "https://in-toto.io/Statement/v1" || statement?.predicateType !== "https://slsa.dev/provenance/v1") return false;
-            const subjects = Array.isArray(statement.subject) ? statement.subject.filter((subject) => {
-              const name = decodeURIComponent(String(subject?.name ?? ""));
-              const namedVersion = name.includes(`${local.package}@${local.version}`) || (name === local.package && subject?.version === local.version);
-              const digest = subject?.digest?.sha512;
-              return namedVersion && (digest === local.sha512 || digest === local.integrity.slice("sha512-".length));
-            }) : [];
-            const workflow = [];
-            const dependencies = [];
-            const walk = (node) => {
-              if (!node || typeof node !== "object") return;
-              if (node.repository === "https://github.com/misofm/engine" && node.path === ".github/workflows/npm-publish.yml" && node.ref === "refs/heads/main") workflow.push(node);
-              if (node.digest?.gitCommit === expectedSha && String(node.uri ?? "").includes("github.com/misofm/engine")) dependencies.push(node);
-              for (const child of Object.values(node)) walk(child);
-            };
-            walk(statement.predicate);
-            return subjects.length === 1 && workflow.length === 1 && dependencies.length === 1;
-          });
-          if (matches.length !== 1) throw new Error("verified npm provenance did not uniquely bind package, digest, repository workflow/ref, and git commit");
+          const bundles = Array.isArray(verified[0].attestationBundles)
+            ? verified[0].attestationBundles.filter((bundle) => bundle?.predicateType === "https://slsa.dev/provenance/v1") : [];
+          if (bundles.length !== 1) throw new Error("expected exactly one verified SLSA v1 attestation bundle");
+          const envelope = bundles[0].bundle?.dsseEnvelope;
+          if (envelope?.payloadType !== "application/vnd.in-toto+json" || typeof envelope.payload !== "string") throw new Error("verified SLSA bundle lacks the required DSSE payload");
+          let statement;
+          try { statement = JSON.parse(Buffer.from(envelope.payload, "base64").toString("utf8")); } catch { throw new Error("verified attestation DSSE payload is not valid base64 JSON"); }
+          if (statement?._type !== "https://in-toto.io/Statement/v1" || statement?.predicateType !== "https://slsa.dev/provenance/v1") throw new Error("DSSE statement is not SLSA provenance v1");
+          const subjects = Array.isArray(statement.subject) ? statement.subject.filter((subject) => subject?.name === "pkg:npm/%40misofm/engine@0.1.0" && subject?.digest?.sha512 === local.sha512) : [];
+          if (subjects.length !== 1) throw new Error("DSSE statement does not uniquely bind the package PURL and tarball SHA-512");
+          const workflow = statement?.predicate?.buildDefinition?.externalParameters?.workflow;
+          if (workflow?.repository !== "https://github.com/misofm/engine" || workflow?.path !== ".github/workflows/npm-publish.yml" || workflow?.ref !== "refs/heads/main") throw new Error("DSSE workflow identity differs from the trusted publisher");
+          const dependencies = Array.isArray(statement?.predicate?.buildDefinition?.resolvedDependencies)
+            ? statement.predicate.buildDefinition.resolvedDependencies.filter((dependency) => dependency?.digest?.gitCommit === expectedSha) : [];
+          if (dependencies.length !== 1) throw new Error("DSSE resolved dependencies do not uniquely bind expected_sha");
           NODE
 
       - name: Upload exact tarball and qualification evidence

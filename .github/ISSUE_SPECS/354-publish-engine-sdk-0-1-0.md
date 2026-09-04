@@ -248,3 +248,6 @@ cannot reach a false PASS, but it is not executable to completion:
 No npm bytes were published and no tag or GitHub release was created. Under the
 three-attempt stop rule, implementation ends here. A fresh bounded successor
 must repair and requalify the release workflow without weakening any gate.
+## Successor handoff
+
+Issue #355 owns the repaired closure procedure. This issue remains the evidence record for the stopped #354 attempt; no publication, tag, release, or issue closure occurred under #354.
