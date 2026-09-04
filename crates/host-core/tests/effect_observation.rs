@@ -835,22 +835,17 @@ fn observation_without_a_control_channel_is_refused() {
 ///
 /// Two halves, because "cost" has two honest meanings and only one of them is a stopwatch.
 ///
-/// **The deterministic half.** Level-2 zero says an unarmed tap's effect state is *never read*.
-/// That is a statement about how many times the effect is asked, and it is counted exactly here:
-/// the lane's `wants` gate is driven the way `graph::runtime::publish_observations` drives it,
-/// against an effect that counts every call. No capacity means the loop does not exist; capacity
-/// unarmed means `wants` refuses before the effect is touched; armed means exactly one call per
-/// tap per block and not one more.
+/// **The deterministic half** (this test). Level-2 zero says an unarmed tap's effect state is
+/// *never read*. That is a statement about how many times the effect is asked, and it is counted
+/// exactly here: the lane's `wants` gate is driven the way `graph::runtime::publish_observations`
+/// drives it, against an effect that counts every call. No capacity means the loop does not
+/// exist; capacity unarmed means `wants` refuses before the effect is touched; armed means
+/// exactly one call per tap per block and not one more.
 ///
-/// **The descriptive half.** A real eight-compressor plan rendered in all four legs, timed, with a
-/// synthetic per-sample ring scan as the separating negative control -- the shape a `Computed` tap
-/// would have if one shipped. The scan must be *measurably* slower than every observation leg, or
-/// the measurement is too coarse to have said anything, and that is the assertion. The three
-/// observation legs are reported rather than pinned: a wall clock on a shared machine is evidence,
-/// not a gate.
-///
-/// Red mutation: declare the limiter tap `Resident` but implement it as a per-sample ring scan ->
-/// the armed row separates from the others, which is what the negative control calibrates for.
+/// **The descriptive half** moved to
+/// [`observation_cost_classes_are_separated_from_a_computed_scan_in_release`] below, `#[ignore]`d
+/// for nightly, release-mode measurement: a wall clock on a shared debug-mode CI runner has no
+/// fixed relationship to the shipped profile's speed (issue #359 WP-2, §10).
 #[test]
 fn observation_cost_classes_are_what_they_claim() {
     use effect_contract::{
@@ -859,7 +854,6 @@ fn observation_cost_classes_are_what_they_claim() {
     };
     use engine::realtime::observation_slot;
     use std::cell::Cell;
-    use std::time::Instant;
 
     static MENU: [ObservationDescriptor; 1] = [ObservationDescriptor {
         id: ObservationTapId(1),
@@ -940,8 +934,34 @@ fn observation_cost_classes_are_what_they_claim() {
         before,
         "disarming stops the reads at once"
     );
+}
 
-    // The descriptive half: four legs of a real eight-compressor plan.
+/// Release-mode half of the E7 cost-class claim above (issue #143): a real eight-compressor plan
+/// rendered in all four legs, timed, with a synthetic per-sample ring scan as the separating
+/// negative control -- the shape a `Computed` tap would have if one shipped. The scan must be
+/// *measurably* slower than the marginal cost of arming a tap over an unarmed console, or the
+/// measurement is too coarse to have said anything, and that is the assertion. The three
+/// observation legs are reported (printed) rather than pinned: a wall clock on a shared machine
+/// is evidence, not a gate.
+///
+/// Red mutation: declare the limiter tap `Resident` but implement it as a per-sample ring scan ->
+/// the armed row separates from the others, which is what the negative control calibrates for.
+///
+/// Debug-mode runner variance makes both wall-clock assertions below a coin flip at P95 on a
+/// shared 4-vCPU CI runner, so this runs only in release, nightly, `--ignored` (issue #359 WP-2,
+/// §10). The separating-control assertion compares `AllArmed` against `CapacityUnarmed`, not
+/// `NoConsole`: in an optimized build, merely having a console object attached (present in
+/// `ConsoleNoCapacity`, `CapacityUnarmed` and `AllArmed` alike) costs measurably more than the
+/// baseline with no console at all, and that fixed cost can exceed the true marginal cost of
+/// arming a tap by an order of magnitude. Subtracting `NoConsole` folded both costs into one
+/// delta and made this a false red the first time it was actually run in release; `CapacityUnarmed`
+/// isolates the cost this test is about.
+#[test]
+#[ignore = "release-mode budget; runs nightly"]
+fn observation_cost_classes_are_separated_from_a_computed_scan_in_release() {
+    use std::time::Instant;
+
+    // Four legs of a real eight-compressor plan.
     const RENDER_BLOCKS: usize = 256;
     let mut measured = Vec::new();
     for leg in [
@@ -1002,12 +1022,26 @@ fn observation_cost_classes_are_what_they_claim() {
         .find(|(leg, _)| *leg == Leg::NoConsole)
         .expect("baseline leg")
         .1;
+    // The negative control isolates the cost of *arming* a tap, so it must be compared against a
+    // leg that already pays for having a console attached but has not armed anything --
+    // `CapacityUnarmed`, not `NoConsole`. In an optimized build the fixed cost of a console being
+    // present at all (present in `ConsoleNoCapacity`, `CapacityUnarmed` and `AllArmed` alike) can
+    // exceed the true per-tap arming cost by an order of magnitude, which made `NoConsole` an
+    // unreliable zero-point here in release: it folded "having a console" and "arming a tap" into
+    // one delta and measurably failed this assertion even though no tap was ever scanned per
+    // sample. `NoConsole` remains the right zero-point for the coarse product-level gate below.
+    let unarmed_with_console = measured
+        .iter()
+        .find(|(leg, _)| *leg == Leg::CapacityUnarmed)
+        .expect("unarmed-with-console leg")
+        .1;
     assert!(
         scan > armed
-            .saturating_sub(baseline)
+            .saturating_sub(unarmed_with_console)
             .max(core::time::Duration::from_nanos(1)),
-        "the negative control ({scan:?}) must separate from the observation cost, or the clock \
-         is too coarse for this comparison to say anything"
+        "the negative control ({scan:?}) must separate from the marginal cost of arming, or the \
+         clock is too coarse for this comparison to say anything: armed={armed:?} \
+         unarmed_with_console={unarmed_with_console:?}"
     );
     // A gate, not a pin: eight resident reads and eight `abs`/compare pairs per block cannot
     // plausibly double a plan that runs eight compressors. A regression that does is a regression.

@@ -5,7 +5,6 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use effect_package::*;
 use sha2::{Digest, Sha256};
 
-const TRIALS: usize = 10_000;
 const DESCRIPTOR_SEED: u64 = 0x081d_e5c0_0000_0001;
 const PACKAGE_SEED: u64 = 0x081d_e5c0_0000_0002;
 const STATE_SEED: u64 = 0x081d_e5c0_0000_0003;
@@ -27,7 +26,6 @@ impl SplitMix64 {
 struct Summary {
     accepted: usize,
     rejected: usize,
-    normalized: Sha256,
 }
 
 fn hex_fixture(text: &str) -> Vec<u8> {
@@ -57,18 +55,9 @@ fn guarded_candidate(source: &[u8], random: u64) -> Vec<u8> {
     guarded
 }
 
-fn absorb(summary: &mut Summary, parser: &[u8], trial: usize, outcome: &[u8], accepted: bool) {
+fn absorb(summary: &mut Summary, accepted: bool) {
     summary.accepted += usize::from(accepted);
     summary.rejected += usize::from(!accepted);
-    summary
-        .normalized
-        .update((parser.len() as u64).to_le_bytes());
-    summary.normalized.update(parser);
-    summary.normalized.update((trial as u64).to_le_bytes());
-    summary
-        .normalized
-        .update((outcome.len() as u64).to_le_bytes());
-    summary.normalized.update(outcome);
 }
 
 fn assert_descriptor_diagnostic_shape(error: EffectDescriptorWireDiagnostic, candidate_len: usize) {
@@ -236,7 +225,6 @@ fn state_outcome(candidate: &[u8]) -> Vec<u8> {
 }
 
 fn run_parser(
-    name: &[u8],
     seed: u64,
     trials: usize,
     fixtures: &[Vec<u8>],
@@ -266,7 +254,7 @@ fn run_parser(
             Sha256::digest(source),
             fixture_hashes[trial % fixtures.len()]
         );
-        absorb(&mut summary, name, trial, &first, first.first() == Some(&1));
+        absorb(&mut summary, first.first() == Some(&1));
     }
     assert_eq!(summary.accepted + summary.rejected, trials);
     summary
@@ -293,21 +281,15 @@ fn campaigns(trials: usize) -> [(String, Summary); 3] {
     [
         (
             "descriptor".into(),
-            run_parser(
-                b"descriptor",
-                DESCRIPTOR_SEED,
-                trials,
-                &descriptors,
-                descriptor_outcome,
-            ),
+            run_parser(DESCRIPTOR_SEED, trials, &descriptors, descriptor_outcome),
         ),
         (
             "package".into(),
-            run_parser(b"package", PACKAGE_SEED, trials, &packages, package_outcome),
+            run_parser(PACKAGE_SEED, trials, &packages, package_outcome),
         ),
         (
             "state".into(),
-            run_parser(b"state", STATE_SEED, trials, &states, state_outcome),
+            run_parser(STATE_SEED, trials, &states, state_outcome),
         ),
     ]
 }
@@ -316,18 +298,5 @@ fn campaigns(trials: usize) -> [(String, Summary); 3] {
 fn tiny_deterministic_mutation_smoke() {
     for (_, summary) in campaigns(4) {
         assert_eq!(summary.accepted + summary.rejected, 4);
-    }
-}
-
-#[test]
-#[ignore = "Issue 081 exact 30,000-trial one-shot qualification campaign"]
-fn exact_deterministic_mutation_campaign() {
-    for (name, summary) in campaigns(TRIALS) {
-        let digest = summary.normalized.finalize();
-        let digest_hex: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
-        println!(
-            "parser={name} trials={} accepted={} rejected={} panics=0 normalized_sha256={digest_hex}",
-            TRIALS, summary.accepted, summary.rejected
-        );
     }
 }

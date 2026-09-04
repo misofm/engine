@@ -561,8 +561,30 @@ fn no_console_request_attaches_nothing_and_charges_nothing() {
 ///
 /// This is deliberately not #240's full refusal-time eval: the exact-1-MiB production-boot fixture
 /// in `host-web` owns parser, validation, span-materialization and wall-time coverage.
+///
+/// The wall-clock half of the original claim ("finishes under one second") moved to
+/// [`dense_refusal_diagnostics_finish_under_one_second_in_release`] below: a debug-build wall
+/// assertion on a shared CI runner has no fixed relationship to the shipped profile's speed
+/// (issue #359 WP-2, §10).
 #[test]
-fn dense_refusal_diagnostics_are_count_bounded_and_finish_under_one_second() {
+fn dense_refusal_diagnostics_are_count_bounded() {
+    const INVALID_ROWS: usize = 16_384;
+    let bytes = diagnostic_lines(
+        (0..INVALID_ROWS).map(|index| ("automation.invalid", format!("$.automation[{index}]"))),
+    );
+    assert_eq!(
+        bytes.iter().filter(|byte| **byte == b'\n').count(),
+        host_core::diagnostics::MAXIMUM_PREPARE_DIAGNOSTIC_LINES
+    );
+}
+
+/// Release-mode half of the budget above: encoding the dense, count-bounded refusal finishes in
+/// under one second in the shipped profile. Debug-mode runner variance makes this assertion a
+/// coin flip at P95 on a shared 4-vCPU CI runner in debug, so it runs only in release, nightly,
+/// `--ignored`.
+#[test]
+#[ignore = "release-mode budget; runs nightly"]
+fn dense_refusal_diagnostics_finish_under_one_second_in_release() {
     use std::time::{Duration, Instant};
 
     const INVALID_ROWS: usize = 16_384;

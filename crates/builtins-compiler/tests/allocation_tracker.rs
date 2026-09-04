@@ -12,8 +12,8 @@ use std::alloc::{GlobalAlloc, System};
 use builtins::{MeterConfig, MeterTap};
 use builtins_compiler::{
     BuiltinCompileCaps, MeterRequest, prepare_session_builtins,
-    test_only_phase_two_allocation_snapshot, test_only_record_phase_two_allocation,
-    test_only_reset_phase_two_allocation_tracker,
+    test_only_begin_phase_two_measurement_session, test_only_phase_two_allocation_snapshot,
+    test_only_record_phase_two_allocation, test_only_reset_phase_two_allocation_tracker,
 };
 use session::{CompileCaps, RouteSource, SendTap, StableId, compile_session, parse_session_json};
 
@@ -156,8 +156,29 @@ fn caps() -> BuiltinCompileCaps {
     }
 }
 
+/// Settle first-touch process/thread state (lazily-initialised std machinery reachable from
+/// [`prepare_session_builtins`], such as thread handles and `HashMap` `RandomState` seeding)
+/// with one full, discarded prepare, so that one-shot cost can never land inside a *measured*
+/// phase-two window. See the diagnosis on `TEST_PHASE_TWO_LAYOUTS` in `src/lib.rs`: the #358 CI
+/// failure showed four extra retained layouts, one allocation each, present only on the first and
+/// only prepare in the process.
+fn settle_phase_two_first_touch(
+    session: &session::CompiledSession,
+    requests: &[MeterRequest],
+    caps: BuiltinCompileCaps,
+) {
+    test_only_reset_phase_two_allocation_tracker();
+    let _ = prepare_session_builtins(session, requests, caps).expect("prepare (warm-up)");
+}
+
 #[test]
 fn phase_two_allocator_layouts_match_the_checked_resource_report() {
+    // Excludes every other test in this binary from the process-global tracker for the whole
+    // measurement session (reset through snapshot); see `TEST_PHASE_TWO_SESSION`.
+    let _session_guard = test_only_begin_phase_two_measurement_session();
+    // One discarded prepare, ahead of every measured combination below, settles first-touch
+    // process/thread state once so no measured window ever observes it.
+    settle_phase_two_first_touch(&session(1), &requests(0), caps());
     for track_count in [1, 4, 65_537] {
         let session = session(track_count);
         for meter_count in [0, 1, 7] {
@@ -243,5 +264,39 @@ fn phase_two_allocator_layouts_match_the_checked_resource_report() {
                 }
             }
         }
+    }
+}
+
+/// Repeats a measured prepare three times in-process (after the same first-touch warm-up) and
+/// asserts every observed snapshot is byte-for-byte identical. This is the direct in-process
+/// analogue of "passes in isolation, fails in the workspace run": if any thread-local or
+/// process-global first-touch state, or any cross-thread contamination, remained, one of these
+/// three measured prepares would diverge from the others.
+#[test]
+fn phase_two_allocator_layouts_are_stable_across_repeated_measured_prepares() {
+    // Excludes every other test in this binary from the process-global tracker for the whole
+    // measurement session (reset through snapshot); see `TEST_PHASE_TWO_SESSION`.
+    let _session_guard = test_only_begin_phase_two_measurement_session();
+    let session = session(4);
+    let requests = requests(3);
+    settle_phase_two_first_touch(&session, &requests, caps());
+
+    let mut snapshots = Vec::with_capacity(3);
+    for _ in 0..3 {
+        test_only_reset_phase_two_allocation_tracker();
+        let _ = prepare_session_builtins(&session, &requests, caps()).expect("prepare (measured)");
+        snapshots.push(test_only_phase_two_allocation_snapshot());
+    }
+
+    let first = &snapshots[0];
+    assert!(
+        !first.overflowed && !first.layouts.is_empty(),
+        "measured snapshot must be a real, non-overflowed observation: {first:?}"
+    );
+    for (index, snapshot) in snapshots.iter().enumerate().skip(1) {
+        assert_eq!(
+            snapshot, first,
+            "measured prepare #{index} observed different phase-two layouts than #0"
+        );
     }
 }
