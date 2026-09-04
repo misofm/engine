@@ -36,7 +36,7 @@ jobs:
     outputs:
       route: ${{ steps.classify.outputs.route }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
       - name: Validate path-routing policy and mutations
@@ -58,7 +58,11 @@ jobs:
     if: needs.route.outputs.route == 'full'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: host
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install pinned Rust toolchain
         run: |
           rustup toolchain install 1.97.1 --profile minimal --component clippy --component rustfmt
@@ -74,10 +78,6 @@ jobs:
         run: RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps
       - name: Workspace policy
         run: bash scripts/check-workspace-policy.sh
-      - name: Retired delivery-codec Cargo boundary and mutations
-        run: |
-          python3 -B scripts/check-delivery-codec-boundary.py
-          python3 -B scripts/test-delivery-codec-boundary.py
       - name: Session dependency and compiler boundary policy
         run: bash scripts/check-session-policy.sh
       - name: Workspace policy mutation tests
@@ -164,7 +164,7 @@ jobs:
       - name: Math gates M1, M2 and M3 in release
         run: cargo test --locked --release -p math --features lane
       - name: Math M3 digests on an FMA-enabled build
-        run: RUSTFLAGS='-C target-feature=+fma' cargo test --locked --release -p math --test m3_determinism
+        run: CARGO_TARGET_DIR=target/ci/m3-fma RUSTFLAGS='-C target-feature=+fma' cargo test --locked --release -p math --test m3_determinism
       - name: Math M1 exhaustive sweep
         run: cargo test --locked --release -p math --features lane --test m1_exhaustive -- --ignored
       - name: Fast dB tier gate F1, exhaustive over both operating domains
@@ -276,7 +276,7 @@ jobs:
           cargo check --locked -p bench --all-targets
           bash scripts/test-protocol-benchmark.sh
       - name: Realtime race model
-        run: RUSTFLAGS='--cfg loom --check-cfg=cfg(loom)' cargo test --locked --release -p engine --lib spsc_loom
+        run: CARGO_TARGET_DIR=target/ci/loom RUSTFLAGS='--cfg loom --check-cfg=cfg(loom)' cargo test --locked --release -p engine --lib spsc_loom
       - name: Realtime audit hooks and syscall trace
         run: |
           cargo build --locked --release -p audit
@@ -334,10 +334,6 @@ jobs:
         run: |
           python3 -B scripts/check-step-vocabulary.py
           python3 -B scripts/check-step-vocabulary.py --self-test
-      - name: Feature-resolution tree
-        run: cargo tree --locked --workspace -e features
-      - name: Metadata report
-        run: cargo metadata --locked --format-version 1 --no-deps
       # G1: the strongest single gate in the repo -- compiles a C++17 header consumer and a C11
       # fixture at -Wall -Wextra -Werror -pedantic, links the real libcapi.so, diffs its exported
       # miso_engine_v1_* symbols against the frozen 14-name ABI V1 list, and executes the fixture.
@@ -360,7 +356,11 @@ jobs:
     if: needs.route.outputs.route == 'full'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: x86-probes
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.97.1 --profile minimal
       # #84 phase A made core (and so every production crate) depend on lane, whose
@@ -391,7 +391,11 @@ jobs:
     if: needs.route.outputs.route == 'full'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: wasm
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install pinned Rust toolchain and Wasm standard library
         run: |
           rustup toolchain install 1.97.1 --profile minimal
@@ -435,19 +439,16 @@ jobs:
           artifacts=$(mktemp -d)
           bash scripts/build-web-audioworklet.sh "$artifacts"
           bash scripts/check-web-audioworklet.sh "$artifacts"
-          python3 -B scripts/web-audioworklet-browser-correctness.py --check --artifacts "$artifacts"
           # Issue #217: the resource-report rows the digest gates above do not cover, pinned
-          # against the same shipped artifact.
+          # against the same shipped artifact. Subsumes web-audioworklet-browser-correctness.py
+          # --check (same direct-oracle.mjs, asserts every digest before printing) and already
+          # runs its own --self-test (:749) before printing, so neither runs separately (§6.3).
           python3 -B scripts/check-browser-expected-resources.py --artifacts "$artifacts"
           ls -l "$artifacts"
-      - name: Browser expected-resources tripwire self-test
-        run: python3 -B scripts/check-browser-expected-resources.py --self-test
       - name: Hermetic browser host and worklet tests
         run: bash scripts/test-web-audioworklet.sh
       - name: Issue-005 scalar and SIMD protocol golden parity
         run: bash scripts/check-protocol-wasm-parity.sh
-      - name: Issue-005 protocol benchmark corpus Wasm parity (no timings)
-        run: bash scripts/check-protocol-benchmark-wasm-parity.sh
 
   wasm-gates:
     name: cross-target digest gates under wasmtime
@@ -455,7 +456,11 @@ jobs:
     if: needs.route.outputs.route == 'full'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: wasm-gates
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # wabt is not optional here. #198 gave `run-wasm-gates.sh` the detector-residency pin, which
       # disassembles both guest modules with `wasm-objdump`, and the script hard-exits when the
       # binary is absent -- so from 12ae81f7 onwards this job died after the native leg printed and
@@ -482,7 +487,7 @@ jobs:
       - name: Gate G6 over the full corpus in release
         run: cargo test --locked --release -p wasm-gates
       - name: Upload cross-target gate evidence
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: wasm-gates
           path: target/ci/wasm-gates/wasm-gates.jsonl

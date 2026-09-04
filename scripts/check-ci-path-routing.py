@@ -36,12 +36,14 @@ RELEASE_PR_INPUTS = [
     "scripts/check-release-shape.py",
 ]
 
+CHECKOUT_PIN = "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2"
+
 CANONICAL_ROUTE_JOB = """    name: classify qualification paths
     runs-on: ubuntu-24.04
     outputs:
       route: ${{ steps.classify.outputs.route }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: """ + CHECKOUT_PIN + """
         with:
           fetch-depth: 0
       - name: Validate path-routing policy and mutations
