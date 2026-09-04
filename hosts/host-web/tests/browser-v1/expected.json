@@ -56,7 +56,7 @@
         "statusBytes": "80",
         "sessionDocumentBytes": "1919",
         "diagnosticBytes": "16384",
-        "sourceIdBytes": "14",
+        "idStagingBytes": "14",
         "sourcePcmStagingBytes": "1024",
         "outputPcmBytes": "1024",
         "bridgeMetadataBytes": "4235",

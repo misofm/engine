@@ -26,6 +26,8 @@ pub struct HostSessionShape {
     pub maximum_source_channels: u32,
     /// Longest declared source ID in bytes, or zero when there are no sources.
     pub longest_source_id_bytes: u64,
+    /// Longest declared track ID in bytes, or zero when there are no tracks.
+    pub longest_track_id_bytes: u64,
     /// Number of sources.
     pub source_count: u64,
     /// Number of tracks.
@@ -62,6 +64,14 @@ pub fn compiled_session_shape(
                 .sources
                 .iter()
                 .map(|source| source.id.as_str().len())
+                .max()
+                .unwrap_or(0),
+        )?,
+        longest_track_id_bytes: count(
+            model
+                .tracks
+                .iter()
+                .map(|track| track.id.as_str().len())
                 .max()
                 .unwrap_or(0),
         )?,

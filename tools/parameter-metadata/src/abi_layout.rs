@@ -263,8 +263,8 @@ fn resource_report_fields() -> [Field; 28] {
             "u64",
         ),
         (
-            "sourceIdBytes",
-            offset_of!(WebResourceReport, source_id_bytes),
+            "idStagingBytes",
+            offset_of!(WebResourceReport, id_staging_bytes),
             "u64",
         ),
         (

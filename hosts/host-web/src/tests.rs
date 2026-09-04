@@ -73,7 +73,9 @@ fn retained_projection(document: &[u8], options: WebBootOptions) -> u64 {
         shape.sample_rate_hz,
         shape.quantum_frames,
         shape.maximum_source_channels,
-        shape.longest_source_id_bytes,
+        shape
+            .longest_source_id_bytes
+            .max(shape.longest_track_id_bytes),
         options,
     )
     .expect("bridge projection");
@@ -294,6 +296,7 @@ fn frozen_layouts_and_values_are_exact() {
     assert_eq!(offset_of!(WebStatus, next_absolute_sample), 32);
     assert_eq!(offset_of!(WebStatus, reserved), 48);
     assert_eq!(offset_of!(WebResourceReport, options_bytes), 32);
+    assert_eq!(offset_of!(WebResourceReport, id_staging_bytes), 64);
     assert_eq!(
         offset_of!(WebResourceReport, largest_named_allocation_bytes),
         184
@@ -3130,6 +3133,49 @@ fn three_source_session(quantum: u32) -> String {
     ];
     model.tracks[0].source_id = session::StableId::parse("mid").expect("stable id");
     canonical_session_json(&model).expect("canonical three-source session")
+}
+
+/// Issue #292 IO-9: track discovery and source submission share one staging buffer, so its
+/// projection must cover both ID families rather than assuming source IDs are always longest.
+///
+/// Red mutation: project only `longest_source_id_bytes` again -> boot still publishes a handle,
+/// but `miso_engine_web_v1_console_track_id` silently returns zero for this valid track and the
+/// browser's console bind turns that document-dependent condition into `RESULT_INTERNAL`.
+#[test]
+fn console_track_id_longer_than_every_source_id_boots_and_round_trips() {
+    const QUANTUM: u32 = 128;
+    const SOURCE_ID: &str = "s";
+    const TRACK_ID: &str = "track-id-is-longer";
+
+    let mut model = parse_session_json(include_str!("../tests/browser-v1/session.json"))
+        .expect("accepted identity fixture");
+    model.quantum_frames = QUANTUM;
+    model.sources[0].id = session::StableId::parse(SOURCE_ID).expect("source ID");
+    model.tracks[0].id = session::StableId::parse(TRACK_ID).expect("track ID");
+    model.tracks[0].source_id = session::StableId::parse(SOURCE_ID).expect("source reference");
+    let session::RouteSource::Track { track_id, .. } = &mut model.routes[0].source else {
+        panic!("the identity fixture routes a track");
+    };
+    *track_id = session::StableId::parse(TRACK_ID).expect("route track ID");
+    let document = canonical_session_json(&model).expect("canonical long-track-ID session");
+
+    let handle = crate::ffi::test_boot(document.as_bytes(), boot_options(QUANTUM));
+    assert_ne!(
+        handle, 0,
+        "the valid session boots instead of refusing internally"
+    );
+    let resources = crate::ffi::test_resources(handle).expect("resource report");
+    assert_eq!(resources.id_staging_bytes, TRACK_ID.len() as u64);
+    assert!(resources.id_staging_bytes > SOURCE_ID.len() as u64);
+
+    let length = miso_engine_web_v1_console_track_id(handle, 0);
+    assert_eq!(length, TRACK_ID.len() as u32);
+    assert_eq!(
+        crate::ffi::test_read_source_id(handle, length).expect("staged track ID"),
+        TRACK_ID.as_bytes()
+    );
+    assert_eq!(miso_engine_web_v1_console_track_id(handle, 1), 0);
+    assert_eq!(miso_engine_web_v1_dispose(handle), RESULT_OK);
 }
 
 /// Issue #207 D1: the compiled session answers what sources exist, in canonical order, with the
