@@ -113,7 +113,7 @@ counter rows. `MockProvider` and `MockProviderConfig` are absent from a normal p
 build and available only to unit tests or consumers explicitly selecting `protocol/test-support`.
 The exact AudioWorklet rebuild remains protocol-free but changes crate identity because host-core's
 declared feature surface changed; its refreshed reproducible SHA-256 is
-`d02f6fbbdf00036479c31933647bb394854244bdd12428264f9392334164f238`.
+`e48504a17e00334e7719ac9defd11c3f52e11802f66a68cc01115641fd8c91b0`.
 
 Refresh gates: `cargo test -p capi`; `cargo test -p capi --test resource_lifecycle`;
 `scripts/check-capi-abi.sh`; `scripts/check-abi-layout-v1.py`; and `cargo test --workspace` against
