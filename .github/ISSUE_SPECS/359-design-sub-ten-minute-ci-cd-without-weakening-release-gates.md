@@ -2,9 +2,10 @@
 
 ## One-line summary
 
-Ask Fable 5.1 to design the optimal GitHub Actions architecture for fast daily
-iteration while preserving every correctness, realtime, artifact, portability,
-and release assertion that can fail a merge.
+Ask Fable 5.1 to design the smallest, fastest GitHub Actions and test
+architecture that protects distinct production risks. Remove obsolete,
+duplicated, non-discriminating, and otherwise unnecessary tests instead of
+preserving the current suite by default.
 
 ## Problem
 
@@ -60,6 +61,35 @@ Fable 5.1 should recommend one coherent target architecture—not merely a list
 of possible optimizations—and support it with expected critical-path timing,
 failure behavior, security boundaries, and a staged migration plan.
 
+### Test-suite reduction mandate
+
+The current test inventory is not presumed correct or necessary. Fable is
+explicitly authorized and expected to audit it aggressively. Every blocking
+test, script, mutation suite, target build, fixture check, and repeated
+debug/release invocation must justify its cost with a distinct, credible
+failure mode.
+
+Classify each current gate family as **keep**, **consolidate**, **move**, or
+**delete**:
+
+- delete obsolete tests and gates for retired or unreachable product surfaces;
+- delete byte/prose/ceremony checks that do not discriminate a product claim;
+- consolidate repeated tests that exercise the same code and failure mode;
+- remove redundant debug/release/target repetitions unless code generation or
+  conditional compilation gives them a distinct assertion;
+- reduce mutation matrices to the minimum representatives that prove the
+  validator catches each semantic class;
+- move valuable but non-merge-critical breadth to scheduled or manual runs;
+- keep blocking only the smallest representative tests needed to protect
+  correctness, realtime safety, deterministic behavior, supported targets,
+  package integrity, and release provenance; and
+- identify tests whose flakiness, global state, runtime, or maintenance cost is
+  greater than their demonstrated signal, then delete or redesign them.
+
+“It already exists” and “it once belonged to an issue” are not reasons to keep
+a test. Conversely, removal must name the stronger surviving check or explain
+why the asserted behavior is no longer a product requirement.
+
 The design should make the fastest correct route the default. It should answer:
 
 1. What measurable P50/P95 budgets should apply to first signal, routine PR
@@ -69,8 +99,9 @@ The design should make the fastest correct route the default. It should answer:
 3. How should the monolithic host job be sharded so independent gates run in
    parallel without hiding failures or introducing nondeterministic shared
    state?
-4. Which checks must run on every relevant PR, which may run after merge, which
-   belong only in nightly/manual qualification, and why?
+4. Which checks should be deleted or consolidated, which must run on every
+   relevant PR, which may run after merge, and which belong only in
+   nightly/manual qualification—and why?
 5. How can Rust, npm, browser, toolchain, and built-artifact caching reduce cold
    setup while remaining correct and resistant to cache poisoning from
    untrusted pull requests?
@@ -88,8 +119,10 @@ The design should make the fastest correct route the default. It should answer:
 
 ## Non-negotiable correctness and security constraints
 
-- Do not delete, skip, or weaken a merge-relevant gate merely to improve time.
-  If a gate is redundant, prove which stronger gate subsumes it before removal.
+- Remove every test that has no distinct, current, merge-relevant claim. Do not
+  weaken a necessary assertion merely to improve time; when deleting a
+  redundant assertion, name the stronger surviving check, and when deleting an
+  obsolete assertion, name the retired requirement.
 - Realtime allocation/syscall/lock rules, deterministic PCM/DSP fixtures,
   scalar/SIMD parity, PDC, browser targets, native targets, and package mutation
   tests remain real assertions.
@@ -121,16 +154,19 @@ Post a design comment containing:
    fixture, and mixed changes;
 3. the proposed sharding of every current blocking gate, including why each
    shard is safe to parallelize and its estimated duration;
-4. exact required-check and GitHub Actions skip/failure/rerun semantics;
-5. cache keys, restore/save rules, invalidation inputs, fork protections, and
+4. a gate-reduction ledger classifying each current test family as keep,
+   consolidate, move, or delete, with unique claim, measured cost, historical
+   signal/flakes, and the surviving protection for every removal;
+5. exact required-check and GitHub Actions skip/failure/rerun semantics;
+6. cache keys, restore/save rules, invalidation inputs, fork protections, and
    which artifacts are never reused as release evidence;
-6. latency and cost estimates derived from recent run evidence, with explicit
+7. latency and cost estimates derived from recent run evidence, with explicit
    P50/P95 acceptance budgets;
-7. a staged migration that keeps `main` protected at every step, including the
+8. a staged migration that keeps `main` protected at every step, including the
    branch-protection transition order and rollback plan;
-8. a validation plan that intentionally mutates path routing, cache inputs,
+9. a validation plan that intentionally mutates path routing, cache inputs,
    job failures, skipped jobs, and aggregate results; and
-9. a short list of bounded implementation issues in dependency order.
+10. a short list of bounded implementation issues in dependency order.
 
 Fable should call out any current gate whose purpose is unclear rather than
 guessing that it is redundant. The answer must distinguish queue/setup time
@@ -141,17 +177,19 @@ qualification.
 
 1. The comment recommends one architecture and accounts for every current
    blocking workflow/job family.
-2. Every proposed skip has a concrete input/dependency argument and a fail-safe
+2. The proposal removes all tests it cannot justify with a unique current
+   product claim and documents why each deletion or consolidation is safe.
+3. Every proposed skip has a concrete input/dependency argument and a fail-safe
    fallback.
-3. Required status checks always resolve to an explicit success or failure for
+4. Required status checks always resolve to an explicit success or failure for
    every pull request shape.
-4. The design includes a credible route to sub-ten-minute routine PR completion
+5. The design includes a credible route to sub-ten-minute routine PR completion
    and defines a separate bounded target for genuinely full-impact changes.
-5. Release artifact/provenance integrity and untrusted-PR isolation are not
+6. Release artifact/provenance integrity and untrusted-PR isolation are not
    weakened.
-6. Migration can be split into small issue-first checkpoints without a period
+7. Migration can be split into small issue-first checkpoints without a period
    in which `main` is less protected.
-7. Sol adversarially reviews Fable's proposal before any implementation issue
+8. Sol adversarially reviews Fable's proposal before any implementation issue
    is authorized.
 
 ## Scope
