@@ -32,6 +32,8 @@ RELEASE_PR_INPUTS = [
     "rust-toolchain.toml",
     "scripts/run-release-workspace-tests.sh",
     ".github/workflows/release-build.yml",
+    ".cargo/config.toml",
+    "scripts/check-release-shape.py",
 ]
 
 CANONICAL_ROUTE_JOB = """    name: classify qualification paths

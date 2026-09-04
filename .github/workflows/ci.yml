@@ -8,12 +8,14 @@ on:
       - '.github/ISSUE_SPECS/**'
       - 'docs/**'
       - 'README.md'
+      - 'dsp-research/**/*.md'
       - 'sdk/**'
       - 'scripts/check-sdk-deletions.py'
       - 'scripts/check-sdk-generated.sh'
       - 'scripts/check-sdk-headless.sh'
       - 'scripts/check-sdk-types.sh'
       - 'scripts/sdk-package.sh'
+      - 'scripts/test-sdk-artifact-builder-output-contract.sh'
   pull_request:
     branches:
       - main

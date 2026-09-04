@@ -8,6 +8,7 @@ on:
       - '.github/ISSUE_SPECS/**'
       - 'docs/**'
       - 'README.md'
+      - 'dsp-research/**/*.md'
   pull_request:
     branches:
       - main
