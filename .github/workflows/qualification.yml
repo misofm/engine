@@ -536,7 +536,7 @@ jobs:
       - name: Builtins fixture corpus audit
         run: bash scripts/check-builtins-fixtures.sh . target/release/audit
       - name: Standing console fixtures against the release session-validator
-        run: bash scripts/check-console-fixtures.sh target/release/session-validator
+        run: bash scripts/check-console-fixtures.sh target/release/session_validator
       # The release conformance-bench half of check-effect-contract.sh (design §6.2 split): lint
       # already ran its preconditions and factory-count grep without a binary.
       - name: Native effect runtime conformance bench
