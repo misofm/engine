@@ -2,6 +2,8 @@
 
 use std::collections::BTreeSet;
 
+use json_syntax::Parse as _;
+
 use crate::{DiagnosticPath, PathSegment};
 
 pub(crate) const MAXIMUM_JSON_DEPTH: usize = 128;
@@ -72,7 +74,11 @@ impl Scanner<'_> {
                 return Ok(());
             };
             let key_end = key_start + key_token.len();
-            let Ok(jstrict::Value::String(key)) = jstrict::parse::parse_str_value(key_token) else {
+            // json-syntax 0.12.5 has no fork-added skip-code-map fast path (`parse_str_value`);
+            // `String::parse_str` is the closest equivalent -- it parses just the string token
+            // and still builds a throwaway single-entry `CodeMap`, which this preflight scan
+            // discards immediately since it only needs the decoded key text.
+            let Ok((key, _code_map)) = json_syntax::String::parse_str(key_token) else {
                 return Ok(());
             };
             let key = key.to_string();

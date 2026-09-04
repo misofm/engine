@@ -12,10 +12,10 @@ use crate::{
     value::{F32Token, parse_f32_token},
 };
 use core::ops::Range;
-use jstrict::{CodeMap, Object, Parse, Value, array::JsonArray};
+use json_syntax::{CodeMap, Object, Parse, Value, array::JsonArray};
 fn code_span(code_map: &CodeMap, offset: usize) -> (usize, usize) {
     let span = code_map[offset].span;
-    (span.start, span.end)
+    (span.start(), span.end())
 }
 #[derive(Clone, Copy)]
 struct ValueRef<'v> {
