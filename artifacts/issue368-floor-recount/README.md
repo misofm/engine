@@ -18,3 +18,12 @@ floors plus an unrelated malformed measured field reject. It refuses overwrite.
 
 Attempt 1 (57a3f86c) received Astra FAIL for inconsistent cells, mixed historical/current
 authority, and missing runner, repricing and derivation evidence. Attempt 2 is the bounded repair.
+
+Attempt 2 (5a156c46) also received Astra FAIL: it used only the current library's `floor_shape`
+rather than full historical record and aggregate validators, and its inverted jq checks did not
+distinguish predicate rejection from execution errors. The final proof identifies the records'
+candidate revision `dc581f3470b40678301d9504f1be4b1fd6be7173`, first proves its unchanged
+validator pair and library accept the originals, and then changes only the compressor and limiter
+inventory constants in a temporary library copy. Both full validators accept the repriced copy.
+Explicit status checks prove stale floors and an unrelated measured-field mutation reject, valid
+records make each negative assertion fail, and broken jq programs report execution failure.

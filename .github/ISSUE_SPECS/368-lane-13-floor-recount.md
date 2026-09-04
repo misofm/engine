@@ -165,6 +165,28 @@ preflight also exposed and this tranche corrected its pre-existing repository-ro
 /tmp/engine-368-bench-test.log, /tmp/engine-368-validator.log, /tmp/engine-368-preflight.out and
 /tmp/engine-368-preflight.err.
 
+## Attempt 3 evidence record (2026-09-04)
+
+Astra's attempt-2 verdict was **FAIL** at `5a156c46`: the proof invoked only `floor_shape`, current
+full validators correctly rejected historical `.toml` schemas, and bare inverted jq commands could
+mask acceptance or execution errors. The synchronized applicability amendment authorized this
+final correction. Historical revision `dc581f3470b40678301d9504f1be4b1fd6be7173` supplies the exact
+library and full validator pair that accept all 46 original mono3 records. A temporary library copy
+changes only `compressor_lane_ops` 94 to 81.5 and `limiter_lane_ops` 138 to 129.5; its full record
+and aggregate gates accept the exactly-three-derived-field repricing. Stale originals and an
+unrelated measured-field mutation reject with exit 1; acceptance and broken-jq self-mutations prove
+the negative harness distinguishes valid input and execution errors. Original/repriced library
+SHA-256: `892e4e7c0810dba4f33121c00ceca8cd035f55119e38e2a433314b72d703baac` /
+`3984c3d4825a0a426bd0172e67b07b63b756097fcd0cc0a0b57ac201e562acc1`; record/aggregate validator
+SHA-256: `bfadf1b47e079246f86e7a6c676f466d48da720e9fbdd35a12b918e1dfc58162` /
+`d4160668c3947d7ee5d3b7522673342c64429e6cff47f87344ab71cfdc2556f5`.
+
+Focused proof PASS (`/tmp/engine-368-attempt3-repricing.out`); unchanged current-schema validator
+suite PASS with zero workload launches (`/tmp/engine-368-attempt3-current-validator.log`). Root's
+candidate workspace comparison at `5a156c46` passed 1546/0/24 versus baseline 1545/0/24, the one
+additional pass being the focused floor test (`/tmp/engine-368-workspace.log`). No timed workload
+has run; the fresh current-schema benchmark remains root-owned after Astra approval.
+
 ## Spec-state finding
 
 The local numbered-spec scan found no files for #366–#394, including #368's promised `.github/ISSUE_SPECS/368-lane-13-floor-recount.md`. Root reports all 172 existing numbered specs have matching remote issues. Before implementing #368, mirror its current remote body and this reconciled brief locally with exact issue number/title; synchronize the remote scope/role amendment. Do not manufacture new numbered issues for existing remote issues, edit other agents' active issue claims, or bundle unrelated historical spec restoration into this PR. Record remaining mirror debt as a bounded synchronization task.
