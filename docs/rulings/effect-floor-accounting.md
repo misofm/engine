@@ -173,18 +173,18 @@ says they should be counted: `fast_level_db` and `fast_gain_from_db` are the com
 level law, sealed by gate F1, and a floor that excluded them would be a floor for a different
 compressor.
 
-### Corroboration from the emitted code
+### Historical corroboration from the emitted code
 
-`objdump` of `compressor::kernel::process_block::<f32x8>` in the runner's own release
-build finds two loops: 858 instructions (the ramping body, with `advance_ramps` inlined) and **630
+The pre-#368 `objdump` capture of `compressor::kernel::process_block::<f32x8>` in the runner's
+release build found two loops: 858 instructions (the ramping body, with `advance_ramps` inlined) and **630
 instructions** for the idle body, which is one frame of both channels — 16 lane-samples. Its
 `vmulps` count is 44, or 22 per channel-frame, against the 22 multiplies the inventory above
-predicts; `vaddps` is 35, against 16.5 predicted plus the `exp2_int` and `frexp` biases. The
-inventory and the compiler agree about what the kernel computes.
+predicted before the recount; `vaddps` was 35, against 16.5 predicted plus the `exp2_int` and
+`frexp` biases. These are dated disassembly counts, not a fresh measurement of the current tree.
 
 They disagree about how much it costs to compute it, and that disagreement is the whole gap:
 
-| per channel-frame | instructions | against the 94-op floor |
+| per channel-frame | historical instructions | against the historical 94-op floor |
 |---|---:|---:|
 | vector ALU | 118 | historical +24 — old `bitselect` as `vandps`/`vandnps`/`vorps`; current `wide` lowers select to `vblendvps` |
 | `vbroadcastss` | 29 | +29 — constants re-splatted inside the loop; sixteen `ymm` registers is not enough to hold them |
@@ -494,7 +494,7 @@ route matrix and its share of the reduction whatever else it does or does not pr
 `sixty_four_track_console_half_mono` render `fixtures/session/v1/console-sixty-four-track-mono.toml`,
 which is the standing fixture with its source mapping and its upstream per-channel parameters
 symmetrised. They carry the whole intended strip and are costed at the whole intended strip's
-inventory — 352 lane-ops — because their fixture differs from the standing one in per-channel
+current inventory — 331 lane-ops — because their fixture differs from the standing one in per-channel
 *values* only, and a floor is an inventory of operations, not of operands.
 
 **One question is deliberately left open**, and it is left open here rather than answered quietly in
@@ -504,13 +504,13 @@ describes two. So the row's measured cost has fallen against an inventory that h
 %-of-floor now reads above what any stereo row can reach. Whether a collapsed row's floor *should*
 halve is a ruling this document still does not make: the honest candidates are "the spec requires the arithmetic
 of both channels and the collapse is an implementation that exploits their equality, so the floor
-stands at 352 and the row's %-of-floor rises above what a stereo row can reach", and "a lane-sample
+stands at 331 and the row's %-of-floor rises above what a stereo row can reach", and "a lane-sample
 whose value is determined by another lane-sample is not independent arithmetic, so the upstream half
 of the inventory halves". Both are defensible and they give different numbers for the same row. The
 rows exist now so that the question is asked against measurements; the pinned equality in
 `floor.rs`'s `the_mono_rows_carry_the_standing_strips_floor` is what makes answering it a deliberate
-edit rather than a table drift. This joins the #193 max/min re-pricing as open floor-accounting debt;
-today's pricing is unchanged by either.
+edit rather than a table drift. The mono-collapse decision remains open. The #193 max/min recount
+debt is closed by #368's current 331-op pricing and is no longer part of that question.
 
 ---
 
@@ -532,22 +532,23 @@ independently by `scripts/console-benchmark-record-lib.jq`, and carried in every
 
 ### The standing table
 
-`artifacts/issue184/`, commit `a1ef5f1`, controlled, AMD Ryzen 7 9700X pinned to cpu 15, exported
-core clock **5 455 548 845 Hz**. p50, minimum of the two measured rounds, as the round READMEs
-report it.
+The measurements below are from `artifacts/issue184/`, commit `a1ef5f1`, controlled, AMD Ryzen 7
+9700X pinned to cpu 15, exported core clock **5 455 548 845 Hz**. Their p50 and isolate columns are
+historical measurements (minimum of the two measured rounds); #368 retrospectively recomputes only
+the floor-derived columns against the current inventories. The sealed artifacts remain untouched.
 
 | row | p50 µs/block | measured cycles/lane-sample | floor | % of floor | isolate | isolated % of floor |
 |---|---:|---:|---:|---:|---:|---:|
 | console — the intended strip | 123.685 | 41.185 | 11.182 | 27.1 % | **13.918** *(limiter)* | **31.4 %** |
 | console, synthetic, 128 tracks | 246.258 | 41.000 | 11.182 | 27.3 % | — | — |
-| eq+compressor on simd1 | 81.816 | 27.243 | 6.807 | 25.0 % | 19.593 *(eq+comp)* | 25.0 % |
-| console legacy | 86.054 | 28.654 | 6.807 | 23.8 % | 21.051 *(eq+comp, split chains)* | 23.3 % |
+| eq+compressor on simd1 | 81.816 | 27.243 | 6.807 | 25.0 % | 19.593 *(eq+comp)* | 22.8 % |
+| console legacy | 86.054 | 28.654 | 6.807 | 23.8 % | 21.051 *(eq+comp, split chains)* | 21.3 % |
 | compressor only | 72.959 | 24.294 | 5.084 | 20.9 % | **16.691** *(compressor)* | **16.5 %** |
 | eq only | 37.942 | 12.634 | 4.054 | 32.1 % | **4.984** *(eq)* | **34.6 %** |
 | idle (silence) | 38.974 | 12.978 | 2.331 | **18.0 %** | — | — |
 | builtins only | 22.833 | 7.603 | 2.331 | 30.7 % | — | — |
 | dispatch only (identity) | 21.962 | 7.313 | 2.331 † | 31.9 % † | — | — |
-| nine-track ragged strip | 24.978 | 59.144 | 19.865 | 33.6 % | — | — |
+| nine-track ragged strip | 24.978 | 59.144 | 19.880 | 33.6 % | — | — |
 | nine-track eq fixture | 6.092 | 14.425 | *not derived* | — | — | — |
 
 **The four per-effect standings, which is what the directive asked for:**
@@ -839,8 +840,9 @@ question about the effect contract, not an optimisation.
 * **A backend with more vector registers.** 29 `vbroadcastss` per channel-frame in the compressor
   is a register-pressure artefact of `x86-64-v3`'s sixteen `ymm`. AVX-512's thirty-two would change
   that term and only that term.
-* **A compiler that forms `vblendvps` from `bitselect`.** Gap term 1 for every kernel with a select
-  in it disappears; the floor does not move, because the floor already assumed it.
+* **A regression away from the current `vblendvps` lowering.** #368 closed the old select gap:
+  current x86 `wide` forms `vblendvps`, while the floor already prices one select. A later lowering
+  change would reopen the emitted-code gap without changing the arithmetic inventory.
 * **A wasm cycle counter.** The wasm floor rule exists because there is none. If one appears, the
   wasm legs stop being wall-only and the residual factors become measurements of one thing rather
   than of a ratio of two.

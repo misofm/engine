@@ -147,6 +147,24 @@ Luna executes one coherent implementation pass and focused verification, then pa
 
 PR title starts LANE-13 and describes accounting. Include Summary, Rows closed, Gate output, Before/after (old/new inventories; no speed claim), Seen/not done, Skipped. Root closes #368 only after PASS and its evidence commit is upstream; then verifies CLOSED and posts #349's row/commit/outcome note. #349 remains an audit tracker, not authority for a cross-cutting cleanup branch.
 
+## Attempt 2 decision/evidence record (2026-09-04)
+
+Astra's attempt-1 verdict was **FAIL** at 57a3f86c: inconsistent derived cells,
+historical/current contradictions, and missing namespace, immutable repricing proof, validator
+negatives and source derivation. Sol attempt 2 retains 81.5/129.5/51/69 and corrects those findings.
+The minimal operator-preflight namespace arm is an explicit scope amendment needed to preflight the
+new runner namespace; it changes no preflight behavior. Durable evidence is under
+artifacts/issue368-floor-recount/. Full workspace and timed gates remain root-owned and unrun.
+
+Focused outcomes: historical repricing/equality/negative proof PASS (46 records; source SHA-256
+9bb03dbbfa33e502fe05c0724bbfe6bf45d704236e0c85177b3ef1d02961ebcb); cargo test -p bench PASS
+(30 passed); console validator mutation suite PASS with 0 workload launches; operator preflight
+PASS with 0 workload launches, one warmup configured and two measured rounds configured. The
+preflight also exposed and this tranche corrected its pre-existing repository-root resolution
+(scripts/operator needs ../..). Logs: /tmp/engine-368-repricing.log,
+/tmp/engine-368-bench-test.log, /tmp/engine-368-validator.log, /tmp/engine-368-preflight.out and
+/tmp/engine-368-preflight.err.
+
 ## Spec-state finding
 
 The local numbered-spec scan found no files for #366–#394, including #368's promised `.github/ISSUE_SPECS/368-lane-13-floor-recount.md`. Root reports all 172 existing numbered specs have matching remote issues. Before implementing #368, mirror its current remote body and this reconciled brief locally with exact issue number/title; synchronize the remote scope/role amendment. Do not manufacture new numbered issues for existing remote issues, edit other agents' active issue claims, or bundle unrelated historical spec restoration into this PR. Record remaining mirror debt as a bounded synchronization task.
