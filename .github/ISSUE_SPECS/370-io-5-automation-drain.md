@@ -166,3 +166,15 @@ Root must create the missing `.github/ISSUE_SPECS/370-io-5-automation-drain.md` 
 - Luna gets one coherent pass, then pauses at exact-path checkpoint notification. Root commits that result promptly; no second tranche while it waits. Astra reviews the actual PR before merge. If Luna fails, Sol gets at most two implementation attempts with one Astra verdict each. Three failed attempts triggers a rescope, never weakened gates.
 - PR title starts IO-5 and says docs. State plainly that sample-timed protocol batches still do not render and that the actual live effect lane uses block-boundary point delivery. Do not claim this closes the drain feature. After upstream evidence and Astra PASS, root merges, verifies #370 CLOSED, and synchronizes #349 with row, merge hash and docs-only outcome. Remove claim on a recorded null if the premise was already corrected by another agent.
 
+
+## Execution evidence — Luna attempt 1 (2026-09-04)
+
+Implementation checkpoint `f2dcfc15` changes only the three specified documentation locations. Pre/post searches confirm exactly two `LateAutomation` references (enum and decoder) and no production render-side automation drain. No executable Rust or protocol shape changed.
+
+- `cargo test -p protocol`: PASS, 132 passed, 0 failed.
+- `cargo doc -p protocol --no-deps`: PASS, no warnings.
+- `cargo test --workspace`: baseline `87926988` and candidate `f2dcfc15` both PASS, 1545 passed, 0 failed, 24 ignored; test-count delta 0.
+- `cargo fmt --all -- --check` and `git diff --check`: PASS.
+- Logs retained at `/tmp/engine-370-{precheck,postcheck,cargo-test,cargo-doc,workspace,fmt}.log`; baseline `/tmp/engine-368-baseline.log`.
+
+Astra PR review and required remote qualification remain pending. This evidence proves documentation accuracy only; the separate drain feature remains deferred.
