@@ -23,7 +23,13 @@ on:
 
 concurrency:
   group: qualification-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  # S9: cancelling a main push here (cancel-in-progress: true, unconditionally) races the next
+  # main push's superseding run against every rust-cache's `save-if: github.ref == main` post
+  # step. A push run cancelled mid-cache-save writes nothing, so under frequent merges to main the
+  # caches every PR depends on may never be written. PR runs still want unconditional cancellation
+  # (a superseded PR run's work is worthless the moment a new commit lands), so cancel only on
+  # pull_request; a main push always runs to completion and its caches always save.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read

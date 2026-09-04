@@ -517,11 +517,15 @@ def check_qualification_verdict_permissions(text: str) -> None:
 
 
 def check_qualification_concurrency(text: str) -> None:
-    """S9: a superseded run must still be cancellable, or `qualification-<ref>`'s per-ref
-    concurrency group leaves stale runs occupying the required context indefinitely."""
+    """S9: a superseded PR run must still be cancellable, but an unconditional
+    `cancel-in-progress: true` also cancels a main push's own successor before its
+    `save-if: github.ref == main` rust-cache post steps run, so under frequent merges the caches
+    every PR depends on may never be written. Exactly this expression -- cancel only on
+    pull_request, never on a main push -- is required, not merely the key's presence."""
     concurrency_block = section(text, "concurrency:", ("permissions:",))
-    require("cancel-in-progress:" in concurrency_block,
-            "qualification.yml: concurrency must declare cancel-in-progress")
+    require("cancel-in-progress: ${{ github.event_name == 'pull_request' }}" in concurrency_block,
+            "qualification.yml: concurrency must cancel pull_request runs only, "
+            "never a main push")
 
 
 def check_qualification_release_shape_guard(text: str) -> None:

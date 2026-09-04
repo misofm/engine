@@ -697,9 +697,14 @@ def main() -> int:
     )  # the verdict's permissions must stay exactly actions: read plus contents: read
     workflow_mutation_fails(
         "qualification.yml",
-        "  cancel-in-progress: true\n",
+        "  cancel-in-progress: ${{ github.event_name == 'pull_request' }}\n",
         "",
-    )  # a superseded run must still be cancellable, or stale runs occupy the required context
+    )  # dropping the pull_request-only cancellation lets a main push starve its own cache saves
+    workflow_mutation_fails(
+        "qualification.yml",
+        "  cancel-in-progress: ${{ github.event_name == 'pull_request' }}\n",
+        "  cancel-in-progress: true\n",
+    )  # reverting to unconditional cancellation is exactly the regression S9 forbids
 
     # This precondition (baseline copied-workflow checker succeeds before the mutation) is the
     # one assertion in this file that depends on .github/workflows/*.yml already carrying the
