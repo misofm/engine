@@ -26,6 +26,56 @@ sole_owner() {
     }
 }
 
+# Like `sole_owner`, but a function outside `owner` matching `def_pattern` is not itself a
+# violation if its whole body (brace-depth tracked from the definition line) calls the shared
+# `escape(`: a one-line `format!("\"{}\"", escape(value))` wrapper is a caller, not a second
+# escaper. A function whose body never calls `escape(` -- the original defect this rule targets,
+# `vectorization.rs`'s `json_string` before this issue -- still fails.
+sole_owner_or_delegate() {
+    local label=$1 owner=$2 def_pattern=$3
+    grep -qE "$def_pattern" "$owner" 2>/dev/null || fail "$label (the shared definition in $owner is gone)"
+    local matches offenders=()
+    matches="$(grep -rlE "$def_pattern" tools --include='*.rs' 2>/dev/null | LC_ALL=C sort || true)"
+    local file awk_pattern="${def_pattern//\\/\\\\}"
+    while IFS= read -r file; do
+        [[ -z "$file" || "$file" == "$owner" ]] && continue
+        if [[ "$(awk -v pat="$awk_pattern" '
+            # The definition line itself is never checked for a delegating call: a function named
+            # `json_escape` spells "escape(" in its own signature, which is not a call to anything.
+            !in_fn && $0 ~ pat {
+                in_fn = 1
+                depth = gsub(/\{/, "{") - gsub(/\}/, "}")
+                next
+            }
+            in_fn {
+                if ($0 ~ /::escape\(|[^a-zA-Z0-9_]escape\(/) delegates = 1
+                depth += gsub(/\{/, "{") - gsub(/\}/, "}")
+                if (depth <= 0) { print (delegates ? "delegate" : "own"); in_fn = 0; delegates = 0 }
+            }
+        ' "$file")" == *own* ]]; then
+            offenders+=("$file")
+        fi
+    done <<<"$matches"
+    ((${#offenders[@]} == 0)) || {
+        printf 'expected only %s (or a wrapper whose body calls escape())\noffenders:\n%s\n' \
+            "$owner" "$(printf '%s\n' "${offenders[@]}")" >&2
+        fail "$label"
+    }
+}
+
+# Unlike `sole_owner`, this one names nothing that is allowed to hold the pattern: `bench-support`
+# hashes through the `sha2` crate, not a hand-rolled round-constant table, so the pattern below
+# must appear nowhere at all under `tools/`.
+forbidden_under_tools() {
+    local label=$1 pattern=$2
+    local found
+    found="$(grep -rlE "$pattern" tools --include='*.rs' 2>/dev/null | LC_ALL=C sort || true)"
+    [[ -z "$found" ]] || {
+        printf 'found:\n%s\n' "$found" >&2
+        fail "$label"
+    }
+}
+
 support=tools/bench-support
 [[ -d "$support" ]] || fail "missing the shared harness: $support"
 
@@ -33,12 +83,14 @@ sole_owner 'the audited allocator has more than one implementation' \
     "$support/src/alloc.rs" '^unsafe impl GlobalAlloc'
 sole_owner 'more than one global allocator is registered under tools/' \
     "$support/src/alloc.rs" '^#\[global_allocator\]'
-sole_owner 'the JSON string escaper has more than one implementation' \
-    "$support/src/json.rs" '^(pub )?fn (json_)?escape\('
+sole_owner_or_delegate 'the JSON string escaper has more than one implementation' \
+    "$support/src/json.rs" '^(pub )?fn (json_(escape|string|quote)|escape)\('
 sole_owner 'the nearest-rank percentile has more than one implementation' \
     "$support/src/stats.rs" '^(pub )?fn (percentile|nearest_rank|per_mille|percentile_nearest_rank)'
 sole_owner 'the counted SHA-256 sink has more than one implementation' \
     "$support/src/digest.rs" '^(pub )?struct Sha256Sink'
+forbidden_under_tools 'a private SHA-256 round-constant table reappeared under tools/' \
+    '0x6a09_?e667|const K: ?\[u32; ?64\]'
 
 # Subjects converted to the shared timer (#104 F1, made structural). `timing::timed` samples the
 # digest sink's update counter on both sides of the clock and panics if the timed body hashed

@@ -42,6 +42,29 @@ printf '\nfn json_escape(value: &str) -> String {\n    value.to_owned()\n}\n' \
     >>"$case_root/tools/bench/src/conformance.rs"
 expect_failure second-escaper
 
+# #380: the widened escaper pattern also has to catch a `json_string`/`json_quote`-named
+# reimplementation, not just `escape`/`json_escape` -- this is the exact shape
+# `tools/audit/src/vectorization.rs`'s `json_string` had before this issue removed it.
+new_case second-json-string-name
+printf '\nfn json_string(value: &str) -> String {\n    value.replace('"'"'\\\\'"'"', "\\\\\\\\")\n}\n' \
+    >>"$case_root/tools/bench/src/conformance.rs"
+expect_failure second-json-string-name
+
+# A local wrapper that only calls the shared `escape` is not the defect (`tools/bench/src/builtins.rs`
+# and `tools/bench/src/effect_interchange.rs` both carry one); the baseline case above already
+# proves that shape stays green.
+
+# #380: the private SHA-256 round-constant table `tools/bench/src/session.rs` used to carry.
+new_case second-sha256-round-constant
+printf '\nconst K: [u32; 64] = [0; 64];\n' \
+    >>"$case_root/tools/bench/src/conformance.rs"
+expect_failure second-sha256-round-constant
+
+new_case second-sha256-initial-constant
+printf '\nconst INITIAL: u32 = 0x6a09_e667;\n' \
+    >>"$case_root/tools/bench/src/conformance.rs"
+expect_failure second-sha256-initial-constant
+
 new_case second-percentile
 printf '\nfn percentile(sorted: &[u64], p: usize) -> u64 {\n    sorted[p]\n}\n' \
     >>"$case_root/tools/bench/src/graph.rs"
