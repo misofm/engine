@@ -154,7 +154,7 @@ fn buffer_pointer(host: &mut AudioWorkletEngineHost, kind: u32) -> *mut u8 {
 fn buffer_capacity(host: &AudioWorkletEngineHost, kind: u32) -> u32 {
     let resources = host.resources();
     let bytes = match kind {
-        BUFFER_SOURCE_ID => resources.source_id_bytes,
+        BUFFER_SOURCE_ID => resources.id_staging_bytes,
         BUFFER_SOURCE_PCM => resources.source_pcm_staging_bytes,
         BUFFER_DIAGNOSTIC => resources.diagnostic_bytes,
         BUFFER_OUTPUT_PCM => resources.output_pcm_bytes,
@@ -489,11 +489,10 @@ pub extern "C" fn miso_engine_web_v1_console_track_count(handle: u32) -> u32 {
     })
 }
 
-/// Copy one canonical track ID into the source-ID staging buffer; returns its byte length.
+/// Copy one canonical track ID into the ID staging buffer; returns its byte length.
 ///
-/// Zero means "no such track" or "the ID does not fit the staged buffer": the caller reads the
-/// bytes out of [`BUFFER_SOURCE_ID`], which preparation already sized for the longest ID in the
-/// session, and a session whose IDs did not fit was refused at compilation.
+/// Zero means "no such track". The caller reads the bytes out of [`BUFFER_SOURCE_ID`], which
+/// preparation already sized for the longest source or track ID in the session.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_console_track_id(handle: u32, index: u32) -> u32 {
     with_host_mut(handle, 0, |host| host.copy_console_track_id(index))
@@ -528,11 +527,10 @@ pub extern "C" fn miso_engine_web_v1_source_count(handle: u32) -> u32 {
     })
 }
 
-/// Copy one canonical source ID into the source-ID staging buffer; returns its byte length.
+/// Copy one canonical source ID into the ID staging buffer; returns its byte length.
 ///
-/// Zero means "no such source". Unlike [`miso_engine_web_v1_console_track_id`] it cannot also mean
-/// "the ID does not fit": compilation refuses a session whose source IDs exceed
-/// [`BUFFER_SOURCE_ID`], which is what that buffer is sized for.
+/// Zero means "no such source". [`BUFFER_SOURCE_ID`] is sized for the longest source or track ID
+/// in the compiled session.
 #[unsafe(no_mangle)]
 pub extern "C" fn miso_engine_web_v1_source_id(handle: u32, index: u32) -> u32 {
     with_host_mut(handle, 0, |host| host.copy_session_source_id(index))

@@ -29,7 +29,7 @@ const BUFFER_METER_FRAME = 7;
 const METER_HEADER_BYTES = 64;
 const OBSERVATION_WINDOW_BLOCKS = 2;
 const RESOURCE_NAMES = [
-  "optionsBytes", "statusBytes", "sessionDocumentBytes", "diagnosticBytes", "sourceIdBytes",
+  "optionsBytes", "statusBytes", "sessionDocumentBytes", "diagnosticBytes", "idStagingBytes",
   "sourcePcmStagingBytes", "outputPcmBytes", "bridgeMetadataBytes", "bridgeRetainedBytes",
   "largestBridgeAllocationBytes", "sourceTotalBytes", "sourceOverheadBytes",
   "effectScalarStateBytes", "effectScalarScratchBytes", "builtinRetainedBytes",

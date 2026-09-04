@@ -543,7 +543,7 @@ export interface MisoWebResourceReport {
   readonly statusBytes: bigint;
   readonly sessionDocumentBytes: bigint;
   readonly diagnosticBytes: bigint;
-  readonly sourceIdBytes: bigint;
+  readonly idStagingBytes: bigint;
   readonly sourcePcmStagingBytes: bigint;
   readonly outputPcmBytes: bigint;
   readonly bridgeMetadataBytes: bigint;

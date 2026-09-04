@@ -232,7 +232,7 @@ export const ABI_LAYOUT = deepFreeze(
           "type": "u64"
         },
         {
-          "name": "sourceIdBytes",
+          "name": "idStagingBytes",
           "offset": 64,
           "type": "u64"
         },

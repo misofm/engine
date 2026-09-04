@@ -112,7 +112,7 @@ TARGET_INDEPENDENT = frozenset(
         "statusBytes",
         "sessionDocumentBytes",
         "diagnosticBytes",
-        "sourceIdBytes",
+        "idStagingBytes",
         "sourcePcmStagingBytes",
         "outputPcmBytes",
         "largestBridgeAllocationBytes",

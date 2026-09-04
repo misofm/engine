@@ -157,7 +157,7 @@ function validCommand(command) {
 }
 const RESOURCE_FIELDS = [
   "sampleRateHz", "quantumFrames", "backend", "optionsBytes", "statusBytes", "sessionDocumentBytes",
-  "diagnosticBytes", "sourceIdBytes", "sourcePcmStagingBytes", "outputPcmBytes",
+  "diagnosticBytes", "idStagingBytes", "sourcePcmStagingBytes", "outputPcmBytes",
   "bridgeMetadataBytes", "bridgeRetainedBytes", "largestBridgeAllocationBytes",
   "sourceTotalBytes", "sourceOverheadBytes", "effectScalarStateBytes", "effectScalarScratchBytes",
   "builtinRetainedBytes", "graphSessionPlusPlanBytes", "graphIncrementalPlanBytes",

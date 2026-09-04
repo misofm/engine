@@ -41,7 +41,7 @@ fn main() {
         ("statusBytes", report.status_bytes),
         ("sessionDocumentBytes", report.session_document_bytes),
         ("diagnosticBytes", report.diagnostic_bytes),
-        ("sourceIdBytes", report.source_id_bytes),
+        ("idStagingBytes", report.id_staging_bytes),
         ("sourcePcmStagingBytes", report.source_pcm_staging_bytes),
         ("outputPcmBytes", report.output_pcm_bytes),
         ("bridgeMetadataBytes", report.bridge_metadata_bytes),

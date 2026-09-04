@@ -76,7 +76,7 @@
         { "name": "statusBytes", "offset": 40, "type": "u64" },
         { "name": "sessionDocumentBytes", "offset": 48, "type": "u64" },
         { "name": "diagnosticBytes", "offset": 56, "type": "u64" },
-        { "name": "sourceIdBytes", "offset": 64, "type": "u64" },
+        { "name": "idStagingBytes", "offset": 64, "type": "u64" },
         { "name": "sourcePcmStagingBytes", "offset": 72, "type": "u64" },
         { "name": "outputPcmBytes", "offset": 80, "type": "u64" },
         { "name": "bridgeMetadataBytes", "offset": 88, "type": "u64" },

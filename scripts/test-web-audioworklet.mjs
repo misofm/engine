@@ -31,7 +31,7 @@ function resourceReport(backend, quantumFrames) {
     statusBytes: 1n,
     sessionDocumentBytes: 1n,
     diagnosticBytes: 1n,
-    sourceIdBytes: 1n,
+    idStagingBytes: 1n,
     sourcePcmStagingBytes: 1n,
     outputPcmBytes: 1n,
     bridgeMetadataBytes: 1n,

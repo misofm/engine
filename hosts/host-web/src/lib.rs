@@ -480,8 +480,8 @@ pub struct WebResourceReport {
     pub session_document_bytes: u64,
     /// Diagnostic bytes.
     pub diagnostic_bytes: u64,
-    /// Source-ID staging bytes.
-    pub source_id_bytes: u64,
+    /// Source/track-ID staging bytes.
+    pub id_staging_bytes: u64,
     /// Source PCM staging bytes.
     pub source_pcm_staging_bytes: u64,
     /// Output PCM bytes.
@@ -829,7 +829,9 @@ impl AudioWorkletEngineHost {
             shape.sample_rate_hz,
             shape.quantum_frames,
             shape.maximum_source_channels,
-            shape.longest_source_id_bytes,
+            shape
+                .longest_source_id_bytes
+                .max(shape.longest_track_id_bytes),
             options,
         )?;
         let retained_projection = projected_retained_bytes(
@@ -1088,7 +1090,7 @@ impl AudioWorkletEngineHost {
             .is_some_and(|ready| !ready.controls.is_empty())
     }
 
-    /// Copy one canonical console track ID into source-ID staging; returns its byte length.
+    /// Copy one canonical console track ID into ID staging; returns its byte length.
     pub(crate) fn copy_console_track_id(&mut self, index: u32) -> u32 {
         let Some(ready) = self.ready.as_ref() else {
             return 0;
@@ -1096,23 +1098,10 @@ impl AudioWorkletEngineHost {
         let Some(id) = ready.tracks.get(index as usize) else {
             return 0;
         };
-        let bytes = id.as_bytes();
-        let length = bytes.len();
-        let Some(buffers) = self.buffers.as_mut() else {
-            return 0;
-        };
-        let Some(target) = buffers.source_id.get_mut(..length) else {
-            return 0;
-        };
-        target.copy_from_slice(bytes);
-        u32::try_from(length).unwrap_or(0)
+        Self::copy_id_into_staging(self.buffers.as_mut(), id.as_bytes())
     }
 
-    /// Copy one canonical source ID into source-ID staging; returns its byte length (issue #207).
-    ///
-    /// The twin of [`AudioWorkletEngineHost::copy_console_track_id`], and it cannot fail on
-    /// capacity the way that one can: `compile_ready` refuses `web.source.id.capacity` unless
-    /// every source ID fits this exact buffer, so the only zero this returns is "no such source".
+    /// Copy one canonical source ID into ID staging; returns its byte length (issue #207).
     pub(crate) fn copy_session_source_id(&mut self, index: u32) -> u32 {
         let Some(ready) = self.ready.as_ref() else {
             return 0;
@@ -1120,16 +1109,18 @@ impl AudioWorkletEngineHost {
         let Some(source) = ready.session.normalized_model().sources.get(index as usize) else {
             return 0;
         };
-        let bytes = source.id.as_str().as_bytes();
+        Self::copy_id_into_staging(self.buffers.as_mut(), source.id.as_str().as_bytes())
+    }
+
+    fn copy_id_into_staging(buffers: Option<&mut PreparedBuffers>, bytes: &[u8]) -> u32 {
         let length = bytes.len();
-        let Some(buffers) = self.buffers.as_mut() else {
-            return 0;
-        };
-        let Some(target) = buffers.source_id.get_mut(..length) else {
-            return 0;
-        };
-        target.copy_from_slice(bytes);
-        u32::try_from(length).unwrap_or(0)
+        let buffers = buffers.expect("a ready host owns its staging buffers");
+        debug_assert!(
+            length <= buffers.source_id.len(),
+            "compiled ID exceeds its projected staging capacity"
+        );
+        buffers.source_id[..length].copy_from_slice(bytes);
+        u32::try_from(length).expect("ID staging capacity is representable as u32")
     }
 
     pub(crate) fn diagnostic_buffer_mut(&mut self) -> Option<&mut [u8]> {
@@ -2260,7 +2251,7 @@ const fn empty_resource_report(backend: u32) -> WebResourceReport {
         status_bytes: size_of::<WebStatus>() as u64,
         session_document_bytes: 0,
         diagnostic_bytes: 0,
-        source_id_bytes: 0,
+        id_staging_bytes: 0,
         source_pcm_staging_bytes: 0,
         output_pcm_bytes: 0,
         bridge_metadata_bytes: 0,
@@ -2369,7 +2360,7 @@ fn project_buffers(
     sample_rate_hz: u32,
     quantum_frames: u32,
     maximum_source_channels: u32,
-    longest_source_id_bytes: u64,
+    id_staging_bytes: u64,
     options: WebBootOptions,
 ) -> Result<PreparedBufferProjection, BootFailure> {
     let arithmetic = || BootFailure::fixed(RESULT_REFUSED_BUDGET, "host.budget.arithmetic");
@@ -2404,7 +2395,7 @@ fn project_buffers(
         u64::from(STATUS_BYTES),
         u64::from(document_bytes),
         u64::from(DIAGNOSTIC_BYTES),
-        longest_source_id_bytes,
+        id_staging_bytes,
         source_pcm_bytes,
         output_pcm_bytes,
         command_bytes,
@@ -2424,7 +2415,7 @@ fn project_buffers(
     report.quantum_frames = quantum_frames;
     report.session_document_bytes = u64::from(document_bytes);
     report.diagnostic_bytes = u64::from(DIAGNOSTIC_BYTES);
-    report.source_id_bytes = longest_source_id_bytes;
+    report.id_staging_bytes = id_staging_bytes;
     report.source_pcm_staging_bytes = source_pcm_bytes;
     report.output_pcm_bytes = output_pcm_bytes;
     report.bridge_metadata_bytes = bridge_metadata;
@@ -2443,7 +2434,7 @@ fn allocate_buffers(projection: PreparedBufferProjection) -> Result<PreparedBuff
     Ok(PreparedBuffers {
         diagnostic: boxed_zero_u8(DIAGNOSTIC_BYTES).map_err(allocation)?,
         source_id: boxed_zero_u8(
-            u32::try_from(projection.report.source_id_bytes)
+            u32::try_from(projection.report.id_staging_bytes)
                 .map_err(|_| BootFailure::fixed(RESULT_REFUSED_BUDGET, "web.resource.platform"))?,
         )
         .map_err(allocation)?,

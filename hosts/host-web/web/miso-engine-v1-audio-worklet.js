@@ -472,7 +472,7 @@ class MisoEngineAudioWorkletProcessor extends AudioWorkletProcessor {
       throw new RangeError("Invalid resource report");
     }
     const names = [
-      "optionsBytes", "statusBytes", "sessionDocumentBytes", "diagnosticBytes", "sourceIdBytes",
+      "optionsBytes", "statusBytes", "sessionDocumentBytes", "diagnosticBytes", "idStagingBytes",
       "sourcePcmStagingBytes", "outputPcmBytes", "bridgeMetadataBytes", "bridgeRetainedBytes",
       "largestBridgeAllocationBytes", "sourceTotalBytes", "sourceOverheadBytes",
       "effectScalarStateBytes", "effectScalarScratchBytes", "builtinRetainedBytes",
