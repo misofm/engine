@@ -586,6 +586,33 @@ def main() -> int:
         "  cancel-in-progress: true\n",
     )  # reverting to unconditional cancellation is exactly the regression S9 forbids
 
+    # Stage-3 review S1/S2: the route job's self-validation step, its ordering, fetch-depth, the
+    # SDK closure and the canonical workspace-policy step are pinned on the surviving workflow.
+    workflow_mutation_fails(
+        "qualification.yml",
+        "      - name: Validate path-routing policy and mutations\n"
+        "        run: |\n"
+        "          python3 -B scripts/check-ci-path-routing.py\n"
+        "          python3 -B scripts/test-ci-path-routing.py\n",
+        "",
+    )
+    workflow_mutation_fails("qualification.yml", "          fetch-depth: 0\n", "          fetch-depth: 1\n")
+    workflow_mutation_fails(
+        "qualification.yml",
+        "          bash scripts/check-sdk-headless.sh target/ci/qualification-artifacts\n",
+        "",
+    )
+    workflow_mutation_fails(
+        "qualification.yml",
+        "          bash scripts/sdk-package.sh check target/ci/qualification-artifacts\n",
+        "",
+    )
+    workflow_mutation_fails(
+        "qualification.yml",
+        "        run: bash scripts/check-workspace-policy.sh\n",
+        "        run: true\n",
+    )
+
     # Baseline: the unmutated workspace() -- qualification.yml plus the router/checker/test
     # scripts, with none of the four retired workflows present -- must pass the checker outright.
     # Every workflow_mutation_fails/checker_fails call above depends on this holding; if it ever
