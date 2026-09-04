@@ -271,14 +271,16 @@ jobs:
         run: |
           bash scripts/check-console-benchmark-fixture.sh
           bash scripts/check-rack-benchmark-fixture.sh
-      # check-console-fixtures.sh and check-builtins-fixtures.sh split (design §6.2): the
-      # manifest-only half (no binary argument) is hermetic and belongs here; audit-native runs
-      # them again with the release audit/session-validator binaries for the full audit half.
-      - name: Standing console and builtins fixture manifests
-        run: |
-          bash scripts/check-console-fixtures.sh
-          bash scripts/check-builtins-fixtures.sh .
-          bash scripts/test-builtins-fixtures.sh
+      # check-console-fixtures.sh and check-builtins-fixtures.sh (S1/S2): neither script has a
+      # hermetic no-binary mode -- with no binary argument, check-console-fixtures.sh's
+      # derive-intended-console-fixture.py falls back to `cargo run -q -p session-validator`
+      # (debug) and check-builtins-fixtures.sh unconditionally falls back to
+      # `cargo run --bin audit` whenever tools/audit exists on disk (it always does), so a bare
+      # call here is a hidden debug cargo build, not a manifest-only check. Both invocations moved
+      # entirely to audit-native, which already runs them a second time with the prebuilt release
+      # binaries; only the hermetic mutation-test suite stays here.
+      - name: Standing builtins fixture manifest mutation tests
+        run: bash scripts/test-builtins-fixtures.sh
       - name: Wasm console benchmark validator mutation tests
         run: bash scripts/test-wasm-console-benchmark.sh
       # test-builtins-benchmark.sh and test-graph-benchmark.sh moved to nightly's
@@ -336,11 +338,13 @@ jobs:
         run: |
           bash scripts/check-effect-interchange-qualification.sh
           bash scripts/test-effect-interchange-policy.sh
-      # check-effect-contract.sh's preconditions and factory-count grep, without a bench binary:
-      # the release conformance-bench half runs in audit-native once the binary exists (design
-      # §6.2 split).
-      - name: Native effect runtime contract preconditions
-        run: bash scripts/check-effect-contract.sh
+      # check-effect-contract.sh has no hermetic no-binary mode either (S1): with no bench binary
+      # argument it falls back to `cargo run --locked --release -q -p bench`, a full release build
+      # inside the lint shard, and it re-runs the effect-runtime-policy/fixtures checks the
+      # "Effect runtime dependency-boundary and fixture policy and mutation tests" step above
+      # already ran. audit-native runs the whole script (preconditions, factory-count grep, and
+      # the bench conformance record) once, with the prebuilt release bench binary; nothing here
+      # is lost by removing the bare call.
       - name: Native PCM runner static seal and mutation tests
         run: |
           bash scripts/check-native-pcm-runner.sh
