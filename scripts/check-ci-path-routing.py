@@ -156,7 +156,7 @@ def check_mapping_structure(text: str, workflow: str, title: str, jobs: list[str
         line for line in text.splitlines()
         if line and not line[0].isspace() and not line.startswith("#")
     ]
-    require(top_level == [f"name: {title}", "on:", "concurrency:", "env:", "jobs:"],
+    require(top_level == [f"name: {title}", "on:", "concurrency:", "permissions:", "env:", "jobs:"],
             f"{workflow}: top-level mapping structure must be exact and unique")
     jobs_block = section(text, "jobs:", ())
     job_headers = [
