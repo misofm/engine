@@ -243,3 +243,14 @@ enginectl, browser, CI, fixture, documentation, and release dependencies.
   metadata/lock green, a `package =` alias, and a lock entry; each must name
   the retired identity. CI runs both after its pinned Rust toolchain
   installation.
+
+## Final Sol verdict: PASS
+
+Sol-high adversarial review verified the complete live FLAC delivery-stack
+removal, preserved generic PCM/session/browser/OPFS/ring/resolver primitives,
+deletion-only lock reconciliation (0 additions, 173 deletions), unchanged
+sealed Engine Wasm digest, request-mode CLI compatibility/failure ordering, the
+65-file Engine-only npm archive and its mutations, retained browser/CI Engine
+gates, and synchronized Engine-only release authority in #357. The macOS GNU
+`find`/`sed` wrapper limitations reproduce outside this change and are not a
+#356 product regression.
