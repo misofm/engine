@@ -26,6 +26,12 @@ pub(crate) struct SharedPlanState {
     pub(crate) render_peak_observed: AtomicBool,
 }
 
+impl host_core::PlanSampleSource for SharedPlanState {
+    fn next_absolute_sample(&self) -> u64 {
+        self.render_sample.load(Ordering::Acquire)
+    }
+}
+
 pub(crate) fn active_resources(shared: &SharedPlanState) -> PlanResourceReport {
     let active = shared.active_epoch.load(Ordering::Acquire);
     shared

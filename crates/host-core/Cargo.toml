@@ -22,6 +22,7 @@ graph-compiler.workspace = true
 # The lane crate is already in every host's link graph; naming it here is what lets the facade own
 # the one started-session handle instead of each host re-deriving the pin.
 lane.workspace = true
+protocol.workspace = true
 session.workspace = true
 source.workspace = true
 

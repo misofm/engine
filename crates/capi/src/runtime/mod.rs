@@ -27,12 +27,12 @@ pub(crate) use engine::realtime::{
 };
 pub(crate) use host_core::SourceSubmission;
 pub(crate) use host_core::{
-    HostPrepareCaps, HostShapePolicy, PrepareDiagnostics, SourceControlError, SourceControlSet,
-    parse_host_session, prepare_host_runtime,
+    HostPrepareCaps, HostShapePolicy, PrepareDiagnostics, SessionControlProvider,
+    SourceControlError, SourceControlSet, parse_host_session, prepare_host_runtime,
 };
 pub(crate) use protocol::{
     CommandFrameProcessError, ControllerRetainedCapacity, DecodeScratch, EncodeError,
-    EventEgressError, MockProvider, PreparedCommandFrame, ProtocolCodec, ProtocolController,
+    EventEgressError, PreparedCommandFrame, ProtocolCodec, ProtocolController,
     ProtocolControllerConfig, ProtocolLimits, ProtocolQueueConfig, ProtocolQueues,
     ProviderFeatures, ReplayCache, ReplayCacheConfig, SessionStore,
 };

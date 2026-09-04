@@ -193,11 +193,11 @@ pub(crate) struct SessionState {
 }
 
 pub(crate) struct ObservedController {
-    pub(crate) inner: ProtocolController<MockProvider>,
+    pub(crate) inner: ProtocolController<SessionControlProvider>,
 }
 
 impl ObservedController {
-    pub(crate) fn new(inner: ProtocolController<MockProvider>) -> Self {
+    pub(crate) fn new(inner: ProtocolController<SessionControlProvider>) -> Self {
         #[cfg(test)]
         update_test_owners(|owners| owners.replay_current_constructed += 1);
         Self { inner }
@@ -205,7 +205,7 @@ impl ObservedController {
 }
 
 impl core::ops::Deref for ObservedController {
-    type Target = ProtocolController<MockProvider>;
+    type Target = ProtocolController<SessionControlProvider>;
 
     fn deref(&self) -> &Self::Target {
         &self.inner
@@ -506,6 +506,9 @@ impl SessionState {
         slot.protocol_events_before = protocol_events_before;
         slot.reservation = Some(reservation);
         slot.occupied = true;
+        self.controller
+            .provider_mut()
+            .set_render_diagnostic(tail, sample, sequence, true);
         self.render_diagnostic_len += 1;
     }
 
@@ -664,6 +667,10 @@ impl SessionState {
     ) -> Result<usize, CommandError> {
         self.synchronize_plan_epochs()?;
         self.collect_render_activity();
+        let telemetry_counters = self.controller.queues().telemetry_counters();
+        self.controller
+            .provider_mut()
+            .set_telemetry_counters(telemetry_counters);
         let output_capacity = usize::try_from(output_capacity).unwrap_or(usize::MAX);
         let prepared = self
             .controller
@@ -700,6 +707,10 @@ impl SessionState {
                     self.limits,
                 )
                 .map_err(CommandError::CompileRejected)?;
+                let candidate_catalog = SessionControlProvider::prepare_session(
+                    prepared.get().prospective_session().compiled(),
+                )
+                .map_err(|_| CommandError::CompileRejected(failure("capi.resource.allocation")))?;
                 #[cfg(test)]
                 if self.take_test_fault(TestStructuralFaultPhase::AfterResourceProjection) {
                     drop(prepared);
@@ -798,6 +809,9 @@ impl SessionState {
                 let committed = prepared
                     .commit(&mut self.controller)
                     .map_err(|_| CommandError::Internal)?;
+                self.controller
+                    .provider_mut()
+                    .replace_session_catalog(candidate_catalog);
                 self.pending_providers.push(candidate_provider);
                 reports.push((epoch, resources));
                 reservation.commit();
@@ -896,6 +910,9 @@ impl SessionState {
                 slot.diagnostic.provider_sequence = None;
                 slot.protocol_events_before = 0;
                 slot.occupied = false;
+                self.controller
+                    .provider_mut()
+                    .set_render_diagnostic(head, 0, 0, false);
                 self.render_diagnostic_head =
                     (self.render_diagnostic_head + 1) % self.render_diagnostics.len();
                 self.render_diagnostic_len -= 1;

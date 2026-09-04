@@ -18,6 +18,8 @@ std::thread_local! {
     static TYPED_COMMAND_DECODES: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
 }
 
+#[cfg(any(test, feature = "test-support"))]
+use crate::TransportState;
 use crate::{
     AutomationBatchError, AutomationBatchSlot, AutomationCanceled, AutomationCancellationReason,
     AutomationEnqueueError, AutomationEnqueued, Backpressure, BackpressureQueueKind, Capabilities,
@@ -31,8 +33,8 @@ use crate::{
     ReliableSlot, RequestId, SampleTime, SessionCommitted, SessionEdit, SessionRevision,
     SessionSnapshot, SessionStore, SessionStoreError, StatusCode, SuccessResponsePayload,
     TelemetryConfiguration, TelemetryKey, TelemetryRecord, TransactionApplied, TransportSetRequest,
-    TransportSnapshot, TransportState, TransportStateEvent, TypedEventFrame,
-    TypedNonOkResponseFrame, TypedSuccessResponseFrame,
+    TransportSnapshot, TransportStateEvent, TypedEventFrame, TypedNonOkResponseFrame,
+    TypedSuccessResponseFrame,
 };
 
 /// Bounded replay storage configuration for one logical endpoint lifetime.
@@ -616,6 +618,7 @@ pub enum ParameterProviderError {
 }
 
 /// Bounded typed fixture input accepted by [`MockProvider::new`].
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Clone, Debug)]
 pub struct MockProviderConfig {
     /// Endpoint current sample.
@@ -635,6 +638,7 @@ pub struct MockProviderConfig {
 }
 
 /// Small deterministic provider suitable for protocol conformance fixtures.
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Clone, Debug)]
 pub struct MockProvider {
     /// Endpoint-owned current absolute sample for bounded automation admission fixtures.
@@ -658,6 +662,7 @@ pub struct MockProvider {
     telemetry_configuration: TelemetryConfiguration,
 }
 
+#[cfg(any(test, feature = "test-support"))]
 impl Default for MockProvider {
     fn default() -> Self {
         Self {
@@ -687,6 +692,7 @@ impl Default for MockProvider {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 impl MockProvider {
     /// Construct an empty provider with eager retained mutable collection capacities.
     pub fn try_with_retained_capacity(
@@ -807,6 +813,7 @@ impl MockProvider {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 impl ControlProvider for MockProvider {
     fn current_sample(&mut self) -> SampleTime {
         self.current_sample
@@ -2540,6 +2547,11 @@ impl<P: ControlProvider> ProtocolController<P> {
     #[must_use]
     pub const fn provider(&self) -> &P {
         &self.provider
+    }
+
+    /// Mutably borrow the provider on its endpoint-owning control thread.
+    pub fn provider_mut(&mut self) -> &mut P {
+        &mut self.provider
     }
 
     /// Borrow the bounded replay cache for occupancy fixture checks.

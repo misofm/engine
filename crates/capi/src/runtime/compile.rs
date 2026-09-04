@@ -110,6 +110,7 @@ pub(crate) fn capi_resources(
     source_count: usize,
     source_id_bytes: usize,
     quantum_frames: usize,
+    provider: host_core::SessionControlProviderResources,
 ) -> Result<CapiResources, CompileFailure> {
     let queue_config = protocol_queue_config(limits, quantum_frames)?;
     let queue = ProtocolQueues::resource_report_for_config(queue_config)
@@ -157,13 +158,11 @@ pub(crate) fn capi_resources(
         checked_layout::<RetainedDiagnosticSlotMirror>(2)?,
         checked_layout::<RenderDiagnosticSlot>(RENDER_DIAGNOSTIC_SLOTS)?,
         checked_layout::<u8>(RENDER_DIAGNOSTIC_CODE.len() * RENDER_DIAGNOSTIC_SLOTS)?,
-        // ProtocolController and MockProvider each retain their own complete telemetry config.
+        // ProtocolController and SessionControlProvider each retain their own telemetry config.
         checked_layout::<u32>(maximum_configuration_items)?,
         checked_layout::<protocol::CounterId>(maximum_configuration_items)?,
         checked_layout::<protocol::CounterValue>(maximum_configuration_items)?,
-        // The automation-only descriptor is inline in the provider; charge its two strings.
-        checked_layout::<u8>(4)?,
-        checked_layout::<u8>(7)?,
+        provider.fixed_retained_bytes,
         checked_layout::<u32>(maximum_configuration_items)?,
         checked_layout::<protocol::CounterId>(maximum_configuration_items)?,
         checked_layout::<ProviderEpoch>(2)?,
@@ -185,9 +184,11 @@ pub(crate) fn capi_resources(
     let active_retained = checked_sum(&fixed_allocation_rows)?
         .checked_add(checked_sum(&fixed_aggregate_rows)?)
         .and_then(|value| value.checked_add(epoch_retained))
+        .and_then(|value| value.checked_add(provider.catalog_retained_bytes))
         .ok_or_else(|| failure("capi.resource.arithmetic"))?;
     let prepared_protocol_retained = checked_sum(&prepared_protocol_allocation_rows)?
         .checked_add(checked_sum(&prepared_protocol_aggregate_rows)?)
+        .and_then(|value| value.checked_add(provider.catalog_retained_bytes))
         .ok_or_else(|| failure("capi.resource.arithmetic"))?;
     let largest = epoch_rows
         .into_iter()
@@ -197,6 +198,7 @@ pub(crate) fn capi_resources(
             queue.largest_allocation_bytes,
             replay.largest_allocation_bytes,
             exchange.largest_allocation_bytes,
+            provider.largest_allocation_bytes,
         ])
         .max()
         .unwrap_or(0);
@@ -222,6 +224,8 @@ pub(crate) fn compiled_capi_resources(
                     .checked_add(source.id.as_str().len())
                     .ok_or_else(|| failure("capi.resource.arithmetic"))
             })?;
+    let provider = SessionControlProvider::resource_report(compiled, RENDER_DIAGNOSTIC_SLOTS)
+        .map_err(|_| failure("capi.resource.arithmetic"))?;
     Ok((
         capi_resources(
             limits,
@@ -229,6 +233,7 @@ pub(crate) fn compiled_capi_resources(
             compiled.source_count(),
             source_id_bytes,
             compiled.quantum().0 as usize,
+            provider,
         )?,
         source_id_bytes,
     ))
@@ -482,46 +487,6 @@ pub(crate) fn compile_children(
         meter_handles: maximum_tlvs as usize,
         counter_ids: maximum_tlvs as usize,
     };
-    let provider = MockProvider::try_with_retained_capacity_and_automation(
-        retained_capacity,
-        protocol::ParameterDescriptor {
-            handle: u32::MAX,
-            track_id: "capi".to_owned(),
-            rack: protocol::ParameterRack::Dynamic,
-            effect_id: "control".to_owned(),
-            parameter_id: 1,
-            channel: protocol::ParameterChannel::Left,
-            value_kind: protocol::ParameterValueKind::F32,
-            unit: protocol::ParameterUnit::Linear,
-            domain: protocol::ParameterDomain::Continuous,
-            minimum: Some(-1.0),
-            maximum: Some(1.0),
-            default: 0.0,
-            mapping: protocol::ParameterMapping::Linear,
-            automation_rate: protocol::ParameterAutomationRate::Sample,
-            smoothing_samples: 0,
-            flags: 3,
-            display_name: None,
-            display_unit: None,
-            enum_choices: Vec::new(),
-        },
-    )
-    .map_err(|_| failure("capi.resource.allocation"))?;
-    let controller = ProtocolController::try_with_config_and_retained_capacity(
-        store,
-        queues,
-        provider,
-        replay,
-        codec,
-        ProtocolControllerConfig {
-            maximum_transaction_edits: maximum_tlvs,
-            maximum_response_diagnostics: u16::MAX,
-            provider_features: ProviderFeatures::ALL,
-        },
-        retained_capacity,
-    )
-    .map_err(|_| failure("capi.resource.allocation"))?;
-
     let PreparedRuntime {
         sources,
         plan,
@@ -550,6 +515,28 @@ pub(crate) fn compile_children(
         // No endpoint has configured telemetry yet, so nothing can read a peak.
         render_peak_observed: AtomicBool::new(false),
     });
+    let sample_source: Arc<dyn host_core::PlanSampleSource> = Arc::clone(&shared) as Arc<_>;
+    let provider = SessionControlProvider::try_new(
+        store.compiled(),
+        sample_source,
+        retained_capacity,
+        RENDER_DIAGNOSTIC_SLOTS,
+    )
+    .map_err(|_| failure("capi.resource.allocation"))?;
+    let controller = ProtocolController::try_with_config_and_retained_capacity(
+        store,
+        queues,
+        provider,
+        replay,
+        codec,
+        ProtocolControllerConfig {
+            maximum_transaction_edits: maximum_tlvs,
+            maximum_response_diagnostics: u16::MAX,
+            provider_features: ProviderFeatures::ALL,
+        },
+        retained_capacity,
+    )
+    .map_err(|_| failure("capi.resource.allocation"))?;
     let mut pending_providers = Vec::new();
     pending_providers
         .try_reserve_exact(1)
