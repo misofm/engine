@@ -6,8 +6,7 @@
 #
 # One script, two subjects (formerly `check-native-pcm-runner-v1.sh` and
 # `check-native-pcm-runner-portability-v1.sh`): one tool's contract split across two files for no
-# reason the tool itself gives. Both were previously reachable only from `scripts/sweep.sh`, which
-# nobody runs.
+# reason the tool itself gives. Both gates now run from CI, not from the retired local sweep.
 set -euo pipefail
 root="${1:-.}"
 cd "$root"

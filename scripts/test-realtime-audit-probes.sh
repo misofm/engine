@@ -5,9 +5,9 @@
 # Folds together what were three near-identical scripts (`test-realtime-audit-hooks.sh`,
 # `test-builtins-audit-probes.sh`, `test-builtins-graph-audit-probes.sh`) -- one harness three
 # times over `tools/audit`'s `realtime`, `builtins` and `builtins-graph` subcommands. Two of the
-# three subjects (`builtins`, `builtins-graph`) were previously reachable only from
-# `scripts/sweep.sh`, which nobody runs, so their nine probes each were not exercised by CI at
-# all; this wiring closes that gap rather than merely deduplicating the shell.
+# three subjects (`builtins`, `builtins-graph`) previously had no CI caller at all, so their nine
+# probes each were not exercised; this wiring closes that gap rather than merely deduplicating the
+# shell. All three subjects now run from CI.
 set -euo pipefail
 
 usage() {
