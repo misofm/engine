@@ -1,5 +1,12 @@
 # Publish `@misofm/engine` 0.1.0 from one provenance-attested tarball
 
+> **Superseded release authority (2026-09-04).** This issue exhausted its
+> three attempts and handed off to #355, which also exhausted its bounded
+> repair attempts. Issue #356 then removed the unreleased FLAC delivery stack.
+> The historical two-Wasm, FLAC-digest, and `enginectl --stems` records below
+> do not describe the package that may be published. Issue #357 is the sole
+> current authority for the Engine-only `@misofm/engine@0.1.0` release.
+
 ## Objective
 
 Publish the existing reviewed `sdk/` package as public
@@ -250,4 +257,7 @@ three-attempt stop rule, implementation ends here. A fresh bounded successor
 must repair and requalify the release workflow without weakening any gate.
 ## Successor handoff
 
-Issue #355 owns the repaired closure procedure. This issue remains the evidence record for the stopped #354 attempt; no publication, tag, release, or issue closure occurred under #354.
+Issue #355 owned the first repaired closure procedure and also exhausted its
+three attempts. Issue #357 now owns the Engine-only release. This issue remains
+the evidence record for the stopped #354 attempt; no publication, tag, release,
+or issue closure occurred under #354.

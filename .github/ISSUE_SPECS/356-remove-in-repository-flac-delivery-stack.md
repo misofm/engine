@@ -9,8 +9,9 @@ publishing `@misofm/engine@0.1.0`.
 The engine package exposes generic session, canonical-PCM, render, browser-host,
 and PCM-ingress primitives only. Delivery codecs, transport policy, and Miso
 platform publishing/migration tools belong in external packages or `misofm/cli`.
-This issue is a prerequisite of #354; all earlier tarballs and qualification
-evidence are obsolete after this change.
+This issue is a prerequisite of publication successor #357; all earlier
+tarballs and qualification evidence in exhausted #354/#355 are obsolete after
+this change.
 
 ## Decision and smallest closable slice
 
@@ -127,8 +128,8 @@ are the current ruling.
    test rejects a second codec artifact requirement.
 7. Browser qualification retains all Engine/AudioWorklet/attestation/digest/
    stall/deployment gates with no decoder job; CI invokes no deleted script.
-8. #354 builds and pins only the Engine AudioWorklet closure and publishes only
-   a newly qualified exact archive.
+8. Publication successor #357 builds and pins only the Engine AudioWorklet
+   closure and publishes only a newly qualified exact archive.
 9. Fresh Sol-high adversarial review returns PASS before #354 resumes.
 
 ## Required mutations
