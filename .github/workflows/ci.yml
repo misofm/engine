@@ -262,8 +262,10 @@ jobs:
       # calls as its own precondition). Previously reachable only from scripts/sweep.sh.
       - name: Effect descriptor V1 corpus and inspection surface
         run: bash scripts/check-effect-descriptor-v1.sh
-      # The stem store's cold-open-latency and pump budgets (real assert.ok thresholds, not just
-      # printed numbers), its core/pump correctness gates, and --self-test's mutation ledger.
+      # The stem store's core/pump correctness gates and --self-test's mutation ledger. Wall-clock
+      # budget thresholds (cold-open/verify-open latency, the fallback-write abort deadline) are
+      # opt-in via --budgets and stay off this blocking path to avoid flaking on shared runners;
+      # nightly.yml's moved-mutation-suites job runs the same command with --budgets added.
       # Previously reachable only from scripts/sweep.sh, which nobody runs.
       - name: Stem store V1 gate and mutation ledger
         run: node scripts/check-stem-store-v1.mjs --self-test

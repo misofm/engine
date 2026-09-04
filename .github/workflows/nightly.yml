@@ -260,7 +260,7 @@ jobs:
           bash scripts/test-builtins-benchmark.sh
           bash scripts/test-graph-benchmark.sh
       - name: Stem store V1 mutation ledger
-        run: node scripts/check-stem-store-v1.mjs --self-test
+        run: node scripts/check-stem-store-v1.mjs --self-test --budgets
 
   release-budgets:
     name: release-mode wall-clock budgets (host-web, host-core, effect-package)
