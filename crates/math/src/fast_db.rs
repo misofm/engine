@@ -159,7 +159,7 @@ const LOG2_Q: [f32; 6] = [
 ///
 /// Operation order, frozen (any change re-opens the exhaustive bound test):
 /// clamp to `[-126, 127]`; `xi = floor(x)`; `f = x - xi`; five-term Horner in `f` with mul/add;
-/// `p = 1 + f * p`; `p * exp2_int(xi)`.
+/// `p = 1 + f * p`; `p * exp2_int_in_range(xi)`.
 #[inline(always)]
 fn fast_exp2<L: Lane>(x: L) -> L {
     let x = x.max(L::splat(-126.0)).min(L::splat(127.0));
@@ -177,7 +177,7 @@ fn fast_exp2<L: Lane>(x: L) -> L {
     }
     let p = L::splat(1.0).add(f.mul(p));
 
-    p.mul(L::exp2_int(xi))
+    p.mul(L::exp2_int_in_range(xi))
 }
 
 /// `log2(x)`, lane-wide, fast tier, for positive `x`. Private: see [`fast_exp2`].

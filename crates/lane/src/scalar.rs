@@ -169,6 +169,12 @@ impl Lane for f32 {
     #[inline(always)]
     fn exp2_int(n: Self) -> Self {
         let n = Lane::min(Lane::max(n, EXP2_INT_MIN), EXP2_INT_MAX);
+        Lane::exp2_int_in_range(n)
+    }
+
+    #[inline(always)]
+    fn exp2_int_in_range(n: Self) -> Self {
+        debug_assert!((EXP2_INT_MIN..=EXP2_INT_MAX).contains(&n));
         let biased = n + EXP2_INT_MAGIC;
         f32::from_bits(biased.to_bits() << MANTISSA_BITS)
     }
