@@ -42,6 +42,102 @@ printf '\nfn json_escape(value: &str) -> String {\n    value.to_owned()\n}\n' \
     >>"$case_root/tools/bench/src/conformance.rs"
 expect_failure second-escaper
 
+# #380: the widened escaper pattern also has to catch a `json_string`/`json_quote`-named
+# reimplementation, not just `escape`/`json_escape` -- this is the exact shape
+# `tools/audit/src/vectorization.rs`'s `json_string` had before this issue removed it.
+new_case second-json-string-name
+printf '\nfn json_string(value: &str) -> String {\n    value.replace('"'"'\\\\'"'"', "\\\\\\\\")\n}\n' \
+    >>"$case_root/tools/bench/src/conformance.rs"
+expect_failure second-json-string-name
+
+# A local wrapper that only calls the shared `escape` is not the defect (`tools/bench/src/builtins.rs`
+# and `tools/bench/src/effect_interchange.rs` both carry one); the baseline case above already
+# proves that shape stays green.
+
+# A delegating wrapper whose signature rustfmt has wrapped across multiple lines is still a
+# delegate, not a reimplementation: the window scan has to reach the line that actually calls
+# `escape(`, however many signature lines come first.
+new_case json-string-multiline-signature-delegate-stays-green
+printf '\nfn json_string(\n    value: &str,\n) -> String {\n    format!("\\"{}\\"", json::escape(value))\n}\n' \
+    >>"$case_root/tools/bench/src/conformance.rs"
+check >/dev/null || {
+    printf 'bench policy rejects a delegating json_string whose signature spans multiple lines\n' >&2
+    exit 1
+}
+
+# A one-line delegating wrapper immediately followed by unrelated code must still read as a
+# delegate: the window closes on the next line at the definition's own indentation followed by
+# `}`, or a 40-line cap, not on brace balance.
+new_case json-string-one-liner-delegate-followed-by-other-code-stays-green
+printf '\nfn json_string(value: &str) -> String { format!("\\"{}\\"", json::escape(value)) }\n\nfn something_else() -> u32 {\n    1\n}\n' \
+    >>"$case_root/tools/bench/src/conformance.rs"
+check >/dev/null || {
+    printf 'bench policy rejects a one-line delegating json_string followed by other code\n' >&2
+    exit 1
+}
+
+new_case json-string-non-delegating-one-liner-as-last-item
+printf '\nfn json_string(value: &str) -> String { value.to_owned() }\n' \
+    >>"$case_root/tools/bench/src/conformance.rs"
+expect_failure json-string-non-delegating-one-liner-as-last-item
+
+# The exact partial-escaper shape this rule exists to catch: it calls the shared `escape` and then
+# keeps hand-rolling more escaping of its own, same as `vectorization.rs`'s old `json_string` did
+# with `.replace('\\', ...)`.
+new_case json-string-delegates-then-replaces
+printf '\nfn json_string(value: &str) -> String {\n    let escaped = json::escape(value);\n    escaped.replace("<", "&lt;")\n}\n' \
+    >>"$case_root/tools/bench/src/conformance.rs"
+expect_failure json-string-delegates-then-replaces
+
+# `escape(` appearing only in a comment is not a delegating call.
+new_case json-string-escape-mentioned-only-in-a-comment
+printf '\nfn json_string(value: &str) -> String {\n    // escape(value) used to be called here\n    value.to_owned()\n}\n' \
+    >>"$case_root/tools/bench/src/conformance.rs"
+expect_failure json-string-escape-mentioned-only-in-a-comment
+
+# The widened definition anchor (`^\s*(pub(\([a-z]+\))? )?fn`) has to see a reimplementation that
+# is indented (inside a module) or spelled `pub(crate)`, not just a column-zero `pub`/bare `fn`.
+new_case json-string-indented-inside-a-module
+printf '\nmod scratch {\n    fn json_string(value: &str) -> String {\n        value.to_owned()\n    }\n}\n' \
+    >>"$case_root/tools/bench/src/conformance.rs"
+expect_failure json-string-indented-inside-a-module
+
+new_case json-string-pub-crate-non-delegating
+printf '\npub(crate) fn json_string(value: &str) -> String {\n    value.to_owned()\n}\n' \
+    >>"$case_root/tools/bench/src/conformance.rs"
+expect_failure json-string-pub-crate-non-delegating
+
+# A nested block (an `if` with its own more-indented `}`) inside a delegating wrapper's body must
+# not close the window before the delegating call is seen: the window closer is the definition
+# line's own indentation followed by `}`, not the first lone `}` at any depth.
+new_case json-string-nested-if-before-delegating-call-stays-green
+printf '\nfn json_string(value: &str) -> String {\n    if value.is_empty() {\n        return "\\"\\"".to_owned();\n    }\n    format!("\\"{}\\"", bench_support::json::escape(value))\n}\n' \
+    >>"$case_root/tools/bench/src/conformance.rs"
+check >/dev/null || {
+    printf 'bench policy rejects a delegating json_string with a nested if before the call\n' >&2
+    exit 1
+}
+
+# The backslash-literal needle has to be load-bearing on its own, not just redundant with
+# `.replace(`: a reimplementation that calls the shared `escape` (so the escape( check alone would
+# pass it) and then hand-rolls its own backslash handling through `.chars().flat_map(...)` -- no
+# `.replace(` anywhere -- is still the partial-escaper defect and must still fail.
+new_case json-string-delegates-then-hand-rolls-backslash-via-flat-map
+printf '\nfn json_string(value: &str) -> String {\n    let escaped = bench_support::json::escape(value);\n    let doubled: String = escaped\n        .chars()\n        .flat_map(|c| if c == '"'"'\\\\'"'"' { vec!['"'"'\\\\'"'"', '"'"'\\\\'"'"'] } else { vec![c] })\n        .collect();\n    doubled\n}\n' \
+    >>"$case_root/tools/bench/src/conformance.rs"
+expect_failure json-string-delegates-then-hand-rolls-backslash-via-flat-map
+
+# #380: the private SHA-256 round-constant table `tools/bench/src/session.rs` used to carry.
+new_case second-sha256-round-constant
+printf '\nconst K: [u32; 64] = [0; 64];\n' \
+    >>"$case_root/tools/bench/src/conformance.rs"
+expect_failure second-sha256-round-constant
+
+new_case second-sha256-initial-constant
+printf '\nconst INITIAL: u32 = 0x6a09_e667;\n' \
+    >>"$case_root/tools/bench/src/conformance.rs"
+expect_failure second-sha256-initial-constant
+
 new_case second-percentile
 printf '\nfn percentile(sorted: &[u64], p: usize) -> u64 {\n    sorted[p]\n}\n' \
     >>"$case_root/tools/bench/src/graph.rs"

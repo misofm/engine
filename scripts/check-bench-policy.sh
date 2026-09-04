@@ -26,6 +26,94 @@ sole_owner() {
     }
 }
 
+# Like `sole_owner`, but a function outside `owner` matching `def_pattern` is not itself a
+# violation if it delegates to the shared `escape(`. Brace-depth tracking turned out to be the
+# wrong tool for this (four different ways to desynchronise it, caught in review): this instead
+# takes the window from the definition line to the first following line whose content is exactly
+# the definition line's own leading indentation followed by `}` -- that is how rustfmt closes a
+# `fn` at any nesting depth, so an `if`/`match`/loop's own more-indented `}` inside the body does
+# not end the window early -- or a 40-line cap, whichever comes first; if the window runs off the
+# end of the file first, it is still judged on what it saw. The window is a delegate iff it
+# contains `escape(` on a non-comment line and contains neither `.replace(` nor the char literal
+# `'\\'` (four characters: Rust's own spelling of a backslash char literal, not the one-backslash
+# value it holds) -- the shape of the exact partial-escaper defect this rule exists to catch
+# (`vectorization.rs`'s old `json_string`: it called nothing and hand-escaped `\` and `"` itself,
+# and a hypothetical `.chars().flat_map(...)` rewrite of the same defect that never calls
+# `.replace(` at all but still hand-rolls a `'\\'` branch). The definition line's own signature is
+# exempt from the `escape(` search up through its matched prefix, so a function literally named
+# `json_escape` does not "delegate" to itself by spelling `escape(` in its own name -- but any call
+# after that prefix, including on a one-line signature-and-body, still counts.
+sole_owner_or_delegate() {
+    local label=$1 owner=$2 def_pattern=$3
+    grep -qE "$def_pattern" "$owner" 2>/dev/null || fail "$label (the shared definition in $owner is gone)"
+    local matches offenders=()
+    matches="$(grep -rlE "$def_pattern" tools --include='*.rs' 2>/dev/null | LC_ALL=C sort || true)"
+    local file awk_pattern="${def_pattern//\\/\\\\}"
+    # The 4-character Rust *source* spelling of the backslash char literal -- apostrophe,
+    # backslash, backslash, apostrophe, as it appears in `.replace('\\', ...)` -- built from
+    # single unambiguous pieces and handed to awk as an environment variable rather than through
+    # `-v` (which applies its own C-style backslash processing to `-v` values a second time, and
+    # spelling it directly inside the awk script text below is not an option either: that script
+    # is itself inside a single-quoted bash string, so an embedded apostrophe would close it
+    # early). `ENVIRON` is the process environment verbatim, with no escape processing on either
+    # side, so what is built here is exactly what awk sees.
+    local sq="'" bs='\'
+    local backslash_char_literal="$sq$bs$bs$sq"
+    while IFS= read -r file; do
+        [[ -z "$file" || "$file" == "$owner" ]] && continue
+        if [[ "$(MISO_ENGINE_BENCH_POLICY_NEEDLE="$backslash_char_literal" awk -v pat="$awk_pattern" '
+            BEGIN { needle = ENVIRON["MISO_ENGINE_BENCH_POLICY_NEEDLE"] }
+            { lines[NR] = $0 }
+            $0 ~ pat { starts[NR] = 1 }
+            END {
+                for (i = 1; i <= NR; i++) {
+                    if (!(i in starts)) continue
+                    match(lines[i], /^[ \t]*/)
+                    closer = substr(lines[i], RSTART, RLENGTH) "}"
+                    escapes = 0; replaces = 0; backslash_literal = 0
+                    for (j = i; j < i + 40 && j <= NR; j++) {
+                        line = lines[j]
+                        search_from = 1
+                        if (j == i) {
+                            match(line, pat)
+                            search_from = RSTART + RLENGTH
+                        }
+                        rest = substr(line, search_from)
+                        trimmed = line
+                        sub(/^[ \t]+/, "", trimmed)
+                        is_comment = (trimmed ~ /^\/\//)
+                        if (!is_comment && index(rest, "escape(") > 0) escapes = 1
+                        if (index(line, ".replace(") > 0) replaces = 1
+                        if (index(line, needle) > 0) backslash_literal = 1
+                        if (line == closer) break
+                    }
+                    print (escapes && !replaces && !backslash_literal ? "delegate" : "own")
+                }
+            }
+        ' "$file")" == *own* ]]; then
+            offenders+=("$file")
+        fi
+    done <<<"$matches"
+    ((${#offenders[@]} == 0)) || {
+        printf 'expected only %s (or a wrapper whose body calls escape())\noffenders:\n%s\n' \
+            "$owner" "$(printf '%s\n' "${offenders[@]}")" >&2
+        fail "$label"
+    }
+}
+
+# Unlike `sole_owner`, this one names nothing that is allowed to hold the pattern: `bench-support`
+# hashes through the `sha2` crate, not a hand-rolled initial-hash-word/round-constant table, so the
+# pattern below must appear nowhere at all under `tools/`.
+forbidden_under_tools() {
+    local label=$1 pattern=$2
+    local found
+    found="$(grep -rlE "$pattern" tools --include='*.rs' 2>/dev/null | LC_ALL=C sort || true)"
+    [[ -z "$found" ]] || {
+        printf 'found:\n%s\n' "$found" >&2
+        fail "$label"
+    }
+}
+
 support=tools/bench-support
 [[ -d "$support" ]] || fail "missing the shared harness: $support"
 
@@ -33,12 +121,17 @@ sole_owner 'the audited allocator has more than one implementation' \
     "$support/src/alloc.rs" '^unsafe impl GlobalAlloc'
 sole_owner 'more than one global allocator is registered under tools/' \
     "$support/src/alloc.rs" '^#\[global_allocator\]'
-sole_owner 'the JSON string escaper has more than one implementation' \
-    "$support/src/json.rs" '^(pub )?fn (json_)?escape\('
+# `\s` is a GNU extension to POSIX ERE, not portable to every `grep -E`/awk in general -- but this
+# repo's CI and every host this script is meant to run on use GNU grep and gawk, both of which
+# support it, so it is fine here.
+sole_owner_or_delegate 'the JSON string escaper has more than one implementation' \
+    "$support/src/json.rs" '^\s*(pub(\([a-z]+\))? )?fn (json_(escape|string|quote)|escape)\('
 sole_owner 'the nearest-rank percentile has more than one implementation' \
     "$support/src/stats.rs" '^(pub )?fn (percentile|nearest_rank|per_mille|percentile_nearest_rank)'
 sole_owner 'the counted SHA-256 sink has more than one implementation' \
     "$support/src/digest.rs" '^(pub )?struct Sha256Sink'
+forbidden_under_tools 'a private SHA-256 initial hash word (H0) or round-constant table (K) reappeared under tools/' \
+    '0x6a09_?e667|const K: ?\[u32; ?64\]'
 
 # Subjects converted to the shared timer (#104 F1, made structural). `timing::timed` samples the
 # digest sink's update counter on both sides of the clock and panics if the timed body hashed

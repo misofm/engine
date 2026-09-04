@@ -343,10 +343,6 @@ fn sha256(bytes: &[u8]) -> String {
         .collect()
 }
 
-fn json_string(value: &str) -> String {
-    format!("\"{}\"", value.replace('\\', "\\\\").replace('\"', "\\\""))
-}
-
 struct Args {
     artifact: PathBuf,
     allowlist: PathBuf,
@@ -431,7 +427,7 @@ pub(crate) fn main() {
         .count();
     let failure_json = failures
         .iter()
-        .map(|failure| json_string(failure))
+        .map(|failure| format!("\"{}\"", bench_support::json::escape(failure)))
         .collect::<Vec<_>>()
         .join(",");
     println!(
