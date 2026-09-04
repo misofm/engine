@@ -673,6 +673,34 @@ def main() -> int:
     finally:
         shutil.rmtree(root)
 
+    # S3/S4/N2: the verdict's `if: always()`, its exact `check <job> "$<JOB>_RESULT"` pairing per
+    # expectation-table row, the release_shape guard, and its own permissions/cancellation must
+    # all be caught by the checker rather than only by the verdict's own runtime bash (design §7).
+    workflow_mutation_fails(
+        "qualification.yml", "    name: qualification\n    if: always()\n",
+        "    name: qualification\n",
+    )  # deleting if: always() would let the required context resolve to skipped forever
+    workflow_mutation_fails(
+        "qualification.yml",
+        'check sdk "$SDK_RESULT" "$artifact_expected"\n',
+        'check sdk "$LINT_RESULT" "$artifact_expected"\n',
+    )  # a name grep alone would miss the expectation table checking the wrong job's result
+    workflow_mutation_fails(
+        "qualification.yml",
+        '[[ "$RELEASE_INPUTS" == "true" ]] && release_shape_expected=success\n',
+        "release_shape_expected=success\n",
+    )  # release-shape must not be expected to run on a full route without release inputs
+    workflow_mutation_fails(
+        "qualification.yml",
+        "    permissions:\n      actions: read\n      contents: read\n",
+        "    permissions:\n      contents: read\n",
+    )  # the verdict's permissions must stay exactly actions: read plus contents: read
+    workflow_mutation_fails(
+        "qualification.yml",
+        "  cancel-in-progress: true\n",
+        "",
+    )  # a superseded run must still be cancellable, or stale runs occupy the required context
+
     # This precondition (baseline copied-workflow checker succeeds before the mutation) is the
     # one assertion in this file that depends on .github/workflows/*.yml already carrying the
     # issue #359 WP-1 paths-ignore additions (dsp-research/**/*.md,
