@@ -168,3 +168,45 @@ preflight also exposed and this tranche corrected its pre-existing repository-ro
 ## Spec-state finding
 
 The local numbered-spec scan found no files for #366–#394, including #368's promised `.github/ISSUE_SPECS/368-lane-13-floor-recount.md`. Root reports all 172 existing numbered specs have matching remote issues. Before implementing #368, mirror its current remote body and this reconciled brief locally with exact issue number/title; synchronize the remote scope/role amendment. Do not manufacture new numbered issues for existing remote issues, edit other agents' active issue claims, or bundle unrelated historical spec restoration into this PR. Record remaining mirror debt as a bounded synchronization task.
+
+
+## Attempt 2 verdict and final-attempt evidence applicability amendment
+
+# #368 attempt 2 adversarial review — Astra
+
+**VERDICT: FAIL. Do not authorize the benchmark.** Reviewed checkpoint `5a156c46` cumulatively against approved spec `ed4b543b` and attempt-1 findings at `57a3f86c`. The document arithmetic/history corrections, minimal runner arm and bounded operator-root fix are acceptable. The remaining blocker is discriminating record-validation evidence, not the floor inventories.
+
+## Blocking evidence defects
+
+1. `verify-historical-repricing.sh` invokes only `floor_shape`, not the actual full record and aggregate validators expressly required by the brief. I ran both real validators read-only on the committed repriced file; both exit 1. This is not a hypothetical omission:
+
+```sh
+jq -e -L scripts -f scripts/console-benchmark-record-validator.jq \
+  artifacts/issue368-floor-recount/historical-mono3-repriced.jsonl
+# exit 1
+jq -s -e -L scripts -f scripts/console-benchmark-validator.jq \
+  artifacts/issue368-floor-recount/historical-mono3-repriced.jsonl
+# exit 1
+```
+
+A concrete independent incompatibility: mono3 retains `.toml` fixture IDs; current `session_kind_shape` requires `.json` (console-benchmark-record-lib.jq:184–208). A read-only inventory found no sealed accepted console stream whose first row has both real core_clock_hz and a `.json` fixture ID. Therefore the original brief's combination of full CURRENT validation and historical equality apart from exactly three floor fields is not satisfiable with the identified historical evidence. This fact needs an explicit spec correction, not field rewriting, validator weakening, or silently substituting floor_shape for the full gates.
+
+2. Three standalone `! jq ...` negative checks do not enforce rejection under `set -e`. `bash -c 'set -e; ! true; echo reached'` prints `reached`: an inverted command is exempt from errexit. The script can print PASS when a stale floor or deliberately malformed measured value is accepted. Use explicit `if jq ...; then ... exit 1; fi` checks and reject unexpected jq execution/parsing errors separately from a predicate false if claiming the failure class. This is a bounded local evidence-script correction, not generic gate infrastructure work.
+
+## Necessary scope decision before the final Sol attempt
+
+Root has approved the following bounded applicability correction during this review; mirror it into #368's local spec and remote issue before attempt 3. The final Sol revision MUST:
+
+- Keep the sealed originals and the exactly-three-field equality proof unchanged.
+- Retrieve the historical record+aggregate validator pair and library from a clearly identified source revision that accepts the original mono3 records; prove unmodified originals pass it.
+- In a temporary/evidence namespace only, substitute just the justified floor inventory constants in that historical validator library. Run the full historical record and aggregate gates on the repriced copy, and show stale originals plus unrelated invalid fields reject through explicit negative assertions. Retain minimal provenance/diff evidence so no semantic validator relaxation is hidden.
+- Prove the negative assertion logic itself: feed an otherwise valid record into each supposed rejection path (or invert the intended mutation) in an isolated self-check and require the proof script to fail, never print PASS. A jq syntax/runtime error must be reported as execution failure, not accepted as the intended predicate rejection.
+- Separately retain the existing current-validator positive/negative floor suite, and require the single fresh benchmark to pass the CURRENT full record/aggregate validators. Optional missing fresh cycle columns remain honest; historical full-gate proof is what then exercises measured cycle-bearing records.
+
+This reconciliation is approved for the final Sol revision, conditional on root synchronizing the spec amendment first; it is not permission to modify current production validators or claim current-schema historical acceptance. If the historical validator capture cannot be identified and validated in one bounded correction, split/rescope the qualification remainder and stop instead of constructing a migration framework. One Sol attempt remains under the three-attempt limit.
+
+## Non-blocking/checkpoint disposition
+
+The corrected eq+comp isolate percentages and ragged floor now calculate correctly; retrospective repricing is labeled and the mono/select debt wording is corrected. Fixed core throughput remains unchanged. The shared expression derivation is now recorded. The operator preflight's `scripts/operator/../..` root is the correct repository path, and the namespace addition is minimal. No benchmark has run. Existing preflight evidence names old HEAD57a while exercising the working edits; root should rerun the non-timed preflight against the final committed head once the proof is fixed, so the final candidate identity is exact.
+
+No cargo tests, benchmark, source edits, GitHub actions or spawned agents were used by this review. Full workspace is root-owned and pending; a workspace PASS cannot remedy the two evidence defects above. Actual PR still requires Astra review before merge.
