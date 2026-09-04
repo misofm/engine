@@ -72,6 +72,10 @@ jobs:
         run: RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps
       - name: Workspace policy
         run: bash scripts/check-workspace-policy.sh
+      - name: Retired delivery-codec Cargo boundary and mutations
+        run: |
+          python3 -B scripts/check-delivery-codec-boundary.py
+          python3 -B scripts/test-delivery-codec-boundary.py
       - name: Session dependency and compiler boundary policy
         run: bash scripts/check-session-policy.sh
       - name: Workspace policy mutation tests

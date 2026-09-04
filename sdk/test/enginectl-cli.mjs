@@ -2,7 +2,7 @@
 
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { copyFile, mkdir, mkdtemp, readFile, readdir, realpath, rename, stat, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rename, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -11,7 +11,6 @@ import { describe, test } from "node:test";
 
 const executable = resolve(process.env.ENGINECTL ?? "dist/enginectl.js");
 const CONTENT = `sha256:${"0".repeat(64)}`;
-const repoRoot = resolve(import.meta.dirname, "../..");
 
 function request(overrides = {}) {
   return {
@@ -182,6 +181,16 @@ describe("enginectl session build", () => {
     const result = await run(["session", "build", "--stems", directory, "--output", output]);
     failure(result, 2, "cli.usage");
     await assert.rejects(readFile(output), (error) => error?.code === "ENOENT");
+  });
+
+  test("request input refusal precedes a retired stems-only output preflight", async () => {
+    const directory = await mkdtemp(resolve(tmpdir(), "enginectl-request-precedence-"));
+    const missing = resolve(directory, "missing.json");
+    const output = resolve(directory, "existing.json");
+    await writeFile(output, "sentinel");
+    const result = await run(["session", "build", "--request", missing, "--output", output]);
+    failure(result, 3, "request.read");
+    assert.equal(await readFile(output, "utf8"), "sentinel");
   });
 
   test("rich mapping equals the direct builder and entity permutations are canonical", async () => {

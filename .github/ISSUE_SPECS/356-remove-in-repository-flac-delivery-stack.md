@@ -79,6 +79,8 @@ recoverable from Git history for future extraction into an external package.
 - `scripts/test-flac-decoder.sh` (delete)
 - `scripts/sdk-package.sh`
 - `scripts/test-sdk-artifact-builder-output-contract.sh`
+- `scripts/check-delivery-codec-boundary.py` (add)
+- `scripts/test-delivery-codec-boundary.py` (add)
 - `scripts/build-web-audioworklet.sh`
 - `scripts/test-lane-policy.sh`
 - `scripts/test-workspace-policy.sh`
@@ -216,3 +218,26 @@ enginectl, browser, CI, fixture, documentation, and release dependencies.
   current, and workspace policy passes. The local workspace-policy mutation
   wrapper is not portable to this macOS host (`find -printf` and GNU `sed -i`
   assumptions); no green result is claimed for that wrapper.
+
+## Attempt 2 request-mode precedence correction (Terra)
+
+- Removed the obsolete stems-output preflight from `enginectl`: request bytes
+  now load and validate before any destination publication work, as the
+  request-only contract requires. A portable regression creates a missing
+  request child beside a sentinel output file and requires the input-read
+  refusal (`3`, `request.read`) while proving that sentinel remains unchanged.
+  Normal publication still occurs only after a successful build.
+- Archive smoke now requires the package manifest's artifact keys to equal the
+  exact six-file Engine closure, so an otherwise well-formed retired decoder
+  manifest entry fails rather than being ignored. Dead stem-era CLI fields and
+  test imports were removed with the preflight.
+- Added a locked Cargo boundary checker and mutation test. It rejects only the
+  retired workspace/package/dependency identities `flac-decoder`,
+  `stem-publisher`, `catalog-migrate`, `flacenc`, and `symphonia` in every
+  manifest, lockfile, and locked metadata, while allowing unrelated future
+  sidecars. It also rejects each retired delivery directory even if a manifest
+  renames its package. The mutations cover a restored sidecar member, a renamed
+  retired sidecar directory, an unused workspace dependency that leaves
+  metadata/lock green, a `package =` alias, and a lock entry; each must name
+  the retired identity. CI runs both after its pinned Rust toolchain
+  installation.

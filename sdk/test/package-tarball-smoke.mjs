@@ -48,6 +48,19 @@ for (const [subpath, module] of Object.entries(imported)) {
 for (const assetUrl of Object.values(imported["./assets"].BUNDLED_ENGINE_ASSETS)) {
   await readFile(assetUrl);
 }
+const assetManifest = JSON.parse(await readFile(imported["./assets"].BUNDLED_ENGINE_ASSETS.manifest, "utf8"));
+assert.deepEqual(
+  Object.keys(assetManifest.artifacts).sort(),
+  [
+    "miso-engine-v1-abi-layout.json",
+    "miso-engine-v1-audio-worklet-host.d.ts",
+    "miso-engine-v1-audio-worklet-host.js",
+    "miso-engine-v1-audio-worklet.js",
+    "miso-engine-v1-audio-worklet.simd128.wasm",
+    "miso-engine-v1-parameter-metadata.json",
+  ],
+  "the package manifest declares exactly the Engine artifact closure",
+);
 
 const files = await readdir(packageRoot, { recursive: true });
 assert.ok(files.includes("dist/assets/miso-engine-v1-audio-worklet.simd128.wasm"));

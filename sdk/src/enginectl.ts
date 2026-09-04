@@ -2,7 +2,7 @@
 
 import { createHash, randomBytes } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { link, lstat, open, readFile, rename, stat, unlink } from "node:fs/promises";
+import { link, open, readFile, rename, unlink } from "node:fs/promises";
 import { basename, dirname, resolve } from "node:path";
 import process from "node:process";
 
@@ -16,7 +16,6 @@ interface ErrorExtra {
   readonly phase?: string;
   readonly result?: number;
   readonly diagnostics?: readonly unknown[];
-  readonly groups?: readonly string[];
 }
 
 class CliFailure extends Error {
@@ -247,36 +246,7 @@ async function publish(
   }
 }
 
-async function preflightStemOutput(args: BuildArguments): Promise<void> {
-  if (args.output === "-") return;
-  const destination = resolve(args.output);
-  const parentPath = dirname(destination);
-  let parent: Awaited<ReturnType<typeof stat>>;
-  try {
-    parent = await stat(parentPath, { bigint: true });
-    if (!parent.isDirectory()) {
-      throw new Error("parent is not a directory");
-    }
-  } catch (error) {
-    throw new CliFailure(5, "output.publish", `could not inspect '${args.output}': ${errorMessage(error)}`);
-  }
-  try {
-    const existing = await lstat(destination);
-    if (args.overwrite && !existing.isDirectory()) return;
-  } catch (error) {
-    if (typeof error === "object" && error !== null && "code" in error
-      && (error as { readonly code?: unknown }).code === "ENOENT") return;
-    throw new CliFailure(5, "output.publish", `could not inspect '${args.output}': ${errorMessage(error)}`);
-  }
-  throw new CliFailure(
-    5,
-    "output.publish",
-    `could not publish '${args.output}': destination already exists${args.overwrite ? " as a directory" : ""}`,
-  );
-}
-
 async function build(args: BuildArguments): Promise<void> {
-  await preflightStemOutput(args);
   let json: string;
   {
     const request = decodeRequest(await boundedBytes(args.request as string));
