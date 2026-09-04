@@ -61,8 +61,8 @@ sole_owner_or_delegate() {
     local backslash_char_literal="$sq$bs$bs$sq"
     while IFS= read -r file; do
         [[ -z "$file" || "$file" == "$owner" ]] && continue
-        if [[ "$(MISO_BENCH_POLICY_NEEDLE="$backslash_char_literal" awk -v pat="$awk_pattern" '
-            BEGIN { needle = ENVIRON["MISO_BENCH_POLICY_NEEDLE"] }
+        if [[ "$(MISO_ENGINE_BENCH_POLICY_NEEDLE="$backslash_char_literal" awk -v pat="$awk_pattern" '
+            BEGIN { needle = ENVIRON["MISO_ENGINE_BENCH_POLICY_NEEDLE"] }
             { lines[NR] = $0 }
             $0 ~ pat { starts[NR] = 1 }
             END {
