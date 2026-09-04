@@ -38,7 +38,7 @@ RELEASE_INPUT_FILES = {
     "Cargo.lock",
     "rust-toolchain.toml",
     "scripts/run-release-workspace-tests.sh",
-    ".github/workflows/release-build.yml",
+    ".github/workflows/qualification.yml",
     ".cargo/config.toml",
     "scripts/check-release-shape.py",
 }
@@ -89,7 +89,8 @@ def is_math_closure_path(path: str) -> bool:
 
 
 def is_release_input_path(path: str) -> bool:
-    """The existing release-build.yml PR filter, plus its shape-policy inputs."""
+    """The release-shape inputs: manifests, lockfile, toolchain, the release test runner, the
+    shape policy, and the workflow that hosts the release-shape job itself."""
     return path in RELEASE_INPUT_FILES or path.endswith(RELEASE_INPUT_SUFFIX)
 
 

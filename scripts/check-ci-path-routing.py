@@ -37,7 +37,7 @@ RELEASE_INPUT_FILES = {
     "Cargo.lock",
     "rust-toolchain.toml",
     "scripts/run-release-workspace-tests.sh",
-    ".github/workflows/release-build.yml",
+    ".github/workflows/qualification.yml",
     ".cargo/config.toml",
     "scripts/check-release-shape.py",
 }
@@ -142,7 +142,7 @@ def check_classifier_contract(root: pathlib.Path) -> None:
     release_input_suffix = router_assign(tree, "RELEASE_INPUT_SUFFIX")
     require(isinstance(release_input_suffix, ast.Constant)
             and release_input_suffix.value == RELEASE_INPUT_SUFFIX,
-            "ci-path-router.py: RELEASE_INPUT_SUFFIX drifted from the release-build.yml PR filter")
+            "ci-path-router.py: RELEASE_INPUT_SUFFIX drifted from the release-shape input taxonomy")
     release_input_files = router_assign(tree, "RELEASE_INPUT_FILES")
     require(isinstance(release_input_files, ast.Set),
             "ci-path-router.py: RELEASE_INPUT_FILES must be a literal set")
@@ -285,6 +285,48 @@ def check_qualification_release_shape_guard(text: str) -> None:
             '"$RELEASE_INPUTS" == "true"')
 
 
+ROUTE_VALIDATION_STEP = """      - name: Validate path-routing policy and mutations
+        run: |
+          python3 -B scripts/check-ci-path-routing.py
+          python3 -B scripts/test-ci-path-routing.py
+"""
+
+SDK_CLOSURE_LINES = (
+    "bash scripts/check-sdk-generated.sh",
+    "python3 -B scripts/check-sdk-deletions.py",
+    "python3 -B scripts/check-sdk-deletions.py --self-test",
+    "bash scripts/check-sdk-types.sh",
+    "bash scripts/check-sdk-headless.sh target/ci/qualification-artifacts",
+    "bash scripts/sdk-package.sh check target/ci/qualification-artifacts",
+)
+
+
+def check_qualification_route_job(text: str) -> None:
+    """Stage-3 review S1: the route job is the only place this checker (and so the retired-workflow
+    absence rule) executes in CI. It must validate policy before classifying, and it must check out
+    full history so the router can diff against the real base."""
+    route = job(text, "route")
+    require(ROUTE_VALIDATION_STEP in route,
+            "qualification.yml: route job must run the routing policy checker and its mutations "
+            "before classifying")
+    require("fetch-depth: 0" in route,
+            "qualification.yml: route job must check out full history (fetch-depth: 0)")
+    require(route.index(ROUTE_VALIDATION_STEP) < route.index("scripts/ci-path-router.py"),
+            "qualification.yml: routing policy must be validated before the router runs")
+
+
+def check_qualification_closures(text: str) -> None:
+    """Stage-3 review S2: the SDK closure and the canonical workspace-policy gate were pinned by
+    the retired sdk.yml/ci.yml rules; pin them on the surviving workflow instead."""
+    sdk = job(text, "sdk")
+    for line in SDK_CLOSURE_LINES:
+        require(line in sdk, f"qualification.yml: sdk job is missing {line!r}")
+    lint = job(text, "lint")
+    require("run: bash scripts/check-workspace-policy.sh\n" in lint or
+            "bash scripts/check-workspace-policy.sh\n" in lint,
+            "qualification.yml: lint job must run the canonical check-workspace-policy.sh step")
+
+
 def check_qualification_workflow(root: pathlib.Path) -> None:
     text = (root / ".github/workflows/qualification.yml").read_text(encoding="utf-8")
     check_qualification_no_path_filter(text)
@@ -297,6 +339,8 @@ def check_qualification_workflow(root: pathlib.Path) -> None:
     check_qualification_verdict_permissions(text)
     check_qualification_expectation_table(text, names)
     check_qualification_release_shape_guard(text)
+    check_qualification_route_job(text)
+    check_qualification_closures(text)
 
 
 RETIRED_WORKFLOWS = ("ci.yml", "sdk.yml", "browser-qualification.yml", "release-build.yml")

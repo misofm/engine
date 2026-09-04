@@ -113,12 +113,12 @@ def test_new_router_behaviours() -> None:
     for shared in ("Cargo.lock", "Cargo.toml", "rust-toolchain.toml", ".cargo/config.toml"):
         assert route_flags(shared) == ("full", "true", "true"), shared
 
-    # release_inputs: the existing release-build.yml PR filter (any Cargo.toml, Cargo.lock,
-    # rust-toolchain.toml, the release test runner, the workflow file itself) plus the two
-    # additions (.cargo/config.toml, above, and the new shape-policy script).
+    # release_inputs: any Cargo.toml, Cargo.lock, rust-toolchain.toml, .cargo/config.toml, the
+    # release test runner, the shape-policy script, and qualification.yml itself (it hosts the
+    # release-shape job, so editing that job must select it).
     for release_only in (
         "scripts/run-release-workspace-tests.sh",
-        ".github/workflows/release-build.yml",
+        ".github/workflows/qualification.yml",
         "scripts/check-release-shape.py",
         "crates/session/Cargo.toml",
         "hosts/host-web/Cargo.toml",
