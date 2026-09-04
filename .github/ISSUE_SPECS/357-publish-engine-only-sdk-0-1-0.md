@@ -39,8 +39,9 @@ record is obsolete and must not authorize this release.
 2. Repair the remaining #355 defect with a fixture-tested parser for npm
    11.19.0 trusted-publisher output: empty stdout means absent; one standalone
    JSON object must exactly name GitHub, `misofm/engine`, `npm-publish.yml`, and
-   permission `createPackage`; malformed, multiple, or conflicting documents
-   fail closed.
+   permissions `createPackage` and `createStagedPackage`, which npm returns for
+   a direct-publish grant; malformed, multiple, or conflicting documents fail
+   closed.
 3. Dispatch `qualify` on the exact merged and required-check-green `main` SHA,
    then freeze `main` through publication. `qualification_run_id` is forbidden
    for `qualify` and required for both `publish` and `verify`; it must identify
@@ -55,8 +56,11 @@ record is obsolete and must not authorize this release.
    `bootstrap == 0.0.0`, and absence of `latest` before continuing.
 5. Configure and reread the exact trusted publisher for GitHub repository
    `misofm/engine`, workflow `npm-publish.yml`, with direct publish permission.
-   The fixture-tested parser must return `present` and GitHub `NPM_TOKEN` must
-   remain absent.
+   The fixture-tested parser must return `present` during the interactive
+   operator check and GitHub `NPM_TOKEN` must remain absent. OIDC authorizes
+   `npm publish`, not `npm trust list`, so the workflow must not attempt an
+   authenticated trust-list read; npm's OIDC exchange is the runtime identity
+   enforcement.
 6. Dispatch `publish` once against the successful qualification run. The job
    must reject npm token fallbacks, use GitHub-hosted OIDC, and publish the exact
    qualified archive. After any ambiguous response, use only `verify`.
@@ -109,9 +113,10 @@ artifact pin may change.
 7. The trust parser accepts zero-byte absence or one exact object with only
    `id`, `type`, `file`, `repository`, and `permissions`; the ID is a nonempty
    string and the remaining values are exactly `github`, `npm-publish.yml`,
-   `misofm/engine`, and `[\"createPackage\"]`. Fixtures reject whitespace-only
-   absence, arrays/scalars, malformed or concatenated JSON, duplicate keys,
-   missing/extra fields, and wrong or extra values.
+   `misofm/engine`, and `[\"createPackage\", \"createStagedPackage\"]`.
+   Fixtures reject whitespace-only absence, arrays/scalars, malformed or
+   concatenated JSON, duplicate keys, missing/extra fields, and wrong or extra
+   values.
 8. OIDC `publish` consumes the exact successful qualification artifact, proves
    `0.1.0` absent, and invokes `npm publish` at most once with public access,
    `latest`, ignored lifecycle scripts, and provenance. Verify never publishes.

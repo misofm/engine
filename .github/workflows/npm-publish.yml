@@ -255,14 +255,6 @@ jobs:
           fi
           grep -Eq '(E404|404 Not Found)' target/npm-publish/evidence/registry-before.err || { cat target/npm-publish/evidence/registry-before.err >&2; echo "npm absence check was ambiguous" >&2; exit 1; }
 
-      - name: Require the exact npm trusted publisher before OIDC publication
-        if: inputs.mode == 'publish'
-        run: |
-          set -euo pipefail
-          npm trust list "$PACKAGE_NAME" --json > target/npm-publish/evidence/npm-trust-list.json
-          node scripts/parse-npm-trust-list.mjs < target/npm-publish/evidence/npm-trust-list.json > target/npm-publish/evidence/npm-trust-state.txt
-          [[ "$(<target/npm-publish/evidence/npm-trust-state.txt)" == "present" ]] || { echo "npm trusted publisher is absent" >&2; exit 1; }
-
       - name: Publish the already-smoked archive through OIDC, or verify an ambiguous outcome without retrying
         if: inputs.mode == 'publish'
         run: |

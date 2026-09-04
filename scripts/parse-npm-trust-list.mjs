@@ -100,7 +100,7 @@ try {
   if (actualKeys.length !== expectedKeys.length || actualKeys.some((key, index) => key !== expectedKeys[index])) reject("object keys differ");
   if (typeof entry.id !== "string" || entry.id.length === 0) reject("id is not a nonempty string");
   if (entry.type !== "github" || entry.file !== "npm-publish.yml" || entry.repository !== "misofm/engine") reject("publisher identity differs");
-  if (!Array.isArray(entry.permissions) || entry.permissions.length !== 1 || entry.permissions[0] !== "createPackage") reject("permissions differ");
+  if (!Array.isArray(entry.permissions) || entry.permissions.length !== 2 || entry.permissions[0] !== "createPackage" || entry.permissions[1] !== "createStagedPackage") reject("permissions differ");
   process.stdout.write("present\n");
 } catch (error) {
   process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
