@@ -150,15 +150,14 @@ fn hex(bytes: &[u8; 32]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Compare width 4 and width 8 against the scalar oracle, bit for bit, and check the pinned digest.
-fn check(
+/// Compare width 4 and width 8 against the scalar oracle, bit for bit.
+fn compare_widths(
     name: &str,
     input: &[f32],
     scalar: fn(f32) -> f32,
     wide4: fn(Simd4) -> Simd4,
     wide8: fn(Simd8) -> Simd8,
-    pinned: &[u8; 32],
-) {
+) -> Vec<u32> {
     let oracle = apply::<f32>(input, scalar);
     let four = apply::<Simd4>(input, wide4);
     let eight = apply::<Simd8>(input, wide8);
@@ -180,6 +179,20 @@ fn check(
         );
     }
 
+    oracle
+}
+
+/// Compare width 4 and width 8 against the scalar oracle, then check the scalar digest.
+fn check(
+    name: &str,
+    input: &[f32],
+    scalar: fn(f32) -> f32,
+    wide4: fn(Simd4) -> Simd4,
+    wide8: fn(Simd8) -> Simd8,
+    pinned: &[u8; 32],
+) {
+    let oracle = compare_widths(name, input, scalar, wide4, wide8);
+
     let actual = digest(&oracle);
     if std::env::var_os("MISO_ENGINE_MATH_PIN").is_some() {
         println!("{name} digest: {:?}", actual);
@@ -192,6 +205,54 @@ fn check(
          bits and needs the master plan §8 fixture procedure, not a re-pin",
         hex(&actual),
         hex(pinned)
+    );
+}
+
+/// Inputs whose clamp treatment is the load-bearing premise of LANE-4.
+fn exp2_caller_edges() -> Vec<f32> {
+    let mut values = vec![
+        f32::from_bits(0x7fc0_0000),
+        f32::from_bits(0x7fc0_0001),
+        f32::from_bits(0xffc0_0000),
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+        0.0,
+        -0.0,
+        f32::from_bits(0x0000_0001),
+        f32::from_bits(0x8000_0001),
+        f32::from_bits(0x007f_ffff),
+        f32::from_bits(0x807f_ffff),
+        f32::MIN_POSITIVE,
+        -f32::MIN_POSITIVE,
+    ];
+    for boundary in [-127.0_f32, -126.0, 126.0, 127.0] {
+        let bits = boundary.to_bits();
+        values.push(f32::from_bits(bits - 1));
+        values.push(boundary);
+        values.push(f32::from_bits(bits + 1));
+    }
+    while !values.len().is_multiple_of(8) {
+        values.push(0.0);
+    }
+    values
+}
+
+#[test]
+fn m2_exp2_callers_directed_edges_are_lane_identical() {
+    let input = exp2_caller_edges();
+    compare_widths(
+        "fast_gain_from_db directed edges",
+        &input,
+        math::fast_db::fast_gain_from_db::<f32>,
+        math::fast_db::fast_gain_from_db::<Simd4>,
+        math::fast_db::fast_gain_from_db::<Simd8>,
+    );
+    compare_widths(
+        "exp2_lane directed edges",
+        &input,
+        math::exp2_lane::<f32>,
+        math::exp2_lane::<Simd4>,
+        math::exp2_lane::<Simd8>,
     );
 }
 

@@ -80,6 +80,12 @@ fn compare<L: Lane>(op: Op, width_name: &str, a: &[f32], b: &[f32], c: &[f32]) {
 /// Builds the directed pool for one operation: every ordered pair (and, for ternary operations,
 /// every ordered pair against a rotating third operand) of [`EDGES`].
 fn directed_pool(op: Op) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+    if op == Op::Exp2IntInRange {
+        let a = vec![-126.0, -125.0, -1.0, -0.0, 0.0, 1.0, 126.0, 127.0];
+        let b = vec![0.0; a.len()];
+        let c = vec![0.0; a.len()];
+        return (a, b, c);
+    }
     let (mut a, mut b, mut c) = (Vec::new(), Vec::new(), Vec::new());
     for (left_index, left) in EDGES.iter().enumerate() {
         for (right_index, right) in EDGES.iter().enumerate() {
@@ -125,16 +131,22 @@ fn directed_pool(op: Op) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
 }
 
 /// Builds a seeded random corpus of `vectors * MAX_WIDTH` lanes.
-fn random_pool(vectors: usize, seed: u64) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+fn random_pool(op: Op, vectors: usize, seed: u64) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
     let lanes = vectors * MAX_WIDTH;
     let mut random = Xorshift64Star::new(seed);
     let mut a = Vec::with_capacity(lanes);
     let mut b = Vec::with_capacity(lanes);
     let mut c = Vec::with_capacity(lanes);
     for index in 0..lanes {
-        a.push(random.next_mixed(index));
-        b.push(random.next_mixed(index + 1));
-        c.push(random.next_mixed(index));
+        if op == Op::Exp2IntInRange {
+            a.push((random.next_u32() % 254) as f32 - 126.0);
+            b.push(0.0);
+            c.push(0.0);
+        } else {
+            a.push(random.next_mixed(index));
+            b.push(random.next_mixed(index + 1));
+            c.push(random.next_mixed(index));
+        }
     }
     (a, b, c)
 }
@@ -156,7 +168,7 @@ fn g1_random_vectors_are_lane_identical() {
         } else {
             RANDOM_VECTORS
         };
-        let (a, b, c) = random_pool(vectors, SEED ^ (op.name().len() as u64));
+        let (a, b, c) = random_pool(*op, vectors, SEED ^ (op.name().len() as u64));
         compare::<Simd4>(*op, "Simd4", &a, &b, &c);
         compare::<Simd8>(*op, "Simd8", &a, &b, &c);
     }
