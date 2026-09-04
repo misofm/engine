@@ -13,11 +13,12 @@ The explicit registry is `vectorization-allowlist.tsv`:
   the exact mnemonic token rather than as a substring, so a helper call emitted into a kernel body
   fails the report instead of passing silently.
 
-Native AArch64 (`aarch64-neon`) is unsupported; no claim (owner ruling 2026-09-04, #378): the
-three `aarch64-neon` rows and their probes are retired from the registry. See the deferred-defect
-register in `docs/TARGET_MATRIX.md` and #378, including the Darwin `svf_block` `flush()`
-`bl _memset_pattern16` finding this registry used to carry as a known-red row -- a future revival
-of native AArch64 must reopen that entry before restoring the row.
+Native AArch64 (`aarch64-neon`) is unsupported; no claim (owner ruling 2026-09-04, #378): the three
+`aarch64-neon` rows are retired from the registry. See the deferred-defect register in
+`docs/TARGET_MATRIX.md` and #378, including the Darwin `svf_block` `flush()` `bl _memset_pattern16`
+finding this registry used to carry as a known-red row -- a future revival of native AArch64 must
+reopen that entry before restoring the row. On an aarch64 host the audit is red by design:
+`certify()` reports `allowlist registry mismatch for aarch64-neon` until the rows are restored.
 
 The subject artifact is intentionally reported as
 `release_probe_instantiations_of_production_kernels`. It is the release

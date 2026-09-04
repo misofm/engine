@@ -30,9 +30,8 @@ compile, not deployment defaults.
 
 ## Reproducible checks
 
-The pinned `rust-toolchain.toml` installs Rust 1.97.1 with `clippy`, `rustfmt`, and browser Wasm,
-Android ARM64, and iOS ARM64 standard libraries. After the workspace exists, the relevant commands
-are:
+The pinned `rust-toolchain.toml` installs Rust 1.97.1 with `clippy`, `rustfmt`, and the browser
+Wasm standard library. After the workspace exists, the relevant commands are:
 
 ```bash
 cargo check --locked --workspace --all-targets
