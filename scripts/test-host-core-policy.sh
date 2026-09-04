@@ -83,4 +83,12 @@ expect_failure host-web-recompiles-the-pipeline \
 expect_failure host-web-reinvents-the-identity-processor \
     'printf "%s\n" "struct IdentityBinding;" >>"$root/hosts/host-web/src/lib.rs"'
 
+# S9: `! rg ...` fails open on rg exit 2 (a missing search root), and `[ -d "$host" ] || continue`
+# silently drops a host whose src/ directory disappears -- both must now be hard failures rather
+# than a vacuous "ok".
+expect_failure host-web-src-directory-deleted \
+    'rm -rf -- "$root/hosts/host-web/src"'
+expect_failure capi-src-directory-deleted \
+    'rm -rf -- "$root/crates/capi/src"'
+
 printf 'host-core policy mutation tests: ok\n'
