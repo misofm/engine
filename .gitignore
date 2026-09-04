@@ -32,3 +32,4 @@
 # because they run under Node native type stripping.
 sdk/node_modules/
 sdk/dist/
+.claude/worktrees/
