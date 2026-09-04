@@ -58,7 +58,7 @@ pub(crate) const RENDER_DIAGNOSTIC_CODE: &str = "capi.render.activity";
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum TestStructuralFaultPhase {
     AfterProtocolPrepare,
-    AfterResourceProjection,
+    BeforeRuntimePrepare,
     AfterRuntimePrepare,
     AfterAdmission,
     AfterPlanReservation,
@@ -702,6 +702,11 @@ impl SessionState {
                         required: u64::try_from(response_len).unwrap_or(u64::MAX),
                     });
                 }
+                #[cfg(test)]
+                if self.take_test_fault(TestStructuralFaultPhase::BeforeRuntimePrepare) {
+                    drop(prepared);
+                    return Err(CommandError::Backpressure);
+                }
                 let prepared_runtime = match STRUCTURAL_SOURCE_STATE_POLICY {
                     StructuralSourceStatePolicy::ResetAtReplacementBoundary => prepare_runtime(
                         prepared.get().prospective_session().compiled(),
@@ -716,14 +721,6 @@ impl SessionState {
                     control_catalog: candidate_catalog,
                     capi: prospective_capi,
                 } = prepared_runtime;
-                #[cfg(test)]
-                if self.take_test_fault(TestStructuralFaultPhase::AfterResourceProjection) {
-                    drop(candidate_plan);
-                    drop(candidate_catalog);
-                    drop(sources);
-                    drop(prepared);
-                    return Err(CommandError::Backpressure);
-                }
                 let mut candidate_provider = ProviderEpoch::candidate(sources);
                 let candidate_plan = ObservedCandidatePlan::new(candidate_plan);
                 #[cfg(test)]

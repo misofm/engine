@@ -403,8 +403,9 @@ pub(crate) fn prepare_runtime(
     limits: CompileLimits,
 ) -> Result<PreparedRuntime, CompileFailure> {
     let caps = prepare_caps(limits);
-    // Shape first, so an unsupported rate or a bad ring is reported before capi spends the
-    // pre-flight projection on a session it will refuse anyway.
+    // Shape still runs before host/runtime allocation. The exact provider catalog exists only
+    // after shared host preparation, so CAPI retained-resource admission necessarily follows the
+    // full plan allocation; #369 records that allocation and diagnostic-precedence consequence.
     caps.validate_shape(compiled).map_err(prepare_failure)?;
     let prepared = prepare_host_runtime(compiled, &caps).map_err(prepare_failure)?;
     let (capi, _) = prepared_capi_resources(compiled, &prepared.control_catalog, limits)?;

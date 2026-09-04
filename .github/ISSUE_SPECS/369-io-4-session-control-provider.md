@@ -53,15 +53,18 @@ continues to own protocol queues, replay, transport dispatch, render diagnostic 
 plan exchange. `PlanSampleSource` is a read-only shared projection; it adds no render operation and
 uses the C ABI's existing release/acquire sample publication.
 
-The retained lifecycle fixture's active CAPI row is re-derived from 149,862 bytes after the fixture
-provider type replacement, plus 10,800 bytes of soft-clip catalog storage and 282 bytes of bounded
-diagnostic projection storage, for 160,933 bytes. The double-live CAPI admission is 204,375 bytes.
-The existing 58,804-byte canonical writer remains the largest named allocation for that fixture.
+The retained lifecycle fixture's active CAPI row is re-derived from 149,851 bytes after the fixture
+provider type replacement and subtraction of the removed mock strings (`4 + 7` bytes), plus 10,800
+bytes of soft-clip catalog storage and 282 bytes of bounded diagnostic projection storage, for
+160,933 bytes. The double-live CAPI admission is 204,375 bytes. The existing 58,804-byte canonical
+writer remains the largest named allocation for that fixture.
 
 Revision attempt 2 snapshots the catalog before graph lowering from the accepted prepared entries,
 reserves at least three provider counter records, and narrows the #103 policy exception to an exact
-optional edge enabled only by capi. The default host-web graph remains protocol-free. Adding the
-declared host-core feature still changes the reproducible linked crate identity; the full shipped
-AudioWorklet lineage is refreshed from `6dcd9ced…61e5` to `d02f6fbb…f238`.
+optional edge enabled only by capi. The default host-web graph remains protocol-free. Both the
+manifest change and the `#[cfg]`-guarded host-core source edits affect the reproducible linked crate
+identity: applying only the host-core `Cargo.toml`/`Cargo.lock` change to main builds
+`bf403ee6…`, not the final `d02f6fbb…`. The full shipped AudioWorklet lineage for the complete
+source change is refreshed from `6dcd9ced…61e5` to `d02f6fbb…f238`.
 
 Final command outputs and commit/PR identity are recorded in the pull request.

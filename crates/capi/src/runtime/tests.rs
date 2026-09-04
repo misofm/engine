@@ -211,6 +211,124 @@ fn command_c_capacity(
     (result, output.required_bytes, storage)
 }
 
+#[test]
+fn c_commands_publish_the_replacement_parameter_catalog() {
+    let (c_session, c_plan) = boxed_c_children(SESSION);
+    let edit = protocol::SessionEdit::RemoveTrackEffect {
+        track_id: session::StableId::parse("eq0").expect("track ID"),
+        rack_name: session::RackName::Simd1,
+        effect_id: session::StableId::parse("eq").expect("effect ID"),
+    };
+    let replace = command_bytes_at_revision(
+        1,
+        ExpectedRevision::Exact(SessionRevision(42)),
+        protocol::CommandPayload::SessionTransactionApply(core::slice::from_ref(&edit)),
+    );
+    assert_eq!(command_c(c_session, &replace).0, crate::RESULT_OK);
+
+    let metadata = command_bytes_at_revision(
+        2,
+        ExpectedRevision::Exact(SessionRevision(43)),
+        protocol::CommandPayload::ParameterMetadataGet(protocol::ParameterMetadataRequest {
+            after_handle: 0,
+            limit: 1,
+        }),
+    );
+    let (result, response) = command_c(c_session, &metadata);
+    assert_eq!(result, crate::RESULT_OK);
+    let mut fields = [0_u16; 512];
+    let protocol::DecodedTypedResponseFrame::Success {
+        header,
+        payload: protocol::DecodedSuccessResponsePayload::ParameterMetadata(page),
+    } = ProtocolCodec::default()
+        .decode_typed_response(&response, &mut DecodeScratch::new(&mut fields))
+        .expect("replacement metadata response")
+    else {
+        panic!("expected replacement metadata success")
+    };
+    assert_eq!(header.revision, SessionRevision(43));
+    assert_eq!(page.descriptors.len(), 1);
+    assert_eq!(page.descriptors[0].handle, 1);
+    assert_eq!(page.descriptors[0].track_id, "eq1");
+    assert_eq!(page.descriptors[0].rack, protocol::ParameterRack::Simd1);
+
+    crate::ffi::test_plan_destroy(c_plan);
+    crate::ffi::test_session_destroy(c_session);
+}
+
+#[test]
+fn c_commands_observe_the_rendered_plan_sample() {
+    let (c_session, c_plan) = boxed_c_children(SESSION);
+    let codec = ProtocolCodec::default();
+    let initial_transport = command_bytes(1, protocol::CommandPayload::TransportGet);
+    let (result, response) = command_c(c_session, &initial_transport);
+    assert_eq!(result, crate::RESULT_OK);
+    let mut fields = [0_u16; 64];
+    let protocol::DecodedTypedResponseFrame::Success {
+        payload: protocol::DecodedSuccessResponsePayload::TransportGetSnapshot(initial),
+        ..
+    } = codec
+        .decode_typed_response(&response, &mut DecodeScratch::new(&mut fields))
+        .expect("initial transport response")
+    else {
+        panic!("expected initial transport success")
+    };
+    assert_eq!(initial.effective_sample, protocol::SampleTime(0));
+
+    let mut pcm = [f32::NAN; 256];
+    let output = crate::PlanarOutput {
+        struct_size: crate::PLANAR_OUTPUT_SIZE,
+        channels: 2,
+        samples: pcm.as_mut_ptr(),
+        sample_capacity: pcm.len() as u64,
+        frames: 128,
+        plane_stride_samples: 128,
+        reserved: [0; 2],
+    };
+    assert_eq!(
+        crate::ffi::test_render(c_plan, 0, &output),
+        crate::RESULT_OK
+    );
+
+    let state = command_bytes(
+        2,
+        protocol::CommandPayload::ParameterStateGet(&protocol::ParameterStateRequest {
+            handles: vec![1],
+        }),
+    );
+    let (result, response) = command_c(c_session, &state);
+    assert_eq!(result, crate::RESULT_OK);
+    let mut fields = [0_u16; 64];
+    let protocol::DecodedTypedResponseFrame::Success {
+        payload: protocol::DecodedSuccessResponsePayload::ParameterState(state),
+        ..
+    } = codec
+        .decode_typed_response(&response, &mut DecodeScratch::new(&mut fields))
+        .expect("rendered parameter-state response")
+    else {
+        panic!("expected parameter-state success")
+    };
+    assert_eq!(state.observed_sample, 128);
+
+    let transport = command_bytes(3, protocol::CommandPayload::TransportGet);
+    let (result, response) = command_c(c_session, &transport);
+    assert_eq!(result, crate::RESULT_OK);
+    let mut fields = [0_u16; 64];
+    let protocol::DecodedTypedResponseFrame::Success {
+        payload: protocol::DecodedSuccessResponsePayload::TransportGetSnapshot(transport),
+        ..
+    } = codec
+        .decode_typed_response(&response, &mut DecodeScratch::new(&mut fields))
+        .expect("rendered transport response")
+    else {
+        panic!("expected rendered transport success")
+    };
+    assert_eq!(transport.effective_sample, protocol::SampleTime(128));
+
+    crate::ffi::test_plan_destroy(c_plan);
+    crate::ffi::test_session_destroy(c_session);
+}
+
 fn event_c(session: *mut crate::Session, lane: u32) -> (u32, Vec<u8>) {
     let (result, _, storage) = event_c_capacity(session, lane, 4_096);
     (result, storage)
@@ -932,13 +1050,13 @@ fn plan_first_destroy_guards_structural_publication_without_visible_mutation() {
 #[test]
 fn every_structural_phase_and_ordered_dual_fault_preserves_owners_and_credits() {
     use TestStructuralFaultPhase::{
-        AfterAdmission, AfterPlanReservation, AfterProtocolPrepare, AfterResourceProjection,
-        AfterRuntimePrepare, BeforeProtocolCommit,
+        AfterAdmission, AfterPlanReservation, AfterProtocolPrepare, AfterRuntimePrepare,
+        BeforeProtocolCommit, BeforeRuntimePrepare,
     };
 
     const PHASES: [TestStructuralFaultPhase; 6] = [
         AfterProtocolPrepare,
-        AfterResourceProjection,
+        BeforeRuntimePrepare,
         AfterRuntimePrepare,
         AfterAdmission,
         AfterPlanReservation,
