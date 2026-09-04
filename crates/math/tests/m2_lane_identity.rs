@@ -1,3 +1,5 @@
+#![allow(clippy::disallowed_methods)] // identity gate for the sealed fast-dB caller
+
 //! Gate M2 — `exp2_lane` and `log2_lane` produce identical bits at every lane width.
 //!
 //! The scalar `impl Lane for f32` is the oracle (master plan §3.2): a width-N result must be the

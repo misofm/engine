@@ -53,3 +53,24 @@ generated product artifacts are outside scope. If a production change is require
 - The browser qualification `candidateCommit` squash-merge convention and #384's immutable merge
   trailer are recorded by #388 but are not part of its done conditions or this evidence-only
   change.
+
+## Evidence record
+
+- G1 now routes `exp2_int_in_range` through the scalar/Simd4/Simd8 table over every legal integer
+  in `[-126, 127]`; its two existing identity tests pass, and the original `exp2_int` operation
+  and exactness test remain.
+- M2's directed caller test passes over NaN payloads, infinities, signed zero, subnormals, minimum
+  normals, and the one-ULP neighbourhoods of `-127`, `-126`, `126`, and `127`.
+- Exact workspace tests pass at detached `origin/main`
+  (`879269886102664f1c2194ee15b44fab528075c2`) and at committed candidate
+  `a55234beafca0222266af4308cabc8a1759c8a63`; the candidate adds exactly the one named M2 test.
+- The benchmark runner's new unconsumed arm completed exactly once with disposition
+  `PASS/complete`, one warmup and two measured rounds. The uncontrolled-host override is recorded,
+  so this is reproducibility evidence and not a performance acceptance claim.
+- Full retained `llvm-objdump` output shows both requested callers going from two `vmaxps` plus two
+  `vminps` at `9c062318` to one of each at `2b38ba7f`.
+- Formatting, full workspace clippy, runner validator/mutation tests, realtime policy, artifact
+  validation, and diff hygiene pass. No production source is changed.
+- PR #384 and the implementer-authored #349 note are corrected after this evidence checkpoint is
+  pushed. The #388 PR remains open for Fable verification and merge; Codex does not review or
+  merge it.
