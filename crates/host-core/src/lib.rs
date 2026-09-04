@@ -89,6 +89,7 @@
 //!   attested. [`PreparedHost`] stays `Send`, because moving *preparation* to the render thread is
 //!   the supported hand-off.
 
+#[cfg(feature = "control-provider")]
 pub mod control_provider;
 pub mod diagnostics;
 pub mod prepare;
@@ -97,6 +98,7 @@ pub mod shape;
 pub mod solo;
 pub mod source;
 
+#[cfg(feature = "control-provider")]
 pub use control_provider::{
     PlanSampleSource, PreparedSessionControlCatalog, SessionControlProvider,
     SessionControlProviderError, SessionControlProviderResources,

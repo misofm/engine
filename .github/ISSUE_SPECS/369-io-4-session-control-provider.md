@@ -14,10 +14,9 @@ automation drain, other IO audit rows, crate renames, dependency updates, or new
 
 ## Product contract
 
-- Parameter metadata walks normalized tracks, racks, effect declarations and the same launch
-  native effect descriptors used by preparation. Handles are nonzero, strictly increasing and
-  revision-scoped.
-- Parameter state reflects the compiled declaration or descriptor default in handle order.
+- Parameter metadata is snapshotted from the exact accepted `EffectPreparedEntry` descriptors.
+  Handles are nonzero, strictly increasing and revision-scoped.
+- Parameter state reflects the matching accepted `bank_preparation.initial_values` in handle order.
 - Automation domain admission uses the corresponding real descriptor.
 - Current/effective sample reads the live plan's published next absolute sample.
 - Transport is endpoint-local absolute state/position with that effective sample.
@@ -27,6 +26,10 @@ automation drain, other IO audit rows, crate renames, dependency updates, or new
 - A structural replacement fully allocates its candidate catalog before protocol commit and
   publishes the catalog only after commit succeeds.
 - Retained-resource admission includes active and candidate provider catalog allocations.
+- Provider counters retain and account for all three owned slots independently of frame-derived
+  telemetry configuration capacity.
+- Host-core's adapter is optional and non-default; only capi enables it, preserving the default
+  browser dependency boundary.
 
 ## Verification gates
 
@@ -44,7 +47,8 @@ policy gate is required by the finding.
 
 ## Decision and evidence record
 
-The provider belongs in `host-core`: descriptor preparation is already shared there and the C ABI
+The provider belongs in `host-core` behind its non-default `control-provider` feature: descriptor
+preparation is already shared there and the C ABI
 continues to own protocol queues, replay, transport dispatch, render diagnostic reservations and
 plan exchange. `PlanSampleSource` is a read-only shared projection; it adds no render operation and
 uses the C ABI's existing release/acquire sample publication.
@@ -53,5 +57,11 @@ The retained lifecycle fixture's active CAPI row is re-derived from 149,862 byte
 provider type replacement, plus 10,800 bytes of soft-clip catalog storage and 282 bytes of bounded
 diagnostic projection storage, for 160,933 bytes. The double-live CAPI admission is 204,375 bytes.
 The existing 58,804-byte canonical writer remains the largest named allocation for that fixture.
+
+Revision attempt 2 snapshots the catalog before graph lowering from the accepted prepared entries,
+reserves at least three provider counter records, and narrows the #103 policy exception to an exact
+optional edge enabled only by capi. The default host-web graph remains protocol-free. Adding the
+declared host-core feature still changes the reproducible linked crate identity; the full shipped
+AudioWorklet lineage is refreshed from `6dcd9ced…61e5` to `d02f6fbb…f238`.
 
 Final command outputs and commit/PR identity are recorded in the pull request.

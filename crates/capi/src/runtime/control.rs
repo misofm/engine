@@ -702,20 +702,6 @@ impl SessionState {
                         required: u64::try_from(response_len).unwrap_or(u64::MAX),
                     });
                 }
-                let (prospective_capi, _) = compiled_capi_resources(
-                    prepared.get().prospective_session().compiled(),
-                    self.limits,
-                )
-                .map_err(CommandError::CompileRejected)?;
-                let candidate_catalog = SessionControlProvider::prepare_session(
-                    prepared.get().prospective_session().compiled(),
-                )
-                .map_err(|_| CommandError::CompileRejected(failure("capi.resource.allocation")))?;
-                #[cfg(test)]
-                if self.take_test_fault(TestStructuralFaultPhase::AfterResourceProjection) {
-                    drop(prepared);
-                    return Err(CommandError::Backpressure);
-                }
                 let prepared_runtime = match STRUCTURAL_SOURCE_STATE_POLICY {
                     StructuralSourceStatePolicy::ResetAtReplacementBoundary => prepare_runtime(
                         prepared.get().prospective_session().compiled(),
@@ -727,7 +713,17 @@ impl SessionState {
                     sources,
                     plan: candidate_plan,
                     resources,
+                    control_catalog: candidate_catalog,
+                    capi: prospective_capi,
                 } = prepared_runtime;
+                #[cfg(test)]
+                if self.take_test_fault(TestStructuralFaultPhase::AfterResourceProjection) {
+                    drop(candidate_plan);
+                    drop(candidate_catalog);
+                    drop(sources);
+                    drop(prepared);
+                    return Err(CommandError::Backpressure);
+                }
                 let mut candidate_provider = ProviderEpoch::candidate(sources);
                 let candidate_plan = ObservedCandidatePlan::new(candidate_plan);
                 #[cfg(test)]

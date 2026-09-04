@@ -2378,3 +2378,31 @@ fn external_primitive_double_live_oracle_drives_exact_and_one_below_c_caps() {
         }
     }
 }
+
+#[test]
+fn tiny_control_frame_still_accounts_three_provider_counters_exactly() {
+    let mut roomy = limits();
+    roomy.maximum_control_frame_bytes = 1;
+    // SAFETY: Each returned child is uniquely owned and destroyed exactly once below.
+    let required = unsafe {
+        let (session, plan) = compile_c(SESSION, &roomy);
+        let required = resources_c(plan).capi_retained_bytes;
+        miso_engine_v1_session_destroy(session);
+        miso_engine_v1_plan_destroy(plan);
+        required
+    };
+    assert_eq!(required, 178_466, "tiny-frame retained authority");
+    let mut exact = roomy;
+    exact.maximum_capi_retained_bytes = required;
+    // SAFETY: Exact admission returns two uniquely owned children.
+    unsafe {
+        let (session, plan) = compile_c(SESSION, &exact);
+        assert_eq!(resources_c(plan).capi_retained_bytes, required);
+        miso_engine_v1_session_destroy(session);
+        miso_engine_v1_plan_destroy(plan);
+    }
+    let mut below = roomy;
+    below.maximum_capi_retained_bytes = required - 1;
+    // SAFETY: The helper verifies atomic rejection without published children.
+    unsafe { compile_rejected_c(SESSION, &below) };
+}

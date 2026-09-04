@@ -2,9 +2,10 @@
 
 use std::sync::Arc;
 
-use effect_compiler::launch_native_effect_registry;
+use effect_compiler::{EffectPreparedEntry, EffectRack};
 use effect_contract::{
-    AutomationRate, ParameterChannelPolicy, ParameterDomain, ParameterMapping, ParameterUnit,
+    AutomationRate, ParameterChannel as PreparedChannel, ParameterChannelPolicy, ParameterDomain,
+    ParameterMapping, ParameterUnit,
 };
 use protocol::{
     ControlProvider, ControllerRetainedCapacity, CounterId, CounterSnapshot, CounterValue,
@@ -16,7 +17,8 @@ use protocol::{
     ParameterValueKind, SampleTime, TelemetryConfiguration, TelemetryCounters, TransportSetRequest,
     TransportSnapshot, TransportState,
 };
-use session::{CompiledSession, EffectIdentity, ParameterChannel as SessionChannel, RackName};
+
+const PROVIDER_COUNTER_SLOTS: usize = 3;
 
 /// Read-only, thread-safe projection of the active render plan's next absolute sample.
 pub trait PlanSampleSource: Send + Sync {
@@ -59,84 +61,41 @@ pub struct SessionControlProvider {
 }
 
 impl SessionControlProvider {
-    /// Project the allocations made by [`Self::try_new`] from the same descriptor authority.
+    /// Project the allocations made by [`Self::try_new`] from its already prepared catalog.
     pub fn resource_report(
-        compiled: &CompiledSession,
+        catalog: &PreparedSessionControlCatalog,
+        retained: ControllerRetainedCapacity,
         diagnostic_capacity: usize,
     ) -> Result<SessionControlProviderResources, SessionControlProviderError> {
-        let registry = launch_native_effect_registry().map_err(|_| SessionControlProviderError)?;
-        let mut descriptor_count = 0_usize;
+        let descriptor_count = catalog.parameter_metadata.len();
         let mut enum_count = 0_usize;
         let mut string_bytes = 0_usize;
         let mut largest_string = 0_u64;
         let mut largest_enum = 0_u64;
-        for track in &compiled.normalized_model().tracks {
-            for effects in [
-                &track.simd1.effects,
-                &track.dynamic.effects,
-                &track.simd2.effects,
+        for descriptor in &catalog.parameter_metadata {
+            enum_count = enum_count
+                .checked_add(descriptor.enum_choices.len())
+                .ok_or(SessionControlProviderError)?;
+            largest_enum = largest_enum.max(bytes::<EnumChoice>(descriptor.enum_choices.len())?);
+            for value in [
+                descriptor.track_id.as_str(),
+                descriptor.effect_id.as_str(),
+                descriptor.display_name.as_deref().unwrap_or_default(),
+                descriptor.display_unit.as_deref().unwrap_or_default(),
             ] {
-                for effect in effects {
-                    let EffectIdentity::Native { effect_id } = &effect.identity else {
-                        continue;
-                    };
-                    let descriptor = registry
-                        .get_ascii(effect_id.as_str())
-                        .ok_or(SessionControlProviderError)?
-                        .descriptor();
-                    for parameter in descriptor.parameters {
-                        let channels = match parameter.channel_policy {
-                            ParameterChannelPolicy::Shared => 1,
-                            ParameterChannelPolicy::PerLane => 2,
-                        };
-                        descriptor_count = descriptor_count
-                            .checked_add(channels)
-                            .ok_or(SessionControlProviderError)?;
-                        enum_count = enum_count
-                            .checked_add(
-                                parameter
-                                    .enum_choices
-                                    .len()
-                                    .checked_mul(channels)
-                                    .ok_or(SessionControlProviderError)?,
-                            )
-                            .ok_or(SessionControlProviderError)?;
-                        largest_enum =
-                            largest_enum.max(bytes::<EnumChoice>(parameter.enum_choices.len())?);
-                        for value in [
-                            track.id.as_str(),
-                            effect.id.as_str(),
-                            parameter.display_name,
-                            parameter.display_unit,
-                        ] {
-                            let bytes = value
-                                .len()
-                                .checked_mul(channels)
-                                .ok_or(SessionControlProviderError)?;
-                            string_bytes = string_bytes
-                                .checked_add(bytes)
-                                .ok_or(SessionControlProviderError)?;
-                            largest_string = largest_string.max(
-                                u64::try_from(value.len())
-                                    .map_err(|_| SessionControlProviderError)?,
-                            );
-                        }
-                        for choice in parameter.enum_choices {
-                            let bytes = choice
-                                .label
-                                .len()
-                                .checked_mul(channels)
-                                .ok_or(SessionControlProviderError)?;
-                            string_bytes = string_bytes
-                                .checked_add(bytes)
-                                .ok_or(SessionControlProviderError)?;
-                            largest_string = largest_string.max(
-                                u64::try_from(choice.label.len())
-                                    .map_err(|_| SessionControlProviderError)?,
-                            );
-                        }
-                    }
-                }
+                string_bytes = string_bytes
+                    .checked_add(value.len())
+                    .ok_or(SessionControlProviderError)?;
+                largest_string = largest_string
+                    .max(u64::try_from(value.len()).map_err(|_| SessionControlProviderError)?);
+            }
+            for choice in &descriptor.enum_choices {
+                string_bytes = string_bytes
+                    .checked_add(choice.label.len())
+                    .ok_or(SessionControlProviderError)?;
+                largest_string = largest_string.max(
+                    u64::try_from(choice.label.len()).map_err(|_| SessionControlProviderError)?,
+                );
             }
         }
         let metadata_bytes = bytes::<ParameterDescriptor>(descriptor_count)?;
@@ -153,6 +112,8 @@ impl SessionControlProvider {
             .ok_or(SessionControlProviderError)?;
         let diagnostics_bytes = bytes::<Diagnostic>(diagnostic_capacity)?;
         let diagnostic_live_bytes = bytes::<bool>(diagnostic_capacity)?;
+        let counter_snapshot_bytes =
+            bytes::<CounterValue>(retained.counter_ids.max(PROVIDER_COUNTER_SLOTS))?;
         let diagnostic_code_bytes = "capi.render.activity"
             .len()
             .checked_mul(diagnostic_capacity)
@@ -162,6 +123,7 @@ impl SessionControlProvider {
         let fixed_retained_bytes = diagnostics_bytes
             .checked_add(diagnostic_live_bytes)
             .and_then(|value| value.checked_add(diagnostic_code_bytes))
+            .and_then(|value| value.checked_add(counter_snapshot_bytes))
             .ok_or(SessionControlProviderError)?;
         Ok(SessionControlProviderResources {
             catalog_retained_bytes,
@@ -172,6 +134,7 @@ impl SessionControlProvider {
                 .max(largest_string)
                 .max(diagnostics_bytes)
                 .max(diagnostic_live_bytes)
+                .max(counter_snapshot_bytes)
                 .max(
                     diagnostic_code_bytes
                         / u64::try_from(diagnostic_capacity.max(1))
@@ -182,7 +145,7 @@ impl SessionControlProvider {
 
     /// Build the complete revision-scoped effect catalog before the endpoint is published.
     pub fn try_new(
-        compiled: &CompiledSession,
+        catalog: PreparedSessionControlCatalog,
         sample_source: Arc<dyn PlanSampleSource>,
         retained: ControllerRetainedCapacity,
         diagnostic_capacity: usize,
@@ -200,7 +163,7 @@ impl SessionControlProvider {
         };
         provider
             .counter_snapshot
-            .try_reserve_exact(retained.counter_ids)
+            .try_reserve_exact(retained.counter_ids.max(PROVIDER_COUNTER_SLOTS))
             .map_err(|_| SessionControlProviderError)?;
         provider
             .diagnostics
@@ -222,15 +185,15 @@ impl SessionControlProvider {
             });
             provider.diagnostic_live.push(false);
         }
-        provider.replace_session_catalog(Self::prepare_session(compiled)?);
+        provider.replace_session_catalog(catalog);
         Ok(provider)
     }
 
     /// Allocate a complete candidate catalog without mutating the live provider.
     pub fn prepare_session(
-        compiled: &CompiledSession,
+        entries: &[EffectPreparedEntry],
     ) -> Result<PreparedSessionControlCatalog, SessionControlProviderError> {
-        let (metadata, state) = build_parameter_catalog(compiled)?;
+        let (metadata, state) = build_parameter_catalog(entries)?;
         Ok(PreparedSessionControlCatalog {
             parameter_metadata: metadata,
             parameter_state: state,
@@ -455,35 +418,23 @@ impl ControlProvider for SessionControlProvider {
 }
 
 fn build_parameter_catalog(
-    compiled: &CompiledSession,
+    entries: &[EffectPreparedEntry],
 ) -> Result<(Vec<ParameterDescriptor>, Vec<ParameterStateRecord>), SessionControlProviderError> {
-    let registry = launch_native_effect_registry().map_err(|_| SessionControlProviderError)?;
-    let count = compiled
-        .normalized_model()
-        .tracks
-        .iter()
-        .flat_map(|track| [&track.simd1, &track.dynamic, &track.simd2])
-        .flat_map(|rack| &rack.effects)
-        .try_fold(0_usize, |total, effect| {
-            let EffectIdentity::Native { effect_id } = &effect.identity else {
-                return Ok(total);
-            };
-            let descriptor = registry
-                .get_ascii(effect_id.as_str())
-                .ok_or(SessionControlProviderError)?
-                .descriptor();
-            descriptor
-                .parameters
-                .iter()
-                .try_fold(total, |total, parameter| {
-                    total
-                        .checked_add(match parameter.channel_policy {
-                            ParameterChannelPolicy::Shared => 1,
-                            ParameterChannelPolicy::PerLane => 2,
-                        })
-                        .ok_or(SessionControlProviderError)
-                })
-        })?;
+    let count = entries.iter().try_fold(0_usize, |total, entry| {
+        entry
+            .metadata
+            .descriptor
+            .parameters
+            .iter()
+            .try_fold(total, |total, parameter| {
+                total
+                    .checked_add(match parameter.channel_policy {
+                        ParameterChannelPolicy::Shared => 1,
+                        ParameterChannelPolicy::PerLane => 2,
+                    })
+                    .ok_or(SessionControlProviderError)
+            })
+    })?;
     if count > u32::MAX as usize {
         return Err(SessionControlProviderError);
     }
@@ -496,91 +447,70 @@ fn build_parameter_catalog(
         .try_reserve_exact(count)
         .map_err(|_| SessionControlProviderError)?;
     let mut handle = 1_u32;
-    for track in &compiled.normalized_model().tracks {
-        for (rack, effects) in [
-            (RackName::Simd1, &track.simd1.effects),
-            (RackName::Dynamic, &track.dynamic.effects),
-            (RackName::Simd2, &track.simd2.effects),
-        ] {
-            for effect in effects {
-                let EffectIdentity::Native { effect_id } = &effect.identity else {
-                    continue;
+    for entry in entries {
+        let descriptor = entry.metadata.descriptor;
+        for (parameter_index, parameter) in descriptor.parameters.iter().enumerate() {
+            let channels: &[ParameterChannel] = match parameter.channel_policy {
+                ParameterChannelPolicy::Shared => &[ParameterChannel::Both],
+                ParameterChannelPolicy::PerLane => {
+                    &[ParameterChannel::Left, ParameterChannel::Right]
+                }
+            };
+            for channel in channels {
+                let prepared_channel = match channel {
+                    ParameterChannel::Left => PreparedChannel::Left,
+                    ParameterChannel::Right => PreparedChannel::Right,
+                    ParameterChannel::Both => PreparedChannel::Both,
                 };
-                let descriptor = registry
-                    .get_ascii(effect_id.as_str())
-                    .ok_or(SessionControlProviderError)?
-                    .descriptor();
-                for parameter in descriptor.parameters {
-                    let channels: &[ParameterChannel] = match parameter.channel_policy {
-                        ParameterChannelPolicy::Shared => &[ParameterChannel::Both],
-                        ParameterChannelPolicy::PerLane => {
-                            &[ParameterChannel::Left, ParameterChannel::Right]
-                        }
-                    };
-                    for channel in channels {
-                        let matching = effect
-                            .params
-                            .iter()
-                            .filter(|item| item.parameter_id == parameter.id.0);
-                        let requested = matching
-                            .clone()
-                            .find(|item| ParameterChannel::from(item.channel) == *channel)
-                            .or_else(|| {
-                                (parameter.channel_policy == ParameterChannelPolicy::PerLane)
-                                    .then(|| {
-                                        matching
-                                            .clone()
-                                            .find(|item| item.channel == SessionChannel::Both)
-                                    })
-                                    .flatten()
-                            });
-                        let value = effect_contract::normalize_zero(
-                            requested.map_or(parameter.default_value, |item| item.value),
-                        );
-                        let flags = u32::from(parameter.readable)
-                            | (u32::from(parameter.automatable) << 1)
-                            | (u32::from(
-                                parameter.channel_policy == ParameterChannelPolicy::PerLane,
-                            ) << 2);
-                        metadata.push(ParameterDescriptor {
-                            handle,
-                            track_id: try_string(track.id.as_str())?,
-                            rack: ParameterRack::from(rack),
-                            effect_id: try_string(effect.id.as_str())?,
-                            parameter_id: parameter.id.0,
-                            channel: *channel,
-                            value_kind: ParameterValueKind::F32,
-                            unit: protocol_unit(parameter.unit),
-                            domain: protocol_domain(parameter.domain),
-                            minimum: parameter.minimum,
-                            maximum: parameter.maximum,
-                            default: parameter.default_value,
-                            mapping: protocol_mapping(parameter.mapping),
-                            automation_rate: protocol_rate(parameter.automation_rate),
-                            smoothing_samples: parameter.smoothing_samples,
-                            flags,
-                            display_name: Some(try_string(parameter.display_name)?),
-                            display_unit: Some(try_string(parameter.display_unit)?),
-                            enum_choices: parameter
-                                .enum_choices
-                                .iter()
-                                .map(|choice| {
-                                    Ok(EnumChoice {
-                                        value: choice.value,
-                                        label: try_string(choice.label)?,
-                                    })
-                                })
-                                .collect::<Result<Vec<_>, SessionControlProviderError>>()?,
-                        });
-                        state.push(ParameterStateRecord {
-                            handle,
-                            flags: 1,
-                            value,
-                        });
-                        if metadata.len() < count {
-                            handle = handle.checked_add(1).ok_or(SessionControlProviderError)?;
-                        }
-                    }
+                let prepared = entry
+                    .bank_preparation
+                    .initial_values
+                    .iter()
+                    .find(|value| {
+                        value.parameter_index as usize == parameter_index
+                            && value.channel == prepared_channel
+                    })
+                    .ok_or(SessionControlProviderError)?;
+                let flags = u32::from(parameter.readable)
+                    | (u32::from(parameter.automatable) << 1)
+                    | (u32::from(parameter.channel_policy == ParameterChannelPolicy::PerLane) << 2);
+                metadata.push(ParameterDescriptor {
+                    handle,
+                    track_id: try_string(&entry.track_id)?,
+                    rack: protocol_rack(entry.rack),
+                    effect_id: try_string(&entry.effect_id)?,
+                    parameter_id: parameter.id.0,
+                    channel: *channel,
+                    value_kind: ParameterValueKind::F32,
+                    unit: protocol_unit(parameter.unit),
+                    domain: protocol_domain(parameter.domain),
+                    minimum: parameter.minimum,
+                    maximum: parameter.maximum,
+                    default: parameter.default_value,
+                    mapping: protocol_mapping(parameter.mapping),
+                    automation_rate: protocol_rate(parameter.automation_rate),
+                    smoothing_samples: parameter.smoothing_samples,
+                    flags,
+                    display_name: Some(try_string(parameter.display_name)?),
+                    display_unit: Some(try_string(parameter.display_unit)?),
+                    enum_choices: parameter
+                        .enum_choices
+                        .iter()
+                        .map(|choice| {
+                            Ok(EnumChoice {
+                                value: choice.value,
+                                label: try_string(choice.label)?,
+                            })
+                        })
+                        .collect::<Result<Vec<_>, SessionControlProviderError>>()?,
+                });
+                state.push(ParameterStateRecord {
+                    handle,
+                    flags: 1,
+                    value: prepared.value,
+                });
+                if metadata.len() < count {
+                    handle = handle.checked_add(1).ok_or(SessionControlProviderError)?;
                 }
             }
         }
@@ -637,6 +567,14 @@ fn bytes<T>(count: usize) -> Result<u64, SessionControlProviderError> {
     u64::try_from(bytes).map_err(|_| SessionControlProviderError)
 }
 
+const fn protocol_rack(value: EffectRack) -> ParameterRack {
+    match value {
+        EffectRack::Simd1 => ParameterRack::Simd1,
+        EffectRack::Dynamic => ParameterRack::Dynamic,
+        EffectRack::Simd2 => ParameterRack::Simd2,
+    }
+}
+
 const fn protocol_unit(value: ParameterUnit) -> ProtocolUnit {
     match value {
         ParameterUnit::Db => ProtocolUnit::Db,
@@ -679,6 +617,36 @@ mod tests {
 
     use super::*;
 
+    fn compile(model: &session::SessionModel) -> session::CompiledSession {
+        session::compile_session(
+            model,
+            session::CompileCaps {
+                max_compiled_model_bytes: u64::MAX,
+                max_requested_runtime_bytes: u64::MAX,
+                max_single_allocation_bytes: u64::MAX,
+                max_queue_items: u64::MAX,
+                max_source_ring_frames: u64::MAX,
+                max_source_ring_bytes: u64::MAX,
+            },
+        )
+        .expect("compiled fixture")
+    }
+
+    fn prepare_effects(model: &session::SessionModel) -> effect_compiler::EffectPreparedSession {
+        let compiled = compile(model);
+        let registry = effect_compiler::launch_native_effect_registry().expect("registry");
+        effect_compiler::prepare_native_session_effects(
+            &compiled,
+            &registry,
+            effect_compiler::EffectCompileCaps {
+                maximum_total_state_bytes: u64::MAX,
+                maximum_scratch_bytes: u64::MAX,
+                maximum_automation_spans_per_block: u32::MAX,
+            },
+        )
+        .expect("prepared effects")
+    }
+
     struct Clock(AtomicU64);
 
     impl PlanSampleSource for Clock {
@@ -692,31 +660,140 @@ mod tests {
             "../../../fixtures/session/v1/parametric-eq-nine-track.json"
         ))
         .expect("session fixture");
-        let compiled = session::compile_session(
-            &model,
-            session::CompileCaps {
-                max_compiled_model_bytes: u64::MAX,
-                max_requested_runtime_bytes: u64::MAX,
-                max_single_allocation_bytes: u64::MAX,
-                max_queue_items: u64::MAX,
-                max_source_ring_frames: u64::MAX,
-                max_source_ring_bytes: u64::MAX,
-            },
-        )
-        .expect("compiled fixture");
+        let effects = prepare_effects(&model);
+        let catalog = SessionControlProvider::prepare_session(&effects.entries).expect("catalog");
         let clock = Arc::new(Clock(AtomicU64::new(0)));
         let sample_source: Arc<dyn PlanSampleSource> = Arc::clone(&clock) as Arc<_>;
         let provider = SessionControlProvider::try_new(
-            &compiled,
+            catalog,
             sample_source,
             ControllerRetainedCapacity {
                 meter_handles: 4,
-                counter_ids: 4,
+                counter_ids: 0,
             },
             2,
         )
         .expect("provider");
         (provider, clock)
+    }
+
+    #[test]
+    fn every_launch_effect_and_rack_matches_the_accepted_preparation_authority() {
+        let mut model = session::parse_session_json(include_str!(
+            "../../../fixtures/session/v1/parametric-eq-nine-track.json"
+        ))
+        .expect("session fixture");
+        let template = model.tracks[0].simd1.effects[0].clone();
+        for track in &mut model.tracks {
+            track.simd1.effects.clear();
+            track.dynamic.effects.clear();
+            track.simd2.effects.clear();
+        }
+        let registry = effect_compiler::launch_native_effect_registry().expect("registry");
+        let descriptor_ids = registry
+            .descriptors()
+            .map(|descriptor| descriptor.id.as_str().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(descriptor_ids.len(), 8, "complete launch registry");
+        for rack_index in 0..3 {
+            let mut rack_effects = Vec::new();
+            for (effect_index, descriptor_id) in descriptor_ids.iter().enumerate() {
+                let mut effect = template.clone();
+                effect.id = session::StableId::parse(&format!("r{rack_index}e{effect_index}"))
+                    .expect("stable effect ID");
+                effect.identity = session::EffectIdentity::Native {
+                    effect_id: session::StableId::parse(descriptor_id).expect("native effect ID"),
+                };
+                if rack_index != 0 || descriptor_id != "miso.parametric-eq" {
+                    effect.params.clear();
+                }
+                rack_effects.push(effect);
+            }
+            match rack_index {
+                0 => model.tracks[0].simd1.effects = rack_effects,
+                1 => model.tracks[0].dynamic.effects = rack_effects,
+                2 => model.tracks[0].simd2.effects = rack_effects,
+                _ => unreachable!(),
+            }
+        }
+
+        let effects = prepare_effects(&model);
+        assert_eq!(effects.entries.len(), 3 * descriptor_ids.len());
+        let catalog = SessionControlProvider::prepare_session(&effects.entries).expect("catalog");
+        let mut expected_handle = 1_u32;
+        let mut offset = 0_usize;
+        let mut saw_both = false;
+        let mut saw_left = false;
+        let mut saw_right = false;
+        let mut saw_override = false;
+        for entry in &effects.entries {
+            for (parameter_index, parameter) in
+                entry.metadata.descriptor.parameters.iter().enumerate()
+            {
+                let channels: &[PreparedChannel] = match parameter.channel_policy {
+                    ParameterChannelPolicy::Shared => &[PreparedChannel::Both],
+                    ParameterChannelPolicy::PerLane => {
+                        &[PreparedChannel::Left, PreparedChannel::Right]
+                    }
+                };
+                for channel in channels {
+                    let metadata = &catalog.parameter_metadata[offset];
+                    let state = &catalog.parameter_state[offset];
+                    let initial = entry
+                        .bank_preparation
+                        .initial_values
+                        .iter()
+                        .find(|value| {
+                            value.parameter_index as usize == parameter_index
+                                && value.channel == *channel
+                        })
+                        .expect("accepted initial value");
+                    assert_eq!(metadata.handle, expected_handle);
+                    assert_eq!(state.handle, expected_handle);
+                    assert_eq!(metadata.track_id, entry.track_id);
+                    assert_eq!(metadata.effect_id, entry.effect_id);
+                    assert_eq!(metadata.rack, protocol_rack(entry.rack));
+                    assert_eq!(metadata.parameter_id, parameter.id.0);
+                    assert_eq!(state.value.to_bits(), initial.value.to_bits());
+                    saw_override |= initial.value.to_bits() != parameter.default_value.to_bits();
+                    saw_both |= *channel == PreparedChannel::Both;
+                    saw_left |= *channel == PreparedChannel::Left;
+                    saw_right |= *channel == PreparedChannel::Right;
+                    expected_handle = expected_handle.checked_add(1).expect("handle");
+                    offset += 1;
+                }
+            }
+        }
+        assert_eq!(offset, catalog.parameter_metadata.len());
+        assert!(saw_both && saw_left && saw_right && saw_override);
+
+        let replacement_entries = &effects.entries[..1];
+        let replacement = SessionControlProvider::prepare_session(replacement_entries)
+            .expect("replacement catalog");
+        let clock = Arc::new(Clock(AtomicU64::new(0)));
+        let sample_source: Arc<dyn PlanSampleSource> = Arc::clone(&clock) as Arc<_>;
+        let mut provider = SessionControlProvider::try_new(
+            catalog,
+            sample_source,
+            ControllerRetainedCapacity {
+                meter_handles: 0,
+                counter_ids: 0,
+            },
+            0,
+        )
+        .expect("provider");
+        provider.replace_session_catalog(replacement);
+        let page = provider
+            .parameter_metadata(ParameterMetadataRequest {
+                after_handle: 0,
+                limit: u16::MAX,
+            })
+            .expect("replacement metadata");
+        assert!(page.eof);
+        assert!(page.descriptors.iter().all(|row| {
+            row.track_id == replacement_entries[0].track_id
+                && row.effect_id == replacement_entries[0].effect_id
+        }));
     }
 
     #[test]
@@ -756,10 +833,13 @@ mod tests {
         assert_eq!(transport.effective_sample, SampleTime(256));
         assert_eq!(transport.position, SampleTime(64));
 
+        let counter_capacity = provider.retained_capacities().1;
+        assert_eq!(counter_capacity, PROVIDER_COUNTER_SLOTS);
         provider.set_telemetry_counters(TelemetryCounters {
             telemetry_coalesced: 7,
             telemetry_dropped: 9,
         });
+        provider.record_canceled_automation(11);
         let counters = provider
             .counters(&CountersRequest {
                 all: true,
@@ -769,6 +849,8 @@ mod tests {
         assert_eq!(counters.observed_sample, SampleTime(256));
         assert_eq!(counters.values[0].value, 7);
         assert_eq!(counters.values[1].value, 9);
+        assert_eq!(counters.values[2].value, 11);
+        assert_eq!(provider.retained_capacities().1, counter_capacity);
 
         provider.set_render_diagnostic(0, 256, 3, true);
         provider.set_render_diagnostic(1, 128, 2, true);

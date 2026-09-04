@@ -339,9 +339,11 @@ evidence is recorded by issue #338; it remains descriptive rather than a render-
 allocates the prepared plan and the source rings, and is never reachable from render. It contains
 no `unsafe` code and exports no C symbol -- it is a plain `rlib`, because a `cdylib` re-exports
 every `no_mangle` symbol it links, and a facade carrying them would push the C ABI's fifteen
-exports into the browser artifact. It deliberately does not depend on `protocol`: the
-control protocol is a host-specific transport, and a host that does not speak it does not pay for
-it. `scripts/check-host-core-policy.sh` enforces all of this, with mutation coverage in
+exports into the browser artifact. Its default graph deliberately does not depend on `protocol`:
+the issue #369 `control-provider` adapter is an optional, non-default feature enabled only by
+`capi`, so the browser and every host that does not speak the protocol pay for neither its code nor
+its dependencies. `scripts/check-host-core-policy.sh` enforces this exact edge and rejects a
+mandatory or default-enabled protocol dependency, with mutation coverage in
 `scripts/test-host-core-policy.sh`.
 
 ## Issue 011 runtime boundary and issue 029 package hashing dependency

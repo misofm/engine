@@ -90,15 +90,19 @@ device 0.
 
 ## Issue 369 control-provider refresh
 
-IO-4 replaces the C ABI's conformance-only `MockProvider` with
-`host_core::SessionControlProvider`. The production parameter catalog now comes from the compiled
-session's normalized track/rack/effect walk and the launch native effect descriptors used by plan
-preparation. Parameter state comes from compiled values or descriptor defaults; automation domain
+IO-4 replaces the C ABI's conformance-only `MockProvider` with the opt-in
+`host_core::SessionControlProvider`. The production parameter catalog is snapshotted directly from
+each accepted `EffectPreparedEntry`'s `metadata.descriptor` and
+`bank_preparation.initial_values` before graph lowering consumes those entries. Parameter state
+therefore uses the exact prepared values; automation domain
 checks therefore address real revision-scoped handles. Current/effective sample reads the active
 plan's existing release/acquire next-sample publication, while transport remains endpoint-local.
 Protocol telemetry counters and the existing bounded CAPI render-diagnostic slots feed the
-provider's counter and diagnostic pages. Candidate catalogs allocate before structural commit and
-are included in double-live resource admission.
+provider's counter and diagnostic pages. The three provider-owned counters retain an independent
+three-slot minimum even when the frame-derived telemetry configuration capacity is smaller.
+Candidate catalogs allocate before structural commit and are included in double-live resource
+admission. Host-core's default feature graph remains protocol-free; only capi enables the optional
+`control-provider` edge.
 
 The `resource_lifecycle` primitive oracle re-derives the soft-clip fixture's provider as 9,072
 bytes of descriptor rows, 864 bytes of state rows, 864 bytes of descriptor text, and 282 bytes of
@@ -107,6 +111,9 @@ admission is 204,375; the 58,804-byte canonical writer remains that fixture's la
 allocation. The C response vectors now pin session-derived metadata/state and registered telemetry
 counter rows. `MockProvider` and `MockProviderConfig` are absent from a normal protocol library
 build and available only to unit tests or consumers explicitly selecting `protocol/test-support`.
+The exact AudioWorklet rebuild remains protocol-free but changes crate identity because host-core's
+declared feature surface changed; its refreshed reproducible SHA-256 is
+`d02f6fbbdf00036479c31933647bb394854244bdd12428264f9392334164f238`.
 
 Refresh gates: `cargo test -p capi`; `cargo test -p capi --test resource_lifecycle`;
 `scripts/check-capi-abi.sh`; `scripts/check-abi-layout-v1.py`; and `cargo test --workspace` against

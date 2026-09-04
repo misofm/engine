@@ -12,6 +12,8 @@ pub(crate) struct PreparedRuntime {
     pub(crate) sources: SourceControlSet,
     pub(crate) plan: PreparedRenderPlan,
     pub(crate) resources: PlanResourceReport,
+    pub(crate) control_catalog: PreparedSessionControlCatalog,
+    pub(crate) capi: CapiResources,
 }
 
 pub(crate) fn boxed_zeroed(bytes: u64) -> Result<Box<[u8]>, CompileFailure> {
@@ -161,7 +163,6 @@ pub(crate) fn capi_resources(
         // ProtocolController and SessionControlProvider each retain their own telemetry config.
         checked_layout::<u32>(maximum_configuration_items)?,
         checked_layout::<protocol::CounterId>(maximum_configuration_items)?,
-        checked_layout::<protocol::CounterValue>(maximum_configuration_items)?,
         provider.fixed_retained_bytes,
         checked_layout::<u32>(maximum_configuration_items)?,
         checked_layout::<protocol::CounterId>(maximum_configuration_items)?,
@@ -210,8 +211,9 @@ pub(crate) fn capi_resources(
     })
 }
 
-pub(crate) fn compiled_capi_resources(
+pub(crate) fn prepared_capi_resources(
     compiled: &CompiledSession,
+    catalog: &PreparedSessionControlCatalog,
     limits: CompileLimits,
 ) -> Result<(CapiResources, usize), CompileFailure> {
     let source_id_bytes =
@@ -224,8 +226,12 @@ pub(crate) fn compiled_capi_resources(
                     .checked_add(source.id.as_str().len())
                     .ok_or_else(|| failure("capi.resource.arithmetic"))
             })?;
-    let provider = SessionControlProvider::resource_report(compiled, RENDER_DIAGNOSTIC_SLOTS)
-        .map_err(|_| failure("capi.resource.arithmetic"))?;
+    let provider = SessionControlProvider::resource_report(
+        catalog,
+        controller_retained_capacity(limits)?,
+        RENDER_DIAGNOSTIC_SLOTS,
+    )
+    .map_err(|_| failure("capi.resource.arithmetic"))?;
     Ok((
         capi_resources(
             limits,
@@ -237,6 +243,18 @@ pub(crate) fn compiled_capi_resources(
         )?,
         source_id_bytes,
     ))
+}
+
+pub(crate) fn controller_retained_capacity(
+    limits: CompileLimits,
+) -> Result<ControllerRetainedCapacity, CompileFailure> {
+    let control_bytes = usize::try_from(limits.maximum_control_frame_bytes)
+        .map_err(|_| failure("capi.resource.platform"))?;
+    let maximum_tlvs = control_bytes / size_of::<u16>();
+    Ok(ControllerRetainedCapacity {
+        meter_handles: maximum_tlvs,
+        counter_ids: maximum_tlvs,
+    })
 }
 
 pub(crate) fn validate_replacement_peak(
@@ -388,13 +406,13 @@ pub(crate) fn prepare_runtime(
     // Shape first, so an unsupported rate or a bad ring is reported before capi spends the
     // pre-flight projection on a session it will refuse anyway.
     caps.validate_shape(compiled).map_err(prepare_failure)?;
-    let (capi, _) = compiled_capi_resources(compiled, limits)?;
+    let prepared = prepare_host_runtime(compiled, &caps).map_err(prepare_failure)?;
+    let (capi, _) = prepared_capi_resources(compiled, &prepared.control_catalog, limits)?;
     if capi.active_retained > limits.maximum_capi_retained_bytes
         || capi.largest > limits.maximum_named_allocation_bytes
     {
         return Err(failure("capi.resource.limit"));
     }
-    let prepared = prepare_host_runtime(compiled, &caps).map_err(prepare_failure)?;
     let host = prepared.report;
     let largest_named = host.largest_engine_allocation_bytes.max(capi.largest);
     let (tail_kind, tail_samples) = match host.output_tail {
@@ -435,6 +453,8 @@ pub(crate) fn prepare_runtime(
             largest_named_allocation_bytes: largest_named,
             reserved: [0; 4],
         },
+        control_catalog: prepared.control_catalog,
+        capi,
     })
 }
 
@@ -483,14 +503,13 @@ pub(crate) fn compile_children(
         max_response_bytes: control_bytes,
     })
     .map_err(|_| failure("capi.resource.allocation"))?;
-    let retained_capacity = ControllerRetainedCapacity {
-        meter_handles: maximum_tlvs as usize,
-        counter_ids: maximum_tlvs as usize,
-    };
+    let retained_capacity = controller_retained_capacity(limits)?;
     let PreparedRuntime {
         sources,
         plan,
         resources,
+        control_catalog,
+        capi: _,
     } = runtime;
     let (publisher, owner, retirer) = plan_exchange(
         plan,
@@ -517,7 +536,7 @@ pub(crate) fn compile_children(
     });
     let sample_source: Arc<dyn host_core::PlanSampleSource> = Arc::clone(&shared) as Arc<_>;
     let provider = SessionControlProvider::try_new(
-        store.compiled(),
+        control_catalog,
         sample_source,
         retained_capacity,
         RENDER_DIAGNOSTIC_SLOTS,

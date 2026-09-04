@@ -362,6 +362,9 @@ pub struct PreparedHost {
     pub sources: SourceControlSet,
     /// Address-free resource facts about this preparation.
     pub report: HostPrepareReport,
+    /// Exact protocol catalog projected from the accepted prepared-effect authority.
+    #[cfg(feature = "control-provider")]
+    pub control_catalog: crate::PreparedSessionControlCatalog,
 }
 
 impl core::fmt::Debug for PreparedHost {
@@ -602,6 +605,9 @@ pub fn prepare_host_runtime_with_console(
     {
         return Err(resource("host.effect.resource.limit"));
     }
+    #[cfg(feature = "control-provider")]
+    let control_catalog = crate::SessionControlProvider::prepare_session(&effects.entries)
+        .map_err(|_| resource("host.control_provider.allocation"))?;
 
     // Issue #140 A: one bounded live-control channel per prepared effect instance, at the same
     // depth the builtin channels use and capped at each effect's own automation capacity. This is
@@ -911,6 +917,8 @@ pub fn prepare_host_runtime_with_console(
             plan,
             sources,
             report,
+            #[cfg(feature = "control-provider")]
+            control_catalog,
         },
         HostConsoleHandles {
             tracks: console_tracks,
