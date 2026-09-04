@@ -164,8 +164,14 @@ export class CanonicalPcmPump {
     this.#windowFrames = positiveInteger(options.windowFrames ?? 4096, "windowFrames")
     this.#generation = options.generation ?? 1n
     this.#onError = options.onError
-    this.#states = options.sources.map((source) => ({
-      ...validateSource(source),
+    const sources = options.sources.map(validateSource)
+    for (const source of sources) {
+      if (this.#windowFrames < source.ring.frameCapacity) {
+        throw new RangeError("windowFrames must be at least the MSB1 ring frame capacity")
+      }
+    }
+    this.#states = sources.map((source) => ({
+      ...source,
       cursor: 0,
       blob: null,
       window: null,
@@ -224,26 +230,24 @@ export class CanonicalPcmPump {
       state.finished = true
       return 0
     }
-    const windowStart =
-      Math.floor(state.cursor / this.#windowFrames) * this.#windowFrames
-    const frames = Math.min(
-      state.ring.frameCapacity,
-      state.frames - state.cursor,
-      windowStart + this.#windowFrames - state.cursor
-    )
+    const frames = Math.min(state.ring.frameCapacity, state.frames - state.cursor)
     const planes = state.ring.reserve(frames)
     if (planes === null) return 0
     const bytesPerSample = state.bitDepth / 8
     const frameBytes = state.channels * bytesPerSample
-    if (state.window === null || state.windowStart !== windowStart) {
+    const windowEnd = state.windowStart + (state.window?.byteLength ?? 0) / frameBytes
+    if (
+      state.window === null ||
+      state.cursor < state.windowStart ||
+      state.cursor + frames > windowEnd
+    ) {
       state.blob ??= await this.#lease.read(state.identity)
-      const windowEnd = Math.min(state.frames, windowStart + this.#windowFrames)
-      const firstByte = windowStart * frameBytes
-      const finalByte = windowEnd * frameBytes
+      const firstByte = state.cursor * frameBytes
+      const finalByte = Math.min(state.frames, state.cursor + this.#windowFrames) * frameBytes
       state.window = new Uint8Array(
         await state.blob.slice(firstByte, finalByte).arrayBuffer()
       )
-      state.windowStart = windowStart
+      state.windowStart = state.cursor
     }
     const localFrame = state.cursor - state.windowStart
     deinterleaveCanonicalPcm(
