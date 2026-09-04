@@ -68,7 +68,6 @@ to `origin/main` on this branch.
 | `ramps` | E6, D11: one division at the event, iterated additions, the exact snap on update 64, a restart from the value reached, automation validation, and that a finished ramp equals a fresh preparation |
 | `payload` | E7: idle restore bit-exact against an uninterrupted render, transactional rejection across both channels, the class-B mid-ramp restore, subnormal round trip, both resets |
 | `nonfinite` | E9, D7: the boundary check trips once per block at the latency and not per sample, the left channel is untouched, the limit row, a NaN detector is clamped, and `flush` brings `G` to exactly `+0.0` |
-| `stall` | E14, descriptive: the `f32` release stall floor, printed and handed to issue 046 |
 
 ## Issue #140 — the automation-span feed, the live fader, and GR observation
 

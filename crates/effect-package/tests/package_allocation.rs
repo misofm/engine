@@ -447,8 +447,13 @@ fn each_package_publication_has_one_nested_descriptor_pass_and_no_native_allocat
 }
 
 /// The frozen 4,096-artifact cap is the authoring default, not a pathological input: encoding at
-/// the cap must stay allocation-free relative to the one nested descriptor pass and finish in
-/// single-digit milliseconds.
+/// the cap must stay allocation-free relative to the one nested descriptor pass.
+///
+/// The "finish in single-digit milliseconds" half of the original claim moved to
+/// [`encode_at_the_frozen_artifact_cap_finishes_in_ten_milliseconds_in_release`] below,
+/// `#[ignore]`d for nightly, release-mode measurement: a debug-build wall-clock budget on a
+/// shared CI runner has no fixed relationship to the shipped profile's speed (issue #359 WP-2,
+/// §10).
 #[test]
 fn encode_at_the_frozen_artifact_cap_has_one_nested_descriptor_pass_and_no_native_allocation() {
     let bytes = fixture();
@@ -477,22 +482,15 @@ fn encode_at_the_frozen_artifact_cap_has_one_nested_descriptor_pass_and_no_nativ
         artifacts: &artifacts,
     };
 
-    let started = std::time::Instant::now();
     let (required, required_snapshot) =
         measure(|| effect_package_required_size(&authoring, EffectPackageLimits::default()));
     let required = required.unwrap() as usize;
     let mut output = vec![0; required];
     let (encoded, encode_snapshot) =
         measure(|| encode_effect_package(&authoring, EffectPackageLimits::default(), &mut output));
-    let elapsed = started.elapsed();
     assert_eq!(encoded.unwrap(), required);
     assert_eq!(required_snapshot, descriptor_pass);
     assert_eq!(encode_snapshot, descriptor_pass);
-    let budget_ms = if cfg!(debug_assertions) { 500 } else { 10 };
-    assert!(
-        elapsed.as_millis() < budget_ms,
-        "required_size + encode at the artifact cap took {elapsed:?}"
-    );
 
     let verified = verify_effect_package(&output, EffectPackageLimits::default()).unwrap();
     assert_eq!(verified.artifact_count(), count as u32);
@@ -520,6 +518,56 @@ fn encode_at_the_frozen_artifact_cap_has_one_nested_descriptor_pass_and_no_nativ
     assert_eq!(
         (error.code, error.byte_offset),
         (EffectPackageDiagnosticCode::Limit, 48)
+    );
+    println!(
+        "issue097_package_cap artifacts={count} bytes={required} allocations={encode_snapshot:?}"
+    );
+}
+
+/// Release-mode half of the issue097 package-cap claim above: `required_size` + `encode` at the
+/// frozen 4,096-artifact cap finish in single-digit milliseconds in the shipped profile. Debug-mode
+/// runner variance makes a fixed-millisecond wall budget a coin flip at P95 on a shared 4-vCPU CI
+/// runner, so this runs only in release, nightly, `--ignored` (issue #359 WP-2, §10).
+#[test]
+#[ignore = "release-mode budget; runs nightly"]
+fn encode_at_the_frozen_artifact_cap_finishes_in_ten_milliseconds_in_release() {
+    let bytes = fixture();
+    let descriptor_len = u64::from_le_bytes(bytes[24..32].try_into().unwrap()) as usize;
+    let descriptor = &bytes[96..96 + descriptor_len];
+
+    let count = 4_096usize;
+    let paths: Vec<String> = (0..count)
+        .rev()
+        .map(|index| format!("src/file-{index:04}.rs"))
+        .collect();
+    let contents: Vec<[u8; 1]> = (0..count).map(|index| [index as u8]).collect();
+    let artifacts: Vec<EffectArtifactAuthoring<'_>> = (0..count)
+        .map(|index| EffectArtifactAuthoring {
+            kind: EffectArtifactKind::Source,
+            path: &paths[index],
+            target: "",
+            features: "",
+            content: &contents[index],
+        })
+        .collect();
+    let authoring = EffectPackageAuthoring {
+        descriptor,
+        artifacts: &artifacts,
+    };
+
+    let started = std::time::Instant::now();
+    let (required, _required_snapshot) =
+        measure(|| effect_package_required_size(&authoring, EffectPackageLimits::default()));
+    let required = required.unwrap() as usize;
+    let mut output = vec![0; required];
+    let (encoded, encode_snapshot) =
+        measure(|| encode_effect_package(&authoring, EffectPackageLimits::default(), &mut output));
+    let elapsed = started.elapsed();
+    assert_eq!(encoded.unwrap(), required);
+    let budget_ms = 10;
+    assert!(
+        elapsed.as_millis() < budget_ms,
+        "required_size + encode at the artifact cap took {elapsed:?}"
     );
     println!(
         "issue097_package_cap artifacts={count} bytes={required} elapsed={elapsed:?} \

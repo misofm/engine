@@ -61,26 +61,22 @@ fn a_million_windows_are_read_whole_and_in_order() {
     let mut reads = 0_u64;
     let mut torn = 0_u64;
     let mut regressions = 0_u64;
-    let mut absent = 0_u64;
     let mut newest = 0_u64;
     let mut missed_total = 0_u64;
     while !done.load(Ordering::Acquire) {
-        match reader.read() {
-            Some(observed) => {
-                reads += 1;
-                if !consistent(observed) {
-                    torn += 1;
-                }
-                if observed.sequence < newest {
-                    regressions += 1;
-                }
-                if observed.sequence > newest {
-                    missed_total += reader.missed_windows(observed.sequence);
-                    newest = observed.sequence;
-                    reader.acknowledge(observed.sequence);
-                }
+        if let Some(observed) = reader.read() {
+            reads += 1;
+            if !consistent(observed) {
+                torn += 1;
             }
-            None => absent += 1,
+            if observed.sequence < newest {
+                regressions += 1;
+            }
+            if observed.sequence > newest {
+                missed_total += reader.missed_windows(observed.sequence);
+                newest = observed.sequence;
+                reader.acknowledge(observed.sequence);
+            }
         }
     }
     if let Some(observed) = reader.read() {
@@ -115,15 +111,14 @@ fn a_million_windows_are_read_whole_and_in_order() {
         writer_view <= WINDOWS,
         "the writer's view of the reader is bounded by what was published"
     );
-    // A coarse livelock bound, not a jitter budget. How often a read lands inside a publication
-    // depends on how the scheduler interleaves two threads on this machine under this load, so a
-    // tight ratio here would be measuring the host rather than the primitive. What must not happen
-    // is the reader spending most of its time giving up, which is what a broken retry loop looks
-    // like; an order of magnitude either way is still decisively inside that.
-    assert!(
-        absent <= reads.saturating_mul(10).saturating_add(1_000),
-        "reads gave up far more often than they succeeded: {absent} absent against {reads} whole"
-    );
+    // No bound on `absent` here (issue #359 WP-2, §10): how often a read lands inside a
+    // publication depends on how the scheduler interleaves the writer and reader threads on this
+    // machine under this load, which is host/scheduler behavior, not a property of the seqlock.
+    // A run with `33598887208` (docs-only main push) failed a "coarse livelock" ratio bound on
+    // `absent` though the tested code had not changed. The seqlock's correctness claim -- whole
+    // windows only, non-decreasing sequences with a counted gap, a wait-free writer -- does not
+    // depend on how often the reader wins the race, and every assertion above already states that
+    // claim exactly; `absent` itself is not part of it.
 }
 
 /// A reader that stops entirely resumes on the newest window plus an exact gap, never on a stale

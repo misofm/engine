@@ -49,7 +49,52 @@ mod tests {
 
         assert_eq!(report.sample_rate.0, 48_000);
         assert_eq!(report.quantum_frames.0, 128);
-        assert!(report.backend.width() >= 1);
+
+        // Literal, per-target expected backends -- not `report.backend == lane::Backend::current()`,
+        // which would compare the same compile-time constant against itself and could never fail.
+        // A change to either `lane::Backend::current()`'s target selection or to this pin must fail
+        // this test (AGENTS.md: `x86-64-v3` is pinned to AVX2/FMA, NEON is baseline on AArch64, the
+        // shipped wasm width is four lanes unless issue #183 step 2's measurement cfg widens it, and
+        // every other target is the scalar fallback).
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        assert_eq!(
+            report.backend,
+            lane::Backend::Simd8,
+            "x86-64-v3 is pinned to AVX2, eight f32 lanes"
+        );
+        #[cfg(target_arch = "aarch64")]
+        assert_eq!(
+            report.backend,
+            lane::Backend::Simd4,
+            "AArch64 NEON is baseline, four f32 lanes"
+        );
+        #[cfg(all(
+            target_arch = "wasm32",
+            target_feature = "simd128",
+            not(miso_wasm_simd8)
+        ))]
+        assert_eq!(
+            report.backend,
+            lane::Backend::Simd4,
+            "the shipped wasm width is four lanes"
+        );
+        #[cfg(all(target_arch = "wasm32", target_feature = "simd128", miso_wasm_simd8))]
+        assert_eq!(
+            report.backend,
+            lane::Backend::Simd8,
+            "issue #183 step 2's eight-lane wasm measurement build"
+        );
+        #[cfg(not(any(
+            target_arch = "x86",
+            target_arch = "x86_64",
+            target_arch = "aarch64",
+            all(target_arch = "wasm32", target_feature = "simd128")
+        )))]
+        assert_eq!(
+            report.backend,
+            lane::Backend::Scalar,
+            "every other target is the scalar fallback"
+        );
     }
 
     #[test]

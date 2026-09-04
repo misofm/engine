@@ -509,22 +509,23 @@ fn compile_resource_caps_are_inclusive_and_one_below_rejects() {
     );
 }
 
-/// Issue #240 built-in eval 4: time the complete production refusal, not the diagnostic encoder.
+/// Issue #240 built-in eval 4: the complete production refusal is typed and returns the fixed,
+/// bounded diagnostic set for the maximum document. The separate phase oracle proves that the
+/// exact 1 MiB typed document reaches semantic validation and retains only the first 64
+/// invalid-range source spans.
 ///
-/// The 234 ms worst-accepted Wasm boot measured for the brief leaves a 4.27x margin under this
-/// fixed one-second CI wall. The separate phase oracle proves that the exact 1 MiB typed document
-/// reaches semantic validation and retains only the first 64 invalid-range source spans.
+/// The wall-clock half of this claim ("finishes under one second") is deliberately not measured
+/// here: a debug-build assertion on a shared CI runner has no fixed relationship to the shipped
+/// profile's speed (issue #359 WP-2, §10) and was one of this workspace's five worst-offending
+/// false-red causes. It is [`maximum_document_dense_invalid_boot_finishes_under_one_second_in_release`]
+/// below, `#[ignore]`d for nightly, release-mode measurement.
 #[test]
 fn maximum_document_dense_invalid_boot_is_typed_and_finishes_under_one_second() {
-    use std::time::{Duration, Instant};
-
     let fixture = maximum_document_with_dense_invalid_automation();
     assert_eq!(fixture.bytes.len(), MAXIMUM_DOCUMENT_BYTES as usize);
-    let started = Instant::now();
     let failure = AudioWorkletEngineHost::boot(&fixture.bytes, WebBootOptions::default())
         .err()
         .expect("dense invalid automation must refuse");
-    let elapsed = started.elapsed();
     assert_eq!(failure.result(), RESULT_REFUSED_DOCUMENT);
     assert_eq!(
         failure
@@ -550,6 +551,26 @@ fn maximum_document_dense_invalid_boot_is_typed_and_finishes_under_one_second() 
         "the final retained semantic diagnostic is segment 63: {}",
         String::from_utf8_lossy(failure.diagnostic())
     );
+}
+
+/// Release-mode half of the boot budget above: the complete production refusal for the maximum
+/// dense-invalid document finishes in under one second in the shipped profile. The 234 ms
+/// worst-accepted Wasm boot measured for the brief leaves a 4.27x margin under this fixed
+/// one-second wall. Debug-mode runner variance (~1.8x observed) makes this assertion a coin flip
+/// at P95 on a shared 4-vCPU CI runner in debug, so it runs only in release, nightly, `--ignored`.
+#[test]
+#[ignore = "release-mode budget; runs nightly"]
+fn maximum_document_dense_invalid_boot_finishes_under_one_second_in_release() {
+    use std::time::{Duration, Instant};
+
+    let fixture = maximum_document_with_dense_invalid_automation();
+    assert_eq!(fixture.bytes.len(), MAXIMUM_DOCUMENT_BYTES as usize);
+    let started = Instant::now();
+    let failure = AudioWorkletEngineHost::boot(&fixture.bytes, WebBootOptions::default())
+        .err()
+        .expect("dense invalid automation must refuse");
+    let elapsed = started.elapsed();
+    assert_eq!(failure.result(), RESULT_REFUSED_DOCUMENT);
     assert!(
         elapsed < Duration::from_secs(1),
         "exact-1-MiB dense invalid full boot took {elapsed:?}"
