@@ -3,6 +3,7 @@
 use session::{DiagnosticCode, canonical_session_json, parse_session_json};
 
 const CANONICAL: &str = include_str!("../../../fixtures/session/v1/canonical.json");
+const CANONICAL_MINIMAL: &str = include_str!("../../../fixtures/session/v1/canonical-minimal.json");
 
 fn only<'a>(
     error: &'a session::DiagnosticSet,
@@ -244,6 +245,133 @@ fn numeric_lexemes_reach_typed_rules_without_f64_preprocessing() {
             "$.tracks[0].builtins.left.trim_db",
         );
     }
+}
+
+// Issue #387: json-syntax 0.12.5 (and jstrict 0.14.0 before it, on `main`) never calls
+// `end_fragment` for an empty JSON object, so the reserved `CodeMap` entry keeps `volume = 0`
+// and every later member is read one slot off. `session::parse::Parser::keys` hits
+// `Option::unwrap()` on the resulting `None` at `json-syntax-0.12.5/src/object/mod.rs:795:67`.
+// No V1 position ever admits `{}` (docs/SESSION_SCHEMA_V1.md: every object rejects unknown keys
+// and requires every field explicit), so the preflight in `json_preflight.rs` refuses an empty
+// object anywhere in the document, before the typed walk -- and before the dependency's `Value`
+// tree is even built -- with `DiagnosticCode::JsonSyntax`, mirroring the existing duplicate-key
+// and depth-129 preflight refusals.
+#[test]
+fn empty_object_refuses_at_every_placement_instead_of_corrupting_the_code_map() {
+    let cases = [
+        (
+            "render_profile",
+            r#""id": "native",
+    "mode": "single_thread""#,
+        ),
+        (
+            "output_profile",
+            r#""id": "main",
+    "channels": 2,
+    "sample_format": "f32_planar""#,
+        ),
+    ];
+    for (key, inner) in cases {
+        let needle = format!("\"{key}\": {{\n    {inner}\n  }}");
+        assert!(
+            CANONICAL.contains(&needle),
+            "fixture shape drifted for {key}"
+        );
+        let source = CANONICAL.replacen(&needle, &format!("\"{key}\": {{}}"), 1);
+        let error = parse_session_json(&source).expect_err("empty object refuses");
+        let diagnostic = only(&error, DiagnosticCode::JsonSyntax, &format!("$.{key}"));
+        let start = source.find(&format!("\"{key}\": {{}}")).unwrap() + key.len() + 4;
+        let span = diagnostic.span.expect("empty-object span");
+        assert_eq!((span.byte_start, span.byte_end), (start, start + 2));
+        assert_eq!(
+            diagnostic.message,
+            "empty JSON object {} is never a valid V1 schema value"
+        );
+    }
+
+    // A track's `builtins` table: the same refusal fires for a nested object below the root.
+    let builtins_start = CANONICAL.find("\"builtins\": {").expect("builtins key");
+    let mut depth = 0i32;
+    let mut cursor = CANONICAL[builtins_start..].find('{').unwrap() + builtins_start;
+    let builtins_end = loop {
+        match CANONICAL.as_bytes()[cursor] {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    break cursor + 1;
+                }
+            }
+            _ => {}
+        }
+        cursor += 1;
+    };
+    let source = format!(
+        "{}\"builtins\": {{}}{}",
+        &CANONICAL[..builtins_start],
+        &CANONICAL[builtins_end..]
+    );
+    let error = parse_session_json(&source).expect_err("empty builtins table refuses");
+    let diagnostic = only(&error, DiagnosticCode::JsonSyntax, "$.tracks[0].builtins");
+    let start = source.find("\"builtins\": {}").unwrap() + "\"builtins\": ".len();
+    let span = diagnostic.span.expect("empty-object span");
+    assert_eq!((span.byte_start, span.byte_end), (start, start + 2));
+}
+
+#[test]
+fn canonical_minimal_empty_render_profile_reports_syntax_not_a_bogus_numeric_range() {
+    // Before the fix this fixture reported a spurious `numeric.out_of_schema_range` at
+    // `$.output_profile.channels` (the value is `2`, well inside range) plus degenerate
+    // `151..151` spans for the real missing-field errors, because the corrupted `CodeMap`
+    // misattributed every entry after the empty `render_profile` object.
+    let source = CANONICAL_MINIMAL.replacen(
+        "\"render_profile\": {\n    \"id\": \"single\",\n    \"mode\": \"single_thread\"\n  }",
+        "\"render_profile\": {}",
+        1,
+    );
+    assert!(source != CANONICAL_MINIMAL, "fixture shape drifted");
+    let error = parse_session_json(&source).expect_err("empty object refuses");
+    let diagnostic = only(&error, DiagnosticCode::JsonSyntax, "$.render_profile");
+    let span = diagnostic.span.expect("empty-object span");
+    assert_ne!(
+        (span.byte_start, span.byte_end),
+        (151, 151),
+        "span must not degenerate"
+    );
+    assert!(
+        error
+            .diagnostics()
+            .iter()
+            .all(|d| d.code != DiagnosticCode::NumericOutOfSchemaRange),
+        "must not report the bogus numeric.out_of_schema_range: {error}"
+    );
+}
+
+#[test]
+fn fuzz_crash_52d9c906_empty_render_profile_diagnoses_instead_of_aborting() {
+    // Content-equivalent to fuzz artifact `crash-52d9c906ce5ad7f1d1e67dad91b13ec69e2caab5`
+    // (`session_parse`, found by the #385 verifier): `canonical.json` with `render_profile`'s
+    // body reduced to whitespace only, which is still an empty object under the JSON grammar.
+    // The literal fuzz artifact file was not present on disk in this worktree; this input
+    // reproduces the same `Option::unwrap()` panic pre-fix (verified on unmodified `main`/#385).
+    let source = CANONICAL.replacen(
+        "\"render_profile\": {\n    \"id\": \"native\",\n    \"mode\": \"single_thread\"\n  }",
+        "\"render_profile\": {\n    \n  }",
+        1,
+    );
+    let error = parse_session_json(&source).expect_err("empty object refuses");
+    only(&error, DiagnosticCode::JsonSyntax, "$.render_profile");
+}
+
+#[test]
+fn minimal_two_member_object_with_an_empty_first_value_diagnoses_instead_of_aborting() {
+    // The raw `CodeMap` illustration from issue #387: `{"a":{},"b":1}` is the smallest input
+    // that demonstrates the off-by-one -- an empty object followed by a sibling member whose
+    // `CodeMap` slot the corrupted `IterMapped` would misread.
+    let error = parse_session_json(r#"{"a":{},"b":1}"#).expect_err("empty object refuses");
+    let diagnostic = only(&error, DiagnosticCode::JsonSyntax, "$.a");
+    let span = diagnostic.span.expect("empty-object span");
+    assert_eq!((span.byte_start, span.byte_end), (5, 7));
 }
 
 #[test]
