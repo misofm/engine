@@ -4,15 +4,30 @@
 set -euo pipefail
 [[ "$#" -le 1 ]] || { printf 'usage: %s [path/to/session-validator]\n' "$0" >&2; exit 2; }
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+
+# S3: resolve a relative validator path against the caller's cwd BEFORE `cd "$root"` below.
+validator="${1:-}"
+if [[ -n "$validator" ]]; then
+    case "$validator" in
+        /*) : ;;
+        *) validator="$(realpath -m -- "$validator")" ;;
+    esac
+    # S1/S2: an explicit path must be an existing executable file, never a directory or a missing
+    # path -- and being explicit-but-missing is a hard error here, never a build trigger.
+    [[ -f "$validator" && -x "$validator" ]] || {
+        printf 'missing session-validator binary: %s\n' "$validator" >&2
+        exit 1
+    }
+fi
+
 cd "$root"
 export LC_ALL=C
 tmp_dir=$(mktemp -d)
 trap 'rm -rf "$tmp_dir"' EXIT
 
 validator_args=()
-if [[ -n "${1:-}" ]]; then
-    [[ -x "$1" ]] || { printf 'missing session-validator binary: %s\n' "$1" >&2; exit 1; }
-    validator_args=(--validator "$1")
+if [[ -n "$validator" ]]; then
+    validator_args=(--validator "$validator")
 fi
 
 python3 -I -B scripts/derive-intended-console-fixture.py "${validator_args[@]}" >"$tmp_dir/intended.json"

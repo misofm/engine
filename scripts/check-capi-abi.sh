@@ -1,5 +1,16 @@
 #!/usr/bin/env bash
 # Check the frozen Issue-022 C header, exact exported symbols, and native consumer linkage.
+#
+# S4 (#359): the default path below still does a full `cargo build --locked --release -p capi`, so
+# a bare invocation stays self-contained. But that build resolves a different feature/package set
+# than the audit-native CI shard's single `cargo build --locked --release -p audit -p bench
+# -p session-validator -p capi`, so running both back to back in the same shard's `target/`
+# alternately invalidates each other's fingerprints and rebuilds every time. The shard-friendly
+# path is first-class, not a workaround: it builds that four-package release set exactly once,
+# then calls this script with `MISO_ENGINE_CAPI_SKIP_BUILD=1` (an existing hook, no new env name)
+# so this script skips its own build and links straight against the release artifacts the shard
+# already produced (`target/release/libcapi.so`/`.a`, overridable via `MISO_ENGINE_CAPI_LIBRARY`
+# / `MISO_ENGINE_CAPI_STATIC_LIBRARY` exactly as before).
 set -euo pipefail
 
 

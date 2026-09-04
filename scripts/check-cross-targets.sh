@@ -18,6 +18,8 @@
 #     first.
 set -euo pipefail
 
+[[ $# -eq 0 ]] || { printf 'usage: check-cross-targets.sh\n' >&2; exit 2; }
+
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
 
@@ -66,7 +68,7 @@ for target in aarch64-linux-android aarch64-apple-ios; do
     # effect-package + effect-compiler + conformance: `check --all-targets`, debug (issue #081's
     # android/ios rows; the original script never passed --release here).
     CARGO_TARGET_DIR="$target_dir" \
-        cargo check --locked --all-targets --target "$target" \
+        cargo check --quiet --locked --all-targets --target "$target" \
         -p effect-package -p effect-compiler -p conformance
 done
 
@@ -88,26 +90,34 @@ for mode in scalar simd; do
     # builtins + builtins-compiler: release `build` -- the original script links here, not just
     # checks (issue #007).
     CARGO_TARGET_DIR="$target_dir" RUSTFLAGS="$flags" \
-        cargo build --locked --release --target wasm32-unknown-unknown \
+        cargo build --quiet --locked --release --target wasm32-unknown-unknown \
         -p builtins -p builtins-compiler
 
     # effect-package + effect-compiler + conformance: `check --all-targets`, debug (issue #081).
     CARGO_TARGET_DIR="$target_dir" RUSTFLAGS="$flags" \
-        cargo check --locked --all-targets --target wasm32-unknown-unknown \
+        cargo check --quiet --locked --all-targets --target wasm32-unknown-unknown \
         -p effect-package -p effect-compiler -p conformance
 
     # effect-package cdylib object + export/SIMD assertions (issue #081's wasm row).
     CARGO_TARGET_DIR="$target_dir" RUSTFLAGS="$flags" \
-        cargo rustc --locked -p effect-package --features c-abi \
+        cargo rustc --quiet --locked -p effect-package --features c-abi \
         --target wasm32-unknown-unknown --lib -- --crate-type=cdylib
-    wasm="$(find "$target_dir/wasm32-unknown-unknown/debug" -maxdepth 1 -name '*.wasm' -type f -print -quit)"
-    [[ -n "$wasm" ]] || fail "missing effect-package Wasm object ($mode)"
+    # Named explicitly rather than globbed (N3): `cargo rustc --crate-type=cdylib -p effect-package`
+    # always produces exactly this path, and a persistent (non-mktemp) target dir means a stale
+    # object from a different commit could otherwise win a `find -print -quit` race.
+    wasm="$target_dir/wasm32-unknown-unknown/debug/effect_package.wasm"
+    [[ -f "$wasm" ]] || fail "missing effect-package Wasm object ($mode)"
     metadata="$base_target_dir/$mode.wasm-metadata.txt"
     wasm-objdump -x "$wasm" >"$metadata"
     validate_wasm_exports "$metadata" "$mode"
-    if [[ "$mode" == scalar ]] && wasm-objdump -d "$wasm" | rg -q \
-        'v128|f32x4|f64x2|i8x16|i16x8|i32x4|i64x2'; then
-        fail 'SIMD opcode in scalar effect-package object'
+    if [[ "$mode" == scalar ]]; then
+        # Captured to a variable first (N2) so `set -e` semantics apply to `wasm-objdump` itself --
+        # inside an `if` condition (or the left side of a pipeline under only `pipefail`) a failing
+        # objdump would otherwise make the SIMD ban silently vacuous rather than fatal.
+        disasm="$(wasm-objdump -d "$wasm")"
+        if printf '%s' "$disasm" | rg -q 'v128|f32x4|f64x2|i8x16|i16x8|i32x4|i64x2'; then
+            fail 'SIMD opcode in scalar effect-package object'
+        fi
     fi
 done
 

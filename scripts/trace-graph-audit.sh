@@ -3,9 +3,28 @@
 set -euo pipefail
 
 workspace_dir=$(cd "$(dirname "$0")/.." && pwd)
-binary="${1:-$workspace_dir/target/release/audit}"
 blocks="${2:-1000000}"
 trace_root="$workspace_dir/target/issue6/strace"
+
+# S3: this script never `cd`s, so a relative path already resolves against the caller's cwd; still
+# normalize to absolute for consistency with the scripts in this family that do `cd`.
+binary="${1:-}"
+if [[ -n "$binary" ]]; then
+    case "$binary" in
+        /*) : ;;
+        *) binary="$(realpath -m -- "$binary")" ;;
+    esac
+    # S1/S2: an explicit path must be an existing executable file, never a directory or a missing
+    # path -- and being explicit-but-missing is a hard error; only the defaulted path may trigger
+    # a build.
+    [[ -f "$binary" && -x "$binary" ]] || {
+        printf 'trace-graph-audit.sh: explicit binary path must be an existing executable file: %s\n' \
+            "$binary" >&2
+        exit 1
+    }
+else
+    binary="$workspace_dir/target/release/audit"
+fi
 
 if [[ ! -x "$binary" ]]; then
   cargo build --quiet --locked --release --manifest-path "$workspace_dir/Cargo.toml" \

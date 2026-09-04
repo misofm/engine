@@ -79,6 +79,28 @@ expect_failure() {
     fi
 }
 
+# N20: like expect_failure, but also asserts the failure message contains the given substring --
+# proving the mutation was caught by the rule it targets, not by some unrelated failure that
+# happens to also reject the fixture.
+expect_failure_with_message() {
+    local fixture_name="$1" expected_substring="$2"
+    local fixture_root="$scratch_root/$fixture_name"
+    shift 2
+    create_valid_fixture "$fixture_root"
+    "$@" "$fixture_root"
+
+    local output
+    if output="$(bash "$policy_script" "$fixture_root" 2>&1)"; then
+        printf 'policy mutation unexpectedly passed: %s\n' "$fixture_name" >&2
+        exit 1
+    fi
+    if [[ "$output" != *"$expected_substring"* ]]; then
+        printf 'policy mutation %s failed for the wrong reason (expected to contain %q): %s\n' \
+            "$fixture_name" "$expected_substring" "$output" >&2
+        exit 1
+    fi
+}
+
 # The miso-engine- prefix convention was retired by the prefix-strip rename
 # (docs/rulings/prefix-strip-inventory.md). A package that reintroduces it must still fail --
 # this is the regression the gate exists to catch now that the prefix is no longer required.
@@ -309,6 +331,37 @@ mutate_retired_lockfile_identity() {
     printf '\n[[package]]\nname = "symphonia"\nversion = "0.5.4"\n' >>"$root/Cargo.lock"
 }
 
+# S8: the forbidden-name scan must reach every Cargo.toml in the tree, not just the six
+# hard-coded roots the prior scan_forbidden call used -- a nested manifest under sdk/ (outside
+# crates/hosts/tools/sidecars/fuzz) must still fail.
+mutate_nested_manifest_dependency() {
+    local root="$1"
+    mkdir -p "$root/sdk/native"
+    printf '%s\n' \
+        '[package]' \
+        'name = "x"' \
+        '' \
+        '[dependencies]' \
+        'symphonia = "0.5.4"' \
+        >"$root/sdk/native/Cargo.toml"
+}
+
+# N16: the bare-stub directory scan must reach any depth under any root, not `-maxdepth 2` under
+# four hard-coded roots -- a retired name three levels under tools/ must still fail.
+mutate_deep_retired_stub_directory() {
+    local root="$1"
+    mkdir -p "$root/tools/a/b/flac-decoder"
+}
+
+# N17: a retired name's mere mention inside a '#' comment must NOT trip the gate -- only a real
+# dependency/rename/package entry should.
+allow_retired_name_in_comment() {
+    local root="$1"
+    create_valid_fixture "$root"
+    printf '\n# we deliberately do not depend on symphonia\n' >>"$root/crates/library/Cargo.toml"
+    bash "$policy_script" "$root" >/dev/null
+}
+
 mutate_prelude_collision() {
     local root="$1"
     mkdir -p "$root/crates/std/src"
@@ -372,6 +425,10 @@ expect_failure retired-stub-directory mutate_retired_stub_directory
 expect_failure retired-manifest-dependency mutate_retired_manifest_dependency
 expect_failure retired-manifest-dependency-rename mutate_retired_manifest_dependency_rename
 expect_failure retired-lockfile-identity mutate_retired_lockfile_identity
+expect_failure_with_message nested-manifest-dependency \
+    'retired delivery-codec Cargo identity is forbidden' mutate_nested_manifest_dependency
+expect_failure_with_message deep-retired-stub-directory \
+    'retired delivery-codec directory remains' mutate_deep_retired_stub_directory
 
 mutate_missing_license() {
     local root="$1"
@@ -411,5 +468,6 @@ expect_failure missing-sidecars-root mutate_missing_sidecars_root
 allow_secondary_tool_bin "$scratch_root/secondary-tool-bin"
 allow_approved_isa_pin "$scratch_root/approved-isa-pin"
 allow_sidecar_valid "$scratch_root/sidecar-valid"
+allow_retired_name_in_comment "$scratch_root/retired-name-comment"
 
 printf 'workspace policy mutation tests: ok\n'

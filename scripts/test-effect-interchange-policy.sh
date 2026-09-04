@@ -48,13 +48,36 @@ expect_failure new-export
 cp "$root/crates/effect-package/src/ffi.rs" \
     "$temp/crates/effect-package/src/ffi.rs"
 
-sed -i 's/TRIALS: usize = 10_000/TRIALS: usize = 9_999/' \
+sed -i 's/campaigns(4)/campaigns(3)/' \
     "$temp/crates/effect-package/tests/effect_interchange_mutation.rs"
 expect_failure mutation-count
+cp "$root/crates/effect-package/tests/effect_interchange_mutation.rs" \
+    "$temp/crates/effect-package/tests/effect_interchange_mutation.rs"
+
+sed -i 's/fn tiny_deterministic_mutation_smoke/fn tiny_deterministic_mutation_smoke_renamed/' \
+    "$temp/crates/effect-package/tests/effect_interchange_mutation.rs"
+expect_failure mutation-smoke-renamed
 cp "$root/crates/effect-package/tests/effect_interchange_mutation.rs" \
     "$temp/crates/effect-package/tests/effect_interchange_mutation.rs"
 
 sed -i 's/const OBSERVATIONS: usize = 256/const OBSERVATIONS: usize = 255/' \
     "$temp/tools/bench/src/effect_interchange.rs"
 expect_failure benchmark-observations
+cp "$root/tools/bench/src/effect_interchange.rs" \
+    "$temp/tools/bench/src/effect_interchange.rs"
+
+# B2: the qualification gate must police the real matrix in check-cross-targets.sh, not a
+# decorative copy of its literals -- dropping a required target triple must fail.
+sed -i 's/aarch64-linux-android aarch64-apple-ios/aarch64-linux-android/' \
+    "$temp/scripts/check-cross-targets.sh"
+expect_failure cross-target-dropped-ios
+cp "$root/scripts/check-cross-targets.sh" "$temp/scripts/check-cross-targets.sh"
+
+# B2: turning the Wasm simd leg scalar (dropping the +simd128 feature row from the real matrix)
+# must also fail.
+sed -i 's/feature=+simd128/feature=-simd128/' \
+    "$temp/scripts/check-cross-targets.sh"
+expect_failure cross-target-simd-leg-scalar
+cp "$root/scripts/check-cross-targets.sh" "$temp/scripts/check-cross-targets.sh"
+
 printf 'effect interchange qualification policy mutations: ok\n'
