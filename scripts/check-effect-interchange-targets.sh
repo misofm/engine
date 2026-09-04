@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Exact Issue 081 five-row native/compile/object target matrix. Do not use as a smoke test.
+# Exact Issue 081 three-row native/compile/object target matrix. Do not use as a smoke test.
+# Native AArch64 (android/ios) rows are unsupported, no claim (#378, owner ruling 2026-09-04); see
+# the deferred-defect register in docs/TARGET_MATRIX.md.
 #
 # The cargo/wasm-objdump matrix itself, the qualification-policy call, and the literal
 # target-triple/Wasm-feature-flag strings scripts/check-effect-interchange-qualification.sh
@@ -59,7 +61,7 @@ done
     printf 'effect interchange target matrix: native row requires x86_64 Linux host\n' >&2
     exit 1
 }
-for target in x86_64-unknown-linux-gnu aarch64-linux-android aarch64-apple-ios wasm32-unknown-unknown; do
+for target in x86_64-unknown-linux-gnu wasm32-unknown-unknown; do
     rustup target list --installed | rg -qx "$target" || {
         printf 'effect interchange target matrix: required target unavailable: %s\n' "$target" >&2
         exit 1
@@ -68,7 +70,7 @@ done
 
 # scripts/check-effect-interchange-qualification.sh now polices the target-triple and Wasm
 # feature-flag spellings directly against scripts/check-cross-targets.sh, which is where the
-# per-mode android/ios/wasm builds actually run (B2) -- this file no longer carries a decorative
+# per-mode wasm builds actually run (B2) -- this file no longer carries a decorative
 # copy of that loop.
 bash "$root/scripts/check-cross-targets.sh"
-printf 'effect interchange five-target matrix: ok\n'
+printf 'effect interchange three-target matrix: ok\n'

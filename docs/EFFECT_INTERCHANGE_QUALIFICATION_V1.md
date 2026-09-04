@@ -71,11 +71,16 @@ read-only input and atomic caller publication. No test invokes render or product
 
 ## Target and static matrix
 
-The five exact rows are native x86-64 Linux execution; Android `aarch64-linux-android` compile only;
-iOS `aarch64-apple-ios` compile only; and Wasm `wasm32-unknown-unknown` scalar `-simd128` and SIMD
-`+simd128` compile/object only. Missing installed targets or inspection tools are HOLD, never skip.
-Both Wasm objects expose only the descriptor inspector under the `miso_engine_` prefix; scalar has
-no SIMD opcode. Neither mobile nor Wasm row claims execution or cross-CPU byte identity.
+The three exact rows are native x86-64 Linux execution and Wasm `wasm32-unknown-unknown` scalar
+`-simd128` and SIMD `+simd128` compile/object only. Missing installed targets or inspection tools
+are HOLD, never skip. Both Wasm objects expose only the descriptor inspector under the
+`miso_engine_` prefix; scalar has no SIMD opcode. The Wasm row claims neither execution nor
+cross-CPU byte identity.
+
+Native AArch64 (`aarch64-linux-android` compile only, `aarch64-apple-ios` compile only) was a
+fourth and fifth row through #378: owner ruling 2026-09-04 downgrades native AArch64 to
+unsupported, no claim, until a native iOS/Android effort is scheduled, so those two rows are
+retired rather than held. See the deferred-defect register in `docs/TARGET_MATRIX.md`.
 
 Static checks freeze the accepted manifest and dependency direction, forbid new unsafe production
 surface and migration serialization, keep qualification dependencies out of production crates, and
@@ -109,7 +114,7 @@ with an inode distinct from the preserved mutable raw output. Postlaunch evidenc
 attempt.
 
 During both implementation checkpoints the real 100-process matrix, exact 30,000-trial campaign,
-48-row matrix, five-target script, benchmark preflight, benchmark runner, benchmark workload, and
+48-row matrix, three-target script, benchmark preflight, benchmark runner, benchmark workload, and
 timed measurement remain unexecuted, so every real counter remains zero. The sole timed invocation
 requires a later clean nonbenchmark seal and explicit Sol XHigh authorization. No benchmark result
 is a performance threshold.

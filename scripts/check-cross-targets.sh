@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
-# Consolidated android/ios/wasm cross-target build matrix.
+# Consolidated native/wasm cross-target build matrix.
+#
+# Native AArch64 (android/ios) is unsupported, no claim (#378, owner ruling 2026-09-04): the
+# android/ios rows this script used to build were removed. A future revival must reopen the
+# deferred-defect register in docs/TARGET_MATRIX.md before restoring them.
 #
 # Replaces the cargo/wasm-objdump halves of scripts/check-parametric-eq-targets.sh,
 # scripts/check-builtins-targets.sh and scripts/check-effect-interchange-targets.sh with one script
@@ -34,7 +38,7 @@ done
 [[ "$(uname -s)" == Linux ]] || fail 'native row requires Linux'
 host_triple="$(rustc -vV | sed -n 's/^host: //p')"
 [[ "$host_triple" == x86_64-unknown-linux-gnu ]] || fail 'native row requires x86_64 Linux host'
-for target in x86_64-unknown-linux-gnu aarch64-linux-android aarch64-apple-ios wasm32-unknown-unknown; do
+for target in x86_64-unknown-linux-gnu wasm32-unknown-unknown; do
     rustup target list --installed | rg -qx "$target" || fail "required target unavailable: $target"
 done
 
@@ -59,27 +63,6 @@ CARGO_TARGET_DIR="$base_target_dir/x86_64-unknown-linux-gnu" \
     cargo check --quiet --locked --release \
     -p parametric-eq -p builtins -p builtins-compiler
 
-for target in aarch64-linux-android aarch64-apple-ios; do
-    target_dir="$base_target_dir/$target"
-    # parametric-eq + builtins + builtins-compiler: release `check` (issue #087, issue #007).
-    CARGO_TARGET_DIR="$target_dir" \
-        cargo check --quiet --locked --release --target "$target" \
-        -p parametric-eq -p builtins -p builtins-compiler
-    # effect-package + effect-compiler: `check --all-targets`, debug (issue #081's android/ios
-    # rows; the original script never passed --release here). Split from the conformance row below
-    # (N1): effect-package ships a cdylib, so one invocation naming it together with the evidence
-    # crate conformance would unify conformance's feature/dependency edges into the artifact build
-    # -- exactly what scripts/check-artifact-evidence-leak.sh exists to catch. Both invocations
-    # share $target_dir, so the split costs no extra fetch/compile work on an incremental rerun.
-    CARGO_TARGET_DIR="$target_dir" \
-        cargo check --quiet --locked --all-targets --target "$target" \
-        -p effect-package -p effect-compiler
-    # conformance: `check --all-targets`, debug -- evidence-only, no shipped package (N1).
-    CARGO_TARGET_DIR="$target_dir" \
-        cargo check --quiet --locked --all-targets --target "$target" \
-        -p conformance
-done
-
 for mode in scalar simd; do
     if [[ "$mode" == scalar ]]; then
         feature=-simd128
@@ -102,9 +85,11 @@ for mode in scalar simd; do
         -p builtins -p builtins-compiler
 
     # effect-package + effect-compiler: `check --all-targets`, debug (issue #081). Split from the
-    # conformance row below (N1): see the android/ios loop above for why a shipped cdylib crate
-    # and an evidence crate must never share one invocation. Both share $target_dir, so the split
-    # costs no extra fetch/compile work on an incremental rerun.
+    # conformance row below (N1): effect-package ships a cdylib, so one invocation naming it
+    # together with the evidence crate conformance would unify conformance's feature/dependency
+    # edges into the artifact build -- exactly what scripts/check-artifact-evidence-leak.sh exists
+    # to catch. Both invocations share $target_dir, so the split costs no extra fetch/compile work
+    # on an incremental rerun.
     CARGO_TARGET_DIR="$target_dir" RUSTFLAGS="$flags" \
         cargo check --quiet --locked --all-targets --target wasm32-unknown-unknown \
         -p effect-package -p effect-compiler
@@ -136,4 +121,4 @@ for mode in scalar simd; do
     fi
 done
 
-printf 'cross-target matrix: PASS (x86-64-v3; android/ios; wasm scalar/simd128; parametric-eq, builtins, effect-interchange rows deduplicated)\n'
+printf 'cross-target matrix: PASS (x86-64-v3; wasm scalar/simd128; parametric-eq, builtins, effect-interchange rows deduplicated; native aarch64 unsupported, see #378)\n'
