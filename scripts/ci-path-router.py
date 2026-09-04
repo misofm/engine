@@ -16,6 +16,7 @@ import sys
 
 EVIDENCE_PREFIXES = (".github/ISSUE_SPECS/", "docs/")
 EVIDENCE_FILES = {"README.md"}
+DSP_RESEARCH_PREFIX = "dsp-research/"
 SDK_PREFIXES = ("sdk/",)
 SDK_FILES = {
     "scripts/check-sdk-deletions.py",
@@ -23,8 +24,24 @@ SDK_FILES = {
     "scripts/check-sdk-headless.sh",
     "scripts/check-sdk-types.sh",
     "scripts/sdk-package.sh",
+    "scripts/test-sdk-artifact-builder-output-contract.sh",
 }
 GIT_DIFF_OPTIONS = ("--name-status", "-z", "--find-renames", "--find-copies-harder")
+
+# Two closure-derived step conditions (design #359 WP-1, §2/§5): a tiny closure gating an
+# expensive step *inside* an already-selected shard. They never widen or narrow `route` itself.
+MATH_CLOSURE_PREFIXES = ("crates/math/", "crates/lane/")
+MATH_CLOSURE_FILES = {"Cargo.lock", "Cargo.toml", "rust-toolchain.toml", ".cargo/config.toml"}
+RELEASE_INPUT_SUFFIX = "/Cargo.toml"
+RELEASE_INPUT_FILES = {
+    "Cargo.toml",
+    "Cargo.lock",
+    "rust-toolchain.toml",
+    "scripts/run-release-workspace-tests.sh",
+    ".github/workflows/release-build.yml",
+    ".cargo/config.toml",
+    "scripts/check-release-shape.py",
+}
 
 
 def path_kind(path: str) -> str | None:
@@ -35,6 +52,8 @@ def path_kind(path: str) -> str | None:
         return "evidence"
     if path in SDK_FILES or path.startswith(SDK_PREFIXES):
         return "sdk"
+    if path.startswith(DSP_RESEARCH_PREFIX):
+        return "evidence" if path.endswith(".md") else None
     return None
 
 
@@ -50,6 +69,30 @@ def classify_paths(paths: list[str]) -> str:
     if all(kind in {"evidence", "sdk"} for kind in kinds):
         return "sdk"
     return "full"
+
+
+def is_math_closure_path(path: str) -> bool:
+    """A tiny, exact closure: math's reverse workspace closure is exactly {lane}."""
+    return path.startswith(MATH_CLOSURE_PREFIXES) or path in MATH_CLOSURE_FILES
+
+
+def is_release_input_path(path: str) -> bool:
+    """The existing release-build.yml PR filter, plus its shape-policy inputs."""
+    return path in RELEASE_INPUT_FILES or path.endswith(RELEASE_INPUT_SUFFIX)
+
+
+def compute_flags(paths: list[str] | None) -> tuple[bool, bool]:
+    """Both flags are fail-safe true whenever the path list itself is unavailable/untrusted.
+
+    This mirrors `classify_paths`'s own `if not paths: return "full"`: a `None` (malformed diff,
+    missing base, unknown status, workflow_dispatch) and an empty list (empty diff) are the same
+    fail-safe case, and both must force the expensive gated step to run.
+    """
+    if not paths:
+        return True, True
+    math_closure = any(is_math_closure_path(path) for path in paths)
+    release_inputs = any(is_release_input_path(path) for path in paths)
+    return math_closure, release_inputs
 
 
 def parse_name_status(raw: bytes) -> list[str] | None:
@@ -113,12 +156,13 @@ def main() -> int:
     parser.add_argument("--head")
     parser.add_argument("--name-status-file", type=pathlib.Path)
     parser.add_argument("--path", action="append", default=[])
+    parser.add_argument("--flags", action="store_true",
+                         help="also print GITHUB_OUTPUT-style route/math_closure/release_inputs lines")
     args = parser.parse_args()
 
     if args.event == "workflow_dispatch":
-        print("full")
-        return 0
-    if args.name_status_file is not None:
+        paths = None
+    elif args.name_status_file is not None:
         try:
             paths = parse_name_status(args.name_status_file.read_bytes())
         except OSError:
@@ -127,7 +171,16 @@ def main() -> int:
         paths = args.path
     else:
         paths = diff_paths(args.event, args.base or "", args.head or "")
-    print(classify_paths(paths) if paths is not None else "full")
+
+    route = classify_paths(paths) if paths is not None else "full"
+    math_closure, release_inputs = compute_flags(paths)
+
+    # Bare mode is unchanged: exactly the route, one line, for existing callers.
+    print(route)
+    if args.flags:
+        print(f"route={route}")
+        print(f"math_closure={'true' if math_closure else 'false'}")
+        print(f"release_inputs={'true' if release_inputs else 'false'}")
     return 0
 
 
