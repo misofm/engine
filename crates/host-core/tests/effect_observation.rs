@@ -980,10 +980,11 @@ fn observation_cost_classes_are_separated_from_a_computed_scan_in_release() {
         measured.push((leg, start.elapsed()));
     }
 
-    // The separating negative control: what a `Computed` tap's shape actually costs. One pass per
-    // sample per track over a ring the size of the plan's, which is the cheapest honest sketch of
-    // an analysis pass -- and it must be measurably slower than every observation leg, or the
-    // clock on this machine is too coarse for the comparison above to have meant anything.
+    // A reference figure only, printed below for context: what a `Computed` tap's shape actually
+    // costs. One pass per sample per track over a ring the size of the plan's, which is the
+    // cheapest honest sketch of an analysis pass. It is not compared against the observation legs
+    // (see the load-bearing assertion below, which compares `AllArmed` against
+    // `CapacityUnarmed` directly).
     let mut ring = vec![0.0_f32; 8 * 128 * 4];
     let scan_start = Instant::now();
     let mut sink = 0.0_f32;
@@ -1035,13 +1036,18 @@ fn observation_cost_classes_are_separated_from_a_computed_scan_in_release() {
         .find(|(leg, _)| *leg == Leg::CapacityUnarmed)
         .expect("unarmed-with-console leg")
         .1;
+    // The load-bearing claim: arming eight taps is not measurably slower than an attached-but-
+    // unarmed console. `AllArmed` is not reliably slower than `CapacityUnarmed` at all (the two
+    // legs differ by only eight resident reads and eight `abs`/compare pairs per block, well
+    // inside run-to-run noise), so comparing the marginal delta against the synthetic scan is
+    // inert: a scan-sized regression in arming cost can leave `armed` still faster than
+    // `unarmed_with_console`, and a `saturating_sub` clamped to a positive floor would pass no
+    // matter what was measured. Assert the bound directly instead.
     assert!(
-        scan > armed
-            .saturating_sub(unarmed_with_console)
-            .max(core::time::Duration::from_nanos(1)),
-        "the negative control ({scan:?}) must separate from the marginal cost of arming, or the \
-         clock is too coarse for this comparison to say anything: armed={armed:?} \
-         unarmed_with_console={unarmed_with_console:?}"
+        armed.as_secs_f64() <= unarmed_with_console.as_secs_f64() * 1.10 + 50e-6,
+        "arming eight taps must not measurably exceed the cost of an attached-but-unarmed \
+         console: armed={armed:?} unarmed_with_console={unarmed_with_console:?} (allowed up to \
+         10% + 50us over unarmed_with_console)"
     );
     // A gate, not a pin: eight resident reads and eight `abs`/compare pairs per block cannot
     // plausibly double a plan that runs eight compressors. A regression that does is a regression.

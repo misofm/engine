@@ -44,9 +44,21 @@ RELEASE_INPUT_FILES = {
 }
 
 
+def is_untrusted_path(path: str) -> bool:
+    """A path with no trustworthy on-disk meaning: empty, absolute, containing a literal
+    backslash, or containing a `/../` traversal segment.
+
+    Shared by `path_kind` (which refuses to classify such a path at all, forcing `route` to
+    `full`) and `compute_flags` (which forces both closure flags fail-safe true on the same
+    input) so the two checks cannot silently drift apart -- see the `math_closure`/`release_inputs`
+    fail-safe note on `compute_flags`.
+    """
+    return not path or path.startswith("/") or "\\" in path or "/../" in f"/{path}/"
+
+
 def path_kind(path: str) -> str | None:
     """Return the narrowest class for one repository-relative, nonempty path."""
-    if not path or path.startswith("/") or "\\" in path or "/../" in f"/{path}/":
+    if is_untrusted_path(path):
         return None
     if path in EVIDENCE_FILES or path.startswith(EVIDENCE_PREFIXES):
         return "evidence"
@@ -82,13 +94,23 @@ def is_release_input_path(path: str) -> bool:
 
 
 def compute_flags(paths: list[str] | None) -> tuple[bool, bool]:
-    """Both flags are fail-safe true whenever the path list itself is unavailable/untrusted.
+    """Both flags are fail-safe true whenever the path list itself is unavailable/untrusted, or
+    contains any single path `path_kind` would refuse to trust.
 
     This mirrors `classify_paths`'s own `if not paths: return "full"`: a `None` (malformed diff,
     missing base, unknown status, workflow_dispatch) and an empty list (empty diff) are the same
-    fail-safe case, and both must force the expensive gated step to run.
+    fail-safe case, and both must force the expensive gated step to run. It deliberately does not
+    mirror `classify_paths`'s *unknown-kind* fail-safe, though: a well-formed path this router has
+    no name for (`LICENSE`, an unrecognised top-level directory) still forces `route` to `full`,
+    but it is not itself untrusted, so it must not be able to force `math_closure`/`release_inputs`
+    true -- the two closures are named, exact prefix/suffix sets (see design #359 WP-1, §2), and an
+    unknown path cannot be a member of either by construction. Only a path `is_untrusted_path`
+    would refuse outright -- a leading `/`, a literal backslash, or a `/../` segment -- forces the
+    fail-safe here, exactly as it forces `path_kind` to return `None`.
     """
     if not paths:
+        return True, True
+    if any(is_untrusted_path(path) for path in paths):
         return True, True
     math_closure = any(is_math_closure_path(path) for path in paths)
     release_inputs = any(is_release_input_path(path) for path in paths)
@@ -157,7 +179,9 @@ def main() -> int:
     parser.add_argument("--name-status-file", type=pathlib.Path)
     parser.add_argument("--path", action="append", default=[])
     parser.add_argument("--flags", action="store_true",
-                         help="also print GITHUB_OUTPUT-style route/math_closure/release_inputs lines")
+                         help="print only GITHUB_OUTPUT-style route/math_closure/release_inputs "
+                              "key=value lines, suitable for appending straight to $GITHUB_OUTPUT, "
+                              "instead of bare mode's single route line")
     args = parser.parse_args()
 
     if args.event == "workflow_dispatch":
@@ -175,12 +199,16 @@ def main() -> int:
     route = classify_paths(paths) if paths is not None else "full"
     math_closure, release_inputs = compute_flags(paths)
 
-    # Bare mode is unchanged: exactly the route, one line, for existing callers.
-    print(route)
+    # Bare mode is unchanged: exactly the route, one line, for existing callers. `--flags` mode
+    # prints only `key=value` lines -- no bare route line first -- so its whole stdout can be
+    # appended straight to `$GITHUB_OUTPUT`: a leading line without `=` makes Actions reject the
+    # entire file command ("Invalid format").
     if args.flags:
         print(f"route={route}")
         print(f"math_closure={'true' if math_closure else 'false'}")
         print(f"release_inputs={'true' if release_inputs else 'false'}")
+    else:
+        print(route)
     return 0
 
 

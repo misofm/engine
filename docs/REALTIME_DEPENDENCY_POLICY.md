@@ -233,24 +233,28 @@ itself starts. `gh workflow run release-build.yml --ref <branch>` forces the ful
 the filter skipped.
 
 Running those tests in CI is the intended end state and is not done yet. Repairing the build made
-two release-only failures reachable for the first time, and both predate this work — no CI leg has
+two release-only failures reachable for the first time, and both predated this work — no CI leg had
 ever run these tests in release, and the workspace release build did not compile, so nothing could
-have run them. Both fail on `main`, with and without the panic override, and both pass in debug:
+have run them. Both are now resolved (issue #359 WP-2/WP-5b):
 
-- `observation_cost_classes_are_what_they_claim (#159)` (#143, in
-  `crates/host-core/tests/effect_observation.rs`) fails deterministically. The
-  measurement says arming costs nothing — `AllArmed` sits at or below `ConsoleNoCapacity` — while
-  the assertion subtracts the `NoConsole` baseline and so charges observation for the cost of a
-  console *existing*.
-- `a_million_windows_are_read_whole_and_in_order (#160)` (#143, in
-  `crates/engine/tests/observation_transport.rs`) fails intermittently: three of five
-  full-workspace release runs, against 20 of 20 passing standalone release reruns. It is
-  timing-dependent rather than a plain red, and the reader's spin loop is far faster in an
-  optimized build than in the debug build the assertion has only ever been exercised under.
+- `observation_cost_classes_are_separated_from_a_computed_scan_in_release` (#143, in
+  `crates/host-core/tests/effect_observation.rs`, `--ignored`, release only) failed
+  deterministically. Arming eight taps costs nothing measurable — `AllArmed` sits at or below
+  `CapacityUnarmed` — while the old assertion subtracted the `NoConsole` baseline and so charged
+  observation for the cost of a console *existing*. It is rebaselined to assert the claim that is
+  actually load-bearing: `armed <= unarmed_with_console * 1.10 + 50 µs`, i.e. arming is not
+  measurably slower than an attached-but-unarmed console.
+- `a_million_windows_are_read_whole_and_in_order` (#160) (#143, in
+  `crates/engine/tests/observation_transport.rs`) failed intermittently: three of five
+  full-workspace release runs, against 20 of 20 passing standalone release reruns. It was
+  timing-dependent rather than a plain red. WP-2 removed the one scheduler-dependent assertion
+  (the livelock bound `absent <= reads * 10 + 1000`); the remaining assertions (`torn == 0`,
+  `regressions == 0`, `newest == WINDOWS`) are absolute and do not depend on scheduling.
 
-Both are questions about what those gates assert, so they are left to their owner rather than
-skipped here. Once they are resolved, the CI step becomes the full `cargo test` invocation — the
-script already runs the tests by default.
+The CI step (`release-build.yml`) still passes `--no-run`: it continues to gate the build-clobber
+failure it exists for, and nothing else in CI runs the release-mode test suite yet. Turning that
+step into the full `cargo test` invocation is a follow-up — the script already runs the tests by
+default.
 
 What the override does **not** touch:
 

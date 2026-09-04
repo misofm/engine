@@ -927,51 +927,17 @@ type ConsumerSeal = (u64, Box<str>, MeterTap);
 /// Test-only phase-two allocation accounting.  The production resource report deliberately
 /// remains a layout calculation; this probe independently observes the allocator requests made
 /// after phase-one validation has accepted the artifact.
-///
-/// Two nondeterminism sources are guarded against explicitly (issue #359 WP-2, CI run
-/// `33841397115` attempt 1: four extra retained layouts of 48/8, 96/8, 148/16 and 608/8 bytes,
-/// one allocation each, observed only on the first and only `prepare_session_builtins` call in
-/// the process):
-///
-/// 1. **First-touch process/thread state.**  Lazily-initialised std machinery (thread handles,
-///    `HashMap` `RandomState` seeding, and similar `OnceLock`/TLS-guard machinery reachable from
-///    `prepare_session_builtins`) allocates on its first use per thread or process and never
-///    again.  A test that measures the *first* prepare in the process folds that one-shot cost
-///    into the observed side while the reported side -- a pure layout calculation -- never
-///    accounted for it.  The fix is warm-up-then-measure: callers perform one full prepare to
-///    settle first-touch state, discard its snapshot, then measure a second, steady-state
-///    prepare and compare `observed == reported` exactly.
-/// 2. **Cross-thread contamination.**  `owner_thread` below records the thread that armed phase
-///    two; [`TestPhaseTwoLayoutTable::record`] refuses to attribute an allocation made by any
-///    other thread, so a concurrent thread (a background worker spawned by a dependency, for
-///    example) can never contribute a layout to this table.
 #[cfg(feature = "test-support")]
 static TEST_PHASE_TWO_ACTIVE: AtomicBool = AtomicBool::new(false);
 #[cfg(feature = "test-support")]
 static TEST_PHASE_TWO_LAYOUTS: Mutex<TestPhaseTwoLayoutTable> =
     Mutex::new(TestPhaseTwoLayoutTable::new());
-/// Serializes an entire reset-prepare-snapshot measurement session against every other such
-/// session in the process. `TEST_PHASE_TWO_ACTIVE`/`TEST_PHASE_TWO_LAYOUTS` are process-global by
-/// necessity (the armed window has to be visible to a global allocator), so two `#[test]`
-/// functions in the same test binary that each drive a measurement would otherwise race by
-/// default `cargo test` thread parallelism: one test's reset or snapshot can land inside another
-/// test's armed window. Thread attribution on [`TestPhaseTwoLayoutTable::record`] stops a
-/// concurrent thread from *contributing* a layout, but not from de-arming or reading someone
-/// else's in-flight window, so every caller of [`prepare_session_builtins`] under the tracker
-/// must hold [`test_only_begin_phase_two_measurement_session`] for the full reset-through-snapshot
-/// sequence.
-#[cfg(feature = "test-support")]
-static TEST_PHASE_TWO_SESSION: Mutex<()> = Mutex::new(());
 
 #[cfg(feature = "test-support")]
 struct TestPhaseTwoLayoutTable {
     values: [BuiltinRetainedLayout; BUILTIN_RETAINED_LAYOUT_CLASS_CAPACITY],
     len: usize,
     overflowed: bool,
-    /// The thread that armed the current phase-two window ([`TestPhaseTwoAllocationGuard::begin`]).
-    /// `record` attributes an allocation only when it is observed on this thread, so a
-    /// concurrent thread can never contribute a layout to this table.
-    owner_thread: Option<std::thread::ThreadId>,
 }
 
 #[cfg(feature = "test-support")]
@@ -981,7 +947,6 @@ impl TestPhaseTwoLayoutTable {
             values: [BuiltinRetainedLayout::ZERO; BUILTIN_RETAINED_LAYOUT_CLASS_CAPACITY],
             len: 0,
             overflowed: false,
-            owner_thread: None,
         }
     }
 
@@ -989,15 +954,7 @@ impl TestPhaseTwoLayoutTable {
         *self = Self::new();
     }
 
-    fn arm(&mut self, owner_thread: std::thread::ThreadId) {
-        self.clear();
-        self.owner_thread = Some(owner_thread);
-    }
-
-    fn record(&mut self, thread: std::thread::ThreadId, layout: core::alloc::Layout) {
-        if self.owner_thread != Some(thread) {
-            return;
-        }
+    fn record(&mut self, layout: core::alloc::Layout) {
         let Ok(size_bytes) = u64::try_from(layout.size()) else {
             self.overflowed = true;
             return;
@@ -1042,28 +999,6 @@ pub struct TestPhaseTwoAllocationSnapshot {
     pub overflowed: bool,
 }
 
-/// Holds exclusive use of the phase-two allocation tracker for one whole measurement session
-/// (reset, prepare, snapshot). Acquire this once at the top of any test that resets and measures
-/// the tracker, and hold it for the entire measurement so no other test's use of the same
-/// process-global tracker can interleave. See [`TEST_PHASE_TWO_SESSION`].
-#[cfg(feature = "test-support")]
-#[doc(hidden)]
-#[allow(
-    dead_code,
-    reason = "held only for its Drop-time release of TEST_PHASE_TWO_SESSION"
-)]
-pub struct TestOnlyPhaseTwoSessionGuard(std::sync::MutexGuard<'static, ()>);
-
-#[cfg(feature = "test-support")]
-#[doc(hidden)]
-#[must_use]
-pub fn test_only_begin_phase_two_measurement_session() -> TestOnlyPhaseTwoSessionGuard {
-    let guard = TEST_PHASE_TWO_SESSION
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    TestOnlyPhaseTwoSessionGuard(guard)
-}
-
 #[cfg(feature = "test-support")]
 #[doc(hidden)]
 pub fn test_only_reset_phase_two_allocation_tracker() {
@@ -1079,9 +1014,8 @@ pub fn test_only_record_phase_two_allocation(layout: core::alloc::Layout) {
     if !TEST_PHASE_TWO_ACTIVE.load(Ordering::Relaxed) {
         return;
     }
-    let thread = std::thread::current().id();
     if let Ok(mut table) = TEST_PHASE_TWO_LAYOUTS.lock() {
-        table.record(thread, layout);
+        table.record(layout);
     }
 }
 
@@ -1128,10 +1062,6 @@ struct TestPhaseTwoAllocationGuard;
 #[cfg(feature = "test-support")]
 impl TestPhaseTwoAllocationGuard {
     fn begin() -> Self {
-        let owner_thread = std::thread::current().id();
-        if let Ok(mut table) = TEST_PHASE_TWO_LAYOUTS.lock() {
-            table.arm(owner_thread);
-        }
         TEST_PHASE_TWO_ACTIVE.store(true, Ordering::SeqCst);
         Self
     }

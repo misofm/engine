@@ -69,6 +69,24 @@ to `origin/main` on this branch.
 | `payload` | E7: idle restore bit-exact against an uninterrupted render, transactional rejection across both channels, the class-B mid-ramp restore, subnormal round trip, both resets |
 | `nonfinite` | E9, D7: the boundary check trips once per block at the latency and not per sample, the left channel is untouched, the limit row, a NaN detector is clamped, and `flush` brings `G` to exactly `+0.0` |
 
+### E14 (retired, measured once)
+
+`tests/stall.rs` (`f32_release_stall_floor_is_reported`) was print-only — never asserted against a
+threshold (issue #359 WP-2, `docs/audits/test-usefulness-2026-09-04/02-dsp-effects.md:68`) — and
+was deleted rather than gated. Its retired requirement is BRIEFS/013, handed to issue #046. Before
+deletion the number was recorded here once so it stays recoverable without rewriting the test:
+
+At 96 kHz, release 5,000 ms (`c ≈ 2.08e-6`): the envelope settled under a loud burst at
+`G = -37.1306 dB`; stepping to a quieter level whose static curve asks for `-13.2804 dB`, `G`
+stopped moving at `-13.5093 dB` after 2,180,096 samples — a residual of `0.2289 dB`. The increment
+`c * (C - G)` fell below roughly half an `ulp` of `G`, which is inherent to an `f32` state (master
+plan D2 leaves an `f64` `Lane64` family open; BRIEFS/013's 0.005 dB envelope gate at the release
+maximum needs that decision).
+
+Measured once, release profile, `cargo test --release -p compressor --test stall -- --nocapture`
+against `main`'s `crates/compressor/tests/stall.rs` (`git show main:crates/compressor/tests/stall.rs`),
+recorded in this commit, 2026-09-04, one shared `x86_64` Zen 5 machine — evidence, not a pin.
+
 ## Issue #140 — the automation-span feed, the live fader, and GR observation
 
 Every row below was applied to the working tree, the named test was run, the failure was observed,

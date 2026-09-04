@@ -26,3 +26,11 @@ four six-word reads are comparable in length to the seven-word store they race. 
 takes the measured give-up rate to a few percent under the same stress while keeping the loop
 provably finite. Production publishes once per closed window — once per `window_blocks` render
 blocks — so this bound is set for the stress case, not for the shipped one.
+
+This give-up rate is now measurement only: issue #359 WP-2 removed the scheduler-dependent
+`assert!(absent <= reads * 10 + 1000)` livelock bound from `observation_transport.rs` (it was
+timing-dependent rather than a plain deterministic red — three of five full-workspace release
+runs failed it against 20 of 20 passing standalone release reruns). The `64` figure above remains
+the record of why that constant was chosen, but no test in the suite asserts a give-up-rate ceiling
+today; the remaining assertions on that test (`torn == 0`, `regressions == 0`, `newest == WINDOWS`)
+are absolute and independent of scheduling.

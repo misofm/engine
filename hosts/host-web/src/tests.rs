@@ -520,7 +520,7 @@ fn compile_resource_caps_are_inclusive_and_one_below_rejects() {
 /// false-red causes. It is [`maximum_document_dense_invalid_boot_finishes_under_one_second_in_release`]
 /// below, `#[ignore]`d for nightly, release-mode measurement.
 #[test]
-fn maximum_document_dense_invalid_boot_is_typed_and_finishes_under_one_second() {
+fn maximum_document_dense_invalid_boot_is_typed_and_bounded() {
     let fixture = maximum_document_with_dense_invalid_automation();
     assert_eq!(fixture.bytes.len(), MAXIMUM_DOCUMENT_BYTES as usize);
     let failure = AudioWorkletEngineHost::boot(&fixture.bytes, WebBootOptions::default())

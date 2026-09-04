@@ -26,6 +26,23 @@ SDK_FILES = [
 ]
 SDK = ["sdk/**", *SDK_FILES]
 GIT_DIFF_OPTIONS = ("--name-status", "-z", "--find-renames", "--find-copies-harder")
+# Mirrors of ci-path-router.py's own math_closure/release_inputs step-condition constants (design
+# #359 WP-1 §2/§5). AST-pinned by `check_classifier_contract` below the same way SDK_FILES and
+# GIT_DIFF_OPTIONS are, so router/checker drift on these is caught by the policy checker rather
+# than only by test-ci-path-routing.py's direct assertions.
+DSP_RESEARCH_PREFIX = "dsp-research/"
+MATH_CLOSURE_PREFIXES = ("crates/math/", "crates/lane/")
+MATH_CLOSURE_FILES = {"Cargo.lock", "Cargo.toml", "rust-toolchain.toml", ".cargo/config.toml"}
+RELEASE_INPUT_SUFFIX = "/Cargo.toml"
+RELEASE_INPUT_FILES = {
+    "Cargo.toml",
+    "Cargo.lock",
+    "rust-toolchain.toml",
+    "scripts/run-release-workspace-tests.sh",
+    ".github/workflows/release-build.yml",
+    ".cargo/config.toml",
+    "scripts/check-release-shape.py",
+}
 RELEASE_PR_INPUTS = [
     "**/Cargo.toml",
     "Cargo.lock",
@@ -273,6 +290,15 @@ def check_sdk_closure(text: str) -> None:
         require(required in heavy, f"sdk.yml: SDK closure is missing {required!r}")
 
 
+def router_assign(tree: ast.Module, name: str) -> ast.expr | None:
+    """The literal value assigned to a single top-level `NAME = ...` in ci-path-router.py."""
+    return next((
+        node.value for node in tree.body
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == name for target in node.targets)
+    ), None)
+
+
 def check_classifier_contract(root: pathlib.Path) -> None:
     """Make the unknown-path fail-safe a checked policy, not an implied convention."""
     source = (root / "scripts/ci-path-router.py").read_text(encoding="utf-8")
@@ -286,11 +312,7 @@ def check_classifier_contract(root: pathlib.Path) -> None:
             and isinstance(function.body[-1].value, ast.Constant)
             and function.body[-1].value.value is None,
             "ci-path-router.py: unknown paths must fall through to full qualification")
-    sdk_files = next((
-        node.value for node in tree.body
-        if isinstance(node, ast.Assign)
-        and any(isinstance(target, ast.Name) and target.id == "SDK_FILES" for target in node.targets)
-    ), None)
+    sdk_files = router_assign(tree, "SDK_FILES")
     require(isinstance(sdk_files, ast.Set), "ci-path-router.py: SDK_FILES must be a literal set")
     values = {
         element.value for element in sdk_files.elts
@@ -299,12 +321,7 @@ def check_classifier_contract(root: pathlib.Path) -> None:
     expected = set(SDK_FILES)
     require(len(values) == len(sdk_files.elts) and values == expected,
             "ci-path-router.py: exact SDK file taxonomy drifted (LICENSE is full-route owned)")
-    git_options = next((
-        node.value for node in tree.body
-        if isinstance(node, ast.Assign)
-        and any(isinstance(target, ast.Name) and target.id == "GIT_DIFF_OPTIONS"
-                for target in node.targets)
-    ), None)
+    git_options = router_assign(tree, "GIT_DIFF_OPTIONS")
     require(isinstance(git_options, ast.Tuple),
             "ci-path-router.py: GIT_DIFF_OPTIONS must be a literal tuple")
     options = tuple(
@@ -313,6 +330,41 @@ def check_classifier_contract(root: pathlib.Path) -> None:
     )
     require(len(options) == len(git_options.elts) and options == GIT_DIFF_OPTIONS,
             "ci-path-router.py: Git diff must discover copies from unchanged full-route sources")
+    dsp_research_prefix = router_assign(tree, "DSP_RESEARCH_PREFIX")
+    require(isinstance(dsp_research_prefix, ast.Constant)
+            and dsp_research_prefix.value == DSP_RESEARCH_PREFIX,
+            "ci-path-router.py: DSP_RESEARCH_PREFIX drifted from the evidence-route taxonomy")
+    math_closure_prefixes = router_assign(tree, "MATH_CLOSURE_PREFIXES")
+    require(isinstance(math_closure_prefixes, ast.Tuple),
+            "ci-path-router.py: MATH_CLOSURE_PREFIXES must be a literal tuple")
+    prefixes = tuple(
+        element.value for element in math_closure_prefixes.elts
+        if isinstance(element, ast.Constant) and isinstance(element.value, str)
+    )
+    require(len(prefixes) == len(math_closure_prefixes.elts) and prefixes == MATH_CLOSURE_PREFIXES,
+            "ci-path-router.py: math's reverse workspace closure (MATH_CLOSURE_PREFIXES) drifted")
+    math_closure_files = router_assign(tree, "MATH_CLOSURE_FILES")
+    require(isinstance(math_closure_files, ast.Set),
+            "ci-path-router.py: MATH_CLOSURE_FILES must be a literal set")
+    closure_files = {
+        element.value for element in math_closure_files.elts
+        if isinstance(element, ast.Constant) and isinstance(element.value, str)
+    }
+    require(len(closure_files) == len(math_closure_files.elts) and closure_files == MATH_CLOSURE_FILES,
+            "ci-path-router.py: shared math_closure config-file set (MATH_CLOSURE_FILES) drifted")
+    release_input_suffix = router_assign(tree, "RELEASE_INPUT_SUFFIX")
+    require(isinstance(release_input_suffix, ast.Constant)
+            and release_input_suffix.value == RELEASE_INPUT_SUFFIX,
+            "ci-path-router.py: RELEASE_INPUT_SUFFIX drifted from the release-build.yml PR filter")
+    release_input_files = router_assign(tree, "RELEASE_INPUT_FILES")
+    require(isinstance(release_input_files, ast.Set),
+            "ci-path-router.py: RELEASE_INPUT_FILES must be a literal set")
+    input_files = {
+        element.value for element in release_input_files.elts
+        if isinstance(element, ast.Constant) and isinstance(element.value, str)
+    }
+    require(len(input_files) == len(release_input_files.elts) and input_files == RELEASE_INPUT_FILES,
+            "ci-path-router.py: exact release_inputs file taxonomy (RELEASE_INPUT_FILES) drifted")
     diff_function = next((
         node for node in tree.body
         if isinstance(node, ast.FunctionDef) and node.name == "diff_paths"
