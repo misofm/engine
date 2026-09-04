@@ -5,7 +5,7 @@ disallowed-methods = [
     # `disallowed-methods` matches a *resolved path in the AST* -- the workspace member list, not
     # a directory string -- so it cannot be blinded by a crate move between crates/hosts/sidecars
     # or by a brand-new top-level directory, the way a grep gate scanning a hardcoded root list
-    # can. A call site this list forbids fails to compile under `ci.yml`'s `host` job
+    # can. A call site this list forbids fails to compile under `qualification.yml`'s `lint` job
     # (`cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`) unless it
     # carries `#[expect(clippy::disallowed_methods, reason = "issue #NNN")]`; rustc's own
     # unfulfilled-expectation error fires the day that attribute stops being needed. That is the
@@ -36,8 +36,8 @@ disallowed-methods = [
     # independent ways; and a refusal of the retired software-FMA *definitions* in
     # `crates/lane/src/softfma.rs`, not calls to them. `#[expect]` only ever answers "is this
     # specific site still needed", never "does this file's body still say X" or "how many total
-    # occurrences exist tree-wide" -- so `check-unfused-seal.sh` stays wired into CI (`ci.yml`'s
-    # `host` job).
+    # occurrences exist tree-wide" -- so `check-unfused-seal.sh` stays wired into CI
+    # (`qualification.yml`'s `lint` job).
     #
     # `check-fast-db-seal.sh` also carried one rule with no clippy equivalent --
     # `fast_exp2`/`fast_log2` must stay private to their module, a definition-visibility rule, not

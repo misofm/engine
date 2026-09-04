@@ -15,7 +15,6 @@ import pathlib
 import re
 import sys
 
-EVIDENCE = [".github/ISSUE_SPECS/**", "docs/**", "README.md", "dsp-research/**/*.md"]
 SDK_FILES = [
     "scripts/check-sdk-deletions.py",
     "scripts/check-sdk-generated.sh",
@@ -24,7 +23,6 @@ SDK_FILES = [
     "scripts/sdk-package.sh",
     "scripts/test-sdk-artifact-builder-output-contract.sh",
 ]
-SDK = ["sdk/**", *SDK_FILES]
 GIT_DIFF_OPTIONS = ("--name-status", "-z", "--find-renames", "--find-copies-harder")
 # Mirrors of ci-path-router.py's own math_closure/release_inputs step-condition constants (design
 # #359 WP-1 §2/§5). AST-pinned by `check_classifier_contract` below the same way SDK_FILES and
@@ -39,44 +37,10 @@ RELEASE_INPUT_FILES = {
     "Cargo.lock",
     "rust-toolchain.toml",
     "scripts/run-release-workspace-tests.sh",
-    ".github/workflows/release-build.yml",
+    ".github/workflows/qualification.yml",
     ".cargo/config.toml",
     "scripts/check-release-shape.py",
 }
-RELEASE_PR_INPUTS = [
-    "**/Cargo.toml",
-    "Cargo.lock",
-    "rust-toolchain.toml",
-    "scripts/run-release-workspace-tests.sh",
-    ".github/workflows/release-build.yml",
-    ".cargo/config.toml",
-    "scripts/check-release-shape.py",
-]
-
-CHECKOUT_PIN = "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2"
-
-CANONICAL_ROUTE_JOB = """    name: classify qualification paths
-    runs-on: ubuntu-24.04
-    outputs:
-      route: ${{ steps.classify.outputs.route }}
-    steps:
-      - uses: """ + CHECKOUT_PIN + """
-        with:
-          fetch-depth: 0
-      - name: Validate path-routing policy and mutations
-        run: |
-          python3 -B scripts/check-ci-path-routing.py
-          python3 -B scripts/test-ci-path-routing.py
-      - id: classify
-        name: Select fail-safe qualification route
-        run: |
-          route=$(python3 -B scripts/ci-path-router.py \\
-            --event "${{ github.event_name }}" \\
-            --base "${{ github.event.pull_request.base.sha || github.event.before }}" \\
-            --head "${{ github.event.pull_request.head.sha || github.sha }}")
-          printf 'route=%s\\n' "$route" >> "$GITHUB_OUTPUT"
-
-"""
 
 
 class Invalid(RuntimeError):
@@ -109,185 +73,8 @@ def job(text: str, name: str) -> str:
     return tail[:next_job.start() if next_job else len(tail)]
 
 
-def named_step(job_block: str, name: str) -> str:
-    marker = f"      - name: {name}\n"
-    require(job_block.count(marker) == 1, f"step {name!r} must exist exactly once")
-    start = job_block.index(marker)
-    tail = job_block[start + len(marker):]
-    next_step = re.search(r"^      - ", tail, re.MULTILINE)
-    return marker + tail[:next_step.start() if next_step else len(tail)]
-
-
-def require_job_header(job_block: str, expected: list[str], message: str) -> None:
-    header = [
-        line for line in job_block.splitlines()
-        if line.startswith("    ") and not line.startswith("      ") and line.strip()
-    ]
-    require(header == expected, message)
-
-
-def canonical_trigger(push_ignores: list[str], pull_paths: list[str] | None) -> str:
-    """Render the only accepted spelling of a security-critical Actions trigger."""
-    ignored = "".join(f"      - '{path}'\n" for path in push_ignores)
-    pull = "  pull_request:\n    branches:\n      - main\n"
-    if pull_paths is not None:
-        pull += "    paths:\n" + "".join(f"      - '{path}'\n" for path in pull_paths)
-    return (
-        "  push:\n"
-        "    branches:\n"
-        "      - main\n"
-        "    paths-ignore:\n"
-        f"{ignored}"
-        f"{pull}"
-        "  workflow_dispatch:\n\n"
-    )
-
-
-def check_trigger(text: str, workflow: str, push_ignores: list[str]) -> None:
-    actual = section(text, "on:", ("concurrency:",))
-    pull_paths = RELEASE_PR_INPUTS if workflow == "release-build.yml" else None
-    require(actual == canonical_trigger(push_ignores, pull_paths),
-            f"{workflow}: trigger block must match the exact canonical path contract")
-
-
-def check_mapping_structure(text: str, workflow: str, title: str, jobs: list[str]) -> None:
-    """Exclude duplicate or quoted override keys around the canonically pinned regions."""
-    top_level = [
-        line for line in text.splitlines()
-        if line and not line[0].isspace() and not line.startswith("#")
-    ]
-    require(top_level == [f"name: {title}", "on:", "concurrency:", "permissions:", "env:", "jobs:"],
-            f"{workflow}: top-level mapping structure must be exact and unique")
-    jobs_block = section(text, "jobs:", ())
-    job_headers = [
-        line for line in jobs_block.splitlines()
-        if line.startswith("  ") and not line.startswith("    ") and line.strip()
-        and not line.lstrip().startswith("#")
-    ]
-    require(job_headers == [f"  {name}:" for name in jobs],
-            f"{workflow}: job mapping structure must be exact and unique")
-
-
-def check_common(text: str, workflow: str, domain: str) -> None:
-    require(f"group: {domain}-${{{{ github.workflow }}}}-${{{{ github.ref }}}}" in text,
-            f"{workflow}: concurrency must be ref-scoped in its own domain")
-    require("cancel-in-progress: true" in text, f"{workflow}: missing cancellation")
-
-
-def check_router(text: str, workflow: str) -> None:
-    route = job(text, "route")
-    require(route == CANONICAL_ROUTE_JOB,
-            f"{workflow}: route job must match the exact unconditional, failure-propagating contract")
-    require("route: ${{ steps.classify.outputs.route }}" in route,
-            f"{workflow}: router must expose route output")
-    require("fetch-depth: 0" in route, f"{workflow}: router needs complete history")
-    policy = "python3 -B scripts/check-ci-path-routing.py\n          python3 -B scripts/test-ci-path-routing.py"
-    require(policy in route,
-            f"{workflow}: route must validate path policy and mutations before classification")
-    require(route.index(policy) < route.index("scripts/ci-path-router.py"),
-            f"{workflow}: route must validate checked-out workflow code before classification")
-    require("scripts/ci-path-router.py" in route and "--event \"${{ github.event_name }}\"" in route,
-            f"{workflow}: router must route dispatch through the fail-safe classifier")
-
-
 def result_variable(job_name: str) -> str:
     return job_name.replace("-", "_").upper() + "_RESULT"
-
-
-def canonical_aggregate(title: str, heavy: list[str], evaluator: tuple[str, ...]) -> str:
-    """Render the only accepted aggregate job, including its failure semantics."""
-    results = "".join(
-        f"      {result_variable(name)}: ${{{{ needs.{name}.result }}}}\n" for name in heavy
-    )
-    script = "".join(f"          {line}\n" for line in evaluator)
-    return (
-        f"    name: {title}\n"
-        "    if: always()\n"
-        f"    needs: [route, {', '.join(heavy)}]\n"
-        "    runs-on: ubuntu-24.04\n"
-        "    env:\n"
-        "      ROUTE_RESULT: ${{ needs.route.result }}\n"
-        "      ROUTE: ${{ needs.route.outputs.route }}\n"
-        f"{results}"
-        "    steps:\n"
-        f"      - name: Enforce {title} route\n"
-        "        run: |\n"
-        f"{script}"
-    )
-
-
-def check_aggregate(
-    text: str,
-    workflow: str,
-    title: str,
-    heavy: list[str],
-    selected: str,
-    selected_routes: tuple[str, ...],
-    skipped_routes: tuple[str, ...],
-    evaluator: tuple[str, ...],
-) -> None:
-    aggregate = job(text, "qualification")
-    require(aggregate == canonical_aggregate(title, heavy, evaluator),
-            f"{workflow}: aggregate must match the exact always-failing-on-error contract")
-    job_name_count = len(re.findall(rf"^    name: {re.escape(title)}$", text, re.MULTILINE))
-    require(job_name_count == 1 and f"name: {title}" in aggregate,
-            f"{workflow}: aggregate name must be exactly once as {title!r}")
-    require(re.search(r"^    if: always\(\)$", aggregate, re.MULTILINE) is not None,
-            f"{workflow}: aggregate job itself must always run")
-    require("continue-on-error:" not in aggregate,
-            f"{workflow}: aggregate job and enforcement step must not suppress failures")
-    require(f"needs: [route, {', '.join(heavy)}]" in aggregate,
-            f"{workflow}: aggregate dependencies must include every heavy job exactly once")
-    require("ROUTE_RESULT: ${{ needs.route.result }}" in aggregate
-            and "ROUTE: ${{ needs.route.outputs.route }}" in aggregate,
-            f"{workflow}: aggregate must pass bounded router values through env")
-    require('[[ "$ROUTE_RESULT" == success ]]' in aggregate,
-            f"{workflow}: aggregate evaluator must fail a failed router")
-    for route in selected_routes:
-        require(f"{route}) expected=success" in aggregate,
-                f"{workflow}: selected {route} route must require heavy success")
-    for route in skipped_routes:
-        require(f"{route}) expected=skipped" in aggregate,
-                f"{workflow}: unselected {route} route must require skipped heavy jobs")
-    require('*) echo "unknown route: $ROUTE" >&2; exit 1 ;;' in aggregate,
-            f"{workflow}: unknown route must fail")
-    variables: list[str] = []
-    for name in heavy:
-        heavy_job = job(text, name)
-        require("needs: route" in heavy_job or "needs: [route," in heavy_job,
-                f"{workflow}: {name} must depend on router")
-        require(selected in heavy_job, f"{workflow}: {name} must be selected only by the route")
-        variable = result_variable(name)
-        variables.append(variable)
-        require(f"{variable}: ${{{{ needs.{name}.result }}}}" in aggregate,
-                f"{workflow}: aggregate does not pass {name} result to its evaluator")
-    if len(variables) == 1:
-        require(f'[[ "${variables[0]}" == "$expected" ]] ||' in aggregate,
-                f"{workflow}: aggregate evaluator does not fail {heavy[0]} result mismatch")
-    else:
-        loop = re.search(
-            r'for result in (?P<inputs>[^;]+); do\n\s+\[\[ "\$result" == "\$expected" \]\] \|\|',
-            aggregate,
-        )
-        require(loop is not None, f"{workflow}: aggregate must fail every heavy-result mismatch")
-        for variable in variables:
-            require(f'"${variable}"' in loop.group("inputs"),
-                    f"{workflow}: aggregate evaluator does not fail {variable} mismatch")
-
-
-def check_sdk_closure(text: str) -> None:
-    heavy = job(text, "sdk")
-    for required in (
-        "npm ci",
-        "wasm32-unknown-unknown",
-        "bash scripts/build-web-audioworklet.sh target/ci/sdk-artifacts",
-        "bash scripts/check-sdk-generated.sh",
-        "python3 -B scripts/check-sdk-deletions.py",
-        "bash scripts/check-sdk-types.sh",
-        "bash scripts/check-sdk-headless.sh target/ci/sdk-artifacts",
-        "bash scripts/sdk-package.sh check target/ci/sdk-artifacts",
-    ):
-        require(required in heavy, f"sdk.yml: SDK closure is missing {required!r}")
 
 
 def router_assign(tree: ast.Module, name: str) -> ast.expr | None:
@@ -355,7 +142,7 @@ def check_classifier_contract(root: pathlib.Path) -> None:
     release_input_suffix = router_assign(tree, "RELEASE_INPUT_SUFFIX")
     require(isinstance(release_input_suffix, ast.Constant)
             and release_input_suffix.value == RELEASE_INPUT_SUFFIX,
-            "ci-path-router.py: RELEASE_INPUT_SUFFIX drifted from the release-build.yml PR filter")
+            "ci-path-router.py: RELEASE_INPUT_SUFFIX drifted from the release-shape input taxonomy")
     release_input_files = router_assign(tree, "RELEASE_INPUT_FILES")
     require(isinstance(release_input_files, ast.Set),
             "ci-path-router.py: RELEASE_INPUT_FILES must be a literal set")
@@ -386,46 +173,6 @@ def check_classifier_contract(root: pathlib.Path) -> None:
             and isinstance(command.elts[3].value, ast.Name)
             and command.elts[3].value.id == "revisions",
             "ci-path-router.py: production Git diff must consume the pinned option tuple exactly")
-
-
-def check_shared_license_ownership(ci: str, sdk: str) -> None:
-    host = job(ci, "host")
-    require_job_header(host, [
-        "    name: host quality and native shell",
-        "    needs: route",
-        "    if: needs.route.outputs.route == 'full'",
-        "    runs-on: ubuntu-24.04",
-        "    steps:",
-    ], "ci.yml: full-route host job ownership or failure semantics drifted")
-    require(named_step(host, "Workspace policy") == (
-        "      - name: Workspace policy\n"
-        "        run: bash scripts/check-workspace-policy.sh\n"
-    ), "ci.yml: host must run the unsuppressed canonical workspace-policy step")
-
-    sdk_job = job(sdk, "sdk")
-    require_job_header(sdk_job, [
-        "    name: SDK package, generated surface, and headless qualification",
-        "    needs: route",
-        "    if: needs.route.outputs.route == 'sdk' || needs.route.outputs.route == 'full'",
-        "    runs-on: ubuntu-24.04",
-        "    steps:",
-    ], "sdk.yml: SDK/full package job ownership or failure semantics drifted")
-    require(re.search(
-        r"^    if: needs\.route\.outputs\.route == 'sdk' \|\| needs\.route\.outputs\.route == 'full'$",
-        sdk_job, re.MULTILINE,
-    ) is not None, "sdk.yml: package qualification must be selected on SDK and full routes")
-    require(named_step(sdk_job, "Build one pinned AudioWorklet closure and qualify the SDK package") == (
-        "      - name: Build one pinned AudioWorklet closure and qualify the SDK package\n"
-        "        run: |\n"
-        "          mkdir -p target/ci/sdk-artifacts\n"
-        "          bash scripts/build-web-audioworklet.sh target/ci/sdk-artifacts\n"
-        "          bash scripts/check-sdk-generated.sh\n"
-        "          python3 -B scripts/check-sdk-deletions.py\n"
-        "          bash scripts/check-sdk-types.sh\n"
-        "          bash scripts/check-sdk-headless.sh target/ci/sdk-artifacts\n"
-        "          bash scripts/sdk-package.sh check target/ci/sdk-artifacts\n"
-        "\n"
-    ), "sdk.yml: full-route SDK package qualification step drifted or was suppressed")
 
 
 def check_qualification_no_path_filter(text: str) -> None:
@@ -538,6 +285,48 @@ def check_qualification_release_shape_guard(text: str) -> None:
             '"$RELEASE_INPUTS" == "true"')
 
 
+ROUTE_VALIDATION_STEP = """      - name: Validate path-routing policy and mutations
+        run: |
+          python3 -B scripts/check-ci-path-routing.py
+          python3 -B scripts/test-ci-path-routing.py
+"""
+
+SDK_CLOSURE_LINES = (
+    "bash scripts/check-sdk-generated.sh",
+    "python3 -B scripts/check-sdk-deletions.py",
+    "python3 -B scripts/check-sdk-deletions.py --self-test",
+    "bash scripts/check-sdk-types.sh",
+    "bash scripts/check-sdk-headless.sh target/ci/qualification-artifacts",
+    "bash scripts/sdk-package.sh check target/ci/qualification-artifacts",
+)
+
+
+def check_qualification_route_job(text: str) -> None:
+    """Stage-3 review S1: the route job is the only place this checker (and so the retired-workflow
+    absence rule) executes in CI. It must validate policy before classifying, and it must check out
+    full history so the router can diff against the real base."""
+    route = job(text, "route")
+    require(ROUTE_VALIDATION_STEP in route,
+            "qualification.yml: route job must run the routing policy checker and its mutations "
+            "before classifying")
+    require("fetch-depth: 0" in route,
+            "qualification.yml: route job must check out full history (fetch-depth: 0)")
+    require(route.index(ROUTE_VALIDATION_STEP) < route.index("scripts/ci-path-router.py"),
+            "qualification.yml: routing policy must be validated before the router runs")
+
+
+def check_qualification_closures(text: str) -> None:
+    """Stage-3 review S2: the SDK closure and the canonical workspace-policy gate were pinned by
+    the retired sdk.yml/ci.yml rules; pin them on the surviving workflow instead."""
+    sdk = job(text, "sdk")
+    for line in SDK_CLOSURE_LINES:
+        require(line in sdk, f"qualification.yml: sdk job is missing {line!r}")
+    lint = job(text, "lint")
+    require("run: bash scripts/check-workspace-policy.sh\n" in lint or
+            "bash scripts/check-workspace-policy.sh\n" in lint,
+            "qualification.yml: lint job must run the canonical check-workspace-policy.sh step")
+
+
 def check_qualification_workflow(root: pathlib.Path) -> None:
     text = (root / ".github/workflows/qualification.yml").read_text(encoding="utf-8")
     check_qualification_no_path_filter(text)
@@ -550,86 +339,29 @@ def check_qualification_workflow(root: pathlib.Path) -> None:
     check_qualification_verdict_permissions(text)
     check_qualification_expectation_table(text, names)
     check_qualification_release_shape_guard(text)
+    check_qualification_route_job(text)
+    check_qualification_closures(text)
+
+
+RETIRED_WORKFLOWS = ("ci.yml", "sdk.yml", "browser-qualification.yml", "release-build.yml")
+
+
+def check_retired_workflows_absent(root: pathlib.Path) -> None:
+    """Design #359 §12 stage 3: qualification.yml is the sole required PR workflow now that it
+    has reported on >= 10 PRs alongside the four workflows it replaces (stage 1/2). If any of
+    ci.yml, sdk.yml, browser-qualification.yml or release-build.yml reappears, every PR would
+    silently need multiple required contexts again, reverting the migration without anyone
+    updating branch protection to notice."""
+    workflows = root / ".github/workflows"
+    for name in RETIRED_WORKFLOWS:
+        require(not (workflows / name).exists(),
+                f"{name}: retired workflow must not exist (design #359 §12 stage 3)")
 
 
 def check(root: pathlib.Path) -> None:
-    workflows = root / ".github/workflows"
-    ci = (workflows / "ci.yml").read_text(encoding="utf-8")
-    browser = (workflows / "browser-qualification.yml").read_text(encoding="utf-8")
-    sdk = (workflows / "sdk.yml").read_text(encoding="utf-8")
-    release = (workflows / "release-build.yml").read_text(encoding="utf-8")
-
-    check_mapping_structure(ci, "ci.yml", "ci",
-                            ["route", "host", "x86-probes", "wasm", "wasm-gates", "qualification"])
-    check_mapping_structure(browser, "browser-qualification.yml", "browser qualification",
-                            ["route", "artifact", "browser", "qualification"])
-    check_mapping_structure(sdk, "sdk.yml", "SDK qualification",
-                            ["route", "sdk", "qualification"])
-    check_mapping_structure(release, "release-build.yml", "release build", ["release-workspace"])
-
-    for text, name, ignored in (
-        (ci, "ci.yml", EVIDENCE + SDK),
-        (browser, "browser-qualification.yml", EVIDENCE + SDK),
-        (release, "release-build.yml", EVIDENCE + SDK),
-        (sdk, "sdk.yml", EVIDENCE),
-    ):
-        check_trigger(text, name, ignored)
-
-    check_common(ci, "ci.yml", "engine-qualification")
-    check_common(browser, "browser-qualification.yml", "browser-qualification")
-    check_common(sdk, "sdk.yml", "sdk-qualification")
-    check_common(release, "release-build.yml", "release-build")
-    check_router(ci, "ci.yml")
-    check_router(browser, "browser-qualification.yml")
-    check_router(sdk, "sdk.yml")
-    check_aggregate(ci, "ci.yml", "engine qualification",
-                    ["host", "x86-probes", "wasm", "wasm-gates"],
-                    "needs.route.outputs.route == 'full'", ("full",), ("sdk|evidence",), (
-                        "set -euo pipefail",
-                        '[[ "$ROUTE_RESULT" == success ]] || { echo "router result: $ROUTE_RESULT" >&2; exit 1; }',
-                        'case "$ROUTE" in',
-                        "  full) expected=success ;;",
-                        "  sdk|evidence) expected=skipped ;;",
-                        '  *) echo "unknown route: $ROUTE" >&2; exit 1 ;;',
-                        "esac",
-                        'for result in "$HOST_RESULT" "$X86_PROBES_RESULT" "$WASM_RESULT" "$WASM_GATES_RESULT"; do',
-                        '  [[ "$result" == "$expected" ]] || { echo "expected $expected heavy result, got $result" >&2; exit 1; }',
-                        "done",
-                    ))
-    check_aggregate(browser, "browser-qualification.yml", "browser qualification",
-                    ["artifact", "browser"], "needs.route.outputs.route == 'full'",
-                    ("full",), ("sdk|evidence",), (
-                        "set -euo pipefail",
-                        '[[ "$ROUTE_RESULT" == success ]] || { echo "router result: $ROUTE_RESULT" >&2; exit 1; }',
-                        'case "$ROUTE" in',
-                        "  full) expected=success ;;",
-                        "  sdk|evidence) expected=skipped ;;",
-                        '  *) echo "unknown route: $ROUTE" >&2; exit 1 ;;',
-                        "esac",
-                        'for result in "$ARTIFACT_RESULT" "$BROWSER_RESULT"; do',
-                        '  [[ "$result" == "$expected" ]] || { echo "expected $expected heavy result, got $result" >&2; exit 1; }',
-                        "done",
-                    ))
-    check_aggregate(sdk, "sdk.yml", "SDK qualification", ["sdk"],
-                    "needs.route.outputs.route == 'sdk' || needs.route.outputs.route == 'full'",
-                    ("full|sdk",), ("evidence",), (
-                        "set -euo pipefail",
-                        '[[ "$ROUTE_RESULT" == success ]] || { echo "router result: $ROUTE_RESULT" >&2; exit 1; }',
-                        'case "$ROUTE" in',
-                        "  full|sdk) expected=success ;;",
-                        "  evidence) expected=skipped ;;",
-                        '  *) echo "unknown route: $ROUTE" >&2; exit 1 ;;',
-                        "esac",
-                        '[[ "$SDK_RESULT" == "$expected" ]] || { echo "expected $expected SDK result, got $SDK_RESULT" >&2; exit 1; }',
-                    ))
-    check_sdk_closure(sdk)
+    check_retired_workflows_absent(root)
     check_classifier_contract(root)
-    check_shared_license_ownership(ci, sdk)
     check_qualification_workflow(root)
-    require("check-sdk-generated" not in job(ci, "host"),
-            "ci.yml: generated SDK ownership must be in sdk.yml")
-    require("check-sdk-headless" not in job(ci, "wasm") and "sdk-package.sh" not in job(ci, "wasm"),
-            "ci.yml: SDK package ownership must be in sdk.yml")
 
 
 def main() -> int:

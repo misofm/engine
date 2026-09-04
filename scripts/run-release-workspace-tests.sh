@@ -31,8 +31,14 @@
 # * Shipped artifacts. Nothing here builds one. `scripts/build-web-audioworklet.sh` and every
 #   per-package release invocation still get D12's `panic = "abort"` exactly as before.
 # * Per-package release invocations (`cargo test --locked --release -p <pkg>`, the many gate legs
-#   in .github/workflows/ci.yml). They select one package's targets, never two panic variants of a
-#   clobbering lib unit in the same run, so they are unaffected and are deliberately left alone.
+#   in .github/workflows/qualification.yml's test-release job). They select one package's targets,
+#   never two panic variants of a clobbering lib unit in the same run, so they are unaffected and
+#   are deliberately left alone.
+#
+# This script's own `--no-run` invocation -- the release build-clobber link proof this header
+# describes -- used to run on every `main` push and manifest-touching PR from `release-build.yml`;
+# design #359 §12 stage 4 moved it to `nightly.yml`'s `release-link-proof` job (once a day, or on
+# manual dispatch), and `release-build.yml` is retired.
 #
 # The structural alternative -- move `panic = "abort"` off `[profile.release]` onto a separate
 # `dist` profile -- is NOT taken here, because it would change D12's "a benchmark measures the

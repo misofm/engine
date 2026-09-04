@@ -2,8 +2,9 @@
 # #105 phase 2 C2: a CI invocation that produces a shipped artifact names no evidence crate.
 #
 # Cargo resolves and unifies features across the packages selected by ONE invocation. Before this
-# gate, `.github/workflows/ci.yml` built `host-web` and `conformance` in a
-# single `cargo build --target wasm32-unknown-unknown`, so conformance's edge to
+# gate, the old `ci.yml` workflow (retired by design #359 §12 stage 3; qualification.yml is its
+# sole successor) built `host-web` and `conformance` in a single
+# `cargo build --target wasm32-unknown-unknown`, so conformance's edge to
 # `engine/realtime-audit` was unified into the very wasm module the browser ships:
 # `cargo tree` on the CI list showed `realtime-audit`, while `-p host-web` alone did
 # not. `scripts/check-realtime-audit-leak.sh` (#84 phase D) proves each package's own graph is
@@ -19,23 +20,21 @@
 #      invocation that compiles every evidence crate and no shipped package.
 #
 # N1: the workflow YAML is not the only source of cross-target cargo invocations --
-# scripts/check-cross-targets.sh (called from both ci.yml and qualification.yml) carries its own.
-# It is scanned separately, below, for rule 1 only: some of its `--target` values come from a
+# scripts/check-cross-targets.sh (called from qualification.yml) carries its own. It is scanned
+# separately, below, for rule 1 only: some of its `--target` values come from a
 # `for target in ...` shell loop variable rather than a literal triple in the script text, so
 # rule 2's per-target artifact/coverage pairing (which needs a literal target string) stays owned
-# by the workflow scan above -- the calling workflows are where this script's own evidence-crate
+# by the workflow scan above -- the calling workflow is where this script's own evidence-crate
 # cross-target coverage already lives (see "Evidence crates compile for Wasm").
 set -euo pipefail
 
 root="$(cd "${1:-$(dirname "${BASH_SOURCE[0]}")/..}" && pwd)"
 cd "$root"
 
-# design #359 WP-4 deliverable B: qualification.yml (stage 1) carries its own cross-target wasm
-# cargo lines (the wasm-guests job) once it exists, and is gated by the same invocation-owns-the-
-# leak rule as ci.yml. A workflow that has not landed yet in a given checkout is skipped, not
-# failed, so this gate keeps working before and after qualification.yml is added.
-workflows=(.github/workflows/ci.yml)
-[[ -f .github/workflows/qualification.yml ]] && workflows+=(.github/workflows/qualification.yml)
+# design #359 §12 stage 3: qualification.yml is the sole required PR workflow and carries every
+# cross-target wasm cargo line (the wasm-guests job among them), so it is this gate's one
+# mandatory scan target -- its absence is a hard failure, not a skip.
+workflows=(.github/workflows/qualification.yml)
 for workflow in "${workflows[@]}"; do
     [[ -f "$workflow" ]] || { printf 'artifact evidence gate failure: missing %s\n' "$workflow" >&2; exit 1; }
 done

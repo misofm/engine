@@ -219,18 +219,24 @@ scheduling, so the *error face* is nondeterministic — it usually surfaces as a
 `CARGO_PROFILE_RELEASE_PANIC=unwind` for that one run. Forcing a single panic variant means nothing
 is built twice and nothing is clobbered.
 
-`.github/workflows/release-build.yml` runs the script with `--no-run`, so the workspace-wide
+`nightly.yml`'s `release-link-proof` job runs the script with `--no-run`, so the workspace-wide
 release build cannot silently rot again. That gates exactly what rotted: the clobber is a build
 failure that happens while compiling the test targets, so building them is enough to catch it, and
 doing so is deterministic.
 
-That workflow runs unconditionally on every push to `main`, and on a pull request only when the
-diff touches a Cargo manifest, `rust-toolchain.toml`, the script, or the workflow itself. The
-clobber is a property of crate-types and `[profile.release]`, so a manifest is the only thing that
-can introduce it; the residual risk a source-only pull request carries is a `cfg(debug_assertions)`
-item that compiles in debug and not in release, and that is caught by the `main` run the merge
-itself starts. `gh workflow run release-build.yml --ref <branch>` forces the full check on a branch
-the filter skipped.
+Design #359 §12 stage 4 moved this off the per-PR path: the old `release-build.yml` ran the script
+unconditionally on every push to `main`, and on a pull request only when the diff touched a Cargo
+manifest, `rust-toolchain.toml`, the script, or the workflow itself. That workflow is retired.
+`qualification.yml`'s `release-shape` job is gated the same way (`route == 'full' &&
+release_inputs == 'true'`, i.e. a manifest-touching diff) and still runs on every such PR and
+`main` push, but it only runs `check-release-shape.py`'s metadata policy and a metadata-only,
+check-only `cargo check --release --workspace --all-targets` under the unwind override -- a check
+cannot reproduce a link-time clobber, so it is not a substitute for this link proof. The clobber
+is a property of crate-types and `[profile.release]`, so a manifest is the only thing that can
+introduce it; the residual risk a source-only pull request carries is a `cfg(debug_assertions)`
+item that compiles in debug and not in release, now bounded by nightly's cadence (worst case ~24h,
+03:17 UTC) rather than caught on the same `main` push. `gh workflow run nightly.yml --ref <branch>`
+forces the full nightly suite, including this proof, on a branch outside the schedule.
 
 Running those tests in CI is the intended end state and is not done yet. Repairing the build made
 two release-only failures reachable for the first time, and both predated this work — no CI leg had
@@ -251,10 +257,10 @@ have run them. Both are now resolved (issue #359 WP-2/WP-5b):
   (the livelock bound `absent <= reads * 10 + 1000`); the remaining assertions (`torn == 0`,
   `regressions == 0`, `newest == WINDOWS`) are absolute and do not depend on scheduling.
 
-The CI step (`release-build.yml`) still passes `--no-run`: it continues to gate the build-clobber
-failure it exists for, and nothing else in CI runs the release-mode test suite yet. Turning that
-step into the full `cargo test` invocation is a follow-up — the script already runs the tests by
-default.
+The nightly step (`release-link-proof` in `nightly.yml`) still passes `--no-run`: it continues to
+gate the build-clobber failure it exists for, and nothing in CI runs the release-mode test suite
+yet. Turning that step into the full `cargo test` invocation is a follow-up — the script already
+runs the tests by default.
 
 What the override does **not** touch:
 

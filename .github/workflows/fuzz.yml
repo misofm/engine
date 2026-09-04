@@ -7,8 +7,10 @@ name: fuzz
 # per target -- the whole cost is toolchain install and sanitizer builds, paid on every run
 # regardless of whether the diff could possibly change a fuzz outcome.
 #
-# They are split into their own workflow for the reason `release-build.yml` was: `paths:` is a
-# workflow-level filter, so a filter on `ci.yml` would gate all of its jobs.
+# They are split into their own workflow for the reason the old `release-build.yml` was (design
+# #359 §12 stage 3 retired it; qualification.yml is its and `ci.yml`'s sole successor): `paths:`
+# is a workflow-level filter, so a filter here would gate every job in whichever workflow carried
+# it, and neither `ci.yml`'s heavy jobs nor qualification.yml's can be path-filtered.
 #
 # The policy this file implements:
 #
@@ -18,10 +20,11 @@ name: fuzz
 #   nightly        -- `nightly.yml` runs every target with a far larger budget, unfiltered, on the
 #                     default branch. That is the backstop for anything this filter skips.
 #
-# WHY BOTH LEGS ARE FILTERED, unlike `release-build.yml`. That file leaves its push leg unfiltered
-# because its filter is a heuristic -- a source-only `cfg(debug_assertions)` edit can break a
-# release build without touching any path it lists, so main needs an unfiltered backstop. This
-# filter is not a heuristic. It is the transitive workspace-dependency closure of the fuzz crate,
+# WHY BOTH LEGS ARE FILTERED, unlike the old `release-build.yml`. That file left its push leg
+# unfiltered because its filter was a heuristic -- a source-only `cfg(debug_assertions)` edit can
+# break a release build without touching any path it lists, so main needed an unfiltered backstop
+# (now `nightly.yml`'s `release-link-proof` job, which is unconditional). This filter is not a
+# heuristic. It is the transitive workspace-dependency closure of the fuzz crate,
 # computed from `cargo metadata`, and the fuzz binaries link nothing outside it. `fuzz/Cargo.toml`
 # depends on exactly four workspace crates:
 #
