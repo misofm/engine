@@ -216,11 +216,11 @@ jobs:
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.97.1 --profile minimal
       # The former release-build.yml's unconditional main-push leg (design §6.7/§12 stage 4):
-      # release-build.yml is retired once qualification.yml carries the required context, and
-      # release-shape's cargo check --release --workspace --all-targets (metadata-only + check-
-      # only, no link) is not a substitute for actually linking every test/bench/example target
-      # in release. This is that link proof, at full 21-minute cost, once a day instead of on
-      # every PR and every main push.
+      # release-build.yml was retired once qualification.yml carried the required context, and
+      # qualification.yml's release-shape job's cargo check --release --workspace --all-targets
+      # (metadata-only + check-only, no link) is not a substitute for actually linking every
+      # test/bench/example target in release. This is that link proof, at full 21-minute cost,
+      # once a day instead of on every PR and every main push.
       - name: Workspace release build (single panic variant, --no-run)
         run: bash scripts/run-release-workspace-tests.sh --no-run
 

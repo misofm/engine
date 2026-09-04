@@ -1,10 +1,10 @@
 name: qualification
 
-# Design #359 WP-4 (stage 1): one PR workflow, one required status context (the `verdict` job,
-# whose own `name:` is `qualification`), thirteen leaf jobs behind one router, one aggregate.
-# Not yet required on `main` -- ci.yml, sdk.yml, browser-qualification.yml and release-build.yml
-# stay the required contexts until this workflow has reported on >= 10 PRs and the routing
-# policy checker's new qualification.yml rules (below) pass. See design §4/§5/§7/§12.
+# Design #359 WP-4: one PR workflow, one required status context (the `verdict` job, whose own
+# `name:` is `qualification`), thirteen leaf jobs behind one router, one aggregate. Stage 3 (§12)
+# retired the four workflows this one replaced -- ci.yml, sdk.yml, browser-qualification.yml and
+# release-build.yml -- once this workflow had reported on >= 10 PRs and agreed with them; this is
+# now the sole required PR workflow. See design §4/§5/§7/§12.
 #
 # No `paths:`/`paths-ignore:` anywhere in this file, by design and by policy check: a required
 # workflow that can be skipped by a path filter leaves a PR pending forever. Every job below is

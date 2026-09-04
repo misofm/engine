@@ -251,8 +251,9 @@ failure was observed, and the mutation was reverted in the same session.
 
 ## Issues #280 and #281 — the qualification harness's artifact pin and its boot options
 
-Two defects that together kept `npm run qualify` — the step
-`.github/workflows/browser-qualification.yml` runs — from reaching a browser at all on `main`.
+Two defects that together kept `npm run qualify` — the step `.github/workflows/qualification.yml`'s
+`browser` job runs (the old `browser-qualification.yml` ran it before design #359 §12 stage 3
+retired that workflow) — from reaching a browser at all on `main`.
 Derivations, the document audit that cleared the #241-fallout hypothesis, and the
 digest-immobility argument are in `docs/derivations/281-qualification-harness-boot.md`.
 

@@ -130,15 +130,21 @@ When the user requests fewer CI/CD invocations, use this delivery mode until the
 - GitHub issue evidence may be prepared locally during the batch, but do not claim remote
   synchronization or close an issue until its evidence commit is actually upstream.  Synchronize
   all completed issue bodies/states immediately after the single batch push.
-- `.github/workflows/ci.yml` should ignore ordinary feature-branch pushes, run for `main` pushes
-  and pull requests targeting `main`, and cancel superseded runs for the same ref.
-- A job that cannot fail a merge does not belong on `ci.yml`.  `paths:` is a workflow-level
-  filter, so narrowing one job's trigger means moving it to its own file: `release-build.yml`
-  and `fuzz.yml` are paths-filtered per-PR workflows, and `nightly.yml` carries the jobs that
-  gate nothing at all (the non-blocking vectorization report, the descriptive benchmarks) plus
-  the deep fuzzing the per-PR budget cannot afford.  A check that stops reporting on some pull
-  requests must be removed from `main`'s required status checks first, or every pull request
-  that skips it stays permanently pending.
+- `.github/workflows/qualification.yml` is the only required status check on `main` (design #359;
+  its `verdict` job's own `name:` is `qualification`).  It ignores ordinary feature-branch pushes,
+  runs for `main` pushes and pull requests targeting `main`, and cancels superseded pull-request
+  runs for the same ref (never a `main` push, so a superseded push cannot starve its own
+  `rust-cache` saves).  It carries no `paths:`/`paths-ignore:` filter on any trigger -- a required
+  workflow that a path filter can skip leaves that PR's required context pending forever -- so
+  every leaf job is instead gated by its own router's `route` output, and the verdict enforces
+  that every job's result matches a static expectation table.
+- A job that cannot fail a merge does not belong on `qualification.yml`.  `fuzz.yml` and
+  `nightly.yml` are the non-required workflows: `fuzz.yml` is a paths-filtered per-PR workflow for
+  the two bounded fuzz jobs, and `nightly.yml` carries the jobs that gate nothing at all (the
+  non-blocking vectorization report, the descriptive benchmarks, the release-workspace link proof)
+  plus the deep fuzzing and math sweeps the per-PR budget cannot afford.  A check that stops
+  reporting on some pull requests must be removed from `main`'s required status checks first, or
+  every pull request that skips it stays permanently pending.
 
 Keep feature issues small enough to ship.  A feature issue owns the minimum implementation and
 evidence needed to prove its product contract; generic harness hardening, artifact promotion,
