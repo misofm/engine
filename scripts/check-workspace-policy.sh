@@ -147,6 +147,22 @@ while IFS= read -r manifest; do
             ;;
     esac
 
+    # Issue #356/#359: the in-repository FLAC delivery stack (and its migration tooling) was
+    # retired; PCM is this repository's output and delivery codecs live outside it. This was
+    # `scripts/check-delivery-codec-boundary.py`, folded in here because #358's claim ("no
+    # retired delivery-codec identity in the live workspace") is a name-absence claim over
+    # exactly the same manifests, lockfile and tree this loop already walks.
+    case "$package_name" in
+        flac-decoder | stem-publisher | catalog-migrate | flacenc | symphonia)
+            fail "$manifest package name is a retired delivery-codec identity: $package_name"
+            ;;
+    esac
+    case "$package_directory" in
+        flac-decoder | stem-publisher | catalog-migrate | flacenc | symphonia)
+            fail "$manifest directory name is a retired delivery-codec identity: $package_directory"
+            ;;
+    esac
+
     expected_crate_name="${package_name//-/_}"
 
     lib_name="$(toml_name lib "$manifest")"
@@ -166,6 +182,27 @@ done < <(find crates hosts tools sidecars -name Cargo.toml -type f | sort)
 scan_forbidden "hardware ISA Cargo features are forbidden" \
     '^[[:space:]]*(simd128|neon|avx2|fma)[[:space:]]*=' Cargo.toml \
     crates hosts tools sidecars
+
+# Issue #356/#359: a bare retired-directory stub (no Cargo.toml, so invisible to the manifest
+# loop above) is still a regression -- these three exact paths carried the retired FLAC delivery
+# stack and its migration tooling.
+while IFS= read -r retired_directory; do
+    [[ -z "$retired_directory" ]] && continue
+    fail "retired delivery-codec directory remains: $retired_directory"
+done < <(find crates hosts tools sidecars -mindepth 1 -maxdepth 2 -type d \( \
+    -name flac-decoder -o -name stem-publisher -o -name catalog-migrate \
+    -o -name flacenc -o -name symphonia \) 2>/dev/null)
+
+# Every Cargo.toml (workspace root and fuzz/ included, not just workspace members) and the
+# lockfile: a retired identity can also appear as a dependency key, a `package = "..."` rename,
+# or (in Cargo.lock) a resolved package entry, none of which the manifest loop above sees.
+retired_delivery_codec_pattern='\b(flac-decoder|stem-publisher|catalog-migrate|flacenc|symphonia)\b'
+scan_forbidden "retired delivery-codec Cargo identity is forbidden" \
+    "$retired_delivery_codec_pattern" 'Cargo.toml' \
+    Cargo.toml fuzz crates hosts tools sidecars
+scan_forbidden "retired delivery-codec Cargo identity is forbidden in the lockfile" \
+    "$retired_delivery_codec_pattern" 'Cargo.lock' \
+    Cargo.lock
 
 scan_forbidden "compiled track-capacity identifiers are forbidden" \
     '\b(MAX_TRACKS|MAX_TRACK_COUNT|DEFAULT_MAX_TRACKS|TRACK_LIMIT)\b' '*.rs' \
