@@ -51,7 +51,11 @@ def route(*paths: str) -> str:
 
 
 def route_flags_with(router: pathlib.Path, *args: str) -> tuple[str, str, str]:
-    """Run the router in `--flags` mode and return (route, math_closure, release_inputs)."""
+    """Run the router in `--flags` mode and return (route, math_closure, release_inputs).
+
+    `--flags` mode prints only `key=value` lines -- no bare route line first -- so its whole
+    stdout can be appended straight to `$GITHUB_OUTPUT`.
+    """
     result = subprocess.run([sys.executable, str(router), "--flags", *args],
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
     if result.returncode:
@@ -59,15 +63,14 @@ def route_flags_with(router: pathlib.Path, *args: str) -> tuple[str, str, str]:
     lines = result.stdout.split("\n")
     if lines and lines[-1] == "":
         lines.pop()
-    if len(lines) != 4:
-        raise AssertionError(f"--flags must print exactly 4 lines, got {lines!r}")
-    bare, route_line, math_line, release_line = lines
+    if len(lines) != 3:
+        raise AssertionError(f"--flags must print exactly 3 lines, got {lines!r}")
+    route_line, math_line, release_line = lines
     if not (route_line.startswith("route=") and math_line.startswith("math_closure=")
             and release_line.startswith("release_inputs=")):
         raise AssertionError(f"--flags lines have the wrong shape: {lines!r}")
-    if bare != route_line[len("route="):]:
-        raise AssertionError(f"bare route {bare!r} must equal the route= line {route_line!r}")
-    return bare, math_line[len("math_closure="):], release_line[len("release_inputs="):]
+    return (route_line[len("route="):], math_line[len("math_closure="):],
+            release_line[len("release_inputs="):])
 
 
 def route_flags(*paths: str) -> tuple[str, str, str]:
@@ -139,7 +142,7 @@ def test_new_router_behaviours() -> None:
     dispatch = subprocess.run([sys.executable, str(ROUTER), "--event", "workflow_dispatch", "--flags"],
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
     assert dispatch.returncode == 0
-    assert dispatch.stdout == "full\nroute=full\nmath_closure=true\nrelease_inputs=true\n"
+    assert dispatch.stdout == "route=full\nmath_closure=true\nrelease_inputs=true\n"
 
     assert route_flags_with(ROUTER, "--event", "pull_request") == ("full", "true", "true")  # missing base
     assert route_flags_with(
@@ -159,6 +162,26 @@ def test_new_router_behaviours() -> None:
         assert route_flags_with(
             ROUTER, "--event", "pull_request", "--name-status-file", status.name,
         ) == ("full", "true", "true")
+
+    # R1 (WP-1 review S4): a path `path_kind` refuses as untrusted (leading `/`, a literal
+    # backslash, or a `/../` traversal segment) must force both closure flags fail-safe true, the
+    # same way it forces `route` to `full` -- never silently compute "definitely not math /
+    # definitely not a release input" for a name the router does not trust the shape of.
+    for untrusted in (
+        "/crates/math/src/lib.rs",
+        "docs/../crates/math/src/lib.rs",
+        "crates\\math\\src\\lib.rs",
+        "hosts/../Cargo.lock",
+        "crates/lane/../math/src/lib.rs",
+    ):
+        assert route_flags(untrusted) == ("full", "true", "true"), untrusted
+
+    # A well-formed but unrecognised path is not untrusted, so it must keep computing the flags
+    # normally instead of being swept into the same fail-safe: this is a deliberate, documented
+    # divergence from design #359 WP-1 §2's literal sentence (an unknown well-formed path forces
+    # `route` to `full` but cannot affect `math_closure`/`release_inputs`, which are exact,
+    # named prefix/suffix sets -- see `compute_flags`'s docstring).
+    assert route_flags("LICENSE") == ("full", "false", "false")
 
     # Bare mode (no --flags) is unchanged: exactly one line, the route, for existing callers.
     bare_result = subprocess.run(
@@ -416,6 +439,50 @@ def main() -> int:
         checker_fails(root)  # leaving a correct unused constant cannot disguise production downgrade
     finally:
         shutil.rmtree(root)
+
+    # R3 (WP-1 review B3/N21): DSP_RESEARCH_PREFIX, MATH_CLOSURE_*, and RELEASE_INPUT_FILES are
+    # AST-pinned by check-ci-path-routing.py the same way SDK_FILES and GIT_DIFF_OPTIONS are, so
+    # router/checker drift on any of them is caught by the policy checker rather than only by
+    # this file's own direct assertions above.
+    root = workspace()
+    try:
+        mutate(root / "scripts/ci-path-router.py",
+               'DSP_RESEARCH_PREFIX = "dsp-research/"', 'DSP_RESEARCH_PREFIX = "dsp-notes/"')
+        checker_fails(root)
+    finally:
+        shutil.rmtree(root)
+    root = workspace()
+    try:
+        mutate(root / "scripts/ci-path-router.py",
+               'MATH_CLOSURE_PREFIXES = ("crates/math/", "crates/lane/")',
+               'MATH_CLOSURE_PREFIXES = ("crates/math/", "crates/lane/", "crates/engine/")')
+        checker_fails(root)
+    finally:
+        shutil.rmtree(root)
+    root = workspace()
+    try:
+        mutate(root / "scripts/ci-path-router.py",
+               'MATH_CLOSURE_FILES = {"Cargo.lock", "Cargo.toml", "rust-toolchain.toml", ".cargo/config.toml"}',
+               'MATH_CLOSURE_FILES = {"Cargo.lock", "Cargo.toml", "rust-toolchain.toml"}')
+        checker_fails(root)
+    finally:
+        shutil.rmtree(root)
+    root = workspace()
+    try:
+        mutate(root / "scripts/ci-path-router.py",
+               'RELEASE_INPUT_SUFFIX = "/Cargo.toml"', 'RELEASE_INPUT_SUFFIX = "/Cargo.lock"')
+        checker_fails(root)
+    finally:
+        shutil.rmtree(root)
+    root = workspace()
+    try:
+        mutate(root / "scripts/ci-path-router.py",
+               '    "scripts/check-release-shape.py",\n}',
+               '    "scripts/check-release-shape.py",\n    "scripts/check-sdk-types.sh",\n}')
+        checker_fails(root)
+    finally:
+        shutil.rmtree(root)
+
     with tempfile.NamedTemporaryFile() as status:
         status.write(b"R100\0sdk/src/index.ts\0")  # a missing rename side is malformed/full
         status.flush()
