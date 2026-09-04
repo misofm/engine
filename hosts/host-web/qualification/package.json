@@ -9,8 +9,6 @@
   },
   "scripts": {
     "demo": "node ./server.mjs",
-    "flac-decoder": "node ./run-flac-decoder.mjs",
-    "flac-throughput": "node ./run-flac-decoder-throughput.mjs",
     "matrix": "node ./generate-matrix.mjs",
     "qualify": "node ./run.mjs",
     "session-identities": "node ./session-identities.mjs"

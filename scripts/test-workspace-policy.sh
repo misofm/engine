@@ -190,37 +190,37 @@ allow_approved_isa_pin() {
 allow_sidecar_valid() {
     local root="$1"
     create_valid_fixture "$root"
-    mkdir -p "$root/sidecars/flac-decoder/src"
+    mkdir -p "$root/sidecars/example/src"
     printf '%s\n' \
         '[package]' \
-        'name = "flac-decoder"' \
+        'name = "example"' \
         'license.workspace = true' \
         '' \
         '[lib]' \
-        'name = "flac_decoder"' \
+        'name = "example"' \
         '' \
         '[features]' \
         'default = []' \
-        >"$root/sidecars/flac-decoder/Cargo.toml"
-    printf '//! fixture\n' >"$root/sidecars/flac-decoder/src/lib.rs"
+        >"$root/sidecars/example/Cargo.toml"
+    printf '//! fixture\n' >"$root/sidecars/example/src/lib.rs"
     bash "$policy_script" "$root" >/dev/null
 }
 
 mutate_sidecar_package_prefix() {
     local root="$1"
-    mkdir -p "$root/sidecars/flac-decoder/src"
+    mkdir -p "$root/sidecars/example/src"
     printf '%s\n' \
         '[package]' \
-        'name = "miso-engine-flac-decoder"' \
+        'name = "miso-engine-example"' \
         'license.workspace = true' \
         '' \
         '[lib]' \
-        'name = "miso_engine_flac_decoder"' \
+        'name = "miso_engine_example"' \
         '' \
         '[features]' \
         'default = []' \
-        >"$root/sidecars/flac-decoder/Cargo.toml"
-    printf '//! fixture\n' >"$root/sidecars/flac-decoder/src/lib.rs"
+        >"$root/sidecars/example/Cargo.toml"
+    printf '//! fixture\n' >"$root/sidecars/example/src/lib.rs"
 }
 
 # The directory-equals-package-name rule applies regardless of nesting depth: a manifest two

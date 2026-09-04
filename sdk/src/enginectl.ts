@@ -2,7 +2,7 @@
 
 import { createHash, randomBytes } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { link, lstat, open, readFile, rename, stat, unlink } from "node:fs/promises";
+import { link, open, readFile, rename, unlink } from "node:fs/promises";
 import { basename, dirname, resolve } from "node:path";
 import process from "node:process";
 
@@ -16,7 +16,6 @@ interface ErrorExtra {
   readonly phase?: string;
   readonly result?: number;
   readonly diagnostics?: readonly unknown[];
-  readonly groups?: readonly string[];
 }
 
 class CliFailure extends Error {
@@ -57,20 +56,13 @@ Commands:
   build           Build and validate a canonical Session V1 document
 `;
 
-const BUILD_HELP = `Usage: enginectl session build (--request PATH|- | --stems DIRECTORY) --output PATH|- [options]
+const BUILD_HELP = `Usage: enginectl session build --request PATH|- --output PATH|- [options]
 
-Exactly one of --request and --stems is required. --request reads one strict JSON request from PATH
-or stdin with '-'. --stems reads one leaf directory of directly owned FLAC files. Stem sessions
-default their ID from the leaf directory name and their quantum to 128; override those defaults
-with --session-id and --quantum-frames.
+--request reads one strict JSON request from PATH or stdin with '-'.
 
 --output - writes only raw canonical JSON (with its final LF); successful stderr is empty. A file
 output is published atomically before stdout emits one compact JSON receipt plus LF. Existing
-destinations are refused unless --overwrite is present. In stems mode, the output cannot physically
-reside inside the stems directory, including through a symlink or case alias.
-
-A stems collection is refused with code stems.collection and sorted child-directory names; those
-children are not asserted to be valid leaves. Failures leave stdout empty and write one JSON stderr
+destinations are refused unless --overwrite is present. Failures leave stdout empty and write one JSON stderr
 document: exit 2 is usage, 3 is input/build refusal, 4 is engine refusal, 5 is output refusal, and
 70 is internal or packaged-asset failure. The command is non-interactive and offline.
 `;
@@ -81,20 +73,14 @@ function usage(message: string): never {
 
 interface BuildArguments {
   readonly request?: string;
-  readonly stems?: string;
   readonly output: string;
   readonly overwrite: boolean;
-  readonly sessionId?: string;
-  readonly quantumFrames?: number;
 }
 
 function parseBuildArguments(args: readonly string[]): BuildArguments | "help" {
   if (args.length === 1 && args[0] === "--help") return "help";
   let request: string | undefined;
-  let stems: string | undefined;
   let output: string | undefined;
-  let sessionId: string | undefined;
-  let quantumFrames: number | undefined;
   let overwrite = false;
   for (let index = 0; index < args.length; index += 1) {
     const flag = args[index];
@@ -103,8 +89,7 @@ function parseBuildArguments(args: readonly string[]): BuildArguments | "help" {
       overwrite = true;
       continue;
     }
-    if (flag !== "--request" && flag !== "--stems" && flag !== "--output"
-      && flag !== "--session-id" && flag !== "--quantum-frames") {
+    if (flag !== "--request" && flag !== "--output") {
       usage(flag?.startsWith("--") ? `unknown flag '${flag}'` : `unexpected operand '${String(flag)}'`);
     }
     const value = args[index + 1];
@@ -113,42 +98,18 @@ function parseBuildArguments(args: readonly string[]): BuildArguments | "help" {
     if (flag === "--request") {
       if (request !== undefined) usage("--request was specified more than once");
       request = value;
-    } else if (flag === "--stems") {
-      if (stems !== undefined) usage("--stems was specified more than once");
-      stems = value;
     } else if (flag === "--output") {
       if (output !== undefined) usage("--output was specified more than once");
       output = value;
-    } else if (flag === "--session-id") {
-      if (sessionId !== undefined) usage("--session-id was specified more than once");
-      sessionId = value;
-    } else {
-      if (quantumFrames !== undefined) usage("--quantum-frames was specified more than once");
-      if (!/^[1-9][0-9]*$/.test(value)) usage("--quantum-frames requires a positive u32");
-      quantumFrames = Number(value);
-      if (!Number.isSafeInteger(quantumFrames) || quantumFrames > 0xffff_ffff) {
-        usage("--quantum-frames requires a positive u32");
-      }
     }
   }
-  if ((request === undefined) === (stems === undefined)) {
-    usage("exactly one of --request and --stems is required");
-  }
+  if (request === undefined) usage("--request is required");
   if (output === undefined) usage("--output is required");
   if (output === "-" && overwrite) usage("--overwrite cannot be used with --output -");
-  if (request !== undefined && (sessionId !== undefined || quantumFrames !== undefined)) {
-    usage("--session-id and --quantum-frames are valid only with --stems");
-  }
-  if (sessionId !== undefined && !/^[a-z][a-z0-9._-]{0,126}$/.test(sessionId)) {
-    usage("--session-id must match [a-z][a-z0-9._-]{0,126}");
-  }
   return {
-    ...(request === undefined ? {} : { request }),
-    ...(stems === undefined ? {} : { stems }),
+    request,
     output,
     overwrite,
-    ...(sessionId === undefined ? {} : { sessionId }),
-    ...(quantumFrames === undefined ? {} : { quantumFrames }),
   };
 }
 
@@ -285,83 +246,16 @@ async function publish(
   }
 }
 
-async function preflightStemOutput(args: BuildArguments): Promise<void> {
-  if (args.request !== undefined || args.output === "-") return;
-  const destination = resolve(args.output);
-  const parentPath = dirname(destination);
-  let parent: Awaited<ReturnType<typeof stat>>;
-  try {
-    parent = await stat(parentPath, { bigint: true });
-    if (!parent.isDirectory()) {
-      throw new Error("parent is not a directory");
-    }
-  } catch (error) {
-    throw new CliFailure(5, "output.publish", `could not inspect '${args.output}': ${errorMessage(error)}`);
-  }
-  // Compare physical directory identities, not path spellings. `stat` follows a symlink parent,
-  // and `(dev, ino)` also collapses case aliases on a case-insensitive filesystem. This runs
-  // before discovery imports or loads the decoder, so an in-leaf destination cannot overwrite a
-  // source or make the next invocation reject the session file the previous invocation created.
-  try {
-    const stems = await stat(resolve(args.stems as string), { bigint: true });
-    if (stems.isDirectory() && stems.dev === parent.dev && stems.ino === parent.ino) {
-      throw new CliFailure(
-        5,
-        "output.publish",
-        `could not publish '${args.output}': output parent is the stems directory`,
-      );
-    }
-  } catch (error) {
-    if (error instanceof CliFailure) throw error;
-    // A missing/unreadable stems path is an input refusal, not an output refusal. Discovery below
-    // reports it through the established exit-3 `stems.read` contract.
-  }
-  try {
-    const existing = await lstat(destination);
-    if (args.overwrite && !existing.isDirectory()) return;
-  } catch (error) {
-    if (typeof error === "object" && error !== null && "code" in error
-      && (error as { readonly code?: unknown }).code === "ENOENT") return;
-    throw new CliFailure(5, "output.publish", `could not inspect '${args.output}': ${errorMessage(error)}`);
-  }
-  throw new CliFailure(
-    5,
-    "output.publish",
-    `could not publish '${args.output}': destination already exists${args.overwrite ? " as a directory" : ""}`,
-  );
-}
-
 async function build(args: BuildArguments): Promise<void> {
-  await preflightStemOutput(args);
   let json: string;
-  let stemsBuild: import("./cli/stems.ts").StemsBuild | undefined;
-  if (args.request !== undefined) {
-    const request = decodeRequest(await boundedBytes(args.request));
+  {
+    const request = decodeRequest(await boundedBytes(args.request as string));
     const { sessionBuilderFromRequest } = await import("./cli/session-request.ts");
     try {
       json = sessionBuilderFromRequest(request).toJson();
     } catch (error) {
       if (error instanceof MisoUsageError || error instanceof TypeError) {
         throw new CliFailure(3, "request.shape", error.message);
-      }
-      throw error;
-    }
-  } else {
-    const directory = args.stems as string;
-    const { buildFromStems, normalizeSessionId, StemsImportError } = await import("./cli/stems.ts");
-    try {
-      stemsBuild = await buildFromStems({
-        directory,
-        sessionId: args.sessionId ?? normalizeSessionId(directory),
-        quantumFrames: args.quantumFrames ?? 128,
-      });
-      json = stemsBuild.builder.toJson();
-    } catch (error) {
-      if (error instanceof StemsImportError) {
-        throw new CliFailure(error.internal ? 70 : 3, error.code, error.message, error.extra);
-      }
-      if (error instanceof MisoUsageError || error instanceof TypeError) {
-        throw new CliFailure(3, "stems.shape", error.message);
       }
       throw error;
     }
@@ -409,29 +303,7 @@ async function build(args: BuildArguments): Promise<void> {
       sha256: createHash("sha256").update(bytes).digest("hex"),
     },
   };
-  const receipt = stemsBuild === undefined ? requestReceipt : {
-    ...requestReceipt,
-    output: {
-      path: requestReceipt.output.path,
-      resolvedPath: resolve(args.output),
-      bytes: requestReceipt.output.bytes,
-      sha256: requestReceipt.output.sha256,
-    },
-    input: {
-      kind: "stems",
-      path: args.stems,
-      resolvedPath: stemsBuild.directory,
-    },
-    session: {
-      id: stemsBuild.sessionId,
-      revision: 0,
-      sampleRateHz: stemsBuild.sampleRateHz,
-      quantumFrames: stemsBuild.quantumFrames,
-      sources: stemsBuild.mappings.length,
-      tracks: stemsBuild.mappings.length,
-    },
-    stems: stemsBuild.mappings,
-  };
+  const receipt = requestReceipt;
   const receiptText = `${JSON.stringify(receipt)}\n`;
   await publish(args.output, bytes, args.overwrite);
   try {

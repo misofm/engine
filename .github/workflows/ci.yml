@@ -72,6 +72,10 @@ jobs:
         run: RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps
       - name: Workspace policy
         run: bash scripts/check-workspace-policy.sh
+      - name: Retired delivery-codec Cargo boundary and mutations
+        run: |
+          python3 -B scripts/check-delivery-codec-boundary.py
+          python3 -B scripts/test-delivery-codec-boundary.py
       - name: Session dependency and compiler boundary policy
         run: bash scripts/check-session-policy.sh
       - name: Workspace policy mutation tests
@@ -243,16 +247,6 @@ jobs:
         run: |
           bash scripts/check-builtins-fixtures.sh .
           bash scripts/test-builtins-fixtures.sh
-      # The hermetic half of the FLAC delivery pipeline: builds the shipped decoder sidecar,
-      # checks its artifact/provenance/vectors and a red mutation, and bans decodeAudioData from
-      # the delivery pipeline (PCM-only per AGENTS.md). The expensive half -- real browser decode
-      # over Playwright -- is browser-qualification.yml's `npm run flac-decoder`, a different
-      # script entirely; this one needs no browser. Previously reachable only from
-      # scripts/sweep.sh, which nobody runs.
-      - name: FLAC decoder artifact, provenance and delivery-pipeline gates
-        run: |
-          bash scripts/check-flac-decoder.sh
-          bash scripts/test-flac-decoder.sh
       # Issue #097: the independent canonical effect-package V1 corpus plus its native and
       # scalar-Wasm inspection surfaces. Previously reachable only from scripts/sweep.sh, which
       # nobody runs. It re-runs check-workspace-policy.sh/check-realtime-policy.sh and their

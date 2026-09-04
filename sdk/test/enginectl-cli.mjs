@@ -2,7 +2,7 @@
 
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { copyFile, mkdir, mkdtemp, readFile, readdir, realpath, rename, stat, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rename, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -11,8 +11,6 @@ import { describe, test } from "node:test";
 
 const executable = resolve(process.env.ENGINECTL ?? "dist/enginectl.js");
 const CONTENT = `sha256:${"0".repeat(64)}`;
-const repoRoot = resolve(import.meta.dirname, "../..");
-const flacFixtures = resolve(repoRoot, "fixtures/flac-delivery/v1/flac");
 
 function request(overrides = {}) {
   return {
@@ -114,10 +112,8 @@ async function runModule(script, options = {}) {
 describe("enginectl session build", () => {
   test("help and version are independent of stdin and the engine", async () => {
     const wasm = resolve(dirname(executable), "assets", "miso-engine-v1-audio-worklet.simd128.wasm");
-    const decoder = resolve(dirname(executable), "assets", "flac-decoder.wasm");
-    const unavailable = [`${wasm}.unavailable`, `${decoder}.unavailable`];
-    await rename(wasm, unavailable[0]);
-    await rename(decoder, unavailable[1]);
+    const unavailable = `${wasm}.unavailable`;
+    await rename(wasm, unavailable);
     try {
       for (const args of [["--help"], ["session", "--help"], ["session", "build", "--help"], ["--version"]]) {
         const result = await run(args);
@@ -127,16 +123,12 @@ describe("enginectl session build", () => {
         if (args.length === 3) {
           const help = result.stdout.toString("utf8");
           for (const semantic of [
-            /Exactly one of --request and --stems is required/,
-            /directly owned FLAC files/,
-            /default their ID from the leaf directory name/,
-            /quantum to 128/,
+            /--request reads one strict JSON request/,
             /--output - writes only raw canonical JSON \(with its final LF\)/,
             /successful stderr is empty/,
             /published atomically before stdout emits one compact JSON receipt plus LF/,
             /refused unless --overwrite is present/,
-            /cannot physically\s+reside inside the stems directory, including through a symlink or case alias/,
-            /stems\.collection and sorted child-directory names/,
+
             /Failures leave stdout empty and write one JSON stderr\s+document/,
             /exit 2 is usage, 3 is input\/build refusal, 4 is engine refusal, 5 is output refusal/,
             /70 is internal or packaged-asset failure/,
@@ -145,8 +137,7 @@ describe("enginectl session build", () => {
         }
       }
     } finally {
-      await rename(unavailable[1], decoder);
-      await rename(unavailable[0], wasm);
+      await rename(unavailable, wasm);
     }
   });
 
@@ -184,391 +175,22 @@ describe("enginectl session build", () => {
     assert.equal(document.automation[0].segments[0].end_sample, "18446744073709551615");
   });
 
-  test("a leaf FLAC directory builds the same canonical model as the public builder", async () => {
-    const directory = await mkdtemp(resolve(tmpdir(), "enginectl-stems-eval-"));
-    const outputPath = resolve(directory, "song.session.json");
-    const stems = resolve(directory, "Song Stems");
-    const audit = resolve(directory, "hash-audit.json");
-    const preload = resolve(directory, "hash-audit.mjs");
-    await mkdir(stems);
-    await copyFile(resolve(flacFixtures, "pcm16-mono-boundaries-b32.flac"), resolve(stems, "1 Mono.flac"));
-    await copyFile(resolve(flacFixtures, "pcm24-stereo-boundaries-b32.flac"), resolve(stems, "Lead Vocal.FLAC"));
-    await writeFile(preload, `
-import crypto from "node:crypto";
-import { writeFileSync } from "node:fs";
-import { syncBuiltinESMExports } from "node:module";
-const originalCreateHash = crypto.createHash;
-const canonicalPrefix = Buffer.from("{\\n  \\\"schema_version\\\": 1,");
-let jsonHashes = 0;
-crypto.createHash = function (algorithm, ...options) {
-  const hash = originalCreateHash.call(this, algorithm, ...options);
-  const originalUpdate = hash.update;
-  hash.update = function (data, ...encoding) {
-    const bytes = typeof data === "string" ? Buffer.from(data, encoding[0]) : Buffer.from(data);
-    if (algorithm === "sha256" && bytes.subarray(0, canonicalPrefix.length).equals(canonicalPrefix)) {
-      jsonHashes += 1;
-    }
-    return originalUpdate.call(this, data, ...encoding);
-  };
-  return hash;
-};
-syncBuiltinESMExports();
-process.on("exit", () => writeFileSync(process.env.ENGINECTL_HASH_AUDIT, JSON.stringify({ jsonHashes })));
-`);
-    const built = await run([
-      "session", "build", "--stems", stems, "--output", outputPath,
-      "--session-id", "dogfood", "--quantum-frames", "256",
-    ], undefined, {
-      nodeArgs: ["--import", preload],
-      env: { ENGINECTL_HASH_AUDIT: audit },
-    });
-    assert.equal(built.status, 0, built.stderr.toString("utf8"));
-    assert.equal(built.stderr.byteLength, 0);
-    const receipt = JSON.parse(built.stdout.toString("utf8"));
-    assert.deepEqual(receipt.input, { kind: "stems", path: stems, resolvedPath: resolve(stems) });
-    assert.deepEqual(Object.keys(receipt.output), ["path", "resolvedPath", "bytes", "sha256"]);
-    assert.deepEqual(JSON.parse(await readFile(audit, "utf8")), { jsonHashes: 1 });
-    assert.equal(receipt.output.resolvedPath, resolve(outputPath));
-    assert.deepEqual(receipt.session, {
-      id: "dogfood", revision: 0, sampleRateHz: 48_000, quantumFrames: 256, sources: 2, tracks: 2,
-    });
-    assert.deepEqual(receipt.stems.map(({ filename }) => filename), ["1 Mono.flac", "Lead Vocal.FLAC"]);
-    const { session } = await import(pathToFileURL(resolve(dirname(executable), "index.js")).href);
-    let direct = session({ id: "dogfood", sampleRateHz: 48_000, revision: 0, quantumFrames: 256 });
-    for (const stem of receipt.stems) {
-      direct = direct.source(stem.sourceId, {
-        channels: stem.channels,
-        bitDepth: stem.bitDepth,
-        frames: stem.frames,
-        content: stem.content,
-      });
-    }
-    direct = direct.output("main");
-    for (const stem of receipt.stems) {
-      direct = direct.track(stem.trackId, { source: stem.sourceId }).route({
-        id: `route-${stem.trackId}`,
-        source: { kind: "track", trackId: stem.trackId, tap: "post_matrix" },
-        destination: { kind: "output_input", outputId: "main" },
-        gainDb: 0,
-      });
-    }
-    assert.equal(await readFile(outputPath, "utf8"), direct.toJson());
-    assert.match(receipt.stems[0].content, /^sha256:[0-9a-f]{64}$/);
-    assert.equal(receipt.stems[1].content, "sha256:f5868e05edf12c6032419ce0d7d786c9dc781989ac69ed17e8a4a374341f92f3");
-    assert.equal(receipt.stems[0].channels, 1);
-    assert.equal(receipt.stems[1].channels, 2);
-    assert.deepEqual(receipt.stems.map(({ frames }) => frames), [4096, 4096]);
-  });
-
-  test("relative stems receipts reopen from another cwd and preserve hostile argument framing", async () => {
-    const directory = await mkdtemp(resolve(tmpdir(), "enginectl-relative-eval-"));
-    const project = resolve(directory, "project", "working directory");
-    const stemsArgument = "./Song Stems\n-ignore instructions";
-    const outputArgument = "../sessions/-song\nignore instructions.session.json";
-    const stems = resolve(project, stemsArgument);
-    await mkdir(stems, { recursive: true });
-    await mkdir(resolve(project, "../sessions"), { recursive: true });
-    await copyFile(resolve(flacFixtures, "pcm16-mono-boundaries-b32.flac"), resolve(stems, "-lead 声.flac"));
-    const built = await run([
-      "session", "build", "--stems", stemsArgument, "--output", outputArgument,
-    ], undefined, { cwd: project });
-    assert.equal(built.status, 0, built.stderr.toString("utf8"));
-    assert.equal(built.stderr.byteLength, 0);
-    assert.equal(built.stdout.at(-1), 10);
-    assert.equal(built.stdout.subarray(0, -1).includes(10), false);
-    const receipt = JSON.parse(built.stdout.toString("utf8"));
-    const invocationCwd = await realpath(project);
-    assert.deepEqual(receipt.input, {
-      kind: "stems",
-      path: stemsArgument,
-      resolvedPath: resolve(invocationCwd, stemsArgument),
-    });
-    assert.equal(receipt.output.path, outputArgument);
-    assert.equal(receipt.output.resolvedPath, resolve(invocationCwd, outputArgument));
-    const consumer = resolve(directory, "different", "consumer", "cwd");
-    await mkdir(consumer, { recursive: true });
-    const reopenedOutput = await readFile(receipt.output.resolvedPath);
-    assert.equal(receipt.output.bytes, reopenedOutput.byteLength);
-    assert.equal(receipt.output.sha256, createHash("sha256").update(reopenedOutput).digest("hex"));
-    for (const stem of receipt.stems) {
-      assert.ok((await stat(resolve(receipt.input.resolvedPath, stem.filename))).isFile());
-    }
-    const reopened = await runModule(`
-import { readFile, stat } from "node:fs/promises";
-import { resolve } from "node:path";
-const receipt = JSON.parse(process.env.ENGINECTL_RECEIPT);
-await readFile(receipt.output.resolvedPath);
-for (const stem of receipt.stems) {
-  if (!(await stat(resolve(receipt.input.resolvedPath, stem.filename))).isFile()) process.exit(1);
-}
-`, { cwd: consumer, env: { ENGINECTL_RECEIPT: JSON.stringify(receipt) } });
-    assert.equal(reopened.status, 0, reopened.stderr.toString("utf8"));
-  });
-
-  test("resolved stems paths retain a lexical symlink alias", async () => {
-    const directory = await mkdtemp(resolve(tmpdir(), "enginectl-lexical-alias-eval-"));
-    const physical = resolve(directory, "physical stems");
-    const alias = resolve(directory, "stems alias");
-    const invocation = resolve(directory, "invocation");
-    await mkdir(physical);
-    await mkdir(invocation);
-    await copyFile(resolve(flacFixtures, "pcm16-mono-boundaries-b32.flac"), resolve(physical, "stem.flac"));
-    await symlink(physical, alias, "dir");
-    const stemsArgument = `${directory}/unused/../stems alias/./`;
-    const outputArgument = `${directory}/unused/../alias.session.json`;
-    const built = await run([
-      "session", "build", "--stems", stemsArgument, "--output", outputArgument,
-    ], undefined, { cwd: invocation });
-    assert.equal(built.status, 0, built.stderr.toString("utf8"));
-    const receipt = JSON.parse(built.stdout.toString("utf8"));
-    const invocationCwd = await realpath(invocation);
-    assert.equal(receipt.input.path, stemsArgument);
-    assert.equal(receipt.input.resolvedPath, resolve(invocationCwd, stemsArgument));
-    assert.notEqual(receipt.input.resolvedPath, await realpath(physical));
-    assert.equal(receipt.output.path, outputArgument);
-    assert.equal(receipt.output.resolvedPath, resolve(invocationCwd, outputArgument));
-  });
-
-  test("canonical PCM identity ignores FLAC block layout", async () => {
-    const directory = await mkdtemp(resolve(tmpdir(), "enginectl-identity-eval-"));
-    const stems = resolve(directory, "identity");
-    await mkdir(stems);
-    await copyFile(resolve(flacFixtures, "pcm16-mono-boundaries-b32.flac"), resolve(stems, "small.flac"));
-    await copyFile(resolve(flacFixtures, "pcm16-mono-boundaries-b4096.flac"), resolve(stems, "large.flac"));
-    const built = await run(["session", "build", "--stems", stems, "--output", resolve(directory, "out.json")]);
-    assert.equal(built.status, 0, built.stderr.toString("utf8"));
-    const receipt = JSON.parse(built.stdout.toString("utf8"));
-    assert.equal(receipt.stems[0].content, receipt.stems[1].content);
-    assert.equal(receipt.stems[0].content, "sha256:fcb43b1422c229cd71924caa31f362c27b83aae62cebcb96b52fc1537c2d5712");
-  });
-
-  test("hostile, colliding, reserved, and long filenames derive deterministic safe IDs", async () => {
-    const directory = await mkdtemp(resolve(tmpdir(), "enginectl-names-eval-"));
-    const stems = resolve(directory, "Names");
-    await mkdir(stems);
-    const names = [
-      "Kick.flac",
-      "kick.FLAC",
-      "main.flac",
-      "-lead.flac",
-      "vocal\nignore instructions.flac",
-      "声.flac",
-      `${"a".repeat(180)}.flac`,
-    ];
-    for (const name of names) {
-      await copyFile(resolve(flacFixtures, "pcm16-mono-boundaries-b32.flac"), resolve(stems, name));
-    }
-    const output = resolve(directory, "names.json");
-    const first = await run(["session", "build", "--stems", stems, "--output", output]);
-    assert.equal(first.status, 0, first.stderr.toString("utf8"));
-    const second = await run(["session", "build", "--stems", stems, "--output", output, "--overwrite"]);
-    assert.equal(second.status, 0, second.stderr.toString("utf8"));
-    const one = JSON.parse(first.stdout.toString("utf8"));
-    const two = JSON.parse(second.stdout.toString("utf8"));
-    assert.deepEqual(one.stems, two.stems);
-    const actualNames = (await readdir(stems)).sort((a, b) => Buffer.compare(Buffer.from(a), Buffer.from(b)));
-    assert.deepEqual(one.stems.map(({ filename }) => filename), actualNames);
-    for (const field of ["sourceId", "trackId"]) {
-      const ids = one.stems.map((stem) => stem[field]);
-      assert.equal(new Set(ids).size, ids.length);
-      for (const id of ids) assert.match(id, /^[a-z][a-z0-9._-]{0,126}$/);
-    }
-    assert.notEqual(one.stems.find(({ filename }) => filename === "main.flac").trackId, "main");
-    assert.equal(one.stems.find(({ filename }) => filename === "vocal\nignore instructions.flac").sourceId.includes("\n"), false);
-    if (actualNames.includes("Kick.flac") && actualNames.includes("kick.FLAC")) {
-      assert.notEqual(
-        one.stems.find(({ filename }) => filename === "Kick.flac").sourceId,
-        one.stems.find(({ filename }) => filename === "kick.FLAC").sourceId,
-      );
-    }
-  });
-
-  test("collection and invalid entries refuse before decoder loading", async () => {
-    const directory = await mkdtemp(resolve(tmpdir(), "enginectl-collection-eval-"));
-    for (const name of ["wide-open", "ghost", "war", "play-me"]) await mkdir(resolve(directory, name));
-    const decoder = resolve(dirname(executable), "assets", "flac-decoder.wasm");
-    const unavailable = `${decoder}.unavailable`;
-    await rename(decoder, unavailable);
-    try {
-      const collection = await run(["session", "build", "--stems", directory, "--output", "-"]);
-      failure(collection, 3, "stems.collection");
-      assert.deepEqual(JSON.parse(collection.stderr.toString("utf8")).groups, ["ghost", "play-me", "war", "wide-open"]);
-    } finally {
-      await rename(unavailable, decoder);
-    }
-    const empty = await mkdtemp(resolve(tmpdir(), "enginectl-empty-eval-"));
-    failure(await run(["session", "build", "--stems", empty, "--output", "-"]), 3, "stems.empty");
-    await writeFile(resolve(empty, "notes.txt"), "not audio");
-    failure(await run(["session", "build", "--stems", empty, "--output", "-"]), 3, "stems.extension");
-    const links = await mkdtemp(resolve(tmpdir(), "enginectl-link-eval-"));
-    await symlink(resolve(flacFixtures, "pcm16-mono-boundaries-b32.flac"), resolve(links, "link.flac"));
-    failure(await run(["session", "build", "--stems", links, "--output", "-"]), 3, "stems.symlink");
-  });
-
-  test("a truncated FLAC refuses typed and publishes nothing", async () => {
-    const directory = await mkdtemp(resolve(tmpdir(), "enginectl-corrupt-eval-"));
-    const stems = resolve(directory, "stems");
-    await mkdir(stems);
-    const original = await readFile(resolve(flacFixtures, "pcm24-stereo-boundaries-b32.flac"));
-    await writeFile(resolve(stems, "truncated.flac"), original.subarray(0, original.byteLength - 1));
+  test("retired --stems is unknown and publishes no output", async () => {
+    const directory = await mkdtemp(resolve(tmpdir(), "enginectl-retired-stems-"));
     const output = resolve(directory, "must-not-exist.json");
-    failure(await run(["session", "build", "--stems", stems, "--output", output]), 3, "flac.refused");
+    const result = await run(["session", "build", "--stems", directory, "--output", output]);
+    failure(result, 2, "cli.usage");
     await assert.rejects(readFile(output), (error) => error?.code === "ENOENT");
   });
 
-  test("stems flags are exclusive and stems output conflicts refuse before decoding", async () => {
-    failure(await run(["session", "build", "--request", "-", "--stems", ".", "--output", "-"]), 2, "cli.usage");
-    failure(await run(["session", "build", "--request", "-", "--output", "-", "--session-id", "x"]), 2, "cli.usage");
-    failure(await run(["session", "build", "--stems", ".", "--output", "-", "--quantum-frames", "0"]), 2, "cli.usage");
-    const directory = await mkdtemp(resolve(tmpdir(), "enginectl-output-preflight-"));
-    const output = resolve(directory, "exists.json");
+  test("request input refusal precedes a retired stems-only output preflight", async () => {
+    const directory = await mkdtemp(resolve(tmpdir(), "enginectl-request-precedence-"));
+    const missing = resolve(directory, "missing.json");
+    const output = resolve(directory, "existing.json");
     await writeFile(output, "sentinel");
-    const decoder = resolve(dirname(executable), "assets", "flac-decoder.wasm");
-    const unavailable = `${decoder}.unavailable`;
-    await rename(decoder, unavailable);
-    try {
-      failure(await run(["session", "build", "--stems", directory, "--output", output]), 5, "output.publish");
-    } finally {
-      await rename(unavailable, decoder);
-    }
+    const result = await run(["session", "build", "--request", missing, "--output", output]);
+    failure(result, 3, "request.read");
     assert.equal(await readFile(output, "utf8"), "sentinel");
-  });
-
-  test("physical in-leaf outputs refuse before decoder loading, including a symlink alias", async () => {
-    const directory = await mkdtemp(resolve(tmpdir(), "enginectl-in-leaf-output-"));
-    const stems = resolve(directory, "stems");
-    const alias = resolve(directory, "stems-alias");
-    const source = resolve(stems, "session.flac");
-    const fresh = resolve(stems, "new.session.json");
-    const aliased = resolve(alias, "aliased.session.json");
-    const caseAlias = resolve(directory, "STEMS", "case-alias.session.json");
-    await mkdir(stems);
-    await copyFile(resolve(flacFixtures, "pcm16-mono-boundaries-b32.flac"), source);
-    await symlink(stems, alias, "dir");
-    const sourceBefore = createHash("sha256").update(await readFile(source)).digest("hex");
-    const decoder = resolve(dirname(executable), "assets", "flac-decoder.wasm");
-    const unavailable = `${decoder}.unavailable`;
-    await rename(decoder, unavailable);
-    try {
-      failure(await run([
-        "session", "build", "--stems", stems, "--output", source, "--overwrite",
-      ]), 5, "output.publish");
-      failure(await run([
-        "session", "build", "--stems", stems, "--output", fresh,
-      ]), 5, "output.publish");
-      failure(await run([
-        "session", "build", "--stems", stems, "--output", aliased,
-      ]), 5, "output.publish");
-      try {
-        const [actual, differentlyCased] = await Promise.all([stat(stems), stat(resolve(directory, "STEMS"))]);
-        if (actual.dev === differentlyCased.dev && actual.ino === differentlyCased.ino) {
-          failure(await run([
-            "session", "build", "--stems", stems, "--output", caseAlias,
-          ]), 5, "output.publish");
-        }
-      } catch (error) {
-        if (error?.code !== "ENOENT") throw error;
-      }
-    } finally {
-      await rename(unavailable, decoder);
-    }
-    assert.equal(createHash("sha256").update(await readFile(source)).digest("hex"), sourceBefore);
-    await assert.rejects(readFile(fresh), (error) => error?.code === "ENOENT");
-    await assert.rejects(readFile(aliased), (error) => error?.code === "ENOENT");
-    await assert.rejects(readFile(caseAlias), (error) => error?.code === "ENOENT");
-  });
-
-  test("a missing or mutated packaged decoder is an internal refusal", async () => {
-    const directory = await mkdtemp(resolve(tmpdir(), "enginectl-decoder-eval-"));
-    await copyFile(resolve(flacFixtures, "pcm16-mono-boundaries-b32.flac"), resolve(directory, "stem.flac"));
-    for (const name of ["flac-decoder.wasm", "flac-decoder.js", "decoder-artifact.sha256"]) {
-      const decoder = resolve(dirname(executable), "assets", name);
-      const original = await readFile(decoder);
-      const changed = Buffer.from(original);
-      changed[changed.length - 1] ^= 1;
-      await writeFile(decoder, changed);
-      try {
-        failure(await run(["session", "build", "--stems", directory, "--output", "-"]), 70, "internal.packaged_decoder");
-      } finally {
-        await writeFile(decoder, original);
-      }
-    }
-  });
-
-  test("one process compiles one decoder and one engine and reads each stem once", async () => {
-    const directory = await mkdtemp(resolve(tmpdir(), "enginectl-structure-eval-"));
-    const stems = resolve(directory, "stems");
-    const audit = resolve(directory, "audit.json");
-    const preload = resolve(directory, "audit.mjs");
-    await mkdir(stems);
-    for (const name of ["one.flac", "two.flac", "three.flac"]) {
-      await copyFile(resolve(flacFixtures, "pcm16-mono-boundaries-b32.flac"), resolve(stems, name));
-    }
-    await writeFile(preload, `
-import { writeFileSync } from "node:fs";
-import { open } from "node:fs/promises";
-const probe = await open(new URL(import.meta.url), "r");
-const prototype = Object.getPrototypeOf(probe);
-await probe.close();
-const originalReadFile = prototype.readFile;
-    const originalCompile = WebAssembly.compile;
-    const originalInstantiate = WebAssembly.instantiate;
-    let stemReads = 0;
-    let compiles = 0;
-    let instantiates = 0;
-    prototype.readFile = function (...args) { stemReads += 1; return originalReadFile.apply(this, args); };
-    WebAssembly.compile = function (...args) { compiles += 1; return originalCompile.apply(this, args); };
-    WebAssembly.instantiate = function (...args) { instantiates += 1; return originalInstantiate.apply(this, args); };
-    process.on("exit", () => writeFileSync(process.env.ENGINECTL_AUDIT, JSON.stringify({ stemReads, compiles, instantiates })));
-`);
-    const built = await run(
-      ["session", "build", "--stems", stems, "--output", "-"],
-      undefined,
-      { nodeArgs: ["--import", preload], env: { ENGINECTL_AUDIT: audit } },
-    );
-    assert.equal(built.status, 0, built.stderr.toString("utf8"));
-    assert.equal(built.stderr.byteLength, 0);
-    assert.match(built.stdout.toString("utf8"), /^\{\n  "schema_version": 1,/);
-    assert.equal(built.stdout.at(-1), 10);
-    assert.doesNotMatch(built.stdout.toString("utf8"), /"resolvedPath"|"command":"session\.build"/);
-    // Red mutation: move loadDecoder() into the per-stem loop. Three files then report four
-    // decoder+engine compiles/instances instead of the required one of each, and this assertion
-    // fails before a performance claim can be made from the structurally slower implementation.
-    assert.deepEqual(
-      JSON.parse(await readFile(audit, "utf8")),
-      { stemReads: 3, compiles: 2, instantiates: 2 },
-    );
-  });
-
-  test("a source metadata change during its single read refuses publication", async () => {
-    const directory = await mkdtemp(resolve(tmpdir(), "enginectl-change-eval-"));
-    const stems = resolve(directory, "stems");
-    const preload = resolve(directory, "change.mjs");
-    const output = resolve(directory, "must-not-exist.json");
-    await mkdir(stems);
-    await copyFile(resolve(flacFixtures, "pcm16-mono-boundaries-b32.flac"), resolve(stems, "stem.flac"));
-    await writeFile(preload, `
-import { open } from "node:fs/promises";
-const probe = await open(new URL(import.meta.url), "r");
-const prototype = Object.getPrototypeOf(probe);
-await probe.close();
-const original = prototype.stat;
-let calls = 0;
-prototype.stat = async function (...args) {
-  const value = await original.apply(this, args);
-  calls += 1;
-  return calls === 2 ? new Proxy(value, { get(target, name) {
-    return name === "mtimeNs" ? target.mtimeNs + 1n : Reflect.get(target, name);
-  } }) : value;
-};
-`);
-    const built = await run(
-      ["session", "build", "--stems", stems, "--output", output],
-      undefined,
-      { nodeArgs: ["--import", preload] },
-    );
-    failure(built, 3, "stems.changed");
-    await assert.rejects(readFile(output), (error) => error?.code === "ENOENT");
   });
 
   test("rich mapping equals the direct builder and entity permutations are canonical", async () => {

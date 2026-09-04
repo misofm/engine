@@ -106,8 +106,8 @@ bash "$policy_script" "$valid_root" >/dev/null
 
 expect_failure fusion-outside-lane \
     'printf "%s\n" "let y = a.mul_add(b, c);" >>"$root/crates/compressor/src/lib.rs"'
-# sidecars/ ships its own delivery artifact (FLAC decoder sidecar move) and is scanned the same
-# as crates/, hosts/ and tools/ (scripts/check-lane-policy.sh:52) -- fused arithmetic there is the
+# sidecars/ is scanned the same as crates/, hosts/ and tools/ (scripts/check-lane-policy.sh:52) --
+# fused arithmetic there is the
 # same D3 violation as anywhere else.
 expect_failure fusion-in-a-sidecar \
     'mkdir -p "$root/sidecars/probe-decoder/src"; printf "%s\n" "let y = a.mul_add(b, c);" >"$root/sidecars/probe-decoder/src/lib.rs"'

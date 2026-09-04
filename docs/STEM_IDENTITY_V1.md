@@ -1,7 +1,8 @@
 # Stem identity v1: canonical PCM
 
 This document is the normative launch contract for content-addressed stems. A stem's identity is
-its sound samples, not its delivery wrapper: the same integer audio delivered as WAV or FLAC has
+its sound samples, not its delivery wrapper: the same integer audio carried by different external
+containers has
 the same identity. `MUST`, `MUST NOT`, and `SHOULD` are normative requirements.
 
 ## Declaration and interpretation
@@ -40,8 +41,8 @@ For `frames` frames, `channels` channels, and `bit_depth`:
    64 lowercase hexadecimal digest characters. The exact grammar is
    `^sha256:[0-9a-f]{64}$`.
 
-Container bytes never join the hash. A WAVE parser, FLAC decoder, publisher, and store ingest path
-conform only when they produce the exact serialization above before hashing. Integer samples MUST
+Container bytes never join the hash. A WAVE parser or external ingress adapter conforms only when
+it produces the exact serialization above before hashing. Integer samples MUST
 stay integer-valued through this boundary; an implementation may not make identity depend on a
 floating-point decoder's rounding behavior.
 

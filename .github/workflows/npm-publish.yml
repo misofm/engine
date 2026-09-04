@@ -1,0 +1,329 @@
+name: Publish @misofm/engine
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "qualify builds; publish sends its exact artifact once; verify only rechecks that artifact"
+        required: true
+        type: choice
+        options: [qualify, publish, verify]
+      expected_sha:
+        description: "Exact 40-character lowercase main commit SHA"
+        required: true
+        type: string
+      qualification_run_id:
+        description: "Successful qualifying npm-publish workflow run for this exact SHA (required for publish)"
+        required: false
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+  id-token: write
+  pull-requests: read
+
+concurrency:
+  group: npm-publish-${{ inputs.mode == 'qualify' && github.ref || 'publish' }}
+  cancel-in-progress: false
+
+env:
+  PACKAGE_NAME: "@misofm/engine"
+  PACKAGE_VERSION: "0.1.0"
+  EXPECTED_WORKLET_SHA256: "6dcd9ced2daeb886843a764bcc6abc0b4f1b2c7a50af1ed91151a5ab366461e5"
+  RUSTUP_TOOLCHAIN: "1.97.1"
+  NPM_CONFIG_REGISTRY: "https://registry.npmjs.org"
+
+jobs:
+  release:
+    name: ${{ inputs.mode }} @misofm/engine 0.1.0
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Refuse non-main dispatches before checkout
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          MODE: ${{ inputs.mode }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REF" == "refs/heads/main" ]] || { echo "release dispatches must use main" >&2; exit 1; }
+          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "expected_sha must be a full lowercase SHA" >&2; exit 1; }
+          [[ "$MODE" == verify || "$GITHUB_SHA" == "$EXPECTED_SHA" ]] || { echo "workflow_dispatch SHA differs from expected_sha" >&2; exit 1; }
+
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ inputs.expected_sha }}
+          fetch-depth: 0
+
+      - uses: actions/setup-node@5e2628c959b9ade56971c0afcebbe5332d44b398 # v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+          cache: npm
+          cache-dependency-path: sdk/package-lock.json
+
+      - name: Guard release identity, accepted ancestry, and rejected commits
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          MODE: ${{ inputs.mode }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$MODE" == verify || "$GITHUB_SHA" == "$EXPECTED_SHA" ]] || { echo "workflow_dispatch SHA differs from expected_sha" >&2; exit 1; }
+          [[ "$(git rev-parse HEAD)" == "$EXPECTED_SHA" ]] || { echo "checked-out HEAD differs from expected_sha" >&2; exit 1; }
+          git merge-base --is-ancestor "$EXPECTED_SHA" origin/main || { echo "expected_sha is not in origin/main" >&2; exit 1; }
+          [[ "$(node -p "require('./sdk/package.json').name")" == "$PACKAGE_NAME" ]]
+          [[ "$(node -p "require('./sdk/package.json').version")" == "$PACKAGE_VERSION" ]]
+          [[ "$(node -p "require('./sdk/package-lock.json').name")" == "$PACKAGE_NAME" ]]
+          [[ "$(node -p "require('./sdk/package-lock.json').version")" == "$PACKAGE_VERSION" ]]
+          accepted=$(gh api "repos/$GITHUB_REPOSITORY/pulls/353" --jq 'select(.merged_at != null) | .merge_commit_sha')
+          [[ "$accepted" =~ ^[0-9a-f]{40}$ ]] || { echo "PR #353 is not merged" >&2; exit 1; }
+          git fetch --no-tags origin "$accepted"
+          git merge-base --is-ancestor "$accepted" HEAD || { echo "PR #353 merge commit is not an ancestor" >&2; exit 1; }
+          for rejected in 3ab49a3d bf1a6672 6a08315c; do
+            if git cat-file -e "$rejected^{commit}" 2>/dev/null && git merge-base --is-ancestor "$rejected" HEAD; then
+              echo "rejected #352 commit is in release ancestry: $rejected" >&2
+              exit 1
+            fi
+          done
+
+      - name: Require a successful qualification dispatch before publication or recovery
+        if: inputs.mode != 'qualify'
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          QUALIFICATION_RUN_ID: ${{ inputs.qualification_run_id }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$QUALIFICATION_RUN_ID" =~ ^[0-9]+$ ]] || { echo "publish requires qualification_run_id" >&2; exit 1; }
+          qualification_run=$(mktemp)
+          qualification_jobs=$(mktemp)
+          trap 'rm -f -- "$qualification_run" "$qualification_jobs"' EXIT
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$QUALIFICATION_RUN_ID" > "$qualification_run"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$QUALIFICATION_RUN_ID/jobs?per_page=100" > "$qualification_jobs"
+          node - "$qualification_run" "$qualification_jobs" <<'NODE'
+          const fs = require("node:fs");
+          const run = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+          const jobs = JSON.parse(fs.readFileSync(process.argv[3], "utf8"));
+          if (run.conclusion !== "success" || run.event !== "workflow_dispatch" || run.head_sha !== process.env.EXPECTED_SHA || run.name !== "Publish @misofm/engine" || !jobs.jobs?.some((job) => job.name === "qualify @misofm/engine 0.1.0" && job.conclusion === "success")) {
+            throw new Error("qualification run is not a successful manual npm-publish run for expected_sha");
+          }
+          NODE
+
+      - name: Pin npm 11.12.1 for packing and provenance verification
+        run: |
+          set -euo pipefail
+          npm install --global npm@11.12.1
+          [[ "$(npm --version)" == "11.12.1" ]]
+          node --version
+
+      - name: Install Rust 1.97.1 and the Wasm target
+        if: inputs.mode == 'qualify'
+        run: |
+          set -euo pipefail
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+          rustup target add --toolchain "$RUSTUP_TOOLCHAIN" wasm32-unknown-unknown
+          rustup run "$RUSTUP_TOOLCHAIN" rustc --version
+
+      - name: Install locked SDK dependencies
+        working-directory: sdk
+        run: npm ci --ignore-scripts
+
+      - name: Build the shipped Engine AudioWorklet closure once and prove its Linux pin
+        if: inputs.mode == 'qualify'
+        run: |
+          set -euo pipefail
+          worklet=target/npm-publish/worklet-artifacts
+          mkdir -p "$worklet"
+          bash scripts/build-web-audioworklet.sh "$worklet"
+          [[ "$(sha256sum "$worklet/miso-engine-v1-audio-worklet.simd128.wasm" | awk '{print $1}')" == "$EXPECTED_WORKLET_SHA256" ]]
+
+      - name: Run generated, deletion, type, headless, and package preparation gates
+        if: inputs.mode == 'qualify'
+        run: |
+          set -euo pipefail
+          worklet=target/npm-publish/worklet-artifacts
+          bash scripts/test-sdk-artifact-builder-output-contract.sh
+          bash scripts/check-sdk-generated.sh
+          python3 -B scripts/check-sdk-deletions.py
+          bash scripts/check-sdk-types.sh
+          bash scripts/check-sdk-headless.sh "$worklet"
+          bash scripts/sdk-package.sh build "$worklet"
+
+      - name: Pack exactly one archive, smoke it, and record immutable local evidence
+        if: inputs.mode == 'qualify'
+        run: |
+          set -euo pipefail
+          evidence=target/npm-publish/evidence
+          pack_dir=target/npm-publish/pack
+          mkdir -p "$evidence" "$pack_dir"
+          npm --version > "$evidence/npm-version.txt"
+          [[ "$(<"$evidence/npm-version.txt")" == "11.12.1" ]]
+          (cd sdk && npm pack --ignore-scripts --json --pack-destination "../$pack_dir" > "../$evidence/npm-pack.json")
+          shopt -s nullglob
+          archives=("$pack_dir"/*.tgz)
+          [[ ${#archives[@]} == 1 && -f ${archives[0]} ]] || { echo "expected exactly one packed archive" >&2; exit 1; }
+          archive=${archives[0]}
+          tar -tzf "$archive" > "$evidence/tarball-files.txt"
+          unpack=target/npm-publish/unpacked
+          mkdir -p "$unpack"
+          tar -xzf "$archive" -C "$unpack"
+          node sdk/test/package-tarball-smoke.mjs "$unpack/package"
+          npm publish --dry-run --ignore-scripts "$archive"
+          sha256sum "$archive" > "$evidence/tarball.sha256"
+          node - "$evidence/npm-pack.json" "$archive" "$evidence/tarball-evidence.json" <<'NODE'
+          const fs = require("node:fs");
+          const crypto = require("node:crypto");
+          const [packJson, archive, output] = process.argv.slice(2);
+          const entries = JSON.parse(fs.readFileSync(packJson, "utf8"));
+          if (!Array.isArray(entries) || entries.length !== 1) throw new Error("npm pack did not report exactly one archive");
+          const item = entries[0];
+          if (item.name !== "@misofm/engine" || item.version !== "0.1.0") throw new Error("packed package identity differs");
+          if (typeof item.integrity !== "string" || !item.integrity.startsWith("sha512-")) throw new Error("npm did not report SHA-512 integrity");
+          const bytes = fs.readFileSync(archive);
+          const sha1 = crypto.createHash("sha1").update(bytes).digest("hex");
+          if (sha1 !== item.shasum) throw new Error("npm shasum does not match archive bytes");
+          fs.writeFileSync(output, JSON.stringify({ package: item.name, version: item.version, archive: archive.split("/").pop(), files: item.files.length, shasum: item.shasum, integrity: item.integrity, sha256: crypto.createHash("sha256").update(bytes).digest("hex"), sha512: crypto.createHash("sha512").update(bytes).digest("hex") }, null, 2) + "\n");
+          NODE
+          cp "$archive" "$evidence/"
+
+      - name: Download the exact prior-qualified archive and evidence
+        if: inputs.mode != 'qualify'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: engine-sdk-qualify-${{ inputs.expected_sha }}
+          path: target/npm-publish/evidence
+          run-id: ${{ inputs.qualification_run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Re-smoke and checksum the exact prior-qualified archive
+        if: inputs.mode != 'qualify'
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          archives=(target/npm-publish/evidence/*.tgz)
+          [[ ${#archives[@]} == 1 && -f ${archives[0]} ]] || { echo "qualification artifact must contain exactly one archive" >&2; exit 1; }
+          archive=${archives[0]}
+          unpack=target/npm-publish/publish-unpacked
+          mkdir -p "$unpack"
+          tar -xzf "$archive" -C "$unpack"
+          node sdk/test/package-tarball-smoke.mjs "$unpack/package"
+          npm publish --dry-run --ignore-scripts "$archive"
+          node - target/npm-publish/evidence/tarball-evidence.json "$archive" <<'NODE'
+          const fs = require("node:fs");
+          const crypto = require("node:crypto");
+          const expected = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+          const bytes = fs.readFileSync(process.argv[3]);
+          const actual = {
+            shasum: crypto.createHash("sha1").update(bytes).digest("hex"),
+            sha256: crypto.createHash("sha256").update(bytes).digest("hex"),
+            integrity: `sha512-${crypto.createHash("sha512").update(bytes).digest("base64")}`,
+          };
+          for (const key of Object.keys(actual)) if (actual[key] !== expected[key]) throw new Error(`qualified archive ${key} mismatch`);
+          NODE
+
+      - name: Refuse an existing npm version before publish
+        if: inputs.mode == 'publish'
+        run: |
+          set -euo pipefail
+          if npm view "$PACKAGE_NAME@$PACKAGE_VERSION" version --json > target/npm-publish/evidence/registry-before.json 2> target/npm-publish/evidence/registry-before.err; then
+            echo "$PACKAGE_NAME@$PACKAGE_VERSION already exists; npm versions are immutable" >&2
+            exit 1
+          fi
+          grep -Eq '(E404|404 Not Found)' target/npm-publish/evidence/registry-before.err || { cat target/npm-publish/evidence/registry-before.err >&2; echo "npm absence check was ambiguous" >&2; exit 1; }
+
+      - name: Publish the already-smoked archive, or verify an ambiguous outcome without retrying
+        if: inputs.mode == 'publish'
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          [[ -n "$NODE_AUTH_TOKEN" ]] || { echo "NPM_TOKEN is required only for publish mode" >&2; exit 1; }
+          archive=$(find target/npm-publish/evidence -maxdepth 1 -type f -name '*.tgz' -print -quit)
+          [[ -n "$archive" ]] || { echo "smoked tarball is missing" >&2; exit 1; }
+          published=0
+          if npm publish "$archive" --provenance --access public --tag latest --ignore-scripts; then published=1; else echo "npm publish returned non-zero; proceeding to registry verification; no retry will occur" >&2; fi
+
+      - name: Verify registry version, integrity, public access, and latest converge together
+        if: inputs.mode != 'qualify'
+        run: |
+          set -euo pipefail
+          evidence=target/npm-publish/evidence
+          converged=0
+          for attempt in $(seq 1 12); do
+            if npm view "$PACKAGE_NAME@$PACKAGE_VERSION" --json > "$evidence/registry-version.json" 2> "$evidence/registry-version.err" \
+              && npm access get status "$PACKAGE_NAME" --json > "$evidence/registry-access.json" 2> "$evidence/registry-access.err" \
+              && npm view "$PACKAGE_NAME" dist-tags.latest --json > "$evidence/registry-latest.json" 2> "$evidence/registry-latest.err" \
+              && node - "$evidence/tarball-evidence.json" "$evidence/registry-version.json" "$evidence/registry-access.json" "$evidence/registry-latest.json" <<'NODE'
+          const fs = require("node:fs");
+          const [localPath, versionPath, accessPath, latestPath] = process.argv.slice(2);
+          const local = JSON.parse(fs.readFileSync(localPath, "utf8"));
+          const registry = JSON.parse(fs.readFileSync(versionPath, "utf8"));
+          const accessReply = JSON.parse(fs.readFileSync(accessPath, "utf8"));
+          const latest = JSON.parse(fs.readFileSync(latestPath, "utf8"));
+          const access = typeof accessReply === "string" ? accessReply : accessReply?.[local.package] ?? accessReply?.status;
+          if (registry.version !== local.version || registry.dist?.shasum !== local.shasum || registry.dist?.integrity !== local.integrity || access !== "public" || latest !== local.version) {
+            throw new Error("registry did not yet match the exact qualified archive, public access, and latest tag");
+          }
+          NODE
+            then
+              converged=1
+              break
+            fi
+            [[ "$attempt" == 12 ]] && break
+            sleep 5
+          done
+          [[ "$converged" == 1 ]] || {
+            for file in "$evidence"/registry-*.err; do [[ -f "$file" ]] && cat "$file" >&2; done
+            echo "registry verification did not converge; rerun only in verify mode after propagation, never publish again" >&2
+            exit 1
+          }
+
+      - name: Fresh registry install imports all public entries and runs enginectl
+        if: inputs.mode != 'qualify'
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          set -euo pipefail
+          consumer=$(mktemp -d)
+          trap 'rm -rf -- "$consumer"' EXIT
+          cd "$consumer"
+          npm install --ignore-scripts --package-lock-only "$PACKAGE_NAME@$PACKAGE_VERSION"
+          npm install --ignore-scripts "$PACKAGE_NAME@$PACKAGE_VERSION"
+          node --input-type=module -e 'await import("@misofm/engine"); await import("@misofm/engine/headless"); await import("@misofm/engine/browser"); await import("@misofm/engine/assets")'
+          ./node_modules/.bin/enginectl --version
+          npm audit signatures --json --include-attestations > "$GITHUB_WORKSPACE/target/npm-publish/evidence/npm-audit-signatures.json"
+          node - "$GITHUB_WORKSPACE/target/npm-publish/evidence/tarball-evidence.json" "$GITHUB_WORKSPACE/target/npm-publish/evidence/npm-audit-signatures.json" <<'NODE'
+          const fs = require("node:fs");
+          const local = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+          const report = JSON.parse(fs.readFileSync(process.argv[3], "utf8"));
+          const expectedSha = process.env.EXPECTED_SHA;
+          if (!/^[0-9a-f]{40}$/.test(expectedSha ?? "")) throw new Error("expected release SHA was not exported to provenance verification");
+          const target = (entry) => entry && entry.name === local.package && entry.version === local.version;
+          const verified = Array.isArray(report.verified) ? report.verified.filter(target) : [];
+          const rejected = ["invalid", "missing", "unverified"].flatMap((key) => Array.isArray(report[key]) ? report[key].filter(target) : []);
+          if (verified.length !== 1 || rejected.length !== 0) throw new Error("npm did not report exactly one cryptographically verified target package");
+          const bundles = Array.isArray(verified[0].attestationBundles)
+            ? verified[0].attestationBundles.filter((bundle) => bundle?.predicateType === "https://slsa.dev/provenance/v1") : [];
+          if (bundles.length !== 1) throw new Error("expected exactly one verified SLSA v1 attestation bundle");
+          const envelope = bundles[0].bundle?.dsseEnvelope;
+          if (envelope?.payloadType !== "application/vnd.in-toto+json" || typeof envelope.payload !== "string") throw new Error("verified SLSA bundle lacks the required DSSE payload");
+          let statement;
+          try { statement = JSON.parse(Buffer.from(envelope.payload, "base64").toString("utf8")); } catch { throw new Error("verified attestation DSSE payload is not valid base64 JSON"); }
+          if (statement?._type !== "https://in-toto.io/Statement/v1" || statement?.predicateType !== "https://slsa.dev/provenance/v1") throw new Error("DSSE statement is not SLSA provenance v1");
+          const subjects = Array.isArray(statement.subject) ? statement.subject.filter((subject) => subject?.name === "pkg:npm/%40misofm/engine@0.1.0" && subject?.digest?.sha512 === local.sha512) : [];
+          if (subjects.length !== 1) throw new Error("DSSE statement does not uniquely bind the package PURL and tarball SHA-512");
+          const workflow = statement?.predicate?.buildDefinition?.externalParameters?.workflow;
+          if (workflow?.repository !== "https://github.com/misofm/engine" || workflow?.path !== ".github/workflows/npm-publish.yml" || workflow?.ref !== "refs/heads/main") throw new Error("DSSE workflow identity differs from the trusted publisher");
+          const dependencies = Array.isArray(statement?.predicate?.buildDefinition?.resolvedDependencies)
+            ? statement.predicate.buildDefinition.resolvedDependencies.filter((dependency) => dependency?.digest?.gitCommit === expectedSha) : [];
+          if (dependencies.length !== 1) throw new Error("DSSE resolved dependencies do not uniquely bind expected_sha");
+          NODE
+
+      - name: Upload exact tarball and qualification evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: engine-sdk-${{ inputs.mode }}-${{ inputs.expected_sha }}
+          path: target/npm-publish/evidence/
+          if-no-files-found: warn
+          retention-days: 30
