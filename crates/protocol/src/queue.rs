@@ -829,6 +829,9 @@ impl ProtocolQueues {
     }
 
     /// Pop one fixed batch without decoding or allocation.
+    ///
+    /// The only production consumer is `ProtocolController::cancel_queued_automation_reserved`;
+    /// render-side delivery is deferred (see `docs/CONTROL_PROTOCOL_SEMANTICS.md`, "Delivery status").
     pub fn try_dequeue_automation(&mut self) -> Result<AutomationBatchSlot, QueueEmpty> {
         let batch = self.automation.consumer.try_pop()?;
         self.remove_automation_density(&batch);

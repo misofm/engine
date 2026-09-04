@@ -10,8 +10,7 @@ channel/frame multiplication and accumulated offset. Borrowed `PlanarBufferRef` 
 `PlanarBufferMut` contain slices and scalar shape metadata only. Issue 003 promises contiguous
 planar `f32`; SIMD alignment and AoSoA layout belong to issue 008.
 
-Parameter and event delivery is owned by the protocol crate's accepted-automation queue (#102);
-the plan itself carries no parameter store. (#84 phase C deleted the unused issue-003 slot/event
+Live parameter delivery is owned by the per-effect `EffectControlLane` (#140), fed by the `EffectControlProducer`s prepared with the plan; the protocol crate's accepted-automation queue (#102) admits, retains and cancels sample-timed batches but has no render-side consumer yet (see `CONTROL_PROTOCOL_SEMANTICS.md`, "Delivery status"). The plan itself carries no parameter store. (#84 phase C deleted the unused issue-003 slot/event
 store; `PlanEpoch` now lives with the plan exchange, whose publication epochs it names.)
 
 `PreparedRenderPlan` privately separates immutable `PreparedProgram`/`RenderEnvelope` from mutable
