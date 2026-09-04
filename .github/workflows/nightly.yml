@@ -279,12 +279,10 @@ jobs:
       # PRs; the timing half becomes `#[ignore]` and runs here, in release, once a day, with the
       # number recorded against a product budget instead of a debug-build guess.
       #
-      # WP-2 (crates/host-web, crates/host-core, crates/effect-package) adds the
-      # `#[ignore = "release-mode budget; runs nightly"]` attribute this job's `-- --ignored`
-      # depends on. Until that lands, `--ignored` may also pick up other pre-existing ignored
-      # tests in these three crates that are not release-mode budgets; once WP-2 lands, narrow
-      # this to a name filter (e.g. `-- --ignored budget_` or an explicit test-name list) so this
-      # job runs exactly the tests it exists to run, not merely a superset of them.
+      # `-- --ignored` over these three crates selects exactly the four
+      # `#[ignore = "release-mode budget; runs nightly"]` tests (verified by `--list --ignored`
+      # at the time of writing); if an unrelated `#[ignore]` test is ever added to one of them,
+      # narrow this to an explicit test-name list.
       - name: Release-mode wall-clock budget tests
         run: cargo test --locked --release -p host-web -p host-core -p effect-package -- --ignored
 

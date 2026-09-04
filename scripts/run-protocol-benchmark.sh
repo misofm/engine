@@ -28,7 +28,7 @@ cd "$repository_root"
 scalar_artifact="target/ci/issue005-protocol-bench-wasm-scalar/wasm32-unknown-unknown/release/bench.wasm"
 simd_artifact="target/ci/issue005-protocol-bench-wasm-simd128/wasm32-unknown-unknown/release/bench.wasm"
 [[ -f "$scalar_artifact" && -f "$simd_artifact" ]] || {
-    printf 'build Wasm parity artifacts with scripts/check-protocol-benchmark-wasm-parity.sh before benchmarking\n' >&2
+    printf 'build Wasm parity artifacts with scripts/check-protocol-wasm-parity.sh before benchmarking\n' >&2
     exit 1
 }
 

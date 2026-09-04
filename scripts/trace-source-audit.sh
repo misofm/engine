@@ -43,4 +43,7 @@ jq -e '
   .quantum_frames == 128 and
   .native_worker_hold_release == true and
   .total_violations == 0
-' <<<"$output" >/dev/null
+' <<<"$output" >/dev/null || {
+    printf 'source realtime audit: binary %s produced no acceptable audit record (see output above)\n' "$binary" >&2
+    exit 1
+}

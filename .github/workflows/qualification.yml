@@ -58,6 +58,9 @@ jobs:
       - id: classify
         name: Select fail-safe qualification route and step conditions
         run: |
+          # pipefail: without it a router crash leaves an empty GITHUB_OUTPUT and the step exits 0,
+          # and the failure only surfaces as "unknown route" in the verdict a full cycle later.
+          set -o pipefail
           python3 -B scripts/ci-path-router.py --flags \
             --event "${{ github.event_name }}" \
             --base "${{ github.event.pull_request.base.sha || github.event.before }}" \
@@ -67,7 +70,9 @@ jobs:
   docs-gates:
     name: docs and research evidence gates
     needs: route
-    if: needs.route.outputs.route == 'evidence'
+    # Runs on the evidence route and on the full route (a mixed docs+code PR routes full; the
+    # research and listening-packet validators must not disappear for it).
+    if: needs.route.outputs.route == 'evidence' || needs.route.outputs.route == 'full'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -100,6 +105,9 @@ jobs:
       # mismatch. Built exactly once here; every consumer downloads it and re-hashes.
       - name: Build the exact shipped artifact
         run: |
+          # The build script refuses a non-empty output directory; never rely on the cache
+          # action having pruned a previous run's loose files.
+          rm -rf target/ci/qualification-artifacts
           mkdir -p target/ci/qualification-artifacts
           bash scripts/build-web-audioworklet.sh target/ci/qualification-artifacts
       - name: Upload shipped artifact
@@ -510,7 +518,7 @@ jobs:
       - name: Build release audit, bench, capi, and session-validator binaries
         run: cargo build --locked --release -p audit -p bench -p capi -p session-validator
       - name: Audit and console-workload unit tests in release
-        run: cargo test --locked --release -p audit -p console-workload
+        run: cargo test --locked --release -p audit -p bench -p console-workload
       - name: Delay realtime allocation and syscall audit
         run: ./target/release/audit delay --blocks 100000
       - name: Compressor realtime allocation and syscall audit
@@ -589,12 +597,14 @@ jobs:
       # serializes between the two jobs (design deliverable B).
       - name: Build the wasmtime runner
         run: cargo build --locked --release -p wasm-gates
-      - name: Browser-local realtime path has no atomic opcodes
-        run: bash scripts/check-wasm-realtime-atomics.sh
       - name: Scalar Wasm build (lane's scalar wasm path)
         run: |
           CARGO_TARGET_DIR=target/ci/wasm-scalar RUSTFLAGS='-C target-feature=-simd128' cargo build --locked --release --target wasm32-unknown-unknown -p engine -p session -p effect-contract -p effect-compiler -p protocol -p target-smoke -p host-core -p host-web -p lane -p math -p builtins -p builtins-compiler -p effect-runtime -p gate-expander -p delay -p multiband-compressor -p parametric-eq -p soft-clip
           ! rustc --print cfg --target wasm32-unknown-unknown -C target-feature=-simd128 | grep -qx 'target_feature="simd128"'
+      # Shares the scalar target dir just populated above (design §5/§6.3), so the three
+      # rlibs it inspects are incremental rather than a second full scalar closure build.
+      - name: Browser-local realtime path has no atomic opcodes
+        run: bash scripts/check-wasm-realtime-atomics.sh target/ci/wasm-scalar
       # SIMD128 18-package build deleted (design §6.3: host-web's simd128 closure is already built
       # by the artifact job); only the compile-probe claim over target-smoke/protocol survives.
       - name: SIMD128 compile probe (target-smoke and protocol)
@@ -724,6 +734,7 @@ jobs:
               artifact_expected=success
               ;;
             full)
+              docs_expected=success
               artifact_expected=success
               full_expected=success
               [[ "$RELEASE_INPUTS" == "true" ]] && release_shape_expected=success
