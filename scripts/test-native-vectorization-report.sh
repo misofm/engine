@@ -25,10 +25,13 @@ fi
 scratch_root="$(mktemp -d)"
 trap 'rm -rf -- "$scratch_root"' EXIT
 
+# Optional fourth argument: the failure class the mutation must produce. A mutation that is red
+# for the wrong reason (any `"status":"fail"` at all) would otherwise count as proof.
 expect_red() {
     local name="$1"
     local mutated="$2"
     local disassembler="${3:-$objdump}"
+    local expected_class="${4:-}"
     local output="$scratch_root/$name.json"
     if "$binary" vectorization --artifact "$binary" --allowlist "$mutated" \
         --objdump "$disassembler" >"$output" 2>&1; then
@@ -40,6 +43,13 @@ expect_red() {
         sed -n '1,20p' "$output" >&2
         exit 1
     }
+    if [[ -n "$expected_class" ]]; then
+        rg -q "$expected_class" "$output" || {
+            printf 'native vectorization mutation failed with the wrong class: %s\n' "$name" >&2
+            sed -n '1,20p' "$output" >&2
+            exit 1
+        }
+    fi
 }
 
 missing_family="$scratch_root/missing-family.tsv"
@@ -64,7 +74,7 @@ printf '%s\n' \
     '"$real_objdump" "$@" | awk '\''/probe_svf_simd8>:/ { print; print "  0: vfmadd213ps %ymm0, %ymm1, %ymm2"; next } { print }'\''' \
     >"$fused_objdump"
 chmod +x "$fused_objdump"
-expect_red fused-multiply-add "$allowlist" "$fused_objdump"
+expect_red fused-multiply-add "$allowlist" "$fused_objdump" "forbidden scalar fallback"
 
 call_objdump="$scratch_root/call-objdump"
 printf '%s\n' \
@@ -74,7 +84,7 @@ printf '%s\n' \
     '"$real_objdump" "$@" | awk '\''/probe_svf_simd8>:/ { print; print "  0: call   0x1000"; next } { print }'\''' \
     >"$call_objdump"
 chmod +x "$call_objdump"
-expect_red call-inside-kernel "$allowlist" "$call_objdump"
+expect_red call-inside-kernel "$allowlist" "$call_objdump" "forbidden call"
 
 incomplete="$scratch_root/incomplete.tsv"
 awk -F '\t' '$3 != "probe_sum2_simd8"' "$allowlist" >"$incomplete"

@@ -14,7 +14,9 @@ and `scripts/test-native-vectorization-report.sh` repeats them against the real 
 
 The missing-family and incomplete-registry mutations alter temporary allowlists. The scalar-
 fallback, fused-multiply-add, and call mutations wrap the disassembler and inject one instruction
-into a captured probe body. None recompiles or edits production code, so a red result proves the
+into a captured probe body. The fused-multiply-add and call mutations additionally assert the
+failure *class* (`forbidden scalar fallback` / `forbidden call`), so a red for the wrong reason
+does not count as proof. None recompiles or edits production code, so a red result proves the
 disassembly checker read and enforced the claim rather than merely observing that a build
 completed. The fused-multiply-add mutation is the codegen leg of the unfused contract that
 `scripts/check-unfused-seal.sh` guards at source level (issue #372, row LANE-9).

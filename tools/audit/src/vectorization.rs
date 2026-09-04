@@ -42,12 +42,14 @@ const ACTIVE_REGISTRY: &[&str] = &["probe_gain_simd4", "probe_sum2_simd4", "prob
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 const ACTIVE_REGISTRY: &[&str] = &[];
 
-// The gain argument is loaded without `black_box`: an opaque slice makes the wrapper's own
-// in-range check emit a `slice_index_fail` trampoline into the captured body, which is wrapper
-// plumbing, not kernel code, and would defeat the allowlist's no-call assertion (issue #372).
+// The gain value stays opaque (`black_box`) so the probe measures the kernel on a runtime
+// gain instead of a folded constant, and the typed rebind keeps the array's static length so
+// `Simd8::load`'s in-range check stays provable: no `slice_index_fail` trampoline enters the
+// captured body, which the allowlist's no-call assertion forbids (issue #372).
 #[cfg(target_arch = "x86_64")]
 #[inline(never)]
 fn probe_gain_simd8(io: &mut [f32; PROBE_FRAMES * 8], gain: &[f32; 8]) {
+    let gain: &[f32; 8] = black_box(gain);
     gain_block::<lane::Simd8>(io, PROBE_FRAMES, lane::Simd8::load(gain));
 }
 
@@ -71,10 +73,11 @@ fn probe_svf_simd8(
     svf_block::<lane::Simd8>(io, PROBE_FRAMES, black_box(coefficients), black_box(state));
 }
 
-// Same rationale as the x86 gain probe above: no `black_box` on the gain argument (issue #372).
+// Same rationale as the x86 gain probe above: opaque value, static length (issue #372).
 #[cfg(target_arch = "aarch64")]
 #[inline(never)]
 fn probe_gain_simd4(io: &mut [f32; PROBE_FRAMES * 4], gain: &[f32; 4]) {
+    let gain: &[f32; 4] = black_box(gain);
     gain_block::<lane::Simd4>(io, PROBE_FRAMES, lane::Simd4::load(gain));
 }
 
@@ -284,7 +287,7 @@ fn certify(disassembly: &str, rules: &[Rule]) -> Vec<String> {
             }
         }
         for token in &rule.forbidden_calls {
-            if token_hits(body, token) {
+            if body.lines().any(|line| line_has_mnemonic(line, token)) {
                 failures.push(format!(
                     "{} / {}: forbidden call '{token}' is present",
                     rule.family, rule.symbol
@@ -301,6 +304,27 @@ fn token_hits(body: &str, token: &str) -> bool {
     token
         .split('|')
         .any(|alternative| body.contains(alternative))
+}
+
+/// A forbidden-call token is a `|`-separated set of **exact** mnemonics. Matching is anchored on
+/// the mnemonic token of each disassembly line, never a substring: an unanchored search fires on
+/// `tbl` (which contains `bl`), on jump-target annotations such as
+/// `<core::ops::function::FnOnce::call_once+0x10>`, and on every `*_block` kernel symbol name.
+fn line_has_mnemonic(line: &str, token: &str) -> bool {
+    mnemonic(line)
+        .is_some_and(|mnemonic| token.split('|').any(|alternative| mnemonic == alternative))
+}
+
+/// The first mnemonic-like token of a normalized disassembly line: the `addr:` prefix and the
+/// hex-byte tokens are skipped, and the first remaining token is the mnemonic (everything after
+/// it is operands and annotations). Lines that carry nothing but hex bytes have no mnemonic.
+fn mnemonic(line: &str) -> Option<&str> {
+    line.split_whitespace()
+        .find(|token| !token.ends_with(':') && !is_hex_byte(token))
+}
+
+fn is_hex_byte(token: &str) -> bool {
+    token.len() == 2 && token.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn sha256(bytes: &[u8]) -> String {
@@ -480,15 +504,44 @@ mod tests {
         );
     }
 
+    fn rules_with_forbidden_calls(index: usize, calls: &str) -> Vec<Rule> {
+        let mut rules = active_rules();
+        rules[index].forbidden_calls = vec![calls.to_owned()];
+        rules
+    }
+
     #[test]
     fn call_inside_kernel_body_is_red() {
-        let mut rules = active_rules();
-        rules[0].forbidden_calls = vec!["call".to_owned()];
-        let failures = certify(&synthetic_bodies("vector-op vmulps call <memset>"), &rules);
+        let failures = certify(
+            &synthetic_bodies("0000: 48 83 fa 07 call 0x1000"),
+            &rules_with_forbidden_calls(0, "call|callq"),
+        );
         assert!(
             failures
                 .iter()
-                .any(|failure| failure.contains("forbidden call") && failure.contains("'call'"))
+                .any(|failure| failure.contains("forbidden call")
+                    && failure.contains("'call|callq'"))
+        );
+        // The matcher is anchored on the mnemonic token: a `call` that occurs only inside a
+        // jump-target annotation, and a `bl` that occurs only inside the mnemonic `tbl`, are
+        // not calls (the pre-#372-review substring matcher fired on both).
+        let annotated = certify(
+            &synthetic_bodies("0000: 75 10 jmp 0x20 <core::ops::function::FnOnce::call_once+0x10>"),
+            &rules_with_forbidden_calls(0, "call|callq"),
+        );
+        assert!(
+            !annotated
+                .iter()
+                .any(|failure| failure.contains("forbidden call"))
+        );
+        let table = certify(
+            &synthetic_bodies("0001: 4e 06 01 tbl v0.16b, { v1.16b }, v2.16b"),
+            &rules_with_forbidden_calls(0, "bl|blr"),
+        );
+        assert!(
+            !table
+                .iter()
+                .any(|failure| failure.contains("forbidden call"))
         );
     }
 
