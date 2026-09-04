@@ -103,4 +103,30 @@ corrected smallest slice for implementation.
 
 ## Implementation and Sol review evidence
 
-Pending.
+Attempt 1 checkpoint `bd7f330a` makes the output size depend only on the MSB1
+ring quantum and the true source tail. A cached window is reused only when it
+contains that complete interval; otherwise the next bounded window begins at
+the exact cursor. Construction rejects a window smaller than any mounted ring
+quantum before engaging writers.
+
+The focused regression covers a three-channel 24-bit source, seeks to
+unaligned frame 2, and proves generation 2 commits at frames 2/5/8/11 with
+sizes 3/3/3/2, exact samples, aligned bounded slice ranges, a cursor-exact
+first post-seek slice, later reloads, and no read past the source. The existing
+illegal 3/1/1 transcript is corrected to 3/2. Direct, full, and mutation-backed
+stem-store gates, formatting, workspace policy, and diff checks pass.
+
+Sol adversarially reviewed the checkpoint and recorded PASS with no actionable
+finding. The diff from `main` contains only this spec and the two allowed
+host-web files; the unrelated untracked issue-349 draft is excluded.
+
+The app vendors exact engine revision
+`bd7f330a9773ce43bb077f0e6d5c8fc30fe9e27c`. Its separate app-owned SAB
+handshake records the generation last accepted by `source_submit` and will not
+publish playback ready from stale lifetime counters. In a fresh real Chrome
+Ghost run, an arbitrary seek to 55% applied once to all eight sources;
+accepted submissions advanced from 9,856 to 18,176 over the sampled four
+seconds, refusals remained zero, post-transition underruns stayed flat at 152,
+and every sampled master meter was non-silent. This closes the cross-repo
+integration gate without changing the Rust engine, ABI, codec, transport, or
+application UI.
