@@ -45,9 +45,8 @@ strip_flag="-C strip=${MISO_ENGINE_WEB_STRIP:-debuginfo}"
 # function of the SOURCE and nothing else. It is not by default: dependency
 # sources live under CARGO_HOME, whose absolute path differs between a
 # developer's machine and CI (`/root/.cargo` vs `/home/runner/.cargo`), and
-# rustc bakes those paths into panic locations. That made the digest a function
-# of WHERE cargo's registry sits, exactly as it did for the FLAC decoder artifact
-# (see scripts/build-flac-decoder.sh and #300) before its own remap fix.
+# rustc bakes those paths into panic locations. Without remapping, that would
+# make the artifact digest a function of WHERE cargo's registry sits.
 #
 # Remapping both roots to fixed labels makes the digest reproducible anywhere.
 # Verified: with these flags the digest is identical under CARGO_HOME=/root/.cargo

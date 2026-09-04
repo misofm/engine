@@ -12,8 +12,7 @@ The issue bodies in [`.github/ISSUE_SPECS`](../.github/ISSUE_SPECS/README.md) re
 | Corpus and recorded Issue 005 evidence | [Control protocol conformance](CONTROL_PROTOCOL_CONFORMANCE.md) |
 | Canonical JSON Session V1 model edited by the protocol | [Session schema v1](SESSION_SCHEMA_V1.md) |
 | Canonical PCM serialization and stem identities | [Stem identity v1](STEM_IDENTITY_V1.md) |
-| FLAC decoder, publisher, and catalog re-hash | [FLAC delivery v1](FLAC_DELIVERY_V1.md) |
-| One-time real-catalog re-hash operations | [FLAC catalog re-hash runbook](FLAC_CATALOG_REHASH_RUNBOOK.md) |
+| Delivery-codec ownership boundary | [Delivery codec boundary](DELIVERY_CODEC_BOUNDARY.md) |
 | Render lifetime and SPSC foundation | [Realtime memory](REALTIME_MEMORY.md) |
 | Fixed scalar track chain and transparent meters | [Builtins and metering V1](BUILTINS_AND_METERING_V1.md) |
 | Native effect factory and process boundary | [Effect contract V1](EFFECT_CONTRACT_V1.md) |

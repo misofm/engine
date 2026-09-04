@@ -193,3 +193,26 @@ enginectl, browser, CI, fixture, documentation, and release dependencies.
   one-directory builder-contract and `enginectl --stems`/no-output negatives
   passed; and `sdk-package.sh check` packed one archive whose extracted smoke
   test imported every public entry and rejected decoder/stems payloads.
+
+## Attempt 1 browser/CI/release/docs checkpoint (Terra)
+
+- Removed the live browser decoder server/workers/runners, qualification package
+  commands, artifact upload/download, and browser job. The remaining browser
+  workflow still builds and qualifies the single pinned Engine AudioWorklet,
+  then retains its attestation, digest, stall, and generated deployment-matrix
+  gates for every browser.
+- Removed the retired decoder CI job and all decoder closure inputs from the
+  manual npm workflow. Qualification now builds, pins, stages, and packages one
+  Engine AudioWorklet closure only; its existing exact-archive, recovery, and
+  provenance state machine is otherwise unchanged.
+- Removed the current delivery/runbook documents and obsolete environment
+  vocabulary. `DELIVERY_CODEC_BOUNDARY.md`, the docs index, stem-identity text,
+  sidecar policy fixtures, and agent boundary now state that external callers
+  supply decoded PCM through generic ingress; canonical PCM/stem-hasher, OPFS,
+  resolver, ring/pump, AudioWorklet, and native WAVE/RF64 support remain.
+- The exact retired-product inventory is empty outside explicitly retained
+  historical issue specs, derivations, rulings, and `MUTATIONS.md`. YAML parses,
+  CI path-routing and mutation contracts pass, the browser deployment matrix is
+  current, and workspace policy passes. The local workspace-policy mutation
+  wrapper is not portable to this macOS host (`find -printf` and GNU `sed -i`
+  assumptions); no green result is claimed for that wrapper.

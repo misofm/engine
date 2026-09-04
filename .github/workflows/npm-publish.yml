@@ -31,7 +31,6 @@ env:
   PACKAGE_NAME: "@misofm/engine"
   PACKAGE_VERSION: "0.1.0"
   EXPECTED_WORKLET_SHA256: "6dcd9ced2daeb886843a764bcc6abc0b4f1b2c7a50af1ed91151a5ab366461e5"
-  EXPECTED_FLAC_SHA256: "a9fc3301cb6f290909e165fd5d21d7ded5fb3535d8c41472c93beed66173b65e"
   RUSTUP_TOOLCHAIN: "1.97.1"
   NPM_CONFIG_REGISTRY: "https://registry.npmjs.org"
 
@@ -129,30 +128,26 @@ jobs:
         working-directory: sdk
         run: npm ci --ignore-scripts
 
-      - name: Build each shipped Wasm closure once and prove its Linux pins
+      - name: Build the shipped Engine AudioWorklet closure once and prove its Linux pin
         if: inputs.mode == 'qualify'
         run: |
           set -euo pipefail
           worklet=target/npm-publish/worklet-artifacts
-          flac=target/npm-publish/flac-artifacts
-          mkdir -p "$worklet" "$flac"
+          mkdir -p "$worklet"
           bash scripts/build-web-audioworklet.sh "$worklet"
-          bash scripts/build-flac-decoder.sh "$flac"
           [[ "$(sha256sum "$worklet/miso-engine-v1-audio-worklet.simd128.wasm" | awk '{print $1}')" == "$EXPECTED_WORKLET_SHA256" ]]
-          [[ "$(sha256sum "$flac/flac-decoder.wasm" | awk '{print $1}')" == "$EXPECTED_FLAC_SHA256" ]]
 
       - name: Run generated, deletion, type, headless, and package preparation gates
         if: inputs.mode == 'qualify'
         run: |
           set -euo pipefail
           worklet=target/npm-publish/worklet-artifacts
-          flac=target/npm-publish/flac-artifacts
           bash scripts/test-sdk-artifact-builder-output-contract.sh
           bash scripts/check-sdk-generated.sh
           python3 -B scripts/check-sdk-deletions.py
           bash scripts/check-sdk-types.sh
           bash scripts/check-sdk-headless.sh "$worklet"
-          bash scripts/sdk-package.sh build "$worklet" "$flac"
+          bash scripts/sdk-package.sh build "$worklet"
 
       - name: Pack exactly one archive, smoke it, and record immutable local evidence
         if: inputs.mode == 'qualify'
