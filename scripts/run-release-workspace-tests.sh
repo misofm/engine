@@ -13,11 +13,11 @@
 # Two variants are normally fine, because Cargo hashes the variant into each output filename. They
 # are not fine for a lib unit that also carries a `cdylib` or `staticlib` crate-type: those emit
 # UN-hashed filenames (`libfoo.so`, `libfoo.a`), so the two panic variants write to the same paths
-# and the second clobbers the first. Three packages in this workspace are in that shape:
-#
-#   crates/capi            rlib + staticlib + cdylib
-#   crates/effect-package  rlib + cdylib
-#   hosts/host-web         rlib + cdylib
+# and the second clobbers the first. N19 (#359): the exact package set in that shape is pinned by
+# `scripts/check-release-shape.py` (currently five: capi, effect-package, host-web,
+# wasm-gate-guest, wasm-console-guest), not restated here -- a prose list beside the checker's own
+# pin is exactly the kind of restatement that goes stale, which is what check-release-shape.py
+# exists to stop.
 #
 # A downstream unit then links whichever variant happened to land last and gets a metadata
 # mismatch. The error face is nondeterministic (it depends on build scheduling) and usually reads
