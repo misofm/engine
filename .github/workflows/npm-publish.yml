@@ -13,7 +13,7 @@ on:
         required: true
         type: string
       qualification_run_id:
-        description: "Successful qualifying npm-publish workflow run for this exact SHA (required for publish)"
+        description: "Empty for qualify; successful qualifying npm-publish workflow run for this exact SHA (required for publish or verify)"
         required: false
         type: string
 
@@ -43,11 +43,17 @@ jobs:
         env:
           EXPECTED_SHA: ${{ inputs.expected_sha }}
           MODE: ${{ inputs.mode }}
+          QUALIFICATION_RUN_ID: ${{ inputs.qualification_run_id }}
         run: |
           set -euo pipefail
           [[ "$GITHUB_REF" == "refs/heads/main" ]] || { echo "release dispatches must use main" >&2; exit 1; }
           [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "expected_sha must be a full lowercase SHA" >&2; exit 1; }
-          [[ "$MODE" == verify || "$GITHUB_SHA" == "$EXPECTED_SHA" ]] || { echo "workflow_dispatch SHA differs from expected_sha" >&2; exit 1; }
+          [[ "$GITHUB_SHA" == "$EXPECTED_SHA" ]] || { echo "workflow_dispatch SHA differs from expected_sha" >&2; exit 1; }
+          case "$MODE" in
+            qualify) [[ -z "$QUALIFICATION_RUN_ID" ]] || { echo "qualify forbids qualification_run_id" >&2; exit 1; } ;;
+            publish|verify) [[ "$QUALIFICATION_RUN_ID" =~ ^[0-9]+$ ]] || { echo "$MODE requires a digits-only qualification_run_id" >&2; exit 1; } ;;
+            *) echo "unknown release mode" >&2; exit 1 ;;
+          esac
 
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -79,7 +85,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          [[ "$MODE" == verify || "$GITHUB_SHA" == "$EXPECTED_SHA" ]] || { echo "workflow_dispatch SHA differs from expected_sha" >&2; exit 1; }
+          [[ "$GITHUB_SHA" == "$EXPECTED_SHA" ]] || { echo "workflow_dispatch SHA differs from expected_sha" >&2; exit 1; }
           [[ "$(git rev-parse HEAD)" == "$EXPECTED_SHA" ]] || { echo "checked-out HEAD differs from expected_sha" >&2; exit 1; }
           git merge-base --is-ancestor "$EXPECTED_SHA" origin/main || { echo "expected_sha is not in origin/main" >&2; exit 1; }
           [[ "$(node -p "require('./sdk/package.json').name")" == "$PACKAGE_NAME" ]]
@@ -108,23 +114,29 @@ jobs:
           [[ "$QUALIFICATION_RUN_ID" =~ ^[0-9]+$ ]] || { echo "publish requires qualification_run_id" >&2; exit 1; }
           qualification_run=$(mktemp)
           qualification_jobs=$(mktemp)
-          trap 'rm -f -- "$qualification_run" "$qualification_jobs"' EXIT
+          qualification_artifacts=$(mktemp)
+          trap 'rm -f -- "$qualification_run" "$qualification_jobs" "$qualification_artifacts"' EXIT
           gh api "repos/$GITHUB_REPOSITORY/actions/runs/$QUALIFICATION_RUN_ID" > "$qualification_run"
           gh api "repos/$GITHUB_REPOSITORY/actions/runs/$QUALIFICATION_RUN_ID/jobs?per_page=100" > "$qualification_jobs"
-          node - "$qualification_run" "$qualification_jobs" <<'NODE'
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$QUALIFICATION_RUN_ID/artifacts?per_page=100" > "$qualification_artifacts"
+          node - "$qualification_run" "$qualification_jobs" "$qualification_artifacts" <<'NODE'
           const fs = require("node:fs");
           const run = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
           const jobs = JSON.parse(fs.readFileSync(process.argv[3], "utf8"));
-          if (run.conclusion !== "success" || run.event !== "workflow_dispatch" || run.head_sha !== process.env.EXPECTED_SHA || run.name !== "Publish @misofm/engine" || !jobs.jobs?.some((job) => job.name === "qualify @misofm/engine 0.1.0" && job.conclusion === "success")) {
+          const artifacts = JSON.parse(fs.readFileSync(process.argv[4], "utf8"));
+          const expectedArtifact = `engine-sdk-qualify-${process.env.EXPECTED_SHA}`;
+          const qualificationJobs = Array.isArray(jobs.jobs) ? jobs.jobs.filter((job) => job.name === "qualify @misofm/engine 0.1.0" && job.conclusion === "success") : [];
+          const namedArtifacts = Array.isArray(artifacts.artifacts) ? artifacts.artifacts.filter((artifact) => artifact.name === expectedArtifact && artifact.expired === false) : [];
+          if (run.conclusion !== "success" || run.event !== "workflow_dispatch" || run.head_sha !== process.env.EXPECTED_SHA || run.name !== "Publish @misofm/engine" || run.path !== ".github/workflows/npm-publish.yml@main" || qualificationJobs.length !== 1 || namedArtifacts.length !== 1) {
             throw new Error("qualification run is not a successful manual npm-publish run for expected_sha");
           }
           NODE
 
-      - name: Pin npm 11.12.1 for packing and provenance verification
+      - name: Pin npm 11.19.0 for packing, trusted-publisher checks, and provenance verification
         run: |
           set -euo pipefail
-          npm install --global npm@11.12.1
-          [[ "$(npm --version)" == "11.12.1" ]]
+          npm install --global npm@11.19.0
+          [[ "$(npm --version)" == "11.19.0" ]]
           node --version
 
       - name: Install Rust 1.97.1 and the Wasm target
@@ -153,6 +165,7 @@ jobs:
         run: |
           set -euo pipefail
           worklet=target/npm-publish/worklet-artifacts
+          node scripts/test-parse-npm-trust-list.mjs
           bash scripts/test-sdk-artifact-builder-output-contract.sh
           bash scripts/check-sdk-generated.sh
           python3 -B scripts/check-sdk-deletions.py
@@ -168,7 +181,7 @@ jobs:
           pack_dir=target/npm-publish/pack
           mkdir -p "$evidence" "$pack_dir"
           npm --version > "$evidence/npm-version.txt"
-          [[ "$(<"$evidence/npm-version.txt")" == "11.12.1" ]]
+          [[ "$(<"$evidence/npm-version.txt")" == "11.19.0" ]]
           (cd sdk && npm pack --ignore-scripts --json --pack-destination "../$pack_dir" > "../$evidence/npm-pack.json")
           shopt -s nullglob
           archives=("$pack_dir"/*.tgz)
@@ -242,13 +255,24 @@ jobs:
           fi
           grep -Eq '(E404|404 Not Found)' target/npm-publish/evidence/registry-before.err || { cat target/npm-publish/evidence/registry-before.err >&2; echo "npm absence check was ambiguous" >&2; exit 1; }
 
-      - name: Publish the already-smoked archive, or verify an ambiguous outcome without retrying
+      - name: Require the exact npm trusted publisher before OIDC publication
         if: inputs.mode == 'publish'
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           set -euo pipefail
-          [[ -n "$NODE_AUTH_TOKEN" ]] || { echo "NPM_TOKEN is required only for publish mode" >&2; exit 1; }
+          npm trust list "$PACKAGE_NAME" --json > target/npm-publish/evidence/npm-trust-list.json
+          node scripts/parse-npm-trust-list.mjs < target/npm-publish/evidence/npm-trust-list.json > target/npm-publish/evidence/npm-trust-state.txt
+          [[ "$(<target/npm-publish/evidence/npm-trust-state.txt)" == "present" ]] || { echo "npm trusted publisher is absent" >&2; exit 1; }
+
+      - name: Publish the already-smoked archive through OIDC, or verify an ambiguous outcome without retrying
+        if: inputs.mode == 'publish'
+        run: |
+          set -euo pipefail
+          for fallback in NODE_AUTH_TOKEN NPM_TOKEN NPM_CONFIG__AUTH_TOKEN; do
+            [[ -z "${!fallback:-}" ]] || { echo "refusing populated npm token fallback: $fallback" >&2; exit 1; }
+          done
+          oidc_userconfig="$RUNNER_TEMP/npmrc-oidc-only"
+          : > "$oidc_userconfig"
+          export NPM_CONFIG_USERCONFIG="$oidc_userconfig"
           archive=$(find target/npm-publish/evidence -maxdepth 1 -type f -name '*.tgz' -print -quit)
           [[ -n "$archive" ]] || { echo "smoked tarball is missing" >&2; exit 1; }
           published=0
