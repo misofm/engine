@@ -1,11 +1,20 @@
 # Session schema V1
 
 `session` accepts strict RFC 8259 JSON through exact-pinned `json-syntax 0.12.5`, after a
-contract-owned duplicate-key and nesting-depth preflight. Comments, trailing commas, multiple
-top-level values, BOMs, invalid escapes, unpaired surrogates and non-JSON numeric tokens refuse.
-A duplicate member refuses before its value is parsed or retained, at the decoded member path,
-with a byte span over the second key. The root object is depth one; opening any object or array at
-depth 129 refuses before that subtree is built.
+contract-owned duplicate-key, nesting-depth, and empty-object preflight. Comments, trailing
+commas, multiple top-level values, BOMs, invalid escapes, unpaired surrogates and non-JSON numeric
+tokens refuse. A duplicate member refuses before its value is parsed or retained, at the decoded
+member path, with a byte span over the second key. The root object is depth one; opening any
+object or array at depth 129 refuses before that subtree is built.
+
+An empty JSON object `{}` anywhere in the document refuses with `json.syntax` at that value's
+path, with a byte span over its `{...}` bytes, before the typed walk runs (issue #387). This is a
+workaround for a `json-syntax 0.12.5` defect, not a schema rule stated for its own sake: the
+dependency never finishes the reserved `CodeMap` entry for an empty object (it never calls
+`end_fragment` for that branch, unlike the empty-array branch), which otherwise misreads every
+sibling member declared after it and can panic. No V1 schema position accepts `{}` regardless --
+every object rejects unknown keys and requires every field explicit -- so the refusal costs no
+legal document; empty arrays remain legal and are unaffected.
 
 Canonical output is defined by the schema walk, not generic map order, RFC 8785/JCS, or a serde
 serializer. It is UTF-8 without BOM, uses LF and two-space indentation, has no tabs or trailing

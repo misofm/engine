@@ -114,7 +114,7 @@ jobs:
         run: |
           mkdir -p target/ci/session-fuzz/parse
           export RUSTFLAGS='-C target-feature=+avx2,+fma'  # lane D4 guard; cargo-fuzz prepends this to its sanitizer flags
-          cargo +nightly-2026-08-20 fuzz run session_parse target/ci/session-fuzz/parse -- -runs=10000 -seed=557074001 -seed_inputs=fixtures/session/v1/canonical.json
+          cargo +nightly-2026-08-20 fuzz run session_parse target/ci/session-fuzz/parse -- -runs=10000 -seed=557074001 -seed_inputs=fixtures/session/v1/canonical.json,fixtures/session/v1/fuzz-seeds/empty-object.json
       - name: Run bounded compiler fuzz target
         run: |
           mkdir -p target/ci/session-fuzz/compile

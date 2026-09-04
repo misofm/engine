@@ -28,8 +28,15 @@ pub(crate) fn preflight(source: &str) -> Result<(), SyntaxRefusal> {
         path: Vec::new(),
     };
     scanner.whitespace();
-    // Malformed JSON is diagnosed by the authoritative dependency. This pass only returns the
-    // two refusals for which the value parser does not expose the required contract information.
+    // Malformed JSON is diagnosed by the authoritative dependency. This pass returns exactly
+    // three refusals: duplicate object member and nesting depth 129, for which the value parser
+    // does not expose the required contract information, plus empty object `{}` (issue #387),
+    // which the value parser *would* diagnose correctly on its own except that json-syntax 0.12.5
+    // never finishes the reserved `CodeMap` entry for an empty object (no `end_fragment` call on
+    // that branch, unlike the empty-array branch), so every later sibling member is misread and
+    // the dependency can panic instead of returning a diagnostic. This preflight refuses `{}`
+    // itself, before the dependency ever builds a `Value` tree, so that corrupted `CodeMap` state
+    // is never reached.
     scanner.value(1)?;
     Ok(())
 }
