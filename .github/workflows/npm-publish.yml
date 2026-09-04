@@ -61,6 +61,17 @@ jobs:
           cache: npm
           cache-dependency-path: sdk/package-lock.json
 
+      - name: Assert the worklet sha256 pin matches its source-of-truth file
+        run: |
+          set -euo pipefail
+          pin_file=hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256
+          [[ -f "$pin_file" ]] || { echo "missing $pin_file" >&2; exit 1; }
+          pinned=$(<"$pin_file")
+          [[ "$pinned" == "$EXPECTED_WORKLET_SHA256" ]] || {
+            echo "EXPECTED_WORKLET_SHA256 ($EXPECTED_WORKLET_SHA256) has drifted from $pin_file ($pinned)" >&2
+            exit 1
+          }
+
       - name: Guard release identity, accepted ancestry, and rejected commits
         env:
           EXPECTED_SHA: ${{ inputs.expected_sha }}

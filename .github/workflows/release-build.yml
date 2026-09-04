@@ -38,12 +38,14 @@ on:
       - '.github/ISSUE_SPECS/**'
       - 'docs/**'
       - 'README.md'
+      - 'dsp-research/**/*.md'
       - 'sdk/**'
       - 'scripts/check-sdk-deletions.py'
       - 'scripts/check-sdk-generated.sh'
       - 'scripts/check-sdk-headless.sh'
       - 'scripts/check-sdk-types.sh'
       - 'scripts/sdk-package.sh'
+      - 'scripts/test-sdk-artifact-builder-output-contract.sh'
   pull_request:
     branches:
       - main
@@ -53,6 +55,8 @@ on:
       - 'rust-toolchain.toml'
       - 'scripts/run-release-workspace-tests.sh'
       - '.github/workflows/release-build.yml'
+      - '.cargo/config.toml'
+      - 'scripts/check-release-shape.py'
   workflow_dispatch:
 
 concurrency:
@@ -68,7 +72,7 @@ jobs:
     name: workspace release build
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.97.1 --profile minimal
       # D12 puts `panic = "abort"` on `[profile.release]`, so ONE workspace-wide release
