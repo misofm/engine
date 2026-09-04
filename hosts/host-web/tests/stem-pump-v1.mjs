@@ -41,6 +41,7 @@ function inspectRing(shared, slot) {
   const channels = control[3]
   const frameCapacity = control[4]
   const headers = new Int32Array(shared, control[5], (capacity * 32) / 4)
+  const headersI64 = new BigInt64Array(shared, control[5], (capacity * 32) / 8)
   const planes = Array.from(
     { length: channels },
     (_, channel) =>
@@ -54,6 +55,8 @@ function inspectRing(shared, slot) {
     control,
     frames: headers[slot * 8 + 2],
     flags: headers[slot * 8 + 3],
+    generation: headersI64[slot * 4 + 2],
+    startFrame: headersI64[slot * 4 + 3],
     planes,
   }
 }
@@ -121,27 +124,115 @@ async function workerPumpContract() {
       ],
     })
     assert.deepEqual(await pump.pumpUntilFull(), {
-      chunks: 3,
+      chunks: 2,
       frames: 5,
       finished: true,
     })
     const first = inspectRing(shared, 0)
     const second = inspectRing(shared, 1)
-    const third = inspectRing(shared, 2)
     assert.equal(first.frames, 3)
     assert.equal(first.flags, 0)
     assert.deepEqual(Array.from(first.planes[0].subarray(0, 3)), [-1, 0, 0.5])
-    assert.equal(second.frames, 1)
-    assert.equal(second.flags, 0)
-    assert.deepEqual(Array.from(second.planes[1].subarray(0, 1)), [-1])
-    assert.equal(third.frames, 1)
-    assert.equal(third.flags, 1)
-    assert.deepEqual(Array.from(third.planes[1].subarray(0, 1)), [-1 / 32768])
+    assert.equal(second.frames, 2)
+    assert.equal(second.flags, 1)
+    assert.deepEqual(Array.from(second.planes[1].subarray(0, 2)), [-1, -1 / 32768])
     assert.ok(Math.max(...slices) <= 4 * 2 * 2, "pump RAM is bounded by one window")
     pump.stop()
   } finally {
     globalThis.fetch = previousFetch
   }
+}
+
+async function unalignedSeekKeepsChunksQuantumShaped() {
+  const channels = 3
+  const frames = 13
+  const samples = Array.from({ length: frames * channels }, (_, index) => index * 1000 - 7000)
+  const bytes = pcm24(samples, channels)
+  const stemIdentity = identity(bytes)
+  const slices = []
+  const lazyBlob = {
+    slice(start, end) {
+      slices.push({ start, end })
+      return new Blob([bytes.slice(start, end)])
+    },
+  }
+  const shared = createFixtureMsb1Ring({ channels, frameCapacity: 3, capacity: 4 })
+  const writer = new Msb1RingWriter(shared)
+  const pump = new CanonicalPcmPump({
+    lease: { async read() { return lazyBlob } },
+    windowFrames: 5,
+    sources: [{
+      sourceId: "unaligned",
+      identity: stemIdentity,
+      channels,
+      bitDepth: 24,
+      frames,
+      ring: writer,
+    }],
+  })
+
+  await pump.pumpUntilFull()
+  const preSeekSliceCount = slices.length
+  const control = new Int32Array(shared, 0, 128 / 4)
+  Atomics.store(control, 9, control[8])
+  await pump.seek(2)
+  assert.deepEqual(await pump.pumpUntilFull(), {
+    chunks: 4,
+    frames: 11,
+    finished: true,
+  })
+
+  const frameBytes = channels * 3
+  const postSeekSlices = slices.slice(preSeekSliceCount)
+  assert.equal(postSeekSlices[0].start, 2 * frameBytes)
+  assert.ok(postSeekSlices.length > 1, "the post-seek run reloads a later window")
+  for (const [slot, start] of [2, 5, 8, 11].entries()) {
+    const chunk = inspectRing(shared, slot)
+    assert.equal(chunk.startFrame, BigInt(start))
+    assert.equal(chunk.generation, 2n)
+    assert.equal(chunk.frames, start === 11 ? 2 : 3)
+    assert.equal(chunk.flags, start === 11 ? 1 : 0)
+    for (let frame = 0; frame < chunk.frames; frame += 1) {
+      for (let channel = 0; channel < channels; channel += 1) {
+        const expected = samples[(start + frame) * channels + channel] / 8_388_608
+        assert.equal(chunk.planes[channel][frame], expected)
+      }
+    }
+  }
+
+  for (const { start, end } of slices) {
+    assert.equal(start % frameBytes, 0, "slice starts on a frame boundary")
+    assert.equal(end % frameBytes, 0, "slice ends on a frame boundary")
+    assert.ok(end - start <= 5 * frameBytes, "slice stays within one window")
+    assert.ok(end <= frames * frameBytes, "slice stays within the source")
+  }
+  pump.stop()
+}
+
+async function rejectsWindowSmallerThanRingBeforeEngaging() {
+  let engaged = false
+  const ring = {
+    channels: 1,
+    frameCapacity: 3,
+    capacity: 1,
+    engage() { engaged = true },
+  }
+  assert.throws(
+    () => new CanonicalPcmPump({
+      lease: { async read() { throw new Error("unreachable") } },
+      windowFrames: 2,
+      sources: [{
+        sourceId: "invalid-window",
+        identity: `sha256:${"0".repeat(64)}`,
+        channels: 1,
+        bitDepth: 16,
+        frames: 1,
+        ring,
+      }],
+    }),
+    /windowFrames must be at least/
+  )
+  assert.equal(engaged, false)
 }
 
 async function readFailureHardStops() {
@@ -370,7 +461,7 @@ function cadenceFixture() {
     frames: 5,
     ring: { channels: 2, frameCapacity: 3, capacity: 4 },
     windowFrames: 4,
-    expectedChunks: 3,
+    expectedChunks: 2,
   }
 }
 
@@ -474,7 +565,7 @@ async function pullDrivenTranscript(fixture) {
   await worker.until(() => worker.reply("pumped") !== undefined, "the pump reply")
   assert.deepEqual(
     { ...worker.reply("pumped") },
-    { type: "pumped", requestId: "pump", chunks: 3, frames: 5, finished: true },
+    { type: "pumped", requestId: "pump", chunks: 2, frames: 5, finished: true },
     "the pull-driven reply is the pre-#278 reply, field for field"
   )
   const transcript = ringTranscript(shared, fixture.expectedChunks)
@@ -565,6 +656,8 @@ async function seekReArmsAFinishedLoop() {
 
 await transformContract()
 await workerPumpContract()
+await unalignedSeekKeepsChunksQuantumShaped()
+await rejectsWindowSmallerThanRingBeforeEngaging()
 await readFailureHardStops()
 await resumeInsideGestureGate()
 await sameSessionReplacementReleasesPredecessorPin()
