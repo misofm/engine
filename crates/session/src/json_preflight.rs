@@ -28,8 +28,15 @@ pub(crate) fn preflight(source: &str) -> Result<(), SyntaxRefusal> {
         path: Vec::new(),
     };
     scanner.whitespace();
-    // Malformed JSON is diagnosed by the authoritative dependency. This pass only returns the
-    // two refusals for which the value parser does not expose the required contract information.
+    // Malformed JSON is diagnosed by the authoritative dependency. This pass returns exactly
+    // three refusals: duplicate object member and nesting depth 129, for which the value parser
+    // does not expose the required contract information, plus empty object `{}` (issue #387),
+    // which the value parser *would* diagnose correctly on its own except that json-syntax 0.12.5
+    // never finishes the reserved `CodeMap` entry for an empty object (no `end_fragment` call on
+    // that branch, unlike the empty-array branch), so every later sibling member is misread and
+    // the dependency can panic instead of returning a diagnostic. This preflight refuses `{}`
+    // itself, before the dependency ever builds a `Value` tree, so that corrupted `CodeMap` state
+    // is never reached.
     scanner.value(1)?;
     Ok(())
 }
@@ -60,12 +67,17 @@ impl Scanner<'_> {
 
     fn object(&mut self, depth: usize) -> Result<(), SyntaxRefusal> {
         self.open(depth)?;
+        let open_at = self.cursor;
         self.cursor += 1;
         self.whitespace();
         let mut keys = BTreeSet::new();
         if self.peek() == Some(b'}') {
             self.cursor += 1;
-            return Ok(());
+            return Err(SyntaxRefusal {
+                path: self.current_path(),
+                span: open_at..self.cursor,
+                message: "empty JSON object {} is never a valid V1 schema value",
+            });
         }
         loop {
             self.whitespace();
@@ -83,17 +95,8 @@ impl Scanner<'_> {
             };
             let key = key.to_string();
             if !keys.insert(key.clone()) {
-                let mut path = DiagnosticPath::root();
-                for segment in &self.path {
-                    path = match segment {
-                        PathSegment::Field(value) => path.key(value),
-                        PathSegment::Index(value) => path.index(*value),
-                        PathSegment::Id(_) => unreachable!(),
-                    };
-                }
-                path = path.key(&key);
                 return Err(SyntaxRefusal {
-                    path,
+                    path: self.current_path().key(&key),
                     span: key_start..key_end,
                     message: "duplicate object member",
                 });
@@ -148,6 +151,15 @@ impl Scanner<'_> {
         if depth <= MAXIMUM_JSON_DEPTH {
             return Ok(());
         }
+        Err(SyntaxRefusal {
+            path: self.current_path(),
+            span: self.cursor..self.cursor + 1,
+            message: "JSON nesting exceeds the maximum depth of 128",
+        })
+    }
+
+    /// Materialize the structured path to the value currently being scanned.
+    fn current_path(&self) -> DiagnosticPath {
         let mut path = DiagnosticPath::root();
         for segment in &self.path {
             path = match segment {
@@ -156,11 +168,7 @@ impl Scanner<'_> {
                 PathSegment::Id(_) => unreachable!(),
             };
         }
-        Err(SyntaxRefusal {
-            path,
-            span: self.cursor..self.cursor + 1,
-            message: "JSON nesting exceeds the maximum depth of 128",
-        })
+        path
     }
 
     fn string(&mut self) -> Result<&str, ()> {

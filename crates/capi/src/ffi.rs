@@ -1878,6 +1878,81 @@ mod tests {
         destroy(engine);
     }
 
+    /// Issue #387: json-syntax 0.12.5 never calls `end_fragment` for an empty JSON object, so the
+    /// reserved `CodeMap` entry keeps `volume = 0` and every later member is read one slot off --
+    /// `session::parse::Parser::keys` used to hit `Option::unwrap()` on the resulting `None`,
+    /// which aborted the process under this workspace's `panic = "abort"` release profile
+    /// (`catch_result`'s `catch_unwind` cannot contain an abort). The session preflight now
+    /// refuses `{}` anywhere in the document before the typed walk, so this reaches
+    /// `RESULT_COMPILE_REJECTED` with a documented diagnostic instead, exactly like any other
+    /// malformed document.
+    #[test]
+    fn empty_object_document_is_diagnosed_not_aborted() {
+        const JSON: &str =
+            include_str!("../../../fixtures/session/v1/parametric-eq-nine-track.json");
+        let needle =
+            "\"render_profile\": {\n    \"id\": \"native\",\n    \"mode\": \"single_thread\"\n  }";
+        assert!(JSON.contains(needle), "fixture shape drifted");
+        let document = JSON.replacen(needle, "\"render_profile\": {}", 1);
+
+        let mut engine = ptr::null_mut();
+        assert_eq!(create(&config(), &mut engine), RESULT_OK);
+        let mut diagnostics = BytesOut {
+            struct_size: BYTES_OUT_SIZE,
+            reserved0: 0,
+            data: ptr::null_mut(),
+            capacity_bytes: 0,
+            required_bytes: 0,
+        };
+        let mut session = ptr::dangling_mut::<Session>();
+        let mut plan = ptr::dangling_mut::<Plan>();
+        let result =
+            // SAFETY: Every pointer names a complete local ABI value or the mutated document bytes.
+            unsafe {
+                miso_engine_v1_compile_session(
+                    engine,
+                    document.as_ptr(),
+                    document.len() as u64,
+                    &limits(),
+                    &mut diagnostics,
+                    &mut session,
+                    &mut plan,
+                )
+            };
+        assert_eq!(result, RESULT_BUFFER_TOO_SMALL);
+        assert!(session.is_null());
+        assert!(plan.is_null());
+        assert!(diagnostics.required_bytes > 0);
+
+        let mut storage = vec![0_u8; diagnostics.required_bytes as usize];
+        diagnostics.data = storage.as_mut_ptr();
+        diagnostics.capacity_bytes = storage.len() as u64;
+        session = ptr::dangling_mut();
+        plan = ptr::dangling_mut();
+        let result =
+            // SAFETY: The retry output can hold the complete diagnostic and outputs are writable.
+            unsafe {
+                miso_engine_v1_compile_session(
+                    engine,
+                    document.as_ptr(),
+                    document.len() as u64,
+                    &limits(),
+                    &mut diagnostics,
+                    &mut session,
+                    &mut plan,
+                )
+            };
+        assert_eq!(result, RESULT_COMPILE_REJECTED);
+        assert!(session.is_null());
+        assert!(plan.is_null());
+        let rendered = core::str::from_utf8(&storage).expect("diagnostics are UTF-8");
+        assert!(
+            rendered.contains("json.syntax\t$.render_profile\n"),
+            "unexpected diagnostic bytes: {rendered:?}"
+        );
+        destroy(engine);
+    }
+
     /// F6, end to end: a rejected source submission or seek reaches a C host as the diagnostic for
     /// the rule it broke, through the real entry point and the real `last_error` path. Every one of
     /// these used to be `RESULT_INVALID_ARGUMENT` with `source.submit.rejected` or
