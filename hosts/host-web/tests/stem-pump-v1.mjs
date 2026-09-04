@@ -596,13 +596,12 @@ async function stopInterruptsTheIdleLoop() {
   await worker.until(() => control[WROTE] === 1, "the one-slot ring to fill")
   assert.equal(Atomics.load(control, WRITER_STATE), 1, "the writer is engaged while driving")
 
-  const started = Date.now()
+  // `until`'s own 1000 ms deadline (below) is the functional assertion that stop is prompt: it
+  // throws "timed out waiting for the stop reply" if the idle sleep is not actually interrupted.
+  // A follow-up `Date.now() - started < 1000` here would be a tautology -- it can only observe
+  // what `until` has already enforced by not throwing.
   worker.send({ type: "stop", requestId: "stop" })
   await worker.until(() => worker.reply("stopped") !== undefined, "the stop reply", 1000)
-  assert.ok(
-    Date.now() - started < 1000,
-    "stop did not wait on the idle sleep it interrupted"
-  )
   assert.equal(Atomics.load(control, WRITER_STATE), 0, "stop released the ring writer")
 
   const settled = control[WROTE]
