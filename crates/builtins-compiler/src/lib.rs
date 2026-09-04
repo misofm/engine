@@ -927,53 +927,11 @@ type ConsumerSeal = (u64, Box<str>, MeterTap);
 /// Test-only phase-two allocation accounting.  The production resource report deliberately
 /// remains a layout calculation; this probe independently observes the allocator requests made
 /// after phase-one validation has accepted the artifact.
-///
-/// Two nondeterminism sources are guarded against explicitly (issue #359 WP-2, CI run
-/// `33841397115` attempt 1: four extra retained layouts of 48/8, 96/8, 148/16 and 608/8 bytes,
-/// one allocation each, observed only on the first and only `prepare_session_builtins` call in
-/// the process):
-///
-/// 1. **First-touch process/thread state.**  Lazily-initialised std machinery (thread handles,
-///    `HashMap` `RandomState` seeding, and similar `OnceLock`/TLS-guard machinery reachable from
-///    `prepare_session_builtins`) allocates on its first use per thread or process and never
-///    again.  A test that measures the *first* prepare in the process folds that one-shot cost
-///    into the observed side while the reported side -- a pure layout calculation -- never
-///    accounted for it.  The fix is warm-up-then-measure: callers perform one full prepare to
-///    settle first-touch state, discard its snapshot, then measure a second, steady-state
-///    prepare and compare `observed == reported` exactly.
-/// 2. **Cross-thread contamination.**  [`TEST_PHASE_TWO_OWNER_THREAD`] is set on the measuring
-///    thread alone when phase two is armed, and [`test_only_record_phase_two_allocation`] checks
-///    it before ever calling [`TestPhaseTwoLayoutTable::record`], so a concurrent thread (a
-///    background worker spawned by a dependency, for example) can never contribute a layout to
-///    this table.
 #[cfg(feature = "test-support")]
 static TEST_PHASE_TWO_ACTIVE: AtomicBool = AtomicBool::new(false);
 #[cfg(feature = "test-support")]
-thread_local! {
-    /// Set on the measuring (owner) thread only, once at [`TestPhaseTwoAllocationGuard::begin`],
-    /// and cleared on that same thread at `Drop`. [`test_only_record_phase_two_allocation`] reads
-    /// this instead of calling `std::thread::current().id()` on every allocation while a window
-    /// is armed: `std::thread::current()` lazily allocates a `Thread` handle on first use per
-    /// thread and clones an `Arc` on every call after that, which would itself be a reentrant
-    /// allocation from inside a `GlobalAlloc::alloc` hook. `thread_local!` access for a `Copy`,
-    /// non-`Drop` `Cell<bool>` has no such hazard.
-    static TEST_PHASE_TWO_OWNER_THREAD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-#[cfg(feature = "test-support")]
 static TEST_PHASE_TWO_LAYOUTS: Mutex<TestPhaseTwoLayoutTable> =
     Mutex::new(TestPhaseTwoLayoutTable::new());
-/// Serializes an entire reset-prepare-snapshot measurement session against every other such
-/// session in the process. `TEST_PHASE_TWO_ACTIVE`/`TEST_PHASE_TWO_LAYOUTS` are process-global by
-/// necessity (the armed window has to be visible to a global allocator), so two `#[test]`
-/// functions in the same test binary that each drive a measurement would otherwise race by
-/// default `cargo test` thread parallelism: one test's reset or snapshot can land inside another
-/// test's armed window. Thread attribution on [`TestPhaseTwoLayoutTable::record`] stops a
-/// concurrent thread from *contributing* a layout, but not from de-arming or reading someone
-/// else's in-flight window, so every caller of [`prepare_session_builtins`] under the tracker
-/// must hold [`test_only_begin_phase_two_measurement_session`] for the full reset-through-snapshot
-/// sequence.
-#[cfg(feature = "test-support")]
-static TEST_PHASE_TWO_SESSION: Mutex<()> = Mutex::new(());
 
 #[cfg(feature = "test-support")]
 struct TestPhaseTwoLayoutTable {
@@ -996,13 +954,6 @@ impl TestPhaseTwoLayoutTable {
         *self = Self::new();
     }
 
-    fn arm(&mut self) {
-        self.clear();
-    }
-
-    /// Only called after the caller ([`test_only_record_phase_two_allocation`]) has already
-    /// confirmed, via [`TEST_PHASE_TWO_OWNER_THREAD`], that the current thread is the one that
-    /// armed this window -- see the cross-thread-contamination note above.
     fn record(&mut self, layout: core::alloc::Layout) {
         let Ok(size_bytes) = u64::try_from(layout.size()) else {
             self.overflowed = true;
@@ -1048,28 +999,6 @@ pub struct TestPhaseTwoAllocationSnapshot {
     pub overflowed: bool,
 }
 
-/// Holds exclusive use of the phase-two allocation tracker for one whole measurement session
-/// (reset, prepare, snapshot). Acquire this once at the top of any test that resets and measures
-/// the tracker, and hold it for the entire measurement so no other test's use of the same
-/// process-global tracker can interleave. See [`TEST_PHASE_TWO_SESSION`].
-#[cfg(feature = "test-support")]
-#[doc(hidden)]
-#[allow(
-    dead_code,
-    reason = "held only for its Drop-time release of TEST_PHASE_TWO_SESSION"
-)]
-pub struct TestOnlyPhaseTwoSessionGuard(std::sync::MutexGuard<'static, ()>);
-
-#[cfg(feature = "test-support")]
-#[doc(hidden)]
-#[must_use]
-pub fn test_only_begin_phase_two_measurement_session() -> TestOnlyPhaseTwoSessionGuard {
-    let guard = TEST_PHASE_TWO_SESSION
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    TestOnlyPhaseTwoSessionGuard(guard)
-}
-
 #[cfg(feature = "test-support")]
 #[doc(hidden)]
 pub fn test_only_reset_phase_two_allocation_tracker() {
@@ -1083,14 +1012,6 @@ pub fn test_only_reset_phase_two_allocation_tracker() {
 #[doc(hidden)]
 pub fn test_only_record_phase_two_allocation(layout: core::alloc::Layout) {
     if !TEST_PHASE_TWO_ACTIVE.load(Ordering::Relaxed) {
-        return;
-    }
-    // Deliberately not `std::thread::current().id()`: that lazily allocates a `Thread` handle on
-    // first use per thread and clones an `Arc` on every subsequent call, which is a reentrant
-    // allocation hazard from inside a `GlobalAlloc::alloc` hook. The thread-local flag below is
-    // set once, on the measuring thread only, outside this hot path (see
-    // `TestPhaseTwoAllocationGuard::begin`).
-    if !TEST_PHASE_TWO_OWNER_THREAD.with(std::cell::Cell::get) {
         return;
     }
     if let Ok(mut table) = TEST_PHASE_TWO_LAYOUTS.lock() {
@@ -1141,12 +1062,6 @@ struct TestPhaseTwoAllocationGuard;
 #[cfg(feature = "test-support")]
 impl TestPhaseTwoAllocationGuard {
     fn begin() -> Self {
-        if let Ok(mut table) = TEST_PHASE_TWO_LAYOUTS.lock() {
-            table.arm();
-        }
-        // Set once here, on the measuring thread, outside the allocator hook -- not on every
-        // allocation. See `TEST_PHASE_TWO_OWNER_THREAD` and `test_only_record_phase_two_allocation`.
-        TEST_PHASE_TWO_OWNER_THREAD.with(|flag| flag.set(true));
         TEST_PHASE_TWO_ACTIVE.store(true, Ordering::SeqCst);
         Self
     }
@@ -1155,7 +1070,6 @@ impl TestPhaseTwoAllocationGuard {
 impl Drop for TestPhaseTwoAllocationGuard {
     fn drop(&mut self) {
         TEST_PHASE_TWO_ACTIVE.store(false, Ordering::SeqCst);
-        TEST_PHASE_TWO_OWNER_THREAD.with(|flag| flag.set(false));
     }
 }
 

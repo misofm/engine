@@ -5,34 +5,86 @@
 
 use core::{
     alloc::Layout,
+    cell::Cell,
     num::{NonZeroU32, NonZeroU64, NonZeroUsize},
 };
 use std::alloc::{GlobalAlloc, System};
+use std::sync::Mutex;
 
 use builtins::{MeterConfig, MeterTap};
 use builtins_compiler::{
     BuiltinCompileCaps, MeterRequest, prepare_session_builtins,
-    test_only_begin_phase_two_measurement_session, test_only_phase_two_allocation_snapshot,
-    test_only_record_phase_two_allocation, test_only_reset_phase_two_allocation_tracker,
+    test_only_phase_two_allocation_snapshot, test_only_record_phase_two_allocation,
+    test_only_reset_phase_two_allocation_tracker,
 };
 use session::{CompileCaps, RouteSource, SendTap, StableId, compile_session, parse_session_json};
+
+/// Serializes the two tests below (each measures the process-global phase-two tracker) so no
+/// other test in this binary's use of `TEST_PHASE_TWO_ACTIVE`/`TEST_PHASE_TWO_LAYOUTS` interleaves
+/// with either measurement session. `builtins_compiler` exposes no session primitive of its own
+/// (that global state is intentionally private -- only the reset/record/snapshot triplet is
+/// `test_only_*` public), so ownership of this lock is entirely test-file-local. Poison-tolerant:
+/// a panicking test must not permanently deadlock the other test in this binary.
+static SESSION: Mutex<()> = Mutex::new(());
 
 struct TrackingAllocator;
 
 #[global_allocator]
 static GLOBAL_ALLOCATOR: TrackingAllocator = TrackingAllocator;
 
+thread_local! {
+    /// Set true only on the measuring thread, for the span of one `armed` call (one warm-up or
+    /// measured `prepare_session_builtins`), by [`ArmedGuard`]. `TrackingAllocator` forwards an
+    /// allocation to `test_only_record_phase_two_allocation` only when the *current* thread's
+    /// flag is set, so an allocation made concurrently by any other thread (a background worker
+    /// spawned by a dependency, for example) is never attributed to this measurement -- without
+    /// calling `std::thread::current()` from inside the allocator hook: that lazily allocates a
+    /// `Thread` handle on first use per thread and clones an `Arc` on every subsequent call,
+    /// which would itself be a reentrant allocation from inside a `GlobalAlloc::alloc` hook.
+    static ARMED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Guards one armed span on the current thread; clears the flag on drop (including on panic), so
+/// a failed assertion inside `body` can never leave a later, unrelated allocation on the same
+/// thread attributed to a stale window.
+struct ArmedGuard;
+
+impl ArmedGuard {
+    fn new() -> Self {
+        ARMED.with(|flag| flag.set(true));
+        Self
+    }
+}
+
+impl Drop for ArmedGuard {
+    fn drop(&mut self) {
+        ARMED.with(|flag| flag.set(false));
+    }
+}
+
+/// Runs `body` -- a single `prepare_session_builtins` call -- with this thread armed, so
+/// `TrackingAllocator` attributes only this thread's allocations to the phase-two tracker for the
+/// span of the call.
+fn armed<T>(body: impl FnOnce() -> T) -> T {
+    let _guard = ArmedGuard::new();
+    body()
+}
+
 // SAFETY: this delegates every request unchanged and records only a fixed atomic counter in the
 // compiler crate while its explicit test-only phase-two guard is active.
 unsafe impl GlobalAlloc for TrackingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        test_only_record_phase_two_allocation(layout);
+        if ARMED.with(Cell::get) {
+            test_only_record_phase_two_allocation(layout);
+        }
         // SAFETY: forwards the allocator-provided layout unchanged.
         unsafe { System.alloc(layout) }
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        test_only_record_phase_two_allocation(layout);
+        if ARMED.with(Cell::get) {
+            test_only_record_phase_two_allocation(layout);
+        }
         // SAFETY: forwards the allocator-provided layout unchanged.
         unsafe { System.alloc_zeroed(layout) }
     }
@@ -43,7 +95,9 @@ unsafe impl GlobalAlloc for TrackingAllocator {
     }
 
     unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, size: usize) -> *mut u8 {
-        test_only_record_phase_two_allocation(layout);
+        if ARMED.with(Cell::get) {
+            test_only_record_phase_two_allocation(layout);
+        }
         // SAFETY: forwards the original allocation arguments unchanged.
         unsafe { System.realloc(pointer, layout, size) }
     }
@@ -130,7 +184,7 @@ fn assert_rejects_in_phase_one(
     caps: BuiltinCompileCaps,
 ) {
     test_only_reset_phase_two_allocation_tracker();
-    let error = prepare_session_builtins(session, requests, caps)
+    let error = armed(|| prepare_session_builtins(session, requests, caps))
         .err()
         .expect("one-below cap must reject");
     assert!(
@@ -173,7 +227,7 @@ fn settle_phase_two_first_touch(
     caps: BuiltinCompileCaps,
 ) -> builtins_compiler::TestPhaseTwoAllocationSnapshot {
     test_only_reset_phase_two_allocation_tracker();
-    let _ = prepare_session_builtins(session, requests, caps).expect("prepare (warm-up)");
+    let _ = armed(|| prepare_session_builtins(session, requests, caps)).expect("prepare (warm-up)");
     test_only_phase_two_allocation_snapshot()
 }
 
@@ -246,8 +300,10 @@ fn assert_first_touch_delta_is_bounded(
 #[test]
 fn phase_two_allocator_layouts_match_the_checked_resource_report() {
     // Excludes every other test in this binary from the process-global tracker for the whole
-    // measurement session (reset through snapshot); see `TEST_PHASE_TWO_SESSION`.
-    let _session_guard = test_only_begin_phase_two_measurement_session();
+    // measurement session (reset through snapshot); see `SESSION`.
+    let _session_guard = SESSION
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     // One discarded prepare, ahead of every measured combination below, settles first-touch
     // process/thread state once so no measured window ever observes it. Its snapshot is not
     // thrown away: the very first measured combination below repeats the same
@@ -259,7 +315,8 @@ fn phase_two_allocator_layouts_match_the_checked_resource_report() {
         for meter_count in [0, 1, 7] {
             let requests = requests(meter_count);
             test_only_reset_phase_two_allocation_tracker();
-            let prepared = prepare_session_builtins(&session, &requests, caps()).expect("prepare");
+            let prepared =
+                armed(|| prepare_session_builtins(&session, &requests, caps())).expect("prepare");
             let snapshot = test_only_phase_two_allocation_snapshot();
             let report = prepared.resource_report();
             assert!(!snapshot.overflowed);
@@ -295,7 +352,8 @@ fn phase_two_allocator_layouts_match_the_checked_resource_report() {
             exact.maximum_total_meter_bytes = report.engine_owned_meter_payload_bytes.max(1);
             exact.maximum_single_allocation_bytes = report.maximum_single_allocation_bytes;
             exact.maximum_meter_streams = u64::try_from(meter_count).expect("bounded").max(1);
-            prepare_session_builtins(&session, &requests, exact).expect("equal caps accept");
+            armed(|| prepare_session_builtins(&session, &requests, exact))
+                .expect("equal caps accept");
 
             let mut below = exact;
             below.maximum_total_state_bytes = report
@@ -358,8 +416,10 @@ fn phase_two_allocator_layouts_match_the_checked_resource_report() {
 #[test]
 fn phase_two_allocator_layouts_are_stable_across_repeated_measured_prepares() {
     // Excludes every other test in this binary from the process-global tracker for the whole
-    // measurement session (reset through snapshot); see `TEST_PHASE_TWO_SESSION`.
-    let _session_guard = test_only_begin_phase_two_measurement_session();
+    // measurement session (reset through snapshot); see `SESSION`.
+    let _session_guard = SESSION
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let session = session(4);
     let requests = requests(3);
     let warmup_snapshot = settle_phase_two_first_touch(&session, &requests, caps());
@@ -367,7 +427,8 @@ fn phase_two_allocator_layouts_are_stable_across_repeated_measured_prepares() {
     let mut snapshots = Vec::with_capacity(3);
     for _ in 0..3 {
         test_only_reset_phase_two_allocation_tracker();
-        let _ = prepare_session_builtins(&session, &requests, caps()).expect("prepare (measured)");
+        let _ = armed(|| prepare_session_builtins(&session, &requests, caps()))
+            .expect("prepare (measured)");
         snapshots.push(test_only_phase_two_allocation_snapshot());
     }
 
