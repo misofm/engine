@@ -23,7 +23,13 @@ on:
 
 concurrency:
   group: qualification-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  # S9: cancelling a main push here (cancel-in-progress: true, unconditionally) races the next
+  # main push's superseding run against every rust-cache's `save-if: github.ref == main` post
+  # step. A push run cancelled mid-cache-save writes nothing, so under frequent merges to main the
+  # caches every PR depends on may never be written. PR runs still want unconditional cancellation
+  # (a superseded PR run's work is worthless the moment a new commit lands), so cancel only on
+  # pull_request; a main push always runs to completion and its caches always save.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -102,6 +108,7 @@ jobs:
           name: audioworklet-${{ github.sha }}
           path: target/ci/qualification-artifacts/
           if-no-files-found: error
+          overwrite: true
 
   sdk:
     name: SDK package and generated-surface qualification
@@ -111,6 +118,10 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: sdk
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
@@ -138,10 +149,16 @@ jobs:
           expected="$(cat hosts/host-web/web/miso-engine-v1-audio-worklet-artifact.sha256)"
           actual="$(sha256sum target/ci/qualification-artifacts/miso-engine-v1-audio-worklet.simd128.wasm | awk '{print $1}')"
           [[ "$actual" == "$expected" ]] || { echo "downloaded artifact sha256 mismatch: expected $expected, got $actual" >&2; exit 1; }
+      # S7: check-sdk-deletions.py's 37-mutation --self-test (design §6.6) was never wired in --
+      # only the bare gate ran. test-sdk-artifact-builder-output-contract.sh (also design §6.6) is
+      # not added separately: sdk-package.sh check already runs it as its own first step (see
+      # scripts/sdk-package.sh:29-30) before the `sdk-package.sh check` call below, so adding it
+      # here again would be a duplicate invocation, not a new gate.
       - name: Qualify the SDK package against the shared artifact
         run: |
           bash scripts/check-sdk-generated.sh
           python3 -B scripts/check-sdk-deletions.py
+          python3 -B scripts/check-sdk-deletions.py --self-test
           bash scripts/check-sdk-types.sh
           bash scripts/check-sdk-headless.sh target/ci/qualification-artifacts
           bash scripts/sdk-package.sh check target/ci/qualification-artifacts
@@ -271,14 +288,16 @@ jobs:
         run: |
           bash scripts/check-console-benchmark-fixture.sh
           bash scripts/check-rack-benchmark-fixture.sh
-      # check-console-fixtures.sh and check-builtins-fixtures.sh split (design §6.2): the
-      # manifest-only half (no binary argument) is hermetic and belongs here; audit-native runs
-      # them again with the release audit/session-validator binaries for the full audit half.
-      - name: Standing console and builtins fixture manifests
-        run: |
-          bash scripts/check-console-fixtures.sh
-          bash scripts/check-builtins-fixtures.sh .
-          bash scripts/test-builtins-fixtures.sh
+      # check-console-fixtures.sh and check-builtins-fixtures.sh (S1/S2): neither script has a
+      # hermetic no-binary mode -- with no binary argument, check-console-fixtures.sh's
+      # derive-intended-console-fixture.py falls back to `cargo run -q -p session-validator`
+      # (debug) and check-builtins-fixtures.sh unconditionally falls back to
+      # `cargo run --bin audit` whenever tools/audit exists on disk (it always does), so a bare
+      # call here is a hidden debug cargo build, not a manifest-only check. Both invocations moved
+      # entirely to audit-native, which already runs them a second time with the prebuilt release
+      # binaries; only the hermetic mutation-test suite stays here.
+      - name: Standing builtins fixture manifest mutation tests
+        run: bash scripts/test-builtins-fixtures.sh
       - name: Wasm console benchmark validator mutation tests
         run: bash scripts/test-wasm-console-benchmark.sh
       # test-builtins-benchmark.sh and test-graph-benchmark.sh moved to nightly's
@@ -336,11 +355,13 @@ jobs:
         run: |
           bash scripts/check-effect-interchange-qualification.sh
           bash scripts/test-effect-interchange-policy.sh
-      # check-effect-contract.sh's preconditions and factory-count grep, without a bench binary:
-      # the release conformance-bench half runs in audit-native once the binary exists (design
-      # §6.2 split).
-      - name: Native effect runtime contract preconditions
-        run: bash scripts/check-effect-contract.sh
+      # check-effect-contract.sh has no hermetic no-binary mode either (S1): with no bench binary
+      # argument it falls back to `cargo run --locked --release -q -p bench`, a full release build
+      # inside the lint shard, and it re-runs the effect-runtime-policy/fixtures checks the
+      # "Effect runtime dependency-boundary and fixture policy and mutation tests" step above
+      # already ran. audit-native runs the whole script (preconditions, factory-count grep, and
+      # the bench conformance record) once, with the prebuilt release bench binary; nothing here
+      # is lost by removing the bare call.
       - name: Native PCM runner static seal and mutation tests
         run: |
           bash scripts/check-native-pcm-runner.sh
@@ -536,7 +557,7 @@ jobs:
       - name: Builtins fixture corpus audit
         run: bash scripts/check-builtins-fixtures.sh . target/release/audit
       - name: Standing console fixtures against the release session-validator
-        run: bash scripts/check-console-fixtures.sh target/release/session-validator
+        run: bash scripts/check-console-fixtures.sh target/release/session_validator
       # The release conformance-bench half of check-effect-contract.sh (design §6.2 split): lint
       # already ran its preconditions and factory-count grep without a binary.
       - name: Native effect runtime conformance bench
@@ -597,6 +618,8 @@ jobs:
         with:
           name: wasm-gates
           path: target/ci/wasm-gates/wasm-gates.jsonl
+          if-no-files-found: error
+          overwrite: true
 
   cross-target:
     name: android, iOS, and wasm cross-target checks
@@ -741,6 +764,7 @@ jobs:
         continue-on-error: true
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: ci-telemetry-${{ github.run_id }}
+          name: ci-telemetry-${{ github.run_id }}-${{ github.run_attempt }}
           path: ci-telemetry.json
           if-no-files-found: ignore
+          overwrite: true

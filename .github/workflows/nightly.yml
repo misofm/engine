@@ -55,6 +55,7 @@ jobs:
   native-vectorization-report:
     name: native production-kernel release-probe report (non-blocking)
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Install pinned Rust toolchain and disassembler
@@ -76,11 +77,13 @@ jobs:
         with:
           name: native-vectorization-report
           path: target/ci/native-vectorization/report.json
+          overwrite: true
 
 
   benchmark:
     name: bounded descriptive benchmarks
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Install pinned Rust toolchain
@@ -125,6 +128,7 @@ jobs:
             target/session-benchmark.jsonl
             target/fp-environment-benchmark.jsonl
             target/issue11/effect-contract-benchmark.jsonl
+          overwrite: true
 
   deep-fuzz:
     name: deep fuzzing over every target
@@ -201,6 +205,7 @@ jobs:
           name: nightly-fuzz
           path: target/ci/nightly-fuzz
           if-no-files-found: ignore
+          overwrite: true
 
   release-link-proof:
     name: workspace release link proof (moved off the per-PR path)
@@ -289,6 +294,7 @@ jobs:
             moved-mutation-suites, release-budgets]
     if: ${{ always() && contains(needs.*.result, 'failure') }}
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
     permissions:
       issues: write
     steps:

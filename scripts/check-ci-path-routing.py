@@ -156,7 +156,7 @@ def check_mapping_structure(text: str, workflow: str, title: str, jobs: list[str
         line for line in text.splitlines()
         if line and not line[0].isspace() and not line.startswith("#")
     ]
-    require(top_level == [f"name: {title}", "on:", "concurrency:", "env:", "jobs:"],
+    require(top_level == [f"name: {title}", "on:", "concurrency:", "permissions:", "env:", "jobs:"],
             f"{workflow}: top-level mapping structure must be exact and unique")
     jobs_block = section(text, "jobs:", ())
     job_headers = [
@@ -483,23 +483,73 @@ def check_qualification_verdict_needs(text: str, names: list[str]) -> None:
 def check_qualification_expectation_table(text: str, names: list[str]) -> None:
     """The static expectation table -- not a leaf `if:` echoed back at itself -- must mention
     every job so a leaf's `if:` drifting from it fails the verdict in both directions (design §7).
-    `route` drives the table rather than being checked by it, so it is exempt."""
+    `route` drives the table rather than being checked by it, so it is exempt. S4: a name grep
+    alone is not a semantics check -- `check sdk "$LINT_RESULT"` would still mention 'sdk' by
+    name, so the exact `check <job> "$<JOB>_RESULT"` pairing (uppercase, hyphens to underscores)
+    is required, not merely the job name's presence somewhere in the table."""
     verdict = job(text, "verdict")
     for name in names:
         if name in ("route", "verdict"):
             continue
-        require(re.search(rf'check {re.escape(name)} "\$', verdict) is not None,
-                f"qualification.yml: expectation table does not mention job {name!r}")
+        variable = result_variable(name)
+        require(re.search(rf'check {re.escape(name)} "\${re.escape(variable)}"', verdict) is not None,
+                f"qualification.yml: expectation table does not check {name!r} against "
+                f"\"${variable}\"")
+
+
+def check_qualification_verdict_always(text: str) -> None:
+    """S3: `if: always()` is the single property that makes the verdict -- the workflow's one
+    required context -- always report, rather than resolving to `skipped` and leaving a required
+    check pending forever (design §4/§7)."""
+    verdict = job(text, "verdict")
+    require(re.search(r"^    if: always\(\)$", verdict, re.MULTILINE) is not None,
+            "qualification.yml: verdict must run unconditionally (if: always())")
+
+
+def check_qualification_verdict_permissions(text: str) -> None:
+    """The verdict's job-level permissions override the read-only top-level default (already
+    pinned by check_qualification_permissions) to add exactly the `actions: read` its telemetry
+    step needs to call the Actions API -- never more."""
+    verdict = job(text, "verdict")
+    require("    permissions:\n      actions: read\n      contents: read\n" in verdict,
+            "qualification.yml: verdict permissions must be exactly actions: read and "
+            "contents: read")
+
+
+def check_qualification_concurrency(text: str) -> None:
+    """S9: a superseded PR run must still be cancellable, but an unconditional
+    `cancel-in-progress: true` also cancels a main push's own successor before its
+    `save-if: github.ref == main` rust-cache post steps run, so under frequent merges the caches
+    every PR depends on may never be written. Exactly this expression -- cancel only on
+    pull_request, never on a main push -- is required, not merely the key's presence."""
+    concurrency_block = section(text, "concurrency:", ("permissions:",))
+    require("cancel-in-progress: ${{ github.event_name == 'pull_request' }}" in concurrency_block,
+            "qualification.yml: concurrency must cancel pull_request runs only, "
+            "never a main push")
+
+
+def check_qualification_release_shape_guard(text: str) -> None:
+    """S4: release-shape must be selected only when release_inputs is actually true -- dropping
+    this guard would run the metadata/panic-clobber policy unconditionally on every full route,
+    contradicting its own `needs.route.outputs.release_inputs == 'true'` job-level `if:`."""
+    verdict = job(text, "verdict")
+    require('[[ "$RELEASE_INPUTS" == "true" ]] && release_shape_expected=success' in verdict,
+            "qualification.yml: release-shape expectation must be conditioned on "
+            '"$RELEASE_INPUTS" == "true"')
 
 
 def check_qualification_workflow(root: pathlib.Path) -> None:
     text = (root / ".github/workflows/qualification.yml").read_text(encoding="utf-8")
     check_qualification_no_path_filter(text)
     check_qualification_permissions(text)
+    check_qualification_concurrency(text)
     names = qualification_job_names(text)
     check_qualification_timeouts(text, names)
     check_qualification_verdict_needs(text, names)
+    check_qualification_verdict_always(text)
+    check_qualification_verdict_permissions(text)
     check_qualification_expectation_table(text, names)
+    check_qualification_release_shape_guard(text)
 
 
 def check(root: pathlib.Path) -> None:

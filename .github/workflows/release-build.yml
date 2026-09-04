@@ -63,6 +63,9 @@ concurrency:
   group: release-build-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   RUSTUP_TOOLCHAIN: 1.97.1
