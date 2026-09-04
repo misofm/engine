@@ -1,15 +1,14 @@
 #!/usr/bin/env bash
 # Issue #243 eval 6: the SDK typechecks, and its host mirror is pinned to the shipped declaration.
 #
-# # Why this is not a sweep row
+# # Why this needs its own CI step, not a hermetic gate row
 #
-# `tsc` is a dependency, and installing it needs the network. Every row in `scripts/sweep.sh` is
-# hermetic by construction, so a row that ran `npm ci` would break the one property the sweep
-# exists to have. The same reasoning already keeps `hosts/host-web/qualification`'s
-# suite out of the sweep, and this follows it.
+# `tsc` is a dependency, and installing it needs the network. Every other gate run from CI is
+# hermetic by construction, so a row that ran `npm ci` would break that property. The same
+# reasoning already keeps `hosts/host-web/qualification`'s suite in its own CI step too.
 #
 # The SDK's *behavioural* evals need no `node_modules` at all -- they run under Node's native type
-# stripping and are swept as `check-sdk-headless.sh`. What this adds is the static half: the
+# stripping, hermetically, from `check-sdk-headless.sh`. What this adds is the static half: the
 # strict-mode typecheck, and with it `sdk/test/host-mirror.ts`, which is checked rather than run.
 # That file's whole job is to fail COMPILATION when the shipped `.d.ts` and the SDK's adapter
 # disagree -- a `bigint` field that became a `number` is caught there and nowhere else until a

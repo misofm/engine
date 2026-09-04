@@ -15,13 +15,14 @@ import pathlib
 import re
 import sys
 
-EVIDENCE = [".github/ISSUE_SPECS/**", "docs/**", "README.md"]
+EVIDENCE = [".github/ISSUE_SPECS/**", "docs/**", "README.md", "dsp-research/**/*.md"]
 SDK_FILES = [
     "scripts/check-sdk-deletions.py",
     "scripts/check-sdk-generated.sh",
     "scripts/check-sdk-headless.sh",
     "scripts/check-sdk-types.sh",
     "scripts/sdk-package.sh",
+    "scripts/test-sdk-artifact-builder-output-contract.sh",
 ]
 SDK = ["sdk/**", *SDK_FILES]
 GIT_DIFF_OPTIONS = ("--name-status", "-z", "--find-renames", "--find-copies-harder")

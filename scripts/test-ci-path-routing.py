@@ -50,6 +50,125 @@ def route(*paths: str) -> str:
     return route_with(ROUTER, *paths)
 
 
+def route_flags_with(router: pathlib.Path, *args: str) -> tuple[str, str, str]:
+    """Run the router in `--flags` mode and return (route, math_closure, release_inputs)."""
+    result = subprocess.run([sys.executable, str(router), "--flags", *args],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
+    if result.returncode:
+        raise AssertionError(f"command failed: {args}\n{result.stderr}")
+    lines = result.stdout.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    if len(lines) != 4:
+        raise AssertionError(f"--flags must print exactly 4 lines, got {lines!r}")
+    bare, route_line, math_line, release_line = lines
+    if not (route_line.startswith("route=") and math_line.startswith("math_closure=")
+            and release_line.startswith("release_inputs=")):
+        raise AssertionError(f"--flags lines have the wrong shape: {lines!r}")
+    if bare != route_line[len("route="):]:
+        raise AssertionError(f"bare route {bare!r} must equal the route= line {route_line!r}")
+    return bare, math_line[len("math_closure="):], release_line[len("release_inputs="):]
+
+
+def route_flags(*paths: str) -> tuple[str, str, str]:
+    args = ["--event", "pull_request"]
+    for path in paths:
+        args += ["--path", path]
+    return route_flags_with(ROUTER, *args)
+
+
+def test_new_router_behaviours() -> None:
+    """Mutation coverage for issue #359 WP-1: dsp-research evidence, the new SDK script, and the
+    `--flags` math-closure/release-inputs outputs. Pure router-argument assertions only -- these
+    do not depend on any workflow file, so they run and report independently of whether
+    .github/workflows/*.yml has been synchronized with the extended router/checker taxonomy yet.
+    """
+    # dsp-research/**/*.md joins the evidence family; any other dsp-research/ path is unknown
+    # (fail-safe full), exactly like every other unclassified path.
+    assert route("dsp-research/notes/topic.md") == "evidence"
+    assert route("dsp-research/notes/topic.md", "docs/x.md", "README.md") == "evidence"
+    assert route("dsp-research/notes/topic.md", "sdk/src/index.ts") == "sdk"
+    assert route("dsp-research/data.wav") == "full"
+    assert route("dsp-research/nested/dir/README") == "full"
+    assert route("dsp-research/notes/topic.md", "dsp-research/data.wav") == "full"
+
+    # scripts/test-sdk-artifact-builder-output-contract.sh joins the SDK ownership set.
+    assert route("scripts/test-sdk-artifact-builder-output-contract.sh") == "sdk"
+    assert route("scripts/test-sdk-artifact-builder-output-contract.sh", "sdk/x.ts") == "sdk"
+    assert route("scripts/test-sdk-artifact-builder-output-contract.sh", "docs/x.md") == "sdk"
+
+    # --flags: an ordinary path that is neither closure gets both flags false.
+    assert route_flags("crates/engine/src/lib.rs") == ("full", "false", "false")
+    assert route_flags("crates/session/src/lib.rs") == ("full", "false", "false")
+
+    # math_closure: crates/math/**, crates/lane/** are math_closure-only (math's reverse
+    # workspace closure is exactly {lane}); the four root config files are shared with
+    # release_inputs.
+    for math_only in ("crates/math/src/lib.rs", "crates/lane/src/lib.rs",
+                       "crates/math/tests/m1.rs", "crates/lane/tests/g1.rs"):
+        assert route_flags(math_only) == ("full", "true", "false"), math_only
+    for shared in ("Cargo.lock", "Cargo.toml", "rust-toolchain.toml", ".cargo/config.toml"):
+        assert route_flags(shared) == ("full", "true", "true"), shared
+
+    # release_inputs: the existing release-build.yml PR filter (any Cargo.toml, Cargo.lock,
+    # rust-toolchain.toml, the release test runner, the workflow file itself) plus the two
+    # additions (.cargo/config.toml, above, and the new shape-policy script).
+    for release_only in (
+        "scripts/run-release-workspace-tests.sh",
+        ".github/workflows/release-build.yml",
+        "scripts/check-release-shape.py",
+        "crates/session/Cargo.toml",
+        "hosts/host-web/Cargo.toml",
+        "Cargo.toml",
+    ):
+        route_value, math_closure, release_inputs = route_flags(release_only)
+        assert release_inputs == "true", release_only
+        # Only the bare root Cargo.toml is also in the math_closure set; every other release
+        # input here is release_inputs-only.
+        assert math_closure == ("true" if release_only == "Cargo.toml" else "false"), release_only
+
+    # Mixed: a math path with an evidence path still routes full (union, fail-safe) and stays
+    # math_closure true; release_inputs is computed from the same path set and is false here.
+    assert route_flags("crates/math/src/lib.rs", "docs/x.md") == ("full", "true", "false")
+
+    # Mixed: an SDK path with a release-input manifest routes full (Cargo.lock is not SDK-owned)
+    # and both closure flags are still computed from the whole path set, independent of route.
+    assert route_flags("sdk/src/index.ts", "Cargo.lock") == ("full", "true", "true")
+
+    # Fail-safe reasons force both flags true, never because of what a real path happened to be.
+    dispatch = subprocess.run([sys.executable, str(ROUTER), "--event", "workflow_dispatch", "--flags"],
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
+    assert dispatch.returncode == 0
+    assert dispatch.stdout == "full\nroute=full\nmath_closure=true\nrelease_inputs=true\n"
+
+    assert route_flags_with(ROUTER, "--event", "pull_request") == ("full", "true", "true")  # missing base
+    assert route_flags_with(
+        ROUTER, "--event", "pull_request", "--base", "definitely-not-a-revision", "--head", "HEAD",
+    ) == ("full", "true", "true")  # malformed diff
+
+    with tempfile.NamedTemporaryFile() as status:
+        status.write(b"")  # empty diff
+        status.flush()
+        assert route_flags_with(
+            ROUTER, "--event", "pull_request", "--name-status-file", status.name,
+        ) == ("full", "true", "true")
+
+    with tempfile.NamedTemporaryFile() as status:
+        status.write(b"U\0sdk/src/index.ts\0")  # unrecognised status code
+        status.flush()
+        assert route_flags_with(
+            ROUTER, "--event", "pull_request", "--name-status-file", status.name,
+        ) == ("full", "true", "true")
+
+    # Bare mode (no --flags) is unchanged: exactly one line, the route, for existing callers.
+    bare_result = subprocess.run(
+        [sys.executable, str(ROUTER), "--event", "pull_request", "--path", "sdk/x.ts"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False,
+    )
+    assert bare_result.returncode == 0
+    assert bare_result.stdout == "sdk\n"
+
+
 def checker_fails(root: pathlib.Path) -> None:
     result = subprocess.run([sys.executable, str(CHECKER), "--root", str(root)],
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
@@ -112,6 +231,9 @@ def commit_file(root: pathlib.Path, path: str, contents: str, message: str) -> s
 
 
 def main() -> int:
+    test_new_router_behaviours()
+    print("new dsp-research/SDK-script/--flags mutation cases passed")
+
     assert route("sdk/src/index.ts") == "sdk"
     for owned in (
         "scripts/check-sdk-deletions.py",
@@ -299,15 +421,6 @@ def main() -> int:
         assert run(sys.executable, str(ROUTER), "--event", "pull_request",
                    "--name-status-file", status.name) == "full"
 
-    root = workspace()
-    try:
-        run(sys.executable, str(CHECKER), "--root", str(root))
-        mutate(root / ".github/workflows/sdk.yml",
-               "          python3 -B scripts/test-ci-path-routing.py\n", "")
-        checker_fails(root)  # an SDK-only route cannot consume unchecked workflow/router code
-    finally:
-        shutil.rmtree(root)
-
     # Exact canonical trigger ownership rejects YAML-equivalent entries regardless of quoting or
     # tags. These all parse as an extra ignored engine path, which must never become invisible to
     # the checker merely because it is not a single-quoted scalar.
@@ -443,6 +556,22 @@ def main() -> int:
         mutate(root / ".github/workflows/browser-qualification.yml", "    branches:\n      - main\n  workflow_dispatch:",
                "    branches:\n      - main\n    paths:\n      - 'sdk/**'\n  workflow_dispatch:")
         checker_fails(root)  # path-filtered required PR workflow would leave its context pending
+    finally:
+        shutil.rmtree(root)
+
+    # This precondition (baseline copied-workflow checker succeeds before the mutation) is the
+    # one assertion in this file that depends on .github/workflows/*.yml already carrying the
+    # issue #359 WP-1 paths-ignore additions (dsp-research/**/*.md,
+    # scripts/test-sdk-artifact-builder-output-contract.sh). It is placed last, deliberately,
+    # so every other assertion above -- including the new dsp-research/SDK-script/--flags cases
+    # at the top of this function -- always runs and reports on its own, regardless of whether
+    # the workflow package has landed those lines yet.
+    root = workspace()
+    try:
+        run(sys.executable, str(CHECKER), "--root", str(root))
+        mutate(root / ".github/workflows/sdk.yml",
+               "          python3 -B scripts/test-ci-path-routing.py\n", "")
+        checker_fails(root)  # an SDK-only route cannot consume unchecked workflow/router code
     finally:
         shutil.rmtree(root)
 
