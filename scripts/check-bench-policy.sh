@@ -29,38 +29,49 @@ sole_owner() {
 # Like `sole_owner`, but a function outside `owner` matching `def_pattern` is not itself a
 # violation if it delegates to the shared `escape(`. Brace-depth tracking turned out to be the
 # wrong tool for this (four different ways to desynchronise it, caught in review): this instead
-# takes the window from the definition line to the first following line that is exactly `}` (or a
-# 12-line cap, whichever comes first -- if the window runs out at EOF first, it is still judged on
-# what it saw) and calls the window a delegate iff it contains `escape(` on a non-comment line and
-# contains neither `.replace(` nor the char literal `'\'` -- the shape of the exact partial-escaper
-# defect this rule exists to catch (`vectorization.rs`'s old `json_string`: it called nothing and
-# hand-escaped `\` and `"` itself). The definition line's own signature is exempt from the
-# `escape(` search up through its matched prefix, so a function literally named `json_escape` does
-# not "delegate" to itself by spelling `escape(` in its own name -- but any call after that prefix,
-# including on a one-line signature-and-body, still counts.
+# takes the window from the definition line to the first following line whose content is exactly
+# the definition line's own leading indentation followed by `}` -- that is how rustfmt closes a
+# `fn` at any nesting depth, so an `if`/`match`/loop's own more-indented `}` inside the body does
+# not end the window early -- or a 40-line cap, whichever comes first; if the window runs off the
+# end of the file first, it is still judged on what it saw. The window is a delegate iff it
+# contains `escape(` on a non-comment line and contains neither `.replace(` nor the char literal
+# `'\\'` (four characters: Rust's own spelling of a backslash char literal, not the one-backslash
+# value it holds) -- the shape of the exact partial-escaper defect this rule exists to catch
+# (`vectorization.rs`'s old `json_string`: it called nothing and hand-escaped `\` and `"` itself,
+# and a hypothetical `.chars().flat_map(...)` rewrite of the same defect that never calls
+# `.replace(` at all but still hand-rolls a `'\\'` branch). The definition line's own signature is
+# exempt from the `escape(` search up through its matched prefix, so a function literally named
+# `json_escape` does not "delegate" to itself by spelling `escape(` in its own name -- but any call
+# after that prefix, including on a one-line signature-and-body, still counts.
 sole_owner_or_delegate() {
     local label=$1 owner=$2 def_pattern=$3
     grep -qE "$def_pattern" "$owner" 2>/dev/null || fail "$label (the shared definition in $owner is gone)"
     local matches offenders=()
     matches="$(grep -rlE "$def_pattern" tools --include='*.rs' 2>/dev/null | LC_ALL=C sort || true)"
     local file awk_pattern="${def_pattern//\\/\\\\}"
-    # The 3-character Rust char literal `'\'` (apostrophe, backslash, apostrophe): the exact
-    # partial-escaper's own `.replace('\\', ...)` needle. Built here and handed to awk through
-    # `-v` rather than spelled inside the awk script text below, because that script is itself
-    # inside a single-quoted bash string and an embedded apostrophe would close it early.
-    # Passed through `-v`, which applies awk's own C-style escape processing to the value, so the
-    # two backslashes below collapse to the one the needle needs.
-    local backslash_char_literal="'\\\\'"
+    # The 4-character Rust *source* spelling of the backslash char literal -- apostrophe,
+    # backslash, backslash, apostrophe, as it appears in `.replace('\\', ...)` -- built from
+    # single unambiguous pieces and handed to awk as an environment variable rather than through
+    # `-v` (which applies its own C-style backslash processing to `-v` values a second time, and
+    # spelling it directly inside the awk script text below is not an option either: that script
+    # is itself inside a single-quoted bash string, so an embedded apostrophe would close it
+    # early). `ENVIRON` is the process environment verbatim, with no escape processing on either
+    # side, so what is built here is exactly what awk sees.
+    local sq="'" bs='\'
+    local backslash_char_literal="$sq$bs$bs$sq"
     while IFS= read -r file; do
         [[ -z "$file" || "$file" == "$owner" ]] && continue
-        if [[ "$(awk -v pat="$awk_pattern" -v needle="$backslash_char_literal" '
+        if [[ "$(MISO_BENCH_POLICY_NEEDLE="$backslash_char_literal" awk -v pat="$awk_pattern" '
+            BEGIN { needle = ENVIRON["MISO_BENCH_POLICY_NEEDLE"] }
             { lines[NR] = $0 }
             $0 ~ pat { starts[NR] = 1 }
             END {
                 for (i = 1; i <= NR; i++) {
                     if (!(i in starts)) continue
+                    match(lines[i], /^[ \t]*/)
+                    closer = substr(lines[i], RSTART, RLENGTH) "}"
                     escapes = 0; replaces = 0; backslash_literal = 0
-                    for (j = i; j < i + 12 && j <= NR; j++) {
+                    for (j = i; j < i + 40 && j <= NR; j++) {
                         line = lines[j]
                         search_from = 1
                         if (j == i) {
@@ -74,7 +85,7 @@ sole_owner_or_delegate() {
                         if (!is_comment && index(rest, "escape(") > 0) escapes = 1
                         if (index(line, ".replace(") > 0) replaces = 1
                         if (index(line, needle) > 0) backslash_literal = 1
-                        if (trimmed == "}") break
+                        if (line == closer) break
                     }
                     print (escapes && !replaces && !backslash_literal ? "delegate" : "own")
                 }
@@ -110,6 +121,9 @@ sole_owner 'the audited allocator has more than one implementation' \
     "$support/src/alloc.rs" '^unsafe impl GlobalAlloc'
 sole_owner 'more than one global allocator is registered under tools/' \
     "$support/src/alloc.rs" '^#\[global_allocator\]'
+# `\s` is a GNU extension to POSIX ERE, not portable to every `grep -E`/awk in general -- but this
+# repo's CI and every host this script is meant to run on use GNU grep and gawk, both of which
+# support it, so it is fine here.
 sole_owner_or_delegate 'the JSON string escaper has more than one implementation' \
     "$support/src/json.rs" '^\s*(pub(\([a-z]+\))? )?fn (json_(escape|string|quote)|escape)\('
 sole_owner 'the nearest-rank percentile has more than one implementation' \

@@ -24,12 +24,23 @@ pub fn physical_core_count() -> String {
         .ok()
         .filter(|output| output.status.success())
         .and_then(|output| String::from_utf8(output.stdout).ok())
-        .map(|output| output.trim().to_owned())
-        .filter(|output| !output.is_empty())
     else {
         return "unknown".to_owned();
     };
-    let cores = output
+    count_cores(&output)
+}
+
+/// The parsing tail, split out so the restored `.trim()`/empty-output behaviour has a unit test
+/// instead of only a doc comment. `lscpu_stdout` is the raw (possibly untrimmed, possibly empty)
+/// standard output of `lscpu -p=CORE,SOCKET`; every non-comment line is `core,socket`, and the
+/// count is the number of distinct pairs.
+#[must_use]
+fn count_cores(lscpu_stdout: &str) -> String {
+    let trimmed = lscpu_stdout.trim();
+    if trimmed.is_empty() {
+        return "unknown".to_owned();
+    }
+    let cores = trimmed
         .lines()
         .filter(|line| !line.starts_with('#'))
         .filter_map(|line| {
@@ -46,11 +57,31 @@ pub fn physical_core_count() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::physical_core_count;
+    use super::{count_cores, physical_core_count};
 
     #[test]
     fn returns_a_decimal_count_or_the_unknown_sentinel() {
         let count = physical_core_count();
         assert!(count == "unknown" || count.parse::<usize>().is_ok());
+    }
+
+    #[test]
+    fn empty_output_is_unknown() {
+        assert_eq!(count_cores(""), "unknown");
+    }
+
+    #[test]
+    fn whitespace_only_output_is_unknown() {
+        assert_eq!(count_cores("  \n"), "unknown");
+    }
+
+    #[test]
+    fn header_only_output_is_unknown() {
+        assert_eq!(count_cores("# header only\n"), "unknown");
+    }
+
+    #[test]
+    fn distinct_core_socket_pairs_are_counted_once_each() {
+        assert_eq!(count_cores("0,0\n1,0\n0,0\n"), "2");
     }
 }

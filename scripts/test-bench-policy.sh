@@ -66,7 +66,8 @@ check >/dev/null || {
 }
 
 # A one-line delegating wrapper immediately followed by unrelated code must still read as a
-# delegate: the window closes on the next lone `}` line or a 12-line cap, not on brace balance.
+# delegate: the window closes on the next line at the definition's own indentation followed by
+# `}`, or a 40-line cap, not on brace balance.
 new_case json-string-one-liner-delegate-followed-by-other-code-stays-green
 printf '\nfn json_string(value: &str) -> String { format!("\\"{}\\"", json::escape(value)) }\n\nfn something_else() -> u32 {\n    1\n}\n' \
     >>"$case_root/tools/bench/src/conformance.rs"
@@ -105,6 +106,26 @@ new_case json-string-pub-crate-non-delegating
 printf '\npub(crate) fn json_string(value: &str) -> String {\n    value.to_owned()\n}\n' \
     >>"$case_root/tools/bench/src/conformance.rs"
 expect_failure json-string-pub-crate-non-delegating
+
+# A nested block (an `if` with its own more-indented `}`) inside a delegating wrapper's body must
+# not close the window before the delegating call is seen: the window closer is the definition
+# line's own indentation followed by `}`, not the first lone `}` at any depth.
+new_case json-string-nested-if-before-delegating-call-stays-green
+printf '\nfn json_string(value: &str) -> String {\n    if value.is_empty() {\n        return "\\"\\"".to_owned();\n    }\n    format!("\\"{}\\"", bench_support::json::escape(value))\n}\n' \
+    >>"$case_root/tools/bench/src/conformance.rs"
+check >/dev/null || {
+    printf 'bench policy rejects a delegating json_string with a nested if before the call\n' >&2
+    exit 1
+}
+
+# The backslash-literal needle has to be load-bearing on its own, not just redundant with
+# `.replace(`: a reimplementation that calls the shared `escape` (so the escape( check alone would
+# pass it) and then hand-rolls its own backslash handling through `.chars().flat_map(...)` -- no
+# `.replace(` anywhere -- is still the partial-escaper defect and must still fail.
+new_case json-string-delegates-then-hand-rolls-backslash-via-flat-map
+printf '\nfn json_string(value: &str) -> String {\n    let escaped = bench_support::json::escape(value);\n    let doubled: String = escaped\n        .chars()\n        .flat_map(|c| if c == '"'"'\\\\'"'"' { vec!['"'"'\\\\'"'"', '"'"'\\\\'"'"'] } else { vec![c] })\n        .collect();\n    doubled\n}\n' \
+    >>"$case_root/tools/bench/src/conformance.rs"
+expect_failure json-string-delegates-then-hand-rolls-backslash-via-flat-map
 
 # #380: the private SHA-256 round-constant table `tools/bench/src/session.rs` used to carry.
 new_case second-sha256-round-constant
