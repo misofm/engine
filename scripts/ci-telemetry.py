@@ -5,13 +5,22 @@ Reads the `repos/.../actions/runs/<id>/jobs` JSON shape (`--jobs <file>`), compu
 
   queue     = started_at - created_at
   setup     = job start to the end of the last *leading* step whose name starts with
-              "Set up", "Run actions/checkout", "Install", "Restore", or "Download"
+              "Set up", "Run actions/checkout", "Install", "Restore", "Download",
+              "Run Swatinem/rust-cache", or "Run actions/cache"
   execution = completed_at - (end of that leading run, or started_at if none/no steps)
   total     = completed_at - created_at
 
 and prints a Markdown table plus a one-line "longest job" summary. `--out <file>` additionally
 writes the same per-job data as JSON, plus `route`/`attempt`/`cache_hits` from `--route`,
 `--attempt`, `--cache-hits <string>`.
+
+The caller is expected to fetch the jobs listing with `?per_page=100` (the GitHub API's page
+size cap); a run with more than 100 jobs needs pagination across `?page=2`, `?page=3`, ... with
+the pages' `jobs` arrays concatenated before this script sees them (this script does not paginate
+itself -- it only has the one file it was handed). Because a silent truncation would corrupt the
+P50/P95 and critical-path tables built from this output (design §11), `build_report` compares the
+response's `total_count` field (when present) against the actual length of `jobs` and raises
+loudly on a mismatch (S7) rather than silently rendering a partial table.
 
 A job whose timestamps are null (skipped) or whose `steps` list is empty or absent renders as all
 zero durations rather than raising -- the verdict job that will call this in stage 1 must never
@@ -25,16 +34,30 @@ import json
 import pathlib
 import sys
 
-LEADING_SETUP_PREFIXES = ("Set up", "Run actions/checkout", "Install", "Restore", "Download")
+LEADING_SETUP_PREFIXES = (
+    "Set up",
+    "Run actions/checkout",
+    "Install",
+    "Restore",
+    "Download",
+    "Run Swatinem/rust-cache",
+    "Run actions/cache",
+)
 
 
 def parse_timestamp(value: object) -> datetime.datetime | None:
     if not isinstance(value, str) or not value:
         return None
     try:
-        return datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
         return None
+    # N13: GitHub always emits timezone-aware (`Z`-suffixed) timestamps, but a naive timestamp
+    # sneaking through a hand-edited fixture must not crash `seconds_between`'s subtraction with
+    # an uncaught `TypeError` when mixed with an aware one -- treat a naive value as UTC.
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=datetime.timezone.utc)
+    return parsed
 
 
 def seconds_between(start: datetime.datetime | None, end: datetime.datetime | None) -> float:
@@ -96,15 +119,39 @@ def render_markdown(rows: list[dict]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def build_report(document: dict) -> list[dict]:
+def build_report(document: object) -> list[dict]:
+    # N13: a top-level JSON array (or any other non-object) must fail with a clean message, not
+    # an uncaught `AttributeError` from calling `.get` on something that isn't a dict.
+    if not isinstance(document, dict):
+        raise ValueError(
+            "jobs document must be a JSON object with a 'jobs' list, not a top-level "
+            f"{type(document).__name__}"
+        )
     jobs = document.get("jobs")
     if not isinstance(jobs, list):
         raise ValueError("jobs document is missing a 'jobs' list")
-    return [job_metrics(job) for job in jobs if isinstance(job, dict)]
+    # S7: the GitHub jobs listing is paginated at `?per_page=100`; a truncated response (more
+    # jobs existed than were fetched) must fail loudly rather than silently render a partial
+    # table and a wrong "longest job" -- `total_count` is only checked when the caller's document
+    # carries it, so hand-built fixtures without it are unaffected.
+    total_count = document.get("total_count")
+    if isinstance(total_count, int) and total_count != len(jobs):
+        raise ValueError(
+            f"jobs document is truncated: total_count={total_count} but {len(jobs)} jobs were "
+            "provided -- fetch with ?per_page=100 and paginate (?page=2, ?page=3, ...) past the "
+            "first page before rendering telemetry"
+        )
+    dict_jobs = [job for job in jobs if isinstance(job, dict)]
+    # N13: a 'jobs' list whose entries are all non-objects is not a legitimately empty run -- it
+    # is a malformed document, and must fail rather than silently render an empty table.
+    if jobs and not dict_jobs:
+        raise ValueError("jobs list contains no job objects (every entry is a non-object)")
+    return [job_metrics(job) for job in dict_jobs]
 
 
 def self_test() -> None:
     document = {
+        "total_count": 4,
         "jobs": [
             {
                 "name": "route",
@@ -205,6 +252,70 @@ def self_test() -> None:
         "cache_hits": '{"lint":"true","test-release":"false"}',
     }
     json.dumps(payload)  # must be JSON-serializable
+
+    # S7: a truncated jobs listing (total_count says more jobs existed than were provided) must
+    # raise, not silently render a partial table.
+    try:
+        build_report({"total_count": 137, "jobs": document["jobs"][:2]})
+    except ValueError as error:
+        assert "truncated" in str(error)
+    else:
+        raise AssertionError("truncated jobs document did not raise")
+
+    # A total_count that matches the provided jobs is not truncation.
+    assert len(build_report({"total_count": 4, "jobs": document["jobs"]})) == 4
+
+    # N13: a top-level JSON array must fail with a clean ValueError, not an uncaught
+    # AttributeError from calling .get on a list.
+    try:
+        build_report([1, 2, 3])
+    except ValueError as error:
+        assert "top-level" in str(error)
+    else:
+        raise AssertionError("top-level array did not raise")
+
+    # N13: mixing a naive and an aware timestamp must not crash with an uncaught TypeError.
+    mixed_tz_row = job_metrics(
+        {
+            "name": "mixed-tz",
+            "created_at": "2026-09-04T00:00:00",  # naive
+            "started_at": "2026-09-04T00:00:02Z",  # aware
+            "completed_at": "2026-09-04T00:00:12Z",
+            "steps": [],
+        }
+    )
+    assert mixed_tz_row["queue_seconds"] == 2.0
+    assert mixed_tz_row["total_seconds"] == 12.0
+
+    # N13: a 'jobs' list whose entries are all non-dicts is a malformed document, not a
+    # legitimately empty run -- it must raise rather than silently render an empty table.
+    try:
+        build_report({"jobs": ["not-a-job", 42, None]})
+    except ValueError as error:
+        assert "non-object" in str(error)
+    else:
+        raise AssertionError("all-non-dict jobs list did not raise")
+
+    # An actually-empty jobs list is still legitimate (a route that skipped every job).
+    assert build_report({"jobs": []}) == []
+
+    # N14: cache-restore steps must count as leading setup, not execution.
+    cache_row = job_metrics(
+        {
+            "name": "audit-native",
+            "created_at": "2026-09-04T00:00:00Z",
+            "started_at": "2026-09-04T00:00:00Z",
+            "completed_at": "2026-09-04T00:01:00Z",
+            "steps": [
+                {"name": "Set up job", "completed_at": "2026-09-04T00:00:02Z"},
+                {"name": "Run Swatinem/rust-cache@v2", "completed_at": "2026-09-04T00:00:20Z"},
+                {"name": "Run actions/cache@v4", "completed_at": "2026-09-04T00:00:25Z"},
+                {"name": "Run tests", "completed_at": "2026-09-04T00:01:00Z"},
+            ],
+        }
+    )
+    assert cache_row["setup_seconds"] == 25.0
+    assert cache_row["execution_seconds"] == 35.0
 
     print("ci-telemetry self-test: ok")
 

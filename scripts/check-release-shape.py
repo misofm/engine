@@ -63,13 +63,59 @@ def crate_type_packages(metadata: object) -> set[str]:
         if not isinstance(name, str) or not isinstance(targets, list):
             raise Invalid("cargo metadata: malformed package entry")
         for target in targets:
+            # N12: a malformed `targets` entry (e.g. a bare string instead of an object) must
+            # fail closed, the same as every other malformed-shape branch in this function --
+            # silently skipping it would let a genuinely new cdylib/staticlib crate whose
+            # metadata happens to be malformed drift past this gate unnoticed.
             if not isinstance(target, dict):
-                continue
-            kinds = set(target.get("kind") or []) | set(target.get("crate_types") or [])
+                raise Invalid(f"cargo metadata: malformed target entry in package {name!r}")
+            kind_field = target.get("kind")
+            crate_types_field = target.get("crate_types")
+            if kind_field is not None and not isinstance(kind_field, list):
+                raise Invalid(f"cargo metadata: malformed target 'kind' in package {name!r}")
+            if crate_types_field is not None and not isinstance(crate_types_field, list):
+                raise Invalid(
+                    f"cargo metadata: malformed target 'crate_types' in package {name!r}"
+                )
+            kinds = set(kind_field or []) | set(crate_types_field or [])
             if kinds & NATIVE_LIB_CRATE_TYPES:
                 found.add(name)
                 break
     return found
+
+
+def check_workspace_members(metadata: object) -> None:
+    """Every `workspace_members` package id must have a matching `packages` entry (N12).
+
+    `cargo metadata` cannot actually produce a mismatch here on a healthy workspace, but a
+    member present only in `workspace_members` -- e.g. from a hand-edited or truncated
+    `--metadata` fixture -- must fail closed rather than pass silently: this script's whole
+    premise is that `packages` is a trustworthy enumeration of every crate-type-bearing crate.
+    """
+    if not isinstance(metadata, dict):
+        raise Invalid("cargo metadata output must be a JSON object")
+    packages = metadata.get("packages")
+    if not isinstance(packages, list):
+        raise Invalid("cargo metadata: missing or malformed 'packages' list")
+    package_ids: set[str] = set()
+    for package in packages:
+        if not isinstance(package, dict):
+            raise Invalid("cargo metadata: malformed package entry")
+        package_id = package.get("id")
+        if not isinstance(package_id, str):
+            raise Invalid("cargo metadata: package entry missing a string 'id'")
+        package_ids.add(package_id)
+    members = metadata.get("workspace_members")
+    if not isinstance(members, list):
+        raise Invalid("cargo metadata: missing or malformed 'workspace_members' list")
+    orphaned = sorted(
+        member for member in members if not isinstance(member, str) or member not in package_ids
+    )
+    if orphaned:
+        raise Invalid(
+            "cargo metadata: workspace_members references package id(s) with no matching "
+            f"'packages' entry: {orphaned[:3]}"
+        )
 
 
 def check_crate_types(metadata: object) -> set[str]:
@@ -105,10 +151,11 @@ def check_release_profile(cargo_toml_text: str) -> None:
         )
     if release.get("lto") != "fat":
         raise Invalid(f"[profile.release].lto must be \"fat\", got {release.get('lto')!r}")
-    if release.get("codegen-units") != 1:
-        raise Invalid(
-            f"[profile.release].codegen-units must be 1, got {release.get('codegen-units')!r}"
-        )
+    codegen_units = release.get("codegen-units")
+    # N11: Python's `bool` is a subclass of `int`, so `True == 1` -- without the explicit
+    # `isinstance` guard, `codegen-units = true` in TOML would satisfy `!= 1` and pass.
+    if isinstance(codegen_units, bool) or codegen_units != 1:
+        raise Invalid(f"[profile.release].codegen-units must be 1, got {codegen_units!r}")
 
 
 def load_metadata(metadata_path: pathlib.Path | None, root: pathlib.Path) -> object:
@@ -139,6 +186,7 @@ def load_metadata(metadata_path: pathlib.Path | None, root: pathlib.Path) -> obj
 def check(root: pathlib.Path, metadata_path: pathlib.Path | None) -> set[str]:
     metadata = load_metadata(metadata_path, root)
     actual = check_crate_types(metadata)
+    check_workspace_members(metadata)
     manifest = root / "Cargo.toml"
     try:
         cargo_toml_text = manifest.read_text(encoding="utf-8")
@@ -156,6 +204,7 @@ def check(root: pathlib.Path, metadata_path: pathlib.Path | None) -> set[str]:
 def _pkg(name: str, crate_types: list[str]) -> dict:
     return {
         "name": name,
+        "id": f"{name} 0.1.0",
         "targets": [{
             "name": name.replace("-", "_"),
             "kind": list(crate_types),
@@ -165,17 +214,19 @@ def _pkg(name: str, crate_types: list[str]) -> dict:
 
 
 def _valid_metadata() -> dict:
+    packages = [
+        _pkg("capi", ["rlib", "staticlib", "cdylib"]),
+        _pkg("effect-package", ["rlib", "cdylib"]),
+        _pkg("host-web", ["rlib", "cdylib"]),
+        _pkg("wasm-gate-guest", ["cdylib"]),
+        _pkg("wasm-console-guest", ["cdylib"]),
+        _pkg("engine", ["lib"]),
+        _pkg("lane", ["lib"]),
+        _pkg("math", ["lib"]),
+    ]
     return {
-        "packages": [
-            _pkg("capi", ["rlib", "staticlib", "cdylib"]),
-            _pkg("effect-package", ["rlib", "cdylib"]),
-            _pkg("host-web", ["rlib", "cdylib"]),
-            _pkg("wasm-gate-guest", ["cdylib"]),
-            _pkg("wasm-console-guest", ["cdylib"]),
-            _pkg("engine", ["lib"]),
-            _pkg("lane", ["lib"]),
-            _pkg("math", ["lib"]),
-        ]
+        "packages": packages,
+        "workspace_members": [package["id"] for package in packages],
     }
 
 
@@ -263,6 +314,40 @@ def self_test() -> None:
         check_release_profile,
         VALID_CARGO_TOML.replace("codegen-units = 1", "codegen-units = 16"),
         needle="codegen-units",
+    )
+
+    # N11: `codegen-units = true` must not satisfy `!= 1` via Python's bool/int identity.
+    _expect_invalid(
+        "codegen-units is a bool",
+        check_release_profile,
+        VALID_CARGO_TOML.replace("codegen-units = 1", "codegen-units = true"),
+        needle="codegen-units",
+    )
+
+    # N12: a malformed `targets` entry (a bare string, not an object) must fail closed rather
+    # than being silently skipped -- a genuinely new cdylib whose metadata is shaped like this
+    # must not drift past the gate unnoticed.
+    malformed_target = _valid_metadata()
+    malformed_target["packages"].append({
+        "name": "seventh-shipped-cdylib",
+        "id": "seventh-shipped-cdylib 0.1.0",
+        "targets": ["cdylib"],
+    })
+    _expect_invalid(
+        "malformed targets entry",
+        check_crate_types, malformed_target,
+        needle="malformed target",
+    )
+
+    # N12: workspace_members must cross-check against packages -- a member id with no matching
+    # packages entry must fail closed rather than pass silently.
+    check_workspace_members(_valid_metadata())  # positive control: the valid pair passes.
+    orphaned_member = _valid_metadata()
+    orphaned_member["workspace_members"].append("ghost-package 9.9.9")
+    _expect_invalid(
+        "workspace_members orphan",
+        check_workspace_members, orphaned_member,
+        needle="workspace_members",
     )
 
     print("check-release-shape self-test: ok")
